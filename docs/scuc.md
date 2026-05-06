@@ -951,12 +951,13 @@ std::string scuc_input_to_json(const SCUCInput& inp, int indent = 2);
 
 Environment: macOS ARM64 (Apple M4), Release build, MIP gap 1%, HiGHS 4.x.
 
-| Case | T | HiGHS | Gurobi | NativeBranchAndCut | Objective ($) | Cuts |
-|---|---|---|---|---|---|---|
-| 3-bus | 6 | 22 ms | 4 ms | 50 ms | 746,316 | 32 |
-| 6-bus (wind+storage) | 8 | 22 ms | 6 ms | 73 ms | 76,478 | 86 |
-| IEEE 39-bus | 4 | 21 ms | 5 ms | 15 ms | 203,130 | 122 |
-| **IEEE 39-bus** | **24** | **81 ms** | **73 ms** | **85 ms** | **976,359** | **898** |
+| Case | T | Resources | HiGHS | Gurobi | NativeBranchAndCut | Objective ($) | Cuts |
+|---|---|---|---|---|---|---|---|
+| 3-bus | 6 | — | 22 ms | 4 ms | 48 ms | 746,316 | 32 |
+| 6-bus | 8 | wind+storage | 22 ms | 6 ms | 70 ms | 76,478 | 86 |
+| IEEE 39-bus | 4 | wind | 21 ms | 5 ms | 16 ms | 203,130 | 122 |
+| IEEE 39-bus | 24 | wind+solar | 91 ms | 77 ms | 96 ms | 891,466 | 898 |
+| **IEEE 39-bus** | **24** | **wind+solar+storage** | **96 ms** | **84 ms** | **147 ms** | **891,466** | **900** |
 
 > **Notes:**
 > - SCIP supports MINLP only and is not registered for MILP dispatch in this
@@ -965,4 +966,8 @@ Environment: macOS ARM64 (Apple M4), Release build, MIP gap 1%, HiGHS 4.x.
 >   tolerance).
 > - `"Auto"` mode selects HiGHS first for MILP, then falls back to
 >   Gurobi → NativeBranchAndCut.
-> - Zero load-shed for the IEEE 39-bus 24-hour case (VOLL penalty = $0).
+> - Zero load-shed for all IEEE 39-bus cases (VOLL penalty = $0).
+> - The wind+solar case objective (891,466 $) is lower than wind-only (976,359 $):
+>   solar generation displaces expensive peak-period thermal capacity.
+> - The wind+solar+storage case adds two batteries (bus 3: 200 MW/800 MWh;
+>   bus 19: 150 MW/600 MWh); same objective, two additional SOC cuts.

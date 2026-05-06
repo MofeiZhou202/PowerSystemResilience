@@ -328,6 +328,75 @@ if(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER AND MIPSOLVERS_BUILD_SCUC)
   endif()
 endif()
 
+# ── Python bindings (pybind11) ────────────────────────────────────────────────
+option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings" OFF)
+if(MIPSOLVERS_BUILD_PYTHON)
+  # Locate the Python interpreter + pybind11 installed into it.
+  # Override with -DPYTHON_EXECUTABLE=/path/to/python3 if needed.
+  if(NOT DEFINED PYTHON_EXECUTABLE)
+    find_program(PYTHON_EXECUTABLE
+      NAMES python3.8 python3.9 python3 python
+      HINTS
+        "$ENV{HOME}/.pyenv/versions/3.8.20/bin"
+        /opt/homebrew/bin
+        /usr/local/bin
+        /usr/bin)
+  endif()
+  if(NOT PYTHON_EXECUTABLE)
+    message(FATAL_ERROR
+      "MIPSOLVERS_BUILD_PYTHON=ON but no Python interpreter found. "
+      "Set -DPYTHON_EXECUTABLE=/path/to/python3.8")
+  endif()
+
+  # Ask pybind11 where its CMake config lives.
+  execute_process(
+    COMMAND "${PYTHON_EXECUTABLE}" -c
+      "import pybind11, os; print(os.path.dirname(pybind11.get_cmake_dir()))"
+    OUTPUT_VARIABLE _pb11_cmake_root
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _pb11_ret)
+  if(_pb11_ret)
+    message(FATAL_ERROR
+      "pybind11 not found for ${PYTHON_EXECUTABLE}. "
+      "Install it with: ${PYTHON_EXECUTABLE} -m pip install pybind11")
+  endif()
+
+  # Use pybind11's own CMake integration.
+  list(APPEND CMAKE_PREFIX_PATH "${_pb11_cmake_root}")
+  find_package(pybind11 REQUIRED CONFIG)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+  # Build the extension module.
+  pybind11_add_module(mipsolvers_py MODULE
+    src/python/mipsolvers_py.cpp
+    src/scuc/scuc.cpp          # SCUC is header-only-ish; include impl
+  )
+
+  target_include_directories(mipsolvers_py PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
+  target_link_libraries(mipsolvers_py PRIVATE mipsolvers)
+
+  if(NOT MSVC)
+    target_compile_options(mipsolvers_py PRIVATE -Wall -Wextra
+      $<$<CONFIG:Release>:-O3 -DNDEBUG>
+      $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+  endif()
+
+  # Derive extension suffix from Python (e.g. .cpython-38-darwin.so).
+  execute_process(
+    COMMAND "${PYTHON_EXECUTABLE}" -c
+      "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"
+    OUTPUT_VARIABLE _py_ext_suffix
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+  set_target_properties(mipsolvers_py PROPERTIES
+    OUTPUT_NAME "mipsolvers"
+    SUFFIX "${_py_ext_suffix}")
+
+  message(STATUS "Python bindings: ${PYTHON_EXECUTABLE}, suffix: ${_py_ext_suffix}")
+endif()
+
 # ── Install rules ─────────────────────────────────────────────────────────────
 include(GNUInstallDirs)
 install(TARGETS mipsolvers

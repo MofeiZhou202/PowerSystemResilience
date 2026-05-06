@@ -464,27 +464,78 @@ TEST_CASE("Market: IEEE 39-bus 快速基准 (T=4)", "[market][benchmark][ieee39]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TEST 3b: IEEE 39-bus 24h 全求解器性能基准
+// TEST 3b: IEEE 39-bus 24h 风电+光伏 全求解器基准
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_CASE("Market: IEEE 39-bus 24h 全求解器基准", "[market][benchmark][ieee39]") {
+TEST_CASE("Market: IEEE 39-bus 24h 风电+光伏 全求解器基准", "[market][benchmark][ieee39]") {
     const auto solvers = available_milp_solvers();
     REQUIRE_FALSE(solvers.empty());
 
-    SCUCInput base = build_ieee39_case(24, 1.0, /*wind=*/true, /*solar=*/false);
+    SCUCInput base = build_ieee39_case(24, 1.0, /*wind=*/true, /*solar=*/true);
     base.config.mip_gap        = 0.01;
     base.config.time_limit_sec = 300.0;
 
     std::vector<BenchResult> results;
     for (const auto& s : solvers) {
         DYNAMIC_SECTION("求解器=" << s) {
-            auto res = solve_with(s, "ieee39-T24", base);
+            auto res = solve_with(s, "ieee39-T24-wind-solar", base);
             results.push_back(res);
             SUCCEED();
         }
     }
 
-    viz::print_benchmark_report("IEEE 39-bus T=24", results);
+    viz::print_benchmark_report("IEEE 39-bus T=24 (风电+光伏)", results);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST 3c: IEEE 39-bus 24h 全资源 (风+光+储) 全求解器基准
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("Market: IEEE 39-bus 24h 全资源 (风+光+储) 基准", "[market][benchmark][ieee39]") {
+    const auto solvers = available_milp_solvers();
+    REQUIRE_FALSE(solvers.empty());
+
+    SCUCInput base = build_ieee39_case(24, 1.0, /*wind=*/true, /*solar=*/true);
+    base.config.mip_gap        = 0.01;
+    base.config.time_limit_sec = 300.0;
+
+    // 添加 2 个网侧大型储能（接入主要负荷母线）
+    {
+        StorageUnit batt1;
+        batt1.bus                 = 3;     // bus 3: 500 MW 负荷母线
+        batt1.pmax_charge         = 200.0;
+        batt1.pmax_discharge      = 200.0;
+        batt1.energy_capacity_mwh = 800.0;
+        batt1.efficiency          = 0.90;
+        batt1.soc_init            = 0.50;
+        batt1.charge_bid_price    = 5.0;
+        batt1.discharge_bid_price = 20.0;
+        base.storage.push_back(batt1);
+
+        StorageUnit batt2;
+        batt2.bus                 = 19;    // bus 19: 628 MW 负荷母线
+        batt2.pmax_charge         = 150.0;
+        batt2.pmax_discharge      = 150.0;
+        batt2.energy_capacity_mwh = 600.0;
+        batt2.efficiency          = 0.90;
+        batt2.soc_init            = 0.50;
+        batt2.charge_bid_price    = 5.0;
+        batt2.discharge_bid_price = 20.0;
+        base.storage.push_back(batt2);
+
+        base.initial_status.storage_soc = {0.5, 0.5};
+    }
+
+    std::vector<BenchResult> results;
+    for (const auto& s : solvers) {
+        DYNAMIC_SECTION("求解器=" << s) {
+            auto res = solve_with(s, "ieee39-T24-wind-solar-sto", base);
+            results.push_back(res);
+            SUCCEED();
+        }
+    }
+
+    viz::print_benchmark_report("IEEE 39-bus T=24 (风+光+储)", results);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
