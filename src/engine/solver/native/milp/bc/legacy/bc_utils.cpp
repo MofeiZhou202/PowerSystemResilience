@@ -1,7 +1,7 @@
 /// @file bc_utils.cpp
 /// @brief Utility function implementations for the branch-and-cut solver.
 
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -16,10 +16,10 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
-#include "hacdcpf/engine/detail/bc_clique_table.hpp"
-#include "hacdcpf/engine/detail/bc_threading.hpp"
+#include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_threading.hpp"
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 
 namespace {
 
@@ -6582,4 +6582,4 @@ bool propagate_node_domain(
                                     total_tightened, reason_bounds_out);
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

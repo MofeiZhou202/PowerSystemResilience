@@ -1,8 +1,8 @@
-#include "hacdcpf/engine/bc/api.hpp"
+#include "mipsolvers/engine/bc/api.hpp"
 
-#include "hacdcpf/engine/detail/bc/legacy_bridge.hpp"
+#include "mipsolvers/engine/detail/bc/legacy_bridge.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 BCResult solve_milp_bc(const MIPModel& prob, const BCOptions& opt) {
   return detail::solve_milp_bc_legacy_core(prob, opt);
@@ -26,4 +26,4 @@ BCResult solve_minlp_bc(const MINLPModel&  prob,
   return detail::solve_minlp_bc_legacy_core(prob, opt, ws, cbs);
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

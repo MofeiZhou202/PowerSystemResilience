@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
 #ifdef HACDCPF_HAVE_UMFPACK
 #include <Eigen/UmfPackSupport>
@@ -7,7 +7,7 @@
 #include <Eigen/KLUSupport>
 #endif
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 const char* EigenSparseLUSolver::backend_name() const {
   return "EigenSparseLU";
@@ -93,4 +93,4 @@ std::unique_ptr<SparseLinearSolver> make_default_sparse_solver() {
 #endif
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

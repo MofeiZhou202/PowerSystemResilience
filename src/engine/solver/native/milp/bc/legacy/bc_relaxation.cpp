@@ -1,7 +1,7 @@
 /// @file bc_relaxation.cpp
 /// @brief LP/NLP relaxation solving and rounding heuristics for the B&C solver.
 
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,14 +17,14 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
-#include "hacdcpf/engine/kernel/ipm/ipm_lp_solver.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 
 #ifdef HACDCPF_HAVE_HIGHS_LIB
 #include "Highs.h"
 #endif
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 
 namespace {
 
@@ -2060,4 +2060,4 @@ bool try_rounding_heuristic(const LPModel& base_lp,
   return false;
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

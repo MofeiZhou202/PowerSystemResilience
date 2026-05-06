@@ -8,21 +8,21 @@
 /// 4. Progressive rounding heuristic
 /// 5. Early termination checks (gap, optimality)
 
-#include "hacdcpf/engine/solver/native/milp/bc/root/root_solve.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/root/root_solve.hpp"
 
 #include <limits>
 #include <vector>
 
 #include <Eigen/Core>
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/shared_state.hpp"
-#include "hacdcpf/engine/detail/bc_types.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/shared_state.hpp"
+#include "mipsolvers/engine/detail/bc_types.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_pools.hpp"
 #include <cmath>
 #include <algorithm>
 
-namespace hacdcpf::engine::solver::native::milp::bc {
+namespace mipsolvers::engine::solver::native::milp::bc {
 
 RootSolvePhase::RootSolvePhase(BCSolveContext& context)
     : ctx_(&context) {}
@@ -281,4 +281,4 @@ std::vector<Eigen::VectorXd> RootSolvePhase::run_progressive_rounding(
   return solutions;
 }
 
-}  // namespace hacdcpf::engine::solver::native::milp::bc
+}  // namespace mipsolvers::engine::solver::native::milp::bc

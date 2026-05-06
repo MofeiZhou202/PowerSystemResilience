@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/kernel/kkt/kkt_system.hpp"
+#include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,7 +8,7 @@
 #include <Eigen/Cholesky>
 #include <Eigen/Sparse>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 bool factor_kkt_sparse(SparseKKTCache& cache,
                        const Eigen::SparseMatrix<double>& w,
@@ -454,4 +454,4 @@ void split_inequalities(const NLPModel& prob,
   jh.makeCompressed();
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

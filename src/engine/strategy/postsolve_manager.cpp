@@ -1,8 +1,8 @@
-#include "hacdcpf/engine/strategy/postsolve_manager.hpp"
+#include "mipsolvers/engine/strategy/postsolve_manager.hpp"
 
 #include <cmath>
 
-namespace hacdcpf::engine::strategy {
+namespace mipsolvers::engine::strategy {
 
 SolveResult PostsolveManager::postsolve(const SolveResult& presolved_result,
                                         const PresolveMapping& mapping) const {
@@ -81,4 +81,4 @@ bool PostsolveManager::validate(const SolveResult& /* original_result */,
   return false;
 }
 
-}  // namespace hacdcpf::engine::strategy
+}  // namespace mipsolvers::engine::strategy

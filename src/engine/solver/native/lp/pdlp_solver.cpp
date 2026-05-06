@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/solver/native/lp/pdlp_solver.hpp"
+#include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,9 +11,9 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
-#include "hacdcpf/engine/util/problem_validation.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -636,4 +636,4 @@ SolveResult NativePDLPAdapter::solve_lp(const LPModel& prob) const {
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

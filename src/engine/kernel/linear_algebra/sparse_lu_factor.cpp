@@ -3,7 +3,7 @@
 // Forrest-Tomlin column replacement update.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#include "hacdcpf/engine/kernel/linear_algebra/sparse_lu_factor.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/sparse_lu_factor.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +17,7 @@ extern "C" {
 }
 #endif
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P11 (2026-04-23) hyper-sparse triangular solve gating.
@@ -964,4 +964,4 @@ bool SparseLUFactor::update_ft(int pivot_row, const double* spike_data,
   return true;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

@@ -1,15 +1,15 @@
-#include "hacdcpf/engine/api/solver.hpp"
+#include "mipsolvers/engine/api/solver.hpp"
 
 #include <memory>
 
-#include "hacdcpf/engine/solver/external/adapters.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_lp_solver.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_solver.hpp"
-#include "hacdcpf/engine/kernel/ipm/lcqp_solver.hpp"
-#include "hacdcpf/engine/solver/native/native_adapters.hpp"
-#include "hacdcpf/engine/solver/native/lp/pdlp_solver.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
+#include "mipsolvers/engine/solver/native/native_adapters.hpp"
+#include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 api::Result to_api_result(const SolveResult& in) {
@@ -183,4 +183,4 @@ api::Result SolverEngine::solve_minlp(const MINLPModel& problem,
   return solve(api::ProblemVariant{problem}, options);
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

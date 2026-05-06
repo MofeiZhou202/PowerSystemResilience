@@ -6,19 +6,19 @@
 /// 2. Iteratively: select node → evaluate → branch
 /// 3. Termination: time/node/gap limit or queue exhausted
 
-#include "hacdcpf/engine/solver/native/milp/bc/search/sequential_search.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/search/sequential_search.hpp"
 
 #include <chrono>
 #include <queue>
 #include <algorithm>
 #include <cmath>
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/shared_state.hpp"
-#include "hacdcpf/engine/solver/native/milp/bc/search/node_evaluator.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/bc/options.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/shared_state.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/search/node_evaluator.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/bc/options.hpp"
 
-namespace hacdcpf::engine::solver::native::milp::bc {
+namespace mipsolvers::engine::solver::native::milp::bc {
 
 SequentialSearchDriver::SequentialSearchDriver(BCSolveContext& context)
     : ctx_(&context) {}
@@ -247,4 +247,4 @@ bool SequentialSearchDriver::should_terminate() const {
   return false;
 }
 
-}  // namespace hacdcpf::engine::solver::native::milp::bc
+}  // namespace mipsolvers::engine::solver::native::milp::bc

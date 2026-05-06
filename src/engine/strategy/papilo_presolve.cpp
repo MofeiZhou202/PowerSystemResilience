@@ -1,7 +1,7 @@
 /// @file papilo_presolve.cpp
 /// @brief PaPILO-based presolve implementation for MILP problems.
 
-#include "hacdcpf/engine/strategy/papilo_presolve.hpp"
+#include "mipsolvers/engine/strategy/papilo_presolve.hpp"
 
 #ifdef HACDCPF_HAVE_PAPILO
 
@@ -18,7 +18,7 @@
 #include <limits>
 #include <unordered_map>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 static constexpr double kInf = 1e20;
 
@@ -797,11 +797,11 @@ std::vector<PaPILOAffineExpression> papilo_export_affine_expressions(
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine
 
 #else  // !HACDCPF_HAVE_PAPILO
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 struct PaPILOPostsolveData {};
 
@@ -856,6 +856,6 @@ std::vector<PaPILOAffineExpression> papilo_export_affine_expressions(
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine
 
 #endif  // HACDCPF_HAVE_PAPILO

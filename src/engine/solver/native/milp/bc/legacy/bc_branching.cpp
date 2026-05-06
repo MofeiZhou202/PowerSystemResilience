@@ -1,17 +1,17 @@
 /// @file bc_branching.cpp
 /// @brief Branch variable selection strategies for the B&C solver.
 
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
 #include <Eigen/Core>
-#include "hacdcpf/engine/detail/bc_fallback.hpp"
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/detail/bc_fallback.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 
 namespace {
 
@@ -274,4 +274,4 @@ double compute_node_estimate(const std::vector<VariableMeta>& vars,
   return std::max(node_bound, estimate);
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

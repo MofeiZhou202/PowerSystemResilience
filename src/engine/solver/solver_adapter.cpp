@@ -1,6 +1,6 @@
-#include "hacdcpf/engine/solver/solver_adapter.hpp"
+#include "mipsolvers/engine/solver/solver_adapter.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 const char* class_name(ProblemClass cls) {
@@ -62,4 +62,4 @@ SolveResult SolverAdapter::solve_minlp(const MINLPModel&) const {
   return unsupported_result(ProblemClass::MINLP);
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

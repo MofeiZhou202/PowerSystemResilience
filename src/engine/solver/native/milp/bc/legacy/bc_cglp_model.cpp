@@ -1,7 +1,7 @@
 /// @file bc_cglp_model.cpp
 /// @brief Phase 2 CGLP model builder.
 
-#include "hacdcpf/engine/detail/bc_cglp.hpp"
+#include "mipsolvers/engine/detail/bc_cglp.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,7 @@
 
 #include <Eigen/Sparse>
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 namespace {
 
 constexpr double kFiniteBound = 1e19;
@@ -211,4 +211,4 @@ bool build_cglp_lp(const CGLPContext& ctx, int j, CGLPModel& out_model) {
   return true;
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

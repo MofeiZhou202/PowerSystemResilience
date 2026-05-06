@@ -1,8 +1,8 @@
 /// @file highs_presolve_side_state.cpp
 /// @brief In-process HiGHS presolve/conformance bridge.
 
-#include "hacdcpf/engine/strategy/highs_presolve_side_state.hpp"
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
 #ifdef HACDCPF_HAVE_HIGHS_LIB
 #if defined(__clang__)
@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 
@@ -867,4 +867,4 @@ HiGHSRootLpStateStats highs_standard_form_lp_state_stats(
   return stats;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

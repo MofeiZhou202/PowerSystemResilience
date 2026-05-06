@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/solver/native/native_adapters.hpp"
+#include "mipsolvers/engine/solver/native/native_adapters.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -6,11 +6,11 @@
 #include <limits>
 #include <vector>
 
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
-#include "hacdcpf/engine/kernel/linear_algebra/linear_solver.hpp"
-#include "hacdcpf/engine/util/problem_validation.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 double inf_norm(const Eigen::VectorXd& v) {
@@ -498,4 +498,4 @@ SolveResult NativeBranchAndCutAdapter::solve_minlp(const MINLPModel& prob) const
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

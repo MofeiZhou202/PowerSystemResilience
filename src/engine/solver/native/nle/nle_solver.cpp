@@ -12,16 +12,16 @@
 ///   3. Accept/reject via dogleg trust-region update.
 ///   4. Update x and repeat until ‖F(x)‖ < tol or max_iters reached.
 
-#include "hacdcpf/engine/solver/native/nle/nle_solver.hpp"
+#include "mipsolvers/engine/solver/native/nle/nle_solver.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
-#include "hacdcpf/engine/kernel/globalization/globalization.hpp"
-#include "hacdcpf/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/kernel/globalization/globalization.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 
@@ -117,4 +117,4 @@ NLEResult NLESolver::solve(const NLEProblem& prob, const NLEOptions& opt) const 
   return result;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

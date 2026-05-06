@@ -44,7 +44,7 @@
 // Future refactor plan (tracked in /memories/repo/forrest-tomlin-update-design.md):
 //
 //   - Extract SparseBasis + NativeLU + SimplexBoundChange into a private
-//     header `include/hacdcpf/engine/detail/dual_simplex_internals.hpp` with
+//     header `include/mipsolvers/engine/detail/dual_simplex_internals.hpp` with
 //     external linkage, then split Sections 6-9 (public API) into a sibling
 //     TU `src/engine/dual_simplex_api.cpp`. This halves the current TU but
 //     requires moving ~640 lines of class implementations and adjusting
@@ -53,9 +53,9 @@
 //
 // ════════════════════════════════════════════════════════════════════════════
 
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
-#include "hacdcpf/engine/kernel/linear_algebra/sparse_lu_factor.hpp"
-#include "hacdcpf/engine/kernel/linear_algebra/hfactor_backend.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/sparse_lu_factor.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -85,13 +85,13 @@ extern "C" {
 }
 #endif
 
-#include "hacdcpf/core/logging.hpp"
+#include "mipsolvers/core/logging.hpp"
 
 #ifndef HACDCPF_ENABLE_FACTOR_BACKEND_B
 #define HACDCPF_ENABLE_FACTOR_BACKEND_B 0
 #endif
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 SparseFactorTelemetry BasisOps::factor_telemetry() const {
   return {};
@@ -8078,4 +8078,4 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

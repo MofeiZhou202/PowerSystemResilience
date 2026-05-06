@@ -1,10 +1,10 @@
-#include "hacdcpf/engine/kernel/ipm/ipm_filter.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_filter.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 bool Filter::is_acceptable(double theta_trial, double phi_trial,
                            double gamma_theta, double gamma_phi) const {
@@ -53,4 +53,4 @@ void Filter::reset_with_theta_upper_bound(double theta_max) {
 
 void Filter::clear() { entries_.clear(); }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

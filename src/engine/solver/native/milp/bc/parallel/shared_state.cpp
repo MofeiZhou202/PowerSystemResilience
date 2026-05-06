@@ -1,16 +1,16 @@
 /// @file shared_state.cpp
 /// @brief Implementation of BCSolveContext
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/shared_state.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/shared_state.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 
 #include <Eigen/Sparse>
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
-namespace hacdcpf::engine::solver::native::milp::bc {
+namespace mipsolvers::engine::solver::native::milp::bc {
 
 BCSolveContext::BCSolveContext(const MIPModel& prob_in,
                                const BCOptions& opt_in,
@@ -141,4 +141,4 @@ const detail::RowPropagationIndex& BCSolveContext::row_prop_index() const {
   return row_index_cached_;
 }
 
-}  // namespace hacdcpf::engine::solver::native::milp::bc
+}  // namespace mipsolvers::engine::solver::native::milp::bc

@@ -14,7 +14,7 @@
 /// 7. apply_rounding_heuristics()- Simple/progressive rounding + guided rounding
 /// 8. compute_pseudocost_updates()- Branching statistic tracking
 
-#include "hacdcpf/engine/solver/native/milp/bc/search/node_evaluator.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/search/node_evaluator.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -22,12 +22,12 @@
 
 #include <Eigen/Core>
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/shared_state.hpp"
-#include "hacdcpf/engine/detail/bc_types.hpp"
-#include "hacdcpf/engine/detail/bc_pools.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/shared_state.hpp"
+#include "mipsolvers/engine/detail/bc_types.hpp"
+#include "mipsolvers/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
-namespace hacdcpf::engine::solver::native::milp::bc {
+namespace mipsolvers::engine::solver::native::milp::bc {
 
 NodeEvaluator::NodeEvaluator(BCSolveContext& context)
     : ctx_(&context) {}
@@ -441,4 +441,4 @@ std::vector<PCUpdate> NodeEvaluator::compute_pseudocost_updates(
   return updates;
 }
 
-}  // namespace hacdcpf::engine::solver::native::milp::bc
+}  // namespace mipsolvers::engine::solver::native::milp::bc

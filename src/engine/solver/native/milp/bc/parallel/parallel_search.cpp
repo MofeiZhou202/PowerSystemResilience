@@ -9,21 +9,21 @@
 /// BCSolveContext state into the exact parameter set each thread function
 /// expects, and collecting results when threads finish.
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/parallel_search.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/parallel_search.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <thread>
 
-#include "hacdcpf/engine/solver/native/milp/bc/parallel/shared_state.hpp"
-#include "hacdcpf/engine/detail/bc_parallel.hpp"
-#include "hacdcpf/engine/detail/bc_fallback.hpp"
-#include "hacdcpf/engine/detail/bc_threading.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/bc/options.hpp"
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/parallel/shared_state.hpp"
+#include "mipsolvers/engine/detail/bc_parallel.hpp"
+#include "mipsolvers/engine/detail/bc_fallback.hpp"
+#include "mipsolvers/engine/detail/bc_threading.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/bc/options.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
-namespace hacdcpf::engine::solver::native::milp::bc {
+namespace mipsolvers::engine::solver::native::milp::bc {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -293,4 +293,4 @@ std::vector<detail::WorkerRole> ParallelSearchDriver::assign_roles(
   return roles;
 }
 
-}  // namespace hacdcpf::engine::solver::native::milp::bc
+}  // namespace mipsolvers::engine::solver::native::milp::bc

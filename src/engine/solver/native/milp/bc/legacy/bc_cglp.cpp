@@ -8,7 +8,7 @@
 ///     extraction, efficacy filtering, and conservative branch-side validity
 ///     checks before cut admission.
 
-#include "hacdcpf/engine/detail/bc_cglp.hpp"
+#include "mipsolvers/engine/detail/bc_cglp.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -19,11 +19,11 @@
 #include <utility>
 #include <vector>
 
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/detail/bc_pools.hpp"
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 namespace {
 
 bool validate_cut_on_branch(const CGLPContext& ctx,
@@ -460,4 +460,4 @@ int add_cglp_cuts_root(LPModel& lp,
   return generated;
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

@@ -1,9 +1,9 @@
-#include "hacdcpf/engine/strategy/warmstart.hpp"
+#include "mipsolvers/engine/strategy/warmstart.hpp"
 
 #include <algorithm>
-#include "hacdcpf/engine/solver/solver_adapter.hpp"
+#include "mipsolvers/engine/solver/solver_adapter.hpp"
 
-namespace hacdcpf::engine::strategy {
+namespace mipsolvers::engine::strategy {
 
 bool WarmStartManager::is_compatible(int num_vars, int num_constraints,
                                      const WarmStart& ws) const {
@@ -151,4 +151,4 @@ bool WarmStartManager::validate(const WarmStart& ws) const {
   return true;
 }
 
-}  // namespace hacdcpf::engine::strategy
+}  // namespace mipsolvers::engine::strategy

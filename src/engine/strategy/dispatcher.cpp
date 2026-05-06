@@ -1,10 +1,10 @@
-#include "hacdcpf/engine/strategy/dispatcher.hpp"
+#include "mipsolvers/engine/strategy/dispatcher.hpp"
 
 #include <array>
 #include <algorithm>
 #include <unordered_set>
 
-namespace hacdcpf::engine::strategy {
+namespace mipsolvers::engine::strategy {
 namespace {
 
 SolveResult unsupported(const std::string& reason) {
@@ -248,4 +248,4 @@ std::string StrategyDispatcher::estimate_best_solver(
   return "Unknown";
 }
 
-}  // namespace hacdcpf::engine::strategy
+}  // namespace mipsolvers::engine::strategy

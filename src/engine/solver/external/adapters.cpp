@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/solver/external/adapters.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -16,8 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "hacdcpf/core/string_utils.hpp"
-#include "hacdcpf/engine/util/problem_validation.hpp"
+#include "mipsolvers/core/string_utils.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
 #ifdef HACDCPF_HAVE_IPOPT
 #include "IpIpoptApplication.hpp"
@@ -31,7 +31,7 @@
 
 namespace fs = std::filesystem;
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 std::string shell_quote(const fs::path& p) {
@@ -1272,10 +1272,10 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
 
   const auto stamp = std::to_string(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
-  const fs::path mps_path = fs::temp_directory_path() / ("hacdcpf_lp_" + stamp + ".mps");
-  const fs::path sol_path = fs::temp_directory_path() / ("hacdcpf_lp_" + stamp + ".sol");
-  const fs::path opt_path = fs::temp_directory_path() / ("hacdcpf_lp_" + stamp + ".opt");
-  const fs::path log_path = fs::temp_directory_path() / ("hacdcpf_lp_" + stamp + ".log");
+  const fs::path mps_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".mps");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".sol");
+  const fs::path opt_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".opt");
+  const fs::path log_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".log");
 
   SolveResult out;
   out.stats.solver_name = name();
@@ -1376,10 +1376,10 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
 
   const auto stamp = std::to_string(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
-  const fs::path mps_path = fs::temp_directory_path() / ("hacdcpf_milp_" + stamp + ".mps");
-  const fs::path sol_path = fs::temp_directory_path() / ("hacdcpf_milp_" + stamp + ".sol");
-  const fs::path opt_path = fs::temp_directory_path() / ("hacdcpf_milp_" + stamp + ".opt");
-  const fs::path log_path = fs::temp_directory_path() / ("hacdcpf_milp_" + stamp + ".log");
+  const fs::path mps_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".mps");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".sol");
+  const fs::path opt_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".opt");
+  const fs::path log_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".log");
 
   if (!write_lp_as_mps(lp, mps_path, true)) {
     out.stats.status = "Unavailable: failed to write MPS";
@@ -1611,8 +1611,8 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
   std::error_code ec;
   const auto stamp = std::to_string(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
-  const fs::path pip_path = fs::temp_directory_path() / ("hacdcpf_minlp_" + stamp + ".pip");
-  const fs::path sol_path = fs::temp_directory_path() / ("hacdcpf_minlp_" + stamp + ".sol");
+  const fs::path pip_path = fs::temp_directory_path() / ("mipsolvers_minlp_" + stamp + ".pip");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_minlp_" + stamp + ".sol");
 
   std::vector<std::string> var_names;
   bool was_maximize = false;
@@ -2229,4 +2229,4 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

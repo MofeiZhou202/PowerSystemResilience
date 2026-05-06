@@ -1,9 +1,9 @@
-#include "hacdcpf/engine/kernel/ipm/ipm_scaling.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_scaling.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 
@@ -187,4 +187,4 @@ NLPModel build_scaled_nlp_model(const NLPModel& prob,
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

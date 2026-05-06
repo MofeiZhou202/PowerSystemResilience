@@ -5,8 +5,8 @@
 /// cover cuts, flow cover cuts, implied bound cuts,
 /// and the unified add_cuts dispatch. Includes scoring helpers for cut selection.
 
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_clique_table.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -26,7 +26,7 @@
 #include <Eigen/Sparse>
 #include <fmt/format.h>
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 
 namespace {
 
@@ -6716,4 +6716,4 @@ int add_cuts(LPModel& lp,
   return total;
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

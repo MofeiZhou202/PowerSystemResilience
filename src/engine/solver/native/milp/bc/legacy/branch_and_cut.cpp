@@ -6,8 +6,8 @@
 /// the heavy orchestration logic (sequential/parallel loops and NLP fallback) while
 /// preserving old behavior.
 
-#include "hacdcpf/engine/branch_and_cut.hpp"
-#include "hacdcpf/engine/detail/bc/legacy_bridge.hpp"
+#include "mipsolvers/engine/branch_and_cut.hpp"
+#include "mipsolvers/engine/detail/bc/legacy_bridge.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,7 +30,7 @@
 #include <unordered_map>
 #include <utility>
 
-#include "hacdcpf/core/logging.hpp"
+#include "mipsolvers/core/logging.hpp"
 #include <string>
 #include <thread>
 #include <tuple>
@@ -42,27 +42,27 @@
 
 #include <fmt/format.h>
 
-#include "hacdcpf/engine/detail/bc_types.hpp"
-#include "hacdcpf/engine/detail/bc_domain.hpp"
-#include "hacdcpf/engine/detail/bc_pools.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/detail/bc_cglp.hpp"
-#include "hacdcpf/engine/detail/bc_clique_table.hpp"
-#include "hacdcpf/engine/detail/bc_threading.hpp"
-#include "hacdcpf/engine/detail/bc_fallback.hpp"
-#include "hacdcpf/engine/detail/bc_parallel.hpp"
-#include "hacdcpf/engine/detail/bc_solver_dispatch.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_lp_solver.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_solver.hpp"
-#include "hacdcpf/engine/kernel/kkt/kkt_system.hpp"
-#include "hacdcpf/engine/strategy/highs_presolve_side_state.hpp"
-#include "hacdcpf/engine/strategy/papilo_presolve.hpp"
+#include "mipsolvers/engine/detail/bc_types.hpp"
+#include "mipsolvers/engine/detail/bc_domain.hpp"
+#include "mipsolvers/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_cglp.hpp"
+#include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_threading.hpp"
+#include "mipsolvers/engine/detail/bc_fallback.hpp"
+#include "mipsolvers/engine/detail/bc_parallel.hpp"
+#include "mipsolvers/engine/detail/bc_solver_dispatch.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
+#include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
+#include "mipsolvers/engine/strategy/papilo_presolve.hpp"
 
 #ifdef HACDCPF_HAVE_HIGHS_LIB
 #include "Highs.h"
 #endif
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 using namespace detail;
 
 // ── Public: thread-count resolver ──────────────────────────────────────
@@ -11933,7 +11933,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       }
       const int added = add_cuts(root_lp, root.x_relax, cut_simplex, opt, effective_cuts_per_round, cut_sbasis, &cut_family_tracker, &clique_table);
       // Phase 1 CGLP: gated, stub only — never adds rows yet.
-      // See include/hacdcpf/engine/detail/bc_cglp.hpp for the roadmap and
+      // See include/mipsolvers/engine/detail/bc_cglp.hpp for the roadmap and
       // BCOptions::enable_cglp_cuts for the feature flag.
       detail::CGLPPassStats cglp_pass;
       const int cglp_added = detail::add_cglp_cuts_root(root_lp, root.x_relax, opt, &cglp_pass);
@@ -13569,7 +13569,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // call probes via `fix_col + propagate` and then `restore` to a savepoint,
   // so the per-alpha-step propagation work is O(touched_cols * row_nnz)
   // instead of the prior O(nnz) full-rescan.
-  using ::hacdcpf::engine::detail::BCDomain;
+  using ::mipsolvers::engine::detail::BCDomain;
   BCDomain repair_domain;
   repair_domain.init(base_lp, root.lb, root.ub);
   // One initial sweep absorbs whatever tightening the root box already implies.
@@ -30428,4 +30428,4 @@ BCResult detail::solve_minlp_bc_legacy_core(const MINLPModel&  prob,
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/solver/native/nle/newton_solver.hpp"
+#include "mipsolvers/engine/solver/native/nle/newton_solver.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,17 +11,17 @@
 
 #include <Eigen/Sparse>
 
-#include "hacdcpf/power_flow/converter_model.hpp"
-#include "hacdcpf/power_flow/jacobian_builder.hpp"
-#include "hacdcpf/power_flow/nonlinear_scaling.hpp"
-#include "hacdcpf/power_flow/nonmonotone_linesearch.hpp"
-#include "hacdcpf/power_flow/lm_trust_region.hpp"
-#include "hacdcpf/power_flow/newton_krylov.hpp"
-#include "hacdcpf/power_flow/pf_utils.hpp"
-#include "hacdcpf/engine/kernel/globalization/globalization.hpp"
-#include "hacdcpf/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/power_flow/converter_model.hpp"
+#include "mipsolvers/power_flow/jacobian_builder.hpp"
+#include "mipsolvers/power_flow/nonlinear_scaling.hpp"
+#include "mipsolvers/power_flow/nonmonotone_linesearch.hpp"
+#include "mipsolvers/power_flow/lm_trust_region.hpp"
+#include "mipsolvers/power_flow/newton_krylov.hpp"
+#include "mipsolvers/power_flow/pf_utils.hpp"
+#include "mipsolvers/engine/kernel/globalization/globalization.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 
@@ -1453,4 +1453,4 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

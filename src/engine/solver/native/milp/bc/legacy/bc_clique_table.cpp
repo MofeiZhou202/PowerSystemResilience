@@ -1,8 +1,8 @@
 /// @file bc_clique_table.cpp
 /// @brief Persistent clique table implementation.
 
-#include "hacdcpf/engine/detail/bc_clique_table.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_clique_table.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace hacdcpf::engine::detail {
+namespace mipsolvers::engine::detail {
 
 void CliqueTable::ensure_storage(int n) {
   if (n_ == n && !offsets_.empty() && !lit_offsets_.empty()) return;
@@ -996,4 +996,4 @@ CliqueTable::find_violated_cliques(const Eigen::VectorXd& x,
   return out;
 }
 
-}  // namespace hacdcpf::engine::detail
+}  // namespace mipsolvers::engine::detail

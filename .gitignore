@@ -71,36 +71,9 @@ benchmark/
 # AGI
 .claude/
 
-data/
-
-active_distribution_system_simulation_technique/
-
-build_test/
-
-output/
-
 .github/
 
-matpower/
-
-build_rel/
-
-DistributionPowerFlow/
-
-build_phase3/
-
-PowerSystemsReliabilityAssessment/
-
-Multi-stage Restoration/
-
-PowerMarketSimulation/
-
-MachineLearningAssisstUnitCommitment/
-
-DecompositionAlgorithms/
-
 .cache/
-
 
 reports/
 

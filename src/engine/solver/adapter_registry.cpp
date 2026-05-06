@@ -1,6 +1,6 @@
-#include "hacdcpf/engine/solver/adapter_registry.hpp"
+#include "mipsolvers/engine/solver/adapter_registry.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 void AdapterRegistry::register_adapter(const SolverAdapterPtr& adapter) {
   if (!adapter) {
@@ -37,4 +37,4 @@ SolverAdapterPtr AdapterRegistry::find_by_name(const std::string& adapter_name) 
   return nullptr;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

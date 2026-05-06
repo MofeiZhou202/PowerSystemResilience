@@ -1,9 +1,9 @@
-#include "hacdcpf/engine/util/problem_validation.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 constexpr double kBoundEps = 1e-12;
@@ -256,4 +256,4 @@ ValidationReport validate(const MINLPModel& model) {
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

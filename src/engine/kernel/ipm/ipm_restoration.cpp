@@ -1,9 +1,9 @@
-#include "hacdcpf/engine/kernel/ipm/ipm_restoration.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 
@@ -245,4 +245,4 @@ Eigen::VectorXd extract_x_from_restoration(const RestorationBuild& build,
   return w.head(build.n_x);
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

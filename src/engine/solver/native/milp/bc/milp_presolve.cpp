@@ -14,7 +14,7 @@
 ///  10. Coefficient strengthening (MIP)
 ///  11. Binary probing with bound intersection
 
-#include "hacdcpf/engine/solver/native/milp/bc/milp_presolve.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -27,7 +27,7 @@
 #include <utility>
 #include <vector>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 static constexpr double kInf = 1e20;
 
@@ -1642,4 +1642,4 @@ PresolveStats presolve_inplace(LPModel& lp, const PresolveOptions& opts) {
   return stats;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

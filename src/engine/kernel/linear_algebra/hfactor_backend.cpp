@@ -3,13 +3,13 @@
 //
 // Wraps the vendored HiGHS HFactor (see
 // src/engine/kernel/linear_algebra/highs_factor/) in an API that mirrors
-// `hacdcpf::engine::SparseLUFactor`.
+// `mipsolvers::engine::SparseLUFactor`.
 //
 // Phase 2 of U.7.118.  Phase 3 will plug this into the dual-simplex driver
 // behind a new `FactorBackendKind::HFactorPort` enum value.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#include "hacdcpf/engine/kernel/linear_algebra/hfactor_backend.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/hfactor_backend.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,7 +19,7 @@
 #include "util/HFactor.h"
 #include "util/HVector.h"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 struct HFactorBackend::Impl {
   HFactor f;
@@ -211,4 +211,4 @@ void HFactorBackend::reset_update_tracking() noexcept {
   refactor_hint_ = 0;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

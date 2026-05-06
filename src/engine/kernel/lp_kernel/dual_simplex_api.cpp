@@ -1,6 +1,6 @@
 // dual_simplex_api.cpp — extracted public API helpers from dual_simplex.cpp
 
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -982,4 +982,4 @@ void update_standard_form_bounds_incremental(
 }
 
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

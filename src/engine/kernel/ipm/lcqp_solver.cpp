@@ -7,7 +7,7 @@
 //
 // This is a high-performance implementation for DC OPF problems.
 
-#include "hacdcpf/engine/kernel/ipm/lcqp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -16,9 +16,9 @@
 
 #include <Eigen/Dense>
 
-#include "hacdcpf/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 namespace {
 constexpr double kBigNum = 1e15;
@@ -556,4 +556,4 @@ SolveResult NativeLCQPAdapter::solve_qp_ipm(
   return result;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

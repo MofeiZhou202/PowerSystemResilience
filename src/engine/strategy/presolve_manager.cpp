@@ -1,8 +1,8 @@
-#include "hacdcpf/engine/strategy/presolve_manager.hpp"
+#include "mipsolvers/engine/strategy/presolve_manager.hpp"
 
 #include <cmath>
 
-namespace hacdcpf::engine::strategy {
+namespace mipsolvers::engine::strategy {
 
 bool PresolveManager::should_presolve(const api::ProblemVariant& /* problem */,
                                       const SolveOptions& /* options */) const {
@@ -50,4 +50,4 @@ PresolvedProblem PresolveManager::scale(const api::ProblemVariant& problem,
   return result;
 }
 
-}  // namespace hacdcpf::engine::strategy
+}  // namespace mipsolvers::engine::strategy

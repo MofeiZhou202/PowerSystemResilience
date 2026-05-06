@@ -5,7 +5,7 @@
 /// heterogeneous parallel explorer (Diver/Prover/IPMDiver) and the
 /// dedicated cut worker that generates GMI cuts from submitted LP results.
 
-#include "hacdcpf/engine/detail/bc_parallel.hpp"
+#include "mipsolvers/engine/detail/bc_parallel.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -19,13 +19,13 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
-#include "hacdcpf/engine/detail/bc_pools.hpp"
-#include "hacdcpf/engine/detail/bc_utils.hpp"
-#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_lp_solver.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 using namespace detail;
 
 namespace {
@@ -1410,4 +1410,4 @@ void detail::cut_worker_thread(
   }
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

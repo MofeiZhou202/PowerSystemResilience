@@ -5,7 +5,7 @@
 // Bounded-variable formulation: handles bounds directly (no upper-bound slacks).
 // Uses banded Cholesky for narrow-banded normal equations, sparse LDLT otherwise.
 
-#include "hacdcpf/engine/kernel/ipm/ipm_lp_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -28,7 +28,7 @@
 #define USE_NEON 0
 #endif
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 
 // Apple Accelerate sparse Cholesky cache — persists across IPM solve calls
 // to reuse symbolic factorization when the sparsity pattern is unchanged
@@ -2222,4 +2222,4 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   return out;
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine

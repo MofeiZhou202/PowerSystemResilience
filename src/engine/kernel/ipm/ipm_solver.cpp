@@ -1,4 +1,4 @@
-#include "hacdcpf/engine/kernel/ipm/ipm_solver.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,14 +13,14 @@
 #include <Eigen/Cholesky>
 #include <Eigen/Sparse>
 
-#include "hacdcpf/engine/solver/external/adapters.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_filter.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_restoration.hpp"
-#include "hacdcpf/engine/kernel/ipm/ipm_scaling.hpp"
-#include "hacdcpf/engine/kernel/kkt/kkt_system.hpp"
-#include "hacdcpf/engine/util/problem_validation.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_filter.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_restoration.hpp"
+#include "mipsolvers/engine/kernel/ipm/ipm_scaling.hpp"
+#include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
-namespace hacdcpf::engine {
+namespace mipsolvers::engine {
 namespace {
 
 constexpr double kBoundInfinity = 1e19;
@@ -1986,4 +1986,4 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
   return {out, detail};
 }
 
-}  // namespace hacdcpf::engine
+}  // namespace mipsolvers::engine
