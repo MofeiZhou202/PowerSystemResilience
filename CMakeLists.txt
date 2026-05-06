@@ -255,6 +255,37 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)
+
+  # SCUC module test requires scuc.cpp (not in base mipsolvers lib)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scuc_module.cpp" AND MIPSOLVERS_BUILD_SCUC)
+    add_executable(test_scuc_module
+      tests/test_scuc_module.cpp
+      src/scuc/scuc.cpp
+    )
+    target_link_libraries(test_scuc_module PRIVATE mipsolvers Catch2::Catch2WithMain)
+    target_include_directories(test_scuc_module PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(NAME test_scuc_module COMMAND test_scuc_module)
+    set_tests_properties(test_scuc_module PROPERTIES LABELS "integration")
+  endif()
+endif()
+
+# ── SCUC market simulation executable ────────────────────────────────────────
+option(MIPSOLVERS_BUILD_SCUC "Build scuc_solve command-line tool" ON)
+if(MIPSOLVERS_BUILD_SCUC)
+  add_executable(scuc_solve
+    src/scuc/main.cpp
+    src/scuc/scuc.cpp
+  )
+  target_include_directories(scuc_solve PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+  target_link_libraries(scuc_solve PRIVATE mipsolvers)
+  if(NOT MSVC)
+    target_compile_options(scuc_solve PRIVATE -Wall -Wextra
+      $<$<CONFIG:Release>:-O3 -DNDEBUG>
+      $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+  endif()
 endif()
 
 # ── Install rules ─────────────────────────────────────────────────────────────
