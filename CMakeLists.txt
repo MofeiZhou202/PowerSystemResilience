@@ -269,6 +269,28 @@ if(MIPSOLVERS_BUILD_TESTS)
     add_test(NAME test_scuc_module COMMAND test_scuc_module)
     set_tests_properties(test_scuc_module PROPERTIES LABELS "integration")
   endif()
+
+  # SCUC 市场模拟基准 & 可视化测试
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_market_simulation.cpp" AND MIPSOLVERS_BUILD_SCUC)
+    add_executable(test_market_simulation
+      tests/test_market_simulation.cpp
+      src/scuc/scuc.cpp
+      src/scuc/case_builder.cpp
+    )
+    target_link_libraries(test_market_simulation PRIVATE mipsolvers Catch2::Catch2WithMain)
+    target_include_directories(test_market_simulation PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    if(NOT MSVC)
+      target_compile_options(test_market_simulation PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+    add_test(NAME test_market_simulation COMMAND test_market_simulation)
+    set_tests_properties(test_market_simulation PROPERTIES
+      LABELS "benchmark"
+      TIMEOUT 600)
+  endif()
 endif()
 
 # ── SCUC market simulation executable ────────────────────────────────────────
@@ -283,6 +305,24 @@ if(MIPSOLVERS_BUILD_SCUC)
   target_link_libraries(scuc_solve PRIVATE mipsolvers)
   if(NOT MSVC)
     target_compile_options(scuc_solve PRIVATE -Wall -Wextra
+      $<$<CONFIG:Release>:-O3 -DNDEBUG>
+      $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+  endif()
+endif()
+
+# ── SCUC case builder tool ─────────────────────────────────────────────────────
+option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool" ON)
+if(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER AND MIPSOLVERS_BUILD_SCUC)
+  add_executable(scuc_case_builder
+    src/scuc/case_builder_main.cpp
+    src/scuc/case_builder.cpp
+    src/scuc/scuc.cpp
+  )
+  target_include_directories(scuc_case_builder PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+  target_link_libraries(scuc_case_builder PRIVATE mipsolvers)
+  if(NOT MSVC)
+    target_compile_options(scuc_case_builder PRIVATE -Wall -Wextra
       $<$<CONFIG:Release>:-O3 -DNDEBUG>
       $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
   endif()

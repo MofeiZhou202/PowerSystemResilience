@@ -2,6 +2,9 @@
 
 /// Security-Constrained Unit Commitment (SCUC) / SCED / LMP module.
 ///
+/// Implements the Southern China Regional Electricity Market Spot Trading
+/// Rules 2025 V1.0, §2.6 day-ahead clearing formulation.
+///
 /// Standalone MILP formulation that accepts JSON input describing a
 /// power-market day-ahead clearing problem and writes JSON output.
 /// Any solver registered with mipsolvers::engine::SolverEngine can be
@@ -13,6 +16,7 @@
 ///   std::string json = mipsolvers::scuc::scuc_output_to_json(output, input);
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mipsolvers::scuc {
@@ -41,11 +45,29 @@ struct Generator {
   int max_startups{0};               ///< 0 = unlimited
   int max_shutdowns{0};              ///< 0 = unlimited
   std::vector<BidSegment> bid_segments;
-  double startup_cost{0.0};          ///< $ per start
-  double no_load_cost{0.0};          ///< $/h while committed
+
+  /// Startup cost (§2.6.3.13): state-dependent hot/warm/cold.
+  /// If startup_cost_hot = 0, falls back to startup_cost for all states.
+  double startup_cost{0.0};          ///< $ per start (legacy / hot-start cost)
+  double startup_cost_warm{0.0};     ///< $ per warm start (0 = use startup_cost)
+  double startup_cost_cold{0.0};     ///< $ per cold start (0 = use startup_cost)
+  double hot_start_threshold_hr{4.0};   ///< Max off-time for hot start (hours)
+  double warm_start_threshold_hr{8.0};  ///< Max off-time for warm start (hours)
+
+  /// Startup/shutdown trajectory durations (§2.6.3.8).
+  int ud_periods{0};  ///< Startup process duration (periods from sync to Pmin)
+  int dd_periods{0};  ///< Shutdown process duration (periods from Pmin to desync)
+
+  double no_load_cost{0.0};          ///< $/h while committed (minimum-output cost)
   double spinning_reserve_price{0.0};
   double regulation_up_price{0.0};
   double regulation_down_price{0.0};
+
+  /// Primary frequency regulation coefficient: max PFR = pfr_alpha * pmax (§2.6.3.4).
+  double pfr_alpha{0.0};             ///< 0 = unit does not provide PFR
+
+  /// Generator group membership: -1 = no group.
+  int group_id{-1};
 };
 
 /// AC transmission branch (line or transformer).
@@ -66,7 +88,7 @@ struct Load {
 /// Wind generation unit.
 struct WindUnit {
   int bus{0};
-  double pmax{0.0};  ///< Rated capacity (MW); profile gives per-unit factor
+  double pmax{0.0};  ///< Rated capacity (MW); profile gives actual forecast MW
 };
 
 /// Solar (PV) generation unit.
@@ -77,15 +99,31 @@ struct SolarUnit {
 
 /// Battery / pumped-hydro storage unit.
 struct StorageUnit {
+  std::string name;
   int bus{0};
   double pmax_charge{0.0};       ///< Maximum charging rate (MW)
   double pmax_discharge{0.0};    ///< Maximum discharging rate (MW)
+  double pmin_charge{0.0};       ///< Minimum charging rate when charging (MW)
+  double pmin_discharge{0.0};    ///< Minimum discharging rate when discharging (MW)
   double energy_capacity_mwh{0.0};
-  double efficiency{0.9};        ///< Round-trip efficiency (0–1)
-  double soc_init{0.5};          ///< Initial state of charge (fraction of capacity)
-  double charge_bid_price{0.0};
-  double discharge_bid_price{0.0};
-  double cycle_limit{0.0};       ///< Max daily equivalent full-cycles (0 = unlimited)
+  double efficiency{0.9};        ///< Round-trip efficiency (legacy, used if eta_charge/discharge < 0)
+
+  /// Separate charging/discharging efficiencies (§2.6.3.16).
+  /// Values < 0 → derive from sqrt(efficiency).
+  double eta_charge{-1.0};       ///< Charging efficiency η^ch (0–1; <0 = use sqrt(efficiency))
+  double eta_discharge{-1.0};    ///< Discharging efficiency η^dis (0–1; <0 = use sqrt(efficiency))
+
+  double soc_init{0.5};          ///< Initial SOC (fraction of capacity, or MWh if > 1)
+  double soc_min{-1.0};          ///< Minimum SOC fraction (<0 → use 0.10)
+  double soc_final{-1.0};        ///< Required final SOC fraction (<0 → use soc_init)
+
+  double charge_bid_price{0.0};      ///< λ^ch ($/MWh)
+  double discharge_bid_price{0.0};   ///< λ^dis ($/MWh)
+  double cycle_limit{0.0};           ///< N^cycle, max daily equivalent full-cycles (0 = unlimited)
+
+  /// Use binary charge/discharge mode indicators (ξ+/ξ-) in SCUC MILP.
+  /// Ensures mutual exclusion exactly; increases model size.
+  bool use_binary_indicators{false};
 };
 
 /// VSC-HVDC or controllable DC line.
@@ -96,6 +134,32 @@ struct DCLine {
   double pmax{1e6};    ///< MW
   double ramp_up{1e6};
   double ramp_dn{1e6};
+};
+
+/// Generator group: shared output or energy limits (§2.6.3.9–2.6.3.10).
+struct GeneratorGroup {
+  int id{-1};
+  std::string name;
+  std::vector<int> gen_indices;   ///< 0-based indices into SCUCInput::generators
+
+  /// Per-period output limits [MW].  Empty → no constraint.
+  std::vector<double> pmin_t;     ///< [T] or [1] (scalar applied to all periods)
+  std::vector<double> pmax_t;     ///< [T] or [1]
+
+  /// Horizon energy limits [MWh].  0 → no constraint.
+  double emin{0.0};
+  double emax{0.0};
+};
+
+/// Monitored network section (aggregate transmission corridor) (§2.6.3.15).
+/// Section flow = weighted sum of constituent line flows.
+struct Section {
+  std::string name;
+  /// Pairs of (0-based branch index, weight).
+  /// Section PTDF_s = sum_l weight_l * PTDF_l
+  std::vector<std::pair<int, double>> line_weights;
+  double rating_fwd_mw{1e6};   ///< Forward (positive) flow limit [MW]
+  double rating_rev_mw{1e6};   ///< Reverse (negative) flow limit [MW]
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,29 +179,42 @@ struct SCUCConfig {
   double time_limit_sec{300.0};
   bool verbose{false};
 
-  // Reserve requirements (fraction of system load)
+  // ── Reserve requirements ──────────────────────────────────────────────────
+  /// Positive (upward) reserve requirement: fraction of system load (§2.6.3.2)
   double spinning_reserve_req{0.10};
   double regulation_up_req{0.05};
   double regulation_down_req{0.05};
+  /// Negative (downward) reserve requirement: fraction of system load (§2.6.3.3).
+  /// 0 = no negative reserve constraint.
+  double neg_reserve_req{0.0};
+  /// Primary frequency regulation reserve requirement [MW] (§2.6.3.4).
+  /// 0 = no PFR constraint.
+  double pfr_reserve_req_mw{0.0};
 
-  // Curtailment penalties ($/MWh)
-  double voll{10000.0};   ///< Value of lost load
-  double vocc{1000.0};    ///< Value of over-generation curtailment
-
-  /// Minimum renewable output enforced: P_w >= alpha * forecast
+  // ── Penalty and cost parameters ───────────────────────────────────────────
+  /// Value of lost load $/MWh (load-shedding penalty)
+  double voll{10000.0};
+  /// Value of over-generation curtailment $/MWh (system-level gen curtailment)
+  double vocc{1000.0};
+  /// Minimum renewable output enforced: P_w >= alpha * forecast (§2.6.3.20)
   double renewable_min_output_coeff{0.0};
+  /// M2: renewable curtailment penalty ($/MW per period) (§2.6.3 objective)
+  double M2_renewable_curtail_penalty{0.0};
+  /// Wheeling fee (inter-provincial transmission cost) $/MWh (P_gwf in tex).
+  /// Applied to all thermal generator output.  0 = disabled.
+  double wheeling_fee_per_mwh{0.0};
 
   /// Add LP-valid pre-formulation cutting planes to SCUC
   bool enable_market_cuts{true};
 
-  /// Big-M penalty for line/section flow slack variables (§2.6.3.14)
+  /// Big-M penalty for line/section flow slack variables (§2.6.3.14–2.6.3.15)
   double M1_line_slack_penalty{1.0e5};
 
-  // Post-SCUC stages
-  bool solve_sced{true};  ///< Re-solve as LP with fixed commitment
-  bool solve_lmp{true};   ///< Compute nodal LMP from SCED duals
+  // ── Post-SCUC stages ──────────────────────────────────────────────────────
+  bool solve_sced{true};  ///< Re-solve as LP with fixed commitment (§2.6.4)
+  bool solve_lmp{true};   ///< Compute nodal LMP from SCED duals (§2.6.5–2.6.6)
 
-  /// Delta-neighbourhood factor for LMP re-dispatch (tex §2.6.5.5)
+  /// Delta-neighbourhood factor for LMP re-dispatch (§2.6.5.5)
   double lmp_delta{0.10};
 };
 
@@ -160,6 +237,9 @@ struct SCUCInitialStatus {
   std::vector<double> commitment;   ///< [ng] 0 or 1 — on/off status before period 1
   std::vector<double> dispatch;     ///< [ng] MW dispatched in period 0
   std::vector<double> storage_soc;  ///< [nstorage] fraction of capacity
+  /// [ng] number of consecutive hours the unit has been in its current on/off state
+  /// (positive = on-time, negative = off-time).  Used for hot/warm/cold start detection.
+  std::vector<double> time_in_state;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,15 +249,17 @@ struct SCUCInitialStatus {
 struct SCUCInput {
   SCUCConfig config;
   int num_buses{1};  ///< Total number of AC buses (auto-inferred if 0)
-  std::vector<Generator>   generators;
-  std::vector<Branch>      branches;
-  std::vector<Load>        loads;
-  std::vector<WindUnit>    wind;
-  std::vector<SolarUnit>   solar;
-  std::vector<StorageUnit> storage;
-  std::vector<DCLine>      dc_lines;
-  SCUCProfiles             profiles;
-  SCUCInitialStatus        initial_status;
+  std::vector<Generator>       generators;
+  std::vector<Branch>          branches;
+  std::vector<Load>            loads;
+  std::vector<WindUnit>        wind;
+  std::vector<SolarUnit>       solar;
+  std::vector<StorageUnit>     storage;
+  std::vector<DCLine>          dc_lines;
+  std::vector<GeneratorGroup>  generator_groups;  ///< §2.6.3.9–2.6.3.10
+  std::vector<Section>         sections;          ///< §2.6.3.15 monitored sections
+  SCUCProfiles                 profiles;
+  SCUCInitialStatus            initial_status;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +295,9 @@ struct SCUCSolveResult {
   // Renewable generation: [nw or npv][T]
   Matrix2D wind_generation;
   Matrix2D solar_generation;
+  /// Renewable curtailment: wind_curtailment[w][t] = forecast[w][t] - wind_generation[w][t]
+  Matrix2D wind_curtailment;
+  Matrix2D solar_curtailment;
 
   // Storage: [nstorage][T]
   Matrix2D storage_charging;
@@ -221,6 +306,8 @@ struct SCUCSolveResult {
 
   // Transmission: [nl][T]
   Matrix2D line_flows;
+  /// Section flows [nsec][T]
+  Matrix2D section_flows;
 
   // System-level [T]
   std::vector<double> load_shedding;

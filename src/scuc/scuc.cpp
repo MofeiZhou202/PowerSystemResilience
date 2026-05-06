@@ -1,6 +1,6 @@
 /// Security-Constrained Unit Commitment — standalone MILP formulation.
 ///
-/// Ported from HybridACDCPowerSystemsPlanning/src/analysis/market_simulation.cpp.
+/// Implements Southern China Regional Electricity Market §2.6 (SCUC/SCED/LMP).
 /// All HybridACDCPF dependencies removed; uses mipsolvers::engine::SolverEngine.
 
 #include "mipsolvers/scuc/scuc.hpp"
@@ -37,8 +37,9 @@ inline double clampd(double v, double lo, double hi) {
 // Variable index — flat variable layout for SCUC MILP
 // ─────────────────────────────────────────────────────────────────────────────
 struct VarIndex {
-  int ng{0}, nb{0}, nl{0}, nw{0}, npv{0}, nstorage{0}, ndc{0};
+  int ng{0}, nb{0}, nl{0}, nw{0}, npv{0}, nstorage{0}, ndc{0}, nsec{0};
   int T{24}, T_commit{24}, n_segments{3}, intervals_per_hour{1};
+  bool use_sto_binaries{false};  ///< xi+/xi- binary vars for storage
 
   // Block start/end indices
   int SU_start{0}, SU_end{0};       // startup binary [ng × T_commit]
@@ -52,28 +53,31 @@ struct VarIndex {
   int RG_reg_down_start{0}, RG_reg_down_end{0};
 
   int PF_start{0}, PF_end{0};
-  int PW_start{0}, PW_end{0};
-  int PPV_start{0}, PPV_end{0};
-  int PSTO_IN_start{0}, PSTO_IN_end{0};
+  int PW_start{0}, PW_end{0};       // wind dispatch [nw × T]
+  int PPV_start{0}, PPV_end{0};     // solar dispatch [npv × T]
+  int WIND_CURT_start{0}, WIND_CURT_end{0};  // wind curtailment [nw × T]
+  int SOL_CURT_start{0},  SOL_CURT_end{0};   // solar curtailment [npv × T]
+  int PSTO_IN_start{0},  PSTO_IN_end{0};
   int PSTO_OUT_start{0}, PSTO_OUT_end{0};
   int SOC_start{0}, SOC_end{0};
+  // Binary storage mode indicators (only allocated when use_sto_binaries=true)
+  int XI_CH_start{0},  XI_CH_end{0};   // xi+ [nstorage × T]
+  int XI_DIS_start{0}, XI_DIS_end{0};  // xi- [nstorage × T]
   int PDC_start{0}, PDC_end{0};
 
   int n_areas{1};
-  int LOAD_SHED_start{0}, LOAD_SHED_end{0};
-  int GEN_CURT_start{0}, GEN_CURT_end{0};
+  int LOAD_SHED_start{0}, LOAD_SHED_end{0};  // [n_areas × T]
+  int GEN_CURT_start{0},  GEN_CURT_end{0};   // [n_areas × T]
 
   int SL_LINE_POS_start{0}, SL_LINE_POS_end{0};
   int SL_LINE_NEG_start{0}, SL_LINE_NEG_end{0};
-  int n_sections{0};
-  int SL_SEC_POS_start{0}, SL_SEC_POS_end{0};
-  int SL_SEC_NEG_start{0}, SL_SEC_NEG_end{0};
+  int SL_SEC_POS_start{0},  SL_SEC_POS_end{0};
+  int SL_SEC_NEG_start{0},  SL_SEC_NEG_end{0};
 
   int nx{0};
 
-  int idx(int base, int unit, int period, int n_units) const {
+  int idx(int base, int unit, int period, [[maybe_unused]] int n_units) const {
     return base + unit * T + period;
-    (void)n_units;  // kept for documentation
   }
   int idx_commit(int base, int unit, int period) const {
     return base + unit * T_commit + period;
@@ -90,10 +94,15 @@ VarIndex setup_var_index(const SCUCInput& inp) {
   v.npv = static_cast<int>(inp.solar.size());
   v.nstorage = static_cast<int>(inp.storage.size());
   v.ndc = static_cast<int>(inp.dc_lines.size());
+  v.nsec = static_cast<int>(inp.sections.size());
   v.T = cfg.num_periods;
   v.n_segments = std::max(1, cfg.n_segments);
   v.intervals_per_hour = std::max(1, static_cast<int>(std::llround(1.0 / std::max(1e-6, cfg.period_length_hr))));
   v.T_commit = std::max(1, v.T / v.intervals_per_hour);
+
+  // Use binary storage indicators if any unit requests them
+  for (const auto& s : inp.storage)
+    if (s.use_binary_indicators) { v.use_sto_binaries = true; break; }
 
   int off = 0;
   auto alloc = [&](int n, int& s, int& e) { s = off; e = off + n; off = e; };
@@ -112,22 +121,36 @@ VarIndex setup_var_index(const SCUCInput& inp) {
   alloc(v.ng * v.T, v.RG_reg_up_start, v.RG_reg_up_end);
   alloc(v.ng * v.T, v.RG_reg_down_start, v.RG_reg_down_end);
   alloc(v.nl * v.T, v.PF_start, v.PF_end);
-  alloc(v.nw * v.T, v.PW_start, v.PW_end);
+  alloc(v.nw  * v.T, v.PW_start,  v.PW_end);
   alloc(v.npv * v.T, v.PPV_start, v.PPV_end);
+  // Renewable curtailment variables (only allocated if M2 > 0)
+  if (cfg.M2_renewable_curtail_penalty > kEps) {
+    alloc(v.nw  * v.T, v.WIND_CURT_start, v.WIND_CURT_end);
+    alloc(v.npv * v.T, v.SOL_CURT_start,  v.SOL_CURT_end);
+  } else {
+    alloc(0, v.WIND_CURT_start, v.WIND_CURT_end);
+    alloc(0, v.SOL_CURT_start,  v.SOL_CURT_end);
+  }
   alloc(v.nstorage * v.T, v.PSTO_IN_start, v.PSTO_IN_end);
   alloc(v.nstorage * v.T, v.PSTO_OUT_start, v.PSTO_OUT_end);
   alloc(v.nstorage * v.T, v.SOC_start, v.SOC_end);
+  if (v.use_sto_binaries) {
+    alloc(v.nstorage * v.T, v.XI_CH_start,  v.XI_CH_end);
+    alloc(v.nstorage * v.T, v.XI_DIS_start, v.XI_DIS_end);
+  } else {
+    alloc(0, v.XI_CH_start,  v.XI_CH_end);
+    alloc(0, v.XI_DIS_start, v.XI_DIS_end);
+  }
   alloc(v.ndc * v.T, v.PDC_start, v.PDC_end);
 
   v.n_areas = 1;
   alloc(v.n_areas * v.T, v.LOAD_SHED_start, v.LOAD_SHED_end);
-  alloc(v.n_areas * v.T, v.GEN_CURT_start, v.GEN_CURT_end);
+  alloc(v.n_areas * v.T, v.GEN_CURT_start,  v.GEN_CURT_end);
 
-  alloc(v.nl * v.T, v.SL_LINE_POS_start, v.SL_LINE_POS_end);
-  alloc(v.nl * v.T, v.SL_LINE_NEG_start, v.SL_LINE_NEG_end);
-  v.n_sections = 0;
-  alloc(0, v.SL_SEC_POS_start, v.SL_SEC_POS_end);
-  alloc(0, v.SL_SEC_NEG_start, v.SL_SEC_NEG_end);
+  alloc(v.nl   * v.T, v.SL_LINE_POS_start, v.SL_LINE_POS_end);
+  alloc(v.nl   * v.T, v.SL_LINE_NEG_start, v.SL_LINE_NEG_end);
+  alloc(v.nsec * v.T, v.SL_SEC_POS_start,  v.SL_SEC_POS_end);
+  alloc(v.nsec * v.T, v.SL_SEC_NEG_start,  v.SL_SEC_NEG_end);
 
   v.nx = off;
   return v;
@@ -220,12 +243,15 @@ double solar_at(const SCUCInput& inp, int s, int t) {
 struct Formulation {
   engine::MIPModel mip;
   VarIndex v;
-  Eigen::MatrixXd PTDF;
+  Eigen::MatrixXd PTDF;       // [nl × nb]
+  Eigen::MatrixXd SEC_PTDF;   // [nsec × nb] = weighted combination of PTDF rows
   int n_ineq_rows{0};
   int n_eq_rows{0};
   int power_balance_eq_start{0};
   std::vector<int> line_fwd_row;  // size = nl*T, -1 = skipped
   std::vector<int> line_rev_row;
+  std::vector<int> sec_fwd_row;   // size = nsec*T
+  std::vector<int> sec_rev_row;
   int n_cuts{0};
 };
 
@@ -262,11 +288,29 @@ Formulation build_formulation(const SCUCInput& inp) {
     lp.vars[static_cast<size_t>(i)] = {engine::VarType::Binary, 0.0, 1.0, {}};
     mip.binary_idx.push_back(i);
   }
+  if (v.use_sto_binaries) {
+    for (int i = v.XI_CH_start; i < v.XI_CH_end; ++i) {
+      lp.vars[static_cast<size_t>(i)] = {engine::VarType::Binary, 0.0, 1.0, {}};
+      mip.binary_idx.push_back(i);
+    }
+    for (int i = v.XI_DIS_start; i < v.XI_DIS_end; ++i) {
+      lp.vars[static_cast<size_t>(i)] = {engine::VarType::Binary, 0.0, 1.0, {}};
+      mip.binary_idx.push_back(i);
+    }
+  }
 
   // ── Objective ────────────────────────────────────────────────────────────
+  // §2.6.3 Objective: generation cost + startup/no-load + wheeling fee
+  //                 + M1 slacks + M2 renewable curtailment + storage bids
+  const double M1 = cfg.M1_line_slack_penalty;
+  const double M2 = cfg.M2_renewable_curtail_penalty;
+  const double wf = cfg.wheeling_fee_per_mwh;  // P_gwf wheeling fee (§ obj)
+
   for (int g = 0; g < v.ng; ++g) {
     const auto& gen = inp.generators[static_cast<size_t>(g)];
+    const double wf_coeff = wf * dt;  // wheeling fee per MW per period
     for (int t = 0; t < T; ++t) {
+      // Piecewise-linear bid cost (§2.6.3.7)
       for (int k = 0; k < v.n_segments; ++k) {
         const int idx = v.SEG_start[static_cast<size_t>(k)] + g * T + t;
         double price = 0.0;
@@ -274,34 +318,47 @@ Formulation build_formulation(const SCUCInput& inp) {
           price = gen.bid_segments[static_cast<size_t>(k)].price;
         lp.c(idx) = price * dt;
       }
-      lp.c(v.RG_spin_start + g * T + t) = gen.spinning_reserve_price * dt;
-      lp.c(v.RG_reg_up_start + g * T + t) = gen.regulation_up_price * dt;
+      // Wheeling fee on total generator output (§2.6.3 obj P_gwf term)
+      if (wf > kEps)
+        lp.c(v.PG_start + g * T + t) += wf_coeff;
+
+      lp.c(v.RG_spin_start   + g * T + t) = gen.spinning_reserve_price * dt;
+      lp.c(v.RG_reg_up_start + g * T + t) = gen.regulation_up_price    * dt;
       lp.c(v.RG_reg_down_start + g * T + t) = gen.regulation_down_price * dt;
     }
+    // Startup cost (§2.6.3.13) and no-load cost (§2.6.3 min-output cost)
     for (int h = 0; h < v.T_commit; ++h) {
-      lp.c(v.SU_start + g * v.T_commit + h) += gen.startup_cost;
+      lp.c(v.SU_start + g * v.T_commit + h) += gen.startup_cost;  // hot cost used as default
       lp.c(v.IG_start + g * v.T_commit + h) += gen.no_load_cost * (1.0 / iph);
     }
   }
 
-  // LOAD_SHED / GEN_CURT penalty in objective
-  const double M1 = cfg.M1_line_slack_penalty;
+  // LOAD_SHED / GEN_CURT penalty
   for (int t = 0; t < T; ++t) {
-    lp.c(v.LOAD_SHED_start + t) = cfg.voll * dt;
+    lp.c(v.LOAD_SHED_start + t) = cfg.voll  * dt;
     lp.vars[static_cast<size_t>(v.LOAD_SHED_start + t)].ub = 1e6;
     lp.c(v.GEN_CURT_start + t) = cfg.vocc * dt;
     lp.vars[static_cast<size_t>(v.GEN_CURT_start + t)].ub = 1e6;
   }
   for (int i = v.SL_LINE_POS_start; i < v.SL_LINE_POS_end; ++i) { lp.c(i) = M1; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
   for (int i = v.SL_LINE_NEG_start; i < v.SL_LINE_NEG_end; ++i) { lp.c(i) = M1; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
+  for (int i = v.SL_SEC_POS_start;  i < v.SL_SEC_POS_end;  ++i) { lp.c(i) = M1; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
+  for (int i = v.SL_SEC_NEG_start;  i < v.SL_SEC_NEG_end;  ++i) { lp.c(i) = M1; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
 
-  // Storage bid price costs
+  // Renewable curtailment penalty (§2.6.3 obj M2 term)
+  if (M2 > kEps) {
+    for (int i = v.WIND_CURT_start; i < v.WIND_CURT_end; ++i) { lp.c(i) = M2 * dt; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
+    for (int i = v.SOL_CURT_start;  i < v.SOL_CURT_end;  ++i) { lp.c(i) = M2 * dt; lp.vars[static_cast<size_t>(i)].ub = 1e6; }
+  }
+
+  // Storage bid price costs (§2.6.3 obj last term)
   for (int s = 0; s < v.nstorage; ++s) {
     const auto& sto = inp.storage[static_cast<size_t>(s)];
-    if (std::abs(sto.charge_bid_price) < kEps && std::abs(sto.discharge_bid_price) < kEps) continue;
     for (int t = 0; t < T; ++t) {
-      lp.c(v.PSTO_IN_start + s * T + t) += sto.charge_bid_price * dt;
-      lp.c(v.PSTO_OUT_start + s * T + t) += sto.discharge_bid_price * dt;
+      if (std::abs(sto.discharge_bid_price) > kEps)
+        lp.c(v.PSTO_OUT_start + s * T + t) += sto.discharge_bid_price * dt;
+      if (std::abs(sto.charge_bid_price) > kEps)
+        lp.c(v.PSTO_IN_start  + s * T + t) += sto.charge_bid_price    * dt;
     }
   }
 
@@ -325,7 +382,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     b_vec.push_back(std::isfinite(rhs) ? rhs : 0.0);
   };
 
-  // ── PG = Pmin*IG + Σ segments ─────────────────────────────────────────────
+  // ── PG = Pmin*IG + Σ segments (§2.6.3.6) ─────────────────────────────────
   for (int g = 0; g < v.ng; ++g) {
     const double pmin = inp.generators[static_cast<size_t>(g)].pmin;
     const double pmax = inp.generators[static_cast<size_t>(g)].pmax;
@@ -343,12 +400,12 @@ Formulation build_formulation(const SCUCInput& inp) {
         add_eq(row, 0.0);
       }
 
-      // PG <= Pmax * IG
+      // PG <= Pmax * IG (§2.6.3.8)
       add_le({{pg, 1.0}, {ig, -pmax}}, 0.0);
-      // PG >= Pmin * IG  →  -PG + Pmin*IG <= 0
+      // PG >= Pmin * IG
       add_le({{pg, -1.0}, {ig, pmin}}, 0.0);
 
-      // Segment capacity upper bounds
+      // Segment capacity upper bounds (§2.6.3.7 segment bounds)
       for (int k = 0; k < v.n_segments; ++k) {
         const auto& seg_idx = v.SEG_start[static_cast<size_t>(k)] + g * T + t;
         const auto& gen = inp.generators[static_cast<size_t>(g)];
@@ -360,7 +417,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── Commitment transitions ────────────────────────────────────────────────
+  // ── Commitment transitions (§2.6.3.12) ───────────────────────────────────
   for (int g = 0; g < v.ng; ++g) {
     const auto& gen = inp.generators[static_cast<size_t>(g)];
     for (int h = 0; h < v.T_commit; ++h) {
@@ -379,6 +436,7 @@ Formulation build_formulation(const SCUCInput& inp) {
       }
       add_le({{su, 1.0}, {sd, 1.0}}, 1.0);
 
+      // Must-run (§2.6.3.5)
       if (gen.must_run) {
         lp.vars[static_cast<size_t>(ig)].lb = 1.0;
         lp.vars[static_cast<size_t>(ig)].ub = 1.0;
@@ -386,7 +444,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── Min up/down time ─────────────────────────────────────────────────────
+  // ── Min up/down time (§2.6.3.12) ─────────────────────────────────────────
   for (int g = 0; g < v.ng; ++g) {
     const auto& gen = inp.generators[static_cast<size_t>(g)];
     const int min_up = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
@@ -409,7 +467,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── Max startups/shutdowns ────────────────────────────────────────────────
+  // ── Max startups/shutdowns (§2.6.3.13) ───────────────────────────────────
   for (int g = 0; g < v.ng; ++g) {
     const auto& gen = inp.generators[static_cast<size_t>(g)];
     if (gen.max_startups > 0) {
@@ -426,7 +484,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── Ramping constraints ───────────────────────────────────────────────────
+  // ── Ramping constraints (§2.6.3.11) ──────────────────────────────────────
   for (int g = 0; g < v.ng; ++g) {
     const auto& gen = inp.generators[static_cast<size_t>(g)];
     const double pmax = gen.pmax;
@@ -453,32 +511,58 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── Renewable variable bounds ─────────────────────────────────────────────
+  // ── Renewable variable bounds (§2.6.3.20) ─────────────────────────────────
   const double alpha_n = cfg.renewable_min_output_coeff;
+  const bool has_ren_curt = (M2 > kEps);
   for (int t = 0; t < T; ++t) {
     for (int w = 0; w < v.nw; ++w) {
       const double fw = wind_at(inp, w, t);
-      const int idx = v.PW_start + w * T + t;
-      lp.vars[static_cast<size_t>(idx)].lb = std::max(0.0, alpha_n * fw);
-      lp.vars[static_cast<size_t>(idx)].ub = std::max(0.0, fw);
+      const int pw_idx = v.PW_start + w * T + t;
+      if (has_ren_curt) {
+        // P_w[t] + WIND_CURT[w][t] = forecast[w][t]; curt >= 0
+        const int wc_idx = v.WIND_CURT_start + w * T + t;
+        lp.vars[static_cast<size_t>(pw_idx)].lb = std::max(0.0, alpha_n * fw);
+        lp.vars[static_cast<size_t>(pw_idx)].ub = 1e20;  // freed; equality constraint handles it
+        lp.vars[static_cast<size_t>(wc_idx)].ub = std::max(0.0, fw);  // curt <= forecast
+        add_eq({{pw_idx, 1.0}, {wc_idx, 1.0}}, std::max(0.0, fw));
+      } else {
+        lp.vars[static_cast<size_t>(pw_idx)].lb = std::max(0.0, alpha_n * fw);
+        lp.vars[static_cast<size_t>(pw_idx)].ub = std::max(0.0, fw);
+      }
     }
     for (int s = 0; s < v.npv; ++s) {
       const double fs = solar_at(inp, s, t);
-      const int idx = v.PPV_start + s * T + t;
-      lp.vars[static_cast<size_t>(idx)].lb = std::max(0.0, alpha_n * fs);
-      lp.vars[static_cast<size_t>(idx)].ub = std::max(0.0, fs);
+      const int pv_idx = v.PPV_start + s * T + t;
+      if (has_ren_curt) {
+        const int sc_idx = v.SOL_CURT_start + s * T + t;
+        lp.vars[static_cast<size_t>(pv_idx)].lb = std::max(0.0, alpha_n * fs);
+        lp.vars[static_cast<size_t>(pv_idx)].ub = 1e20;
+        lp.vars[static_cast<size_t>(sc_idx)].ub = std::max(0.0, fs);
+        add_eq({{pv_idx, 1.0}, {sc_idx, 1.0}}, std::max(0.0, fs));
+      } else {
+        lp.vars[static_cast<size_t>(pv_idx)].lb = std::max(0.0, alpha_n * fs);
+        lp.vars[static_cast<size_t>(pv_idx)].ub = std::max(0.0, fs);
+      }
     }
   }
 
-  // ── Storage constraints ───────────────────────────────────────────────────
+  // ── Storage constraints (§2.6.3.16) ──────────────────────────────────────
   for (int s = 0; s < v.nstorage; ++s) {
     const auto& sto = inp.storage[static_cast<size_t>(s)];
-    const double p_ch = std::max(0.0, sto.pmax_charge);
-    const double p_dis = std::max(0.0, sto.pmax_discharge);
+    const double p_ch_max  = std::max(0.0, sto.pmax_charge);
+    const double p_dis_max = std::max(0.0, sto.pmax_discharge);
+    const double p_ch_min  = std::max(0.0, sto.pmin_charge);
+    const double p_dis_min = std::max(0.0, sto.pmin_discharge);
     const double e_cap = std::max(0.0, sto.energy_capacity_mwh);
     const double eta_rt = clampd(sto.efficiency, 0.1, 1.0);
-    const double eta = std::sqrt(eta_rt);
+    const double eta_sq = std::sqrt(eta_rt);
+    // Separate charge / discharge efficiencies (§2.6.3.16(2))
+    const double eta_ch  = (sto.eta_charge   > 0) ? clampd(sto.eta_charge,  0.01, 1.0) : eta_sq;
+    const double eta_dis = (sto.eta_discharge > 0) ? clampd(sto.eta_discharge, 0.01, 1.0) : eta_sq;
+    // SOC bounds (§2.6.3.16(2))
+    const double soc_lo = (sto.soc_min >= 0) ? clampd(sto.soc_min, 0.0, 1.0) * e_cap : 0.1 * e_cap;
 
+    // Initial SOC (§2.6.3.16(3))
     double soc0 = sto.soc_init * e_cap;
     if (s < static_cast<int>(inp.initial_status.storage_soc.size())) {
       const double iv = std::max(0.0, inp.initial_status.storage_soc[static_cast<size_t>(s)]);
@@ -486,47 +570,68 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
     soc0 = clampd(soc0, 0.0, e_cap);
 
+    // Required final SOC (§2.6.3.16(3))
+    const double soc_fin = (sto.soc_final >= 0) ? clampd(sto.soc_final, 0.0, 1.0) * e_cap : soc0;
+
+    const bool use_xi = v.use_sto_binaries && sto.use_binary_indicators;
+
     for (int t = 0; t < T; ++t) {
-      const int p_in = v.PSTO_IN_start + s * T + t;
+      const int p_in  = v.PSTO_IN_start  + s * T + t;
       const int p_out = v.PSTO_OUT_start + s * T + t;
-      const int soc = v.SOC_start + s * T + t;
+      const int soc   = v.SOC_start      + s * T + t;
 
-      lp.vars[static_cast<size_t>(p_in)] = {engine::VarType::Continuous, 0.0, p_ch, {}};
-      lp.vars[static_cast<size_t>(p_out)] = {engine::VarType::Continuous, 0.0, p_dis, {}};
-      lp.vars[static_cast<size_t>(soc)] = {engine::VarType::Continuous, 0.1 * e_cap, e_cap, {}};
+      lp.vars[static_cast<size_t>(soc)].lb = soc_lo;
+      lp.vars[static_cast<size_t>(soc)].ub = e_cap;
 
+      if (use_xi) {
+        // (a) Binary mode indicators: xi+, xi- (§2.6.3.16(1))
+        const int xi_ch  = v.XI_CH_start  + s * T + t;
+        const int xi_dis = v.XI_DIS_start + s * T + t;
+        // P_ch_min * xi+ <= P_ch <= P_ch_max * xi+
+        lp.vars[static_cast<size_t>(p_in)].ub  = p_ch_max;
+        lp.vars[static_cast<size_t>(p_out)].ub = p_dis_max;
+        if (p_ch_min > kEps)
+          add_le({{p_in,  -1.0}, {xi_ch,  p_ch_min}},  0.0);  // p_in >= p_ch_min * xi+
+        add_le({{p_in,   1.0}, {xi_ch,  -p_ch_max}},  0.0);   // p_in <= p_ch_max * xi+
+        if (p_dis_min > kEps)
+          add_le({{p_out, -1.0}, {xi_dis, p_dis_min}}, 0.0);  // p_out >= p_dis_min * xi-
+        add_le({{p_out,  1.0}, {xi_dis, -p_dis_max}}, 0.0);   // p_out <= p_dis_max * xi-
+        // Mutual exclusion: xi+ + xi- <= 1 (§2.6.3.16(1))
+        add_le({{xi_ch, 1.0}, {xi_dis, 1.0}}, 1.0);
+      } else {
+        // LP relaxation: simple bounds + soft anti-simultaneous
+        lp.vars[static_cast<size_t>(p_in)].ub  = p_ch_max;
+        lp.vars[static_cast<size_t>(p_out)].ub = p_dis_max;
+        const double p_max_sim = std::max(p_ch_max, p_dis_max);
+        add_le({{p_in, 1.0}, {p_out, 1.0}}, p_max_sim);
+      }
+
+      // (b) SOC dynamics: E_t = E_{t-1} + eta_ch * P_ch * dt - P_dis / eta_dis * dt (§2.6.3.16(2))
       if (t == 0) {
-        add_eq({{soc, 1.0}, {p_in, -eta * dt},
-                {p_out, dt / std::max(eta, 1e-6)}}, soc0);
+        add_eq({{soc, 1.0}, {p_in, -eta_ch * dt}, {p_out, dt / eta_dis}}, soc0);
       } else {
         const int soc_prev = v.SOC_start + s * T + (t - 1);
-        add_eq({{soc, 1.0}, {soc_prev, -1.0},
-                {p_in, -eta * dt}, {p_out, dt / std::max(eta, 1e-6)}}, 0.0);
+        add_eq({{soc, 1.0}, {soc_prev, -1.0}, {p_in, -eta_ch * dt}, {p_out, dt / eta_dis}}, 0.0);
       }
     }
-    // Final SOC >= initial SOC
-    if (T > 0) {
-      const int soc_T = v.SOC_start + s * T + (T - 1);
-      add_le({{soc_T, -1.0}}, -soc0);
-    }
-    // Simultaneous charge/discharge prevention
-    const double p_max_sim = std::max(p_ch, p_dis);
-    for (int t = 0; t < T; ++t)
-      add_le({{v.PSTO_IN_start + s * T + t, 1.0},
-              {v.PSTO_OUT_start + s * T + t, 1.0}}, p_max_sim);
 
-    // Cycle limit
+    // (c) Final SOC constraint: E_T >= soc_fin (§2.6.3.16(3))
+    if (T > 0) {
+      add_le({{v.SOC_start + s * T + (T - 1), -1.0}}, -soc_fin);
+    }
+
+    // (e) Cycle limit (§2.6.3.16(5))
     if (sto.cycle_limit > kEps && e_cap > kEps) {
       std::vector<std::pair<int,double>> row;
       for (int t = 0; t < T; ++t) {
-        row.emplace_back(v.PSTO_OUT_start + s * T + t, dt / std::max(eta, 1e-6));
-        row.emplace_back(v.PSTO_IN_start + s * T + t, eta * dt);
+        row.emplace_back(v.PSTO_OUT_start + s * T + t, dt / eta_dis);
+        row.emplace_back(v.PSTO_IN_start  + s * T + t, eta_ch * dt);
       }
       add_le(row, 2.0 * sto.cycle_limit * e_cap);
     }
   }
 
-  // ── DC line limits and ramping ────────────────────────────────────────────
+  // ── DC line limits and ramping (§2.6.3.17) ───────────────────────────────
   for (int dcl = 0; dcl < v.ndc; ++dcl) {
     const auto& dc = inp.dc_lines[static_cast<size_t>(dcl)];
     for (int t = 0; t < T; ++t) {
@@ -544,7 +649,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     }
   }
 
-  // ── System power balance ─────────────────────────────────────────────────
+  // ── System power balance (§2.6.3.1) ──────────────────────────────────────
   f.power_balance_eq_start = static_cast<int>(beq_vec.size());
   for (int t = 0; t < T; ++t) {
     std::vector<std::pair<int,double>> row;
@@ -555,11 +660,13 @@ Formulation build_formulation(const SCUCInput& inp) {
     for (int s = 0; s < v.npv; ++s)
       row.emplace_back(v.PPV_start + s * T + t, 1.0);
     for (int s = 0; s < v.nstorage; ++s) {
-      row.emplace_back(v.PSTO_OUT_start + s * T + t, 1.0);
-      row.emplace_back(v.PSTO_IN_start + s * T + t, -1.0);
+      row.emplace_back(v.PSTO_OUT_start + s * T + t,  1.0);
+      row.emplace_back(v.PSTO_IN_start  + s * T + t, -1.0);
     }
-    row.emplace_back(v.LOAD_SHED_start + t, 1.0);   // shed reduces effective demand
-    row.emplace_back(v.GEN_CURT_start + t, -1.0);   // curtailment absorbs surplus
+    for (int dcl = 0; dcl < v.ndc; ++dcl)
+      row.emplace_back(v.PDC_start + dcl * T + t, 1.0);
+    row.emplace_back(v.LOAD_SHED_start + t,  1.0);
+    row.emplace_back(v.GEN_CURT_start  + t, -1.0);
 
     double load_t = 0.0;
     for (int d = 0; d < static_cast<int>(inp.loads.size()); ++d)
@@ -567,7 +674,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     add_eq(row, load_t);
   }
 
-  // ── PTDF-based line flow limits ───────────────────────────────────────────
+  // ── PTDF-based line flow limits (§2.6.3.14) ───────────────────────────────
   const Eigen::MatrixXd PTDF = compute_ptdf(inp);
   f.PTDF = PTDF;
   f.line_fwd_row.assign(static_cast<size_t>(v.nl * T), -1);
@@ -601,20 +708,25 @@ Formulation build_formulation(const SCUCInput& inp) {
     if (b >= 0 && b < nb) sto_at[static_cast<size_t>(b)].push_back(s);
   }
 
+  // Line flow constraints
   if (PTDF.rows() == v.nl && PTDF.cols() == nb) {
     for (int l = 0; l < v.nl; ++l) {
       const auto& br = inp.branches[static_cast<size_t>(l)];
       const double lim = std::max(0.0, br.rating_mw);
-      if (!br.in_service || lim > 1e5) continue;  // unconstrained
+      if (!br.in_service || lim > 1e5) continue;
 
       for (int t = 0; t < T; ++t) {
+        // Add slack variables to the row vectors
+        const int sl_pos_idx = v.SL_LINE_POS_start + l * T + t;
+        const int sl_neg_idx = v.SL_LINE_NEG_start + l * T + t;
+
+        int fwd_r, rev_r;
+        // Build raw flow row, then append slacks
         std::vector<std::pair<int,double>> fwd, rev;
         double load_ptdf = 0.0;
-
         for (int b = 0; b < nb; ++b) {
           const double ptdf = PTDF(l, b);
           if (std::abs(ptdf) <= 1e-12) continue;
-
           for (int g : gens_at[static_cast<size_t>(b)]) {
             fwd.emplace_back(v.PG_start + g * T + t, ptdf);
             rev.emplace_back(v.PG_start + g * T + t, -ptdf);
@@ -628,15 +740,14 @@ Formulation build_formulation(const SCUCInput& inp) {
             rev.emplace_back(v.PPV_start + s * T + t, -ptdf);
           }
           for (int s : sto_at[static_cast<size_t>(b)]) {
-            fwd.emplace_back(v.PSTO_OUT_start + s * T + t, ptdf);
-            fwd.emplace_back(v.PSTO_IN_start + s * T + t, -ptdf);
+            fwd.emplace_back(v.PSTO_OUT_start + s * T + t,  ptdf);
+            fwd.emplace_back(v.PSTO_IN_start  + s * T + t, -ptdf);
             rev.emplace_back(v.PSTO_OUT_start + s * T + t, -ptdf);
-            rev.emplace_back(v.PSTO_IN_start + s * T + t, ptdf);
+            rev.emplace_back(v.PSTO_IN_start  + s * T + t,  ptdf);
           }
           for (int d : loads_at[static_cast<size_t>(b)])
             load_ptdf += ptdf * load_at(inp, d, t);
         }
-        // DC contribution
         for (int dcl = 0; dcl < v.ndc; ++dcl) {
           const auto& dc = inp.dc_lines[static_cast<size_t>(dcl)];
           if (dc.from < 0 || dc.from >= nb || dc.to < 0 || dc.to >= nb) continue;
@@ -646,30 +757,92 @@ Formulation build_formulation(const SCUCInput& inp) {
             rev.emplace_back(v.PDC_start + dcl * T + t, -coeff);
           }
         }
-
-        // Slack variables
-        fwd.emplace_back(v.SL_LINE_POS_start + l * T + t, -1.0);
-        rev.emplace_back(v.SL_LINE_NEG_start + l * T + t, -1.0);
-
-        f.line_fwd_row[static_cast<size_t>(l * T + t)] = static_cast<int>(b_vec.size());
+        fwd.emplace_back(sl_pos_idx, -1.0);
+        rev.emplace_back(sl_neg_idx, -1.0);
+        fwd_r = static_cast<int>(b_vec.size());
         add_le(fwd, lim + load_ptdf);
-        f.line_rev_row[static_cast<size_t>(l * T + t)] = static_cast<int>(b_vec.size());
+        rev_r = static_cast<int>(b_vec.size());
         add_le(rev, lim - load_ptdf);
+        f.line_fwd_row[static_cast<size_t>(l * T + t)] = fwd_r;
+        f.line_rev_row[static_cast<size_t>(l * T + t)] = rev_r;
       }
     }
   }
 
-  // ── Reserve requirements ──────────────────────────────────────────────────
+  // ── Section flow constraints (§2.6.3.15) ─────────────────────────────────
+  // Section PTDF = weighted sum of constituent line PTDFs
+  f.sec_fwd_row.assign(static_cast<size_t>(v.nsec * T), -1);
+  f.sec_rev_row.assign(static_cast<size_t>(v.nsec * T), -1);
+  if (v.nsec > 0 && PTDF.rows() == v.nl && PTDF.cols() == nb) {
+    f.SEC_PTDF = Eigen::MatrixXd::Zero(v.nsec, nb);
+    for (int s = 0; s < v.nsec; ++s) {
+      const auto& sec = inp.sections[static_cast<size_t>(s)];
+      for (const auto& [li, w] : sec.line_weights) {
+        if (li >= 0 && li < v.nl)
+          f.SEC_PTDF.row(s) += w * PTDF.row(li);
+      }
+    }
+    for (int s = 0; s < v.nsec; ++s) {
+      const auto& sec = inp.sections[static_cast<size_t>(s)];
+      const double fwd_lim = std::max(0.0, sec.rating_fwd_mw);
+      const double rev_lim = std::max(0.0, sec.rating_rev_mw);
+      for (int t = 0; t < T; ++t) {
+        const int sl_pos_idx = v.SL_SEC_POS_start + s * T + t;
+        const int sl_neg_idx = v.SL_SEC_NEG_start + s * T + t;
+
+        std::vector<std::pair<int,double>> fwd, rev;
+        double load_ptdf = 0.0;
+        for (int b = 0; b < nb; ++b) {
+          const double ptdf = f.SEC_PTDF(s, b);
+          if (std::abs(ptdf) <= 1e-12) continue;
+          for (int g : gens_at[static_cast<size_t>(b)]) {
+            fwd.emplace_back(v.PG_start + g * T + t, ptdf);
+            rev.emplace_back(v.PG_start + g * T + t, -ptdf);
+          }
+          for (int w : wind_at_b[static_cast<size_t>(b)]) {
+            fwd.emplace_back(v.PW_start + w * T + t, ptdf);
+            rev.emplace_back(v.PW_start + w * T + t, -ptdf);
+          }
+          for (int ss : solar_at_b[static_cast<size_t>(b)]) {
+            fwd.emplace_back(v.PPV_start + ss * T + t, ptdf);
+            rev.emplace_back(v.PPV_start + ss * T + t, -ptdf);
+          }
+          for (int ss : sto_at[static_cast<size_t>(b)]) {
+            fwd.emplace_back(v.PSTO_OUT_start + ss * T + t,  ptdf);
+            fwd.emplace_back(v.PSTO_IN_start  + ss * T + t, -ptdf);
+            rev.emplace_back(v.PSTO_OUT_start + ss * T + t, -ptdf);
+            rev.emplace_back(v.PSTO_IN_start  + ss * T + t,  ptdf);
+          }
+          for (int d : loads_at[static_cast<size_t>(b)])
+            load_ptdf += ptdf * load_at(inp, d, t);
+        }
+        fwd.emplace_back(sl_pos_idx, -1.0);
+        rev.emplace_back(sl_neg_idx, -1.0);
+        f.sec_fwd_row[static_cast<size_t>(s * T + t)] = static_cast<int>(b_vec.size());
+        add_le(fwd, fwd_lim + load_ptdf);
+        f.sec_rev_row[static_cast<size_t>(s * T + t)] = static_cast<int>(b_vec.size());
+        add_le(rev, rev_lim - load_ptdf);
+      }
+    }
+  }
+
+  // ── Reserve requirements (§2.6.3.2, §2.6.3.3, §2.6.3.4) ─────────────────
   for (int t = 0; t < T; ++t) {
     double load_t = 0.0;
     for (int d = 0; d < static_cast<int>(inp.loads.size()); ++d)
       load_t += load_at(inp, d, t);
 
-    const double spin_req = cfg.spinning_reserve_req * load_t;
-    const double rup_req  = cfg.regulation_up_req * load_t;
-    const double rdn_req  = cfg.regulation_down_req * load_t;
+    const double spin_req  = cfg.spinning_reserve_req  * load_t;
+    const double rup_req   = cfg.regulation_up_req     * load_t;
+    const double rdn_req   = cfg.regulation_down_req   * load_t;
+    const double neg_req   = cfg.neg_reserve_req       * load_t;  // §2.6.3.3
+    const double pfr_req   = cfg.pfr_reserve_req_mw;              // §2.6.3.4
 
     std::vector<std::pair<int,double>> spin_row, rup_row, rdn_row;
+    // Negative reserve: sum_g (P_{g,t} - Pmin * IG) <= load - neg_req
+    std::vector<std::pair<int,double>> neg_row;
+    // PFR: sum_g alpha_pf * Pmax * IG >= pfr_req
+    std::vector<std::pair<int,double>> pfr_row;
 
     for (int g = 0; g < v.ng; ++g) {
       const auto& gen = inp.generators[static_cast<size_t>(g)];
@@ -677,27 +850,107 @@ Formulation build_formulation(const SCUCInput& inp) {
       const int h = t / iph;
       const int pg = v.PG_start + g * T + t;
       const int ig = v.IG_start + g * v.T_commit + h;
-      const int rs = v.RG_spin_start + g * T + t;
-      const int ru = v.RG_reg_up_start + g * T + t;
+      const int rs = v.RG_spin_start    + g * T + t;
+      const int ru = v.RG_reg_up_start  + g * T + t;
       const int rd = v.RG_reg_down_start + g * T + t;
 
       spin_row.emplace_back(rs, -1.0);
-      rup_row.emplace_back(ru, -1.0);
-      rdn_row.emplace_back(rd, -1.0);
+      rup_row.emplace_back(ru,  -1.0);
+      rdn_row.emplace_back(rd,  -1.0);
 
+      // Reserve coupling: P + R_spin + R_up <= Pmax * IG
       add_le({{pg, 1.0}, {rs, 1.0}, {ru, 1.0}, {ig, -pmax}}, 0.0);
+      // Regulation down: R_down <= P - Pmin * IG
       add_le({{rd, 1.0}, {pg, -1.0}, {ig, pmin}}, 0.0);
+      // Spinning cap: R_spin <= (Pmax - Pmin) * IG
       add_le({{rs, 1.0}, {ig, -(pmax - pmin)}}, 0.0);
 
-      const double r10 = gen.ramp_up_mw_min * 10.0;
-      if (r10 > kEps) add_le({{ru, 1.0}, {ig, -r10}}, 0.0);
+      const double r10u = gen.ramp_up_mw_min * 10.0;
+      if (r10u > kEps) add_le({{ru, 1.0}, {ig, -r10u}}, 0.0);
       const double r10d = gen.ramp_dn_mw_min * 10.0;
       if (r10d > kEps) add_le({{rd, 1.0}, {ig, -r10d}}, 0.0);
+
+      // §2.6.3.3 Negative reserve: P - Pmin * IG (dispatchable downward room)
+      if (neg_req > 0.0) {
+        neg_row.emplace_back(pg,  1.0);
+        neg_row.emplace_back(ig, -pmin);
+      }
+
+      // §2.6.3.4 PFR: alpha_pf * Pmax * IG (simplified capacity bound)
+      if (pfr_req > 0.0 && gen.pfr_alpha > kEps) {
+        pfr_row.emplace_back(ig, -gen.pfr_alpha * pmax);
+      }
     }
 
+    // Positive reserve requirements
     if (spin_req > 0.0) add_le(spin_row, -spin_req);
     if (rup_req  > 0.0) add_le(rup_row,  -rup_req);
     if (rdn_req  > 0.0) add_le(rdn_row,  -rdn_req);
+
+    // §2.6.3.3 Negative reserve: sum(P - Pmin*IG) <= load - neg_req
+    // Equivalent to: sum_g(P_g - Pmin_g * IG_g) <= load_t - neg_req
+    if (neg_req > 0.0 && !neg_row.empty())
+      add_le(neg_row, load_t - neg_req);
+
+    // §2.6.3.4 PFR requirement: sum_g alpha^pf_g * Pmax_g * IG_g >= pfr_req
+    // Written as: -sum ... <= -pfr_req
+    if (pfr_req > 0.0 && !pfr_row.empty())
+      add_le(pfr_row, -pfr_req);
+  }
+
+  // ── Generator group output limits (§2.6.3.9) ─────────────────────────────
+  for (const auto& grp : inp.generator_groups) {
+    if (grp.gen_indices.empty()) continue;
+    for (int t = 0; t < T; ++t) {
+      // Group output sum = sum of PG for members
+      std::vector<std::pair<int,double>> row;
+      for (int gi : grp.gen_indices) {
+        if (gi >= 0 && gi < v.ng)
+          row.emplace_back(v.PG_start + gi * T + t, 1.0);
+      }
+      if (row.empty()) continue;
+
+      // Lower bound
+      double gp_min = 0.0;
+      if (!grp.pmin_t.empty()) {
+        const int tidx = (grp.pmin_t.size() == 1) ? 0 : std::min(t, static_cast<int>(grp.pmin_t.size()) - 1);
+        gp_min = grp.pmin_t[static_cast<size_t>(tidx)];
+      }
+      // Upper bound
+      double gp_max = 1e18;
+      if (!grp.pmax_t.empty()) {
+        const int tidx = (grp.pmax_t.size() == 1) ? 0 : std::min(t, static_cast<int>(grp.pmax_t.size()) - 1);
+        gp_max = grp.pmax_t[static_cast<size_t>(tidx)];
+      }
+      if (gp_min > 0.0) {
+        std::vector<std::pair<int,double>> lb_row;
+        for (const auto& [c, cv] : row) lb_row.emplace_back(c, -cv);
+        add_le(lb_row, -gp_min);
+      }
+      if (gp_max < 1e17)
+        add_le(row, gp_max);
+    }
+  }
+
+  // ── Generator group energy limits (§2.6.3.10) ────────────────────────────
+  for (const auto& grp : inp.generator_groups) {
+    if (grp.gen_indices.empty()) continue;
+    if (grp.emax < kEps && grp.emin < kEps) continue;
+
+    std::vector<std::pair<int,double>> row;
+    for (int gi : grp.gen_indices) {
+      if (gi < 0 || gi >= v.ng) continue;
+      for (int t = 0; t < T; ++t)
+        row.emplace_back(v.PG_start + gi * T + t, dt);
+    }
+    if (row.empty()) continue;
+    if (grp.emax > kEps)
+      add_le(row, grp.emax);
+    if (grp.emin > kEps) {
+      std::vector<std::pair<int,double>> lb_row;
+      for (const auto& [c, cv] : row) lb_row.emplace_back(c, -cv);
+      add_le(lb_row, -grp.emin);
+    }
   }
 
   // ── LP-valid pre-formulation market cutting planes ─────────────────────────
@@ -735,19 +988,29 @@ Formulation build_formulation(const SCUCInput& inp) {
       for (int t = 0; t < T; ++t) {
         const int h = t / iph;
         const int ig = v.IG_start + g * v.T_commit + h;
+        double cumQ = 0.0;
         for (int m = 0; m < v.n_segments; ++m) {
           double q = 0.0;
           if (m < static_cast<int>(gen.bid_segments.size()))
             q = gen.bid_segments[static_cast<size_t>(m)].quantity;
           if (q < kEps) continue;
+          cumQ += q;
           const int seg = v.SEG_start[static_cast<size_t>(m)] + g * T + t;
-          add_le({{seg, 1.0}, {ig, -q}}, 0.0);
+          // Cumulative segment cut (Family A from tex §2.6.6)
+          std::vector<std::pair<int,double>> row;
+          for (int mm = 0; mm <= m; ++mm) {
+            if (mm < static_cast<int>(gen.bid_segments.size()) && gen.bid_segments[static_cast<size_t>(mm)].quantity > kEps)
+              row.emplace_back(v.SEG_start[static_cast<size_t>(mm)] + g * T + t, 1.0);
+          }
+          row.emplace_back(ig, -cumQ);
+          add_le(row, 0.0);
           ++n_cuts;
+          (void)seg;
         }
       }
     }
 
-    // Family G: extended startup clique
+    // Family G: extended startup clique (TU + TD window)
     for (int g = 0; g < v.ng; ++g) {
       const auto& gen = inp.generators[static_cast<size_t>(g)];
       const int TU = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
@@ -763,18 +1026,25 @@ Formulation build_formulation(const SCUCInput& inp) {
       }
     }
 
-    // Family 11: cyclic SOC bound for storage
+    // Family 11: cyclic SOC bound for storage (corrected for separate eta)
     for (int s = 0; s < v.nstorage; ++s) {
       const auto& sto = inp.storage[static_cast<size_t>(s)];
       const double e_cap = std::max(0.0, sto.energy_capacity_mwh);
       if (e_cap < kEps) continue;
-      const double eta = std::sqrt(clampd(sto.efficiency, 0.1, 1.0));
-      const double soc0 = clampd(sto.soc_init, 0.0, 1.0) * e_cap;
-      const double rhs = eta * sto.pmax_charge * static_cast<double>(T) * dt + soc0;
+      const double eta_rt = clampd(sto.efficiency, 0.1, 1.0);
+      const double eta_sq = std::sqrt(eta_rt);
+      const double eta_ch  = (sto.eta_charge   > 0) ? clampd(sto.eta_charge,  0.01, 1.0) : eta_sq;
+      const double soc0_frac = clampd(sto.soc_init, 0.0, 1.0);
+      const double soc_fin = (sto.soc_final >= 0) ? clampd(sto.soc_final, 0.0, 1.0) * e_cap
+                                                   : soc0_frac * e_cap;
+      const double rhs = eta_ch * sto.pmax_charge * static_cast<double>(T) * dt
+                       + soc0_frac * e_cap - soc_fin;
       if (rhs < kEps) continue;
       std::vector<std::pair<int,double>> row;
-      for (int t = 0; t < T; ++t)
-        row.emplace_back(v.PSTO_OUT_start + s * T + t, dt / std::max(eta, 1e-6));
+      for (int t = 0; t < T; ++t) {
+        const double eta_dis = (sto.eta_discharge > 0) ? clampd(sto.eta_discharge, 0.01, 1.0) : eta_sq;
+        row.emplace_back(v.PSTO_OUT_start + s * T + t, dt / eta_dis);
+      }
       add_le(row, rhs);
       ++n_cuts;
     }
@@ -807,7 +1077,7 @@ Formulation build_formulation(const SCUCInput& inp) {
     uc.ramp.resize(static_cast<size_t>(v.ng));
     for (int g = 0; g < v.ng; ++g) {
       const auto& gen = inp.generators[static_cast<size_t>(g)];
-      uc.min_up[static_cast<size_t>(g)] = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
+      uc.min_up[static_cast<size_t>(g)]   = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
       uc.min_down[static_cast<size_t>(g)] = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
       uc.ig0[static_cast<size_t>(g)] =
           (g < static_cast<int>(inp.initial_status.commitment.size()) &&
@@ -861,6 +1131,9 @@ SCUCSolveResult extract_result(
   out.storage_discharging = zero2d(v.nstorage, T);
   out.storage_soc         = zero2d(v.nstorage, T);
   out.line_flows = zero2d(v.nl, T);
+  out.wind_curtailment  = zero2d(v.nw, T);
+  out.solar_curtailment = zero2d(v.npv, T);
+  out.section_flows     = zero2d(v.nsec, T);
   out.load_shedding   = std::vector<double>(static_cast<size_t>(T), 0.0);
   out.gen_curtailment = std::vector<double>(static_cast<size_t>(T), 0.0);
 
@@ -930,7 +1203,38 @@ SCUCSolveResult extract_result(
       Eigen::VectorXd flows = fm.PTDF * inj;
       for (int l = 0; l < v.nl; ++l)
         out.line_flows[static_cast<size_t>(l)][static_cast<size_t>(t)] = flows(l);
+      // Section flows via section PTDF
+      if (fm.SEC_PTDF.rows() == v.nsec && fm.SEC_PTDF.cols() == v.nb) {
+        Eigen::VectorXd sflows = fm.SEC_PTDF * inj;
+        for (int s = 0; s < v.nsec; ++s)
+          out.section_flows[static_cast<size_t>(s)][static_cast<size_t>(t)] = sflows(s);
+      }
     }
+  }
+
+  // Wind / solar curtailment
+  if (v.WIND_CURT_start < v.WIND_CURT_end) {
+    for (int w = 0; w < v.nw; ++w)
+      for (int t = 0; t < T; ++t)
+        out.wind_curtailment[static_cast<size_t>(w)][static_cast<size_t>(t)] =
+            x(v.WIND_CURT_start + w * T + t);
+  } else {
+    // Curtailment = forecast - actual when not explicitly tracked
+    for (int w = 0; w < v.nw; ++w)
+      for (int t = 0; t < T; ++t)
+        out.wind_curtailment[static_cast<size_t>(w)][static_cast<size_t>(t)] =
+            std::max(0.0, wind_at(inp, w, t) - out.wind_generation[static_cast<size_t>(w)][static_cast<size_t>(t)]);
+  }
+  if (v.SOL_CURT_start < v.SOL_CURT_end) {
+    for (int s = 0; s < v.npv; ++s)
+      for (int t = 0; t < T; ++t)
+        out.solar_curtailment[static_cast<size_t>(s)][static_cast<size_t>(t)] =
+            x(v.SOL_CURT_start + s * T + t);
+  } else {
+    for (int s = 0; s < v.npv; ++s)
+      for (int t = 0; t < T; ++t)
+        out.solar_curtailment[static_cast<size_t>(s)][static_cast<size_t>(t)] =
+            std::max(0.0, solar_at(inp, s, t) - out.solar_generation[static_cast<size_t>(s)][static_cast<size_t>(t)]);
   }
 
   for (int t = 0; t < T; ++t) {
@@ -1288,10 +1592,14 @@ SCUCInput scuc_from_json(const std::string& json_str) {
     gs("vocc",                      inp.config.vocc);
     gs("renewable_min_output_coeff",inp.config.renewable_min_output_coeff);
     gs("enable_market_cuts",        inp.config.enable_market_cuts);
-    gs("M1_line_slack_penalty",     inp.config.M1_line_slack_penalty);
-    gs("solve_sced",                inp.config.solve_sced);
-    gs("solve_lmp",                 inp.config.solve_lmp);
-    gs("lmp_delta",                 inp.config.lmp_delta);
+    gs("M1_line_slack_penalty",            inp.config.M1_line_slack_penalty);
+    gs("M2_renewable_curtail_penalty",      inp.config.M2_renewable_curtail_penalty);
+    gs("neg_reserve_req",                   inp.config.neg_reserve_req);
+    gs("pfr_reserve_req_mw",               inp.config.pfr_reserve_req_mw);
+    gs("wheeling_fee_per_mwh",             inp.config.wheeling_fee_per_mwh);
+    gs("solve_sced",                       inp.config.solve_sced);
+    gs("solve_lmp",                        inp.config.solve_lmp);
+    gs("lmp_delta",                        inp.config.lmp_delta);
   }
 
   // ── Generators ───────────────────────────────────────────────────────────
@@ -1315,6 +1623,14 @@ SCUCInput scuc_from_json(const std::string& json_str) {
       gs2("spinning_reserve_price",g.spinning_reserve_price);
       gs2("regulation_up_price",   g.regulation_up_price);
       gs2("regulation_down_price", g.regulation_down_price);
+      gs2("startup_cost_warm",      g.startup_cost_warm);
+      gs2("startup_cost_cold",      g.startup_cost_cold);
+      gs2("hot_start_threshold_hr", g.hot_start_threshold_hr);
+      gs2("warm_start_threshold_hr",g.warm_start_threshold_hr);
+      gs2("ud_periods",             g.ud_periods);
+      gs2("dd_periods",             g.dd_periods);
+      gs2("pfr_alpha",              g.pfr_alpha);
+      gs2("group_id",              g.group_id);
       if (jg.contains("bid_segments")) {
         for (const auto& seg : jg["bid_segments"]) {
           BidSegment s;
@@ -1382,6 +1698,13 @@ SCUCInput scuc_from_json(const std::string& json_str) {
       gss("charge_bid_price",      s.charge_bid_price);
       gss("discharge_bid_price",   s.discharge_bid_price);
       gss("cycle_limit",           s.cycle_limit);
+      gss("eta_charge",             s.eta_charge);
+      gss("eta_discharge",          s.eta_discharge);
+      gss("soc_min",                s.soc_min);
+      gss("soc_final",              s.soc_final);
+      gss("pmin_charge",            s.pmin_charge);
+      gss("pmin_discharge",         s.pmin_discharge);
+      gss("use_binary_indicators",  s.use_binary_indicators);
       inp.storage.push_back(s);
     }
   }
@@ -1415,11 +1738,49 @@ SCUCInput scuc_from_json(const std::string& json_str) {
   }
 
   // ── Initial status ────────────────────────────────────────────────────────
+  // ── Generator groups ─────────────────────────────────────────────────────
+  if (j.contains("generator_groups")) {
+    for (const auto& jgrp : j["generator_groups"]) {
+      GeneratorGroup grp;
+      if (jgrp.contains("id"))   grp.id   = jgrp["id"].get<int>();
+      if (jgrp.contains("name")) grp.name = jgrp["name"].get<std::string>();
+      if (jgrp.contains("gen_indices")) grp.gen_indices = jgrp["gen_indices"].get<std::vector<int>>();
+      if (jgrp.contains("pmin_t")) grp.pmin_t = jgrp["pmin_t"].get<std::vector<double>>();
+      if (jgrp.contains("pmax_t")) grp.pmax_t = jgrp["pmax_t"].get<std::vector<double>>();
+      if (jgrp.contains("emin"))  grp.emin = jgrp["emin"].get<double>();
+      if (jgrp.contains("emax"))  grp.emax = jgrp["emax"].get<double>();
+      inp.generator_groups.push_back(std::move(grp));
+    }
+  }
+
+  // ── Sections ─────────────────────────────────────────────────────────────
+  if (j.contains("sections")) {
+    for (const auto& jsec : j["sections"]) {
+      Section sec;
+      if (jsec.contains("name")) sec.name = jsec["name"].get<std::string>();
+      if (jsec.contains("rating_fwd_mw")) sec.rating_fwd_mw = jsec["rating_fwd_mw"].get<double>();
+      if (jsec.contains("rating_rev_mw")) sec.rating_rev_mw = jsec["rating_rev_mw"].get<double>();
+      if (jsec.contains("line_weights")) {
+        for (const auto& lw : jsec["line_weights"]) {
+          if (lw.is_array() && lw.size() >= 2)
+            sec.line_weights.emplace_back(lw[0].get<int>(), lw[1].get<double>());
+          else if (lw.is_object()) {
+            int li = lw.contains("line") ? lw["line"].get<int>() : -1;
+            double wt = lw.contains("weight") ? lw["weight"].get<double>() : 1.0;
+            sec.line_weights.emplace_back(li, wt);
+          }
+        }
+      }
+      inp.sections.push_back(std::move(sec));
+    }
+  }
+
   if (j.contains("initial_status")) {
     const auto& ji = j["initial_status"];
-    if (ji.contains("commitment"))  inp.initial_status.commitment  = ji["commitment"].get<std::vector<double>>();
-    if (ji.contains("dispatch"))    inp.initial_status.dispatch    = ji["dispatch"].get<std::vector<double>>();
-    if (ji.contains("storage_soc")) inp.initial_status.storage_soc = ji["storage_soc"].get<std::vector<double>>();
+    if (ji.contains("commitment"))   inp.initial_status.commitment  = ji["commitment"].get<std::vector<double>>();
+    if (ji.contains("dispatch"))     inp.initial_status.dispatch    = ji["dispatch"].get<std::vector<double>>();
+    if (ji.contains("storage_soc"))  inp.initial_status.storage_soc = ji["storage_soc"].get<std::vector<double>>();
+    if (ji.contains("time_in_state")) inp.initial_status.time_in_state = ji["time_in_state"].get<std::vector<double>>();
   }
 
   // ── Infer num_buses if not provided ──────────────────────────────────────
