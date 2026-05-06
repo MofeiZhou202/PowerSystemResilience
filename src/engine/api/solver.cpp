@@ -1,6 +1,9 @@
 #include "mipsolvers/engine/api/solver.hpp"
 
 #include <memory>
+#include <sstream>
+#include <stdexcept>
+#include <type_traits>
 
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
@@ -8,6 +11,7 @@
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/solver/native/native_adapters.hpp"
 #include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
 
 namespace mipsolvers::engine {
 namespace {
@@ -62,6 +66,53 @@ void normalize_qp_matrices(QPModel& qp) {
   }
   if (qp.Q.rows() == 0 && qp.Q.cols() != n) {
     qp.Q.resize(n, n);
+  }
+}
+
+api::ProblemVariant normalize_problem(api::ProblemVariant problem) {
+  std::visit(
+      [](auto& p) {
+        using T = std::decay_t<decltype(p)>;
+        if constexpr (std::is_same_v<T, LPModel>) {
+          normalize_lp_matrices(p);
+        } else if constexpr (std::is_same_v<T, QPModel>) {
+          normalize_qp_matrices(p);
+        } else if constexpr (std::is_same_v<T, MIPModel>) {
+          normalize_lp_matrices(p.linear_part);
+        }
+      },
+      problem);
+  return problem;
+}
+
+std::string join_validation_errors(const ValidationReport& report) {
+  if (report.errors.empty()) {
+    return "unknown validation error";
+  }
+
+  std::ostringstream oss;
+  for (std::size_t i = 0; i < report.errors.size(); ++i) {
+    if (i > 0) {
+      oss << "; ";
+    }
+    oss << report.errors[i];
+  }
+  return oss.str();
+}
+
+ValidationReport validate_problem(const api::ProblemVariant& problem) {
+  return std::visit(
+      [](const auto& p) {
+        return validate(p);
+      },
+      problem);
+}
+
+void throw_if_invalid(const api::ProblemVariant& problem) {
+  const ValidationReport report = validate_problem(problem);
+  if (!report.valid) {
+    throw std::invalid_argument(api::problem_class_name(api::problem_class(problem)) +
+                                " validation failed: " + join_validation_errors(report));
   }
 }
 
@@ -132,9 +183,11 @@ std::vector<std::string> SolverEngine::list_solvers(ProblemClass cls) const {
 
 api::Result SolverEngine::solve(const api::ProblemVariant& problem,
                                 const SolveOptions& options) const {
+  const api::ProblemVariant normalized = normalize_problem(problem);
+  throw_if_invalid(normalized);
   const SolveResult internal = dispatcher_.solve(
       registry_,
-      problem,
+      normalized,
       options.preferred_solver,
       options.allow_fallback,
       options.strategy_policy,

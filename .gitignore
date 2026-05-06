@@ -110,3 +110,6 @@ reports/study_contracts/results/*
 .venv38/
 .venv/
 .github/
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml

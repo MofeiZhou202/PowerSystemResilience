@@ -84,6 +84,29 @@ TEST_CASE("validate LPModel: b size mismatch yields error", "[validation][lp]") 
   CHECK_FALSE(rep.valid);
 }
 
+// ─── QPModel validation ───────────────────────────────────────────────────────
+TEST_CASE("validate QPModel: empty Hessian is accepted as zero", "[validation][qp]") {
+  QPModel qp;
+  qp.c.resize(1);
+  qp.c << 1.0;
+  qp.vars.push_back({VarType::Continuous, 0.0, 10.0, "x"});
+
+  auto rep = validate(qp);
+  CHECK(rep.valid);
+}
+
+TEST_CASE("validate QPModel: Hessian shape mismatch yields error", "[validation][qp]") {
+  QPModel qp;
+  qp.c.resize(2);
+  qp.c << 1.0, 2.0;
+  qp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  qp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  qp.Q.resize(3, 3);
+
+  auto rep = validate(qp);
+  CHECK_FALSE(rep.valid);
+}
+
 // ─── MIPModel validation ──────────────────────────────────────────────────────
 TEST_CASE("validate MIPModel: single binary variable passes", "[validation][milp]") {
   MIPModel mip;

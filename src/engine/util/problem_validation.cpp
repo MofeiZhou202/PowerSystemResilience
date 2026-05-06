@@ -162,6 +162,42 @@ ValidationReport validate(const LPModel& model) {
   return out;
 }
 
+ValidationReport validate(const QPModel& model) {
+  ValidationReport out;
+  const int n = static_cast<int>(model.c.size());
+  if (n <= 0) {
+    add_error(out, "Objective vector c must be non-empty");
+    return out;
+  }
+
+  const bool has_empty_hessian = model.Q.rows() == 0 && model.Q.cols() == 0;
+  if (!has_empty_hessian && (model.Q.rows() != n || model.Q.cols() != n)) {
+    add_error(out, "Q must be empty or have shape c.size by c.size");
+  }
+
+  if (model.A.rows() > 0 && model.A.cols() != n) {
+    add_error(out, "A.cols must equal c.size");
+  }
+  if (model.A.rows() != model.b.size()) {
+    add_error(out, "A.rows must equal b.size");
+  }
+
+  if (model.Aeq.rows() > 0 && model.Aeq.cols() != n) {
+    add_error(out, "Aeq.cols must equal c.size");
+  }
+  if (model.Aeq.rows() != model.beq.size()) {
+    add_error(out, "Aeq.rows must equal beq.size");
+  }
+
+  if (static_cast<int>(model.vars.size()) != n) {
+    add_error(out, "vars size must equal c.size");
+  } else {
+    validate_variable_meta(model.vars, out);
+  }
+
+  return out;
+}
+
 ValidationReport validate(const NLPModel& model) {
   ValidationReport out;
   const int n = static_cast<int>(model.vars.size());

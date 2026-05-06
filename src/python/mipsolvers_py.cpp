@@ -11,9 +11,12 @@
 #include <pybind11/stl.h>
 #include <pybind11/functional.h>
 
+#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 // SCUC public API
 #include "mipsolvers/scuc/scuc.hpp"
@@ -31,6 +34,51 @@ using namespace pybind11::literals;
 // Helpers: numpy <-> Eigen
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
+
+[[noreturn]] void rethrow_scuc_exception(const std::string& context,
+                                         const std::exception& ex) {
+  throw std::runtime_error(context + ": " + ex.what());
+}
+
+mipsolvers::scuc::SCUCInput scuc_from_json_checked(const std::string& json_str) {
+  try {
+    return mipsolvers::scuc::scuc_from_json(json_str);
+  } catch (const nlohmann::json::parse_error& ex) {
+    rethrow_scuc_exception("SCUC JSON parse error", ex);
+  } catch (const nlohmann::json::type_error& ex) {
+    rethrow_scuc_exception("SCUC JSON type error", ex);
+  } catch (const nlohmann::json::out_of_range& ex) {
+    rethrow_scuc_exception("SCUC JSON field error", ex);
+  } catch (const nlohmann::json::exception& ex) {
+    rethrow_scuc_exception("SCUC JSON error", ex);
+  }
+}
+
+std::string scuc_output_to_json_checked(const mipsolvers::scuc::SCUCOutput& out,
+                                        const mipsolvers::scuc::SCUCInput& inp,
+                                        int indent) {
+  try {
+    return mipsolvers::scuc::scuc_output_to_json(out, inp, indent);
+  } catch (const nlohmann::json::exception& ex) {
+    rethrow_scuc_exception("SCUC JSON serialization error", ex);
+  }
+}
+
+void require_vector_size(const Eigen::VectorXd& vec,
+                         int expected,
+                         const std::string& name) {
+  if (vec.size() != expected) {
+    throw std::invalid_argument(name + " length must equal c.size");
+  }
+}
+
+void require_matrix_cols(const Eigen::SparseMatrix<double>& matrix,
+                         int expected,
+                         const std::string& name) {
+  if (matrix.cols() != expected) {
+    throw std::invalid_argument(name + ".shape[1] must equal c.size");
+  }
+}
 
 /// 1-D numpy float64 array -> Eigen::VectorXd
 Eigen::VectorXd vec_from_numpy(const py::array_t<double>& arr) {
@@ -123,22 +171,43 @@ mipsolvers::engine::LPModel build_lp_model(
   lp.c = vec_from_numpy(c);
   const int n = static_cast<int>(lp.c.size());
 
+  if (n <= 0) {
+    throw std::invalid_argument("c must be a non-empty 1-D float64 array");
+  }
+
+  if (A.is_none() != b.is_none()) {
+    throw std::invalid_argument("A and b must be provided together");
+  }
+  if (Aeq.is_none() != beq.is_none()) {
+    throw std::invalid_argument("Aeq and beq must be provided together");
+  }
+
   if (!A.is_none() && !b.is_none()) {
     lp.A   = sparse_from_dense(A.cast<py::array_t<double>>());
     lp.b   = vec_from_numpy(b.cast<py::array_t<double>>());
+    require_matrix_cols(lp.A, n, "A");
+    if (lp.b.size() != lp.A.rows()) {
+      throw std::invalid_argument("b length must equal A.shape[0]");
+    }
   }
   if (!Aeq.is_none() && !beq.is_none()) {
     lp.Aeq  = sparse_from_dense(Aeq.cast<py::array_t<double>>());
     lp.beq  = vec_from_numpy(beq.cast<py::array_t<double>>());
+    require_matrix_cols(lp.Aeq, n, "Aeq");
+    if (lp.beq.size() != lp.Aeq.rows()) {
+      throw std::invalid_argument("beq length must equal Aeq.shape[0]");
+    }
   }
 
   lp.vars.resize(static_cast<size_t>(n));
   if (!lb.is_none()) {
     auto lbv = vec_from_numpy(lb.cast<py::array_t<double>>());
+    require_vector_size(lbv, n, "lb");
     for (int i = 0; i < n; ++i) lp.vars[static_cast<size_t>(i)].lb = lbv[i];
   }
   if (!ub.is_none()) {
     auto ubv = vec_from_numpy(ub.cast<py::array_t<double>>());
+    require_vector_size(ubv, n, "ub");
     for (int i = 0; i < n; ++i) lp.vars[static_cast<size_t>(i)].ub = ubv[i];
   }
   return lp;
@@ -161,8 +230,14 @@ mipsolvers::engine::MIPModel build_mip_model(
   mip.linear_part = build_lp_model(c, A, b, Aeq, beq, lb, ub, maximize);
   const int n = static_cast<int>(mip.linear_part.c.size());
 
+  if (!vartypes.empty() && static_cast<int>(vartypes.size()) != n) {
+    throw std::invalid_argument("vartypes length must equal c.size");
+  }
+
   for (int i = 0; i < n; ++i) {
-    const std::string vt = py::str(vartypes[i]).cast<std::string>();
+    const std::string vt = vartypes.empty()
+                               ? "C"
+                               : py::str(vartypes[i]).cast<std::string>();
     const char ch = vt.empty() ? 'C' : static_cast<char>(std::toupper(static_cast<unsigned char>(vt[0])));
     auto& meta = mip.linear_part.vars[static_cast<size_t>(i)];
     if (ch == 'B') {
@@ -544,7 +619,7 @@ lmp  : SCUCLMPResult     Nodal prices (only if config.solve_lmp=True)
     .def_readonly("lmp",  &mipsolvers::scuc::SCUCOutput::lmp);
 
   // ── Free functions ─────────────────────────────────────────────────────────
-  m_scuc.def("from_json", &mipsolvers::scuc::scuc_from_json,
+  m_scuc.def("from_json", &scuc_from_json_checked,
     py::arg("json_str"),
     R"doc(
 Deserialize an SCUCInput from a JSON string.
@@ -564,7 +639,13 @@ RuntimeError  If the JSON is malformed or a field type is wrong.
 
   m_scuc.def("solve",
     [](const mipsolvers::scuc::SCUCInput& inp) {
-      return mipsolvers::scuc::scuc_solve(inp);
+      try {
+        return mipsolvers::scuc::scuc_solve(inp);
+      } catch (const std::invalid_argument&) {
+        throw;
+      } catch (const std::exception& ex) {
+        rethrow_scuc_exception("SCUC solve failed", ex);
+      }
     },
     py::arg("input"),
     py::call_guard<py::gil_scoped_release>(),
@@ -588,7 +669,7 @@ The GIL is released during the solve; other Python threads can run.
     [](const mipsolvers::scuc::SCUCOutput& out,
        const mipsolvers::scuc::SCUCInput& inp,
        int indent) {
-      return mipsolvers::scuc::scuc_output_to_json(out, inp, indent);
+      return scuc_output_to_json_checked(out, inp, indent);
     },
     py::arg("output"),
     py::arg("input"),
@@ -610,13 +691,22 @@ str  JSON string
   // ── Convenience: JSON-in → JSON-out ────────────────────────────────────────
   m_scuc.def("solve_json",
     [](const std::string& json_str, int indent) -> std::string {
-      const auto inp = mipsolvers::scuc::scuc_from_json(json_str);
-      const auto out = mipsolvers::scuc::scuc_solve(inp);
-      return mipsolvers::scuc::scuc_output_to_json(out, inp, indent);
+      const auto inp = scuc_from_json_checked(json_str);
+      mipsolvers::scuc::SCUCOutput out;
+      {
+        py::gil_scoped_release rel;
+        try {
+          out = mipsolvers::scuc::scuc_solve(inp);
+        } catch (const std::invalid_argument&) {
+          throw;
+        } catch (const std::exception& ex) {
+          rethrow_scuc_exception("SCUC solve failed", ex);
+        }
+      }
+      return scuc_output_to_json_checked(out, inp, indent);
     },
     py::arg("json_str"),
     py::arg("indent") = 2,
-    py::call_guard<py::gil_scoped_release>(),
     R"doc(
 One-shot JSON API: parse input, run SCUC pipeline, return JSON result.
 

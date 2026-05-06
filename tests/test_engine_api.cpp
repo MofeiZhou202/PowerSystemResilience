@@ -3,6 +3,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <stdexcept>
+
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/problem.hpp"
 #include "mipsolvers/engine/api/result.hpp"
@@ -66,6 +68,38 @@ TEST_CASE("SolverEngine solves a simple LP", "[engine][api][lp]") {
   CHECK(result.stats.objective == Approx(-2.0).margin(1e-4));
   CHECK(result.x.size() == 2);
   CHECK(result.x.sum() == Approx(2.0).margin(1e-4));
+}
+
+TEST_CASE("SolverEngine rejects invalid LP at public API boundary", "[engine][api][validation]") {
+  SolverEngine eng(/*register_defaults=*/false);
+
+  LPModel lp;
+  lp.c.resize(2);
+  lp.c << 1.0, 1.0;
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  Eigen::SparseMatrix<double> A(1, 3);
+  A.insert(0, 0) = 1.0;
+  A.makeCompressed();
+  lp.A = A;
+  lp.b.resize(1);
+  lp.b << 1.0;
+
+  CHECK_THROWS_AS(eng.solve_lp(lp), std::invalid_argument);
+}
+
+TEST_CASE("SolverEngine normalizes unconstrained LP before validation", "[engine][api][validation]") {
+  SolverEngine eng(/*register_defaults=*/false);
+
+  LPModel lp;
+  lp.c.resize(1);
+  lp.c << 1.0;
+  lp.vars.push_back({VarType::Continuous, 0.0, 10.0});
+
+  const auto result = eng.solve_lp(lp);
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.status == "No adapter registered for class LP");
 }
 
 // ─── ProblemVariant dispatch ───────────────────────────────────────────────────
