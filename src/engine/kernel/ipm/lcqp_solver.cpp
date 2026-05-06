@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
@@ -106,18 +107,82 @@ bool NativeLCQPAdapter::supports(ProblemClass cls) const {
 }
 
 SolveResult NativeLCQPAdapter::solve_lp(const LPModel& prob) const {
-  const int n = static_cast<int>(prob.c.size());
+  const int n       = static_cast<int>(prob.c.size());
+  const int m_ineq  = static_cast<int>(prob.A.rows());
+
+  if (m_ineq == 0) {
+    // No inequality constraints — pass through directly.
+    QPModel qp;
+    qp.sense = prob.sense;
+    qp.Q.resize(n, n);
+    qp.c    = prob.c;
+    qp.Aeq  = prob.Aeq;
+    qp.beq  = prob.beq;
+    qp.vars = prob.vars;
+    return solve_qp(qp);
+  }
+
+  // Convert A*x <= b to equality form by adding slack variables s >= 0:
+  //   [Aeq  0 ] [x]   [beq]
+  //   [A    I ] [s] = [b  ]
+  //   lb_s = 0,  ub_s = +inf
+  const int n_aug = n + m_ineq;
+
   QPModel qp;
   qp.sense = prob.sense;
-  qp.Q.resize(n, n);
-  qp.c = prob.c;
-  qp.A = prob.A;
-  qp.b = prob.b;
-  qp.Aeq = prob.Aeq;
-  qp.beq = prob.beq;
+  qp.Q.resize(n_aug, n_aug);  // zero (LP → no Q)
+
+  // Augmented cost: [c; 0] (no cost on slacks)
+  qp.c.resize(n_aug);
+  qp.c << prob.c, Eigen::VectorXd::Zero(m_ineq);
+
+  // Build augmented equality constraint matrix [Aeq 0; A I]
+  const int m_eq   = static_cast<int>(prob.Aeq.rows());
+  const int m_all  = m_eq + m_ineq;
+  qp.Aeq.resize(m_all, n_aug);
+  {
+    std::vector<Eigen::Triplet<double>> trips;
+    trips.reserve(static_cast<size_t>(prob.Aeq.nonZeros() + prob.A.nonZeros() + m_ineq));
+    // Top block: [Aeq | 0]
+    for (int k = 0; k < prob.Aeq.outerSize(); ++k)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, k); it; ++it)
+        trips.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+    // Bottom block: [A | I]
+    for (int k = 0; k < prob.A.outerSize(); ++k)
+      for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, k); it; ++it)
+        trips.emplace_back(m_eq + static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+    for (int i = 0; i < m_ineq; ++i)
+      trips.emplace_back(m_eq + i, n + i, 1.0);   // slack identity block
+    qp.Aeq.setFromTriplets(trips.begin(), trips.end());
+    qp.Aeq.makeCompressed();
+  }
+
+  // Augmented RHS: [beq; b]
+  qp.beq.resize(m_all);
+  if (m_eq > 0) qp.beq.head(m_eq) = prob.beq;
+  qp.beq.tail(m_ineq) = prob.b;
+
+  // Augmented variables: original vars + slack vars (lb=0, ub=+inf)
   qp.vars = prob.vars;
-  return solve_qp(qp);
+  for (int i = 0; i < m_ineq; ++i)
+    qp.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+
+  SolveResult out = solve_qp(qp);
+  // Strip slack variables from solution
+  if (static_cast<int>(out.x.size()) == n_aug) {
+    out.x.conservativeResize(n);
+  }
+  // Re-compute objective using original (un-augmented) cost vector c.
+  // solve_qp already handles Maximize by negating c internally, so the
+  // returned objective is the minimization value (possibly negated). We
+  // recompute from scratch to get the user-facing value (c.dot(x) for min,
+  // -c.dot(x) for max, to match the convention used throughout the engine).
+  if (out.stats.success) {
+    out.stats.objective = prob.c.dot(out.x);
+  }
+  return out;
 }
+
 
 SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
   SolveResult result;

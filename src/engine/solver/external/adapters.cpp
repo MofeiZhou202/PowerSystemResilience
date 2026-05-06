@@ -166,6 +166,9 @@ bool write_lp_as_mps(const LPModel& lp, const fs::path& mps_path, bool with_inte
   }
 
   out << "NAME HACDCPF\n";
+  if (lp.sense == Sense::Maximize) {
+    out << "OBJSENSE\n    MAX\n";
+  }
   out << "ROWS\n";
   out << " N  OBJ\n";
   for (int i = 0; i < lp.A.rows(); ++i) {

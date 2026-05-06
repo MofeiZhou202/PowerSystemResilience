@@ -316,10 +316,15 @@ SolveResult NativePDLPAdapter::solve_lp(const LPModel& prob) const {
   double avg_count = 0.0;
 
   for (int j = 0; j < n; ++j) {
-    if (std::isfinite(vl[j]) && std::isfinite(vu[j]))
+    // Treat very large bounds (>= 1e15) as effectively infinite for initialization.
+    // Starting at 0.5*(lb + 1e20) would give a terrible initial point.
+    constexpr double kBoundInfThresh = 1e15;
+    const bool lb_fin = std::isfinite(vl[j]) && std::abs(vl[j]) < kBoundInfThresh;
+    const bool ub_fin = std::isfinite(vu[j]) && std::abs(vu[j]) < kBoundInfThresh;
+    if (lb_fin && ub_fin)
       x[j] = 0.5 * (vl[j] + vu[j]);
-    else if (std::isfinite(vl[j])) x[j] = vl[j];
-    else if (std::isfinite(vu[j])) x[j] = vu[j];
+    else if (lb_fin) x[j] = vl[j];
+    else if (ub_fin) x[j] = vu[j];
     else x[j] = 0.0;
     x_prev[j] = x[j];
     x_avg[j] = x[j];
