@@ -158,6 +158,8 @@ void ParallelSearchDriver::launch_workers(
   par_simplex_opt.allow_cold_start = false;
   par_simplex_opt.allow_vendored_highs_sf_backend =
       opt.use_vendored_highs_lp_kernel;
+  par_simplex_opt.require_vendored_highs_sf_backend =
+      opt.use_vendored_highs_lp_kernel;
   par_simplex_opt.factor_backend =
       simplex_factor_backend_from_id(opt.simplex_factor_backend);
 
@@ -174,6 +176,13 @@ void ParallelSearchDriver::launch_workers(
   // Build the shared standard-form template once. Explorer threads take it by
   // const reference and apply node-specific bound updates locally.
   StandardFormLP base_sf = build_standard_form_lp(base_lp);
+  std::vector<char> branchable_cols(
+      static_cast<std::size_t>(base_lp.vars.size()), 0);
+  for (int j = 0; j < static_cast<int>(base_lp.vars.size()); ++j) {
+    if (detail::is_integer_type(base_lp.vars[static_cast<std::size_t>(j)])) {
+      branchable_cols[static_cast<std::size_t>(j)] = 1;
+    }
+  }
 
   // FallbackLogger (timestamped IPM fallback events).
   // Stored as a class member so it outlives launch_workers() scope.
@@ -205,6 +214,7 @@ void ParallelSearchDriver::launch_workers(
         std::cref(base_lp),
         std::cref(base_lp),  // pre_cut_lp same as base for now
         std::cref(base_sf),
+        std::cref(branchable_cols),
         std::cref(ctx_.clique_table()),
         std::cref(ctx_.implication_graph()),
         std::cref(par_simplex_opt),

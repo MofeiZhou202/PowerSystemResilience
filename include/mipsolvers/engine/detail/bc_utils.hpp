@@ -12,6 +12,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <set>
 #include <string>
@@ -168,6 +169,49 @@ class NodeQueue {
  public:
     explicit NodeQueue(NodeSelection mode) : mode_(mode) {}
 
+    void configure_domain_signature(const std::vector<char>& branchable_cols,
+                                    const Eigen::VectorXd& root_lb,
+                                    const Eigen::VectorXd& root_ub,
+                                    double tol = 1e-9) {
+        domain_signature_cols_.clear();
+        domain_signature_cols_.reserve(branchable_cols.size());
+        for (std::size_t j = 0; j < branchable_cols.size(); ++j) {
+            if (branchable_cols[j] != 0) {
+                domain_signature_cols_.push_back(static_cast<int>(j));
+            }
+        }
+        domain_signature_root_lb_ = root_lb;
+        domain_signature_root_ub_ = root_ub;
+        domain_signature_tol_ = std::max(1e-12, tol);
+        domain_signature_enabled_ =
+            !domain_signature_cols_.empty() &&
+            root_lb.size() == root_ub.size();
+        signature_to_id_.clear();
+        id_to_signature_.clear();
+        if (!domain_signature_enabled_) return;
+        std::vector<std::int64_t> doomed;
+        for (const auto& [id, node] : nodes_) {
+            auto sig = make_domain_signature(node);
+            if (!sig.has_value()) continue;
+            const auto existing = signature_to_id_.find(*sig);
+            if (existing == signature_to_id_.end()) {
+                signature_to_id_.emplace(*sig, id);
+                id_to_signature_.emplace(id, *sig);
+                continue;
+            }
+            const auto keep_it = nodes_.find(existing->second);
+            if (keep_it != nodes_.end() &&
+                keep_it->second.bound <= node.bound + signature_bound_tol(node.bound)) {
+                doomed.push_back(id);
+            } else {
+                doomed.push_back(existing->second);
+                signature_to_id_[*sig] = id;
+                id_to_signature_[id] = *sig;
+            }
+        }
+        for (std::int64_t id : doomed) erase_id(id);
+    }
+
     void push(Node node, bool has_incumbent) {
         if (mode_ == NodeSelection::DepthFirst) {
             push_dfs(std::move(node));
@@ -182,6 +226,7 @@ class NodeQueue {
 
     void push_dfs(Node node) {
         const auto id = store(std::move(node));
+        if (id < 0) return;
         const double bound = nodes_.at(id).bound;
         dfs_.push_back(id);
         dfs_bounds_.emplace(bound, id);
@@ -189,6 +234,7 @@ class NodeQueue {
 
     void push_priority(Node node) {
         const auto id = store(std::move(node));
+        if (id < 0) return;
         const Node& stored = nodes_.at(id);
         priority_.emplace(node_selection_priority(stored), id);
         bounds_.emplace(stored.bound, id);
@@ -687,96 +733,111 @@ class NodeQueue {
                 std::vector<DomainReasonBound> reasons;
                 std::uint64_t tightened = 0;
                 bool prune = false;
-                for (const auto& cert : certificates) {
-                    if (cert.target_bound.var_idx < 0 ||
-                        cert.target_bound.var_idx >= n ||
-                        !std::isfinite(cert.target_bound.value)) {
-                        continue;
-                    }
-                    std::vector<BranchDomainLiteral> clause =
-                        cert.frontier_literals;
-                    BranchDomainLiteral source_lit = cert.source_conflict_literal;
-                    if (!cert.has_source_conflict_literal ||
-                        source_lit.var_idx < 0 || source_lit.var_idx >= n ||
-                        !std::isfinite(source_lit.value)) {
-                        if (!flip_clause_literal(cert.target_bound, source_lit)) {
+                bool changed_this_pass = true;
+                const std::size_t max_closure_passes = certificates.size() + 1;
+                for (std::size_t pass = 0;
+                     pass < max_closure_passes && changed_this_pass && !prune;
+                     ++pass) {
+                    changed_this_pass = false;
+                    for (const auto& cert : certificates) {
+                        if (cert.target_bound.var_idx < 0 ||
+                            cert.target_bound.var_idx >= n ||
+                            !std::isfinite(cert.target_bound.value)) {
                             continue;
                         }
-                    }
-                    clause.push_back(source_lit);
+                        std::vector<BranchDomainLiteral> clause =
+                            cert.frontier_literals;
+                        BranchDomainLiteral source_lit =
+                            cert.source_conflict_literal;
+                        if (!cert.has_source_conflict_literal ||
+                            source_lit.var_idx < 0 || source_lit.var_idx >= n ||
+                            !std::isfinite(source_lit.value)) {
+                            if (!flip_clause_literal(cert.target_bound,
+                                                     source_lit)) {
+                                continue;
+                            }
+                        }
+                        clause.push_back(source_lit);
 
-                    int missing_idx = -1;
-                    int missing_count = 0;
-                    std::vector<BranchDomainLiteral> reason;
-                    reason.reserve(clause.size());
-                    for (int ci = 0; ci < static_cast<int>(clause.size()); ++ci) {
-                        const auto& lit = clause[static_cast<std::size_t>(ci)];
-                        if (literal_active(lit, lb, ub)) {
-                            reason.push_back(lit);
+                        int missing_idx = -1;
+                        int missing_count = 0;
+                        std::vector<BranchDomainLiteral> reason;
+                        reason.reserve(clause.size());
+                        for (int ci = 0; ci < static_cast<int>(clause.size());
+                             ++ci) {
+                            const auto& lit =
+                                clause[static_cast<std::size_t>(ci)];
+                            if (literal_active(lit, lb, ub)) {
+                                reason.push_back(lit);
+                            } else {
+                                missing_idx = ci;
+                                if (++missing_count > 1) break;
+                            }
+                        }
+                        if (missing_count == 0) {
+                            prune = true;
+                            break;
+                        }
+                        if (missing_count != 1 || missing_idx < 0) continue;
+
+                        const BranchDomainLiteral& missing =
+                            clause[static_cast<std::size_t>(missing_idx)];
+                        const bool missing_is_source =
+                            missing.var_idx == source_lit.var_idx &&
+                            missing.is_lb == source_lit.is_lb &&
+                            std::abs(missing.value - source_lit.value) <= tol;
+                        if (!missing_is_source) {
+                            continue;
+                        }
+                        BranchDomainLiteral implied = cert.target_bound;
+                        if (implied.var_idx < 0 || implied.var_idx >= n ||
+                            !std::isfinite(implied.value)) {
+                            continue;
+                        }
+                        canonicalize_branch_literals(reason);
+
+                        DomainReasonBound rb;
+                        rb.bound = implied;
+                        rb.reason = reason;
+                        rb.trail_pos = static_cast<int>(
+                            node.branch_reasons.size() +
+                            node.domain_reason_bounds.size() + reasons.size());
+                        rb.depth = cert.depth;
+                        rb.source_conflict_literal = missing;
+                        rb.has_source_conflict_literal = true;
+
+                        const int j = implied.var_idx;
+                        bool bound_changed = false;
+                        if (implied.is_lb) {
+                            if (implied.value > ub[j] + tol) {
+                                prune = true;
+                                break;
+                            }
+                            if (implied.value > lb[j] + tol) {
+                                lb[j] = implied.value;
+                                bound_changed = true;
+                                ++tightened;
+                            }
                         } else {
-                            missing_idx = ci;
-                            if (++missing_count > 1) break;
+                            if (implied.value < lb[j] - tol) {
+                                prune = true;
+                                break;
+                            }
+                            if (implied.value < ub[j] - tol) {
+                                ub[j] = implied.value;
+                                bound_changed = true;
+                                ++tightened;
+                            }
                         }
-                    }
-                    if (missing_count == 0) {
-                        prune = true;
-                        break;
-                    }
-                    if (missing_count != 1 || missing_idx < 0) continue;
-
-                    const BranchDomainLiteral& missing =
-                        clause[static_cast<std::size_t>(missing_idx)];
-                    BranchDomainLiteral implied = cert.target_bound;
-                    const bool missing_is_source =
-                        missing.var_idx == source_lit.var_idx &&
-                        missing.is_lb == source_lit.is_lb &&
-                        std::abs(missing.value - source_lit.value) <= tol;
-                    if (!missing_is_source &&
-                        !flip_clause_literal(missing, implied)) {
-                        continue;
-                    }
-                    if (implied.var_idx < 0 || implied.var_idx >= n ||
-                        !std::isfinite(implied.value)) {
-                        continue;
-                    }
-                    canonicalize_branch_literals(reason);
-
-                    DomainReasonBound rb;
-                    rb.bound = implied;
-                    rb.reason = reason;
-                    rb.trail_pos = static_cast<int>(
-                        node.branch_reasons.size() +
-                        node.domain_reason_bounds.size() + reasons.size());
-                    rb.depth = cert.depth;
-                    rb.source_conflict_literal = missing;
-                    rb.has_source_conflict_literal = true;
-
-                    const int j = implied.var_idx;
-                    bool bound_changed = false;
-                    if (implied.is_lb) {
-                        if (implied.value > ub[j] + tol) {
-                            prune = true;
-                            break;
+                        bool reason_added = false;
+                        if (bound_changed || literal_active(implied, lb, ub)) {
+                            if (!duplicate_reason(node, reasons, rb)) {
+                                reasons.push_back(std::move(rb));
+                                reason_added = true;
+                            }
                         }
-                        if (implied.value > lb[j] + tol) {
-                            lb[j] = implied.value;
-                            bound_changed = true;
-                            ++tightened;
-                        }
-                    } else {
-                        if (implied.value < lb[j] - tol) {
-                            prune = true;
-                            break;
-                        }
-                        if (implied.value < ub[j] - tol) {
-                            ub[j] = implied.value;
-                            bound_changed = true;
-                            ++tightened;
-                        }
-                    }
-                    if (bound_changed || literal_active(implied, lb, ub)) {
-                        if (!duplicate_reason(node, reasons, rb)) {
-                            reasons.push_back(std::move(rb));
+                        if (bound_changed || reason_added) {
+                            changed_this_pass = true;
                         }
                     }
                 }
@@ -843,10 +904,10 @@ class NodeQueue {
                         ++post_update_pruned;
                         continue;
                     }
-                    if (post_tightened > 0) {
-                        if (node.x_seed.size() == node.lb.size()) {
-                            node.x_seed = clamp_to_bounds(node.x_seed,
-                                                          node.lb, node.ub);
+                if (post_tightened > 0) {
+                    if (node.x_seed.size() == node.lb.size()) {
+                        node.x_seed = clamp_to_bounds(node.x_seed,
+                                                      node.lb, node.ub);
                         }
                         node.lp_refresh_needed = true;
                         if (tightened_out != nullptr) {
@@ -857,6 +918,9 @@ class NodeQueue {
                         *reasons_out += post_reasons;
                     }
                 }
+                if (!refresh_domain_signature_after_update(upd.id)) {
+                    continue;
+                }
             }
             for (std::int64_t id : doomed) {
                 erase_id(id);
@@ -864,175 +928,6 @@ class NodeQueue {
             }
             return pruned + post_update_pruned;
         }
-
-		    int tighten_by_dual_proof_bound(const Eigen::SparseVector<double>& coeff,
-	                                    double rhs,
-	                                    double proof_upper,
-	                                    bool has_incumbent,
-	                                    double incumbent_obj,
-                                    double tol,
-                                    int* pruned_out = nullptr,
-                                    double* lift_sum_out = nullptr,
-                                    double* lift_max_out = nullptr,
-                                    double bound_band = kInf,
-                                    int max_nodes = 256,
-                                    const std::vector<BranchDomainLiteral>* required_scope = nullptr) {
-	        if (pruned_out != nullptr) *pruned_out = 0;
-	        if (lift_sum_out != nullptr) *lift_sum_out = 0.0;
-	        if (lift_max_out != nullptr) *lift_max_out = 0.0;
-	        if (coeff.size() <= 0 || coeff.nonZeros() <= 0 ||
-	            !std::isfinite(rhs) || !std::isfinite(proof_upper) ||
-	            nodes_.empty()) {
-	            return 0;
-	        }
-
-	        struct Update {
-	            std::int64_t id{-1};
-	            double old_bound{kInf};
-	            double new_bound{kInf};
-	            bool prune{false};
-	        };
-	        std::vector<std::int64_t> candidate_ids;
-	        candidate_ids.reserve(std::min<std::size_t>(
-	            nodes_.size(), static_cast<std::size_t>(std::max(1, max_nodes))));
-	        std::set<std::int64_t> seen_ids;
-	        const double queue_lb = lower_bound();
-	        const double threshold =
-	            std::isfinite(queue_lb) && std::isfinite(bound_band)
-	                ? queue_lb + std::max(0.0, bound_band)
-	                : kInf;
-	        auto collect_ids = [&](const std::multiset<QueueKey>& source) {
-	            for (auto it = source.begin(); it != source.end(); ++it) {
-	                if (std::isfinite(threshold) && it->first > threshold) break;
-	                if (seen_ids.insert(it->second).second) {
-	                    candidate_ids.push_back(it->second);
-	                    if (max_nodes > 0 &&
-	                        static_cast<int>(candidate_ids.size()) >= max_nodes) {
-	                        break;
-	                    }
-	                }
-	            }
-	        };
-	        collect_ids(bounds_);
-	        if (max_nodes <= 0 || static_cast<int>(candidate_ids.size()) < max_nodes) {
-	            collect_ids(dfs_bounds_);
-	        }
-	        if (candidate_ids.empty()) return 0;
-
-	        std::vector<Update> updates;
-	        updates.reserve(candidate_ids.size());
-	        const double proof_constant = proof_upper - rhs;
-	        const double prune_tol =
-	            std::max(1e-7, std::max(tol, kIncumbentPruneTol) *
-	                                std::max(1.0, std::abs(incumbent_obj)));
-	        auto scope_active = [&](const Node& node) {
-	            if (required_scope == nullptr || required_scope->empty()) return true;
-	            for (const auto& lit : *required_scope) {
-	                if (lit.var_idx < 0 || lit.var_idx >= node.lb.size() ||
-	                    lit.var_idx >= node.ub.size()) {
-	                    return false;
-	                }
-	                const bool active = lit.is_lb
-	                    ? (node.lb[lit.var_idx] >= lit.value - tol)
-	                    : (node.ub[lit.var_idx] <= lit.value + tol);
-	                if (!active) return false;
-	            }
-	            return true;
-	        };
-	        for (std::int64_t id : candidate_ids) {
-	            const auto node_find = nodes_.find(id);
-	            if (node_find == nodes_.end()) continue;
-	            const Node& node = node_find->second;
-	            if (!scope_active(node)) continue;
-	            if (node.lb.size() < coeff.size() || node.ub.size() < coeff.size()) {
-	                continue;
-	            }
-	            double min_activity = 0.0;
-	            bool finite = true;
-	            for (Eigen::SparseVector<double>::InnerIterator it(coeff); it; ++it) {
-	                const int j = static_cast<int>(it.index());
-	                const double a = it.value();
-	                if (j < 0 || j >= node.lb.size() || j >= node.ub.size() ||
-	                    !std::isfinite(a)) {
-	                    finite = false;
-	                    break;
-	                }
-	                if (a > 0.0) {
-	                    if (!std::isfinite(node.lb[j])) {
-	                        finite = false;
-	                        break;
-	                    }
-	                    min_activity += a * node.lb[j];
-	                } else if (a < 0.0) {
-	                    if (!std::isfinite(node.ub[j])) {
-	                        finite = false;
-	                        break;
-	                    }
-	                    min_activity += a * node.ub[j];
-	                }
-	            }
-	            if (!finite) continue;
-	            const double proof_bound = proof_constant + min_activity;
-	            if (!std::isfinite(proof_bound)) continue;
-	            const bool prune =
-	                has_incumbent && std::isfinite(incumbent_obj) &&
-	                proof_bound >= incumbent_obj - prune_tol;
-	            if (prune || proof_bound > node.bound + std::max(1e-7, tol)) {
-	                updates.push_back(Update{id, node.bound,
-	                                         std::max(node.bound, proof_bound),
-	                                         prune});
-	            }
-	        }
-
-	        int tightened = 0;
-	        int pruned = 0;
-	        double lift_sum = 0.0;
-	        double lift_max = 0.0;
-	        for (const Update& upd : updates) {
-	            auto node_it = nodes_.find(upd.id);
-	            if (node_it == nodes_.end()) continue;
-	            Node& node = node_it->second;
-	            const double old_priority = node_selection_priority(node);
-	            const auto priority_it = priority_.find({old_priority, upd.id});
-	            const bool had_priority = priority_it != priority_.end();
-	            if (had_priority) priority_.erase(priority_it);
-	            const auto bound_it = bounds_.find({upd.old_bound, upd.id});
-	            const bool had_bound = bound_it != bounds_.end();
-	            if (had_bound) bounds_.erase(bound_it);
-	            const auto dfs_bound_it = dfs_bounds_.find({upd.old_bound, upd.id});
-	            const bool had_dfs_bound = dfs_bound_it != dfs_bounds_.end();
-	            if (had_dfs_bound) dfs_bounds_.erase(dfs_bound_it);
-
-	            if (upd.prune) {
-	                if (had_priority || had_bound || had_dfs_bound) {
-	                    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
-	                               dfs_.end());
-	                    nodes_.erase(node_it);
-	                    ++pruned;
-	                }
-	                continue;
-	            }
-
-	            const double lift = std::max(0.0, upd.new_bound - node.bound);
-	            node.bound = upd.new_bound;
-	            if (node.estimate < node.bound) node.estimate = node.bound;
-	            if (had_priority) {
-	                priority_.emplace(node_selection_priority(node), upd.id);
-	            }
-	            if (had_bound) bounds_.emplace(node.bound, upd.id);
-	            if (had_dfs_bound) dfs_bounds_.emplace(node.bound, upd.id);
-	            if (lift > 0.0) {
-	                ++tightened;
-	                lift_sum += lift;
-	                lift_max = std::max(lift_max, lift);
-	            }
-	        }
-
-	        if (pruned_out != nullptr) *pruned_out = pruned;
-	        if (lift_sum_out != nullptr) *lift_sum_out = lift_sum;
-	        if (lift_max_out != nullptr) *lift_max_out = lift_max;
-	        return tightened;
-	    }
 
 	    int propagate_by_dual_proof_domain(
 	        const std::vector<VariableMeta>& vars,
@@ -1050,19 +945,21 @@ class NodeQueue {
 			        double* lift_max_out = nullptr,
 			        double bound_band = kInf,
 			        int max_nodes = 256,
-			        const std::vector<BranchDomainLiteral>* required_scope = nullptr,
-			        const std::function<void(const Node&, double, double, bool, bool)>*
-			            prune_certificate_cb = nullptr,
-			        const std::function<void(
-			            const DomainReasonBound&,
-			            const std::vector<BranchDomainLiteral>*,
-			            const std::vector<std::vector<BranchDomainLiteral>>*)>*
-			            bound_lifting_certificate_cb = nullptr,
-			        const std::function<bool(Node&,
-			                                 const std::vector<DomainReasonBound>&,
-			                                 std::uint64_t&,
-			                                 std::uint64_t&,
-			                                 bool&)>* post_update_cb = nullptr) {
+				        const std::vector<BranchDomainLiteral>* required_scope = nullptr,
+				        const std::function<void(const Node&, double, double, bool, bool)>*
+				            prune_certificate_cb = nullptr,
+				        const std::function<void(
+				            const DomainReasonBound&,
+				            const std::vector<BranchDomainLiteral>*,
+				            const std::vector<std::vector<BranchDomainLiteral>>*)>*
+				            bound_lifting_certificate_cb = nullptr,
+				        const std::function<bool(Node&,
+				                                 const std::vector<DomainReasonBound>&,
+				                                 std::uint64_t&,
+				                                 std::uint64_t&,
+				                                 bool&)>* post_update_cb = nullptr,
+				        const Eigen::VectorXd* root_lb_override = nullptr,
+				        const Eigen::VectorXd* root_ub_override = nullptr) {
 		        if (pruned_out != nullptr) *pruned_out = 0;
 		        if (domain_tightened_out != nullptr) *domain_tightened_out = 0;
 		        if (scoped_certificates_out != nullptr) *scoped_certificates_out = 0;
@@ -1131,12 +1028,18 @@ class NodeQueue {
 	        }
 	        const int highs_frontier_literal_limit =
 	            std::max(32, (1000 + 3 * integral_cols) / 10);
-	        Eigen::VectorXd root_lb(n);
-	        Eigen::VectorXd root_ub(n);
-	        for (int j = 0; j < n; ++j) {
-	            root_lb[j] = vars[static_cast<std::size_t>(j)].lb;
-	            root_ub[j] = vars[static_cast<std::size_t>(j)].ub;
-	        }
+		        Eigen::VectorXd root_lb(n);
+		        Eigen::VectorXd root_ub(n);
+		        for (int j = 0; j < n; ++j) {
+		            root_lb[j] = root_lb_override != nullptr &&
+		                                 root_lb_override->size() > j
+		                             ? (*root_lb_override)[j]
+		                             : vars[static_cast<std::size_t>(j)].lb;
+		            root_ub[j] = root_ub_override != nullptr &&
+		                                 root_ub_override->size() > j
+		                             ? (*root_ub_override)[j]
+		                             : vars[static_cast<std::size_t>(j)].ub;
+		        }
 
 	        auto scope_active = [&](const Node& node) {
 	            if (required_scope == nullptr || required_scope->empty()) return true;
@@ -1253,10 +1156,10 @@ class NodeQueue {
 	                    return false;
 	                };
 		            auto add_bound_lifting_certificate =
-		                [&](const BranchDomainLiteral& bound) {
+		                [&](const BranchDomainLiteral& bound) -> bool {
 		                    if (bound.var_idx < 0 || bound.var_idx >= n ||
 		                        !std::isfinite(bound.value)) {
-		                        return;
+		                        return false;
 		                    }
 		                    DomainReasonBound raw_target{
 		                        bound,
@@ -1268,71 +1171,42 @@ class NodeQueue {
 		                        node.depth,
 		                        BranchDomainLiteral{},
 		                        false};
-		                    DualProofTrailResolution resolution;
-		                    if (!resolve_dual_proof_target_bound_from_local_trail(
-		                            vars, root_lb, root_ub,
-		                            node.x_relax.size() >= n ? &node.x_relax : nullptr,
-		                            int_tol, node.branch_reasons,
-		                            node.domain_reason_bounds,
-		                            &node.local_domain_trail,
-		                            &node.local_branch_positions, raw_target,
-		                            highs_frontier_literal_limit,
-		                            coeff, rhs, resolution, nullptr) ||
-		                        !resolution.valid ||
-		                        resolution.cutoff_conflict) {
-		                        return;
-		                    }
-		                    std::vector<BranchDomainLiteral> scope =
-		                        resolution.resolved_frontier;
-		                    DomainReasonBound rb{
-	                        resolution.has_proved_target_bound
-	                            ? resolution.proved_target_bound
-	                            : bound,
-	                        scope,
-	                        trail_base + static_cast<int>(new_reasons.size()),
-	                        node.depth,
-	                        resolution.flipped_target,
-	                        true};
+			                    DualProofTrailResolution resolution;
+			                    const bool resolved_bound_lift =
+			                        resolve_dual_proof_target_bound_from_local_trail(
+			                            vars, root_lb, root_ub,
+			                            node.x_relax.size() >= n ? &node.x_relax : nullptr,
+			                            int_tol, node.branch_reasons,
+			                            node.domain_reason_bounds,
+			                            &node.local_domain_trail,
+			                            &node.local_branch_positions, raw_target,
+			                            highs_frontier_literal_limit,
+			                            coeff, rhs, resolution, nullptr);
+			                    if (!resolved_bound_lift || !resolution.valid ||
+			                        resolution.cutoff_conflict) {
+			                        return false;
+			                    }
+			                    std::vector<BranchDomainLiteral> residual_frontier =
+			                        resolution.resolved_frontier;
+			                    DomainReasonBound rb{
+		                        resolution.has_proved_target_bound
+		                            ? resolution.proved_target_bound
+		                            : bound,
+		                        residual_frontier,
+		                        trail_base + static_cast<int>(new_reasons.size()),
+		                        node.depth,
+		                        resolution.flipped_target,
+		                        true};
 		                    if (!duplicate_reason_bound(rb)) {
 		                        new_reasons.push_back(rb);
 		                    }
-		                    if (bound_lifting_certificate_cb != nullptr) {
-		                        (*bound_lifting_certificate_cb)(
-		                            rb, required_scope,
-		                            &resolution.reconvergence_clauses);
-		                    }
-	                    if (scope.empty()) return;
-	                    ScopedConflictClause obj;
-	                    if (required_scope != nullptr) {
-	                        obj.scope_literals = *required_scope;
-	                        canonicalize_branch_literals(obj.scope_literals);
-	                    } else {
-	                        obj.scope_literals.clear();
-	                    }
-	                    obj.residual_literals = std::move(scope);
-		                    std::vector<BranchDomainLiteral> sig = obj.scope_literals;
-		                    sig.insert(sig.end(), obj.residual_literals.begin(),
-		                               obj.residual_literals.end());
-		                    sig.push_back(rb.bound);
-	                    if (rb.has_source_conflict_literal) {
-	                        sig.push_back(rb.source_conflict_literal);
-	                    }
-	                    canonicalize_branch_literals(sig);
-	                    obj.hash = conflict_clause_hash(sig);
-	                    obj.depth = node.depth;
-	                    obj.has_target_bound = true;
-	                    obj.target_bound = rb.bound;
-	                    obj.source_conflict_literal = rb.source_conflict_literal;
-	                    obj.has_source_conflict_literal =
-	                        rb.has_source_conflict_literal;
-	                    for (const auto& existing : node.scoped_conflict_clauses) {
-	                        if (existing.hash == obj.hash) return;
-	                    }
-	                    for (const auto& existing : new_scoped_certificates) {
-	                        if (existing.hash == obj.hash) return;
-	                    }
-	                    new_scoped_certificates.push_back(std::move(obj));
-	                };
+			                    if (bound_lifting_certificate_cb != nullptr) {
+			                        (*bound_lifting_certificate_cb)(
+			                            rb, required_scope,
+			                            &resolution.reconvergence_clauses);
+			                    }
+			                    return true;
+			                };
 	            for (Eigen::SparseVector<double>::InnerIterator it(coeff); it; ++it) {
 	                const int j = static_cast<int>(it.index());
 	                const double a = it.value();
@@ -1350,14 +1224,15 @@ class NodeQueue {
 	                        break;
 	                    }
 	                    if (implied_ub < node.ub[j] - tol) {
-	                        if (new_ub.size() == 0) {
-	                            new_lb = node.lb;
-	                            new_ub = node.ub;
+	                        if (add_bound_lifting_certificate(
+	                                BranchDomainLiteral{j, implied_ub, false})) {
+	                            if (new_ub.size() == 0) {
+	                                new_lb = node.lb;
+	                                new_ub = node.ub;
+	                            }
+	                            new_ub[j] = implied_ub;
+	                            ++fixings;
 	                        }
-	                        new_ub[j] = implied_ub;
-	                        add_bound_lifting_certificate(
-	                            BranchDomainLiteral{j, implied_ub, false});
-	                        ++fixings;
 	                    }
 	                } else {
 	                    if (!std::isfinite(node.ub[j])) continue;
@@ -1372,14 +1247,15 @@ class NodeQueue {
 	                        break;
 	                    }
 	                    if (implied_lb > node.lb[j] + tol) {
-	                        if (new_lb.size() == 0) {
-	                            new_lb = node.lb;
-	                            new_ub = node.ub;
+	                        if (add_bound_lifting_certificate(
+	                                BranchDomainLiteral{j, implied_lb, true})) {
+	                            if (new_lb.size() == 0) {
+	                                new_lb = node.lb;
+	                                new_ub = node.ub;
+	                            }
+	                            new_lb[j] = implied_lb;
+	                            ++fixings;
 	                        }
-	                        new_lb[j] = implied_lb;
-	                        add_bound_lifting_certificate(
-	                            BranchDomainLiteral{j, implied_lb, true});
-	                        ++fixings;
 	                    }
 	                }
 	            }
@@ -1417,9 +1293,9 @@ class NodeQueue {
 	        for (Update& upd : updates) {
 	            auto node_it = nodes_.find(upd.id);
 	            if (node_it == nodes_.end()) continue;
-	            Node& node = node_it->second;
-	            const double old_priority = node_selection_priority(node);
-	            const auto priority_it = priority_.find({old_priority, upd.id});
+		            Node& node = node_it->second;
+		            const double old_priority = node_selection_priority(node);
+		            const auto priority_it = priority_.find({old_priority, upd.id});
 	            const bool had_priority = priority_it != priority_.end();
 	            if (had_priority) priority_.erase(priority_it);
 	            const auto bound_it = bounds_.find({upd.old_bound, upd.id});
@@ -1436,11 +1312,12 @@ class NodeQueue {
 		                            node, upd.min_activity, upd.cutoff_rhs,
 		                            upd.proof_cutoff, upd.incumbent_cutoff);
 		                    }
-		                    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
-		                               dfs_.end());
-	                    nodes_.erase(node_it);
-	                    ++pruned;
-	                }
+			                    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
+			                               dfs_.end());
+                            forget_domain_signature(upd.id);
+		                    nodes_.erase(node_it);
+		                    ++pruned;
+		                }
 	                continue;
 	            }
 
@@ -1510,14 +1387,15 @@ class NodeQueue {
 		                const bool post_ok = (*post_update_cb)(
 		                    node, added_reason_bounds, post_tightened,
 		                    post_reasons, post_pruned);
-		                if (!post_ok || post_pruned ||
-		                    !bounds_consistent(node.lb, node.ub)) {
-		                    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
-		                               dfs_.end());
-		                    nodes_.erase(node_it);
-		                    ++post_update_pruned;
-		                    continue;
-		                }
+			                if (!post_ok || post_pruned ||
+			                    !bounds_consistent(node.lb, node.ub)) {
+			                    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
+			                               dfs_.end());
+                            forget_domain_signature(upd.id);
+			                    nodes_.erase(node_it);
+			                    ++post_update_pruned;
+			                    continue;
+			                }
 		                if (post_tightened > 0) {
 		                    if (node.x_seed.size() == node.lb.size()) {
 		                        node.x_seed = clamp_to_bounds(node.x_seed, node.lb, node.ub);
@@ -1525,36 +1403,6 @@ class NodeQueue {
 		                    node.lp_refresh_needed = true;
 		                    domain_fixings += post_tightened;
 		                    touched_node = true;
-		                    const double post_activity =
-		                        min_activity_for_bounds(node.lb, node.ub);
-		                    if (std::isfinite(post_activity) &&
-		                        post_activity > upd.min_activity + proof_tol) {
-		                        const double post_bound =
-		                            proof_constant + post_activity;
-		                        bool post_proof_cutoff = false;
-		                        bool post_incumbent_cutoff = false;
-		                        const double post_cutoff_rhs =
-		                            cutoff_rhs_for_activity(
-		                                post_activity, post_bound,
-		                                post_proof_cutoff, post_incumbent_cutoff);
-		                        if (post_proof_cutoff || post_incumbent_cutoff) {
-		                            if (prune_certificate_cb != nullptr) {
-		                                (*prune_certificate_cb)(
-		                                    node, post_activity, post_cutoff_rhs,
-		                                    post_proof_cutoff,
-		                                    post_incumbent_cutoff);
-		                            }
-		                            dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), upd.id),
-		                                       dfs_.end());
-		                            nodes_.erase(node_it);
-		                            ++post_update_pruned;
-		                            continue;
-		                        }
-		                        if (std::isfinite(post_bound) &&
-		                            post_bound > upd.new_bound) {
-		                            upd.new_bound = post_bound;
-		                        }
-		                    }
 		                }
 		                if (post_reasons > 0) {
 		                    scoped_certificates += post_reasons;
@@ -1562,12 +1410,15 @@ class NodeQueue {
 		                    touched_node = true;
 		                }
 		            }
-		            const double lift = std::max(0.0, upd.new_bound - node.bound);
-		            node.bound = std::max(node.bound, upd.new_bound);
-	            if (node.estimate < node.bound) node.estimate = node.bound;
-	            if (had_priority) {
-	                priority_.emplace(node_selection_priority(node), upd.id);
-	            }
+			            const double lift = std::max(0.0, upd.new_bound - node.bound);
+			            node.bound = std::max(node.bound, upd.new_bound);
+		            if (node.estimate < node.bound) node.estimate = node.bound;
+                    if (!refresh_domain_signature_after_update(upd.id)) {
+                        continue;
+                    }
+		            if (had_priority) {
+		                priority_.emplace(node_selection_priority(node), upd.id);
+		            }
 	            if (had_bound) bounds_.emplace(node.bound, upd.id);
 	            if (had_dfs_bound) dfs_bounds_.emplace(node.bound, upd.id);
 	            if (lift > 0.0) {
@@ -1684,6 +1535,9 @@ class NodeQueue {
 	            }
 	            node.lp_refresh_needed = true;
 	            if (tightened_out != nullptr) *tightened_out += upd.tightened;
+                    if (!refresh_domain_signature_after_update(upd.id)) {
+                        continue;
+                    }
 	        }
 
 	        for (std::int64_t id : doomed) {
@@ -1863,6 +1717,9 @@ class NodeQueue {
 		                    *reasons_out += post_reasons;
 		                }
 		            }
+                    if (!refresh_domain_signature_after_update(upd.id)) {
+                        continue;
+                    }
 		        }
 
 		        for (std::int64_t id : doomed) {
@@ -1881,14 +1738,154 @@ class NodeQueue {
     std::multiset<QueueKey> bounds_;
     std::vector<std::int64_t> dfs_;
     std::multiset<QueueKey> dfs_bounds_;
+    bool domain_signature_enabled_{false};
+    double domain_signature_tol_{1e-9};
+    std::vector<int> domain_signature_cols_;
+    Eigen::VectorXd domain_signature_root_lb_;
+    Eigen::VectorXd domain_signature_root_ub_;
+    std::unordered_map<std::string, std::int64_t> signature_to_id_;
+    std::unordered_map<std::int64_t, std::string> id_to_signature_;
     bool hybrid_post_incumbent_active_{false};
     std::int64_t hybrid_queue_leaves_{0};
     std::int64_t hybrid_last_lower_bound_leave_{0};
     static constexpr std::int64_t kHybridBestBoundPeriod = 10;
 
+    double signature_bound_tol(double bound) const {
+        return std::max(1e-9, 1e-12 * std::max(1.0, std::abs(bound)));
+    }
+
+    static std::int64_t quantize_lower_bound(double value, double tol) {
+        if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::min();
+        const long double q = std::ceil(static_cast<long double>(value) -
+                                        static_cast<long double>(tol));
+        const long double lo = static_cast<long double>(
+            std::numeric_limits<std::int64_t>::min() + 1);
+        const long double hi = static_cast<long double>(
+            std::numeric_limits<std::int64_t>::max() - 1);
+        return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
+    }
+
+    static std::int64_t quantize_upper_bound(double value, double tol) {
+        if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::max();
+        const long double q = std::floor(static_cast<long double>(value) +
+                                         static_cast<long double>(tol));
+        const long double lo = static_cast<long double>(
+            std::numeric_limits<std::int64_t>::min() + 1);
+        const long double hi = static_cast<long double>(
+            std::numeric_limits<std::int64_t>::max() - 1);
+        return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
+    }
+
+    template <typename T>
+    static void append_signature_bytes(std::string& sig, const T& value) {
+        sig.append(reinterpret_cast<const char*>(&value), sizeof(T));
+    }
+
+    std::optional<std::string> make_domain_signature(const Node& node) const {
+        if (!domain_signature_enabled_ ||
+            node.lb.size() != node.ub.size() ||
+            node.lb.size() != domain_signature_root_lb_.size() ||
+            node.ub.size() != domain_signature_root_ub_.size()) {
+            return std::nullopt;
+        }
+        std::string sig;
+        sig.reserve(domain_signature_cols_.size() * 18);
+        constexpr char lower_tag = 'L';
+        constexpr char upper_tag = 'U';
+        for (int j : domain_signature_cols_) {
+            if (j < 0 || j >= node.lb.size()) continue;
+            const double root_lb = domain_signature_root_lb_[j];
+            const double root_ub = domain_signature_root_ub_[j];
+            const double lb = node.lb[j];
+            const double ub = node.ub[j];
+            const bool lower_active =
+                std::isfinite(lb) &&
+                (!std::isfinite(root_lb) || lb > root_lb + domain_signature_tol_);
+            if (lower_active) {
+                const std::int32_t col = static_cast<std::int32_t>(j);
+                const std::int64_t val =
+                    quantize_lower_bound(lb, domain_signature_tol_);
+                append_signature_bytes(sig, col);
+                sig.push_back(lower_tag);
+                append_signature_bytes(sig, val);
+            }
+            const bool upper_active =
+                std::isfinite(ub) &&
+                (!std::isfinite(root_ub) || ub < root_ub - domain_signature_tol_);
+            if (upper_active) {
+                const std::int32_t col = static_cast<std::int32_t>(j);
+                const std::int64_t val =
+                    quantize_upper_bound(ub, domain_signature_tol_);
+                append_signature_bytes(sig, col);
+                sig.push_back(upper_tag);
+                append_signature_bytes(sig, val);
+            }
+        }
+        return sig;
+    }
+
+    void forget_domain_signature(std::int64_t id) {
+        auto sig_it = id_to_signature_.find(id);
+        if (sig_it == id_to_signature_.end()) return;
+        auto owner_it = signature_to_id_.find(sig_it->second);
+        if (owner_it != signature_to_id_.end() && owner_it->second == id) {
+            signature_to_id_.erase(owner_it);
+        }
+        id_to_signature_.erase(sig_it);
+    }
+
+    bool refresh_domain_signature_after_update(std::int64_t id) {
+        if (!domain_signature_enabled_) return nodes_.find(id) != nodes_.end();
+        auto node_it = nodes_.find(id);
+        if (node_it == nodes_.end()) return false;
+        forget_domain_signature(id);
+        auto sig = make_domain_signature(node_it->second);
+        if (!sig.has_value()) return true;
+        auto existing = signature_to_id_.find(*sig);
+        if (existing != signature_to_id_.end() && existing->second != id) {
+            auto existing_node = nodes_.find(existing->second);
+            if (existing_node != nodes_.end()) {
+                if (existing_node->second.bound <=
+                    node_it->second.bound + signature_bound_tol(node_it->second.bound)) {
+                    erase_id(id);
+                    return false;
+                }
+                erase_id(existing->second);
+            } else {
+                signature_to_id_.erase(existing);
+            }
+        }
+        signature_to_id_[*sig] = id;
+        id_to_signature_[id] = std::move(*sig);
+        return true;
+    }
+
     std::int64_t store(Node node) {
+        std::optional<std::string> sig;
+        if (domain_signature_enabled_) {
+            sig = make_domain_signature(node);
+            if (sig.has_value()) {
+                auto existing = signature_to_id_.find(*sig);
+                if (existing != signature_to_id_.end()) {
+                    auto existing_node = nodes_.find(existing->second);
+                    if (existing_node != nodes_.end()) {
+                        if (existing_node->second.bound <=
+                            node.bound + signature_bound_tol(node.bound)) {
+                            return -1;
+                        }
+                        erase_id(existing->second);
+                    } else {
+                        signature_to_id_.erase(existing);
+                    }
+                }
+            }
+        }
         const auto id = next_id_++;
         nodes_.emplace(id, std::move(node));
+        if (sig.has_value()) {
+            signature_to_id_[*sig] = id;
+            id_to_signature_[id] = std::move(*sig);
+        }
         return id;
     }
 
@@ -1912,6 +1909,7 @@ class NodeQueue {
         }
 
         out = std::move(node_it->second);
+        forget_domain_signature(id);
         nodes_.erase(node_it);
         return true;
     }
@@ -1937,6 +1935,7 @@ class NodeQueue {
         }
 
         out = std::move(node_it->second);
+        forget_domain_signature(id);
         nodes_.erase(node_it);
         (void)priority;
 	        return true;
@@ -1961,6 +1960,7 @@ class NodeQueue {
 	            dfs_bounds_.erase(dfs_bound_it);
 	        }
 	        dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
+            forget_domain_signature(id);
 	        nodes_.erase(node_it);
 	    }
 
@@ -1985,6 +1985,7 @@ class NodeQueue {
             }
             dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
             out = std::move(node_it->second);
+            forget_domain_signature(id);
             nodes_.erase(node_it);
             return true;
         }

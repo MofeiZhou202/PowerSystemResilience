@@ -646,6 +646,13 @@ class ThreadSafeNodeQueue {
   std::multiset<QueueKey> dfs_bounds_;
   NodeSelection mode_;
   std::atomic<bool> shutdown_{false};
+  bool domain_signature_enabled_{false};
+  double domain_signature_tol_{1e-9};
+  std::vector<int> domain_signature_cols_;
+  Eigen::VectorXd domain_signature_root_lb_;
+  Eigen::VectorXd domain_signature_root_ub_;
+  std::unordered_map<std::string, std::int64_t> signature_to_id_;
+  std::unordered_map<std::int64_t, std::string> id_to_signature_;
 
   static double priority_key(const Node& node) {
     if (!std::isfinite(node.bound)) {
@@ -657,9 +664,131 @@ class ThreadSafeNodeQueue {
     return 0.5 * (node.bound + std::max(node.bound, node.estimate));
   }
 
+  double signature_bound_tol(double bound) const {
+    return std::max(1e-9, 1e-12 * std::max(1.0, std::abs(bound)));
+  }
+
+  static std::int64_t quantize_lower_bound(double value, double tol) {
+    if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::min();
+    const long double q = std::ceil(static_cast<long double>(value) -
+                                    static_cast<long double>(tol));
+    const long double lo = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::min() + 1);
+    const long double hi = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::max() - 1);
+    return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
+  }
+
+  static std::int64_t quantize_upper_bound(double value, double tol) {
+    if (!std::isfinite(value)) return std::numeric_limits<std::int64_t>::max();
+    const long double q = std::floor(static_cast<long double>(value) +
+                                     static_cast<long double>(tol));
+    const long double lo = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::min() + 1);
+    const long double hi = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::max() - 1);
+    return static_cast<std::int64_t>(std::max(lo, std::min(hi, q)));
+  }
+
+  template <typename T>
+  static void append_signature_bytes(std::string& sig, const T& value) {
+    sig.append(reinterpret_cast<const char*>(&value), sizeof(T));
+  }
+
+  std::optional<std::string> make_domain_signature(const Node& node) const {
+    if (!domain_signature_enabled_ ||
+        node.lb.size() != node.ub.size() ||
+        node.lb.size() != domain_signature_root_lb_.size() ||
+        node.ub.size() != domain_signature_root_ub_.size()) {
+      return std::nullopt;
+    }
+    std::string sig;
+    sig.reserve(domain_signature_cols_.size() * 18);
+    constexpr char lower_tag = 'L';
+    constexpr char upper_tag = 'U';
+    for (int j : domain_signature_cols_) {
+      if (j < 0 || j >= node.lb.size()) continue;
+      const double root_lb = domain_signature_root_lb_[j];
+      const double root_ub = domain_signature_root_ub_[j];
+      const double lb = node.lb[j];
+      const double ub = node.ub[j];
+      const bool lower_active =
+          std::isfinite(lb) &&
+          (!std::isfinite(root_lb) || lb > root_lb + domain_signature_tol_);
+      if (lower_active) {
+        const std::int32_t col = static_cast<std::int32_t>(j);
+        const std::int64_t val =
+            quantize_lower_bound(lb, domain_signature_tol_);
+        append_signature_bytes(sig, col);
+        sig.push_back(lower_tag);
+        append_signature_bytes(sig, val);
+      }
+      const bool upper_active =
+          std::isfinite(ub) &&
+          (!std::isfinite(root_ub) || ub < root_ub - domain_signature_tol_);
+      if (upper_active) {
+        const std::int32_t col = static_cast<std::int32_t>(j);
+        const std::int64_t val =
+            quantize_upper_bound(ub, domain_signature_tol_);
+        append_signature_bytes(sig, col);
+        sig.push_back(upper_tag);
+        append_signature_bytes(sig, val);
+      }
+    }
+    return sig;
+  }
+
+  void forget_domain_signature_locked(std::int64_t id) {
+    auto sig_it = id_to_signature_.find(id);
+    if (sig_it == id_to_signature_.end()) return;
+    auto owner_it = signature_to_id_.find(sig_it->second);
+    if (owner_it != signature_to_id_.end() && owner_it->second == id) {
+      signature_to_id_.erase(owner_it);
+    }
+    id_to_signature_.erase(sig_it);
+  }
+
+  void erase_id_locked(std::int64_t id) {
+    auto node_it = nodes_.find(id);
+    if (node_it == nodes_.end()) return;
+    const Node& node = node_it->second;
+    auto prio_it = priority_.find({priority_key(node), id});
+    if (prio_it != priority_.end()) priority_.erase(prio_it);
+    auto bound_it = bounds_.find({node.bound, id});
+    if (bound_it != bounds_.end()) bounds_.erase(bound_it);
+    auto dfs_bound_it = dfs_bounds_.find({node.bound, id});
+    if (dfs_bound_it != dfs_bounds_.end()) dfs_bounds_.erase(dfs_bound_it);
+    dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
+    forget_domain_signature_locked(id);
+    nodes_.erase(node_it);
+  }
+
   std::int64_t store_locked(Node node) {
+    std::optional<std::string> sig;
+    if (domain_signature_enabled_) {
+      sig = make_domain_signature(node);
+      if (sig.has_value()) {
+        auto existing = signature_to_id_.find(*sig);
+        if (existing != signature_to_id_.end()) {
+          auto existing_node = nodes_.find(existing->second);
+          if (existing_node != nodes_.end()) {
+            if (existing_node->second.bound <=
+                node.bound + signature_bound_tol(node.bound)) {
+              return -1;
+            }
+            erase_id_locked(existing->second);
+          } else {
+            signature_to_id_.erase(existing);
+          }
+        }
+      }
+    }
     const auto id = next_id_++;
     nodes_.emplace(id, std::move(node));
+    if (sig.has_value()) {
+      signature_to_id_[*sig] = id;
+      id_to_signature_[id] = std::move(*sig);
+    }
     return id;
   }
 
@@ -683,6 +812,7 @@ class ThreadSafeNodeQueue {
     }
 
     out = std::move(node_it->second);
+    forget_domain_signature_locked(id);
     nodes_.erase(node_it);
     return true;
   }
@@ -708,6 +838,7 @@ class ThreadSafeNodeQueue {
     }
 
     out = std::move(node_it->second);
+    forget_domain_signature_locked(id);
     nodes_.erase(node_it);
     (void)priority;
     return true;
@@ -742,6 +873,7 @@ class ThreadSafeNodeQueue {
       dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
 
       out = std::move(node_it->second);
+      forget_domain_signature_locked(id);
       nodes_.erase(node_it);
       return true;
     }
@@ -761,6 +893,7 @@ class ThreadSafeNodeQueue {
     }
 
     out = std::move(node_it->second);
+    forget_domain_signature_locked(id);
     nodes_.erase(node_it);
     (void)bound;
     return true;
@@ -768,6 +901,50 @@ class ThreadSafeNodeQueue {
 
 public:
   explicit ThreadSafeNodeQueue(NodeSelection mode) : mode_(mode) {}
+
+  void configure_domain_signature(const std::vector<char>& branchable_cols,
+                                  const Eigen::VectorXd& root_lb,
+                                  const Eigen::VectorXd& root_ub,
+                                  double tol = 1e-9) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    domain_signature_cols_.clear();
+    domain_signature_cols_.reserve(branchable_cols.size());
+    for (std::size_t j = 0; j < branchable_cols.size(); ++j) {
+      if (branchable_cols[j] != 0) {
+        domain_signature_cols_.push_back(static_cast<int>(j));
+      }
+    }
+    domain_signature_root_lb_ = root_lb;
+    domain_signature_root_ub_ = root_ub;
+    domain_signature_tol_ = std::max(1e-12, tol);
+    domain_signature_enabled_ =
+        !domain_signature_cols_.empty() &&
+        root_lb.size() == root_ub.size();
+    signature_to_id_.clear();
+    id_to_signature_.clear();
+    if (!domain_signature_enabled_) return;
+    std::vector<std::int64_t> doomed;
+    for (const auto& [id, node] : nodes_) {
+      auto sig = make_domain_signature(node);
+      if (!sig.has_value()) continue;
+      const auto existing = signature_to_id_.find(*sig);
+      if (existing == signature_to_id_.end()) {
+        signature_to_id_.emplace(*sig, id);
+        id_to_signature_.emplace(id, *sig);
+        continue;
+      }
+      const auto keep_it = nodes_.find(existing->second);
+      if (keep_it != nodes_.end() &&
+          keep_it->second.bound <= node.bound + signature_bound_tol(node.bound)) {
+        doomed.push_back(id);
+      } else {
+        doomed.push_back(existing->second);
+        signature_to_id_[*sig] = id;
+        id_to_signature_[id] = *sig;
+      }
+    }
+    for (std::int64_t id : doomed) erase_id_locked(id);
+  }
 
   /// @brief Pop a node (blocks briefly if empty).
   /// @return false on shutdown/timeout.
@@ -807,14 +984,17 @@ public:
     std::lock_guard<std::mutex> lk(mtx_);
     if (mode_ == NodeSelection::DepthFirst) {
       const auto id = store_locked(std::move(node));
+      if (id < 0) return;
       dfs_.push_back(id);
       dfs_bounds_.emplace(nodes_.at(id).bound, id);
     } else if (mode_ == NodeSelection::Hybrid && !has_incumbent) {
       const auto id = store_locked(std::move(node));
+      if (id < 0) return;
       dfs_.push_back(id);
       dfs_bounds_.emplace(nodes_.at(id).bound, id);
     } else {
       const auto id = store_locked(std::move(node));
+      if (id < 0) return;
       const Node& stored = nodes_.at(id);
       priority_.emplace(priority_key(stored), id);
       bounds_.emplace(stored.bound, id);
@@ -826,6 +1006,7 @@ public:
   void push_dfs(Node node) {
     std::lock_guard<std::mutex> lk(mtx_);
     const auto id = store_locked(std::move(node));
+    if (id < 0) return;
     dfs_.push_back(id);
     dfs_bounds_.emplace(nodes_.at(id).bound, id);
     cv_.notify_one();
@@ -835,6 +1016,7 @@ public:
   void push_pq(Node node) {
     std::lock_guard<std::mutex> lk(mtx_);
     const auto id = store_locked(std::move(node));
+    if (id < 0) return;
     const Node& stored = nodes_.at(id);
     priority_.emplace(priority_key(stored), id);
     bounds_.emplace(stored.bound, id);
@@ -859,19 +1041,7 @@ public:
         doomed.push_back(id);
       }
     }
-    for (const auto id : doomed) {
-      auto node_it = nodes_.find(id);
-      if (node_it == nodes_.end()) continue;
-      const Node& node = node_it->second;
-      auto prio_it = priority_.find({priority_key(node), id});
-      if (prio_it != priority_.end()) priority_.erase(prio_it);
-      auto bound_it = bounds_.find({node.bound, id});
-      if (bound_it != bounds_.end()) bounds_.erase(bound_it);
-      auto dfs_bound_it = dfs_bounds_.find({node.bound, id});
-      if (dfs_bound_it != dfs_bounds_.end()) dfs_bounds_.erase(dfs_bound_it);
-      dfs_.erase(std::remove(dfs_.begin(), dfs_.end(), id), dfs_.end());
-      nodes_.erase(node_it);
-    }
+    for (const auto id : doomed) erase_id_locked(id);
     return static_cast<int>(doomed.size());
   }
 

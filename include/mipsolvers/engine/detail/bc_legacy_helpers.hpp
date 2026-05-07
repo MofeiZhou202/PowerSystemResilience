@@ -1,0 +1,97 @@
+/// @file bc_legacy_helpers.hpp
+/// @brief Small support helpers shared by the legacy branch-and-cut modules.
+
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <Eigen/Core>
+
+#include "mipsolvers/engine/branch_and_cut.hpp"
+#include "mipsolvers/engine/detail/bc_types.hpp"
+#include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+#include "Highs.h"
+#endif
+
+namespace mipsolvers::engine::detail {
+
+bool bc_env_flag_enabled(const char* name);
+int bc_conformance_trace_terms(const char* env_name, int default_value = 32);
+bool bc_frontier_conformance_enabled();
+bool bc_first_class_lp_state_conformance_enabled();
+bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt);
+bool bc_vendored_highs_root_frontier_enabled();
+
+void apply_bc_first_class_simplex_state(SimplexOptions& opt,
+                                        bool allow_frontier_remap);
+
+struct BcStrictHighsContractState {
+  bool requested_vendored_highs_lp{false};
+  bool strict_highs_lp_contract{false};
+  bool allow_vendored_root_frontier{true};
+  bool domain_heuristics{false};
+};
+
+BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt);
+
+struct BcDeclaredIntegrality {
+  std::vector<char> integer_cols;
+  std::vector<char> binary_cols;
+};
+
+BcDeclaredIntegrality normalize_declared_integrality(const MIPModel& prob,
+                                                     LPModel& base_lp);
+
+std::shared_ptr<SimplexBasis> persist_bc_node_basis_from_simplex(
+    SimplexResult& simplex,
+    const std::shared_ptr<SimplexBasis>& previous_basis);
+
+class VendoredHighsSfBackendScope {
+ public:
+  explicit VendoredHighsSfBackendScope(bool enabled);
+  ~VendoredHighsSfBackendScope();
+  VendoredHighsSfBackendScope(const VendoredHighsSfBackendScope&) = delete;
+  VendoredHighsSfBackendScope& operator=(const VendoredHighsSfBackendScope&) = delete;
+
+ private:
+  bool old_{false};
+};
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+const char* bc_highs_model_status_label(HighsModelStatus status);
+
+bool bc_native_basis_to_highs_basis(const LPModel& lp,
+                                    const SimplexBasis* basis_hint,
+                                    HighsBasis& hbasis);
+
+bool bc_pass_mip_model_to_highs(Highs& highs,
+                                const LPModel& lp,
+                                const Eigen::VectorXd* lb_override,
+                                const Eigen::VectorXd* ub_override);
+
+struct VendoredHighsRootCertificateResult {
+  bool attempted{false};
+  bool accepted{false};
+  std::string status{"not_attempted"};
+  Eigen::VectorXd x;
+  double primal_obj{kInf};
+  double dual_bound{kInf};
+  double rel_gap{kInf};
+  std::int64_t nodes{-1};
+  std::int64_t simplex_iterations{-1};
+  double runtime_sec{0.0};
+};
+
+VendoredHighsRootCertificateResult bc_try_vendored_highs_root_certificate(
+    const LPModel& lp,
+    const Eigen::VectorXd* lb_override,
+    const Eigen::VectorXd* ub_override,
+    const BCOptions& opt);
+#endif
+
+}  // namespace mipsolvers::engine::detail

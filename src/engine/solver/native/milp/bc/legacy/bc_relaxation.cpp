@@ -1158,8 +1158,13 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     if (opt.verbose || std::getenv("HACDCPF_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS LP unavailable/failed; "
-                   "falling back to native LP path\n");
+                   "strict HiGHS LP contract rejects native fallback\n");
     }
+    out.primal.stats.solver_name = "VendoredHighsLpKernel";
+    out.primal.stats.success = false;
+    out.primal.stats.status = "VendoredHiGHS LP rejected";
+    out.dual_bound = std::numeric_limits<double>::infinity();
+    return out;
   }
   const bool trace_huge_root_relax = opt.verbose;
   auto relax_t0 = std::chrono::steady_clock::now();
@@ -1182,6 +1187,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     warm_opt.use_partial_pricing = true;
     warm_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
     warm_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    warm_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
     apply_root_simplex_conformance_options(warm_opt, opt.use_simplex_lp_nodes);
 
     auto warm_simplex = std::make_shared<SimplexResult>(
@@ -1542,6 +1548,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         push_opt.use_partial_pricing = huge_warmstart_root;
         push_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
         push_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        push_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
         apply_root_simplex_conformance_options(push_opt, require_simplex_crossover);
 
 	        simplex = std::make_shared<SimplexResult>(
@@ -1604,6 +1611,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
           cleanup_opt.use_partial_pricing = false; // Full pricing for consistent basis
           cleanup_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
           cleanup_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+          cleanup_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
           apply_root_simplex_conformance_options(cleanup_opt, require_simplex_crossover);
 
           auto cleanup_res = std::make_shared<SimplexResult>(
@@ -1646,6 +1654,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         sx_opt.use_partial_pricing = false;
         sx_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
         sx_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        sx_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
         apply_root_simplex_conformance_options(sx_opt, require_simplex_crossover);
         if (lp_basis_trace_enabled()) {
           std::fprintf(stderr,
@@ -1782,6 +1791,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     simplex_opt.verbose = false;
     simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
     simplex_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    simplex_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
     apply_root_simplex_conformance_options(simplex_opt, opt.use_simplex_lp_nodes);
 
     auto simplex = std::make_shared<SimplexResult>(solve_lp_with_basis(lp, simplex_opt, basis_hint));

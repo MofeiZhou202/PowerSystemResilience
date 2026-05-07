@@ -8,6 +8,8 @@
 
 #include "mipsolvers/engine/branch_and_cut.hpp"
 #include "mipsolvers/engine/detail/bc/legacy_bridge.hpp"
+#include "mipsolvers/engine/detail/bc_conformance_trace.hpp"
+#include "mipsolvers/engine/detail/bc_concurrent_tree_state.hpp"
 
 #include <algorithm>
 #include <array>
@@ -40,12 +42,19 @@
 #include <Eigen/Sparse>
 #include <fmt/format.h>
 
-#include <fmt/format.h>
-
 #include "mipsolvers/engine/detail/bc_types.hpp"
 #include "mipsolvers/engine/detail/bc_domain.hpp"
+#include "mipsolvers/engine/detail/bc_implied_bounds.hpp"
+#include "mipsolvers/engine/detail/bc_legacy_helpers.hpp"
+#include "mipsolvers/engine/detail/bc_minlp_legacy.hpp"
+#include "mipsolvers/engine/detail/bc_objective_propagation.hpp"
 #include "mipsolvers/engine/detail/bc_pools.hpp"
+#include "mipsolvers/engine/detail/bc_proof_artifacts.hpp"
+#include "mipsolvers/engine/detail/bc_root_audit.hpp"
+#include "mipsolvers/engine/detail/bc_status.hpp"
+#include "mipsolvers/engine/detail/bc_uc_trace.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
+#include "mipsolvers/engine/detail/bc_validation.hpp"
 #include "mipsolvers/engine/detail/bc_cglp.hpp"
 #include "mipsolvers/engine/detail/bc_clique_table.hpp"
 #include "mipsolvers/engine/detail/bc_threading.hpp"
@@ -58,6112 +67,11 @@
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 #include "mipsolvers/engine/strategy/papilo_presolve.hpp"
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
-#include "Highs.h"
-#endif
-
 namespace mipsolvers::engine {
 using namespace detail;
-
-// ── Public: thread-count resolver ──────────────────────────────────────
-// A value ≥ 1 is returned verbatim; ≤ 0 maps to std::thread::hardware_concurrency()
-// clamped to [min_threads, max_threads] (max_threads == 0 removes the cap).
-int resolve_num_threads(int requested, int min_threads, int max_threads) {
-  if (requested >= 1) return requested;
-  const unsigned hw = std::thread::hardware_concurrency();
-  int n = (hw == 0) ? min_threads : static_cast<int>(hw);
-  if (n < min_threads) n = min_threads;
-  if (max_threads > 0 && n > max_threads) n = max_threads;
-  return n;
-}
-int resolve_num_threads(const BCOptions& opt) {
-  return resolve_num_threads(opt.num_threads,
-                             std::max(1, opt.auto_parallel_min_threads),
-                             opt.auto_parallel_max_threads);
-}
+namespace bc_status = detail::bc_status;
 
 namespace {
-
-bool bc_env_flag_enabled(const char* name) {
-  const char* env = std::getenv(name);
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-
-int bc_conformance_trace_terms(const char* env_name, int default_value = 32) {
-  const char* env = std::getenv(env_name);
-  if (env == nullptr || env[0] == '\0') return default_value;
-  char* end = nullptr;
-  const long parsed = std::strtol(env, &end, 10);
-  if (end == env || parsed <= 0) return default_value;
-  return static_cast<int>(std::min<long>(parsed, 256));
-}
-
-bool bc_frontier_conformance_enabled() {
-  return bc_env_flag_enabled("HACDCPF_FRONTIER_CONFORM") ||
-         bc_env_flag_enabled("HACDCPF_NATIVE_FRONTIER_CONFORM") ||
-         bc_env_flag_enabled("HACDCPF_LPSTATE_CONFORM");
-}
-
-bool bc_first_class_lp_state_conformance_enabled() {
-  return bc_frontier_conformance_enabled() ||
-         bc_env_flag_enabled("HACDCPF_ROOT_COLDSTATE_DIAG") ||
-         bc_env_flag_enabled("HACDCPF_XPOOL_EXACT_DSE") ||
-         bc_env_flag_enabled("HACDCPF_XPOOL_PARENT_EXACT_DSE");
-}
-
-bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
-  return opt.use_vendored_highs_lp_kernel ||
-         bc_env_flag_enabled("HACDCPF_USE_VENDORED_HIGHS_LP");
-}
-
-bool bc_vendored_highs_root_frontier_enabled() {
-  return !bc_env_flag_enabled("HACDCPF_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER");
-}
-
-#ifdef HACDCPF_HAVE_HIGHS_LIB
-const char* bc_highs_model_status_label(HighsModelStatus status) {
-  switch (status) {
-    case HighsModelStatus::kOptimal:
-      return "Optimal";
-    case HighsModelStatus::kInfeasible:
-      return "Infeasible";
-    case HighsModelStatus::kUnbounded:
-      return "Unbounded";
-    case HighsModelStatus::kUnboundedOrInfeasible:
-      return "UnboundedOrInfeasible";
-    case HighsModelStatus::kObjectiveBound:
-      return "ObjectiveBound";
-    case HighsModelStatus::kObjectiveTarget:
-      return "ObjectiveTarget";
-    case HighsModelStatus::kTimeLimit:
-      return "TimeLimit";
-    case HighsModelStatus::kIterationLimit:
-      return "IterationLimit";
-    case HighsModelStatus::kSolutionLimit:
-      return "SolutionLimit";
-    default:
-      return "Other";
-  }
-}
-
-bool bc_native_basis_to_highs_basis(const LPModel& lp,
-                                    const SimplexBasis* basis_hint,
-                                    HighsBasis& hbasis) {
-  if (basis_hint == nullptr) return false;
-  const int n = static_cast<int>(lp.vars.size());
-  const int m = static_cast<int>(lp.A.rows() + lp.Aeq.rows());
-  if (basis_hint->rows != m ||
-      static_cast<int>(basis_hint->index_count()) != m ||
-      static_cast<int>(basis_hint->at_upper.size()) < n) {
-    return false;
-  }
-  hbasis.valid = false;
-  hbasis.alien = true;
-  hbasis.useful = true;
-  hbasis.col_status.assign(static_cast<std::size_t>(n),
-                           HighsBasisStatus::kLower);
-  hbasis.row_status.assign(static_cast<std::size_t>(m),
-                           HighsBasisStatus::kLower);
-  for (int j = 0; j < n; ++j) {
-    const auto& v = lp.vars[static_cast<std::size_t>(j)];
-    const bool fixed = std::isfinite(v.lb) && std::isfinite(v.ub) &&
-                       std::abs(v.ub - v.lb) <= 1e-12;
-    if (fixed) {
-      hbasis.col_status[static_cast<std::size_t>(j)] =
-          HighsBasisStatus::kLower;
-    } else if (basis_hint->at_upper[static_cast<std::size_t>(j)] != 0) {
-      hbasis.col_status[static_cast<std::size_t>(j)] =
-          HighsBasisStatus::kUpper;
-    }
-  }
-
-  const int slack_begin = n;
-  const int surplus_begin = n + std::max(0, basis_hint->sf_n_slack);
-  const int art_begin = surplus_begin + std::max(0, basis_hint->sf_n_surplus);
-  const int n_slack = std::max(0, basis_hint->sf_n_slack);
-  const int n_surplus = std::max(0, basis_hint->sf_n_surplus);
-  const int n_art = std::max(0, basis_hint->sf_n_artificial);
-  const auto& basis_indices = basis_hint->basis_indices();
-  for (int row = 0; row < m; ++row) {
-    const int col = basis_indices[static_cast<std::size_t>(row)];
-    if (col >= 0 && col < n) {
-      hbasis.col_status[static_cast<std::size_t>(col)] =
-          HighsBasisStatus::kBasic;
-    } else if (col >= slack_begin && col < slack_begin + n_slack) {
-      hbasis.row_status[static_cast<std::size_t>(col - slack_begin)] =
-          HighsBasisStatus::kBasic;
-    } else if (col >= surplus_begin && col < surplus_begin + n_surplus) {
-      hbasis.row_status[static_cast<std::size_t>(col - surplus_begin)] =
-          HighsBasisStatus::kBasic;
-    } else if (col >= art_begin && col < art_begin + n_art) {
-      hbasis.row_status[static_cast<std::size_t>(col - art_begin)] =
-          HighsBasisStatus::kBasic;
-    } else {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool bc_pass_mip_model_to_highs(Highs& highs,
-                                const LPModel& lp,
-                                const Eigen::VectorXd* lb_override,
-                                const Eigen::VectorXd* ub_override) {
-  const int ncols = static_cast<int>(lp.vars.size());
-  const int m_ineq = static_cast<int>(lp.A.rows());
-  const int m_eq = static_cast<int>(lp.Aeq.rows());
-  const int nrows = m_ineq + m_eq;
-  if (lp.c.size() != ncols) return false;
-  if (lp.b.size() != m_ineq || lp.beq.size() != m_eq) return false;
-  if (lb_override != nullptr && lb_override->size() != ncols) return false;
-  if (ub_override != nullptr && ub_override->size() != ncols) return false;
-
-  const double inf = std::numeric_limits<double>::infinity();
-  std::vector<double> col_cost(static_cast<std::size_t>(ncols), 0.0);
-  std::vector<double> col_lower(static_cast<std::size_t>(ncols), -inf);
-  std::vector<double> col_upper(static_cast<std::size_t>(ncols), inf);
-  std::vector<HighsInt> integrality(static_cast<std::size_t>(ncols),
-                                    static_cast<HighsInt>(HighsVarType::kContinuous));
-  for (int j = 0; j < ncols; ++j) {
-    col_cost[static_cast<std::size_t>(j)] =
-        lp.sense == Sense::Maximize ? -lp.c[j] : lp.c[j];
-    const auto& v = lp.vars[static_cast<std::size_t>(j)];
-    col_lower[static_cast<std::size_t>(j)] =
-        lb_override != nullptr ? (*lb_override)[j] : v.lb;
-    col_upper[static_cast<std::size_t>(j)] =
-        ub_override != nullptr ? (*ub_override)[j] : v.ub;
-    if (v.type != VarType::Continuous) {
-      integrality[static_cast<std::size_t>(j)] =
-          static_cast<HighsInt>(HighsVarType::kInteger);
-    }
-  }
-
-  std::vector<double> row_lower(static_cast<std::size_t>(nrows), -inf);
-  std::vector<double> row_upper(static_cast<std::size_t>(nrows), inf);
-  for (int r = 0; r < m_ineq; ++r) {
-    row_lower[static_cast<std::size_t>(r)] = lp_row_lhs_or_neg_inf(lp, r);
-    row_upper[static_cast<std::size_t>(r)] = lp.b[r];
-  }
-  for (int r = 0; r < m_eq; ++r) {
-    const int rr = m_ineq + r;
-    row_lower[static_cast<std::size_t>(rr)] = lp.beq[r];
-    row_upper[static_cast<std::size_t>(rr)] = lp.beq[r];
-  }
-
-  std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
-  std::vector<HighsInt> index;
-  std::vector<double> value;
-  index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
-  value.reserve(index.capacity());
-  const Eigen::SparseMatrix<double, Eigen::ColMajor> A_col(lp.A);
-  const Eigen::SparseMatrix<double, Eigen::ColMajor> Aeq_col(lp.Aeq);
-  for (int j = 0; j < ncols; ++j) {
-    start[static_cast<std::size_t>(j)] =
-        static_cast<HighsInt>(index.size());
-    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(A_col, j);
-         it; ++it) {
-      if (it.value() == 0.0) continue;
-      index.push_back(static_cast<HighsInt>(it.row()));
-      value.push_back(it.value());
-    }
-    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(Aeq_col, j);
-         it; ++it) {
-      if (it.value() == 0.0) continue;
-      index.push_back(static_cast<HighsInt>(m_ineq + it.row()));
-      value.push_back(it.value());
-    }
-  }
-  start[static_cast<std::size_t>(ncols)] =
-      static_cast<HighsInt>(index.size());
-
-  const HighsStatus pass_status = highs.passModel(
-      static_cast<HighsInt>(ncols), static_cast<HighsInt>(nrows),
-      static_cast<HighsInt>(index.size()),
-      static_cast<HighsInt>(MatrixFormat::kColwise),
-      static_cast<HighsInt>(ObjSense::kMinimize), 0.0, col_cost.data(),
-      col_lower.data(), col_upper.data(), row_lower.data(), row_upper.data(),
-      start.data(), index.data(), value.data(), integrality.data());
-  return pass_status == HighsStatus::kOk;
-}
-
-struct VendoredHighsRootCertificateResult {
-  bool attempted{false};
-  bool accepted{false};
-  std::string status{"not_attempted"};
-  Eigen::VectorXd x;
-  double primal_obj{kInf};
-  double dual_bound{kInf};
-  double rel_gap{kInf};
-  std::int64_t nodes{-1};
-  std::int64_t simplex_iterations{-1};
-  double runtime_sec{0.0};
-};
-
-VendoredHighsRootCertificateResult bc_try_vendored_highs_root_certificate(
-    const LPModel& lp,
-    const Eigen::VectorXd* lb_override,
-    const Eigen::VectorXd* ub_override,
-    const BCOptions& opt) {
-  VendoredHighsRootCertificateResult out;
-  out.attempted = true;
-  const auto h0 = std::chrono::steady_clock::now();
-
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 0 || lp.c.size() != n) {
-    out.status = "invalid_model_size";
-    return out;
-  }
-  if (lp.sense != Sense::Minimize) {
-    out.status = "unsupported_sense";
-    return out;
-  }
-
-  Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
-  highs.setOptionValue("threads", 1);
-  highs.setOptionValue("presolve", "choose");
-  highs.setOptionValue("solver", "choose");
-  highs.setOptionValue("mip_lp_solver", "choose");
-  highs.setOptionValue("mip_ipm_solver", "choose");
-  highs.setOptionValue("mip_rel_gap", opt.gap_tol);
-
-  if (!bc_pass_mip_model_to_highs(highs, lp, lb_override, ub_override)) {
-    out.status = "pass_error";
-    return out;
-  }
-
-  const HighsStatus run_status = highs.run();
-  const HighsModelStatus model_status = highs.getModelStatus();
-  const HighsInfo& info = highs.getInfo();
-  out.nodes = info.mip_node_count;
-  out.simplex_iterations = info.simplex_iteration_count;
-  out.dual_bound = info.mip_dual_bound;
-  out.status = fmt::format("{} run={} nodes={} iters={}",
-                           bc_highs_model_status_label(model_status),
-                           static_cast<int>(run_status), out.nodes,
-                           out.simplex_iterations);
-
-  const HighsSolution& sol = highs.getSolution();
-  if (run_status != HighsStatus::kOk ||
-      model_status != HighsModelStatus::kOptimal ||
-      out.nodes < 0 || out.nodes > 1 ||
-      static_cast<int>(sol.col_value.size()) < n ||
-      !std::isfinite(out.dual_bound)) {
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-
-  Eigen::VectorXd x(n);
-  for (int j = 0; j < n; ++j) {
-    x[j] = sol.col_value[static_cast<std::size_t>(j)];
-  }
-
-  Eigen::VectorXd lb(n), ub(n);
-  if (lb_override != nullptr && lb_override->size() == n) {
-    lb = *lb_override;
-  } else {
-    for (int j = 0; j < n; ++j) lb[j] = lp.vars[static_cast<std::size_t>(j)].lb;
-  }
-  if (ub_override != nullptr && ub_override->size() == n) {
-    ub = *ub_override;
-  } else {
-    for (int j = 0; j < n; ++j) ub[j] = lp.vars[static_cast<std::size_t>(j)].ub;
-  }
-
-  if (!satisfies_with_bounds(lp, x, lb, ub, 1e-6)) {
-    out.status += " invalid_native_recheck";
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-
-  out.primal_obj = objective_value(lp.c, x, lp.sense);
-  if (!std::isfinite(out.primal_obj)) {
-    out.status += " invalid_objective";
-    out.runtime_sec =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-            .count();
-    return out;
-  }
-  out.rel_gap = std::max(
-      0.0, (out.primal_obj - out.dual_bound) /
-               std::max(1.0, std::abs(out.primal_obj)));
-  if (out.rel_gap <= opt.gap_tol + 1e-12) {
-    out.x = std::move(x);
-    out.accepted = true;
-  } else {
-    out.status += fmt::format(" gap_reject={:.6g}", out.rel_gap);
-  }
-  out.runtime_sec =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - h0)
-          .count();
-  return out;
-}
-#endif
-
-void apply_bc_first_class_simplex_state(SimplexOptions& opt,
-                                        bool allow_frontier_remap) {
-  if (!bc_first_class_lp_state_conformance_enabled()) return;
-  opt.exact_dse_initialization = true;
-  opt.perturb_degenerate_primal = false;
-  opt.enable_degenerate_frontier_remap = allow_frontier_remap;
-  if (!allow_frontier_remap) {
-    opt.suppress_degenerate_frontier_remap = true;
-  }
-}
-
-class VendoredHighsSfBackendScope {
- public:
-  explicit VendoredHighsSfBackendScope(bool enabled)
-      : old_(set_vendored_highs_sf_backend_thread_enabled(
-            enabled || vendored_highs_sf_backend_thread_enabled())) {}
-  ~VendoredHighsSfBackendScope() {
-    set_vendored_highs_sf_backend_thread_enabled(old_);
-  }
-  VendoredHighsSfBackendScope(const VendoredHighsSfBackendScope&) = delete;
-  VendoredHighsSfBackendScope& operator=(const VendoredHighsSfBackendScope&) = delete;
-
- private:
-  bool old_{false};
-};
-
-const char* bc_var_type_name(const VariableMeta& v) {
-  switch (v.type) {
-    case VarType::Binary:
-      return "bin";
-    case VarType::Integer:
-      return "int";
-    case VarType::Continuous:
-      return "cont";
-    default:
-      return "var";
-  }
-}
-
-std::vector<char> bc_original_basic_mask(int n_orig,
-                                         const SimplexBasis* basis_hint) {
-  std::vector<char> basic(static_cast<std::size_t>(std::max(0, n_orig)), 0);
-  if (basis_hint == nullptr) return basic;
-  for (int col : basis_hint->basis_indices()) {
-    if (col >= 0 && col < n_orig) {
-      basic[static_cast<std::size_t>(col)] = 1;
-    }
-  }
-  return basic;
-}
-
-char bc_native_basis_status(int col,
-                            const std::vector<char>& basic,
-                            const SimplexBasis* basis_hint) {
-  if (col >= 0 && col < static_cast<int>(basic.size()) &&
-      basic[static_cast<std::size_t>(col)] != 0) {
-    return 'B';
-  }
-  if (basis_hint != nullptr && col >= 0 &&
-      col < static_cast<int>(basis_hint->at_upper.size()) &&
-      basis_hint->at_upper[static_cast<std::size_t>(col)] != 0) {
-    return 'U';
-  }
-  return 'L';
-}
-
-double bc_native_reduced_cost(int col, const SimplexBasis* basis_hint) {
-  if (basis_hint == nullptr || !basis_hint->cached_reduced_costs ||
-      col < 0 || col >= basis_hint->cached_reduced_costs->size()) {
-    return std::numeric_limits<double>::quiet_NaN();
-  }
-  return (*basis_hint->cached_reduced_costs)[col];
-}
-
-std::uint64_t bc_model_side_state_signature(const LPModel& lp) {
-  auto mix = [](std::uint64_t seed, std::uint64_t value) {
-    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-    return seed;
-  };
-  auto dbl = [](double value) {
-    if (std::isinf(value)) {
-      return value > 0.0 ? 0x7ff0000000000000ULL : 0xfff0000000000000ULL;
-    }
-    if (!std::isfinite(value)) return 0x7ff8000000000000ULL;
-    return static_cast<std::uint64_t>(
-        static_cast<std::int64_t>(std::llround(value * 1e9)));
-  };
-  std::uint64_t sig = 0x4841434448505353ULL;
-  sig = mix(sig, static_cast<std::uint64_t>(lp.vars.size()));
-  sig = mix(sig, static_cast<std::uint64_t>(lp.A.rows()));
-  sig = mix(sig, static_cast<std::uint64_t>(lp.Aeq.rows()));
-  sig = mix(sig, static_cast<std::uint64_t>(lp.A.nonZeros()));
-  sig = mix(sig, static_cast<std::uint64_t>(lp.Aeq.nonZeros()));
-  sig = mix(sig, static_cast<std::uint64_t>(lp.sense == Sense::Maximize));
-  for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
-    sig = mix(sig, static_cast<std::uint64_t>(j));
-    sig = mix(sig, static_cast<std::uint64_t>(lp.vars[j].type));
-    sig = mix(sig, dbl(lp.c[j]));
-    sig = mix(sig, dbl(lp.vars[j].lb));
-    sig = mix(sig, dbl(lp.vars[j].ub));
-  }
-  for (int j = 0; j < lp.A.outerSize(); ++j) {
-    sig = mix(sig, static_cast<std::uint64_t>(j));
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
-      sig = mix(sig, static_cast<std::uint64_t>(it.row()));
-      sig = mix(sig, dbl(it.value()));
-    }
-  }
-  for (int j = 0; j < lp.Aeq.outerSize(); ++j) {
-    sig = mix(sig, static_cast<std::uint64_t>(j) ^ 0x4551ULL);
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
-      sig = mix(sig, static_cast<std::uint64_t>(it.row()));
-      sig = mix(sig, dbl(it.value()));
-    }
-  }
-  for (int r = 0; r < static_cast<int>(lp.b.size()); ++r) {
-    sig = mix(sig, dbl(lp_row_lhs_or_neg_inf(lp, r)));
-    sig = mix(sig, dbl(lp.b[r]));
-  }
-  for (int r = 0; r < static_cast<int>(lp.beq.size()); ++r) {
-    sig = mix(sig, dbl(lp.beq[r]));
-  }
-  return sig;
-}
-
-const HiGHSPresolvedModelStats& cached_highs_presolve_side_state(
-    const LPModel& lp,
-    bool* cache_hit = nullptr) {
-  static std::mutex cache_mutex;
-  static std::unordered_map<std::uint64_t, HiGHSPresolvedModelStats> cache;
-  const std::uint64_t sig = bc_model_side_state_signature(lp);
-  {
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto it = cache.find(sig);
-    if (it != cache.end()) {
-      if (cache_hit != nullptr) *cache_hit = true;
-      return it->second;
-    }
-  }
-  HiGHSPresolvedModelStats computed = highs_presolve_model_stats(lp);
-  std::lock_guard<std::mutex> lock(cache_mutex);
-  auto [it, inserted] = cache.emplace(sig, std::move(computed));
-  (void)inserted;
-  if (cache_hit != nullptr) *cache_hit = false;
-  return it->second;
-}
-
-std::uint64_t bc_trace_hash_mix(std::uint64_t seed, std::uint64_t value) {
-  seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-  return seed;
-}
-
-std::uint64_t bc_trace_hash_double(double value) {
-  if (std::isinf(value)) {
-    return value > 0.0 ? 0x7ff0000000000000ULL : 0xfff0000000000000ULL;
-  }
-  if (!std::isfinite(value)) return 0x7ff8000000000000ULL;
-  return static_cast<std::uint64_t>(
-      static_cast<std::int64_t>(std::llround(value * 1e9)));
-}
-
-[[maybe_unused]] void trace_native_frontier_conformance(
-    const char* phase,
-    const LPModel& lp,
-    const StandardFormLP* native_sf,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& x,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    const SimplexBasis* basis_hint,
-    double objective,
-    double int_tol);
-
-[[maybe_unused]] void trace_native_frontier_conformance(
-    const char* phase,
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& x,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    const SimplexBasis* basis_hint,
-    double objective,
-    double int_tol) {
-  trace_native_frontier_conformance(phase, lp, nullptr, implied_integer_cols, x,
-                                    lb, ub, basis_hint, objective, int_tol);
-}
-
-void trace_native_frontier_conformance(
-    const char* phase,
-    const LPModel& lp,
-    const StandardFormLP* native_sf,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& x,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    const SimplexBasis* basis_hint,
-    double objective,
-    double int_tol) {
-  if (!bc_frontier_conformance_enabled()) return;
-  const int n = static_cast<int>(lp.vars.size());
-  if (x.size() != n || lb.size() != n || ub.size() != n) {
-    fmt::print(stderr,
-               "[B&C-FRONTIER] phase={} invalid_sizes n={} x={} lb={} ub={}\n",
-               phase != nullptr ? phase : "unknown", n, x.size(), lb.size(),
-               ub.size());
-    return;
-  }
-
-  const std::vector<char> basic = bc_original_basic_mask(n, basis_hint);
-  int basic_cols = 0;
-  int nonbasic_lower = 0;
-  int nonbasic_upper = 0;
-  int fixed_cols = 0;
-  int integer_like_total = 0;
-  int fractional_total = 0;
-  int fractional_binary = 0;
-  int fractional_integer = 0;
-  int fractional_implied = 0;
-  std::uint64_t status_hash = 0x4841434450435354ULL;
-  std::vector<char> native_status(static_cast<std::size_t>(n), '?');
-  std::vector<double> native_value(static_cast<std::size_t>(n),
-                                   std::numeric_limits<double>::quiet_NaN());
-  std::vector<double> native_rc(static_cast<std::size_t>(n),
-                                std::numeric_limits<double>::quiet_NaN());
-  std::vector<char> integer_like_mask(static_cast<std::size_t>(n), 0);
-  std::vector<char> native_frontier_mask(static_cast<std::size_t>(n), 0);
-  std::vector<char> native_nonbasic_mask(static_cast<std::size_t>(n), 0);
-
-  struct FrontierTerm {
-    int col;
-    double value;
-    double rounded;
-    double frac;
-    char status;
-    double rc;
-    bool implied;
-    const char* type;
-  };
-  struct SideTerm {
-    int col;
-    double value;
-    double lb;
-    double ub;
-    char status;
-    double rc;
-    bool implied;
-    const char* type;
-  };
-  std::vector<FrontierTerm> frontier;
-  std::vector<SideTerm> side_terms;
-  frontier.reserve(256);
-  side_terms.reserve(256);
-
-  for (int j = 0; j < n; ++j) {
-    const bool is_basic = basic[static_cast<std::size_t>(j)] != 0;
-    const char status = bc_native_basis_status(j, basic, basis_hint);
-    const double rcj = bc_native_reduced_cost(j, basis_hint);
-    native_status[static_cast<std::size_t>(j)] = status;
-    native_value[static_cast<std::size_t>(j)] = x[j];
-    native_rc[static_cast<std::size_t>(j)] = rcj;
-    status_hash = bc_trace_hash_mix(status_hash,
-                                    static_cast<std::uint64_t>(j));
-    status_hash = bc_trace_hash_mix(status_hash,
-                                    static_cast<std::uint64_t>(status));
-    status_hash = bc_trace_hash_mix(status_hash, bc_trace_hash_double(x[j]));
-    const bool is_fixed =
-        std::isfinite(lb[j]) && std::isfinite(ub[j]) &&
-        ub[j] - lb[j] <= std::max(1e-9, int_tol);
-    if (is_basic) {
-      ++basic_cols;
-    } else if (basis_hint != nullptr &&
-               j < static_cast<int>(basis_hint->at_upper.size()) &&
-               basis_hint->at_upper[static_cast<std::size_t>(j)] != 0) {
-      ++nonbasic_upper;
-    } else {
-      ++nonbasic_lower;
-    }
-    if (is_fixed) ++fixed_cols;
-
-    const bool implied =
-        j < static_cast<int>(implied_integer_cols.size()) &&
-        implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-    const bool integer_like =
-        is_integer_type(lp.vars[static_cast<std::size_t>(j)]) || implied;
-    if (!integer_like) continue;
-    integer_like_mask[static_cast<std::size_t>(j)] = 1;
-    ++integer_like_total;
-    if (!is_basic) {
-      native_nonbasic_mask[static_cast<std::size_t>(j)] = 1;
-      side_terms.push_back(SideTerm{
-          j, x[j], lb[j], ub[j], status, rcj, implied,
-          bc_var_type_name(lp.vars[static_cast<std::size_t>(j)])});
-    }
-    const double rounded =
-        std::min(ub[j], std::max(lb[j], std::round(x[j])));
-    const double frac = std::abs(x[j] - rounded);
-    if (!(frac > int_tol)) continue;
-    ++fractional_total;
-    if (lp.vars[static_cast<std::size_t>(j)].type == VarType::Binary) {
-      ++fractional_binary;
-    } else if (lp.vars[static_cast<std::size_t>(j)].type == VarType::Integer) {
-      ++fractional_integer;
-    } else if (implied) {
-      ++fractional_implied;
-    }
-    native_frontier_mask[static_cast<std::size_t>(j)] = 1;
-    frontier.push_back(FrontierTerm{
-        j, x[j], rounded, frac, status, rcj, implied,
-        bc_var_type_name(lp.vars[static_cast<std::size_t>(j)])});
-  }
-
-  std::sort(frontier.begin(), frontier.end(),
-            [](const FrontierTerm& a, const FrontierTerm& b) {
-              return a.col < b.col;
-            });
-  std::sort(side_terms.begin(), side_terms.end(),
-            [](const SideTerm& a, const SideTerm& b) {
-              return a.col < b.col;
-            });
-  std::uint64_t hash = 0x4841434450434655ULL;
-  for (const FrontierTerm& t : frontier) {
-    hash = bc_trace_hash_mix(hash, static_cast<std::uint64_t>(t.col));
-    hash = bc_trace_hash_mix(hash, bc_trace_hash_double(t.value));
-    hash = bc_trace_hash_mix(hash, static_cast<std::uint64_t>(t.status));
-  }
-
-  fmt::memory_buffer sample;
-  const int max_terms =
-      bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32);
-  for (int k = 0; k < static_cast<int>(frontier.size()) && k < max_terms; ++k) {
-    const FrontierTerm& t = frontier[static_cast<std::size_t>(k)];
-    if (k > 0) fmt::format_to(std::back_inserter(sample), ";");
-    fmt::format_to(std::back_inserter(sample),
-                   "{}:{:.12g}:r{:.12g}:f{:.6g}:{}:rc{:.6g}:{}:{}",
-                   t.col, t.value, t.rounded, t.frac, t.status, t.rc,
-                   t.type, t.implied ? "impl" : "decl");
-  }
-  fmt::memory_buffer side_sample;
-  for (int k = 0; k < static_cast<int>(side_terms.size()) && k < max_terms;
-       ++k) {
-    const SideTerm& t = side_terms[static_cast<std::size_t>(k)];
-    if (k > 0) fmt::format_to(std::back_inserter(side_sample), ";");
-    fmt::format_to(std::back_inserter(side_sample),
-                   "{}:{:.12g}:lb{:.12g}:ub{:.12g}:{}:rc{:.6g}:{}:{}",
-                   t.col, t.value, t.lb, t.ub, t.status, t.rc, t.type,
-                   t.implied ? "impl" : "decl");
-  }
-
-  fmt::print(stderr,
-             "[B&C-FRONTIER] phase={} obj={:.12g} cols={} "
-             "basis=basic{}:lower{}:upper{}:fixed{} "
-             "integer_like={} frac={} bin={} int={} impl={} hash={:016x} "
-             "status_hash={:016x} "
-             "basis_rows={} basis_cols={} at_upper_size={} sample=[{}]\n",
-             phase != nullptr ? phase : "unknown", objective, n, basic_cols,
-             nonbasic_lower, nonbasic_upper, fixed_cols, integer_like_total,
-             fractional_total, fractional_binary, fractional_integer,
-             fractional_implied, hash, status_hash,
-             basis_hint != nullptr ? basis_hint->rows : -1,
-             basis_hint != nullptr ? basis_hint->cols : -1,
-             basis_hint != nullptr
-                 ? static_cast<int>(basis_hint->at_upper.size())
-                 : -1,
-             fmt::to_string(sample));
-  fmt::print(stderr,
-             "[B&C-LPSTATE] phase={} status_hash={:016x} "
-             "nonbasic_integer_like={} side_sample=[{}]\n",
-             phase != nullptr ? phase : "unknown", status_hash,
-             side_terms.size(), fmt::to_string(side_sample));
-
-  if (bc_env_flag_enabled("HACDCPF_LPSTATE_CONFORM")) {
-    const HiGHSRootLpStateStats highs_state = highs_root_lp_state_stats(
-        lp, implied_integer_cols, int_tol,
-        bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32));
-    fmt::print(stderr,
-               "[HIGHS-LPSTATE] phase={} avail={} pass={} solve={} "
-               "status={} obj={:.12g} rows={} cols={} nnz={} iter={} "
-               "basis_valid={} basis=basic{}:lower{}:upper{}:zero{}:"
-               "other{}:fixed{} integer_like={} frac={} bin={} int={} "
-               "impl={} hash={:016x} status_hash={:016x} sample=[{}]\n",
-               phase != nullptr ? phase : "unknown",
-               highs_state.available ? 1 : 0,
-               highs_state.pass_ok ? 1 : 0,
-               highs_state.solve_ok ? 1 : 0, highs_state.model_status,
-               highs_state.objective, highs_state.rows, highs_state.cols,
-               highs_state.nnz, highs_state.iterations,
-               highs_state.basis_valid ? 1 : 0, highs_state.basic_cols,
-               highs_state.nonbasic_lower, highs_state.nonbasic_upper,
-               highs_state.nonbasic_zero, highs_state.nonbasic_other,
-               highs_state.fixed_cols, highs_state.integer_like_total,
-               highs_state.fractional_total, highs_state.fractional_binary,
-               highs_state.fractional_integer, highs_state.fractional_implied,
-               highs_state.frontier_hash, highs_state.status_hash,
-               highs_state.frontier_sample);
-    fmt::print(stderr,
-               "[HIGHS-LPSTATE-SIDE] phase={} nonbasic_integer_like={} "
-               "side_sample=[{}]\n",
-               phase != nullptr ? phase : "unknown",
-               highs_state.nonbasic_integer_like,
-               highs_state.side_sample);
-    if (static_cast<int>(highs_state.col_status.size()) == n &&
-        static_cast<int>(highs_state.col_value.size()) == n &&
-        static_cast<int>(highs_state.col_dual.size()) == n) {
-      int status_diff = 0;
-      int basic_diff = 0;
-      int side_flip = 0;
-      int degenerate_side_flip = 0;
-      int degenerate_basic_boundary_diff = 0;
-      int frontier_basic_boundary_diff = 0;
-      int nondegenerate_status_diff = 0;
-      int status_after_degenerate_remap = 0;
-      int value_diff = 0;
-      int frontier_both = 0;
-      int frontier_native_only = 0;
-      int frontier_highs_only = 0;
-      int frontier_status_diff = 0;
-      int side_integer_diff = 0;
-      double max_abs_dx = 0.0;
-      int max_abs_dx_col = -1;
-      fmt::memory_buffer status_sample;
-      fmt::memory_buffer frontier_native_sample;
-      fmt::memory_buffer frontier_highs_sample;
-      fmt::memory_buffer side_diff_sample;
-      int status_emit = 0;
-      int frontier_native_emit = 0;
-      int frontier_highs_emit = 0;
-      int side_diff_emit = 0;
-      auto append_sep = [](fmt::memory_buffer& buf, int emit) {
-        if (emit > 0) fmt::format_to(std::back_inserter(buf), ";");
-      };
-      const int diff_terms =
-          bc_conformance_trace_terms("HACDCPF_LPSTATE_DIFF_TERMS", max_terms);
-      for (int j = 0; j < n; ++j) {
-        const char ns = native_status[static_cast<std::size_t>(j)];
-        const char hs = highs_state.col_status[static_cast<std::size_t>(j)];
-        const double nx = native_value[static_cast<std::size_t>(j)];
-        const double hx = highs_state.col_value[static_cast<std::size_t>(j)];
-        const double nrc = native_rc[static_cast<std::size_t>(j)];
-        const double hrc = highs_state.col_dual[static_cast<std::size_t>(j)];
-        const double dx =
-            (std::isfinite(nx) && std::isfinite(hx))
-                ? std::abs(nx - hx)
-                : (nx == hx ? 0.0 : std::numeric_limits<double>::infinity());
-        if (dx > std::max(1e-8, 10.0 * int_tol)) ++value_diff;
-        if (dx > max_abs_dx) {
-          max_abs_dx = dx;
-          max_abs_dx_col = j;
-        }
-        if (ns != hs) {
-          ++status_diff;
-          const bool basic_membership_diff = (ns == 'B') != (hs == 'B');
-          const bool lower_upper_flip =
-              (ns == 'L' && hs == 'U') || (ns == 'U' && hs == 'L');
-          const bool nx_at_lower = std::abs(nx - lb[j]) <=
-                                   std::max(1e-8, 10.0 * int_tol);
-          const bool hx_at_lower = std::abs(hx - lb[j]) <=
-                                   std::max(1e-8, 10.0 * int_tol);
-          const bool nx_at_upper =
-              std::isfinite(ub[j]) &&
-              std::abs(nx - ub[j]) <= std::max(1e-8, 10.0 * int_tol);
-          const bool hx_at_upper =
-              std::isfinite(ub[j]) &&
-              std::abs(hx - ub[j]) <= std::max(1e-8, 10.0 * int_tol);
-          const bool same_value = dx <= std::max(1e-8, 10.0 * int_tol);
-          const bool same_bound =
-              (nx_at_lower && hx_at_lower) || (nx_at_upper && hx_at_upper);
-          const bool native_zero_rc =
-              std::isfinite(nrc) &&
-              std::abs(nrc) <= std::max(1e-8, 10.0 * int_tol);
-          const bool highs_zero_rc =
-              std::isfinite(hrc) &&
-              std::abs(hrc) <= std::max(1e-8, 10.0 * int_tol);
-          const bool on_degenerate_bound =
-              same_value && same_bound && (native_zero_rc || highs_zero_rc);
-          if (basic_membership_diff) {
-            ++basic_diff;
-            if (on_degenerate_bound) {
-              ++degenerate_basic_boundary_diff;
-              const bool nf =
-                  native_frontier_mask[static_cast<std::size_t>(j)] != 0;
-              const double hrounded = std::min(
-                  ub[j], std::max(lb[j], std::round(hx)));
-              const bool hf =
-                  std::isfinite(hx) && std::abs(hx - hrounded) > int_tol;
-              if (nf || hf) ++frontier_basic_boundary_diff;
-            } else {
-              ++nondegenerate_status_diff;
-            }
-          } else if (lower_upper_flip) {
-            ++side_flip;
-            if (on_degenerate_bound) {
-              ++degenerate_side_flip;
-            } else {
-              ++nondegenerate_status_diff;
-            }
-          } else {
-            ++nondegenerate_status_diff;
-          }
-          if (status_emit < diff_terms) {
-            append_sep(status_sample, status_emit++);
-            fmt::format_to(std::back_inserter(status_sample),
-                           "{}:{}>{}:nx{:.12g}:hx{:.12g}:nrc{:.6g}:hrc{:.6g}:{}",
-                           j, ns, hs, nx, hx, nrc, hrc,
-                           integer_like_mask[static_cast<std::size_t>(j)]
-                               ? "intlike"
-                               : "cont");
-          }
-        }
-        const bool integer_like =
-            integer_like_mask[static_cast<std::size_t>(j)] != 0;
-        if (!integer_like) continue;
-        const bool native_nonbasic =
-            native_nonbasic_mask[static_cast<std::size_t>(j)] != 0;
-        const bool highs_nonbasic = hs != 'B';
-        if (native_nonbasic != highs_nonbasic) {
-          ++side_integer_diff;
-          if (side_diff_emit < diff_terms) {
-            append_sep(side_diff_sample, side_diff_emit++);
-            fmt::format_to(std::back_inserter(side_diff_sample),
-                           "{}:{}>{}:nx{:.12g}:hx{:.12g}:nrc{:.6g}:hrc{:.6g}:{}",
-                           j, ns, hs, nx, hx, nrc, hrc,
-                           (j < static_cast<int>(implied_integer_cols.size()) &&
-                            implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                               ? "impl"
-                               : "decl");
-          }
-        }
-        const double hrounded = std::min(
-            ub[j], std::max(lb[j], std::round(hx)));
-        const bool highs_frontier =
-            std::isfinite(hx) && std::abs(hx - hrounded) > int_tol;
-        const bool native_frontier =
-            native_frontier_mask[static_cast<std::size_t>(j)] != 0;
-        if (native_frontier && highs_frontier) {
-          ++frontier_both;
-          if (ns != hs) ++frontier_status_diff;
-        } else if (native_frontier) {
-          ++frontier_native_only;
-          if (frontier_native_emit < diff_terms) {
-            append_sep(frontier_native_sample, frontier_native_emit++);
-            fmt::format_to(std::back_inserter(frontier_native_sample),
-                           "{}:nx{:.12g}:hx{:.12g}:{}>{}:nrc{:.6g}:hrc{:.6g}:{}",
-                           j, nx, hx, ns, hs, nrc, hrc,
-                           (j < static_cast<int>(implied_integer_cols.size()) &&
-                            implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                               ? "impl"
-                               : "decl");
-          }
-        } else if (highs_frontier) {
-          ++frontier_highs_only;
-          if (frontier_highs_emit < diff_terms) {
-            append_sep(frontier_highs_sample, frontier_highs_emit++);
-            fmt::format_to(std::back_inserter(frontier_highs_sample),
-                           "{}:nx{:.12g}:hx{:.12g}:{}>{}:nrc{:.6g}:hrc{:.6g}:{}",
-                           j, nx, hx, ns, hs, nrc, hrc,
-                           (j < static_cast<int>(implied_integer_cols.size()) &&
-                            implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                               ? "impl"
-                               : "decl");
-          }
-        }
-      }
-      status_after_degenerate_remap =
-          status_diff - degenerate_side_flip -
-          degenerate_basic_boundary_diff;
-      fmt::print(stderr,
-                 "[LPSTATE-DIFF] phase={} status_diff={} basic_diff={} "
-                 "side_flip={} deg_side={} deg_basic={} "
-                 "frontier_deg_basic={} nondeg_status={} post_remap_status={} "
-                 "value_diff={} max_dx={:.6g}@{} "
-                 "frontier=both{}:native_only{}:highs_only{}:"
-                 "status_diff{} side_integer_diff={} sample=[{}]\n",
-                 phase != nullptr ? phase : "unknown", status_diff,
-                 basic_diff, side_flip, degenerate_side_flip,
-                 degenerate_basic_boundary_diff, frontier_basic_boundary_diff,
-                 nondegenerate_status_diff, status_after_degenerate_remap,
-                 value_diff, max_abs_dx,
-                 max_abs_dx_col, frontier_both, frontier_native_only,
-                 frontier_highs_only, frontier_status_diff, side_integer_diff,
-                 fmt::to_string(status_sample));
-      fmt::print(stderr,
-                 "[LPSTATE-FRONTIER-DIFF] phase={} native_only=[{}] "
-                 "highs_only=[{}] side_diff=[{}]\n",
-                 phase != nullptr ? phase : "unknown",
-                 fmt::to_string(frontier_native_sample),
-                 fmt::to_string(frontier_highs_sample),
-                 fmt::to_string(side_diff_sample));
-    }
-    if (native_sf != nullptr) {
-      const HiGHSRootLpStateStats sf_state =
-          highs_standard_form_lp_state_stats(
-              *native_sf, lp, implied_integer_cols, int_tol,
-              bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32));
-      fmt::print(stderr,
-                 "[HIGHS-SF-LPSTATE] phase={} avail={} pass={} solve={} "
-                 "status={} obj={:.12g} rows={} cols={} nnz={} iter={} "
-                 "basis_valid={} basis=basic{}:lower{}:upper{}:zero{}:"
-                 "other{}:fixed{} integer_like={} frac={} bin={} int={} "
-                 "impl={} hash={:016x} status_hash={:016x} sample=[{}]\n",
-                 phase != nullptr ? phase : "unknown",
-                 sf_state.available ? 1 : 0,
-                 sf_state.pass_ok ? 1 : 0,
-                 sf_state.solve_ok ? 1 : 0, sf_state.model_status,
-                 sf_state.objective, sf_state.rows, sf_state.cols,
-                 sf_state.nnz, sf_state.iterations,
-                 sf_state.basis_valid ? 1 : 0, sf_state.basic_cols,
-                 sf_state.nonbasic_lower, sf_state.nonbasic_upper,
-                 sf_state.nonbasic_zero, sf_state.nonbasic_other,
-                 sf_state.fixed_cols, sf_state.integer_like_total,
-                 sf_state.fractional_total, sf_state.fractional_binary,
-                 sf_state.fractional_integer, sf_state.fractional_implied,
-                 sf_state.frontier_hash, sf_state.status_hash,
-                 sf_state.frontier_sample);
-      fmt::print(stderr,
-                 "[HIGHS-SF-LPSTATE-SIDE] phase={} nonbasic_integer_like={} "
-                 "side_sample=[{}]\n",
-                 phase != nullptr ? phase : "unknown",
-                 sf_state.nonbasic_integer_like, sf_state.side_sample);
-      if (static_cast<int>(sf_state.col_status.size()) == n &&
-          static_cast<int>(sf_state.col_value.size()) == n &&
-          static_cast<int>(sf_state.col_dual.size()) == n) {
-        int status_diff = 0;
-        int basic_diff = 0;
-        int side_flip = 0;
-        int degenerate_side_flip = 0;
-        int degenerate_basic_boundary_diff = 0;
-        int frontier_basic_boundary_diff = 0;
-        int degenerate_frontier_value_move = 0;
-        int nondegenerate_status_diff = 0;
-        int value_diff = 0;
-        int frontier_both = 0;
-        int frontier_native_only = 0;
-        int frontier_highs_only = 0;
-        int frontier_status_diff = 0;
-        int side_integer_diff = 0;
-        double max_abs_dx = 0.0;
-        int max_abs_dx_col = -1;
-        fmt::memory_buffer status_sample;
-        fmt::memory_buffer frontier_native_sample;
-        fmt::memory_buffer frontier_highs_sample;
-        fmt::memory_buffer side_diff_sample;
-        int status_emit = 0;
-        int frontier_native_emit = 0;
-        int frontier_highs_emit = 0;
-        int side_diff_emit = 0;
-        auto append_sep = [](fmt::memory_buffer& buf, int emit) {
-          if (emit > 0) fmt::format_to(std::back_inserter(buf), ";");
-        };
-        const int diff_terms =
-            bc_conformance_trace_terms("HACDCPF_LPSTATE_DIFF_TERMS",
-                                       max_terms);
-        const double state_tol = std::max(1e-8, 10.0 * int_tol);
-        for (int j = 0; j < n; ++j) {
-          const char ns = native_status[static_cast<std::size_t>(j)];
-          const char hs = sf_state.col_status[static_cast<std::size_t>(j)];
-          const double nx = native_value[static_cast<std::size_t>(j)];
-          const double hx = sf_state.col_value[static_cast<std::size_t>(j)];
-          const double nrc = native_rc[static_cast<std::size_t>(j)];
-          const double hrc = sf_state.col_dual[static_cast<std::size_t>(j)];
-          const double dx =
-              (std::isfinite(nx) && std::isfinite(hx))
-                  ? std::abs(nx - hx)
-                  : (nx == hx ? 0.0 : std::numeric_limits<double>::infinity());
-          if (dx > state_tol) ++value_diff;
-          if (dx > max_abs_dx) {
-            max_abs_dx = dx;
-            max_abs_dx_col = j;
-          }
-
-          const bool integer_like =
-              integer_like_mask[static_cast<std::size_t>(j)] != 0;
-          const double hrounded = std::min(
-              ub[j], std::max(lb[j], std::round(hx)));
-          const bool highs_frontier =
-              std::isfinite(hx) && std::abs(hx - hrounded) > int_tol;
-          const bool native_frontier =
-              native_frontier_mask[static_cast<std::size_t>(j)] != 0;
-          if (integer_like && native_frontier && highs_frontier) {
-            ++frontier_both;
-            if (ns != hs) ++frontier_status_diff;
-          } else if (integer_like && native_frontier) {
-            ++frontier_native_only;
-            if (frontier_native_emit < diff_terms) {
-              append_sep(frontier_native_sample, frontier_native_emit++);
-              fmt::format_to(
-                  std::back_inserter(frontier_native_sample),
-                  "{}:nx{:.12g}:hx{:.12g}:{}>{}:nrc{:.6g}:hrc{:.6g}:{}",
-                  j, nx, hx, ns, hs, nrc, hrc,
-                  (j < static_cast<int>(implied_integer_cols.size()) &&
-                   implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                      ? "impl"
-                      : "decl");
-            }
-          } else if (integer_like && highs_frontier) {
-            ++frontier_highs_only;
-            if (frontier_highs_emit < diff_terms) {
-              append_sep(frontier_highs_sample, frontier_highs_emit++);
-              fmt::format_to(
-                  std::back_inserter(frontier_highs_sample),
-                  "{}:nx{:.12g}:hx{:.12g}:{}>{}:nrc{:.6g}:hrc{:.6g}:{}",
-                  j, nx, hx, ns, hs, nrc, hrc,
-                  (j < static_cast<int>(implied_integer_cols.size()) &&
-                   implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                      ? "impl"
-                      : "decl");
-            }
-          }
-
-          const bool native_zero_rc =
-              std::isfinite(nrc) && std::abs(nrc) <= state_tol;
-          const bool highs_zero_rc =
-              std::isfinite(hrc) && std::abs(hrc) <= state_tol;
-          if (integer_like && (native_frontier || highs_frontier) &&
-              dx > state_tol && ns == 'B' && hs == 'B' &&
-              native_zero_rc && highs_zero_rc) {
-            ++degenerate_frontier_value_move;
-          }
-
-          if (ns != hs) {
-            ++status_diff;
-            const bool basic_membership_diff = (ns == 'B') != (hs == 'B');
-            const bool lower_upper_flip =
-                (ns == 'L' && hs == 'U') || (ns == 'U' && hs == 'L');
-            const bool nx_at_lower = std::abs(nx - lb[j]) <= state_tol;
-            const bool hx_at_lower = std::abs(hx - lb[j]) <= state_tol;
-            const bool nx_at_upper =
-                std::isfinite(ub[j]) && std::abs(nx - ub[j]) <= state_tol;
-            const bool hx_at_upper =
-                std::isfinite(ub[j]) && std::abs(hx - ub[j]) <= state_tol;
-            const bool same_value = dx <= state_tol;
-            const bool same_bound =
-                (nx_at_lower && hx_at_lower) || (nx_at_upper && hx_at_upper);
-            const bool on_degenerate_bound =
-                same_value && same_bound && (native_zero_rc || highs_zero_rc);
-            if (basic_membership_diff) {
-              ++basic_diff;
-              if (on_degenerate_bound) {
-                ++degenerate_basic_boundary_diff;
-                if (native_frontier || highs_frontier) {
-                  ++frontier_basic_boundary_diff;
-                }
-              } else {
-                ++nondegenerate_status_diff;
-              }
-            } else if (lower_upper_flip) {
-              ++side_flip;
-              if (on_degenerate_bound) {
-                ++degenerate_side_flip;
-              } else {
-                ++nondegenerate_status_diff;
-              }
-            } else {
-              ++nondegenerate_status_diff;
-            }
-            if (status_emit < diff_terms) {
-              append_sep(status_sample, status_emit++);
-              fmt::format_to(
-                  std::back_inserter(status_sample),
-                  "{}:{}>{}:nx{:.12g}:hx{:.12g}:nrc{:.6g}:hrc{:.6g}:{}",
-                  j, ns, hs, nx, hx, nrc, hrc,
-                  integer_like ? "intlike" : "cont");
-            }
-          }
-
-          if (!integer_like) continue;
-          const bool native_nonbasic =
-              native_nonbasic_mask[static_cast<std::size_t>(j)] != 0;
-          const bool highs_nonbasic = hs != 'B';
-          if (native_nonbasic != highs_nonbasic) {
-            ++side_integer_diff;
-            if (side_diff_emit < diff_terms) {
-              append_sep(side_diff_sample, side_diff_emit++);
-              fmt::format_to(
-                  std::back_inserter(side_diff_sample),
-                  "{}:{}>{}:nx{:.12g}:hx{:.12g}:nrc{:.6g}:hrc{:.6g}:{}",
-                  j, ns, hs, nx, hx, nrc, hrc,
-                  (j < static_cast<int>(implied_integer_cols.size()) &&
-                   implied_integer_cols[static_cast<std::size_t>(j)] != 0)
-                      ? "impl"
-                      : "decl");
-            }
-          }
-        }
-        const int status_after_degenerate_remap =
-            status_diff - degenerate_side_flip -
-            degenerate_basic_boundary_diff;
-        fmt::print(stderr,
-                   "[LPSTATE-SF-DIFF] phase={} status_diff={} basic_diff={} "
-                   "side_flip={} deg_side={} deg_basic={} "
-                   "frontier_deg_basic={} deg_frontier_move={} "
-                   "nondeg_status={} post_remap_status={} value_diff={} "
-                   "max_dx={:.6g}@{} frontier=both{}:native_only{}:"
-                   "highs_only{}:status_diff{} side_integer_diff={} "
-                   "sample=[{}]\n",
-                   phase != nullptr ? phase : "unknown", status_diff,
-                   basic_diff, side_flip, degenerate_side_flip,
-                   degenerate_basic_boundary_diff,
-                   frontier_basic_boundary_diff,
-                   degenerate_frontier_value_move,
-                   nondegenerate_status_diff, status_after_degenerate_remap,
-                   value_diff, max_abs_dx, max_abs_dx_col, frontier_both,
-                   frontier_native_only, frontier_highs_only,
-                   frontier_status_diff, side_integer_diff,
-                   fmt::to_string(status_sample));
-        fmt::print(stderr,
-                   "[LPSTATE-SF-FRONTIER-DIFF] phase={} native_only=[{}] "
-                   "highs_only=[{}] side_diff=[{}]\n",
-                   phase != nullptr ? phase : "unknown",
-                   fmt::to_string(frontier_native_sample),
-                   fmt::to_string(frontier_highs_sample),
-                   fmt::to_string(side_diff_sample));
-      }
-    }
-  }
-}
-
-void trace_native_repair_bounds(
-    const char* phase,
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& root_x,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    const SimplexBasis* basis_hint,
-    double int_tol,
-    const char* detail = nullptr) {
-  if (!bc_frontier_conformance_enabled()) return;
-  (void)int_tol;
-  const int n = static_cast<int>(lp.vars.size());
-  if (root_x.size() != n || lb.size() != n || ub.size() != n) return;
-  const std::vector<char> basic = bc_original_basic_mask(n, basis_hint);
-  int fixed = 0;
-  int free = 0;
-  int fractional_free = 0;
-  fmt::memory_buffer fixed_sample;
-  fmt::memory_buffer free_sample;
-  const int max_terms =
-      bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32);
-  int fixed_emit = 0;
-  int free_emit = 0;
-  for (int j = 0; j < n; ++j) {
-    if (!is_integer_type(lp.vars[static_cast<std::size_t>(j)])) continue;
-    const bool is_fixed =
-        std::isfinite(lb[j]) && std::isfinite(ub[j]) &&
-        ub[j] - lb[j] <= std::max(1e-9, int_tol);
-    const double rounded =
-        std::min(ub[j], std::max(lb[j], std::round(root_x[j])));
-    const double frac = std::abs(root_x[j] - rounded);
-    const char st = bc_native_basis_status(j, basic, basis_hint);
-    const bool implied =
-        j < static_cast<int>(implied_integer_cols.size()) &&
-        implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-    if (is_fixed) {
-      ++fixed;
-      if (fixed_emit < max_terms) {
-        if (fixed_emit++ > 0) fmt::format_to(std::back_inserter(fixed_sample), ";");
-        fmt::format_to(std::back_inserter(fixed_sample),
-                       "{}:{:.12g}:x{:.12g}:f{:.6g}:{}:{}",
-                       j, lb[j], root_x[j], frac, st,
-                       implied ? "impl" : "decl");
-      }
-    } else {
-      ++free;
-      if (frac > int_tol) ++fractional_free;
-      if (free_emit < max_terms) {
-        if (free_emit++ > 0) fmt::format_to(std::back_inserter(free_sample), ";");
-        fmt::format_to(std::back_inserter(free_sample),
-                       "{}:x{:.12g}:r{:.12g}:f{:.6g}:{}:{}",
-                       j, root_x[j], rounded, frac, st,
-                       implied ? "impl" : "decl");
-      }
-    }
-  }
-  fmt::print(stderr,
-             "[B&C-REPAIR] phase={} fixed={} free={} frac_free={} detail={} "
-             "fixed_sample=[{}] free_sample=[{}]\n",
-             phase != nullptr ? phase : "unknown", fixed, free,
-             fractional_free, detail != nullptr ? detail : "",
-             fmt::to_string(fixed_sample), fmt::to_string(free_sample));
-}
-
-void trace_native_repair_candidate_order(
-    const char* phase,
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& x,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    const SimplexBasis* basis_hint,
-    const std::vector<int>& ordered_cols,
-    double int_tol,
-    const char* detail = nullptr) {
-  if (!bc_frontier_conformance_enabled()) return;
-  (void)int_tol;
-  const int n = static_cast<int>(lp.vars.size());
-  if (x.size() != n || lb.size() != n || ub.size() != n) return;
-  const std::vector<char> basic = bc_original_basic_mask(n, basis_hint);
-  fmt::memory_buffer sample;
-  const int max_terms =
-      bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32);
-  int emitted = 0;
-  int valid = 0;
-  for (int col : ordered_cols) {
-    if (col < 0 || col >= n) continue;
-    ++valid;
-    if (emitted >= max_terms) continue;
-    const bool implied =
-        col < static_cast<int>(implied_integer_cols.size()) &&
-        implied_integer_cols[static_cast<std::size_t>(col)] != 0;
-    const double rounded =
-        std::min(ub[col], std::max(lb[col], std::round(x[col])));
-    const double frac = std::abs(x[col] - rounded);
-    if (emitted++ > 0) fmt::format_to(std::back_inserter(sample), ";");
-    fmt::format_to(std::back_inserter(sample),
-                   "{}:{:.12g}:r{:.12g}:f{:.6g}:{}:rc{:.6g}:{}:{}",
-                   col, x[col], rounded, frac,
-                   bc_native_basis_status(col, basic, basis_hint),
-                   bc_native_reduced_cost(col, basis_hint),
-                   bc_var_type_name(lp.vars[static_cast<std::size_t>(col)]),
-                   implied ? "impl" : "decl");
-  }
-
-  fmt::print(stderr,
-             "[B&C-REPAIR-CAND] phase={} count={} detail={} sample=[{}]\n",
-             phase != nullptr ? phase : "unknown", valid,
-             detail != nullptr ? detail : "", fmt::to_string(sample));
-}
-
-void trace_native_presolve_state_conformance(
-    const char* phase,
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const VariableBoundTable& variable_bound_table) {
-  if (!bc_frontier_conformance_enabled()) return;
-  const int n = static_cast<int>(lp.vars.size());
-  int binary_cols = 0;
-  int integer_cols = 0;
-  int implied_cols = 0;
-  int continuous_cols = 0;
-  std::uint64_t implied_hash = 0x4841434450434949ULL;
-  fmt::memory_buffer implied_sample;
-  const int max_terms =
-      bc_conformance_trace_terms("HACDCPF_FRONTIER_CONFORM_TERMS", 32);
-  int implied_emit = 0;
-
-  for (int j = 0; j < n; ++j) {
-    const bool implied =
-        j < static_cast<int>(implied_integer_cols.size()) &&
-        implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-    if (implied) {
-      ++implied_cols;
-      implied_hash =
-          bc_trace_hash_mix(implied_hash, static_cast<std::uint64_t>(j));
-      implied_hash = bc_trace_hash_mix(implied_hash,
-                                       bc_trace_hash_double(lp.vars[j].lb));
-      implied_hash = bc_trace_hash_mix(implied_hash,
-                                       bc_trace_hash_double(lp.vars[j].ub));
-      if (implied_emit < max_terms) {
-        if (implied_emit++ > 0)
-          fmt::format_to(std::back_inserter(implied_sample), ";");
-        fmt::format_to(std::back_inserter(implied_sample),
-                       "{}:lb{:.12g}:ub{:.12g}:{}",
-                       j, lp.vars[j].lb, lp.vars[j].ub,
-                       bc_var_type_name(lp.vars[j]));
-      }
-    }
-    switch (lp.vars[static_cast<std::size_t>(j)].type) {
-      case VarType::Binary:
-        ++binary_cols;
-        break;
-      case VarType::Integer:
-        ++integer_cols;
-        break;
-      case VarType::Continuous:
-        ++continuous_cols;
-        break;
-      default:
-        break;
-    }
-  }
-
-  int ranged_rows = 0;
-  std::uint64_t row_hash = 0x484143445043524fULL;
-  fmt::memory_buffer row_sample;
-  int row_emit = 0;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  for (int r = 0; r < Arow.rows(); ++r) {
-    const double lhs = lp_row_lhs_or_neg_inf(lp, r);
-    if (std::isfinite(lhs)) ++ranged_rows;
-    row_hash = bc_trace_hash_mix(row_hash, static_cast<std::uint64_t>(r));
-    row_hash = bc_trace_hash_mix(row_hash, bc_trace_hash_double(lhs));
-    row_hash = bc_trace_hash_mix(row_hash, bc_trace_hash_double(lp.b[r]));
-    row_hash = bc_trace_hash_mix(
-        row_hash, static_cast<std::uint64_t>(Arow.outerIndexPtr()[r + 1] -
-                                             Arow.outerIndexPtr()[r]));
-    if (row_emit < max_terms) {
-      if (row_emit++ > 0) fmt::format_to(std::back_inserter(row_sample), ";");
-      fmt::format_to(std::back_inserter(row_sample),
-                     "{}:lhs{:.12g}:rhs{:.12g}:nnz{}",
-                     r, lhs, lp.b[r],
-                     Arow.outerIndexPtr()[r + 1] - Arow.outerIndexPtr()[r]);
-    }
-  }
-
-  std::uint64_t vub_hash = 0x4841434450435655ULL;
-  std::uint64_t vlb_hash = 0x484143445043564cULL;
-  std::uint64_t vub_count = 0;
-  std::uint64_t vlb_count = 0;
-  fmt::memory_buffer vub_sample;
-  fmt::memory_buffer vlb_sample;
-  int vub_emit = 0;
-  int vlb_emit = 0;
-  for (int col = 0; col < variable_bound_table.num_vars(); ++col) {
-    for (const auto& entry : variable_bound_table.vubs(col)) {
-      ++vub_count;
-      vub_hash = bc_trace_hash_mix(vub_hash,
-                                   static_cast<std::uint64_t>(col));
-      vub_hash = bc_trace_hash_mix(
-          vub_hash, static_cast<std::uint64_t>(entry.trigger_col));
-      vub_hash = bc_trace_hash_mix(vub_hash,
-                                   bc_trace_hash_double(entry.bound.coef));
-      vub_hash = bc_trace_hash_mix(
-          vub_hash, bc_trace_hash_double(entry.bound.constant));
-      if (vub_emit < max_terms) {
-        if (vub_emit++ > 0)
-          fmt::format_to(std::back_inserter(vub_sample), ";");
-        fmt::format_to(std::back_inserter(vub_sample),
-                       "{}<= {:.12g}*{} + {:.12g}:min{:.12g}",
-                       col, entry.bound.coef, entry.trigger_col,
-                       entry.bound.constant, entry.bound.min_value());
-      }
-    }
-    for (const auto& entry : variable_bound_table.vlbs(col)) {
-      ++vlb_count;
-      vlb_hash = bc_trace_hash_mix(vlb_hash,
-                                   static_cast<std::uint64_t>(col));
-      vlb_hash = bc_trace_hash_mix(
-          vlb_hash, static_cast<std::uint64_t>(entry.trigger_col));
-      vlb_hash = bc_trace_hash_mix(vlb_hash,
-                                   bc_trace_hash_double(entry.bound.coef));
-      vlb_hash = bc_trace_hash_mix(
-          vlb_hash, bc_trace_hash_double(entry.bound.constant));
-      if (vlb_emit < max_terms) {
-        if (vlb_emit++ > 0)
-          fmt::format_to(std::back_inserter(vlb_sample), ";");
-        fmt::format_to(std::back_inserter(vlb_sample),
-                       "{}>= {:.12g}*{} + {:.12g}:max{:.12g}",
-                       col, entry.bound.coef, entry.trigger_col,
-                       entry.bound.constant, entry.bound.max_value());
-      }
-    }
-  }
-
-  fmt::print(stderr,
-             "[B&C-PRESOLVE-STATE] phase={} rows={} cols={} nnz={} "
-             "ranged={} eq={} bin={} int={} impl={} cont={} "
-             "implied_hash={:016x} row_hash={:016x} "
-             "vub={}:{} vlb={}:{} vb_total={} "
-             "stats=vub{}/{}/{}:vlb{}/{}/{}:mir{}/{}:red{} "
-             "implied_sample=[{}] row_sample=[{}] "
-             "vub_sample=[{}] vlb_sample=[{}]\n",
-             phase != nullptr ? phase : "presolve_state",
-             lp.A.rows(), n, lp.A.nonZeros() + lp.Aeq.nonZeros(),
-             ranged_rows, lp.Aeq.rows(), binary_cols, integer_cols,
-             implied_cols, continuous_cols, implied_hash, row_hash,
-             vub_count, vub_hash, vlb_count, vlb_hash,
-             variable_bound_table.size(),
-             variable_bound_table.stats().vub_accepted,
-             variable_bound_table.stats().vub_attempts,
-             variable_bound_table.stats().vub_replaced,
-             variable_bound_table.stats().vlb_accepted,
-             variable_bound_table.stats().vlb_attempts,
-             variable_bound_table.stats().vlb_replaced,
-             variable_bound_table.stats().mir_strengthened,
-             variable_bound_table.stats().mir_attempts,
-             variable_bound_table.stats().redundant,
-             fmt::to_string(implied_sample), fmt::to_string(row_sample),
-             fmt::to_string(vub_sample), fmt::to_string(vlb_sample));
-}
-
-namespace bc_status {
-constexpr char kNotStarted[] = "Not started";
-constexpr char kEmptyMilpModel[] = "Empty MILP model";
-constexpr char kEmptyMinlpModel[] = "Empty MINLP model";
-constexpr char kInfeasiblePapiloPresolve[] = "Infeasible (PaPILO presolve)";
-constexpr char kInvalidReducedIncumbent[] = "Invalid reduced-space incumbent";
-constexpr char kInvalidPapiloPostsolveIncumbent[] = "Invalid incumbent after PaPILO postsolve";
-constexpr char kInfeasibleVariableBounds[] = "Infeasible variable bounds";
-constexpr char kRootRelaxationFailed[] = "Root relaxation failed";
-constexpr char kRootRelaxationNanObjective[] = "Root relaxation returned NaN objective";
-constexpr char kRootNlpRelaxationFailed[] = "Root NLP relaxation failed";
-constexpr char kOptimalRootGapClosed[] = "Optimal (root gap closed)";
-constexpr char kTimeLimitReached[] = "Time limit reached";
-constexpr char kNodeLimitReached[] = "Node limit reached";
-constexpr char kSearchQueueExhausted[] = "Search queue exhausted";
-constexpr char kOptimalityGapReached[] = "Optimality gap reached";
-constexpr char kGapStagnation[] = "Gap stagnation";
-constexpr char kOptimalTreeExhausted[] = "Optimal (tree exhausted)";
-constexpr char kFeasibleIncumbentFound[] = "Feasible incumbent found";
-constexpr char kNoFeasibleIntegerSolutionFound[] = "No feasible integer solution found";
-}  // namespace bc_status
-
-struct RootCutRowAudit {
-  int rows{0};
-  int invalid_rows{0};
-  int nonviolated_at_lp{0};
-  int incumbent_violations{0};
-  double max_lp_violation{0.0};
-  double max_incumbent_violation{0.0};
-};
-
-struct RootCutStandardFormAudit {
-  int rows{0};
-  int flipped_rows{0};
-  int mismatches{0};
-  double max_coeff_error{0.0};
-  double max_rhs_error{0.0};
-};
-
-struct RootReducedCostAudit {
-  std::uint64_t rc_nonzero{0};
-  std::uint64_t rc_integer_nonzero{0};
-  std::uint64_t rc_implied_integer_nonzero{0};
-  std::uint64_t rc_at_lower{0};
-  std::uint64_t rc_at_upper{0};
-  std::uint64_t cutoff_fix_candidates{0};
-  double rc_abs_sum{0.0};
-  double rc_abs_max{0.0};
-  double gap{0.0};
-};
-
-void truncate_ineq_rows(LPModel& lp, int keep_rows) {
-  const int current_rows = static_cast<int>(lp.A.rows());
-  if (keep_rows < 0) {
-    return;
-  }
-  keep_rows = std::min(keep_rows, current_rows);
-  if (keep_rows < current_rows) {
-    Eigen::SparseMatrix<double> kept = lp.A.topRows(keep_rows);
-    lp.A = std::move(kept);
-    lp.b.conservativeResize(keep_rows);
-  }
-  if (lp.row_lhs.size() > 0 && lp.row_lhs.size() != keep_rows) {
-    if (lp.row_lhs.size() > keep_rows) {
-      lp.row_lhs.conservativeResize(keep_rows);
-    } else {
-      Eigen::VectorXd lhs_new = Eigen::VectorXd::Constant(
-          keep_rows, -std::numeric_limits<double>::infinity());
-      lhs_new.head(lp.row_lhs.size()) = lp.row_lhs;
-      lp.row_lhs = std::move(lhs_new);
-    }
-  }
-}
-
-RootCutRowAudit audit_root_cut_rows(const LPModel& lp,
-                                    int first_new_row,
-                                    const Eigen::VectorXd& lp_point,
-                                    const Eigen::VectorXd* incumbent_point,
-                                    double tol) {
-  RootCutRowAudit out;
-  const int m = static_cast<int>(lp.A.rows());
-  const int n = static_cast<int>(lp.A.cols());
-  if (first_new_row < 0 || first_new_row >= m || lp_point.size() != n) {
-    return out;
-  }
-
-  out.rows = m - first_new_row;
-  std::vector<double> lhs_lp(static_cast<std::size_t>(out.rows), 0.0);
-  std::vector<double> lhs_inc(static_cast<std::size_t>(out.rows), 0.0);
-  std::vector<double> norm_sq(static_cast<std::size_t>(out.rows), 0.0);
-  std::vector<char> finite(static_cast<std::size_t>(out.rows), 1);
-  const bool has_incumbent =
-      incumbent_point != nullptr && incumbent_point->size() == n;
-
-  for (int col = 0; col < lp.A.outerSize(); ++col) {
-    const double xj = lp_point[col];
-    const double zj = has_incumbent ? (*incumbent_point)[col] : 0.0;
-    if (!std::isfinite(xj) || (has_incumbent && !std::isfinite(zj))) {
-      continue;
-    }
-    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-      const int row = static_cast<int>(it.row());
-      if (row < first_new_row) continue;
-      const int k = row - first_new_row;
-      const double a = it.value();
-      if (!std::isfinite(a)) {
-        finite[static_cast<std::size_t>(k)] = 0;
-        continue;
-      }
-      lhs_lp[static_cast<std::size_t>(k)] += a * xj;
-      if (has_incumbent) {
-        lhs_inc[static_cast<std::size_t>(k)] += a * zj;
-      }
-      norm_sq[static_cast<std::size_t>(k)] += a * a;
-    }
-  }
-
-  for (int k = 0; k < out.rows; ++k) {
-    const int row = first_new_row + k;
-    const double rhs = lp.b[row];
-    const double norm = std::sqrt(norm_sq[static_cast<std::size_t>(k)]);
-    const double scale = std::max({1.0, norm, std::abs(rhs)});
-    if (!finite[static_cast<std::size_t>(k)] || !std::isfinite(rhs) ||
-        norm <= 1e-15) {
-      ++out.invalid_rows;
-      continue;
-    }
-
-    const double lp_viol = lhs_lp[static_cast<std::size_t>(k)] - rhs;
-    out.max_lp_violation = std::max(out.max_lp_violation, lp_viol);
-    if (lp_viol <= tol * scale) {
-      ++out.nonviolated_at_lp;
-    }
-
-    if (has_incumbent) {
-      const double inc_viol = lhs_inc[static_cast<std::size_t>(k)] - rhs;
-      out.max_incumbent_violation =
-          std::max(out.max_incumbent_violation, inc_viol);
-      if (inc_viol > 100.0 * tol * scale) {
-        ++out.incumbent_violations;
-      }
-    }
-  }
-
-  return out;
-}
-
-RootCutStandardFormAudit audit_root_cut_standard_form_rows(const LPModel& lp,
-                                                           int first_new_row,
-                                                           double tol) {
-  RootCutStandardFormAudit out;
-  const int m_ineq = static_cast<int>(lp.A.rows());
-  const int n = static_cast<int>(lp.A.cols());
-  if (first_new_row < 0 || first_new_row >= m_ineq) return out;
-
-  const StandardFormLP sf = build_standard_form_lp(lp);
-  if (sf.n_original != n || static_cast<int>(sf.A.rows()) < m_ineq ||
-      static_cast<int>(sf.row_sign.size()) < m_ineq ||
-      sf.lb_shift.size() < n) {
-    out.rows = m_ineq - first_new_row;
-    out.mismatches = out.rows;
-    return out;
-  }
-
-  const Eigen::SparseMatrix<double, Eigen::RowMajor> lp_a_row = lp.A;
-  const Eigen::SparseMatrix<double, Eigen::RowMajor> sf_a_row = sf.A;
-  for (int r = first_new_row; r < m_ineq; ++r) {
-    ++out.rows;
-    const int sign = sf.row_sign[static_cast<std::size_t>(r)];
-    if (sign < 0) ++out.flipped_rows;
-
-    double shifted_rhs = lp.b[r];
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(lp_a_row, r);
-         it; ++it) {
-      const int col = static_cast<int>(it.col());
-      if (col >= 0 && col < n) shifted_rhs -= it.value() * sf.lb_shift[col];
-    }
-    const double expected_rhs = static_cast<double>(sign) * shifted_rhs;
-    const double rhs_err = std::abs(sf.b[r] - expected_rhs);
-    out.max_rhs_error = std::max(out.max_rhs_error, rhs_err);
-    bool mismatch = rhs_err > tol * std::max({1.0, std::abs(sf.b[r]),
-                                              std::abs(expected_rhs)});
-
-    std::unordered_map<int, double> expected;
-    expected.reserve(static_cast<std::size_t>(lp_a_row.innerVector(r).nonZeros()));
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(lp_a_row, r);
-         it; ++it) {
-      expected[static_cast<int>(it.col())] = static_cast<double>(sign) * it.value();
-    }
-    std::unordered_set<int> seen;
-    seen.reserve(expected.size());
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf_a_row, r);
-         it; ++it) {
-      const int col = static_cast<int>(it.col());
-      if (col >= n) continue;
-      seen.insert(col);
-      const auto pos = expected.find(col);
-      const double ref = (pos == expected.end()) ? 0.0 : pos->second;
-      const double err = std::abs(it.value() - ref);
-      out.max_coeff_error = std::max(out.max_coeff_error, err);
-      if (err > tol * std::max({1.0, std::abs(it.value()), std::abs(ref)})) {
-        mismatch = true;
-      }
-    }
-    for (const auto& [col, ref] : expected) {
-      if (seen.find(col) != seen.end()) continue;
-      const double err = std::abs(ref);
-      out.max_coeff_error = std::max(out.max_coeff_error, err);
-      if (err > tol * std::max(1.0, std::abs(ref))) mismatch = true;
-    }
-    if (mismatch) ++out.mismatches;
-  }
-  return out;
-}
-
-RootReducedCostAudit audit_root_reduced_costs(
-    const std::vector<VariableMeta>& vars,
-    const std::vector<char>* implied_integer_cols,
-    const Eigen::VectorXd& x_relax,
-    const Eigen::VectorXd& reduced_costs,
-    const std::vector<int>& basis_indices,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    double node_bound,
-    double incumbent_obj,
-    double int_tol) {
-  RootReducedCostAudit out;
-  const int n = static_cast<int>(vars.size());
-  if (x_relax.size() < n || reduced_costs.size() < n || lb.size() < n ||
-      ub.size() < n) {
-    return out;
-  }
-  std::vector<char> is_basic(static_cast<std::size_t>(n), 0);
-  for (int idx : basis_indices) {
-    if (idx >= 0 && idx < n) is_basic[static_cast<std::size_t>(idx)] = 1;
-  }
-  out.gap = std::isfinite(incumbent_obj) && std::isfinite(node_bound)
-      ? incumbent_obj - node_bound
-      : kInf;
-  const double tol = std::max(1e-12, int_tol);
-  for (int j = 0; j < n; ++j) {
-    const double rc_abs = std::abs(reduced_costs[j]);
-    if (!std::isfinite(rc_abs) || rc_abs <= tol) continue;
-    ++out.rc_nonzero;
-    out.rc_abs_sum += rc_abs;
-    out.rc_abs_max = std::max(out.rc_abs_max, rc_abs);
-    const bool declared_integer =
-        is_integer_type(vars[static_cast<std::size_t>(j)]);
-    const bool implied_integer =
-        implied_integer_cols != nullptr &&
-        j < static_cast<int>(implied_integer_cols->size()) &&
-        (*implied_integer_cols)[static_cast<std::size_t>(j)];
-    if (!declared_integer && !implied_integer) continue;
-    ++out.rc_integer_nonzero;
-    if (implied_integer && !declared_integer) ++out.rc_implied_integer_nonzero;
-    const bool at_lower = std::isfinite(lb[j]) && std::abs(x_relax[j] - lb[j]) <= tol;
-    const bool at_upper = std::isfinite(ub[j]) && std::abs(x_relax[j] - ub[j]) <= tol;
-    if (at_lower) ++out.rc_at_lower;
-    if (at_upper) ++out.rc_at_upper;
-    if (is_basic[static_cast<std::size_t>(j)] || !std::isfinite(out.gap) ||
-        out.gap <= 1e-12 || !std::isfinite(lb[j]) || !std::isfinite(ub[j]) ||
-        ub[j] <= lb[j] + 1e-9) {
-      continue;
-    }
-    const double max_increase = rc_abs * (ub[j] - lb[j]);
-    if (max_increase <= out.gap + 1e-9) continue;
-    if (at_lower) {
-      const double new_ub = std::floor(out.gap / rc_abs + lb[j] + int_tol);
-      if (new_ub < ub[j] - 1e-9) ++out.cutoff_fix_candidates;
-    } else if (at_upper) {
-      const double new_lb = std::ceil(ub[j] - out.gap / rc_abs - int_tol);
-      if (new_lb > lb[j] + 1e-9) ++out.cutoff_fix_candidates;
-    }
-  }
-  return out;
-}
-
-struct IncumbentValidationSummary {
-  bool size_ok{true};
-  bool bounds_ok{true};
-  bool ineq_ok{true};
-  bool eq_ok{true};
-  bool integrality_ok{true};
-  int expected_size{0};
-  int actual_size{0};
-  int bound_var{-1};
-  int ineq_row{-1};
-  int eq_row{-1};
-  int frac_var{-1};
-  double ineq_row_activity{0.0};
-  double ineq_row_lhs{-kInf};
-  double ineq_row_rhs{kInf};
-  const char* ineq_row_side{"none"};
-  double max_bound_violation{0.0};
-  double max_ineq_violation{0.0};
-  double max_eq_violation{0.0};
-  double max_integrality_violation{0.0};
-
-  bool ok() const {
-    return size_ok && bounds_ok && ineq_ok && eq_ok && integrality_ok;
-  }
-};
-
-struct ObjectiveCutoffEvent {
-  int row{-1};
-  int s{-1};
-  int y{-1};
-  int z{-1};
-  double mandatory_s{0.0};
-  double cost{0.0};
-  double activity{0.0};
-};
-
-struct ObjectivePropagationState {
-  struct Term {
-    int col{-1};
-    double cost{0.0};
-    bool integer{false};
-  };
-  struct PartitionTerm {
-    int col{-1};
-    double cost{0.0};
-    bool favorable_one{false};
-    double favorable_contribution{0.0};
-    double nonfavorable_contribution{0.0};
-    double replacement_delta{0.0};
-  };
-  struct Partition {
-    std::vector<PartitionTerm> terms;
-  };
-  struct Literal {
-    int col{-1};
-    bool value_one{false};
-  };
-  struct ImpliedContributionEvent {
-    int target_col{-1};
-    double target_bound{0.0};
-    double target_cost{0.0};
-    bool target_is_lower_bound{true};
-    std::vector<Literal> literals;
-  };
-
-  std::vector<Term> terms;
-  std::vector<int> partition_of_col;
-  std::vector<Partition> partitions;
-  std::vector<ImpliedContributionEvent> implied_events;
-  std::vector<char> implied_event_target_cols;
-  std::vector<std::vector<int>> implied_events_by_literal;
-  std::uint64_t clique_edges{0};
-  std::uint64_t mixed_rows_scanned{0};
-  double max_replacement_delta{0.0};
-  double max_implied_event_delta{0.0};
-  double max_implied_event_aggregate_delta{0.0};
-  std::uint64_t implied_event_vlb_events{0};
-  std::uint64_t implied_event_vub_events{0};
-  std::uint64_t implied_event_integral_rounds{0};
-  std::uint64_t implied_event_mir_attempts{0};
-  std::uint64_t implied_event_mir_strengthened{0};
-  double implied_event_mir_gain_sum{0.0};
-  double implied_event_mir_gain_max{0.0};
-  std::uint64_t objective_clique_candidate_literals{0};
-  std::uint64_t objective_clique_pair_tests{0};
-  std::uint64_t objective_clique_pair_conflicts{0};
-  std::uint64_t objective_clique_literal_conflicts{0};
-  std::uint64_t objective_clique_implication_conflicts{0};
-
-  void setup(const LPModel& lp,
-             const std::vector<char>* implied_integer_cols = nullptr,
-             const CliqueTable* clique_table = nullptr,
-             const BinaryImplicationGraph* implication_graph = nullptr) {
-    terms.clear();
-    partitions.clear();
-    implied_events.clear();
-    clique_edges = 0;
-    mixed_rows_scanned = 0;
-    max_replacement_delta = 0.0;
-    max_implied_event_delta = 0.0;
-    max_implied_event_aggregate_delta = 0.0;
-    implied_event_vlb_events = 0;
-    implied_event_vub_events = 0;
-    implied_event_integral_rounds = 0;
-    implied_event_mir_attempts = 0;
-    implied_event_mir_strengthened = 0;
-    implied_event_mir_gain_sum = 0.0;
-    implied_event_mir_gain_max = 0.0;
-    objective_clique_candidate_literals = 0;
-    objective_clique_pair_tests = 0;
-    objective_clique_pair_conflicts = 0;
-    objective_clique_literal_conflicts = 0;
-    objective_clique_implication_conflicts = 0;
-    const int n = static_cast<int>(lp.vars.size());
-    partition_of_col.assign(static_cast<std::size_t>(n), -1);
-    implied_event_target_cols.assign(static_cast<std::size_t>(n), 0);
-    implied_events_by_literal.assign(static_cast<std::size_t>(2 * n), {});
-    terms.reserve(static_cast<std::size_t>(n));
-    auto implied_integer = [&](int j) {
-      return implied_integer_cols != nullptr &&
-             j >= 0 && j < static_cast<int>(implied_integer_cols->size()) &&
-             (*implied_integer_cols)[static_cast<std::size_t>(j)];
-    };
-    for (int j = 0; j < n; ++j) {
-      const double c = lp.c[j];
-      if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
-      terms.push_back(Term{
-          j, c, is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-                    implied_integer(j)});
-    }
-    build_objective_clique_partitions(lp, implied_integer_cols);
-    build_objective_clique_partitions_from_implications(
-        lp, implied_integer_cols, clique_table, implication_graph);
-    build_implied_contribution_events(lp, implied_integer_cols);
-    build_implied_contribution_events_from_implications(lp, implication_graph);
-    recompute_max_implied_event_aggregate_delta(lp);
-  }
-
-  bool empty() const { return terms.empty(); }
-
-  static bool finite_model_bound(double value) {
-    return std::isfinite(value) && std::abs(value) < 1e19;
-  }
-
-  static bool strengthen_binary_var_bound_mir(double& coef,
-                                              double& constant,
-                                              bool lower_bound) {
-    if (!std::isfinite(coef) || !std::isfinite(constant) ||
-        std::abs(coef) >= 1e19 || std::abs(constant) >= 1e19) {
-      return false;
-    }
-    constexpr double f0min = 0.005;
-    constexpr double f0max = 0.995;
-    constexpr double tiny = 1e-12;
-    const double multiplier = lower_bound ? -1.0 : 1.0;
-    const double downrhs = std::floor(multiplier * constant);
-    const double f0 = multiplier * constant - downrhs;
-    if (f0 < f0min || f0 > f0max) return false;
-    const double downaj = std::floor(-multiplier * coef + tiny);
-    const double fj = -multiplier * coef - downaj;
-    constant = multiplier * downrhs;
-    coef = -multiplier *
-           (downaj + std::max(fj - f0, 0.0) / (1.0 - f0));
-    return true;
-  }
-
-  void build_objective_clique_partitions(
-      const LPModel& lp,
-      const std::vector<char>* implied_integer_cols = nullptr) {
-    const int n = static_cast<int>(lp.vars.size());
-    auto binary_like = [&](int j) {
-      const auto& var = lp.vars[static_cast<std::size_t>(j)];
-      if (var.type == VarType::Binary) return true;
-      const bool implied_integer =
-          implied_integer_cols != nullptr &&
-          j >= 0 && j < static_cast<int>(implied_integer_cols->size()) &&
-          (*implied_integer_cols)[static_cast<std::size_t>(j)];
-      return implied_integer &&
-             std::abs(var.lb) <= 1e-9 && std::abs(var.ub - 1.0) <= 1e-9;
-    };
-    struct Candidate {
-      int col{-1};
-      double cost{0.0};
-      bool favorable_one{false};
-      double penalty{0.0};
-    };
-    std::vector<Candidate> candidates;
-    std::vector<int> cand_pos(static_cast<std::size_t>(n), -1);
-    for (int j = 0; j < n; ++j) {
-      const double c = lp.c[j];
-      if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
-      if (!binary_like(j)) continue;
-      if (lp.vars[static_cast<std::size_t>(j)].lb > 1e-9 ||
-          lp.vars[static_cast<std::size_t>(j)].ub < 1.0 - 1e-9) {
-        continue;
-      }
-      const int pos = static_cast<int>(candidates.size());
-      cand_pos[static_cast<std::size_t>(j)] = pos;
-      candidates.push_back(Candidate{j, c, c < 0.0, std::abs(c)});
-    }
-    if (candidates.size() <= 1) return;
-    objective_clique_candidate_literals +=
-        static_cast<std::uint64_t>(candidates.size());
-
-    std::vector<std::vector<int>> adj(candidates.size());
-    auto add_edge = [&](int a, int b) {
-      if (a < 0 || b < 0 || a == b) return;
-      adj[static_cast<std::size_t>(a)].push_back(b);
-      adj[static_cast<std::size_t>(b)].push_back(a);
-      ++clique_edges;
-    };
-
-    auto scan_leq_row = [&](const std::vector<std::pair<int, double>>& row,
-                            double rhs) {
-      if (row.size() < 2 || row.size() > 512 || !std::isfinite(rhs)) return;
-      double min_activity = 0.0;
-      struct RowCand {
-        int cand{-1};
-        double lift{0.0};
-        double penalty{0.0};
-      };
-      std::vector<RowCand> row_cands;
-      row_cands.reserve(row.size());
-      bool has_continuous_or_general = false;
-      for (const auto& [col, a] : row) {
-        if (col < 0 || col >= n || std::abs(a) <= 1e-12 || !std::isfinite(a)) {
-          continue;
-        }
-        const auto& var = lp.vars[static_cast<std::size_t>(col)];
-        if (var.type != VarType::Binary) has_continuous_or_general = true;
-        const double activity_bound = (a >= 0.0) ? var.lb : var.ub;
-        if (!finite_model_bound(activity_bound)) return;
-        const double min_contrib = a * activity_bound;
-        min_activity += min_contrib;
-        const int cp = cand_pos[static_cast<std::size_t>(col)];
-        if (cp < 0) continue;
-        const double fav_value =
-            candidates[static_cast<std::size_t>(cp)].favorable_one ? 1.0 : 0.0;
-        const double lift = a * fav_value - min_contrib;
-        if (lift > 1e-12) {
-          row_cands.push_back(
-              RowCand{cp, lift, candidates[static_cast<std::size_t>(cp)].penalty});
-        }
-      }
-      if (row_cands.size() < 2) return;
-      if (has_continuous_or_general) ++mixed_rows_scanned;
-      if (row_cands.size() > 256) {
-        std::sort(row_cands.begin(), row_cands.end(),
-                  [](const RowCand& a, const RowCand& b) {
-                    if (a.penalty != b.penalty) return a.penalty > b.penalty;
-                    return a.lift > b.lift;
-                  });
-        row_cands.resize(256);
-      }
-      const int k = static_cast<int>(row_cands.size());
-      for (int i = 0; i < k; ++i) {
-        for (int j = i + 1; j < k; ++j) {
-          ++objective_clique_pair_tests;
-          if (min_activity + row_cands[static_cast<std::size_t>(i)].lift +
-                  row_cands[static_cast<std::size_t>(j)].lift >
-              rhs + 1e-9) {
-            ++objective_clique_pair_conflicts;
-            add_edge(row_cands[static_cast<std::size_t>(i)].cand,
-                     row_cands[static_cast<std::size_t>(j)].cand);
-          }
-        }
-      }
-    };
-
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-    std::vector<std::pair<int, double>> row;
-    row.reserve(128);
-    for (int r = 0; r < Arow.rows(); ++r) {
-      row.clear();
-      bool too_large = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, r);
-           it; ++it) {
-        const int col = it.col();
-        if (col < 0 || col >= n) continue;
-        row.emplace_back(col, it.value());
-        if (row.size() > 512) {
-          too_large = true;
-          break;
-        }
-      }
-      if (!too_large) scan_leq_row(row, lp.b[r]);
-      const double lhs = lp_row_lhs_or_neg_inf(lp, r);
-      if (!too_large && std::isfinite(lhs)) {
-        for (auto& entry : row) entry.second = -entry.second;
-        scan_leq_row(row, -lhs);
-      }
-    }
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Aeqrow = lp.Aeq;
-    for (int r = 0; r < Aeqrow.rows(); ++r) {
-      row.clear();
-      bool too_large = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeqrow, r);
-           it; ++it) {
-        const int col = it.col();
-        if (col < 0 || col >= n) continue;
-        row.emplace_back(col, it.value());
-        if (row.size() > 512) {
-          too_large = true;
-          break;
-        }
-      }
-      if (too_large) continue;
-      scan_leq_row(row, lp.beq[r]);
-      for (auto& entry : row) entry.second = -entry.second;
-      scan_leq_row(row, -lp.beq[r]);
-    }
-
-    for (auto& nbs : adj) {
-      std::sort(nbs.begin(), nbs.end());
-      nbs.erase(std::unique(nbs.begin(), nbs.end()), nbs.end());
-    }
-
-    std::vector<int> order(candidates.size());
-    for (int i = 0; i < static_cast<int>(order.size()); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-      const auto& ca = candidates[static_cast<std::size_t>(a)];
-      const auto& cb = candidates[static_cast<std::size_t>(b)];
-      if (ca.penalty != cb.penalty) return ca.penalty > cb.penalty;
-      return ca.col < cb.col;
-    });
-    std::vector<char> used(candidates.size(), 0);
-    for (int seed : order) {
-      if (used[static_cast<std::size_t>(seed)] ||
-          adj[static_cast<std::size_t>(seed)].empty()) {
-        continue;
-      }
-      std::vector<int> clique{seed};
-      used[static_cast<std::size_t>(seed)] = 1;
-      for (int cand : order) {
-        if (used[static_cast<std::size_t>(cand)] || cand == seed) continue;
-        bool all_conflict = true;
-        for (int member : clique) {
-          const auto& nbs = adj[static_cast<std::size_t>(cand)];
-          if (!std::binary_search(nbs.begin(), nbs.end(), member)) {
-            all_conflict = false;
-            break;
-          }
-        }
-        if (!all_conflict) continue;
-        clique.push_back(cand);
-        used[static_cast<std::size_t>(cand)] = 1;
-      }
-      if (clique.size() < 2) {
-        used[static_cast<std::size_t>(seed)] = 0;
-        continue;
-      }
-      const int pid = static_cast<int>(partitions.size());
-      Partition part;
-      part.terms.reserve(clique.size());
-      for (int cp : clique) {
-        const Candidate& c = candidates[static_cast<std::size_t>(cp)];
-        const double fav = c.favorable_one ? c.cost : 0.0;
-        const double nonfav = c.favorable_one ? 0.0 : c.cost;
-        part.terms.push_back(
-            PartitionTerm{c.col, c.cost, c.favorable_one, fav, nonfav,
-                          nonfav - fav});
-        max_replacement_delta =
-            std::max(max_replacement_delta, std::max(0.0, nonfav - fav));
-        partition_of_col[static_cast<std::size_t>(c.col)] = pid;
-      }
-      partitions.push_back(std::move(part));
-    }
-  }
-
-  void build_objective_clique_partitions_from_implications(
-      const LPModel& lp,
-      const std::vector<char>* implied_integer_cols,
-      const CliqueTable* clique_table,
-      const BinaryImplicationGraph* implication_graph) {
-    const int n = static_cast<int>(lp.vars.size());
-    if (n <= 1 || (clique_table == nullptr && implication_graph == nullptr)) {
-      return;
-    }
-
-    auto binary_like = [&](int j) {
-      if (j < 0 || j >= n) return false;
-      const auto& var = lp.vars[static_cast<std::size_t>(j)];
-      if (var.lb > 1e-9 || var.ub < 1.0 - 1e-9) return false;
-      if (var.type == VarType::Binary) return true;
-      const bool implied_integer =
-          implied_integer_cols != nullptr &&
-          j < static_cast<int>(implied_integer_cols->size()) &&
-          (*implied_integer_cols)[static_cast<std::size_t>(j)];
-      return implied_integer && std::abs(var.lb) <= 1e-9 &&
-             std::abs(var.ub - 1.0) <= 1e-9;
-    };
-
-    struct Candidate {
-      int col{-1};
-      double cost{0.0};
-      bool favorable_one{false};
-      double penalty{0.0};
-    };
-    std::vector<Candidate> candidates;
-    candidates.reserve(terms.size());
-    for (const Term& term : terms) {
-      const int j = term.col;
-      if (!binary_like(j)) continue;
-      if (j < static_cast<int>(partition_of_col.size()) &&
-          partition_of_col[static_cast<std::size_t>(j)] >= 0) {
-        continue;
-      }
-      candidates.push_back(Candidate{j, term.cost, term.cost < 0.0,
-                                     std::abs(term.cost)});
-    }
-    if (candidates.size() <= 1) return;
-    objective_clique_candidate_literals +=
-        static_cast<std::uint64_t>(candidates.size());
-
-    auto literals_conflict = [&](const Candidate& a,
-                                 const Candidate& b,
-                                 bool& via_literal,
-                                 bool& via_implication) {
-      via_literal = false;
-      via_implication = false;
-      if (a.col == b.col) return false;
-
-      if (clique_table != nullptr &&
-          clique_table->has_literal_edge(a.col, a.favorable_one,
-                                         b.col, b.favorable_one)) {
-        via_literal = true;
-        return true;
-      }
-
-      if (implication_graph == nullptr || implication_graph->empty()) {
-        return false;
-      }
-      const bool b_opposite = !b.favorable_one;
-      const bool a_opposite = !a.favorable_one;
-      via_implication =
-          implication_graph->implies_binary_value(
-              a.col, a.favorable_one, b.col, b_opposite) ||
-          implication_graph->implies_binary_value(
-              b.col, b.favorable_one, a.col, a_opposite);
-      return via_implication;
-    };
-
-    std::vector<std::vector<int>> adj(candidates.size());
-    for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
-      for (int j = i + 1; j < static_cast<int>(candidates.size()); ++j) {
-        ++objective_clique_pair_tests;
-        bool via_literal = false;
-        bool via_implication = false;
-        if (!literals_conflict(candidates[static_cast<std::size_t>(i)],
-                               candidates[static_cast<std::size_t>(j)],
-                               via_literal, via_implication)) {
-          continue;
-        }
-        ++objective_clique_pair_conflicts;
-        if (via_literal) ++objective_clique_literal_conflicts;
-        if (via_implication) ++objective_clique_implication_conflicts;
-        adj[static_cast<std::size_t>(i)].push_back(j);
-        adj[static_cast<std::size_t>(j)].push_back(i);
-        ++clique_edges;
-      }
-    }
-    for (auto& nbs : adj) {
-      std::sort(nbs.begin(), nbs.end());
-      nbs.erase(std::unique(nbs.begin(), nbs.end()), nbs.end());
-    }
-
-    std::vector<int> order(candidates.size());
-    for (int i = 0; i < static_cast<int>(order.size()); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](int a, int b) {
-      const Candidate& ca = candidates[static_cast<std::size_t>(a)];
-      const Candidate& cb = candidates[static_cast<std::size_t>(b)];
-      if (ca.penalty != cb.penalty) return ca.penalty > cb.penalty;
-      return ca.col < cb.col;
-    });
-
-    std::vector<char> used(candidates.size(), 0);
-    for (int seed : order) {
-      if (used[static_cast<std::size_t>(seed)] ||
-          adj[static_cast<std::size_t>(seed)].empty()) {
-        continue;
-      }
-
-      std::vector<int> clique{seed};
-      used[static_cast<std::size_t>(seed)] = 1;
-      for (int cand : order) {
-        if (cand == seed || used[static_cast<std::size_t>(cand)]) continue;
-        bool all_conflict = true;
-        const auto& cand_adj = adj[static_cast<std::size_t>(cand)];
-        for (int member : clique) {
-          if (!std::binary_search(cand_adj.begin(), cand_adj.end(), member)) {
-            all_conflict = false;
-            break;
-          }
-        }
-        if (!all_conflict) continue;
-        clique.push_back(cand);
-        used[static_cast<std::size_t>(cand)] = 1;
-      }
-      if (clique.size() < 2) {
-        used[static_cast<std::size_t>(seed)] = 0;
-        continue;
-      }
-
-      const int pid = static_cast<int>(partitions.size());
-      Partition part;
-      part.terms.reserve(clique.size());
-      for (int cp : clique) {
-        const Candidate& c = candidates[static_cast<std::size_t>(cp)];
-        const double fav = c.favorable_one ? c.cost : 0.0;
-        const double nonfav = c.favorable_one ? 0.0 : c.cost;
-        part.terms.push_back(
-            PartitionTerm{c.col, c.cost, c.favorable_one, fav, nonfav,
-                          nonfav - fav});
-        max_replacement_delta =
-            std::max(max_replacement_delta, std::max(0.0, nonfav - fav));
-        partition_of_col[static_cast<std::size_t>(c.col)] = pid;
-      }
-      partitions.push_back(std::move(part));
-    }
-  }
-
-  void build_implied_contribution_events(
-      const LPModel& lp,
-      const std::vector<char>* implied_integer_cols = nullptr) {
-    const int n = static_cast<int>(lp.vars.size());
-    constexpr int kMaxRowNnz = 32;
-    constexpr int kMaxRowLiterals = 24;
-    constexpr std::size_t kMaxEvents = 100000;
-
-    auto is_implied_integer = [&](int j) {
-      return implied_integer_cols != nullptr &&
-             j >= 0 && j < static_cast<int>(implied_integer_cols->size()) &&
-             (*implied_integer_cols)[static_cast<std::size_t>(j)];
-    };
-    auto is_integral_or_implied = [&](int j) {
-      if (j < 0 || j >= n) return false;
-      return is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-             is_implied_integer(j);
-    };
-    auto integral_bounds = [&](int j) {
-      if (j < 0 || j >= n) return false;
-      const auto& var = lp.vars[static_cast<std::size_t>(j)];
-      auto integral_if_finite = [](double value) {
-        return !std::isfinite(value) ||
-               std::abs(value - std::round(value)) <= 1e-7;
-      };
-      return integral_if_finite(var.lb) && integral_if_finite(var.ub);
-    };
-    auto binary_like = [&](int j) {
-      if (j < 0 || j >= n) return false;
-      const auto& var = lp.vars[static_cast<std::size_t>(j)];
-      if (var.lb > 1e-9 || var.ub < 1.0 - 1e-9) return false;
-      if (var.type == VarType::Binary) return true;
-      return is_implied_integer(j) && std::abs(var.lb) <= 1e-9 &&
-             std::abs(var.ub - 1.0) <= 1e-9;
-    };
-    auto rounded_integral_bound = [&](int j, bool lower_bound,
-                                      double value) {
-      if (!is_integral_or_implied(j)) return value;
-      const double rounded = lower_bound ? std::ceil(value - 1e-9)
-                                         : std::floor(value + 1e-9);
-      if (lower_bound ? (rounded > value + 1e-9)
-                      : (rounded < value - 1e-9)) {
-        ++implied_event_integral_rounds;
-      }
-      return rounded;
-    };
-
-    auto scan_leq_row = [&](const std::vector<std::pair<int, double>>& row,
-                            double rhs) {
-      if (row.size() < 2 || row.size() > kMaxRowNnz || !std::isfinite(rhs) ||
-          implied_events.size() >= kMaxEvents) {
-        return;
-      }
-
-      for (const auto& [target, target_a] : row) {
-        if (target < 0 || target >= n || std::abs(target_a) <= 1e-12 ||
-            target >= lp.c.size()) {
-          continue;
-        }
-        const double target_cost = lp.c[target];
-        if (!std::isfinite(target_cost)) continue;
-        const auto& target_var = lp.vars[static_cast<std::size_t>(target)];
-        const bool target_lower_event =
-            target_a < -1e-12 && target_cost > 1e-12 &&
-            finite_model_bound(target_var.lb);
-        const bool target_upper_event =
-            target_a > 1e-12 && target_cost < -1e-12 &&
-            finite_model_bound(target_var.ub);
-        if (!target_lower_event && !target_upper_event) continue;
-        const bool target_is_lower_bound = target_lower_event;
-        const double denom = std::abs(target_a);
-
-        struct RowLiteral {
-          Literal lit;
-          double lift{0.0};
-          double row_coeff{0.0};
-          double min_contrib{0.0};
-        };
-        std::vector<RowLiteral> literals;
-        literals.reserve(row.size() * 2);
-        double min_rest_activity = 0.0;
-        bool valid = true;
-
-        for (const auto& [col, a] : row) {
-          if (col < 0 || col >= n || col == target ||
-              std::abs(a) <= 1e-12 || !std::isfinite(a)) {
-            continue;
-          }
-          const auto& var = lp.vars[static_cast<std::size_t>(col)];
-          const double min_bound = (a >= 0.0) ? var.lb : var.ub;
-          if (!finite_model_bound(min_bound)) {
-            valid = false;
-            break;
-          }
-          const double min_contrib = a * min_bound;
-          min_rest_activity += min_contrib;
-
-          if (!binary_like(col)) continue;
-          const double lift_zero = -min_contrib;
-          const double lift_one = a - min_contrib;
-          if (lift_zero > 1e-9) {
-            literals.push_back(
-                RowLiteral{Literal{col, false}, lift_zero, a, min_contrib});
-          }
-          if (lift_one > 1e-9) {
-            literals.push_back(
-                RowLiteral{Literal{col, true}, lift_one, a, min_contrib});
-          }
-        }
-        if (!valid || literals.empty()) continue;
-        if (literals.size() > kMaxRowLiterals) {
-          std::sort(literals.begin(), literals.end(),
-                    [](const RowLiteral& a, const RowLiteral& b) {
-                      return a.lift > b.lift;
-                    });
-          literals.resize(kMaxRowLiterals);
-        }
-
-        auto add_event = [&](std::vector<Literal> lits, double lift_sum,
-                             const RowLiteral* single_literal) {
-          if (implied_events.size() >= kMaxEvents) return;
-          double implied_bound = target_is_lower_bound
-              ? (min_rest_activity + lift_sum - rhs) / denom
-              : (rhs - min_rest_activity - lift_sum) / denom;
-          if (!std::isfinite(implied_bound)) return;
-
-          const bool target_integral =
-              is_integral_or_implied(target) && integral_bounds(target);
-          if (target_integral && single_literal != nullptr) {
-            ++implied_event_mir_attempts;
-            const double trigger_value =
-                single_literal->lit.value_one ? 1.0 : 0.0;
-            const double other_min =
-                min_rest_activity - single_literal->min_contrib;
-            double vbd_constant = target_is_lower_bound
-                ? (other_min - rhs) / denom
-                : (rhs - other_min) / denom;
-            double vbd_coef = target_is_lower_bound
-                ? single_literal->row_coeff / denom
-                : -single_literal->row_coeff / denom;
-            const double raw_active_bound = vbd_constant +
-                                            vbd_coef * trigger_value;
-            const bool mir_ok = strengthen_binary_var_bound_mir(
-                vbd_coef, vbd_constant, target_is_lower_bound);
-            if (mir_ok) {
-              const double mir_active_bound = vbd_constant +
-                                              vbd_coef * trigger_value;
-              const double mir_gain = target_is_lower_bound
-                  ? (mir_active_bound - raw_active_bound)
-                  : (raw_active_bound - mir_active_bound);
-              if (mir_gain > 1e-9 && std::isfinite(mir_gain)) {
-                implied_bound = mir_active_bound;
-                ++implied_event_mir_strengthened;
-                implied_event_mir_gain_sum += mir_gain;
-                implied_event_mir_gain_max =
-                    std::max(implied_event_mir_gain_max, mir_gain);
-              }
-            }
-          }
-          implied_bound =
-              rounded_integral_bound(target, target_is_lower_bound,
-                                     implied_bound);
-          double contribution = 0.0;
-          if (target_is_lower_bound) {
-            if (implied_bound <= target_var.lb + 1e-8) return;
-            contribution = target_cost * (implied_bound - target_var.lb);
-          } else {
-            if (implied_bound >= target_var.ub - 1e-8) return;
-            contribution = (-target_cost) * (target_var.ub - implied_bound);
-          }
-          if (contribution <= 1e-7 || !std::isfinite(contribution)) return;
-          max_implied_event_delta =
-              std::max(max_implied_event_delta, contribution);
-          const int event_idx = static_cast<int>(implied_events.size());
-          implied_event_target_cols[static_cast<std::size_t>(target)] = 1;
-          implied_events.push_back(ImpliedContributionEvent{
-              target, implied_bound, target_cost, target_is_lower_bound,
-              std::move(lits)});
-          if (target_is_lower_bound) {
-            ++implied_event_vlb_events;
-          } else {
-            ++implied_event_vub_events;
-          }
-          for (const Literal& lit : implied_events.back().literals) {
-            if (lit.col < 0 || lit.col >= n) continue;
-            const std::size_t key =
-                static_cast<std::size_t>(2 * lit.col + (lit.value_one ? 1 : 0));
-            implied_events_by_literal[key].push_back(event_idx);
-          }
-        };
-
-        for (const RowLiteral& lit : literals) {
-          add_event(std::vector<Literal>{lit.lit}, lit.lift, &lit);
-        }
-        for (std::size_t i = 0; i < literals.size(); ++i) {
-          for (std::size_t j = i + 1; j < literals.size(); ++j) {
-            if (literals[i].lit.col == literals[j].lit.col) continue;
-            add_event(std::vector<Literal>{literals[i].lit, literals[j].lit},
-                      literals[i].lift + literals[j].lift, nullptr);
-          }
-        }
-      }
-    };
-
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-    std::vector<std::pair<int, double>> row;
-    row.reserve(kMaxRowNnz);
-    for (int r = 0; r < Arow.rows(); ++r) {
-      row.clear();
-      bool too_large = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, r);
-           it; ++it) {
-        const int col = it.col();
-        if (col < 0 || col >= n) continue;
-        row.emplace_back(col, it.value());
-        if (row.size() > kMaxRowNnz) {
-          too_large = true;
-          break;
-        }
-      }
-      if (!too_large) scan_leq_row(row, lp.b[r]);
-      const double lhs = lp_row_lhs_or_neg_inf(lp, r);
-      if (!too_large && std::isfinite(lhs)) {
-        for (auto& entry : row) entry.second = -entry.second;
-        scan_leq_row(row, -lhs);
-      }
-    }
-
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Aeqrow = lp.Aeq;
-    for (int r = 0; r < Aeqrow.rows(); ++r) {
-      row.clear();
-      bool too_large = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeqrow, r);
-           it; ++it) {
-        const int col = it.col();
-        if (col < 0 || col >= n) continue;
-        row.emplace_back(col, it.value());
-        if (row.size() > kMaxRowNnz) {
-          too_large = true;
-          break;
-        }
-      }
-      if (too_large) continue;
-      scan_leq_row(row, lp.beq[r]);
-      for (auto& entry : row) entry.second = -entry.second;
-      scan_leq_row(row, -lp.beq[r]);
-    }
-  }
-
-  void build_implied_contribution_events_from_implications(
-      const LPModel& lp,
-      const BinaryImplicationGraph* implication_graph) {
-    if (implication_graph == nullptr || implication_graph->empty()) return;
-    const int n = static_cast<int>(lp.vars.size());
-    if (n <= 0 || implied_events_by_literal.size() < static_cast<std::size_t>(2 * n)) {
-      return;
-    }
-    constexpr std::size_t kMaxEvents = 100000;
-    auto binary_like = [&](int j) {
-      if (j < 0 || j >= n) return false;
-      const auto& var = lp.vars[static_cast<std::size_t>(j)];
-      return var.lb <= 1e-9 && var.ub >= 1.0 - 1e-9 &&
-             var.type == VarType::Binary;
-    };
-    auto add_graph_event = [&](int trigger, bool trigger_one,
-                               const BinaryImplicationGraph::Implication& imp) {
-      if (implied_events.size() >= kMaxEvents) return;
-      const int target = imp.var_idx;
-      if (trigger < 0 || trigger >= n || target < 0 || target >= n ||
-          trigger == target || !binary_like(trigger)) {
-        return;
-      }
-      const double target_cost = lp.c[target];
-      if (!std::isfinite(target_cost) || std::abs(target_cost) <= 1e-12 ||
-          !std::isfinite(imp.value)) {
-        return;
-      }
-      const auto& target_var = lp.vars[static_cast<std::size_t>(target)];
-      const bool lower_event =
-          imp.is_lb && target_cost > 1e-12 &&
-          finite_model_bound(target_var.lb) &&
-          imp.value > target_var.lb + 1e-8;
-      const bool upper_event =
-          !imp.is_lb && target_cost < -1e-12 &&
-          finite_model_bound(target_var.ub) &&
-          imp.value < target_var.ub - 1e-8;
-      if (!lower_event && !upper_event) return;
-      const double contribution = lower_event
-          ? target_cost * (imp.value - target_var.lb)
-          : (-target_cost) * (target_var.ub - imp.value);
-      if (!(contribution > 1e-7) || !std::isfinite(contribution)) return;
-      max_implied_event_delta =
-          std::max(max_implied_event_delta, contribution);
-      const int event_idx = static_cast<int>(implied_events.size());
-      implied_event_target_cols[static_cast<std::size_t>(target)] = 1;
-      implied_events.push_back(ImpliedContributionEvent{
-          target, imp.value, target_cost, lower_event,
-          std::vector<Literal>{Literal{trigger, trigger_one}}});
-      if (lower_event) {
-        ++implied_event_vlb_events;
-      } else {
-        ++implied_event_vub_events;
-      }
-      const std::size_t key =
-          static_cast<std::size_t>(2 * trigger + (trigger_one ? 1 : 0));
-      implied_events_by_literal[key].push_back(event_idx);
-    };
-
-    for (int trigger = 0; trigger < n; ++trigger) {
-      for (bool trigger_one : {false, true}) {
-        auto range = implication_graph->implications(trigger, trigger_one);
-        for (const auto* p = range.first; p != range.second; ++p) {
-          if (p == nullptr) break;
-          add_graph_event(trigger, trigger_one, *p);
-          if (implied_events.size() >= kMaxEvents) return;
-        }
-      }
-    }
-  }
-
-  void recompute_max_implied_event_aggregate_delta(const LPModel& lp) {
-    max_implied_event_aggregate_delta = max_implied_event_delta;
-    const int n = static_cast<int>(lp.vars.size());
-    if (n <= 0 || implied_events.empty() ||
-        implied_events_by_literal.empty()) {
-      return;
-    }
-    for (const auto& event_ids : implied_events_by_literal) {
-      if (event_ids.empty()) continue;
-      std::unordered_map<int, double> best_by_target;
-      best_by_target.reserve(event_ids.size());
-      for (int event_id : event_ids) {
-        if (event_id < 0 ||
-            event_id >= static_cast<int>(implied_events.size())) {
-          continue;
-        }
-        const ImpliedContributionEvent& event =
-            implied_events[static_cast<std::size_t>(event_id)];
-        const int target = event.target_col;
-        if (target < 0 || target >= n) continue;
-        const auto& target_var = lp.vars[static_cast<std::size_t>(target)];
-        const double contribution = event.target_is_lower_bound
-            ? event.target_cost * (event.target_bound - target_var.lb)
-            : (-event.target_cost) * (target_var.ub - event.target_bound);
-        if (!(contribution > 1e-9) || !std::isfinite(contribution)) continue;
-        auto [it, inserted] = best_by_target.emplace(target, contribution);
-        if (!inserted && contribution > it->second) {
-          it->second = contribution;
-        }
-      }
-      double aggregate = 0.0;
-      for (const auto& [target, contribution] : best_by_target) {
-        (void)target;
-        aggregate += contribution;
-      }
-      max_implied_event_aggregate_delta =
-          std::max(max_implied_event_aggregate_delta, aggregate);
-    }
-  }
-
-  struct Activity {
-    double lower{0.0};
-    int inf_count{0};
-    int inf_col{-1};
-    std::vector<double> min_contribution;
-    std::vector<double> contribution_delta;
-    double max_delta{0.0};
-  };
-
-  struct CapacityConformanceAudit {
-    bool valid{false};
-    double raw_lower{kInf};
-    double raw_capacity{kInf};
-    double proof_lower{kInf};
-    double proof_capacity{kInf};
-    double max_domain_delta{0.0};
-    double max_objective_delta{0.0};
-    double max_aggregate_delta{0.0};
-    std::uint64_t target_tightening_events{0};
-    std::uint64_t active_events{0};
-    std::uint64_t active_tightening_events{0};
-    std::uint64_t one_missing_events{0};
-    std::uint64_t one_missing_keys{0};
-    std::uint64_t one_missing_raw_exceed_keys{0};
-    std::uint64_t one_missing_proof_exceed_keys{0};
-    double max_one_missing_contribution{0.0};
-    double max_raw_excess{0.0};
-    double max_proof_excess{0.0};
-  };
-
-  struct ProofCapacityContext {
-    const Eigen::SparseVector<double>* proof_coeff{nullptr};
-    const Eigen::VectorXd* x_relax{nullptr};
-    const Eigen::VectorXd* reduced_costs{nullptr};
-    double proof_lower_bound{kInf};
-    double incumbent_obj{kInf};
-    double int_tol{1e-9};
-    double lp_tol{1e-9};
-    int depth{0};
-    int trail_offset{0};
-  };
-
-  struct ProofCapacityPropagationStats {
-    std::uint64_t candidates{0};
-    std::uint64_t fixings{0};
-    std::uint64_t prunes{0};
-    std::uint64_t skip_coeff{0};
-    std::uint64_t skip_budget{0};
-    std::uint64_t skip_no_lp_or_queue_hit{0};
-    std::uint64_t rc_frontier_candidates{0};
-    std::uint64_t rc_frontier_fixings{0};
-    std::uint64_t rc_frontier_skip_budget{0};
-    double max_proof_lift{0.0};
-    double max_proof_excess{0.0};
-  };
-
-  Activity compute_activity(const Eigen::VectorXd& lb,
-                            const Eigen::VectorXd& ub,
-                            int n) const {
-    Activity a;
-    a.min_contribution.assign(static_cast<std::size_t>(n), 0.0);
-    a.contribution_delta.assign(static_cast<std::size_t>(n), 0.0);
-    for (const Partition& part : partitions) {
-      double nonfav_sum = 0.0;
-      double best_delta = -1.0;
-      int best_col = -1;
-      bool fixed_favorable = false;
-      double partition_lower = 0.0;
-      for (const PartitionTerm& t : part.terms) {
-        const bool fav_possible = t.favorable_one
-            ? (ub[t.col] >= 1.0 - 1e-9)
-            : (lb[t.col] <= 1e-9);
-        const bool fav_forced = t.favorable_one
-            ? (lb[t.col] >= 1.0 - 1e-9)
-            : (ub[t.col] <= 1e-9);
-        nonfav_sum += t.nonfavorable_contribution;
-        if (fav_forced) {
-          fixed_favorable = true;
-          partition_lower += t.favorable_contribution;
-        } else {
-          partition_lower += t.nonfavorable_contribution;
-          if (fav_possible && t.replacement_delta > best_delta) {
-            best_delta = t.replacement_delta;
-            best_col = t.col;
-          }
-        }
-      }
-      if (!fixed_favorable && best_col >= 0) {
-        partition_lower = nonfav_sum - std::max(0.0, best_delta);
-      }
-      a.lower += partition_lower;
-      for (const PartitionTerm& t : part.terms) {
-        a.min_contribution[static_cast<std::size_t>(t.col)] = partition_lower;
-        a.contribution_delta[static_cast<std::size_t>(t.col)] =
-            std::max(0.0, t.replacement_delta);
-        a.max_delta = std::max(a.max_delta, std::max(0.0, t.replacement_delta));
-      }
-    }
-    for (const Term& t : terms) {
-      if (t.col < 0 || t.col >= n) continue;
-      if (t.col < static_cast<int>(partition_of_col.size()) &&
-          partition_of_col[static_cast<std::size_t>(t.col)] >= 0) {
-        continue;
-      }
-      const double c = t.cost;
-      if (c > 0.0) {
-        if (!std::isfinite(lb[t.col])) {
-          ++a.inf_count;
-          a.inf_col = t.col;
-          continue;
-        }
-        const double contrib = c * lb[t.col];
-        a.min_contribution[static_cast<std::size_t>(t.col)] = contrib;
-        a.lower += contrib;
-        if (std::isfinite(ub[t.col])) {
-          const double delta = std::max(0.0, c * (ub[t.col] - lb[t.col]));
-          a.contribution_delta[static_cast<std::size_t>(t.col)] = delta;
-          a.max_delta = std::max(a.max_delta, delta);
-        }
-      } else {
-        if (!std::isfinite(ub[t.col])) {
-          ++a.inf_count;
-          a.inf_col = t.col;
-          continue;
-        }
-        const double contrib = c * ub[t.col];
-        a.min_contribution[static_cast<std::size_t>(t.col)] = contrib;
-        a.lower += contrib;
-        if (std::isfinite(lb[t.col])) {
-          const double delta = std::max(0.0, c * (lb[t.col] - ub[t.col]));
-          a.contribution_delta[static_cast<std::size_t>(t.col)] = delta;
-          a.max_delta = std::max(a.max_delta, delta);
-        }
-      }
-    }
-    return a;
-  }
-
-  CapacityConformanceAudit audit_capacity_conformance(
-      const LPModel& lp,
-      const Eigen::VectorXd& lb,
-      const Eigen::VectorXd& ub,
-      double incumbent_obj,
-      double proof_lower_bound,
-      double int_tol) const {
-    CapacityConformanceAudit audit;
-    if (empty() || lp.sense != Sense::Minimize ||
-        !std::isfinite(incumbent_obj)) {
-      return audit;
-    }
-    const int n = static_cast<int>(lp.vars.size());
-    if (lb.size() < n || ub.size() < n) return audit;
-    const double obj_cutoff =
-        incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
-    const double tol = std::max(1e-9, int_tol);
-    const Activity act = compute_activity(lb, ub, n);
-    audit.valid = true;
-    audit.raw_lower = act.lower;
-    audit.raw_capacity = obj_cutoff - act.lower;
-    audit.proof_lower = proof_lower_bound;
-    audit.proof_capacity = std::isfinite(proof_lower_bound)
-        ? obj_cutoff - proof_lower_bound
-        : kInf;
-    audit.max_domain_delta = act.max_delta;
-    audit.max_aggregate_delta = max_implied_event_aggregate_delta;
-    audit.max_objective_delta =
-        std::max({act.max_delta, max_implied_event_delta,
-                  max_implied_event_aggregate_delta});
-
-    auto literal_active = [&](const Literal& lit) {
-      return lit.col >= 0 && lit.col < n &&
-             (lit.value_one ? (lb[lit.col] >= 1.0 - tol)
-                            : (ub[lit.col] <= tol));
-    };
-    auto literal_possible = [&](const Literal& lit) {
-      return lit.col >= 0 && lit.col < n &&
-             (lit.value_one ? (ub[lit.col] >= 1.0 - tol)
-                            : (lb[lit.col] <= tol));
-    };
-
-    struct AggregateEvent {
-      double contribution{0.0};
-      std::unordered_map<int, double> best_by_target;
-    };
-    std::unordered_map<int, AggregateEvent> aggregates;
-    aggregates.reserve(std::min<std::size_t>(
-        implied_events.size(), static_cast<std::size_t>(512)));
-
-    for (const ImpliedContributionEvent& event : implied_events) {
-      const int target = event.target_col;
-      if (target < 0 || target >= n) continue;
-      const bool target_tightens = event.target_is_lower_bound
-          ? (event.target_bound > lb[target] + tol)
-          : (event.target_bound < ub[target] - tol);
-      if (!target_tightens) continue;
-      const double contribution = event.target_is_lower_bound
-          ? event.target_cost * (event.target_bound - lb[target])
-          : (-event.target_cost) * (ub[target] - event.target_bound);
-      if (!(contribution > 1e-9) || !std::isfinite(contribution)) {
-        continue;
-      }
-      ++audit.target_tightening_events;
-
-      int missing_key = -1;
-      bool impossible = false;
-      bool all_active = true;
-      for (const Literal& lit : event.literals) {
-        if (literal_active(lit)) continue;
-        all_active = false;
-        if (literal_possible(lit)) {
-          const int key = 2 * lit.col + (lit.value_one ? 1 : 0);
-          if (missing_key >= 0 && missing_key != key) {
-            missing_key = -2;
-            break;
-          }
-          missing_key = key;
-        } else {
-          impossible = true;
-          break;
-        }
-      }
-
-      if (all_active) {
-        ++audit.active_events;
-        ++audit.active_tightening_events;
-        continue;
-      }
-      if (impossible || missing_key < 0) continue;
-
-      ++audit.one_missing_events;
-      AggregateEvent& aggregate = aggregates[missing_key];
-      auto [it, inserted] = aggregate.best_by_target.emplace(target, contribution);
-      if (inserted) {
-        aggregate.contribution += contribution;
-      } else if (contribution > it->second + 1e-9) {
-        aggregate.contribution += contribution - it->second;
-        it->second = contribution;
-      }
-    }
-
-    audit.one_missing_keys = static_cast<std::uint64_t>(aggregates.size());
-    for (const auto& [key, aggregate] : aggregates) {
-      (void)key;
-      audit.max_one_missing_contribution =
-          std::max(audit.max_one_missing_contribution,
-                   aggregate.contribution);
-      if (std::isfinite(audit.raw_capacity) &&
-          aggregate.contribution > audit.raw_capacity + 1e-9) {
-        ++audit.one_missing_raw_exceed_keys;
-        audit.max_raw_excess =
-            std::max(audit.max_raw_excess,
-                     aggregate.contribution - audit.raw_capacity);
-      }
-      if (std::isfinite(audit.proof_capacity) &&
-          aggregate.contribution > audit.proof_capacity + 1e-9) {
-        ++audit.one_missing_proof_exceed_keys;
-        audit.max_proof_excess =
-            std::max(audit.max_proof_excess,
-                     aggregate.contribution - audit.proof_capacity);
-      }
-    }
-    return audit;
-  }
-
-  bool propagate_proof_capacity_one_missing(
-      const LPModel& lp,
-      const ProofCapacityContext& ctx,
-      Eigen::VectorXd& lb,
-      Eigen::VectorXd& ub,
-      std::vector<DomainReasonBound>* reasons_out,
-      int& tightened,
-      int& pruned,
-      ProofCapacityPropagationStats* stats = nullptr) const {
-    tightened = 0;
-    pruned = 0;
-    if (empty() || lp.sense != Sense::Minimize ||
-        ctx.proof_coeff == nullptr ||
-        ctx.proof_coeff->size() < static_cast<Eigen::Index>(lp.vars.size()) ||
-        !std::isfinite(ctx.incumbent_obj) ||
-        !std::isfinite(ctx.proof_lower_bound)) {
-      return true;
-    }
-    const int n = static_cast<int>(lp.vars.size());
-    if (lb.size() < n || ub.size() < n) return true;
-    const double tol = std::max(1e-9, ctx.int_tol);
-    const double proof_tol =
-        std::max({1e-7, ctx.lp_tol,
-                  1e-10 * std::max(1.0, std::abs(ctx.incumbent_obj))});
-    const double obj_cutoff =
-        ctx.incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(ctx.incumbent_obj)));
-    const double capacity = obj_cutoff - ctx.proof_lower_bound;
-    if (!std::isfinite(capacity)) return true;
-    if (capacity < -proof_tol) {
-      ++pruned;
-      if (stats != nullptr) ++stats->prunes;
-      return false;
-    }
-
-    auto literal_active = [&](const Literal& lit) {
-      return lit.col >= 0 && lit.col < n &&
-             (lit.value_one ? (lb[lit.col] >= 1.0 - tol)
-                            : (ub[lit.col] <= tol));
-    };
-    auto literal_possible = [&](const Literal& lit) {
-      return lit.col >= 0 && lit.col < n &&
-             (lit.value_one ? (ub[lit.col] >= 1.0 - tol)
-                            : (lb[lit.col] <= tol));
-    };
-    auto literal_reason = [](const Literal& lit) {
-      return BranchDomainLiteral{lit.col, lit.value_one ? 1.0 : 0.0,
-                                 lit.value_one};
-    };
-    auto add_reason_literal = [](std::vector<BranchDomainLiteral>& reason,
-                                 const BranchDomainLiteral& literal) {
-      const auto found = std::find_if(
-          reason.begin(), reason.end(), [&](const BranchDomainLiteral& r) {
-            return r.var_idx == literal.var_idx && r.is_lb == literal.is_lb &&
-                   std::abs(r.value - literal.value) <= 1e-9;
-          });
-      if (found == reason.end()) reason.push_back(literal);
-    };
-    auto record_reason = [&](const BranchDomainLiteral& bound,
-                             std::vector<BranchDomainLiteral> reason,
-                             const BranchDomainLiteral& forbidden) {
-      if (reasons_out == nullptr) return;
-      canonicalize_branch_literals(reason);
-      const int trail_pos =
-          ctx.trail_offset + static_cast<int>(reasons_out->size());
-      reasons_out->push_back(DomainReasonBound{
-          bound, std::move(reason), trail_pos, ctx.depth, forbidden, true});
-    };
-
-    for (int round = 0; round < 4; ++round) {
-      int round_tightened = 0;
-
-      // LP-active reduced-cost frontier source.  This mirrors the first
-      // HiGHS consumption step: use the current node LP certificate to forbid
-      // movement away from an active integer bound when the reduced-cost
-      // increase alone exceeds the incumbent capacity.  It is deliberately
-      // tied to the node's own x/RC pair, not to the offline VLB event list.
-      if (ctx.x_relax != nullptr && ctx.x_relax->size() >= n &&
-          ctx.reduced_costs != nullptr && ctx.reduced_costs->size() >= n) {
-        const double active_tol = std::max({tol, proof_tol, ctx.lp_tol});
-        for (int j = 0; j < n; ++j) {
-          if (!is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
-            continue;
-          }
-          if (!std::isfinite(lb[j]) || !std::isfinite(ub[j]) ||
-              ub[j] <= lb[j] + tol || !std::isfinite((*ctx.x_relax)[j])) {
-            continue;
-          }
-          const double rc = std::abs((*ctx.reduced_costs)[j]);
-          if (!(rc > 1e-12) || !std::isfinite(rc)) continue;
-          const double xj = (*ctx.x_relax)[j];
-          if (std::abs(xj - lb[j]) <= active_tol) {
-            const double proof_delta = rc * (ub[j] - lb[j]);
-            if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
-              continue;
-            }
-            if (stats != nullptr) {
-              ++stats->candidates;
-              ++stats->rc_frontier_candidates;
-              stats->max_proof_lift =
-                  std::max(stats->max_proof_lift, proof_delta);
-            }
-            if (!(proof_delta > capacity + proof_tol)) {
-              if (stats != nullptr) {
-                ++stats->skip_budget;
-                ++stats->rc_frontier_skip_budget;
-              }
-              continue;
-            }
-            double new_ub = std::floor(lb[j] + capacity / rc + tol);
-            new_ub = std::min(ub[j], std::max(lb[j], new_ub));
-            if (new_ub < ub[j] - tol) {
-              ub[j] = new_ub;
-              ++round_tightened;
-              ++tightened;
-              if (stats != nullptr) {
-                ++stats->fixings;
-                ++stats->rc_frontier_fixings;
-                stats->max_proof_excess =
-                    std::max(stats->max_proof_excess,
-                             proof_delta - capacity);
-              }
-              record_reason(
-                  BranchDomainLiteral{j, new_ub, false}, {},
-                  BranchDomainLiteral{j, std::floor(new_ub + tol) + 1.0,
-                                      true});
-            }
-          } else if (std::abs(xj - ub[j]) <= active_tol) {
-            const double proof_delta = rc * (ub[j] - lb[j]);
-            if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
-              continue;
-            }
-            if (stats != nullptr) {
-              ++stats->candidates;
-              ++stats->rc_frontier_candidates;
-              stats->max_proof_lift =
-                  std::max(stats->max_proof_lift, proof_delta);
-            }
-            if (!(proof_delta > capacity + proof_tol)) {
-              if (stats != nullptr) {
-                ++stats->skip_budget;
-                ++stats->rc_frontier_skip_budget;
-              }
-              continue;
-            }
-            double new_lb = std::ceil(ub[j] - capacity / rc - tol);
-            new_lb = std::max(lb[j], std::min(ub[j], new_lb));
-            if (new_lb > lb[j] + tol) {
-              lb[j] = new_lb;
-              ++round_tightened;
-              ++tightened;
-              if (stats != nullptr) {
-                ++stats->fixings;
-                ++stats->rc_frontier_fixings;
-                stats->max_proof_excess =
-                    std::max(stats->max_proof_excess,
-                             proof_delta - capacity);
-              }
-              record_reason(
-                  BranchDomainLiteral{j, new_lb, true}, {},
-                  BranchDomainLiteral{j, std::ceil(new_lb - tol) - 1.0,
-                                      false});
-            }
-          }
-        }
-      }
-
-      // LP-frontier source: if the current proof coefficient on a binary
-      // frontier variable already proves that one side of the binary exceeds
-      // the cutoff capacity, consume it directly as a scoped objective fixing.
-      // This is source-side filtering, not looser admission: the fixing must
-      // cut the queued LP point and must be explained by positive proof mass.
-      if (ctx.x_relax != nullptr && ctx.x_relax->size() >= n) {
-        for (int j = 0; j < n; ++j) {
-          if (lp.vars[static_cast<std::size_t>(j)].type != VarType::Binary) {
-            continue;
-          }
-          if (lb[j] > tol || ub[j] < 1.0 - tol ||
-              !std::isfinite((*ctx.x_relax)[j])) {
-            continue;
-          }
-          const double xj = (*ctx.x_relax)[j];
-          const double a = ctx.proof_coeff->coeff(j);
-          if (!std::isfinite(a) || std::abs(a) <= 1e-12) continue;
-
-          auto try_forbid_one = [&]() -> bool {
-            if (!(a > 1e-12) || xj <= std::max(proof_tol, ctx.lp_tol) ||
-                ub[j] <= tol) {
-              return true;
-            }
-            const double proof_delta = a * (1.0 - lb[j]);
-            if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
-              return true;
-            }
-            if (stats != nullptr) {
-              ++stats->candidates;
-              stats->max_proof_lift =
-                  std::max(stats->max_proof_lift, proof_delta);
-            }
-            if (!(proof_delta > capacity + proof_tol)) {
-              if (stats != nullptr) ++stats->skip_budget;
-              return true;
-            }
-            if (0.0 < lb[j] - tol) {
-              ++pruned;
-              if (stats != nullptr) ++stats->prunes;
-              return false;
-            }
-            if (ub[j] > tol) {
-              ub[j] = 0.0;
-              ++round_tightened;
-              ++tightened;
-              if (stats != nullptr) {
-                ++stats->fixings;
-                stats->max_proof_excess =
-                    std::max(stats->max_proof_excess,
-                             proof_delta - capacity);
-              }
-              record_reason(BranchDomainLiteral{j, 0.0, false}, {},
-                            BranchDomainLiteral{j, 1.0, true});
-            }
-            return true;
-          };
-
-          auto try_forbid_zero = [&]() -> bool {
-            if (!(a < -1e-12) ||
-                xj >= 1.0 - std::max(proof_tol, ctx.lp_tol) ||
-                lb[j] >= 1.0 - tol) {
-              return true;
-            }
-            const double proof_delta = (-a) * (ub[j] - 0.0);
-            if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
-              return true;
-            }
-            if (stats != nullptr) {
-              ++stats->candidates;
-              stats->max_proof_lift =
-                  std::max(stats->max_proof_lift, proof_delta);
-            }
-            if (!(proof_delta > capacity + proof_tol)) {
-              if (stats != nullptr) ++stats->skip_budget;
-              return true;
-            }
-            if (1.0 > ub[j] + tol) {
-              ++pruned;
-              if (stats != nullptr) ++stats->prunes;
-              return false;
-            }
-            if (lb[j] < 1.0 - tol) {
-              lb[j] = 1.0;
-              ++round_tightened;
-              ++tightened;
-              if (stats != nullptr) {
-                ++stats->fixings;
-                stats->max_proof_excess =
-                    std::max(stats->max_proof_excess,
-                             proof_delta - capacity);
-              }
-              record_reason(BranchDomainLiteral{j, 1.0, true}, {},
-                            BranchDomainLiteral{j, 0.0, false});
-            }
-            return true;
-          };
-
-          if (!try_forbid_one() || !try_forbid_zero()) return false;
-        }
-      }
-
-      struct AggregateProofEvent {
-        double proof_delta{0.0};
-        double objective_delta{0.0};
-        std::unordered_map<int, double> best_by_target;
-        std::vector<BranchDomainLiteral> reason;
-      };
-      std::unordered_map<int, AggregateProofEvent> aggregates;
-      aggregates.reserve(std::min<std::size_t>(
-          implied_events.size(), static_cast<std::size_t>(512)));
-
-      for (const ImpliedContributionEvent& event : implied_events) {
-        const int target = event.target_col;
-        if (target < 0 || target >= n) continue;
-        const double a = ctx.proof_coeff->coeff(target);
-        double proof_delta = 0.0;
-        double objective_delta = 0.0;
-        if (event.target_is_lower_bound) {
-          if (event.target_bound <= lb[target] + tol) continue;
-          if (!(a > 1e-12)) {
-            if (stats != nullptr) ++stats->skip_coeff;
-            continue;
-          }
-          proof_delta = a * (event.target_bound - lb[target]);
-          objective_delta = std::max(0.0, event.target_cost) *
-                            (event.target_bound - lb[target]);
-        } else {
-          if (event.target_bound >= ub[target] - tol) continue;
-          if (!(a < -1e-12)) {
-            if (stats != nullptr) ++stats->skip_coeff;
-            continue;
-          }
-          proof_delta = (-a) * (ub[target] - event.target_bound);
-          objective_delta = std::max(0.0, -event.target_cost) *
-                            (ub[target] - event.target_bound);
-        }
-        if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
-          continue;
-        }
-
-        int missing_key = -1;
-        bool impossible = false;
-        std::vector<BranchDomainLiteral> active_reason;
-        active_reason.reserve(event.literals.size());
-        for (const Literal& lit : event.literals) {
-          if (literal_active(lit)) {
-            active_reason.push_back(literal_reason(lit));
-          } else if (literal_possible(lit)) {
-            const int key = 2 * lit.col + (lit.value_one ? 1 : 0);
-            if (missing_key >= 0 && missing_key != key) {
-              missing_key = -2;
-              break;
-            }
-            missing_key = key;
-          } else {
-            impossible = true;
-            break;
-          }
-        }
-        if (impossible || missing_key < 0) continue;
-
-        AggregateProofEvent& aggregate = aggregates[missing_key];
-        auto [best_it, inserted] =
-            aggregate.best_by_target.emplace(target, proof_delta);
-        if (inserted) {
-          aggregate.proof_delta += proof_delta;
-          aggregate.objective_delta += std::max(0.0, objective_delta);
-          for (const BranchDomainLiteral& r : active_reason) {
-            add_reason_literal(aggregate.reason, r);
-          }
-        } else if (proof_delta > best_it->second + 1e-9) {
-          aggregate.proof_delta += proof_delta - best_it->second;
-          aggregate.objective_delta += std::max(0.0, objective_delta);
-          best_it->second = proof_delta;
-          for (const BranchDomainLiteral& r : active_reason) {
-            add_reason_literal(aggregate.reason, r);
-          }
-        }
-      }
-
-      for (const auto& [missing_key, aggregate] : aggregates) {
-        if (!(aggregate.proof_delta > 1e-9) ||
-            !std::isfinite(aggregate.proof_delta)) {
-          continue;
-        }
-        if (stats != nullptr) {
-          ++stats->candidates;
-          stats->max_proof_lift =
-              std::max(stats->max_proof_lift, aggregate.proof_delta);
-        }
-        if (!(aggregate.proof_delta > capacity + proof_tol)) {
-          if (stats != nullptr) ++stats->skip_budget;
-          continue;
-        }
-        if (ctx.x_relax == nullptr || ctx.x_relax->size() < n) {
-          if (stats != nullptr) ++stats->skip_no_lp_or_queue_hit;
-          continue;
-        }
-        if (stats != nullptr) {
-          stats->max_proof_excess =
-              std::max(stats->max_proof_excess,
-                       aggregate.proof_delta - capacity);
-        }
-        const int col = missing_key / 2;
-        const bool value_one = (missing_key % 2) != 0;
-        if (col < 0 || col >= n) continue;
-        const double fixing_lp_violation = value_one
-            ? std::max(0.0, (*ctx.x_relax)[col])
-            : std::max(0.0, 1.0 - (*ctx.x_relax)[col]);
-        if (fixing_lp_violation <= std::max(proof_tol, ctx.lp_tol)) {
-          if (stats != nullptr) ++stats->skip_no_lp_or_queue_hit;
-          continue;
-        }
-        const BranchDomainLiteral forbidden{
-            col, value_one ? 1.0 : 0.0, value_one};
-        if (value_one) {
-          if (0.0 < lb[col] - tol) {
-            ++pruned;
-            if (stats != nullptr) ++stats->prunes;
-            return false;
-          }
-          if (ub[col] > tol) {
-            ub[col] = 0.0;
-            ++round_tightened;
-            ++tightened;
-            if (stats != nullptr) ++stats->fixings;
-            record_reason(BranchDomainLiteral{col, 0.0, false},
-                          aggregate.reason, forbidden);
-          }
-        } else {
-          if (1.0 > ub[col] + tol) {
-            ++pruned;
-            if (stats != nullptr) ++stats->prunes;
-            return false;
-          }
-          if (lb[col] < 1.0 - tol) {
-            lb[col] = 1.0;
-            ++round_tightened;
-            ++tightened;
-            if (stats != nullptr) ++stats->fixings;
-            record_reason(BranchDomainLiteral{col, 1.0, true},
-                          aggregate.reason, forbidden);
-          }
-        }
-      }
-      if (round_tightened == 0) break;
-    }
-
-    return bounds_consistent(lb, ub);
-  }
-
-  bool propagate(const LPModel& lp,
-                 Eigen::VectorXd& lb,
-                 Eigen::VectorXd& ub,
-                 double incumbent_obj,
-                 double int_tol,
-                 int depth,
-                 int trail_offset,
-                 std::vector<DomainReasonBound>* reasons_out,
-                 int& tightened,
-                 int& pruned) const {
-    tightened = 0;
-    pruned = 0;
-    if (empty() || lp.sense != Sense::Minimize ||
-        !std::isfinite(incumbent_obj)) {
-      return true;
-    }
-    const int n = static_cast<int>(lp.vars.size());
-    if (lb.size() < n || ub.size() < n) return true;
-    const double obj_cutoff =
-        incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
-    const double tol = std::max(1e-9, int_tol);
-
-    auto record_reason = [&](int col, bool is_lb, double value,
-                             std::vector<BranchDomainLiteral> reason = {}) {
-      if (reasons_out == nullptr) return;
-      const int trail_pos = trail_offset + static_cast<int>(reasons_out->size());
-      reasons_out->push_back(DomainReasonBound{
-          BranchDomainLiteral{col, value, is_lb}, std::move(reason), trail_pos, depth,
-          BranchDomainLiteral{}, false});
-    };
-    auto literal_active = [&](const Literal& lit) {
-      return lit.value_one ? (lb[lit.col] >= 1.0 - tol) : (ub[lit.col] <= tol);
-    };
-    auto literal_possible = [&](const Literal& lit) {
-      return lit.value_one ? (ub[lit.col] >= 1.0 - tol) : (lb[lit.col] <= tol);
-    };
-    auto literal_reason = [](const Literal& lit) {
-      return BranchDomainLiteral{lit.col, lit.value_one ? 1.0 : 0.0,
-                                 lit.value_one};
-    };
-
-    for (int round = 0; round < 4; ++round) {
-      Activity act = compute_activity(lb, ub, n);
-      int round_tightened = 0;
-      for (const ImpliedContributionEvent& event : implied_events) {
-        bool all_active = true;
-        std::vector<BranchDomainLiteral> reason;
-        reason.reserve(event.literals.size());
-        for (const Literal& lit : event.literals) {
-          if (!literal_active(lit)) {
-            all_active = false;
-            break;
-          }
-          reason.push_back(literal_reason(lit));
-        }
-        if (!all_active) continue;
-        if (event.target_col < 0 || event.target_col >= n) continue;
-        if (event.target_is_lower_bound) {
-          if (event.target_bound > ub[event.target_col] + tol) {
-            ++pruned;
-            return false;
-          }
-          if (event.target_bound > lb[event.target_col] + tol) {
-            lb[event.target_col] = event.target_bound;
-            ++round_tightened;
-            ++tightened;
-            record_reason(event.target_col, /*is_lb=*/true, event.target_bound,
-                          std::move(reason));
-          }
-        } else {
-          if (event.target_bound < lb[event.target_col] - tol) {
-            ++pruned;
-            return false;
-          }
-          if (event.target_bound < ub[event.target_col] - tol) {
-            ub[event.target_col] = event.target_bound;
-            ++round_tightened;
-            ++tightened;
-            record_reason(event.target_col, /*is_lb=*/false,
-                          event.target_bound, std::move(reason));
-          }
-        }
-      }
-      if (round_tightened > 0) continue;
-
-      if (act.inf_count == 0) {
-        const double preliminary_capacity = obj_cutoff - act.lower;
-        const double max_objective_delta =
-            std::max({act.max_delta, max_implied_event_delta,
-                      max_implied_event_aggregate_delta});
-        if (preliminary_capacity > max_objective_delta + 1e-9) {
-          return true;
-        }
-      }
-
-      if (act.inf_count > 1) return true;
-      if (act.inf_count == 0 && act.lower > obj_cutoff + 1e-7) {
-        ++pruned;
-        return false;
-      }
-      double capacity = obj_cutoff - act.lower;
-      if (act.inf_count == 0 && capacity > act.max_delta + 1e-9) {
-        if (capacity > max_implied_event_aggregate_delta + 1e-9) {
-          return true;
-        }
-      }
-
-      if (act.inf_count == 1) {
-        const int j = act.inf_col;
-        if (j < 0 || j >= n) return true;
-        const double c = lp.c[j];
-        if (c > 0.0) {
-          if (!std::isfinite(ub[j])) return true;
-          double implied_ub = capacity / c;
-          if (is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
-            implied_ub = std::floor(implied_ub + tol);
-          }
-          if (implied_ub < lb[j] - tol) {
-            ++pruned;
-            return false;
-          }
-          if (implied_ub < ub[j] - tol) {
-            ub[j] = implied_ub;
-            ++round_tightened;
-            ++tightened;
-            record_reason(j, /*is_lb=*/false, implied_ub);
-          }
-        } else if (c < 0.0) {
-          if (!std::isfinite(lb[j])) return true;
-          double implied_lb = capacity / c;
-          if (is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
-            implied_lb = std::ceil(implied_lb - tol);
-          }
-          if (implied_lb > ub[j] + tol) {
-            ++pruned;
-            return false;
-          }
-          if (implied_lb > lb[j] + tol) {
-            lb[j] = implied_lb;
-            ++round_tightened;
-            ++tightened;
-            record_reason(j, /*is_lb=*/true, implied_lb);
-          }
-        }
-      } else {
-        struct AggregateEvent {
-          double contribution{0.0};
-          std::unordered_map<int, double> best_by_target;
-          std::vector<BranchDomainLiteral> reason;
-        };
-        std::unordered_map<int, AggregateEvent> aggregates;
-        aggregates.reserve(std::min<std::size_t>(
-            implied_events.size(), static_cast<std::size_t>(256)));
-        auto add_reason_literal = [](std::vector<BranchDomainLiteral>& reason,
-                                     const BranchDomainLiteral& literal) {
-          const auto found = std::find_if(
-              reason.begin(), reason.end(), [&](const BranchDomainLiteral& r) {
-                return r.var_idx == literal.var_idx &&
-                       r.is_lb == literal.is_lb &&
-                       std::abs(r.value - literal.value) <= 1e-9;
-              });
-          if (found == reason.end()) reason.push_back(literal);
-        };
-        for (const ImpliedContributionEvent& event : implied_events) {
-          if (event.target_col < 0 || event.target_col >= n ||
-              (event.target_is_lower_bound
-                   ? event.target_bound <= lb[event.target_col] + tol
-                   : event.target_bound >= ub[event.target_col] - tol)) {
-            continue;
-          }
-          const double contribution = event.target_is_lower_bound
-              ? event.target_cost *
-                    (event.target_bound - lb[event.target_col])
-              : (-event.target_cost) *
-                    (ub[event.target_col] - event.target_bound);
-          if (!(contribution > 1e-9) || !std::isfinite(contribution)) {
-            continue;
-          }
-
-          int missing_key = -1;
-          bool impossible = false;
-          std::vector<BranchDomainLiteral> active_reason;
-          active_reason.reserve(event.literals.size());
-          for (const Literal& lit : event.literals) {
-            if (literal_active(lit)) {
-              active_reason.push_back(literal_reason(lit));
-            } else if (literal_possible(lit)) {
-              const int key = 2 * lit.col + (lit.value_one ? 1 : 0);
-              if (missing_key >= 0 && missing_key != key) {
-                missing_key = -2;
-                break;
-              }
-              missing_key = key;
-            } else {
-              impossible = true;
-              break;
-            }
-          }
-          if (impossible || missing_key < 0) continue;
-
-          AggregateEvent& aggregate = aggregates[missing_key];
-          auto [best_it, inserted] =
-              aggregate.best_by_target.emplace(event.target_col, contribution);
-          if (inserted) {
-            aggregate.contribution += contribution;
-            for (const BranchDomainLiteral& r : active_reason) {
-              add_reason_literal(aggregate.reason, r);
-            }
-          } else if (contribution > best_it->second + 1e-9) {
-            aggregate.contribution += contribution - best_it->second;
-            best_it->second = contribution;
-            for (const BranchDomainLiteral& r : active_reason) {
-              add_reason_literal(aggregate.reason, r);
-            }
-          }
-        }
-        for (const auto& [missing_key, aggregate] : aggregates) {
-          if (!(aggregate.contribution > capacity + 1e-9)) continue;
-          const int col = missing_key / 2;
-          const bool value_one = (missing_key % 2) != 0;
-          if (col < 0 || col >= n) continue;
-          if (value_one) {
-            if (0.0 < lb[col] - tol) {
-              ++pruned;
-              return false;
-            }
-            if (ub[col] > tol) {
-              ub[col] = 0.0;
-              ++round_tightened;
-              ++tightened;
-              record_reason(col, /*is_lb=*/false, 0.0, aggregate.reason);
-            }
-          } else {
-            if (1.0 > ub[col] + tol) {
-              ++pruned;
-              return false;
-            }
-            if (lb[col] < 1.0 - tol) {
-              lb[col] = 1.0;
-              ++round_tightened;
-              ++tightened;
-              record_reason(col, /*is_lb=*/true, 1.0, aggregate.reason);
-            }
-          }
-        }
-        if (round_tightened > 0) continue;
-
-        for (const ImpliedContributionEvent& event : implied_events) {
-          if (event.target_col < 0 || event.target_col >= n ||
-              (event.target_is_lower_bound
-                   ? event.target_bound <= lb[event.target_col] + tol
-                   : event.target_bound >= ub[event.target_col] - tol)) {
-            continue;
-          }
-          const double contribution = event.target_is_lower_bound
-              ? event.target_cost *
-                    (event.target_bound - lb[event.target_col])
-              : (-event.target_cost) *
-                    (ub[event.target_col] - event.target_bound);
-          if (!(contribution > capacity + 1e-9)) continue;
-          int missing = -1;
-          bool impossible = false;
-          std::vector<BranchDomainLiteral> reason;
-          reason.reserve(event.literals.size());
-          for (int li = 0; li < static_cast<int>(event.literals.size()); ++li) {
-            const Literal& lit = event.literals[static_cast<std::size_t>(li)];
-            if (literal_active(lit)) {
-              reason.push_back(literal_reason(lit));
-            } else if (literal_possible(lit)) {
-              if (missing >= 0) {
-                missing = -2;
-                break;
-              }
-              missing = li;
-            } else {
-              impossible = true;
-              break;
-            }
-          }
-          if (impossible || missing < 0) continue;
-          const Literal& lit = event.literals[static_cast<std::size_t>(missing)];
-          if (lit.value_one) {
-            if (0.0 < lb[lit.col] - tol) {
-              ++pruned;
-              return false;
-            }
-            if (ub[lit.col] > tol) {
-              ub[lit.col] = 0.0;
-              ++round_tightened;
-              ++tightened;
-              record_reason(lit.col, /*is_lb=*/false, 0.0, std::move(reason));
-            }
-          } else {
-            if (1.0 > ub[lit.col] + tol) {
-              ++pruned;
-              return false;
-            }
-            if (lb[lit.col] < 1.0 - tol) {
-              lb[lit.col] = 1.0;
-              ++round_tightened;
-              ++tightened;
-              record_reason(lit.col, /*is_lb=*/true, 1.0, std::move(reason));
-            }
-          }
-        }
-        for (const Partition& part : partitions) {
-          struct PossibleFav {
-            const PartitionTerm* term{nullptr};
-            double delta{0.0};
-          };
-          std::vector<PossibleFav> possible;
-          possible.reserve(part.terms.size());
-          bool has_fixed_favorable = false;
-          int fixed_favorable_col = -1;
-          double best_delta = -1.0;
-          const PartitionTerm* best_term = nullptr;
-          for (const PartitionTerm& pt : part.terms) {
-            const bool fav_possible = pt.favorable_one
-                ? (ub[pt.col] >= 1.0 - 1e-9)
-                : (lb[pt.col] <= 1e-9);
-            const bool fav_forced = pt.favorable_one
-                ? (lb[pt.col] >= 1.0 - 1e-9)
-                : (ub[pt.col] <= 1e-9);
-            if (fav_forced) {
-              has_fixed_favorable = true;
-              fixed_favorable_col = pt.col;
-            }
-            if (fav_possible) {
-              possible.push_back(PossibleFav{&pt, pt.replacement_delta});
-              if (pt.replacement_delta > best_delta) {
-                best_delta = pt.replacement_delta;
-                best_term = &pt;
-              }
-            }
-          }
-
-          auto force_favorable = [&](const PartitionTerm& pt) -> bool {
-            if (pt.favorable_one) {
-              if (1.0 > ub[pt.col] + tol) return false;
-              if (lb[pt.col] < 1.0 - tol) {
-                lb[pt.col] = 1.0;
-                ++round_tightened;
-                ++tightened;
-                record_reason(pt.col, /*is_lb=*/true, 1.0);
-              }
-            } else {
-              if (0.0 < lb[pt.col] - tol) return false;
-              if (ub[pt.col] > tol) {
-                ub[pt.col] = 0.0;
-                ++round_tightened;
-                ++tightened;
-                record_reason(pt.col, /*is_lb=*/false, 0.0);
-              }
-            }
-            return true;
-          };
-          auto force_nonfavorable = [&](const PartitionTerm& pt) -> bool {
-            if (pt.favorable_one) {
-              if (0.0 < lb[pt.col] - tol) return false;
-              if (ub[pt.col] > tol) {
-                ub[pt.col] = 0.0;
-                ++round_tightened;
-                ++tightened;
-                record_reason(pt.col, /*is_lb=*/false, 0.0);
-              }
-            } else {
-              if (1.0 > ub[pt.col] + tol) return false;
-              if (lb[pt.col] < 1.0 - tol) {
-                lb[pt.col] = 1.0;
-                ++round_tightened;
-                ++tightened;
-                record_reason(pt.col, /*is_lb=*/true, 1.0);
-              }
-            }
-            return true;
-          };
-
-          if (has_fixed_favorable) {
-            for (const PartitionTerm& pt : part.terms) {
-              if (pt.col == fixed_favorable_col) continue;
-              if (!force_nonfavorable(pt)) {
-                ++pruned;
-                return false;
-              }
-            }
-            continue;
-          }
-          if (best_term == nullptr || best_delta <= 0.0) continue;
-          double second_delta = -1.0;
-          for (const PossibleFav& fav : possible) {
-            if (fav.term == best_term) continue;
-            second_delta = std::max(second_delta, fav.delta);
-          }
-          const double best_replacement_loss =
-              best_delta - std::max(0.0, second_delta);
-          if (best_replacement_loss > capacity + 1e-9) {
-            if (!force_favorable(*best_term)) {
-              ++pruned;
-              return false;
-            }
-            continue;
-          }
-          for (const PossibleFav& fav : possible) {
-            if (fav.term == best_term) continue;
-            if (best_delta - fav.delta > capacity + 1e-9) {
-              if (!force_nonfavorable(*fav.term)) {
-                ++pruned;
-                return false;
-              }
-            }
-          }
-        }
-        for (const Term& t : terms) {
-          const int j = t.col;
-          if (j < 0 || j >= n) continue;
-          if (j < static_cast<int>(partition_of_col.size()) &&
-              partition_of_col[static_cast<std::size_t>(j)] >= 0) {
-            continue;
-          }
-          const double c = t.cost;
-          if (std::abs(c) <= 1e-12) continue;
-          const double other_activity =
-              act.lower - act.min_contribution[static_cast<std::size_t>(j)];
-          double implied = (obj_cutoff - other_activity) / c;
-          if (!std::isfinite(implied)) continue;
-          if (c > 0.0) {
-            if (t.integer) implied = std::floor(implied + tol);
-            if (implied < lb[j] - tol) {
-              ++pruned;
-              return false;
-            }
-            if (implied < ub[j] - tol) {
-              ub[j] = implied;
-              ++round_tightened;
-              ++tightened;
-              record_reason(j, /*is_lb=*/false, implied);
-            }
-          } else {
-            if (t.integer) implied = std::ceil(implied - tol);
-            if (implied > ub[j] + tol) {
-              ++pruned;
-              return false;
-            }
-            if (implied > lb[j] + tol) {
-              lb[j] = implied;
-              ++round_tightened;
-              ++tightened;
-              record_reason(j, /*is_lb=*/true, implied);
-            }
-          }
-        }
-      }
-      if (round_tightened == 0) break;
-    }
-    return true;
-  }
-};
-
-struct PublishedObjectiveEventStats {
-  std::uint64_t single_literal_events{0};
-  std::uint64_t implications_added{0};
-  std::uint64_t clique_edges_added{0};
-};
-
-PublishedObjectiveEventStats publish_objective_implied_event_source(
-    const LPModel& lp,
-    const ObjectivePropagationState& objective_propagation,
-    BinaryImplicationGraph& implication_graph,
-    CliqueTable& clique_table,
-    double int_tol) {
-  PublishedObjectiveEventStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 0 || objective_propagation.implied_events.empty()) {
-    return stats;
-  }
-
-  auto binary_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.type == VarType::Binary) return true;
-    return std::isfinite(var.lb) && std::isfinite(var.ub) &&
-           var.lb >= -std::max(1e-9, int_tol) &&
-           var.ub <= 1.0 + std::max(1e-9, int_tol);
-  };
-
-  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
-      literal_edges;
-  literal_edges.reserve(1024);
-
-  for (const auto& event : objective_propagation.implied_events) {
-    if (event.literals.size() != 1 || event.target_col < 0 ||
-        event.target_col >= n || !std::isfinite(event.target_bound)) {
-      continue;
-    }
-    const auto& lit = event.literals.front();
-    if (!binary_like(lit.col) || lit.col == event.target_col) continue;
-
-    const auto& target_var = lp.vars[static_cast<std::size_t>(event.target_col)];
-    bool improving = false;
-    if (event.target_is_lower_bound) {
-      improving = event.target_bound > target_var.lb + 1e-9;
-    } else {
-      improving = event.target_bound < target_var.ub - 1e-9;
-    }
-    if (!improving) continue;
-
-    ++stats.single_literal_events;
-    if (implication_graph.add_implication(
-            lit.col, lit.value_one, event.target_col,
-            event.target_is_lower_bound, event.target_bound)) {
-      ++stats.implications_added;
-    }
-
-    if (!binary_like(event.target_col)) continue;
-    if (event.target_is_lower_bound &&
-        event.target_bound >= 1.0 - std::max(1e-9, int_tol)) {
-      literal_edges.emplace_back(
-          CliqueTable::Literal{lit.col, lit.value_one},
-          CliqueTable::Literal{event.target_col, false});
-    } else if (!event.target_is_lower_bound &&
-               event.target_bound <= std::max(1e-9, int_tol)) {
-      literal_edges.emplace_back(
-          CliqueTable::Literal{lit.col, lit.value_one},
-          CliqueTable::Literal{event.target_col, true});
-    }
-  }
-
-  stats.clique_edges_added = clique_table.add_literal_edges(lp, literal_edges);
-  return stats;
-}
-
-IncumbentValidationSummary validate_incumbent_solution(
-    const LPModel& lp,
-    const Eigen::VectorXd& x,
-    double tol = 1e-6) {
-  IncumbentValidationSummary summary;
-  summary.expected_size = static_cast<int>(lp.vars.size());
-  summary.actual_size = static_cast<int>(x.size());
-  if (summary.actual_size != summary.expected_size) {
-    summary.size_ok = false;
-    return summary;
-  }
-
-  for (int j = 0; j < summary.expected_size; ++j) {
-    const auto& var = lp.vars[j];
-    const double below = var.lb - x[j];
-    const double above = x[j] - var.ub;
-    const double viol = std::max(0.0, std::max(below, above));
-    if (viol > summary.max_bound_violation) {
-      summary.max_bound_violation = viol;
-      summary.bound_var = j;
-    }
-    if (is_integer_type(var)) {
-      const double frac = std::abs(x[j] - std::round(x[j]));
-      if (frac > summary.max_integrality_violation) {
-        summary.max_integrality_violation = frac;
-        summary.frac_var = j;
-      }
-    }
-  }
-  summary.bounds_ok = summary.max_bound_violation <= tol;
-  summary.integrality_ok = summary.max_integrality_violation <= tol;
-
-  if (lp.A.rows() > 0) {
-    const Eigen::VectorXd ax = lp.A * x;
-    for (int i = 0; i < ax.size(); ++i) {
-      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
-      const double upper_viol = std::max(0.0, ax[i] - lp.b[i]);
-      const double lower_viol =
-          std::isfinite(lhs) ? std::max(0.0, lhs - ax[i]) : 0.0;
-      const double viol = std::max(upper_viol, lower_viol);
-      if (viol > summary.max_ineq_violation) {
-        summary.max_ineq_violation = viol;
-        summary.ineq_row = i;
-        summary.ineq_row_activity = ax[i];
-        summary.ineq_row_lhs = lhs;
-        summary.ineq_row_rhs = lp.b[i];
-        summary.ineq_row_side = (upper_viol >= lower_viol) ? "upper" : "lower";
-      }
-    }
-    summary.ineq_ok = summary.max_ineq_violation <= tol;
-  }
-
-  if (lp.Aeq.rows() > 0) {
-    const Eigen::VectorXd aeqx = lp.Aeq * x;
-    for (int i = 0; i < aeqx.size(); ++i) {
-      const double viol = std::abs(aeqx[i] - lp.beq[i]);
-      if (viol > summary.max_eq_violation) {
-        summary.max_eq_violation = viol;
-        summary.eq_row = i;
-      }
-    }
-    summary.eq_ok = summary.max_eq_violation <= tol;
-  }
-
-  return summary;
-}
-
-bool is_near_integer_scalar(double v, double tol = 1e-9) {
-  return std::isfinite(v) && std::abs(v - std::round(v)) <= tol;
-}
-
-std::vector<char> detect_implied_integer_columns(const LPModel& lp) {
-  const int n = static_cast<int>(lp.vars.size());
-  std::vector<char> implied(static_cast<std::size_t>(n), 0);
-  if (n == 0) {
-    return implied;
-  }
-
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row = lp.Aeq;
-  const int m_ineq = static_cast<int>(A_row.rows());
-  const int m_eq = static_cast<int>(Aeq_row.rows());
-
-  auto row_scaled_integral = [&](const auto& row_matrix, int row, double scale,
-                                 double rhs, bool has_rhs,
-                                 double lhs = -kInf, bool has_lhs = false) {
-    if (has_rhs && !is_near_integer_scalar(rhs * scale)) return false;
-    if (has_lhs && !is_near_integer_scalar(lhs * scale)) return false;
-    for (typename std::decay_t<decltype(row_matrix)>::InnerIterator it(row_matrix, row); it; ++it) {
-      if (std::abs(it.value()) > 1e-12 &&
-          !is_near_integer_scalar(it.value() * scale)) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-  bool changed = true;
-  int passes = 0;
-  while (changed && passes++ < 8) {
-    changed = false;
-
-    std::vector<int> ineq_size(static_cast<std::size_t>(m_ineq), 0);
-    std::vector<int> ineq_integral(static_cast<std::size_t>(m_ineq), 0);
-    for (int r = 0; r < m_ineq; ++r) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        if (std::abs(it.value()) <= 1e-12) continue;
-        ++ineq_size[static_cast<std::size_t>(r)];
-        if (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            implied[static_cast<std::size_t>(j)]) {
-          ++ineq_integral[static_cast<std::size_t>(r)];
-        }
-      }
-    }
-    std::vector<int> eq_size(static_cast<std::size_t>(m_eq), 0);
-    std::vector<int> eq_integral(static_cast<std::size_t>(m_eq), 0);
-    for (int r = 0; r < m_eq; ++r) {
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row, r); it; ++it) {
-        const int j = static_cast<int>(it.col());
-        if (std::abs(it.value()) <= 1e-12) continue;
-        ++eq_size[static_cast<std::size_t>(r)];
-        if (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            implied[static_cast<std::size_t>(j)]) {
-          ++eq_integral[static_cast<std::size_t>(r)];
-        }
-      }
-    }
-
-    for (int col = 0; col < n; ++col) {
-      const auto& var = lp.vars[static_cast<std::size_t>(col)];
-      if (var.type != VarType::Continuous || implied[static_cast<std::size_t>(col)])
-        continue;
-
-      bool equation_witness = false;
-      bool dual_detection_possible = true;
-      bool touched = false;
-
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it; ++it) {
-        const int r = static_cast<int>(it.row());
-        const double a = it.value();
-        if (std::abs(a) <= 1e-12) continue;
-        touched = true;
-        if (eq_size[static_cast<std::size_t>(r)] < 2 ||
-            eq_integral[static_cast<std::size_t>(r)] <
-                eq_size[static_cast<std::size_t>(r)] - 1) {
-          dual_detection_possible = false;
-          continue;
-        }
-        const double scale = 1.0 / a;
-        if (row_scaled_integral(Aeq_row, r, scale, lp.beq[r], true)) {
-          equation_witness = true;
-          break;
-        }
-      }
-      if (equation_witness) {
-        implied[static_cast<std::size_t>(col)] = 1;
-        changed = true;
-        continue;
-      }
-
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-        const int r = static_cast<int>(it.row());
-        if (std::abs(it.value()) <= 1e-12) continue;
-        touched = true;
-        if (ineq_size[static_cast<std::size_t>(r)] < 2 ||
-            ineq_integral[static_cast<std::size_t>(r)] <
-                ineq_size[static_cast<std::size_t>(r)] - 1) {
-          dual_detection_possible = false;
-          break;
-        }
-      }
-      if (!touched || !dual_detection_possible) continue;
-      if ((std::isfinite(var.lb) && !is_near_integer_scalar(var.lb)) ||
-          (std::isfinite(var.ub) && !is_near_integer_scalar(var.ub))) {
-        continue;
-      }
-
-      bool all_rows_integral = true;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it; ++it) {
-        const double a = it.value();
-        if (std::abs(a) <= 1e-12) continue;
-        if (!row_scaled_integral(Aeq_row, static_cast<int>(it.row()),
-                                 1.0 / a,
-                                 lp.beq[static_cast<int>(it.row())], true)) {
-          all_rows_integral = false;
-          break;
-        }
-      }
-      if (!all_rows_integral) continue;
-      for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
-        const double a = it.value();
-        if (std::abs(a) <= 1e-12) continue;
-        const int row = static_cast<int>(it.row());
-        const double lhs = lp_row_lhs_or_neg_inf(lp, row);
-        if (!row_scaled_integral(A_row, row, 1.0 / a, lp.b[row], true,
-                                 lhs, std::isfinite(lhs))) {
-          all_rows_integral = false;
-          break;
-        }
-      }
-      if (all_rows_integral) {
-        implied[static_cast<std::size_t>(col)] = 1;
-        changed = true;
-      }
-    }
-  }
-  return implied;
-}
-
-struct IntegralRowTighteningStats {
-  std::uint64_t integral_rows{0};
-  std::uint64_t upper_tightened{0};
-  std::uint64_t lower_tightened{0};
-  double max_upper_delta{0.0};
-  double max_lower_delta{0.0};
-};
-
-IntegralRowTighteningStats tighten_integral_row_sides(
-    LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    double feastol) {
-  IntegralRowTighteningStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  const int m = static_cast<int>(lp.A.rows());
-  if (n <= 0 || m <= 0) return stats;
-
-  auto is_integral_or_implied = [&](int j) {
-    return j >= 0 && j < n &&
-           (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            (j < static_cast<int>(implied_integer_cols.size()) &&
-             implied_integer_cols[static_cast<std::size_t>(j)] != 0));
-  };
-
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  const bool has_lhs = lp_has_row_lhs(lp);
-  const double tol = std::max(1e-9, feastol);
-
-  for (int r = 0; r < m; ++r) {
-    bool integral_row = true;
-    bool has_nz = false;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, r);
-         it; ++it) {
-      const double a = it.value();
-      if (std::abs(a) <= 1e-12) continue;
-      has_nz = true;
-      const int j = static_cast<int>(it.col());
-      if (!is_integral_or_implied(j) || !is_near_integer_scalar(a, tol)) {
-        integral_row = false;
-        break;
-      }
-    }
-    if (!has_nz || !integral_row) continue;
-    ++stats.integral_rows;
-
-    if (std::isfinite(lp.b[r])) {
-      const double old_ub = lp.b[r];
-      const double new_ub = std::floor(old_ub + tol);
-      if (new_ub < old_ub - 1e-10) {
-        lp.b[r] = new_ub;
-        ++stats.upper_tightened;
-        stats.max_upper_delta =
-            std::max(stats.max_upper_delta, old_ub - new_ub);
-      }
-    }
-
-    if (has_lhs) {
-      const double old_lb = lp.row_lhs[r];
-      if (std::isfinite(old_lb)) {
-        const double new_lb = std::ceil(old_lb - tol);
-        if (new_lb > old_lb + 1e-10) {
-          lp.row_lhs[r] = new_lb;
-          ++stats.lower_tightened;
-          stats.max_lower_delta =
-              std::max(stats.max_lower_delta, new_lb - old_lb);
-        }
-      }
-    }
-  }
-
-  return stats;
-}
-
-struct RootImpliedIntegerArtifactStats {
-  std::uint64_t row_sides_scanned{0};
-  std::uint64_t row_sides_with_binary_literals{0};
-  std::uint64_t bound_candidates{0};
-  std::uint64_t bound_improvements{0};
-  std::uint64_t implications_added{0};
-  std::uint64_t conflicts_added{0};
-  std::uint64_t clique_edges_added{0};
-  std::uint64_t literal_pair_tests{0};
-  std::uint64_t literal_pair_conflicts{0};
-  std::uint64_t objective_literal_pair_tests{0};
-  std::uint64_t objective_literal_pair_conflicts{0};
-};
-
-struct NativeVariableBoundSourceStats {
-  std::uint64_t row_sides_scanned{0};
-  std::uint64_t single_binary_row_sides{0};
-  std::uint64_t skipped_multi_binary{0};
-  std::uint64_t candidates{0};
-  std::uint64_t exported_implications{0};
-  std::uint64_t cut_rows_scanned{0};
-  std::uint64_t cut_mixed_rows{0};
-  std::uint64_t cut_vub_candidates{0};
-  std::uint64_t cut_vlb_candidates{0};
-  std::uint64_t cut_domain_tightenings{0};
-  std::uint64_t cut_exported_implications{0};
-  std::uint64_t presolve_vub_candidates{0};
-  std::uint64_t presolve_vlb_candidates{0};
-  std::uint64_t presolve_varbounds_replayed{0};
-  std::uint64_t presolve_exported_implications{0};
-  std::uint64_t implied_bound_passes{0};
-  std::uint64_t implied_bound_lower{0};
-  std::uint64_t implied_bound_upper{0};
-  std::uint64_t probe_vub_candidates{0};
-  std::uint64_t probe_vlb_candidates{0};
-  std::uint64_t probe_varbounds_replayed{0};
-  std::uint64_t probe_global_tightenings{0};
-  std::uint64_t probe_exported_implications{0};
-};
-
-void accumulate_variable_bound_source_stats(
-    NativeVariableBoundSourceStats& dst,
-    const NativeVariableBoundSourceStats& src) {
-  dst.row_sides_scanned += src.row_sides_scanned;
-  dst.single_binary_row_sides += src.single_binary_row_sides;
-  dst.skipped_multi_binary += src.skipped_multi_binary;
-  dst.candidates += src.candidates;
-  dst.exported_implications += src.exported_implications;
-  dst.cut_rows_scanned += src.cut_rows_scanned;
-  dst.cut_mixed_rows += src.cut_mixed_rows;
-  dst.cut_vub_candidates += src.cut_vub_candidates;
-  dst.cut_vlb_candidates += src.cut_vlb_candidates;
-  dst.cut_domain_tightenings += src.cut_domain_tightenings;
-  dst.cut_exported_implications += src.cut_exported_implications;
-  dst.presolve_vub_candidates += src.presolve_vub_candidates;
-  dst.presolve_vlb_candidates += src.presolve_vlb_candidates;
-  dst.presolve_varbounds_replayed += src.presolve_varbounds_replayed;
-  dst.presolve_exported_implications += src.presolve_exported_implications;
-  dst.implied_bound_passes += src.implied_bound_passes;
-  dst.implied_bound_lower += src.implied_bound_lower;
-  dst.implied_bound_upper += src.implied_bound_upper;
-  dst.probe_vub_candidates += src.probe_vub_candidates;
-  dst.probe_vlb_candidates += src.probe_vlb_candidates;
-  dst.probe_varbounds_replayed += src.probe_varbounds_replayed;
-  dst.probe_global_tightenings += src.probe_global_tightenings;
-  dst.probe_exported_implications += src.probe_exported_implications;
-}
-
-struct NativeVariableBoundSourceEntry {
-  bool is_vub{true};
-  int col{-1};
-  int trigger_col{-1};
-  double coef{0.0};
-  double constant{0.0};
-};
-
-std::vector<NativeVariableBoundSourceEntry> collect_variable_bound_sources(
-    const VariableBoundTable& table) {
-  std::vector<NativeVariableBoundSourceEntry> out;
-  for (int col = 0; col < table.num_vars(); ++col) {
-    for (const auto& entry : table.vubs(col)) {
-      out.push_back(NativeVariableBoundSourceEntry{
-          true, col, entry.trigger_col, entry.bound.coef,
-          entry.bound.constant});
-    }
-    for (const auto& entry : table.vlbs(col)) {
-      out.push_back(NativeVariableBoundSourceEntry{
-          false, col, entry.trigger_col, entry.bound.coef,
-          entry.bound.constant});
-    }
-  }
-  return out;
-}
-
-std::string native_varbound_key(bool is_vub,
-                                int col,
-                                int trigger_col,
-                                double coef,
-                                double constant) {
-  return fmt::format("{}:{}:{}:{:.17g}:{:.17g}", is_vub ? 1 : 0, col,
-                     trigger_col, coef, constant);
-}
-
-void trace_highs_native_varbound_diff(
-    const char* phase,
-    const HiGHSPresolvedModelStats& highs_state,
-    const LPModel* lp,
-    const VariableBoundTable& table,
-    int max_samples = 8) {
-  if (!bc_frontier_conformance_enabled() &&
-      std::getenv("HACDCPF_HIGHS_PRESOLVE_STATS") == nullptr) {
-    return;
-  }
-  if (!highs_state.side_state_available || highs_state.var_bounds.empty()) return;
-  std::unordered_set<std::string> native_keys;
-  native_keys.reserve(table.size() * 2 + 1);
-  std::uint64_t native_vub = 0;
-  std::uint64_t native_vlb = 0;
-  for (int col = 0; col < table.num_vars(); ++col) {
-    for (const auto& entry : table.vubs(col)) {
-      native_keys.insert(native_varbound_key(true, col, entry.trigger_col,
-                                             entry.bound.coef,
-                                             entry.bound.constant));
-      ++native_vub;
-    }
-    for (const auto& entry : table.vlbs(col)) {
-      native_keys.insert(native_varbound_key(false, col, entry.trigger_col,
-                                             entry.bound.coef,
-                                             entry.bound.constant));
-      ++native_vlb;
-    }
-  }
-
-  std::uint64_t highs_vub_records = 0;
-  std::uint64_t highs_vlb_records = 0;
-  std::uint64_t missing = 0;
-  std::uint64_t missing_vub = 0;
-  std::uint64_t missing_vlb = 0;
-  std::uint64_t missing_same_row = 0;
-  std::uint64_t missing_no_same_row = 0;
-  std::uint64_t missing_bad_cols = 0;
-  fmt::memory_buffer sample;
-  int emitted = 0;
-  auto has_same_row = [&](int target_col, int trigger_col) {
-    if (lp == nullptr || target_col < 0 || trigger_col < 0 ||
-        target_col >= static_cast<int>(lp->vars.size()) ||
-        trigger_col >= static_cast<int>(lp->vars.size())) {
-      ++missing_bad_cols;
-      return false;
-    }
-    Eigen::SparseMatrix<double, Eigen::RowMajor> arow = lp->A;
-    arow.makeCompressed();
-    for (int r = 0; r < arow.rows(); ++r) {
-      bool has_target = false;
-      bool has_trigger = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(arow, r);
-           it; ++it) {
-        const int col = static_cast<int>(it.col());
-        if (col == target_col) has_target = true;
-        if (col == trigger_col) has_trigger = true;
-      }
-      if (has_target && has_trigger) return true;
-    }
-    Eigen::SparseMatrix<double, Eigen::RowMajor> aeqrow = lp->Aeq;
-    aeqrow.makeCompressed();
-    for (int r = 0; r < aeqrow.rows(); ++r) {
-      bool has_target = false;
-      bool has_trigger = false;
-      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(aeqrow, r);
-           it; ++it) {
-        const int col = static_cast<int>(it.col());
-        if (col == target_col) has_target = true;
-        if (col == trigger_col) has_trigger = true;
-      }
-      if (has_target && has_trigger) return true;
-    }
-    return false;
-  };
-  for (const auto& rec : highs_state.var_bounds) {
-    if (rec.upper)
-      ++highs_vub_records;
-    else
-      ++highs_vlb_records;
-    const std::string key = native_varbound_key(
-        rec.upper, rec.target_col, rec.trigger_col, rec.coef, rec.constant);
-    if (native_keys.find(key) != native_keys.end()) continue;
-    ++missing;
-    if (rec.upper)
-      ++missing_vub;
-    else
-      ++missing_vlb;
-    if (has_same_row(rec.target_col, rec.trigger_col))
-      ++missing_same_row;
-    else
-      ++missing_no_same_row;
-    if (emitted < max_samples) {
-      if (emitted++ > 0) fmt::format_to(std::back_inserter(sample), ";");
-      fmt::format_to(std::back_inserter(sample), "{}{}{}={:.12g}*{}+{:.12g}",
-                     rec.target_col, rec.upper ? "<=" : ">=", "hs",
-                     rec.coef, rec.trigger_col, rec.constant);
-    }
-  }
-  fmt::print(stderr,
-             "[B&C-HIGHS-VB-DIFF] phase={} hs_vub={} hs_vlb={} "
-             "native_vub={} native_vlb={} missing={} missing_vub={} "
-             "missing_vlb={} same_row={} no_same_row={} bad_cols={} "
-             "sample=[{}]\n",
-             phase != nullptr ? phase : "unknown", highs_vub_records,
-             highs_vlb_records, native_vub, native_vlb, missing,
-             missing_vub, missing_vlb, missing_same_row, missing_no_same_row,
-             missing_bad_cols, fmt::to_string(sample));
-}
-
-struct NativeImpliedColumnBounds {
-  std::vector<double> lower;
-  std::vector<double> upper;
-  std::vector<int> lower_source;
-  std::vector<int> upper_source;
-  std::uint64_t passes{0};
-  std::uint64_t lower_tightened{0};
-  std::uint64_t upper_tightened{0};
-};
-
-NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
-    const LPModel& lp,
-    int max_passes = 16,
-    int max_row_nnz = 512,
-    double tol = 1e-9) {
-  NativeImpliedColumnBounds out;
-  const int n = static_cast<int>(lp.vars.size());
-  out.lower.assign(static_cast<std::size_t>(n),
-                   -std::numeric_limits<double>::infinity());
-  out.upper.assign(static_cast<std::size_t>(n),
-                   std::numeric_limits<double>::infinity());
-  out.lower_source.assign(static_cast<std::size_t>(n), -1);
-  out.upper_source.assign(static_cast<std::size_t>(n), -1);
-  if (n <= 0) return out;
-
-  struct Entry {
-    int col{-1};
-    double coef{0.0};
-  };
-
-  auto effective_lower = [&](int row, int col) {
-    const double raw = lp.vars[static_cast<std::size_t>(col)].lb;
-    if (out.lower_source[static_cast<std::size_t>(col)] == row) return raw;
-    const double impl = out.lower[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::max(raw, impl) : raw;
-  };
-  auto effective_upper = [&](int row, int col) {
-    const double raw = lp.vars[static_cast<std::size_t>(col)].ub;
-    if (out.upper_source[static_cast<std::size_t>(col)] == row) return raw;
-    const double impl = out.upper[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::min(raw, impl) : raw;
-  };
-  auto lower_activity_bound = [&](int row, int col, double coef) {
-    return coef > 0.0 ? effective_lower(row, col)
-                      : effective_upper(row, col);
-  };
-  auto upper_activity_bound = [&](int row, int col, double coef) {
-    return coef < 0.0 ? effective_lower(row, col)
-                      : effective_upper(row, col);
-  };
-  auto add_activity = [](double& activity, int& num_inf, double coef,
-                         double bound) {
-    if (std::isfinite(bound)) {
-      activity += coef * bound;
-    } else {
-      ++num_inf;
-    }
-  };
-  auto remove_activity = [](double& activity, int& num_inf, double coef,
-                            double bound) {
-    if (std::isfinite(bound)) {
-      activity -= coef * bound;
-    } else {
-      --num_inf;
-    }
-  };
-  auto try_tighten_lower = [&](int row, int col, double value) {
-    if (!std::isfinite(value)) return false;
-    const double raw_lb = lp.vars[static_cast<std::size_t>(col)].lb;
-    const double raw_ub = lp.vars[static_cast<std::size_t>(col)].ub;
-    if (value <= raw_lb + tol || value > raw_ub + tol) return false;
-    const double cur = out.lower[static_cast<std::size_t>(col)];
-    if (std::isfinite(cur) && value <= cur + tol) return false;
-    out.lower[static_cast<std::size_t>(col)] = value;
-    out.lower_source[static_cast<std::size_t>(col)] = row;
-    ++out.lower_tightened;
-    return true;
-  };
-  auto try_tighten_upper = [&](int row, int col, double value) {
-    if (!std::isfinite(value)) return false;
-    const double raw_lb = lp.vars[static_cast<std::size_t>(col)].lb;
-    const double raw_ub = lp.vars[static_cast<std::size_t>(col)].ub;
-    if (value >= raw_ub - tol || value < raw_lb - tol) return false;
-    const double cur = out.upper[static_cast<std::size_t>(col)];
-    if (std::isfinite(cur) && value >= cur - tol) return false;
-    out.upper[static_cast<std::size_t>(col)] = value;
-    out.upper_source[static_cast<std::size_t>(col)] = row;
-    ++out.upper_tightened;
-    return true;
-  };
-
-  auto process_row =
-      [&](const Eigen::SparseMatrix<double, Eigen::RowMajor>& rows,
-          int matrix_row, int source_row, double lhs, double rhs) {
-        std::vector<Entry> entries;
-        entries.reserve(32);
-        double sum_lower = 0.0;
-        double sum_upper = 0.0;
-        int num_inf_lower = 0;
-        int num_inf_upper = 0;
-        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(rows, matrix_row);
-             it; ++it) {
-          const int col = static_cast<int>(it.col());
-          const double a = it.value();
-          if (col < 0 || col >= n || std::abs(a) <= 1e-12) continue;
-          if (static_cast<int>(entries.size()) >= max_row_nnz) return false;
-          const auto& var = lp.vars[static_cast<std::size_t>(col)];
-          if (std::abs(var.ub - var.lb) <= 1e-12) continue;
-          entries.push_back(Entry{col, a});
-          add_activity(sum_lower, num_inf_lower, a,
-                       lower_activity_bound(source_row, col, a));
-          add_activity(sum_upper, num_inf_upper, a,
-                       upper_activity_bound(source_row, col, a));
-        }
-        if (entries.size() <= 1) return false;
-
-        bool changed = false;
-        for (const Entry& entry : entries) {
-          if (std::abs(entry.coef) <= 1e-12) continue;
-          if (std::isfinite(rhs)) {
-            double residual = sum_lower;
-            int residual_inf = num_inf_lower;
-            remove_activity(residual, residual_inf, entry.coef,
-                            lower_activity_bound(source_row, entry.col, entry.coef));
-            if (residual_inf == 0 && std::isfinite(residual)) {
-              const double bound = (rhs - residual) / entry.coef;
-              if (entry.coef > 0.0) {
-                changed =
-                    try_tighten_upper(source_row, entry.col, bound) || changed;
-              } else {
-                changed =
-                    try_tighten_lower(source_row, entry.col, bound) || changed;
-              }
-            }
-          }
-          if (std::isfinite(lhs)) {
-            double residual = sum_upper;
-            int residual_inf = num_inf_upper;
-            remove_activity(residual, residual_inf, entry.coef,
-                            upper_activity_bound(source_row, entry.col, entry.coef));
-            if (residual_inf == 0 && std::isfinite(residual)) {
-              const double bound = (lhs - residual) / entry.coef;
-              if (entry.coef > 0.0) {
-                changed =
-                    try_tighten_lower(source_row, entry.col, bound) || changed;
-              } else {
-                changed =
-                    try_tighten_upper(source_row, entry.col, bound) || changed;
-              }
-            }
-          }
-        }
-        return changed;
-      };
-
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeqrow = lp.Aeq;
-  for (int pass = 0; pass < max_passes; ++pass) {
-    bool changed = false;
-    for (int r = 0; r < Arow.rows(); ++r) {
-      changed =
-          process_row(Arow, r, r, lp_row_lhs_or_neg_inf(lp, r), lp.b[r]) ||
-          changed;
-    }
-    const int eq_offset = static_cast<int>(Arow.rows());
-    for (int r = 0; r < Aeqrow.rows(); ++r) {
-      changed = process_row(Aeqrow, r, eq_offset + r, lp.beq[r], lp.beq[r]) ||
-                changed;
-    }
-    ++out.passes;
-    if (!changed) break;
-  }
-
-  return out;
-}
-
-NativeVariableBoundSourceStats build_variable_bound_table_from_rows(
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    VariableBoundTable& table,
-    BinaryImplicationGraph* implication_graph = nullptr,
-    int max_row_nnz = 512) {
-  NativeVariableBoundSourceStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  table.reset(n);
-  if (n <= 0) return stats;
-
-  NativeImpliedColumnBounds implied_col_bounds =
-      compute_implied_column_bounds_from_rows(lp, 16, max_row_nnz, 1e-9);
-  stats.implied_bound_passes = implied_col_bounds.passes;
-  stats.implied_bound_lower = implied_col_bounds.lower_tightened;
-  stats.implied_bound_upper = implied_col_bounds.upper_tightened;
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto is_integral_or_implied = [&](int j) {
-    return j >= 0 && j < n &&
-           (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            is_implied_integer(j));
-  };
-  auto binary_trigger_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > 1e-9 || var.ub < 1.0 - 1e-9) return false;
-    return var.type == VarType::Binary ||
-           (var.type == VarType::Integer && std::abs(var.lb) <= 1e-9 &&
-            std::abs(var.ub - 1.0) <= 1e-9);
-  };
-  struct Entry {
-    int col{-1};
-    double coef{0.0};
-  };
-
-  auto effective_lower = [&](int row, int col) {
-    const auto& var = lp.vars[static_cast<std::size_t>(col)];
-    if (implied_col_bounds.lower_source[static_cast<std::size_t>(col)] == row)
-      return var.lb;
-    const double impl = implied_col_bounds.lower[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::max(var.lb, impl) : var.lb;
-  };
-  auto effective_upper = [&](int row, int col) {
-    const auto& var = lp.vars[static_cast<std::size_t>(col)];
-    if (implied_col_bounds.upper_source[static_cast<std::size_t>(col)] == row)
-      return var.ub;
-    const double impl = implied_col_bounds.upper[static_cast<std::size_t>(col)];
-    return std::isfinite(impl) ? std::min(var.ub, impl) : var.ub;
-  };
-  auto bound_for_lower_activity = [&](int row, int col, double coef) {
-    return coef > 0.0 ? effective_lower(row, col) : effective_upper(row, col);
-  };
-  auto bound_for_upper_activity = [&](int row, int col, double coef) {
-    return coef < 0.0 ? effective_lower(row, col) : effective_upper(row, col);
-  };
-  auto add_activity = [](double& activity, int& num_inf, double coef,
-                         double bound) {
-    if (std::isfinite(bound)) {
-      activity += coef * bound;
-    } else {
-      ++num_inf;
-    }
-  };
-  auto remove_activity = [](double& activity, int& num_inf, double coef,
-                            double bound) {
-    if (std::isfinite(bound)) {
-      activity -= coef * bound;
-    } else {
-      --num_inf;
-    }
-  };
-  auto replace_activity = [&](double& activity, int& num_inf, double coef,
-                              double old_bound, double new_bound) {
-    remove_activity(activity, num_inf, coef, old_bound);
-    add_activity(activity, num_inf, coef, new_bound);
-  };
-
-  auto process_ranged_row =
-      [&](const Eigen::SparseMatrix<double, Eigen::RowMajor>& rows,
-          int matrix_row, int source_row, double lhs, double rhs) {
-    std::vector<Entry> entries;
-    entries.reserve(32);
-    int binary_col = -1;
-    double binary_coef = 0.0;
-    double sum_lower = 0.0;
-    double sum_upper = 0.0;
-    int num_inf_lower = 0;
-    int num_inf_upper = 0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(rows, matrix_row);
-         it; ++it) {
-      const int col = static_cast<int>(it.col());
-      const double a = it.value();
-      if (col < 0 || col >= n || std::abs(a) <= 1e-12) continue;
-      if (static_cast<int>(entries.size()) >= max_row_nnz) return;
-      const auto& var = lp.vars[static_cast<std::size_t>(col)];
-      if (std::abs(var.ub - var.lb) <= 1e-12) continue;
-      entries.push_back(Entry{col, a});
-      add_activity(sum_lower, num_inf_lower, a,
-                   bound_for_lower_activity(source_row, col, a));
-      add_activity(sum_upper, num_inf_upper, a,
-                   bound_for_upper_activity(source_row, col, a));
-      if (binary_trigger_like(col)) {
-        if (binary_col != -1) {
-          ++stats.skipped_multi_binary;
-          return;
-        }
-        binary_col = col;
-        binary_coef = a;
-      }
-    }
-    if (entries.size() <= 1) return;
-    if (binary_col < 0) return;
-    const bool use_lhs = std::isfinite(lhs) && num_inf_upper <= 1;
-    const bool use_rhs = std::isfinite(rhs) && num_inf_lower <= 1;
-    if (!use_lhs && !use_rhs) return;
-    stats.row_sides_scanned += (use_lhs ? 1 : 0) + (use_rhs ? 1 : 0);
-    stats.single_binary_row_sides += (use_lhs ? 1 : 0) + (use_rhs ? 1 : 0);
-
-    for (const Entry& target : entries) {
-      if (target.col == binary_col || std::abs(target.coef) <= 1e-12) {
-        continue;
-      }
-      double vlb_constant = -std::numeric_limits<double>::infinity();
-      if (use_lhs) {
-        double residual = sum_upper;
-        int residual_inf = num_inf_upper;
-        remove_activity(residual, residual_inf, target.coef,
-                        bound_for_upper_activity(source_row, target.col,
-                                                 target.coef));
-        replace_activity(
-            residual, residual_inf, binary_coef,
-            bound_for_upper_activity(source_row, binary_col, binary_coef),
-            0.0);
-        if (residual_inf == 0 && std::isfinite(residual)) {
-          vlb_constant = (lhs - residual) / std::abs(target.coef);
-        }
-      }
-      double vub_constant = std::numeric_limits<double>::infinity();
-      if (use_rhs) {
-        double residual = sum_lower;
-        int residual_inf = num_inf_lower;
-        remove_activity(residual, residual_inf, target.coef,
-                        bound_for_lower_activity(source_row, target.col,
-                                                 target.coef));
-        replace_activity(
-            residual, residual_inf, binary_coef,
-            bound_for_lower_activity(source_row, binary_col, binary_coef),
-            0.0);
-        if (residual_inf == 0 && std::isfinite(residual)) {
-          vub_constant = (rhs - residual) / std::abs(target.coef);
-        }
-      }
-
-      if (target.coef < 0.0) {
-        vlb_constant *= -1.0;
-        vub_constant *= -1.0;
-        std::swap(vlb_constant, vub_constant);
-      }
-      const double vb_coef = -binary_coef / target.coef;
-      if (!std::isfinite(vb_coef)) continue;
-      const bool target_integral = is_integral_or_implied(target.col);
-      if (std::isfinite(vlb_constant)) {
-        ++stats.candidates;
-        table.add_vlb(target.col, binary_col, vb_coef, vlb_constant,
-                      lp.vars[static_cast<std::size_t>(target.col)].lb,
-                      target_integral);
-      }
-      if (std::isfinite(vub_constant)) {
-        ++stats.candidates;
-        table.add_vub(target.col, binary_col, vb_coef, vub_constant,
-                      lp.vars[static_cast<std::size_t>(target.col)].ub,
-                      target_integral);
-      }
-    }
-  };
-
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  for (int r = 0; r < Arow.rows(); ++r) {
-    process_ranged_row(Arow, r, r, lp_row_lhs_or_neg_inf(lp, r), lp.b[r]);
-  }
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeqrow = lp.Aeq;
-  const int eq_offset = static_cast<int>(Arow.rows());
-  for (int r = 0; r < Aeqrow.rows(); ++r) {
-    process_ranged_row(Aeqrow, r, eq_offset + r, lp.beq[r], lp.beq[r]);
-  }
-  if (implication_graph != nullptr) {
-    stats.exported_implications =
-        table.export_to_implication_graph(*implication_graph);
-  }
-  return stats;
-}
-
-NativeVariableBoundSourceStats augment_variable_bound_table_from_cut_rows(
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    int first_row,
-    int last_row,
-    VariableBoundTable& table,
-    BinaryImplicationGraph* implication_graph = nullptr,
-    int max_cut_nnz = 100,
-    double feastol = 1e-7) {
-  NativeVariableBoundSourceStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 0 || lp.A.rows() <= 0) return stats;
-  first_row = std::max(0, first_row);
-  last_row = std::min<int>(last_row, static_cast<int>(lp.A.rows()));
-  if (first_row >= last_row) return stats;
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto is_integral_or_implied = [&](int j) {
-    return j >= 0 && j < n &&
-           (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            is_implied_integer(j));
-  };
-  auto is_binary_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > feastol || var.ub < 1.0 - feastol) return false;
-    if (var.type == VarType::Binary ||
-        (var.type == VarType::Integer && std::abs(var.lb) <= feastol &&
-         std::abs(var.ub - 1.0) <= feastol)) {
-      return true;
-    }
-    return is_implied_integer(j) && std::abs(var.lb) <= feastol &&
-           std::abs(var.ub - 1.0) <= feastol;
-  };
-
-  struct RowEntry {
-    int col{-1};
-    double val{0.0};
-  };
-
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  const std::uint64_t exported_before =
-      implication_graph != nullptr
-          ? static_cast<std::uint64_t>(implication_graph->size())
-          : 0;
-
-  for (int r = first_row; r < last_row; ++r) {
-    if (!std::isfinite(lp.b[r])) continue;
-    std::vector<RowEntry> entries;
-    entries.reserve(32);
-    int nbin = 0;
-    double min_activity = 0.0;
-    bool finite_activity = true;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, r);
-         it; ++it) {
-      const int col = static_cast<int>(it.col());
-      const double a = it.value();
-      if (col < 0 || col >= n || std::abs(a) <= 1e-12) continue;
-      if (static_cast<int>(entries.size()) >= max_cut_nnz) {
-        finite_activity = false;
-        break;
-      }
-      const auto& var = lp.vars[static_cast<std::size_t>(col)];
-      if (std::abs(var.ub - var.lb) <= 1e-12) continue;
-      const double bound = a > 0.0 ? var.lb : var.ub;
-      if (!std::isfinite(bound)) {
-        finite_activity = false;
-        break;
-      }
-      min_activity += a * bound;
-      entries.push_back(RowEntry{col, a});
-      if (is_binary_like(col)) ++nbin;
-    }
-    if (!finite_activity || entries.size() <= 1) continue;
-    ++stats.cut_rows_scanned;
-    if (lp.b[r] - min_activity < 0.0) min_activity = lp.b[r];
-
-    for (const RowEntry& entry : entries) {
-      if (!is_integral_or_implied(entry.col)) continue;
-      const auto& var = lp.vars[static_cast<std::size_t>(entry.col)];
-      if (entry.val > 0.0) {
-        const double bound_val =
-            std::floor((lp.b[r] - min_activity) / entry.val + var.lb + feastol);
-        if (std::isfinite(bound_val) && bound_val < var.ub - feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      } else if (entry.val < 0.0) {
-        const double bound_val =
-            std::ceil((lp.b[r] - min_activity) / entry.val + var.ub - feastol);
-        if (std::isfinite(bound_val) && bound_val > var.lb + feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      }
-    }
-
-    if (nbin <= 1 || nbin >= static_cast<int>(entries.size())) continue;
-    ++stats.cut_mixed_rows;
-
-    for (const RowEntry& bin_entry : entries) {
-      if (!is_binary_like(bin_entry.col)) continue;
-      const int bin_col = bin_entry.col;
-      const double implied_activity =
-          lp.b[r] - min_activity - std::abs(bin_entry.val);
-      if (!std::isfinite(implied_activity)) continue;
-
-      for (const RowEntry& target : entries) {
-        if (target.col == bin_col || is_binary_like(target.col)) continue;
-        const auto& var = lp.vars[static_cast<std::size_t>(target.col)];
-        const bool target_integral = is_integral_or_implied(target.col);
-        if (target.val > 0.0) {
-          double impl_ub =
-              (implied_activity + target.val * var.lb) / target.val;
-          if (target_integral) impl_ub = std::floor(impl_ub + feastol);
-          if (!(std::isfinite(impl_ub) && impl_ub < var.ub - feastol)) continue;
-
-          double coef = 0.0;
-          double constant = 0.0;
-          if (bin_entry.val < 0.0) {
-            coef = var.ub - impl_ub;
-            constant = impl_ub;
-          } else {
-            if (!std::isfinite(var.ub)) continue;
-            coef = impl_ub - var.ub;
-            constant = var.ub;
-          }
-          ++stats.cut_vub_candidates;
-          table.add_vub(target.col, bin_col, coef, constant, var.ub,
-                        target_integral);
-        } else if (target.val < 0.0) {
-          double impl_lb =
-              (implied_activity + target.val * var.ub) / target.val;
-          if (target_integral) impl_lb = std::ceil(impl_lb - feastol);
-          if (!(std::isfinite(impl_lb) && impl_lb > var.lb + feastol)) continue;
-
-          double coef = 0.0;
-          double constant = 0.0;
-          if (bin_entry.val < 0.0) {
-            coef = var.lb - impl_lb;
-            constant = impl_lb;
-          } else {
-            if (!std::isfinite(var.lb)) continue;
-            coef = impl_lb - var.lb;
-            constant = var.lb;
-          }
-          ++stats.cut_vlb_candidates;
-          table.add_vlb(target.col, bin_col, coef, constant, var.lb,
-                        target_integral);
-        }
-      }
-    }
-  }
-
-  if (implication_graph != nullptr) {
-    table.export_to_implication_graph(*implication_graph);
-    const std::uint64_t exported_after =
-        static_cast<std::uint64_t>(implication_graph->size());
-    stats.cut_exported_implications =
-        exported_after > exported_before ? exported_after - exported_before : 0;
-  }
-  return stats;
-}
-
-NativeVariableBoundSourceStats augment_variable_bound_table_from_sparse_cut_rows(
-    const LPModel& domain_lp,
-    const std::vector<Eigen::SparseVector<double>>& cut_rows,
-    const std::vector<double>& cut_rhs,
-    const std::vector<char>& implied_integer_cols,
-    VariableBoundTable& table,
-    BinaryImplicationGraph* implication_graph = nullptr,
-    int max_cut_nnz = 100,
-    double feastol = 1e-7) {
-  NativeVariableBoundSourceStats stats;
-  const int n = static_cast<int>(domain_lp.vars.size());
-  const std::size_t nrows = std::min(cut_rows.size(), cut_rhs.size());
-  if (n <= 0 || nrows == 0) return stats;
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto is_integral_or_implied = [&](int j) {
-    return j >= 0 && j < n &&
-           (is_integer_type(domain_lp.vars[static_cast<std::size_t>(j)]) ||
-            is_implied_integer(j));
-  };
-  auto is_binary_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = domain_lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > feastol || var.ub < 1.0 - feastol) return false;
-    if (var.type == VarType::Binary ||
-        (var.type == VarType::Integer && std::abs(var.lb) <= feastol &&
-         std::abs(var.ub - 1.0) <= feastol)) {
-      return true;
-    }
-    return is_implied_integer(j) && std::abs(var.lb) <= feastol &&
-           std::abs(var.ub - 1.0) <= feastol;
-  };
-
-  struct RowEntry {
-    int col{-1};
-    double val{0.0};
-  };
-
-  const std::uint64_t exported_before =
-      implication_graph != nullptr
-          ? static_cast<std::uint64_t>(implication_graph->size())
-          : 0;
-
-  for (std::size_t row_id = 0; row_id < nrows; ++row_id) {
-    const double rhs = cut_rhs[row_id];
-    if (!std::isfinite(rhs)) continue;
-    const auto& sparse_row = cut_rows[row_id];
-    std::vector<RowEntry> entries;
-    entries.reserve(32);
-    int nbin = 0;
-    double min_activity = 0.0;
-    bool finite_activity = true;
-    for (Eigen::SparseVector<double>::InnerIterator it(sparse_row); it; ++it) {
-      const int col = static_cast<int>(it.index());
-      const double a = it.value();
-      if (col < 0 || col >= n || std::abs(a) <= 1e-12) continue;
-      if (static_cast<int>(entries.size()) >= max_cut_nnz) {
-        finite_activity = false;
-        break;
-      }
-      const auto& var = domain_lp.vars[static_cast<std::size_t>(col)];
-      if (std::abs(var.ub - var.lb) <= 1e-12) continue;
-      const double bound = a > 0.0 ? var.lb : var.ub;
-      if (!std::isfinite(bound)) {
-        finite_activity = false;
-        break;
-      }
-      min_activity += a * bound;
-      entries.push_back(RowEntry{col, a});
-      if (is_binary_like(col)) ++nbin;
-    }
-    if (!finite_activity || entries.size() <= 1) continue;
-    ++stats.cut_rows_scanned;
-    if (rhs - min_activity < 0.0) min_activity = rhs;
-
-    for (const RowEntry& entry : entries) {
-      if (!is_integral_or_implied(entry.col)) continue;
-      const auto& var = domain_lp.vars[static_cast<std::size_t>(entry.col)];
-      if (entry.val > 0.0) {
-        const double bound_val =
-            std::floor((rhs - min_activity) / entry.val + var.lb + feastol);
-        if (std::isfinite(bound_val) && bound_val < var.ub - feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      } else if (entry.val < 0.0) {
-        const double bound_val =
-            std::ceil((rhs - min_activity) / entry.val + var.ub - feastol);
-        if (std::isfinite(bound_val) && bound_val > var.lb + feastol) {
-          ++stats.cut_domain_tightenings;
-        }
-      }
-    }
-
-    if (nbin <= 1 || nbin >= static_cast<int>(entries.size())) continue;
-    ++stats.cut_mixed_rows;
-
-    for (const RowEntry& bin_entry : entries) {
-      if (!is_binary_like(bin_entry.col)) continue;
-      const int bin_col = bin_entry.col;
-      const double implied_activity =
-          rhs - min_activity - std::abs(bin_entry.val);
-      if (!std::isfinite(implied_activity)) continue;
-      for (const RowEntry& target : entries) {
-        if (target.col == bin_col || is_binary_like(target.col)) continue;
-        const auto& var = domain_lp.vars[static_cast<std::size_t>(target.col)];
-        const bool target_integral = is_integral_or_implied(target.col);
-        if (target.val > 0.0) {
-          double impl_ub =
-              (implied_activity + target.val * var.lb) / target.val;
-          if (target_integral) impl_ub = std::floor(impl_ub + feastol);
-          if (!(std::isfinite(impl_ub) && impl_ub < var.ub - feastol)) continue;
-
-          double coef = 0.0;
-          double constant = 0.0;
-          if (bin_entry.val < 0.0) {
-            coef = var.ub - impl_ub;
-            constant = impl_ub;
-          } else {
-            if (!std::isfinite(var.ub)) continue;
-            coef = impl_ub - var.ub;
-            constant = var.ub;
-          }
-          ++stats.cut_vub_candidates;
-          table.add_vub(target.col, bin_col, coef, constant, var.ub,
-                        target_integral);
-        } else if (target.val < 0.0) {
-          double impl_lb =
-              (implied_activity + target.val * var.ub) / target.val;
-          if (target_integral) impl_lb = std::ceil(impl_lb - feastol);
-          if (!(std::isfinite(impl_lb) && impl_lb > var.lb + feastol)) continue;
-
-          double coef = 0.0;
-          double constant = 0.0;
-          if (bin_entry.val < 0.0) {
-            coef = var.lb - impl_lb;
-            constant = impl_lb;
-          } else {
-            if (!std::isfinite(var.lb)) continue;
-            coef = impl_lb - var.lb;
-            constant = var.lb;
-          }
-          ++stats.cut_vlb_candidates;
-          table.add_vlb(target.col, bin_col, coef, constant, var.lb,
-                        target_integral);
-        }
-      }
-    }
-  }
-
-  if (implication_graph != nullptr) {
-    table.export_to_implication_graph(*implication_graph);
-    const std::uint64_t exported_after =
-        static_cast<std::uint64_t>(implication_graph->size());
-    stats.cut_exported_implications =
-        exported_after > exported_before ? exported_after - exported_before : 0;
-  }
-  return stats;
-}
-
-RootImpliedIntegerArtifactStats build_implied_integer_row_artifacts(
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    CliqueTable& clique_table,
-    BinaryImplicationGraph& implication_graph,
-    int max_row_nnz = 256,
-    int max_binary_literals_per_row = 96,
-    std::uint64_t max_implications = 250000,
-    const Eigen::VectorXd* lp_solution = nullptr) {
-  (void)lp_solution;
-  RootImpliedIntegerArtifactStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 0 || lp.A.rows() == 0) return stats;
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto is_integral_or_implied = [&](int j) {
-    return j >= 0 && j < n &&
-           (is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
-            is_implied_integer(j));
-  };
-  auto is_binary_col = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > 1e-9 || var.ub < 1.0 - 1e-9) return false;
-    if (var.type == VarType::Binary) return true;
-    return is_implied_integer(j) && std::abs(var.lb) <= 1e-9 &&
-           std::abs(var.ub - 1.0) <= 1e-9;
-  };
-  auto rounded_bound = [&](int j, bool is_lb, double value) {
-    if (!is_integral_or_implied(j)) return value;
-    return is_lb ? std::ceil(value - 1e-9) : std::floor(value + 1e-9);
-  };
-  auto min_contribution = [&](double a, int j, double& contrib) {
-    if (a > 0.0) {
-      if (!std::isfinite(lp.vars[static_cast<std::size_t>(j)].lb)) return false;
-      contrib = a * lp.vars[static_cast<std::size_t>(j)].lb;
-    } else {
-      if (!std::isfinite(lp.vars[static_cast<std::size_t>(j)].ub)) return false;
-      contrib = a * lp.vars[static_cast<std::size_t>(j)].ub;
-    }
-    return true;
-  };
-  auto objective_literal = [&](int col, bool one) {
-    return col >= 0 && col < n && col < lp.c.size() &&
-           std::isfinite(lp.c[col]) && std::abs(lp.c[col]) > 1e-12 &&
-           ((lp.c[col] < 0.0) == one);
-  };
-
-  struct Entry {
-    int col{-1};
-    double val{0.0};
-    double min_contrib{0.0};
-  };
-  struct Literal {
-    int col{-1};
-    bool one{false};
-    double delta{0.0};
-  };
-
-  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
-      literal_clique_edges;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row = lp.Aeq;
-
-  auto add_forbid_literal = [&](int trigger, bool trigger_one,
-                                int lit_col, bool lit_one) {
-    bool added = false;
-    if (lit_one) {
-      added = implication_graph.add_implication(
-          trigger, trigger_one, lit_col, /*implied_is_lb=*/false, 0.0);
-    } else {
-      added = implication_graph.add_implication(
-          trigger, trigger_one, lit_col, /*implied_is_lb=*/true, 1.0);
-    }
-    if (added) ++stats.implications_added;
-    return added;
-  };
-
-  auto process_side = [&](const Eigen::SparseMatrix<double, Eigen::RowMajor>& row_matrix,
-                          int row, double side_sign, double rhs) {
-    if (!std::isfinite(rhs) ||
-        stats.implications_added >= max_implications) {
-      return;
-    }
-    std::vector<Entry> entries;
-    entries.reserve(32);
-    double min_activity = 0.0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(row_matrix, row);
-         it; ++it) {
-      const double a = side_sign * it.value();
-      if (std::abs(a) <= 1e-12) continue;
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= n) return;
-      if (static_cast<int>(entries.size()) >= max_row_nnz) return;
-      double c = 0.0;
-      if (!min_contribution(a, j, c)) return;
-      min_activity += c;
-      entries.push_back(Entry{j, a, c});
-    }
-    if (entries.size() < 2) return;
-    ++stats.row_sides_scanned;
-
-    std::vector<Literal> literals;
-    literals.reserve(std::min<int>(2 * entries.size(),
-                                   max_binary_literals_per_row));
-    for (const Entry& e : entries) {
-      if (!is_binary_col(e.col)) continue;
-      if (static_cast<int>(literals.size()) + 2 >
-          max_binary_literals_per_row) {
-        break;
-      }
-      literals.push_back(Literal{e.col, false, -e.min_contrib});
-      literals.push_back(Literal{e.col, true, e.val - e.min_contrib});
-    }
-    if (!literals.empty()) ++stats.row_sides_with_binary_literals;
-
-    const double scale = std::max(1.0, std::abs(rhs));
-    const double conflict_tol = 1e-9 * scale + 1e-9;
-    for (std::size_t a = 0; a < literals.size(); ++a) {
-      for (std::size_t b = a + 1; b < literals.size(); ++b) {
-        const Literal& la = literals[a];
-        const Literal& lb = literals[b];
-        if (la.col == lb.col) continue;
-        ++stats.literal_pair_tests;
-        const bool objective_pair =
-            objective_literal(la.col, la.one) &&
-            objective_literal(lb.col, lb.one);
-        if (objective_pair) ++stats.objective_literal_pair_tests;
-        if (min_activity + la.delta + lb.delta <= rhs + conflict_tol) {
-          continue;
-        }
-        ++stats.literal_pair_conflicts;
-        if (objective_pair) ++stats.objective_literal_pair_conflicts;
-        bool any = false;
-        any = add_forbid_literal(la.col, la.one, lb.col, lb.one) || any;
-        any = add_forbid_literal(lb.col, lb.one, la.col, la.one) || any;
-        literal_clique_edges.emplace_back(
-            CliqueTable::Literal{la.col, la.one},
-            CliqueTable::Literal{lb.col, lb.one});
-        if (any) ++stats.conflicts_added;
-        if (stats.implications_added >= max_implications) return;
-      }
-    }
-
-    for (const Literal& lit : literals) {
-      if (stats.implications_added >= max_implications) return;
-      const double conditioned_min = min_activity + lit.delta;
-      for (const Entry& target : entries) {
-        if (target.col == lit.col) {
-          continue;
-        }
-        ++stats.bound_candidates;
-        const double residual =
-            rhs - (conditioned_min - target.min_contrib);
-        if (std::abs(target.val) <= 1e-12) continue;
-        if (target.val > 0.0) {
-          double ub = rounded_bound(target.col, /*is_lb=*/false,
-                                    residual / target.val);
-          if (ub < lp.vars[static_cast<std::size_t>(target.col)].ub - 1e-9) {
-            ++stats.bound_improvements;
-            if (implication_graph.add_implication(
-                    lit.col, lit.one, target.col, /*implied_is_lb=*/false,
-                    ub)) {
-              ++stats.implications_added;
-            }
-            if (is_binary_col(target.col) && ub <= 1e-9) {
-              literal_clique_edges.emplace_back(
-                  CliqueTable::Literal{lit.col, lit.one},
-                  CliqueTable::Literal{target.col, true});
-            }
-          }
-        } else {
-          double lb = rounded_bound(target.col, /*is_lb=*/true,
-                                    residual / target.val);
-          if (lb > lp.vars[static_cast<std::size_t>(target.col)].lb + 1e-9) {
-            ++stats.bound_improvements;
-            if (implication_graph.add_implication(
-                    lit.col, lit.one, target.col, /*implied_is_lb=*/true,
-                    lb)) {
-              ++stats.implications_added;
-            }
-            if (is_binary_col(target.col) && lb >= 1.0 - 1e-9) {
-              literal_clique_edges.emplace_back(
-                  CliqueTable::Literal{lit.col, lit.one},
-                  CliqueTable::Literal{target.col, false});
-            }
-          }
-        }
-        if (stats.implications_added >= max_implications) {
-          return;
-        }
-      }
-    }
-  };
-
-  for (int r = 0; r < A_row.rows(); ++r) {
-    process_side(A_row, r, 1.0, lp.b[r]);
-    const double lhs = lp_row_lhs_or_neg_inf(lp, r);
-    if (std::isfinite(lhs)) process_side(A_row, r, -1.0, -lhs);
-    if (stats.implications_added >= max_implications) break;
-  }
-  for (int r = 0; r < Aeq_row.rows() &&
-                  stats.implications_added < max_implications; ++r) {
-    process_side(Aeq_row, r, 1.0, lp.beq[r]);
-    process_side(Aeq_row, r, -1.0, -lp.beq[r]);
-  }
-
-  stats.clique_edges_added =
-      clique_table.add_literal_edges(lp, literal_clique_edges);
-  return stats;
-}
-
-struct ObjectiveCutoffArtifactStats {
-  std::uint64_t candidates{0};
-  std::uint64_t conflicts_seen{0};
-  std::uint64_t implications_added{0};
-  std::uint64_t clique_edges_added{0};
-  double raw_objective_lower{0.0};
-  double cutoff_capacity{kInf};
-  double max_delta{0.0};
-};
-
-ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    double incumbent_obj,
-    BinaryImplicationGraph& implication_graph,
-    CliqueTable& clique_table,
-    double int_tol,
-    const ObjectivePropagationState* objective_propagation = nullptr,
-    std::uint64_t max_implications = 250000) {
-  ObjectiveCutoffArtifactStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  if (n <= 1 || lp.sense != Sense::Minimize ||
-      !std::isfinite(incumbent_obj) || lb.size() < n || ub.size() < n) {
-    return stats;
-  }
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto binary_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > int_tol || var.ub < 1.0 - int_tol) return false;
-    if (var.type == VarType::Binary) return true;
-    return is_implied_integer(j) && std::abs(var.lb) <= int_tol &&
-           std::abs(var.ub - 1.0) <= int_tol;
-  };
-
-  struct Candidate {
-    int col{-1};
-    bool literal_one{false};
-    double delta{0.0};
-  };
-  std::vector<Candidate> candidates;
-  candidates.reserve(static_cast<std::size_t>(n));
-
-  const double cutoff =
-      incumbent_obj -
-      std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
-
-  std::vector<double> cutoff_coeff(static_cast<std::size_t>(n), 0.0);
-  for (int j = 0; j < n; ++j) {
-    const double c = lp.c[j];
-    if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
-    cutoff_coeff[static_cast<std::size_t>(j)] = c;
-  }
-  double cutoff_rhs = cutoff;
-  if (objective_propagation != nullptr &&
-      !objective_propagation->partitions.empty()) {
-    for (const auto& part : objective_propagation->partitions) {
-      double largest = 0.0;
-      int clique_rhs = 1;
-      for (const auto& term : part.terms) {
-        if (term.col < 0 || term.col >= n ||
-            !std::isfinite(term.cost) || std::abs(term.cost) <= 1e-12) {
-          continue;
-        }
-        if (term.cost > 0.0) {
-          --clique_rhs;
-          if (lb[term.col] < 1.0 - int_tol) {
-            largest = std::max(largest, term.cost);
-          }
-        } else if (ub[term.col] > int_tol) {
-          largest = std::max(largest, -term.cost);
-        }
-      }
-      if (!(largest > 1e-12) || !std::isfinite(largest)) continue;
-      cutoff_rhs += largest * static_cast<double>(clique_rhs);
-      for (const auto& term : part.terms) {
-        if (term.col < 0 || term.col >= n ||
-            !std::isfinite(term.cost) || std::abs(term.cost) <= 1e-12) {
-          continue;
-        }
-        cutoff_coeff[static_cast<std::size_t>(term.col)] =
-            term.cost - std::copysign(largest, term.cost);
-      }
-    }
-  }
-
-  int inf_count = 0;
-  for (int j = 0; j < n; ++j) {
-    const double c = cutoff_coeff[static_cast<std::size_t>(j)];
-    if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
-    if (c > 0.0) {
-      if (!std::isfinite(lb[j])) {
-        ++inf_count;
-      } else {
-        stats.raw_objective_lower += c * lb[j];
-      }
-      if (binary_like(j) && ub[j] >= 1.0 - int_tol) {
-        const double delta = c * std::max(0.0, 1.0 - lb[j]);
-        if (delta > 1e-9) {
-          candidates.push_back(Candidate{j, true, delta});
-          stats.max_delta = std::max(stats.max_delta, delta);
-        }
-      }
-    } else {
-      if (!std::isfinite(ub[j])) {
-        ++inf_count;
-      } else {
-        stats.raw_objective_lower += c * ub[j];
-      }
-      if (binary_like(j) && lb[j] <= int_tol) {
-        const double delta = (-c) * std::max(0.0, ub[j]);
-        if (delta > 1e-9) {
-          candidates.push_back(Candidate{j, false, delta});
-          stats.max_delta = std::max(stats.max_delta, delta);
-        }
-      }
-    }
-  }
-  stats.candidates = static_cast<std::uint64_t>(candidates.size());
-  if (inf_count != 0 || candidates.size() <= 1) return stats;
-
-  stats.cutoff_capacity = cutoff_rhs - stats.raw_objective_lower;
-  if (!std::isfinite(stats.cutoff_capacity)) return stats;
-
-  std::sort(candidates.begin(), candidates.end(),
-            [](const Candidate& a, const Candidate& b) {
-              if (a.delta != b.delta) return a.delta > b.delta;
-              return a.col < b.col;
-            });
-  if (candidates[0].delta + candidates[1].delta <=
-      stats.cutoff_capacity + 1e-9) {
-    return stats;
-  }
-
-  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
-      literal_edges;
-  literal_edges.reserve(1024);
-
-  auto add_forbidden_literal = [&](const Candidate& trigger,
-                                   const Candidate& forbidden) {
-    if (trigger.col == forbidden.col) return false;
-    bool added = false;
-    if (forbidden.literal_one) {
-      added = implication_graph.add_implication(
-          trigger.col, trigger.literal_one, forbidden.col,
-          /*implied_is_lb=*/false, 0.0);
-    } else {
-      added = implication_graph.add_implication(
-          trigger.col, trigger.literal_one, forbidden.col,
-          /*implied_is_lb=*/true, 1.0);
-    }
-    if (added) ++stats.implications_added;
-    return added;
-  };
-
-  const double tol = std::max(1e-9, int_tol);
-  for (int k = static_cast<int>(candidates.size()) - 1; k > 0; --k) {
-    const Candidate& b = candidates[static_cast<std::size_t>(k)];
-    const double threshold = stats.cutoff_capacity - b.delta + tol;
-    for (int i = 0; i < k; ++i) {
-      const Candidate& a = candidates[static_cast<std::size_t>(i)];
-      if (a.delta <= threshold) break;
-      if (a.col == b.col) continue;
-      ++stats.conflicts_seen;
-      const bool added_ab = add_forbidden_literal(a, b);
-      const bool added_ba = add_forbidden_literal(b, a);
-      literal_edges.emplace_back(
-          CliqueTable::Literal{a.col, a.literal_one},
-          CliqueTable::Literal{b.col, b.literal_one});
-      if (!added_ab && !added_ba &&
-          stats.implications_added >= max_implications) {
-        return stats;
-      }
-      if (stats.implications_added >= max_implications) {
-        stats.clique_edges_added =
-            clique_table.add_literal_edges(lp, literal_edges);
-        return stats;
-      }
-    }
-  }
-
-  stats.clique_edges_added = clique_table.add_literal_edges(lp, literal_edges);
-  return stats;
-}
-
-struct DualProofLiteralArtifactStats {
-  std::uint64_t candidates{0};
-  std::uint64_t conflicts_seen{0};
-  std::uint64_t conflict_clauses_added{0};
-  std::uint64_t implications_added{0};
-  std::uint64_t clique_edges_added{0};
-  std::uint64_t frontier_priority_updates{0};
-  double proof_capacity{kInf};
-  double max_delta{0.0};
-};
-
-DualProofLiteralArtifactStats extract_dual_proof_literal_artifacts(
-    const LPModel& lp,
-    const std::vector<char>& implied_integer_cols,
-    const DualProofRow& proof,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub,
-    BinaryImplicationGraph& implication_graph,
-    CliqueTable& clique_table,
-    double int_tol,
-    ConflictPool* conflict_pool = nullptr,
-    SharedConflictPool* shared_conflict_pool = nullptr,
-    std::vector<int>* proof_frontier_priority = nullptr,
-    std::uint64_t max_implications = 250000) {
-  DualProofLiteralArtifactStats stats;
-  const int n = static_cast<int>(lp.vars.size());
-  if (!proof.valid || proof.coeff.size() < n || n <= 1 ||
-      lb.size() < n || ub.size() < n || !std::isfinite(proof.rhs) ||
-      !std::isfinite(proof.min_activity)) {
-    return stats;
-  }
-
-  auto is_implied_integer = [&](int j) {
-    return j >= 0 && j < static_cast<int>(implied_integer_cols.size()) &&
-           implied_integer_cols[static_cast<std::size_t>(j)] != 0;
-  };
-  auto binary_like = [&](int j) {
-    if (j < 0 || j >= n) return false;
-    const auto& var = lp.vars[static_cast<std::size_t>(j)];
-    if (var.lb > int_tol || var.ub < 1.0 - int_tol) return false;
-    if (var.type == VarType::Binary) return true;
-    return is_implied_integer(j) && std::abs(var.lb) <= int_tol &&
-           std::abs(var.ub - 1.0) <= int_tol;
-  };
-
-  struct Candidate {
-    int col{-1};
-    bool literal_one{false};
-    double delta{0.0};
-  };
-  std::vector<Candidate> candidates;
-  candidates.reserve(static_cast<std::size_t>(proof.coeff.nonZeros()));
-
-  for (Eigen::SparseVector<double>::InnerIterator it(proof.coeff); it; ++it) {
-    const int j = static_cast<int>(it.index());
-    if (!binary_like(j)) continue;
-    const double a = it.value();
-    if (a > 1e-12 && std::isfinite(lb[j]) && ub[j] >= 1.0 - int_tol) {
-      const double delta = a * std::max(0.0, 1.0 - lb[j]);
-      if (delta > 1e-9) {
-        candidates.push_back(Candidate{j, true, delta});
-        stats.max_delta = std::max(stats.max_delta, delta);
-      }
-    } else if (a < -1e-12 && std::isfinite(ub[j]) &&
-               lb[j] <= int_tol) {
-      const double delta = (-a) * std::max(0.0, ub[j]);
-      if (delta > 1e-9) {
-        candidates.push_back(Candidate{j, false, delta});
-        stats.max_delta = std::max(stats.max_delta, delta);
-      }
-    }
-  }
-  stats.candidates = static_cast<std::uint64_t>(candidates.size());
-  if (candidates.size() <= 1) return stats;
-
-  stats.proof_capacity = proof.rhs - proof.min_activity;
-  if (!std::isfinite(stats.proof_capacity)) return stats;
-  std::sort(candidates.begin(), candidates.end(),
-            [](const Candidate& a, const Candidate& b) {
-              if (a.delta != b.delta) return a.delta > b.delta;
-              return a.col < b.col;
-            });
-  if (candidates[0].delta + candidates[1].delta <=
-      stats.proof_capacity + 1e-9) {
-    return stats;
-  }
-
-  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
-      literal_edges;
-  literal_edges.reserve(1024);
-  auto add_forbidden_literal = [&](const Candidate& trigger,
-                                   const Candidate& forbidden) {
-    if (trigger.col == forbidden.col) return false;
-    bool added = false;
-    if (forbidden.literal_one) {
-      added = implication_graph.add_implication(
-          trigger.col, trigger.literal_one, forbidden.col,
-          /*implied_is_lb=*/false, 0.0);
-    } else {
-      added = implication_graph.add_implication(
-          trigger.col, trigger.literal_one, forbidden.col,
-          /*implied_is_lb=*/true, 1.0);
-    }
-    if (added) ++stats.implications_added;
-    return added;
-  };
-  auto candidate_literal = [](const Candidate& candidate) {
-    return BranchDomainLiteral{candidate.col,
-                               candidate.literal_one ? 1.0 : 0.0,
-                               candidate.literal_one};
-  };
-  auto publish_conflict_clause = [&](const Candidate& a,
-                                     const Candidate& b) {
-    std::vector<BranchDomainLiteral> clause;
-    clause.reserve(2);
-    clause.push_back(candidate_literal(a));
-    clause.push_back(candidate_literal(b));
-    canonicalize_branch_literals(clause);
-    if (clause.size() != 2) return false;
-    bool added = false;
-    if (conflict_pool != nullptr) {
-      added = conflict_pool->add(clause) || added;
-    }
-    if (shared_conflict_pool != nullptr) {
-      added = shared_conflict_pool->add(clause) || added;
-    }
-    if (added) {
-      ++stats.conflict_clauses_added;
-    }
-    return added;
-  };
-  auto note_frontier_priority = [&](const Candidate& a,
-                                    const Candidate& b) {
-    if (proof_frontier_priority == nullptr) return;
-    if (a.col < 0 || b.col < 0 ||
-        a.col >= static_cast<int>(proof_frontier_priority->size()) ||
-        b.col >= static_cast<int>(proof_frontier_priority->size()) ||
-        a.col == b.col) {
-      return;
-    }
-    auto bump = [&](int col) {
-      int& priority = (*proof_frontier_priority)[static_cast<std::size_t>(col)];
-      if (priority < std::numeric_limits<int>::max() / 2) {
-        ++priority;
-        ++stats.frontier_priority_updates;
-      }
-    };
-    bump(a.col);
-    bump(b.col);
-  };
-
-  const double tol = std::max(1e-9, int_tol);
-  for (int k = static_cast<int>(candidates.size()) - 1; k > 0; --k) {
-    const Candidate& b = candidates[static_cast<std::size_t>(k)];
-    const double threshold = stats.proof_capacity - b.delta + tol;
-    for (int i = 0; i < k; ++i) {
-      const Candidate& a = candidates[static_cast<std::size_t>(i)];
-      if (a.delta <= threshold) break;
-      if (a.col == b.col) continue;
-      ++stats.conflicts_seen;
-      note_frontier_priority(a, b);
-      publish_conflict_clause(a, b);
-      add_forbidden_literal(a, b);
-      add_forbidden_literal(b, a);
-      literal_edges.emplace_back(
-          CliqueTable::Literal{a.col, a.literal_one},
-          CliqueTable::Literal{b.col, b.literal_one});
-      if (stats.implications_added >= max_implications) {
-        stats.clique_edges_added =
-            clique_table.add_literal_edges(lp, literal_edges);
-        return stats;
-      }
-    }
-  }
-  stats.clique_edges_added = clique_table.add_literal_edges(lp, literal_edges);
-  return stats;
-}
-
-int append_graph_implied_bound_cuts(
-    const LPModel& lp,
-    const Eigen::VectorXd& x,
-    const Eigen::VectorXd& node_lb,
-    const Eigen::VectorXd& node_ub,
-    const BinaryImplicationGraph& graph,
-    int max_cuts,
-    std::vector<Eigen::SparseVector<double>>& rows,
-    std::vector<double>& rhs) {
-  if (graph.empty() || max_cuts <= 0) return 0;
-  const int n = std::min({static_cast<int>(lp.vars.size()),
-                          static_cast<int>(x.size()),
-                          static_cast<int>(node_lb.size()),
-                          static_cast<int>(node_ub.size())});
-  if (n <= 0) return 0;
-
-  int added = 0;
-  std::unordered_set<std::string> seen;
-  constexpr double kTol = 1e-7;
-
-  auto add_if_violated = [&](int trigger, bool trigger_one,
-                             const BinaryImplicationGraph::Implication& arc) {
-    if (added >= max_cuts) return;
-    const int k = arc.var_idx;
-    if (trigger < 0 || trigger >= n || k < 0 || k >= n || trigger == k) return;
-    if (!std::isfinite(x[trigger]) || !std::isfinite(x[k]) ||
-        !std::isfinite(arc.value)) {
-      return;
-    }
-
-    const double lb = node_lb[k];
-    const double ub = node_ub[k];
-    if (arc.is_lb && !std::isfinite(lb)) return;
-    if (!arc.is_lb && !std::isfinite(ub)) return;
-
-    double rhs_val = 0.0;
-    double coeff_trigger = 0.0;
-    double coeff_implied = arc.is_lb ? -1.0 : 1.0;
-    if (trigger_one) {
-      if (arc.is_lb) {
-        if (!(arc.value > lb + 1e-9)) return;
-        // x_t = 1 => x_k >= b:
-        //   -x_k + (b-lb_k) x_t <= -lb_k.
-        coeff_trigger = arc.value - lb;
-        rhs_val = -lb;
-      } else {
-        if (!(arc.value < ub - 1e-9)) return;
-        // x_t = 1 => x_k <= b:
-        //   x_k + (ub_k-b) x_t <= ub_k.
-        coeff_trigger = ub - arc.value;
-        rhs_val = ub;
-      }
-    } else {
-      if (arc.is_lb) {
-        if (!(arc.value > lb + 1e-9)) return;
-        // x_t = 0 => x_k >= b:
-        //   -x_k + (lb_k-b) x_t <= -b.
-        coeff_trigger = lb - arc.value;
-        rhs_val = -arc.value;
-      } else {
-        if (!(arc.value < ub - 1e-9)) return;
-        // x_t = 0 => x_k <= b:
-        //   x_k + (b-ub_k) x_t <= b.
-        coeff_trigger = arc.value - ub;
-        rhs_val = arc.value;
-      }
-    }
-
-    if (!std::isfinite(coeff_trigger) || !std::isfinite(rhs_val)) return;
-    const double lhs = coeff_implied * x[k] + coeff_trigger * x[trigger];
-    const double scale = std::max({1.0, std::abs(rhs_val),
-                                   std::abs(coeff_implied),
-                                   std::abs(coeff_trigger)});
-    const double violation = lhs - rhs_val;
-    if (!(violation > kTol * scale)) return;
-
-    const std::string key = fmt::format("{}:{}:{}:{}:{:.12g}",
-                                        trigger, trigger_one ? 1 : 0,
-                                        k, arc.is_lb ? 1 : 0, arc.value);
-    if (!seen.insert(key).second) return;
-
-    Eigen::SparseVector<double> cut(n);
-    cut.reserve(2);
-    cut.coeffRef(k) += coeff_implied;
-    cut.coeffRef(trigger) += coeff_trigger;
-    rows.push_back(std::move(cut));
-    rhs.push_back(rhs_val);
-    ++added;
-  };
-
-  for (int j = 0; j < n && added < max_cuts; ++j) {
-    const auto& v = lp.vars[static_cast<std::size_t>(j)];
-    const bool binary_like =
-        is_integer_type(v) && node_lb[j] >= -1e-9 && node_ub[j] <= 1.0 + 1e-9;
-    if (!binary_like) continue;
-    for (bool trigger_one : {false, true}) {
-      auto range = graph.implications(j, trigger_one);
-      for (const auto* arc = range.first;
-           arc != range.second && added < max_cuts; ++arc) {
-        add_if_violated(j, trigger_one, *arc);
-      }
-    }
-  }
-  return added;
-}
-
-std::string format_incumbent_validation_failure(
-    const char* stage,
-    const LPModel& lp,
-    const IncumbentValidationSummary& summary) {
-  if (!summary.size_ok) {
-    return fmt::format("{}: size mismatch (expected {}, got {})",
-                       stage, summary.expected_size, summary.actual_size);
-  }
-  std::string msg = fmt::format(
-      "{}: bounds={:.3g}",
-      stage,
-      summary.max_bound_violation);
-  if (summary.bound_var >= 0 && summary.bound_var < static_cast<int>(lp.vars.size()) &&
-      !lp.vars[summary.bound_var].name.empty()) {
-    msg += fmt::format(" at var {} [{}]", summary.bound_var,
-                       lp.vars[summary.bound_var].name);
-  } else if (summary.bound_var >= 0) {
-    msg += fmt::format(" at var {}", summary.bound_var);
-  }
-  msg += fmt::format(
-      "; ineq={:.3g} row {}",
-      summary.max_ineq_violation,
-      summary.ineq_row);
-  if (summary.ineq_row >= 0) {
-    msg += fmt::format(" side={} activity={:.12g} lhs={:.12g} rhs={:.12g}",
-                       summary.ineq_row_side,
-                       summary.ineq_row_activity,
-                       summary.ineq_row_lhs,
-                       summary.ineq_row_rhs);
-  }
-  msg += fmt::format(
-      "; eq={:.3g} row {}; integrality={:.3g}",
-      summary.max_eq_violation,
-      summary.eq_row,
-      summary.max_integrality_violation);
-  if (summary.frac_var >= 0 && summary.frac_var < static_cast<int>(lp.vars.size()) &&
-      !lp.vars[summary.frac_var].name.empty()) {
-    msg += fmt::format(" at integer var {} [{}]", summary.frac_var,
-                       lp.vars[summary.frac_var].name);
-  } else if (summary.frac_var >= 0) {
-    msg += fmt::format(" at integer var {}", summary.frac_var);
-  }
-  return msg;
-}
-
-std::string format_ineq_row_contributors(
-    const LPModel& lp,
-    const Eigen::VectorXd& x,
-    int row,
-    int max_terms = 8) {
-  if (row < 0 || row >= lp.A.rows() || x.size() < static_cast<int>(lp.vars.size())) {
-    return "";
-  }
-  struct TermInfo {
-    int col{-1};
-    double a{0.0};
-    double x{0.0};
-    double ax{0.0};
-  };
-  std::vector<TermInfo> terms;
-  Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = lp.A;
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, row);
-       it; ++it) {
-    const int j = static_cast<int>(it.col());
-    if (j < 0 || j >= x.size()) continue;
-    terms.push_back(TermInfo{j, it.value(), x[j], it.value() * x[j]});
-  }
-  std::sort(terms.begin(), terms.end(), [](const TermInfo& a, const TermInfo& b) {
-    return std::abs(a.ax) > std::abs(b.ax);
-  });
-  if (terms.empty()) return "";
-  std::string out = " top=[";
-  const int k = std::min(static_cast<int>(terms.size()), std::max(0, max_terms));
-  for (int p = 0; p < k; ++p) {
-    const TermInfo& t = terms[static_cast<std::size_t>(p)];
-    if (p > 0) out += ", ";
-    out += fmt::format("c{}:{} a={:.6g} x={:.6g} ax={:.6g}",
-                       t.col,
-                       (t.col >= 0 && t.col < static_cast<int>(lp.vars.size()) &&
-                        !lp.vars[static_cast<std::size_t>(t.col)].name.empty())
-                           ? lp.vars[static_cast<std::size_t>(t.col)].name
-                           : "?",
-                       t.a,
-                       t.x,
-                       t.ax);
-  }
-  out += "]";
-  return out;
-}
-
-#ifdef HACDCPF_HAVE_PAPILO
-std::string format_papilo_reduced_row_mapping_detail(
-    const PaPILOPresolveResult& ps,
-    const LPModel& reduced_lp,
-    const Eigen::VectorXd& x_reduced,
-    int original_row) {
-  if (original_row < 0 || x_reduced.size() < static_cast<int>(reduced_lp.vars.size())) {
-    return "";
-  }
-  int matches = 0;
-  int first_ineq = -1;
-  bool first_negated = false;
-  for (int r = 0; r < static_cast<int>(ps.reduced_ineq_to_orig_row.size()); ++r) {
-    if (ps.reduced_ineq_to_orig_row[static_cast<std::size_t>(r)] == original_row) {
-      if (first_ineq < 0) {
-        first_ineq = r;
-        first_negated =
-            r < static_cast<int>(ps.reduced_ineq_negated.size()) &&
-            ps.reduced_ineq_negated[static_cast<std::size_t>(r)] != 0;
-      }
-      ++matches;
-    }
-  }
-  int first_eq = -1;
-  for (int r = 0; r < static_cast<int>(ps.reduced_eq_to_orig_row.size()); ++r) {
-    if (ps.reduced_eq_to_orig_row[static_cast<std::size_t>(r)] == original_row) {
-      if (first_eq < 0) first_eq = r;
-      ++matches;
-    }
-  }
-  if (matches == 0) {
-    return " reduced_map=absent";
-  }
-  if (first_ineq >= 0 && first_ineq < reduced_lp.A.rows()) {
-    double activity = 0.0;
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = reduced_lp.A;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Arow, first_ineq);
-         it; ++it) {
-      const int j = static_cast<int>(it.col());
-      if (j >= 0 && j < x_reduced.size()) activity += it.value() * x_reduced[j];
-    }
-    const double lhs = lp_row_lhs_or_neg_inf(reduced_lp, first_ineq);
-    const double rhs = reduced_lp.b[first_ineq];
-    const double viol = std::max(
-        std::max(0.0, activity - rhs),
-        std::isfinite(lhs) ? std::max(0.0, lhs - activity) : 0.0);
-    return fmt::format(
-        " reduced_map=ineq:{}{} matches={} lhs_size={} A_rows={} activity={:.12g} lhs={:.12g} rhs={:.12g} viol={:.3g}",
-        first_ineq,
-        first_negated ? "(neg)" : "",
-        matches,
-        static_cast<int>(reduced_lp.row_lhs.size()),
-        static_cast<int>(reduced_lp.A.rows()),
-        activity,
-        lhs,
-        rhs,
-        viol);
-  }
-  if (first_eq >= 0 && first_eq < reduced_lp.Aeq.rows()) {
-    double activity = 0.0;
-    Eigen::SparseMatrix<double, Eigen::RowMajor> Aeqrow = reduced_lp.Aeq;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeqrow, first_eq);
-         it; ++it) {
-      const int j = static_cast<int>(it.col());
-      if (j >= 0 && j < x_reduced.size()) activity += it.value() * x_reduced[j];
-    }
-    const double rhs = reduced_lp.beq[first_eq];
-    return fmt::format(
-        " reduced_map=eq:{} matches={} activity={:.12g} rhs={:.12g} viol={:.3g}",
-        first_eq,
-        matches,
-        activity,
-        rhs,
-        std::abs(activity - rhs));
-  }
-  return fmt::format(" reduced_map=invalid matches={}", matches);
-}
-
-std::string format_papilo_compressed_validation_detail(
-    const PaPILOReducedValidationSummary& summary) {
-  if (!summary.available) {
-    return " papilo_reduced=unavailable";
-  }
-  if (!summary.size_ok) {
-    return fmt::format(" papilo_reduced=size_mismatch expected={} got={}",
-                       summary.expected_active_size,
-                       summary.actual_size);
-  }
-  std::string out = fmt::format(
-      " papilo_reduced={} rows={} cols={} active_cols={} fixed_pop={} "
-      "rowviol={:.3g} row={} orig={} side={} activity={:.12g} lhs={:.12g} rhs={:.12g} "
-      "nonactive_terms={} nonactive_abs={:.6g} colviol={:.3g} col={} orig_col={} value={:.12g} lb={:.12g} ub={:.12g}",
-      summary.ok() ? "ok" : "fail",
-      summary.compressed_rows,
-      summary.compressed_cols,
-      summary.expected_active_size,
-      summary.fixed_cols_populated,
-      summary.max_row_violation,
-      summary.worst_row,
-      summary.worst_orig_row,
-      summary.worst_row_side,
-      summary.worst_row_activity,
-      summary.worst_row_lhs,
-      summary.worst_row_rhs,
-      summary.worst_row_nonactive_terms,
-      summary.worst_row_nonactive_abs_activity,
-      summary.max_col_violation,
-      summary.worst_col,
-      summary.worst_orig_col,
-      summary.worst_col_value,
-      summary.worst_col_lb,
-      summary.worst_col_ub);
-  if (summary.worst_row_eq) out += " rowtype=eq";
-  return out;
-}
-#endif
-
-struct ProgRoundTraceFocusVar {
-  int g{0};
-  int t{0};
-  int col{-1};
-  double root_val{0.0};
-  int frac_rank{-1};
-  bool available{true};
-  bool last_fixed{false};
-  double last_value{0.0};
-};
-
-std::vector<ProgRoundTraceFocusVar> make_prog_round_focus_ig_trace(
-    const std::optional<MIPModel::UCGenHint>& uc_hint,
-    const Eigen::VectorXd& x_relax,
-    const Eigen::VectorXd& lb,
-    const Eigen::VectorXd& ub) {
-  constexpr int kFocusGenerators[] = {53, 45, 13};
-  constexpr int kFocusPeriods[] = {0, 1, 2, 3, 4, 23};
-
-  std::vector<ProgRoundTraceFocusVar> out;
-  if (!uc_hint.has_value()) return out;
-
-  const auto& uc = *uc_hint;
-  const int n = static_cast<int>(x_relax.size());
-  const bool use_cols = !uc.ig_cols.empty();
-  out.reserve(static_cast<size_t>(sizeof(kFocusGenerators) / sizeof(kFocusGenerators[0]) *
-                                  sizeof(kFocusPeriods) / sizeof(kFocusPeriods[0])));
-
-  for (int g : kFocusGenerators) {
-    if (g < 0 || g >= uc.ng) continue;
-    for (int t : kFocusPeriods) {
-      if (t < 0 || t >= uc.T) continue;
-      const size_t pos = static_cast<size_t>(t * uc.ng + g);
-      int col = -1;
-      if (use_cols) {
-        if (pos < uc.ig_cols.size()) col = uc.ig_cols[pos];
-      } else if (uc.ig_start >= 0) {
-        col = uc.ig_start + static_cast<int>(pos);
-      }
-
-      ProgRoundTraceFocusVar focus;
-      focus.g = g;
-      focus.t = t;
-      focus.col = col;
-      focus.available = (col >= 0 && col < n);
-      if (focus.available) {
-        focus.root_val = x_relax[col];
-        focus.last_fixed = (ub[col] - lb[col] < 1e-9);
-        focus.last_value = focus.last_fixed ? lb[col] : x_relax[col];
-      }
-      out.push_back(focus);
-    }
-  }
-  return out;
-}
-
-void annotate_prog_round_focus_frac_ranks(
-    std::vector<ProgRoundTraceFocusVar>& focus,
-    const std::vector<int>& frac_cols) {
-  for (auto& entry : focus) {
-    entry.frac_rank = -1;
-    if (!entry.available || entry.col < 0) continue;
-    for (int k = 0; k < static_cast<int>(frac_cols.size()); ++k) {
-      if (frac_cols[static_cast<size_t>(k)] == entry.col) {
-        entry.frac_rank = k;
-        break;
-      }
-    }
-  }
-}
-
-void print_prog_round_focus_initial(const char* phase,
-                                    const std::vector<ProgRoundTraceFocusVar>& focus) {
-  if (focus.empty()) return;
-
-  fprintf(stderr, "[%s-TRACE] tracking %zu focused IG vars\n",
-          phase, focus.size());
-  for (const auto& entry : focus) {
-    if (!entry.available || entry.col < 0) {
-      fprintf(stderr,
-              "[%s-TRACE] start IG(g=%d,t=%d) col=-1 status=eliminated-by-presolve\n",
-              phase, entry.g, entry.t);
-      continue;
-    }
-    const int frac_rank = (entry.frac_rank >= 0) ? (entry.frac_rank + 1) : -1;
-    if (entry.last_fixed) {
-      fprintf(stderr,
-              "[%s-TRACE] start IG(g=%d,t=%d) col=%d root=%.3f frac_rank=%d status=fixed value=%.0f\n",
-              phase, entry.g, entry.t, entry.col, entry.root_val, frac_rank,
-              entry.last_value);
-    } else {
-      fprintf(stderr,
-              "[%s-TRACE] start IG(g=%d,t=%d) col=%d root=%.3f frac_rank=%d status=free\n",
-              phase, entry.g, entry.t, entry.col, entry.root_val, frac_rank);
-    }
-  }
-}
-
-void log_prog_round_focus_changes(const char* phase,
-                                  const std::string& source,
-                                  std::vector<ProgRoundTraceFocusVar>& focus,
-                                  const Eigen::VectorXd& lb,
-                                  const Eigen::VectorXd& ub) {
-  if (focus.empty()) return;
-
-  for (auto& entry : focus) {
-    if (!entry.available || entry.col < 0) continue;
-    const bool fixed = (ub[entry.col] - lb[entry.col] < 1e-9);
-    const double value = fixed ? lb[entry.col] : entry.root_val;
-    const bool changed = (fixed != entry.last_fixed) ||
-                         (fixed && std::abs(value - entry.last_value) > 1e-9);
-    if (!changed) continue;
-
-    const int frac_rank = (entry.frac_rank >= 0) ? (entry.frac_rank + 1) : -1;
-    if (fixed) {
-      fprintf(stderr,
-              "[%s-TRACE] %s IG(g=%d,t=%d) col=%d root=%.3f frac_rank=%d fixed=%.0f\n",
-              phase, source.c_str(), entry.g, entry.t, entry.col, entry.root_val,
-              frac_rank, value);
-    } else {
-      fprintf(stderr,
-              "[%s-TRACE] %s IG(g=%d,t=%d) col=%d root=%.3f frac_rank=%d released\n",
-              phase, source.c_str(), entry.g, entry.t, entry.col, entry.root_val,
-              frac_rank);
-    }
-
-    entry.last_fixed = fixed;
-    entry.last_value = value;
-  }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// UC-aware commitment rounding
-// ════════════════════════════════════════════════════════════════════════════
-// When the MILP encodes a unit-commitment problem, simple independent rounding
-// of IG/SU/SD leaves coupling constraints violated.  This helper rounds IG for
-// each generator as contiguous on/off blocks respecting min-up/min-down, then
-// derives SU/SD from transitions.
-
-void uc_round_commitment(Eigen::VectorXd& x,
-                         const MIPModel::UCGenHint& uc,
-                         int ng_stride) {
-  const int ng = uc.ng;
-  const int T = uc.T;
-  const bool use_cols = !uc.ig_cols.empty();
-  auto ig_col = [&](int g, int h) -> int {
-    if (use_cols) {
-      size_t idx = static_cast<size_t>(h * ng + g);
-      return idx < uc.ig_cols.size() ? uc.ig_cols[idx] : -1;
-    }
-    return uc.ig_start + h * ng_stride + g;
-  };
-  auto su_col = [&](int g, int h) -> int {
-    if (use_cols) {
-      size_t idx = static_cast<size_t>(h * ng + g);
-      return idx < uc.su_cols.size() ? uc.su_cols[idx] : -1;
-    }
-    return uc.su_start + h * ng_stride + g;
-  };
-  auto sd_col = [&](int g, int h) -> int {
-    if (use_cols) {
-      size_t idx = static_cast<size_t>(h * ng + g);
-      return idx < uc.sd_cols.size() ? uc.sd_cols[idx] : -1;
-    }
-    if (uc.sd_start == uc.su_start) return -1;
-    return uc.sd_start + h * ng_stride + g;
-  };
-  const int n = static_cast<int>(x.size());
-
-  for (int g = 0; g < ng; ++g) {
-    const int mu = (g < static_cast<int>(uc.min_up.size())) ? uc.min_up[g] : 1;
-    const int md = (g < static_cast<int>(uc.min_down.size())) ? uc.min_down[g] : 1;
-    const int ig0 = (g < static_cast<int>(uc.ig0.size())) ? uc.ig0[g] : 0;
-
-    // Phase 1: greedy forward sweep — round IG respecting min-up/min-down.
-    std::vector<int> ig(static_cast<size_t>(T));
-    int prev = ig0;
-    int time_in_state = 100;
-
-    for (int h = 0; h < T; ++h) {
-      int ic = ig_col(g, h);
-      const double frac = (ic >= 0 && ic < n) ? x[ic] : 0.0;
-      int desired = (frac >= 0.5) ? 1 : 0;
-
-      if (prev == 1 && desired == 0 && time_in_state < mu) {
-        desired = 1;
-      } else if (prev == 0 && desired == 1 && time_in_state < md) {
-        desired = 0;
-      }
-
-      ig[h] = desired;
-      if (desired == prev) {
-        ++time_in_state;
-      } else {
-        time_in_state = 1;
-      }
-      prev = desired;
-    }
-
-    // Phase 2: write back IG and derive SU, SD.
-    int prev_ig = ig0;
-    for (int h = 0; h < T; ++h) {
-      int ic = ig_col(g, h);
-      if (ic >= 0 && ic < n) x[ic] = static_cast<double>(ig[h]);
-      const int su = (ig[h] == 1 && prev_ig == 0) ? 1 : 0;
-      const int sd = (ig[h] == 0 && prev_ig == 1) ? 1 : 0;
-      int sc = su_col(g, h);
-      if (sc >= 0 && sc < n) x[sc] = static_cast<double>(su);
-      int dc = sd_col(g, h);
-      if (dc >= 0 && dc < n) x[dc] = static_cast<double>(sd);
-      prev_ig = ig[h];
-    }
-  }
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Main MILP B&C Entry Point
@@ -6173,41 +81,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   BCResult out;
   out.stats.solver_name = "NativeBranchAndCut";
   out.stats.status = bc_status::kNotStarted;
-  const bool domain_heuristics = opt.enable_domain_heuristics;
+  const auto highs_contract = apply_bc_strict_highs_contract(opt);
   const bool requested_vendored_highs_lp =
-      bc_vendored_highs_lp_kernel_enabled(opt);
+      highs_contract.requested_vendored_highs_lp;
+  const bool strict_highs_lp_contract =
+      highs_contract.strict_highs_lp_contract;
   const bool allow_vendored_root_frontier =
-      bc_vendored_highs_root_frontier_enabled();
+      highs_contract.allow_vendored_root_frontier;
+  bool domain_heuristics = highs_contract.domain_heuristics;
   VendoredHighsSfBackendScope vendored_sf_scope(
       requested_vendored_highs_lp && allow_vendored_root_frontier);
-  if (requested_vendored_highs_lp && !allow_vendored_root_frontier) {
-    // Suppressing the vendored root frontier is a diagnostic/native-proof mode:
-    // the HiGHS root MIP certificate is intentionally unavailable, so the
-    // remaining native proof tail must prove the live tree rather than prune by
-    // a tolerance gap limit derived from an unaligned incumbent frontier.
-    opt.require_tree_exhaustion_certificate = true;
-  }
-  if (requested_vendored_highs_lp && allow_vendored_root_frontier &&
-      opt.require_tree_exhaustion_certificate &&
-      !bc_env_flag_enabled("HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION")) {
-    // HiGHS terminates a MIP solve on its relative-gap certificate; it does
-    // not keep draining the tree merely to prove exact exhaustion.  Keep the
-    // native tree/cut/proof machinery, but use the same termination contract
-    // whenever the vendored HiGHS LP kernel is the numerical oracle.
-    opt.require_tree_exhaustion_certificate = false;
-  }
-  if (requested_vendored_highs_lp && !opt.require_tree_exhaustion_certificate) {
-    // HiGHS does not leave an LP proof artifact scoped to the node that
-    // generated it: reduced-cost/objective proofs are resolved through the
-    // local domain trail and published as reconvergence/bound-lifting
-    // certificates that the open-node queue can consume immediately.  The
-    // vendored LP kernel gives native the same dual row/frontier state, so keep
-    // the proof-conflict path first-class whenever we use HiGHS' MIP gap
-    // termination contract.
-    opt.enable_reduced_cost_conflict_learning = true;
-    opt.enable_reduced_cost_proof_conflict_minimization = true;
-    opt.enable_reduced_cost_proof_cut_resolve = true;
-  }
 
   // ── P9.1: Forrest--Tomlin activation ──────────────────────────────────
   // When use_forrest_tomlin_updates is true, force the simplex factor
@@ -6251,20 +134,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   }
 
   LPModel base_lp = prob.linear_part;
-
-  for (int idx : prob.integer_idx) {
-    if (idx >= 0 && idx < static_cast<int>(base_lp.vars.size())) {
-      base_lp.vars[idx].type = VarType::Integer;
-    }
-  }
-  for (int idx : prob.binary_idx) {
-    if (idx >= 0 && idx < static_cast<int>(base_lp.vars.size())) {
-      base_lp.vars[idx].type = VarType::Binary;
-      base_lp.vars[idx].lb = std::max(base_lp.vars[idx].lb, 0.0);
-      base_lp.vars[idx].ub = std::min(base_lp.vars[idx].ub, 1.0);
-    }
-  }
   const int orig_n = static_cast<int>(base_lp.vars.size());
+
+  const auto declared_integrality =
+      normalize_declared_integrality(prob, base_lp);
+  const auto& original_declared_integer_cols =
+      declared_integrality.integer_cols;
+  const auto& original_declared_binary_cols =
+      declared_integrality.binary_cols;
 
   if (requested_vendored_highs_lp && allow_vendored_root_frontier &&
       !opt.require_tree_exhaustion_certificate) {
@@ -6365,7 +242,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   Eigen::VectorXd heuristic_x_orig;  // verified original-space solution
   const bool warmstart_provided = prob.initial_solution.size() == orig_n;
   const bool skip_huge_heuristic_verification = !opt.use_ipm_nodes && orig_n >= 90000;
-  if (warmstart_provided && !skip_huge_heuristic_verification) {
+  if (warmstart_provided && !strict_highs_lp_contract &&
+      !skip_huge_heuristic_verification) {
     auto t_heur0 = std::chrono::steady_clock::now();
     Eigen::VectorXd x0 = prob.initial_solution;
     Eigen::VectorXd olb(orig_n), oub(orig_n);
@@ -6458,10 +336,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                    disp_res.stats.success ? "clamped infeasible" : "infeasible");
       }
     }
-  } else if (warmstart_provided && opt.verbose && skip_huge_heuristic_verification) {
+  } else if (warmstart_provided && opt.verbose &&
+             (strict_highs_lp_contract || skip_huge_heuristic_verification)) {
     fmt::print(stderr,
-               "[B&C] heuristic verification skipped on huge warm-start root (n={})\n",
-               orig_n);
+               "[B&C] heuristic verification skipped (strict_highs_lp={} n={})\n",
+               strict_highs_lp_contract ? 1 : 0, orig_n);
   }
 
   std::vector<NativeVariableBoundSourceEntry> original_presolve_vb_sources;
@@ -6531,6 +410,97 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   }
 
   const int n = static_cast<int>(base_lp.vars.size());
+  std::vector<char> declared_branchable_cols(static_cast<std::size_t>(n), 0);
+  std::vector<char> declared_binary_cols(static_cast<std::size_t>(n), 0);
+  for (int j = 0; j < n; ++j) {
+    int orig_j = j;
+#ifdef HACDCPF_HAVE_PAPILO
+    if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
+      if (j >= static_cast<int>(papilo_ps.reduced_to_orig_col.size())) {
+        continue;
+      }
+      orig_j = papilo_ps.reduced_to_orig_col[static_cast<std::size_t>(j)];
+    }
+#endif
+    if (orig_j >= 0 && orig_j < orig_n &&
+        original_declared_integer_cols[static_cast<std::size_t>(orig_j)] != 0) {
+      declared_branchable_cols[static_cast<std::size_t>(j)] = 1;
+      if (original_declared_binary_cols[static_cast<std::size_t>(orig_j)] != 0) {
+        declared_binary_cols[static_cast<std::size_t>(j)] = 1;
+      }
+    }
+  }
+  auto fractional_branchable_indices =
+      [&](const Eigen::VectorXd& x, const Eigen::VectorXd& lb,
+          const Eigen::VectorXd& ub, double int_tol,
+          std::vector<int>& out) -> bool {
+    out.clear();
+    const int limit =
+        std::min(n, static_cast<int>(std::min<std::size_t>(
+                        declared_branchable_cols.size(),
+                        static_cast<std::size_t>(std::min(
+                            static_cast<int>(x.size()),
+                            std::min(static_cast<int>(lb.size()),
+                                     static_cast<int>(ub.size())))))));
+    const double split_tol = std::max(1e-9, int_tol);
+    for (int j = 0; j < limit; ++j) {
+      if (declared_branchable_cols[static_cast<std::size_t>(j)] == 0) {
+        continue;
+      }
+      if (ub[j] - lb[j] <= split_tol) {
+        continue;
+      }
+      const double v = std::min(ub[j], std::max(lb[j], x[j]));
+      if (is_integral(v, int_tol)) {
+        continue;
+      }
+      const double down_ub = std::min(ub[j], std::floor(v));
+      const double up_lb = std::max(lb[j], std::ceil(v));
+      if (down_ub < lb[j] - split_tol || up_lb > ub[j] + split_tol) {
+        continue;
+      }
+      out.push_back(j);
+    }
+    return !out.empty();
+  };
+  auto round_declared_branchables = [&](Eigen::VectorXd& x,
+                                        const Eigen::VectorXd& lb,
+                                        const Eigen::VectorXd& ub) {
+    const int limit =
+        std::min(n, static_cast<int>(std::min<std::size_t>(
+                        declared_branchable_cols.size(),
+                        static_cast<std::size_t>(x.size()))));
+    for (int j = 0; j < limit; ++j) {
+      if (declared_branchable_cols[static_cast<std::size_t>(j)] == 0) {
+        continue;
+      }
+      x[j] = std::min(ub[j], std::max(lb[j], std::round(x[j])));
+    }
+  };
+  if (opt.verbose || std::getenv("HACDCPF_BC_TIMELINE") != nullptr) {
+    const int model_integer_cols = static_cast<int>(std::count_if(
+        base_lp.vars.begin(), base_lp.vars.end(),
+        [](const VariableMeta& v) { return is_integer_type(v); }));
+    const int declared_branchable_count = static_cast<int>(std::count(
+        declared_branchable_cols.begin(), declared_branchable_cols.end(), 1));
+    const int declared_binary_count = static_cast<int>(
+        std::count(declared_binary_cols.begin(), declared_binary_cols.end(), 1));
+    fmt::print(stderr,
+               "[B&C-INTEGRALITY] model_int={} declared_branchable={} "
+               "declared_binary={} cols={}{}{}\n",
+               model_integer_cols, declared_branchable_count,
+               declared_binary_count, n,
+#ifdef HACDCPF_HAVE_PAPILO
+               papilo_ps.success ? " presolve=papilo" : "",
+               papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()
+                   ? " mapped=1"
+                   : " mapped=0"
+#else
+               "",
+               ""
+#endif
+    );
+  }
   HiGHSPresolvedModelStats highs_presolve_side_state;
   const bool highs_presolve_vb_source_disabled =
       bc_env_flag_enabled("HACDCPF_DISABLE_HIGHS_PRESOLVE_VB_SOURCE");
@@ -6604,7 +574,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       !domain_heuristics &&
       (presolved_m > std::min(opt.large_problem_threshold, 8000)) &&
       (n > 5000);
-  if (opt.auto_highs_root_pipeline && large_generic_presolved_root) {
+  if (!strict_highs_lp_contract && opt.auto_highs_root_pipeline &&
+      large_generic_presolved_root) {
     opt.use_lock_count_rounding = true;
     opt.use_linesearch_rounding = true;
     opt.use_analytic_centre = true;
@@ -8062,12 +2033,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
   };
 
-  if (reduced_initial_solution.size() == n) {
-    try_register_root_cutoff("reduced_initial_solution",
-                             reduced_initial_solution);
-  }
-  if (heuristic_x_orig.size() > 0 && std::isfinite(heuristic_obj)) {
-    Eigen::VectorXd x_fwd = heuristic_x_orig;
+	  if (reduced_initial_solution.size() == n) {
+    if (!strict_highs_lp_contract) {
+      try_register_root_cutoff("reduced_initial_solution",
+                               reduced_initial_solution);
+    }
+	  }
+	  if (!strict_highs_lp_contract && heuristic_x_orig.size() > 0 &&
+      std::isfinite(heuristic_obj)) {
+	    Eigen::VectorXd x_fwd = heuristic_x_orig;
 #ifdef HACDCPF_HAVE_PAPILO
     if (papilo_ps.success && !papilo_ps.orig_to_reduced_col.empty()) {
       x_fwd = papilo_forward_map(papilo_ps, x_fwd);
@@ -8075,13 +2049,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 #endif
     try_register_root_cutoff("forward_mapped_heuristic", x_fwd);
   }
-  const bool has_root_cutoff_for_propagation =
-      has_verified_root_cutoff || std::isfinite(heuristic_obj);
+	  const bool has_root_cutoff_for_propagation =
+	      has_verified_root_cutoff ||
+      (!strict_highs_lp_contract && std::isfinite(heuristic_obj));
   const double root_cutoff_for_propagation =
       has_verified_root_cutoff ? verified_root_cutoff_obj : heuristic_obj;
   const std::string root_cutoff_source_for_propagation =
-      has_verified_root_cutoff ? verified_root_cutoff_source
-                               : std::string("original_verified_heuristic");
+	      has_verified_root_cutoff ? verified_root_cutoff_source
+	                               : std::string("none");
 
   out.bc_stats.root_presolved_rows =
       static_cast<int>(root_lp.A.rows()) + static_cast<int>(root_lp.Aeq.rows());
@@ -11592,8 +5567,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // once the root LP bound proves it is already within the requested MIP gap.
   // This is a general-purpose incumbent/dual-bound check and avoids building
   // root cut and heuristic infrastructure that cannot change the outcome.
-  if (heuristic_x_orig.size() > 0 && std::isfinite(heuristic_obj) &&
-      std::isfinite(root.bound)) {
+	  if (!strict_highs_lp_contract &&
+      heuristic_x_orig.size() > 0 && std::isfinite(heuristic_obj) &&
+	      std::isfinite(root.bound)) {
     const double heuristic_gap =
         std::max(0.0, (heuristic_obj - root.bound) /
                            std::max(1.0, std::abs(heuristic_obj)));
@@ -12284,8 +6260,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           1e-10 * std::max(1.0, std::abs(round_bound)));
       std::vector<int> round_frac_after;
       const bool has_fractional_after_round =
-          fractional_indices(root_lp.vars, root.x_relax, opt.int_tol,
-                             round_frac_after);
+          fractional_branchable_indices(root.x_relax, root.lb, root.ub,
+                                        opt.int_tol,
+                                        round_frac_after);
       const bool termination_effective =
           highs_root_pipeline_active ||
           !opt.root_cut_reject_nonmoving_rows || round_domain_tightened > 0 ||
@@ -12779,78 +6756,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   std::vector<ObjectiveCutoffEvent> objective_cutoff_events;
   double objective_cutoff_rest_lb = kInf;
 
-  // ConcurrentTreeState: holds shared parallel infrastructure for
-  // concurrent root heuristics + tree search.  Defined early so that
-  // root_gap_closed() can reference cts.
-  struct ConcurrentTreeState {
-    SharedCutPool shared_cp;
-    SharedConflictPool shared_conflicts;
-    SharedSolutionPool shared_sp;
-    SharedIncumbent shared_inc;
-    ThreadSafeNodeQueue shared_queue;
-    CutRequestQueue cut_req_queue;
-    AtomicBCStats atomic_stats;
-    std::atomic<bool> should_stop{false};
-    std::atomic<double> optimality_limit{kInf};
-    std::atomic<int> active_explorers{0};
-    ActiveNodeBounds active_bounds;
-    std::mutex pc_mtx;
-    FallbackLogger fallback_logger;
-    SimplexOptions par_simplex_opt;
-    std::unique_ptr<WorkStealingPool> steal_pool;
-    SharedImplicationGraph shared_impl_graph;  // cross-thread binary-implication store
-    std::unique_ptr<DeterministicTurnToken> det_token;  // opt-in deterministic pop/push serialisation
-    std::vector<std::thread> explorers;
-    std::thread cut_worker;
-    bool use_cut_worker{false};
-    int n_explorers{0};
-
-    ConcurrentTreeState(const BCOptions& opt_,
-                        std::chrono::steady_clock::time_point t0_,
-                        int cut_coeff_size)
-      : shared_cp(opt_.cut_pool_max_size, opt_.cut_pool_max_age,
-                  cut_coeff_size)
-	      , shared_conflicts(
-	            opt_.cut_pool_max_size,
-	            std::max(64, opt_.reduced_cost_conflict_pool_max_literals))
-      , shared_sp(opt_.solution_pool_size)
-      , shared_queue(opt_.node_sel)
-      , cut_req_queue(opt_.cut_worker_queue_size)
-      , active_bounds(std::max(1, resolve_num_threads(opt_)))
-      , fallback_logger(t0_)
-    {
-      par_simplex_opt.max_iter = std::max(opt_.max_lp_iter * 10, 2000);
-      par_simplex_opt.feasibility_tol = std::max(1e-10, opt_.lp_tol * 0.1);
-      par_simplex_opt.optimality_tol = std::max(1e-10, opt_.lp_tol * 0.1);
-      par_simplex_opt.allow_cold_start = false;
-      par_simplex_opt.allow_vendored_highs_sf_backend =
-          bc_vendored_highs_lp_kernel_enabled(opt_);
-      par_simplex_opt.factor_backend =
-          simplex_factor_backend_from_id(opt_.simplex_factor_backend);
-    }
-
-    void shutdown_and_join() {
-      should_stop.store(true, std::memory_order_release);
-      shared_queue.request_shutdown();
-      cut_req_queue.request_shutdown();
-      for (auto& t : explorers) {
-        if (t.joinable()) t.join();
-      }
-      if (cut_worker.joinable()) cut_worker.join();
-    }
-  };
-
   std::unique_ptr<ConcurrentTreeState> cts;
   bool concurrent_tree_launched = false;
   const bool trace_root_subsolves = opt.verbose;
 
-  struct RootSubsolveTrace {
-    std::string name;
-    int calls{0};
-    int successes{0};
-    double total_ms{0.0};
-    int incumbent_hits{0};
-  };
   std::vector<RootSubsolveTrace> root_subsolve_traces;
   std::string root_incumbent_source = "none";
   bool root_gap_certificate_ready = true;
@@ -12902,24 +6811,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       global_domain_learning_epoch += added;
     }
   };
-
-	  auto note_root_subsolve = [&](const char* name, double ms, bool success,
-	                                bool incumbent_hit = false) {
-	    if (!trace_root_subsolves) return;
-    auto it = std::find_if(root_subsolve_traces.begin(), root_subsolve_traces.end(),
-                           [&](const RootSubsolveTrace& entry) {
-                             return entry.name == name;
-                           });
-    if (it == root_subsolve_traces.end()) {
-      root_subsolve_traces.push_back(RootSubsolveTrace{});
-      it = std::prev(root_subsolve_traces.end());
-      it->name = name;
-    }
-    ++it->calls;
-    if (success) ++it->successes;
-    it->total_ms += ms;
-	    if (incumbent_hit) ++it->incumbent_hits;
-	  };
+  auto note_root_subsolve = [&](const char* name, double ms, bool success,
+                                bool incumbent_hit = false,
+                                int lp_solves = 0) {
+    note_root_subsolve_trace(root_subsolve_traces, trace_root_subsolves, name,
+                             ms, success, incumbent_hit, lp_solves);
+  };
 
 	  bool incumbent_proof_validated = false;
 	  double incumbent_proof_validated_obj = kInf;
@@ -13413,7 +7310,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
 	      root_relax.primal.stats.success && root_relax.primal.x.size() == n);
 
-	  if (has_verified_root_cutoff && verified_root_cutoff_x.size() == n) {
+	  if (!strict_highs_lp_contract &&
+      has_verified_root_cutoff && verified_root_cutoff_x.size() == n) {
 	    const bool improved = adopt_root_incumbent(
 	        verified_root_cutoff_source.c_str(), verified_root_cutoff_x,
 	        verified_root_cutoff_obj);
@@ -13704,12 +7602,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   };
 
   auto t_pp_a = std::chrono::steady_clock::now();
-  run_highs_randomized_rounding();
+  if (!strict_highs_lp_contract) {
+    run_highs_randomized_rounding();
+  }
   auto t_pp_b = std::chrono::steady_clock::now();
 
-  if (!skip_large_near_integral_forward_map) {
-    apply_forward_mapped_heuristic();
-  }
+	  if (!strict_highs_lp_contract && !skip_large_near_integral_forward_map) {
+	    apply_forward_mapped_heuristic();
+	  }
   auto t_pp_c = std::chrono::steady_clock::now();
 
 	  auto run_feasibility_jump = [&]() -> bool {
@@ -13824,7 +7724,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return false;
   };
 
-  run_feasibility_jump();
+  if (!strict_highs_lp_contract) {
+    run_feasibility_jump();
+  }
   auto t_pp_d = std::chrono::steady_clock::now();
   auto t_pp_d2 = t_pp_d;  // after quick_round
   auto t_pp_d3 = t_pp_d;  // after linesearch_rounding
@@ -13833,8 +7735,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // ── Quick rounding heuristic after root LP ─────────────────────────
   // Always attempt simple rounding regardless of pump setting — it's cheap.
   // When UC hints are available, use commitment-aware rounding first.
-  if (!root_gap_closed() && !skip_large_near_integral_quick_round &&
-      !skip_pump_large_uc_like) {
+	  if (!strict_highs_lp_contract &&
+      !root_gap_closed() && !skip_large_near_integral_quick_round &&
+	      !skip_pump_large_uc_like) {
     Eigen::VectorXd xr = root.x_relax;
 
     // UC-aware rounding: round IG respecting min-up/down, derive SU/SD.
@@ -14632,16 +8535,35 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           sub_opt.max_nodes = large_generic_root ? 500 : 5000;
           sub_opt.max_lp_iter = opt.max_lp_iter;
           sub_opt.int_tol = opt.int_tol;
-          sub_opt.gap_tol = std::max(opt.gap_tol, 0.01);  // loose gap: just need feasibility
+          sub_opt.gap_tol = 0.0;
           sub_opt.lp_tol = opt.lp_tol;
-          sub_opt.use_feasibility_pump = true;   // allow pump (won't recurse due to flag)
-          sub_opt.enable_lns = false;
-          sub_opt.use_papilo_presolve = false;   // already in presolved space
-          sub_opt.num_threads = 1;
-          sub_opt.verbose = false;
+          sub_opt.root_cut_rounds = 0;
+          sub_opt.cuts_per_round = 0;
+          sub_opt.max_cut_depth = 0;
+          sub_opt.cuts = CutType::None;
           sub_opt.branching = opt.branching;
           sub_opt.node_sel = opt.node_sel;
-          sub_opt.cuts = CutType::None;          // keep the sub lightweight
+          sub_opt.use_simplex_lp_nodes = true;
+          sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+          sub_opt.use_ipm_root = false;
+          sub_opt.use_ipm_nodes = false;
+          sub_opt.use_feasibility_pump = false;
+          sub_opt.enable_feasibility_jump = false;
+          sub_opt.use_progressive_rounding = false;
+          sub_opt.max_dive_lps = 0;
+          sub_opt.max_probe_vars = 0;
+          sub_opt.root_split_bound_probing = false;
+          sub_opt.enable_lns = false;
+          sub_opt.use_papilo_presolve = false;
+          sub_opt.enable_incumbent_local_branching = false;
+          sub_opt.enable_root_low_fractionality_rens = false;
+          sub_opt.enable_objective_cutoff_conflict_cuts = false;
+          sub_opt.enable_objective_cutoff_weighted_event_cuts = false;
+          sub_opt.enable_objective_cutoff_domain_fixing = false;
+          sub_opt.enable_dynamic_implied_bound_probing = false;
+          sub_opt.enable_reduced_cost_proof_cut_resolve = false;
+          sub_opt.num_threads = 1;
+          sub_opt.verbose = false;
 
           auto t_s30 = std::chrono::steady_clock::now();
           BCResult sub_res = branch_and_cut_lp(sub_prob, sub_opt);
@@ -14658,7 +8580,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             if (satisfies_with_bounds(base_lp, xs, root.lb, root.ub, 1e-6)) {
               const double obj = objective_value(base_lp.c, xs, base_lp.sense);
               const bool improved = adopt_root_incumbent("obj_pump_stage3_submip", xs, obj);
-              note_root_subsolve("obj_pump_stage3_submip", s3_ms, true, improved);
+              note_root_subsolve("obj_pump_stage3_submip", s3_ms, true,
+                                 improved, sub_res.bc_stats.lp_solves);
               s3_ok = true;
               if (opt.verbose)
                 fmt::print(stderr,
@@ -14667,7 +8590,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             }
           }
           if (!s3_ok) {
-            note_root_subsolve("obj_pump_stage3_submip", s3_ms, false);
+            note_root_subsolve("obj_pump_stage3_submip", s3_ms, false,
+                               false, sub_res.bc_stats.lp_solves);
             if (opt.verbose)
               fmt::print(stderr,
                 "[OBJ-PUMP] stage3 sub-MIP n_free={} n_fixed={} budget={:.1f}s -> infeas/none ({:.0f}ms)\n",
@@ -14774,8 +8698,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       cts->shared_sp.seed(incumbent_x, incumbent_obj);
     }
 
-    // Push root node to shared queue.
-    cts->shared_queue.push(root, has_incumbent);
+	    // Push root node to shared queue.
+    cts->shared_queue.configure_domain_signature(
+        declared_branchable_cols, root.lb, root.ub, std::max(1e-9, opt.int_tol));
+	    cts->shared_queue.push(root, has_incumbent);
     cts->optimality_limit.store(
         root_gap_certificate_ready && !opt.require_tree_exhaustion_certificate &&
                 has_incumbent && std::isfinite(incumbent_obj) &&
@@ -14796,6 +8722,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     cts->par_simplex_opt.incumbent_bound = nullptr;
     cts->par_simplex_opt.incumbent_check_interval = 0;
     cts->par_simplex_opt.allow_vendored_highs_sf_backend =
+        requested_vendored_highs_lp;
+    cts->par_simplex_opt.require_vendored_highs_sf_backend =
         requested_vendored_highs_lp;
     cts->par_simplex_opt.factor_backend =
         simplex_factor_backend_from_id(opt.simplex_factor_backend);
@@ -14849,11 +8777,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           std::ref(cts->shared_conflicts),
           std::ref(cts->shared_sp),
           std::ref(cts->shared_inc),
-          std::cref(base_lp),
-          std::cref(pre_cut_root_lp),
-          std::cref(ensure_base_sf()),
-          std::cref(clique_table),
-          std::cref(implication_graph),
+	          std::cref(base_lp),
+	          std::cref(pre_cut_root_lp),
+	          std::cref(ensure_base_sf()),
+	          std::cref(declared_branchable_cols),
+	          std::cref(clique_table),
+	          std::cref(implication_graph),
           std::cref(cts->par_simplex_opt),
           std::cref(opt),
           std::ref(pc),
@@ -14907,12 +8836,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	  // 0.5% "large gap" trigger.
 	  const double prog_round_gap_threshold =
 	      large_near_integral_root ? opt.gap_tol : 0.005;
-  bool need_prog_round = !has_incumbent;
-  if (has_incumbent && std::isfinite(root.bound) && std::abs(root.bound) > 1e-9) {
-    double gap = (incumbent_obj - root.bound) / std::abs(root.bound);
-    if (gap > prog_round_gap_threshold)
-      need_prog_round = true;
-  }
+	  bool need_prog_round = opt.use_progressive_rounding && !has_incumbent;
+	  if (has_incumbent && std::isfinite(root.bound) && std::abs(root.bound) > 1e-9) {
+	    double gap = (incumbent_obj - root.bound) / std::abs(root.bound);
+	    if (opt.use_progressive_rounding && gap > prog_round_gap_threshold)
+	      need_prog_round = true;
+	  }
   // Skip ALL remaining heuristics if gap is already within tolerance.
   if (root_gap_closed()) need_prog_round = false;
 	  // Do not use a UC-shaped label to suppress the generic progressive
@@ -16972,8 +10901,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // otherwise start from a poor incumbent.
   const bool skip_lns_large = (presolved_m > 30000) ||
                               large_generic_low_frac_root;
+  const bool skip_lns_highs_root_pipeline =
+      requested_vendored_highs_lp && opt.auto_highs_root_pipeline;
   const bool skip_lns_gap = root_gap_closed();
-  const int effective_lns_max_iters = (skip_lns_large || skip_lns_gap) ? 0
+  const int effective_lns_max_iters =
+      (skip_lns_large || skip_lns_highs_root_pipeline || skip_lns_gap) ? 0
       : ((presolved_m > 10000) ? 1
       : ((presolved_m > 5000) ? std::min(2, opt.lns_max_iters)
       : ((presolved_m > 2000) ? std::min(3, opt.lns_max_iters)
@@ -16988,9 +10920,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                  ? "run"
                  : "skip",
       skip_lns_gap ? "gap_closed=1"
-                   : (skip_lns_large ? "large_or_good_low_frac=1"
+                   : (skip_lns_highs_root_pipeline
+                          ? "highs_root_pipeline_uses_solveSubMip=1"
+                      : (skip_lns_large ? "large_or_good_low_frac=1"
                                      : (!has_incumbent ? "no_incumbent=1"
-                                                       : "budget=1")));
+                                                       : "budget=1"))));
   if (opt.enable_lns && has_incumbent) {
     // Identify integer variables sorted by "confidence".
     // Use LP relaxation fractionality: variables that are integer in the LP
@@ -17076,20 +11010,53 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         // Warm-start with current incumbent (adjusted for fixed vars)
         restricted.initial_solution = incumbent_x;
 
-        // Solve with limited resources
+        // Solve as a HiGHS-style primal-heuristic sub-MIP consumer: inherit the
+        // active root domain and LP kernel, but do not restart the root
+        // cut/heuristic/proof pipeline inside the neighborhood.
         BCOptions lns_opt;
+        lns_opt._is_stage3_submip = true;
         lns_opt.max_nodes = effective_lns_node_limit;
         lns_opt.time_limit_sec = effective_lns_time_limit;
+        lns_opt.max_lp_iter = opt.max_lp_iter;
         lns_opt.int_tol = opt.int_tol;
-        lns_opt.gap_tol = 1e-3;  // Accept any improvement
-        lns_opt.root_cut_rounds = 3;  // Light cuts
-        lns_opt.cuts_per_round = 5;
-        lns_opt.branching = BranchingStrategy::Pseudocost;
+        lns_opt.gap_tol = 0.0;
+        lns_opt.lp_tol = opt.lp_tol;
+        lns_opt.root_cut_rounds = 0;
+        lns_opt.cuts_per_round = 0;
+        lns_opt.max_cut_depth = 0;
+        lns_opt.cuts = CutType::None;
+        lns_opt.branching = opt.branching;
+        lns_opt.node_sel = opt.node_sel;
         lns_opt.use_simplex_lp_nodes = true;
+        lns_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
+        lns_opt.use_ipm_root = false;
+        lns_opt.use_ipm_nodes = false;
+        lns_opt.use_feasibility_pump = false;
+        lns_opt.enable_feasibility_jump = false;
+        lns_opt.use_progressive_rounding = false;
+        lns_opt.max_dive_lps = 0;
+        lns_opt.max_probe_vars = 0;
+        lns_opt.root_split_bound_probing = false;
+        lns_opt.use_papilo_presolve = false;
+        lns_opt.enable_lns = false;
+        lns_opt.enable_incumbent_local_branching = false;
+        lns_opt.enable_root_low_fractionality_rens = false;
+        lns_opt.enable_objective_cutoff_conflict_cuts = false;
+        lns_opt.enable_objective_cutoff_weighted_event_cuts = false;
+        lns_opt.enable_objective_cutoff_domain_fixing = false;
+        lns_opt.enable_dynamic_implied_bound_probing = false;
+        lns_opt.enable_reduced_cost_proof_cut_resolve = false;
+        lns_opt.num_threads = 1;
         lns_opt.verbose = false;
-        lns_opt.enable_lns = false;  // Prevent recursion
 
+        const auto lns_sub0 = std::chrono::steady_clock::now();
         BCResult lns_result = solve_milp_bc(restricted, lns_opt);
+        const auto lns_sub1 = std::chrono::steady_clock::now();
+        const double lns_sub_ms =
+            std::chrono::duration<double, std::milli>(lns_sub1 - lns_sub0)
+                .count();
+        note_root_subsolve("root_lns", lns_sub_ms, lns_result.stats.success,
+                           false, lns_result.bc_stats.lp_solves);
 
         // Check if LNS found a better solution.
         // stats.success indicates feasibility; check objective directly for improvement.
@@ -17232,19 +11199,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       sub_opt.max_nodes = std::max(1, opt.incumbent_local_branching_node_limit);
       sub_opt.max_lp_iter = opt.max_lp_iter;
       sub_opt.int_tol = opt.int_tol;
-      sub_opt.gap_tol = std::max(opt.gap_tol, 1e-4);
+      sub_opt.gap_tol = 0.0;
       sub_opt.lp_tol = opt.lp_tol;
-      sub_opt.root_cut_rounds = 2;
-      sub_opt.cuts_per_round = 5;
+      sub_opt.root_cut_rounds = 0;
+      sub_opt.cuts_per_round = 0;
       sub_opt.max_cut_depth = 0;
-      sub_opt.cuts = opt.cuts;
+      sub_opt.cuts = CutType::None;
       sub_opt.branching = opt.branching;
       sub_opt.node_sel = opt.node_sel;
       sub_opt.use_simplex_lp_nodes = true;
+      sub_opt.use_vendored_highs_lp_kernel = requested_vendored_highs_lp;
       sub_opt.use_ipm_root = false;
       sub_opt.use_ipm_nodes = false;
       sub_opt.use_feasibility_pump = false;
+      sub_opt.enable_feasibility_jump = false;
       sub_opt.use_progressive_rounding = false;
+      sub_opt.max_dive_lps = 0;
+      sub_opt.max_probe_vars = 0;
+      sub_opt.root_split_bound_probing = false;
       sub_opt.use_papilo_presolve = false;
       sub_opt.enable_lns = false;
       sub_opt.enable_incumbent_local_branching = false;
@@ -17252,6 +11224,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       sub_opt.enable_objective_cutoff_conflict_cuts = false;
       sub_opt.enable_objective_cutoff_weighted_event_cuts = false;
       sub_opt.enable_objective_cutoff_domain_fixing = false;
+      sub_opt.enable_dynamic_implied_bound_probing = false;
+      sub_opt.enable_reduced_cost_proof_cut_resolve = false;
       sub_opt.num_threads = 1;
       sub_opt.verbose = false;
 
@@ -17281,7 +11255,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           }
         }
       }
-      note_root_subsolve("incumbent_local_branching", lb_ms, valid_candidate, improved);
+      note_root_subsolve("incumbent_local_branching", lb_ms, valid_candidate,
+                         improved, sub_res.bc_stats.lp_solves);
       if (improved && root_gap_closed()) break;
     }
   }
@@ -17505,9 +11480,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       sub_out.nodes =
           static_cast<int>(std::min<int64_t>(info.mip_node_count,
                                              std::numeric_limits<int>::max()));
-      sub_out.lp_solves =
-          static_cast<int>(std::min<int64_t>(info.simplex_iteration_count,
-                                             std::numeric_limits<int>::max()));
+	      // HiGHS exposes simplex_iteration_count, not a count of LP
+	      // relaxations solved inside the sub-MIP.  Native's lp_solves metric is
+	      // a solve count, so account one LP relaxation for the root plus one per
+	      // processed MIP node instead of misclassifying iterations as LP solves.
+	      sub_out.lp_solves =
+	          std::max(1, sub_out.nodes + (sub_out.nodes == 0 ? 1 : 0));
       sub_out.last_lp_status =
           fmt::format("VendoredHiGHSSubMip {} run={}",
                       bc_highs_model_status_label(model_status),
@@ -17798,7 +11776,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 
       std::vector<int> frac;
-	      if (!fractional_indices(base_lp.vars, cur.x_relax, opt.int_tol, frac)) {
+		      if (!fractional_branchable_indices(cur.x_relax, cur.lb, cur.ub,
+		                                        opt.int_tol, frac)) {
 		        const bool improved = accept_integral_candidate(cur);
 		        sub_out.found = sub_out.found || improved;
 		        ++sub_out.leaves;
@@ -18123,7 +12102,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         }
       }
     }
-    note_root_subsolve(reason, lb_ms, valid_candidate, improved);
+    note_root_subsolve(reason, lb_ms, valid_candidate, improved,
+                       sub_res.bc_stats.lp_solves);
     if (opt.verbose || improved || trace_bc_timeline ||
         std::getenv("HACDCPF_BC_CONF") != nullptr) {
       const double rel_gap = incumbent_root_rel_gap();
@@ -18356,7 +12336,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           const double obj = objective_value(base_lp.c, xs, base_lp.sense);
 	          const bool improved =
 	              adopt_root_incumbent(label, xs, obj);
-	          note_root_subsolve(label, rr_ms, true, improved);
+	          note_root_subsolve(label, rr_ms, true, improved,
+	                             rr_res.lp_solves);
 	          rr_ok = true;
 	          rr_improved = improved;
 			          if (improved && requested_vendored_highs_lp &&
@@ -18394,7 +12375,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         }
       }
       if (!rr_ok) {
-        note_root_subsolve(label, rr_ms, false);
+        note_root_subsolve(label, rr_ms, false, false, rr_res.lp_solves);
         if (opt.verbose || trace_bc_timeline ||
             std::getenv("HACDCPF_BC_CONF") != nullptr) {
           fmt::print(stderr,
@@ -18742,7 +12723,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          if (satisfies_with_bounds(base_lp, xs, root.lb, root.ub, 1e-6)) {
 	            const double obj = sub_res.obj;
 	            const bool improved = adopt_root_incumbent("root_low_fractionality_rens", xs, obj);
-	            note_root_subsolve("root_low_fractionality_rens", rens_ms, true, improved);
+	            note_root_subsolve("root_low_fractionality_rens", rens_ms, true,
+	                               improved, sub_res.lp_solves);
 	            rens_ok = true;
 	            rens_attempt_had_candidate = true;
 	            if (trace_rens) {
@@ -18763,7 +12745,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          }
 	        }
 	        if (!rens_ok) {
-	          note_root_subsolve("root_low_fractionality_rens", rens_ms, false);
+	          note_root_subsolve("root_low_fractionality_rens", rens_ms, false,
+	                             false, sub_res.lp_solves);
 	          if (trace_rens) {
 	            fmt::print(stderr,
 	                       "[B&C RENS] attempt={} no incumbent n_free={} "
@@ -18802,6 +12785,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   bool have_cached_queue_dual_proof = false;
   bool cached_queue_dual_proof_is_global = false;
   std::vector<BranchDomainLiteral> cached_queue_dual_proof_scope;
+  DualProofRow cached_queue_objective_event_proof;
+  bool have_cached_queue_objective_event_proof = false;
+  bool cached_queue_objective_event_proof_is_global = false;
+  std::vector<BranchDomainLiteral> cached_queue_objective_event_proof_scope;
   DualProofRow root_global_dual_proof;
   double root_global_dual_proof_upper = kInf;
   bool have_root_global_dual_proof = false;
@@ -18954,6 +12941,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     probe_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
     probe_opt.verbose = false;
     probe_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
+    probe_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
+    probe_opt.require_vendored_highs_sf_backend = requested_vendored_highs_lp;
     apply_bc_first_class_simplex_state(probe_opt, /*allow_frontier_remap=*/true);
     auto ensure_probe_sf = [&]() -> StandardFormLP& {
       if (!probe_sf_ptr) probe_sf_ptr = std::make_unique<StandardFormLP>(ensure_base_sf());
@@ -19367,6 +13356,35 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           base_lp, root.x_relax, root.lb, root.ub, implication_graph,
           opt.graph_implied_bound_max_cuts, ib_rows, ib_rhs);
       if (ib_added > 0) {
+        if (requested_vendored_highs_lp && opt.auto_highs_root_pipeline &&
+            has_incumbent) {
+          int deferred_rows = 0;
+          for (int i = 0; i < ib_added; ++i) {
+            Eigen::SparseVector<double>& row =
+                ib_rows[static_cast<std::size_t>(i)];
+            const double rhs = ib_rhs[static_cast<std::size_t>(i)];
+            const double norm =
+                std::sqrt(std::max(0.0, row.squaredNorm()));
+            if (!(norm > 1e-12) || !std::isfinite(norm) ||
+                !std::isfinite(rhs)) {
+              continue;
+            }
+            const std::size_t hash = sparse_cut_hash(row);
+            root_deferred_implied_bound_cutpool_rows.push_back(
+                PoolCut{std::move(row), rhs, 0, 0.0, norm, hash});
+            ++deferred_rows;
+          }
+          out.bc_stats.root_cut_rows_rejected_nonmoving +=
+              static_cast<std::uint64_t>(std::max(0, ib_added));
+          ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
+          if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) {
+            fmt::print(stderr,
+                       "[B&C IMPLIED-BOUND] graph_arcs={} cuts={} "
+                       "deferred={} kept=0 domain_tight=0 "
+                       "mode=proof_artifact\n",
+                       implication_graph.size(), ib_added, deferred_rows);
+          }
+        } else {
         const int prev_ib_rows = static_cast<int>(base_lp.A.rows());
         const double ib_old_bound = root.bound;
         const Eigen::VectorXd ib_old_x = root.x_relax;
@@ -19468,6 +13486,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                      ib_keep_rows ? root.bound : ib_candidate_bound,
                      ib_keep_rows ? 1 : 0, ib_domain_tightened);
         }
+        }
       } else if (opt.verbose) {
         fmt::print(stderr,
                    "[B&C IMPLIED-BOUND] graph_arcs={} cuts=0\n",
@@ -19534,7 +13553,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_probe_start).count();
       if (elapsed > probe_time_budget) break;
 
-      bool down_infeas = false;
+      bool down_success = false;
+      bool down_proved_infeas = false;
       double down_bound = root.bound;
       {
         Eigen::VectorXd plb = root.lb, pub = root.ub;
@@ -19542,23 +13562,33 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         ++out.bc_stats.lp_solves;
         if (auto* pipm = ensure_root_heur_ipm()) {
           auto res = pipm->solve_node_lp(base_lp, plb, pub, root.x_relax);
-          if (!res.stats.success) {
-            down_infeas = true;
-          } else {
+          const std::string& status = res.stats.status;
+          const bool status_infeasible =
+              status.find("Infeasible") != std::string::npos ||
+              status.find("infeasible") != std::string::npos;
+          if (res.stats.success && res.x.size() == n &&
+              std::isfinite(res.stats.objective)) {
+            down_success = true;
             down_bound = res.stats.objective;
+          } else if (res.stats.has_farkas_certificate || status_infeasible) {
+            down_proved_infeas = true;
           }
         } else {
           update_standard_form_bounds(ensure_probe_sf(), base_lp, plb, pub);
           auto res = solve_lp_from_sf(ensure_probe_sf(), probe_opt, root.basis_hint.get());
-          if (!res.result.stats.success) {
-            down_infeas = true;
-          } else {
+          const auto type = classify_lp_result(res, n);
+          if (type == LPFailureType::Success &&
+              std::isfinite(res.result.stats.objective)) {
+            down_success = true;
             down_bound = res.result.stats.objective;
+          } else if (type == LPFailureType::Infeasible) {
+            down_proved_infeas = true;
           }
         }
       }
 
-      bool up_infeas = false;
+      bool up_success = false;
+      bool up_proved_infeas = false;
       double up_bound = root.bound;
       {
         Eigen::VectorXd plb = root.lb, pub = root.ub;
@@ -19566,31 +13596,40 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         ++out.bc_stats.lp_solves;
         if (auto* pipm2 = ensure_root_heur_ipm()) {
           auto res = pipm2->solve_node_lp(base_lp, plb, pub, root.x_relax);
-          if (!res.stats.success) {
-            up_infeas = true;
-          } else {
+          const std::string& status = res.stats.status;
+          const bool status_infeasible =
+              status.find("Infeasible") != std::string::npos ||
+              status.find("infeasible") != std::string::npos;
+          if (res.stats.success && res.x.size() == n &&
+              std::isfinite(res.stats.objective)) {
+            up_success = true;
             up_bound = res.stats.objective;
+          } else if (res.stats.has_farkas_certificate || status_infeasible) {
+            up_proved_infeas = true;
           }
         } else {
           update_standard_form_bounds(ensure_probe_sf(), base_lp, plb, pub);
           auto res = solve_lp_from_sf(ensure_probe_sf(), probe_opt, root.basis_hint.get());
-          if (!res.result.stats.success) {
-            up_infeas = true;
-          } else {
+          const auto type = classify_lp_result(res, n);
+          if (type == LPFailureType::Success &&
+              std::isfinite(res.result.stats.objective)) {
+            up_success = true;
             up_bound = res.result.stats.objective;
+          } else if (type == LPFailureType::Infeasible) {
+            up_proved_infeas = true;
           }
         }
       }
 
       ++probed;
 
-      if (down_infeas && !up_infeas) {
+      if (down_proved_infeas && up_success) {
         root.lb[j] = 1.0;
         ++fixed_by_probe;
-      } else if (up_infeas && !down_infeas) {
+      } else if (up_proved_infeas && down_success) {
         root.ub[j] = 0.0;
         ++fixed_by_probe;
-      } else if (!down_infeas && !up_infeas) {
+      } else if (down_success && up_success) {
         pc[j].add_down(std::max(0.0, down_bound - probe_base_bound));
         pc[j].add_up(std::max(0.0, up_bound - probe_base_bound));
         if (split_bound_probe_root) {
@@ -19767,6 +13806,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         have_cached_queue_dual_proof = true;
         cached_queue_dual_proof_is_global = true;
         cached_queue_dual_proof_scope.clear();
+        cached_queue_objective_event_proof = full_proof;
+        have_cached_queue_objective_event_proof = true;
+        cached_queue_objective_event_proof_is_global = true;
+        cached_queue_objective_event_proof_scope.clear();
         DualProofRow root_rc_mass_proof;
         if (build_reduced_cost_mass_dual_proof_row(
                 base_lp, proof_simplex, root.lb, root.ub, root.x_relax,
@@ -19911,10 +13954,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             std::chrono::duration<double, std::milli>(t_probe_done - t0).count());
   }
 
-  NodeQueue node_queue(opt.node_sel);
-  // For concurrent mode, root was already pushed to cts->shared_queue.
-  if (!concurrent_tree_launched) {
-    node_queue.push(root, root_incumbent_good_enough());
+	  NodeQueue node_queue(opt.node_sel);
+  node_queue.configure_domain_signature(declared_branchable_cols, root.lb,
+                                        root.ub, std::max(1e-9, opt.int_tol));
+	  // For concurrent mode, root was already pushed to cts->shared_queue.
+	  if (!concurrent_tree_launched) {
+	    node_queue.push(root, root_incumbent_good_enough());
   }
 
   double global_lb = node_queue.lower_bound();
@@ -19988,7 +14033,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return ok;
   };
 
-  StandardFormLP node_sf = ensure_base_sf();
+  // Main tree LPs must start from a root-clean standard form.  Root heuristics
+  // and probes reuse PersistentLPState scratch space and repeatedly rewrite
+  // its bounds; using that object as the live tree LP lets sibling/probe state
+  // leak into child bounds.  HiGHS keeps the active node LP state as a
+  // first-class object and applies each node's domain before solving it.  Mirror
+  // that here by keeping an immutable tree base and deriving node-local SF
+  // workspaces from it.
+  StandardFormLP tree_base_sf = build_standard_form_lp(base_lp);
+  ruiz_scale_standard_form(tree_base_sf);
+  update_standard_form_bounds(tree_base_sf, base_lp, root.lb, root.ub);
+  StandardFormLP node_sf = tree_base_sf;
   const double root_domain_bound_floor =
       std::isfinite(root.bound) ? root.bound : -kInf;
 
@@ -20006,6 +14061,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   simplex_opt.incumbent_check_interval = 0;
   simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
   simplex_opt.allow_vendored_highs_sf_backend = requested_vendored_highs_lp;
+  simplex_opt.require_vendored_highs_sf_backend = requested_vendored_highs_lp;
   apply_bc_first_class_simplex_state(simplex_opt, /*allow_frontier_remap=*/true);
 
   // Pre-compute row-major sparse matrices for bound propagation (avoids
@@ -20138,8 +14194,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     std::string inc_msg = has_incumbent ? fmt::format(" inc_obj={:.2f}", incumbent_obj) : "";
     HACDCPF_LOG_DEBUG("[B&C] root_bound={:.2f}  has_incumbent={}{}  n={}",
             root.bound, has_incumbent ? 1 : 0, inc_msg, n);
-    std::vector<int> frac_tmp;
-    fractional_indices(base_lp.vars, root.x_relax, opt.int_tol, frac_tmp);
+  std::vector<int> frac_tmp;
+  fractional_branchable_indices(root.x_relax, root.lb, root.ub, opt.int_tol,
+                                frac_tmp);
     HACDCPF_LOG_DEBUG("[B&C] root fractional vars: {}", static_cast<int>(frac_tmp.size()));
   }
 
@@ -21004,6 +15061,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                         "reconv_implication_cut")) {
 	        local_proof_cuts->push_back(*candidate.local_implication_cut);
 	      }
+      int bound_lift_published = 0;
+      if (candidate.has_bound_lift && publish_bound_lifting_certificate) {
+        DomainReasonBound lifted;
+        lifted.bound = candidate.target_bound;
+        lifted.reason = candidate.frontier_literals;
+        lifted.trail_pos = candidate.trail_pos;
+        lifted.depth = candidate.depth;
+        lifted.source_conflict_literal = candidate.source_literal;
+        lifted.has_source_conflict_literal = true;
+        bound_lift_published = publish_bound_lifting_certificate(
+            lifted, nullptr, nullptr, "scoped_reconvergence_bound_lift");
+        if (bound_lift_published > 0) {
+          learned_any = true;
+        }
+      }
 	      if (scoped_node != nullptr) {
 	        bool scoped_added = false;
 	        if (add_scoped_conflict_object(*scoped_node, frontier_clause, nullptr)) {
@@ -21014,21 +15086,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              static_cast<std::uint64_t>(frontier_clause.size());
 	          scoped_added = true;
 	        }
-	        if (candidate.has_bound_lift &&
-	            publish_bound_lifting_certificate) {
-	          DomainReasonBound lifted;
-	          lifted.bound = candidate.target_bound;
-	          lifted.reason = candidate.frontier_literals;
-	          lifted.trail_pos = candidate.trail_pos;
-	          lifted.depth = candidate.depth;
-	          lifted.source_conflict_literal = candidate.source_literal;
-	          lifted.has_source_conflict_literal = true;
-	          if (publish_bound_lifting_certificate(
-	                  lifted, nullptr, nullptr,
-	                  "short_reconv_bound_lift") > 0) {
-	            scoped_added = true;
-	          }
-	        }
+		        // This path is a scoped implication learned from already-stored
+		        // local reasons, not a row-resolved reconvergence proof.  Keep it
+		        // node-local; globally consumable bound-lifting certificates are
+		        // emitted only by the dual-proof local-trail resolver below.
+		        (void)candidate;
 	        std::vector<std::vector<BranchDomainLiteral>> learned_clauses;
 	        conflict_pool.add_with_binary_resolution(
 	            base_lp.vars, frontier_clause,
@@ -21072,7 +15134,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          note_global_domain_learning(
 	              static_cast<std::uint64_t>(learned_clauses.size()));
 	        }
-	        learned_any = learned_any || scoped_added || global_added;
+	        learned_any = learned_any || scoped_added || global_added ||
+                          bound_lift_published > 0;
 	        ++learned_frontier;
 	        continue;
 	      }
@@ -21081,7 +15144,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       conflict_pool.add_with_binary_resolution(
           base_lp.vars, frontier_clause,
           /*max_resolvents=*/4, &learned_clauses);
-      if (learned_clauses.empty()) continue;
+      if (learned_clauses.empty()) {
+        if (bound_lift_published > 0) ++learned_frontier;
+        continue;
+      }
 
       for (const auto& learned_clause : learned_clauses) {
         const bool impl_added =
@@ -21167,6 +15233,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           DomainReasonBound{branch_reasons[static_cast<std::size_t>(i)],
 	                            {}, i, i, BranchDomainLiteral{}, false});
 	    }
+	    const bool have_local_domain_trail =
+	        local_domain_trail != nullptr && !local_domain_trail->empty();
+	    const int synthetic_target_trail_pos =
+	        have_local_domain_trail
+	            ? static_cast<int>(local_domain_trail->size())
+	            : static_cast<int>(branch_reasons.size() + reason_bounds.size());
+	    std::vector<DomainReasonBound> local_trail_targets;
+	    if (have_local_domain_trail) {
+	      local_trail_targets.reserve(local_domain_trail->size());
+	      for (const auto& entry : *local_domain_trail) {
+	        const int j = entry.bound.var_idx;
+	        if (j < 0 || j >= n || !std::isfinite(entry.bound.value) ||
+	            entry.pos < 0) {
+	          continue;
+	        }
+	        const double a = dual_proof->coeff.coeff(j);
+	        const bool target_side =
+	            (entry.bound.is_lb && a < -1e-12) ||
+	            (!entry.bound.is_lb && a > 1e-12);
+	        if (!target_side) continue;
+	        DomainReasonBound rb;
+	        rb.bound = entry.bound;
+	        rb.reason = entry.reason;
+	        rb.trail_pos = entry.pos;
+	        rb.depth = entry.depth;
+	        rb.source_conflict_literal = entry.source_conflict_literal;
+	        rb.has_source_conflict_literal = entry.has_source_conflict_literal;
+	        rb.prev_bound_pos = entry.prev_bound_pos;
+	        rb.prev_bound_value = entry.prev_bound_value;
+	        local_trail_targets.push_back(std::move(rb));
+	      }
+	    }
 	    auto compute_node_min_activity = [&]() -> double {
 	      double activity = 0.0;
 	      for (Eigen::SparseVector<double>::InnerIterator it(dual_proof->coeff);
@@ -21238,8 +15336,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            (movement + 10.0 * lp_violation);
 	        tmp.push_back(ProofTargetTmp{
 	            DomainReasonBound{BranchDomainLiteral{j, implied, is_lb},
-	                              {}, static_cast<int>(branch_reasons.size() +
-	                                                   reason_bounds.size()),
+	                              {}, synthetic_target_trail_pos,
 	                              static_cast<int>(branch_reasons.size()),
 	                              BranchDomainLiteral{}, false},
 	            proof_activity + 4.0 * priority_activity +
@@ -21260,6 +15357,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    }
 	    std::vector<TargetCandidate> targets;
 	    targets.reserve(reason_bounds.size() + branch_targets.size() +
+	                    local_trail_targets.size() +
 	                    proof_activity_targets.size() +
 	                    (direct_domain_targets != nullptr
 	                         ? direct_domain_targets->size()
@@ -21332,6 +15430,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        add_target_candidate(rb);
 	      }
 	      for (const auto& rb : branch_targets) {
+	        add_target_candidate(rb);
+	      }
+	      for (const auto& rb : local_trail_targets) {
 	        add_target_candidate(rb);
 	      }
 	    }
@@ -21638,6 +15739,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
              (large_stale_frontier_case ? 4 : 1));
   int rc_proof_cut_resolve_lps_left =
       std::max(0, opt.reduced_cost_proof_cut_resolve_max_lps);
+  const bool allow_certificate_domain_replay =
+      opt.enable_reduced_cost_proof_conflict_minimization;
+  const bool allow_native_proof_cut_rows =
+      opt.enable_reduced_cost_proof_cut_resolve && !strict_highs_lp_contract;
 
   double last_queue_domain_replay_incumbent = kInf;
   std::uint64_t last_queue_domain_replay_epoch = 0;
@@ -21719,15 +15824,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          const std::vector<std::vector<BranchDomainLiteral>>*
 	              reconvergence_clauses,
 	          const char* tag) -> int {
+	    // HiGHS' reconvergence cut stores the resolved frontier itself.  A
+	    // native scoped gate may decide where the artifact is consumed, but it is
+	    // not part of the published frontier unless the resolver selected it.
+	    (void)extra_scope;
 	    if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
-	        !std::isfinite(rb.bound.value)) {
+	        !std::isfinite(rb.bound.value) ||
+	        !rb.has_source_conflict_literal ||
+	        rb.source_conflict_literal.var_idx < 0 ||
+	        rb.source_conflict_literal.var_idx >= n ||
+	        !std::isfinite(rb.source_conflict_literal.value)) {
 	      return 0;
 	    }
 	    std::vector<BranchDomainLiteral> frontier;
-	    if (extra_scope != nullptr) {
-	      frontier.insert(frontier.end(), extra_scope->begin(),
-	                      extra_scope->end());
-	    }
 	    frontier.insert(frontier.end(), rb.reason.begin(), rb.reason.end());
 	    canonicalize_branch_literals(frontier);
 	    int integral_cols = 0;
@@ -21764,21 +15873,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      ++published;
 	    }
 
-	    if (rb.has_source_conflict_literal &&
-	        rb.source_conflict_literal.var_idx >= 0 &&
-	        rb.source_conflict_literal.var_idx < n &&
-	        std::isfinite(rb.source_conflict_literal.value)) {
-	      std::vector<BranchDomainLiteral> reconv = frontier;
-	      reconv.push_back(rb.source_conflict_literal);
-	      published += publish_conflict_clause_from_dual_proof(
-	          std::move(reconv),
-	          static_cast<std::uint64_t>(frontier.size() + 1),
-	          tag != nullptr ? tag : "bound_lifting_certificate");
-	    }
+	    std::vector<BranchDomainLiteral> reconv = frontier;
+	    reconv.push_back(rb.source_conflict_literal);
+	    published += publish_conflict_clause_from_dual_proof(
+	        std::move(reconv),
+	        static_cast<std::uint64_t>(frontier.size() + 1),
+	        tag != nullptr ? tag : "bound_lifting_certificate");
 	    if (reconvergence_clauses != nullptr) {
 	      for (const auto& reconv : *reconvergence_clauses) {
+	        std::vector<BranchDomainLiteral> scoped_reconv = reconv;
+	        canonicalize_branch_literals(scoped_reconv);
 	        published += publish_conflict_clause_from_dual_proof(
-	            reconv, static_cast<std::uint64_t>(reconv.size()),
+	            scoped_reconv,
+	            static_cast<std::uint64_t>(scoped_reconv.size()),
 	            tag != nullptr ? tag : "bound_lifting_reconvergence");
 	      }
 	    }
@@ -22294,10 +16401,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return true;
   };
 
-  add_scoped_conflict_object =
-      [&](Node& node, const std::vector<BranchDomainLiteral>& learned_clause,
-          const DomainReasonBound* target_bound)
-          -> bool {
+	  add_scoped_conflict_object =
+	      [&](Node& node, const std::vector<BranchDomainLiteral>& learned_clause,
+	          const DomainReasonBound* target_bound)
+	          -> bool {
     if (learned_clause.empty() || learned_clause.size() > 16) return false;
     std::vector<BranchDomainLiteral> scope;
     std::vector<BranchDomainLiteral> residual;
@@ -22316,13 +16423,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
     canonicalize_branch_literals(scope);
     canonicalize_branch_literals(residual);
-	    const int max_scoped_residual =
-	        std::min(8, std::max(2, opt.reduced_cost_conflict_cut_max_literals));
-		    if (scope.empty() ||
-		        (!target_bound && residual.empty()) ||
-		        static_cast<int>(residual.size()) > max_scoped_residual) {
-		      return false;
-		    }
+    int integral_cols = 0;
+    for (const auto& var : base_lp.vars) {
+      if (is_integer_type(var)) ++integral_cols;
+    }
+    const int max_scoped_residual = std::max(
+        1, (1000 + 3 * integral_cols) / 10);
+	    int published_global = 0;
+    if (target_bound == nullptr && scope.empty() && !residual.empty() &&
+        static_cast<int>(residual.size()) <= max_scoped_residual) {
+      published_global = publish_conflict_clause_from_dual_proof(
+          residual, static_cast<std::uint64_t>(residual.size()),
+          "scoped_conflict_global_reconvergence");
+    }
+    if ((!target_bound && residual.empty()) ||
+        static_cast<int>(residual.size()) > max_scoped_residual ||
+        scope.empty()) {
+      return published_global > 0;
+    }
     std::vector<BranchDomainLiteral> sig = scope;
     sig.insert(sig.end(), residual.begin(), residual.end());
     if (target_bound != nullptr) {
@@ -22334,7 +16452,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     canonicalize_branch_literals(sig);
     const std::size_t h = conflict_clause_hash(sig);
     for (const auto& obj : node.scoped_conflict_clauses) {
-      if (obj.hash == h) return false;
+      if (obj.hash == h) return published_global > 0;
     }
     ScopedConflictClause obj;
     obj.scope_literals = std::move(scope);
@@ -22357,18 +16475,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return true;
   };
 
-	  add_scoped_target_bound_certificate =
-	      [&](Node& node, const DomainReasonBound& target_bound) -> bool {
-    if (target_bound.bound.var_idx < 0 || target_bound.bound.var_idx >= n ||
-        !std::isfinite(target_bound.bound.value)) {
-      return false;
-    }
-    std::vector<BranchDomainLiteral> scope;
-    std::vector<BranchDomainLiteral> residual = target_bound.reason;
-    canonicalize_branch_literals(scope);
-    canonicalize_branch_literals(residual);
-    const int max_scoped_residual =
-        std::min(8, std::max(2, opt.reduced_cost_conflict_cut_max_literals));
+		  add_scoped_target_bound_certificate =
+		      [&](Node& node, const DomainReasonBound& target_bound) -> bool {
+		    if (target_bound.bound.var_idx < 0 || target_bound.bound.var_idx >= n ||
+		        !std::isfinite(target_bound.bound.value)) {
+		      return false;
+		    }
+		    std::vector<BranchDomainLiteral> scope;
+		    std::vector<BranchDomainLiteral> residual = target_bound.reason;
+		    canonicalize_branch_literals(scope);
+		    canonicalize_branch_literals(residual);
+		    int integral_cols = 0;
+	    for (const auto& var : base_lp.vars) {
+	      if (is_integer_type(var)) ++integral_cols;
+	    }
+    const int max_scoped_residual = std::max(
+        1, (1000 + 3 * integral_cols) / 10);
     if (static_cast<int>(residual.size()) > max_scoped_residual) {
       return false;
     }
@@ -22380,11 +16502,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
     canonicalize_branch_literals(sig);
     const std::size_t h = conflict_clause_hash(sig);
-    const int published_global = publish_bound_lifting_certificate(
-        target_bound, nullptr, nullptr, "scoped_target_bound_lift");
-    for (const auto& obj : node.scoped_conflict_clauses) {
-      if (obj.hash == h) return published_global > 0;
-    }
+	    for (const auto& obj : node.scoped_conflict_clauses) {
+	      if (obj.hash == h) return false;
+	    }
     ScopedConflictClause obj;
     obj.scope_literals = std::move(scope);
     obj.residual_literals = std::move(residual);
@@ -22453,102 +16573,117 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      return false;
 	    };
 
-	    bool changed = false;
-	    std::uint64_t reasons_added = 0;
-	    for (const auto& cert : global_bound_lifting_certificates) {
-	      if (cert.target_bound.var_idx < 0 ||
-	          cert.target_bound.var_idx >= n ||
-	          !std::isfinite(cert.target_bound.value)) {
-	        continue;
-	      }
-	      std::vector<BranchDomainLiteral> clause = cert.frontier_literals;
-	      BranchDomainLiteral source_lit = cert.source_conflict_literal;
-	      if (!cert.has_source_conflict_literal ||
-	          source_lit.var_idx < 0 || source_lit.var_idx >= n ||
-	          !std::isfinite(source_lit.value)) {
-	        if (!flip_clause_literal(cert.target_bound, source_lit)) {
-	          continue;
-	        }
-	      }
-	      clause.push_back(source_lit);
+		    bool changed = false;
+		    bool changed_this_pass = true;
+		    std::uint64_t reasons_added = 0;
+		    const std::size_t max_closure_passes =
+		        global_bound_lifting_certificates.size() + 1;
+		    for (std::size_t pass = 0;
+		         pass < max_closure_passes && changed_this_pass; ++pass) {
+		      changed_this_pass = false;
+		      for (const auto& cert : global_bound_lifting_certificates) {
+		        if (cert.target_bound.var_idx < 0 ||
+		            cert.target_bound.var_idx >= n ||
+		            !std::isfinite(cert.target_bound.value)) {
+		          continue;
+		        }
+		        std::vector<BranchDomainLiteral> clause =
+		            cert.frontier_literals;
+		        BranchDomainLiteral source_lit = cert.source_conflict_literal;
+		        if (!cert.has_source_conflict_literal ||
+		            source_lit.var_idx < 0 || source_lit.var_idx >= n ||
+		            !std::isfinite(source_lit.value)) {
+		          if (!flip_clause_literal(cert.target_bound, source_lit)) {
+		            continue;
+		          }
+		        }
+		        clause.push_back(source_lit);
 
-	      int missing_idx = -1;
-	      int missing_count = 0;
-	      std::vector<BranchDomainLiteral> reason;
-	      reason.reserve(clause.size());
-	      for (int ci = 0; ci < static_cast<int>(clause.size()); ++ci) {
-	        const auto& lit = clause[static_cast<std::size_t>(ci)];
-	        if (literal_active(lit)) {
-	          reason.push_back(lit);
-	        } else {
-	          missing_idx = ci;
-	          if (++missing_count > 1) break;
-	        }
-	      }
-	      if (missing_count == 0) {
-	        ++out.bc_stats.scoped_conflict_prunes;
-	        return false;
-	      }
-	      if (missing_count != 1 || missing_idx < 0) continue;
+		        int missing_idx = -1;
+		        int missing_count = 0;
+		        std::vector<BranchDomainLiteral> reason;
+		        reason.reserve(clause.size());
+		        for (int ci = 0; ci < static_cast<int>(clause.size()); ++ci) {
+		          const auto& lit = clause[static_cast<std::size_t>(ci)];
+		          if (literal_active(lit)) {
+		            reason.push_back(lit);
+		          } else {
+		            missing_idx = ci;
+		            if (++missing_count > 1) break;
+		          }
+		        }
+		        if (missing_count == 0) {
+		          ++out.bc_stats.scoped_conflict_prunes;
+		          return false;
+		        }
+		        if (missing_count != 1 || missing_idx < 0) continue;
 
-	      const BranchDomainLiteral& missing =
-	          clause[static_cast<std::size_t>(missing_idx)];
-	      BranchDomainLiteral implied = cert.target_bound;
-	      const bool missing_is_source =
-	          missing.var_idx == source_lit.var_idx &&
-	          missing.is_lb == source_lit.is_lb &&
-	          std::abs(missing.value - source_lit.value) <= tol;
-	      if (!missing_is_source && !flip_clause_literal(missing, implied)) {
-	        continue;
-	      }
-	      if (implied.var_idx < 0 || implied.var_idx >= n ||
-	          !std::isfinite(implied.value)) {
-	        continue;
-	      }
-	      canonicalize_branch_literals(reason);
+		        const BranchDomainLiteral& missing =
+		            clause[static_cast<std::size_t>(missing_idx)];
+		        BranchDomainLiteral implied = cert.target_bound;
+		        const bool missing_is_source =
+		            missing.var_idx == source_lit.var_idx &&
+		            missing.is_lb == source_lit.is_lb &&
+		            std::abs(missing.value - source_lit.value) <= tol;
+		        if (!missing_is_source) {
+		          continue;
+		        }
+		        if (implied.var_idx < 0 || implied.var_idx >= n ||
+		            !std::isfinite(implied.value)) {
+		          continue;
+		        }
+		        canonicalize_branch_literals(reason);
 
-	      DomainReasonBound rb;
-	      rb.bound = implied;
-	      rb.reason = reason;
-	      rb.trail_pos = static_cast<int>(node.branch_reasons.size() +
-	                                      node.domain_reason_bounds.size());
-	      rb.depth = cert.depth;
-	      rb.source_conflict_literal = missing;
-	      rb.has_source_conflict_literal = true;
+		        DomainReasonBound rb;
+		        rb.bound = implied;
+		        rb.reason = reason;
+		        rb.trail_pos = static_cast<int>(
+		            node.branch_reasons.size() + node.domain_reason_bounds.size());
+		        rb.depth = cert.depth;
+		        rb.source_conflict_literal = missing;
+		        rb.has_source_conflict_literal = true;
 
-	      const int j = implied.var_idx;
-	      if (implied.is_lb) {
-	        if (implied.value > node.ub[j] + tol) {
-	          ++out.bc_stats.scoped_conflict_prunes;
-	          return false;
-	        }
-	        if (implied.value > node.lb[j] + tol) {
-	          const double old = node.lb[j];
-	          node.lb[j] = implied.value;
-	          changes_out.push_back({j, implied.value - old, true});
-	          ++out.bc_stats.scoped_conflict_tightenings;
-	          ++out.bc_stats.certificate_domain_fixings;
-	          changed = true;
-	        }
-	      } else {
-	        if (implied.value < node.lb[j] - tol) {
-	          ++out.bc_stats.scoped_conflict_prunes;
-	          return false;
-	        }
-	        if (implied.value < node.ub[j] - tol) {
-	          const double old = node.ub[j];
-	          node.ub[j] = implied.value;
-	          changes_out.push_back({j, implied.value - old, false});
-	          ++out.bc_stats.scoped_conflict_tightenings;
-	          ++out.bc_stats.certificate_domain_fixings;
-	          changed = true;
-	        }
-	      }
-	      if (!duplicate_reason(rb)) {
-	        append_domain_reason_bound(node, std::move(rb), n, &root.lb, &root.ub);
-	        ++reasons_added;
-	      }
-	    }
+		        const int j = implied.var_idx;
+		        bool bound_changed = false;
+		        if (implied.is_lb) {
+		          if (implied.value > node.ub[j] + tol) {
+		            ++out.bc_stats.scoped_conflict_prunes;
+		            return false;
+		          }
+		          if (implied.value > node.lb[j] + tol) {
+		            const double old = node.lb[j];
+		            node.lb[j] = implied.value;
+		            changes_out.push_back({j, implied.value - old, true});
+		            ++out.bc_stats.scoped_conflict_tightenings;
+		            ++out.bc_stats.certificate_domain_fixings;
+		            bound_changed = true;
+		            changed = true;
+		          }
+		        } else {
+		          if (implied.value < node.lb[j] - tol) {
+		            ++out.bc_stats.scoped_conflict_prunes;
+		            return false;
+		          }
+		          if (implied.value < node.ub[j] - tol) {
+		            const double old = node.ub[j];
+		            node.ub[j] = implied.value;
+		            changes_out.push_back({j, implied.value - old, false});
+		            ++out.bc_stats.scoped_conflict_tightenings;
+		            ++out.bc_stats.certificate_domain_fixings;
+		            bound_changed = true;
+		            changed = true;
+		          }
+		        }
+		        bool reason_added = false;
+		        if (!duplicate_reason(rb)) {
+		          append_domain_reason_bound(node, std::move(rb), n, &root.lb,
+		                                     &root.ub);
+		          ++reasons_added;
+		          reason_added = true;
+		        }
+		        if (bound_changed || reason_added) changed_this_pass = true;
+		      }
+		    }
 	    if (reasons_added_out != nullptr) {
 	      *reasons_added_out = reasons_added;
 	    }
@@ -22595,9 +16730,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    auto remember_scoped_reason_bound =
 	        [&](const BranchDomainLiteral& bound,
 	            std::vector<BranchDomainLiteral> reason,
+	            const std::vector<BranchDomainLiteral>& scope_literals,
 	            const BranchDomainLiteral& source_conflict_literal,
 	            bool has_source_conflict_literal,
 	            int depth) {
+	      (void)scope_literals;
 	      if (bound.var_idx < 0 || bound.var_idx >= n ||
 	          !std::isfinite(bound.value)) {
 	        return;
@@ -22611,7 +16748,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      rb.depth = depth;
 	      rb.source_conflict_literal = source_conflict_literal;
 	      rb.has_source_conflict_literal = has_source_conflict_literal;
-	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+		      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
 	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
 	            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
@@ -22625,6 +16762,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        [&](const ScopedConflictClause& obj) {
 	      if (!obj.has_target_bound) return;
 	      remember_scoped_reason_bound(obj.target_bound, obj.residual_literals,
+	                                   obj.scope_literals,
 	                                   obj.source_conflict_literal,
 	                                   obj.has_source_conflict_literal,
 	                                   obj.depth);
@@ -22651,6 +16789,70 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            if (!flip_clause_literal(obj.target_bound, source_lit)) {
 	              continue;
 	            }
+	          }
+
+	          bool frontier_active = true;
+	          std::vector<BranchDomainLiteral> frontier_reason;
+	          frontier_reason.reserve(obj.residual_literals.size());
+	          for (const auto& lit : obj.residual_literals) {
+	            if (!literal_active(lit)) {
+	              frontier_active = false;
+	              break;
+	            }
+	            frontier_reason.push_back(lit);
+	          }
+	          if (frontier_active) {
+	            const int j = obj.target_bound.var_idx;
+	            if (j < 0 || j >= n ||
+	                !std::isfinite(obj.target_bound.value)) {
+	              continue;
+	            }
+	            bool target_changed = false;
+	            if (obj.target_bound.is_lb) {
+	              if (obj.target_bound.value > node.ub[j] + tol) {
+	                remember_scoped_reason_bound(
+	                    obj.target_bound, std::move(frontier_reason),
+	                    obj.scope_literals,
+	                    source_lit, /*has_source_conflict_literal=*/true,
+	                    obj.depth);
+	                ++out.bc_stats.scoped_conflict_prunes;
+	                return false;
+	              }
+	              if (obj.target_bound.value > node.lb[j] + tol) {
+	                const double old = node.lb[j];
+	                node.lb[j] = obj.target_bound.value;
+	                changes_out.push_back(
+	                    {j, obj.target_bound.value - old, true});
+	                ++out.bc_stats.scoped_conflict_tightenings;
+	                target_changed = true;
+	                changed = true;
+	              }
+	            } else {
+	              if (obj.target_bound.value < node.lb[j] - tol) {
+	                remember_scoped_reason_bound(
+	                    obj.target_bound, std::move(frontier_reason),
+	                    obj.scope_literals,
+	                    source_lit, /*has_source_conflict_literal=*/true,
+	                    obj.depth);
+	                ++out.bc_stats.scoped_conflict_prunes;
+	                return false;
+	              }
+	              if (obj.target_bound.value < node.ub[j] - tol) {
+	                const double old = node.ub[j];
+	                node.ub[j] = obj.target_bound.value;
+	                changes_out.push_back(
+	                    {j, obj.target_bound.value - old, false});
+	                ++out.bc_stats.scoped_conflict_tightenings;
+	                target_changed = true;
+	                changed = true;
+	              }
+	            }
+	            remember_scoped_reason_bound(
+	                obj.target_bound, std::move(frontier_reason),
+	                obj.scope_literals,
+	                source_lit,
+	                /*has_source_conflict_literal=*/true, obj.depth);
+	            if (target_changed) continue;
 	          }
 
 	          std::vector<BranchDomainLiteral> clause = obj.residual_literals;
@@ -22680,8 +16882,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                missing.var_idx == source_lit.var_idx &&
 	                missing.is_lb == source_lit.is_lb &&
 	                std::abs(missing.value - source_lit.value) <= tol;
-	            if (!missing_is_source &&
-	                !flip_clause_literal(missing, implied)) {
+	            if (!missing_is_source) {
 	              continue;
 	            }
 	            const int j = implied.var_idx;
@@ -22692,8 +16893,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            if (implied.is_lb) {
 	              if (implied.value > node.ub[j] + tol) {
 	                remember_scoped_reason_bound(
-	                    implied, reason, missing, /*has_source_conflict_literal=*/true,
-	                    obj.depth);
+	                    implied, reason, obj.scope_literals, missing,
+	                    /*has_source_conflict_literal=*/true, obj.depth);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -22708,8 +16909,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            } else {
 	              if (implied.value < node.lb[j] - tol) {
 	                remember_scoped_reason_bound(
-	                    implied, reason, missing, /*has_source_conflict_literal=*/true,
-	                    obj.depth);
+	                    implied, reason, obj.scope_literals, missing,
+	                    /*has_source_conflict_literal=*/true, obj.depth);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -22724,7 +16925,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            }
 	            if (target_changed || literal_active(implied)) {
 	              remember_scoped_reason_bound(
-	                  implied, std::move(reason), missing,
+	                  implied, std::move(reason), obj.scope_literals, missing,
 	                  /*has_source_conflict_literal=*/true, obj.depth);
 	            }
 	            if (target_changed) continue;
@@ -22862,12 +17063,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 	      return true;
 	    };
-	    auto apply_reason_bound = [&](const DomainReasonBound& rb) -> bool {
-	      const int j = rb.bound.var_idx;
-	      if (j < 0 || j >= n || !std::isfinite(rb.bound.value)) {
-	        return true;
-	      }
-	      if (rb.bound.is_lb) {
+		    auto apply_reason_bound = [&](const DomainReasonBound& rb) -> bool {
+		      const int j = rb.bound.var_idx;
+		      if (j < 0 || j >= n || !std::isfinite(rb.bound.value)) {
+		        return true;
+		      }
+		      if (rb.bound.is_lb) {
 	        if (rb.bound.value > node.ub[j] + tol) {
 	          ++out.bc_stats.scoped_conflict_prunes;
 	          return false;
@@ -22928,7 +17129,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    };
 
 	    bool changed = true;
-	    int resolved_objects = 0;
 	    while (changed) {
 	      changed = false;
 	      const std::size_t objects_this_pass = node.scoped_conflict_clauses.size();
@@ -22960,22 +17160,81 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            }
 	          }
 	          if (best == nullptr) continue;
-	          if (resolved_objects < 8) {
-	            std::vector<BranchDomainLiteral> resolved_clause = obj.scope_literals;
-	            for (const auto& keep : obj.residual_literals) {
-	              if (!branch_literal_stronger_or_equal(keep, residual_lit, tol) ||
-	                  !branch_literal_stronger_or_equal(residual_lit, keep, tol)) {
-	                resolved_clause.push_back(keep);
-	              }
-	            }
-	            resolved_clause.insert(resolved_clause.end(), best->reason.begin(),
-	                                   best->reason.end());
-	            canonicalize_branch_literals(resolved_clause);
-		            if (add_scoped_conflict_object(node, resolved_clause, nullptr)) {
-	              ++resolved_objects;
-	              changed = true;
+	          std::vector<BranchDomainLiteral> resolved_clause = obj.scope_literals;
+	          std::vector<BranchDomainLiteral> resolved_residual;
+	          resolved_residual.reserve(obj.residual_literals.size() +
+	                                    best->reason.size());
+	          for (const auto& keep : obj.residual_literals) {
+	            if (!branch_literal_stronger_or_equal(keep, residual_lit, tol) ||
+	                !branch_literal_stronger_or_equal(residual_lit, keep, tol)) {
+	              resolved_clause.push_back(keep);
+	              resolved_residual.push_back(keep);
 	            }
 	          }
+	          resolved_clause.insert(resolved_clause.end(), best->reason.begin(),
+	                                 best->reason.end());
+	          resolved_residual.insert(resolved_residual.end(),
+	                                   best->reason.begin(),
+	                                   best->reason.end());
+	          canonicalize_branch_literals(resolved_clause);
+	          canonicalize_branch_literals(resolved_residual);
+		          if (obj.has_target_bound) {
+		            DomainReasonBound resolved_target;
+		            resolved_target.bound = obj.target_bound;
+		            resolved_target.reason = resolved_clause;
+		            resolved_target.trail_pos =
+		                static_cast<int>(node.branch_reasons.size() +
+		                                 node.domain_reason_bounds.size());
+		            resolved_target.depth = obj.depth;
+	            resolved_target.source_conflict_literal =
+	                obj.has_source_conflict_literal
+	                    ? obj.source_conflict_literal
+		                    : BranchDomainLiteral{};
+		            resolved_target.has_source_conflict_literal =
+		                obj.has_source_conflict_literal;
+		            const bool resolved_frontier_active =
+		                reason_active(resolved_target.reason);
+		            if (resolved_frontier_active) {
+		              const std::size_t reason_hash =
+		                  conflict_clause_hash(resolved_target.reason);
+		              bool duplicate = false;
+		              for (const auto& existing : node.domain_reason_bounds) {
+		                if (branch_literal_stronger_or_equal(
+		                        existing.bound, resolved_target.bound, tol) &&
+		                    branch_literal_stronger_or_equal(
+		                        resolved_target.bound, existing.bound, tol) &&
+		                    conflict_clause_hash(existing.reason) == reason_hash) {
+		                  duplicate = true;
+		                  break;
+		                }
+		              }
+		              if (!duplicate) {
+		                append_domain_reason_bound(node, resolved_target, n,
+		                                           &root.lb, &root.ub);
+		                changed = true;
+		              }
+		              const double old_lb =
+		                  resolved_target.bound.var_idx >= 0
+		                      ? node.lb[resolved_target.bound.var_idx]
+		                      : 0.0;
+		              const double old_ub =
+		                  resolved_target.bound.var_idx >= 0
+		                      ? node.ub[resolved_target.bound.var_idx]
+		                      : 0.0;
+		              if (!apply_reason_bound(resolved_target)) return false;
+		              const bool target_tightened =
+		                  resolved_target.bound.var_idx >= 0 &&
+		                  (resolved_target.bound.is_lb
+		                       ? node.lb[resolved_target.bound.var_idx] >
+		                             old_lb + tol
+		                       : node.ub[resolved_target.bound.var_idx] <
+		                             old_ub - tol);
+		              if (target_tightened) changed = true;
+		            }
+		          } else if (add_scoped_conflict_object(node, resolved_clause,
+		                                                nullptr)) {
+		            changed = true;
+		          }
 	          const double old_lb = node.lb[best->bound.var_idx];
 	          const double old_ub = node.ub[best->bound.var_idx];
 	          if (!apply_reason_bound(*best)) return false;
@@ -23602,43 +17861,23 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             std::max(out.bc_stats.conformance_bound_lift_max, lift);
       }
 
-      auto refresh_basis =
-          std::make_shared<SimplexBasis>(std::move(refresh_res.basis));
-      if (qnode.basis_hint) {
-        refresh_basis->try_share_indices_from(*qnode.basis_hint);
-      }
-      refresh_basis->compact_indices_storage();
-      if (refresh_res.shared_binv) {
-        refresh_basis->cached_inverse = refresh_res.shared_binv;
-      } else if (refresh_res.basis_inverse.rows() > 0) {
-        refresh_basis->cached_inverse =
-            std::make_shared<const Eigen::MatrixXd>(
-                std::move(refresh_res.basis_inverse));
-      }
-      refresh_basis->cached_reduced_costs =
-          std::make_shared<const Eigen::VectorXd>(
-              std::move(refresh_res.reduced_costs));
-	      qnode.basis_hint = refresh_basis;
+      qnode.basis_hint =
+          persist_bc_node_basis_from_simplex(refresh_res, qnode.basis_hint);
 	      qnode.domain_learning_epoch = current_domain_learning_epoch();
 	      qnode.lp_refresh_needed = false;
 
 	      std::vector<int> refresh_frac;
-      if (!fractional_indices(base_lp.vars, qnode.x_relax,
-                              requested_vendored_highs_lp
-                                  ? std::max(1e-9, opt.lp_tol)
-                                  : opt.int_tol,
-                              refresh_frac) &&
+      if (!fractional_branchable_indices(
+              qnode.x_relax, qnode.lb, qnode.ub,
+              requested_vendored_highs_lp ? std::max(1e-9, opt.lp_tol)
+                                          : opt.int_tol,
+              refresh_frac) &&
           satisfies_with_bounds(base_lp, qnode.x_relax, qnode.lb, qnode.ub,
                                 requested_vendored_highs_lp
                                     ? std::max(1e-6, opt.lp_tol)
                                     : 1e-6)) {
         Eigen::VectorXd x_int = qnode.x_relax;
-        for (int i = 0; i < n; ++i) {
-          if (is_integer_type(base_lp.vars[static_cast<std::size_t>(i)])) {
-            x_int[i] = std::min(qnode.ub[i],
-                                std::max(qnode.lb[i], std::round(x_int[i])));
-          }
-	        }
+	        round_declared_branchables(x_int, qnode.lb, qnode.ub);
 	        const double obj = objective_value(base_lp.c, x_int, base_lp.sense);
 	        if (adopt_tree_incumbent("queue_refresh", x_int, obj, qnode.depth,
 	                                 global_lb)) {
@@ -23854,12 +18093,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       closure_pruned_total = closure_pruned;
       out.bc_stats.local_implications_applied += queued_tightened;
     }
-	    const bool proof_tail_without_refresh_budget =
-	        proof_tail_queue_mode_active() && rc_fixing_resolve_lps_left <= 0;
-	    const bool objective_replay_allowed =
-	        !proof_tail_queue_mode_active() || cutoff_strictly_improved;
-	    if (objective_replay_allowed && !proof_tail_without_refresh_budget &&
-	        use_objective_propagation && has_incumbent &&
+		    const bool objective_replay_allowed =
+		        force_frontier_drain || !proof_tail_queue_mode_active() ||
+		        cutoff_strictly_improved || has_new_global_learning;
+		    if (objective_replay_allowed &&
+		        use_objective_propagation && has_incumbent &&
 	        std::isfinite(incumbent_obj) &&
 	        (!objective_propagation.partitions.empty() ||
          !objective_propagation.implied_events.empty() ||
@@ -23874,6 +18112,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       std::uint64_t queue_objcap_raw_exceed = 0;
       std::uint64_t queue_objcap_proof_exceed = 0;
       std::uint64_t objective_reasons_added = 0;
+      std::uint64_t queue_objective_event_bound_lifts = 0;
       ObjectivePropagationState::ProofCapacityPropagationStats
           queue_proof_stats;
       double queue_objcap_min_raw_cap = kInf;
@@ -23881,11 +18120,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       double queue_objcap_max_one = 0.0;
       double queue_objcap_max_proof_excess = 0.0;
       const DualProofRow* global_queue_objective_proof = nullptr;
-      if (have_cached_queue_dual_proof && cached_queue_dual_proof_is_global &&
-          cached_queue_dual_proof.valid &&
-          cached_queue_dual_proof.coeff.size() >= n &&
-          cached_queue_dual_proof.coeff.nonZeros() > 0) {
-        global_queue_objective_proof = &cached_queue_dual_proof;
+      if (have_cached_queue_objective_event_proof &&
+          cached_queue_objective_event_proof_is_global &&
+          cached_queue_objective_event_proof.valid &&
+          cached_queue_objective_event_proof.coeff.size() >= n &&
+          cached_queue_objective_event_proof.coeff.nonZeros() > 0) {
+        global_queue_objective_proof = &cached_queue_objective_event_proof;
       } else if (have_root_global_dual_proof && root_global_dual_proof.valid &&
                  root_global_dual_proof.coeff.size() >= n &&
                  root_global_dual_proof.coeff.nonZeros() > 0) {
@@ -23899,11 +18139,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      const bool allow_scoped_queue_proof = proof_tail_queue_mode_active();
       const bool have_scoped_queue_objective_proof =
           allow_scoped_queue_proof &&
-          have_cached_queue_dual_proof && !cached_queue_dual_proof_is_global &&
-          cached_queue_dual_proof.valid &&
-          cached_queue_dual_proof.coeff.size() >= n &&
-          cached_queue_dual_proof.coeff.nonZeros() > 0 &&
-          dual_proof_has_objective_event_target(&cached_queue_dual_proof);
+          have_cached_queue_objective_event_proof &&
+          !cached_queue_objective_event_proof_is_global &&
+          cached_queue_objective_event_proof.valid &&
+          cached_queue_objective_event_proof.coeff.size() >= n &&
+          cached_queue_objective_event_proof.coeff.nonZeros() > 0 &&
+          dual_proof_has_objective_event_target(
+              &cached_queue_objective_event_proof);
       auto scope_active_for_node =
           [&](const Node& node,
               const std::vector<BranchDomainLiteral>& scope) {
@@ -23974,14 +18216,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                 global_queue_objective_proof;
             if (queue_objective_proof == nullptr &&
                 have_scoped_queue_objective_proof &&
-                scope_active_for_node(node, cached_queue_dual_proof_scope)) {
-              queue_objective_proof = &cached_queue_dual_proof;
+                scope_active_for_node(
+                    node, cached_queue_objective_event_proof_scope)) {
+              queue_objective_proof = &cached_queue_objective_event_proof;
             }
-            if (queue_objective_proof != nullptr &&
-                opt.enable_reduced_cost_proof_cut_resolve) {
+	            if (queue_objective_proof != nullptr &&
+	                allow_certificate_domain_replay) {
               const bool using_scoped_queue_proof =
-                  queue_objective_proof == &cached_queue_dual_proof &&
-                  !cached_queue_dual_proof_is_global;
+                  queue_objective_proof ==
+                      &cached_queue_objective_event_proof &&
+                  !cached_queue_objective_event_proof_is_global;
               const std::size_t scoped_reason_begin = reasons.size();
 	              ObjectivePropagationState::ProofCapacityPropagationStats
 	                  local_proof_stats;
@@ -23993,6 +18237,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   node.basis_hint->cached_reduced_costs->size() >= n) {
                 node_reduced_costs = node.basis_hint->cached_reduced_costs.get();
               }
+              ObjectivePropagationState::EventBoundLiftCallback
+                  event_bound_lift_cb =
+                      [&](const ObjectivePropagationState::ImpliedContributionEvent&
+                              event,
+                          const std::vector<BranchDomainLiteral>& active_reason,
+                          const BranchDomainLiteral& missing_literal) -> int {
+                const int target = event.target_col;
+                if (target < 0 || target >= n ||
+                    !std::isfinite(event.target_bound) ||
+                    missing_literal.var_idx < 0 ||
+                    missing_literal.var_idx >= n ||
+                    !std::isfinite(missing_literal.value)) {
+                  return 0;
+                }
+	                (void)event;
+	                (void)target;
+	                (void)active_reason;
+	                (void)missing_literal;
+	                return 0;
+	              };
 	              const bool proof_ok =
 	                  objective_propagation.propagate_proof_capacity_one_missing(
 	                      base_lp,
@@ -24003,26 +18267,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                          std::max(1e-9, opt.lp_tol), node.depth,
 	                          trail_base + static_cast<int>(reasons.size())},
                       lb, ub, &reasons, proof_tightened, proof_pruned,
-                      &local_proof_stats);
-              if (using_scoped_queue_proof &&
-                  reasons.size() > scoped_reason_begin) {
-                for (std::size_t ri = scoped_reason_begin; ri < reasons.size();
-                     ++ri) {
-                  for (const auto& lit : cached_queue_dual_proof_scope) {
-                    bool duplicate = false;
-                    for (const auto& existing : reasons[ri].reason) {
-                      if (existing.var_idx == lit.var_idx &&
-                          existing.is_lb == lit.is_lb &&
-                          std::abs(existing.value - lit.value) <= 1e-9) {
-                        duplicate = true;
-                        break;
-                      }
-                    }
-                    if (!duplicate) reasons[ri].reason.push_back(lit);
-                  }
-                  canonicalize_branch_literals(reasons[ri].reason);
-                }
-              }
+                      &local_proof_stats, &event_bound_lift_cb);
+              // The cached child proof scope is a consumption gate.  HiGHS
+              // resolves the local trail and publishes only the reconvergence
+              // frontier; appending the generating child branch here would turn
+              // a cross-frontier certificate back into a local artifact.
+              (void)using_scoped_queue_proof;
+              (void)scoped_reason_begin;
               queue_proof_stats.candidates += local_proof_stats.candidates;
               queue_proof_stats.fixings += local_proof_stats.fixings;
               queue_proof_stats.prunes += local_proof_stats.prunes;
@@ -24087,6 +18338,37 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         out.bc_stats.objective_implied_event_prunes +=
             static_cast<std::uint64_t>(objective_pruned);
       }
+      if (queue_objective_event_bound_lifts > 0) {
+        out.bc_stats.termination_effective_admitted +=
+            queue_objective_event_bound_lifts;
+        if (!global_bound_lifting_certificates.empty()) {
+          std::uint64_t cert_tightened = 0;
+          std::uint64_t cert_reasons = 0;
+          const int cert_pruned =
+              node_queue.propagate_bound_lifting_certificates(
+                  base_lp.vars, global_bound_lifting_certificates,
+                  has_incumbent, incumbent_obj,
+                  std::max(1e-9, kIncumbentPruneTol *
+                                     std::max(1.0, std::abs(incumbent_obj))),
+                  &cert_tightened, &cert_reasons,
+                  objective_queue_bound_band, objective_queue_max_nodes,
+                  &root.lb, &root.ub,
+                  &replay_queue_reason_trail_certificates);
+          closure_tightened_total += cert_tightened;
+          objective_tightened_total += cert_tightened;
+          learned_pruned += cert_pruned;
+          out.bc_stats.certificate_queue_tightenings += cert_tightened;
+          out.bc_stats.certificate_domain_fixings += cert_tightened;
+          out.bc_stats.scoped_conflict_objects_learned += cert_reasons;
+          out.bc_stats.termination_effective_admitted +=
+              cert_tightened + cert_reasons +
+              static_cast<std::uint64_t>(std::max(0, cert_pruned));
+          if (cert_pruned > 0) {
+            out.bc_stats.certificate_queue_prunes +=
+                static_cast<std::uint64_t>(cert_pruned);
+          }
+        }
+      }
       if (queue_objcap_nodes > 0) {
         out.bc_stats.conformance_objective_capacity_phases +=
             queue_objcap_nodes;
@@ -24148,10 +18430,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                            queue_proof_stats.rc_frontier_skip_budget);
 	      }
     }
-    if (learned_pruned > 0) {
-      out.bc_stats.rc_conflict_queue_prunes +=
-          static_cast<std::uint64_t>(learned_pruned);
-    }
+	    if (learned_pruned > 0) {
+	      out.bc_stats.rc_conflict_queue_prunes +=
+	          static_cast<std::uint64_t>(learned_pruned);
+	    }
     pruned += learned_pruned;
     const std::uint64_t queue_tightenings_for_refresh =
         closure_tightened_total + objective_tightened_total;
@@ -24462,11 +18744,40 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   int stale_certificate_queue_passes = 0;
   double best_certificate_queue_gap = kInf;
   std::uint64_t last_certificate_queue_node = 0;
+  double last_cached_dual_proof_consume_obj = kInf;
+  std::uint64_t last_cached_dual_proof_consume_epoch =
+      std::numeric_limits<std::uint64_t>::max();
+  bool last_cached_dual_proof_consume_had_effect = false;
+  auto cached_dual_proof_consumed_for_current_epoch = [&]() -> bool {
+    if (!has_incumbent || !std::isfinite(incumbent_obj) ||
+        !std::isfinite(last_cached_dual_proof_consume_obj)) {
+      return false;
+    }
+    const double consume_obj_tol =
+        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+    return std::abs(incumbent_obj - last_cached_dual_proof_consume_obj) <=
+               consume_obj_tol &&
+           last_cached_dual_proof_consume_epoch ==
+               current_domain_learning_epoch();
+  };
   auto consume_dual_proof_for_queue =
       [&](const DualProofRow& proof, double proof_upper,
           const char* source,
           const std::vector<BranchDomainLiteral>* required_scope = nullptr)
           -> int {
+    if (opt.require_tree_exhaustion_certificate) {
+      // HiGHS conflict analysis resolves a row proof through the current local
+      // domain trail before publishing a reusable frontier.  The native queue
+      // pass below derives reduced-cost-style bound changes directly from a
+      // row proof over queued nodes; in strict proof mode that can turn
+      // proof-side activity into domain fixings without a resolved trail
+      // certificate.  Keep strict exhaustion on first-class certificates only.
+      (void)proof;
+      (void)proof_upper;
+      (void)source;
+      (void)required_scope;
+      return 0;
+    }
     if (!proof.valid || proof.coeff.size() < n || proof.coeff.nonZeros() <= 0 ||
         !std::isfinite(proof_upper) || !std::isfinite(proof.rhs) ||
         node_queue.empty() ||
@@ -24534,10 +18845,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          !std::isfinite(rb.bound.value)) {
 	        return;
 	      }
-      queue_proof_conflicts += static_cast<std::uint64_t>(
-          publish_bound_lifting_certificate(
-              rb, nullptr, reconvergence_clauses,
-              "queue_bound_lifting_certificate"));
+	      queue_proof_conflicts += static_cast<std::uint64_t>(
+	          publish_bound_lifting_certificate(
+	              rb, nullptr, nullptr,
+	              "queue_bound_lifting_certificate"));
 	      auto publish_bound_lifting_clause =
 	          [&](std::vector<BranchDomainLiteral> clause,
 	              std::uint64_t source_literals) {
@@ -24554,19 +18865,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                std::move(clause), source_literals,
 	                "queue_bound_lifting_certificate"));
 	      };
-	      if (reconvergence_clauses != nullptr) {
-	        for (const auto& reconv : *reconvergence_clauses) {
-	          publish_bound_lifting_clause(
-	              reconv, static_cast<std::uint64_t>(reconv.size()));
-	        }
-	      }
-	      std::vector<BranchDomainLiteral> clause;
-	      // The resolver has already replaced the local proof path by
-	      // rb.reason.  Re-adding the generating child branch scope here would
-	      // make the certificate local to that child instead of consumable at
-	      // the reconvergence frontier.
-	      (void)scope;
-	      clause.insert(clause.end(), rb.reason.begin(), rb.reason.end());
+		      if (reconvergence_clauses != nullptr) {
+		        for (const auto& reconv : *reconvergence_clauses) {
+		          (void)scope;
+		          std::vector<BranchDomainLiteral> scoped_reconv = reconv;
+		          canonicalize_branch_literals(scoped_reconv);
+		          publish_bound_lifting_clause(
+		              scoped_reconv,
+		              static_cast<std::uint64_t>(scoped_reconv.size()));
+		        }
+		      }
+		      std::vector<BranchDomainLiteral> clause;
+		      clause.insert(clause.end(), rb.reason.begin(), rb.reason.end());
 	      if (rb.has_source_conflict_literal &&
 	          rb.source_conflict_literal.var_idx >= 0 &&
 	          rb.source_conflict_literal.var_idx < n &&
@@ -24589,17 +18899,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 				        frontier_band, max_queue_nodes, required_scope,
 				        &queue_prune_certificate_cb,
 				        &queue_bound_lifting_certificate_cb,
-				        &replay_queue_reason_trail_certificates);
+				        &replay_queue_reason_trail_certificates,
+				        &root.lb, &root.ub);
     if (forced_certificate_queue_passes > 0) {
       --forced_certificate_queue_passes;
     }
 	    if (tightened == 0 && pruned == 0 && scoped_domain_fixings == 0 &&
-	        queue_proof_conflicts == 0) {
+	        scoped_certificates == 0 && queue_proof_conflicts == 0) {
       ++out.bc_stats.termination_effective_skip_no_lp_or_queue_hit;
       if (certificate_queue_passes_left > 0) --certificate_queue_passes_left;
       last_certificate_queue_node =
           static_cast<std::uint64_t>(out.bc_stats.nodes_explored);
       ++out.bc_stats.certificate_queue_passes;
+      last_queue_domain_replay_epoch = current_domain_learning_epoch();
+      stale_queue_domain_replay_passes = 0;
       if (meaningfully_better) {
         best_certificate_queue_gap =
             std::min(best_certificate_queue_gap, proof_gap);
@@ -24632,7 +18945,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     const double certificate_lift_tol =
         std::max(1e-6, 10.0 * std::max(opt.lp_tol, opt.int_tol));
     const bool termination_effective_pass =
-        pruned > 0 || lift_max > certificate_lift_tol;
+        pruned > 0 || lift_max > certificate_lift_tol ||
+        scoped_domain_fixings > 0 || scoped_certificates > 0 ||
+        queue_proof_conflicts > 0;
     if (termination_effective_pass) {
       stale_certificate_queue_passes = 0;
     } else {
@@ -24758,10 +19073,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             static_cast<std::uint64_t>(replay_pruned);
         pruned += replay_pruned;
       }
-    }
+	    }
 	    if (have_bound_lifting_artifacts && rc_fixing_resolve_lps_left > 0) {
-      const int marked_frontier_nodes =
-          node_queue.count_lp_refresh_needed_near_lower_bound(
+	      const int marked_frontier_nodes =
+	          node_queue.count_lp_refresh_needed_near_lower_bound(
               frontier_band, /*max_scan=*/8192);
       const int pass_budget = std::min(
           rc_fixing_resolve_lps_left,
@@ -24776,6 +19091,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                                           frontier_band);
 	    }
     refresh_queue_lower_bound();
+    last_queue_domain_replay_epoch = current_domain_learning_epoch();
+    stale_queue_domain_replay_passes = 0;
     if (opt.verbose) {
       fmt::print(stderr,
 	                 "[B&C-CERT-QUEUE] source={} gap={:.6g} tightened={} "
@@ -24873,11 +19190,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       have_cached_queue_dual_proof = true;
       cached_queue_dual_proof_is_global = true;
       cached_queue_dual_proof_scope.clear();
+      cached_queue_objective_event_proof = root_global_dual_proof;
+      have_cached_queue_objective_event_proof = true;
+      cached_queue_objective_event_proof_is_global = true;
+      cached_queue_objective_event_proof_scope.clear();
     }
 	    if (!have_cached_queue_dual_proof || node_queue.empty() ||
 	        !std::isfinite(cached_queue_dual_proof_upper)) {
 	      return incumbent_pruned;
 	    }
+    if (cached_dual_proof_consumed_for_current_epoch()) {
+      return incumbent_pruned;
+    }
 	    const bool strict_frontier_ready =
 	        proof_tail_queue_mode_active();
 	    const std::vector<BranchDomainLiteral>* cached_scope =
@@ -24893,11 +19217,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    forced_certificate_queue_passes =
 	        std::max(forced_certificate_queue_passes, 1);
 	    ++out.bc_stats.incumbent_certificate_queue_consumptions;
-	    return incumbent_pruned +
-		           consume_dual_proof_for_queue(cached_queue_dual_proof,
-		                                        cached_queue_dual_proof_upper,
-		                                        "incumbent_cached_proof",
-		                                        cached_scope);
+    const int proof_pruned =
+        consume_dual_proof_for_queue(cached_queue_dual_proof,
+                                     cached_queue_dual_proof_upper,
+                                     "incumbent_cached_proof", cached_scope);
+    last_cached_dual_proof_consume_obj = incumbent_obj;
+    last_cached_dual_proof_consume_epoch = current_domain_learning_epoch();
+    last_cached_dual_proof_consume_had_effect = proof_pruned > 0;
+	    return incumbent_pruned + proof_pruned;
   };
 
   auto separate_local_probed_implied_bound_cuts =
@@ -24905,10 +19232,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           std::vector<PoolCut>& local_proof_cuts,
           double inc_obj_snapshot,
           bool has_inc_snapshot) -> int {
-    if (!opt.enable_dynamic_implied_bound_probing ||
-        !opt.enable_graph_implied_bound_cuts ||
-        !opt.enable_reduced_cost_proof_cut_resolve ||
-        child.x_relax.size() != n ||
+	    if (!allow_native_proof_cut_rows ||
+	        !opt.enable_dynamic_implied_bound_probing ||
+	        !opt.enable_graph_implied_bound_cuts ||
+	        child.x_relax.size() != n ||
         opt.dynamic_implied_bound_probing_max_vars <= 0 ||
         opt.dynamic_implied_bound_probing_max_rows <= 0) {
       return 0;
@@ -25127,10 +19454,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           const std::shared_ptr<BasisOps>& sbasis,
           std::vector<PoolCut>& local_proof_cuts,
           int max_rows) -> int {
-    if (max_rows <= 0 || !simplex.exact_optimal ||
-        child.x_relax.size() != n ||
-        !opt.enable_reduced_cost_proof_cut_resolve ||
-        rc_proof_cut_resolve_lps_left <= 0) {
+	    if (max_rows <= 0 || !simplex.exact_optimal ||
+	        child.x_relax.size() != n ||
+	        !allow_native_proof_cut_rows ||
+	        rc_proof_cut_resolve_lps_left <= 0) {
       return 0;
     }
 
@@ -25339,48 +19666,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		    return true;
 		  };
 
-		  auto probe_domain_is_subset_of_child_domain =
-		      [&](const Eigen::VectorXd& child_lb,
-		          const Eigen::VectorXd& child_ub,
-		          const Eigen::VectorXd& probe_lb,
-		          const Eigen::VectorXd& probe_ub) -> bool {
-		    if (child_lb.size() != n || child_ub.size() != n ||
-		        probe_lb.size() != n || probe_ub.size() != n) {
-		      return false;
-		    }
-		    const double tol =
-		        std::max(1e-12, 10.0 * std::max(opt.lp_tol, opt.int_tol));
-		    for (int i = 0; i < n; ++i) {
-		      if (std::isfinite(child_lb[i]) && std::isfinite(probe_lb[i]) &&
-		          child_lb[i] + tol < probe_lb[i]) {
-		        return false;
-		      }
-		      if (std::isfinite(child_ub[i]) && std::isfinite(probe_ub[i]) &&
-		          child_ub[i] - tol > probe_ub[i]) {
-		        return false;
-		      }
-		    }
-		    return true;
-		  };
-
-		  auto probe_solution_feasible_in_child_bounds =
-		      [&](const StrongBranchProbeResult& probe_state,
-		          const Node& child) -> bool {
-		    const auto& x_probe = probe_state.simplex.result.x;
-		    if (x_probe.size() != n || child.lb.size() != n || child.ub.size() != n) {
-		      return false;
-		    }
-		    const double tol =
-		        std::max(1e-9, std::max(opt.lp_tol, opt.int_tol));
-		    for (int i = 0; i < n; ++i) {
-		      const double xi = x_probe[i];
-		      if (!std::isfinite(xi)) return false;
-		      if (std::isfinite(child.lb[i]) && xi < child.lb[i] - tol) return false;
-		      if (std::isfinite(child.ub[i]) && xi > child.ub[i] + tol) return false;
-		    }
-		    return true;
-		  };
-
 	  // ════════════════════════════════════════════════════════════════════════
 	  // Helper: process a single child node (LP solve, pool separation,
 	  // cut generation). Used by both sequential and parallel code paths.
@@ -25562,39 +19847,35 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     branch_obs.inference_count = static_cast<double>(conflict_tightenings);
     auto _t1 = std::chrono::steady_clock::now();
 
-	    const bool probe_lp_matches_child =
-	        probe_lp_state != nullptr && probe_lp_state->available &&
-	        !probe_lp_state->consumed && probe_lp_state->var == branch_var &&
-	        probe_lp_state->is_up == is_up_branch;
-		    const bool probe_success_matches_domain =
+		    const bool probe_lp_matches_child =
+		        probe_lp_state != nullptr && probe_lp_state->available &&
+		        !probe_lp_state->consumed && probe_lp_state->var == branch_var &&
+		        probe_lp_state->is_up == is_up_branch;
+		    const bool probe_same_domain =
 		        probe_lp_matches_child &&
-		        probe_lp_state->failure_type == LPFailureType::Success &&
 		        same_domain_bounds_for_probe(child.lb, child.ub,
 		                                     probe_lp_state->lb,
 		                                     probe_lp_state->ub);
-		    const bool probe_success_subset_domain =
-		        probe_lp_matches_child &&
+		    const bool probe_success_matches_domain =
+		        probe_same_domain &&
 		        probe_lp_state->failure_type == LPFailureType::Success &&
-		        probe_domain_is_subset_of_child_domain(child.lb, child.ub,
-		                                               probe_lp_state->lb,
-		                                               probe_lp_state->ub) &&
-		        probe_solution_feasible_in_child_bounds(*probe_lp_state, child);
+		        (!strict_highs_lp_contract ||
+		         probe_lp_state->simplex.exact_optimal);
 		    const bool probe_cutoff_valid_for_domain =
-		        probe_lp_matches_child &&
+		        probe_same_domain &&
 		        (probe_lp_state->failure_type == LPFailureType::Infeasible ||
 		         probe_lp_state->failure_type == LPFailureType::ObjectiveCutoff);
 		    const bool consume_probe_lp =
-		        probe_success_matches_domain || probe_success_subset_domain ||
-		        probe_cutoff_valid_for_domain;
+		        probe_success_matches_domain || probe_cutoff_valid_for_domain;
 		    if ((opt.verbose || trace_bc_timeline) && probe_lp_matches_child &&
 		        !consume_probe_lp) {
 		      fmt::print(stderr,
 		                 "[B&C-SB-SKIP] depth={} var={} up={} type={} "
-		                 "same_domain={} subset_feas={}\n",
+		                 "same_domain={} exact={}\n",
 		                 child.depth, branch_var, is_up_branch ? 1 : 0,
 		                 lp_failure_type_str(probe_lp_state->failure_type),
-		                 probe_success_matches_domain ? 1 : 0,
-		                 probe_success_subset_domain ? 1 : 0);
+		                 probe_same_domain ? 1 : 0,
+		                 probe_lp_state->simplex.exact_optimal ? 1 : 0);
 		    }
 
 	    // Update standard form with child's bounds. The existing function handles
@@ -25670,18 +19951,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           requested_vendored_highs_lp ? std::max(1e-9, opt.lp_tol)
                                       : opt.int_tol;
       std::vector<int> frac_check;
-      if (fractional_indices(base_lp.vars, child.x_relax,
-                             mip_integrality_tol, frac_check)) {
+	      if (fractional_branchable_indices(child.x_relax, child.lb, child.ub,
+	                                        mip_integrality_tol, frac_check)) {
         return false;
       }
       Eigen::VectorXd x_int = child.x_relax;
-      for (int i = 0; i < n; ++i) {
-        if (!is_integer_type(base_lp.vars[static_cast<std::size_t>(i)])) {
-          continue;
-        }
-        x_int[i] = std::min(child.ub[i],
-                            std::max(child.lb[i], std::round(x_int[i])));
-      }
+	      round_declared_branchables(x_int, child.lb, child.ub);
       const double feas_tol =
           requested_vendored_highs_lp ? std::max(kNodeFeasibilityTol, opt.lp_tol)
                                       : kNodeFeasibilityTol;
@@ -25842,6 +20117,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              child_dual_proof, std::max(1e-9, opt.lp_tol), &node_sf_ref);
 	          if (child_dual_proof_ok) {
 	            child_objective_event_proof = child_dual_proof;
+	            cached_queue_objective_event_proof = child_objective_event_proof;
+	            have_cached_queue_objective_event_proof = true;
+	            cached_queue_objective_event_proof_is_global = false;
+	            cached_queue_objective_event_proof_scope = child.branch_reasons;
 	            cached_queue_dual_proof = child_objective_event_proof;
 	            cached_queue_dual_proof_upper = inc_obj_snapshot;
 	            have_cached_queue_dual_proof = true;
@@ -25881,7 +20160,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          }
 	        }
         if (has_inc_snapshot && std::isfinite(inc_obj_snapshot) &&
-            opt.enable_reduced_cost_proof_cut_resolve &&
+            allow_native_proof_cut_rows &&
             rc_proof_cut_resolve_lps_left > 0 &&
             local_proof_cuts.size() + transformed_frontier_cuts.size() < 8) {
           const int row_budget = std::min<int>(
@@ -25904,20 +20183,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   transformed_frontier_cuts, row_budget);
         }
         node_result = std::move(simplex_res.result);
-        auto child_basis = std::make_shared<SimplexBasis>(std::move(simplex_res.basis));
-        if (child.basis_hint) {
-          child_basis->try_share_indices_from(*child.basis_hint);
-        }
-        child_basis->compact_indices_storage();
-        if (simplex_res.shared_binv) {
-          child_basis->cached_inverse = simplex_res.shared_binv;
-        } else if (simplex_res.basis_inverse.rows() > 0) {
-          child_basis->cached_inverse =
-              std::make_shared<const Eigen::MatrixXd>(std::move(simplex_res.basis_inverse));
-        }
-        child_basis->cached_reduced_costs =
-            std::make_shared<const Eigen::VectorXd>(std::move(simplex_res.reduced_costs));
-	        child.basis_hint = child_basis;
+        const auto node_basis_telemetry =
+            simplex_res.basis.cached_sparse_basis
+                ? get_sparse_basis_factor_telemetry(
+                      simplex_res.basis.cached_sparse_basis)
+                : SparseFactorTelemetry{};
+        const bool have_node_basis_telemetry =
+            static_cast<bool>(simplex_res.basis.cached_sparse_basis);
+        child.basis_hint =
+            persist_bc_node_basis_from_simplex(simplex_res, child.basis_hint);
 	        child.bound = std::max(parent_bound, node_result.stats.objective);
 	        if (!node_lp_from_probe_cache) {
 	          branch_obs.has_gain = true;
@@ -25925,10 +20199,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              std::max(branch_obs.gain,
 	                       std::max(0.0, child.bound - parent_bound));
 	        }
-	        if (simplex_res.basis.cached_sparse_basis) {
+	        if (have_node_basis_telemetry) {
           child.has_live_factor_telemetry = true;
-          child.live_factor_telemetry =
-              get_sparse_basis_factor_telemetry(simplex_res.basis.cached_sparse_basis);
+          child.live_factor_telemetry = node_basis_telemetry;
         } else {
           child.has_live_factor_telemetry = false;
           child.live_factor_telemetry = {};
@@ -26171,8 +20444,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            forbidden, true});
 	      }
 	    }
-	    std::vector<DomainReasonBound> objective_event_domain_targets;
-	    std::vector<DomainReasonBound> direct_domain_targets;
+		    std::vector<DomainReasonBound> objective_event_domain_targets;
+		    std::vector<DomainReasonBound> direct_domain_targets;
 	    if (!rc_direct_domain_targets.empty() ||
 	        !objective_event_domain_targets.empty()) {
 	      direct_domain_targets.reserve(rc_direct_domain_targets.size() +
@@ -26214,18 +20487,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        branch_obs.has_inference = true;
 	        branch_obs.inference_count +=
 	            static_cast<double>(proof_domain_fixed);
-	        std::vector<DomainReasonBound> proof_domain_cert_targets;
-	        proof_domain_cert_targets.reserve(
-	            std::min<std::size_t>(proof_domain_changes.size(), 8));
-	        const int proof_domain_cert_limit =
-	            std::max(1, opt.reduced_cost_conflict_max_per_node);
-	        for (const auto& chg : proof_domain_changes) {
-	          if (static_cast<int>(proof_domain_cert_targets.size()) >=
-	              proof_domain_cert_limit) {
-	            break;
-	          }
-	          const int j = chg.var_idx;
-	          if (j < 0 || j >= n) continue;
+		        std::vector<DomainReasonBound> proof_domain_cert_targets;
+		        proof_domain_cert_targets.reserve(proof_domain_changes.size());
+		        for (const auto& chg : proof_domain_changes) {
+		          const int j = chg.var_idx;
+		          if (j < 0 || j >= n) continue;
 	          const double value =
 	              chg.is_lb ? proof_domain_lb[j] : proof_domain_ub[j];
 	          if (!std::isfinite(value)) continue;
@@ -26290,10 +20556,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        if (child.x_seed.size() == n) {
 	          child.x_seed = clamp_to_bounds(child.x_seed, child.lb, child.ub);
 	        }
-	        for (const auto& explained : proof_domain_cert_targets) {
-	          append_domain_reason_bound(child, explained, n, &root.lb, &root.ub);
-	          add_scoped_target_bound_certificate(child, explained);
-	        }
+		        for (const auto& explained : proof_domain_cert_targets) {
+		          append_domain_reason_bound(child, explained, n, &root.lb, &root.ub);
+		          add_scoped_target_bound_certificate(child, explained);
+		          if (publish_bound_lifting_certificate &&
+		              explained.has_source_conflict_literal &&
+		              !explained.reason.empty()) {
+		            publish_bound_lifting_certificate(
+		                explained, nullptr, nullptr,
+		                "proof_domain_bound_lift");
+		          }
+		        }
 	        if (!proof_domain_cert_targets.empty()) {
 	          out.bc_stats.termination_effective_candidates +=
 	              static_cast<std::uint64_t>(proof_domain_cert_targets.size());
@@ -26378,23 +20651,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          out.bc_stats.rc_proof_resolve_lift_sum += lift;
 	          out.bc_stats.rc_proof_resolve_lift_max =
 	              std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
-	          auto proof_domain_basis =
-	              std::make_shared<SimplexBasis>(std::move(proof_domain_res.basis));
-	          if (child.basis_hint) {
-	            proof_domain_basis->try_share_indices_from(*child.basis_hint);
-	          }
-	          proof_domain_basis->compact_indices_storage();
-	          if (proof_domain_res.shared_binv) {
-	            proof_domain_basis->cached_inverse = proof_domain_res.shared_binv;
-	          } else if (proof_domain_res.basis_inverse.rows() > 0) {
-	            proof_domain_basis->cached_inverse =
-	                std::make_shared<const Eigen::MatrixXd>(
-	                    std::move(proof_domain_res.basis_inverse));
-	          }
-	          proof_domain_basis->cached_reduced_costs =
-	              std::make_shared<const Eigen::VectorXd>(
-	                  std::move(proof_domain_res.reduced_costs));
-	          child.basis_hint = proof_domain_basis;
+	          child.basis_hint =
+	              persist_bc_node_basis_from_simplex(proof_domain_res,
+	                                              child.basis_hint);
 		          if (child.bound > old_bound + 1e-7) {
 		            ++out.bc_stats.rc_fixing_resolve_bound_improvements;
 		            ++out.bc_stats.certificate_domain_bound_improvements;
@@ -26502,8 +20761,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            std::max(1, opt.reduced_cost_conflict_max_per_node));
 	        if (learned_targets > 0) target_dual_proof = fallback_dual_proof;
 	      }
-	      auto learn_objective_event_proof_fixings =
-	          [&](const DualProofRow* proof) -> int {
+	      int objective_event_bound_lifts = 0;
+		      auto learn_objective_event_proof_fixings =
+		          [&](const DualProofRow* proof) -> int {
 	        if (proof == nullptr || !proof->valid || proof->coeff.size() < n ||
 	            !std::isfinite(proof->rhs) ||
 	            objective_propagation.implied_events.empty() ||
@@ -26587,13 +20847,94 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          return a.var_idx == b.var_idx && a.is_lb == b.is_lb &&
 	                 std::abs(a.value - b.value) <= 1e-9;
 	        };
-	        struct Candidate {
-	          DomainReasonBound rb;
-	          double score{0.0};
-	        };
-	        std::vector<Candidate> candidates;
-	        candidates.reserve(
-	            static_cast<std::size_t>(
+			        struct Candidate {
+			          DomainReasonBound rb;
+			          double score{0.0};
+			        };
+			        auto push_objective_event_target =
+		            [&](std::vector<Candidate>& target_candidates,
+		                const DomainReasonBound& raw_target, double score) {
+		          bool duplicate = false;
+		          const std::size_t reason_hash =
+		              conflict_clause_hash(raw_target.reason);
+		          for (const auto& existing : proof_target_bounds) {
+		            if (same_bound(existing.bound, raw_target.bound) &&
+		                conflict_clause_hash(existing.reason) == reason_hash) {
+		              duplicate = true;
+		              break;
+		            }
+		          }
+		          if (!duplicate) {
+		            for (const auto& existing : target_candidates) {
+		              if (same_bound(existing.rb.bound, raw_target.bound) &&
+		                  conflict_clause_hash(existing.rb.reason) == reason_hash) {
+		                duplicate = true;
+		                break;
+		              }
+		            }
+		          }
+		          if (duplicate) return;
+
+		          std::vector<BranchDomainLiteral> cert_clause;
+		          DualProofTargetExplanation cert_explanation;
+		          PoolCut cert_cover;
+		          double cert_margin = 0.0;
+		          const int max_pool_literals = std::max(
+		              std::max(2, opt.reduced_cost_conflict_cut_max_literals),
+		              opt.reduced_cost_conflict_pool_max_literals);
+		          if (!build_dual_proof_target_bound_conflict_clause(
+		                  base_lp.vars, root.lb, root.ub, child.x_relax,
+		                  opt.int_tol, child.branch_reasons,
+		                  child.domain_reason_bounds, &child.local_domain_trail,
+		                  &child.local_branch_positions, raw_target,
+		                  max_pool_literals, cert_clause, &cert_margin,
+		                  &cert_cover, proof, &cert_explanation, nullptr,
+		                  priority_dual_proof)) {
+		            return;
+		          }
+		          if (!cert_explanation.valid || cert_explanation.cutoff_conflict) {
+		            return;
+		          }
+		          DomainReasonBound explained = raw_target;
+		          explained.bound = cert_explanation.has_proved_target_bound
+		                                ? cert_explanation.proved_target_bound
+		                                : raw_target.bound;
+		          explained.reason = cert_explanation.resolved_frontier;
+		          explained.source_conflict_literal =
+		              cert_explanation.flipped_target;
+		          explained.has_source_conflict_literal = true;
+		          const int published_reconvergence_bound =
+		              publish_bound_lifting_certificate(
+		                  explained, nullptr, nullptr,
+		                  "objective_event_reconvergence_bound_lift");
+		          if (published_reconvergence_bound > 0) {
+		            objective_event_bound_lifts +=
+		                published_reconvergence_bound;
+		          }
+			          target_candidates.push_back(Candidate{std::move(explained), score});
+			        };
+		        auto duplicate_candidate_bound =
+		            [&](const std::vector<Candidate>& target_candidates,
+		                const DomainReasonBound& raw_target) {
+		          const std::size_t reason_hash =
+		              conflict_clause_hash(raw_target.reason);
+		          for (const auto& existing : proof_target_bounds) {
+		            if (same_bound(existing.bound, raw_target.bound) &&
+		                conflict_clause_hash(existing.reason) == reason_hash) {
+		              return true;
+		            }
+		          }
+		          for (const auto& existing : target_candidates) {
+		            if (same_bound(existing.rb.bound, raw_target.bound) &&
+		                conflict_clause_hash(existing.rb.reason) == reason_hash) {
+		              return true;
+		            }
+		          }
+		          return false;
+		        };
+			        std::vector<Candidate> candidates;
+			        candidates.reserve(
+			            static_cast<std::size_t>(
 	                std::max(1, opt.reduced_cost_conflict_max_per_node)));
 	        std::uint64_t proof_candidates = 0;
 	        std::uint64_t skip_coeff = 0;
@@ -26625,16 +20966,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            ++out.bc_stats.termination_effective_skip_no_lp_or_queue_hit;
 	            return;
 	          }
-	          struct AggregateProofEvent {
-	            double proof_delta{0.0};
-	            double objective_delta{0.0};
-	            std::unordered_map<int, double> best_by_target;
-	            std::vector<BranchDomainLiteral> reason;
-	          };
-	          AggregateProofEvent aggregate;
-	          auto add_reason_literal =
-	              [](std::vector<BranchDomainLiteral>& reason,
-	                 const BranchDomainLiteral& literal) {
+		          struct AggregateProofEvent {
+		            double proof_delta{0.0};
+		            double objective_delta{0.0};
+		            std::unordered_map<int, double> best_by_target;
+		            std::unordered_map<int, DomainReasonBound> best_target_bound;
+		            std::vector<BranchDomainLiteral> reason;
+		          };
+		          AggregateProofEvent aggregate;
+		          auto add_reason_literal =
+		              [](std::vector<BranchDomainLiteral>& reason,
+		                 const BranchDomainLiteral& literal) {
 	            const auto found = std::find_if(
 	                reason.begin(), reason.end(),
 	                [&](const BranchDomainLiteral& r) {
@@ -26710,55 +21052,88 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                inactive = true;
 	                break;
 	              }
-	              active_reason.push_back(literal_reason(lit));
-	            }
-	            if (inactive || missing < 0) continue;
-	            auto [best_it, inserted] =
-	                aggregate.best_by_target.emplace(target, proof_delta);
-	            if (inserted) {
-	              aggregate.proof_delta += proof_delta;
-	              aggregate.objective_delta += std::max(0.0, objective_delta);
-	              for (const BranchDomainLiteral& r : active_reason) {
-	                add_reason_literal(aggregate.reason, r);
-	              }
-	            } else if (proof_delta > best_it->second + 1e-9) {
-	              aggregate.proof_delta += proof_delta - best_it->second;
-	              aggregate.objective_delta += std::max(0.0, objective_delta);
-	              best_it->second = proof_delta;
-	              for (const BranchDomainLiteral& r : active_reason) {
-	                add_reason_literal(aggregate.reason, r);
-	              }
+		              active_reason.push_back(literal_reason(lit));
+		            }
+		            if (inactive || missing < 0) continue;
+		            DomainReasonBound event_target{
+		                BranchDomainLiteral{target, event.target_bound,
+		                                    event.target_is_lower_bound},
+		                active_reason,
+		                child.local_domain_trail.empty()
+		                    ? static_cast<int>(child.branch_reasons.size() +
+		                                       child.domain_reason_bounds.size() +
+		                                       aggregate.best_by_target.size())
+		                    : static_cast<int>(child.local_domain_trail.size() +
+		                                       aggregate.best_by_target.size()),
+		                child.depth,
+		                event.target_is_lower_bound
+		                    ? BranchDomainLiteral{
+		                          target,
+		                          is_integer_type(base_lp.vars[
+		                              static_cast<std::size_t>(target)])
+		                              ? std::ceil(event.target_bound - tol) - 1.0
+		                              : event.target_bound -
+		                                    std::max(1e-7, 10.0 * tol),
+		                          false}
+		                    : BranchDomainLiteral{
+		                          target,
+		                          is_integer_type(base_lp.vars[
+		                              static_cast<std::size_t>(target)])
+		                              ? std::floor(event.target_bound + tol) + 1.0
+		                              : event.target_bound +
+		                                    std::max(1e-7, 10.0 * tol),
+		                          true},
+		                true};
+		            auto [best_it, inserted] =
+		                aggregate.best_by_target.emplace(target, proof_delta);
+		            if (inserted) {
+		              aggregate.proof_delta += proof_delta;
+		              aggregate.objective_delta += std::max(0.0, objective_delta);
+		              aggregate.best_target_bound.emplace(target,
+		                                                  std::move(event_target));
+		              for (const BranchDomainLiteral& r : active_reason) {
+		                add_reason_literal(aggregate.reason, r);
+		              }
+		            } else if (proof_delta > best_it->second + 1e-9) {
+		              aggregate.proof_delta += proof_delta - best_it->second;
+		              aggregate.objective_delta += std::max(0.0, objective_delta);
+		              best_it->second = proof_delta;
+		              aggregate.best_target_bound[target] =
+		                  std::move(event_target);
+		              for (const BranchDomainLiteral& r : active_reason) {
+		                add_reason_literal(aggregate.reason, r);
+		              }
 	            }
 	          }
-	          if (!(aggregate.proof_delta > 1e-9)) return;
-	          ++proof_candidates;
-	          if (!(node_proof_activity + aggregate.proof_delta >
-	                proof_budget + proof_tol)) {
-	            ++skip_budget;
-	            return;
-	          }
-	          bool duplicate = false;
-	          for (const auto& existing : proof_target_bounds) {
-	            if (same_bound(existing.bound, fixing) &&
-	                conflict_clause_hash(existing.reason) ==
-	                    conflict_clause_hash(aggregate.reason)) {
-	              duplicate = true;
-	              break;
-	            }
-	          }
-	          if (duplicate) return;
-	          const double score =
-	              aggregate.proof_delta + 1e-3 * aggregate.objective_delta;
-	          candidates.push_back(Candidate{
-	              DomainReasonBound{
-	                  fixing, std::move(aggregate.reason),
-	                  static_cast<int>(child.branch_reasons.size() +
-	                                   child.domain_reason_bounds.size() +
-	                                   proof_target_bounds.size() +
-	                                   candidates.size()),
-	                  child.depth, forbidden, true},
-	              score});
-	        };
+		          if (!(aggregate.proof_delta > 1e-9)) return;
+		          ++proof_candidates;
+			          const double score =
+			              aggregate.proof_delta + 1e-3 * aggregate.objective_delta;
+		          for (const auto& [target, raw_event_target] :
+		               aggregate.best_target_bound) {
+		            (void)target;
+		            push_objective_event_target(candidates, raw_event_target, score);
+		          }
+			          if (!(node_proof_activity + aggregate.proof_delta >
+			                proof_budget + proof_tol)) {
+			            ++skip_budget;
+			            return;
+			          }
+		          DomainReasonBound fixing_target{
+		              fixing, aggregate.reason,
+		              child.local_domain_trail.empty()
+		                  ? static_cast<int>(child.branch_reasons.size() +
+		                                     child.domain_reason_bounds.size() +
+		                                     proof_target_bounds.size() +
+		                                     candidates.size())
+		                  : static_cast<int>(child.local_domain_trail.size() +
+		                                     proof_target_bounds.size() +
+		                                     candidates.size()),
+		              child.depth, forbidden, true};
+		          if (!duplicate_candidate_bound(candidates, fixing_target)) {
+		            candidates.push_back(Candidate{std::move(fixing_target), score});
+		          }
+		        };
 	        for (int col = 0; col < n; ++col) {
 	          if (base_lp.vars[static_cast<std::size_t>(col)].type !=
 	              VarType::Binary) {
@@ -26807,6 +21182,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        out.bc_stats.objective_implied_event_tightenings +=
 	            static_cast<std::uint64_t>(objective_proof_fixings);
 	      }
+	      if (objective_event_bound_lifts > 0 && !node_queue.empty()) {
+	        learned_targets += objective_event_bound_lifts;
+	        const int queue_pruned = prune_queue_after_domain_learning(
+	            /*force_frontier_drain=*/true,
+	            "objective_event_bound_lift");
+	        if (queue_pruned > 0) {
+	          out.bc_stats.rc_conflict_queue_prunes +=
+	              static_cast<std::uint64_t>(queue_pruned);
+	        }
+	        forced_certificate_queue_passes =
+	            std::max(forced_certificate_queue_passes, 1);
+	      }
 	      const int local_trail_bound_lifts =
 	          publish_local_trail_bound_lifting_certificates(
 	              child, target_dual_proof, priority_dual_proof,
@@ -26836,8 +21223,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      if (!proof_target_bounds.empty()) {
 	        has_new_proof_target_bounds = true;
 	        bool target_tightened = false;
-	        const bool allow_target_tightening =
-	            rc_proof_cut_resolve_lps_left > 0;
+		        const bool allow_target_tightening =
+		            allow_certificate_domain_replay ||
+                    rc_proof_cut_resolve_lps_left > 0;
 	        auto active_literal = [&](const BranchDomainLiteral& lit) {
 	          if (lit.var_idx < 0 || lit.var_idx >= n) return false;
 	          const double tol = std::max(1e-9, opt.int_tol);
@@ -26859,9 +21247,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              return;
 		            }
 		          }
-		          append_domain_reason_bound(child, rb, n, &root.lb, &root.ub);
-		          add_scoped_target_bound_certificate(child, rb);
-		          if (rb.reason.size() == 1) {
+			          append_domain_reason_bound(child, rb, n, &root.lb, &root.ub);
+			          add_scoped_target_bound_certificate(child, rb);
+			          if (publish_bound_lifting_certificate &&
+			              rb.has_source_conflict_literal &&
+			              !rb.reason.empty()) {
+			            publish_bound_lifting_certificate(
+			                rb, nullptr, nullptr,
+			                "proof_target_bound_lift");
+			          }
+			          if (rb.reason.size() == 1) {
 	            const auto& trig = rb.reason.front();
 	            const bool trig_one =
 	                trig.var_idx >= 0 && trig.var_idx < n &&
@@ -26922,7 +21317,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            }
 	          }
 	        }
-	        if (target_tightened && rc_proof_cut_resolve_lps_left > 0) {
+		        if (target_tightened &&
+                    (allow_certificate_domain_replay ||
+                     rc_proof_cut_resolve_lps_left > 0)) {
 	          std::vector<BoundChangeInfo> target_prop_changes;
 	          if (!propagate_local_binary_implications(child, target_prop_changes) ||
 	              !propagate_scoped_conflict_objects(child, target_prop_changes)) {
@@ -26967,7 +21364,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          target_resolve_opt.allow_cold_start = true;
 	          auto target_res = solve_lp_from_sf(node_sf_ref, target_resolve_opt,
 	                                             child.basis_hint.get());
-	          --rc_proof_cut_resolve_lps_left;
+		          if (rc_proof_cut_resolve_lps_left > 0) {
+		            --rc_proof_cut_resolve_lps_left;
+		          }
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
 	          const auto target_type = classify_lp_result(target_res, n);
@@ -26998,23 +21397,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              out.bc_stats.rc_proof_resolve_lift_max =
 		                  std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
 		            }
-		            auto target_basis =
-	                std::make_shared<SimplexBasis>(std::move(target_res.basis));
-	            if (child.basis_hint) {
-	              target_basis->try_share_indices_from(*child.basis_hint);
-	            }
-	            target_basis->compact_indices_storage();
-	            if (target_res.shared_binv) {
-	              target_basis->cached_inverse = target_res.shared_binv;
-	            } else if (target_res.basis_inverse.rows() > 0) {
-	              target_basis->cached_inverse =
-	                  std::make_shared<const Eigen::MatrixXd>(
-	                      std::move(target_res.basis_inverse));
-	            }
-	            target_basis->cached_reduced_costs =
-	                std::make_shared<const Eigen::VectorXd>(
-	                    std::move(target_res.reduced_costs));
-	            child.basis_hint = target_basis;
+		            child.basis_hint =
+		                persist_bc_node_basis_from_simplex(target_res,
+		                                                child.basis_hint);
 		            if (child.bound > old_bound + 1e-7) {
 		              ++out.bc_stats.rc_fixing_resolve_bound_improvements;
 		              branch_obs.has_gain = true;
@@ -27061,7 +21446,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        branch_obs.inference_count += 1.0;
 	        branch_obs.conflict_score += 1.0;
 	      }
-	      if (learned_scoped_reconvergence && rc_proof_cut_resolve_lps_left > 0) {
+		      if (learned_scoped_reconvergence &&
+                  (allow_certificate_domain_replay ||
+                   rc_proof_cut_resolve_lps_left > 0)) {
 	        std::vector<BoundChangeInfo> scoped_post_changes;
 	        if (!explain_active_scoped_reason_bounds(child, scoped_post_changes)) {
 	          branch_obs.cutoff_count = 1;
@@ -27079,7 +21466,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          scoped_resolve_opt.allow_cold_start = true;
 	          auto scoped_res = solve_lp_from_sf(node_sf_ref, scoped_resolve_opt,
 	                                             child.basis_hint.get());
-	          --rc_proof_cut_resolve_lps_left;
+		          if (rc_proof_cut_resolve_lps_left > 0) {
+		            --rc_proof_cut_resolve_lps_left;
+		          }
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
 	          const auto scoped_type = classify_lp_result(scoped_res, n);
@@ -27110,23 +21499,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              out.bc_stats.rc_proof_resolve_lift_max =
 		                  std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
 		            }
-		            auto scoped_basis =
-	                std::make_shared<SimplexBasis>(std::move(scoped_res.basis));
-	            if (child.basis_hint) {
-	              scoped_basis->try_share_indices_from(*child.basis_hint);
-	            }
-	            scoped_basis->compact_indices_storage();
-	            if (scoped_res.shared_binv) {
-	              scoped_basis->cached_inverse = scoped_res.shared_binv;
-	            } else if (scoped_res.basis_inverse.rows() > 0) {
-	              scoped_basis->cached_inverse =
-	                  std::make_shared<const Eigen::MatrixXd>(
-	                      std::move(scoped_res.basis_inverse));
-	            }
-	            scoped_basis->cached_reduced_costs =
-	                std::make_shared<const Eigen::VectorXd>(
-	                    std::move(scoped_res.reduced_costs));
-	            child.basis_hint = scoped_basis;
+		            child.basis_hint =
+		                persist_bc_node_basis_from_simplex(scoped_res,
+		                                                child.basis_hint);
 		            if (child.bound > old_bound + 1e-7) {
 		              ++out.bc_stats.rc_fixing_resolve_bound_improvements;
 		              branch_obs.has_gain = true;
@@ -27156,8 +21531,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 	    }
 
-		    if (opt.enable_reduced_cost_proof_cut_resolve &&
-		        rc_proof_cut_resolve_lps_left > 0 &&
+			    if (allow_native_proof_cut_rows &&
+			        rc_proof_cut_resolve_lps_left > 0 &&
 		        child.x_relax.size() == n &&
 		        local_proof_cuts.size() < 8) {
 		      const int scoped_rows = separate_active_scoped_conflict_rows(
@@ -27169,8 +21544,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		      }
 		    }
 
-		    if (opt.enable_graph_implied_bound_cuts &&
-		        opt.enable_reduced_cost_proof_cut_resolve &&
+			    if (opt.enable_graph_implied_bound_cuts &&
+			        allow_native_proof_cut_rows &&
 	        !implication_graph.empty() &&
         child.x_relax.size() == n &&
         local_proof_cuts.size() < 8) {
@@ -27434,8 +21809,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
       }
       bool rc_resolved_this_node = false;
-      if (opt.enable_reduced_cost_proof_cut_resolve &&
-          rc_proof_cut_resolve_lps_left > 0 &&
+	      if (allow_native_proof_cut_rows &&
+	          rc_proof_cut_resolve_lps_left > 0 &&
           (new_cuts.size() > rc_proof_cut_begin ||
            !local_proof_cuts.empty() ||
            !transformed_frontier_cuts.empty())) {
@@ -27586,20 +21961,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           child.x_relax = clamp_to_bounds(rc_res.result.x, child.lb, child.ub);
           child.x_seed = child.x_relax;
           child.bound = std::max(child.bound, rc_res.result.stats.objective);
-          auto rc_basis = std::make_shared<SimplexBasis>(std::move(rc_res.basis));
-          if (child.basis_hint) {
-            rc_basis->try_share_indices_from(*child.basis_hint);
-          }
-          rc_basis->compact_indices_storage();
-          if (rc_res.shared_binv) {
-            rc_basis->cached_inverse = rc_res.shared_binv;
-          } else if (rc_res.basis_inverse.rows() > 0) {
-            rc_basis->cached_inverse =
-                std::make_shared<const Eigen::MatrixXd>(std::move(rc_res.basis_inverse));
-          }
-          rc_basis->cached_reduced_costs =
-              std::make_shared<const Eigen::VectorXd>(std::move(rc_res.reduced_costs));
-          child.basis_hint = rc_basis;
+          child.basis_hint =
+              persist_bc_node_basis_from_simplex(rc_res, child.basis_hint);
           if (child.bound > old_bound + 1e-7) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
             branch_obs.has_gain = true;
@@ -27752,7 +22115,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     // Try rounding heuristic.  Always attempt — the satisfies_with_bounds
     // check is O(nnz) and cheap relative to LP solves.
-    {
+    if (!strict_highs_lp_contract) {
       const Eigen::VectorXd xr = project_integer_solution(base_lp.vars, child.x_relax,
                                                           child.lb, child.ub);
       if (satisfies_with_bounds(base_lp, xr, child.lb, child.ub, kNodeFeasibilityTol)) {
@@ -27896,7 +22259,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
 
     // Guided rounding from solution pool (sequential path).
-    if (solution_pool.size() >= 2) {
+    if (!strict_highs_lp_contract && solution_pool.size() >= 2) {
       Eigen::VectorXd xg = solution_pool.guided_rounding(child.x_relax, base_lp.vars);
       xg = clamp_to_bounds(xg, child.lb, child.ub);
       if (satisfies_with_bounds(base_lp, xg, child.lb, child.ub, kNodeFeasibilityTol)) {
@@ -28080,31 +22443,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   out.bc_stats.parallel_schedule_reason =
       (num_threads > 1) ? "enabled" : parallel_schedule_reason;
 
-  // Root timing / diagnostics (shared by both paths).
-  {
-    auto t_now = std::chrono::steady_clock::now();
-    double t_root_lp = std::chrono::duration<double, std::milli>(t_root1 - t_root0).count();
-    double t_cuts = std::chrono::duration<double, std::milli>(t_cuts_done - t_root1).count();
-    double t_pump = std::chrono::duration<double, std::milli>(t_pump_done - t_cuts_done).count();
-    double t_prog = std::chrono::duration<double, std::milli>(t_prog_done - t_pump_done).count();
-    double t_dive = std::chrono::duration<double, std::milli>(t_dive_done - t_prog_done).count();
-    double t_lns = std::chrono::duration<double, std::milli>(t_lns_done - t_dive_done).count();
-    double t_rest = std::chrono::duration<double, std::milli>(t_now - t_lns_done).count();
-    double t_total = std::chrono::duration<double, std::milli>(t_now - t0).count();
-    // Always print root phase timing for diagnostics
-    fprintf(stderr, "[ROOT-PHASES] lp=%.0f cuts=%.0f pump=%.0f prog=%.0f dive=%.0f lns=%.0f rest=%.0f total=%.0fms inc=%d\n",
-              t_root_lp, t_cuts, t_pump, t_prog, t_dive, t_lns, t_rest, t_total, has_incumbent ? 1 : 0);
-    if (trace_root_subsolves) {
-      fprintf(stderr, "[ROOT-SUBSOLVES] frac_bin=%d incumbent_source=%s\n",
-              root_frac_bin_count, root_incumbent_source.c_str());
-      for (const auto& entry : root_subsolve_traces) {
-        fprintf(stderr,
-                "[ROOT-SUBSOLVE] %s calls=%d ok=%d inc=%d ms=%.0f\n",
-                entry.name.c_str(), entry.calls, entry.successes,
-                entry.incumbent_hits, entry.total_ms);
-      }
-    }
-  }
+  print_root_phase_timing(t0, t_root0, t_root1, t_cuts_done, t_pump_done,
+                          t_prog_done, t_dive_done, t_lns_done, has_incumbent,
+                          trace_root_subsolves, root_subsolve_traces,
+                          root_frac_bin_count, root_incumbent_source);
 	  if (opt.verbose) {
 	    const double root_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	    fmt::print(stderr, "[B&C] root done: {:.3f}s inc={} root_bound={:.2f}\n",
@@ -28140,13 +22482,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // For concurrent mode, also pull tree-found incumbent from SharedIncumbent.
   bool skip_tree = false;
 	  if (concurrent_tree_launched && cts && cts->shared_inc.has()) {
-	    double tree_obj = cts->shared_inc.get_obj();
-	    if (!has_incumbent || tree_obj < incumbent_obj) {
-	      Eigen::VectorXd tree_x = cts->shared_inc.get_x();
+	    Eigen::VectorXd tree_x = cts->shared_inc.get_x();
+	    const double tree_actual_obj =
+	        objective_value(base_lp.c, tree_x, base_lp.sense);
+	    if (std::isfinite(tree_actual_obj) &&
+	        (!has_incumbent || tree_actual_obj + 1e-9 < incumbent_obj)) {
 	      if (validate_root_candidate_for_proof("shared_tree_incumbent",
 	                                            tree_x)) {
 	        has_incumbent = true;
-	        incumbent_obj = objective_value(base_lp.c, tree_x, base_lp.sense);
+	        incumbent_obj = tree_actual_obj;
 	        incumbent_x = std::move(tree_x);
 	        incumbent_proof_validated = true;
 	        incumbent_proof_validated_obj = incumbent_obj;
@@ -28256,11 +22600,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     const bool proof_tail_mode_now = proof_tail_queue_mode_active();
 	    if (proof_tail_mode_now && !proof_tail_mode_was_active) {
-	      forced_certificate_queue_passes =
-	          std::max(forced_certificate_queue_passes, 1);
-	      const int tail_pruned = consume_cached_dual_proof_after_incumbent();
-		      const int replay_pruned = prune_queue_after_domain_learning(
-		          /*force_frontier_drain=*/true, "proof_tail_activate");
+      const bool cached_proof_already_consumed =
+          cached_dual_proof_consumed_for_current_epoch();
+      if (!cached_proof_already_consumed) {
+        forced_certificate_queue_passes =
+            std::max(forced_certificate_queue_passes, 1);
+      }
+      const int tail_pruned =
+          cached_proof_already_consumed
+              ? 0
+              : consume_cached_dual_proof_after_incumbent();
+      const bool has_new_replay_learning =
+          current_domain_learning_epoch() > last_queue_domain_replay_epoch;
+		      const int replay_pruned = has_new_replay_learning
+              ? prune_queue_after_domain_learning(
+		            /*force_frontier_drain=*/true, "proof_tail_activate")
+              : 0;
           const int gap_pruned =
               prune_queue_by_gap_optimality_limit("proof_tail_activate");
 	      refresh_queue_lower_bound();
@@ -28328,12 +22683,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     const bool late_replay_has_new_learning =
         cur.lp_refresh_needed ||
         cur.domain_learning_epoch < current_domain_learning_epoch();
-		    if ((cur.lp_refresh_needed || !conflict_pool.empty() ||
-		         !implication_graph.empty() ||
-		         !global_bound_lifting_certificates.empty()) &&
-		        opt.enable_reduced_cost_proof_cut_resolve &&
-		        rc_proof_cut_resolve_lps_left > 0 &&
-		        late_replay_has_new_learning) {
+			    if ((cur.lp_refresh_needed || !conflict_pool.empty() ||
+			         !implication_graph.empty() ||
+			         !global_bound_lifting_certificates.empty()) &&
+			        allow_certificate_domain_replay &&
+			        late_replay_has_new_learning) {
 	      Node replay_node = cur;
 	      std::vector<BoundChangeInfo> late_prop_changes;
 		      std::vector<BranchDomainLiteral> late_conflict;
@@ -28457,15 +22811,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              cur.local_conflict_clauses.size() ||
 	          replay_node.local_binary_implications.size() !=
 	              cur.local_binary_implications.size();
-	      if ((late_tightenings > 0 || !late_prop_changes.empty() ||
-	           cur.lp_refresh_needed) &&
-	          bounds_consistent(replay_node.lb, replay_node.ub)) {
+		      if ((late_tightenings > 0 || !late_prop_changes.empty() ||
+		           cur.lp_refresh_needed) &&
+		          bounds_consistent(replay_node.lb, replay_node.ub)) {
 	        update_standard_form_bounds(node_sf, base_lp, replay_node.lb,
 	                                    replay_node.ub);
 	        SimplexOptions late_opt = simplex_opt;
 	        late_opt.allow_cold_start = true;
 	        auto late_res = solve_lp_from_sf(node_sf, late_opt, cur.basis_hint.get());
-        --rc_proof_cut_resolve_lps_left;
+	        if (rc_proof_cut_resolve_lps_left > 0) {
+	          --rc_proof_cut_resolve_lps_left;
+	        }
         ++out.bc_stats.lp_solves;
         ++out.bc_stats.rc_fixing_resolve_lps;
         const auto late_type = classify_lp_result(late_res, n);
@@ -28493,20 +22849,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            out.bc_stats.rc_proof_resolve_lift_max =
 	                std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
 	          }
-	          auto late_basis = std::make_shared<SimplexBasis>(std::move(late_res.basis));
-          if (cur.basis_hint) {
-            late_basis->try_share_indices_from(*cur.basis_hint);
-          }
-          late_basis->compact_indices_storage();
-          if (late_res.shared_binv) {
-            late_basis->cached_inverse = late_res.shared_binv;
-          } else if (late_res.basis_inverse.rows() > 0) {
-            late_basis->cached_inverse =
-                std::make_shared<const Eigen::MatrixXd>(std::move(late_res.basis_inverse));
-          }
-          late_basis->cached_reduced_costs =
-              std::make_shared<const Eigen::VectorXd>(std::move(late_res.reduced_costs));
-          cur.basis_hint = late_basis;
+	          cur.basis_hint =
+	              persist_bc_node_basis_from_simplex(late_res, cur.basis_hint);
           if (cur.bound > old_bound + 1e-7) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
           }
@@ -28521,15 +22865,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
       cur.domain_learning_epoch = current_domain_learning_epoch();
       cur.lp_refresh_needed = false;
-	    } else if ((!conflict_pool.empty() || !implication_graph.empty() ||
-	                !global_bound_lifting_certificates.empty()) &&
-	               opt.enable_reduced_cost_proof_cut_resolve &&
-	               rc_proof_cut_resolve_lps_left > 0 &&
-	               !late_replay_has_new_learning) {
-      ++out.bc_stats.late_replay_skipped_no_new_learning;
-    }
+		    } else if ((!conflict_pool.empty() || !implication_graph.empty() ||
+		                !global_bound_lifting_certificates.empty()) &&
+		               allow_certificate_domain_replay &&
+		               !late_replay_has_new_learning) {
+	      ++out.bc_stats.late_replay_skipped_no_new_learning;
+	    }
 
-    if (opt.enable_reduced_cost_proof_cut_resolve &&
+    if (allow_native_proof_cut_rows &&
         rc_proof_cut_resolve_lps_left > 0 &&
         cut_pool.size() > 0) {
       auto violated = cut_pool.find_violated(cur.x_relax, 1e-4);
@@ -28588,7 +22931,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
 
     std::vector<int> frac;
-	    if (!fractional_indices(base_lp.vars, cur.x_relax, opt.int_tol, frac)) {
+		    if (!fractional_branchable_indices(cur.x_relax, cur.lb, cur.ub,
+		                                      opt.int_tol, frac)) {
 	      if (satisfies_with_bounds(base_lp, cur.x_relax, cur.lb, cur.ub, 1e-6)) {
 	        const double obj = objective_value(base_lp.c, cur.x_relax, base_lp.sense);
 	        if (adopt_tree_incumbent("tree_integral_node", cur.x_relax, obj,
@@ -28616,6 +22960,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      int local_lp_solves = 0;
 	      bool incumbent_changed_by_probe = false;
 	      if (opt.branching == BranchingStrategy::Pseudocost) {
+	        if (proof_tail_mode_now && has_incumbent) {
+	          j = choose_branch_var(opt, frac, cur.x_relax, pc, branch_priority);
+	        } else
         // When using IPM for node solves, skip expensive simplex probing
         // and use IPM-based probing or pure pseudocost instead.
         if (use_ipm_nodes && ipm_node_solver) {
@@ -28709,7 +23056,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                  std::min(cur.depth == 0 ? eff_max : std::max(2, eff_max / 2),
 	                           static_cast<int>(unreliable.size()));
 	              probe_results.reserve(static_cast<std::size_t>(2 * probes));
-	              StandardFormLP probe_sf = ensure_base_sf();
 
 	              auto update_pc_from_probe =
 	                  [&](const StrongBranchProbeResult& pr) {
@@ -28745,22 +23091,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                Eigen::VectorXd x_probe =
 	                    clamp_to_bounds(pr.simplex.result.x, pr.lb, pr.ub);
 	                std::vector<int> probe_frac;
-	                if (fractional_indices(base_lp.vars, x_probe,
-	                                       requested_vendored_highs_lp
-	                                           ? std::max(1e-9, opt.lp_tol)
-	                                           : opt.int_tol,
-	                                       probe_frac)) {
+		                if (fractional_branchable_indices(
+		                        x_probe, pr.lb, pr.ub,
+		                        requested_vendored_highs_lp
+		                            ? std::max(1e-9, opt.lp_tol)
+		                            : opt.int_tol,
+		                        probe_frac)) {
 	                  return;
 	                }
-	                for (int ii = 0; ii < n; ++ii) {
-	                  if (!is_integer_type(
-	                          base_lp.vars[static_cast<std::size_t>(ii)])) {
-	                    continue;
-	                  }
-	                  x_probe[ii] =
-	                      std::min(pr.ub[ii],
-	                               std::max(pr.lb[ii], std::round(x_probe[ii])));
-	                }
+		                round_declared_branchables(x_probe, pr.lb, pr.ub);
 	                if (!satisfies_with_bounds(
 	                        base_lp, x_probe, pr.lb, pr.ub,
 	                        requested_vendored_highs_lp
@@ -28797,7 +23136,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                  probe_results.push_back(std::move(pr));
 	                  return;
 	                }
-	                update_standard_form_bounds(probe_sf, base_lp, plb, pub);
+		                StandardFormLP probe_sf = tree_base_sf;
+		                update_standard_form_bounds(probe_sf, base_lp, plb, pub);
 		                pr.simplex = seq_dispatcher.solve(
 		                    probe_sf, cur.basis_hint.get(), SolveContext::Probing,
 		                    seq_node_id++, cur.depth + 1, n, pr.deferred);
@@ -28938,11 +23278,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    bool down_valid, up_valid;
 	    bool incumbent_changed_this_node = false;
 		    {
-			      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-	          process_single_child(child_down, false, j, cur.bound,
-	                                node_sf, cut_pool, incumbent_obj, has_incumbent,
-	                                &retained_down_probe);
+				      StandardFormLP child_down_sf = tree_base_sf;
+				      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
+		          process_single_child(child_down, false, j, cur.bound,
+		                                child_down_sf, cut_pool, incumbent_obj, has_incumbent,
+		                                &retained_down_probe);
       down_valid = valid;
+      if (trace_bc_timeline) {
+        fmt::print(stderr,
+                   "[B&C-CHILD] dir=down depth={} var={} x={:.10g} "
+                   "valid={} bound={:.10g} sols={} lps={} lb={:.10g} "
+                   "ub={:.10g}\n",
+                   child_down.depth, j, xj, down_valid ? 1 : 0,
+                   child_down.bound, sols.size(), lps, child_down.lb[j],
+                   child_down.ub[j]);
+      }
       out.bc_stats.lp_solves += lps;
       out.bc_stats.cuts_added += ca;
       out.bc_stats.pool_cuts_separated += ps;
@@ -28966,11 +23316,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
 
     {
-	      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
-	          process_single_child(child_up, true, j, cur.bound,
-	                                node_sf, cut_pool, incumbent_obj, has_incumbent,
-	                                &retained_up_probe);
+		      StandardFormLP child_up_sf = tree_base_sf;
+		      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
+		          process_single_child(child_up, true, j, cur.bound,
+		                                child_up_sf, cut_pool, incumbent_obj, has_incumbent,
+		                                &retained_up_probe);
       up_valid = valid;
+      if (trace_bc_timeline) {
+        fmt::print(stderr,
+                   "[B&C-CHILD] dir=up depth={} var={} x={:.10g} "
+                   "valid={} bound={:.10g} sols={} lps={} lb={:.10g} "
+                   "ub={:.10g}\n",
+                   child_up.depth, j, xj, up_valid ? 1 : 0,
+                   child_up.bound, sols.size(), lps, child_up.lb[j],
+                   child_up.ub[j]);
+      }
       out.bc_stats.lp_solves += lps;
       out.bc_stats.cuts_added += ca;
       out.bc_stats.pool_cuts_separated += ps;
@@ -29038,6 +23398,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     replay_child_domain_before_queue(child_down, down_valid,
                                      "down_child_queue");
     replay_child_domain_before_queue(child_up, up_valid, "up_child_queue");
+
+    if (trace_bc_timeline) {
+      fmt::print(stderr,
+                 "[B&C-CHILD-FINAL] var={} down_valid={} up_valid={} "
+                 "down_bound={:.10g} up_bound={:.10g} inc={:.10g} "
+                 "qsize={}\n",
+                 j, down_valid ? 1 : 0, up_valid ? 1 : 0,
+                 child_down.bound, child_up.bound,
+                 has_incumbent ? incumbent_obj : kInf, node_queue.size());
+    }
 
     if (down_valid) {
       child_down.estimate = compute_node_estimate(base_lp.vars, child_down.x_relax,
@@ -29212,8 +23582,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   if (!concurrent_tree_launched) {
     // Late launch: create CTS and launch threads (same logic as early launch).
     const int num_threads_late = std::max(1, resolve_num_threads(opt));
-    cts = std::make_unique<ConcurrentTreeState>(opt, t0, n);
-    if (out.bc_stats.cuts_added > 0) {
+	    cts = std::make_unique<ConcurrentTreeState>(opt, t0, n);
+    cts->shared_queue.configure_domain_signature(
+        declared_branchable_cols, root.lb, root.ub, std::max(1e-9, opt.int_tol));
+	    if (out.bc_stats.cuts_added > 0) {
       const int orig_rows = static_cast<int>(pre_cut_root_lp.A.rows());
       const int total_rows = static_cast<int>(base_lp.A.rows());
       Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_late = base_lp.A;
@@ -29249,6 +23621,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     cts->par_simplex_opt.incumbent_check_interval = 0;
     cts->par_simplex_opt.allow_vendored_highs_sf_backend =
         requested_vendored_highs_lp;
+    cts->par_simplex_opt.require_vendored_highs_sf_backend =
+        requested_vendored_highs_lp;
     cts->par_simplex_opt.factor_backend =
         simplex_factor_backend_from_id(opt.simplex_factor_backend);
     apply_bc_first_class_simplex_state(cts->par_simplex_opt,
@@ -29277,9 +23651,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           tid, role,
           std::ref(cts->shared_queue), std::ref(cts->cut_req_queue),
           std::ref(cts->shared_cp), std::ref(cts->shared_conflicts),
-          std::ref(cts->shared_sp), std::ref(cts->shared_inc),
-          std::cref(base_lp), std::cref(pre_cut_root_lp), std::cref(ensure_base_sf()),
-          std::cref(clique_table), std::cref(implication_graph),
+	          std::ref(cts->shared_sp), std::ref(cts->shared_inc),
+	          std::cref(base_lp), std::cref(pre_cut_root_lp), std::cref(ensure_base_sf()),
+	          std::cref(declared_branchable_cols),
+	          std::cref(clique_table), std::cref(implication_graph),
           std::cref(cts->par_simplex_opt), std::cref(opt),
           std::ref(pc), std::ref(cts->pc_mtx),
           std::ref(cts->atomic_stats), std::ref(cts->should_stop),
@@ -29442,25 +23817,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     out.bc_stats.steal_attempts = cts->steal_pool->get_total_steals() + cts->steal_pool->get_failed_steals();
   }
 
-	  if (cts->shared_inc.has()) {
-	    const double shared_obj = cts->shared_inc.get_obj();
-	    const bool parallel_improved =
-	        !has_incumbent || shared_obj + 1e-9 < incumbent_obj;
-	    Eigen::VectorXd shared_x = cts->shared_inc.get_x();
-	    if (validate_root_candidate_for_proof("parallel_shared_incumbent",
-	                                          shared_x)) {
-	      has_incumbent = true;
-	      incumbent_obj = objective_value(base_lp.c, shared_x, base_lp.sense);
-	      incumbent_x = std::move(shared_x);
-	      incumbent_proof_validated = true;
-	      incumbent_proof_validated_obj = incumbent_obj;
-	    } else if (!has_incumbent) {
-	      invalidate_incumbent_proof_validation();
-	    }
-	    if (parallel_improved && incumbent_proof_validated) {
-	      note_incumbent_update(/*depth=*/-1, global_lb);
-	    }
-	  }
+		  if (cts->shared_inc.has()) {
+		    Eigen::VectorXd shared_x = cts->shared_inc.get_x();
+		    const double shared_actual_obj =
+		        objective_value(base_lp.c, shared_x, base_lp.sense);
+		    const bool parallel_improved =
+		        std::isfinite(shared_actual_obj) &&
+		        (!has_incumbent || shared_actual_obj + 1e-9 < incumbent_obj);
+		    if (parallel_improved &&
+		        validate_root_candidate_for_proof("parallel_shared_incumbent",
+		                                          shared_x)) {
+		      has_incumbent = true;
+		      incumbent_obj = shared_actual_obj;
+		      incumbent_x = std::move(shared_x);
+		      incumbent_proof_validated = true;
+		      incumbent_proof_validated_obj = incumbent_obj;
+		      note_incumbent_update(/*depth=*/-1, global_lb);
+		    } else if (!has_incumbent) {
+		      invalidate_incumbent_proof_validation();
+		    }
+		  }
 
   const double live_lb = cts->shared_queue.lower_bound();
   const double deque_lb = cts->steal_pool ? cts->steal_pool->lower_bound() : kInf;
@@ -29927,421 +24303,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   return out;
 }
 
-Eigen::VectorXd sparse_abs_diagonal(const Eigen::SparseMatrix<double>& mat, int n) {
-  Eigen::VectorXd diag = Eigen::VectorXd::Zero(n);
-  for (int col = 0; col < mat.outerSize(); ++col) {
-    for (Eigen::SparseMatrix<double>::InnerIterator it(mat, col); it; ++it) {
-      if (it.row() == it.col()) {
-        diag[it.row()] = std::abs(it.value());
-      }
-    }
-  }
-  return diag;
-}
-
-double minlp_directional_branch_cost(const PseudoCost& pc, bool up_branch) {
-  const double sum = up_branch ? pc.up_sum : pc.down_sum;
-  const int cnt = up_branch ? pc.up_cnt : pc.down_cnt;
-  if (cnt > 0) {
-    return std::max(1e-6, sum / static_cast<double>(cnt));
-  }
-  const double other_sum = up_branch ? pc.down_sum : pc.up_sum;
-  const int other_cnt = up_branch ? pc.down_cnt : pc.up_cnt;
-  if (other_cnt > 0) {
-    return std::max(1e-6, other_sum / static_cast<double>(other_cnt));
-  }
-  return 1.0;
-}
-
-void build_minlp_branch_scores(const NLPModel& base,
-                               const Eigen::VectorXd& lb,
-                               const Eigen::VectorXd& ub,
-                               const SolveResult& relax,
-                               double int_tol,
-                               std::optional<Eigen::VectorXd>& down_scores,
-                               std::optional<Eigen::VectorXd>& up_scores) {
-  const int n = static_cast<int>(base.vars.size());
-  if (relax.x.size() != n || !base.grad) {
-    down_scores.reset();
-    up_scores.reset();
-    return;
-  }
-  down_scores = Eigen::VectorXd::Zero(n);
-  up_scores = Eigen::VectorXd::Zero(n);
-  Eigen::VectorXd& down = *down_scores;
-  Eigen::VectorXd& up = *up_scores;
-
-  NLPModel node_nlp = base;
-  apply_node_bounds(node_nlp.vars, lb, ub);
-
-  Eigen::VectorXd grad = Eigen::VectorXd::Zero(n);
-  node_nlp.grad(relax.x, grad);
-  if (node_nlp.sense == Sense::Maximize) {
-    grad = -grad;
-  }
-
-  Eigen::VectorXd hdiag = Eigen::VectorXd::Ones(n);
-  if (node_nlp.hess) {
-    Eigen::SparseMatrix<double> hess;
-    node_nlp.hess(relax.x, hess);
-    hdiag = sparse_abs_diagonal(hess, n).cwiseMax(Eigen::VectorXd::Constant(n, 1e-4));
-  }
-
-  Eigen::VectorXd structural = Eigen::VectorXd::Zero(n);
-  Eigen::VectorXd lambda;
-  Eigen::VectorXd mu;
-
-  Eigen::VectorXd g;
-  Eigen::SparseMatrix<double> jg;
-  if (node_nlp.g && node_nlp.jac_g) {
-    node_nlp.g(relax.x, g);
-    node_nlp.jac_g(relax.x, jg);
-  }
-
-  std::vector<int> lb_cols;
-  std::vector<int> ub_cols;
-  lb_cols.reserve(static_cast<size_t>(n));
-  ub_cols.reserve(static_cast<size_t>(n));
-  for (int j = 0; j < n; ++j) {
-    if (std::isfinite(node_nlp.vars[static_cast<size_t>(j)].lb)) {
-      lb_cols.push_back(j);
-    }
-    if (std::isfinite(node_nlp.vars[static_cast<size_t>(j)].ub)) {
-      ub_cols.push_back(j);
-    }
-  }
-
-  Eigen::VectorXd h;
-  Eigen::SparseMatrix<double> jh;
-  split_inequalities(node_nlp, relax.x, lb_cols, ub_cols, h, jh);
-
-  const int eq_dim = g.size();
-  const int ineq_dim = h.size();
-  if (relax.constraint_duals.size() == ineq_dim + eq_dim) {
-    if (ineq_dim > 0) {
-      mu = relax.constraint_duals.head(ineq_dim);
-      structural += (jh.transpose() * mu).cwiseAbs();
-    }
-    if (eq_dim > 0) {
-      lambda = relax.constraint_duals.tail(eq_dim);
-      structural += (jg.transpose() * lambda).cwiseAbs();
-    }
-  }
-
-  Eigen::VectorXd box_lb = Eigen::VectorXd::Zero(n);
-  Eigen::VectorXd box_ub = Eigen::VectorXd::Zero(n);
-  if (relax.box_dual_lb.size() == n) {
-    box_lb = relax.box_dual_lb.cwiseAbs();
-  }
-  if (relax.box_dual_ub.size() == n) {
-    box_ub = relax.box_dual_ub.cwiseAbs();
-  }
-
-  for (int j = 0; j < n; ++j) {
-    const VarType type = base.vars[static_cast<size_t>(j)].type;
-    if (type != VarType::Integer && type != VarType::Binary) {
-      continue;
-    }
-
-    const double xj = relax.x[j];
-    const double floor_x = std::floor(xj);
-    const double ceil_x = std::ceil(xj);
-    const double dist_down = std::max(0.0, xj - floor_x);
-    const double dist_up = std::max(0.0, ceil_x - xj);
-    if (dist_down <= int_tol && dist_up <= int_tol) {
-      continue;
-    }
-
-    const double local_curv = std::max(1e-4, hdiag[j]);
-    const double coupling = structural[j];
-    const double linear_down = std::max(0.0, -grad[j]) * dist_down;
-    const double linear_up = std::max(0.0, grad[j]) * dist_up;
-    down[j] = std::max(1e-6,
-        linear_down + box_ub[j] * dist_down + 0.1 * coupling * dist_down +
-        0.5 * local_curv * dist_down * dist_down);
-    up[j] = std::max(1e-6,
-        linear_up + box_lb[j] * dist_up + 0.1 * coupling * dist_up +
-        0.5 * local_curv * dist_up * dist_up);
-  }
-}
-
-double compute_minlp_node_estimate(const std::vector<VariableMeta>& vars,
-                                   const Eigen::VectorXd& x,
-                                   const std::optional<Eigen::VectorXd>& down_scores,
-                                   const std::optional<Eigen::VectorXd>& up_scores,
-                                   double int_tol,
-                                   double node_bound) {
-  double estimate = node_bound;
-  const int n = static_cast<int>(vars.size());
-  if (!down_scores || !up_scores) {
-    return estimate;
-  }
-  if (x.size() != n || down_scores->size() != n || up_scores->size() != n) {
-    return estimate;
-  }
-  const Eigen::VectorXd& down = *down_scores;
-  const Eigen::VectorXd& up = *up_scores;
-  for (int j = 0; j < n; ++j) {
-    const VarType type = vars[static_cast<size_t>(j)].type;
-    if (type != VarType::Integer && type != VarType::Binary) {
-      continue;
-    }
-    const double xj = x[j];
-    const double nearest = std::round(xj);
-    if (std::abs(xj - nearest) <= int_tol) {
-      continue;
-    }
-    estimate += std::min(down[j], up[j]);
-  }
-  return estimate;
-}
-
-int choose_minlp_branch_var(const BCOptions& opt,
-                            const std::vector<int>& cand,
-                            const Eigen::VectorXd& x,
-                            const std::vector<PseudoCost>& pc,
-                            const std::optional<Eigen::VectorXd>& down_scores,
-                            const std::optional<Eigen::VectorXd>& up_scores) {
-  int best = -1;
-  double best_score = -1.0;
-  for (int j : cand) {
-    const double frac = x[j] - std::floor(x[j]);
-    const double up_frac = 1.0 - frac;
-    const double down_pc = minlp_directional_branch_cost(pc[static_cast<size_t>(j)], false);
-    const double up_pc = minlp_directional_branch_cost(pc[static_cast<size_t>(j)], true);
-    const double base_pc = std::sqrt(std::max(1e-9, down_pc * up_pc));
-    const double local_down = (down_scores && down_scores->size() > j) ? (*down_scores)[j] : frac;
-    const double local_up = (up_scores && up_scores->size() > j) ? (*up_scores)[j] : up_frac;
-    const double local_signal = std::sqrt(std::max(1e-9, local_down * local_up));
-    const bool has_history = pc[static_cast<size_t>(j)].down_cnt > 0 || pc[static_cast<size_t>(j)].up_cnt > 0;
-    const double score = has_history
-        ? base_pc * (1.0 + 0.5 * local_signal)
-        : local_signal + std::min(frac, up_frac);
-    if (score > best_score + 1e-12) {
-      best_score = score;
-      best = j;
-    }
-  }
-  if (best >= 0) {
-    return best;
-  }
-  return choose_branch_var(opt, cand, x, pc);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// MINLP B&C Entry Point
-// ════════════════════════════════════════════════════════════════════════════
-
-BCResult branch_and_cut_nlp(const MINLPModel& prob, const BCOptions& opt) {
-  BCResult out;
-  out.stats.solver_name = "NativeBranchAndCutMINLP";
-
-  const auto t0 = std::chrono::steady_clock::now();
-
-  NLPModel base = prob.nonlinear_part;
-  const int n = static_cast<int>(base.vars.size());
-  if (n <= 0) {
-    out.stats.status = bc_status::kEmptyMinlpModel;
-    return out;
-  }
-
-  for (int idx : prob.integer_idx) {
-    if (idx >= 0 && idx < n) {
-      base.vars[idx].type = VarType::Integer;
-    }
-  }
-  for (int idx : prob.binary_idx) {
-    if (idx >= 0 && idx < n) {
-      base.vars[idx].type = VarType::Binary;
-      base.vars[idx].lb = std::max(base.vars[idx].lb, 0.0);
-      base.vars[idx].ub = std::min(base.vars[idx].ub, 1.0);
-    }
-  }
-
-  Node root;
-  root.lb = Eigen::VectorXd(n);
-  root.ub = Eigen::VectorXd(n);
-  for (int i = 0; i < n; ++i) {
-    root.lb[i] = base.vars[i].lb;
-    root.ub[i] = base.vars[i].ub;
-  }
-  root.x_seed = (base.x0.size() == n) ? clamp_to_bounds(base.x0, root.lb, root.ub)
-                                      : Eigen::VectorXd::Zero(n);
-
-  if (!bounds_consistent(root.lb, root.ub)) {
-    out.stats.status = bc_status::kInfeasibleVariableBounds;
-    return out;
-  }
-
-  SolveResult root_relax = solve_nlp_relaxation(base, root.lb, root.ub, &root.x_seed, opt);
-  out.bc_stats.lp_solves += 1;
-  if (!root_relax.stats.success || root_relax.x.size() != n) {
-    out.stats.status = bc_status::kRootNlpRelaxationFailed;
-    return out;
-  }
-
-  root.x_relax = clamp_to_bounds(root_relax.x, root.lb, root.ub);
-  root.x_seed = root.x_relax;
-  root.bound = root_relax.stats.objective;
-  build_minlp_branch_scores(base, root.lb, root.ub, root_relax, opt.int_tol,
-                            root.nlp_down_scores, root.nlp_up_scores);
-  root.estimate = compute_minlp_node_estimate(
-      base.vars, root.x_relax, root.nlp_down_scores, root.nlp_up_scores,
-      opt.int_tol, root.bound);
-
-  bool has_incumbent = false;
-  double incumbent_obj = kInf;
-  Eigen::VectorXd incumbent_x = Eigen::VectorXd::Zero(n);
-
-  std::vector<PseudoCost> pc(static_cast<size_t>(n));
-  std::priority_queue<QueueItem, std::vector<QueueItem>, QueueItemMinKey> pq;
-  std::vector<Node> dfs;
-  push_node(pq, dfs, root, opt.node_sel, has_incumbent);
-
-  double global_lb = live_node_lower_bound(pq, dfs);
-  if (!std::isfinite(global_lb)) {
-    global_lb = root.bound;
-  }
-
-  while (true) {
-    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    if (elapsed > opt.time_limit_sec) {
-      out.stats.status = bc_status::kTimeLimitReached;
-      break;
-    }
-    if (out.bc_stats.nodes_explored >= opt.max_nodes) {
-      out.stats.status = bc_status::kNodeLimitReached;
-      break;
-    }
-
-    Node cur;
-    if (!pop_node(pq, dfs, opt.node_sel, has_incumbent, cur)) {
-      out.stats.status = bc_status::kSearchQueueExhausted;
-      break;
-    }
-
-    ++out.bc_stats.nodes_explored;
-
-    if (incumbent_prunes_node(has_incumbent, incumbent_obj, cur.bound)) {
-      continue;
-    }
-
-    std::vector<int> frac;
-    if (!fractional_indices(base.vars, cur.x_relax, opt.int_tol, frac)) {
-      const double obj = cur.bound;
-      if (!has_incumbent || obj < incumbent_obj) {
-        has_incumbent = true;
-        incumbent_obj = obj;
-        incumbent_x = cur.x_relax;
-      }
-      continue;
-    }
-
-    const int j = choose_minlp_branch_var(
-        opt, frac, cur.x_relax, pc, cur.nlp_down_scores, cur.nlp_up_scores);
-    if (j < 0) {
-      continue;
-    }
-
-    const double xj = cur.x_relax[j];
-    Node left = cur;
-    left.depth = cur.depth + 1;
-    left.ub[j] = std::min(left.ub[j], std::floor(xj));
-    left.x_seed = clamp_to_bounds(cur.x_relax, left.lb, left.ub);
-
-    Node right = cur;
-    right.depth = cur.depth + 1;
-    right.lb[j] = std::max(right.lb[j], std::ceil(xj));
-    right.x_seed = clamp_to_bounds(cur.x_relax, right.lb, right.ub);
-
-    auto process = [&](Node& child, bool up) {
-      if (!bounds_consistent(child.lb, child.ub)) {
-        return;
-      }
-      SolveResult relax = solve_nlp_relaxation(base, child.lb, child.ub, &child.x_seed, opt);
-      ++out.bc_stats.lp_solves;
-      if (!relax.stats.success || relax.x.size() != n) {
-        return;
-      }
-
-      child.x_relax = clamp_to_bounds(relax.x, child.lb, child.ub);
-      child.x_seed = child.x_relax;
-      child.bound = relax.stats.objective;
-        build_minlp_branch_scores(base, child.lb, child.ub, relax, opt.int_tol,
-                    child.nlp_down_scores, child.nlp_up_scores);
-        child.estimate = compute_minlp_node_estimate(
-          base.vars, child.x_relax, child.nlp_down_scores, child.nlp_up_scores,
-          opt.int_tol, child.bound);
-
-      const double gain = std::max(0.0, child.bound - cur.bound);
-      if (up) {
-        pc[j].up_sum += gain;
-        pc[j].up_cnt += 1;
-      } else {
-        pc[j].down_sum += gain;
-        pc[j].down_cnt += 1;
-      }
-
-      if (incumbent_prunes_node(has_incumbent, incumbent_obj, child.bound)) {
-        return;
-      }
-
-      push_node(pq, dfs, child, opt.node_sel, has_incumbent);
-    };
-
-    process(left, false);
-    process(right, true);
-
-    const double live_lb = live_node_lower_bound(pq, dfs);
-    if (std::isfinite(live_lb)) {
-      global_lb = live_lb;
-    } else if (has_incumbent) {
-      global_lb = incumbent_obj;
-    }
-    out.bc_stats.best_bound = global_lb;
-
-    if (has_incumbent && std::isfinite(global_lb)) {
-      const double denom = std::max(1.0, std::abs(incumbent_obj));
-      const double rel_gap = std::max(0.0, (incumbent_obj - global_lb) / denom);
-      out.bc_stats.gap = rel_gap;
-      if (!opt.require_tree_exhaustion_certificate &&
-          rel_gap <= opt.gap_tol) {
-        out.stats.status = bc_status::kOptimalityGapReached;
-        break;
-      }
-    }
-  }
-
-  const double runtime = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  out.bc_stats.runtime_sec = runtime;
-  out.bc_stats.best_bound = global_lb;
-  out.bc_stats.best_obj = has_incumbent ? incumbent_obj : kInf;
-
-  out.stats.runtime_sec = runtime;
-  out.stats.iterations = out.bc_stats.nodes_explored;
-  out.stats.success = has_incumbent;
-  out.stats.objective = has_incumbent ? incumbent_obj : 0.0;
-  out.stats.mip_gap = std::isfinite(out.bc_stats.gap) ? out.bc_stats.gap : kInf;
-
-  if (has_incumbent) {
-    out.x = incumbent_x;
-    if (out.stats.status == bc_status::kSearchQueueExhausted) {
-      out.bc_stats.gap = 0.0;
-      out.stats.mip_gap = 0.0;
-      out.stats.status = bc_status::kOptimalTreeExhausted;
-    } else if (out.stats.status.empty()) {
-      out.stats.status = bc_status::kFeasibleIncumbentFound;
-    }
-  } else {
-    out.x = Eigen::VectorXd::Zero(n);
-    if (out.stats.status.empty()) {
-      out.stats.status = bc_status::kNoFeasibleIntegerSolutionFound;
-    }
-  }
-
-  out.bc_stats.status = out.stats.status;
-  return out;
-}
 
 }  // anonymous namespace
 

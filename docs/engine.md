@@ -580,6 +580,65 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 | `max_plunge_depth` | 10 | Max depth for synchronous DFS plunge in parallel mode |
 | `auto_parallel_min_threads` | 2 | Minimum threads for auto-parallel |
 | `auto_parallel_max_threads` | 0 | 0 = no cap |
+| `deterministic_parallel` | `false` | Round-robin turn token for reproducible parallel search |
+| `share_conflict_learning_across_threads` | `false` | Publish conflict clauses across explorers |
+| `share_implications_across_threads` | `true` | Publish binary implications to shared graph (requires above) |
+| `pseudocost_delta_merge` | `true` | Delta-aggregate pseudocost merge across threads |
+| `parallel_delay_until_incumbent` | `true` | Don't launch parallel tree until a finite incumbent exists |
+| `enable_work_stealing` | `true` | Work-stealing between parallel explorer threads |
+
+#### Implied Bound Cuts
+
+| Field | Default | Description |
+|---|---|---|
+| `enable_graph_implied_bound_cuts` | `true` | Separate violated two-term implied-bound cuts from the binary implication graph |
+| `graph_implied_bound_max_cuts` | 128 | Maximum implied-bound cuts per round |
+| `enable_dynamic_implied_bound_probing` | `true` | Local probing to discover dynamic implied bounds at nodes |
+| `dynamic_implied_bound_probing_max_vars` | 8 | Max fractional binaries to probe per node |
+| `dynamic_implied_bound_probing_max_rows` | 8 | Max rows generated per probing pass |
+
+#### Reduced-Cost Learning
+
+| Field | Default | Description |
+|---|---|---|
+| `enable_reduced_cost_fixing` | `true` | Apply reduced-cost domain fixing after LP solves |
+| `enable_reduced_cost_conflict_learning` | `true` | Record cutoff conflicts from reduced-cost fixings |
+| `enable_reduced_cost_fixing_resolve` | `true` | Re-solve LP after tightening bounds via fixing |
+| `enable_reduced_cost_proof_cut_resolve` | `true` | Re-solve nodes after proof-frontier no-good rows are admitted |
+| `reduced_cost_proof_cut_resolve_max_lps` | 4 | LP budget per node for proof-cut resolve |
+
+#### Root Cut Quality
+
+| Field | Default | Description |
+|---|---|---|
+| `root_cut_stall_tol` | 1e-4 | Stall tolerance: stop cutting if bound lift is below this |
+| `root_cut_max_stalls` | 2 | Maximum consecutive stalled rounds before halting |
+| `root_cut_reject_nonmoving_rows` | `true` | Reject root cuts that don't tighten the domain or bound |
+| `root_cut_audit_validate_rows` | `true` | Validate cut rows after each separation round |
+| `root_cut_audit_force_separation` | `false` | Force separation through size/fractionality gates (audit only) |
+| `enable_objective_cutoff_conflict_cuts` | `true` | Objective-cutoff conflict cuts from cost-implied binary events |
+| `enable_graph_implied_bound_cuts` | `true` | Two-term implied-bound cuts from binary implication graph |
+
+#### LP Fallback and Auto-Tuning
+
+| Field | Default | Description |
+|---|---|---|
+| `enable_lp_fallback` | `true` | Enable multi-phase LP failure recovery |
+| `fallback_l1_retries` | 3 | Phase-1 retry count (perturbation-based) |
+| `fallback_l3_retries` | 2 | Phase-3 retry count (tolerance-relaxation) |
+| `ipm_auto_threshold` | 8 000 | Switch to IPM at root when `m > threshold` |
+| `hybrid_ipm_threshold` | 15 000 | Hybrid IPM/simplex crossover for node LPs |
+| `xlarge_ipm_only_threshold` | 50 000 | Use IPM-only above this size |
+
+#### Large Neighborhood Search (LNS)
+
+| Field | Default | Description |
+|---|---|---|
+| `enable_lns` | `true` | Enable LNS sub-MIP improvement heuristic |
+| `lns_fix_ratio` | 0.80 | Fraction of binaries fixed during LNS dive |
+| `lns_node_limit` | 500 | Node limit per LNS sub-MIP |
+| `lns_time_limit` | 5.0 | Time limit per LNS call (seconds) |
+| `lns_max_iters` | 3 | Maximum LNS improvement iterations |
 
 ### 7.2 Branching and Node Selection
 

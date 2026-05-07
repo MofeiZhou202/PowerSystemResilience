@@ -1089,8 +1089,7 @@ void rebuild_local_domain_trail(Node& node,
       }
       if (!covered && node.lb[j] > root + 1e-9) {
         append_entry(BranchDomainLiteral{j, node.lb[j], true},
-                     {BranchDomainLiteral{j, node.lb[j], true}}, node.depth,
-                     false, BranchDomainLiteral{}, false);
+                     {}, node.depth, false, BranchDomainLiteral{}, false);
       }
     }
     if (node.ub.size() >= n && std::isfinite(node.ub[j])) {
@@ -1109,8 +1108,7 @@ void rebuild_local_domain_trail(Node& node,
       }
       if (!covered && node.ub[j] < root - 1e-9) {
         append_entry(BranchDomainLiteral{j, node.ub[j], false},
-                     {BranchDomainLiteral{j, node.ub[j], false}}, node.depth,
-                     false, BranchDomainLiteral{}, false);
+                     {}, node.depth, false, BranchDomainLiteral{}, false);
       }
     }
   }
@@ -1121,8 +1119,116 @@ void append_domain_reason_bound(Node& node,
                                 int n,
                                 const Eigen::VectorXd* root_lb,
                                 const Eigen::VectorXd* root_ub) {
+  if (n <= 0) {
+    n = node.lb.size() > 0 ? static_cast<int>(node.lb.size())
+                           : static_cast<int>(node.ub.size());
+  }
   node.domain_reason_bounds.push_back(std::move(rb));
-  rebuild_local_domain_trail(node, n, root_lb, root_ub);
+  DomainReasonBound& stored = node.domain_reason_bounds.back();
+  if (n <= 0 || stored.bound.var_idx < 0 || stored.bound.var_idx >= n ||
+      !std::isfinite(stored.bound.value)) {
+    return;
+  }
+
+  if (node.local_domain_trail.empty() && !node.branch_reasons.empty()) {
+    rebuild_local_domain_trail(node, n, root_lb, root_ub);
+    return;
+  }
+
+  const int branch_count = static_cast<int>(node.branch_reasons.size());
+  if (node.local_branch_positions.size() !=
+      static_cast<std::size_t>(branch_count)) {
+    rebuild_local_domain_trail(node, n, root_lb, root_ub);
+    return;
+  }
+  for (int i = 0; i < branch_count; ++i) {
+    const int pos = node.local_branch_positions[static_cast<std::size_t>(i)];
+    if (pos < 0 || pos >= static_cast<int>(node.local_domain_trail.size()) ||
+        !node.local_domain_trail[static_cast<std::size_t>(pos)].is_branch) {
+      rebuild_local_domain_trail(node, n, root_lb, root_ub);
+      return;
+    }
+  }
+
+  auto trail_entry_active = [&](const LocalDomainTrailEntry& entry) {
+    const int j = entry.bound.var_idx;
+    if (j < 0 || j >= n || node.lb.size() < n || node.ub.size() < n) {
+      return false;
+    }
+    return entry.bound.is_lb
+        ? node.lb[j] >= entry.bound.value - 1e-9
+        : node.ub[j] <= entry.bound.value + 1e-9;
+  };
+
+  for (auto& entry : node.local_domain_trail) {
+    if (entry.bound.var_idx != stored.bound.var_idx ||
+        entry.bound.is_lb != stored.bound.is_lb) {
+      continue;
+    }
+    if (branch_literal_stronger_or_equal(entry.bound, stored.bound, 1e-9) &&
+        branch_literal_stronger_or_equal(stored.bound, entry.bound, 1e-9) &&
+        trail_entry_active(entry)) {
+      if (!entry.is_branch && entry.reason.empty() && !stored.reason.empty()) {
+        entry.reason = stored.reason;
+        entry.depth = stored.depth;
+        entry.source_conflict_literal = stored.source_conflict_literal;
+        entry.has_source_conflict_literal =
+            stored.has_source_conflict_literal;
+      }
+      stored.trail_pos = entry.pos;
+      stored.prev_bound_pos = entry.prev_bound_pos;
+      stored.prev_bound_value = entry.prev_bound_value;
+      return;
+    }
+  }
+
+  int prev_pos = -1;
+  for (int p = static_cast<int>(node.local_domain_trail.size()) - 1; p >= 0;
+       --p) {
+    const auto& entry = node.local_domain_trail[static_cast<std::size_t>(p)];
+    if (entry.bound.var_idx == stored.bound.var_idx &&
+        entry.bound.is_lb == stored.bound.is_lb) {
+      prev_pos = p;
+      break;
+    }
+  }
+  auto previous_value = [&]() {
+    if (prev_pos >= 0 &&
+        prev_pos < static_cast<int>(node.local_domain_trail.size())) {
+      return node.local_domain_trail[static_cast<std::size_t>(prev_pos)]
+          .bound.value;
+    }
+    const int j = stored.bound.var_idx;
+    if (stored.bound.is_lb) {
+      if (root_lb != nullptr && root_lb->size() > j &&
+          std::isfinite((*root_lb)[j])) {
+        return (*root_lb)[j];
+      }
+      return -kInf;
+    }
+    if (root_ub != nullptr && root_ub->size() > j &&
+        std::isfinite((*root_ub)[j])) {
+      return (*root_ub)[j];
+    }
+    return kInf;
+  };
+
+  const int pos = static_cast<int>(node.local_domain_trail.size());
+  LocalDomainTrailEntry entry;
+  entry.bound = stored.bound;
+  entry.reason = stored.reason;
+  entry.pos = pos;
+  entry.depth = stored.depth;
+  entry.prev_bound_pos = prev_pos;
+  entry.prev_bound_value = previous_value();
+  entry.is_branch = false;
+  entry.source_conflict_literal = stored.source_conflict_literal;
+  entry.has_source_conflict_literal = stored.has_source_conflict_literal;
+  node.local_domain_trail.push_back(std::move(entry));
+  stored.trail_pos = pos;
+  stored.prev_bound_pos = prev_pos;
+  stored.prev_bound_value =
+      node.local_domain_trail[static_cast<std::size_t>(pos)].prev_bound_value;
 }
 
 bool try_build_binary_conflict_cut(const LPModel& base_lp,
@@ -1847,12 +1953,12 @@ bool build_reduced_cost_mass_dual_proof_row(
 
     rhs += a * x_lp[j];
 
+    const bool keep_target = force_keep(j);
     const bool integer_col =
         is_integer_type(lp.vars[static_cast<std::size_t>(j)]) ||
         implied_integer(j);
-    bool keep = integer_col && !is_basic[static_cast<std::size_t>(j)];
+    bool keep = keep_target || (integer_col && !is_basic[static_cast<std::size_t>(j)]);
     if (keep) {
-      const bool keep_target = force_keep(j);
       if (!keep_target) {
         if (a > 0.0) {
           keep = std::isfinite(root_lb[j]) &&
@@ -2011,6 +2117,8 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     DualProofTrailResolution& out,
     const Eigen::SparseVector<double>* priority_coeff_sparse) {
   out = DualProofTrailResolution{};
+  (void)x_relax;
+  (void)priority_coeff_sparse;
   const int n = static_cast<int>(vars.size());
   if (max_literals <= 0 || n <= 0 || coeff_sparse.size() < n ||
       coeff_sparse.nonZeros() <= 0 || !std::isfinite(rhs) ||
@@ -2093,40 +2201,16 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     return false;
   };
 
-  auto priority_coeff = [&](int j) -> double {
-    if (priority_coeff_sparse == nullptr || priority_coeff_sparse->size() < n ||
-        j < 0 || j >= n) {
-      return 0.0;
-    }
-    const double v = priority_coeff_sparse->coeff(j);
-    return std::isfinite(v) ? v : 0.0;
-  };
   auto literal_priority = [&](const BranchDomainLiteral& lit) -> double {
     if (lit.var_idx < 0 || lit.var_idx >= n) return 0.0;
-    const double p = priority_coeff(lit.var_idx);
-    if (std::abs(p) <= 1e-12) return 0.0;
+    const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
+    if (std::abs(a) <= 1e-12) return 0.0;
     if (lit.is_lb) {
       if (!std::isfinite(root_lb[lit.var_idx])) return 0.0;
-      const double proof_move =
-          std::max(0.0, lit.value - root_lb[lit.var_idx]);
-      double lp_move = 0.0;
-      if (x_relax != nullptr && x_relax->size() >= n &&
-          std::isfinite((*x_relax)[lit.var_idx])) {
-        lp_move = std::max(0.0, (*x_relax)[lit.var_idx] -
-                                    root_lb[lit.var_idx]);
-      }
-      return std::abs(p) * (proof_move + 0.25 * lp_move);
+      return std::abs(a * (lit.value - root_lb[lit.var_idx]));
     }
     if (!std::isfinite(root_ub[lit.var_idx])) return 0.0;
-    const double proof_move =
-        std::max(0.0, root_ub[lit.var_idx] - lit.value);
-    double lp_move = 0.0;
-    if (x_relax != nullptr && x_relax->size() >= n &&
-        std::isfinite((*x_relax)[lit.var_idx])) {
-      lp_move = std::max(0.0, root_ub[lit.var_idx] -
-                                  (*x_relax)[lit.var_idx]);
-    }
-    return std::abs(p) * (proof_move + 0.25 * lp_move);
+    return std::abs(a * (lit.value - root_ub[lit.var_idx]));
   };
   auto flipped_literal = [&](const BranchDomainLiteral& lit,
                              BranchDomainLiteral& flipped) -> bool {
@@ -2619,57 +2703,82 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     const int max_resolves = std::min<int>(
         4096, static_cast<int>(local_domain_trail->size()) +
                   4 * std::max(1, max_literals));
-    std::unordered_set<std::size_t> seen;
-    int resolved = 0;
-    for (int iter = 0; iter < max_resolves; ++iter) {
-      const std::size_t h = reason_frontier_hash(frontier);
-      if (!seen.insert(h).second) break;
+	    std::unordered_set<std::size_t> seen;
+	    std::unordered_set<int> skipped_positions;
+	    int resolved = 0;
+	    for (int iter = 0; iter < max_resolves; ++iter) {
+	      std::size_t h = reason_frontier_hash(frontier);
+	      for (int pos : skipped_positions) {
+	        h ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	             (h << 6) + (h >> 2);
+	      }
+	      if (!seen.insert(h).second) break;
 
-      int latest_idx = -1;
+	      int latest_idx = -1;
       int latest_pos = -1;
       int resolvable = 0;
       for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
         const int pos = frontier[static_cast<std::size_t>(i)].trail_pos;
-        if (pos < start_pos || pos < 0 ||
-            pos >= static_cast<int>(local_domain_trail->size())) {
-          continue;
-        }
-        const auto& entry =
-            (*local_domain_trail)[static_cast<std::size_t>(pos)];
-        if (entry.is_branch || entry.reason.empty()) continue;
+	        if (pos < start_pos || pos < 0 ||
+	            pos >= static_cast<int>(local_domain_trail->size())) {
+	          continue;
+	        }
+	        if (skipped_positions.count(pos) != 0) continue;
+	        const auto& entry =
+	            (*local_domain_trail)[static_cast<std::size_t>(pos)];
+	        if (entry.is_branch || entry.reason.empty()) continue;
         ++resolvable;
         if (pos > latest_pos) {
           latest_pos = pos;
           latest_idx = i;
         }
       }
-      if (latest_idx < 0 ||
-          (resolvable <= stop_size && resolved >= min_resolve)) {
-        break;
-      }
-      const auto& entry =
-          (*local_domain_trail)[static_cast<std::size_t>(latest_pos)];
-      std::vector<ReasonFrontierEntry> replacement;
-      replacement.reserve(entry.reason.size());
-      for (const auto& reason_lit : entry.reason) {
-        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
-            !std::isfinite(reason_lit.value)) {
-          replacement.clear();
-          break;
-        }
-        replacement.push_back(
-            reason_entry_for_literal(reason_lit, latest_pos));
-      }
-      if (replacement.empty()) {
-        break;
-      }
-      frontier.erase(frontier.begin() + latest_idx);
-      frontier.insert(frontier.end(),
-                      std::make_move_iterator(replacement.begin()),
-                      std::make_move_iterator(replacement.end()));
-      compact_reason_frontier(frontier);
-      ++resolved;
-    }
+	      if (latest_idx < 0 ||
+	          (resolvable <= stop_size && resolved >= min_resolve)) {
+	        break;
+	      }
+	      const auto& entry =
+	          (*local_domain_trail)[static_cast<std::size_t>(latest_pos)];
+	      auto covered_by_current_frontier =
+	          [&](const BranchDomainLiteral& lit) {
+	        for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
+	          if (i == latest_idx) continue;
+	          const auto& cur = frontier[static_cast<std::size_t>(i)].lit;
+	          if (cur.var_idx != lit.var_idx || cur.is_lb != lit.is_lb) {
+	            continue;
+	          }
+	          if (branch_literal_stronger_or_equal(cur, lit, eps)) {
+	            return true;
+	          }
+	        }
+	        return false;
+	      };
+	      std::vector<ReasonFrontierEntry> replacement;
+	      replacement.reserve(entry.reason.size());
+	      bool replacement_valid = true;
+	      for (const auto& reason_lit : entry.reason) {
+	        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
+	            !std::isfinite(reason_lit.value)) {
+	          replacement_valid = false;
+	          break;
+	        }
+	        if (covered_by_current_frontier(reason_lit)) continue;
+	        replacement.push_back(
+	            reason_entry_for_literal(reason_lit, latest_pos));
+	      }
+	      if (!replacement_valid) {
+	        skipped_positions.insert(latest_pos);
+	        continue;
+	      }
+	      frontier.erase(frontier.begin() + latest_idx);
+	      if (!replacement.empty()) {
+	        frontier.insert(frontier.end(),
+	                        std::make_move_iterator(replacement.begin()),
+	                        std::make_move_iterator(replacement.end()));
+	      }
+	      compact_reason_frontier(frontier);
+	      ++resolved;
+	    }
     return reason_frontier_literals(frontier);
   };
 
@@ -3201,14 +3310,19 @@ bool resolve_dual_proof_conflict_from_local_trail(
         4096, static_cast<int>(local_domain_trail->size()) +
                   4 * std::max(1, max_literals));
     std::vector<BranchDomainLiteral> best = frontier_literals(frontier);
-    std::unordered_set<std::size_t> seen;
-    int resolved = 0;
-    for (int iter = 0; iter < max_resolves; ++iter) {
-      std::vector<BranchDomainLiteral> sig = frontier_literals(frontier);
-      const std::size_t h = conflict_clause_hash(sig);
-      if (!seen.insert(h).second) break;
-      if (!sig.empty() && static_cast<int>(sig.size()) <= max_literals &&
-          (best.empty() || sig.size() < best.size())) {
+	    std::unordered_set<std::size_t> seen;
+	    std::unordered_set<int> skipped_positions;
+	    int resolved = 0;
+	    for (int iter = 0; iter < max_resolves; ++iter) {
+	      std::vector<BranchDomainLiteral> sig = frontier_literals(frontier);
+	      std::size_t h = conflict_clause_hash(sig);
+	      for (int pos : skipped_positions) {
+	        h ^= std::hash<int>{}(pos) + 0x9e3779b97f4a7c15ULL +
+	             (h << 6) + (h >> 2);
+	      }
+	      if (!seen.insert(h).second) break;
+	      if (!sig.empty() && static_cast<int>(sig.size()) <= max_literals &&
+	          (best.empty() || sig.size() < best.size())) {
         best = sig;
       }
 
@@ -3217,13 +3331,14 @@ bool resolve_dual_proof_conflict_from_local_trail(
       int resolvable = 0;
       for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
         const int pos = frontier[static_cast<std::size_t>(i)].trail_pos;
-        if (pos < start_pos || pos < 0 ||
-            pos >= static_cast<int>(local_domain_trail->size())) {
-          continue;
-        }
-        const auto& entry =
-            (*local_domain_trail)[static_cast<std::size_t>(pos)];
-        if (entry.is_branch || entry.reason.empty()) continue;
+	        if (pos < start_pos || pos < 0 ||
+	            pos >= static_cast<int>(local_domain_trail->size())) {
+	          continue;
+	        }
+	        if (skipped_positions.count(pos) != 0) continue;
+	        const auto& entry =
+	            (*local_domain_trail)[static_cast<std::size_t>(pos)];
+	        if (entry.is_branch || entry.reason.empty()) continue;
         ++resolvable;
         if (pos > latest_pos) {
           latest_pos = pos;
@@ -3234,26 +3349,47 @@ bool resolve_dual_proof_conflict_from_local_trail(
           (static_cast<int>(frontier.size()) <= stop_size &&
            resolved >= min_resolve && resolvable <= stop_size)) {
         break;
-      }
-      const auto& entry =
-          (*local_domain_trail)[static_cast<std::size_t>(latest_pos)];
-      std::vector<FrontierEntry> replacement;
-      replacement.reserve(entry.reason.size());
-      for (const auto& reason_lit : entry.reason) {
-        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
-            !std::isfinite(reason_lit.value)) {
-          replacement.clear();
-          break;
-        }
-        replacement.push_back(entry_for_literal(reason_lit, latest_pos));
-      }
-      if (replacement.empty()) break;
-      frontier.erase(frontier.begin() + latest_idx);
-      frontier.insert(frontier.end(),
-                      std::make_move_iterator(replacement.begin()),
-                      std::make_move_iterator(replacement.end()));
-      compact_frontier(frontier);
-      ++resolved;
+	      }
+	      const auto& entry =
+	          (*local_domain_trail)[static_cast<std::size_t>(latest_pos)];
+	      auto covered_by_current_frontier =
+	          [&](const BranchDomainLiteral& lit) {
+	        for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
+	          if (i == latest_idx) continue;
+	          const auto& cur = frontier[static_cast<std::size_t>(i)].lit;
+	          if (cur.var_idx != lit.var_idx || cur.is_lb != lit.is_lb) {
+	            continue;
+	          }
+	          if (branch_literal_stronger_or_equal(cur, lit, tol)) {
+	            return true;
+	          }
+	        }
+	        return false;
+	      };
+	      std::vector<FrontierEntry> replacement;
+	      replacement.reserve(entry.reason.size());
+	      bool replacement_valid = true;
+	      for (const auto& reason_lit : entry.reason) {
+	        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
+	            !std::isfinite(reason_lit.value)) {
+	          replacement_valid = false;
+	          break;
+	        }
+	        if (covered_by_current_frontier(reason_lit)) continue;
+	        replacement.push_back(entry_for_literal(reason_lit, latest_pos));
+	      }
+	      if (!replacement_valid) {
+	        skipped_positions.insert(latest_pos);
+	        continue;
+	      }
+	      frontier.erase(frontier.begin() + latest_idx);
+	      if (!replacement.empty()) {
+	        frontier.insert(frontier.end(),
+	                        std::make_move_iterator(replacement.begin()),
+	                        std::make_move_iterator(replacement.end()));
+	      }
+	      compact_frontier(frontier);
+	      ++resolved;
       std::vector<BranchDomainLiteral> cur = frontier_literals(frontier);
       if (!cur.empty() && static_cast<int>(cur.size()) <= max_literals &&
           (best.empty() || cur.size() < best.size())) {
@@ -3370,8 +3506,12 @@ bool build_dual_proof_target_bound_conflict_clause(
     const DualProofRow* priority_proof) {
   out_clause.clear();
   if (proof_margin != nullptr) *proof_margin = 0.0;
-  if (violated_local_proof_cover != nullptr) *violated_local_proof_cover = PoolCut{};
-  if (additional_local_proof_covers != nullptr) additional_local_proof_covers->clear();
+  if (violated_local_proof_cover != nullptr) {
+    *violated_local_proof_cover = PoolCut{};
+  }
+  if (additional_local_proof_covers != nullptr) {
+    additional_local_proof_covers->clear();
+  }
   if (explanation != nullptr) *explanation = DualProofTargetExplanation{};
   const int n = static_cast<int>(vars.size());
   if (max_literals <= 0 || n <= 0 || dual_proof == nullptr ||
@@ -3388,67 +3528,21 @@ bool build_dual_proof_target_bound_conflict_clause(
   }
 
   std::vector<double> coeff(static_cast<std::size_t>(n), 0.0);
-  for (Eigen::SparseVector<double>::InnerIterator it(dual_proof->coeff); it; ++it) {
+  double root_min_activity = 0.0;
+  for (Eigen::SparseVector<double>::InnerIterator it(dual_proof->coeff); it;
+       ++it) {
     const int j = static_cast<int>(it.index());
-    if (j >= 0 && j < n && std::isfinite(it.value())) {
-      coeff[static_cast<std::size_t>(j)] = it.value();
+    const double a = it.value();
+    if (j < 0 || j >= n || !std::isfinite(a)) continue;
+    coeff[static_cast<std::size_t>(j)] = a;
+    if (a > 0.0) {
+      if (!std::isfinite(root_lb[j])) return false;
+      root_min_activity += a * root_lb[j];
+    } else if (a < 0.0) {
+      if (!std::isfinite(root_ub[j])) return false;
+      root_min_activity += a * root_ub[j];
     }
   }
-  const bool use_priority_proof =
-      priority_proof != nullptr && priority_proof->valid &&
-      priority_proof->coeff.size() >= n;
-  auto priority_coeff = [&](int j) -> double {
-    if (!use_priority_proof || j < 0 || j >= n) return 0.0;
-    const double v = priority_proof->coeff.coeff(j);
-    return std::isfinite(v) ? v : 0.0;
-  };
-
-  auto min_activity = [&](const Eigen::VectorXd& lb,
-                          const Eigen::VectorXd& ub) -> double {
-    double activity = 0.0;
-    for (int j = 0; j < n; ++j) {
-      const double a = coeff[static_cast<std::size_t>(j)];
-      if (a > 0.0) {
-        if (!std::isfinite(lb[j])) return -std::numeric_limits<double>::infinity();
-        activity += a * lb[j];
-      } else if (a < 0.0) {
-        if (!std::isfinite(ub[j])) return -std::numeric_limits<double>::infinity();
-        activity += a * ub[j];
-      }
-    }
-    return activity;
-  };
-
-  const double root_min_activity = min_activity(root_lb, root_ub);
-  if (!std::isfinite(root_min_activity)) return false;
-
-  const int target = target_lit.var_idx;
-  const double a0 = coeff[static_cast<std::size_t>(target)];
-  if ((target_lit.is_lb && a0 >= -1e-12) ||
-      (!target_lit.is_lb && a0 <= 1e-12)) {
-    return false;
-  }
-
-  const bool integer_target =
-      is_integer_type(vars[static_cast<std::size_t>(target)]);
-  double relaxed_bound = target_lit.value;
-  if (integer_target) {
-    const double relax = std::max(0.0, 1.0 - 10.0 * int_tol);
-    relaxed_bound += target_lit.is_lb ? -relax : relax;
-  } else {
-    relaxed_bound += target_lit.is_lb ? -1e-7 : 1e-7;
-  }
-
-  double target_global_contribution = 0.0;
-  if (a0 > 0.0) {
-    if (!std::isfinite(root_lb[target])) return false;
-    target_global_contribution = a0 * root_lb[target];
-  } else {
-    if (!std::isfinite(root_ub[target])) return false;
-    target_global_contribution = a0 * root_ub[target];
-  }
-  const double required_activity = dual_proof->rhs - a0 * relaxed_bound;
-  double explained_activity = root_min_activity - target_global_contribution;
 
   auto literal_delta = [&](const BranchDomainLiteral& lit) -> double {
     if (lit.var_idx < 0 || lit.var_idx >= n) return 0.0;
@@ -3463,25 +3557,12 @@ bool build_dual_proof_target_bound_conflict_clause(
     }
     return 0.0;
   };
-  auto literal_priority = [&](const BranchDomainLiteral& lit) -> double {
-    if (lit.var_idx < 0 || lit.var_idx >= n) return 0.0;
-    const double p = priority_coeff(lit.var_idx);
-    if (std::abs(p) <= 1e-12) return 0.0;
-    if (lit.is_lb) {
-      if (!std::isfinite(root_lb[lit.var_idx])) return 0.0;
-      const double proof_move = std::max(0.0, lit.value - root_lb[lit.var_idx]);
-      const double lp_move = std::max(0.0, x_relax[lit.var_idx] - root_lb[lit.var_idx]);
-      return std::abs(p) * (proof_move + 0.25 * lp_move);
-    }
-    if (!std::isfinite(root_ub[lit.var_idx])) return 0.0;
-    const double proof_move = std::max(0.0, root_ub[lit.var_idx] - lit.value);
-    const double lp_move = std::max(0.0, root_ub[lit.var_idx] - x_relax[lit.var_idx]);
-    return std::abs(p) * (proof_move + 0.25 * lp_move);
-  };
-
   DualProofTrailResolution trail_resolution;
   const Eigen::SparseVector<double>* priority_coeff_ptr =
-      use_priority_proof ? &priority_proof->coeff : nullptr;
+      priority_proof != nullptr && priority_proof->valid &&
+              priority_proof->coeff.size() >= n
+          ? &priority_proof->coeff
+          : nullptr;
   if (resolve_dual_proof_target_bound_from_local_trail(
           vars, root_lb, root_ub, &x_relax, int_tol, branch_reasons,
           reason_bounds, local_domain_trail, local_branch_positions,
@@ -3581,1078 +3662,17 @@ bool build_dual_proof_target_bound_conflict_clause(
               ? violated_local_proof_cover->coeff.nonZeros()
               : 0;
     }
-    out_clause = trail_resolution.clause;
-    return true;
-  }
+	    out_clause = trail_resolution.clause;
+	    return true;
+	  }
 
-  auto try_highs_style_bound_lifting_certificate = [&]() -> bool {
-    const bool have_native_trail =
-        local_domain_trail != nullptr && !local_domain_trail->empty();
-    const int target_pos = target_bound.trail_pos >= 0
-        ? target_bound.trail_pos
-        : (have_native_trail
-               ? static_cast<int>(local_domain_trail->size())
-               : static_cast<int>(branch_reasons.size() + reason_bounds.size()));
-    const double proof_tol =
-        std::max(1e-7, 1e-10 * (1.0 + std::abs(dual_proof->rhs)));
-    const double eps = std::max(1e-9, int_tol);
+	  // Cross-frontier target-bound proofs are valid only when the
+  // first-class local trail resolver produced the resolved reason-side
+  // frontier.  Legacy unordered candidate fallbacks are deliberately absent:
+  // they can publish a different frontier than the local trail actually
+  // resolves to, which breaks HiGHS-style proof consumption.
+  return false;
 
-    struct TrailCandidate {
-      BranchDomainLiteral proof_lit;
-      std::vector<BranchDomainLiteral> reason;
-      double delta{0.0};
-      double base_bound{0.0};
-      double priority{0.0};
-      int trail_pos{-1};
-      int prev_bound_pos{-1};
-      bool from_reason_bound{false};
-    };
-    std::vector<TrailCandidate> trail_candidates;
-    trail_candidates.reserve(branch_reasons.size() + reason_bounds.size());
-
-    auto reason_touches_target_local =
-        [&](const std::vector<BranchDomainLiteral>& lits) {
-      for (const auto& lit : lits) {
-        if (lit.var_idx == target) return true;
-      }
-      return false;
-    };
-    auto add_trail_candidate =
-        [&](BranchDomainLiteral lit, std::vector<BranchDomainLiteral> reason,
-            int trail_pos, int prev_bound_pos, double prev_bound_value,
-            bool from_reason_bound) {
-      const int j = lit.var_idx;
-      if (j < 0 || j >= n || j == target || !std::isfinite(lit.value) ||
-          trail_pos < 0 || trail_pos >= target_pos ||
-          reason_touches_target_local(reason)) {
-        return;
-      }
-      const double a = coeff[static_cast<std::size_t>(j)];
-      double base = 0.0;
-      double delta = 0.0;
-      if (a > 0.0 && lit.is_lb) {
-        if (std::isfinite(prev_bound_value)) {
-          base = prev_bound_value;
-        } else if (std::isfinite(root_lb[j])) {
-          base = root_lb[j];
-        } else {
-          return;
-        }
-        if (lit.value <= base + eps) return;
-        delta = a * (lit.value - base);
-      } else if (a < 0.0 && !lit.is_lb) {
-        if (std::isfinite(prev_bound_value)) {
-          base = prev_bound_value;
-        } else if (std::isfinite(root_ub[j])) {
-          base = root_ub[j];
-        } else {
-          return;
-        }
-        if (lit.value >= base - eps) return;
-        delta = a * (lit.value - base);
-      } else {
-        return;
-      }
-      if (!std::isfinite(delta) || delta <= proof_tol * 1e-4) return;
-      if (reason.empty()) reason.push_back(lit);
-      canonicalize_branch_literals(reason);
-      trail_candidates.push_back(
-          TrailCandidate{lit, std::move(reason), delta, base,
-                         literal_priority(lit), trail_pos, prev_bound_pos,
-                         from_reason_bound});
-    };
-
-    if (have_native_trail) {
-      for (const auto& entry : *local_domain_trail) {
-        if (entry.pos < 0 || entry.pos >= target_pos ||
-            entry.bound.var_idx == target) {
-          continue;
-        }
-        add_trail_candidate(entry.bound, entry.reason, entry.pos,
-                            entry.prev_bound_pos, entry.prev_bound_value,
-                            !entry.is_branch);
-      }
-    } else {
-      for (int pos = 0; pos < static_cast<int>(branch_reasons.size()); ++pos) {
-        const BranchDomainLiteral& lit =
-            branch_reasons[static_cast<std::size_t>(pos)];
-        add_trail_candidate(lit, {lit}, pos, -1,
-                            lit.is_lb ? root_lb[lit.var_idx]
-                                      : root_ub[lit.var_idx],
-                            false);
-      }
-      for (const auto& rb : reason_bounds) {
-        if (rb.trail_pos < 0 || rb.trail_pos >= target_pos ||
-            rb.bound.var_idx == target) {
-          continue;
-        }
-        add_trail_candidate(rb.bound, rb.reason, rb.trail_pos,
-                            rb.prev_bound_pos, rb.prev_bound_value, true);
-      }
-    }
-    if (trail_candidates.empty()) return false;
-
-    std::sort(trail_candidates.begin(), trail_candidates.end(),
-              [](const TrailCandidate& a, const TrailCandidate& b) {
-                if (a.priority != b.priority) return a.priority > b.priority;
-                if (a.trail_pos != b.trail_pos) return a.trail_pos < b.trail_pos;
-                if (a.delta != b.delta) return a.delta > b.delta;
-                return a.reason.size() < b.reason.size();
-              });
-
-    const double residual_root_activity =
-        root_min_activity - target_global_contribution;
-    double residual_activity = residual_root_activity;
-    std::vector<TrailCandidate> selected_candidates;
-    selected_candidates.reserve(
-        static_cast<std::size_t>(std::min(max_literals, 32)));
-    std::vector<char> used_lower(static_cast<std::size_t>(n), 0);
-    std::vector<char> used_upper(static_cast<std::size_t>(n), 0);
-    for (const auto& cand : trail_candidates) {
-      const int j = cand.proof_lit.var_idx;
-      char& used = cand.proof_lit.is_lb
-          ? used_lower[static_cast<std::size_t>(j)]
-          : used_upper[static_cast<std::size_t>(j)];
-      if (used != 0) continue;
-      used = 1;
-      selected_candidates.push_back(cand);
-      residual_activity += cand.delta;
-      if (residual_activity >= required_activity - proof_tol) break;
-      if (static_cast<int>(selected_candidates.size()) >=
-          std::max(max_literals, 2 * max_literals)) {
-        break;
-      }
-    }
-    if (residual_activity < required_activity - proof_tol) return false;
-
-    // This mirrors HiGHS ConflictSet::resolveLinearLeq(): after enough local
-    // bound changes cover the proof row, relax or drop late changes while the
-    // target bound remains implied.  The resulting proof literals are the
-    // first-class bound-lifting certificate, not just a conflict heuristic.
-    for (int k = static_cast<int>(selected_candidates.size()) - 1; k >= 0; --k) {
-      auto& cand = selected_candidates[static_cast<std::size_t>(k)];
-      const int j = cand.proof_lit.var_idx;
-      const double a = coeff[static_cast<std::size_t>(j)];
-      const double without = residual_activity - cand.delta;
-      if (cand.proof_lit.is_lb) {
-        if (a <= 0.0) continue;
-        double relax_lb = (required_activity - without) / a + cand.base_bound;
-        if (is_integer_type(vars[static_cast<std::size_t>(j)])) {
-          relax_lb = std::ceil(relax_lb - eps);
-        }
-        if (!std::isfinite(relax_lb) ||
-            relax_lb >= cand.proof_lit.value - proof_tol) {
-          continue;
-        }
-        if (relax_lb <= cand.base_bound + eps) {
-          residual_activity = without;
-          selected_candidates.erase(selected_candidates.begin() + k);
-        } else {
-          if (have_native_trail) {
-            int p = cand.prev_bound_pos;
-            while (p >= 0 &&
-                   p < static_cast<int>(local_domain_trail->size()) &&
-                   relax_lb <=
-                       (*local_domain_trail)[static_cast<std::size_t>(p)]
-                               .bound.value +
-                           eps) {
-              cand.trail_pos = p;
-              cand.prev_bound_pos =
-                  (*local_domain_trail)[static_cast<std::size_t>(p)]
-                      .prev_bound_pos;
-              p = cand.prev_bound_pos;
-            }
-          }
-          residual_activity += a * (relax_lb - cand.proof_lit.value);
-          cand.proof_lit.value = relax_lb;
-          if (!cand.from_reason_bound) {
-            cand.reason = {cand.proof_lit};
-          }
-        }
-      } else {
-        if (a >= 0.0) continue;
-        double relax_ub = (required_activity - without) / a + cand.base_bound;
-        if (is_integer_type(vars[static_cast<std::size_t>(j)])) {
-          relax_ub = std::floor(relax_ub + eps);
-        }
-        if (!std::isfinite(relax_ub) ||
-            relax_ub <= cand.proof_lit.value + proof_tol) {
-          continue;
-        }
-        if (relax_ub >= cand.base_bound - eps) {
-          residual_activity = without;
-          selected_candidates.erase(selected_candidates.begin() + k);
-        } else {
-          if (have_native_trail) {
-            int p = cand.prev_bound_pos;
-            while (p >= 0 &&
-                   p < static_cast<int>(local_domain_trail->size()) &&
-                   relax_ub >=
-                       (*local_domain_trail)[static_cast<std::size_t>(p)]
-                               .bound.value -
-                           eps) {
-              cand.trail_pos = p;
-              cand.prev_bound_pos =
-                  (*local_domain_trail)[static_cast<std::size_t>(p)]
-                      .prev_bound_pos;
-              p = cand.prev_bound_pos;
-            }
-          }
-          residual_activity += a * (relax_ub - cand.proof_lit.value);
-          cand.proof_lit.value = relax_ub;
-          if (!cand.from_reason_bound) {
-            cand.reason = {cand.proof_lit};
-          }
-        }
-      }
-      if (residual_activity <= required_activity + proof_tol) break;
-    }
-    if (selected_candidates.empty() ||
-        residual_activity < required_activity - proof_tol) {
-      return false;
-    }
-
-    std::vector<BranchDomainLiteral> proof_frontier;
-    std::vector<BranchDomainLiteral> reason_frontier;
-    proof_frontier.reserve(selected_candidates.size());
-    for (const auto& cand : selected_candidates) {
-      proof_frontier.push_back(cand.proof_lit);
-      reason_frontier.insert(reason_frontier.end(), cand.reason.begin(),
-                             cand.reason.end());
-    }
-    if (have_native_trail && local_branch_positions != nullptr &&
-        !local_branch_positions->empty()) {
-      std::vector<TrailCandidate> frontier = selected_candidates;
-      int depth = static_cast<int>(local_branch_positions->size());
-      while (depth > 0) {
-        const int branch_pos =
-            (*local_branch_positions)[static_cast<std::size_t>(depth - 1)];
-        if (branch_pos < 0 ||
-            branch_pos >= static_cast<int>(local_domain_trail->size())) {
-          break;
-        }
-        const auto& branch_entry =
-            (*local_domain_trail)[static_cast<std::size_t>(branch_pos)];
-        if (std::abs(branch_entry.bound.value -
-                     branch_entry.prev_bound_value) > eps) {
-          break;
-        }
-        --depth;
-      }
-      const int start_pos =
-          depth <= 0 ? 0
-                     : (*local_branch_positions)[static_cast<std::size_t>(depth - 1)] + 1;
-      bool changed = true;
-      int resolved = 0;
-      while (changed && resolved < 16) {
-        changed = false;
-        int latest = -1;
-        int latest_idx = -1;
-        for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
-          const int pos = frontier[static_cast<std::size_t>(i)].trail_pos;
-          if (pos >= start_pos && pos > latest) {
-            latest = pos;
-            latest_idx = i;
-          }
-        }
-        if (latest_idx < 0) break;
-        const auto& entry =
-            (*local_domain_trail)[static_cast<std::size_t>(latest)];
-        if (entry.is_branch || entry.reason.empty()) break;
-        TrailCandidate resolved_cand =
-            frontier[static_cast<std::size_t>(latest_idx)];
-        frontier.erase(frontier.begin() + latest_idx);
-        for (const auto& lit : entry.reason) {
-          for (const auto& prior : *local_domain_trail) {
-            if (prior.pos >= latest || prior.bound.var_idx != lit.var_idx ||
-                prior.bound.is_lb != lit.is_lb) {
-              continue;
-            }
-            const bool strong_enough = lit.is_lb
-                ? prior.bound.value >= lit.value - eps
-                : prior.bound.value <= lit.value + eps;
-            if (!strong_enough) continue;
-            TrailCandidate repl = resolved_cand;
-            repl.proof_lit = lit;
-            repl.reason = prior.reason.empty() ? std::vector<BranchDomainLiteral>{lit}
-                                               : prior.reason;
-            repl.trail_pos = prior.pos;
-            repl.prev_bound_pos = prior.prev_bound_pos;
-            repl.from_reason_bound = !prior.is_branch;
-            frontier.push_back(std::move(repl));
-            break;
-          }
-        }
-        changed = true;
-        ++resolved;
-      }
-      proof_frontier.clear();
-      reason_frontier.clear();
-      for (const auto& cand : frontier) {
-        proof_frontier.push_back(cand.proof_lit);
-        reason_frontier.insert(reason_frontier.end(), cand.reason.begin(),
-                               cand.reason.end());
-      }
-    }
-    canonicalize_branch_literals(proof_frontier);
-    canonicalize_branch_literals(reason_frontier);
-    if (static_cast<int>(reason_frontier.size()) + 1 > max_literals) {
-      return false;
-    }
-
-    BranchDomainLiteral proved_target_lit = target_lit;
-    const double raw_bound = (dual_proof->rhs - residual_activity) / a0;
-    if (std::isfinite(raw_bound)) {
-      double strengthened = raw_bound;
-      if (integer_target) {
-        strengthened = target_lit.is_lb
-            ? std::ceil(strengthened - 10.0 * int_tol)
-            : std::floor(strengthened + 10.0 * int_tol);
-      } else {
-        strengthened += target_lit.is_lb ? -1e-7 : 1e-7;
-      }
-      if (target_lit.is_lb) {
-        proved_target_lit.value =
-            std::max(proved_target_lit.value, strengthened);
-      } else {
-        proved_target_lit.value =
-            std::min(proved_target_lit.value, strengthened);
-      }
-    }
-
-    auto flipped_literal = [&](const BranchDomainLiteral& lit,
-                               BranchDomainLiteral& out) -> bool {
-      if (lit.var_idx < 0 || lit.var_idx >= n || !std::isfinite(lit.value)) {
-        return false;
-      }
-      const bool integer_var =
-          is_integer_type(vars[static_cast<std::size_t>(lit.var_idx)]);
-      if (lit.is_lb) {
-        out = BranchDomainLiteral{
-            lit.var_idx,
-            integer_var ? std::ceil(lit.value - 1e-9) - 1.0
-                        : lit.value - 1e-7,
-            false};
-      } else {
-        out = BranchDomainLiteral{
-            lit.var_idx,
-            integer_var ? std::floor(lit.value + 1e-9) + 1.0
-                        : lit.value + 1e-7,
-            true};
-      }
-      return true;
-    };
-    BranchDomainLiteral flipped;
-    const bool target_was_strengthened =
-        std::abs(proved_target_lit.value - target_lit.value) >
-        std::max(1e-9, int_tol);
-    if (target_bound.has_source_conflict_literal && !target_was_strengthened) {
-      flipped = target_bound.source_conflict_literal;
-    } else if (!flipped_literal(proved_target_lit, flipped)) {
-      return false;
-    }
-
-    const double selected_delta = residual_activity - residual_root_activity;
-    const double proof_budget = dual_proof->rhs - root_min_activity;
-    const bool cutoff_conflict =
-        selected_delta >
-        proof_budget + std::max(1e-7, 1e-10 * (1.0 + std::abs(proof_budget)));
-
-    std::vector<BranchDomainLiteral> clause = reason_frontier;
-    if (!cutoff_conflict) clause.push_back(flipped);
-    canonicalize_branch_literals(clause);
-    if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
-      return false;
-    }
-
-    double best_violation = 0.0;
-    if (violated_local_proof_cover != nullptr) {
-      struct ProofTerm {
-        BranchDomainLiteral lit;
-        double coeff{0.0};
-        double root_bound{0.0};
-        double lp_activity{0.0};
-      };
-      auto make_proof_term = [&](const BranchDomainLiteral& lit,
-                                 ProofTerm& term) -> bool {
-        if (lit.var_idx < 0 || lit.var_idx >= n) return false;
-        const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
-        if (a > 0.0 && lit.is_lb) {
-          if (!std::isfinite(root_lb[lit.var_idx])) return false;
-          term = ProofTerm{lit, a, root_lb[lit.var_idx],
-                           a * (x_relax[lit.var_idx] - root_lb[lit.var_idx])};
-          return true;
-        }
-        if (a < 0.0 && !lit.is_lb) {
-          if (!std::isfinite(root_ub[lit.var_idx])) return false;
-          term = ProofTerm{lit, a, root_ub[lit.var_idx],
-                           a * (x_relax[lit.var_idx] - root_ub[lit.var_idx])};
-          return true;
-        }
-        return false;
-      };
-      std::vector<ProofTerm> terms;
-      terms.reserve(proof_frontier.size() + 1);
-      std::vector<char> used_var(static_cast<std::size_t>(n), 0);
-      auto add_term = [&](const BranchDomainLiteral& lit) {
-        ProofTerm term;
-        if (!make_proof_term(lit, term)) return false;
-        if (used_var[static_cast<std::size_t>(lit.var_idx)] == 0) {
-          used_var[static_cast<std::size_t>(lit.var_idx)] = 1;
-          terms.push_back(term);
-        }
-        return true;
-      };
-      bool cover_valid = cutoff_conflict || add_term(flipped);
-      for (const auto& lit : proof_frontier) {
-        cover_valid = add_term(lit) && cover_valid;
-      }
-      if (cover_valid && !terms.empty()) {
-        Eigen::SparseVector<double> cover_coeff(n);
-        cover_coeff.reserve(static_cast<int>(terms.size()));
-        double cover_rhs = dual_proof->rhs - root_min_activity;
-        double norm2 = 0.0;
-        for (const auto& term : terms) {
-          cover_coeff.coeffRef(term.lit.var_idx) += term.coeff;
-          cover_rhs += term.coeff * term.root_bound;
-          norm2 += term.coeff * term.coeff;
-        }
-        cover_coeff.prune(0.0);
-        const double lhs = cover_coeff.dot(x_relax);
-        const double scale = 1.0 + std::abs(lhs) + std::abs(cover_rhs);
-        const double cut_tol = std::max(1e-7, 1e-10 * scale);
-        if (lhs > cover_rhs + cut_tol) {
-          best_violation = lhs - cover_rhs;
-          *violated_local_proof_cover =
-              PoolCut{std::move(cover_coeff), cover_rhs, 0, 0.0,
-                      std::sqrt(norm2), 0};
-        }
-      }
-    }
-
-    if (proof_margin != nullptr) {
-      *proof_margin = residual_activity - required_activity;
-    }
-    if (explanation != nullptr) {
-      explanation->valid = true;
-      explanation->cutoff_conflict = cutoff_conflict;
-      explanation->has_proved_target_bound = true;
-      explanation->proved_target_bound = proved_target_lit;
-      explanation->flipped_target = flipped;
-      explanation->initial_frontier = std::move(proof_frontier);
-      explanation->resolved_frontier = reason_frontier;
-      explanation->clause = clause;
-      explanation->proof_margin = residual_activity - required_activity;
-      explanation->proof_budget = proof_budget;
-      explanation->frontier_lp_activity = 0.0;
-      for (const auto& lit : explanation->initial_frontier) {
-        explanation->frontier_lp_activity += literal_delta(lit);
-      }
-      explanation->local_proof_cover_violation = best_violation;
-      explanation->local_proof_cover_nnz =
-          violated_local_proof_cover != nullptr &&
-                  violated_local_proof_cover->coeff.size() == n
-              ? violated_local_proof_cover->coeff.nonZeros()
-              : 0;
-    }
-    out_clause = std::move(clause);
-    return true;
-  };
-  if (try_highs_style_bound_lifting_certificate()) {
-    return true;
-  }
-
-  auto reason_touches_target = [&](const std::vector<BranchDomainLiteral>& lits) {
-    for (const auto& lit : lits) {
-      if (lit.var_idx == target) return true;
-    }
-    return false;
-  };
-
-  struct Candidate {
-    std::vector<BranchDomainLiteral> proof_literals;
-    std::vector<BranchDomainLiteral> reason;
-    double delta{0.0};
-    double priority{0.0};
-    int trail_pos{-1};
-  };
-  std::vector<Candidate> candidates;
-  candidates.reserve(branch_reasons.size() + reason_bounds.size());
-  for (int bpos = 0; bpos < static_cast<int>(branch_reasons.size()); ++bpos) {
-    const auto& lit = branch_reasons[static_cast<std::size_t>(bpos)];
-    if (target_bound.trail_pos >= 0 && bpos >= target_bound.trail_pos) {
-      continue;
-    }
-    if (lit.var_idx == target) continue;
-    const double delta = literal_delta(lit);
-    if (delta > 1e-10) {
-      candidates.push_back({{lit}, {lit}, delta, literal_priority(lit), bpos});
-    }
-  }
-  for (const auto& rb : reason_bounds) {
-    if (target_bound.trail_pos >= 0 &&
-        (rb.trail_pos < 0 || rb.trail_pos >= target_bound.trail_pos)) {
-      continue;
-    }
-    if (rb.bound.var_idx == target || reason_touches_target(rb.reason)) continue;
-    const double delta = literal_delta(rb.bound);
-    if (delta > 1e-10) {
-      candidates.push_back(
-          {{rb.bound}, rb.reason, delta, literal_priority(rb.bound), rb.trail_pos});
-    }
-  }
-  std::sort(candidates.begin(), candidates.end(),
-            [](const Candidate& a, const Candidate& b) {
-              if (a.priority != b.priority) return a.priority > b.priority;
-              if (a.delta != b.delta) return a.delta > b.delta;
-              if (a.reason.size() != b.reason.size()) {
-                return a.reason.size() < b.reason.size();
-              }
-              return a.trail_pos > b.trail_pos;
-            });
-
-  const double tol =
-      std::max(1e-7, 1e-10 * (1.0 + std::abs(required_activity)));
-  struct Selection {
-    std::vector<int> selected;
-    std::vector<BranchDomainLiteral> frontier_literals;
-    double activity{0.0};
-    double priority{0.0};
-    bool valid{false};
-  };
-
-  auto build_selection = [&](const std::vector<int>& order,
-                             bool use_reason_frontier) {
-    Selection sel;
-    sel.activity = root_min_activity - target_global_contribution;
-    for (int idx : order) {
-      if (sel.activity >= required_activity - tol) break;
-      const Candidate& cand = candidates[static_cast<std::size_t>(idx)];
-      std::vector<BranchDomainLiteral> trial = sel.frontier_literals;
-      const auto& source_literals =
-          use_reason_frontier ? cand.reason : cand.proof_literals;
-      trial.insert(trial.end(), source_literals.begin(),
-                   source_literals.end());
-      canonicalize_branch_literals(trial);
-      if (static_cast<int>(trial.size()) + 1 > max_literals) continue;
-      if (static_cast<int>(sel.selected.size()) >=
-          std::max(max_literals, 2 * max_literals)) {
-        continue;
-      }
-      sel.selected.push_back(idx);
-      sel.frontier_literals.swap(trial);
-      sel.activity += cand.delta;
-      sel.priority += cand.priority;
-    }
-    if (sel.activity < required_activity - tol) return sel;
-
-    bool changed = true;
-    while (changed && !sel.selected.empty()) {
-      changed = false;
-      for (std::size_t p = 0; p < sel.selected.size(); ++p) {
-        const int idx = sel.selected[p];
-        const double trial_activity =
-            sel.activity - candidates[static_cast<std::size_t>(idx)].delta;
-        if (trial_activity < required_activity - tol) continue;
-        std::vector<int> trial_selected = sel.selected;
-        trial_selected.erase(trial_selected.begin() + static_cast<std::ptrdiff_t>(p));
-        std::vector<BranchDomainLiteral> trial_frontier;
-        for (int kept : trial_selected) {
-          const auto& kept_cand = candidates[static_cast<std::size_t>(kept)];
-          const auto& lits =
-              use_reason_frontier ? kept_cand.reason : kept_cand.proof_literals;
-          trial_frontier.insert(trial_frontier.end(), lits.begin(), lits.end());
-        }
-        canonicalize_branch_literals(trial_frontier);
-        if (static_cast<int>(trial_frontier.size()) + 1 > max_literals) continue;
-        sel.selected.swap(trial_selected);
-        sel.frontier_literals.swap(trial_frontier);
-        sel.activity = trial_activity;
-        sel.priority -= candidates[static_cast<std::size_t>(idx)].priority;
-        changed = true;
-        break;
-      }
-    }
-    sel.valid = true;
-    return sel;
-  };
-
-  std::vector<int> delta_order(candidates.size());
-  for (int i = 0; i < static_cast<int>(delta_order.size()); ++i) {
-    delta_order[static_cast<std::size_t>(i)] = i;
-  }
-  std::vector<int> efficiency_order = delta_order;
-  std::sort(efficiency_order.begin(), efficiency_order.end(),
-            [&](int lhs, int rhs) {
-              const Candidate& a = candidates[static_cast<std::size_t>(lhs)];
-              const Candidate& b = candidates[static_cast<std::size_t>(rhs)];
-              const double ea =
-                  a.delta / static_cast<double>(std::max<std::size_t>(1, a.reason.size()));
-              const double eb =
-                  b.delta / static_cast<double>(std::max<std::size_t>(1, b.reason.size()));
-              if (ea != eb) return ea > eb;
-              if (a.reason.size() != b.reason.size()) {
-                return a.reason.size() < b.reason.size();
-              }
-              return a.delta > b.delta;
-            });
-  std::vector<int> priority_order = delta_order;
-  std::sort(priority_order.begin(), priority_order.end(),
-            [&](int lhs, int rhs) {
-              const Candidate& a = candidates[static_cast<std::size_t>(lhs)];
-              const Candidate& b = candidates[static_cast<std::size_t>(rhs)];
-              if (a.priority != b.priority) return a.priority > b.priority;
-              if (a.delta != b.delta) return a.delta > b.delta;
-              if (a.reason.size() != b.reason.size()) {
-                return a.reason.size() < b.reason.size();
-              }
-              return a.trail_pos > b.trail_pos;
-            });
-  std::vector<int> short_order = delta_order;
-  std::sort(short_order.begin(), short_order.end(),
-            [&](int lhs, int rhs) {
-              const Candidate& a = candidates[static_cast<std::size_t>(lhs)];
-              const Candidate& b = candidates[static_cast<std::size_t>(rhs)];
-              if (a.reason.size() != b.reason.size()) {
-                return a.reason.size() < b.reason.size();
-              }
-              if (a.delta != b.delta) return a.delta > b.delta;
-              return a.trail_pos > b.trail_pos;
-            });
-
-  Selection best;
-  auto consider_selection = [&](Selection trial) {
-    if (!trial.valid) return;
-    if (!best.valid ||
-        trial.frontier_literals.size() < best.frontier_literals.size() ||
-        (trial.frontier_literals.size() == best.frontier_literals.size() &&
-         trial.selected.size() < best.selected.size()) ||
-        (trial.frontier_literals.size() == best.frontier_literals.size() &&
-         trial.selected.size() == best.selected.size() &&
-         trial.priority > best.priority) ||
-        (trial.frontier_literals.size() == best.frontier_literals.size() &&
-         trial.selected.size() == best.selected.size() &&
-         trial.priority == best.priority &&
-         trial.activity > best.activity)) {
-      best = std::move(trial);
-    }
-  };
-  consider_selection(build_selection(priority_order, /*use_reason_frontier=*/true));
-  consider_selection(build_selection(delta_order, /*use_reason_frontier=*/true));
-  consider_selection(build_selection(efficiency_order, /*use_reason_frontier=*/true));
-  consider_selection(build_selection(short_order, /*use_reason_frontier=*/true));
-  consider_selection(build_selection(priority_order, /*use_reason_frontier=*/false));
-  consider_selection(build_selection(delta_order, /*use_reason_frontier=*/false));
-  consider_selection(build_selection(efficiency_order, /*use_reason_frontier=*/false));
-  consider_selection(build_selection(short_order, /*use_reason_frontier=*/false));
-  if (!best.valid) return false;
-
-  std::vector<int> selected = std::move(best.selected);
-  std::vector<BranchDomainLiteral> frontier_literals =
-      std::move(best.frontier_literals);
-  explained_activity = best.activity;
-  double selected_delta = 0.0;
-  for (int idx : selected) {
-    selected_delta += candidates[static_cast<std::size_t>(idx)].delta;
-  }
-  const double proof_budget = dual_proof->rhs - root_min_activity;
-  const bool cutoff_conflict =
-      selected_delta >
-      proof_budget + std::max(1e-7, 1e-10 * (1.0 + std::abs(proof_budget)));
-
-  BranchDomainLiteral proved_target_lit = target_lit;
-  {
-    const double raw_bound = (dual_proof->rhs - explained_activity) / a0;
-    if (std::isfinite(raw_bound)) {
-      double strengthened = raw_bound;
-      if (integer_target) {
-        strengthened = target_lit.is_lb
-            ? std::ceil(strengthened - 10.0 * int_tol)
-            : std::floor(strengthened + 10.0 * int_tol);
-      } else {
-        strengthened += target_lit.is_lb ? -1e-7 : 1e-7;
-      }
-      if (target_lit.is_lb) {
-        if (strengthened > proved_target_lit.value) {
-          proved_target_lit.value = strengthened;
-        }
-      } else {
-        if (strengthened < proved_target_lit.value) {
-          proved_target_lit.value = strengthened;
-        }
-      }
-    }
-  }
-
-  auto flipped_literal = [&](const BranchDomainLiteral& lit,
-                             BranchDomainLiteral& out) -> bool {
-    if (lit.var_idx < 0 || lit.var_idx >= n || !std::isfinite(lit.value)) {
-      return false;
-    }
-    const bool integer_var =
-        is_integer_type(vars[static_cast<std::size_t>(lit.var_idx)]);
-    if (lit.is_lb) {
-      out = BranchDomainLiteral{
-          lit.var_idx,
-          integer_var ? std::ceil(lit.value - 1e-9) - 1.0 : lit.value - 1e-7,
-          false};
-    } else {
-      out = BranchDomainLiteral{
-          lit.var_idx,
-          integer_var ? std::floor(lit.value + 1e-9) + 1.0 : lit.value + 1e-7,
-          true};
-    }
-    return true;
-  };
-
-  BranchDomainLiteral flipped;
-  const bool target_was_strengthened =
-      std::abs(proved_target_lit.value - target_lit.value) >
-      std::max(1e-9, int_tol);
-  if (target_bound.has_source_conflict_literal && !target_was_strengthened) {
-    flipped = target_bound.source_conflict_literal;
-  } else if (!flipped_literal(proved_target_lit, flipped)) {
-    return false;
-  }
-
-  const int target_pos = target_bound.trail_pos >= 0
-      ? target_bound.trail_pos
-      : static_cast<int>(branch_reasons.size() + reason_bounds.size());
-
-  auto literal_pos = [&](const BranchDomainLiteral& lit) {
-    int best_pos = -1;
-    for (int i = 0; i < static_cast<int>(branch_reasons.size()); ++i) {
-      if (branch_literal_stronger_or_equal(
-              branch_reasons[static_cast<std::size_t>(i)], lit)) {
-        best_pos = std::max(best_pos, i);
-      }
-    }
-    for (const auto& rb : reason_bounds) {
-      if (rb.trail_pos < 0 || rb.trail_pos >= target_pos) continue;
-      if (branch_literal_stronger_or_equal(rb.bound, lit)) {
-        best_pos = std::max(best_pos, rb.trail_pos);
-      }
-    }
-    return best_pos;
-  };
-
-  auto find_earlier_reason_bound = [&](const BranchDomainLiteral& lit)
-      -> const DomainReasonBound* {
-    const DomainReasonBound* best_reason = nullptr;
-    int best_pos = -1;
-    for (const auto& rb : reason_bounds) {
-      if (rb.trail_pos < 0 || rb.trail_pos >= target_pos ||
-          rb.reason.empty()) {
-        continue;
-      }
-      if (!branch_literal_stronger_or_equal(rb.bound, lit)) continue;
-      if (rb.trail_pos > best_pos) {
-        best_pos = rb.trail_pos;
-        best_reason = &rb;
-      }
-    }
-    return best_reason;
-  };
-
-  auto frontier_quality = [&](const std::vector<BranchDomainLiteral>& frontier) {
-    double quality = -static_cast<double>(frontier.size());
-    for (const auto& lit : frontier) {
-      if (lit.var_idx < 0 || lit.var_idx >= n) continue;
-      const bool binary =
-          vars[static_cast<std::size_t>(lit.var_idx)].type == VarType::Binary;
-      const bool binary_zero = binary && !lit.is_lb && lit.value <= int_tol;
-      const bool binary_one = binary && lit.is_lb && lit.value >= 1.0 - int_tol;
-      if (binary_zero || binary_one) quality += 1000.0;
-      quality += 1e-3 * literal_priority(lit);
-      quality += 1e-6 * literal_delta(lit);
-      const int pos = literal_pos(lit);
-      if (pos >= 0) quality += 1e-9 * static_cast<double>(pos);
-    }
-    return quality;
-  };
-
-  auto resolve_reason_frontier =
-      [&](std::vector<BranchDomainLiteral> frontier, int literal_budget,
-          int stop_size) {
-    canonicalize_branch_literals(frontier);
-    std::vector<BranchDomainLiteral> best_frontier = frontier;
-    double best_quality = frontier_quality(best_frontier);
-    std::unordered_set<std::size_t> seen_frontiers;
-    for (int iter = 0; iter < 32; ++iter) {
-      const std::size_t h = conflict_clause_hash(frontier);
-      if (!seen_frontiers.insert(h).second) break;
-      int best_idx = -1;
-      int best_pos = -1;
-      const DomainReasonBound* replacement = nullptr;
-      int resolvable_count = 0;
-      for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
-        const auto* reason =
-            find_earlier_reason_bound(frontier[static_cast<std::size_t>(i)]);
-        if (reason == nullptr || reason->reason.empty()) continue;
-        ++resolvable_count;
-        const int pos = std::max(reason->trail_pos,
-                                 literal_pos(frontier[static_cast<std::size_t>(i)]));
-        if (pos > best_pos) {
-          best_pos = pos;
-          best_idx = i;
-          replacement = reason;
-        }
-      }
-      if (best_idx < 0 || replacement == nullptr ||
-          (static_cast<int>(frontier.size()) <= stop_size &&
-           resolvable_count <= stop_size)) {
-        break;
-      }
-      std::vector<BranchDomainLiteral> trial;
-      trial.reserve(frontier.size() + replacement->reason.size());
-      for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
-        if (i == best_idx) continue;
-        trial.push_back(frontier[static_cast<std::size_t>(i)]);
-      }
-      trial.insert(trial.end(), replacement->reason.begin(),
-                   replacement->reason.end());
-      canonicalize_branch_literals(trial);
-      if (trial.empty() || static_cast<int>(trial.size()) > literal_budget) {
-        break;
-      }
-      frontier.swap(trial);
-      const double quality = frontier_quality(frontier);
-      if (frontier.size() < best_frontier.size() ||
-          (frontier.size() == best_frontier.size() &&
-           quality > best_quality)) {
-        best_frontier = frontier;
-        best_quality = quality;
-      }
-      if (static_cast<int>(frontier.size()) <= stop_size) {
-        best_frontier = frontier;
-        break;
-      }
-    }
-    return best_frontier;
-  };
-
-  std::vector<BranchDomainLiteral> initial_frontier = frontier_literals;
-  canonicalize_branch_literals(initial_frontier);
-  frontier_literals = resolve_reason_frontier(
-      frontier_literals, max_literals - (cutoff_conflict ? 0 : 1), 1);
-
-  std::vector<BranchDomainLiteral> clause = frontier_literals;
-  if (!cutoff_conflict) clause.push_back(flipped);
-  canonicalize_branch_literals(clause);
-  if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
-    return false;
-  }
-
-  if (violated_local_proof_cover != nullptr) {
-    struct ProofTerm {
-      BranchDomainLiteral lit;
-      double coeff{0.0};
-      double root_bound{0.0};
-      double lp_activity{0.0};
-      double proof_activity{0.0};
-    };
-    auto make_proof_term = [&](const BranchDomainLiteral& lit,
-                               ProofTerm& term) -> bool {
-      if (lit.var_idx < 0 || lit.var_idx >= n) return false;
-      const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
-      if (a > 0.0 && lit.is_lb) {
-        if (!std::isfinite(root_lb[lit.var_idx])) return false;
-        term = ProofTerm{lit, a, root_lb[lit.var_idx],
-                         a * (x_relax[lit.var_idx] - root_lb[lit.var_idx]),
-                         a * (lit.value - root_lb[lit.var_idx])};
-        return true;
-      }
-      if (a < 0.0 && !lit.is_lb) {
-        if (!std::isfinite(root_ub[lit.var_idx])) return false;
-        term = ProofTerm{lit, a, root_ub[lit.var_idx],
-                         a * (x_relax[lit.var_idx] - root_ub[lit.var_idx]),
-                         a * (lit.value - root_ub[lit.var_idx])};
-        return true;
-      }
-      return false;
-    };
-    auto add_unique_proof_term = [&](const BranchDomainLiteral& lit,
-                                     std::vector<ProofTerm>& terms,
-                                     std::vector<char>& used_var) -> bool {
-      ProofTerm term;
-      if (!make_proof_term(lit, term)) return false;
-      if (used_var[static_cast<std::size_t>(lit.var_idx)] != 0) return true;
-      used_var[static_cast<std::size_t>(lit.var_idx)] = 1;
-      terms.push_back(term);
-      return true;
-    };
-    auto emit_if_violated = [&](const std::vector<ProofTerm>& terms,
-                                PoolCut& out, double& violation) {
-      violation = 0.0;
-      if (terms.empty()) return;
-      Eigen::SparseVector<double> cover_coeff(n);
-      cover_coeff.reserve(static_cast<int>(terms.size()));
-      double cover_rhs = dual_proof->rhs - root_min_activity;
-      double norm2 = 0.0;
-      for (const auto& term : terms) {
-        cover_coeff.coeffRef(term.lit.var_idx) += term.coeff;
-        cover_rhs += term.coeff * term.root_bound;
-        norm2 += term.coeff * term.coeff;
-      }
-      cover_coeff.prune(0.0);
-      const double lhs = cover_coeff.dot(x_relax);
-      const double scale = 1.0 + std::abs(lhs) + std::abs(cover_rhs);
-      const double tol = std::max(1e-7, 1e-10 * scale);
-      if (lhs > cover_rhs + tol) {
-        violation = lhs - cover_rhs;
-        out = PoolCut{std::move(cover_coeff), cover_rhs, 0, 0.0,
-                      std::sqrt(norm2), 0};
-      }
-    };
-
-    std::vector<ProofTerm> terms;
-    terms.reserve(selected.size() + 1);
-    std::vector<char> used_var(static_cast<std::size_t>(n), 0);
-    bool proof_cover_valid =
-        cutoff_conflict ? true : add_unique_proof_term(flipped, terms, used_var);
-    for (int idx : selected) {
-      for (const auto& lit :
-           candidates[static_cast<std::size_t>(idx)].proof_literals) {
-        proof_cover_valid =
-            add_unique_proof_term(lit, terms, used_var) && proof_cover_valid;
-      }
-    }
-    double selected_lp_activity = 0.0;
-    for (const auto& term : terms) {
-      selected_lp_activity += term.lp_activity;
-    }
-    PoolCut best_cover;
-    double best_violation = 0.0;
-    if (proof_cover_valid) {
-      emit_if_violated(terms, best_cover, best_violation);
-    }
-
-    // HiGHS' resolveLinearLeq/Geq explains a target bound change from the row
-    // proof activity, not from the target count.  If the minimal selected
-    // frontier is not violated at the current LP point, try one extra local
-    // proof-cover row using the same target's reason-side candidates ordered by
-    // their current LP activity.  This remains node-local: it is just the
-    // objective-cutoff proof row restricted to variables whose local bounds
-    // already contribute to the proof.
-    std::vector<ProofTerm> activity_terms;
-    activity_terms.reserve(static_cast<std::size_t>(max_literals));
-    std::vector<char> activity_used(static_cast<std::size_t>(n), 0);
-    bool activity_valid =
-        cutoff_conflict ? true
-                        : add_unique_proof_term(flipped, activity_terms,
-                                                activity_used);
-    struct PotentialTerm {
-      ProofTerm term;
-      double score{0.0};
-    };
-    std::vector<PotentialTerm> potential_terms;
-    potential_terms.reserve(candidates.size());
-    for (const auto& cand : candidates) {
-      for (const auto& lit : cand.proof_literals) {
-        ProofTerm term;
-        if (!make_proof_term(lit, term)) continue;
-        if (term.lp_activity <= 1e-9 && term.proof_activity <= 1e-9) continue;
-        const double priority = literal_priority(lit);
-        potential_terms.push_back(
-            PotentialTerm{term, std::max(0.0, term.lp_activity) +
-                                    1e-3 * std::max(0.0, term.proof_activity) +
-                                    1e-2 * priority});
-      }
-    }
-    std::sort(potential_terms.begin(), potential_terms.end(),
-              [](const PotentialTerm& a, const PotentialTerm& b) {
-                if (a.score != b.score) return a.score > b.score;
-                if (a.term.lp_activity != b.term.lp_activity) {
-                  return a.term.lp_activity > b.term.lp_activity;
-                }
-                return a.term.lit.var_idx < b.term.lit.var_idx;
-              });
-    double activity_cover = 0.0;
-    for (const auto& term : activity_terms) {
-      activity_cover += term.lp_activity;
-    }
-    const double proof_budget = dual_proof->rhs - root_min_activity;
-    const double activity_tol =
-        std::max(1e-7, 1e-10 * (1.0 + std::abs(proof_budget)));
-    const int sparse_activity_cap = std::min(max_literals, 12);
-    std::vector<ProofTerm> shortest_activity_terms;
-    for (const auto& pot : potential_terms) {
-      const int var = pot.term.lit.var_idx;
-      if (var < 0 || var >= n ||
-          activity_used[static_cast<std::size_t>(var)] != 0) {
-        continue;
-      }
-      if (static_cast<int>(activity_terms.size()) >= sparse_activity_cap) break;
-      activity_used[static_cast<std::size_t>(var)] = 1;
-      activity_terms.push_back(pot.term);
-      activity_cover += pot.term.lp_activity;
-      if (shortest_activity_terms.empty() &&
-          activity_cover > proof_budget + activity_tol &&
-          static_cast<int>(activity_terms.size()) >= 2) {
-        shortest_activity_terms = activity_terms;
-      }
-    }
-    auto consider_cover = [&](const std::vector<ProofTerm>& candidate_terms,
-                              bool allow_extra) {
-      if (!activity_valid || static_cast<int>(candidate_terms.size()) < 2) {
-        return;
-      }
-      PoolCut candidate_cut;
-      double candidate_violation = 0.0;
-      emit_if_violated(candidate_terms, candidate_cut, candidate_violation);
-      if (candidate_cut.coeff.size() != n || candidate_cut.coeff.nonZeros() <= 0) {
-        return;
-      }
-      if (candidate_violation > best_violation) {
-        if (allow_extra && best_cover.coeff.size() == n &&
-            best_cover.coeff.nonZeros() > 0 &&
-            additional_local_proof_covers != nullptr) {
-          additional_local_proof_covers->push_back(std::move(best_cover));
-        }
-        best_violation = candidate_violation;
-        best_cover = std::move(candidate_cut);
-      } else if (allow_extra && additional_local_proof_covers != nullptr) {
-        additional_local_proof_covers->push_back(std::move(candidate_cut));
-      }
-    };
-    if (activity_valid && static_cast<int>(activity_terms.size()) >= 2) {
-      consider_cover(shortest_activity_terms, true);
-      if (shortest_activity_terms.size() != activity_terms.size()) {
-        consider_cover(activity_terms, true);
-      }
-    }
-    if (best_cover.coeff.size() == n && best_cover.coeff.nonZeros() > 0) {
-      *violated_local_proof_cover = std::move(best_cover);
-    }
-    if (explanation != nullptr) {
-      explanation->proof_budget = proof_budget;
-      explanation->frontier_lp_activity = selected_lp_activity;
-      explanation->local_proof_cover_violation = best_violation;
-      explanation->local_proof_cover_nnz =
-          violated_local_proof_cover != nullptr &&
-                  violated_local_proof_cover->coeff.size() == n
-              ? violated_local_proof_cover->coeff.nonZeros()
-              : 0;
-    }
-  }
-
-  if (proof_margin != nullptr) *proof_margin = explained_activity - required_activity;
-  if (explanation != nullptr) {
-    explanation->valid = true;
-    explanation->cutoff_conflict = cutoff_conflict;
-    explanation->has_proved_target_bound = true;
-    explanation->proved_target_bound = proved_target_lit;
-    explanation->flipped_target = flipped;
-    explanation->initial_frontier = std::move(initial_frontier);
-    explanation->resolved_frontier = frontier_literals;
-    explanation->clause = clause;
-    explanation->proof_margin = explained_activity - required_activity;
-    if (explanation->proof_budget == 0.0) {
-      explanation->proof_budget = proof_budget;
-    }
-  }
-  out_clause = std::move(clause);
-  return true;
 }
 
 bool build_reduced_cost_cutoff_conflict_clause(

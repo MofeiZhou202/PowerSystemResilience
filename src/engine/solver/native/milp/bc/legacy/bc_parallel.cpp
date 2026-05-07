@@ -44,10 +44,11 @@ void detail::explorer_thread(
     SharedConflictPool& shared_conflicts,
     SharedSolutionPool& shared_sp,
     SharedIncumbent& shared_inc,
-    const LPModel& base_lp,
-    const LPModel& pre_cut_lp,
-    const StandardFormLP& base_sf,
-    const CliqueTable& clique_table,
+	    const LPModel& base_lp,
+	    const LPModel& pre_cut_lp,
+	    const StandardFormLP& base_sf,
+	    const std::vector<char>& branchable_cols,
+	    const CliqueTable& clique_table,
     const BinaryImplicationGraph& implication_graph,
     const SimplexOptions& simplex_opt,
     const BCOptions& opt,
@@ -64,7 +65,39 @@ void detail::explorer_thread(
     DeterministicTurnToken* det_token,
     const std::atomic<double>* optimality_limit) {
 
-  const int n = static_cast<int>(base_lp.vars.size());
+	  const int n = static_cast<int>(base_lp.vars.size());
+	  auto is_branchable_col = [&](int j) {
+	    return j >= 0 && j < n &&
+	           j < static_cast<int>(branchable_cols.size()) &&
+	           branchable_cols[static_cast<std::size_t>(j)] != 0;
+	  };
+	  auto fractional_branchable_indices =
+	      [&](const Eigen::VectorXd& x, const Eigen::VectorXd& lb,
+	          const Eigen::VectorXd& ub, double int_tol,
+	          std::vector<int>& out) -> bool {
+	    out.clear();
+	    const int limit =
+	        std::min(n, static_cast<int>(std::min<std::size_t>(
+	                        branchable_cols.size(),
+	                        static_cast<std::size_t>(std::min(
+	                            static_cast<int>(x.size()),
+	                            std::min(static_cast<int>(lb.size()),
+	                                     static_cast<int>(ub.size())))))));
+	    const double split_tol = std::max(1e-9, int_tol);
+	    for (int j = 0; j < limit; ++j) {
+	      if (!is_branchable_col(j)) continue;
+	      if (ub[j] - lb[j] <= split_tol) continue;
+	      const double v = std::min(ub[j], std::max(lb[j], x[j]));
+	      if (is_integral(v, int_tol)) continue;
+	      const double down_ub = std::min(ub[j], std::floor(v));
+	      const double up_lb = std::max(lb[j], std::ceil(v));
+	      if (down_ub < lb[j] - split_tol || up_lb > ub[j] + split_tol) {
+	        continue;
+	      }
+	      out.push_back(j);
+	    }
+	    return !out.empty();
+	  };
   Eigen::VectorXd root_lb(n);
   Eigen::VectorXd root_ub(n);
   for (int j = 0; j < n; ++j) {
@@ -1030,11 +1063,11 @@ void detail::explorer_thread(
         auto [s0, s1] = shared_sp.top2();
         Eigen::VectorXd xc = s0.x;
         for (int i = 0; i < n; ++i) {
-          if (!is_integer_type(base_lp.vars[i])) continue;
+	          if (!is_branchable_col(i)) continue;
           xc[i] = std::round(s0.x[i]);
         }
         for (int i = 0; i < n; ++i) {
-          if (!is_integer_type(base_lp.vars[i])) continue;
+	          if (!is_branchable_col(i)) continue;
           if (!is_integral(s0.x[i], 1e-5)) {
             xc[i] = std::round(s1.x[i]);
           }
@@ -1069,7 +1102,8 @@ void detail::explorer_thread(
                                  cur.bound);
 
     std::vector<int> frac;
-    if (!fractional_indices(base_lp.vars, cur.x_relax, opt.int_tol, frac)) {
+		    if (!fractional_branchable_indices(cur.x_relax, cur.lb, cur.ub,
+		                                       opt.int_tol, frac)) {
       if (satisfies_with_bounds(base_lp, cur.x_relax, cur.lb, cur.ub, kNodeFeasibilityTol)) {
         const double obj = objective_value(base_lp.c, cur.x_relax, base_lp.sense);
         shared_inc.try_update(cur.x_relax, obj);

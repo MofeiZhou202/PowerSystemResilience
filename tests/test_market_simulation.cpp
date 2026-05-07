@@ -793,7 +793,7 @@ TEST_CASE("Market: 备用约束验证", "[market][physics]") {
     inp.config.regulation_up_req    = 0.05;
     inp.config.regulation_down_req  = 0.05;
     inp.config.neg_reserve_req      = 0.10;
-    inp.config.pfr_reserve_req_mw   = 20.0;
+    inp.config.pfr_reserve_req_mw   = 10.0;  // G1: 0.05 * pmax200 = 10 MW max
     // 设置 PFR 系数（G1 参与 PFR）
     inp.generators[0].pfr_alpha = 0.05;
     inp.config.solve_sced = false;

@@ -192,6 +192,7 @@ Thermal or dispatchable generator.
 | `spinning_reserve_price` | `double` | 0.0 | Reserve bid ($/MWh) |
 | `regulation_up_price` | `double` | 0.0 | Reg-up bid ($/MWh) |
 | `regulation_down_price` | `double` | 0.0 | Reg-down bid ($/MWh) |
+| `pfr_alpha` | `double` | 0.0 | Primary frequency regulation coefficient: max PFR = `pfr_alpha × pmax` (0 = no PFR) |
 
 ### `Branch`
 
@@ -284,6 +285,8 @@ Solver and model configuration.
 | `solve_sced` | `bool` | `true` | Run SCED LP after SCUC |
 | `solve_lmp` | `bool` | `true` | Compute LMPs after SCED |
 | `lmp_delta` | `double` | 0.10 | Delta-neighbourhood factor for LMP re-dispatch |
+| `neg_reserve_req` | `double` | 0.0 | Negative (downward) reserve requirement (fraction of load); 0 = disabled |
+| `pfr_reserve_req_mw` | `double` | 0.0 | Primary frequency regulation requirement (MW); 0 = disabled |
 
 ### `SCUCProfiles`
 

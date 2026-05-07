@@ -56,6 +56,14 @@ add_library(mipsolvers STATIC
   src/engine/solver/native/milp/bc/legacy/bc_cglp_model.cpp
   src/engine/solver/native/milp/bc/legacy/bc_clique_table.cpp
   src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_conformance_trace.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_minlp_legacy.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_proof_artifacts.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_uc_trace.cpp
+  src/engine/solver/native/milp/bc/legacy/bc_validation.cpp
   src/engine/solver/native/milp/bc/milp_presolve.cpp
   src/engine/solver/native/milp/bc/parallel/shared_state.cpp
   src/engine/solver/native/milp/bc/parallel/parallel_search.cpp

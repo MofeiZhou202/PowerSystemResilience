@@ -66,6 +66,7 @@ struct DispatcherConfig {
   bool suppress_degenerate_frontier_remap{false};
   bool disable_partial_pricing_for_conformance{false};
   bool allow_vendored_highs_sf_backend{false};
+  bool require_vendored_highs_sf_backend{false};
 
   static DispatcherConfig from_bc_options(const BCOptions& opt) {
     DispatcherConfig c;
@@ -74,6 +75,7 @@ struct DispatcherConfig {
     c.use_simplex_lp_nodes = opt.use_simplex_lp_nodes;
     c.simplex_factor_backend = opt.simplex_factor_backend;
     c.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    c.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
     c.enable_fallback = opt.enable_lp_fallback;
     c.feas_tol = std::max(1e-10, opt.lp_tol * 0.1);
     c.opt_tol = std::max(1e-10, opt.lp_tol * 0.1);
@@ -196,6 +198,8 @@ class SolverDispatcher {
         config_.suppress_degenerate_frontier_remap;
     opts.allow_vendored_highs_sf_backend =
         config_.allow_vendored_highs_sf_backend;
+    opts.require_vendored_highs_sf_backend =
+        config_.require_vendored_highs_sf_backend;
     if (config_.disable_partial_pricing_for_conformance) {
       opts.use_partial_pricing = false;
       opts.perturb_degenerate_primal = false;
