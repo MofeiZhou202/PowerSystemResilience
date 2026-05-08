@@ -65,8 +65,9 @@ void detail::explorer_thread(
     DeterministicTurnToken* det_token,
     const std::atomic<double>* optimality_limit) {
 
-	  const int n = static_cast<int>(base_lp.vars.size());
-	  auto is_branchable_col = [&](int j) {
+		  const int n = static_cast<int>(base_lp.vars.size());
+		  const bool strict_highs_lp_contract = opt.use_vendored_highs_lp_kernel;
+		  auto is_branchable_col = [&](int j) {
 	    return j >= 0 && j < n &&
 	           j < static_cast<int>(branchable_cols.size()) &&
 	           branchable_cols[static_cast<std::size_t>(j)] != 0;
@@ -332,10 +333,13 @@ void detail::explorer_thread(
     auto learn_short_reconvergence_implications =
         [&](const std::vector<BranchDomainLiteral>& branch_reasons,
             const std::vector<DomainReasonBound>& reason_bounds) -> int {
-      if (!opt.enable_reduced_cost_proof_conflict_minimization ||
-          reason_bounds.empty()) {
-        return 0;
-      }
+	      if (!opt.enable_reduced_cost_proof_conflict_minimization ||
+	          reason_bounds.empty()) {
+	        return 0;
+	      }
+	      if (strict_highs_lp_contract) {
+	        return 0;
+	      }
       const int max_cut_literals =
           std::max(2, opt.reduced_cost_conflict_cut_max_literals);
       const int max_literals = std::min(32, max_cut_literals);
@@ -678,6 +682,10 @@ void detail::explorer_thread(
         }
         child_basis->cached_reduced_costs =
             std::make_shared<const Eigen::VectorXd>(std::move(simplex_res.reduced_costs));
+        if (simplex_res.form.col_scale.size() == simplex_res.form.A.cols()) {
+          child_basis->cached_col_scale =
+              std::make_shared<const Eigen::VectorXd>(simplex_res.form.col_scale);
+        }
         child.basis_hint = child_basis;
         child.bound = std::max(parent_bound, simplex_res.result.stats.objective);
       }
@@ -721,6 +729,9 @@ void detail::explorer_thread(
                           inc_obj, opt.int_tol, child.lb, child.ub,
                           opt.enable_reduced_cost_conflict_learning
                               ? &rc_forbidden_literals
+                              : nullptr,
+                          child.basis_hint
+                              ? child.basis_hint->cached_col_scale.get()
                               : nullptr);
       if (rc_fixed > 0) {
         stats.rc_fixings.fetch_add(static_cast<std::uint64_t>(rc_fixed),
@@ -730,6 +741,7 @@ void detail::explorer_thread(
             std::memory_order_relaxed);
       }
 	      if (rc_fixed > 0 && opt.enable_reduced_cost_conflict_learning &&
+	          !strict_highs_lp_contract &&
 	          !rc_forbidden_literals.empty()) {
 	        int learned = 0;
 	        const int max_learn = std::max(0, opt.reduced_cost_conflict_max_per_node);

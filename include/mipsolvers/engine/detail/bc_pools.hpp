@@ -75,6 +75,19 @@ inline double sparse_sparse_dot(const Eigen::SparseVector<double>& a, const Eige
   return sum;
 }
 
+inline bool sparse_same_support(const Eigen::SparseVector<double>& a,
+                                const Eigen::SparseVector<double>& b) {
+  if (a.nonZeros() != b.nonZeros()) return false;
+  Eigen::SparseVector<double>::InnerIterator ia(a);
+  Eigen::SparseVector<double>::InnerIterator ib(b);
+  while (ia && ib) {
+    if (ia.index() != ib.index()) return false;
+    ++ia;
+    ++ib;
+  }
+  return !ia && !ib;
+}
+
 /// @brief Structural hash for a branch-domain literal.
 inline std::size_t branch_literal_hash(const BranchDomainLiteral& literal) {
   std::size_t h = std::hash<int>{}(literal.var_idx);
@@ -449,9 +462,14 @@ class ConflictPool {
             }
             node_ub[j] = new_ub;
             if (reason_bounds_out != nullptr) {
-              reason_bounds_out->push_back(
-                  {BranchDomainLiteral{j, new_ub, false}, reason, -1, 0,
-                   *remaining, true});
+              DomainReasonBound rb;
+              rb.bound = BranchDomainLiteral{j, new_ub, false};
+              rb.reason = reason;
+              rb.source_conflict_literal = *remaining;
+              rb.has_source_conflict_literal = true;
+              rb.source_conflict_clause = clause.literals;
+              rb.has_source_conflict_clause = true;
+              reason_bounds_out->push_back(std::move(rb));
             }
             ++local_tightened;
             changed = true;
@@ -466,9 +484,14 @@ class ConflictPool {
             }
             node_lb[j] = new_lb;
             if (reason_bounds_out != nullptr) {
-              reason_bounds_out->push_back(
-                  {BranchDomainLiteral{j, new_lb, true}, reason, -1, 0,
-                   *remaining, true});
+              DomainReasonBound rb;
+              rb.bound = BranchDomainLiteral{j, new_lb, true};
+              rb.reason = reason;
+              rb.source_conflict_literal = *remaining;
+              rb.has_source_conflict_literal = true;
+              rb.source_conflict_clause = clause.literals;
+              rb.has_source_conflict_clause = true;
+              reason_bounds_out->push_back(std::move(rb));
             }
             ++local_tightened;
             changed = true;
@@ -492,9 +515,26 @@ class ConflictPool {
   const ConflictClause& operator[](int i) const { return clauses_[i]; }
 };
 
+struct CutPoolPropagationStats {
+  int rows_scanned{0};
+  int active_rows{0};
+  int tightened{0};
+  int pruned{0};
+  int skipped_invalid{0};
+  int skipped_infinite_min{0};
+  int skipped_capacity{0};
+  int candidate_bounds{0};
+  int rejected_weak_bounds{0};
+  double max_capacity{0.0};
+  double min_capacity{std::numeric_limits<double>::infinity()};
+  double max_capacity_threshold{0.0};
+  double min_capacity_threshold{std::numeric_limits<double>::infinity()};
+};
+
 /// @brief Stores globally generated cuts for cheap re-separation at tree nodes.
-/// @details Cuts are evicted by age (consecutive non-violations) and duplicates
-/// are rejected via cosine similarity.
+/// @details Cuts are evicted by age.  Duplicate rejection mirrors HiGHS'
+/// cutpool contract: the rows must have identical support and be almost
+/// parallel in the same direction.
 class CutPool {
   std::vector<PoolCut> cuts_;
   int max_pool_size_;
@@ -521,6 +561,8 @@ class CutPool {
     return true;
   }
 
+  int initial_cut_age() const { return std::max(0, max_age_ - 5); }
+
 public:
   /// @brief Construct a cut pool with given capacity and age limit.
   /// @param max_size Maximum cuts stored in the pool.
@@ -536,20 +578,45 @@ public:
   }
 
   /// @brief Add a sparse cut to the pool.
-  /// @return false if duplicate (hash match + cosine > 0.95).
-  bool add(Eigen::SparseVector<double> coeff, double rhs) {
+  /// @return false if duplicate (same support + parallelism >= 1 - 1e-6).
+  bool add(Eigen::SparseVector<double> coeff, double rhs,
+           bool domain_only = false,
+           bool* new_domain_source = nullptr) {
+    if (new_domain_source != nullptr) *new_domain_source = false;
     double norm = 0.0;
     if (!valid_cut_input(coeff, rhs, &norm)) return false;
 
     const std::size_t h = sparse_cut_hash(coeff);
 
-    // Fast duplicate rejection: only compute cosine for cuts with matching hash.
-    for (const auto& pc : cuts_) {
-      if (pc.hash == h) {
-        double dot = sparse_sparse_dot(pc.coeff, coeff);
-        if (std::abs(dot) / (pc.norm * norm) > 0.95) {
+    for (auto& pc : cuts_) {
+      if (!sparse_same_support(pc.coeff, coeff)) continue;
+      const double dot = sparse_sparse_dot(pc.coeff, coeff);
+      const double denom = pc.norm * norm;
+      if (!(denom > 0.0) || !std::isfinite(dot) || !std::isfinite(denom)) {
+        continue;
+      }
+      const double parallelism = dot / denom;
+      if (parallelism >= 1.0 - 1e-6) {
+        const double scale = dot / (pc.norm * pc.norm);
+        const double rhs_on_existing_scale =
+            scale > 1e-12 ? rhs / scale : rhs;
+        const double rhs_tol =
+            1e-9 * std::max({1.0, std::abs(rhs_on_existing_scale),
+                              std::abs(pc.rhs)});
+        const bool tighter_rhs = rhs_on_existing_scale < pc.rhs - rhs_tol;
+        const bool upgrades_lp_visibility = pc.domain_only && !domain_only;
+        if (!tighter_rhs && !upgrades_lp_visibility) {
           return false;
         }
+        const bool merged_domain_only = pc.domain_only && domain_only;
+        if (tighter_rhs) {
+          pc = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
+                       merged_domain_only};
+          if (new_domain_source != nullptr) *new_domain_source = true;
+        } else {
+          pc.domain_only = merged_domain_only;
+        }
+        return true;
       }
     }
 
@@ -557,18 +624,291 @@ public:
       auto worst = std::max_element(cuts_.begin(), cuts_.end(),
           [](const PoolCut& a, const PoolCut& b) { return a.age < b.age; });
       if (worst != cuts_.end()) {
-        *worst = PoolCut{std::move(coeff), rhs, 0, 0.0, norm, h};
+        *worst = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
+                         domain_only};
+        if (new_domain_source != nullptr) *new_domain_source = true;
         return true;
       }
     }
 
-    cuts_.push_back(PoolCut{std::move(coeff), rhs, 0, 0.0, norm, h});
+    cuts_.push_back(PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0,
+                            norm, h, domain_only});
+    if (new_domain_source != nullptr) *new_domain_source = true;
     return true;
   }
 
   /// @brief Convenience overload: add a dense cut (converts to sparse).
-  bool add(const Eigen::VectorXd& coeff_dense, double rhs) {
-    return add(dense_to_sparse_cut(coeff_dense), rhs);
+  bool add(const Eigen::VectorXd& coeff_dense, double rhs,
+           bool domain_only = false,
+           bool* new_domain_source = nullptr) {
+    return add(dense_to_sparse_cut(coeff_dense), rhs, domain_only,
+               new_domain_source);
+  }
+
+  bool propagate_with_reasons(
+      const std::vector<VariableMeta>& vars,
+      Eigen::VectorXd& node_lb,
+      Eigen::VectorXd& node_ub,
+      int max_rounds,
+      int* tightened = nullptr,
+      std::vector<BoundChangeInfo>* changes_out = nullptr,
+      std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
+      CutPoolPropagationStats* stats = nullptr,
+      const std::vector<PoolCut>* extra_cuts = nullptr,
+      const std::vector<char>* implied_integer_cols = nullptr,
+      int reason_depth = 0,
+      int reason_trail_offset = 0,
+      double tol = 1e-9,
+      const std::vector<char>* pending_cols = nullptr) const {
+    const int n = static_cast<int>(vars.size());
+    if (n <= 0 || node_lb.size() != n || node_ub.size() != n) return true;
+    const int rounds = std::max(1, max_rounds);
+    int local_tightened = 0;
+    auto is_integral_col = [&](int col) {
+      return col >= 0 && col < n &&
+             (is_integer_type(vars[static_cast<std::size_t>(col)]) ||
+              (implied_integer_cols != nullptr &&
+               col < static_cast<int>(implied_integer_cols->size()) &&
+               (*implied_integer_cols)[static_cast<std::size_t>(col)] != 0));
+    };
+    auto highs_bound_range = [&](int col) {
+      if (col < 0 || col >= n ||
+          !std::isfinite(node_lb[col]) || !std::isfinite(node_ub[col])) {
+        return std::numeric_limits<double>::infinity();
+      }
+      const double range = std::max(0.0, node_ub[col] - node_lb[col]);
+      if (is_integral_col(col)) {
+        return std::max(0.0, range - tol);
+      }
+      return std::max(0.0, range - std::max(0.3 * range, 1000.0 * tol));
+    };
+    std::vector<char> current_pending;
+    std::vector<char> next_pending;
+    const bool use_pending_filter = pending_cols != nullptr;
+    if (use_pending_filter) {
+      current_pending = *pending_cols;
+      if (current_pending.size() < static_cast<std::size_t>(n)) {
+        current_pending.resize(static_cast<std::size_t>(n), 0);
+      }
+      next_pending.assign(static_cast<std::size_t>(n), 0);
+    }
+    auto pending_has_any = [&]() {
+      return std::any_of(current_pending.begin(), current_pending.end(),
+                         [](char v) { return v != 0; });
+    };
+    auto mark_next_pending = [&](int col) {
+      if (!use_pending_filter || col < 0 || col >= n) return;
+      next_pending[static_cast<std::size_t>(col)] = 1;
+    };
+
+    auto propagate_cut = [&](const PoolCut& cut, bool force_scan) -> bool {
+      const auto& row = cut.coeff;
+      if (row.size() != n || row.nonZeros() <= 0 ||
+          !std::isfinite(cut.rhs)) {
+        if (stats != nullptr) ++stats->skipped_invalid;
+        return true;
+      }
+      if (!force_scan && use_pending_filter) {
+        bool touches_pending = false;
+        for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
+          const int j = static_cast<int>(it.index());
+          if (j >= 0 && j < static_cast<int>(current_pending.size()) &&
+              current_pending[static_cast<std::size_t>(j)] != 0) {
+            touches_pending = true;
+            break;
+          }
+        }
+        if (!touches_pending) return true;
+      }
+      if (stats != nullptr) ++stats->rows_scanned;
+      double min_activity = 0.0;
+      int ninf_min = 0;
+      double capacity_threshold = -tol;
+      for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
+        const int j = static_cast<int>(it.index());
+        const double a = it.value();
+        if (j < 0 || j >= n || std::abs(a) <= 1e-12 ||
+            !std::isfinite(a)) {
+          continue;
+        }
+        const double bound = a > 0.0 ? node_lb[j] : node_ub[j];
+        if (!std::isfinite(bound)) {
+          ++ninf_min;
+        } else {
+          min_activity += a * bound;
+        }
+        const double range = highs_bound_range(j);
+        capacity_threshold = std::max(
+            {capacity_threshold, std::abs(a) * range, tol});
+      }
+      if (!std::isfinite(min_activity) || ninf_min > 1) {
+        if (stats != nullptr) ++stats->skipped_infinite_min;
+        return true;
+      }
+      const double capacity = cut.rhs - min_activity;
+      if (stats != nullptr) {
+        stats->max_capacity = std::max(stats->max_capacity, capacity);
+        stats->min_capacity = std::min(stats->min_capacity, capacity);
+        stats->max_capacity_threshold =
+            std::max(stats->max_capacity_threshold, capacity_threshold);
+        stats->min_capacity_threshold =
+            std::min(stats->min_capacity_threshold, capacity_threshold);
+      }
+      if (ninf_min == 0 && capacity < -tol) {
+        if (stats != nullptr) ++stats->pruned;
+        return false;
+      }
+      if (ninf_min == 0 && capacity > capacity_threshold + tol) {
+        if (stats != nullptr) ++stats->skipped_capacity;
+        return true;
+      }
+      if (stats != nullptr) ++stats->active_rows;
+
+      const Eigen::VectorXd row_reason_lb = node_lb;
+      const Eigen::VectorXd row_reason_ub = node_ub;
+      for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
+        const int j = static_cast<int>(it.index());
+        const double a = it.value();
+        if (j < 0 || j >= n || std::abs(a) <= 1e-12 ||
+            !std::isfinite(a)) {
+          continue;
+        }
+        const double min_bound = a > 0.0 ? row_reason_lb[j] : row_reason_ub[j];
+        const bool target_is_inf_min = !std::isfinite(min_bound);
+        double min_residual_activity = min_activity;
+        if (ninf_min == 1) {
+          if (!target_is_inf_min) continue;
+        } else {
+          if (target_is_inf_min) continue;
+          min_residual_activity -= a * min_bound;
+        }
+        const double residual = cut.rhs - min_residual_activity;
+        auto make_reason = [&](const BranchDomainLiteral& bound,
+                               const BranchDomainLiteral& forbidden) {
+          if (reason_bounds_out == nullptr) return;
+          DomainReasonBound rb;
+          rb.bound = bound;
+          rb.reason.reserve(static_cast<std::size_t>(
+              std::max<Eigen::Index>(0, row.nonZeros() - 1)));
+          for (Eigen::SparseVector<double>::InnerIterator jt(row); jt; ++jt) {
+            const int k = static_cast<int>(jt.index());
+            const double ak = jt.value();
+            if (k < 0 || k >= n || k == j || std::abs(ak) <= 1e-12 ||
+                !std::isfinite(ak)) {
+              continue;
+            }
+            if (ak > 0.0) {
+              if (std::isfinite(row_reason_lb[k])) {
+                rb.reason.push_back(
+                    BranchDomainLiteral{k, row_reason_lb[k], true});
+              }
+            } else if (std::isfinite(row_reason_ub[k])) {
+              rb.reason.push_back(
+                  BranchDomainLiteral{k, row_reason_ub[k], false});
+            }
+          }
+          canonicalize_branch_literals(rb.reason);
+          rb.trail_pos =
+              reason_trail_offset + static_cast<int>(reason_bounds_out->size());
+          rb.depth = reason_depth;
+          rb.source_conflict_literal = forbidden;
+          rb.has_source_conflict_literal = true;
+          rb.source_conflict_clause = rb.reason;
+          rb.source_conflict_clause.push_back(forbidden);
+          canonicalize_branch_literals(rb.source_conflict_clause);
+          rb.has_source_conflict_clause = true;
+          const double source_activity =
+              min_residual_activity + a * forbidden.value;
+          rb.has_proof_activity_audit =
+              std::isfinite(source_activity) && std::isfinite(cut.rhs);
+          rb.proof_activity = source_activity;
+          rb.proof_required_activity = cut.rhs;
+          rb.proof_activity_margin = source_activity - cut.rhs;
+          reason_bounds_out->push_back(std::move(rb));
+        };
+        if (a > 0.0) {
+          double new_ub = residual / a;
+          if (is_integral_col(j)) new_ub = std::floor(new_ub + tol);
+          if (std::isfinite(new_ub) && new_ub < node_ub[j] - tol) {
+            if (stats != nullptr) ++stats->candidate_bounds;
+            make_reason(BranchDomainLiteral{j, new_ub, false},
+                        BranchDomainLiteral{
+                            j,
+                            is_integral_col(j)
+                                ? std::floor(new_ub + tol) + 1.0
+                                : new_ub + std::max(1e-7, 10.0 * tol),
+                            true});
+            if (changes_out != nullptr) {
+              changes_out->push_back({j, new_ub - node_ub[j], false});
+            }
+            node_ub[j] = new_ub;
+            mark_next_pending(j);
+            ++local_tightened;
+            if (stats != nullptr) ++stats->tightened;
+          } else if (stats != nullptr && std::isfinite(new_ub)) {
+            ++stats->rejected_weak_bounds;
+          }
+        } else {
+          double new_lb = residual / a;
+          if (is_integral_col(j)) new_lb = std::ceil(new_lb - tol);
+          if (std::isfinite(new_lb) && new_lb > node_lb[j] + tol) {
+            if (stats != nullptr) ++stats->candidate_bounds;
+            make_reason(BranchDomainLiteral{j, new_lb, true},
+                        BranchDomainLiteral{
+                            j,
+                            is_integral_col(j)
+                                ? std::ceil(new_lb - tol) - 1.0
+                                : new_lb - std::max(1e-7, 10.0 * tol),
+                            false});
+            if (changes_out != nullptr) {
+              changes_out->push_back({j, new_lb - node_lb[j], true});
+            }
+            node_lb[j] = new_lb;
+            mark_next_pending(j);
+            ++local_tightened;
+            if (stats != nullptr) ++stats->tightened;
+          } else if (stats != nullptr && std::isfinite(new_lb)) {
+            ++stats->rejected_weak_bounds;
+          }
+        }
+        if (node_lb[j] > node_ub[j] + tol) {
+          if (stats != nullptr) ++stats->pruned;
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const bool have_force_scan_cuts =
+        extra_cuts != nullptr && !extra_cuts->empty();
+    for (int round = 0; round < rounds; ++round) {
+      if (use_pending_filter && !pending_has_any() &&
+          !(round == 0 && have_force_scan_cuts)) {
+        break;
+      }
+      if (use_pending_filter) {
+        std::fill(next_pending.begin(), next_pending.end(), 0);
+      }
+      const int before = local_tightened;
+      for (const auto& cut : cuts_) {
+        if (!propagate_cut(cut, /*force_scan=*/false)) {
+          if (tightened != nullptr) *tightened += local_tightened;
+          return false;
+        }
+      }
+      if (extra_cuts != nullptr) {
+        for (const auto& cut : *extra_cuts) {
+          if (!propagate_cut(cut, /*force_scan=*/true)) {
+            if (tightened != nullptr) *tightened += local_tightened;
+            return false;
+          }
+        }
+      }
+      if (local_tightened == before) break;
+      if (use_pending_filter) current_pending.swap(next_pending);
+    }
+    if (tightened != nullptr) *tightened += local_tightened;
+    return true;
   }
 
   /// @brief Find indices of pool cuts violated by x (violation > min_viol).
@@ -576,6 +916,7 @@ public:
   std::vector<int> find_violated(const Eigen::VectorXd& x, double min_viol = 1e-4) const {
     std::vector<std::pair<double, int>> violated;
     for (int i = 0; i < static_cast<int>(cuts_.size()); ++i) {
+      if (cuts_[i].domain_only) continue;
       if (cuts_[i].coeff.size() != x.size()) continue;
       const double activity = sparse_dot(cuts_[i].coeff, x);
       if (!std::isfinite(activity) || !std::isfinite(cuts_[i].rhs)) continue;
@@ -615,6 +956,8 @@ public:
 
   /// @brief Access a pool cut by index.
   const PoolCut& operator[](int i) const { return cuts_[i]; }
+  /// @brief First-class row view for domain propagation closure.
+  const std::vector<PoolCut>& cuts() const { return cuts_; }
   /// @brief Number of cuts in the pool.
   int size() const { return static_cast<int>(cuts_.size()); }
 };

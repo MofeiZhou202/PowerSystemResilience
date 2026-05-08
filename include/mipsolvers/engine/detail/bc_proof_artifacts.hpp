@@ -23,9 +23,13 @@ struct ObjectivePropagationState;
 
 struct ObjectiveCutoffArtifactStats {
   std::uint64_t candidates{0};
+  std::uint64_t implied_event_candidates{0};
   std::uint64_t conflicts_seen{0};
+  std::uint64_t conflict_clauses_added{0};
   std::uint64_t implications_added{0};
   std::uint64_t clique_edges_added{0};
+  std::uint64_t unary_conflicts_added{0};
+  std::uint64_t pair_conflicts_added{0};
   double raw_objective_lower{0.0};
   double cutoff_capacity{kInf};
   double max_delta{0.0};
@@ -42,16 +46,42 @@ struct DualProofLiteralArtifactStats {
   double max_delta{0.0};
 };
 
-ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
+struct ObjectiveCutoffCliqueStats {
+  std::uint64_t candidates{0};
+  std::uint64_t pair_tests{0};
+  std::uint64_t pair_conflicts{0};
+  std::uint64_t cliques_generated{0};
+  std::uint64_t clique_edges_added{0};
+  std::uint64_t conflict_clauses_added{0};
+  double raw_objective_lower{0.0};
+  double cutoff_capacity{kInf};
+  double max_pair_excess{0.0};
+};
+
+ObjectiveCutoffCliqueStats extract_objective_cutoff_cliques(
     const LPModel& lp,
     const std::vector<char>& implied_integer_cols,
     const Eigen::VectorXd& lb,
     const Eigen::VectorXd& ub,
-    double incumbent_obj,
+    double upper_limit,
+    CliqueTable& clique_table,
+    double int_tol,
+    const ObjectivePropagationState* objective_propagation = nullptr,
+    ConflictPool* conflict_pool = nullptr,
+    SharedConflictPool* shared_conflict_pool = nullptr);
+
+ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
+    const LPModel& lp,
+	    const std::vector<char>& implied_integer_cols,
+	    const Eigen::VectorXd& lb,
+	    const Eigen::VectorXd& ub,
+	    double upper_limit,
     BinaryImplicationGraph& implication_graph,
     CliqueTable& clique_table,
     double int_tol,
     const ObjectivePropagationState* objective_propagation = nullptr,
+    ConflictPool* conflict_pool = nullptr,
+    SharedConflictPool* shared_conflict_pool = nullptr,
     std::uint64_t max_implications = 250000);
 
 DualProofLiteralArtifactStats extract_dual_proof_literal_artifacts(

@@ -54,9 +54,17 @@ struct HiGHSPresolvedModelStats {
   struct VarBoundRecord {
     int target_col{-1};
     int trigger_col{-1};
+    int target_orig_col{-1};
+    int trigger_orig_col{-1};
     double coef{0.0};
     double constant{0.0};
+    double target_scale{1.0};
+    double target_constant{0.0};
+    double trigger_scale{1.0};
+    double trigger_constant{0.0};
     bool upper{true};
+    bool target_linearly_transformable{false};
+    bool trigger_linearly_transformable{false};
   };
   std::vector<VarBoundRecord> var_bounds;
 };

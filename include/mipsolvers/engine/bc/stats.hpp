@@ -3,6 +3,7 @@
 /// \brief Runtime statistics and result record for the B&C engine.
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <Eigen/Core>
 
@@ -63,6 +64,12 @@ struct BCStats {
   double root_reduced_cost_gap{0.0};
   std::uint64_t root_objective_cutoff_domain_tightenings{0};
   std::uint64_t root_objective_cutoff_domain_prunes{0};
+  std::uint64_t vendored_root_certificate_attempts{0};
+  std::uint64_t vendored_root_certificate_accepted{0};
+  std::uint64_t vendored_root_certificate_rejected{0};
+  double vendored_root_certificate_time_ms{0.0};
+  std::int64_t vendored_root_certificate_nodes{-1};
+  std::int64_t vendored_root_certificate_simplex_iterations{-1};
   std::uint64_t root_split_bound_probe_candidates{0};
   std::uint64_t root_split_bound_probe_vars{0};
   std::uint64_t root_split_bound_probe_fixings{0};
@@ -223,6 +230,9 @@ struct BCStats {
   double objective_implied_event_mir_gain_max{0.0};
   double objective_implied_event_max_delta{0.0};
   double objective_implied_event_max_aggregate_delta{0.0};
+  std::uint64_t objective_domain_bound_lift_nodes{0};
+  double objective_domain_bound_lift_sum{0.0};
+  double objective_domain_bound_lift_max{0.0};
   std::uint64_t rowdual_cmir_candidates{0};
   std::uint64_t rowdual_cmir_violated{0};
   std::uint64_t rowdual_cmir_target_coeff{0};
@@ -252,6 +262,34 @@ struct BCStats {
   std::uint64_t certificate_queue_prunes{0};
   double certificate_queue_lift_sum{0.0};
   double certificate_queue_lift_max{0.0};
+  std::uint64_t certificate_queue_lower_bound_lift_nodes{0};
+  std::uint64_t certificate_queue_lp_refresh_marked{0};
+  std::uint64_t certificate_queue_frontier_bound_moves{0};
+  double certificate_queue_frontier_bound_move_sum{0.0};
+  double certificate_queue_frontier_bound_move_max{0.0};
+  std::uint64_t certificate_queue_lb_audit_passes{0};
+  std::uint64_t certificate_queue_lb_audit_failures{0};
+  double certificate_queue_lb_audit_indexed_min{
+      std::numeric_limits<double>::infinity()};
+  double certificate_queue_lb_audit_computed_min{
+      std::numeric_limits<double>::infinity()};
+  double certificate_queue_lb_audit_max_error{0.0};
+  std::int64_t certificate_queue_lb_audit_indexed_nodes{0};
+  std::int64_t certificate_queue_lb_audit_live_nodes{0};
+  std::uint64_t bound_lifting_certificates_published{0};
+  std::uint64_t bound_lifting_certificates_rejected_audit{0};
+  double bound_lifting_certificate_activity_margin_min{
+      std::numeric_limits<double>::infinity()};
+  double bound_lifting_certificate_activity_margin_max{0.0};
+  std::uint64_t resolved_target_attempts{0};
+  std::uint64_t resolved_target_success{0};
+  std::uint64_t resolved_target_failed{0};
+  std::uint64_t resolved_conflict_attempts{0};
+  std::uint64_t resolved_conflict_success{0};
+  std::uint64_t resolved_conflict_failed{0};
+  std::uint64_t resolution_activity_failed{0};
+  std::uint64_t resolution_missing_reason{0};
+  std::uint64_t resolution_scope_blocked{0};
   std::uint64_t certificate_domain_passes{0};
   std::uint64_t certificate_domain_fixings{0};
   std::uint64_t certificate_domain_prunes{0};

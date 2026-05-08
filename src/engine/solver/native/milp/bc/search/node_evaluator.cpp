@@ -233,7 +233,8 @@ FixingResult NodeEvaluator::apply_reduced_cost_fixing(
       child.basis_hint->basis_indices(),
       child.bound, incumbent_obj,
       opt.int_tol,
-      child.lb, child.ub);
+      child.lb, child.ub, nullptr,
+      child.basis_hint->cached_col_scale.get());
 
   res.variables_fixed = fixed;
 

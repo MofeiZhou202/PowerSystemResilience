@@ -85,6 +85,8 @@ add_library(mipsolvers STATIC
   src/engine/kernel/ipm/ipm_scaling.cpp
   src/engine/kernel/ipm/ipm_restoration.cpp
   src/engine/util/problem_validation.cpp
+  src/aml/model.cpp
+  src/aml/set.cpp
 )
 
 add_library(mipsolvers::mipsolvers ALIAS mipsolvers)
@@ -377,6 +379,7 @@ if(MIPSOLVERS_BUILD_PYTHON)
   # Build the extension module.
   pybind11_add_module(mipsolvers_py MODULE
     src/python/mipsolvers_py.cpp
+    src/python/aml_bindings.cpp
     src/scuc/scuc.cpp          # SCUC is header-only-ish; include impl
   )
 

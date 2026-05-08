@@ -78,34 +78,32 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
   BcStrictHighsContractState state;
   state.domain_heuristics = opt.enable_domain_heuristics;
   state.requested_vendored_highs_lp = bc_vendored_highs_lp_kernel_enabled(opt);
+  if (state.requested_vendored_highs_lp) {
+    opt.use_vendored_highs_lp_kernel = true;
+  }
   state.strict_highs_lp_contract = state.requested_vendored_highs_lp;
   state.allow_vendored_root_frontier =
       bc_vendored_highs_root_frontier_enabled();
 
-  if (state.requested_vendored_highs_lp &&
-      !state.allow_vendored_root_frontier) {
-    // Suppressing the vendored root frontier is a diagnostic/native-proof mode:
-    // the HiGHS root MIP certificate is intentionally unavailable, so the
-    // remaining native proof tail must prove the live tree rather than prune by
-    // a tolerance gap limit derived from an unaligned incumbent frontier.
-    opt.require_tree_exhaustion_certificate = true;
+  if (state.requested_vendored_highs_lp) {
+    const bool strict_tree_exhaustion =
+        bc_env_flag_enabled("HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION");
+    // Suppressing the vendored root frontier only removes the direct
+    // HiGHS-root certificate.  It must not also disable HiGHS' normal MIP
+    // optimality-limit lifecycle: HighsMipSolverData keeps upper_limit for
+    // incumbent cutoff propagation and optimality_limit for gap-valid node/root
+    // pruning.  A strict live-tree exhaustion audit is still available through
+    // HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION.
+    opt.require_tree_exhaustion_certificate = strict_tree_exhaustion;
   }
-  if (state.requested_vendored_highs_lp &&
-      state.allow_vendored_root_frontier &&
-      opt.require_tree_exhaustion_certificate &&
-      !bc_env_flag_enabled("HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION")) {
-    // HiGHS terminates a MIP solve on its relative-gap certificate; it does
-    // not keep draining the tree merely to prove exact exhaustion. Keep the
-    // native tree/cut/proof machinery, but use the same termination contract
-    // whenever the vendored HiGHS LP kernel is the numerical oracle.
-    opt.require_tree_exhaustion_certificate = false;
-  }
-  if (state.requested_vendored_highs_lp &&
-      !opt.require_tree_exhaustion_certificate) {
+  if (state.requested_vendored_highs_lp) {
     // HiGHS does not turn local proof artifacts into ad-hoc node LP rows.
     // Reduced-cost/domain proofs are resolved through the local domain trail
     // and published as reconvergence/bound-lifting certificates; when domain
     // bounds change, the LP is re-evaluated from the same HiGHS kernel state.
+    // This must remain enabled in suppress-root proof-tail mode as well:
+    // strict tree exhaustion removes the root MIP certificate, not the
+    // ConflictSet::resolveLinearLeq/Geq-style local trail resolver.
     opt.enable_reduced_cost_conflict_learning = true;
     opt.enable_reduced_cost_proof_conflict_minimization = true;
   }
@@ -119,21 +117,30 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
     opt.enable_domain_heuristics = false;
     state.domain_heuristics = false;
 
-    // Remove legacy/native primal shortcuts from the strict path. These are not
-    // part of the HiGHS HighsSearch -> HighsLpRelaxation -> HighsDomain
-    // contract and have repeatedly hidden frontier/proof bugs behind weak
-    // incumbents or local sub-MIPs.
+    // Remove legacy/native proof and primal shortcuts from the strict path.
+    // HiGHS evaluateRootNode() does run root primal sources, but their lifecycle is
+    // tied to HighsDomain::propagate()/evaluateRootLp(): randomized/shifting,
+    // central rounding, root reduced-cost, RENS, and finally feasibility pump only
+    // when no upper_limit exists.  The native objective pump, progressive
+    // rounding, and generic LP diving paths are separate repair heuristics; in a
+    // strict HiGHS comparison they pollute the root fixed-point timing and can
+    // publish incumbents before the HiGHS-style domain/cutpool closure has reached
+    // its own state.  Keep the implemented HiGHS-like central rounding and RENS
+    // hooks, but disable the non-HiGHS repair loops here.
     opt.use_feasibility_pump = false;
     opt.use_progressive_rounding = false;
     opt.accept_verified_warm_start_incumbent = false;
     opt.enable_feasibility_jump = false;
-    opt.use_analytic_centre = false;
-    opt.use_linesearch_rounding = false;
-    opt.use_lock_count_rounding = false;
-    opt.auto_highs_root_pipeline = false;
+    opt.use_analytic_centre = true;
+    opt.use_linesearch_rounding = true;
+    opt.use_lock_count_rounding = true;
+    // Keep the HiGHS root pipeline switch on in strict mode.  In this codebase
+    // it gates root separation/cutpool/domain fixed-point work as well as some
+    // primal heuristics; the primal pieces are disabled individually above.
+    opt.auto_highs_root_pipeline = true;
     opt.enable_lns = false;
     opt.enable_incumbent_local_branching = false;
-    opt.enable_root_low_fractionality_rens = false;
+    opt.enable_root_low_fractionality_rens = true;
     opt.max_dive_lps = 0;
     opt.max_probe_vars = 0;
     opt.root_split_bound_probing = false;
@@ -147,9 +154,17 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
     opt.enable_verified_reduced_cost_conflict_minimization = false;
     opt.enable_dynamic_implied_bound_probing = false;
     opt.enable_graph_implied_bound_cuts = false;
+    // Keep only the HiGHS ObjectivePropagation::propagate() contract.  Native
+    // rest-LP cutoff covers / weighted event cuts are separate proof artifacts:
+    // they are useful experiments, but they are not HiGHS' pending-row objective
+    // propagation and must not participate in strict correctness/performance
+    // comparisons.
     opt.enable_objective_cutoff_conflict_cuts = false;
     opt.enable_objective_cutoff_weighted_event_cuts = false;
-    opt.enable_objective_cutoff_domain_fixing = false;
+    opt.enable_nonviolated_cutoff_conflict_covers = false;
+    // Keep objective-cutoff domain propagation enabled: this corresponds to
+    // HighsDomain::ObjectivePropagation using the incumbent upper_limit.
+    opt.enable_objective_cutoff_domain_fixing = true;
   }
 
   return state;
@@ -204,6 +219,10 @@ std::shared_ptr<SimplexBasis> persist_bc_node_basis_from_simplex(
   }
   basis->cached_reduced_costs =
       std::make_shared<const Eigen::VectorXd>(std::move(simplex.reduced_costs));
+  if (simplex.form.col_scale.size() == simplex.form.A.cols()) {
+    basis->cached_col_scale =
+        std::make_shared<const Eigen::VectorXd>(simplex.form.col_scale);
+  }
   // Tree/node SF objects are per-node workspaces. Do not persist live BasisOps
   // pointers tied to those temporary matrices across queue siblings.
   basis->cached_sparse_basis.reset();

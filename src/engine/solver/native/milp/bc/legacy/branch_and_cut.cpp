@@ -16,12 +16,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <climits>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -73,6 +75,497 @@ namespace bc_status = detail::bc_status;
 
 namespace {
 
+std::int64_t highs_style_gcd(std::int64_t a, std::int64_t b) {
+  if (a < 0) a = -a;
+  if (b < 0) b = -b;
+  if (a == 0) return b;
+  if (b == 0) return a;
+  while (b != 0) {
+    const std::int64_t h = a % b;
+    a = b;
+    b = h;
+  }
+  return a;
+}
+
+std::int64_t highs_style_denominator(double x,
+                                     double eps,
+                                     std::int64_t max_denom) {
+  std::int64_t ai = static_cast<std::int64_t>(x);
+  std::int64_t m[] = {ai, 1, 1, 0};
+  long double xi = x;
+  long double fraction = xi - static_cast<double>(ai);
+  while (fraction > eps) {
+    xi = 1.0L / fraction;
+    if (static_cast<double>(xi) > static_cast<double>(std::int64_t{1} << 53)) {
+      break;
+    }
+    ai = static_cast<std::int64_t>(static_cast<double>(xi));
+    std::int64_t t = m[2] * ai + m[3];
+    if (t > max_denom) break;
+    m[3] = m[2];
+    m[2] = t;
+    t = m[0] * ai + m[1];
+    m[1] = m[0];
+    m[0] = t;
+    fraction = xi - static_cast<double>(ai);
+  }
+  ai = (max_denom - m[3]) / m[2];
+  m[1] += m[0] * ai;
+  m[3] += m[2] * ai;
+  x = std::abs(x);
+  const double x0 = static_cast<double>(m[0]) / static_cast<double>(m[2]);
+  const double x1 = static_cast<double>(m[1]) / static_cast<double>(m[3]);
+  return std::abs(x - x0) < std::abs(x - x1) ? m[2] : m[3];
+}
+
+double highs_style_integral_scale(const std::vector<double>& vals,
+                                  double eps) {
+  if (vals.empty()) return 0.0;
+  auto minmax = std::minmax_element(
+      vals.begin(), vals.end(),
+      [](double a, double b) { return std::abs(a) < std::abs(b); });
+  const double minval = *minmax.first;
+  const double maxval = *minmax.second;
+
+  int expshift = 0;
+  if (minval < -eps || minval > eps) std::frexp(minval, &expshift);
+  expshift = std::max(-expshift, 0) + 3;
+
+  int exp_max_val = 0;
+  std::frexp(maxval, &exp_max_val);
+  exp_max_val = std::min(exp_max_val, 32);
+  if (exp_max_val + expshift > 32) expshift = 32 - exp_max_val;
+  if (expshift < 0) expshift = 0;
+
+  std::uint64_t denom = std::uint64_t{75} << expshift;
+  std::uint64_t start_denom = denom;
+  auto scaled_floor_fraction =
+      [&](double value, std::uint64_t scale, long double& downval) {
+        const long double scaled =
+            static_cast<long double>(scale) * static_cast<long double>(value);
+        downval = std::floor(scaled + eps);
+        return scaled - downval;
+      };
+
+  long double downval = 0.0L;
+  long double fraction = scaled_floor_fraction(vals.front(), denom, downval);
+  if (fraction > eps) {
+    denom *= static_cast<std::uint64_t>(
+        highs_style_denominator(static_cast<double>(fraction), eps, 1000));
+    fraction = scaled_floor_fraction(vals.front(), denom, downval);
+    if (fraction > eps) return 0.0;
+  }
+
+  auto abs_int64_from_floor = [](long double value) -> std::int64_t {
+    if (value < 0.0L) value = -value;
+    if (value > static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+      return std::numeric_limits<std::int64_t>::max();
+    }
+    return static_cast<std::int64_t>(static_cast<double>(value));
+  };
+
+  std::uint64_t curr_gcd =
+      static_cast<std::uint64_t>(abs_int64_from_floor(downval));
+  for (std::size_t i = 1; i < vals.size(); ++i) {
+    fraction = scaled_floor_fraction(vals[i], denom, downval);
+    if (fraction > eps) {
+      long double start_down = 0.0L;
+      const long double start_scaled =
+          static_cast<long double>(start_denom) *
+          static_cast<long double>(vals[i]);
+      const long double start_fraction =
+          start_scaled - std::floor(start_scaled);
+      denom *= static_cast<std::uint64_t>(highs_style_denominator(
+          static_cast<double>(start_fraction), eps, 1000));
+      fraction = scaled_floor_fraction(vals[i], denom, downval);
+      (void)start_down;
+      if (fraction > eps) return 0.0;
+    }
+    if (curr_gcd != 1) {
+      curr_gcd = static_cast<std::uint64_t>(highs_style_gcd(
+          static_cast<std::int64_t>(curr_gcd),
+          abs_int64_from_floor(downval)));
+      if (denom > std::numeric_limits<unsigned int>::max()) {
+        denom /= std::max<std::uint64_t>(1, curr_gcd);
+        if (start_denom != 1) {
+          start_denom /=
+              static_cast<std::uint64_t>(highs_style_gcd(
+                  static_cast<std::int64_t>(curr_gcd),
+                  static_cast<std::int64_t>(start_denom)));
+        }
+        curr_gcd = 1;
+      }
+    }
+  }
+
+  return static_cast<double>(denom) /
+         static_cast<double>(std::max<std::uint64_t>(1, curr_gcd));
+}
+
+double highs_style_objective_integral_scale(const LPModel& lp,
+                                            double eps) {
+  std::vector<double> objective_vals;
+  objective_vals.reserve(static_cast<std::size_t>(lp.c.size()));
+  for (std::size_t j = 0;
+       j < lp.vars.size() && j < static_cast<std::size_t>(lp.c.size()); ++j) {
+    const double cj = lp.c[static_cast<Eigen::Index>(j)];
+    if (!std::isfinite(cj) || std::abs(cj) <= 1e-12) continue;
+    if (!is_integer_type(lp.vars[j])) return 0.0;
+    objective_vals.push_back(cj);
+  }
+  if (objective_vals.empty()) return 1.0;
+  const double scale =
+      highs_style_integral_scale(objective_vals, std::max(1e-12, eps));
+  if (!(scale > 0.0) || scale * 1e-14 > std::max(1e-12, eps)) {
+    return 0.0;
+  }
+  return scale;
+}
+
+double highs_style_incumbent_upper_limit(const LPModel& lp,
+                                         double incumbent_obj,
+                                         double feastol) {
+  if (!std::isfinite(incumbent_obj)) return kInf;
+  const double tol = std::max(1e-9, feastol);
+
+  // Mirror HighsMipSolverData::computeNewUpperLimit(): the propagation cutoff
+  // is the best objective value still worth searching, not the incumbent
+  // objective itself.  Fractional-but-scalable integer objectives such as UC
+  // costs with 0.5 increments must use their integral scale.
+  const double integral_scale = highs_style_objective_integral_scale(lp, tol);
+  if (integral_scale > 0.0) {
+    return std::floor(integral_scale * incumbent_obj - 0.5) /
+               integral_scale +
+           tol;
+  }
+  return std::min(incumbent_obj - tol,
+                  std::nextafter(incumbent_obj, -kInf));
+}
+
+struct RootRedcostLurkingBounds {
+  struct AddStats {
+    int columns_seen{0};
+    int records_added{0};
+    int records_total{0};
+    int side_rejected{0};
+  };
+
+  struct PropagateStats {
+    int records_scanned{0};
+    int records_active{0};
+    int tightened{0};
+    int pruned{0};
+  };
+
+  std::vector<std::multimap<double, double>> lower_bounds;
+  std::vector<std::multimap<double, double>> upper_bounds;
+
+  void ensure_size(int n) {
+    if (n <= 0) return;
+    if (static_cast<int>(lower_bounds.size()) < n) {
+      lower_bounds.resize(static_cast<std::size_t>(n));
+      upper_bounds.resize(static_cast<std::size_t>(n));
+    }
+  }
+
+  int size() const {
+    int total = 0;
+    for (const auto& bucket : lower_bounds) {
+      total += static_cast<int>(bucket.size());
+    }
+    for (const auto& bucket : upper_bounds) {
+      total += static_cast<int>(bucket.size());
+    }
+    return total;
+  }
+
+  int prune_below_proof_lower_bound(double proof_lower_bound, double tol) {
+    if (!std::isfinite(proof_lower_bound)) return 0;
+    const double local_tol = std::max(1e-9, tol);
+    int removed = 0;
+    auto prune_bucket = [&](std::multimap<double, double>& bucket) {
+      auto last = bucket.upper_bound(proof_lower_bound + local_tol);
+      for (auto it = bucket.begin(); it != last;) {
+        it = bucket.erase(it);
+        ++removed;
+      }
+    };
+    for (auto& bucket : lower_bounds) prune_bucket(bucket);
+    for (auto& bucket : upper_bounds) prune_bucket(bucket);
+    return removed;
+  }
+
+  bool add_candidate(int col,
+                     bool is_lower,
+                     double required_cutoff,
+                     double bound,
+                     double tol) {
+    if (col < 0 || !std::isfinite(required_cutoff) || !std::isfinite(bound)) {
+      return false;
+    }
+    ensure_size(col + 1);
+    auto& bucket = is_lower ? lower_bounds[static_cast<std::size_t>(col)]
+                            : upper_bounds[static_cast<std::size_t>(col)];
+    const int strength = is_lower ? 1 : -1;
+    auto pos = bucket.lower_bound(required_cutoff - tol);
+    for (auto it = pos; it != bucket.end(); ++it) {
+      const bool dominated =
+          strength * it->second >= strength * bound - tol;
+      if (dominated) return false;
+    }
+    auto inserted = bucket.emplace_hint(pos, required_cutoff, bound);
+    for (auto it = bucket.begin(); it != inserted;) {
+      if (strength * bound >= strength * it->second - tol) {
+        it = bucket.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    return true;
+  }
+
+  AddStats add_from_root_lp(const std::vector<VariableMeta>& vars,
+                            const std::vector<char>* implied_integer_cols,
+                            const Eigen::VectorXd& x_relax,
+                            const Eigen::VectorXd& reduced_costs,
+                            const Eigen::VectorXd* sf_col_scale,
+                            const std::vector<int>& basis_indices,
+                            const Eigen::VectorXd& lb,
+                            const Eigen::VectorXd& ub,
+                            double lp_objective,
+                            double int_tol) {
+    AddStats stats;
+    const int n = static_cast<int>(vars.size());
+    if (n <= 0 || reduced_costs.size() < n ||
+        lb.size() < n || ub.size() < n || !std::isfinite(lp_objective)) {
+      stats.records_total = size();
+      return stats;
+    }
+    ensure_size(n);
+    (void)prune_below_proof_lower_bound(lp_objective, int_tol);
+    std::vector<char> is_basic(static_cast<std::size_t>(n), 0);
+    for (int idx : basis_indices) {
+      if (idx >= 0 && idx < n) is_basic[static_cast<std::size_t>(idx)] = 1;
+    }
+    auto is_integral = [&](int col) {
+      return col >= 0 && col < n &&
+             (is_integer_type(vars[static_cast<std::size_t>(col)]) ||
+              (implied_integer_cols != nullptr &&
+               col < static_cast<int>(implied_integer_cols->size()) &&
+               (*implied_integer_cols)[static_cast<std::size_t>(col)] != 0));
+    };
+    auto col_dual = [&](int col) -> double {
+      const double scale =
+          sf_col_scale != nullptr && sf_col_scale->size() > col &&
+                  std::isfinite((*sf_col_scale)[col]) &&
+                  std::abs((*sf_col_scale)[col]) > 1e-18
+              ? (*sf_col_scale)[col]
+              : 1.0;
+      return -reduced_costs[col] / scale;
+    };
+
+    int large_domain_cols = 0;
+    for (int col = 0; col < n; ++col) {
+      if (!is_integral(col) || is_basic[static_cast<std::size_t>(col)] ||
+          !std::isfinite(lb[col]) || !std::isfinite(ub[col])) {
+        continue;
+      }
+      const double rc_abs = std::abs(col_dual(col));
+      if (ub[col] - lb[col] >= 512.0 && rc_abs > int_tol) {
+        ++large_domain_cols;
+      }
+    }
+    int max_steps_exp = 10;
+    int exp_shift = 0;
+    std::frexp(static_cast<double>(large_domain_cols) / 10.0, &exp_shift);
+    if (exp_shift > 5) {
+      exp_shift = std::min(exp_shift, max_steps_exp);
+      max_steps_exp = max_steps_exp - exp_shift + 5;
+    }
+    const long long max_steps = 1LL << max_steps_exp;
+    const double tol = std::max(1e-9, int_tol);
+    for (int col = 0; col < n; ++col) {
+      if (!is_integral(col) || !std::isfinite(lb[col]) ||
+          !std::isfinite(ub[col])) {
+        continue;
+      }
+      const double lpredcost = col_dual(col);
+      if (!std::isfinite(lpredcost) || std::abs(lpredcost) <= tol ||
+          ub[col] <= lb[col] + tol) {
+        continue;
+      }
+      const double side_tol =
+          std::max({1e-7, 10.0 * tol,
+                    1e-10 * std::max(1.0, std::max(std::abs(lb[col]),
+                                                    std::abs(ub[col])))});
+      const bool at_lower = x_relax.size() > col &&
+                            std::isfinite(x_relax[col]) &&
+                            std::abs(x_relax[col] - lb[col]) <= side_tol;
+      const bool at_upper = x_relax.size() > col &&
+                            std::isfinite(x_relax[col]) &&
+                            std::abs(x_relax[col] - ub[col]) <= side_tol;
+      if ((lpredcost > tol && !at_lower) ||
+          (lpredcost < -tol && !at_upper)) {
+        ++stats.side_rejected;
+        continue;
+      }
+      const double lo_d = std::ceil(lb[col] - tol);
+      const double hi_d = std::floor(ub[col] + tol);
+      if (!std::isfinite(lo_d) || !std::isfinite(hi_d) ||
+          lo_d > hi_d || lo_d < static_cast<double>(LLONG_MIN / 4) ||
+          hi_d > static_cast<double>(LLONG_MAX / 4)) {
+        continue;
+      }
+      const long long lo = static_cast<long long>(lo_d);
+      const long long hi = static_cast<long long>(hi_d);
+      if (lo >= hi) continue;
+
+      ++stats.columns_seen;
+
+      if (lpredcost > tol) {
+        const long long last = hi - 1;
+        if (last >= lo) {
+          long long step = 1;
+          const long long range = last - lo;
+          if (range > max_steps) {
+            step = std::max<long long>(
+                1, (range + max_steps - 1) >> max_steps_exp);
+          }
+          const double shift = static_cast<double>(step) - 10.0 * tol;
+          for (long long lurk_ub = lo; lurk_ub <= last; lurk_ub += step) {
+            const double required =
+                lp_objective +
+                (static_cast<double>(lurk_ub - lo) + shift) * lpredcost;
+            if (required < lp_objective + tol) {
+              if (last - lurk_ub < step) break;
+              continue;
+            }
+            if (add_candidate(col, /*is_lower=*/false, required,
+                              static_cast<double>(lurk_ub), tol)) {
+              ++stats.records_added;
+            }
+            if (last - lurk_ub < step) break;
+          }
+        }
+      }
+      else if (lpredcost < -tol) {
+        const long long last = lo + 1;
+        if (last <= hi) {
+          long long step = 1;
+          const long long range = hi - last;
+          if (range > max_steps) {
+            step = std::max<long long>(
+                1, (range + max_steps - 1) >> max_steps_exp);
+          }
+          const double shift = -static_cast<double>(step) + 10.0 * tol;
+          for (long long lurk_lb = hi; lurk_lb >= last; lurk_lb -= step) {
+            const double required =
+                lp_objective +
+                (static_cast<double>(lurk_lb - hi) + shift) * lpredcost;
+            if (required < lp_objective + tol) {
+              if (lurk_lb - last < step) break;
+              continue;
+            }
+            if (add_candidate(col, /*is_lower=*/true, required,
+                              static_cast<double>(lurk_lb), tol)) {
+              ++stats.records_added;
+            }
+            if (lurk_lb - last < step) break;
+          }
+        }
+      }
+    }
+    stats.records_total = size();
+    return stats;
+  }
+
+  PropagateStats propagate(double cutoff,
+                           double proof_lower_bound,
+                           Eigen::VectorXd& lb,
+                           Eigen::VectorXd& ub,
+                           std::vector<DomainReasonBound>* reason_bounds_out,
+                           int reason_depth,
+                           int reason_trail_offset,
+                           double tol) {
+    PropagateStats stats;
+    const int n = static_cast<int>(std::min(lb.size(), ub.size()));
+    if (n <= 0 || !std::isfinite(cutoff)) return stats;
+    ensure_size(n);
+    const double local_tol = std::max(1e-9, tol);
+    const double cutoff_tol =
+        std::max(local_tol, 1e-10 * std::max(1.0, std::abs(cutoff)));
+    auto append_reason = [&](int col, bool is_lower, double value,
+                             double required_cutoff) {
+      if (reason_bounds_out == nullptr) return;
+      DomainReasonBound rb;
+      rb.bound = BranchDomainLiteral{col, value, is_lower};
+      rb.depth = reason_depth;
+      rb.trail_pos =
+          reason_trail_offset + static_cast<int>(reason_bounds_out->size());
+      rb.source_conflict_literal =
+          is_lower ? BranchDomainLiteral{
+                         col, std::ceil(value - local_tol) - 1.0, false}
+                   : BranchDomainLiteral{
+                         col, std::floor(value + local_tol) + 1.0, true};
+      rb.has_source_conflict_literal = true;
+      rb.source_conflict_clause = {rb.source_conflict_literal};
+      rb.has_source_conflict_clause = true;
+      rb.has_proof_activity_audit =
+          std::isfinite(required_cutoff) && std::isfinite(cutoff);
+      rb.proof_activity = required_cutoff;
+      rb.proof_required_activity = cutoff;
+      rb.proof_activity_margin = required_cutoff - cutoff;
+      reason_bounds_out->push_back(std::move(rb));
+    };
+    auto consume_bucket =
+        [&](int col, bool is_lower,
+            std::multimap<double, double>& bucket) {
+      if (bucket.empty()) return true;
+      if (std::isfinite(proof_lower_bound)) {
+        bucket.erase(bucket.begin(),
+                     bucket.upper_bound(proof_lower_bound + local_tol));
+      }
+      for (auto it = bucket.lower_bound(cutoff - cutoff_tol);
+           it != bucket.end(); ++it) {
+        ++stats.records_scanned;
+        const double bound = it->second;
+        const double required_cutoff = it->first;
+        ++stats.records_active;
+        if (is_lower) {
+          if (bound > ub[col] + local_tol) {
+            ++stats.pruned;
+            return false;
+          }
+          if (bound > lb[col] + local_tol) {
+            lb[col] = bound;
+            ++stats.tightened;
+            append_reason(col, true, bound, required_cutoff);
+          }
+        } else {
+          if (bound < lb[col] - local_tol) {
+            ++stats.pruned;
+            return false;
+          }
+          if (bound < ub[col] - local_tol) {
+            ub[col] = bound;
+            ++stats.tightened;
+            append_reason(col, false, bound, required_cutoff);
+          }
+        }
+      }
+      return lb[col] <= ub[col] + local_tol;
+    };
+    for (int col = 0; col < n; ++col) {
+      if (!consume_bucket(col, true, lower_bounds[static_cast<std::size_t>(col)]) ||
+          !consume_bucket(col, false, upper_bounds[static_cast<std::size_t>(col)])) {
+        return stats;
+      }
+    }
+    return stats;
+  }
+};
+
 // ════════════════════════════════════════════════════════════════════════════
 // Main MILP B&C Entry Point
 // ════════════════════════════════════════════════════════════════════════════
@@ -86,11 +579,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       highs_contract.requested_vendored_highs_lp;
   const bool strict_highs_lp_contract =
       highs_contract.strict_highs_lp_contract;
+  const bool strict_highs_root_fixed_point =
+      requested_vendored_highs_lp && opt.auto_highs_root_pipeline;
   const bool allow_vendored_root_frontier =
       highs_contract.allow_vendored_root_frontier;
   bool domain_heuristics = highs_contract.domain_heuristics;
-  VendoredHighsSfBackendScope vendored_sf_scope(
-      requested_vendored_highs_lp && allow_vendored_root_frontier);
+  VendoredHighsSfBackendScope vendored_sf_scope(requested_vendored_highs_lp);
 
   // ── P9.1: Forrest--Tomlin activation ──────────────────────────────────
   // When use_forrest_tomlin_updates is true, force the simplex factor
@@ -148,6 +642,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 #ifdef HACDCPF_HAVE_HIGHS_LIB
     const auto cert = bc_try_vendored_highs_root_certificate(
         base_lp, nullptr, nullptr, opt);
+    if (cert.attempted) {
+      ++out.bc_stats.vendored_root_certificate_attempts;
+      out.bc_stats.vendored_root_certificate_time_ms +=
+          1000.0 * cert.runtime_sec;
+      out.bc_stats.vendored_root_certificate_nodes = cert.nodes;
+      out.bc_stats.vendored_root_certificate_simplex_iterations =
+          cert.simplex_iterations;
+      if (cert.accepted) {
+        ++out.bc_stats.vendored_root_certificate_accepted;
+      } else {
+        ++out.bc_stats.vendored_root_certificate_rejected;
+      }
+    }
     if (opt.verbose || bc_env_flag_enabled("HACDCPF_BC_TIMELINE")) {
       fmt::print(stderr,
                  "[B&C-ROOT-HIGHS-CERT:orig] attempted={} accepted={} "
@@ -1040,10 +1547,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   LPModel root_lp = base_lp;
   apply_node_bounds(root_lp.vars, root.lb, root.ub);
 
-  std::vector<char> root_implied_integer_cols =
-      detect_implied_integer_columns(root_lp);
-  int root_implied_integer_count = static_cast<int>(
-      std::count(root_implied_integer_cols.begin(),
+	  std::vector<char> root_implied_integer_cols =
+	      detect_implied_integer_columns(root_lp);
+	  RootRedcostLurkingBounds root_redcost_lurking_bounds;
+	  root_redcost_lurking_bounds.ensure_size(n);
+	  int root_implied_integer_count = static_cast<int>(
+	      std::count(root_implied_integer_cols.begin(),
                  root_implied_integer_cols.end(), 1));
   const IntegralRowTighteningStats root_integral_row_tightening =
       tighten_integral_row_sides(root_lp, root_implied_integer_cols,
@@ -1159,10 +1668,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           root_relax.simplex->basis.cached_sparse_basis;
     }
   }
-  root.basis_hint = root_relax.basis_hint;
-  if (root.basis_hint) {
-    root.basis_hint->compact_indices_storage();
-  }
+	  root.basis_hint = root_relax.basis_hint;
+	  if (root.basis_hint) {
+	    root.basis_hint->compact_indices_storage();
+	  }
   if (root_relax.simplex && root_relax.simplex->basis.cached_sparse_basis) {
     root.has_live_factor_telemetry = true;
     root.live_factor_telemetry =
@@ -1172,24 +1681,86 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   if (!std::isfinite(root.bound)) {
     root.bound = objective_value(base_lp.c, root.x_relax, base_lp.sense);
   }
-  if (!std::isfinite(root.bound)) {
-    out.stats.status = bc_status::kRootRelaxationNanObjective;
-    join_root_background_tasks();
-    return return_with_profile();
-  }
-  root.depth = 0;
-  const StandardFormLP* root_trace_sf =
-      root_relax.simplex ? &root_relax.simplex->form : nullptr;
+	  if (!std::isfinite(root.bound)) {
+	    out.stats.status = bc_status::kRootRelaxationNanObjective;
+	    join_root_background_tasks();
+	    return return_with_profile();
+	  }
+	  root.depth = 0;
+	  const bool highs_root_cutpool_original_lp =
+	      strict_highs_root_fixed_point;
+	      // HiGHS' HighsDomain::propagate() commits objective-cutoff and current-LP
+	      // reduced-cost bound changes as first-class domain changes, then
+	      // immediately re-solves the LP when the domain moved.  The root red-cost
+      // lurking table is a first-class root LP source: it is built only from the
+      // audited root LP basis/dual state and activated by the HiGHS upper_limit
+      // (not the raw incumbent objective).
+      const bool root_cutoff_domain_commit_allowed = true;
+      const bool root_current_redcost_domain_commit_allowed = true;
+      const bool root_lurking_redcost_domain_commit_allowed = true;
+      bool root_redcost_lurking_cutoff_available = false;
+      auto root_redcost_lurking_recording_allowed =
+          [&]() -> bool {
+        if (!root_lurking_redcost_domain_commit_allowed ||
+            !opt.enable_reduced_cost_fixing) {
+          return false;
+        }
+        // HiGHS records root reduced-cost state inside the root domain
+        // fixed point, but actual reduced-cost bound changes are activated by
+        // a finite upper_limit.  The strict root pipeline must therefore not
+        // inflate a multi-threshold lurking table before a verified cutoff is
+        // available; that turns a lightweight LP state into an extra Native
+        // proof-source graph and dominates root separation time.
+        if (strict_highs_root_fixed_point &&
+            !root_redcost_lurking_cutoff_available) {
+          return false;
+        }
+        return true;
+      };
+		  auto refresh_root_redcost_lurking_bounds =
+		      [&](const char* phase) -> RootRedcostLurkingBounds::AddStats {
+		    RootRedcostLurkingBounds::AddStats stats;
+			    if (!root_redcost_lurking_recording_allowed() ||
+            base_lp.sense != Sense::Minimize ||
+		        !root.basis_hint || !root.basis_hint->cached_reduced_costs ||
+		        root.basis_hint->cached_reduced_costs->size() < n ||
+		        root.x_relax.size() != n || root.lb.size() != n ||
+	        root.ub.size() != n || !std::isfinite(root.bound)) {
+	      stats.records_total = root_redcost_lurking_bounds.size();
+	      return stats;
+	    }
+	    stats = root_redcost_lurking_bounds.add_from_root_lp(
+	        base_lp.vars, &root_implied_integer_cols, root.x_relax,
+	        *root.basis_hint->cached_reduced_costs,
+	        root.basis_hint->cached_col_scale.get(),
+	        root.basis_hint->basis_indices(),
+	        root.lb, root.ub, root.bound, opt.int_tol);
+	    if (opt.verbose || stats.records_added > 0) {
+	      fmt::print(stderr,
+	                 "[B&C ROOT-RC-LURK] phase={} cols={} added={} total={} "
+	                 "sideReject={} lpobj={:.10g}\n",
+	                 phase != nullptr ? phase : "root_lp", stats.columns_seen,
+	                 stats.records_added, stats.records_total,
+	                 stats.side_rejected, root.bound);
+	    }
+	    return stats;
+	  };
+	  refresh_root_redcost_lurking_bounds("root_lp_initial");
+	  const StandardFormLP* root_trace_sf =
+	      root_relax.simplex ? &root_relax.simplex->form : nullptr;
   trace_native_frontier_conformance(
       "root_lp_initial", root_lp, root_trace_sf, root_implied_integer_cols,
       root.x_relax, root.lb, root.ub, root.basis_hint.get(), root.bound,
       opt.int_tol);
-  StandardFormLP root_first_class_unscaled_sf;
-  bool root_first_class_sf_valid = false;
-  if (root_relax.simplex && root_relax.simplex->form.A.rows() > 0) {
-    root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
-    root_first_class_sf_valid = true;
-  }
+	  StandardFormLP root_first_class_unscaled_sf;
+	  bool root_first_class_sf_valid = false;
+	  const bool maintain_native_xpool_sf_cache =
+	      !highs_root_cutpool_original_lp;
+	  if (maintain_native_xpool_sf_cache && root_relax.simplex &&
+	      root_relax.simplex->form.A.rows() > 0) {
+	    root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
+	    root_first_class_sf_valid = true;
+	  }
 
   // ─────────────────────────────────────────────────────────────────────
   // Root pseudocost seeding (cold-start priors).
@@ -1255,12 +1826,52 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       opt.enable_objective_cutoff_domain_fixing ||
       (opt.enable_reduced_cost_fixing &&
        opt.enable_reduced_cost_proof_conflict_minimization);
-  if (use_objective_propagation) {
-    objective_propagation.setup(root_lp, &root_implied_integer_cols);
-  }
+  auto objective_propagation_build_policy =
+      [&]() -> ObjectivePropagationState::BuildPolicy {
+    return strict_highs_lp_contract
+        ? ObjectivePropagationState::BuildPolicy::highs_domain_closure()
+        : ObjectivePropagationState::BuildPolicy::native_enriched();
+  };
+	  if (use_objective_propagation) {
+	    objective_propagation.setup(root_lp, &root_implied_integer_cols,
+	                                nullptr, nullptr,
+	                                objective_propagation_build_policy());
+	  }
 
-  // When crossover was skipped (no simplex basis), Gomory cuts can't fire.
-  // Switch to All so MIR/cover still run.
+		  ConflictPool conflict_pool(
+		      opt.cut_pool_max_size,
+		      std::max(64, opt.reduced_cost_conflict_pool_max_literals));
+		  std::uint64_t global_domain_learning_epoch = 0;
+		  std::uint64_t objective_artifact_epoch = 0;
+		  std::uint64_t incumbent_cutoff_epoch = 0;
+		  auto current_domain_learning_epoch = [&]() -> std::uint64_t {
+		    return global_domain_learning_epoch;
+		  };
+		  auto current_objective_artifact_epoch = [&]() -> std::uint64_t {
+		    return objective_artifact_epoch;
+		  };
+		  auto current_domain_closure_epoch = [&]() -> std::uint64_t {
+		    return global_domain_learning_epoch + objective_artifact_epoch +
+		           incumbent_cutoff_epoch;
+		  };
+		  auto note_global_domain_learning =
+		      [&](std::uint64_t added = 1) -> void {
+		    if (added > 0) {
+		      global_domain_learning_epoch += added;
+		    }
+		  };
+		  auto note_objective_artifact_learning =
+		      [&](std::uint64_t added = 1) -> void {
+		    if (added > 0) {
+		      objective_artifact_epoch += added;
+		    }
+		  };
+		  auto note_incumbent_cutoff_learning = [&]() -> void {
+		    ++incumbent_cutoff_epoch;
+		  };
+
+	  // When crossover was skipped (no simplex basis), Gomory cuts can't fire.
+	  // Switch to All so MIR/cover still run.
   if (!root_relax.simplex && opt.cuts == CutType::Gomory) {
     opt.cuts = CutType::All;
   }
@@ -1289,8 +1900,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           root_transformed_cutpool_audit_rows;
       std::vector<double> root_transformed_cutpool_audit_rhs;
       std::unordered_set<std::string> root_transformed_cutpool_audit_row_keys;
+      // HiGHS keeps cutpool rows as live domain-propagation rows.  Deriving
+      // extra variable-bound separator sources from those rows changes the
+      // transformed source graph and is intentionally diagnostic/opt-in.
       const bool root_transformed_cutpool_live_vb_source =
-          std::getenv("HACDCPF_XTAB_CUTPOOL_VB_SOURCE") != nullptr;
+          !strict_highs_root_fixed_point &&
+          bc_env_flag_enabled("HACDCPF_XTAB_CUTPOOL_VB_SOURCE");
+      const bool derive_dynamic_root_lp_rows_as_vb_source =
+          !strict_highs_root_fixed_point ||
+          bc_env_flag_enabled("HACDCPF_XTAB_DYNAMIC_ROW_VB_SOURCE");
       struct RootProbeVariableBoundSource {
         bool is_vub{true};
         int col{-1};
@@ -1301,11 +1919,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       std::vector<RootProbeVariableBoundSource> root_presolve_varbound_sources;
       std::vector<RootProbeVariableBoundSource> root_highs_varbound_sources;
       std::vector<RootProbeVariableBoundSource> root_probe_varbound_sources;
-      const bool use_highs_presolve_varbounds =
-          !highs_presolve_vb_source_disabled &&
-          highs_presolve_side_state.side_state_available &&
-          highs_presolve_side_state.cols == n &&
-          !highs_presolve_side_state.var_bounds.empty();
+	      const bool use_highs_presolve_varbounds =
+	          !highs_presolve_vb_source_disabled &&
+	          highs_presolve_side_state.side_state_available &&
+	          !highs_presolve_side_state.var_bounds.empty();
       const bool replay_highs_presolve_varbounds =
           use_highs_presolve_varbounds ||
           bc_env_flag_enabled("HACDCPF_REPLAY_HIGHS_PRESOLVE_VB");
@@ -1350,23 +1967,68 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         std::uint64_t highs_vub_kept = 0;
         std::uint64_t highs_vlb_kept = 0;
         std::uint64_t highs_bad_col = 0;
-        std::uint64_t highs_bad_trigger = 0;
-        std::uint64_t highs_nonbinary_trigger = 0;
-        std::uint64_t highs_duplicate = 0;
-        std::uint64_t highs_self = 0;
-        const bool highs_side_match =
-            highs_presolve_side_state.side_state_available &&
-            highs_presolve_side_state.cols == n &&
-            !highs_presolve_side_state.var_bounds.empty();
-        if (highs_side_match) {
-          for (const auto& rec : highs_presolve_side_state.var_bounds) {
-            ++highs_seen;
-            const int col = rec.target_col;
-            const int trigger_col = rec.trigger_col;
-            if (col == trigger_col) {
-              ++highs_self;
-              continue;
-            }
+	        std::uint64_t highs_bad_trigger = 0;
+	        std::uint64_t highs_nonbinary_trigger = 0;
+	        std::uint64_t highs_duplicate = 0;
+	        std::uint64_t highs_self = 0;
+	        std::uint64_t highs_mapped_reduced = 0;
+	        std::uint64_t highs_mapped_original = 0;
+	        std::uint64_t highs_unmapped_original = 0;
+	        std::uint64_t highs_nontransformable = 0;
+	        std::uint64_t highs_bad_transform = 0;
+	        const bool highs_side_match =
+	            highs_presolve_side_state.side_state_available &&
+	            highs_presolve_side_state.cols == n &&
+	            !highs_presolve_side_state.var_bounds.empty();
+	        if (use_highs_presolve_varbounds) {
+	          for (const auto& rec : highs_presolve_side_state.var_bounds) {
+	            ++highs_seen;
+	            bool mapped_from_original = false;
+	            int col = rec.target_col;
+	            int trigger_col = rec.trigger_col;
+	            bool is_vub = rec.upper;
+	            double coef = rec.coef;
+	            double constant = rec.constant;
+	            if (!highs_side_match) {
+	              if (!rec.target_linearly_transformable ||
+	                  !rec.trigger_linearly_transformable) {
+	                ++highs_nontransformable;
+	                continue;
+	              }
+	              if (rec.target_orig_col < 0 || rec.trigger_orig_col < 0) {
+	                ++highs_unmapped_original;
+	                continue;
+	              }
+	              col = rec.target_orig_col;
+	              trigger_col = rec.trigger_orig_col;
+	              if (col < 0 || trigger_col < 0) {
+	                ++highs_unmapped_original;
+	                continue;
+	              }
+	              const double target_scale = rec.target_scale;
+	              const double trigger_scale = rec.trigger_scale;
+	              const double target_shift = rec.target_constant;
+	              const double trigger_shift = rec.trigger_constant;
+	              if (!std::isfinite(target_scale) ||
+	                  !std::isfinite(trigger_scale) ||
+	                  !std::isfinite(target_shift) ||
+	                  !std::isfinite(trigger_shift) ||
+	                  std::abs(target_scale) <= 1e-12 ||
+	                  std::abs(trigger_scale) <= 1e-12) {
+	                ++highs_bad_transform;
+	                continue;
+	              }
+	              coef = rec.coef * trigger_scale / target_scale;
+	              constant =
+	                  (rec.coef * trigger_shift + rec.constant - target_shift) /
+	                  target_scale;
+	              if (target_scale < 0.0) is_vub = !is_vub;
+	              mapped_from_original = true;
+	            }
+	            if (col == trigger_col) {
+	              ++highs_self;
+	              continue;
+	            }
             if (col < 0 || col >= n) {
               ++highs_bad_col;
               continue;
@@ -1384,35 +2046,41 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               ++highs_nonbinary_trigger;
               continue;
             }
-            if (!std::isfinite(rec.coef) || !std::isfinite(rec.constant)) {
-              ++highs_bad_col;
-              continue;
-            }
-            const std::string key = fmt::format(
-                "{}:{}:{}:{:.17g}:{:.17g}", rec.upper ? 1 : 0, col,
-                trigger_col, rec.coef, rec.constant);
-            if (!highs_source_keys.insert(key).second) {
-              ++highs_duplicate;
-              continue;
-            }
-            root_highs_varbound_sources.push_back(
-                RootProbeVariableBoundSource{rec.upper, col, trigger_col,
-                                             rec.coef, rec.constant});
-            ++highs_kept;
-            if (rec.upper)
-              ++highs_vub_kept;
-            else
-              ++highs_vlb_kept;
-          }
-        }
+	            if (!std::isfinite(coef) || !std::isfinite(constant)) {
+	              ++highs_bad_col;
+	              continue;
+	            }
+	            const std::string key = fmt::format(
+	                "{}:{}:{}:{:.17g}:{:.17g}", is_vub ? 1 : 0, col,
+	                trigger_col, coef, constant);
+	            if (!highs_source_keys.insert(key).second) {
+	              ++highs_duplicate;
+	              continue;
+	            }
+	            root_highs_varbound_sources.push_back(
+	                RootProbeVariableBoundSource{is_vub, col, trigger_col, coef,
+	                                             constant});
+	            ++highs_kept;
+	            if (mapped_from_original)
+	              ++highs_mapped_original;
+	            else
+	              ++highs_mapped_reduced;
+	            if (is_vub)
+	              ++highs_vub_kept;
+	            else
+	              ++highs_vlb_kept;
+	          }
+	        }
         if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
             std::getenv("HACDCPF_HIGHS_PRESOLVE_STATS") != nullptr) {
           fmt::print(stderr,
                      "[B&C-HIGHS-VB-MAP] mode={} side_match={} "
                      "hs_cols={} native_cols={} hs_vub={} hs_vlb={} "
                      "records={} seen={} kept={} kept_vub={} kept_vlb={} "
-                     "bad_col={} bad_trigger={} nonbin={} dup={} self={} "
-                     "src_stats=vub{}/{}/{}:vlb{}/{}/{}\n",
+	                     "bad_col={} bad_trigger={} nonbin={} dup={} self={} "
+	                     "redMap={} origMap={} unmapOrig={} nonxform={} "
+	                     "badXform={} "
+	                     "src_stats=vub{}/{}/{}:vlb{}/{}/{}\n",
                      use_highs_presolve_varbounds ? "first_class"
                                                   : "diagnostic",
                      highs_side_match ? 1 : 0, highs_presolve_side_state.cols,
@@ -1420,9 +2088,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                      highs_presolve_side_state.vlb_count,
                      highs_presolve_side_state.var_bounds.size(), highs_seen,
                      highs_kept, highs_vub_kept, highs_vlb_kept,
-                     highs_bad_col, highs_bad_trigger,
-                     highs_nonbinary_trigger, highs_duplicate, highs_self,
-                     highs_presolve_side_state.vub_accepted,
+	                     highs_bad_col, highs_bad_trigger,
+	                     highs_nonbinary_trigger, highs_duplicate, highs_self,
+	                     highs_mapped_reduced, highs_mapped_original,
+	                     highs_unmapped_original, highs_nontransformable,
+	                     highs_bad_transform,
+	                     highs_presolve_side_state.vub_accepted,
                      highs_presolve_side_state.vub_attempts,
                      highs_presolve_side_state.vub_replaced,
                      highs_presolve_side_state.vlb_accepted,
@@ -1431,12 +2102,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         }
       } else if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
                  std::getenv("HACDCPF_HIGHS_PRESOLVE_STATS") != nullptr) {
-        fmt::print(stderr,
-                   "[B&C-HIGHS-VB-MAP] mode=disabled side_match=0 "
-                   "hs_cols={} native_cols={} hs_vub={} hs_vlb={} "
-                   "records={} seen=0 kept=0 kept_vub=0 kept_vlb=0 "
-                   "bad_col=0 bad_trigger=0 nonbin=0 dup=0 self=0 "
-                   "src_stats=vub{}/{}/{}:vlb{}/{}/{}\n",
+	          fmt::print(stderr,
+	                   "[B&C-HIGHS-VB-MAP] mode=disabled side_match=0 "
+	                   "hs_cols={} native_cols={} hs_vub={} hs_vlb={} "
+	                   "records={} seen=0 kept=0 kept_vub=0 kept_vlb=0 "
+	                   "bad_col=0 bad_trigger=0 nonbin=0 dup=0 self=0 "
+	                   "redMap=0 origMap=0 unmapOrig=0 nonxform=0 badXform=0 "
+	                   "src_stats=vub{}/{}/{}:vlb{}/{}/{}\n",
                    highs_presolve_side_state.cols, n,
                    highs_presolve_side_state.vub_count,
                    highs_presolve_side_state.vlb_count,
@@ -1694,7 +2366,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    variable_bound_source_stats = build_variable_bound_table_from_rows(
 	        source_lp, root_implied_integer_cols, variable_bound_table,
 	        &implication_graph, 512);
-	    if (source_lp.A.rows() > root_cut_varbound_source_start_row) {
+		    if (derive_dynamic_root_lp_rows_as_vb_source &&
+            source_lp.A.rows() > root_cut_varbound_source_start_row) {
 	      NativeVariableBoundSourceStats cut_stats =
 	          augment_variable_bound_table_from_cut_rows(
 	              source_lp, root_implied_integer_cols,
@@ -1799,74 +2472,154 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         double max_capacity{0.0};
         double min_capacity{kInf};
       };
-      auto propagate_sparse_cutpool_rows =
-          [&](const std::vector<Eigen::SparseVector<double>>& rows,
-              const std::vector<double>& rhs,
-              Eigen::VectorXd& lb,
-              Eigen::VectorXd& ub,
-              int max_rounds,
-              SparseCutpoolPropagationStats* stats) -> bool {
-        const int n_local = static_cast<int>(lb.size());
-        const std::size_t nrows = std::min(rows.size(), rhs.size());
-        if (n_local != n || ub.size() != n_local || nrows == 0) return true;
-        const double tol = std::max(1e-9, opt.lp_tol);
-        const int rounds = std::max(1, max_rounds);
+	      auto propagate_sparse_cutpool_rows =
+	          [&](const std::vector<Eigen::SparseVector<double>>& rows,
+	              const std::vector<double>& rhs,
+	              Eigen::VectorXd& lb,
+	              Eigen::VectorXd& ub,
+	              int max_rounds,
+	              SparseCutpoolPropagationStats* stats,
+	              std::vector<DomainReasonBound>* reason_bounds_out = nullptr,
+	              int reason_depth = 0,
+	              int reason_trail_offset = 0,
+	              const std::vector<char>* pending_cols = nullptr) -> bool {
+	        const int n_local = static_cast<int>(lb.size());
+	        const std::size_t nrows = std::min(rows.size(), rhs.size());
+	        if (n_local != n || ub.size() != n_local || nrows == 0) return true;
+	        const double tol = std::max(1e-9, opt.lp_tol);
+	        const int rounds = std::max(1, max_rounds);
         for (int round = 0; round < rounds; ++round) {
           int round_tightened = 0;
           for (std::size_t row_id = 0; row_id < nrows; ++row_id) {
             const auto& row = rows[row_id];
-            if (row.size() != n || row.nonZeros() <= 0 ||
-                row.nonZeros() > 100 || !std::isfinite(rhs[row_id])) {
-              continue;
-            }
-            if (stats != nullptr) ++stats->rows_scanned;
+	            if (row.size() != n || row.nonZeros() <= 0 ||
+	                !std::isfinite(rhs[row_id])) {
+	              continue;
+	            }
+	            if (pending_cols != nullptr) {
+	              bool touches_pending = false;
+	              for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
+	                const int j = static_cast<int>(it.index());
+	                if (j >= 0 && j < static_cast<int>(pending_cols->size()) &&
+	                    (*pending_cols)[static_cast<std::size_t>(j)] != 0) {
+	                  touches_pending = true;
+	                  break;
+	                }
+	              }
+	              if (!touches_pending) continue;
+	            }
+	            if (stats != nullptr) ++stats->rows_scanned;
             double min_activity = 0.0;
+            int ninf_min = 0;
             double capacity_threshold = tol;
-            bool finite_activity = true;
             for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
               const int j = static_cast<int>(it.index());
               const double a = it.value();
               if (j < 0 || j >= n || std::abs(a) <= 1e-12) continue;
               const double bound = a > 0.0 ? lb[j] : ub[j];
               if (!std::isfinite(bound)) {
-                finite_activity = false;
-                break;
+                ++ninf_min;
+              } else {
+                min_activity += a * bound;
               }
-              min_activity += a * bound;
               const double range =
                   std::isfinite(lb[j]) && std::isfinite(ub[j])
                       ? std::max(0.0, ub[j] - lb[j])
                       : kInf;
               if (std::isfinite(range)) {
                 capacity_threshold =
-                    std::max(capacity_threshold, std::abs(a) * range);
+                  std::max(capacity_threshold, std::abs(a) * range);
               }
             }
-            if (!finite_activity) continue;
+            if (!std::isfinite(min_activity) || ninf_min > 1) continue;
             const double capacity = rhs[row_id] - min_activity;
             if (stats != nullptr) {
               stats->max_capacity = std::max(stats->max_capacity, capacity);
               stats->min_capacity = std::min(stats->min_capacity, capacity);
             }
-            if (capacity < -tol) {
+            if (ninf_min == 0 && capacity < -tol) {
               if (stats != nullptr) ++stats->pruned;
               return false;
             }
-            if (capacity > capacity_threshold + tol) continue;
+            if (ninf_min == 0 && capacity > capacity_threshold + tol) continue;
             if (stats != nullptr) ++stats->active_rows;
 
+            const Eigen::VectorXd row_reason_lb = lb;
+            const Eigen::VectorXd row_reason_ub = ub;
             for (Eigen::SparseVector<double>::InnerIterator it(row); it; ++it) {
               const int j = static_cast<int>(it.index());
               const double a = it.value();
               if (j < 0 || j >= n || std::abs(a) <= 1e-12) continue;
-              const double contrib = a > 0.0 ? a * lb[j] : a * ub[j];
-              const double residual = rhs[row_id] - (min_activity - contrib);
+              const double min_bound =
+                  a > 0.0 ? row_reason_lb[j] : row_reason_ub[j];
+              const bool target_is_inf_min = !std::isfinite(min_bound);
+              double min_residual_activity = min_activity;
+              if (ninf_min == 1) {
+                if (!target_is_inf_min) continue;
+              } else {
+                if (target_is_inf_min) continue;
+                min_residual_activity -= a * min_bound;
+              }
+              const double residual = rhs[row_id] - min_residual_activity;
+              auto make_reason = [&](const BranchDomainLiteral& bound,
+                                     const BranchDomainLiteral& forbidden) {
+                if (reason_bounds_out == nullptr) return;
+                DomainReasonBound rb;
+                rb.bound = bound;
+                rb.reason.reserve(static_cast<std::size_t>(
+                    std::max<Eigen::Index>(0, row.nonZeros() - 1)));
+                for (Eigen::SparseVector<double>::InnerIterator jt(row); jt;
+                     ++jt) {
+                  const int k = static_cast<int>(jt.index());
+                  const double ak = jt.value();
+                  if (k < 0 || k >= n || k == j ||
+                      std::abs(ak) <= 1e-12) {
+                    continue;
+                  }
+                  if (ak > 0.0) {
+                    if (std::isfinite(row_reason_lb[k])) {
+                      rb.reason.push_back(
+                          BranchDomainLiteral{k, row_reason_lb[k], true});
+                    }
+                  } else if (std::isfinite(row_reason_ub[k])) {
+                    rb.reason.push_back(
+                        BranchDomainLiteral{k, row_reason_ub[k], false});
+                  }
+                }
+                canonicalize_branch_literals(rb.reason);
+                rb.trail_pos =
+                    reason_trail_offset +
+                    static_cast<int>(reason_bounds_out->size());
+                rb.depth = reason_depth;
+                rb.source_conflict_literal = forbidden;
+                rb.has_source_conflict_literal = true;
+                rb.source_conflict_clause = rb.reason;
+                rb.source_conflict_clause.push_back(forbidden);
+                canonicalize_branch_literals(rb.source_conflict_clause);
+                rb.has_source_conflict_clause = true;
+                const double source_activity =
+                    min_residual_activity + a * forbidden.value;
+                rb.has_proof_activity_audit =
+                    std::isfinite(source_activity) &&
+                    std::isfinite(rhs[row_id]);
+                rb.proof_activity = source_activity;
+                rb.proof_required_activity = rhs[row_id];
+                rb.proof_activity_margin = source_activity - rhs[row_id];
+                reason_bounds_out->push_back(std::move(rb));
+              };
               if (a > 0.0) {
                 double new_ub = residual / a;
                 if (is_root_integral_or_implied(j)) {
                   new_ub = std::floor(new_ub + opt.int_tol);
                 }
                 if (std::isfinite(new_ub) && new_ub < ub[j] - tol) {
+                  make_reason(BranchDomainLiteral{j, new_ub, false},
+                              BranchDomainLiteral{
+                                  j,
+                                  is_root_integral_or_implied(j)
+                                      ? std::floor(new_ub + opt.int_tol) + 1.0
+                                      : new_ub + std::max(1e-7, 10.0 * tol),
+                                  true});
                   ub[j] = new_ub;
                   ++round_tightened;
                   if (stats != nullptr) ++stats->tightened;
@@ -1877,6 +2630,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   new_lb = std::ceil(new_lb - opt.int_tol);
                 }
                 if (std::isfinite(new_lb) && new_lb > lb[j] + tol) {
+                  make_reason(BranchDomainLiteral{j, new_lb, true},
+                              BranchDomainLiteral{
+                                  j,
+                                  is_root_integral_or_implied(j)
+                                      ? std::ceil(new_lb - opt.int_tol) - 1.0
+                                      : new_lb - std::max(1e-7, 10.0 * tol),
+                                  false});
                   lb[j] = new_lb;
                   ++round_tightened;
                   if (stats != nullptr) ++stats->tightened;
@@ -1892,10 +2652,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         }
         return true;
       };
-	  auto capture_variable_bound_cutpool_rows =
-	      [&](const LPModel& with_rows, int first_row, int last_row,
-	          const char* phase) {
-	    first_row = std::max(0, first_row);
+		  auto capture_variable_bound_cutpool_rows =
+		      [&](const LPModel& with_rows, int first_row, int last_row,
+		          const char* phase) {
+        if (!derive_dynamic_root_lp_rows_as_vb_source) return;
+		    first_row = std::max(0, first_row);
 	    last_row = std::min<int>(last_row, static_cast<int>(with_rows.A.rows()));
 	    if (first_row >= last_row) return;
 	    Eigen::SparseMatrix<double, Eigen::RowMajor> Arow = with_rows.A;
@@ -1952,12 +2713,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        trace_native_presolve_state_conformance(
             "root_initial_source", root_lp, root_implied_integer_cols,
             variable_bound_table);
-	    artifact_stats = build_implied_integer_row_artifacts(
+    artifact_stats = build_implied_integer_row_artifacts(
         root_lp, root_implied_integer_cols, clique_table,
         implication_graph, 256, 96, 250000, &root.x_relax);
     if (use_objective_propagation) {
       objective_propagation.setup(root_lp, &root_implied_integer_cols,
-                                  &clique_table, &implication_graph);
+                                  &clique_table, &implication_graph,
+                                  objective_propagation_build_policy());
       const auto published = publish_objective_implied_event_source(
           root_lp, objective_propagation, implication_graph, clique_table,
           opt.int_tol);
@@ -1967,7 +2729,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           published.clique_edges_added;
       if (published.implications_added > 0 || published.clique_edges_added > 0) {
         objective_propagation.setup(root_lp, &root_implied_integer_cols,
-                                    &clique_table, &implication_graph);
+                                    &clique_table, &implication_graph,
+                                    objective_propagation_build_policy());
       }
     }
     auto t_cq1 = std::chrono::steady_clock::now();
@@ -2033,12 +2796,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
   };
 
-	  if (reduced_initial_solution.size() == n) {
-    if (!strict_highs_lp_contract) {
-      try_register_root_cutoff("reduced_initial_solution",
-                               reduced_initial_solution);
-    }
-	  }
+		  if (reduced_initial_solution.size() == n) {
+	    // HiGHS runSetup() accepts a feasible MIP start before evaluateRootNode()
+	    // and exposes it as upper_limit for objective propagation and root
+	    // reduced-cost fixing.  In strict tree-exhaustion mode this cutoff is
+	    // propagation-only: it is not a root gap certificate or termination
+	    // shortcut.
+	    try_register_root_cutoff("reduced_initial_solution",
+	                             reduced_initial_solution);
+		  }
 	  if (!strict_highs_lp_contract && heuristic_x_orig.size() > 0 &&
       std::isfinite(heuristic_obj)) {
 	    Eigen::VectorXd x_fwd = heuristic_x_orig;
@@ -2049,17 +2815,89 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 #endif
     try_register_root_cutoff("forward_mapped_heuristic", x_fwd);
   }
-	  const bool has_root_cutoff_for_propagation =
-	      has_verified_root_cutoff ||
-      (!strict_highs_lp_contract && std::isfinite(heuristic_obj));
-  const double root_cutoff_for_propagation =
+		  const bool has_root_cutoff_for_propagation =
+		      has_verified_root_cutoff;
+  const double root_cutoff_raw_for_propagation =
       has_verified_root_cutoff ? verified_root_cutoff_obj : heuristic_obj;
-  const std::string root_cutoff_source_for_propagation =
-	      has_verified_root_cutoff ? verified_root_cutoff_source
-	                               : std::string("none");
+  const double root_cutoff_for_propagation =
+      has_root_cutoff_for_propagation
+          ? highs_style_incumbent_upper_limit(base_lp,
+                                             root_cutoff_raw_for_propagation,
+                                             opt.int_tol)
+          : kInf;
+	  const std::string root_cutoff_source_for_propagation =
+		      has_verified_root_cutoff ? verified_root_cutoff_source
+		                               : std::string("none");
+    root_redcost_lurking_cutoff_available =
+        has_root_cutoff_for_propagation &&
+        std::isfinite(root_cutoff_for_propagation);
+    if (root_redcost_lurking_cutoff_available) {
+      (void)refresh_root_redcost_lurking_bounds("root_cutoff_available");
+    }
+	  if (root_cutoff_domain_commit_allowed &&
+	      has_root_cutoff_for_propagation &&
+	      std::isfinite(root_cutoff_for_propagation) &&
+	      use_objective_propagation && base_lp.sense == Sense::Minimize) {
+	    note_incumbent_cutoff_learning();
+	    const auto clique_stats = extract_objective_cutoff_cliques(
+	        base_lp, root_implied_integer_cols, root.lb, root.ub,
+	        root_cutoff_for_propagation, clique_table, opt.int_tol,
+	        &objective_propagation, &conflict_pool, nullptr);
+	    const auto stats = extract_objective_cutoff_artifacts(
+	        base_lp, root_implied_integer_cols, root.lb, root.ub,
+	        root_cutoff_for_propagation, implication_graph, clique_table,
+	        opt.int_tol, &objective_propagation, &conflict_pool, nullptr);
+	    const std::uint64_t extracted =
+	        stats.implications_added + stats.clique_edges_added +
+	        stats.conflict_clauses_added + clique_stats.clique_edges_added +
+	        clique_stats.conflict_clauses_added;
+	    if (extracted > 0) {
+	      out.bc_stats.rc_binary_implications_learned +=
+	          stats.implications_added;
+	      out.bc_stats.cutoff_conflict_clauses_learned +=
+	          stats.conflict_clauses_added + clique_stats.conflict_clauses_added;
+	      note_global_domain_learning(extracted);
+	      note_objective_artifact_learning(extracted);
+	      objective_propagation.setup(base_lp, &root_implied_integer_cols,
+	                                  &clique_table, &implication_graph,
+	                                  objective_propagation_build_policy());
+	      const auto published = publish_objective_implied_event_source(
+	          base_lp, objective_propagation, implication_graph, clique_table,
+	          opt.int_tol);
+	      out.bc_stats.objective_implied_event_published_implications +=
+	          published.implications_added;
+	      out.bc_stats.objective_implied_event_published_clique_edges +=
+	          published.clique_edges_added;
+	      const std::uint64_t published_total =
+	          published.implications_added + published.clique_edges_added;
+	      if (published_total > 0) {
+	        note_global_domain_learning(published_total);
+	        note_objective_artifact_learning(published_total);
+	        objective_propagation.setup(base_lp, &root_implied_integer_cols,
+	                                    &clique_table, &implication_graph,
+	                                    objective_propagation_build_policy());
+	      }
+	    }
+	    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+	        extracted > 0) {
+	      fmt::print(stderr,
+	                 "[B&C ROOT-CUTOFF-SOURCE] source={} cap={:.6g} "
+	                 "cand={} eventCand={} conflicts={} confQ={} impl={} "
+	                 "clq={} cutClq={} cutConf={} arcs={} clqEdges={}\n",
+	                 root_cutoff_source_for_propagation,
+	                 stats.cutoff_capacity, stats.candidates,
+	                 stats.implied_event_candidates, stats.conflicts_seen,
+	                 stats.conflict_clauses_added +
+	                     clique_stats.conflict_clauses_added,
+	                 stats.implications_added, stats.clique_edges_added,
+	                 clique_stats.clique_edges_added,
+	                 clique_stats.conflict_clauses_added,
+	                 implication_graph.size(), clique_table.n_literal_edges());
+	    }
+	  }
 
-  out.bc_stats.root_presolved_rows =
-      static_cast<int>(root_lp.A.rows()) + static_cast<int>(root_lp.Aeq.rows());
+	  out.bc_stats.root_presolved_rows =
+	      static_cast<int>(root_lp.A.rows()) + static_cast<int>(root_lp.Aeq.rows());
   out.bc_stats.root_presolved_cols = n;
 #ifdef HACDCPF_HAVE_PAPILO
   if (papilo_ps.success && papilo_ps.reduced_compact_rows > 0) {
@@ -2400,6 +3238,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return audit;
   };
 
+  std::function<double(const Node&)> domain_objective_lower_bound =
+      [&](const Node& node) -> double {
+    return objective_propagation.objective_lower_bound(base_lp, node.lb,
+                                                       node.ub);
+  };
+
+  auto apply_domain_objective_lower_bound =
+      [&](Node& node, const char* phase) -> double {
+    const double domain_lb = domain_objective_lower_bound(node);
+    if (!std::isfinite(domain_lb)) return 0.0;
+    const double old_bound = node.bound;
+    if (std::isfinite(old_bound) && domain_lb <= old_bound) return 0.0;
+    node.bound = domain_lb;
+    if (node.estimate < node.bound) node.estimate = node.bound;
+    const double lift =
+        std::isfinite(old_bound) ? std::max(0.0, node.bound - old_bound) : 0.0;
+    if (lift > std::max(1e-8, opt.lp_tol)) {
+      ++out.bc_stats.objective_domain_bound_lift_nodes;
+      out.bc_stats.objective_domain_bound_lift_sum += lift;
+      out.bc_stats.objective_domain_bound_lift_max =
+          std::max(out.bc_stats.objective_domain_bound_lift_max, lift);
+      if (opt.verbose) {
+        fmt::print(stderr,
+                   "[B&C-OBJ-LB] phase={} depth={} bound={:.10g}->{:.10g} "
+                   "lift={:.6g}\n",
+                   phase != nullptr ? phase : "domain_objective", node.depth,
+                   old_bound, node.bound, lift);
+      }
+    }
+    return lift;
+  };
+
   record_conformance_source("root_initial_source");
 
   bool root_propagation_local_cutoff_tightened = false;
@@ -2417,19 +3287,40 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         base_lp.A;
     const Eigen::SparseMatrix<double, Eigen::RowMajor> root_prop_Aeq_row =
         base_lp.Aeq;
-    int row_tightened = node_bound_propagation(
-        base_lp, root_prop_A_row, root_prop_Aeq_row, root.lb, root.ub,
-        opt.bound_propagation_rounds);
-    int clique_tightened = 0;
-    if (!clique_table.empty()) {
-      clique_tightened = clique_table.propagate(root.lb, root.ub);
-    }
-    int objective_tightened = 0;
-    int objective_pruned = 0;
-    int proof_target_tightened = 0;
-    int proof_target_pruned = 0;
-    std::vector<DomainReasonBound> root_objective_reasons;
-    if (has_root_cutoff_for_propagation && use_objective_propagation) {
+	    int row_tightened = node_bound_propagation(
+	        base_lp, root_prop_A_row, root_prop_Aeq_row, root.lb, root.ub,
+	        opt.bound_propagation_rounds);
+	    int clique_tightened = 0;
+	    if (!clique_table.empty()) {
+	      clique_tightened = clique_table.propagate(root.lb, root.ub);
+	    }
+	    int conflict_tightened = 0;
+	    std::vector<DomainReasonBound> root_conflict_reasons;
+	    if (!conflict_pool.empty()) {
+	      int pass_conflict_tight = 0;
+	      std::vector<BoundChangeInfo> conflict_changes;
+	      const bool conflict_ok = conflict_pool.propagate_with_reasons(
+	          base_lp.vars, root.lb, root.ub, &pass_conflict_tight,
+	          &conflict_changes, &root_conflict_reasons, opt.int_tol);
+	      (void)conflict_changes;
+	      conflict_tightened += std::max(0, pass_conflict_tight);
+	      if (!conflict_ok) {
+	        root_propagation_pruned = true;
+	      }
+	    }
+	    int implication_tightened = 0;
+	    if (!root_propagation_pruned && !implication_graph.empty()) {
+	      implication_tightened = implication_graph.propagate(
+	          base_lp.vars, root.lb, root.ub, nullptr,
+	          std::max(1e-9, opt.int_tol));
+	    }
+		    int objective_tightened = 0;
+		    int objective_pruned = 0;
+		    int proof_target_tightened = 0;
+		    int proof_target_pruned = 0;
+		    std::vector<DomainReasonBound> root_objective_reasons;
+	    if (root_cutoff_domain_commit_allowed &&
+          has_root_cutoff_for_propagation && use_objective_propagation) {
       record_objective_capacity_conformance(
           "root_initial_objective_capacity", root.lb, root.ub,
           root_cutoff_for_propagation, root_bound_before_prop);
@@ -2438,31 +3329,48 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             base_lp, root.lb, root.ub, root_cutoff_for_propagation, opt.int_tol,
             /*depth=*/0, /*trail_offset=*/0, &root_objective_reasons,
             objective_tightened, objective_pruned);
-        if (!ok) {
-          root_propagation_pruned = true;
-        }
-      }
-      root_propagation_local_cutoff_tightened =
+	        if (!ok) {
+	          root_propagation_pruned = true;
+	        }
+	      }
+	      root_propagation_local_cutoff_tightened =
           proof_target_tightened > 0 || proof_target_pruned > 0 ||
-          objective_tightened > 0 || objective_pruned > 0;
-    }
+	          objective_tightened > 0 || objective_pruned > 0;
+	    }
+	    auto append_initial_root_reason_bounds =
+	        [&](std::vector<DomainReasonBound>& reason_bounds) {
+	      for (auto& rb : reason_bounds) {
+	        if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
+	            !std::isfinite(rb.bound.value)) {
+	          continue;
+	        }
+	        append_domain_reason_bound(root, std::move(rb), n,
+	                                   &root_lb_before_prop,
+	                                   &root_ub_before_prop);
+	      }
+	      reason_bounds.clear();
+	    };
+	    append_initial_root_reason_bounds(root_conflict_reasons);
+	    append_initial_root_reason_bounds(root_objective_reasons);
 
-    int followup_row_tightened = 0;
-    int followup_clique_tightened = 0;
-    if (!root_propagation_pruned &&
-        (row_tightened + clique_tightened + objective_tightened) > 0 &&
-        bounds_consistent(root.lb, root.ub)) {
-      followup_row_tightened = node_bound_propagation(
-          base_lp, root_prop_A_row, root_prop_Aeq_row, root.lb, root.ub,
-          opt.bound_propagation_rounds);
-      if (!clique_table.empty()) {
+	    int followup_row_tightened = 0;
+	    int followup_clique_tightened = 0;
+	    if (!root_propagation_pruned &&
+	        (row_tightened + clique_tightened + conflict_tightened +
+	         implication_tightened + objective_tightened) > 0 &&
+	        bounds_consistent(root.lb, root.ub)) {
+	      followup_row_tightened = node_bound_propagation(
+	          base_lp, root_prop_A_row, root_prop_Aeq_row, root.lb, root.ub,
+	          opt.bound_propagation_rounds);
+	      if (!clique_table.empty()) {
         followup_clique_tightened = clique_table.propagate(root.lb, root.ub);
       }
     }
 
-    const int total_root_tightened = row_tightened + clique_tightened +
-        proof_target_tightened + objective_tightened +
-        followup_row_tightened + followup_clique_tightened;
+	    const int total_root_tightened = row_tightened + clique_tightened +
+	        conflict_tightened + implication_tightened +
+	        proof_target_tightened + objective_tightened +
+	        followup_row_tightened + followup_clique_tightened;
     out.bc_stats.root_objective_cutoff_domain_tightenings +=
         static_cast<std::uint64_t>(std::max(0, proof_target_tightened) +
                                    std::max(0, objective_tightened));
@@ -2476,12 +3384,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     const auto root_bound_delta = count_bound_changes(
         root_lb_before_prop, root_ub_before_prop, root.lb, root.ub);
     const std::uint64_t root_conf_sources = conformance_source_total();
-    const std::string root_conf_detail = fmt::format(
-        "row={} clique={} proof_target={} obj={} follow_row={} "
-        "follow_clique={} objective_pruned={}",
-        row_tightened, clique_tightened, proof_target_tightened,
-        objective_tightened, followup_row_tightened, followup_clique_tightened,
-        objective_pruned);
+	    const std::string root_conf_detail = fmt::format(
+	        "row={} clique={} conflict={} impl={} proof_target={} obj={} "
+	        "follow_row={} follow_clique={} objective_pruned={}",
+	        row_tightened, clique_tightened, conflict_tightened,
+	        implication_tightened, proof_target_tightened, objective_tightened,
+	        followup_row_tightened, followup_clique_tightened, objective_pruned);
 
     if (root_propagation_pruned) {
       root.bound = has_root_cutoff_for_propagation
@@ -2494,16 +3402,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           /*resolved=*/false, /*resolve_ok=*/true, root_bound_before_prop,
           root.bound, root_conf_detail);
       if (opt.verbose || total_root_tightened > 0 || objective_pruned > 0) {
-        fmt::print(stderr,
-                   "[B&C ROOT-PROP] pruned root by propagation "
-                   "row={} clique={} proof_target={} obj={} "
-                   "follow_row={} follow_clique={} "
-                   "target_pruned={} obj_pruned={} cutoff={:.2f}\n",
-                   row_tightened, clique_tightened, proof_target_tightened,
-                   objective_tightened,
-                   followup_row_tightened, followup_clique_tightened,
-                   proof_target_pruned, objective_pruned,
-                   root_cutoff_for_propagation);
+	        fmt::print(stderr,
+	                   "[B&C ROOT-PROP] pruned root by propagation "
+	                   "row={} clique={} conflict={} impl={} proof_target={} obj={} "
+	                   "follow_row={} follow_clique={} "
+	                   "target_pruned={} obj_pruned={} cutoff={:.2f}\n",
+	                   row_tightened, clique_tightened, conflict_tightened,
+	                   implication_tightened, proof_target_tightened,
+	                   objective_tightened,
+	                   followup_row_tightened, followup_clique_tightened,
+	                   proof_target_pruned, objective_pruned,
+	                   root_cutoff_for_propagation);
       }
     } else if (total_root_tightened > 0) {
       apply_node_bounds(root_lp.vars, root.lb, root.ub);
@@ -2520,9 +3429,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         root.x_seed = root.x_relax;
         root.basis_hint = root_relax.basis_hint;
         if (root.basis_hint) root.basis_hint->compact_indices_storage();
-        root.bound = root_relax.dual_bound;
-        if (root_relax.simplex &&
-            root_relax.simplex->basis.cached_sparse_basis) {
+	        root.bound = root_relax.dual_bound;
+	        refresh_root_redcost_lurking_bounds("root_initial_propagation_resolve");
+	        if (root_relax.simplex &&
+	            root_relax.simplex->basis.cached_sparse_basis) {
           root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
         } else {
           root_sbasis.reset();
@@ -2539,15 +3449,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             root_bound_delta.first, root_bound_delta.second, 0,
             /*resolved=*/true, /*resolve_ok=*/true, root_bound_before_prop,
             root.bound, root_conf_detail);
-        if (opt.verbose || total_root_tightened > 0) {
-          fmt::print(stderr,
-                     "[B&C ROOT-PROP] row={} clique={} proof_target={} obj={} "
-                     "follow_row={} follow_clique={} bound={:.2f}->{:.2f} "
-                     "resolve={:.1f}ms cutoff={} source={}\n",
-                     row_tightened, clique_tightened, proof_target_tightened,
-                     objective_tightened,
-                     followup_row_tightened, followup_clique_tightened,
-                     root_bound_before_prop, root.bound,
+	        if (opt.verbose || total_root_tightened > 0) {
+	          fmt::print(stderr,
+	                     "[B&C ROOT-PROP] row={} clique={} conflict={} impl={} "
+	                     "proof_target={} obj={} "
+	                     "follow_row={} follow_clique={} bound={:.2f}->{:.2f} "
+	                     "resolve={:.1f}ms cutoff={} source={}\n",
+	                     row_tightened, clique_tightened, conflict_tightened,
+	                     implication_tightened, proof_target_tightened,
+	                     objective_tightened,
+	                     followup_row_tightened, followup_clique_tightened,
+	                     root_bound_before_prop, root.bound,
                      std::chrono::duration<double, std::milli>(
                          t_prop_resolve1 - t_prop_resolve0).count(),
                      has_root_cutoff_for_propagation
@@ -2610,6 +3522,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 #ifdef HACDCPF_HAVE_HIGHS_LIB
     const auto cert = bc_try_vendored_highs_root_certificate(
         root_lp, &root.lb, &root.ub, opt);
+    if (cert.attempted) {
+      ++out.bc_stats.vendored_root_certificate_attempts;
+      out.bc_stats.vendored_root_certificate_time_ms +=
+          1000.0 * cert.runtime_sec;
+      out.bc_stats.vendored_root_certificate_nodes = cert.nodes;
+      out.bc_stats.vendored_root_certificate_simplex_iterations =
+          cert.simplex_iterations;
+      if (cert.accepted) {
+        ++out.bc_stats.vendored_root_certificate_accepted;
+      } else {
+        ++out.bc_stats.vendored_root_certificate_rejected;
+      }
+    }
     if (opt.verbose || bc_env_flag_enabled("HACDCPF_BC_TIMELINE")) {
       fmt::print(stderr,
                  "[B&C-ROOT-HIGHS-CERT] attempted={} accepted={} status={} "
@@ -2710,10 +3635,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // made the root loop mathematically valid but far more expensive.
   std::vector<unsigned char> root_implied_bound_probe_cache(
       static_cast<std::size_t>(std::max(0, n)), 0);
-  std::unordered_set<std::size_t> root_implied_bound_cut_hashes;
-  std::vector<PoolCut> root_deferred_implied_bound_cutpool_rows;
+	  std::unordered_set<std::size_t> root_implied_bound_cut_hashes;
+	  std::vector<PoolCut> root_deferred_implied_bound_cutpool_rows;
 
-  auto run_root_probed_implied_bound_resolve = [&]() -> bool {
+		  // HiGHS keeps the root cutpool attached to the active propagation domain
+		  // during separation.  Native root source rows used to become
+		  // queue-visible only after root separation had already finished, which
+		  // meant the root fixed point could not consume them before the tree
+		  // opened.  Keep this pool live for the whole root separation path.
+		  CutPool cut_pool(opt.cut_pool_max_size, opt.cut_pool_max_age, n);
+
+		  auto run_root_probed_implied_bound_resolve = [&]() -> bool {
     if (!opt.enable_dynamic_implied_bound_probing ||
         !opt.enable_graph_implied_bound_cuts ||
         opt.dynamic_implied_bound_probing_max_rows <= 0 ||
@@ -3403,11 +4335,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       root_relax = std::move(ib_relax);
       root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
       root.x_seed = root.x_relax;
-      root.basis_hint = root_relax.basis_hint;
-      if (root.basis_hint) root.basis_hint->compact_indices_storage();
-      root.bound = root_relax.dual_bound;
-      if (root_relax.simplex &&
-          root_relax.simplex->basis.cached_sparse_basis) {
+	      root.basis_hint = root_relax.basis_hint;
+	      if (root.basis_hint) root.basis_hint->compact_indices_storage();
+	      root.bound = root_relax.dual_bound;
+	      refresh_root_redcost_lurking_bounds("root_implied_bound_resolve");
+	      if (root_relax.simplex &&
+	          root_relax.simplex->basis.cached_sparse_basis) {
         root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
       } else {
         root_sbasis.reset();
@@ -3537,10 +4470,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     root_relax = std::move(tableau_relax);
     root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
     root.x_seed = root.x_relax;
-    root.basis_hint = root_relax.basis_hint;
-    if (root.basis_hint) root.basis_hint->compact_indices_storage();
-    root.bound = root_relax.dual_bound;
-    if (root_relax.simplex && root_relax.simplex->basis.cached_sparse_basis) {
+	    root.basis_hint = root_relax.basis_hint;
+	    if (root.basis_hint) root.basis_hint->compact_indices_storage();
+	    root.bound = root_relax.dual_bound;
+	    refresh_root_redcost_lurking_bounds("root_tableau_resolve");
+	    if (root_relax.simplex && root_relax.simplex->basis.cached_sparse_basis) {
       root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
     } else {
       root_sbasis.reset();
@@ -3643,10 +4577,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     root_relax = std::move(path_relax);
     root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
     root.x_seed = root.x_relax;
-    root.basis_hint = root_relax.basis_hint;
-    if (root.basis_hint) root.basis_hint->compact_indices_storage();
-    root.bound = root_relax.dual_bound;
-    if (root_relax.simplex && root_relax.simplex->basis.cached_sparse_basis) {
+	    root.basis_hint = root_relax.basis_hint;
+	    if (root.basis_hint) root.basis_hint->compact_indices_storage();
+	    root.bound = root_relax.dual_bound;
+	    refresh_root_redcost_lurking_bounds("root_path_resolve");
+	    if (root_relax.simplex && root_relax.simplex->basis.cached_sparse_basis) {
       root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
     } else {
       root_sbasis.reset();
@@ -3719,6 +4654,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         double xpool_sf_ms{0.0};
         double xpool_solve_ms{0.0};
         double xpool_apply_ms{0.0};
+      };
+
+      struct RootCutpoolResolveResult {
+        bool lp_resolved{false};
+        int admitted_rows{0};
+        double lift{0.0};
       };
 
 	      RootSourceLoopTrace root_source_trace;
@@ -3959,6 +4900,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
 	  std::vector<PoolCut> root_transformed_cutpool;
 	  std::vector<unsigned char> root_transformed_cut_in_lp;
+	  std::vector<unsigned char> root_transformed_cut_alive;
+	  std::vector<int> root_transformed_cut_age;
+	  const int root_transformed_cutpool_age_limit =
+	      opt.auto_highs_root_pipeline ? 30 : std::max(0, opt.cut_pool_max_age);
+	  const int root_transformed_cutpool_soft_limit =
+	      opt.auto_highs_root_pipeline ? 10000 : std::max(1, opt.cut_pool_max_size);
+	  const int root_transformed_cutpool_initial_age =
+	      std::max(0, root_transformed_cutpool_age_limit - 5);
+	  double root_transformed_cutpool_best_observed_score = 0.0;
+	  double root_transformed_cutpool_min_score_factor = 0.9;
       int root_transformed_cutpool_pending_source_rows = 0;
 
 	  auto add_root_transformed_cutpool_rows =
@@ -3966,6 +4917,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    int added = 0;
 	    int duplicate = 0;
         int source_rows = 0;
+        int live_pool_added = 0;
 	    for (auto& row : rows) {
 	      if (row.coeff.size() != n || row.coeff.nonZeros() <= 0 ||
 	          !std::isfinite(row.rhs)) {
@@ -3977,31 +4929,57 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      if (!(row.norm > 1e-12) || !std::isfinite(row.norm)) continue;
 	      if (row.hash == 0) row.hash = sparse_cut_hash(row.coeff);
 	      bool is_duplicate = false;
-	      for (const PoolCut& keep : root_transformed_cutpool) {
-	        if (keep.hash != row.hash || keep.coeff.nonZeros() != row.coeff.nonZeros() ||
-	            !(keep.norm > 0.0)) {
+	      for (int keep_idx = 0;
+	           keep_idx < static_cast<int>(root_transformed_cutpool.size());
+	           ++keep_idx) {
+	        if (keep_idx < static_cast<int>(root_transformed_cut_alive.size()) &&
+	            root_transformed_cut_alive[static_cast<std::size_t>(keep_idx)] == 0) {
 	          continue;
 	        }
-	        const double par =
-	            sparse_sparse_dot(keep.coeff, row.coeff) / (keep.norm * row.norm);
-	        if (par >= 1.0 - 1e-6) {
-	          is_duplicate = true;
-	          break;
-	        }
+	        const PoolCut& keep =
+	            root_transformed_cutpool[static_cast<std::size_t>(keep_idx)];
+		        if (!sparse_same_support(keep.coeff, row.coeff) ||
+		            !(keep.norm > 0.0)) {
+		          continue;
+		        }
+		        const double par =
+		            sparse_sparse_dot(keep.coeff, row.coeff) / (keep.norm * row.norm);
+		        if (std::isfinite(par) && par >= 1.0 - 1e-6) {
+		          is_duplicate = true;
+		          break;
+		        }
 	      }
 	      if (is_duplicate) {
 	        ++duplicate;
 	        continue;
 	      }
-          if (append_root_transformed_cutpool_audit_row(row.coeff, row.rhs)) {
+          if (!strict_highs_root_fixed_point &&
+              append_root_transformed_cutpool_audit_row(row.coeff, row.rhs)) {
             ++source_rows;
             ++root_transformed_cutpool_pending_source_rows;
             if (root_transformed_cutpool_live_vb_source) {
               append_variable_bound_sparse_cutpool_row(row.coeff, row.rhs);
             }
           }
+	          // HiGHS cutpool rows propagate immediately.  During root separation
+	          // the native xpool owns LP admission, so the global pool starts them
+	          // as propagation-only; the final root seed reclassifies rows that
+	          // were not admitted to the root LP as available cutpool rows.
+	          bool new_domain_source = false;
+	          if (cut_pool.add(row.coeff, row.rhs, /*domain_only=*/true,
+	                           &new_domain_source)) {
+            ++live_pool_added;
+            if (new_domain_source) {
+              note_global_domain_learning();
+              if (!opt.auto_highs_root_pipeline) {
+                note_objective_artifact_learning();
+              }
+            }
+          }
 	      root_transformed_cutpool.push_back(std::move(row));
 	      root_transformed_cut_in_lp.push_back(0);
+	      root_transformed_cut_alive.push_back(1);
+	      root_transformed_cut_age.push_back(root_transformed_cutpool_initial_age);
 	      ++added;
 	    }
 	    if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
@@ -4014,6 +4992,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                      root_transformed_cutpool_pending_source_rows,
 	                 static_cast<int>(root_transformed_cutpool.size()));
 	    }
+        (void)live_pool_added;
 	    return added;
 	  };
 
@@ -4021,6 +5000,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           [&](const char* phase) -> bool {
         if (root_transformed_cutpool_pending_source_rows <= 0) return false;
         const int pending = root_transformed_cutpool_pending_source_rows;
+        if (strict_highs_root_fixed_point) {
+          root_transformed_cutpool_pending_source_rows = 0;
+          if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
+            fmt::print(stderr,
+                       "[B&C ROOT-XPOOL-VB] phase={} mode=sealed_highs "
+                       "pendingSrc={} cutpoolRows=0 cutMixed=0 cutVUB=0 "
+                       "cutVLB=0 auditVarbounds=0 auditImpl=0 "
+                       "liveVarbounds=0 liveImpl=0\n",
+                       phase != nullptr ? phase : "after_root_xpool_accept",
+                       pending);
+          }
+          return true;
+        }
         const std::size_t old_varbounds = variable_bound_table.size();
         const std::uint64_t old_implications =
             static_cast<std::uint64_t>(implication_graph.size());
@@ -4046,7 +5038,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   : 0;
         }
         if (root_transformed_cutpool_live_vb_source) {
+          const std::size_t before_varbounds = variable_bound_table.size();
+          const std::uint64_t before_implications =
+              static_cast<std::uint64_t>(implication_graph.size());
           refresh_variable_bound_table(root_lp, phase);
+          const std::size_t after_varbounds = variable_bound_table.size();
+          const std::uint64_t after_implications =
+              static_cast<std::uint64_t>(implication_graph.size());
+          if ((after_varbounds > before_varbounds ||
+               after_implications > before_implications) &&
+              use_objective_propagation) {
+            objective_propagation.setup(root_lp, &root_implied_integer_cols,
+                                        &clique_table, &implication_graph,
+                                        objective_propagation_build_policy());
+          }
         }
         root_transformed_cutpool_pending_source_rows = 0;
         if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
@@ -4073,60 +5078,373 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         return true;
       };
 
-      auto propagate_root_transformed_cutpool_resolve = [&]() -> bool {
-        if (root_transformed_cutpool_audit_rows.empty() ||
-            root.x_relax.size() != n) {
+      std::size_t last_cutpool_clique_scan_size = 0;
+      auto synchronize_root_source_cutpool_domain_sources =
+          [&](const char* source) -> std::uint64_t {
+        if (strict_highs_root_fixed_point) {
+          last_cutpool_clique_scan_size = cut_pool.size();
+          (void)source;
+          return 0;
+        }
+        if (last_cutpool_clique_scan_size >
+            static_cast<std::size_t>(cut_pool.size())) {
+          last_cutpool_clique_scan_size = 0;
+        }
+        std::uint64_t learned = 0;
+        std::uint64_t rows_scanned = 0;
+        std::uint64_t rows_with_literals = 0;
+        std::uint64_t generated_edges = 0;
+        const auto& cuts = cut_pool.cuts();
+        for (std::size_t i = last_cutpool_clique_scan_size;
+             i < cuts.size(); ++i) {
+          const PoolCut& cut = cuts[i];
+          if (cut.coeff.size() != n || cut.coeff.nonZeros() <= 0 ||
+              !std::isfinite(cut.rhs)) {
+            continue;
+          }
+          CliqueTable::CutCliqueExtractionStats stats;
+          const std::size_t added = clique_table.add_literal_edges_from_cut(
+              base_lp, cut.coeff, cut.rhs, 512, &root_implied_integer_cols,
+              &implication_graph, &stats, nullptr);
+          learned += static_cast<std::uint64_t>(added);
+          rows_scanned += stats.rows_scanned;
+          rows_with_literals += stats.rows_with_binary_literals;
+          generated_edges += stats.literal_edges_generated;
+        }
+        last_cutpool_clique_scan_size = cuts.size();
+        if (learned > 0) {
+          note_global_domain_learning(learned);
+          note_objective_artifact_learning(learned);
+          if (use_objective_propagation) {
+            objective_propagation.setup(base_lp, &root_implied_integer_cols,
+                                        &clique_table, &implication_graph,
+                                        objective_propagation_build_policy());
+            const auto published = publish_objective_implied_event_source(
+                base_lp, objective_propagation, implication_graph,
+                clique_table, opt.int_tol);
+            out.bc_stats.objective_implied_event_published_implications +=
+                published.implications_added;
+            out.bc_stats.objective_implied_event_published_clique_edges +=
+                published.clique_edges_added;
+            const std::uint64_t published_total =
+                published.implications_added + published.clique_edges_added;
+            note_global_domain_learning(published_total);
+            note_objective_artifact_learning(published_total);
+            learned += published_total;
+            if (published_total > 0) {
+              objective_propagation.setup(base_lp, &root_implied_integer_cols,
+                                          &clique_table, &implication_graph,
+                                          objective_propagation_build_policy());
+            }
+          }
+        }
+        if ((opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+             std::getenv("HACDCPF_XTAB_DIAG") != nullptr) &&
+            rows_scanned > 0) {
+          fmt::print(stderr,
+                     "[B&C ROOT-CUTPOOL-SRC] source={} scan={} litRows={} "
+                     "genEdges={} learned={} cutpool={} clqEdges={} arcs={}\n",
+                     source != nullptr ? source : "root_cutpool",
+                     rows_scanned, rows_with_literals, generated_edges,
+                     learned, cut_pool.size(), clique_table.n_literal_edges(),
+                     implication_graph.size());
+        }
+        return learned;
+      };
+
+	      auto propagate_root_transformed_cutpool_resolve = [&]() -> bool {
+        if (!root_cutoff_domain_commit_allowed) {
           return false;
+        }
+        if (root.x_relax.size() != n || root.lb.size() != n ||
+            root.ub.size() != n) {
+	          return false;
         }
         const Eigen::VectorXd old_lb = root.lb;
         const Eigen::VectorXd old_ub = root.ub;
         const double old_bound = root.bound;
-        Eigen::VectorXd trial_lb = root.lb;
-        Eigen::VectorXd trial_ub = root.ub;
-        SparseCutpoolPropagationStats prop_stats;
-        const bool ok = propagate_sparse_cutpool_rows(
-            root_transformed_cutpool_audit_rows,
-            root_transformed_cutpool_audit_rhs, trial_lb, trial_ub,
-            opt.bound_propagation_rounds, &prop_stats);
+        const LPModel old_root_lp = root_lp;
+        const LPRelaxationResult old_root_relax = root_relax;
+        const auto old_basis = root.basis_hint;
+        const Eigen::VectorXd old_x = root.x_relax;
+        const Eigen::VectorXd old_x_seed = root.x_seed;
+        const std::size_t old_reason_count = root.domain_reason_bounds.size();
+
+        const std::uint64_t source_epoch_before =
+            current_domain_learning_epoch();
+        const std::uint64_t objective_epoch_before =
+            current_objective_artifact_epoch();
+        std::uint64_t source_learned = 0;
+        int objective_tightened = 0;
+        int objective_pruned = 0;
+        int redcost_tightened = 0;
+        int redcost_pruned = 0;
+        int redcost_active = 0;
+        int conflict_tightened = 0;
+        int implication_tightened = 0;
+        int clique_tightened = 0;
+        int row_tightened = 0;
+        int cutpool_tightened = 0;
+        int reasons_added = 0;
+        int closure_passes = 0;
+        bool pruned = false;
+
+        auto duplicate_root_reason_bound =
+            [&](const DomainReasonBound& rb) -> bool {
+          const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+          const double tol = std::max(1e-9, opt.int_tol);
+          for (const auto& existing : root.domain_reason_bounds) {
+            if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
+                branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
+                conflict_clause_hash(existing.reason) == reason_hash) {
+              return true;
+            }
+          }
+          return false;
+        };
+        auto append_root_reason_bounds =
+            [&](std::vector<DomainReasonBound>& reason_bounds) {
+          for (auto& rb : reason_bounds) {
+            if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
+                !std::isfinite(rb.bound.value) ||
+                duplicate_root_reason_bound(rb)) {
+              continue;
+            }
+            append_domain_reason_bound(root, std::move(rb), n, &old_lb,
+                                       &old_ub);
+            ++reasons_added;
+          }
+          reason_bounds.clear();
+        };
+
+        const Eigen::SparseMatrix<double, Eigen::RowMajor> root_source_A_row =
+            base_lp.A;
+        const Eigen::SparseMatrix<double, Eigen::RowMajor> root_source_Aeq_row =
+            base_lp.Aeq;
+
+	        bool redcost_lurking_propagated = false;
+	        const std::size_t max_root_closure_passes =
+	            std::max<std::size_t>(8, 2 * static_cast<std::size_t>(n) + 8);
+        for (std::size_t pass = 0; pass < max_root_closure_passes; ++pass) {
+          ++closure_passes;
+          const Eigen::VectorXd pass_lb = root.lb;
+          const Eigen::VectorXd pass_ub = root.ub;
+          const std::size_t pass_reasons = root.domain_reason_bounds.size();
+          const int pass_conflicts = conflict_pool.size();
+          const int pass_cutpool = cut_pool.size();
+          const std::uint64_t pass_impl =
+              static_cast<std::uint64_t>(implication_graph.size());
+          const std::uint64_t pass_cliques =
+              static_cast<std::uint64_t>(clique_table.n_literal_edges());
+          const std::uint64_t pass_domain_epoch =
+              current_domain_learning_epoch();
+          const std::uint64_t pass_objective_epoch =
+              current_objective_artifact_epoch();
+          const std::uint64_t pass_closure_epoch =
+              current_domain_closure_epoch();
+
+          source_learned += synchronize_root_source_cutpool_domain_sources(
+              "root_domain_closure");
+
+          if (has_root_cutoff_for_propagation && use_objective_propagation &&
+              std::isfinite(root_cutoff_for_propagation)) {
+            std::vector<DomainReasonBound> objective_reasons;
+            int pass_obj_tight = 0;
+            int pass_obj_pruned = 0;
+            const bool obj_ok = objective_propagation.propagate(
+                base_lp, root.lb, root.ub, root_cutoff_for_propagation,
+                opt.int_tol, /*depth=*/0,
+                static_cast<int>(root.domain_reason_bounds.size()),
+                &objective_reasons, pass_obj_tight, pass_obj_pruned);
+            objective_tightened += std::max(0, pass_obj_tight);
+            objective_pruned += std::max(0, pass_obj_pruned);
+            append_root_reason_bounds(objective_reasons);
+            if (!obj_ok || pass_obj_pruned > 0 ||
+                !bounds_consistent(root.lb, root.ub)) {
+              pruned = true;
+              break;
+            }
+
+	            if (!redcost_lurking_propagated &&
+	                root_redcost_lurking_bounds.size() > 0) {
+	              redcost_lurking_propagated = true;
+	              std::vector<DomainReasonBound> redcost_reasons;
+	              const auto rc_stats = root_redcost_lurking_bounds.propagate(
+                  root_cutoff_for_propagation, root.bound, root.lb, root.ub,
+                  &redcost_reasons, /*reason_depth=*/0,
+                  static_cast<int>(root.domain_reason_bounds.size()),
+                  std::max(1e-9, opt.int_tol));
+              redcost_tightened += std::max(0, rc_stats.tightened);
+              redcost_pruned += std::max(0, rc_stats.pruned);
+              redcost_active += std::max(0, rc_stats.records_active);
+              append_root_reason_bounds(redcost_reasons);
+              if (rc_stats.pruned > 0 ||
+                  !bounds_consistent(root.lb, root.ub)) {
+                pruned = true;
+                break;
+              }
+            }
+          }
+
+          if (!conflict_pool.empty()) {
+            int pass_conflict_tight = 0;
+            std::vector<BoundChangeInfo> conflict_changes;
+            std::vector<DomainReasonBound> conflict_reasons;
+            const bool conflict_ok = conflict_pool.propagate_with_reasons(
+                base_lp.vars, root.lb, root.ub, &pass_conflict_tight,
+                &conflict_changes, &conflict_reasons, opt.int_tol);
+            (void)conflict_changes;
+            conflict_tightened += std::max(0, pass_conflict_tight);
+            append_root_reason_bounds(conflict_reasons);
+            if (!conflict_ok || !bounds_consistent(root.lb, root.ub)) {
+              pruned = true;
+              break;
+            }
+          }
+
+          if (!implication_graph.empty()) {
+            implication_tightened += implication_graph.propagate(
+                base_lp.vars, root.lb, root.ub, nullptr,
+                std::max(1e-9, opt.int_tol));
+            if (!bounds_consistent(root.lb, root.ub)) {
+              pruned = true;
+              break;
+            }
+          }
+          if (!clique_table.empty()) {
+            clique_tightened += clique_table.propagate(root.lb, root.ub);
+            if (!bounds_consistent(root.lb, root.ub)) {
+              pruned = true;
+              break;
+            }
+          }
+
+          const int pass_row_tight = node_bound_propagation(
+              base_lp, root_source_A_row, root_source_Aeq_row, root.lb,
+              root.ub, opt.bound_propagation_rounds);
+          row_tightened += std::max(0, pass_row_tight);
+          if (!bounds_consistent(root.lb, root.ub)) {
+            pruned = true;
+            break;
+          }
+
+          auto propagate_root_sparse_family =
+              [&](const std::vector<Eigen::SparseVector<double>>& rows,
+                  const std::vector<double>& rhs) -> bool {
+            if (rows.empty()) return true;
+            SparseCutpoolPropagationStats stats;
+            std::vector<DomainReasonBound> cut_reasons;
+            const bool ok = propagate_sparse_cutpool_rows(
+                rows, rhs, root.lb, root.ub, opt.bound_propagation_rounds,
+                &stats, &cut_reasons, /*reason_depth=*/0,
+                static_cast<int>(root.domain_reason_bounds.size()));
+            cutpool_tightened += std::max(0, stats.tightened);
+            append_root_reason_bounds(cut_reasons);
+            return ok && bounds_consistent(root.lb, root.ub);
+          };
+          if (!propagate_root_sparse_family(variable_bound_cutpool_rows,
+                                           variable_bound_cutpool_rhs)) {
+            pruned = true;
+            break;
+          }
+
+          if (cut_pool.size() > 0) {
+            int pass_cutpool_tight = 0;
+            std::vector<BoundChangeInfo> cutpool_changes;
+            std::vector<DomainReasonBound> cutpool_reasons;
+            CutPoolPropagationStats cutpool_stats;
+            const bool cutpool_ok = cut_pool.propagate_with_reasons(
+                base_lp.vars, root.lb, root.ub, opt.bound_propagation_rounds,
+                &pass_cutpool_tight, &cutpool_changes, &cutpool_reasons,
+                &cutpool_stats, nullptr, &root_implied_integer_cols,
+                /*reason_depth=*/0,
+                static_cast<int>(root.domain_reason_bounds.size()),
+                std::max(1e-9, opt.lp_tol));
+            (void)cutpool_changes;
+            cutpool_tightened += std::max(0, pass_cutpool_tight);
+            append_root_reason_bounds(cutpool_reasons);
+            if (!cutpool_ok || !bounds_consistent(root.lb, root.ub)) {
+              pruned = true;
+              break;
+            }
+          }
+
+          apply_domain_objective_lower_bound(root, "root_domain_closure");
+
+          const auto pass_delta =
+              count_bound_changes(pass_lb, pass_ub, root.lb, root.ub);
+          const bool pass_changed =
+              pass_delta.first > 0 ||
+              root.domain_reason_bounds.size() != pass_reasons ||
+              conflict_pool.size() != pass_conflicts ||
+              cut_pool.size() != pass_cutpool ||
+              static_cast<std::uint64_t>(implication_graph.size()) !=
+                  pass_impl ||
+              static_cast<std::uint64_t>(clique_table.n_literal_edges()) !=
+                  pass_cliques ||
+              current_domain_learning_epoch() != pass_domain_epoch ||
+              current_objective_artifact_epoch() != pass_objective_epoch ||
+              current_domain_closure_epoch() != pass_closure_epoch;
+          if (!pass_changed) break;
+        }
+
         const auto delta =
-            count_bound_changes(old_lb, old_ub, trial_lb, trial_ub);
-        if (!ok || !bounds_consistent(trial_lb, trial_ub)) {
-          root.lb = std::move(trial_lb);
-          root.ub = std::move(trial_ub);
+            count_bound_changes(old_lb, old_ub, root.lb, root.ub);
+        if (pruned || !bounds_consistent(root.lb, root.ub)) {
           root.bound = has_root_cutoff_for_propagation
               ? root_cutoff_for_propagation
               : kInf;
           if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr ||
               opt.verbose) {
             fmt::print(stderr,
-                       "[B&C ROOT-XPOOL-PROP] pruned rows={} active={} "
-                       "tight={} minCap={:.6g} maxCap={:.6g}\n",
-                       prop_stats.rows_scanned, prop_stats.active_rows,
-                       prop_stats.tightened, prop_stats.min_capacity,
-                       prop_stats.max_capacity);
+                       "[B&C ROOT-DOM-CLOSURE] pruned pass={} obj={} "
+                       "conflict={} impl={} clique={} row={} cutpool={} "
+                       "rc={} rcActive={} reasons={} learned={}\n",
+                       closure_passes, objective_tightened,
+                       conflict_tightened, implication_tightened,
+                       clique_tightened, row_tightened, cutpool_tightened,
+                       redcost_tightened, redcost_active, reasons_added,
+                       source_learned);
           }
           record_conformance_propagation(
               "root_xpool_cut_propagation", conformance_source_total(),
               delta.first, delta.second, 1, /*resolved=*/false,
               /*resolve_ok=*/true, old_bound, root.bound,
-              fmt::format("cutpool_rows={} active={} tight={}",
-                          prop_stats.rows_scanned, prop_stats.active_rows,
-                          prop_stats.tightened));
+              fmt::format("pass={} obj={} conflict={} impl={} clique={} "
+                          "row={} cutpool={} rc={} rc_active={} reasons={} "
+                          "learned={} obj_pruned={} rc_pruned={}",
+                          closure_passes, objective_tightened,
+                          conflict_tightened, implication_tightened,
+                          clique_tightened, row_tightened,
+                          cutpool_tightened, redcost_tightened,
+                          redcost_active, reasons_added, source_learned,
+                          objective_pruned, redcost_pruned));
           return true;
         }
+        const bool source_changed =
+            current_domain_learning_epoch() != source_epoch_before ||
+            current_objective_artifact_epoch() != objective_epoch_before;
         if (delta.first == 0) {
-          if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
+          if (source_changed) {
+            ++root_source_epoch;
+          }
+          if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr ||
+              opt.verbose || source_changed) {
             fmt::print(stderr,
-                       "[B&C ROOT-XPOOL-PROP] rows={} active={} tight=0 "
-                       "minCap={:.6g} maxCap={:.6g}\n",
-                       prop_stats.rows_scanned, prop_stats.active_rows,
-                       prop_stats.min_capacity, prop_stats.max_capacity);
+                       "[B&C ROOT-DOM-CLOSURE] pass={} tight=0 "
+                       "obj={} conflict={} impl={} clique={} row={} "
+                       "cutpool={} rc={} reasons={} learned={} source={}\n",
+                       closure_passes, objective_tightened,
+                       conflict_tightened, implication_tightened,
+                       clique_tightened, row_tightened, cutpool_tightened,
+                       redcost_tightened, reasons_added, source_learned,
+                       source_changed ? 1 : 0);
           }
           return false;
         }
 
         LPModel trial_lp = root_lp;
-        apply_node_bounds(trial_lp.vars, trial_lb, trial_ub);
+        apply_node_bounds(trial_lp.vars, root.lb, root.ub);
         LPRelaxationResult prop_relax = solve_lp_relaxation(
             trial_lp, &root.x_relax, root.basis_hint.get(), root_solve_opt);
         ++out.bc_stats.lp_solves;
@@ -4136,28 +5454,43 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             prop_relax.dual_bound >= old_bound -
                 std::max(1e-6, 1e-9 * std::max(1.0, std::abs(old_bound)));
         if (!resolve_ok) {
+          root.lb = old_lb;
+          root.ub = old_ub;
+          root_lp = old_root_lp;
+          root_relax = old_root_relax;
+          root.basis_hint = old_basis;
+          root.x_relax = old_x;
+          root.x_seed = old_x_seed;
+          if (root.domain_reason_bounds.size() > old_reason_count) {
+            root.domain_reason_bounds.resize(old_reason_count);
+          }
           record_conformance_propagation(
               "root_xpool_cut_propagation", conformance_source_total(),
               delta.first, delta.second, 0, /*resolved=*/true,
               /*resolve_ok=*/false, old_bound, old_bound,
-              fmt::format("cutpool_rows={} active={} tight={}",
-                          prop_stats.rows_scanned, prop_stats.active_rows,
-                          prop_stats.tightened));
+              fmt::format("pass={} obj={} conflict={} impl={} clique={} "
+                          "row={} cutpool={} rc={} rc_active={} reasons={} "
+                          "learned={} resolve_failed=1",
+                          closure_passes, objective_tightened,
+                          conflict_tightened, implication_tightened,
+                          clique_tightened, row_tightened,
+                          cutpool_tightened, redcost_tightened,
+                          redcost_active, reasons_added, source_learned));
           return false;
         }
-        root.lb = std::move(trial_lb);
-        root.ub = std::move(trial_ub);
         root_lp = std::move(trial_lp);
         root_relax = std::move(prop_relax);
         root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
         root.x_seed = root.x_relax;
-        root.basis_hint = root_relax.basis_hint;
-        if (root.basis_hint) root.basis_hint->compact_indices_storage();
-        root.bound = root_relax.dual_bound;
-        if (root_relax.simplex && root_relax.simplex->form.A.rows() > 0) {
-          root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
-          root_first_class_sf_valid = true;
-        } else {
+	        root.basis_hint = root_relax.basis_hint;
+	        if (root.basis_hint) root.basis_hint->compact_indices_storage();
+	        root.bound = root_relax.dual_bound;
+	        refresh_root_redcost_lurking_bounds("root_xpool_cut_propagation_resolve");
+	        if (maintain_native_xpool_sf_cache && root_relax.simplex &&
+	            root_relax.simplex->form.A.rows() > 0) {
+	          root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
+	          root_first_class_sf_valid = true;
+	        } else {
           root_first_class_sf_valid = false;
         }
         ++root_source_epoch;
@@ -4171,20 +5504,27 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             "root_xpool_cut_propagation", conformance_source_total(),
             delta.first, delta.second, 0, /*resolved=*/true,
             /*resolve_ok=*/true, old_bound, root.bound,
-            fmt::format("cutpool_rows={} active={} tight={}",
-                        prop_stats.rows_scanned, prop_stats.active_rows,
-                        prop_stats.tightened));
+            fmt::format("pass={} obj={} conflict={} impl={} clique={} "
+                        "row={} cutpool={} rc={} rc_active={} reasons={} "
+                        "learned={} obj_pruned={} rc_pruned={}",
+                        closure_passes, objective_tightened,
+                        conflict_tightened, implication_tightened,
+                        clique_tightened, row_tightened, cutpool_tightened,
+                        redcost_tightened, redcost_active, reasons_added,
+                        source_learned, objective_pruned, redcost_pruned));
         if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr || opt.verbose) {
           fmt::print(stderr,
-                     "[B&C ROOT-XPOOL-PROP] rows={} active={} tight={} "
-                     "bound={:.2f}->{:.2f} minCap={:.6g} maxCap={:.6g}\n",
-                     prop_stats.rows_scanned, prop_stats.active_rows,
-                     prop_stats.tightened, old_bound, root.bound,
-                     prop_stats.min_capacity, prop_stats.max_capacity);
+                     "[B&C ROOT-DOM-CLOSURE] pass={} tight={} obj={} "
+                     "conflict={} impl={} clique={} row={} cutpool={} "
+                     "rc={} rcActive={} reasons={} learned={} "
+                     "bound={:.2f}->{:.2f}\n",
+                     closure_passes, delta.first, objective_tightened,
+                     conflict_tightened, implication_tightened,
+                     clique_tightened, row_tightened, cutpool_tightened,
+                     redcost_tightened, redcost_active, reasons_added,
+                     source_learned, old_bound, root.bound);
         }
-        return root.bound >
-               old_bound + std::max(opt.root_cut_min_bound_lift,
-                                     1e-10 * std::max(1.0, std::abs(old_bound)));
+        return true;
       };
 
 	  auto select_root_transformed_cutpool =
@@ -4198,7 +5538,42 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    if (max_cuts <= 0 || root.x_relax.size() != n) return scored;
 	    constexpr double feastol = 1e-7;
 	    stats.available = 0;
+	    int num_available = 0;
+	    std::vector<int> age_distribution(
+	        static_cast<std::size_t>(
+	            std::max(1, root_transformed_cutpool_age_limit) + 1),
+	        0);
+	    for (int i = 0;
+	         i < static_cast<int>(root_transformed_cutpool.size()); ++i) {
+	      const bool alive =
+	          i >= static_cast<int>(root_transformed_cut_alive.size()) ||
+	          root_transformed_cut_alive[static_cast<std::size_t>(i)] != 0;
+	      const bool in_lp =
+	          i < static_cast<int>(root_transformed_cut_in_lp.size()) &&
+	          root_transformed_cut_in_lp[static_cast<std::size_t>(i)] != 0;
+	      if (alive && !in_lp) {
+	        ++num_available;
+	        const int age =
+	            i < static_cast<int>(root_transformed_cut_age.size())
+	                ? root_transformed_cut_age[static_cast<std::size_t>(i)]
+	                : 0;
+	        const int bucket =
+	            std::clamp(age, 0, root_transformed_cutpool_age_limit);
+	        ++age_distribution[static_cast<std::size_t>(bucket)];
+	      }
+	    }
+	    int effective_age_limit = root_transformed_cutpool_age_limit;
+	    while (effective_age_limit > 1 &&
+	           num_available > root_transformed_cutpool_soft_limit) {
+	      num_available -= age_distribution[
+	          static_cast<std::size_t>(effective_age_limit)];
+	      --effective_age_limit;
+	    }
 	    for (int i = 0; i < static_cast<int>(root_transformed_cutpool.size()); ++i) {
+	      if (i < static_cast<int>(root_transformed_cut_alive.size()) &&
+	          root_transformed_cut_alive[static_cast<std::size_t>(i)] == 0) {
+	        continue;
+	      }
 	      if (i < static_cast<int>(root_transformed_cut_in_lp.size()) &&
 	          root_transformed_cut_in_lp[static_cast<std::size_t>(i)] != 0) {
 	        continue;
@@ -4210,7 +5585,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      if (!std::isfinite(activity) || !std::isfinite(cut.rhs)) continue;
 	      const double violation = activity - cut.rhs;
 	      stats.max_violation = std::max(stats.max_violation, violation);
-	      if (!(violation > feastol)) continue;
+	      if (!(violation > feastol)) {
+	        if (i < static_cast<int>(root_transformed_cut_age.size())) {
+	          ++root_transformed_cut_age[static_cast<std::size_t>(i)];
+	          if (root_transformed_cut_age[static_cast<std::size_t>(i)] >=
+	              effective_age_limit) {
+	            root_transformed_cut_alive[static_cast<std::size_t>(i)] = 0;
+	          }
+	        }
+	        continue;
+	      }
 	      ++stats.violated;
 
 	      double active_norm = 0.0;
@@ -4237,6 +5621,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      const double score =
 	          violation / (static_cast<double>(active_nnz) * std::sqrt(active_norm));
 	      if (!std::isfinite(score)) continue;
+	      if (i < static_cast<int>(root_transformed_cut_age.size())) {
+	        root_transformed_cut_age[static_cast<std::size_t>(i)] = 0;
+	      }
 	      stats.best_score = std::max(stats.best_score, score);
 	      scored.push_back(ScoredCut{i, score, violation});
 	    }
@@ -4246,6 +5633,36 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      if (a.violation != b.violation) return a.violation > b.violation;
 	      return a.index < b.index;
 	    });
+	    if (!scored.empty()) {
+	      root_transformed_cutpool_best_observed_score =
+	          std::max(root_transformed_cutpool_best_observed_score,
+	                   scored.front().score);
+	      const double min_score =
+	          root_transformed_cutpool_min_score_factor *
+	          root_transformed_cutpool_best_observed_score;
+	      auto eff_end = std::upper_bound(
+	          scored.begin(), scored.end(), min_score,
+	          [](double threshold, const ScoredCut& cut) {
+	            return threshold > cut.score;
+	          });
+	      std::size_t num_efficacious =
+	          static_cast<std::size_t>(eff_end - scored.begin());
+	      const std::size_t lower_threshold = scored.size() / 20;
+	      const std::size_t upper_threshold = scored.size() - 1;
+	      if (num_efficacious <= lower_threshold) {
+	        num_efficacious = std::max(scored.size() / 2, std::size_t{1});
+	        root_transformed_cutpool_min_score_factor =
+	            scored[num_efficacious - 1].score /
+	            root_transformed_cutpool_best_observed_score;
+	      } else if (num_efficacious > upper_threshold) {
+	        root_transformed_cutpool_min_score_factor =
+	            scored[upper_threshold].score /
+	            root_transformed_cutpool_best_observed_score;
+	      }
+	      if (num_efficacious < scored.size()) {
+	        scored.resize(num_efficacious);
+	      }
+	    }
 
 	    std::vector<ScoredCut> selected;
 	    selected.reserve(static_cast<std::size_t>(max_cuts));
@@ -4440,16 +5857,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    return added;
 	  };
 
-	  auto separate_root_transformed_cutpool_resolve = [&]() -> bool {
-        ++root_source_trace.xpool_calls;
-        const auto t_xpool0 = std::chrono::steady_clock::now();
-        const std::size_t current_pool_size = root_transformed_cutpool.size();
-        if (root_xpool_noop_epoch == root_source_epoch &&
-            root_xpool_noop_pool_size == current_pool_size &&
-            root_transformed_cutpool_pending_source_rows == 0) {
-          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
-          return false;
-        }
+		  auto separate_root_transformed_cutpool_resolve =
+		      [&]() -> RootCutpoolResolveResult {
+        RootCutpoolResolveResult result;
+	        ++root_source_trace.xpool_calls;
+	        const auto t_xpool0 = std::chrono::steady_clock::now();
+	        const std::size_t current_pool_size = root_transformed_cutpool.size();
+	        if (root_xpool_noop_epoch == root_source_epoch &&
+	            root_xpool_noop_pool_size == current_pool_size &&
+	            root_transformed_cutpool_pending_source_rows == 0) {
+	          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
+	          return result;
+	        }
 	    RootTransformedPoolStats pool_stats;
 	    const bool large_transformed_source_root =
 	        presolved_m > opt.cut_budget_large_row_threshold;
@@ -4472,12 +5891,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                 pool_stats.selected, pool_stats.parallel,
 	                 pool_stats.best_score, pool_stats.max_violation);
 	    }
-	    if (selected.empty()) {
-          root_xpool_noop_epoch = root_source_epoch;
-          root_xpool_noop_pool_size = current_pool_size;
-          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
-          return false;
-        }
+		    if (selected.empty()) {
+	          root_xpool_noop_epoch = root_source_epoch;
+	          root_xpool_noop_pool_size = current_pool_size;
+	          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
+	          return result;
+	        }
 
         const auto t_build0 = std::chrono::steady_clock::now();
 	    LPModel trial_lp = root_lp;
@@ -4509,6 +5928,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         // The basis extension in solve_lp_from_sf handles the row shift when
         // cut rows are inserted before equality rows in the SF.
         const bool use_direct_sf_warm =
+            !highs_root_cutpool_original_lp &&
             root.basis_hint &&
             root.basis_hint->rows > 0 &&
             static_cast<int>(root.basis_hint->index_count()) == root.basis_hint->rows;
@@ -5232,20 +6652,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                   static_cast<int>(trial_lp.A.rows()) - prev_rows,
 	                   old_bound, pool_relax.primal.stats.status);
 	      }
-          root_xpool_noop_epoch = root_source_epoch;
-          root_xpool_noop_pool_size = current_pool_size;
-          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
-	      return false;
-	    }
-
-        ++root_source_trace.xpool_resolve_ok;
-        const double lift = pool_relax.dual_bound - old_bound;
-        const double min_lift =
-            std::max(opt.root_cut_min_bound_lift,
-                     1e-10 * std::max(1.0, std::abs(old_bound)));
-        const bool consume_zero_lift_frontier_rows =
+	          root_xpool_noop_epoch = root_source_epoch;
+	          root_xpool_noop_pool_size = current_pool_size;
+	          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
+		      return result;
+		    }
+	
+	        ++root_source_trace.xpool_resolve_ok;
+	        const double lift = pool_relax.dual_bound - old_bound;
+	        result.lp_resolved = true;
+	        result.lift = lift;
+	        const double min_lift =
+	            std::max(opt.root_cut_min_bound_lift,
+	                     1e-10 * std::max(1.0, std::abs(old_bound)));
+        const bool highs_cutpool_round =
             opt.auto_highs_root_pipeline && opt.cuts != CutType::None;
-        if (!consume_zero_lift_frontier_rows &&
+        if (!highs_cutpool_round &&
             opt.root_cut_reject_nonmoving_rows && lift <= min_lift) {
           out.bc_stats.root_cut_rows_rejected_nonmoving +=
               static_cast<std::uint64_t>(trial_lp.A.rows() - prev_rows);
@@ -5261,19 +6683,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                        static_cast<int>(root_transformed_cutpool.size()),
                        pool_stats.available, pool_stats.active);
           }
-          root_xpool_noop_epoch = root_source_epoch;
-          root_xpool_noop_pool_size = current_pool_size;
-          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
-          return false;
-        }
+	          root_xpool_noop_epoch = root_source_epoch;
+	          root_xpool_noop_pool_size = current_pool_size;
+	          root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
+	          return result;
+	        }
 
-        const auto t_apply0 = std::chrono::steady_clock::now();
-	    for (const auto& picked : selected) {
-	      if (picked.index >= 0 &&
-	          picked.index < static_cast<int>(root_transformed_cut_in_lp.size())) {
-	        root_transformed_cut_in_lp[static_cast<std::size_t>(picked.index)] = 1;
-	      }
-	    }
+	        const auto t_apply0 = std::chrono::steady_clock::now();
+			    for (const auto& picked : selected) {
+			      if (picked.index >= 0 &&
+			          picked.index < static_cast<int>(root_transformed_cut_in_lp.size())) {
+			        root_transformed_cut_in_lp[static_cast<std::size_t>(picked.index)] = 1;
+			      }
+			    }
 	    root_lp = std::move(trial_lp);
 	    capture_variable_bound_cutpool_rows(root_lp, prev_rows,
 	                                        static_cast<int>(root_lp.A.rows()),
@@ -5283,17 +6705,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    root.x_seed = root.x_relax;
 	    root.basis_hint = root_relax.basis_hint;
 	    if (root.basis_hint) root.basis_hint->compact_indices_storage();
-        if (accepted_unscaled_sf_valid) {
+        if (maintain_native_xpool_sf_cache && accepted_unscaled_sf_valid) {
           root_first_class_unscaled_sf = std::move(accepted_unscaled_sf);
           root_first_class_sf_valid = true;
-        } else if (root_relax.simplex && root_relax.simplex->form.A.rows() > 0) {
+        } else if (maintain_native_xpool_sf_cache && root_relax.simplex &&
+                   root_relax.simplex->form.A.rows() > 0) {
           root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
           root_first_class_sf_valid = true;
         } else {
           root_first_class_sf_valid = false;
         }
-		    root.bound = root_relax.dual_bound;
-		    const StandardFormLP* xpool_trace_sf =
+			    root.bound = root_relax.dual_bound;
+			    refresh_root_redcost_lurking_bounds("root_xpool_resolve");
+			    const StandardFormLP* xpool_trace_sf =
 		        root_relax.simplex ? &root_relax.simplex->form : nullptr;
 		    trace_native_frontier_conformance(
 		        "after_root_xpool", root_lp, xpool_trace_sf,
@@ -5307,11 +6731,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    } else {
 	      root_sbasis.reset();
 	    }
-		    const int admitted = static_cast<int>(root_lp.A.rows()) - prev_rows;
-        root_source_trace.xpool_rows += admitted;
+			    const int admitted = static_cast<int>(root_lp.A.rows()) - prev_rows;
+	        result.admitted_rows = admitted;
+	        root_source_trace.xpool_rows += admitted;
 		    out.bc_stats.cuts_added += admitted;
 	    out.bc_stats.root_cuts_added += admitted;
-	    out.bc_stats.root_gomory_cuts += admitted;
+		    out.bc_stats.root_gomory_cuts += admitted;
 	    if (lift > opt.root_cut_min_bound_lift) {
 	      out.bc_stats.root_cut_bound_lift += std::max(0.0, lift);
 	    }
@@ -5322,35 +6747,67 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	               root.bound, lift,
 	               static_cast<int>(root_transformed_cutpool.size()),
 	               pool_stats.available, pool_stats.active);
-        root_source_trace.xpool_apply_ms += root_source_elapsed_ms(t_apply0);
-        root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
-        return lift > min_lift || consume_zero_lift_frontier_rows;
-		  };
+	        root_source_trace.xpool_apply_ms += root_source_elapsed_ms(t_apply0);
+	        root_source_trace.xpool_ms += root_source_elapsed_ms(t_xpool0);
+	        return result;
+			  };
 
   const bool trace_root_source_loop =
       opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
       std::getenv("HACDCPF_BC_TIMELINE") != nullptr;
 
-	  const bool run_highs_style_root_source_loop =
-	      opt.auto_highs_root_pipeline && opt.cuts != CutType::None &&
-	      root_implied_integer_count > 0 && std::isfinite(root.bound) &&
-	      // With vendored HiGHS as the LP/MIP oracle, keep the root proof path
-	      // aligned with HiGHS evaluateRootNode rather than replaying the native
-	      // transformed-source frontier loop. Otherwise we duplicate root work
-	      // (source loop + HiGHS-style RENS) and pay a large runtime penalty.
-	      !requested_vendored_highs_lp;
+		  const bool run_highs_style_root_source_loop =
+		      opt.auto_highs_root_pipeline && opt.cuts != CutType::None &&
+		      root_implied_integer_count > 0 && std::isfinite(root.bound);
   if (run_highs_style_root_source_loop) {
-	    const double source_first_bound = root.bound;
-	    double previous_total_lift = 0.0;
-	    int source_stalls = 0;
-	    constexpr int kHighsStyleRootSourceStallLimit = 3;
-	    constexpr int kHighsStyleRootSourceRoundCap = 16;
-        const bool enforce_highs_progress_break =
-            presolved_m > opt.cut_budget_very_large_row_threshold;
+    const double source_first_bound = root.bound;
+    double root_source_prev_bound_for_progress = source_first_bound;
+    int source_stalls = 0;
+    constexpr int kHighsStyleRootSourceStallLimit = 3;
+    int highs_root_source_max_tree_size_log2 = 0;
+    for (int j = 0; j < n; ++j) {
+      const auto& var = root_lp.vars[static_cast<std::size_t>(j)];
+      const bool declared_tree_integer =
+          var.type == VarType::Integer || var.type == VarType::Binary;
+      if (!declared_tree_integer ||
+          root.ub[j] <= root.lb[j] + opt.int_tol) {
+        continue;
+      }
+      const double domain_size =
+          std::min(1024.0, 1.0 + root.ub[j] - root.lb[j]);
+      if (domain_size > 1.0 && std::isfinite(domain_size)) {
+        highs_root_source_max_tree_size_log2 +=
+            static_cast<int>(std::ceil(std::log2(domain_size)));
+      }
+    }
+    const int highs_root_source_round_cap =
+        std::max(0, static_cast<int>(
+                        2.0 * std::sqrt(static_cast<double>(
+                                  highs_root_source_max_tree_size_log2))));
+        const bool use_highs_direction_stall =
+            opt.auto_highs_root_pipeline && root.x_relax.size() == n;
+        Eigen::VectorXd highs_source_first_x =
+            use_highs_direction_stall ? root.x_relax : Eigen::VectorXd();
+        Eigen::VectorXd highs_source_avg_direction =
+            use_highs_direction_stall ? Eigen::VectorXd::Zero(n)
+                                      : Eigen::VectorXd();
+        double highs_source_smooth_progress = 0.0;
+        auto close_root_source_stage = [&](const char* phase) -> bool {
+          ++root_source_trace.flush_calls;
+          const auto t_flush0 = std::chrono::steady_clock::now();
+          (void)flush_root_transformed_cutpool_sources(phase);
+          root_source_trace.flush_ms += root_source_elapsed_ms(t_flush0);
 
-		    for (int source_round = 0;
-		         source_round < kHighsStyleRootSourceRoundCap &&
-		         source_stalls < kHighsStyleRootSourceStallLimit;) {
+          ++root_source_trace.prop_calls;
+          const auto t_prop0 = std::chrono::steady_clock::now();
+          const bool moved = propagate_root_transformed_cutpool_resolve();
+          root_source_trace.prop_ms += root_source_elapsed_ms(t_prop0);
+          return moved;
+        };
+
+        for (int source_round = 0;
+             source_round < highs_root_source_round_cap &&
+             source_stalls < kHighsStyleRootSourceStallLimit;) {
 	      const int frac_before = count_fractional_source_integers();
 	      if (frac_before <= 0) break;
 
@@ -5372,25 +6829,23 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            root_deferred_implied_bound_cutpool_rows, "implied_bound");
 	        root_deferred_implied_bound_cutpool_rows.clear();
 	      }
-              const bool skip_tableau_source =
-                  requested_vendored_highs_lp &&
-                  opt.auto_highs_root_pipeline;
+          const bool implied_bound_stage_moved =
+              close_root_source_stage("after_implied_bounds_propagate");
 		      const int tableau_pool_added =
-                  skip_tableau_source ? 0 : generate_root_tableau_cutpool();
-
+              generate_root_tableau_cutpool();
 		      const int path_pool_added = generate_root_path_cutpool();
-		      ++root_source_trace.flush_calls;
-		      const auto t_flush0 = std::chrono::steady_clock::now();
-		      flush_root_transformed_cutpool_sources(
-		          "after_root_transformed_cutpool_accept");
-		      root_source_trace.flush_ms += root_source_elapsed_ms(t_flush0);
-		      ++root_source_trace.prop_calls;
-		      const auto t_prop0 = std::chrono::steady_clock::now();
-		      const bool cutpool_prop_moved =
-		              propagate_root_transformed_cutpool_resolve();
-		      root_source_trace.prop_ms += root_source_elapsed_ms(t_prop0);
-		      const bool transformed_pool_moved =
-		          separate_root_transformed_cutpool_resolve();
+	          const bool separator_stage_moved =
+	              close_root_source_stage("after_separator_propagate");
+			      const RootCutpoolResolveResult transformed_pool =
+			          separate_root_transformed_cutpool_resolve();
+		          // HiGHS ends a separation round after cutpool add/resolve.
+		          // New domain propagation caused by the accepted cuts is handled
+		          // by the next round's implied-bounds/propagate fixed point, not
+		          // by an immediate full closure replay on the post-cutpool LP.
+		          const bool post_cutpool_stage_moved = false;
+	          const bool cutpool_prop_moved =
+	              implied_bound_stage_moved || separator_stage_moved ||
+	              post_cutpool_stage_moved;
 
       if (!std::isfinite(root.bound)) {
         if (trace_root_source_loop) {
@@ -5401,35 +6856,42 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         break;
       }
 
-      const double round_lift = root.bound - round_bound_before;
-      const double total_lift = root.bound - source_first_bound;
-	      const double min_lift = std::max(
-	          opt.root_cut_min_bound_lift,
-	          1e-10 * std::max(1.0, std::abs(round_bound_before)));
-	      const bool moved =
-	          ib_moved || cutpool_prop_moved || transformed_pool_moved;
+	      const double round_lift = root.bound - round_bound_before;
+	      const double total_lift = root.bound - source_first_bound;
+				      const int highs_round_ncuts =
+				          (ib_moved ? 1 : 0) +
+				          (cutpool_prop_moved ? 1 : 0) +
+				          std::max(0, transformed_pool.admitted_rows);
+				      const bool moved = highs_round_ncuts > 0;
+	          const int frac_after = count_fractional_source_integers();
 
-	      if (trace_root_source_loop) {
-	        fmt::print(stderr,
-	                   "[B&C ROOT-SOURCE] round={} ib={} xpoolProp={} xpool={} "
-	                   "ibPool={} xtabPool={} xpathPool={} "
-	                   "rows={} varbounds={} cutpool={} impl={} "
-	                   "bound={:.2f}->{:.2f} lift={:.3e} total_lift={:.3e} "
-	                   "frac_int={} stalls={}\n",
-	                   source_round, ib_moved ? 1 : 0,
-	                   cutpool_prop_moved ? 1 : 0,
-	                   transformed_pool_moved ? 1 : 0,
+		      if (trace_root_source_loop) {
+		        fmt::print(stderr,
+		                   "[B&C ROOT-SOURCE] round={} ib={} xpoolProp={} xpool={} "
+		                   "ibStage={} tabStage={} pathStage={} postXpool={} "
+		                   "ibPool={} xtabPool={} xpathPool={} "
+		                   "rows={} ncuts={} varbounds={} cutpool={} impl={} "
+		                   "bound={:.2f}->{:.2f} lift={:.3e} total_lift={:.3e} "
+		                   "frac_int={} stalls={}\n",
+		                   source_round, ib_moved ? 1 : 0,
+		                   cutpool_prop_moved ? 1 : 0,
+		                   transformed_pool.admitted_rows > 0 ? 1 : 0,
+		                   implied_bound_stage_moved ? 1 : 0,
+		                   0,
+		                   separator_stage_moved ? 1 : 0,
+	                   post_cutpool_stage_moved ? 1 : 0,
 	                   implied_bound_pool_added, tableau_pool_added,
                        path_pool_added,
-	                   static_cast<int>(root_lp.A.rows()) - rows_before,
-	                   static_cast<long long>(variable_bound_table.size()) -
-	                       static_cast<long long>(varbounds_before),
+		                   static_cast<int>(root_lp.A.rows()) - rows_before,
+                       highs_round_ncuts,
+		                   static_cast<long long>(variable_bound_table.size()) -
+		                       static_cast<long long>(varbounds_before),
                    static_cast<long long>(variable_bound_cutpool_rows.size()) -
                        static_cast<long long>(cutpool_before),
 	                   static_cast<long long>(implication_graph.size()) -
 	                       static_cast<long long>(impl_before),
 	                   round_bound_before, root.bound, round_lift, total_lift,
-	                   count_fractional_source_integers(), source_stalls);
+		                   frac_after, source_stalls);
         fmt::print(stderr,
                    "[B&C ROOT-SOURCE-TIME] round={} "
                    "ib={:.1f} tab={:.1f}(gen={:.1f},add={:.1f}) "
@@ -5474,35 +6936,57 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
 	      ++source_round;
 	      root_source_trace.rounds = source_round;
-      const int source_rows_added =
-          static_cast<int>(root_lp.A.rows()) - rows_before;
-      const bool generated_source =
-          implied_bound_pool_added > 0 ||
-          tableau_pool_added > 0 || path_pool_added > 0 ||
-          source_rows_added > 0;
-      if (!moved && !generated_source) break;
-
-      const double highs_progress_floor =
-          std::max(previous_total_lift,
-                   std::max(opt.lp_tol, min_lift));
-      const bool highs_progress_stalled =
-          total_lift <= 1.01 * highs_progress_floor;
-      previous_total_lift = total_lift;
-      if (enforce_highs_progress_break && highs_progress_stalled) {
-        break;
-      }
-
-      // Native's transformed source is still not row-for-row identical to HiGHS
-      // on medium roots: a zero-lift membership round can still change the next
-      // basis enough to expose bound-moving rows.  Keep the older bounded stall
-      // allowance there, but use the strict HiGHS progress stop on very large
-      // roots where repeated path/xpool passes dominate runtime.
-      if (round_lift <= min_lift || highs_progress_stalled) {
-        ++source_stalls;
-      } else {
-        source_stalls = 0;
-      }
-	    }
+	      const int source_rows_added =
+	          static_cast<int>(root_lp.A.rows()) - rows_before;
+	      (void)source_rows_added;
+		      if (!moved) break;
+	
+          bool highs_direction_stalled = false;
+          if (use_highs_direction_stall && root.x_relax.size() == n) {
+            const Eigen::VectorXd curdirection =
+                highs_source_first_x - root.x_relax;
+            const double sqrnorm = curdirection.squaredNorm();
+            if (sqrnorm > 0.0 && std::isfinite(sqrnorm)) {
+              const double scale = 1.0 / std::sqrt(sqrnorm);
+              const Eigen::VectorXd normalized_direction =
+                  scale * curdirection;
+              highs_source_avg_direction =
+                  (normalized_direction - highs_source_avg_direction) /
+                  static_cast<double>(source_round);
+              const double avg_norm2 = highs_source_avg_direction.squaredNorm();
+              if (avg_norm2 > 0.0 && std::isfinite(avg_norm2)) {
+                const double dotproduct =
+                    highs_source_avg_direction.dot(curdirection);
+                const double progress = dotproduct / std::sqrt(avg_norm2);
+                if (source_round == 1) {
+                  highs_source_smooth_progress = progress;
+                } else {
+                  constexpr double kHighsProgressAlpha = 1.0 / 3.0;
+                  const double next_progress =
+                      (1.0 - kHighsProgressAlpha) *
+                          highs_source_smooth_progress +
+                      kHighsProgressAlpha * progress;
+                  highs_direction_stalled =
+                      next_progress < highs_source_smooth_progress * 1.01 &&
+                      (root.bound - source_first_bound) <=
+                          (root_source_prev_bound_for_progress -
+                           source_first_bound) *
+                              1.001;
+                  highs_source_smooth_progress = next_progress;
+                }
+              }
+            }
+          }
+          root_source_prev_bound_for_progress = root.bound;
+          if (frac_after <= 0) {
+            break;
+          }
+          if (highs_direction_stalled) {
+            ++source_stalls;
+          } else {
+            source_stalls = 0;
+          }
+		    }
     if (trace_root_source_loop) {
       fmt::print(stderr,
                  "[B&C ROOT-SOURCE-TIME-SUM] rounds={} "
@@ -5610,6 +7094,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   int effective_cut_rounds = opt.root_cut_rounds;
   int effective_cuts_per_round = opt.cuts_per_round;
   bool is_scuc_like = false;  // set below in root-fractional diagnostic block
+  std::string root_cut_skip_reason;
   const bool highs_root_pipeline_active =
       opt.auto_highs_root_pipeline && opt.cuts != CutType::None;
   if (!highs_root_pipeline_active &&
@@ -5731,7 +7216,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   const bool par_mode = (resolved_threads > 1);
   bool parallel_tree_allowed = par_mode;
   std::string parallel_schedule_reason = par_mode ? "enabled" : "single_thread";
-  std::string root_cut_skip_reason;
   out.bc_stats.parallel_requested_threads = resolved_threads;
   out.bc_stats.parallel_effective_threads = 1;
   out.bc_stats.parallel_explorer_threads = 0;
@@ -5842,6 +7326,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
     effective_cut_rounds = 0;
     root_cut_skip_reason = "large_generic_low_fractionality";
+  }
+  if (highs_root_pipeline_active && effective_cut_rounds > 0) {
+    // HiGHS' root separators publish candidate rows into HighsCutPool; only
+    // cutpool.separate() admits rows into the LP after propagation closure.
+    // The native equivalent is the root source/xpool loop above.  Running the
+    // legacy add_cuts() loop here would bypass that lifecycle by scanning the
+    // tableau again and inserting rows directly into root_lp.
+    effective_cut_rounds = 0;
+    root_cut_skip_reason = "highs_root_cutpool_fixed_point";
   }
   if (parallel_tree_allowed &&
       opt.parallel_serial_on_low_fractionality_root &&
@@ -6248,10 +7741,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       }
       root_relax.basis_hint = cut_basis;
 
-      root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
-      root.basis_hint = root_relax.basis_hint;
-      root.bound = root_relax.dual_bound;
-      }  // end simplex re-solve path
+	      root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
+	      root.basis_hint = root_relax.basis_hint;
+	      root.bound = root_relax.dual_bound;
+	      refresh_root_redcost_lurking_bounds("root_cut_round_resolve");
+	      }  // end simplex re-solve path
 
       const double candidate_bound_after_round = root.bound;
       const double round_lift = candidate_bound_after_round - round_bound;
@@ -6393,19 +7887,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   base_lp.vars = root_global_vars;
   if (use_objective_propagation) {
     objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                &clique_table, &implication_graph);
+                                &clique_table, &implication_graph,
+                                objective_propagation_build_policy());
     const auto published = publish_objective_implied_event_source(
         base_lp, objective_propagation, implication_graph, clique_table,
         opt.int_tol);
     out.bc_stats.objective_implied_event_published_implications +=
         published.implications_added;
-    out.bc_stats.objective_implied_event_published_clique_edges +=
-        published.clique_edges_added;
-    if (published.implications_added > 0 || published.clique_edges_added > 0) {
-      objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                  &clique_table, &implication_graph);
-    }
-  }
+	    out.bc_stats.objective_implied_event_published_clique_edges +=
+	        published.clique_edges_added;
+	    if (published.implications_added > 0 || published.clique_edges_added > 0) {
+	      const std::uint64_t published_total =
+	          published.implications_added + published.clique_edges_added;
+	      note_global_domain_learning(published_total);
+	      note_objective_artifact_learning(published_total);
+	      objective_propagation.setup(base_lp, &root_implied_integer_cols,
+	                                  &clique_table, &implication_graph,
+	                                  objective_propagation_build_policy());
+	    }
+	  }
   out.bc_stats.objective_clique_partitions =
       static_cast<std::uint64_t>(objective_propagation.partitions.size());
   for (const auto& part : objective_propagation.partitions) {
@@ -6437,10 +7937,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       objective_propagation.max_implied_event_delta;
   out.bc_stats.objective_implied_event_max_aggregate_delta =
       objective_propagation.max_implied_event_aggregate_delta;
-  auto refresh_objective_artifact_stats = [&]() {
-    out.bc_stats.root_clique_edges = clique_table.n_literal_edges();
-    out.bc_stats.root_implication_arcs =
-        static_cast<std::uint64_t>(implication_graph.size());
+	  auto refresh_objective_artifact_stats = [&]() {
+	    out.bc_stats.root_clique_edges = clique_table.n_literal_edges();
+	    out.bc_stats.root_implication_arcs =
+	        static_cast<std::uint64_t>(implication_graph.size());
     out.bc_stats.objective_clique_partitions =
         static_cast<std::uint64_t>(objective_propagation.partitions.size());
     out.bc_stats.objective_clique_terms = 0;
@@ -6471,11 +7971,129 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         objective_propagation.implied_event_mir_gain_max;
     out.bc_stats.objective_implied_event_max_delta =
         objective_propagation.max_implied_event_delta;
-    out.bc_stats.objective_implied_event_max_aggregate_delta =
-        objective_propagation.max_implied_event_aggregate_delta;
-  };
+	    out.bc_stats.objective_implied_event_max_aggregate_delta =
+	        objective_propagation.max_implied_event_aggregate_delta;
+	  };
 
-  record_conformance_source("root_postcut_source");
+	  struct ObjectiveDomainSourceRefreshStats {
+	    std::uint64_t published_implications{0};
+	    std::uint64_t published_clique_edges{0};
+	    std::uint64_t setup_passes{0};
+
+	    std::uint64_t total_published() const {
+	      return published_implications + published_clique_edges;
+	    }
+	  };
+
+	  std::uint64_t last_objective_source_refresh_domain_epoch =
+	      std::numeric_limits<std::uint64_t>::max();
+	  std::uint64_t last_objective_source_refresh_objective_epoch =
+	      std::numeric_limits<std::uint64_t>::max();
+	  std::uint64_t last_objective_source_refresh_clique_edges =
+	      std::numeric_limits<std::uint64_t>::max();
+	  std::uint64_t last_objective_source_refresh_implications =
+	      std::numeric_limits<std::uint64_t>::max();
+	  Eigen::Index last_objective_source_refresh_ineq_rows = -1;
+	  Eigen::Index last_objective_source_refresh_eq_rows = -1;
+	  auto refresh_objective_domain_sources =
+	      [&](const char* source,
+	          bool force = false) -> ObjectiveDomainSourceRefreshStats {
+	    ObjectiveDomainSourceRefreshStats stats;
+	    if (!use_objective_propagation) {
+	      return stats;
+	    }
+
+	    // HiGHS keeps objective propagation inside the same domain closure, but
+	    // its source structure is tied to the objective, clique table and
+	    // implication graph, not to every learned bound certificate.  Rebuild
+	    // only when that structural source changes; ordinary domain learning is
+	    // consumed by propagation using the current node bounds.
+	    const std::uint64_t requested_objective_epoch =
+	        current_objective_artifact_epoch();
+	    const std::uint64_t requested_clique_edges =
+	        static_cast<std::uint64_t>(clique_table.n_literal_edges());
+	    const std::uint64_t requested_implications =
+	        static_cast<std::uint64_t>(implication_graph.size());
+	    const Eigen::Index requested_ineq_rows = base_lp.A.rows();
+	    const Eigen::Index requested_eq_rows = base_lp.Aeq.rows();
+	    if (!force &&
+	        last_objective_source_refresh_objective_epoch ==
+	            requested_objective_epoch &&
+	        last_objective_source_refresh_clique_edges ==
+	            requested_clique_edges &&
+	        last_objective_source_refresh_implications ==
+	            requested_implications &&
+	        last_objective_source_refresh_ineq_rows == requested_ineq_rows &&
+	        last_objective_source_refresh_eq_rows == requested_eq_rows) {
+	      return stats;
+	    }
+
+	    constexpr int kMaxObjectiveSourceRefreshPasses = 16;
+	    bool final_setup_needed = false;
+		    for (int pass = 0; pass < kMaxObjectiveSourceRefreshPasses; ++pass) {
+		      ++stats.setup_passes;
+		      objective_propagation.setup(base_lp, &root_implied_integer_cols,
+		                                  &clique_table, &implication_graph,
+		                                  objective_propagation_build_policy());
+	      const auto published = publish_objective_implied_event_source(
+	          base_lp, objective_propagation, implication_graph, clique_table,
+	          opt.int_tol);
+	      out.bc_stats.objective_implied_event_published_implications +=
+	          published.implications_added;
+	      out.bc_stats.objective_implied_event_published_clique_edges +=
+	          published.clique_edges_added;
+
+	      const std::uint64_t published_total =
+	          published.implications_added + published.clique_edges_added;
+	      if (published_total == 0) {
+	        final_setup_needed = false;
+	        break;
+	      }
+
+	      stats.published_implications += published.implications_added;
+	      stats.published_clique_edges += published.clique_edges_added;
+	      note_global_domain_learning(published_total);
+	      note_objective_artifact_learning(published_total);
+	      final_setup_needed = true;
+	    }
+
+		    if (final_setup_needed) {
+		      ++stats.setup_passes;
+		      objective_propagation.setup(base_lp, &root_implied_integer_cols,
+		                                  &clique_table, &implication_graph,
+		                                  objective_propagation_build_policy());
+		    }
+	    refresh_objective_artifact_stats();
+	    last_objective_source_refresh_domain_epoch =
+	        current_domain_learning_epoch();
+	    last_objective_source_refresh_objective_epoch =
+	        current_objective_artifact_epoch();
+	    last_objective_source_refresh_clique_edges =
+	        static_cast<std::uint64_t>(clique_table.n_literal_edges());
+	    last_objective_source_refresh_implications =
+	        static_cast<std::uint64_t>(implication_graph.size());
+	    last_objective_source_refresh_ineq_rows = base_lp.A.rows();
+	    last_objective_source_refresh_eq_rows = base_lp.Aeq.rows();
+
+	    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+	        stats.total_published() > 0) {
+	      fmt::print(stderr,
+	                 "[B&C-OBJ-SRC-REFRESH] source={} setup={} pub={}/{} "
+	                 "domainEpoch={} objectiveEpoch={} objParts={} objEvents={} "
+	                 "clqEdges={} arcs={}\n",
+	                 source != nullptr ? source : "domain_source",
+	                 stats.setup_passes, stats.published_implications,
+	                 stats.published_clique_edges,
+	                 current_domain_learning_epoch(),
+	                 current_objective_artifact_epoch(),
+	                 objective_propagation.partitions.size(),
+	                 objective_propagation.implied_events.size(),
+	                 clique_table.n_literal_edges(), implication_graph.size());
+	    }
+	    return stats;
+	  };
+
+	  record_conformance_source("root_postcut_source");
 
   [[maybe_unused]] auto t_postcut0 = std::chrono::steady_clock::now();
 
@@ -6618,11 +8236,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       if (xover_res->basis.cached_sparse_basis) {
         xo_basis->cached_sparse_basis = xover_res->basis.cached_sparse_basis;
       }
-      root_relax.basis_hint = xo_basis;
-      root.x_relax = clamp_to_bounds(xover_res->result.x, root.lb, root.ub);
-      root.basis_hint = root_relax.basis_hint;
-      root.bound = root_relax.dual_bound;
-    }
+	      root_relax.basis_hint = xo_basis;
+	      root.x_relax = clamp_to_bounds(xover_res->result.x, root.lb, root.ub);
+	      root.basis_hint = root_relax.basis_hint;
+	      root.bound = root_relax.dual_bound;
+	      refresh_root_redcost_lurking_bounds("root_postcut_crossover");
+	    }
   }
 
   // Generic medium-size IPM root polish: when the root cut path adds no cuts,
@@ -6665,11 +8284,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         handoff_basis->cached_sparse_basis = handoff_res->basis.cached_sparse_basis;
       }
 
-      root_relax.basis_hint = handoff_basis;
-      root.x_relax = clamp_to_bounds(handoff_res->result.x, root.lb, root.ub);
-      root.basis_hint = handoff_basis;
-      root.bound = root_relax.dual_bound;
-    }
+	      root_relax.basis_hint = handoff_basis;
+	      root.x_relax = clamp_to_bounds(handoff_res->result.x, root.lb, root.ub);
+	      root.basis_hint = handoff_basis;
+	      root.bound = root_relax.dual_bound;
+	      refresh_root_redcost_lurking_bounds("root_ipm_handoff_simplex");
+	    }
   }
 
   // The root cut rounds create SparseBasis objects that reference local
@@ -6724,16 +8344,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             std::chrono::duration<double, std::milli>(t_cuts_done - t_final_sf0).count());
   }
 
-  CutPool cut_pool(opt.cut_pool_max_size, opt.cut_pool_max_age, n);
-	  ConflictPool conflict_pool(
-	      opt.cut_pool_max_size,
-	      std::max(64, opt.reduced_cost_conflict_pool_max_literals));
-  SolutionPool solution_pool(opt.solution_pool_size);
+	  SolutionPool solution_pool(opt.solution_pool_size);
 
   if (out.bc_stats.cuts_added > 0) {
-    const int orig_rows = static_cast<int>(pre_cut_root_lp.A.rows());
-    const int total_rows = static_cast<int>(base_lp.A.rows());
+	    const int orig_rows = static_cast<int>(pre_cut_root_lp.A.rows());
+	    const int total_rows = static_cast<int>(base_lp.A.rows());
     Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_seed = base_lp.A;
+    int seeded_root_lp_cutpool_rows = 0;
     for (int r = orig_rows; r < total_rows; ++r) {
       Eigen::SparseVector<double> row_sparse(n);
       int nnz = 0;
@@ -6746,7 +8363,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           row_sparse.insertBack(it.col()) = it.value();
         }
       }
-      cut_pool.add(std::move(row_sparse), base_lp.b[r]);
+      bool new_domain_source = false;
+      if (cut_pool.add(std::move(row_sparse), base_lp.b[r],
+                       /*domain_only=*/false, &new_domain_source) &&
+          new_domain_source) {
+        ++seeded_root_lp_cutpool_rows;
+      }
+    }
+    if (seeded_root_lp_cutpool_rows > 0) {
+      note_global_domain_learning(
+          static_cast<std::uint64_t>(seeded_root_lp_cutpool_rows));
+      if (static_cast<std::size_t>(cut_pool.size()) <=
+          last_cutpool_clique_scan_size) {
+        last_cutpool_clique_scan_size = 0;
+      }
+      (void)synchronize_root_source_cutpool_domain_sources(
+          "root_lp_cut_seed");
     }
   }
 
@@ -6801,16 +8433,165 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
   };
 
-  std::uint64_t global_domain_learning_epoch = 0;
-  auto current_domain_learning_epoch = [&]() -> std::uint64_t {
-    return global_domain_learning_epoch;
-  };
-  auto note_global_domain_learning =
-      [&](std::uint64_t added = 1) -> void {
-    if (added > 0) {
-      global_domain_learning_epoch += added;
+	  auto synchronize_cutpool_clique_objective_sources =
+	      [&](const char* source) -> std::uint64_t {
+    if (last_cutpool_clique_scan_size >
+        static_cast<std::size_t>(cut_pool.size())) {
+      last_cutpool_clique_scan_size = 0;
     }
+    std::uint64_t edges_added_total = 0;
+    std::uint64_t generated_edges_total = 0;
+    std::uint64_t rows_scanned = 0;
+    std::uint64_t rows_with_literals = 0;
+    std::uint64_t rows_with_pair_excess = 0;
+    double max_pair_excess = 0.0;
+    double best_pair_margin = -1e100;
+    const auto& cuts = cut_pool.cuts();
+    for (std::size_t i = last_cutpool_clique_scan_size; i < cuts.size(); ++i) {
+      const PoolCut& cut = cuts[i];
+      if (cut.coeff.size() != n || cut.coeff.nonZeros() <= 0 ||
+          !std::isfinite(cut.rhs)) {
+        continue;
+      }
+      CliqueTable::CutCliqueExtractionStats stats;
+      const std::size_t added = clique_table.add_literal_edges_from_cut(
+          base_lp, cut.coeff, cut.rhs, 512, &root_implied_integer_cols,
+          &implication_graph, &stats, nullptr);
+      edges_added_total += static_cast<std::uint64_t>(added);
+      generated_edges_total += stats.literal_edges_generated;
+      rows_scanned += stats.rows_scanned;
+      rows_with_literals += stats.rows_with_binary_literals;
+      rows_with_pair_excess += stats.rows_with_pair_excess;
+      max_pair_excess = std::max(max_pair_excess, stats.max_pair_excess);
+      best_pair_margin = std::max(best_pair_margin, stats.best_pair_margin);
+    }
+    last_cutpool_clique_scan_size = cuts.size();
+    if (edges_added_total == 0) {
+      if ((opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) &&
+          rows_scanned > 0) {
+        fmt::print(stderr,
+                   "[B&C-CUTPOOL-CLIQUE] source={} scan={} litRows={} "
+                   "pairRows={} genEdges={} added=0 bestMargin={:.6g} "
+                   "maxExcess={:.6g} clqEdges={}\n",
+                   source != nullptr ? source : "cutpool", rows_scanned,
+                   rows_with_literals, rows_with_pair_excess,
+                   generated_edges_total, best_pair_margin, max_pair_excess,
+                   clique_table.n_literal_edges());
+      }
+      return 0;
+    }
+
+	    note_global_domain_learning(edges_added_total);
+	    note_objective_artifact_learning(edges_added_total);
+	    const auto refresh_stats =
+	        refresh_objective_domain_sources(source, /*force=*/true);
+	    const std::uint64_t published_total =
+	        refresh_stats.total_published();
+	    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+	        edges_added_total > 0) {
+	      fmt::print(stderr,
+	                 "[B&C-CUTPOOL-CLIQUE] source={} scan={} litRows={} "
+	                 "pairRows={} genEdges={} added={} pub={}/{} "
+                 "bestMargin={:.6g} maxExcess={:.6g} objParts={} "
+                 "clqEdges={} arcs={}\n",
+	                 source != nullptr ? source : "cutpool", rows_scanned,
+	                 rows_with_literals, rows_with_pair_excess,
+	                 generated_edges_total, edges_added_total,
+	                 refresh_stats.published_implications,
+	                 refresh_stats.published_clique_edges,
+	                 best_pair_margin, max_pair_excess,
+	                 objective_propagation.partitions.size(),
+	                 clique_table.n_literal_edges(), implication_graph.size());
+	    }
+	    return edges_added_total + published_total;
   };
+
+	  auto add_cut_to_global_domain_pool =
+	      [&](Eigen::SparseVector<double> coeff, double rhs,
+	          const char* source, bool domain_only = false) -> bool {
+    if (coeff.size() != n || coeff.nonZeros() <= 0 || !std::isfinite(rhs)) {
+      return false;
+    }
+    bool new_domain_source = false;
+    const bool added =
+        cut_pool.add(std::move(coeff), rhs, domain_only, &new_domain_source);
+    if (added) {
+      if (new_domain_source) {
+        note_global_domain_learning();
+        if (static_cast<std::size_t>(cut_pool.size()) <=
+            last_cutpool_clique_scan_size) {
+          last_cutpool_clique_scan_size = 0;
+        }
+        (void)synchronize_cutpool_clique_objective_sources(source);
+      }
+      if (opt.verbose || trace_bc_timeline) {
+        fmt::print(stderr,
+                   "[B&C-CUTPOOL-DOMAIN] source={} size={} domain_only={} "
+                   "new_source={} epoch={}\n",
+                   source != nullptr ? source : "cutpool", cut_pool.size(),
+                   domain_only ? 1 : 0, new_domain_source ? 1 : 0,
+                   current_domain_learning_epoch());
+      }
+    }
+	    return added;
+	  };
+	  bool root_transformed_cutpool_in_global_domain_pool = false;
+	  auto seed_root_transformed_cutpool_domain_rows = [&]() -> int {
+	    int added = 0;
+	    int duplicates = 0;
+	    int domain_only_rows = 0;
+	    int lp_visible_rows = 0;
+	    for (int i = 0; i < static_cast<int>(root_transformed_cutpool.size()); ++i) {
+	      const PoolCut& cut = root_transformed_cutpool[static_cast<std::size_t>(i)];
+	      if (cut.coeff.size() != n || cut.coeff.nonZeros() <= 0 ||
+	          !std::isfinite(cut.rhs)) {
+	        continue;
+	      }
+	      if (i < static_cast<int>(root_transformed_cut_alive.size()) &&
+	          root_transformed_cut_alive[static_cast<std::size_t>(i)] == 0) {
+	        continue;
+	      }
+	      const bool in_root_lp =
+	          i < static_cast<int>(root_transformed_cut_in_lp.size()) &&
+	          root_transformed_cut_in_lp[static_cast<std::size_t>(i)] != 0;
+	      Eigen::SparseVector<double> coeff = cut.coeff;
+		      // HiGHS marks selected cutpool rows as LP rows (age=-1), so they are
+		      // no longer candidates for later cutpool separation.  Rows that were
+		      // never admitted to the root LP remain available for future node LPs.
+		      const bool domain_only = in_root_lp;
+	      if (add_cut_to_global_domain_pool(
+                  std::move(coeff), cut.rhs,
+                  "root_transformed_cutpool_seed", domain_only)) {
+	        ++added;
+	        if (domain_only) {
+	          ++domain_only_rows;
+	        } else {
+	          ++lp_visible_rows;
+	        }
+	      } else {
+	        ++duplicates;
+	      }
+	    }
+	    root_transformed_cutpool_in_global_domain_pool =
+	        !root_transformed_cutpool.empty();
+	    if (added > 0) {
+	      (void)refresh_objective_domain_sources(
+	          "root_transformed_cutpool_seed", /*force=*/true);
+	    }
+	    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+	        std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
+	      fmt::print(stderr,
+	                 "[B&C-CUTPOOL-DOMAIN] source=root_transformed_cutpool_seed "
+	                 "poolRows={} added={} dup={} domain_only={} lp_visible={} "
+	                 "cutpool={}\n",
+	                 static_cast<int>(root_transformed_cutpool.size()), added,
+	                 duplicates, domain_only_rows, lp_visible_rows,
+	                 cut_pool.size());
+	    }
+	    return added;
+	  };
+	  (void)seed_root_transformed_cutpool_domain_rows();
+	  (void)synchronize_cutpool_clique_objective_sources("root_cutpool_seed");
   auto note_root_subsolve = [&](const char* name, double ms, bool success,
                                 bool incumbent_hit = false,
                                 int lp_solves = 0) {
@@ -6878,80 +8659,168 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    return ok;
 	  };
 
-	  double last_objective_cutoff_artifact_obj = kInf;
-	  auto consume_objective_cutoff_artifacts = [&](const char* reason) -> std::uint64_t {
-	    if (!use_objective_propagation || !has_incumbent ||
-	        !std::isfinite(incumbent_obj) || base_lp.sense != Sense::Minimize ||
-	        root.lb.size() != n || root.ub.size() != n) {
-	      return 0;
-	    }
-	    if (!current_incumbent_valid_for_proof(reason)) {
-	      return 0;
-	    }
-	    const double improve_tol =
-	        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
-    if (std::isfinite(last_objective_cutoff_artifact_obj) &&
-        incumbent_obj >= last_objective_cutoff_artifact_obj - improve_tol) {
-      return 0;
-    }
+		  auto root_domain_signature = [&]() -> std::size_t {
+		    std::size_t h = 0;
+		    auto mix = [&](std::size_t v) {
+		      h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+		    };
+		    auto quantized_bound = [](double value) -> long long {
+		      if (!std::isfinite(value)) {
+		        return value < 0.0 ? std::numeric_limits<long long>::min()
+		                           : std::numeric_limits<long long>::max();
+		      }
+		      const double scaled = value * 1e6;
+		      if (scaled <= static_cast<double>(std::numeric_limits<long long>::min())) {
+		        return std::numeric_limits<long long>::min() + 1;
+		      }
+		      if (scaled >= static_cast<double>(std::numeric_limits<long long>::max())) {
+		        return std::numeric_limits<long long>::max() - 1;
+		      }
+		      return static_cast<long long>(std::llround(scaled));
+		    };
+		    const int m = root.lb.size() == root.ub.size()
+		                      ? static_cast<int>(root.lb.size())
+		                      : 0;
+		    mix(std::hash<int>{}(m));
+		    for (int j = 0; j < m; ++j) {
+		      mix(std::hash<int>{}(j));
+		      mix(std::hash<long long>{}(quantized_bound(root.lb[j])));
+		      mix(std::hash<long long>{}(quantized_bound(root.ub[j])));
+		    }
+		    return h;
+		  };
 
-    const auto stats = extract_objective_cutoff_artifacts(
-        base_lp, root_implied_integer_cols, root.lb, root.ub, incumbent_obj,
+		  auto current_incumbent_valid_for_cutoff_propagation =
+		      [&](const char* source) -> bool {
+		    if (!has_incumbent || !std::isfinite(incumbent_obj) ||
+		        incumbent_x.size() != n) {
+		      return false;
+		    }
+		    const auto reduced_validation =
+		        validate_incumbent_solution(base_lp, incumbent_x,
+		                                     kNodeFeasibilityTol);
+		    if (!reduced_validation.ok()) {
+		      if (opt.verbose || trace_bc_timeline) {
+		        fmt::print(stderr,
+		                   "[B&C-INC-GATE] rejected source={} {}\n",
+		                   source != nullptr ? source : "incumbent_cutoff",
+		                   format_incumbent_validation_failure(
+		                       "cutoff-propagation-gate", base_lp,
+		                       reduced_validation));
+		      }
+		      return false;
+		    }
+		    return true;
+		  };
+
+		  double last_objective_cutoff_artifact_obj = kInf;
+		  std::uint64_t last_objective_cutoff_artifact_domain_epoch =
+		      std::numeric_limits<std::uint64_t>::max();
+		  std::size_t last_objective_cutoff_artifact_root_signature =
+		      std::numeric_limits<std::size_t>::max();
+		  auto consume_objective_cutoff_artifacts = [&](const char* reason) -> std::uint64_t {
+		    if (!use_objective_propagation || !has_incumbent ||
+		        !std::isfinite(incumbent_obj) || base_lp.sense != Sense::Minimize ||
+		        root.lb.size() != n || root.ub.size() != n) {
+		      return 0;
+		    }
+		    if (!current_incumbent_valid_for_cutoff_propagation(reason)) {
+		      return 0;
+		    }
+	    const double upper_limit =
+	        highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                         opt.int_tol);
+	    if (!std::isfinite(upper_limit)) {
+	      return 0;
+	    }
+		    const double improve_tol =
+	        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+	    const std::uint64_t domain_epoch = current_domain_learning_epoch();
+	    const std::size_t domain_signature = root_domain_signature();
+	    const bool cutoff_improved =
+	        !std::isfinite(last_objective_cutoff_artifact_obj) ||
+	        incumbent_obj < last_objective_cutoff_artifact_obj - improve_tol;
+	    const bool domain_changed =
+	        domain_epoch != last_objective_cutoff_artifact_domain_epoch ||
+	        domain_signature != last_objective_cutoff_artifact_root_signature;
+	    if (!cutoff_improved && !domain_changed) {
+	      return 0;
+	    }
+
+	    const auto clique_stats = extract_objective_cutoff_cliques(
+        base_lp, root_implied_integer_cols, root.lb, root.ub, upper_limit,
+        clique_table, opt.int_tol, &objective_propagation,
+        &conflict_pool, cts ? &cts->shared_conflicts : nullptr);
+	    const auto stats = extract_objective_cutoff_artifacts(
+        base_lp, root_implied_integer_cols, root.lb, root.ub, upper_limit,
         implication_graph, clique_table, opt.int_tol,
-        &objective_propagation);
-    last_objective_cutoff_artifact_obj = incumbent_obj;
-    if (stats.implications_added == 0 && stats.clique_edges_added == 0) {
-      record_conformance_source("incumbent_objective_source_none");
-      fmt::print(stderr,
-                 "[B&C OBJ-CLIQUE] {} none cand={} cap={:.6g} "
-                 "raw_lb={:.2f} max_delta={:.6g}\n",
+        &objective_propagation, &conflict_pool,
+        cts ? &cts->shared_conflicts : nullptr);
+	    if (stats.implications_added == 0 && stats.clique_edges_added == 0 &&
+	        stats.conflict_clauses_added == 0 &&
+	        clique_stats.clique_edges_added == 0 &&
+	        clique_stats.conflict_clauses_added == 0) {
+	      last_objective_cutoff_artifact_obj = incumbent_obj;
+	      last_objective_cutoff_artifact_domain_epoch = current_domain_learning_epoch();
+	      last_objective_cutoff_artifact_root_signature = root_domain_signature();
+	      record_conformance_source("incumbent_objective_source_none");
+	      fmt::print(stderr,
+                 "[B&C OBJ-CLIQUE] {} none cand={} eventCand={} cap={:.6g} "
+                 "raw_lb={:.2f} max_delta={:.6g} cutClqCand={} "
+                 "cutClqPairs={} cutClqConf={} cutClqAdded={}\n",
                  reason != nullptr ? reason : "incumbent",
-                 stats.candidates, stats.cutoff_capacity,
-                 stats.raw_objective_lower, stats.max_delta);
+                 stats.candidates, stats.implied_event_candidates,
+                 stats.cutoff_capacity,
+                 stats.raw_objective_lower, stats.max_delta,
+                 clique_stats.candidates, clique_stats.pair_tests,
+                 clique_stats.pair_conflicts,
+                 clique_stats.clique_edges_added);
       return 0;
     }
 
     out.bc_stats.rc_binary_implications_learned +=
         stats.implications_added;
-    note_global_domain_learning(stats.implications_added +
-                                stats.clique_edges_added);
-    objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                &clique_table, &implication_graph);
-    const auto published = publish_objective_implied_event_source(
-        base_lp, objective_propagation, implication_graph, clique_table,
-        opt.int_tol);
-    out.bc_stats.objective_implied_event_published_implications +=
-        published.implications_added;
-    out.bc_stats.objective_implied_event_published_clique_edges +=
-        published.clique_edges_added;
-    note_global_domain_learning(published.implications_added +
-                                published.clique_edges_added);
-    if (published.implications_added > 0 || published.clique_edges_added > 0) {
-      objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                  &clique_table, &implication_graph);
-    }
-    refresh_objective_artifact_stats();
-    record_conformance_source("incumbent_objective_source");
-    if (opt.verbose || stats.implications_added > 0 ||
-        stats.clique_edges_added > 0) {
+    const std::uint64_t extracted_objective_artifacts =
+        stats.implications_added + stats.clique_edges_added +
+        stats.conflict_clauses_added + clique_stats.clique_edges_added +
+        clique_stats.conflict_clauses_added;
+	    out.bc_stats.cutoff_conflict_clauses_learned +=
+	        stats.conflict_clauses_added + clique_stats.conflict_clauses_added;
+	    note_global_domain_learning(extracted_objective_artifacts);
+	    note_objective_artifact_learning(extracted_objective_artifacts);
+	    (void)refresh_objective_domain_sources(reason, /*force=*/true);
+		    last_objective_cutoff_artifact_obj = incumbent_obj;
+		    last_objective_cutoff_artifact_domain_epoch = current_domain_learning_epoch();
+		    last_objective_cutoff_artifact_root_signature = root_domain_signature();
+	    record_conformance_source("incumbent_objective_source");
+	    if (opt.verbose || stats.implications_added > 0 ||
+	        stats.clique_edges_added > 0) {
       fmt::print(stderr,
-                 "[B&C OBJ-CLIQUE] {} cand={} conflicts={} impl={} "
-                 "clique_edges={} cap={:.6g} raw_lb={:.2f} "
+                 "[B&C OBJ-CLIQUE] {} cand={} eventCand={} conflicts={} "
+                 "confQ={} unary={} pair={} impl={} clique_edges={} "
+                 "cutClqCand={} cutClqPairs={} cutClqConf={} "
+                 "cutClqAdded={} cutClqClauses={} cap={:.6g} raw_lb={:.2f} "
                  "obj_parts={} obj_terms={} arcs={}\n",
                  reason != nullptr ? reason : "incumbent",
-                 stats.candidates, stats.conflicts_seen,
-                 stats.implications_added, stats.clique_edges_added,
+                 stats.candidates, stats.implied_event_candidates,
+	                 stats.conflicts_seen, stats.conflict_clauses_added,
+	                 stats.unary_conflicts_added, stats.pair_conflicts_added,
+	                 stats.implications_added, stats.clique_edges_added,
+	                 clique_stats.candidates, clique_stats.pair_tests,
+	                 clique_stats.pair_conflicts, clique_stats.clique_edges_added,
+                 clique_stats.conflict_clauses_added,
                  stats.cutoff_capacity, stats.raw_objective_lower,
                  objective_propagation.partitions.size(),
-                 out.bc_stats.objective_clique_terms,
-                 implication_graph.size());
-    }
-    return stats.implications_added + stats.clique_edges_added;
-  };
+	    out.bc_stats.objective_clique_terms,
+	                 implication_graph.size());
+	    }
+	    return extracted_objective_artifacts;
+	  };
 
-	  auto adopt_root_incumbent = [&](const char* source,
-	                                  const Eigen::VectorXd& candidate_x,
-	                                  double candidate_obj) -> bool {
+		  std::function<void(const char*)> root_incumbent_fixed_point_hook;
+		  auto adopt_root_incumbent = [&](const char* source,
+		                                  const Eigen::VectorXd& candidate_x,
+		                                  double candidate_obj) -> bool {
 	    (void)candidate_obj;
 	    const double actual_obj =
 	        objective_value(base_lp.c, candidate_x, base_lp.sense);
@@ -6967,6 +8836,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    has_incumbent = true;
 	    incumbent_x = candidate_x;
 	    incumbent_obj = actual_obj;
+	    note_incumbent_cutoff_learning();
 	    incumbent_proof_validated = true;
 	    incumbent_proof_validated_obj = incumbent_obj;
 	    solution_pool.add(candidate_x, actual_obj);
@@ -6974,11 +8844,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      cts->shared_inc.try_update(candidate_x, actual_obj);
 	      cts->shared_sp.add(candidate_x, actual_obj);
 	    }
-	    root_incumbent_source = source;
-	    note_incumbent_update(/*depth=*/0, root.bound);
-	    consume_objective_cutoff_artifacts(source);
-	    return true;
-	  };
+		    root_incumbent_source = source;
+		    note_incumbent_update(/*depth=*/0, root.bound);
+		    consume_objective_cutoff_artifacts(source);
+		    if (root_incumbent_fixed_point_hook) {
+		      root_incumbent_fixed_point_hook(source);
+		    }
+		    return true;
+		  };
 
   auto root_incumbent_match_tol = [&]() -> double {
     return std::max(1e-6, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
@@ -7062,16 +8935,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   };
 
   bool root_primal_polish_complete = !requested_vendored_highs_lp;
+  auto root_proof_tail_polish_required = [&]() -> bool {
+    return requested_vendored_highs_lp && opt.auto_highs_root_pipeline &&
+           opt.require_tree_exhaustion_certificate &&
+           !root_primal_polish_complete && root_frac_bin_count > 0 &&
+           std::isfinite(root.bound);
+  };
 
 	  // ── Helper: check if incumbent is within gap_tol of root bound ──
-	  // Used to skip expensive root heuristics once gap is already closed.
-	  // When concurrent tree is running, also check tree's SharedIncumbent.
-	  auto root_gap_closed = [&]() -> bool {
-	    const bool root_bound_certified_now =
-	        publish_root_bound_gap_certificate("root_gap_closed");
-	    if (!root_primal_polish_complete && !root_bound_certified_now) {
-	      return false;
-	    }
+		  // Used to skip expensive root heuristics once gap is already closed.
+		  // When concurrent tree is running, also check tree's SharedIncumbent.
+		  auto root_gap_closed = [&]() -> bool {
+		    (void)publish_root_bound_gap_certificate("root_gap_closed");
+		    if (!root_primal_polish_complete) {
+		      return false;
+		    }
 	    if (!root_gap_certificate_ready) {
 	      return false;
     }
@@ -7104,12 +8982,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
            std::max(1.0, std::abs(incumbent_obj));
   };
 
-	  auto root_incumbent_good_enough = [&]() -> bool {
-	    const bool root_bound_certified_now =
-	        publish_root_bound_gap_certificate("root_incumbent_good_enough");
-	    if (!root_primal_polish_complete && !root_bound_certified_now) {
-	      return false;
-	    }
+	  auto incumbent_upper_limit = [&]() -> double {
+	    return highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                             opt.int_tol);
+	  };
+	  auto incumbent_upper_limit_prune_tol = [&](double upper_limit) -> double {
+	    return std::max({1e-9, opt.lp_tol,
+	                     kIncumbentPruneTol *
+	                         std::max(1.0, std::abs(upper_limit))});
+	  };
+
+		  auto root_incumbent_good_enough = [&]() -> bool {
+		    (void)publish_root_bound_gap_certificate("root_incumbent_good_enough");
+		    if (!root_primal_polish_complete) {
+		      return false;
+		    }
 	    if (!root_gap_certificate_ready) {
 	      return false;
     }
@@ -7126,13 +9013,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       return;
     }
 	    const double gate_gap = incumbent_root_rel_gap();
-	    const bool gate_cert_ready =
-	        root_gap_certificate_ready || root_bound_gap_certifies_incumbent();
-	    const bool gate_closed = has_incumbent && std::isfinite(gate_gap) &&
-	                             (root_primal_polish_complete ||
-	                              gate_cert_ready) &&
-	                             gate_cert_ready &&
-	                             gate_gap <= opt.gap_tol;
+		    const bool gate_cert_ready =
+		        root_gap_certificate_ready || root_bound_gap_certifies_incumbent();
+		    const bool gate_closed = has_incumbent && std::isfinite(gate_gap) &&
+		                             root_primal_polish_complete &&
+		                             gate_cert_ready &&
+		                             gate_gap <= opt.gap_tol;
     fmt::print(stderr,
                "[B&C ROOT-HEUR] phase={} decision={} has_inc={} "
                "gap={:.6g} proof_gap={:.6g} tree_good_gap={:.6g} root_closed={} "
@@ -7144,168 +9030,594 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                large_generic_low_frac_root ? 1 : 0,
                root_frac_bin_count, root_total_bin_count, presolved_m,
                detail != nullptr ? detail : "");
-  };
+	  };
 
-  double last_root_incumbent_propagation_obj = kInf;
-  auto run_root_incumbent_propagation = [&](const char* reason) {
-    if (!has_incumbent ||
-        !std::isfinite(incumbent_obj) || !std::isfinite(root.bound) ||
+			  DualProofRow cached_queue_dual_proof;
+			  double cached_queue_dual_proof_upper = kInf;
+			  bool have_cached_queue_dual_proof = false;
+			  bool cached_queue_dual_proof_is_global = false;
+			  std::vector<BranchDomainLiteral> cached_queue_dual_proof_scope;
+			  DualProofRow cached_queue_objective_event_proof;
+			  bool have_cached_queue_objective_event_proof = false;
+			  bool cached_queue_objective_event_proof_is_global = false;
+			  double cached_queue_objective_event_proof_upper = kInf;
+			  std::vector<BranchDomainLiteral> cached_queue_objective_event_proof_scope;
+			  DualProofRow root_global_dual_proof;
+			  double root_global_dual_proof_upper = kInf;
+			  bool have_root_global_dual_proof = false;
+			  std::uint64_t root_dual_proof_epoch = 0;
+
+				  double last_root_incumbent_propagation_obj = kInf;
+			  std::uint64_t last_root_incumbent_propagation_domain_epoch =
+			      std::numeric_limits<std::uint64_t>::max();
+			  std::uint64_t last_root_incumbent_propagation_objective_epoch =
+			      std::numeric_limits<std::uint64_t>::max();
+			  std::uint64_t last_root_incumbent_propagation_proof_epoch =
+			      std::numeric_limits<std::uint64_t>::max();
+			  std::size_t last_root_incumbent_propagation_domain_signature =
+			      std::numeric_limits<std::size_t>::max();
+			  std::function<void(const char*)> run_root_incumbent_propagation;
+			  run_root_incumbent_propagation = [&](const char* reason) {
+	    if (!has_incumbent ||
+	        !std::isfinite(incumbent_obj) || !std::isfinite(root.bound) ||
         !use_objective_propagation || base_lp.sense != Sense::Minimize) {
       return;
     }
+	    const double upper_limit = incumbent_upper_limit();
+	    if (!std::isfinite(upper_limit)) {
+	      return;
+	    }
     const double improve_tol =
         std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
-    if (std::isfinite(last_root_incumbent_propagation_obj) &&
-        incumbent_obj >= last_root_incumbent_propagation_obj - improve_tol) {
+	    const std::uint64_t domain_epoch = current_domain_learning_epoch();
+	    const std::uint64_t objective_epoch = current_objective_artifact_epoch();
+	    const std::size_t domain_signature = root_domain_signature();
+	    const bool cutoff_improved =
+	        !std::isfinite(last_root_incumbent_propagation_obj) ||
+	        incumbent_obj < last_root_incumbent_propagation_obj - improve_tol;
+		    const bool domain_event_changed =
+		        domain_epoch != last_root_incumbent_propagation_domain_epoch ||
+		        objective_epoch != last_root_incumbent_propagation_objective_epoch ||
+		        root_dual_proof_epoch !=
+		            last_root_incumbent_propagation_proof_epoch ||
+		        domain_signature != last_root_incumbent_propagation_domain_signature;
+	    if (!cutoff_improved && !domain_event_changed) {
+	      return;
+	    }
+		    consume_objective_cutoff_artifacts(reason);
+    if (!root_cutoff_domain_commit_allowed) {
+      if (opt.verbose || trace_bc_timeline ||
+          std::getenv("HACDCPF_BC_CONF") != nullptr) {
+        fmt::print(stderr,
+                   "[B&C ROOT-INC-PROP] {} scoped-only cutoff closure; "
+                   "root LP domain unchanged inc={:.10g} bound={:.10g}\n",
+                   reason != nullptr ? reason : "incumbent", incumbent_obj,
+                   root.bound);
+	      }
       return;
     }
-    last_root_incumbent_propagation_obj = incumbent_obj;
-    consume_objective_cutoff_artifacts(reason);
 
-    const double old_bound = root.bound;
+	    const double old_bound = root.bound;
     const Eigen::VectorXd old_lb = root.lb;
     const Eigen::VectorXd old_ub = root.ub;
-    const Eigen::VectorXd old_x = root.x_relax;
-    const auto old_basis = root.basis_hint;
-    const LPRelaxationResult old_relax = root_relax;
 
     const Eigen::SparseMatrix<double, Eigen::RowMajor> prop_A_row = base_lp.A;
     const Eigen::SparseMatrix<double, Eigen::RowMajor> prop_Aeq_row = base_lp.Aeq;
 
-    int proof_target_tightened = 0;
-    int proof_target_pruned = 0;
     int objective_tightened = 0;
     int objective_pruned = 0;
     int row_tightened = 0;
     int clique_tightened = 0;
-    bool pruned = false;
-    std::vector<DomainReasonBound> objective_reasons;
+	    int implication_tightened = 0;
+	    int conflict_tightened = 0;
+      int cutpool_tightened = 0;
+      int redcost_tightened = 0;
+	      int redcost_pruned = 0;
+	      int redcost_active = 0;
+	      int proof_capacity_tightened = 0;
+	      int proof_capacity_pruned = 0;
+	      std::uint64_t proof_capacity_candidates = 0;
+		      std::uint64_t proof_capacity_fixings = 0;
+		      std::uint64_t proof_capacity_skip_coeff = 0;
+		      std::uint64_t proof_capacity_skip_budget = 0;
+		      std::uint64_t objective_artifacts_learned = 0;
+		      std::uint64_t source_artifacts_learned = 0;
+		      int reasons_added = 0;
+		      int closure_passes = 0;
+		      bool pruned = false;
+
+    auto duplicate_root_reason_bound = [&](const DomainReasonBound& rb) {
+      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+      const double tol = std::max(1e-9, opt.int_tol);
+      for (const auto& existing : root.domain_reason_bounds) {
+        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
+            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
+            conflict_clause_hash(existing.reason) == reason_hash) {
+          return true;
+        }
+      }
+      return false;
+    };
+    auto append_root_reason_bounds =
+        [&](std::vector<DomainReasonBound>& reason_bounds) {
+      for (auto& rb : reason_bounds) {
+        if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
+            !std::isfinite(rb.bound.value) ||
+            duplicate_root_reason_bound(rb)) {
+          continue;
+        }
+        append_domain_reason_bound(root, std::move(rb), n, &old_lb, &old_ub);
+        ++reasons_added;
+      }
+      reason_bounds.clear();
+    };
 
     record_objective_capacity_conformance(
         "root_incumbent_objective_capacity", root.lb, root.ub,
-        incumbent_obj, old_bound);
-    const bool ok = objective_propagation.propagate(
-        base_lp, root.lb, root.ub, incumbent_obj, opt.int_tol,
-        /*depth=*/0, /*trail_offset=*/0, &objective_reasons,
-        objective_tightened, objective_pruned);
-    if (!ok) pruned = true;
+        upper_limit, old_bound);
 
-    if (!pruned && (proof_target_tightened + objective_tightened) > 0) {
-      row_tightened = node_bound_propagation(
+    // HiGHS' HighsDomain::propagate() is a single monotone domain closure:
+    // objective cutoff, conflict pool, model rows, cutpool rows and implication
+    // sources keep reactivating each other until no bound changes remain.
+	    bool redcost_lurking_propagated = false;
+	    const std::size_t max_root_closure_passes =
+	        std::max<std::size_t>(8, 2 * static_cast<std::size_t>(n) + 8);
+    for (std::size_t pass = 0; pass < max_root_closure_passes; ++pass) {
+      ++closure_passes;
+      const Eigen::VectorXd pass_lb = root.lb;
+      const Eigen::VectorXd pass_ub = root.ub;
+      const std::size_t pass_reason_count = root.domain_reason_bounds.size();
+	      const int pass_conflicts = conflict_pool.size();
+	      const int pass_cutpool_size = cut_pool.size();
+	      const std::uint64_t pass_implications =
+	          static_cast<std::uint64_t>(implication_graph.size());
+	      const std::uint64_t pass_clique_edges =
+	          static_cast<std::uint64_t>(clique_table.n_literal_edges());
+	      const std::uint64_t pass_domain_epoch =
+	          current_domain_learning_epoch();
+	      const std::uint64_t pass_objective_epoch =
+	          current_objective_artifact_epoch();
+	      const std::uint64_t pass_closure_epoch =
+	          current_domain_closure_epoch();
+
+	      source_artifacts_learned +=
+	          synchronize_root_source_cutpool_domain_sources(
+	              "root_incumbent_closure");
+	      const auto root_refresh =
+	          refresh_objective_domain_sources("root_incumbent_closure");
+	      source_artifacts_learned += root_refresh.total_published();
+
+	      int pass_obj_tight = 0;
+	      int pass_obj_pruned = 0;
+	      std::vector<DomainReasonBound> objective_reasons;
+      const bool obj_ok = objective_propagation.propagate(
+          base_lp, root.lb, root.ub, upper_limit, opt.int_tol,
+          /*depth=*/0,
+          static_cast<int>(root.domain_reason_bounds.size()),
+          &objective_reasons, pass_obj_tight, pass_obj_pruned);
+      objective_tightened += std::max(0, pass_obj_tight);
+      objective_pruned += std::max(0, pass_obj_pruned);
+      append_root_reason_bounds(objective_reasons);
+		      if (!obj_ok || pass_obj_pruned > 0 ||
+		          !bounds_consistent(root.lb, root.ub)) {
+		        pruned = true;
+		        break;
+		      }
+
+		      auto proof_domain_lower_bound =
+		          [&](const DualProofRow& proof, double proof_upper) -> double {
+		        if (!proof.valid || proof.coeff.size() < n ||
+		            proof.coeff.nonZeros() <= 0 || !std::isfinite(proof_upper) ||
+		            !std::isfinite(proof.rhs) || root.lb.size() < n ||
+		            root.ub.size() < n) {
+		          return kInf;
+		        }
+		        double min_activity = 0.0;
+		        for (Eigen::SparseVector<double>::InnerIterator it(proof.coeff);
+		             it; ++it) {
+		          const int col = static_cast<int>(it.index());
+		          const double a = it.value();
+		          if (col < 0 || col >= n || !std::isfinite(a)) return kInf;
+		          if (a > 0.0) {
+		            if (!std::isfinite(root.lb[col])) return kInf;
+		            min_activity += a * root.lb[col];
+		          } else if (a < 0.0) {
+		            if (!std::isfinite(root.ub[col])) return kInf;
+		            min_activity += a * root.ub[col];
+		          }
+		        }
+		        if (!std::isfinite(min_activity)) return kInf;
+		        return proof_upper - proof.rhs + min_activity;
+		      };
+		      if (have_root_global_dual_proof && root_global_dual_proof.valid &&
+		          root_global_dual_proof.coeff.size() >= n &&
+		          root_global_dual_proof.coeff.nonZeros() > 0 &&
+		          std::isfinite(root_global_dual_proof_upper)) {
+		        const double proof_lower = proof_domain_lower_bound(
+		            root_global_dual_proof, root_global_dual_proof_upper);
+		        if (std::isfinite(proof_lower)) {
+		          std::vector<DomainReasonBound> proof_reasons;
+		          ObjectivePropagationState::ProofCapacityPropagationStats proof_stats;
+		          int pass_proof_tightened = 0;
+		          int pass_proof_pruned = 0;
+		          const Eigen::VectorXd* root_reduced_costs = nullptr;
+		          if (root.basis_hint && root.basis_hint->cached_reduced_costs &&
+		              root.basis_hint->cached_reduced_costs->size() >= n) {
+		            root_reduced_costs = root.basis_hint->cached_reduced_costs.get();
+		          }
+		          const bool proof_ok =
+		              objective_propagation.propagate_proof_capacity_one_missing(
+		                  base_lp,
+		                  ObjectivePropagationState::ProofCapacityContext{
+		                      &root_global_dual_proof.coeff,
+		                      root.x_relax.size() >= n ? &root.x_relax : nullptr,
+		                      root_reduced_costs, proof_lower, upper_limit,
+		                      opt.int_tol, std::max(1e-9, opt.lp_tol),
+		                      /*depth=*/0,
+		                      static_cast<int>(root.domain_reason_bounds.size())},
+		                  root.lb, root.ub, &proof_reasons,
+		                  pass_proof_tightened, pass_proof_pruned,
+		                  &proof_stats);
+		          proof_capacity_tightened += std::max(0, pass_proof_tightened);
+		          proof_capacity_pruned += std::max(0, pass_proof_pruned);
+		          proof_capacity_candidates += proof_stats.candidates;
+		          proof_capacity_fixings += proof_stats.fixings;
+		          proof_capacity_skip_coeff += proof_stats.skip_coeff;
+		          proof_capacity_skip_budget += proof_stats.skip_budget;
+		          out.bc_stats.objective_implied_event_proof_candidates +=
+		              proof_stats.candidates;
+		          out.bc_stats.objective_implied_event_proof_fixings +=
+		              proof_stats.fixings;
+		          out.bc_stats.objective_implied_event_proof_skip_coeff +=
+		              proof_stats.skip_coeff;
+		          out.bc_stats.objective_implied_event_proof_skip_budget +=
+		              proof_stats.skip_budget;
+		          out.bc_stats.termination_effective_candidates +=
+		              proof_stats.candidates;
+		          out.bc_stats.termination_effective_admitted +=
+		              proof_stats.fixings + proof_stats.prunes;
+		          append_root_reason_bounds(proof_reasons);
+		          if (!proof_ok || pass_proof_pruned > 0 ||
+		              !bounds_consistent(root.lb, root.ub)) {
+		            pruned = true;
+		            break;
+		          }
+		        }
+		      }
+
+				    if (!redcost_lurking_propagated &&
+				        root_redcost_lurking_bounds.size() > 0) {
+			        redcost_lurking_propagated = true;
+			        std::vector<DomainReasonBound> redcost_reasons;
+			        const auto rc_stats = root_redcost_lurking_bounds.propagate(
+		            upper_limit, root.bound, root.lb, root.ub, &redcost_reasons,
+	            /*reason_depth=*/0,
+	            static_cast<int>(root.domain_reason_bounds.size()),
+	            std::max(1e-9, opt.int_tol));
+	        redcost_tightened += std::max(0, rc_stats.tightened);
+	        redcost_pruned += std::max(0, rc_stats.pruned);
+	        redcost_active += std::max(0, rc_stats.records_active);
+	        append_root_reason_bounds(redcost_reasons);
+	        if (rc_stats.pruned > 0 || !bounds_consistent(root.lb, root.ub)) {
+	          pruned = true;
+	          break;
+	        }
+	      }
+
+	      if (!conflict_pool.empty()) {
+        int pass_conflict_tight = 0;
+        std::vector<BoundChangeInfo> conflict_changes;
+        std::vector<DomainReasonBound> conflict_reasons;
+        const bool conflict_ok = conflict_pool.propagate_with_reasons(
+            base_lp.vars, root.lb, root.ub, &pass_conflict_tight,
+            &conflict_changes, &conflict_reasons, opt.int_tol);
+        (void)conflict_changes;
+        conflict_tightened += std::max(0, pass_conflict_tight);
+        append_root_reason_bounds(conflict_reasons);
+        if (!conflict_ok || !bounds_consistent(root.lb, root.ub)) {
+          pruned = true;
+          break;
+        }
+      }
+
+      if (!implication_graph.empty()) {
+        implication_tightened += implication_graph.propagate(
+            base_lp.vars, root.lb, root.ub, nullptr,
+            std::max(1e-9, opt.int_tol));
+        if (!bounds_consistent(root.lb, root.ub)) {
+          pruned = true;
+          break;
+        }
+      }
+      if (!clique_table.empty()) {
+        clique_tightened += clique_table.propagate(root.lb, root.ub);
+        if (!bounds_consistent(root.lb, root.ub)) {
+          pruned = true;
+          break;
+        }
+      }
+
+      const int pass_row_tightened = node_bound_propagation(
           base_lp, prop_A_row, prop_Aeq_row, root.lb, root.ub,
           opt.bound_propagation_rounds);
-      if (!clique_table.empty()) {
-        clique_tightened = clique_table.propagate(root.lb, root.ub);
+      row_tightened += std::max(0, pass_row_tightened);
+      if (!bounds_consistent(root.lb, root.ub)) {
+        pruned = true;
+        break;
       }
-      if (!bounds_consistent(root.lb, root.ub)) pruned = true;
-    }
 
-    const int total_tightened = proof_target_tightened + objective_tightened +
-        row_tightened + clique_tightened;
-    const auto root_inc_delta =
-        count_bound_changes(old_lb, old_ub, root.lb, root.ub);
-    const std::uint64_t root_inc_sources = conformance_source_total();
-    const std::string root_inc_detail = fmt::format(
-        "reason={} proof_target={} obj={} row={} clique={} "
-        "target_pruned={} obj_pruned={}",
-        reason != nullptr ? reason : "incumbent", proof_target_tightened,
-        objective_tightened, row_tightened, clique_tightened,
-        proof_target_pruned, objective_pruned);
-    if (pruned) {
-      root.bound = incumbent_obj;
+      auto propagate_root_cutpool_family =
+          [&](const std::vector<Eigen::SparseVector<double>>& rows,
+              const std::vector<double>& rhs) -> bool {
+        if (rows.empty()) return true;
+        SparseCutpoolPropagationStats stats;
+        std::vector<DomainReasonBound> cut_reasons;
+        const bool ok = propagate_sparse_cutpool_rows(
+            rows, rhs, root.lb, root.ub, opt.bound_propagation_rounds,
+            &stats, &cut_reasons, /*reason_depth=*/0,
+            static_cast<int>(root.domain_reason_bounds.size()));
+        cutpool_tightened += std::max(0, stats.tightened);
+        append_root_reason_bounds(cut_reasons);
+        return ok && bounds_consistent(root.lb, root.ub);
+      };
+      if ((!root_transformed_cutpool_in_global_domain_pool &&
+           !propagate_root_cutpool_family(root_transformed_cutpool_audit_rows,
+                                          root_transformed_cutpool_audit_rhs)) ||
+          !propagate_root_cutpool_family(variable_bound_cutpool_rows,
+                                         variable_bound_cutpool_rhs)) {
+        pruned = true;
+        break;
+      }
+
+      if (cut_pool.size() > 0) {
+        int pass_cutpool_tight = 0;
+        std::vector<BoundChangeInfo> cutpool_changes;
+        std::vector<DomainReasonBound> cutpool_reasons;
+        CutPoolPropagationStats cutpool_stats;
+        const bool cutpool_ok = cut_pool.propagate_with_reasons(
+            base_lp.vars, root.lb, root.ub, opt.bound_propagation_rounds,
+            &pass_cutpool_tight, &cutpool_changes, &cutpool_reasons,
+            &cutpool_stats, nullptr, &root_implied_integer_cols,
+            /*reason_depth=*/0,
+            static_cast<int>(root.domain_reason_bounds.size()),
+            std::max(1e-9, opt.lp_tol));
+        (void)cutpool_changes;
+        cutpool_tightened += std::max(0, pass_cutpool_tight);
+        append_root_reason_bounds(cutpool_reasons);
+        if (!cutpool_ok || !bounds_consistent(root.lb, root.ub)) {
+          pruned = true;
+          break;
+        }
+      }
+
+      apply_domain_objective_lower_bound(root, "root_incumbent_closure");
+
+      // HiGHS reaches a fixed point over domain propagation before and after
+      // root reduced-cost fixing, then extracts objective cliques from the
+      // strengthened global domain.  Re-run the objective-cutoff artifact
+      // extractor whenever this pass moved the root domain so conflict/clique
+      // sources join the same monotone closure instead of arriving one
+      // incumbent later.
+      objective_artifacts_learned +=
+          consume_objective_cutoff_artifacts("root_incumbent_fixed_point");
+
+      const auto pass_delta =
+          count_bound_changes(pass_lb, pass_ub, root.lb, root.ub);
+      const bool pass_changed =
+          pass_delta.first > 0 ||
+	          root.domain_reason_bounds.size() != pass_reason_count ||
+	          conflict_pool.size() != pass_conflicts ||
+	          cut_pool.size() != pass_cutpool_size ||
+	          static_cast<std::uint64_t>(implication_graph.size()) !=
+	              pass_implications ||
+	          static_cast<std::uint64_t>(clique_table.n_literal_edges()) !=
+	              pass_clique_edges ||
+	          current_domain_learning_epoch() != pass_domain_epoch ||
+	          current_objective_artifact_epoch() != pass_objective_epoch ||
+	          current_domain_closure_epoch() != pass_closure_epoch;
+	      if (!pass_changed) break;
+	    }
+
+		    const int total_tightened = objective_tightened + row_tightened +
+		        clique_tightened + implication_tightened + conflict_tightened +
+		        cutpool_tightened + redcost_tightened +
+		        proof_capacity_tightened;
+		    const auto root_inc_delta =
+		        count_bound_changes(old_lb, old_ub, root.lb, root.ub);
+		    const std::uint64_t root_inc_domain_moves =
+		        static_cast<std::uint64_t>(root_inc_delta.first) +
+		        static_cast<std::uint64_t>(root_inc_delta.second);
+		    if (root_inc_domain_moves > 0) {
+		      note_global_domain_learning(root_inc_domain_moves);
+		    }
+		    const std::uint64_t root_inc_sources = conformance_source_total();
+		    const std::string root_inc_detail = fmt::format(
+			        "reason={} pass={} obj={} conflict={} impl={} row={} clique={} "
+			        "cutpool={} rc={} rc_active={} proof={} proofCand={} "
+			        "proofFix={} proofSkip={}/{} reasons={} obj_pruned={} "
+			        "rc_pruned={} proof_pruned={} srcLearned={} objLearned={}",
+		        reason != nullptr ? reason : "incumbent", closure_passes,
+		        objective_tightened, conflict_tightened, implication_tightened,
+		        row_tightened, clique_tightened, cutpool_tightened,
+		        redcost_tightened, redcost_active, proof_capacity_tightened,
+		        proof_capacity_candidates, proof_capacity_fixings,
+		        proof_capacity_skip_coeff, proof_capacity_skip_budget, reasons_added,
+		        objective_pruned, redcost_pruned, proof_capacity_pruned,
+		        source_artifacts_learned, objective_artifacts_learned);
+	    auto mark_root_incumbent_closure_consumed = [&]() {
+	      last_root_incumbent_propagation_obj = incumbent_obj;
+	      last_root_incumbent_propagation_domain_epoch =
+	          current_domain_learning_epoch();
+		      last_root_incumbent_propagation_objective_epoch =
+		          current_objective_artifact_epoch();
+		      last_root_incumbent_propagation_proof_epoch =
+		          root_dual_proof_epoch;
+		      last_root_incumbent_propagation_domain_signature =
+		          root_domain_signature();
+		    };
+	    if (pruned) {
+	      mark_root_incumbent_closure_consumed();
+	      root.bound = incumbent_obj;
       persistent_lp_state.invalidate_base_sf();
       record_conformance_propagation(
           "root_incumbent_propagation", root_inc_sources,
           root_inc_delta.first, root_inc_delta.second, 1,
           /*resolved=*/false, /*resolve_ok=*/true, old_bound, root.bound,
           root_inc_detail);
-      if (opt.verbose || total_tightened > 0 || proof_target_pruned > 0 ||
-          objective_pruned > 0) {
-        fmt::print(stderr,
-                   "[B&C ROOT-INC-PROP] {} pruned root "
-                   "proof_target={} obj={} row={} clique={} "
-                   "target_pruned={} obj_pruned={} bound={:.2f}->{:.2f}\n",
-                   reason != nullptr ? reason : "incumbent",
-                   proof_target_tightened, objective_tightened,
-                   row_tightened, clique_tightened,
-                   proof_target_pruned, objective_pruned,
-                   old_bound, root.bound);
-      }
-      return;
-    }
+	      if (opt.verbose || total_tightened > 0 ||
+	          objective_pruned > 0 || redcost_pruned > 0) {
+		        fmt::print(stderr,
+		                   "[B&C ROOT-INC-PROP] {} pruned root "
+		                   "pass={} obj={} conflict={} impl={} row={} clique={} "
+			                   "cutpool={} rc={} rc_active={} proof={} "
+			                   "proofCand={} proofFix={} proofSkip={}/{} "
+			                   "srcArtifacts={} objArtifacts={} reasons={} obj_pruned={} rc_pruned={} "
+			                   "proof_pruned={} bound={:.2f}->{:.2f}\n",
+			                   reason != nullptr ? reason : "incumbent",
+			                   closure_passes, objective_tightened, conflict_tightened,
+			                   implication_tightened, row_tightened, clique_tightened,
+			                   cutpool_tightened, redcost_tightened, redcost_active,
+			                   proof_capacity_tightened, proof_capacity_candidates,
+			                   proof_capacity_fixings, proof_capacity_skip_coeff,
+			                   proof_capacity_skip_budget, source_artifacts_learned,
+			                   objective_artifacts_learned, reasons_added, objective_pruned, redcost_pruned,
+			                   proof_capacity_pruned, old_bound, root.bound);
+		      }
+	      return;
+	    }
 
-    if (total_tightened <= 0) {
-      record_conformance_propagation(
+	    if (total_tightened <= 0) {
+	      mark_root_incumbent_closure_consumed();
+	      record_conformance_propagation(
           "root_incumbent_propagation", root_inc_sources,
           root_inc_delta.first, root_inc_delta.second, 0,
           /*resolved=*/false, /*resolve_ok=*/true, old_bound, old_bound,
           root_inc_detail);
-      if (opt.verbose) {
-        fmt::print(stderr,
-                   "[B&C ROOT-INC-PROP] {} no tightening "
-                   "cutoff={:.2f} bound={:.2f}\n",
-                   reason != nullptr ? reason : "incumbent",
-                   incumbent_obj, root.bound);
-      }
-      return;
-    }
+	      if (opt.verbose) {
+			        fmt::print(stderr,
+			                   "[B&C ROOT-INC-PROP] {} no tightening "
+			                   "cutoff={:.2f} upper_limit={:.2f} bound={:.2f} pass={} "
+			                   "srcArtifacts={} objArtifacts={} reasons={} rc_active={} proofCand={} "
+			                   "proofSkip={}/{}\n",
+			                   reason != nullptr ? reason : "incumbent",
+			                   incumbent_obj, upper_limit, root.bound, closure_passes,
+			                   source_artifacts_learned, objective_artifacts_learned,
+			                   reasons_added, redcost_active,
+			                   proof_capacity_candidates, proof_capacity_skip_coeff,
+			                   proof_capacity_skip_budget);
+	      }
+	      return;
+	    }
 
-    LPModel propagated_root_lp = base_lp;
-    apply_node_bounds(propagated_root_lp.vars, root.lb, root.ub);
-    const auto t_resolve0 = std::chrono::steady_clock::now();
-    LPRelaxationResult prop_relax = solve_lp_relaxation(
-        propagated_root_lp, &root.x_relax, root.basis_hint.get(),
-        root_solve_opt);
-    const auto t_resolve1 = std::chrono::steady_clock::now();
-    out.bc_stats.lp_solves += 1;
+	    const LPModel root_lp_before_resolve = root_lp;
+	    const LPRelaxationResult root_relax_before_resolve = root_relax;
+	    const auto root_basis_before_resolve = root.basis_hint;
+	    const Eigen::VectorXd root_x_before_resolve = root.x_relax;
+	    const Eigen::VectorXd root_x_seed_before_resolve = root.x_seed;
+	    const double root_bound_before_resolve = root.bound;
+	    apply_node_bounds(root_lp.vars, root.lb, root.ub);
+	    const auto t_inc_resolve0 = std::chrono::steady_clock::now();
+	    LPRelaxationResult inc_relax = solve_lp_relaxation(
+	        root_lp, &root.x_relax, root.basis_hint.get(), root_solve_opt);
+	    const auto t_inc_resolve1 = std::chrono::steady_clock::now();
+	    out.bc_stats.lp_solves += 1;
+	    const bool resolve_ok =
+	        inc_relax.primal.stats.success && inc_relax.primal.x.size() == n &&
+	        std::isfinite(inc_relax.dual_bound);
+	    if (!resolve_ok) {
+	      root_lp = root_lp_before_resolve;
+	      root_relax = root_relax_before_resolve;
+	      root.basis_hint = root_basis_before_resolve;
+	      root.x_relax = root_x_before_resolve;
+	      root.x_seed = root_x_seed_before_resolve;
+	      root.bound = root_bound_before_resolve;
+	      root.lp_refresh_needed = true;
+	      record_conformance_propagation(
+	          "root_incumbent_propagation", root_inc_sources,
+	          root_inc_delta.first, root_inc_delta.second, 0,
+	          /*resolved=*/true, /*resolve_ok=*/false, old_bound, root.bound,
+	          root_inc_detail + " root_resolve_failed=1");
+	      if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) {
+	        fmt::print(stderr,
+	                   "[B&C ROOT-INC-PROP] {} pass={} root_resolve_failed "
+	                   "status={} bound={:.2f}->{:.2f}\n",
+	                   reason != nullptr ? reason : "incumbent",
+	                   closure_passes, inc_relax.primal.stats.status,
+	                   old_bound, root.bound);
+	      }
+	      return;
+	    }
 
-    if (prop_relax.primal.stats.success && prop_relax.primal.x.size() == n &&
-        std::isfinite(prop_relax.dual_bound)) {
-      root_lp = std::move(propagated_root_lp);
-      root_relax = std::move(prop_relax);
-      root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
-      root.x_seed = root.x_relax;
-      root.basis_hint = root_relax.basis_hint;
-      if (root.basis_hint) root.basis_hint->compact_indices_storage();
-      root.bound = root_relax.dual_bound;
-      root.estimate = compute_node_estimate(base_lp.vars, root.x_relax, pc,
-                                            opt.int_tol, root.bound);
-      persistent_lp_state.invalidate_base_sf();
-      record_conformance_propagation(
-          "root_incumbent_propagation", root_inc_sources,
-          root_inc_delta.first, root_inc_delta.second, 0,
-          /*resolved=*/true, /*resolve_ok=*/true, old_bound, root.bound,
-          root_inc_detail);
-      fmt::print(stderr,
-                 "[B&C ROOT-INC-PROP] {} proof_target={} obj={} row={} "
-                 "clique={} bound={:.2f}->{:.2f} resolve={:.1f}ms\n",
-                 reason != nullptr ? reason : "incumbent",
-                 proof_target_tightened, objective_tightened,
-                 row_tightened, clique_tightened,
-                 old_bound, root.bound,
-                 std::chrono::duration<double, std::milli>(
-                     t_resolve1 - t_resolve0).count());
-    } else {
-      root.lb = old_lb;
-      root.ub = old_ub;
-      root.x_relax = old_x;
-      root.basis_hint = old_basis;
-      root.bound = old_bound;
-      root_relax = old_relax;
-      record_conformance_propagation(
-          "root_incumbent_propagation", root_inc_sources,
-          root_inc_delta.first, root_inc_delta.second, 0,
-          /*resolved=*/true, /*resolve_ok=*/false, old_bound, old_bound,
-          root_inc_detail + " reverted=1");
-      if (opt.verbose) {
-        fmt::print(stderr,
-                   "[B&C ROOT-INC-PROP] {} re-solve failed; reverted\n",
-                   reason != nullptr ? reason : "incumbent");
-      }
-    }
-  };
+	    root_relax = std::move(inc_relax);
+	    root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
+	    root.x_seed = root.x_relax;
+	    root.basis_hint = root_relax.basis_hint;
+	    if (root.basis_hint) root.basis_hint->compact_indices_storage();
+	    root.bound = root_relax.dual_bound;
+	    if (root.estimate < root.bound) root.estimate = root.bound;
+	    root.lp_refresh_needed = false;
+	    root.domain_learning_epoch = current_domain_learning_epoch();
+	    root.objective_artifact_epoch = current_objective_artifact_epoch();
+	    root.domain_closure_epoch = current_domain_closure_epoch();
+		    if (maintain_native_xpool_sf_cache && root_relax.simplex &&
+		        root_relax.simplex->form.A.rows() > 0) {
+		      root_first_class_unscaled_sf = build_standard_form_lp(root_lp);
+		      root_first_class_sf_valid = true;
+		    } else {
+	      root_first_class_sf_valid = false;
+	    }
+	    if (root_relax.simplex &&
+	        root_relax.simplex->basis.cached_sparse_basis) {
+	      root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
+	      root.has_live_factor_telemetry = true;
+	      root.live_factor_telemetry =
+	          get_sparse_basis_factor_telemetry(
+	              root_relax.simplex->basis.cached_sparse_basis);
+	    } else {
+	      root_sbasis.reset();
+	    }
+	    if (root.basis_hint) {
+	      persistent_lp_state.set_cut_basis(root.basis_hint);
+	    }
+	    persistent_lp_state.invalidate_base_sf();
+	    mark_root_incumbent_closure_consumed();
+	    const auto rc_add_stats =
+	        refresh_root_redcost_lurking_bounds(
+	            "root_incumbent_propagation_resolve");
+	    record_conformance_propagation(
+	        "root_incumbent_propagation", root_inc_sources,
+	        root_inc_delta.first, root_inc_delta.second, 0,
+	        /*resolved=*/true, /*resolve_ok=*/true, old_bound, root.bound,
+	        root_inc_detail +
+	            fmt::format(" root_resolve=1 rcAdded={}",
+	                        rc_add_stats.records_added));
+	    if (opt.verbose || total_tightened > 0 ||
+	        std::getenv("HACDCPF_BC_CONF") != nullptr) {
+	      fmt::print(stderr,
+	                 "[B&C ROOT-INC-PROP] {} pass={} obj={} conflict={} impl={} "
+	                 "row={} clique={} cutpool={} rc={} rc_active={} "
+	                 "proof={} proofCand={} proofFix={} proofSkip={}/{} "
+	                 "srcArtifacts={} objArtifacts={} reasons={} "
+	                 "bound={:.2f}->{:.2f} root_resolve=1 "
+	                 "resolve={:.1f}ms rcAdded={}\n",
+	                 reason != nullptr ? reason : "incumbent", closure_passes,
+	                 objective_tightened, conflict_tightened,
+	                 implication_tightened, row_tightened, clique_tightened,
+	                 cutpool_tightened, redcost_tightened, redcost_active,
+	                 proof_capacity_tightened, proof_capacity_candidates,
+	                 proof_capacity_fixings, proof_capacity_skip_coeff,
+	                 proof_capacity_skip_budget, source_artifacts_learned,
+	                 objective_artifacts_learned, reasons_added, old_bound,
+	                 root.bound,
+	                 std::chrono::duration<double, std::milli>(
+	                     t_inc_resolve1 - t_inc_resolve0).count(),
+	                 rc_add_stats.records_added);
+	    }
+	  };
 
-	  note_root_subsolve(
+	  root_incumbent_fixed_point_hook = run_root_incumbent_propagation;
+
+		  note_root_subsolve(
 	      "root_relax",
 	      std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
 	      root_relax.primal.stats.success && root_relax.primal.x.size() == n);
@@ -7427,7 +9739,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // Keep the large-UC skip for mid/large roots, but allow bounded root
   // heuristics on xlarge roots. On xlarge UC we often need an incumbent
   // early; skipping all root heuristics can leave parallel search unseeded.
-  const bool skip_pump_large_uc_like = large_uc_like_root && !is_xlarge_root;
+  const bool skip_pump_large_uc_like =
+      large_uc_like_root && !is_xlarge_root && !opt.auto_highs_root_pipeline;
   if (skip_pump_large_uc_like && opt.verbose) {
     fprintf(stderr, "[B&C] skip root repair/pump on large UC-like (m=%d n_bin=%d) — "
                     "yielding to parallel tree\n",
@@ -7974,8 +10287,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   }
   t_pp_d3 = std::chrono::steady_clock::now();
 
-    const bool skip_large_generic_pump =
-        large_generic_root && !has_incumbent;
+	    const bool skip_large_generic_pump =
+	        large_generic_root && !has_incumbent &&
+	        !opt.auto_highs_root_pipeline;
     if (skip_large_generic_pump && opt.verbose) {
       fprintf(stderr,
               "[B&C] skip root feasibility pump on large generic root "
@@ -8866,9 +11180,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     if (has_incumbent && std::isfinite(root.bound) && std::abs(root.bound) > 1e-9) {
       gap = (incumbent_obj - root.bound) / std::abs(root.bound);
     }
-    if (!has_incumbent ||
-        (large_generic_low_frac_root && root_incumbent_good_enough()) ||
-        gap <= opt.gap_tol) {
+	    if ((!has_incumbent && !(requested_vendored_highs_lp &&
+	                             opt.auto_highs_root_pipeline)) ||
+	        (large_generic_low_frac_root && root_incumbent_good_enough()) ||
+	        gap <= opt.gap_tol) {
       if (opt.verbose) {
         fprintf(stderr,
                 "[PROG-ROUND] skip on large generic root "
@@ -8884,15 +11199,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                              "weak_incumbent_large_generic=1");
     }
   }
-  if (need_prog_round && requested_vendored_highs_lp &&
-      opt.auto_highs_root_pipeline) {
-    // HiGHS root heuristic schedule does not spend this native progressive
-    // simplex/IPM rounding block before RENS/root-reduced-cost. In vendored
-    // HiGHS root mode this block is redundant and can dominate runtime.
-    trace_root_primal_gate("prog_round", "skip",
-                           "vendored_highs_root_pipeline=1");
-    need_prog_round = false;
-  }
+	  if (need_prog_round && requested_vendored_highs_lp &&
+	      opt.auto_highs_root_pipeline) {
+	    trace_root_primal_gate("prog_round", "run",
+	                           "vendored_highs_root_pipeline_primal_source=1");
+	  }
   // For parallel mode, the tree threads will also search for incumbents.
   // Reduce prog-round budget since each LP solve delays tree launch.
       if (need_prog_round && presolved_m > 5000 && root.basis_hint) {
@@ -10026,22 +12337,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     const bool xlarge_dive = m_dive > 10000;
     const bool skip_dive_good_incumbent =
         root_gap_closed() || root_incumbent_good_enough();
-    const int max_dive_lps = skip_dive_good_incumbent ? 0
-        : (xlarge_dive ? 0  // Skip diving on very large problems: LP infeasibility prevents convergence.
-           : large_dive ? 0  // Skip diving on large problems: coupling constraints prevent rounding.
-           : std::max(500, opt.max_dive_lps * 5));
+	    const int max_dive_lps = skip_dive_good_incumbent ? 0
+	        : opt.max_dive_lps <= 0 ? 0
+	        : (xlarge_dive ? 0  // Skip diving on very large problems: LP infeasibility prevents convergence.
+	           : large_dive ? 0  // Skip diving on large problems: coupling constraints prevent rounding.
+	           : std::max(500, opt.max_dive_lps * 5));
     int dive_lp_count = 0;
     int dive_fail_count = 0;  // Track consecutive failures for early abort
-    const double dive_time_budget = skip_dive_good_incumbent ? 0.0
-        : (xlarge_dive ? std::min(opt.time_limit_sec * 0.01, 0.15)
-           : large_dive ? std::min(opt.time_limit_sec * 0.02, 0.5)
-           : std::min(opt.time_limit_sec * 0.40, 15.0));
+	    const double dive_time_budget = skip_dive_good_incumbent ? 0.0
+	        : opt.max_dive_lps <= 0 ? 0.0
+	        : (xlarge_dive ? std::min(opt.time_limit_sec * 0.01, 0.15)
+	           : large_dive ? std::min(opt.time_limit_sec * 0.02, 0.5)
+	           : std::min(opt.time_limit_sec * 0.40, 15.0));
     trace_root_primal_gate(
         "dive", max_dive_lps > 0 ? "run" : "skip",
-        skip_dive_good_incumbent
-            ? "good_incumbent_or_gap_closed=1"
-            : (xlarge_dive ? "xlarge=1"
-                           : (large_dive ? "large=1" : "budget=1")));
+	        skip_dive_good_incumbent
+	            ? "good_incumbent_or_gap_closed=1"
+	            : (opt.max_dive_lps <= 0 ? "disabled=1"
+	            : (xlarge_dive ? "xlarge=1"
+	                           : (large_dive ? "large=1" : "budget=1"))));
     const auto t_dive_start = std::chrono::steady_clock::now();
     auto dive_budget_exceeded = [&]() {
       return dive_lp_count >= max_dive_lps ||
@@ -10500,7 +12814,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     // Skip for very large problems: constructive dispatch + LP rounding is
     // expensive (~700ms) and almost never finds a feasible incumbent due to
     // complex coupling constraints (min-up/min-down/ramp).
-    if (!has_incumbent && base_m <= 5000) {
+    if (max_dive_lps > 0 && !has_incumbent && base_m <= 5000) {
       // Direct rounding check: round binaries in dive_x, repair continuous
       Eigen::VectorXd xr = dive_x;
       if (reduced_uc_hint.has_value()) {
@@ -12422,29 +14736,41 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // sub-MIP source, the fixing rate is about 60%, and the incumbent objective
   // is consumed as a local objective bound rather than by relaxing the proof
   // gap.
-  const double root_rens_gap_now =
-      has_incumbent ? incumbent_root_rel_gap() : kInf;
-  const bool root_rens_frontier_handoff_ready =
-      requested_vendored_highs_lp && has_incumbent &&
-      current_large_generic_low_frac_root() && std::isfinite(root_rens_gap_now) &&
-      root_rens_gap_now <= std::max(3.0 * opt.gap_tol,
-                                    opt.gap_tol + 5.0e-5);
-  const bool root_rens_needs_incumbent =
-      (!has_incumbent || root_rens_gap_now > opt.gap_tol) &&
-      !root_rens_frontier_handoff_ready;
-  trace_root_primal_gate(
-      "root_low_fractionality_rens",
-      (root_rens_needs_incumbent && !opt._is_stage3_submip &&
-       opt.enable_root_low_fractionality_rens &&
-       root_frac_bin_count > 0 &&
-       std::isfinite(root.bound))
-          ? "run"
-          : "skip",
-      opt.enable_root_low_fractionality_rens ? "enabled=1" : "disabled=1");
-  if (root_rens_needs_incumbent && !opt._is_stage3_submip &&
-      opt.enable_root_low_fractionality_rens &&
-      root_frac_bin_count > 0 &&
-      std::isfinite(root.bound)) {
+	  const double root_rens_gap_now =
+	      has_incumbent ? incumbent_root_rel_gap() : kInf;
+	  const bool highs_root_rens_slot =
+	      requested_vendored_highs_lp && opt.auto_highs_root_pipeline &&
+	      !root_primal_polish_complete;
+	  const bool native_root_rens_needs_incumbent =
+	      !requested_vendored_highs_lp &&
+	      (!has_incumbent || root_rens_gap_now > opt.gap_tol);
+	  const bool root_rens_should_run =
+	      highs_root_rens_slot || native_root_rens_needs_incumbent ||
+	      root_proof_tail_polish_required();
+	  const std::string root_rens_gate_detail =
+	      highs_root_rens_slot
+	          ? "highs_root_heuristic_slot=1"
+	          : (native_root_rens_needs_incumbent
+	                 ? "native_needs_incumbent=1"
+	                 : (root_proof_tail_polish_required()
+	                        ? "strict_tree_polish=1"
+	                        : (has_incumbent ? "incumbent_gap_closed=1"
+	                                         : "no_highs_root_slot=1")));
+	  trace_root_primal_gate(
+	      "root_low_fractionality_rens",
+	      (root_rens_should_run && !opt._is_stage3_submip &&
+	       opt.enable_root_low_fractionality_rens &&
+	       root_frac_bin_count > 0 &&
+	       std::isfinite(root.bound))
+	          ? "run"
+	          : "skip",
+	      opt.enable_root_low_fractionality_rens
+	          ? root_rens_gate_detail.c_str()
+	          : "disabled=1");
+	  if (root_rens_should_run && !opt._is_stage3_submip &&
+	      opt.enable_root_low_fractionality_rens &&
+	      root_frac_bin_count > 0 &&
+	      std::isfinite(root.bound)) {
     const double remaining_s =
         std::max(0.0, opt.time_limit_sec -
                       std::chrono::duration<double>(
@@ -12780,20 +15106,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
   run_root_incumbent_propagation("after_root_incumbent");
 
-  DualProofRow cached_queue_dual_proof;
-  double cached_queue_dual_proof_upper = kInf;
-  bool have_cached_queue_dual_proof = false;
-  bool cached_queue_dual_proof_is_global = false;
-  std::vector<BranchDomainLiteral> cached_queue_dual_proof_scope;
-  DualProofRow cached_queue_objective_event_proof;
-  bool have_cached_queue_objective_event_proof = false;
-  bool cached_queue_objective_event_proof_is_global = false;
-  std::vector<BranchDomainLiteral> cached_queue_objective_event_proof_scope;
-  DualProofRow root_global_dual_proof;
-  double root_global_dual_proof_upper = kInf;
-  bool have_root_global_dual_proof = false;
-
-  // ════════════════════════════════════════════════════════════════════════
+	  // ════════════════════════════════════════════════════════════════════════
   // Root probing — two phases:
   //   Phase 1: Domain propagation probing (fast, all binaries).
   //            Fix x[j]=0/1, run bound propagation. If inconsistent → fix.
@@ -12825,10 +15138,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       // Compute row-major matrices only when actually needed for domain propagation.
       const Eigen::SparseMatrix<double, Eigen::RowMajor> probe_A_row = base_lp.A;
       const Eigen::SparseMatrix<double, Eigen::RowMajor> probe_Aeq_row = base_lp.Aeq;
-      auto t_dp_start = std::chrono::steady_clock::now();
-      int dp_fixed = 0;
-      int dp_count = 0;
-      Eigen::VectorXd plb(n), pub(n);  // Reusable scratch buffers.
+	      auto t_dp_start = std::chrono::steady_clock::now();
+	      int dp_fixed = 0;
+	      int dp_count = 0;
+	      std::uint64_t dp_conflict_sources = 0;
+	      std::uint64_t dp_implication_sources = 0;
+	      Eigen::VectorXd plb(n), pub(n);  // Reusable scratch buffers.
       for (int j = 0; j < n; ++j) {
         if (!is_integer_type(base_lp.vars[j])) continue;
         if (std::abs(root.ub[j] - root.lb[j]) < 1e-9) continue;
@@ -12839,36 +15154,44 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         pub[j] = 0.0;
         node_bound_propagation(base_lp, probe_A_row, probe_Aeq_row, plb, pub, opt.bound_propagation_rounds);
         if (!clique_table.empty()) clique_table.propagate(plb, pub);
-        ++dp_count;
-        if (!bounds_consistent(plb, pub)) {
-          root.lb[j] = 1.0;  // x[j]=0 infeasible → fix to 1.
-          conflict_pool.add({BranchDomainLiteral{j, 0.0, false}});
-          ++dp_fixed;
-          continue;
-        }
+	        ++dp_count;
+	        if (!bounds_consistent(plb, pub)) {
+	          root.lb[j] = 1.0;  // x[j]=0 infeasible → fix to 1.
+	          if (conflict_pool.add({BranchDomainLiteral{j, 0.0, false}})) {
+	            ++dp_conflict_sources;
+	          }
+	          ++dp_fixed;
+	          continue;
+	        }
 
         // Probe up: x[j] = 1.
         plb = root.lb; pub = root.ub;
         plb[j] = 1.0;
         node_bound_propagation(base_lp, probe_A_row, probe_Aeq_row, plb, pub, opt.bound_propagation_rounds);
         if (!clique_table.empty()) clique_table.propagate(plb, pub);
-        ++dp_count;
-        if (!bounds_consistent(plb, pub)) {
-          root.ub[j] = 0.0;  // x[j]=1 infeasible → fix to 0.
-          conflict_pool.add({BranchDomainLiteral{j, 1.0, true}});
-          ++dp_fixed;
-          continue;
-        }
+	        ++dp_count;
+	        if (!bounds_consistent(plb, pub)) {
+	          root.ub[j] = 0.0;  // x[j]=1 infeasible → fix to 0.
+	          if (conflict_pool.add({BranchDomainLiteral{j, 1.0, true}})) {
+	            ++dp_conflict_sources;
+	          }
+	          ++dp_fixed;
+	          continue;
+	        }
 
-        for (int k = 0; k < n; ++k) {
-          if (k == j) continue;
-          if (plb[k] > root.lb[k] + 1e-9) {
-            implication_graph.add_implication(j, true, k, true, plb[k]);
-          }
-          if (pub[k] < root.ub[k] - 1e-9) {
-            implication_graph.add_implication(j, true, k, false, pub[k]);
-          }
-        }
+	        for (int k = 0; k < n; ++k) {
+	          if (k == j) continue;
+	          if (plb[k] > root.lb[k] + 1e-9) {
+	            if (implication_graph.add_implication(j, true, k, true, plb[k])) {
+	              ++dp_implication_sources;
+	            }
+	          }
+	          if (pub[k] < root.ub[k] - 1e-9) {
+	            if (implication_graph.add_implication(j, true, k, false, pub[k])) {
+	              ++dp_implication_sources;
+	            }
+	          }
+	        }
 
         // Reuse the down-probe world stored before the up probe.
         Eigen::VectorXd dlb = root.lb;
@@ -12876,17 +15199,28 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         dub[j] = 0.0;
         node_bound_propagation(base_lp, probe_A_row, probe_Aeq_row, dlb, dub, opt.bound_propagation_rounds);
         if (!clique_table.empty()) clique_table.propagate(dlb, dub);
-        for (int k = 0; k < n; ++k) {
-          if (k == j) continue;
-          if (dlb[k] > root.lb[k] + 1e-9) {
-            implication_graph.add_implication(j, false, k, true, dlb[k]);
-          }
-          if (dub[k] < root.ub[k] - 1e-9) {
-            implication_graph.add_implication(j, false, k, false, dub[k]);
-          }
-        }
-      }
-      fixed_by_probe += dp_fixed;
+	        for (int k = 0; k < n; ++k) {
+	          if (k == j) continue;
+	          if (dlb[k] > root.lb[k] + 1e-9) {
+	            if (implication_graph.add_implication(j, false, k, true, dlb[k])) {
+	              ++dp_implication_sources;
+	            }
+	          }
+	          if (dub[k] < root.ub[k] - 1e-9) {
+	            if (implication_graph.add_implication(j, false, k, false, dub[k])) {
+	              ++dp_implication_sources;
+	            }
+	          }
+	        }
+	      }
+	      if (dp_conflict_sources > 0 || dp_implication_sources > 0) {
+	        note_global_domain_learning(dp_conflict_sources +
+	                                    dp_implication_sources);
+	        note_objective_artifact_learning(dp_implication_sources);
+	        (void)refresh_objective_domain_sources("root_domain_probing",
+	                                               /*force=*/true);
+	      }
+	      fixed_by_probe += dp_fixed;
       auto t_dp_end = std::chrono::steady_clock::now();
       if (opt.verbose) {
         fmt::print(stderr, "[B&C PROBE] domain prop: {:.1f}ms probes={} fixed={}\n",
@@ -12962,11 +15296,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     // whose mandatory s-cost exceeds the remaining budget becomes a legal
     // conflict clause:
     //   sum y_i - sum z_i <= |cover|-1.
-    if (opt.enable_objective_cutoff_conflict_cuts && has_incumbent &&
-        base_lp.sense == Sense::Minimize && std::isfinite(incumbent_obj) &&
-        std::isfinite(root.bound) &&
-        opt.objective_cutoff_conflict_max_cuts > 0) {
-      std::vector<ObjectiveCutoffEvent> events;
+	    if (opt.enable_objective_cutoff_conflict_cuts && has_incumbent &&
+	        base_lp.sense == Sense::Minimize && std::isfinite(incumbent_obj) &&
+	        std::isfinite(root.bound) &&
+	        opt.objective_cutoff_conflict_max_cuts > 0) {
+	      const double incumbent_upper_limit_for_cutoff =
+	          highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                             opt.int_tol);
+	      if (std::isfinite(incumbent_upper_limit_for_cutoff)) {
+	      std::vector<ObjectiveCutoffEvent> events;
       events.reserve(256);
       std::vector<char> is_cutoff_s(static_cast<size_t>(n), 0);
       const Eigen::SparseMatrix<double, Eigen::RowMajor> Arow_cutoff = base_lp.A;
@@ -13057,9 +15395,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           const double rest_lb = rest_res.result.stats.objective;
           objective_cutoff_events = events;
           objective_cutoff_rest_lb = rest_lb;
-          const double cutoff_budget =
-              incumbent_obj - rest_lb -
-              std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+	          const double cutoff_budget =
+	              incumbent_upper_limit_for_cutoff - rest_lb;
 
           if (cutoff_budget > 0.0 && std::isfinite(cutoff_budget)) {
             std::vector<Eigen::SparseVector<double>> cutoff_rows;
@@ -13137,10 +15474,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                 cutoff_rows.push_back(std::move(weighted_cut));
                 cutoff_rhs.push_back(cutoff_budget);
                 weighted_event_cuts = 1;
-              }
-            }
+	        }
+		      }
 
-            std::vector<ObjectiveCutoffEvent> cover_events;
+	            std::vector<ObjectiveCutoffEvent> cover_events;
             cover_events.reserve(events.size());
             for (const auto& e : events) {
               if (e.cost + 1e-9 < min_event_cost) continue;
@@ -13182,11 +15519,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               // incumbent cutoff.  HiGHS keeps this kind of nonviolated
               // conflict in the global conflict/cut machinery.
               const bool violated_at_root = lhs_at_root > rhs + 1e-7;
-              if (!violated_at_root &&
-                  !opt.enable_nonviolated_cutoff_conflict_covers) {
+              const bool admit_nonviolated_cutoff_cover =
+                  strict_highs_lp_contract ||
+                  opt.enable_nonviolated_cutoff_conflict_covers;
+              if (!violated_at_root && !admit_nonviolated_cutoff_cover) {
                 continue;
               }
-              if (!violated_at_root && static_cast<int>(chosen.size()) > 16) {
+              if (!strict_highs_lp_contract && !violated_at_root &&
+                  static_cast<int>(chosen.size()) > 16) {
                 continue;
               }
 
@@ -13201,20 +15541,65 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               }
               if (!seen_covers.insert(std::move(key)).second) continue;
 
-              Eigen::SparseVector<double> cut(n);
-              cut.reserve(static_cast<int>(2 * chosen.size()));
-              for (int idx : chosen) {
-                const auto& e = cover_events[static_cast<size_t>(idx)];
-                cut.coeffRef(e.y) += 1.0;
-                if (e.z >= 0) cut.coeffRef(e.z) -= 1.0;
-              }
-              cutoff_rows.push_back(std::move(cut));
-              cutoff_rhs.push_back(rhs);
-            }
+	              Eigen::SparseVector<double> cut(n);
+	              cut.reserve(static_cast<int>(2 * chosen.size()));
+	              std::vector<BranchDomainLiteral> cover_clause;
+	              cover_clause.reserve(static_cast<std::size_t>(2 * chosen.size()));
+	              for (int idx : chosen) {
+	                const auto& e = cover_events[static_cast<size_t>(idx)];
+	                cut.coeffRef(e.y) += 1.0;
+	                cover_clause.push_back(BranchDomainLiteral{e.y, 1.0, true});
+	                if (e.z >= 0) cut.coeffRef(e.z) -= 1.0;
+	                if (e.z >= 0) {
+	                  cover_clause.push_back(
+	                      BranchDomainLiteral{e.z, 0.0, false});
+	                }
+	              }
+	              canonicalize_branch_literals(cover_clause);
+	              if (!cover_clause.empty()) {
+	                const bool pool_added = conflict_pool.add(cover_clause);
+	                const bool impl_added =
+	                    add_binary_implications_from_conflict_clause(
+	                        base_lp.vars, cover_clause, implication_graph);
+	                if (pool_added || impl_added) {
+	                  note_global_domain_learning(1 + (impl_added ? 1 : 0));
+	                  ++out.bc_stats.cutoff_conflict_clauses_learned;
+	                }
+	              }
+	              cutoff_rows.push_back(std::move(cut));
+	              cutoff_rhs.push_back(rhs);
+	            }
 
-            if (!cutoff_rows.empty()) {
-              const int added_cutoff = static_cast<int>(cutoff_rows.size());
-              const int prev_cutoff_rows = static_cast<int>(base_lp.A.rows());
+	            if (!cutoff_rows.empty()) {
+	              const int added_cutoff = static_cast<int>(cutoff_rows.size());
+	              if (strict_highs_lp_contract) {
+	                int domain_rows_added = 0;
+	                for (int i = 0; i < added_cutoff; ++i) {
+	                  if (add_cut_to_global_domain_pool(
+	                          std::move(cutoff_rows[static_cast<std::size_t>(i)]),
+	                          cutoff_rhs[static_cast<std::size_t>(i)],
+	                          "objective_cutoff_domain_row",
+	                          /*domain_only=*/true)) {
+	                    ++domain_rows_added;
+	                    ++out.bc_stats.cutoff_conflict_cuts_added;
+	                  }
+	                }
+	    if (domain_rows_added > 0) {
+		                  (void)refresh_objective_domain_sources(
+		                      "objective_cutoff_domain_row", /*force=*/true);
+		                }
+	                if (opt.verbose || trace_bc_timeline) {
+	                  fmt::print(stderr,
+	                             "[B&C CUTOFF-CONFLICT] events={} svars={} "
+	                             "rest_lb={:.2f} budget={:.2f} cuts={} "
+	                             "weighted={} domain_only=1 root_lp_rows=0 "
+	                             "pool_added={}\n",
+	                             static_cast<int>(events.size()), n_cutoff_s,
+	                             rest_lb, cutoff_budget, added_cutoff,
+	                             weighted_event_cuts, domain_rows_added);
+		                }
+		              } else {
+		              const int prev_cutoff_rows = static_cast<int>(base_lp.A.rows());
               const double cutoff_old_bound = root.bound;
               const Eigen::VectorXd cutoff_old_x = root.x_relax;
               const auto cutoff_old_basis = root.basis_hint;
@@ -13294,11 +15679,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                 root.basis_hint = cutoff_basis;
                 root_relax.primal = cutoff_res.result;
                 root_relax.dual_bound = cutoff_candidate_bound;
-                root_relax.basis_hint = root.basis_hint;
-                root_relax.simplex =
-                    std::make_shared<SimplexResult>(cutoff_res);
-                root_relax.simplex->form = cutoff_sf;
-              } else if (cutoff_keep_rows) {
+	                root_relax.basis_hint = root.basis_hint;
+	                root_relax.simplex =
+	                    std::make_shared<SimplexResult>(cutoff_res);
+	                root_relax.simplex->form = cutoff_sf;
+	                refresh_root_redcost_lurking_bounds("root_cutoff_conflict_resolve");
+	              } else if (cutoff_keep_rows) {
                 root.bound = incumbent_obj;
               } else {
                 truncate_ineq_rows(base_lp, prev_cutoff_rows);
@@ -13322,22 +15708,24 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                            "kept={} domain_tight={}\n",
                            static_cast<int>(events.size()), n_cutoff_s, rest_lb,
                            cutoff_budget, added_cutoff, weighted_event_cuts,
-                           cutoff_keep_rows ? root.bound : cutoff_candidate_bound,
-                           cutoff_keep_rows ? 1 : 0, cutoff_domain_tightened);
-              }
-            } else if (opt.verbose) {
+	                           cutoff_keep_rows ? root.bound : cutoff_candidate_bound,
+	                           cutoff_keep_rows ? 1 : 0, cutoff_domain_tightened);
+	              }
+	              }
+	            } else if (opt.verbose) {
               fmt::print(stderr,
                          "[B&C CUTOFF-CONFLICT] events={} svars={} rest_lb={:.2f} "
                          "budget={:.2f} cuts=0 weighted=0\n",
                          static_cast<int>(events.size()), n_cutoff_s, rest_lb,
                          cutoff_budget);
             }
-          }
-        }
-      }
-    }
+	          }
+	        }
+	      }
+	    }
+	  }
 
-    const bool defer_root_graph_implied_bound_resolve =
+	    const bool defer_root_graph_implied_bound_resolve =
         requested_vendored_highs_lp && has_incumbent &&
         current_large_generic_low_frac_root() &&
         std::isfinite(incumbent_root_rel_gap()) &&
@@ -13457,11 +15845,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               std::make_shared<const Eigen::VectorXd>(ib_res.reduced_costs);
           root.basis_hint = ib_basis;
           root_relax.primal = ib_res.result;
-          root_relax.dual_bound = ib_candidate_bound;
-          root_relax.basis_hint = root.basis_hint;
-          root_relax.simplex = std::make_shared<SimplexResult>(ib_res);
-          root_relax.simplex->form = ib_sf;
-        } else if (ib_keep_rows) {
+	          root_relax.dual_bound = ib_candidate_bound;
+	          root_relax.basis_hint = root.basis_hint;
+	          root_relax.simplex = std::make_shared<SimplexResult>(ib_res);
+	          root_relax.simplex->form = ib_sf;
+	          refresh_root_redcost_lurking_bounds("root_graph_implied_bound_resolve");
+	        } else if (ib_keep_rows) {
           root.bound = ib_candidate_bound;
         } else {
           truncate_ineq_rows(base_lp, prev_ib_rows);
@@ -13716,19 +16105,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     // Reduced cost fixing at root: if we have an incumbent, use reduced costs
     // to fix integer variables that can't improve the objective.
-    if (has_incumbent && root_relax.simplex &&
-        opt.enable_reduced_cost_fixing &&
-        (opt.enable_reduced_cost_proof_cut_resolve ||
-         opt.enable_reduced_cost_proof_conflict_minimization)) {
+	    const double root_upper_limit_for_proof =
+	        has_incumbent
+	            ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                               opt.int_tol)
+	            : kInf;
+	    if (has_incumbent && std::isfinite(root_upper_limit_for_proof) &&
+	        root_relax.simplex &&
+	        opt.enable_reduced_cost_fixing &&
+	        (opt.enable_reduced_cost_proof_cut_resolve ||
+	         opt.enable_reduced_cost_proof_conflict_minimization)) {
       SimplexResult proof_simplex = *root_relax.simplex;
       if (proof_simplex.result.constraint_duals.size() != base_lp.A.rows() + base_lp.Aeq.rows() &&
           root_relax.row_duals.size() == base_lp.A.rows() + base_lp.Aeq.rows()) {
         proof_simplex.result.constraint_duals = root_relax.row_duals;
       }
-      DualProofRow full_proof;
-      const bool proof_ok = build_full_dual_proof_row(
-          base_lp, proof_simplex, root.lb, root.ub, root.x_relax,
-          root.bound, incumbent_obj, full_proof, std::max(1e-9, opt.lp_tol));
+	      DualProofRow full_proof;
+	      const bool proof_ok = build_full_dual_proof_row(
+	          base_lp, proof_simplex, root.lb, root.ub, root.x_relax,
+	          root.bound, root_upper_limit_for_proof, full_proof,
+	          std::max(1e-9, opt.lp_tol));
       if (opt.verbose) {
         if (proof_ok) {
           fmt::print(stderr,
@@ -13752,10 +16148,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                      full_proof.reject_reason);
         }
       }
-      if (proof_ok) {
-        root_global_dual_proof = full_proof;
-        root_global_dual_proof_upper = incumbent_obj;
-        have_root_global_dual_proof = true;
+		      if (proof_ok) {
+		        root_global_dual_proof = full_proof;
+		        root_global_dual_proof_upper = root_upper_limit_for_proof;
+	        have_root_global_dual_proof = true;
+	        ++root_dual_proof_epoch;
         const auto proof_artifacts = extract_dual_proof_literal_artifacts(
             base_lp, root_implied_integer_cols, full_proof, root.lb, root.ub,
             implication_graph, clique_table, opt.int_tol, &conflict_pool,
@@ -13766,27 +16163,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             proof_artifacts.conflict_clauses_added > 0) {
           out.bc_stats.rc_binary_implications_learned +=
               proof_artifacts.implications_added;
-          note_global_domain_learning(proof_artifacts.implications_added +
-                                      proof_artifacts.clique_edges_added +
-                                      proof_artifacts.conflict_clauses_added);
-          objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                      &clique_table, &implication_graph);
-          const auto published = publish_objective_implied_event_source(
-              base_lp, objective_propagation, implication_graph, clique_table,
-              opt.int_tol);
-          out.bc_stats.objective_implied_event_published_implications +=
-              published.implications_added;
-          out.bc_stats.objective_implied_event_published_clique_edges +=
-              published.clique_edges_added;
-          note_global_domain_learning(published.implications_added +
-                                      published.clique_edges_added);
-          if (published.implications_added > 0 ||
-              published.clique_edges_added > 0) {
-            objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                        &clique_table, &implication_graph);
-          }
-          refresh_objective_artifact_stats();
-        }
+	          note_global_domain_learning(proof_artifacts.implications_added +
+	                                      proof_artifacts.clique_edges_added +
+	                                      proof_artifacts.conflict_clauses_added);
+	          note_objective_artifact_learning(
+	              proof_artifacts.implications_added +
+	              proof_artifacts.clique_edges_added);
+	          (void)refresh_objective_domain_sources(
+	              "root_dual_proof_artifacts", /*force=*/true);
+	        }
         fmt::print(stderr,
                    "[B&C PROOF-IMPL] root cand={} conflicts={} confQ={} impl={} "
                    "clique_edges={} cap={:.6g} max_delta={:.6g} "
@@ -13801,28 +16186,30 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                    proof_artifacts.frontier_priority_updates,
                    objective_propagation.partitions.size(),
                    implication_graph.size());
-        cached_queue_dual_proof = full_proof;
-        cached_queue_dual_proof_upper = incumbent_obj;
+	        cached_queue_dual_proof = full_proof;
+	        cached_queue_dual_proof_upper = root_upper_limit_for_proof;
         have_cached_queue_dual_proof = true;
         cached_queue_dual_proof_is_global = true;
         cached_queue_dual_proof_scope.clear();
         cached_queue_objective_event_proof = full_proof;
         have_cached_queue_objective_event_proof = true;
         cached_queue_objective_event_proof_is_global = true;
-        cached_queue_objective_event_proof_scope.clear();
+		        cached_queue_objective_event_proof_upper = root_upper_limit_for_proof;
+	        cached_queue_objective_event_proof_scope.clear();
         DualProofRow root_rc_mass_proof;
-        if (build_reduced_cost_mass_dual_proof_row(
-                base_lp, proof_simplex, root.lb, root.ub, root.x_relax,
-                root.bound, incumbent_obj, root_rc_mass_proof,
-                std::max(1e-9, opt.lp_tol), nullptr,
-                &root_implied_integer_cols,
-                &objective_propagation.implied_event_target_cols)) {
-          cached_queue_dual_proof = root_rc_mass_proof;
-          cached_queue_dual_proof_upper = incumbent_obj;
+	        if (build_reduced_cost_mass_dual_proof_row(
+	                base_lp, proof_simplex, root.lb, root.ub, root.x_relax,
+	                root.bound, root_upper_limit_for_proof, root_rc_mass_proof,
+	                std::max(1e-9, opt.lp_tol), nullptr,
+	                &root_implied_integer_cols,
+	                &objective_propagation.implied_event_target_cols)) {
+	          cached_queue_dual_proof = root_rc_mass_proof;
+	          cached_queue_dual_proof_upper = root_upper_limit_for_proof;
           have_cached_queue_dual_proof = true;
           cached_queue_dual_proof_is_global = true;
           cached_queue_dual_proof_scope.clear();
         }
+        run_root_incumbent_propagation("after_root_dual_proof");
         // A full dual proof row is derived from the incumbent cutoff.  It is a
         // first-class proof object for local domains and queued frontier nodes,
         // but consuming it as root-domain fixing changes the global root LP
@@ -13832,19 +16219,27 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       }
     }
 
-    if (opt.enable_reduced_cost_fixing &&
-        has_incumbent && root.basis_hint && root.basis_hint->cached_reduced_costs &&
-        root.basis_hint->cached_reduced_costs->size() >= n) {
+				    if (root_current_redcost_domain_commit_allowed &&
+			          opt.enable_reduced_cost_fixing &&
+			        has_incumbent && std::isfinite(root_upper_limit_for_proof) &&
+			        !root.lp_refresh_needed &&
+			        root.basis_hint && root.basis_hint->cached_reduced_costs &&
+			        root.basis_hint->cached_reduced_costs->size() >= n) {
       const Eigen::VectorXd rc_root_lb_before = root.lb;
       const Eigen::VectorXd rc_root_ub_before = root.ub;
       const auto rc_root_basis_before = root.basis_hint;
       const auto rc_root_x_before = root.x_relax;
       const double rc_root_bound_before = root.bound;
       const LPRelaxationResult rc_root_relax_before = root_relax;
-      int root_fixed = reduced_cost_fixing(
-          base_lp.vars, root.x_relax, *root.basis_hint->cached_reduced_costs,
-          root.basis_hint->basis_indices(), root.bound, incumbent_obj,
-          opt.int_tol, root.lb, root.ub);
+      std::vector<DomainReasonBound> root_current_redcost_reasons;
+	      int root_fixed = reduced_cost_fixing(
+		          base_lp.vars, root.x_relax, *root.basis_hint->cached_reduced_costs,
+		          root.basis_hint->basis_indices(), root.bound,
+		          root_upper_limit_for_proof,
+		          opt.int_tol, root.lb, root.ub, nullptr,
+	          root.basis_hint->cached_col_scale.get(),
+          &root_current_redcost_reasons, nullptr, /*reason_depth=*/0,
+          static_cast<int>(root.domain_reason_bounds.size()));
       if (root_fixed > 0) {
         out.bc_stats.rc_fixings += static_cast<std::uint64_t>(root_fixed);
         out.bc_stats.root_cut_domain_tightenings +=
@@ -13896,17 +16291,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                      "fallback disabled without vendored LP\n",
                      rc_res->result.stats.status);
         }
-        if (rc_accept) {
-          root.x_relax = clamp_to_bounds(rc_accept_relax.primal.x, root.lb, root.ub);
+	        if (rc_accept) {
+          for (auto& rb : root_current_redcost_reasons) {
+            append_domain_reason_bound(root, std::move(rb), n,
+                                       &rc_root_lb_before, &rc_root_ub_before);
+          }
+	          root.x_relax = clamp_to_bounds(rc_accept_relax.primal.x, root.lb, root.ub);
           root.x_seed = root.x_relax;
           root.bound = rc_accept_relax.dual_bound;
           root_relax = std::move(rc_accept_relax);
           root.basis_hint = root_relax.basis_hint;
           if (root.basis_hint) root.basis_hint->compact_indices_storage();
-          if (root_relax.simplex && root_relax.simplex->form.A.rows() == 0) {
-            root_relax.simplex->form = ensure_probe_sf();
-          }
-          if (root.bound > rc_root_bound_before +
+	          if (root_relax.simplex && root_relax.simplex->form.A.rows() == 0) {
+	            root_relax.simplex->form = ensure_probe_sf();
+	          }
+	          refresh_root_redcost_lurking_bounds("root_rc_fixing_resolve");
+	          if (root.bound > rc_root_bound_before +
                   std::max(1e-7, opt.root_cut_min_bound_lift)) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
           }
@@ -13983,8 +16383,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		    return current_incumbent_valid_for_proof("proof_tail_queue_mode");
 		  };
 
-  auto dual_proof_has_objective_event_target =
-      [&](const DualProofRow* proof) {
+	  auto dual_proof_has_objective_event_target =
+	      [&](const DualProofRow* proof) {
     if (proof == nullptr ||
         objective_propagation.implied_event_target_cols.empty()) {
       return false;
@@ -13996,11 +16396,106 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               .implied_event_target_cols[static_cast<std::size_t>(j)]) {
         return true;
       }
+	    }
+	    return false;
+	  };
+
+	  auto scope_active_for_node =
+	      [&](const Node& node, const std::vector<BranchDomainLiteral>& scope) {
+	    const double tol = std::max(1e-9, opt.int_tol);
+	    for (const auto& lit : scope) {
+	      if (lit.var_idx < 0 || lit.var_idx >= n ||
+	          lit.var_idx >= node.lb.size() || lit.var_idx >= node.ub.size()) {
+	        return false;
+	      }
+	      const bool active = lit.is_lb
+	          ? (node.lb[lit.var_idx] >= lit.value - tol)
+	          : (node.ub[lit.var_idx] <= lit.value + tol);
+	      if (!active) return false;
+	    }
+	    return true;
+	  };
+
+	  auto objective_event_proof_usable = [&](const DualProofRow* proof) {
+	    return proof != nullptr && proof->valid && proof->coeff.size() >= n &&
+	           proof->coeff.nonZeros() > 0 &&
+	           dual_proof_has_objective_event_target(proof);
+	  };
+
+  auto dual_proof_domain_lower_bound =
+      [&](const DualProofRow* proof, double proof_upper,
+          const Eigen::VectorXd& lb, const Eigen::VectorXd& ub) -> double {
+    if (proof == nullptr || !proof->valid || proof->coeff.size() < n ||
+        proof->coeff.nonZeros() <= 0 || !std::isfinite(proof_upper) ||
+        !std::isfinite(proof->rhs) || lb.size() < n || ub.size() < n) {
+      return kInf;
     }
-    return false;
+    double min_activity = 0.0;
+    for (Eigen::SparseVector<double>::InnerIterator it(proof->coeff); it;
+         ++it) {
+      const int j = static_cast<int>(it.index());
+      const double a = it.value();
+      if (j < 0 || j >= n || !std::isfinite(a)) return kInf;
+      if (a > 0.0) {
+        if (!std::isfinite(lb[j])) return kInf;
+        min_activity += a * lb[j];
+      } else if (a < 0.0) {
+        if (!std::isfinite(ub[j])) return kInf;
+        min_activity += a * ub[j];
+      }
+    }
+    if (!std::isfinite(min_activity)) return kInf;
+    return proof_upper - proof->rhs + min_activity;
   };
 
-  auto termination_bound_band = [&]() {
+  auto objective_event_proof_upper = [&](const DualProofRow* proof) -> double {
+    if (proof == nullptr) return kInf;
+    if (have_cached_queue_objective_event_proof &&
+        proof == &cached_queue_objective_event_proof &&
+        std::isfinite(cached_queue_objective_event_proof_upper)) {
+      return cached_queue_objective_event_proof_upper;
+    }
+    if (have_root_global_dual_proof && proof == &root_global_dual_proof &&
+        std::isfinite(root_global_dual_proof_upper)) {
+      return root_global_dual_proof_upper;
+    }
+    if (have_cached_queue_dual_proof &&
+        proof == &cached_queue_dual_proof &&
+        std::isfinite(cached_queue_dual_proof_upper)) {
+      return cached_queue_dual_proof_upper;
+    }
+    return kInf;
+  };
+
+	  auto select_objective_event_proof_for_node =
+	      [&](const Node& node, bool require_proof_tail) -> const DualProofRow* {
+	    if (require_proof_tail && !proof_tail_queue_mode_active()) {
+	      return nullptr;
+	    }
+	    // HiGHS consumes objective/cutoff propagation in the current local
+	    // domain closure.  Prefer the scoped node LP proof when its trail scope
+	    // is active; a root/global proof is only a fallback oracle.  Using the
+	    // root proof first inflates the proof capacity on non-root frontiers and
+	    // turns real one-missing objective events into skip_budget no-ops.
+	    if (have_cached_queue_objective_event_proof &&
+	        !cached_queue_objective_event_proof_is_global &&
+	        objective_event_proof_usable(&cached_queue_objective_event_proof) &&
+	        scope_active_for_node(node, cached_queue_objective_event_proof_scope)) {
+	      return &cached_queue_objective_event_proof;
+	    }
+	    if (have_cached_queue_objective_event_proof &&
+	        cached_queue_objective_event_proof_is_global &&
+	        objective_event_proof_usable(&cached_queue_objective_event_proof)) {
+	      return &cached_queue_objective_event_proof;
+	    }
+	    if (have_root_global_dual_proof &&
+	        objective_event_proof_usable(&root_global_dual_proof)) {
+	      return &root_global_dual_proof;
+	    }
+	    return nullptr;
+	  };
+
+	  auto termination_bound_band = [&]() {
     const double base =
         std::isfinite(global_lb) ? std::abs(global_lb)
                                  : std::max(1.0, std::abs(root.bound));
@@ -14102,12 +16597,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     disp_config.disable_partial_pricing_for_conformance = true;
   }
 	  SolverDispatcher seq_dispatcher(disp_config, &seq_fallback_mgr, &seq_incumbent_bound);
-	  if (root.basis_hint) {
-	    seq_dispatcher.set_root_basis(root.basis_hint);
-	  }
-	  auto adopt_tree_incumbent =
-	      [&](const char* source, const Eigen::VectorXd& candidate_x,
-	          double candidate_obj, int depth, double bound_snapshot) -> bool {
+		  if (root.basis_hint) {
+		    seq_dispatcher.set_root_basis(root.basis_hint);
+		  }
+		  bool tree_incumbent_domain_closure_pending = false;
+		  std::string tree_incumbent_domain_closure_source;
+		  int tree_incumbent_domain_closure_depth = 0;
+		  bool tree_incumbent_domain_closure_active = false;
+		  auto adopt_tree_incumbent =
+		      [&](const char* source, const Eigen::VectorXd& candidate_x,
+		          double candidate_obj, int depth, double bound_snapshot) -> bool {
 	    (void)candidate_obj;
 	    const double actual_obj =
 	        objective_value(base_lp.c, candidate_x, base_lp.sense);
@@ -14133,14 +16632,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    has_incumbent = true;
 	    incumbent_x = candidate_x;
 	    incumbent_obj = actual_obj;
+	    note_incumbent_cutoff_learning();
 	    incumbent_proof_validated = true;
 	    incumbent_proof_validated_obj = incumbent_obj;
 	    solution_pool.add(candidate_x, actual_obj);
-	    seq_incumbent_bound.store(incumbent_obj, std::memory_order_relaxed);
-	    note_incumbent_update(depth, bound_snapshot);
-	    certify_root_gap_frontier_incumbent(source, actual_obj);
-	    return true;
-	  };
+		    seq_incumbent_bound.store(incumbent_obj, std::memory_order_relaxed);
+		    note_incumbent_update(depth, bound_snapshot);
+		    certify_root_gap_frontier_incumbent(source, actual_obj);
+		    tree_incumbent_domain_closure_pending = true;
+		    tree_incumbent_domain_closure_source =
+		        source != nullptr ? source : "tree_incumbent";
+		    tree_incumbent_domain_closure_depth = depth;
+		    return true;
+		  };
 
 	  // IPM-LP node solver: use IPM for node LP solves only when no simplex
   // basis is available from crossover. With a basis, dual simplex warm-starts
@@ -14213,44 +16717,70 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
   // experiment rather than production search.
   int incumbent_repair_lps_left = 0;
 
-  auto apply_objective_cutoff_domain_fixing =
-      [&](Node& node,
-          double inc_obj_snapshot,
-          bool has_inc_snapshot,
-          std::vector<PoolCut>& new_cuts,
-          int& cut_count,
-          int& n_conflicts_learned,
-          int& n_tightened) -> bool {
+		  auto apply_objective_cutoff_domain_fixing =
+	      [&](Node& node,
+	          double cutoff_snapshot,
+	          bool has_inc_snapshot,
+	          std::vector<PoolCut>& new_cuts,
+	          int& cut_count,
+	          int& n_conflicts_learned,
+	          int& n_tightened,
+	          int* n_reasons_added = nullptr) -> bool {
     n_tightened = 0;
     n_conflicts_learned = 0;
-    if (!opt.enable_objective_cutoff_domain_fixing ||
-        !has_inc_snapshot ||
-        base_lp.sense != Sense::Minimize ||
-        !std::isfinite(inc_obj_snapshot)) {
-      return true;
-    }
+	    if (n_reasons_added != nullptr) *n_reasons_added = 0;
+	    if (!opt.enable_objective_cutoff_domain_fixing ||
+	        !has_inc_snapshot ||
+	        base_lp.sense != Sense::Minimize ||
+	        !std::isfinite(cutoff_snapshot)) {
+	      return true;
+	    }
 
-    int objective_state_tightenings = 0;
-    int objective_state_prunes = 0;
-    if (!objective_propagation.propagate(
-            base_lp, node.lb, node.ub, inc_obj_snapshot, opt.int_tol,
-            node.depth, static_cast<int>(node.branch_reasons.size()),
-            opt.enable_reduced_cost_proof_conflict_minimization
-                ? &node.domain_reason_bounds
-                : nullptr,
-            objective_state_tightenings, objective_state_prunes)) {
-      n_tightened += objective_state_tightenings;
-      out.bc_stats.cutoff_domain_tightenings +=
-          static_cast<std::uint64_t>(objective_state_tightenings);
+	    int objective_state_tightenings = 0;
+	    int objective_state_prunes = 0;
+	    std::vector<DomainReasonBound> objective_state_reasons;
+	    auto append_objective_state_reason = [&](DomainReasonBound rb) {
+	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+	      for (const auto& existing : node.domain_reason_bounds) {
+	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound,
+	                                             std::max(1e-9, opt.int_tol)) &&
+	            branch_literal_stronger_or_equal(rb.bound, existing.bound,
+	                                             std::max(1e-9, opt.int_tol)) &&
+	            conflict_clause_hash(existing.reason) == reason_hash) {
+	          return false;
+	        }
+	      }
+	      append_domain_reason_bound(node, std::move(rb), n, &root.lb, &root.ub);
+	      if (n_reasons_added != nullptr) ++(*n_reasons_added);
+	      return true;
+	    };
+		    if (!objective_propagation.propagate(
+		            base_lp, node.lb, node.ub, cutoff_snapshot, opt.int_tol,
+		            node.depth,
+	            static_cast<int>(node.branch_reasons.size() +
+	                             node.domain_reason_bounds.size()),
+	            opt.enable_reduced_cost_proof_conflict_minimization
+	                ? &objective_state_reasons
+	                : nullptr,
+	            objective_state_tightenings, objective_state_prunes)) {
+	      for (auto& rb : objective_state_reasons) {
+	        (void)append_objective_state_reason(std::move(rb));
+	      }
+	      n_tightened += objective_state_tightenings;
+	      out.bc_stats.cutoff_domain_tightenings +=
+	          static_cast<std::uint64_t>(objective_state_tightenings);
       out.bc_stats.objective_implied_event_tightenings +=
           static_cast<std::uint64_t>(objective_state_tightenings);
       out.bc_stats.cutoff_domain_prunes +=
           static_cast<std::uint64_t>(std::max(1, objective_state_prunes));
       out.bc_stats.objective_implied_event_prunes +=
           static_cast<std::uint64_t>(std::max(1, objective_state_prunes));
-      return false;
-    }
-    n_tightened += objective_state_tightenings;
+	      return false;
+	    }
+	    for (auto& rb : objective_state_reasons) {
+	      (void)append_objective_state_reason(std::move(rb));
+	    }
+	    n_tightened += objective_state_tightenings;
     out.bc_stats.objective_implied_event_tightenings +=
         static_cast<std::uint64_t>(objective_state_tightenings);
 
@@ -14276,16 +16806,50 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         note_global_domain_learning(1 + (impl_added ? 1 : 0));
         ++n_conflicts_learned;
         ++out.bc_stats.cutoff_conflict_clauses_learned;
-        if (clause.size() <= 16) {
-          PoolCut conflict_cut;
-          if (try_build_binary_conflict_cut(base_lp, clause, conflict_cut, 16)) {
-            new_cuts.push_back(std::move(conflict_cut));
-            ++cut_count;
-            ++out.bc_stats.cutoff_conflict_cuts_added;
-          }
-        }
+	        if (!strict_highs_lp_contract && clause.size() <= 16) {
+	          PoolCut conflict_cut;
+	          if (try_build_binary_conflict_cut(base_lp, clause, conflict_cut, 16)) {
+	            conflict_cut.domain_only = true;
+	            new_cuts.push_back(std::move(conflict_cut));
+	            ++cut_count;
+	            ++out.bc_stats.cutoff_conflict_cuts_added;
+	          }
+	        }
       }
     };
+	    auto append_objective_cutoff_reason =
+	        [&](BranchDomainLiteral bound,
+	            std::vector<BranchDomainLiteral> reason,
+	            BranchDomainLiteral source_conflict_literal,
+	            double mandatory_cost) {
+	      if (bound.var_idx < 0 || bound.var_idx >= n ||
+	          !std::isfinite(bound.value)) {
+	        return false;
+	      }
+	      canonicalize_branch_literals(reason);
+	      DomainReasonBound rb;
+	      rb.bound = bound;
+	      rb.reason = std::move(reason);
+	      rb.trail_pos = static_cast<int>(node.branch_reasons.size() +
+	                                      node.domain_reason_bounds.size());
+	      rb.depth = node.depth;
+	      rb.source_conflict_literal = source_conflict_literal;
+	      rb.has_source_conflict_literal = true;
+	      rb.source_conflict_clause = rb.reason;
+	      rb.source_conflict_clause.push_back(source_conflict_literal);
+	      canonicalize_branch_literals(rb.source_conflict_clause);
+	      rb.has_source_conflict_clause = true;
+	      if (std::isfinite(mandatory_cost) &&
+	          std::isfinite(objective_cutoff_rest_lb)) {
+	        rb.has_proof_activity_audit = true;
+	        rb.proof_activity =
+	            objective_cutoff_rest_lb + std::max(0.0, mandatory_cost);
+	        rb.proof_required_activity = cutoff_snapshot;
+	        rb.proof_activity_margin =
+	            rb.proof_activity - rb.proof_required_activity;
+	      }
+	      return append_objective_state_reason(std::move(rb));
+	    };
 
     if (objective_cutoff_events.empty() ||
         !std::isfinite(objective_cutoff_rest_lb)) {
@@ -14298,9 +16862,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       return ok;
     }
 
-    const double cutoff_budget =
-        inc_obj_snapshot - objective_cutoff_rest_lb -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(inc_obj_snapshot)));
+	    const double cutoff_budget = cutoff_snapshot - objective_cutoff_rest_lb;
     if (!(cutoff_budget >= 0.0) || !std::isfinite(cutoff_budget)) {
       ++out.bc_stats.cutoff_domain_prunes;
       return false;
@@ -14344,8 +16906,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           return false;
         }
         if (node.ub[e.y] > 1e-9) {
+	          std::vector<BranchDomainLiteral> reason = forced_event_literals;
           node.ub[e.y] = 0.0;
           ++n_tightened;
+	          (void)append_objective_cutoff_reason(
+	              BranchDomainLiteral{e.y, 0.0, false}, std::move(reason),
+	              BranchDomainLiteral{e.y, 1.0, true},
+	              forced_cost + e.cost);
         }
       } else if (e.z >= 0 && e.z < n) {
         const bool y_forced_one = node.lb[e.y] >= 1.0 - 1e-9;
@@ -14363,15 +16930,27 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           add_literal(clause, BranchDomainLiteral{e.y, 1.0, true});
           add_literal(clause, BranchDomainLiteral{e.z, 0.0, false});
           learn_cutoff_clause(std::move(clause));
+	          std::vector<BranchDomainLiteral> reason = forced_event_literals;
+	          add_literal(reason, BranchDomainLiteral{e.y, 1.0, true});
           node.lb[e.z] = 1.0;
           ++n_tightened;
+	          (void)append_objective_cutoff_reason(
+	              BranchDomainLiteral{e.z, 1.0, true}, std::move(reason),
+	              BranchDomainLiteral{e.z, 0.0, false},
+	              forced_cost + e.cost);
         } else if (z_forced_zero && node.ub[e.y] > 1e-9) {
           std::vector<BranchDomainLiteral> clause = forced_event_literals;
           add_literal(clause, BranchDomainLiteral{e.y, 1.0, true});
           add_literal(clause, BranchDomainLiteral{e.z, 0.0, false});
           learn_cutoff_clause(std::move(clause));
+	          std::vector<BranchDomainLiteral> reason = forced_event_literals;
+	          add_literal(reason, BranchDomainLiteral{e.z, 0.0, false});
           node.ub[e.y] = 0.0;
           ++n_tightened;
+	          (void)append_objective_cutoff_reason(
+	              BranchDomainLiteral{e.y, 0.0, false}, std::move(reason),
+	              BranchDomainLiteral{e.y, 1.0, true},
+	              forced_cost + e.cost);
         }
       }
     }
@@ -14405,6 +16984,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    if (!opt.enable_reduced_cost_conflict_learning ||
 	        forbidden_literals.empty() ||
 	        max_to_learn <= 0) {
+	      return;
+	    }
+	    if (strict_highs_lp_contract) {
 	      return;
 	    }
 	    const int max_cut_literals =
@@ -14492,7 +17074,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          ++out.bc_stats.rc_binary_implications_learned;
 	          note_global_domain_learning();
 	        }
-	        if (static_cast<int>(learned_clause.size()) <= max_cut_literals) {
+	        if (!strict_highs_lp_contract &&
+	            static_cast<int>(learned_clause.size()) <= max_cut_literals) {
 	          PoolCut conflict_cut;
 	          if (try_build_binary_conflict_cut(base_lp, learned_clause,
 	                                            conflict_cut,
@@ -14537,11 +17120,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      replay_queue_reason_trail_certificates;
 	  std::function<bool(Node&, std::vector<BoundChangeInfo>&, std::uint64_t*)>
 	      propagate_global_bound_lifting_certificates;
-	  std::function<int(const DomainReasonBound&,
-	                    const std::vector<BranchDomainLiteral>*,
-	                    const std::vector<std::vector<BranchDomainLiteral>>*,
-	                    const char*)>
-	      publish_bound_lifting_certificate;
+		  std::function<int(const DomainReasonBound&,
+		                    const std::vector<BranchDomainLiteral>*,
+		                    const std::vector<std::vector<BranchDomainLiteral>>*,
+		                    const char*)>
+		      publish_bound_lifting_certificate;
 
   auto learn_short_reconvergence_implication =
       [&](const std::vector<BranchDomainLiteral>& branch_reasons,
@@ -14553,12 +17136,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           std::vector<PoolCut>& new_cuts,
           int& cut_count,
           Node* scoped_node = nullptr) -> bool {
-    if (!opt.enable_reduced_cost_proof_conflict_minimization ||
-        reason_bounds.empty()) {
-      return false;
-    }
-    const int max_cut_literals =
-        std::max(2, opt.reduced_cost_conflict_cut_max_literals);
+	    if (!opt.enable_reduced_cost_proof_conflict_minimization ||
+	        reason_bounds.empty()) {
+	      return false;
+	    }
+	    const int max_cut_literals =
+	        std::max(2, opt.reduced_cost_conflict_cut_max_literals);
     const int max_literals = std::min(32, max_cut_literals);
     const int max_frontier_clauses =
         std::min(4, std::max(1, opt.reduced_cost_conflict_max_per_node));
@@ -14974,31 +17557,33 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       } else if (!flip_bound(rb.bound, flipped)) {
         continue;
       }
-      std::vector<BranchDomainLiteral> clause = resolve_scoped_trail_frontier(
-          rb.reason,
-          rb.trail_pos >= 0
-              ? rb.trail_pos
-              : static_cast<int>(branch_reasons.size() + reason_bounds.size()));
-      PoolCut implication_cut;
-      const bool implication_viol =
-          build_local_implication_proof_cut(clause, flipped, implication_cut);
-      clause.push_back(flipped);
-      canonicalize_branch_literals(clause);
-      if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
-        continue;
-      }
+	      std::vector<BranchDomainLiteral> clause = resolve_scoped_trail_frontier(
+	          rb.reason,
+	          rb.trail_pos >= 0
+	              ? rb.trail_pos
+	              : static_cast<int>(branch_reasons.size() + reason_bounds.size()));
+	      PoolCut implication_cut;
+	      const bool implication_viol =
+	          !strict_highs_lp_contract &&
+	          build_local_implication_proof_cut(clause, flipped, implication_cut);
+	      clause.push_back(flipped);
+	      canonicalize_branch_literals(clause);
+	      if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
+	        continue;
+	      }
       const std::size_t h = conflict_clause_hash(clause);
       if (!seen.insert(h).second) continue;
       const double cut_viol = local_binary_cut_violation(clause);
       const int short_limit = std::min(8, max_literals);
-      const int queue_hits =
-          static_cast<int>(clause.size()) <= short_limit
-              ? node_queue.count_clause_hits_near_lower_bound(
-                    clause, termination_bound_band(), true, 8)
-              : 0;
-      if (cut_viol <= 1e-7 && queue_hits <= 0 && !implication_viol) {
-        continue;
-      }
+	      const int queue_hits =
+	          static_cast<int>(clause.size()) <= short_limit
+	              ? node_queue.count_clause_hits_near_lower_bound(
+	                    clause, termination_bound_band(), true, 8)
+	              : 0;
+	      if (!strict_highs_lp_contract && cut_viol <= 1e-7 &&
+	          queue_hits <= 0 && !implication_viol) {
+	        continue;
+	      }
       FrontierCandidate cand;
       cand.score = (cut_viol > 1e-7 ? 1000000.0 * cut_viol : 0.0) +
                    (implication_viol ? 500000.0 : 0.0) +
@@ -15041,41 +17626,29 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     bool learned_any = false;
     int learned_frontier = 0;
-    for (const auto& candidate : candidates) {
-      if (learned_frontier >= max_frontier_clauses) break;
-      const auto& frontier_clause = candidate.clause;
-      if (candidate.cut_violation > 1e-7 && local_proof_cuts != nullptr) {
-        PoolCut local_cut;
-        if (try_build_binary_conflict_cut(base_lp, frontier_clause, local_cut,
-                                          max_cut_literals) &&
-            local_x != nullptr &&
-            local_x->size() == n &&
+	    for (const auto& candidate : candidates) {
+	      if (learned_frontier >= max_frontier_clauses) break;
+	      const auto& frontier_clause = candidate.clause;
+	      if (!strict_highs_lp_contract && candidate.cut_violation > 1e-7 &&
+	          local_proof_cuts != nullptr) {
+	        PoolCut local_cut;
+	        if (try_build_binary_conflict_cut(base_lp, frontier_clause, local_cut,
+	                                          max_cut_literals) &&
+	            local_x != nullptr &&
+	            local_x->size() == n &&
             valid_pool_cut(local_cut, local_x, "reconv_binary_cut") &&
             sparse_dot(local_cut.coeff, *local_x) > local_cut.rhs + 1e-7) {
           local_proof_cuts->push_back(std::move(local_cut));
         }
       }
-	      if (candidate.local_implication_cut.has_value() &&
-	          local_proof_cuts != nullptr &&
-	          valid_pool_cut(*candidate.local_implication_cut, local_x,
-	                         "reconv_implication_cut")) {
+		      if (!strict_highs_lp_contract &&
+		          candidate.local_implication_cut.has_value() &&
+		          local_proof_cuts != nullptr &&
+		          valid_pool_cut(*candidate.local_implication_cut, local_x,
+		                         "reconv_implication_cut")) {
 	        local_proof_cuts->push_back(*candidate.local_implication_cut);
 	      }
       int bound_lift_published = 0;
-      if (candidate.has_bound_lift && publish_bound_lifting_certificate) {
-        DomainReasonBound lifted;
-        lifted.bound = candidate.target_bound;
-        lifted.reason = candidate.frontier_literals;
-        lifted.trail_pos = candidate.trail_pos;
-        lifted.depth = candidate.depth;
-        lifted.source_conflict_literal = candidate.source_literal;
-        lifted.has_source_conflict_literal = true;
-        bound_lift_published = publish_bound_lifting_certificate(
-            lifted, nullptr, nullptr, "scoped_reconvergence_bound_lift");
-        if (bound_lift_published > 0) {
-          learned_any = true;
-        }
-      }
 	      if (scoped_node != nullptr) {
 	        bool scoped_added = false;
 	        if (add_scoped_conflict_object(*scoped_node, frontier_clause, nullptr)) {
@@ -15105,7 +17678,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            ++out.bc_stats.rc_binary_implications_learned;
 	            note_global_domain_learning();
 	          }
-	          if (static_cast<int>(learned_clause.size()) <= max_cut_literals) {
+	          if (!strict_highs_lp_contract &&
+	              static_cast<int>(learned_clause.size()) <= max_cut_literals) {
 	            PoolCut conflict_cut;
 	            if (try_build_binary_conflict_cut(base_lp, learned_clause,
 	                                              conflict_cut, max_cut_literals) &&
@@ -15158,7 +17732,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           ++out.bc_stats.rc_binary_implications_learned;
           note_global_domain_learning();
         }
-        if (static_cast<int>(learned_clause.size()) <= max_cut_literals) {
+        if (!strict_highs_lp_contract &&
+            static_cast<int>(learned_clause.size()) <= max_cut_literals) {
           PoolCut conflict_cut;
           if (try_build_binary_conflict_cut(base_lp, learned_clause,
                                             conflict_cut, max_cut_literals)) {
@@ -15229,9 +17804,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    std::vector<DomainReasonBound> branch_targets;
 	    branch_targets.reserve(branch_reasons.size());
     for (int i = 0; i < static_cast<int>(branch_reasons.size()); ++i) {
-      branch_targets.push_back(
-          DomainReasonBound{branch_reasons[static_cast<std::size_t>(i)],
-	                            {}, i, i, BranchDomainLiteral{}, false});
+      DomainReasonBound rb;
+      rb.bound = branch_reasons[static_cast<std::size_t>(i)];
+      rb.trail_pos = i;
+      rb.depth = i;
+      branch_targets.push_back(std::move(rb));
 	    }
 	    const bool have_local_domain_trail =
 	        local_domain_trail != nullptr && !local_domain_trail->empty();
@@ -15334,11 +17911,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        const double priority_activity =
 	            std::abs(target_priority_coeff(j)) *
 	            (movement + 10.0 * lp_violation);
+	        DomainReasonBound rb;
+	        rb.bound = BranchDomainLiteral{j, implied, is_lb};
+	        rb.trail_pos = synthetic_target_trail_pos;
+	        rb.depth = static_cast<int>(branch_reasons.size());
 	        tmp.push_back(ProofTargetTmp{
-	            DomainReasonBound{BranchDomainLiteral{j, implied, is_lb},
-	                              {}, synthetic_target_trail_pos,
-	                              static_cast<int>(branch_reasons.size()),
-	                              BranchDomainLiteral{}, false},
+	            std::move(rb),
 	            proof_activity + 4.0 * priority_activity +
 	                1.0 / std::max(1.0, 1.0 + movement),
 	            proof_activity});
@@ -15515,6 +18093,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           lifted.reason = explanation.resolved_frontier;
           lifted.source_conflict_literal = explanation.flipped_target;
           lifted.has_source_conflict_literal = true;
+          lifted.has_proof_activity_audit =
+              explanation.has_proof_activity_audit;
+          lifted.proof_activity_margin = explanation.proof_margin;
+          lifted.proof_activity = explanation.proof_activity;
+          lifted.proof_required_activity =
+              explanation.proof_required_activity;
           lifted.trail_pos = std::max(
               lifted.trail_pos,
               static_cast<int>(branch_reasons.size() + reason_bounds.size()));
@@ -15578,6 +18162,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         explained.reason = explanation.resolved_frontier;
         explained.source_conflict_literal = explanation.flipped_target;
         explained.has_source_conflict_literal = true;
+        explained.has_proof_activity_audit =
+            explanation.has_proof_activity_audit;
+        explained.proof_activity_margin = explanation.proof_margin;
+        explained.proof_activity = explanation.proof_activity;
+        explained.proof_required_activity =
+            explanation.proof_required_activity;
         explained.trail_pos = std::max(
             explained.trail_pos,
             static_cast<int>(branch_reasons.size() + reason_bounds.size() +
@@ -15702,7 +18292,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           ++out.bc_stats.rc_binary_implications_learned;
           note_global_domain_learning();
         }
-        if (static_cast<int>(learned_clause.size()) <= max_cut_literals) {
+        if (!strict_highs_lp_contract &&
+            static_cast<int>(learned_clause.size()) <= max_cut_literals) {
           PoolCut conflict_cut;
           if (try_build_binary_conflict_cut(base_lp, learned_clause,
                                             conflict_cut,
@@ -15746,6 +18337,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
   double last_queue_domain_replay_incumbent = kInf;
   std::uint64_t last_queue_domain_replay_epoch = 0;
+  std::uint64_t last_queue_objective_replay_epoch = 0;
   int stale_queue_domain_replay_passes = 0;
 
 	  auto local_implication_hash = [](int trigger, bool trigger_one, int implied,
@@ -15786,7 +18378,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          add_binary_implications_from_conflict_clause(
 	              base_lp.vars, learned_clause, implication_graph);
 	      if (impl_added) ++out.bc_stats.rc_binary_implications_learned;
-	      if (static_cast<int>(learned_clause.size()) <= max_cut_literals) {
+	      if (!strict_highs_lp_contract &&
+	          static_cast<int>(learned_clause.size()) <= max_cut_literals) {
 	        PoolCut conflict_cut;
 	        if (try_build_binary_conflict_cut(base_lp, learned_clause,
 	                                          conflict_cut,
@@ -15794,7 +18387,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            valid_pool_cut(conflict_cut, nullptr,
 	                           tag != nullptr ? tag
 	                                          : "queue_dual_proof_conflict") &&
-	            cut_pool.add(std::move(conflict_cut.coeff), conflict_cut.rhs)) {
+	            [&]() {
+	              return add_cut_to_global_domain_pool(
+	                  std::move(conflict_cut.coeff), conflict_cut.rhs,
+	                  tag != nullptr ? tag : "queue_dual_proof_conflict",
+	                  conflict_cut.domain_only);
+	            }()) {
 	          ++out.bc_stats.rc_conflict_cuts_added;
 	        }
 	      }
@@ -15849,6 +18447,47 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        std::max(std::max(2, opt.reduced_cost_conflict_pool_max_literals),
 	                 highs_reconvergence_limit);
 	    if (static_cast<int>(frontier.size() + 1) > max_bound_lift_literals) {
+	      ++out.bc_stats.bound_lifting_certificates_rejected_audit;
+	      return 0;
+	    }
+	    auto structural_certificate_ok =
+	        [&](const std::vector<BranchDomainLiteral>& lits) -> bool {
+	      std::vector<double> lower(static_cast<std::size_t>(n), -kInf);
+	      std::vector<double> upper(static_cast<std::size_t>(n), kInf);
+	      for (const auto& lit : lits) {
+	        if (lit.var_idx < 0 || lit.var_idx >= n ||
+	            !std::isfinite(lit.value)) {
+	          return false;
+	        }
+	        if (lit.var_idx == rb.bound.var_idx) return false;
+	        if (lit.is_lb) {
+	          lower[static_cast<std::size_t>(lit.var_idx)] =
+	              std::max(lower[static_cast<std::size_t>(lit.var_idx)],
+	                       lit.value);
+	        } else {
+	          upper[static_cast<std::size_t>(lit.var_idx)] =
+	              std::min(upper[static_cast<std::size_t>(lit.var_idx)],
+	                       lit.value);
+	        }
+	        if (lower[static_cast<std::size_t>(lit.var_idx)] >
+	            upper[static_cast<std::size_t>(lit.var_idx)] + opt.int_tol) {
+	          return false;
+	        }
+	      }
+	      return true;
+	    };
+	    const bool source_excludes_target =
+	        rb.source_conflict_literal.var_idx == rb.bound.var_idx &&
+	        rb.source_conflict_literal.is_lb != rb.bound.is_lb &&
+	        (rb.bound.is_lb
+	             ? rb.source_conflict_literal.value < rb.bound.value - 1e-9
+	             : rb.source_conflict_literal.value > rb.bound.value + 1e-9);
+          if (!rb.has_proof_activity_audit ||
+              !std::isfinite(rb.proof_activity_margin) ||
+              rb.proof_activity_margin < -std::max(1e-8, opt.lp_tol) ||
+              !source_excludes_target ||
+              !structural_certificate_ok(frontier)) {
+	      ++out.bc_stats.bound_lifting_certificates_rejected_audit;
 	      return 0;
 	    }
 
@@ -15859,19 +18498,30 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    }
 	    canonicalize_branch_literals(sig);
 	    const std::size_t cert_hash = conflict_clause_hash(sig);
-	    int published = 0;
-	    if (global_bound_lifting_certificate_hashes.insert(cert_hash).second) {
-	      BoundLiftingCertificate cert;
-	      cert.frontier_literals = frontier;
-	      cert.target_bound = rb.bound;
-	      cert.source_conflict_literal = rb.source_conflict_literal;
+		    int published = 0;
+		    if (global_bound_lifting_certificate_hashes.insert(cert_hash).second) {
+		      BoundLiftingCertificate cert;
+		      cert.frontier_literals = frontier;
+		      cert.target_bound = rb.bound;
+		      cert.source_conflict_literal = rb.source_conflict_literal;
 	      cert.has_source_conflict_literal = rb.has_source_conflict_literal;
 	      cert.hash = cert_hash;
 	      cert.depth = rb.depth;
-	      global_bound_lifting_certificates.push_back(std::move(cert));
-	      note_global_domain_learning();
-	      ++published;
-	    }
+		      cert.has_proof_activity_audit = rb.has_proof_activity_audit;
+		      cert.proof_activity_margin = rb.proof_activity_margin;
+		      cert.proof_activity = rb.proof_activity;
+		      cert.proof_required_activity = rb.proof_required_activity;
+		      global_bound_lifting_certificates.push_back(std::move(cert));
+		      note_global_domain_learning();
+		      ++out.bc_stats.bound_lifting_certificates_published;
+	      out.bc_stats.bound_lifting_certificate_activity_margin_min =
+	          std::min(out.bc_stats.bound_lifting_certificate_activity_margin_min,
+	                   rb.proof_activity_margin);
+	      out.bc_stats.bound_lifting_certificate_activity_margin_max =
+	          std::max(out.bc_stats.bound_lifting_certificate_activity_margin_max,
+		                   rb.proof_activity_margin);
+		      ++published;
+		    }
 
 	    std::vector<BranchDomainLiteral> reconv = frontier;
 	    reconv.push_back(rb.source_conflict_literal);
@@ -15892,7 +18542,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    return published;
 	  };
 
-	  auto publish_local_trail_bound_lifting_certificates =
+    auto record_dual_proof_resolution_failure =
+        [&](DualProofResolutionStatus status) {
+      if (dual_proof_resolution_missing_reason(status)) {
+        ++out.bc_stats.resolution_missing_reason;
+      } else if (dual_proof_resolution_scope_blocked(status)) {
+        ++out.bc_stats.resolution_scope_blocked;
+      } else {
+        ++out.bc_stats.resolution_activity_failed;
+      }
+    };
+
+    auto publish_local_trail_bound_lifting_certificates =
 	      [&](const Node& node, const DualProofRow* proof,
 	          const DualProofRow* priority_proof, const char* tag) -> int {
 	    if (proof == nullptr || !proof->valid || proof->coeff.size() < n ||
@@ -15922,6 +18583,27 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          !std::isfinite(rb.bound.value)) {
 	        continue;
 	      }
+	      const bool source_excludes_target =
+	          rb.has_source_conflict_literal &&
+	          rb.source_conflict_literal.var_idx == rb.bound.var_idx &&
+	          rb.source_conflict_literal.is_lb != rb.bound.is_lb &&
+	          std::isfinite(rb.source_conflict_literal.value) &&
+	          (rb.bound.is_lb
+	               ? rb.source_conflict_literal.value < rb.bound.value - 1e-9
+	               : rb.source_conflict_literal.value > rb.bound.value + 1e-9);
+	      const bool first_class_proof_target =
+	          rb.has_proof_activity_audit &&
+	          std::isfinite(rb.proof_activity_margin) &&
+	          std::isfinite(rb.proof_activity) &&
+	          std::isfinite(rb.proof_required_activity) &&
+	          rb.proof_activity_margin >= -std::max(1e-8, opt.lp_tol) &&
+	          rb.has_source_conflict_literal &&
+	          rb.source_conflict_literal.var_idx >= 0 &&
+	          rb.source_conflict_literal.var_idx < n &&
+	          source_excludes_target;
+	      if (!first_class_proof_target) {
+	        continue;
+	      }
 	      std::vector<BranchDomainLiteral> sig = rb.reason;
 	      sig.push_back(rb.bound);
 	      if (rb.has_source_conflict_literal) {
@@ -15931,25 +18613,41 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      if (!seen_targets.insert(conflict_clause_hash(sig)).second) {
 	        continue;
 	      }
-	      DualProofTrailResolution resolution;
-	      if (!resolve_dual_proof_target_bound_from_local_trail(
-	              base_lp.vars, root.lb, root.ub,
-	              node.x_relax.size() >= n ? &node.x_relax : nullptr,
-	              opt.int_tol, node.branch_reasons, node.domain_reason_bounds,
-	              &node.local_domain_trail, &node.local_branch_positions, rb,
-	              max_literals, proof->coeff, proof->rhs, resolution,
-	              priority_coeff) ||
-	          !resolution.valid || resolution.cutoff_conflict) {
+    	      DualProofTrailResolution resolution;
+        ++out.bc_stats.resolved_target_attempts;
+        const DualProofResolutionStatus resolve_status =
+          resolve_dual_proof_target_bound_from_local_trail(
+                base_lp.vars, root.lb, root.ub,
+                node.x_relax.size() >= n ? &node.x_relax : nullptr,
+                opt.int_tol, node.branch_reasons, node.domain_reason_bounds,
+                &node.local_domain_trail, &node.local_branch_positions, rb,
+                max_literals, proof->coeff, proof->rhs, resolution,
+            priority_coeff);
+        const bool resolved_target =
+          dual_proof_resolution_success(resolve_status) && resolution.valid &&
+          !resolution.cutoff_conflict;
+        if (!resolved_target) {
+          ++out.bc_stats.resolved_target_failed;
+          record_dual_proof_resolution_failure(
+            resolution.cutoff_conflict
+              ? DualProofResolutionStatus::ScopeBlocked
+              : resolve_status);
 	        continue;
 	      }
+        ++out.bc_stats.resolved_target_success;
 	      DomainReasonBound lifted = rb;
 	      lifted.bound = resolution.has_proved_target_bound
 	                         ? resolution.proved_target_bound
 	                         : rb.bound;
 	      lifted.reason = resolution.resolved_frontier;
-	      lifted.source_conflict_literal = resolution.flipped_target;
-	      lifted.has_source_conflict_literal = true;
-	      lifted.trail_pos = std::max(
+      lifted.source_conflict_literal = resolution.flipped_target;
+      lifted.has_source_conflict_literal = true;
+      lifted.has_proof_activity_audit = true;
+      lifted.proof_activity_margin = resolution.proof_margin;
+      lifted.proof_activity = resolution.resolved_activity;
+      lifted.proof_required_activity =
+          resolution.resolved_activity - resolution.proof_margin;
+      lifted.trail_pos = std::max(
 	          lifted.trail_pos,
 	          static_cast<int>(node.branch_reasons.size() +
 	                           node.domain_reason_bounds.size()));
@@ -15959,6 +18657,72 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    }
 	    return published;
 	  };
+
+    auto publish_local_trail_cutoff_conflict_certificates =
+        [&](const Node& node, const DualProofRow* proof, double cutoff_rhs,
+            const char* tag) -> int {
+      if (proof == nullptr || !proof->valid || proof->coeff.size() < n ||
+          proof->coeff.nonZeros() <= 0 || !std::isfinite(cutoff_rhs) ||
+          node.lb.size() < n || node.ub.size() < n ||
+          node.local_domain_trail.empty()) {
+        return 0;
+      }
+      double node_min_activity = 0.0;
+      for (Eigen::SparseVector<double>::InnerIterator it(proof->coeff); it;
+           ++it) {
+        const int j = static_cast<int>(it.index());
+        const double a = it.value();
+        if (j < 0 || j >= n || !std::isfinite(a)) return 0;
+        if (a > 0.0) {
+          if (!std::isfinite(node.lb[j])) return 0;
+          node_min_activity += a * node.lb[j];
+        } else if (a < 0.0) {
+          if (!std::isfinite(node.ub[j])) return 0;
+          node_min_activity += a * node.ub[j];
+        }
+      }
+      const double activity_tol =
+          std::max(1e-7, std::max(opt.lp_tol, opt.int_tol) *
+                              std::max(10.0, std::abs(cutoff_rhs)));
+      if (!std::isfinite(node_min_activity) ||
+          node_min_activity <= cutoff_rhs + activity_tol) {
+        return 0;
+      }
+      const int integral_cols_for_limit =
+          static_cast<int>(std::count_if(
+              base_lp.vars.begin(), base_lp.vars.end(),
+              [](const VariableMeta& var) { return is_integer_type(var); }));
+      const int proof_frontier_literal_limit = std::min(
+          std::max(2, opt.reduced_cost_conflict_pool_max_literals),
+          std::max(32, (1000 + 3 * integral_cols_for_limit) / 10));
+      DualProofConflictResolution resolution;
+      ++out.bc_stats.resolved_conflict_attempts;
+      const DualProofResolutionStatus resolve_status =
+          resolve_dual_proof_conflict_from_local_trail(
+              base_lp.vars, root.lb, root.ub, node.lb, node.ub, opt.int_tol,
+              opt.lp_tol, node.branch_reasons, node.domain_reason_bounds,
+              &node.local_domain_trail, &node.local_branch_positions,
+              proof->coeff, cutoff_rhs, proof_frontier_literal_limit,
+              resolution);
+      if (!dual_proof_resolution_success(resolve_status) ||
+          !resolution.valid) {
+        ++out.bc_stats.resolved_conflict_failed;
+        record_dual_proof_resolution_failure(resolve_status);
+        return 0;
+      }
+      ++out.bc_stats.resolved_conflict_success;
+      int published = 0;
+      for (const auto& clause : resolution.conflict_clauses) {
+        published += publish_conflict_clause_from_dual_proof(
+            clause,
+            static_cast<std::uint64_t>(
+                resolution.proof_frontier.empty()
+                    ? clause.size()
+                    : resolution.proof_frontier.size()),
+            tag != nullptr ? tag : "local_trail_cutoff_conflict");
+      }
+      return published;
+    };
 
 	  auto publish_dual_proof_prune_conflict =
 	      [&](const DualProofRow& proof, const Node& node, double node_min_activity,
@@ -15991,12 +18755,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        std::max(32, (1000 + 3 * integral_cols_for_limit) / 10));
 	    DualProofConflictResolution row_resolution;
 	    int row_published = 0;
-	    if (resolve_dual_proof_conflict_from_local_trail(
+      ++out.bc_stats.resolved_conflict_attempts;
+  	    const DualProofResolutionStatus resolve_status =
+        resolve_dual_proof_conflict_from_local_trail(
 	            base_lp.vars, root.lb, root.ub, node.lb, node.ub, opt.int_tol,
 	            opt.lp_tol, node.branch_reasons, node.domain_reason_bounds,
 	            &node.local_domain_trail, &node.local_branch_positions, proof.coeff,
-	            cutoff_rhs, proof_frontier_literal_limit, row_resolution) &&
-	        row_resolution.valid) {
+          cutoff_rhs, proof_frontier_literal_limit, row_resolution);
+      const bool resolved_conflict =
+        dual_proof_resolution_success(resolve_status) && row_resolution.valid;
+      if (resolved_conflict) {
+        ++out.bc_stats.resolved_conflict_success;
 	      for (const auto& clause : row_resolution.conflict_clauses) {
 	        row_published += publish_conflict_clause_from_dual_proof(
 	            clause, static_cast<std::uint64_t>(
@@ -16005,314 +18774,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                            : row_resolution.proof_frontier.size()),
 	            source != nullptr ? source : "proof_row_local_trail");
 	      }
+      } else {
+        ++out.bc_stats.resolved_conflict_failed;
+	      record_dual_proof_resolution_failure(resolve_status);
 	    }
 	    if (row_published > 0) {
 	      return row_published;
 	    }
-
-	    double root_min_activity = 0.0;
-	    std::vector<double> coeff_dense(static_cast<std::size_t>(n), 0.0);
-	    for (Eigen::SparseVector<double>::InnerIterator it(proof.coeff); it; ++it) {
-	      const int j = static_cast<int>(it.index());
-	      const double a = it.value();
-	      if (j < 0 || j >= n || !std::isfinite(a)) return 0;
-	      coeff_dense[static_cast<std::size_t>(j)] = a;
-	      if (a > 0.0) {
-	        if (!std::isfinite(root.lb[j])) return 0;
-	        root_min_activity += a * root.lb[j];
-	      } else if (a < 0.0) {
-	        if (!std::isfinite(root.ub[j])) return 0;
-	        root_min_activity += a * root.ub[j];
-	      }
-	    }
-	    if (!std::isfinite(root_min_activity)) return 0;
-
-	    const double required_activity =
-	        cutoff_rhs + std::max(10.0, std::abs(cutoff_rhs)) * feastol;
-	    if (root_min_activity >= required_activity - feastol) return 0;
-
-	    struct ProofTrailCandidate {
-	      BranchDomainLiteral lit;
-	      std::vector<BranchDomainLiteral> reason;
-	      double delta{0.0};
-	      double base_bound{0.0};
-	      double priority{0.0};
-	      int trail_pos{-1};
-	      int prev_bound_pos{-1};
-	      bool is_branch{false};
-	    };
-	    std::vector<ProofTrailCandidate> candidates;
-	    candidates.reserve(static_cast<std::size_t>(proof.coeff.nonZeros()));
-
-	    auto proof_side_matches = [&](const BranchDomainLiteral& lit) {
-	      if (lit.var_idx < 0 || lit.var_idx >= n) return false;
-	      const double a = coeff_dense[static_cast<std::size_t>(lit.var_idx)];
-	      return (a > 0.0 && lit.is_lb) || (a < 0.0 && !lit.is_lb);
-	    };
-	    auto active_enough = [&](const BranchDomainLiteral& lit) {
-	      if (lit.var_idx < 0 || lit.var_idx >= n) return false;
-	      return lit.is_lb ? (lit.value <= node.lb[lit.var_idx] + eps)
-	                       : (lit.value >= node.ub[lit.var_idx] - eps);
-	    };
-	    auto candidate_delta = [&](const BranchDomainLiteral& lit,
-	                               double& base_bound) {
-	      const int j = lit.var_idx;
-	      const double a = coeff_dense[static_cast<std::size_t>(j)];
-	      if (a > 0.0 && lit.is_lb) {
-	        if (!std::isfinite(root.lb[j])) return 0.0;
-	        base_bound = root.lb[j];
-	        return a * std::max(0.0, lit.value - root.lb[j]);
-	      }
-	      if (a < 0.0 && !lit.is_lb) {
-	        if (!std::isfinite(root.ub[j])) return 0.0;
-	        base_bound = root.ub[j];
-	        return a * (lit.value - root.ub[j]);
-	      }
-	      return 0.0;
-	    };
-	    auto candidate_priority = [&](const BranchDomainLiteral& lit,
-	                                  double base_bound) {
-	      const int j = lit.var_idx;
-	      const double a = coeff_dense[static_cast<std::size_t>(j)];
-	      const int side_nodes = node_queue.count_branch_literal_side(j, lit.is_lb);
-	      return std::abs(a * (lit.value - base_bound) *
-	                      static_cast<double>(1 + side_nodes));
-	    };
-	    auto add_candidate = [&](BranchDomainLiteral lit,
-	                             std::vector<BranchDomainLiteral> reason,
-	                             int trail_pos,
-	                             int prev_bound_pos,
-	                             bool is_branch) {
-	      if (!proof_side_matches(lit) || !active_enough(lit)) return;
-	      double base_bound = 0.0;
-	      const double delta = candidate_delta(lit, base_bound);
-	      if (!std::isfinite(delta) || delta <= activity_tol * 1e-6) return;
-	      if (reason.empty()) reason.push_back(lit);
-	      canonicalize_branch_literals(reason);
-	      candidates.push_back(ProofTrailCandidate{
-	          lit, std::move(reason), delta, base_bound,
-	          candidate_priority(lit, base_bound), trail_pos, prev_bound_pos,
-	          is_branch});
-	    };
-
-	    if (!node.local_domain_trail.empty()) {
-	      for (Eigen::SparseVector<double>::InnerIterator it(proof.coeff); it; ++it) {
-	        const int j = static_cast<int>(it.index());
-	        const double a = it.value();
-	        const bool need_lb = a > 0.0;
-	        int best_pos = -1;
-	        const LocalDomainTrailEntry* best = nullptr;
-	        for (const auto& entry : node.local_domain_trail) {
-	          if (entry.bound.var_idx != j || entry.bound.is_lb != need_lb) {
-	            continue;
-	          }
-	          if (!active_enough(entry.bound)) continue;
-	          if (best == nullptr ||
-	              (need_lb && entry.bound.value > best->bound.value + eps) ||
-	              (!need_lb && entry.bound.value < best->bound.value - eps) ||
-	              (std::abs(entry.bound.value - best->bound.value) <= eps &&
-	               entry.pos > best_pos)) {
-	            best = &entry;
-	            best_pos = entry.pos;
-	          }
-	        }
-	        if (best != nullptr) {
-	          add_candidate(best->bound, best->reason, best->pos,
-	                        best->prev_bound_pos, best->is_branch);
-	        }
-	      }
-	    }
-
-	    if (candidates.empty()) {
-	      for (int pos = 0; pos < static_cast<int>(node.branch_reasons.size()); ++pos) {
-	        const auto& lit = node.branch_reasons[static_cast<std::size_t>(pos)];
-	        add_candidate(lit, {lit}, pos, -1, true);
-	      }
-	      for (const auto& rb : node.domain_reason_bounds) {
-	        add_candidate(rb.bound, rb.reason, rb.trail_pos, rb.prev_bound_pos,
-	                      false);
-	      }
-	    }
-	    if (candidates.empty()) return 0;
-
-	    std::sort(candidates.begin(), candidates.end(),
-	              [](const ProofTrailCandidate& a,
-	                 const ProofTrailCandidate& b) {
-	                if (a.priority != b.priority) return a.priority > b.priority;
-	                if (a.trail_pos != b.trail_pos) return a.trail_pos < b.trail_pos;
-	                if (a.delta != b.delta) return a.delta > b.delta;
-	                return a.reason.size() < b.reason.size();
-	              });
-
-	    double resolved_activity = root_min_activity;
-	    std::vector<ProofTrailCandidate> selected;
-	    selected.reserve(candidates.size());
-	    std::vector<char> used_lower(static_cast<std::size_t>(n), 0);
-	    std::vector<char> used_upper(static_cast<std::size_t>(n), 0);
-	    for (const auto& cand : candidates) {
-	      const int j = cand.lit.var_idx;
-	      char& used = cand.lit.is_lb ? used_lower[static_cast<std::size_t>(j)]
-	                                  : used_upper[static_cast<std::size_t>(j)];
-	      if (used != 0) continue;
-	      used = 1;
-	      selected.push_back(cand);
-	      resolved_activity += cand.delta;
-	      if (resolved_activity >= required_activity - feastol) break;
-	    }
-	    if (selected.empty() ||
-	        resolved_activity < required_activity - feastol) {
-	      return 0;
-	    }
-
-	    for (int k = static_cast<int>(selected.size()) - 1; k >= 0; --k) {
-	      ProofTrailCandidate& cand = selected[static_cast<std::size_t>(k)];
-	      const int j = cand.lit.var_idx;
-	      const double a = coeff_dense[static_cast<std::size_t>(j)];
-	      const double without = resolved_activity - cand.delta;
-	      if (cand.lit.is_lb) {
-	        if (a <= 0.0) continue;
-	        double relaxed = (required_activity - without) / a + cand.base_bound;
-	        if (is_integer_type(base_lp.vars[static_cast<std::size_t>(j)])) {
-	          relaxed = std::ceil(relaxed - eps);
-	        }
-	        if (!std::isfinite(relaxed) ||
-	            relaxed >= cand.lit.value - feastol) {
-	          continue;
-	        }
-	        if (relaxed <= cand.base_bound + eps) {
-	          resolved_activity = without;
-	          selected.erase(selected.begin() + k);
-	        } else {
-	          resolved_activity += a * (relaxed - cand.lit.value);
-	          cand.lit.value = relaxed;
-	          if (cand.is_branch) cand.reason = {cand.lit};
-	        }
-	      } else {
-	        if (a >= 0.0) continue;
-	        double relaxed = (required_activity - without) / a + cand.base_bound;
-	        if (is_integer_type(base_lp.vars[static_cast<std::size_t>(j)])) {
-	          relaxed = std::floor(relaxed + eps);
-	        }
-	        if (!std::isfinite(relaxed) ||
-	            relaxed <= cand.lit.value + feastol) {
-	          continue;
-	        }
-	        if (relaxed >= cand.base_bound - eps) {
-	          resolved_activity = without;
-	          selected.erase(selected.begin() + k);
-	        } else {
-	          resolved_activity += a * (relaxed - cand.lit.value);
-	          cand.lit.value = relaxed;
-	          if (cand.is_branch) cand.reason = {cand.lit};
-	        }
-	      }
-	      if (resolved_activity <= required_activity + feastol) break;
-	    }
-	    if (selected.empty() ||
-	        resolved_activity < required_activity - feastol) {
-	      return 0;
-	    }
-
-	    int integral_cols = 0;
-	    for (const auto& var : base_lp.vars) {
-	      if (is_integer_type(var)) ++integral_cols;
-	    }
-	    if (10 * static_cast<int>(selected.size()) > 1000 + 3 * integral_cols) {
-	      return 0;
-	    }
-
-	    auto pool_literal = [&](BranchDomainLiteral lit) {
-	      if (lit.var_idx >= 0 && lit.var_idx < n &&
-	          base_lp.vars[static_cast<std::size_t>(lit.var_idx)].type ==
-	              VarType::Continuous) {
-	        lit.value += lit.is_lb ? feastol : -feastol;
-	      }
-	      return lit;
-	    };
-
-	    std::vector<BranchDomainLiteral> proof_clause;
-	    proof_clause.reserve(selected.size());
-	    for (const auto& cand : selected) {
-	      proof_clause.push_back(pool_literal(cand.lit));
-	    }
-	    canonicalize_branch_literals(proof_clause);
-	    out.bc_stats.termination_effective_candidates +=
-	        static_cast<std::uint64_t>(proof_clause.size());
-
-	    auto find_reason_for_literal =
-	        [&](const BranchDomainLiteral& lit) -> const LocalDomainTrailEntry* {
-	      const LocalDomainTrailEntry* best = nullptr;
-	      for (const auto& entry : node.local_domain_trail) {
-	        if (entry.is_branch || entry.reason.empty() ||
-	            entry.bound.var_idx != lit.var_idx ||
-	            entry.bound.is_lb != lit.is_lb ||
-	            !branch_literal_stronger_or_equal(entry.bound, lit, eps)) {
-	          continue;
-	        }
-	        if (best == nullptr || entry.pos > best->pos) best = &entry;
-	      }
-	      return best;
-	    };
-	    auto resolve_reason_frontier =
-	        [&](std::vector<BranchDomainLiteral> frontier) {
-	      canonicalize_branch_literals(frontier);
-	      const int max_literals =
-	          std::max(2, opt.reduced_cost_conflict_pool_max_literals);
-	      std::unordered_set<std::size_t> seen;
-	      for (int iter = 0; iter < 32; ++iter) {
-	        const std::size_t h = conflict_clause_hash(frontier);
-	        if (!seen.insert(h).second) break;
-	        int best_idx = -1;
-	        int best_pos = -1;
-	        const LocalDomainTrailEntry* replacement = nullptr;
-	        for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
-	          const auto* reason =
-	              find_reason_for_literal(frontier[static_cast<std::size_t>(i)]);
-	          if (reason == nullptr) continue;
-	          if (reason->pos > best_pos) {
-	            best_pos = reason->pos;
-	            best_idx = i;
-	            replacement = reason;
-	          }
-	        }
-	        if (best_idx < 0 || replacement == nullptr) break;
-	        std::vector<BranchDomainLiteral> trial;
-	        trial.reserve(frontier.size() + replacement->reason.size());
-	        for (int i = 0; i < static_cast<int>(frontier.size()); ++i) {
-	          if (i != best_idx) trial.push_back(frontier[static_cast<std::size_t>(i)]);
-	        }
-	        trial.insert(trial.end(), replacement->reason.begin(),
-	                     replacement->reason.end());
-	        canonicalize_branch_literals(trial);
-	        if (trial.empty() || static_cast<int>(trial.size()) > max_literals) {
-	          break;
-	        }
-	        frontier.swap(trial);
-	      }
-	      return frontier;
-	    };
-
-	    std::vector<BranchDomainLiteral> reason_clause;
-	    reason_clause.reserve(proof_clause.size());
-	    for (const auto& cand : selected) {
-	      if (!cand.is_branch && !cand.reason.empty()) {
-	        reason_clause.insert(reason_clause.end(), cand.reason.begin(),
-	                             cand.reason.end());
-	      } else {
-	        reason_clause.push_back(pool_literal(cand.lit));
-	      }
-	    }
-	    reason_clause = resolve_reason_frontier(std::move(reason_clause));
-	    canonicalize_branch_literals(reason_clause);
-
-	    int published = 0;
-	    published += publish_conflict_clause_from_dual_proof(
-	        reason_clause, static_cast<std::uint64_t>(selected.size()), source);
-	    if (conflict_clause_hash(reason_clause) != conflict_clause_hash(proof_clause)) {
-	      published += publish_conflict_clause_from_dual_proof(
-	          proof_clause, static_cast<std::uint64_t>(selected.size()), source);
-	    }
-	    return published;
+	    return 0;
 	  };
 
 	  auto dual_proof_min_activity_for_node =
@@ -16397,15 +18866,66 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       }
     }
     node.local_conflict_clauses.push_back(std::move(local_clause));
-    ++out.bc_stats.local_conflict_clauses_learned;
-    return true;
-  };
+	    ++out.bc_stats.local_conflict_clauses_learned;
+	    return true;
+	  };
 
-	  add_scoped_conflict_object =
-	      [&](Node& node, const std::vector<BranchDomainLiteral>& learned_clause,
-	          const DomainReasonBound* target_bound)
-	          -> bool {
-    if (learned_clause.empty() || learned_clause.size() > 16) return false;
+	  auto strict_target_certificate_ok =
+	      [&](const DomainReasonBound& rb) -> bool {
+	    if (!strict_highs_lp_contract) return true;
+	    if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
+	        !std::isfinite(rb.bound.value) ||
+	        !rb.has_source_conflict_literal ||
+	        rb.source_conflict_literal.var_idx < 0 ||
+	        rb.source_conflict_literal.var_idx >= n ||
+	        !std::isfinite(rb.source_conflict_literal.value) ||
+	        !rb.has_proof_activity_audit ||
+	        !std::isfinite(rb.proof_activity_margin) ||
+	        rb.proof_activity_margin < -std::max(1e-8, opt.lp_tol)) {
+	      return false;
+	    }
+	    const bool source_excludes_target =
+	        rb.source_conflict_literal.var_idx == rb.bound.var_idx &&
+	        rb.source_conflict_literal.is_lb != rb.bound.is_lb &&
+	        (rb.bound.is_lb
+	             ? rb.source_conflict_literal.value < rb.bound.value - 1e-9
+	             : rb.source_conflict_literal.value > rb.bound.value + 1e-9);
+	    if (!source_excludes_target) return false;
+	    std::vector<double> lower(static_cast<std::size_t>(n), -kInf);
+	    std::vector<double> upper(static_cast<std::size_t>(n), kInf);
+	    for (const auto& lit : rb.reason) {
+	      if (lit.var_idx < 0 || lit.var_idx >= n ||
+	          !std::isfinite(lit.value) || lit.var_idx == rb.bound.var_idx) {
+	        return false;
+	      }
+	      if (lit.is_lb) {
+	        lower[static_cast<std::size_t>(lit.var_idx)] =
+	            std::max(lower[static_cast<std::size_t>(lit.var_idx)],
+	                     lit.value);
+	      } else {
+	        upper[static_cast<std::size_t>(lit.var_idx)] =
+	            std::min(upper[static_cast<std::size_t>(lit.var_idx)],
+	                     lit.value);
+	      }
+	      if (lower[static_cast<std::size_t>(lit.var_idx)] >
+	          upper[static_cast<std::size_t>(lit.var_idx)] +
+	              std::max(1e-9, opt.int_tol)) {
+	        return false;
+	      }
+	    }
+	    return true;
+	  };
+
+		  add_scoped_conflict_object =
+		      [&](Node& node, const std::vector<BranchDomainLiteral>& learned_clause,
+		          const DomainReasonBound* target_bound)
+		          -> bool {
+	    if (learned_clause.empty() || learned_clause.size() > 16) return false;
+	    if (strict_highs_lp_contract &&
+	        (target_bound == nullptr ||
+	         !strict_target_certificate_ok(*target_bound))) {
+	      return false;
+	    }
     std::vector<BranchDomainLiteral> scope;
     std::vector<BranchDomainLiteral> residual;
     scope.reserve(node.branch_reasons.size());
@@ -16459,26 +18979,35 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     obj.residual_literals = std::move(residual);
     obj.hash = h;
     obj.depth = node.depth;
-    if (target_bound != nullptr &&
-        target_bound->bound.var_idx >= 0 &&
-        target_bound->bound.var_idx < n &&
-        std::isfinite(target_bound->bound.value)) {
-      obj.has_target_bound = true;
-      obj.target_bound = target_bound->bound;
-      obj.source_conflict_literal = target_bound->source_conflict_literal;
-      obj.has_source_conflict_literal =
-          target_bound->has_source_conflict_literal;
-    }
+	    if (target_bound != nullptr &&
+	        target_bound->bound.var_idx >= 0 &&
+	        target_bound->bound.var_idx < n &&
+	        std::isfinite(target_bound->bound.value)) {
+	      obj.has_target_bound = true;
+	      obj.target_bound = target_bound->bound;
+	      obj.source_conflict_literal = target_bound->source_conflict_literal;
+	      obj.has_source_conflict_literal =
+	          target_bound->has_source_conflict_literal;
+	      obj.has_proof_activity_audit =
+	          target_bound->has_proof_activity_audit;
+	      obj.proof_activity_margin = target_bound->proof_activity_margin;
+	      obj.proof_activity = target_bound->proof_activity;
+	      obj.proof_required_activity =
+	          target_bound->proof_required_activity;
+	    }
     node.scoped_conflict_clauses.push_back(
         std::move(obj));
     ++out.bc_stats.scoped_conflict_objects_learned;
     return true;
   };
 
-		  add_scoped_target_bound_certificate =
-		      [&](Node& node, const DomainReasonBound& target_bound) -> bool {
-		    if (target_bound.bound.var_idx < 0 || target_bound.bound.var_idx >= n ||
-		        !std::isfinite(target_bound.bound.value)) {
+				  add_scoped_target_bound_certificate =
+				      [&](Node& node, const DomainReasonBound& target_bound) -> bool {
+			    if (target_bound.bound.var_idx < 0 || target_bound.bound.var_idx >= n ||
+			        !std::isfinite(target_bound.bound.value)) {
+			      return false;
+			    }
+		    if (!strict_target_certificate_ok(target_bound)) {
 		      return false;
 		    }
 		    std::vector<BranchDomainLiteral> scope;
@@ -16510,18 +19039,79 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     obj.residual_literals = std::move(residual);
     obj.hash = h;
     obj.depth = node.depth;
-    obj.has_target_bound = true;
-    obj.target_bound = target_bound.bound;
-    obj.source_conflict_literal = target_bound.source_conflict_literal;
-    obj.has_source_conflict_literal =
-        target_bound.has_source_conflict_literal;
-    node.scoped_conflict_clauses.push_back(std::move(obj));
-    ++out.bc_stats.scoped_conflict_objects_learned;
-		    return true;
-		  };
+	    obj.has_target_bound = true;
+	    obj.target_bound = target_bound.bound;
+	    obj.source_conflict_literal = target_bound.source_conflict_literal;
+	    obj.has_source_conflict_literal =
+	        target_bound.has_source_conflict_literal;
+	    obj.has_proof_activity_audit =
+	        target_bound.has_proof_activity_audit;
+	    obj.proof_activity_margin = target_bound.proof_activity_margin;
+	    obj.proof_activity = target_bound.proof_activity;
+	    obj.proof_required_activity =
+	        target_bound.proof_required_activity;
+	    node.scoped_conflict_clauses.push_back(std::move(obj));
+	    ++out.bc_stats.scoped_conflict_objects_learned;
+			    return true;
+			  };
 
-		  propagate_global_bound_lifting_certificates =
-		      [&](Node& node, std::vector<BoundChangeInfo>& changes_out,
+			  std::size_t root_domain_reason_certificate_cursor = 0;
+			  auto publish_root_domain_closure_certificates =
+			      [&](const char* tag) -> int {
+			    if (!publish_bound_lifting_certificate ||
+			        root.domain_reason_bounds.empty()) {
+			      return 0;
+			    }
+			    if (root_domain_reason_certificate_cursor >
+			        root.domain_reason_bounds.size()) {
+			      root_domain_reason_certificate_cursor = 0;
+			    }
+			    int published = 0;
+			    int candidates = 0;
+			    int rejected = 0;
+			    const std::size_t begin = root_domain_reason_certificate_cursor;
+			    for (std::size_t i = begin; i < root.domain_reason_bounds.size(); ++i) {
+			      const DomainReasonBound& rb = root.domain_reason_bounds[i];
+			      const bool candidate =
+			          rb.bound.var_idx >= 0 && rb.bound.var_idx < n &&
+			          std::isfinite(rb.bound.value) &&
+			          rb.has_source_conflict_literal &&
+			          rb.source_conflict_literal.var_idx >= 0 &&
+			          rb.source_conflict_literal.var_idx < n &&
+			          std::isfinite(rb.source_conflict_literal.value) &&
+			          rb.has_proof_activity_audit &&
+			          std::isfinite(rb.proof_activity_margin);
+			      if (!candidate) {
+			        ++rejected;
+			        continue;
+			      }
+			      ++candidates;
+			      published += publish_bound_lifting_certificate(
+			          rb, nullptr, nullptr,
+			          tag != nullptr ? tag : "root_domain_closure");
+			    }
+			    root_domain_reason_certificate_cursor =
+			        root.domain_reason_bounds.size();
+			    if (published > 0) {
+			      root.domain_learning_epoch = current_domain_learning_epoch();
+			      root.objective_artifact_epoch = current_objective_artifact_epoch();
+			      root.domain_closure_epoch = current_domain_closure_epoch();
+			    }
+			    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr ||
+			        published > 0) {
+			      fmt::print(stderr,
+			                 "[B&C ROOT-CERT-PUBLISH] source={} range={}:{} "
+			                 "candidates={} rejected={} published={} totalCert={}\n",
+			                 tag != nullptr ? tag : "root_domain_closure",
+			                 begin, root.domain_reason_bounds.size(), candidates,
+			                 rejected, published,
+			                 global_bound_lifting_certificates.size());
+			    }
+			    return published;
+			  };
+
+			  propagate_global_bound_lifting_certificates =
+			      [&](Node& node, std::vector<BoundChangeInfo>& changes_out,
 		          std::uint64_t* reasons_added_out) -> bool {
 	    if (reasons_added_out != nullptr) *reasons_added_out = 0;
 	    if (global_bound_lifting_certificates.empty() || node.lb.size() < n ||
@@ -16618,16 +19208,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		        }
 		        if (missing_count != 1 || missing_idx < 0) continue;
 
-		        const BranchDomainLiteral& missing =
-		            clause[static_cast<std::size_t>(missing_idx)];
-		        BranchDomainLiteral implied = cert.target_bound;
-		        const bool missing_is_source =
-		            missing.var_idx == source_lit.var_idx &&
-		            missing.is_lb == source_lit.is_lb &&
-		            std::abs(missing.value - source_lit.value) <= tol;
-		        if (!missing_is_source) {
-		          continue;
-		        }
+			        const BranchDomainLiteral& missing =
+			            clause[static_cast<std::size_t>(missing_idx)];
+			        BranchDomainLiteral implied = cert.target_bound;
+			        const bool missing_is_source =
+			            missing.var_idx == source_lit.var_idx &&
+			            missing.is_lb == source_lit.is_lb &&
+			            std::abs(missing.value - source_lit.value) <= tol;
+			        if (!missing_is_source &&
+			            !flip_clause_literal(missing, implied)) {
+			          continue;
+			        }
 		        if (implied.var_idx < 0 || implied.var_idx >= n ||
 		            !std::isfinite(implied.value)) {
 		          continue;
@@ -16639,9 +19230,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		        rb.reason = reason;
 		        rb.trail_pos = static_cast<int>(
 		            node.branch_reasons.size() + node.domain_reason_bounds.size());
-		        rb.depth = cert.depth;
-		        rb.source_conflict_literal = missing;
-		        rb.has_source_conflict_literal = true;
+			        rb.depth = cert.depth;
+			        rb.source_conflict_literal = missing;
+			        rb.has_source_conflict_literal = true;
+			        rb.has_proof_activity_audit =
+			            cert.has_proof_activity_audit;
+			        rb.proof_activity_margin = cert.proof_activity_margin;
+			        rb.proof_activity = cert.proof_activity;
+			        rb.proof_required_activity =
+			            cert.proof_required_activity;
 
 		        const int j = implied.var_idx;
 		        bool bound_changed = false;
@@ -16674,23 +19271,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		            changed = true;
 		          }
 		        }
-		        bool reason_added = false;
-		        if (!duplicate_reason(rb)) {
-		          append_domain_reason_bound(node, std::move(rb), n, &root.lb,
-		                                     &root.ub);
-		          ++reasons_added;
-		          reason_added = true;
-		        }
+			        bool reason_added = false;
+			        if (bound_changed && !duplicate_reason(rb)) {
+			          append_domain_reason_bound(node, std::move(rb), n, &root.lb,
+			                                     &root.ub);
+			          ++reasons_added;
+			          reason_added = true;
+			        }
 		        if (bound_changed || reason_added) changed_this_pass = true;
 		      }
 		    }
 	    if (reasons_added_out != nullptr) {
 	      *reasons_added_out = reasons_added;
 	    }
-	    if (changed || reasons_added > 0) {
-	      node.lp_refresh_needed = true;
-	      node.domain_learning_epoch = current_domain_learning_epoch();
-	    }
+		    if (changed) {
+		      node.lp_refresh_needed = true;
+		      node.domain_learning_epoch = current_domain_learning_epoch();
+		      node.objective_artifact_epoch = current_objective_artifact_epoch();
+		      node.domain_closure_epoch = current_domain_closure_epoch();
+		    }
 	    return bounds_consistent(node.lb, node.ub);
 	  };
 
@@ -16727,13 +19326,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 	      return true;
 	    };
-	    auto remember_scoped_reason_bound =
-	        [&](const BranchDomainLiteral& bound,
-	            std::vector<BranchDomainLiteral> reason,
-	            const std::vector<BranchDomainLiteral>& scope_literals,
-	            const BranchDomainLiteral& source_conflict_literal,
-	            bool has_source_conflict_literal,
-	            int depth) {
+		    auto remember_scoped_reason_bound =
+		        [&](const BranchDomainLiteral& bound,
+		            std::vector<BranchDomainLiteral> reason,
+		            const std::vector<BranchDomainLiteral>& scope_literals,
+		            const BranchDomainLiteral& source_conflict_literal,
+		            bool has_source_conflict_literal,
+		            int depth,
+		            bool has_proof_activity_audit,
+		            double proof_activity_margin,
+		            double proof_activity,
+		            double proof_required_activity) {
 	      (void)scope_literals;
 	      if (bound.var_idx < 0 || bound.var_idx >= n ||
 	          !std::isfinite(bound.value)) {
@@ -16745,10 +19348,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      rb.reason = std::move(reason);
 	      rb.trail_pos = static_cast<int>(node.branch_reasons.size() +
 	                                      node.domain_reason_bounds.size());
-	      rb.depth = depth;
-	      rb.source_conflict_literal = source_conflict_literal;
-	      rb.has_source_conflict_literal = has_source_conflict_literal;
-		      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+		      rb.depth = depth;
+		      rb.source_conflict_literal = source_conflict_literal;
+		      rb.has_source_conflict_literal = has_source_conflict_literal;
+		      rb.has_proof_activity_audit = has_proof_activity_audit;
+		      rb.proof_activity_margin = proof_activity_margin;
+		      rb.proof_activity = proof_activity;
+		      rb.proof_required_activity = proof_required_activity;
+			      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
 	      for (const auto& existing : node.domain_reason_bounds) {
 	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
 	            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
@@ -16758,15 +19365,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 	      append_domain_reason_bound(node, std::move(rb), n, &root.lb, &root.ub);
 	    };
-	    auto remember_scoped_target_reason =
-	        [&](const ScopedConflictClause& obj) {
+		    auto remember_scoped_target_reason =
+		        [&](const ScopedConflictClause& obj) {
 	      if (!obj.has_target_bound) return;
 	      remember_scoped_reason_bound(obj.target_bound, obj.residual_literals,
 	                                   obj.scope_literals,
 	                                   obj.source_conflict_literal,
 	                                   obj.has_source_conflict_literal,
-	                                   obj.depth);
-	    };
+	                                   obj.depth,
+	                                   obj.has_proof_activity_audit,
+	                                   obj.proof_activity_margin,
+	                                   obj.proof_activity,
+	                                   obj.proof_required_activity);
+		    };
 		    bool changed = true;
 		    while (changed) {
 		      changed = false;
@@ -16810,11 +19421,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            bool target_changed = false;
 	            if (obj.target_bound.is_lb) {
 	              if (obj.target_bound.value > node.ub[j] + tol) {
-	                remember_scoped_reason_bound(
-	                    obj.target_bound, std::move(frontier_reason),
-	                    obj.scope_literals,
-	                    source_lit, /*has_source_conflict_literal=*/true,
-	                    obj.depth);
+		                remember_scoped_reason_bound(
+		                    obj.target_bound, std::move(frontier_reason),
+		                    obj.scope_literals,
+		                    source_lit, /*has_source_conflict_literal=*/true,
+		                    obj.depth, obj.has_proof_activity_audit,
+		                    obj.proof_activity_margin, obj.proof_activity,
+		                    obj.proof_required_activity);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -16829,11 +19442,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              }
 	            } else {
 	              if (obj.target_bound.value < node.lb[j] - tol) {
-	                remember_scoped_reason_bound(
-	                    obj.target_bound, std::move(frontier_reason),
-	                    obj.scope_literals,
-	                    source_lit, /*has_source_conflict_literal=*/true,
-	                    obj.depth);
+		                remember_scoped_reason_bound(
+		                    obj.target_bound, std::move(frontier_reason),
+		                    obj.scope_literals,
+		                    source_lit, /*has_source_conflict_literal=*/true,
+		                    obj.depth, obj.has_proof_activity_audit,
+		                    obj.proof_activity_margin, obj.proof_activity,
+		                    obj.proof_required_activity);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -16847,12 +19462,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                changed = true;
 	              }
 	            }
-	            remember_scoped_reason_bound(
-	                obj.target_bound, std::move(frontier_reason),
-	                obj.scope_literals,
-	                source_lit,
-	                /*has_source_conflict_literal=*/true, obj.depth);
-	            if (target_changed) continue;
+		            if (target_changed) {
+			              remember_scoped_reason_bound(
+			                  obj.target_bound, std::move(frontier_reason),
+			                  obj.scope_literals,
+			                  source_lit,
+			                  /*has_source_conflict_literal=*/true, obj.depth,
+			                  obj.has_proof_activity_audit,
+			                  obj.proof_activity_margin, obj.proof_activity,
+			                  obj.proof_required_activity);
+		            }
+		            if (target_changed) continue;
 	          }
 
 	          std::vector<BranchDomainLiteral> clause = obj.residual_literals;
@@ -16875,16 +19495,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            return false;
 	          }
 	          if (missing_count == 1 && missing_idx >= 0) {
-	            const BranchDomainLiteral& missing =
-	                clause[static_cast<std::size_t>(missing_idx)];
-	            BranchDomainLiteral implied = obj.target_bound;
-	            const bool missing_is_source =
-	                missing.var_idx == source_lit.var_idx &&
-	                missing.is_lb == source_lit.is_lb &&
-	                std::abs(missing.value - source_lit.value) <= tol;
-	            if (!missing_is_source) {
-	              continue;
-	            }
+		            const BranchDomainLiteral& missing =
+		                clause[static_cast<std::size_t>(missing_idx)];
+		            BranchDomainLiteral implied = obj.target_bound;
+		            const bool missing_is_source =
+		                missing.var_idx == source_lit.var_idx &&
+		                missing.is_lb == source_lit.is_lb &&
+		                std::abs(missing.value - source_lit.value) <= tol;
+		            if (!missing_is_source &&
+		                !flip_clause_literal(missing, implied)) {
+		              continue;
+		            }
 	            const int j = implied.var_idx;
 	            if (j < 0 || j >= n || !std::isfinite(implied.value)) {
 	              continue;
@@ -16892,9 +19513,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            bool target_changed = false;
 	            if (implied.is_lb) {
 	              if (implied.value > node.ub[j] + tol) {
-	                remember_scoped_reason_bound(
-	                    implied, reason, obj.scope_literals, missing,
-	                    /*has_source_conflict_literal=*/true, obj.depth);
+		                remember_scoped_reason_bound(
+		                    implied, reason, obj.scope_literals, missing,
+		                    /*has_source_conflict_literal=*/true, obj.depth,
+		                    obj.has_proof_activity_audit,
+		                    obj.proof_activity_margin, obj.proof_activity,
+		                    obj.proof_required_activity);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -16908,9 +19532,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              }
 	            } else {
 	              if (implied.value < node.lb[j] - tol) {
-	                remember_scoped_reason_bound(
-	                    implied, reason, obj.scope_literals, missing,
-	                    /*has_source_conflict_literal=*/true, obj.depth);
+		                remember_scoped_reason_bound(
+		                    implied, reason, obj.scope_literals, missing,
+		                    /*has_source_conflict_literal=*/true, obj.depth,
+		                    obj.has_proof_activity_audit,
+		                    obj.proof_activity_margin, obj.proof_activity,
+		                    obj.proof_required_activity);
 	                ++out.bc_stats.scoped_conflict_prunes;
 	                return false;
 	              }
@@ -16923,11 +19550,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                changed = true;
 	              }
 	            }
-	            if (target_changed || literal_active(implied)) {
-	              remember_scoped_reason_bound(
-	                  implied, std::move(reason), obj.scope_literals, missing,
-	                  /*has_source_conflict_literal=*/true, obj.depth);
-	            }
+		            if (target_changed) {
+			              remember_scoped_reason_bound(
+			                  implied, std::move(reason), obj.scope_literals, missing,
+			                  /*has_source_conflict_literal=*/true, obj.depth,
+			                  obj.has_proof_activity_audit,
+			                  obj.proof_activity_margin, obj.proof_activity,
+			                  obj.proof_required_activity);
+		            }
 	            if (target_changed) continue;
 	          }
 	          continue;
@@ -16956,13 +19586,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               const double old = node.lb[j];
               node.lb[j] = obj.target_bound.value;
               changes_out.push_back({j, obj.target_bound.value - old, true});
-              remember_scoped_target_reason(obj);
-              ++out.bc_stats.scoped_conflict_tightenings;
-              target_changed = true;
-              changed = true;
-            } else {
-              remember_scoped_target_reason(obj);
-            }
+	              ++out.bc_stats.scoped_conflict_tightenings;
+	              target_changed = true;
+	              changed = true;
+	            }
           } else {
             if (obj.target_bound.value < node.lb[j] - tol) {
               remember_scoped_target_reason(obj);
@@ -16973,13 +19600,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               const double old = node.ub[j];
               node.ub[j] = obj.target_bound.value;
               changes_out.push_back({j, obj.target_bound.value - old, false});
-              remember_scoped_target_reason(obj);
-              ++out.bc_stats.scoped_conflict_tightenings;
-              target_changed = true;
-              changed = true;
-            } else {
-              remember_scoped_target_reason(obj);
-            }
+	              ++out.bc_stats.scoped_conflict_tightenings;
+	              target_changed = true;
+	              changed = true;
+	            }
           }
           if (target_changed) continue;
         }
@@ -17063,7 +19687,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      }
 	      return true;
 	    };
-		    auto apply_reason_bound = [&](const DomainReasonBound& rb) -> bool {
+			    auto apply_reason_bound = [&](const DomainReasonBound& rb) -> bool {
 		      const int j = rb.bound.var_idx;
 		      if (j < 0 || j >= n || !std::isfinite(rb.bound.value)) {
 		        return true;
@@ -17125,8 +19749,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          }
 	        }
 	      }
-	      return bounds_consistent(node.lb, node.ub);
-	    };
+		      return bounds_consistent(node.lb, node.ub);
+		    };
+		    auto duplicate_reason_bound = [&](const DomainReasonBound& rb) {
+		      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+		      for (const auto& existing : node.domain_reason_bounds) {
+		        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
+		            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
+		            conflict_clause_hash(existing.reason) == reason_hash) {
+		          return true;
+		        }
+		      }
+		      return false;
+		    };
 
 	    bool changed = true;
 	    while (changed) {
@@ -17190,33 +19825,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                obj.has_source_conflict_literal
 	                    ? obj.source_conflict_literal
 		                    : BranchDomainLiteral{};
-		            resolved_target.has_source_conflict_literal =
-		                obj.has_source_conflict_literal;
-		            const bool resolved_frontier_active =
-		                reason_active(resolved_target.reason);
-		            if (resolved_frontier_active) {
-		              const std::size_t reason_hash =
-		                  conflict_clause_hash(resolved_target.reason);
-		              bool duplicate = false;
-		              for (const auto& existing : node.domain_reason_bounds) {
-		                if (branch_literal_stronger_or_equal(
-		                        existing.bound, resolved_target.bound, tol) &&
-		                    branch_literal_stronger_or_equal(
-		                        resolved_target.bound, existing.bound, tol) &&
-		                    conflict_clause_hash(existing.reason) == reason_hash) {
-		                  duplicate = true;
-		                  break;
-		                }
-		              }
-		              if (!duplicate) {
-		                append_domain_reason_bound(node, resolved_target, n,
-		                                           &root.lb, &root.ub);
-		                changed = true;
-		              }
-		              const double old_lb =
-		                  resolved_target.bound.var_idx >= 0
-		                      ? node.lb[resolved_target.bound.var_idx]
-		                      : 0.0;
+			            resolved_target.has_source_conflict_literal =
+			                obj.has_source_conflict_literal;
+			            resolved_target.has_proof_activity_audit =
+			                obj.has_proof_activity_audit;
+			            resolved_target.proof_activity_margin =
+			                obj.proof_activity_margin;
+			            resolved_target.proof_activity = obj.proof_activity;
+			            resolved_target.proof_required_activity =
+			                obj.proof_required_activity;
+			            const bool resolved_frontier_active =
+			                reason_active(resolved_target.reason);
+			            if (resolved_frontier_active) {
+			              const double old_lb =
+			                  resolved_target.bound.var_idx >= 0
+			                      ? node.lb[resolved_target.bound.var_idx]
+			                      : 0.0;
 		              const double old_ub =
 		                  resolved_target.bound.var_idx >= 0
 		                      ? node.ub[resolved_target.bound.var_idx]
@@ -17224,13 +19848,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              if (!apply_reason_bound(resolved_target)) return false;
 		              const bool target_tightened =
 		                  resolved_target.bound.var_idx >= 0 &&
-		                  (resolved_target.bound.is_lb
-		                       ? node.lb[resolved_target.bound.var_idx] >
-		                             old_lb + tol
-		                       : node.ub[resolved_target.bound.var_idx] <
-		                             old_ub - tol);
-		              if (target_tightened) changed = true;
-		            }
+			                  (resolved_target.bound.is_lb
+			                       ? node.lb[resolved_target.bound.var_idx] >
+			                             old_lb + tol
+			                       : node.ub[resolved_target.bound.var_idx] <
+			                             old_ub - tol);
+			              if (target_tightened) {
+			                if (!duplicate_reason_bound(resolved_target)) {
+			                  append_domain_reason_bound(node, resolved_target, n,
+			                                             &root.lb, &root.ub);
+			                }
+			                changed = true;
+			              }
+			            }
 		          } else if (add_scoped_conflict_object(node, resolved_clause,
 		                                                nullptr)) {
 		            changed = true;
@@ -17454,6 +20084,750 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    return bounds_consistent(node.lb, node.ub);
 	  };
 
+	  struct NodeDomainClosureStats {
+	    std::uint64_t tightened{0};
+	    std::uint64_t reasons_added{0};
+	    std::uint64_t global_certificate_reasons{0};
+	    std::uint64_t cutpool_tightened{0};
+	    std::uint64_t objective_tightened{0};
+	    std::uint64_t objective_proof_candidates{0};
+	    std::uint64_t objective_proof_fixings{0};
+	    std::uint64_t objective_proof_prunes{0};
+	    std::uint64_t objective_proof_skip_coeff{0};
+	    std::uint64_t objective_proof_skip_budget{0};
+		    std::uint64_t objective_proof_skip_no_hit{0};
+		    std::uint64_t conflict_tightened{0};
+		    std::uint64_t row_tightened{0};
+		    std::uint64_t redcost_tightened{0};
+		    std::uint64_t redcost_active{0};
+		    std::uint64_t redcost_scanned{0};
+		    std::uint64_t cutpool_rows_scanned{0};
+		    std::uint64_t cutpool_active_rows{0};
+		    std::uint64_t cutpool_skip_capacity{0};
+		    std::uint64_t cutpool_skip_infinite{0};
+		    std::uint64_t cutpool_candidate_bounds{0};
+		    std::uint64_t cutpool_rejected_weak_bounds{0};
+		    std::uint64_t closure_passes{0};
+			    std::uint64_t global_learning_events{0};
+			    int conflicts_learned{0};
+			    int cuts_learned{0};
+			    bool domain_changed{false};
+			    bool propagation_source_changed{false};
+		    bool pruned{false};
+		  };
+
+  auto run_node_domain_closure =
+      [&](Node& node,
+          const std::vector<DomainReasonBound>& incoming_reasons,
+          std::vector<BoundChangeInfo>& changes_out,
+          std::vector<PoolCut>* new_cuts,
+          int* cut_count,
+          double inc_obj_snapshot,
+          bool has_inc_snapshot,
+          const char* phase,
+          NodeDomainClosureStats* stats) -> bool {
+    if (node.lb.size() != n || node.ub.size() != n) {
+      return true;
+    }
+		    NodeDomainClosureStats local_stats;
+		    NodeDomainClosureStats& st = stats != nullptr ? *stats : local_stats;
+		    const double tol = std::max(1e-9, opt.int_tol);
+		    const double upper_limit_snapshot =
+		        has_inc_snapshot
+		            ? highs_style_incumbent_upper_limit(base_lp, inc_obj_snapshot,
+		                                               opt.int_tol)
+		            : kInf;
+		    const bool has_propagation_cutoff =
+		        has_inc_snapshot && std::isfinite(upper_limit_snapshot);
+			    const std::size_t initial_reason_count = node.domain_reason_bounds.size();
+			    const std::size_t initial_scoped_count = node.scoped_conflict_clauses.size();
+			    const std::size_t initial_changes = changes_out.size();
+			    std::size_t processed_changes_for_cutpool = initial_changes;
+			    std::uint64_t scanned_domain_source_epoch =
+			        node.domain_learning_epoch;
+			    auto build_pending_cols =
+			        [&](std::size_t begin) -> std::vector<char> {
+			      std::vector<char> pending(static_cast<std::size_t>(n), 0);
+			      for (std::size_t i = begin; i < changes_out.size(); ++i) {
+			        const int j = changes_out[i].var_idx;
+			        if (j >= 0 && j < n) pending[static_cast<std::size_t>(j)] = 1;
+			      }
+			      return pending;
+			    };
+			    auto pending_has_any = [](const std::vector<char>& pending) {
+			      return std::any_of(pending.begin(), pending.end(),
+			                         [](char v) { return v != 0; });
+			    };
+			    bool inherited_root_domain = false;
+		    if (root.lb.size() == n && root.ub.size() == n) {
+		      for (int col = 0; col < n; ++col) {
+		        if (std::isfinite(root.lb[col]) &&
+		            node.lb[col] < root.lb[col] - tol) {
+		          const double old = node.lb[col];
+		          node.lb[col] = root.lb[col];
+		          changes_out.push_back({col, node.lb[col] - old, true});
+		          inherited_root_domain = true;
+		        }
+		        if (std::isfinite(root.ub[col]) &&
+		            node.ub[col] > root.ub[col] + tol) {
+		          const double old = node.ub[col];
+		          node.ub[col] = root.ub[col];
+		          changes_out.push_back({col, node.ub[col] - old, false});
+		          inherited_root_domain = true;
+		        }
+		      }
+			      if (!bounds_consistent(node.lb, node.ub)) {
+			        st.pruned = true;
+			        return false;
+			      }
+			    }
+			    if (inherited_root_domain) st.domain_changed = true;
+
+	    auto publish_closure_scratch_cuts =
+	        [&](std::vector<PoolCut>& cuts, const char* source) -> int {
+	      int added = 0;
+	      for (auto& cut : cuts) {
+	        if (!valid_pool_cut(cut, nullptr, source)) {
+	          continue;
+	        }
+		        if (add_cut_to_global_domain_pool(std::move(cut.coeff), cut.rhs,
+		                                          source, cut.domain_only)) {
+	          ++added;
+	        }
+	      }
+	      cuts.clear();
+	      if (added > 0) {
+	        st.cuts_learned += added;
+	      }
+	      return added;
+	    };
+
+	    auto duplicate_reason_bound = [&](const DomainReasonBound& rb) -> bool {
+	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
+	      for (const auto& existing : node.domain_reason_bounds) {
+        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
+            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
+            conflict_clause_hash(existing.reason) == reason_hash) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+	    auto append_reason_and_certificate =
+	        [&](DomainReasonBound rb, bool apply_bound) -> bool {
+      if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
+          !std::isfinite(rb.bound.value)) {
+        return true;
+      }
+      bool bound_changed = false;
+      if (apply_bound) {
+        const int j = rb.bound.var_idx;
+        if (rb.bound.is_lb) {
+          if (rb.bound.value > node.ub[j] + tol) return false;
+          if (rb.bound.value > node.lb[j] + tol) {
+            const double old = node.lb[j];
+            node.lb[j] = rb.bound.value;
+            changes_out.push_back({j, rb.bound.value - old, true});
+            bound_changed = true;
+          }
+        } else {
+          if (rb.bound.value < node.lb[j] - tol) return false;
+          if (rb.bound.value < node.ub[j] - tol) {
+            const double old = node.ub[j];
+            node.ub[j] = rb.bound.value;
+            changes_out.push_back({j, rb.bound.value - old, false});
+            bound_changed = true;
+          }
+        }
+      }
+      if (!duplicate_reason_bound(rb)) {
+        append_domain_reason_bound(node, std::move(rb), n, &root.lb, &root.ub);
+        ++st.reasons_added;
+      }
+	      if (bound_changed) ++st.tightened;
+	      return true;
+	    };
+
+	    auto publish_closure_reason_target =
+	        [&](const DomainReasonBound& rb, const char* tag) -> int {
+	      (void)add_scoped_target_bound_certificate(node, rb);
+	      if (publish_bound_lifting_certificate == nullptr ||
+	          !strict_target_certificate_ok(rb)) {
+	        return 0;
+	      }
+	      const int published = publish_bound_lifting_certificate(
+	          rb, nullptr, nullptr, tag != nullptr ? tag : "domain_closure");
+	      if (published > 0) {
+	        st.global_certificate_reasons +=
+	            static_cast<std::uint64_t>(published);
+	      }
+	      return published;
+	    };
+
+			    for (const auto& rb : incoming_reasons) {
+			      if (!append_reason_and_certificate(rb, /*apply_bound=*/true)) {
+			        st.pruned = true;
+			        return false;
+			      }
+			      (void)publish_closure_reason_target(rb, "closure_incoming");
+			    }
+			    if (changes_out.size() > initial_changes) {
+			      st.domain_changed = true;
+			    }
+
+		    auto run_objective_closure_step = [&]() -> bool {
+		      if (!use_objective_propagation || !has_propagation_cutoff) {
+	        return true;
+	      }
+	      Eigen::VectorXd objective_change_base_lb = node.lb;
+	      Eigen::VectorXd objective_change_base_ub = node.ub;
+	      apply_domain_objective_lower_bound(node, phase);
+	      std::vector<PoolCut> scratch_cuts;
+	      int scratch_cut_count = 0;
+	      int objective_conflicts = 0;
+	      int objective_tightened = 0;
+	      int objective_reasons_added = 0;
+	      std::vector<PoolCut>& cuts_ref =
+	          new_cuts != nullptr ? *new_cuts : scratch_cuts;
+	      int& cut_count_ref =
+	          cut_count != nullptr ? *cut_count : scratch_cut_count;
+	      const std::size_t objective_reason_begin =
+	          node.domain_reason_bounds.size();
+		      if (!apply_objective_cutoff_domain_fixing(
+		              node, upper_limit_snapshot, has_inc_snapshot, cuts_ref,
+	              cut_count_ref, objective_conflicts, objective_tightened,
+	              &objective_reasons_added)) {
+	        if (new_cuts == nullptr) {
+	          (void)publish_closure_scratch_cuts(
+	              scratch_cuts, "objective_closure_cutoff_prune");
+	        }
+		        for (std::size_t i = objective_reason_begin;
+		             i < node.domain_reason_bounds.size(); ++i) {
+		          (void)publish_closure_reason_target(
+		              node.domain_reason_bounds[i],
+		              "objective_closure_cutoff_prune");
+		        }
+	        st.objective_tightened +=
+	            static_cast<std::uint64_t>(std::max(0, objective_tightened));
+	        st.reasons_added +=
+	            static_cast<std::uint64_t>(std::max(0, objective_reasons_added));
+	        st.conflicts_learned += objective_conflicts;
+	        st.pruned = true;
+	        return false;
+	      }
+	      if (new_cuts == nullptr) {
+	        (void)publish_closure_scratch_cuts(scratch_cuts,
+	                                           "objective_closure_cutoff");
+	      }
+		      for (std::size_t i = objective_reason_begin;
+		           i < node.domain_reason_bounds.size(); ++i) {
+		        (void)publish_closure_reason_target(
+		            node.domain_reason_bounds[i], "objective_closure_raw");
+		      }
+	      st.objective_tightened +=
+	          static_cast<std::uint64_t>(std::max(0, objective_tightened));
+	      st.reasons_added +=
+	          static_cast<std::uint64_t>(std::max(0, objective_reasons_added));
+	      st.conflicts_learned += objective_conflicts;
+	      apply_domain_objective_lower_bound(node, phase);
+	      auto append_objective_bound_changes = [&]() {
+	        if (objective_change_base_lb.size() != n ||
+	            objective_change_base_ub.size() != n) {
+	          return;
+	        }
+	        for (int col = 0; col < n; ++col) {
+	          if (node.lb[col] > objective_change_base_lb[col] + tol) {
+	            changes_out.push_back(
+	                {col, node.lb[col] - objective_change_base_lb[col], true});
+	          }
+	          if (node.ub[col] < objective_change_base_ub[col] - tol) {
+	            changes_out.push_back(
+	                {col, node.ub[col] - objective_change_base_ub[col], false});
+	          }
+	        }
+	        objective_change_base_lb = node.lb;
+	        objective_change_base_ub = node.ub;
+	      };
+	      if (objective_tightened > 0) {
+	        append_objective_bound_changes();
+	      }
+
+	      const DualProofRow* objective_proof =
+	          allow_certificate_domain_replay
+	              ? select_objective_event_proof_for_node(
+	                    node, /*require_proof_tail=*/true)
+	              : nullptr;
+	      if (objective_proof == nullptr) return true;
+      const double objective_proof_upper =
+          objective_event_proof_upper(objective_proof);
+      const double objective_proof_lower =
+          dual_proof_domain_lower_bound(objective_proof, objective_proof_upper,
+                                        node.lb, node.ub);
+      if (!std::isfinite(objective_proof_lower)) return true;
+
+	      std::vector<DomainReasonBound> proof_reasons;
+	      ObjectivePropagationState::ProofCapacityPropagationStats proof_stats;
+	      int proof_tightened = 0;
+	      int proof_pruned = 0;
+	      const Eigen::VectorXd* node_reduced_costs = nullptr;
+	      if (node.basis_hint && node.basis_hint->cached_reduced_costs &&
+	          node.basis_hint->cached_reduced_costs->size() >= n) {
+	        node_reduced_costs = node.basis_hint->cached_reduced_costs.get();
+	      }
+	      const bool proof_ok =
+	          objective_propagation.propagate_proof_capacity_one_missing(
+	                      base_lp,
+	                      ObjectivePropagationState::ProofCapacityContext{
+	                  &objective_proof->coeff,
+	                  node.x_relax.size() >= n ? &node.x_relax : nullptr,
+	                  node_reduced_costs,
+	                  objective_proof_lower, upper_limit_snapshot, opt.int_tol,
+	                  std::max(1e-9, opt.lp_tol), node.depth,
+	                  static_cast<int>(node.branch_reasons.size() +
+	                                   node.domain_reason_bounds.size())},
+	              node.lb, node.ub, &proof_reasons, proof_tightened,
+	              proof_pruned, &proof_stats);
+	      st.objective_proof_candidates += proof_stats.candidates;
+	      st.objective_proof_fixings += proof_stats.fixings;
+	      st.objective_proof_prunes += proof_stats.prunes;
+	      st.objective_proof_skip_coeff += proof_stats.skip_coeff;
+	      st.objective_proof_skip_budget += proof_stats.skip_budget;
+	      st.objective_proof_skip_no_hit +=
+	          proof_stats.skip_no_lp_or_queue_hit;
+	      out.bc_stats.termination_effective_candidates +=
+	          proof_stats.candidates;
+	      out.bc_stats.termination_effective_admitted +=
+	          proof_stats.fixings + proof_stats.prunes;
+	      out.bc_stats.termination_effective_skip_no_lp_or_queue_hit +=
+	          proof_stats.skip_no_lp_or_queue_hit;
+	      out.bc_stats.objective_implied_event_proof_candidates +=
+	          proof_stats.candidates;
+	      out.bc_stats.objective_implied_event_proof_fixings +=
+	          proof_stats.fixings;
+	      out.bc_stats.objective_implied_event_proof_skip_coeff +=
+	          proof_stats.skip_coeff;
+	      out.bc_stats.objective_implied_event_proof_skip_budget +=
+	          proof_stats.skip_budget;
+	      out.bc_stats.objective_implied_event_tightenings +=
+	          static_cast<std::uint64_t>(std::max(0, proof_tightened));
+	      if (proof_pruned > 0) {
+	        out.bc_stats.objective_implied_event_prunes +=
+	            static_cast<std::uint64_t>(proof_pruned);
+	      }
+	      st.objective_tightened +=
+	          static_cast<std::uint64_t>(std::max(0, proof_tightened));
+	      if (proof_tightened > 0) {
+	        append_objective_bound_changes();
+	      }
+		      for (auto& rb : proof_reasons) {
+		        DomainReasonBound rb_copy = rb;
+		        const bool duplicate_before = duplicate_reason_bound(rb);
+		        if (!append_reason_and_certificate(std::move(rb),
+		                                           /*apply_bound=*/false)) {
+	          st.pruned = true;
+		          return false;
+		        }
+		        (void)publish_closure_reason_target(
+		            duplicate_before ? rb_copy : node.domain_reason_bounds.back(),
+		            "objective_closure_proof_capacity");
+		      }
+	      if (!proof_ok || proof_pruned > 0 ||
+	          !bounds_consistent(node.lb, node.ub)) {
+	        st.pruned = true;
+	        return false;
+	      }
+		      return true;
+		    };
+
+		    // HiGHS' local domain propagation treats conflict pool, cut pool, objective
+	    // cutoff propagation and row propagation as one monotone closure.  The
+    // outer loop here repeats only when one source changed the local domain or
+    // published a new reason/certificate that can feed another source.
+    const std::size_t max_closure_passes =
+        std::max<std::size_t>(8, 2 * static_cast<std::size_t>(n) + 8);
+	    bool changed = inherited_root_domain || !incoming_reasons.empty();
+    for (std::size_t pass = 0; pass < max_closure_passes; ++pass) {
+      ++st.closure_passes;
+      const std::size_t pass_changes_before = changes_out.size();
+      const std::size_t pass_reasons_before = node.domain_reason_bounds.size();
+      const std::size_t pass_scoped_before = node.scoped_conflict_clauses.size();
+	      const std::size_t pass_conflict_pool_before =
+	          static_cast<std::size_t>(conflict_pool.size());
+	      const int pass_cut_pool_before = cut_pool.size();
+	      const std::uint64_t pass_impl_before =
+	          static_cast<std::uint64_t>(implication_graph.size());
+	      const std::uint64_t pass_clique_edges_before =
+	          static_cast<std::uint64_t>(clique_table.n_literal_edges());
+	      const std::size_t pass_cuts_before =
+	          new_cuts != nullptr ? new_cuts->size() : 0;
+		      const std::uint64_t pass_domain_epoch_before =
+		          current_domain_learning_epoch();
+		      const std::size_t pass_global_certificates_before =
+		          global_bound_lifting_certificates.size();
+		      const std::size_t pass_pending_begin = processed_changes_for_cutpool;
+
+		      const auto source_refresh =
+		          refresh_objective_domain_sources(
+		              phase != nullptr ? phase : "node_domain_closure");
+		      st.global_learning_events += source_refresh.total_published();
+
+		      std::uint64_t global_cert_reasons = 0;
+		      if (!propagate_global_bound_lifting_certificates(
+		              node, changes_out, &global_cert_reasons)) {
+        st.pruned = true;
+        return false;
+      }
+	      st.global_certificate_reasons += global_cert_reasons;
+	      st.reasons_added += global_cert_reasons;
+
+		      if (!run_objective_closure_step()) {
+		        return false;
+		      }
+
+		      if (!propagate_local_conflict_clauses(node, changes_out) ||
+	          !explain_active_scoped_reason_bounds(node, changes_out) ||
+          !propagate_scoped_conflict_objects(node, changes_out) ||
+          !propagate_local_binary_implications(node, changes_out)) {
+        st.pruned = true;
+        return false;
+      }
+
+	      std::vector<BranchDomainLiteral> learned_conflict;
+      std::vector<DomainReasonBound> row_reason_bounds;
+      int row_tightenings = 0;
+      if (!propagate_node_domain(
+              base_lp, A_row_cached, Aeq_row_cached, row_index_cached, node.lb,
+              node.ub, opt.bound_propagation_rounds, &conflict_pool,
+              &clique_table, &implication_graph, changes_out,
+              node.branch_reasons, &learned_conflict, &row_tightenings,
+	              opt.enable_reduced_cost_proof_conflict_minimization
+	                  ? &row_reason_bounds
+	                  : nullptr,
+	              &node.domain_reason_bounds)) {
+        if (learned_conflict.empty()) learned_conflict = node.branch_reasons;
+        if (!learned_conflict.empty()) {
+          const bool pool_added = conflict_pool.add(learned_conflict);
+          const bool impl_added = add_binary_implications_from_conflict_clause(
+              base_lp.vars, learned_conflict, implication_graph);
+          if (pool_added || impl_added) {
+            note_global_domain_learning(1 + (impl_added ? 1 : 0));
+            ++st.conflicts_learned;
+          }
+	          if (!strict_highs_lp_contract) {
+	            PoolCut conflict_cut;
+	            if (try_build_binary_conflict_cut(
+	                    base_lp, learned_conflict, conflict_cut,
+	                    opt.reduced_cost_conflict_cut_max_literals) &&
+	                valid_pool_cut(conflict_cut, nullptr,
+	                               "node_closure_conflict_cut")) {
+	              if (new_cuts != nullptr && cut_count != nullptr) {
+	                new_cuts->push_back(std::move(conflict_cut));
+	                ++(*cut_count);
+	                ++st.cuts_learned;
+	              } else if (add_cut_to_global_domain_pool(
+	                             std::move(conflict_cut.coeff), conflict_cut.rhs,
+	                             "node_closure_conflict_cut",
+	                             conflict_cut.domain_only)) {
+	                ++st.cuts_learned;
+	              }
+	            }
+	          }
+	        }
+        st.pruned = true;
+        return false;
+      }
+	      st.row_tightened +=
+	          static_cast<std::uint64_t>(std::max(0, row_tightenings));
+	      for (auto& rb : row_reason_bounds) {
+	        DomainReasonBound rb_copy = rb;
+	        const bool duplicate_before = duplicate_reason_bound(rb);
+	        if (!append_reason_and_certificate(std::move(rb),
+	                                           /*apply_bound=*/false)) {
+	          st.pruned = true;
+	          return false;
+	        }
+	        (void)publish_closure_reason_target(
+	            duplicate_before ? rb_copy : node.domain_reason_bounds.back(),
+	            "row_domain_closure");
+	      }
+
+      if (!row_reason_bounds.empty()) {
+        if (!explain_active_scoped_reason_bounds(node, changes_out) ||
+            !propagate_scoped_conflict_objects(node, changes_out)) {
+          st.pruned = true;
+          return false;
+        }
+      }
+
+	      auto propagate_cutpool_family =
+	          [&](const std::vector<Eigen::SparseVector<double>>& rows,
+	              const std::vector<double>& rhs,
+	              const char* source) -> bool {
+	        if (rows.empty()) return true;
+	        const bool force_source_scan =
+	            current_domain_learning_epoch() > scanned_domain_source_epoch;
+	        const std::vector<char> pending_cols =
+	            build_pending_cols(pass_pending_begin);
+	        if (!force_source_scan && !pending_has_any(pending_cols)) return true;
+	        const Eigen::VectorXd old_lb = node.lb;
+	        const Eigen::VectorXd old_ub = node.ub;
+	        const std::size_t cutpool_changes_begin = changes_out.size();
+	        SparseCutpoolPropagationStats cutpool_stats;
+	        std::vector<DomainReasonBound> cutpool_reason_bounds;
+	        const bool ok = propagate_sparse_cutpool_rows(
+	            rows, rhs, node.lb, node.ub, opt.bound_propagation_rounds,
+	            &cutpool_stats, &cutpool_reason_bounds, node.depth,
+	            static_cast<int>(node.branch_reasons.size() +
+	                             node.domain_reason_bounds.size()),
+	            force_source_scan ? nullptr : &pending_cols);
+        if (!ok || !bounds_consistent(node.lb, node.ub)) {
+          st.cutpool_tightened +=
+              static_cast<std::uint64_t>(std::max(0, cutpool_stats.tightened));
+          (void)source;
+          return false;
+        }
+        if (cutpool_stats.tightened > 0) {
+          st.cutpool_tightened += static_cast<std::uint64_t>(
+              std::max(0, cutpool_stats.tightened));
+          for (int col = 0; col < n; ++col) {
+            if (node.lb[col] > old_lb[col] + tol) {
+              changes_out.push_back({col, node.lb[col] - old_lb[col], true});
+            }
+            if (node.ub[col] < old_ub[col] - tol) {
+              changes_out.push_back({col, node.ub[col] - old_ub[col], false});
+            }
+	          }
+	          for (auto& rb : cutpool_reason_bounds) {
+	            DomainReasonBound rb_copy = rb;
+	            const bool duplicate_before = duplicate_reason_bound(rb);
+	            if (!append_reason_and_certificate(std::move(rb),
+	                                               /*apply_bound=*/false)) {
+	              return false;
+	            }
+	            (void)publish_closure_reason_target(
+	                duplicate_before ? rb_copy : node.domain_reason_bounds.back(),
+	                source);
+	          }
+	          processed_changes_for_cutpool =
+	              std::min(processed_changes_for_cutpool,
+	                       cutpool_changes_begin);
+	        }
+        return true;
+      };
+      if ((!root_transformed_cutpool_in_global_domain_pool &&
+           !propagate_cutpool_family(root_transformed_cutpool_audit_rows,
+                                     root_transformed_cutpool_audit_rhs,
+                                     "root_transformed_cutpool")) ||
+          !propagate_cutpool_family(variable_bound_cutpool_rows,
+                                    variable_bound_cutpool_rhs,
+                                    "variable_bound_cutpool")) {
+        st.pruned = true;
+        return false;
+      }
+
+	      if (cut_pool.size() > 0 || (new_cuts != nullptr && !new_cuts->empty())) {
+	        int global_cutpool_tightened = 0;
+	        std::vector<BoundChangeInfo> global_cutpool_changes;
+	        std::vector<DomainReasonBound> global_cutpool_reason_bounds;
+	        CutPoolPropagationStats global_cutpool_stats;
+	        const std::vector<char> pending_cols =
+	            build_pending_cols(pass_pending_begin);
+	        const bool force_source_scan =
+	            current_domain_learning_epoch() > scanned_domain_source_epoch;
+	        const bool scan_existing_cutpool = pending_has_any(pending_cols);
+	        const bool have_pending_extra_cuts =
+	            new_cuts != nullptr && !new_cuts->empty();
+	        if (!force_source_scan && !scan_existing_cutpool &&
+	            !have_pending_extra_cuts) {
+	          processed_changes_for_cutpool = changes_out.size();
+	        } else {
+	          const bool global_cutpool_ok = cut_pool.propagate_with_reasons(
+	              base_lp.vars, node.lb, node.ub, opt.bound_propagation_rounds,
+	              &global_cutpool_tightened, &global_cutpool_changes,
+	              &global_cutpool_reason_bounds, &global_cutpool_stats,
+	              new_cuts, &root_implied_integer_cols, node.depth,
+	              static_cast<int>(node.branch_reasons.size() +
+	                               node.domain_reason_bounds.size()),
+	              std::max(1e-9, opt.lp_tol),
+	              force_source_scan ? nullptr : &pending_cols);
+	          st.cutpool_rows_scanned += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.rows_scanned));
+	          st.cutpool_active_rows += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.active_rows));
+	          st.cutpool_skip_capacity += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.skipped_capacity));
+	          st.cutpool_skip_infinite += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.skipped_infinite_min));
+	          st.cutpool_candidate_bounds += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.candidate_bounds));
+	          st.cutpool_rejected_weak_bounds += static_cast<std::uint64_t>(
+	              std::max(0, global_cutpool_stats.rejected_weak_bounds));
+	          if (!global_cutpool_ok || !bounds_consistent(node.lb, node.ub)) {
+	            st.cutpool_tightened += static_cast<std::uint64_t>(
+	                std::max(0, global_cutpool_stats.tightened));
+	            st.pruned = true;
+	            return false;
+	          }
+	          if (global_cutpool_tightened > 0) {
+	            const std::size_t global_cutpool_changes_begin =
+	                changes_out.size();
+	            changes_out.insert(changes_out.end(), global_cutpool_changes.begin(),
+	                               global_cutpool_changes.end());
+	            st.cutpool_tightened += static_cast<std::uint64_t>(
+	                std::max(0, global_cutpool_tightened));
+	            for (auto& rb : global_cutpool_reason_bounds) {
+	              DomainReasonBound rb_copy = rb;
+	              const bool duplicate_before = duplicate_reason_bound(rb);
+	              if (!append_reason_and_certificate(std::move(rb),
+	                                                 /*apply_bound=*/false)) {
+	                st.pruned = true;
+	                return false;
+	              }
+	              (void)publish_closure_reason_target(
+	                  duplicate_before ? rb_copy : node.domain_reason_bounds.back(),
+	                  "global_cutpool_closure");
+	            }
+	            processed_changes_for_cutpool =
+	                std::min(processed_changes_for_cutpool,
+	                         global_cutpool_changes_begin);
+	          }
+	          if (global_cutpool_tightened <= 0) {
+	            processed_changes_for_cutpool = changes_out.size();
+	          }
+	        }
+	      }
+	      scanned_domain_source_epoch =
+	          std::max(scanned_domain_source_epoch,
+	                   current_domain_learning_epoch());
+
+      if (node.domain_reason_bounds.size() != pass_reasons_before) {
+        std::vector<PoolCut> scratch_cuts;
+        int scratch_cut_count = 0;
+        std::vector<PoolCut>& cuts_ref =
+            new_cuts != nullptr ? *new_cuts : scratch_cuts;
+        int& cut_count_ref =
+            cut_count != nullptr ? *cut_count : scratch_cut_count;
+        const std::size_t clauses_before =
+            static_cast<std::size_t>(conflict_pool.size());
+	        if (learn_short_reconvergence_implication(
+	                node.branch_reasons, node.domain_reason_bounds, nullptr,
+	                nullptr, nullptr, nullptr, cuts_ref, cut_count_ref, &node)) {
+	          ++st.conflicts_learned;
+	        }
+	        if (new_cuts == nullptr) {
+	          (void)publish_closure_scratch_cuts(
+	              scratch_cuts, "node_closure_reconvergence_cut");
+	        }
+	        const std::size_t clauses_after =
+	            static_cast<std::size_t>(conflict_pool.size());
+        if (clauses_after > clauses_before) {
+          note_global_domain_learning(static_cast<std::uint64_t>(
+              clauses_after - clauses_before));
+        }
+      }
+
+		      const bool pass_domain_changed =
+		          changes_out.size() != pass_changes_before;
+		      const bool pass_source_changed =
+		          static_cast<std::size_t>(conflict_pool.size()) !=
+		              pass_conflict_pool_before ||
+		          cut_pool.size() != pass_cut_pool_before ||
+		          static_cast<std::uint64_t>(implication_graph.size()) !=
+		              pass_impl_before ||
+		          static_cast<std::uint64_t>(clique_table.n_literal_edges()) !=
+		              pass_clique_edges_before ||
+		          (new_cuts != nullptr && new_cuts->size() != pass_cuts_before) ||
+		          source_refresh.total_published() > 0;
+		      const bool pass_metadata_changed =
+		          node.domain_reason_bounds.size() != pass_reasons_before ||
+		          node.scoped_conflict_clauses.size() != pass_scoped_before ||
+		          global_bound_lifting_certificates.size() !=
+		              pass_global_certificates_before;
+		      const bool pass_changed =
+		          pass_domain_changed || pass_source_changed ||
+		          pass_metadata_changed;
+		      st.domain_changed = st.domain_changed || pass_domain_changed;
+		      st.propagation_source_changed =
+		          st.propagation_source_changed || pass_source_changed;
+		      if (current_domain_learning_epoch() != pass_domain_epoch_before) {
+		        st.global_learning_events += current_domain_learning_epoch() -
+		                                     pass_domain_epoch_before;
+		      }
+		      changed = changed || pass_changed || pass_metadata_changed;
+		      if (!pass_changed) break;
+		    }
+
+    if (!bounds_consistent(node.lb, node.ub)) {
+      st.pruned = true;
+      return false;
+    }
+    st.tightened =
+        static_cast<std::uint64_t>(changes_out.size() - initial_changes);
+    const bool metadata_changed =
+        node.domain_reason_bounds.size() != initial_reason_count ||
+        node.scoped_conflict_clauses.size() != initial_scoped_count;
+    const bool trail_changed = changed || metadata_changed;
+    const bool domain_moved =
+        st.tightened > 0 || st.conflict_tightened > 0 || st.row_tightened > 0 ||
+        st.cutpool_tightened > 0 || st.objective_tightened > 0 ||
+        st.redcost_tightened > 0 || st.cuts_learned > 0;
+    if (trail_changed) {
+      rebuild_local_domain_trail(node, n, &root.lb, &root.ub);
+      node.domain_learning_epoch = current_domain_learning_epoch();
+      node.objective_artifact_epoch = current_objective_artifact_epoch();
+      node.domain_closure_epoch = current_domain_closure_epoch();
+    }
+    if (domain_moved) {
+      node.lp_refresh_needed = true;
+      if (node.x_seed.size() == n) {
+        node.x_seed = clamp_to_bounds(node.x_seed, node.lb, node.ub);
+      }
+      if (node.x_relax.size() == n) {
+        node.x_relax = clamp_to_bounds(node.x_relax, node.lb, node.ub);
+      }
+      if (apply_domain_objective_lower_bound(node, phase) >
+          std::max(1e-8, opt.lp_tol)) {
+        node.lp_refresh_needed = true;
+      }
+    }
+	    if ((opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) &&
+		        (st.tightened > 0 || st.reasons_added > 0 || st.cutpool_tightened > 0 ||
+		         st.objective_tightened > 0 || st.redcost_tightened > 0 ||
+		         st.conflict_tightened > 0 || st.row_tightened > 0 ||
+		         st.conflicts_learned > 0 ||
+		         st.objective_proof_candidates > 0 ||
+		         st.objective_proof_fixings > 0 ||
+		         st.objective_proof_prunes > 0 ||
+		         st.cutpool_rows_scanned > 0)) {
+		      fmt::print(stderr,
+		                 "[B&C-DOM-CLOSURE] phase={} depth={} pass={} tight={} "
+			                 "reasons={} certReasons={} conflictTight={} rowTight={} "
+			                 "cutpoolTight={} objTight={} rcTight={} rcActive={} "
+			                 "cutRows={}/{} skipCap={} skipInf={} cand/rej={}/{} "
+			                 "learnEvt={} objProof={}/{}/{} "
+			                 "skip={}/{}/{} learnedConf={} learnedCuts={} refresh={}\n",
+			                 phase != nullptr ? phase : "node", node.depth,
+			                 st.closure_passes, st.tightened, st.reasons_added,
+			                 st.global_certificate_reasons, st.conflict_tightened,
+			                 st.row_tightened, st.cutpool_tightened,
+			                 st.objective_tightened, st.redcost_tightened,
+			                 st.redcost_active, st.cutpool_active_rows,
+			                 st.cutpool_rows_scanned, st.cutpool_skip_capacity,
+			                 st.cutpool_skip_infinite,
+			                 st.cutpool_candidate_bounds,
+			                 st.cutpool_rejected_weak_bounds,
+			                 st.global_learning_events,
+			                 st.objective_proof_candidates,
+			                 st.objective_proof_fixings, st.objective_proof_prunes,
+	                 st.objective_proof_skip_coeff,
+	                 st.objective_proof_skip_budget,
+	                 st.objective_proof_skip_no_hit, st.conflicts_learned,
+	                 st.cuts_learned, node.lp_refresh_needed ? 1 : 0);
+	    }
+    return true;
+  };
+
 	  replay_queue_reason_trail_certificates =
 	      [&](Node& node, const std::vector<DomainReasonBound>& new_reasons,
 	          std::uint64_t& tightened_out, std::uint64_t& reasons_out,
@@ -17464,111 +20838,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	    if (node.lb.size() != n || node.ub.size() != n) {
 	      return true;
 	    }
-
-	    const std::size_t reasons_before = node.domain_reason_bounds.size();
-	    const std::size_t scoped_before = node.scoped_conflict_clauses.size();
-	    const double tol = std::max(1e-9, opt.int_tol);
-	    auto duplicate_reason = [&](const DomainReasonBound& rb) {
-	      const std::size_t reason_hash = conflict_clause_hash(rb.reason);
-	      for (const auto& existing : node.domain_reason_bounds) {
-	        if (branch_literal_stronger_or_equal(existing.bound, rb.bound, tol) &&
-	            branch_literal_stronger_or_equal(rb.bound, existing.bound, tol) &&
-	            conflict_clause_hash(existing.reason) == reason_hash) {
-	          return true;
-	        }
-	      }
-	      return false;
-	    };
-
-	    bool learned_scoped = false;
-	    for (const auto& rb : new_reasons) {
-	      if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
-	          !std::isfinite(rb.bound.value)) {
-	        continue;
-	      }
-	      learned_scoped =
-	          add_scoped_target_bound_certificate(node, rb) || learned_scoped;
-	      if (!duplicate_reason(rb)) {
-	        append_domain_reason_bound(node, rb, n, &root.lb, &root.ub);
-	        ++reasons_out;
-	      }
-	    }
-
-	    if (!new_reasons.empty() || learned_scoped) {
-	      std::vector<PoolCut> ignored_cuts;
-	      int ignored_cut_count = 0;
-	      const std::size_t clauses_before = conflict_pool.size();
-	      if (learn_short_reconvergence_implication(
-	              node.branch_reasons, node.domain_reason_bounds, nullptr,
-	              nullptr, nullptr, nullptr, ignored_cuts, ignored_cut_count,
-	              &node)) {
-	        learned_scoped = true;
-	      }
-		      const std::size_t clauses_after =
-		          static_cast<std::size_t>(conflict_pool.size());
-		      if (clauses_after > clauses_before) {
-		        note_global_domain_learning(static_cast<std::uint64_t>(
-		            clauses_after - clauses_before));
-		      }
-	    }
-
-		    std::vector<BoundChangeInfo> changes;
-		    std::uint64_t global_cert_reasons = 0;
-		    if (!propagate_global_bound_lifting_certificates(
-		            node, changes, &global_cert_reasons) ||
-		        !explain_active_scoped_reason_bounds(node, changes) ||
-		        !propagate_scoped_conflict_objects(node, changes) ||
-		        !propagate_local_binary_implications(node, changes)) {
-		      pruned_out = true;
-		      return false;
-		    }
-		    tightened_out += static_cast<std::uint64_t>(changes.size());
-		    reasons_out += global_cert_reasons;
-
-	    if (!conflict_pool.empty()) {
-	      int conflict_tightened = 0;
-	      std::vector<BoundChangeInfo> conflict_changes;
-	      std::vector<DomainReasonBound> conflict_reasons;
-	      const bool ok = conflict_pool.propagate_with_reasons(
-	          base_lp.vars, node.lb, node.ub, &conflict_tightened,
-	          &conflict_changes, &conflict_reasons, opt.int_tol);
-	      if (!ok || !bounds_consistent(node.lb, node.ub)) {
-	        pruned_out = true;
-	        return false;
-	      }
-	      tightened_out += static_cast<std::uint64_t>(
-	          std::max(0, conflict_tightened));
-	      for (auto& rb : conflict_reasons) {
-	        if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
-	            !std::isfinite(rb.bound.value) || duplicate_reason(rb)) {
-	          continue;
-	        }
-	        append_domain_reason_bound(node, rb, n, &root.lb, &root.ub);
-	        ++reasons_out;
-	        if (!rb.reason.empty()) {
-	          add_scoped_target_bound_certificate(node, rb);
-	        }
-	      }
-	      if (!conflict_reasons.empty()) {
-	        std::vector<BoundChangeInfo> second_pass_changes;
-	        if (!explain_active_scoped_reason_bounds(node, second_pass_changes) ||
-	            !propagate_scoped_conflict_objects(node,
-	                                               second_pass_changes)) {
-	          pruned_out = true;
-	          return false;
-	        }
-	        tightened_out +=
-	            static_cast<std::uint64_t>(second_pass_changes.size());
-	      }
-	    }
-
-	    if (node.domain_reason_bounds.size() != reasons_before ||
-	        node.scoped_conflict_clauses.size() != scoped_before ||
-	        tightened_out > 0) {
-	      rebuild_local_domain_trail(node, n, &root.lb, &root.ub);
-	      node.lp_refresh_needed = true;
-	    }
-	    return bounds_consistent(node.lb, node.ub);
+	    std::vector<BoundChangeInfo> changes;
+	    NodeDomainClosureStats closure_stats;
+	    const bool ok = run_node_domain_closure(
+	        node, new_reasons, changes, nullptr, nullptr,
+	        has_incumbent ? incumbent_obj : kInf, has_incumbent,
+	        "queue_reason_replay", &closure_stats);
+		    tightened_out =
+		        closure_stats.tightened + closure_stats.conflict_tightened +
+		        closure_stats.row_tightened + closure_stats.cutpool_tightened +
+		        closure_stats.objective_tightened +
+		        closure_stats.redcost_tightened;
+	    reasons_out = closure_stats.reasons_added +
+	                  closure_stats.global_certificate_reasons;
+	    pruned_out = !ok || closure_stats.pruned ||
+	                 !bounds_consistent(node.lb, node.ub);
+	    return ok && !pruned_out;
 	  };
 
 	  double gap_limit_lower_bound_certificate = -kInf;
@@ -17631,22 +20916,126 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return global_lb;
   };
 
-	  auto prune_queue_by_incumbent = [&]() -> int {
-	    if (!has_incumbent || !std::isfinite(incumbent_obj)) {
+	  auto record_queue_lower_bound_audit = [&](const char* phase,
+	                                            const char* source,
+	                                            double before_lb,
+	                                            double after_lb) {
+    const QueueLowerBoundAudit audit =
+        node_queue.audit_lower_bound_index(std::max(1e-9, opt.lp_tol));
+    ++out.bc_stats.certificate_queue_lb_audit_passes;
+    if (!audit.ok) {
+      ++out.bc_stats.certificate_queue_lb_audit_failures;
+    }
+    out.bc_stats.certificate_queue_lb_audit_indexed_min = audit.indexed_min;
+    out.bc_stats.certificate_queue_lb_audit_computed_min = audit.computed_min;
+    out.bc_stats.certificate_queue_lb_audit_max_error =
+        std::max(out.bc_stats.certificate_queue_lb_audit_max_error,
+                 audit.abs_error);
+    out.bc_stats.certificate_queue_lb_audit_indexed_nodes =
+        audit.indexed_nodes;
+    out.bc_stats.certificate_queue_lb_audit_live_nodes = audit.live_nodes;
+    if (opt.verbose || !audit.ok) {
+      fmt::print(stderr,
+                 "[B&C-QUEUE-LB] phase={} source={} ok={} "
+                 "nodes={}/{} indexed={:.10g} computed={:.10g} "
+                 "err={:.6g} before={:.10g} after={:.10g}\n",
+                 phase != nullptr ? phase : "unknown",
+                 source != nullptr ? source : "unknown", audit.ok ? 1 : 0,
+                 audit.indexed_nodes, audit.live_nodes, audit.indexed_min,
+                 audit.computed_min, audit.abs_error, before_lb, after_lb);
+    }
+	    return audit.ok;
+	  };
+
+	  auto inherit_root_domain_to_queue = [&](const char* source,
+	                                          bool force_frontier_drain) -> int {
+	    if (node_queue.empty() || root.lb.size() != n || root.ub.size() != n) {
 	      return 0;
 	    }
-	    if (!current_incumbent_valid_for_proof("queue_incumbent_prune")) {
+	    const double qlb_before = node_queue.lower_bound();
+	    std::uint64_t inherited_tightened = 0;
+	    std::uint64_t refresh_marked = 0;
+	    std::uint64_t lift_nodes = 0;
+		    double lift_sum = 0.0;
+		    double lift_max = 0.0;
+		    const double root_queue_upper_limit =
+		        has_incumbent && std::isfinite(incumbent_obj)
+		            ? incumbent_upper_limit()
+		            : kInf;
+		    const bool has_root_queue_upper_limit =
+		        has_incumbent && std::isfinite(root_queue_upper_limit);
+		    const double root_queue_prune_tol =
+		        has_root_queue_upper_limit
+		            ? incumbent_upper_limit_prune_tol(root_queue_upper_limit)
+		            : kIncumbentPruneTol;
+		    const int pruned = node_queue.inherit_root_domain(
+		        root.lb, root.ub, &domain_objective_lower_bound,
+		        has_root_queue_upper_limit, root_queue_upper_limit,
+		        root_queue_prune_tol,
+		        &inherited_tightened, &refresh_marked, &lift_nodes, &lift_sum,
+		        &lift_max);
+	    if (inherited_tightened > 0 || refresh_marked > 0 || pruned > 0 ||
+	        lift_sum > 0.0) {
+	      note_global_domain_learning(inherited_tightened);
+	      out.bc_stats.certificate_queue_tightenings += inherited_tightened;
+	      out.bc_stats.certificate_domain_fixings += inherited_tightened;
+	      out.bc_stats.certificate_queue_lp_refresh_marked += refresh_marked;
+	      out.bc_stats.certificate_queue_lower_bound_lift_nodes += lift_nodes;
+	      out.bc_stats.certificate_queue_lift_sum += lift_sum;
+	      out.bc_stats.certificate_queue_lift_max =
+	          std::max(out.bc_stats.certificate_queue_lift_max, lift_max);
+	      if (pruned > 0) {
+	        out.bc_stats.certificate_queue_prunes +=
+	            static_cast<std::uint64_t>(pruned);
+	      }
+	      refresh_queue_lower_bound();
+	      record_queue_lower_bound_audit("queue_root_domain",
+	                                     source != nullptr
+	                                         ? source
+	                                         : "root_domain_inherit",
+	                                     qlb_before, node_queue.lower_bound());
+	      if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) {
+	        fmt::print(stderr,
+	                   "[B&C-QUEUE-ROOT-DOMAIN] source={} tight={} "
+	                   "refresh={} pruned={} lift_nodes={} "
+	                   "lift_sum/max={:.6g}/{:.6g} qlb={:.10g}->{:.10g}\n",
+	                   source != nullptr ? source : "root_domain_inherit",
+	                   inherited_tightened, refresh_marked, pruned, lift_nodes,
+	                   lift_sum, lift_max, qlb_before, node_queue.lower_bound());
+	      }
+	    }
+	    if (force_frontier_drain && inherited_tightened > 0) {
+	      return pruned;
+	    }
+	    return pruned;
+	  };
+	  std::function<int(const char*, int)>
+	      highs_style_post_incumbent_domain_closure;
+
+  auto prune_queue_by_incumbent = [&]() -> int {
+    if (!has_incumbent || !std::isfinite(incumbent_obj)) {
+      return 0;
+    }
+    if (!current_incumbent_valid_for_proof("queue_incumbent_prune")) {
+      return 0;
+    }
+    const double upper_limit = incumbent_upper_limit();
+	    if (!std::isfinite(upper_limit)) {
 	      return 0;
 	    }
 	    ++out.bc_stats.incumbent_queue_prune_passes;
-    const double prune_tol =
-        std::max(1e-9, kIncumbentPruneTol *
-                            std::max(1.0, std::abs(incumbent_obj)));
+	    const double prune_tol = incumbent_upper_limit_prune_tol(upper_limit);
     const int pruned =
-        node_queue.prune_by_incumbent(true, incumbent_obj, prune_tol);
+        node_queue.prune_by_lower_bound_limit(upper_limit, prune_tol);
     if (pruned > 0) {
       out.bc_stats.incumbent_queue_prunes +=
           static_cast<std::uint64_t>(pruned);
+      if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) {
+        fmt::print(stderr,
+                   "[B&C-QUEUE-BOUND] upper_limit={:.10g} incumbent={:.10g} "
+                   "pruned={} qsize={}\n",
+                   upper_limit, incumbent_obj, pruned, node_queue.size());
+      }
     }
     refresh_queue_lower_bound();
     return pruned;
@@ -17707,16 +21096,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return pruned;
   };
 
-  auto refresh_marked_queue_nodes =
-      [&](const char* source, int max_lps, double bound_band) -> int {
-	    if (!opt.enable_reduced_cost_fixing_resolve ||
-	        rc_fixing_resolve_lps_left <= 0 || max_lps <= 0 ||
+	  int last_marked_queue_refresh_attempts = 0;
+	  int last_marked_queue_refresh_remaining = 0;
+	  int last_marked_queue_refresh_pruned = 0;
+	  int last_marked_queue_refresh_bound_moves = 0;
+	  double last_marked_queue_refresh_queue_lift = 0.0;
+	  auto refresh_marked_queue_nodes =
+	      [&](const char* source, int max_lps, double bound_band,
+	          bool mandatory_frontier_contract) -> int {
+	    last_marked_queue_refresh_attempts = 0;
+	    last_marked_queue_refresh_remaining = 0;
+	    last_marked_queue_refresh_pruned = 0;
+	    last_marked_queue_refresh_bound_moves = 0;
+	    last_marked_queue_refresh_queue_lift = 0.0;
+	    if ((!mandatory_frontier_contract &&
+             (!opt.enable_reduced_cost_fixing_resolve ||
+              rc_fixing_resolve_lps_left <= 0 || max_lps <= 0)) ||
 	        node_queue.empty()) {
 	      return 0;
 	    }
+    const double qlb_for_refresh = node_queue.lower_bound();
+    const double frontier_band =
+        std::isfinite(qlb_for_refresh)
+            ? std::max({1e-8, opt.lp_tol,
+                        1e-10 * std::max(1.0, std::abs(qlb_for_refresh))})
+            : bound_band;
+    const double movement_band =
+        std::isfinite(bound_band) ? std::min(bound_band, frontier_band)
+                                  : frontier_band;
+    const int scan_limit = mandatory_frontier_contract ? 0 : 8192;
     const int marked_frontier_nodes =
         node_queue.count_lp_refresh_needed_near_lower_bound(
-            bound_band, /*max_scan=*/8192);
+            movement_band, scan_limit);
     // HiGHS' currentNodeToQueue/openNodesToQueue contract runs local-domain
     // propagation before a node is left in the queue; conflicts are published
     // immediately and the node lower bound reflects the propagated domain.
@@ -17729,32 +21140,49 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
 
     int effective_max_lps = max_lps;
-    if (marked_frontier_nodes > 0) {
+    if (mandatory_frontier_contract) {
+      effective_max_lps = marked_frontier_nodes;
+    } else if (marked_frontier_nodes > 0) {
       effective_max_lps =
           std::max(effective_max_lps,
                    std::min(marked_frontier_nodes,
                             std::max(1, opt.reduced_cost_fixing_resolve_max_lps / 2)));
     }
-    const int budget =
-        std::min(effective_max_lps, std::max(0, rc_fixing_resolve_lps_left));
+    const int budget = mandatory_frontier_contract
+                           ? effective_max_lps
+                           : std::min(effective_max_lps,
+                                      std::max(0, rc_fixing_resolve_lps_left));
     const double qlb_before = node_queue.lower_bound();
     int attempts = 0;
     int failures = 0;
     int pruned = 0;
-    int requeued = 0;
-    int bound_moves = 0;
-    int incumbent_updates = 0;
-    double node_lift_sum = 0.0;
-    double node_lift_max = 0.0;
+	    int requeued = 0;
+	    int bound_moves = 0;
+	    int incumbent_updates = 0;
+    LPFailureType last_refresh_type = LPFailureType::Unknown;
+    std::string last_refresh_status;
+    bool last_refresh_farkas = false;
+    double last_refresh_objective = std::numeric_limits<double>::quiet_NaN();
+    std::uint64_t frontier_effective_nodes = 0;
+	    double node_lift_sum = 0.0;
+	    double node_lift_max = 0.0;
 
-    for (; attempts < budget && rc_fixing_resolve_lps_left > 0; ++attempts) {
-      Node qnode;
-      bool qnode_was_dfs = false;
-      if (!node_queue.pop_lp_refresh_node(qnode, bound_band,
-                                          /*max_scan=*/4096,
-                                          &qnode_was_dfs)) {
-        break;
-      }
+	    for (; attempts < budget &&
+               (mandatory_frontier_contract ||
+                rc_fixing_resolve_lps_left > 0); ++attempts) {
+      const double qlb_at_pop = node_queue.lower_bound();
+	      Node qnode;
+	      bool qnode_was_dfs = false;
+	      if (!node_queue.pop_lp_refresh_node(qnode, movement_band,
+	                                          mandatory_frontier_contract
+                                                  ? 0
+                                                  : 4096,
+	                                          &qnode_was_dfs)) {
+	        break;
+	      }
+      const bool popped_lower_bound_frontier =
+          std::isfinite(qlb_at_pop) && std::isfinite(qnode.bound) &&
+          qnode.bound <= qlb_at_pop + frontier_band;
 
       auto requeue_refreshed_node = [&](Node node) {
         if (qnode_was_dfs) {
@@ -17765,44 +21193,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       };
 
       std::vector<BoundChangeInfo> refresh_changes;
-      bool domain_ok = propagate_local_binary_implications(qnode,
-                                                           refresh_changes);
-      if (domain_ok) {
-        domain_ok = propagate_local_conflict_clauses(qnode, refresh_changes);
-      }
-      if (domain_ok) {
-        domain_ok = propagate_scoped_conflict_objects(qnode, refresh_changes);
-      }
-      std::vector<BranchDomainLiteral> refresh_conflict;
-      std::vector<DomainReasonBound> refresh_reason_bounds;
-      int refresh_tightenings = 0;
-      if (domain_ok) {
-        domain_ok = propagate_node_domain(
-            base_lp, A_row_cached, Aeq_row_cached, row_index_cached,
-            qnode.lb, qnode.ub, opt.bound_propagation_rounds,
-            &conflict_pool, &clique_table, &implication_graph,
-            refresh_changes, qnode.branch_reasons, &refresh_conflict,
-            &refresh_tightenings,
-            opt.enable_reduced_cost_proof_conflict_minimization
-                ? &refresh_reason_bounds
-                : nullptr);
-      }
+      NodeDomainClosureStats refresh_closure_stats;
+      const std::vector<DomainReasonBound> no_refresh_reasons;
+      bool domain_ok = run_node_domain_closure(
+          qnode, no_refresh_reasons, refresh_changes, nullptr, nullptr,
+          has_incumbent ? incumbent_obj : kInf, has_incumbent,
+          "queue_refresh_pre_lp", &refresh_closure_stats);
       if (!domain_ok || !bounds_consistent(qnode.lb, qnode.ub)) {
-        if (!refresh_conflict.empty()) {
-          conflict_pool.add(refresh_conflict);
-          add_binary_implications_from_conflict_clause(
-              base_lp.vars, refresh_conflict, implication_graph);
-        }
         ++pruned;
         ++out.bc_stats.rc_conflict_queue_prunes;
         ++out.bc_stats.certificate_queue_prunes;
         ++out.bc_stats.certificate_domain_prunes;
         continue;
-      }
-      if (!refresh_reason_bounds.empty()) {
-        qnode.domain_reason_bounds.insert(qnode.domain_reason_bounds.end(),
-                                          refresh_reason_bounds.begin(),
-                                          refresh_reason_bounds.end());
       }
 
       update_standard_form_bounds(node_sf, base_lp, qnode.lb, qnode.ub);
@@ -17810,13 +21212,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       refresh_opt.allow_cold_start = true;
       auto refresh_res =
           solve_lp_from_sf(node_sf, refresh_opt, qnode.basis_hint.get());
-      --rc_fixing_resolve_lps_left;
+      if (rc_fixing_resolve_lps_left > 0) {
+        --rc_fixing_resolve_lps_left;
+      }
       ++out.bc_stats.lp_solves;
       ++out.bc_stats.rc_fixing_resolve_lps;
       ++out.bc_stats.certificate_domain_resolve_lps;
       ++out.bc_stats.conformance_resolve_attempts;
 
       const auto refresh_type = classify_lp_result(refresh_res, n);
+      last_refresh_type = refresh_type;
+      last_refresh_status = refresh_res.result.stats.status;
+      last_refresh_farkas = refresh_res.result.stats.has_farkas_certificate;
+      last_refresh_objective = refresh_res.result.stats.objective;
       if (refresh_type == LPFailureType::Infeasible ||
           refresh_type == LPFailureType::ObjectiveCutoff) {
         if (refresh_type == LPFailureType::ObjectiveCutoff) {
@@ -17824,11 +21232,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                                  refresh_res.result.stats.objective);
         }
         ++pruned;
-        ++out.bc_stats.rc_fixing_resolve_prunes;
-        ++out.bc_stats.certificate_queue_prunes;
-        ++out.bc_stats.certificate_domain_prunes;
-        continue;
-      }
+	        ++out.bc_stats.rc_fixing_resolve_prunes;
+	        ++out.bc_stats.certificate_queue_prunes;
+	        ++out.bc_stats.certificate_domain_prunes;
+        if (popped_lower_bound_frontier) ++frontier_effective_nodes;
+	        continue;
+	      }
       if (refresh_type != LPFailureType::Success ||
           refresh_res.result.x.size() != n ||
           !std::isfinite(refresh_res.result.stats.objective)) {
@@ -17851,9 +21260,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
       node_lift_sum += lift;
       node_lift_max = std::max(node_lift_max, lift);
-      if (lift > std::max(1e-7, opt.lp_tol)) {
-        ++bound_moves;
-        ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+	      if (lift > std::max(1e-7, opt.lp_tol)) {
+	        ++bound_moves;
+        if (popped_lower_bound_frontier) ++frontier_effective_nodes;
+	        ++out.bc_stats.rc_fixing_resolve_bound_improvements;
         ++out.bc_stats.certificate_domain_bound_improvements;
         ++out.bc_stats.conformance_resolve_bound_moves;
         out.bc_stats.conformance_bound_lift_sum += lift;
@@ -17861,12 +21271,161 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             std::max(out.bc_stats.conformance_bound_lift_max, lift);
       }
 
-      qnode.basis_hint =
-          persist_bc_node_basis_from_simplex(refresh_res, qnode.basis_hint);
-	      qnode.domain_learning_epoch = current_domain_learning_epoch();
-	      qnode.lp_refresh_needed = false;
+	      qnode.basis_hint =
+	          persist_bc_node_basis_from_simplex(refresh_res, qnode.basis_hint);
+		      qnode.domain_learning_epoch = current_domain_learning_epoch();
+		      qnode.objective_artifact_epoch = current_objective_artifact_epoch();
+		      qnode.domain_closure_epoch = current_domain_closure_epoch();
+		      qnode.lp_refresh_needed = false;
 
-	      std::vector<int> refresh_frac;
+      bool rc_refresh_deferred = false;
+      bool rc_refresh_pruned = false;
+      int queue_rc_fixed = 0;
+      int queue_rc_passes = 0;
+      for (;;) {
+        const double queue_upper_limit =
+            has_incumbent && std::isfinite(incumbent_obj)
+                ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+                                                   opt.int_tol)
+                : kInf;
+        if (!opt.enable_reduced_cost_fixing ||
+            (!mandatory_frontier_contract && rc_fixing_resolve_lps_left <= 0) ||
+            !std::isfinite(queue_upper_limit) || qnode.basis_hint == nullptr ||
+            !qnode.basis_hint->cached_reduced_costs ||
+            qnode.basis_hint->cached_reduced_costs->size() < n) {
+          break;
+        }
+        std::vector<DomainReasonBound> queue_rc_reasons;
+        const int rc_fixed = reduced_cost_fixing(
+            base_lp.vars, qnode.x_relax,
+            *qnode.basis_hint->cached_reduced_costs,
+            qnode.basis_hint->basis_indices(), qnode.bound,
+            queue_upper_limit, opt.int_tol, qnode.lb, qnode.ub, nullptr,
+            qnode.basis_hint->cached_col_scale.get(), &queue_rc_reasons,
+            &qnode.branch_reasons, qnode.depth,
+            static_cast<int>(qnode.branch_reasons.size() +
+                             qnode.domain_reason_bounds.size()));
+        if (rc_fixed <= 0) break;
+        queue_rc_fixed += rc_fixed;
+        ++queue_rc_passes;
+        out.bc_stats.rc_fixings += static_cast<std::uint64_t>(rc_fixed);
+        for (auto& rb : queue_rc_reasons) {
+          append_domain_reason_bound(qnode, std::move(rb), n, &root.lb,
+                                     &root.ub);
+        }
+        rebuild_local_domain_trail(qnode, n, &root.lb, &root.ub);
+        qnode.lp_refresh_needed = true;
+
+        std::vector<BoundChangeInfo> rc_refresh_changes;
+        NodeDomainClosureStats rc_refresh_closure_stats;
+        const std::vector<DomainReasonBound> no_rc_refresh_reasons;
+        const bool rc_domain_ok = run_node_domain_closure(
+            qnode, no_rc_refresh_reasons, rc_refresh_changes, nullptr, nullptr,
+            has_incumbent ? incumbent_obj : kInf, has_incumbent,
+            "queue_refresh_rc_closure", &rc_refresh_closure_stats);
+        if (!rc_domain_ok || !bounds_consistent(qnode.lb, qnode.ub)) {
+          ++pruned;
+          ++out.bc_stats.rc_fixing_resolve_prunes;
+          ++out.bc_stats.certificate_queue_prunes;
+          ++out.bc_stats.certificate_domain_prunes;
+          rc_refresh_deferred = false;
+          rc_refresh_pruned = true;
+          break;
+        }
+
+        update_standard_form_bounds(node_sf, base_lp, qnode.lb, qnode.ub);
+        SimplexOptions rc_refresh_opt = simplex_opt;
+        rc_refresh_opt.allow_cold_start = true;
+        auto rc_refresh_res =
+            solve_lp_from_sf(node_sf, rc_refresh_opt, qnode.basis_hint.get());
+        if (rc_fixing_resolve_lps_left > 0) {
+          --rc_fixing_resolve_lps_left;
+        }
+        ++out.bc_stats.lp_solves;
+        ++out.bc_stats.rc_fixing_resolve_lps;
+        ++out.bc_stats.certificate_domain_resolve_lps;
+        ++out.bc_stats.conformance_resolve_attempts;
+
+        const auto rc_refresh_type = classify_lp_result(rc_refresh_res, n);
+        last_refresh_type = rc_refresh_type;
+        last_refresh_status = rc_refresh_res.result.stats.status;
+        last_refresh_farkas = rc_refresh_res.result.stats.has_farkas_certificate;
+        last_refresh_objective = rc_refresh_res.result.stats.objective;
+        if (rc_refresh_type == LPFailureType::Infeasible ||
+            rc_refresh_type == LPFailureType::ObjectiveCutoff) {
+          if (rc_refresh_type == LPFailureType::ObjectiveCutoff) {
+            qnode.bound =
+                std::max(qnode.bound, rc_refresh_res.result.stats.objective);
+          }
+          ++pruned;
+          ++out.bc_stats.rc_fixing_resolve_prunes;
+          ++out.bc_stats.certificate_queue_prunes;
+          ++out.bc_stats.certificate_domain_prunes;
+          if (popped_lower_bound_frontier) ++frontier_effective_nodes;
+          rc_refresh_deferred = false;
+          rc_refresh_pruned = true;
+          break;
+        }
+        if (rc_refresh_type != LPFailureType::Success ||
+            rc_refresh_res.result.x.size() != n ||
+            !std::isfinite(rc_refresh_res.result.stats.objective)) {
+          ++failures;
+          ++out.bc_stats.conformance_resolve_failures;
+          qnode.lp_refresh_needed = true;
+          rc_refresh_deferred = true;
+          break;
+        }
+
+        const double rc_old_bound = qnode.bound;
+        qnode.x_relax = clamp_to_bounds(rc_refresh_res.result.x, qnode.lb,
+                                        qnode.ub);
+        qnode.x_seed = qnode.x_relax;
+        qnode.bound =
+            std::max(qnode.bound, rc_refresh_res.result.stats.objective);
+        if (qnode.estimate < qnode.bound) qnode.estimate = qnode.bound;
+        const double rc_lift = std::max(0.0, qnode.bound - rc_old_bound);
+        ++out.bc_stats.rc_proof_resolve_lift_samples;
+        out.bc_stats.rc_proof_resolve_lift_sum += rc_lift;
+        out.bc_stats.rc_proof_resolve_lift_max =
+            std::max(out.bc_stats.rc_proof_resolve_lift_max, rc_lift);
+        node_lift_sum += rc_lift;
+        node_lift_max = std::max(node_lift_max, rc_lift);
+        if (rc_lift > std::max(1e-7, opt.lp_tol)) {
+          ++bound_moves;
+          if (popped_lower_bound_frontier) ++frontier_effective_nodes;
+          ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+          ++out.bc_stats.certificate_domain_bound_improvements;
+          ++out.bc_stats.conformance_resolve_bound_moves;
+          out.bc_stats.conformance_bound_lift_sum += rc_lift;
+          out.bc_stats.conformance_bound_lift_max =
+              std::max(out.bc_stats.conformance_bound_lift_max, rc_lift);
+        }
+        qnode.basis_hint =
+            persist_bc_node_basis_from_simplex(rc_refresh_res, qnode.basis_hint);
+        qnode.domain_learning_epoch = current_domain_learning_epoch();
+        qnode.objective_artifact_epoch = current_objective_artifact_epoch();
+        qnode.domain_closure_epoch = current_domain_closure_epoch();
+        qnode.lp_refresh_needed = false;
+      }
+      if (queue_rc_fixed > 0 &&
+          (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr)) {
+        fmt::print(stderr,
+                   "[B&C-RC-FIXPOINT] phase=queue_refresh depth={} pass={} "
+                   "fix={} bound={:.10g} deferred={}\n",
+                   qnode.depth, queue_rc_passes, queue_rc_fixed, qnode.bound,
+                   rc_refresh_deferred ? 1 : 0);
+      }
+      if (rc_refresh_deferred) {
+        requeue_refreshed_node(std::move(qnode));
+        ++requeued;
+        break;
+      }
+      if (rc_refresh_pruned ||
+          (queue_rc_fixed > 0 && !bounds_consistent(qnode.lb, qnode.ub))) {
+        continue;
+      }
+
+		      std::vector<int> refresh_frac;
       if (!fractional_branchable_indices(
               qnode.x_relax, qnode.lb, qnode.ub,
               requested_vendored_highs_lp ? std::max(1e-9, opt.lp_tol)
@@ -17888,20 +21447,35 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                        "obj={:.10g} bound={:.10g}\n",
                        qnode.depth, obj, qnode.bound);
           }
-        }
-        ++pruned;
-        continue;
-      }
+	        }
+	        ++pruned;
+        if (popped_lower_bound_frontier) ++frontier_effective_nodes;
+	        continue;
+	      }
 
-	      if (incumbent_prunes_node(has_incumbent, incumbent_obj, qnode.bound)) {
+	      const double queue_refresh_prune_limit =
+	          has_incumbent && std::isfinite(incumbent_obj)
+	              ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                                 opt.int_tol)
+	              : kInf;
+	      if (incumbent_prunes_node(
+	              has_incumbent && std::isfinite(queue_refresh_prune_limit),
+	              queue_refresh_prune_limit, qnode.bound,
+	              std::max(1e-9, opt.lp_tol))) {
 	        ++pruned;
 	        ++out.bc_stats.rc_fixing_resolve_prunes;
 	        ++out.bc_stats.certificate_queue_prunes;
+        if (popped_lower_bound_frontier) ++frontier_effective_nodes;
 	        continue;
 	      }
 
 	      requeue_refreshed_node(std::move(qnode));
 	      ++requeued;
+      // A zero-lift LP refresh proves only this queued node's current
+      // frontier bound.  Other marked frontier nodes may still lift or prune,
+      // so strict proof drain must continue through the available refresh
+      // budget instead of stopping on the first degenerate/no-move node.
+      (void)popped_lower_bound_frontier;
     }
 
     if (incumbent_updates > 0) {
@@ -17909,6 +21483,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     }
     refresh_queue_lower_bound();
     const double qlb_after = node_queue.lower_bound();
+    record_queue_lower_bound_audit("queue_resolve",
+                     source != nullptr ? source
+                             : "domain_refresh",
+                     qlb_before, qlb_after);
     const double queue_lift =
         (std::isfinite(qlb_before) && std::isfinite(qlb_after))
             ? std::max(0.0, qlb_after - qlb_before)
@@ -17918,47 +21496,77 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       out.bc_stats.conformance_queue_lift_sum += queue_lift;
       out.bc_stats.conformance_queue_lift_max =
           std::max(out.bc_stats.conformance_queue_lift_max, queue_lift);
+      out.bc_stats.certificate_queue_lower_bound_lift_nodes +=
+          frontier_effective_nodes;
     }
+	    last_marked_queue_refresh_attempts = attempts;
+	    last_marked_queue_refresh_remaining =
+	        node_queue.count_lp_refresh_needed_near_lower_bound(
+	            movement_band, scan_limit);
+	    last_marked_queue_refresh_pruned = pruned;
+	    last_marked_queue_refresh_bound_moves = bound_moves;
+	    last_marked_queue_refresh_queue_lift = queue_lift;
     if (opt.verbose || attempts > 0 || pruned > 0 || queue_lift > 0.0) {
-      fmt::print(stderr,
-                 "[B&C-QUEUE-RESOLVE] source={} attempts={} requeued={} "
-                 "pruned={} failures={} inc={} bound_moves={} "
-                 "frontier_marked={} lift_avg/max={:.6g}/{:.6g} "
-                 "qlb={:.10g}->{:.10g} budget_left={}\n",
-                 source != nullptr ? source : "domain_refresh", attempts,
-                 requeued, pruned, failures, incumbent_updates, bound_moves,
-                 marked_frontier_nodes,
-                 attempts > 0 ? node_lift_sum / static_cast<double>(attempts)
-                              : 0.0,
-                 node_lift_max, qlb_before, qlb_after,
-                 rc_fixing_resolve_lps_left);
+	      fmt::print(stderr,
+	                 "[B&C-QUEUE-RESOLVE] source={} attempts={} requeued={} "
+	                 "pruned={} failures={} inc={} bound_moves={} "
+	                 "frontier_marked={} lb_nodes={} lift_avg/max={:.6g}/{:.6g} "
+	                 "qlb={:.10g}->{:.10g} budget_left={} mandatory={} "
+                     "frontier_stale={} last_type={} last_status='{}' "
+                     "last_farkas={} last_obj={:.10g}\n",
+	                 source != nullptr ? source : "domain_refresh", attempts,
+	                 requeued, pruned, failures, incumbent_updates, bound_moves,
+	                 marked_frontier_nodes, frontier_effective_nodes,
+	                 attempts > 0 ? node_lift_sum / static_cast<double>(attempts)
+	                              : 0.0,
+	                 node_lift_max, qlb_before, qlb_after,
+                 rc_fixing_resolve_lps_left,
+                 mandatory_frontier_contract ? 1 : 0,
+                 last_marked_queue_refresh_remaining,
+                 lp_failure_type_str(last_refresh_type), last_refresh_status,
+                 last_refresh_farkas ? 1 : 0, last_refresh_objective);
     }
     (void)bound_moves;
     return pruned;
   };
 
-  auto prune_queue_after_domain_learning =
-      [&](bool force_frontier_drain = false, const char* reason = nullptr)
-          -> int {
-    const double cutoff_improve_tol =
-        std::max(1e-7, has_incumbent && std::isfinite(incumbent_obj)
-                            ? 1e-10 * std::max(1.0, std::abs(incumbent_obj))
-                            : 1e-7);
+	  auto prune_queue_after_domain_learning =
+	      [&](bool force_frontier_drain = false, const char* reason = nullptr)
+	          -> int {
+	    const auto queue_source_refresh = refresh_objective_domain_sources(
+	        reason != nullptr ? reason : "queue_domain_learning");
+	    const double cutoff_improve_tol =
+	        std::max(1e-7, has_incumbent && std::isfinite(incumbent_obj)
+	                            ? 1e-10 * std::max(1.0, std::abs(incumbent_obj))
+	                            : 1e-7);
     const bool cutoff_strictly_improved =
         has_incumbent && std::isfinite(incumbent_obj) &&
         (!std::isfinite(last_queue_domain_replay_incumbent) ||
          incumbent_obj < last_queue_domain_replay_incumbent - cutoff_improve_tol);
-    const std::uint64_t replay_epoch = current_domain_learning_epoch();
-    const bool has_new_global_learning =
-        replay_epoch > last_queue_domain_replay_epoch;
-    if (!force_frontier_drain && !cutoff_strictly_improved &&
-        !has_new_global_learning) {
-      return 0;
-    }
-    if (!force_frontier_drain && !cutoff_strictly_improved &&
-        stale_queue_domain_replay_passes >= 3) {
-      return 0;
-    }
+    const std::uint64_t closure_epoch = current_domain_closure_epoch();
+	    const bool has_new_global_learning =
+	        closure_epoch > last_queue_domain_replay_epoch;
+	    if (!force_frontier_drain && !cutoff_strictly_improved &&
+	        !has_new_global_learning &&
+	        queue_source_refresh.total_published() == 0) {
+	      return 0;
+	    }
+	    // HiGHS' HighsDomain::propagate() is driven by pending propagation rows:
+	    // once a conflict/cut/objective artifact is learned, the domain closure
+	    // must run regardless of how many previous queue replays were empty.
+	    // Stale replay suppression may only apply when there is no new source,
+	    // which is already handled by the early return above.
+    const double queue_incumbent_upper_limit =
+        has_incumbent && std::isfinite(incumbent_obj)
+            ? incumbent_upper_limit()
+            : kInf;
+    const bool has_queue_upper_limit =
+        has_incumbent && std::isfinite(queue_incumbent_upper_limit);
+    const double queue_upper_limit_prune_tol =
+        has_queue_upper_limit
+            ? incumbent_upper_limit_prune_tol(queue_incumbent_upper_limit)
+            : kIncumbentPruneTol;
+
     const double queue_lb_before = node_queue.lower_bound();
     const int queue_size_before = node_queue.size();
     const std::uint64_t queue_sources = conformance_source_total();
@@ -17966,11 +21574,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     std::uint64_t cutpool_tightened_total = 0;
     std::uint64_t objective_tightened_total = 0;
     int direct_incumbent_pruned = 0;
-    int closure_pruned_total = 0;
-    int cutpool_pruned_total = 0;
-    int objective_pruned_total = 0;
-    int pruned = prune_queue_by_incumbent();
-    direct_incumbent_pruned = pruned;
+	    int closure_pruned_total = 0;
+	    int cutpool_pruned_total = 0;
+	    int objective_pruned_total = 0;
+	    int pruned = prune_queue_by_incumbent();
+	    direct_incumbent_pruned = pruned;
     const int direct_gap_pruned =
         prune_queue_by_gap_optimality_limit("queue_domain_learning");
     pruned += direct_gap_pruned;
@@ -17978,6 +21586,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     if (!global_bound_lifting_certificates.empty()) {
       std::uint64_t certificate_tightened = 0;
       std::uint64_t certificate_reasons = 0;
+      std::uint64_t certificate_refresh_marked = 0;
+      double certificate_move_sum = 0.0;
+      double certificate_move_max = 0.0;
       const bool frontier_limited_cert =
           opt.require_tree_exhaustion_certificate &&
           (proof_tail_queue_mode_active() || force_frontier_drain);
@@ -17991,13 +21602,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               : 0;
       const int certificate_pruned =
           node_queue.propagate_bound_lifting_certificates(
-              base_lp.vars, global_bound_lifting_certificates, has_incumbent,
-              incumbent_obj,
-              std::max(1e-9, kIncumbentPruneTol *
-                                 std::max(1.0, std::abs(incumbent_obj))),
-              &certificate_tightened, &certificate_reasons, cert_replay_band,
+              base_lp.vars, global_bound_lifting_certificates,
+              has_queue_upper_limit, queue_incumbent_upper_limit,
+              queue_upper_limit_prune_tol,
+              &certificate_tightened, &certificate_reasons,
+              &certificate_refresh_marked, &certificate_move_sum,
+              &certificate_move_max, cert_replay_band,
               cert_replay_max_nodes, &root.lb, &root.ub,
+              &domain_objective_lower_bound,
               &replay_queue_reason_trail_certificates);
+      out.bc_stats.certificate_queue_lp_refresh_marked +=
+          certificate_refresh_marked;
+      if (certificate_move_sum > 0.0) {
+        out.bc_stats.certificate_queue_frontier_bound_moves +=
+            certificate_tightened;
+        out.bc_stats.certificate_queue_frontier_bound_move_sum +=
+            certificate_move_sum;
+        out.bc_stats.certificate_queue_frontier_bound_move_max =
+            std::max(out.bc_stats.certificate_queue_frontier_bound_move_max,
+                     certificate_move_max);
+      }
       if (certificate_tightened > 0 || certificate_reasons > 0) {
         closure_tightened_total += certificate_tightened;
         out.bc_stats.certificate_queue_tightenings += certificate_tightened;
@@ -18012,93 +21636,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             static_cast<std::uint64_t>(certificate_pruned);
       }
     }
-    if (!implication_graph.empty() || !clique_table.empty() ||
-        !conflict_pool.empty()) {
-      std::uint64_t queued_tightened = 0;
-      const bool frontier_limited_closure =
-          opt.require_tree_exhaustion_certificate &&
-          (proof_tail_queue_mode_active() || force_frontier_drain);
-      const double closure_replay_band =
-          frontier_limited_closure
-              ? std::max(termination_bound_band(), 2.0 * opt.lp_tol)
-              : kInf;
-      const int closure_replay_max_nodes =
-          frontier_limited_closure
-              ? (force_frontier_drain ? 2048 : 512)
-              : 0;
-      const int closure_pruned = node_queue.propagate_by_domain_object(
-          [&](const Node&,
-              Eigen::VectorXd& lb,
-              Eigen::VectorXd& ub,
-              int& tightened,
-              int& pruned_by_domain) {
-            tightened = 0;
-            pruned_by_domain = 0;
-            if (lb.size() != n || ub.size() != n) return true;
-            for (int pass = 0; pass < 8; ++pass) {
-              const int before = tightened;
-              if (!conflict_pool.empty()) {
-                int conflict_tightened = 0;
-                std::vector<BoundChangeInfo> conflict_changes;
-                if (!conflict_pool.propagate(base_lp.vars, lb, ub,
-                                             &conflict_tightened,
-                                             &conflict_changes,
-                                             opt.int_tol)) {
-                  pruned_by_domain = 1;
-                  return false;
-                }
-                tightened += conflict_tightened;
-              }
-              if (!implication_graph.empty()) {
-                std::vector<BoundChangeInfo> implication_changes;
-                tightened += implication_graph.propagate(
-                    base_lp.vars, lb, ub, &implication_changes, opt.int_tol);
-              }
-              if (!clique_table.empty()) {
-                std::vector<BoundChangeInfo> clique_changes;
-                tightened += clique_table.propagate(lb, ub, &clique_changes);
-              }
-              if (!root_transformed_cutpool_audit_rows.empty()) {
-                SparseCutpoolPropagationStats cutpool_stats;
-                const int before_cutpool = tightened;
-                const bool cutpool_ok = propagate_sparse_cutpool_rows(
-                    root_transformed_cutpool_audit_rows,
-                    root_transformed_cutpool_audit_rhs, lb, ub,
-                    /*max_rounds=*/1, &cutpool_stats);
-                if (!cutpool_ok) {
-                  pruned_by_domain = 1;
-                  ++cutpool_pruned_total;
-                  return false;
-                }
-                tightened += cutpool_stats.tightened;
-                if (tightened > before_cutpool) {
-                  cutpool_tightened_total += static_cast<std::uint64_t>(
-                      tightened - before_cutpool);
-                }
-              }
-              if (!bounds_consistent(lb, ub)) {
-                pruned_by_domain = 1;
-                return false;
-              }
-              if (tightened == before) break;
-            }
-            return true;
-          },
-          has_incumbent, incumbent_obj,
-          std::max(1e-9, kIncumbentPruneTol *
-                             std::max(1.0, std::abs(incumbent_obj))),
-          &queued_tightened, closure_replay_band, closure_replay_max_nodes);
-      learned_pruned += closure_pruned;
-      closure_tightened_total = queued_tightened;
-      closure_pruned_total = closure_pruned;
-      out.bc_stats.local_implications_applied += queued_tightened;
-    }
-		    const bool objective_replay_allowed =
-		        force_frontier_drain || !proof_tail_queue_mode_active() ||
-		        cutoff_strictly_improved || has_new_global_learning;
+						    const bool objective_replay_allowed =
+					        cutoff_strictly_improved ||
+		                    current_objective_artifact_epoch() >
+	                            last_queue_objective_replay_epoch ||
+	                        (!proof_tail_queue_mode_active() &&
+	                         has_new_global_learning);
+		    const double queue_upper_limit =
+		        has_incumbent && std::isfinite(incumbent_obj)
+		            ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+		                                               opt.int_tol)
+		            : kInf;
 		    if (objective_replay_allowed &&
 		        use_objective_propagation && has_incumbent &&
-	        std::isfinite(incumbent_obj) &&
+	        std::isfinite(queue_upper_limit) &&
 	        (!objective_propagation.partitions.empty() ||
          !objective_propagation.implied_events.empty() ||
          objective_propagation.max_implied_event_delta > 0.0 ||
@@ -18112,7 +21663,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       std::uint64_t queue_objcap_raw_exceed = 0;
       std::uint64_t queue_objcap_proof_exceed = 0;
       std::uint64_t objective_reasons_added = 0;
-      std::uint64_t queue_objective_event_bound_lifts = 0;
       ObjectivePropagationState::ProofCapacityPropagationStats
           queue_proof_stats;
       double queue_objcap_min_raw_cap = kInf;
@@ -18181,7 +21731,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             if (opt.verbose) {
               const auto audit =
                   objective_propagation.audit_capacity_conformance(
-                      base_lp, lb, ub, incumbent_obj, node.bound, opt.int_tol);
+                      base_lp, lb, ub, queue_upper_limit, node.bound,
+                      opt.int_tol);
               if (audit.valid) {
                 ++queue_objcap_nodes;
                 queue_objcap_active += audit.active_events;
@@ -18207,21 +21758,31 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             int raw_tightened = 0;
             int raw_pruned = 0;
             const bool raw_ok = objective_propagation.propagate(
-                base_lp, lb, ub, incumbent_obj, opt.int_tol, node.depth,
+                base_lp, lb, ub, queue_upper_limit, opt.int_tol, node.depth,
                 trail_base, &reasons, raw_tightened, raw_pruned);
             tightened = raw_tightened;
             pruned = raw_pruned;
             if (!raw_ok || pruned > 0) return raw_ok;
-            const DualProofRow* queue_objective_proof =
-                global_queue_objective_proof;
-            if (queue_objective_proof == nullptr &&
-                have_scoped_queue_objective_proof &&
+            const DualProofRow* queue_objective_proof = nullptr;
+            if (have_scoped_queue_objective_proof &&
                 scope_active_for_node(
                     node, cached_queue_objective_event_proof_scope)) {
               queue_objective_proof = &cached_queue_objective_event_proof;
             }
+            if (queue_objective_proof == nullptr) {
+              queue_objective_proof = global_queue_objective_proof;
+            }
 	            if (queue_objective_proof != nullptr &&
 	                allow_certificate_domain_replay) {
+              const double queue_objective_proof_upper =
+                  objective_event_proof_upper(queue_objective_proof);
+              const double queue_objective_proof_lower =
+                  dual_proof_domain_lower_bound(queue_objective_proof,
+                                                queue_objective_proof_upper,
+                                                lb, ub);
+              if (!std::isfinite(queue_objective_proof_lower)) {
+                return bounds_consistent(lb, ub);
+              }
               const bool using_scoped_queue_proof =
                   queue_objective_proof ==
                       &cached_queue_objective_event_proof &&
@@ -18237,37 +21798,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   node.basis_hint->cached_reduced_costs->size() >= n) {
                 node_reduced_costs = node.basis_hint->cached_reduced_costs.get();
               }
-              ObjectivePropagationState::EventBoundLiftCallback
-                  event_bound_lift_cb =
-                      [&](const ObjectivePropagationState::ImpliedContributionEvent&
-                              event,
-                          const std::vector<BranchDomainLiteral>& active_reason,
-                          const BranchDomainLiteral& missing_literal) -> int {
-                const int target = event.target_col;
-                if (target < 0 || target >= n ||
-                    !std::isfinite(event.target_bound) ||
-                    missing_literal.var_idx < 0 ||
-                    missing_literal.var_idx >= n ||
-                    !std::isfinite(missing_literal.value)) {
-                  return 0;
-                }
-	                (void)event;
-	                (void)target;
-	                (void)active_reason;
-	                (void)missing_literal;
-	                return 0;
-	              };
 	              const bool proof_ok =
 	                  objective_propagation.propagate_proof_capacity_one_missing(
 	                      base_lp,
 	                      ObjectivePropagationState::ProofCapacityContext{
 	                          &queue_objective_proof->coeff, &node.x_relax,
                           node_reduced_costs,
-	                          node.bound, incumbent_obj, opt.int_tol,
+	                          queue_objective_proof_lower, queue_upper_limit,
+                          opt.int_tol,
 	                          std::max(1e-9, opt.lp_tol), node.depth,
 	                          trail_base + static_cast<int>(reasons.size())},
                       lb, ub, &reasons, proof_tightened, proof_pruned,
-                      &local_proof_stats, &event_bound_lift_cb);
+                      &local_proof_stats);
               // The cached child proof scope is a consumption gate.  HiGHS
               // resolves the local trail and publishes only the reconvergence
               // frontier; appending the generating child branch here would turn
@@ -18299,12 +21841,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             }
             return bounds_consistent(lb, ub);
           },
-	          has_incumbent, incumbent_obj,
-	          std::max(1e-9, kIncumbentPruneTol *
-	                             std::max(1.0, std::abs(incumbent_obj))),
+		          has_queue_upper_limit, queue_incumbent_upper_limit,
+		          queue_upper_limit_prune_tol,
 	          &objective_tightened, &objective_reasons_added,
 	          objective_queue_bound_band, objective_queue_max_nodes,
-	          &root.lb, &root.ub, &replay_queue_reason_trail_certificates);
+	          &root.lb, &root.ub, &domain_objective_lower_bound, nullptr,
+	          nullptr, nullptr, &replay_queue_reason_trail_certificates);
+      if (objective_tightened > 0 || objective_reasons_added > 0) {
+        refresh_queue_lower_bound();
+      }
       objective_tightened_total = objective_tightened;
       objective_pruned_total = objective_pruned;
       if (objective_tightened > 0) {
@@ -18338,37 +21883,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         out.bc_stats.objective_implied_event_prunes +=
             static_cast<std::uint64_t>(objective_pruned);
       }
-      if (queue_objective_event_bound_lifts > 0) {
-        out.bc_stats.termination_effective_admitted +=
-            queue_objective_event_bound_lifts;
-        if (!global_bound_lifting_certificates.empty()) {
-          std::uint64_t cert_tightened = 0;
-          std::uint64_t cert_reasons = 0;
-          const int cert_pruned =
-              node_queue.propagate_bound_lifting_certificates(
-                  base_lp.vars, global_bound_lifting_certificates,
-                  has_incumbent, incumbent_obj,
-                  std::max(1e-9, kIncumbentPruneTol *
-                                     std::max(1.0, std::abs(incumbent_obj))),
-                  &cert_tightened, &cert_reasons,
-                  objective_queue_bound_band, objective_queue_max_nodes,
-                  &root.lb, &root.ub,
-                  &replay_queue_reason_trail_certificates);
-          closure_tightened_total += cert_tightened;
-          objective_tightened_total += cert_tightened;
-          learned_pruned += cert_pruned;
-          out.bc_stats.certificate_queue_tightenings += cert_tightened;
-          out.bc_stats.certificate_domain_fixings += cert_tightened;
-          out.bc_stats.scoped_conflict_objects_learned += cert_reasons;
-          out.bc_stats.termination_effective_admitted +=
-              cert_tightened + cert_reasons +
-              static_cast<std::uint64_t>(std::max(0, cert_pruned));
-          if (cert_pruned > 0) {
-            out.bc_stats.certificate_queue_prunes +=
-                static_cast<std::uint64_t>(cert_pruned);
-          }
-        }
-      }
+      last_queue_objective_replay_epoch = current_objective_artifact_epoch();
       if (queue_objcap_nodes > 0) {
         out.bc_stats.conformance_objective_capacity_phases +=
             queue_objcap_nodes;
@@ -18425,39 +21940,50 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                   queue_proof_stats.skip_no_lp_or_queue_hit,
 	                   queue_proof_stats.max_proof_lift,
 	                   queue_proof_stats.max_proof_excess,
-                           queue_proof_stats.rc_frontier_fixings,
+	                   queue_proof_stats.rc_frontier_fixings,
                            queue_proof_stats.rc_frontier_candidates,
                            queue_proof_stats.rc_frontier_skip_budget);
 	      }
     }
-	    if (learned_pruned > 0) {
+		    if (learned_pruned > 0) {
 	      out.bc_stats.rc_conflict_queue_prunes +=
 	          static_cast<std::uint64_t>(learned_pruned);
-	    }
+    }
     pruned += learned_pruned;
     const std::uint64_t queue_tightenings_for_refresh =
         closure_tightened_total + objective_tightened_total;
+    const bool mandatory_frontier_refresh =
+        proof_tail_queue_mode_active() || force_frontier_drain ||
+        cutoff_strictly_improved;
     if (queue_tightenings_for_refresh > 0 &&
-        rc_fixing_resolve_lps_left > 0) {
+        (mandatory_frontier_refresh || rc_fixing_resolve_lps_left > 0)) {
       const double refresh_band =
           std::max(termination_bound_band(), 2.0 * opt.lp_tol);
       const int marked_frontier_nodes =
           node_queue.count_lp_refresh_needed_near_lower_bound(
               refresh_band, /*max_scan=*/8192);
-      const int pass_budget = std::min(
-          rc_fixing_resolve_lps_left,
-          marked_frontier_nodes > 0
-              ? std::min(marked_frontier_nodes,
-                         proof_tail_queue_mode_active()
-                             ? std::max(1, opt.reduced_cost_fixing_resolve_max_lps)
-                             : std::max(1, opt.reduced_cost_fixing_resolve_max_lps / 2))
-              : std::max(1, opt.reduced_cost_fixing_resolve_max_lps / 8));
-      pruned += refresh_marked_queue_nodes(
-          reason != nullptr ? reason : "queue_domain_learning", pass_budget,
-          refresh_band);
-    }
+      const int pass_budget = mandatory_frontier_refresh
+          ? marked_frontier_nodes
+          : std::min(
+                rc_fixing_resolve_lps_left,
+                marked_frontier_nodes > 0
+                    ? std::min(marked_frontier_nodes,
+                               std::max(1,
+                                        opt.reduced_cost_fixing_resolve_max_lps /
+                                            2))
+                    : std::max(1,
+                               opt.reduced_cost_fixing_resolve_max_lps / 8));
+		      const int refresh_pruned = refresh_marked_queue_nodes(
+		          reason != nullptr ? reason : "queue_domain_learning", pass_budget,
+		          refresh_band, mandatory_frontier_refresh);
+		      pruned += refresh_pruned;
+		    }
     refresh_queue_lower_bound();
     const double queue_lb_after = node_queue.lower_bound();
+    record_queue_lower_bound_audit("queue_domain_learning",
+                     reason != nullptr ? reason
+                             : "domain_learning",
+                     queue_lb_before, queue_lb_after);
     const int queue_size_after = node_queue.size();
     const std::uint64_t queue_tightenings =
         closure_tightened_total + cutpool_tightened_total +
@@ -18494,7 +22020,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     if (has_incumbent && std::isfinite(incumbent_obj)) {
       last_queue_domain_replay_incumbent = incumbent_obj;
     }
-    last_queue_domain_replay_epoch = replay_epoch;
+    last_queue_domain_replay_epoch = current_domain_closure_epoch();
     const bool progressed =
         queue_tightenings > 0 || pruned > 0 ||
         queue_lift > std::max(1e-8, opt.lp_tol);
@@ -18765,19 +22291,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           const char* source,
           const std::vector<BranchDomainLiteral>* required_scope = nullptr)
           -> int {
-    if (opt.require_tree_exhaustion_certificate) {
-      // HiGHS conflict analysis resolves a row proof through the current local
-      // domain trail before publishing a reusable frontier.  The native queue
-      // pass below derives reduced-cost-style bound changes directly from a
-      // row proof over queued nodes; in strict proof mode that can turn
-      // proof-side activity into domain fixings without a resolved trail
-      // certificate.  Keep strict exhaustion on first-class certificates only.
-      (void)proof;
-      (void)proof_upper;
-      (void)source;
-      (void)required_scope;
-      return 0;
-    }
     if (!proof.valid || proof.coeff.size() < n || proof.coeff.nonZeros() <= 0 ||
         !std::isfinite(proof_upper) || !std::isfinite(proof.rhs) ||
         node_queue.empty() ||
@@ -18810,113 +22323,62 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       return 0;
     }
 
+    (void)required_scope;
 	    int pruned = 0;
 	    std::uint64_t scoped_domain_fixings = 0;
 		    std::uint64_t scoped_certificates = 0;
 		    std::uint64_t queue_proof_conflicts = 0;
+		    std::uint64_t queue_lb_lift_nodes = 0;
+		    std::uint64_t queue_lp_refresh_marked = 0;
+		    double frontier_bound_move_sum = 0.0;
+		    double frontier_bound_move_max = 0.0;
 		    double lift_sum = 0.0;
 		    double lift_max = 0.0;
 	    const double frontier_band = forced ? kInf : std::max(band, 2.0 * proof_gap);
 	    const int max_queue_nodes = forced ? 2048 : 256;
+      const double queue_lb_before = node_queue.lower_bound();
 	    const int queue_nodes_before = node_queue.size();
-	    std::function<void(const Node&, double, double, bool, bool)>
-	        queue_prune_certificate_cb =
-	            [&](const Node& pruned_node, double min_activity,
-	                double cutoff_rhs, bool proof_cutoff,
-	                bool incumbent_cutoff) {
-	      const int published = publish_dual_proof_prune_conflict(
-	          proof, pruned_node, min_activity, cutoff_rhs, proof_cutoff,
-	          incumbent_cutoff, source);
-	      if (published > 0) {
-	        queue_proof_conflicts += static_cast<std::uint64_t>(published);
-	      }
-	    };
-		    std::unordered_set<std::size_t> queue_bound_lifting_seen;
-		    std::function<void(
-		        const DomainReasonBound&,
-		        const std::vector<BranchDomainLiteral>*,
-		        const std::vector<std::vector<BranchDomainLiteral>>*)>
-		        queue_bound_lifting_certificate_cb =
-		        [&](const DomainReasonBound& rb,
-		            const std::vector<BranchDomainLiteral>* scope,
-		            const std::vector<std::vector<BranchDomainLiteral>>*
-		                reconvergence_clauses) {
-	      if (rb.bound.var_idx < 0 || rb.bound.var_idx >= n ||
-	          !std::isfinite(rb.bound.value)) {
-	        return;
-	      }
-	      queue_proof_conflicts += static_cast<std::uint64_t>(
-	          publish_bound_lifting_certificate(
-	              rb, nullptr, nullptr,
-	              "queue_bound_lifting_certificate"));
-	      auto publish_bound_lifting_clause =
-	          [&](std::vector<BranchDomainLiteral> clause,
-	              std::uint64_t source_literals) {
-	        canonicalize_branch_literals(clause);
-	        if (clause.empty() ||
-	            static_cast<int>(clause.size()) >
-	                std::max(2, opt.reduced_cost_conflict_pool_max_literals)) {
-	          return;
-	        }
-	        const std::size_t h = conflict_clause_hash(clause);
-	        if (!queue_bound_lifting_seen.insert(h).second) return;
-	        queue_proof_conflicts += static_cast<std::uint64_t>(
-	            publish_conflict_clause_from_dual_proof(
-	                std::move(clause), source_literals,
-	                "queue_bound_lifting_certificate"));
-	      };
-		      if (reconvergence_clauses != nullptr) {
-		        for (const auto& reconv : *reconvergence_clauses) {
-		          (void)scope;
-		          std::vector<BranchDomainLiteral> scoped_reconv = reconv;
-		          canonicalize_branch_literals(scoped_reconv);
-		          publish_bound_lifting_clause(
-		              scoped_reconv,
-		              static_cast<std::uint64_t>(scoped_reconv.size()));
-		        }
-		      }
-		      std::vector<BranchDomainLiteral> clause;
-		      clause.insert(clause.end(), rb.reason.begin(), rb.reason.end());
-	      if (rb.has_source_conflict_literal &&
-	          rb.source_conflict_literal.var_idx >= 0 &&
-	          rb.source_conflict_literal.var_idx < n &&
-	          std::isfinite(rb.source_conflict_literal.value)) {
-	        clause.push_back(rb.source_conflict_literal);
-	        publish_bound_lifting_clause(
-	            std::move(clause),
-	            static_cast<std::uint64_t>(rb.reason.size() + 1));
-	      }
-	    };
-			    const double proof_cutoff_obj =
-			        has_incumbent && std::isfinite(incumbent_obj) &&
-			                std::isfinite(proof_upper)
-			            ? std::min(incumbent_obj, proof_upper)
-			            : incumbent_obj;
-			    const int tightened = node_queue.propagate_by_dual_proof_domain(
-			        base_lp.vars, proof.coeff, proof.rhs, proof_upper, has_incumbent,
-			        proof_cutoff_obj, opt.int_tol, std::max(1e-9, opt.lp_tol), &pruned,
-				        &scoped_domain_fixings, &scoped_certificates, &lift_sum, &lift_max,
-				        frontier_band, max_queue_nodes, required_scope,
-				        &queue_prune_certificate_cb,
-				        &queue_bound_lifting_certificate_cb,
-				        &replay_queue_reason_trail_certificates,
-				        &root.lb, &root.ub);
+      const int tightened = 0;
+				    const double queue_incumbent_upper_limit =
+				        has_incumbent && std::isfinite(incumbent_obj)
+				            ? incumbent_upper_limit()
+				            : kInf;
+				    const bool has_queue_upper_limit =
+				        has_incumbent && std::isfinite(queue_incumbent_upper_limit);
+				    const double queue_upper_limit_prune_tol =
+				        has_queue_upper_limit
+				            ? incumbent_upper_limit_prune_tol(
+				                  queue_incumbent_upper_limit)
+				            : kIncumbentPruneTol;
+      const bool has_resolved_frontier_certificates =
+          !global_bound_lifting_certificates.empty();
+      // HiGHS does not let a raw row-dual proof scan the open queue.  The row
+      // must first be explained through the local domain trail and republished
+      // as a resolved frontier certificate or conflict.  This consumer is
+      // therefore only a scheduling hook for already-published certificates.
     if (forced_certificate_queue_passes > 0) {
       --forced_certificate_queue_passes;
     }
 	    if (tightened == 0 && pruned == 0 && scoped_domain_fixings == 0 &&
-	        scoped_certificates == 0 && queue_proof_conflicts == 0) {
+	        scoped_certificates == 0 && queue_proof_conflicts == 0 &&
+	        queue_lb_lift_nodes == 0 && queue_lp_refresh_marked == 0 &&
+	        frontier_bound_move_sum <= 0.0 &&
+          !has_resolved_frontier_certificates) {
       ++out.bc_stats.termination_effective_skip_no_lp_or_queue_hit;
       if (certificate_queue_passes_left > 0) --certificate_queue_passes_left;
       last_certificate_queue_node =
           static_cast<std::uint64_t>(out.bc_stats.nodes_explored);
       ++out.bc_stats.certificate_queue_passes;
-      last_queue_domain_replay_epoch = current_domain_learning_epoch();
+      last_queue_domain_replay_epoch = current_domain_closure_epoch();
       stale_queue_domain_replay_passes = 0;
       if (meaningfully_better) {
         best_certificate_queue_gap =
             std::min(best_certificate_queue_gap, proof_gap);
       }
+      record_queue_lower_bound_audit("certificate_queue_noop",
+                                     source != nullptr ? source
+                                                       : "dual_proof",
+                                     queue_lb_before, node_queue.lower_bound());
       return 0;
     }
 
@@ -18942,12 +22404,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     out.bc_stats.certificate_queue_lift_sum += lift_sum;
     out.bc_stats.certificate_queue_lift_max =
         std::max(out.bc_stats.certificate_queue_lift_max, lift_max);
+    out.bc_stats.certificate_queue_lower_bound_lift_nodes +=
+        queue_lb_lift_nodes;
+    out.bc_stats.certificate_queue_lp_refresh_marked +=
+        queue_lp_refresh_marked;
+    if (frontier_bound_move_sum > 0.0) {
+      out.bc_stats.certificate_queue_frontier_bound_moves +=
+          scoped_domain_fixings;
+      out.bc_stats.certificate_queue_frontier_bound_move_sum +=
+          frontier_bound_move_sum;
+      out.bc_stats.certificate_queue_frontier_bound_move_max =
+          std::max(out.bc_stats.certificate_queue_frontier_bound_move_max,
+                   frontier_bound_move_max);
+    }
     const double certificate_lift_tol =
         std::max(1e-6, 10.0 * std::max(opt.lp_tol, opt.int_tol));
     const bool termination_effective_pass =
         pruned > 0 || lift_max > certificate_lift_tol ||
-        scoped_domain_fixings > 0 || scoped_certificates > 0 ||
-        queue_proof_conflicts > 0;
+        queue_lb_lift_nodes > 0 || queue_lp_refresh_marked > 0 ||
+        frontier_bound_move_sum > 0.0;
     if (termination_effective_pass) {
       stale_certificate_queue_passes = 0;
     } else {
@@ -18966,18 +22441,34 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		        !global_bound_lifting_certificates.empty();
 		    if (have_bound_lifting_artifacts &&
 		        !global_bound_lifting_certificates.empty()) {
-		      std::uint64_t cert_tightened = 0;
-		      std::uint64_t cert_reasons = 0;
-		      const int cert_pruned =
-		          node_queue.propagate_bound_lifting_certificates(
-		              base_lp.vars, global_bound_lifting_certificates,
-		              has_incumbent, incumbent_obj,
-		              std::max(1e-9, kIncumbentPruneTol *
-		                                 std::max(1.0, std::abs(incumbent_obj))),
-		              &cert_tightened, &cert_reasons,
-		              frontier_band, forced ? 2048 : 512,
-		              &root.lb, &root.ub,
-		              &replay_queue_reason_trail_certificates);
+			      std::uint64_t cert_tightened = 0;
+			      std::uint64_t cert_reasons = 0;
+			      std::uint64_t cert_refresh_marked = 0;
+			      double cert_move_sum = 0.0;
+			      double cert_move_max = 0.0;
+				      const int cert_pruned =
+				          node_queue.propagate_bound_lifting_certificates(
+			              base_lp.vars, global_bound_lifting_certificates,
+			              has_queue_upper_limit, queue_incumbent_upper_limit,
+			              queue_upper_limit_prune_tol,
+			              &cert_tightened, &cert_reasons,
+			              &cert_refresh_marked, &cert_move_sum,
+			              &cert_move_max,
+			              frontier_band, forced ? 2048 : 512,
+			              &root.lb, &root.ub,
+			              &domain_objective_lower_bound,
+			              &replay_queue_reason_trail_certificates);
+		      out.bc_stats.certificate_queue_lp_refresh_marked +=
+		          cert_refresh_marked;
+		      if (cert_move_sum > 0.0) {
+		        out.bc_stats.certificate_queue_frontier_bound_moves +=
+		            cert_tightened;
+		        out.bc_stats.certificate_queue_frontier_bound_move_sum +=
+		            cert_move_sum;
+		        out.bc_stats.certificate_queue_frontier_bound_move_max =
+		            std::max(out.bc_stats.certificate_queue_frontier_bound_move_max,
+		                     cert_move_max);
+		      }
 		      if (cert_tightened > 0 || cert_reasons > 0) {
 		        scoped_domain_fixings += cert_tightened;
 		        scoped_certificates += cert_reasons;
@@ -18985,8 +22476,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		        out.bc_stats.certificate_domain_fixings += cert_tightened;
 		        out.bc_stats.termination_effective_admitted +=
 		            cert_tightened + cert_reasons;
-		        lift_sum += static_cast<double>(cert_tightened);
-		        lift_max = std::max(lift_max, cert_tightened > 0 ? 1.0 : 0.0);
 		      }
 		      if (cert_pruned > 0) {
 		        pruned += cert_pruned;
@@ -19020,13 +22509,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		                  return false;
 		                }
 		                return true;
-		              },
-			              has_incumbent, incumbent_obj,
-			              std::max(1e-9, kIncumbentPruneTol *
-			                                 std::max(1.0, std::abs(incumbent_obj))),
-			              &conflict_tightened, &conflict_reasons,
+			              },
+				              has_queue_upper_limit, queue_incumbent_upper_limit,
+				              queue_upper_limit_prune_tol,
+				              &conflict_tightened, &conflict_reasons,
 			              frontier_band, forced ? 2048 : 512,
 			              &root.lb, &root.ub,
+			              &domain_objective_lower_bound, nullptr,
+			              nullptr, nullptr,
 			              &replay_queue_reason_trail_certificates);
 		      if (conflict_tightened > 0 || conflict_reasons > 0) {
 		        scoped_domain_fixings += conflict_tightened;
@@ -19036,6 +22526,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		            conflict_tightened;
 		        out.bc_stats.termination_effective_admitted +=
 		            conflict_tightened + conflict_reasons;
+		        refresh_queue_lower_bound();
 		      }
 		      if (conflict_pruned > 0) {
 		        pruned += conflict_pruned;
@@ -19050,11 +22541,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		    if ((scoped_domain_fixings > 0 || queue_proof_conflicts > 0) &&
 		        !implication_graph.empty()) {
       std::uint64_t queued_tightened = 0;
-      const int replay_pruned = node_queue.prune_by_implications(
-          base_lp.vars, implication_graph,
-          conflict_pool.empty() ? nullptr : &conflict_pool, has_incumbent,
-          incumbent_obj, opt.int_tol, &queued_tightened, frontier_band,
-          forced ? 2048 : 512);
+		      const int replay_pruned = node_queue.prune_by_implications(
+		          base_lp.vars, implication_graph,
+		          conflict_pool.empty() ? nullptr : &conflict_pool,
+		          has_queue_upper_limit, queue_incumbent_upper_limit, opt.int_tol,
+		          &queued_tightened, frontier_band,
+		          forced ? 2048 : 512, &root.lb, &root.ub);
       out.bc_stats.local_implications_applied += queued_tightened;
       if (replay_pruned > 0) {
         out.bc_stats.rc_conflict_queue_prunes +=
@@ -19063,21 +22555,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             static_cast<std::uint64_t>(replay_pruned);
         pruned += replay_pruned;
       }
-		    } else if ((scoped_domain_fixings > 0 || queue_proof_conflicts > 0) &&
-		               !conflict_pool.empty()) {
-      const int replay_pruned = node_queue.prune_conflicts(conflict_pool);
-      if (replay_pruned > 0) {
-        out.bc_stats.rc_conflict_queue_prunes +=
+			    } else if ((scoped_domain_fixings > 0 || queue_proof_conflicts > 0) &&
+			               !conflict_pool.empty()) {
+	      const int replay_pruned = node_queue.prune_conflicts(conflict_pool);
+	      if (replay_pruned > 0) {
+	        out.bc_stats.rc_conflict_queue_prunes +=
             static_cast<std::uint64_t>(replay_pruned);
         out.bc_stats.certificate_queue_prunes +=
             static_cast<std::uint64_t>(replay_pruned);
-        pruned += replay_pruned;
-      }
+	        pruned += replay_pruned;
+	      }
+		    }
+	    const bool certificate_domain_moved =
+	        scoped_domain_fixings > 0 || scoped_certificates > 0 ||
+	        queue_proof_conflicts > 0 || queue_lb_lift_nodes > 0 ||
+	        queue_lp_refresh_marked > 0 || frontier_bound_move_sum > 0.0;
+	    if (have_bound_lifting_artifacts || certificate_domain_moved) {
+	      // HiGHS treats conflict rows, cutpool rows and objective/cutoff
+	      // propagation as one domain closure.  After a dual proof publishes
+	      // resolved frontier certificates, replay the full queue-side closure
+	      // immediately so new conflict/cutpool/objective activations are not
+	      // left as a separate tail pass.
+	      const int fixed_point_pruned = prune_queue_after_domain_learning(
+	          proof_tail_queue_mode_active() || forced || certificate_domain_moved,
+	          source != nullptr ? source : "certificate_queue_fixed_point");
+	      if (fixed_point_pruned > 0) {
+	        pruned += fixed_point_pruned;
+	      }
 	    }
-	    if (have_bound_lifting_artifacts && rc_fixing_resolve_lps_left > 0) {
-	      const int marked_frontier_nodes =
-	          node_queue.count_lp_refresh_needed_near_lower_bound(
-              frontier_band, /*max_scan=*/8192);
+		    if (have_bound_lifting_artifacts && rc_fixing_resolve_lps_left > 0) {
+		      const int marked_frontier_nodes =
+		          node_queue.count_lp_refresh_needed_near_lower_bound(
+	              frontier_band, /*max_scan=*/8192);
       const int pass_budget = std::min(
           rc_fixing_resolve_lps_left,
           marked_frontier_nodes > 0
@@ -19088,11 +22597,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               : (forced ? 16
                         : std::max(1, opt.reduced_cost_fixing_resolve_max_lps / 8)));
 	      pruned += refresh_marked_queue_nodes(source, pass_budget,
-	                                           frontier_band);
+	                                           frontier_band,
+                                               proof_tail_queue_mode_active() ||
+                                                   forced);
 	    }
-    refresh_queue_lower_bound();
-    last_queue_domain_replay_epoch = current_domain_learning_epoch();
+	    refresh_queue_lower_bound();
+    const double queue_lb_after = node_queue.lower_bound();
+    record_queue_lower_bound_audit("certificate_queue",
+                                   source != nullptr ? source
+                                                     : "dual_proof",
+                                   queue_lb_before, queue_lb_after);
+    last_queue_domain_replay_epoch = current_domain_closure_epoch();
     stale_queue_domain_replay_passes = 0;
+    const int certificate_effect =
+        pruned + static_cast<int>(std::min<std::uint64_t>(
+                     scoped_domain_fixings + scoped_certificates +
+                         queue_proof_conflicts + queue_lb_lift_nodes +
+                         queue_lp_refresh_marked,
+                     static_cast<std::uint64_t>(
+                         std::numeric_limits<int>::max())));
     if (opt.verbose) {
       fmt::print(stderr,
 	                 "[B&C-CERT-QUEUE] source={} gap={:.6g} tightened={} "
@@ -19102,10 +22625,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		                 tightened, scoped_domain_fixings, scoped_certificates, pruned,
 	                 tightened > 0 ? lift_sum / static_cast<double>(tightened)
 	                               : 0.0,
-	                 lift_max, queue_proof_conflicts, global_lb,
-	                 stale_certificate_queue_passes);
+		                 lift_max, queue_proof_conflicts, global_lb,
+		                 stale_certificate_queue_passes);
     }
-    return tightened + pruned;
+    return certificate_effect;
   };
 
   auto consume_cached_dual_proof_after_incumbent = [&]() -> int {
@@ -19128,6 +22651,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           tightened_proof.rhs - tightened_proof.lp_activity;
       root_global_dual_proof = tightened_proof;
       root_global_dual_proof_upper = incumbent_obj;
+      if (have_cached_queue_objective_event_proof &&
+          cached_queue_objective_event_proof_is_global) {
+        cached_queue_objective_event_proof = tightened_proof;
+        cached_queue_objective_event_proof_upper = incumbent_obj;
+      }
       const auto proof_artifacts = extract_dual_proof_literal_artifacts(
           base_lp, root_implied_integer_cols, root_global_dual_proof,
           root.lb, root.ub, implication_graph, clique_table, opt.int_tol,
@@ -19138,29 +22666,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           proof_artifacts.conflict_clauses_added > 0) {
         out.bc_stats.rc_binary_implications_learned +=
             proof_artifacts.implications_added;
-        note_global_domain_learning(proof_artifacts.implications_added +
-                                    proof_artifacts.clique_edges_added +
-                                    proof_artifacts.conflict_clauses_added);
-        objective_propagation.setup(base_lp, &root_implied_integer_cols,
-                                    &clique_table, &implication_graph);
-        const auto published = publish_objective_implied_event_source(
-            base_lp, objective_propagation, implication_graph, clique_table,
-            opt.int_tol);
-        out.bc_stats.objective_implied_event_published_implications +=
-            published.implications_added;
-        out.bc_stats.objective_implied_event_published_clique_edges +=
-            published.clique_edges_added;
-        note_global_domain_learning(published.implications_added +
-                                    published.clique_edges_added);
-	            if (published.implications_added > 0 ||
-	                published.clique_edges_added > 0) {
-	              objective_propagation.setup(base_lp, &root_implied_integer_cols,
-	                                          &clique_table, &implication_graph);
-	            }
-	        refresh_objective_artifact_stats();
-	        incumbent_pruned += prune_queue_after_domain_learning(
-	            /*force_frontier_drain=*/true, "incumbent_dual_proof_artifacts");
-      }
+	        note_global_domain_learning(proof_artifacts.implications_added +
+	                                    proof_artifacts.clique_edges_added +
+	                                    proof_artifacts.conflict_clauses_added);
+	        note_objective_artifact_learning(proof_artifacts.implications_added +
+	                                         proof_artifacts.clique_edges_added);
+	        (void)refresh_objective_domain_sources(
+	            "incumbent_dual_proof_artifacts", /*force=*/true);
+		        incumbent_pruned += prune_queue_after_domain_learning(
+		            /*force_frontier_drain=*/true, "incumbent_dual_proof_artifacts");
+	      }
       fmt::print(stderr,
                  "[B&C PROOF-SCOPED] incumbent full-proof rhs={:.6g} "
                  "gap={:.6g} proof_clq_cand={} conflicts={} confQ={} impl={} "
@@ -19175,15 +22690,32 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                  objective_propagation.partitions.size(),
                  implication_graph.size());
     }
-    if (have_cached_queue_dual_proof &&
-        std::isfinite(cached_queue_dual_proof_upper) &&
-        std::isfinite(incumbent_obj) &&
-        incumbent_obj + 1e-9 < cached_queue_dual_proof_upper) {
-      cached_queue_dual_proof.rhs +=
-          incumbent_obj - cached_queue_dual_proof_upper;
-      cached_queue_dual_proof.actual_lp_gap =
-          cached_queue_dual_proof.rhs - cached_queue_dual_proof.lp_activity;
-      cached_queue_dual_proof_upper = incumbent_obj;
+	    const double incumbent_upper_limit_now =
+	        highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                         opt.int_tol);
+	      if (have_cached_queue_dual_proof &&
+	        std::isfinite(cached_queue_dual_proof_upper) &&
+	        std::isfinite(incumbent_upper_limit_now) &&
+	        incumbent_upper_limit_now + 1e-9 < cached_queue_dual_proof_upper) {
+	      cached_queue_dual_proof.rhs +=
+	          incumbent_upper_limit_now - cached_queue_dual_proof_upper;
+	      cached_queue_dual_proof.actual_lp_gap =
+	          cached_queue_dual_proof.rhs - cached_queue_dual_proof.lp_activity;
+	      cached_queue_dual_proof_upper = incumbent_upper_limit_now;
+      if (have_cached_queue_objective_event_proof &&
+          cached_queue_objective_event_proof_is_global &&
+          std::isfinite(cached_queue_objective_event_proof_upper) &&
+          incumbent_upper_limit_now + 1e-9 <
+              cached_queue_objective_event_proof_upper) {
+        cached_queue_objective_event_proof.rhs +=
+            incumbent_upper_limit_now -
+            cached_queue_objective_event_proof_upper;
+        cached_queue_objective_event_proof.actual_lp_gap =
+            cached_queue_objective_event_proof.rhs -
+            cached_queue_objective_event_proof.lp_activity;
+        cached_queue_objective_event_proof_upper =
+            incumbent_upper_limit_now;
+      }
     } else if (!have_cached_queue_dual_proof && have_root_global_dual_proof) {
       cached_queue_dual_proof = root_global_dual_proof;
       cached_queue_dual_proof_upper = root_global_dual_proof_upper;
@@ -19193,6 +22725,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       cached_queue_objective_event_proof = root_global_dual_proof;
       have_cached_queue_objective_event_proof = true;
       cached_queue_objective_event_proof_is_global = true;
+      cached_queue_objective_event_proof_upper = root_global_dual_proof_upper;
       cached_queue_objective_event_proof_scope.clear();
     }
 	    if (!have_cached_queue_dual_proof || node_queue.empty() ||
@@ -19222,12 +22755,73 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                                      cached_queue_dual_proof_upper,
                                      "incumbent_cached_proof", cached_scope);
     last_cached_dual_proof_consume_obj = incumbent_obj;
-    last_cached_dual_proof_consume_epoch = current_domain_learning_epoch();
-    last_cached_dual_proof_consume_had_effect = proof_pruned > 0;
-	    return incumbent_pruned + proof_pruned;
-  };
+	    last_cached_dual_proof_consume_epoch = current_domain_learning_epoch();
+	    last_cached_dual_proof_consume_had_effect = proof_pruned > 0;
+		    return incumbent_pruned + proof_pruned;
+	  };
 
-  auto separate_local_probed_implied_bound_cuts =
+	  highs_style_post_incumbent_domain_closure =
+	      [&](const char* source, int depth) -> int {
+	    if (tree_incumbent_domain_closure_active) {
+	      tree_incumbent_domain_closure_pending = true;
+	      tree_incumbent_domain_closure_source = source != nullptr
+	                                                 ? source
+	                                                 : "tree_incumbent";
+	      tree_incumbent_domain_closure_depth = depth;
+	      return 0;
+	    }
+	    if (!has_incumbent || !std::isfinite(incumbent_obj)) {
+	      tree_incumbent_domain_closure_pending = false;
+	      return 0;
+	    }
+	    tree_incumbent_domain_closure_active = true;
+	    const std::string source_string =
+	        source != nullptr ? source : "tree_incumbent";
+	    int pruned = 0;
+	    tree_incumbent_domain_closure_pending = false;
+	    const double root_bound_before = root.bound;
+	    const Eigen::VectorXd root_lb_before = root.lb;
+	    const Eigen::VectorXd root_ub_before = root.ub;
+	    run_root_incumbent_propagation(source_string.c_str());
+	    const auto root_domain_delta =
+	        count_bound_changes(root_lb_before, root_ub_before, root.lb, root.ub);
+		    if (root_domain_delta.first > 0 || root_domain_delta.second > 0 ||
+		        root.bound > root_bound_before + std::max(1e-8, opt.lp_tol)) {
+		      update_standard_form_bounds(tree_base_sf, base_lp, root.lb, root.ub);
+		      update_standard_form_bounds(node_sf, base_lp, root.lb, root.ub);
+		      pruned += inherit_root_domain_to_queue(source_string.c_str(),
+		                                            /*force_frontier_drain=*/true);
+		      pruned += prune_queue_after_domain_learning(
+		          /*force_frontier_drain=*/true,
+		          "tree_incumbent_domain_inherit");
+		    }
+		    pruned += prune_queue_after_domain_learning(
+		        /*force_frontier_drain=*/true, source_string.c_str());
+		    pruned += consume_cached_dual_proof_after_incumbent();
+		    pruned += prune_queue_by_gap_optimality_limit(source_string.c_str());
+		    refresh_queue_lower_bound();
+		    const bool rerun_requested = tree_incumbent_domain_closure_pending;
+		    const std::string rerun_source = tree_incumbent_domain_closure_source;
+	    const int rerun_depth = tree_incumbent_domain_closure_depth;
+	    tree_incumbent_domain_closure_pending = false;
+	    tree_incumbent_domain_closure_active = false;
+	    if (opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) {
+	      fmt::print(stderr,
+	                 "[B&C-POSTINC-CLOSURE] source={} depth={} root_delta={}/{} "
+	                 "root_bound={:.10g}->{:.10g} pruned={} qsize={} "
+	                 "qlb={:.10g} ub={:.10g}\n",
+	                 source_string, depth, root_domain_delta.first,
+		                 root_domain_delta.second, root_bound_before, root.bound,
+		                 pruned, node_queue.size(), global_lb, incumbent_obj);
+		    }
+		    if (rerun_requested) {
+		      pruned += highs_style_post_incumbent_domain_closure(
+		          rerun_source.c_str(), rerun_depth);
+		    }
+		    return pruned;
+		  };
+
+	  auto separate_local_probed_implied_bound_cuts =
       [&](Node& child,
           std::vector<PoolCut>& local_proof_cuts,
           double inc_obj_snapshot,
@@ -19684,9 +23278,23 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     std::vector<PoolSolution> sols;
     std::vector<PoolCut> new_cuts;
     std::vector<PoolCut> local_proof_cuts;
-    std::vector<PoolCut> transformed_frontier_cuts;
-    int local_transformed_frontier_rows_pending = 0;
-    int lp_count = 0, cut_count = 0, pool_sep = 0;
+	    std::vector<PoolCut> transformed_frontier_cuts;
+	    int local_transformed_frontier_rows_pending = 0;
+	    bool rc_fixing_preproof_applied = false;
+	    int rc_fixed_preproof = 0;
+    std::vector<BranchDomainLiteral> rc_forbidden_literals_preproof;
+	    Eigen::VectorXd rc_proof_lb_preproof;
+	    Eigen::VectorXd rc_proof_ub_preproof;
+	    std::shared_ptr<SimplexResult> child_final_simplex_for_proof;
+	    const bool defer_child_lp_proof_until_closure = true;
+	    const double child_upper_limit_snapshot =
+	        has_inc_snapshot && std::isfinite(inc_obj_snapshot)
+	            ? highs_style_incumbent_upper_limit(base_lp, inc_obj_snapshot,
+	                                               opt.int_tol)
+	            : kInf;
+	    const bool has_child_upper_limit =
+	        has_inc_snapshot && std::isfinite(child_upper_limit_snapshot);
+	    int lp_count = 0, cut_count = 0, pool_sep = 0;
     PCUpdate branch_obs{branch_var, is_up_branch};
 
     if (!bounds_consistent(child.lb, child.ub)) {
@@ -19695,157 +23303,56 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     int conflict_tightenings = 0;
     std::vector<BoundChangeInfo> prop_changes;
-    std::vector<BranchDomainLiteral> learned_conflict;
-    prop_changes.reserve(32);
+    prop_changes.reserve(64);
     if (opt.enable_reduced_cost_proof_conflict_minimization) {
       child.domain_reason_bounds.reserve(child.domain_reason_bounds.size() + 32);
     }
-	    const std::size_t domain_reason_bounds_before =
-	        child.domain_reason_bounds.size();
-	    std::uint64_t global_cert_reasons = 0;
-	    if (!propagate_global_bound_lifting_certificates(child, prop_changes,
-	                                                     &global_cert_reasons)) {
-	      branch_obs.has_inference = true;
-	      branch_obs.inference_count +=
-	          static_cast<double>(std::max<std::size_t>(1, prop_changes.size()));
-	      branch_obs.cutoff_count = 1;
-	      pc_upd.push_back(branch_obs);
-	      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-	    }
-	    if (global_cert_reasons > 0) {
-	      branch_obs.has_inference = true;
-	      branch_obs.inference_count += static_cast<double>(global_cert_reasons);
-	    }
-	    const std::uint64_t child_domain_replayed_epoch =
-	        current_domain_learning_epoch();
-	    child.domain_learning_epoch = child_domain_replayed_epoch;
-	    if (!propagate_local_conflict_clauses(child, prop_changes)) {
-	      branch_obs.has_inference = true;
-	      branch_obs.cutoff_count = 1;
-      pc_upd.push_back(branch_obs);
-      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-    }
-    if (!propagate_scoped_conflict_objects(child, prop_changes)) {
+    NodeDomainClosureStats child_closure_stats;
+    const std::vector<DomainReasonBound> no_incoming_reasons;
+    if (!run_node_domain_closure(child, no_incoming_reasons, prop_changes,
+                                 &new_cuts, &cut_count, inc_obj_snapshot,
+                                 has_inc_snapshot, "child_pre_lp",
+                                 &child_closure_stats)) {
       branch_obs.has_inference = true;
+      branch_obs.inference_count =
+          static_cast<double>(child_closure_stats.tightened +
+                              child_closure_stats.conflict_tightened +
+	                              child_closure_stats.row_tightened +
+	                              child_closure_stats.cutpool_tightened +
+	                              child_closure_stats.objective_tightened +
+	                              child_closure_stats.redcost_tightened +
+	                              child_closure_stats.reasons_added);
+      branch_obs.conflict_score =
+          static_cast<double>(child_closure_stats.conflicts_learned);
       branch_obs.cutoff_count = 1;
       pc_upd.push_back(branch_obs);
       return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
     }
-    const std::uint64_t local_implications_applied_before =
-        out.bc_stats.local_implications_applied;
-    if (!propagate_local_binary_implications(child, prop_changes)) {
+    conflict_tightenings =
+        static_cast<int>(std::min<std::uint64_t>(
+            std::numeric_limits<int>::max(),
+            child_closure_stats.tightened +
+                child_closure_stats.conflict_tightened +
+	                child_closure_stats.row_tightened +
+	                child_closure_stats.cutpool_tightened +
+	                child_closure_stats.objective_tightened +
+	                child_closure_stats.redcost_tightened));
+    if (conflict_tightenings > 0 || child_closure_stats.reasons_added > 0 ||
+        child_closure_stats.conflicts_learned > 0) {
       branch_obs.has_inference = true;
       branch_obs.inference_count +=
-          static_cast<double>(out.bc_stats.local_implications_applied -
-                              local_implications_applied_before);
-      branch_obs.cutoff_count = 1;
-      pc_upd.push_back(branch_obs);
-      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-    }
-		        if (!propagate_node_domain(base_lp, A_row_cached, Aeq_row_cached,
-		                                   row_index_cached,
-		                                   child.lb, child.ub,
-                               opt.bound_propagation_rounds,
-                               &conflict_pool, &clique_table, &implication_graph,
-                   prop_changes,
-                   child.branch_reasons,
-                   &learned_conflict,
-                   &conflict_tightenings,
-                   opt.enable_reduced_cost_proof_conflict_minimization
-                       ? &child.domain_reason_bounds
-                       : nullptr)) {
-      if (learned_conflict.empty()) learned_conflict = child.branch_reasons;
-      if (!learned_conflict.empty()) {
-        conflict_pool.add(learned_conflict);
-        add_binary_implications_from_conflict_clause(base_lp.vars,
-                                                     learned_conflict,
-                                                     implication_graph);
-        PoolCut conflict_cut;
-        if (try_build_binary_conflict_cut(base_lp, learned_conflict,
-                                          conflict_cut)) {
-          new_cuts.push_back(std::move(conflict_cut));
-          ++cut_count;
-        }
-      }
-      branch_obs.has_inference = true;
-      branch_obs.inference_count = static_cast<double>(conflict_tightenings);
-      branch_obs.conflict_score = learned_conflict.empty() ? 0.0 : 1.0;
-      branch_obs.cutoff_count = 1;
-      pc_upd.push_back(branch_obs);
-      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+          static_cast<double>(conflict_tightenings +
+                              child_closure_stats.reasons_added);
+      branch_obs.conflict_score +=
+          static_cast<double>(child_closure_stats.conflicts_learned);
     }
 
-    rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
-    const bool has_new_domain_reasons =
-        child.domain_reason_bounds.size() > domain_reason_bounds_before;
-	    if (has_new_domain_reasons &&
-	        learn_short_reconvergence_implication(child.branch_reasons,
-	                                              child.domain_reason_bounds,
-	                                              nullptr,
-	                                              nullptr,
-	                                              nullptr,
-	                                              nullptr,
-	                                              new_cuts, cut_count, &child)) {
-	      branch_obs.has_inference = true;
-	      branch_obs.inference_count += 1.0;
-	      branch_obs.conflict_score += 1.0;
-	      if (!explain_active_scoped_reason_bounds(child, prop_changes)) {
-	        branch_obs.cutoff_count = 1;
-	        pc_upd.push_back(branch_obs);
-	        return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-	      }
-	      if (!propagate_scoped_conflict_objects(child, prop_changes)) {
-	        branch_obs.cutoff_count = 1;
-	        pc_upd.push_back(branch_obs);
-	        return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-	      }
-	    }
-
-	    int cutoff_domain_tightenings = 0;
-	    int cutoff_conflicts_learned = 0;
-	    if (!apply_objective_cutoff_domain_fixing(child, inc_obj_snapshot,
-                                              has_inc_snapshot,
-                                              new_cuts,
-                                              cut_count,
-                                              cutoff_conflicts_learned,
-                                              cutoff_domain_tightenings)) {
-      branch_obs.has_inference = true;
-      branch_obs.inference_count += static_cast<double>(cutoff_domain_tightenings);
-      branch_obs.conflict_score += static_cast<double>(cutoff_conflicts_learned);
-      branch_obs.cutoff_count = 1;
-      pc_upd.push_back(branch_obs);
-      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-    }
-    if (cutoff_domain_tightenings > 0) {
-      branch_obs.has_inference = true;
-      branch_obs.inference_count += static_cast<double>(cutoff_domain_tightenings);
-      branch_obs.conflict_score += static_cast<double>(cutoff_conflicts_learned);
-      std::vector<BoundChangeInfo> cutoff_prop_changes;
-      std::vector<BranchDomainLiteral> cutoff_conflict;
-      int cutoff_prop_tightenings = 0;
-      if (!propagate_node_domain(base_lp, A_row_cached, Aeq_row_cached,
-                                 row_index_cached,
-                                 child.lb, child.ub,
-                                 opt.bound_propagation_rounds,
-                                 &conflict_pool, &clique_table,
-                                 &implication_graph,
-                                 cutoff_prop_changes,
-                                 child.branch_reasons,
-                                 &cutoff_conflict,
-                                 &cutoff_prop_tightenings)) {
-        branch_obs.cutoff_count = 1;
-        pc_upd.push_back(branch_obs);
-        return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-      }
-      branch_obs.inference_count += static_cast<double>(cutoff_prop_tightenings);
-    }
-
-    // Unified node domain propagation has already replayed conflicts,
-    // clique implications, root-probed implications, and row tightening.
-    auto _t0 = std::chrono::steady_clock::now();
-    branch_obs.has_inference = true;
-    branch_obs.inference_count = static_cast<double>(conflict_tightenings);
-    auto _t1 = std::chrono::steady_clock::now();
+	    // Unified node domain propagation has already replayed conflicts,
+	    // clique implications, root-probed implications, and row tightening.
+	    auto _t0 = std::chrono::steady_clock::now();
+	    branch_obs.has_inference = branch_obs.has_inference ||
+	                               conflict_tightenings > 0;
+	    auto _t1 = std::chrono::steady_clock::now();
 
 		    const bool probe_lp_matches_child =
 		        probe_lp_state != nullptr && probe_lp_state->available &&
@@ -19997,10 +23504,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       node_lp_success = node_result.stats.success &&
                         node_result.x.size() == n;
       if (node_lp_success) {
-        child.x_relax = clamp_to_bounds(node_result.x, child.lb, child.ub);
-        child.x_seed = child.x_relax;
-        child.bound = std::max(parent_bound, node_result.stats.objective);
-        child.ipm_iterations = node_result.stats.iterations;  // ← Capture IPM iterations
+		        child.x_relax = clamp_to_bounds(node_result.x, child.lb, child.ub);
+		        child.x_seed = child.x_relax;
+		        child.bound = std::max(parent_bound, node_result.stats.objective);
+		        child.lp_refresh_needed = false;
+		        child.domain_learning_epoch = current_domain_learning_epoch();
+		        child.objective_artifact_epoch = current_objective_artifact_epoch();
+		        child.domain_closure_epoch = current_domain_closure_epoch();
+		        child.ipm_iterations = node_result.stats.iterations;  // ← Capture IPM iterations
         child.has_live_factor_telemetry = false;
         child.live_factor_telemetry = {};
         // Track IPM iteration statistics
@@ -20062,37 +23573,50 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           ++lp_count;
           if (ipm_res.stats.success && ipm_res.x.size() == n) {
             node_lp_success = true;
-            node_result = std::move(ipm_res);
-            child.x_relax = clamp_to_bounds(node_result.x, child.lb, child.ub);
-            child.x_seed = child.x_relax;
-            child.bound = std::max(parent_bound, node_result.stats.objective);
-            child.has_live_factor_telemetry = false;
+	            node_result = std::move(ipm_res);
+		            child.x_relax = clamp_to_bounds(node_result.x, child.lb, child.ub);
+		            child.x_seed = child.x_relax;
+		            child.bound = std::max(parent_bound, node_result.stats.objective);
+		            child.lp_refresh_needed = false;
+		            child.domain_learning_epoch = current_domain_learning_epoch();
+		            child.objective_artifact_epoch = current_objective_artifact_epoch();
+		            child.domain_closure_epoch = current_domain_closure_epoch();
+		            child.has_live_factor_telemetry = false;
             child.live_factor_telemetry = {};
             // No simplex basis — child keeps parent's basis_hint for future
             // simplex warm-start attempts at grandchild nodes.
-          }
-        }
-        if (!node_lp_success) {
-          if (failure_type == LPFailureType::Infeasible) {
-            seq_fallback_logger.log(node_id, child.depth,
-                                    LPFailureType::Infeasible, 5, "pruned");
-            branch_obs.cutoff_count = 1;
-            if (has_farkas) {
-              if (learned_conflict.empty()) learned_conflict = child.branch_reasons;
-              branch_obs.conflict_score = 1.0;
-              conflict_pool.add(learned_conflict);
-              add_binary_implications_from_conflict_clause(base_lp.vars,
-                                                           learned_conflict,
-                                                           implication_graph);
-              PoolCut conflict_cut;
-              if (try_build_binary_conflict_cut(base_lp, learned_conflict,
-                                                conflict_cut)) {
-                new_cuts.push_back(std::move(conflict_cut));
-                ++cut_count;
-              }
-            }
-            pc_upd.push_back(branch_obs);
-          }
+	          }
+	        }
+	        if (!node_lp_success) {
+	          if (failure_type == LPFailureType::Infeasible) {
+	            seq_fallback_logger.log(node_id, child.depth,
+	                                    LPFailureType::Infeasible, 5, "pruned");
+	            branch_obs.cutoff_count = 1;
+	            if (has_farkas) {
+	              std::vector<BranchDomainLiteral> learned_conflict =
+	                  child.branch_reasons;
+	              branch_obs.conflict_score = 1.0;
+	              if (!learned_conflict.empty()) {
+		                const bool pool_added =
+		                    conflict_pool.add(learned_conflict);
+		                const bool impl_added =
+		                    add_binary_implications_from_conflict_clause(
+		                        base_lp.vars, learned_conflict, implication_graph);
+		                if (pool_added || impl_added) {
+		                  note_global_domain_learning(1 + (impl_added ? 1 : 0));
+		                }
+	                if (!strict_highs_lp_contract) {
+	                  PoolCut conflict_cut;
+	                  if (try_build_binary_conflict_cut(base_lp, learned_conflict,
+	                                                    conflict_cut)) {
+	                    new_cuts.push_back(std::move(conflict_cut));
+	                    ++cut_count;
+	                  }
+	                }
+	              }
+	            }
+	            pc_upd.push_back(branch_obs);
+	          }
           if (deferred) {
             const bool child_queue_proof_mode =
                 has_inc_snapshot && std::isfinite(inc_obj_snapshot) &&
@@ -20104,62 +23628,72 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           }
           return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
         }
-      } else {
+	      } else {
 	        node_lp_success = true;
 	        child.x_relax = clamp_to_bounds(simplex_res.result.x, child.lb, child.ub);
 	        child.x_seed = child.x_relax;
-	        if (has_inc_snapshot && std::isfinite(inc_obj_snapshot) &&
+		        if (!defer_child_lp_proof_until_closure &&
+		            has_child_upper_limit &&
 	            (opt.enable_reduced_cost_proof_cut_resolve ||
 	             opt.enable_reduced_cost_proof_conflict_minimization)) {
 	          child_dual_proof_ok = build_full_dual_proof_row(
 	              base_lp, simplex_res, root.lb, root.ub, child.x_relax,
-	              simplex_res.result.stats.objective, inc_obj_snapshot,
+	              simplex_res.result.stats.objective, child_upper_limit_snapshot,
 	              child_dual_proof, std::max(1e-9, opt.lp_tol), &node_sf_ref);
 	          if (child_dual_proof_ok) {
 	            child_objective_event_proof = child_dual_proof;
 	            cached_queue_objective_event_proof = child_objective_event_proof;
 	            have_cached_queue_objective_event_proof = true;
+	            // Do not expose a child objective-event proof as global direct
+	            // objective propagation.  Cross-frontier use is allowed only
+	            // after the generating node's local-trail resolver publishes a
+	            // first-class certificate.
 	            cached_queue_objective_event_proof_is_global = false;
+	            cached_queue_objective_event_proof_upper =
+	                child_upper_limit_snapshot;
 	            cached_queue_objective_event_proof_scope = child.branch_reasons;
 	            cached_queue_dual_proof = child_objective_event_proof;
-	            cached_queue_dual_proof_upper = inc_obj_snapshot;
+	            cached_queue_dual_proof_upper = child_upper_limit_snapshot;
 	            have_cached_queue_dual_proof = true;
-	            cached_queue_dual_proof_is_global = false;
-	            cached_queue_dual_proof_scope = child.branch_reasons;
+	            cached_queue_dual_proof_is_global = true;
+	            cached_queue_dual_proof_scope.clear();
 	            if (proof_tail_queue_mode_active()) {
+	              // This only schedules replay of certificates already
+	              // published by local-trail resolution; the raw row is not a
+	              // queue propagation object.
 	              consume_dual_proof_for_queue(child_objective_event_proof,
-	                                           inc_obj_snapshot,
+                                           child_upper_limit_snapshot,
 	                                           "node_full_proof",
-	                                           &cached_queue_dual_proof_scope);
+	                                           nullptr);
 	            }
 
 		            // Keep the expanded full proof for objective-event
 		            // explanations, but compact the generic proof row before it is
-		            // used for target/reconvergence scanning.
+		            // used by the node-local resolver.
 		            compact_child_full_dual_proof(child_dual_proof,
 		                                          child.x_relax);
 	          }
 	          child_rc_mass_proof_ok = build_reduced_cost_mass_dual_proof_row(
 	              base_lp, simplex_res, root.lb, root.ub, child.x_relax,
-	              simplex_res.result.stats.objective, inc_obj_snapshot,
+	              simplex_res.result.stats.objective, child_upper_limit_snapshot,
 	              child_rc_mass_proof, std::max(1e-9, opt.lp_tol),
 	              &node_sf_ref, &root_implied_integer_cols,
 	              &objective_propagation.implied_event_target_cols);
 	          if (child_rc_mass_proof_ok) {
 	            cached_queue_dual_proof = child_rc_mass_proof;
-	            cached_queue_dual_proof_upper = inc_obj_snapshot;
+	            cached_queue_dual_proof_upper = child_upper_limit_snapshot;
 	            have_cached_queue_dual_proof = true;
-	            cached_queue_dual_proof_is_global = false;
-	            cached_queue_dual_proof_scope = child.branch_reasons;
+	            cached_queue_dual_proof_is_global = true;
+	            cached_queue_dual_proof_scope.clear();
 	            if (proof_tail_queue_mode_active()) {
 	              consume_dual_proof_for_queue(child_rc_mass_proof,
-	                                           inc_obj_snapshot,
+                                           child_upper_limit_snapshot,
 	                                           "node_rc_mass_proof",
-	                                           &cached_queue_dual_proof_scope);
+	                                           nullptr);
 	            }
 	          }
 	        }
-        if (has_inc_snapshot && std::isfinite(inc_obj_snapshot) &&
+	        if (has_child_upper_limit &&
             allow_native_proof_cut_rows &&
             rc_proof_cut_resolve_lps_left > 0 &&
             local_proof_cuts.size() + transformed_frontier_cuts.size() < 8) {
@@ -20181,18 +23715,25 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                   child, *source_simplex,
                   source_simplex->basis.cached_sparse_basis,
                   transformed_frontier_cuts, row_budget);
-        }
-        node_result = std::move(simplex_res.result);
+	        }
+        child_final_simplex_for_proof =
+            std::make_shared<SimplexResult>(simplex_res);
+        node_result = simplex_res.result;
         const auto node_basis_telemetry =
-            simplex_res.basis.cached_sparse_basis
+            child_final_simplex_for_proof->basis.cached_sparse_basis
                 ? get_sparse_basis_factor_telemetry(
-                      simplex_res.basis.cached_sparse_basis)
+                      child_final_simplex_for_proof->basis.cached_sparse_basis)
                 : SparseFactorTelemetry{};
         const bool have_node_basis_telemetry =
-            static_cast<bool>(simplex_res.basis.cached_sparse_basis);
+            static_cast<bool>(
+                child_final_simplex_for_proof->basis.cached_sparse_basis);
         child.basis_hint =
             persist_bc_node_basis_from_simplex(simplex_res, child.basis_hint);
 	        child.bound = std::max(parent_bound, node_result.stats.objective);
+	        child.lp_refresh_needed = false;
+	        child.domain_learning_epoch = current_domain_learning_epoch();
+	        child.objective_artifact_epoch = current_objective_artifact_epoch();
+	        child.domain_closure_epoch = current_domain_closure_epoch();
 	        if (!node_lp_from_probe_cache) {
 	          branch_obs.has_gain = true;
 	          branch_obs.gain =
@@ -20214,10 +23755,180 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	    }
 
+	    if (opt.enable_reduced_cost_fixing &&
+	        !use_ipm_nodes && has_child_upper_limit && child.basis_hint &&
+        child.basis_hint->cached_reduced_costs &&
+        child.basis_hint->cached_reduced_costs->size() >= n) {
+      if (opt.enable_reduced_cost_conflict_learning) {
+        rc_forbidden_literals_preproof.reserve(
+            static_cast<std::size_t>(
+                std::max(0, opt.reduced_cost_conflict_max_per_node)));
+        if (opt.enable_reduced_cost_proof_conflict_minimization) {
+          rc_proof_lb_preproof = child.lb;
+          rc_proof_ub_preproof = child.ub;
+        }
+      }
+      int rc_fixed_point_passes = 0;
+      for (;;) {
+        const std::size_t forbidden_begin =
+            rc_forbidden_literals_preproof.size();
+        std::vector<DomainReasonBound> rc_fixing_reasons;
+			        const int rc_fixed_this_pass = reduced_cost_fixing(
+			            base_lp.vars, child.x_relax, *child.basis_hint->cached_reduced_costs,
+			            child.basis_hint->basis_indices(), child.bound,
+			            child_upper_limit_snapshot,
+			            opt.int_tol, child.lb, child.ub,
+	            opt.enable_reduced_cost_conflict_learning
+		                ? &rc_forbidden_literals_preproof
+		                : nullptr,
+		            child.basis_hint->cached_col_scale.get(),
+            &rc_fixing_reasons, &child.branch_reasons, child.depth,
+            static_cast<int>(child.branch_reasons.size() +
+                             child.domain_reason_bounds.size()));
+	        rc_fixing_preproof_applied = true;
+	        if (rc_fixed_this_pass <= 0) break;
+        rc_fixed_preproof += rc_fixed_this_pass;
+        ++rc_fixed_point_passes;
+
+	        out.bc_stats.rc_fixings +=
+	            static_cast<std::uint64_t>(rc_fixed_this_pass);
+	        out.bc_stats.rc_forbidden_literals +=
+	            static_cast<std::uint64_t>(
+	                rc_forbidden_literals_preproof.size() - forbidden_begin);
+	        branch_obs.has_inference = true;
+	        branch_obs.inference_count +=
+	            static_cast<double>(rc_fixed_this_pass);
+        for (auto& rb : rc_fixing_reasons) {
+          append_domain_reason_bound(child, std::move(rb), n, &root.lb,
+                                     &root.ub);
+        }
+	        rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
+        child.lp_refresh_needed = true;
+
+	        update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
+	        std::vector<BoundChangeInfo> rc_closure_changes;
+        NodeDomainClosureStats rc_closure_stats;
+        const std::vector<DomainReasonBound> no_rc_reasons;
+        if (!run_node_domain_closure(
+                child, no_rc_reasons, rc_closure_changes, &new_cuts,
+                &cut_count, inc_obj_snapshot, has_inc_snapshot,
+                "child_post_lp_rc_closure", &rc_closure_stats)) {
+          branch_obs.cutoff_count = 1;
+          pc_upd.push_back(branch_obs);
+          return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+        }
+        update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
+
+        SimplexOptions rc_fp_resolve_opt = simplex_opt;
+        rc_fp_resolve_opt.allow_cold_start = true;
+        auto rc_fp_res =
+            solve_lp_from_sf(node_sf_ref, rc_fp_resolve_opt,
+                             child.basis_hint.get());
+        ++lp_count;
+        ++out.bc_stats.rc_fixing_resolve_lps;
+        const auto rc_fp_type = classify_lp_result(rc_fp_res, n);
+        if (rc_fp_type == LPFailureType::Infeasible ||
+            rc_fp_type == LPFailureType::ObjectiveCutoff) {
+          if (rc_fp_type == LPFailureType::ObjectiveCutoff) {
+            child.bound =
+                std::max(child.bound, rc_fp_res.result.stats.objective);
+          }
+          branch_obs.cutoff_count = 1;
+          pc_upd.push_back(branch_obs);
+          return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+        }
+        if (rc_fp_type != LPFailureType::Success ||
+            rc_fp_res.result.x.size() != n ||
+            !std::isfinite(rc_fp_res.result.stats.objective)) {
+          break;
+        }
+        const double old_bound = child.bound;
+        child.x_relax =
+            clamp_to_bounds(rc_fp_res.result.x, child.lb, child.ub);
+        child.x_seed = child.x_relax;
+        child.bound = std::max(child.bound, rc_fp_res.result.stats.objective);
+        node_result = rc_fp_res.result;
+        child_final_simplex_for_proof =
+            std::make_shared<SimplexResult>(rc_fp_res);
+        child.basis_hint =
+            persist_bc_node_basis_from_simplex(rc_fp_res, child.basis_hint);
+        if (child.bound > old_bound + 1e-7) {
+          ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+          branch_obs.has_gain = true;
+          branch_obs.gain =
+              std::max(branch_obs.gain,
+                       std::max(0.0, child.bound - parent_bound));
+        }
+        child.lp_refresh_needed = false;
+	        child.domain_learning_epoch = current_domain_learning_epoch();
+	        child.objective_artifact_epoch = current_objective_artifact_epoch();
+	        child.domain_closure_epoch = current_domain_closure_epoch();
+	      }
+      if ((opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) &&
+          rc_fixed_preproof > 0) {
+        fmt::print(stderr,
+                   "[B&C-RC-FIXPOINT] phase=child_post_lp depth={} pass={} "
+                   "fix={} bound={:.10g} forbidden={}\n",
+                   child.depth, rc_fixed_point_passes, rc_fixed_preproof,
+                   child.bound, rc_forbidden_literals_preproof.size());
+      }
+	    }
+
 	    if (collect_integral_lp_candidate("node_lp")) {
 	      pc_upd.push_back(branch_obs);
 	      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	    }
+
+    if (defer_child_lp_proof_until_closure &&
+	        child_final_simplex_for_proof && !use_ipm_nodes &&
+	        has_child_upper_limit &&
+        (opt.enable_reduced_cost_proof_cut_resolve ||
+         opt.enable_reduced_cost_proof_conflict_minimization)) {
+      SimplexResult& proof_simplex = *child_final_simplex_for_proof;
+      child_dual_proof_ok = build_full_dual_proof_row(
+          base_lp, proof_simplex, root.lb, root.ub, child.x_relax,
+          proof_simplex.result.stats.objective, child_upper_limit_snapshot,
+          child_dual_proof, std::max(1e-9, opt.lp_tol), &node_sf_ref);
+      if (child_dual_proof_ok) {
+        child_objective_event_proof = child_dual_proof;
+        cached_queue_objective_event_proof = child_objective_event_proof;
+        have_cached_queue_objective_event_proof = true;
+        cached_queue_objective_event_proof_is_global = false;
+        cached_queue_objective_event_proof_upper = child_upper_limit_snapshot;
+        cached_queue_objective_event_proof_scope = child.branch_reasons;
+        cached_queue_dual_proof = child_objective_event_proof;
+        cached_queue_dual_proof_upper = child_upper_limit_snapshot;
+        have_cached_queue_dual_proof = true;
+        cached_queue_dual_proof_is_global = true;
+        cached_queue_dual_proof_scope.clear();
+        if (proof_tail_queue_mode_active()) {
+          consume_dual_proof_for_queue(child_objective_event_proof,
+                                           child_upper_limit_snapshot,
+                                       "node_full_proof",
+                                       nullptr);
+        }
+        compact_child_full_dual_proof(child_dual_proof, child.x_relax);
+      }
+      child_rc_mass_proof_ok = build_reduced_cost_mass_dual_proof_row(
+          base_lp, proof_simplex, root.lb, root.ub, child.x_relax,
+          proof_simplex.result.stats.objective, child_upper_limit_snapshot,
+          child_rc_mass_proof, std::max(1e-9, opt.lp_tol),
+          &node_sf_ref, &root_implied_integer_cols,
+          &objective_propagation.implied_event_target_cols);
+      if (child_rc_mass_proof_ok) {
+        cached_queue_dual_proof = child_rc_mass_proof;
+        cached_queue_dual_proof_upper = child_upper_limit_snapshot;
+        have_cached_queue_dual_proof = true;
+        cached_queue_dual_proof_is_global = true;
+        cached_queue_dual_proof_scope.clear();
+        if (proof_tail_queue_mode_active()) {
+          consume_dual_proof_for_queue(child_rc_mass_proof,
+                                           child_upper_limit_snapshot,
+                                       "node_rc_mass_proof",
+                                       nullptr);
+        }
+      }
+    }
 
 		    // HiGHS separates the real incumbent cutoff (`upper_limit`) from the
 		    // gap proof frontier (`optimality_limit`).  Once the node LP lower
@@ -20311,15 +24022,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 				          continue;
 				        }
 				        DualProofRow frontier_proof = *proof;
-				        double proof_upper = inc_obj_snapshot;
-				        const std::vector<BranchDomainLiteral>* required_scope =
-				            child.branch_reasons.empty() ? nullptr : &child.branch_reasons;
+				        double proof_upper = child_upper_limit_snapshot;
+				        if (!std::isfinite(proof_upper)) {
+				          proof_upper = inc_obj_snapshot;
+				        }
+					        const std::vector<BranchDomainLiteral>* required_scope = nullptr;
 				        if (use_gap_cutoff) {
-				          frontier_proof.rhs += gap_limit - inc_obj_snapshot;
+				          frontier_proof.rhs += gap_limit - proof_upper;
 				          frontier_proof.actual_lp_gap =
 				              frontier_proof.rhs - frontier_proof.lp_activity;
-				          frontier_proof.expected_lp_gap +=
-				              gap_limit - inc_obj_snapshot;
+				          frontier_proof.expected_lp_gap += gap_limit - proof_upper;
 				          proof_upper = gap_limit;
 				          required_scope = nullptr;
 				        }
@@ -20377,43 +24089,6 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		      return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 		    }
 
-		    bool rc_fixing_preproof_applied = false;
-		    int rc_fixed_preproof = 0;
-		    std::vector<BranchDomainLiteral> rc_forbidden_literals_preproof;
-		    Eigen::VectorXd rc_proof_lb_preproof;
-		    Eigen::VectorXd rc_proof_ub_preproof;
-	    if (opt.enable_reduced_cost_fixing &&
-	        !use_ipm_nodes && has_inc_snapshot && child.basis_hint &&
-	        child.basis_hint->cached_reduced_costs &&
-	        child.basis_hint->cached_reduced_costs->size() >= n) {
-	      if (opt.enable_reduced_cost_conflict_learning) {
-	        rc_forbidden_literals_preproof.reserve(
-	            static_cast<std::size_t>(
-	                std::max(0, opt.reduced_cost_conflict_max_per_node)));
-	        if (opt.enable_reduced_cost_proof_conflict_minimization) {
-	          rc_proof_lb_preproof = child.lb;
-	          rc_proof_ub_preproof = child.ub;
-	        }
-	      }
-	      rc_fixed_preproof = reduced_cost_fixing(
-	          base_lp.vars, child.x_relax, *child.basis_hint->cached_reduced_costs,
-	          child.basis_hint->basis_indices(), child.bound, inc_obj_snapshot,
-	          opt.int_tol, child.lb, child.ub,
-	          opt.enable_reduced_cost_conflict_learning
-	              ? &rc_forbidden_literals_preproof
-	              : nullptr);
-	      rc_fixing_preproof_applied = true;
-	      if (rc_fixed_preproof > 0) {
-	        out.bc_stats.rc_fixings +=
-	            static_cast<std::uint64_t>(rc_fixed_preproof);
-	        out.bc_stats.rc_forbidden_literals +=
-	            static_cast<std::uint64_t>(
-	                rc_forbidden_literals_preproof.size());
-	        update_standard_form_bounds(node_sf_ref, base_lp, child.lb,
-	                                    child.ub);
-	      }
-	    }
-
 		    // The proof source used for target/frontier construction must carry
 		    // objective-effective mass.  The full row-dual proof is still a valid
 		    // certificate, but it often spreads activity over rows that do not
@@ -20439,9 +24114,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          if (!std::isfinite(child.lb[j])) continue;
 	          target_bound = BranchDomainLiteral{j, child.lb[j], true};
 	        }
-	        rc_direct_domain_targets.push_back(DomainReasonBound{
-	            target_bound, {}, base_trail + static_cast<int>(k), child.depth,
-	            forbidden, true});
+	        DomainReasonBound rb;
+	        rb.bound = target_bound;
+	        rb.trail_pos = base_trail + static_cast<int>(k);
+	        rb.depth = child.depth;
+	        rb.source_conflict_literal = forbidden;
+	        rb.has_source_conflict_literal = true;
+	        rc_direct_domain_targets.push_back(std::move(rb));
 	      }
 	    }
 		    std::vector<DomainReasonBound> objective_event_domain_targets;
@@ -20457,9 +24136,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                                   objective_event_domain_targets.begin(),
 	                                   objective_event_domain_targets.end());
 	    }
-	    if (target_dual_proof != nullptr &&
-	        opt.enable_reduced_cost_proof_conflict_minimization &&
-	        rc_proof_cut_resolve_lps_left > 0) {
+	    if (target_dual_proof != nullptr && allow_certificate_domain_replay) {
 	      const DualProofRow consumed_target_dual_proof =
 	          target_dual_proof != nullptr ? *target_dual_proof : DualProofRow{};
 	      const DualProofRow consumed_fallback_dual_proof =
@@ -20495,18 +24172,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          const double value =
 	              chg.is_lb ? proof_domain_lb[j] : proof_domain_ub[j];
 	          if (!std::isfinite(value)) continue;
-	          DomainReasonBound raw_target{
-	              BranchDomainLiteral{j, value, chg.is_lb},
-	              {},
+	          DomainReasonBound raw_target;
+	          raw_target.bound = BranchDomainLiteral{j, value, chg.is_lb};
+	          raw_target.trail_pos =
 	              child.local_domain_trail.empty()
 	                  ? static_cast<int>(child.branch_reasons.size() +
 	                                     child.domain_reason_bounds.size() +
 	                                     proof_domain_cert_targets.size())
 	                  : static_cast<int>(child.local_domain_trail.size() +
-	                                     proof_domain_cert_targets.size()),
-	              child.depth,
-	              BranchDomainLiteral{},
-	              false};
+	                                     proof_domain_cert_targets.size());
+	          raw_target.depth = child.depth;
 	          std::vector<BranchDomainLiteral> cert_clause;
 	          DualProofTargetExplanation cert_explanation;
 	          PoolCut cert_cover;
@@ -20535,6 +24210,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          explained.source_conflict_literal =
 	              cert_explanation.flipped_target;
 	          explained.has_source_conflict_literal = true;
+	          explained.has_proof_activity_audit =
+	              cert_explanation.has_proof_activity_audit;
+	          explained.proof_activity_margin =
+	              cert_explanation.proof_margin;
+	          explained.proof_activity = cert_explanation.proof_activity;
+	          explained.proof_required_activity =
+	              cert_explanation.proof_required_activity;
 	          bool duplicate = false;
 	          const std::size_t reason_hash =
 	              conflict_clause_hash(explained.reason);
@@ -20601,10 +24283,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                                       ? &child.domain_reason_bounds
 	                                       : nullptr)) {
 	          if (!proof_domain_conflict.empty()) {
-	            conflict_pool.add(proof_domain_conflict);
-	            add_binary_implications_from_conflict_clause(
-	                base_lp.vars, proof_domain_conflict, implication_graph);
-	            prune_queue_after_domain_learning();
+		            const bool pool_added =
+		                conflict_pool.add(proof_domain_conflict);
+		            const bool impl_added =
+		                add_binary_implications_from_conflict_clause(
+		                    base_lp.vars, proof_domain_conflict, implication_graph);
+		            if (pool_added || impl_added) {
+		              note_global_domain_learning(1 + (impl_added ? 1 : 0));
+		              prune_queue_after_domain_learning(
+		                  proof_tail_queue_mode_active(),
+		                  "proof_domain_conflict");
+		            }
 	          }
 	          ++out.bc_stats.certificate_domain_prunes;
 	          ++out.bc_stats.rc_fixing_resolve_prunes;
@@ -20613,6 +24302,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		          return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 		        }
 		        rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
+	        const bool allow_proof_domain_lp_refresh =
+	            allow_native_proof_cut_rows &&
+	            rc_proof_cut_resolve_lps_left > 0;
+	        if (allow_proof_domain_lp_refresh) {
 		        update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
 	        SimplexOptions proof_domain_resolve_opt = simplex_opt;
 	        proof_domain_resolve_opt.allow_cold_start = true;
@@ -20666,8 +24359,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		            pc_upd.push_back(branch_obs);
 		            return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 		          }
-				          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot,
-				                                    child.bound)) {
+		          if (incumbent_prunes_node(has_child_upper_limit,
+				                                    child_upper_limit_snapshot,
+				                                    child.bound,
+				                                    std::max(1e-9, opt.lp_tol))) {
 			            publish_child_bound_exceeding_conflict("proof_domain_resolve_bound");
 			            ++out.bc_stats.certificate_domain_prunes;
 			            ++out.bc_stats.rc_fixing_resolve_prunes;
@@ -20687,20 +24382,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		          child_dual_proof = DualProofRow{};
 		          child_objective_event_proof = DualProofRow{};
 		          child_rc_mass_proof = DualProofRow{};
-		          child_dual_proof_ok = build_full_dual_proof_row(
-		              base_lp, proof_domain_res, root.lb, root.ub, child.x_relax,
-		              proof_domain_res.result.stats.objective, inc_obj_snapshot,
-		              child_dual_proof, std::max(1e-9, opt.lp_tol),
-		              &node_sf_ref);
+			          child_dual_proof_ok = build_full_dual_proof_row(
+			              base_lp, proof_domain_res, root.lb, root.ub, child.x_relax,
+			              proof_domain_res.result.stats.objective,
+			              child_upper_limit_snapshot,
+			              child_dual_proof, std::max(1e-9, opt.lp_tol),
+			              &node_sf_ref);
 		          if (child_dual_proof_ok) {
 		            child_objective_event_proof = child_dual_proof;
 		            compact_child_full_dual_proof(child_dual_proof,
 		                                          child.x_relax);
 		          }
-		          child_rc_mass_proof_ok = build_reduced_cost_mass_dual_proof_row(
-		              base_lp, proof_domain_res, root.lb, root.ub, child.x_relax,
-		              proof_domain_res.result.stats.objective, inc_obj_snapshot,
-		              child_rc_mass_proof, std::max(1e-9, opt.lp_tol),
+			          child_rc_mass_proof_ok = build_reduced_cost_mass_dual_proof_row(
+			              base_lp, proof_domain_res, root.lb, root.ub, child.x_relax,
+			              proof_domain_res.result.stats.objective,
+			              child_upper_limit_snapshot,
+			              child_rc_mass_proof, std::max(1e-9, opt.lp_tol),
 		              &node_sf_ref, &root_implied_integer_cols,
 		              &objective_propagation.implied_event_target_cols);
 		          target_dual_proof =
@@ -20732,6 +24429,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		          }
 		          direct_domain_targets.clear();
 	        }
+	      } else {
+	        if (child.x_relax.size() == n) {
+	          child.x_relax = clamp_to_bounds(child.x_relax, child.lb, child.ub);
+	        }
+	        child.lp_refresh_needed = true;
+	      }
 	      }
 	    }
 	    bool has_new_proof_target_bounds = false;
@@ -20764,10 +24467,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	      int objective_event_bound_lifts = 0;
 		      auto learn_objective_event_proof_fixings =
 		          [&](const DualProofRow* proof) -> int {
-	        if (proof == nullptr || !proof->valid || proof->coeff.size() < n ||
-	            !std::isfinite(proof->rhs) ||
-	            objective_propagation.implied_events.empty() ||
-	            rc_proof_cut_resolve_lps_left <= 0) {
+		        if (strict_highs_lp_contract || proof == nullptr ||
+		            !proof->valid || proof->coeff.size() < n ||
+		            !std::isfinite(proof->rhs) ||
+		            objective_propagation.implied_events.empty() ||
+		            rc_proof_cut_resolve_lps_left <= 0) {
 	          return 0;
 	        }
 	        if (!objective_propagation.implied_event_target_cols.empty()) {
@@ -20900,10 +24604,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		                                ? cert_explanation.proved_target_bound
 		                                : raw_target.bound;
 		          explained.reason = cert_explanation.resolved_frontier;
-		          explained.source_conflict_literal =
-		              cert_explanation.flipped_target;
-		          explained.has_source_conflict_literal = true;
-		          const int published_reconvergence_bound =
+			          explained.source_conflict_literal =
+			              cert_explanation.flipped_target;
+			          explained.has_source_conflict_literal = true;
+			          explained.has_proof_activity_audit =
+			              cert_explanation.has_proof_activity_audit;
+			          explained.proof_activity_margin =
+			              cert_explanation.proof_margin;
+			          explained.proof_activity =
+			              cert_explanation.proof_activity;
+			          explained.proof_required_activity =
+			              cert_explanation.proof_required_activity;
+			          const int published_reconvergence_bound =
 		              publish_bound_lifting_certificate(
 		                  explained, nullptr, nullptr,
 		                  "objective_event_reconvergence_bound_lift");
@@ -21055,35 +24767,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              active_reason.push_back(literal_reason(lit));
 		            }
 		            if (inactive || missing < 0) continue;
-		            DomainReasonBound event_target{
-		                BranchDomainLiteral{target, event.target_bound,
-		                                    event.target_is_lower_bound},
-		                active_reason,
-		                child.local_domain_trail.empty()
-		                    ? static_cast<int>(child.branch_reasons.size() +
-		                                       child.domain_reason_bounds.size() +
-		                                       aggregate.best_by_target.size())
-		                    : static_cast<int>(child.local_domain_trail.size() +
-		                                       aggregate.best_by_target.size()),
-		                child.depth,
-		                event.target_is_lower_bound
-		                    ? BranchDomainLiteral{
-		                          target,
-		                          is_integer_type(base_lp.vars[
-		                              static_cast<std::size_t>(target)])
-		                              ? std::ceil(event.target_bound - tol) - 1.0
-		                              : event.target_bound -
-		                                    std::max(1e-7, 10.0 * tol),
-		                          false}
-		                    : BranchDomainLiteral{
-		                          target,
-		                          is_integer_type(base_lp.vars[
-		                              static_cast<std::size_t>(target)])
-		                              ? std::floor(event.target_bound + tol) + 1.0
-		                              : event.target_bound +
-		                                    std::max(1e-7, 10.0 * tol),
-		                          true},
-		                true};
+			            DomainReasonBound event_target;
+			            event_target.bound =
+			                BranchDomainLiteral{target, event.target_bound,
+			                                    event.target_is_lower_bound};
+			            event_target.reason = active_reason;
+			            event_target.trail_pos =
+			                child.local_domain_trail.empty()
+			                    ? static_cast<int>(child.branch_reasons.size() +
+			                                       child.domain_reason_bounds.size() +
+			                                       aggregate.best_by_target.size())
+			                    : static_cast<int>(child.local_domain_trail.size() +
+			                                       aggregate.best_by_target.size());
+			            event_target.depth = child.depth;
+			            event_target.source_conflict_literal =
+			                event.target_is_lower_bound
+			                    ? BranchDomainLiteral{
+			                          target,
+			                          is_integer_type(base_lp.vars[
+			                              static_cast<std::size_t>(target)])
+			                              ? std::ceil(event.target_bound - tol) - 1.0
+			                              : event.target_bound -
+			                                    std::max(1e-7, 10.0 * tol),
+			                          false}
+			                    : BranchDomainLiteral{
+			                          target,
+			                          is_integer_type(base_lp.vars[
+			                              static_cast<std::size_t>(target)])
+			                              ? std::floor(event.target_bound + tol) + 1.0
+			                              : event.target_bound +
+			                                    std::max(1e-7, 10.0 * tol),
+			                          true};
+			            event_target.has_source_conflict_literal = true;
 		            auto [best_it, inserted] =
 		                aggregate.best_by_target.emplace(target, proof_delta);
 		            if (inserted) {
@@ -21119,17 +24834,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 			            ++skip_budget;
 			            return;
 			          }
-		          DomainReasonBound fixing_target{
-		              fixing, aggregate.reason,
-		              child.local_domain_trail.empty()
-		                  ? static_cast<int>(child.branch_reasons.size() +
-		                                     child.domain_reason_bounds.size() +
-		                                     proof_target_bounds.size() +
-		                                     candidates.size())
-		                  : static_cast<int>(child.local_domain_trail.size() +
-		                                     proof_target_bounds.size() +
-		                                     candidates.size()),
-		              child.depth, forbidden, true};
+			          DomainReasonBound fixing_target;
+			          fixing_target.bound = fixing;
+			          fixing_target.reason = aggregate.reason;
+			          fixing_target.trail_pos =
+			              child.local_domain_trail.empty()
+			                  ? static_cast<int>(child.branch_reasons.size() +
+			                                     child.domain_reason_bounds.size() +
+			                                     proof_target_bounds.size() +
+			                                     candidates.size())
+			                  : static_cast<int>(child.local_domain_trail.size() +
+			                                     proof_target_bounds.size() +
+			                                     candidates.size());
+			          fixing_target.depth = child.depth;
+			          fixing_target.source_conflict_literal = forbidden;
+			          fixing_target.has_source_conflict_literal = true;
 		          if (!duplicate_candidate_bound(candidates, fixing_target)) {
 		            candidates.push_back(Candidate{std::move(fixing_target), score});
 		          }
@@ -21205,6 +24924,41 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            static_cast<double>(local_trail_bound_lifts);
 	        out.bc_stats.termination_effective_admitted +=
 	            static_cast<std::uint64_t>(local_trail_bound_lifts);
+	      }
+	      int local_trail_cutoff_conflicts = 0;
+	      if (has_inc_snapshot && std::isfinite(inc_obj_snapshot)) {
+	        std::array<const DualProofRow*, 3> proof_rows{
+	            target_dual_proof, fallback_dual_proof,
+	            child_dual_proof_ok ? &child_objective_event_proof : nullptr};
+	        std::unordered_set<const DualProofRow*> seen_proof_rows;
+	        for (const DualProofRow* proof_row : proof_rows) {
+	          if (proof_row == nullptr ||
+	              !seen_proof_rows.insert(proof_row).second ||
+	              !proof_row->valid) {
+	            continue;
+	          }
+	          local_trail_cutoff_conflicts +=
+	              publish_local_trail_cutoff_conflict_certificates(
+	                  child, proof_row, proof_row->rhs,
+	                  "node_local_trail_cutoff_conflict");
+	        }
+	      }
+	      if (local_trail_cutoff_conflicts > 0) {
+	        learned_targets += local_trail_cutoff_conflicts;
+	        branch_obs.has_inference = true;
+	        branch_obs.conflict_score +=
+	            static_cast<double>(local_trail_cutoff_conflicts);
+	        out.bc_stats.termination_effective_admitted +=
+	            static_cast<std::uint64_t>(local_trail_cutoff_conflicts);
+	        if (!node_queue.empty()) {
+	          const int queue_pruned = prune_queue_after_domain_learning(
+	              /*force_frontier_drain=*/true,
+	              "node_local_trail_cutoff_conflict");
+	          if (queue_pruned > 0) {
+	            out.bc_stats.rc_conflict_queue_prunes +=
+	                static_cast<std::uint64_t>(queue_pruned);
+	          }
+	        }
 	      }
 	      if (learned_targets > 0) {
 	        branch_obs.has_inference = true;
@@ -21317,56 +25071,36 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            }
 	          }
 	        }
-		        if (target_tightened &&
-                    (allow_certificate_domain_replay ||
-                     rc_proof_cut_resolve_lps_left > 0)) {
-	          std::vector<BoundChangeInfo> target_prop_changes;
-	          if (!propagate_local_binary_implications(child, target_prop_changes) ||
-	              !propagate_scoped_conflict_objects(child, target_prop_changes)) {
-	            branch_obs.cutoff_count = 1;
-	            pc_upd.push_back(branch_obs);
-	            return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+			        if (target_tightened &&
+	                    (allow_certificate_domain_replay ||
+	                     rc_proof_cut_resolve_lps_left > 0)) {
+		          std::vector<BoundChangeInfo> target_prop_changes;
+		          NodeDomainClosureStats target_closure_stats;
+		          const std::vector<DomainReasonBound> no_target_reasons;
+		          if (!run_node_domain_closure(
+		                  child, no_target_reasons, target_prop_changes,
+		                  &new_cuts, &cut_count, inc_obj_snapshot,
+		                  has_inc_snapshot, "proof_target_closure",
+		                  &target_closure_stats)) {
+		            branch_obs.cutoff_count = 1;
+		            pc_upd.push_back(branch_obs);
+		            return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
+		          }
+		          if (!target_prop_changes.empty()) {
+		            branch_obs.has_inference = true;
+		            branch_obs.inference_count +=
+		                static_cast<double>(target_prop_changes.size());
 	          }
-	          std::vector<BranchDomainLiteral> target_conflict;
-	          int target_prop_tightenings = 0;
-	          if (!propagate_node_domain(base_lp, A_row_cached, Aeq_row_cached,
-	                                     row_index_cached,
-	                                     child.lb, child.ub,
-	                                     opt.bound_propagation_rounds,
-	                                     &conflict_pool, &clique_table,
-	                                     &implication_graph,
-	                                     target_prop_changes,
-	                                     child.branch_reasons,
-	                                     &target_conflict,
-	                                     &target_prop_tightenings,
-	                                     opt.enable_reduced_cost_proof_conflict_minimization
-	                                         ? &child.domain_reason_bounds
-	                                         : nullptr)) {
-	            if (!target_conflict.empty()) {
-	              conflict_pool.add(target_conflict);
-	              add_binary_implications_from_conflict_clause(base_lp.vars,
-	                                                           target_conflict,
-	                                                           implication_graph);
-	              prune_queue_after_domain_learning();
-	            }
-	            branch_obs.cutoff_count = 1;
-	            pc_upd.push_back(branch_obs);
-	            return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
-	          }
-	          rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
-	          if (!target_prop_changes.empty()) {
-	            branch_obs.has_inference = true;
-	            branch_obs.inference_count +=
-	                static_cast<double>(target_prop_changes.size());
-	          }
+	          const bool allow_target_lp_refresh =
+	              allow_native_proof_cut_rows &&
+	              rc_proof_cut_resolve_lps_left > 0;
+	          if (allow_target_lp_refresh) {
 	          update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
 	          SimplexOptions target_resolve_opt = simplex_opt;
 	          target_resolve_opt.allow_cold_start = true;
 	          auto target_res = solve_lp_from_sf(node_sf_ref, target_resolve_opt,
 	                                             child.basis_hint.get());
-		          if (rc_proof_cut_resolve_lps_left > 0) {
-		            --rc_proof_cut_resolve_lps_left;
-		          }
+	          --rc_proof_cut_resolve_lps_left;
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
 	          const auto target_type = classify_lp_result(target_res, n);
@@ -21411,8 +25145,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              pc_upd.push_back(branch_obs);
 		              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 		            }
-			            if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot,
-			                                      child.bound)) {
+			            if (incumbent_prunes_node(has_child_upper_limit,
+			                                      child_upper_limit_snapshot,
+			                                      child.bound,
+			                                      std::max(1e-9, opt.lp_tol))) {
 		              publish_child_bound_exceeding_conflict("proof_target_resolve_bound");
 		              ++out.bc_stats.rc_fixing_resolve_prunes;
 	              branch_obs.cutoff_count = 1;
@@ -21425,12 +25161,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	            }
 	          }
+	        } else {
+	          if (child.x_relax.size() == n) {
+	            child.x_relax = clamp_to_bounds(child.x_relax, child.lb, child.ub);
+	          }
+	          child.lp_refresh_needed = true;
+	        }
 	        }
 	      }
 	    }
 
-	    if (opt.enable_reduced_cost_proof_conflict_minimization &&
-	        (has_new_domain_reasons || has_new_proof_target_bounds)) {
+		    if (opt.enable_reduced_cost_proof_conflict_minimization &&
+		        (child_closure_stats.reasons_added > 0 ||
+		         has_new_proof_target_bounds)) {
 	      bool learned_scoped_reconvergence = false;
 	      if (learn_short_reconvergence_implication(child.branch_reasons,
 	                                                child.domain_reason_bounds,
@@ -21461,14 +25204,17 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	        }
 	        if (!scoped_post_changes.empty()) {
+	          rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
+	          const bool allow_scoped_lp_refresh =
+	              allow_native_proof_cut_rows &&
+	              rc_proof_cut_resolve_lps_left > 0;
+	          if (allow_scoped_lp_refresh) {
 	          update_standard_form_bounds(node_sf_ref, base_lp, child.lb, child.ub);
 	          SimplexOptions scoped_resolve_opt = simplex_opt;
 	          scoped_resolve_opt.allow_cold_start = true;
 	          auto scoped_res = solve_lp_from_sf(node_sf_ref, scoped_resolve_opt,
 	                                             child.basis_hint.get());
-		          if (rc_proof_cut_resolve_lps_left > 0) {
-		            --rc_proof_cut_resolve_lps_left;
-		          }
+	          --rc_proof_cut_resolve_lps_left;
 	          ++lp_count;
 	          ++out.bc_stats.rc_fixing_resolve_lps;
 	          const auto scoped_type = classify_lp_result(scoped_res, n);
@@ -21513,8 +25259,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		              pc_upd.push_back(branch_obs);
 		              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 		            }
-			            if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot,
-			                                      child.bound)) {
+			            if (incumbent_prunes_node(has_child_upper_limit,
+			                                      child_upper_limit_snapshot,
+			                                      child.bound,
+			                                      std::max(1e-9, opt.lp_tol))) {
 		              publish_child_bound_exceeding_conflict("scoped_resolve_bound");
 		              ++out.bc_stats.rc_fixing_resolve_prunes;
 	              branch_obs.cutoff_count = 1;
@@ -21527,6 +25275,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	            }
 	          }
+	        } else {
+	          if (child.x_relax.size() == n) {
+	            child.x_relax = clamp_to_bounds(child.x_relax, child.lb, child.ub);
+	          }
+	          child.lp_refresh_needed = true;
+	        }
 	        }
 	      }
 	    }
@@ -21583,12 +25337,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         child.bound < root_domain_bound_floor) {
       child.bound = root_domain_bound_floor;
     }
+    apply_domain_objective_lower_bound(child, "child_pre_cutoff");
 
     const double gain = std::max(0.0, child.bound - parent_bound);
     branch_obs.has_gain = true;
     branch_obs.gain = gain;
 
-	    if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+	    if (incumbent_prunes_node(has_child_upper_limit,
+	                              child_upper_limit_snapshot, child.bound,
+	                              std::max(1e-9, opt.lp_tol))) {
 	      publish_child_bound_exceeding_conflict("node_bound_exceeding");
 	      branch_obs.cutoff_count = 1;
 	      pc_upd.push_back(branch_obs);
@@ -21598,8 +25355,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     // Reduced-cost variable fixing: fix integer variables whose reduced costs
     // prove they can't improve the incumbent.
     // Only available when simplex was used (provides reduced costs + basis).
-    if (opt.enable_reduced_cost_fixing &&
-        !use_ipm_nodes && has_inc_snapshot && child.basis_hint &&
+	    if (opt.enable_reduced_cost_fixing &&
+	        !use_ipm_nodes && has_child_upper_limit && child.basis_hint &&
         child.basis_hint->cached_reduced_costs &&
         child.basis_hint->cached_reduced_costs->size() >= n) {
       std::vector<BranchDomainLiteral> rc_forbidden_literals =
@@ -21617,13 +25374,23 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             rc_proof_ub = child.ub;
           }
         }
-        rc_fixed = reduced_cost_fixing(
-            base_lp.vars, child.x_relax, *child.basis_hint->cached_reduced_costs,
-            child.basis_hint->basis_indices(), child.bound, inc_obj_snapshot,
-            opt.int_tol, child.lb, child.ub,
-            opt.enable_reduced_cost_conflict_learning ? &rc_forbidden_literals
-                                                      : nullptr);
-      }
+        std::vector<DomainReasonBound> rc_fixing_reasons;
+		        rc_fixed = reduced_cost_fixing(
+		            base_lp.vars, child.x_relax, *child.basis_hint->cached_reduced_costs,
+		            child.basis_hint->basis_indices(), child.bound,
+		            child_upper_limit_snapshot,
+		            opt.int_tol, child.lb, child.ub,
+	            opt.enable_reduced_cost_conflict_learning ? &rc_forbidden_literals
+	                                                      : nullptr,
+	            child.basis_hint->cached_col_scale.get(),
+            &rc_fixing_reasons, &child.branch_reasons, child.depth,
+            static_cast<int>(child.branch_reasons.size() +
+                             child.domain_reason_bounds.size()));
+        for (auto& rb : rc_fixing_reasons) {
+          append_domain_reason_bound(child, std::move(rb), n, &root.lb,
+                                     &root.ub);
+        }
+	      }
       if (rc_fixed > 0 && !rc_fixing_preproof_applied) {
         out.bc_stats.rc_fixings += static_cast<std::uint64_t>(rc_fixed);
         out.bc_stats.rc_forbidden_literals +=
@@ -21698,8 +25465,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             }
             if (vtype == LPFailureType::Success &&
                 std::isfinite(verify_res.result.stats.objective) &&
-                incumbent_prunes_node(true, inc_obj_snapshot,
-                                      verify_res.result.stats.objective)) {
+                incumbent_prunes_node(has_child_upper_limit,
+                                      child_upper_limit_snapshot,
+                                      verify_res.result.stats.objective,
+                                      std::max(1e-9, opt.lp_tol))) {
               return true;
             }
             return false;
@@ -21722,7 +25491,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
               ++out.bc_stats.rc_binary_implications_learned;
               note_global_domain_learning();
             }
-            if ((pool_added || impl_added) && clause.size() <= 16) {
+            if (!strict_highs_lp_contract &&
+                (pool_added || impl_added) && clause.size() <= 16) {
               PoolCut conflict_cut;
               if (try_build_binary_conflict_cut(base_lp, clause, conflict_cut, 16)) {
                 new_cuts.push_back(std::move(conflict_cut));
@@ -21915,7 +25685,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	            pc_upd.push_back(branch_obs);
 	            return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	          }
-		          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+		          if (incumbent_prunes_node(has_child_upper_limit,
+		                                    child_upper_limit_snapshot,
+		                                    child.bound,
+		                                    std::max(1e-9, opt.lp_tol))) {
 		            publish_child_bound_exceeding_conflict("rc_proof_resolve_bound");
 		            ++out.bc_stats.rc_fixing_resolve_prunes;
 	              branch_obs.cutoff_count = 1;
@@ -21969,7 +25742,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
             branch_obs.gain = std::max(branch_obs.gain,
                                        std::max(0.0, child.bound - parent_bound));
           }
-	          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+	          if (incumbent_prunes_node(has_child_upper_limit,
+	                                    child_upper_limit_snapshot, child.bound,
+	                                    std::max(1e-9, opt.lp_tol))) {
 	            publish_child_bound_exceeding_conflict("rc_fixing_resolve_bound");
 	            ++out.bc_stats.rc_fixing_resolve_prunes;
 	            branch_obs.cutoff_count = 1;
@@ -22018,7 +25793,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              pc_upd.push_back(branch_obs);
 	              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	            }
-		          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+		          if (incumbent_prunes_node(has_child_upper_limit,
+		                                    child_upper_limit_snapshot,
+		                                    child.bound,
+		                                    std::max(1e-9, opt.lp_tol))) {
 		            publish_child_bound_exceeding_conflict("pool_cut_ipm_bound");
 		              branch_obs.cutoff_count = 1;
 	              pc_upd.push_back(branch_obs);
@@ -22043,7 +25821,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              pc_upd.push_back(branch_obs);
 	              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	            }
-		          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+		          if (incumbent_prunes_node(has_child_upper_limit,
+		                                    child_upper_limit_snapshot,
+		                                    child.bound,
+		                                    std::max(1e-9, opt.lp_tol))) {
 		            publish_child_bound_exceeding_conflict("pool_cut_resolve_bound");
 		              branch_obs.cutoff_count = 1;
 	              pc_upd.push_back(branch_obs);
@@ -22095,7 +25876,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	              pc_upd.push_back(branch_obs);
 	              return {false, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
 	            }
-			          if (incumbent_prunes_node(has_inc_snapshot, inc_obj_snapshot, child.bound)) {
+			          if (incumbent_prunes_node(has_child_upper_limit,
+			                                    child_upper_limit_snapshot,
+			                                    child.bound,
+			                                    std::max(1e-9, opt.lp_tol))) {
 			            publish_child_bound_exceeding_conflict("child_cut_resolve_bound");
 			              branch_obs.cutoff_count = 1;
 		              pc_upd.push_back(branch_obs);
@@ -22309,8 +26093,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     return {true, pc_upd, sols, new_cuts, lp_count, cut_count, pool_sep};
   };
 
-  auto replay_child_domain_before_queue =
-      [&](Node& child, bool& valid, const char* source) -> bool {
+	  auto replay_child_domain_before_queue =
+	      [&](Node& child, bool& valid, const char* source) -> bool {
     if (!valid) return false;
     if (!bounds_consistent(child.lb, child.ub)) {
       valid = false;
@@ -22319,7 +26103,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 
     const bool needs_replay =
         child.lp_refresh_needed ||
-        child.domain_learning_epoch < current_domain_learning_epoch();
+        child.domain_learning_epoch < current_domain_learning_epoch() ||
+        child.objective_artifact_epoch < current_objective_artifact_epoch() ||
+        child.domain_closure_epoch < current_domain_closure_epoch();
     if (!needs_replay) return true;
 
     Eigen::VectorXd lb_before = child.lb;
@@ -22338,92 +26124,247 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       return false;
     }
 
-    std::vector<BoundChangeInfo> replay_changes;
-    replay_changes.reserve(16);
-    if (lb_before.size() == n && ub_before.size() == n &&
-        child.lb.size() == n && child.ub.size() == n) {
-      const double tol = std::max(1e-9, opt.int_tol);
-      for (int col = 0; col < n; ++col) {
-        if (std::isfinite(child.lb[col]) &&
-            (!std::isfinite(lb_before[col]) ||
-             child.lb[col] > lb_before[col] + tol)) {
-          replay_changes.push_back(
-              {col,
-               std::isfinite(lb_before[col]) ? child.lb[col] - lb_before[col]
-                                             : 0.0,
-               true});
-        }
-        if (std::isfinite(child.ub[col]) &&
-            (!std::isfinite(ub_before[col]) ||
-             child.ub[col] < ub_before[col] - tol)) {
-          replay_changes.push_back(
-              {col,
-               std::isfinite(ub_before[col]) ? child.ub[col] - ub_before[col]
-                                             : 0.0,
-               false});
-        }
-      }
-    }
-
-    std::vector<BranchDomainLiteral> replay_conflict;
-    int replay_domain_tightenings = 0;
-    if (!replay_changes.empty() &&
-        !propagate_node_domain(
-            base_lp, A_row_cached, Aeq_row_cached, row_index_cached,
-            child.lb, child.ub, opt.bound_propagation_rounds, &conflict_pool,
-            &clique_table, &implication_graph, replay_changes,
-            child.branch_reasons, &replay_conflict, &replay_domain_tightenings,
-            opt.enable_reduced_cost_proof_conflict_minimization
-                ? &child.domain_reason_bounds
-                : nullptr)) {
-      if (replay_conflict.empty()) replay_conflict = child.branch_reasons;
-      if (!replay_conflict.empty()) {
-        conflict_pool.add(replay_conflict);
-        add_binary_implications_from_conflict_clause(base_lp.vars,
-                                                     replay_conflict,
-                                                     implication_graph);
-      }
-      valid = false;
-      ++out.bc_stats.rc_conflict_queue_prunes;
+	    if (conflict_pool.has_conflict(child.lb, child.ub) ||
+	        !bounds_consistent(child.lb, child.ub)) {
+	      valid = false;
+	      ++out.bc_stats.rc_conflict_queue_prunes;
       ++out.bc_stats.certificate_queue_prunes;
       return false;
     }
 
-    if (conflict_pool.has_conflict(child.lb, child.ub) ||
-        !bounds_consistent(child.lb, child.ub)) {
-      valid = false;
-      ++out.bc_stats.rc_conflict_queue_prunes;
-      ++out.bc_stats.certificate_queue_prunes;
-      return false;
-    }
+		    const bool domain_changed =
+		        replay_tightened > 0 ||
+		        !same_domain_bounds_for_probe(lb_before, ub_before, child.lb,
+		                                      child.ub);
+		    const bool trail_changed = domain_changed || replay_reasons > 0;
+		    if (trail_changed) {
+		      rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
+		    }
+		    if (domain_changed) {
+	      if (child.x_seed.size() == n) {
+	        child.x_seed = clamp_to_bounds(child.x_seed, child.lb, child.ub);
+	      }
+	      if (child.x_relax.size() == n) {
+	        child.x_relax = clamp_to_bounds(child.x_relax, child.lb, child.ub);
+	      }
+	      child.lp_refresh_needed = true;
+		      if (apply_domain_objective_lower_bound(child, source) >
+		          std::max(1e-8, opt.lp_tol)) {
+		        child.lp_refresh_needed = true;
+		      }
+	      out.bc_stats.certificate_domain_fixings +=
+	          replay_tightened;
+	      if (opt.verbose || trace_bc_timeline) {
+	        fmt::print(stderr,
+	                   "[B&C-PREQ-REPLAY] source={} depth={} tight={} "
+	                   "reasons={} row_tight={} refresh=1\n",
+	                   source != nullptr ? source : "child_queue",
+	                   child.depth, replay_tightened, replay_reasons,
+	                   0);
+	      }
+	    }
+	    child.domain_learning_epoch = current_domain_learning_epoch();
+	    child.objective_artifact_epoch = current_objective_artifact_epoch();
+	    child.domain_closure_epoch = current_domain_closure_epoch();
+	    return true;
+	  };
 
-    const bool domain_changed =
-        replay_tightened > 0 || replay_reasons > 0 ||
-        replay_domain_tightenings > 0 || !replay_changes.empty();
-    if (domain_changed) {
-      rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
-      if (child.x_seed.size() == n) {
-        child.x_seed = clamp_to_bounds(child.x_seed, child.lb, child.ub);
+	  auto refresh_child_lp_before_queue =
+	      [&](Node& child, bool& valid, const char* source) -> bool {
+	    if (!valid || !child.lp_refresh_needed) return valid;
+	    if (child.lb.size() != n || child.ub.size() != n ||
+	        !bounds_consistent(child.lb, child.ub)) {
+	      valid = false;
+	      return false;
+	    }
+	    StandardFormLP refresh_sf = tree_base_sf;
+	    update_standard_form_bounds(refresh_sf, base_lp, child.lb, child.ub);
+	    SimplexOptions refresh_opt = simplex_opt;
+	    refresh_opt.allow_cold_start = true;
+	    auto refresh_res =
+	        solve_lp_from_sf(refresh_sf, refresh_opt, child.basis_hint.get());
+	    ++out.bc_stats.lp_solves;
+	    ++out.bc_stats.certificate_domain_resolve_lps;
+	    const auto refresh_type = classify_lp_result(refresh_res, n);
+	    if (refresh_type == LPFailureType::Infeasible ||
+	        refresh_type == LPFailureType::ObjectiveCutoff) {
+	      if (refresh_type == LPFailureType::ObjectiveCutoff) {
+	        child.bound =
+	            std::max(child.bound, refresh_res.result.stats.objective);
+	      }
+	      valid = false;
+	      ++out.bc_stats.certificate_domain_prunes;
+	      ++out.bc_stats.rc_fixing_resolve_prunes;
+	      return false;
+	    }
+	    if (refresh_type != LPFailureType::Success ||
+	        refresh_res.result.x.size() != n ||
+	        !std::isfinite(refresh_res.result.stats.objective)) {
+	      return valid;
+	    }
+	    const double old_bound = child.bound;
+	    child.x_relax =
+	        clamp_to_bounds(refresh_res.result.x, child.lb, child.ub);
+	    child.x_seed = child.x_relax;
+	    child.bound = std::max(child.bound, refresh_res.result.stats.objective);
+	    if (child.estimate < child.bound) child.estimate = child.bound;
+	    child.basis_hint =
+	        persist_bc_node_basis_from_simplex(refresh_res, child.basis_hint);
+	    child.lp_refresh_needed = false;
+	    child.domain_learning_epoch = current_domain_learning_epoch();
+	    child.objective_artifact_epoch = current_objective_artifact_epoch();
+	    child.domain_closure_epoch = current_domain_closure_epoch();
+	    const double lift = std::max(0.0, child.bound - old_bound);
+	    if (lift > std::max(1e-7, opt.lp_tol)) {
+	      ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+	      ++out.bc_stats.certificate_domain_bound_improvements;
+	      out.bc_stats.rc_proof_resolve_lift_sum += lift;
+	      out.bc_stats.rc_proof_resolve_lift_max =
+	          std::max(out.bc_stats.rc_proof_resolve_lift_max, lift);
+	    }
+		    if (opt.verbose || trace_bc_timeline) {
+		      fmt::print(stderr,
+		                 "[B&C-PREQ-LP] source={} depth={} bound={:.10g}->{:.10g} "
+		                 "lift={:.6g}\n",
+		                 source != nullptr ? source : "child_queue",
+		                 child.depth, old_bound, child.bound, lift);
+		    }
+      if (opt.enable_reduced_cost_fixing && has_incumbent &&
+          std::isfinite(incumbent_obj) && child.basis_hint &&
+          child.basis_hint->cached_reduced_costs &&
+          child.basis_hint->cached_reduced_costs->size() >= n) {
+        bool rc_pruned = false;
+        int rc_fixed_total = 0;
+        int rc_passes = 0;
+        for (;;) {
+          const double upper_limit =
+              highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+                                                opt.int_tol);
+          if (!std::isfinite(upper_limit)) break;
+          std::vector<DomainReasonBound> rc_handoff_reasons;
+	          const int rc_fixed = reduced_cost_fixing(
+	              base_lp.vars, child.x_relax,
+	              *child.basis_hint->cached_reduced_costs,
+	              child.basis_hint->basis_indices(), child.bound, upper_limit,
+	              opt.int_tol, child.lb, child.ub, nullptr,
+	              child.basis_hint->cached_col_scale.get(), &rc_handoff_reasons,
+              &child.branch_reasons, child.depth,
+              static_cast<int>(child.branch_reasons.size() +
+                               child.domain_reason_bounds.size()));
+	          if (rc_fixed <= 0) break;
+          rc_fixed_total += rc_fixed;
+          ++rc_passes;
+          out.bc_stats.rc_fixings += static_cast<std::uint64_t>(rc_fixed);
+          for (auto& rb : rc_handoff_reasons) {
+            append_domain_reason_bound(child, std::move(rb), n, &root.lb,
+                                       &root.ub);
+          }
+	          rebuild_local_domain_trail(child, n, &root.lb, &root.ub);
+          std::vector<BoundChangeInfo> rc_changes;
+          NodeDomainClosureStats rc_closure_stats;
+          const std::vector<DomainReasonBound> no_rc_reasons;
+          if (!run_node_domain_closure(
+                  child, no_rc_reasons, rc_changes, nullptr, nullptr,
+                  incumbent_obj, true, "prequeue_rc_closure",
+                  &rc_closure_stats) ||
+              !bounds_consistent(child.lb, child.ub)) {
+            valid = false;
+            rc_pruned = true;
+            ++out.bc_stats.certificate_domain_prunes;
+            break;
+          }
+          update_standard_form_bounds(refresh_sf, base_lp, child.lb, child.ub);
+          auto rc_res =
+              solve_lp_from_sf(refresh_sf, refresh_opt, child.basis_hint.get());
+          ++out.bc_stats.lp_solves;
+          ++out.bc_stats.certificate_domain_resolve_lps;
+          const auto rc_type = classify_lp_result(rc_res, n);
+          if (rc_type == LPFailureType::Infeasible ||
+              rc_type == LPFailureType::ObjectiveCutoff) {
+            if (rc_type == LPFailureType::ObjectiveCutoff) {
+              child.bound = std::max(child.bound, rc_res.result.stats.objective);
+            }
+            valid = false;
+            rc_pruned = true;
+            ++out.bc_stats.certificate_domain_prunes;
+            ++out.bc_stats.rc_fixing_resolve_prunes;
+            break;
+          }
+          if (rc_type != LPFailureType::Success || rc_res.result.x.size() != n ||
+              !std::isfinite(rc_res.result.stats.objective)) {
+            child.lp_refresh_needed = true;
+            break;
+          }
+          const double rc_old_bound = child.bound;
+          child.x_relax = clamp_to_bounds(rc_res.result.x, child.lb, child.ub);
+          child.x_seed = child.x_relax;
+          child.bound = std::max(child.bound, rc_res.result.stats.objective);
+          if (child.estimate < child.bound) child.estimate = child.bound;
+          const double rc_lift = std::max(0.0, child.bound - rc_old_bound);
+          if (rc_lift > std::max(1e-7, opt.lp_tol)) {
+            ++out.bc_stats.rc_fixing_resolve_bound_improvements;
+            ++out.bc_stats.certificate_domain_bound_improvements;
+            out.bc_stats.rc_proof_resolve_lift_sum += rc_lift;
+            out.bc_stats.rc_proof_resolve_lift_max =
+                std::max(out.bc_stats.rc_proof_resolve_lift_max, rc_lift);
+          }
+          child.basis_hint =
+              persist_bc_node_basis_from_simplex(rc_res, child.basis_hint);
+          child.lp_refresh_needed = false;
+          child.domain_learning_epoch = current_domain_learning_epoch();
+          child.objective_artifact_epoch = current_objective_artifact_epoch();
+          child.domain_closure_epoch = current_domain_closure_epoch();
+        }
+        if ((opt.verbose || std::getenv("HACDCPF_BC_CONF") != nullptr) &&
+            rc_fixed_total > 0) {
+          fmt::print(stderr,
+                     "[B&C-RC-FIXPOINT] phase=prequeue_refresh depth={} "
+                     "pass={} fix={} bound={:.10g} pruned={}\n",
+                     child.depth, rc_passes, rc_fixed_total, child.bound,
+                     rc_pruned ? 1 : 0);
+        }
+        if (rc_pruned) return false;
       }
-      if (child.x_relax.size() == n) {
-        child.x_relax = clamp_to_bounds(child.x_relax, child.lb, child.ub);
-      }
-      child.lp_refresh_needed = true;
-      out.bc_stats.certificate_domain_fixings +=
-          replay_tightened +
-          static_cast<std::uint64_t>(std::max(0, replay_domain_tightenings));
-      if (opt.verbose || trace_bc_timeline) {
-        fmt::print(stderr,
-                   "[B&C-PREQ-REPLAY] source={} depth={} tight={} "
-                   "reasons={} row_tight={} refresh=1\n",
-                   source != nullptr ? source : "child_queue",
-                   child.depth, replay_tightened, replay_reasons,
-                   replay_domain_tightenings);
-      }
-    }
-    child.domain_learning_epoch = current_domain_learning_epoch();
-    return true;
-  };
+		    std::vector<int> prequeue_frac;
+	    if (!fractional_branchable_indices(
+	            child.x_relax, child.lb, child.ub,
+	            requested_vendored_highs_lp ? std::max(1e-9, opt.lp_tol)
+	                                        : opt.int_tol,
+	            prequeue_frac)) {
+	      Eigen::VectorXd x_int = child.x_relax;
+	      round_declared_branchables(x_int, child.lb, child.ub);
+	      const double feas_tol =
+	          requested_vendored_highs_lp ? std::max(kNodeFeasibilityTol, opt.lp_tol)
+	                                      : kNodeFeasibilityTol;
+	      if (satisfies_with_bounds(base_lp, x_int, child.lb, child.ub,
+	                                feas_tol)) {
+	        const double obj = objective_value(base_lp.c, x_int, base_lp.sense);
+	        if (adopt_tree_incumbent("prequeue_refresh", x_int, obj,
+	                                 child.depth, child.bound)) {
+	          if (opt.verbose || trace_bc_timeline) {
+	            fmt::print(stderr,
+	                       "[B&C LP-INTEGRAL] phase=prequeue_refresh "
+	                       "depth={} obj={:.10g} bound={:.10g}\n",
+	                       child.depth, obj, child.bound);
+	          }
+	        }
+	        valid = false;
+	        return false;
+	      }
+	    }
+	    const double prequeue_upper_limit =
+	        has_incumbent && std::isfinite(incumbent_obj)
+	            ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                               opt.int_tol)
+	            : kInf;
+	    if (incumbent_prunes_node(
+	            has_incumbent && std::isfinite(prequeue_upper_limit),
+	            prequeue_upper_limit, child.bound, std::max(1e-9, opt.lp_tol))) {
+	      valid = false;
+	      return false;
+	    }
+	    return valid;
+	  };
 
   // ════════════════════════════════════════════════════════════════════════
   // Main B&C loop — sequential (num_threads==1) or heterogeneous parallel
@@ -22453,13 +26394,59 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	               root_time, has_incumbent ? 1 : 0, root.bound);
 	  }
 
-	  // HiGHS consumes a usable incumbent immediately against the live queue:
-	  // objective/reduced-cost proof objects are propagation sources, not a
-	  // side channel that waits for a later incumbent.  Do the same once the
-	  // sequential root node has been inserted, before the first gap check.
-	  if (!concurrent_tree_launched && has_incumbent && !node_queue.empty() &&
-	      (have_cached_queue_dual_proof || have_root_global_dual_proof)) {
-	    const int post_root_pruned = consume_cached_dual_proof_after_incumbent();
+			  // HiGHS consumes a usable incumbent immediately against the live queue:
+			  // objective/reduced-cost proof objects are propagation sources, not a
+			  // side channel that waits for a later incumbent.  Do the same once the
+			  // sequential root node has been inserted, before the first gap check.
+			  if (!concurrent_tree_launched && !node_queue.empty()) {
+			    const int root_cert_published =
+			        publish_root_domain_closure_certificates(
+			            "root_pre_tree_domain_closure");
+	      if (root_cert_published > 0) {
+	        int root_cert_pruned = prune_queue_after_domain_learning(
+	            /*force_frontier_drain=*/true,
+	            "root_pre_tree_domain_closure");
+	        if (!node_queue.empty()) {
+	          root_cert_pruned += inherit_root_domain_to_queue(
+	              "root_pre_tree_domain_closure",
+	              /*force_frontier_drain=*/true);
+	          root_cert_pruned += prune_queue_after_domain_learning(
+	              /*force_frontier_drain=*/true,
+	              "root_pre_tree_domain_inherit");
+	        }
+	        refresh_queue_lower_bound();
+			      if (opt.verbose ||
+			          std::getenv("HACDCPF_BC_CONF") != nullptr) {
+			        fmt::print(stderr,
+			                   "[B&C ROOT-CERT-CLOSURE] published={} "
+			                   "pruned={} qsize={} qlb={:.10g}\n",
+			                   root_cert_published, root_cert_pruned,
+			                   node_queue.size(), global_lb);
+			      }
+			    }
+			  }
+			  if (!concurrent_tree_launched && has_incumbent && !node_queue.empty()) {
+			    int root_fixed_point_pruned = prune_queue_after_domain_learning(
+			        /*force_frontier_drain=*/true, "root_incumbent_fixed_point");
+	    if (!node_queue.empty()) {
+	      root_fixed_point_pruned += inherit_root_domain_to_queue(
+	          "root_incumbent_fixed_point", /*force_frontier_drain=*/true);
+	      root_fixed_point_pruned += prune_queue_after_domain_learning(
+	          /*force_frontier_drain=*/true,
+	          "root_incumbent_domain_inherit");
+	    }
+		    refresh_queue_lower_bound();
+		    if (opt.verbose) {
+		      fmt::print(stderr,
+		                 "[B&C-POSTINC] phase=root_fixed_point pruned={} "
+		                 "qsize={} qlb={:.10g} ub={:.10g}\n",
+		                 root_fixed_point_pruned, node_queue.size(), global_lb,
+		                 incumbent_obj);
+		    }
+		  }
+		  if (!concurrent_tree_launched && has_incumbent && !node_queue.empty() &&
+		      (have_cached_queue_dual_proof || have_root_global_dual_proof)) {
+		    const int post_root_pruned = consume_cached_dual_proof_after_incumbent();
 	    refresh_queue_lower_bound();
 	    if (opt.verbose) {
 	      fmt::print(stderr,
@@ -22487,11 +26474,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        objective_value(base_lp.c, tree_x, base_lp.sense);
 	    if (std::isfinite(tree_actual_obj) &&
 	        (!has_incumbent || tree_actual_obj + 1e-9 < incumbent_obj)) {
-	      if (validate_root_candidate_for_proof("shared_tree_incumbent",
+      if (validate_root_candidate_for_proof("shared_tree_incumbent",
 	                                            tree_x)) {
 	        has_incumbent = true;
 	        incumbent_obj = tree_actual_obj;
 	        incumbent_x = std::move(tree_x);
+	        note_incumbent_cutoff_learning();
 	        incumbent_proof_validated = true;
 	        incumbent_proof_validated_obj = incumbent_obj;
 	      } else if (!has_incumbent) {
@@ -22606,12 +26594,13 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
         forced_certificate_queue_passes =
             std::max(forced_certificate_queue_passes, 1);
       }
-      const int tail_pruned =
-          cached_proof_already_consumed
-              ? 0
-              : consume_cached_dual_proof_after_incumbent();
+	      const int tail_pruned =
+	          cached_proof_already_consumed
+	              ? 0
+	              : highs_style_post_incumbent_domain_closure(
+	                    "proof_tail_activate", out.bc_stats.last_incumbent_depth);
       const bool has_new_replay_learning =
-          current_domain_learning_epoch() > last_queue_domain_replay_epoch;
+          current_domain_closure_epoch() > last_queue_domain_replay_epoch;
 		      const int replay_pruned = has_new_replay_learning
               ? prune_queue_after_domain_learning(
 		            /*force_frontier_drain=*/true, "proof_tail_activate")
@@ -22633,6 +26622,44 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                                   tail_pruned + replay_pruned + gap_pruned);
 	    }
     proof_tail_mode_was_active = proof_tail_mode_now;
+
+    if (proof_tail_mode_now) {
+      int frontier_contract_pruned = 0;
+      for (int guard = 0; guard < 8; ++guard) {
+        const double refresh_band =
+            std::max(termination_bound_band(), 2.0 * opt.lp_tol);
+        const int marked_frontier_nodes =
+            node_queue.count_lp_refresh_needed_near_lower_bound(
+                refresh_band, /*max_scan=*/0);
+        if (marked_frontier_nodes <= 0) break;
+	        frontier_contract_pruned += refresh_marked_queue_nodes(
+	            "proof_tail_frontier_contract", marked_frontier_nodes,
+	            refresh_band, /*mandatory_frontier_contract=*/true);
+	        if (last_marked_queue_refresh_attempts <= 0 ||
+	            last_marked_queue_refresh_remaining <= 0 ||
+	            (last_marked_queue_refresh_pruned <= 0 &&
+	             last_marked_queue_refresh_bound_moves <= 0 &&
+	             last_marked_queue_refresh_queue_lift <=
+	                 std::max(1e-8, opt.lp_tol))) {
+	          break;
+	        }
+	      }
+      if (frontier_contract_pruned > 0) {
+        refresh_queue_lower_bound();
+        const double frontier_upper_limit =
+            has_incumbent && std::isfinite(incumbent_obj)
+                ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+                                                   opt.int_tol)
+                : kInf;
+        if (incumbent_prunes_node(
+                has_incumbent && std::isfinite(frontier_upper_limit),
+                frontier_upper_limit, node_queue.lower_bound(),
+                std::max(1e-9, opt.lp_tol))) {
+          (void)prune_queue_by_incumbent();
+          refresh_queue_lower_bound();
+        }
+      }
+    }
 
     Node cur;
     const bool proof_queue_mode = hybrid_queue_mode_active();
@@ -22660,7 +26687,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
       ++out.bc_stats.rc_conflict_queue_prunes;
       continue;
     }
-	    if (incumbent_prunes_node(has_incumbent, incumbent_obj, cur.bound)) {
+	    const double cur_upper_limit =
+	        has_incumbent && std::isfinite(incumbent_obj)
+	            ? highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+	                                               opt.int_tol)
+	            : kInf;
+	    if (incumbent_prunes_node(
+	            has_incumbent && std::isfinite(cur_upper_limit),
+	            cur_upper_limit, cur.bound, std::max(1e-9, opt.lp_tol))) {
 	      continue;
 	    }
         if (!opt.require_tree_exhaustion_certificate) {
@@ -22682,137 +26716,38 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     // stronger domain than the LP that produced it.
     const bool late_replay_has_new_learning =
         cur.lp_refresh_needed ||
-        cur.domain_learning_epoch < current_domain_learning_epoch();
+        cur.domain_learning_epoch < current_domain_learning_epoch() ||
+        cur.objective_artifact_epoch < current_objective_artifact_epoch() ||
+        cur.domain_closure_epoch < current_domain_closure_epoch();
 			    if ((cur.lp_refresh_needed || !conflict_pool.empty() ||
-			         !implication_graph.empty() ||
+			         !implication_graph.empty() || cut_pool.size() > 0 ||
 			         !global_bound_lifting_certificates.empty()) &&
-			        allow_certificate_domain_replay &&
-			        late_replay_has_new_learning) {
-	      Node replay_node = cur;
-	      std::vector<BoundChangeInfo> late_prop_changes;
-		      std::vector<BranchDomainLiteral> late_conflict;
-		      std::vector<DomainReasonBound> late_reason_bounds;
-		      int late_tightenings = 0;
-		      std::uint64_t late_cert_reasons = 0;
-		      bool prop_ok = propagate_global_bound_lifting_certificates(
-		          replay_node, late_prop_changes, &late_cert_reasons);
-		      if (prop_ok) {
-		        prop_ok = propagate_local_conflict_clauses(replay_node,
-		                                                  late_prop_changes);
-		      }
-	      if (prop_ok) {
-	        prop_ok = propagate_scoped_conflict_objects(replay_node,
-	                                                    late_prop_changes);
+				        allow_certificate_domain_replay &&
+				        late_replay_has_new_learning) {
+		      Node replay_node = cur;
+		      std::vector<BoundChangeInfo> late_prop_changes;
+	      NodeDomainClosureStats late_closure_stats;
+	      const std::vector<DomainReasonBound> no_late_reasons;
+	      bool prop_ok = run_node_domain_closure(
+	          replay_node, no_late_reasons, late_prop_changes, nullptr,
+	          nullptr, has_incumbent ? incumbent_obj : kInf, has_incumbent,
+	          "pop_late_replay", &late_closure_stats);
+		      if (!prop_ok) {
+	        ++out.bc_stats.rc_conflict_queue_prunes;
+	        continue;
 	      }
-	      if (prop_ok) {
-	        prop_ok = explain_active_scoped_reason_bounds(replay_node,
-	                                                      late_prop_changes);
-	      }
-	      if (prop_ok) {
-	        prop_ok = propagate_local_binary_implications(replay_node,
-	                                                      late_prop_changes);
-	      }
-	      if (prop_ok) {
-	        prop_ok = propagate_node_domain(
-	            base_lp, A_row_cached, Aeq_row_cached, row_index_cached,
-	            replay_node.lb, replay_node.ub, opt.bound_propagation_rounds,
-	            &conflict_pool, &clique_table, &implication_graph,
-	            late_prop_changes, replay_node.branch_reasons, &late_conflict,
-	            &late_tightenings,
-	            opt.enable_reduced_cost_proof_conflict_minimization
-	                ? &late_reason_bounds
-	                : nullptr);
-	      }
-	      if (!prop_ok) {
-	        if (late_conflict.empty()) late_conflict = cur.branch_reasons;
-	        if (!late_conflict.empty()) {
-          conflict_pool.add(late_conflict);
-          add_binary_implications_from_conflict_clause(base_lp.vars,
-                                                       late_conflict,
-                                                       implication_graph);
-          PoolCut conflict_cut;
-          if (try_build_binary_conflict_cut(base_lp, late_conflict,
-                                            conflict_cut,
-                                            opt.reduced_cost_conflict_cut_max_literals) &&
-              valid_pool_cut(conflict_cut, nullptr, "late_replay_conflict_cut") &&
-              cut_pool.add(std::move(conflict_cut.coeff), conflict_cut.rhs)) {
-            ++out.bc_stats.cuts_added;
-            ++out.bc_stats.rc_conflict_cuts_added;
-          }
-        }
-        ++out.bc_stats.rc_conflict_queue_prunes;
-        continue;
-      }
-	      if (!late_reason_bounds.empty() &&
-	          opt.enable_reduced_cost_proof_conflict_minimization) {
-	        for (const auto& rb : late_reason_bounds) {
-	          bool duplicate = false;
-	          for (const auto& existing : replay_node.domain_reason_bounds) {
-	            if (branch_literal_stronger_or_equal(existing.bound, rb.bound) &&
-	                branch_literal_stronger_or_equal(rb.bound, existing.bound) &&
-	                conflict_clause_hash(existing.reason) ==
-	                    conflict_clause_hash(rb.reason)) {
-	              duplicate = true;
-	              break;
-	            }
-	          }
-	          if (!duplicate) {
-	            append_domain_reason_bound(replay_node, rb, n, &root.lb,
-	                                       &root.ub);
-	          }
-	        }
-	        std::vector<PoolCut> late_new_cuts;
-	        int late_cut_count = 0;
-	        const std::uint64_t learned_before =
-	            out.bc_stats.rc_conflict_clauses_learned;
-	        if (learn_short_reconvergence_implication(replay_node.branch_reasons,
-	                                                  replay_node.domain_reason_bounds,
-	                                                  nullptr,
-	                                                  nullptr,
-	                                                  nullptr,
-	                                                  nullptr,
-	                                                  late_new_cuts,
-	                                                  late_cut_count,
-	                                                  &replay_node)) {
-	          for (auto& c : late_new_cuts) {
-	            if (valid_pool_cut(c, nullptr, "late_replay_new_cut") &&
-	                cut_pool.add(std::move(c.coeff), c.rhs)) {
-              ++out.bc_stats.cuts_added;
-            }
-          }
-          if (out.bc_stats.rc_conflict_clauses_learned > learned_before) {
-            const int queue_pruned = node_queue.prune_conflicts(conflict_pool);
-            if (queue_pruned > 0) {
-	              out.bc_stats.rc_conflict_queue_prunes +=
-	                  static_cast<std::uint64_t>(queue_pruned);
-	            }
-	          }
-	          if (!explain_active_scoped_reason_bounds(replay_node,
-	                                                   late_prop_changes) ||
-	              !propagate_scoped_conflict_objects(replay_node,
-	                                                 late_prop_changes)) {
-	            ++out.bc_stats.rc_conflict_queue_prunes;
-	            continue;
-	          }
-	          if (conflict_pool.has_conflict(replay_node.lb, replay_node.ub)) {
-	            ++out.bc_stats.rc_conflict_queue_prunes;
-	            continue;
-	          }
-	        }
-	      }
-	      const bool replay_domain_changed =
-	          late_tightenings > 0 || !late_prop_changes.empty() ||
-	          replay_node.domain_reason_bounds.size() !=
-	              cur.domain_reason_bounds.size() ||
-	          late_cert_reasons > 0 ||
-	          replay_node.scoped_conflict_clauses.size() !=
-	              cur.scoped_conflict_clauses.size() ||
+		      const bool replay_domain_changed =
+		          !late_prop_changes.empty() ||
+		          replay_node.domain_reason_bounds.size() !=
+		              cur.domain_reason_bounds.size() ||
+		          replay_node.scoped_conflict_clauses.size() !=
+		              cur.scoped_conflict_clauses.size() ||
 	          replay_node.local_conflict_clauses.size() !=
-	              cur.local_conflict_clauses.size() ||
-	          replay_node.local_binary_implications.size() !=
-	              cur.local_binary_implications.size();
-		      if ((late_tightenings > 0 || !late_prop_changes.empty() ||
-		           cur.lp_refresh_needed) &&
+		              cur.local_conflict_clauses.size() ||
+		          replay_node.local_binary_implications.size() !=
+		              cur.local_binary_implications.size();
+			      if ((!late_prop_changes.empty() ||
+			           cur.lp_refresh_needed) &&
 		          bounds_consistent(replay_node.lb, replay_node.ub)) {
 	        update_standard_form_bounds(node_sf, base_lp, replay_node.lb,
 	                                    replay_node.ub);
@@ -22854,7 +26789,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
           if (cur.bound > old_bound + 1e-7) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
           }
-	          if (incumbent_prunes_node(has_incumbent, incumbent_obj, cur.bound)) {
+	          if (incumbent_prunes_node(
+	                  has_incumbent && std::isfinite(cur_upper_limit),
+	                  cur_upper_limit, cur.bound,
+	                  std::max(1e-9, opt.lp_tol))) {
 	            ++out.bc_stats.rc_fixing_resolve_prunes;
 	            continue;
 	          }
@@ -22864,8 +26802,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        cur = std::move(replay_node);
 	      }
       cur.domain_learning_epoch = current_domain_learning_epoch();
+      cur.objective_artifact_epoch = current_objective_artifact_epoch();
+      cur.domain_closure_epoch = current_domain_closure_epoch();
       cur.lp_refresh_needed = false;
 		    } else if ((!conflict_pool.empty() || !implication_graph.empty() ||
+		                cut_pool.size() > 0 ||
 		                !global_bound_lifting_certificates.empty()) &&
 		               allow_certificate_domain_replay &&
 		               !late_replay_has_new_learning) {
@@ -22912,7 +26853,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          if (cur.bound > old_bound + 1e-7) {
             ++out.bc_stats.rc_fixing_resolve_bound_improvements;
           }
-          if (incumbent_prunes_node(has_incumbent, incumbent_obj, cur.bound)) {
+          if (incumbent_prunes_node(
+                  has_incumbent && std::isfinite(cur_upper_limit),
+                  cur_upper_limit, cur.bound, std::max(1e-9, opt.lp_tol))) {
             ++out.bc_stats.rc_fixing_resolve_prunes;
             continue;
           }
@@ -22940,7 +26883,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          if (opt.verbose && !has_incumbent)
 	            fprintf(stderr, "[B&C] first incumbent at node=%d obj=%.2f\n",
 	                    static_cast<int>(out.bc_stats.nodes_explored), obj);
-	          consume_cached_dual_proof_after_incumbent();
+		          highs_style_post_incumbent_domain_closure(
+		              "tree_integral_node", cur.depth);
 	          maybe_run_post_incumbent_local_branching(cur.depth);
 	        }
 	      }
@@ -23201,7 +27145,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        j = choose_branch_var(opt, frac, cur.x_relax, pc, branch_priority);
 	      }
 	      if (incumbent_changed_by_probe) {
-	        consume_cached_dual_proof_after_incumbent();
+	        highs_style_post_incumbent_domain_closure(
+	            tree_incumbent_domain_closure_source.c_str(),
+	            tree_incumbent_domain_closure_depth);
 	        prune_queue_by_gap_optimality_limit("strong_branch_probe_incumbent");
 	      }
 	      out.bc_stats.lp_solves += local_lp_solves;
@@ -23275,9 +27221,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     child_up.x_seed = clamp_to_bounds(cur.x_relax, child_up.lb, child_up.ub);
     append_branch_reason(child_up, j, true, child_up.lb[j]);
 
-	    bool down_valid, up_valid;
-	    bool incumbent_changed_this_node = false;
-		    {
+		    bool down_valid, up_valid;
+		    bool incumbent_changed_this_node = false;
+		    bool child_domain_source_added = false;
+			    {
 				      StandardFormLP child_down_sf = tree_base_sf;
 				      auto [valid, pcu, sols, ncuts, lps, ca, ps] =
 		          process_single_child(child_down, false, j, cur.bound,
@@ -23308,11 +27255,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          incumbent_changed_this_node = true;
 	        }
 	      }
-      for (auto& c : ncuts) {
-        if (valid_pool_cut(c, nullptr, "down_child_new_cut")) {
-          cut_pool.add(std::move(c.coeff), c.rhs);
-        }
-      }
+	      for (auto& c : ncuts) {
+	        if (valid_pool_cut(c, nullptr, "down_child_new_cut")) {
+		          child_domain_source_added =
+		              add_cut_to_global_domain_pool(std::move(c.coeff), c.rhs,
+		                                            "down_child_new_cut",
+		                                            c.domain_only) ||
+		              child_domain_source_added;
+	        }
+	      }
     }
 
     {
@@ -23346,26 +27297,44 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	          incumbent_changed_this_node = true;
 	        }
 	      }
-	      for (auto& c : ncuts) {
-	        if (valid_pool_cut(c, nullptr, "up_child_new_cut")) {
-	          cut_pool.add(std::move(c.coeff), c.rhs);
-	        }
-	      }
-	    }
-	    const auto loop_t3 = std::chrono::steady_clock::now();
+		      for (auto& c : ncuts) {
+		        if (valid_pool_cut(c, nullptr, "up_child_new_cut")) {
+			          child_domain_source_added =
+			              add_cut_to_global_domain_pool(std::move(c.coeff), c.rhs,
+			                                            "up_child_new_cut",
+			                                            c.domain_only) ||
+			              child_domain_source_added;
+		        }
+		      }
+		    }
+		    const auto loop_t3 = std::chrono::steady_clock::now();
 
-		    // Node-local proof artifacts are consumed lazily through the
-		    // domain_learning_epoch pop-time replay.  Draining the whole queue
-		    // here repeats the same frontier scan after each learned clause and
-		    // was the source of the 100g proof-tail empty replay loop.
-	    if (incumbent_changed_this_node) {
-	      consume_cached_dual_proof_after_incumbent();
+			    // HiGHS treats newly learned conflict/cutpool rows as live
+			    // propagation rows.  Once a child publishes one, drive the proof
+			    // frontier to the same domain fixed point before leaving stale
+			    // queued nodes behind.
+			    if (child_domain_source_added && !node_queue.empty()) {
+			      (void)prune_queue_after_domain_learning(
+			          proof_tail_queue_mode_active(), "child_domain_source");
+			    }
+		    if (incumbent_changed_this_node) {
+		      highs_style_post_incumbent_domain_closure(
+		          "child_solution", cur.depth);
 	      maybe_run_post_incumbent_local_branching(cur.depth);
 	    }
 
 		    if (has_incumbent) {
-		      if (down_valid && incumbent_prunes_node(true, incumbent_obj, child_down.bound)) down_valid = false;
-		      if (up_valid && incumbent_prunes_node(true, incumbent_obj, child_up.bound)) up_valid = false;
+		      const double child_queue_upper_limit =
+		          highs_style_incumbent_upper_limit(base_lp, incumbent_obj,
+		                                             opt.int_tol);
+		      if (down_valid && incumbent_prunes_node(
+		                            std::isfinite(child_queue_upper_limit),
+		                            child_queue_upper_limit, child_down.bound,
+		                            std::max(1e-9, opt.lp_tol))) down_valid = false;
+		      if (up_valid && incumbent_prunes_node(
+		                          std::isfinite(child_queue_upper_limit),
+		                          child_queue_upper_limit, child_up.bound,
+		                          std::max(1e-9, opt.lp_tol))) up_valid = false;
               const double gap_limit = gap_optimality_limit();
               const double gap_limit_tol = gap_optimality_prune_tol(gap_limit);
 	              if (!opt.require_tree_exhaustion_certificate &&
@@ -23398,6 +27367,10 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
     replay_child_domain_before_queue(child_down, down_valid,
                                      "down_child_queue");
     replay_child_domain_before_queue(child_up, up_valid, "up_child_queue");
+    refresh_child_lp_before_queue(child_down, down_valid,
+                                  "down_child_queue_refresh");
+    refresh_child_lp_before_queue(child_up, up_valid,
+                                  "up_child_queue_refresh");
 
     if (trace_bc_timeline) {
       fmt::print(stderr,
@@ -23468,7 +27441,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        if (adopt_tree_incumbent("crossover", xc, obj, cur.depth,
 	                                 global_lb)) {
 	          ++out.bc_stats.crossover_incumbents;
-	          consume_cached_dual_proof_after_incumbent();
+		          highs_style_post_incumbent_domain_closure("crossover",
+		                                                    cur.depth);
 	          maybe_run_post_incumbent_local_branching(cur.depth);
 	        }
       }
@@ -23496,7 +27470,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	        const double obj = objective_value(base_lp.c, xr, base_lp.sense);
 	        if (adopt_tree_incumbent("rins_rounding", xr, obj, cur.depth,
 	                                 global_lb)) {
-	          consume_cached_dual_proof_after_incumbent();
+		          highs_style_post_incumbent_domain_closure("rins_rounding",
+		                                                    cur.depth);
 	          maybe_run_post_incumbent_local_branching(cur.depth);
 	        }
       }
@@ -23824,13 +27799,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 		    const bool parallel_improved =
 		        std::isfinite(shared_actual_obj) &&
 		        (!has_incumbent || shared_actual_obj + 1e-9 < incumbent_obj);
-		    if (parallel_improved &&
-		        validate_root_candidate_for_proof("parallel_shared_incumbent",
-		                                          shared_x)) {
-		      has_incumbent = true;
-		      incumbent_obj = shared_actual_obj;
-		      incumbent_x = std::move(shared_x);
-		      incumbent_proof_validated = true;
+			    if (parallel_improved &&
+			        validate_root_candidate_for_proof("parallel_shared_incumbent",
+			                                          shared_x)) {
+			      has_incumbent = true;
+			      incumbent_obj = shared_actual_obj;
+			      incumbent_x = std::move(shared_x);
+			      note_incumbent_cutoff_learning();
+			      incumbent_proof_validated = true;
 		      incumbent_proof_validated_obj = incumbent_obj;
 		      note_incumbent_update(/*depth=*/-1, global_lb);
 		    } else if (!has_incumbent) {
@@ -23926,11 +27902,21 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	               "objEvt={}/{}/{} lpSlack={} "
 	               "objSrc=vlb/vub:{}/{} pub={}/{} round={} mir={}/{} "
 	               "mir_gain_avg/max={:.3g}/{:.3g} evtMax={:.3g}/{:.3g} "
+	               "objDomLb={}/{:.3g}/{:.3g} "
 	               "dynIB_active={} dynIB_qhit={} dynIB_skip={}/{}/{} late_skip={} "
 	               "locImp={}/{}/{} locCl={}/{}/{} scoped={}/{}/{}/{} "
 	               "cutoff_tight={} cutoff_prunes={} "
 	               "cutoff_clauses={} cutoff_cuts={} "
 	               "certQ={}/{}/{} lift_avg/max={:.3g}/{:.3g} "
+	               "certMove=count{} sum/max={:.3g}/{:.3g} "
+	               "lb_nodes={} lp_refresh={} certPub/Rej={}/{} "
+	               "audit_margin=min/max={:.3g}/{:.3g} "
+                 "resTarget={}/{}/{} resConflict={}/{}/{} "
+                 "resFail=activity/missing/scope {}/{}/{} "
+                 "qlbAudit={}/{} last={:.10g}/{:.10g} maxErr={:.3g} "
+                 "nodes={}/{} "
+	               "rootCert=att/acc/rej {}/{}/{} time_ms={:.1f} "
+	               "nodes={} iters={} "
 	               "certD={}/{}/{}/{} termEff={}/{}/{} "
 	               "xfront=att{} tab{} path{} viol/admit/rej={}/{}/{} "
 	               "coeff/viol={:.3g}/{:.3g} xres={}/{} avg/max={:.3g}/{:.3g} "
@@ -23979,6 +27965,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
                out.bc_stats.objective_implied_event_mir_gain_max,
                out.bc_stats.objective_implied_event_max_delta,
                out.bc_stats.objective_implied_event_max_aggregate_delta,
+               out.bc_stats.objective_domain_bound_lift_nodes,
+               out.bc_stats.objective_domain_bound_lift_sum,
+               out.bc_stats.objective_domain_bound_lift_max,
                out.bc_stats.dynamic_implied_bound_rows_active_implication,
                out.bc_stats.dynamic_implied_bound_rows_queue_hit,
                out.bc_stats.dynamic_implied_bound_rows_skip_not_active,
@@ -24008,6 +27997,45 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt) {
 	                             out.bc_stats.certificate_queue_tightenings)
 	                   : 0.0,
 	               out.bc_stats.certificate_queue_lift_max,
+	               out.bc_stats.certificate_queue_frontier_bound_moves,
+	               out.bc_stats.certificate_queue_frontier_bound_move_sum,
+	               out.bc_stats.certificate_queue_frontier_bound_move_max,
+	               out.bc_stats.certificate_queue_lower_bound_lift_nodes,
+	               out.bc_stats.certificate_queue_lp_refresh_marked,
+	               out.bc_stats.bound_lifting_certificates_published,
+	               out.bc_stats.bound_lifting_certificates_rejected_audit,
+	               std::isfinite(
+	                   out.bc_stats.bound_lifting_certificate_activity_margin_min)
+	                   ? out.bc_stats
+	                         .bound_lifting_certificate_activity_margin_min
+	                   : 0.0,
+	               out.bc_stats.bound_lifting_certificate_activity_margin_max,
+                 out.bc_stats.resolved_target_attempts,
+                 out.bc_stats.resolved_target_success,
+                 out.bc_stats.resolved_target_failed,
+                 out.bc_stats.resolved_conflict_attempts,
+                 out.bc_stats.resolved_conflict_success,
+                 out.bc_stats.resolved_conflict_failed,
+                 out.bc_stats.resolution_activity_failed,
+                 out.bc_stats.resolution_missing_reason,
+                 out.bc_stats.resolution_scope_blocked,
+                 out.bc_stats.certificate_queue_lb_audit_passes,
+                 out.bc_stats.certificate_queue_lb_audit_failures,
+                 std::isfinite(out.bc_stats.certificate_queue_lb_audit_indexed_min)
+                     ? out.bc_stats.certificate_queue_lb_audit_indexed_min
+                     : kInf,
+                 std::isfinite(out.bc_stats.certificate_queue_lb_audit_computed_min)
+                     ? out.bc_stats.certificate_queue_lb_audit_computed_min
+                     : kInf,
+                 out.bc_stats.certificate_queue_lb_audit_max_error,
+                 out.bc_stats.certificate_queue_lb_audit_indexed_nodes,
+                 out.bc_stats.certificate_queue_lb_audit_live_nodes,
+	               out.bc_stats.vendored_root_certificate_attempts,
+	               out.bc_stats.vendored_root_certificate_accepted,
+	               out.bc_stats.vendored_root_certificate_rejected,
+	               out.bc_stats.vendored_root_certificate_time_ms,
+	               out.bc_stats.vendored_root_certificate_nodes,
+	               out.bc_stats.vendored_root_certificate_simplex_iterations,
 	               out.bc_stats.certificate_domain_passes,
 	               out.bc_stats.certificate_domain_fixings,
 	               out.bc_stats.certificate_domain_prunes,

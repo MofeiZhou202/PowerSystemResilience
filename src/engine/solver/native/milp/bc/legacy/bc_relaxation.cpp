@@ -246,6 +246,10 @@ make_first_class_basis_hint_from_simplex(const SimplexResult& simplex) {
     basis->cached_reduced_costs =
         std::make_shared<const Eigen::VectorXd>(simplex.reduced_costs);
   }
+  if (simplex.form.col_scale.size() == simplex.form.A.cols()) {
+    basis->cached_col_scale =
+        std::make_shared<const Eigen::VectorXd>(simplex.form.col_scale);
+  }
   if (simplex.x_basic.size() == simplex.form.A.rows()) {
     basis->cached_x_basic =
         std::make_shared<const Eigen::VectorXd>(simplex.x_basic);
@@ -488,11 +492,93 @@ bool native_basis_to_highs_basis(const LPModel& lp,
   if (basis_hint == nullptr) return false;
   const int n = static_cast<int>(lp.vars.size());
   const int m = static_cast<int>(lp.A.rows() + lp.Aeq.rows());
-  if (basis_hint->rows != m ||
-      static_cast<int>(basis_hint->index_count()) != m ||
+  if (basis_hint->rows <= 0 || basis_hint->rows > m ||
+      static_cast<int>(basis_hint->index_count()) != basis_hint->rows ||
       static_cast<int>(basis_hint->at_upper.size()) < n) {
     return false;
   }
+  const StandardFormLP sf = build_standard_form_lp(lp);
+  const int sf_n = static_cast<int>(sf.A.cols());
+  if (sf.n_original != n || sf.A.rows() != m || sf_n < n) {
+    return false;
+  }
+
+  std::vector<int> mapped_basis(static_cast<std::size_t>(m), -1);
+  auto adjusted_col = [&](int col, int n_slack_old,
+                          int n_surplus_old) -> int {
+    if (col < 0) return -1;
+    const int old_surplus_begin = n + n_slack_old;
+    const int old_art_begin = old_surplus_begin + n_surplus_old;
+    const int delta_slack = sf.n_slack - n_slack_old;
+    const int delta_surplus = sf.n_surplus - n_surplus_old;
+    if (col < old_surplus_begin) return col;
+    if (col < old_art_begin) return col + delta_slack;
+    return col + delta_slack + delta_surplus;
+  };
+
+  if (basis_hint->rows < m) {
+    const int m_eq = static_cast<int>(lp.Aeq.rows());
+    const int old_rows = basis_hint->rows;
+    const int new_rows = m - old_rows;
+    const int old_m_ineq = old_rows - m_eq;
+    if (old_m_ineq < 0) return false;
+    const int n_slack_old =
+        basis_hint->sf_n_slack >= 0
+            ? basis_hint->sf_n_slack
+            : basis_hint->cols - n - sf.n_surplus - sf.n_artificial;
+    const int n_surplus_old =
+        basis_hint->sf_n_surplus >= 0 ? basis_hint->sf_n_surplus
+                                      : sf.n_surplus;
+    if (n_slack_old < 0 || n_surplus_old < 0 ||
+        sf.n_slack - n_slack_old != new_rows) {
+      return false;
+    }
+    const auto& hint = basis_hint->basis_indices();
+    for (int row = 0; row < old_m_ineq; ++row) {
+      mapped_basis[static_cast<std::size_t>(row)] =
+          adjusted_col(hint[static_cast<std::size_t>(row)], n_slack_old,
+                       n_surplus_old);
+    }
+    for (int k = 0; k < new_rows; ++k) {
+      const int row = old_m_ineq + k;
+      const int slack =
+          row < static_cast<int>(sf.row_to_slack_col.size())
+              ? sf.row_to_slack_col[static_cast<std::size_t>(row)]
+              : -1;
+      mapped_basis[static_cast<std::size_t>(row)] = slack;
+    }
+    for (int row = old_m_ineq; row < old_rows; ++row) {
+      mapped_basis[static_cast<std::size_t>(row + new_rows)] =
+          adjusted_col(hint[static_cast<std::size_t>(row)], n_slack_old,
+                       n_surplus_old);
+    }
+  } else {
+    const auto& hint = basis_hint->basis_indices();
+    for (int row = 0; row < m; ++row) {
+      mapped_basis[static_cast<std::size_t>(row)] =
+          hint[static_cast<std::size_t>(row)];
+    }
+  }
+
+  std::vector<int> sf_col_to_row(static_cast<std::size_t>(sf_n), -1);
+  for (int row = 0; row < m; ++row) {
+    const int slack =
+        row < static_cast<int>(sf.row_to_slack_col.size())
+            ? sf.row_to_slack_col[static_cast<std::size_t>(row)]
+            : -1;
+    const int surplus =
+        row < static_cast<int>(sf.row_to_surplus_col.size())
+            ? sf.row_to_surplus_col[static_cast<std::size_t>(row)]
+            : -1;
+    const int artificial =
+        row < static_cast<int>(sf.row_to_artificial_col.size())
+            ? sf.row_to_artificial_col[static_cast<std::size_t>(row)]
+            : -1;
+    if (slack >= 0 && slack < sf_n) sf_col_to_row[slack] = row;
+    if (surplus >= 0 && surplus < sf_n) sf_col_to_row[surplus] = row;
+    if (artificial >= 0 && artificial < sf_n) sf_col_to_row[artificial] = row;
+  }
+
   hbasis.valid = false;
   hbasis.alien = true;
   hbasis.useful = true;
@@ -512,31 +598,33 @@ bool native_basis_to_highs_basis(const LPModel& lp,
       hbasis.col_status[static_cast<std::size_t>(j)] = HighsBasisStatus::kUpper;
     }
   }
-
-  const int slack_begin = n;
-  const int surplus_begin = n + std::max(0, basis_hint->sf_n_slack);
-  const int art_begin = surplus_begin + std::max(0, basis_hint->sf_n_surplus);
-  const int n_slack = std::max(0, basis_hint->sf_n_slack);
-  const int n_surplus = std::max(0, basis_hint->sf_n_surplus);
-  const int n_art = std::max(0, basis_hint->sf_n_artificial);
   for (int row = 0; row < m; ++row) {
-    const int col = basis_hint->basis_indices()[static_cast<std::size_t>(row)];
+    const int col = mapped_basis[static_cast<std::size_t>(row)];
     if (col >= 0 && col < n) {
       hbasis.col_status[static_cast<std::size_t>(col)] =
           HighsBasisStatus::kBasic;
-    } else if (col >= slack_begin && col < slack_begin + n_slack) {
-      hbasis.row_status[static_cast<std::size_t>(col - slack_begin)] =
-          HighsBasisStatus::kBasic;
-    } else if (col >= surplus_begin && col < surplus_begin + n_surplus) {
-      hbasis.row_status[static_cast<std::size_t>(col - surplus_begin)] =
-          HighsBasisStatus::kBasic;
-    } else if (col >= art_begin && col < art_begin + n_art) {
-      hbasis.row_status[static_cast<std::size_t>(col - art_begin)] =
+    } else if (col >= n && col < sf_n) {
+      const int logical_row = sf_col_to_row[static_cast<std::size_t>(col)];
+      if (logical_row < 0 || logical_row >= m) return false;
+      hbasis.row_status[static_cast<std::size_t>(logical_row)] =
           HighsBasisStatus::kBasic;
     } else {
       return false;
     }
   }
+  const int at_upper_n =
+      std::min(sf_n, static_cast<int>(basis_hint->at_upper.size()));
+  for (int col = n; col < at_upper_n; ++col) {
+    if (basis_hint->at_upper[static_cast<std::size_t>(col)] == 0) continue;
+    const int logical_row = sf_col_to_row[static_cast<std::size_t>(col)];
+    if (logical_row >= 0 && logical_row < m &&
+        hbasis.row_status[static_cast<std::size_t>(logical_row)] !=
+            HighsBasisStatus::kBasic) {
+      hbasis.row_status[static_cast<std::size_t>(logical_row)] =
+          HighsBasisStatus::kUpper;
+    }
+  }
+  hbasis.valid = true;
   return true;
 }
 

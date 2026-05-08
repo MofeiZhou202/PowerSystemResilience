@@ -32,6 +32,33 @@ struct ObjectiveCutoffEvent {
 };
 
 struct ObjectivePropagationState {
+  struct BuildPolicy {
+    bool build_row_implied_events{true};
+    bool build_pair_row_implied_events{true};
+    bool strengthen_row_events_with_mir{true};
+    bool build_implication_events{true};
+
+    static BuildPolicy native_enriched() { return BuildPolicy{}; }
+
+    static BuildPolicy highs_domain_closure() {
+      BuildPolicy policy;
+      policy.build_row_implied_events = false;
+      policy.build_pair_row_implied_events = false;
+      policy.strengthen_row_events_with_mir = false;
+      policy.build_implication_events = false;
+      return policy;
+    }
+
+    static BuildPolicy none() {
+      BuildPolicy policy;
+      policy.build_row_implied_events = false;
+      policy.build_pair_row_implied_events = false;
+      policy.strengthen_row_events_with_mir = false;
+      policy.build_implication_events = false;
+      return policy;
+    }
+  };
+
   struct Term {
     int col{-1};
     double cost{0.0};
@@ -87,7 +114,8 @@ struct ObjectivePropagationState {
   void setup(const LPModel& lp,
              const std::vector<char>* implied_integer_cols = nullptr,
              const CliqueTable* clique_table = nullptr,
-             const BinaryImplicationGraph* implication_graph = nullptr) {
+             const BinaryImplicationGraph* implication_graph = nullptr,
+             BuildPolicy build_policy = BuildPolicy::native_enriched()) {
     terms.clear();
     partitions.clear();
     implied_events.clear();
@@ -128,9 +156,15 @@ struct ObjectivePropagationState {
     build_objective_clique_partitions(lp, implied_integer_cols);
     build_objective_clique_partitions_from_implications(
         lp, implied_integer_cols, clique_table, implication_graph);
-    build_implied_contribution_events(lp, implied_integer_cols);
-    build_implied_contribution_events_from_implications(lp, implication_graph);
-    recompute_max_implied_event_aggregate_delta(lp);
+    if (build_policy.build_row_implied_events) {
+      build_implied_contribution_events(lp, implied_integer_cols, build_policy);
+    }
+    if (build_policy.build_implication_events) {
+      build_implied_contribution_events_from_implications(lp, implication_graph);
+    }
+    if (!implied_events.empty()) {
+      recompute_max_implied_event_aggregate_delta(lp);
+    }
   }
 
   bool empty() const { return terms.empty(); }
@@ -518,7 +552,8 @@ struct ObjectivePropagationState {
 
   void build_implied_contribution_events(
       const LPModel& lp,
-      const std::vector<char>* implied_integer_cols = nullptr) {
+      const std::vector<char>* implied_integer_cols,
+      const BuildPolicy& build_policy) {
     const int n = static_cast<int>(lp.vars.size());
     constexpr int kMaxRowNnz = 32;
     constexpr int kMaxRowLiterals = 24;
@@ -644,7 +679,8 @@ struct ObjectivePropagationState {
 
           const bool target_integral =
               is_integral_or_implied(target) && integral_bounds(target);
-          if (target_integral && single_literal != nullptr) {
+          if (build_policy.strengthen_row_events_with_mir && target_integral &&
+              single_literal != nullptr) {
             ++implied_event_mir_attempts;
             const double trigger_value =
                 single_literal->lit.value_one ? 1.0 : 0.0;
@@ -710,11 +746,13 @@ struct ObjectivePropagationState {
         for (const RowLiteral& lit : literals) {
           add_event(std::vector<Literal>{lit.lit}, lit.lift, &lit);
         }
-        for (std::size_t i = 0; i < literals.size(); ++i) {
-          for (std::size_t j = i + 1; j < literals.size(); ++j) {
-            if (literals[i].lit.col == literals[j].lit.col) continue;
-            add_event(std::vector<Literal>{literals[i].lit, literals[j].lit},
-                      literals[i].lift + literals[j].lift, nullptr);
+        if (build_policy.build_pair_row_implied_events) {
+          for (std::size_t i = 0; i < literals.size(); ++i) {
+            for (std::size_t j = i + 1; j < literals.size(); ++j) {
+              if (literals[i].lit.col == literals[j].lit.col) continue;
+              add_event(std::vector<Literal>{literals[i].lit, literals[j].lit},
+                        literals[i].lift + literals[j].lift, nullptr);
+            }
           }
         }
       }
@@ -911,7 +949,7 @@ struct ObjectivePropagationState {
     const Eigen::VectorXd* x_relax{nullptr};
     const Eigen::VectorXd* reduced_costs{nullptr};
     double proof_lower_bound{kInf};
-    double incumbent_obj{kInf};
+	    double upper_limit{kInf};
     double int_tol{1e-9};
     double lp_tol{1e-9};
     int depth{0};
@@ -931,11 +969,6 @@ struct ObjectivePropagationState {
     double max_proof_lift{0.0};
     double max_proof_excess{0.0};
   };
-
-  using EventBoundLiftCallback = std::function<int(
-      const ImpliedContributionEvent&,
-      const std::vector<BranchDomainLiteral>&,
-      const BranchDomainLiteral&)>;
 
   Activity compute_activity(const Eigen::VectorXd& lb,
                             const Eigen::VectorXd& ub,
@@ -1019,23 +1052,32 @@ struct ObjectivePropagationState {
     return a;
   }
 
+  double objective_lower_bound(const LPModel& lp,
+                               const Eigen::VectorXd& lb,
+                               const Eigen::VectorXd& ub) const {
+    if (lp.sense != Sense::Minimize) return -kInf;
+    const int n = static_cast<int>(lp.vars.size());
+    if (n < 0 || lb.size() < n || ub.size() < n) return -kInf;
+    const Activity act = compute_activity(lb, ub, n);
+    if (act.inf_count != 0 || !std::isfinite(act.lower)) return -kInf;
+    return act.lower;
+  }
+
   CapacityConformanceAudit audit_capacity_conformance(
       const LPModel& lp,
       const Eigen::VectorXd& lb,
       const Eigen::VectorXd& ub,
-      double incumbent_obj,
+	      double upper_limit,
       double proof_lower_bound,
       double int_tol) const {
     CapacityConformanceAudit audit;
-    if (empty() || lp.sense != Sense::Minimize ||
-        !std::isfinite(incumbent_obj)) {
+	    if (empty() || lp.sense != Sense::Minimize ||
+	        !std::isfinite(upper_limit)) {
       return audit;
     }
     const int n = static_cast<int>(lp.vars.size());
     if (lb.size() < n || ub.size() < n) return audit;
-    const double obj_cutoff =
-        incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+	    const double obj_cutoff = upper_limit;
     const double tol = std::max(1e-9, int_tol);
     const Activity act = compute_activity(lb, ub, n);
     audit.valid = true;
@@ -1154,14 +1196,13 @@ struct ObjectivePropagationState {
       std::vector<DomainReasonBound>* reasons_out,
       int& tightened,
       int& pruned,
-      ProofCapacityPropagationStats* stats = nullptr,
-      const EventBoundLiftCallback* event_bound_lift_cb = nullptr) const {
+      ProofCapacityPropagationStats* stats = nullptr) const {
     tightened = 0;
     pruned = 0;
     if (empty() || lp.sense != Sense::Minimize ||
         ctx.proof_coeff == nullptr ||
         ctx.proof_coeff->size() < static_cast<Eigen::Index>(lp.vars.size()) ||
-        !std::isfinite(ctx.incumbent_obj) ||
+	        !std::isfinite(ctx.upper_limit) ||
         !std::isfinite(ctx.proof_lower_bound)) {
       return true;
     }
@@ -1170,10 +1211,8 @@ struct ObjectivePropagationState {
     const double tol = std::max(1e-9, ctx.int_tol);
     const double proof_tol =
         std::max({1e-7, ctx.lp_tol,
-                  1e-10 * std::max(1.0, std::abs(ctx.incumbent_obj))});
-    const double obj_cutoff =
-        ctx.incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(ctx.incumbent_obj)));
+	                  1e-10 * std::max(1.0, std::abs(ctx.upper_limit))});
+	    const double obj_cutoff = ctx.upper_limit;
     const double capacity = obj_cutoff - ctx.proof_lower_bound;
     if (!std::isfinite(capacity)) return true;
     if (capacity < -proof_tol) {
@@ -1205,16 +1244,33 @@ struct ObjectivePropagationState {
           });
       if (found == reason.end()) reason.push_back(literal);
     };
-    auto record_reason = [&](const BranchDomainLiteral& bound,
-                             std::vector<BranchDomainLiteral> reason,
-                             const BranchDomainLiteral& forbidden) {
-      if (reasons_out == nullptr) return;
-      canonicalize_branch_literals(reason);
-      const int trail_pos =
-          ctx.trail_offset + static_cast<int>(reasons_out->size());
-      reasons_out->push_back(DomainReasonBound{
-          bound, std::move(reason), trail_pos, ctx.depth, forbidden, true});
-    };
+	    auto record_reason = [&](const BranchDomainLiteral& bound,
+	                             std::vector<BranchDomainLiteral> reason,
+	                             const BranchDomainLiteral& forbidden,
+	                             double proof_delta) {
+	      if (reasons_out == nullptr) return;
+	      canonicalize_branch_literals(reason);
+	      const int trail_pos =
+	          ctx.trail_offset + static_cast<int>(reasons_out->size());
+      DomainReasonBound rb;
+      rb.bound = bound;
+      rb.reason = std::move(reason);
+      rb.trail_pos = trail_pos;
+      rb.depth = ctx.depth;
+	      rb.source_conflict_literal = forbidden;
+	      rb.has_source_conflict_literal = true;
+	      rb.source_conflict_clause = rb.reason;
+	      rb.source_conflict_clause.push_back(forbidden);
+	      canonicalize_branch_literals(rb.source_conflict_clause);
+	      rb.has_source_conflict_clause = true;
+	      if (std::isfinite(proof_delta)) {
+	        rb.has_proof_activity_audit = true;
+	        rb.proof_activity_margin = proof_delta - capacity;
+	        rb.proof_activity = ctx.proof_lower_bound + proof_delta;
+	        rb.proof_required_activity = obj_cutoff;
+	      }
+	      reasons_out->push_back(std::move(rb));
+	    };
 
     for (int round = 0; round < 4; ++round) {
       int round_tightened = 0;
@@ -1269,10 +1325,11 @@ struct ObjectivePropagationState {
                     std::max(stats->max_proof_excess,
                              proof_delta - capacity);
               }
-              record_reason(
-                  BranchDomainLiteral{j, new_ub, false}, {},
-                  BranchDomainLiteral{j, std::floor(new_ub + tol) + 1.0,
-                                      true});
+	              record_reason(
+	                  BranchDomainLiteral{j, new_ub, false}, {},
+	                  BranchDomainLiteral{j, std::floor(new_ub + tol) + 1.0,
+	                                      true},
+	                  proof_delta);
             }
           } else if (std::abs(xj - ub[j]) <= active_tol) {
             const double proof_delta = rc * (ub[j] - lb[j]);
@@ -1305,10 +1362,11 @@ struct ObjectivePropagationState {
                     std::max(stats->max_proof_excess,
                              proof_delta - capacity);
               }
-              record_reason(
-                  BranchDomainLiteral{j, new_lb, true}, {},
-                  BranchDomainLiteral{j, std::ceil(new_lb - tol) - 1.0,
-                                      false});
+	              record_reason(
+	                  BranchDomainLiteral{j, new_lb, true}, {},
+	                  BranchDomainLiteral{j, std::ceil(new_lb - tol) - 1.0,
+	                                      false},
+	                  proof_delta);
             }
           }
         }
@@ -1365,8 +1423,9 @@ struct ObjectivePropagationState {
                     std::max(stats->max_proof_excess,
                              proof_delta - capacity);
               }
-              record_reason(BranchDomainLiteral{j, 0.0, false}, {},
-                            BranchDomainLiteral{j, 1.0, true});
+	              record_reason(BranchDomainLiteral{j, 0.0, false}, {},
+	                            BranchDomainLiteral{j, 1.0, true},
+	                            proof_delta);
             }
             return true;
           };
@@ -1405,8 +1464,9 @@ struct ObjectivePropagationState {
                     std::max(stats->max_proof_excess,
                              proof_delta - capacity);
               }
-              record_reason(BranchDomainLiteral{j, 1.0, true}, {},
-                            BranchDomainLiteral{j, 0.0, false});
+	              record_reason(BranchDomainLiteral{j, 1.0, true}, {},
+	                            BranchDomainLiteral{j, 0.0, false},
+	                            proof_delta);
             }
             return true;
           };
@@ -1468,20 +1528,11 @@ struct ObjectivePropagationState {
         }
         if (impossible || missing_key < 0) continue;
         const int missing_col = missing_key / 2;
-        const bool missing_value_one = (missing_key % 2) != 0;
         if (missing_col < 0 || missing_col >= n) continue;
-        if (event_bound_lift_cb != nullptr) {
-          (*event_bound_lift_cb)(
-              event, active_reason,
-              BranchDomainLiteral{missing_col,
-                                  missing_value_one ? 1.0 : 0.0,
-                                  missing_value_one});
-        }
         if (!(proof_delta > 1e-9) || !std::isfinite(proof_delta)) {
           if (stats != nullptr) ++stats->skip_coeff;
           continue;
         }
-
         AggregateProofEvent& aggregate = aggregates[missing_key];
         auto [best_it, inserted] =
             aggregate.best_by_target.emplace(target, proof_delta);
@@ -1531,28 +1582,30 @@ struct ObjectivePropagationState {
             if (stats != nullptr) ++stats->prunes;
             return false;
           }
-          if (ub[col] > tol) {
-            ub[col] = 0.0;
-            ++round_tightened;
-            ++tightened;
-            if (stats != nullptr) ++stats->fixings;
-            record_reason(BranchDomainLiteral{col, 0.0, false},
-                          aggregate.reason, forbidden);
-          }
+	            if (ub[col] > tol) {
+	              ub[col] = 0.0;
+	              ++round_tightened;
+	              ++tightened;
+	              if (stats != nullptr) ++stats->fixings;
+	              record_reason(BranchDomainLiteral{col, 0.0, false},
+	                          aggregate.reason, forbidden,
+	                          aggregate.proof_delta);
+	            }
         } else {
           if (1.0 > ub[col] + tol) {
             ++pruned;
             if (stats != nullptr) ++stats->prunes;
             return false;
           }
-          if (lb[col] < 1.0 - tol) {
-            lb[col] = 1.0;
-            ++round_tightened;
-            ++tightened;
-            if (stats != nullptr) ++stats->fixings;
-            record_reason(BranchDomainLiteral{col, 1.0, true},
-                          aggregate.reason, forbidden);
-          }
+	            if (lb[col] < 1.0 - tol) {
+	              lb[col] = 1.0;
+	              ++round_tightened;
+	              ++tightened;
+	              if (stats != nullptr) ++stats->fixings;
+	              record_reason(BranchDomainLiteral{col, 1.0, true},
+	                          aggregate.reason, forbidden,
+	                          aggregate.proof_delta);
+	            }
         }
       }
       if (round_tightened == 0) break;
@@ -1562,9 +1615,9 @@ struct ObjectivePropagationState {
   }
 
   bool propagate(const LPModel& lp,
-                 Eigen::VectorXd& lb,
-                 Eigen::VectorXd& ub,
-                 double incumbent_obj,
+	                 Eigen::VectorXd& lb,
+	                 Eigen::VectorXd& ub,
+	                 double upper_limit,
                  double int_tol,
                  int depth,
                  int trail_offset,
@@ -1573,24 +1626,49 @@ struct ObjectivePropagationState {
                  int& pruned) const {
     tightened = 0;
     pruned = 0;
-    if (empty() || lp.sense != Sense::Minimize ||
-        !std::isfinite(incumbent_obj)) {
+	    if (empty() || lp.sense != Sense::Minimize ||
+	        !std::isfinite(upper_limit)) {
       return true;
     }
     const int n = static_cast<int>(lp.vars.size());
     if (lb.size() < n || ub.size() < n) return true;
-    const double obj_cutoff =
-        incumbent_obj -
-        std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+	    const double obj_cutoff = upper_limit;
     const double tol = std::max(1e-9, int_tol);
 
-    auto record_reason = [&](int col, bool is_lb, double value,
-                             std::vector<BranchDomainLiteral> reason = {}) {
+	    auto record_reason =
+	        [&](int col, bool is_lb, double value,
+	            std::vector<BranchDomainLiteral> reason = {},
+	            const BranchDomainLiteral* source_conflict_literal = nullptr,
+            double proof_delta = 0.0,
+            double objective_lower = 0.0,
+            double required_activity = 0.0,
+            double capacity = 0.0) {
       if (reasons_out == nullptr) return;
       const int trail_pos = trail_offset + static_cast<int>(reasons_out->size());
-      reasons_out->push_back(DomainReasonBound{
-          BranchDomainLiteral{col, value, is_lb}, std::move(reason), trail_pos, depth,
-          BranchDomainLiteral{}, false});
+	      DomainReasonBound rb;
+	      rb.bound = BranchDomainLiteral{col, value, is_lb};
+	      canonicalize_branch_literals(reason);
+	      rb.reason = std::move(reason);
+	      rb.trail_pos = trail_pos;
+	      rb.depth = depth;
+	      if (source_conflict_literal != nullptr &&
+	          source_conflict_literal->var_idx == col &&
+          source_conflict_literal->is_lb != is_lb &&
+          std::isfinite(source_conflict_literal->value) &&
+          std::isfinite(proof_delta) && std::isfinite(objective_lower) &&
+          std::isfinite(required_activity) && std::isfinite(capacity)) {
+	        rb.source_conflict_literal = *source_conflict_literal;
+	        rb.has_source_conflict_literal = true;
+	        rb.source_conflict_clause = rb.reason;
+	        rb.source_conflict_clause.push_back(*source_conflict_literal);
+	        canonicalize_branch_literals(rb.source_conflict_clause);
+	        rb.has_source_conflict_clause = true;
+	        rb.has_proof_activity_audit = true;
+	        rb.proof_activity_margin = proof_delta - capacity;
+	        rb.proof_activity = objective_lower + proof_delta;
+	        rb.proof_required_activity = required_activity;
+	      }
+      reasons_out->push_back(std::move(rb));
     };
     auto literal_active = [&](const Literal& lit) {
       return lit.value_one ? (lb[lit.col] >= 1.0 - tol) : (ub[lit.col] <= tol);
@@ -1602,8 +1680,85 @@ struct ObjectivePropagationState {
       return BranchDomainLiteral{lit.col, lit.value_one ? 1.0 : 0.0,
                                  lit.value_one};
     };
+	    auto flip_bound_literal = [&](const BranchDomainLiteral& bound,
+	                                  BranchDomainLiteral& flipped) {
+      if (bound.var_idx < 0 || bound.var_idx >= n ||
+          !std::isfinite(bound.value)) {
+        return false;
+      }
+      const bool integer_var =
+          is_integer_type(lp.vars[static_cast<std::size_t>(bound.var_idx)]);
+      if (bound.is_lb) {
+        flipped = BranchDomainLiteral{
+            bound.var_idx,
+            integer_var ? std::ceil(bound.value - tol) - 1.0
+                        : bound.value - std::max(1e-7, 10.0 * tol),
+            false};
+      } else {
+        flipped = BranchDomainLiteral{
+            bound.var_idx,
+            integer_var ? std::floor(bound.value + tol) + 1.0
+                        : bound.value + std::max(1e-7, 10.0 * tol),
+            true};
+      }
+	      return true;
+	    };
+	    auto objective_activity_reason =
+	        [&](int exclude_col) -> std::vector<BranchDomainLiteral> {
+	      std::vector<BranchDomainLiteral> reason;
+	      if (reasons_out == nullptr) return reason;
+	      auto add_bound = [&](int col, bool is_lb, double value) {
+	        if (col < 0 || col >= n || col == exclude_col ||
+	            !std::isfinite(value)) {
+	          return;
+	        }
+	        const auto& var = lp.vars[static_cast<std::size_t>(col)];
+	        const double model_bound = is_lb ? var.lb : var.ub;
+	        if (std::isfinite(model_bound)) {
+	          const bool is_model_bound =
+	              is_lb ? (value <= model_bound + tol)
+	                    : (value >= model_bound - tol);
+	          if (is_model_bound) return;
+	        }
+	        reason.push_back(BranchDomainLiteral{col, value, is_lb});
+	      };
+	      for (const Partition& part : partitions) {
+	        for (const PartitionTerm& pt : part.terms) {
+	          if (pt.col < 0 || pt.col >= n || pt.col == exclude_col) {
+	            continue;
+	          }
+	          const bool fav_possible =
+	              pt.favorable_one ? (ub[pt.col] >= 1.0 - tol)
+	                               : (lb[pt.col] <= tol);
+	          const bool fav_forced =
+	              pt.favorable_one ? (lb[pt.col] >= 1.0 - tol)
+	                               : (ub[pt.col] <= tol);
+	          if (fav_forced) {
+	            add_bound(pt.col, pt.favorable_one, pt.favorable_one ? 1.0 : 0.0);
+	          } else if (!fav_possible) {
+	            add_bound(pt.col, !pt.favorable_one,
+	                      pt.favorable_one ? 0.0 : 1.0);
+	          }
+	        }
+	      }
+	      for (const Term& t : terms) {
+	        const int col = t.col;
+	        if (col < 0 || col >= n || col == exclude_col) continue;
+	        if (col < static_cast<int>(partition_of_col.size()) &&
+	            partition_of_col[static_cast<std::size_t>(col)] >= 0) {
+	          continue;
+	        }
+	        if (t.cost > 0.0) {
+	          add_bound(col, true, lb[col]);
+	        } else if (t.cost < 0.0) {
+	          add_bound(col, false, ub[col]);
+	        }
+	      }
+	      canonicalize_branch_literals(reason);
+	      return reason;
+	    };
 
-    for (int round = 0; round < 4; ++round) {
+	    for (int round = 0; round < 4; ++round) {
       Activity act = compute_activity(lb, ub, n);
       int round_tightened = 0;
       for (const ImpliedContributionEvent& event : implied_events) {
@@ -1683,13 +1838,23 @@ struct ObjectivePropagationState {
             ++pruned;
             return false;
           }
-          if (implied_ub < ub[j] - tol) {
-            ub[j] = implied_ub;
-            ++round_tightened;
-            ++tightened;
-            record_reason(j, /*is_lb=*/false, implied_ub);
-          }
-        } else if (c < 0.0) {
+	          if (implied_ub < ub[j] - tol) {
+	            const BranchDomainLiteral bound{j, implied_ub, false};
+	            BranchDomainLiteral forbidden;
+	            const BranchDomainLiteral* forbidden_ptr =
+	                flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	            const double proof_delta =
+	                forbidden_ptr != nullptr && std::isfinite(lb[j])
+	                    ? c * (forbidden.value - lb[j])
+	                    : capacity;
+	            ub[j] = implied_ub;
+	            ++round_tightened;
+	            ++tightened;
+	            record_reason(j, /*is_lb=*/false, implied_ub,
+	                          objective_activity_reason(j), forbidden_ptr,
+	                          proof_delta, act.lower, obj_cutoff, capacity);
+	          }
+	        } else if (c < 0.0) {
           if (!std::isfinite(lb[j])) return true;
           double implied_lb = capacity / c;
           if (is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
@@ -1699,13 +1864,23 @@ struct ObjectivePropagationState {
             ++pruned;
             return false;
           }
-          if (implied_lb > lb[j] + tol) {
-            lb[j] = implied_lb;
-            ++round_tightened;
-            ++tightened;
-            record_reason(j, /*is_lb=*/true, implied_lb);
-          }
-        }
+	          if (implied_lb > lb[j] + tol) {
+	            const BranchDomainLiteral bound{j, implied_lb, true};
+	            BranchDomainLiteral forbidden;
+	            const BranchDomainLiteral* forbidden_ptr =
+	                flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	            const double proof_delta =
+	                forbidden_ptr != nullptr && std::isfinite(ub[j])
+	                    ? (-c) * (ub[j] - forbidden.value)
+	                    : capacity;
+	            lb[j] = implied_lb;
+	            ++round_tightened;
+	            ++tightened;
+	            record_reason(j, /*is_lb=*/true, implied_lb,
+	                          objective_activity_reason(j), forbidden_ptr,
+	                          proof_delta, act.lower, obj_cutoff, capacity);
+	          }
+	        }
       } else {
         struct AggregateEvent {
           double contribution{0.0};
@@ -1792,7 +1967,12 @@ struct ObjectivePropagationState {
               ub[col] = 0.0;
               ++round_tightened;
               ++tightened;
-              record_reason(col, /*is_lb=*/false, 0.0, aggregate.reason);
+              const BranchDomainLiteral forbidden{
+                  col, value_one ? 1.0 : 0.0, value_one};
+              record_reason(BranchDomainLiteral{col, 0.0, false}.var_idx,
+                            /*is_lb=*/false, 0.0, aggregate.reason,
+                            &forbidden, aggregate.contribution, act.lower,
+                            obj_cutoff, capacity);
             }
           } else {
             if (1.0 > ub[col] + tol) {
@@ -1803,7 +1983,12 @@ struct ObjectivePropagationState {
               lb[col] = 1.0;
               ++round_tightened;
               ++tightened;
-              record_reason(col, /*is_lb=*/true, 1.0, aggregate.reason);
+              const BranchDomainLiteral forbidden{
+                  col, value_one ? 1.0 : 0.0, value_one};
+              record_reason(BranchDomainLiteral{col, 1.0, true}.var_idx,
+                            /*is_lb=*/true, 1.0, aggregate.reason,
+                            &forbidden, aggregate.contribution, act.lower,
+                            obj_cutoff, capacity);
             }
           }
         }
@@ -1852,7 +2037,10 @@ struct ObjectivePropagationState {
               ub[lit.col] = 0.0;
               ++round_tightened;
               ++tightened;
-              record_reason(lit.col, /*is_lb=*/false, 0.0, std::move(reason));
+              const BranchDomainLiteral forbidden = literal_reason(lit);
+              record_reason(lit.col, /*is_lb=*/false, 0.0, std::move(reason),
+                            &forbidden, contribution, act.lower, obj_cutoff,
+                            capacity);
             }
           } else {
             if (1.0 > ub[lit.col] + tol) {
@@ -1863,7 +2051,10 @@ struct ObjectivePropagationState {
               lb[lit.col] = 1.0;
               ++round_tightened;
               ++tightened;
-              record_reason(lit.col, /*is_lb=*/true, 1.0, std::move(reason));
+              const BranchDomainLiteral forbidden = literal_reason(lit);
+              record_reason(lit.col, /*is_lb=*/true, 1.0, std::move(reason),
+                            &forbidden, contribution, act.lower, obj_cutoff,
+                            capacity);
             }
           }
         }
@@ -1898,54 +2089,84 @@ struct ObjectivePropagationState {
             }
           }
 
-          auto force_favorable = [&](const PartitionTerm& pt) -> bool {
+          auto force_favorable = [&](const PartitionTerm& pt,
+                                     double proof_delta) -> bool {
             if (pt.favorable_one) {
               if (1.0 > ub[pt.col] + tol) return false;
               if (lb[pt.col] < 1.0 - tol) {
                 lb[pt.col] = 1.0;
                 ++round_tightened;
                 ++tightened;
-                record_reason(pt.col, /*is_lb=*/true, 1.0);
-              }
-            } else {
+                const BranchDomainLiteral bound{pt.col, 1.0, true};
+                BranchDomainLiteral forbidden;
+	                const BranchDomainLiteral* forbidden_ptr =
+	                    flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	                record_reason(pt.col, /*is_lb=*/true, 1.0,
+	                              objective_activity_reason(pt.col),
+	                              forbidden_ptr, proof_delta, act.lower,
+	                              obj_cutoff, capacity);
+	              }
+	            } else {
               if (0.0 < lb[pt.col] - tol) return false;
               if (ub[pt.col] > tol) {
                 ub[pt.col] = 0.0;
                 ++round_tightened;
                 ++tightened;
-                record_reason(pt.col, /*is_lb=*/false, 0.0);
-              }
-            }
+                const BranchDomainLiteral bound{pt.col, 0.0, false};
+                BranchDomainLiteral forbidden;
+	                const BranchDomainLiteral* forbidden_ptr =
+	                    flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	                record_reason(pt.col, /*is_lb=*/false, 0.0,
+	                              objective_activity_reason(pt.col),
+	                              forbidden_ptr, proof_delta, act.lower,
+	                              obj_cutoff, capacity);
+	              }
+	            }
             return true;
           };
-          auto force_nonfavorable = [&](const PartitionTerm& pt) -> bool {
+          auto force_nonfavorable = [&](const PartitionTerm& pt,
+                                        double proof_delta) -> bool {
             if (pt.favorable_one) {
               if (0.0 < lb[pt.col] - tol) return false;
               if (ub[pt.col] > tol) {
                 ub[pt.col] = 0.0;
                 ++round_tightened;
                 ++tightened;
-                record_reason(pt.col, /*is_lb=*/false, 0.0);
-              }
-            } else {
+                const BranchDomainLiteral bound{pt.col, 0.0, false};
+                BranchDomainLiteral forbidden;
+	                const BranchDomainLiteral* forbidden_ptr =
+	                    flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	                record_reason(pt.col, /*is_lb=*/false, 0.0,
+	                              objective_activity_reason(pt.col),
+	                              forbidden_ptr, proof_delta, act.lower,
+	                              obj_cutoff, capacity);
+	              }
+	            } else {
               if (1.0 > ub[pt.col] + tol) return false;
               if (lb[pt.col] < 1.0 - tol) {
                 lb[pt.col] = 1.0;
                 ++round_tightened;
                 ++tightened;
-                record_reason(pt.col, /*is_lb=*/true, 1.0);
-              }
-            }
+                const BranchDomainLiteral bound{pt.col, 1.0, true};
+                BranchDomainLiteral forbidden;
+	                const BranchDomainLiteral* forbidden_ptr =
+	                    flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	                record_reason(pt.col, /*is_lb=*/true, 1.0,
+	                              objective_activity_reason(pt.col),
+	                              forbidden_ptr, proof_delta, act.lower,
+	                              obj_cutoff, capacity);
+	              }
+	            }
             return true;
           };
 
           if (has_fixed_favorable) {
             for (const PartitionTerm& pt : part.terms) {
               if (pt.col == fixed_favorable_col) continue;
-              if (!force_nonfavorable(pt)) {
-                ++pruned;
-                return false;
-              }
+                if (!force_nonfavorable(pt, capacity + 1e-9)) {
+                  ++pruned;
+                  return false;
+                }
             }
             continue;
           }
@@ -1958,7 +2179,7 @@ struct ObjectivePropagationState {
           const double best_replacement_loss =
               best_delta - std::max(0.0, second_delta);
           if (best_replacement_loss > capacity + 1e-9) {
-            if (!force_favorable(*best_term)) {
+            if (!force_favorable(*best_term, best_replacement_loss)) {
               ++pruned;
               return false;
             }
@@ -1967,7 +2188,7 @@ struct ObjectivePropagationState {
           for (const PossibleFav& fav : possible) {
             if (fav.term == best_term) continue;
             if (best_delta - fav.delta > capacity + 1e-9) {
-              if (!force_nonfavorable(*fav.term)) {
+              if (!force_nonfavorable(*fav.term, best_delta - fav.delta)) {
                 ++pruned;
                 return false;
               }
@@ -1997,9 +2218,19 @@ struct ObjectivePropagationState {
               ub[j] = implied;
               ++round_tightened;
               ++tightened;
-              record_reason(j, /*is_lb=*/false, implied);
-            }
-          } else {
+              const BranchDomainLiteral bound{j, implied, false};
+              BranchDomainLiteral forbidden;
+              const BranchDomainLiteral* forbidden_ptr =
+                  flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	              const double proof_delta =
+	                  forbidden_ptr != nullptr && std::isfinite(lb[j])
+	                      ? c * (forbidden.value - lb[j])
+	                      : capacity;
+	              record_reason(j, /*is_lb=*/false, implied,
+	                            objective_activity_reason(j), forbidden_ptr,
+	                            proof_delta, act.lower, obj_cutoff, capacity);
+	            }
+	          } else {
             if (t.integer) implied = std::ceil(implied - tol);
             if (implied > ub[j] + tol) {
               ++pruned;
@@ -2009,9 +2240,19 @@ struct ObjectivePropagationState {
               lb[j] = implied;
               ++round_tightened;
               ++tightened;
-              record_reason(j, /*is_lb=*/true, implied);
-            }
-          }
+              const BranchDomainLiteral bound{j, implied, true};
+              BranchDomainLiteral forbidden;
+              const BranchDomainLiteral* forbidden_ptr =
+                  flip_bound_literal(bound, forbidden) ? &forbidden : nullptr;
+	              const double proof_delta =
+	                  forbidden_ptr != nullptr && std::isfinite(ub[j])
+	                      ? (-c) * (ub[j] - forbidden.value)
+	                      : capacity;
+	              record_reason(j, /*is_lb=*/true, implied,
+	                            objective_activity_reason(j), forbidden_ptr,
+	                            proof_delta, act.lower, obj_cutoff, capacity);
+	            }
+	          }
         }
       }
       if (round_tightened == 0) break;

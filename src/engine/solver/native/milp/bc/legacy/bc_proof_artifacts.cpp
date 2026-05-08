@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -21,21 +22,199 @@
 
 namespace mipsolvers::engine::detail {
 
-ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
+ObjectiveCutoffCliqueStats extract_objective_cutoff_cliques(
     const LPModel& lp,
     const std::vector<char>& implied_integer_cols,
     const Eigen::VectorXd& lb,
     const Eigen::VectorXd& ub,
-    double incumbent_obj,
+    double upper_limit,
+    CliqueTable& clique_table,
+    double int_tol,
+    const ObjectivePropagationState* objective_propagation,
+    ConflictPool* conflict_pool,
+    SharedConflictPool* shared_conflict_pool) {
+  ObjectiveCutoffCliqueStats stats;
+  const int n = static_cast<int>(lp.vars.size());
+  if (n <= 1 || lp.sense != Sense::Minimize || !std::isfinite(upper_limit) ||
+      lb.size() < n || ub.size() < n) {
+    return stats;
+  }
+
+  const double tol = std::max(1e-9, int_tol);
+  auto binary_like = [&](int j) {
+    if (j < 0 || j >= n) return false;
+    const auto& var = lp.vars[static_cast<std::size_t>(j)];
+    if (var.lb > tol || var.ub < 1.0 - tol) return false;
+    if (var.type == VarType::Binary) return true;
+    return j < static_cast<int>(implied_integer_cols.size()) &&
+           implied_integer_cols[static_cast<std::size_t>(j)] != 0 &&
+           std::abs(var.lb) <= tol && std::abs(var.ub - 1.0) <= tol;
+  };
+
+  struct Candidate {
+    int col{-1};
+    bool literal_one{false};
+    double delta{0.0};
+  };
+  std::vector<Candidate> candidates;
+  candidates.reserve(static_cast<std::size_t>(n));
+
+  int ninf = 0;
+  std::vector<double> cutoff_coeff(static_cast<std::size_t>(n), 0.0);
+  for (int j = 0; j < n; ++j) {
+    const double c = lp.c[j];
+    if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
+    cutoff_coeff[static_cast<std::size_t>(j)] = c;
+  }
+  double cutoff_rhs = upper_limit;
+  if (objective_propagation != nullptr &&
+      !objective_propagation->partitions.empty()) {
+    for (const auto& part : objective_propagation->partitions) {
+      double largest = 0.0;
+      int clique_rhs = 1;
+      for (const auto& term : part.terms) {
+        if (term.col < 0 || term.col >= n || !std::isfinite(term.cost) ||
+            std::abs(term.cost) <= 1e-12) {
+          continue;
+        }
+        if (term.cost > 0.0) {
+          --clique_rhs;
+          if (lb[term.col] < 1.0 - tol) {
+            largest = std::max(largest, term.cost);
+          }
+        } else if (ub[term.col] > tol) {
+          largest = std::max(largest, -term.cost);
+        }
+      }
+      if (!(largest > 1e-12) || !std::isfinite(largest)) continue;
+      cutoff_rhs += largest * static_cast<double>(clique_rhs);
+      for (const auto& term : part.terms) {
+        if (term.col < 0 || term.col >= n || !std::isfinite(term.cost) ||
+            std::abs(term.cost) <= 1e-12) {
+          continue;
+        }
+        cutoff_coeff[static_cast<std::size_t>(term.col)] =
+            term.cost - std::copysign(largest, term.cost);
+      }
+    }
+  }
+
+  for (int j = 0; j < n; ++j) {
+    const double c = cutoff_coeff[static_cast<std::size_t>(j)];
+    if (std::abs(c) <= 1e-12 || !std::isfinite(c)) continue;
+    if (c > 0.0) {
+      if (!std::isfinite(lb[j])) {
+        ++ninf;
+      } else {
+        stats.raw_objective_lower += c * lb[j];
+      }
+      if (binary_like(j) && ub[j] >= 1.0 - tol) {
+        const double delta = c * std::max(0.0, 1.0 - lb[j]);
+        if (delta > 1e-12 && std::isfinite(delta)) {
+          candidates.push_back(Candidate{j, true, delta});
+        }
+      }
+    } else {
+      if (!std::isfinite(ub[j])) {
+        ++ninf;
+      } else {
+        stats.raw_objective_lower += c * ub[j];
+      }
+      if (binary_like(j) && lb[j] <= tol) {
+        const double delta = (-c) * std::max(0.0, ub[j]);
+        if (delta > 1e-12 && std::isfinite(delta)) {
+          candidates.push_back(Candidate{j, false, delta});
+        }
+      }
+    }
+  }
+
+  stats.candidates = static_cast<std::uint64_t>(candidates.size());
+  if (ninf != 0 || candidates.size() <= 1) return stats;
+
+  stats.cutoff_capacity = cutoff_rhs - stats.raw_objective_lower;
+  if (!std::isfinite(stats.cutoff_capacity)) return stats;
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) {
+              if (std::abs(a.delta - b.delta) > 1e-12) {
+                return a.delta > b.delta;
+              }
+              if (a.col != b.col) return a.col < b.col;
+              return a.literal_one > b.literal_one;
+            });
+
+  if (candidates[0].delta + candidates[1].delta <=
+      stats.cutoff_capacity + tol) {
+    return stats;
+  }
+
+  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
+      literal_edges;
+  literal_edges.reserve(1024);
+  auto publish_conflict = [&](const Candidate& a, const Candidate& b) {
+    if (a.col == b.col) return;
+    ++stats.pair_conflicts;
+    literal_edges.emplace_back(CliqueTable::Literal{a.col, a.literal_one},
+                               CliqueTable::Literal{b.col, b.literal_one});
+    std::vector<BranchDomainLiteral> clause{
+        BranchDomainLiteral{a.col, a.literal_one ? 1.0 : 0.0, a.literal_one},
+        BranchDomainLiteral{b.col, b.literal_one ? 1.0 : 0.0, b.literal_one}};
+    canonicalize_branch_literals(clause);
+    bool added = false;
+    if (conflict_pool != nullptr) added = conflict_pool->add(clause) || added;
+    if (shared_conflict_pool != nullptr) {
+      added = shared_conflict_pool->add(clause) || added;
+    }
+    if (added) ++stats.conflict_clauses_added;
+  };
+
+  const int nbin = static_cast<int>(candidates.size());
+  for (int k = nbin - 1; k > 0; --k) {
+    const Candidate& tail = candidates[static_cast<std::size_t>(k)];
+    const double min_clique_val = stats.cutoff_capacity - tail.delta + tol;
+    auto clique_end = std::partition_point(
+        candidates.begin(), candidates.begin() + k,
+        [&](const Candidate& candidate) {
+          return candidate.delta > min_clique_val;
+        });
+    if (clique_end == candidates.begin()) continue;
+
+    const int old_edges = static_cast<int>(literal_edges.size());
+    for (auto it = candidates.begin(); it != clique_end; ++it) {
+      ++stats.pair_tests;
+      publish_conflict(*it, tail);
+    }
+    if (static_cast<int>(literal_edges.size()) > old_edges) {
+      ++stats.cliques_generated;
+      stats.max_pair_excess = std::max(
+          stats.max_pair_excess,
+          candidates.front().delta + tail.delta - stats.cutoff_capacity);
+    }
+    if (clique_end == candidates.begin() + k) break;
+  }
+
+  stats.clique_edges_added = clique_table.add_literal_edges(lp, literal_edges);
+  return stats;
+}
+
+ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
+    const LPModel& lp,
+	    const std::vector<char>& implied_integer_cols,
+	    const Eigen::VectorXd& lb,
+	    const Eigen::VectorXd& ub,
+	    double upper_limit,
     BinaryImplicationGraph& implication_graph,
     CliqueTable& clique_table,
     double int_tol,
     const ObjectivePropagationState* objective_propagation,
+    ConflictPool* conflict_pool,
+    SharedConflictPool* shared_conflict_pool,
     std::uint64_t max_implications) {
   ObjectiveCutoffArtifactStats stats;
   const int n = static_cast<int>(lp.vars.size());
-  if (n <= 1 || lp.sense != Sense::Minimize ||
-      !std::isfinite(incumbent_obj) || lb.size() < n || ub.size() < n) {
+	  if (n <= 1 || lp.sense != Sense::Minimize ||
+	      !std::isfinite(upper_limit) || lb.size() < n || ub.size() < n) {
     return stats;
   }
 
@@ -57,12 +236,15 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
     bool literal_one{false};
     double delta{0.0};
   };
+  auto candidate_literal = [](const Candidate& candidate) {
+    return BranchDomainLiteral{candidate.col,
+                               candidate.literal_one ? 1.0 : 0.0,
+                               candidate.literal_one};
+  };
   std::vector<Candidate> candidates;
   candidates.reserve(static_cast<std::size_t>(n));
 
-  const double cutoff =
-      incumbent_obj -
-      std::max(1e-7, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
+	  const double cutoff = upper_limit;
 
   std::vector<double> cutoff_coeff(static_cast<std::size_t>(n), 0.0);
   for (int j = 0; j < n; ++j) {
@@ -135,25 +317,6 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       }
     }
   }
-  stats.candidates = static_cast<std::uint64_t>(candidates.size());
-  if (inf_count != 0 || candidates.size() <= 1) return stats;
-
-  stats.cutoff_capacity = cutoff_rhs - stats.raw_objective_lower;
-  if (!std::isfinite(stats.cutoff_capacity)) return stats;
-
-  std::sort(candidates.begin(), candidates.end(),
-            [](const Candidate& a, const Candidate& b) {
-              if (a.delta != b.delta) return a.delta > b.delta;
-              return a.col < b.col;
-            });
-  if (candidates[0].delta + candidates[1].delta <=
-      stats.cutoff_capacity + 1e-9) {
-    return stats;
-  }
-
-  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
-      literal_edges;
-  literal_edges.reserve(1024);
 
   auto add_forbidden_literal = [&](const Candidate& trigger,
                                    const Candidate& forbidden) {
@@ -171,8 +334,150 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
     if (added) ++stats.implications_added;
     return added;
   };
+  auto publish_conflict_clause =
+      [&](const std::vector<BranchDomainLiteral>& raw_clause) {
+        std::vector<BranchDomainLiteral> clause = raw_clause;
+        canonicalize_branch_literals(clause);
+        if (clause.empty()) return false;
+        bool added = false;
+        if (conflict_pool != nullptr) {
+          added = conflict_pool->add(clause) || added;
+        }
+        if (shared_conflict_pool != nullptr) {
+          added = shared_conflict_pool->add(clause) || added;
+        }
+        if (added) ++stats.conflict_clauses_added;
+        return added;
+      };
+  auto publish_pair_conflict = [&](const Candidate& a, const Candidate& b) {
+    if (a.col == b.col) return false;
+    ++stats.conflicts_seen;
+    const bool added_ab = add_forbidden_literal(a, b);
+    const bool added_ba = add_forbidden_literal(b, a);
+    if (publish_conflict_clause(
+            std::vector<BranchDomainLiteral>{candidate_literal(a),
+                                             candidate_literal(b)})) {
+      ++stats.pair_conflicts_added;
+    }
+    return added_ab || added_ba;
+  };
+
+  struct AggregateEvent {
+    double contribution{0.0};
+    std::unordered_map<int, double> best_by_target;
+  };
+  std::unordered_map<int, AggregateEvent> implied_aggregates;
+  if (objective_propagation != nullptr &&
+      !objective_propagation->implied_events.empty()) {
+    const double tol = std::max(1e-9, int_tol);
+    auto literal_active = [&](const ObjectivePropagationState::Literal& lit) {
+      return lit.col >= 0 && lit.col < n &&
+             (lit.value_one ? (lb[lit.col] >= 1.0 - tol)
+                            : (ub[lit.col] <= tol));
+    };
+    auto literal_possible = [&](const ObjectivePropagationState::Literal& lit) {
+      return lit.col >= 0 && lit.col < n &&
+             (lit.value_one ? (ub[lit.col] >= 1.0 - tol)
+                            : (lb[lit.col] <= tol));
+    };
+
+    implied_aggregates.reserve(std::min<std::size_t>(
+        objective_propagation->implied_events.size(),
+        static_cast<std::size_t>(1024)));
+    for (const auto& event : objective_propagation->implied_events) {
+      const int target = event.target_col;
+      if (target < 0 || target >= n) continue;
+      const bool target_tightens = event.target_is_lower_bound
+          ? (event.target_bound > lb[target] + tol)
+          : (event.target_bound < ub[target] - tol);
+      if (!target_tightens) continue;
+      const double contribution = event.target_is_lower_bound
+          ? event.target_cost * (event.target_bound - lb[target])
+          : (-event.target_cost) * (ub[target] - event.target_bound);
+      if (!(contribution > 1e-9) || !std::isfinite(contribution)) {
+        continue;
+      }
+
+      int missing_key = -1;
+      bool impossible = false;
+      for (const auto& lit : event.literals) {
+        if (literal_active(lit)) continue;
+        if (literal_possible(lit)) {
+          const int key = 2 * lit.col + (lit.value_one ? 1 : 0);
+          if (missing_key >= 0 && missing_key != key) {
+            missing_key = -2;
+            break;
+          }
+          missing_key = key;
+        } else {
+          impossible = true;
+          break;
+        }
+      }
+      if (impossible || missing_key < 0) continue;
+
+      AggregateEvent& aggregate = implied_aggregates[missing_key];
+      auto [it, inserted] = aggregate.best_by_target.emplace(target, contribution);
+      if (inserted) {
+        aggregate.contribution += contribution;
+      } else if (contribution > it->second + 1e-9) {
+        aggregate.contribution += contribution - it->second;
+        it->second = contribution;
+      }
+    }
+
+    for (const auto& [key, aggregate] : implied_aggregates) {
+      if (!(aggregate.contribution > 1e-9) ||
+          !std::isfinite(aggregate.contribution)) {
+        continue;
+      }
+      const int col = key / 2;
+      const bool value_one = (key % 2) != 0;
+      if (!binary_like(col)) continue;
+      candidates.push_back(Candidate{col, value_one, aggregate.contribution});
+      ++stats.implied_event_candidates;
+      stats.max_delta = std::max(stats.max_delta, aggregate.contribution);
+    }
+  }
+
+  stats.candidates = static_cast<std::uint64_t>(candidates.size());
+  if (inf_count != 0) return stats;
+
+  stats.cutoff_capacity = cutoff_rhs - stats.raw_objective_lower;
+  if (!std::isfinite(stats.cutoff_capacity)) return stats;
 
   const double tol = std::max(1e-9, int_tol);
+  if (objective_propagation != nullptr &&
+      !objective_propagation->implied_events.empty()) {
+    for (const auto& [key, aggregate] : implied_aggregates) {
+      if (!(aggregate.contribution > stats.cutoff_capacity + tol)) {
+        continue;
+      }
+      const int col = key / 2;
+      const bool value_one = (key % 2) != 0;
+      if (!binary_like(col)) continue;
+      const BranchDomainLiteral forbidden{col, value_one ? 1.0 : 0.0,
+                                          value_one};
+      if (publish_conflict_clause(std::vector<BranchDomainLiteral>{forbidden})) {
+        ++stats.unary_conflicts_added;
+      }
+    }
+  }
+  if (candidates.size() <= 1) return stats;
+
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) {
+              if (a.delta != b.delta) return a.delta > b.delta;
+              return a.col < b.col;
+            });
+  if (candidates[0].delta + candidates[1].delta <=
+      stats.cutoff_capacity + 1e-9) {
+    return stats;
+  }
+
+  std::vector<std::pair<CliqueTable::Literal, CliqueTable::Literal>>
+      literal_edges;
+  literal_edges.reserve(1024);
   for (int k = static_cast<int>(candidates.size()) - 1; k > 0; --k) {
     const Candidate& b = candidates[static_cast<std::size_t>(k)];
     const double threshold = stats.cutoff_capacity - b.delta + tol;
@@ -180,13 +485,11 @@ ObjectiveCutoffArtifactStats extract_objective_cutoff_artifacts(
       const Candidate& a = candidates[static_cast<std::size_t>(i)];
       if (a.delta <= threshold) break;
       if (a.col == b.col) continue;
-      ++stats.conflicts_seen;
-      const bool added_ab = add_forbidden_literal(a, b);
-      const bool added_ba = add_forbidden_literal(b, a);
+      const bool added = publish_pair_conflict(a, b);
       literal_edges.emplace_back(
           CliqueTable::Literal{a.col, a.literal_one},
           CliqueTable::Literal{b.col, b.literal_one});
-      if (!added_ab && !added_ba &&
+      if (!added &&
           stats.implications_added >= max_implications) {
         return stats;
       }

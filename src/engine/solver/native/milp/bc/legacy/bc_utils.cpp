@@ -990,7 +990,10 @@ void rebuild_local_domain_trail(Node& node,
                           int depth,
                           bool is_branch,
                           BranchDomainLiteral source_conflict_literal,
-                          bool has_source_conflict_literal) {
+                          bool has_source_conflict_literal,
+                          const std::vector<BranchDomainLiteral>*
+                              source_conflict_clause = nullptr,
+                          bool has_source_conflict_clause = false) {
     if (lit.var_idx < 0 || lit.var_idx >= n || !std::isfinite(lit.value)) {
       return;
     }
@@ -1008,6 +1011,10 @@ void rebuild_local_domain_trail(Node& node,
     entry.is_branch = is_branch;
     entry.source_conflict_literal = source_conflict_literal;
     entry.has_source_conflict_literal = has_source_conflict_literal;
+    if (source_conflict_clause != nullptr && has_source_conflict_clause) {
+      entry.source_conflict_clause = *source_conflict_clause;
+      entry.has_source_conflict_clause = true;
+    }
     node.local_domain_trail.push_back(std::move(entry));
     side_pos = pos;
     if (is_branch) node.local_branch_positions.push_back(pos);
@@ -1044,7 +1051,8 @@ void rebuild_local_domain_trail(Node& node,
     }
     if (duplicate_active) return;
     append_entry(rb.bound, rb.reason, rb.depth, false,
-                 rb.source_conflict_literal, rb.has_source_conflict_literal);
+                 rb.source_conflict_literal, rb.has_source_conflict_literal,
+                 &rb.source_conflict_clause, rb.has_source_conflict_clause);
     if (!node.local_domain_trail.empty()) {
       const auto& entry = node.local_domain_trail.back();
       rb.trail_pos = entry.pos;
@@ -1174,6 +1182,9 @@ void append_domain_reason_bound(Node& node,
         entry.source_conflict_literal = stored.source_conflict_literal;
         entry.has_source_conflict_literal =
             stored.has_source_conflict_literal;
+        entry.source_conflict_clause = stored.source_conflict_clause;
+        entry.has_source_conflict_clause =
+            stored.has_source_conflict_clause;
       }
       stored.trail_pos = entry.pos;
       stored.prev_bound_pos = entry.prev_bound_pos;
@@ -1224,6 +1235,8 @@ void append_domain_reason_bound(Node& node,
   entry.is_branch = false;
   entry.source_conflict_literal = stored.source_conflict_literal;
   entry.has_source_conflict_literal = stored.has_source_conflict_literal;
+  entry.source_conflict_clause = stored.source_conflict_clause;
+  entry.has_source_conflict_clause = stored.has_source_conflict_clause;
   node.local_domain_trail.push_back(std::move(entry));
   stored.trail_pos = pos;
   stored.prev_bound_pos = prev_pos;
@@ -1398,7 +1411,13 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
                         double int_tol,
                         Eigen::VectorXd& node_lb,
                         Eigen::VectorXd& node_ub,
-                        std::vector<BranchDomainLiteral>* forbidden_literals) {
+                        std::vector<BranchDomainLiteral>* forbidden_literals,
+                        const Eigen::VectorXd* sf_col_scale,
+                        std::vector<DomainReasonBound>* reason_bounds,
+                        const std::vector<BranchDomainLiteral>* reason_frontier,
+                        int reason_depth,
+                        int reason_trail_offset) {
+  (void)x_relax;
   const double gap = incumbent_obj - node_bound;
   if (gap <= 1e-12) return 0;
 
@@ -1419,45 +1438,91 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
     if (is_basic[static_cast<size_t>(j)]) continue;
     if (std::abs(node_ub[j] - node_lb[j]) < 1e-9) continue;  // already fixed
 
-    // reduced_costs[j] is for the standard-form maximization problem.
-    // For minimization: positive rc means increasing j worsens objective.
-    // The original reduced cost for minimization is -reduced_costs[j].
-    const double rc = std::abs(reduced_costs[j]);
-    if (rc < 1e-12) continue;
+    // HiGHS' MIP propagation consumes minimization-space `col_dual`.
+    // Native simplex stores scaled standard-form maximization reduced costs,
+    // so the original-column dual is recovered by undoing both conventions.
+    const double scale =
+        sf_col_scale != nullptr && sf_col_scale->size() > j &&
+                std::isfinite((*sf_col_scale)[j]) &&
+                std::abs((*sf_col_scale)[j]) > 1e-18
+            ? (*sf_col_scale)[j]
+            : 1.0;
+    const double lpredcost = -reduced_costs[j] / scale;
+    const double tol = std::max(10.0 * int_tol,
+                                1e-12 * std::max(1.0, std::abs(gap)));
+    if (!std::isfinite(lpredcost) || std::abs(lpredcost) <= tol) continue;
 
-    // HiGHS-style cutoff domain tightening.  If a nonbasic integer column is
-    // sitting at one bound, moving it away from that bound worsens the LP
-    // objective by approximately |rc| per unit.  The incumbent cutoff therefore
-    // gives a finite limit on how far it can move in any improving solution.
-    if (std::abs(x_relax[j] - node_lb[j]) < int_tol) {
-      const double max_increase = rc * (node_ub[j] - node_lb[j]);
-      if (max_increase > gap + 1e-9) {
-        const double old_ub = node_ub[j];
-        double new_ub = std::floor(gap / rc + node_lb[j] + int_tol);
-        new_ub = std::min(old_ub, std::max(node_lb[j], new_ub));
-        if (new_ub >= old_ub - 1e-9) continue;
-        if (forbidden_literals != nullptr) {
-          forbidden_literals->push_back(
-              BranchDomainLiteral{j, std::floor(new_ub + 1e-9) + 1.0, true});
-        }
-        node_ub[j] = new_ub;
-        ++fixed;
+    const double width = node_ub[j] - node_lb[j];
+    if (!std::isfinite(width) || width <= int_tol) continue;
+    const double max_increase = lpredcost * width;
+    if (max_increase > gap) {
+      if (!std::isfinite(node_lb[j])) continue;
+      const double old_ub = node_ub[j];
+      double new_ub = std::floor(gap / lpredcost + node_lb[j] + int_tol);
+      new_ub = std::min(old_ub, std::max(node_lb[j], new_ub));
+      if (new_ub >= old_ub - 1e-9) continue;
+      const BranchDomainLiteral forbidden{
+          j, std::floor(new_ub + 1e-9) + 1.0, true};
+      if (forbidden_literals != nullptr) forbidden_literals->push_back(forbidden);
+      if (reason_bounds != nullptr) {
+        DomainReasonBound rb;
+        rb.bound = BranchDomainLiteral{j, new_ub, false};
+        if (reason_frontier != nullptr) rb.reason = *reason_frontier;
+        canonicalize_branch_literals(rb.reason);
+        rb.trail_pos = reason_trail_offset +
+                       static_cast<int>(reason_bounds->size());
+        rb.depth = reason_depth;
+        rb.source_conflict_literal = forbidden;
+        rb.has_source_conflict_literal = true;
+        rb.source_conflict_clause = rb.reason;
+        rb.source_conflict_clause.push_back(forbidden);
+        canonicalize_branch_literals(rb.source_conflict_clause);
+        rb.has_source_conflict_clause = true;
+        const double source_activity =
+            node_bound + (forbidden.value - node_lb[j]) * lpredcost;
+        rb.has_proof_activity_audit =
+            std::isfinite(source_activity) && std::isfinite(incumbent_obj);
+        rb.proof_activity = source_activity;
+        rb.proof_required_activity = incumbent_obj;
+        rb.proof_activity_margin = source_activity - incumbent_obj;
+        reason_bounds->push_back(std::move(rb));
       }
-    }
-    else if (std::abs(x_relax[j] - node_ub[j]) < int_tol) {
-      const double max_increase = rc * (node_ub[j] - node_lb[j]);
-      if (max_increase > gap + 1e-9) {
-        const double old_lb = node_lb[j];
-        double new_lb = std::ceil(node_ub[j] - gap / rc - int_tol);
-        new_lb = std::max(old_lb, std::min(node_ub[j], new_lb));
-        if (new_lb <= old_lb + 1e-9) continue;
-        if (forbidden_literals != nullptr) {
-          forbidden_literals->push_back(
-              BranchDomainLiteral{j, std::ceil(new_lb - 1e-9) - 1.0, false});
-        }
-        node_lb[j] = new_lb;
-        ++fixed;
+      node_ub[j] = new_ub;
+      ++fixed;
+    } else if (max_increase < -gap) {
+      if (!std::isfinite(node_ub[j])) continue;
+      const double old_lb = node_lb[j];
+      double new_lb = std::ceil(gap / lpredcost + node_ub[j] - int_tol);
+      new_lb = std::max(old_lb, std::min(node_ub[j], new_lb));
+      if (new_lb <= old_lb + 1e-9) continue;
+      const BranchDomainLiteral forbidden{
+          j, std::ceil(new_lb - 1e-9) - 1.0, false};
+      if (forbidden_literals != nullptr) forbidden_literals->push_back(forbidden);
+      if (reason_bounds != nullptr) {
+        DomainReasonBound rb;
+        rb.bound = BranchDomainLiteral{j, new_lb, true};
+        if (reason_frontier != nullptr) rb.reason = *reason_frontier;
+        canonicalize_branch_literals(rb.reason);
+        rb.trail_pos = reason_trail_offset +
+                       static_cast<int>(reason_bounds->size());
+        rb.depth = reason_depth;
+        rb.source_conflict_literal = forbidden;
+        rb.has_source_conflict_literal = true;
+        rb.source_conflict_clause = rb.reason;
+        rb.source_conflict_clause.push_back(forbidden);
+        canonicalize_branch_literals(rb.source_conflict_clause);
+        rb.has_source_conflict_clause = true;
+        const double source_activity =
+            node_bound + (forbidden.value - node_ub[j]) * lpredcost;
+        rb.has_proof_activity_audit =
+            std::isfinite(source_activity) && std::isfinite(incumbent_obj);
+        rb.proof_activity = source_activity;
+        rb.proof_required_activity = incumbent_obj;
+        rb.proof_activity_margin = source_activity - incumbent_obj;
+        reason_bounds->push_back(std::move(rb));
       }
+      node_lb[j] = new_lb;
+      ++fixed;
     }
   }
   return fixed;
@@ -2100,7 +2165,7 @@ int apply_dual_proof_domain_fixing(
   return tightened;
 }
 
-bool resolve_dual_proof_target_bound_from_local_trail(
+DualProofResolutionStatus resolve_dual_proof_target_bound_from_local_trail(
     const std::vector<VariableMeta>& vars,
     const Eigen::VectorXd& root_lb,
     const Eigen::VectorXd& root_ub,
@@ -2117,19 +2182,27 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     DualProofTrailResolution& out,
     const Eigen::SparseVector<double>* priority_coeff_sparse) {
   out = DualProofTrailResolution{};
+  auto fail = [&](DualProofResolutionStatus status) {
+    out.status = status;
+    return status;
+  };
+  auto success = [&]() {
+    out.status = DualProofResolutionStatus::Success;
+    return DualProofResolutionStatus::Success;
+  };
   (void)x_relax;
   (void)priority_coeff_sparse;
   const int n = static_cast<int>(vars.size());
   if (max_literals <= 0 || n <= 0 || coeff_sparse.size() < n ||
       coeff_sparse.nonZeros() <= 0 || !std::isfinite(rhs) ||
       root_lb.size() < n || root_ub.size() < n) {
-    return false;
+    return fail(DualProofResolutionStatus::InvalidInput);
   }
 
   const BranchDomainLiteral& target_lit = target_bound.bound;
   if (target_lit.var_idx < 0 || target_lit.var_idx >= n ||
       !std::isfinite(target_lit.value)) {
-    return false;
+    return fail(DualProofResolutionStatus::InvalidInput);
   }
 
   std::vector<double> coeff(static_cast<std::size_t>(n), 0.0);
@@ -2144,10 +2217,14 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   for (int j = 0; j < n; ++j) {
     const double a = coeff[static_cast<std::size_t>(j)];
     if (a > 0.0) {
-      if (!std::isfinite(root_lb[j])) return false;
+      if (!std::isfinite(root_lb[j])) {
+        return fail(DualProofResolutionStatus::InvalidInput);
+      }
       root_min_activity += a * root_lb[j];
     } else if (a < 0.0) {
-      if (!std::isfinite(root_ub[j])) return false;
+      if (!std::isfinite(root_ub[j])) {
+        return fail(DualProofResolutionStatus::InvalidInput);
+      }
       root_min_activity += a * root_ub[j];
     }
   }
@@ -2156,7 +2233,7 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   const double a0 = coeff[static_cast<std::size_t>(target)];
   if ((target_lit.is_lb && a0 >= -1e-12) ||
       (!target_lit.is_lb && a0 <= 1e-12)) {
-    return false;
+    return fail(DualProofResolutionStatus::ActivityFailed);
   }
 
   const bool integer_target =
@@ -2171,10 +2248,14 @@ bool resolve_dual_proof_target_bound_from_local_trail(
 
   double target_global_contribution = 0.0;
   if (a0 > 0.0) {
-    if (!std::isfinite(root_lb[target])) return false;
+    if (!std::isfinite(root_lb[target])) {
+      return fail(DualProofResolutionStatus::InvalidInput);
+    }
     target_global_contribution = a0 * root_lb[target];
   } else {
-    if (!std::isfinite(root_ub[target])) return false;
+    if (!std::isfinite(root_ub[target])) {
+      return fail(DualProofResolutionStatus::InvalidInput);
+    }
     target_global_contribution = a0 * root_ub[target];
   }
 
@@ -2191,7 +2272,9 @@ bool resolve_dual_proof_target_bound_from_local_trail(
       : (have_native_trail
              ? static_cast<int>(local_domain_trail->size())
              : static_cast<int>(branch_reasons.size() + reason_bounds.size()));
-  if (target_pos < 0) return false;
+  if (target_pos < 0) {
+    return fail(DualProofResolutionStatus::InvalidInput);
+  }
 
   auto reason_touches_target =
       [&](const std::vector<BranchDomainLiteral>& lits) {
@@ -2232,6 +2315,130 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     }
     return true;
   };
+  auto proof_literal_delta = [&](const BranchDomainLiteral& lit,
+                                 double* delta_out) -> bool {
+    if (delta_out != nullptr) *delta_out = 0.0;
+    if (lit.var_idx < 0 || lit.var_idx >= n ||
+        !std::isfinite(lit.value)) {
+      return false;
+    }
+    if (lit.var_idx == target) return false;
+    const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
+    if (a > 0.0 && lit.is_lb) {
+      if (!std::isfinite(root_lb[lit.var_idx])) return false;
+      const double delta = a * (lit.value - root_lb[lit.var_idx]);
+      if (!std::isfinite(delta) || delta < -proof_tol) return false;
+      if (delta_out != nullptr) *delta_out = std::max(0.0, delta);
+      return true;
+    }
+    if (a < 0.0 && !lit.is_lb) {
+      if (!std::isfinite(root_ub[lit.var_idx])) return false;
+      const double delta = a * (lit.value - root_ub[lit.var_idx]);
+      if (!std::isfinite(delta) || delta < -proof_tol) return false;
+      if (delta_out != nullptr) *delta_out = std::max(0.0, delta);
+      return true;
+    }
+    return false;
+  };
+  auto audited_activity_from_frontier =
+      [&](const std::vector<BranchDomainLiteral>& frontier,
+          double& audited_activity) -> bool {
+    audited_activity = residual_root_activity;
+    std::vector<char> seen_lower(static_cast<std::size_t>(n), 0);
+    std::vector<char> seen_upper(static_cast<std::size_t>(n), 0);
+    for (const auto& lit : frontier) {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value) || lit.var_idx == target) {
+        return false;
+      }
+      char& seen = lit.is_lb ? seen_lower[static_cast<std::size_t>(lit.var_idx)]
+                             : seen_upper[static_cast<std::size_t>(lit.var_idx)];
+      if (seen != 0) return false;
+      seen = 1;
+      double delta = 0.0;
+      if (!proof_literal_delta(lit, &delta)) return false;
+      audited_activity += delta;
+    }
+    return std::isfinite(audited_activity);
+  };
+  auto frontier_implies_proof_frontier =
+      [&](const std::vector<BranchDomainLiteral>& reason_frontier,
+          const std::vector<BranchDomainLiteral>& needed_proof_frontier,
+          double& audited_activity) -> bool {
+    if (audited_activity_from_frontier(reason_frontier, audited_activity)) {
+      if (audited_activity >= required_activity - proof_tol) {
+        return true;
+      }
+    }
+    if (!have_native_trail) return false;
+    Eigen::VectorXd closure_lb = root_lb;
+    Eigen::VectorXd closure_ub = root_ub;
+    auto apply_lit = [&](const BranchDomainLiteral& lit) -> bool {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value)) {
+        return false;
+      }
+      if (lit.is_lb) {
+        if (lit.value > closure_ub[lit.var_idx] + eps) return false;
+        if (lit.value > closure_lb[lit.var_idx]) {
+          closure_lb[lit.var_idx] = lit.value;
+        }
+      } else {
+        if (lit.value < closure_lb[lit.var_idx] - eps) return false;
+        if (lit.value < closure_ub[lit.var_idx]) {
+          closure_ub[lit.var_idx] = lit.value;
+        }
+      }
+      return true;
+    };
+    auto active_lit = [&](const BranchDomainLiteral& lit) -> bool {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value)) {
+        return false;
+      }
+      return lit.is_lb ? closure_lb[lit.var_idx] >= lit.value - eps
+                       : closure_ub[lit.var_idx] <= lit.value + eps;
+    };
+    for (const auto& lit : reason_frontier) {
+      if (lit.var_idx == target || !apply_lit(lit)) return false;
+    }
+    bool changed = true;
+    for (int pass = 0;
+         pass < static_cast<int>(local_domain_trail->size()) + 1 && changed;
+         ++pass) {
+      changed = false;
+      for (const auto& entry : *local_domain_trail) {
+        if (entry.pos < 0 || entry.pos >= target_pos ||
+            entry.bound.var_idx == target || entry.reason.empty()) {
+          continue;
+        }
+        bool reason_active = true;
+        for (const auto& lit : entry.reason) {
+          if (!active_lit(lit)) {
+            reason_active = false;
+            break;
+          }
+        }
+        if (!reason_active) continue;
+        const double old_lb = closure_lb[entry.bound.var_idx];
+        const double old_ub = closure_ub[entry.bound.var_idx];
+        if (!apply_lit(entry.bound)) return false;
+        if (closure_lb[entry.bound.var_idx] > old_lb + eps ||
+            closure_ub[entry.bound.var_idx] < old_ub - eps) {
+          changed = true;
+        }
+      }
+    }
+    audited_activity = residual_root_activity;
+    for (const auto& lit : needed_proof_frontier) {
+      if (!active_lit(lit)) return false;
+      double delta = 0.0;
+      if (!proof_literal_delta(lit, &delta)) return false;
+      audited_activity += delta;
+    }
+    return std::isfinite(audited_activity) &&
+           audited_activity >= required_activity - proof_tol;
+  };
 
   if (residual_root_activity >= required_activity - proof_tol) {
     BranchDomainLiteral proved_target_lit = target_lit;
@@ -2260,12 +2467,13 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     if (target_bound.has_source_conflict_literal && !target_was_strengthened) {
       flipped = target_bound.source_conflict_literal;
     } else if (!flipped_literal(proved_target_lit, flipped)) {
-      return false;
+      return fail(DualProofResolutionStatus::ScopeBlocked);
     }
     std::vector<BranchDomainLiteral> clause{flipped};
     canonicalize_branch_literals(clause);
     if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
-      return false;
+      return fail(clause.empty() ? DualProofResolutionStatus::ScopeBlocked
+                                 : DualProofResolutionStatus::LiteralLimit);
     }
     out.valid = true;
     out.cutoff_conflict = false;
@@ -2280,7 +2488,7 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     out.proof_budget = rhs - root_min_activity;
     out.proof_activity = 0.0;
     out.resolved_activity = residual_root_activity;
-    return true;
+    return success();
   }
 
   struct TrailCandidate {
@@ -2325,7 +2533,7 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     const int j = lit.var_idx;
     if (j < 0 || j >= n || j == target || !std::isfinite(lit.value) ||
         trail_pos < 0 || trail_pos >= target_pos ||
-        !proof_side_matches(lit) || reason_touches_target(reason)) {
+        !proof_side_matches(lit)) {
       return;
     }
     const double a = coeff[static_cast<std::size_t>(j)];
@@ -2379,7 +2587,9 @@ bool resolve_dual_proof_target_bound_from_local_trail(
                                rb.prev_bound_pos, true);
     }
   }
-  if (candidates.empty()) return false;
+  if (candidates.empty()) {
+    return fail(DualProofResolutionStatus::MissingReason);
+  }
 
   std::sort(candidates.begin(), candidates.end(),
             [](const TrailCandidate& a, const TrailCandidate& b) {
@@ -2404,12 +2614,10 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     selected.push_back(cand);
     activity += cand.delta;
     if (activity >= required_activity - proof_tol) break;
-    if (static_cast<int>(selected.size()) >=
-        std::max(max_literals, 2 * max_literals)) {
-      break;
-    }
   }
-  if (activity < required_activity - proof_tol) return false;
+  if (activity < required_activity - proof_tol) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
 
   for (int k = static_cast<int>(selected.size()) - 1; k >= 0; --k) {
     auto& cand = selected[static_cast<std::size_t>(k)];
@@ -2484,14 +2692,22 @@ bool resolve_dual_proof_target_bound_from_local_trail(
     if (activity <= required_activity + proof_tol) break;
   }
   if (selected.empty() || activity < required_activity - proof_tol) {
-    return false;
+    return fail(DualProofResolutionStatus::ActivityFailed);
   }
 
   std::vector<BranchDomainLiteral> proof_frontier;
   proof_frontier.reserve(selected.size());
   for (const auto& cand : selected) proof_frontier.push_back(cand.proof_lit);
   canonicalize_branch_literals(proof_frontier);
-  if (proof_frontier.empty()) return false;
+  if (proof_frontier.empty()) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
+  double proof_frontier_activity = 0.0;
+  if (!audited_activity_from_frontier(proof_frontier,
+                                      proof_frontier_activity) ||
+      proof_frontier_activity < required_activity - proof_tol) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
 
   auto find_prior_entry =
       [&](const BranchDomainLiteral& lit,
@@ -2649,6 +2865,102 @@ bool resolve_dual_proof_target_bound_from_local_trail(
                                fallback_literal_pos(lit, before_pos), true};
   };
 
+  auto flip_literal_for_conflict =
+      [&](const BranchDomainLiteral& lit, BranchDomainLiteral& flipped) -> bool {
+    if (lit.var_idx < 0 || lit.var_idx >= n || !std::isfinite(lit.value)) {
+      return false;
+    }
+    const bool integer_var =
+        is_integer_type(vars[static_cast<std::size_t>(lit.var_idx)]);
+    if (lit.is_lb) {
+      flipped = BranchDomainLiteral{
+          lit.var_idx,
+          integer_var ? std::ceil(lit.value - eps) - 1.0
+                      : lit.value - std::max(1e-7, 10.0 * eps),
+          false};
+    } else {
+      flipped = BranchDomainLiteral{
+          lit.var_idx,
+          integer_var ? std::floor(lit.value + eps) + 1.0
+                      : lit.value + std::max(1e-7, 10.0 * eps),
+          true};
+    }
+    return true;
+  };
+
+  auto source_conflict_matches_flipped =
+      [&](const BranchDomainLiteral& conflict_lit,
+          const BranchDomainLiteral& flipped) {
+    if (conflict_lit.var_idx != flipped.var_idx ||
+        conflict_lit.is_lb != flipped.is_lb) {
+      return false;
+    }
+    return conflict_lit.is_lb
+               ? conflict_lit.value <= flipped.value + eps
+               : conflict_lit.value >= flipped.value - eps;
+  };
+
+  auto explain_conflict_reason_frontier =
+      [&](const LocalDomainTrailEntry& entry,
+          std::vector<ReasonFrontierEntry>& replacement) -> bool {
+    replacement.clear();
+    if (!have_native_trail || !entry.has_source_conflict_clause ||
+        entry.source_conflict_clause.empty() || entry.pos <= 0) {
+      return false;
+    }
+    BranchDomainLiteral flipped_entry;
+    if (!flip_literal_for_conflict(entry.bound, flipped_entry)) {
+      return false;
+    }
+    bool found_flipped = false;
+    for (const auto& conflict_lit : entry.source_conflict_clause) {
+      if (!found_flipped &&
+          source_conflict_matches_flipped(conflict_lit, flipped_entry)) {
+        found_flipped = true;
+        continue;
+      }
+      if (conflict_lit.var_idx < 0 || conflict_lit.var_idx >= n ||
+          !std::isfinite(conflict_lit.value)) {
+        return false;
+      }
+      const double global_bound =
+          conflict_lit.is_lb ? root_lb[conflict_lit.var_idx]
+                             : root_ub[conflict_lit.var_idx];
+      if (std::isfinite(global_bound)) {
+        const bool globally_active =
+            conflict_lit.is_lb
+                ? global_bound >= conflict_lit.value - eps
+                : global_bound <= conflict_lit.value + eps;
+        if (globally_active) continue;
+      }
+      const LocalDomainTrailEntry* prior =
+          find_prior_entry(conflict_lit, entry.pos);
+      if (prior == nullptr) return false;
+      LocalDomainTrailEntry relaxed = *prior;
+      while (relaxed.prev_bound_pos >= 0 &&
+             relaxed.prev_bound_pos <
+                 static_cast<int>(local_domain_trail->size())) {
+        const auto& prev =
+            (*local_domain_trail)[static_cast<std::size_t>(
+                relaxed.prev_bound_pos)];
+        const bool prev_still_active =
+            conflict_lit.is_lb
+                ? prev.bound.value >= conflict_lit.value - eps
+                : prev.bound.value <= conflict_lit.value + eps;
+        if (!prev_still_active) break;
+        relaxed = prev;
+      }
+      replacement.push_back(ReasonFrontierEntry{
+          conflict_lit,
+          relaxed.reason.empty() && relaxed.is_branch
+              ? std::vector<BranchDomainLiteral>{conflict_lit}
+              : relaxed.reason,
+          relaxed.pos,
+          relaxed.is_branch});
+    }
+    return found_flipped;
+  };
+
   auto reason_entry_for_candidate =
       [&](const TrailCandidate& cand) -> ReasonFrontierEntry {
     if (have_native_trail && cand.trail_pos >= 0 &&
@@ -2754,17 +3066,30 @@ bool resolve_dual_proof_target_bound_from_local_trail(
 	        return false;
 	      };
 	      std::vector<ReasonFrontierEntry> replacement;
-	      replacement.reserve(entry.reason.size());
-	      bool replacement_valid = true;
-	      for (const auto& reason_lit : entry.reason) {
-	        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
-	            !std::isfinite(reason_lit.value)) {
-	          replacement_valid = false;
-	          break;
+	      bool replacement_valid =
+	          explain_conflict_reason_frontier(entry, replacement);
+	      if (replacement_valid) {
+	        replacement.erase(
+	            std::remove_if(
+	                replacement.begin(), replacement.end(),
+	                [&](const ReasonFrontierEntry& repl) {
+	                  return covered_by_current_frontier(repl.lit);
+	                }),
+	            replacement.end());
+	      } else {
+	        replacement.clear();
+	        replacement.reserve(entry.reason.size());
+	        replacement_valid = true;
+	        for (const auto& reason_lit : entry.reason) {
+	          if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
+	              !std::isfinite(reason_lit.value)) {
+	            replacement_valid = false;
+	            break;
+	          }
+	          if (covered_by_current_frontier(reason_lit)) continue;
+	          replacement.push_back(
+	              reason_entry_for_literal(reason_lit, latest_pos));
 	        }
-	        if (covered_by_current_frontier(reason_lit)) continue;
-	        replacement.push_back(
-	            reason_entry_for_literal(reason_lit, latest_pos));
 	      }
 	      if (!replacement_valid) {
 	        skipped_positions.insert(latest_pos);
@@ -2785,7 +3110,9 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   std::vector<ReasonFrontierEntry> initial_frontier;
   initial_frontier.reserve(selected.size());
   for (const auto& cand : selected) {
-    if (cand.proof_lit.var_idx == target) return false;
+    if (cand.proof_lit.var_idx == target) {
+      return fail(DualProofResolutionStatus::ScopeBlocked);
+    }
     initial_frontier.push_back(reason_entry_for_candidate(cand));
   }
   std::vector<BranchDomainLiteral> resolved_frontier =
@@ -2793,13 +3120,21 @@ bool resolve_dual_proof_target_bound_from_local_trail(
                                     /*stop_size=*/0,
                                     /*min_resolve=*/0);
   canonicalize_branch_literals(resolved_frontier);
-  if (static_cast<int>(resolved_frontier.size()) + 1 > max_literals ||
-      reason_touches_target(resolved_frontier)) {
-    return false;
+  if (static_cast<int>(resolved_frontier.size()) + 1 > max_literals) {
+    return fail(DualProofResolutionStatus::LiteralLimit);
+  }
+  if (reason_touches_target(resolved_frontier)) {
+    return fail(DualProofResolutionStatus::ScopeBlocked);
+  }
+  double resolved_frontier_activity = 0.0;
+  if (!frontier_implies_proof_frontier(resolved_frontier, proof_frontier,
+                                       resolved_frontier_activity)) {
+    return fail(have_native_trail ? DualProofResolutionStatus::ScopeBlocked
+                                  : DualProofResolutionStatus::MissingReason);
   }
 
   BranchDomainLiteral proved_target_lit = target_lit;
-  const double raw_bound = (rhs - activity) / a0;
+  const double raw_bound = (rhs - resolved_frontier_activity) / a0;
   if (std::isfinite(raw_bound)) {
     double strengthened = raw_bound;
     if (integer_target) {
@@ -2823,7 +3158,7 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   if (target_bound.has_source_conflict_literal && !target_was_strengthened) {
     flipped = target_bound.source_conflict_literal;
   } else if (!flipped_literal(proved_target_lit, flipped)) {
-    return false;
+    return fail(DualProofResolutionStatus::ScopeBlocked);
   }
 
   const double selected_delta = activity - residual_root_activity;
@@ -2836,7 +3171,8 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   if (!cutoff_conflict) clause.push_back(flipped);
   canonicalize_branch_literals(clause);
   if (clause.empty() || static_cast<int>(clause.size()) > max_literals) {
-    return false;
+    return fail(clause.empty() ? DualProofResolutionStatus::ScopeBlocked
+                               : DualProofResolutionStatus::LiteralLimit);
   }
 
   std::vector<std::vector<BranchDomainLiteral>> reconvergence_clauses;
@@ -2875,6 +3211,11 @@ bool resolve_dual_proof_target_bound_from_local_trail(
             : resolve_local_reason_frontier(std::move(reason_frontier),
                                             /*stop_size=*/0,
                                             /*min_resolve=*/0);
+    double reconv_activity = 0.0;
+    if (!frontier_implies_proof_frontier(reconv, proof_frontier,
+                                         reconv_activity)) {
+      continue;
+    }
     reconv.push_back(flipped_selected);
     canonicalize_branch_literals(reconv);
     if (reconv.empty() ||
@@ -2901,14 +3242,14 @@ bool resolve_dual_proof_target_bound_from_local_trail(
   out.resolved_frontier = std::move(resolved_frontier);
   out.clause = std::move(clause);
   out.reconvergence_clauses = std::move(reconvergence_clauses);
-  out.proof_margin = activity - required_activity;
+  out.proof_margin = resolved_frontier_activity - required_activity;
   out.proof_budget = proof_budget;
-  out.proof_activity = selected_delta;
-  out.resolved_activity = activity;
-  return true;
+  out.proof_activity = proof_frontier_activity;
+  out.resolved_activity = resolved_frontier_activity;
+  return success();
 }
 
-bool resolve_dual_proof_conflict_from_local_trail(
+DualProofResolutionStatus resolve_dual_proof_conflict_from_local_trail(
     const std::vector<VariableMeta>& vars,
     const Eigen::VectorXd& root_lb,
     const Eigen::VectorXd& root_ub,
@@ -2925,12 +3266,20 @@ bool resolve_dual_proof_conflict_from_local_trail(
     int max_literals,
     DualProofConflictResolution& out) {
   out = DualProofConflictResolution{};
+  auto fail = [&](DualProofResolutionStatus status) {
+    out.status = status;
+    return status;
+  };
+  auto success = [&]() {
+    out.status = DualProofResolutionStatus::Success;
+    return DualProofResolutionStatus::Success;
+  };
   const int n = static_cast<int>(vars.size());
   if (max_literals <= 0 || n <= 0 || coeff_sparse.size() < n ||
       coeff_sparse.nonZeros() <= 0 || !std::isfinite(rhs) ||
       root_lb.size() < n || root_ub.size() < n ||
       node_lb.size() < n || node_ub.size() < n) {
-    return false;
+    return fail(DualProofResolutionStatus::InvalidInput);
   }
 
   std::vector<double> coeff(static_cast<std::size_t>(n), 0.0);
@@ -2939,31 +3288,37 @@ bool resolve_dual_proof_conflict_from_local_trail(
   for (Eigen::SparseVector<double>::InnerIterator it(coeff_sparse); it; ++it) {
     const int j = static_cast<int>(it.index());
     const double a = it.value();
-    if (j < 0 || j >= n || !std::isfinite(a)) return false;
+    if (j < 0 || j >= n || !std::isfinite(a)) {
+      return fail(DualProofResolutionStatus::InvalidInput);
+    }
     coeff[static_cast<std::size_t>(j)] = a;
     if (a > 0.0) {
       if (!std::isfinite(root_lb[j]) || !std::isfinite(node_lb[j])) {
-        return false;
+        return fail(DualProofResolutionStatus::InvalidInput);
       }
       root_min_activity += a * root_lb[j];
       node_min_activity += a * node_lb[j];
     } else if (a < 0.0) {
       if (!std::isfinite(root_ub[j]) || !std::isfinite(node_ub[j])) {
-        return false;
+        return fail(DualProofResolutionStatus::InvalidInput);
       }
       root_min_activity += a * root_ub[j];
       node_min_activity += a * node_ub[j];
     }
   }
   if (!std::isfinite(root_min_activity) || !std::isfinite(node_min_activity)) {
-    return false;
+    return fail(DualProofResolutionStatus::InvalidInput);
   }
 
   const double tol = std::max({1e-9, int_tol, lp_tol});
   const double proof_tol = std::max(1e-7, tol * std::max(10.0, std::abs(rhs)));
   const double cutoff_rhs = rhs + proof_tol;
-  if (node_min_activity < cutoff_rhs) return false;
-  if (root_min_activity >= cutoff_rhs) return false;
+  if (node_min_activity < cutoff_rhs) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
+  if (root_min_activity >= cutoff_rhs) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
 
   struct TrailCandidate {
     BranchDomainLiteral lit;
@@ -3005,6 +3360,139 @@ bool resolve_dual_proof_conflict_from_local_trail(
                              const BranchDomainLiteral& rhs_lit) {
     return lhs.var_idx == rhs_lit.var_idx && lhs.is_lb == rhs_lit.is_lb &&
            std::abs(lhs.value - rhs_lit.value) <= tol;
+  };
+  auto proof_literal_delta = [&](const BranchDomainLiteral& lit,
+                                 double* delta_out) -> bool {
+    if (delta_out != nullptr) *delta_out = 0.0;
+    if (lit.var_idx < 0 || lit.var_idx >= n ||
+        !std::isfinite(lit.value)) {
+      return false;
+    }
+    const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
+    if (a > 0.0 && lit.is_lb) {
+      if (!std::isfinite(root_lb[lit.var_idx])) return false;
+      const double delta = a * (lit.value - root_lb[lit.var_idx]);
+      if (!std::isfinite(delta) || delta < -proof_tol) return false;
+      if (delta_out != nullptr) *delta_out = std::max(0.0, delta);
+      return true;
+    }
+    if (a < 0.0 && !lit.is_lb) {
+      if (!std::isfinite(root_ub[lit.var_idx])) return false;
+      const double delta = a * (lit.value - root_ub[lit.var_idx]);
+      if (!std::isfinite(delta) || delta < -proof_tol) return false;
+      if (delta_out != nullptr) *delta_out = std::max(0.0, delta);
+      return true;
+    }
+    return false;
+  };
+  auto audited_activity_from_frontier =
+      [&](const std::vector<BranchDomainLiteral>& frontier,
+          double& audited_activity) -> bool {
+    audited_activity = root_min_activity;
+    std::vector<char> seen_lower(static_cast<std::size_t>(n), 0);
+    std::vector<char> seen_upper(static_cast<std::size_t>(n), 0);
+    for (const auto& lit : frontier) {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value)) {
+        return false;
+      }
+      char& seen = lit.is_lb ? seen_lower[static_cast<std::size_t>(lit.var_idx)]
+                             : seen_upper[static_cast<std::size_t>(lit.var_idx)];
+      if (seen != 0) return false;
+      seen = 1;
+      double delta = 0.0;
+      if (!proof_literal_delta(lit, &delta)) return false;
+      audited_activity += delta;
+    }
+    return std::isfinite(audited_activity);
+  };
+  auto frontier_implies_literals =
+      [&](const std::vector<BranchDomainLiteral>& reason_frontier,
+          const std::vector<BranchDomainLiteral>& needed_literals) -> bool {
+    if (needed_literals.empty()) return false;
+    Eigen::VectorXd closure_lb = root_lb;
+    Eigen::VectorXd closure_ub = root_ub;
+    auto apply_lit = [&](const BranchDomainLiteral& lit) -> bool {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value)) {
+        return false;
+      }
+      if (lit.is_lb) {
+        if (lit.value > closure_ub[lit.var_idx] + tol) return false;
+        if (lit.value > closure_lb[lit.var_idx]) {
+          closure_lb[lit.var_idx] = lit.value;
+        }
+      } else {
+        if (lit.value < closure_lb[lit.var_idx] - tol) return false;
+        if (lit.value < closure_ub[lit.var_idx]) {
+          closure_ub[lit.var_idx] = lit.value;
+        }
+      }
+      return true;
+    };
+    auto active_lit = [&](const BranchDomainLiteral& lit) -> bool {
+      if (lit.var_idx < 0 || lit.var_idx >= n ||
+          !std::isfinite(lit.value)) {
+        return false;
+      }
+      return lit.is_lb ? closure_lb[lit.var_idx] >= lit.value - tol
+                       : closure_ub[lit.var_idx] <= lit.value + tol;
+    };
+    for (const auto& lit : reason_frontier) {
+      if (!apply_lit(lit)) return false;
+    }
+    if (have_native_trail) {
+      bool changed = true;
+      for (int pass = 0; pass < trail_end + 1 && changed; ++pass) {
+        changed = false;
+        for (const auto& entry : *local_domain_trail) {
+          if (entry.pos < 0 || entry.pos >= trail_end ||
+              entry.reason.empty()) {
+            continue;
+          }
+          bool reason_active = true;
+          for (const auto& lit : entry.reason) {
+            if (!active_lit(lit)) {
+              reason_active = false;
+              break;
+            }
+          }
+          if (!reason_active) continue;
+          const double old_lb = closure_lb[entry.bound.var_idx];
+          const double old_ub = closure_ub[entry.bound.var_idx];
+          if (!apply_lit(entry.bound)) return false;
+          if (closure_lb[entry.bound.var_idx] > old_lb + tol ||
+              closure_ub[entry.bound.var_idx] < old_ub - tol) {
+            changed = true;
+          }
+        }
+      }
+    }
+    for (const auto& lit : needed_literals) {
+      if (!active_lit(lit)) return false;
+    }
+    return true;
+  };
+  auto frontier_implies_proof_frontier =
+      [&](const std::vector<BranchDomainLiteral>& reason_frontier,
+          const std::vector<BranchDomainLiteral>& needed_proof_frontier,
+          double& audited_activity) -> bool {
+    if (audited_activity_from_frontier(reason_frontier, audited_activity)) {
+      if (audited_activity >= cutoff_rhs - proof_tol) {
+        return true;
+      }
+    }
+    if (!frontier_implies_literals(reason_frontier, needed_proof_frontier)) {
+      return false;
+    }
+    audited_activity = root_min_activity;
+    for (const auto& lit : needed_proof_frontier) {
+      double delta = 0.0;
+      if (!proof_literal_delta(lit, &delta)) return false;
+      audited_activity += delta;
+    }
+    return std::isfinite(audited_activity) &&
+           audited_activity >= cutoff_rhs - proof_tol;
   };
   std::vector<TrailCandidate> candidates;
   candidates.reserve(static_cast<std::size_t>(coeff_sparse.nonZeros()));
@@ -3068,7 +3556,9 @@ bool resolve_dual_proof_conflict_from_local_trail(
                                rb.prev_bound_pos, false);
     }
   }
-  if (candidates.empty()) return false;
+  if (candidates.empty()) {
+    return fail(DualProofResolutionStatus::MissingReason);
+  }
 
   std::sort(candidates.begin(), candidates.end(),
             [](const TrailCandidate& a, const TrailCandidate& b) {
@@ -3086,7 +3576,9 @@ bool resolve_dual_proof_conflict_from_local_trail(
     activity += cand.delta;
     if (activity >= cutoff_rhs) break;
   }
-  if (selected.empty() || activity < cutoff_rhs) return false;
+  if (selected.empty() || activity < cutoff_rhs) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
 
   for (int k = static_cast<int>(selected.size()) - 1; k >= 0; --k) {
     TrailCandidate& cand = selected[static_cast<std::size_t>(k)];
@@ -3156,7 +3648,9 @@ bool resolve_dual_proof_conflict_from_local_trail(
     }
     if (activity <= cutoff_rhs + proof_tol) break;
   }
-  if (selected.empty() || activity < cutoff_rhs) return false;
+  if (selected.empty() || activity < cutoff_rhs) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
+  }
 
   int integral_cols = 0;
   for (const auto& var : vars) {
@@ -3164,7 +3658,7 @@ bool resolve_dual_proof_conflict_from_local_trail(
   }
   if (10 * static_cast<int>(selected.size()) > 1000 + 3 * integral_cols ||
       static_cast<int>(selected.size()) > max_literals) {
-    return false;
+    return fail(DualProofResolutionStatus::LiteralLimit);
   }
 
   std::vector<BranchDomainLiteral> proof_frontier;
@@ -3173,7 +3667,15 @@ bool resolve_dual_proof_conflict_from_local_trail(
   canonicalize_branch_literals(proof_frontier);
   if (proof_frontier.empty() ||
       static_cast<int>(proof_frontier.size()) > max_literals) {
-    return false;
+    return fail(proof_frontier.empty()
+                    ? DualProofResolutionStatus::ActivityFailed
+                    : DualProofResolutionStatus::LiteralLimit);
+  }
+  double proof_frontier_activity = 0.0;
+  if (!audited_activity_from_frontier(proof_frontier,
+                                      proof_frontier_activity) ||
+      proof_frontier_activity < cutoff_rhs - proof_tol) {
+    return fail(DualProofResolutionStatus::ActivityFailed);
   }
 
   struct FrontierEntry {
@@ -3260,14 +3762,109 @@ bool resolve_dual_proof_conflict_from_local_trail(
                                int before_pos) -> FrontierEntry {
     const LocalDomainTrailEntry* prior = find_prior_entry(lit, before_pos);
     if (prior != nullptr) {
-      return FrontierEntry{lit,
-                           prior->reason.empty()
-                               ? std::vector<BranchDomainLiteral>{lit}
-                               : prior->reason,
-                           prior->pos,
-                           prior->is_branch};
+      return FrontierEntry{
+          lit,
+          prior->reason.empty()
+              ? std::vector<BranchDomainLiteral>{lit}
+              : prior->reason,
+          prior->pos,
+          prior->is_branch};
     }
     return FrontierEntry{lit, {lit}, fallback_literal_pos(lit), true};
+  };
+
+  auto flip_literal_for_conflict =
+      [&](const BranchDomainLiteral& lit, BranchDomainLiteral& flipped) -> bool {
+    if (lit.var_idx < 0 || lit.var_idx >= n || !std::isfinite(lit.value)) {
+      return false;
+    }
+    const bool integer_var =
+        is_integer_type(vars[static_cast<std::size_t>(lit.var_idx)]);
+    if (lit.is_lb) {
+      flipped = BranchDomainLiteral{
+          lit.var_idx,
+          integer_var ? std::ceil(lit.value - tol) - 1.0
+                      : lit.value - std::max(1e-7, 10.0 * tol),
+          false};
+    } else {
+      flipped = BranchDomainLiteral{
+          lit.var_idx,
+          integer_var ? std::floor(lit.value + tol) + 1.0
+                      : lit.value + std::max(1e-7, 10.0 * tol),
+          true};
+    }
+    return true;
+  };
+
+  auto source_conflict_matches_flipped =
+      [&](const BranchDomainLiteral& conflict_lit,
+          const BranchDomainLiteral& flipped) {
+    if (conflict_lit.var_idx != flipped.var_idx ||
+        conflict_lit.is_lb != flipped.is_lb) {
+      return false;
+    }
+    return conflict_lit.is_lb
+               ? conflict_lit.value <= flipped.value + tol
+               : conflict_lit.value >= flipped.value - tol;
+  };
+
+  auto explain_conflict_reason_frontier =
+      [&](const LocalDomainTrailEntry& entry,
+          std::vector<FrontierEntry>& replacement) -> bool {
+    replacement.clear();
+    if (!have_native_trail || !entry.has_source_conflict_clause ||
+        entry.source_conflict_clause.empty() || entry.pos <= 0) {
+      return false;
+    }
+    BranchDomainLiteral flipped_entry;
+    if (!flip_literal_for_conflict(entry.bound, flipped_entry)) return false;
+    bool found_flipped = false;
+    for (const auto& conflict_lit : entry.source_conflict_clause) {
+      if (!found_flipped &&
+          source_conflict_matches_flipped(conflict_lit, flipped_entry)) {
+        found_flipped = true;
+        continue;
+      }
+      if (conflict_lit.var_idx < 0 || conflict_lit.var_idx >= n ||
+          !std::isfinite(conflict_lit.value)) {
+        return false;
+      }
+      const double global_bound =
+          conflict_lit.is_lb ? root_lb[conflict_lit.var_idx]
+                             : root_ub[conflict_lit.var_idx];
+      if (std::isfinite(global_bound)) {
+        const bool globally_active =
+            conflict_lit.is_lb
+                ? global_bound >= conflict_lit.value - tol
+                : global_bound <= conflict_lit.value + tol;
+        if (globally_active) continue;
+      }
+      const LocalDomainTrailEntry* prior =
+          find_prior_entry(conflict_lit, entry.pos);
+      if (prior == nullptr) return false;
+      LocalDomainTrailEntry relaxed = *prior;
+      while (relaxed.prev_bound_pos >= 0 &&
+             relaxed.prev_bound_pos <
+                 static_cast<int>(local_domain_trail->size())) {
+        const auto& prev =
+            (*local_domain_trail)[static_cast<std::size_t>(
+                relaxed.prev_bound_pos)];
+        const bool prev_still_active =
+            conflict_lit.is_lb
+                ? prev.bound.value >= conflict_lit.value - tol
+                : prev.bound.value <= conflict_lit.value + tol;
+        if (!prev_still_active) break;
+        relaxed = prev;
+      }
+      replacement.push_back(FrontierEntry{
+          conflict_lit,
+          relaxed.reason.empty() && relaxed.is_branch
+              ? std::vector<BranchDomainLiteral>{conflict_lit}
+              : relaxed.reason,
+          relaxed.pos,
+          relaxed.is_branch});
+    }
+    return found_flipped;
   };
 
   auto frontier_literals = [&](const std::vector<FrontierEntry>& frontier) {
@@ -3367,16 +3964,29 @@ bool resolve_dual_proof_conflict_from_local_trail(
 	        return false;
 	      };
 	      std::vector<FrontierEntry> replacement;
-	      replacement.reserve(entry.reason.size());
-	      bool replacement_valid = true;
-	      for (const auto& reason_lit : entry.reason) {
-	        if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
-	            !std::isfinite(reason_lit.value)) {
-	          replacement_valid = false;
-	          break;
+	      bool replacement_valid =
+	          explain_conflict_reason_frontier(entry, replacement);
+	      if (replacement_valid) {
+	        replacement.erase(
+	            std::remove_if(
+	                replacement.begin(), replacement.end(),
+	                [&](const FrontierEntry& repl) {
+	                  return covered_by_current_frontier(repl.lit);
+	                }),
+	            replacement.end());
+	      } else {
+	        replacement.clear();
+	        replacement.reserve(entry.reason.size());
+	        replacement_valid = true;
+	        for (const auto& reason_lit : entry.reason) {
+	          if (reason_lit.var_idx < 0 || reason_lit.var_idx >= n ||
+	              !std::isfinite(reason_lit.value)) {
+	            replacement_valid = false;
+	            break;
+	          }
+	          if (covered_by_current_frontier(reason_lit)) continue;
+	          replacement.push_back(entry_for_literal(reason_lit, latest_pos));
 	        }
-	        if (covered_by_current_frontier(reason_lit)) continue;
-	        replacement.push_back(entry_for_literal(reason_lit, latest_pos));
 	      }
 	      if (!replacement_valid) {
 	        skipped_positions.insert(latest_pos);
@@ -3415,7 +4025,15 @@ bool resolve_dual_proof_conflict_from_local_trail(
   canonicalize_branch_literals(resolved_frontier);
   if (resolved_frontier.empty() ||
       static_cast<int>(resolved_frontier.size()) > max_literals) {
-    return false;
+    return fail(resolved_frontier.empty()
+                    ? DualProofResolutionStatus::ScopeBlocked
+                    : DualProofResolutionStatus::LiteralLimit);
+  }
+  double resolved_frontier_activity = 0.0;
+  if (!frontier_implies_proof_frontier(resolved_frontier, proof_frontier,
+                                       resolved_frontier_activity)) {
+    return fail(have_native_trail ? DualProofResolutionStatus::ScopeBlocked
+                                  : DualProofResolutionStatus::MissingReason);
   }
 
   auto flip_literal = [&](const BranchDomainLiteral& lit,
@@ -3452,37 +4070,46 @@ bool resolve_dual_proof_conflict_from_local_trail(
     out.conflict_clauses.push_back(std::move(clause));
   };
 
-  for (const auto& cand : selected) {
-    if (cand.is_branch || cand.reason.empty()) continue;
-    BranchDomainLiteral flipped;
-    if (!flip_literal(cand.lit, flipped)) continue;
-    std::vector<FrontierEntry> reason_frontier;
-    reason_frontier.reserve(cand.reason.size());
-    for (const auto& reason_lit : cand.reason) {
-      reason_frontier.push_back(entry_for_literal(reason_lit, cand.trail_pos));
+  if (out.conflict_clauses.empty()) {
+    for (const auto& cand : selected) {
+      if (cand.is_branch || cand.reason.empty()) continue;
+      BranchDomainLiteral flipped;
+      if (!flip_literal(cand.lit, flipped)) continue;
+      std::vector<FrontierEntry> reason_frontier;
+      reason_frontier.reserve(cand.reason.size());
+      for (const auto& reason_lit : cand.reason) {
+        reason_frontier.push_back(entry_for_literal(reason_lit, cand.trail_pos));
+      }
+      std::vector<BranchDomainLiteral> reconv =
+          resolve_reason_frontier(std::move(reason_frontier), /*stop_size=*/0,
+                                  /*min_resolve=*/0);
+      if (!frontier_implies_literals(reconv, {cand.lit})) continue;
+      reconv.push_back(flipped);
+      add_clause(std::move(reconv));
     }
-    std::vector<BranchDomainLiteral> reconv =
-        resolve_reason_frontier(std::move(reason_frontier), /*stop_size=*/0,
-                                /*min_resolve=*/0);
-    reconv.push_back(flipped);
-    add_clause(std::move(reconv));
   }
 
-  add_clause(resolved_frontier);
-  if (conflict_clause_hash(proof_frontier) !=
-      conflict_clause_hash(resolved_frontier)) {
-    add_clause(proof_frontier);
+  if (out.conflict_clauses.empty()) {
+    add_clause(resolved_frontier);
+    if (conflict_clause_hash(proof_frontier) !=
+        conflict_clause_hash(resolved_frontier)) {
+      add_clause(proof_frontier);
+    }
   }
-  if (out.conflict_clauses.empty()) return false;
+  if (out.conflict_clauses.empty()) {
+    return fail(DualProofResolutionStatus::ScopeBlocked);
+  }
 
   out.valid = true;
   out.proof_frontier = std::move(proof_frontier);
   out.resolved_frontier = std::move(resolved_frontier);
   out.root_min_activity = root_min_activity;
   out.node_min_activity = node_min_activity;
-  out.cutoff_rhs = rhs;
-  out.proof_margin = node_min_activity - rhs;
-  return true;
+  out.cutoff_rhs = cutoff_rhs;
+  out.proof_margin = resolved_frontier_activity - cutoff_rhs;
+  out.proof_activity = proof_frontier_activity;
+  out.resolved_activity = resolved_frontier_activity;
+  return success();
 }
 
 bool build_dual_proof_target_bound_conflict_clause(
@@ -3544,30 +4171,19 @@ bool build_dual_proof_target_bound_conflict_clause(
     }
   }
 
-  auto literal_delta = [&](const BranchDomainLiteral& lit) -> double {
-    if (lit.var_idx < 0 || lit.var_idx >= n) return 0.0;
-    const double a = coeff[static_cast<std::size_t>(lit.var_idx)];
-    if (a > 0.0 && lit.is_lb) {
-      if (!std::isfinite(root_lb[lit.var_idx])) return 0.0;
-      return std::max(0.0, a * (lit.value - root_lb[lit.var_idx]));
-    }
-    if (a < 0.0 && !lit.is_lb) {
-      if (!std::isfinite(root_ub[lit.var_idx])) return 0.0;
-      return std::max(0.0, a * (lit.value - root_ub[lit.var_idx]));
-    }
-    return 0.0;
-  };
   DualProofTrailResolution trail_resolution;
   const Eigen::SparseVector<double>* priority_coeff_ptr =
       priority_proof != nullptr && priority_proof->valid &&
               priority_proof->coeff.size() >= n
           ? &priority_proof->coeff
           : nullptr;
-  if (resolve_dual_proof_target_bound_from_local_trail(
+  const DualProofResolutionStatus trail_status =
+      resolve_dual_proof_target_bound_from_local_trail(
           vars, root_lb, root_ub, &x_relax, int_tol, branch_reasons,
           reason_bounds, local_domain_trail, local_branch_positions,
           target_bound, max_literals, dual_proof->coeff, dual_proof->rhs,
-          trail_resolution, priority_coeff_ptr)) {
+          trail_resolution, priority_coeff_ptr);
+  if (dual_proof_resolution_success(trail_status) && trail_resolution.valid) {
     double best_violation = 0.0;
     if (violated_local_proof_cover != nullptr) {
       struct ProofTerm {
@@ -3651,16 +4267,20 @@ bool build_dual_proof_target_bound_conflict_clause(
       explanation->clause = trail_resolution.clause;
       explanation->proof_margin = trail_resolution.proof_margin;
       explanation->proof_budget = trail_resolution.proof_budget;
-      explanation->frontier_lp_activity = 0.0;
-      for (const auto& lit : explanation->initial_frontier) {
-        explanation->frontier_lp_activity += literal_delta(lit);
-      }
+      explanation->frontier_lp_activity =
+          std::max(0.0, trail_resolution.resolved_activity -
+                            (dual_proof->rhs -
+                             trail_resolution.proof_budget));
       explanation->local_proof_cover_violation = best_violation;
       explanation->local_proof_cover_nnz =
           violated_local_proof_cover != nullptr &&
                   violated_local_proof_cover->coeff.size() == n
               ? violated_local_proof_cover->coeff.nonZeros()
               : 0;
+      explanation->has_proof_activity_audit = true;
+      explanation->proof_activity = trail_resolution.resolved_activity;
+      explanation->proof_required_activity =
+          trail_resolution.resolved_activity - trail_resolution.proof_margin;
     }
 	    out_clause = trail_resolution.clause;
 	    return true;
@@ -5079,42 +5699,6 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
             &clause_reason_bounds)
       : conflict_pool->propagate(vars, node_lb, node_ub,
                                  &local_tightened, &clause_changes);
-  if (!ok) {
-    if (tightened != nullptr) *tightened += local_tightened;
-    for (int k = 0; k < static_cast<int>(clause_reason_bounds.size()); ++k) {
-      auto& rb = clause_reason_bounds[static_cast<std::size_t>(k)];
-      rb.trail_pos =
-          branch_reason_count + static_cast<int>(changes_out.size()) + k;
-      rb.depth = branch_reason_count;
-      if (rb.bound.var_idx >= 0 && rb.bound.var_idx < static_cast<int>(vars.size())) {
-        std::vector<int> ids;
-        for (const auto& lit : rb.reason) {
-          if (lit.var_idx < 0 ||
-              lit.var_idx >= static_cast<int>(vars.size())) {
-            continue;
-          }
-          const int rid = lit.is_lb
-              ? lb_reason[static_cast<std::size_t>(lit.var_idx)]
-              : ub_reason[static_cast<std::size_t>(lit.var_idx)];
-          ids.push_back(rid > 0 ? rid : arena.singleton(lit));
-        }
-        const int rid = arena.merge_ids(ids);
-        rb.reason = arena.get(rid);
-        if (rb.bound.is_lb) {
-          lb_reason[static_cast<std::size_t>(rb.bound.var_idx)] = rid;
-        } else {
-          ub_reason[static_cast<std::size_t>(rb.bound.var_idx)] = rid;
-        }
-      }
-    }
-    changes_out.insert(changes_out.end(), clause_changes.begin(), clause_changes.end());
-    if (reason_bounds_out != nullptr) {
-      reason_bounds_out->insert(reason_bounds_out->end(),
-                                clause_reason_bounds.begin(),
-                                clause_reason_bounds.end());
-    }
-    return false;
-  }
   if (tightened != nullptr) *tightened += local_tightened;
   for (int k = 0; k < static_cast<int>(clause_reason_bounds.size()); ++k) {
     auto& rb = clause_reason_bounds[static_cast<std::size_t>(k)];
@@ -5122,6 +5706,7 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
         branch_reason_count + static_cast<int>(changes_out.size()) + k;
     rb.depth = branch_reason_count;
     if (rb.bound.var_idx >= 0 && rb.bound.var_idx < static_cast<int>(vars.size())) {
+      canonicalize_branch_literals(rb.reason);
       std::vector<int> ids;
       for (const auto& lit : rb.reason) {
         if (lit.var_idx < 0 ||
@@ -5147,6 +5732,9 @@ bool clause_propagation_step(const ConflictPoolT* conflict_pool,
     reason_bounds_out->insert(reason_bounds_out->end(),
                               clause_reason_bounds.begin(),
                               clause_reason_bounds.end());
+  }
+  if (!ok) {
+    return false;
   }
   for (const auto& bc : clause_changes) {
     if (bc.var_idx >= 0 && bc.var_idx < static_cast<int>(queued_vars.size()) &&
@@ -5174,7 +5762,8 @@ bool propagate_node_domain_impl(
     const std::vector<BranchDomainLiteral>& branch_reasons,
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
-    std::vector<DomainReasonBound>* reason_bounds_out) {
+    std::vector<DomainReasonBound>* reason_bounds_out,
+    const std::vector<DomainReasonBound>* existing_reason_bounds) {
   PropagationProfile profile;
   profile.calls = 1;
   const auto _prop_t0 = std::chrono::steady_clock::now();
@@ -5205,16 +5794,43 @@ bool propagate_node_domain_impl(
       enqueue_var(lit.var_idx);
     }
   }
+  if (existing_reason_bounds != nullptr) {
+    for (const auto& rb : *existing_reason_bounds) {
+      const int j = rb.bound.var_idx;
+      if (j < 0 || j >= n || !std::isfinite(rb.bound.value)) continue;
+      const bool active = rb.bound.is_lb
+          ? (node_lb[j] >= rb.bound.value - 1e-9)
+          : (node_ub[j] <= rb.bound.value + 1e-9);
+      if (!active) continue;
+      const int rid = !rb.reason.empty() ? arena.add_clause(rb.reason) : 0;
+      if (rb.bound.is_lb) {
+        const int old = lb_reason[static_cast<std::size_t>(j)];
+        if (old <= 0 || rb.bound.value >= node_lb[j] - 1e-9) {
+          lb_reason[static_cast<std::size_t>(j)] = rid;
+        }
+      } else {
+        const int old = ub_reason[static_cast<std::size_t>(j)];
+        if (old <= 0 || rb.bound.value <= node_ub[j] + 1e-9) {
+          ub_reason[static_cast<std::size_t>(j)] = rid;
+        }
+      }
+      enqueue_var(j);
+    }
+  }
   const std::size_t input_change_count = changes_out.size();
   for (std::size_t ci = 0; ci < input_change_count; ++ci) {
     const int j = changes_out[ci].var_idx;
     if (j >= 0 && j < n) {
       if (changes_out[ci].is_lb) {
-        lb_reason[static_cast<std::size_t>(j)] =
-            arena.singleton(BranchDomainLiteral{j, node_lb[j], true});
+        int& rid = lb_reason[static_cast<std::size_t>(j)];
+        if (rid <= 0) {
+          rid = arena.singleton(BranchDomainLiteral{j, node_lb[j], true});
+        }
       } else {
-        ub_reason[static_cast<std::size_t>(j)] =
-            arena.singleton(BranchDomainLiteral{j, node_ub[j], false});
+        int& rid = ub_reason[static_cast<std::size_t>(j)];
+        if (rid <= 0) {
+          rid = arena.singleton(BranchDomainLiteral{j, node_ub[j], false});
+        }
       }
       enqueue_var(j);
     }
@@ -5234,7 +5850,14 @@ bool propagate_node_domain_impl(
     accumulate_propagation_profile(profile);
   };
 
-  auto apply_bound = [&](int j, bool is_lb, double new_val, int reason_id) -> bool {
+  struct LinearProofAudit {
+    BranchDomainLiteral source_conflict_literal;
+    double proof_activity{0.0};
+    double proof_required_activity{0.0};
+  };
+
+  auto apply_bound = [&](int j, bool is_lb, double new_val, int reason_id,
+                         const LinearProofAudit* proof_audit = nullptr) -> bool {
     if (j < 0 || j >= n) return true;
     if (is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
       new_val = is_lb ? std::ceil(new_val - 1e-9) : std::floor(new_val + 1e-9);
@@ -5248,12 +5871,34 @@ bool propagate_node_domain_impl(
           auto reason = arena.get(reason_id);
           const int trail_pos =
               static_cast<int>(branch_reasons.size()) + local_tightened;
-          reason_bounds_out->push_back(
-              {bound_lit, reason, trail_pos,
-               static_cast<int>(branch_reasons.size()),
-               BranchDomainLiteral{}, false});
+          DomainReasonBound rb;
+          rb.bound = bound_lit;
+          rb.reason = reason;
+          rb.trail_pos = trail_pos;
+          rb.depth = static_cast<int>(branch_reasons.size());
+          if (proof_audit != nullptr &&
+              proof_audit->source_conflict_literal.var_idx == j &&
+              proof_audit->source_conflict_literal.is_lb != is_lb &&
+              std::isfinite(proof_audit->source_conflict_literal.value) &&
+              std::isfinite(proof_audit->proof_activity) &&
+              std::isfinite(proof_audit->proof_required_activity)) {
+            rb.source_conflict_literal =
+                proof_audit->source_conflict_literal;
+            rb.has_source_conflict_literal = true;
+            rb.source_conflict_clause = rb.reason;
+            rb.source_conflict_clause.push_back(rb.source_conflict_literal);
+            canonicalize_branch_literals(rb.source_conflict_clause);
+            rb.has_source_conflict_clause = true;
+            rb.has_proof_activity_audit = true;
+            rb.proof_activity = proof_audit->proof_activity;
+            rb.proof_required_activity =
+                proof_audit->proof_required_activity;
+            rb.proof_activity_margin =
+                rb.proof_activity - rb.proof_required_activity;
+          }
+          reason_bounds_out->push_back(std::move(rb));
         }
-        lb_reason[static_cast<std::size_t>(j)] = arena.singleton(bound_lit);
+        lb_reason[static_cast<std::size_t>(j)] = reason_id;
         ++local_tightened;
         enqueue_var(j);
       }
@@ -5266,12 +5911,34 @@ bool propagate_node_domain_impl(
           auto reason = arena.get(reason_id);
           const int trail_pos =
               static_cast<int>(branch_reasons.size()) + local_tightened;
-          reason_bounds_out->push_back(
-              {bound_lit, reason, trail_pos,
-               static_cast<int>(branch_reasons.size()),
-               BranchDomainLiteral{}, false});
+          DomainReasonBound rb;
+          rb.bound = bound_lit;
+          rb.reason = reason;
+          rb.trail_pos = trail_pos;
+          rb.depth = static_cast<int>(branch_reasons.size());
+          if (proof_audit != nullptr &&
+              proof_audit->source_conflict_literal.var_idx == j &&
+              proof_audit->source_conflict_literal.is_lb != is_lb &&
+              std::isfinite(proof_audit->source_conflict_literal.value) &&
+              std::isfinite(proof_audit->proof_activity) &&
+              std::isfinite(proof_audit->proof_required_activity)) {
+            rb.source_conflict_literal =
+                proof_audit->source_conflict_literal;
+            rb.has_source_conflict_literal = true;
+            rb.source_conflict_clause = rb.reason;
+            rb.source_conflict_clause.push_back(rb.source_conflict_literal);
+            canonicalize_branch_literals(rb.source_conflict_clause);
+            rb.has_source_conflict_clause = true;
+            rb.has_proof_activity_audit = true;
+            rb.proof_activity = proof_audit->proof_activity;
+            rb.proof_required_activity =
+                proof_audit->proof_required_activity;
+            rb.proof_activity_margin =
+                rb.proof_activity - rb.proof_required_activity;
+          }
+          reason_bounds_out->push_back(std::move(rb));
         }
-        ub_reason[static_cast<std::size_t>(j)] = arena.singleton(bound_lit);
+        ub_reason[static_cast<std::size_t>(j)] = reason_id;
         ++local_tightened;
         enqueue_var(j);
       }
@@ -5291,6 +5958,31 @@ bool propagate_node_domain_impl(
            node_lb[j] >= -1e-9 && node_ub[j] <= 1.0 + 1e-9 &&
            std::isfinite(var.lb) && std::isfinite(var.ub) &&
            var.lb >= -1e-9 && var.ub <= 1.0 + 1e-9;
+  };
+  auto normalized_bound_value = [&](int j, bool is_lb, double value) {
+    if (j >= 0 && j < n &&
+        is_integer_type(lp.vars[static_cast<std::size_t>(j)])) {
+      return is_lb ? std::ceil(value - 1e-9) : std::floor(value + 1e-9);
+    }
+    return value;
+  };
+  auto opposite_source_literal = [&](int j, bool target_is_lb,
+                                     double target_value) {
+    const bool integer_var =
+        j >= 0 && j < n &&
+        is_integer_type(lp.vars[static_cast<std::size_t>(j)]);
+    if (target_is_lb) {
+      return BranchDomainLiteral{
+          j,
+          integer_var ? std::ceil(target_value - 1e-9) - 1.0
+                      : target_value - 1e-7,
+          false};
+    }
+    return BranchDomainLiteral{
+        j,
+        integer_var ? std::floor(target_value + 1e-9) + 1.0
+                    : target_value + 1e-7,
+        true};
   };
 
   if (!clause_propagation_step(conflict_pool, lp.vars, node_lb, node_ub,
@@ -5430,9 +6122,19 @@ bool propagate_node_domain_impl(
           }
           const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
-            if (!apply_bound(j, false, residual / a, rid)) break;
+            const double new_ub = normalized_bound_value(j, false, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, false, new_ub);
+            const LinearProofAudit audit{
+                source, min_activity - contrib + a * source.value, rhs};
+            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
           } else {
-            if (!apply_bound(j, true, residual / a, rid)) break;
+            const double new_lb = normalized_bound_value(j, true, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, true, new_lb);
+            const LinearProofAudit audit{
+                source, min_activity - contrib + a * source.value, rhs};
+            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
           }
         }
       };
@@ -5486,9 +6188,19 @@ bool propagate_node_domain_impl(
           }
           const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
-            if (!apply_bound(j, false, residual / a, rid)) break;
+            const double new_ub = normalized_bound_value(j, false, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, false, new_ub);
+            const LinearProofAudit audit{
+                source, min_activity - contrib + a * source.value, lp.beq[r]};
+            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
           } else {
-            if (!apply_bound(j, true, residual / a, rid)) break;
+            const double new_lb = normalized_bound_value(j, true, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, true, new_lb);
+            const LinearProofAudit audit{
+                source, min_activity - contrib + a * source.value, lp.beq[r]};
+            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
           }
         }
       }
@@ -5512,9 +6224,21 @@ bool propagate_node_domain_impl(
           }
           const int rid = arena.merge_ids(ids);
           if (a > 0.0) {
-            if (!apply_bound(j, true, residual / a, rid)) break;
+            const double new_lb = normalized_bound_value(j, true, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, true, new_lb);
+            const double source_activity =
+                max_activity - contrib + a * source.value;
+            const LinearProofAudit audit{source, -source_activity, -lp.beq[r]};
+            if (!apply_bound(j, true, new_lb, rid, &audit)) break;
           } else {
-            if (!apply_bound(j, false, residual / a, rid)) break;
+            const double new_ub = normalized_bound_value(j, false, residual / a);
+            const BranchDomainLiteral source =
+                opposite_source_literal(j, false, new_ub);
+            const double source_activity =
+                max_activity - contrib + a * source.value;
+            const LinearProofAudit audit{source, -source_activity, -lp.beq[r]};
+            if (!apply_bound(j, false, new_ub, rid, &audit)) break;
           }
         }
       }
@@ -5571,12 +6295,14 @@ bool propagate_node_domain(
     const std::vector<BranchDomainLiteral>& branch_reasons,
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
-    std::vector<DomainReasonBound>* reason_bounds_out) {
+    std::vector<DomainReasonBound>* reason_bounds_out,
+    const std::vector<DomainReasonBound>* existing_reason_bounds) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
-                                    total_tightened, reason_bounds_out);
+                                    total_tightened, reason_bounds_out,
+                                    existing_reason_bounds);
 }
 
 bool propagate_node_domain(
@@ -5594,12 +6320,14 @@ bool propagate_node_domain(
     const std::vector<BranchDomainLiteral>& branch_reasons,
     std::vector<BranchDomainLiteral>* learned_conflict,
     int* total_tightened,
-    std::vector<DomainReasonBound>* reason_bounds_out) {
+    std::vector<DomainReasonBound>* reason_bounds_out,
+    const std::vector<DomainReasonBound>* existing_reason_bounds) {
   return propagate_node_domain_impl(lp, A_row, Aeq_row, row_index, node_lb, node_ub,
                                     max_rounds, conflict_pool, clique_table,
                                     implication_graph, changes_out,
                                     branch_reasons, learned_conflict,
-                                    total_tightened, reason_bounds_out);
+                                    total_tightened, reason_bounds_out,
+                                    existing_reason_bounds);
 }
 
 }  // namespace mipsolvers::engine::detail

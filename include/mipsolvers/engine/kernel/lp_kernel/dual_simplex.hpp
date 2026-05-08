@@ -167,6 +167,11 @@ struct SimplexBasis {
   std::shared_ptr<const Eigen::MatrixXd> cached_inverse;
   // Cached reduced costs (depend only on basis/binv/c, not b).
   std::shared_ptr<const Eigen::VectorXd> cached_reduced_costs;
+  // Column scale used by cached_reduced_costs. Native simplex stores reduced
+  // costs in scaled standard-form maximization convention; HiGHS MIP
+  // propagation consumes unscaled minimization col_dual, recovered as
+  // col_dual[j] = -reduced_costs[j] / cached_col_scale[j].
+  std::shared_ptr<const Eigen::VectorXd> cached_col_scale;
   // Optional live simplex state for first-class root LP debugging.  These are
   // deliberately optional because tree-node basis hints are numerous; root
   // xpool code fills them only when it wants to continue from the same vertex

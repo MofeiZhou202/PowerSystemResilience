@@ -60,8 +60,14 @@ struct DomainReasonBound {
   int depth{0};
   BranchDomainLiteral source_conflict_literal;
   bool has_source_conflict_literal{false};
+  std::vector<BranchDomainLiteral> source_conflict_clause;
+  bool has_source_conflict_clause{false};
   int prev_bound_pos{-1};
   double prev_bound_value{0.0};
+  bool has_proof_activity_audit{false};
+  double proof_activity_margin{0.0};
+  double proof_activity{0.0};
+  double proof_required_activity{0.0};
 };
 
 /// @brief Ordered node-local domain trail entry.
@@ -78,6 +84,8 @@ struct LocalDomainTrailEntry {
   bool is_branch{false};
   BranchDomainLiteral source_conflict_literal;
   bool has_source_conflict_literal{false};
+  std::vector<BranchDomainLiteral> source_conflict_clause;
+  bool has_source_conflict_clause{false};
 };
 
 /// @brief Node-local binary implication proved under the node domain.
@@ -107,6 +115,10 @@ struct ScopedConflictClause {
   BranchDomainLiteral target_bound;
   BranchDomainLiteral source_conflict_literal;
   bool has_source_conflict_literal{false};
+  bool has_proof_activity_audit{false};
+  double proof_activity_margin{0.0};
+  double proof_activity{0.0};
+  double proof_required_activity{0.0};
 };
 
 /// @brief Globally consumable bound-lifting certificate.
@@ -123,6 +135,10 @@ struct BoundLiftingCertificate {
   bool has_source_conflict_literal{false};
   std::size_t hash{0};
   int depth{0};
+  bool has_proof_activity_audit{false};
+  double proof_activity_margin{0.0};
+  double proof_activity{0.0};
+  double proof_required_activity{0.0};
 };
 
 /// @brief Tree node with parent pointer for LCA-based navigation.
@@ -318,6 +334,8 @@ struct Node {
   std::vector<std::vector<BranchDomainLiteral>> local_conflict_clauses;
   std::vector<ScopedConflictClause> scoped_conflict_clauses;
   std::uint64_t domain_learning_epoch{0};
+  std::uint64_t objective_artifact_epoch{0};
+  std::uint64_t domain_closure_epoch{0};
   bool lp_refresh_needed{false};
   double bound{kInf};
   double estimate{kInf};
@@ -343,6 +361,8 @@ struct Node {
     c.local_conflict_clauses = local_conflict_clauses;
     c.scoped_conflict_clauses = scoped_conflict_clauses;
     c.domain_learning_epoch = domain_learning_epoch;
+    c.objective_artifact_epoch = objective_artifact_epoch;
+    c.domain_closure_epoch = domain_closure_epoch;
     c.lp_refresh_needed = false;
     c.bound = bound;
     c.estimate = estimate;
@@ -502,6 +522,7 @@ struct PoolCut {
   double best_efficacy;    ///< Best violation/||coeff|| ever seen
   double norm{0.0};        ///< Cached ||coeff||
   std::size_t hash{0};     ///< Structural hash for fast duplicate rejection
+  bool domain_only{false}; ///< Propagation-only row; do not inject into node LPs.
 };
 
 /// @brief Cut family identifiers for efficacy tracking (P2.1).

@@ -18,6 +18,9 @@
 
 #include <nlohmann/json.hpp>
 
+// AML forward declaration — defined in aml_bindings.cpp
+void bind_aml(pybind11::module_& parent);
+
 // SCUC public API
 #include "mipsolvers/scuc/scuc.hpp"
 
@@ -930,4 +933,7 @@ Returns
 -------
 list[str]  Available solver names (in priority order for "Auto")
 )doc");
+
+  // ── AML submodule ──────────────────────────────────────────────────────────
+  bind_aml(m);
 }
