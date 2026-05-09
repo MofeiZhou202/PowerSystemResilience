@@ -231,8 +231,36 @@ if(MIPSOLVERS_USE_SUITESPARSE)
   endif()
 endif()
 
-# ── Eigen3 (header-only) — use local sibling or installed ────────────────────
+# ── Eigen3 (header-only) — use installed package, system include path, or local sibling ──
 find_package(Eigen3 3.3 CONFIG QUIET)
+
+if(NOT Eigen3_FOUND)
+  find_path(MIPSOLVERS_EIGEN3_INCLUDE_DIR
+    NAMES Eigen/Core
+    HINTS
+      $ENV{EIGEN3_ROOT}
+      $ENV{EIGEN_ROOT}
+      /usr/include/eigen3
+      /usr/local/include/eigen3
+      /opt/homebrew/include/eigen3
+      "C:/vcpkg/installed/x64-windows/include/eigen3"
+      "C:/Program Files/eigen3/include/eigen3"
+    PATH_SUFFIXES
+      include
+      include/eigen3
+      eigen3)
+
+  if(MIPSOLVERS_EIGEN3_INCLUDE_DIR)
+    if(NOT TARGET Eigen3::Eigen)
+      add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+      target_include_directories(Eigen3::Eigen INTERFACE
+        "${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+    endif()
+    set(Eigen3_FOUND TRUE)
+    message(STATUS "mipsolvers: Eigen3 found via include path at ${MIPSOLVERS_EIGEN3_INCLUDE_DIR}")
+  endif()
+endif()
+
 if(NOT Eigen3_FOUND)
   # Try sibling project's fetched copy (offline-friendly)
   set(_EIGEN_LOCAL_HINTS
@@ -243,17 +271,19 @@ if(NOT Eigen3_FOUND)
   set(_EIGEN_FOUND_LOCAL FALSE)
   foreach(_EIGEN_DIR IN LISTS _EIGEN_LOCAL_HINTS)
     if(EXISTS "${_EIGEN_DIR}/Eigen/Core")
-      add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
-      target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_DIR}")
+      if(NOT TARGET Eigen3::Eigen)
+        add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+        target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_DIR}")
+      endif()
       set(_EIGEN_FOUND_LOCAL TRUE)
+      set(Eigen3_FOUND TRUE)
       message(STATUS "mipsolvers: Eigen3 found locally at ${_EIGEN_DIR}")
       break()
     endif()
   endforeach()
   if(NOT _EIGEN_FOUND_LOCAL)
     message(FATAL_ERROR
-      "Eigen3 not found. Either install it (brew install eigen) or ensure "
-      "HybridACDCPowerSystemsPlanning build dirs contain eigen-src/.")
+      "Eigen3 not found. Install Eigen or set EIGEN3_ROOT/EIGEN_ROOT to its include prefix.")
   endif()
 endif()
 
