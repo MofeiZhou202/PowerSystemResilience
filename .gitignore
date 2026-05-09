@@ -113,3 +113,5 @@ reports/study_contracts/results/*
 !.github/
 !.github/workflows/
 !.github/workflows/ci.yml
+
+.idea/

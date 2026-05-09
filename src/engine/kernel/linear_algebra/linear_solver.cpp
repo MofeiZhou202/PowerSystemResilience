@@ -9,20 +9,37 @@
 
 namespace mipsolvers::engine {
 
+namespace {
+
+bool is_empty_square_system(const Eigen::SparseMatrix<double>& a) {
+  return a.rows() == 0 && a.cols() == 0;
+}
+
+}  // namespace
+
 const char* EigenSparseLUSolver::backend_name() const {
   return "EigenSparseLU";
 }
 
 void EigenSparseLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
   solver_.analyzePattern(a);
 }
 
 bool EigenSparseLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
   solver_.factorize(a);
   return solver_.info() == Eigen::Success;
 }
 
 bool EigenSparseLUSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
   x = solver_.solve(rhs);
   return solver_.info() == Eigen::Success;
 }
@@ -38,17 +55,26 @@ const char* EigenUmfPackSolver::backend_name() const {
 }
 
 void EigenUmfPackSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->solver.analyzePattern(a);
 }
 
 bool EigenUmfPackSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }
 
 bool EigenUmfPackSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
   if (!impl_) return false;
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;
@@ -66,17 +92,26 @@ const char* EigenKluSolver::backend_name() const {
 }
 
 void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->solver.analyzePattern(a);
 }
 
 bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }
 
 bool EigenKluSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
   if (!impl_) return false;
   x = impl_->solver.solve(rhs);
   return impl_->solver.info() == Eigen::Success;

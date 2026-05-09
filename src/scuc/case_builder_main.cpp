@@ -4,7 +4,7 @@
 ///   scuc_case_builder [--case <name>] [--T <periods>] [--dt <hr>]
 ///                     [--wind] [--solar] [--storage] [--output <file>]
 ///
-/// Available cases: 3bus, 6bus, ieee39
+/// Available cases: 3bus, 6bus, ieee39, ieee118
 
 #include <filesystem>
 #include <fstream>
@@ -17,7 +17,7 @@
 static void usage(const char* prog) {
   std::cerr
       << "Usage: " << prog << " [options]\n"
-      << "  --case <name>    Case name: 3bus | 6bus | ieee39  (default: ieee39)\n"
+      << "  --case <name>    Case name: 3bus | 6bus | ieee39 | ieee118  (default: ieee39)\n"
       << "  --T <periods>    Number of time periods           (default: 24)\n"
       << "  --dt <hours>     Period length in hours           (default: 1.0)\n"
       << "  --wind           Include wind generation\n"
@@ -72,9 +72,11 @@ int main(int argc, char** argv) {
       inp = mipsolvers::scuc::build_6bus_case(T, dt, with_wind, with_storage);
     } else if (case_name == "ieee39") {
       inp = mipsolvers::scuc::build_ieee39_case(T, dt, with_wind, with_solar);
+    } else if (case_name == "ieee118") {
+      inp = mipsolvers::scuc::build_ieee118_case(T, dt, with_wind, with_solar);
     } else {
       std::cerr << "Unknown case: " << case_name
-                << "  (choose 3bus | 6bus | ieee39)\n";
+                << "  (choose 3bus | 6bus | ieee39 | ieee118)\n";
       return 1;
     }
   } catch (const std::exception& e) {

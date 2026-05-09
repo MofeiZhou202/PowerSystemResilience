@@ -38,11 +38,20 @@ static Key py_to_key(const py::object& obj) {
   }
   if (py::isinstance<py::tuple>(obj) || py::isinstance<py::list>(obj)) {
     std::vector<Atom> atoms;
-    for (auto item : obj) atoms.push_back(item.cast<std::string>());
+    for (auto item : obj) {
+      py::object pyitem = py::reinterpret_borrow<py::object>(item);
+      if (py::isinstance<Key>(pyitem)) {
+        // Accept Key objects inside a tuple (e.g. cost[(key_i, key_j)])
+        const Key& k = pyitem.cast<const Key&>();
+        for (const auto& a : k.values) atoms.push_back(a);
+      } else {
+        atoms.push_back(pyitem.cast<std::string>());
+      }
+    }
     return Key{atoms};
   }
   throw py::type_error(
-      "Key argument must be str, tuple[str,...], list[str] or aml.Key");
+      "Key argument must be str, tuple[str/Key,...], list[str/Key] or aml.Key");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -220,6 +229,14 @@ void bind_aml(py::module_& parent) {
          })
     .def("__sub__",
          [](const LinearExpr& a, const LinearExpr& b) { return a - b; })
+    .def("__sub__",
+         [](const LinearExpr& a, double c) {
+           LinearExpr r = a; r += -c; return r;
+         })
+    .def("__rsub__",
+         [](const LinearExpr& a, double c) {
+           LinearExpr r = -a; r += c; return r;
+         })
     .def("__neg__",
          [](const LinearExpr& a) { return -a; })
     .def("__mul__",

@@ -27,6 +27,7 @@ class EigenSparseLUSolver final : public SparseLinearSolver {
 
  private:
   Eigen::SparseLU<Eigen::SparseMatrix<double>> solver_;
+  bool empty_system_{false};
 };
 
 #ifdef HACDCPF_HAVE_UMFPACK
@@ -40,6 +41,7 @@ class EigenUmfPackSolver final : public SparseLinearSolver {
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
 };
 #endif
 
@@ -54,6 +56,7 @@ class EigenKluSolver final : public SparseLinearSolver {
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
 };
 #endif
 

@@ -3,7 +3,7 @@
 /// SCUC 市场模拟基准测试与结果可视化
 ///
 /// 功能：
-///   1. 对所有已注册 MILP 求解器（Gurobi / SCIP / NativeBranchAndCut / HiGHS）
+///   1. 对所有已注册的可用 MILP 求解器
 ///      在 3-bus、6-bus、IEEE 39-bus 算例上分别测速，输出对比表格
 ///   2. ASCII 图形化输出：机组组合 Gantt 图、调度出力时序图、LMP 热图
 ///   3. 物理一致性验证：功率平衡、备用满足、SOC 边界
@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -28,6 +29,7 @@
 
 using namespace mipsolvers::scuc;
 using namespace mipsolvers::engine;
+namespace fs = std::filesystem;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 计时辅助
@@ -51,6 +53,19 @@ struct BenchResult {
     double      mip_gap{0.0};
     int         n_cuts{0};
 };
+
+static fs::path debug_output_path(const std::string& filename) {
+    std::error_code ec;
+    fs::path dir = fs::temp_directory_path(ec);
+    if (ec || dir.empty()) {
+        ec.clear();
+        dir = fs::current_path(ec);
+    }
+    if (ec || dir.empty()) {
+        return fs::path(filename);
+    }
+    return dir / filename;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ASCII 可视化工具
@@ -865,8 +880,9 @@ TEST_CASE("Market: IEEE 39-bus 24h 完整流程", "[market][viz][ieee39]") {
     // ── 导出输入 JSON ────────────────────────────────────────────────────────
     {
         std::string js = scuc_input_to_json(inp, 2);
-        std::ofstream f("/tmp/ieee39_scuc_input.json");
-        if (f) { f << js; std::cout << "\n[调试] 输入已写入 /tmp/ieee39_scuc_input.json\n"; }
+        const fs::path input_path = debug_output_path("ieee39_scuc_input.json");
+        std::ofstream f(input_path);
+        if (f) { f << js; std::cout << "\n[调试] 输入已写入 " << input_path.string() << "\n"; }
     }
 
     // ── 求解前: 容量裕度检查 ──────────────────────────────────────────────────
@@ -934,8 +950,9 @@ TEST_CASE("Market: IEEE 39-bus 24h 完整流程", "[market][viz][ieee39]") {
     // ── 导出输出 JSON ────────────────────────────────────────────────────────
     {
         std::string js = scuc_output_to_json(out, inp, 2);
-        std::ofstream f("/tmp/ieee39_scuc_output.json");
-        if (f) { f << js; std::cout << "[调试] 输出已写入 /tmp/ieee39_scuc_output.json\n"; }
+        const fs::path output_path = debug_output_path("ieee39_scuc_output.json");
+        std::ofstream f(output_path);
+        if (f) { f << js; std::cout << "[调试] 输出已写入 " << output_path.string() << "\n"; }
     }
 
     // ── 求解耗时 ──────────────────────────────────────────────────────────────

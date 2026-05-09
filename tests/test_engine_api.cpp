@@ -10,6 +10,7 @@
 #include "mipsolvers/engine/api/result.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
 
 using namespace mipsolvers::engine;
@@ -136,4 +137,32 @@ TEST_CASE("SolveOptions defaults are sane", "[engine][api]") {
   CHECK(opts.allow_fallback);
   CHECK(opts.preferred_solver.empty());
   CHECK(opts.strategy_policy == StrategyPolicy::Auto);
+}
+
+TEST_CASE("EigenSparseLU handles empty square systems", "[engine][api][linear-solver]") {
+  EigenSparseLUSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  solver.analyze_pattern(a);
+  CHECK(solver.factorize(a));
+
+  Eigen::VectorXd rhs(0);
+  Eigen::VectorXd x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
+
+TEST_CASE("Default sparse solver handles empty square systems", "[engine][api][linear-solver]") {
+  auto solver = make_default_sparse_solver();
+  REQUIRE(solver != nullptr);
+
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  solver->analyze_pattern(a);
+  CHECK(solver->factorize(a));
+
+  Eigen::VectorXd rhs(0);
+  Eigen::VectorXd x;
+  CHECK(solver->solve(rhs, x));
+  CHECK(x.size() == 0);
 }

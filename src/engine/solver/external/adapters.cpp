@@ -42,6 +42,14 @@ std::string shell_quote(const std::string& s) {
   return std::string("\"") + s + "\"";
 }
 
+const char* shell_null_device() {
+#ifdef _WIN32
+  return "NUL";
+#else
+  return "/dev/null";
+#endif
+}
+
 bool file_exists(const std::string& p) {
   return !p.empty() && fs::exists(fs::path(p));
 }
@@ -1299,7 +1307,7 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
                           (env_flag_enabled("HIGHS_XROW_TRACE") ||
                                    env_flag_enabled("HACDCPF_XTAB_ROW_TRACE")
                                ? " >> " + shell_quote(log_path) + " 2>&1"
-                               : " > /dev/null 2>&1");
+                   : std::string(" > ") + shell_null_device() + " 2>&1");
 
   const int rc = std::system(cmd.c_str());
   const HighsRunReport run_report = parse_highs_run_report(log_path);
@@ -1417,7 +1425,7 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
                           " --options_file " + shell_quote(opt_path) +
                           (capture_log
                                ? " >> " + shell_quote(log_path) + " 2>&1"
-                               : " > /dev/null 2>&1");
+               : std::string(" > ") + shell_null_device() + " 2>&1");
 
   const int rc = std::system(cmd.c_str());
   const HighsRunReport run_report = parse_highs_run_report(log_path);
@@ -1639,7 +1647,7 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
   const std::string cmd = shell_quote(executable_) +
                           " -c \"set limits time 30\" -c \"read " + pip_path.string() +
                           "\" -c \"optimize\" -c \"write solution " + sol_path.string() +
-                          "\" -c \"quit\" > /dev/null 2>&1";
+                          "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
 
 #ifdef HACDCPF_HAVE_SCIP_LIB
   // ── In-process SCIP via libscip ────────────────────────────────────────────

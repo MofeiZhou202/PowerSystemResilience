@@ -1,0 +1,1513 @@
+% ============================================================
+%  MIPSolvers 使用教程 — Beamer 幻灯片
+%  编译: xelatex -interaction=nonstopmode slides.tex  (执行两次)
+% ============================================================
+\documentclass[10pt,aspectratio=169]{beamer}
+
+%% ── 中文支持 ──────────────────────────────────────────────────────────────────
+\usepackage{ctex}
+
+%% ── 主题 ──────────────────────────────────────────────────────────────────────
+\usetheme{Madrid}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+
+%% ── 数学 ──────────────────────────────────────────────────────────────────────
+\usepackage{amsmath,amssymb,bm}
+\newcommand{\vx}{\bm{x}}
+\newcommand{\vc}{\bm{c}}
+\newcommand{\vb}{\bm{b}}
+\newcommand{\mA}{\bm{A}}
+\newcommand{\mQ}{\bm{Q}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+
+%% ── 表格 ──────────────────────────────────────────────────────────────────────
+\usepackage{booktabs,multirow,array}
+
+%% ── 代码高亮 ──────────────────────────────────────────────────────────────────
+\usepackage{listings,xcolor}
+
+\definecolor{codebg}  {RGB}{248,248,248}
+\definecolor{codecmmt}{RGB}{ 60,128, 49}
+\definecolor{codekey} {RGB}{ 22, 22,212}
+\definecolor{codestr} {RGB}{163,  21, 21}
+\definecolor{codegray}{RGB}{130,130,130}
+
+\lstdefinestyle{py}{
+  backgroundcolor = \color{codebg},
+  basicstyle      = \ttfamily\scriptsize,
+  keywordstyle    = \color{codekey}\bfseries,
+  commentstyle    = \color{codecmmt}\itshape,
+  stringstyle     = \color{codestr},
+  numberstyle     = \tiny\color{codegray},
+  language        = Python,
+  numbers         = left,
+  numbersep       = 5pt,
+  stepnumber      = 1,
+  showstringspaces= false,
+  breaklines      = true,
+  frame           = single,
+  rulecolor       = \color{gray!40},
+  tabsize         = 4,
+  keepspaces      = true,
+  columns         = fullflexible,
+}
+\lstset{style=py}
+
+%% ── 颜色方框 ─────────────────────────────────────────────────────────────────
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\tcbset{
+  mybox/.style={
+    colback=blue!5,colframe=blue!60!black,
+    fonttitle=\bfseries,boxrule=0.5pt,
+    left=2pt,right=2pt,top=2pt,bottom=2pt
+  }
+}
+
+%% ── TikZ 流程图 ──────────────────────────────────────────────────────────────
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,shapes.geometric,positioning,fit}
+
+%% ── 标题信息 ─────────────────────────────────────────────────────────────────
+\title{MIPSolvers 使用教程}
+\subtitle{优化求解器：理论、接口与电力系统应用}
+\author{内部技术教程}
+\institute{MIPSolvers v0.1}
+\date{\today}
+
+% ============================================================
+\begin{document}
+% ============================================================
+
+%% ── 封面 ──────────────────────────────────────────────────────────────────────
+\begin{frame}
+  \titlepage
+  \vfill
+  \begin{center}
+    \small\texttt{Python~3.8 + pybind11 + HiGHS/SCIP}
+  \end{center}
+\end{frame}
+
+%% ── 目录 ──────────────────────────────────────────────────────────────────────
+\begin{frame}{目录}
+  \tableofcontents
+\end{frame}
+
+% ============================================================
+\section{优化求解器概论}
+% ============================================================
+
+\begin{frame}{什么是数学优化？}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{数学优化（Mathematical Programming）}
+    \vspace{4pt}
+
+    在满足约束条件的前提下，寻找使目标函数最小（或最大）的决策变量取值：
+    \[
+      \min_{\vx\in\mathcal{X}} \; f(\vx)
+      \quad\text{s.t.}\quad
+      g_i(\vx) \le 0,\;
+      h_j(\vx) = 0
+    \]
+
+    \textbf{三要素：}
+    \begin{itemize}
+      \item \textbf{决策变量} $\vx$：可调节量
+      \item \textbf{目标函数} $f(\vx)$：优化指标
+      \item \textbf{约束条件} $g,\,h$：物理/逻辑限制
+    \end{itemize}
+
+    \column{0.40\textwidth}
+    \begin{tcolorbox}[mybox,title=常见问题类型]
+      \footnotesize
+      \begin{tabular}{@{}ll@{}}
+        \textbf{LP}   & 线性规划 \\[2pt]
+        \textbf{QP}   & 二次规划 \\[2pt]
+        \textbf{NLP}  & 非线性规划 \\[2pt]
+        \textbf{MILP} & 混合整数线性规划 \\[2pt]
+        \textbf{MINLP}& 混合整数非线性 \\[2pt]
+        \textbf{LE}   & 线性方程组 \\[2pt]
+        \textbf{NLE}  & 非线性方程组 \\
+      \end{tabular}
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{求解器的作用与分类}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \textbf{求解器}封装了数值优化算法，提供统一接口：
+    \begin{center}
+      \begin{tikzpicture}[>=Stealth,node distance=0.9cm,font=\small]
+        \node[draw,rounded corners,fill=blue!15,text width=2.8cm,align=center]
+              (model) {数学模型\\(变量, 目标, 约束)};
+        \node[draw,rounded corners,fill=orange!20,text width=2.8cm,align=center,
+              below=of model]
+              (solver){优化求解器\\(算法实现)};
+        \node[draw,rounded corners,fill=green!20,text width=2.8cm,align=center,
+              below=of solver]
+              (sol)  {最优解 / 状态};
+        \draw[->] (model)  -- (solver);
+        \draw[->] (solver) -- (sol);
+      \end{tikzpicture}
+    \end{center}
+
+    \column{0.45\textwidth}
+    \footnotesize
+    \begin{tabular}{@{}lll@{}}
+      \toprule
+      \textbf{求解器} & \textbf{类型} & \textbf{许可} \\
+      \midrule
+      Gurobi      & LP/MILP  & 商业 \\
+      CPLEX       & LP/MILP  & 商业 \\
+      HiGHS       & LP/MILP  & 开源 \\
+      SCIP        & MILP     & 开源 \\
+      Ipopt       & NLP      & 开源 \\
+      GLPK        & LP/MILP  & 开源 \\
+      \midrule
+      \multicolumn{3}{l}{\textit{MIPSolvers 统一以上接口}} \\
+      \bottomrule
+    \end{tabular}
+    \vspace{6pt}
+
+    \textbf{核心算法：}
+    \begin{itemize}
+      \item 单纯形法 / 对偶单纯形法 (LP)
+      \item 内点法 (LP, NLP)
+      \item 分支定界法 (MILP)
+      \item 切平面法、列生成法
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{主要应用场景}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \textbf{通用领域：}
+    \begin{itemize}
+      \item 供应链与物流优化（运输规划、选址）
+      \item 金融投资组合优化
+      \item 生产排程与资源分配
+      \item 机器学习（正则化、SVM）
+      \item 通信网络路由
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{电力系统专项：}
+    \begin{itemize}
+      \item \textbf{机组组合（UC/SCUC）}：确定每台机组的开/停计划
+      \item \textbf{最优潮流（OPF）}：最小化发电成本，满足电网约束
+      \item \textbf{电力市场出清}：计算边际电价（LMP）
+      \item \textbf{输电规划}：确定新建线路方案
+      \item \textbf{储能调度}：管理电池充放电计划
+    \end{itemize}
+
+    \column{0.47\textwidth}
+    \begin{tcolorbox}[mybox,title=电力系统调度层级]
+      \footnotesize
+      \begin{tabular}{@{}ll@{}}
+        \textbf{年度/季度} & 检修计划规划 \\[2pt]
+        \textbf{周}        & 水电协调优化 \\[2pt]
+        \textbf{日前}      & SCUC（机组组合）\\[2pt]
+        \textbf{小时前}    & SCED（经济调度）\\[2pt]
+        \textbf{实时}      & AGC自动发电控制 \\[2pt]
+        \textbf{毫秒级}    & 保护与稳定控制 \\
+      \end{tabular}
+    \end{tcolorbox}
+
+    \vspace{6pt}
+    \textbf{MIPSolvers 重点}：日前 SCUC 及 SCED 的快速求解与建模
+  \end{columns}
+\end{frame}
+
+\begin{frame}{电力系统优化的理论难题（一）}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{1. 计算复杂性（NP难）}
+
+    SCUC 中有 $G$ 台机组、$T$ 个时段：
+    \[
+      \text{组合数} = 2^{G \times T}
+    \]
+    \begin{itemize}
+      \item $G=50,\; T=24$：超过 $10^{360}$ 种方案！
+      \item 启停约束（最小开/停机时间）引入时间耦合
+      \item 分段报价将连续变量线性化，增加辅助二值变量
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{2. 时间耦合约束}
+    \begin{itemize}
+      \item 爬坡约束：$|p_t - p_{t-1}| \le R_g$
+      \item 最小开机时间：$\sum_{\tau=t}^{t+T^{up}-1} u_\tau \ge T^{up} \cdot (u_t - u_{t-1})$
+      \item 使 LP 松弛的质量决定 B\&B 效率
+    \end{itemize}
+
+    \column{0.43\textwidth}
+    \begin{tcolorbox}[mybox,title=实际规模（华东电网示例）]
+      \footnotesize
+      \begin{tabular}{@{}lr@{}}
+        机组数      & $\sim$1000 \\
+        节点数      & $\sim$2000 \\
+        线路数      & $\sim$3000 \\
+        时段数      & 24--96 \\
+        二值变量    & $> 24000$ \\
+        求解时限    & $\le 30$~min \\
+      \end{tabular}
+    \end{tcolorbox}
+
+    \vspace{8pt}
+    \textbf{常用应对策略：}
+    \begin{itemize}
+      \item Lagrangian 松弛
+      \item Benders 分解
+      \item 强化形式（Tight formulations）
+      \item 列生成 / 分支定价
+      \item 热启动（Warm start）
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{电力系统优化的理论难题（二）}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{3. 非凸性（AC-OPF）}
+
+    交流最优潮流引入非线性等式约束：
+    \[
+      P_i = \sum_j |V_i||V_j|\left(G_{ij}\cos\theta_{ij} + B_{ij}\sin\theta_{ij}\right)
+    \]
+    \begin{itemize}
+      \item 电压模/相角乘积为非凸
+      \item 局部最优解众多，全局优化困难
+      \item SDP / 多项式优化松弛方法
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{4. 不确定性（随机优化）}
+    \begin{itemize}
+      \item 风电/光伏出力不确定
+      \item 负荷预测误差
+      \item 随机 UC、鲁棒 UC、机会约束
+    \end{itemize}
+
+    \column{0.45\textwidth}
+    \textbf{5. 数值挑战}
+    \begin{itemize}
+      \item Big-M 取值不当→数值病态
+      \item 线路潮流约束引入大系数差异
+      \item 稀疏 vs. 密集矩阵混合
+    \end{itemize}
+
+    \vspace{10pt}
+    \begin{tcolorbox}[mybox,title=MIPSolvers 目标]
+      \footnotesize
+      提供\textbf{统一的求解器接口}，使研究人员专注于：
+      \begin{itemize}
+        \item 建模与算法设计
+        \item 快速原型验证
+        \item 多求解器对比
+      \end{itemize}
+      而不是底层求解器调用的细节
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{Engine 数学格式}
+% ============================================================
+
+\begin{frame}{支持的标准数学格式总览}
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{@{}lllp{5.2cm}@{}}
+    \toprule
+    \textbf{类型} & \textbf{目标} & \textbf{变量域} & \textbf{可用求解器} \\
+    \midrule
+    LP    & 线性    & 连续   & HiGHS, Gurobi, NativeLCQP, NativePDLP, NativeIPMLP \\[2pt]
+    QP    & 二次    & 连续   & HiGHS, Gurobi, NativeLCQP \\[2pt]
+    NLP   & 非线性  & 连续   & NativeIPMLP（内点法） \\[2pt]
+    MILP  & 线性    & 混合整数 & HiGHS, Gurobi, SCIP, NativeBranchAndCut \\[2pt]
+    MINLP & 非线性  & 混合整数 & NativeBranchAndCut \\[2pt]
+    LE    & ---     & 连续   & NativeDirect（稀疏 LU 分解）\\[2pt]
+    NLE   & ---     & 连续   & NativeNewton（Newton-Raphson）\\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+
+  \vspace{8pt}
+  \textbf{统一入口}：\texttt{mipsolvers.engine.solve\_lp / solve\_milp / solve\_nlp / ...}
+
+  \vspace{4pt}
+  \textbf{自动选择}：\texttt{solver="Auto"} 按优先级选取已安装且最适合的求解器
+\end{frame}
+
+\begin{frame}{LP — 线性规划}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{标准形式：}
+    \[
+      \min_{\vx}\; \vc^{\top}\vx
+    \]
+    \[
+      \text{s.t.}\quad
+      \begin{cases}
+        \mA\,\vx \le \vb \\
+        A_{eq}\vx = b_{eq} \\
+        l_b \le \vx \le u_b
+      \end{cases}
+    \]
+
+    \textbf{Python 接口参数：}
+    \begin{itemize}
+      \item \texttt{c}：目标系数向量 $\R^n$
+      \item \texttt{A, b}：不等式约束
+      \item \texttt{Aeq, beq}：等式约束（可省略）
+      \item \texttt{lb, ub}：变量界（可省略）
+      \item \texttt{solver}：求解器名称
+      \item \texttt{maximize}：默认\,\texttt{False}
+    \end{itemize}
+
+    \column{0.46\textwidth}
+    \textbf{返回字典 \texttt{res}：}
+    \begin{itemize}
+      \item \texttt{res['success']}：是否求解成功
+      \item \texttt{res['objective']}：最优目标值
+      \item \texttt{res['x']}：最优解向量
+      \item \texttt{res['status']}：状态描述
+      \item \texttt{res['duals']}：对偶变量（影子价格）
+      \item \texttt{res['solver']}：实际使用求解器
+      \item \texttt{res['runtime\_sec']}：耗时
+    \end{itemize}
+
+    \vspace{6pt}
+    \begin{tcolorbox}[mybox,title=应用示例]
+      \footnotesize
+      生产计划、运输、网络流、电力经济调度
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{MILP — 混合整数线性规划}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{标准形式：}
+    \[
+      \min_{\vx}\; \vc^{\top}\vx
+      \quad\text{s.t.}\quad
+      \mA\vx\le\vb,\; l_b\le\vx\le u_b
+    \]
+    \[
+      x_i \in \mathbb{Z} \;(\text{或}\; \{0,1\}) \quad \forall i \in \mathcal{I}
+    \]
+
+    \textbf{额外参数：}
+    \begin{itemize}
+      \item \texttt{vartypes}：列表，每元素为\\
+            \texttt{"C"}（连续）、\texttt{"B"}（0/1）、\texttt{"I"}（整数）
+      \item \texttt{mip\_gap}：MIP容忍间隙（默认 $10^{-4}$）
+      \item \texttt{time\_limit\_sec}：时间上限
+    \end{itemize}
+
+    \column{0.45\textwidth}
+    \textbf{额外返回字段：}
+    \begin{itemize}
+      \item \texttt{res['mip\_gap']}：实际间隙
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{算法：Branch \& Bound}
+    \begin{enumerate}
+      \item 求解 LP 松弛，得到下界
+      \item 选择分数变量进行分支
+      \item 剪枝：界+LP松弛判断
+      \item 更新上界（可行整数解）
+    \end{enumerate}
+
+    \vspace{6pt}
+    \begin{tcolorbox}[mybox,title=应用示例]
+      \footnotesize
+      背包/排程、设施选址、\\
+      机组组合、供应链规划
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{QP、NLP 与方程组求解}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \textbf{QP — 二次规划：}
+    \[
+      \min\; \tfrac{1}{2}\vx^{\top}\mQ\vx + \vc^{\top}\vx
+      \quad\text{s.t.}\quad \mA\vx\le\vb
+    \]
+    \begin{itemize}
+      \item $\mQ \succeq 0$（正半定）→ 凸问题
+      \item 参数：\texttt{Q}（稀疏/密集），其余同 LP
+      \item 应用：投资组合、MPC 轨迹优化
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{NLP — 非线性规划：}
+    \begin{itemize}
+      \item 用户提供 $f$, $\nabla f$, $H_f$, $g$, $\nabla g$ 回调函数
+      \item 内点法 (NativeIPMLP)
+      \item 应用：AC-OPF、非线性工程优化
+    \end{itemize}
+
+    \column{0.48\textwidth}
+    \textbf{LE — 线性方程组：}
+    \[
+      \mA\vx = \vb,\quad \mA\in\R^{m\times n}
+    \]
+    \begin{itemize}
+      \item 稀疏 LU 分解（NativeDirect）
+      \item 适用：潮流方程线性化、预条件
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{NLE — 非线性方程组：}
+    \[
+      F(\vx) = \bm{0},\quad F:\R^n\to\R^n
+    \]
+    \begin{itemize}
+      \item Newton-Raphson 方法
+      \item 需提供 $F$ 和 $J_F$
+      \item 适用：潮流计算、稳态方程
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{Python 接口使用}
+% ============================================================
+
+\begin{frame}[fragile]{两种 Python 接口}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{tcolorbox}[colback=orange!8,colframe=orange!70,title=底层 Engine 接口]
+      \footnotesize
+      \begin{itemize}
+        \item 直接传 NumPy 矩阵/向量
+        \item 适合矩阵结构已知的小规模问题
+        \item 最低开销，最直接控制
+        \item 返回字典（\texttt{res['x']}, \texttt{res['objective']}）
+      \end{itemize}
+      \vspace{4pt}
+      \texttt{mipsolvers.engine.solve\_lp(...)}\\
+      \texttt{mipsolvers.engine.solve\_milp(...)}
+    \end{tcolorbox}
+
+    \column{0.48\textwidth}
+    \begin{tcolorbox}[colback=green!8,colframe=green!60!black,title=AML 代数建模接口]
+      \footnotesize
+      \begin{itemize}
+        \item 声明式建模：集合、参数、变量、约束
+        \item 支持索引变量（多维下标）
+        \item 可读性强，接近数学符号
+        \item 自动管理矩阵构造
+        \item 支持 LP / MILP / QP / NLP
+      \end{itemize}
+      \vspace{4pt}
+      \texttt{mipsolvers.aml.Model(...)}
+    \end{tcolorbox}
+  \end{columns}
+
+  \vspace{10pt}
+  \begin{center}
+  \textbf{导入模块：}
+  \end{center}
+  \vspace{-4pt}
+  \begin{columns}
+    \column{0.5\textwidth}
+    \begin{lstlisting}
+import sys
+sys.path.insert(0,
+    '/path/to/MIPSolvers/build_py')
+import mipsolvers
+aml = mipsolvers.aml
+    \end{lstlisting}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{底层接口：求解 LP（生产计划）}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{问题：} $\max\;5x_1+4x_2$
+    \[
+      \text{s.t.}\;\;
+      \begin{pmatrix}6&4\\1&2\end{pmatrix}
+      \begin{pmatrix}x_1\\x_2\end{pmatrix}
+      \le\begin{pmatrix}24\\6\end{pmatrix},\;
+      x_1,x_2\ge0
+    \]
+
+    \begin{lstlisting}
+import numpy as np
+import mipsolvers
+
+c  = np.array([-5.0, -4.0])  # min
+A  = np.array([[6.0,4.0],[1.0,2.0]])
+b  = np.array([24.0, 6.0])
+lb = np.zeros(2)
+
+res = mipsolvers.engine.solve_lp(
+    c=c, A=A, b=b, lb=lb,
+    solver="Auto")
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \begin{lstlisting}
+print(res['status'])
+# Optimal
+
+print(-res['objective'])
+# 21.0
+
+print(res['x'])
+# [3.0  1.5]
+
+print(res['duals'])
+# [0.75  0.5]  (shadow prices)
+    \end{lstlisting}
+
+    \vspace{8pt}
+    \textbf{完整示例：} \texttt{demo\_01\_lp\_direct.py}
+
+    \vspace{4pt}
+    \begin{tcolorbox}[mybox,title=查询可用求解器]
+      \footnotesize
+      \texttt{mipsolvers.engine.list\_solvers("LP")}
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{底层接口：求解 MILP（0/1 背包）}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{问题：} 选物品使总价值最大，总重量 $\le W$
+    \[
+      \max\;\bm{v}^{\top}\vx,\quad
+      \bm{w}^{\top}\vx\le W,\quad
+      x_i\in\{0,1\}
+    \]
+
+    \begin{lstlisting}
+weights = np.array([3,4,5,2,6,1],
+                   dtype=float)
+values  = np.array([9,8,10,5,12,3],
+                   dtype=float)
+W, n = 10.0, 6
+
+res = mipsolvers.engine.solve_milp(
+    c   = -values,
+    A   = weights.reshape(1, n),
+    b   = np.array([W]),
+    lb  = np.zeros(n),
+    ub  = np.ones(n),
+    vartypes = ["B"] * n,
+    solver   = "Auto")
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \begin{lstlisting}
+print(-res['objective'])
+# 22.0
+
+sel = [i for i in range(n)
+       if res['x'][i] > 0.5]
+# 选了哪些物品
+
+print(res['mip_gap'])
+# 0.0  (精确最优)
+
+print(res['solver'])
+# HiGHS
+    \end{lstlisting}
+
+    \vspace{6pt}
+    \textbf{完整示例：} \texttt{demo\_02\_milp\_knapsack.py}
+
+    \vspace{4pt}
+    \begin{tcolorbox}[mybox,title=变量类型]
+      \footnotesize
+      \texttt{"B"} = 0/1 整型\\
+      \texttt{"I"} = 普通整型\\
+      \texttt{"C"} = 连续型
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{AML 代数建模工作流程}
+  \begin{center}
+  \begin{tikzpicture}[>=Stealth,node distance=0.45cm,font=\small]
+    \tikzstyle{box} = [draw,rounded corners,fill=blue!12,
+                       text width=2.2cm,align=center,
+                       minimum height=0.7cm]
+    \tikzstyle{arr} = [->,thick,blue!60]
+
+    \node[box] (m)  {创建模型\\{\tiny\texttt{aml.Model("name")}}};
+    \node[box, right=0.7cm of m] (s)  {定义集合\\{\tiny\texttt{add\_set / add\_ordered\_set}}};
+    \node[box, right=0.7cm of s] (p)  {载入参数\\{\tiny\texttt{add\_param / load()}}};
+    \node[box, right=0.7cm of p] (v)  {声明变量\\{\tiny\texttt{add\_var2}}};
+    \node[box, right=0.7cm of v] (oc) {目标+约束\\{\tiny\texttt{minimize / add\_constraints}}};
+    \node[box, right=0.7cm of oc](sl) {求解\\{\tiny\texttt{model.solve(opts)}}};
+
+    \draw[arr] (m) -- (s);
+    \draw[arr] (s) -- (p);
+    \draw[arr] (p) -- (v);
+    \draw[arr] (v) -- (oc);
+    \draw[arr] (oc)-- (sl);
+
+    \node[below=0.5cm of sl, align=center, font=\footnotesize]
+      {$\downarrow$\\
+       \texttt{SolveResult}\\
+       {\tiny \texttt{termination\_status, objective\_value}}\\
+       {\tiny \texttt{var\_value(), array\_values(), dual\_array()}}};
+  \end{tikzpicture}
+  \end{center}
+\end{frame}
+
+\begin{frame}[fragile]{AML：集合、参数与变量}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{集合（索引域）：}
+    \begin{lstlisting}
+m = aml.Model("transport")
+
+# 普通集合
+I = m.add_set("I", ["A","B","C"])
+
+# 有序集合（支持 prev/next）
+T = m.add_ordered_set("T",
+        ["t1","t2","t3","t4"])
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{参数：}
+    \begin{lstlisting}
+c = m.add_param("cost", dim=2)
+c.load({
+    ("A","t1"): 2.5,
+    ("A","t2"): 3.0,
+    ("B","t1"): 4.0,
+    ...
+})
+val = c[("A","t1")]  # => 2.5
+    \end{lstlisting}
+
+    \column{0.46\textwidth}
+    \textbf{决策变量：}
+    \begin{lstlisting}
+# 1维变量 (indexed by I)
+x1 = m.add_var("x", I,
+      aml.VarType.Continuous,
+      lb=0.0)
+
+# 2维变量 (indexed by I x T)
+x2 = m.add_var2("y", I, T,
+      aml.VarType.Binary)
+
+# 访问方式
+xv = x2[("A", "t1")]  # VarRef
+    \end{lstlisting}
+
+    \vspace{6pt}
+    \textbf{变量类型：}
+    \begin{itemize}
+      \footnotesize
+      \item \texttt{VarType.Continuous}
+      \item \texttt{VarType.Binary}
+      \item \texttt{VarType.Integer}
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML：目标函数与约束}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{目标函数（使用 sum\_over）：}
+    \begin{lstlisting}
+# min sum_{i,t} cost[i,t] * x[i,t]
+m.minimize(
+  aml.sum_over(I, lambda i:
+    aml.sum_over(T, lambda t:
+      cost[(i,t)] * x2[(i,t)])))
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{批量约束 add\_constraints：}
+    \begin{lstlisting}
+# 对集合I中每个i添加约束
+m.add_constraints("cap", I,
+  lambda i:
+    aml.sum_over(T, lambda t:
+      x2[(i,t)] * 1.0) <= cap[i])
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \textbf{单个约束 add\_constraint：}
+    \begin{lstlisting}
+# 线性表达式比较
+lhs = 1.0*x1[i] - 50.0*x2[i]
+m.add_constraint(
+    lhs >= 0.0, "pmin_i")
+
+# 表达式 == 常数
+m.add_constraint(
+    1.0*a + 1.0*b == demand,
+    "balance")
+    \end{lstlisting}
+
+    \vspace{6pt}
+    \begin{tcolorbox}[mybox,title=表达式构造规则]
+      \footnotesize
+      \texttt{float * VarRef} $\to$ \texttt{LinearExpr}\\
+      \texttt{LinearExpr $\pm$ LinearExpr} $\to$ \texttt{LinearExpr}\\
+      \texttt{LinearExpr $\ge$ float} $\to$ \texttt{TempConstr}
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML：求解配置与结果提取}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{求解选项：}
+    \begin{lstlisting}
+opts = aml.SolveOptions()
+opts.solver_name  = ""    # Auto
+opts.verbosity    = 0     # 0=silent
+opts.mip_gap_tol  = 1e-3  # MIP gap
+opts.time_limit   = 300.0 # seconds
+opts.max_iter     = 10000
+
+result = m.solve(opts)
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{基本结果：}
+    \begin{lstlisting}
+print(result.termination_status)
+# TerminationStatus.Optimal
+
+print(result.objective_value)
+# 320.5
+
+print(result.solver_used)
+# HiGHS
+    \end{lstlisting}
+
+    \column{0.46\textwidth}
+    \textbf{提取变量值：}
+    \begin{lstlisting}
+# 单个变量
+v = result.var_value(x2[("A","t1")])
+
+# 整个变量数组 -> dict
+vals = result.array_values(x2)
+# {("A","t1"): 2.5,
+#  ("A","t2"): 0.0, ...}
+for key, val in vals.items():
+    if val > 0.01:
+        print(key, val)
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{提取对偶变量：}
+    \begin{lstlisting}
+# 批量约束的对偶值
+ca = m.add_constraints(
+        "c", I, lambda i: ...)
+duals = result.dual_array(ca)
+# {"A": -0.75, "B": -0.50}
+    \end{lstlisting}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML 示例：运输问题（完整）}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \begin{lstlisting}
+m = aml.Model("transport")
+F = m.add_set("F", ["FA","FB"])
+C = m.add_set("C", ["C1","C2","C3"])
+supply = m.add_param("s", dim=1)
+demand = m.add_param("d", dim=1)
+cost   = m.add_param("c", dim=2)
+supply.load({"FA":120.0,"FB":80.0})
+demand.load({"C1":70.0,"C2":90.0,
+             "C3":40.0})
+cost.load({("FA","C1"):4.0,
+           ("FA","C2"):3.0,...})
+
+x = m.add_var2("x", F, C,
+    aml.VarType.Continuous, lb=0.0)
+
+m.minimize(aml.sum_over(F, lambda f:
+  aml.sum_over(C, lambda c:
+    cost[(f,c)] * x[(f,c)])))
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \begin{lstlisting}
+m.add_constraints("sup", F,
+  lambda f:
+    aml.sum_over(C, lambda c:
+      x[(f,c)]*1.0) <= supply[f])
+
+m.add_constraints("dem", C,
+  lambda c:
+    aml.sum_over(F, lambda f:
+      x[(f,c)]*1.0) >= demand[c])
+
+opts = aml.SolveOptions()
+r = m.solve(opts)
+print(r.objective_value) # 570.0
+    \end{lstlisting}
+
+    \vspace{6pt}
+    \textbf{完整示例：} \texttt{demo\_03\_aml\_transport.py}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{SCUC 问题建模与求解}
+% ============================================================
+
+\begin{frame}{SCUC 问题定义}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{安全约束机组组合（SCUC）}
+
+    \vspace{4pt}
+    \textit{Security-Constrained Unit Commitment}
+
+    \vspace{8pt}
+    \textbf{本质}：日前调度问题，决定未来 $T=24$（或 96）个时段内：
+    \begin{enumerate}
+      \item 每台机组\textbf{何时开机/停机}（整数决策）
+      \item 每台机组\textbf{出力多少 MW}（连续决策）
+    \end{enumerate}
+
+    \vspace{8pt}
+    \textbf{优化目标}：最小化总运行成本（含启动费、空载费、发电费）
+
+    \vspace{8pt}
+    \textbf{约束体系}：
+    \begin{itemize}
+      \item 功率平衡（需量=供给）
+      \item 出力上下限（取决于开停状态）
+      \item 爬坡速率（相邻时段出力变化）
+      \item 最小开/停机时间
+      \item 网络安全约束（N-1 准则）
+    \end{itemize}
+
+    \column{0.40\textwidth}
+    \begin{tcolorbox}[mybox,title=决策变量集合]
+      \footnotesize
+      \begin{tabular}{@{}ll@{}}
+        $u_{g,t}\in\{0,1\}$   & 开停状态 \\[3pt]
+        $p_{g,t}\ge 0$         & 出力 (MW) \\[3pt]
+        $su_{g,t}\in\{0,1\}$  & 启动标志 \\[3pt]
+        $sd_{g,t}\in\{0,1\}$  & 停机标志 \\[3pt]
+        $r_{g,t}\ge 0$         & 备用量 (MW) \\
+      \end{tabular}
+    \end{tcolorbox}
+
+    \vspace{8pt}
+    \begin{tcolorbox}[colback=red!5,colframe=red!60,title=计算复杂度]
+      \footnotesize
+      SCUC 是 \textbf{NP难}问题\\
+      $G$ 台机组，$T$ 时段：\\
+      二值变量数 $= 3 \times G \times T$\\
+      连续变量数 $= G \times T$
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{SCUC 数学模型}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{目标函数（最小化总成本）：}
+    \[
+      \min\sum_{g}\sum_{t}
+      \Bigl[
+        c^{nl}_g u_{g,t}
+        + c^e_g p_{g,t}
+        + c^{su}_g su_{g,t}
+      \Bigr]
+    \]
+
+    其中 $c^{nl}$：空载成本，$c^e$：发电边际成本，$c^{su}$：启动成本
+
+    \vspace{8pt}
+    \textbf{功率平衡约束：}
+    \[
+      \sum_g p_{g,t} = D_t \quad \forall t
+    \]
+    （$D_t$：$t$时段系统负荷）
+
+    \column{0.44\textwidth}
+    \textbf{出力界约束（依赖开停状态）：}
+    \[
+      \underline{P}_g u_{g,t}
+      \le p_{g,t}
+      \le \overline{P}_g u_{g,t}
+      \quad\forall g,t
+    \]
+
+    \textbf{爬坡约束：}
+    \[
+      p_{g,t} - p_{g,t-1} \le R_g \quad\forall g,t>1
+    \]
+    \[
+      p_{g,t-1} - p_{g,t} \le R_g \quad\forall g,t>1
+    \]
+
+    \textbf{启停逻辑：}
+    \[
+      su_{g,t} - sd_{g,t}
+      = u_{g,t} - u_{g,t-1}
+      \quad\forall g,t
+    \]
+    \[
+      su_{g,t} + sd_{g,t} \le 1
+    \]
+  \end{columns}
+\end{frame}
+
+\begin{frame}{SCUC 约束：最小开/停机时间}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{最小开机时间（$T_g^{up}$）}：
+
+    机组$g$在$t$期启动后，必须连续开机至少 $T_g^{up}$ 个时段：
+    \[
+      \sum_{\tau=t}^{\min(t+T^{up}_g-1,\,T)}
+      u_{g,\tau}
+      \ge T^{up}_g \cdot su_{g,t}
+      \quad \forall t
+    \]
+
+    \vspace{8pt}
+    \textbf{最小停机时间（$T_g^{dn}$）}：
+
+    机组$g$在$t$期停机后，必须连续停机至少 $T_g^{dn}$ 个时段：
+    \[
+      \sum_{\tau=t}^{\min(t+T^{dn}_g-1,\,T)}
+      (1-u_{g,\tau})
+      \ge T^{dn}_g \cdot sd_{g,t}
+      \quad \forall t
+    \]
+
+    \column{0.40\textwidth}
+    \textbf{分段报价线性化：}
+
+    机组出力成本用分段线性函数近似：
+    \[
+      c_g(p) = \sum_{k=1}^{K} c_{g,k}\,\delta_{g,k}
+    \]
+    其中 $\delta_{g,k}$ 为各段出力量，满足：
+    \[
+      \sum_k \delta_{g,k} = p_g,\quad
+      0\le\delta_{g,k}\le\Delta\overline{P}_{g,k}
+    \]
+
+    \vspace{6pt}
+    \begin{tcolorbox}[mybox,title=整体规模]
+      \footnotesize
+      典型日前调度（$G=100,T=24$）：\\
+      $\sim 7200$ 二值变量\\
+      $\sim 2400$ 连续变量\\
+      $\sim 20000$ 约束\\
+      求解时限：$\le 10$ 分钟
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML 建模 SCUC：数据与变量定义}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \begin{lstlisting}
+gen_data = {
+  "G1": dict(pmin=50, pmax=200,
+             ramp=120, no_load=500,
+             bid=30, startup=1000),
+  "G2": dict(pmin=30, pmax=150,
+             ramp=90,  no_load=300,
+             bid=45, startup=800),
+}
+load_mw = {"t1":150,"t2":200,
+           "t3":260,"t4":240,
+           "t5":180,"t6":120}
+    \end{lstlisting}
+
+    \begin{lstlisting}
+m = aml.Model("mini_scuc")
+G     = m.add_set("G", gen_names)
+T_set = m.add_ordered_set(
+            "T", t_names)  # t1..t6
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \begin{lstlisting}
+# 决策变量
+u  = m.add_var2("u",  G, T_set,
+      aml.VarType.Binary)
+p  = m.add_var2("p",  G, T_set,
+      aml.VarType.Continuous,
+      lb=0.0)
+su = m.add_var2("su", G, T_set,
+      aml.VarType.Binary)
+sd = m.add_var2("sd", G, T_set,
+      aml.VarType.Binary)
+    \end{lstlisting}
+
+    \vspace{6pt}
+    \begin{tcolorbox}[mybox,title=规模]
+      \footnotesize
+      $2 \times 6 = 12$ 连续变量\\
+      $3 \times 2 \times 6 = 36$ 二值变量\\
+      $\sim 60$ 个约束
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML 建模 SCUC：目标与约束}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{目标函数：}
+    \begin{lstlisting}
+m.minimize(aml.sum_over(G, lambda g:
+  aml.sum_over(T_set, lambda t:
+    d["no_load"] * u[(g,t)] +
+    d["bid"]     * p[(g,t)] +
+    d["startup"] * su[(g,t)])))
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{功率平衡约束：}
+    \begin{lstlisting}
+for t in t_names:
+  bal = aml.sum_over(G, lambda g:
+          p[(g.values[0],t)] * 1.0)
+  m.add_constraint(
+      bal == load_mw[t],
+      f"balance_{t}")
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \textbf{出力上下界约束：}
+    \begin{lstlisting}
+for g, d in gen_data.items():
+  for t in t_names:
+    # pmin*u <= p
+    lhs = (1.0*p[(g,t)]
+           - d["pmin"]*u[(g,t)])
+    m.add_constraint(
+        lhs >= 0.0, f"lb_{g}_{t}")
+    # p <= pmax*u
+    rhs = (d["pmax"]*u[(g,t)]
+           - 1.0*p[(g,t)])
+    m.add_constraint(
+        rhs >= 0.0, f"ub_{g}_{t}")
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{完整示例：} \texttt{demo\_04\_aml\_scuc.py}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{AML 建模 SCUC：结果解读}
+  \textbf{求解并提取结果：}
+
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \begin{lstlisting}
+opts = aml.SolveOptions()
+opts.mip_gap_tol = 0.001
+result = m.solve(opts)
+
+print(result.termination_status)
+# TerminationStatus.Optimal
+
+print(f"总费用: ${result.objective_value:,.2f}")
+# 总费用: $39,250.00
+    \end{lstlisting}
+
+    \column{0.46\textwidth}
+    \begin{lstlisting}
+# 开停状态表
+for g in gen_names:
+  row = [
+    f"{result.var_value(u[(g,t)]):.0f}"
+    for t in t_names
+  ]
+  print(f"{g}: {row}")
+
+# G1: ['1','1','1','1','1','1']
+# G2: ['0','0','1','1','1','0']
+    \end{lstlisting}
+  \end{columns}
+
+  \vspace{6pt}
+  \textbf{典型输出：}
+  \begin{center}
+  \footnotesize
+  \begin{tabular}{@{}lrrrrrr@{}}
+    \toprule
+    & t1 & t2 & t3 & t4 & t5 & t6 \\
+    \midrule
+    负荷 (MW) & 150 & 200 & 260 & 240 & 180 & 120 \\
+    G1 状态   & 1 & 1 & 1 & 1 & 1 & 1 \\
+    G1 出力 (MW) & 150.0 & 140.0 & 200.0 & 200.0 & 150.0 & 120.0 \\
+    G2 状态   & 0 & 1 & 1 & 1 & 1 & 0 \\
+    G2 出力 (MW) & 0.0 & 60.0 & 60.0 & 40.0 & 30.0 & 0.0 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+\end{frame}
+
+\begin{frame}[fragile]{JSON API：solve\_json 接口}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \textbf{输入数据结构：}
+    \begin{lstlisting}[language={}]
+{
+  "config": {
+    "num_periods": 24,
+    "period_length_hr": 1.0,
+    "solver": "Auto",
+    "mip_gap": 0.001,
+    "solve_sced": true,
+    "solve_lmp": true
+  },
+  "generators": [
+    { "name": "G1", "bus": 0,
+      "pmin": 50.0, "pmax": 400.0,
+      "bid_segments": [
+        {"price":20.0,"quantity":150.0},
+        {"price":35.0,"quantity":150.0}
+      ], ... }
+  ],
+  "loads":    [{"bus":0,"p_mw":300.0}],
+  "branches": [],
+  "profiles": {"load":[[0.8,...,0.95]]}
+}
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \textbf{调用与解析：}
+    \begin{lstlisting}
+import json, mipsolvers
+
+json_in  = json.dumps(input_data)
+json_out = mipsolvers.scuc.solve_json(
+               json_in, indent=2)
+res = json.loads(json_out)
+
+scuc = res["scuc"]
+print(scuc["converged"])     # True
+print(scuc["cost"]["total"]) # $
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{输出结构：}
+    \begin{lstlisting}[language={}]
+{
+  "scuc": {
+    "converged": true,
+    "cost": {
+      "total": 85230.0,
+      "startup": 7000.0,
+      "energy": 78230.0
+    },
+    "dispatch": [[...],[...]],
+    "commitment": [[...],[...]],
+    "lmp": [20.0, 35.0, ...]
+  }
+}
+    \end{lstlisting}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[fragile]{JSON API：结果分析示例}
+  \begin{columns}[T]
+    \column{0.52\textwidth}
+    \begin{lstlisting}
+dispatch   = scuc["dispatch"]
+commitment = scuc["commitment"]
+lmp        = scuc["lmp"]
+gen_names  = ["G1", "G2", "G3"]
+
+# 逐时段打印调度计划
+print(f"{'t':>3} {'Load':>7}", end="")
+for gn in gen_names:
+    print(f" {gn:>8}", end="")
+print(f" {'LMP':>8}")
+
+for t in range(24):
+    load_t = load_profile[t]*300.0
+    print(f"{t+1:3} {load_t:7.1f}",end="")
+    for gi in range(len(gen_names)):
+        print(f" {dispatch[gi][t]:8.1f}",
+              end="")
+    print(f" {lmp[t]:8.2f}")
+    \end{lstlisting}
+
+    \column{0.44\textwidth}
+    \textbf{边际电价 LMP 分析：}
+    \begin{lstlisting}
+import matplotlib.pyplot as plt
+
+hours = list(range(1, 25))
+fig, (ax1, ax2) = plt.subplots(
+    2, 1, figsize=(8, 5))
+
+ax1.plot(hours,
+    [load_profile[t]*300 for t in range(24)])
+ax1.set_ylabel("Load (MW)")
+
+ax2.plot(hours, lmp,
+         color='red', marker='o',
+         markersize=3)
+ax2.set_ylabel("LMP ($/MWh)")
+ax2.set_xlabel("Hour")
+
+plt.tight_layout()
+plt.savefig("lmp_curve.png")
+    \end{lstlisting}
+
+    \vspace{4pt}
+    \textbf{完整示例：} \texttt{demo\_05\_scuc\_api.py}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+\section{工作进展与计划}
+% ============================================================
+
+\begin{frame}{已完成工作}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{核心框架：}
+    \begin{itemize}
+      \item[$\checkmark$] Engine 层：LP/QP/NLP/MILP/MINLP/LE/NLE 统一接口
+      \item[$\checkmark$] AML 代数建模库（16头文件 + 2实现文件）
+      \item[$\checkmark$] HiGHS 集成（LP 及 MILP 开源求解器）
+      \item[$\checkmark$] SCIP 集成（大规模 MILP 开源求解器）
+      \item[$\checkmark$] 本地自研求解器（内点法、PDLP、LCQP、分支定界）
+    \end{itemize}
+
+    \column{0.46\textwidth}
+    \textbf{Python 接口：}
+    \begin{itemize}
+      \item[$\checkmark$] pybind11 绑定，Python 3.8 兼容
+      \item[$\checkmark$] \texttt{mipsolvers.engine} 底层接口
+      \item[$\checkmark$] \texttt{mipsolvers.aml} 代数建模接口
+      \item[$\checkmark$] \texttt{mipsolvers.scuc} SCUC专用接口
+    \end{itemize}
+
+    \vspace{6pt}
+    \textbf{文档：}
+    \begin{itemize}
+      \item[$\checkmark$] Python API 参考手册（\texttt{docs/aml\_python\_api.md}）
+      \item[$\checkmark$] 5个可运行 Python 示例
+      \item[$\checkmark$] 本教程幻灯片
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{近期工作计划}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{1. AC 最优潮流（AC-OPF）}
+    \begin{itemize}
+      \item 基于 NLP 接口实现完整 AC-OPF
+      \item 支持 IEEE 测试系统（14/30/118 节点）
+      \item SDP 松弛近似（凸化）
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{2. Benders 分解算法}
+    \begin{itemize}
+      \item 支持大规模 SCUC 加速求解
+      \item 主问题（Unit Commitment）+ 子问题（SCED）解耦
+      \item 适用于 $G > 200$ 台机组的场景
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{3. 验证测试集}
+    \begin{itemize}
+      \item IEEE RTS-96 标准测试系统
+      \item 对比 Gurobi / HiGHS 求解质量与速度
+    \end{itemize}
+
+    \column{0.46\textwidth}
+    \textbf{4. 网络安全约束（N-1）}
+    \begin{itemize}
+      \item 将输电网络约束（PTDF）纳入 SCUC
+      \item N-1 准则：单一故障后仍满足约束
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{5. 分段报价完整支持}
+    \begin{itemize}
+      \item SCUC 模块支持多段线性报价曲线
+      \item 边际电价（LMP）精确计算
+      \item 竞价区域划分
+    \end{itemize}
+
+    \vspace{8pt}
+    \begin{tcolorbox}[mybox,title=里程碑]
+      \footnotesize
+      \textbf{目标：}在标准测试系统上达到与商业求解器相当的精度，求解时间 $<5$ 分钟
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{中期规划}
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    \textbf{随机机组组合（Stochastic UC）}
+    \begin{itemize}
+      \item 考虑风电、光伏出力不确定性
+      \item 基于情景树（Scenario Tree）
+      \item 两阶段随机规划框架：
+        \begin{itemize}
+          \item 第一阶段：机组开停决策（here-and-now）
+          \item 第二阶段：实时调度调整（wait-and-see）
+        \end{itemize}
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{鲁棒机组组合（Robust UC）}
+    \begin{itemize}
+      \item 不确定性用集合描述（椭球体、多面体）
+      \item 列约束生成（C\&CG）算法
+    \end{itemize}
+
+    \column{0.46\textwidth}
+    \textbf{多时间尺度协同}
+    \begin{itemize}
+      \item 日前（24h）$\times$ 日内滚动（4h）$\times$ 实时（15min）
+      \item 储能（电池）的多时段套利建模
+      \item 需求响应（DR）资源聚合
+    \end{itemize}
+
+    \vspace{8pt}
+    \textbf{接口扩展}
+    \begin{itemize}
+      \item Julia / MATLAB 绑定
+      \item REST API 服务化部署
+      \item 与 PowerModels.jl 对接
+    \end{itemize}
+
+    \vspace{8pt}
+    \begin{tcolorbox}[mybox,title=长期目标]
+      \footnotesize
+      打造电力系统运行优化全栈解决方案，覆盖从稳态分析到市场出清的完整链路
+    \end{tcolorbox}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{总结}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{MIPSolvers 提供了：}
+    \begin{enumerate}
+      \item \textbf{统一求解器接口} — LP / MILP / NLP / MINLP / LE / NLE，通过 \texttt{solver="Auto"} 自动调度 HiGHS / SCIP / 自研求解器
+      \item \textbf{代数建模库 (AML)} — 以接近数学公式的方式建模，支持多维索引变量和批量约束生成
+      \item \textbf{SCUC 专用模块} — JSON 输入/输出，自动完成 UC + SCED + LMP 计算
+      \item \textbf{Python 3.8 绑定} — 与 NumPy/Pandas/Matplotlib 无缝配合
+    \end{enumerate}
+
+    \column{0.40\textwidth}
+    \textbf{配套示例文件：}
+    \begin{itemize}
+      \footnotesize
+      \item \texttt{demo\_01\_lp\_direct.py}\\生产计划 LP
+      \item \texttt{demo\_02\_milp\_knapsack.py}\\0/1 背包 MILP
+      \item \texttt{demo\_03\_aml\_transport.py}\\运输问题（AML）
+      \item \texttt{demo\_04\_aml\_scuc.py}\\迷你 SCUC（AML）
+      \item \texttt{demo\_05\_scuc\_api.py}\\完整 SCUC（JSON API）
+    \end{itemize}
+
+    \vspace{8pt}
+    \begin{tcolorbox}[mybox,title=运行方式]
+      \footnotesize
+      \texttt{python3.8 demo\_XX.py}
+    \end{tcolorbox}
+  \end{columns}
+
+  \vspace{16pt}
+  \begin{center}
+    \large\textbf{谢谢！}
+  \end{center}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}[fragile]{附录：完整安装与构建流程}
+  \begin{lstlisting}[language=bash]
+# 1. 克隆仓库
+git clone https://github.com/.../MIPSolvers.git
+cd MIPSolvers
+
+# 2. 构建 C++ 库与测试
+cmake -B build_mipsolvers -DCMAKE_BUILD_TYPE=Release
+cmake --build build_mipsolvers --parallel 8
+cd build_mipsolvers && ctest --output-on-failure
+
+# 3. 构建 Python 模块 (.so)
+cmake -B build_py \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DPython_EXECUTABLE=$(which python3.8)
+cmake --build build_py --parallel 8
+
+# 4. 测试 Python 模块
+python3.8 -c "
+import sys; sys.path.insert(0, 'build_py')
+import mipsolvers
+print(mipsolvers.engine.list_solvers('LP'))
+print(mipsolvers.engine.list_solvers('MILP'))
+"
+  \end{lstlisting}
+\end{frame}
+
+\begin{frame}{附录：求解器选择指南}
+  \footnotesize
+  \begin{center}
+  \begin{tabular}{@{}lllll@{}}
+    \toprule
+    \textbf{问题类型} & \textbf{规模} & \textbf{首选求解器} & \textbf{备选} & \textbf{说明} \\
+    \midrule
+    LP  & 小/中 & HiGHS & NativeLCQP  & 开源，速度快 \\
+    LP  & 大型 & Gurobi & HiGHS       & 商业许可证 \\
+    LP  & 流式/在线 & NativePDLP & ---  & 一阶方法，低内存 \\
+    MILP & 小/中 & HiGHS & SCIP        & 开源首选 \\
+    MILP & 大型 & Gurobi & SCIP        & 商业许可证 \\
+    MILP & 研究 & SCIP   & NativeBnC   & 强切平面支持 \\
+    QP  & 凸   & HiGHS  & NativeLCQP  & 需 $Q\succeq 0$ \\
+    NLP & 稀疏 & NativeIPMLP & ---     & 内点法 \\
+    MINLP & 通用 & NativeBnC & ---     & 自研分支定界 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+
+  \vspace{8pt}
+  \textbf{注意事项：}
+  \begin{itemize}
+    \item \texttt{solver="Auto"} 会按优先级（Gurobi $>$ HiGHS $>$ SCIP $>$ Native...）自动选择
+    \item Gurobi 需要有效许可证，否则 Auto 会跳过
+    \item 对于 SCUC（$G<100,T=24$），HiGHS 通常可在 1 分钟内求解
+  \end{itemize}
+\end{frame}
+
+\end{document}

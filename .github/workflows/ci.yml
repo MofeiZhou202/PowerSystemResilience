@@ -27,3 +27,31 @@ jobs:
 
       - name: Run unit tests
         run: ctest --test-dir build -L unit --output-on-failure
+
+  windows-scuc-regression:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure Windows regression build
+        run: >-
+          cmake -S . -B build-win -A x64
+          -DMIPSOLVERS_BUILD_TESTS=ON
+          -DMIPSOLVERS_BUILD_PYTHON=OFF
+          -DMIPSOLVERS_BUILD_SCUC=ON
+          -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
+          -DMIPSOLVERS_ENABLE_WERROR=OFF
+
+      - name: Build Windows regression targets
+        run: >-
+          cmake --build build-win --config Release
+          --target test_engine_api test_milp_solver test_ipm_solver test_scuc_module test_market_simulation
+          --parallel 2
+
+      - name: Run Windows regression tests
+        run: >-
+          ctest --test-dir build-win --build-config Release
+          -R "test_(engine_api|milp_solver|ipm_solver|scuc_module|market_simulation)"
+          --output-on-failure --parallel 2

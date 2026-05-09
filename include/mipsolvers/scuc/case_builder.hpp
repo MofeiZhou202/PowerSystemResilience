@@ -27,6 +27,13 @@ SCUCInput build_ieee39_case(int T = 24, double dt = 1.0,
                             bool with_wind  = false,
                             bool with_solar = false);
 
+/// IEEE 118-bus test case — 54 generators, 186 branches, 99 load buses.
+/// Standard MATPOWER case118 topology; ~4242 MW peak aggregate load.
+/// Optional wind (4 sites) and solar (3 sites).
+SCUCInput build_ieee118_case(int T = 24, double dt = 1.0,
+                             bool with_wind  = false,
+                             bool with_solar = false);
+
 /// Serialize SCUCInput to JSON string (for export / golden-file testing).
 /// Pass indent >= 0 for pretty-printing, -1 for compact.
 std::string scuc_input_to_json(const SCUCInput& inp, int indent = 2);
