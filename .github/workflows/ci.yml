@@ -12,6 +12,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libeigen3-dev \
+            libfmt-dev \
+            nlohmann-json3-dev \
+            catch2
+
       - name: Configure
         run: >
           cmake -S . -B build
