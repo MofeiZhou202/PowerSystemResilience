@@ -1,0 +1,543 @@
+% ============================================================
+\section{Power-Flow Models}
+\label{sec:powerflow}
+% ============================================================
+
+\subsection{Scope and Architecture Overview}
+
+This chapter documents the steady-state hybrid AC/DC power-flow (PF) module
+in \texttt{src/power_flow/} and \texttt{src/engine/solver/native/nle/}.
+The module is production-quality and ships as the primary numerical engine for
+planning, optimization warm-starts, and annual simulation.
+
+The module exposes seven public solver paths:
+
+\begin{longtable}{L{0.24\linewidth}L{0.22\linewidth}L{0.46\linewidth}}
+\toprule
+Public API & Primary file & Scope \\
+\midrule
+\endhead
+\texttt{solve\_power\_flow} & \texttt{hybrid.cpp} & Hybrid AC/DC Newton; full coupling \\
+\texttt{solve\_dc\_power\_flow} & \texttt{dc.cpp} & DC-only Newton \\
+\texttt{solve\_ac\_power\_flow} (FDPF) & \texttt{fdpf\_solver.cpp} & Fast-decoupled AC-only \\
+\texttt{solve\_ac\_dc\_power\_flow} & \texttt{ac\_linearized\_pf.cpp} & Linearized DC-load-flow angle + DC \\
+\texttt{solve\_adaptive\_power\_flow} & \texttt{adaptive\_solver.cpp} & Island-aware with fallback chain \\
+\texttt{solve\_islanded\_power\_flow} & \texttt{adaptive\_solver.cpp} & Explicit per-island solve \\
+\texttt{solve\_distributed\_slack\_pf} & \texttt{distributed\_slack\_solver.cpp} & Multi-source slack participation \\
+\bottomrule
+\caption{Public power-flow API family.}
+\label{tab:pf-api}
+\end{longtable}
+
+All paths share the same canonical preprocessing pipeline
+(\texttt{solver\_data.cpp}, \texttt{admittance\_builder.cpp}) and differ only
+in their iteration loops or post-processing.  The main Newton kernel lives in
+\texttt{src/engine/solver/native/nle/newton\_solver.cpp} and is reused by the
+hybrid solver, the OPF warm-start path, and the adaptive solver.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=7mm and 12mm]
+  \node[flowwide] (in) {\texttt{HybridPowerSystem}\\(rich component tables)};
+  \node[flowbox, below=of in] (proj) {Canonical projection\\and \texttt{SolverData} build};
+  \node[flowbox, below=of proj] (zip) {ZIP weight injection\\from \texttt{PowerFlowOptions}};
+  \node[flowbox, below=of zip] (dispatch) {Solver dispatch\\(see Table~\ref{tab:pf-api})};
+  \node[flowbox, right=30mm of dispatch] (post) {Post-processing:\\branch flows, VSC/DCDC/router reports};
+  \draw[flowline] (in) -- (proj);
+  \draw[flowline] (proj) -- (zip);
+  \draw[flowline] (zip) -- (dispatch);
+  \draw[flowline] (dispatch) -- (post);
+\end{tikzpicture}
+\caption{Shared execution pipeline for all power-flow API variants.}
+\label{fig:pf-pipeline}
+\end{figure}
+
+% ------------------------------------------------------------
+\subsection{Mathematical Problem Form}
+% ------------------------------------------------------------
+
+The Newton kernel solves the hybrid residual system
+\begin{align}
+F(x) = 0,
+\qquad
+x =
+\begin{bmatrix}
+\theta_{\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}} \\
+v_{\mathcal{N}_{PQ}} \\
+v^{\qual{dc}}_{\mathcal{N}_{dc}\setminus\mathcal{N}_{sl}^{\qual{dc}}}
+\end{bmatrix},
+\label{eq:pf-residual}
+\end{align}
+where \(\mathcal{N}_{sl}\) and \(\mathcal{N}_{sl}^{\qual{dc}}\) are the sets of
+AC and DC slack buses, and \(\mathcal{N}_{PQ}\) is the set of PQ buses.
+
+\paragraph{AC bus mismatch.}
+For each non-slack AC bus \(i\),
+\begin{align}
+\Delta P_i &= P_i^{\qual{spec}} - P_i^{\qual{calc}},
+\qquad i\in\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}, \\
+\Delta Q_i &= Q_i^{\qual{spec}} - Q_i^{\qual{calc}},
+\qquad i\in\mathcal{N}_{PQ},
+\end{align}
+where the calculated nodal injections are
+\begin{align}
+P_i^{\qual{calc}} &= \sum_{j\in\mathcal{N}_{ac}}
+v_i v_j\!\left(G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}\right), \\
+Q_i^{\qual{calc}} &= \sum_{j\in\mathcal{N}_{ac}}
+v_i v_j\!\left(G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}\right),
+\end{align}
+with \(\theta_{ij}=\theta_i-\theta_j\) and \((G_{ij}+jB_{ij})\) the
+\((i,j)\) entry of the sparse bus admittance matrix \(Y_{bus}\).
+
+\paragraph{DC bus mismatch.}
+For each non-DC-slack bus \(k\),
+\begin{align}
+\Delta P_k^{\qual{dc}} &= P_k^{\qual{dc,spec}} - P_k^{\qual{dc,calc}}, \\
+P_k^{\qual{dc,calc}} &= v_k^{\qual{dc}}\!\left(G_{dc}\,v^{\qual{dc}}\right)_k.
+\end{align}
+
+\paragraph{Specified-injection assembly.}
+\begin{align}
+P_i^{\qual{spec}} &= P_i^{\qual{g,agg}} - P_i^{\qual{load}}(v_i) + P_i^{\qual{vsc}}, \\
+Q_i^{\qual{spec}} &= Q_i^{\qual{g,agg}} - Q_i^{\qual{load}}(v_i) + Q_i^{\qual{vsc}},
+\end{align}
+where the aggregated generation vectors are
+\begin{align}
+P_i^{\qual{g,agg}} &= P_i^{\qual{gen}} + P_i^{\qual{sg}} + P_i^{\qual{ren}}
++ P_i^{\qual{pv}} + P_i^{\qual{stor}} + P_i^{\qual{vpp}}
++ P_i^{\qual{mg}} + P_i^{\qual{ms}}, \\
+Q_i^{\qual{g,agg}} &= Q_i^{\qual{gen}} + Q_i^{\qual{sg}} + Q_i^{\qual{ren}}
++ Q_i^{\qual{pv}} + Q_i^{\qual{stor}} + Q_i^{\qual{vpp}}
++ Q_i^{\qual{ms}}.
+\end{align}
+Here \(P_i^{\qual{mg}}\) is microgrid exchange at the PCC bus in
+\texttt{GridConnected} mode.
+
+\paragraph{ZIP demand model.}
+The runtime voltage-dependent load model is
+\begin{align}
+P_i^{\qual{load}}(v_i)
+&= P_{i,0}\!\left(w_{P,0,i} + w_{P,1,i}v_i + w_{P,2,i}v_i^2\right), \\
+Q_i^{\qual{load}}(v_i)
+&= Q_{i,0}\!\left(w_{Q,0,i} + w_{Q,1,i}v_i + w_{Q,2,i}v_i^2\right).
+\end{align}
+The ZIP weights are populated in one of three assembly cases:
+(1)~explicit \texttt{Load}/charging-station tables present,
+(2)~charging-station tables only,
+(3)~neither table — global \texttt{zip\_pw}/\texttt{zip\_qw} from
+\texttt{PowerFlowOptions} are used.
+
+% ------------------------------------------------------------
+\subsection{VSC Converter Model}
+% ------------------------------------------------------------
+
+The converter model uses bus-injection-positive signs on both AC and DC sides.
+Three control modes are supported.
+
+\paragraph{Loss model.}
+With active transfer \(p\) (p.u.), AC-side proxy current
+\(I^{\qual{ac}}=|p|/v^{\qual{dc,safe}}\), \(v^{\qual{dc,safe}}=\max(v^{\qual{dc}},0.1)\):
+\begin{align}
+P^{\qual{loss,lin}} &= (1-\eta)|p|, \\
+P^{\qual{loss,cur}} &= a + b\,I^{\qual{ac}} + c\,(I^{\qual{ac}})^2,
+\qquad
+a=\frac{\texttt{loss\_mw}}{S_{base}},\;
+b=\frac{\texttt{loss\_pct}}{100},\;
+c=1-\eta.
+\end{align}
+
+\paragraph{\texttt{PQ\_MODE}.}
+\begin{align}
+P^{\qual{conv,ac}} = P^{\qual{set}},\quad
+Q^{\qual{conv,ac}} = Q^{\qual{set}},\quad
+P^{\qual{conv,dc}} = -(P^{\qual{set}}+P^{\qual{loss}}).
+\end{align}
+
+\paragraph{\texttt{VDC\_Q} and \texttt{VDC\_VAC}.}
+\begin{align}
+P^{\qual{tr}} &= k^{\qual{vdc}}\!\left[(v^{\qual{dc}})^2-(v^{\qual{dc,set}})^2\right],\quad
+P^{\qual{conv,ac}} = P^{\qual{tr}} - P^{\qual{loss}},\quad
+P^{\qual{conv,dc}} = -P^{\qual{tr}}.
+\end{align}
+In \texttt{VDC\_VAC} mode the Newton loop enforces
+\(v^{\qual{ac}}=v^{\qual{ac,set}}\) for the converter AC bus via an augmented
+setpoint equation.
+
+% ------------------------------------------------------------
+\subsection{DCDC Converter Model}
+% ------------------------------------------------------------
+
+The DCDC converter connects \texttt{bus\_in} to \texttt{bus\_out}.
+Power \texttt{p\_ref\_mw} is output-side referenced.
+\begin{align}
+P^{\qual{in}} &=
+\begin{cases}
+P^{\qual{ref}}/\eta, & P^{\qual{ref}}\ge 0, \\
+P^{\qual{ref}}\cdot\eta, & P^{\qual{ref}}<0,
+\end{cases}
+\qquad
+P^{\qual{out}} = P^{\qual{ref}} - r_{eq}\frac{(P^{\qual{in}})^2}{(v^{\qual{dc,in}})^2}.
+\end{align}
+
+% ------------------------------------------------------------
+\subsection{Jacobian Structure}
+% ------------------------------------------------------------
+
+The linearized Newton system is
+\begin{align}
+J\,\Delta x = F(x),
+\qquad
+J =
+\begin{bmatrix}
+J_{\theta\theta} & J_{\theta V} & J_{\theta V^{dc}} \\
+J_{V\theta} & J_{VV} & J_{V V^{dc}} \\
+0 & J_{V^{dc} V} & J_{V^{dc} V^{dc}}
+\end{bmatrix}.
+\end{align}
+
+The sparse Jacobian pattern is cached in a \texttt{PatternCache} keyed by
+matrix storage addresses and a monotone \texttt{build\_id}, and is rebuilt only
+on topology changes.
+
+\paragraph{AC diagonal entries (with ZIP load corrections).}
+\begin{align}
+\frac{\partial \Delta P_i}{\partial v_i}
+&= \frac{P_i^{\qual{calc}}}{v_i} + G_{ii}v_i
+- P_{i,0}(w_{P,1,i}+2w_{P,2,i}v_i), \\
+\frac{\partial \Delta Q_i}{\partial v_i}
+&= \frac{Q_i^{\qual{calc}}}{v_i} - B_{ii}v_i
+- Q_{i,0}(w_{Q,1,i}+2w_{Q,2,i}v_i).
+\end{align}
+In the code, \(v_i\) is floored at \texttt{min\_vm\_pu}
+(configurable via \texttt{RobustNonlinearOptions}) to prevent zero-division.
+
+\paragraph{DC entries.}
+\begin{align}
+\frac{\partial P_k^{\qual{dc,calc}}}{\partial v_m^{\qual{dc}}} =
+\begin{cases}
+(G_{dc}v^{\qual{dc}})_k + G_{kk}^{\qual{dc}}v_k^{\qual{dc}}, & m=k, \\
+G_{km}^{\qual{dc}}v_k^{\qual{dc}}, & m\neq k.
+\end{cases}
+\end{align}
+
+\paragraph{AC/DC coupling.}
+When \texttt{enable\_coupled\_jacobian} is set, the converter Jacobian blocks
+\(\partial P^{\qual{vsc}}/\partial v^{\qual{dc}}\),
+\(\partial Q^{\qual{vsc}}/\partial v^{\qual{dc}}\), and
+\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) are inserted analytically.
+The coupling entries are pre-registered as \texttt{CouplingEntry} records in
+\texttt{JacobianPattern} and updated in-place each iteration without
+re-analyzing the pattern.
+
+% ------------------------------------------------------------
+\subsection{Hybrid Newton Algorithm}
+\label{sec:pf-newton-algorithm}
+% ------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=7mm and 13mm]
+  \node[flowwide] (init)   {Initialize \(v,\theta,v^{dc}\) from bus data or \texttt{InitialState}};
+  \node[flowbox, below=of init]  (validate) {Validate initial state (finite, size-matched)};
+  \node[flowbox, below=of validate] (ctx)   {Build \texttt{JacobianContext} and bus-type maps};
+  \node[flowbox, below=of ctx]   (cache)  {Check pattern cache (\texttt{build\_id} + matrix ptrs)};
+  \node[flowbox, below=of cache]  (eval)  {Evaluate \(F(x)\) and \(J\) (\texttt{evaluate\_residual\_and\_jacobian})};
+  \node[decision, below=of eval] (conv)  {\(\|F\|_\infty < \varepsilon_{\qual{tol}}\)?};
+  \node[flowbox, right=28mm of conv] (done) {Populate result:\\ branch flows, VSC, DCDC, routers};
+  \node[flowbox, below=of conv]  (factor){\texttt{SparseLU} factorize;\\ regularize if singular};
+  \node[flowbox, below=of factor] (clip)  {Clip \(\Delta\theta\), \(\Delta v\), \(\Delta v^{dc}\); backtrack};
+  \node[flowbox, below=of clip]  (switch){PV/PQ and converter-mode switching};
+  \draw[flowline] (init)     -- (validate);
+  \draw[flowline] (validate) -- (ctx);
+  \draw[flowline] (ctx)      -- (cache);
+  \draw[flowline] (cache)    -- (eval);
+  \draw[flowline] (eval)     -- (conv);
+  \draw[flowline] (conv)     -- node[above]{yes} (done);
+  \draw[flowline] (conv)     -- node[right]{no}  (factor);
+  \draw[flowline] (factor)   -- (clip);
+  \draw[flowline] (clip)     -- (switch);
+  \draw[flowline] (switch.west) |- ++(-20mm,0) |- (eval.west);
+\end{tikzpicture}
+\caption{Hybrid AC/DC Newton power-flow algorithm (\texttt{NewtonSolver::solve}).}
+\label{fig:hybrid-newton}
+\end{figure}
+
+\paragraph{Algorithm PF-1: Hybrid Newton PF}
+\begin{algorithmic}[1]
+\Procedure{\texttt{NewtonSolver::solve}}{$\textit{data},\,\textit{opt},\,\textit{init}$}
+  \State Validate \textit{init}: check size, NaN, Inf; \textbf{throw} \texttt{invalid\_argument} on failure
+  \State $x \gets$ flat start or \textit{init} values; build \texttt{JacobianContext}
+  \State $x_{\textit{ctx}}\texttt{.min\_vm\_pu} \gets \textit{opt.robust\_nonlinear.min\_vm\_pu}$
+  \For{$k = 1,\ldots,\textit{opt.max\_iter}$}
+    \State $F, J \gets \texttt{evaluate\_residual\_and\_jacobian}(x, \textit{ctx}, \textit{pattern})$
+    \If{$\|F\|_\infty < \textit{opt.tol}$} \textbf{break} \EndIf
+    \State $\texttt{SparseLU}(J)\,\Delta x = F$;\quad
+      \textbf{if} singular \textbf{then} regularize and retry
+    \State Clip $\Delta x$: $|\Delta\theta|\le\Delta\theta_{\max}$, $|\Delta v|\le\Delta v_{\max}$
+    \State Backtracking line search; accept best step
+    \State PV/PQ hysteresis switching; converter mode switching
+  \EndFor
+  \State \textbf{if} not converged \textbf{then} set \texttt{failure\_reason}
+  \State Post-process branch, VSC, DCDC, router flows; \Return result
+\EndProcedure
+\end{algorithmic}
+
+\paragraph{Robust nonlinear pipeline.}
+The solver implements a five-phase robustification pipeline controlled by
+\texttt{RobustNonlinearOptions}:
+\begin{enumerate}
+  \item \textbf{Phase 1 -- Scaling and diagnostics}: residual-equation scaling,
+    variable scaling, and Jacobian row/column equilibration;
+    condition-number proxy monitor.
+  \item \textbf{Phase 2 -- Nonmonotone line search and smooth NCP}: Grippo--Lampariello--Lucidi
+    nonmonotone Armijo search; optional \(\mu\)-perturbed Fischer--Burmeister
+    complementarity for PV/PQ switching.
+  \item \textbf{Phase 3 -- LM trust-region fallback}: Levenberg--Marquardt step
+    \((J^\top J + \lambda I)\Delta x = -J^\top F\) when Newton line search fails;
+    SER-based pseudo-transient continuation.
+  \item \textbf{Phase 4 -- Homotopy continuation}: ramp loads and converter
+    setpoints from flat start to target in adaptive \(\lambda\) steps.
+  \item \textbf{Phase 5 -- Krylov fallback}: Newton--GMRES with Schur-complement
+    AC/DC block preconditioner (opt-in; not active by default).
+\end{enumerate}
+
+% ------------------------------------------------------------
+\subsection{Fast-Decoupled Power Flow (FDPF)}
+% ------------------------------------------------------------
+
+The FDPF solver builds two constant susceptance matrices from \(Y_{bus}\):
+\begin{align}
+B' &= -\Im\!\left\{Y_{bus}^{(R=0,\;b=0,\;\texttt{tap}=1)}\right\}, \\
+B'' &= -\Im\!\left\{Y_{bus}^{(\text{full shunts and charging,\;zero phase shift})}\right\},
+\end{align}
+and then alternates P-\(\theta\) and Q-\(V\) decoupled solves:
+\begin{align}
+B'\,\Delta\theta &= \Delta P / v, \\
+B''\,\Delta v &= \Delta Q / v.
+\end{align}
+Both \(B'\) and \(B''\) are factorized once via \texttt{Eigen::SparseLU}; only
+the right-hand sides change across iterations.  The solver is AC-only (no DC or
+converter coupling).
+
+\paragraph{Algorithm PF-2: Fast-Decoupled PF}
+\begin{algorithmic}[1]
+\Procedure{\texttt{FDPFSolver::solve}}{$\textit{data},\,\textit{opt}$}
+  \State Build reduced $B'_{\mathcal{N}\setminus\{sl\}}$, $B''_{\mathcal{N}_{PQ}}$; factorize
+  \If{factorization failed} set \texttt{SingularJacobian}; \Return \EndIf
+  \For{$k=1,\ldots,\textit{opt.fdpf\_max\_iter}$}
+    \State Compute $\Delta P/v$, $\Delta Q/v$ using \textbf{sparse} $Y_{bus}$ iteration
+    \If{$\|\Delta P/v\|_\infty < \varepsilon$ and $\|\Delta Q/v\|_\infty < \varepsilon$} \textbf{break} \EndIf
+    \State $\Delta\theta \gets (B')^{-1}(\Delta P/v)$; update $\theta$
+    \State $\Delta v \gets (B'')^{-1}(\Delta Q/v)$; update $v$
+  \EndFor
+\EndProcedure
+\end{algorithmic}
+
+% ------------------------------------------------------------
+\subsection{DC-Only Power Flow}
+% ------------------------------------------------------------
+
+The DC solver iterates on non-slack DC voltages using dense LU on the small
+reduced Jacobian:
+\begin{align}
+J_{dc}\,\Delta v^{\qual{dc}} &= \Delta P^{\qual{dc}}, \\
+J_{dc,kl} &=
+\begin{cases}
+(G_{dc}v^{\qual{dc}})_k + G_{kk}^{\qual{dc}}v_k^{\qual{dc}}, & l=k, \\
+G_{kl}^{\qual{dc}}v_k^{\qual{dc}}, & l\neq k.
+\end{cases}
+\end{align}
+DC bus injections are assembled from \texttt{DCLoad}, DC storage, DC static
+generators, DC PV arrays, VSC DC-side injections, DCDC transfers, and DC
+\texttt{EnergyRouter} ports.
+A backtracking line search over \(\alpha\in\{1,\tfrac12,\ldots\}\) is applied
+with voltages floored at \texttt{kMinVdc} to prevent collapse.
+
+% ------------------------------------------------------------
+\subsection{Adaptive Islanded Solver}
+% ------------------------------------------------------------
+
+The adaptive solver handles multi-island AC/DC topologies that a single global
+solve cannot address:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=7mm and 13mm]
+  \node[flowwide] (detect) {Detect islands (\texttt{island\_detector})};
+  \node[decision, below=of detect] (single) {Single connected island?};
+  \node[flowbox, right=28mm of single] (direct) {Direct Newton solve};
+  \node[flowbox, below=of single] (split) {Split \texttt{SolverData} per island};
+  \node[flowbox, below=of split] (par) {Solve islands in parallel\\(thread pool)};
+  \node[flowbox, below=of par] (merge) {Merge voltage results and\\compute inter-island flows};
+  \draw[flowline] (detect) -- (single);
+  \draw[flowline] (single) -- node[above]{yes} (direct);
+  \draw[flowline] (single) -- node[right]{no} (split);
+  \draw[flowline] (split) -- (par);
+  \draw[flowline] (par) -- (merge);
+\end{tikzpicture}
+\caption{Adaptive islanded power-flow workflow.}
+\label{fig:adaptive-pf}
+\end{figure}
+
+% ------------------------------------------------------------
+\subsection{HELM Solver}
+% ------------------------------------------------------------
+
+The HELM (Holomorphic Embedding Load-flow Method) solver constructs a power
+series in a complex embedding parameter \(s\in\mathbb{C}\):
+\begin{align}
+V_i(s) = \sum_{n=0}^{N} a_n^{(i)}\,s^n.
+\end{align}
+The recursion for order \(n\) coefficients follows from the holomorphic
+embedding of the network equations.  Convergence is tested via Padé approximants
+\([M/M]\) evaluated at \(s=1\):
+\begin{align}
+V_i(1) \approx \frac{P_M(1)}{Q_M(1)}.
+\end{align}
+The HELM solver is used as a DC warm-start supplier for the hybrid Newton path
+(\texttt{HelmWarmStart::DCPF}) and as a standalone fallback in the adaptive
+solver chain.
+
+% ------------------------------------------------------------
+\subsection{Error Handling and Diagnostics}
+% ------------------------------------------------------------
+
+All solvers return a result struct with a \texttt{SolverFailureReason} field
+(added in the May~2026 hardening pass):
+\begin{itemize}
+  \item \texttt{None} --- converged successfully,
+  \item \texttt{SingularJacobian} --- \texttt{SparseLU} or dense LU
+    factorization reported failure (B\({}'\), B\({}''\), or DC Jacobian),
+  \item \texttt{NonFiniteSolution} --- Newton step or intermediate state
+    contained NaN or Inf,
+  \item \texttt{InvalidInitialState} --- provided \texttt{InitialState} contained
+    non-finite values (guarded by \texttt{validate\_initial\_state}),
+  \item \texttt{MaxIterationsReached} --- tolerance not met within the iteration limit.
+\end{itemize}
+
+The solver \textbf{throws} \texttt{std::invalid\_argument} for structural API
+violations (e.g., size mismatch, NaN in initial state) and \textbf{returns
+a non-converged result} for numerical failures.  This two-tier policy separates
+programming errors from expected numerical difficulties.
+
+% ------------------------------------------------------------
+\subsection{Maintainability Roadmap: Code-Duplication Inventory}
+\label{sec:pf-dedup}
+% ------------------------------------------------------------
+
+All six items D1--D6 from the original inventory were resolved across two
+refactoring passes (\textit{code-dedup-D1-D5} and \textit{code-dedup-D3-D6}).
+
+\paragraph{D1 --- \texttt{inf\_norm} \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The anonymous-namespace duplicate removed from
+\texttt{jacobian\_builder.cpp} and \texttt{dc\_solver.cpp}.
+The canonical definition now lives in
+\texttt{include/hacdcpf/power_flow/pf\_utils.hpp} as an inline function.
+Test files \texttt{test\_powerflow\_performance.cpp} updated to use
+\texttt{hacdcpf::powerflow::inf\_norm} via a \texttt{using} declaration.
+
+\paragraph{D2 --- DC injection assembly \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The 80-line DC injection loop extracted into
+\texttt{assemble\_dc\_injections(data, vm, va, vdc, pdc\_spec)},
+declared in a new header
+\texttt{include/hacdcpf/power_flow/pf\_injection\_assembly.hpp} and
+implemented in \texttt{src/power_flow/pf\_injection\_assembly.cpp}.
+Both \texttt{dc\_solver.cpp} and \texttt{residual\_evaluator.cpp} now
+call this single canonical function.
+
+\paragraph{D3 --- Duplicated B\('\) matrix construction \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The anonymous-namespace functions \texttt{build\_bp} and \texttt{build\_bpp}
+were removed from \texttt{fdpf\_solver.cpp} and replaced with calls to a
+new utility \texttt{build\_susceptance\_matrix(data, flags)} implemented in
+\texttt{admittance\_builder.cpp}.  A \texttt{BpBuildFlags} struct (declared in
+\texttt{admittance\_builder.hpp}) controls all assembly variants: zero
+resistance, zero line charging, unit tap, zero phase shift, and optional bus
+shunt susceptance.  Convenience factories \texttt{make\_bp\_flags(min\_x\_pu)}
+and \texttt{make\_bpp\_flags()} cover the two FDPF use cases.
+
+\paragraph{D4 --- DC initial-state warm-start \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The size-guarded copy of \texttt{init->vdc} with NaN/Inf validation
+extracted into \texttt{load\_dc\_initial\_state(init, dc\_buses, vdc)}
+in \texttt{pf\_utils.hpp}.  Applied to both \texttt{dc\_solver.cpp} and
+\texttt{newton\_solver.cpp}.
+
+\paragraph{D5 --- Bus-type classification loop \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The manual AC bus classification into SLACK/PV/PQ sets extracted into
+\texttt{classify\_ac\_buses(data)} returning an \texttt{AcBusSets} struct
+(all in \texttt{pf\_utils.hpp}).  Applied to \texttt{fdpf\_solver.cpp},
+\texttt{residual\_evaluator.cpp}, and the helper in
+\texttt{test\_unified\_pf\_upgrade.cpp}.
+
+\paragraph{D6 --- \texttt{jacobian\_builder.cpp} file split \textnormal{(}\textbf{DONE}\textnormal{)}.}
+The monolithic \texttt{jacobian\_builder.cpp} was split into three focused
+compilation units:
+\begin{itemize}
+  \item \texttt{jacobian\_pattern.cpp} --- \texttt{build\_jacobian\_pattern} and
+        its anonymous-namespace helpers (\texttt{rc\_key},
+        \texttt{add\_pattern\_position}, \texttt{build\_entry\_to\_nz},
+        \texttt{lookup\_nz});
+  \item \texttt{ac\_kernel.cpp} --- \texttt{evaluate\_ac\_kernel\_serial},
+        \texttt{evaluate\_ac\_kernel\_parallel}, and \texttt{effective\_ac\_threads};
+  \item \texttt{jacobian\_builder.cpp} (retained) --- \texttt{build\_power\_spec},
+        \texttt{evaluate\_residual\_impl}, \texttt{evaluate\_residual\_and\_jacobian},
+        and \texttt{evaluate\_residual\_only}.
+\end{itemize}
+The cross-file linkage between \texttt{jacobian\_builder.cpp} and
+\texttt{ac\_kernel.cpp} is provided by an internal header
+\texttt{src/power_flow/ac\_kernel\_impl.hpp} (not installed).
+
+% ------------------------------------------------------------
+\subsection{Numerical Performance (Release Mode)}
+\label{sec:pf-performance}
+% ------------------------------------------------------------
+
+Benchmarks were run on 84 MATPOWER cases (\texttt{build\_rel},
+Apple M4, \texttt{-O3 -DNDEBUG}, single thread) using
+\texttt{build\_rel/helm\_powerflow\_benchmark ../data}.
+Four paths are compared: NR = hybrid Newton, FD = fast-decoupled,
+HE = HELM standalone, HE+DC = HELM with DC warm start.
+
+\begin{longtable}{L{0.18\linewidth}rr
+  L{0.08\linewidth}L{0.08\linewidth}
+  L{0.08\linewidth}L{0.08\linewidth}}
+\toprule
+Case & $N$ & Branches & NR ms & FD ms & HE ms & HE+DC ms \\
+\midrule
+\endhead
+case14 & 14 & 20 & 0.0 & 0.3 & 0.1 & 0.1 \\
+case57 & 57 & 80 & 0.1 & 2.9 & 0.6 & 0.6 \\
+case118 & 118 & 186 & 0.4 & 11.5 & 1.8 & 1.9 \\
+case300 & 300 & 411 & 0.9 & 59.5 & div & div \\
+case1354pegase & 1354 & 1991 & 15.2 & skip & div & div \\
+case1888rte & 1888 & 2531 & 10.8 & skip & 135.8 & 136.5 \\
+case2383wp & 2383 & 2896 & 3.8 & skip & 117.6 & 109.3 \\
+case2736sp & 2736 & 3504 & 5.6 & skip & 75.2 & 76.6 \\
+case3012wp & 3012 & 3572 & 35.0 & skip & 124.3 & 126.9 \\
+case6468rte & 6468 & 9000 & 31.7 & skip & 297.7 & 296.2 \\
+case8387pegase & 8387 & 14561 & 46.7 & skip & 1776.5 & 1786.7 \\
+case13659pegase & 13659 & 20467 & 95.9 & skip & skip & skip \\
+case\_ACTIVSg10k & 10000 & 12706 & 21.8 & skip & 4327.9 & 4389.7 \\
+case\_ACTIVSg25k & 25000 & 32230 & 64.3 & skip & skip & skip \\
+case\_SyntheticUSA & 82000 & 104121 & 1745.2 & skip & skip & skip \\
+\bottomrule
+\caption{Power-flow solver timing (release mode, Apple M4, single thread, post D1--D5 refactor).
+``div'' = diverged, ``skip'' = case excluded from path at this size.}
+\label{tab:pf-perf}
+\end{longtable}
+
+Key observations:
+\begin{itemize}
+  \item The hybrid Newton path converges on the 82000-bus USA synthetic system
+    in 1.75\,s with 17 iterations after the D1--D5 refactoring pass
+    (no regression vs.\ pre-refactoring baseline).
+  \item Newton solve time scales approximately as $O(N^{1.2})$ in practice for
+    typical sparse transmission systems.
+  \item FDPF is 10--200$\times$ slower than Newton on small-to-medium cases due
+    to the current $O(N^2)$ dense Ybus iteration in the power-injection loop;
+    replacing it with a sparse row iteration remains an open performance item.
+  \item HELM converges on most well-conditioned cases under 2000~buses but
+    diverges on stressed systems (case300, case1354pegase); it
+    remains useful as a warm-start provider for Newton on difficult cases.
+  \item The D1--D6 refactoring passes introduced no performance regression:
+    Newton solve times match the pre-refactoring baseline on all benchmark cases.
+\end{itemize}

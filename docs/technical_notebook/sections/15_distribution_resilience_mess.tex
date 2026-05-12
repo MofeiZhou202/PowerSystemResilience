@@ -1,0 +1,306 @@
+\section{Distribution Resilience Assessment with Mobile Energy Storage Systems}
+\label{sec:distribution-resilience-mess}
+
+\subsection{Problem Form and Runtime Scope}
+
+This chapter documents the resilience-restoration layer for multi-period outage
+recovery with mobile energy storage systems.  The mathematical model couples
+feeder availability, reconfiguration, served-load restoration, and inter-temporal
+MESS movement and discharge decisions over a discrete restoration horizon.
+
+\subsection{Code Map}
+
+The current implementation is concentrated in:
+\begin{itemize}
+  \item \texttt{src/analysis/resilience\_assessment.cpp} for restoration simulation and resilience KPI aggregation,
+  \item \texttt{src/analysis/topology\_analysis.cpp} for feeder-switching support,
+  \item distribution and reliability-side result structures used by the GUI and regression tests.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The detailed algorithm chapter does not yet include a dedicated MESS-resilience
+pseudocode block.  The closest reusable workflow references are the ONR and
+distribution-PF algorithms (A13 and A14) in Section~\ref{sec:algorithms}.  This
+chapter therefore remains the main code-aligned statement of the restoration
+model itself.
+
+\subsection{Current Status}
+
+The C++ port now has two layers. The default runtime path remains the practical
+heuristic restoration simulator used by the GUI and validation demo, while a
+new strict multi-period MIP/LinDistFlow restoration skeleton has been added as
+the replacement path for unexpected-fault studies. The current C++ scope is
+therefore broader than before, but still narrower than the original full
+stochastic two-stage decomposition design.
+
+This section documents the resilience-restoration model used for
+multi-period distribution-service recovery with mobile energy storage systems
+(MESS). The formulation is aligned with the original MATLAB package in
+\texttt{Multi-stage Restoration/} and with the current C++ implementation in
+\texttt{resilience\_assessment.cpp}.
+
+The original MATLAB workflow is a two-stage stochastic mixed-integer recourse
+model with Benders-style decomposition. The current C++ port implements the
+core operational layer needed for practical resilience studies in this codebase:
+\begin{enumerate}
+  \item time-indexed feeder outage and repair simulation,
+  \item radial reconfiguration through healthy tie-line closure,
+  \item island-level load restoration prioritization,
+  \item inter-temporal MESS routing and discharge scheduling,
+  \item resilience KPI aggregation for GUI and regression tests.
+\end{enumerate}
+
+In addition, the latest C++ implementation now contains a strict restoration
+builder that formulates a single multi-period MIP with binary branch-status,
+energized-bus, and root-selection variables; active-power LinDistFlow voltage
+envelopes; fixed-storage inter-temporal energy balance; and time-space MESS
+movement arcs. This strict model is currently a first skeleton, intended to
+replace the heuristic unexpected-fault restoration path incrementally.
+
+\subsection{Sets and Indices}
+
+\begin{align}
+\mathcal{N} &= \text{distribution buses}, \\
+\mathcal{E} &= \text{AC feeder branches}, \\
+\mathcal{E}^{\mathrm{tie}} &\subseteq \mathcal{E} && \text{normally open tie branches}, \\
+\mathcal{G} &= \text{dispatchable local generators}, \\
+\mathcal{R} &= \text{static and renewable distributed resources}, \\
+\mathcal{S} &= \text{fixed stationary storage units}, \\
+\mathcal{M} &= \text{mobile energy storage systems (MESS)}, \\
+\mathcal{L} &= \text{loads}, \\
+\mathcal{T} &= \{0,1,\dots,T-1\} && \text{discrete restoration periods}, \\
+\mathcal{F} &= \text{faulted feeder branches}. 
+\end{align}
+
+Each load $\ell\in\mathcal{L}$ is attached to a bus $n(\ell)\in\mathcal{N}$,
+with active demand $P^{d}_{\ell,t}$, priority weight $w_{\ell}$, and customer
+count $N^{\mathrm{cust}}_{\ell}$.
+
+\subsection{State Variables}
+
+For each time period $t\in\mathcal{T}$:
+\begin{align}
+\alpha_{e,t} &\in \{0,1\} && \text{branch energization state}, \\
+P^{\mathrm{serv}}_{\ell,t} &\ge 0 && \text{served load}, \\
+P^{\mathrm{shed}}_{\ell,t} &\ge 0 && \text{unsupplied load}, \\
+E^{\mathrm{mess}}_{m,t} &\ge 0 && \text{MESS stored energy}, \\
+P^{\mathrm{mess}}_{m,t} &\ge 0 && \text{MESS discharge power}, \\
+\chi^{\mathrm{stay}}_{m,n,t} &\in \{0,1\} && \text{MESS located at bus }n, \\
+\chi^{\mathrm{move}}_{m,a,t} &\in \{0,1\} && \text{MESS traverses transport arc }a.
+\end{align}
+
+The C++ implementation reports these decisions in aggregated form through the
+per-step result objects:
+\begin{align}
+P^{\mathrm{demand}}_t,\;
+P^{\mathrm{served}}_t,\;
+P^{\mathrm{shed}}_t,\;
+R_t,\;
+\mathcal{E}^{\mathrm{open}}_t,\;
+\mathcal{M}^{\mathrm{dispatch}}_t.
+\end{align}
+
+\subsection{Fault and Repair Process}
+
+A faulted branch $f\in\mathcal{F}$ is unavailable during its outage window:
+\begin{align}
+\alpha_{f,t} = 0,
+\qquad
+\forall t\in\left[t^{\mathrm{out}}_f,\; t^{\mathrm{out}}_f + \tau^{\mathrm{rep}}_f\right).
+\end{align}
+
+Outside this interval, the branch may either return to its original state or be
+closed by reconfiguration if it is a healthy tie branch. In the deterministic
+C++ implementation, repair times are explicit inputs and branch failures are
+simulated chronologically over the horizon.
+
+\subsection{Load Restoration and Prioritization}
+
+For every load $\ell$ and time $t$:
+\begin{align}
+P^{\mathrm{serv}}_{\ell,t} + P^{\mathrm{shed}}_{\ell,t} = P^{d}_{\ell,t},
+\qquad
+0 \le P^{\mathrm{serv}}_{\ell,t} \le P^{d}_{\ell,t}.
+\end{align}
+
+Within each island, available supply is allocated to higher-priority loads
+first. If $\pi(1),\pi(2),\dots$ denotes the ordering of island loads by
+descending $w_{\ell}$, then the restoration rule is
+\begin{align}
+P^{\mathrm{serv}}_{\pi(k),t}
+= \min\left(P^{d}_{\pi(k),t},
+\; P^{\mathrm{avail}}_{t} - \sum_{j=1}^{k-1} P^{\mathrm{serv}}_{\pi(j),t}\right)_{+}.
+\end{align}
+
+The weighted unserved load is
+\begin{align}
+P^{\mathrm{wshed}}_t = \sum_{\ell\in\mathcal{L}} w_{\ell} P^{\mathrm{shed}}_{\ell,t}.
+\end{align}
+
+\subsection{Island Supply Model}
+
+For each electrical island $\mathcal{I}\subseteq\mathcal{N}$ at time $t$, the
+available active supply is approximated as
+\begin{align}
+P^{\mathrm{avail}}_{\mathcal{I},t} =
+P^{\mathrm{grid}}_{\mathcal{I},t}
++ \sum_{g\in\mathcal{G}(\mathcal{I})} P^{\max}_{g}
++ \sum_{r\in\mathcal{R}(\mathcal{I})} P_{r,t}
++ \sum_{s\in\mathcal{S}(\mathcal{I})} P^{\mathrm{dis}}_{s,t}
++ \sum_{m\in\mathcal{M}(\mathcal{I})} P^{\mathrm{mess}}_{m,t}.
+\end{align}
+
+If an island contains a slack or external-grid source, then
+$P^{\mathrm{grid}}_{\mathcal{I},t}$ is treated as nonbinding and the island can
+serve its full demand. Otherwise restoration is limited by local DER and
+storage capability.
+
+\subsection{MESS Energy Dynamics}
+
+For each mobile unit $m\in\mathcal{M}$:
+\begin{align}
+E^{\min}_{m} \le E^{\mathrm{mess}}_{m,t} \le E^{\max}_{m},
+\end{align}
+and during a discharge period,
+\begin{align}
+E^{\mathrm{mess}}_{m,t+1}
+= E^{\mathrm{mess}}_{m,t}
+- \frac{\Delta t}{\eta^{\mathrm{dis}}_{m}} P^{\mathrm{mess}}_{m,t}.
+\end{align}
+
+Travel consumes energy according to the traversed road distance:
+\begin{align}
+E^{\mathrm{mess}}_{m,t^{+}}
+= E^{\mathrm{mess}}_{m,t^{-}} - \rho^{\mathrm{travel}}_m d_{m,t},
+\end{align}
+where $\rho^{\mathrm{travel}}_m$ is the transport energy cost in MWh/km and
+$d_{m,t}$ is the routing distance during the dispatch decision.
+
+The discharge capability is limited by both power and stored energy:
+\begin{align}
+0 \le P^{\mathrm{mess}}_{m,t}
+\le \min\left(P^{\max}_{m},
+\frac{\eta^{\mathrm{dis}}_{m}}{\Delta t}
+\left(E^{\mathrm{mess}}_{m,t} - E^{\min}_{m}\right)\right).
+\end{align}
+
+\subsection{Transportation-Network Coupling}
+
+The original MATLAB model defines a time-space transportation network with
+binary path-flow variables. The corresponding canonical constraints are:
+\begin{align}
+\sum_{a\in\delta^{+}(v)} \chi^{\mathrm{move}}_{m,a,t}
+- \sum_{a\in\delta^{-}(v)} \chi^{\mathrm{move}}_{m,a,t}
+= b_{m,v,t},
+\end{align}
+where $b_{m,v,t}$ is the source/sink balance induced by the current MESS
+location and the desired destination.
+
+In the current C++ implementation, this is approximated by a shortest-path
+assignment over a transport graph. If no explicit road network is provided, the
+AC feeder graph is used as a transportation proxy with branch length as edge
+weight. This keeps the data contract lightweight while preserving the essential
+spatial coupling between restoration need and MESS mobility.
+
+\subsection{Radial Reconfiguration}
+
+Healthy open ties may be closed to reconnect unsupplied islands, subject to a
+radial forest policy. In the simplified implementation, branch closures are
+accepted only when they connect two different components. This enforces
+cycle-free restoration and mimics the spanning-tree intent of the MATLAB master
+problem:
+\begin{align}
+\alpha_{e,t} = 1
+\implies e \text{ joins two distinct connected components at time } t.
+\end{align}
+
+This heuristic is consistent with single-commodity radial restoration logic and
+remains the default GUI path. In parallel, the code base now also contains a
+strict mixed-integer LinDistFlow restoration skeleton, so future unexpected-
+fault studies no longer need to remain confined to heuristic topology updates.
+
+\subsection{Objective Function}
+
+The stochastic MATLAB model minimizes expected restoration cost across
+scenarios. Its operational core is represented by
+\begin{align}
+\min \sum_{t\in\mathcal{T}} \Bigg[
+C^{\mathrm{shed}} \sum_{\ell\in\mathcal{L}} P^{\mathrm{shed}}_{\ell,t}
++ C^{\mathrm{sw}} \sum_{e\in\mathcal{E}^{\mathrm{tie}}}
+\left|\alpha_{e,t} - \alpha_{e,t-1}\right|
++ C^{\mathrm{travel}} \sum_{m\in\mathcal{M}} d_{m,t}
+\Bigg].
+\end{align}
+
+The implemented C++ routine uses the same operational priorities, but solves
+them sequentially by:
+\begin{enumerate}
+  \item enforcing feeder outages and completed repairs,
+  \item greedily reconnecting unsourced islands through healthy ties,
+  \item allocating local generation and storage to maximize served load,
+  \item dispatching available MESS to the most critical unsupplied islands.
+\end{enumerate}
+
+\subsection{Resilience Metrics}
+
+The primary resilience outputs are:
+\begin{align}
+E^{\mathrm{demand}} &= \sum_{t\in\mathcal{T}} P^{\mathrm{demand}}_t \Delta t, \\
+E^{\mathrm{served}} &= \sum_{t\in\mathcal{T}} P^{\mathrm{served}}_t \Delta t, \\
+E^{\mathrm{uns}} &= \sum_{t\in\mathcal{T}} P^{\mathrm{shed}}_t \Delta t, \\
+R_t &= \frac{P^{\mathrm{served}}_t}{P^{\mathrm{demand}}_t}, \\
+\mathrm{RI} &= \frac{E^{\mathrm{served}}}{E^{\mathrm{demand}}}, \\
+E^{\mathrm{MESS}} &= \sum_{t\in\mathcal{T}} \sum_{m\in\mathcal{M}} P^{\mathrm{mess}}_{m,t} \Delta t.
+\end{align}
+
+The GUI reports these quantities as:
+\begin{itemize}
+  \item total served energy,
+  \item total shed energy,
+  \item resilience index,
+  \item average and final restoration ratio,
+  \item peak shed power,
+  \item MESS-delivered energy,
+  \item MESS travel distance,
+  \item switching actions and repaired-fault count.
+\end{itemize}
+
+\subsection{Implementation Notes}
+
+The present C++ port is intentionally conservative in scope:
+\begin{enumerate}
+  \item it runs directly on the canonical \texttt{HybridPowerSystem} data model,
+  \item it supports arbitrary user-specified feeder faults and repair windows,
+  \item it uses explicit mobile-storage state tracking over time,
+  \item it returns lightweight JSON-friendly outputs for the GUI,
+  \item it remains extensible toward the full stochastic Benders architecture in
+        the original MATLAB package.
+\end{enumerate}
+
+This design is appropriate for interactive resilience screening and regression
+validation, while preserving a clean upgrade path toward a full mixed-integer
+recourse implementation.
+
+\subsection{Validation Snapshot}
+
+The new regression test \texttt{tests/test\_resilience\_assessment.cpp} uses the
+\texttt{case33mg\_acdc} feeder with a single automatically selected feeder
+fault, a six-hour repair window, and an eight-hour restoration horizon. To
+isolate the marginal contribution of MESS, stationary DER is removed from the
+test scenario and one mobile unit is placed on the tail bus.
+
+The measured results are:
+\begin{align}
+E^{\mathrm{demand}} &= 29.72\ \text{MWh}, \\
+E^{\mathrm{shed,base}} &= 0.48\ \text{MWh}, \\
+E^{\mathrm{shed,MESS}} &= 0.00\ \text{MWh}, \\
+\mathrm{RI}^{\mathrm{base}} &= 0.983849, \\
+\mathrm{RI}^{\mathrm{MESS}} &= 1.000000, \\
+E^{\mathrm{MESS}} &= 0.48\ \text{MWh}.
+\end{align}
+
+In other words, the mobile storage unit fully eliminates the residual outage
+energy left by the feeder fault in this validation case. This is the expected
+behavior for a tail-island restoration event and provides a useful sanity check
+for both the operational logic and the GUI integration.

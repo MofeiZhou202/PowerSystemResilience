@@ -1,0 +1,536 @@
+\section{Optimal Power Flow Models}
+\label{sec:opf}
+
+\subsection{Problem Form and Runtime Scope}
+
+This chapter covers the OPF family built on top of canonical AC/DC network
+projection.  The implemented problem classes are:
+\begin{itemize}
+  \item nonlinear AC/DC OPF for the native primal-dual and parity-IPM routes,
+  \item convex DC OPF in LP or QP form,
+  \item mixed-integer reactive-power optimization over discrete taps and shunts.
+\end{itemize}
+The runtime solver family is selected from option flags and DC-network presence.
+
+\subsection{Code Map}
+
+The current implementation is concentrated in:
+\begin{itemize}
+  \item \texttt{src/optimal_power_flow/ac\_opf.cpp} for top-level AC OPF routing and native reduced-space solve orchestration,
+  \item \texttt{src/optimal_power_flow/parity\_formulation.cpp} and \texttt{src/optimal_power_flow/parity\_ipm.cpp} for the parity full-space NLP route,
+  \item \texttt{src/optimal_power_flow/dc\_opf.cpp} for DC OPF model build and backend selection,
+  \item \texttt{src/optimal_power_flow/reactive\_power\_opt.cpp} for the four-phase outer-approximation MINLP,
+  \item \texttt{src/engine/lcqp\_solver.cpp}, \texttt{src/engine/dual\_simplex.cpp}, and the adapter layer for native and external backend execution.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The relevant code-aligned workflows are:
+\begin{itemize}
+  \item Algorithms A8--A11 in Section~\ref{sec:algorithms} for AC OPF routing, fast dispatch fallback, native primal-dual OPF, and parity-IPM build/solve,
+  \item Algorithm A16 for DC OPF,
+  \item Algorithm A17 for reactive-power optimization,
+  \item Algorithms E5--E8 in Section~\ref{sec:engine-solver-system} for the native LCQP, LP IPM, dual simplex, and PDLP backends used underneath those routes.
+\end{itemize}
+
+\subsection{Current Status}
+
+This is an active production chapter with multiple live backends.  The AC OPF
+family is fully implemented, but backend coverage differs by path: parity and
+native nonlinear routes are the main AC/DC engines, while DC OPF and RPO reuse
+the solver infrastructure through specialized model builders.
+
+\subsection{Top-Level Solver Routing}
+
+The public \texttt{solve\_ac\_opf} path selects among three solver families.
+A key implementation rule is automatic DC routing: if the case has DC buses or
+VSC converters and \texttt{enable\_primal\_dual=false}, the options are
+internally overridden to
+\texttt{enable\_primal\_dual=true, use\_parity\_ipm=true}.
+
+\begin{longtable}{L{0.25\linewidth}L{0.26\linewidth}L{0.37\linewidth}}
+\toprule
+Path & Trigger & Current behavior \\
+\midrule
+\endhead
+Fast dispatch + PF fallback (AC-only) &
+\texttt{enable\_primal\_dual=false} and no forced DC parity routing &
+Drops DC and converter subsystems, solves economic dispatch, then runs AC PF projection. \\
+Native primal-dual OPF &
+\texttt{enable\_primal\_dual=true}, \texttt{use\_parity\_ipm=false} &
+Uses a custom sparse KKT loop with AC equations, DC-bus equations, and converter power-balance equations. \\
+Parity primal-dual IPM &
+\texttt{enable\_primal\_dual=true}, \texttt{use\_parity\_ipm=true}
+or auto-enabled by DC presence &
+Builds the parity full-space NLP and solves by Mehrotra-type primal-dual IPM. Optional fallback to native path when enabled. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Fast Dispatch + PF Fallback (AC-Only Path)}
+
+This path is used for fastest feasible dispatch recovery in AC-only operation.
+It solves a clipped economic dispatch first, then projects via AC PF.
+
+\paragraph{Economic dispatch stage.}
+\begin{align}
+\min_{P_g}\; \sum_{g\in\mathcal{G}}
+\left(c_{2g}P_g^2 + c_{1g}P_g + c_{0g}\right),
+\end{align}
+subject to generator bounds and
+\(\sum_g P_g = P_D\) (clamped to feasible range).
+For quadratic units, the code uses incremental-cost clipping
+\(P_g = \mathrm{clip}((\lambda-c_1)/(2c_2),P_g^{\qual{min}},P_g^{\qual{max}})\).
+
+\paragraph{Feasibility projection stage.}
+The dispatch is passed to AC Newton PF; resulting bus injections are split back
+across generators at each bus and clamped to individual bounds.
+If direct projection fails, one reshaped economic-dispatch attempt is executed
+before declaring failure.
+
+\subsection{Native Primal-Dual OPF Formulation}
+
+\subsubsection{Decision Variables}
+
+For the native path, variables are
+\begin{align}
+x_{nat}=
+\begin{bmatrix}
+\theta_{\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}} &
+v_{\mathcal{N}_{PQ}} &
+P_g & Q_g &
+v^{\qual{dc}} &
+P^{\qual{conv,ac}} & Q^{\qual{conv,ac}} & P^{\qual{conv,dc}}
+\end{bmatrix}^{\top}.
+\end{align}
+
+The implementation includes all DC bus voltages in \(v^{\qual{dc}}\); for
+\texttt{DC\_V} buses, tight bounds are built around the setpoint.
+
+\subsubsection{Objective}
+\begin{align}
+\min_x f(x) =
+\sum_{g\in\mathcal{G}}
+\left(c_{2g}P_g^2 + c_{1g}P_g + c_{0g}\right).
+\end{align}
+
+\subsubsection{Equality Constraints}
+
+\paragraph{AC equations.}
+AC rows reuse the PF residual kernel (with converter table disabled in that
+kernel call), then subtract explicit converter variables:
+\begin{align}
+g_{P,i} &= \left(P_i^{\qual{spec,PF}}-P_i^{\qual{calc}}\right) - \sum_{c\in\mathcal{C}_i} P_c^{\qual{ac}} = 0,
+&& i\in\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}, \\
+g_{Q,i} &= \left(Q_i^{\qual{spec,PF}}-Q_i^{\qual{calc}}\right) - \sum_{c\in\mathcal{C}_i} Q_c^{\qual{ac}} = 0,
+&& i\in\mathcal{N}_{PQ}.
+\end{align}
+
+\paragraph{DC equations.}
+For each DC bus \(k\):
+\begin{align}
+g_{k}^{\qual{dc}} = P_{d,k}^{\qual{dc}} + V_k^{\qual{dc}}(G_{dc}V^{\qual{dc}})_k
+- \sum_{c\in\mathcal{C}_k^{\qual{dc}}} P_c^{\qual{dc}} = 0.
+\end{align}
+
+\paragraph{Converter energy balance.}
+For converter \(c\):
+\begin{align}
+g_c^{\qual{conv}} &= P_c^{\qual{ac}} + P_c^{\qual{dc}} + P_c^{\qual{loss}} = 0, \\
+P_c^{\qual{loss}} &= a_c + b_c I_c^{\qual{ac}} + (1-\eta_c)(I_c^{\qual{ac}})^2, \\
+I_c^{\qual{ac}} &= \frac{\sqrt{(P_c^{\qual{ac}})^2+(Q_c^{\qual{ac}})^2+\epsilon}}{V_c^{\qual{ac}}},
+\quad \epsilon=10^{-6}.
+\end{align}
+
+\subsubsection{Bounds and Nonlinear Limits}
+
+Variable bounds are enforced for
+\(\theta, v, P_g, Q_g, v^{\qual{dc}}, P^{\qual{conv,ac}}, Q^{\qual{conv,ac}}, P^{\qual{conv,dc}}\).
+
+Nonlinear engineering limits are modeled as
+\(h(x)\le 0\) and handled by exterior quadratic penalty terms inside the
+merit model:
+\begin{align}
+h_{ij}^{\qual{from}} &= P_{f,ij}^2 + Q_{f,ij}^2 - (S_{ij}^{\qual{max}})^2 \le 0, \\
+h_{ij}^{\qual{to}}   &= P_{t,ij}^2 + Q_{t,ij}^2 - (S_{ij}^{\qual{max}})^2 \le 0, \\
+h_c^{\qual{conv}}    &= (P_c^{\qual{ac}})^2 + (Q_c^{\qual{ac}})^2 - (S_c^{\qual{max}})^2 \le 0.
+\end{align}
+
+\subsubsection{KKT System and Globalization}
+
+At each inner iteration, the solver builds
+\begin{align}
+\begin{bmatrix}
+H + \delta I & J_g^{\top} \\
+J_g & -\delta I
+\end{bmatrix}
+\begin{bmatrix}
+\Delta x \\
+\Delta\lambda
+\end{bmatrix}
+=
+-\begin{bmatrix}
+\nabla_x L \\
+g(x)
+\end{bmatrix},
+\end{align}
+with dynamic regularization \(\delta\), line search, trust/restore logic,
+and bounded step clipping.
+
+A barrier term is applied to variable bounds; nonlinear branch/converter limits
+enter the merit model through adaptive exterior penalties.
+
+\subsection{Parity Full-Space Formulation}
+
+\subsubsection{Decision Variables}
+
+The parity NLP includes AC, DC, converter, shedding, and enhanced DER variables:
+\begin{align}
+x_{par}=
+\begin{bmatrix}
+\theta,\ v^{\qual{ac}},\ P_g,\ Q_g,\ v^{\qual{dc}},\ P^{\qual{conv,ac}},\ Q^{\qual{conv,ac}},\ P^{\qual{conv,dc}}, \\
+\Delta P_d,\ \Delta Q_d,\ P^{\qual{ren}},\ Q^{\qual{ren}},\ P^{\qual{stor}},\ Q^{\qual{stor}}, \\
+P^{\qual{dcdc}},\ P^{\qual{flex}}
+\end{bmatrix}^{\top}.
+\end{align}
+
+\subsubsection{Objective}
+\begin{align}
+\min_x f_{par}(x) =
+&\sum_{g\in\mathcal{G}}\left(c_{2g}P_g^2 + c_{1g}P_g + c_{0g}\right)
++ \mathrm{VOLL}_{eff} S_{base}\sum_i (\Delta P_{d,i}+\Delta Q_{d,i}) \\
+&+ \sum_{r\in\mathcal{R}^{\qual{curt}}}
+\max\left(0, P_{r}^{\qual{rated}} - P_r\right)c_r^{\qual{curt}}.
+\end{align}
+
+\subsubsection{Equality Constraints}
+
+\paragraph{AC full-bus balance (scaled).}
+For each AC bus \(i\):
+\begin{align}
+g_{P,i} &=
+\Bigl(P_i^{\qual{calc}} - P_i^{\qual{gen}} - P_i^{\qual{fixed}} - P_i^{\qual{ren}} - P_i^{\qual{stor}}
++ P_i^{\qual{load}} - \Delta P_{d,i} + P_i^{\qual{flex}} - P_i^{\qual{conv,ac}}\Bigr)\,\alpha_P = 0, \\
+g_{Q,i} &=
+\Bigl(Q_i^{\qual{calc}} - Q_i^{\qual{gen}} - Q_i^{\qual{fixed}} - Q_i^{\qual{ren}} - Q_i^{\qual{stor}}
++ Q_i^{\qual{load}} - \Delta Q_{d,i} - Q_i^{\qual{conv,ac}}\Bigr)\,\alpha_Q = 0.
+\end{align}
+Here \(P_i^{\qual{fixed}},Q_i^{\qual{fixed}}\) aggregate non-variable injections
+(static generators, non-curtailable renewables/PV, VPP, microgrid exchange,
+mobile storage).
+
+\paragraph{DC balance with DCDC coupling.}
+For each DC bus \(k\):
+\begin{align}
+g_k^{\qual{dc}} = P_{d,k}^{\qual{dc}} + \sum_{m\neq k} g_{km}
+\left((V_k^{\qual{dc}})^2 - V_k^{\qual{dc}}V_m^{\qual{dc}}\right)
+- P_k^{\qual{conv,dc}} + P_k^{\qual{dcdc,in}} - P_k^{\qual{dcdc,out}} = 0,
+\end{align}
+where the OPF decision variable is \(P^{\qual{in}}\)
+(\emph{input-side referenced}, i.e.\ the power absorbed from \texttt{bus\_in}).
+The output power is a deterministic function of \(P^{\qual{in}}\) including
+both efficiency and \(I^2R\) conduction loss:
+\begin{align}
+P^{\qual{out}}=
+\begin{cases}
+\eta\, P^{\qual{in}} - r_{eq}(P^{\qual{in}})^2/(V^{\qual{dc}})^2,
+& P^{\qual{in}}\ge 0, \\
+P^{\qual{in}}/\eta - r_{eq}(P^{\qual{in}})^2/(V^{\qual{dc}})^2,
+& P^{\qual{in}}<0.
+\end{cases}
+\end{align}
+There is no separate converter-balance constraint row for DCDC converters;
+their power contributions are folded directly into the two DC bus balance
+equations:
+\begin{align}
+g_{\texttt{bus\_in}} &\mathrel{+}= P^{\qual{in}}, &
+g_{\texttt{bus\_out}} &\mathrel{-}= P^{\qual{out}}.
+\end{align}
+
+\paragraph{DCDC Jacobian and Hessian.}
+The first-order derivatives of the DCDC coupling terms are:
+\begin{align}
+\frac{\partial g_{\texttt{bus\_in}}}{\partial P^{\qual{in}}} &= 1, &
+\frac{\partial g_{\texttt{bus\_out}}}{\partial P^{\qual{in}}} &=
+-\frac{\partial P^{\qual{out}}}{\partial P^{\qual{in}}}, \\
+\frac{\partial P^{\qual{out}}}{\partial P^{\qual{in}}} &=
+\begin{cases}
+\eta - 2r_{eq}P^{\qual{in}}/(V^{\qual{dc}})^2, & P^{\qual{in}}\ge 0, \\
+1/\eta - 2r_{eq}P^{\qual{in}}/(V^{\qual{dc}})^2, & P^{\qual{in}}<0.
+\end{cases}
+\end{align}
+When \(r_{eq}>0\), there is also a cross-derivative with respect to
+the input-side DC voltage:
+\begin{align}
+\frac{\partial g_{\texttt{bus\_out}}}{\partial V^{\qual{dc}}_{\texttt{in}}}
+&= \frac{2r_{eq}(P^{\qual{in}})^2}{(V^{\qual{dc}}_{\texttt{in}})^3}.
+\end{align}
+The Hessian contributions from the \(I^2R\) loss term are:
+\begin{align}
+\frac{\partial^2 g}{\partial (P^{\qual{in}})^2}
+&= \frac{2r_{eq}}{(V^{\qual{dc}})^2}, &
+\frac{\partial^2 g}{\partial P^{\qual{in}}\partial V^{\qual{dc}}}
+&= \frac{-4r_{eq}P^{\qual{in}}}{(V^{\qual{dc}})^3}, &
+\frac{\partial^2 g}{\partial (V^{\qual{dc}})^2}
+&= \frac{6r_{eq}(P^{\qual{in}})^2}{(V^{\qual{dc}})^4}.
+\end{align}
+
+\paragraph{OPF warm-start convention.}
+Note that the PF uses output-referenced \(P^{\qual{ref}}\) while the OPF uses
+input-referenced \(P^{\qual{in}}\).  The warm-start path converts between these
+reference frames when seeding the OPF initial point from a PF result.
+
+\paragraph{Converter balance.}
+For each VSC converter:
+\begin{align}
+P_c^{\qual{ac}}+P_c^{\qual{dc}}+P_c^{\qual{loss}}=0,
+\end{align}
+with the same loss model as in the native formulation.
+
+\subsubsection{Inequality Constraints}
+
+Nonlinear inequalities:
+\begin{align}
+P_{f,ij}^2 + Q_{f,ij}^2 - (S_{ij}^{\qual{max}})^2 &\le 0, \\
+P_{t,ij}^2 + Q_{t,ij}^2 - (S_{ij}^{\qual{max}})^2 &\le 0, \\
+(P_c^{\qual{ac}})^2 + (Q_c^{\qual{ac}})^2 - (S_c^{\qual{max}})^2 &\le 0, \\
+\left(g_{km}V_k^{\qual{dc}}(V_k^{\qual{dc}}-V_m^{\qual{dc}})\right)^2 - (P_{km}^{\qual{max}})^2 &\le 0.
+\end{align}
+
+Variable bounds are converted to inequality rows:
+\begin{align}
+x^{\qual{min}}-x \le 0, \qquad x-x^{\qual{max}}\le 0.
+\end{align}
+
+\subsubsection{Primal-Dual IPM System}
+
+The parity solver introduces slack \(z>0\) and multipliers \(\mu>0\):
+\begin{align}
+g(x) &= 0, \\
+h(x)+z &= 0, \\
+\nabla f(x)+J_g^{\top}\lambda+J_h^{\top}\mu &= 0, \\
+z \circ \mu &= \gamma\mathbf{1}.
+\end{align}
+
+A Mehrotra predictor-corrector method is used, with:
+\begin{enumerate}
+  \item affine predictor step,
+  \item adaptive centering parameter \(\sigma = \min(0.3,\, 100\mu)\),
+  \item corrector step with second-order compensation,
+  \item iterative refinement (2 steps) for conditioning of the KKT solve,
+  \item fraction-to-boundary step lengths for primal and dual updates.
+\end{enumerate}
+
+\paragraph{Implementation note.}
+The current \texttt{parity\_ipm.cpp} uses the Mehrotra predictor-corrector
+scheme.  Gondzio extra corrections are \textbf{not} implemented.
+The KKT system is solved using either Eigen \texttt{SparseLU} for sparse or
+\texttt{PartialPivLU} for dense factorizations.
+
+Convergence monitors primal infeasibility, dual stationarity, and average
+complementarity. A best-iterate restoration is applied before final failure.
+
+\subsection{Component Coverage by Solver Path}
+
+\begin{longtable}{L{0.30\linewidth}L{0.22\linewidth}L{0.36\linewidth}}
+\toprule
+Component / feature & Native primal-dual & Parity IPM \\
+\midrule
+\endhead
+\texttt{Generator} \((P_g,Q_g)\) & decision variable & decision variable \\
+\texttt{VSCConverter} \((P^{\qual{conv,ac}},Q^{\qual{conv,ac}},P^{\qual{conv,dc}})\) & decision variable & decision variable \\
+\texttt{DCBus} voltage & decision variable & decision variable \\
+AC branch MVA limits & nonlinear penalty term & nonlinear inequality + slack \\
+DC branch power limits & not explicit in native path & nonlinear inequality + slack \\
+Load shedding \((\Delta P_d,\Delta Q_d)\) & not modeled & decision variable with VOLL penalty \\
+Curtailable renewable / controllable PV & not modeled as variable & decision variable \\
+Storage dispatch & not modeled as variable & decision variable \\
+DCDC dispatch & not modeled as variable & decision variable + DC coupling \\
+Flexible load dispatch & not modeled as variable & decision variable \\
+StaticGen / fixed DER aggregates & not explicit variable in native objective model & included as fixed injections \\
+\bottomrule
+\end{longtable}
+
+\subsection{Fallback Behavior}
+
+\begin{enumerate}
+  \item If parity IPM is selected and fails, and
+  \texttt{allow\_fallback=true}, the solver retries with
+  \texttt{use\_parity\_ipm=false}.
+  \item If native primal-dual fails and fallback is allowed,
+  it attempts the fast dispatch + AC PF path.
+  \item Status strings in \texttt{ACOPFResult::status} record which fallback
+  path was taken.
+\end{enumerate}
+
+\subsection{DC Optimal Power Flow (\texttt{solve\_dc\_opf})}
+\label{sec:dc-opf}
+
+The DC OPF model solves a linearized economic dispatch problem using the
+DC power flow approximation.  It is independent of the AC OPF paths above
+and is invoked through \texttt{hacdcpf::opf::solve\_dc\_opf}.
+
+\subsubsection{Decision Variables}
+
+\begin{align}
+x_{dc} =
+\begin{bmatrix}
+\theta_{\mathcal{N}\setminus\{sl\}} &
+P_g &
+P_{f} &
+\Delta P_d
+\end{bmatrix}^{\top},
+\end{align}
+where \(P_{f,ij}\) are branch flow variables (optional, depending on
+formulation mode) and \(\Delta P_{d,i}\) are per-bus load-shedding variables.
+
+\subsubsection{Network Model}
+
+The DC power flow relationship is:
+\begin{align}
+P_{f,ij} = \frac{\theta_i - \theta_j}{x_{ij}},
+\end{align}
+with the bus susceptance matrix \(B\) assembled from branch reactances
+\(x_{ij}\).  The slack bus angle is fixed at \(\theta_{sl}=0\).
+
+\subsubsection{Objective Function}
+
+The DC OPF supports two cost modes:
+
+\paragraph{Linear cost (default).}
+\begin{align}
+\min \sum_{g\in\mathcal{G}}
+c_g^{\qual{lin}} P_g
++ \sum_i \mathrm{VOLL}_{\qual{eff}} \cdot \Delta P_{d,i} \cdot S_{\qual{base}},
+\end{align}
+where the linearized coefficient is evaluated at the generator midpoint:
+\begin{align}
+c_g^{\qual{lin}} = c_{1g} + 2c_{2g}\frac{P_g^{\qual{min}}+P_g^{\qual{max}}}{2}.
+\end{align}
+
+\paragraph{Quadratic cost (optional).}
+\begin{align}
+\min \frac{1}{2}x^{\top}Qx + c^{\top}x,
+\end{align}
+where \(Q_{gg} = 2c_{2g}S_{\qual{base}}^2\) and \(c_g = c_{1g}S_{\qual{base}}\).
+This mode requires a QP-capable backend (LCQP or Gurobi).
+
+\paragraph{VOLL auto-tuning.}
+The load-shedding penalty is auto-tuned as \(1.1\times\) the maximum generator
+marginal cost to guarantee load serving priority.
+
+\subsubsection{Constraints}
+
+\paragraph{Power balance (per bus).}
+\begin{align}
+\sum_{g\in\mathcal{G}_i} P_g - P_{d,i} + \Delta P_{d,i}
+= \sum_{j\in\mathcal{N}_i} P_{f,ij},
+\quad \forall i.
+\end{align}
+
+\paragraph{Flow definition.}
+\begin{align}
+P_{f,ij} - b_{ij}(\theta_i - \theta_j) = 0,
+\quad \forall (i,j)\in\mathcal{E}.
+\end{align}
+
+\paragraph{Variable bounds.}
+\begin{align}
+\theta_{sl} &= 0, \qquad
+-\pi \le \theta_i \le \pi, \quad i\ne sl, \\
+P_g^{\qual{min}} &\le P_g \le P_g^{\qual{max}}, \\
+-r_a^{\qual{max}} &\le P_{f,ij} \le r_a^{\qual{max}}, \\
+0 &\le \Delta P_{d,i} \le \max(P_{d,i},\, 0.01/S_{\qual{base}}).
+\end{align}
+
+\subsubsection{Solver Backend Selection}
+
+The DC OPF solver selects among backends via \texttt{DCOPFSolverBackend}:
+\begin{enumerate}
+  \item \textbf{NativeQP} (LCQP solver): true quadratic costs via primal-dual IPM.
+  \item \textbf{Gurobi}: commercial QP solver.
+  \item \textbf{HiGHS}: open-source LP solver (linearized costs).
+  \item \textbf{Native Dual Simplex}: via \texttt{solve\_lp\_with\_basis()}.
+  \item \textbf{Auto}: tries each in sequence until success.
+\end{enumerate}
+
+\subsubsection{Locational Marginal Prices}
+
+LMPs are extracted from the dual variables on the per-bus power balance
+equality constraints.  The dual on bus \(i\) balance yields the locational
+marginal price at bus \(i\).
+
+\subsection{Reactive Power Optimization (\texttt{solve\_reactive\_power\_opt})}
+\label{sec:rpo}
+
+The reactive power optimization (RPO) module solves a mixed-integer nonlinear
+program for optimal voltage/reactive power control by coordinating discrete
+control devices (transformer on-load tap changers and switchable shunt steps)
+with continuous AC OPF.
+
+\subsubsection{Problem Structure}
+
+\paragraph{Discrete variables.}
+\begin{itemize}
+  \item Transformer OLTC tap positions:
+    \(\text{tap ratio} = 1 + (\text{tap\_pos} - \text{tap\_neutral}) \times \text{step\_pct}/100\).
+  \item Switchable shunt steps:
+    \(B_s = \text{step} \times b_{\text{per\_step}}\) (susceptance per step).
+\end{itemize}
+
+\paragraph{Continuous variables.}
+Bus voltages and generator reactive outputs, solved via AC OPF at each
+discrete configuration.
+
+\subsubsection{Objective Functions}
+
+Selectable objectives:
+\begin{align}
+\text{MinVoltageDeviation:} &\quad
+\sum_i w_{\qual{vdev}} (V_i - V_{\qual{tgt}})^2, \\
+\text{MinActiveLoss:} &\quad
+\sum_g P_g - \sum_d P_d, \\
+\text{Combined:} &\quad
+w_{\qual{vdev}} \sum_i (V_i - V_{\qual{tgt}})^2
++ \left(\sum_g P_g - \sum_d P_d\right).
+\end{align}
+
+\subsubsection{Algorithm: Four-Phase Outer Approximation}
+
+\paragraph{Phase~0: Sensitivity ranking.}
+Perturb each discrete variable by \(\pm 1\) from the baseline (two NLP solves
+per variable).  Compute \(|\Delta\text{obj}|\) for each variable and order by
+descending sensitivity.
+
+\paragraph{Phase~1: Ternary-search sweep.}
+For each variable in sensitivity order, exploit approximate unimodality of the
+RPO objective using integer ternary search (\(O(\log R)\) evaluations per
+variable instead of \(O(R)\)).  At each evaluation, generate an
+outer-approximation cutting plane:
+\begin{align}
+f(y) \ge f_k + g_k^{\top}(y - y_k),
+\end{align}
+where \(g_k\) is a finite-difference gradient estimate.
+
+\paragraph{Phase~2: Coordinate descent with OA pruning (up to 3 cycles).}
+Sweep each variable and evaluate only candidates where the OA lower bound
+\(< \text{incumbent}\).  Add OA cuts after each NLP evaluation.  Terminate if
+no improvement this cycle.  The OA lower bound is:
+\begin{align}
+\max_k f_k + g_k^{\top}(y - y_k).
+\end{align}
+
+\paragraph{Phase~3: Pairwise neighborhood polishing.}
+Check \(\pm 1\) perturbations of every pair of discrete variables.  OA cuts
+prune many candidates before expensive NLP evaluation.
+
+\subsubsection{Inner NLP Solver}
+
+At each discrete configuration, the AC OPF solver (IPM by default, fallback
+enabled) is called to solve the continuous sub-problem.  Solution caching by
+discrete configuration key avoids redundant NLP evaluations.
+
+\subsubsection{Result Structure}
+
+The result includes per-device tap/shunt adjustments, the number of NLP solves,
+OA cuts added, nodes explored, and the final status
+(\texttt{"Optimal (OA)"}, \texttt{"Time limit"}, or \texttt{"Node limit"}).

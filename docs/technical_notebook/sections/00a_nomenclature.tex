@@ -1,0 +1,81 @@
+\section{Nomenclature}
+\label{sec:nomenclature}
+
+\subsection{Notation Policy}
+
+This notebook uses a strict notation policy consistent with the C++ module:
+\begin{itemize}
+  \item scalar variables use italic math symbols, for example \(P_i, Q_i, V_i\),
+  \item sets use calligraphic symbols, for example \(\mathcal{N}_{ac}, \mathcal{E}_{dc}\),
+  \item all semantic qualifiers use upright superscripts via \(\mathrm{\cdot}\), for example \(P_i^{\qual{spec}}, P_i^{\qual{calc}}, V_k^{\qual{dc}}\),
+  \item for variable symbols, subscripts are reserved for ordered indices (bus/component/time) and not for semantic class labels,
+  \item set symbols may use compact domain tags in subscript, e.g., \(\mathcal{N}_{ac}\), \(\mathcal{E}_{dc}\),
+  \item model-family and semantic words must stay in superscripts: write \(P^{\qual{dcdc}}\), \(P^{\qual{flex}}\), \(P_r^{\qual{rated}}\), \(c_r^{\qual{curt}}\), and \(\mathcal{R}^{\qual{curt}}\).
+\end{itemize}
+
+\subsection{Index and Qualifier Conventions}
+
+\begin{longtable}{L{0.24\linewidth}L{0.66\linewidth}}
+\toprule
+Token & Meaning \\
+\midrule
+\endhead
+\(i,j\) & AC bus indices \\
+\(k,m\) & DC bus indices \\
+\(c\) & converter index (VSC / DCDC) \\
+\(b\) & branch index \\
+\(g\) & generator index \\
+\(\qual{spec}\) & specified (assembled) quantity from component injections/demands \\
+\(\qual{calc}\) & network-calculated quantity from current state \\
+\(\qual{ac}\), \(\qual{dc}\) & AC-side / DC-side quantity qualifier \\
+\(\qual{conv}\) & converter-side quantity qualifier \\
+\(\qual{dcdc}\), \(\qual{flex}\) & DCDC-dispatch / flexible-load variable class qualifier \\
+\(\qual{rated}\), \(\qual{curt}\) & rated-capacity / curtailment-related qualifier \\
+\(\qual{min}\), \(\qual{max}\) & lower/upper operating bounds \\
+\bottomrule
+\end{longtable}
+
+\subsection{Canonical Naming Grammar}
+
+Use the canonical symbol template
+\begin{align}
+X_{\text{indices}}^{\text{qualifiers}},
+\end{align}
+with the following rules:
+\begin{itemize}
+  \item index block (\(_{\cdot}\)): ordered indices only (\(i,j,k,c,r,t,\dots\)),
+  \item qualifier block (\(^{\cdot}\)): semantic tags only (\(\qual{spec}\), \(\qual{calc}\), \(\qual{conv}\), \(\qual{dcdc}\), \(\qual{flex}\), \(\qual{rated}\), \(\qual{curt}\), \(\qual{min}\), \(\qual{max}\), \dots),
+  \item when multiple qualifiers are needed, order them as: model/class \(\rightarrow\) side or direction \(\rightarrow\) status/bound/cost.
+\end{itemize}
+
+Examples:
+\begin{align}
+P_i^{\qual{conv,ac}},\quad
+P_k^{\qual{dcdc,in}},\quad
+P_r^{\qual{rated}},\quad
+c_r^{\qual{curt}}.
+\end{align}
+
+\subsection{Superscript/Subscript Rule}
+
+\begin{longtable}{L{0.30\linewidth}L{0.60\linewidth}}
+\toprule
+Rule & Usage \\
+\midrule
+\endhead
+Subscript (\(_{\cdot}\)) & for variable symbols: ordered indices only (\(i,j,k,c,r,t\)); set symbols may use domain tags (\(\mathcal{N}_{ac}\), \(\mathcal{E}_{dc}\)). \\
+Superscript (\(^{\cdot}\)) & semantic labels: domain, role, operating mode, variable class, bounds, and status qualifiers. \\
+Forbidden mixed style & avoid semantic words in subscript, such as \(P_{dcdc}\), \(P_{flex}\), \(\mathcal{R}_{curt}\), \(P_{rated}\), \(c_{curt}\). \\
+Preferred style & \(P^{\qual{dcdc}}, P^{\qual{flex}}, \mathcal{R}^{\qual{curt}}, P_r^{\qual{rated}}, c_r^{\qual{curt}}\). \\
+\bottomrule
+\end{longtable}
+
+\subsection{Integration Status Codes}
+
+The integration matrix uses these codes:
+\begin{itemize}
+  \item \statuscode{D}: direct model consumption in the module,
+  \item \statuscode{F}: fixed-only consumption (no explicit variable),
+  \item \statuscode{P}: consumed after projection to canonical equivalents,
+  \item \statuscode{N}: not consumed by the module.
+\end{itemize}

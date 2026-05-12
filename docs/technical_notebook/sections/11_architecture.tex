@@ -1,0 +1,103 @@
+\section{Current C++ Architecture}
+
+\subsection{Layered View}
+
+The current module is organized around a small number of namespaces with clear
+runtime responsibilities.
+
+\begin{longtable}{L{0.16\linewidth}L{0.28\linewidth}L{0.46\linewidth}}
+\toprule
+Layer / namespace & Representative files & Current responsibility \\
+\midrule
+\endhead
+\texttt{model} & \texttt{system.hpp}, \texttt{components.hpp}, \texttt{options.hpp}, \texttt{results.hpp} & Domain objects, enums, solver option bundles, result containers, validation helpers, and canonical-projection utilities. \\
+\texttt{io} & \texttt{json\_io.hpp}, \texttt{excel\_io.hpp}, \texttt{matpower\_parser.hpp}, \texttt{case\_builders.hpp} & Case ingestion, serialization, canned benchmark systems, and workbook/JSON export of inputs and results. \\
+\texttt{powerflow} & \texttt{solver\_data.hpp}, \texttt{admittance\_builder.hpp}, \texttt{residual\_evaluator.hpp}, \texttt{fdpf\_solver.hpp}, \texttt{dc\_solver.hpp} & Canonical steady-state assembly, AC/DC network matrices, branch-flow evaluation, converter coupling, and PF solver variants. \\
+\texttt{engine} & \texttt{newton\_solver.hpp}, \texttt{linear\_solver.hpp}, \texttt{dual\_simplex.hpp}, \texttt{ipm\_solver.hpp}, \texttt{branch\_and\_cut.hpp} & Reusable numerical kernels: sparse linear solvers, Newton infrastructure, native NLP IPM, LP simplex, and MILP/MINLP branch-and-cut. \\
+\texttt{opf} & \texttt{ac\_opf.hpp}, \texttt{parity\_formulation.hpp}, \texttt{parity\_ipm.hpp}, \texttt{dc\_opf.hpp}, \texttt{reactive\_power\_opt.hpp} & AC OPF orchestration, native reduced-space primal-dual path, parity formulation, parity-specific IPM, fallback selection logic, DC OPF (B-$\theta$ LP/QP), and reactive-power optimisation (MINLP with outer-approximation). \\
+\texttt{analysis} & \texttt{distribution\_power\_flow.hpp}, \texttt{short\_circuit.hpp}, \texttt{topology\_analysis.hpp}, \texttt{annual\_production\_sim.hpp}, \texttt{lifecycle\_simulation.hpp}, \texttt{time\_series\_distribution.hpp} & Secondary analytical modules that sit on top of the model layer and reuse parts of the power-flow or engine stack.  Includes annual production simulation (hierarchical L0/L2/L3 decomposition), multi-year lifecycle simulation with degradation and NPV, and time-series distribution PF with topology reconfiguration. \\
+\texttt{api} & \nolinkurl{include/hacdcpf/api/hacdcpf.hpp}, \nolinkurl{src/api/hacdcpf.cpp} & Stable top-level solve functions, solver-handle caching, public entry points, and derived-result postprocessing. \\
+\texttt{core} / \texttt{solver} & compatibility re-export headers & Backward-compatible namespace aliases over the canonical \texttt{powerflow} and \texttt{engine} implementations. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Runtime Data Flow}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=7mm and 9mm]
+  \node[flowwide] (io) {Input cases\\JSON / Excel / MATPOWER / builders};
+  \node[flowwide, below=of io] (model) {\texttt{HybridPowerSystem}\\rich component tables};
+  \node[flowwide, below=of model] (proj) {\texttt{project\_to\_canonical\_models}\\equivalent loads, branches, stations, three-phase reduction};
+  \node[flowwide, below=of proj] (solverdata) {\texttt{make\_solver\_data}\\aggregated injections, \(Y_{bus}\), \(G_{dc}\), ZIP tables};
+  \node[flowbox, below left=of solverdata, xshift=-6mm] (pf) {PF family\\Newton / FDPF / DC / adaptive / distributed slack};
+  \node[flowbox, below=of solverdata] (opf) {OPF family\\dispatch+PF, native PD, parity-IPM, DC OPF, RPO};
+  \node[flowbox, below right=of solverdata, xshift=6mm] (analysis) {Analysis family\\SC / DPF / ONR / Annual Sim / Lifecycle};
+  \node[flowwide, below=16mm of opf] (results) {Result containers\\\texttt{PowerFlowResult}, \texttt{ACOPFResult}, \texttt{DCOPFResult}, \texttt{RPOResult}, \texttt{SCResult}, \texttt{DPFResult}, \texttt{ONRResult}, \texttt{AnnualProductionSimResult}, \texttt{LifecycleSimResult}};
+
+  \draw[flowline] (io) -- (model);
+  \draw[flowline] (model) -- (proj);
+  \draw[flowline] (proj) -- (solverdata);
+  \draw[flowline] (solverdata) -- (pf);
+  \draw[flowline] (solverdata) -- (opf);
+  \draw[flowline] (solverdata) -- (analysis);
+  \draw[flowline] (pf) |- (results);
+  \draw[flowline] (opf) -- (results);
+  \draw[flowline] (analysis) |- (results);
+\end{tikzpicture}
+\caption{Primary runtime data path in the current C++ module.}
+\end{figure}
+
+\subsection{Public API Surface}
+
+The public API layer exposes a deliberately small set of top-level entry points.
+The most important ones are:
+\begin{itemize}
+  \item \texttt{solve\_power\_flow}, \texttt{solve\_dc\_power\_flow}, \texttt{solve\_power\_flow\_fdpf},
+  \item \texttt{solve\_power\_flow\_adaptive}, \texttt{solve\_power\_flow\_distributed\_slack},
+  \item \texttt{solve\_ac\_dc\_power\_flow},
+  \item \texttt{opf::solve\_ac\_opf},
+  \item \texttt{opf::solve\_dc\_opf}, \texttt{opf::solve\_reactive\_power\_opt},
+  \item \texttt{analysis::solve\_annual\_production\_simulation}, \texttt{analysis::run\_lifecycle\_simulation},
+  \item solver-handle creation/reset/destruction functions for repeated PF runs on cached matrix structure.
+\end{itemize}
+
+\subsection{Solver Families and Backends}
+
+\begin{longtable}{L{0.17\linewidth}L{0.24\linewidth}L{0.23\linewidth}L{0.26\linewidth}}
+\toprule
+Subsystem & Native numerical kernel & Optional backend or wrapper & Current use in module \\
+\midrule
+\endhead
+AC/DC Newton PF & sparse linear solve through \texttt{engine::}\allowbreak\texttt{SparseLinearSolver} & Eigen SparseLU by default; UMFPACK/KLU through SuiteSparse when available & Main PF path, adaptive PF, solver-handle reuse. \\
+DC PF & dense Jacobian + Eigen \texttt{FullPivLU} & none & Small-to-medium DC subnetworks. \\
+FDPF & decoupled sparse LU of \(B'\) and \(B''\) & Eigen SparseLU & Fast AC approximation when the full Newton path is unnecessary. \\
+Native AC OPF & custom reduced-space primal-dual KKT assembly & same sparse linear-solver abstraction as Newton PF & Used when \texttt{enable\_primal\_dual=true} and \texttt{use\_parity\_ipm=false}. \\
+Parity OPF & full parity formulation plus dedicated primal-dual IPM & dense or sparse KKT solves inside parity IPM implementation & Used when \texttt{enable\_primal\_dual=true} and \texttt{use\_parity\_ipm=true}. \\
+LP / MILP engine & dual simplex and native branch-and-cut & HiGHS / Gurobi adapters available through \texttt{engine::}\allowbreak\texttt{SolverAdapter} & ONR uses the native MILP branch-and-cut path. \\
+NLP / MINLP engine & native IPM and branch-and-cut & IPOPT / SCIP adapters available through \texttt{engine::}\allowbreak\texttt{SolverAdapter} & Infrastructure exists, but PF/OPF modules mostly use the native paths directly. \\
+DC OPF & B-$\theta$ LP/QP via \texttt{NativeQP}, \texttt{LCQP} solver, or \texttt{DualSimplex} & HiGHS / Gurobi through adapter & Used by \texttt{opf::solve\_dc\_opf}; extracts LMP from dual variables. \\
+RPO (Reactive Power Optimisation) & 4-phase outer-approximation MINLP over discrete taps and switchable shunts & none (self-contained) & Used by \texttt{opf::solve\_reactive\_power\_opt}; iterates until OA gap converges. \\
+LCQP (Linear/Convex QP) & Mehrotra predictor-corrector IPM with symbolic factorisation caching & none & Back-end for DC OPF (NativeQP mode) and reusable for other QP sub-problems. \\
+Annual Production Sim & Hierarchical L0/L2/L3 decomposition orchestrating LP (L0) and MILP (L2/L3 via UC) & Same MILP adapters as UC (Gurobi $\to$ HiGHS $\to$ Native) & Used by \texttt{analysis::solve\_annual\_production\_simulation}. \\
+Lifecycle Simulation & Multi-year loop calling annual production sim with degradation and stratified sampling & uses annual sim solvers internally & Used by \texttt{analysis::run\_lifecycle\_simulation}; produces per-year and NPV metrics. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Current Architectural Strengths}
+
+\begin{itemize}
+  \item The \texttt{model} layer is richer than the steady-state kernels, which makes future expansion possible without redesigning the external data model.
+  \item The \texttt{project\_to\_canonical\_models} step gives PF, OPF, and SC a common data contract.
+  \item The engine layer isolates linear algebra and mathematical-programming infrastructure from application modules.
+  \item The compatibility namespaces \texttt{core} and \texttt{solver} reduce migration cost for older code.
+\end{itemize}
+
+\subsection{Current Architectural Friction Points}
+
+\begin{itemize}
+  \item Canonical projection is now reused by DPF and ONR as well, but the repository still lacks explicit regression tests and durable consumer keys proving that projected and non-projected views remain equivalent.
+  \item The parity OPF path already fills advanced in-memory dispatch vectors, but JSON / Excel result export still exposes only the older core subset.
+  \item The detailed IEC short-circuit path is now executable, but the public result contract still carries legacy scaffold fields and does not yet expose an explicit external-grid contribution bucket.
+  \item Public documentation must track both canonical namespaces and their compatibility aliases, which increases cognitive load for maintainers.
+\end{itemize}

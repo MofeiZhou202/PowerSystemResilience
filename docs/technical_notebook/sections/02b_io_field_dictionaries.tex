@@ -1,0 +1,653 @@
+\section{Detailed I/O Field Dictionaries}
+
+This section expands the per-field contract to the remaining public model
+families.  Section \texttt{02a\_io\_contracts} already gives detailed field
+maps for \texttt{AsynchronousMotor}, the optional \texttt{three\_phase\_ac}
+family, and the result-sheet enum conventions.  The tables below complete the
+same JSON-key / Excel-column dictionary pattern for the other current input
+models.
+
+When the ``Excel sheet / column'' entry says \texttt{none}, the engineering
+workbook does not preserve that JSON field directly.  When two workbook sheet
+names are listed, the first is the preferred explicit input table and the
+second is a fallback or derived view with the same column family.
+
+\subsection{System Metadata}
+
+\footnotesize
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{name} & \texttt{Info[name]} & default \texttt{"Hybrid AC/DC System"} & top-level \texttt{HybridPowerSystem} display name \\
+\texttt{base\_mva} & \texttt{Info[base\_mva]} & default \texttt{100.0} & top-level system power base; workbook import also copies it into \texttt{ac.base\_mva} and \texttt{dc.base\_mva} \\
+\texttt{ac.name} & \texttt{none} & default \texttt{"AC System"} & JSON-only AC subsystem label \\
+\texttt{ac.base\_mva} & \texttt{none} & default \texttt{100.0} & JSON-only AC subsystem base; workbook uses the shared top-level \texttt{base\_mva} instead \\
+\texttt{ac.freq\_hz} & \texttt{Info[ac\_freq\_hz]} & default \texttt{50.0} & nominal AC frequency in Hz \\
+\texttt{dc.name} & \texttt{none} & default \texttt{"DC System"} & JSON-only DC subsystem label \\
+\texttt{dc.base\_mva} & \texttt{none} & default \texttt{100.0} & JSON-only DC subsystem base; workbook again uses the shared top-level \texttt{base\_mva} \\
+\texttt{three\_phase\_ac.*} & \texttt{Info[three\_phase\_*]} plus dedicated sheets & see Section \texttt{02a\_io\_contracts} & optional explicit unbalanced subsystem documented in the earlier detailed dictionary \\
+\bottomrule
+\end{longtable}
+
+\subsection{AC Network and Demand Models}
+
+\subsubsection*{\texttt{ACBus} : \texttt{ac.buses[]} / sheet \texttt{ACBus}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{ACBus.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable bus identifier \\
+\texttt{name} & \texttt{ACBus.name} & default empty string & bus label \\
+\texttt{bus\_type} & \texttt{ACBus.bus\_type} & default \texttt{PQ} & bus category token \texttt{PQ}/\texttt{PV}/\texttt{SLACK}/\texttt{ISOLATED} \\
+\texttt{pd\_mw}, \texttt{qd\_mvar} & same columns & default \texttt{0.0} & embedded bus demand snapshot; workbook export may contain synchronized aggregated demand rather than original raw struct values \\
+\texttt{vm\_pu}, \texttt{va\_deg} & same columns & defaults \texttt{1.0}, \texttt{0.0} & initial or specified bus voltage magnitude and angle \\
+\texttt{base\_kv} & \texttt{ACBus.base\_kv} & default \texttt{110.0} & nominal bus voltage base \\
+\texttt{vmin\_pu}, \texttt{vmax\_pu} & same columns & defaults \texttt{0.9}, \texttt{1.1} & voltage operating bounds \\
+\texttt{gs\_mw}, \texttt{bs\_mvar} & same columns & default \texttt{0.0} & shunt conductance and susceptance embedded at the bus \\
+\texttt{area}, \texttt{zone} & same columns & defaults \texttt{1}, \texttt{1} & planning / reporting partitions \\
+\texttt{in\_service} & \texttt{ACBus.in\_service} & default \texttt{true} & availability flag \\
+\texttt{n\_customers} & \texttt{ACBus.n\_customers} & default \texttt{0} & customer-count metadata \\
+\texttt{importance} & \texttt{ACBus.importance} & default \texttt{1.0} & bus criticality / weighting metadata \\
+\texttt{latitude}, \texttt{longitude} & same columns & default \texttt{0.0} & geospatial metadata only \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{ACBranch} : \texttt{ac.branches[]} / sheet \texttt{ACBranch}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{ACBranch.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable branch identifier \\
+\texttt{from\_bus}, \texttt{to\_bus} & same columns & required on JSON import & branch terminal bus indices \\
+\texttt{name} & \texttt{ACBranch.name} & default empty string & branch label \\
+\texttt{r\_pu}, \texttt{x\_pu}, \texttt{b\_pu} & same columns & default \texttt{0.0} & series resistance, series reactance, and total shunt charging in per unit \\
+\texttt{tap} & \texttt{ACBranch.tap} & default \texttt{1.0} & off-nominal tap ratio used in the branch model \\
+\texttt{shift\_deg} & \texttt{ACBranch.shift\_deg} & default \texttt{0.0} & phase-shifting angle in degrees \\
+\texttt{rate\_a\_mva}, \texttt{rate\_b\_mva}, \texttt{rate\_c\_mva} & same columns & default \texttt{0.0} & thermal / planning ratings \\
+\texttt{length\_km} & \texttt{ACBranch.length\_km} & default \texttt{0.0} & physical route length metadata \\
+\texttt{in\_service} & \texttt{ACBranch.in\_service} & default \texttt{true} & availability flag \\
+\texttt{failure\_rate}, \texttt{mttr\_hr} & same columns & default \texttt{0.0} & reliability metadata \\
+\texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{b0\_pu}, \texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv}, \texttt{sn\_mva} & \texttt{none} & not part of the current JSON / Excel contract & struct-level short-circuit and transformer-nameplate helpers currently stay internal to the in-memory model \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Load} : \texttt{ac.loads[]} / sheet \texttt{Load} (fallback \texttt{ACLoad})}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{Load.index} or \texttt{ACLoad.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable load identifier \\
+\texttt{bus} & \texttt{Load.bus} or \texttt{ACLoad.bus} & required on JSON import & connected AC bus index \\
+\texttt{name} & same column & default empty string & load label \\
+\texttt{in\_service} & same column & default \texttt{true} & availability flag \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & active and reactive demand \\
+\texttt{model} & same column & default \texttt{ConstantPower} & ZIP / exponential / constant-power load-model token \\
+\texttt{z\_percent\_p}, \texttt{i\_percent\_p}, \texttt{p\_percent\_p} & same columns & defaults \texttt{0.0}, \texttt{0.0}, \texttt{100.0} & active-power ZIP shares \\
+\texttt{z\_percent\_q}, \texttt{i\_percent\_q}, \texttt{p\_percent\_q} & same columns & defaults \texttt{0.0}, \texttt{0.0}, \texttt{100.0} & reactive-power ZIP shares \\
+\texttt{controllable} & same column & default \texttt{false} & whether shedding / dispatch logic may treat the load as controllable \\
+\texttt{p\_min\_mw} & \texttt{none} & default \texttt{0.0} & JSON-only minimum retained active demand; workbook currently omits this field for AC loads \\
+\texttt{cost\_mw} & same column & default \texttt{0.0} & marginal shedding or curtailment penalty \\
+\texttt{priority} & same column & default \texttt{Medium} & service-priority token \texttt{Low}/\texttt{Medium}/\texttt{High}/\texttt{Critical} \\
+\texttt{n\_customers} & \texttt{none} & default \texttt{0} & JSON-only customer-count metadata \\
+\texttt{profile\_id} & \texttt{none} & default \texttt{-1} & JSON-only profile linkage identifier \\
+\texttt{sn\_mva}, \texttt{motor\_percent}, \texttt{x\_sub\_pu}, \texttt{r\_sc\_pu} & \texttt{none} & not part of the current main JSON contract & short-circuit helper fields remain outside the stable \texttt{Load} I/O contract \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{FlexibleLoad} : \texttt{ac.flexible\_loads[]} / sheet \texttt{FlexibleLoad}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{FlexibleLoad.name} & default empty string & load label \\
+\texttt{in\_service} & \texttt{FlexibleLoad.in\_service} & default \texttt{true} & availability flag \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & baseline active and reactive demand \\
+\texttt{flex\_up\_mw}, \texttt{flex\_down\_mw} & same columns & default \texttt{0.0} & upward / downward flexibility envelope in MW \\
+\texttt{flex\_duration\_h} & same column & default \texttt{0.0} & duration for which the flex envelope can be sustained \\
+\texttt{response\_time\_s} & same column & default \texttt{0.0} & response latency in seconds \\
+\texttt{ramp\_rate\_mw\_min} & same column & default \texttt{0.0} & adjustment ramp-rate limit \\
+\texttt{availability\_pct} & same column & default \texttt{100.0} & expected availability of the flexibility service \\
+\texttt{controllable} & same column & default \texttt{true} & whether the flexibility service is enabled \\
+\texttt{priority} & same column & default \texttt{Medium} & load-service priority token \\
+\texttt{control\_area} & same column & default empty string & operator / aggregation area tag \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{AsymmetricLoad} : \texttt{ac.asymmetric\_loads[]} / sheet \texttt{AsymmetricLoad}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{AsymmetricLoad.name} & default empty string & load label \\
+\texttt{in\_service} & \texttt{AsymmetricLoad.in\_service} & default \texttt{true} & availability flag \\
+\texttt{connection} & \shortstack[l]{\texttt{AsymmetricLoad.}\\\texttt{connection}} & default empty string & wiring model string such as \texttt{wye} or \texttt{delta} \\
+\texttt{grounded} & \texttt{AsymmetricLoad.grounded} & default \texttt{true} & grounding-path assumption \\
+\texttt{pa\_rated\_mw}, \texttt{pb\_rated\_mw}, \texttt{pc\_rated\_mw} & same columns & default \texttt{0.0} & rated per-phase active demand \\
+\texttt{qa\_rated\_mvar}, \texttt{qb\_rated\_mvar}, \texttt{qc\_rated\_mvar} & same columns & default \texttt{0.0} & rated per-phase reactive demand \\
+\texttt{pa\_mw}, \texttt{pb\_mw}, \texttt{pc\_mw} & same columns & default \texttt{0.0} & current per-phase active demand \\
+\texttt{qa\_mvar}, \texttt{qb\_mvar}, \texttt{qc\_mvar} & same columns & default \texttt{0.0} & current per-phase reactive demand \\
+\texttt{scaling} & \texttt{AsymmetricLoad.scaling} & default \texttt{1.0} & overall scaling factor applied to the phase values \\
+\texttt{const\_z\_percent}, \texttt{const\_i\_percent} & same columns & default \texttt{0.0} & ZIP constant-impedance and constant-current shares \\
+\texttt{const\_p\_percent} & same column & default \texttt{100.0} & ZIP constant-power share \\
+\texttt{controllable} & same column & default \texttt{false} & controllability flag \\
+\texttt{priority} & same column & default \texttt{Medium} & load-service priority token \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Shunt} : \texttt{ac.shunts[]} / sheet \texttt{Shunt}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{Shunt.name} & default empty string & shunt label \\
+\texttt{in\_service} & \texttt{Shunt.in\_service} & default \texttt{true} & availability flag \\
+\texttt{gs\_mw}, \texttt{bs\_mvar} & same columns & default \texttt{0.0} & fixed shunt conductance and susceptance \\
+\texttt{switchable} & \texttt{Shunt.switchable} & default \texttt{false} & whether the shunt is modeled as stepped / switchable \\
+\texttt{n\_steps} & \texttt{Shunt.n\_steps} & default \texttt{1} & number of available discrete shunt steps \\
+\texttt{current\_step} & \texttt{Shunt.current\_step} & default \texttt{1} & currently selected shunt step \\
+\texttt{bs\_per\_step} & \texttt{Shunt.bs\_per\_step} & default \texttt{0.0} & susceptance increment per step \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{ExternalGrid} : \texttt{ac.external\_grids[]} / sheet \texttt{ExternalGrid}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{ExternalGrid.name} & default empty string & source label \\
+\texttt{in\_service} & \texttt{ExternalGrid.in\_service} & default \texttt{true} & availability flag \\
+\texttt{vm\_pu}, \texttt{va\_deg} & same columns & defaults \texttt{1.0}, \texttt{0.0} & voltage magnitude and angle target for the slack / Thevenin source \\
+\texttt{s\_sc\_max\_mva}, \texttt{s\_sc\_min\_mva} & same columns & default \texttt{0.0} & short-circuit strength range \\
+\texttt{rx\_max}, \texttt{rx\_min} & same columns & default \texttt{0.0} & R/X ratio bounds for equivalent-source construction \\
+\texttt{r\_pu}, \texttt{x\_pu} & \texttt{none} & default \texttt{0.0} & JSON-only explicit positive-sequence Thevenin impedance \\
+\texttt{r0\_pu}, \texttt{x0\_pu} & \texttt{none} & default \texttt{0.0} & JSON-only zero-sequence source impedance \\
+\texttt{vn\_kv} & \texttt{none} & default \texttt{0.0} & JSON-only nominal source voltage rating \\
+\texttt{ikq\_ka}, \texttt{x\_r} & \texttt{none} & not part of the current JSON / Excel contract & struct-level IEC 60909 helper fields currently stay internal and are not preserved by either import path \\
+\texttt{controllable} & \shortstack[l]{\texttt{ExternalGrid.}\\\texttt{controllable}} & default \texttt{true} & whether optimization logic may vary the source dispatch \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Transformer2W} : \texttt{ac.transformers\_2w[]} / sheet \texttt{Transformer2W}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{hv\_bus}, \texttt{lv\_bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and terminal bus indices \\
+\texttt{name} & \texttt{Transformer2W.name} & default empty string & transformer label \\
+\texttt{std\_type} & \texttt{none} & default empty string & JSON-only library / standard type name \\
+\texttt{in\_service} & \texttt{Transformer2W.in\_service} & default \texttt{true} & availability flag \\
+\texttt{sn\_mva} & \texttt{Transformer2W.sn\_mva} & default \texttt{0.0} & rated apparent power \\
+\texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv} & same columns & default \texttt{0.0} & winding rated voltages \\
+\texttt{vk\_percent}, \texttt{vkr\_percent} & same columns & default \texttt{0.0} & short-circuit magnitude and resistive share in percent \\
+\texttt{pk\_kw} & \texttt{none} & default \texttt{0.0} & JSON-only load-loss field retained in the richer transformer contract \\
+\texttt{pfe\_kw}, \texttt{i0\_percent} & same columns & default \texttt{0.0} & no-load loss and excitation current \\
+\texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_min}, \texttt{tap\_max}, \texttt{tap\_neutral} & same columns & default \texttt{0} & tap-changer placement and discrete tap metadata \\
+\texttt{tap\_step\_percent} & \texttt{Transformer2W.tap\_step\_percent} & default \texttt{0.0} & tap step size in percent \\
+\texttt{shift\_deg} & \texttt{Transformer2W.shift\_deg} & default \texttt{0.0} & phase-shift angle in degrees \\
+\texttt{vector\_group} & \texttt{Transformer2W.vector\_group} & default empty string & winding connection / clock notation \\
+\texttt{z0\_percent}, \texttt{x0\_r0} & \texttt{none} & default \texttt{0.0} & JSON-only zero-sequence impedance parameters \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Transformer3W} : \texttt{ac.transformers\_3w[]} / sheet \texttt{Transformer3W}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{hv\_bus}, \texttt{mv\_bus}, \texttt{lv\_bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and three winding bus indices \\
+\texttt{name} & \texttt{Transformer3W.name} & default empty string & transformer label \\
+\texttt{std\_type} & \texttt{Transformer3W.std\_type} & default empty string & library / standard type name \\
+\texttt{in\_service} & \texttt{Transformer3W.in\_service} & default \texttt{true} & availability flag \\
+\texttt{sn\_hv\_mva}, \texttt{sn\_mv\_mva}, \texttt{sn\_lv\_mva} & same columns & default \texttt{0.0} & winding ratings on the HV / MV / LV sides \\
+\texttt{vn\_hv\_kv}, \texttt{vn\_mv\_kv}, \texttt{vn\_lv\_kv} & same columns & default \texttt{0.0} & winding rated voltages \\
+\texttt{vk\_hv\_mv\_percent}, \texttt{vk\_hv\_lv\_percent}, \texttt{vk\_mv\_lv\_percent} & same columns & default \texttt{0.0} & pairwise short-circuit magnitudes \\
+\texttt{vkr\_hv\_mv\_percent}, \texttt{vkr\_hv\_lv\_percent}, \texttt{vkr\_mv\_lv\_percent} & same columns & default \texttt{0.0} & pairwise resistive shares \\
+\texttt{pfe\_kw}, \texttt{i0\_percent} & same columns & default \texttt{0.0} & no-load loss and excitation-current data \\
+\texttt{tap\_side}, \texttt{tap\_pos} & same columns & default \texttt{0} & tap-changer side and current position \\
+\texttt{tap\_step\_percent} & \texttt{Transformer3W.tap\_step\_percent} & default \texttt{0.0} & tap step size in percent \\
+\texttt{shift\_mv\_deg}, \texttt{shift\_lv\_deg} & same columns & default \texttt{0.0} & phase shifts from HV to MV / LV windings \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & same columns & default \texttt{0.0} & reliability metadata preserved in both JSON and workbook \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Switch} : \texttt{ac.switches[]} / sheet \texttt{Switch}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus\_from}, \texttt{bus\_to} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and terminal bus indices \\
+\texttt{name} & \texttt{Switch.name} & default empty string & switch label \\
+\texttt{in\_service} & \texttt{Switch.in\_service} & default \texttt{true} & availability flag \\
+\texttt{switch\_type} & \texttt{Switch.switch\_type} & default \texttt{CircuitBreaker} & switching-device token such as \texttt{Recloser} or \texttt{Fuse} \\
+\texttt{closed} & \texttt{Switch.closed} & default \texttt{true} & topology status flag \\
+\texttt{r\_contact\_ohm}, \texttt{z\_ohm} & \texttt{none} & default \texttt{0.0} & JSON-only detailed contact / arc impedance inputs \\
+\texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka} & \texttt{none} & default \texttt{0.0} & JSON-only current capability ratings \\
+\texttt{element\_type}, \texttt{element\_id} & \texttt{none} & defaults \texttt{0}, \texttt{0} & JSON-only foreign-key reference to the protected element \\
+\texttt{is\_remote}, \texttt{is\_automated} & \texttt{none} & default \texttt{false} & JSON-only automation metadata \\
+\texttt{t\_operation\_s}, \texttt{p\_sw\_fail} & \texttt{none} & default \texttt{0.0} & JSON-only operation timing and failure-probability metadata \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{ChargingStation} : \texttt{ac.charging\_stations[]} / sheet \texttt{ChargingStation}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{ChargingStation.name} & default empty string & station label \\
+\texttt{location} & \texttt{none} & default empty string & JSON-only free-form location descriptor \\
+\texttt{in\_service} & \texttt{ChargingStation.in\_service} & default \texttt{true} & availability flag \\
+\texttt{n\_fast}, \texttt{n\_slow}, \texttt{num\_chargers} & same columns & default \texttt{0} & counts of charger assets by class and in total \\
+\texttt{p\_fast\_max\_kw}, \texttt{p\_slow\_max\_kw} & same columns & default \texttt{0.0} & per-charger maximum power by service class \\
+\texttt{max\_power\_kw} & same column & default \texttt{0.0} & aggregate station power ceiling \\
+\texttt{simultaneity\_factor} & same column & default \texttt{1.0} & diversification factor used in the aggregate station model \\
+\texttt{power\_factor} & same column & default \texttt{0.95} & station-level reactive-power assumption \\
+\texttt{utilization\_rate} & \texttt{none} & default \texttt{0.0} & JSON-only expected utilization metadata \\
+\texttt{p\_total\_kw}, \texttt{q\_total\_kvar} & same columns & default \texttt{0.0} & aggregate present demand of the station \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Charger} : \texttt{ac.chargers[]} / sheet \texttt{Charger}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{Charger.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable charger identifier \\
+\texttt{name} & \texttt{Charger.name} & default empty string & charger label \\
+\texttt{station\_id} & \texttt{Charger.station\_id} & default \texttt{0} & parent charging-station foreign key \\
+\texttt{charger\_type} & \texttt{Charger.charger\_type} & default \texttt{AC\_L2} & charger-class token \texttt{AC\_L1}/\texttt{AC\_L2}/\texttt{DC\_Fast} \\
+\texttt{in\_service} & \texttt{Charger.in\_service} & default \texttt{true} & availability flag \\
+\texttt{p\_rated\_kw} & \texttt{Charger.p\_rated\_kw} & default \texttt{0.0} & rated charger power \\
+\texttt{p\_ch\_max\_kw}, \texttt{p\_ch\_min\_kw} & same columns & default \texttt{0.0} & charging power limits \\
+\texttt{eta} & \texttt{Charger.eta} & default \texttt{0.95} & charger conversion efficiency \\
+\texttt{v2g\_capable} & \texttt{Charger.v2g\_capable} & default \texttt{false} & whether reverse power flow is allowed \\
+\texttt{p\_dis\_max\_kw} & \texttt{Charger.p\_dis\_max\_kw} & default \texttt{0.0} & maximum discharging power when V2G is enabled \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & same columns & default \texttt{0.0} & reliability metadata preserved in both JSON and workbook \\
+\bottomrule
+\end{longtable}
+
+\subsection{Generation and Storage Models}
+
+\subsubsection*{\texttt{Generator} : \texttt{ac.generators[]} / sheet \texttt{Generator}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{Generator.name} & default empty string & generator label \\
+\texttt{in\_service} & \texttt{Generator.in\_service} & default \texttt{true} & availability flag \\
+\texttt{pg\_mw}, \texttt{qg\_mvar} & same columns & default \texttt{0.0} & active and reactive generation setpoints \\
+\texttt{vg\_pu} & \texttt{Generator.vg\_pu} & default \texttt{1.0} & voltage setpoint on the connected bus \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
+\texttt{is\_slack} & \texttt{Generator.is\_slack} & default \texttt{false} & slack-machine flag \\
+\texttt{fuel\_type} & \texttt{Generator.fuel\_type} & default \texttt{Unknown} & fuel-type token such as \texttt{Gas}, \texttt{Wind}, or \texttt{Solar} \\
+\texttt{cost\_c2}, \texttt{cost\_c1}, \texttt{cost\_c0} & same columns & default \texttt{0.0} & quadratic production-cost coefficients \\
+\texttt{startup\_cost}, \texttt{shutdown\_cost}, \texttt{min\_up\_time\_hr}, \texttt{min\_dn\_time\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only unit-commitment metadata \\
+\texttt{ramp\_up\_mw\_min}, \texttt{ramp\_dn\_mw\_min} & same columns & default \texttt{0.0} & ramp-rate limits \\
+\texttt{mbase\_mva}, \texttt{inertia\_h}, \texttt{droop\_r} & same columns & defaults \texttt{0.0}, \texttt{0.0}, \texttt{0.05} & machine base, inertia, and governor droop metadata \\
+\texttt{xd\_pu}, \texttt{xdp\_pu}, \texttt{xdpp\_pu}, \texttt{td0p\_s}, \texttt{td0pp\_s} & \texttt{none} & default \texttt{0.0} & JSON-only machine dynamic / short-circuit parameters \\
+\texttt{ra\_pu}, \texttt{vn\_kv}, \texttt{cos\_phi}, \texttt{xq\_pu}, \texttt{xd\_xq}, \texttt{x0\_pu}, \texttt{r0\_pu} & \texttt{none} & not part of the current JSON / Excel contract & additional short-circuit parameters exist in the C++ struct but are not yet serialized or workbook-backed \\
+\texttt{emission\_factor\_tco2\_mwh}, \texttt{nox\_factor\_kg\_mwh}, \texttt{so2\_factor\_kg\_mwh} & \texttt{none} & default \texttt{0.0} & JSON-only emissions metadata \\
+\texttt{forced\_outage\_rate}, \texttt{mttr\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{StaticGenerator} : \texttt{ac.static\_generators[]} or \texttt{dc.static\_generators[]} / sheets \texttt{StaticGenerator} and \texttt{DCStaticGen}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC or DC bus \\
+\texttt{name} & corresponding \texttt{name} column & default empty string & generator label \\
+\texttt{in\_service} & corresponding \texttt{in\_service} column & default \texttt{true} & availability flag \\
+\texttt{sgen\_type} & corresponding \texttt{sgen\_type} column & default \texttt{Other} & generator-type token such as \texttt{Wind}, \texttt{Battery}, or \texttt{FuelCell} \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present active / reactive injection \\
+\texttt{p\_rated\_mw}, \texttt{sn\_mva} & same columns & default \texttt{0.0} & rated active power and apparent power \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
+\texttt{scaling} & same column & default \texttt{1.0} & scalar multiplier for the static generation profile \\
+\texttt{controllable} & same column & default \texttt{false} & controllability flag \\
+\texttt{v\_ref\_pu}, \texttt{k\_p}, \texttt{k\_q}, \texttt{k}, \texttt{rx} & \texttt{none} & defaults \texttt{1.0}, \texttt{0.0}, \texttt{0.0}, \texttt{1.0}, \texttt{0.0} & JSON-only control and equivalent-source tuning parameters \\
+\texttt{co2\_emission\_rate} & \texttt{none} & default \texttt{0.0} & JSON-only emissions metadata \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Storage} : \texttt{ac.storage[]} or \texttt{dc.storage[]} / sheets \texttt{Storage} and \texttt{DCStorage}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected bus \\
+\texttt{name} & corresponding \texttt{name} column & default empty string & storage label \\
+\texttt{in\_service} & corresponding \texttt{in\_service} column & default \texttt{true} & availability flag \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present active and reactive dispatch \\
+\texttt{p\_rated\_mw} & same column & default \texttt{0.0} & rated converter power \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating limits \\
+\texttt{e\_rated\_mwh} & same column & default \texttt{0.0} & energy capacity \\
+\texttt{soc\_init}, \texttt{soc\_min}, \texttt{soc\_max} & same columns & defaults \texttt{0.5}, \texttt{0.1}, \texttt{0.9} & initial and admissible state-of-charge values \\
+\texttt{soc\_carbon\_intensity\_tco2\_mwh} & same column & default \texttt{0.0} & explicit carbon intensity of the stored energy state used by carbon-flow analysis during discharge \\
+\texttt{eta\_charge}, \texttt{eta\_discharge} & same columns & default \texttt{0.95} & charging and discharging efficiency \\
+\texttt{self\_discharge\_pct} & \texttt{none} & default \texttt{0.0} & JSON-only storage leakage metadata \\
+\texttt{max\_cycles}, \texttt{current\_cycles} & \texttt{none} & defaults \texttt{5000}, \texttt{0} & JSON-only lifecycle counters \\
+\texttt{soh} & \texttt{none} & default \texttt{1.0} & JSON-only state-of-health value \\
+\texttt{replacement\_cost} & \texttt{none} & default \texttt{0.0} & JSON-only replacement-cost metadata \\
+\texttt{forced\_outage\_rate}, \texttt{mttr\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{RenewableGen} : \texttt{ac.renewable\_gens[]} / sheet \texttt{RenewableGen}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{RenewableGen.name} & default empty string & generator label \\
+\texttt{in\_service} & \texttt{RenewableGen.in\_service} & default \texttt{true} & availability flag \\
+\texttt{type} & \texttt{RenewableGen.type} & default \texttt{Wind} & renewable-type token such as \texttt{Wind}, \texttt{SolarPV}, or \texttt{Hydro} \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present active and reactive output \\
+\texttt{p\_rated\_mw} & same column & default \texttt{0.0} & rated active power \\
+\texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & reactive capability limits \\
+\texttt{curtailable} & same column & default \texttt{true} & whether curtailment is allowed \\
+\texttt{cost\_curtail\_mwh} & \texttt{none} & default \texttt{0.0} & JSON-only curtailment penalty \\
+\texttt{capacity\_factor} & \texttt{RenewableGen.capacity\_factor} & default \texttt{0.3} & expected normalized availability \\
+\texttt{profile\_id} & \texttt{none} & default \texttt{-1} & JSON-only profile linkage identifier \\
+\texttt{emission\_offset\_tco2\_mwh} & \texttt{none} & default \texttt{0.0} & JSON-only avoided-emissions metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{PVSystem} : \texttt{ac.pv\_systems[]} / sheet \texttt{PVSystem}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected AC bus \\
+\texttt{name} & \texttt{PVSystem.name} & default empty string & PV system label \\
+\texttt{in\_service} & \texttt{PVSystem.in\_service} & default \texttt{true} & availability flag \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present active and reactive output \\
+\texttt{sn\_mva} & \texttt{PVSystem.sn\_mva} & default \texttt{0.0} & apparent-power rating \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
+\texttt{control\_mode} & \texttt{PVSystem.control\_mode} & default \texttt{MPPT} & inverter control-mode token; one of \texttt{MPPT}, \texttt{VoltVar}, \texttt{VoltWatt}, \texttt{FixedPF}, or \texttt{Curtailed} \\
+\texttt{controllable} & \texttt{none} & default \texttt{false} & JSON-only controllability flag \\
+\texttt{v\_ac\_set\_pu}, \texttt{v\_dc\_set\_pu} & \texttt{none} & default \texttt{1.0} & JSON-only AC/DC voltage reference targets \\
+\texttt{inverter\_eff} & \texttt{PVSystem.inverter\_eff} & default \texttt{0.97} & inverter efficiency \\
+\texttt{loss\_percent} & \texttt{none} & default \texttt{0.0} & JSON-only miscellaneous loss factor \\
+\texttt{num\_series}, \texttt{num\_parallel}, \texttt{vmpp}, \texttt{impp}, \texttt{voc}, \texttt{isc}, \texttt{alpha\_isc}, \texttt{beta\_voc} & \texttt{none} & default \texttt{0} or \texttt{0.0} & JSON-only panel-array electrical metadata \\
+\texttt{irradiance}, \texttt{temperature} & \texttt{none} & defaults \texttt{1000.0}, \texttt{25.0} & JSON-only environmental inputs \\
+\texttt{mtbf\_panel\_hours}, \texttt{mttr\_panel\_hours}, \texttt{mtbf\_inverter\_hours}, \texttt{mttr\_inverter\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsection{DC and Hybrid Coordination Models}
+
+\subsubsection*{\texttt{DCBus} : \texttt{dc.buses[]} / sheet \texttt{DCBus}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{DCBus.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable DC bus identifier \\
+\texttt{name} & \texttt{DCBus.name} & default empty string & bus label \\
+\texttt{bus\_type} & \texttt{DCBus.bus\_type} & default \texttt{DC\_P} & DC bus-type token \texttt{DC\_P} or \texttt{DC\_V} \\
+\texttt{vm\_pu} & \texttt{DCBus.vm\_pu} & default \texttt{1.0} & DC voltage magnitude in per unit \\
+\texttt{vmax\_pu}, \texttt{vmin\_pu} & same columns & defaults \texttt{1.1}, \texttt{0.9} & DC voltage operating bounds \\
+\texttt{pd\_mw} & \texttt{DCBus.pd\_mw} & default \texttt{0.0} & embedded DC demand snapshot; workbook export may reflect synchronized aggregate demand \\
+\texttt{in\_service} & \texttt{DCBus.in\_service} & default \texttt{true} & availability flag \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{DCBranch} : \texttt{dc.branches[]} / sheet \texttt{DCBranch}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{from\_bus}, \texttt{to\_bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and terminal bus indices \\
+\texttt{name} & \texttt{DCBranch.name} & default empty string & branch label \\
+\texttt{r\_pu} & \texttt{DCBranch.r\_pu} & default \texttt{0.0} & branch resistance in per unit \\
+\texttt{rate\_a\_mva} & \texttt{DCBranch.rate\_a\_mva} & default \texttt{0.0} & branch rating \\
+\texttt{length\_km} & \texttt{DCBranch.length\_km} & default \texttt{0.0} & physical route length metadata \\
+\texttt{in\_service} & \texttt{DCBranch.in\_service} & default \texttt{true} & availability flag \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{DCLoad} : \texttt{dc.loads[]} / sheet \texttt{DCLoadRaw} (fallback \texttt{DCLoad})}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected DC bus \\
+\texttt{name} & same column & default empty string & load label \\
+\texttt{in\_service} & same column & default \texttt{true} & availability flag \\
+\texttt{p\_mw} & same column & default \texttt{0.0} & active demand \\
+\texttt{controllable} & same column & default \texttt{false} & controllability flag \\
+\texttt{p\_min\_mw} & same column & default \texttt{0.0} & minimum retained demand under curtailment \\
+\texttt{cost\_mw} & same column & default \texttt{0.0} & marginal curtailment penalty \\
+\texttt{profile\_id} & \texttt{none} & default \texttt{-1} & JSON-only profile linkage identifier \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{VSCConverter} : \texttt{vsc\_converters[]} / sheet \texttt{VSCConverter}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus\_ac}, \texttt{bus\_dc} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and AC/DC terminal bus indices \\
+\texttt{name} & \texttt{VSCConverter.name} & default empty string & converter label \\
+\texttt{in\_service} & \texttt{VSCConverter.in\_service} & default \texttt{true} & availability flag \\
+\texttt{control\_mode} & \texttt{VSCConverter.control\_mode} & default \texttt{PQ} & converter-mode token \texttt{PQ}/\texttt{VDC\_Q}/\texttt{VDC\_VAC} \\
+\texttt{p\_set\_mw}, \texttt{q\_set\_mvar} & same columns & default \texttt{0.0} & AC-side active and reactive setpoints \\
+\texttt{v\_dc\_set\_pu}, \texttt{v\_ac\_set\_pu} & same columns & default \texttt{1.0} & DC and AC voltage references \\
+\texttt{eta} & \texttt{VSCConverter.eta} & default \texttt{0.99} & conversion efficiency \\
+\texttt{loss\_percent} & \texttt{VSCConverter.loss\_percent} & default \texttt{0.0} & generic loss factor \\
+\texttt{loss\_mw} & \texttt{none} & default \texttt{0.0} & JSON-only fixed loss term \\
+\texttt{k\_vdc} & \texttt{none} & default \texttt{0.1} & JSON-only DC-voltage droop coefficient \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
+\texttt{p\_rated\_mw} & \texttt{VSCConverter.p\_rated\_mw} & default \texttt{0.0} & converter rating \\
+\texttt{forced\_outage\_rate}, \texttt{mttr\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{DCDCConverter} : \texttt{dcdc\_converters[]} / sheet \texttt{DCDCConverter}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus\_in}, \texttt{bus\_out} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and input / output DC bus indices \\
+\texttt{name} & \texttt{DCDCConverter.name} & default empty string & converter label \\
+\texttt{in\_service} & \texttt{DCDCConverter.in\_service} & default \texttt{true} & availability flag \\
+\texttt{control\_mode} & \texttt{DCDCConverter.control\_mode} & default \texttt{Voltage} & control-mode token \texttt{Voltage}/\texttt{Power}/\texttt{Droop} \\
+\texttt{p\_ref\_mw} & \texttt{DCDCConverter.p\_ref\_mw} & default \texttt{0.0} & active-power reference \\
+\texttt{v\_ref\_pu} & \texttt{DCDCConverter.v\_ref\_pu} & default \texttt{1.0} & output-voltage reference \\
+\texttt{sn\_mva} & \texttt{DCDCConverter.sn\_mva} & default \texttt{0.0} & converter rating \\
+\texttt{vn\_in\_kv}, \texttt{vn\_out\_kv} & \texttt{none} & default \texttt{0.0} & JSON-only nominal voltage ratings \\
+\texttt{eta} & \texttt{DCDCConverter.eta} & default \texttt{0.98} & conversion efficiency \\
+\texttt{r\_eq\_pu} & \texttt{none} & default \texttt{0.0} & JSON-only equivalent resistance \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw} & same columns & default \texttt{0.0} & power limits \\
+\texttt{k\_droop} & \texttt{none} & default \texttt{0.0} & JSON-only droop coefficient \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{EnergyRouter} : \texttt{energy\_routers[]} / sheet \texttt{EnergyRouter}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{EnergyRouter.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable router identifier \\
+\texttt{name} & \texttt{EnergyRouter.name} & default empty string & router label \\
+\texttt{in\_service} & \texttt{EnergyRouter.in\_service} & default \texttt{true} & availability flag \\
+\texttt{router\_type} & \texttt{EnergyRouter.router\_type} & default empty string & free-form router classification token \\
+\texttt{num\_ports} & \texttt{EnergyRouter.num\_ports} & default \texttt{0} & expected number of ports; workbook import may later recompute it from the separate port table \\
+\texttt{ports[]} & sheet \texttt{EnergyRouterPort} & missing JSON array keeps the vector empty & nested port objects are flattened into a dedicated workbook sheet \\
+\texttt{p\_rated\_mw} & \texttt{EnergyRouter.p\_rated\_mw} & default \texttt{0.0} & total router rating \\
+\texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv} & same columns & default \texttt{0.0} & nominal AC/DC voltage ratings \\
+\texttt{loss\_percent} & \texttt{EnergyRouter.loss\_percent} & default \texttt{0.0} & aggregate conversion loss factor \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & aggregate operating limits \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & same columns & default \texttt{0.0} & reliability metadata preserved in both JSON and workbook \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{EnergyRouterPort} : nested \texttt{energy\_routers[].ports[]} / sheet \texttt{EnergyRouterPort}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{router\_index} & \shortstack[l]{\texttt{EnergyRouterPort.}\\\texttt{router\_index}} & workbook-only join key & parent router identifier used because ports are nested in JSON but flattened in Excel \\
+\texttt{index} & \texttt{EnergyRouterPort.index} & required on JSON import; workbook row also needs \texttt{router\_index} & stable port identifier within its router \\
+\texttt{name} & \texttt{EnergyRouterPort.name} & default empty string & port label \\
+\texttt{bus} & \texttt{EnergyRouterPort.bus} & required on JSON import & connected AC or DC bus index \\
+\texttt{port\_type} & \texttt{EnergyRouterPort.port\_type} & default \texttt{AC} & side-type token \texttt{AC} or \texttt{DC} \\
+\texttt{voltage\_level\_kv} & \shortstack[l]{\texttt{EnergyRouterPort.}\\\texttt{voltage\_level\_kv}} & default \texttt{0.0} & nominal port voltage level \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present active and reactive transfer assigned to the port \\
+\texttt{v\_pu} & \texttt{EnergyRouterPort.v\_pu} & default \texttt{1.0} & local port voltage state or initialization \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating limits \\
+\texttt{control\_mode} & \shortstack[l]{\texttt{EnergyRouterPort.}\\\texttt{control\_mode}} & default \texttt{PQ} & control-mode token \texttt{PQ}/\texttt{VF}/\texttt{Droop} \\
+\texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_set\_pu} & same columns & defaults \texttt{0.0}, \texttt{0.0}, \texttt{1.0} & reference setpoints for the local port controller \\
+\texttt{in\_service} & \texttt{EnergyRouterPort.in\_service} & default \texttt{true} & availability flag \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{VirtualPowerPlant} : \texttt{vpps[]} / sheet \texttt{VPP}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{VPP.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable VPP identifier \\
+\texttt{name} & \texttt{VPP.name} & default empty string & VPP label \\
+\texttt{description} & \texttt{none} & default empty string & JSON-only free-form description \\
+\texttt{aggregation\_bus} & \texttt{VPP.aggregation\_bus} & default \texttt{0} & reporting / control aggregation bus \\
+\texttt{in\_service} & \texttt{VPP.in\_service} & default \texttt{true} & availability flag \\
+\texttt{n\_pv\_systems}, \texttt{n\_wind\_turbines}, \texttt{n\_battery\_systems} & same columns & default \texttt{0} & asset counts preserved in both JSON and workbook \\
+\texttt{n\_ev\_chargers}, \texttt{n\_controllable\_loads} & \texttt{none} & default \texttt{0} & JSON-only aggregation metadata \\
+\texttt{p\_generation\_sum\_mw}, \texttt{e\_storage\_sum\_mwh}, \texttt{p\_load\_controllable\_mw} & \texttt{none} & default \texttt{0.0} & JSON-only aggregate capability metadata \\
+\texttt{p\_output\_mw}, \texttt{q\_output\_mvar} & same columns & default \texttt{0.0} & present aggregated power output \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw} & same columns & default \texttt{0.0} & aggregate operating limits \\
+\texttt{ramp\_up\_max\_mw\_min}, \texttt{ramp\_down\_max\_mw\_min} & \texttt{none} & default \texttt{0.0} & JSON-only ramping metadata \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{Microgrid} : \texttt{microgrids[]} / sheet \texttt{Microgrid}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index} & \texttt{Microgrid.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable microgrid identifier \\
+\texttt{name} & \texttt{Microgrid.name} & default empty string & microgrid label \\
+\texttt{description} & \texttt{none} & default empty string & JSON-only free-form description \\
+\texttt{in\_service} & \texttt{Microgrid.in\_service} & default \texttt{true} & availability flag \\
+\texttt{pcc\_bus} & \texttt{Microgrid.pcc\_bus} & default \texttt{0} & point-of-common-coupling bus index \\
+\texttt{internal\_buses} & \texttt{none} & missing JSON array keeps the vector empty & JSON-only explicit internal bus membership list \\
+\texttt{operating\_mode} & \texttt{Microgrid.operating\_mode} & default \texttt{GridConnected} & operating-mode token; one of \texttt{GridConnected}, \texttt{Islanded}, or \texttt{Transition} \\
+\texttt{islanding\_capability} & \texttt{Microgrid.islanding\_capability} & default \texttt{false} & whether the microgrid may island \\
+\texttt{auto\_reconnection} & \texttt{none} & default \texttt{false} & JSON-only reconnection automation flag \\
+\texttt{p\_exchange\_max\_mw}, \texttt{p\_exchange\_min\_mw} & Excel keeps only \texttt{p\_exchange\_max\_mw} & default \texttt{0.0} & aggregate exchange limits with the host grid \\
+\texttt{p\_import\_max\_mw}, \texttt{p\_export\_max\_mw} & \texttt{none} & default \texttt{0.0} & JSON-only directional exchange limits \\
+\texttt{p\_exchange\_mw} & \texttt{Microgrid.p\_exchange\_mw} & default \texttt{0.0} & present net power exchange at the PCC \\
+\texttt{total\_generation\_mw}, \texttt{total\_load\_mw} & same columns & default \texttt{0.0} & current aggregate generation and demand \\
+\texttt{total\_storage\_mwh}, \texttt{capacity\_mw}, \texttt{peak\_load\_mw} & \texttt{none} & default \texttt{0.0} & JSON-only planning metadata \\
+\texttt{f\_set\_hz}, \texttt{v\_set\_pu}, \texttt{k\_droop} & \texttt{none} & defaults \texttt{50.0}, \texttt{1.0}, \texttt{0.0} & JSON-only islanded-control targets \\
+\texttt{area} & \texttt{none} & default \texttt{0} & JSON-only area tag \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{MobileStorage} : \texttt{mobile\_storage[]} / sheet \texttt{MobileStorage}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and current connected bus \\
+\texttt{name} & \texttt{MobileStorage.name} & default empty string & unit label \\
+\texttt{in\_service} & \texttt{MobileStorage.in\_service} & default \texttt{true} & availability flag \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & present dispatch at the current location \\
+\texttt{p\_rated\_mw} & \texttt{MobileStorage.p\_rated\_mw} & default \texttt{0.0} & converter power rating \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & \texttt{none} & default \texttt{0.0} & JSON-only operating limits \\
+\texttt{e\_rated\_mwh} & \texttt{MobileStorage.e\_rated\_mwh} & default \texttt{0.0} & energy capacity \\
+\texttt{soc\_init} & \texttt{MobileStorage.soc\_init} & default \texttt{0.5} & initial state of charge \\
+\texttt{soc\_min}, \texttt{soc\_max} & \texttt{none} & defaults \texttt{0.1}, \texttt{0.9} & JSON-only admissible state-of-charge bounds \\
+\texttt{eta\_charge}, \texttt{eta\_discharge} & \texttt{none} & default \texttt{0.95} & JSON-only efficiency metadata \\
+\texttt{max\_cycles}, \texttt{current\_cycles}, \texttt{soh} & \texttt{none} & defaults \texttt{5000}, \texttt{0}, \texttt{1.0} & JSON-only lifecycle / health metadata \\
+\texttt{is\_mobile} & \texttt{none} & default \texttt{true} & JSON-only flag distinguishing mobile vs. stationary storage representation \\
+\texttt{status} & \texttt{MobileStorage.status} & default \texttt{Stationary} & mobility-state token; one of \texttt{Stationary}, \texttt{InTransit}, or \texttt{Deployed} \\
+\texttt{current\_location} & \texttt{none} & default empty string & JSON-only free-form location string \\
+\texttt{target\_bus} & \texttt{none} & default \texttt{0} & JSON-only relocation target \\
+\texttt{e\_consumption\_mwh\_km}, \texttt{max\_travel\_distance\_km} & \texttt{none} & default \texttt{0.0} & JSON-only transportation-energy metadata \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\bottomrule
+\end{longtable}
+
+\subsection{Cross-Reference}
+
+The only remaining detailed dictionaries not repeated in this section are the
+ones already written in Section \texttt{02a\_io\_contracts}:
+\begin{enumerate}
+  \item \texttt{AsynchronousMotor}
+  \item the optional \texttt{three\_phase\_ac} metadata container
+  \item \texttt{ThreePhaseBus}, \texttt{ThreePhaseLine}, \texttt{ThreePhaseTransformer}, \texttt{ThreePhaseLoad}, \texttt{ThreePhaseGenerator}, and \texttt{ThreePhaseExternalGrid}
+  \item result-sheet enum and flag conventions
+\end{enumerate}
+
+\normalsize

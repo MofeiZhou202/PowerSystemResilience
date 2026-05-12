@@ -1,0 +1,214 @@
+#include "hacdcpf/power_flow/fdpf_solver.hpp"
+
+#include <cmath>
+#include <vector>
+
+#include <Eigen/Core>
+#include <Eigen/Sparse>
+#include <Eigen/SparseLU>
+
+#include "hacdcpf/power_flow/admittance_builder.hpp"
+#include "hacdcpf/power_flow/pf_utils.hpp"
+
+namespace hacdcpf::powerflow {
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+}  // namespace
+
+PowerFlowResult FDPFSolver::solve(const SolverData& data,
+                                   const PowerFlowOptions& opt) const {
+  PowerFlowResult out;
+  const int n = static_cast<int>(data.ac_buses.size());
+  if (n == 0) {
+    out.converged = true;
+    return out;
+  }
+
+  // Classify bus types.
+  const AcBusSets ac = classify_ac_buses(data);
+  const int slack = ac.slack;
+  const std::vector<int>& pq = ac.pq;
+  const std::vector<int>& non_slack = ac.non_slack;
+
+  const int npvpq = static_cast<int>(non_slack.size());
+  const int npq = static_cast<int>(pq.size());
+
+  // Initialize voltages from bus data.
+  Eigen::VectorXd vm = Eigen::VectorXd::Ones(n);
+  Eigen::VectorXd va = Eigen::VectorXd::Zero(n);
+  for (int i = 0; i < n; ++i) {
+    vm[i] = data.ac_buses[static_cast<size_t>(i)].vm_pu;
+    va[i] = data.ac_buses[static_cast<size_t>(i)].va_deg * kPi / 180.0;
+  }
+
+  // Build and factorize B' (reduced to non_slack × non_slack).
+  Eigen::SparseMatrix<double> Bp_full =
+      build_susceptance_matrix(data, make_bp_flags(opt.robust_nonlinear.min_branch_x_pu));
+  Eigen::SparseMatrix<double> Bpp_full = build_susceptance_matrix(data, make_bpp_flags());
+
+  // Reduce B' to non_slack rows/cols and B'' to pq rows/cols.
+  std::vector<int> remap_ns(static_cast<size_t>(n), -1);
+  for (int k = 0; k < npvpq; ++k) {
+    remap_ns[static_cast<size_t>(non_slack[static_cast<size_t>(k)])] = k;
+  }
+  std::vector<int> remap_pq(static_cast<size_t>(n), -1);
+  for (int k = 0; k < npq; ++k) {
+    remap_pq[static_cast<size_t>(pq[static_cast<size_t>(k)])] = k;
+  }
+
+  auto extract_submatrix = [&](const Eigen::SparseMatrix<double>& M,
+                                const std::vector<int>& remap,
+                                int dim) {
+    std::vector<Eigen::Triplet<double>> t;
+    for (int col = 0; col < M.outerSize(); ++col) {
+      const int rc = remap[static_cast<size_t>(col)];
+      if (rc < 0) continue;
+      for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it) {
+        const int rr = remap[static_cast<size_t>(it.row())];
+        if (rr < 0) continue;
+        t.emplace_back(rr, rc, it.value());
+      }
+    }
+    Eigen::SparseMatrix<double> sub(dim, dim);
+    sub.setFromTriplets(t.begin(), t.end());
+    sub.makeCompressed();
+    return sub;
+  };
+
+  Eigen::SparseMatrix<double> Bp_red = extract_submatrix(Bp_full, remap_ns, npvpq);
+  Eigen::SparseMatrix<double> Bpp_red = extract_submatrix(Bpp_full, remap_pq, npq);
+
+  Eigen::SparseLU<Eigen::SparseMatrix<double>> lu_bp, lu_bpp;
+  lu_bp.compute(Bp_red);
+  if (lu_bp.info() != Eigen::Success) {
+    out.converged = false;
+    out.failure_reason = SolverFailureReason::SingularJacobian;
+    return out;
+  }
+  if (npq > 0) {
+    lu_bpp.compute(Bpp_red);
+    if (lu_bpp.info() != Eigen::Success) {
+      out.converged = false;
+      out.failure_reason = SolverFailureReason::SingularJacobian;
+      return out;
+    }
+  }
+
+  // Convert Ybus to dense for power injection computation.
+  const Eigen::MatrixXcd ybus_dense(data.ybus);
+
+  const int max_iter = opt.fdpf_max_iter;
+  const double tol = opt.tol;
+  int iter = 0;
+
+  for (; iter < max_iter; ++iter) {
+    // Compute power mismatch: mis = V .* conj(Ybus * V) - Sbus
+    // then P = real(mis)/Vm, Q = imag(mis)/Vm
+    Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd qcalc = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < n; ++j) {
+        const double theta = va[i] - va[j];
+        const double g = ybus_dense(i, j).real();
+        const double b = ybus_dense(i, j).imag();
+        pcalc[i] += vm[i] * vm[j] * (g * std::cos(theta) + b * std::sin(theta));
+        qcalc[i] += vm[i] * vm[j] * (g * std::sin(theta) - b * std::cos(theta));
+      }
+    }
+
+    Eigen::VectorXd p_spec = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd q_spec = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+      const auto& bus = data.ac_buses[static_cast<size_t>(i)];
+      const double pd = bus.pd_mw / data.base_mva;
+      const double qd = bus.qd_mvar / data.base_mva;
+      const double v = vm[i];
+      p_spec[i] = data.pg[i] - (pd * data.zip_pw[0] + pd * data.zip_pw[1] * v + pd * data.zip_pw[2] * v * v);
+      q_spec[i] = data.qg[i] - (qd * data.zip_qw[0] + qd * data.zip_qw[1] * v + qd * data.zip_qw[2] * v * v);
+    }
+
+    // P mismatch (divided by Vm, per FDPF formulation).
+    Eigen::VectorXd P_mis(npvpq);
+    for (int k = 0; k < npvpq; ++k) {
+      const int i = non_slack[static_cast<size_t>(k)];
+      P_mis[k] = (p_spec[i] - pcalc[i]) / vm[i];
+    }
+
+    // Q mismatch (divided by Vm).
+    Eigen::VectorXd Q_mis(npq);
+    for (int k = 0; k < npq; ++k) {
+      const int i = pq[static_cast<size_t>(k)];
+      Q_mis[k] = (q_spec[i] - qcalc[i]) / vm[i];
+    }
+
+    const double normP = (npvpq > 0) ? P_mis.cwiseAbs().maxCoeff() : 0.0;
+    const double normQ = (npq > 0) ? Q_mis.cwiseAbs().maxCoeff() : 0.0;
+
+    if (normP < tol && normQ < tol) {
+      out.converged = true;
+      out.residual = std::max(normP, normQ);
+      break;
+    }
+
+    // P-step: update Va.  B'*Δθ = ΔP/V  →  Δθ = (B')^{-1} * P_mis
+    if (npvpq > 0) {
+      const Eigen::VectorXd dVa = lu_bp.solve(P_mis);
+      for (int k = 0; k < npvpq; ++k) {
+        va[non_slack[static_cast<size_t>(k)]] += dVa[k];
+      }
+    }
+
+    // Q-step: update Vm.  B''*ΔV = ΔQ/V  →  ΔV = (B'')^{-1} * Q_mis
+    if (npq > 0) {
+      const Eigen::VectorXd dVm = lu_bpp.solve(Q_mis);
+      for (int k = 0; k < npq; ++k) {
+        vm[pq[static_cast<size_t>(k)]] += dVm[k];
+      }
+    }
+  }
+
+  out.iterations = iter;
+  if (!out.converged) {
+    // Compute final residual.
+    Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
+    Eigen::VectorXd qcalc = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+      for (int j = 0; j < n; ++j) {
+        const double theta = va[i] - va[j];
+        const double g = ybus_dense(i, j).real();
+        const double b = ybus_dense(i, j).imag();
+        pcalc[i] += vm[i] * vm[j] * (g * std::cos(theta) + b * std::sin(theta));
+        qcalc[i] += vm[i] * vm[j] * (g * std::sin(theta) - b * std::cos(theta));
+      }
+    }
+    double max_mis = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (i == slack) continue;
+      const auto& bus = data.ac_buses[static_cast<size_t>(i)];
+      const double pd = bus.pd_mw / data.base_mva;
+      const double v = vm[i];
+      const double p_spec = data.pg[i] - (pd * data.zip_pw[0] + pd * data.zip_pw[1] * v + pd * data.zip_pw[2] * v * v);
+      max_mis = std::max(max_mis, std::abs(p_spec - pcalc[i]));
+      if (bus.bus_type == BusType::PQ) {
+        const double qd = bus.qd_mvar / data.base_mva;
+        const double q_spec = data.qg[i] - (qd * data.zip_qw[0] + qd * data.zip_qw[1] * v + qd * data.zip_qw[2] * v * v);
+        max_mis = std::max(max_mis, std::abs(q_spec - qcalc[i]));
+      }
+    }
+    out.residual = max_mis;
+  }
+
+  out.vm.resize(static_cast<size_t>(n));
+  out.va.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    out.vm[static_cast<size_t>(i)] = vm[i];
+    out.va[static_cast<size_t>(i)] = va[i];
+  }
+
+  return out;
+}
+
+}  // namespace hacdcpf::powerflow

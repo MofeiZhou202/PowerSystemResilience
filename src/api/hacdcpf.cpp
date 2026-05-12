@@ -1,0 +1,701 @@
+#include "hacdcpf/api/hacdcpf.hpp"
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+
+#include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/power_flow/ac_linearized_pf.hpp"
+#include "hacdcpf/power_flow/branch_flow.hpp"
+#include "hacdcpf/power_flow/converter_model.hpp"
+#include "hacdcpf/power_flow/dc_solver.hpp"
+#include "hacdcpf/power_flow/fdpf_solver.hpp"
+#include "hacdcpf/power_flow/newton_solver.hpp"
+#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/power_flow/adaptive_solver.hpp"
+#include "hacdcpf/power_flow/distributed_slack_solver.hpp"
+#include "hacdcpf/power_flow/island_detector.hpp"
+#include "hacdcpf/market/market_simulation.hpp"
+#include "hacdcpf/planning/hybrid_distribution_planning_validation.hpp"
+#include "hacdcpf/planning/microgrid_planning_solver.hpp"
+
+namespace hacdcpf {
+
+struct SolverHandle {
+  powerflow::SolverData data;
+  powerflow::NewtonSolver newton_solver;
+  powerflow::DCSolver dc_solver;
+  LossModelType configured_loss_model{LossModelType::Linear};
+};
+
+namespace {
+
+std::uint64_t hash_combine(std::uint64_t seed, std::uint64_t v) {
+  return seed ^ (v + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
+}
+
+std::uint64_t hash_double(double d) {
+  std::uint64_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(d), "Unexpected double size.");
+  std::memcpy(&bits, &d, sizeof(bits));
+  return bits;
+}
+
+std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType loss_model) {
+  std::uint64_t h = 0xcbf29ce484222325ULL;
+  h = hash_combine(h, static_cast<std::uint64_t>(loss_model));
+  h = hash_combine(h, hash_double(sys.base_mva));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.buses.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.branches.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.generators.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.buses.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.branches.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.loads.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.vsc_converters.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dcdc_converters.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.energy_routers.size()));
+
+  for (const auto& b : sys.ac.buses) {
+    h = hash_combine(h, static_cast<std::uint64_t>(b.index));
+    h = hash_combine(h, static_cast<std::uint64_t>(b.bus_type));
+    h = hash_combine(h, hash_double(b.pd_mw));
+    h = hash_combine(h, hash_double(b.qd_mvar));
+    h = hash_combine(h, hash_double(b.vm_pu));
+    h = hash_combine(h, hash_double(b.va_deg));
+    h = hash_combine(h, static_cast<std::uint64_t>(b.in_service));
+  }
+  for (const auto& br : sys.ac.branches) {
+    h = hash_combine(h, static_cast<std::uint64_t>(br.from_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(br.to_bus));
+    h = hash_combine(h, hash_double(br.r_pu));
+    h = hash_combine(h, hash_double(br.x_pu));
+    h = hash_combine(h, hash_double(br.b_pu));
+    h = hash_combine(h, hash_double(br.tap));
+    h = hash_combine(h, hash_double(br.shift_deg));
+    h = hash_combine(h, static_cast<std::uint64_t>(br.in_service));
+  }
+  for (const auto& g : sys.ac.generators) {
+    h = hash_combine(h, static_cast<std::uint64_t>(g.bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(g.is_slack));
+    h = hash_combine(h, static_cast<std::uint64_t>(g.in_service));
+    h = hash_combine(h, hash_double(g.pg_mw));
+    h = hash_combine(h, hash_double(g.qg_mvar));
+    h = hash_combine(h, hash_double(g.vg_pu));
+  }
+  for (const auto& b : sys.dc.buses) {
+    h = hash_combine(h, static_cast<std::uint64_t>(b.index));
+    h = hash_combine(h, static_cast<std::uint64_t>(b.bus_type));
+    h = hash_combine(h, hash_double(b.vm_pu));
+    h = hash_combine(h, hash_double(b.vmin_pu));
+    h = hash_combine(h, hash_double(b.vmax_pu));
+    h = hash_combine(h, hash_double(b.pd_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(b.in_service));
+  }
+  for (const auto& br : sys.dc.branches) {
+    h = hash_combine(h, static_cast<std::uint64_t>(br.from_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(br.to_bus));
+    h = hash_combine(h, hash_double(br.r_pu));
+    h = hash_combine(h, static_cast<std::uint64_t>(br.in_service));
+  }
+  for (const auto& ld : sys.dc.loads) {
+    h = hash_combine(h, static_cast<std::uint64_t>(ld.bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(ld.in_service));
+    h = hash_combine(h, hash_double(ld.p_mw));
+  }
+  for (const auto& c : sys.vsc_converters) {
+    h = hash_combine(h, static_cast<std::uint64_t>(c.bus_ac));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.bus_dc));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.control_mode));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.in_service));
+    h = hash_combine(h, hash_double(c.p_set_mw));
+    h = hash_combine(h, hash_double(c.q_set_mvar));
+    h = hash_combine(h, hash_double(c.v_dc_set_pu));
+    h = hash_combine(h, hash_double(c.v_ac_set_pu));
+    h = hash_combine(h, hash_double(c.eta));
+    h = hash_combine(h, hash_double(c.loss_percent));
+    h = hash_combine(h, hash_double(c.loss_mw));
+    h = hash_combine(h, hash_double(c.k_vdc));
+    h = hash_combine(h, hash_double(c.pmax_mw));
+    h = hash_combine(h, hash_double(c.pmin_mw));
+    h = hash_combine(h, hash_double(c.qmax_mvar));
+    h = hash_combine(h, hash_double(c.qmin_mvar));
+    h = hash_combine(h, hash_double(c.p_rated_mw));
+    h = hash_combine(h, hash_double(c.r_conv_ac_pu));   // AC-resistance cross-coupling
+  }
+  for (const auto& c : sys.dc.dcdc_converters) {
+    h = hash_combine(h, static_cast<std::uint64_t>(c.bus_in));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.bus_out));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.control_mode));
+    h = hash_combine(h, static_cast<std::uint64_t>(c.in_service));
+    h = hash_combine(h, hash_double(c.p_ref_mw));
+    h = hash_combine(h, hash_double(c.v_ref_pu));
+    h = hash_combine(h, hash_double(c.eta));
+    h = hash_combine(h, hash_double(c.k_droop));
+  }
+  for (const auto& er : sys.energy_routers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(er.index));
+    h = hash_combine(h, static_cast<std::uint64_t>(er.in_service));
+    h = hash_combine(h, hash_double(er.loss_percent));
+    h = hash_combine(h, static_cast<std::uint64_t>(er.ports.size()));
+    for (const auto& p : er.ports) {
+      h = hash_combine(h, static_cast<std::uint64_t>(p.bus));
+      h = hash_combine(h, static_cast<std::uint64_t>(p.port_type));
+      h = hash_combine(h, static_cast<std::uint64_t>(p.control_mode));
+      h = hash_combine(h, static_cast<std::uint64_t>(p.in_service));
+      h = hash_combine(h, hash_double(p.p_mw));
+      h = hash_combine(h, hash_double(p.q_mvar));
+    }
+  }
+  // Hash component tables that affect power flow results.
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.loads.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.flexible_loads.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.asymmetric_loads.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.static_generators.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.renewable_gens.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.pv_systems.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.storage.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.shunts.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_2w.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_3w.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.switches.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.charging_stations.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.chargers.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.external_grids.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.motors.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.storage.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.static_generators.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dc_static_generators.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.pv_arrays.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.three_phase_ac.has_value()));
+  for (const auto& ld : sys.ac.loads) {
+    h = hash_combine(h, static_cast<std::uint64_t>(ld.bus));
+    h = hash_combine(h, hash_double(ld.p_mw));
+    h = hash_combine(h, hash_double(ld.q_mvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(ld.in_service));
+  }
+  for (const auto& sg : sys.ac.static_generators) {
+    h = hash_combine(h, static_cast<std::uint64_t>(sg.bus));
+    h = hash_combine(h, hash_double(sg.p_mw));
+    h = hash_combine(h, hash_double(sg.scaling));
+    h = hash_combine(h, static_cast<std::uint64_t>(sg.in_service));
+  }
+  for (const auto& st : sys.ac.storage) {
+    h = hash_combine(h, static_cast<std::uint64_t>(st.bus));
+    h = hash_combine(h, hash_double(st.p_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(st.in_service));
+  }
+  for (const auto& sh : sys.ac.shunts) {
+    h = hash_combine(h, static_cast<std::uint64_t>(sh.bus));
+    h = hash_combine(h, hash_double(sh.gs_mw));
+    h = hash_combine(h, hash_double(sh.bs_mvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(sh.in_service));
+    h = hash_combine(h, static_cast<std::uint64_t>(sh.current_step));
+  }
+  for (const auto& cs : sys.ac.charging_stations) {
+    h = hash_combine(h, static_cast<std::uint64_t>(cs.bus));
+    h = hash_combine(h, hash_double(cs.p_total_kw));
+    h = hash_combine(h, hash_double(cs.q_total_kvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(cs.in_service));
+  }
+  for (const auto& eg : sys.ac.external_grids) {
+    h = hash_combine(h, static_cast<std::uint64_t>(eg.bus));
+    h = hash_combine(h, hash_double(eg.vm_pu));
+    h = hash_combine(h, hash_double(eg.va_deg));
+    h = hash_combine(h, static_cast<std::uint64_t>(eg.in_service));
+  }
+  for (const auto& st : sys.dc.storage) {
+    h = hash_combine(h, static_cast<std::uint64_t>(st.bus));
+    h = hash_combine(h, hash_double(st.p_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(st.in_service));
+  }
+  for (const auto& sg : sys.dc.static_generators) {
+    h = hash_combine(h, static_cast<std::uint64_t>(sg.bus));
+    h = hash_combine(h, hash_double(sg.p_mw));
+    h = hash_combine(h, hash_double(sg.scaling));
+    h = hash_combine(h, static_cast<std::uint64_t>(sg.in_service));
+  }
+  for (const auto& pv : sys.ac.pv_systems) {
+    h = hash_combine(h, static_cast<std::uint64_t>(pv.bus));
+    h = hash_combine(h, hash_double(pv.p_mw));
+    h = hash_combine(h, hash_double(pv.q_mvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(pv.in_service));
+  }
+  for (const auto& rg : sys.ac.renewable_gens) {
+    h = hash_combine(h, static_cast<std::uint64_t>(rg.bus));
+    h = hash_combine(h, hash_double(rg.p_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(rg.in_service));
+  }
+  // VPP / Microgrid / MobileStorage
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.vpps.size()));
+  for (const auto& vpp : sys.vpps) {
+    h = hash_combine(h, static_cast<std::uint64_t>(vpp.pcc_bus));
+    h = hash_combine(h, hash_double(vpp.p_output_mw));
+    h = hash_combine(h, hash_double(vpp.q_output_mvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(vpp.in_service));
+  }
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.microgrids.size()));
+  for (const auto& mg : sys.microgrids) {
+    h = hash_combine(h, static_cast<std::uint64_t>(mg.pcc_bus));
+    h = hash_combine(h, hash_double(mg.p_exchange_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(mg.operating_mode));
+    h = hash_combine(h, static_cast<std::uint64_t>(mg.in_service));
+  }
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.mobile_storage.size()));
+  for (const auto& ms : sys.mobile_storage) {
+    h = hash_combine(h, static_cast<std::uint64_t>(ms.bus));
+    h = hash_combine(h, hash_double(ms.p_mw));
+    h = hash_combine(h, hash_double(ms.q_mvar));
+    h = hash_combine(h, static_cast<std::uint64_t>(ms.status));
+    h = hash_combine(h, static_cast<std::uint64_t>(ms.in_service));
+  }
+  for (const auto& fl : sys.ac.flexible_loads) {
+    h = hash_combine(h, static_cast<std::uint64_t>(fl.bus));
+    h = hash_combine(h, hash_double(fl.p_mw));
+    h = hash_combine(h, hash_double(fl.q_mvar));
+    h = hash_combine(h, hash_double(fl.flex_up_mw));
+    h = hash_combine(h, hash_double(fl.flex_down_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(fl.in_service));
+  }
+  for (const auto& al : sys.ac.asymmetric_loads) {
+    h = hash_combine(h, static_cast<std::uint64_t>(al.bus));
+    h = hash_combine(h, hash_double(al.pa_mw));
+    h = hash_combine(h, hash_double(al.pb_mw));
+    h = hash_combine(h, hash_double(al.pc_mw));
+    h = hash_combine(h, hash_double(al.qa_mvar));
+    h = hash_combine(h, hash_double(al.qb_mvar));
+    h = hash_combine(h, hash_double(al.qc_mvar));
+    h = hash_combine(h, hash_double(al.scaling));
+    h = hash_combine(h, static_cast<std::uint64_t>(al.in_service));
+  }
+  for (const auto& tr : sys.ac.transformers_2w) {
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.hv_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.lv_bus));
+    h = hash_combine(h, hash_double(tr.sn_mva));
+    h = hash_combine(h, hash_double(tr.vk_percent));
+    h = hash_combine(h, hash_double(tr.vkr_percent));
+    h = hash_combine(h, hash_double(tr.tap_step_percent));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.tap_pos));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.tap_neutral));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.in_service));
+  }
+  for (const auto& tr : sys.ac.transformers_3w) {
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.hv_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.mv_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.lv_bus));
+    h = hash_combine(h, hash_double(tr.vk_hv_mv_percent));
+    h = hash_combine(h, hash_double(tr.vk_hv_lv_percent));
+    h = hash_combine(h, hash_double(tr.vk_mv_lv_percent));
+    h = hash_combine(h, hash_double(tr.vkr_hv_mv_percent));
+    h = hash_combine(h, hash_double(tr.vkr_hv_lv_percent));
+    h = hash_combine(h, hash_double(tr.vkr_mv_lv_percent));
+    h = hash_combine(h, static_cast<std::uint64_t>(tr.in_service));
+  }
+  for (const auto& sw : sys.ac.switches) {
+    h = hash_combine(h, static_cast<std::uint64_t>(sw.bus_from));
+    h = hash_combine(h, static_cast<std::uint64_t>(sw.bus_to));
+    h = hash_combine(h, hash_double(sw.r_contact_ohm));
+    h = hash_combine(h, hash_double(sw.z_ohm));
+    h = hash_combine(h, static_cast<std::uint64_t>(sw.closed));
+    h = hash_combine(h, static_cast<std::uint64_t>(sw.in_service));
+  }
+  for (const auto& ch : sys.ac.chargers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(ch.station_id));
+    h = hash_combine(h, hash_double(ch.p_ch_max_kw));
+    h = hash_combine(h, hash_double(ch.p_dis_max_kw));
+    h = hash_combine(h, hash_double(ch.eta));
+    h = hash_combine(h, static_cast<std::uint64_t>(ch.in_service));
+  }
+  for (const auto& m : sys.ac.motors) {
+    h = hash_combine(h, static_cast<std::uint64_t>(m.bus));
+    h = hash_combine(h, hash_double(m.sn_mva));
+    h = hash_combine(h, static_cast<std::uint64_t>(m.in_service));
+  }
+  for (const auto& sgdc : sys.dc.dc_static_generators) {
+    h = hash_combine(h, static_cast<std::uint64_t>(sgdc.bus));
+    h = hash_combine(h, hash_double(sgdc.p_set_mw));
+    h = hash_combine(h, hash_double(sgdc.scaling));
+    h = hash_combine(h, static_cast<std::uint64_t>(sgdc.in_service));
+  }
+  for (const auto& pva : sys.dc.pv_arrays) {
+    h = hash_combine(h, static_cast<std::uint64_t>(pva.bus));
+    h = hash_combine(h, hash_double(pva.p_set_mw));
+    h = hash_combine(h, static_cast<std::uint64_t>(pva.in_service));
+  }
+  if (sys.three_phase_ac.has_value()) {
+    const auto& tp = sys.three_phase_ac.value();
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.buses.size()));
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.lines.size()));
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.transformers.size()));
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.loads.size()));
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.generators.size()));
+    h = hash_combine(h, static_cast<std::uint64_t>(tp.external_grids.size()));
+  }
+  return h;
+}
+
+struct SolverDataCache {
+  struct StorageView {
+    const ACBus* ac_buses{nullptr};
+    size_t ac_buses_size{0};
+    const ACBranch* ac_branches{nullptr};
+    size_t ac_branches_size{0};
+    const Generator* ac_generators{nullptr};
+    size_t ac_generators_size{0};
+    const DCBus* dc_buses{nullptr};
+    size_t dc_buses_size{0};
+    const DCBranch* dc_branches{nullptr};
+    size_t dc_branches_size{0};
+    const VSCConverter* vsc_converters{nullptr};
+    size_t vsc_converters_size{0};
+  };
+
+  bool valid{false};
+  const HybridPowerSystem* system_ptr{nullptr};
+  LossModelType loss_model{LossModelType::Linear};
+  std::uint64_t signature{0};
+  StorageView storage;
+  powerflow::SolverData data;
+};
+
+SolverDataCache::StorageView capture_storage_view(const HybridPowerSystem& sys) {
+  SolverDataCache::StorageView s;
+  s.ac_buses = sys.ac.buses.data();
+  s.ac_buses_size = sys.ac.buses.size();
+  s.ac_branches = sys.ac.branches.data();
+  s.ac_branches_size = sys.ac.branches.size();
+  s.ac_generators = sys.ac.generators.data();
+  s.ac_generators_size = sys.ac.generators.size();
+  s.dc_buses = sys.dc.buses.data();
+  s.dc_buses_size = sys.dc.buses.size();
+  s.dc_branches = sys.dc.branches.data();
+  s.dc_branches_size = sys.dc.branches.size();
+  s.vsc_converters = sys.vsc_converters.data();
+  s.vsc_converters_size = sys.vsc_converters.size();
+  return s;
+}
+
+bool same_storage_view(const SolverDataCache::StorageView& cached, const HybridPowerSystem& sys) {
+  return cached.ac_buses == sys.ac.buses.data() && cached.ac_buses_size == sys.ac.buses.size() &&
+         cached.ac_branches == sys.ac.branches.data() &&
+         cached.ac_branches_size == sys.ac.branches.size() &&
+         cached.ac_generators == sys.ac.generators.data() &&
+         cached.ac_generators_size == sys.ac.generators.size() &&
+         cached.dc_buses == sys.dc.buses.data() && cached.dc_buses_size == sys.dc.buses.size() &&
+         cached.dc_branches == sys.dc.branches.data() &&
+         cached.dc_branches_size == sys.dc.branches.size() &&
+         cached.vsc_converters == sys.vsc_converters.data() &&
+         cached.vsc_converters_size == sys.vsc_converters.size();
+}
+
+powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, LossModelType loss_model) {
+  thread_local SolverDataCache cache;
+
+  // Hot-path reuse for repeated solves on an unchanged system object.
+  // Requires pointer match, storage view match, AND hash consistency to
+  // guard against dangling-pointer aliasing (e.g. a stack-local copy that
+  // was destroyed and reallocated at the same address with different data).
+  if (cache.valid && cache.system_ptr == &sys && cache.loss_model == loss_model &&
+      same_storage_view(cache.storage, sys)) {
+    const std::uint64_t sig = hash_system_signature(sys, loss_model);
+    if (cache.signature == sig) {
+      return cache.data;
+    }
+  }
+
+  const std::uint64_t sig = hash_system_signature(sys, loss_model);
+  if (!cache.valid || cache.signature != sig || cache.loss_model != loss_model) {
+    cache.data = powerflow::make_solver_data(sys, loss_model);
+    cache.signature = sig;
+    cache.loss_model = loss_model;
+    cache.valid = true;
+  }
+  cache.system_ptr = &sys;
+  cache.storage = capture_storage_view(sys);
+  return cache.data;
+}
+
+void rebuild_handle_data(SolverHandle& handle,
+                         const HybridPowerSystem& sys,
+                         LossModelType loss_model) {
+  handle.data = powerflow::make_solver_data(sys, loss_model);
+  handle.configured_loss_model = loss_model;
+}
+
+void apply_zip_weights(powerflow::SolverData& data, const PowerFlowOptions& opt) {
+  for (int k = 0; k < 3; ++k) {
+    data.zip_pw[k] = opt.zip_pw[k];
+    data.zip_qw[k] = opt.zip_qw[k];
+  }
+  // Propagate exact fully-coupled Newton flags.
+  data.enable_coupled_jacobian = opt.enable_coupled_jacobian;
+  data.enable_augmented_equations = opt.enable_augmented_equations;
+  data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
+}
+
+void populate_derived_results(const powerflow::SolverData& data,
+                              PowerFlowResult& result,
+                              LossModelType loss_model) {
+  result.branch_flows.clear();
+  result.vsc_transfers.clear();
+  result.dcdc_transfers.clear();
+  result.er_port_transfers.clear();
+  if (!result.converged) {
+    return;
+  }
+
+  result.branch_flows = powerflow::compute_branch_flows(data, result.vm, result.va);
+
+  Eigen::VectorXd vm = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(result.vm.size()));
+  Eigen::VectorXd va = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(result.va.size()));
+  Eigen::VectorXd vdc = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(result.vdc.size()));
+  for (Eigen::Index i = 0; i < vm.size(); ++i) vm[i] = result.vm[static_cast<size_t>(i)];
+  for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
+  for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
+
+  result.vsc_transfers.reserve(data.converters.size());
+  for (const auto& conv : data.converters) {
+    if (!conv.in_service) continue;
+    const auto [p_ac_pu, q_ac_pu] =
+        powerflow::converter_ac_injection(conv, vm, va, vdc, data.base_mva, loss_model);
+    const double p_dc_pu =
+        powerflow::converter_dc_injection(conv, vm, va, vdc, data.base_mva, loss_model);
+
+    VSCTransfer tr;
+    tr.index = conv.index;
+    tr.bus_ac = conv.bus_ac;
+    tr.bus_dc = conv.bus_dc;
+    tr.p_ac_mw = p_ac_pu * data.base_mva;
+    tr.q_ac_mvar = q_ac_pu * data.base_mva;
+    tr.p_dc_mw = p_dc_pu * data.base_mva;
+    tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
+    result.vsc_transfers.push_back(tr);
+  }
+
+  result.dcdc_transfers.reserve(data.dcdc_converters.size());
+  for (const auto& c : data.dcdc_converters) {
+    if (!c.in_service) continue;
+    const double eta = (c.eta > 1e-9) ? c.eta : 1.0;
+    const double p_out_mw = c.p_ref_mw;
+    const double p_in_mw = (p_out_mw >= 0.0) ? (p_out_mw / eta) : (p_out_mw * eta);
+    DCDCTransfer tr;
+    tr.index = c.index;
+    tr.bus_in = c.bus_in;
+    tr.bus_out = c.bus_out;
+    tr.p_in_mw = p_in_mw;
+    tr.p_out_mw = p_out_mw;
+    tr.loss_mw = p_in_mw - p_out_mw;
+    result.dcdc_transfers.push_back(tr);
+  }
+
+  for (const auto& er : data.energy_routers) {
+    if (!er.in_service) continue;
+    for (const auto& p : er.ports) {
+      if (!p.in_service) continue;
+      ERPortTransfer tr;
+      tr.router_index = er.index;
+      tr.port_index = p.index;
+      tr.bus = p.bus;
+      tr.is_ac = (p.port_type == ERPortType::AC);
+      tr.p_mw = p.p_mw;
+      tr.q_mvar = p.q_mvar;
+      if (tr.is_ac) {
+        const int b = p.bus - 1;
+        tr.v_pu = (b >= 0 && b < vm.size()) ? vm[b] : 1.0;
+      } else {
+        const int b = p.bus - 1;
+        tr.v_pu = (b >= 0 && b < vdc.size()) ? vdc[b] : 1.0;
+      }
+      result.er_port_transfers.push_back(tr);
+    }
+  }
+}
+
+// Expand merged PF result vectors (vm, va) back to the original bus count
+// so that callers can index by original bus position.
+void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
+  if (!map.has_merges()) return;
+  result.vm = unproject_bus_vector(result.vm, map);
+  result.va = unproject_bus_vector(result.va, map);
+}
+
+}  // namespace
+
+PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  apply_zip_weights(data, opt);
+  static thread_local powerflow::NewtonSolver solver;
+  const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
+  PowerFlowResult result = solver.solve(data, opt, init_ptr);
+  populate_derived_results(data, result, opt.loss_model);
+  if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
+  return result;
+}
+
+DCPowerFlowResult solve_dc_power_flow(const HybridPowerSystem& sys,
+                                      const PowerFlowOptions& opt) {
+  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  static thread_local powerflow::DCSolver solver;
+  return solver.solve(data, opt, nullptr);
+}
+
+AdaptiveSolveResult solve_power_flow_adaptive(const HybridPowerSystem& sys,
+                                              const PowerFlowOptions& opt) {
+  powerflow::AdaptiveSolver solver;
+  AdaptiveSolveResult result = solver.solve(sys, opt, {});
+  if (result.converged) {
+    powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+    apply_zip_weights(data, opt);
+    result.branch_flows = powerflow::compute_branch_flows(data, result.vm, result.va);
+  }
+  return result;
+}
+
+IslandedSolveResult solve_power_flow_islanded(const HybridPowerSystem& sys,
+                                              const PowerFlowOptions& opt) {
+  IslandedSolveResult result;
+  powerflow::AdaptiveSolver solver;
+  const AdaptiveSolveResult adaptive = solver.solve(sys, opt, {});
+  result.vm = adaptive.vm;
+  result.va = adaptive.va;
+  result.vdc = adaptive.vdc;
+  result.converged = adaptive.converged;
+  result.iterations = adaptive.iterations;
+  result.residual = adaptive.residual;
+  result.islands = adaptive.islands;
+  return result;
+}
+
+DistributedSlackResult solve_power_flow_distributed_slack(const HybridPowerSystem& sys,
+                                                          const DistributedSlack& slack_cfg,
+                                                          const PowerFlowOptions& opt) {
+  powerflow::DistributedSlackSolver solver;
+  return solver.solve_simplified(sys, slack_cfg, opt);
+}
+
+DistributedSlackResult solve_power_flow_distributed_slack_full(const HybridPowerSystem& sys,
+                                                               const DistributedSlack& slack_cfg,
+                                                               const PowerFlowOptions& opt) {
+  powerflow::DistributedSlackSolver solver;
+  return solver.solve_full_jacobian(sys, slack_cfg, opt);
+}
+
+SolverHandle* create_solver_handle(const HybridPowerSystem& sys, LossModelType loss_model) {
+  auto handle = std::make_unique<SolverHandle>();
+  rebuild_handle_data(*handle, sys, loss_model);
+  return handle.release();
+}
+
+void reset_solver_handle(SolverHandle* handle,
+                         const HybridPowerSystem& sys,
+                         LossModelType loss_model) {
+  if (handle == nullptr) {
+    throw std::invalid_argument("reset_solver_handle: handle is null.");
+  }
+  rebuild_handle_data(*handle, sys, loss_model);
+}
+
+PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) {
+  if (handle == nullptr) {
+    throw std::invalid_argument("solve_handle: handle is null.");
+  }
+  handle->data.loss_model = opt.loss_model;
+  handle->configured_loss_model = opt.loss_model;
+  apply_zip_weights(handle->data, opt);
+  PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
+  populate_derived_results(handle->data, result, opt.loss_model);
+  if (handle->data.bus_merge_map) unproject_pf_result(result, *handle->data.bus_merge_map);
+  return result;
+}
+
+DCPowerFlowResult solve_dc_handle(SolverHandle* handle, const PowerFlowOptions& opt) {
+  if (handle == nullptr) {
+    throw std::invalid_argument("solve_dc_handle: handle is null.");
+  }
+  handle->data.loss_model = opt.loss_model;
+  handle->configured_loss_model = opt.loss_model;
+  return handle->dc_solver.solve(handle->data, opt, nullptr);
+}
+
+void destroy_solver_handle(SolverHandle* handle) {
+  delete handle;
+}
+
+PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
+                                       const PowerFlowOptions& opt) {
+  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  apply_zip_weights(data, opt);
+  powerflow::FDPFSolver solver;
+  PowerFlowResult result = solver.solve(data, opt);
+  populate_derived_results(data, result, opt.loss_model);
+  if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
+  return result;
+}
+
+powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,
+                                                        const PowerFlowOptions& opt) {
+  powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
+  return powerflow::solve_ac_linearized_dc(data);
+}
+
+opf::ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const opf::ACOPFOptions& opt) {
+  return opf::solve_ac_opf(sys, opt);
+}
+
+opf::DCOPFResult solve_dc_opf(const HybridPowerSystem& sys, const opf::DCOPFOptions& opt) {
+  return opf::solve_dc_opf(sys, opt);
+}
+
+opf::RPOResult solve_rpo(const HybridPowerSystem& sys, const opf::RPOOptions& opt) {
+  return opf::solve_rpo(sys, opt);
+}
+
+analysis::DistributionResilienceResult run_distribution_resilience_assessment(
+    const HybridPowerSystem& sys,
+    const analysis::DistributionResilienceOptions& opt) {
+  return analysis::run_distribution_resilience_assessment(sys, opt);
+}
+
+market::MarketClearingOutput run_market_clearing(
+    const HybridPowerSystem& sys,
+    const market::MarketConfig& config,
+    const std::vector<market::GenCoBid>& bids,
+    const market::MarketProfiles* profiles,
+    const market::InitialStatus* init,
+    const market::ScenarioConfig* scen_cfg) {
+  return market::run_market_clearing(sys, config, bids, profiles, init, scen_cfg);
+}
+
+planning::PlanningResult solve_microgrid_planning(
+    const planning::MicrogridPlanningInput& input,
+    const planning::PlanningOptions& options) {
+  return planning::solve_microgrid_planning(input, options);
+}
+
+planning::PlanningResult solve_microgrid_planning_baseline(
+    const planning::MicrogridPlanningInput& input,
+    const planning::PlanningOptions& options) {
+  return planning::solve_microgrid_planning_baseline(input, options);
+}
+
+planning::PlanningResult solve_microgrid_planning_nested_bc(
+    const planning::MicrogridPlanningInput& input,
+    const planning::PlanningOptions& options) {
+  return planning::solve_microgrid_planning_nested_bc(input, options);
+}
+
+planning::HybridDistributionCandidateReplayResult replay_hybrid_distribution_candidate(
+    const HybridPowerSystem& base_system,
+    const planning::HybridDistributionPlanningResult& result,
+    const planning::HybridDistributionCandidateReplayOptions& options) {
+  return planning::replay_hybrid_distribution_candidate(base_system, result, options);
+}
+
+planning::HybridDistributionValidationReport validate_hybrid_distribution_planning_result(
+    const HybridPowerSystem& base_system,
+    const planning::HybridDistributionPlanningResult& result,
+    const planning::HybridDistributionValidationOptions& options) {
+  return planning::validate_hybrid_distribution_planning_result(base_system, result, options);
+}
+
+}  // namespace hacdcpf

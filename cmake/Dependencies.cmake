@@ -36,13 +36,40 @@ if(NOT TARGET mipsolvers::mipsolvers)
 endif()
 
 # ── Catch2 (test framework – fetched only when tests are enabled) ─────────────
-if(HACDCDSS_BUILD_TESTS)
+if(HACDCPF_BUILD_TESTS)
   include(FetchContent)
-  FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG        v3.5.4
-    EXCLUDE_FROM_ALL)
+
+  # Prefer a pre-existing local source tree over a network download to avoid
+  # depending on GitHub connectivity.
+  set(_CATCH2_LOCAL_CANDIDATES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build_rel/_deps/catch2-src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../HybridACDCPowerSystemsPlanning/build/_deps/catch2-src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/build_mipsolvers/_deps/catch2-src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/_deps/catch2-src")
+
+  set(_CATCH2_LOCAL_DIR "")
+  foreach(_dir IN LISTS _CATCH2_LOCAL_CANDIDATES)
+    if(EXISTS "${_dir}/CMakeLists.txt")
+      set(_CATCH2_LOCAL_DIR "${_dir}")
+      break()
+    endif()
+  endforeach()
+
+  if(_CATCH2_LOCAL_DIR)
+    message(STATUS "hacdcdss: using local Catch2 source at ${_CATCH2_LOCAL_DIR}")
+    FetchContent_Declare(
+      Catch2
+      SOURCE_DIR "${_CATCH2_LOCAL_DIR}"
+      EXCLUDE_FROM_ALL)
+  else()
+    message(STATUS "hacdcdss: downloading Catch2 v3.5.4 from GitHub")
+    FetchContent_Declare(
+      Catch2
+      GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+      GIT_TAG        v3.5.4
+      EXCLUDE_FROM_ALL)
+  endif()
+
   FetchContent_MakeAvailable(Catch2)
   list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
   include(CTest)

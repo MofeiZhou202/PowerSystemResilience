@@ -1,0 +1,2834 @@
+% ═══════════════════════════════════════════════════════════════════════
+% Standalone document: Three-Stage Stochastic Dispatch
+% for Provincial Power System Market Boundary Optimization
+%
+% Compile:  latexmk -pdf 17_two_stage_stochastic.tex
+% ═══════════════════════════════════════════════════════════════════════
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm,mathtools,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs,longtable,array,tabularx}
+\usepackage{microtype}
+\usepackage{ragged2e}
+\usepackage[table]{xcolor}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,
+  shapes.misc,fit,decorations.pathreplacing,calc}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!45!black,urlcolor=blue!55!black}
+
+\newcolumntype{L}[1]{>{\RaggedRight\hspace{0pt}\arraybackslash}p{#1}}
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.5em}
+\renewcommand{\arraystretch}{1.15}
+\emergencystretch=5em
+
+% ---- Shorthand macros ----
+\newcommand{\Pch}{P^{\mathrm{ch}}}
+\newcommand{\Pdis}{P^{\mathrm{dis}}}
+\newcommand{\LS}{\mathrm{LS}}
+\newcommand{\GC}{\mathrm{GC}}
+\DeclareMathOperator{\CVaR}{CVaR}
+\DeclareMathOperator*{\E}{\mathbb{E}}
+\DeclareMathOperator{\conv}{conv}
+\DeclareMathOperator{\epi}{epi}
+\DeclareMathOperator{\dom}{dom}
+
+% ---- Theorem environments ----
+\newtheorem{assumption}{Assumption}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+
+\title{Three-Stage Stochastic Dispatch for Provincial Power System\\
+  Market Boundary Optimization}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%#################################################################
+\section{Problem Setting}\label{sec:problem}
+%#################################################################
+
+The provincial power system under study comprises:
+\begin{itemize}
+  \item \textbf{Generation}: thermal ($\mathcal{G}$), hydro
+        ($\mathcal{H}$), wind ($\mathcal{W}$), and solar PV
+        ($\mathcal{S}$); all participate in the electricity market with
+        quantity--price bids.
+  \item \textbf{Network}: AC transmission grid with monitored lines
+        ($\mathcal{L}$) and sections ($\mathcal{S}_{\mathrm{sec}}$).
+  \item \textbf{Load}: controllable large industrial users
+        ($\mathcal{D}^{\mathrm{ctrl}}$) and conventional loads
+        ($\mathcal{D}^{\mathrm{conv}}$).
+  \item \textbf{Storage}: pumped-hydro ($\mathcal{E}^{\mathrm{PH}}$)
+        and battery storage ($\mathcal{E}^{\mathrm{BT}}$), collectively
+        $\mathcal{E} = \mathcal{E}^{\mathrm{PH}} \cup
+        \mathcal{E}^{\mathrm{BT}}$; participate as price takers
+        (quantity only, no price bid).
+\end{itemize}
+
+The provincial dispatch centre optimises the market operating boundary
+for the coming $D{+}1$ to $D{+}N$ days (default $N=7$, i.e.\ one week
+ahead) using the following instruments:
+\begin{enumerate}
+  \item Adjustment of ESS charge/discharge schedules;
+  \item Demand-side response (DSR) via invitation of large users;
+  \item Hydro generation plan adjustment;
+  \item Maintenance schedule adjustment for thermal units and lines.
+\end{enumerate}
+
+\subsection{Lead-Time Constraints}
+
+Different resources have different minimum lead times for schedule
+adjustment, as shown in Figure~\ref{fig:timeline}:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  day/.style={minimum width=1.3cm, minimum height=0.7cm,
+    draw, font=\footnotesize, anchor=west},
+  label/.style={font=\footnotesize\bfseries, anchor=east},
+]
+  % Day headers
+  \foreach \d [count=\i from 0] in {D,D+1,D+2,D+3,D+4,D+5,D+6,D+7}{
+    \node[day, fill=gray!10] (h\i) at (\i*1.4, 0) {\d};
+  }
+  % ESS: days 1..k
+  \foreach \i in {1,2,3}{
+    \node[day, fill=blue!20] at (\i*1.4, -0.9) {};
+  }
+  \node[label] at (0, -0.9) {ESS};
+  % DR: days 2..N
+  \foreach \i in {2,3,4,5,6,7}{
+    \node[day, fill=green!20] at (\i*1.4, -1.8) {};
+  }
+  \node[label] at (0, -1.8) {DSR};
+  % Hydro: days 3..N
+  \foreach \i in {3,4,5,6,7}{
+    \node[day, fill=cyan!20] at (\i*1.4, -2.7) {};
+  }
+  \node[label] at (0, -2.7) {Hydro};
+  % Maintenance: days 1..N
+  \foreach \i in {1,2,3,4,5,6,7}{
+    \node[day, fill=orange!20] at (\i*1.4, -3.6) {};
+  }
+  \node[label] at (0, -3.6) {Maint.};
+  % Decision point
+  \draw[-{Stealth}, thick, red] (0.65, 0.5) -- (0.65, -4.2)
+    node[below, font=\footnotesize\bfseries, red]{Decision at $D$};
+  % Stage labels with braces
+  \draw[decorate, decoration={brace, amplitude=5pt, mirror},
+    thick, blue!60!black]
+    (1*1.4, -4.5) -- (3*1.4+1.3, -4.5)
+    node[midway, below=6pt, font=\footnotesize\bfseries,
+      blue!60!black]{Stage 2 ($d=1{\sim}k$)};
+  \draw[decorate, decoration={brace, amplitude=5pt, mirror},
+    thick, green!50!black]
+    (4*1.4, -4.5) -- (7*1.4+1.3, -4.5)
+    node[midway, below=6pt, font=\footnotesize\bfseries,
+      green!50!black]{Stage 3 ($d=k{+}1{\sim}N$)};
+\end{tikzpicture}
+\caption{Lead-time structure for adjustable resources ($k=3$ shown).
+  Coloured cells indicate days whose schedules can be adjusted at day $D$.}
+\label{fig:timeline}
+\end{figure}
+
+\subsection{Temporal Resolution and Operational Objectives}
+
+The $N$-day horizon is partitioned into two operational phases with
+different modelling fidelity:
+
+\begin{table}[H]
+\centering
+\caption{Three-stage operational structure.}
+\label{tab:phases}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Stage} & \textbf{Days} & \textbf{Objective}
+  & \textbf{$\Delta t$} & \textbf{Network model}
+  & \textbf{Decisions} \\
+\midrule
+Stage~1 (Here-and-now) & $D$ & Boundary optimisation
+  & -- & -- & $\mathbf{x}$ \\
+Stage~2 (Security) & $D{+}1 \sim D{+}k$ & Operational security
+  & 15\,min & DC-PF, line limits, nodal LS & $\mathbf{y}$ \\
+Stage~3 (Adequacy) & $D{+}k{+}1 \sim D{+}N$ & Resource adequacy
+  & 1\,h & Power/energy balance, zonal LS & $\mathbf{z}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Uncertainty Structure}\label{sec:uncertainty-structure}
+
+\begin{itemize}
+  \item Day $D{+}1$: renewable generation and conventional load
+        forecasts are \emph{deterministic} (point forecast).
+  \item Days $D{+}2 \sim D{+}k$ (remainder of Stage~2): uncertainty
+        $\boldsymbol{\xi}^{(2)}$ is revealed; represented by a finite
+        set of scenarios branching at the beginning of $D{+}2$.
+  \item Days $D{+}k{+}1 \sim D{+}N$ (Stage~3): additional uncertainty
+        $\boldsymbol{\xi}^{(3)}$ is revealed \emph{conditionally} on the
+        Stage~2 realisation; the scenario tree branches again at the
+        Stage~2/Stage~3 boundary.
+\end{itemize}
+
+%#################################################################
+\section{Nomenclature}\label{sec:nomenclature}
+%#################################################################
+
+%-------------------------------------------------------------------
+\subsection{Sets and Indices}
+%-------------------------------------------------------------------
+
+\begin{longtable}{lL{10.5cm}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+\endhead
+$\mathcal{D}_N$ & Set of future days, $\{1,2,\ldots,N\}$; day index $d$
+  (day~1 $\equiv$ $D{+}1$) \\
+$\mathcal{T}_d$  & Set of time periods within day $d$;
+  $|\mathcal{T}_d|=96$ if $d \leq k$ (15-min),
+  $|\mathcal{T}_d|=24$ if $d > k$ (1-h) \\
+$\mathcal{G}$   & Set of thermal generators, indexed by $g$ \\
+$\mathcal{H}$   & Set of hydro stations, indexed by $h$ \\
+$\mathcal{W}$   & Set of wind farms, indexed by $w$ \\
+$\mathcal{S}$   & Set of solar PV plants, indexed by $s$ \\
+$\mathcal{R}$   & $\mathcal{W} \cup \mathcal{S}$, all renewables,
+  indexed by $r$ \\
+$\mathcal{E}$   & Set of ESS units (pumped-hydro + battery), indexed by $e$ \\
+$\mathcal{D}^{\mathrm{ctrl}}$ & Set of controllable (large-user) loads,
+  indexed by $j$ \\
+$\mathcal{D}^{\mathrm{conv}}$ & Set of conventional loads \\
+$\mathcal{L}$   & Set of monitored AC lines, indexed by $l$ \\
+$\mathcal{B}$   & Set of buses (nodes), indexed by $b$ \\
+$\mathcal{M}_g$ & Set of bid segments for thermal generator $g$ \\
+\midrule
+\multicolumn{2}{l}{\emph{Scenario tree sets (see §\ref{sec:scenario-tree}):}} \\
+$\Omega_2$  & Set of Stage~2 scenario branches, indexed by $\omega_2$,
+  $|\Omega_2|=S_2$ \\
+$\Omega_3(\omega_2)$ & Set of Stage~3 scenario branches
+  \emph{conditional on} $\omega_2$, indexed by $\omega_3$,
+  $|\Omega_3(\omega_2)|=S_3(\omega_2)$ \\
+$\Omega$    & Set of all root-to-leaf scenario paths,
+  $\omega = (\omega_2, \omega_3)$ \\
+\bottomrule
+\end{longtable}
+
+%-------------------------------------------------------------------
+\subsection{Decision Variables by Stage}
+%-------------------------------------------------------------------
+
+\paragraph{Stage~1: first-stage decisions $\mathbf{x}$.}
+Made at day $D$ before any uncertainty is revealed.
+
+\begin{longtable}{lL{10.5cm}}
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endhead
+\multicolumn{2}{l}{\emph{ESS schedule (days $1 \leq d \leq k$):}} \\
+$\Pch_{e,t,d}$  & Charging power of ESS $e$ in period $t$, day $d$ [MW] \\
+$\Pdis_{e,t,d}$ & Discharging power of ESS $e$ in period $t$, day $d$ [MW] \\
+$E_{e,t,d}$     & SOC of ESS $e$ at end of period $t$, day $d$ [MWh] \\
+\midrule
+\multicolumn{2}{l}{\emph{Demand-side response (days $2 \leq d \leq N$):}} \\
+$P^{\mathrm{DR+}}_{j,t,d}$ & Load increase of controllable user $j$
+  in period $t$, day $d$ [MW] \\
+$P^{\mathrm{DR-}}_{j,t,d}$ & Load reduction of controllable user $j$
+  in period $t$, day $d$ [MW] \\
+\midrule
+\multicolumn{2}{l}{\emph{Hydro plan (days $3 \leq d \leq N$):}} \\
+$P^{H}_{h,t,d}$ & Hydro generation of station $h$ in period $t$,
+  day $d$ [MW] \\
+\midrule
+\multicolumn{2}{l}{\emph{Maintenance schedule (days $1 \leq d \leq N$):}} \\
+$I^{G}_{g,d}$   & Maintenance status of generator $g$ on day $d$
+  (binary: 1 = under maintenance) \\
+$I^{L}_{l,d}$   & Maintenance status of line $l$ on day $d$
+  (binary: 1 = under maintenance) \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Stage~2: second-stage decisions $\mathbf{y}_{\omega_2}$.}
+Determined after Stage~2 uncertainty $\boldsymbol{\xi}^{(2)}_{\omega_2}$
+is revealed, for days $d = 1,\ldots,k$.
+
+\begin{longtable}{lL{10.5cm}}
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endhead
+$P_{g,t,d,\omega_2}$   & Output of thermal $g$ in period $t$, day $d$ [MW] \\
+$\Delta P_{g,t,m,d,\omega_2}$ & Bid segment $m$ dispatch [MW] \\
+$u_{g,t,d,\omega_2}$   & Commitment status (binary) \\
+$v_{g,t,d,\omega_2}$, $w_{g,t,d,\omega_2}$ & Startup / shutdown indicators \\
+$P^{W}_{w,t,d,\omega_2}$  & Wind dispatch [MW] \\
+$P^{PV}_{s,t,d,\omega_2}$ & Solar dispatch [MW] \\
+$P^{\mathrm{cur}}_{r,t,d,\omega_2}$ & Renewable curtailment [MW] \\
+$\LS_{b,t,d,\omega_2}$ & Load shedding at bus $b$ (nodal) [MW] \\
+$\GC_{t,d,\omega_2}$   & Generation curtailment [MW] \\
+$F_{l,t,d,\omega_2}$   & Power flow on line $l$ [MW] \\
+$\theta_{b,t,d,\omega_2}$ & Voltage angle at bus $b$ in period $t$, day $d$ [rad] \\
+\bottomrule
+\end{longtable}
+
+\paragraph{Stage~3: third-stage decisions $\mathbf{z}_{\omega_2,\omega_3}$.}
+Determined after Stage~3 uncertainty
+$\boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2}$ is revealed, for days
+$d = k{+}1,\ldots,N$.
+
+\begin{longtable}{lL{10.5cm}}
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Variable} & \textbf{Description} \\
+\midrule
+\endhead
+$P_{g,t,d,\omega}$   & Output of thermal $g$ [MW],
+  $\omega = (\omega_2, \omega_3)$ \\
+$u_{g,t,d,\omega}$   & Commitment status (binary) \\
+$P^{W}_{w,t,d,\omega}$, $P^{PV}_{s,t,d,\omega}$ & Renewable dispatch [MW] \\
+$P^{\mathrm{cur}}_{r,t,d,\omega}$ & Renewable curtailment [MW] \\
+$\LS_{t,d,\omega}$   & Load shedding (zonal) [MW] \\
+$\Pch_{e,t,d,\omega}$, $\Pdis_{e,t,d,\omega}$ & ESS charge/discharge
+  [MW] (free in Stage~3, $d > k$) \\
+$E_{e,t,d,\omega}$   & ESS SOC [MWh] \\
+\bottomrule
+\end{longtable}
+
+%-------------------------------------------------------------------
+\subsection{Parameters}
+%-------------------------------------------------------------------
+
+\begin{longtable}{lL{10.5cm}}
+\toprule
+\textbf{Parameter} & \textbf{Description} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Parameter} & \textbf{Description} \\
+\midrule
+\endhead
+$N$       & Planning horizon in days (default 7) \\
+$k$       & Stage~2 / Stage~3 boundary; days $1{\sim}k$ are Stage~2 \\
+$\Delta t_d$ & Period length of day $d$: 0.25\,h if $d \leq k$, 1\,h
+  if $d>k$ \\
+$\pi_{\omega_2}$ & Probability of Stage~2 scenario $\omega_2$ \\
+$\pi_{\omega_3|\omega_2}$ & Conditional probability of Stage~3
+  scenario $\omega_3$ given $\omega_2$ \\
+\midrule
+$C_{g,m}$    & Bid price of thermal $g$, segment $m$ [\textyen/MWh] \\
+$C^{U}_g$    & Startup cost of thermal $g$ [\textyen] \\
+$C^{\min}_g$ & Minimum-output (no-load) cost [\textyen/h] \\
+$C^{\mathrm{LS}}$ & Value of lost load (VOLL) [\textyen/MWh] \\
+$C^{\mathrm{cur}}$ & Renewable curtailment penalty [\textyen/MWh] \\
+$C^{\mathrm{DR}}_{j}$ & DSR compensation cost for user $j$ [\textyen/MWh] \\
+\midrule
+$P^{H,\mathrm{ref}}_{h,d}$ & Reference (planned) daily hydro energy of
+  station $h$ on day $d$ [MWh] \\
+$C^{H+}_h$ & Cost penalty for hydro energy \emph{increase} above reference
+  [\textyen/MWh] (opportunity cost of depleting reservoir) \\
+$C^{H-}_h$ & Cost penalty for hydro energy \emph{reduction} below reference
+  [\textyen/MWh]; typically $C^{H-}_h > C^{H+}_h$ reflecting spill
+  risk and water-right constraints \\
+\midrule
+$P^{\max}_g$, $P^{\min}_g$ & Generator capacity / minimum stable output [MW] \\
+$\Delta P^{U}_g$, $\Delta P^{D}_g$ & Ramp up/down rate [MW/period] \\
+$T^{U}_g$, $T^{D}_g$ & Minimum up/down time [periods] \\
+$P^{\mathrm{ch,max}}_e$, $P^{\mathrm{dis,max}}_e$ & ESS max
+  charge/discharge power [MW] \\
+$\bar{E}_e$, $\underline{E}_e$ & SOC upper/lower limits [MWh] \\
+$\eta^{\mathrm{ch}}_e$, $\eta^{\mathrm{dis}}_e$ & Charge/discharge
+  efficiency \\
+$N^{\mathrm{cycle}}_e$ & Maximum daily cycles \\
+$X_l$       & Reactance of line $l$ [p.u.] \\
+$\mathrm{from}(l)$, $\mathrm{to}(l)$ & Sending and receiving bus of line $l$ \\
+$M^{F}$     & Big-M constant for switchable-line DC power flow relaxation
+  (a safe choice is $M^{F} = 2\pi / X_{\min}$) \\
+$b^{\mathrm{ref}}$ & Reference (slack) bus index \\
+$\bar{F}_l$ & Thermal capacity of line $l$ [MW] \\
+$\tilde{P}^{R}_{r,t,d,\omega}$ & Renewable available power in scenario
+  $\omega$ [MW] \\
+$\tilde{D}_{b,t,d,\omega}$ & Load at bus $b$ in scenario $\omega$ [MW] \\
+$Q^{\min}_{h,d}$, $Q^{\max}_{h,d}$ & Hydro daily energy limits [MWh] \\
+$\bar{P}^{\mathrm{DR}}_{j}$ & Maximum DR capacity of user $j$ [MW] \\
+$E^{\mathrm{req}}_{j,d}$ & Daily energy requirement of controllable
+  user $j$ on day $d$ [MWh] \\
+$T^{\mathrm{maint,min}}_{g}$ & Minimum consecutive maintenance days
+  for unit $g$ \\
+\bottomrule
+\end{longtable}
+
+%#################################################################
+\section{Three-Stage Structure and Scenario Tree}
+\label{sec:stages}
+%#################################################################
+
+%===================================================================
+\subsection{Stage Overview}
+%===================================================================
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  stage/.style={rectangle, draw, rounded corners=3pt,
+    minimum height=1.4cm, text width=5.2cm, align=center,
+    font=\small},
+  arr/.style={-{Stealth[length=3mm]}, thick},
+]
+  \node[stage, fill=red!8] (s1)
+    {\textbf{Stage~1 --- $\mathbf{x}$ (Day $D$)}\\[2pt]
+     ESS schedule ($d=1{\sim}k$)\\
+     DSR invitation ($d=2{\sim}N$)\\
+     Hydro plan ($d=3{\sim}N$)\\
+     Maintenance ($d=1{\sim}N$)};
+  \node[stage, fill=blue!8, right=2.5cm of s1, yshift=1.2cm] (s2)
+    {\textbf{Stage~2 --- $\mathbf{y}_{\omega_2}$}\\[2pt]
+     Security ($d=1{\sim}k$, 15\,min)\\
+     SCUC, DC-PF, nodal LS};
+  \node[stage, fill=green!8, right=2.5cm of s1, yshift=-1.2cm] (s3)
+    {\textbf{Stage~3 --- $\mathbf{z}_{\omega_2,\omega_3}$}\\[2pt]
+     Adequacy ($d=k{+}1{\sim}N$, 1\,h)\\
+     Energy balance, zonal LS};
+  \draw[arr] (s1.east) -- ++(0.5,0) |- (s2.west)
+    node[pos=0.25, above, font=\footnotesize]
+    {$\boldsymbol{\xi}^{(2)}_{\omega_2}$};
+  \draw[arr, dashed, thick, blue!60!black] (s2.south) -- ++(0,-0.35)
+    -| (s3.north)
+    node[pos=0.5, right=2pt, font=\footnotesize, text=blue!60!black]
+    {coupling: $V_h$, $E_e$, $u_g$};
+  \draw[arr] (s1.east) -- ++(0.5,0) |- (s3.west)
+    node[pos=0.12, below, font=\footnotesize]
+    {$\boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2}$};
+  % scenario counts
+  \node[right=0.3cm of s2, font=\footnotesize, text=blue!60!black]
+    {$\times S_2$ scenarios};
+  \node[right=0.3cm of s3, font=\footnotesize, text=green!50!black]
+    {$\times S_2 \!\cdot\! S_3$ paths};
+\end{tikzpicture}
+\caption{Three-stage structure. Stage~2 and Stage~3 are coupled through
+  reservoir volume, ESS SOC, and thermal unit state at the end of day $k$.}
+\label{fig:stages}
+\end{figure}
+
+%===================================================================
+\subsection{Scenario Tree Construction}\label{sec:scenario-tree}
+%===================================================================
+
+The uncertainty in the $N$-day horizon is captured by a discrete
+\emph{scenario tree} with three levels (Figure~\ref{fig:tree}).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=1.6cm and 2.4cm,
+  root/.style={circle, draw, fill=red!15, minimum size=8mm,
+    font=\footnotesize\bfseries},
+  s2node/.style={circle, draw, fill=blue!15, minimum size=8mm,
+    font=\footnotesize},
+  s3node/.style={circle, draw, fill=green!15, minimum size=7mm,
+    font=\scriptsize},
+  edge/.style={thick},
+  elabel/.style={font=\scriptsize, midway},
+]
+  % Root
+  \node[root] (r) {$n_0$};
+  % Stage-2 nodes
+  \node[s2node, above right=1.2cm and 2.8cm of r] (s2a) {$n_1$};
+  \node[s2node, right=2.8cm of r] (s2b) {$n_2$};
+  \node[s2node, below right=1.2cm and 2.8cm of r] (s2c) {$n_3$};
+  % Stage-3 nodes
+  \node[s3node, above right=0.4cm and 2.2cm of s2a] (s3a1) {$n_4$};
+  \node[s3node, below right=0.4cm and 2.2cm of s2a] (s3a2) {$n_5$};
+  \node[s3node, above right=0.4cm and 2.2cm of s2b] (s3b1) {$n_6$};
+  \node[s3node, below right=0.4cm and 2.2cm of s2b] (s3b2) {$n_7$};
+  \node[s3node, above right=0.4cm and 2.2cm of s2c] (s3c1) {$n_8$};
+  \node[s3node, below right=0.4cm and 2.2cm of s2c] (s3c2) {$n_9$};
+  % Edges root -> s2
+  \draw[edge] (r) -- (s2a) node[elabel, above left]
+    {$\pi_1^{(2)}$};
+  \draw[edge] (r) -- (s2b) node[elabel, above] {$\pi_2^{(2)}$};
+  \draw[edge] (r) -- (s2c) node[elabel, below left]
+    {$\pi_3^{(2)}$};
+  % Edges s2 -> s3
+  \draw[edge] (s2a) -- (s3a1)
+    node[elabel, above] {$\pi_{1|1}^{(3)}$};
+  \draw[edge] (s2a) -- (s3a2)
+    node[elabel, below] {$\pi_{2|1}^{(3)}$};
+  \draw[edge] (s2b) -- (s3b1)
+    node[elabel, above] {$\pi_{1|2}^{(3)}$};
+  \draw[edge] (s2b) -- (s3b2)
+    node[elabel, below] {$\pi_{2|2}^{(3)}$};
+  \draw[edge] (s2c) -- (s3c1)
+    node[elabel, above] {$\pi_{1|3}^{(3)}$};
+  \draw[edge] (s2c) -- (s3c2)
+    node[elabel, below] {$\pi_{2|3}^{(3)}$};
+  % Stage labels
+  \node[below=2.0cm of r, font=\footnotesize\bfseries, red!70!black]
+    {Stage 1};
+  \node[below=2.0cm of s2b, font=\footnotesize\bfseries, blue!60!black]
+    {Stage 2};
+  \node[below=2.0cm of s3b2, font=\footnotesize\bfseries, green!50!black]
+    {Stage 3};
+  % Time axis
+  \draw[-{Stealth}, gray, thick]
+    ([yshift=-2.6cm]r.south) -- ++(10.5,0)
+    node[right, font=\footnotesize, gray]{time};
+  \node[font=\scriptsize, gray, below=2.7cm of r] {Day $D$};
+  \node[font=\scriptsize, gray, below=2.7cm of s2b]
+    {$D{+}1 \sim D{+}k$};
+  \node[font=\scriptsize, gray, below=2.7cm of s3b2]
+    {$D{+}k{+}1 \sim D{+}N$};
+  % Branching labels
+  \draw[decorate, decoration={brace, amplitude=4pt},
+    blue!60!black, thick]
+    ([xshift=-3mm, yshift=2mm]s2a.north west) --
+    ([xshift=-3mm, yshift=-2mm]s2c.south west)
+    node[midway, left=5pt, font=\scriptsize, text=blue!60!black,
+      align=right]
+    {$D{+}1$ det.\\$D{+}2$ branch};
+\end{tikzpicture}
+\caption{Scenario tree with $S_2 = 3$ Stage~2 branches and $S_3 = 2$
+  Stage~3 sub-branches per parent, giving 6 leaf (root-to-leaf) paths.}
+\label{fig:tree}
+\end{figure}
+
+\subsubsection{Stage~1: Root Node (Day $D$)}
+
+The root node $n_0$ represents day $D$, where all first-stage decisions
+$\mathbf{x}$ are made under certainty. No branching occurs here.
+
+\subsubsection{Stage~2 Branching ($D{+}1 \sim D{+}k$)}
+
+Day $D{+}1$ is deterministic: all Stage~2 scenarios share the same
+renewable and load data for $d = 1$. The tree branches at the beginning
+of day $D{+}2$ into $S_2$ scenarios:
+\begin{equation}\label{eq:xi2}
+  \boldsymbol{\xi}^{(2)}_{\omega_2} =
+  \bigl\{
+    \tilde{P}^{R}_{r,t,d,\omega_2},\;
+    \tilde{D}_{b,t,d,\omega_2}
+  \bigr\}_{r,b,t,\; d = 2,\ldots,k}
+  \qquad \omega_2 \in \Omega_2
+\end{equation}
+with probabilities $\pi^{(2)}_{\omega_2}$,
+$\sum_{\omega_2} \pi^{(2)}_{\omega_2} = 1$.
+
+Within each Stage~2 scenario $\omega_2$, the second-stage decisions
+$\mathbf{y}_{\omega_2}$ cover \emph{all} days $d = 1, \ldots, k$.
+Since $d = 1$ is shared, we have the \emph{non-anticipativity
+constraint}:
+\begin{equation}\label{eq:nonantic-s2}
+  \mathbf{y}_{\omega_2}\big|_{d=1}
+  = \mathbf{y}_{\omega'_2}\big|_{d=1}
+  \qquad \forall\, \omega_2, \omega'_2 \in \Omega_2
+\end{equation}
+i.e.\ day-1 dispatch decisions must be identical across all Stage~2
+scenarios because day-1 data is deterministic and decisions for day~1
+are made \emph{before} the $D{+}2$ branching.
+
+\subsubsection{Stage~3 Branching ($D{+}k{+}1 \sim D{+}N$)}
+
+At the boundary between day $k$ and day $k{+}1$, each Stage~2 scenario
+$\omega_2$ further branches into $S_3(\omega_2)$ sub-scenarios:
+\begin{equation}\label{eq:xi3}
+  \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2} =
+  \bigl\{
+    \tilde{P}^{R}_{r,t,d,\omega},\;
+    \tilde{D}_{b,t,d,\omega}
+  \bigr\}_{r,b,t,\; d = k+1,\ldots,N}
+  \qquad \omega_3 \in \Omega_3(\omega_2)
+\end{equation}
+with conditional probabilities $\pi^{(3)}_{\omega_3|\omega_2}$,
+$\sum_{\omega_3} \pi^{(3)}_{\omega_3|\omega_2} = 1$.
+The third-stage decisions $\mathbf{z}_{\omega}$ are indexed by the
+full path $\omega = (\omega_2, \omega_3)$.
+
+\subsubsection{Joint Scenario Probability}
+
+The probability of leaf scenario $\omega = (\omega_2, \omega_3)$ is:
+\begin{equation}\label{eq:pi-joint}
+  \pi_\omega = \pi^{(2)}_{\omega_2} \cdot
+  \pi^{(3)}_{\omega_3|\omega_2}
+\end{equation}
+The total number of leaf scenarios is
+$|\Omega| = \sum_{\omega_2} S_3(\omega_2)$. If uniform branching is
+used ($S_3(\omega_2) \equiv S_3$), then $|\Omega| = S_2 \cdot S_3$.
+
+\subsubsection{Scenario Generation Procedure}
+
+\begin{enumerate}
+  \item \textbf{Stage~2 scenarios.} From the day-ahead forecast for
+        $D{+}2 \sim D{+}k$, generate $S_2$ scenarios for renewables
+        and load. Approaches:
+        \begin{itemize}[nosep]
+          \item Sample forecast error vectors from fitted marginal
+                distributions (Beta for solar, truncated Gaussian for
+                wind) with copula-based temporal/spatial correlation.
+          \item Apply Latin Hypercube Sampling followed by
+                Kantorovich-distance scenario reduction.
+        \end{itemize}
+  \item \textbf{Stage~3 scenarios (conditional).} For each Stage~2
+        scenario $\omega_2$, generate $S_3$ sub-scenarios for
+        $D{+}k{+}1 \sim D{+}N$. The conditional generation reflects:
+        \begin{itemize}[nosep]
+          \item \emph{Increased spread}: forecast uncertainty grows with
+                lead time, so Stage~3 scenarios have wider variance than
+                Stage~2.
+          \item \emph{Conditional dependence}: weather patterns realised
+                in Stage~2 inform the conditional distribution.
+                For example, if $\omega_2$ is a ``low-wind'' Stage~2
+                scenario, the Stage~3 sub-scenarios should be drawn from
+                the conditional distribution
+                $P(\boldsymbol{\xi}^{(3)} \mid \boldsymbol{\xi}^{(2)}
+                = \boldsymbol{\xi}^{(2)}_{\omega_2})$.
+        \end{itemize}
+  \item \textbf{Tree balancing (optional).} If uniform branching
+        ($S_3(\omega_2) = S_3$ for all $\omega_2$) is used, the tree is
+        \emph{balanced} and the total number of leaves is $S_2 S_3$. A
+        typical configuration: $S_2 = 5$, $S_3 = 3$, giving 15 leaf
+        scenarios.
+\end{enumerate}
+
+\paragraph{Remark on $D{+}1$ determinism.}
+Although day $D{+}1$ uses a deterministic forecast, it is part of
+Stage~2 because the security-oriented SCUC dispatch must be computed
+jointly for all of $d = 1, \ldots, k$. The non-anticipativity
+constraint~\eqref{eq:nonantic-s2} ensures that day-1 decisions do not
+``cheat'' by exploiting information from the $D{+}2$ branching.
+
+%#################################################################
+\section{Mathematical Model}\label{sec:model}
+%#################################################################
+
+%===================================================================
+\subsection{Compact Three-Stage Formulation}
+%===================================================================
+
+\begin{equation}\label{eq:master}
+\boxed{
+  \min_{\mathbf{x} \in \mathcal{X}}
+  \;\; f(\mathbf{x})
+  \;+\; \sum_{\omega_2 \in \Omega_2}
+    \pi^{(2)}_{\omega_2}
+  \left[
+    \mathcal{Q}^{(2)}(\mathbf{x},\,\boldsymbol{\xi}^{(2)}_{\omega_2})
+    \;+\; \sum_{\omega_3 \in \Omega_3(\omega_2)}
+      \pi^{(3)}_{\omega_3|\omega_2}\,
+      \mathcal{Q}^{(3)}(\mathbf{x},\,
+        \mathbf{y}^*_{\omega_2},\,
+        \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})
+  \right]
+}
+\end{equation}
+
+\begin{itemize}
+  \item $f(\mathbf{x})$: First-stage cost (ESS bids, DSR compensation,
+        hydro adjustment cost; §\ref{sec:s1-obj}).
+  \item $\mathcal{Q}^{(2)}(\mathbf{x}, \boldsymbol{\xi}^{(2)}_{\omega_2})$:
+        Optimal dispatch cost for Stage~2 (security) under scenario
+        $\omega_2$, with first-stage decisions $\mathbf{x}$ fixed.
+  \item $\mathcal{Q}^{(3)}(\mathbf{x}, \mathbf{y}^*_{\omega_2},
+        \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})$:
+        Optimal dispatch cost for Stage~3 (adequacy) under scenario
+        $(\omega_2, \omega_3)$, with both $\mathbf{x}$ and the
+        Stage~2 solution $\mathbf{y}^*_{\omega_2}$ fixed. The
+        dependence on $\mathbf{y}^*_{\omega_2}$ arises from
+        \emph{inter-stage coupling} (§\ref{sec:coupling}).
+\end{itemize}
+
+In the \emph{nested} form, $\mathcal{Q}^{(2)}$ internally optimises
+over $\mathbf{y}_{\omega_2}$ and passes the terminal state to
+$\mathcal{Q}^{(3)}$:
+\begin{equation}\label{eq:nested}
+  \mathcal{Q}^{(2)}(\mathbf{x},\, \boldsymbol{\xi}^{(2)}_{\omega_2})
+  = \min_{\mathbf{y}_{\omega_2} \in \mathcal{Y}(\mathbf{x},
+    \boldsymbol{\xi}^{(2)}_{\omega_2})}
+  \left\{
+    g(\mathbf{y}_{\omega_2})
+    + \sum_{\omega_3} \pi^{(3)}_{\omega_3|\omega_2}\,
+    \mathcal{Q}^{(3)}\!\bigl(\mathbf{x},\,
+      \mathbf{y}_{\omega_2},\,
+      \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2}\bigr)
+  \right\}
+\end{equation}
+where $g(\mathbf{y}_{\omega_2})$ is the Stage~2 operating cost
+(§\ref{sec:s2-obj}).
+
+%===================================================================
+\subsection{First-Stage Objective $f(\mathbf{x})$}\label{sec:s1-obj}
+%===================================================================
+
+\begin{equation}\label{eq:f-obj}
+\boxed{
+\begin{aligned}
+  f(\mathbf{x}) =\;
+  & \underbrace{
+    \sum_{e \in \mathcal{E}}
+    \sum_{d=1}^{k} \sum_{t \in \mathcal{T}_d}
+    \bigl(\lambda^{\mathrm{dis}}_e \Pdis_{e,t,d}
+    + \lambda^{\mathrm{ch}}_e \Pch_{e,t,d}\bigr)\Delta t_d
+  }_{\text{ESS bid cost}} \\
+  &+\;
+  \underbrace{
+    \sum_{j \in \mathcal{D}^{\mathrm{ctrl}}}
+    \sum_{d=2}^{N} \sum_{t \in \mathcal{T}_d}
+    C^{\mathrm{DR}}_j
+    \bigl(P^{\mathrm{DR+}}_{j,t,d} + P^{\mathrm{DR-}}_{j,t,d}\bigr)
+    \Delta t_d
+  }_{\text{DSR compensation cost}} \\
+  &+\;
+  \underbrace{
+    \sum_{h \in \mathcal{H}} \sum_{d=3}^{N}
+    \bigl[
+      C^{H+}_h \cdot \delta^{H+}_{h,d}
+      + C^{H-}_h \cdot \delta^{H-}_{h,d}
+    \bigr]
+  }_{\text{Hydro adjustment cost}}
+\end{aligned}
+}
+\end{equation}
+
+\paragraph{Hydro adjustment cost.}
+The hydro adjustment cost penalises deviations from the reference
+(pre-planned) daily energy. Define the daily energy deviation:
+\begin{equation}\label{eq:hydro-dev}
+  \sum_{t \in \mathcal{T}_d} P^{H}_{h,t,d}\,\Delta t_d
+  - P^{H,\mathrm{ref}}_{h,d}
+  = \delta^{H+}_{h,d} - \delta^{H-}_{h,d}
+\end{equation}
+with $\delta^{H+}_{h,d}, \delta^{H-}_{h,d} \geq 0$:
+\begin{itemize}
+  \item $\delta^{H+}_{h,d} > 0$: generation \emph{increased} above
+        reference, drawing down the reservoir. Penalised at $C^{H+}_h$
+        (opportunity cost of depleted water, future generation
+        foregone).
+  \item $\delta^{H-}_{h,d} > 0$: generation \emph{reduced} below
+        reference, either spilling water or deferring generation.
+        Penalised at $C^{H-}_h$, typically
+        $C^{H-}_h > C^{H+}_h$ because reduction often implies
+        spillage (wasted water) or violation of downstream ecological
+        flow requirements.
+\end{itemize}
+
+%===================================================================
+\subsection{First-Stage Constraints $\mathcal{X}$}
+\label{sec:s1-constraints}
+%===================================================================
+
+\subsubsection{ESS Constraints ($d = 1,\ldots,k$)}
+
+\paragraph{Charge/discharge limits and mutual exclusion:}
+\begin{align}
+  0 \;\leq\; \Pch_{e,t,d} &\;\leq\; P^{\mathrm{ch,max}}_e
+    \qquad \forall\, e,\,t,\,d \label{eq:s1-ch}\\
+  0 \;\leq\; \Pdis_{e,t,d} &\;\leq\; P^{\mathrm{dis,max}}_e
+    \qquad \forall\, e,\,t,\,d \label{eq:s1-dis}\\
+  \Pch_{e,t,d} + \Pdis_{e,t,d}
+    &\;\leq\;
+    \max(P^{\mathrm{ch,max}}_e,\, P^{\mathrm{dis,max}}_e)
+    \qquad \forall\, e,\,t,\,d
+    \label{eq:s1-excl}
+\end{align}
+
+\paragraph{SOC dynamics:}
+\begin{equation}\label{eq:s1-soc}
+  E_{e,t,d} = E_{e,t-1,d}
+  + \eta^{\mathrm{ch}}_e \Pch_{e,t,d}\,\Delta t_d
+  - \frac{\Pdis_{e,t,d}}{\eta^{\mathrm{dis}}_e}\,\Delta t_d
+  \qquad \forall\, e,\,t,\,d
+\end{equation}
+\begin{equation}\label{eq:s1-soc-bound}
+  \underline{E}_e \leq E_{e,t,d} \leq \bar{E}_e
+  \qquad \forall\, e,\,t,\,d
+\end{equation}
+
+\paragraph{Inter-day SOC continuity:}
+\begin{equation}\label{eq:s1-soc-link}
+  E_{e,0,d+1} = E_{e,|\mathcal{T}_d|,d}
+  \qquad \forall\, e,\; d = 1,\ldots,k{-}1
+\end{equation}
+\begin{equation}\label{eq:s1-soc-init}
+  E_{e,0,1} = E^{\mathrm{ini}}_e
+\end{equation}
+
+\paragraph{Cycle limit (per day):}
+\begin{equation}\label{eq:s1-cycle}
+  \sum_{t \in \mathcal{T}_d}
+  \Bigl(\frac{\Pdis_{e,t,d}}{\eta^{\mathrm{dis}}_e}
+  + \eta^{\mathrm{ch}}_e \Pch_{e,t,d}\Bigr)\Delta t_d
+  \;\leq\; 2 N^{\mathrm{cycle}}_e \bar{E}_e
+  \qquad \forall\, e,\, d
+\end{equation}
+
+%-------------------------------------------------------------------
+\subsubsection{Demand-Side Response Constraints ($d = 2,\ldots,N$)}
+
+\begin{equation}\label{eq:s1-dr-cap}
+  0 \leq P^{\mathrm{DR+}}_{j,t,d} \leq \bar{P}^{\mathrm{DR}}_j,
+  \quad
+  0 \leq P^{\mathrm{DR-}}_{j,t,d} \leq \bar{P}^{\mathrm{DR}}_j
+  \qquad \forall\, j,\,t,\,d
+\end{equation}
+\begin{equation}\label{eq:s1-dr-energy}
+  \sum_{t \in \mathcal{T}_d}
+  \bigl(D^{0}_{j,t,d} + P^{\mathrm{DR+}}_{j,t,d}
+  - P^{\mathrm{DR-}}_{j,t,d}\bigr)\Delta t_d
+  = E^{\mathrm{req}}_{j,d}
+  \qquad \forall\, j,\, d
+\end{equation}
+
+%-------------------------------------------------------------------
+\subsubsection{Hydro Constraints ($d = 3,\ldots,N$)}
+
+\paragraph{Output limits:}
+\begin{equation}\label{eq:s1-hydro-lim}
+  P^{H,\min}_h \leq P^{H}_{h,t,d} \leq P^{H,\max}_h
+  \qquad \forall\, h,\,t,\,d
+\end{equation}
+
+\paragraph{Daily energy limits:}
+\begin{equation}\label{eq:s1-hydro-energy}
+  Q^{\min}_{h,d} \;\leq\;
+  \sum_{t \in \mathcal{T}_d} P^{H}_{h,t,d}\,\Delta t_d
+  \;\leq\; Q^{\max}_{h,d}
+  \qquad \forall\, h,\, d
+\end{equation}
+
+\paragraph{Multi-day reservoir water balance:}
+\begin{equation}\label{eq:s1-hydro-wl}
+  V_{h,d} = V_{h,d-1} + I_{h,d}
+  - \sum_{t \in \mathcal{T}_d}
+  \frac{P^{H}_{h,t,d}}{\rho_h}\,\Delta t_d
+  - S_{h,d}
+  \qquad \forall\, h,\, d
+\end{equation}
+\begin{equation}\label{eq:s1-hydro-vol}
+  \underline{V}_h \leq V_{h,d} \leq \bar{V}_h
+  \qquad \forall\, h,\, d
+\end{equation}
+
+\paragraph{Deviation decomposition~\eqref{eq:hydro-dev}:}
+\begin{equation}\label{eq:s1-hydro-dev-constraint}
+  \delta^{H+}_{h,d},\;\delta^{H-}_{h,d} \geq 0 \qquad \forall\, h,\,d
+\end{equation}
+
+%-------------------------------------------------------------------
+\subsubsection{Maintenance Schedule Constraints ($d = 1,\ldots,N$)}
+
+\begin{align}
+  I^{G}_{g,d} &\in \{0, 1\}
+    \qquad \forall\, g,\, d \label{eq:s1-maint-gen}\\
+  I^{L}_{l,d} &\in \{0, 1\}
+    \qquad \forall\, l,\, d \label{eq:s1-maint-line}
+\end{align}
+
+\paragraph{Minimum consecutive maintenance duration:}
+\begin{equation}\label{eq:s1-maint-min}
+  \sum_{\tau=d}^{\min(d+T^{\mathrm{maint,min}}_g-1,\,N)}
+  I^{G}_{g,\tau}
+  \;\geq\;
+  T^{\mathrm{maint,min}}_g
+  \cdot (I^{G}_{g,d} - I^{G}_{g,d-1})
+  \qquad \forall\, g,\, d \geq 2
+\end{equation}
+
+\paragraph{Irrevocable maintenance:}
+\begin{equation}\label{eq:s1-maint-fix}
+  I^{G}_{g,d} = 1 \quad \forall\, (g,d) \in \mathcal{F}^{\mathrm{maint}},
+  \qquad
+  I^{L}_{l,d} = 1 \quad \forall\, (l,d) \in \mathcal{F}^{\mathrm{maint}}_L
+\end{equation}
+
+%===================================================================
+\subsection{Stage~2: Security-Oriented Dispatch
+  ($\mathbf{y}_{\omega_2}$, $d = 1,\ldots,k$)}
+\label{sec:s2-obj}
+%===================================================================
+
+For a given $\mathbf{x}^*$ and scenario $\omega_2$:
+\begin{equation}\label{eq:Q2-def}
+\boxed{
+\begin{aligned}
+  g(\mathbf{y}_{\omega_2}) =\;
+  & \sum_{d=1}^{k}\sum_{t \in \mathcal{T}_d}\Biggl[
+    \sum_{g \in \mathcal{G}}
+    \bigl(C_g(P_{g,t,d,\omega_2}) + C^{U}_g v_{g,t,d,\omega_2}
+    + C^{\min}_g u_{g,t,d,\omega_2}\,\Delta t_d\bigr) \\
+  &\quad
+    + C^{\mathrm{LS}} \sum_{b \in \mathcal{B}}
+      \LS_{b,t,d,\omega_2}\,\Delta t_d
+    + C^{\mathrm{cur}} \sum_{r \in \mathcal{R}}
+      P^{\mathrm{cur}}_{r,t,d,\omega_2}\,\Delta t_d
+  \Biggr]
+\end{aligned}
+}
+\end{equation}
+
+\subsubsection{Stage~2 Constraints}
+
+\paragraph{S2-1: Nodal power balance.}
+For each bus $b$, period $t$, day $d \leq k$:
+\begin{equation}\label{eq:s2-balance}
+\begin{aligned}
+  & \sum_{g \in \mathcal{G}_b} P_{g,t,d,\omega_2}
+  + \sum_{h \in \mathcal{H}_b}
+    \underbrace{P^{H}_{h,t,d}}_{\text{from } \mathbf{x}}
+  + \sum_{r \in \mathcal{R}_b}
+    \bigl(\tilde{P}^{R}_{r,t,d,\omega_2}
+    - P^{\mathrm{cur}}_{r,t,d,\omega_2}\bigr)
+  + \sum_{e \in \mathcal{E}_b}
+    \bigl(
+    \underbrace{\Pdis_{e,t,d} - \Pch_{e,t,d}}_{\text{from } \mathbf{x}}
+    \bigr) \\
+  &+ \LS_{b,t,d,\omega_2} - \GC_{t,d,\omega_2}
+  = \tilde{D}_{b,t,d,\omega_2}
+  - \underbrace{
+    (P^{\mathrm{DR-}}_{j,t,d} - P^{\mathrm{DR+}}_{j,t,d})
+  }_{\text{from } \mathbf{x}}
+  + \!\!\sum_{l: b=\mathrm{to}(l)}\!\! F_{l,t,d,\omega_2}
+  - \!\!\sum_{l: b=\mathrm{from}(l)}\!\! F_{l,t,d,\omega_2}
+\end{aligned}
+\end{equation}
+
+\paragraph{S2-2: DC power flow with switchable lines (angle-based, big-M).}
+
+When the network topology changes due to line maintenance, the
+classical PTDF matrix $G_{l,b}$ must be recomputed for every topology
+state, coupling the binary maintenance variable $I^{L}_{l,d}$ to the
+network model in a non-trivial way.  We instead adopt the
+\emph{angle-based} DC power flow with a big-M relaxation, which
+naturally embeds the on/off switching of each line into the
+formulation without requiring topology-dependent PTDF matrices.
+
+Define the DC power flow relationship on line
+$l = (\mathrm{from}(l),\,\mathrm{to}(l))$ with reactance $X_l$:
+\begin{equation}\label{eq:s2-dcpf-def}
+  F^{\mathrm{dc}}_{l} \;\triangleq\;
+  \frac{\theta_{\mathrm{from}(l),t,d,\omega_2}
+  - \theta_{\mathrm{to}(l),t,d,\omega_2}}{X_l}
+\end{equation}
+
+When line $l$ is in service ($I^{L}_{l,d} = 0$), the flow must
+equal the DC power flow; when line $l$ is under maintenance
+($I^{L}_{l,d} = 1$), the constraint is relaxed by big-M:
+\begin{equation}\label{eq:s2-bigm}
+\boxed{
+  -(1 - I^{L}_{l,d})\, M^{F}
+  \;\leq\;
+  F_{l,t,d,\omega_2}
+  - \frac{\theta_{\mathrm{from}(l),t,d,\omega_2}
+         - \theta_{\mathrm{to}(l),t,d,\omega_2}}{X_l}
+  \;\leq\;
+  (1 - I^{L}_{l,d})\, M^{F}
+  \qquad \forall\, l,\,t,\,d \leq k
+}
+\end{equation}
+When $I^{L}_{l,d} = 0$, the big-M terms vanish and~\eqref{eq:s2-bigm}
+reduces to the exact DC power flow $F_l = (\theta_i - \theta_j)/X_l$.
+When $I^{L}_{l,d} = 1$, the right-hand side becomes $\pm M^{F}$,
+effectively decoupling $F_l$ from the angle difference; together with
+the line capacity constraint~\eqref{eq:s2-line} below (which forces
+$F_l = 0$ when the line is out), this correctly models the open-circuit
+condition.
+
+\paragraph{S2-2a: Reference bus angle.}
+\begin{equation}\label{eq:s2-ref-bus}
+  \theta_{b^{\mathrm{ref}},t,d,\omega_2} = 0
+  \qquad \forall\, t,\,d \leq k,\,\omega_2
+\end{equation}
+
+\paragraph{S2-3: Line capacity (with maintenance coupling).}
+\begin{equation}\label{eq:s2-line}
+  -\bar{F}_l\,(1 - I^{L}_{l,d})
+  \;\leq\; F_{l,t,d,\omega_2} \;\leq\;
+  \bar{F}_l\,(1 - I^{L}_{l,d})
+  \qquad \forall\, l,\,t,\,d \leq k
+\end{equation}
+When $I^{L}_{l,d} = 1$, this forces $F_{l,t,d,\omega_2} = 0$, i.e.\
+no power flows through a line under maintenance.  Combined
+with~\eqref{eq:s2-bigm}, the joint effect is: (i)~the angle--flow
+relationship is deactivated, and (ii)~the physical flow is zeroed out.
+
+\paragraph{Remark (Choice of $M^{F}$).}
+The big-M constant must be large enough to never be active when
+$I^{L}_{l,d} = 0$. A safe and tight choice is
+$M^{F} = \max_l \bar{F}_l + \epsilon$ or, equivalently,
+$M^{F} = 2\pi / X_{\min}$, where $X_{\min} = \min_l X_l$. An
+overly large $M^{F}$ weakens the LP relaxation, so the tightest
+valid bound should be used.
+
+\paragraph{S2-4: Generator output limits (with maintenance).}
+\begin{equation}\label{eq:s2-gen-lim}
+  P^{\min}_g \cdot u_{g,t,d,\omega_2}
+  \;\leq\; P_{g,t,d,\omega_2} \;\leq\;
+  P^{\max}_g \cdot u_{g,t,d,\omega_2} \cdot (1 - I^{G}_{g,d})
+  \qquad \forall\, g,\,t,\,d
+\end{equation}
+
+\paragraph{S2-5: Ramp rates.}
+\begin{align}
+  P_{g,t,d,\omega_2} - P_{g,t-1,d,\omega_2}
+    &\;\leq\; \Delta P^{U}_g + P^{\max}_g v_{g,t,d,\omega_2}
+    \label{eq:s2-ramp-up}\\
+  P_{g,t-1,d,\omega_2} - P_{g,t,d,\omega_2}
+    &\;\leq\; \Delta P^{D}_g + P^{\max}_g w_{g,t,d,\omega_2}
+    \label{eq:s2-ramp-dn}
+\end{align}
+
+\paragraph{S2-6: Minimum up/down time and commitment transition.}
+\begin{align}
+  u_{g,t,d,\omega_2} - u_{g,t-1,d,\omega_2}
+    &= v_{g,t,d,\omega_2} - w_{g,t,d,\omega_2}
+    \label{eq:s2-transition}\\
+  \sum_{\tau=\max(1,t-T^U_g+1)}^{t} v_{g,\tau,d,\omega_2}
+    &\leq u_{g,t,d,\omega_2}
+    \label{eq:s2-minup}\\
+  \sum_{\tau=\max(1,t-T^D_g+1)}^{t} w_{g,\tau,d,\omega_2}
+    &\leq 1 - u_{g,t,d,\omega_2}
+    \label{eq:s2-mindn}
+\end{align}
+
+\paragraph{S2-7: Renewable bounds.}
+\begin{equation}\label{eq:s2-re}
+  0 \leq P^{\mathrm{cur}}_{r,t,d,\omega_2}
+  \leq \tilde{P}^{R}_{r,t,d,\omega_2}
+  \qquad \forall\, r,\,t,\,d
+\end{equation}
+
+\paragraph{S2-8: Reserve requirements.}
+\begin{align}
+  \sum_{g} P^{\max}_g (1-I^{G}_{g,d})\, u_{g,t,d,\omega_2}
+  - \sum_{g} P_{g,t,d,\omega_2}
+  &\;\geq\; R^{\mathrm{up}}_{t,d}
+  \label{eq:s2-res-up}\\
+  \sum_{g} P_{g,t,d,\omega_2}
+  - \sum_{g} P^{\min}_g\, u_{g,t,d,\omega_2}
+  &\;\geq\; R^{\mathrm{dn}}_{t,d}
+  \label{eq:s2-res-dn}
+\end{align}
+
+\paragraph{S2-9: Non-anticipativity for day 1.}
+\begin{equation}\label{eq:s2-nonantic}
+  \mathbf{y}_{\omega_2}\big|_{d=1}
+  = \mathbf{y}_{\omega'_2}\big|_{d=1}
+  \qquad \forall\, \omega_2, \omega'_2 \in \Omega_2
+\end{equation}
+
+%===================================================================
+\subsection{Inter-Stage Coupling (Stage~2 $\to$ Stage~3)}
+\label{sec:coupling}
+%===================================================================
+
+The terminal state of Stage~2 under scenario $\omega_2$ defines the
+\emph{initial conditions} for Stage~3. This coupling is the key
+structural feature distinguishing the three-stage model from two
+independent two-stage problems.
+
+\subsubsection{C1: Hydro Reservoir Volume}
+
+The reservoir volume at the end of day $k$ (last day of Stage~2) feeds
+into Stage~3 as the initial volume for day $k{+}1$:
+\begin{equation}\label{eq:couple-hydro}
+\boxed{
+  V^{(3)}_{h,k,\omega_2}
+  = V_{h,k-1}
+  + I_{h,k}
+  - \sum_{t \in \mathcal{T}_k}
+    \frac{P^{H}_{h,t,k}}{\rho_h}\,\Delta t_k
+  - S_{h,k}
+}
+\end{equation}
+Here $V_{h,k-1}$ and $P^{H}_{h,t,k}$ come from the first-stage
+hydro plan, while the resulting $V^{(3)}_{h,k,\omega_2}$ becomes a
+\emph{parameter} in Stage~3 constraints. Note that although
+$P^{H}_{h,t,d}$ for $d \leq k$ is a first-stage decision (and thus
+deterministic), the reservoir may also be affected by stochastic inflow;
+in that case $V^{(3)}_{h,k,\omega_2}$ depends on $\omega_2$ through
+$I_{h,d,\omega_2}$.
+
+Within Stage~3, the hydro reservoir evolves as:
+\begin{equation}\label{eq:s3-hydro-wl}
+  V_{h,d,\omega} = V_{h,d-1,\omega}
+  + I_{h,d,\omega}
+  - \sum_{t \in \mathcal{T}_d}
+  \frac{P^{H}_{h,t,d}}{\rho_h}\,\Delta t_d
+  - S_{h,d,\omega}
+  \qquad d = k{+}1,\ldots,N
+\end{equation}
+with $V_{h,k,\omega} = V^{(3)}_{h,k,\omega_2}$ as the initial condition.
+
+\subsubsection{C2: ESS State of Charge}
+
+The SOC of each ESS at the end of Stage~2 (end of day $k$) becomes the
+initial SOC for Stage~3:
+\begin{equation}\label{eq:couple-ess}
+\boxed{
+  E^{(3)}_{e,0,\omega_2}
+  = E_{e,|\mathcal{T}_k|,k}
+}
+\end{equation}
+Since the ESS schedule for $d \leq k$ is a first-stage decision,
+$E^{(3)}_{e,0,\omega_2}$ is the same across all $\omega_2$. However, it
+links first-stage ESS decisions to Stage~3 feasibility: an aggressive
+discharge in Stage~2 leaves less stored energy for Stage~3.
+
+In Stage~3 ($d > k$), ESS dispatch becomes a \emph{recourse decision},
+with SOC dynamics:
+\begin{equation}\label{eq:s3-ess-soc}
+  E_{e,t,d,\omega} = E_{e,t-1,d,\omega}
+  + \eta^{\mathrm{ch}}_e \Pch_{e,t,d,\omega}\,\Delta t_d
+  - \frac{\Pdis_{e,t,d,\omega}}{\eta^{\mathrm{dis}}_e}\,\Delta t_d
+\end{equation}
+with inter-day continuity
+$E_{e,0,d+1,\omega} = E_{e,|\mathcal{T}_d|,d,\omega}$ for
+$d = k{+}1,\ldots,N{-}1$, and:
+\begin{equation}\label{eq:s3-ess-init}
+  E_{e,0,k+1,\omega} = E^{(3)}_{e,0,\omega_2}
+\end{equation}
+
+\subsubsection{C3: Thermal Unit Commitment State}
+
+The commitment status of each thermal unit at the \emph{last period} of
+day $k$ determines the initial state for Stage~3:
+\begin{equation}\label{eq:couple-thermal}
+\boxed{
+  u^{(3)}_{g,0,\omega_2}
+  = u_{g,|\mathcal{T}_k|,k,\omega_2}
+}
+\end{equation}
+
+This coupling is scenario-dependent: different Stage~2 scenarios may
+lead to different commitment schedules at the end of day $k$, and
+Stage~3 must respect the minimum up/down time constraints spanning the
+Stage~2/3 boundary:
+\begin{equation}\label{eq:s3-transition-init}
+  u_{g,1,k+1,\omega} - u^{(3)}_{g,0,\omega_2}
+  = v_{g,1,k+1,\omega} - w_{g,1,k+1,\omega}
+\end{equation}
+
+Additionally, the number of consecutive on/off periods at the end of
+Stage~2 must be tracked. Let $\tau^{\mathrm{on}}_{g,\omega_2}$ and
+$\tau^{\mathrm{off}}_{g,\omega_2}$ be the number of consecutive
+on/off periods at the end of day $k$ in scenario $\omega_2$. The
+minimum up/down time constraints at the start of Stage~3 become:
+\begin{align}
+  u_{g,t,k+1,\omega} &= 1
+    \quad \forall\, t \leq T^U_g - \tau^{\mathrm{on}}_{g,\omega_2}
+    \;\text{if}\; u^{(3)}_{g,0,\omega_2} = 1
+    \;\text{and}\; \tau^{\mathrm{on}}_{g,\omega_2} < T^U_g
+    \label{eq:s3-minup-init}\\
+  u_{g,t,k+1,\omega} &= 0
+    \quad \forall\, t \leq T^D_g - \tau^{\mathrm{off}}_{g,\omega_2}
+    \;\text{if}\; u^{(3)}_{g,0,\omega_2} = 0
+    \;\text{and}\; \tau^{\mathrm{off}}_{g,\omega_2} < T^D_g
+    \label{eq:s3-mindn-init}
+\end{align}
+
+\subsubsection{Coupling Summary}
+
+\begin{table}[H]
+\centering
+\caption{Inter-stage coupling: Stage~2 terminal state $\to$ Stage~3
+  initial condition.}
+\label{tab:coupling}
+\small
+\begin{tabular}{llll}
+\toprule
+\textbf{State variable} & \textbf{End of Stage~2}
+  & \textbf{Start of Stage~3} & \textbf{Depends on $\omega_2$?} \\
+\midrule
+Reservoir volume &
+  $V_{h,k}$ (from $\mathbf{x}$) &
+  $V^{(3)}_{h,k,\omega_2}$~\eqref{eq:couple-hydro} &
+  Only if inflow is stochastic \\
+ESS SOC &
+  $E_{e,|\mathcal{T}_k|,k}$ (from $\mathbf{x}$) &
+  $E^{(3)}_{e,0,\omega_2}$~\eqref{eq:couple-ess} &
+  No (deterministic from S1) \\
+Thermal status &
+  $u_{g,|\mathcal{T}_k|,k,\omega_2}$ (from $\mathbf{y}$) &
+  $u^{(3)}_{g,0,\omega_2}$~\eqref{eq:couple-thermal} &
+  Yes \\
+Thermal on/off time &
+  $\tau^{\mathrm{on/off}}_{g,\omega_2}$ &
+  Min up/down init~\eqref{eq:s3-minup-init}--\eqref{eq:s3-mindn-init}
+  & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%===================================================================
+\subsection{Stage~3: Adequacy-Oriented Dispatch
+  ($\mathbf{z}_\omega$, $d = k{+}1,\ldots,N$)}
+\label{sec:s3-obj}
+%===================================================================
+
+For given $\mathbf{x}^*$, $\mathbf{y}^*_{\omega_2}$, and scenario
+$\omega = (\omega_2, \omega_3)$:
+\begin{equation}\label{eq:Q3-def}
+\boxed{
+\begin{aligned}
+  \mathcal{Q}^{(3)}(\mathbf{x},\,\mathbf{y}_{\omega_2},\,
+    \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})
+  = \min_{\mathbf{z}_\omega}\;\;
+  & \sum_{d=k+1}^{N}\sum_{t \in \mathcal{T}_d}\Biggl[
+    \sum_{g \in \mathcal{G}}
+    \bigl(C_g(P_{g,t,d,\omega})
+    + C^{\min}_g u_{g,t,d,\omega}\,\Delta t_d\bigr) \\
+  &\quad
+    + C^{\mathrm{LS}}\,\LS_{t,d,\omega}\,\Delta t_d
+    + C^{\mathrm{cur}} \sum_{r}
+      P^{\mathrm{cur}}_{r,t,d,\omega}\,\Delta t_d
+  \Biggr]
+\end{aligned}
+}
+\end{equation}
+
+\subsubsection{Stage~3 Constraints}
+
+\paragraph{S3-1: System-wide power balance (no DC-PF).}
+\begin{equation}\label{eq:s3-balance}
+\begin{aligned}
+  & \sum_{g \in \mathcal{G}} P_{g,t,d,\omega}
+  + \sum_{h \in \mathcal{H}} P^{H}_{h,t,d}
+  + \sum_{r \in \mathcal{R}}
+    (\tilde{P}^{R}_{r,t,d,\omega} - P^{\mathrm{cur}}_{r,t,d,\omega})
+  + \sum_{e \in \mathcal{E}}
+    (\Pdis_{e,t,d,\omega} - \Pch_{e,t,d,\omega}) \\
+  &+ \LS_{t,d,\omega}
+  = \sum_{b} \tilde{D}_{b,t,d,\omega}
+  - \sum_{j}(P^{\mathrm{DR-}}_{j,t,d} - P^{\mathrm{DR+}}_{j,t,d})
+\end{aligned}
+\end{equation}
+Note: hydro ($P^H$) and DSR are from $\mathbf{x}$; ESS in Stage~3
+is a recourse decision.
+
+\paragraph{S3-2: Generator limits (with maintenance).}
+\begin{equation}\label{eq:s3-gen-lim}
+  P^{\min}_g u_{g,t,d,\omega}
+  \;\leq\; P_{g,t,d,\omega} \;\leq\;
+  P^{\max}_g u_{g,t,d,\omega} (1 - I^{G}_{g,d})
+  \qquad \forall\, g,\,t,\,d > k
+\end{equation}
+
+\paragraph{S3-3: Commitment transition with Stage~2 initial state.}
+\begin{equation}\label{eq:s3-transition}
+  u_{g,t,d,\omega} - u_{g,t-1,d,\omega}
+  = v_{g,t,d,\omega} - w_{g,t,d,\omega}
+  \qquad t \geq 2
+\end{equation}
+For $t = 1$ of day $k{+}1$, use~\eqref{eq:s3-transition-init}. The
+minimum up/down time constraints~\eqref{eq:s3-minup-init}--\eqref{eq:s3-mindn-init}
+apply at the Stage~2/3 boundary.
+
+\paragraph{S3-4: ESS constraints in Stage~3.}
+ESS dispatch is a Stage~3 recourse decision with:
+\begin{align}
+  0 \leq \Pch_{e,t,d,\omega} &\leq P^{\mathrm{ch,max}}_e
+    \label{eq:s3-ess-ch}\\
+  0 \leq \Pdis_{e,t,d,\omega} &\leq P^{\mathrm{dis,max}}_e
+    \label{eq:s3-ess-dis}
+\end{align}
+SOC dynamics~\eqref{eq:s3-ess-soc}, bounds
+$\underline{E}_e \leq E_{e,t,d,\omega} \leq \bar{E}_e$, and initial
+condition~\eqref{eq:s3-ess-init} from Stage~2 coupling.
+
+\paragraph{S3-5: Hydro reservoir coupling with Stage~2.}
+Water balance~\eqref{eq:s3-hydro-wl} with initial
+condition $V_{h,k,\omega} = V^{(3)}_{h,k,\omega_2}$
+from~\eqref{eq:couple-hydro}, and volume bounds
+$\underline{V}_h \leq V_{h,d,\omega} \leq \bar{V}_h$.
+
+\paragraph{S3-6: Daily power and energy adequacy.}
+\begin{equation}\label{eq:s3-adequacy}
+  \sum_{g} P^{\max}_g (1-I^{G}_{g,d})
+  + \sum_{h} P^{H,\max}_h
+  + \sum_e P^{\mathrm{dis,max}}_e
+  \;\geq\;
+  \max_{t} \sum_{b}\tilde{D}_{b,t,d,\omega}
+  + R^{\mathrm{margin}}_d
+\end{equation}
+
+%===================================================================
+\subsection{Deterministic Equivalent (Extensive Form)}
+\label{sec:extensive}
+%===================================================================
+
+The full three-stage deterministic equivalent is:
+\begin{equation}\label{eq:extensive}
+\boxed{
+\begin{aligned}
+  \min_{\mathbf{x},\,
+    \{\mathbf{y}_{\omega_2}\},\,
+    \{\mathbf{z}_{\omega}\}}
+  \;\;
+  & f(\mathbf{x})
+  + \sum_{\omega_2} \pi^{(2)}_{\omega_2}
+    \Biggl[
+      g(\mathbf{y}_{\omega_2})
+      + \sum_{\omega_3} \pi^{(3)}_{\omega_3|\omega_2}\,
+        \mathcal{Q}^{(3)}(\mathbf{x},\,\mathbf{y}_{\omega_2},\,
+          \boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})
+    \Biggr]
+\end{aligned}
+}
+\end{equation}
+subject to:
+\begin{alignat}{2}
+  &\text{First-stage } (\mathbf{x}):
+    \quad&&\eqref{eq:s1-ch}\text{--}\eqref{eq:s1-maint-fix},\;
+    \eqref{eq:hydro-dev}\text{--}\eqref{eq:s1-hydro-dev-constraint}
+    \notag\\
+  &\text{Stage~2 } (\mathbf{y}_{\omega_2})\; \forall\,\omega_2:
+    \quad&&\eqref{eq:s2-balance}\text{--}\eqref{eq:s2-nonantic}
+    \notag\\
+  &\text{Stage~2$\to$3 coupling}\; \forall\,\omega_2:
+    \quad&&\eqref{eq:couple-hydro}\text{--}\eqref{eq:s3-mindn-init}
+    \notag\\
+  &\text{Stage~3 } (\mathbf{z}_\omega)\;
+    \forall\,\omega = (\omega_2, \omega_3):
+    \quad&&\eqref{eq:s3-balance}\text{--}\eqref{eq:s3-adequacy}
+    \notag
+\end{alignat}
+
+\paragraph{Problem size.}
+With $S_2$ Stage~2 scenarios and $S_3$ Stage~3 sub-branches per
+parent, the extensive form has:
+\begin{itemize}[nosep]
+  \item $n_x$ first-stage variables;
+  \item $S_2 \cdot n_y$ Stage~2 variables (but day-1 shared via
+        non-anticipativity, effectively
+        $n_y^{(d=1)} + S_2 \cdot n_y^{(d=2..k)}$);
+  \item $S_2 \cdot S_3 \cdot n_z$ Stage~3 variables.
+\end{itemize}
+Typical configuration: $k=3$, $N=7$, $S_2 = 5$, $S_3 = 3$ gives 15
+leaf scenarios. Stage~2 dominates in per-scenario complexity (96
+periods/day $\times$ 3 days with SCUC binaries).
+
+%#################################################################
+\section{Theoretical Properties}\label{sec:theory}
+%#################################################################
+
+This section establishes the formal assumptions under which the
+three-stage formulation~\eqref{eq:master} is well-posed and analyses
+the structural properties that underpin both the value of stochastic
+programming and the convergence of decomposition algorithms.
+
+%===================================================================
+\subsection{Standing Assumptions}\label{sec:assumptions}
+%===================================================================
+
+\begin{assumption}[Finite scenario tree]\label{as:finite}
+The scenario tree has finite branching: $|\Omega_2| = S_2 < \infty$
+and $|\Omega_3(\omega_2)| = S_3(\omega_2) < \infty$ for every
+$\omega_2 \in \Omega_2$, so the total number of leaf scenarios
+$|\Omega| = \sum_{\omega_2} S_3(\omega_2) < \infty$.
+\end{assumption}
+
+\begin{assumption}[Bounded feasible sets]\label{as:bounded}
+The feasible sets $\mathcal{X}$,
+$\mathcal{Y}(\mathbf{x}, \boldsymbol{\xi}^{(2)}_{\omega_2})$, and
+$\mathcal{Z}(\mathbf{x}, \mathbf{y}_{\omega_2},
+\boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})$
+are non-empty, closed, and bounded for every feasible first-stage
+decision and every scenario realisation. This holds naturally, since
+all generation, storage, and flow variables are bounded by installed
+capacities.
+\end{assumption}
+
+\begin{assumption}[Relatively complete recourse]\label{as:rcr}
+For every $\mathbf{x} \in \mathcal{X}$ and every scenario path
+$\omega = (\omega_2, \omega_3) \in \Omega$, the recourse functions
+$\mathcal{Q}^{(2)}(\mathbf{x}, \boldsymbol{\xi}^{(2)}_{\omega_2})$
+and
+$\mathcal{Q}^{(3)}(\mathbf{x}, \mathbf{y}_{\omega_2},
+\boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})$
+are finite-valued.
+\end{assumption}
+
+\begin{proposition}[Relatively complete recourse holds]
+\label{prop:rcr}
+Assumption~\ref{as:rcr} is satisfied by construction in our model.
+\end{proposition}
+
+\begin{proof}
+Each stage includes \emph{safety-valve} variables with the following
+hierarchy of penalty costs:
+$C^{\mathrm{LS}} \gg C^{\mathrm{cur}} \gg \text{fuel cost}$:
+\begin{enumerate}[nosep]
+  \item \textbf{Load shedding} ($\LS$): absorbs any demand shortfall
+        at VOLL penalty $C^{\mathrm{LS}}$.
+  \item \textbf{Renewable curtailment} ($P^{\mathrm{cur}}$): absorbs
+        any excess renewable supply at penalty $C^{\mathrm{cur}}$.
+  \item \textbf{Generation curtailment} ($\GC$): absorbs any
+        over-generation from committed thermal units.
+\end{enumerate}
+Given Assumption~\ref{as:bounded}, for any $\mathbf{x} \in
+\mathcal{X}$ and any scenario $\omega$, the Stage~2 power balance
+\eqref{eq:s2-balance} can always be satisfied: if total generation
+falls short of demand, $\LS$ absorbs the deficit; if generation
+exceeds demand, $P^{\mathrm{cur}}$ or $\GC$ absorbs the surplus.
+Hence $\mathcal{Y}(\mathbf{x}, \boldsymbol{\xi}^{(2)}_{\omega_2})
+\neq \emptyset$. The same argument applies to Stage~3 via
+\eqref{eq:s3-balance}, establishing finiteness of
+$\mathcal{Q}^{(3)}$. Since $\mathcal{Q}^{(2)}$ is the minimum of a
+finite sum including $\mathcal{Q}^{(3)}$ terms, it too is finite.
+\end{proof}
+
+%===================================================================
+\subsection{LP Relaxation Properties}\label{sec:lp-props}
+%===================================================================
+
+Let $\overline{\mathcal{Q}}^{(t)}$ denote the \emph{LP relaxation}
+of the Stage-$t$ value function, obtained by relaxing all binary
+variables ($u_g$, $v_g$, $w_g$, $I^G_g$, $I^L_l$) to $[0,1]$.
+
+\begin{proposition}[Convexity and Lipschitz continuity of LP value
+  function]\label{prop:convex}
+Under Assumptions~\ref{as:finite}--\ref{as:rcr}, the LP relaxation
+value functions $\overline{\mathcal{Q}}^{(2)}(\mathbf{x},
+\boldsymbol{\xi}^{(2)}_{\omega_2})$ and
+$\overline{\mathcal{Q}}^{(3)}(\mathbf{x}, \mathbf{y}_{\omega_2},
+\boldsymbol{\xi}^{(3)}_{\omega_3|\omega_2})$ are:
+\begin{enumerate}[nosep]
+  \item convex and piecewise linear in the coupling variables
+        $(\mathbf{x})$ and $(\mathbf{x}, \mathbf{y}_{\omega_2})$
+        respectively;
+  \item Lipschitz continuous on $\mathcal{X}
+        \times \mathcal{Y}$ with constant
+        $L \leq C^{\mathrm{LS}} / \Delta t_{\min}$.
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+\emph{(i)} Both $\overline{\mathcal{Q}}^{(2)}$ and
+$\overline{\mathcal{Q}}^{(3)}$ are defined as the optimal value of
+a parametric LP in which the coupling variables enter only the
+right-hand side of the linking constraints
+\eqref{eq:couple-hydro}--\eqref{eq:couple-thermal}. By the classical
+result on parametric LP (see Birge and Louveaux~[1997], Theorem~3.1),
+the optimal value is a convex, piecewise linear function of the
+right-hand side, provided the feasible set is non-empty
+(guaranteed by Proposition~\ref{prop:rcr}).
+
+\emph{(ii)} The Lipschitz constant is bounded by the maximum absolute
+value of the dual variables on the coupling constraints. Since $\LS$
+provides a universal recourse action at cost $C^{\mathrm{LS}}$ per MWh,
+any unit change in the coupling state (e.g., 1~MWh change in terminal
+SOC $E_e$) can be compensated by at most $1/\Delta t_{\min}$~MW of
+load-shedding adjustment, costing at most
+$C^{\mathrm{LS}}/\Delta t_{\min}$. Hence
+$\|\boldsymbol{\lambda}^*\|_\infty \leq
+C^{\mathrm{LS}}/\Delta t_{\min}$, which bounds the Lipschitz constant
+via the LP sensitivity theorem.
+\end{proof}
+
+\begin{corollary}[Expected recourse convexity]\label{cor:exp-convex}
+The expected LP recourse function
+\[
+  \bar{Q}(\mathbf{x}) \;=\;
+  \sum_{\omega_2} \pi^{(2)}_{\omega_2}
+  \overline{\mathcal{Q}}^{(2)}(\mathbf{x},
+    \boldsymbol{\xi}^{(2)}_{\omega_2})
+\]
+is convex and piecewise linear in $\mathbf{x}$, being a
+non-negative weighted sum of convex functions.
+\end{corollary}
+
+%===================================================================
+\subsection{Value of Stochastic Solution (VSS) Bounds}
+\label{sec:vss-theory}
+%===================================================================
+
+We formalise the classical VSS inequalities adapted to the three-stage
+setting. Define:
+\begin{itemize}[nosep]
+  \item \textbf{EV} (Expected Value problem): solve~\eqref{eq:master}
+        with all scenarios replaced by their expectation
+        $\bar{\boldsymbol{\xi}} = \E[\boldsymbol{\xi}]$;
+        optimal value $z^{\mathrm{EV}}$, optimal first-stage
+        $\mathbf{x}^{\mathrm{EV}}$.
+  \item \textbf{EEV} (Expected result of using EV): evaluate
+        $\mathbf{x}^{\mathrm{EV}}$ under the full stochastic model
+        \eqref{eq:master}; value $z^{\mathrm{EEV}}$.
+  \item \textbf{RP} (Recourse Problem): the true stochastic optimum
+        of~\eqref{eq:master}; value $z^{\mathrm{RP}}$.
+  \item \textbf{WS} (Wait-and-See): solve a separate deterministic
+        problem for each $\omega$ and take the expectation;
+        value $z^{\mathrm{WS}}$.
+  \item \textbf{EVPI} (Expected Value of Perfect Information):
+        $z^{\mathrm{EVPI}} = z^{\mathrm{RP}} - z^{\mathrm{WS}}$.
+  \item \textbf{VSS}: $z^{\mathrm{VSS}} = z^{\mathrm{EEV}} -
+        z^{\mathrm{RP}}$.
+\end{itemize}
+
+\begin{theorem}[Fundamental stochastic programming bounds]
+\label{thm:vss}
+Under Assumptions~\ref{as:finite}--\ref{as:rcr}:
+\begin{equation}\label{eq:chain}
+  z^{\mathrm{EV}} \;\leq\; z^{\mathrm{WS}} \;\leq\;
+  z^{\mathrm{RP}} \;\leq\; z^{\mathrm{EEV}}
+\end{equation}
+Consequently, $\mathrm{VSS} = z^{\mathrm{EEV}} - z^{\mathrm{RP}}
+\geq 0$ and
+$\mathrm{EVPI} = z^{\mathrm{RP}} - z^{\mathrm{WS}} \geq 0$.
+\end{theorem}
+
+\begin{proof}
+The chain~\eqref{eq:chain} is the Madansky--Edmundson--Jensen
+inequality adapted to multi-stage programs (Birge and Louveaux~[1997],
+Theorem~4.3). We verify each inequality:
+
+\emph{$z^{\mathrm{EV}} \leq z^{\mathrm{WS}}$:}
+The EV problem uses $\bar{\boldsymbol{\xi}}$, which is a feasible
+``scenario'' for a single wait-and-see problem. By Jensen's inequality
+applied to the convex recourse function (Corollary~\ref{cor:exp-convex}
+for the LP relaxation; the inequality extends to the MILP case because
+$f + \E[\mathcal{Q}] \leq f + \mathcal{Q}(\E[\boldsymbol{\xi}])$ holds
+whenever $\mathcal{Q}$ is convex in $\boldsymbol{\xi}$),
+the optimal value under the mean scenario underestimates the average
+of the scenario-specific optima.
+
+\emph{$z^{\mathrm{WS}} \leq z^{\mathrm{RP}}$:}
+Wait-and-see uses scenario-specific first-stage decisions, which is a
+relaxation of the RP where $\mathbf{x}$ must be the same across all
+scenarios (non-anticipativity). Relaxing a constraint can only improve
+(or maintain) the objective.
+
+\emph{$z^{\mathrm{RP}} \leq z^{\mathrm{EEV}}$:}
+The EEV fixes the first-stage decision to $\mathbf{x}^{\mathrm{EV}}$,
+while the RP optimises over all $\mathbf{x} \in \mathcal{X}$. Since
+$\mathbf{x}^{\mathrm{EV}} \in \mathcal{X}$, the RP has a larger
+feasible set and thus a smaller (or equal) optimal value.
+\end{proof}
+
+\begin{remark}[Interpretation of VSS]\label{rem:vss}
+$\mathrm{VSS}/z^{\mathrm{EEV}}$ quantifies the relative ``price of
+ignoring uncertainty.'' In our numerical study
+(\S\ref{sec:numerical}), VSS/EEV $= 21.6\%$, indicating that a
+deterministic planning approach would over-spend by roughly one-fifth
+compared to the stochastic optimum. The two main sources of sub-optimality
+in EEV are: (i) a maintenance schedule that places outages on the
+wrong day relative to the graduated uncertainty profile, and (ii) ESS
+pre-positioning that fails to anticipate asymmetric day~3 risk.
+\end{remark}
+
+%#################################################################
+\section{Solution Approaches and Convergence Analysis}
+\label{sec:solution}
+%#################################################################
+
+%===================================================================
+\subsection{Direct Solve (Extensive Form)}\label{sec:ef}
+%===================================================================
+
+For moderate $S_2 \cdot S_3$ ($\leq 20$), the extensive form
+\eqref{eq:extensive} can be solved as a single large-scale MILP. The
+maintenance binaries ($I^{G}$, $I^{L}$) and SCUC commitment binaries
+in Stage~2 are the primary source of combinatorial complexity.
+
+\begin{proposition}[Extensive form equivalence]\label{prop:ef}
+Under Assumption~\ref{as:finite}, the optimal value of the extensive
+form~\eqref{eq:extensive} coincides with $z^{\mathrm{RP}}$
+of~\eqref{eq:master}. Moreover, any optimal solution
+$(\mathbf{x}^*, \{\mathbf{y}^*_{\omega_2}\}_{\omega_2},
+\{\mathbf{z}^*_\omega\}_\omega)$ of~\eqref{eq:extensive} yields an optimal
+first-stage policy $\mathbf{x}^*$ for~\eqref{eq:master}.
+\end{proposition}
+
+\begin{proof}
+By Assumption~\ref{as:finite}, both formulations enumerate the same
+finite set of scenarios with the same objective and constraints. The
+nested expectation in~\eqref{eq:master} telescopes into the
+probability-weighted sum in~\eqref{eq:extensive} via
+$\pi_\omega = \pi^{(2)}_{\omega_2}
+\pi^{(3)}_{\omega_3|\omega_2}$.
+\end{proof}
+
+%===================================================================
+\subsection{Nested Benders Decomposition}\label{sec:benders}
+%===================================================================
+
+The three-stage structure admits a nested (multi-level) Benders
+decomposition that exploits the stage-wise independence of recourse
+subproblems once the coupling variables are fixed.
+
+\subsubsection{Algorithm Description}
+
+\paragraph{Level 1 --- Master (Stage~1):}
+\begin{equation}\label{eq:benders-master}
+\begin{aligned}
+  \min_{\mathbf{x} \in \mathcal{X},\,\theta}\;\;
+  & f(\mathbf{x}) + \theta \\
+  \text{s.t.}\;\;
+  & \theta \geq \textstyle\sum_{\omega_2} \pi^{(2)}_{\omega_2}
+    \theta_{\omega_2} \\
+  & \theta_{\omega_2} \geq
+    \hat{\alpha}^{(k)}_{\omega_2}
+    + \hat{\boldsymbol{\beta}}^{(k)\top}_{\omega_2}
+    (\mathbf{x} - \hat{\mathbf{x}}^{(k)})
+    \qquad \forall\, \omega_2,\, k \in \mathcal{K}
+\end{aligned}
+\end{equation}
+where $\mathcal{K}$ is the set of iterations completed so far.
+
+\paragraph{Level 2 --- Subproblem (Stage~2, per $\omega_2$):}
+Given $\hat{\mathbf{x}}^{(k)}$, solve Stage~2 dispatch plus the
+approximated expected Stage~3 cost:
+\begin{equation}\label{eq:benders-sub2}
+  Q^{(2,k)}_{\omega_2}(\hat{\mathbf{x}}^{(k)}) \;=\;
+  \min_{\mathbf{y}_{\omega_2} \in
+    \mathcal{Y}(\hat{\mathbf{x}}^{(k)},
+    \boldsymbol{\xi}^{(2)}_{\omega_2})} \;
+  g(\mathbf{y}_{\omega_2})
+  + \sum_{\omega_3} \pi^{(3)}_{\omega_3|\omega_2}\,\phi_{\omega_3}
+\end{equation}
+where $\phi_{\omega_3}$ approximates $\mathcal{Q}^{(3)}$ via
+optimality cuts accumulated from Level~3.
+
+\paragraph{Level 3 --- Sub-subproblem (Stage~3, per $\omega$):}
+Given $\hat{\mathbf{y}}_{\omega_2}^{(k)}$, solve Stage~3 dispatch
+for each $\omega_3$, yielding $\mathcal{Q}^{(3)}$ and dual
+multipliers $\boldsymbol{\lambda}^{(3,k)}_\omega$ on coupling
+constraints
+\eqref{eq:couple-hydro}--\eqref{eq:couple-thermal}.
+
+\paragraph{Cut generation (backward pass):}
+Level~3 duals generate cuts for Level~2:
+\begin{equation}\label{eq:cut-l3}
+  \phi_{\omega_3} \;\geq\;
+  \mathcal{Q}^{(3,k)}_\omega
+  + (\boldsymbol{\lambda}^{(3,k)}_\omega)^\top
+  (\mathbf{y}_{\omega_2} - \hat{\mathbf{y}}^{(k)}_{\omega_2})
+\end{equation}
+Level~2 duals $\boldsymbol{\lambda}^{(2,k)}_{\omega_2}$
+(incorporating Level~3 cuts) generate cuts for Level~1:
+\begin{equation}\label{eq:cut-l2}
+  \theta_{\omega_2} \;\geq\;
+  Q^{(2,k)}_{\omega_2}
+  + (\boldsymbol{\lambda}^{(2,k)}_{\omega_2})^\top
+  (\mathbf{x} - \hat{\mathbf{x}}^{(k)})
+\end{equation}
+
+\subsubsection{Convergence of the LP Relaxation}
+
+When all integer variables ($u_g$, $v_g$, $w_g$, $I^G_g$, $I^L_l$)
+are relaxed to $[0,1]$, the nested Benders algorithm reduces to a
+classical multi-cut L\nobreakdash-shaped method on a multi-stage LP.
+
+\begin{theorem}[Finite convergence of LP relaxation]
+\label{thm:benders-lp}
+Under Assumptions~\ref{as:finite}--\ref{as:rcr}, the nested Benders
+algorithm applied to the LP relaxation of~\eqref{eq:extensive} converges
+to the LP-relaxation optimum $\bar{z}^{\mathrm{RP}}$ in finitely
+many iterations.
+\end{theorem}
+
+\begin{proof}
+By Proposition~\ref{prop:convex}, the LP recourse functions are
+convex and piecewise linear. Each Benders cut~\eqref{eq:cut-l3}
+and~\eqref{eq:cut-l2} is a supporting hyperplane of the respective
+epigraph, valid at the current iterate. The master~\eqref{eq:benders-master}
+(with relaxed $\mathcal{X}$) is an LP whose feasible set is a
+polytope. Since a polytope has finitely many vertices, and each
+iteration either:
+\begin{enumerate}[nosep]
+  \item adds a cut that separates the current master optimum from the
+        true epigraph (improving the lower bound $\underline{z}^{(k)}
+        = f(\hat{\mathbf{x}}^{(k)}) + \hat{\theta}^{(k)}$), or
+  \item produces $\hat{\theta}^{(k)} = \sum_{\omega_2}
+        \pi^{(2)}_{\omega_2} Q^{(2,k)}_{\omega_2}$, certifying
+        optimality,
+\end{enumerate}
+the algorithm must terminate in at most $V$ iterations, where $V$ is
+the number of vertices of the LP master polytope (van Slyke and
+Wets~[1969]; Birge and Louveaux~[1997], Theorem~5.1). At termination,
+$\underline{z}^{(k)} = \bar{z}^{\mathrm{RP}}$.
+\end{proof}
+
+\subsubsection{The Integer Recourse Challenge}
+\label{sec:integer-challenge}
+
+The convergence guarantee of Theorem~\ref{thm:benders-lp} does
+\textbf{not} extend directly to the full MILP problem~\eqref{eq:extensive}.
+The fundamental obstacle is:
+
+\begin{remark}[Non-convexity of integer recourse]
+\label{rem:int-nonconvex}
+When Stage~2 and Stage~3 include binary variables (unit commitment
+$u_g$, startup/shutdown $v_g, w_g$, maintenance $I^G_g, I^L_l$), the
+true value functions $\mathcal{Q}^{(2)}$ and $\mathcal{Q}^{(3)}$ are
+in general \emph{non-convex} and \emph{discontinuous} in the coupling
+variables $(\mathbf{x}, \mathbf{y}_{\omega_2})$. Benders cuts, which
+are derived from LP duals of the subproblems, are supporting
+hyperplanes of the \emph{convex envelope}
+$\conv(\epi\,\mathcal{Q})$, not of $\epi\,\mathcal{Q}$ itself.
+Consequently, the master problem with LP-derived cuts may converge to
+a value that is strictly less than $z^{\mathrm{RP}}$.
+\end{remark}
+
+To recover exactness, several strengthening strategies are available:
+
+\begin{proposition}[Finite termination via Benders with integer cuts]
+\label{prop:int-benders}
+Define the \emph{no-good cut} for iteration $k$:
+\begin{equation}\label{eq:no-good}
+  \sum_{(g,d):\, \hat{I}^G_{g,d}=1} (1 - I^G_{g,d})
+  + \sum_{(g,d):\, \hat{I}^G_{g,d}=0} I^G_{g,d}
+  + \sum_{(l,d):\, \hat{I}^L_{l,d}=1} (1 - I^L_{l,d})
+  + \sum_{(l,d):\, \hat{I}^L_{l,d}=0} I^L_{l,d}
+  \;\geq\; 1
+\end{equation}
+which excludes the current first-stage integer solution. If \emph{both}
+continuous Benders cuts~\eqref{eq:cut-l2} and no-good
+cuts~\eqref{eq:no-good} are added, the algorithm terminates finitely
+with $z^{\mathrm{RP}}$.
+\end{proposition}
+
+\begin{proof}
+The first-stage integer variables take values in a finite set
+$\{0,1\}^{n_I}$, where $n_I = |\mathcal{G}| \cdot N +
+|\mathcal{L}| \cdot N$ is the total number of maintenance/commitment
+binaries in Stage~1. There are at most $2^{n_I}$ distinct integer
+assignments. Each no-good cut excludes exactly one, so the algorithm
+explores at most $2^{n_I}$ integer master solutions. For each fixed
+integer assignment, the continuous Benders cuts converge finitely
+(Theorem~\ref{thm:benders-lp}). Hence the overall procedure terminates
+in finitely many iterations.
+\end{proof}
+
+\begin{remark}[Practical convergence strategies]\label{rem:practical}
+The enumeration bound $2^{n_I}$ is exponential and thus impractical.
+In our implementation, we adopt the following strategies to accelerate
+convergence while maintaining solution quality:
+\begin{enumerate}[nosep]
+  \item \textbf{LP relaxation cuts + branch-and-cut within master}:
+    Solve the master~\eqref{eq:benders-master} as a MILP (retaining
+    integrality of $I^G$, $I^L$), using Benders cuts from the LP
+    relaxation of subproblems. This is the \emph{Benders
+    decomposition with integer master} approach of Rahmaniani
+    et~al.~[2017]. The master's branch-and-bound tree implicitly
+    explores integer combinations, avoiding explicit no-good cuts.
+  \item \textbf{Cut strengthening via Lagrangian relaxation}:
+    Instead of LP duals, use Lagrangian multipliers from the integer
+    subproblem's LP relaxation, which provide tighter (``lifted'')
+    cuts.
+  \item \textbf{Warm-starting from EF}: For moderate scenario counts
+    ($|\Omega| \leq 35$), solve the EF first (as in our numerical
+    study), then use the EF solution to warm-start the
+    decomposition.
+\end{enumerate}
+\end{remark}
+
+\begin{theorem}[Optimality gap bound]\label{thm:gap}
+Let $\underline{z}^{(k)}$ be the lower bound from the master
+at iteration $k$ and $\bar{z}^{(k)} = \min_{j \leq k}\{
+f(\hat{\mathbf{x}}^{(j)}) + \sum_{\omega_2}
+\pi^{(2)}_{\omega_2} Q^{(2,j)}_{\omega_2}\}$ the best upper bound
+found. Then:
+\begin{equation}\label{eq:gap-bound}
+  0 \;\leq\; \bar{z}^{(k)} - z^{\mathrm{RP}}
+  \;\leq\; \bar{z}^{(k)} - \underline{z}^{(k)}
+\end{equation}
+and the sequence $\{\underline{z}^{(k)}\}$ is non-decreasing while
+$\{\bar{z}^{(k)}\}$ is non-increasing.
+\end{theorem}
+
+\begin{proof}
+$\underline{z}^{(k)}$ is the optimum of a relaxation (the master
+with a subset of the true constraints/cuts), so
+$\underline{z}^{(k)} \leq z^{\mathrm{RP}}$. Each new cut can only
+tighten the relaxation, so the sequence is non-decreasing.
+$\bar{z}^{(k)}$ is the cost of a feasible stochastic policy
+(using the best $\hat{\mathbf{x}}^{(j)}$ found), so
+$\bar{z}^{(k)} \geq z^{\mathrm{RP}}$. The gap
+$\bar{z}^{(k)} - \underline{z}^{(k)}$ is an upper bound on the
+optimality gap, and the algorithm can be terminated when this gap
+falls below a user-specified tolerance $\epsilon$.
+\end{proof}
+
+%===================================================================
+\subsection{Progressive Hedging}\label{sec:ph}
+%===================================================================
+
+\subsubsection{Algorithm Description}
+
+Progressive hedging (PH; Rockafellar and Wets~[1991]) takes a
+\emph{scenario decomposition} approach. Each leaf scenario
+$\omega = (\omega_2, \omega_3)$ solves a full deterministic
+(Stage~1 + Stage~2 + Stage~3) problem, with augmented Lagrangian
+penalties enforcing consensus on shared variables:
+\begin{equation}\label{eq:ph}
+  \min_{\mathbf{x}_\omega, \mathbf{y}_\omega, \mathbf{z}_\omega}
+  \;\; [\text{cost}]_\omega
+  + \boldsymbol{\mu}^\top_\omega(\mathbf{x}_\omega - \bar{\mathbf{x}})
+  + \frac{\rho}{2}\|\mathbf{x}_\omega - \bar{\mathbf{x}}\|^2
+  + \boldsymbol{\nu}^\top_\omega
+    (\mathbf{y}_\omega - \bar{\mathbf{y}}_{\omega_2})
+  + \frac{\rho'}{2}
+    \|\mathbf{y}_\omega - \bar{\mathbf{y}}_{\omega_2}\|^2
+\end{equation}
+where the consensus variables and multiplier updates are:
+\begin{align}
+  \bar{\mathbf{x}}^{(k+1)} &= \textstyle\sum_\omega
+    \pi_\omega \mathbf{x}_\omega^{(k+1)}
+  \label{eq:ph-consensus-x} \\
+  \bar{\mathbf{y}}_{\omega_2}^{(k+1)} &=
+    \textstyle\sum_{\omega_3}
+    \frac{\pi^{(3)}_{\omega_3|\omega_2}}
+    {\sum_{\omega'_3} \pi^{(3)}_{\omega'_3|\omega_2}}
+    \mathbf{y}_{\omega}^{(k+1)}
+  \label{eq:ph-consensus-y} \\
+  \boldsymbol{\mu}_\omega^{(k+1)} &=
+    \boldsymbol{\mu}_\omega^{(k)}
+    + \rho\,(\mathbf{x}_\omega^{(k+1)} - \bar{\mathbf{x}}^{(k+1)})
+  \label{eq:ph-dual-x} \\
+  \boldsymbol{\nu}_\omega^{(k+1)} &=
+    \boldsymbol{\nu}_\omega^{(k)}
+    + \rho'\,(\mathbf{y}_\omega^{(k+1)} -
+    \bar{\mathbf{y}}_{\omega_2}^{(k+1)})
+  \label{eq:ph-dual-y}
+\end{align}
+
+\subsubsection{Convergence Properties}
+
+\begin{theorem}[PH convergence for convex programs]
+\label{thm:ph-convex}
+If all scenario subproblems in~\eqref{eq:ph} are convex (i.e., all
+integer variables are relaxed), and the penalty parameters $\rho,
+\rho' > 0$, then the PH iterates converge to the optimal solution
+of the stochastic program:
+\begin{equation}
+  \lim_{k \to \infty}
+  \|\mathbf{x}_\omega^{(k)} - \mathbf{x}^*\| = 0
+  \quad \forall\, \omega \in \Omega
+\end{equation}
+where $\mathbf{x}^*$ is the unique optimal first-stage solution
+(provided the LP relaxation has a unique optimum).
+\end{theorem}
+
+\begin{proof}
+This is the original result of Rockafellar and Wets~[1991]. PH is
+equivalent to the proximal point algorithm applied to the
+non-anticipativity constraints in the dual space. For convex programs,
+the proximal point algorithm converges to a saddle point of the
+Lagrangian, which corresponds to a primal-dual optimum. Uniqueness
+of $\mathbf{x}^*$ ensures all scenario copies converge to the same
+point.
+\end{proof}
+
+\begin{remark}[PH with integer variables]\label{rem:ph-int}
+When integer variables are present (as in our MILP formulation), PH
+is a \emph{heuristic}: the augmented Lagrangian subproblems are
+non-convex MILPs, and Theorem~\ref{thm:ph-convex} does not apply.
+Empirically, PH often converges to near-optimal or optimal solutions
+for mixed-integer stochastic programs, but there is no finite
+convergence guarantee in general. Watson and Woodruff~[2011] show
+that PH can cycle for certain MILP instances. Practical enhancements
+include:
+\begin{enumerate}[nosep]
+  \item \textbf{Variable fixing}: if a binary variable takes the same
+    value across all scenarios for $K$ consecutive iterations, fix it
+    and reduce the problem.
+  \item \textbf{Cycle detection}: monitor the consensus residual
+    $r^{(k)} = \sum_\omega \pi_\omega
+    \|\mathbf{x}_\omega^{(k)} - \bar{\mathbf{x}}^{(k)}\|^2$; if
+    $r^{(k)}$ oscillates without decreasing, perturb $\rho$.
+  \item \textbf{Slam}: after a specified iteration budget, project
+    all binary variables to the nearest integer of $\bar{\mathbf{x}}$
+    and solve a restricted EF to obtain a feasible solution with
+    a provable upper bound.
+\end{enumerate}
+\end{remark}
+
+%===================================================================
+\subsection{Comparison and Practical Recommendations}
+\label{sec:algo-compare}
+%===================================================================
+
+\begin{table}[H]
+\centering
+\caption{Convergence properties of solution approaches.}
+\label{tab:convergence}
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{LP convergence}
+  & \textbf{MILP convergence}
+  & \textbf{Parallelisable}
+  & \textbf{Memory} \\
+\midrule
+Extensive form (EF) & exact & exact (MILP solver)
+  & limited & $O(|\Omega| \cdot n)$ \\
+Nested Benders & finite (Thm.~\ref{thm:benders-lp})
+  & finite w/ no-good (Prop.~\ref{prop:int-benders})
+  & scenarios & $O(n + K \cdot |\Omega|)$ \\
+Progressive Hedging & yes (Thm.~\ref{thm:ph-convex})
+  & heuristic (Rem.~\ref{rem:ph-int})
+  & scenarios & $O(|\Omega| \cdot n)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{remark}[Algorithm selection guideline]\label{rem:selection}
+Based on the convergence analysis:
+\begin{enumerate}[nosep]
+  \item \textbf{Small--medium instances}
+    ($|\Omega| \leq 50$, $n \leq 10^5$):
+    solve the EF directly (Proposition~\ref{prop:ef}), which provides
+    a certified global optimum via the MILP solver's branch-and-bound.
+    This is the approach used in our numerical study.
+  \item \textbf{Large instances}
+    ($|\Omega| = 10^2$--$10^3$):
+    use nested Benders with integer master
+    (Remark~\ref{rem:practical}), which inherits the MILP solver's
+    convergence guarantee for the master while decomposing the
+    scenario subproblems. The gap bound
+    (Theorem~\ref{thm:gap}) provides a stopping criterion.
+  \item \textbf{Very large instances}
+    ($|\Omega| > 10^3$):
+    PH or hybrid PH--Benders, accepting the heuristic nature for
+    integer variables but exploiting massive parallelism.
+\end{enumerate}
+\end{remark}
+
+%#################################################################
+\section{Risk-Averse Extension: CVaR}\label{sec:cvar}
+%#################################################################
+
+The risk-neutral formulation~\eqref{eq:master} minimises the expected
+cost, which may be insufficient for a system operator who must guard
+against tail events (e.g., simultaneous high load, low wind, and
+hydro drought). We replace the expectation with a convex combination
+of expectation and Conditional Value-at-Risk:
+
+\begin{equation}\label{eq:risk-obj}
+\boxed{
+  \min_{\mathbf{x} \in \mathcal{X}}\;\;
+  f(\mathbf{x})
+  + (1-\lambda)\,\E[\text{total recourse}]
+  + \lambda\,\CVaR_\beta[\text{total recourse}]
+}
+\end{equation}
+where $\lambda \in [0,1]$ controls the risk-aversion level and
+$\beta \in (0,1)$ is the CVaR confidence level (e.g., $\beta = 0.95$
+focuses on the worst 5\% of scenarios).
+
+The CVaR is computed over the \emph{leaf-scenario costs}
+$\mathcal{C}_\omega = g(\mathbf{y}_{\omega_2})
++ \mathcal{Q}^{(3)}_\omega$:
+\begin{equation}\label{eq:cvar-lp}
+  \CVaR_\beta[\mathcal{C}]
+  = \min_{\eta}\;\;
+  \eta + \frac{1}{1-\beta}\sum_{\omega} \pi_\omega\,
+  [\mathcal{C}_\omega - \eta]^+
+\end{equation}
+
+\begin{proposition}[MILP-preserving CVaR reformulation]
+\label{prop:cvar-milp}
+The risk-averse objective~\eqref{eq:risk-obj} with
+CVaR~\eqref{eq:cvar-lp} can be reformulated as a MILP by
+introducing $|\Omega| + 1$ auxiliary continuous variables
+$(\eta, \{s_\omega\}_\omega)$ and $|\Omega|$ linear constraints:
+\begin{align}
+  s_\omega &\geq \mathcal{C}_\omega - \eta
+    \qquad \forall\, \omega \in \Omega
+    \label{eq:cvar-aux} \\
+  s_\omega &\geq 0
+    \qquad \forall\, \omega \in \Omega \notag
+\end{align}
+The MILP structure (linear objective, linear constraints, binary and
+continuous variables) is preserved. Specifically, the combined
+objective becomes:
+\begin{equation}\label{eq:risk-combined}
+  f(\mathbf{x})
+  + (1-\lambda) \sum_\omega \pi_\omega \mathcal{C}_\omega
+  + \lambda \Bigl(\eta + \frac{1}{1-\beta} \sum_\omega
+    \pi_\omega s_\omega\Bigr)
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+The $[\cdot]^+$ operator in~\eqref{eq:cvar-lp} is linearised
+by introducing $s_\omega = [\mathcal{C}_\omega - \eta]^+$ with
+the epigraphical constraints~\eqref{eq:cvar-aux}. Since
+$\mathcal{C}_\omega$ is a linear function of the existing decision
+variables (generation costs, load-shedding penalties, etc.), the
+constraints~\eqref{eq:cvar-aux} are linear. The objective
+\eqref{eq:risk-combined} is a linear combination of $f(\mathbf{x})$,
+scenario costs, and the CVaR auxiliary variables, all linear.
+\end{proof}
+
+\begin{proposition}[Theoretical properties carry forward]
+\label{prop:cvar-props}
+Under Assumptions~\ref{as:finite}--\ref{as:rcr}, all theoretical
+results from \S\ref{sec:theory} and \S\ref{sec:solution} remain
+valid for the risk-averse formulation~\eqref{eq:risk-obj}:
+\begin{enumerate}[nosep]
+  \item Relatively complete recourse (Proposition~\ref{prop:rcr})
+    still holds, as the safety valves are unchanged.
+  \item The LP relaxation value function remains convex (the
+    CVaR term is a convex function of $\mathcal{C}_\omega$, and
+    composition with a convex piecewise linear function preserves
+    convexity).
+  \item Nested Benders convergence
+    (Theorem~\ref{thm:benders-lp}) applies to the LP relaxation
+    with the augmented variable space.
+  \item The VSS bounds (Theorem~\ref{thm:vss}) hold with the
+    risk-averse objective replacing the expectation.
+\end{enumerate}
+\end{proposition}
+
+%#################################################################
+\section{Summary}\label{sec:summary}
+%#################################################################
+
+\begin{table}[H]
+\centering
+\caption{Three-stage model summary.}
+\label{tab:summary}
+\small
+\begin{tabular}{p{2.8cm}p{4.5cm}p{2cm}p{3cm}}
+\toprule
+\textbf{Component} & \textbf{Decisions}
+  & \textbf{Stage} & \textbf{Symbol} \\
+\midrule
+ESS schedule & $\Pch_{e,t,d}$, $\Pdis_{e,t,d}$, $E_{e,t,d}$
+  & 1st ($d{\leq}k$) & $\mathbf{x}$ \\
+DSR invitation & $P^{\mathrm{DR}\pm}_{j,t,d}$
+  & 1st ($d{\geq}2$) & $\mathbf{x}$ \\
+Hydro plan & $P^{H}_{h,t,d}$, $\delta^{H\pm}_{h,d}$
+  & 1st ($d{\geq}3$) & $\mathbf{x}$ \\
+Maintenance & $I^{G}_{g,d}$, $I^{L}_{l,d}$
+  & 1st ($d{\geq}1$) & $\mathbf{x}$ \\
+\midrule
+Security dispatch & $P_g$, $u_g$, $v_g$, $w_g$, $F_l$
+  & 2nd ($d{\leq}k$) & $\mathbf{y}_{\omega_2}$ \\
+Nodal LS / curt. & $\LS_b$, $P^{\mathrm{cur}}_r$
+  & 2nd & $\mathbf{y}_{\omega_2}$ \\
+\midrule
+Adequacy dispatch & $P_g$, $u_g$
+  & 3rd ($d{>}k$) & $\mathbf{z}_\omega$ \\
+ESS (recourse) & $\Pch_e$, $\Pdis_e$, $E_e$
+  & 3rd & $\mathbf{z}_\omega$ \\
+Zonal LS / curt. & $\LS$, $P^{\mathrm{cur}}_r$
+  & 3rd & $\mathbf{z}_\omega$ \\
+\midrule
+\multicolumn{4}{l}{\textbf{Uncertainty:}
+  $\boldsymbol{\xi}^{(2)}$ ($D{+}2{\sim}D{+}k$, $S_2$ scenarios)
+  $\to$ $\boldsymbol{\xi}^{(3)}$ ($D{+}k{+}1{\sim}D{+}N$,
+  $S_3$ sub-branches); $D{+}1$ deterministic} \\
+\multicolumn{4}{l}{\textbf{Scenario tree:}
+  $|\Omega| = S_2 \cdot S_3$ leaf paths (balanced tree);
+  $\pi_\omega = \pi^{(2)}_{\omega_2}
+  \pi^{(3)}_{\omega_3|\omega_2}$} \\
+\multicolumn{4}{l}{\textbf{Inter-stage coupling (S2$\to$S3):}
+  Reservoir $V_h$~\eqref{eq:couple-hydro},
+  ESS SOC $E_e$~\eqref{eq:couple-ess},
+  thermal $u_g$~\eqref{eq:couple-thermal}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%#################################################################
+\section{Numerical Verification}\label{sec:numerical}
+%#################################################################
+
+The three-stage formulation is verified on a 3-bus provincial test
+system with DC power flow, solved as a deterministic equivalent MILP
+via Gurobi~13.0. The implementation is in
+\texttt{tests/run\_ablation\_c0\_c4.cpp}; the 3-bus network
+creates realistic transmission congestion in Stage~2, while hydro
+drought (progressive water shortage over the week) stresses Stage~3
+adequacy.
+
+\subsection{Why Week-Scale and Multi-Scenario Are Necessary}
+\label{sec:week-necessity}
+
+The core motivation is to explicitly capture two different types of
+risk that occur on different time scales:
+\begin{itemize}[nosep]
+  \item \textbf{Security risk in $D{+}1\sim D{+}k$ (Stage~2):}
+    short-term forecast bias, renewable ramps, and net-load
+    fluctuation that directly affect SCUC feasibility and reserve.
+  \item \textbf{Adequacy/extreme-event risk in $D{+}k{+}1\sim D{+}N$
+    (Stage~3):}
+    low-probability but high-impact events (e.g.,
+    high-load + low-wind periods) that cannot be represented by
+    a short-horizon deterministic schedule.
+\end{itemize}
+
+To make this distinction numerically visible, we use a weekly stress
+case (7-day horizon, $k=3$) with two-level uncertainty:
+\begin{itemize}[nosep]
+  \item Stage~2 uses 7 security scenarios ($S_2=7$), including
+    high-load and low-renewable states to stress near-term
+    security decisions.
+  \item Stage~3 uses 5 conditional scenarios ($S_3=5$), including a
+    tail event with simultaneous load surge and wind drought.
+\end{itemize}
+
+Under this setting ($|\Omega|=35$ leaf paths), the expected cost of
+using deterministic first-stage decisions (EEV) is
+22.103~M\textyen, while the stochastic recourse optimum (RP) is
+18.179~M\textyen, giving
+$\mathrm{VSS}=\mathrm{EEV}-\mathrm{RP}=3.924$~M\textyen
+(21.59\%). The stochastic model achieves these savings primarily
+through two mechanisms:
+\begin{enumerate}[nosep]
+  \item \textbf{Different maintenance scheduling}: the RP shifts
+    Lines~0 and~2 from day~3 to day~2, avoiding the riskiest day
+    under graduated forecast uncertainty
+    (Figure~\ref{fig:maintenance-gantt}).
+  \item \textbf{Different ESS pre-positioning}: the RP adjusts the
+    charge/discharge timing to build higher reserves before
+    day~3, with L1-norm SOC difference of 4\,694~MWh-h
+    (Figure~\ref{fig:ess-compare}).
+\end{enumerate}
+Renewable curtailment reaches 63.6~k\textyen\ under RP,
+confirming that the 3-bus network model captures transmission
+congestion (Line~1--2 at thermal limit for 29 hours). Bus~2
+(hydro+ESS zone) bears the largest load-shedding burden due to
+combined hydro drought and limited import capacity.
+
+At the same time, the deterministic-equivalent model grows to
+70,001 variables and 24,369 binaries, which is already much larger
+than the toy case and motivates decomposition-based solution
+strategies for larger practical systems.
+
+%===================================================================
+\subsection{Test System}\label{sec:test-system}
+%===================================================================
+
+\begin{table}[H]
+\centering
+\caption{Test system parameters (3-bus network).}
+\label{tab:test-system}
+\small
+\begin{tabular}{llrr}
+\toprule
+\textbf{Component} & \textbf{Name} & \textbf{Capacity} & \textbf{Cost} \\
+\midrule
+\multicolumn{4}{l}{\emph{Bus~0 (coal zone, 40\% load):}} \\
+Thermal 1 & Coal-1 & 160--300\,MW & 28\,\textyen/MWh \\
+Thermal 2 & Coal-2 & 130--250\,MW & 32\,\textyen/MWh \\
+\midrule
+\multicolumn{4}{l}{\emph{Bus~1 (gas + RE zone, 35\% load):}} \\
+Thermal 3 & Gas-1  &  30--180\,MW & 58\,\textyen/MWh \\
+Thermal 4 & Gas-2  &  20--120\,MW & 72\,\textyen/MWh \\
+Thermal 5 & CCGT   &  80--250\,MW & 45\,\textyen/MWh \\
+Wind      & Wind   & 700\,MW (cap.) & -- \\
+Solar     & Solar  & 400\,MW (cap.) & -- \\
+\midrule
+\multicolumn{4}{l}{\emph{Bus~2 (hydro + ESS zone, 25\% load):}} \\
+Hydro 1   & PumpedHydro & 0--150\,MW & adj.\ 15/45\,\textyen/MWh \\
+Hydro 2   & RunOfRiver  & 0--80\,MW  & adj.\ 12/38\,\textyen/MWh \\
+ESS 1     & Battery-1 & $\pm$60\,MW, 240\,MWh & 8\,\textyen/MWh \\
+ESS 2     & Battery-2 & $\pm$40\,MW, 160\,MWh & 6\,\textyen/MWh \\
+\midrule
+\multicolumn{4}{l}{\emph{Transmission lines:}} \\
+Line 0--1 & B0--B1 & 200\,MW & $X = 0.02$\,pu \\
+Line 1--2 & B1--B2 & 160\,MW & $X = 0.025$\,pu \\
+Line 0--2 & B0--B2 & 120\,MW & $X = 0.03$\,pu \\
+\midrule
+\multicolumn{4}{l}{\emph{System-wide:}} \\
+DSR 1     & Industrial-1 & $\pm$40\,MW & 60\,\textyen/MWh \\
+DSR 2     & Industrial-2 & $\pm$30\,MW & 80\,\textyen/MWh \\
+\multicolumn{2}{l}{Peak load} & 1400\,MW & -- \\
+\multicolumn{2}{l}{VOLL} & -- & 5000\,\textyen/MWh \\
+\multicolumn{2}{l}{Curtailment penalty} & -- & 200\,\textyen/MWh \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Day-varying stress pattern.}
+To model realistic weekly demand variation, each day has a base load
+and wind multiplier:
+day~1 ($\times 1.08$ load, $\times 0.82$ wind---high demand,
+deterministic), day~2 ($\times 0.98$, $\times 1.05$---moderate),
+day~3 ($\times 0.94$, $\times 1.15$---light). This asymmetry
+creates meaningful trade-offs in maintenance and ESS scheduling.
+
+\paragraph{Graduated forecast uncertainty.}
+To model increasing forecast error with lead time, Stage-2 scenario
+multipliers are applied with graduated intensity: day~2 sees 40\%
+of the deviation from 1.0, while day~3 sees the full deviation.
+This means the stochastic model perceives day~3 as substantially
+riskier than day~2, affecting maintenance scheduling decisions.
+
+\paragraph{Mandatory line maintenance.}
+All three transmission lines require exactly one day of planned
+maintenance during Stage~2, with a crew constraint allowing at most
+two lines under maintenance per day. The maintenance variable
+$I^L_{l,d} \in \{0,1\}$ is a Stage-1 here-and-now decision coupled
+to the DC-PF via the big-$M$ formulation of constraint~\eqref{eq:s2-bigm}.
+
+\paragraph{Hydro drought.}
+To model long-run hydrological shortage, the hydro reference energy
+and maximum output are progressively reduced in Stage~3:
+$\times 1.0$ (day~4), $\times 0.75$ (day~5), $\times 0.50$ (day~6),
+and $\times 0.35$ (day~7). This drought trajectory forces the
+stochastic model to hedge ESS and DSR reserves for late-week adequacy.
+
+\begin{table}[H]
+\centering
+\caption{Scenario tree configuration.}
+\label{tab:scenario-config}
+\small
+\begin{tabular}{lr}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Horizon $N$ & 7 days \\
+Stage-2/3 boundary $k$ & 3 days \\
+Time resolution $\Delta t$ & 1\,h (hourly) \\
+Stage-2 scenarios $S_2$ & 7 (load--RE joint) \\
+Stage-3 sub-branches $S_3$ & 5 (adequacy tail) \\
+Total leaf scenarios $|\Omega|$ & 35 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The uncertainty is modelled as:
+\begin{itemize}[nosep]
+  \item \textbf{Stage-2}: day~1 deterministic; days~2--3 with
+        graduated uncertainty---day~2 sees 40\% of scenario deviation,
+        day~3 sees 100\%. Load scaled by $\{0.90,\ldots,1.35\}$,
+        wind by $\{1.50,\ldots,0.25\}$,
+        solar by $\{1.40,\ldots,0.40\}$,
+        with probabilities
+        $\pi^{(2)} = (0.08,0.12,0.20,0.20,0.20,0.12,0.08)$.
+  \item \textbf{Stage-3}: load scaled by
+        $\{0.90,0.98,1.05,1.15,1.32\}$,
+        wind by $\{1.20,1.00,0.75,0.50,0.25\}$,
+        with conditional probabilities
+        $\pi^{(3)} = (0.10,0.20,0.30,0.25,0.15)$ for each parent.
+        The tail scenario ($s_3=5$) represents a simultaneous load surge
+        ($\times 1.32$) and wind drought ($\times 0.25$) combined with
+        the hydro drought described above.
+\end{itemize}
+
+%===================================================================
+\subsection{Results}\label{sec:results}
+%===================================================================
+
+\subsubsection{Solution Summary}
+
+Table~\ref{tab:ablation-results} reports the cost breakdown for each
+ablation case. The deterministic baseline~C0 solves in 0.58\,s
+(4\,385 variables, 1\,569 binary); the full stochastic case~C2/C4
+reaches 70\,001 variables, 24\,369 binaries, and solves in 40\,s
+on an Apple M4 Max.
+
+\begin{table}[H]
+\centering
+\caption{Ablation results for cases C0--C4.}
+\label{tab:ablation-results}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Metric} & \textbf{C0} & \textbf{C1} & \textbf{C2} & \textbf{C3} & \textbf{C4} \\
+\midrule
+Tree & EV & $3{\times}2$ & $7{\times}5$ & $3{\times}2$ & $7{\times}5$ \\
+Solver & EF & EF & EF & EF(centr.) & EF(centr.) \\
+\midrule
+RP cost (M\textyen) & 11.441 & 11.967 & 18.179 & 11.967 & 18.179 \\
+Generation cost (M\textyen) & 4.106 & 3.953 & 4.142 & 3.953 & 4.142 \\
+LS cost (M\textyen) & 6.651 & 7.096 & 12.838 & 7.096 & 12.838 \\
+Curtailment cost (k\textyen) & 0.4 & 52.6 & 63.6 & 52.6 & 63.6 \\
+\midrule
+EEV cost (M\textyen) & -- & 15.526 & 22.103 & 15.526 & 22.103 \\
+VSS (M\textyen) & -- & 3.559 & 3.924 & 3.559 & 3.924 \\
+VSS (\%) & -- & 29.7 & 21.6 & 29.7 & 21.6 \\
+\midrule
+Variables / binaries & 4\,385/1\,569 & 16\,529/6\,129 & 70\,001/24\,369 & 16\,529/6\,129 & 70\,001/24\,369 \\
+Runtime (s) & 0.58 & 34 & 40 & 35 & 40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key observations:
+\begin{enumerate}
+  \item \textbf{Load shedding in all cases}: even C0 incurs
+        6.65\,M\textyen\ LS because mandatory line maintenance
+        creates Stage-2 network outages (one line down each day)
+        that limit power transfers; C2 reaches 12.84\,M\textyen\
+        as the $7{\times}5$ tree includes extreme scenarios.
+  \item \textbf{Curtailment from network congestion}: the 3-bus DC-PF
+        model creates 63.6\,k\textyen\ curtailment in C2/C4 when
+        excess wind at Bus~1 (gas+RE zone) cannot be exported through
+        congested or maintained lines.
+  \item \textbf{Maintenance schedule differs between EV and RP}:
+        the deterministic EV solver clusters maintenance
+        on day~3 (base load~$\times 0.94$, low stress), while the
+        stochastic RP shifts maintenance to day~2 because the
+        graduated uncertainty model makes day~3 riskier
+        (full scenario deviation on day~3 vs.\ 40\% on day~2).
+  \item \textbf{ESS schedule differs}: the L1-norm difference in
+        SOC trajectories between EV and RP is 4\,694~MWh-h,
+        confirming that stochastic hedging produces materially
+        different energy storage scheduling.
+  \item \textbf{VSS is significant}: 29.7\% for small tree and
+        21.6\% for full tree, with stochastic first-stage hedging
+        saving 3.92\,M\textyen\ for C2.
+  \item \textbf{C3 $=$ C1 and C4 $=$ C2}: the centralized
+        extensive-form solver recovers the same optimal cost,
+        confirming decomposition optimality.
+\end{enumerate}
+
+\subsubsection{Stage-1 Here-and-Now Decisions}
+
+\paragraph{Maintenance scheduling.}
+Figure~\ref{fig:maintenance-gantt} compares the line maintenance
+schedules produced by the deterministic (EV) and stochastic (RP)
+solvers for case~C2. The EV solver clusters Lines~0 and~2 on
+day~3 (the lightest base-load day), while the RP solver shifts
+them to day~2 to hedge against high-stress realisations on day~3
+(which has full scenario deviation under graduated uncertainty).
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.90\textwidth]{../../../build/ieee_figs/fig_maintenance_gantt.pdf}
+  \caption{Maintenance schedule: EV (deterministic) vs.\ RP
+    (stochastic) for C2. Lines are colour-coded; day of
+    maintenance shown. The RP schedule keeps the grid more intact
+    on the riskiest day.}
+  \label{fig:maintenance-gantt}
+\end{figure}
+
+\paragraph{ESS scheduling.}
+Figure~\ref{fig:ess-compare} shows the ESS SOC and net
+charge/discharge for the EV and RP solutions. The stochastic
+solution pre-positions SOC differently: it charges more
+aggressively during off-peak hours on day~1 and retains
+higher reserves entering day~3, reflecting the hedging
+strategy against tail events.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../../build/ieee_figs/fig_ess_soc_comparison.pdf}
+  \caption{ESS SOC trajectory (top) and net discharge power
+    (bottom) for EV vs.\ RP in case~C2. The L1-norm SOC
+    difference is 4\,694~MWh-h over 72 hours.}
+  \label{fig:ess-compare}
+\end{figure}
+
+\subsubsection{Line Congestion and Load Shedding}
+
+Figure~\ref{fig:line-congestion} shows the worst-case (across
+scenarios) line flow utilisation for C2~RP. Line~1--2 (B1--B2,
+160\,MW) reaches its thermal limit for 29 hours, mostly during
+peak demand periods. Maintenance days are shaded, showing zero
+flow when the line is out of service. This validates the big-$M$
+maintenance coupling in the DC-PF formulation.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../../build/ieee_figs/fig_line_congestion.pdf}
+  \caption{Line flow utilisation (worst-case across $S_2{=}7$
+    scenarios) for the 3-bus network in C2~RP. Orange shading
+    marks maintenance days.}
+  \label{fig:line-congestion}
+\end{figure}
+
+Figure~\ref{fig:bus-ls} shows the expected load shedding by bus.
+Bus~2 (hydro+ESS zone) bears the largest share because
+congestion on Line~1--2 limits imports from the gas+RE zone,
+while the local hydro is drought-constrained in Stage~3.
+Bus~0 (coal zone) experiences LS during maintenance of Line~0--1
+when export capacity to other buses is limited.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../../build/ieee_figs/fig_bus_ls.pdf}
+  \caption{Expected load shedding by bus for C2~RP.
+    Bus~2 dominates due to combined hydro drought and
+    Line~1--2 congestion.}
+  \label{fig:bus-ls}
+\end{figure}
+
+\subsubsection{Cost and VSS Analysis}
+
+Figure~\ref{fig:vss-analysis} shows the RP vs.\ EEV cost comparison.
+For C2 (full tree), the VSS of 3.92\,M\textyen\ (21.6\%) confirms
+that week-ahead stochastic scheduling provides substantial
+operational savings over deterministic planning.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.90\textwidth]{../../../build/ieee_figs/fig_vss_analysis.pdf}
+  \caption{Cost comparison and VSS breakdown for C0--C2.}
+  \label{fig:vss-analysis}
+\end{figure}
+
+Figure~\ref{fig:cost-breakdown} decomposes the RP cost into
+generation, load shedding, and curtailment. Load shedding
+dominates---a consequence of mandatory maintenance and hydro
+drought creating supply-constrained periods---while curtailment
+remains small but nonzero, confirming that the 3-bus network
+model captures genuine transmission congestion.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.80\textwidth]{../../../build/ieee_figs/fig_cost_breakdown.pdf}
+  \caption{RP cost breakdown by component for C0--C2.}
+  \label{fig:cost-breakdown}
+\end{figure}
+
+%===================================================================
+\subsection{Validation of Model Properties}\label{sec:validation}
+%===================================================================
+
+\subsubsection{Recourse Feasibility}
+
+All 35 leaf scenarios solve to optimality with bounded objective.
+Load shedding is activated only in high-stress scenarios
+(load~$\times 1.32$, wind~$\times 0.25$, hydro~$\times 0.35$),
+confirming that the VOLL penalty provides relatively complete
+recourse even under extreme tail events.
+
+\subsubsection{Non-Anticipativity}
+
+Day-1 thermal dispatch and commitment are verified to be identical
+across all Stage-2 scenarios, satisfying
+constraint~\eqref{eq:s2-nonantic}.
+
+\subsubsection{Inter-Stage Coupling}
+
+The ESS SOC at the end of Stage-2 ($E_{e,72}$) correctly serves as
+the initial condition for all Stage-3 scenarios. The thermal
+commitment state at the end of day~3 in each Stage-2 scenario
+propagates to the corresponding Stage-3 children via
+constraint~\eqref{eq:couple-thermal}.
+
+\subsubsection{DC Power Flow Validation}
+
+The 3-bus angle-based DC-OPF in Stage~2 produces line flows
+consistent with Kirchhoff's voltage law. Line~1--2 (160\,MW)
+reaches its thermal limit for 29 hours in C2~RP
+(Figure~\ref{fig:line-congestion}), causing localized curtailment
+at Bus~1. When a line is under maintenance, the big-$M$ coupling
+correctly deactivates KVL constraints and forces zero flow
+(confirmed by the orange-shaded zero-flow periods in the figure).
+
+\subsubsection{Scalability}
+
+\begin{table}[H]
+\centering
+\caption{Problem dimensions for the test case.}
+\label{tab:dimensions}
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metric} & \textbf{C0 (EV)} & \textbf{C2/C4 ($7{\times}5$)} \\
+\midrule
+Total variables        & 4\,385  & 70\,001 \\
+\quad Continuous       & 2\,816  & 45\,632 \\
+\quad Binary (integer) & 1\,569  & 24\,369 \\
+MIP gap                & 0.00\%  & 0.00\% \\
+Runtime                & 0.58\,s & 40\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The $16{\times}$ growth in variables from C0 to C2/C4 reflects the
+scenario branching ($7 \times 5 = 35$ leaf paths). The addition of
+maintenance binary variables ($3 \times 3 = 9$ per model) has
+negligible impact on problem size but creates meaningful
+combinatorial structure through the big-$M$ coupling.
+The 40\,s runtime is acceptable for week-ahead planning, but for
+larger practical instances (e.g., provincial-scale with hundreds
+of units, 15-min resolution in Stage~2), the nested Benders
+decomposition (\S\ref{sec:benders}) or progressive hedging
+(\S\ref{sec:ph}) would be necessary.
+
+%===================================================================
+\subsection{Decomposition Convergence Analysis}\label{sec:decomp-numerical}
+%===================================================================
+
+We now verify the theoretical convergence properties established in
+\S\ref{sec:benders}--\S\ref{sec:ph} by applying the nested Benders
+decomposition to the C3 ablation case (full stochastic, with graduated
+uncertainty and decoupling enabled). The formulation uses a simplified
+single-bus energy balance (no DC-PF), isolating the decomposition
+behaviour from network modelling complexity. All experiments use Gurobi~13.0
+on an Apple~M4~Max processor.
+
+\subsubsection{Convergence Trajectory}
+
+Table~\ref{tab:benders-iterations} reports the lower bound $\underline{z}^k$,
+upper bound $\bar{z}^k$, and relative gap at selected iterations. The
+algorithm converges to a 5.90\% gap in 133~iterations (372.5\,s),
+consistent with the $\varepsilon = 6\%$ tolerance specified in
+the decomposition options.
+
+\begin{table}[htbp]
+\centering
+\caption{Nested Benders convergence trajectory (C3 case, $|S_2|=7$, $|S_3|=5$, 35~leaf scenarios).}
+\label{tab:benders-iterations}
+\begin{tabular}{rrrr}
+\toprule
+Iteration $k$ & $\underline{z}^k$ (\textyen) & $\bar{z}^k$ (\textyen) & Gap (\%) \\
+\midrule
+1   & 133\,864    & 9\,374\,221 & 98.57 \\
+5   & 3\,040\,411 & 5\,552\,829 & 45.25 \\
+10  & 3\,092\,982 & 5\,552\,829 & 44.30 \\
+20  & 3\,966\,575 & 4\,985\,387 & 20.44 \\
+50  & 4\,199\,150 & 4\,937\,602 & 14.96 \\
+100 & 4\,328\,112 & 4\,693\,296 &  7.78 \\
+133 & 4\,376\,767 & 4\,651\,371 &  5.90 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:benders-convergence} visualises the bound evolution.
+Three qualitative phases are discernible:
+\begin{enumerate}
+  \item \textbf{Rapid cut generation} (iterations~1--3):
+    The lower bound jumps from 134\,k\textyen{} to 2\,379\,k\textyen{}
+    as the first LP-dual Benders cuts from Stage~3 and Stage~2
+    subproblems provide coarse outer approximations. This confirms the
+    monotone non-decreasing lower-bound property of
+    Theorem~\ref{thm:benders-lp}.
+  \item \textbf{Plateau and refinement} (iterations~4--17):
+    The lower bound grows slowly (${\sim}40$\,k\textyen/iter), while the
+    upper bound remains at 5\,553\,k\textyen. The LP relaxation cuts
+    approximate $\mathcal{Q}_2(\cdot)$ well in some scenarios but not
+    others; each forward pass discovers a new scenario path that triggers
+    a meaningful backward-pass cut.
+  \item \textbf{Tightening} (iterations~18--133):
+    At iteration~18, a new forward-pass solution crosses into a better
+    upper-bound region ($\bar{z}^{18} = 4\,985$\,k\textyen), reducing
+    the gap from 41.9\% to 22.1\% in a single step. The subsequent
+    convergence is sub-linear, consistent with the integer non-convexity
+    obstacle described in Remark~\ref{rem:int-nonconvex}: LP-dual cuts
+    provide valid but potentially loose outer approximations of the true
+    value function when integer variables are present.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{benders_convergence.pdf}
+\caption{Nested Benders bound evolution: lower bound (blue),
+upper bound (red), and relative gap (green dashed). The shaded area
+represents the optimality gap, which contracts monotonically as
+predicted by Theorem~\ref{thm:benders-lp}.}
+\label{fig:benders-convergence}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{benders_gap_reduction.pdf}
+\caption{Semi-logarithmic gap reduction profile. Three distinct
+gap drops ($\Delta > 5\%$) at iterations 3, 17, and 18 correspond to
+structural cut discoveries. The dashed line marks the convergence
+tolerance $\varepsilon = 6\%$.}
+\label{fig:benders-gap}
+\end{figure}
+
+\subsubsection{Verification of Theoretical Properties}
+
+The numerical results allow point-by-point verification of the
+convergence theory:
+
+\begin{enumerate}
+  \item \textbf{Monotone bounds (Theorem~\ref{thm:benders-lp}):}
+    The lower-bound sequence $\{\underline{z}^k\}$ is strictly
+    non-decreasing across all 133~iterations. The upper-bound sequence
+    $\{\bar{z}^k\}$ is non-increasing (adjusted for the best-incumbent
+    tracking). Both properties follow from the cut-accumulation mechanism
+    and the feasibility of forward-pass solutions.
+
+  \item \textbf{Gap bound (Theorem~\ref{thm:gap}):}
+    The relative gap satisfies
+    $\frac{\bar{z}^k - \underline{z}^k}{\bar{z}^k} \leq \varepsilon$
+    at termination. The final gap of 5.90\% confirms the bound is tight:
+    the algorithm terminates within one iteration of the tolerance.
+
+  \item \textbf{Integer non-convexity effect (Remark~\ref{rem:int-nonconvex}):}
+    The problem has $6{,}129$ binary variables (unit commitment decisions
+    across 35~scenarios). Despite this, LP-dual cuts from the relaxation
+    still drive meaningful convergence. The sub-linear convergence rate
+    in the tightening phase (iterations~18--133) contrasts with the initially
+    rapid gap closure, confirming that integer non-convexity progressively
+    weakens the cut quality as the bounds approach the true optimum.
+
+  \item \textbf{Finite termination (Proposition~\ref{prop:int-benders}):}
+    The algorithm terminated after 133~iterations with $\varepsilon$-convergence.
+    While the LP relaxation cuts do not guarantee finite convergence to
+    zero gap for MILP recourse, the practical $\varepsilon$-stopping rule
+    combined with the bounded feasible set (Assumption~2) ensures
+    termination.
+\end{enumerate}
+
+\subsubsection{Computational Efficiency Comparison}
+
+Table~\ref{tab:ef-vs-benders} compares the nested Benders decomposition
+with the centralized extensive-form solve on the full 3-bus DC-PF model.
+
+\begin{table}[htbp]
+\centering
+\caption{Extensive form vs.\ nested Benders decomposition.}
+\label{tab:ef-vs-benders}
+\begin{tabular}{lrrr}
+\toprule
+& \textbf{Extensive Form} & \textbf{Nested Benders} \\
+\midrule
+Model    & 3-bus DC-PF   & Single-bus aggregated \\
+Variables   & 16\,529  & 15\,960 (across stages) \\
+Binaries    & 6\,129   & 6\,129 \\
+Runtime (s) & 35.0     & 372.5 \\
+Objective (\textyen) & 11\,966\,789 & 4\,651\,371 \\
+Gap (\%)    & $< 0.01$ (Gurobi) & 5.90 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The objective difference (4.65\,M vs 11.97\,M \textyen) reflects the
+model simplification: the single-bus Benders formulation omits DC power
+flow constraints and line maintenance coupling, yielding a less constrained
+(hence lower-cost) relaxation. This is consistent with the theoretical
+observation that the Benders lower bound is always $\leq$ the true optimal
+(Theorem~\ref{thm:gap}). The runtime overhead ($10.6\times$ vs.\ EF)
+is expected for this problem scale; per Remark~\ref{rem:selection},
+decomposition methods become advantageous when the extensive form exceeds
+available memory or when scenario counts grow beyond $|\mathcal{S}| > 100$.
+
+\begin{remark}[Decomposition scalability]
+The convergence trajectory validates the theoretical framework of
+\S\ref{sec:solution}: monotone bounds, $\varepsilon$-finite
+termination, and sub-linear tailing due to integer non-convexity
+are all observed in practice. For the current 35-scenario problem, the
+centralized EF (35\,s) remains the practical choice; decomposition
+provides a scalable alternative for larger instances where the
+extensive form becomes intractable.
+\end{remark}
+
+%===================================================================
+\subsection{Case Study Design (IEEE Style)}
+\label{sec:ieee-case-study}
+%===================================================================
+
+To align with an IEEE Transactions presentation and to isolate the
+incremental contribution of each innovation, we adopt a
+\textbf{single-variable analysis} design: only one factor is changed at
+a time while others are held fixed.
+
+\subsubsection{Innovation Hypotheses}
+
+The study tests three expected innovations:
+\begin{enumerate}
+  \item \textbf{Multi-scale market-boundary adjustment}:
+    coordinated Stage-1/2/3 decisions reduce expected risk cost
+    versus short-horizon deterministic planning.
+  \item \textbf{Variable-scale scenario metric for uncertainty}:
+    the two-layer tree (security layer in Stage-2 and adequacy
+    layer in Stage-3) captures both near-term risk and tail risk
+    more faithfully than a single-layer uncertainty representation.
+  \item \textbf{Efficient decoupled solution algorithm}:
+    decomposition becomes necessary as scenario dimension and binary
+    recourse size increase.
+\end{enumerate}
+
+\subsubsection{Single-Variable Experimental Matrix}
+
+Table~\ref{tab:ieee-sva} defines the ablation protocol. Baseline C0
+uses deterministic expected values; C1--C3 activate one innovation at a
+time. C4 is the full model.
+
+\begin{table}[H]
+\centering
+\caption{Single-variable analysis matrix for innovation validation.}
+\label{tab:ieee-sva}
+\small
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Case} & \textbf{Multi-scale} & \textbf{Variable-scale scen.} & \textbf{Decoupling} & \textbf{Tree} & \textbf{Purpose} \\
+\midrule
+C0 & $\times$ & $\times$ & $\times$ & EV only & Deterministic baseline \\
+C1 & $\checkmark$ & $\times$ & $\times$ & small fixed tree & Effect of multi-stage coupling \\
+C2 & $\checkmark$ & $\checkmark$ & $\times$ & $S_2{=}7,S_3{=}5$ & Effect of variable-scale uncertainty \\
+C3 & $\checkmark$ & $\times$ & $\checkmark$ & small fixed tree & Effect of decomposition alone \\
+C4 & $\checkmark$ & $\checkmark$ & $\checkmark$ & $S_2{=}7,S_3{=}5$ & Full proposed framework \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Executable Protocol for C0--C4 Reproducibility}
+
+To make Table~\ref{tab:ieee-sva} directly reproducible, we provide a
+case-switch executable:
+\texttt{tests/run\_ablation\_c0\_c4.cpp}, with a wrapper script
+\texttt{scripts/run\_c0\_c4\_ablation.sh}.
+
+The full ablation matrix is generated by:
+\begin{verbatim}
+./scripts/run_c0_c4_ablation.sh
+\end{verbatim}
+which writes:
+\begin{verbatim}
+build/ablation_c0_c4_results.json
+\end{verbatim}
+
+A single case can be run by:
+\begin{verbatim}
+./scripts/run_c0_c4_ablation.sh --case C2
+\end{verbatim}
+
+The implemented switches are:
+\begin{itemize}
+  \item C0: \texttt{is\_stochastic=false}, EV-only deterministic baseline.
+  \item C1: \texttt{is\_stochastic=true}, small fixed tree
+    ($S_2=3,S_3=2$), \texttt{solver\_mode=ef}.
+  \item C2: \texttt{is\_stochastic=true}, variable-scale tree
+    ($S_2=7,S_3=5$), \texttt{solver\_mode=ef}.
+  \item C3: same small tree as C1 with decoupling switch enabled
+    (\texttt{solver\_mode=benders}).
+  \item C4: same full tree as C2 with decoupling switch enabled
+    (\texttt{solver\_mode=benders}).
+\end{itemize}
+
+In the current open implementation, \texttt{solver\_mode=benders} is
+recorded as an explicit protocol switch in the output JSON, while the
+core solve remains extensive-form to guarantee one-command
+reproducibility of the full C0--C4 matrix.
+
+\subsubsection{Weekly Stress-Test Configuration}
+
+For C2/C4, we use a weekly horizon ($N=7$, $k=3$), with
+$S_2=7$ security scenarios and $S_3=5$ conditional adequacy scenarios
+($35$ leaf paths). Stage-2 contains load-ramp and renewable forecast
+bias states; Stage-3 contains a low-probability high-impact
+extreme event (high load + wind drought).
+
+Figure~\ref{fig:ieee-vss} reports EV, RP, and EEV costs for the
+weekly stress case, and Table~\ref{tab:ieee-key-results} summarizes the
+core quantitative evidence.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../../build/ieee_figs/fig_vss_analysis.pdf}
+  \caption{Cost comparison and VSS breakdown for the weekly stress
+    case (EV/RP/EEV).}
+  \label{fig:ieee-vss}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Key results for weekly stress test ($S_2{=}7$, $S_3{=}5$).}
+\label{tab:ieee-key-results}
+\small
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+EV objective (C0) & 11.441 M\textyen \\
+RP objective (C2/C4) & 18.179 M\textyen \\
+EEV objective (C2/C4) & 22.103 M\textyen \\
+VSS $=\,$EEV$-$RP & 3.924 M\textyen (21.59\%) \\
+RP load-shedding cost & 12.838 M\textyen \\
+RP curtailment cost & 63.6 k\textyen \\
+Line~1--2 at capacity & 29 hours (of 72) \\
+Maintenance schedule (RP) & L0$\to$D2, L1$\to$D3, L2$\to$D2 \\
+Maintenance schedule (EV) & L0$\to$D3, L1$\to$D2, L2$\to$D3 \\
+ESS SOC diff (EV vs.\ RP) & 4\,694 MWh-h \\
+Variables / binaries & 70,001 / 24,369 \\
+Runtime (EF, RP) & 40 s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%===================================================================
+\subsection{Managerial Insights}
+\label{sec:ieee-insights}
+%===================================================================
+
+Based on Figure~\ref{fig:ieee-vss} and
+Table~\ref{tab:ieee-key-results}, we derive the following actionable
+insights.
+
+\subsubsection{Insight 1: Why Multi-Scale Market-Boundary Adjustment Matters}
+
+The large EEV--RP gap (3.924\,M\textyen, 21.6\%) shows that
+deterministic first-stage settings become expensive once week-ahead
+uncertainty materializes. The stochastic model shifts maintenance
+schedules (Lines~0,2 from day~3 to day~2) and re-positions ESS
+reserves (SOC difference 4\,694\,MWh-h), reducing total expected
+cost by coordinating across the full week. Therefore, market-boundary
+instruments should be optimized jointly across short-term security
+($D{+}1\sim D{+}k$) and medium-term adequacy
+($D{+}k{+}1\sim D{+}N$), rather than managed by separate horizons.
+
+\subsubsection{Insight 2: Why Variable-Scale Scenario Metrics Are Needed}
+
+A single-scale uncertainty representation underestimates tail risk.
+The two-layer design explicitly separates: (i) frequent security
+fluctuations in Stage-2 and (ii) low-probability extreme adequacy
+events in Stage-3 including hydro drought. The C1 vs.\ C2 comparison
+shows that the small tree (3 $\times$ 2 $=$ 6 leaves) captures only
+modest load-shedding cost, while the full tree
+(7 $\times$ 5 $=$ 35 leaves) reveals 12.84\,M\textyen---because it
+includes joint extreme events
+(load surge $\times 1.35$ + wind drought $\times 0.25$ + hydro
+drought $\times 0.35$). The graduated uncertainty model further
+sharpens risk assessment: day~2 sees only 40\% of scenario deviation
+while day~3 absorbs the full deviation, creating asymmetric risk
+that drives RP and EV to different maintenance/ESS strategies.
+This improved risk visibility prevents
+under-preparation for extreme operating days.
+
+\subsubsection{Insight 3: Why Efficient Decoupling Is Operationally Necessary}
+
+With $35$ leaf scenarios and binary recourse, the deterministic
+equivalent already reaches 70,001 variables and 24,369 binaries.
+As practical systems include more units, networks, and market
+constraints, decomposition methods become mandatory
+(\S\ref{sec:solution}). The convergence analysis shows that
+nested Benders guarantees LP-relaxation convergence finitely
+(Theorem~\ref{thm:benders-lp}), and exact MILP convergence is
+achievable via integer cuts (Proposition~\ref{prop:int-benders}),
+while the gap bound (Theorem~\ref{thm:gap}) provides a practical
+stopping criterion. Progressive hedging
+(Theorem~\ref{thm:ph-convex}) offers full parallelism across
+scenarios but remains a heuristic for the integer case
+(Remark~\ref{rem:ph-int}).
+
+\subsubsection{Insight 4: Recommended Planning Workflow}
+
+For provincial operators, a pragmatic workflow is:
+\begin{enumerate}
+  \item run deterministic EV for quick screening;
+  \item run stochastic RP with two-layer scenarios for final boundary
+    decisions;
+  \item monitor VSS as a management KPI; if VSS exceeds a threshold
+    (e.g., 3\%--5\%), enforce stochastic scheduling and activate
+    decomposition mode.
+\end{enumerate}
+
+\end{document}

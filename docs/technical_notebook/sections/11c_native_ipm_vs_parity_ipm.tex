@@ -1,0 +1,276 @@
+\section{Generic NativeIPM vs. Parity-Specific IPM: Algorithm Gap and Refactoring Roadmap}
+\label{sec:native-ipm-vs-parity-ipm}
+
+This section isolates one question that now matters more than raw feature
+completeness: why does the dedicated parity OPF interior-point solver converge
+on large cases where the generic \texttt{NativeIPMAdapter} still fails on the
+same nonlinear program callbacks?
+
+The answer is no longer ``because the generic solver has no exact Hessian.''
+That issue has already been addressed.  The remaining gap is that the dedicated
+parity solver still has a better algorithmic envelope for OPF-class problems,
+especially in globalization, centrality control, and reduced-system handling.
+
+\subsection{What Is Actually Being Compared}
+
+The large-case comparison in
+\texttt{tests/benchmark\_ac\_opf\_cases.cpp} now evaluates three modes on the
+same parity NLP model:
+\begin{itemize}
+  \item \texttt{parity}: the dedicated solver in \texttt{src/optimal_power_flow/parity\_ipm.cpp},
+  \item \texttt{native}: the generic \texttt{NativeIPMAdapter} with the same
+  callback model and exact Lagrangian Hessian,
+  \item \texttt{ipopt}: IPOPT applied to the same callback model.
+\end{itemize}
+
+This matters because it removes most modeling ambiguity.  When \texttt{parity}
+converges and \texttt{native} does not, the remaining explanation is mostly in
+the solver algorithm, not in the OPF formulation itself.
+
+\subsection{Algorithmic Differences}
+
+Table~\ref{tab:native-vs-parity-ipm-gap} summarizes the most relevant current
+differences.
+
+\begin{longtable}{L{0.20\linewidth}L{0.34\linewidth}L{0.36\linewidth}}
+\caption{Current algorithmic differences between generic NativeIPM and dedicated parity IPM}
+\label{tab:native-vs-parity-ipm-gap}\\
+\toprule
+Aspect & Generic \texttt{NativeIPMAdapter} & Dedicated \texttt{parity\_ipm.cpp} \\
+\midrule
+\endfirsthead
+\toprule
+Aspect & Generic \texttt{NativeIPMAdapter} & Dedicated \texttt{parity\_ipm.cpp} \\
+\midrule
+\endhead
+Globalization & Default path is filter-based with restoration and second-order correction; fallback path is merit-based backtracking.  In practice this stack is still fragile on large OPF NLPs. & Uses a more direct OPF-focused primal-dual step acceptance strategy with separate primal and dual fraction-to-boundary steps and no generic merit backtracking on each iteration. \\
+Barrier-state initialization & Now improved with residual-aware slack and multiplier initialization in the merit path, but still embedded in a more generic driver. & Initializes slacks directly from inequality residuals to control \(\mu_i / z_i\) spread and maintain a well-conditioned condensed system from the start. \\
+Residual metrics & Generic path now uses normalized residuals, but its acceptance logic still depends on a more generic merit/filter driver architecture. & Uses OPF-focused normalized convergence tests that were tuned around the parity formulation and its scaling behavior. \\
+Complementarity handling & Uses a generalized predictor-corrector centering target and restoration logic. & Uses condensed complementarity handling with OPF-tested centering and direct update rules tailored to the assembled parity inequalities. \\
+Extra correctors & Filter path contains second-order correction; merit path has no parity-style Gondzio block. & Includes explicit Gondzio-type extra corrector passes, which help recover centrality without relying on a merit backtracking loop. \\
+Reduced Newton system & Reuses generic KKT utilities and multiple solve paths, including reduced-KKT logic for some equality patterns. & Builds and solves the condensed parity-specific Schur system directly in the exact structure expected by the OPF formulation. \\
+Failure behavior on large parity OPF & Still terminates with globalization failure on IEEE118 and PEGASE2869. & Converges on IEEE118 and PEGASE2869 and passes PF cross-validation. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Why the Dedicated Parity Solver Still Wins}
+
+The dedicated parity solver currently wins for three concrete reasons.
+
+\paragraph{1. It solves the right condensed problem with less generic machinery}
+The parity solver assembles the exact OPF inequality residuals, slack ratios,
+and reduced Hessian contributions in one coherent path.  The generic solver can
+now represent the same mathematics, but it still routes that information
+through a broader abstraction that was designed to handle arbitrary NLPs rather
+than one specific network structure.
+
+\paragraph{2. Its globalization is still closer to the OPF central path}
+The parity solver takes separate primal and dual fraction-to-boundary steps and
+accepts them directly after corrector assembly.  The generic native solver,
+especially in its merit-backed path, still has a stronger tendency to reject
+steps via generic globalization rules that are mathematically sensible but too
+conservative for the parity OPF trajectory.
+
+\paragraph{3. It contains OPF-specific corrector behavior the generic solver still lacks}
+The parity implementation includes Gondzio-style extra corrector passes and
+best-iterate restoration in a path already tuned around parity OPF residual
+geometry.  The generic solver has partially moved in this direction, but the
+remaining gap is still visible on large cases.
+
+\subsection{Current Performance Interpretation}
+
+The present large-case evidence should be interpreted carefully.
+
+\begin{itemize}
+  \item The generic native NLP IPM is no longer catastrophically incomplete.  It
+  now reaches much better neighborhoods on parity OPF than it did before the
+  exact-Hessian and merit-path upgrades.
+  \item However, the current performance is still not acceptable as a final OPF
+  solver path.  On realistic parity cases it either fails outright or only
+  approaches the correct trajectory before globalization collapses.
+  \item Therefore the remaining issue is not ``can the solver form Newton
+  systems?'' but rather ``can it keep and accept the right Newton trajectory on
+  hard OPF landscapes?''
+\end{itemize}
+
+This is why the current Native IPM performance still looks problematic even
+after recent improvements: the solver core is now mathematically much closer to
+correct, but its driver logic is still not as OPF-effective as the parity
+solver's dedicated update scheme.
+
+\subsection{Implementation Backlog: PR1 / PR2 / PR3}
+
+The next useful step is not another high-level roadmap but a concrete sequence
+of pull requests.  The purpose of the following backlog is to bind the intended
+algorithm changes directly to the current source functions and acceptance rules.
+
+\paragraph{PR1: unify globalization around a direct primal/dual accepted step}
+
+\textbf{Primary file:} \texttt{src/engine/ipm\_solver.cpp}
+
+\textbf{Functions to change.}
+\begin{itemize}
+  \item \texttt{solve\_nlp\_filter\_impl}
+  \item the merit fallback loop inside
+  \texttt{NativeIPMAdapter::solve\_nlp\_detail}
+  \item if needed, extract a shared helper for step acceptance so filter and
+  merit paths do not diverge again
+\end{itemize}
+
+\textbf{What should change.}
+\begin{itemize}
+  \item Replace the current mixed acceptance rule in which \(x,s,\lambda\)
+  are accepted by filter logic while \(\mu\) is still updated with an
+  independent \texttt{alpha\_max\_dual}.  The accepted step should become one
+  coherent primal-dual update decided from the same accepted trial.
+  \item Introduce a direct fraction-to-boundary accepted step for the
+  predictor-corrector direction before falling back to repeated generic
+  backtracking.  In other words, the first-class path should be ``accept the
+  Newton step if positivity and normalized residual improvement are good
+  enough,'' not ``always reduce \(\alpha\) until the generic filter admits it.''
+  \item Move the current acceptance decision away from pure
+  \((\theta,\phi)\)-based rejection and toward a parity-style gate that checks
+  positivity, normalized primal feasibility, normalized dual feasibility, and
+  complementarity together.
+\end{itemize}
+
+\textbf{Acceptance criteria to replace or add.}
+\begin{itemize}
+  \item Replace ``accepted trial point for \(x,s,\lambda\) plus separate dual
+  multiplier step'' with ``one accepted \((x,s,\lambda,\mu)\) trial.''
+  \item Add an explicit rule that a full or near-full step is kept when it
+  improves the normalized residual summary produced by
+  \texttt{summarize\_residuals}, even if the generic filter would otherwise
+  shrink it.
+  \item Keep filter backtracking only as a secondary safeguard, not as the
+  dominant accepted-step mechanism.
+\end{itemize}
+
+\textbf{Minimum validation.}
+\begin{itemize}
+  \item Re-run \texttt{benchmark\_ac\_opf\_cases} on IEEE118 and PEGASE2869 in
+  \texttt{native} mode.
+  \item Require that failure mode changes from early line-search collapse to a
+  materially better trajectory, ideally either convergence or a much lower
+  final normalized residual than the current baseline.
+\end{itemize}
+
+\paragraph{PR2: port parity-style extra correctors into the generic driver}
+
+\textbf{Primary files:} \texttt{src/engine/ipm\_solver.cpp} and, for reference,
+\texttt{src/optimal_power_flow/parity\_ipm.cpp}
+
+\textbf{Functions to change.}
+\begin{itemize}
+  \item \texttt{solve\_nlp\_filter\_impl}
+  \item the merit fallback loop inside
+  \texttt{NativeIPMAdapter::solve\_nlp\_detail}
+  \item possibly a new helper dedicated to extra-corrector assembly so the code
+  does not duplicate one-off second-order logic in multiple branches
+\end{itemize}
+
+\textbf{What should change.}
+\begin{itemize}
+  \item Generalize the current one-shot second-order correction into a bounded
+  parity-style extra-corrector loop.  The present filter path already has a
+  single SOC retry; PR2 should turn that into a structured ``predictor,
+  corrector, extra-corrector'' sequence.
+  \item Use the extra correctors specifically to improve centrality and recover a
+  larger accepted step, rather than treating them only as a feasibility patch
+  after filter rejection.
+  \item Ensure the extra corrector is evaluated against the same normalized
+  residual summary used by the main step so that centrality improvement is
+  measured rather than guessed.
+\end{itemize}
+
+\textbf{Acceptance criteria to replace or add.}
+\begin{itemize}
+  \item Replace ``at most one SOC attempt on first rejection'' with ``up to a
+  small fixed number of extra correctors that are accepted only if residuals and
+  complementarity improve.''
+  \item Add an explicit centrality-improvement test based on the normalized
+  complementarity and aggregate merit terms, not only on filter admissibility.
+\end{itemize}
+
+\textbf{Minimum validation.}
+\begin{itemize}
+  \item Re-run the same large-case parity benchmarks and compare accepted step
+  lengths, iteration counts, and final residual summaries against PR1.
+  \item Confirm that the generic solver is no longer losing obviously usable
+  predictor-corrector steps that the parity solver would keep.
+\end{itemize}
+
+\paragraph{PR3: retune scaling, barrier-state initialization, and restoration triggers}
+
+\textbf{Primary files:} \texttt{src/engine/ipm\_solver.cpp},
+\texttt{include/hacdcpf/engine/ipm\_solver.hpp}, and any supporting scaling or
+restoration helpers already used by the filter path
+
+\textbf{Functions to change.}
+\begin{itemize}
+  \item \texttt{initialize\_barrier\_state}
+  \item \texttt{summarize\_residuals}
+  \item \texttt{solve\_nlp\_filter\_impl}
+  \item restoration-trigger decisions inside the native driver stack
+\end{itemize}
+
+\textbf{What should change.}
+\begin{itemize}
+  \item Tighten the connection between slack initialization, multiplier
+  initialization, and the normalized residual scales actually used during step
+  acceptance.
+  \item Revisit the current filter constants and restoration triggers so that the
+  solver does not declare globalization failure too early on OPF-class problems
+  that still have a promising best iterate.
+  \item Make best-iterate restoration a deliberate part of the native path's
+  acceptance policy rather than a final afterthought used only when the main
+  loop is already exhausted.
+\end{itemize}
+
+\textbf{Acceptance criteria to replace or add.}
+\begin{itemize}
+  \item Replace purely absolute or mixed-scale progress decisions with
+  consistently normalized criteria derived from \texttt{summarize\_residuals}.
+  \item Add a restoration-entry rule based on repeated accepted-step collapse,
+  not only on hard factorization or line-search failure.
+  \item Keep the current best-iterate bookkeeping, but require restoration to be
+  judged against parity-like feasibility and complementarity thresholds.
+\end{itemize}
+
+\textbf{Minimum validation.}
+\begin{itemize}
+  \item Re-run IEEE118 and PEGASE2869 in \texttt{native}, \texttt{parity}, and
+  \texttt{ipopt} modes on the same callback model.
+  \item Only declare the generic path ready for default use on parity OPF when
+  it converges without IPOPT fallback, matches parity objective and feasibility
+  closely, and no longer fails primarily through globalization breakdown.
+\end{itemize}
+
+\paragraph{Why this PR order matters}
+
+This order is intentional.  PR1 attacks the most visible current defect, namely
+that the accepted step is still too generic and internally inconsistent.  PR2
+then adds the parity-style corrector machinery needed to keep that better step
+on hard iterations.  PR3 only makes sense after PR1 and PR2, because scaling
+and restoration thresholds cannot be tuned meaningfully while the accepted-step
+logic itself is still unstable.
+
+\subsection{Practical Bottom Line}
+
+The current technical conclusion is blunt but useful.
+
+\begin{itemize}
+  \item The generic NativeIPM is now a genuine interior-point implementation and
+  no longer a placeholder.
+  \item Its current performance is still problematic on large OPF-class NLPs.
+  \item The parity-specific solver remains the stronger implementation for this
+  problem family.
+  \item The right next move is not more Hessian plumbing, but better
+  globalization and closer transfer of parity's accepted-step logic into the
+  generic driver.
+\end{itemize}
+
+So if the review question is whether the current native NLP IPM still has major
+performance problems, the answer is yes.  They are now concentrated in the
+driver and globalization layer, not in the existence of the Newton system or
+the availability of exact second derivatives.

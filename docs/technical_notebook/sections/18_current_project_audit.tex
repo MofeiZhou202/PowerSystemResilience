@@ -1,0 +1,169 @@
+\section{Current Project Implementation Audit}
+\label{sec:current-project-audit}
+
+\subsection{Audit Scope and Reading Order}
+
+This section is a code-aligned snapshot of the current project state as of
+May~5,~2026, after the recent refactors to the power-flow and OPF modules.  It
+does not replace the detailed derivations in the individual chapters.  Instead,
+it provides one consolidated ledger that connects the current mathematical
+models, algorithms, implementation files, numerical evidence, and code-quality
+plan for each major module.
+
+The current filesystem convention is:
+\begin{itemize}
+  \item \texttt{include/hacdcpf/power\_flow} and \texttt{src/power\_flow} for steady-state PF kernels,
+  \item \texttt{include/hacdcpf/optimal\_power\_flow} and \texttt{src/optimal\_power\_flow} for OPF kernels,
+  \item \texttt{include/hacdcpf/engine} and \texttt{src/engine} for reusable numerical optimization machinery,
+  \item \texttt{include/hacdcpf/analysis} and \texttt{src/analysis} for secondary analysis modules,
+  \item \texttt{include/hacdcpf/planning} and \texttt{src/planning} for planning studies and reporting.
+\end{itemize}
+The C++ namespace \texttt{hacdcpf::powerflow} is intentionally unchanged; only
+the source and include paths were renamed.
+
+\subsection{Canonical Mathematical Form Shared by the Project}
+
+Most modules are built from one canonical hybrid-system representation.  The
+runtime flow is
+\begin{align}
+\texttt{HybridPowerSystem}
+&\xrightarrow{\text{canonical projection}} \texttt{SolverData}, \\
+\texttt{SolverData}
+&\xrightarrow{\text{matrix / residual build}}
+\text{PF, OPF, analysis, and planning kernels}.
+\end{align}
+The shared steady-state equations have the compact form
+\begin{align}
+F_{\mathrm{pf}}(x) =
+\begin{bmatrix}
+P^{\mathrm{spec}}_{\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}}(x)-P^{\mathrm{calc}}_{\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}}(v,\theta) \\
+Q^{\mathrm{spec}}_{\mathcal{N}_{PQ}}(x)-Q^{\mathrm{calc}}_{\mathcal{N}_{PQ}}(v,\theta) \\
+P^{\mathrm{spec}}_{\mathcal{N}_{dc}\setminus\mathcal{N}_{dc,sl}}(x)-v^{dc}\circ (G_{dc}v^{dc})
+\end{bmatrix}=0,
+\end{align}
+with ZIP demand, VSC converter losses, DCDC efficiency and \(I^2R\) loss, energy
+router ports, storage, renewable generation, VPPs, microgrids, and charging
+loads folded into the specified-injection terms.  The nonlinear OPF family uses
+the standard constrained form
+\begin{align}
+\min_x\;& f(x) \\
+\mathrm{s.t.}\;& g(x)=0,\qquad h(x)\le 0,\qquad x^{\min}\le x\le x^{\max},
+\end{align}
+where the parity route exposes a full-space AC/DC formulation, while the native
+route and fast route use specialized reduced or projected forms.  The engine
+layer exposes LP, QP, NLP, MILP, and MINLP kernels that all reduce to sparse
+matrix models with explicit bound, equality, and inequality blocks.
+
+\subsection{Mathematical Model Ledger}
+
+\begin{longtable}{@{}L{0.16\linewidth}L{0.42\linewidth}L{0.34\linewidth}@{}}
+\toprule
+Module & Current mathematical model & Current implementation boundary \\
+\midrule
+\endhead
+Model and I/O & Rich hybrid component graph with AC buses, DC buses, branches, transformers, switches, VSCs, DCDCs, loads, ZIP demand, storage, renewables, VPPs, microgrids, mobile storage, energy routers, chargers, external grids, and metadata.  Canonical projection normalizes equivalent structures while retaining merge metadata. & \texttt{include/hacdcpf/model}, \texttt{src/model}, \texttt{include/hacdcpf/io}, \texttt{src/io}.  JSON, Excel, MATPOWER, OpenDSS bridge, and case builders feed the same public model. \\
+Power flow & Hybrid AC/DC nonlinear equations \(F_{\mathrm{pf}}(x)=0\).  AC rows use polar \(Y_{bus}\) power injections; DC rows use \(V(GV)\); VSC rows include fixed, linear, or quadratic loss; DCDC rows include bidirectional efficiency, droop, and optional \(I^2R\) loss; ZIP loads make demand voltage-dependent. & \texttt{src/power\_flow}: \texttt{solver\_data}, \texttt{admittance\_builder}, \texttt{residual\_evaluator}, \texttt{jacobian\_builder}, \texttt{jacobian\_pattern}, \texttt{ac\_kernel}, \texttt{newton\_solver}, \texttt{fdpf\_solver}, \texttt{dc\_solver}, \texttt{helm\_solver}. \\
+Optimal power flow & Nonlinear AC/DC OPF with generation cost, AC/DC balance, converter balance, voltage limits, generator bounds, branch MVA limits, converter limits, DC branch limits, load shedding, controllable renewables, storage, flexible load, and DCDC decision variables.  DC OPF uses B-\(\theta\) LP/QP approximations.  RPO is a mixed-integer tap/shunt optimization with OPF subproblem evaluations. & \texttt{src/optimal\_power\_flow}: \texttt{ac\_opf}, \texttt{dc\_opf}, \texttt{parity\_formulation}, \texttt{parity\_ipm}, \texttt{reactive\_power\_opt}. \\
+Engine solvers & Generic mathematical-programming models: LP/QP/NLP/MILP/MINLP in bound/equality/inequality form.  KKT systems, barrier systems, branch-and-bound trees, cut pools, presolve/postsolve transforms, simplex bases, and sparse factorization state are explicit data structures. & \texttt{include/hacdcpf/engine}, \texttt{src/engine}, and compatibility \texttt{include/hacdcpf/solver}.  Native IPM, LP IPM, LCQP, dual simplex, branch-and-cut, PDLP/PMM-style solvers, and adapters. \\
+Distribution PF & Radial distribution feeder equations with backward/forward sweep and three-phase variants.  The model tracks branch current, voltage drops, unbalance, DER injections, hybrid overlays, and optional time-series topology changes. & \texttt{include/hacdcpf/analysis/distribution\_power\_flow.hpp}, \texttt{src/analysis/distribution\_power\_flow.cpp}, plus \texttt{time\_series\_distribution}. \\
+Short circuit & Z-bus/Thevenin impedance model with IEC-style correction factors and multiple fault types.  Three-phase, single-line-to-ground, line-to-line, and double-line-to-ground faults are represented through sequence-domain or equivalent impedance calculations. & \texttt{include/hacdcpf/analysis/short\_circuit.hpp}, \texttt{src/analysis/short\_circuit.cpp}. \\
+Network reconfiguration & LinDistFlow-style MILP with binary branch status, radiality/connectivity constraints, voltage-drop constraints, flow limits, load-service variables, switching costs, and post-solve PF feasibility checks. & \texttt{include/hacdcpf/analysis/topology\_analysis.hpp}, \texttt{src/analysis/topology\_analysis.cpp}, native branch-and-cut engine. \\
+Carbon analysis & Directed hybrid carrier graph, proportional tracing, matrix-based bus carbon-intensity solve, storage source/sink treatment, converter and branch loss allocation, and emission aggregation by source/load/carrier. & \texttt{include/hacdcpf/analysis/carbon\_analysis.hpp}, \texttt{src/analysis/carbon\_analysis.cpp}, visualization/reporting helpers. \\
+Time series and annual simulation & Multi-horizon operation model: representative annual planning layer, weekly UC layer, daily replay/validation layer, PF/OPF feasibility checks, emissions and cost aggregation, degradation-aware lifecycle wrapper. & \texttt{include/hacdcpf/analysis/time\_series\_pf.hpp}, \texttt{annual\_production\_sim.hpp}, \texttt{lifecycle\_simulation.hpp}, and related \texttt{src/analysis} files. \\
+Reliability, resilience, MESS & Reliability/FMEA component catalog, outage/resilience state evolution, mobile energy storage dispatch heuristics, restoration scoring, and service-restoration metrics. & \texttt{include/hacdcpf/analysis/reliability\_assessment.hpp}, \texttt{resilience\_assessment.hpp}, docs sections 14--15, tests and validation demos. \\
+Planning, market, stochastic dispatch & Microgrid and hybrid AC/DC distribution planning models; market-clearing and settlement models; two-stage/stochastic dispatch and decomposition formulations with extensive notebook derivations. & \texttt{include/hacdcpf/planning}, \texttt{src/planning}, \texttt{include/hacdcpf/market}, \texttt{include/hacdcpf/decomposition}, sections 10a, 10b, 16, and 17. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Algorithm and Implementation Ledger}
+
+\begin{longtable}{@{}L{0.18\linewidth}L{0.40\linewidth}L{0.34\linewidth}@{}}
+\toprule
+Module & Implemented algorithms & Important implementation notes \\
+\midrule
+\endhead
+Model/I/O & Canonical projection, bus merge mapping, MATPOWER parsing, JSON/Excel round trips, canned case construction, OpenDSS snapshot adapters. & Projection is the common input boundary for PF/OPF/analysis.  Compatibility headers under \texttt{core} and \texttt{solver} remain for older includes. \\
+Power flow & Sparse Newton PF, FDPF, DC-only Newton, adaptive island solve, distributed slack, HELM with sparse \(Y_{trans}\), homotopy continuation, nonlinear scaling, nonmonotone line search, LM/PTC trust-region control, Newton-Krylov/GMRES with Schur preconditioning, voltage-stability/CPF. & The AC kernel and Jacobian sparsity construction are split into \texttt{ac\_kernel.cpp} and \texttt{jacobian\_pattern.cpp}.  Shared susceptance builders now serve FDPF \(B'\) and \(B''\). \\
+Optimal power flow & Fast economic dispatch plus PF projection, native primal-dual AC/DC OPF, parity full-space formulation, dedicated parity IPM with Mehrotra predictor-corrector and extra correctors, DC OPF backend dispatch, RPO OA search over taps/shunts. & The parity route is the strongest current nonlinear AC/DC OPF path.  RPO is self-contained and calls AC OPF repeatedly with a solution cache and OA lower bounds. \\
+Engine solvers & Dual simplex, sparse dual simplex, LP IPM, LCQP IPM, native NLP IPM, PDLP/PMM-family solvers, branch-and-cut with presolve, cuts, conflict/domain propagation, warm starts, parallel search and sharing. & The engine is now a real in-tree optimization layer rather than a thin wrapper.  Generic native NLP IPM is improving but still lags the parity-specific OPF solver on large OPF-class NLPs. \\
+Distribution PF & Backward/forward sweep, radial topology traversal, DER/load aggregation, three-phase validation, time-series feeder replay. & Cross-validation against Newton PF exists for radial cases; hybrid component projection is still the main area needing broader cases. \\
+Short circuit & Batch all-bus and per-bus fault analysis, Thevenin/Zbus solve, sequence fault formulas, contribution bookkeeping. & The module is mathematically usable; stronger external-grid and reference standard cases are still needed before calling the reporting contract complete. \\
+Network reconfiguration & Native MILP build, branch-and-cut solve, stable branch-id result emission, radiality/connectivity checks, post-reconfiguration Newton PF validation. & Stable branch ids are mostly solved; projected/canonical equivalence cases with nontrivial ids still need stronger assertions. \\
+Carbon analysis & Hybrid graph construction, directed flow extraction from PF/OPF, proportional source/load tracing, matrix bus-intensity solve, Sankey/report output. & Current tests cover core carbon accounting; richer time-coupled storage carbon-state validation remains a useful next step. \\
+Time series, annual sim, lifecycle & L0/L2/L3 hierarchy, UC/OPF/PF replay, annual metric aggregation, multi-year degradation, stratified sampling, NPV accumulation. & Smoke and contract tests exist; external reference-cost cases and spreadsheet lifecycle baselines would strengthen numerical credibility. \\
+Reliability, resilience, MESS & Reliability catalog, fault/service metrics, restoration heuristics, mobile storage movement/energy constraints, validation demo reporting. & The current solver is pragmatic and demonstrative; full MILP/rolling-horizon restoration remains the intended high-fidelity upgrade path. \\
+Planning, market, stochastic & Benders/progressive decomposition studies, low-carbon planning cases, market settlement and reserve products, stochastic dispatch summaries. & These chapters contain strong mathematical material; implementation coverage varies by study and should be documented per executable path as experiments mature. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Numerical Evidence and Performance Snapshot}
+
+The latest release-mode regression snapshot recorded for the core notebook
+evidence set is summarized below.  These are not exhaustive benchmarks; they are
+the current fast-to-medium confidence gates that demonstrate the refactored
+modules still execute coherently after the recent source split and directory
+rename.
+
+\begin{longtable}{@{}L{0.31\linewidth}L{0.16\linewidth}L{0.43\linewidth}@{}}
+\toprule
+Evidence source & Assertions & Interpretation \\
+\midrule
+\endhead
+\texttt{test\_all\_components\_pf} & 159 & Main AC/DC PF component integration: loads, DERs, converters, storage, hybrid buses, and result assembly. \\
+\texttt{test\_annual\_production\_sim} & 405 & Annual production simulation stack: L0/L2/L3 orchestration, metric aggregation, and representative operation pipeline. \\
+\texttt{test\_carbon\_analysis} & 82 & Hybrid carbon tracing, matrix intensity solve, source/load aggregation, and report-contract evidence. \\
+\texttt{test\_core\_modules} & 11 & Core utility and module smoke checks. \\
+\texttt{test\_modeling\_toolkit} & 146 & AML/modeling-toolkit variable, expression, bridge, and solver interaction coverage. \\
+\texttt{test\_opf\_pf\_crossval} & 24 & OPF dispatch replay through PF feasibility checks on representative cases. \\
+\texttt{test\_powerflow\_performance} & 3 & Performance-oriented PF smoke checks for the optimized/refactored kernels. \\
+\texttt{test\_problem\_types} & 14 & Engine problem-type contracts and validation paths. \\
+\texttt{test\_projection\_equivalence} & 21 & Canonical projection equivalence checks. \\
+\textbf{Total in this release-mode snapshot} & \textbf{865} & \textbf{All assertions passed in the last recorded run.} \\
+\bottomrule
+\end{longtable}
+
+Additional numerical evidence is distributed in the detailed chapters:
+\begin{itemize}
+  \item Section~\ref{sec:powerflow} records the power-flow refactor performance status and the D1--D6 deduplication completion state.
+  \item Section~\ref{sec:opf} records AC/DC OPF, parity IPM, DC OPF, and RPO formulations.
+  \item Section~\ref{sec:engine-nlp-ipm} records structured sparse NLP/IPM and parity-OPF comparison results, including large OPF cases where the parity path remains stronger than the generic native NLP path.
+  \item The 10a microgrid-planning chapter records the corrected numerical study and replay-feasibility evidence.
+  \item Section~\ref{sec:stochastic-dispatch-summary} and the standalone stochastic manuscript record two-stage/stochastic dispatch verification and decomposition behavior.
+\end{itemize}
+
+\subsection{Code-Quality Investigation by Module}
+
+\begin{longtable}{@{}L{0.17\linewidth}L{0.31\linewidth}L{0.42\linewidth}@{}}
+\toprule
+Module & Current quality assessment & Focused improvement plan \\
+\midrule
+\endhead
+Model and projection & Strong public information model and useful canonical projection, but some consumer paths still rely on implicit contiguous bus ids or vector order assumptions. & Add explicit id-to-position mapping utilities, use them in replay/unprojection/export code, and add non-contiguous id regression cases. \\
+I/O contracts & JSON/Excel/MATPOWER coverage is broad, but the runtime model has grown faster than some result/input dictionaries. & Close remaining DC PV/static-generator serialization gaps; extend OPF and PF result exports for new dispatch vectors; add round-trip equality tests for every new table. \\
+Power flow & Numerically central and recently refactored: shared susceptance builder, split Jacobian pattern/kernel/evaluator, and robust nonlinear aids.  Main remaining risk is duplicated injection accounting across PF residual, OPF parity, and validation paths. & Keep \texttt{pf\_injection\_assembly} as the shared DC source of truth; add FD tests for every AC/DC cross derivative; add one stress case per VSC/DCDC control mode. \\
+Optimal power flow & Parity path is robust and feature-rich; generic native path still has performance and globalization gaps for large NLP-class OPF.  RPO lacks dedicated tests. & Continue parity/native convergence comparison; add RPO regression tests; expose all parity result vectors in output contracts; fix DCDC directional derivative consistency if current-iterate sign and reference sign diverge. \\
+Engine solvers & LP/MILP center is mature, with strong presolve, warm-start, and branch-and-cut work.  Generic NLP IPM is much improved but not yet parity-competitive on large OPF cases. & Stabilize generic IPM globalization and scaling; stratify benchmark-scale tests from fast correctness gates; add per-kernel performance baselines. \\
+Distribution PF & BFS and radial workflows are usable and cross-validated on representative feeders.  Hybrid overlays and projected component views are the weaker edge. & Expand cross-validation to transformers, switches, chargers, asymmetric loads, flexible loads, and projected feeder ids. \\
+Short circuit & Functional mathematical core with batch/per-bus APIs.  Reporting semantics still need richer component-source breakdown. & Add external-grid contribution bucket; compare against named IEC reference cases; lock per-fault-type expected values. \\
+Network reconfiguration & Stable ids and PF post-validation are mostly in place.  Branch-id semantics under projection remain the main subtle risk. & Add projected-vs-canonical branch-id set equality tests and deliberately nontrivial branch indices. \\
+Carbon analysis & Core tracing and matrix methods are covered; current model is strong for static snapshots. & Add time-coupled storage carbon-intensity state tests and OPF/PF replay consistency checks for losses. \\
+Time-series, annual simulation, lifecycle & End-to-end paths exist and have meaningful smoke coverage.  They need stronger external reference cases to become benchmark-grade. & Add small reference production-cost case; add lifecycle spreadsheet baseline; validate UC initial state/startup accounting. \\
+Reliability, resilience, MESS & The documents and demos give a coherent practical workflow; optimization depth is still heuristic in places. & Add MILP restoration prototype or rolling-horizon benchmark; quantify service-restoration optimality gaps on fixed toy systems. \\
+Planning, market, stochastic & Mathematical documentation is extensive and several studies have numerical artifacts, but implementation maturity varies by sub-study. & For each study, maintain a code map, input contract, reproducible run command, result table, and smoke/reference test. \\
+Documentation and CI & Notebook coverage is broad but historically lagged fast-changing code paths. & Build the technical notebook in release gates; include the current implementation audit; keep validation tables tied to executable tests. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Immediate Documentation Contract}
+
+For future development, every new module or major refactor should update five
+documentation surfaces together:
+\begin{enumerate}
+  \item the mathematical model section that defines variables, objective, and constraints;
+  \item the algorithm section that gives code-aligned pseudocode;
+  \item the implementation map that names source/header files and public APIs;
+  \item the validation section that names exact tests, benchmarks, and expected outputs;
+  \item the improvement-plan table that records residual code-quality risks.
+\end{enumerate}
+This audit section should remain the high-level index, while individual chapters
+remain the detailed derivation and experiment records.

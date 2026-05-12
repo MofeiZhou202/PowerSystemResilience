@@ -20,10 +20,13 @@ if(_ipo_ok)
 endif()
 
 # ── Options ───────────────────────────────────────────────────────────────────
-option(HACDCDSS_BUILD_TESTS   "Build unit/integration tests"               ON)
-option(HACDCDSS_ENABLE_WERROR "Treat warnings as errors for core library"  OFF)
-option(HACDCDSS_ENABLE_NATIVE_ARCH
+option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
+option(HACDCPF_ENABLE_WERROR  "Treat warnings as errors for core library"  OFF)
+option(HACDCPF_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                     OFF)
+# IO optional features: OpenDSS and Excel require external libs not bundled here
+option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
+option(HACDCPF_ENABLE_EXCEL   "Build Excel I/O   (requires OpenXLSX)"      OFF)
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
@@ -31,55 +34,151 @@ include(cmake/Dependencies.cmake)
 
 # ── Core library ──────────────────────────────────────────────────────────────
 #
-# hacdcdss is one standalone static library that includes four modules:
+# hacdcpf is a standalone static library that includes:
 #
-#   model               – AC/DC network data structures, scenario & time-series
-#   power_models        – admittance matrix (Y-bus / G_dc) construction
-#   power_flow          – Newton-Raphson AC/DC power-flow solver
-#   optimal_power_flow  – DC-OPF (LP) and AC-OPF (NLP) formulations
+#   model               – AC/DC network data structures, system topology
+#   power_models        – ACOPF/DCOPF/LinDistFlow/SCUC algebraic model builders
+#   power_flow          – Newton-Raphson, FDPF, HELM, homotopy, adaptive, etc.
+#   optimal_power_flow  – AC-OPF, DC-OPF, parity, reactive power optimisation
+#   io                  – JSON, MATPOWER, case builders (OpenDSS/Excel optional)
+#   api                 – Public high-level entry points
 #
-# The only external dependency is mipsolvers::mipsolvers, which transitively
-# provides Eigen3, fmt, nlohmann_json, HiGHS, and optional Ipopt/SCIP.
+# The only required external dependency is mipsolvers::mipsolvers, which
+# transitively provides Eigen3, fmt, nlohmann_json, HiGHS, and Ipopt/SCIP.
 # No Homebrew or system-installed library is required.
 
-add_library(hacdcdss STATIC
+set(HACDCPF_SOURCES
   # ── model ────────────────────────────────────────────────────────────────
-  src/model/network_model.cpp
-  src/model/scenario_data.cpp
+  src/model/network_utils.cpp
   # ── power_models ─────────────────────────────────────────────────────────
-  src/power_models/admittance.cpp
+  src/power_models/acopf_builder.cpp
+  src/power_models/acdcopf_builder.cpp
+  src/power_models/dc_opf_builder.cpp
+  src/power_models/lindistflow_builder.cpp
+  src/power_models/scuc_builder.cpp
   # ── power_flow ───────────────────────────────────────────────────────────
-  src/power_flow/pf_solver.cpp
+  src/power_flow/ac.cpp
+  src/power_flow/ac_kernel.cpp
+  src/power_flow/ac_linearized_pf.cpp
+  src/power_flow/adaptive_solver.cpp
+  src/power_flow/admittance_builder.cpp
+  src/power_flow/branch_flow.cpp
+  src/power_flow/converter_model.cpp
+  src/power_flow/dc.cpp
+  src/power_flow/dc_solver.cpp
+  src/power_flow/distributed_slack_solver.cpp
+  src/power_flow/fdpf_solver.cpp
+  src/power_flow/helm_solver.cpp
+  src/power_flow/homotopy_continuation.cpp
+  src/power_flow/hybrid.cpp
+  src/power_flow/island_detector.cpp
+  src/power_flow/jacobian_builder.cpp
+  src/power_flow/jacobian_pattern.cpp
+  src/power_flow/lm_trust_region.cpp
+  src/power_flow/newton_krylov.cpp
+  src/power_flow/nonlinear_scaling.cpp
+  src/power_flow/nonmonotone_linesearch.cpp
+  src/power_flow/pf_injection_assembly.cpp
+  src/power_flow/residual_evaluator.cpp
+  src/power_flow/robust_nonlinear_options.cpp
+  src/power_flow/solver_data.cpp
+  src/power_flow/voltage_stability.cpp
+  src/power_flow/workspace.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
-  src/optimal_power_flow/opf_model.cpp
+  src/optimal_power_flow/ac_opf.cpp
+  src/optimal_power_flow/dc_opf.cpp
+  src/optimal_power_flow/parity_formulation.cpp
+  src/optimal_power_flow/parity_ipm.cpp
+  src/optimal_power_flow/reactive_power_opt.cpp
+  # ── io (always-available: JSON / MATPOWER / case builders) ───────────────
+  src/io/json_io.cpp
+  src/io/matpower_parser.cpp
+  src/io/case_builders.cpp
+  # ── api ──────────────────────────────────────────────────────────────────
+  src/api/hacdcpf.cpp  # ── analysis stubs ───────────────────────────────────────────────────
+  src/analysis/carbon_analysis.cpp
+  src/analysis/distribution_power_flow.cpp
+  src/analysis/reliability_assessment.cpp
+  src/analysis/resilience_assessment.cpp
+  src/analysis/time_series_pf.cpp
+  # ── market stubs ─────────────────────────────────────────────────────
+  src/market/market_simulation.cpp
+  # ── planning stubs ───────────────────────────────────────────────────
+  src/planning/hybrid_distribution_planning_validation.cpp
+  src/planning/microgrid_planning_solver.cpp)
+
+# ── MIPSolvers orphan sources (not compiled by MIPSolvers itself) ────────────
+# newton_solver.cpp depends on bridge headers provided by hacdcpf's include/
+# The HiGHS-factor utilities provide the LU factorisation back-end.
+set(MIPSOLVERS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src")
+list(APPEND HACDCPF_SOURCES
+  ${MIPSOLVERS_SRC}/engine/solver/native/nle/newton_solver.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactor.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorDebug.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorExtend.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorRefactor.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorUtils.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HSet.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HVectorBase.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsHash.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsMatrixUtils.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsSort.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsSparseMatrix.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsUtils.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/stringutil.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/io/HighsIO.cpp
+  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/lp_data/HighsOptions.cpp
 )
 
-add_library(hacdcdss::hacdcdss ALIAS hacdcdss)
+if(HACDCPF_ENABLE_EXCEL)
+  list(APPEND HACDCPF_SOURCES src/io/excel_io.cpp)
+endif()
+if(HACDCPF_ENABLE_OPENDSS)
+  list(APPEND HACDCPF_SOURCES src/io/opendss_bridge.cpp)
+endif()
+
+add_library(hacdcpf STATIC ${HACDCPF_SOURCES})
+add_library(hacdcpf::hacdcpf ALIAS hacdcpf)
 
 # ── Include paths ─────────────────────────────────────────────────────────────
-target_include_directories(hacdcdss
+target_include_directories(hacdcpf
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+  PRIVATE
+    # Compat shim directory (e.g. spdlog -> fmt bridge)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/compat>
+    # MIPSolvers src/ so orphan .cpp files can find sibling headers
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src>
+    # HiGHS-factor internal headers (util/HFactor.h etc.)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src/engine/kernel/linear_algebra/highs_factor>
 )
 
+# ── Compile definitions ───────────────────────────────────────────────────────
+if(NOT HACDCPF_ENABLE_EXCEL)
+  target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_EXCEL)
+endif()
+if(NOT HACDCPF_ENABLE_OPENDSS)
+  target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_OPENDSS)
+endif()
+
 # ── Link against MIPSolvers (brings Eigen3, fmt, nlohmann_json, HiGHS, Ipopt) ─
-target_link_libraries(hacdcdss PUBLIC mipsolvers::mipsolvers)
+target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
-if(HACDCDSS_ENABLE_WERROR)
-  target_compile_options(hacdcdss PRIVATE
+if(HACDCPF_ENABLE_WERROR)
+  target_compile_options(hacdcpf PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Werror>
     $<$<CXX_COMPILER_ID:MSVC>:/WX>)
 endif()
 
-if(HACDCDSS_ENABLE_NATIVE_ARCH)
-  target_compile_options(hacdcdss PRIVATE
+if(HACDCPF_ENABLE_NATIVE_ARCH)
+  target_compile_options(hacdcpf PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-if(HACDCDSS_BUILD_TESTS)
+if(HACDCPF_BUILD_TESTS)
   include(CTest)
   enable_testing()
   add_subdirectory(tests)

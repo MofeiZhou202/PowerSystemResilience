@@ -1,0 +1,153 @@
+\section{Optimal Network Reconfiguration}
+
+\subsection{Problem Form and Runtime Scope}
+
+This chapter documents the current ONR mixed-integer model for radial feeder
+reconfiguration.  The runtime problem is a LinDistFlow-style MILP with binary
+branch-status variables, feeder-flow variables, squared-voltage variables, and
+connectivity-flow variables, solved through the native branch-and-cut engine.
+
+\subsection{Code Map}
+
+The current implementation is concentrated in:
+\begin{itemize}
+  \item \texttt{src/analysis/topology\_analysis.cpp} for ONR model build, solve, and post-processing,
+  \item \texttt{src/analysis/distribution\_power\_flow.cpp} for radial-feeder checks and distribution-side electrical support,
+  \item \texttt{src/engine/branch\_and\_cut.cpp} and its helper files for MILP solution.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The code-aligned workflow summary lives in two places:
+\begin{itemize}
+  \item Algorithm A13 in Section~\ref{sec:algorithms} for the application-level ONR solve flow,
+  \item Section~\ref{sec:native-branch-and-cut} for the solver-kernel mechanics used underneath the ONR MILP.
+\end{itemize}
+
+\subsection{Current Status}
+
+The ONR route is a live MILP application using the native branch-and-cut stack.
+Its main current boundary is modeling scope: projected canonical AC components
+are supported, but higher-level hybrid overlays such as VPP, microgrid, and
+mobile-storage behavior are not yet injected directly into the ONR MILP.
+
+\subsection{Scope of the Current ONR Module}
+
+The ONR solver now exposes both \texttt{ACSystem} and
+\texttt{HybridPowerSystem} overloads.  The \texttt{HybridPowerSystem} overload
+first projects the rich model through \texttt{project\_to\_canonical\_models()},
+so the current production path can see
+\begin{itemize}
+  \item direct AC buses and branches,
+  \item direct AC loads and generators,
+  \item direct static generators, renewable generators, PV systems, storage, and charging stations,
+  \item projected transformers, switches, flexible loads, asymmetric loads, chargers, and optional three-phase reductions,
+  \item still no automatic injection of \texttt{VPP}, \texttt{Microgrid}, or \texttt{MobileStorage} overlays into the ONR MILP.
+\end{itemize}
+
+\subsection{Decision Variables}
+
+For an AC network with \(m=|\mathcal{E}_{ac}|\) branches and
+\(n=|\mathcal{N}_{ac}|\) buses, the MILP uses the variable blocks
+\begin{align}
+x = \begin{bmatrix}
+\alpha & P & Q & v & f & t
+\end{bmatrix}^{\top},
+\end{align}
+where
+\begin{align}
+\alpha_b &\in \{0,1\} && \text{branch status}, \\
+P_b,Q_b &\in \mathbb{R} && \text{branch active/reactive flow}, \\
+v_i &\in \mathbb{R} && \text{squared bus voltage magnitude}, \\
+f_b &\in \mathbb{R} && \text{single-commodity connectivity flow}, \\
+t_b &\ge 0 && \text{auxiliary variable for } |P_b|.
+\end{align}
+
+\subsection{Net-Injection Model}
+
+The ONR builder computes per-bus net injections directly from the AC component
+tables as
+\begin{align}
+P_i^{net} &= \frac{P_i^{load} + P_i^{cs} - P_i^{gen} - P_i^{sg} - P_i^{ren} - P_i^{pv} - P_i^{stor}}{S_{base}}, \\
+Q_i^{net} &= \frac{Q_i^{load} + Q_i^{cs} - Q_i^{gen} - Q_i^{sg} - Q_i^{ren} - Q_i^{pv} - Q_i^{stor}}{S_{base}}.
+\end{align}
+Storage discharge is therefore treated as generation, and charging stations are
+additional fixed loads.
+
+\subsection{LinDistFlow MILP}
+
+\paragraph{Objective.}
+The objective minimizes a linearized active-loss proxy:
+\begin{align}
+\min_x \sum_{b=1}^{m} r_b t_b.
+\end{align}
+
+\paragraph{Tree cardinality.}
+\begin{align}
+\sum_{b=1}^{m} \alpha_b = n-1.
+\end{align}
+
+\paragraph{Commodity-flow connectivity.}
+The solver uses a single-commodity-flow spanning-tree formulation.  For the root
+bus,
+\begin{align}
+\sum_{b\in\delta^{-}(root)} f_b - \sum_{b\in\delta^{+}(root)} f_b = -(n-1),
+\end{align}
+and for every non-root bus,
+\begin{align}
+\sum_{b\in\delta^{-}(i)} f_b - \sum_{b\in\delta^{+}(i)} f_b = 1.
+\end{align}
+Capacity of \(f_b\) is tied to \(\alpha_b\) using big-\(M\) logic.
+
+\paragraph{Power-balance constraints.}
+For each non-root bus,
+\begin{align}
+\sum_{b\in\delta^{-}(i)} P_b - \sum_{b\in\delta^{+}(i)} P_b &= P_i^{net}, \\
+\sum_{b\in\delta^{-}(i)} Q_b - \sum_{b\in\delta^{+}(i)} Q_b &= Q_i^{net}.
+\end{align}
+
+\paragraph{Voltage-drop constraints.}
+The current implementation uses the LinDistFlow relation relaxed by big-\(M\):
+\begin{align}
+v_j - v_i + 2r_b P_b + 2x_b Q_b &\le M(1-\alpha_b), \\
+-(v_j - v_i + 2r_b P_b + 2x_b Q_b) &\le M(1-\alpha_b).
+\end{align}
+
+\paragraph{Thermal and absolute-value constraints.}
+\begin{align}
+|P_b| &\le P_b^{max}\alpha_b, \\
+|Q_b| &\le Q_b^{max}\alpha_b, \\
+P_b &\le t_b, \\
+-P_b &\le t_b.
+\end{align}
+
+\subsection{Branch-and-Cut Configuration}
+
+The ONR path solves the MILP through the native branch-and-cut engine with the
+following current tuning:
+\begin{itemize}
+  \item cut family: MIR cuts,
+  \item root cut rounds: 5,
+  \item cuts per round: 20,
+  \item branching: pseudocost,
+  \item node selection: hybrid,
+  \item LP node solver: simplex enabled,
+  \item feasibility pump: enabled.
+\end{itemize}
+
+\subsection{Postprocessing and Verification}
+
+The branch-status variables returned by branch-and-cut are snapped to a binary
+assignment with exactly \(n-1\) closed branches.  The resulting switching plan
+is then verified by running the full Newton PF solver on a modified \texttt{ACSystem}
+where branch \texttt{in\_service} flags follow the optimal topology.
+
+\subsection{Current Modeling Boundary}
+
+The ONR module is already useful for radial feeder reconfiguration, but its
+current mathematical scope is intentionally narrower than the main PF/OPF stack.
+The main structural limitations are:
+\begin{itemize}
+  \item no hybrid-side injections from \texttt{VPP}, \texttt{Microgrid}, or \texttt{MobileStorage},
+  \item no integer co-optimization of DER dispatch and topology in the current public API.
+\end{itemize}

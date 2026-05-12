@@ -1,0 +1,492 @@
+\section{Carbon Flow Analysis}
+\label{sec:carbon-analysis}
+
+\subsection{Problem Form and Runtime Scope}
+
+This chapter documents the post-power-flow carbon tracing layer.  It does not
+solve a new electrical operating point.  Instead, it maps a converged canonical
+hybrid network solution into directed carrier flows, source intensities, and
+bus-level carbon intensity metrics.
+
+\subsection{Code Map}
+
+The current implementation is concentrated in:
+\begin{itemize}
+  \item \texttt{src/analysis/carbon\_analysis.cpp} for graph construction, tracing, and matrix-based intensity calculations,
+  \item canonical PF result structures from the power-flow layer for branch, converter, and storage transfers,
+  \item shared component emission-factor fields from the information model.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The code-aligned workflow reference is Algorithm A15 in
+Section~\ref{sec:algorithms}.  This chapter then expands the algebra used in
+that workflow.
+
+\subsection{Current Status}
+
+The carbon-analysis route is implemented as a reporting layer over the canonical
+hybrid network.  The main remaining gaps are source normalization for some
+higher-level hybrid overlays and richer explicit reporting for auxiliary
+participation paths.
+
+\subsection{Purpose and Required Inputs}
+
+The carbon-analysis module is a post-power-flow reporting layer.  It does not
+solve a new electrical operating point.  Instead, it consumes
+\begin{itemize}
+  \item a \texttt{HybridPowerSystem},
+  \item a converged \texttt{PowerFlowResult},
+  \item component emission-factor data already stored in the information model,
+\end{itemize}
+and produces source-to-load carbon tracing reports and matrix-based bus carbon
+intensities on the canonical hybrid AC/DC network.
+
+The public entry points are
+\begin{itemize}
+  \item \texttt{compute\_carbon\_analysis(sys, pf\_result, opt)},
+  \item \texttt{compute\_carbon\_analysis(sys, pf\_opt, ca\_opt)},
+\end{itemize}
+where the second overload simply runs the main PF solver first and then invokes
+the carbon-analysis routine.
+
+\subsection{Implemented Scope and Current Boundary}
+
+The implementation now operates on the same canonical projected network used by
+the steady-state solver.  In particular, the carbon model includes
+\begin{itemize}
+  \item canonical AC buses and AC branches,
+  \item canonical DC buses and DC branches,
+  \item VSC AC/DC converters through \texttt{PowerFlowResult::vsc\_transfers},
+  \item DCDC converters through \texttt{PowerFlowResult::dcdc\_transfers},
+  \item energy routers through \texttt{PowerFlowResult::er\_port\_transfers},
+  \item AC and DC storage as explicit discharge-side carbon sources and charge-side traced sinks.
+\end{itemize}
+
+The current boundary is still narrower than the full information-model catalog:
+\begin{itemize}
+  \item explicit carbon-source normalization now includes \texttt{Generator}, \texttt{StaticGenerator} on AC and DC, \texttt{RenewableGen}, \texttt{PVSystem}, and discharging \texttt{Storage},
+  \item charging \texttt{Storage} is represented as an explicit traced sink, but \texttt{MobileStorage} still participates only through auxiliary slack-balance bookkeeping,
+  \item VPP and microgrid exchange are still treated as auxiliary net-injection terms in slack reconstruction; they are not yet emitted as standalone carbon sources,
+  \item if PF did not converge or both AC and DC bus sets are empty, the routine returns an empty result object.
+\end{itemize}
+
+\subsection{Canonical Hybrid Graph}
+
+Let the projected AC and DC bus sets be
+\begin{align}
+\mathcal{N}^{ac},\qquad \mathcal{N}^{dc},\qquad
+\mathcal{N} = \mathcal{N}^{ac} \cup \mathcal{N}^{dc}.
+\end{align}
+The carbon module builds a directed hybrid carrier graph on \(\mathcal{N}\).
+Each directed carrier edge is represented as
+\begin{align}
+e = \left(u,v,F_e,R_e,L_e\right),
+\end{align}
+where
+\begin{itemize}
+  \item \(u\) is the sending node,
+  \item \(v\) is the receiving node,
+  \item \(F_e\) is the active power entering the carrier at the sending side,
+  \item \(R_e\) is the active power received at the downstream side,
+  \item \(L_e = F_e - R_e\) is the carrier loss.
+\end{itemize}
+The carrier set is
+\begin{align}
+\mathcal{E} = \mathcal{E}^{ac} \cup \mathcal{E}^{dc} \cup \mathcal{E}^{vsc} \cup \mathcal{E}^{dcdc} \cup \mathcal{E}^{er}.
+\end{align}
+
+\subsection{Source and Load Normalization}
+
+\paragraph{Unified source model.}
+Each explicit source is normalized to
+\begin{align}
+s = \left(\mathrm{id}_s,\ i_s,\ P_s,\ e_s\right),
+\end{align}
+where \(i_s \in \mathcal{N}\) is the attached hybrid node, \(P_s\) is the
+actual active injection in MW, and \(e_s\) is the emission factor in
+\(\mathrm{tCO_2/MWh}\).
+
+The implemented source families are
+\begin{align}
+\mathcal{S} =
+\mathcal{G}^{sync}
+\cup \mathcal{G}^{static,ac}
+\cup \mathcal{G}^{static,dc}
+\cup \mathcal{G}^{ren}
+\cup \mathcal{G}^{pv}
+\cup \mathcal{G}^{stor,ac,dis}
+\cup \mathcal{G}^{stor,dc,dis}.
+\end{align}
+The source emission factors are read from
+\begin{align}
+e_s \in
+\left\{
+\begin{aligned}
+&\texttt{Generator::emission\_factor\_tco2\_mwh}, \\
+&\texttt{StaticGenerator::co2\_emission\_rate}, \\
+&0.0, \\
+&\texttt{Storage::soc\_carbon\_intensity\_tco2\_mwh}
+\end{aligned}
+\right\},
+\end{align}
+so \texttt{RenewableGen} and \texttt{PVSystem} are currently treated as
+zero-emission injections.
+
+\paragraph{Storage as explicit source / sink.}
+For storage unit \(s\), the PF sign convention is bus injection:
+\begin{align}
+p_s > 0 \Rightarrow \text{discharge / inject},\qquad
+p_s < 0 \Rightarrow \text{charge / withdraw}.
+\end{align}
+The implemented carbon normalization is
+\begin{align}
+p_s > 0 &: \text{explicit source with } P_s = p_s,\quad e_s = w_s^{soc}, \\
+p_s < 0 &: \text{explicit sink with } P_s^{ch} = -p_s,
+\end{align}
+where
+\begin{align}
+w_s^{soc} = \texttt{Storage::soc\_carbon\_intensity\_tco2\_mwh}.
+\end{align}
+Therefore discharge-side carbon leaves the storage at the current stored-energy
+carbon intensity, while charging-side carbon is traced from the upstream source
+mix and exported in \texttt{storage\_carbon}.
+
+\paragraph{SOC carbon-intensity propagation rule.}
+For a multi-period storage interpretation with interval \(\Delta t\), stored
+energy \(E_{s,t}\), stored carbon inventory \(C_{s,t}\), self-discharge
+\(\sigma_s\), charge efficiency \(\eta_s^{ch}\), discharge power
+\(P_{s,t}^{dis}\), and charging power \(P_{s,t}^{ch}\), the recommended update
+rule is
+\begin{align}
+E_{s,t+1} &= (1-\sigma_s) E_{s,t}
+          + \eta_s^{ch} P_{s,t}^{ch}\Delta t
+          - P_{s,t}^{dis}\Delta t, \\
+C_{s,t+1} &= (1-\sigma_s) C_{s,t}
+          + w_{s,t}^{in}\eta_s^{ch} P_{s,t}^{ch}\Delta t
+          - w_{s,t}^{soc} P_{s,t}^{dis}\Delta t, \\
+w_{s,t+1}^{soc} &= \frac{C_{s,t+1}}{E_{s,t+1}}.
+\end{align}
+The current C++ carbon-analysis module exports the instantaneous field
+\texttt{soc\_carbon\_intensity\_tco2\_mwh} and uses it directly during discharge;
+the dynamic update above is the governing rule for any future time-coupled
+simulation or optimization layer.
+
+\paragraph{Slack-source reconstruction.}
+Non-slack synchronous generators keep their scheduled \texttt{pg\_mw}.  The
+slack source is reconstructed from hybrid active-power balance:
+\begin{align}
+P_{slack} = \max\!\left(
+\sum_{\ell \in \mathcal{L}^{ac,u} \cup \mathcal{L}^{dc,u} \cup \mathcal{L}^{stor,ch}} P_{\ell}
++ \sum_{e \in \mathcal{E}} L_e
++ \sum_{i \in \mathcal{N}^{ac}} G_i^{sh}
+- \sum_{s \in \mathcal{S}_{ns}} P_s
+- P^{aux}_{net},
+0\right),
+\end{align}
+where \(G_i^{sh}\) is the active shunt demand on AC bus \(i\),
+\(\mathcal{S}_{ns}\) is the explicit non-slack source set, and
+\(P^{aux}_{net}\) is the residual net injection from auxiliary components not
+yet promoted to explicit carbon sources or sinks, currently mobile storage, VPP,
+and microgrid exchange terms.
+
+\paragraph{Unified load model.}
+The module constructs
+\begin{align}
+\mathcal{L}^{ac,u},\qquad \mathcal{L}^{dc,u},\qquad \mathcal{L}^{stor,ch},
+\end{align}
+by combining first-class load rows with synthetic bus-demand rows created from
+\texttt{ACBus::pd\_mw} or \texttt{DCBus::pd\_mw} when no explicit component row
+covers that bus, plus one charge-side sink row per in-service storage unit with
+\(p_s<0\).  Each unified load is represented as
+\begin{align}
+\ell = \left(\mathrm{id}_{\ell},\ i_{\ell},\ P_{\ell},\ Q_{\ell}\right).
+\end{align}
+
+\subsection{Directed Carrier Construction}
+
+\paragraph{AC branches.}
+For AC branch \(k=(i,j)\), let the solved terminal injections be
+\(P_{f,k}\) and \(P_{t,k}\).  The branch loss is
+\begin{align}
+L_k = P_{f,k} + P_{t,k}.
+\end{align}
+The directed-edge rule is
+\begin{align}
+P_{f,k} > 0 &:\ i \rightarrow j,\quad F_k = P_{f,k},\quad R_k = \max(-P_{t,k}, 0), \\
+P_{t,k} > 0 &:\ j \rightarrow i,\quad F_k = P_{t,k},\quad R_k = \max(-P_{f,k}, 0).
+\end{align}
+Zero-flow AC branches are omitted from the directed carrier graph.
+
+\paragraph{DC branches.}
+For DC branch \(k=(i,j)\) with resistance \(r_k\), solved endpoint voltages
+\(V_i\) and \(V_j\), and system base \(S_{base}\), the implementation
+reconstructs the DC current and terminal powers as
+\begin{align}
+I_k &= \frac{V_i - V_j}{r_k}, \\
+P_{i\rightarrow k} &= S_{base} V_i I_k, \\
+P_{j\rightarrow k} &= - S_{base} V_j I_k.
+\end{align}
+If \(P_{i\rightarrow k} > 0\), then the edge direction is \(i \rightarrow j\) with
+\begin{align}
+F_k = P_{i\rightarrow k},\qquad
+R_k = \max(-P_{j\rightarrow k}, 0),\qquad
+L_k = P_{i\rightarrow k} + P_{j\rightarrow k}.
+\end{align}
+The opposite direction is used when \(P_{j\rightarrow k} > 0\).
+
+\paragraph{VSC converters.}
+The PF sign convention is bus injection on both sides:
+\begin{align}
+p^{ac}_c + p^{dc}_c + L_c = 0.
+\end{align}
+If the AC side withdraws power from the AC bus,
+\begin{align}
+p^{ac}_c < 0,\qquad p^{dc}_c > 0,
+\end{align}
+then the converter transports carbon from AC to DC with
+\begin{align}
+F_c = -p^{ac}_c,\qquad R_c = p^{dc}_c,\qquad L_c = -(p^{ac}_c + p^{dc}_c).
+\end{align}
+If instead \(p^{dc}_c < 0\) and \(p^{ac}_c > 0\), the same rule is applied in
+DC-to-AC direction.
+
+\paragraph{DCDC converters.}
+For DCDC transfer \((p^{in}_d, p^{out}_d, L_d)\), the bus injections are
+\begin{align}
+P^{inj}_{bus\_in} = -p^{in}_d,\qquad
+P^{inj}_{bus\_out} = p^{out}_d,\qquad
+L_d = p^{in}_d - p^{out}_d.
+\end{align}
+When \(p^{in}_d > 0\) and \(p^{out}_d > 0\), the carbon carrier direction is
+\(bus\_in \rightarrow bus\_out\) with
+\begin{align}
+F_d = p^{in}_d,\qquad R_d = p^{out}_d.
+\end{align}
+If the signs reverse, the directed carrier is flipped accordingly.
+
+\paragraph{Energy routers.}
+Each router port uses the same bus-injection convention:
+\begin{align}
+p_{r,p} < 0 \Rightarrow \text{bus} \rightarrow \text{router input},\qquad
+p_{r,p} > 0 \Rightarrow \text{router} \rightarrow \text{bus output}.
+\end{align}
+For router \(r\), define the active input and output port sets
+\begin{align}
+\mathcal{P}^{in}_r = \{p \mid p_{r,p} < 0\},\qquad
+\mathcal{P}^{out}_r = \{p \mid p_{r,p} > 0\},
+\end{align}
+and the aggregate powers
+\begin{align}
+P_r^{in} = \sum_{p \in \mathcal{P}^{in}_r} (-p_{r,p}),\qquad
+P_r^{out} = \sum_{p \in \mathcal{P}^{out}_r} p_{r,p},\qquad
+L_r = \max(P_r^{in} - P_r^{out}, 0).
+\end{align}
+The carbon module reconstructs a proportional internal carrier graph between
+all input/output port pairs.  For input port \(i\) and output port \(o\),
+\begin{align}
+\beta_o &= \frac{p_{r,o}}{P_r^{out}}, \\
+F_{io} &= (-p_{r,i}) \beta_o, \\
+R_{io} &= F_{io} \cdot \min\!\left(\frac{P_r^{out}}{P_r^{in}}, 1\right), \\
+L_{io} &= F_{io} - R_{io}.
+\end{align}
+This construction preserves the solved port-sign convention, allocates router
+losses from actual port mismatch, and avoids inventing additional loss from the
+metadata field \texttt{loss\_percent}.
+
+\subsection{Proportional Tracing on the Hybrid Graph}
+
+\paragraph{Node inflow composition.}
+For each hybrid node \(n \in \mathcal{N}\), the total inflow used for tracing is
+\begin{align}
+I_n = \sum_{s \in \mathcal{S}_n} P_s + \sum_{e \in \delta^{-}(n)} R_e,
+\end{align}
+where \(\mathcal{S}_n\) is the set of explicit sources attached to node \(n\).
+
+\paragraph{Load tracing.}
+For each load \(\ell\) attached to node \(n\), the initial traced fraction is
+\begin{align}
+\phi_{\ell,n}^{(0)} = \frac{P_{\ell}}{I_n}.
+\end{align}
+During the upstream breadth-first traversal, every visited node \(m\) allocates
+its local explicit sources by
+\begin{align}
+C_{\ell,s} \mathrel{+}= \phi_{\ell,m} P_s,
+\qquad s \in \mathcal{S}_m,
+\end{align}
+and each incoming carrier edge \(e:u\rightarrow m\) propagates the traced
+fraction in proportion to the received-flow share
+\begin{align}
+\phi_{\ell,u} \leftarrow \phi_{\ell,m} \frac{R_e}{I_m}.
+\end{align}
+The resulting source-attribution map \(C_{\ell,s}\) is exported as
+\texttt{LoadCarbonResult::generator\_supply\_mw} for both AC and DC load
+reports.
+
+\paragraph{Carrier-loss tracing.}
+For each lossy carrier edge \(e\), the implementation traces the source
+composition at the sending node and allocates the loss proportionally:
+\begin{align}
+\Lambda_{e,s} \approx \gamma_{e,s} L_e,
+\end{align}
+where \(\gamma_{e,s}\) is the traced source share at the carrier input.  These
+allocations populate
+\begin{itemize}
+  \item \texttt{branch\_carbon} for AC branches,
+  \item \texttt{dc\_branch\_carbon} for DC branches,
+  \item \texttt{vsc\_carbon} for VSC losses,
+  \item \texttt{dcdc\_carbon} for DCDC losses,
+  \item \texttt{energy\_router\_carbon} for router internal losses,
+\end{itemize}
+as well as the aggregated \texttt{generator\_loss\_allocation} map.
+
+\paragraph{Tracing-derived carbon intensity.}
+For any traced demand or lossy carrier item \(x\), the weighted-average carbon
+intensity is
+\begin{align}
+w_x^{trace} = \frac{\sum_s e_s C_{x,s}}{\sum_s C_{x,s}},
+\end{align}
+and the reported emissions are
+\begin{align}
+E_x^{trace} = w_x^{trace} P_x,
+\end{align}
+with \(P_x\) equal to demand MW for loads or loss MW for carriers.
+
+\subsection{Matrix-Based Hybrid Bus Carbon Intensity}
+
+The second path solves one carbon-intensity value per hybrid node.  Define
+\begin{align}
+w = \begin{bmatrix} w^{ac} \\ w^{dc} \end{bmatrix},
+\end{align}
+and let \(\alpha \in [0,1]\) control how carrier losses are split between the
+sending and receiving sides.
+
+\paragraph{Node-level bookkeeping.}
+For each directed carrier edge \(e:u\rightarrow v\), the implementation applies
+\begin{align}
+P_{in,v} &\mathrel{+}= F_e - \alpha L_e, \\
+P_{out,u} &\mathrel{+}= F_e, \\
+P_{out,v} &\mathrel{+}= (1-\alpha)L_e.
+\end{align}
+Explicit source injections are added to \(P_{in}\), while unified AC/DC loads
+and AC shunt conductance demand are added to \(P_{out}\).
+
+\paragraph{Linear system.}
+The upstream transfer matrix is
+\begin{align}
+A_{in}(i,j) =
+\begin{cases}
+F_e - \alpha L_e, & \text{if there is a directed carrier } j \rightarrow i, \\
+0, & \text{otherwise},
+\end{cases}
+\end{align}
+and the hybrid system matrix is
+\begin{align}
+A = \mathrm{diag}(P_{out}) - A_{in},
+\qquad
+b_i = \sum_{s \in \mathcal{S}_i} e_s P_s.
+\end{align}
+The node carbon-intensity vector is obtained from
+\begin{align}
+A w = b.
+\end{align}
+
+\paragraph{End-node handling.}
+When a node has neither local generation nor local load and its system-matrix
+row is nearly singular, the implementation replaces that row with an averaging
+constraint
+\begin{align}
+w_i = \frac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} w_j,
+\end{align}
+so electrically passive end-nodes inherit the intensity of adjacent hybrid
+nodes.  The current linear solver then converts the repaired sparse system to a
+dense matrix and solves it with column-pivoted Householder QR.  The reported
+\texttt{matrix\_residual} is
+\begin{align}
+\|Aw-b\|_2.
+\end{align}
+
+\subsection{Emissions Summaries}
+
+The tracing path reports a generation-vs-load-vs-loss balance:
+\begin{align}
+E_{gen} &= \sum_{s \in \mathcal{S}} e_s P_s, \\
+E_{load}^{trace} &=
+\sum_{\ell \in \mathcal{L}^{ac,u}} E_{\ell}^{trace}
++ \sum_{\ell \in \mathcal{L}^{dc,u}} E_{\ell}^{trace}
++ \sum_{\ell \in \mathcal{L}^{stor,ch}} E_{\ell}^{trace}, \\
+E_{loss}^{trace} &= \sum_{e \in \mathcal{E}} E_e^{trace}.
+\end{align}
+The balance error is
+\begin{align}
+\Delta E^{trace} = E_{gen} - E_{load}^{trace} - E_{loss}^{trace},
+\end{align}
+and the verification flag \texttt{tracing\_verified} checks whether the relative
+balance error is below \texttt{verification\_tol}.
+
+The matrix path reports an analogous summary using solved hybrid node
+intensities:
+\begin{align}
+E_{load}^{mat} &= \sum_{\ell \in \mathcal{L}^{ac,u} \cup \mathcal{L}^{dc,u} \cup \mathcal{L}^{stor,ch}}
+                 w_{i(\ell)} P_{\ell}, \\
+E_{loss}^{mat} &= \sum_{e=(u,v) \in \mathcal{E}} w_u L_e.
+\end{align}
+The matrix loss summary therefore uses the sending-node intensity of each
+carrier rather than the average of the two terminal nodes.
+
+\subsection{Result Artifacts}
+
+The dedicated carbon result object now contains
+\begin{itemize}
+  \item \texttt{load\_carbon} and \texttt{dc\_load\_carbon}: per-load tracing allocations and carbon intensity,
+  \item \texttt{branch\_carbon} and \texttt{dc\_branch\_carbon}: per-branch loss allocations and carbon intensity,
+  \item \texttt{vsc\_carbon} and \texttt{dcdc\_carbon}: converter-loss allocations and hybrid transfer direction,
+  \item \texttt{storage\_carbon}: per-storage charge/discharge carbon summary, including traced charging intensity and explicit discharge-side SOC intensity,
+  \item \texttt{energy\_router\_carbon}: per-router internal-loss carbon allocation reconstructed from port transfers,
+  \item \texttt{bus\_carbon} and \texttt{dc\_bus\_carbon}: matrix-based AC/DC node carbon intensities,
+  \item \texttt{generator\_loss\_allocation}: aggregated traced loss contribution by source id,
+  \item \texttt{tracing\_summary} and \texttt{matrix\_summary},
+  \item \texttt{tracing\_verified}, \texttt{matrix\_solved}, and \texttt{matrix\_residual}.
+\end{itemize}
+
+The field-level JSON / workbook contracts for these artifacts are documented in
+the I/O-contract and output-dictionary sections of this notebook; this chapter
+focuses on the analytical model and the meaning of the reported quantities.
+
+\subsection{Sankey Visualization of Carbon/SO\texorpdfstring{$_2$}{2} Source-Sink Relations}
+
+For engineering review, the repository includes a lightweight post-processing
+workflow to render source-to-sink Sankey charts:
+\begin{enumerate}
+  \item run PF + carbon analysis and export a carbon-result JSON using \texttt{run\_carbon\_analysis\_cli},
+  \item render Sankey HTML using \texttt{tools/plot\_emission\_sankey.py}.
+\end{enumerate}
+
+The standard commands are:
+\begin{verbatim}
+cmake --build build --target run_carbon_analysis_cli -j4
+./build/run_carbon_analysis_cli \
+  --input-system-json <system.json> \
+  --output-carbon-json <carbon_result.json>
+
+python3 tools/plot_emission_sankey.py \
+  --system-json <system.json> \
+  --carbon-json <carbon_result.json> \
+  --output-html <emission_sankey.html> \
+  --aggregate-view bus \
+  --top-n-source-nodes 20 \
+  --top-n-sink-nodes 30 \
+  --top-n-links 200 \
+  --load-granularity bus \
+  --loss-granularity type
+\end{verbatim}
+
+By default, the generated HTML contains two Sankey graphs:
+\begin{itemize}
+  \item carbon flow (\(\mathrm{tCO_2/h}\)),
+  \item sulfur-dioxide flow (\(\mathrm{kg/h}\)).
+\end{itemize}
+The SO\(_2\) graph currently reads source factors from
+\texttt{Generator::so2\_factor\_kg\_mwh}; non-generator source families are
+treated as zero-SO\(_2\) unless optional extension keys are provided in the
+input JSON.

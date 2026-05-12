@@ -1,0 +1,540 @@
+\section{I/O Contracts, Sheet Dictionaries, and JSON Keys}
+
+The model dictionaries in the previous section explain the physical meaning of
+each field.  This section documents the external I/O contract actually exposed
+by the current C++ implementation: JSON path names, Excel sheet names, column
+names, defaulting rules, aggregated views, and the current serialization gaps.
+
+\subsection{Serialization Families}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.18\linewidth}L{0.28\linewidth}}
+\toprule
+API entry point & Artifact & Direction & Practical behavior \\
+\midrule
+\endhead
+\texttt{to\_json} / \texttt{from\_json} & one JSON document for \texttt{HybridPowerSystem} & bidirectional & now covers all major public model families attached to \texttt{HybridPowerSystem}, including \texttt{ac.motors} and optional \texttt{three\_phase\_ac}; some legacy field-level gaps still remain inside individual structs. \\
+\texttt{save\_xlsx} / \texttt{load\_xlsx} & engineering workbook with one table per supported component class & bidirectional & input-oriented Excel template plus derived aggregated views such as \texttt{ACLoad} and \texttt{DCLoad}. \\
+\texttt{save\_results\_xlsx} & dedicated PF result workbook & export only & writes \texttt{Results\_*} sheets only. \\
+\texttt{save\_results\_compact\_xlsx} & input-like workbook with appended PF result columns & export only & rewrites the input sheets, appends \texttt{result\_*} columns to selected tables, and also writes \texttt{Results\_Summary}. \\
+\texttt{save\_opf\_results\_xlsx} & dedicated OPF result workbook & export only & writes \texttt{OPF\_*} sheets only. \\
+\texttt{save\_opf\_results\_compact\_xlsx} & input sheets plus dedicated OPF result sheets & export only & unlike compact PF export, OPF does not append \texttt{result\_*} columns into the input tables; it ships separate \texttt{OPF\_*} sheets beside the input data. \\
+\texttt{opf\_result\_to\_json} / \texttt{opf\_result\_from\_json} & AC OPF result JSON & bidirectional & serializes solver status, primal solution vectors, load shedding vectors, converter vectors, and profiling summary. \\
+\texttt{save\_carbon\_results\_xlsx} / \texttt{carbon\_result\_to\_json} & carbon-analysis workbook / JSON & export only for Excel, bidirectional for JSON & uses dedicated report-oriented structures, not the main system model. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Global Parsing and Workbook Rules}
+
+\begin{longtable}{L{0.22\linewidth}L{0.66\linewidth}}
+\toprule
+Rule & Current implementation behavior \\
+\midrule
+\endhead
+JSON missing keys & Most JSON importers use \texttt{jget(..., default)}; missing optional keys are silently defaulted.  Whole arrays are optional as well. \\
+JSON required keys & Identity and connectivity fields are usually mandatory: for example \texttt{index}, \texttt{bus}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{hv\_bus}, \texttt{lv\_bus}, \texttt{bus\_ac}, and \texttt{bus\_dc}. \\
+JSON enums & Enum values are string-coded: for example \texttt{PQ}/\texttt{PV}/\texttt{SLACK}, \texttt{DC\_V}/\texttt{DC\_P}, \texttt{VDC\_Q}, \texttt{Wind}, \texttt{FuelCell}, \texttt{Recloser}, \texttt{Islanded}. \\
+Excel header row & All Excel tables use row 1 as the header row.  Data rows start at row 2. \\
+Excel row termination & Readers stop at the first row with an empty \texttt{index} cell.  This means blank rows inside a table terminate import early. \\
+Excel missing sheets & \texttt{load\_xlsx} silently skips missing sheets; the corresponding component vector remains empty. \\
+Excel boolean parser & \texttt{TRUE}, \texttt{T}, \texttt{YES}, \texttt{Y}, and \texttt{1} map to true; \texttt{FALSE}, \texttt{F}, \texttt{NO}, \texttt{N}, and \texttt{0} map to false. \\
+Sheet precedence & For AC loads, \texttt{Load} is preferred; \texttt{ACLoad} is used only as a fallback.  For DC loads, \texttt{DCLoadRaw} is preferred; \texttt{DCLoad} is only a fallback. \\
+Bus-demand synchronization & After Excel import, \texttt{sync\_bus\_demands\_from\_load\_tables(sys)} is called so the bus-level embedded demand reflects the explicit load tables. \\
+Aggregated Excel views & \texttt{ACBus} and \texttt{DCBus} written by the Excel exporters are aggregated bus views, not always the raw struct contents; \texttt{ACLoad} and \texttt{DCLoad} are explicitly derived tables. \\
+Empty result sheets in templates & \texttt{save\_xlsx} currently pre-creates the \texttt{Results\_*} sheets even though it does not fill them.  A freshly exported template therefore contains empty result tabs. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Hybrid System JSON Contract}
+
+\subsubsection*{Top-level JSON object}
+
+\begin{longtable}{L{0.20\linewidth}L{0.28\linewidth}L{0.42\linewidth}}
+\toprule
+JSON path & Value type & Current meaning \\
+\midrule
+\endhead
+\texttt{name} & scalar string & top-level \texttt{HybridPowerSystem::name}. \\
+\texttt{base\_mva} & scalar number & top-level system base. \\
+\texttt{ac} & object & AC subsystem object with its own name, base, frequency, and AC component arrays. \\
+\texttt{dc} & object & DC subsystem object with its own name, base, and DC component arrays. \\
+\texttt{vsc\_converters} & array & top-level VSC array. \\
+\texttt{dcdc\_converters} & array & top-level DC/DC converter array. \\
+\texttt{energy\_routers} & array & top-level multi-port router array; ports are nested inside each router object. \\
+\texttt{mobile\_storage} & array & top-level mobile-storage array. \\
+\texttt{vpps} & array & top-level virtual power plant array. \\
+\texttt{microgrids} & array & top-level microgrid array. \\
+\texttt{three\_phase\_ac} & object & optional unbalanced AC subsystem with its own base, frequency, and three-phase component arrays. \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{Current JSON caveats}
+
+\begin{longtable}{L{0.24\linewidth}L{0.56\linewidth}}
+\toprule
+Public model area & Current JSON status \\
+\midrule
+\endhead
+Standalone energy-router port array & not used; ports appear only as nested objects under each \texttt{energy\_routers[i].ports}. \\
+\texttt{Load} short-circuit subfields & the embedded SC motor-fraction fields \texttt{sn\_mva}, \texttt{motor\_percent}, \texttt{x\_sub\_pu}, and \texttt{r\_sc\_pu} are still not part of the main \texttt{ac.loads[]} JSON contract. \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{AC-network and demand JSON objects}
+
+\footnotesize
+\begin{longtable}{L{0.14\linewidth}L{0.18\linewidth}L{0.18\linewidth}L{0.33\linewidth}}
+\toprule
+Model & JSON path & Required keys on import & Other exported keys \\
+\midrule
+\endhead
+\texttt{ACBus} & \texttt{ac.buses[]} & \texttt{index} & \texttt{bus\_type}, \texttt{pd\_mw}, \texttt{qd\_mvar}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{area}, \texttt{base\_kv}, \texttt{vmax\_pu}, \texttt{vmin\_pu}, \texttt{gs\_mw}, \texttt{bs\_mvar}, \texttt{zone}, \texttt{in\_service}, \texttt{name}, \texttt{n\_customers}, \texttt{importance}, \texttt{latitude}, \texttt{longitude} \\
+\texttt{ACBranch} & \texttt{ac.branches[]} & \texttt{index}, \texttt{from\_bus}, \texttt{to\_bus} & \texttt{r\_pu}, \texttt{x\_pu}, \texttt{b\_pu}, \texttt{tap}, \texttt{shift\_deg}, \texttt{rate\_a\_mva}, \texttt{rate\_b\_mva}, \texttt{rate\_c\_mva}, \texttt{in\_service}, \texttt{name}, \texttt{length\_km}, \texttt{failure\_rate}, \texttt{mttr\_hr} \\
+\texttt{Load} & \texttt{ac.loads[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{model}, \texttt{z\_percent\_p}, \texttt{i\_percent\_p}, \texttt{p\_percent\_p}, \texttt{z\_percent\_q}, \texttt{i\_percent\_q}, \texttt{p\_percent\_q}, \texttt{controllable}, \texttt{p\_min\_mw}, \texttt{cost\_mw}, \texttt{priority}, \texttt{n\_customers}, \texttt{profile\_id} \\
+\texttt{FlexibleLoad} & \texttt{ac.flexible\_loads[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{flex\_up\_mw}, \texttt{flex\_down\_mw}, \texttt{flex\_duration\_h}, \texttt{response\_time\_s}, \texttt{ramp\_rate\_mw\_min}, \texttt{availability\_pct}, \texttt{controllable}, \texttt{priority}, \texttt{control\_area} \\
+\texttt{AsymmetricLoad} & \texttt{ac.asymmetric\_loads[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{connection}, \texttt{grounded}, \texttt{pa\_rated\_mw}, \texttt{qa\_rated\_mvar}, \texttt{pb\_rated\_mw}, \texttt{qb\_rated\_mvar}, \texttt{pc\_rated\_mw}, \texttt{qc\_rated\_mvar}, \texttt{pa\_mw}, \texttt{qa\_mvar}, \texttt{pb\_mw}, \texttt{qb\_mvar}, \texttt{pc\_mw}, \texttt{qc\_mvar}, \texttt{scaling}, \texttt{const\_z\_percent}, \texttt{const\_i\_percent}, \texttt{const\_p\_percent}, \texttt{controllable}, \texttt{priority} \\
+\texttt{Shunt} & \texttt{ac.shunts[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{gs\_mw}, \texttt{bs\_mvar}, \texttt{switchable}, \texttt{n\_steps}, \texttt{current\_step}, \texttt{bs\_per\_step} \\
+\texttt{Switch} & \texttt{ac.switches[]} & \texttt{index}, \texttt{bus\_from}, \texttt{bus\_to} & \texttt{name}, \texttt{in\_service}, \texttt{switch\_type}, \texttt{closed}, \texttt{r\_contact\_ohm}, \texttt{z\_ohm}, \texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka}, \texttt{element\_type}, \texttt{element\_id}, \texttt{is\_remote}, \texttt{is\_automated}, \texttt{t\_operation\_s}, \texttt{p\_sw\_fail}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\texttt{ChargingStation} & \texttt{ac.charging\_stations[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{location}, \texttt{in\_service}, \texttt{n\_fast}, \texttt{n\_slow}, \texttt{num\_chargers}, \texttt{p\_fast\_max\_kw}, \texttt{p\_slow\_max\_kw}, \texttt{max\_power\_kw}, \texttt{simultaneity\_factor}, \texttt{power\_factor}, \texttt{utilization\_rate}, \texttt{p\_total\_kw}, \texttt{q\_total\_kvar}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\texttt{Charger} & \texttt{ac.chargers[]} & \texttt{index} & \texttt{name}, \texttt{station\_id}, \texttt{charger\_type}, \texttt{in\_service}, \texttt{p\_rated\_kw}, \texttt{p\_ch\_max\_kw}, \texttt{p\_ch\_min\_kw}, \texttt{eta}, \texttt{v2g\_capable}, \texttt{p\_dis\_max\_kw}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\shortstack[l]{\texttt{Asynchronous}\\\texttt{Motor}} & \texttt{ac.motors[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{in\_service}, machine ratings, direct / zero-sequence parameters, locked-rotor data, and efficiency metadata \\
+\texttt{ExternalGrid} & \texttt{ac.external\_grids[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{in\_service}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{s\_sc\_max\_mva}, \texttt{s\_sc\_min\_mva}, \texttt{rx\_max}, \texttt{rx\_min}, \texttt{r\_pu}, \texttt{x\_pu}, \texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{vn\_kv}, \texttt{controllable} \\
+\texttt{Transformer2W} & \texttt{ac.transformers\_2w[]} & \texttt{index}, \texttt{hv\_bus}, \texttt{lv\_bus} & \texttt{name}, \texttt{std\_type}, \texttt{in\_service}, \texttt{sn\_mva}, \texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv}, \texttt{vk\_percent}, \texttt{vkr\_percent}, \texttt{pk\_kw}, \texttt{pfe\_kw}, \texttt{i0\_percent}, \texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_min}, \texttt{tap\_max}, \texttt{tap\_neutral}, \texttt{tap\_step\_percent}, \texttt{shift\_deg}, \texttt{vector\_group}, \texttt{z0\_percent}, \texttt{x0\_r0}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\texttt{Transformer3W} & \texttt{ac.transformers\_3w[]} & \texttt{index}, \texttt{hv\_bus}, \texttt{mv\_bus}, \texttt{lv\_bus} & \texttt{name}, \texttt{std\_type}, \texttt{in\_service}, \texttt{sn\_hv\_mva}, \texttt{sn\_mv\_mva}, \texttt{sn\_lv\_mva}, \texttt{vn\_hv\_kv}, \texttt{vn\_mv\_kv}, \texttt{vn\_lv\_kv}, \texttt{vk\_hv\_mv\_percent}, \texttt{vk\_hv\_lv\_percent}, \texttt{vk\_mv\_lv\_percent}, \texttt{vkr\_hv\_mv\_percent}, \texttt{vkr\_hv\_lv\_percent}, \texttt{vkr\_mv\_lv\_percent}, \texttt{pfe\_kw}, \texttt{i0\_percent}, \texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_step\_percent}, \texttt{shift\_mv\_deg}, \texttt{shift\_lv\_deg}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsubsection*{Generation, storage, and hybrid JSON objects}
+
+\footnotesize
+\begin{longtable}{L{0.14\linewidth}L{0.18\linewidth}L{0.18\linewidth}L{0.33\linewidth}}
+\toprule
+Model & JSON path & Required keys on import & Other exported keys \\
+\midrule
+\endhead
+\texttt{Generator} & \texttt{ac.generators[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{pg\_mw}, \texttt{qg\_mvar}, \texttt{vg\_pu}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{is\_slack}, \texttt{cost\_c2}, \texttt{cost\_c1}, \texttt{cost\_c0}, \texttt{name}, \texttt{fuel\_type}, \texttt{startup\_cost}, \texttt{shutdown\_cost}, \texttt{min\_up\_time\_hr}, \texttt{min\_dn\_time\_hr}, \texttt{ramp\_up\_mw\_min}, \texttt{ramp\_dn\_mw\_min}, \texttt{mbase\_mva}, \texttt{inertia\_h}, \texttt{droop\_r}, \texttt{xd\_pu}, \texttt{xdp\_pu}, \texttt{xdpp\_pu}, \texttt{td0p\_s}, \texttt{td0pp\_s}, \texttt{emission\_factor\_tco2\_mwh}, \texttt{nox\_factor\_kg\_mwh}, \texttt{so2\_factor\_kg\_mwh}, \texttt{forced\_outage\_rate}, \texttt{mttr\_hr} \\
+\texttt{StaticGenerator} & \texttt{ac.static\_generators[]} or \texttt{dc.static\_generators[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{sgen\_type}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{sn\_mva}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{scaling}, \texttt{controllable}, \texttt{v\_ref\_pu}, \texttt{k\_p}, \texttt{k\_q}, \texttt{k}, \texttt{rx}, \texttt{co2\_emission\_rate}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\texttt{RenewableGen} & \texttt{ac.renewable\_gens[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{type}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{curtailable}, \texttt{cost\_curtail\_mwh}, \texttt{capacity\_factor}, \texttt{profile\_id}, \texttt{emission\_offset\_tco2\_mwh} \\
+\texttt{PVSystem} & \texttt{ac.pv\_systems[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{sn\_mva}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{control\_mode}, \texttt{controllable}, \texttt{v\_ac\_set\_pu}, \texttt{v\_dc\_set\_pu}, \texttt{inverter\_eff}, \texttt{loss\_percent}, \texttt{num\_series}, \texttt{num\_parallel}, \texttt{vmpp}, \texttt{impp}, \texttt{voc}, \texttt{isc}, \texttt{alpha\_isc}, \texttt{beta\_voc}, \texttt{irradiance}, \texttt{temperature}, \texttt{mtbf\_panel\_hours}, \texttt{mttr\_panel\_hours}, \texttt{mtbf\_inverter\_hours}, \texttt{mttr\_inverter\_hours} \\
+\texttt{Storage} & \texttt{ac.storage[]} or \texttt{dc.storage[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{e\_rated\_mwh}, \texttt{soc\_init}, \texttt{soc\_min}, \texttt{soc\_max}, \texttt{soc\_carbon\_intensity\_tco2\_mwh}, \texttt{eta\_charge}, \texttt{eta\_discharge}, \texttt{self\_discharge\_pct}, \texttt{max\_cycles}, \texttt{current\_cycles}, \texttt{soh}, \texttt{replacement\_cost}, \texttt{forced\_outage\_rate}, \texttt{mttr\_hr} \\
+\texttt{DCBus} & \texttt{dc.buses[]} & \texttt{index} & \texttt{bus\_type}, \texttt{vm\_pu}, \texttt{vmax\_pu}, \texttt{vmin\_pu}, \texttt{pd\_mw}, \texttt{in\_service}, \texttt{name} \\
+\texttt{DCBranch} & \texttt{dc.branches[]} & \texttt{index}, \texttt{from\_bus}, \texttt{to\_bus} & \texttt{r\_pu}, \texttt{rate\_a\_mva}, \texttt{in\_service}, \texttt{name}, \texttt{length\_km} \\
+\texttt{VSCConverter} & \texttt{vsc\_converters[]} & \texttt{index}, \texttt{bus\_ac}, \texttt{bus\_dc} & \texttt{in\_service}, \texttt{control\_mode}, \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_dc\_set\_pu}, \texttt{v\_ac\_set\_pu}, \texttt{eta}, \texttt{loss\_percent}, \texttt{loss\_mw}, \texttt{k\_vdc}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{p\_rated\_mw}, \texttt{name}, \texttt{forced\_outage\_rate}, \texttt{mttr\_hr} \\
+\texttt{DCDCConverter} & \texttt{dcdc\_converters[]} & \texttt{index}, \texttt{bus\_in}, \texttt{bus\_out} & \texttt{in\_service}, \texttt{name}, \texttt{control\_mode}, \texttt{p\_ref\_mw}, \texttt{v\_ref\_pu}, \texttt{sn\_mva}, \texttt{vn\_in\_kv}, \texttt{vn\_out\_kv}, \texttt{eta}, \texttt{r\_eq\_pu}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{k\_droop}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\shortstack[l]{\texttt{EnergyRouter}\\\texttt{Port}} & \texttt{energy\_routers[].ports[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{port\_type}, \texttt{voltage\_level\_kv}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{v\_pu}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{control\_mode}, \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_set\_pu}, \texttt{in\_service} \\
+\texttt{EnergyRouter} & \texttt{energy\_routers[]} & \texttt{index} & \texttt{name}, \texttt{in\_service}, \texttt{router\_type}, \texttt{num\_ports}, \texttt{ports}, \texttt{p\_rated\_mw}, \texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv}, \texttt{loss\_percent}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\texttt{MobileStorage} & \texttt{mobile\_storage[]} & \texttt{index}, \texttt{bus} & \texttt{in\_service}, \texttt{name}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{e\_rated\_mwh}, \texttt{soc\_init}, \texttt{soc\_min}, \texttt{soc\_max}, \texttt{eta\_charge}, \texttt{eta\_discharge}, \texttt{max\_cycles}, \texttt{current\_cycles}, \texttt{soh}, \texttt{is\_mobile}, \texttt{status}, \texttt{current\_location}, \texttt{target\_bus}, \texttt{e\_consumption\_mwh\_km}, \texttt{max\_travel\_distance\_km}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\shortstack[l]{\texttt{VirtualPower}\\\texttt{Plant}} & \texttt{vpps[]} & \texttt{index} & \texttt{name}, \texttt{description}, \texttt{aggregation\_bus}, resource-count fields, aggregate capability / output terms, ramp limits, reliability metadata, and \texttt{in\_service} \\
+\texttt{Microgrid} & \texttt{microgrids[]} & \texttt{index} & \texttt{name}, \texttt{description}, \texttt{in\_service}, \texttt{pcc\_bus}, \texttt{internal\_buses}, \texttt{operating\_mode}, \texttt{islanding\_capability}, \texttt{auto\_reconnection}, \texttt{p\_exchange\_max\_mw}, \texttt{p\_exchange\_min\_mw}, \texttt{p\_import\_max\_mw}, \texttt{p\_export\_max\_mw}, \texttt{p\_exchange\_mw}, \texttt{total\_generation\_mw}, \texttt{total\_storage\_mwh}, \texttt{total\_load\_mw}, \texttt{capacity\_mw}, \texttt{peak\_load\_mw}, \texttt{f\_set\_hz}, \texttt{v\_set\_pu}, \texttt{k\_droop}, \texttt{area}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{ACSystem}} & \texttt{three\_phase\_ac} & none & \texttt{name}, \texttt{base\_mva}, \texttt{base\_freq\_hz}, and component arrays for buses, lines, transformers, loads, generators, and external grids \\
+\shortstack[l]{\texttt{ThreePhaseAC}\\\texttt{Bus}} & \texttt{three\_phase\_ac.buses[]} & \texttt{index} & \texttt{bus\_type}, \texttt{name}, \texttt{base\_kv}, \texttt{in\_service}, \texttt{vm\_a\_pu}, \texttt{va\_a\_deg}, \texttt{vm\_b\_pu}, \texttt{va\_b\_deg}, \texttt{vm\_c\_pu}, \texttt{va\_c\_deg}, \texttt{pd\_a\_mw}, \texttt{qd\_a\_mvar}, \texttt{pd\_b\_mw}, \texttt{qd\_b\_mvar}, \texttt{pd\_c\_mw}, \texttt{qd\_c\_mvar}, \texttt{gs\_a\_mw}, \texttt{bs\_a\_mvar}, \texttt{gs\_b\_mw}, \texttt{bs\_b\_mvar}, \texttt{gs\_c\_mw}, \texttt{bs\_c\_mvar}, \texttt{vmin\_pu}, \texttt{vmax\_pu}, \texttt{area}, \texttt{zone} \\
+\shortstack[l]{\texttt{ThreePhaseAC}\\\texttt{Line}} & \texttt{three\_phase\_ac.lines[]} & \texttt{index}, \texttt{from\_bus}, \texttt{to\_bus} & \texttt{name}, \texttt{in\_service}, \texttt{length\_km}, \texttt{parallel}, \texttt{r1\_ohm\_per\_km}, \texttt{x1\_ohm\_per\_km}, \texttt{c1\_nf\_per\_km}, \texttt{r0\_ohm\_per\_km}, \texttt{x0\_ohm\_per\_km}, \texttt{c0\_nf\_per\_km}, \texttt{r1\_pu}, \texttt{x1\_pu}, \texttt{b1\_pu}, \texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{b0\_pu}, \texttt{max\_i\_ka}, \texttt{rate\_a\_mva}, \texttt{failure\_rate}, \texttt{mttr\_hr} \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{Transformer}} & \texttt{three\_phase\_ac.transformers[]} & \texttt{index}, \texttt{hv\_bus}, \texttt{lv\_bus} & \texttt{name}, \texttt{in\_service}, nameplate data, leakage and magnetizing terms, zero-sequence data, tap settings, vector group, and reliability metadata \\
+\texttt{ThreePhaseLoad} & \texttt{three\_phase\_ac.loads[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{in\_service}, \texttt{connection}, \texttt{grounded}, \texttt{p\_a\_mw}, \texttt{q\_a\_mvar}, \texttt{p\_b\_mw}, \texttt{q\_b\_mvar}, \texttt{p\_c\_mw}, \texttt{q\_c\_mvar}, \texttt{const\_z\_percent}, \texttt{const\_i\_percent}, \texttt{const\_p\_percent}, \texttt{motor\_percent}, \texttt{lrc\_pu}, \texttt{x\_r\_ratio} \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{Generator}} & \texttt{three\_phase\_ac.generators[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{in\_service}, \texttt{is\_slack}, dispatch setpoints / limits, voltage target, machine base, and sequence reactance terms \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{ExternalGrid}} & \texttt{three\_phase\_ac.external\_grids[]} & \texttt{index}, \texttt{bus} & \texttt{name}, \texttt{in\_service}, voltage target, short-circuit level bounds, \(R/X\) bounds, and sequence Thevenin terms \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsubsection*{Result JSON objects}
+
+\begin{longtable}{L{0.22\linewidth}L{0.32\linewidth}L{0.36\linewidth}}
+\toprule
+JSON artifact & Top-level keys & Current note \\
+\midrule
+\endhead
+\texttt{ACOPFResult} JSON & \texttt{converged}, \texttt{iterations}, \texttt{outer\_iterations}, \texttt{objective}, \texttt{max\_constraint\_violation}, \texttt{max\_stationarity}, \texttt{status}, \texttt{vm}, \texttt{va}, \texttt{pg\_mw}, \texttt{qg\_mvar}, \texttt{dpd\_mw}, \texttt{dqd\_mvar}, \texttt{pac\_mw}, \texttt{qac\_mvar}, \texttt{profiling} & \texttt{profiling} is a nested object containing \texttt{linear\_solver\_backend}, \texttt{analyze\_calls}, \texttt{factorization\_calls}, \texttt{linear\_solve\_calls}, \texttt{total\_iterations}, \texttt{accepted\_steps}, \texttt{rejected\_steps}, \texttt{final\_barrier\_mu}. \\
+\texttt{CarbonAnalysisResult} JSON & \texttt{tracing\_verified}, \texttt{matrix\_solved}, \texttt{matrix\_residual}, \texttt{load\_carbon}, \texttt{dc\_load\_carbon}, \texttt{branch\_carbon}, \texttt{dc\_branch\_carbon}, \texttt{bus\_carbon}, \texttt{dc\_bus\_carbon}, \texttt{vsc\_carbon}, \texttt{dcdc\_carbon}, \texttt{storage\_carbon}, \texttt{energy\_router\_carbon}, \texttt{generator\_loss\_allocation}, \texttt{tracing\_summary}, \texttt{matrix\_summary} & AC/DC load arrays carry the same scalar fields plus nested \texttt{generator\_supply\_mw}; branch / converter / router arrays expose loss and direction fields; \texttt{storage\_carbon} adds charge/discharge-side storage semantics including traced charging intensity. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Excel Input Workbook Contract}
+
+\subsubsection*{Input-sheet catalog}
+
+\footnotesize
+\begin{longtable}{L{0.15\linewidth}L{0.15\linewidth}L{0.42\linewidth}L{0.18\linewidth}}
+\toprule
+Sheet & Primary model / load target & Columns & Current note \\
+\midrule
+\endhead
+\texttt{Info} & global metadata & \texttt{Key}, \texttt{Value} & loader recognizes \texttt{name}, \texttt{base\_mva}, \texttt{ac\_freq\_hz}, \texttt{three\_phase\_name}, \texttt{three\_phase\_base\_mva}, and \texttt{three\_phase\_base\_freq\_hz}. \\
+\texttt{ACBus} & \texttt{ACBus} & \texttt{index}, \texttt{name}, \texttt{bus\_type}, \texttt{pd\_mw}, \texttt{qd\_mvar}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{base\_kv}, \texttt{vmin\_pu}, \texttt{vmax\_pu}, \texttt{gs\_mw}, \texttt{bs\_mvar}, \texttt{area}, \texttt{zone}, \texttt{in\_service}, \texttt{n\_customers}, \texttt{importance}, \texttt{latitude}, \texttt{longitude} & write path uses aggregated AC demand, not necessarily the raw bus fields. \\
+\texttt{ACBranch} & \texttt{ACBranch} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{x\_pu}, \texttt{b\_pu}, \texttt{tap}, \texttt{shift\_deg}, \texttt{rate\_a\_mva}, \texttt{rate\_b\_mva}, \texttt{rate\_c\_mva}, \texttt{length\_km}, \texttt{in\_service}, \texttt{failure\_rate}, \texttt{mttr\_hr} & near-1:1 with JSON coverage. \\
+\texttt{Generator} & \texttt{Generator} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{pg\_mw}, \texttt{qg\_mvar}, \texttt{vg\_pu}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{is\_slack}, \texttt{fuel\_type}, \texttt{mbase\_mva}, \texttt{cost\_c2}, \texttt{cost\_c1}, \texttt{cost\_c0}, \texttt{in\_service}, \texttt{inertia\_h}, \texttt{droop\_r}, \texttt{ramp\_up\_mw\_min}, \texttt{ramp\_dn\_mw\_min} & Excel omits the deeper machine, emissions, and commitment fields that JSON keeps. \\
+\texttt{Load} & \texttt{Load} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{model}, \texttt{z\_percent\_p}, \texttt{i\_percent\_p}, \texttt{p\_percent\_p}, \texttt{z\_percent\_q}, \texttt{i\_percent\_q}, \texttt{p\_percent\_q}, \texttt{controllable}, \texttt{priority}, \texttt{cost\_mw}, \texttt{in\_service} & raw explicit AC load table. \\
+\texttt{ACLoad} & fallback \texttt{Load} import; aggregated export view & same columns as \texttt{Load} & written as a derived table that aggregates \texttt{Load}, charging stations, charging storage, VPP imports, microgrid imports, and AC router ports. \\
+\texttt{FlexibleLoad} & \texttt{FlexibleLoad} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{flex\_up\_mw}, \texttt{flex\_down\_mw}, \texttt{flex\_duration\_h}, \texttt{response\_time\_s}, \texttt{ramp\_rate\_mw\_min}, \texttt{availability\_pct}, \texttt{controllable}, \texttt{priority}, \texttt{control\_area}, \texttt{in\_service} & dedicated Excel input sheet now exists; these rows are still converted to canonical \texttt{Load} equivalents before PF/OPF/SC assembly. \\
+\texttt{AsymmetricLoad} & \texttt{AsymmetricLoad} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{connection}, \texttt{grounded}, \texttt{pa\_rated\_mw}, \texttt{qa\_rated\_mvar}, \texttt{pb\_rated\_mw}, \texttt{qb\_rated\_mvar}, \texttt{pc\_rated\_mw}, \texttt{qc\_rated\_mvar}, \texttt{pa\_mw}, \texttt{qa\_mvar}, \texttt{pb\_mw}, \texttt{qb\_mvar}, \texttt{pc\_mw}, \texttt{qc\_mvar}, \texttt{scaling}, \texttt{const\_z\_percent}, \texttt{const\_i\_percent}, \texttt{const\_p\_percent}, \texttt{controllable}, \texttt{priority}, \texttt{in\_service} & dedicated Excel input sheet now exists; solver-side use still relies on projection to a single \texttt{Load} equivalent. \\
+\texttt{StaticGenerator} & AC \texttt{StaticGenerator} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{sgen\_type}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{sn\_mva}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{scaling}, \texttt{controllable}, \texttt{in\_service} & Excel omits control, SC, emissions, and reliability metadata. \\
+\texttt{Storage} & AC \texttt{Storage} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{e\_rated\_mwh}, \texttt{soc\_init}, \texttt{soc\_min}, \texttt{soc\_max}, \texttt{eta\_charge}, \texttt{eta\_discharge}, \texttt{in\_service} & Excel omits lifecycle and outage fields. \\
+\texttt{RenewableGen} & \texttt{RenewableGen} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{type}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{curtailable}, \texttt{capacity\_factor}, \texttt{in\_service} & Excel omits \texttt{cost\_curtail\_mwh}, \texttt{profile\_id}, and emission-offset metadata. \\
+\texttt{PVSystem} & \texttt{PVSystem} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{sn\_mva}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{control\_mode}, \texttt{inverter\_eff}, \texttt{in\_service} & Excel keeps only a narrow operational subset; JSON is much richer. \\
+\texttt{Shunt} & \texttt{Shunt} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{gs\_mw}, \texttt{bs\_mvar}, \texttt{switchable}, \texttt{n\_steps}, \texttt{current\_step}, \texttt{bs\_per\_step}, \texttt{in\_service} & near-1:1 with JSON coverage. \\
+\texttt{ExternalGrid} & \texttt{ExternalGrid} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{s\_sc\_max\_mva}, \texttt{s\_sc\_min\_mva}, \texttt{rx\_max}, \texttt{rx\_min}, \texttt{controllable}, \texttt{in\_service} & Excel omits explicit Thevenin impedance fields present in JSON. \\
+\texttt{Transformer2W} & \texttt{Transformer2W} & \texttt{index}, \texttt{name}, \texttt{hv\_bus}, \texttt{lv\_bus}, \texttt{sn\_mva}, \texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv}, \texttt{vk\_percent}, \texttt{vkr\_percent}, \texttt{pfe\_kw}, \texttt{i0\_percent}, \texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_min}, \texttt{tap\_max}, \texttt{tap\_neutral}, \texttt{tap\_step\_percent}, \texttt{shift\_deg}, \texttt{vector\_group}, \texttt{in\_service} & Excel omits \texttt{std\_type}, \texttt{pk\_kw}, zero-sequence, and reliability fields. \\
+\texttt{Transformer3W} & \texttt{Transformer3W} & \texttt{index}, \texttt{name}, \texttt{std\_type}, \texttt{hv\_bus}, \texttt{mv\_bus}, \texttt{lv\_bus}, \texttt{sn\_hv\_mva}, \texttt{sn\_mv\_mva}, \texttt{sn\_lv\_mva}, \texttt{vn\_hv\_kv}, \texttt{vn\_mv\_kv}, \texttt{vn\_lv\_kv}, \texttt{vk\_hv\_mv\_percent}, \texttt{vk\_hv\_lv\_percent}, \texttt{vk\_mv\_lv\_percent}, \texttt{vkr\_hv\_mv\_percent}, \texttt{vkr\_hv\_lv\_percent}, \texttt{vkr\_mv\_lv\_percent}, \texttt{pfe\_kw}, \texttt{i0\_percent}, \texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_step\_percent}, \texttt{shift\_mv\_deg}, \texttt{shift\_lv\_deg}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{in\_service} & dedicated Excel input sheet now exists; solver-side treatment still projects the device into equivalent branches. \\
+\texttt{ChargingStation} & \texttt{ChargingStation} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{n\_fast}, \texttt{n\_slow}, \texttt{num\_chargers}, \texttt{p\_fast\_max\_kw}, \texttt{p\_slow\_max\_kw}, \texttt{max\_power\_kw}, \texttt{simultaneity\_factor}, \texttt{power\_factor}, \texttt{p\_total\_kw}, \texttt{q\_total\_kvar}, \texttt{in\_service} & Excel omits \texttt{location}, \texttt{utilization\_rate}, and reliability fields. \\
+\texttt{Charger} & \texttt{Charger} & \texttt{index}, \texttt{name}, \texttt{station\_id}, \texttt{charger\_type}, \texttt{in\_service}, \texttt{p\_rated\_kw}, \texttt{p\_ch\_max\_kw}, \texttt{p\_ch\_min\_kw}, \texttt{eta}, \texttt{v2g\_capable}, \texttt{p\_dis\_max\_kw}, \texttt{mtbf\_hours}, \texttt{mttr\_hours} & dedicated Excel input sheet now exists; charger rows are linked to their parent station by \texttt{station\_id}. \\
+\shortstack[l]{\texttt{Asynchronous}\\\texttt{Motor}} & \shortstack[l]{\texttt{Asynchronous}\\\texttt{Motor}} & \texttt{index}, \texttt{name}, \texttt{bus}, machine ratings, direct / zero-sequence parameters, SC motor data, and \texttt{in\_service} & dedicated Excel input sheet now exists for short-circuit motor data. \\
+\texttt{Switch} & \texttt{Switch} & \texttt{index}, \texttt{name}, \texttt{bus\_from}, \texttt{bus\_to}, \texttt{switch\_type}, \texttt{closed}, \texttt{in\_service} & Excel keeps only the topology/status subset. \\
+\texttt{DCBus} & \texttt{DCBus} & \texttt{index}, \texttt{name}, \texttt{bus\_type}, \texttt{vm\_pu}, \texttt{vmax\_pu}, \texttt{vmin\_pu}, \texttt{pd\_mw}, \texttt{in\_service} & write path uses aggregated DC demand. \\
+\texttt{DCLoad} & fallback \texttt{DCLoad} import; aggregated export view & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{p\_mw}, \texttt{controllable}, \texttt{p\_min\_mw}, \texttt{cost\_mw}, \texttt{in\_service} & written as derived aggregated DC demand. \\
+\texttt{DCLoadRaw} & raw \texttt{DCLoad} table & same columns as \texttt{DCLoad} & preserves the unaggregated DC load objects and is preferred on import. \\
+\texttt{DCBranch} & \texttt{DCBranch} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{rate\_a\_mva}, \texttt{length\_km}, \texttt{in\_service} & near-1:1 with JSON coverage. \\
+\texttt{DCStorage} & DC \texttt{Storage} & same columns as \texttt{Storage} & same coverage limits as AC storage. \\
+\texttt{DCStaticGen} & DC \texttt{StaticGenerator} & same columns as \texttt{StaticGenerator} & same coverage limits as AC static generators. \\
+\texttt{VSCConverter} & \texttt{VSCConverter} & \texttt{index}, \texttt{name}, \texttt{bus\_ac}, \texttt{bus\_dc}, \texttt{control\_mode}, \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_dc\_set\_pu}, \texttt{v\_ac\_set\_pu}, \texttt{eta}, \texttt{loss\_percent}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{p\_rated\_mw}, \texttt{in\_service} & Excel omits \texttt{loss\_mw}, \texttt{k\_vdc}, and outage metadata. \\
+\texttt{DCDCConverter} & \texttt{DCDCConverter} & \texttt{index}, \texttt{name}, \texttt{bus\_in}, \texttt{bus\_out}, \texttt{control\_mode}, \texttt{p\_ref\_mw}, \texttt{v\_ref\_pu}, \texttt{sn\_mva}, \texttt{eta}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{in\_service} & Excel omits voltage-rating, droop, resistance, and reliability fields. \\
+\texttt{EnergyRouter} & \texttt{EnergyRouter} & \texttt{index}, \texttt{name}, \texttt{router\_type}, \texttt{num\_ports}, \texttt{p\_rated\_mw}, \texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv}, \texttt{loss\_percent}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{in\_service} & router-level metadata now has a dedicated Excel sheet. \\
+\shortstack[l]{\texttt{EnergyRouter}\\\texttt{Port}} & \shortstack[l]{\texttt{EnergyRouter}\\\texttt{Port}} & \texttt{router\_index}, \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{port\_type}, \texttt{voltage\_level\_kv}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{v\_pu}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{control\_mode}, \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_set\_pu}, \texttt{in\_service} & port rows are matched back to their parent router through \texttt{router\_index}. \\
+\texttt{VPP} & \shortstack[l]{\texttt{VirtualPower}\\\texttt{Plant}} & \texttt{index}, \texttt{name}, \texttt{aggregation\_bus}, aggregate output / limit snapshot, selected resource counts, and \texttt{in\_service} & Excel omits description, EV/load counts, aggregate capability, ramp rates, and reliability. \\
+\texttt{Microgrid} & \texttt{Microgrid} & \texttt{index}, \texttt{name}, \texttt{pcc\_bus}, \texttt{operating\_mode}, \texttt{islanding\_capability}, \texttt{p\_exchange\_mw}, \texttt{p\_exchange\_max\_mw}, \texttt{total\_generation\_mw}, \texttt{total\_load\_mw}, \texttt{in\_service} & Excel omits \texttt{internal\_buses} and most planning/control metadata. \\
+\texttt{MobileStorage} & \texttt{MobileStorage} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{status}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{p\_rated\_mw}, \texttt{e\_rated\_mwh}, \texttt{soc\_init}, \texttt{in\_service} & Excel keeps only a snapshot subset and omits most mobility/limit metadata. \\
+\texttt{ThreePhaseBus} & \shortstack[l]{\texttt{ThreePhaseAC}\\\texttt{Bus}} & \texttt{index}, \texttt{name}, \texttt{bus\_type}, \texttt{base\_kv}, \texttt{vm\_a\_pu}, \texttt{va\_a\_deg}, \texttt{vm\_b\_pu}, \texttt{va\_b\_deg}, \texttt{vm\_c\_pu}, \texttt{va\_c\_deg}, \texttt{pd\_a\_mw}, \texttt{qd\_a\_mvar}, \texttt{pd\_b\_mw}, \texttt{qd\_b\_mvar}, \texttt{pd\_c\_mw}, \texttt{qd\_c\_mvar}, \texttt{gs\_a\_mw}, \texttt{bs\_a\_mvar}, \texttt{gs\_b\_mw}, \texttt{bs\_b\_mvar}, \texttt{gs\_c\_mw}, \texttt{bs\_c\_mvar}, \texttt{vmin\_pu}, \texttt{vmax\_pu}, \texttt{area}, \texttt{zone}, \texttt{in\_service} & explicit unbalanced bus table for the optional \texttt{three\_phase\_ac} subsystem. \\
+\texttt{ThreePhaseLine} & \shortstack[l]{\texttt{ThreePhaseAC}\\\texttt{Line}} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{length\_km}, \texttt{parallel}, \texttt{r1\_ohm\_per\_km}, \texttt{x1\_ohm\_per\_km}, \texttt{c1\_nf\_per\_km}, \texttt{r0\_ohm\_per\_km}, \texttt{x0\_ohm\_per\_km}, \texttt{c0\_nf\_per\_km}, \texttt{r1\_pu}, \texttt{x1\_pu}, \texttt{b1\_pu}, \texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{b0\_pu}, \texttt{max\_i\_ka}, \texttt{rate\_a\_mva}, \texttt{failure\_rate}, \texttt{mttr\_hr}, \texttt{in\_service} & sequence-parameter line sheet for explicit unbalanced input. \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{Transformer}} & \shortstack[l]{\texttt{ThreePhase}\\\texttt{Transformer}} & \texttt{index}, \texttt{name}, buses, nameplate data, leakage / zero-sequence terms, tap settings, reliability metadata, and \texttt{in\_service} & explicit three-phase transformer input sheet; solver path still projects it to \texttt{Transformer2W}. \\
+\texttt{ThreePhaseLoad} & \texttt{ThreePhaseLoad} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{connection}, \texttt{grounded}, \texttt{p\_a\_mw}, \texttt{q\_a\_mvar}, \texttt{p\_b\_mw}, \texttt{q\_b\_mvar}, \texttt{p\_c\_mw}, \texttt{q\_c\_mvar}, \texttt{const\_z\_percent}, \texttt{const\_i\_percent}, \texttt{const\_p\_percent}, \texttt{motor\_percent}, \texttt{lrc\_pu}, \texttt{x\_r\_ratio}, \texttt{in\_service} & explicit unbalanced demand table; projected before main PF/OPF/SC assembly. \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{Generator}} & \shortstack[l]{\texttt{ThreePhase}\\\texttt{Generator}} & \texttt{index}, \texttt{name}, \texttt{bus}, slack flag, dispatch setpoints / limits, sequence reactance terms, and \texttt{in\_service} & explicit unbalanced generator sheet with sequence impedance metadata. \\
+\shortstack[l]{\texttt{ThreePhase}\\\texttt{ExternalGrid}} & \shortstack[l]{\texttt{ThreePhase}\\\texttt{ExternalGrid}} & \texttt{index}, \texttt{name}, \texttt{bus}, voltage target, SC level bounds, sequence impedance terms, and \texttt{in\_service} & explicit three-phase grid-equivalent sheet. \\
+\bottomrule
+\end{longtable}
+\normalsize
+
+\subsubsection*{Remaining field-level Excel caveats}
+
+\begin{longtable}{L{0.24\linewidth}L{0.56\linewidth}}
+\toprule
+Area & Current Excel status \\
+\midrule
+\endhead
+\texttt{Load} short-circuit motor subfields & the embedded SC fields \texttt{sn\_mva}, \texttt{motor\_percent}, \texttt{x\_sub\_pu}, and \texttt{r\_sc\_pu} still do not have dedicated \texttt{Load}/\texttt{ACLoad} workbook columns. \\
+\texttt{ThreePhaseACSystem} metadata container & subsystem metadata is carried in \texttt{Info} keys rather than a dedicated \texttt{ThreePhaseInfo} sheet. \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{JSON Key / Excel Column Dictionary for the Newly Added Contracts}
+
+The next tables are intentionally 1:1 with the current serializer code.  The
+``JSON default'' text below means the value used by \texttt{from\_json} when a
+key is absent.  Excel uses the exact sheet and column names shown here.
+
+\footnotesize
+
+\noindent\textbf{Optional three-phase subsystem metadata: \texttt{three\_phase\_ac} and \texttt{Info}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{name} & \texttt{Info[three\_phase\_name]} & default \texttt{"Three-Phase AC System"} & user-visible subsystem name for the optional explicit unbalanced AC network \\
+\texttt{base\_mva} & \texttt{Info[three\_phase\_base\_mva]} & default \texttt{100.0} & per-subsystem power base; independent from top-level \texttt{base\_mva} \\
+\texttt{base\_freq\_hz} & \texttt{Info[three\_phase\_base\_freq\_hz]} & default \texttt{50.0} & nominal subsystem frequency in Hz \\
+\texttt{buses[]} & sheet \texttt{ThreePhaseBus} & missing array / sheet keeps vector empty & explicit three-phase bus family \\
+\texttt{lines[]} & sheet \texttt{ThreePhaseLine} & missing array / sheet keeps vector empty & explicit three-phase line family \\
+\texttt{transformers[]} & sheet \texttt{ThreePhaseTransformer} & missing array / sheet keeps vector empty & explicit three-phase transformer family \\
+\texttt{loads[]} & sheet \texttt{ThreePhaseLoad} & missing array / sheet keeps vector empty & explicit unbalanced load family \\
+\texttt{generators[]} & sheet \texttt{ThreePhaseGenerator} & missing array / sheet keeps vector empty & explicit three-phase generator family \\
+\texttt{external\_grids[]} & sheet \texttt{ThreePhaseExternalGrid} & missing array / sheet keeps vector empty & explicit sequence-based grid-equivalent family \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Asynchronous motor contract: \texttt{ac.motors[]} and sheet \texttt{AsynchronousMotor}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable device identifier \\
+\texttt{bus} & \texttt{bus} & required on JSON import & connected AC bus index \\
+\texttt{name} & \texttt{name} & default empty string & display label only \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag; not a solved PF state \\
+\texttt{vn\_kv} & \texttt{vn\_kv} & default \texttt{0.0} & rated terminal voltage in kV \\
+\texttt{sn\_mva} & \texttt{sn\_mva} & default \texttt{0.0} & rated apparent power used in motor fault-contribution scaling \\
+\texttt{r\_pu} & \texttt{r\_pu} & default \texttt{0.0} & motor equivalent positive-sequence resistance input \\
+\texttt{x\_pu} & \texttt{x\_pu} & default \texttt{0.0} & motor equivalent positive-sequence reactance input \\
+\texttt{x\_r} & \texttt{x\_r} & default \texttt{0.0} & X/R ratio used in short-circuit contribution calculations \\
+\texttt{lrc} & \texttt{lrc} & default \texttt{0.0} & locked-rotor current ratio \\
+\texttt{poles} & \texttt{poles} & default \texttt{2} & machine pole count \\
+\texttt{cos\_phi} & \texttt{cos\_phi} & default \texttt{0.85} & rated power factor \\
+\texttt{efficiency} & \texttt{efficiency} & default \texttt{0.95} & rated efficiency factor \\
+\texttt{r0\_pu} & \texttt{r0\_pu} & default \texttt{0.0} & zero-sequence resistance input for unsymmetrical faults \\
+\texttt{x0\_pu} & \texttt{x0\_pu} & default \texttt{0.0} & zero-sequence reactance input for unsymmetrical faults \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase bus contract: \texttt{three\_phase\_ac.buses[]} and sheet \texttt{ThreePhaseBus}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable bus identifier \\
+\texttt{name} & \texttt{name} & default empty string & bus label \\
+\texttt{bus\_type} & \texttt{bus\_type} & default \texttt{PQ} & bus category using the same string tokens as the AC bus model \\
+\texttt{base\_kv} & \texttt{base\_kv} & default \texttt{0.0} & nominal line-to-line bus voltage base \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{vm\_a\_pu}, \texttt{vm\_b\_pu}, \texttt{vm\_c\_pu} & same columns & default \texttt{1.0} each & per-phase initial or specified voltage magnitudes \\
+\texttt{va\_a\_deg}, \texttt{va\_b\_deg}, \texttt{va\_c\_deg} & same columns & defaults \texttt{0.0}, \texttt{-120.0}, \texttt{120.0} & phase-angle initialization in degrees for phase order a, b, c \\
+\texttt{pd\_a\_mw}, \texttt{pd\_b\_mw}, \texttt{pd\_c\_mw} & same columns & default \texttt{0.0} & explicit per-phase active demand before projection \\
+\texttt{qd\_a\_mvar}, \texttt{qd\_b\_mvar}, \texttt{qd\_c\_mvar} & same columns & default \texttt{0.0} & explicit per-phase reactive demand before projection \\
+\texttt{gs\_a\_mw}, \texttt{gs\_b\_mw}, \texttt{gs\_c\_mw} & same columns & default \texttt{0.0} & per-phase conductance shunt terms \\
+\texttt{bs\_a\_mvar}, \texttt{bs\_b\_mvar}, \texttt{bs\_c\_mvar} & same columns & default \texttt{0.0} & per-phase susceptance shunt terms \\
+\texttt{vmin\_pu} & \texttt{vmin\_pu} & default \texttt{0.9} & lower per-unit voltage bound \\
+\texttt{vmax\_pu} & \texttt{vmax\_pu} & default \texttt{1.1} & upper per-unit voltage bound \\
+\texttt{area} & \texttt{area} & default \texttt{1} & planning / reporting area tag \\
+\texttt{zone} & \texttt{zone} & default \texttt{1} & planning / reporting zone tag \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase line contract: \texttt{three\_phase\_ac.lines[]} and sheet \texttt{ThreePhaseLine}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable line identifier \\
+\texttt{from\_bus}, \texttt{to\_bus} & same columns & required on JSON import & line terminal bus indices \\
+\texttt{name} & \texttt{name} & default empty string & line label \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{length\_km} & \texttt{length\_km} & default \texttt{0.0} & physical route length \\
+\texttt{parallel} & \texttt{parallel} & default \texttt{1} & number of parallel circuits represented by the row \\
+\texttt{r1\_ohm\_per\_km}, \texttt{x1\_ohm\_per\_km}, \texttt{c1\_nf\_per\_km} & same columns & default \texttt{0.0} & positive-sequence per-km impedance / capacitance data \\
+\texttt{r0\_ohm\_per\_km}, \texttt{x0\_ohm\_per\_km}, \texttt{c0\_nf\_per\_km} & same columns & default \texttt{0.0} & zero-sequence per-km impedance / capacitance data \\
+\texttt{r1\_pu}, \texttt{x1\_pu}, \texttt{b1\_pu} & same columns & default \texttt{0.0} & positive-sequence per-unit branch parameters \\
+\texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{b0\_pu} & same columns & default \texttt{0.0} & zero-sequence per-unit branch parameters \\
+\texttt{max\_i\_ka} & \texttt{max\_i\_ka} & default \texttt{0.0} & thermal current limit in kA \\
+\texttt{rate\_a\_mva} & \texttt{rate\_a\_mva} & default \texttt{0.0} & apparent-power rating used by planning / screening logic \\
+\texttt{failure\_rate} & \texttt{failure\_rate} & default \texttt{0.0} & reliability failure-rate input \\
+\texttt{mttr\_hr} & \texttt{mttr\_hr} & default \texttt{0.0} & repair-time input in hours \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase transformer contract: \texttt{three\_phase\_ac.transformers[]} and sheet \texttt{ThreePhaseTransformer}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable transformer identifier \\
+\texttt{hv\_bus}, \texttt{lv\_bus} & same columns & required on JSON import & high-voltage and low-voltage terminal bus indices \\
+\texttt{name} & \texttt{name} & default empty string & transformer label \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{sn\_mva} & \texttt{sn\_mva} & default \texttt{0.0} & rated apparent power \\
+\texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv} & same columns & default \texttt{0.0} & rated winding voltages \\
+\texttt{vk\_percent}, \texttt{vkr\_percent} & same columns & default \texttt{0.0} & short-circuit magnitude and resistive share in percent \\
+\texttt{pfe\_kw}, \texttt{i0\_percent} & same columns & default \texttt{0.0} & no-load loss and excitation-current inputs \\
+\texttt{vector\_group} & \texttt{vector\_group} & default empty string & winding connection / clock notation for zero-sequence path interpretation \\
+\texttt{vk0\_percent}, \texttt{vkr0\_percent}, \texttt{mag0\_percent}, \texttt{mag0\_rx}, \texttt{si0\_hv\_partial} & same columns & defaults \texttt{0.0} except \texttt{si0\_hv\_partial = 0.5} & zero-sequence transformer data preserved for SC and future unbalanced workflows \\
+\texttt{tap\_side}, \texttt{tap\_pos}, \texttt{tap\_min}, \texttt{tap\_max}, \texttt{tap\_neutral} & same columns & default \texttt{0} & tap-changer placement and discrete tap position metadata \\
+\texttt{tap\_step\_percent} & \texttt{tap\_step\_percent} & default \texttt{0.0} & tap step size in percent \\
+\texttt{shift\_deg} & \texttt{shift\_deg} & default \texttt{0.0} & phase shift angle in degrees \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & same columns & default \texttt{0.0} & reliability inputs retained in the explicit contract \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase load contract: \texttt{three\_phase\_ac.loads[]} and sheet \texttt{ThreePhaseLoad}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable load identifier \\
+\texttt{bus} & \texttt{bus} & required on JSON import & connected three-phase bus index \\
+\texttt{name} & \texttt{name} & default empty string & load label \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{connection} & \texttt{connection} & default \texttt{"wye"} & wiring model; current code expects free-form connection text such as \texttt{wye} or \texttt{delta} \\
+\texttt{grounded} & \texttt{grounded} & default \texttt{true} & grounding-path assumption for the connection \\
+\texttt{p\_a\_mw}, \texttt{p\_b\_mw}, \texttt{p\_c\_mw} & same columns & default \texttt{0.0} & per-phase active demand \\
+\texttt{q\_a\_mvar}, \texttt{q\_b\_mvar}, \texttt{q\_c\_mvar} & same columns & default \texttt{0.0} & per-phase reactive demand \\
+\texttt{const\_z\_percent}, \texttt{const\_i\_percent} & same columns & default \texttt{0.0} & ZIP-model constant-impedance and constant-current shares \\
+\texttt{const\_p\_percent} & \texttt{const\_p\_percent} & default \texttt{100.0} & ZIP-model constant-power share \\
+\texttt{motor\_percent} & \texttt{motor\_percent} & default \texttt{0.0} & embedded motor-fraction share inside the unbalanced load object \\
+\texttt{lrc\_pu} & \texttt{lrc\_pu} & default \texttt{0.0} & locked-rotor current ratio for the embedded motor fraction \\
+\texttt{x\_r\_ratio} & \texttt{x\_r\_ratio} & default \texttt{0.0} & X/R ratio for the embedded motor fraction \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase generator contract: \texttt{three\_phase\_ac.generators[]} and sheet \texttt{ThreePhaseGenerator}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable generator identifier \\
+\texttt{bus} & \texttt{bus} & required on JSON import & connected three-phase bus index \\
+\texttt{name} & \texttt{name} & default empty string & generator label \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{is\_slack} & \texttt{is\_slack} & default \texttt{false} & slack-machine indicator for explicit three-phase studies \\
+\texttt{p\_mw}, \texttt{q\_mvar} & same columns & default \texttt{0.0} & current active / reactive injection setpoints \\
+\texttt{vm\_pu} & \texttt{vm\_pu} & default \texttt{1.0} & terminal voltage target or initialization \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & capability limits \\
+\texttt{mbase\_mva} & \texttt{mbase\_mva} & default \texttt{0.0} & machine MVA base for the sequence reactances \\
+\texttt{xd\_pu}, \texttt{xdpp\_pu}, \texttt{x2\_pu}, \texttt{x0\_pu}, \texttt{r0\_pu} & same columns & default \texttt{0.0} & positive / subtransient / negative / zero-sequence machine impedance set \\
+\bottomrule
+\end{longtable}
+
+\noindent\textbf{Three-phase external-grid contract: \texttt{three\_phase\_ac.external\_grids[]} and sheet \texttt{ThreePhaseExternalGrid}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel column & JSON default / import rule & Meaning \\
+\midrule
+\endhead
+\texttt{index} & \texttt{index} & required on JSON import; blank Excel \texttt{index} stops table import & stable external-grid identifier \\
+\texttt{bus} & \texttt{bus} & required on JSON import & connected three-phase bus index \\
+\texttt{name} & \texttt{name} & default empty string & source label \\
+\texttt{in\_service} & \texttt{in\_service} & default \texttt{true} & availability flag \\
+\texttt{vm\_pu} & \texttt{vm\_pu} & default \texttt{1.0} & Thevenin voltage magnitude target \\
+\texttt{va\_deg} & \texttt{va\_deg} & default \texttt{0.0} & Thevenin voltage angle in degrees \\
+\texttt{s\_sc\_max\_mva}, \texttt{s\_sc\_min\_mva} & same columns & default \texttt{0.0} & short-circuit strength limits \\
+\texttt{rx\_max}, \texttt{rx\_min} & same columns & default \texttt{0.0} & R/X ratio bounds used in equivalent-source parametrization \\
+\texttt{r1\_pu}, \texttt{x1\_pu} & same columns & default \texttt{0.0} & positive-sequence Thevenin impedance \\
+\texttt{r2\_pu}, \texttt{x2\_pu} & same columns & default \texttt{0.0} & negative-sequence Thevenin impedance \\
+\texttt{r0\_pu}, \texttt{x0\_pu} & same columns & default \texttt{0.0} & zero-sequence Thevenin impedance \\
+\bottomrule
+\end{longtable}
+
+\normalsize
+
+\subsection{Compact Power-Flow Workbook Additions}
+
+\begin{longtable}{L{0.20\linewidth}L{0.46\linewidth}L{0.24\linewidth}}
+\toprule
+Sheet updated by \texttt{save\_results\_compact\_xlsx} & Appended columns & Current note \\
+\midrule
+\endhead
+\texttt{ACBus} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & solved AC bus state. \\
+\texttt{DCBus} & \texttt{result\_vdc\_pu} & solved DC voltage. \\
+\texttt{ACBranch} & \texttt{result\_pf\_mw}, \texttt{result\_qf\_mvar}, \texttt{result\_pt\_mw}, \texttt{result\_qt\_mvar} & branch terminal powers. \\
+\texttt{DCBranch} & \texttt{result\_v\_from\_pu}, \texttt{result\_v\_to\_pu}, \texttt{result\_i\_pu}, \texttt{result\_p\_from\_mw}, \texttt{result\_p\_to\_mw}, \texttt{result\_loss\_mw} & derived from solved DC bus voltages and branch resistance. \\
+\texttt{Storage} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & bus-state annotation only; storage dispatch is not recomputed. \\
+\texttt{DCStorage} & \texttt{result\_vdc\_pu} & bus-state annotation only. \\
+\texttt{Load} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & bus-state annotation on the raw AC load table. \\
+\texttt{ACLoad} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & bus-state annotation on the aggregated AC load view. \\
+\texttt{DCLoad} & \texttt{result\_vdc\_pu} & bus-state annotation on the aggregated DC load view. \\
+\texttt{ChargingStation} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & station bus state. \\
+\texttt{VSCConverter} & \texttt{result\_p\_ac\_mw}, \texttt{result\_q\_ac\_mvar}, \texttt{result\_p\_dc\_mw}, \texttt{result\_loss\_mw}, \texttt{result\_v\_ac\_pu}, \texttt{result\_v\_dc\_pu} & solved converter transfer and terminal voltages. \\
+\texttt{DCDCConverter} & \texttt{result\_p\_in\_mw}, \texttt{result\_p\_out\_mw}, \texttt{result\_loss\_mw}, \texttt{result\_v\_in\_pu}, \texttt{result\_v\_out\_pu} & solved converter transfer and terminal voltages. \\
+\texttt{VPP} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & aggregation-bus annotation only. \\
+\texttt{Microgrid} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & PCC-bus annotation only. \\
+\texttt{MobileStorage} & \texttt{result\_vm\_pu}, \texttt{result\_va\_deg} & current bus annotation only. \\
+\texttt{Results\_Summary} & \texttt{Key}, \texttt{Value} & key-value sheet with \texttt{converged}, \texttt{iterations}, and \texttt{residual}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Dedicated Result Workbooks}
+
+\subsubsection*{Dedicated power-flow result sheets}
+
+\begin{longtable}{L{0.20\linewidth}L{0.48\linewidth}L{0.22\linewidth}}
+\toprule
+Sheet & Columns & Current note \\
+\midrule
+\endhead
+\texttt{Results\_ACBus} & \texttt{index}, \texttt{name}, \texttt{vm\_pu}, \texttt{va\_deg} & solved AC bus state. \\
+\texttt{Results\_DCBus} & \texttt{index}, \texttt{name}, \texttt{vm\_pu} & this sheet uses the AC-style column name \texttt{vm\_pu} even though the value is the DC solved voltage. \\
+\texttt{Results\_BranchFlow} & \texttt{index}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{pf\_mw}, \texttt{qf\_mvar}, \texttt{pt\_mw}, \texttt{qt\_mvar} & branch flows reported in branch order. \\
+\texttt{Results\_DCBranch} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{in\_service}, \texttt{v\_from\_pu}, \texttt{v\_to\_pu}, \texttt{i\_pu}, \texttt{p\_from\_mw}, \texttt{p\_to\_mw}, \texttt{loss\_mw} & computed from solved voltages and branch resistance. \\
+\texttt{Results\_VSCConverter} & \texttt{index}, \texttt{name}, \texttt{bus\_ac}, \texttt{bus\_dc}, \texttt{in\_service}, \texttt{control\_mode}, \texttt{p\_ac\_mw}, \texttt{q\_ac\_mvar}, \texttt{p\_dc\_mw}, \texttt{loss\_mw}, \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_ac\_pu}, \texttt{v\_dc\_pu}, \texttt{eta}, \texttt{loss\_percent} & includes both solved transfer and original setpoint metadata. \\
+\texttt{Results\_DCDCConverter} & \texttt{index}, \texttt{name}, \texttt{bus\_in}, \texttt{bus\_out}, \texttt{in\_service}, \texttt{control\_mode}, \texttt{p\_ref\_mw}, \texttt{v\_ref\_pu}, \texttt{v\_in\_pu}, \texttt{v\_out\_pu}, \texttt{eta}, \texttt{p\_in\_mw}, \texttt{p\_out\_mw}, \texttt{loss\_mw} & includes both solved transfer and original reference metadata. \\
+\texttt{Results\_Storage\_AC} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{in\_service}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{soc}, \texttt{soh}, \texttt{vm\_pu}, \texttt{va\_deg} & uses \texttt{soc\_init} as the reported \texttt{soc}. \\
+\texttt{Results\_Storage\_DC} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{in\_service}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{soc}, \texttt{soh}, \texttt{vdc\_pu} & uses \texttt{soc\_init} as the reported \texttt{soc}. \\
+\texttt{Results\_ChargingStation} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{in\_service}, \texttt{num\_chargers}, \texttt{p\_total\_kw}, \texttt{q\_total\_kvar}, \texttt{max\_power\_kw}, \texttt{utilization\_rate}, \texttt{vm\_pu}, \texttt{va\_deg} & station bus state plus current aggregate demand fields. \\
+\texttt{Results\_Charger} & \texttt{index}, \texttt{name}, \texttt{station\_id}, \texttt{station\_bus}, \texttt{in\_service}, \texttt{charger\_type}, \texttt{p\_rated\_kw}, \texttt{p\_ch\_max\_kw}, \texttt{p\_dis\_max\_kw}, \texttt{eta}, \texttt{v2g\_capable}, \texttt{vm\_pu}, \texttt{va\_deg} & \texttt{charger\_type} now uses the same string token family as JSON and workbook input sheets. \\
+\texttt{Results\_EnergyRouter} & \texttt{index}, \texttt{name}, \texttt{in\_service}, \texttt{router\_type}, \texttt{num\_ports}, \texttt{p\_rated\_mw}, \texttt{loss\_percent}, \texttt{p\_port\_sum\_mw}, \texttt{q\_port\_sum\_mvar} & device-level summary only; solved per-port values live in the port sheet. \\
+\texttt{Results\_EnergyRouterPort} & \texttt{router\_index}, \texttt{port\_index}, \texttt{port\_name}, \texttt{bus}, \texttt{port\_type}, \texttt{control\_mode}, \texttt{in\_service}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{v\_solved\_pu} & flattens nested router ports into one table. \\
+\texttt{Results\_VPP} & \texttt{index}, \texttt{name}, \texttt{aggregation\_bus}, \texttt{in\_service}, \texttt{p\_output\_mw}, \texttt{q\_output\_mvar}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{vm\_pu}, \texttt{va\_deg} & aggregation-bus annotation only. \\
+\texttt{Results\_Microgrid} & \texttt{index}, \texttt{name}, \texttt{pcc\_bus}, \texttt{operating\_mode}, \texttt{in\_service}, \texttt{p\_exchange\_mw}, \texttt{total\_generation\_mw}, \texttt{total\_load\_mw}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{internal\_buses} & \texttt{internal\_buses} is written as one comma-separated string. \\
+\texttt{Results\_MobileStorage} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{status}, \texttt{in\_service}, \texttt{p\_mw}, \texttt{q\_mvar}, \texttt{soc}, \texttt{target\_bus}, \texttt{vm\_pu}, \texttt{va\_deg} & uses \texttt{soc\_init} as the reported \texttt{soc}. \\
+\texttt{Results\_Summary} & \texttt{Key}, \texttt{Value} & keys are \texttt{converged}, \texttt{iterations}, and \texttt{residual}. \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{Result-Sheet Enum and Flag Conventions}
+
+\begin{longtable}{L{0.22\linewidth}L{0.22\linewidth}L{0.22\linewidth}L{0.24\linewidth}}
+\toprule
+Artifact & Field & Output representation & Field note \\
+\midrule
+\endhead
+\texttt{Results\_VSCConverter} & \texttt{control\_mode} & string token: \texttt{PQ}, \texttt{VDC\_Q}, \texttt{VDC\_VAC} & copied from the input converter mode; not a solver-selected mode switch \\
+\texttt{Results\_DCDCConverter} & \texttt{control\_mode} & string token: \texttt{Voltage}, \texttt{Power}, \texttt{Droop} & copied from the input converter mode \\
+\texttt{Results\_Charger} & \texttt{charger\_type} & string token: \texttt{AC\_L1}, \texttt{AC\_L2}, \texttt{DC\_Fast} & now aligned with JSON and workbook input instead of numeric enum codes \\
+\texttt{Results\_EnergyRouterPort} & \texttt{port\_type} & string token: \texttt{AC} or \texttt{DC} & physical port side classification \\
+\texttt{Results\_EnergyRouterPort} & \texttt{control\_mode} & string token: \texttt{PQ}, \texttt{VF}, \texttt{Droop} & copied from the input port control mode \\
+\texttt{Results\_Microgrid} & \texttt{operating\_mode} & string token: \texttt{GridConnected}, \texttt{Islanded}, \texttt{Transition} & reported operating mode metadata, not a PF state variable \\
+\texttt{Results\_MobileStorage} & \texttt{status} & string token: \texttt{Stationary}, \texttt{InTransit}, \texttt{Deployed} & reported mobility state metadata \\
+\texttt{Results\_Charger} & \texttt{v2g\_capable} & boolean token: \texttt{TRUE} / \texttt{FALSE} & static capability flag, not current dispatch direction \\
+\texttt{Results\_*} device sheets & \texttt{in\_service} & boolean token: \texttt{TRUE} / \texttt{FALSE} & copied device availability flag across result workbooks \\
+\texttt{Results\_Summary}, \texttt{OPF\_Summary} & \texttt{converged} & boolean token: \texttt{TRUE} / \texttt{FALSE} & solver convergence outcome \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{Dedicated OPF and carbon result sheets}
+
+\begin{longtable}{L{0.20\linewidth}L{0.48\linewidth}L{0.22\linewidth}}
+\toprule
+Sheet & Columns & Current note \\
+\midrule
+\endhead
+\texttt{OPF\_Bus} & \texttt{index}, \texttt{name}, \texttt{base\_kv}, \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{dpd\_mw}, \texttt{dqd\_mvar} & bus voltages plus bus-level load shedding vectors. \\
+\texttt{OPF\_Generator} & \texttt{index}, \texttt{name}, \texttt{bus}, \texttt{pg\_mw}, \texttt{qg\_mvar}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar}, \texttt{cost\_c2}, \texttt{cost\_c1}, \texttt{cost\_c0}, \texttt{fuel\_type} & generator dispatch report. \\
+\texttt{OPF\_Converter} & \texttt{index}, \texttt{name}, \texttt{bus\_ac}, \texttt{bus\_dc}, \texttt{pac\_mw}, \texttt{qac\_mvar} & only VSC converters are reported here. \\
+\texttt{OPF\_Summary} & \texttt{Key}, \texttt{Value} & keys are \texttt{converged}, \texttt{iterations}, \texttt{outer\_iterations}, \texttt{objective}, \texttt{max\_constraint\_violation}, \texttt{max\_stationarity}, and \texttt{status}. \\
+\texttt{LoadCarbon} & \texttt{load\_index}, \texttt{bus}, \texttt{demand\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 1. \\
+\texttt{DCLoadCarbon} & \texttt{load\_index}, \texttt{bus}, \texttt{demand\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 2. \\
+\texttt{BusCarbon} & \texttt{bus\_index}, \texttt{carbon\_intensity\_tco2\_mwh} & dedicated carbon workbook, sheet 3. \\
+\texttt{DCBusCarbon} & \texttt{bus\_index}, \texttt{carbon\_intensity\_tco2\_mwh} & dedicated carbon workbook, sheet 4. \\
+\texttt{BranchCarbon} & \texttt{branch\_index}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{loss\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 5. \\
+\texttt{DCBranchCarbon} & \texttt{branch\_index}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{loss\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 6. \\
+\texttt{VSCCarbon} & \texttt{converter\_index}, \texttt{bus\_ac}, \texttt{bus\_dc}, \texttt{ac\_to\_dc}, \texttt{input\_power\_mw}, \texttt{output\_power\_mw}, \texttt{loss\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 7. \\
+\texttt{DCDCCarbon} & \texttt{converter\_index}, \texttt{bus\_in}, \texttt{bus\_out}, \texttt{input\_to\_output}, \texttt{input\_power\_mw}, \texttt{output\_power\_mw}, \texttt{loss\_mw}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook, sheet 8. \\
+\texttt{StorageCarbon} & \texttt{storage\_index}, \texttt{bus}, \texttt{is\_dc}, \texttt{p\_mw}, \texttt{soc}, \texttt{stored\_energy\_mwh}, \texttt{soc\_carbon\_intensity\_tco2\_mwh}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook sheet for explicit storage charge/discharge carbon semantics. \\
+\texttt{EnergyRouterCarbon} & \texttt{router\_index}, \texttt{input\_power\_mw}, \texttt{output\_power\_mw}, \texttt{loss\_mw}, \texttt{active\_input\_ports}, \texttt{active\_output\_ports}, \texttt{carbon\_intensity\_tco2\_mwh}, \texttt{total\_emissions\_tco2} & dedicated carbon workbook sheet for router-internal loss allocation reconstructed from port transfers. \\
+\texttt{Summary} & key-value blocks for tracing and matrix summaries & dedicated carbon workbook summary sheet; contains generation/load/loss totals, balance errors, and flags such as \texttt{tracing\_verified} and \texttt{matrix\_solved}. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Current I/O Coverage Gaps That Matter to Engineering Work}
+
+\begin{longtable}{L{0.24\linewidth}L{0.12\linewidth}L{0.12\linewidth}L{0.42\linewidth}}
+\toprule
+Public model area & JSON system file & Excel input workbook & Engineering consequence \\
+\midrule
+\endhead
+\texttt{ACBus}, \texttt{ACBranch}, \texttt{DCBus}, \texttt{DCBranch} & yes & yes & core network objects are available in both I/O families. \\
+\texttt{Generator}, \texttt{Load}, \texttt{Shunt}, \texttt{ExternalGrid} & yes & yes & Excel coverage is narrower than JSON for the richer machine / source metadata. \\
+\texttt{StaticGenerator}, \texttt{RenewableGen}, \texttt{PVSystem}, \texttt{Storage} & yes & yes & Excel exposes only the operational subset; JSON is the better notebook-to-code contract for detailed studies. \\
+\texttt{Transformer2W} & yes & yes & Excel omits zero-sequence and reliability fields. \\
+\texttt{Transformer3W} & yes & yes & JSON and Excel now both carry the explicit 3-winding transformer data, although solver use still goes through projection. \\
+\texttt{FlexibleLoad}, \texttt{AsymmetricLoad} & yes & yes & both I/O families now preserve the rich pre-projection load models. \\
+\texttt{ChargingStation} & yes & yes & input support exists in both families. \\
+\texttt{Charger} & yes & yes & both I/O families now preserve per-charger metadata; the parent station link remains \texttt{station\_id}. \\
+\texttt{DCLoad} & yes & yes & the main system JSON and Excel workbook are now aligned for the explicit DC load table. \\
+\texttt{VSCConverter}, \texttt{DCDCConverter} & yes & yes & Excel coverage is narrower than JSON. \\
+\texttt{EnergyRouter}, \texttt{EnergyRouterPort} & yes & yes & router studies can now use either JSON or Excel input, with ports flattened into a dedicated Excel table. \\
+\texttt{VPP}, \texttt{Microgrid}, \texttt{MobileStorage} & yes & yes & Excel again keeps only a reduced operational subset. \\
+\texttt{AsynchronousMotor} & yes & yes & the SC motor model now has a stable external contract in both families. \\
+\texttt{ThreePhaseACSystem} family & yes & yes & the optional unbalanced subsystem can now round-trip through both JSON and Excel, although main PF/OPF/SC still consume it after projection. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Interpretation}
+
+The current I/O layer is already useful, but it is not a single canonical
+schema yet.
+\begin{enumerate}
+  \item JSON is now the richest external representation for the full current \texttt{HybridPowerSystem} container, including \texttt{ac.motors} and optional \texttt{three\_phase\_ac}.
+  \item Excel is an engineering workbook interface with deliberate aggregation and reduced field coverage.
+  \item The JSON and Excel paths are now aligned for \texttt{DCLoad}, \texttt{Transformer3W}, \texttt{FlexibleLoad}, \texttt{AsymmetricLoad}, \texttt{Charger}, \texttt{EnergyRouter}, \texttt{AsynchronousMotor}, and the \texttt{ThreePhaseACSystem} family.
+  \item The remaining gaps are now field-level rather than family-level, especially the SC-specific motor-fraction fields embedded inside \texttt{Load} and the lack of dedicated result-workbook contracts for explicit three-phase solved states.
+\end{enumerate}

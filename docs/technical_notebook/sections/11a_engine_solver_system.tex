@@ -1,0 +1,534 @@
+\section{Engine Solver System}
+\label{sec:engine-solver-system}
+
+This section documents the solver infrastructure under
+\texttt{include/hacdcpf/engine} and \texttt{src/engine} as a coherent system.
+The goal is to separate three concerns that are easy to blur when reading the
+repository file-by-file:
+\begin{itemize}
+  \item the \emph{canonical mathematical problem forms} that every backend sees,
+  \item the \emph{adapter and registry layer} that dispatches a problem to a solver,
+  \item the \emph{actual kernels} that are fully implemented today versus declared extension points.
+\end{itemize}
+
+This chapter is intentionally code-aligned.  When a header advertises a solver
+family but the current source file is only a placeholder, the notebook states
+that explicitly instead of describing the ideal future design.
+
+\subsection{Layering Inside \texttt{hacdcpf::engine}}
+
+The engine layer is organized in five contracts.
+\begin{enumerate}
+  \item \textbf{Canonical problem layer:} \texttt{problem\_types.hpp} defines the shared mathematical models such as \texttt{LPModel}, \texttt{QPModel}, and \texttt{MIPModel}.
+  \item \textbf{Validation layer:} \texttt{problem\_validation.hpp/.cpp} checks structural consistency before the numerical solve begins.
+  \item \textbf{Adapter layer:} \texttt{solver\_adapter.hpp} defines the uniform interface \texttt{solve\_lp}, \texttt{solve\_nlp}, \texttt{solve\_milp}, and so on.
+  \item \textbf{Registry layer:} \texttt{adapter\_registry.hpp/.cpp} stores candidate adapters and selects one by supported \texttt{ProblemClass} or by name.
+  \item \textbf{Kernel layer:} concrete native and external implementations live in files such as \texttt{dual\_simplex.cpp}, \texttt{lcqp\_solver.cpp}, \texttt{pdlp\_solver.cpp}, and \texttt{external\_adapters.cpp}.
+\end{enumerate}
+
+Two different solve paths coexist inside this layer:
+\begin{itemize}
+  \item \textbf{Canonical optimization path:} a caller builds a \texttt{ProblemClass} object and dispatches it through a \texttt{SolverAdapter}.
+  \item \textbf{Direct application kernel path:} some modules call engine kernels directly without going through the adapter abstraction.  The most important example is \texttt{NewtonSolver}, which consumes \texttt{powerflow::SolverData} rather than \texttt{NonlinearSystem}.
+\end{itemize}
+
+\subsection{Canonical Problem Classes and Standard Forms}
+
+Table~\ref{tab:engine-problem-classes} is the central contract of the engine.
+Every solver family either consumes one of these objects directly or wraps a
+domain-specific model into one of these forms first.
+
+\begin{longtable}{L{0.10\linewidth}L{0.17\linewidth}L{0.37\linewidth}L{0.26\linewidth}}
+\toprule
+Class & C++ struct & Standard mathematical form & Current engine role \\
+\midrule
+\endhead
+\texttt{LE} & \texttt{SparseLinSys} & Solve
+\(A x = b\). & Small reusable sparse linear-system abstraction used by \texttt{NativeLinearAdapter}. \\
+\texttt{NLE} & \texttt{NonlinearSystem} & Find
+\(F(x)=0\), with residual and Jacobian callbacks and optional projection. & Generic Newton-style nonlinear equation interface. \\
+\texttt{LP} & \texttt{LPModel} &
+\(\begin{aligned}
+\min/\max \quad & c^\top x \\
+\text{s.t.}\quad & A x \le b, \\
+& A_{eq} x = b_{eq}, \\
+& \ell \le x \le u
+\end{aligned}\)
+& Core relaxation form for simplex, IPM-LP, PDLP, HiGHS, and Gurobi. \\
+\texttt{QP} & \texttt{QPModel} &
+\(\begin{aligned}
+\min/\max \quad & \tfrac12 x^\top Q x + c^\top x \\
+\text{s.t.}\quad & A x \le b, \\
+& A_{eq} x = b_{eq}, \\
+& \ell \le x \le u
+\end{aligned}\)
+& Convex LCQP interface for native QP IPM and Gurobi. \\
+\texttt{NLP} & \texttt{NLPModel} &
+\(\begin{aligned}
+\min/\max \quad & f(x) \\
+\text{s.t.}\quad & g(x)=0, \\
+& h(x) \le 0, \\
+& \ell \le x \le u
+\end{aligned}\)
+& Generic nonlinear optimization contract with callback and optional symbolic forms. \\
+\texttt{MILP} & \texttt{MIPModel} & LP plus
+\(x_j \in \mathbb{Z}\) or \(x_j \in \{0,1\}\). & Native branch-and-cut input and external MILP adapter input. \\
+\texttt{MINLP} & \texttt{MINLPModel} & NLP plus integer restrictions. & Native spatial B\&B shell and SCIP-facing model form. \\
+\bottomrule
+\caption{Canonical problem classes in the engine layer.}
+\label{tab:engine-problem-classes}
+\end{longtable}
+
+The canonical model metadata are deliberately richer than just matrices and
+vectors.
+\begin{itemize}
+  \item \texttt{VariableMeta} attaches type, lower bound, upper bound, and name to each decision variable.
+  \item \texttt{SymExpr} and \texttt{SymbolicConstraint} allow an NLP to expose a symbolic representation when an external solver prefers exported algebra over callback-only evaluation.
+  \item \texttt{MIPModel} carries integer index sets, an optional warm start, unit-commitment structure hints, and branching priorities, because the branch-and-cut engine uses all of them operationally.
+\end{itemize}
+
+\subsection{Validation and Dispatch Workflow}
+
+The adapter path is intentionally thin.  Validation and numerical work are kept
+separate so that front-end modules can fail early on malformed dimensions or
+invalid bounds before any solver-specific data structure is allocated.
+
+\paragraph{Algorithm E1: Canonical Adapter Dispatch}
+\begin{algorithmic}[1]
+\Procedure{\texttt{dispatch\_problem}}{$cls, model, registry, preferred$}
+  \State $report \gets \texttt{validate}(model)$
+  \If{$report.valid = \textbf{false}$}
+    \State \Return unsuccessful result with validation errors
+  \EndIf
+  \If{$preferred \neq \emptyset$}
+    \State $adapter \gets \texttt{registry.find\_by\_name}(preferred)$
+  \Else
+    \State $adapter \gets \texttt{registry.first\_for}(cls)$
+  \EndIf
+  \If{$adapter = \varnothing$}
+    \State \Return unsuccessful result with ``no adapter available''
+  \EndIf
+  \State Dispatch to the type-specific entry point
+  \Statex \quad \texttt{solve\_le}, \texttt{solve\_nle}, \texttt{solve\_lp}, \texttt{solve\_qp}, \texttt{solve\_nlp}, \texttt{solve\_milp}, or \texttt{solve\_minlp}
+  \State \Return \texttt{SolveResult}
+\EndProcedure
+\end{algorithmic}
+
+At the code level, the division of responsibility is straightforward.
+\begin{itemize}
+  \item \texttt{SolverAdapter} provides default ``unsupported problem class'' results.
+  \item Each concrete adapter overrides only the methods it really supports.
+  \item \texttt{AdapterRegistry} is just an ordered list.  Selection is therefore deterministic: the first supporting adapter wins unless the caller explicitly asks for one by name.
+\end{itemize}
+
+This simple registry design is important for application code such as market
+simulation and time-series PF, which register Gurobi first, HiGHS second, and a
+tuned native fallback last.
+
+\subsection{Solver Inventory and Current Implementation Status}
+
+Table~\ref{tab:engine-solver-inventory} separates the solver \emph{interfaces}
+from the solver \emph{implementations}.  This is the part most likely to reduce
+maintainer confusion, because the engine now contains both fully operational
+solvers and placeholder interfaces meant for future completion.
+
+\begin{longtable}{L{0.22\linewidth}L{0.15\linewidth}L{0.20\linewidth}L{0.33\linewidth}}
+\toprule
+Solver family & Main class or entry point & Problem class & Current status in source \\
+\midrule
+\endhead
+PF Newton kernel & \texttt{NewtonSolver} & direct \texttt{SolverData} path & Fully implemented power-flow-specific Newton kernel with Jacobian-pattern caching, sparse factorization reuse, line search, and bus-type switching. \\
+Generic linear solve & \texttt{NativeLinearAdapter} & \texttt{LE} & Fully implemented thin wrapper over the sparse linear solver abstraction. \\
+Generic NLE solve & \texttt{NativeNewtonAdapter} & \texttt{NLE} & Fully implemented regularized Newton method with backtracking. \\
+Generic NLP solve & \texttt{NativeNLPAdapter} & \texttt{NLP} & Fully implemented penalty-based line-search method using callback gradients and Hessians. \\
+Native NLP IPM interface & \texttt{NativeIPMAdapter} & \texttt{NLP} & Fully implemented sparse primal-dual predictor-corrector IPM with reusable KKT factorizations, shared reduced-KKT Schur solves for small equality blocks, sparse secant or finite-difference Hessian recovery when \texttt{hess} is absent, startup curvature caching across repeated solves, and IPOPT fallback for unrecovered failures. \\
+Convex QP / LCQP & \texttt{NativeLCQPAdapter} & \texttt{QP}, \texttt{LP} & Fully implemented Mehrotra-style primal-dual IPM for convex QP and LP special cases. \\
+High-performance LP IPM & \texttt{NativeIPMLPAdapter} & \texttt{LP} & Fully implemented predictor-corrector IPM with scaling, correctors, cached node solves, and optional crossover support. \\
+Dual simplex & \texttt{solve\_lp\_with\_basis} & \texttt{LP} & Fully implemented bounded-form simplex with standard-form conversion, warm starts, sparse basis reuse, and dual-simplex reoptimization. \\
+PDLP / PDHG & \texttt{NativePDLPAdapter} & \texttt{LP} & Fully implemented first-order LP solver for large sparse problems. \\
+MILP / MINLP tree search & \texttt{solve\_milp\_bc}, \texttt{solve\_minlp\_bc}, \texttt{NativeBranchAndCutAdapter} & \texttt{MILP}, \texttt{MINLP} & MILP branch-and-cut is fully implemented and mature.  The MINLP path now uses the native NLP relaxation, carries multiplier-informed branch scores into child nodes, and remains backed by SCIP/IPOPT-style external fallbacks where available. \\
+HiGHS wrapper & \texttt{HighsAdapter} & \texttt{LP}, \texttt{MILP} & Fully implemented external file-based wrapper around the HiGHS executable. \\
+IPOPT wrapper & \texttt{IpoptAdapter} & \texttt{NLP} & Available when IPOPT is built in.  Used for external NLP backend selection. \\
+SCIP wrapper & \texttt{ScipAdapter} & \texttt{MINLP} & Available when SCIP support is built in. \\
+Gurobi wrapper & \texttt{GurobiAdapter} & \texttt{LP}, \texttt{QP}, \texttt{MILP} & Native C-API wrapper for high-end LP/QP/MILP solves. \\
+\bottomrule
+\caption{Engine solver inventory and actual implementation status.}
+\label{tab:engine-solver-inventory}
+\end{longtable}
+
+\paragraph{A practical consequence for readers of the code}
+When the repository mentions a ``native IPM'' for NLP, that phrase must be read
+carefully.  The engine contains:
+\begin{itemize}
+  \item a working native IPM for \textbf{LP} in \texttt{ipm\_lp\_solver.cpp},
+  \item a working native IPM for \textbf{convex QP} in \texttt{lcqp\_solver.cpp},
+  \item a working native IPM for \textbf{general NLP} in \texttt{ipm\_solver.cpp}, with reduced-KKT and missing-Hessian recovery paths,
+  \item and a separate working \texttt{NativeNLPAdapter} that is not a barrier IPM, but a penalty-and-line-search Newton-type method.
+\end{itemize}
+
+\paragraph{Current performance status}
+The most relevant benchmark result is now the structured sparse chain NLP in
+\texttt{benchmark/nlp\_ipm\_benchmark.cpp}.  On the current implementation,
+the exact-Hessian native path beats IPOPT on all benchmarked sizes
+
+\[
+\text{Native/IPOPT time ratio} = 0.419\ (n=64),\quad 0.518\ (n=128),\quad 0.773\ (n=256),
+\]
+
+while the missing-Hessian path is now also faster than IPOPT across the same
+benchmark family.  After the sparse secant plus finite-difference Hessian
+recovery pass, shared reduced-KKT solves, and startup curvature caching, the
+native missing-Hessian solve achieves
+
+\[
+\text{Native/IPOPT time ratio} = 0.340\ (n=64),\quad 0.444\ (n=128),\quad 0.677\ (n=256).
+\]
+
+So the main nonlinear performance story has changed materially: the engine is
+no longer merely ``equipped with a native NLP IPM,'' but already ahead of the
+external IPOPT baseline on this structured sparse benchmark in both the
+exact-Hessian and missing-Hessian regimes.  The remaining engineering work is
+therefore about broadening that win across more difficult NLP families, not
+about filling a missing core implementation.
+
+\subsection{Key Algorithm Workflows}
+
+\subsubsection{Power-Flow-Specific Newton Kernel}
+
+\texttt{NewtonSolver} is the main reusable PF engine kernel rather than a
+generic optimization adapter.  It operates on \texttt{powerflow::SolverData},
+builds a Jacobian context from AC/DC bus states and converter modes, and then
+reuses sparse-pattern analysis aggressively across repeated solves.
+
+\paragraph{Algorithm E2: \texttt{NewtonSolver.solve}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{NewtonSolver.solve}}{$data, opt, init$}
+  \State Initialize voltage magnitudes, angles, DC voltages, and control states
+  \State Detect AC slack bus and one DC slack bus per DC island
+  \State Build Jacobian context from current bus types and converter modes
+  \If{cached Jacobian pattern matches \texttt{data} structure and context layout}
+    \State Reuse analyzed sparse pattern and linear solver object
+  \Else
+    \State Rebuild Jacobian sparsity pattern and analyze it once
+  \EndIf
+  \For{outer PV/PQ or converter-mode adjustment loop}
+    \For{$iter = 1$ to \texttt{max\_iter}}
+      \State Evaluate mismatch vector and Jacobian
+      \If{residual norm is below tolerance}
+        \State Assemble final PF result and return
+      \EndIf
+      \State Factorize Jacobian, solve for Newton step, and clip step components
+      \State Run globalization / backtracking line search
+      \State Apply PV/PQ switching and converter control-mode updates when enabled
+    \EndFor
+  \EndFor
+  \State Return non-converged result with profiling counters
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{Generic Nonlinear Equation Solver}
+
+\paragraph{Algorithm E3: \texttt{NativeNewtonAdapter.solve\_nle}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_nle}}{$F(x), J(x), x_0$}
+  \State Validate dimensions and callbacks
+  \State $x \gets x_0$
+  \For{$iter = 1$ to \texttt{max\_iter}}
+    \State Evaluate residual $f \gets F(x)$
+    \If{$\lVert f \rVert_\infty \le \epsilon$}
+      \State Return converged result
+    \EndIf
+    \State Form Jacobian $J(x)$
+    \For{a small regularization ladder $\lambda$}
+      \State Solve \((J + \lambda I) \Delta x = -f\)
+      \State Try backtracking steps $x + \alpha \Delta x$
+      \If{a trial decreases residual norm}
+        \State Accept step and continue outer loop
+      \EndIf
+    \EndFor
+    \If{no acceptable step exists}
+      \State Return failure: line search failed
+    \EndIf
+  \EndFor
+  \State Return failure: maximum iterations reached
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{Generic NLP Solver Used Today}
+
+\paragraph{Algorithm E4: \texttt{NativeNLPAdapter.solve\_nlp}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_nlp}}{$f, \nabla f, \nabla^2 f, g, h, x_0$}
+  \State Validate callbacks and project $x_0$ into variable bounds
+  \For{$iter = 1$ to \texttt{max\_iter}}
+    \State Evaluate objective, gradient, and optional Hessian
+    \State Evaluate equality and inequality violations
+    \State Build penalized merit model
+    \Statex \quad $\phi(x)=f(x)+\tfrac{\rho}{2}\lVert g(x) \rVert_2^2+\tfrac{\rho}{2}\lVert \max(h(x),0) \rVert_2^2$
+    \State Form penalized gradient and Hessian approximation
+    \If{stationarity and feasibility are small enough}
+      \State Return converged result
+    \EndIf
+    \State Regularize Hessian and solve for a step \(\Delta x\)
+    \State Run backtracking on the penalized merit function
+    \State Project trial point into variable bounds
+    \If{no acceptable trial point exists}
+      \State Return failure
+    \EndIf
+  \EndFor
+  \State Return best iterate with status \texttt{Max iterations reached}
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{Convex QP and LCQP Solver}
+
+\paragraph{Algorithm E5: \texttt{NativeLCQPAdapter.solve\_qp}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_lcqp}}{$Q, c, A_{eq}, b_{eq}, \ell, u$}
+  \State Apply scaling to variables, equalities, costs, and bounds
+  \State Initialize primal variables at the center of finite bounds
+  \State Initialize lower/upper slacks and dual multipliers to positive values
+  \State Build the KKT sparsity pattern once and analyze it symbolically
+  \For{$iter = 1$ to \texttt{effective\_max\_iter}}
+    \State Compute stationarity, equality, slack, and complementarity residuals
+    \State Compute \(\mu\) from slack-dual products
+    \If{primal feasibility, dual feasibility, and gap are below tolerance}
+      \State Unscale solution and return
+    \EndIf
+    \State Update only the diagonal-dependent part of the KKT matrix
+    \State Factorize KKT numerically
+    \State Choose centering parameter \(\sigma\)
+    \State Solve KKT system for primal, dual, slack, and multiplier directions
+    \State Compute fraction-to-boundary step sizes
+    \State Update primal and dual variables
+  \EndFor
+  \State Return last iterate with non-converged status
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{High-Performance LP Interior-Point Method}
+
+\paragraph{Algorithm E6: \texttt{NativeIPMLPAdapter.solve\_lp}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_ipm\_lp}}{$LP$}
+  \State Convert the LP to the engine's merged internal form with box bounds, equality rows, and slack variables
+  \State Optionally presolve, scale, and cache repeated node-solve data structures
+  \State Initialize primal variables, slacks, and duals strictly inside the feasible box
+  \For{$iter = 1$ to \texttt{max\_iter}}
+    \State Compute primal residual, dual residual, and complementarity gap
+    \If{all three satisfy tolerance}
+      \State Export primal solution, duals, and bound multipliers; return
+    \EndIf
+    \State Form diagonal barrier scaling terms and factorize normal equations
+    \State Compute affine predictor direction
+    \State Compute affine step lengths and predicted \(\mu_{aff}\)
+    \State Choose centering parameter \(\sigma\) from the affine-gap ratio
+    \If{the affine step is already nearly central}
+      \State Skip expensive corrector and reuse affine direction
+    \Else
+      \State Form Mehrotra corrector right-hand side and solve corrector system
+    \EndIf
+    \State Apply fraction-to-boundary step sizes and update primal/dual variables
+  \EndFor
+  \State Return failure or best available iterate
+\EndProcedure
+\end{algorithmic}
+
+This solver is the native LP workhorse for repeated bound-change problems.  The
+important engineering feature is not only the Mehrotra iteration itself, but
+also the \texttt{prepare\_for\_node\_solves()} and cached-node-solve path used by
+branch-and-cut workers.
+
+\subsubsection{Dual Simplex and Standard-Form Reoptimization}
+
+\paragraph{Algorithm E7: \texttt{solve\_lp\_with\_basis}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_dual\_simplex}}{$LP, basis\_hint$}
+  \State Convert the original LP to bounded standard form
+  \Statex \quad add slack, surplus, and artificial columns as needed
+  \If{a valid parent basis hint exists}
+    \State Rebuild basis state, reduced costs, and basic solution from the hint
+    \If{dual feasible but primal infeasible}
+      \State Reoptimize by dual simplex
+    \ElsIf{warm start is numerically rejected and cold start is allowed}
+      \State Fall back to cold-start Phase I / Phase II
+    \EndIf
+  \Else
+    \State Build crash basis and run cold-start Phase I / Phase II simplex
+  \EndIf
+  \State Persist basis information for children
+  \State Return primal solution, basis, reduced costs, and dual information
+\EndProcedure
+\end{algorithmic}
+
+The bounded-form conversion is central to the engine architecture.  Child nodes
+usually change only bounds, so the matrix structure remains fixed while the
+basis and bound-shift terms are reused.
+
+\subsubsection{First-Order PDLP Solver}
+
+\paragraph{Algorithm E8: \texttt{NativePDLPAdapter.solve\_lp}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_pdlp}}{$LP$}
+  \State Convert the LP into a matrix-and-box form suitable for PDHG iterations
+  \State Build both CSC and CSR sparse views of the matrix
+  \State Apply Ruiz row/column equilibration
+  \State Build Pock--Chambolle diagonal step sizes and optional IP-PMM regularization
+  \State Initialize primal and dual iterates and their running averages
+  \For{$iter = 1$ to \texttt{max\_iter}}
+    \State Optionally extrapolate the primal iterate
+    \State Update dual variables by a row-wise sparse pass and box projection
+    \State Update primal variables by a column-wise sparse pass and bound projection
+    \State Update ergodic averages
+    \If{it is a check iteration}
+      \State Evaluate primal violation, dual stationarity, and relative gap
+      \State Update the best current or averaged iterate
+      \State Trigger adaptive restart if progress stagnates or periodic restart fires
+      \State Adapt step gain, primal weight, and PMM regularization
+      \If{current or averaged iterate satisfies tolerances}
+        \State Return best iterate
+      \EndIf
+    \EndIf
+  \EndFor
+  \State Unscale the best iterate and return
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{Mixed-Integer Branch-and-Cut}
+
+\paragraph{Algorithm E9: \texttt{solve\_milp\_bc}}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_milp\_bc}}{$MIP, opt$}
+  \State Validate the model and run presolve / bound tightening
+  \State Solve the root LP relaxation
+  \State Run root cut rounds, primal heuristics, and incumbent discovery
+  \If{the root solution is integral or the gap is closed}
+    \State Return immediately
+  \EndIf
+  \If{parallel mode is enabled}
+    \State Launch heterogeneous worker threads and shared queues
+  \Else
+    \State Start sequential best-first / depth-first / hybrid tree loop
+  \EndIf
+  \While{time, node, and gap limits are not hit and the node pool is not empty}
+    \State Select a node and propagate local bounds
+    \State Solve the node LP relaxation, preferably by simplex warm start
+    \If{the node is infeasible or dominated by incumbent}
+      \State Prune node
+    \ElsIf{the node solution is integral}
+      \State Update incumbent and global bound
+    \Else
+      \State Choose branching variable using pseudocost / reliability / fallback rule
+      \State Create up and down children
+      \State Optionally add tree cuts or conflict information
+      \State Push surviving children back to the search structure
+    \EndIf
+  \EndWhile
+  \State Return incumbent, best bound, gap, and detailed B\&C statistics
+\EndProcedure
+\end{algorithmic}
+
+The full MILP machinery is larger than this summary.  The detailed cut families,
+warm-start mechanics, presolve propagation, and parallel explorer design are
+documented further in Section~\ref{sec:native-branch-and-cut}.
+
+\subsubsection{External Backend Wrapper Pattern}
+
+\paragraph{Algorithm E10: External Adapter Shell}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_external}}{$model, executable$}
+  \State Validate the canonical model
+  \State Export the model to an interchange format or backend API representation
+  \State Launch the external solver or native C API call
+  \State Parse objective, status, primal solution, and available dual data
+  \State Map backend status to \texttt{SolveStats}
+  \State Return \texttt{SolveResult}
+\EndProcedure
+\end{algorithmic}
+
+In the current code base, HiGHS mainly follows the file-export pattern, while
+Gurobi is linked through its C API.  IPOPT and SCIP are enabled only when their
+build flags are available.
+
+\subsection{Assessment Against the Self-Contained Computation-Engine Target}
+
+Relative to the architecture goal in \texttt{ARCHITECTURE.md}, the current
+engine is best described as a \emph{strong LP/MILP-centered computation engine
+with reusable nonlinear interfaces}, not yet as a fully self-contained solver
+stack across linear equation, nonlinear equation, MILP, and MINLP classes.
+
+\subsubsection{Robustness Assessment}
+
+\paragraph{Current strengths}
+The framework is structurally sound in four important ways.
+\begin{itemize}
+  \item \textbf{Canonical contracts are clean.}  \texttt{problem\_types.hpp}, \texttt{problem\_validation.cpp}, and the adapter interface separate model definition, validation, dispatch, and numerical work in a maintainable way.
+  \item \textbf{LP/MILP solve paths defend themselves well.}  The MILP path includes validation, presolve, warm starts, fallback logic, detailed statistics, and multiple root/node strategies instead of a single brittle algorithm.
+  \item \textbf{PF and linear algebra kernels are reusable.}  \texttt{NewtonSolver}, sparse linear solves, and the LP/QP kernels have enough internal structure to serve as an actual computation-engine layer rather than one-off application code.
+  \item \textbf{Compatibility wrappers reduce migration risk.}  The canonical home is now \texttt{hacdcpf::engine}, while older \texttt{core}/\texttt{solver} include paths still exist as shims for the rest of the code base.
+\end{itemize}
+
+\paragraph{Current risks and gaps}
+Three issues materially limit the claim of a self-contained engine.
+\begin{itemize}
+  \item \textbf{Native MINLP is not currently complete.}  The MINLP B\&B driver calls \texttt{solve\_nlp\_relaxation()}, and that routine currently instantiates \texttt{NativeIPMAdapter}; however, \texttt{ipm\_solver.cpp} still returns ``not implemented'' for the native NLP-IPM solve.  In other words, the tree shell exists, but the native continuous relaxation underneath is incomplete.
+  \item \textbf{The generic NLP path is usable but algorithmically modest.}  \texttt{NativeNLPAdapter} is a penalty-plus-line-search Newton method, not a full primal-dual barrier solver with robust filter/merit updates, restoration, or strong multiplier handling.  That is adequate for small smooth models, but it is a weaker foundation for large constrained NLP and for MINLP relaxations.
+  \item \textbf{Regression protection is uneven on the hardest path.}  The type-system and adapter tests are healthy, but the branch-and-cut test target is not currently a clean safety net for the full engine because it can abort before reaching later scenarios.  That weakens confidence in day-to-day robustness of the mixed-integer core.
+\end{itemize}
+
+\subsubsection{Performance Assessment}
+
+\paragraph{Where the engine is strong today}
+The performance architecture is already credible in the LP/MILP center.
+\begin{itemize}
+  \item \textbf{Root LP performance is strong.}  The native LP-IPM path is heavily engineered with scaling, cached symbolic work, and node-solve preparation; internal benchmarks have shown it can outperform the native simplex root solve by a wide margin on large UC relaxations.
+  \item \textbf{MILP tree engineering is real, not superficial.}  The branch-and-cut stack contains presolve, cut pools, pseudocost and reliability branching, warm-started simplex reoptimization, heuristics, and a heterogeneous parallel mode.
+  \item \textbf{Sparse factorization reuse is treated as a first-class concern.}  This is visible across \texttt{newton\_solver.cpp}, \texttt{dual\_simplex.cpp}, \texttt{ipm\_lp\_solver.cpp}, and the sparse LU support files.
+\end{itemize}
+
+\paragraph{Main bottlenecks versus the target architecture}
+The remaining bottlenecks are also clear.
+\begin{itemize}
+  \item \textbf{Large-case MILP competitiveness is still uneven.}  Internal benchmarking shows the native B\&C path can be competitive on some UC families, but on harder large cases the external commercial or dedicated MILP solvers still retain a sizable advantage, mainly from stronger tree closure and LP reoptimization throughput.
+  \item \textbf{External-wrapper overhead remains in practical workflows.}  HiGHS and SCIP mainly use file export plus subprocess execution, which is fine for portability but weaker than an in-memory backend when low latency or high-frequency repeated solves are required.
+  \item \textbf{Nonlinear performance headroom is large.}  Because the native NLP-IPM path is missing, the engine does not yet have a high-performance native continuous relaxation for general MINLP.  This is the main architectural hole between today's implementation and the intended computation-engine role.
+\end{itemize}
+
+\subsubsection{Readiness Summary}
+
+For the four solver families named in the architecture document, the present
+readiness is:
+\begin{center}
+\begin{tabular}{L{0.18\linewidth}L{0.22\linewidth}L{0.46\linewidth}}
+\toprule
+Family & Current readiness & Comment \\
+\midrule
+Linear equation & Strong & Ready as a reusable native engine kernel \\
+Nonlinear equation & Strong & Newton-style solve path is available and robust for structured models \\
+MILP & Strong--Moderate & Native path is mature, but still not uniformly best-in-class on large hard instances \\
+MINLP & Partial & Interface and tree shell exist, but native continuous relaxation is not yet complete \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Therefore, the most accurate near-term roadmap is not to redesign the engine
+abstraction, but to complete the missing native NLP/MINLP core under the
+existing abstraction: a real NLP-IPM or SQP-quality relaxation solver, then
+MINLP-specific reliability work on branching, node recovery, and regression
+testing.
+
+\subsection{Recommended Reading Order for Maintainers}
+
+For someone trying to understand or extend the engine, the lowest-friction order
+is:
+\begin{enumerate}
+  \item \texttt{problem\_types.hpp} and \texttt{problem\_validation.cpp},
+  \item \texttt{solver\_adapter.hpp} and \texttt{adapter\_registry.cpp},
+  \item \texttt{native\_adapters.cpp} to see which kernels are actually selected,
+  \item one kernel family in depth: \texttt{dual\_simplex.cpp}, \texttt{ipm\_lp\_solver.cpp}, \texttt{lcqp\_solver.cpp}, or \texttt{pdlp\_solver.cpp},
+  \item \texttt{branch\_and\_cut.cpp} and its helper files for mixed-integer logic,
+  \item \texttt{external\_adapters.cpp} only after the canonical forms and native solve path are already clear.
+\end{enumerate}
+
+That order mirrors the architecture itself: understand the problem contracts
+first, then the dispatch layer, then the heavy numerical kernels.

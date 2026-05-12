@@ -1,0 +1,75 @@
+\section{Scope and Documentation Contract}
+
+This notebook is the implementation-facing handbook for the current
+\texttt{hacdcpf} C++ module.  Its purpose is not only to list equations, but to
+connect each mathematical model to the actual public data structures,
+preprocessing steps, solver paths, and result objects used by the code base.
+
+\subsection{Covered Module Families}
+
+The current notebook covers the following runtime subsystems:
+\begin{itemize}
+  \item the engine solver layer under \texttt{hacdcpf::engine}, including canonical problem classes, adapter dispatch, native kernels, and external backend wrappers,
+  \item hybrid AC/DC power flow under \texttt{hacdcpf::solve\_power\_flow},
+  \item AC fast-decoupled, DC-only, linearized AC/DC, adaptive-islanding, and distributed-slack power flow variants,
+  \item AC optimal power flow under \texttt{hacdcpf::opf::solve\_ac\_opf}, including the native primal-dual path and the parity-IPM path,
+  \item DC optimal power flow under \texttt{hacdcpf::opf::solve\_dc\_opf}, with piecewise-linear or quadratic cost and LMP extraction,
+  \item reactive power optimization under \texttt{hacdcpf::opf::solve\_reactive\_power\_opt}, a MINLP with outer-approximation cutting planes for discrete tap/shunt control,
+  \item short-circuit analysis under \texttt{hacdcpf::analysis::compute\_short\_circuit},
+  \item distribution power flow under \texttt{hacdcpf::analysis::solve\_distribution\_pf},
+  \item optimal network reconfiguration under \texttt{hacdcpf::analysis::solve\_optimal\_reconfiguration},
+  \item unit commitment and time-series power flow under \texttt{hacdcpf::analysis::solve\_time\_series\_pf},
+  \item annual production simulation under \texttt{hacdcpf::analysis::solve\_annual\_production\_simulation}, with hierarchical L0/L2/L3 decomposition,
+  \item lifecycle simulation under \texttt{hacdcpf::analysis::run\_lifecycle\_simulation}, with multi-year degradation tracking and stratified carbon error bounds,
+  \item data interchange and case-building support used to feed the above solvers.
+\end{itemize}
+
+\subsection{Documentation Principle}
+
+This notebook follows four rules.
+\begin{enumerate}
+  \item Equations are written in the same sign convention as the current C++ implementation.
+  \item Field explanations are tied to concrete structs, not generic textbook entities.
+  \item Each component is classified by how it enters a module: direct state, fixed injection, projected equivalent, or not yet consumed.
+  \item Extension points declared in headers are explicitly separated from functionality that is already wired in source files.
+\end{enumerate}
+
+\subsection{Canonical Modeling Pipeline}
+
+The steady-state solvers do not consume every rich component table directly.
+Instead, the dominant runtime path is:
+\begin{enumerate}
+  \item start from a public \texttt{HybridPowerSystem},
+  \item call \texttt{project\_to\_canonical\_models},
+  \item build \texttt{SolverData} through \texttt{make\_solver\_data},
+  \item assemble residuals, Jacobians, or fault admittances for PF, OPF, or SC.
+\end{enumerate}
+
+The projection stage currently performs the following transformations:
+\begin{itemize}
+  \item \texttt{FlexibleLoad} $\rightarrow$ equivalent \texttt{Load},
+  \item \texttt{AsymmetricLoad} $\rightarrow$ equivalent aggregated \texttt{Load},
+  \item \texttt{Transformer2W} and \texttt{Transformer3W} $\rightarrow$ one or more equivalent \texttt{ACBranch} objects,
+  \item \texttt{Switch} $\rightarrow$ equivalent \texttt{ACBranch} whose \texttt{in\_service} flag follows the switch state,
+  \item \texttt{Charger} $\rightarrow$ accumulation into \texttt{ChargingStation} demand,
+  \item optional \texttt{ThreePhaseACSystem} $\rightarrow$ canonical single-phase-equivalent AC models when the explicit AC system is absent.
+\end{itemize}
+
+\subsection{Important Boundary Between ``Implemented'' and ``Declared''}
+
+The parity OPF formulation now instantiates \textbf{all} enhanced component
+decision blocks as runtime variables with full Jacobian and Hessian wiring:
+\begin{itemize}
+  \item generator dispatch \((P_g, Q_g)\),
+  \item VSC converter power \((P^{\qual{conv,ac}}, Q^{\qual{conv,ac}}, P^{\qual{conv,dc}})\),
+  \item DCDC converter input power \(P^{\qual{dcdc}}\) with analytical \(I^2R\) loss derivatives,
+  \item DC bus voltages \(v^{\qual{dc}}\),
+  \item per-bus load shedding \((\Delta P_d, \Delta Q_d)\) with VOLL penalty,
+  \item curtailable renewable dispatch \((P^{\qual{ren}}, Q^{\qual{ren}})\) for \texttt{RenewableGen} with \texttt{curtailable=true} and \texttt{PVSystem} with \texttt{controllable=true},
+  \item storage dispatch \((P^{\qual{stor}}, Q^{\qual{stor}})\) for AC storage and \(P^{\qual{stor,dc}}\) for DC storage,
+  \item flexible load adjustment \(P^{\qual{flex}}\).
+\end{itemize}
+These are no longer extension hooks: they are fully wired decision variable
+blocks with explicit mapping arrays in \texttt{parity\_formulation.cpp}.
+The notebook marks residual I/O contract gaps (e.g.\ result export for
+DCDC/curtailment/storage dispatch fields) where applicable.

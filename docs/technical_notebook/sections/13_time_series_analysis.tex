@@ -1,0 +1,1566 @@
+\section{Time-Series Analysis}
+\label{sec:time-series}
+
+\subsection{Problem Form and Runtime Scope}
+
+This chapter covers chronological operations analysis built from two linked
+problem classes:
+\begin{itemize}
+  \item a multi-period unit-commitment MILP for commitment and dispatch decisions,
+  \item a sequential per-time-step hybrid power-flow replay for electrical feasibility and reporting.
+\end{itemize}
+The same chapter also documents the hierarchical annual production-simulation
+extension layered on top of those solve paths.
+
+\subsection{Code Map}
+
+The current implementation is concentrated in:
+\begin{itemize}
+  \item \texttt{src/analysis/time\_series\_pf.cpp} for UC model build, backend selection, and chronological PF replay,
+  \item \texttt{src/analysis/annual\_production\_sim.cpp} for the implemented L0/L2/L3 annual-production workflow,
+  \item \texttt{src/analysis/lifecycle\_simulation.cpp} for multi-year orchestration built on the annual simulation,
+  \item the engine adapter layer and native branch-and-cut infrastructure for MILP solving.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The relevant code-aligned workflow summaries are:
+\begin{itemize}
+  \item Algorithm A20 in Section~\ref{sec:algorithms} for annual production simulation,
+  \item Algorithm A21 for lifecycle simulation,
+  \item the UC backend-selection and MILP mechanics summarized in Section~\ref{sec:engine-solver-system} and Section~\ref{sec:native-branch-and-cut}.
+\end{itemize}
+
+\subsection{Current Status}
+
+This is a live analysis stack with implemented UC, chronological PF replay, and
+annual production simulation.  The main architectural boundary is that different
+time-scale layers reuse common solver infrastructure rather than a single unified
+monolithic optimization model.
+
+This section documents the \emph{current} C++ implementation in
+\texttt{src/analysis/time\_series\_pf.cpp} and defines the next
+framework-aligned extension for \textbf{annual production simulation}.
+The runtime pipeline has two
+stages over a discrete horizon
+\(\mathcal{T}=\{0,1,\dots,T-1\}\) with step length \(\Delta t\) (hours):
+\begin{enumerate}
+\item \textbf{Unit Commitment (UC) MILP}: build and solve a linear mixed-integer
+      dispatch/commitment model for in-service AC generators, AC storage, and
+      AC renewable generators.
+\item \textbf{Sequential Time-Domain PF}: for each time step, write UC setpoints
+      into a system snapshot, apply load/PV profiles, and run the hybrid AC/DC
+      Newton power-flow solver.
+\end{enumerate}
+
+The public APIs are:
+\begin{itemize}
+\item \texttt{solve\_unit\_commitment(sys, ts\_data, opts)} returning \texttt{UCSchedule},
+\item \texttt{solve\_time\_series\_pf(sys, ts\_data, opts)} returning \texttt{TimeSeriesPFResult}.
+\end{itemize}
+
+\subsection{Code-Execution Path}
+
+\paragraph{Top-level sequence (\texttt{solve\_time\_series\_pf}).}
+\begin{enumerate}
+\item If \(T\le 0\), return an empty result immediately.
+\item If \texttt{skip\_uc=false}, call \texttt{solve\_unit\_commitment} first.
+\item Build index lists for in-service generators, storage units, and
+      renewable generators.
+\item Create a reusable PF \texttt{SolverHandle}.
+\item For each \(t\in\mathcal{T}\):
+  \begin{enumerate}
+  \item Copy the base system to \(sys_t\).
+  \item If UC is active and feasible, apply schedule setpoints to
+        \texttt{Generator::pg\_mw}, \texttt{Generator::in\_service},
+        \texttt{Storage::p\_mw}, and \texttt{RenewableGen::p\_mw}.
+  \item Apply load profiles to \texttt{Load::p\_mw}/\texttt{q\_mvar}.
+  \item Apply PV profiles to \texttt{PVSystem::irradiance}.
+  \item Reset solver handle with \(sys_t\), solve hybrid PF, and store
+        \texttt{PowerFlowResult} for step \(t\).
+  \end{enumerate}
+\item Destroy handle and return \texttt{TimeSeriesPFResult}.
+\end{enumerate}
+
+\paragraph{UC solver backend routing.}
+\texttt{TimeSeriesPFOptions::uc\_solver} supports
+\texttt{Auto/Native/HiGHS/Gurobi}.  In \texttt{Auto} mode the adapter registry
+tries MILP backends in order:
+\begin{align}
+\texttt{Gurobi} \rightarrow \texttt{HiGHS} \rightarrow \texttt{NativeBranchAndCut}.
+\end{align}
+
+\subsection{Input Profiles and Runtime Scaling}
+\label{sec:ts-profiles}
+
+A profile is a vector \(\pi(t)\) looked up by \texttt{profile\_id}.  Missing
+profile IDs or out-of-range indices fall back to default value \(1.0\).
+
+\begin{longtable}{L{0.23\linewidth}L{0.25\linewidth}L{0.42\linewidth}}
+\toprule
+Component & Runtime update & Implemented rule \\
+\midrule
+\endhead
+\texttt{Load} & \(P_{\ell}(t),Q_{\ell}(t)\) &
+\(P_{\ell}(t)=P_{\ell}^0\,\sigma_{\ell}(t)\),
+\(Q_{\ell}(t)=Q_{\ell}^0\,\sigma_{\ell}(t)\) \\
+\texttt{RenewableGen} & availability in UC &
+\(\bar P^{\qual{ren}}_{r,t}=P^{\qual{rated}}_r\,\rho_r(t)\) \\
+\texttt{PVSystem} & irradiance in PF stage &
+\(G_p(t)=1000\,\rho_p(t)\) W/m\(^2\) \\
+\bottomrule
+\end{longtable}
+
+\subsection{Annual Production-Simulation Model (Implemented --- L0/L2/L3)}
+\label{sec:annual-production-sim}
+
+\subsubsection{Implementation Status}
+
+The annual production simulation is \textbf{implemented} in
+\texttt{src/analysis/annual\_production\_sim.cpp} with the following level
+coverage:
+\begin{itemize}
+\item \textbf{L0 (Annual Planning):} Implemented.  Builds monthly or weekly
+  block boundaries, computes per-block energy budgets, maintenance masks
+  (default: no maintenance), storage SOC boundaries, and block-averaged cost
+  estimates.
+\item \textbf{L1 (Monthly Sub-problems):} \textbf{Not implemented.}  The
+  orchestrator skips directly from L0 blocks to weekly UC windows.  Monthly
+  sub-problem constraints (refined energy budgets, hydro allocation) are not
+  solved; L0 block boundaries serve as the coupling interface.
+\item \textbf{L2 (Weekly Rolling UC):} Implemented.  Each week calls
+  \texttt{solve\_unit\_commitment()} on a sliced sub-horizon with look-ahead
+  buffer, inheriting maintenance masks and SOC boundaries from L0.
+\item \textbf{L3 (Daily OPF/PF Replay):} Implemented.  Each day within a
+  weekly binding window is replayed through \texttt{solve\_time\_series\_pf()}
+  with the pre-solved UC schedule injected via \texttt{skip\_uc=true}.
+\end{itemize}
+
+The public entry point is
+\texttt{solve\_annual\_production\_simulation(sys, ts\_data, opts)} returning
+\texttt{AnnualProductionSimResult}.
+
+A companion module, \texttt{src/analysis/lifecycle\_simulation.cpp}, wraps the
+annual simulation in a multi-year loop with component degradation (battery
+capacity fade, solar degradation), stratified sampling over operating strata
+(7~bins), Neyman allocation, and NPV discounting.  Its entry point is
+\texttt{run\_lifecycle\_simulation(sys, ts\_data, opts)}.
+
+\subsubsection{Position in the Existing Modeling Framework}
+
+The annual production-simulation module is designed as a
+\textbf{chronological year-ahead scheduling layer} that reuses the existing
+time-series abstractions rather than introducing a parallel framework.
+The intended runtime order is
+\begin{align}
+\texttt{TimeSeriesData}
+&\xrightarrow{\text{annual schedule}}
+\texttt{UCSchedule-like yearly plan} \\
+&\xrightarrow{\text{step-wise replay}}
+\texttt{AC OPF / hybrid PF validation}.
+\end{align}
+
+Concretely, the module fits the current code architecture as follows:
+\begin{itemize}
+\item \texttt{TimeSeriesData::num\_steps} carries the full chronological horizon,
+  typically \(T=8760\) for a non-leap year with \(\Delta t=1\) hour.
+\item Existing component \texttt{profile\_id} hooks continue to provide
+  load, renewable, PV, DC-load, and DC-generation trajectories.
+\item The scheduling stage computes yearly commitment/dispatch/SOC trajectories.
+\item The physical network is validated afterwards by the already-documented
+  OPF and PF models in Sections~\ref{sec:opf} and \ref{sec:powerflow},
+  preserving one shared sign convention and one shared converter model family.
+\end{itemize}
+
+This separation is deliberate: the annual scheduling model remains tractable,
+while the electrical feasibility check still uses the detailed hybrid AC/DC
+models already implemented elsewhere in the notebook.
+
+\subsubsection{Chronological Horizon and Sets}
+
+Let the yearly horizon be
+\begin{align}
+\mathcal{T}^{\qual{yr}} = \{0,1,\dots,T_{yr}-1\},
+\qquad T_{yr} = \frac{8760}{\Delta t}.
+\end{align}
+For the base annual production-simulation layer, define:
+\begin{align}
+\mathcal{G} &: \text{dispatchable AC generators}, &
+\mathcal{S}^{\qual{ac}} &: \text{AC storage units}, \\
+\mathcal{S}^{\qual{dc}} &: \text{DC storage units}, &
+\mathcal{R}^{\qual{ac}} &: \text{AC renewable generators / PV}, \\
+\mathcal{R}^{\qual{dc}} &: \text{DC renewable or static generators} \\
+& \text{with profiles}, &
+\mathcal{L}^{\qual{ac}},\mathcal{L}^{\qual{dc}} &: \text{AC/DC loads}, \\
+\mathcal{C}^{\qual{vsc}} &: \text{VSC converters}, &
+\mathcal{D}^{\qual{dcdc}} &: \text{DCDC converters}.
+\end{align}
+
+The per-step exogenous profiles are inherited directly from
+Section~\ref{sec:ts-profiles}:
+\begin{align}
+\sigma_\ell(t) &: \text{load scaling}, &
+\rho_r(t) &: \text{renewable availability}, \\
+\gamma_k(t) &: \text{optional forced-availability or} \\
+& \text{maintenance factor}.
+\end{align}
+
+\subsubsection{Decision Variables}
+
+For each \(t\in\mathcal{T}^{\qual{yr}}\), the annual production-simulation model
+uses the following primary variables:
+\begin{align}
+&P_{g,t},\; u_{g,t},\; y_{g,t}^{\qual{su}},\; y_{g,t}^{\qual{sd}}, && g\in\mathcal{G}, \\
+&P_{s,t}^{\qual{ch}},\; P_{s,t}^{\qual{dis}},\; E_{s,t}, && s\in\mathcal{S}^{\qual{ac}}\cup\mathcal{S}^{\qual{dc}}, \\
+&P_{r,t}^{\qual{ac}},\; P_{r,t}^{\qual{dc}},\; C_{r,t}^{\qual{curt}}, && r\in\mathcal{R}^{\qual{ac}}\cup\mathcal{R}^{\qual{dc}}, \\
+&P_{c,t}^{\qual{ac}},\; Q_{c,t}^{\qual{ac}},\; P_{c,t}^{\qual{dc}}, && c\in\mathcal{C}^{\qual{vsc}}, \\
+&P_{d,t}^{\qual{in}},\; P_{d,t}^{\qual{out}}, && d\in\mathcal{D}^{\qual{dcdc}}, \\
+&L_{i,t}^{\qual{shed}}, && i\in\mathcal{L}^{\qual{ac}}\cup\mathcal{L}^{\qual{dc}}.
+\end{align}
+
+where \(u_{g,t}\in\{0,1\}\) is commitment status, \(y^{\qual{su}}\) and
+\(y^{\qual{sd}}\) are startup/shutdown indicators, \(E_{s,t}\) is stored energy,
+and \(L_{i,t}^{\qual{shed}}\) is optional unserved energy for adequacy studies.
+
+\subsubsection{Objective Function}
+
+The recommended yearly objective is a weighted production-cost functional:
+\begin{align}
+\min J^{\qual{yr}} = \sum_{t\in\mathcal{T}^{\qual{yr}}} \Biggl[
+&\sum_{g\in\mathcal{G}}
+\bigl(c_{2g}P_{g,t}^2 + c_{1g}P_{g,t} + c_{0g}u_{g,t}
++ C_g^{\qual{su}} y_{g,t}^{\qual{su}} + C_g^{\qual{sd}} y_{g,t}^{\qual{sd}}\bigr) \\
+&+ \sum_{s\in\mathcal{S}^{\qual{ac}}\cup\mathcal{S}^{\qual{dc}}}
+\bigl(c_s^{\qual{cyc}} P_{s,t}^{\qual{dis}} + c_s^{\qual{deg}}(P_{s,t}^{\qual{ch}} + P_{s,t}^{\qual{dis}})\bigr) \\
+&+ \sum_{r\in\mathcal{R}^{\qual{ac}}\cup\mathcal{R}^{\qual{dc}}}
+c_r^{\qual{curt}} C_{r,t}^{\qual{curt}}
++ \sum_i c_i^{\qual{ens}} L_{i,t}^{\qual{shed}}
++ \sum_g c_g^{\qual{co2}} P_{g,t}
+\Biggr] \Delta t.
+\label{eq:annual-prod-obj}
+\end{align}
+
+This objective keeps the framework consistent with the existing linear UC cost
+model, but extends it in the directions needed for a production-simulation
+module: startup/shutdown accounting, storage cycling cost, renewable
+curtailment, optional loss-of-load penalty, and optional emissions accounting.
+
+\subsubsection{Core Constraints}
+
+\paragraph{(1) AC and DC carrier balance at the schedule stage.}
+The year-ahead schedule can remain carrier-aware without requiring a full
+nonlinear network solve in the master problem.  For each time step:
+\begin{align}
+\sum_{g\in\mathcal{G}_i^{\qual{ac}}} P_{g,t}
++ \sum_{r\in\mathcal{R}_i^{\qual{ac}}} P_{r,t}^{\qual{ac}}
++ \sum_{s\in\mathcal{S}_i^{\qual{ac}}} \left(P_{s,t}^{\qual{dis}}-P_{s,t}^{\qual{ch}}\right)
++ \sum_{c\in\mathcal{C}_i^{\qual{vsc}}} P_{c,t}^{\qual{ac}}
+= P_{i,t}^{\qual{load,ac}} - L_{i,t}^{\qual{shed}} + \hat P_{i,t}^{\qual{loss,ac}},
+\label{eq:annual-ac-balance}
+\end{align}
+\begin{align}
+\sum_{r\in\mathcal{R}_k^{\qual{dc}}} P_{r,t}^{\qual{dc}}
++ \sum_{s\in\mathcal{S}_k^{\qual{dc}}} \left(P_{s,t}^{\qual{dis}}-P_{s,t}^{\qual{ch}}\right)
++ \sum_{c\in\mathcal{C}_k^{\qual{vsc}}} P_{c,t}^{\qual{dc}}
++ \sum_{d\in\mathcal{D}_{k}^{\qual{out}}} P_{d,t}^{\qual{out}}
+= P_{k,t}^{\qual{load,dc}} - L_{k,t}^{\qual{shed}}
++ \sum_{d\in\mathcal{D}_{k}^{\qual{in}}} P_{d,t}^{\qual{in}} + \hat P_{k,t}^{\qual{loss,dc}}.
+\label{eq:annual-dc-balance}
+\end{align}
+
+Here \(\hat P^{\qual{loss}}\) is a schedule-stage loss proxy.  The exact AC/DC
+network losses and voltage feasibility are checked later by the step-wise OPF/PF
+validation stage.
+
+\paragraph{(2) Load and renewable profile embedding.}
+\begin{align}
+P_{i,t}^{\qual{load,ac}} &= P_{i}^{0,\qual{ac}}\,\sigma_i(t), &
+Q_{i,t}^{\qual{load,ac}} &= Q_{i}^{0,\qual{ac}}\,\sigma_i(t), \\
+P_{k,t}^{\qual{load,dc}} &= P_{k}^{0,\qual{dc}}\,\sigma_k(t), &
+0 \le P_{r,t}^{\qual{ac}} &\le \bar P_{r}^{\qual{ac}}\,\rho_r(t)\,\gamma_r(t), \\
+0 \le P_{r,t}^{\qual{dc}} &\le \bar P_{r}^{\qual{dc}}\,\rho_r(t)\,\gamma_r(t), &
+C_{r,t}^{\qual{curt}} &= \bar P_{r,t} - P_{r,t}.
+\label{eq:annual-profile-embed}
+\end{align}
+
+\paragraph{(3) Generator commitment logic.}
+\begin{align}
+u_{g,t} - u_{g,t-1} &= y_{g,t}^{\qual{su}} - y_{g,t}^{\qual{sd}}, \\
+P_g^{\qual{min}} u_{g,t} &\le P_{g,t} \le P_g^{\qual{max}} u_{g,t}, \\
+0 \le y_{g,t}^{\qual{su}}, y_{g,t}^{\qual{sd}} &\le 1,
+\qquad y_{g,t}^{\qual{su}}, y_{g,t}^{\qual{sd}} \in \{0,1\}.
+\label{eq:annual-commitment}
+\end{align}
+
+\paragraph{(4) Minimum up/down time and ramping.}
+For each generator:
+\begin{align}
+\sum_{\tau=t-T_g^{\qual{up}}+1}^{t} y_{g,\tau}^{\qual{su}} &\le u_{g,t}, \\
+\sum_{\tau=t-T_g^{\qual{dn}}+1}^{t} y_{g,\tau}^{\qual{sd}} &\le 1-u_{g,t}, \\
+P_{g,t}-P_{g,t-1} &\le R_g^{\qual{up}}\Delta t, \\
+P_{g,t-1}-P_{g,t} &\le R_g^{\qual{dn}}\Delta t.
+\label{eq:annual-ramping-updown}
+\end{align}
+This is the natural yearly extension of the existing short-horizon UC model and
+uses the unit-commitment metadata already present in \texttt{Generator}.
+
+\paragraph{(5) Storage dynamics and annual cyclic boundary.}
+For every storage unit:
+\begin{align}
+E_{s,t} &= \alpha_s E_{s,t-1}
++ \eta_s^{\qual{ch}} P_{s,t}^{\qual{ch}}\Delta t
+- \frac{1}{\eta_s^{\qual{dis}}} P_{s,t}^{\qual{dis}}\Delta t, \\
+E_s^{\min} &\le E_{s,t} \le E_s^{\max}, \\
+0 \le P_{s,t}^{\qual{ch}} &\le P_s^{\qual{ch,max}}, \\
+0 \le P_{s,t}^{\qual{dis}} &\le P_s^{\qual{dis,max}}, \\
+E_{s,T_{yr}-1} &= E_{s,-1} + \Delta E_s^{\qual{target}}.
+\label{eq:annual-storage}
+\end{align}
+The terminal condition is essential for annual studies; the default choice is
+\(\Delta E_s^{\qual{target}}=0\), i.e.\ end-of-year SOC equals start-of-year SOC.
+
+\paragraph{(6) Converter coupling with schedule-stage proxies.}
+To stay consistent with the AC/DC component models already defined in
+Sections~\ref{sec:powerflow} and \ref{sec:opf}, the yearly schedule uses the same
+sign convention but allows a simplified master formulation:
+\begin{align}
+P_{c,t}^{\qual{ac}} + P_{c,t}^{\qual{dc}} + \hat P_{c,t}^{\qual{loss}} &= 0,
+\qquad c\in\mathcal{C}^{\qual{vsc}}, \\
+P_{d,t}^{\qual{out}} &= \eta_d^{\pm} P_{d,t}^{\qual{in}} - \hat P_{d,t}^{\qual{loss}},
+\qquad d\in\mathcal{D}^{\qual{dcdc}}.
+\label{eq:annual-converter-proxy}
+\end{align}
+At the annual scheduling stage, \(\hat P^{\qual{loss}}\) may be linear,
+piecewise-linear, or even zero if loss accounting is deferred.  During per-step
+validation, these proxies are replaced by the exact nonlinear VSC and DCDC
+models already documented in the PF/OPF sections, including
+\(P_{\mathrm{loss}} = a + bI + cI^2\) for VSC and \(I^2R\) loss for DCDC.
+
+\paragraph{(7) Optional adequacy and reserve constraints.}
+For yearly production simulation, reserve or resource-adequacy constraints can
+be added without changing the replay pipeline:
+\begin{align}
+\sum_{g\in\mathcal{G}} \left(P_g^{\max}u_{g,t} - P_{g,t}\right)
++ \sum_s \left(P_s^{\qual{dis,max}} - P_{s,t}^{\qual{dis}}\right)
+\ge R_t^{\qual{req}},
+\qquad \forall t.
+\label{eq:annual-reserve}
+\end{align}
+If desired, \(L_{i,t}^{\qual{shed}}\) can be kept strictly at zero for economic
+production simulation, or activated with a high penalty for adequacy studies.
+
+\subsubsection{Hierarchical Temporal Decomposition}
+\label{sec:annual-decomposition}
+
+\paragraph{Motivation.}
+The monolithic formulation~\eqref{eq:annual-prod-obj}--\eqref{eq:annual-reserve}
+contains \(\mathcal{O}(|\mathcal{G}|\,T_{yr})\) binary commitment variables.
+For a system with 50 generators and hourly resolution, this yields
+\(\sim 4.4\times10^5\) binary variables over 8\,760 time steps --- well beyond
+the practical reach of general-purpose MILP solvers.  The standard remedy is to
+split the annual horizon into a hierarchy of nested sub-horizons, where each
+level trades temporal resolution for problem size.
+
+\paragraph{Decomposition levels.}
+We partition the year into four nested levels with decreasing granularity
+in the master problems and increasing detail in the inner sub-problems:
+
+\begin{center}
+\small
+\begin{tabular}{cllll}
+\toprule
+Level & Scope & Typical horizon & Resolution & Key decisions \\
+\midrule
+\textbf{L0} & Annual & 1 year & monthly & maintenance, fuel and energy budgets \\
+\textbf{L1} & Monthly & 1 month & weekly & generation targets and hydro allocation \\
+\textbf{L2} & Weekly & 1 week & hourly & unit commitment, storage cycling \\
+\textbf{L3} & Daily & 1--2 days & hourly or sub-hourly & detailed UC and replay \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each level solves a smaller optimisation problem embedded within the
+constraints inherited from the level above.  Level~L3 maps directly to the
+existing \texttt{solve\_unit\_commitment()} and
+\texttt{solve\_time\_series\_pf()} pipeline.
+
+\paragraph{Level~L0: annual planning.}
+The annual level operates on a coarsened representation of the year, using
+\(K\) blocks (e.g.\ 12~months or 52~weeks).  Let
+\(\mathcal{B}^{(0)}=\{B_1,\dots,B_K\}\) partition
+\(\mathcal{T}^{\qual{yr}}\).  For each block \(k\):
+\begin{align}
+\bar E_{g,k}^{\qual{gen}} &: \text{energy budget for generator } g, \\
+\bar E_{s,k}^{\qual{sto}} &: \text{net energy throughput for storage } s, \\
+m_{g,k} &\in \{0,1\}: \text{maintenance flag (forced outage)}, \\
+F_{k}^{\qual{fuel}} &: \text{fuel/emission budget for block } k.
+\label{eq:annual-l0-vars}
+\end{align}
+
+The L0 objective approximates yearly cost using block-averaged energy prices
+and capacity availability:
+\begin{align}
+\min J^{(0)} = \sum_{k=1}^{K} \Biggl[
+\sum_{g\in\mathcal{G}} \hat c_{g} \bar E_{g,k}^{\qual{gen}}
++ \sum_{g} C_g^{\qual{maint}} m_{g,k}
++ \sum_r c_r^{\qual{curt}} \bar C_{r,k}^{\qual{curt}}
++ \sum_i c_i^{\qual{ens}} \bar L_{i,k}^{\qual{shed}}
+\Biggr],
+\label{eq:annual-l0-obj}
+\end{align}
+subject to block energy balance, maintenance window constraints (minimum
+consecutive outage length, seasonal windows), and annual fuel/emission caps:
+\begin{align}
+\sum_{k=1}^{K} F_k^{\qual{fuel}} &\le F^{\qual{annual}}, \\
+\sum_{k=k_0}^{k_0+M_g-1} m_{g,k} &\ge M_g \cdot w_{g,k_0},
+  \quad \text{(maintenance window of length } M_g), \\
+\sum_{k=1}^{K} \bar E_{g,k}^{\qual{gen}} &\le E_g^{\qual{annual,max}}
+  (1-m_{g,k}).
+\label{eq:annual-l0-constr}
+\end{align}
+
+\paragraph{Level~L1: monthly sub-problems.}
+Each month \(k\) inherits from L0:
+\begin{itemize}
+\item Generator availability mask: \(m_{g,k}=1 \Rightarrow\) generator \(g\) is
+  on forced outage for all weeks in month \(k\).
+\item Energy budget ceiling: \(\sum_{t\in B_k} P_{g,t}\Delta t \le \bar E_{g,k}^{\qual{gen}}\).
+\item Fuel allocation: total fuel consumption in month \(k\) must not exceed
+  \(F_k^{\qual{fuel}}\).
+\item Boundary SOC: \(E_{s,t_{\mathrm{start}(k)}} = E_{s,k}^{\qual{init}}\),
+  where \(E_{s,k}^{\qual{init}}\) is either fixed by L0 or carried from the
+  terminal state of month \(k{-}1\).
+\end{itemize}
+The monthly sub-problem uses weekly representative blocks or full hourly
+resolution within the month, solving a UC-like problem with the inherited
+constraints tightening the feasible region.
+
+\paragraph{Level~L2: weekly rolling commitment.}
+Within each month, the weekly level solves a rolling-horizon UC over
+\(T^{(2)}=168/\Delta t\) steps (one week) plus a look-ahead buffer
+\(T^{\qual{la}}\) (typically 24--48~hours):
+\begin{align}
+\mathcal{T}^{(2)}_w = \{t_w, t_w{+}1, \dots, t_w{+}T^{(2)}{+}T^{\qual{la}}{-}1\},
+\label{eq:annual-l2-horizon}
+\end{align}
+where commitment decisions in the look-ahead window \([t_w{+}T^{(2)},\,
+t_w{+}T^{(2)}{+}T^{\qual{la}}{-}1]\) are advisory (not binding).  Only the
+binding window's schedule is retained before the horizon rolls forward.
+
+Boundary conditions from L1:
+\begin{align}
+u_{g,t_w{-}1},\; P_{g,t_w{-}1},\; E_{s,t_w{-}1}: \quad
+\text{initial commitment, dispatch, and SOC from end of previous week.}
+\label{eq:annual-l2-boundary}
+\end{align}
+
+The formulation within each weekly window is identical to the monolithic
+model~\eqref{eq:annual-prod-obj}--\eqref{eq:annual-reserve}, but restricted to
+\(\mathcal{T}^{(2)}_w\) and augmented with the L1 energy-budget constraint:
+\begin{align}
+\sum_{t\in\mathcal{T}^{(2)}_w\cap B_k} P_{g,t}\Delta t
+\le \bar E_{g,k}^{\qual{gen}} - \sum_{t'<t_w,\, t'\in B_k} P_{g,t'}^{*}\Delta t,
+\label{eq:annual-l2-budget-coupling}
+\end{align}
+where \(P_{g,t'}^{*}\) denotes already-committed dispatch from earlier weeks in
+the same month.
+
+\paragraph{Level~L3: daily detailed UC + OPF/PF.}
+The innermost level processes each day (or 1--2 day window) at full temporal
+resolution.  This level is \emph{identical} to the existing short-horizon
+\texttt{solve\_unit\_commitment()} followed by
+\texttt{solve\_time\_series\_pf()}, inheriting:
+\begin{itemize}
+\item Commitment status and dispatch from L2 as initial conditions or
+  must-run/must-off constraints.
+\item SOC from the end of the previous day.
+\item Generator availability from L0 maintenance flags.
+\end{itemize}
+The replayed OPF/PF gives per-step voltage, loss, and flow results that
+feed into the annual metrics in \S\ref{sec:annual-metrics}.
+
+\paragraph{Coordination protocol.}
+The levels are linked by the following cascade of complicating (coupling)
+variables:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+From $\to$ To & Coupling variables & Direction \\
+\midrule
+L0 $\to$ L1 & \(m_{g,k},\, \bar E_{g,k}^{\qual{gen}},\,
+               F_k^{\qual{fuel}},\, E_{s,k}^{\qual{init}}\) & top-down \\
+L1 $\to$ L2 & \(\bar E_{g,k}^{\qual{gen,remaining}},\,
+               E_{s,t_w}^{\qual{init}},\, u_{g,t_w{-}1}\) & top-down \\
+L2 $\to$ L3 & \(u_{g,t_d{-}1},\, P_{g,t_d{-}1},\,
+               E_{s,t_d{-}1}\) & top-down \\
+L3 $\to$ L2 & Actual dispatch, SOC, and cost realisation & bottom-up \\
+L2 $\to$ L1 & Accumulated energy, fuel consumption & bottom-up \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The default execution mode is a \textbf{single forward pass} (top-down only),
+which is the most common approach in industry production-simulation tools.
+An optional \textbf{iterative feedback} mode re-solves upper levels using
+realised cost/energy information from lower levels, which can improve
+inter-temporal coordination (e.g.\ hydro scheduling or long-duration storage)
+at the cost of additional solve time.
+
+\paragraph{Algorithmic outline.}
+The hierarchical production-simulation pipeline is:
+
+\begin{algorithmic}[1]
+\Procedure{SolveAnnualProductionSimulation}{$sys,\,ts\_data,\,opts$}
+  \State \textbf{L0:} Solve annual planning LP/MILP $\to$ maintenance schedule
+    $\{m_{g,k}\}$, energy budgets $\{\bar E_{g,k}\}$, fuel allocations
+    $\{F_k\}$, boundary SOCs $\{E_{s,k}^{\qual{init}}\}$
+  \For{each month $k=1,\dots,12$}
+    \State \textbf{L1:} Solve monthly sub-problem with L0 constraints $\to$
+      weekly targets, refined SOC trajectories
+    \For{each week $w$ in month $k$}
+      \State \textbf{L2:} Solve rolling weekly UC over
+        $\mathcal{T}^{(2)}_w$ with look-ahead
+      \State Inherit $u_{g,t_w{-}1}$, $E_{s,t_w{-}1}$ from previous week
+      \State Enforce remaining energy budget from L1
+        via~\eqref{eq:annual-l2-budget-coupling}
+      \For{each day $d$ in binding window of week $w$}
+        \State \textbf{L3:} Solve daily UC + sequential OPF/PF via existing
+          \texttt{solve\_time\_series\_pf()} pipeline
+        \State Store per-step results: voltage, losses, flows, costs
+      \EndFor
+    \EndFor
+    \If{opts.iterative\_feedback}
+      \State Feed realised monthly cost/energy back to L0; re-solve if
+        budget violation $>$ tolerance
+    \EndIf
+  \EndFor
+  \State Aggregate all per-step results into annual metrics
+    (\S\ref{sec:annual-metrics})
+\EndProcedure
+\end{algorithmic}
+
+\paragraph{Computational complexity reduction.}
+Let \(N_g=|\mathcal{G}|\) and assume hourly resolution.  The monolithic problem
+has \(\sim N_g\!\cdot\!8760\) binaries.  With the hierarchy:
+\begin{itemize}
+\item L0: \(\sim N_g\!\cdot\!12\) maintenance binaries (easily solvable).
+\item L1: \(\sim N_g\!\cdot\!4\) weekly blocks per month
+  (or full hourly: \(\sim N_g\!\cdot\!720\) --- still tractable).
+\item L2: \(\sim N_g\!\cdot\!(168{+}T^{\qual{la}})\) binaries per window
+  (standard UC size).
+\item L3: \(\sim N_g\!\cdot\!24\) binaries per day (existing pipeline).
+\end{itemize}
+The total solve effort becomes \(\sum_{w=1}^{52}\mathcal{O}(N_g\!\cdot\!192)\)
+plus overhead, which is orders of magnitude cheaper than a single
+\(\mathcal{O}(N_g\!\cdot\!8760)\) MILP.  The trade-off is that inter-temporal
+optimality across weeks is approximate rather than exact, but this is the
+standard and accepted practice in production-simulation studies.
+
+\paragraph{Mapping to the C++ framework.}
+The hierarchical structure maps to the existing API as follows:
+\begin{itemize}
+\item \textbf{L0}: \texttt{solve\_annual\_plan()} returns \texttt{AnnualPlanResult} carrying
+  maintenance masks, energy budgets, and boundary SOCs per block.
+\item \textbf{L1}: Not implemented; the orchestrator proceeds directly from L0
+  blocks to L2 weekly windows.
+\item \textbf{L2}: \texttt{solve\_weekly\_uc()} calls \texttt{solve\_unit\_commitment()} with a
+  168-step \texttt{TimeSeriesData} sliced from the yearly horizon, plus a
+  configurable look-ahead buffer.
+\item \textbf{L3}: \texttt{solve\_daily\_replay()} calls \texttt{solve\_time\_series\_pf()} with
+  \texttt{skip\_uc=true} and the pre-solved weekly schedule sliced to the
+  daily window.
+\item The outer loop is \texttt{solve\_annual\_production\_simulation()}, which
+  assembles sub-horizons and manages boundary handoff.
+\end{itemize}
+
+\subsubsection{Coupling to OPF/PF Replay}
+\label{sec:annual-replay}
+
+Whether the annual problem is solved monolithically or via the hierarchical
+decomposition in \S\ref{sec:annual-decomposition}, the scheduled dispatch for
+each time step is not the final electrical truth.  Instead, each step is
+converted into a physical snapshot and replayed through the existing OPF/PF
+pipeline:
+\begin{align}
+\Pi^{\qual{yr}}
+\xrightarrow{\text{write } sys_t}
+\texttt{solve\_ac\_opf}(sys_t,\,opt_t)
+\xrightarrow{\text{validation}}
+\texttt{solve\_power\_flow}(sys_t,\,opt_t).
+\label{eq:annual-replay-pipeline}
+\end{align}
+This gives the production-simulation module three nested fidelity levels:
+\begin{enumerate}
+\item \textbf{Schedule level}: chronological annual MILP/QP on dispatch,
+  commitment, storage, curtailment, and converter transfer proxies.
+\item \textbf{Operational refinement}: optional per-step OPF with the exact
+  AC/DC formulation and converter equations.
+\item \textbf{Physical validation}: per-step hybrid PF to verify that the
+  replayed operating point remains feasible in the detailed network model.
+\end{enumerate}
+
+\subsubsection{Annual Output Metrics}
+\label{sec:annual-metrics}
+
+The yearly result object should aggregate both economics and physical quality:
+\begin{align}
+C^{\qual{tot}} &= J^{\qual{yr}}, \\
+E^{\qual{gen}}_g &= \sum_{t\in\mathcal{T}^{\qual{yr}}} P_{g,t}\Delta t, \\
+E^{\qual{curt}}_r &= \sum_{t\in\mathcal{T}^{\qual{yr}}} C_{r,t}^{\qual{curt}}\Delta t, \\
+E^{\qual{ens}} &= \sum_{t\in\mathcal{T}^{\qual{yr}}}\sum_i L_{i,t}^{\qual{shed}}\Delta t, \\
+E^{\qual{loss}} &= \sum_{t\in\mathcal{T}^{\qual{yr}}} P_t^{\qual{loss}}\Delta t, \\
+\mathrm{CF}_g &= \frac{E_g^{\qual{gen}}}{P_g^{\max}\,T_{yr}\Delta t}.
+\label{eq:annual-metrics}
+\end{align}
+
+These annual metrics align naturally with the existing
+\texttt{TimeSeriesPFResult} style and can be exported together with per-step
+cross-validation statistics already supported by the UC\(\to\)OPF\(\to\)PF path.
+
+\subsection{Unit Commitment MILP (Implemented)}
+\label{sec:dopf}
+
+\subsubsection{Sets and Variables}
+
+Let:
+\begin{align}
+\mathcal{G}&=\text{in-service AC generators}, &
+\mathcal{S}&=\text{in-service AC storage units}, \\
+\mathcal{R}&=\text{in-service AC renewable generators}, &
+\mathcal{T}&=\{0,1,\dots,T-1\}.
+\end{align}
+
+Decision variables:
+\begin{align}
+P_{g,t},\; u_{g,t}\in\{0,1\},\; s_{g,t}\ge 0,\;
+P^{\qual{ess}}_{s,t},\; E^{\qual{soc}}_{s,t},\; P^{\qual{ren}}_{r,t}.
+\end{align}
+
+where:
+\begin{itemize}
+\item \(P_{g,t}\): generator active output,
+\item \(u_{g,t}\): generator commitment,
+\item \(s_{g,t}\): startup-cost auxiliary variable,
+\item \(P^{\qual{ess}}_{s,t}\): signed storage dispatch (\(+\) discharge, \(-\) charge),
+\item \(E^{\qual{soc}}_{s,t}\): storage SOC state,
+\item \(P^{\qual{ren}}_{r,t}\): renewable dispatch.
+\end{itemize}
+
+\subsubsection{Objective Function}
+
+The implemented objective is linear:
+\begin{align}
+\min J =
+\sum_{t\in\mathcal{T}} \Biggl[
+\sum_{g\in\mathcal{G}} c_{1g}\,P_{g,t}\,\Delta t
++ \sum_{g\in\mathcal{G}} s_{g,t}
+- \sum_{r\in\mathcal{R}} c_r^{\qual{curt}}\,P^{\qual{ren}}_{r,t}\,\Delta t
+\Biggr].
+\label{eq:uc-obj-impl}
+\end{align}
+
+The negative renewable term is equivalent (up to a constant) to a curtailment
+penalty
+\(c_r^{\qual{curt}}(\bar P^{\qual{ren}}_{r,t}-P^{\qual{ren}}_{r,t})\),
+therefore it drives renewable utilization toward availability bounds.
+
+\subsubsection{Constraints}
+
+\paragraph{(1) System-wide active-power balance (single-bus approximation).}
+\begin{align}
+\sum_{g\in\mathcal{G}} P_{g,t}
++ \sum_{s\in\mathcal{S}} P^{\qual{ess}}_{s,t}
++ \sum_{r\in\mathcal{R}} P^{\qual{ren}}_{r,t}
+= P_t^{\qual{load}},
+\quad \forall t\in\mathcal{T}.
+\label{eq:uc-balance-impl}
+\end{align}
+
+Load aggregation from AC loads:
+\begin{align}
+P_t^{\qual{load}} = \sum_{\ell\in\mathcal{L}} P_\ell^0\,\sigma_\ell(t)\,\kappa_\ell,
+\end{align}
+with \(\kappa_\ell=\texttt{Load::scaling}\).
+
+\paragraph{(2) Generator output-commitment coupling.}
+\begin{align}
+0 \le P_{g,t} \le P_g^{\qual{max}} u_{g,t},
+\quad
+P_{g,t} \ge P_g^{\qual{min}} u_{g,t},
+\quad \forall g,t.
+\label{eq:uc-p-u-coupling}
+\end{align}
+
+\paragraph{(3) Generator ramp limits.}
+\begin{align}
+P_{g,t}-P_{g,t-1} &\le R_g^{\qual{up}}\,(60\Delta t), \\
+P_{g,t-1}-P_{g,t} &\le R_g^{\qual{dn}}\,(60\Delta t),
+\quad \forall g,\; t\ge 1.
+\label{eq:uc-ramp-impl}
+\end{align}
+
+\paragraph{(4) Startup-cost linearization.}
+\begin{align}
+s_{g,0} &\ge C_g^{\qual{su}} u_{g,0}, \\
+s_{g,t} &\ge C_g^{\qual{su}}(u_{g,t}-u_{g,t-1}), \quad t\ge 1.
+\label{eq:uc-startup-impl}
+\end{align}
+In matrix form this is implemented as
+\(-s + C^{\qual{su}}u_t - C^{\qual{su}}u_{t-1} \le 0\).
+
+\paragraph{(5) Storage SOC dynamics (linearized signed-power form).}
+For storage unit \(s\), define
+\begin{align}
+\eta_s &= \sqrt{\eta_s^{\qual{ch}}\eta_s^{\qual{dis}}},
+\qquad
+\alpha_s = 1 - \frac{\texttt{self\_discharge\_pct}_s}{100}, \\
+\beta_s &= \frac{\Delta t}{\eta_s E_s^{\qual{rated}}}.
+\end{align}
+Then:
+\begin{align}
+E_{s,0}^{\qual{soc}} + \beta_s P^{\qual{ess}}_{s,0} &= \alpha_s E_{s}^{\qual{soc,init}}, \\
+E_{s,t}^{\qual{soc}} - \alpha_s E_{s,t-1}^{\qual{soc}} + \beta_s P^{\qual{ess}}_{s,t} &= 0,
+\quad t\ge 1,
+\label{eq:uc-soc-impl}
+\end{align}
+with bounds
+\begin{align}
+E_s^{\qual{soc,min}} \le E_{s,t}^{\qual{soc}} \le E_s^{\qual{soc,max}},
+\quad
+P_s^{\qual{ess,min}} \le P_{s,t}^{\qual{ess}} \le P_s^{\qual{ess,max}}.
+\label{eq:uc-soc-bounds-impl}
+\end{align}
+
+\paragraph{(6) Renewable availability bounds.}
+\begin{align}
+0 \le P_{r,t}^{\qual{ren}} \le \bar P_{r,t}^{\qual{ren}},
+\quad
+\bar P_{r,t}^{\qual{ren}} = P_r^{\qual{rated}}\rho_r(t),
+\quad \forall r,t.
+\label{eq:uc-ren-bounds-impl}
+\end{align}
+
+\subsubsection{Model-Class and Solution Output}
+
+The current formulation is a \textbf{MILP} and is solved by the selected MILP
+adapter.  Solution vector \(x\) is unpacked into
+\texttt{UCSchedule::gen\_dispatch/gen\_commit/ess\_dispatch/ess\_soc/renewable\_dispatch},
+plus \texttt{total\_cost}, \texttt{feasible}, and \texttt{solver\_name}.
+
+\subsubsection{Implementation Scope Notes (Important)}
+
+The present UC implementation is intentionally compact and differs from a
+full network-constrained SCUC:
+\begin{itemize}
+\item DC network matrices are constructed, but UC constraints currently use
+      the aggregated single-bus balance~\eqref{eq:uc-balance-impl}.
+\item No line-flow, voltage, reserve, N-1, or zonal constraints are included.
+\item \texttt{min\_up\_time\_hr}, \texttt{min\_dn\_time\_hr}, and shutdown cost are
+      not yet enforced in this runtime UC model.
+\item Objective currently uses linear \texttt{cost\_c1}; quadratic
+      \texttt{cost\_c2}/constant \texttt{cost\_c0} are not part of the active UC MILP.
+\end{itemize}
+
+\subsection{Distribution-System Counterpart: Time-Series Topology Reconfiguration}
+\label{sec:ts-dnr}
+
+\paragraph{Scope separation (important).}
+The UC model in \S\ref{sec:dopf} is the scheduling layer for
+\textbf{transmission-oriented} studies (commit/decommit central generators).
+For \textbf{distribution systems}, the analogous scheduling layer is
+\emph{time-series topology reconfiguration} (TS-TR), where binary decisions
+operate feeder switches and tie lines across time.
+
+In short:
+\begin{align}
+\text{Transmission: } \{u_{g,t}\}_{g,t} \;\;\Longleftrightarrow\;\;
+\text{Distribution: } \{z_{e,t}\}_{e,t}.
+\end{align}
+
+\subsubsection{Sets, Parameters, and Decision Variables}
+
+Let the hybrid distribution network be split into AC and DC subgraphs:
+\begin{align}
+\mathcal{G}^{\qual{ac}}&=(\mathcal{N}^{\qual{ac}},\mathcal{E}^{\qual{ac}}), &
+\mathcal{G}^{\qual{dc}}&=(\mathcal{N}^{\qual{dc}},\mathcal{E}^{\qual{dc}}),
+\end{align}
+with switchable sets
+\(\mathcal{E}^{\qual{ac,sw}}\subseteq\mathcal{E}^{\qual{ac}}\),
+\(\mathcal{E}^{\qual{dc,sw}}\subseteq\mathcal{E}^{\qual{dc}}\), root sets
+\(\mathcal{N}^{\qual{ac}}_0,\mathcal{N}^{\qual{dc}}_0\), converters
+\(\mathcal{C}^{\qual{vsc}}\) (AC/DC), DC/DC converters
+\(\mathcal{D}^{\qual{dcdc}}\), and
+\(\mathcal{T}=\{0,1,\dots,T-1\}\).
+
+Distributed-resource sets are modeled on both sides:
+\begin{align}
+\mathcal{G}^{\qual{ac}},\mathcal{G}^{\qual{dc}} &: \text{dispatchable DG}, \\
+\mathcal{R}^{\qual{ac}},\mathcal{R}^{\qual{dc}} &: \text{renewables}, \\
+\mathcal{S}^{\qual{ac}},\mathcal{S}^{\qual{dc}} &: \text{storage}, \\
+\mathcal{F}^{\qual{ac}},\mathcal{F}^{\qual{dc}} &: \text{flexible loads / charger-type controllable demand}.
+\end{align}
+
+Main decision variables (per \(t\)):
+\begin{align}
+z^{\qual{ac}}_{e,t},z^{\qual{dc}}_{\ell,t}\in\{0,1\}
+&\quad \text{(AC/DC branch closed/open)}, \\
+y^{\qual{ac,on}}_{e,t},y^{\qual{ac,off}}_{e,t}\in\{0,1\},
+\;
+y^{\qual{dc,on}}_{\ell,t},y^{\qual{dc,off}}_{\ell,t}\in\{0,1\}
+&\quad \text{(switching actions)}, \\
+P^{\qual{ac}}_{e,t},Q^{\qual{ac}}_{e,t},\ell^{\qual{ac}}_{e,t},v^{\qual{ac}}_{i,t}
+&\quad \text{(AC DistFlow)}, \\
+P^{\qual{dc}}_{\ell,t},\ell^{\qual{dc}}_{\ell,t},v^{\qual{dc}}_{k,t}
+&\quad \text{(DC branch variables)}, \\
+P^{\qual{ac}}_{c,t},Q^{\qual{ac}}_{c,t},P^{\qual{dc}}_{c,t},p^{\qual{loss,vsc}}_{c,t}
+&\quad \forall c\in\mathcal{C}^{\qual{vsc}}, \\
+p^{\qual{in}}_{d,t},p^{\qual{out}}_{d,t}
+&\quad \forall d\in\mathcal{D}^{\qual{dcdc}}, \\
+p^{\qual{dg}}_{g,t},\; p^{\qual{curt}}_{r,t},\;
+p^{\qual{ch}}_{s,t},\; p^{\qual{dis}}_{s,t},\; E_{s,t},\;
+\Delta p^{\qual{flex}}_{f,t}
+&\quad \text{(DER schedule)}, \\
+p^{\qual{shed,ac}}_{i,t},p^{\qual{shed,dc}}_{k,t}\ge 0
+&\quad \text{(load shedding)}.
+\end{align}
+
+All nodal injection equations below use the same sign convention as PF:
+\textbf{bus injection is positive}.
+
+\subsubsection{Objective Function (Hybrid TS-TR)}
+
+A practical hybrid objective is:
+\begin{align}
+\min J^{\qual{tr}} = \sum_{t\in\mathcal{T}}
+\Biggl[
+&c^{\qual{ac,loss}} \!\!\sum_{e\in\mathcal{E}^{\qual{ac}}}
+r^{\qual{ac}}_e \ell^{\qual{ac}}_{e,t}\Delta t
++c^{\qual{dc,loss}} \!\!\sum_{\ell\in\mathcal{E}^{\qual{dc}}}
+r^{\qual{dc}}_\ell \ell^{\qual{dc}}_{\ell,t}\Delta t \notag\\
+&+c^{\qual{vsc,loss}} \!\!\sum_{c\in\mathcal{C}^{\qual{vsc}}}
+p^{\qual{loss,vsc}}_{c,t}\Delta t
++c^{\qual{dcdc,loss}} \!\!\sum_{d\in\mathcal{D}^{\qual{dcdc}}}
+\!\left(p^{\qual{in}}_{d,t}-p^{\qual{out}}_{d,t}\right)\!\Delta t \notag\\
+&+c^{\qual{shed}}
+\!\left(\sum_{i\in\mathcal{N}^{\qual{ac}}}p^{\qual{shed,ac}}_{i,t}
++\sum_{k\in\mathcal{N}^{\qual{dc}}}p^{\qual{shed,dc}}_{k,t}\right)\!\Delta t
++c^{\qual{curt}}\!\sum_{r}p^{\qual{curt}}_{r,t}\Delta t \notag\\
+&+c^{\qual{sw,ac}}\!\!\sum_{e\in\mathcal{E}^{\qual{ac,sw}}}
+\!\left(y^{\qual{ac,on}}_{e,t}+y^{\qual{ac,off}}_{e,t}\right)
++c^{\qual{sw,dc}}\!\!\sum_{\ell\in\mathcal{E}^{\qual{dc,sw}}}
+\!\left(y^{\qual{dc,on}}_{\ell,t}+y^{\qual{dc,off}}_{\ell,t}\right)
+\Biggr].
+\label{eq:tstr-h-obj}
+\end{align}
+
+\subsubsection{Core Constraints}
+
+\paragraph{(1) AC and DC nodal balance with DER and converter injections.}
+For \(i\in\mathcal{N}^{\qual{ac}}\), \(k\in\mathcal{N}^{\qual{dc}}\):
+\begin{align}
+\sum_{e:(m\!\to\! i)}\!\!\left(P^{\qual{ac}}_{e,t}-r^{\qual{ac}}_e\ell^{\qual{ac}}_{e,t}\right)
+-\sum_{e:(i\!\to\! n)}\!\!P^{\qual{ac}}_{e,t}
++p^{\qual{inj,ac}}_{i,t}
++p^{\qual{shed,ac}}_{i,t}
+&= p^{\qual{load,ac}}_{i,t},
+\label{eq:tstr-h-ac-balance-p}
+\\
+\sum_{e:(m\!\to\! i)}\!\!\left(Q^{\qual{ac}}_{e,t}-x^{\qual{ac}}_e\ell^{\qual{ac}}_{e,t}\right)
+-\sum_{e:(i\!\to\! n)}\!\!Q^{\qual{ac}}_{e,t}
++q^{\qual{inj,ac}}_{i,t}
+&= q^{\qual{load,ac}}_{i,t},
+\label{eq:tstr-h-ac-balance-q}
+\\
+\sum_{\ell:(u\!\to\! k)}\!\!\left(P^{\qual{dc}}_{\ell,t}-r^{\qual{dc}}_\ell\ell^{\qual{dc}}_{\ell,t}\right)
+-\sum_{\ell:(k\!\to\! v)}\!\!P^{\qual{dc}}_{\ell,t}
++p^{\qual{inj,dc}}_{k,t}
++p^{\qual{shed,dc}}_{k,t}
+&= p^{\qual{load,dc}}_{k,t}.
+\label{eq:tstr-h-dc-balance-p}
+\end{align}
+
+Injection decomposition (same sign convention):
+\begin{align}
+p^{\qual{inj,ac}}_{i,t} =
+&\sum_{g\in\mathcal{G}^{\qual{ac}}_i} p^{\qual{dg}}_{g,t}
++\sum_{r\in\mathcal{R}^{\qual{ac}}_i}
+\left(p^{\qual{ava}}_{r,t}-p^{\qual{curt}}_{r,t}\right)
++\sum_{s\in\mathcal{S}^{\qual{ac}}_i}
+\left(p^{\qual{dis}}_{s,t}-p^{\qual{ch}}_{s,t}\right) \notag\\
+&-\sum_{f\in\mathcal{F}^{\qual{ac}}_i}\Delta p^{\qual{flex}}_{f,t}
++\sum_{c:\,\qual{ac}(c)=i} P^{\qual{ac}}_{c,t},
+\label{eq:tstr-h-ac-inj}
+\\
+p^{\qual{inj,dc}}_{k,t} =
+&\sum_{g\in\mathcal{G}^{\qual{dc}}_k} p^{\qual{dg}}_{g,t}
++\sum_{r\in\mathcal{R}^{\qual{dc}}_k}
+\left(p^{\qual{ava}}_{r,t}-p^{\qual{curt}}_{r,t}\right)
++\sum_{s\in\mathcal{S}^{\qual{dc}}_k}
+\left(p^{\qual{dis}}_{s,t}-p^{\qual{ch}}_{s,t}\right) \notag\\
+&-\sum_{f\in\mathcal{F}^{\qual{dc}}_k}\Delta p^{\qual{flex}}_{f,t}
++\sum_{c:\,\qual{dc}(c)=k} P^{\qual{dc}}_{c,t}
++\sum_{d:\,\qual{dst}(d)=k} p^{\qual{out}}_{d,t}
+-\sum_{d:\,\qual{src}(d)=k} p^{\qual{in}}_{d,t}.
+\label{eq:tstr-h-dc-inj}
+\end{align}
+
+\paragraph{(2) AC/DC branch constraints under switching.}
+\begin{align}
+\left|v^{\qual{ac}}_{j,t}-v^{\qual{ac}}_{i,t}
++2\!\left(r^{\qual{ac}}_e P^{\qual{ac}}_{e,t}
++x^{\qual{ac}}_e Q^{\qual{ac}}_{e,t}\right)
+-\left((r^{\qual{ac}}_e)^2+(x^{\qual{ac}}_e)^2\right)\ell^{\qual{ac}}_{e,t}
+\right|
+&\le M^{\qual{ac,v}}_e\!\left(1-z^{\qual{ac}}_{e,t}\right),
+\label{eq:tstr-h-ac-vdrop}
+\\
+\left|v^{\qual{dc}}_{v,t}-v^{\qual{dc}}_{u,t}
++2r^{\qual{dc}}_\ell P^{\qual{dc}}_{\ell,t}
+-(r^{\qual{dc}}_\ell)^2\ell^{\qual{dc}}_{\ell,t}
+\right|
+&\le M^{\qual{dc,v}}_\ell\!\left(1-z^{\qual{dc}}_{\ell,t}\right),
+\label{eq:tstr-h-dc-vdrop}
+\\
+\left(P^{\qual{ac}}_{e,t}\right)^2+\left(Q^{\qual{ac}}_{e,t}\right)^2
+&\le v^{\qual{ac}}_{i,t}\ell^{\qual{ac}}_{e,t},
+\label{eq:tstr-h-ac-soc}
+\\
+\left(P^{\qual{dc}}_{\ell,t}\right)^2
+&\le v^{\qual{dc}}_{u,t}\ell^{\qual{dc}}_{\ell,t},
+\label{eq:tstr-h-dc-soc}
+\\
+|P^{\qual{ac}}_{e,t}| \le \bar P^{\qual{ac}}_e z^{\qual{ac}}_{e,t},
+\quad
+|Q^{\qual{ac}}_{e,t}| \le \bar Q^{\qual{ac}}_e z^{\qual{ac}}_{e,t},
+\quad
+0\le \ell^{\qual{ac}}_{e,t}\le \bar I^{\qual{ac}2}_e z^{\qual{ac}}_{e,t},
+\label{eq:tstr-h-ac-bound}
+\\
+|P^{\qual{dc}}_{\ell,t}| \le \bar P^{\qual{dc}}_\ell z^{\qual{dc}}_{\ell,t},
+\quad
+0\le \ell^{\qual{dc}}_{\ell,t}\le \bar I^{\qual{dc}2}_\ell z^{\qual{dc}}_{\ell,t}.
+\label{eq:tstr-h-dc-bound}
+\end{align}
+
+\paragraph{(3) Converter coupling constraints.}
+\begin{align}
+P^{\qual{ac}}_{c,t} + P^{\qual{dc}}_{c,t}
++ p^{\qual{loss,vsc}}_{c,t} &= 0,
+\quad \forall c\in\mathcal{C}^{\qual{vsc}},
+\label{eq:tstr-h-vsc-balance}
+\\
+p^{\qual{loss,vsc}}_{c,t}
+&\ge a^{\qual{vsc}}_c + b^{\qual{vsc}}_c p^{\qual{abs,vsc}}_{c,t},
+\quad
+p^{\qual{abs,vsc}}_{c,t}\ge \pm P^{\qual{dc}}_{c,t},
+\label{eq:tstr-h-vsc-loss}
+\\
+\left(P^{\qual{ac}}_{c,t}\right)^2+\left(Q^{\qual{ac}}_{c,t}\right)^2
+&\le \left(S^{\qual{rated}}_c\right)^2 u^{\qual{vsc}}_{c,t},
+\quad
+|P^{\qual{dc}}_{c,t}|\le \bar P^{\qual{dc,vsc}}_c u^{\qual{vsc}}_{c,t},
+\label{eq:tstr-h-vsc-cap}
+\\
+0\le p^{\qual{in}}_{d,t}
+&\le \bar P^{\qual{in}}_d u^{\qual{dcdc}}_{d,t},
+\quad
+p^{\qual{out}}_{d,t} = \eta^{\qual{dcdc}}_d p^{\qual{in}}_{d,t},
+\quad \forall d\in\mathcal{D}^{\qual{dcdc}}.
+\label{eq:tstr-h-dcdc}
+\end{align}
+
+\paragraph{(4) DER operating constraints (AC+DC).}
+\begin{align}
+\underline P_g u_{g,t}\le p^{\qual{dg}}_{g,t}\le \bar P_g u_{g,t},
+\quad &\forall g,\; t,
+\label{eq:tstr-h-dg}
+\\
+0\le p^{\qual{curt}}_{r,t}\le p^{\qual{ava}}_{r,t},
+\quad &\forall r,\; t,
+\label{eq:tstr-h-ren}
+\\
+E_{s,t}=E_{s,t-1}
++\eta^{\qual{ch}}_s p^{\qual{ch}}_{s,t}\Delta t
+-\frac{1}{\eta^{\qual{dis}}_s}p^{\qual{dis}}_{s,t}\Delta t,
+\quad &\forall s,\; t\ge 1,
+\label{eq:tstr-h-soc}
+\\
+\underline E_s\le E_{s,t}\le \bar E_s,\;
+0\le p^{\qual{ch}}_{s,t}\le \bar P^{\qual{ch}}_s,\;
+0\le p^{\qual{dis}}_{s,t}\le \bar P^{\qual{dis}}_s,
+\quad &\forall s,\; t,
+\label{eq:tstr-h-soc-bound}
+\\
+-\bar{\Delta P}^{\qual{dn}}_f \le \Delta p^{\qual{flex}}_{f,t}
+\le \bar{\Delta P}^{\qual{up}}_f,
+\quad
+\sum_{t\in\mathcal{T}} \Delta p^{\qual{flex}}_{f,t}=0,
+\quad &\forall f.
+\label{eq:tstr-h-flex}
+\end{align}
+
+\subsubsection{Component-Wise Sub-Equations (One-to-One with C++ Models)}
+\label{sec:tstr-component-wise}
+
+This subsection refines \eqref{eq:tstr-h-ac-inj}--\eqref{eq:tstr-h-dc-inj} into
+component-level sub-equations aligned with runtime structs in
+\texttt{ACSystem}, \texttt{DCSystem}, and \texttt{HybridPowerSystem}.  The
+sign rule remains unchanged: \textbf{bus injection is positive}.
+
+\paragraph{AC generation and inverter-based DER (\texttt{Generator}, \texttt{StaticGenerator}, \texttt{RenewableGen}, \texttt{PVSystem}).}
+\begin{align}
+\underline P_g u_{g,t}\le p^{\qual{gen}}_{g,t}\le \bar P_g u_{g,t},\;
+\underline Q_g u_{g,t}\le q^{\qual{gen}}_{g,t}\le \bar Q_g u_{g,t},
+\label{eq:tstr-comp-gen}
+\\
+-R_g^{\qual{dn}}\Delta t \le p^{\qual{gen}}_{g,t}-p^{\qual{gen}}_{g,t-1}
+\le R_g^{\qual{up}}\Delta t,
+\quad \forall g\in\texttt{Generator},
+\notag
+\\
+p^{\qual{sgen,ac}}_{s,t}=\alpha^{\qual{sgen}}_{s,t}P^{\qual{rated}}_s,\;
+\underline P_s\le p^{\qual{sgen,ac}}_{s,t}\le \bar P_s,\;
+\underline Q_s\le q^{\qual{sgen,ac}}_{s,t}\le \bar Q_s,
+\quad \forall s\in\texttt{StaticGenerator},
+\label{eq:tstr-comp-sgen-ac}
+\\
+p^{\qual{ren,ac}}_{r,t}=p^{\qual{ava}}_{r,t}-p^{\qual{curt}}_{r,t},\;
+0\le p^{\qual{curt}}_{r,t}\le p^{\qual{ava}}_{r,t},\;
+\underline Q_r\le q^{\qual{ren,ac}}_{r,t}\le \bar Q_r,
+\quad \forall r\in\texttt{RenewableGen},
+\label{eq:tstr-comp-ren}
+\\
+0\le p^{\qual{pv}}_{p,t}\le p^{\qual{pv,ava}}_{p,t},\;
+\left(p^{\qual{pv}}_{p,t}\right)^2+\left(q^{\qual{pv}}_{p,t}\right)^2
+\le \left(S^{\qual{pv}}_p\right)^2,
+\quad \forall p\in\texttt{PVSystem}.
+\label{eq:tstr-comp-pv}
+\end{align}
+
+\paragraph{AC demand-side models (\texttt{Load}, \texttt{FlexibleLoad}, \texttt{AsymmetricLoad}, \texttt{ChargingStation}/\texttt{Charger}).}
+Let \(i=b(\ell)\) be the host bus of load-like component \(\ell\), and
+\(\hat v^{\qual{ac}}_{i,t}=\sqrt{v^{\qual{ac}}_{i,t}}\).
+\begin{align}
+p^{\qual{load}}_{\ell,t} &=
+P^{0}_{\ell,t}\!\left(k^Z_{\ell,p}v^{\qual{ac}}_{i,t}
++k^I_{\ell,p}\hat v^{\qual{ac}}_{i,t}
++k^P_{\ell,p}\right)-p^{\qual{shed}}_{\ell,t},
+\label{eq:tstr-comp-load}
+\\
+q^{\qual{load}}_{\ell,t} &=
+Q^{0}_{\ell,t}\!\left(k^Z_{\ell,q}v^{\qual{ac}}_{i,t}
++k^I_{\ell,q}\hat v^{\qual{ac}}_{i,t}
++k^P_{\ell,q}\right),
+\quad \forall \ell\in\texttt{Load},
+\notag
+\\
+p^{\qual{flex}}_{f,t}&=P^{0}_{f,t}+\Delta p^{\qual{flex}}_{f,t},
+\;
+-\bar{\Delta P}^{\qual{dn}}_f\le \Delta p^{\qual{flex}}_{f,t}\le \bar{\Delta P}^{\qual{up}}_f,
+\;
+\sum_t \Delta p^{\qual{flex}}_{f,t}\Delta t=0,
+\quad \forall f\in\texttt{FlexibleLoad},
+\label{eq:tstr-comp-flex}
+\\
+p^{\qual{asym}}_{a,t}&=\kappa_{a,t}\left(p_{a\phi a,t}+p_{a\phi b,t}+p_{a\phi c,t}\right),
+\notag\\
+q^{\qual{asym}}_{a,t}&=\kappa_{a,t}\left(q_{a\phi a,t}+q_{a\phi b,t}+q_{a\phi c,t}\right),
+\quad \forall a\in\texttt{AsymmetricLoad},
+\label{eq:tstr-comp-asym}
+\\
+p^{\qual{cs}}_{c,t}&=\sum_{h\in\mathcal{H}(c)} p^{\qual{charger}}_{h,t},
+\quad \forall c\in\mathcal{C}^{\qual{cs}},
+\notag\\
+q^{\qual{cs}}_{c,t}&=p^{\qual{cs}}_{c,t}\tan(\varphi_c),\;
+\varphi_c=\arccos(\text{pf}_c),
+\quad \forall c\in\mathcal{C}^{\qual{cs}},
+\notag\\
+-\bar p_h^{\qual{v2g}}&\le p^{\qual{charger}}_{h,t},
+\label{eq:tstr-comp-ev}
+\\
+p^{\qual{charger}}_{h,t}&\le \bar p_h^{\qual{ch}}.
+\notag
+\end{align}
+where \(\mathcal{H}^{\qual{ev}}\) is the set of active chargers aggregated by
+all charging stations, and \eqref{eq:tstr-comp-ev} applies to all
+\(h\in\mathcal{H}^{\qual{ev}}\).
+
+\paragraph{Storage and aggregation component equations.}
+This block corresponds to \texttt{Storage}, \texttt{MobileStorage},
+\texttt{VirtualPowerPlant}, \texttt{Microgrid}, \texttt{Shunt}, and
+\texttt{ExternalGrid}.
+Define \(\mathcal{S}^{\qual{all}}=\mathcal{S}^{\qual{ac}}\cup\mathcal{S}^{\qual{dc}}\)
+for stationary storage tables in AC and DC subsystems.
+\begin{align}
+E_{s,t}&=(1-\lambda_s\Delta t)E_{s,t-1}
++\eta^{\qual{ch}}_s p^{\qual{ch}}_{s,t}\Delta t
+-\frac{1}{\eta^{\qual{dis}}_s}p^{\qual{dis}}_{s,t}\Delta t,
+\quad \forall s\in\mathcal{S}^{\qual{all}},
+\label{eq:tstr-comp-storage}
+\\
+0&\le p^{\qual{ch}}_{s,t}\le \bar P^{\qual{ch}}_s u^{\qual{ch}}_{s,t},
+\notag
+\\
+0&\le p^{\qual{dis}}_{s,t}\le \bar P^{\qual{dis}}_s (1-u^{\qual{ch}}_{s,t}),
+\notag
+\\
+\underline E_s&\le E_{s,t}\le \bar E_s,
+\notag
+\\
+\sum_{i\in\mathcal{N}^{\qual{ac}}}x^{\qual{mob}}_{m,i,t}+x^{\qual{travel}}_{m,t}&=1,
+\notag\\
+p^{\qual{mob}}_{m,t}&=p^{\qual{mob,dis}}_{m,t}-p^{\qual{mob,ch}}_{m,t},
+\notag\\
+E^{\qual{mob}}_{m,t}&=E^{\qual{mob}}_{m,t-1}+\Delta E^{\qual{mob}}_{m,t},
+\quad \forall m\in\texttt{MobileStorage},
+\label{eq:tstr-comp-mobile}
+\\
+\underline P^{\qual{vpp}}_v&\le p^{\qual{vpp}}_{v,t}\le \bar P^{\qual{vpp}}_v,
+\notag\\
+\underline R^{\qual{dn}}_v&\le p^{\qual{vpp}}_{v,t}-p^{\qual{vpp}}_{v,t-1},
+\notag\\
+p^{\qual{vpp}}_{v,t}-p^{\qual{vpp}}_{v,t-1}&\le \bar R^{\qual{up}}_v,
+\quad \forall v\in\texttt{VirtualPowerPlant},
+\label{eq:tstr-comp-vpp}
+\\
+\underline P^{\qual{mg}}_m&\le p^{\qual{mg}}_{m,t}\le \bar P^{\qual{mg}}_m,
+\quad \forall m\in\texttt{Microgrid},
+\notag\\
+p^{\qual{mg}}_{m,t}&=0,\quad \forall m\in\mathcal{M}^{\qual{isl}}_t,
+\label{eq:tstr-comp-microgrid}
+\\
+p^{\qual{sh}}_{h,t}&=g_h v^{\qual{ac}}_{i,t},
+\notag\\
+q^{\qual{sh}}_{h,t}&=-b^{\qual{eff}}_{h,t} v^{\qual{ac}}_{i,t},
+\notag\\
+b^{\qual{eff}}_{h,t}&=b_h^{0}+n^{\qual{step}}_{h,t}\Delta b_h,
+\forall h\in\texttt{Shunt},
+\label{eq:tstr-comp-shunt}
+\\
+v^{\qual{ac}}_{b(e),t}&=v^{\qual{set}}_{e},
+\quad \forall e\in\mathcal{E}^{\qual{ext}},
+\notag\\
+\theta_{b(e),t}&=\theta^{\qual{set}}_{e},
+\quad \forall e\in\mathcal{E}^{\qual{ext}}.
+\label{eq:tstr-comp-extgrid}
+\end{align}
+
+\paragraph{AC topology projection models.}
+\begin{align}
+z^{\qual{ac}}_{e,t}=u^{\qual{line}}_{e,t},
+\quad \forall e\in\texttt{ACBranch},
+\label{eq:tstr-comp-branch}
+\\
+r^{\qual{eq}}_{\tau} =
+\frac{\texttt{vkr\_percent}_\tau}{100}\frac{S^{\qual{base}}}{S^{\qual{rated}}_\tau},\;
+x^{\qual{eq}}_{\tau} =
+\sqrt{\left(\frac{\texttt{vk\_percent}_\tau}{100}\frac{S^{\qual{base}}}{S^{\qual{rated}}_\tau}\right)^2
+-\left(r^{\qual{eq}}_{\tau}\right)^2},
+\quad \forall \tau\in\texttt{Transformer2W},
+\label{eq:tstr-comp-transformer2w}
+\\
+\{e_1,e_2,e_3\}=\Pi^{\qual{3w}\rightarrow\qual{branch}}(\tau^{\qual{3w}}),\;
+z^{\qual{ac}}_{e_j,t}=u^{\qual{tr3w}}_{\tau,t},
+\quad \forall \tau^{\qual{3w}}\in\texttt{Transformer3W},\;j\in\{1,2,3\},
+\label{eq:tstr-comp-transformer3w}
+\\
+z^{\qual{ac}}_{e(\sigma),t}=s_{\sigma,t},\;
+s_{\sigma,t}-s_{\sigma,t-1}=y^{\qual{on}}_{\sigma,t}-y^{\qual{off}}_{\sigma,t},
+\quad \forall \sigma\in\texttt{Switch},
+\label{eq:tstr-comp-switch}
+\\
+\left(P^{\qual{eq}},Q^{\qual{eq}},Y^{\qual{eq}}\right)
+=\Pi^{\qual{3\phi}\rightarrow\qual{1\phi}}\!\left(\mathcal{X}^{3\phi}\right).
+\label{eq:tstr-comp-threephase-proj}
+\end{align}
+where \(\mathcal{X}^{3\phi}\) denotes the projected three-phase tables:
+\texttt{ThreePhaseACBus}, \texttt{ThreePhaseACLine},
+\texttt{ThreePhaseTransformer}, \texttt{ThreePhaseLoad},
+\texttt{ThreePhaseGenerator}, and \texttt{ThreePhaseExternalGrid}.
+
+\paragraph{DC-side component equations.}
+\begin{align}
+p^{\qual{load,dc}}_{\ell,t}=
+P^{0,\qual{dc}}_{\ell,t}
+\left(
+k^Z_{\ell}v^{\qual{dc}}_{k,t}
++k^I_{\ell}\sqrt{v^{\qual{dc}}_{k,t}}
++k^P_{\ell}
+\right)
+-p^{\qual{shed,dc}}_{\ell,t},
+\quad \forall \ell\in\texttt{DCLoad},
+\label{eq:tstr-comp-dcload}
+\\
+\underline P_g^{\qual{dc}}\le p^{\qual{sgen,dc}}_{g,t}\le \bar P_g^{\qual{dc}},
+\quad \forall g\in\texttt{StaticGeneratorDC}\cup\texttt{DC::StaticGenerator},
+\label{eq:tstr-comp-dcgen}
+\\
+0\le p^{\qual{pv,dc}}_{a,t}\le p^{\qual{pv,dc,ava}}_{a,t},\;
+p^{\qual{pv,dc,ava}}_{a,t}=f_a\!\left(\text{irradiance}_{a,t},\text{temperature}_{a,t}\right),
+\quad \forall a\in\texttt{PVArrayDC}.
+\label{eq:tstr-comp-pvdc}
+\end{align}
+
+\paragraph{Interlinking converters (\texttt{VSCConverter}, \texttt{DCDCConverter}, \texttt{EnergyRouterPort}, \texttt{EnergyRouter}).}
+\begin{align}
+\text{PQ mode: } &
+P^{\qual{ac}}_{c,t}=P^{\qual{set}}_{c,t},\;
+Q^{\qual{ac}}_{c,t}=Q^{\qual{set}}_{c,t},
+\qquad c\in\texttt{VSCConverter},
+\notag\\
+\text{DC-voltage mode: } &
+v^{\qual{dc}}_{k,t}=v^{\qual{dc,set}}_{c}
++k^{\qual{vdc}}_{c}\!\left(P^{\qual{dc}}_{c,t}-P^{\qual{set}}_{c,t}\right),
+\qquad k=b^{\qual{dc}}(c),
+\label{eq:tstr-comp-vsc-mode}
+\\
+\text{Power mode: } &
+p^{\qual{in}}_{d,t}=p^{\qual{ref}}_{d,t},
+\qquad d\in\texttt{DCDCConverter},
+\notag\\
+\text{Voltage-droop mode: } &
+p^{\qual{in}}_{d,t}=p^{\qual{ref}}_{d,t}
++k^{\qual{droop}}_d\!\left(v^{\qual{dc}}_{\text{out}(d),t}-v^{\qual{ref}}_d\right),\;
+p^{\qual{out}}_{d,t}=\eta_d p^{\qual{in}}_{d,t},
+\label{eq:tstr-comp-dcdc-mode}
+\\
+\sum_{p\in\mathcal{P}(r)} p^{\qual{er}}_{p,t}+p^{\qual{loss,er}}_{r,t}=0,
+\quad \forall r\in\mathcal{R}^{\qual{er}},
+\notag\\
+p^{\qual{loss,er}}_{r,t}\ge \lambda_r\sum_{p\in\mathcal{P}(r)} |p^{\qual{er}}_{p,t}|,
+\quad \forall r\in\mathcal{R}^{\qual{er}},
+\label{eq:tstr-comp-er}
+\\
+\underline P_p\le p^{\qual{er}}_{p,t}\le \bar P_p,
+\quad \forall p\in\mathcal{P}^{\qual{er}},
+\notag\\
+\underline Q_p\le q^{\qual{er}}_{p,t}\le \bar Q_p,
+\quad \forall p\in\mathcal{P}^{\qual{er,ac}}.
+\notag
+\end{align}
+
+\paragraph{TS-TR inactive in this horizon.}
+\texttt{AsynchronousMotor} is short-circuit-only in the current code path and is
+therefore excluded from TS-TR steady-state scheduling constraints.
+
+\paragraph{Integration map (struct \(\leftrightarrow\) sub-equation).}
+{\small
+\begin{longtable}{L{0.31\linewidth}L{0.62\linewidth}}
+\toprule
+C++ struct & TS-TR sub-equation block \\
+\midrule
+\endhead
+\texttt{ACBus}, \texttt{DCBus} & Nodal balances in \eqref{eq:tstr-h-ac-balance-p} and \eqref{eq:tstr-h-dc-balance-p}; voltage bounds in \eqref{eq:tstr-h-ac-bound} and \eqref{eq:tstr-h-dc-bound} \\
+\texttt{ACBranch}, \texttt{DCBranch} & Branch laws in \eqref{eq:tstr-h-ac-vdrop} and \eqref{eq:tstr-h-dc-vdrop}; status in \eqref{eq:tstr-comp-branch} \\
+\texttt{Transformer2W} & Projection to equivalent AC branch by \eqref{eq:tstr-comp-transformer2w} \\
+\texttt{Transformer3W} & Projection to three equivalent AC branches by \eqref{eq:tstr-comp-transformer3w} \\
+\texttt{Switch} & Binary switch status and transitions by \eqref{eq:tstr-comp-switch}, \eqref{eq:tstr-h-ac-transition} \\
+\texttt{ExternalGrid} & Slack/root treatment by \eqref{eq:tstr-comp-extgrid} \\
+\texttt{Generator} & Dispatch/ramp limits by \eqref{eq:tstr-comp-gen} \\
+\texttt{StaticGenerator} & AC static-DER injections by \eqref{eq:tstr-comp-sgen-ac} \\
+\texttt{RenewableGen} & Availability-curtailment model by \eqref{eq:tstr-comp-ren} \\
+\texttt{PVSystem} & AC PV inverter envelope by \eqref{eq:tstr-comp-pv} \\
+\texttt{Load} & ZIP load model by \eqref{eq:tstr-comp-load} \\
+\texttt{FlexibleLoad} & Shiftable-load model by \eqref{eq:tstr-comp-flex} \\
+\texttt{AsymmetricLoad} & Three-phase-to-single-phase aggregation by \eqref{eq:tstr-comp-asym} \\
+\texttt{ChargingStation}, \texttt{Charger} & EV aggregation and V2G envelope by \eqref{eq:tstr-comp-ev} \\
+\texttt{Storage} & SOC and charge/discharge exclusivity by \eqref{eq:tstr-comp-storage} \\
+\texttt{MobileStorage} & Time-space occupancy and SOC with travel by \eqref{eq:tstr-comp-mobile} \\
+\texttt{VirtualPowerPlant} & Aggregate dispatch/ramp by \eqref{eq:tstr-comp-vpp} \\
+\texttt{Microgrid} & PCC exchange by \eqref{eq:tstr-comp-microgrid} \\
+\texttt{Shunt} & Voltage-dependent shunt injections by \eqref{eq:tstr-comp-shunt} \\
+\texttt{DCLoad} & DC ZIP demand by \eqref{eq:tstr-comp-dcload} \\
+\texttt{StaticGeneratorDC} & DC static generation by \eqref{eq:tstr-comp-dcgen} \\
+\texttt{PVArrayDC} & DC PV availability by \eqref{eq:tstr-comp-pvdc} \\
+\texttt{VSCConverter} & AC/DC coupling and mode equations by \eqref{eq:tstr-h-vsc-balance}, \eqref{eq:tstr-comp-vsc-mode} \\
+\texttt{DCDCConverter} & Transfer and droop equations by \eqref{eq:tstr-h-dcdc}, \eqref{eq:tstr-comp-dcdc-mode} \\
+\texttt{EnergyRouterPort}, \texttt{EnergyRouter} & Multi-port balance/limits by \eqref{eq:tstr-comp-er} \\
+\texttt{ThreePhase*} & Projection operator in \eqref{eq:tstr-comp-threephase-proj} \\
+\texttt{AsynchronousMotor} & Out of TS-TR horizon (short-circuit only) \\
+\bottomrule
+\end{longtable}
+}
+
+\paragraph{(5) Topology constraints (AC mandatory radiality, DC configurable).}
+\begin{align}
+\sum_{e\in\mathcal{E}^{\qual{ac}}} z^{\qual{ac}}_{e,t}
+= |\mathcal{N}^{\qual{ac}}|-|\mathcal{N}^{\qual{ac}}_0|,
+\quad \forall t,
+\label{eq:tstr-h-ac-edge-count}
+\end{align}
+plus standard single-commodity AC connectivity-flow constraints that ensure
+every energized AC bus is connected to one substation root.
+For DC, choose one of:
+\begin{align}
+\text{radial DC: }\;
+\sum_{\ell\in\mathcal{E}^{\qual{dc}}} z^{\qual{dc}}_{\ell,t}
+=|\mathcal{N}^{\qual{dc}}|-|\mathcal{N}^{\qual{dc}}_0|,
+\label{eq:tstr-h-dc-radial}
+\end{align}
+or mesh-permitted DC (no edge-count equation, only electrical and thermal limits).
+
+\paragraph{(6) Inter-temporal switching dynamics (AC and DC).}
+\begin{align}
+z^{\qual{ac}}_{e,t}-z^{\qual{ac}}_{e,t-1}
+&= y^{\qual{ac,on}}_{e,t}-y^{\qual{ac,off}}_{e,t},
+\quad
+y^{\qual{ac,on}}_{e,t}+y^{\qual{ac,off}}_{e,t}\le 1,
+\label{eq:tstr-h-ac-transition}
+\\
+z^{\qual{dc}}_{\ell,t}-z^{\qual{dc}}_{\ell,t-1}
+&= y^{\qual{dc,on}}_{\ell,t}-y^{\qual{dc,off}}_{\ell,t},
+\quad
+y^{\qual{dc,on}}_{\ell,t}+y^{\qual{dc,off}}_{\ell,t}\le 1.
+\label{eq:tstr-h-dc-transition}
+\end{align}
+
+\subsubsection{Position in Time-Series Runtime Pipeline}
+
+The hybrid TS-TR layer is the distribution counterpart of UC:
+\begin{align}
+\text{Stage A: } \Pi^{\qual{tr}} =
+\{z^{\qual{ac}},z^{\qual{dc}},\Pi^{\qual{vsc}},\Pi^{\qual{dcdc}},\Pi^{\qual{der}}\}_{t\in\mathcal{T}}
+\xrightarrow{\text{write schedule}} \text{Stage B: step-wise validation}.
+\end{align}
+
+At each step \(t\), the runtime writes AC/DC branch statuses, VSC and DCDC
+setpoints, and DER dispatch to \(sys_t\), then runs either hybrid PF/OPF
+(recommended for AC/DC-coupled feeders) or DPF-only validation on AC-only
+subsets.
+
+\subsubsection{Code-Aligned Pseudocode (Proposed)}
+\label{sec:tstr-pseudocode}
+
+\paragraph{Algorithm TS-TR-1: hybrid topology schedule stage.}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_topology\_reconfiguration\_schedule}}{$sys, ts\_data, opts$}
+  \State Validate \(T=\texttt{ts\_data.num\_steps}>0\); else return empty infeasible schedule
+  \State Build per-step AC/DC load and DER availability from \texttt{profile\_id}
+  \State Build hybrid TS-TR model using \eqref{eq:tstr-h-obj}--\eqref{eq:tstr-h-dc-transition}
+  \State Include AC/DC switch states, VSC/DCDC coupling, and DER temporal constraints
+  \State Select MILP/MISOCP backend from \texttt{opts.tr\_solver}
+  \State Solve and extract:
+  \Statex \quad \(\{z^{\qual{ac}}_{e,t},z^{\qual{dc}}_{\ell,t}\}\), converter schedules, DER schedules
+  \State Pack all arrays into \texttt{TRSchedule} and return
+\EndProcedure
+\end{algorithmic}
+
+\paragraph{Algorithm TS-TR-2: full time-series distribution pipeline.}
+\begin{algorithmic}[1]
+\Procedure{\texttt{solve\_time\_series\_distribution\_pf}}{$sys, ts\_data, opts$}
+  \State Initialize \texttt{TimeSeriesDistroResult} with \(T\)
+  \If{\texttt{opts.skip\_tr == false}}
+    \State \texttt{tr\_schedule} \(\gets\) \texttt{solve\_topology\_reconfiguration\_schedule}(sys, ts\_data, opts)
+  \Else
+    \State Build default schedule from base in-service AC/DC topology and fixed DER
+  \EndIf
+  \If{\texttt{opts.run\_validation == false}}
+    \State Return schedule-only result
+  \EndIf
+  \For{$t=0$ to $T-1$}
+    \State Copy base system to \(sys_t\)
+    \State Apply \(z^{\qual{ac}}_{e,t}\) and \(z^{\qual{dc}}_{\ell,t}\) to branch \texttt{in\_service}
+    \State Apply VSC/DCDC schedule and time-\(t\) DER dispatch to \(sys_t\)
+    \If{\texttt{opts.validation\_mode} includes HybridPF}
+      \State Solve \texttt{solve\_hybrid}(sys\_t, opts.pf\_options)
+    \EndIf
+    \If{\texttt{opts.validation\_mode} includes DPF}
+      \State Solve \texttt{solve\_distribution\_pf}(sys\_t, opts.dpf\_options)
+    \EndIf
+    \State Store step convergence, losses, and interface transfer metrics
+  \EndFor
+  \State Aggregate objective decomposition and convergence counts
+  \State Return full result
+\EndProcedure
+\end{algorithmic}
+
+\subsubsection{C++ Interface Draft (time\_series\_pf-style, Proposed)}
+\label{sec:tstr-cpp-draft}
+
+To keep runtime style aligned with \texttt{time\_series\_pf.cpp}, use a dual-entry API:
+\begin{itemize}
+\item \texttt{solve\_topology\_reconfiguration\_schedule(...)} for schedule stage only;
+\item \texttt{solve\_time\_series\_distribution\_pf(...)} for schedule + sequential validation.
+\end{itemize}
+
+\begin{verbatim}
+namespace hacdcpf::analysis {
+
+enum class TRSolverChoice { Auto, Native, HiGHS, Gurobi };
+enum class TRValidationMode { HybridPF, DistributionPF, Both };
+
+struct TRSchedule {
+  // topology status
+  std::vector<std::vector<int>> ac_branch_closed;   // [ac_branch][t]
+  std::vector<std::vector<int>> dc_branch_closed;   // [dc_branch][t]
+  std::vector<std::vector<int>> ac_switch_on,  ac_switch_off;
+  std::vector<std::vector<int>> dc_switch_on,  dc_switch_off;
+
+  // converter schedules
+  std::vector<std::vector<double>> vsc_p_ac_mw;     // [vsc][t]
+  std::vector<std::vector<double>> vsc_q_ac_mvar;   // [vsc][t]
+  std::vector<std::vector<double>> vsc_p_dc_mw;     // [vsc][t]
+  std::vector<std::vector<double>> dcdc_p_in_mw;    // [dcdc][t]
+  std::vector<std::vector<double>> dcdc_p_out_mw;   // [dcdc][t]
+
+  // DER schedules (AC + DC)
+  std::vector<std::vector<double>> dg_ac_dispatch_mw, dg_dc_dispatch_mw;
+  std::vector<std::vector<double>> ren_ac_dispatch_mw, ren_dc_dispatch_mw;
+  std::vector<std::vector<double>> ren_ac_curtail_mw, ren_dc_curtail_mw;
+  std::vector<std::vector<double>> storage_ac_ch_mw;
+  std::vector<std::vector<double>> storage_ac_dis_mw;
+  std::vector<std::vector<double>> storage_ac_soc_mwh;
+  std::vector<std::vector<double>> storage_dc_ch_mw;
+  std::vector<std::vector<double>> storage_dc_dis_mw;
+  std::vector<std::vector<double>> storage_dc_soc_mwh;
+  std::vector<std::vector<double>> flex_ac_shift_mw, flex_dc_shift_mw;
+
+  double total_objective{0.0};
+  bool feasible{false};
+  std::string solver_name;
+};
+
+struct TimeSeriesDistroOptions {
+  PowerFlowOptions pf_options;
+  DPFOptions dpf_options;
+  ONROptions onr_options;
+  TRSolverChoice tr_solver{TRSolverChoice::Auto};
+  TRValidationMode validation_mode{TRValidationMode::HybridPF};
+  bool skip_tr{false};             // true: no schedule optimization
+  bool run_validation{true};       // true: run per-step physical validation
+  bool enforce_ac_radiality{true};
+  bool enforce_dc_radiality{false};
+  bool verbose{false};
+};
+
+struct TimeSeriesDistroResult {
+  TRSchedule tr_schedule;
+  std::vector<PowerFlowResult> hybrid_pf_results;
+  std::vector<DPFResult> dpf_results;
+  int num_steps{0};
+  int num_hybrid_converged{0};
+  int num_dpf_converged{0};
+  int total_switch_actions{0};
+  double total_ac_loss_mwh{0.0};
+  double total_dc_loss_mwh{0.0};
+};
+
+TRSchedule solve_topology_reconfiguration_schedule(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const TimeSeriesDistroOptions& opts = {});
+
+TimeSeriesDistroResult solve_time_series_distribution_pf(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const TimeSeriesDistroOptions& opts = {});
+
+}  // namespace hacdcpf::analysis
+\end{verbatim}
+
+Recommended source layout (draft):
+\begin{align}
+&\texttt{include/hacdcpf/analysis/time\_series\_distribution.hpp}, \notag\\
+&\texttt{src/analysis/time\_series\_distribution.cpp}.
+\end{align}
+
+\subsection{Time-Domain Power Flow (Sequential Hybrid PF)}
+\label{sec:tdpf}
+
+Given UC schedule \(\Pi^{\qual{uc}}\), each time step \(t\) solves:
+\begin{align}
+F_t(x_t; \zeta_t) = 0,
+\end{align}
+where \(x_t\) is the hybrid PF state and \(\zeta_t\) is the step-updated
+component injection set.
+
+\subsubsection{Step State and Residual Equations}
+
+Using the same notation as \S\ref{sec:powerflow},
+\begin{align}
+x_t =
+\begin{bmatrix}
+\theta_{\mathcal{N}_{ac}\setminus\mathcal{N}_{sl}}(t) &
+v_{\mathcal{N}_{PQ}}(t) &
+v_{\mathcal{N}_{dc}\setminus\mathcal{N}^{\qual{dc}}_{sl}}^{\qual{dc}}(t)
+\end{bmatrix}^{\top},
+\end{align}
+and residual rows are
+\begin{align}
+\Delta P_i(t) &= P_i^{\qual{spec}}(t)-P_i^{\qual{calc}}(x_t), \\
+\Delta Q_i(t) &= Q_i^{\qual{spec}}(t)-Q_i^{\qual{calc}}(x_t), \\
+\Delta P_k^{\qual{dc}}(t) &= P_k^{\qual{dc,spec}}(t)-P_k^{\qual{dc,calc}}(x_t).
+\label{eq:tdpf-residual-impl}
+\end{align}
+
+\subsubsection{Per-Step Injection Update Rules}
+
+For each \(t\in\mathcal{T}\):
+\begin{align}
+P_{g}^{\qual{set}}(t) &= P_{g,t}^{\qual{uc}}, &
+\texttt{in\_service}_g(t) &= u_{g,t}^{\qual{uc}}, \\
+P_{s}^{\qual{ess,set}}(t) &= P_{s,t}^{\qual{ess,uc}}, &
+P_{r}^{\qual{ren,set}}(t) &= P_{r,t}^{\qual{ren,uc}}, \\
+P_{\ell}(t) &= P_\ell^0\sigma_\ell(t), &
+Q_{\ell}(t) &= Q_\ell^0\sigma_\ell(t), \\
+G_p(t) &= 1000\rho_p(t).
+\label{eq:tdpf-updates-impl}
+\end{align}
+
+Then \texttt{reset\_solver\_handle(handle, sys\_t, ...)} and
+\texttt{solve\_handle(handle, pf\_options)} are executed to obtain
+\texttt{PowerFlowResult} at step \(t\).
+
+\subsubsection{Sequential Outputs and Aggregation}
+
+The time-series result stores:
+\begin{align}
+\texttt{pf\_results}[t],\quad
+\texttt{num\_converged} = \sum_{t\in\mathcal{T}} \mathbb{1}[\texttt{pf\_results}[t].\texttt{converged}].
+\end{align}
+
+The reported linear generation-cost accumulator is
+\begin{align}
+C^{\qual{gen,total}} =
+\sum_{t\in\mathcal{T}}\sum_{g\in\mathcal{G}}
+ c_{1g} P_{g,t}^{\qual{uc}}\Delta t,
+\label{eq:tdpf-cost-impl}
+\end{align}
+which is stored as \texttt{TimeSeriesPFResult::total\_generation\_cost}.
+
+\subsection{Post-Processing Metrics}
+\label{sec:ts-metrics}
+
+For a solved horizon, typical compliance metrics are:
+\begin{align}
+\mathrm{VCR} &= \frac{1}{N\,T}\sum_{i=1}^{N}\sum_{t=0}^{T-1}
+\mathbb{1}\bigl[V_i^{\qual{min}} \le V_i(t) \le V_i^{\qual{max}}\bigr], \\
+\mathrm{FVR} &= \frac{1}{B\,T}\sum_{b=1}^{B}\sum_{t=0}^{T-1}
+\mathbb{1}\bigl[|S_b(t)| > S_b^{\qual{rated}}\bigr].
+\end{align}
+
+\subsection{Current C++ API (Implemented)}
+\label{sec:ts-api}
+
+\begin{longtable}{L{0.34\linewidth}L{0.54\linewidth}}
+\toprule
+Structure / Function & Current behavior \\
+\midrule
+\endhead
+\texttt{TimeSeriesProfile} &
+  \texttt{id}, \texttt{name}, and a step vector \texttt{values}. \\
+\texttt{TimeSeriesData} &
+  \texttt{num\_steps}, \texttt{step\_duration\_hr}, and profile list. \\
+\texttt{TimeSeriesPFOptions} &
+  per-step \texttt{PowerFlowOptions}, UC backend selector, and
+  \texttt{skip\_uc} flag. \\
+\texttt{solve\_unit\_commitment(sys, ts\_data, opts)} &
+  builds the MILP in \S\ref{sec:dopf} and returns \texttt{UCSchedule}. \\
+\texttt{solve\_time\_series\_pf(sys, ts\_data, opts)} &
+  executes UC (optional) + sequential hybrid PF per \S\ref{sec:tdpf}. \\
+\texttt{TimeSeriesPFResult} &
+  UC schedule, per-step \texttt{PowerFlowResult} array, convergence count,
+  and linear generation-cost accumulator. \\
+\bottomrule
+\end{longtable}

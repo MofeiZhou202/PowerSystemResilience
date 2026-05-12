@@ -1,0 +1,59 @@
+\section{Stochastic Dispatch and Market-Boundary Optimization}
+\label{sec:stochastic-dispatch-summary}
+
+\subsection{Problem Form and Runtime Scope}
+
+This notebook chapter summarizes the stochastic market-boundary optimization
+material maintained separately in the standalone document
+\texttt{sections/17\_two\_stage\_stochastic.tex}.  The underlying formulation is
+a multi-stage stochastic dispatch and maintenance-planning model with scenario
+tree structure, expected-cost and risk terms, and decomposition-oriented solve
+strategies.
+
+\subsection{Code Map}
+
+The material summarized here is aligned primarily with:
+\begin{itemize}
+  \item \texttt{src/analysis/market\_simulation.cpp} for market-clearing and scheduling-side model infrastructure,
+  \item the MILP solver layer documented in Section~\ref{sec:engine-solver-system},
+  \item the standalone research-style derivation in \texttt{sections/17\_two\_stage\_stochastic.tex} and its compiled PDF companion.
+\end{itemize}
+
+\subsection{Pseudocode Map}
+
+The detailed technical notebook pseudocode already covers the main deterministic
+building blocks reused here:
+\begin{itemize}
+  \item Algorithm A16 for DC OPF-type operational subproblems,
+  \item Algorithm A20 for hierarchical annual and chronological dispatch orchestration,
+  \item Algorithm E9 and Section~\ref{sec:native-branch-and-cut} for MILP solve mechanics.
+\end{itemize}
+The full stochastic extensive-form and decomposition derivations remain in the
+standalone stochastic-dispatch manuscript rather than being duplicated inside
+this notebook.
+
+\subsection{Current Status}
+
+The stochastic-dispatch material in this repository is best understood as a
+hybrid of implementation-facing documentation and a standalone methods paper.
+For the notebook build, the standalone paper is kept external and this section
+acts as the normalized notebook-facing summary chapter.
+
+\subsection{Canonical Problem Form}
+
+In condensed form, the stochastic planning model can be read as
+\begin{align}
+\min_{x,\,y(\omega)} \quad & c^\top x + \sum_{\omega\in\Omega} p_\omega\, q_\omega^\top y(\omega) + \text{risk terms} \\
+\text{s.t.}\quad & A x \le b, \\
+& T_\omega x + W_\omega y(\omega) \le h_\omega, \qquad \forall \omega\in\Omega,
+\end{align}
+with first-stage boundary or maintenance decisions in \(x\) and scenario-wise
+recourse decisions in \(y(\omega)\).
+
+\subsection{How This Chapter Relates to the Standalone Manuscript}
+
+The standalone file \texttt{sections/17\_two\_stage\_stochastic.tex} is still the
+full derivation and should continue to be compiled on its own when the research
+paper version is needed.  The technical notebook now keeps only the normalized
+summary chapter so the main notebook build remains a single coherent document
+instead of recursively including a second document preamble.
