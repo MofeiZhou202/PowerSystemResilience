@@ -220,18 +220,40 @@ class ScopedEnvVar {
       had_old_ = true;
       old_value_ = old;
     }
-    setenv(name_.c_str(), value, 1);
+    set_env(name_.c_str(), value);
   }
 
   ~ScopedEnvVar() {
     if (had_old_) {
-      setenv(name_.c_str(), old_value_.c_str(), 1);
+      set_env(name_.c_str(), old_value_.c_str());
     } else {
-      unsetenv(name_.c_str());
+      unset_env(name_.c_str());
     }
   }
 
  private:
+  // Cross-platform environment-variable helpers. POSIX uses setenv/unsetenv;
+  // MSVC/Windows provides _putenv_s, where passing an empty value removes the
+  // variable. Wrapping here lets the engine build cleanly on Windows.
+  static void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value != nullptr ? value : "");
+#else
+    if (value != nullptr) {
+      ::setenv(name, value, 1);
+    } else {
+      ::unsetenv(name);
+    }
+#endif
+  }
+  static void unset_env(const char* name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    ::unsetenv(name);
+#endif
+  }
+
   std::string name_;
   bool had_old_{false};
   std::string old_value_;

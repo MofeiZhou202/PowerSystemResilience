@@ -840,12 +840,15 @@ void xtab_visit_source_row_terms(const StandardFormLP& sf,
     return;
   }
 
+  const double row_scale_inv = 1.0 / xtab_row_scale_or_one(sf, row);
   for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row,
                                                                       row);
        it; ++it) {
     const int col = static_cast<int>(it.col());
     if (col < 0 || col >= sf.n_original) continue;
-    const double value = xtab_source_row_coeff(sf, row, col);
+    const double scaled = it.value();
+    if (std::abs(scaled) <= 1e-15) continue;
+    const double value = scaled * row_scale_inv / xtab_col_scale_or_one(sf, col);
     if (std::abs(value) <= 1e-15) continue;
     func(col, value);
   }
@@ -4238,6 +4241,7 @@ struct XTabLpAggregator {
         row >= ctx.n_rows || !std::isfinite(weight)) {
       return false;
     }
+    const double row_scale_inv = 1.0 / xtab_row_scale_or_one(sf, row);
     for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
              sf.A_row, row);
          it; ++it) {
@@ -4245,7 +4249,9 @@ struct XTabLpAggregator {
       if (col < 0 || col >= ctx.n_original) {
         continue;
       }
-      add_value(col, weight * xtab_source_row_coeff(sf, row, col));
+      const double unscaled =
+          it.value() * row_scale_inv / xtab_col_scale_or_one(sf, col);
+      add_value(col, weight * unscaled);
     }
     const int slack_col = ctx.n_original + row;
     if (slack_col < 0 || slack_col >= ctx.dim) {
@@ -4689,14 +4695,15 @@ bool xtab_generate_path_mixing_cut(
 
 double standard_row_max_abs(const SimplexResult& simplex, int row) {
   double max_abs = 0.0;
+  const double row_scale_inv = 1.0 / xtab_row_scale_or_one(simplex.form, row);
   for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
            simplex.form.A_row, row);
        it; ++it) {
     const int col = static_cast<int>(it.col());
     if (col >= 0 && col < simplex.form.n_original) {
-      max_abs =
-          std::max(max_abs,
-                   std::abs(xtab_source_row_coeff(simplex.form, row, col)));
+      const double value = std::abs(it.value()) * row_scale_inv /
+                           xtab_col_scale_or_one(simplex.form, col);
+      max_abs = std::max(max_abs, value);
     }
   }
   return max_abs;
@@ -5236,7 +5243,7 @@ int add_mir_like_cuts(LPModel& lp,
 
     Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
     bool has_int = false;
-    for (int j = 0; j < lp.A.cols(); ++j) {
+    for (int j = 0; j < n; ++j) {
       const double a = lp.A.coeff(r, j);
       if (std::abs(a) <= 1e-12 || !is_integer_type(lp.vars[j])) {
         continue;
@@ -5292,6 +5299,9 @@ int add_cover_cuts(LPModel& lp,
   std::vector<Eigen::VectorXd> cut_rows;
   std::vector<double> cut_rhs;
 
+  // Build row-major view once to avoid O(nnz) per column access in scans.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_cover = lp.A;
+
   for (int r = 0; r < lp.A.rows() && added < max_cuts; ++r) {
     if (lp.b[r] <= 0.0) {
       continue;
@@ -5299,33 +5309,56 @@ int add_cover_cuts(LPModel& lp,
 
     std::vector<int> cand;
     cand.reserve(static_cast<size_t>(n));
+    std::vector<double> cand_coeff;  // parallel to cand, cached coefficients
+    cand_coeff.reserve(static_cast<size_t>(n));
     bool valid_row = true;
-    for (int j = 0; j < n; ++j) {
-      const double a = lp.A.coeff(r, j);
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_cover, r); it; ++it) {
+      const double a = it.value();
       if (std::abs(a) <= 1e-12) {
         continue;
       }
+      const int j = static_cast<int>(it.col());
+      if (j < 0 || j >= n) { valid_row = false; break; }
       if (a < 0.0 || lp.vars[j].type != VarType::Binary) {
         valid_row = false;
         break;
       }
       cand.push_back(j);
+      cand_coeff.push_back(a);
     }
 
     if (!valid_row || cand.size() < 2) {
       continue;
     }
 
-    std::sort(cand.begin(), cand.end(), [&](int a, int b) {
-      return lp.A.coeff(r, a) > lp.A.coeff(r, b);
+    // Sort cand by coefficient descending using cached values (avoids repeated sparse lookups).
+    std::vector<int> order(cand.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return cand_coeff[a] > cand_coeff[b];
     });
+    std::vector<int> sorted_cand(cand.size());
+    std::vector<double> sorted_coeff(cand.size());
+    for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+      sorted_cand[i] = cand[order[i]];
+      sorted_coeff[i] = cand_coeff[order[i]];
+    }
+    cand = sorted_cand;
+    cand_coeff = sorted_coeff;
+
+    // Build a coefficient lookup map for this row (for the knapsack lifting phase).
+    std::unordered_map<int, double> row_coeffs;
+    row_coeffs.reserve(cand.size());
+    for (int i = 0; i < static_cast<int>(cand.size()); ++i) {
+      row_coeffs[cand[i]] = cand_coeff[i];
+    }
 
     std::vector<int> cover;
     cover.reserve(cand.size());
     double sum_w = 0.0;
-    for (int j : cand) {
-      cover.push_back(j);
-      sum_w += lp.A.coeff(r, j);
+    for (int i = 0; i < static_cast<int>(cand.size()); ++i) {
+      cover.push_back(cand[i]);
+      sum_w += cand_coeff[i];
       if (sum_w > lp.b[r] + 1e-9) {
         break;
       }
@@ -5353,13 +5386,13 @@ int add_cover_cuts(LPModel& lp,
         if (!in_cover[k]) non_cover.push_back(k);
       }
       std::sort(non_cover.begin(), non_cover.end(), [&](int a, int b_) {
-        return lp.A.coeff(r, a) > lp.A.coeff(r, b_);
+        return row_coeffs.at(a) > row_coeffs.at(b_);
       });
 
       struct KSItem { double weight; double coeff; };
       std::vector<KSItem> items;
       items.reserve(cand.size());
-      for (int j : cover) items.push_back({lp.A.coeff(r, j), 1.0});
+      for (int j : cover) items.push_back({row_coeffs.at(j), 1.0});
 
       constexpr int N_BINS = 512;  // Smaller table for speed
       std::vector<double> dp(N_BINS + 1);
@@ -5379,7 +5412,7 @@ int add_cover_cuts(LPModel& lp,
       };
 
       for (int k : non_cover) {
-        double a_k = lp.A.coeff(r, k);
+        double a_k = row_coeffs.at(k);
         double cap = b_row - a_k;
         double z_star = (cap < -1e-9) ? 0.0 : solve_ks(items, cap);
         double alpha_k = rhs - z_star;
@@ -5435,14 +5468,17 @@ int add_basis_mir_cuts(LPModel& lp,
   std::vector<MIRCandidate> candidates;
   candidates.reserve(static_cast<size_t>(std::min(m_ineq + m_eq, max_cuts * 4)));
 
-  auto try_mir_row = [&](const auto& row_getter, double b_val, int /*row_idx*/) {
-    // Collect row coefficients
+  // Build RowMajor views once to avoid O(n log nnz) coeff() lookups per row.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_mir_row = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_mir_row = lp.Aeq;
+
+  auto try_mir_row = [&](auto&& visit_nonzeros, double b_val, int /*row_idx*/) {
+    // Collect row coefficients via RowMajor InnerIterator (O(nnz), not O(n log nnz)).
     Eigen::VectorXd a = Eigen::VectorXd::Zero(n);
     bool has_integer = false;
     [[maybe_unused]] bool has_continuous = false;
-    for (int j = 0; j < n; ++j) {
-      double val = row_getter(j);
-      if (std::abs(val) > 1e-12) {
+    visit_nonzeros([&](int j, double val) {
+      if (j >= 0 && j < n && std::abs(val) > 1e-12) {
         a[j] = val;
         if (is_integer_type(lp.vars[j])) {
           has_integer = true;
@@ -5450,7 +5486,7 @@ int add_basis_mir_cuts(LPModel& lp,
           has_continuous = true;
         }
       }
-    }
+    });
     if (!has_integer) return;  // pure continuous row - no MIR possible
 
     // Try complementing integer vars near upper bound
@@ -5460,8 +5496,11 @@ int add_basis_mir_cuts(LPModel& lp,
       if (std::abs(a[j]) <= 1e-12 || !is_integer_type(lp.vars[j])) continue;
       double ub = lp.vars[j].ub;
       if (!std::isfinite(ub)) continue;
-      // Complement if x_j closer to ub than lb
+      // Complement if x_j closer to ub than lb.
+      // Guard against infinite lb: if lb is -inf, always treat as closer to lb
+      // (no complementation), since the midpoint is undefined.
       double lb = lp.vars[j].lb;
+      if (!std::isfinite(lb)) continue;
       double mid = (lb + ub) * 0.5;
       if (x[j] > mid) {
         // Replace x_j with (ub - x'_j): a_j*x_j = a_j*ub - a_j*x'_j
@@ -5509,6 +5548,7 @@ int add_basis_mir_cuts(LPModel& lp,
       if (std::abs(mir[j]) <= 1e-12) continue;
       bool complemented = (is_integer_type(lp.vars[j]) &&
                            std::isfinite(lp.vars[j].ub) &&
+                           std::isfinite(lp.vars[j].lb) &&
                            x[j] > (lp.vars[j].lb + lp.vars[j].ub) * 0.5);
       if (complemented) {
         // mir_j * x'_j = mir_j * (ub - x_j) = -mir_j * x_j + mir_j * ub
@@ -5542,13 +5582,22 @@ int add_basis_mir_cuts(LPModel& lp,
 
   // Process inequality rows
   for (int r = 0; r < m_ineq; ++r) {
-    try_mir_row([&](int j) { return lp.A.coeff(r, j); }, lp.b[r], r);
+    try_mir_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_mir_row, r); it; ++it)
+        f(static_cast<int>(it.col()), it.value());
+    }, lp.b[r], r);
   }
   // Process equality rows as two inequalities (relaxed as <=)
   for (int r = 0; r < m_eq; ++r) {
-    try_mir_row([&](int j) { return lp.Aeq.coeff(r, j); }, lp.beq[r], m_ineq + r);
+    try_mir_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_mir_row, r); it; ++it)
+        f(static_cast<int>(it.col()), it.value());
+    }, lp.beq[r], m_ineq + r);
     // Also try negated form
-    try_mir_row([&](int j) { return -lp.Aeq.coeff(r, j); }, -lp.beq[r], m_ineq + m_eq + r);
+    try_mir_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_mir_row, r); it; ++it)
+        f(static_cast<int>(it.col()), -it.value());
+    }, -lp.beq[r], m_ineq + m_eq + r);
   }
 
   if (candidates.empty()) return 0;
@@ -5605,37 +5654,40 @@ int add_flow_cover_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
   };
   std::vector<FlowCoverCut> candidates;
 
+  // Build RowMajor view once to avoid O(n log nnz) coeff() lookups per row.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_flow_row = lp.A;
+
   for (int r = 0; r < m; ++r) {
-    // Identify rows with mixed binary+continuous structure
-    std::vector<int> bin_cols, cont_cols;
-    for (int j = 0; j < n; ++j) {
-      double val = lp.A.coeff(r, j);
-      if (std::abs(val) <= 1e-12) continue;
+    // Identify rows with mixed binary+continuous structure.
+    // Cache (col, val) pairs to avoid repeated O(log nnz) coeff() lookups below.
+    struct ColCoeff { int col; double val; };
+    std::vector<ColCoeff> bin_entries, cont_entries;
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_flow_row, r);
+         it; ++it) {
+      const int j = static_cast<int>(it.col());
+      const double val = it.value();
+      if (j < 0 || j >= n || std::abs(val) <= 1e-12) continue;
       if (lp.vars[j].type == VarType::Binary) {
-        bin_cols.push_back(j);
+        bin_entries.push_back({j, val});
       } else if (lp.vars[j].type == VarType::Continuous) {
-        cont_cols.push_back(j);
+        cont_entries.push_back({j, val});
       }
     }
-    if (bin_cols.empty() || cont_cols.empty()) continue;
-    if (bin_cols.size() < 2 && cont_cols.size() < 1) continue;
+    if (bin_entries.empty() || cont_entries.empty()) continue;
 
-    // For each binary var with negative coefficient (acts as capacity limiter),
-    // try to build a flow cover.
     // Identify N+ (positive coeff binary) and N- (negative coeff binary)
-    std::vector<int> Nplus, Nminus;
-    for (int j : bin_cols) {
-      double a = lp.A.coeff(r, j);
-      if (a > 1e-12) Nplus.push_back(j);
-      else if (a < -1e-12) Nminus.push_back(j);
+    std::vector<ColCoeff> Nplus_entries, Nminus_entries;
+    for (const auto& e : bin_entries) {
+      if (e.val > 1e-12) Nplus_entries.push_back(e);
+      else if (e.val < -1e-12) Nminus_entries.push_back(e);
     }
 
-    if (Nminus.empty()) continue;  // Need negative binary coefficients for flow cover
+    if (Nminus_entries.empty()) continue;  // Need negative binary coefficients for flow cover
 
     // Compute: lambda = b + sum_{j in N-} |a_j| (capacity when all N- = 1)
     double lambda = lp.b[r];
-    for (int j : Nminus) {
-      lambda += std::abs(lp.A.coeff(r, j));
+    for (const auto& e : Nminus_entries) {
+      lambda += std::abs(e.val);
     }
     if (lambda <= 1e-9) continue;
 
@@ -5648,18 +5700,20 @@ int add_flow_cover_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
       double viol_score;
     };
     std::vector<BinInfo> nminus_info;
-    nminus_info.reserve(Nminus.size());
-    for (int j : Nminus) {
-      double ac = std::abs(lp.A.coeff(r, j));
-      nminus_info.push_back({j, ac, ac * (1.0 - x[j])});
+    nminus_info.reserve(Nminus_entries.size());
+    for (const auto& e : Nminus_entries) {
+      double ac = std::abs(e.val);
+      nminus_info.push_back({e.col, ac, ac * (1.0 - x[e.col])});
     }
     std::sort(nminus_info.begin(), nminus_info.end(),
               [](const BinInfo& a, const BinInfo& b) { return a.viol_score > b.viol_score; });
 
     std::vector<int> cover;
+    std::vector<double> cover_abs;  // parallel absolute coefficients
     double cover_sum = 0.0;
     for (const auto& bi : nminus_info) {
       cover.push_back(bi.col);
+      cover_abs.push_back(bi.abs_coeff);
       cover_sum += bi.abs_coeff;
       if (cover_sum > lambda + 1e-9) break;
     }
@@ -5675,25 +5729,23 @@ int add_flow_cover_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     Eigen::VectorXd cut = Eigen::VectorXd::Zero(n);
     double cut_rhs = lambda;
 
-    // Continuous variables with positive coefficients
-    for (int j : cont_cols) {
-      double a = lp.A.coeff(r, j);
-      if (a > 1e-12) {
-        cut[j] = a;
+    // Continuous variables with positive coefficients (use cached values)
+    for (const auto& e : cont_entries) {
+      if (e.val > 1e-12) {
+        cut[e.col] = e.val;
       }
     }
 
-    // Positive binary variables: coefficient = min(a_j, lambda)
-    for (int j : Nplus) {
-      double a = lp.A.coeff(r, j);
-      cut[j] = std::min(a, lambda);
+    // Positive binary variables: coefficient = min(a_j, lambda) (use cached values)
+    for (const auto& e : Nplus_entries) {
+      cut[e.col] = std::min(e.val, lambda);
     }
 
-    // Cover variables: subtract lifting coefficient
-    for (int j : cover) {
-      double aj = std::abs(lp.A.coeff(r, j));
+    // Cover variables: subtract lifting coefficient (use parallel cover_abs)
+    for (int ci = 0; ci < static_cast<int>(cover.size()); ++ci) {
+      double aj = cover_abs[static_cast<std::size_t>(ci)];
       double lift = std::max(0.0, aj - excess);
-      cut[j] = -lift;
+      cut[cover[static_cast<std::size_t>(ci)]] = -lift;
       cut_rhs -= lift;
     }
 
@@ -5896,15 +5948,20 @@ int add_implied_bound_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) 
   };
   std::vector<IBCut> candidates;
 
+  // Build a row-major view once to avoid O(nnz) per column access in the inner loop.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
+
   // Scan for variable bound rows: exactly one continuous and one binary variable
   for (int r = 0; r < m; ++r) {
     int cont_col = -1, bin_col = -1;
     double cont_coeff = 0.0, bin_coeff = 0.0;
     int nnz = 0;
     bool valid = true;
-    for (int j = 0; j < n; ++j) {
-      double val = lp.A.coeff(r, j);
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
+      const double val = it.value();
       if (std::abs(val) <= 1e-12) continue;
+      const int j = static_cast<int>(it.col());
+      if (j < 0 || j >= n) { valid = false; break; }
       ++nnz;
       if (nnz > 2) { valid = false; break; }
       if (lp.vars[j].type == VarType::Binary) {
@@ -5996,16 +6053,19 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
   };
   std::vector<MIRCand> candidates;
 
-  auto try_row = [&](const auto& row_getter, double b_val) {
+  // Build RowMajor views once to avoid O(n log nnz) coeff() lookups per row.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_mir = lp.A;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_row_mir = lp.Aeq;
+
+  auto try_row = [&](auto&& visit_nonzeros, double b_val) {
     Eigen::VectorXd a = Eigen::VectorXd::Zero(n);
     bool has_int = false;
-    for (int j = 0; j < n; ++j) {
-      double val = row_getter(j);
-      if (std::abs(val) > 1e-12) {
+    visit_nonzeros([&](int j, double val) {
+      if (j >= 0 && j < n && std::abs(val) > 1e-12) {
         a[j] = val;
         if (is_integer_type(lp.vars[j])) has_int = true;
       }
-    }
+    });
     if (!has_int) return;
 
     // Complement integer vars near upper bound
@@ -6015,6 +6075,7 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
       if (std::abs(a[j]) <= 1e-12 || !is_integer_type(lp.vars[j])) continue;
       double ub = lp.vars[j].ub;
       if (!std::isfinite(ub)) continue;
+      if (!std::isfinite(lp.vars[j].lb)) continue;
       if (x[j] > (lp.vars[j].lb + ub) * 0.5) {
         ac[j] = -a[j];
         bc -= a[j] * ub;
@@ -6046,6 +6107,7 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     for (int j = 0; j < n; ++j) {
       if (std::abs(mir[j]) <= 1e-12) continue;
       bool comp = (is_integer_type(lp.vars[j]) && std::isfinite(lp.vars[j].ub) &&
+                   std::isfinite(lp.vars[j].lb) &&
                    x[j] > (lp.vars[j].lb + lp.vars[j].ub) * 0.5);
       if (comp) { cut[j] = -mir[j]; rhs -= mir[j] * lp.vars[j].ub; }
       else { cut[j] = mir[j]; }
@@ -6057,11 +6119,20 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
   };
 
   for (int r = 0; r < m_ineq; ++r) {
-    try_row([&](int j) { return lp.A.coeff(r, j); }, lp.b[r]);
+    try_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_mir, r); it; ++it)
+        f(static_cast<int>(it.col()), it.value());
+    }, lp.b[r]);
   }
   for (int r = 0; r < m_eq; ++r) {
-    try_row([&](int j) { return lp.Aeq.coeff(r, j); }, lp.beq[r]);
-    try_row([&](int j) { return -lp.Aeq.coeff(r, j); }, -lp.beq[r]);
+    try_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row_mir, r); it; ++it)
+        f(static_cast<int>(it.col()), it.value());
+    }, lp.beq[r]);
+    try_row([&](auto&& f) {
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_row_mir, r); it; ++it)
+        f(static_cast<int>(it.col()), -it.value());
+    }, -lp.beq[r]);
   }
 
   if (candidates.empty()) return 0;
@@ -7088,7 +7159,8 @@ int add_transformed_path_cuts(
         continue;
       }
 	      subst_col = col;
-	      subst_val = xtab_source_row_coeff(simplex.form, r, col);
+	      subst_val = it.value() / (xtab_row_scale_or_one(simplex.form, r) *
+	                                 xtab_col_scale_or_one(simplex.form, col));
 	      break;
     }
     if (subst_col >= 0 &&
@@ -7132,7 +7204,9 @@ int add_transformed_path_cuts(
       if (col_source_drive[static_cast<std::size_t>(col)] <= feastol) {
         continue;
       }
-      const double a = xtab_source_row_coeff(simplex.form, r, col);
+      const double a =
+          it.value() / (xtab_row_scale_or_one(simplex.form, r) *
+                        xtab_col_scale_or_one(simplex.form, col));
       if (std::abs(a) <= 1e-12) {
         continue;
       }
@@ -7685,16 +7759,25 @@ int add_clique_cuts(LPModel& lp,
   // Build conflict adjacency: conflict[i] = set of j where some row forces
   // x_i + x_j <= 1 (i.e. a_i + a_j > b).
   // Limit to rows with at most 200 binary vars to avoid O(n^2) blowup.
+  // Build conflict adjacency: conflict[i] = set of j where some row forces
+  // x_i + x_j <= 1 (i.e. a_i + a_j > b).
+  // Limit to rows with at most 200 binary vars to avoid O(n^2) blowup.
   std::vector<std::vector<int>> conflicts(n);
+
+  // Build row-major view once to avoid O(nnz) per column access in the
+  // conflict-graph construction loop.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> A_row_clique = lp.A;
 
   for (int r = 0; r < m; ++r) {
     if (lp.b[r] <= 0.0) continue;
 
     std::vector<std::pair<int,double>> bin_vars;
     bool valid = true;
-    for (int j = 0; j < n; ++j) {
-      double a = lp.A.coeff(r, j);
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row_clique, r); it; ++it) {
+      const double a = it.value();
       if (std::abs(a) <= 1e-12) continue;
+      const int j = static_cast<int>(it.col());
+      if (j < 0 || j >= n) { valid = false; break; }
       if (a < 0.0 || lp.vars[j].type != VarType::Binary) { valid = false; break; }
       bin_vars.push_back({j, a});
     }
@@ -7888,6 +7971,9 @@ int add_zero_half_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
     }
 
     if (!has_int_var || odd.empty()) continue;
+
+    // Guard against non-finite or very large RHS to prevent int overflow below.
+    if (!std::isfinite(lp.b[r]) || std::abs(lp.b[r]) >= 2e9) continue;
 
     const double slack = lp.b[r] - activity;
     if (slack < -1e-6 || slack > 0.99) continue; // too violated or too loose
