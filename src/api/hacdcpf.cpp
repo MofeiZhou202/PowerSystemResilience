@@ -16,9 +16,6 @@
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
 #include "hacdcpf/power_flow/distributed_slack_solver.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
-#include "hacdcpf/market/market_simulation.hpp"
-#include "hacdcpf/planning/hybrid_distribution_planning_validation.hpp"
-#include "hacdcpf/planning/microgrid_planning_solver.hpp"
 
 namespace hacdcpf {
 
@@ -656,46 +653,5 @@ analysis::DistributionResilienceResult run_distribution_resilience_assessment(
   return analysis::run_distribution_resilience_assessment(sys, opt);
 }
 
-market::MarketClearingOutput run_market_clearing(
-    const HybridPowerSystem& sys,
-    const market::MarketConfig& config,
-    const std::vector<market::GenCoBid>& bids,
-    const market::MarketProfiles* profiles,
-    const market::InitialStatus* init,
-    const market::ScenarioConfig* scen_cfg) {
-  return market::run_market_clearing(sys, config, bids, profiles, init, scen_cfg);
-}
-
-planning::PlanningResult solve_microgrid_planning(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options) {
-  return planning::solve_microgrid_planning(input, options);
-}
-
-planning::PlanningResult solve_microgrid_planning_baseline(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options) {
-  return planning::solve_microgrid_planning_baseline(input, options);
-}
-
-planning::PlanningResult solve_microgrid_planning_nested_bc(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options) {
-  return planning::solve_microgrid_planning_nested_bc(input, options);
-}
-
-planning::HybridDistributionCandidateReplayResult replay_hybrid_distribution_candidate(
-    const HybridPowerSystem& base_system,
-    const planning::HybridDistributionPlanningResult& result,
-    const planning::HybridDistributionCandidateReplayOptions& options) {
-  return planning::replay_hybrid_distribution_candidate(base_system, result, options);
-}
-
-planning::HybridDistributionValidationReport validate_hybrid_distribution_planning_result(
-    const HybridPowerSystem& base_system,
-    const planning::HybridDistributionPlanningResult& result,
-    const planning::HybridDistributionValidationOptions& options) {
-  return planning::validate_hybrid_distribution_planning_result(base_system, result, options);
-}
 
 }  // namespace hacdcpf

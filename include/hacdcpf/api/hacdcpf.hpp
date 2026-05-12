@@ -13,9 +13,6 @@
 #include "hacdcpf/analysis/time_series_pf.hpp"
 #include "hacdcpf/analysis/reliability_assessment.hpp"
 #include "hacdcpf/analysis/resilience_assessment.hpp"
-#include "hacdcpf/market/market_simulation.hpp"
-#include "hacdcpf/planning/hybrid_distribution_planning_validation.hpp"
-#include "hacdcpf/planning/microgrid_planning_solver.hpp"
 
 namespace hacdcpf {
 
@@ -76,35 +73,5 @@ opf::RPOResult solve_rpo(const HybridPowerSystem& sys,
 analysis::DistributionResilienceResult run_distribution_resilience_assessment(
     const HybridPowerSystem& sys,
     const analysis::DistributionResilienceOptions& opt = {});
-
-market::MarketClearingOutput run_market_clearing(
-    const HybridPowerSystem& sys,
-    const market::MarketConfig& config = {},
-    const std::vector<market::GenCoBid>& bids = {},
-    const market::MarketProfiles* profiles = nullptr,
-    const market::InitialStatus* init = nullptr,
-    const market::ScenarioConfig* scen_cfg = nullptr);
-
-planning::PlanningResult solve_microgrid_planning(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options = {});
-
-planning::PlanningResult solve_microgrid_planning_baseline(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options = {});
-
-planning::PlanningResult solve_microgrid_planning_nested_bc(
-    const planning::MicrogridPlanningInput& input,
-    const planning::PlanningOptions& options = {});
-
-planning::HybridDistributionCandidateReplayResult replay_hybrid_distribution_candidate(
-    const HybridPowerSystem& base_system,
-    const planning::HybridDistributionPlanningResult& result,
-    const planning::HybridDistributionCandidateReplayOptions& options = {});
-
-planning::HybridDistributionValidationReport validate_hybrid_distribution_planning_result(
-    const HybridPowerSystem& base_system,
-    const planning::HybridDistributionPlanningResult& result,
-    const planning::HybridDistributionValidationOptions& options = {});
 
 }  // namespace hacdcpf

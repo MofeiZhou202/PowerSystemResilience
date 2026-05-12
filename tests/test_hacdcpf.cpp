@@ -357,21 +357,6 @@ TEST_CASE("Carbon analysis: stub returns valid struct", "[analysis][carbon]") {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tests: Market stub
-// ═══════════════════════════════════════════════════════════════════════════════
-
-TEST_CASE("Market clearing: stub returns valid struct", "[market]") {
-  using namespace hacdcpf;
-
-  auto sys                       = make_simple_ac_system();
-  market::MarketConfig config;
-  auto result = market::run_market_clearing(sys, config);
-
-  CHECK_FALSE(result.cleared);
-  CHECK(result.status == "not_implemented");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Tests: Resilience stub
 // ═══════════════════════════════════════════════════════════════════════════════
 

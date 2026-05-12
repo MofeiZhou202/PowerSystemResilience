@@ -84,6 +84,7 @@ set(HACDCPF_SOURCES
   src/power_flow/solver_data.cpp
   src/power_flow/voltage_stability.cpp
   src/power_flow/workspace.cpp
+  src/power_flow/newton_solver.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
   src/optimal_power_flow/ac_opf.cpp
   src/optimal_power_flow/dc_opf.cpp
@@ -101,34 +102,12 @@ set(HACDCPF_SOURCES
   src/analysis/reliability_assessment.cpp
   src/analysis/resilience_assessment.cpp
   src/analysis/time_series_pf.cpp
-  # ── market stubs ─────────────────────────────────────────────────────
-  src/market/market_simulation.cpp
-  # ── planning stubs ───────────────────────────────────────────────────
-  src/planning/hybrid_distribution_planning_validation.cpp
-  src/planning/microgrid_planning_solver.cpp)
-
-# ── MIPSolvers orphan sources (not compiled by MIPSolvers itself) ────────────
-# newton_solver.cpp depends on bridge headers provided by hacdcpf's include/
-# The HiGHS-factor utilities provide the LU factorisation back-end.
-set(MIPSOLVERS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src")
-list(APPEND HACDCPF_SOURCES
-  ${MIPSOLVERS_SRC}/engine/solver/native/nle/newton_solver.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactor.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorDebug.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorExtend.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorRefactor.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HFactorUtils.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HSet.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HVectorBase.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsHash.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsMatrixUtils.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsSort.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsSparseMatrix.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/HighsUtils.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/util/stringutil.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/io/HighsIO.cpp
-  ${MIPSOLVERS_SRC}/engine/kernel/linear_algebra/highs_factor/lp_data/HighsOptions.cpp
-)
+  # ── power_models stubs (AML model builders) ──────────────────────────
+  src/power_models/acopf_builder.cpp
+  src/power_models/acdcopf_builder.cpp
+  src/power_models/dc_opf_builder.cpp
+  src/power_models/lindistflow_builder.cpp
+  src/power_models/scuc_builder.cpp)
 
 if(HACDCPF_ENABLE_EXCEL)
   list(APPEND HACDCPF_SOURCES src/io/excel_io.cpp)
@@ -148,10 +127,6 @@ target_include_directories(hacdcpf
   PRIVATE
     # Compat shim directory (e.g. spdlog -> fmt bridge)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/compat>
-    # MIPSolvers src/ so orphan .cpp files can find sibling headers
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src>
-    # HiGHS-factor internal headers (util/HFactor.h etc.)
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers/src/engine/kernel/linear_algebra/highs_factor>
 )
 
 # ── Compile definitions ───────────────────────────────────────────────────────
