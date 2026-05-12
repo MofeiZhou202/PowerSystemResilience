@@ -5,6 +5,15 @@
 # After inclusion, the following CMake target will exist:
 #   ipopt_local  — the Ipopt static library (with MUMPS linear solver via homebrew dylibs)
 
+if(NOT APPLE)
+  message(FATAL_ERROR
+    "BuildIpopt.cmake is currently macOS/Homebrew-specific. "
+    "No system Ipopt fallback is allowed for this project. Disable "
+    "MIPSOLVERS_BUILD_LOCAL_IPOPT only if the TNLP bridge is intentionally "
+    "unavailable, or add the required in-repository BLAS/LAPACK/MUMPS build "
+    "for this platform.")
+endif()
+
 set(_IPOPT_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ipopt")
 set(_IPOPT_BIN "${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_ipopt")
 file(MAKE_DIRECTORY "${_IPOPT_BIN}")

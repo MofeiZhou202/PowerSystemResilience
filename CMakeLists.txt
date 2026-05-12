@@ -27,6 +27,9 @@ option(MIPSOLVERS_BUILD_HFACTOR   "Build vendored HiGHS HFactor static lib"    O
 option(MIPSOLVERS_EIGEN_VECTORIZE "Enable Eigen vectorization intrinsics"      ON)
 option(MIPSOLVERS_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                         OFF)
+option(MIPSOLVERS_BUILD_SCUC "Build scuc_solve command-line tool"              ON)
+option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool"       ON)
+option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings"              OFF)
 set(MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES "32" CACHE STRING
     "Eigen max alignment bytes (16/32/64; empty = Eigen default)")
 
@@ -110,6 +113,9 @@ if(MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES)
   target_compile_definitions(mipsolvers PUBLIC
     EIGEN_MAX_ALIGN_BYTES=${MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES})
 endif()
+if(WIN32)
+  target_compile_definitions(mipsolvers PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
 
 # ── HFactor vendored library ──────────────────────────────────────────────────
 if(MIPSOLVERS_BUILD_HFACTOR)
@@ -126,21 +132,6 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
   target_compile_definitions(mipsolvers PRIVATE
     MIPSOLVERS_HIGHS_LIB_SOURCE="${MIPSOLVERS_HIGHS_LIB_SOURCE}"
     HACDCPF_HIGHS_LIB_SOURCE="${MIPSOLVERS_HIGHS_LIB_SOURCE}")
-endif()
-if(MIPSOLVERS_HIGHS_EXECUTABLE)
-  target_compile_definitions(mipsolvers PRIVATE
-    MIPSOLVERS_HIGHS_EXECUTABLE="${MIPSOLVERS_HIGHS_EXECUTABLE}"
-    HACDCPF_HIGHS_EXECUTABLE="${MIPSOLVERS_HIGHS_EXECUTABLE}")
-endif()
-if(MIPSOLVERS_IPOPT_EXECUTABLE)
-  target_compile_definitions(mipsolvers PRIVATE
-    MIPSOLVERS_IPOPT_EXECUTABLE="${MIPSOLVERS_IPOPT_EXECUTABLE}"
-    HACDCPF_IPOPT_EXECUTABLE="${MIPSOLVERS_IPOPT_EXECUTABLE}")
-endif()
-if(MIPSOLVERS_SCIP_EXECUTABLE)
-  target_compile_definitions(mipsolvers PRIVATE
-    MIPSOLVERS_SCIP_EXECUTABLE="${MIPSOLVERS_SCIP_EXECUTABLE}"
-    HACDCPF_SCIP_EXECUTABLE="${MIPSOLVERS_SCIP_EXECUTABLE}")
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────
@@ -211,16 +202,25 @@ if(MSVC)
     target_compile_options(mipsolvers PRIVATE /WX)
   endif()
   target_compile_options(mipsolvers PRIVATE
-    $<$<CONFIG:Release>:/O2 /Oi /fp:fast /DNDEBUG>
-    $<$<CONFIG:RelWithDebInfo>:/O2 /Oi /Zi /DNDEBUG>)
+    $<$<CONFIG:Release>:/O2>
+    $<$<CONFIG:Release>:/Oi>
+    $<$<CONFIG:Release>:/fp:fast>
+    $<$<CONFIG:Release>:/DNDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:/O2>
+    $<$<CONFIG:RelWithDebInfo>:/Oi>
+    $<$<CONFIG:RelWithDebInfo>:/Zi>
+    $<$<CONFIG:RelWithDebInfo>:/DNDEBUG>)
 else()
   target_compile_options(mipsolvers PRIVATE -Wall -Wextra -Wpedantic)
   if(MIPSOLVERS_ENABLE_WERROR)
     target_compile_options(mipsolvers PRIVATE -Werror)
   endif()
   target_compile_options(mipsolvers PRIVATE
-    $<$<CONFIG:Release>:-O3 -DNDEBUG>
-    $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    $<$<CONFIG:Release>:-O3>
+    $<$<CONFIG:Release>:-DNDEBUG>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-g>
+    $<$<CONFIG:RelWithDebInfo>:-DNDEBUG>)
   if(MIPSOLVERS_ENABLE_NATIVE_ARCH)
     target_compile_options(mipsolvers PRIVATE
       $<$<CONFIG:Release>:-march=native>
@@ -304,7 +304,6 @@ if(MIPSOLVERS_BUILD_TESTS)
 endif()
 
 # ── SCUC market simulation executable ────────────────────────────────────────
-option(MIPSOLVERS_BUILD_SCUC "Build scuc_solve command-line tool" ON)
 if(MIPSOLVERS_BUILD_SCUC)
   add_executable(scuc_solve
     src/scuc/main.cpp
@@ -321,7 +320,6 @@ if(MIPSOLVERS_BUILD_SCUC)
 endif()
 
 # ── SCUC case builder tool ─────────────────────────────────────────────────────
-option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool" ON)
 if(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER AND MIPSOLVERS_BUILD_SCUC)
   add_executable(scuc_case_builder
     src/scuc/case_builder_main.cpp
@@ -339,7 +337,6 @@ if(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER AND MIPSOLVERS_BUILD_SCUC)
 endif()
 
 # ── Python bindings (pybind11) ────────────────────────────────────────────────
-option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings" OFF)
 if(MIPSOLVERS_BUILD_PYTHON)
   # Locate the Python interpreter + pybind11 installed into it.
   # Override with -DPYTHON_EXECUTABLE=/path/to/python3 if needed.

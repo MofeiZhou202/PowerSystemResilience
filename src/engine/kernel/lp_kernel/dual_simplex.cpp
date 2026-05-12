@@ -87,6 +87,14 @@ extern "C" {
 
 #include "mipsolvers/core/logging.hpp"
 
+#if defined(_MSC_VER)
+#define MIPSOLVERS_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+#define MIPSOLVERS_RESTRICT __restrict__
+#else
+#define MIPSOLVERS_RESTRICT
+#endif
+
 #ifndef MIPSOLVERS_ENABLE_FACTOR_BACKEND_B
 #define MIPSOLVERS_ENABLE_FACTOR_BACKEND_B 0
 #endif
@@ -2749,9 +2757,9 @@ static inline void apply_eta_ftran(Eigen::VectorXd& z, const EtaVector& eta) {
   const double zr = z[eta.pivot_row];
   const double scale = zr / eta.pivot_value;
   const int n = static_cast<int>(eta.nz_idx.size());
-  const int* __restrict__ ix = eta.nz_idx.data();
-  const double* __restrict__ vl = eta.nz_val.data();
-  double* __restrict__ zd = z.data();
+  const int* MIPSOLVERS_RESTRICT ix = eta.nz_idx.data();
+  const double* MIPSOLVERS_RESTRICT vl = eta.nz_val.data();
+  double* MIPSOLVERS_RESTRICT zd = z.data();
   for (int k = 0; k < n; ++k) {
     zd[ix[k]] -= scale * vl[k];
   }
@@ -2761,9 +2769,9 @@ static inline void apply_eta_ftran(Eigen::VectorXd& z, const EtaVector& eta) {
 static inline void apply_eta_btran(Eigen::VectorXd& z, const EtaVector& eta) {
   double dot_other = 0.0;
   const int n = static_cast<int>(eta.nz_idx.size());
-  const int* __restrict__ ix = eta.nz_idx.data();
-  const double* __restrict__ vl = eta.nz_val.data();
-  const double* __restrict__ zd = z.data();
+  const int* MIPSOLVERS_RESTRICT ix = eta.nz_idx.data();
+  const double* MIPSOLVERS_RESTRICT vl = eta.nz_val.data();
+  const double* MIPSOLVERS_RESTRICT zd = z.data();
   for (int k = 0; k < n; ++k) {
     dot_other += vl[k] * zd[ix[k]];
   }

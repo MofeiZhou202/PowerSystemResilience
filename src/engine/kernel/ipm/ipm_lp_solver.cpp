@@ -17,15 +17,26 @@
 #include <Eigen/SparseCholesky>
 
 #if defined(HACDCPF_HAVE_ACCELERATE) && defined(__APPLE__)
+#define MIPSOLVERS_USE_ACCELERATE 1
 #include <Accelerate/Accelerate.h>
+#else
+#define MIPSOLVERS_USE_ACCELERATE 0
 #endif
 
-// ARM NEON SIMD for Apple M-series and ARM64
-#if defined(__aarch64__) || defined(_M_ARM64)
+// ARM NEON SIMD for compilers that provide arm_neon.h.
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)
 #include <arm_neon.h>
 #define USE_NEON 1
 #else
 #define USE_NEON 0
+#endif
+
+#if defined(_MSC_VER)
+#define MIPSOLVERS_RESTRICT __restrict
+#elif defined(__GNUC__) || defined(__clang__)
+#define MIPSOLVERS_RESTRICT __restrict__
+#else
+#define MIPSOLVERS_RESTRICT
 #endif
 
 namespace mipsolvers::engine {
@@ -34,7 +45,7 @@ namespace mipsolvers::engine {
 // to reuse symbolic factorization when the sparsity pattern is unchanged
 // (e.g. repeated node LP solves in B&C with same constraint matrix).
 struct AccelSparseCache {
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   SparseOpaqueSymbolicFactorization symbolic{};
   std::vector<long> col_starts;
   int cached_m = 0;
@@ -62,8 +73,8 @@ constexpr size_t kDenseScatterThreshold = 4'000'000;  // switch to dense BLAS wh
 #if USE_NEON
 
 // y[j] = a[j] * b[j] + c[j]  (fused multiply-add)
-inline void simd_fma(const double* __restrict__ a, const double* __restrict__ b,
-                     const double* __restrict__ c, double* __restrict__ y, int n) {
+inline void simd_fma(const double* MIPSOLVERS_RESTRICT a, const double* MIPSOLVERS_RESTRICT b,
+                     const double* MIPSOLVERS_RESTRICT c, double* MIPSOLVERS_RESTRICT y, int n) {
   int j = 0;
   for (; j + 4 <= n; j += 4) {
     float64x2_t a0 = vld1q_f64(a + j);
@@ -81,7 +92,7 @@ inline void simd_fma(const double* __restrict__ a, const double* __restrict__ b,
 }
 
 // y[j] += a * x[j]
-inline void simd_axpy(double a, const double* __restrict__ x, double* __restrict__ y, int n) {
+inline void simd_axpy(double a, const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y, int n) {
   float64x2_t va = vdupq_n_f64(a);
   int j = 0;
   for (; j + 4 <= n; j += 4) {
@@ -98,7 +109,7 @@ inline void simd_axpy(double a, const double* __restrict__ x, double* __restrict
 }
 
 // y[j] = max(y[j] + a * x[j], minval)
-inline void simd_axpy_max(double a, const double* __restrict__ x, double* __restrict__ y, 
+inline void simd_axpy_max(double a, const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y,
                            double minval, int n) {
   float64x2_t va = vdupq_n_f64(a);
   float64x2_t vmin = vdupq_n_f64(minval);
@@ -117,8 +128,8 @@ inline void simd_axpy_max(double a, const double* __restrict__ x, double* __rest
 }
 
 // y[j] = max(a[j] - b[j], minval)
-inline void simd_sub_max(const double* __restrict__ a, const double* __restrict__ b,
-                         double* __restrict__ y, double minval, int n) {
+inline void simd_sub_max(const double* MIPSOLVERS_RESTRICT a, const double* MIPSOLVERS_RESTRICT b,
+                         double* MIPSOLVERS_RESTRICT y, double minval, int n) {
   float64x2_t vmin = vdupq_n_f64(minval);
   int j = 0;
   for (; j + 4 <= n; j += 4) {
@@ -135,8 +146,8 @@ inline void simd_sub_max(const double* __restrict__ a, const double* __restrict_
 }
 
 // y[j] = max(a[j] - b[j], minval)
-inline void simd_rsub_max(const double* __restrict__ a, const double* __restrict__ b,
-                          double* __restrict__ y, double minval, int n) {
+inline void simd_rsub_max(const double* MIPSOLVERS_RESTRICT a, const double* MIPSOLVERS_RESTRICT b,
+                          double* MIPSOLVERS_RESTRICT y, double minval, int n) {
   float64x2_t vmin = vdupq_n_f64(minval);
   int j = 0;
   for (; j + 4 <= n; j += 4) {
@@ -177,7 +188,7 @@ struct BandScatterEntry { int offset; double a_prod; };
 // In-place banded Cholesky factorization (lower triangle, column-major band storage)
 // band layout: band[k * m + col] = L[col+k, col] for k = 0..bw
 // Returns false if not positive definite.
-inline bool banded_chol_factor(double* __restrict__ band, int m, int bw) {
+inline bool banded_chol_factor(double* MIPSOLVERS_RESTRICT band, int m, int bw) {
   for (int j = 0; j < m; ++j) {
     // Compute L[j,j]
     double djj = band[j];  // band[0*m + j]
@@ -208,7 +219,7 @@ inline bool banded_chol_factor(double* __restrict__ band, int m, int bw) {
 }
 
 // Solve L * L^T * x = b in-place (b is overwritten with x)
-inline void banded_chol_solve(const double* __restrict__ band, int m, int bw, double* __restrict__ b) {
+inline void banded_chol_solve(const double* MIPSOLVERS_RESTRICT band, int m, int bw, double* MIPSOLVERS_RESTRICT b) {
   // Forward: L y = b
   for (int j = 0; j < m; ++j) {
     for (int k = std::max(0, j - bw); k < j; ++k) {
@@ -345,7 +356,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // === SpMV operations ===
   // y -= Ae * x  (CSR-based: sequential y writes)
-  auto ae_mul_sub = [&](const double* __restrict__ x, double* __restrict__ y) {
+  auto ae_mul_sub = [&](const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y) {
     for (int i = 0; i < mi; ++i) {
       double s = x[n_orig + i];
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
@@ -361,7 +372,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   };
 
   // y = Ae' * w  (CSC-based: gather from w, natural for CSC)
-  auto aet_mul = [&](const double* __restrict__ w, double* __restrict__ y) {
+  auto aet_mul = [&](const double* MIPSOLVERS_RESTRICT w, double* MIPSOLVERS_RESTRICT y) {
     for (int j = 0; j < n_orig; ++j) {
       double s = 0.0;
       for (int p = A_o[j]; p < A_o[j + 1]; ++p)
@@ -376,8 +387,8 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   };
 
   // Merged: r_p = b - Ae*x, r_d = c - Ae'*y (single CSC pass)
-  auto compute_residuals = [&](const double* __restrict__ xv, const double* __restrict__ yv,
-                               double* __restrict__ rp, double* __restrict__ rd) {
+  auto compute_residuals = [&](const double* MIPSOLVERS_RESTRICT xv, const double* MIPSOLVERS_RESTRICT yv,
+                               double* MIPSOLVERS_RESTRICT rp, double* MIPSOLVERS_RESTRICT rd) {
     std::memcpy(rp, b.data(), sizeof(double) * m);
     std::memcpy(rd, c.data(), sizeof(double) * nn);
     for (int j = 0; j < n_orig; ++j) {
@@ -435,7 +446,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
 
   // === Sparse path — normal equations N = Ae·Θ·Ae' ===
   Eigen::SparseMatrix<double> N_sparse;
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   std::vector<long> accel_col_starts;
   SparseOpaqueSymbolicFactorization accel_symbolic{};
   SparseOpaqueFactorization_Double accel_numeric{};
@@ -590,13 +601,13 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         const int* pos = std::lower_bound(Ni + No[i], Ni + No[i + 1], i);
         sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
       }
-#if !defined(HACDCPF_HAVE_ACCELERATE)
+#if !MIPSOLVERS_USE_ACCELERATE
       ldlt.analyzePattern(N_sparse);
 #endif
     }
   }
 
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   // Apple Accelerate sparse Cholesky setup (after N_sparse is built).
   // Helper lambdas to create Apple Sparse wrappers around N_sparse data.
   auto make_apple_structure = [&]() {
@@ -658,7 +669,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   double* zu_d = zu.data();
 
   // ae_mul for init (CSR-based)
-  auto ae_mul = [&](const double* __restrict__ x, double* __restrict__ y) {
+  auto ae_mul = [&](const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y) {
     for (int i = 0; i < mi; ++i) {
       double s = x[n_orig + i];
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
@@ -737,7 +748,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
         std::fill(yv.begin(), yv.end(), 0.0);
       }
     } else {
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
       SparseOpaqueFactorization_Double init_fac = SparseFactor(accel_symbolic, make_apple_matrix());
       if (init_fac.status == SparseStatusOK) {
         // x_init = Ae' * (N \ b)
@@ -883,7 +894,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     auto t_ff2 = tnow();
     t_fill += std::chrono::duration<double, std::milli>(t_ff2 - t_ff).count();
     // N = Ae_sqrt * Ae_sqrt'  (symmetric rank-nn update = Ae * diag(theta) * Ae')
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     // Use Accelerate cblas_dsyrk for full BLAS performance (>100 GFLOPS on M4).
     // Fills only the lower triangle; Eigen::LDLT<MatrixXd> reads only lower by default.
     N_dense.setZero();
@@ -915,7 +926,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
     for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += reg;
     auto t_ff2 = tnow();
     t_fill += std::chrono::duration<double, std::milli>(t_ff2 - t_ff).count();
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     SparseMatrix_Double apple_N = make_apple_matrix();
     if (accel_numeric_valid) {
       SparseRefactor(apple_N, &accel_numeric);
@@ -942,7 +953,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
       Eigen::Map<Eigen::VectorXd> dy_map(dy_buf, m);
       dy_map = ldlt_dense.solve(rhs_map);
     } else {
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
       std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
       DenseVector_Double xb{};
       xb.count = m;
@@ -1032,7 +1043,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
           // Re-fill sparse normal equations with extra diagonal reg
           double* Nv = N_sparse.valuePtr();
           for (int i = 0; i < m; ++i) Nv[sparse_diag_offsets[i]] += dyn_reg;
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
           SparseMatrix_Double apple_N = make_apple_matrix();
           if (accel_numeric_valid) {
             SparseRefactor(apple_N, &accel_numeric);
@@ -1206,7 +1217,7 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   }
 
   // === Extract solution ===
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   if (!use_banded && !use_dense && accel_numeric_valid) {
     SparseCleanup(accel_numeric);
   }
@@ -1318,7 +1329,7 @@ struct NativeIPMLPAdapter::CachedState {
   std::vector<int> sparse_diag_offsets;
   int sparse_n_nnz = 0;
 
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   std::vector<long> accel_col_starts;
   SparseOpaqueSymbolicFactorization accel_symbolic{};
   bool accel_symbolic_valid = false;
@@ -1335,7 +1346,7 @@ struct NativeIPMLPAdapter::CachedState {
   LPModel base_lp_copy;
 
   ~CachedState() {
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     if (accel_symbolic_valid) SparseCleanup(accel_symbolic);
 #endif
   }
@@ -1516,7 +1527,7 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
       cs->sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
     }
 
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     const int* No2 = cs->N_sparse.outerIndexPtr();
     cs->accel_col_starts.resize(m + 1);
     for (int i = 0; i <= m; ++i)
@@ -1571,7 +1582,7 @@ void NativeIPMLPAdapter::prepare_for_node_solves(const LPModel& base_lp) {
     }
 
     // Factorize and solve
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     SparseMatrixStructure ds{};
     ds.rowCount = m;
     ds.columnCount = m;
@@ -1700,7 +1711,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   const auto& Aeq_rv = cs.Aeq_rv;
 
   // SpMV lambdas (use cached CSR/CSC)
-  auto ae_mul_sub = [&](const double* __restrict__ x, double* __restrict__ y) {
+  auto ae_mul_sub = [&](const double* MIPSOLVERS_RESTRICT x, double* MIPSOLVERS_RESTRICT y) {
     for (int i = 0; i < mi; ++i) {
       double s = x[n_orig + i];
       for (int p = A_rp[i]; p < A_rp[i + 1]; ++p)
@@ -1715,7 +1726,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     }
   };
 
-  auto aet_mul = [&](const double* __restrict__ w, double* __restrict__ y) {
+  auto aet_mul = [&](const double* MIPSOLVERS_RESTRICT w, double* MIPSOLVERS_RESTRICT y) {
     for (int j = 0; j < n_orig; ++j) {
       double s = 0.0;
       for (int p = A_o[j]; p < A_o[j + 1]; ++p)
@@ -1728,8 +1739,8 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     for (int i = 0; i < mi; ++i) y[n_orig + i] = w[i];
   };
 
-  auto compute_residuals = [&](const double* __restrict__ xv, const double* __restrict__ yv,
-                               double* __restrict__ rp, double* __restrict__ rd) {
+  auto compute_residuals = [&](const double* MIPSOLVERS_RESTRICT xv, const double* MIPSOLVERS_RESTRICT yv,
+                               double* MIPSOLVERS_RESTRICT rp, double* MIPSOLVERS_RESTRICT rd) {
     std::memcpy(rp, b_vec.data(), sizeof(double) * m);
     std::memcpy(rd, c_vec.data(), sizeof(double) * nn);
     for (int j = 0; j < n_orig; ++j) {
@@ -1880,7 +1891,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
 
   // For sparse path, we need mutable N_sparse values
   Eigen::SparseMatrix<double> N_local;
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   std::vector<long> accel_col_starts_local;
   SparseOpaqueFactorization_Double accel_numeric{};
   bool accel_numeric_valid = false;
@@ -1889,7 +1900,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
 #endif
   if (!use_banded) {
     N_local = cs.N_sparse;  // copy structure + values (values will be overwritten)
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     accel_col_starts_local = cs.accel_col_starts;
 #else
     ldlt_local.analyzePattern(N_local);
@@ -1921,7 +1932,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
     }
     for (int i = 0; i < mi; ++i) Nv[cs.sparse_diag_offsets[i]] += theta_d[n_orig + i];
     for (int i = 0; i < m; ++i) Nv[cs.sparse_diag_offsets[i]] += reg;
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
     SparseMatrixStructure s_struct{};
     s_struct.rowCount = m;
     s_struct.columnCount = m;
@@ -1954,7 +1965,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
       std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
       banded_chol_solve(band_work.data(), m, bw, dy_buf);
     } else {
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
       std::memcpy(dy_buf, rhs_buf, sizeof(double) * m);
       DenseVector_Double xb{};
       xb.count = m;
@@ -2030,7 +2041,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
         } else {
           double* Nv = N_local.valuePtr();
           for (int i = 0; i < m; ++i) Nv[cs.sparse_diag_offsets[i]] += dyn_reg;
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
           SparseMatrixStructure s_struct{};
           s_struct.rowCount = m;
           s_struct.columnCount = m;
@@ -2175,7 +2186,7 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
   }
 
   // Cleanup
-#if defined(HACDCPF_HAVE_ACCELERATE)
+#if MIPSOLVERS_USE_ACCELERATE
   if (!use_banded && accel_numeric_valid) SparseCleanup(accel_numeric);
 #endif
 

@@ -2,18 +2,16 @@
 # All dependencies resolved locally — no network downloads.
 # HiGHS, SCIP, and Ipopt are compiled from the local source directories.
 
-# ── Optional external solver executables ─────────────────────────────────────
-find_program(MIPSOLVERS_HIGHS_EXECUTABLE
-  NAMES highs
-  HINTS /opt/homebrew/bin /usr/local/bin /usr/bin)
-
-find_program(MIPSOLVERS_IPOPT_EXECUTABLE
-  NAMES ipopt
-  HINTS /opt/homebrew/bin /usr/local/bin /usr/bin)
-
-find_program(MIPSOLVERS_SCIP_EXECUTABLE
-  NAMES scip
-  HINTS /opt/homebrew/bin /usr/local/bin /usr/bin)
+foreach(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE
+    MIPSOLVERS_HIGHS_EXECUTABLE
+    MIPSOLVERS_IPOPT_EXECUTABLE
+    MIPSOLVERS_SCIP_EXECUTABLE
+    MIPSOLVERS_IPOPT_INCLUDE_DIR
+    MIPSOLVERS_IPOPT_LIBRARY)
+  unset(${_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE} CACHE)
+  unset(${_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE})
+endforeach()
+unset(_MIPSOLVERS_FORBIDDEN_SOLVER_CACHE)
 
 # ── HiGHS in-process library ─────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_HIGHS_LIB OFF)
@@ -97,6 +95,13 @@ if(NOT MIPSOLVERS_HAVE_HIGHS_LIB AND
   endif()
 endif()
 
+if(MIPSOLVERS_BUILD_EMBEDDED_HIGHS AND NOT MIPSOLVERS_HAVE_HIGHS_LIB)
+  message(FATAL_ERROR
+    "MIPSOLVERS_BUILD_EMBEDDED_HIGHS=ON, but no embedded HiGHS target was "
+    "created from highs/ or HiGHS/. This project must use the customized "
+    "in-repository HiGHS source; system HiGHS is not used.")
+endif()
+
 # ── SCIP in-process library ───────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_SCIP_LIB OFF)
 set(MIPSOLVERS_SCIP_LIB_SOURCE "none")
@@ -116,10 +121,24 @@ if(MIPSOLVERS_BUILD_EMBEDDED_SCIP AND
   endif()
 endif()
 
+if(MIPSOLVERS_BUILD_EMBEDDED_SCIP AND NOT MIPSOLVERS_HAVE_SCIP_LIB)
+  message(FATAL_ERROR
+    "MIPSOLVERS_BUILD_EMBEDDED_SCIP=ON, but no embedded SCIP target was "
+    "created from scip/. This project must use the customized in-repository "
+    "SCIP source; system SCIP is not used.")
+endif()
+
 # ── Ipopt NLP solver ──────────────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_IPOPT OFF)
+if(APPLE)
+  set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT ON)
+else()
+  set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT OFF)
+endif()
 option(MIPSOLVERS_BUILD_LOCAL_IPOPT
-  "Build embedded Ipopt source (ipopt/) instead of using system Ipopt" ON)
+  "Build embedded Ipopt source (ipopt/) from this repository"
+  ${_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT})
+unset(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT)
 
 if(MIPSOLVERS_BUILD_LOCAL_IPOPT AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ipopt/Interfaces/IpIpoptApplication.hpp" AND
@@ -137,21 +156,14 @@ if(MIPSOLVERS_BUILD_LOCAL_IPOPT AND
   endif()
 endif()
 
-if(NOT MIPSOLVERS_HAVE_IPOPT)
-  # Fall back to system/homebrew Ipopt
-  find_path(MIPSOLVERS_IPOPT_INCLUDE_DIR NAMES IpIpoptApplication.hpp
-    HINTS /opt/homebrew /usr/local /usr
-    PATH_SUFFIXES include/coin-or coin-or include)
-  find_library(MIPSOLVERS_IPOPT_LIBRARY NAMES ipopt
-    HINTS /opt/homebrew /usr/local /usr PATH_SUFFIXES lib)
-  if(MIPSOLVERS_IPOPT_INCLUDE_DIR AND MIPSOLVERS_IPOPT_LIBRARY)
-    set(MIPSOLVERS_HAVE_IPOPT ON)
-    set(MIPSOLVERS_IPOPT_INCLUDE_DIRS ${MIPSOLVERS_IPOPT_INCLUDE_DIR})
-    set(MIPSOLVERS_IPOPT_LIBRARIES ${MIPSOLVERS_IPOPT_LIBRARY})
-    message(STATUS "mipsolvers: Ipopt detected (system): ${MIPSOLVERS_IPOPT_LIBRARY}")
-  else()
-    message(STATUS "mipsolvers: Ipopt not detected; building adapter without TNLP bridge")
-  endif()
+if(MIPSOLVERS_BUILD_LOCAL_IPOPT AND NOT MIPSOLVERS_HAVE_IPOPT)
+  message(FATAL_ERROR
+    "MIPSOLVERS_BUILD_LOCAL_IPOPT=ON, but embedded Ipopt was not built from "
+    "ipopt/. This project must use the customized in-repository Ipopt source; "
+    "system Ipopt is not used.")
+elseif(NOT MIPSOLVERS_BUILD_LOCAL_IPOPT)
+  message(STATUS
+    "mipsolvers: embedded Ipopt disabled; TNLP bridge will be unavailable")
 endif()
 
 # ── Gurobi (optional, detect only) ───────────────────────────────────────────
@@ -160,13 +172,17 @@ set(MIPSOLVERS_GUROBI_INCLUDE_DIRS "")
 set(MIPSOLVERS_GUROBI_LIBRARIES "")
 find_path(MIPSOLVERS_GUROBI_INCLUDE_DIR NAMES gurobi_c.h
   HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-        /opt/gurobi/macos_universal2 ENV GUROBI_HOME
+        /opt/gurobi/macos_universal2
+        "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
+        $ENV{GUROBI_HOME}
   PATH_SUFFIXES include)
-foreach(_grb_ver 130 120 110 100)
+foreach(_grb_ver 130 120 110 100 95)
   if(NOT MIPSOLVERS_GUROBI_LIBRARY)
     find_library(MIPSOLVERS_GUROBI_LIBRARY NAMES gurobi${_grb_ver}
       HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-            /opt/gurobi/macos_universal2 ENV GUROBI_HOME
+            /opt/gurobi/macos_universal2
+            "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
+            $ENV{GUROBI_HOME}
       PATH_SUFFIXES lib)
   endif()
 endforeach()
@@ -184,7 +200,12 @@ if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
 set(MIPSOLVERS_HAVE_PAPILO OFF)
-find_package(papilo CONFIG QUIET HINTS /opt/homebrew /opt/homebrew/lib/cmake/papilo)
+find_package(papilo CONFIG QUIET
+  HINTS
+    $ENV{PAPILO_ROOT}
+    /opt/homebrew
+    /opt/homebrew/lib/cmake/papilo
+    "C:/vcpkg/installed/x64-windows")
 if(papilo_FOUND)
   set(MIPSOLVERS_HAVE_PAPILO ON)
   message(STATUS "mipsolvers: PaPILO detected")
@@ -200,7 +221,15 @@ set(MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS "")
 set(MIPSOLVERS_SUITESPARSE_LIBRARIES "")
 option(MIPSOLVERS_USE_SUITESPARSE "Enable SuiteSparse backends when available" ON)
 if(MIPSOLVERS_USE_SUITESPARSE)
-  set(_SS_HINTS /opt/homebrew/opt/suite-sparse /opt/homebrew /usr/local/opt/suite-sparse /usr/local /usr)
+  set(_SS_HINTS
+    $ENV{SUITESPARSE_ROOT}
+    /opt/homebrew/opt/suite-sparse
+    /opt/homebrew
+    /usr/local/opt/suite-sparse
+    /usr/local
+    /usr
+    "C:/vcpkg/installed/x64-windows"
+    "C:/SuiteSparse")
   find_path(MIPSOLVERS_SUITESPARSE_INCLUDE_DIR NAMES umfpack.h klu.h
     HINTS ${_SS_HINTS} PATH_SUFFIXES include include/suitesparse)
   find_library(MIPSOLVERS_UMFPACK_LIBRARY NAMES umfpack HINTS ${_SS_HINTS} PATH_SUFFIXES lib)
@@ -352,9 +381,6 @@ if(MIPSOLVERS_BUILD_TESTS)
 endif()
 
 # ── Status messages ───────────────────────────────────────────────────────────
-message(STATUS "mipsolvers: HiGHS exe        = ${MIPSOLVERS_HIGHS_EXECUTABLE}")
-message(STATUS "mipsolvers: Ipopt exe         = ${MIPSOLVERS_IPOPT_EXECUTABLE}")
-message(STATUS "mipsolvers: SCIP exe          = ${MIPSOLVERS_SCIP_EXECUTABLE}")
 message(STATUS "mipsolvers: HiGHS lib         = ${MIPSOLVERS_HAVE_HIGHS_LIB} (${MIPSOLVERS_HIGHS_LIB_SOURCE})")
 message(STATUS "mipsolvers: SCIP lib          = ${MIPSOLVERS_HAVE_SCIP_LIB} (${MIPSOLVERS_SCIP_LIB_SOURCE})")
 message(STATUS "mipsolvers: Gurobi            = ${MIPSOLVERS_HAVE_GUROBI}")

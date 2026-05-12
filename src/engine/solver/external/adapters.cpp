@@ -19,6 +19,22 @@
 #include "mipsolvers/core/string_utils.hpp"
 #include "mipsolvers/engine/util/problem_validation.hpp"
 
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+#include "Highs.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#endif
+
 #ifdef HACDCPF_HAVE_IPOPT
 #include "IpIpoptApplication.hpp"
 #include "IpTNLP.hpp"
@@ -54,25 +70,10 @@ bool file_exists(const std::string& p) {
   return !p.empty() && fs::exists(fs::path(p));
 }
 
-std::string resolve_executable(const std::string& explicit_path,
-                               const char* env_name,
-                               const char* cmake_default) {
+std::string resolve_explicit_executable(const std::string& explicit_path) {
   if (!explicit_path.empty() && file_exists(explicit_path)) {
     return explicit_path;
   }
-
-  if (const char* env = std::getenv(env_name)) {
-    std::string v = trim(env);
-    if (!v.empty() && file_exists(v)) {
-      return v;
-    }
-  }
-
-  if (cmake_default && std::string(cmake_default).size() > 0 &&
-      std::string(cmake_default) != "NOTFOUND" && file_exists(cmake_default)) {
-    return std::string(cmake_default);
-  }
-
   return "";
 }
 
@@ -356,6 +357,220 @@ std::optional<std::string> parse_highs_model_status(const fs::path& sol_path) {
   }
   return std::nullopt;
 }
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+std::string highs_model_status_label(HighsModelStatus status) {
+  switch (status) {
+    case HighsModelStatus::kNotset:
+      return "notset";
+    case HighsModelStatus::kLoadError:
+      return "load_error";
+    case HighsModelStatus::kModelError:
+      return "model_error";
+    case HighsModelStatus::kPresolveError:
+      return "presolve_error";
+    case HighsModelStatus::kSolveError:
+      return "solve_error";
+    case HighsModelStatus::kPostsolveError:
+      return "postsolve_error";
+    case HighsModelStatus::kModelEmpty:
+      return "empty";
+    case HighsModelStatus::kOptimal:
+      return "optimal";
+    case HighsModelStatus::kInfeasible:
+      return "infeasible";
+    case HighsModelStatus::kUnboundedOrInfeasible:
+      return "unbounded_or_infeasible";
+    case HighsModelStatus::kUnbounded:
+      return "unbounded";
+    case HighsModelStatus::kObjectiveBound:
+      return "objective_bound";
+    case HighsModelStatus::kObjectiveTarget:
+      return "objective_target";
+    case HighsModelStatus::kTimeLimit:
+      return "time_limit";
+    case HighsModelStatus::kIterationLimit:
+      return "iteration_limit";
+    case HighsModelStatus::kUnknown:
+      return "unknown";
+    case HighsModelStatus::kSolutionLimit:
+      return "solution_limit";
+    case HighsModelStatus::kInterrupt:
+      return "interrupt";
+    case HighsModelStatus::kMemoryLimit:
+      return "memory_limit";
+    case HighsModelStatus::kHighsInterrupt:
+      return "highs_interrupt";
+  }
+  return "unknown";
+}
+
+bool highs_status_has_solution(HighsModelStatus status) {
+  return status == HighsModelStatus::kOptimal ||
+         status == HighsModelStatus::kTimeLimit ||
+         status == HighsModelStatus::kIterationLimit ||
+         status == HighsModelStatus::kSolutionLimit;
+}
+
+std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
+                                                        bool with_integer_markers,
+                                                        const std::string& solver_name) {
+  const auto t0 = std::chrono::steady_clock::now();
+  SolveResult out;
+  out.stats.solver_name = solver_name;
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    out.stats.status = vr.errors.empty() ? "Invalid model" : vr.errors.front();
+    return out;
+  }
+
+  const int ncols = static_cast<int>(prob.vars.size());
+  const int m_ineq = static_cast<int>(prob.A.rows());
+  const int m_eq = static_cast<int>(prob.Aeq.rows());
+  const int nrows = m_ineq + m_eq;
+  if (ncols == 0) {
+    out.stats.success = true;
+    out.stats.status = "HiGHS empty";
+    out.x = Eigen::VectorXd::Zero(0);
+    return out;
+  }
+
+  std::vector<double> col_cost(static_cast<std::size_t>(ncols), 0.0);
+  std::vector<double> col_lower(static_cast<std::size_t>(ncols), -kHighsInf);
+  std::vector<double> col_upper(static_cast<std::size_t>(ncols), kHighsInf);
+  std::vector<HighsInt> integrality(static_cast<std::size_t>(ncols),
+                                    static_cast<HighsInt>(HighsVarType::kContinuous));
+  for (int j = 0; j < ncols; ++j) {
+    const auto& var = prob.vars[static_cast<std::size_t>(j)];
+    col_cost[static_cast<std::size_t>(j)] = prob.c[j];
+    col_lower[static_cast<std::size_t>(j)] =
+        std::isfinite(var.lb) ? var.lb : -kHighsInf;
+    col_upper[static_cast<std::size_t>(j)] =
+        std::isfinite(var.ub) ? var.ub : kHighsInf;
+    if (with_integer_markers && var.type != VarType::Continuous) {
+      integrality[static_cast<std::size_t>(j)] =
+          static_cast<HighsInt>(HighsVarType::kInteger);
+    }
+  }
+
+  std::vector<double> row_lower(static_cast<std::size_t>(nrows), -kHighsInf);
+  std::vector<double> row_upper(static_cast<std::size_t>(nrows), kHighsInf);
+  for (int r = 0; r < m_ineq; ++r) {
+    const double lhs = lp_row_lhs_or_neg_inf(prob, r);
+    row_lower[static_cast<std::size_t>(r)] =
+        std::isfinite(lhs) ? lhs : -kHighsInf;
+    row_upper[static_cast<std::size_t>(r)] =
+        std::isfinite(prob.b[r]) ? prob.b[r] : kHighsInf;
+  }
+  for (int r = 0; r < m_eq; ++r) {
+    const int rr = m_ineq + r;
+    const double rhs = prob.beq[r];
+    row_lower[static_cast<std::size_t>(rr)] =
+        std::isfinite(rhs) ? rhs : (rhs < 0.0 ? -kHighsInf : kHighsInf);
+    row_upper[static_cast<std::size_t>(rr)] = row_lower[static_cast<std::size_t>(rr)];
+  }
+
+  std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
+  std::vector<HighsInt> index;
+  std::vector<double> value;
+  index.reserve(static_cast<std::size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros()));
+  value.reserve(index.capacity());
+  for (int j = 0; j < ncols; ++j) {
+    start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(it.row()));
+      value.push_back(it.value());
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(m_ineq + it.row()));
+      value.push_back(it.value());
+    }
+  }
+  start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
+
+  Highs highs;
+  highs.setOptionValue("output_flag", false);
+  highs.setOptionValue("log_to_console", false);
+  highs.setOptionValue("threads", 1);
+  if (with_integer_markers) {
+    highs.setOptionValue("mip_rel_gap", 1e-4);
+  }
+
+  const auto pass_status = highs.passModel(
+      static_cast<HighsInt>(ncols), static_cast<HighsInt>(nrows),
+      static_cast<HighsInt>(index.size()),
+      static_cast<HighsInt>(MatrixFormat::kColwise),
+      static_cast<HighsInt>(prob.sense == Sense::Maximize ? ObjSense::kMaximize
+                                                          : ObjSense::kMinimize),
+      0.0, col_cost.data(), col_lower.data(), col_upper.data(), row_lower.data(),
+      row_upper.data(), start.data(), index.data(), value.data(),
+      with_integer_markers ? integrality.data() : nullptr);
+  if (pass_status == HighsStatus::kError) {
+    out.stats.status = "HiGHS passModel failed";
+    return out;
+  }
+
+  const auto run_status = highs.run();
+  const HighsModelStatus model_status = highs.getModelStatus();
+  out.stats.status = "HiGHS " + highs_model_status_label(model_status);
+
+  const bool optimal = model_status == HighsModelStatus::kOptimal;
+  const bool feasible_with_limit =
+      highs_status_has_solution(model_status) && highs.getSolution().value_valid;
+  out.stats.success = optimal || feasible_with_limit;
+  if (!out.stats.success && run_status == HighsStatus::kError) {
+    out.stats.status = "HiGHS solve failed";
+    return out;
+  }
+
+  const HighsInfo& info = highs.getInfo();
+  out.stats.objective = info.objective_function_value;
+  out.stats.iterations = static_cast<int>(info.simplex_iteration_count +
+                                          info.ipm_iteration_count +
+                                          info.pdlp_iteration_count);
+  out.stats.primal_feas = info.max_primal_infeasibility;
+  out.stats.dual_feas = info.max_dual_infeasibility;
+  out.stats.residual_inf =
+      std::max(info.max_primal_infeasibility, info.max_dual_infeasibility);
+  if (with_integer_markers && std::isfinite(info.mip_gap)) {
+    out.stats.mip_gap = info.mip_gap;
+  }
+
+  const HighsSolution& sol = highs.getSolution();
+  if (static_cast<int>(sol.col_value.size()) >= ncols) {
+    out.x = Eigen::VectorXd::Zero(ncols);
+    for (int j = 0; j < ncols; ++j) {
+      out.x[j] = sol.col_value[static_cast<std::size_t>(j)];
+    }
+  }
+
+  if (!with_integer_markers &&
+      static_cast<int>(sol.row_dual.size()) >= nrows &&
+      static_cast<int>(sol.col_dual.size()) >= ncols) {
+    out.constraint_duals = Eigen::VectorXd::Zero(nrows);
+    for (int i = 0; i < nrows; ++i) {
+      out.constraint_duals[i] = sol.row_dual[static_cast<std::size_t>(i)];
+    }
+    out.box_dual_lb = Eigen::VectorXd::Zero(ncols);
+    out.box_dual_ub = Eigen::VectorXd::Zero(ncols);
+    for (int j = 0; j < ncols; ++j) {
+      const double dual = sol.col_dual[static_cast<std::size_t>(j)];
+      if (dual > 0.0) {
+        out.box_dual_lb[j] = dual;
+      } else if (dual < 0.0) {
+        out.box_dual_ub[j] = -dual;
+      }
+    }
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  return out;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Parse HiGHS solution file for variable values
@@ -774,6 +989,7 @@ bool write_minlp_as_scip_pip(const MINLPModel& prob,
   return true;
 }
 
+#ifndef HACDCPF_HAVE_SCIP_LIB
 struct ScipSolution {
   bool success{false};
   double objective{0.0};
@@ -795,8 +1011,10 @@ ScipSolution parse_scip_solution(const fs::path& sol_path) {
     if (t.rfind("solution status:", 0) == 0) {
       s.status = trim(t.substr(std::string("solution status:").size()));
       std::string l = s.status;
-      std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c) { return std::tolower(c); });
-      s.success = (l.find("optimal") != std::string::npos || l.find("feasible") != std::string::npos);
+      std::transform(l.begin(), l.end(), l.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      s.success = (l.find("optimal") != std::string::npos ||
+                   l.find("feasible") != std::string::npos);
     } else if (t.rfind("objective value:", 0) == 0) {
       const std::string v = trim(t.substr(std::string("objective value:").size()));
       try {
@@ -815,6 +1033,7 @@ ScipSolution parse_scip_solution(const fs::path& sol_path) {
 
   return s;
 }
+#endif
 
 #ifdef HACDCPF_HAVE_IPOPT
 class CallbackTNLP final : public Ipopt::TNLP {
@@ -1245,14 +1464,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
 }  // namespace
 
 HighsAdapter::HighsAdapter(std::string executable)
-    : executable_(resolve_executable(executable,
-                                     "HACDCPF_HIGHS_EXECUTABLE",
-#ifdef HACDCPF_HIGHS_EXECUTABLE
-                                     HACDCPF_HIGHS_EXECUTABLE
-#else
-                                     ""
-#endif
-                                         )) {}
+    : executable_(resolve_explicit_executable(executable)) {}
 
 std::string HighsAdapter::name() const {
   return "HiGHS";
@@ -1263,7 +1475,11 @@ bool HighsAdapter::supports(ProblemClass cls) const {
 }
 
 bool HighsAdapter::available() const {
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  return true;
+#else
   return !executable_.empty();
+#endif
 }
 
 const std::string& HighsAdapter::executable() const {
@@ -1272,8 +1488,13 @@ const std::string& HighsAdapter::executable() const {
 
 SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  if (auto embedded = solve_lp_with_embedded_highs(prob, false, name())) {
+    return *embedded;
+  }
+#endif
   if (!available()) {
-    return unavailable_result(name(), "HiGHS executable not found");
+    return unavailable_result(name(), "embedded HiGHS library not compiled");
   }
 
   const ValidationReport vr = validate(prob);
@@ -1363,10 +1584,6 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
 
 SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
-  if (!available()) {
-    return unavailable_result(name(), "HiGHS executable not found");
-  }
-
   const ValidationReport vr = validate(prob);
   if (!vr.valid) {
     return unavailable_result(name(), vr.errors.empty() ? "invalid MILP model" : vr.errors.front());
@@ -1380,6 +1597,15 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
     lp.vars[idx].type = VarType::Binary;
     lp.vars[idx].lb = std::max(0.0, lp.vars[idx].lb);
     lp.vars[idx].ub = std::min(1.0, lp.vars[idx].ub);
+  }
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  if (auto embedded = solve_lp_with_embedded_highs(lp, true, name())) {
+    return *embedded;
+  }
+#endif
+  if (!available()) {
+    return unavailable_result(name(), "embedded HiGHS library not compiled");
   }
 
   SolveResult out;
@@ -1480,24 +1706,10 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
 }
 
 IpoptAdapter::IpoptAdapter(std::string executable)
-    : executable_(resolve_executable(executable,
-                                     "HACDCPF_IPOPT_EXECUTABLE",
-#ifdef HACDCPF_IPOPT_EXECUTABLE
-                                     HACDCPF_IPOPT_EXECUTABLE
-#else
-                                     ""
-#endif
-                                         )) {}
+    : executable_(resolve_explicit_executable(executable)) {}
 
 ScipAdapter::ScipAdapter(std::string executable)
-  : executable_(resolve_executable(executable,
-                   "HACDCPF_SCIP_EXECUTABLE",
-#ifdef HACDCPF_SCIP_EXECUTABLE
-                   HACDCPF_SCIP_EXECUTABLE
-#else
-                   ""
-#endif
-                     )) {}
+  : executable_(resolve_explicit_executable(executable)) {}
 
 std::string IpoptAdapter::name() const {
   return "Ipopt";
@@ -1530,8 +1742,6 @@ const std::string& IpoptAdapter::executable() const {
 bool ScipAdapter::available() const {
 #ifdef HACDCPF_HAVE_SCIP_LIB
   return true;
-#elif defined(HACDCPF_SCIP_EXECUTABLE)
-  return true;
 #else
   return !executable_.empty();
 #endif
@@ -1553,7 +1763,7 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
   }
 
   if (!available()) {
-    out.stats.status = "Unavailable: SCIP executable not found";
+    out.stats.status = "Unavailable: embedded SCIP library not compiled";
     return out;
   }
 
@@ -1757,7 +1967,9 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
 }
 
 SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob) const {
+#ifdef HACDCPF_HAVE_IPOPT
   const auto t0 = std::chrono::steady_clock::now();
+#endif
   SolveResult out;
   out.stats.solver_name = name();
 
@@ -1811,12 +2023,12 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob) const {
   out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
   return out;
 #else
-  if (!available()) {
-    out.stats.status = "Unavailable: Ipopt executable not found";
+  if (executable_.empty()) {
+    out.stats.status = "Unavailable: embedded Ipopt TNLP bridge not compiled";
     return out;
   }
 
-  out.stats.status = "Unavailable: in-memory TNLP bridge not compiled (missing Ipopt C++ library)";
+  out.stats.status = "Unavailable: external Ipopt executable adapter is disabled by default; build embedded Ipopt";
   return out;
 #endif
 }

@@ -4,10 +4,10 @@
 #ifndef HCONFIG_H_
 #define HCONFIG_H_
 
-#if defined(_MSC_VER)
-#define HIGHS_HAVE_BITSCAN_REVERSE
-#elif defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #define HIGHS_HAVE_BUILTIN_CLZ
+#elif defined(_MSC_VER)
+#define HIGHS_HAVE_BITSCAN_REVERSE
 #endif
 
 #define HIGHS_GITHASH "vendored-from-dcc25308d"
