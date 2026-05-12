@@ -1365,7 +1365,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                     if (!std::isfinite(upper)) return false;
                     const HighsInt start =
                         static_cast<HighsInt>(cutset->ARindex_.size());
-                    std::map<int, double> merged_terms;
+                    std::unordered_map<int, double> merged_terms;
+                    merged_terms.reserve(indices.size());
                     for (std::size_t k = 0; k < indices.size(); ++k) {
                       const HighsInt col = indices[k];
                       const double val = values[k];

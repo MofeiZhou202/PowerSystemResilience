@@ -215,6 +215,15 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
     }
   }
 
+  // Build O(1) reverse lookup: auxiliary column → row.
+  sf.aux_col_to_row.assign(static_cast<std::size_t>(cols), -1);
+  for (int i = 0; i < m; ++i) {
+    if (sf.row_to_slack_col[i] >= 0)
+      sf.aux_col_to_row[static_cast<std::size_t>(sf.row_to_slack_col[i])] = i;
+    if (sf.row_to_surplus_col[i] >= 0)
+      sf.aux_col_to_row[static_cast<std::size_t>(sf.row_to_surplus_col[i])] = i;
+  }
+
   return sf;
 }
 
@@ -410,6 +419,15 @@ bool append_leq_rows_to_standard_form(
   out.A.setFromTriplets(triplets.begin(), triplets.end());
   out.A.makeCompressed();
   out.A_row = out.A;
+
+  // Build O(1) reverse lookup for the updated standard form.
+  out.aux_col_to_row.assign(static_cast<std::size_t>(new_n), -1);
+  for (int i = 0; i < new_m; ++i) {
+    if (out.row_to_slack_col[i] >= 0)
+      out.aux_col_to_row[static_cast<std::size_t>(out.row_to_slack_col[i])] = i;
+    if (out.row_to_surplus_col[i] >= 0)
+      out.aux_col_to_row[static_cast<std::size_t>(out.row_to_surplus_col[i])] = i;
+  }
   return true;
 }
 

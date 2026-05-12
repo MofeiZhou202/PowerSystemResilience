@@ -1424,18 +1424,18 @@ int reduced_cost_fixing(const std::vector<VariableMeta>& vars,
   const int n = static_cast<int>(vars.size());
   if (reduced_costs.size() < n) return 0;
 
-  // Build set of basic variable indices for O(1) lookup.
-  std::vector<char> is_basic(static_cast<size_t>(n), 0);
+  // Build a hash set of basic variable indices (size = #rows, not #vars).
+  // This avoids allocating an O(n) vector when only O(m) entries are basic.
+  std::unordered_set<int> basic_set;
+  basic_set.reserve(basis_indices.size());
   for (int idx : basis_indices) {
-    if (idx >= 0 && idx < n) {
-      is_basic[static_cast<size_t>(idx)] = 1;
-    }
+    if (idx >= 0 && idx < n) basic_set.insert(idx);
   }
 
   int fixed = 0;
   for (int j = 0; j < n; ++j) {
     if (!is_integer_type(vars[j])) continue;
-    if (is_basic[static_cast<size_t>(j)]) continue;
+    if (basic_set.count(j)) continue;
     if (std::abs(node_ub[j] - node_lb[j]) < 1e-9) continue;  // already fixed
 
     // HiGHS' MIP propagation consumes minimization-space `col_dual`.
@@ -6104,13 +6104,17 @@ bool propagate_node_domain_impl(
         }
         if (has_inf) return;
 
+        // Hoist ids buffer outside the inner loop to avoid per-entry heap
+        // allocation (the loop body runs once per non-zero in the row).
+        std::vector<int> ids;
         for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_row, r); it; ++it) {
           const int j = static_cast<int>(it.col());
           const double a = row_sign * it.value();
           if (std::abs(a) <= 1e-15) continue;
           const double contrib = (a > 0.0) ? a * node_lb[j] : a * node_ub[j];
           const double residual = rhs - (min_activity - contrib);
-          std::vector<int> ids;
+          // Reuse the ids buffer (clear, no deallocation).
+          ids.clear();
           for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator jt(A_row, r); jt; ++jt) {
             const int k = static_cast<int>(jt.col());
             const double ak = row_sign * jt.value();

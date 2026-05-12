@@ -101,6 +101,12 @@ int standard_form_aux_col_row(const StandardFormLP& sf, int col) {
   if (col < sf.n_original) {
     return -1;
   }
+  // Fast O(1) path when the reverse map has been populated.
+  if (!sf.aux_col_to_row.empty() && col < static_cast<int>(sf.aux_col_to_row.size())) {
+    return sf.aux_col_to_row[static_cast<std::size_t>(col)];
+  }
+  // Fallback O(m) linear scan (should only trigger for legacy StandardFormLP
+  // objects that were built without populating aux_col_to_row).
   const int m = static_cast<int>(sf.row_to_slack_col.size());
   for (int row = 0; row < m; ++row) {
     const std::size_t r = static_cast<std::size_t>(row);
@@ -115,7 +121,8 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
                                 int row,
                                 Eigen::VectorXd& cut_le,
                                 double& rhs_le,
-                                const std::shared_ptr<BasisOps>& sbasis) {
+                                const std::shared_ptr<BasisOps>& sbasis,
+                                const std::vector<char>* is_basic_hint = nullptr) {
   const int n_std = static_cast<int>(simplex.form.A.cols());
   const int n_orig = simplex.form.n_original;
   const int m = static_cast<int>(simplex.basis.indices.size());
@@ -171,12 +178,17 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
   if (!tableau_row.allFinite()) {
     return false;
   }
-  std::vector<char> is_basic(static_cast<size_t>(n_std), 0);
-  for (int idx : simplex.basis.indices) {
-    if (idx >= 0 && idx < n_std) {
-      is_basic[static_cast<size_t>(idx)] = 1;
+  std::vector<char> is_basic;
+  if (is_basic_hint && static_cast<int>(is_basic_hint->size()) == n_std) {
+    // Reuse pre-built hint to avoid per-cut O(m) allocation + fill.
+  } else {
+    is_basic.assign(static_cast<size_t>(n_std), 0);
+    for (int idx : simplex.basis.indices) {
+      if (idx >= 0 && idx < n_std) is_basic[static_cast<size_t>(idx)] = 1;
     }
+    is_basic_hint = &is_basic;
   }
+  const std::vector<char>& is_basic_ref = *is_basic_hint;
 
   Eigen::VectorXd std_cut = Eigen::VectorXd::Zero(n_std);
   bool has_term = false;
@@ -186,7 +198,7 @@ bool build_bounded_form_gmi_cut(const SimplexResult& simplex,
   double rhs_adjustment = 0.0;
 
   for (int j = 0; j < n_std; ++j) {
-    if (is_basic[static_cast<size_t>(j)]) {
+    if (is_basic_ref[static_cast<size_t>(j)]) {
       continue;
     }
 
@@ -300,7 +312,8 @@ bool build_bounded_form_mir_cut(const SimplexResult& simplex,
                                 [[maybe_unused]] const Eigen::VectorXd& x_lp,
                                 Eigen::VectorXd& cut_le,
                                 double& rhs_le,
-                                const std::shared_ptr<BasisOps>& sbasis) {
+                                const std::shared_ptr<BasisOps>& sbasis,
+                                const std::vector<char>* is_basic_hint = nullptr) {
   const int n_std = static_cast<int>(simplex.form.A.cols());
   const int n_orig = simplex.form.n_original;
   const int m = static_cast<int>(simplex.basis.indices.size());
@@ -324,11 +337,16 @@ bool build_bounded_form_mir_cut(const SimplexResult& simplex,
   }
   if (!tableau_row.allFinite()) return false;
 
-  // Identify basic/nonbasic status.
-  std::vector<char> is_basic(static_cast<size_t>(n_std), 0);
-  for (int idx : simplex.basis.indices) {
-    if (idx >= 0 && idx < n_std) is_basic[static_cast<size_t>(idx)] = 1;
+  // Identify basic/nonbasic status — reuse pre-built hint when available.
+  std::vector<char> is_basic_local;
+  if (!is_basic_hint || static_cast<int>(is_basic_hint->size()) != n_std) {
+    is_basic_local.assign(static_cast<size_t>(n_std), 0);
+    for (int idx : simplex.basis.indices) {
+      if (idx >= 0 && idx < n_std) is_basic_local[static_cast<size_t>(idx)] = 1;
+    }
+    is_basic_hint = &is_basic_local;
   }
+  const std::vector<char>& is_basic = *is_basic_hint;
 
   const bool has_at_upper = !simplex.basis.at_upper.empty();
   const bool has_var_ub = simplex.form.var_ub.size() == n_std;
@@ -371,7 +389,7 @@ bool build_bounded_form_mir_cut(const SimplexResult& simplex,
   double rhs_adjustment = 0.0;
 
   for (int j = 0; j < n_std; ++j) {
-    if (is_basic[static_cast<size_t>(j)]) continue;
+    if (is_basic[static_cast<size_t>(j)]) continue;  // NOLINT(readability)
 
     const bool j_at_upper = has_at_upper && simplex.basis.at_upper[static_cast<size_t>(j)];
     const bool j_comp = complemented[static_cast<size_t>(j)] != 0;
@@ -6238,10 +6256,20 @@ int add_basis_gomory_cuts(LPModel& lp,
   if (static_cast<int>(frac_rows.size()) > eval_limit)
     frac_rows.resize(static_cast<size_t>(eval_limit));
 
+  // Build is_basic once here and pass it down to avoid one O(n_std) allocation
+  // + fill per fractional row (can be hundreds per cut round).
+  const int n_std_gmi = static_cast<int>(simplex.form.A.cols());
+  std::vector<char> is_basic_cache(static_cast<size_t>(n_std_gmi), 0);
+  for (int idx : simplex.basis.indices) {
+    if (idx >= 0 && idx < n_std_gmi)
+      is_basic_cache[static_cast<size_t>(idx)] = 1;
+  }
+  const std::vector<char>* is_basic_ptr = &is_basic_cache;
+
   for (const auto& fr : frac_rows) {
     Eigen::VectorXd cut;
     double rhs = 0.0;
-    if (!build_bounded_form_gmi_cut(simplex, fr.row, cut, rhs, sbasis)) {
+    if (!build_bounded_form_gmi_cut(simplex, fr.row, cut, rhs, sbasis, is_basic_ptr)) {
       continue;
     }
     const double viol = cut.dot(x) - rhs;
@@ -7856,8 +7884,12 @@ int add_clique_cuts(LPModel& lp,
         }
       }
       if (!all_conflict) {
-        // Remove from pool and try next
-        pool.erase(std::remove(pool.begin(), pool.end(), best), pool.end());
+        // O(1) removal: swap rejected candidate to the end and shrink.
+        const auto it = std::find(pool.begin(), pool.end(), best);
+        if (it != pool.end()) {
+          *it = pool.back();
+          pool.pop_back();
+        }
         continue;
       }
 
@@ -8131,13 +8163,18 @@ int add_cuts(LPModel& lp,
   int budget = max_cuts;
   int total = 0;
 
+  // Build RowMajor view once so that compute_efficacy (called once per cut
+  // family) does not re-copy the full LP matrix each time.
+  Eigen::SparseMatrix<double, Eigen::RowMajor> efficacy_A_row = lp.A;
+
   // Helper to compute average efficacy of cuts added to LP rows [start_row, end_row).
   // Efficacy = violation / ||coeff|| where violation = coeff*x - rhs > 0.
-  // Since lp.A is ColMajor, we create a RowMajor view for efficient row iteration.
   auto compute_efficacy = [&](int start_row, int end_row) -> double {
     if (end_row <= start_row) return 0.0;
     const int n = static_cast<int>(x.size());
-    Eigen::SparseMatrix<double, Eigen::RowMajor> A_row = lp.A;
+    // Use a fresh RowMajor view when new rows were added since the last call.
+    if (efficacy_A_row.rows() != lp.A.rows()) efficacy_A_row = lp.A;
+    const auto& A_row = efficacy_A_row;
     double sum = 0.0;
     int count = 0;
     for (int i = start_row; i < end_row; ++i) {

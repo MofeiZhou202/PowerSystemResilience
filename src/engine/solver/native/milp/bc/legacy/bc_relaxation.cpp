@@ -445,18 +445,34 @@ bool highs_pass_lp_model(Highs& highs, const LPModel& lp) {
   index.reserve(static_cast<std::size_t>(lp.A.nonZeros() + lp.Aeq.nonZeros()));
   value.reserve(index.capacity());
 
-  const Eigen::SparseMatrix<double, Eigen::ColMajor> A_col(lp.A);
-  const Eigen::SparseMatrix<double, Eigen::ColMajor> Aeq_col(lp.Aeq);
+  // Avoid an O(nnz) copy when the matrices are already in compressed ColMajor
+  // format (the default for Eigen::SparseMatrix<double>).  Only copy when
+  // compression is required, which is rare after normal matrix assembly.
+  const Eigen::SparseMatrix<double>* A_ptr = &lp.A;
+  const Eigen::SparseMatrix<double>* Aeq_ptr = &lp.Aeq;
+  Eigen::SparseMatrix<double> A_compressed, Aeq_compressed;
+  if (!lp.A.isCompressed()) {
+    A_compressed = lp.A;
+    A_compressed.makeCompressed();
+    A_ptr = &A_compressed;
+  }
+  if (!lp.Aeq.isCompressed()) {
+    Aeq_compressed = lp.Aeq;
+    Aeq_compressed.makeCompressed();
+    Aeq_ptr = &Aeq_compressed;
+  }
+  const auto& A_col = *A_ptr;
+  const auto& Aeq_col = *Aeq_ptr;
   for (int j = 0; j < ncols; ++j) {
     start[static_cast<std::size_t>(j)] =
         static_cast<HighsInt>(index.size());
-    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(A_col, j);
+    for (Eigen::SparseMatrix<double>::InnerIterator it(A_col, j);
          it; ++it) {
       if (it.value() == 0.0) continue;
       index.push_back(static_cast<HighsInt>(it.row()));
       value.push_back(it.value());
     }
-    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(Aeq_col, j);
+    for (Eigen::SparseMatrix<double>::InnerIterator it(Aeq_col, j);
          it; ++it) {
       if (it.value() == 0.0) continue;
       index.push_back(static_cast<HighsInt>(m_ineq + it.row()));

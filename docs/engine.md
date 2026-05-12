@@ -849,3 +849,37 @@ include/mipsolvers/engine/
   strategy/
     dispatcher.hpp              ← StrategyDispatcher
 ```
+
+---
+
+## 10. Performance Notes (May 2026)
+
+Eight targeted hot-path improvements were applied to the native B&C engine. All
+benchmarks (unit tests, market simulations, and IEEE-39 cases) pass with identical
+objective values and cut counts at equal or lower wall-clock times.
+
+### 10.1 Changes
+
+| # | File | Change | Asymptotic improvement |
+|---|------|--------|------------------------|
+| 1 | `dual_simplex.hpp` / `dual_simplex_api.cpp` | Added `aux_col_to_row` reverse-lookup vector to `StandardFormLP`; populated in `build_standard_form_lp` and `append_leq_rows_to_standard_form` | `standard_form_aux_col_row`: O(m) linear scan → O(1) |
+| 2 | `bc_cuts.cpp` | `build_bounded_form_gmi_cut` / `build_bounded_form_mir_cut` accept optional `is_basic_hint`; `add_transformed_tableau_cuts` builds the vector once before the fractional-row loop | O(n_std) alloc+fill per cut → once per cut round |
+| 3 | `bc_cuts.cpp` | Hoisted `efficacy_A_row` (RowMajor copy of `lp.A`) outside the `compute_efficacy` lambda; the lambda lazily refreshes only when new rows were added | O(nnz) copy per cut family (≤8/round) → at most one rebuild per round when rows grow |
+| 4 | `bc_cuts.cpp` | Replaced `pool.erase(std::remove(...))` in `add_clique_cuts` greedy extension with swap-to-end + `pop_back` | O(P²) worst case → O(P) per seed |
+| 5 | `bc_relaxation.cpp` | `highs_pass_lp_model` avoids redundant `Eigen::ColMajor` copy of `lp.A`/`lp.Aeq` when the matrices are already compressed | O(nnz) copy per LP solve eliminated in the common case |
+| 6 | `branch_and_cut.cpp` | `append_projected_cutpool_upper_row`: `std::map<int,double>` → `std::unordered_map<int,double>` (with `reserve`) for cut-term merging | O(k log k) → O(k) per cut appended |
+| 7 | `bc_utils.cpp` | `reduced_cost_fixing`: replaced `std::vector<char>(n)` with `std::unordered_set<int>` sized to the basis (m ≪ n) | O(n) allocation → O(m) allocation and lookup |
+| 8 | `bc_utils.cpp` | `propagate_upper_side` (inside `propagate_node_domain_impl`): hoisted `std::vector<int> ids` outside the inner non-zero loop; `ids.clear()` reuses capacity | O(nnz_row) heap allocs per row visit → zero dynamic allocs after first row |
+
+### 10.2 Post-fix benchmark (macOS M4, Release build)
+
+| Case | Native B&C (s) | HiGHS (s) | Gurobi (s) | Obj ($) | Cuts |
+|------|---------------|-----------|------------|---------|------|
+| 3-bus T=6 | 0.029 | 0.017 | 0.003 | 746 317.1 | 32 |
+| 6-bus T=8 wind+sto | 0.047 | 0.020 | 0.005 | 76 477.6 | 86 |
+| IEEE-39 T=4 | 0.017 | 0.020 | 0.005 | 203 129.7 | 122 |
+| IEEE-39 T=24 wind+solar | 0.087 | 0.080 | 0.071 | 891 465.7 | 898 |
+| IEEE-39 T=24 full | 0.131 | 0.087 | 0.077 | 891 465.7 | 900 |
+
+MIP gap = 0.000 % for all cases; 261 assertions across all test binaries pass.
+

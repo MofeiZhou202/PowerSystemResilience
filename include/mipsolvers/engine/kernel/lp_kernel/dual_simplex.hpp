@@ -283,6 +283,11 @@ struct StandardFormLP {
   std::vector<int> row_to_artificial_col;
   std::vector<int> row_to_slack_col;
   std::vector<int> row_to_surplus_col;
+  // Reverse lookup: aux_col_to_row[col] = row if col is the slack/surplus for
+  // that row, -1 otherwise.  Populated by build_standard_form_lp and
+  // append_leq_rows_to_standard_form for O(1) aux-column→row queries.
+  // Size = A.cols(); indices 0..n_original-1 are always -1.
+  std::vector<int> aux_col_to_row;
   std::vector<int> row_sign;    // +1 or -1: sign flip applied at construction
   // Bound value used to form each standard-form RHS before lb_shift:
   //   row_sign * (row_rhs_value - A_i * lb_shift).
