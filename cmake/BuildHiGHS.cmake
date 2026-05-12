@@ -43,6 +43,13 @@ set(BUILD_TESTING OFF)   # don't pull in HiGHS test targets
 # ── 3. Generate HConfig.h from template ──────────────────────────────────────
 set(GITHASH "embedded_1.14.0")
 set(CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")  # pass through
+set(HIGHS_HAVE_BUILTIN_CLZ OFF)
+set(HIGHS_HAVE_BITSCAN_REVERSE OFF)
+if(MSVC)
+  set(HIGHS_HAVE_BITSCAN_REVERSE ON)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  set(HIGHS_HAVE_BUILTIN_CLZ ON)
+endif()
 configure_file("${_HIGHS_SRC}/HConfig.h.in" "${_HIGHS_BIN}/HConfig.h" @ONLY)
 
 # ── 4. CMAKE_MODULE_PATH: let include(sources) find highs/sources.cmake ──────

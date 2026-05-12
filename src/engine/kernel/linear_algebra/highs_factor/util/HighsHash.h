@@ -23,7 +23,7 @@
 
 #include "util/HighsInt.h"
 
-#ifdef HIGHS_HAVE_BITSCAN_REVERSE
+#if defined(HIGHS_HAVE_BITSCAN_REVERSE)
 #include <intrin.h>
 #pragma intrinsic(_BitScanReverse)
 #ifdef _WIN64
@@ -98,7 +98,7 @@ struct HighsHashHelpers {
   /// mersenne prime 2^61 - 1
   static constexpr u64 M61() { return u64{0x1fffffffffffffff}; };
 
-#ifdef HIGHS_HAVE_BUILTIN_CLZ
+#if defined(HIGHS_HAVE_BUILTIN_CLZ) && (defined(__GNUC__) || defined(__clang__))
   static int log2i(uint64_t n) { return 63 - __builtin_clzll(n); }
 
   static int log2i(uint32_t n) { return 31 - __builtin_clz(n); }
@@ -109,12 +109,12 @@ struct HighsHashHelpers {
   static int log2i(uint64_t n) {
     unsigned long result;
 #ifdef _WIN64
-    _BitScanReverse64(&result, n);
+    _BitScanReverse64(&result, static_cast<unsigned long long>(n));
 #else
-    if (_BitScanReverse(&result, (n >> 32)))
+    if (_BitScanReverse(&result, static_cast<unsigned long>(n >> 32)))
       result += 32;
     else
-      _BitScanReverse(&result, (n & 0xffffffffu));
+      _BitScanReverse(&result, static_cast<unsigned long>(n & 0xffffffffu));
 #endif
     return static_cast<int>(result);
   }
@@ -127,9 +127,10 @@ struct HighsHashHelpers {
 
   static int popcnt(uint64_t x) {
 #ifdef _WIN64
-    return static_cast<int>(__popcnt64(x));
+    return static_cast<int>(__popcnt64(static_cast<unsigned long long>(x)));
 #else
-    return __popcnt(x & 0xffffffffu) + __popcnt(x >> 32);
+    return __popcnt(static_cast<unsigned int>(x & 0xffffffffu)) +
+           __popcnt(static_cast<unsigned int>(x >> 32));
 #endif
   }
 #else
