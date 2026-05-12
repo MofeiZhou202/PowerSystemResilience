@@ -136,6 +136,13 @@ struct LPModel {
   Eigen::SparseMatrix<double> Aeq;
   Eigen::VectorXd beq;
   std::vector<VariableMeta> vars;
+  // Optional source row order for HiGHS-presolved LPs.  The native Eigen
+  // matrices sort row entries by column, but HiGHS separators consume rows in
+  // the row-wise order returned by HighsLpRelaxation::getRow().
+  std::vector<int> highs_row_to_native_row;
+  std::vector<int> highs_row_start;
+  std::vector<int> highs_row_index;
+  std::vector<double> highs_row_value;
 };
 
 inline bool lp_has_row_lhs(const LPModel& lp) {
@@ -208,6 +215,7 @@ struct MIPModel {
   struct UCGenHint {
     int ng{0};          ///< number of generators
     int T{0};           ///< number of commitment periods
+    double period_hours{1.0};  ///< duration of one period in hours
     int ig_start{0};    ///< first index of IG(g,t) block (size ng×T)
     int su_start{0};    ///< first index of SU(g,t) block (size ng×T)
     int sd_start{0};    ///< first index of SD(g,t) block (size ng×T)
@@ -223,6 +231,71 @@ struct MIPModel {
     std::vector<int> su_cols;   ///< su_cols[t*ng+g] = reduced col for su(g,t)
     std::vector<int> sd_cols;   ///< sd_cols[t*ng+g] = reduced col for sd(g,t)
     std::vector<int> pg_cols;   ///< pg_cols[t*ng+g] = reduced col for p(g,t)
+
+    /// Constraint certificates for dynamic user cuts. Metadata by itself is
+    /// only descriptive; a callback may generate a row only when the matching
+    /// original-space constraint family is certified here.
+    bool certifies_power_balance_rows{false};
+    bool certifies_generation_capacity_rows{false};
+    bool certifies_min_up_down_rows{false};
+    bool certifies_segment_bound_rows{false};
+    bool certifies_system_reserve_rows{false};
+    bool certifies_area_import_rows{false};
+    bool certifies_hard_network_flow_rows{false};
+    bool certifies_hard_section_flow_rows{false};
+    bool certifies_storage_cycle_rows{false};
+
+    /// Optional SCUC metadata for problem-specific dynamic user cuts.
+    /// All indices remain in the original MIP column space. Empty vectors mean
+    /// the corresponding family is not certified for this model and must be
+    /// skipped by user-cut callbacks.
+    std::vector<int> gen_bus;            ///< generator -> bus index, ng entries
+    std::vector<double> demand;          ///< demand[t], T entries
+    std::vector<double> reserve_requirement;  ///< optional reserve[t], T entries
+
+    /// Optional balancing-area metadata. Area-indexed arrays use
+    /// area*T + t ordering. area_import_capacity is a certified upper bound on
+    /// net import into the area in the original model; leave it empty unless
+    /// that bound follows from explicit original constraints.
+    int n_areas{0};
+    std::vector<int> gen_area;  ///< generator -> compact area index, ng entries
+    std::vector<double> area_demand;
+    std::vector<double> area_reserve_requirement;
+    std::vector<double> area_import_capacity;
+    std::vector<double> area_storage_discharge_capacity;
+
+    /// Network deliverability hint for PTDF/GSF cuts. Coefficients are indexed
+    /// as line_gsf[line*ng + g]. RHS arrays are line_fwd_rhs[line*T + t] and
+    /// line_rev_rhs[line*T + t] for +GSF and -GSF line constraints.
+    int network_line_count{0};
+    std::vector<double> line_gsf;
+    std::vector<double> line_fwd_rhs;
+    std::vector<double> line_rev_rhs;
+
+    /// Optional monitored-section / corridor metadata, with the same layout
+    /// as line_gsf and line_*_rhs. A section row must be a nonnegative
+    /// aggregation of explicit original network constraints to be valid as a
+    /// dynamic user cut source.
+    int section_count{0};
+    std::vector<double> section_gsf;
+    std::vector<double> section_fwd_rhs;
+    std::vector<double> section_rev_rhs;
+
+    /// Segment cumulative cuts. segment_cols[(t*ng + g)*n_segments + k] gives
+    /// the original column of segment k for unit g,t. segment_cap[g*n_segments+k]
+    /// gives the segment capacity.
+    int n_segments{0};
+    std::vector<int> segment_cols;
+    std::vector<double> segment_cap;
+
+    /// Storage cycle metadata. These are empty for the synthetic benchmark SCUC.
+    int n_storage{0};
+    std::vector<int> storage_charge_cols;     ///< storage_charge_cols[t*n_storage+s]
+    std::vector<int> storage_discharge_cols;  ///< storage_discharge_cols[t*n_storage+s]
+    std::vector<double> storage_energy_capacity;
+    std::vector<double> storage_efficiency;
+    std::vector<double> storage_initial_energy;
+    std::vector<double> storage_cycle_limit;
   };
   std::optional<UCGenHint> uc_hint;
 

@@ -2385,10 +2385,13 @@ int add_transformed_tableau_cuts(
     const BCOptions& opt,
     int max_cuts,
     const std::shared_ptr<BasisOps>& sbasis = nullptr,
-    const std::vector<char>* implied_integer_cols = nullptr,
-    const BinaryImplicationGraph* implication_graph = nullptr,
-    const VariableBoundTable* variable_bound_table = nullptr,
-    std::vector<PoolCut>* generated_cutpool_rows = nullptr);
+	    const std::vector<char>* implied_integer_cols = nullptr,
+	    const BinaryImplicationGraph* implication_graph = nullptr,
+	    const VariableBoundTable* variable_bound_table = nullptr,
+	    std::vector<PoolCut>* generated_cutpool_rows = nullptr,
+	    double cut_generation_feastol = 1e-8,
+	    const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
+	    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt);
 
 /// @brief Generate HiGHS-style transformed path aggregation CMIR cuts.
 /// @details Starts from active row sides, projects through short row paths that
@@ -2400,10 +2403,31 @@ int add_transformed_path_cuts(
     const SimplexResult& simplex,
     const BCOptions& opt,
     int max_cuts,
+	    const std::vector<char>* implied_integer_cols = nullptr,
+	    const BinaryImplicationGraph* implication_graph = nullptr,
+	    const VariableBoundTable* variable_bound_table = nullptr,
+	    std::vector<PoolCut>* generated_cutpool_rows = nullptr,
+	    double cut_generation_feastol = 1e-8,
+	    const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
+	    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt,
+	    const std::function<int(int)>* highs_path_randint = nullptr);
+
+/// @brief Generate HiGHS-style mod-k cuts from transformed active rows.
+/// @details Mirrors HighsModkSeparator: skip rows containing continuous
+/// variables with nonzero transformed bound distance, build a GF(k) row system
+/// from active integral rows, and add generated cuts directly to the cutpool.
+int add_transformed_modk_cuts(
+    LPModel& lp,
+    const Eigen::VectorXd& x,
+    const SimplexResult& simplex,
+    const BCOptions& opt,
     const std::vector<char>* implied_integer_cols = nullptr,
     const BinaryImplicationGraph* implication_graph = nullptr,
     const VariableBoundTable* variable_bound_table = nullptr,
-    std::vector<PoolCut>* generated_cutpool_rows = nullptr);
+    std::vector<PoolCut>* generated_cutpool_rows = nullptr,
+    double cut_generation_feastol = 1e-8,
+    const std::function<int(PoolCut&&)>* cutpool_acceptor = nullptr,
+    std::optional<std::uint64_t> highs_cutgen_seed = std::nullopt);
 
 // ── Relaxation functions (bc_relaxation.cpp) ─────────────────────────────
 
@@ -2733,10 +2757,10 @@ class BinaryImplicationGraph {
     }
 
     int propagate(const std::vector<VariableMeta>& vars,
-                                Eigen::VectorXd& lb,
-                                Eigen::VectorXd& ub,
-                                std::vector<BoundChangeInfo>* changes_out = nullptr,
-                                double tol = 1e-9) const;
+	                                Eigen::VectorXd& lb,
+	                                Eigen::VectorXd& ub,
+	                                std::vector<BoundChangeInfo>* changes_out = nullptr,
+	                                double tol = 1e-9) const;
 
  private:
     static std::size_t literal_index(int var_idx, bool value_one) {

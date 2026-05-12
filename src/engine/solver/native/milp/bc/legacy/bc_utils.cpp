@@ -5311,7 +5311,6 @@ int BinaryImplicationGraph::propagate(const std::vector<VariableMeta>& vars,
     return std::isfinite(var.lb) && std::isfinite(var.ub) &&
            var.lb >= -tol && var.ub <= 1.0 + tol;
   };
-
   auto enqueue_literal = [&](int var_idx, bool value_one) {
     if (var_idx < 0 || var_idx >= n) return;
     if (!binary_like_domain(var_idx)) return;

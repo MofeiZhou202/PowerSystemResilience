@@ -34,4 +34,17 @@ enum class CutType {
   All,
 };
 
+/// Validity/lifetime of a generated row.
+///
+/// GlobalCut rows are valid for the original model relaxation and may be
+/// stored in the global cut pool. LocalNodeCut rows are valid only under the
+/// branch/domain state of the generating node and descendants that inherit
+/// that domain. LazyConstraint rows are model-valid constraints checked
+/// against integer incumbents; they must not be treated as node-local cuts.
+enum class ValidityScope {
+  GlobalCut,
+  LocalNodeCut,
+  LazyConstraint,
+};
+
 }  // namespace mipsolvers::engine

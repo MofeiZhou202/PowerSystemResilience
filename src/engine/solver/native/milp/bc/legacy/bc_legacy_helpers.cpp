@@ -53,25 +53,26 @@ int bc_conformance_trace_terms(const char* env_name, int default_value) {
 }
 
 bool bc_frontier_conformance_enabled() {
-  return bc_env_flag_enabled("HACDCPF_FRONTIER_CONFORM") ||
-         bc_env_flag_enabled("HACDCPF_NATIVE_FRONTIER_CONFORM") ||
-         bc_env_flag_enabled("HACDCPF_LPSTATE_CONFORM");
+  return bc_env_flag_enabled("MIPSOLVERS_FRONTIER_CONFORM") ||
+         bc_env_flag_enabled("MIPSOLVERS_NATIVE_FRONTIER_CONFORM") ||
+         bc_env_flag_enabled("MIPSOLVERS_LPSTATE_CONFORM");
 }
 
 bool bc_first_class_lp_state_conformance_enabled() {
   return bc_frontier_conformance_enabled() ||
-         bc_env_flag_enabled("HACDCPF_ROOT_COLDSTATE_DIAG") ||
-         bc_env_flag_enabled("HACDCPF_XPOOL_EXACT_DSE") ||
-         bc_env_flag_enabled("HACDCPF_XPOOL_PARENT_EXACT_DSE");
+         bc_env_flag_enabled("MIPSOLVERS_ROOT_COLDSTATE_DIAG") ||
+         bc_env_flag_enabled("MIPSOLVERS_XPOOL_EXACT_DSE") ||
+         bc_env_flag_enabled("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE");
 }
 
 bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
   return opt.use_vendored_highs_lp_kernel ||
-         bc_env_flag_enabled("HACDCPF_USE_VENDORED_HIGHS_LP");
+         bc_env_flag_enabled("MIPSOLVERS_USE_VENDORED_HIGHS_LP");
 }
 
-bool bc_vendored_highs_root_frontier_enabled() {
-  return !bc_env_flag_enabled("HACDCPF_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER");
+bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt) {
+  return !opt.suppress_vendored_highs_root_frontier &&
+         !bc_env_flag_enabled("MIPSOLVERS_SUPPRESS_VENDORED_HIGHS_ROOT_FRONTIER");
 }
 
 BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
@@ -83,17 +84,17 @@ BcStrictHighsContractState apply_bc_strict_highs_contract(BCOptions& opt) {
   }
   state.strict_highs_lp_contract = state.requested_vendored_highs_lp;
   state.allow_vendored_root_frontier =
-      bc_vendored_highs_root_frontier_enabled();
+      bc_vendored_highs_root_frontier_enabled(opt);
 
   if (state.requested_vendored_highs_lp) {
     const bool strict_tree_exhaustion =
-        bc_env_flag_enabled("HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION");
+        bc_env_flag_enabled("MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION");
     // Suppressing the vendored root frontier only removes the direct
     // HiGHS-root certificate.  It must not also disable HiGHS' normal MIP
     // optimality-limit lifecycle: HighsMipSolverData keeps upper_limit for
     // incumbent cutoff propagation and optimality_limit for gap-valid node/root
     // pruning.  A strict live-tree exhaustion audit is still available through
-    // HACDCPF_REQUIRE_STRICT_TREE_EXHAUSTION.
+    // MIPSOLVERS_REQUIRE_STRICT_TREE_EXHAUSTION.
     opt.require_tree_exhaustion_certificate = strict_tree_exhaustion;
   }
   if (state.requested_vendored_highs_lp) {
@@ -230,7 +231,7 @@ std::shared_ptr<SimplexBasis> persist_bc_node_basis_from_simplex(
   return basis;
 }
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 const char* bc_highs_model_status_label(HighsModelStatus status) {
   switch (status) {
     case HighsModelStatus::kOptimal:

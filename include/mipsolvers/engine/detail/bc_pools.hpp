@@ -581,8 +581,10 @@ public:
   /// @return false if duplicate (same support + parallelism >= 1 - 1e-6).
   bool add(Eigen::SparseVector<double> coeff, double rhs,
            bool domain_only = false,
-           bool* new_domain_source = nullptr) {
+           bool* new_domain_source = nullptr,
+           ValidityScope validity_scope = ValidityScope::GlobalCut) {
     if (new_domain_source != nullptr) *new_domain_source = false;
+    if (validity_scope != ValidityScope::GlobalCut) return false;
     double norm = 0.0;
     if (!valid_cut_input(coeff, rhs, &norm)) return false;
 
@@ -611,7 +613,7 @@ public:
         const bool merged_domain_only = pc.domain_only && domain_only;
         if (tighter_rhs) {
           pc = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
-                       merged_domain_only};
+                       merged_domain_only, 0, validity_scope};
           if (new_domain_source != nullptr) *new_domain_source = true;
         } else {
           pc.domain_only = merged_domain_only;
@@ -625,24 +627,30 @@ public:
           [](const PoolCut& a, const PoolCut& b) { return a.age < b.age; });
       if (worst != cuts_.end()) {
         *worst = PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0, norm, h,
-                         domain_only};
+                         domain_only, 0, validity_scope};
         if (new_domain_source != nullptr) *new_domain_source = true;
         return true;
       }
     }
 
     cuts_.push_back(PoolCut{std::move(coeff), rhs, initial_cut_age(), 0.0,
-                            norm, h, domain_only});
+                            norm, h, domain_only, 0, validity_scope});
     if (new_domain_source != nullptr) *new_domain_source = true;
     return true;
+  }
+
+  bool add(PoolCut cut, bool* new_domain_source = nullptr) {
+    return add(std::move(cut.coeff), cut.rhs, cut.domain_only,
+               new_domain_source, cut.validity_scope);
   }
 
   /// @brief Convenience overload: add a dense cut (converts to sparse).
   bool add(const Eigen::VectorXd& coeff_dense, double rhs,
            bool domain_only = false,
-           bool* new_domain_source = nullptr) {
+           bool* new_domain_source = nullptr,
+           ValidityScope validity_scope = ValidityScope::GlobalCut) {
     return add(dense_to_sparse_cut(coeff_dense), rhs, domain_only,
-               new_domain_source);
+               new_domain_source, validity_scope);
   }
 
   bool propagate_with_reasons(

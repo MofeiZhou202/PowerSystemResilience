@@ -301,15 +301,25 @@ public:
   }
 
   /// @brief Add a sparse cut (exclusive lock).
-  bool add(Eigen::SparseVector<double> coeff, double rhs) {
+  bool add(Eigen::SparseVector<double> coeff, double rhs,
+           bool domain_only = false,
+           ValidityScope validity_scope = ValidityScope::GlobalCut) {
     std::unique_lock<std::shared_mutex> lk(mtx_);
-    return pool_.add(std::move(coeff), rhs);
+    return pool_.add(std::move(coeff), rhs, domain_only, nullptr,
+                     validity_scope);
+  }
+
+  bool add(PoolCut cut) {
+    std::unique_lock<std::shared_mutex> lk(mtx_);
+    return pool_.add(std::move(cut));
   }
 
   /// @brief Add a dense cut (exclusive lock, converts to sparse).
-  bool add(const Eigen::VectorXd& coeff, double rhs) {
+  bool add(const Eigen::VectorXd& coeff, double rhs,
+           bool domain_only = false,
+           ValidityScope validity_scope = ValidityScope::GlobalCut) {
     std::unique_lock<std::shared_mutex> lk(mtx_);
-    return pool_.add(coeff, rhs);
+    return pool_.add(coeff, rhs, domain_only, nullptr, validity_scope);
   }
 
   /// @brief Find violated cuts (shared lock).

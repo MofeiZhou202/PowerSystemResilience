@@ -81,6 +81,10 @@ struct BCStats {
   double best_bound{-1e30};
   double best_obj{1e30};
   double gap{1e30};
+  double root_only_bound{std::numeric_limits<double>::quiet_NaN()};
+  double root_only_solver_bound{std::numeric_limits<double>::quiet_NaN()};
+  double root_only_objective_offset{0.0};
+  bool root_only_result{false};
   double runtime_sec{0.0};
   std::uint64_t incumbent_updates{0};
   int first_incumbent_node{-1};
@@ -189,6 +193,10 @@ struct BCStats {
   std::uint64_t dynamic_implied_bound_rows_skip_not_active{0};
   std::uint64_t dynamic_implied_bound_rows_skip_small_move{0};
   std::uint64_t dynamic_implied_bound_rows_skip_no_violation{0};
+  std::uint64_t local_node_cuts_generated{0};
+  std::uint64_t local_node_cuts_added{0};
+  std::uint64_t global_cutpool_scope_rejections{0};
+  std::uint64_t lazy_constraints_added{0};
   std::uint64_t late_replay_skipped_no_new_learning{0};
   std::uint64_t objective_clique_partitions{0};
   std::uint64_t objective_clique_terms{0};

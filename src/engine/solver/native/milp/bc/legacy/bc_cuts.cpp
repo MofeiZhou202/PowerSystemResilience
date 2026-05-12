@@ -19,12 +19,20 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <queue>
+#include <set>
 #include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <fmt/format.h>
+
+#include "../extern/pdqsort/pdqsort.h"
+#include "util/HighsCDouble.h"
+#include "mip/HighsGFkSolve.h"
+#include "util/HighsRandom.h"
+#include "util/HighsIntegers.h"
 
 namespace mipsolvers::engine::detail {
 
@@ -460,16 +468,6 @@ double abs_cosine_similarity(const Eigen::VectorXd& a,
   return std::abs(cos);
 }
 
-double signed_cosine_similarity(const Eigen::VectorXd& a,
-                                const Eigen::VectorXd& b,
-                                double norm_a,
-                                double norm_b) {
-  if (norm_a <= 1e-12 || norm_b <= 1e-12) {
-    return 1.0;
-  }
-  return a.dot(b) / (norm_a * norm_b);
-}
-
 double gmi_binary_activity_score(const SimplexResult& simplex,
                                  const Eigen::VectorXd& x,
                                  const Eigen::VectorXd& cut) {
@@ -576,8 +574,7 @@ bool transformed_col_is_integer_like(
         return false;
       }
       const double unscaled_coeff = it.value() / (row_scale * col_scale);
-      if (!std::isfinite(unscaled_coeff) ||
-          !is_integral(unscaled_coeff, 1e-8)) {
+      if (!std::isfinite(unscaled_coeff) || !is_integral(unscaled_coeff, 1e-8)) {
         return false;
       }
       has_structural_coeff = true;
@@ -595,6 +592,14 @@ bool transformed_col_is_integer_like(
 }
 
 double fast_floor_xtab(double x) {
+  // Guard UB: static_cast<int64_t> is undefined for values outside the int64
+  // range (~±9.22e18) and for inf/NaN.  For those rare inputs fall back to the
+  // standard library floor which is always well-defined.
+  constexpr double kSafeMax = 4503599627370496.0;  // 2^52: every integer here
+                                                    // is exactly representable
+  if (std::abs(x) >= kSafeMax || !std::isfinite(x)) {
+    return std::floor(x);
+  }
   const auto ix = static_cast<int64_t>(x);
   return static_cast<double>(ix - (x < static_cast<double>(ix)));
 }
@@ -610,42 +615,13 @@ double pow2_scale_for_max_abs(double max_abs) {
 }
 
 double xtab_nearest_integer(double value) {
-  return std::floor(value + 0.5);
+  return static_cast<double>(HighsIntegers::nearestInteger(value));
 }
 
 double xtab_integral_scale(const std::vector<double>& values,
                            double feastol,
                            double epsilon) {
-  static constexpr double kScales[] = {
-      1.0,    2.0,    4.0,    5.0,    8.0,    10.0,   16.0,
-      20.0,   25.0,   32.0,   40.0,   50.0,   64.0,   80.0,
-      100.0,  125.0,  128.0,  160.0,  200.0,  250.0,  256.0,
-      320.0,  400.0,  500.0,  512.0,  625.0,  640.0,  800.0,
-      1000.0, 1024.0, 1250.0, 1280.0, 1600.0, 2000.0, 2500.0,
-      2560.0, 3125.0, 3200.0, 4000.0, 5000.0, 6250.0, 6400.0,
-      8000.0, 10000.0};
-  if (values.empty()) {
-    return 0.0;
-  }
-  for (double scale : kScales) {
-    bool ok = true;
-    for (double v : values) {
-      if (!std::isfinite(v)) {
-        ok = false;
-        break;
-      }
-      const double scaled = v * scale;
-      const double err = std::abs(scaled - std::round(scaled));
-      if (err > std::max(epsilon, feastol * std::max(1.0, std::abs(scaled)))) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) {
-      return scale;
-    }
-  }
-  return 0.0;
+  return HighsIntegers::integralScale(values, feastol, epsilon);
 }
 
 double xtab_fractionality_distance(double value) {
@@ -675,6 +651,50 @@ struct XTabVarBoundExpr {
   bool integer_target{false};
 };
 
+struct XTabSparseVectorSum {
+  std::vector<double> values;
+  std::vector<int> nonzeros;
+
+  explicit XTabSparseVectorSum(int dim = 0) { reset_dim(dim); }
+
+  void reset_dim(int dim) {
+    values.assign(static_cast<std::size_t>(std::max(0, dim)), 0.0);
+    nonzeros.clear();
+    nonzeros.reserve(static_cast<std::size_t>(std::max(0, dim)));
+  }
+
+  bool empty() const { return nonzeros.empty(); }
+
+  void add(int index, double value) {
+    if (index < 0 || index >= static_cast<int>(values.size())) return;
+    double& current = values[static_cast<std::size_t>(index)];
+    if (current != 0.0) {
+      current += value;
+    } else {
+      current = value;
+      nonzeros.push_back(index);
+    }
+    if (current == 0.0) {
+      current = std::numeric_limits<double>::min();
+    }
+  }
+
+  template <typename IsZero>
+  void cleanup(IsZero&& is_zero) {
+    int num_nz = static_cast<int>(nonzeros.size());
+    for (int i = num_nz - 1; i >= 0; --i) {
+      const int col = nonzeros[static_cast<std::size_t>(i)];
+      const double value = values[static_cast<std::size_t>(col)];
+      if (!is_zero(col, value)) continue;
+      values[static_cast<std::size_t>(col)] = 0.0;
+      --num_nz;
+      std::swap(nonzeros[static_cast<std::size_t>(num_nz)],
+                nonzeros[static_cast<std::size_t>(i)]);
+    }
+    nonzeros.resize(static_cast<std::size_t>(num_nz));
+  }
+};
+
 struct XTabTransformContext {
   std::vector<XTabVarBoundExpr> best_vlb;
   std::vector<XTabVarBoundExpr> best_vub;
@@ -695,6 +715,8 @@ struct XTabRow {
   std::vector<unsigned char> is_integral;
   double rhs{0.0};
   double initial_scale{1.0};
+  bool integral_support{false};
+  bool integral_coefficients{false};
 };
 
 struct XTabCmirTrace {
@@ -710,7 +732,33 @@ struct XTabCmirTrace {
   double final_f0{std::numeric_limits<double>::quiet_NaN()};
   double final_rhs{std::numeric_limits<double>::quiet_NaN()};
   bool accepted{false};
+  bool lifted_accepted{false};
 };
+
+struct XTabLiftedCoverState {
+  std::vector<int> cover;
+  HighsCDouble cover_weight{0.0};
+  HighsCDouble lambda{0.0};
+};
+
+struct XTabCutgenRandom {
+  std::optional<HighsRandom> randgen;
+
+  explicit XTabCutgenRandom(std::optional<std::uint64_t> seed) {
+    if (seed.has_value()) {
+      randgen.emplace(static_cast<HighsUInt>(*seed));
+    }
+  }
+
+  int next_tiebreaker(int fallback) {
+    if (!randgen.has_value()) return fallback;
+    return static_cast<int>(randgen->integer());
+  }
+};
+
+std::uint64_t xtab_highs_pair_hash(std::uint32_t a,
+                                   std::uint32_t b,
+                                   int k);
 
 struct XTabSourceContext {
   int n_original{0};
@@ -758,6 +806,51 @@ double xtab_source_row_coeff(const StandardFormLP& sf, int row, int col) {
                    xtab_col_scale_or_one(sf, col));
 }
 
+bool xtab_source_row_has_highs_order(const StandardFormLP& sf, int row) {
+  if (row < 0 || row >= static_cast<int>(sf.source_highs_row.size())) {
+    return false;
+  }
+  const int highs_row = sf.source_highs_row[static_cast<std::size_t>(row)];
+  if (highs_row < 0 ||
+      highs_row + 1 > static_cast<int>(sf.source_row_start.size()) - 1) {
+    return false;
+  }
+  const int start = sf.source_row_start[static_cast<std::size_t>(highs_row)];
+  const int end = sf.source_row_start[static_cast<std::size_t>(highs_row + 1)];
+  return start >= 0 && end >= start &&
+         end <= static_cast<int>(sf.source_row_index.size()) &&
+         end <= static_cast<int>(sf.source_row_value.size());
+}
+
+template <typename Func>
+void xtab_visit_source_row_terms(const StandardFormLP& sf,
+                                 int row,
+                                 Func&& func) {
+  if (xtab_source_row_has_highs_order(sf, row)) {
+    const int highs_row = sf.source_highs_row[static_cast<std::size_t>(row)];
+    const int start = sf.source_row_start[static_cast<std::size_t>(highs_row)];
+    const int end = sf.source_row_start[static_cast<std::size_t>(highs_row + 1)];
+    for (int p = start; p < end; ++p) {
+      const int col = sf.source_row_index[static_cast<std::size_t>(p)];
+      if (col < 0 || col >= sf.n_original) continue;
+      const double value = sf.source_row_value[static_cast<std::size_t>(p)];
+      if (std::abs(value) <= 1e-15) continue;
+      func(col, value);
+    }
+    return;
+  }
+
+  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row,
+                                                                      row);
+       it; ++it) {
+    const int col = static_cast<int>(it.col());
+    if (col < 0 || col >= sf.n_original) continue;
+    const double value = xtab_source_row_coeff(sf, row, col);
+    if (std::abs(value) <= 1e-15) continue;
+    func(col, value);
+  }
+}
+
 double xtab_source_row_side(const StandardFormLP& sf, int row) {
   if (row < 0 || row >= sf.A_row.rows()) {
     return std::numeric_limits<double>::quiet_NaN();
@@ -772,7 +865,7 @@ double xtab_source_row_side(const StandardFormLP& sf, int row) {
 }
 
 int xtab_row_trace_limit() {
-  const char* env = std::getenv("HACDCPF_XTAB_ROW_TRACE");
+  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE");
   if (env == nullptr) return 0;
   if (env[0] == '\0') return 20;
   if (std::string(env) == "all") return -1;
@@ -784,7 +877,7 @@ int xtab_row_trace_limit() {
 }
 
 int xtab_row_trace_terms() {
-  const char* env = std::getenv("HACDCPF_XTAB_ROW_TRACE_TERMS");
+  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_TERMS");
   if (env == nullptr || env[0] == '\0') return 12;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -792,8 +885,64 @@ int xtab_row_trace_terms() {
   return static_cast<int>(std::min<long>(value, 200));
 }
 
+std::uint64_t xtab_row_trace_id_bound(const char* name,
+                                      std::uint64_t default_value) {
+  const char* env = std::getenv(name);
+  if (env == nullptr || env[0] == '\0') return default_value;
+  char* end = nullptr;
+  const unsigned long long value = std::strtoull(env, &end, 10);
+  if (end == env) return default_value;
+  return static_cast<std::uint64_t>(value);
+}
+
+int xtab_transform_trace_col() {
+  const char* env = std::getenv("MIPSOLVERS_XTAB_TRANSFORM_TRACE_COL");
+  if (env == nullptr || env[0] == '\0') return -1;
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env) return -1;
+  return static_cast<int>(value);
+}
+
+int xtab_varbound_trace_col() {
+  const char* env = std::getenv("MIPSOLVERS_XTAB_VB_TRACE_COL");
+  if (env == nullptr || env[0] == '\0') return -1;
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env) return -1;
+  return static_cast<int>(value);
+}
+
+int xtab_modk_system_trace_limit() {
+  const char* env = std::getenv("MIPSOLVERS_XMODK_SYSTEM_TRACE");
+  if (env == nullptr || env[0] == '\0') return 0;
+  if (std::string(env) == "all") return 1000000000;
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env) return 40;
+  return value > 0 ? static_cast<int>(std::min<long>(value, 1000000)) : 0;
+}
+
+int xtab_modk_system_trace_terms() {
+  const char* env = std::getenv("MIPSOLVERS_XMODK_SYSTEM_TRACE_TERMS");
+  if (env == nullptr || env[0] == '\0') return 16;
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env || value <= 0) return 16;
+  return static_cast<int>(std::min<long>(value, 200));
+}
+
+int xtab_modk_transform_trace_row() {
+  const char* env = std::getenv("MIPSOLVERS_XMODK_TRANSFORM_ROW");
+  if (env == nullptr || env[0] == '\0') return -1;
+  char* end = nullptr;
+  const long value = std::strtol(env, &end, 10);
+  if (end == env) return -1;
+  return static_cast<int>(value);
+}
+
 bool xtab_row_trace_family_enabled(const char* family) {
-  const char* env = std::getenv("HACDCPF_XTAB_ROW_TRACE_FAMILY");
+  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_FAMILY");
   if (env == nullptr || env[0] == '\0' || std::string(env) == "all") {
     return true;
   }
@@ -801,13 +950,13 @@ bool xtab_row_trace_family_enabled(const char* family) {
 }
 
 bool xtab_row_trace_meta_enabled() {
-  const char* env = std::getenv("HACDCPF_XTAB_ROW_TRACE_META");
+  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_META");
   if (env == nullptr) return false;
   return env[0] != '\0' && std::string(env) != "0";
 }
 
 bool xtab_row_trace_basis_enabled() {
-  const char* env = std::getenv("HACDCPF_XTAB_ROW_TRACE_BASIS");
+  const char* env = std::getenv("MIPSOLVERS_XTAB_ROW_TRACE_BASIS");
   if (env == nullptr) return false;
   return env[0] != '\0' && std::string(env) != "0";
 }
@@ -834,12 +983,47 @@ std::uint64_t xtab_highs_hash_i64(std::int64_t value) {
          (xtab_highs_pair_hash(lo, hi, 0) >> 32);
 }
 
+std::uint64_t xtab_modk_hash_mix(std::uint64_t h, std::uint64_t v) {
+  v ^= v >> 33;
+  v *= std::uint64_t{0xff51afd7ed558ccd};
+  v ^= v >> 33;
+  v *= std::uint64_t{0xc4ceb9fe1a85ec53};
+  v ^= v >> 33;
+  return h ^ (v + std::uint64_t{0x9e3779b97f4a7c15} + (h << 6) + (h >> 2));
+}
+
+std::uint64_t xtab_modk_system_hash(
+    const std::vector<std::int64_t>& values,
+    const std::vector<int>& indices,
+    const std::vector<int>& starts) {
+  std::uint64_t h = std::uint64_t{0x48494748534d4f44};
+  h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(values.size()));
+  h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(indices.size()));
+  h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(starts.size()));
+  for (int start : starts) {
+    h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(start));
+  }
+  for (int index : indices) {
+    h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(index));
+  }
+  for (std::int64_t value : values) {
+    h = xtab_modk_hash_mix(h, static_cast<std::uint64_t>(value));
+  }
+  return h;
+}
+
 bool xtab_claim_row_trace(std::uint64_t& id, const char* family) {
   if (!xtab_row_trace_family_enabled(family)) return false;
   const int limit = xtab_row_trace_limit();
   if (limit == 0) return false;
   static std::atomic<std::uint64_t> next_id{1};
   id = next_id.fetch_add(1, std::memory_order_relaxed);
+  const std::uint64_t min_id =
+      xtab_row_trace_id_bound("MIPSOLVERS_XTAB_ROW_TRACE_MIN_ID", 1);
+  const std::uint64_t max_id = xtab_row_trace_id_bound(
+      "MIPSOLVERS_XTAB_ROW_TRACE_MAX_ID",
+      std::numeric_limits<std::uint64_t>::max());
+  if (id < min_id || id > max_id) return false;
   return limit < 0 || id <= static_cast<std::uint64_t>(limit);
 }
 
@@ -951,7 +1135,7 @@ XTabRowStats xtab_row_stats(const XTabRow& row,
     if (row.complemented[pos] != 0) ++stats.complemented;
     if (emitted < max_terms) {
       if (emitted > 0) fmt::format_to(std::back_inserter(buffer), ",");
-      fmt::format_to(std::back_inserter(buffer), "{}:{:.6g}:{}:s{:.3g}",
+      fmt::format_to(std::back_inserter(buffer), "{}:{:.17g}:{}:s{:.17g}",
                      col, val, xtab_bound_type_name(row.bound_type[pos]),
                      row.solval[pos]);
       ++emitted;
@@ -974,7 +1158,7 @@ void xtab_trace_source_row(std::uint64_t id,
   const XTabSparseStats stats =
       xtab_sparse_stats(coeff, active_cols, xtab_row_trace_terms());
   fmt::print(stderr,
-             "[B&C-XROW] id={} family={} stage={} rhs={:.12g} nnz={} "
+             "[B&C-XROW] id={} family={} stage={} rhs={:.17g} nnz={} "
              "l1={:.6g} max={:.6g} baseRowIndsVals=[{}]\n",
              id, family, stage, rhs, stats.nnz, stats.l1, stats.max_abs,
              stats.sample);
@@ -986,20 +1170,15 @@ std::string xtab_source_row_signature(const SimplexResult& simplex,
   fmt::memory_buffer buffer;
   int emitted = 0;
   int nnz = 0;
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
-           simplex.form.A_row, row);
-       it; ++it) {
-    const int col = static_cast<int>(it.col());
-    if (col < 0 || col >= simplex.form.n_original) continue;
-    const double val = xtab_source_row_coeff(simplex.form, row, col);
-    if (std::abs(val) <= 1e-12) continue;
+  xtab_visit_source_row_terms(simplex.form, row, [&](int col, double val) {
+    if (std::abs(val) <= 1e-12) return;
     ++nnz;
     if (emitted < max_terms) {
       if (emitted > 0) fmt::format_to(std::back_inserter(buffer), ",");
       fmt::format_to(std::back_inserter(buffer), "{}:{:.12g}", col, val);
       ++emitted;
     }
-  }
+  });
   if (nnz > emitted) {
     fmt::format_to(std::back_inserter(buffer), ",...");
   }
@@ -1062,8 +1241,8 @@ void xtab_trace_row(std::uint64_t id,
   fmt::print(stderr,
              "[B&C-XROW] id={} family={} stage={} rhs={:.12g} nnz={} "
              "types=slb{}:sub{}:vlb{}:vub{} int={} cont={} log={} "
-             "comp={} intPos={} activity={:.12g} viol={:.12g} "
-             "norm={:.6g} l1={:.6g} max={:.6g} row=[{}]\n",
+             "comp={} intPos={} activity={:.17g} viol={:.17g} "
+             "norm={:.17g} l1={:.17g} max={:.17g} row=[{}]\n",
              id, family, stage, row.rhs, stats.nnz, stats.simple_lb,
              stats.simple_ub, stats.variable_lb, stats.variable_ub,
              stats.integral, stats.continuous, stats.logical,
@@ -1090,6 +1269,30 @@ void xtab_trace_original_row(std::uint64_t id,
              "max={:.6g} row=[{}]\n",
              id, family, stage, rhs, stats.nnz, activity, activity - rhs,
              (activity - rhs) / norm, stats.l1, stats.max_abs, stats.sample);
+}
+
+bool xtab_cmir_delta_trace_enabled() {
+  const char* env = std::getenv("MIPSOLVERS_XTAB_CMIR_DELTA_TRACE");
+  return env != nullptr && env[0] != '\0' && std::string(env) != "0";
+}
+
+void xtab_trace_cmir_delta(std::uint64_t id,
+                           const char* family,
+                           const char* phase,
+                           double delta,
+                           double scale,
+                           double down_rhs,
+                           double f0,
+                           double violation,
+                           double norm_sq,
+                           double efficacy,
+                           double best_before) {
+  fmt::print(stderr,
+             "[B&C-XROW] id={} family={} stage=cmir_delta phase={} "
+             "delta={:.17g} scale={:.17g} downRhs={:.17g} f0={:.17g} "
+             "viol={:.17g} normSq={:.17g} eff={:.17g} bestBefore={:.17g}\n",
+             id, family == nullptr ? "" : family, phase, delta, scale,
+             down_rhs, f0, violation, norm_sq, efficacy, best_before);
 }
 
 void xtab_trace_fail(std::uint64_t id,
@@ -1138,10 +1341,6 @@ struct XTabSourceDiag {
   std::uint64_t filtered_binary_support{0};
   std::uint64_t filtered_parallel{0};
   std::uint64_t selected{0};
-  std::uint64_t cutpool_candidates{0};
-  std::uint64_t cutpool_violated{0};
-  std::uint64_t cutpool_active{0};
-  std::uint64_t cutpool_parallel{0};
   std::uint64_t vb_substitutions{0};
   std::uint64_t vb_trigger_terms{0};
 };
@@ -1173,13 +1372,13 @@ void xtab_record_reject(XTabSourceDiag* diag, XTabRejectReason reason) {
 }
 
 void maybe_print_xtab_diag(const char* family, const XTabSourceDiag& diag) {
-  if (std::getenv("HACDCPF_XTAB_DIAG") == nullptr) return;
+  if (std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) return;
   fmt::print(stderr,
              "[B&C-XTAB-DIAG] family={} basis={} intOrig={} intAux={} "
              "fracOrig={} fracAux={} btran={} rowEp={} agg={} "
              "reject=T{} P{} C{} E{} U{} V{} gen={} "
              "gate={}>{}>{}>{}>{}>{} filt=d{} e{} a{} b{} p{} sel={} "
-             "pool=c{} v{} a{} p{} vb={}/{}\n",
+             "vb={}/{}\n",
              family, diag.basis_rows, diag.integer_basic_original,
              diag.integer_basic_aux, diag.fractional_basic_original,
              diag.fractional_basic_aux, diag.btran_rows, diag.row_ep_rows,
@@ -1191,9 +1390,7 @@ void maybe_print_xtab_diag(const char* family, const XTabSourceDiag& diag) {
              diag.gate_violation_ok, diag.filtered_density,
              diag.filtered_efficacy, diag.filtered_activity,
              diag.filtered_binary_support, diag.filtered_parallel,
-             diag.selected, diag.cutpool_candidates, diag.cutpool_violated,
-             diag.cutpool_active, diag.cutpool_parallel, diag.vb_substitutions,
-             diag.vb_trigger_terms);
+             diag.selected, diag.vb_substitutions, diag.vb_trigger_terms);
 }
 
 struct XTabCandidateCut {
@@ -1203,119 +1400,15 @@ struct XTabCandidateCut {
   double efficacy{0.0};
   double norm{0.0};
   int nnz{0};
-  double cutpool_score{0.0};
-  double violation{0.0};
-  double active_norm{0.0};
-  int active_nnz{0};
+  std::uint64_t source_trace_id{0};
 };
 
 PoolCut xtab_candidate_to_pool_cut(const XTabCandidateCut& cand) {
   Eigen::SparseVector<double> sparse = dense_to_sparse_cut(cand.coeff);
   const std::size_t hash = sparse_cut_hash(sparse);
-  return PoolCut{std::move(sparse), cand.rhs, 0, cand.efficacy, cand.norm, hash};
-}
-
-std::vector<XTabCandidateCut> xtab_select_highs_cutpool_like(
-    std::vector<XTabCandidateCut>& candidates,
-    const LPModel& lp,
-    const Eigen::VectorXd& x,
-    int max_cuts,
-    const char* family,
-    XTabSourceDiag& diag) {
-  std::vector<XTabCandidateCut> efficacious;
-  if (max_cuts <= 0 || candidates.empty()) return efficacious;
-
-  constexpr double feastol = 1e-7;
-  diag.cutpool_candidates += candidates.size();
-  double best_score = -std::numeric_limits<double>::infinity();
-  double max_violation = 0.0;
-  double max_active_score = 0.0;
-  const int n = std::min<int>(
-      static_cast<int>(x.size()),
-      std::min<int>(static_cast<int>(lp.vars.size()),
-                    candidates.front().coeff.size()));
-
-  for (auto& cand : candidates) {
-    if (cand.coeff.size() != x.size()) continue;
-    const double viol = cand.coeff.dot(x) - cand.rhs;
-    cand.violation = viol;
-    max_violation = std::max(max_violation, viol);
-    if (!(viol > feastol)) continue;
-    ++diag.cutpool_violated;
-
-    double active_norm = 0.0;
-    int active_nnz = 0;
-    for (int j = 0; j < n; ++j) {
-      const double a = cand.coeff[j];
-      if (std::abs(a) <= 1e-12) continue;
-      const VariableMeta& var = lp.vars[static_cast<std::size_t>(j)];
-      const double xj = x[j];
-      if (a > 0.0) {
-        if (xj > var.lb + feastol) {
-          active_norm += a * a;
-          ++active_nnz;
-        }
-      } else {
-        if (xj < var.ub - feastol) {
-          active_norm += a * a;
-          ++active_nnz;
-        }
-      }
-    }
-    if (!(active_norm > 0.0) || active_nnz <= 0) continue;
-    cand.active_norm = active_norm;
-    cand.active_nnz = active_nnz;
-    cand.cutpool_score = viol / (static_cast<double>(active_nnz) *
-                                 std::sqrt(active_norm));
-    if (!std::isfinite(cand.cutpool_score)) continue;
-    ++diag.cutpool_active;
-    best_score = std::max(best_score, cand.cutpool_score);
-    max_active_score = std::max(max_active_score, cand.cutpool_score);
-    efficacious.push_back(cand);
-  }
-
-  std::sort(efficacious.begin(), efficacious.end(),
-            [](const XTabCandidateCut& a, const XTabCandidateCut& b) {
-              if (a.cutpool_score != b.cutpool_score) {
-                return a.cutpool_score > b.cutpool_score;
-              }
-              if (a.violation != b.violation) {
-                return a.violation > b.violation;
-              }
-              return a.rhs < b.rhs;
-            });
-
-  std::vector<XTabCandidateCut> selected;
-  selected.reserve(static_cast<std::size_t>(max_cuts));
-  constexpr double kHighsMaxParallelism = 0.1;
-  for (auto& cand : efficacious) {
-    if (static_cast<int>(selected.size()) >= max_cuts) break;
-    bool discard = false;
-    for (const auto& keep : selected) {
-      if (signed_cosine_similarity(cand.coeff, keep.coeff, cand.norm,
-                                   keep.norm) > kHighsMaxParallelism) {
-        discard = true;
-        break;
-      }
-    }
-    if (discard) {
-      ++diag.cutpool_parallel;
-      continue;
-    }
-    selected.push_back(cand);
-  }
-
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
-    fmt::print(stderr,
-               "[B&C-XTAB-CUTPOOL] family={} cand={} violated={} active={} "
-               "selected={} parallel={} bestScore={:.12g} maxScore={:.12g} "
-               "maxViol={:.12g}\n",
-               family, candidates.size(), diag.cutpool_violated,
-               diag.cutpool_active, selected.size(), diag.cutpool_parallel,
-               std::isfinite(best_score) ? best_score : 0.0,
-               max_active_score, max_violation);
-  }
-  return selected;
+  PoolCut cut{std::move(sparse), cand.rhs, 0, cand.efficacy, cand.norm, hash};
+  cut.source_trace_id = cand.source_trace_id;
+  return cut;
 }
 
 void xtab_flip_complementation(XTabRow& row, int k) {
@@ -1355,6 +1448,475 @@ void xtab_update_violation_and_norm(const XTabRow& row,
     return;
   }
   norm_sq += coeff * coeff;
+}
+
+bool xtab_is_integral_value(double value, double feastol) {
+  return std::abs(value - std::round(value)) <= feastol;
+}
+
+bool xtab_determine_cover(const XTabRow& row,
+                          double feastol,
+                          XTabCutgenRandom* cutgen_random,
+                          int fallback_tiebreaker,
+                          XTabLiftedCoverState& state) {
+  if (row.rhs <= 10.0 * feastol) return false;
+
+  state.cover.clear();
+  state.cover.reserve(row.inds.size());
+  for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
+    if (row.is_integral[static_cast<std::size_t>(k)] == 0) continue;
+    if (row.solval[static_cast<std::size_t>(k)] <= feastol) continue;
+    state.cover.push_back(k);
+  }
+
+  const int max_cover_size = static_cast<int>(state.cover.size());
+  int cover_size = 0;
+  state.cover_weight = 0.0;
+  const int random_tiebreaker =
+      cutgen_random != nullptr
+          ? cutgen_random->next_tiebreaker(fallback_tiebreaker)
+          : fallback_tiebreaker;
+
+  auto ub = [&](int k) { return row.upper[static_cast<std::size_t>(k)]; };
+  auto sol = [&](int k) { return row.solval[static_cast<std::size_t>(k)]; };
+  auto val = [&](int k) { return row.vals[static_cast<std::size_t>(k)]; };
+
+  auto mid = std::partition(state.cover.begin(), state.cover.end(), [&](int k) {
+    return sol(k) >= ub(k) - feastol;
+  });
+  cover_size = static_cast<int>(mid - state.cover.begin());
+  for (int i = 0; i < cover_size; ++i) {
+    const int k = state.cover[static_cast<std::size_t>(i)];
+    state.cover_weight += val(k) * ub(k);
+  }
+
+  std::sort(mid, state.cover.end(), [&](int a, int b) {
+    if (ub(a) < 1.5 && ub(b) > 1.5) return true;
+    if (ub(a) > 1.5 && ub(b) < 1.5) return false;
+
+    const double contrib_a = sol(a) * val(a);
+    const double contrib_b = sol(b) * val(b);
+    if (contrib_a > contrib_b + feastol) return true;
+    if (contrib_a < contrib_b - feastol) return false;
+    if (std::abs(val(a) - val(b)) <= feastol) {
+      return xtab_highs_pair_hash(
+                 static_cast<std::uint32_t>(row.inds[static_cast<std::size_t>(a)]),
+                 static_cast<std::uint32_t>(random_tiebreaker), 0) >
+             xtab_highs_pair_hash(
+                 static_cast<std::uint32_t>(row.inds[static_cast<std::size_t>(b)]),
+                 static_cast<std::uint32_t>(random_tiebreaker), 0);
+    }
+    return val(a) > val(b);
+  });
+
+  const double min_lambda =
+      std::max(10.0 * feastol, feastol * std::abs(row.rhs));
+  for (; cover_size != max_cover_size; ++cover_size) {
+    const double lambda = double(state.cover_weight - row.rhs);
+    if (lambda > min_lambda) break;
+
+    const int k = state.cover[static_cast<std::size_t>(cover_size)];
+    state.cover_weight += val(k) * ub(k);
+  }
+  if (cover_size == 0) return false;
+
+  state.cover_weight.renormalize();
+  state.lambda = state.cover_weight - row.rhs;
+  if (double(state.lambda) <= min_lambda) return false;
+
+  state.cover.resize(static_cast<std::size_t>(cover_size));
+  return true;
+}
+
+void xtab_separate_lifted_knapsack_cover(XTabRow& row,
+                                         const XTabLiftedCoverState& state,
+                                         double feastol,
+                                         double epsilon) {
+  const int cover_size = static_cast<int>(state.cover.size());
+  std::vector<int> cover = state.cover;
+  std::vector<double> partial(static_cast<std::size_t>(cover_size), 0.0);
+  std::vector<signed char> cover_flag(row.inds.size(), 0);
+
+  std::sort(cover.begin(), cover.end(), [&](int a, int b) {
+    return row.vals[static_cast<std::size_t>(a)] >
+           row.vals[static_cast<std::size_t>(b)];
+  });
+
+  HighsCDouble abar_tmp = row.vals[static_cast<std::size_t>(cover.front())];
+  HighsCDouble sigma = state.lambda;
+  for (int i = 1; i != cover_size; ++i) {
+    const HighsCDouble delta =
+        abar_tmp - row.vals[static_cast<std::size_t>(cover[i])];
+    const HighsCDouble kdelta = static_cast<double>(i) * delta;
+    if (double(kdelta) < double(sigma)) {
+      abar_tmp = row.vals[static_cast<std::size_t>(cover[i])];
+      sigma -= kdelta;
+    } else {
+      abar_tmp -= sigma * (1.0 / static_cast<double>(i));
+      sigma = 0.0;
+      break;
+    }
+  }
+
+  if (double(sigma) > 0.0) {
+    abar_tmp = HighsCDouble(row.rhs) / static_cast<double>(cover_size);
+  }
+  const double abar = double(abar_tmp);
+
+  HighsCDouble sum = 0.0;
+  int cplus_size = 0;
+  for (int i = 0; i != cover_size; ++i) {
+    const int k = cover[static_cast<std::size_t>(i)];
+    sum += std::min(abar, row.vals[static_cast<std::size_t>(k)]);
+    partial[static_cast<std::size_t>(i)] = double(sum);
+
+    if (row.vals[static_cast<std::size_t>(k)] > abar + feastol) {
+      ++cplus_size;
+      cover_flag[static_cast<std::size_t>(k)] = 1;
+    } else {
+      cover_flag[static_cast<std::size_t>(k)] = -1;
+    }
+  }
+
+  bool half_integral = false;
+  auto g = [&](double z) {
+    const double hfrac = z / abar;
+    double coef = 0.0;
+
+    int h = static_cast<int>(std::floor(hfrac + 0.5));
+    if (h != 0 && std::abs(hfrac - static_cast<double>(h)) *
+                          std::max(1.0, abar) <= epsilon &&
+        h <= cplus_size - 1) {
+      half_integral = true;
+      coef = 0.5;
+    }
+
+    h = std::max(h - 1, 0);
+    for (; h < cover_size; ++h) {
+      if (z <= partial[static_cast<std::size_t>(h)] + feastol) break;
+    }
+
+    return coef + static_cast<double>(h);
+  };
+
+  row.rhs = static_cast<double>(cover_size - 1);
+  for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
+    const std::size_t pos = static_cast<std::size_t>(k);
+    if (row.vals[pos] == 0.0) continue;
+    if (cover_flag[pos] == -1) {
+      row.vals[pos] = 1.0;
+    } else {
+      row.vals[pos] = g(row.vals[pos]);
+    }
+  }
+
+  if (half_integral) {
+    row.rhs *= 2.0;
+    for (double& v : row.vals) v *= 2.0;
+  }
+
+  row.integral_support = true;
+  row.integral_coefficients = true;
+}
+
+bool xtab_separate_lifted_mixed_binary_cover(
+    XTabRow& row,
+    const XTabLiftedCoverState& state,
+    double epsilon) {
+  row.integral_support = false;
+  row.integral_coefficients = false;
+
+  const int cover_size = static_cast<int>(state.cover.size());
+  if (cover_size == 0) return false;
+
+  std::vector<int> cover = state.cover;
+  std::vector<double> partial(static_cast<std::size_t>(cover_size), 0.0);
+  std::vector<unsigned char> cover_flag(row.inds.size(), 0);
+  for (int k : cover) cover_flag[static_cast<std::size_t>(k)] = 1;
+
+  std::sort(cover.begin(), cover.end(), [&](int a, int b) {
+    return row.vals[static_cast<std::size_t>(a)] >
+           row.vals[static_cast<std::size_t>(b)];
+  });
+
+  double sum = 0.0;
+  int p = cover_size;
+  for (int i = 0; i != cover_size; ++i) {
+    const int k = cover[static_cast<std::size_t>(i)];
+    if (row.vals[static_cast<std::size_t>(k)] - double(state.lambda) <=
+      epsilon) {
+      p = i;
+      break;
+    }
+    sum += row.vals[static_cast<std::size_t>(k)];
+    partial[static_cast<std::size_t>(i)] = sum;
+  }
+  if (p == 0) return false;
+
+  auto phi = [&](double a) {
+    for (int i = 0; i < p; ++i) {
+      if (a <= partial[static_cast<std::size_t>(i)] - double(state.lambda)) {
+        return double(static_cast<double>(i) * state.lambda);
+      }
+
+      if (a <= partial[static_cast<std::size_t>(i)]) {
+        return double(static_cast<double>(i + 1) * state.lambda +
+                      (HighsCDouble(a) - partial[static_cast<std::size_t>(i)]));
+      }
+    }
+
+    return double(static_cast<double>(p) * state.lambda +
+                  (HighsCDouble(a) - partial[static_cast<std::size_t>(p - 1)]));
+  };
+
+  HighsCDouble rhs_acc = -state.lambda;
+  row.integral_support = true;
+  row.integral_coefficients = false;
+  for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
+    const std::size_t pos = static_cast<std::size_t>(k);
+    if (row.is_integral[pos] == 0) {
+      if (row.vals[pos] < 0.0) {
+        row.integral_support = false;
+      } else {
+        row.vals[pos] = 0.0;
+      }
+      continue;
+    }
+
+    if (cover_flag[pos] != 0) {
+      row.vals[pos] = std::min(row.vals[pos], double(state.lambda));
+      rhs_acc += row.vals[pos];
+    } else {
+      row.vals[pos] = phi(row.vals[pos]);
+    }
+  }
+
+  row.rhs = double(rhs_acc);
+  return true;
+}
+
+bool xtab_separate_lifted_mixed_integer_cover(
+    XTabRow& row,
+    const XTabLiftedCoverState& state,
+    double feastol,
+    double epsilon) {
+  (void)epsilon;
+  row.integral_support = false;
+  row.integral_coefficients = false;
+
+  std::vector<int> cover = state.cover;
+  const int cover_size = static_cast<int>(cover.size());
+  std::vector<unsigned char> cover_flag(row.inds.size(), 0);
+  for (int k : cover) cover_flag[static_cast<std::size_t>(k)] = 1;
+
+  std::sort(cover.begin(), cover.end(), [&](int a, int b) {
+    return row.vals[static_cast<std::size_t>(a)] >
+           row.vals[static_cast<std::size_t>(b)];
+  });
+
+  std::vector<double> a(static_cast<std::size_t>(cover_size), 0.0);
+  std::vector<double> u(static_cast<std::size_t>(cover_size + 1), 0.0);
+  std::vector<double> m(static_cast<std::size_t>(cover_size + 1), 0.0);
+
+  double usum = 0.0;
+  double msum = 0.0;
+  for (int c = 0; c != cover_size; ++c) {
+    const int k = cover[static_cast<std::size_t>(c)];
+    u[static_cast<std::size_t>(c)] = usum;
+    m[static_cast<std::size_t>(c)] = msum;
+    a[static_cast<std::size_t>(c)] = row.vals[static_cast<std::size_t>(k)];
+    const double ub = row.upper[static_cast<std::size_t>(k)];
+    usum += ub;
+    msum += ub * a[static_cast<std::size_t>(c)];
+  }
+  u[static_cast<std::size_t>(cover_size)] = usum;
+  m[static_cast<std::size_t>(cover_size)] = msum;
+
+  int lpos = -1;
+  int best_l_cplus_end = -1;
+  double best_l_val = 0.0;
+  bool best_l_at_upper = true;
+
+  for (int i = 0; i != cover_size; ++i) {
+    const int k = cover[static_cast<std::size_t>(i)];
+    const double ub = row.upper[static_cast<std::size_t>(k)];
+
+    const bool at_upper =
+        row.solval[static_cast<std::size_t>(k)] >= ub - feastol;
+    if (at_upper && !best_l_at_upper) continue;
+
+    const double mju = ub * row.vals[static_cast<std::size_t>(k)];
+    const double mu = mju - double(state.lambda);
+
+    if (mu <= 10.0 * feastol) continue;
+    if (std::abs(row.vals[static_cast<std::size_t>(k)]) <
+        1000.0 * feastol) {
+      continue;
+    }
+
+    const double mudival = mu / row.vals[static_cast<std::size_t>(k)];
+    if (xtab_is_integral_value(mudival, feastol)) continue;
+    const double eta = std::ceil(mudival);
+
+    const double ul_minus_eta_plus_one = ub - eta + 1.0;
+    const double cplus_threshold =
+        ul_minus_eta_plus_one * row.vals[static_cast<std::size_t>(k)];
+
+    const int cplus_end = static_cast<int>(
+        std::upper_bound(cover.begin(), cover.end(), cplus_threshold,
+                         [&](double threshold, int col) {
+                           return threshold >
+                                  row.vals[static_cast<std::size_t>(col)];
+                         }) -
+        cover.begin());
+
+    double mcplus = m[static_cast<std::size_t>(cplus_end)];
+    if (i < cplus_end) mcplus -= mju;
+
+    const double jl_val =
+        mcplus + eta * row.vals[static_cast<std::size_t>(k)];
+
+    if (jl_val > best_l_val || (!at_upper && best_l_at_upper)) {
+      lpos = i;
+      best_l_cplus_end = cplus_end;
+      best_l_val = jl_val;
+      best_l_at_upper = at_upper;
+    }
+  }
+
+  if (lpos == -1) return false;
+
+  const int l = cover[static_cast<std::size_t>(lpos)];
+  const double al = row.vals[static_cast<std::size_t>(l)];
+  const double upper_l = row.upper[static_cast<std::size_t>(l)];
+  const double mlu = upper_l * al;
+  const double mu = mlu - double(state.lambda);
+
+  a.resize(static_cast<std::size_t>(best_l_cplus_end));
+  cover.resize(static_cast<std::size_t>(best_l_cplus_end));
+  u.resize(static_cast<std::size_t>(best_l_cplus_end + 1));
+  m.resize(static_cast<std::size_t>(best_l_cplus_end + 1));
+
+  if (lpos < best_l_cplus_end) {
+    a.erase(a.begin() + lpos);
+    cover.erase(cover.begin() + lpos);
+    u.erase(u.begin() + lpos + 1);
+    m.erase(m.begin() + lpos + 1);
+    for (int i = lpos + 1; i < best_l_cplus_end; ++i) {
+      u[static_cast<std::size_t>(i)] -= upper_l;
+      m[static_cast<std::size_t>(i)] -= mlu;
+    }
+  }
+
+  const int cplus_size = static_cast<int>(a.size());
+  const double mudival = mu / al;
+  const double eta = std::ceil(mudival);
+  double r = mu - std::floor(mudival) * al;
+  if (r < 0.0) r = 0.0;
+
+  const double ul_minus_eta_plus_one = upper_l - eta + 1.0;
+  const double cplus_threshold = ul_minus_eta_plus_one * al;
+  const int64_t kmin = static_cast<int64_t>(std::floor(eta - upper_l - 0.5));
+
+  auto phi_l = [&](double value) {
+    int64_t k = std::min(static_cast<int64_t>(value / al), int64_t{-1});
+
+    for (; k >= kmin; --k) {
+      if (value >= static_cast<double>(k) * al + r) {
+        return value - static_cast<double>(k + 1) * r;
+      }
+
+      if (value >= static_cast<double>(k) * al) {
+        return static_cast<double>(k) * (al - r);
+      }
+    }
+
+    return static_cast<double>(kmin) * (al - r);
+  };
+
+  const int64_t kmax = static_cast<int64_t>(std::floor(upper_l - eta + 0.5));
+
+  auto gamma_l = [&](double z) {
+    for (int i = 0; i < cplus_size; ++i) {
+      const int col = cover[static_cast<std::size_t>(i)];
+      const int upper_i = static_cast<int>(
+          row.upper[static_cast<std::size_t>(col)]);
+
+      for (int h = 0; h <= upper_i; ++h) {
+        const double mih = m[static_cast<std::size_t>(i)] +
+                           static_cast<double>(h) *
+                               a[static_cast<std::size_t>(i)];
+        const double uih =
+            u[static_cast<std::size_t>(i)] + static_cast<double>(h);
+        const double mih_plus_delta_i =
+            mih + a[static_cast<std::size_t>(i)] - cplus_threshold;
+        if (z <= mih_plus_delta_i) {
+          return uih * ul_minus_eta_plus_one * (al - r);
+        }
+
+        int64_t k =
+            static_cast<int64_t>((z - mih_plus_delta_i) / al) - 1;
+        for (; k <= kmax; ++k) {
+          if (z <= mih_plus_delta_i + static_cast<double>(k) * al + r) {
+            return (uih * ul_minus_eta_plus_one + static_cast<double>(k)) *
+                   (al - r);
+          }
+
+          if (z <= mih_plus_delta_i + static_cast<double>(k + 1) * al) {
+            return uih * ul_minus_eta_plus_one * (al - r) + z - mih -
+                   a[static_cast<std::size_t>(i)] + cplus_threshold -
+                   static_cast<double>(k + 1) * r;
+          }
+        }
+      }
+    }
+
+    int64_t p = static_cast<int64_t>(
+                    (z - m[static_cast<std::size_t>(cplus_size)]) / al) -
+                1;
+    for (;; ++p) {
+      if (z <= m[static_cast<std::size_t>(cplus_size)] +
+                   static_cast<double>(p) * al + r) {
+        return (u[static_cast<std::size_t>(cplus_size)] *
+                    ul_minus_eta_plus_one +
+                static_cast<double>(p)) *
+               (al - r);
+      }
+
+      if (z <= m[static_cast<std::size_t>(cplus_size)] +
+                   static_cast<double>(p + 1) * al) {
+        return u[static_cast<std::size_t>(cplus_size)] *
+                   ul_minus_eta_plus_one * (al - r) +
+               z - m[static_cast<std::size_t>(cplus_size)] -
+               static_cast<double>(p + 1) * r;
+      }
+    }
+  };
+
+  row.rhs = (upper_l - eta) * r - double(state.lambda);
+  row.integral_support = true;
+  row.integral_coefficients = false;
+  for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
+    const std::size_t pos = static_cast<std::size_t>(k);
+    if (row.vals[pos] == 0.0) continue;
+    if (row.is_integral[pos] == 0) {
+      if (row.vals[pos] < 0.0) {
+        row.integral_support = false;
+      } else {
+        row.vals[pos] = 0.0;
+      }
+      continue;
+    }
+
+    if (cover_flag[pos] != 0) {
+      row.vals[pos] = -phi_l(-row.vals[pos]);
+      row.rhs += row.vals[pos] * row.upper[pos];
+    } else {
+      row.vals[pos] = gamma_l(row.vals[pos]);
+    }
+  }
+
+  return true;
 }
 
 void xtab_erase_positions(XTabRow& row, std::vector<unsigned char>& erase) {
@@ -1416,13 +1978,8 @@ bool xtab_logical_row_bounds(const SimplexResult& simplex,
     double max_activity = 0.0;
     bool min_finite = true;
     bool max_finite = true;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
-             sf.A_row, row);
-         it; ++it) {
-      const int j = static_cast<int>(it.col());
-      if (j < 0 || j >= sf.n_original) continue;
-      const double a = xtab_source_row_coeff(sf, row, j);
-      if (std::abs(a) <= 1e-12) continue;
+    xtab_visit_source_row_terms(sf, row, [&](int j, double a) {
+      if (std::abs(a) <= 1e-12) return;
       const double lb =
           j < sf.lb_shift.size() ? sf.lb_shift[j] : -std::numeric_limits<double>::infinity();
       const double ub =
@@ -1452,7 +2009,7 @@ bool xtab_logical_row_bounds(const SimplexResult& simplex,
           max_finite = false;
         }
       }
-    }
+    });
     return std::pair<double, double>{
         min_finite ? min_activity : -std::numeric_limits<double>::infinity(),
         max_finite ? max_activity : std::numeric_limits<double>::infinity()};
@@ -1515,24 +2072,19 @@ bool xtab_logical_row_is_integer_like(
   }
 
   bool has_structural_coeff = false;
-  for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row,
-                                                                      row);
-       it; ++it) {
-    const int j = static_cast<int>(it.col());
-    if (j < 0 || j >= sf.n_original) {
-      continue;
-    }
+  bool row_is_integral = true;
+  xtab_visit_source_row_terms(sf, row, [&](int j, double unscaled_coeff) {
     if (!transformed_col_is_integer_like(simplex, j, implied_integer_cols)) {
-      return false;
+      row_is_integral = false;
+      return;
     }
-    const double unscaled_coeff = xtab_source_row_coeff(sf, row, j);
-    if (!std::isfinite(unscaled_coeff) ||
-        !is_integral(unscaled_coeff, 1e-8)) {
-      return false;
+    if (!std::isfinite(unscaled_coeff) || !is_integral(unscaled_coeff, 1e-8)) {
+      row_is_integral = false;
+      return;
     }
     has_structural_coeff = true;
-  }
-  return has_structural_coeff;
+  });
+  return row_is_integral && has_structural_coeff;
 }
 
 XTabSourceContext xtab_build_source_context(
@@ -1580,14 +2132,9 @@ XTabSourceContext xtab_build_source_context(
     ctx.lower[col] = lower;
     ctx.upper[col] = upper;
     double activity = 0.0;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(sf.A_row,
-                                                                        row);
-         it; ++it) {
-      const int j = static_cast<int>(it.col());
-      if (j >= 0 && j < n_orig) {
-        activity += xtab_source_row_coeff(sf, row, j) * ctx.solution[j];
-      }
-    }
+    xtab_visit_source_row_terms(sf, row, [&](int j, double value) {
+      activity += value * ctx.solution[j];
+    });
     if (!std::isfinite(activity)) {
       return XTabSourceContext{};
     }
@@ -1779,23 +2326,43 @@ XTabTransformContext xtab_build_transform_context(
   }
   ctx.best_vlb.assign(static_cast<std::size_t>(n_orig), XTabVarBoundExpr{});
   ctx.best_vub.assign(static_cast<std::size_t>(n_orig), XTabVarBoundExpr{});
+  const int trace_vb_col = xtab_varbound_trace_col();
 
   auto add_varbound_expr = [&](int target,
                                int trigger,
                                double coef_orig,
                                double constant_orig,
-                               bool is_lower_bound) {
+                               bool is_lower_bound,
+                               const char* source) {
+    const bool trace = target == trace_vb_col;
+    auto trace_reject = [&](const char* reason) {
+      if (!trace) return;
+      fmt::print(stderr,
+                 "[B&C-XTAB-VB-CAND] target={} trigger={} sense={} "
+                 "source={} reject={} coef={:.17g} constant={:.17g}\n",
+                 target, trigger, is_lower_bound ? "vlb" : "vub",
+                 source != nullptr ? source : "unknown", reason, coef_orig,
+                 constant_orig);
+    };
     bool integer_target = false;
     if (trigger < 0 || trigger >= n_orig || target < 0 ||
         target >= n_orig || target == trigger ||
-        !std::isfinite(coef_orig) || !std::isfinite(constant_orig) ||
-        !xtab_is_binary_trigger_col(simplex, trigger, implied_integer_cols) ||
-        !xtab_can_use_varbound_target(simplex, target,
+        !std::isfinite(coef_orig) || !std::isfinite(constant_orig)) {
+      trace_reject("invalid_input");
+      return;
+    }
+    if (!xtab_is_binary_trigger_col(simplex, trigger, implied_integer_cols)) {
+      trace_reject("trigger_not_binary");
+      return;
+    }
+    if (!xtab_can_use_varbound_target(simplex, target,
                                       implied_integer_cols, &integer_target)) {
+      trace_reject("target_unusable");
       return;
     }
     const double trigger_ub = simplex.form.var_ub[trigger];
     if (!std::isfinite(trigger_ub) || trigger_ub <= 1e-12) {
+      trace_reject("trigger_bad_ub");
       return;
     }
     const double trigger_lb = simplex.form.lb_shift[trigger];
@@ -1807,12 +2374,14 @@ XTabTransformContext xtab_build_transform_context(
                    trigger_lb, trigger_ub_orig);
     if (!std::isfinite(trigger_lb) || !std::isfinite(trigger_ub_orig) ||
         !std::isfinite(trigger_val)) {
+      trace_reject("trigger_bad_value");
       return;
     }
 
     const double target_ub_std = simplex.form.var_ub[target];
     const double target_lb = simplex.form.lb_shift[target];
     if (!std::isfinite(target_lb) || !std::isfinite(target_ub_std)) {
+      trace_reject("target_bad_bounds");
       return;
     }
     const double target_ub =
@@ -1820,10 +2389,12 @@ XTabTransformContext xtab_build_transform_context(
     const double target_val =
         original_space_value(simplex, target, simplex.x_std[target]);
     if (!std::isfinite(target_ub) || !std::isfinite(target_val)) {
+      trace_reject("target_bad_value");
       return;
     }
     const double target_range = std::max(1.0, target_ub - target_lb);
     if (!std::isfinite(target_range) || target_range <= 0.0) {
+      trace_reject("target_bad_range");
       return;
     }
 
@@ -1842,9 +2413,11 @@ XTabTransformContext xtab_build_transform_context(
     y_dist = std::max(1e-9, y_dist);
     const double norm2 = 1.0 + coef_orig * coef_orig;
     if (dist * dist > y_dist * y_dist * norm2 + 1e-12) {
+      trace_reject("bad_vbd_distance");
       return;
     }
     if (integer_target && dist > 1e-7) {
+      trace_reject("integer_target_distance");
       return;
     }
 
@@ -1863,12 +2436,45 @@ XTabTransformContext xtab_build_transform_context(
                                  coef_orig * trigger_ub_orig);
     cand.lift = std::abs(coef_orig) * (trigger_ub_orig - trigger_lb);
     cand.integer_target = integer_target;
+    if (trace) {
+      fmt::print(stderr,
+                 "[B&C-XTAB-VB-CAND] target={} trigger={} sense={} "
+                 "source={} accept coef={:.17g} constant={:.17g} "
+                 "dist={:.17g} scaled={:.17g} min={:.17g} max={:.17g} "
+                 "lift={:.17g} integerTarget={} targetVal={:.17g} "
+                 "triggerVal={:.17g}\n",
+                 target, trigger, is_lower_bound ? "vlb" : "vub",
+                 source != nullptr ? source : "unknown", coef_orig,
+                 constant_orig, cand.dist, cand.scaled_dist, cand.min_value,
+                 cand.max_value, cand.lift, cand.integer_target ? 1 : 0,
+                 target_val, trigger_val);
+    }
     if (is_lower_bound) {
+      XTabVarBoundExpr& best = ctx.best_vlb[static_cast<std::size_t>(target)];
       xtab_update_best_varbound(
-          ctx.best_vlb[static_cast<std::size_t>(target)], cand, true);
+          best, cand, true);
+      if (trace) {
+        fmt::print(stderr,
+                   "[B&C-XTAB-VB-BEST] target={} sense=vlb trigger={} "
+                   "coef={:.17g} constant={:.17g} dist={:.17g} "
+                   "scaled={:.17g} min={:.17g} max={:.17g}\n",
+                   target, best.trigger_col, best.coef, best.constant,
+                   best.dist, best.scaled_dist, best.min_value,
+                   best.max_value);
+      }
     } else {
+      XTabVarBoundExpr& best = ctx.best_vub[static_cast<std::size_t>(target)];
       xtab_update_best_varbound(
-          ctx.best_vub[static_cast<std::size_t>(target)], cand, false);
+          best, cand, false);
+      if (trace) {
+        fmt::print(stderr,
+                   "[B&C-XTAB-VB-BEST] target={} sense=vub trigger={} "
+                   "coef={:.17g} constant={:.17g} dist={:.17g} "
+                   "scaled={:.17g} min={:.17g} max={:.17g}\n",
+                   target, best.trigger_col, best.coef, best.constant,
+                   best.dist, best.scaled_dist, best.min_value,
+                   best.max_value);
+      }
     }
   };
 
@@ -1878,11 +2484,11 @@ XTabTransformContext xtab_build_transform_context(
     for (int target = 0; target < table_cols; ++target) {
       for (const auto& entry : variable_bound_table->vlbs(target)) {
         add_varbound_expr(target, entry.trigger_col, entry.bound.coef,
-                          entry.bound.constant, true);
+                          entry.bound.constant, true, "table");
       }
       for (const auto& entry : variable_bound_table->vubs(target)) {
         add_varbound_expr(target, entry.trigger_col, entry.bound.coef,
-                          entry.bound.constant, false);
+                          entry.bound.constant, false, "table");
       }
     }
   }
@@ -2030,8 +2636,34 @@ XTabTransformContext xtab_build_transform_context(
           xtab_update_best_varbound(
               ctx.best_vub[static_cast<std::size_t>(target)], cand, false);
         }
+        if (target == trace_vb_col) {
+          const XTabVarBoundExpr& best =
+              p->is_lb ? ctx.best_vlb[static_cast<std::size_t>(target)]
+                       : ctx.best_vub[static_cast<std::size_t>(target)];
+          fmt::print(stderr,
+                     "[B&C-XTAB-VB-BEST] target={} sense={} trigger={} "
+                     "source=graph coef={:.17g} constant={:.17g} "
+                     "dist={:.17g} scaled={:.17g} min={:.17g} max={:.17g}\n",
+                     target, p->is_lb ? "vlb" : "vub", best.trigger_col,
+                     best.coef, best.constant, best.dist, best.scaled_dist,
+                     best.min_value, best.max_value);
+        }
       }
     }
+  }
+  if (trace_vb_col >= 0 && trace_vb_col < n_orig) {
+    const XTabVarBoundExpr& vlb =
+        ctx.best_vlb[static_cast<std::size_t>(trace_vb_col)];
+    const XTabVarBoundExpr& vub =
+        ctx.best_vub[static_cast<std::size_t>(trace_vb_col)];
+    fmt::print(stderr,
+               "[B&C-XTAB-VB-FINAL] target={} vlbValid={} vlbTrigger={} "
+               "vlbCoef={:.17g} vlbConst={:.17g} vlbDist={:.17g} "
+               "vubValid={} vubTrigger={} vubCoef={:.17g} "
+               "vubConst={:.17g} vubDist={:.17g}\n",
+               trace_vb_col, vlb.valid ? 1 : 0, vlb.trigger_col, vlb.coef,
+               vlb.constant, vlb.dist, vub.valid ? 1 : 0, vub.trigger_col,
+               vub.coef, vub.constant, vub.dist);
   }
   for (const auto& vb : ctx.best_vlb) {
     if (vb.valid) {
@@ -2060,8 +2692,10 @@ bool xtab_transform_base_row(
     std::uint64_t* vb_trigger_terms_out,
     bool* integers_positive_out,
     bool initial_integers_positive,
+    double feastol,
     XTabRow& row) {
   (void)simplex;
+  feastol = std::max(0.0, feastol);
   if (vb_substitutions_out != nullptr) *vb_substitutions_out = 0;
   if (vb_trigger_terms_out != nullptr) *vb_trigger_terms_out = 0;
   if (integers_positive_out != nullptr) *integers_positive_out = true;
@@ -2076,7 +2710,7 @@ bool xtab_transform_base_row(
   }
   (void)implied_integer_cols;
   row = XTabRow{};
-  row.rhs = rhs_std;
+  HighsCDouble rhs_acc = rhs_std;
   row.inds.reserve(static_cast<std::size_t>(std::min(n_src, 1024)));
   row.vals.reserve(row.inds.capacity());
   row.upper.reserve(row.inds.capacity());
@@ -2085,32 +2719,6 @@ bool xtab_transform_base_row(
   row.varbound_expr.reserve(row.inds.capacity());
   row.complemented.reserve(row.inds.capacity());
   row.is_integral.reserve(row.inds.capacity());
-
-  struct XTabTransformTerm {
-    int col{-1};
-    double coeff{0.0};
-    bool has_type{false};
-    XTabBoundType type{XTabBoundType::SimpleLb};
-    XTabVarBoundExpr varbound;
-  };
-
-  std::vector<XTabTransformTerm> transformed_terms;
-  transformed_terms.reserve(static_cast<std::size_t>(std::min(n_src, 2048)));
-
-  auto append_term = [&](int col,
-                         double coeff,
-                         bool has_type = false,
-                         XTabBoundType type = XTabBoundType::SimpleLb,
-                         const XTabVarBoundExpr* varbound = nullptr) {
-    if (std::abs(coeff) <= 1e-12) return;
-    XTabTransformTerm term;
-    term.col = col;
-    term.coeff = coeff;
-    term.has_type = has_type;
-    term.type = type;
-    if (varbound != nullptr) term.varbound = *varbound;
-    transformed_terms.push_back(term);
-  };
 
   auto choose_bound_type =
       [&](int col,
@@ -2145,7 +2753,7 @@ bool xtab_transform_base_row(
     const double ub_dist = vub != nullptr ? vub->dist : simple_ub_dist;
     const bool integer_like =
         source_context.integral[static_cast<std::size_t>(col)] != 0;
-    constexpr double tol = 1e-8;
+    const double tol = feastol;
 
     auto simple_type = [&]() {
       if (!std::isfinite(simple_lb_dist)) {
@@ -2228,237 +2836,318 @@ bool xtab_transform_base_row(
     return XTabBoundType::SimpleUb;
   };
 
-  auto transform_column = [&](int j) -> bool {
+  std::vector<int> inds;
+  std::vector<double> vals;
+  inds.reserve(active_cols != nullptr ? active_cols->size()
+                                      : static_cast<std::size_t>(n_src));
+  vals.reserve(inds.capacity());
+  auto append_input_term = [&](int j) -> bool {
     if (j < 0 || j >= n_src) {
       return false;
     }
     const double a = coeff_std[j];
-    if (std::abs(a) <= 1e-12) {
-      return true;
-    }
     if (!std::isfinite(a)) {
       return false;
     }
-    const double lb = source_context.lower[j];
-    const double ub = source_context.upper[j];
-    const double sol = source_context.solution[j];
-    if (!std::isfinite(sol) ||
-        (!std::isfinite(lb) && !std::isfinite(ub))) {
-      return false;
-    }
-    if (std::isfinite(lb) && std::isfinite(ub) && ub - lb <= 1e-12) {
-      row.rhs -= std::min(lb, ub) * a;
-      return true;
-    }
-
-    XTabVarBoundExpr chosen_varbound;
-    const XTabBoundType bound_type =
-        choose_bound_type(j, a, chosen_varbound);
-
-    switch (bound_type) {
-      case XTabBoundType::SimpleLb:
-        if (!std::isfinite(lb)) {
-          return false;
-        }
-        if (a > 0.0) {
-          row.rhs -= a * lb;
-          return true;
-        }
-        append_term(j, a, true, bound_type);
-        break;
-      case XTabBoundType::SimpleUb:
-        if (!std::isfinite(ub)) {
-          return false;
-        }
-        if (a < 0.0) {
-          row.rhs -= a * ub;
-          return true;
-        }
-        append_term(j, a, true, bound_type);
-        break;
-      case XTabBoundType::VariableLb:
-        if (!chosen_varbound.valid) {
-          return false;
-        }
-        if (vb_substitutions_out != nullptr) {
-          ++(*vb_substitutions_out);
-        }
-        row.rhs -= a * chosen_varbound.constant;
-        if (std::abs(a * chosen_varbound.coef) > 1e-12 &&
-            chosen_varbound.trigger_col >= 0 &&
-            chosen_varbound.trigger_col < n_orig) {
-          append_term(chosen_varbound.trigger_col,
-                      a * chosen_varbound.coef);
-          if (vb_trigger_terms_out != nullptr) {
-            ++(*vb_trigger_terms_out);
-          }
-        }
-        if (a > 0.0) {
-          return true;
-        }
-        append_term(j, a, true, bound_type, &chosen_varbound);
-        break;
-      case XTabBoundType::VariableUb: {
-        if (!chosen_varbound.valid) {
-          return false;
-        }
-        if (vb_substitutions_out != nullptr) {
-          ++(*vb_substitutions_out);
-        }
-        row.rhs -= a * chosen_varbound.constant;
-        if (std::abs(a * chosen_varbound.coef) > 1e-12 &&
-            chosen_varbound.trigger_col >= 0 &&
-            chosen_varbound.trigger_col < n_orig) {
-          append_term(chosen_varbound.trigger_col,
-                      a * chosen_varbound.coef);
-          if (vb_trigger_terms_out != nullptr) {
-            ++(*vb_trigger_terms_out);
-          }
-        }
-        const double transformed_coeff = -a;
-        if (transformed_coeff > 0.0) {
-          return true;
-        }
-        append_term(j, transformed_coeff, true, bound_type,
-                    &chosen_varbound);
-        break;
-      }
+    if (std::abs(a) > 1e-12) {
+      inds.push_back(j);
+      vals.push_back(a);
     }
     return true;
   };
 
   if (active_cols != nullptr) {
     for (int j : *active_cols) {
-      if (!transform_column(j)) {
+      if (!append_input_term(j)) {
         return false;
       }
     }
   } else {
     for (int j = 0; j < n_src; ++j) {
-      if (!transform_column(j)) {
+      if (!append_input_term(j)) {
         return false;
       }
     }
   }
+  int num_nz = static_cast<int>(inds.size());
+  if (num_nz == 0) return false;
 
-  if (transformed_terms.empty()) {
-    return false;
-  }
-  std::sort(transformed_terms.begin(), transformed_terms.end(),
-            [](const auto& lhs, const auto& rhs) {
-              return lhs.col < rhs.col;
-            });
+  std::vector<XTabBoundType> bound_types(static_cast<std::size_t>(n_src),
+                                         XTabBoundType::SimpleLb);
+  std::vector<XTabVarBoundExpr> bound_varbounds(static_cast<std::size_t>(n_src));
+  XTabSparseVectorSum vector_sum(n_src);
 
-  bool integers_positive = initial_integers_positive;
-  for (std::size_t pos = 0; pos < transformed_terms.size();) {
-    const int col = transformed_terms[pos].col;
-    double coeff = 0.0;
-    bool has_type = false;
-    XTabBoundType bound_type = XTabBoundType::SimpleLb;
-    XTabVarBoundExpr varbound;
-    while (pos < transformed_terms.size() &&
-           transformed_terms[pos].col == col) {
-      coeff += transformed_terms[pos].coeff;
-      if (transformed_terms[pos].has_type) {
-        if (!has_type) {
-          has_type = true;
-          bound_type = transformed_terms[pos].type;
-          varbound = transformed_terms[pos].varbound;
-        } else if (bound_type != transformed_terms[pos].type) {
-          return false;
-        }
-      }
-      ++pos;
-    }
-    if (std::abs(coeff) <= 1e-12) {
-      continue;
-    }
-    if (col < 0 || col >= n_src) {
-      return false;
-    }
+  auto remove_term = [&](int pos) {
+    --num_nz;
+    inds[static_cast<std::size_t>(pos)] =
+        inds[static_cast<std::size_t>(num_nz)];
+    vals[static_cast<std::size_t>(pos)] =
+        vals[static_cast<std::size_t>(num_nz)];
+    inds[static_cast<std::size_t>(num_nz)] = 0;
+    vals[static_cast<std::size_t>(num_nz)] = 0.0;
+  };
+
+  auto simple_lb_dist = [&](int col) {
+    const double lb = source_context.lower[col];
+    const double sol = source_context.solution[col];
+    if (!std::isfinite(lb)) return std::numeric_limits<double>::infinity();
+    const double dist = sol - lb;
+    return dist <= feastol ? 0.0 : std::max(0.0, dist);
+  };
+  auto simple_ub_dist = [&](int col) {
+    const double ub = source_context.upper[col];
+    const double sol = source_context.solution[col];
+    if (!std::isfinite(ub)) return std::numeric_limits<double>::infinity();
+    const double dist = ub - sol;
+    return dist <= feastol ? 0.0 : std::max(0.0, dist);
+  };
+
+  for (int i = 0; i < num_nz;) {
+    const int col = inds[static_cast<std::size_t>(i)];
+    double& val = vals[static_cast<std::size_t>(i)];
     const double lb = source_context.lower[col];
     const double ub = source_context.upper[col];
     const double sol = source_context.solution[col];
-    if (!std::isfinite(sol)) {
+    if (!std::isfinite(sol) ||
+        (!std::isfinite(lb) && !std::isfinite(ub))) {
       return false;
     }
+    if (std::isfinite(lb) && std::isfinite(ub) && ub - lb < 1e-9) {
+      rhs_acc -= std::min(lb, ub) * val;
+      remove_term(i);
+      continue;
+    }
+
+    XTabVarBoundExpr chosen_varbound;
     const bool integer_like =
         source_context.integral[static_cast<std::size_t>(col)] != 0;
-    if (!has_type) {
-      if (integer_like) {
-        if (initial_integers_positive) {
-          if (!std::isfinite(lb)) {
-            bound_type = XTabBoundType::SimpleUb;
-          } else if (coeff > 0.0 || !std::isfinite(ub)) {
-            bound_type = XTabBoundType::SimpleLb;
-          } else {
-            bound_type = XTabBoundType::SimpleUb;
-          }
+    if (integer_like) {
+      const double slb = simple_lb_dist(col);
+      const double sub = simple_ub_dist(col);
+      const double simple_bound_dist = std::min(slb, sub);
+      const bool have_vlb =
+          transform_context != nullptr && col < n_orig &&
+          static_cast<std::size_t>(col) < transform_context->best_vlb.size() &&
+          transform_context->best_vlb[static_cast<std::size_t>(col)].valid;
+      const bool have_vub =
+          transform_context != nullptr && col < n_orig &&
+          static_cast<std::size_t>(col) < transform_context->best_vub.size() &&
+          transform_context->best_vub[static_cast<std::size_t>(col)].valid;
+      double bdist = simple_bound_dist;
+      if (have_vlb) {
+        bdist = std::min(
+            bdist, transform_context->best_vlb[static_cast<std::size_t>(col)].dist);
+      }
+      if (have_vub) {
+        bdist = std::min(
+            bdist, transform_context->best_vub[static_cast<std::size_t>(col)].dist);
+      }
+      XTabBoundType type = XTabBoundType::SimpleLb;
+      const bool use_simple =
+          (std::isfinite(ub) && std::isfinite(lb) && ub - lb <= 1.5 + 1e-9) ||
+          bdist != 0.0 || slb == 0.0 || sub == 0.0;
+      if (use_simple) {
+        if (slb < sub - feastol) {
+          type = XTabBoundType::SimpleLb;
+        } else if (sub < slb - feastol) {
+          type = XTabBoundType::SimpleUb;
+        } else if (val > 0.0) {
+          type = XTabBoundType::SimpleLb;
         } else {
-          const double lb_dist =
-              std::isfinite(lb) ? std::max(0.0, sol - lb)
-                                : std::numeric_limits<double>::infinity();
-          const double ub_dist =
-              std::isfinite(ub) ? std::max(0.0, ub - sol)
-                                : std::numeric_limits<double>::infinity();
-          bound_type = lb_dist < ub_dist ? XTabBoundType::SimpleLb
-                                         : XTabBoundType::SimpleUb;
+          type = XTabBoundType::SimpleUb;
         }
-      } else {
-        if (!std::isfinite(lb)) {
-          bound_type = XTabBoundType::SimpleUb;
-        } else if (!std::isfinite(ub)) {
-          bound_type = XTabBoundType::SimpleLb;
-        } else {
-          bound_type = coeff >= 0.0 ? XTabBoundType::SimpleLb
-                                    : XTabBoundType::SimpleUb;
-        }
+        bound_types[static_cast<std::size_t>(col)] = type;
+        ++i;
+        continue;
       }
     }
 
-    double transformed_coeff = coeff;
+    const XTabBoundType bound_type = choose_bound_type(col, val, chosen_varbound);
+    bound_types[static_cast<std::size_t>(col)] = bound_type;
+    if (chosen_varbound.valid) {
+      bound_varbounds[static_cast<std::size_t>(col)] = chosen_varbound;
+    }
+
+    switch (bound_type) {
+      case XTabBoundType::SimpleLb:
+        if (!std::isfinite(lb)) return false;
+        if (val > 0.0) {
+          rhs_acc -= lb * val;
+          remove_term(i);
+          continue;
+        }
+        break;
+      case XTabBoundType::SimpleUb:
+        if (!std::isfinite(ub)) return false;
+        if (val < 0.0) {
+          rhs_acc -= ub * val;
+          remove_term(i);
+          continue;
+        }
+        break;
+      case XTabBoundType::VariableLb:
+        if (!chosen_varbound.valid) return false;
+        if (vb_substitutions_out != nullptr) ++(*vb_substitutions_out);
+        rhs_acc -= chosen_varbound.constant * val;
+        if (chosen_varbound.trigger_col >= 0 &&
+            chosen_varbound.trigger_col < n_orig &&
+            std::abs(val * chosen_varbound.coef) > 1e-12) {
+          if (chosen_varbound.trigger_col == xtab_transform_trace_col()) {
+            fmt::print(stderr,
+                       "[B&C-TRANSFORM-TERM] target={} source={} type=vlb "
+                       "val={:.17g} coef={:.17g} constant={:.17g} "
+                       "contrib={:.17g} dist={:.17g}\n",
+                       chosen_varbound.trigger_col, col, val,
+                       chosen_varbound.coef, chosen_varbound.constant,
+                       val * chosen_varbound.coef, chosen_varbound.dist);
+          }
+          vector_sum.add(chosen_varbound.trigger_col,
+                         val * chosen_varbound.coef);
+          if (vb_trigger_terms_out != nullptr) ++(*vb_trigger_terms_out);
+        }
+        if (val > 0.0) {
+          remove_term(i);
+          continue;
+        }
+        break;
+      case XTabBoundType::VariableUb:
+        if (!chosen_varbound.valid) return false;
+        if (vb_substitutions_out != nullptr) ++(*vb_substitutions_out);
+        rhs_acc -= chosen_varbound.constant * val;
+        if (chosen_varbound.trigger_col >= 0 &&
+            chosen_varbound.trigger_col < n_orig &&
+            std::abs(val * chosen_varbound.coef) > 1e-12) {
+          if (chosen_varbound.trigger_col == xtab_transform_trace_col()) {
+            fmt::print(stderr,
+                       "[B&C-TRANSFORM-TERM] target={} source={} type=vub "
+                       "val={:.17g} coef={:.17g} constant={:.17g} "
+                       "contrib={:.17g} dist={:.17g}\n",
+                       chosen_varbound.trigger_col, col, val,
+                       chosen_varbound.coef, chosen_varbound.constant,
+                       val * chosen_varbound.coef, chosen_varbound.dist);
+          }
+          vector_sum.add(chosen_varbound.trigger_col,
+                         val * chosen_varbound.coef);
+          if (vb_trigger_terms_out != nullptr) ++(*vb_trigger_terms_out);
+        }
+        val = -val;
+        if (val > 0.0) {
+          remove_term(i);
+          continue;
+        }
+        break;
+    }
+    ++i;
+  }
+
+  if (!vector_sum.empty()) {
+    for (int i = 0; i < num_nz; ++i) {
+      if (vals[static_cast<std::size_t>(i)] != 0.0) {
+        vector_sum.add(inds[static_cast<std::size_t>(i)],
+                       vals[static_cast<std::size_t>(i)]);
+      }
+    }
+    vector_sum.cleanup([](int, double value) {
+      return std::abs(value) <= 1e-9;
+    });
+    inds = vector_sum.nonzeros;
+    num_nz = static_cast<int>(inds.size());
+    vals.resize(static_cast<std::size_t>(num_nz));
+    for (int j = 0; j < num_nz; ++j) {
+      vals[static_cast<std::size_t>(j)] =
+          vector_sum.values[static_cast<std::size_t>(inds[static_cast<std::size_t>(j)])];
+    }
+  } else {
+    inds.resize(static_cast<std::size_t>(num_nz));
+    vals.resize(static_cast<std::size_t>(num_nz));
+  }
+
+  bool integers_positive = initial_integers_positive;
+  for (int j = 0; j < num_nz; ++j) {
+    const int col = inds[static_cast<std::size_t>(j)];
+    if (col < 0 || col >= n_src) return false;
+    if (source_context.integral[static_cast<std::size_t>(col)] == 0) continue;
+    if (bound_types[static_cast<std::size_t>(col)] ==
+            XTabBoundType::VariableLb ||
+        bound_types[static_cast<std::size_t>(col)] ==
+            XTabBoundType::VariableUb) {
+      continue;
+    }
+    const double lb = source_context.lower[col];
+    const double ub = source_context.upper[col];
+    const double val = vals[static_cast<std::size_t>(j)];
+    if (initial_integers_positive) {
+      if ((std::isfinite(lb) && val > 0.0) || !std::isfinite(ub)) {
+        bound_types[static_cast<std::size_t>(col)] = XTabBoundType::SimpleLb;
+      } else {
+        bound_types[static_cast<std::size_t>(col)] = XTabBoundType::SimpleUb;
+      }
+    } else if (simple_lb_dist(col) < simple_ub_dist(col)) {
+      bound_types[static_cast<std::size_t>(col)] = XTabBoundType::SimpleLb;
+    } else {
+      bound_types[static_cast<std::size_t>(col)] = XTabBoundType::SimpleUb;
+    }
+  }
+
+  for (int j = 0; j < num_nz; ++j) {
+    const int col = inds[static_cast<std::size_t>(j)];
+    double transformed_coeff = vals[static_cast<std::size_t>(j)];
+    if (std::abs(transformed_coeff) <= 1e-12) continue;
+    const double lb = source_context.lower[col];
+    const double ub = source_context.upper[col];
+    const double sol = source_context.solution[col];
+    if (!std::isfinite(sol)) return false;
+    XTabBoundType bound_type = bound_types[static_cast<std::size_t>(col)];
+    const XTabVarBoundExpr& varbound =
+        bound_varbounds[static_cast<std::size_t>(col)];
     double upper_range = std::numeric_limits<double>::infinity();
     if (std::isfinite(lb) && std::isfinite(ub)) {
       upper_range = std::max(0.0, ub - lb);
     }
+    auto clipped_dist = [feastol](double dist) {
+      if (dist <= feastol) return 0.0;
+      return std::max(0.0, dist);
+    };
     double solval = std::numeric_limits<double>::infinity();
     switch (bound_type) {
       case XTabBoundType::SimpleLb:
         if (!std::isfinite(lb)) {
           return false;
         }
-        row.rhs -= lb * transformed_coeff;
-        solval = std::max(0.0, sol - lb);
+        rhs_acc -= lb * transformed_coeff;
+        solval = clipped_dist(sol - lb);
         break;
       case XTabBoundType::SimpleUb:
         if (!std::isfinite(ub)) {
           return false;
         }
-        row.rhs -= ub * transformed_coeff;
+        rhs_acc -= ub * transformed_coeff;
         transformed_coeff = -transformed_coeff;
-        solval = std::max(0.0, ub - sol);
+        solval = clipped_dist(ub - sol);
         break;
       case XTabBoundType::VariableLb:
         if (!varbound.valid) {
           return false;
         }
-        solval = varbound.dist;
+        solval = clipped_dist(varbound.dist);
         break;
       case XTabBoundType::VariableUb:
         if (!varbound.valid) {
           return false;
         }
-        solval = varbound.dist;
+        solval = clipped_dist(varbound.dist);
         break;
     }
     if (std::abs(transformed_coeff) <= 1e-12) {
       continue;
     }
+    const bool integer_like =
+        source_context.integral[static_cast<std::size_t>(col)] != 0;
     row.inds.push_back(col);
     row.vals.push_back(transformed_coeff);
     row.bound_type.push_back(bound_type);
     row.varbound_expr.push_back(varbound);
-    row.solval.push_back(std::max(0.0, solval));
+    row.solval.push_back(solval);
     row.upper.push_back(upper_range);
     row.complemented.push_back(0);
     row.is_integral.push_back(integer_like ? 1 : 0);
@@ -2469,15 +3158,17 @@ bool xtab_transform_base_row(
   if (integers_positive_out != nullptr) {
     *integers_positive_out = integers_positive;
   }
+  row.rhs = double(rhs_acc);
   return !row.inds.empty() && std::isfinite(row.rhs);
 }
 
 bool xtab_preprocess_base_inequality(const SimplexResult& simplex,
                                      XTabRow& row,
+                                     double feastol,
                                      bool& has_unbounded_ints,
                                      bool& has_general_ints,
                                      bool& has_continuous) {
-  constexpr double feastol = 1e-8;
+  feastol = std::max(0.0, feastol);
   has_unbounded_ints = false;
   has_general_ints = false;
   has_continuous = false;
@@ -2595,9 +3286,13 @@ bool xtab_preprocess_base_inequality(const SimplexResult& simplex,
 }
 
 bool xtab_cmir_cut_generation(XTabRow& row,
+                              double feastol,
                               double min_efficacy,
-                              XTabCmirTrace* trace = nullptr) {
-  constexpr double feastol = 1e-8;
+                              XTabCmirTrace* trace = nullptr,
+                              bool only_initial_cmir_scale = false,
+                              std::uint64_t trace_id = 0,
+                              const char* trace_family = nullptr) {
+  feastol = std::max(0.0, feastol);
   constexpr double tiny = 1e-14;
   constexpr double f0_min = 0.005;
   constexpr double f0_max = 0.995;
@@ -2608,6 +3303,8 @@ bool xtab_cmir_cut_generation(XTabRow& row,
   if (trace != nullptr) {
     *trace = XTabCmirTrace{};
   }
+  row.integral_support = false;
+  row.integral_coefficients = false;
 
   std::vector<int> integer_inds;
   std::vector<double> deltas;
@@ -2624,6 +3321,9 @@ bool xtab_cmir_cut_generation(XTabRow& row,
       if (std::isfinite(row.upper[pos]) &&
           row.upper[pos] < 2.0 * row.solval[pos]) {
         xtab_flip_complementation(row, k);
+      }
+      if (only_initial_cmir_scale) {
+        continue;
       }
       if (row.solval[pos] > feastol) {
         const double delta = std::abs(row.vals[pos]);
@@ -2660,7 +3360,9 @@ bool xtab_cmir_cut_generation(XTabRow& row,
   }
 
   deltas.push_back(std::min(1.0, row.initial_scale));
-  deltas.push_back(max_abs_delta + std::min(1.0, row.initial_scale));
+  if (!only_initial_cmir_scale) {
+    deltas.push_back(max_abs_delta + std::min(1.0, row.initial_scale));
+  }
   std::sort(deltas.begin(), deltas.end());
   double cur_delta = deltas.empty() ? 0.0 : deltas.front();
   for (std::size_t i = 1; i < deltas.size(); ++i) {
@@ -2674,10 +3376,23 @@ bool xtab_cmir_cut_generation(XTabRow& row,
   if (trace != nullptr) {
     trace->initial_delta_count = static_cast<int>(deltas.size());
   }
+  const bool delta_trace = trace_id != 0 && xtab_cmir_delta_trace_enabled();
+  if (delta_trace) {
+    fmt::memory_buffer buffer;
+    for (std::size_t i = 0; i < deltas.size(); ++i) {
+      if (i > 0) fmt::format_to(std::back_inserter(buffer), ",");
+      fmt::format_to(std::back_inserter(buffer), "{:.17g}", deltas[i]);
+    }
+    fmt::print(stderr,
+               "[B&C-XROW] id={} family={} stage=cmir_deltas feastol={:.17g} "
+               "initialScale={:.17g} deltas=[{}]\n",
+               trace_id, trace_family == nullptr ? "" : trace_family,
+               feastol, row.initial_scale, fmt::to_string(buffer));
+  }
 
   double best_delta = -1.0;
   double best_efficacy = min_efficacy;
-  auto evaluate_delta = [&](double delta) -> double {
+  auto evaluate_delta = [&](const char* phase, double delta) -> double {
     if (trace != nullptr) ++trace->tested_delta_count;
     if (!(delta > 0.0) || !std::isfinite(delta)) {
       return -std::numeric_limits<double>::infinity();
@@ -2709,11 +3424,17 @@ bool xtab_cmir_cut_generation(XTabRow& row,
     if (!(norm_sq > 0.0)) {
       return -std::numeric_limits<double>::infinity();
     }
-    return violation / std::sqrt(norm_sq);
+    const double efficacy = violation / std::sqrt(norm_sq);
+    if (delta_trace) {
+      xtab_trace_cmir_delta(trace_id, trace_family, phase, delta, scale,
+                            down_rhs, f0, violation, norm_sq, efficacy,
+                            best_efficacy);
+    }
+    return efficacy;
   };
 
   for (double delta : deltas) {
-    const double efficacy = evaluate_delta(delta);
+    const double efficacy = evaluate_delta("candidate", delta);
     if (efficacy > best_efficacy) {
       best_delta = delta;
       best_efficacy = efficacy;
@@ -2723,10 +3444,13 @@ bool xtab_cmir_cut_generation(XTabRow& row,
     return false;
   }
 
-  for (int k = 1; k <= 3; ++k) {
+  for (int k = 1; !only_initial_cmir_scale && k <= 3; ++k) {
     const double delta = best_delta * static_cast<double>(1 << k);
-    const double efficacy = evaluate_delta(delta);
-    if (efficacy > best_efficacy) {
+    const double efficacy = evaluate_delta("scale2", delta);
+    const double efficacy_noise =
+        1e-15 * std::max(1.0, std::abs(best_efficacy));
+    const bool first_doubled_tie = k == 1 && efficacy == best_efficacy;
+    if (efficacy > best_efficacy + efficacy_noise || first_doubled_tie) {
       best_delta = delta;
       best_efficacy = efficacy;
     }
@@ -2738,7 +3462,7 @@ bool xtab_cmir_cut_generation(XTabRow& row,
       continue;
     }
     xtab_flip_complementation(row, k);
-    const double efficacy = evaluate_delta(best_delta);
+    const double efficacy = evaluate_delta("flip", best_delta);
     if (efficacy > best_efficacy) {
       best_efficacy = efficacy;
     } else {
@@ -2746,16 +3470,18 @@ bool xtab_cmir_cut_generation(XTabRow& row,
     }
   }
 
-  const double scale = 1.0 / best_delta;
-  const double scaled_rhs = row.rhs * scale;
-  const double down_rhs = std::floor(scaled_rhs);
-  const double f0 = scaled_rhs - down_rhs;
-  const double inv_one_minus = 1.0 / (1.0 - f0);
+  const HighsCDouble scale = 1.0 / HighsCDouble(best_delta);
+  const HighsCDouble scaled_rhs = row.rhs * scale;
+  const double down_rhs = std::floor(double(scaled_rhs));
+  const HighsCDouble f0 = scaled_rhs - down_rhs;
+  const HighsCDouble inv_one_minus = 1.0 / (1.0 - f0);
   row.rhs = down_rhs * best_delta;
+  row.integral_support = true;
+  row.integral_coefficients = false;
   if (trace != nullptr) {
     trace->best_delta = best_delta;
     trace->best_efficacy = best_efficacy;
-    trace->final_f0 = f0;
+    trace->final_f0 = double(f0);
     trace->final_rhs = row.rhs;
     trace->accepted = true;
   }
@@ -2768,18 +3494,111 @@ bool xtab_cmir_cut_generation(XTabRow& row,
       if (row.vals[pos] > 0.0) {
         row.vals[pos] = 0.0;
       } else {
-        row.vals[pos] *= inv_one_minus;
+        row.vals[pos] = double(row.vals[pos] * inv_one_minus);
+        row.integral_support = false;
       }
     } else {
-      const double scaled_a = row.vals[pos] * scale;
-      const double down_a = std::floor(scaled_a + tiny);
-      const double fj = scaled_a - down_a;
-      double aj = down_a;
+      const HighsCDouble scaled_a = scale * row.vals[pos];
+      const double down_a = std::floor(double(scaled_a + tiny));
+      const HighsCDouble fj = scaled_a - down_a;
+      HighsCDouble aj = down_a;
       if (fj > f0) {
         aj += (fj - f0) * inv_one_minus;
       }
-      row.vals[pos] = aj * best_delta;
+      row.vals[pos] = double(aj * best_delta);
     }
+  }
+  return true;
+}
+
+bool xtab_try_generate_cut(XTabRow& row,
+                           bool has_unbounded_ints,
+                           bool has_general_ints,
+                           bool has_continuous,
+                           double feastol,
+                           double min_efficacy,
+                           int random_tiebreaker,
+                           XTabCutgenRandom* cutgen_random,
+                           XTabCmirTrace* trace = nullptr,
+                           bool only_initial_cmir_scale = false,
+                           std::uint64_t trace_id = 0,
+                           const char* trace_family = nullptr) {
+  if (trace != nullptr) *trace = XTabCmirTrace{};
+  if (has_unbounded_ints) {
+    return xtab_cmir_cut_generation(row, feastol, min_efficacy, trace,
+                                    only_initial_cmir_scale, trace_id,
+                                    trace_family);
+  }
+
+  const XTabRow saved_row = row;
+  XTabLiftedCoverState cover_state;
+  bool lifted_success = false;
+  bool saved_integral_support = false;
+  bool saved_integral_coefficients = false;
+  double min_mir_efficacy = min_efficacy;
+  XTabRow lifted_row;
+
+  do {
+    if (!xtab_determine_cover(row, feastol, cutgen_random, random_tiebreaker,
+                              cover_state)) {
+      break;
+    }
+
+    if (!has_continuous && !has_general_ints) {
+      xtab_separate_lifted_knapsack_cover(row, cover_state, feastol, 1e-12);
+      lifted_success = true;
+    } else if (has_general_ints) {
+      lifted_success =
+          xtab_separate_lifted_mixed_integer_cover(row, cover_state, feastol,
+                                                   1e-12);
+    } else {
+      lifted_success =
+          xtab_separate_lifted_mixed_binary_cover(row, cover_state, 1e-12);
+    }
+  } while (false);
+
+  if (lifted_success) {
+    saved_integral_support = row.integral_support;
+    saved_integral_coefficients = row.integral_coefficients;
+
+    double violation = -row.rhs;
+    double norm_sq = 0.0;
+    for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
+      xtab_update_violation_and_norm(row, k,
+                                     row.vals[static_cast<std::size_t>(k)],
+                                     violation, norm_sq, feastol);
+    }
+    const double efficacy =
+        norm_sq > 0.0 ? violation / std::sqrt(norm_sq)
+                      : -std::numeric_limits<double>::infinity();
+    if (efficacy <= min_efficacy) {
+      lifted_success = false;
+    } else {
+      min_mir_efficacy += efficacy;
+      lifted_row = row;
+    }
+  }
+
+  row = saved_row;
+  XTabCmirTrace cmir_trace;
+  if (xtab_cmir_cut_generation(row, feastol, min_mir_efficacy, &cmir_trace,
+                               only_initial_cmir_scale, trace_id,
+                               trace_family)) {
+    if (trace != nullptr) *trace = cmir_trace;
+    return true;
+  }
+
+  if (!lifted_success) {
+    if (trace != nullptr) *trace = cmir_trace;
+    return false;
+  }
+
+  row = std::move(lifted_row);
+  row.integral_support = saved_integral_support;
+  row.integral_coefficients = saved_integral_coefficients;
+  if (trace != nullptr) {
+    *trace = cmir_trace;
+    trace->lifted_accepted = true;
   }
   return true;
 }
@@ -2796,21 +3615,37 @@ bool xtab_untransform_cut(const SimplexResult& simplex,
       source_context.upper.size() != n_src) {
     return false;
   }
-  Eigen::VectorXd std_coeff = Eigen::VectorXd::Zero(n_orig);
-  double rhs = transformed_cut.rhs;
+  std::vector<HighsCDouble> std_coeff_acc(static_cast<std::size_t>(n_orig));
+  std::vector<int> nonzero_cols;
+  nonzero_cols.reserve(static_cast<std::size_t>(std::min(n_orig, n_src)));
+  HighsCDouble rhs = transformed_cut.rhs;
+
+  auto add_coeff = [&](int col, double value) {
+    if (col < 0 || col >= n_orig || value == 0.0) return;
+    HighsCDouble& acc = std_coeff_acc[static_cast<std::size_t>(col)];
+    if (acc != 0.0) {
+      acc += value;
+    } else {
+      acc = value;
+      nonzero_cols.push_back(col);
+    }
+    if (acc == 0.0) {
+      acc = (std::numeric_limits<double>::min)();
+    }
+  };
 
   auto add_logical_row = [&](int row, double scale) -> bool {
     if (row < 0 || row >= simplex.form.A_row.rows()) {
       return false;
     }
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
-             simplex.form.A_row, row);
-         it; ++it) {
-      const int c = static_cast<int>(it.col());
-      if (c >= 0 && c < n_orig) {
-        std_coeff[c] += scale * xtab_source_row_coeff(simplex.form, row, c);
-      }
-    }
+    // Use xtab_visit_source_row_terms so that HiGHS-presolved rows are read
+    // from sf.source_row_index/value (original, unscaled) rather than from
+    // sf.A_row (scaled/presolved).  For non-presolved rows the two paths are
+    // equivalent; for presolved rows sf.A_row has different structure.
+    xtab_visit_source_row_terms(
+        simplex.form, row, [&](int c, double unscaled_coeff) {
+          add_coeff(c, scale * unscaled_coeff);
+        });
     return true;
   };
 
@@ -2843,7 +3678,7 @@ bool xtab_untransform_cut(const SimplexResult& simplex,
             return false;
           }
           rhs += val * lower;
-          std_coeff[col] += val;
+          add_coeff(col, val);
         }
         break;
       case XTabBoundType::SimpleUb: {
@@ -2858,7 +3693,7 @@ bool xtab_untransform_cut(const SimplexResult& simplex,
             return false;
           }
         } else {
-          std_coeff[col] -= val;
+          add_coeff(col, -val);
         }
         break;
       }
@@ -2871,8 +3706,8 @@ bool xtab_untransform_cut(const SimplexResult& simplex,
           return false;
         }
         rhs += vb.constant * val;
-        std_coeff[vb.trigger_col] -= val * vb.coef;
-        std_coeff[col] += val;
+        add_coeff(vb.trigger_col, -val * vb.coef);
+        add_coeff(col, val);
         break;
       }
       case XTabBoundType::VariableUb: {
@@ -2884,21 +3719,24 @@ bool xtab_untransform_cut(const SimplexResult& simplex,
           return false;
         }
         rhs -= vb.constant * val;
-        std_coeff[vb.trigger_col] += val * vb.coef;
-        std_coeff[col] -= val;
+        add_coeff(vb.trigger_col, val * vb.coef);
+        add_coeff(col, -val);
         break;
       }
     }
   }
 
-  Eigen::VectorXd coeff_orig = std_coeff.head(n_orig);
+  Eigen::VectorXd coeff_orig = Eigen::VectorXd::Zero(n_orig);
+  for (int col : nonzero_cols) {
+    coeff_orig[col] = double(std_coeff_acc[static_cast<std::size_t>(col)]);
+  }
 
-  if (!std::isfinite(rhs) || !coeff_orig.allFinite() ||
+  if (!std::isfinite(double(rhs)) || !coeff_orig.allFinite() ||
       coeff_orig.norm() <= 1e-12) {
     return false;
   }
   cut_le = std::move(coeff_orig);
-  rhs_le = rhs;
+  rhs_le = double(rhs);
   return true;
 }
 
@@ -2919,8 +3757,10 @@ bool xtab_original_col_bounds(const SimplexResult& simplex,
 bool xtab_postprocess_original_cut(const SimplexResult& simplex,
                                    const std::vector<char>* implied_integer_cols,
                                    Eigen::VectorXd& cut_le,
-                                   double& rhs_le) {
-  constexpr double feastol = 1e-8;
+                                   double& rhs_le,
+                                   double feastol,
+                                   bool known_integral_cut = false) {
+  feastol = std::max(0.0, feastol);
   constexpr double epsilon = 1e-12;
   const int n = simplex.form.n_original;
   if (cut_le.size() != n || n <= 0 || !std::isfinite(rhs_le) ||
@@ -2930,6 +3770,7 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
   if (rhs_le < 0.0 && rhs_le > -epsilon) {
     rhs_le = 0.0;
   }
+  HighsCDouble rhs_acc = rhs_le;
 
   double max_abs = 0.0;
   for (int j = 0; j < n; ++j) {
@@ -2937,6 +3778,13 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
   }
   if (!(max_abs > 0.0)) {
     return false;
+  }
+
+  if (known_integral_cut) {
+    for (int j = 0; j < n; ++j) {
+      if (std::abs(cut_le[j]) <= epsilon) cut_le[j] = 0.0;
+    }
+    return cut_le.norm() > 1e-12 && std::isfinite(rhs_le);
   }
 
   const double min_coeff = 100.0 * feastol * std::max(max_abs, 1e-3);
@@ -2953,7 +3801,7 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
           (a < 0.0 && !std::isfinite(ub))) {
         return false;
       }
-      rhs_le -= a * (a < 0.0 ? ub : lb);
+      rhs_acc -= a * (a < 0.0 ? ub : lb);
       cut_le[j] = 0.0;
       continue;
     }
@@ -2985,8 +3833,11 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
     if (!(pivot > epsilon) || !std::isfinite(pivot)) {
       return false;
     }
-    const double scale = pow2_scale_for_max_abs(pivot - epsilon);
-    rhs_le *= scale;
+    int exp_shift = 0;
+    std::frexp(pivot - epsilon, &exp_shift);
+    exp_shift = std::min(10, -exp_shift);
+    rhs_acc = ldexp(rhs_acc, exp_shift);
+    const double scale = std::ldexp(1.0, exp_shift);
     for (int j = 0; j < n; ++j) {
       cut_le[j] *= scale;
     }
@@ -2999,7 +3850,8 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
     if (int_scale != 0.0 &&
         int_scale * std::max(1.0, max_abs) <=
             static_cast<double>(uint64_t{1} << 52)) {
-      rhs_le *= int_scale;
+      rhs_acc.renormalize();
+      rhs_acc *= int_scale;
       double scaled_max_abs = xtab_nearest_integer(max_abs * int_scale);
       for (int j = 0; j < n; ++j) {
         const double a = cut_le[j];
@@ -3016,9 +3868,9 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
           return false;
         }
         cut_le[j] = intval;
-        rhs_le -= delta * (delta < 0.0 ? ub : lb);
+        rhs_acc -= delta * (delta < 0.0 ? ub : lb);
       }
-      rhs_le = std::floor(rhs_le + feastol);
+      rhs_acc = floor(rhs_acc + feastol);
       if (int_scale * scaled_max_abs * feastol < 0.5) {
         scale_smallest_to_one = false;
       }
@@ -3045,6 +3897,7 @@ bool xtab_postprocess_original_cut(const SimplexResult& simplex,
       cut_le[j] = 0.0;
     }
   }
+  rhs_le = double(rhs_acc);
   return cut_le.norm() > 1e-12 && std::isfinite(rhs_le);
 }
 
@@ -3052,8 +3905,9 @@ bool xtab_tighten_original_cut_coefficients(
     const SimplexResult& simplex,
     const std::vector<char>* implied_integer_cols,
     Eigen::VectorXd& cut_le,
-    double& rhs_le) {
-  constexpr double feastol = 1e-8;
+    double& rhs_le,
+    double feastol) {
+  feastol = std::max(0.0, feastol);
   const int n = simplex.form.n_original;
   if (cut_le.size() != n || n <= 0 || !std::isfinite(rhs_le) ||
       !cut_le.allFinite()) {
@@ -3069,7 +3923,9 @@ bool xtab_tighten_original_cut_coefficients(
     double lb = 0.0;
     double ub = 0.0;
     if (!xtab_original_col_bounds(simplex, j, lb, ub) ||
-        (a > 0.0 && !std::isfinite(ub))) {
+        (a > 0.0 && !std::isfinite(ub)) ||
+        (a < 0.0 && !std::isfinite(lb))) {
+      // Cannot bound the maximum activity — skip tightening conservatively.
       return true;
     }
     max_activity += a * (a > 0.0 ? ub : lb);
@@ -3125,16 +3981,21 @@ bool xtab_generate_cut_from_base_row(
     std::uint64_t* vb_trigger_terms_out,
     Eigen::VectorXd& cut_le,
     double& rhs_le,
-    double& efficacy_out,
-    XTabRejectReason* reject_reason = nullptr,
-    XTabSourceDiag* gate_diag = nullptr,
+	    double& efficacy_out,
+    double cut_generation_feastol,
+	    XTabRejectReason* reject_reason = nullptr,
+	    XTabSourceDiag* gate_diag = nullptr,
     bool require_violation = true,
     const char* trace_family = "cut",
-    const char* trace_basis_info = nullptr) {
+    const char* trace_basis_info = nullptr,
+    XTabCutgenRandom* cutgen_random = nullptr,
+    bool only_initial_cmir_scale = false,
+    std::uint64_t* trace_id_out = nullptr) {
   if (reject_reason != nullptr) *reject_reason = XTabRejectReason::None;
   if (gate_diag != nullptr) ++gate_diag->gate_calls;
   std::uint64_t trace_id = 0;
   const bool trace_row = xtab_claim_row_trace(trace_id, trace_family);
+  if (trace_id_out != nullptr) *trace_id_out = trace_id;
   if (trace_row) {
     if (trace_basis_info != nullptr && trace_basis_info[0] != '\0') {
       fmt::print(stderr, "[B&C-XROW] id={} family={} stage=basis {}\n",
@@ -3154,7 +4015,8 @@ bool xtab_generate_cut_from_base_row(
                                transform_context,
                                &vb_substitutions, &vb_trigger_terms,
                                &integers_positive,
-                               /*initial_integers_positive=*/true, row)) {
+                               /*initial_integers_positive=*/true,
+                               cut_generation_feastol, row)) {
     if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Transform;
     if (trace_row) xtab_trace_fail(trace_id, trace_family, "transform", "fail");
     return false;
@@ -3177,8 +4039,9 @@ bool xtab_generate_cut_from_base_row(
   bool has_unbounded_ints = false;
   bool has_general_ints = false;
   bool has_continuous = false;
-  if (!xtab_preprocess_base_inequality(simplex, row, has_unbounded_ints,
-                                       has_general_ints, has_continuous)) {
+  if (!xtab_preprocess_base_inequality(simplex, row, cut_generation_feastol,
+                                       has_unbounded_ints, has_general_ints,
+                                       has_continuous)) {
     if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Preprocess;
     if (trace_row) {
       xtab_trace_fail(trace_id, trace_family, "preprocess", "fail");
@@ -3195,8 +4058,6 @@ bool xtab_generate_cut_from_base_row(
                has_general_ints ? 1 : 0, has_continuous ? 1 : 0);
   }
   if (gate_diag != nullptr) ++gate_diag->gate_preprocess_ok;
-  (void)has_general_ints;
-  (void)has_continuous;
   if (!has_unbounded_ints && !integers_positive) {
     for (int k = 0; k < static_cast<int>(row.inds.size()); ++k) {
       const std::size_t pos = static_cast<std::size_t>(k);
@@ -3211,10 +4072,19 @@ bool xtab_generate_cut_from_base_row(
                    integers_positive);
   }
   const double cmir_min_efficacy =
-      require_violation ? 1e-7 : -std::numeric_limits<double>::infinity();
+      require_violation ? 10.0 * cut_generation_feastol
+                        : -std::numeric_limits<double>::infinity();
   XTabCmirTrace cmir_trace;
-  if (!xtab_cmir_cut_generation(row, cmir_min_efficacy,
-                                trace_row ? &cmir_trace : nullptr)) {
+  const int random_tiebreaker =
+      static_cast<int>(trace_id == 0 ? 0 : (trace_id & 0x7fffffffULL));
+  if (!xtab_try_generate_cut(row, has_unbounded_ints, has_general_ints,
+                             has_continuous, cut_generation_feastol,
+                             cmir_min_efficacy, random_tiebreaker,
+                             cutgen_random,
+                             trace_row ? &cmir_trace : nullptr,
+                             only_initial_cmir_scale,
+                             trace_row ? trace_id : 0,
+                             trace_row ? trace_family : nullptr)) {
     if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Cmir;
     if (trace_row) {
       xtab_trace_fail(trace_id, trace_family, "cmir", "fail");
@@ -3228,26 +4098,29 @@ bool xtab_generate_cut_from_base_row(
                  cmir_trace.tested_delta_count,
                  cmir_trace.continuous_contribution,
                  cmir_trace.continuous_norm_sq, cmir_trace.max_abs_delta,
-                 cmir_trace.best_delta, cmir_trace.best_efficacy,
-                 cmir_min_efficacy);
+	                 cmir_trace.best_delta, cmir_trace.best_efficacy,
+	                 cmir_min_efficacy);
     }
     return false;
   }
   if (trace_row) {
-    xtab_trace_row(trace_id, trace_family, "cmir", row, source_context,
-                   integers_positive);
+    xtab_trace_row(trace_id, trace_family,
+                   cmir_trace.lifted_accepted ? "lifted" : "cmir", row,
+                   source_context, integers_positive);
     fmt::print(stderr,
                "[B&C-XROW] id={} family={} stage=cmir_stats "
                "int={} cont={} deltas={} tested={} contContrib={:.12g} "
                "contNorm2={:.12g} maxDelta={:.12g} bestDelta={:.12g} "
-               "bestEff={:.12g} f0={:.12g} finalRhs={:.12g} minEff={:.12g}\n",
+               "bestEff={:.12g} f0={:.12g} finalRhs={:.12g} minEff={:.12g} "
+               "generator={}\n",
                trace_id, trace_family, cmir_trace.integer_terms,
                cmir_trace.continuous_terms, cmir_trace.initial_delta_count,
                cmir_trace.tested_delta_count,
                cmir_trace.continuous_contribution,
                cmir_trace.continuous_norm_sq, cmir_trace.max_abs_delta,
                cmir_trace.best_delta, cmir_trace.best_efficacy,
-               cmir_trace.final_f0, cmir_trace.final_rhs, cmir_min_efficacy);
+               cmir_trace.final_f0, cmir_trace.final_rhs, cmir_min_efficacy,
+               cmir_trace.lifted_accepted ? "lifted" : "cmir");
   }
   if (gate_diag != nullptr) ++gate_diag->gate_cmir_ok;
   xtab_remove_complementation(row);
@@ -3280,7 +4153,9 @@ bool xtab_generate_cut_from_base_row(
                             rhs_le, x);
   }
   if (!xtab_postprocess_original_cut(simplex, implied_integer_cols, cut_le,
-                                     rhs_le)) {
+                                     rhs_le, cut_generation_feastol,
+                                     row.integral_support &&
+                                         row.integral_coefficients)) {
     if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Untransform;
     if (trace_row) {
       xtab_trace_fail(trace_id, trace_family, "postprocess", "fail");
@@ -3292,7 +4167,8 @@ bool xtab_generate_cut_from_base_row(
                             rhs_le, x);
   }
   if (!xtab_tighten_original_cut_coefficients(simplex, implied_integer_cols,
-                                              cut_le, rhs_le)) {
+                                              cut_le, rhs_le,
+                                              cut_generation_feastol)) {
     if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Untransform;
     if (trace_row) {
       xtab_trace_fail(trace_id, trace_family, "tighten", "fail");
@@ -3308,7 +4184,7 @@ bool xtab_generate_cut_from_base_row(
   const double violation = cut_le.dot(x) - rhs_le;
   const double norm = std::max(1e-12, cut_le.norm());
   efficacy_out = violation / norm;
-  const bool violated = violation > 1e-7 && efficacy_out > 1e-8;
+  const bool violated = violation > 10.0 * cut_generation_feastol;
   if (violated && gate_diag != nullptr) ++gate_diag->gate_violation_ok;
   if (!violated && reject_reason != nullptr) {
     *reject_reason = XTabRejectReason::NotViolated;
@@ -3337,8 +4213,25 @@ struct XTabLpAggregator {
                    const XTabSourceContext& source_context)
       : sf(simplex.form),
         ctx(source_context),
-        sum(Eigen::VectorXd::Zero(source_context.dim)),
+        sum(static_cast<std::size_t>(source_context.dim)),
         touched_flag(static_cast<std::size_t>(source_context.dim), 0) {}
+
+  void add_value(int col, double value) {
+    if (col < 0 || col >= ctx.dim || value == 0.0) return;
+    HighsCDouble& acc = sum[static_cast<std::size_t>(col)];
+    if (acc != 0.0) {
+      acc += value;
+    } else {
+      acc = value;
+      if (touched_flag[static_cast<std::size_t>(col)] == 0) {
+        touched_flag[static_cast<std::size_t>(col)] = 1;
+        touched.push_back(col);
+      }
+    }
+    if (acc == 0.0) {
+      acc = (std::numeric_limits<double>::min)();
+    }
+  }
 
   bool add_row(int row, double weight) {
     if (!ctx.valid || row < 0 || row >= sf.A_row.rows() ||
@@ -3352,48 +4245,50 @@ struct XTabLpAggregator {
       if (col < 0 || col >= ctx.n_original) {
         continue;
       }
-      if (touched_flag[static_cast<std::size_t>(col)] == 0) {
-        touched_flag[static_cast<std::size_t>(col)] = 1;
-        touched.push_back(col);
-      }
-      sum[col] += weight * xtab_source_row_coeff(sf, row, col);
+      add_value(col, weight * xtab_source_row_coeff(sf, row, col));
     }
     const int slack_col = ctx.n_original + row;
     if (slack_col < 0 || slack_col >= ctx.dim) {
       return false;
     }
-    if (touched_flag[static_cast<std::size_t>(slack_col)] == 0) {
-      touched_flag[static_cast<std::size_t>(slack_col)] = 1;
-      touched.push_back(slack_col);
-    }
-    sum[slack_col] -= weight;
+    add_value(slack_col, -weight);
     return true;
   }
 
   bool get_current_aggregation(Eigen::VectorXd& coeff,
                                double& rhs,
                                bool negate,
-                               std::vector<int>* active_cols = nullptr) const {
-    if (coeff.size() != sum.size()) {
-      coeff.resize(sum.size());
+                               std::vector<int>* active_cols = nullptr) {
+    if (coeff.size() != static_cast<Eigen::Index>(sum.size())) {
+      coeff.resize(static_cast<int>(sum.size()));
     }
     coeff.setZero();
     if (active_cols != nullptr) active_cols->clear();
     const double sign = negate ? -1.0 : 1.0;
     rhs = 0.0;
     constexpr double droptol = 1e-12;
-    for (int col : touched) {
-      const double val = sign * sum[col];
+    int num_nz = static_cast<int>(touched.size());
+    for (int i = num_nz - 1; i >= 0; --i) {
+      const int col = touched[static_cast<std::size_t>(i)];
+      const double val = double(sum[static_cast<std::size_t>(col)]);
       if (!std::isfinite(val)) {
         return false;
       }
       // HiGHS' HighsLpAggregator drops tiny structural coefficients but keeps
       // exact logical row-activity slack terms.
-      if (col < ctx.n_original) {
-        if (std::abs(val) <= droptol) continue;
-      } else if (val == 0.0) {
-        continue;
+      const bool drop = col < ctx.n_original ? std::abs(val) <= droptol
+                                             : val == 0.0;
+      if (drop) {
+        sum[static_cast<std::size_t>(col)] = 0.0;
+        touched_flag[static_cast<std::size_t>(col)] = 0;
+        --num_nz;
+        std::swap(touched[static_cast<std::size_t>(num_nz)],
+                  touched[static_cast<std::size_t>(i)]);
       }
+    }
+    touched.resize(static_cast<std::size_t>(num_nz));
+    for (int col : touched) {
+      const double val = sign * double(sum[static_cast<std::size_t>(col)]);
       coeff[col] = val;
       if (active_cols != nullptr) active_cols->push_back(col);
     }
@@ -3402,7 +4297,7 @@ struct XTabLpAggregator {
 
   void clear() {
     for (int col : touched) {
-      sum[col] = 0.0;
+      sum[static_cast<std::size_t>(col)] = 0.0;
       touched_flag[static_cast<std::size_t>(col)] = 0;
     }
     touched.clear();
@@ -3410,7 +4305,7 @@ struct XTabLpAggregator {
 
   const StandardFormLP& sf;
   const XTabSourceContext& ctx;
-  Eigen::VectorXd sum;
+  std::vector<HighsCDouble> sum;
   std::vector<int> touched;
   std::vector<unsigned char> touched_flag;
 };
@@ -3433,6 +4328,7 @@ bool xtab_generate_path_mixing_cut(
     Eigen::VectorXd& cut_le,
     double& rhs_le,
     double& efficacy_out,
+    double cut_generation_feastol,
     XTabRejectReason* reject_reason = nullptr,
     const char* trace_family = "pathmix") {
   if (reject_reason != nullptr) *reject_reason = XTabRejectReason::None;
@@ -3447,7 +4343,7 @@ bool xtab_generate_path_mixing_cut(
                trace_id, trace_family, aggregated_path.size(),
                source_context.dim, simplex.form.n_original);
   }
-  constexpr double feastol = 1e-8;
+  const double feastol = std::max(0.0, cut_generation_feastol);
   constexpr double epsilon = 1e-12;
   const int n_src = source_context.dim;
   const int n_orig = simplex.form.n_original;
@@ -3495,7 +4391,8 @@ bool xtab_generate_path_mixing_cut(
                                  implied_integer_cols, transform_context,
                                  &vb_substitutions, &vb_trigger_terms,
                                  &integers_positive,
-                                 /*initial_integers_positive=*/false, row)) {
+                                 /*initial_integers_positive=*/false,
+                                 cut_generation_feastol, row)) {
       if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Transform;
       if (trace_row) {
         const std::string stage =
@@ -3738,7 +4635,7 @@ bool xtab_generate_path_mixing_cut(
                                   cut_le, rhs_le, x);
         }
         if (!xtab_postprocess_original_cut(simplex, implied_integer_cols,
-                                           cut_le, rhs_le)) {
+                                           cut_le, rhs_le, feastol)) {
           if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Untransform;
           if (trace_row) {
             xtab_trace_fail(trace_id, trace_family, "postprocess", "fail");
@@ -3750,7 +4647,7 @@ bool xtab_generate_path_mixing_cut(
                                   cut_le, rhs_le, x);
         }
         if (!xtab_tighten_original_cut_coefficients(
-                simplex, implied_integer_cols, cut_le, rhs_le)) {
+                simplex, implied_integer_cols, cut_le, rhs_le, feastol)) {
           if (reject_reason != nullptr) *reject_reason = XTabRejectReason::Untransform;
           if (trace_row) {
             xtab_trace_fail(trace_id, trace_family, "tighten", "fail");
@@ -3764,7 +4661,7 @@ bool xtab_generate_path_mixing_cut(
         const double final_violation = cut_le.dot(x) - rhs_le;
         const double norm = std::max(1e-12, cut_le.norm());
         efficacy_out = final_violation / norm;
-        const bool accepted = final_violation > 1e-7 && efficacy_out > 1e-8;
+        const bool accepted = final_violation > 10.0 * feastol;
         if (trace_row) {
           fmt::print(stderr,
                      "[B&C-XROW] id={} family={} stage=final violated={} "
@@ -3818,6 +4715,507 @@ bool aggregate_standard_rows(const SimplexResult& simplex,
     }
   }
   return aggregator.get_current_aggregation(coeff, rhs, false, active_cols);
+}
+
+template <int k, typename FoundModKCut>
+bool xtab_separate_modk_system(const std::vector<std::int64_t>& values,
+                               const std::vector<int>& indices,
+                               const std::vector<int>& starts,
+                               int num_cols,
+                               FoundModKCut&& found_cut) {
+  HighsGFkSolve solver;
+  std::vector<HighsInt> highs_indices(indices.begin(), indices.end());
+  std::vector<HighsInt> highs_starts(starts.begin(), starts.end());
+  solver.fromCSC<static_cast<unsigned int>(k)>(values, highs_indices,
+                                               highs_starts, num_cols + 1);
+  solver.setRhs<static_cast<unsigned int>(k)>(num_cols, 1);
+  bool found = false;
+  solver.solve<static_cast<unsigned int>(k)>(
+      [&](std::vector<HighsGFkSolve::SolutionEntry>& weights,
+          int rhs_index) {
+        found = true;
+        found_cut(weights, rhs_index);
+      });
+  return found;
+}
+
+int add_transformed_modk_cuts_impl(
+    LPModel& lp,
+    const Eigen::VectorXd& x,
+    const SimplexResult& simplex,
+    const BCOptions& opt,
+    const std::vector<char>* implied_integer_cols,
+    const BinaryImplicationGraph* implication_graph,
+    const VariableBoundTable* variable_bound_table,
+    std::vector<PoolCut>* generated_cutpool_rows,
+    double cut_generation_feastol,
+    const std::function<int(PoolCut&&)>* cutpool_acceptor,
+    std::optional<std::uint64_t> highs_cutgen_seed) {
+  const bool direct_cutpool_mode = cutpool_acceptor != nullptr;
+  (void)lp;
+  (void)opt;
+  cut_generation_feastol = std::max(0.0, cut_generation_feastol);
+  if ((!direct_cutpool_mode && generated_cutpool_rows == nullptr) ||
+      !simplex.exact_optimal || x.size() != simplex.form.n_original) {
+    return 0;
+  }
+
+  XTabSourceDiag diag;
+  const XTabTransformContext transform_context = xtab_build_transform_context(
+      simplex, implied_integer_cols, implication_graph, variable_bound_table);
+  const XTabSourceContext source_context =
+      xtab_build_source_context(simplex, implied_integer_cols);
+  XTabCutgenRandom cutgen_random(highs_cutgen_seed);
+  if (!source_context.valid) {
+    maybe_print_xtab_diag("modk", diag);
+    return 0;
+  }
+
+  struct XModkLedger {
+    int src_rows{0};
+    int src_dim{0};
+    int skipped_continuous{0};
+    int active_le{0};
+    int active_ge{0};
+    int inactive{0};
+    int transform_ok{0};
+    int transform_fail{0};
+    int integral_rows{0};
+    int scaled_rows{0};
+    int long_skip{0};
+    int zero_skip{0};
+    int system_nnz{0};
+    int nonzero_rhs{0};
+    int gf2_calls{0};
+    int gf3_calls{0};
+    int gf5_calls{0};
+    int gf7_calls{0};
+    int gf_solutions{0};
+    int cutgen_calls{0};
+    int cutgen_success{0};
+    int pool_calls{0};
+    int pool_accepted{0};
+    std::uint64_t system_hash{0};
+  } ledger;
+  ledger.src_rows = source_context.n_rows;
+  ledger.src_dim = source_context.dim;
+
+  auto print_modk_ledger = [&](const char* stage, int accepted) {
+    if (std::getenv("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
+        std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) {
+      return;
+    }
+    fmt::print(
+        stderr,
+        "[B&C-XMODK-LEDGER] stage={} mode={} srcRows={} srcDim={} "
+        "skipCont={} active=le{}:ge{} inactive={} transform={}/{} "
+        "rows=int{}:scaled{} longSkip={} zeroSkip={} systemNnz={} rhsNz={} "
+        "gf=2:{}:3:{}:5:{}:7:{} sol={} cutgen={}/{} "
+        "poolCalls={} poolAccepted={} acceptedRows={} sysHash={:016x}\n",
+        stage, direct_cutpool_mode ? "cutpool" : "rows",
+        ledger.src_rows, ledger.src_dim, ledger.skipped_continuous,
+        ledger.active_le, ledger.active_ge, ledger.inactive,
+        ledger.transform_ok, ledger.transform_fail, ledger.integral_rows,
+        ledger.scaled_rows, ledger.long_skip, ledger.zero_skip,
+        ledger.system_nnz, ledger.nonzero_rhs, ledger.gf2_calls,
+        ledger.gf3_calls, ledger.gf5_calls, ledger.gf7_calls,
+        ledger.gf_solutions, ledger.cutgen_success, ledger.cutgen_calls,
+        ledger.pool_calls, ledger.pool_accepted, accepted,
+        ledger.system_hash);
+  };
+
+  const int n_orig = simplex.form.n_original;
+  const int m = source_context.n_rows;
+  const double feastol = cut_generation_feastol;
+  constexpr double epsilon = 1e-9;
+  const int system_trace_limit = xtab_modk_system_trace_limit();
+  const int system_trace_terms = xtab_modk_system_trace_terms();
+
+  std::vector<unsigned char> integer_like(
+      static_cast<std::size_t>(n_orig), 0);
+  std::vector<double> bound_distance(static_cast<std::size_t>(n_orig), 0.0);
+  for (int col = 0; col < n_orig; ++col) {
+    integer_like[static_cast<std::size_t>(col)] =
+        source_context.integral[static_cast<std::size_t>(col)] != 0 ? 1 : 0;
+    if (integer_like[static_cast<std::size_t>(col)] != 0) continue;
+    const double val = source_context.solution[col];
+    const double lb = source_context.lower[col];
+    const double ub = source_context.upper[col];
+    double lb_dist = std::isfinite(lb) ? std::max(0.0, val - lb)
+                                       : std::numeric_limits<double>::infinity();
+    double ub_dist = std::isfinite(ub) ? std::max(0.0, ub - val)
+                                       : std::numeric_limits<double>::infinity();
+    if (col < static_cast<int>(transform_context.best_vlb.size())) {
+      const XTabVarBoundExpr& vlb =
+          transform_context.best_vlb[static_cast<std::size_t>(col)];
+      if (vlb.valid) lb_dist = std::min(lb_dist, vlb.dist);
+    }
+    if (col < static_cast<int>(transform_context.best_vub.size())) {
+      const XTabVarBoundExpr& vub =
+          transform_context.best_vub[static_cast<std::size_t>(col)];
+      if (vub.valid) ub_dist = std::min(ub_dist, vub.dist);
+    }
+    const double dist = std::min(lb_dist, ub_dist);
+    bound_distance[static_cast<std::size_t>(col)] =
+        std::isfinite(dist) && dist > feastol ? dist : 0.0;
+  }
+
+  std::vector<unsigned char> skip_row(static_cast<std::size_t>(m), 0);
+  for (int col = 0; col < n_orig; ++col) {
+    if (integer_like[static_cast<std::size_t>(col)] != 0 ||
+        bound_distance[static_cast<std::size_t>(col)] == 0.0) {
+      continue;
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(simplex.form.A, col);
+         it; ++it) {
+      const int row = static_cast<int>(it.row());
+      if (row < 0 || row >= m ||
+          skip_row[static_cast<std::size_t>(row)] != 0) {
+        continue;
+      }
+      skip_row[static_cast<std::size_t>(row)] = 1;
+      ++ledger.skipped_continuous;
+    }
+  }
+
+  const int max_int_row_len = static_cast<int>(1000 + 0.1 * n_orig);
+  std::vector<std::pair<int, double>> integral_scales;
+  std::vector<std::int64_t> int_system_value;
+  std::vector<int> int_system_index;
+  std::vector<int> int_system_start;
+  int_system_start.push_back(0);
+
+  for (int row = 0; row < m; ++row) {
+    if (skip_row[static_cast<std::size_t>(row)] != 0) continue;
+
+    const int scol = n_orig + row;
+    const double lower = source_context.lower[scol];
+    const double upper = source_context.upper[scol];
+    const double act = source_context.solution[scol];
+    bool leq_row = true;
+    if (std::isfinite(upper) && upper - act <= feastol) {
+      leq_row = true;
+      ++ledger.active_le;
+    } else if (std::isfinite(lower) && act - lower <= feastol) {
+      leq_row = false;
+      ++ledger.active_ge;
+    } else {
+      ++ledger.inactive;
+      continue;
+    }
+
+    Eigen::VectorXd coeff = Eigen::VectorXd::Zero(source_context.dim);
+    double rhs = leq_row ? upper : -lower;
+    std::vector<int> active_cols;
+    int source_row_len = 0;
+    xtab_visit_source_row_terms(simplex.form, row, [&](int col, double val) {
+      ++source_row_len;
+      if (std::abs(val) <= 1e-12) return;
+      coeff[col] = leq_row ? val : -val;
+      active_cols.push_back(col);
+    });
+
+    XTabRow transformed;
+    bool integers_positive = false;
+    std::uint64_t vb_subs = 0;
+    std::uint64_t vb_terms = 0;
+    if (!xtab_transform_base_row(simplex, source_context, coeff, rhs,
+                                 &active_cols, implied_integer_cols,
+                                 &transform_context, &vb_subs, &vb_terms,
+                                 &integers_positive,
+                                 /*initial_integers_positive=*/false,
+                                 feastol, transformed)) {
+      ++ledger.transform_fail;
+      continue;
+    }
+    ++ledger.transform_ok;
+    diag.vb_substitutions += vb_subs;
+    diag.vb_trigger_terms += vb_terms;
+    if (row == xtab_modk_transform_trace_row()) {
+      fmt::memory_buffer rawbuf;
+      const int raw_emit = std::min<int>(active_cols.size(), 200);
+      for (int k = 0; k < raw_emit; ++k) {
+        const int col = active_cols[static_cast<std::size_t>(k)];
+        if (k > 0) fmt::format_to(std::back_inserter(rawbuf), ",");
+        fmt::format_to(std::back_inserter(rawbuf), "{}:{:.17g}", col,
+                       col >= 0 && col < coeff.size() ? coeff[col] : 0.0);
+      }
+      if (static_cast<int>(active_cols.size()) > raw_emit) {
+        fmt::format_to(std::back_inserter(rawbuf), ",...");
+      }
+      fmt::memory_buffer solbuf;
+      const int emit = std::min<int>(transformed.inds.size(), 200);
+      for (int k = 0; k < emit; ++k) {
+        if (k > 0) fmt::format_to(std::back_inserter(solbuf), ",");
+        fmt::format_to(std::back_inserter(solbuf), "{}:{:.17g}:{:.17g}:{}",
+                       transformed.inds[static_cast<std::size_t>(k)],
+                       transformed.vals[static_cast<std::size_t>(k)],
+                       transformed.solval[static_cast<std::size_t>(k)],
+                       transformed.is_integral[static_cast<std::size_t>(k)]);
+      }
+      if (static_cast<int>(transformed.inds.size()) > emit) {
+        fmt::format_to(std::back_inserter(solbuf), ",...");
+      }
+      fmt::print(stderr,
+                 "[B&C-XMODK-TRANSFORM] row={} side={} rawLen={} rhs={:.17g} "
+                 "raw=[{}] transLen={} transRhs={:.17g} trans=[{}]\n",
+                 row, leq_row ? "le" : "ge", source_row_len, rhs,
+                 fmt::to_string(rawbuf),
+                 static_cast<int>(transformed.inds.size()), transformed.rhs,
+                 fmt::to_string(solbuf));
+    }
+
+    const int rowlen = static_cast<int>(transformed.inds.size());
+    if (rowlen > max_int_row_len) {
+      int int_row_len = 0;
+      for (int i = 0; i < rowlen; ++i) {
+        const std::size_t pos = static_cast<std::size_t>(i);
+        if (transformed.solval[pos] <= feastol) continue;
+        if (transformed.is_integral[pos] == 0) continue;
+        ++int_row_len;
+      }
+      if (int_row_len > max_int_row_len ||
+          (int_row_len == 0 && std::abs(transformed.rhs) <= epsilon)) {
+        ++ledger.long_skip;
+        continue;
+      }
+    }
+
+    double intscale = 1.0;
+    std::int64_t intrhs = 0;
+    const int system_row_start = int_system_start.back();
+    const bool row_integral =
+        source_context.integral[static_cast<std::size_t>(scol)] != 0;
+    if (!row_integral) {
+      std::vector<double> scale_vals;
+      for (int i = 0; i < rowlen; ++i) {
+        const std::size_t pos = static_cast<std::size_t>(i);
+        if (transformed.is_integral[pos] == 0) continue;
+        if (transformed.solval[pos] > feastol) {
+          scale_vals.push_back(transformed.vals[pos]);
+        }
+      }
+      if (std::abs(transformed.rhs) > epsilon) {
+        scale_vals.push_back(-transformed.rhs);
+      }
+      if (scale_vals.empty()) {
+        ++ledger.zero_skip;
+        continue;
+      }
+      intscale = xtab_integral_scale(scale_vals, feastol, epsilon);
+      if (intscale == 0.0 || intscale > 1e6) {
+        ++ledger.zero_skip;
+        continue;
+      }
+      intrhs = static_cast<std::int64_t>(
+          xtab_nearest_integer(intscale * transformed.rhs));
+      for (int i = 0; i < rowlen; ++i) {
+        const std::size_t pos = static_cast<std::size_t>(i);
+        if (transformed.is_integral[pos] == 0) continue;
+        if (transformed.solval[pos] > feastol) {
+          int_system_index.push_back(transformed.inds[pos]);
+          int_system_value.push_back(static_cast<std::int64_t>(
+              xtab_nearest_integer(intscale * transformed.vals[pos])));
+        }
+      }
+      ++ledger.scaled_rows;
+    } else {
+      intrhs = static_cast<std::int64_t>(
+          xtab_nearest_integer(transformed.rhs));
+      for (int i = 0; i < rowlen; ++i) {
+        const std::size_t pos = static_cast<std::size_t>(i);
+        if (transformed.solval[pos] > feastol) {
+          int_system_index.push_back(transformed.inds[pos]);
+          int_system_value.push_back(static_cast<std::int64_t>(
+              xtab_nearest_integer(transformed.vals[pos])));
+        }
+      }
+      ++ledger.integral_rows;
+    }
+
+    ledger.nonzero_rhs += intrhs != 0 ? 1 : 0;
+    int_system_index.push_back(n_orig);
+    int_system_value.push_back(intrhs);
+    int_system_start.push_back(static_cast<int>(int_system_value.size()));
+    if (system_trace_limit > 0 &&
+        static_cast<int>(integral_scales.size()) < system_trace_limit) {
+      fmt::memory_buffer terms;
+      const int system_row_end = static_cast<int>(int_system_value.size());
+      const int emit_end =
+          std::min(system_row_end, system_row_start + system_trace_terms);
+      for (int p = system_row_start; p < emit_end; ++p) {
+        if (p > system_row_start) fmt::format_to(std::back_inserter(terms), ",");
+        fmt::format_to(std::back_inserter(terms), "{}:{}",
+                       int_system_index[static_cast<std::size_t>(p)],
+                       int_system_value[static_cast<std::size_t>(p)]);
+      }
+      if (system_row_end > emit_end) {
+        fmt::format_to(std::back_inserter(terms), ",...");
+      }
+      fmt::print(stderr,
+                 "[B&C-XMODK-SYS] seq={} row={} side={} rowIntegral={} "
+                 "intscale={:.17g} intrhs={} rawLen={} transLen={} start={} "
+                 "end={} terms=[{}]\n",
+                 integral_scales.size(), row, leq_row ? "le" : "ge",
+                 row_integral ? 1 : 0, intscale, intrhs, source_row_len,
+                 rowlen, system_row_start, system_row_end,
+                 fmt::to_string(terms));
+    }
+    integral_scales.emplace_back(row, intscale);
+  }
+
+  ledger.system_nnz = static_cast<int>(int_system_value.size());
+  ledger.system_hash =
+      xtab_modk_system_hash(int_system_value, int_system_index,
+                            int_system_start);
+  if (integral_scales.empty() || ledger.nonzero_rhs == 0) {
+    maybe_print_xtab_diag("modk", diag);
+    print_modk_ledger("empty_system", 0);
+    return 0;
+  }
+
+  int accepted_rows = 0;
+  std::set<std::vector<std::pair<int, int>>> used_weights;
+  XTabLpAggregator aggregator(simplex, source_context);
+
+  auto found_cut = [&](auto& weights, int rhs_index, int k) {
+    (void)rhs_index;
+    if (weights.empty()) return;
+    std::sort(weights.begin(), weights.end());
+    std::vector<std::pair<int, int>> key;
+    key.reserve(weights.size());
+    for (const auto& w : weights) {
+      key.emplace_back(static_cast<int>(w.index), static_cast<int>(w.weight));
+    }
+    if (!used_weights.insert(key).second) return;
+    ++ledger.gf_solutions;
+
+    auto generate_from_weights = [&](bool negated_weights) {
+      aggregator.clear();
+      for (const auto& w : weights) {
+        const int idx = static_cast<int>(w.index);
+        if (idx < 0 || idx >= static_cast<int>(integral_scales.size())) {
+          continue;
+        }
+        const double base_scale =
+            integral_scales[static_cast<std::size_t>(idx)].second;
+        const int row = integral_scales[static_cast<std::size_t>(idx)].first;
+        double weight = 0.0;
+        if (negated_weights) {
+          weight = base_scale *
+                   (static_cast<double>((w.weight * (k - 1)) % k) /
+                    static_cast<double>(k));
+        } else {
+          weight = base_scale *
+                   (static_cast<double>(w.weight) / static_cast<double>(k));
+        }
+        (void)aggregator.add_row(row, weight);
+      }
+      Eigen::VectorXd coeff;
+      double rhs = 0.0;
+      std::vector<int> active_cols;
+      if (!aggregator.get_current_aggregation(coeff, rhs,
+                                              !negated_weights,
+                                              &active_cols)) {
+        return;
+      }
+      Eigen::VectorXd cut;
+      double cut_rhs = 0.0;
+      double efficacy = 0.0;
+      XTabRejectReason reject_reason = XTabRejectReason::None;
+      ++ledger.cutgen_calls;
+      const bool ok = xtab_generate_cut_from_base_row(
+          simplex, source_context, coeff, rhs, &active_cols, x,
+          implied_integer_cols, &transform_context, &diag.vb_substitutions,
+          &diag.vb_trigger_terms, cut, cut_rhs, efficacy, feastol,
+          &reject_reason, &diag, /*require_violation=*/true, "modk",
+          nullptr, &cutgen_random,
+          /*only_initial_cmir_scale=*/true);
+      if (!ok) {
+        xtab_record_reject(&diag, reject_reason);
+        return;
+      }
+      const int nnz = count_nonzeros(cut);
+      const double norm = std::max(1e-12, cut.norm());
+      if (cutpool_acceptor != nullptr) {
+        PoolCut row_cut = xtab_candidate_to_pool_cut(
+            XTabCandidateCut{std::move(cut), cut_rhs, efficacy, efficacy,
+                             norm, nnz});
+        const int added = (*cutpool_acceptor)(std::move(row_cut));
+        ++ledger.pool_calls;
+        if (added > 0) {
+          accepted_rows += added;
+          ledger.pool_accepted += added;
+          ++ledger.cutgen_success;
+          ++diag.generated;
+        }
+      } else if (generated_cutpool_rows != nullptr) {
+        generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(
+            XTabCandidateCut{std::move(cut), cut_rhs, efficacy, efficacy,
+                             norm, nnz}));
+        ++accepted_rows;
+        ++ledger.cutgen_success;
+        ++diag.generated;
+      }
+    };
+
+    generate_from_weights(/*negated_weights=*/true);
+    generate_from_weights(/*negated_weights=*/false);
+    aggregator.clear();
+  };
+
+  ledger.gf2_calls = 1;
+  int accepted_before_gf = accepted_rows;
+  (void)xtab_separate_modk_system<2>(
+      int_system_value, int_system_index, int_system_start, n_orig,
+      [&](auto& weights, int rhs_index) {
+        found_cut(weights, rhs_index, 2);
+      });
+  if (accepted_rows != accepted_before_gf) {
+    maybe_print_xtab_diag("modk", diag);
+    print_modk_ledger("done", accepted_rows);
+    return accepted_rows;
+  }
+
+  used_weights.clear();
+  ledger.gf3_calls = 1;
+  accepted_before_gf = accepted_rows;
+  (void)xtab_separate_modk_system<3>(
+      int_system_value, int_system_index, int_system_start, n_orig,
+      [&](auto& weights, int rhs_index) {
+        found_cut(weights, rhs_index, 3);
+      });
+  if (accepted_rows != accepted_before_gf) {
+    maybe_print_xtab_diag("modk", diag);
+    print_modk_ledger("done", accepted_rows);
+    return accepted_rows;
+  }
+
+  used_weights.clear();
+  ledger.gf5_calls = 1;
+  accepted_before_gf = accepted_rows;
+  (void)xtab_separate_modk_system<5>(
+      int_system_value, int_system_index, int_system_start, n_orig,
+      [&](auto& weights, int rhs_index) {
+        found_cut(weights, rhs_index, 5);
+      });
+  if (accepted_rows != accepted_before_gf) {
+    maybe_print_xtab_diag("modk", diag);
+    print_modk_ledger("done", accepted_rows);
+    return accepted_rows;
+  }
+
+  used_weights.clear();
+  ledger.gf7_calls = 1;
+  (void)xtab_separate_modk_system<7>(
+      int_system_value, int_system_index, int_system_start, n_orig,
+      [&](auto& weights, int rhs_index) {
+        found_cut(weights, rhs_index, 7);
+      });
+
+  maybe_print_xtab_diag("modk", diag);
+  print_modk_ledger("done", accepted_rows);
+  return accepted_rows;
 }
 
 int add_mir_like_cuts(LPModel& lp,
@@ -4685,6 +6083,24 @@ int add_row_mir_cuts(LPModel& lp, const Eigen::VectorXd& x, int max_cuts) {
 
 }  // anonymous namespace
 
+int add_transformed_modk_cuts(
+    LPModel& lp,
+    const Eigen::VectorXd& x,
+    const SimplexResult& simplex,
+    const BCOptions& opt,
+    const std::vector<char>* implied_integer_cols,
+    const BinaryImplicationGraph* implication_graph,
+    const VariableBoundTable* variable_bound_table,
+    std::vector<PoolCut>* generated_cutpool_rows,
+    double cut_generation_feastol,
+    const std::function<int(PoolCut&&)>* cutpool_acceptor,
+    std::optional<std::uint64_t> highs_cutgen_seed) {
+  return add_transformed_modk_cuts_impl(
+      lp, x, simplex, opt, implied_integer_cols, implication_graph,
+      variable_bound_table, generated_cutpool_rows, cut_generation_feastol,
+      cutpool_acceptor, highs_cutgen_seed);
+}
+
 int add_basis_gomory_cuts(LPModel& lp,
                           const Eigen::VectorXd& x,
                           const SimplexResult& simplex,
@@ -4869,9 +6285,15 @@ int add_transformed_tableau_cuts(
     int max_cuts,
     const std::shared_ptr<BasisOps>& sbasis,
     const std::vector<char>* implied_integer_cols,
-    const BinaryImplicationGraph* implication_graph,
-    const VariableBoundTable* variable_bound_table,
-    std::vector<PoolCut>* generated_cutpool_rows) {
+	    const BinaryImplicationGraph* implication_graph,
+	    const VariableBoundTable* variable_bound_table,
+	    std::vector<PoolCut>* generated_cutpool_rows,
+	    double cut_generation_feastol,
+	    const std::function<int(PoolCut&&)>* cutpool_acceptor,
+	    std::optional<std::uint64_t> highs_cutgen_seed) {
+  cut_generation_feastol = std::max(0.0, cut_generation_feastol);
+  const double tableau_feastol = cut_generation_feastol;
+  const double tableau_fractionality_tol = 1000.0 * tableau_feastol;
   if (max_cuts <= 0 || !simplex.exact_optimal ||
       x.size() != simplex.form.n_original) {
     return 0;
@@ -4895,11 +6317,12 @@ int add_transformed_tableau_cuts(
       simplex, implied_integer_cols, implication_graph, variable_bound_table);
   const XTabSourceContext source_context =
       xtab_build_source_context(simplex, implied_integer_cols);
+  XTabCutgenRandom cutgen_random(highs_cutgen_seed);
   if (!source_context.valid) {
     maybe_print_xtab_diag("tableau", diag);
     return 0;
   }
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
+  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
     fmt::print(stderr,
                "[B&C-XTAB-CTX] family=tableau srcDim={} srcRows={} vlb={} "
                "vub={} intVlb={} intVub={}\n",
@@ -4928,7 +6351,7 @@ int add_transformed_tableau_cuts(
           if (emitted >= max_terms) break;
           if (emitted > 0) fmt::format_to(std::back_inserter(buffer), ";");
           fmt::format_to(std::back_inserter(buffer),
-                         "{}:{}:{}:{:.12g}:{:.12g}:{}",
+                         "{}:{}:{}:{:.17g}:{:.17g}:{}",
                          fr.row, fr.basic_col, fr.source_col, fr.frac,
                          fr.score, fr.row_ep.size());
           ++emitted;
@@ -4979,7 +6402,7 @@ int add_transformed_tableau_cuts(
     const double value =
         xtab_unscaled_source_value(simplex, source_context, source_col);
     const double frac = xtab_fractionality_distance(value);
-    if (frac <= 1e-8 || frac >= 0.5 + 1e-8) {
+    if (frac < tableau_fractionality_tol) {
       continue;
     }
     if (source_col < n_orig) {
@@ -5039,15 +6462,23 @@ int add_transformed_tableau_cuts(
   }
 
   for (auto& fr : fractional_rows) {
-    Eigen::VectorXd e = Eigen::VectorXd::Zero(m);
-    e[fr.row] = 1.0;
     Eigen::VectorXd y;
+    std::vector<std::pair<int, double>> sparse_y;
+    const bool have_sparse_y =
+        sbasis && sbasis->kind() == BasisOpsKind::VendoredHighs &&
+        sparse_basis_inverse_row_sparse_entries(sbasis, fr.row, sparse_y);
     if (sbasis) {
-      y = sparse_basis_btran(sbasis, e);
+      if (!have_sparse_y && !sparse_basis_inverse_row(sbasis, fr.row, y)) {
+        continue;
+      }
     } else {
+      if (simplex.basis_inverse.rows() != m ||
+          simplex.basis_inverse.cols() != m) {
+        continue;
+      }
       y = simplex.basis_inverse.row(fr.row).transpose();
     }
-    if (y.size() != m || !y.allFinite()) {
+    if (!have_sparse_y && (y.size() != m || !y.allFinite())) {
       continue;
     }
     ++diag.btran_rows;
@@ -5056,23 +6487,35 @@ int add_transformed_tableau_cuts(
     double min_weight = std::numeric_limits<double>::infinity();
     double max_weight = 0.0;
     int raw_count = 0;
-    fr.row_ep.reserve(static_cast<std::size_t>(m));
-    for (int r = 0; r < m; ++r) {
-      const double w =
-          y[r] * fr.btran_scale * xtab_row_scale_or_one(simplex.form, r);
-      if (std::abs(w) <= 1e-12) {
-        continue;
-      }
+    fr.row_ep.reserve(have_sparse_y ? sparse_y.size()
+                                    : static_cast<std::size_t>(m));
+    auto consume_row_ep_entry = [&](int r, double raw_weight) {
+      if (r < 0 || r >= m || !std::isfinite(raw_weight)) return;
+      const double w = raw_weight * fr.btran_scale *
+                       xtab_row_scale_or_one(simplex.form, r);
       ++raw_count;
       const double row_max = standard_row_max_abs(simplex, r);
       const double scaled_weight = row_max * std::abs(w);
-      if (scaled_weight <= 1e-8) {
-        continue;
+      if (scaled_weight <= tableau_feastol) {
+        return;
       }
       min_weight = std::min(min_weight, scaled_weight);
       max_weight = std::max(max_weight, scaled_weight);
       norm2 += scaled_weight * scaled_weight;
       fr.row_ep.emplace_back(r, w);
+    };
+    if (have_sparse_y) {
+      for (const auto& entry : sparse_y) {
+        consume_row_ep_entry(entry.first, entry.second);
+      }
+    } else {
+      for (int r = 0; r < m; ++r) {
+        const double raw_weight = y[r];
+        if (std::abs(raw_weight) <= 1e-12) {
+          continue;
+        }
+        consume_row_ep_entry(r, raw_weight);
+      }
     }
     const int kept_count = static_cast<int>(fr.row_ep.size());
     if (fr.row_ep.size() <= 1 || !(norm2 > 0.0) ||
@@ -5094,18 +6537,20 @@ int add_transformed_tableau_cuts(
   }
   fractional_rows.erase(
       std::remove_if(fractional_rows.begin(), fractional_rows.end(),
-                     [](const FractionalBasisRow& row) {
-                       return row.row_ep.empty() || !(row.score > 1e-8);
+                     [&](const FractionalBasisRow& row) {
+                       return row.row_ep.empty() ||
+                              row.score <= tableau_feastol;
                      }),
       fractional_rows.end());
   if (fractional_rows.empty()) {
     maybe_print_xtab_diag("tableau", diag);
     return 0;
   }
-  std::sort(fractional_rows.begin(), fractional_rows.end(),
-            [](const FractionalBasisRow& a, const FractionalBasisRow& b) {
-              return a.score > b.score;
-            });
+  pdqsort_branchless(
+      fractional_rows.begin(), fractional_rows.end(),
+      [](const FractionalBasisRow& a, const FractionalBasisRow& b) {
+        return a.score > b.score;
+      });
   trace_fractional_rows("post_rowep_order", fractional_rows, "key=score");
 
   std::vector<XTabCandidateCut> candidates;
@@ -5170,11 +6615,24 @@ int add_transformed_tableau_cuts(
   const double activity_weight = std::max(0.0, opt.gmi_activity_weight);
 
   double best_score = -1.0;
+  int accepted_cutpool_rows = 0;
   for (const auto& fr : fractional_rows) {
-    if (static_cast<int>(candidates.size()) >= 4 * max_cuts) {
+    const int accepted_or_generated =
+        cutpool_acceptor != nullptr
+            ? accepted_cutpool_rows
+            : static_cast<int>(candidates.size());
+    if (cutpool_acceptor != nullptr) {
+      if (accepted_cutpool_rows >= 1000) {
+        break;
+      }
+    } else if (accepted_or_generated >= 4 * max_cuts) {
       break;
     }
-    if (best_score > 0.0 && fr.score < 0.0025 * best_score) {
+    const double best_score_factor =
+        (cutpool_acceptor != nullptr && accepted_cutpool_rows >= 50)
+            ? 0.01
+            : 0.0025;
+    if (best_score > 0.0 && fr.score < best_score_factor * best_score) {
       break;
     }
 
@@ -5224,14 +6682,16 @@ int add_transformed_tableau_cuts(
                                              &base_active_cols, x,
                                              implied_integer_cols,
                                              &transform_context,
-                                             &diag.vb_substitutions,
-                                             &diag.vb_trigger_terms, cut, rhs,
-                                             efficacy, &reject_reason, &diag,
-                                             /*require_violation=*/true,
+	                                             &diag.vb_substitutions,
+	                                             &diag.vb_trigger_terms, cut, rhs,
+	                                             efficacy, cut_generation_feastol,
+	                                             &reject_reason, &diag,
+		                                             /*require_violation=*/true,
                                              "tableau",
                                              basis_info.empty()
                                                  ? nullptr
-                                                 : basis_info.c_str())) {
+                                                 : basis_info.c_str(),
+                                             &cutgen_random)) {
           xtab_record_reject(&diag, reject_reason);
           continue;
         }
@@ -5240,6 +6700,16 @@ int add_transformed_tableau_cuts(
 	        const double norm = std::max(1e-12, cut.norm());
 	        const double activity = gmi_binary_activity_score(simplex, x, cut);
 	        const double score = efficacy * (1.0 + activity_weight * activity);
+        if (cutpool_acceptor != nullptr) {
+          PoolCut row = xtab_candidate_to_pool_cut(
+              XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm,
+                               nnz});
+          const int added = (*cutpool_acceptor)(std::move(row));
+          if (added > 0) {
+            accepted_cutpool_rows += added;
+          }
+          continue;
+        }
 	        if (generated_cutpool_rows != nullptr) {
 	          candidates.push_back(
 	              XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm, nnz});
@@ -5266,31 +6736,31 @@ int add_transformed_tableau_cuts(
 	            XTabCandidateCut{std::move(cut), rhs, score, efficacy, norm, nnz});
       }
     }
-    if (best_score < 0.0 && !candidates.empty()) {
+    if (best_score < 0.0 &&
+        (cutpool_acceptor != nullptr ? accepted_cutpool_rows > 0
+                                     : !candidates.empty())) {
       best_score = fr.score;
     }
+  }
+
+  if (cutpool_acceptor != nullptr) {
+    maybe_print_xtab_diag("tableau", diag);
+    return accepted_cutpool_rows;
   }
 
   if (candidates.empty()) {
     maybe_print_xtab_diag("tableau", diag);
     return 0;
   }
-  if (generated_cutpool_rows != nullptr) {
-    std::vector<XTabCandidateCut> selected =
-        xtab_select_highs_cutpool_like(candidates, lp, x, max_cuts,
-                                      "tableau", diag);
-    generated_cutpool_rows->reserve(generated_cutpool_rows->size() +
-                                    selected.size());
-    for (const auto& cand : selected) {
-      generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(cand));
-    }
-    maybe_print_xtab_diag("tableau", diag);
-    return static_cast<int>(selected.size());
-  }
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
-    (void)xtab_select_highs_cutpool_like(candidates, lp, x, max_cuts,
-                                        "tableau", diag);
-  }
+	  if (generated_cutpool_rows != nullptr) {
+	    generated_cutpool_rows->reserve(generated_cutpool_rows->size() +
+	                                    candidates.size());
+	    for (const auto& cand : candidates) {
+	      generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(cand));
+	    }
+	    maybe_print_xtab_diag("tableau", diag);
+	    return static_cast<int>(candidates.size());
+	  }
   std::sort(candidates.begin(), candidates.end(),
             [](const XTabCandidateCut& a, const XTabCandidateCut& b) {
               if (std::abs(a.score - b.score) > 1e-12) {
@@ -5345,18 +6815,83 @@ int add_transformed_path_cuts(
     const BCOptions& opt,
     int max_cuts,
     const std::vector<char>* implied_integer_cols,
-    const BinaryImplicationGraph* implication_graph,
+	    const BinaryImplicationGraph* implication_graph,
     const VariableBoundTable* variable_bound_table,
-    std::vector<PoolCut>* generated_cutpool_rows) {
-  if (max_cuts <= 0 || !simplex.exact_optimal ||
+    std::vector<PoolCut>* generated_cutpool_rows,
+    double cut_generation_feastol,
+    const std::function<int(PoolCut&&)>* cutpool_acceptor,
+    std::optional<std::uint64_t> highs_cutgen_seed,
+    const std::function<int(int)>* highs_path_randint) {
+  const bool direct_cutpool_mode = cutpool_acceptor != nullptr;
+  cut_generation_feastol = std::max(0.0, cut_generation_feastol);
+  if ((!direct_cutpool_mode && max_cuts <= 0) || !simplex.exact_optimal ||
       x.size() != simplex.form.n_original) {
     return 0;
   }
   XTabSourceDiag diag;
+  int ledger_source_dim = 0;
+  struct XPathLedger {
+    int row_eq{0};
+    int row_leq{0};
+    int row_geq{0};
+    int row_unusable{0};
+    int integer_like_cols{0};
+    int continuous_cols{0};
+    int continuous_bd_cols{0};
+    int rows_with_continuous{0};
+    int substitution_rows{0};
+    int in_arcs{0};
+    int out_arcs{0};
+    int usable_start_rows{0};
+    std::uint64_t start_attempts{0};
+    std::uint64_t path_iterations{0};
+    std::uint64_t aggregation_calls{0};
+    std::uint64_t substitution_events{0};
+    std::uint64_t path_extensions{0};
+    std::uint64_t try_negated_scale{0};
+    std::uint64_t cutgen_calls{0};
+    std::uint64_t cutgen_success{0};
+    std::uint64_t cutpool_calls{0};
+    std::uint64_t cutpool_accepted{0};
+    std::uint64_t candidate_rows{0};
+    std::uint64_t mix_attempts{0};
+    std::uint64_t mix_success{0};
+    std::uint64_t mix_accepted{0};
+  } path_ledger;
+  auto print_path_ledger = [&](const char* stage,
+                               int accepted_cutpool_rows,
+                               std::size_t candidates_size) {
+    if (std::getenv("MIPSOLVERS_XPATH_LEDGER") == nullptr &&
+        std::getenv("MIPSOLVERS_XTAB_DIAG") == nullptr) {
+      return;
+    }
+    path_ledger.candidate_rows = static_cast<std::uint64_t>(candidates_size);
+    fmt::print(
+        stderr,
+        "[B&C-XPATH-LEDGER] stage={} mode={} srcRows={} srcDim={} "
+        "rowtype=eq{}:le{}:ge{}:bad{} cols=int{}:cont{}:bd{} "
+        "rowsCont={} subst={} arcs=in{}:out{} usableStart={} "
+        "starts={} iters={} aggs={} substEvents={} extensions={} "
+        "tryNeg={} cutgen={}/{} gen={} mix={}/{}/{} "
+        "poolCalls={} poolAccepted={} acceptedRows={} candidates={}\n",
+        stage, direct_cutpool_mode ? "cutpool" : "bounded",
+        simplex.form.A_row.rows(), ledger_source_dim,
+        path_ledger.row_eq, path_ledger.row_leq, path_ledger.row_geq,
+        path_ledger.row_unusable, path_ledger.integer_like_cols,
+        path_ledger.continuous_cols, path_ledger.continuous_bd_cols,
+        path_ledger.rows_with_continuous, path_ledger.substitution_rows,
+        path_ledger.in_arcs, path_ledger.out_arcs,
+        path_ledger.usable_start_rows, path_ledger.start_attempts,
+        path_ledger.path_iterations, path_ledger.aggregation_calls,
+        path_ledger.substitution_events, path_ledger.path_extensions,
+        path_ledger.try_negated_scale, path_ledger.cutgen_success,
+        path_ledger.cutgen_calls, diag.generated, path_ledger.mix_success,
+        path_ledger.mix_attempts, path_ledger.mix_accepted,
+        path_ledger.cutpool_calls, path_ledger.cutpool_accepted,
+        accepted_cutpool_rows, path_ledger.candidate_rows);
+  };
   const int n_orig = simplex.form.n_original;
   const int m = static_cast<int>(simplex.form.A_row.rows());
-  const bool very_large_root_source =
-      m > opt.cut_budget_very_large_row_threshold;
   if (m <= 0 || simplex.form.b.size() != m ||
       simplex.x_std.size() != simplex.form.A.cols()) {
     return 0;
@@ -5365,11 +6900,14 @@ int add_transformed_path_cuts(
       simplex, implied_integer_cols, implication_graph, variable_bound_table);
   const XTabSourceContext source_context =
       xtab_build_source_context(simplex, implied_integer_cols);
+  ledger_source_dim = source_context.valid ? source_context.dim : 0;
+  XTabCutgenRandom cutgen_random(highs_cutgen_seed);
   if (!source_context.valid) {
     maybe_print_xtab_diag("path", diag);
+    print_path_ledger("invalid_context", 0, 0);
     return 0;
   }
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
+  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
     fmt::print(stderr,
                "[B&C-XTAB-CTX] family=path srcDim={} srcRows={} vlb={} "
                "vub={} intVlb={} intVub={}\n",
@@ -5380,27 +6918,18 @@ int add_transformed_path_cuts(
   }
   std::vector<unsigned char> integer_like_orig(
       static_cast<std::size_t>(n_orig), 0);
-  std::vector<double> integer_fractionality(static_cast<std::size_t>(n_orig),
-                                            0.0);
-  int integer_like_cols = 0;
-  int fractional_integer_cols = 0;
-  const double integer_frontier_tol = std::max(1e-8, opt.int_tol);
   for (int col = 0; col < n_orig; ++col) {
     if (!transformed_col_is_integer_like(simplex, col,
                                          implied_integer_cols)) {
       continue;
     }
     integer_like_orig[static_cast<std::size_t>(col)] = 1;
-    ++integer_like_cols;
-    const double value =
-        col < source_context.solution.size() ? source_context.solution[col]
-                                             : std::numeric_limits<double>::quiet_NaN();
-    const double frac = xtab_fractionality_distance(value);
-    if (std::isfinite(frac)) {
-      integer_fractionality[static_cast<std::size_t>(col)] = frac;
-      if (frac > integer_frontier_tol && frac < 0.5 + integer_frontier_tol) {
-        ++fractional_integer_cols;
-      }
+  }
+  for (int col = 0; col < n_orig; ++col) {
+    if (integer_like_orig[static_cast<std::size_t>(col)] != 0) {
+      ++path_ledger.integer_like_cols;
+    } else {
+      ++path_ledger.continuous_cols;
     }
   }
   enum class PathRowType : signed char {
@@ -5411,7 +6940,7 @@ int add_transformed_path_cuts(
   };
   std::vector<PathRowType> row_type(static_cast<std::size_t>(m),
                                     PathRowType::Unusable);
-  constexpr double feastol = 1e-8;
+	  const double feastol = cut_generation_feastol;
   for (int r = 0; r < m; ++r) {
     const int scol = source_context.n_original + r;
     const double lower = source_context.lower[scol];
@@ -5436,6 +6965,22 @@ int add_transformed_path_cuts(
       row_type[static_cast<std::size_t>(r)] = PathRowType::Geq;
     } else {
       row_type[static_cast<std::size_t>(r)] = PathRowType::Leq;
+    }
+  }
+  for (PathRowType type : row_type) {
+    switch (type) {
+      case PathRowType::Eq:
+        ++path_ledger.row_eq;
+        break;
+      case PathRowType::Leq:
+        ++path_ledger.row_leq;
+        break;
+      case PathRowType::Geq:
+        ++path_ledger.row_geq;
+        break;
+      case PathRowType::Unusable:
+        ++path_ledger.row_unusable;
+        break;
     }
   }
 
@@ -5493,6 +7038,10 @@ int add_transformed_path_cuts(
   std::vector<double> col_bound_distance(static_cast<std::size_t>(n_orig), 0.0);
   for (int col = 0; col < n_orig; ++col) {
     col_bound_distance[static_cast<std::size_t>(col)] = bound_distance(col);
+    if (integer_like_orig[static_cast<std::size_t>(col)] == 0 &&
+        col_bound_distance[static_cast<std::size_t>(col)] != 0.0) {
+      ++path_ledger.continuous_bd_cols;
+    }
   }
 
   struct PathArc {
@@ -5512,6 +7061,11 @@ int add_transformed_path_cuts(
       if (row >= 0 && row < m) {
         ++num_continuous[static_cast<std::size_t>(row)];
       }
+    }
+  }
+  for (int r = 0; r < m; ++r) {
+    if (num_continuous[static_cast<std::size_t>(r)] > 0) {
+      ++path_ledger.rows_with_continuous;
     }
   }
 
@@ -5542,6 +7096,7 @@ int add_transformed_path_cuts(
       col_substitution[static_cast<std::size_t>(subst_col)] =
           PathArc{r, subst_val};
       row_type[static_cast<std::size_t>(r)] = PathRowType::Unusable;
+      ++path_ledger.substitution_rows;
     }
   }
 
@@ -5607,117 +7162,44 @@ int add_transformed_path_cuts(
       }
     }
   }
-
-  struct PathStart {
-    int row{-1};
-    double score{0.0};
-    double frontier_score{0.0};
-    double drive_score{0.0};
-    int frontier_hits{0};
-    int drive_hits{0};
-    int integer_hits{0};
-    int nnz{0};
-  };
-
-  std::vector<PathStart> starts;
-  starts.reserve(static_cast<std::size_t>(m));
-  for (int r = 0; r < m; ++r) {
-    if (row_type[static_cast<std::size_t>(r)] == PathRowType::Unusable) {
-      continue;
-    }
-    PathStart start;
-    start.row = r;
-    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(
-             simplex.form.A_row, r);
-         it; ++it) {
-      const int col = static_cast<int>(it.col());
-      if (col < 0 || col >= n_orig) {
-        continue;
-      }
-      const double a = std::abs(xtab_source_row_coeff(simplex.form, r, col));
-      if (a <= 1e-12) {
-        continue;
-      }
-      ++start.nnz;
-      if (integer_like_orig[static_cast<std::size_t>(col)] != 0) {
-        ++start.integer_hits;
-        const double frac =
-            integer_fractionality[static_cast<std::size_t>(col)];
-        if (frac > integer_frontier_tol &&
-            frac < 0.5 + integer_frontier_tol) {
-          ++start.frontier_hits;
-          start.frontier_score += a * frac;
-        }
-        continue;
-      }
-      const double drive = col_source_drive[static_cast<std::size_t>(col)];
-      if (drive > feastol) {
-        ++start.drive_hits;
-        start.drive_score += a * std::min(1.0, drive);
-      }
-    }
-    const double nnz_scale =
-        std::sqrt(1.0 + static_cast<double>(std::max(0, start.nnz)));
-    start.score =
-        (16.0 * start.frontier_score + 2.0 * start.drive_score +
-         0.05 * static_cast<double>(start.integer_hits)) /
-        nnz_scale;
-    if (row_type[static_cast<std::size_t>(r)] == PathRowType::Eq) {
-      start.score *= 0.95;
-    }
-    starts.push_back(start);
+  for (const auto& arcs : col_in_arcs) {
+    path_ledger.in_arcs += static_cast<int>(arcs.size());
   }
-  if (starts.empty()) {
+  for (const auto& arcs : col_out_arcs) {
+    path_ledger.out_arcs += static_cast<int>(arcs.size());
+  }
+
+  int usable_start_rows = 0;
+  for (int r = 0; r < m; ++r) {
+    if (row_type[static_cast<std::size_t>(r)] != PathRowType::Unusable) {
+      ++usable_start_rows;
+    }
+  }
+  path_ledger.usable_start_rows = usable_start_rows;
+  if (usable_start_rows == 0) {
     maybe_print_xtab_diag("path", diag);
+    print_path_ledger("no_start_rows", 0, 0);
     return 0;
   }
-  std::sort(starts.begin(), starts.end(),
-            [](const PathStart& a, const PathStart& b) {
-              if (std::abs(a.score - b.score) > 1e-12) {
-                return a.score > b.score;
-              }
-              if (a.frontier_hits != b.frontier_hits) {
-                return a.frontier_hits > b.frontier_hits;
-              }
-              if (std::abs(a.frontier_score - b.frontier_score) > 1e-12) {
-                return a.frontier_score > b.frontier_score;
-              }
-              if (std::abs(a.drive_score - b.drive_score) > 1e-12) {
-                return a.drive_score > b.drive_score;
-              }
-              if (a.nnz != b.nnz) {
-                return a.nnz < b.nnz;
-              }
-              return a.row < b.row;
-            });
-  const int raw_start_count = static_cast<int>(starts.size());
-  const int candidate_floor = std::max(64, 2 * max_cuts);
-  const int frontier_work =
-      4 * std::max(1, fractional_integer_cols) + max_cuts +
-      std::max(64, integer_like_cols / 10);
-  const int path_start_work_limit =
-      std::min(raw_start_count,
-               std::max(candidate_floor, std::min(2048, frontier_work)));
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
-    const PathStart& best = starts.front();
-    fmt::print(stderr,
-               "[B&C-XTAB-PATH-SCHED] rows={} scheduled={} maxCuts={} "
-               "intLike={} fracInt={} best=row{} score={:.12g} "
-               "frontier={:.12g}/{} drive={:.12g}/{} nnz={}\n",
-               raw_start_count, path_start_work_limit, max_cuts,
-               integer_like_cols, fractional_integer_cols, best.row,
-               best.score, best.frontier_score, best.frontier_hits,
-               best.drive_score, best.drive_hits, best.nnz);
+  if (std::getenv("MIPSOLVERS_XTAB_DIAG") != nullptr) {
+    if (direct_cutpool_mode) {
+      fmt::print(stderr,
+                 "[B&C-XTAB-PATH-SCHED] mode=highs_row_order rows={} "
+                 "contentCap=none\n",
+                 usable_start_rows);
+    } else {
+      fmt::print(stderr,
+                 "[B&C-XTAB-PATH-SCHED] mode=highs_row_order rows={} "
+                 "maxCuts={}\n",
+                 usable_start_rows, max_cuts);
+    }
   }
 
   std::vector<XTabCandidateCut> candidates;
-  candidates.reserve(static_cast<std::size_t>(max_cuts * 2));
-  const int candidate_work_cap =
-      std::max(max_cuts, (generated_cutpool_rows != nullptr &&
-                                  very_large_root_source
-                              ? 2
-                              : 4) *
-                             max_cuts);
+  const int reserve_hint =
+      direct_cutpool_mode ? 8 : std::max(8, max_cuts * 2);
+  candidates.reserve(static_cast<std::size_t>(reserve_hint));
+  int accepted_cutpool_rows = 0;
 
   const double density_cap =
       std::min(1.0, std::max(0.01, opt.gmi_max_density));
@@ -5732,63 +7214,62 @@ int add_transformed_path_cuts(
                        [&](const auto& p) { return p.first == row; });
   };
 
-  XTabLpAggregator path_aggregator(simplex, source_context);
-  auto aggregate_path_rows =
-      [&](const std::vector<std::pair<int, double>>& rows,
-          Eigen::VectorXd& coeff, double& rhs,
-          std::vector<int>* active_cols) -> bool {
-    path_aggregator.clear();
-    bool ok = true;
-    for (const auto& row_weight : rows) {
-      if (!path_aggregator.add_row(row_weight.first, row_weight.second)) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) {
-      ok = path_aggregator.get_current_aggregation(
-          coeff, rhs, false, active_cols);
-    }
-    path_aggregator.clear();
-    return ok;
-  };
-
-  auto try_current_path = [&](const std::vector<std::pair<int, double>>& path) {
-    Eigen::VectorXd coeff;
-    double rhs = 0.0;
-    std::vector<int> active_cols;
-    if (!aggregate_path_rows(path, coeff, rhs, &active_cols)) {
-      return;
-    }
+  auto add_path_cuts_from_aggregation = [&](const Eigen::VectorXd& coeff,
+                                            double rhs,
+                                            const std::vector<int>& active_cols) {
     ++diag.aggregate_ok;
+    bool accepted_any = false;
     for (int sign : {1, -1}) {
+      ++path_ledger.cutgen_calls;
       Eigen::VectorXd cut;
       double cut_rhs = 0.0;
       double efficacy = 0.0;
       const Eigen::VectorXd signed_coeff = sign == 1 ? coeff : (-coeff);
-      const double signed_rhs = sign == 1 ? rhs : (-rhs);
+          const double signed_rhs = sign == 1 ? rhs : (-rhs);
       XTabRejectReason reject_reason = XTabRejectReason::None;
+        std::uint64_t source_trace_id = 0;
       if (!xtab_generate_cut_from_base_row(simplex, source_context,
                                            signed_coeff, signed_rhs,
                                            &active_cols, x,
                                            implied_integer_cols,
                                            &transform_context,
-                                           &diag.vb_substitutions,
-                                           &diag.vb_trigger_terms, cut, cut_rhs,
-                                           efficacy,
-                                           &reject_reason, &diag,
-                                           /*require_violation=*/true,
-                                           "path")) {
+	                                           &diag.vb_substitutions,
+	                                           &diag.vb_trigger_terms, cut, cut_rhs,
+	                                           efficacy,
+	                                           cut_generation_feastol,
+		                                           &reject_reason, &diag,
+		                                           /*require_violation=*/true,
+                                           "path", nullptr, &cutgen_random,
+                                           /*only_initial_cmir_scale=*/false,
+                                           &source_trace_id)) {
         xtab_record_reject(&diag, reject_reason);
         continue;
       }
-      ++diag.generated;
       const int nnz = count_nonzeros(cut);
       const double norm = std::max(1e-12, cut.norm());
       const double score = efficacy;
+      if (cutpool_acceptor != nullptr) {
+        PoolCut row = xtab_candidate_to_pool_cut(
+            XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm,
+                   nnz, source_trace_id});
+        const int added = (*cutpool_acceptor)(std::move(row));
+        ++path_ledger.cutpool_calls;
+        if (added > 0) {
+          accepted_cutpool_rows += added;
+          path_ledger.cutpool_accepted += static_cast<std::uint64_t>(added);
+          ++path_ledger.cutgen_success;
+          ++diag.generated;
+          accepted_any = true;
+        }
+        continue;
+      }
       if (generated_cutpool_rows != nullptr) {
         candidates.push_back(XTabCandidateCut{std::move(cut), cut_rhs, score,
-                                              efficacy, norm, nnz});
+                                              efficacy, norm, nnz,
+                                              source_trace_id});
+        ++path_ledger.cutgen_success;
+        ++diag.generated;
+        accepted_any = true;
         continue;
       }
       if (nnz > max_nnz || efficacy < min_efficacy) {
@@ -5800,8 +7281,13 @@ int add_transformed_path_cuts(
         continue;
       }
       candidates.push_back(XTabCandidateCut{std::move(cut), cut_rhs, score,
-                                            efficacy, norm, nnz});
+                                            efficacy, norm, nnz,
+                                            source_trace_id});
+      ++path_ledger.cutgen_success;
+      ++diag.generated;
+      accepted_any = true;
     }
+    return accepted_any;
   };
 
   auto try_path_mixing =
@@ -5809,6 +7295,7 @@ int add_transformed_path_cuts(
     if (path_aggs.size() < 2) {
       return;
     }
+    ++path_ledger.mix_attempts;
     Eigen::VectorXd cut;
     double cut_rhs = 0.0;
     double efficacy = 0.0;
@@ -5817,17 +7304,34 @@ int add_transformed_path_cuts(
                                        implied_integer_cols, &transform_context,
                                        &diag.vb_substitutions,
                                        &diag.vb_trigger_terms, cut, cut_rhs,
-                                       efficacy, &reject_reason)) {
+	                                       efficacy, cut_generation_feastol,
+	                                       &reject_reason)) {
       xtab_record_reject(&diag, reject_reason);
       return;
     }
-    ++diag.generated;
     const int nnz = count_nonzeros(cut);
     const double norm = std::max(1e-12, cut.norm());
     const double score = efficacy;
+    if (cutpool_acceptor != nullptr) {
+      PoolCut row = xtab_candidate_to_pool_cut(
+          XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm,
+                           nnz});
+      const int added = (*cutpool_acceptor)(std::move(row));
+      ++path_ledger.cutpool_calls;
+      if (added > 0) {
+        accepted_cutpool_rows += added;
+        path_ledger.cutpool_accepted += static_cast<std::uint64_t>(added);
+        path_ledger.mix_accepted += static_cast<std::uint64_t>(added);
+        ++path_ledger.mix_success;
+        ++diag.generated;
+      }
+      return;
+    }
     if (generated_cutpool_rows != nullptr) {
       candidates.push_back(
           XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm, nnz});
+      ++path_ledger.mix_success;
+      ++diag.generated;
       return;
     }
     if (nnz > max_nnz || efficacy < min_efficacy) {
@@ -5840,6 +7344,8 @@ int add_transformed_path_cuts(
     }
     candidates.push_back(
         XTabCandidateCut{std::move(cut), cut_rhs, score, efficacy, norm, nnz});
+    ++path_ledger.mix_success;
+    ++diag.generated;
   };
 
   constexpr int kMaxPathLen = 6;
@@ -5849,6 +7355,7 @@ int add_transformed_path_cuts(
     w = std::abs(w);
     return std::isfinite(w) && w >= min_weight && w <= max_weight;
   };
+  HighsRandom fallback_path_randgen(0);
 
   auto skip_col = [&](int col,
                       const std::vector<std::vector<PathArc>>& same_arcs,
@@ -5889,7 +7396,25 @@ int add_transformed_path_cuts(
                       int& row,
                       double& weight) {
     const auto& arcs = arcs_by_col[static_cast<std::size_t>(col)];
-    for (const PathArc& arc : arcs) {
+    if (arcs.empty()) {
+      return false;
+    }
+    int start_pos = 0;
+    if (cutpool_acceptor != nullptr) {
+      if (highs_path_randint != nullptr) {
+        start_pos = (*highs_path_randint)(static_cast<int>(arcs.size()));
+      } else {
+        start_pos = static_cast<int>(
+            fallback_path_randgen.integer(static_cast<HighsInt>(arcs.size())));
+      }
+      if (start_pos < 0 || start_pos >= static_cast<int>(arcs.size())) {
+        start_pos = 0;
+      }
+    }
+    for (int step = 0; step < static_cast<int>(arcs.size()); ++step) {
+      const PathArc& arc =
+          arcs[static_cast<std::size_t>((start_pos + step) %
+                                        static_cast<int>(arcs.size()))];
       if (row_in_path(path, arc.row) || std::abs(arc.coeff) <= 1e-12) {
         continue;
       }
@@ -5904,27 +7429,11 @@ int add_transformed_path_cuts(
     return false;
   };
 
-  auto cutpool_selected_count = [&]() -> int {
-    if (generated_cutpool_rows == nullptr || candidates.empty()) {
-      return static_cast<int>(candidates.size());
-    }
-    std::vector<XTabCandidateCut> probe = candidates;
-    XTabSourceDiag probe_diag;
-    return static_cast<int>(
-        xtab_select_highs_cutpool_like(probe, lp, x, max_cuts, "path_probe",
-                                       probe_diag)
-            .size());
-  };
-
-  int processed_starts = 0;
-  int scheduled_starts = std::min(raw_start_count, candidate_floor);
-  while (processed_starts < raw_start_count) {
-    const int pass_end = std::min(raw_start_count, scheduled_starts);
-    for (; processed_starts < pass_end; ++processed_starts) {
-      const int start_row =
-          starts[static_cast<std::size_t>(processed_starts)].row;
-      if (static_cast<int>(candidates.size()) >= candidate_work_cap) {
-        break;
+  XTabLpAggregator path_aggregator(simplex, source_context);
+  for (int start_row = 0; start_row < m; ++start_row) {
+      if (row_type[static_cast<std::size_t>(start_row)] ==
+          PathRowType::Unusable) {
+        continue;
       }
       std::vector<double> start_scales;
       const PathRowType type = row_type[static_cast<std::size_t>(start_row)];
@@ -5941,19 +7450,25 @@ int add_transformed_path_cuts(
                                          : std::vector<double>{-1.0, 1.0};
       }
       for (double start_scale : start_scales) {
-        if (static_cast<int>(candidates.size()) >= candidate_work_cap) break;
+        ++path_ledger.start_attempts;
+        path_aggregator.clear();
         std::vector<std::pair<int, double>> path;
         std::vector<XTabAggregatedSourceRow> path_aggs;
         bool try_negated_scale = false;
+        if (!path_aggregator.add_row(start_row, start_scale)) {
+          break;
+        }
         path.emplace_back(start_row, start_scale);
-        for (int depth = 0; depth < kMaxPathLen; ++depth) {
-          if (static_cast<int>(candidates.size()) >= candidate_work_cap) break;
+	        while (static_cast<int>(path.size()) < kMaxPathLen) {
+          ++path_ledger.path_iterations;
           Eigen::VectorXd coeff;
           double rhs = 0.0;
           std::vector<int> active_cols;
-          if (!aggregate_path_rows(path, coeff, rhs, &active_cols)) {
+          if (!path_aggregator.get_current_aggregation(
+                  coeff, rhs, false, &active_cols)) {
             break;
           }
+          ++path_ledger.aggregation_calls;
 
           int best_out_col = -1;
           double best_out_val = 0.0;
@@ -5961,7 +7476,8 @@ int add_transformed_path_cuts(
           int best_in_col = -1;
           double best_in_val = 0.0;
           double best_in_dist = 0.0;
-          bool added_substitution = false;
+          bool added_substitution_rows = false;
+          bool abort_path = false;
 
           for (int col : active_cols) {
             if (col < 0 || col >= n_orig) {
@@ -5969,23 +7485,26 @@ int add_transformed_path_cuts(
             }
             const double val = coeff[col];
             if (std::abs(val) <= 1e-10 ||
-                col_source_drive[static_cast<std::size_t>(col)] <= feastol ||
+                col_bound_distance[static_cast<std::size_t>(col)] <= feastol ||
                 integer_like_orig[static_cast<std::size_t>(col)] != 0) {
               continue;
             }
             const PathArc subst =
                 col_substitution[static_cast<std::size_t>(col)];
-            if (subst.row >= 0 && std::abs(subst.coeff) > 1e-12 &&
-                !row_in_path(path, subst.row)) {
-              const double w = -val / subst.coeff;
-              if (weight_ok(w)) {
-                path.emplace_back(subst.row, w);
-                added_substitution = true;
-                break;
-              }
+	            if (subst.row >= 0 && std::abs(subst.coeff) > 1e-12) {
+	              const double w = -val / subst.coeff;
+	              if (std::isfinite(w)) {
+	                if (!path_aggregator.add_row(subst.row, w)) {
+	                  abort_path = true;
+	                  break;
+	                }
+	                ++path_ledger.substitution_events;
+	                added_substitution_rows = true;
+	                continue;
+	              }
             }
-            if (added_substitution) {
-              break;
+            if (added_substitution_rows) {
+              continue;
             }
 
             if (val < 0.0) {
@@ -5994,7 +7513,7 @@ int add_transformed_path_cuts(
                 continue;
               }
               const double dist =
-                  col_source_drive[static_cast<std::size_t>(col)];
+                  col_bound_distance[static_cast<std::size_t>(col)];
               if (best_out_col < 0 || dist > best_out_dist) {
                 best_out_col = col;
                 best_out_val = val;
@@ -6006,7 +7525,7 @@ int add_transformed_path_cuts(
                 continue;
               }
               const double dist =
-                  col_source_drive[static_cast<std::size_t>(col)];
+                  col_bound_distance[static_cast<std::size_t>(col)];
               if (best_in_col < 0 || dist > best_in_dist) {
                 best_in_col = col;
                 best_in_val = val;
@@ -6014,15 +7533,17 @@ int add_transformed_path_cuts(
               }
             }
           }
-          if (added_substitution) {
+          if (abort_path) {
+            break;
+          }
+          if (added_substitution_rows) {
             continue;
           }
 
           const std::size_t before_cuts = candidates.size();
-          try_current_path(path);
-          if (static_cast<int>(candidates.size()) >= candidate_work_cap) {
-            break;
-          }
+          const int before_accepted = accepted_cutpool_rows;
+          const bool success =
+              add_path_cuts_from_aggregation(coeff, rhs, active_cols);
           if (!path_aggs.empty() || best_out_col >= 0 || best_in_col >= 0) {
             XTabAggregatedSourceRow agg;
             agg.coeff = -coeff;
@@ -6030,7 +7551,11 @@ int add_transformed_path_cuts(
             agg.active_cols = active_cols;
             path_aggs.push_back(std::move(agg));
           }
-          if (candidates.size() > before_cuts ||
+          const bool cut_accepted_or_generated =
+              cutpool_acceptor != nullptr
+                  ? accepted_cutpool_rows > before_accepted
+                  : (success && candidates.size() > before_cuts);
+          if (cut_accepted_or_generated ||
               (best_out_col < 0 && best_in_col < 0)) {
             break;
           }
@@ -6054,50 +7579,44 @@ int add_transformed_path_cuts(
               break;
             }
           }
+          if (!path_aggregator.add_row(next_row, next_weight)) {
+            break;
+          }
+          ++path_ledger.path_extensions;
           path.emplace_back(next_row, next_weight);
         }
-        if (static_cast<int>(candidates.size()) < candidate_work_cap) {
-          try_path_mixing(path_aggs);
-        }
-        if (static_cast<int>(candidates.size()) >= candidate_work_cap) break;
+        try_path_mixing(path_aggs);
+        if (try_negated_scale) ++path_ledger.try_negated_scale;
         if (!try_negated_scale) {
           break;
         }
       }
-    }
-    if (static_cast<int>(candidates.size()) >= candidate_work_cap ||
-        processed_starts >= raw_start_count) {
-      break;
-    }
-    if (cutpool_selected_count() >= max_cuts) {
-      break;
-    }
-    scheduled_starts =
-        std::min(raw_start_count,
-                 std::max(scheduled_starts + max_cuts,
-                          2 * std::max(1, scheduled_starts)));
+      path_aggregator.clear();
+  }
+
+  if (cutpool_acceptor != nullptr) {
+    maybe_print_xtab_diag("path", diag);
+    print_path_ledger("done", accepted_cutpool_rows, candidates.size());
+    return accepted_cutpool_rows;
   }
 
   if (candidates.empty()) {
     maybe_print_xtab_diag("path", diag);
+    print_path_ledger("empty_candidates", accepted_cutpool_rows,
+                      candidates.size());
     return 0;
   }
-  if (generated_cutpool_rows != nullptr) {
-    std::vector<XTabCandidateCut> selected =
-        xtab_select_highs_cutpool_like(candidates, lp, x, max_cuts, "path",
-                                      diag);
-    generated_cutpool_rows->reserve(generated_cutpool_rows->size() +
-                                    selected.size());
-    for (const auto& cand : selected) {
-      generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(cand));
-    }
-    maybe_print_xtab_diag("path", diag);
-    return static_cast<int>(selected.size());
-  }
-  if (std::getenv("HACDCPF_XTAB_DIAG") != nullptr) {
-    (void)xtab_select_highs_cutpool_like(candidates, lp, x, max_cuts, "path",
-                                        diag);
-  }
+	  if (generated_cutpool_rows != nullptr) {
+	    generated_cutpool_rows->reserve(generated_cutpool_rows->size() +
+	                                    candidates.size());
+	    for (const auto& cand : candidates) {
+	      generated_cutpool_rows->push_back(xtab_candidate_to_pool_cut(cand));
+	    }
+	    maybe_print_xtab_diag("path", diag);
+	    print_path_ledger("generated_rows", accepted_cutpool_rows,
+	                      candidates.size());
+	    return static_cast<int>(candidates.size());
+	  }
   std::sort(candidates.begin(), candidates.end(),
             [](const XTabCandidateCut& a, const XTabCandidateCut& b) {
               return a.score > b.score;
@@ -6125,6 +7644,8 @@ int add_transformed_path_cuts(
   }
   if (selected.empty()) {
     maybe_print_xtab_diag("path", diag);
+    print_path_ledger("empty_selected", accepted_cutpool_rows,
+                      candidates.size());
     return 0;
   }
   std::vector<Eigen::VectorXd> rows;
@@ -6137,6 +7658,7 @@ int add_transformed_path_cuts(
   }
   add_rows_to_lp(lp, rows, rhs);
   maybe_print_xtab_diag("path", diag);
+  print_path_ledger("selected", accepted_cutpool_rows, candidates.size());
   return static_cast<int>(selected.size());
 }
 
@@ -6565,9 +8087,9 @@ int add_cuts(LPModel& lp,
       tracker->get(family).attempts += 1;
       tracker->get(family).budget_total += actual_budget;
     }
-    const int add = f(actual_budget);
+    const int add = std::max(0, f(actual_budget));
     const int end_rows = static_cast<int>(lp.A.rows());
-    
+
     if (tracker && add > 0) {
       double eff = compute_efficacy(start_rows, end_rows);
       tracker->get(family).add_round(eff);
@@ -6576,7 +8098,7 @@ int add_cuts(LPModel& lp,
     } else if (tracker) {
       tracker->get(family).zero_rounds += 1;
     }
-    
+
     total += add;
     budget -= add;
   };
@@ -6585,7 +8107,7 @@ int add_cuts(LPModel& lp,
     if (budget <= 0) {
       return;
     }
-    const int add = f(budget);
+    const int add = std::max(0, f(budget));
     total += add;
     budget -= add;
   };
@@ -6606,9 +8128,9 @@ int add_cuts(LPModel& lp,
     if (simplex != nullptr) {
       spend_tracked(CutFamily::Gomory,
                     [&](int b) {
-                      return add_transformed_tableau_cuts(
-                          lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
-                          nullptr);
+	                      return add_transformed_tableau_cuts(
+	                          lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
+	                          nullptr);
                     },
                     budget);
     }
@@ -6665,9 +8187,9 @@ int add_cuts(LPModel& lp,
   if (simplex != nullptr) {
     spend_tracked(CutFamily::Gomory,
                   [&](int b) {
-                    return add_transformed_tableau_cuts(
-                        lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
-                        nullptr);
+	                    return add_transformed_tableau_cuts(
+	                        lp, x, *simplex, opt, b, sbasis, nullptr, nullptr,
+	                        nullptr);
                   },
                   budget);
   }

@@ -19,11 +19,14 @@
 /// These hooks are intentionally kept generic so that both learned and
 /// rule-based tuners can share the same infrastructure.
 
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "mipsolvers/engine/bc/branching_prior.hpp"
+#include "mipsolvers/engine/bc/enums.hpp"
 
 namespace mipsolvers::engine {
 
@@ -89,6 +92,57 @@ using BCCutSelectorFn =
     std::function<void(const std::vector<BCCutCandidate>& candidates,
                        std::vector<bool>& out_accept)>;
 
+/// Dynamic node cut request used by the strict HiGHS lifecycle callback.
+/// The row is interpreted as lower <= sum(values[k] * x[indices[k]]) <= upper.
+struct BCDynamicNodeCut {
+  enum class ColumnSpace {
+    /// Indices are interpreted in the active HiGHS node LP column space.
+    NodeLp,
+    /// Indices are interpreted in the caller's original MIP model column space.
+    /// The strict HiGHS bridge projects them through the current presolve
+    /// postsolve stack before inserting the row into the node LP cutpool.
+    Original
+  };
+
+  std::vector<int> indices;
+  std::vector<double> values;
+  /// Optional audit labels. They do not affect solver semantics, but are
+  /// emitted by strict HiGHS projection checks when a dynamic cut is rejected.
+  std::string audit_family;
+  std::string audit_key;
+  int audit_period{-1};
+  double lower{-std::numeric_limits<double>::infinity()};
+  double upper{std::numeric_limits<double>::infinity()};
+  bool integral{false};
+  bool propagate{false};
+  ColumnSpace column_space{ColumnSpace::NodeLp};
+  /// Default is backward-compatible: existing callbacks generate global user
+  /// cuts unless they explicitly mark a row as node-local or lazy.
+  ValidityScope validity_scope{ValidityScope::GlobalCut};
+};
+
+/// Dynamic node cut context at the exact node LP lifecycle point:
+/// after HiGHS resolves the active node LP and before incumbent/prune/branch.
+struct BCDynamicNodeCutContext {
+  std::string event;
+  std::int64_t node_count{0};
+  int depth{0};
+  double lp_objective{0.0};
+  /// Active node-LP solution in current HiGHS LP column space.
+  std::vector<double> col_value;
+  std::vector<double> col_lower;
+  std::vector<double> col_upper;
+  /// Current HiGHS LP column -> original model column. Empty if unavailable.
+  std::vector<int> reduced_to_original_col;
+  /// Original-space solution reconstructed for linearly transformable columns.
+  /// Entries that cannot be reconstructed are NaN.
+  std::vector<double> original_col_value;
+};
+
+using BCDynamicNodeCutFn =
+    std::function<void(const BCDynamicNodeCutContext& ctx,
+                       std::vector<BCDynamicNodeCut>& out_cuts)>;
+
 /// Post-solve event: fired once after the run completes. Useful to log
 /// (features, options, final stats) triples for offline training.
 using BCPostSolveFn =
@@ -103,6 +157,7 @@ struct BCCallbacks {
   BCBranchingPriorFn   branching_prior;
   BCNodeSelectorFn     node_selector;
   BCCutSelectorFn      cut_selector;
+  BCDynamicNodeCutFn   dynamic_node_cut;
   BCHyperparamTunerFn  hyperparam_tuner;
   BCPostSolveFn        post_solve;
 
@@ -112,7 +167,7 @@ struct BCCallbacks {
   /// True when all hooks are empty (fast path).
   bool empty() const {
     return !branching_prior && !node_selector && !cut_selector
-        && !hyperparam_tuner && !post_solve;
+        && !dynamic_node_cut && !hyperparam_tuner && !post_solve;
   }
 };
 

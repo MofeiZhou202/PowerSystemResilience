@@ -4,7 +4,7 @@
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
@@ -26,6 +26,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mipsolvers::engine {
@@ -48,7 +49,7 @@ std::uint64_t bridge_hash_double(double value) {
       static_cast<std::int64_t>(std::llround(value * 1e9)));
 }
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 std::string highs_model_status_name(HighsModelStatus status) {
   switch (status) {
     case HighsModelStatus::kNotset:
@@ -119,6 +120,161 @@ double highs_bound_or_inf(double value, double inf_sign) {
   if (value <= -kBridgeInf) return -kHighsInf;
   if (value >= kBridgeInf) return kHighsInf;
   return value;
+}
+
+double native_bound_or_inf(double value, double inf_sign) {
+  if (!std::isfinite(value)) {
+    return inf_sign < 0.0 ? -std::numeric_limits<double>::infinity()
+                          : std::numeric_limits<double>::infinity();
+  }
+  if (value <= -0.5 * kHighsInf) {
+    return -std::numeric_limits<double>::infinity();
+  }
+  if (value >= 0.5 * kHighsInf) {
+    return std::numeric_limits<double>::infinity();
+  }
+  return value;
+}
+
+bool highs_finite_lower(double value) {
+  return std::isfinite(value) && value > -0.5 * kHighsInf;
+}
+
+bool highs_finite_upper(double value) {
+  return std::isfinite(value) && value < 0.5 * kHighsInf;
+}
+
+VarType native_var_type_from_highs(HighsVarType type,
+                                   double lb,
+                                   double ub) {
+  switch (type) {
+    case HighsVarType::kInteger:
+    case HighsVarType::kSemiInteger:
+      if (highs_finite_lower(lb) && highs_finite_upper(ub) &&
+          std::abs(lb) <= 1e-9 && std::abs(ub - 1.0) <= 1e-9) {
+        return VarType::Binary;
+      }
+      return VarType::Integer;
+    case HighsVarType::kImplicitInteger:
+    case HighsVarType::kContinuous:
+    case HighsVarType::kSemiContinuous:
+      return VarType::Continuous;
+  }
+  return VarType::Continuous;
+}
+
+LPModel convert_highs_presolved_lp_to_native(const HighsLp& presolved,
+                                             Sense native_sense) {
+  LPModel out;
+  out.sense = native_sense;
+  const int ncols = static_cast<int>(presolved.num_col_);
+  const int nrows = static_cast<int>(presolved.num_row_);
+  out.vars.resize(static_cast<std::size_t>(std::max(0, ncols)));
+  out.c = Eigen::VectorXd::Zero(std::max(0, ncols));
+  for (int j = 0; j < ncols; ++j) {
+    const double lb =
+        j < static_cast<int>(presolved.col_lower_.size())
+            ? presolved.col_lower_[static_cast<std::size_t>(j)]
+            : -kHighsInf;
+    const double ub =
+        j < static_cast<int>(presolved.col_upper_.size())
+            ? presolved.col_upper_[static_cast<std::size_t>(j)]
+            : kHighsInf;
+    const double cost =
+        j < static_cast<int>(presolved.col_cost_.size())
+            ? presolved.col_cost_[static_cast<std::size_t>(j)]
+            : 0.0;
+    HighsVarType type = HighsVarType::kContinuous;
+    if (j < static_cast<int>(presolved.integrality_.size())) {
+      type = presolved.integrality_[static_cast<std::size_t>(j)];
+    }
+    out.c[j] = native_sense == Sense::Maximize ? -cost : cost;
+    auto& v = out.vars[static_cast<std::size_t>(j)];
+    v.lb = native_bound_or_inf(lb, -1.0);
+    v.ub = native_bound_or_inf(ub, 1.0);
+    v.type = native_var_type_from_highs(type, lb, ub);
+    v.name = j < static_cast<int>(presolved.col_names_.size())
+                 ? presolved.col_names_[static_cast<std::size_t>(j)]
+                 : std::string();
+  }
+
+  std::vector<Eigen::Triplet<double>> row_trips;
+  row_trips.reserve(static_cast<std::size_t>(presolved.a_matrix_.numNz()));
+  std::vector<int> row_to_native(static_cast<std::size_t>(std::max(0, nrows)),
+                                 -1);
+  std::vector<int> highs_row_to_native_row(
+      static_cast<std::size_t>(std::max(0, nrows)), -1);
+  std::vector<double> row_lhs;
+  std::vector<double> row_rhs;
+  row_lhs.reserve(static_cast<std::size_t>(std::max(0, nrows)));
+  row_rhs.reserve(static_cast<std::size_t>(std::max(0, nrows)));
+
+  for (int r = 0; r < nrows; ++r) {
+    const double lhs =
+        r < static_cast<int>(presolved.row_lower_.size())
+            ? presolved.row_lower_[static_cast<std::size_t>(r)]
+            : -kHighsInf;
+    const double rhs =
+        r < static_cast<int>(presolved.row_upper_.size())
+            ? presolved.row_upper_[static_cast<std::size_t>(r)]
+            : kHighsInf;
+    const bool has_lhs = highs_finite_lower(lhs);
+    const bool has_rhs = highs_finite_upper(rhs);
+    if (!has_lhs && !has_rhs) continue;
+    const int native_row = static_cast<int>(row_rhs.size());
+    highs_row_to_native_row[static_cast<std::size_t>(r)] = native_row;
+    row_to_native[static_cast<std::size_t>(r)] = native_row;
+    row_lhs.push_back(has_lhs ? lhs : -std::numeric_limits<double>::infinity());
+    row_rhs.push_back(has_rhs ? rhs : std::numeric_limits<double>::infinity());
+  }
+
+  HighsSparseMatrix matrix = presolved.a_matrix_;
+  matrix.ensureColwise();
+  if (static_cast<int>(matrix.start_.size()) >= ncols + 1) {
+    for (int col = 0; col < ncols; ++col) {
+      const HighsInt start = matrix.start_[static_cast<std::size_t>(col)];
+      const HighsInt end = matrix.start_[static_cast<std::size_t>(col + 1)];
+      for (HighsInt p = start; p < end; ++p) {
+        if (p < 0 || p >= static_cast<HighsInt>(matrix.index_.size()) ||
+            p >= static_cast<HighsInt>(matrix.value_.size())) {
+          continue;
+        }
+        const int row = static_cast<int>(matrix.index_[static_cast<std::size_t>(p)]);
+        const double value = matrix.value_[static_cast<std::size_t>(p)];
+        if (row < 0 || row >= nrows || value == 0.0) continue;
+        const int native_row = row_to_native[static_cast<std::size_t>(row)];
+        if (native_row >= 0) {
+          row_trips.emplace_back(native_row, col, value);
+        }
+      }
+    }
+  }
+
+  const int m_rows = static_cast<int>(row_rhs.size());
+  out.A.resize(m_rows, ncols);
+  out.A.setFromTriplets(row_trips.begin(), row_trips.end());
+  out.A.makeCompressed();
+  out.row_lhs.resize(m_rows);
+  out.b.resize(m_rows);
+  for (int r = 0; r < m_rows; ++r) {
+    out.row_lhs[r] = row_lhs[static_cast<std::size_t>(r)];
+    out.b[r] = row_rhs[static_cast<std::size_t>(r)];
+  }
+  out.Aeq.resize(0, ncols);
+  out.beq.resize(0);
+  out.highs_row_to_native_row = std::move(highs_row_to_native_row);
+  HighsSparseMatrix row_matrix = presolved.a_matrix_;
+  row_matrix.ensureRowwise();
+  out.highs_row_start.reserve(row_matrix.start_.size());
+  for (const HighsInt v : row_matrix.start_) {
+    out.highs_row_start.push_back(static_cast<int>(v));
+  }
+  out.highs_row_index.reserve(row_matrix.index_.size());
+  for (const HighsInt v : row_matrix.index_) {
+    out.highs_row_index.push_back(static_cast<int>(v));
+  }
+  out.highs_row_value = row_matrix.value_;
+  return out;
 }
 
 char highs_basis_status_char(HighsBasisStatus status) {
@@ -278,10 +434,10 @@ void fill_projected_lp_state_stats(
 
 HiGHSPresolveBridgeInfo highs_presolve_bridge_info() {
   HiGHSPresolveBridgeInfo info;
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   info.available = true;
-#ifdef HACDCPF_HIGHS_LIB_SOURCE
-  info.source = HACDCPF_HIGHS_LIB_SOURCE;
+#ifdef MIPSOLVERS_HIGHS_LIB_SOURCE
+  info.source = MIPSOLVERS_HIGHS_LIB_SOURCE;
 #else
   info.source = "linked";
 #endif
@@ -301,7 +457,7 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
   stats.available = bridge.available;
   stats.bridge_source = bridge.source;
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   if (!bridge.available) return stats;
 
   const int ncols = static_cast<int>(lp.vars.size());
@@ -391,6 +547,24 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
       highs_presolve_status_name(highs.getModelPresolveStatus());
   if (!stats.presolve_ok) return stats;
 
+  const HighsLp& presolved = highs.getPresolvedLp();
+  stats.presolved_objective_offset = presolved.offset_;
+  if (presolved.num_col_ >= 0 && presolved.num_row_ >= 0 &&
+      static_cast<int>(presolved.col_cost_.size()) >= presolved.num_col_ &&
+      static_cast<int>(presolved.col_lower_.size()) >= presolved.num_col_ &&
+      static_cast<int>(presolved.col_upper_.size()) >= presolved.num_col_ &&
+      static_cast<int>(presolved.row_lower_.size()) >= presolved.num_row_ &&
+      static_cast<int>(presolved.row_upper_.size()) >= presolved.num_row_) {
+    stats.presolved_lp = convert_highs_presolved_lp_to_native(presolved,
+                                                              lp.sense);
+    stats.presolved_lp_available =
+        static_cast<int>(stats.presolved_lp.vars.size()) ==
+            static_cast<int>(presolved.num_col_) &&
+        static_cast<int>(stats.presolved_lp.A.rows()) +
+                static_cast<int>(stats.presolved_lp.Aeq.rows()) <=
+            static_cast<int>(presolved.num_row_);
+  }
+
   const auto& side_state = highs.getPresolveSideState();
   if (side_state.available) {
     stats.side_state_available = true;
@@ -419,18 +593,50 @@ HiGHSPresolvedModelStats highs_presolve_model_stats(const LPModel& lp) {
         static_cast<int>(side_state.probing_substitutions);
     stats.vub_hash = side_state.vub_hash;
     stats.vlb_hash = side_state.vlb_hash;
+    stats.presolved_row_lower = side_state.presolved_row_lower;
+    stats.presolved_row_upper = side_state.presolved_row_upper;
+    stats.presolved_col_lower = side_state.presolved_col_lower;
+    stats.presolved_col_upper = side_state.presolved_col_upper;
+    stats.presolved_col_orig.reserve(side_state.presolved_col_orig.size());
+    for (const HighsInt orig : side_state.presolved_col_orig) {
+      stats.presolved_col_orig.push_back(static_cast<int>(orig));
+    }
+    stats.presolved_col_type.reserve(side_state.presolved_col_type.size());
+    for (const HighsVarType type : side_state.presolved_col_type) {
+      stats.presolved_col_type.push_back(static_cast<unsigned char>(type));
+    }
+    stats.presolved_col_scale = side_state.presolved_col_scale;
+    stats.presolved_col_constant = side_state.presolved_col_constant;
+    stats.presolved_col_linearly_transformable =
+        side_state.presolved_col_linearly_transformable;
+    stats.presolved_a_start.reserve(side_state.presolved_a_start.size());
+    for (const HighsInt v : side_state.presolved_a_start) {
+      stats.presolved_a_start.push_back(static_cast<int>(v));
+    }
+    stats.presolved_a_index.reserve(side_state.presolved_a_index.size());
+    for (const HighsInt v : side_state.presolved_a_index) {
+      stats.presolved_a_index.push_back(static_cast<int>(v));
+    }
+    stats.presolved_a_value = side_state.presolved_a_value;
     stats.var_bounds.reserve(side_state.var_bounds.size());
     for (const auto& rec : side_state.var_bounds) {
       HiGHSPresolvedModelStats::VarBoundRecord out;
       out.target_col = static_cast<int>(rec.target_col);
       out.trigger_col = static_cast<int>(rec.trigger_col);
+      out.target_orig_col = static_cast<int>(rec.target_orig_col);
+      out.trigger_orig_col = static_cast<int>(rec.trigger_orig_col);
       out.coef = rec.coef;
       out.constant = rec.constant;
+      out.target_scale = rec.target_scale;
+      out.target_constant = rec.target_constant;
+      out.trigger_scale = rec.trigger_scale;
+      out.trigger_constant = rec.trigger_constant;
       out.upper = rec.upper;
+      out.target_linearly_transformable = rec.target_linearly_transformable;
+      out.trigger_linearly_transformable = rec.trigger_linearly_transformable;
       stats.var_bounds.push_back(out);
     }
   } else {
-    const HighsLp& presolved = highs.getPresolvedLp();
     stats.rows = static_cast<int>(presolved.num_row_);
     stats.cols = static_cast<int>(presolved.num_col_);
     stats.nnz = static_cast<int>(presolved.a_matrix_.numNz());
@@ -492,7 +698,7 @@ HiGHSRootLpStateStats highs_root_lp_state_stats(
   stats.available = bridge.available;
   stats.bridge_source = bridge.source;
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   if (!bridge.available) return stats;
 
   const int ncols = static_cast<int>(lp.vars.size());
@@ -732,7 +938,7 @@ HiGHSRootLpStateStats highs_standard_form_lp_state_stats(
   stats.available = bridge.available;
   stats.bridge_source = bridge.source;
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
   if (!bridge.available) return stats;
   const int nstd = static_cast<int>(sf.A.cols());
   const int m = static_cast<int>(sf.A.rows());

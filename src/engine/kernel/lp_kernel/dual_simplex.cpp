@@ -75,11 +75,11 @@
 
 #include <fmt/format.h>
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #include "Highs.h"
 #endif
 
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
 extern "C" {
 #include <umfpack.h>
 }
@@ -87,8 +87,8 @@ extern "C" {
 
 #include "mipsolvers/core/logging.hpp"
 
-#ifndef HACDCPF_ENABLE_FACTOR_BACKEND_B
-#define HACDCPF_ENABLE_FACTOR_BACKEND_B 0
+#ifndef MIPSOLVERS_ENABLE_FACTOR_BACKEND_B
+#define MIPSOLVERS_ENABLE_FACTOR_BACKEND_B 0
 #endif
 
 namespace mipsolvers::engine {
@@ -317,7 +317,7 @@ Eigen::VectorXd extract_solution(const StandardFormLP& sf, const Eigen::VectorXd
 }
 
 bool lp_basis_trace_enabled() {
-  const char* env = std::getenv("HACDCPF_LP_BASIS_TRACE");
+  const char* env = std::getenv("MIPSOLVERS_LP_BASIS_TRACE");
   return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 
@@ -325,14 +325,14 @@ thread_local bool tl_vendored_highs_sf_backend_enabled = false;
 
 bool vendored_highs_sf_enabled() {
   if (tl_vendored_highs_sf_backend_enabled) return true;
-  const char* env = std::getenv("HACDCPF_USE_VENDORED_HIGHS_SF_LP");
-  const char* unsafe = std::getenv("HACDCPF_ALLOW_UNSAFE_VENDORED_HIGHS_SF_LP");
+  const char* env = std::getenv("MIPSOLVERS_USE_VENDORED_HIGHS_SF_LP");
+  const char* unsafe = std::getenv("MIPSOLVERS_ALLOW_UNSAFE_VENDORED_HIGHS_SF_LP");
   return env != nullptr && env[0] != '\0' && env[0] != '0' &&
          unsafe != nullptr && unsafe[0] == '1';
 }
 
 int lp_basis_trace_terms() {
-  const char* env = std::getenv("HACDCPF_LP_BASIS_TRACE_TERMS");
+  const char* env = std::getenv("MIPSOLVERS_LP_BASIS_TRACE_TERMS");
   if (env == nullptr || env[0] == '\0') return 24;
   char* end = nullptr;
   const long value = std::strtol(env, &end, 10);
@@ -910,20 +910,20 @@ void trace_lp_basis_hint_state(const StandardFormLP& sf,
 }
 
 bool root_coldstate_diag_enabled() {
-  const char* e = std::getenv("HACDCPF_ROOT_COLDSTATE_DIAG");
+  const char* e = std::getenv("MIPSOLVERS_ROOT_COLDSTATE_DIAG");
   return e && e[0] != '\0' && e[0] != '0';
 }
 
 bool simplex_exact_edge_env_enabled() {
   return root_coldstate_diag_enabled() ||
-         std::getenv("HACDCPF_LPSTATE_CONFORM") != nullptr ||
-         std::getenv("HACDCPF_FRONTIER_CONFORM") != nullptr ||
-         std::getenv("HACDCPF_XPOOL_EXACT_DSE") != nullptr ||
-         std::getenv("HACDCPF_XPOOL_PARENT_EXACT_DSE") != nullptr;
+         std::getenv("MIPSOLVERS_LPSTATE_CONFORM") != nullptr ||
+         std::getenv("MIPSOLVERS_FRONTIER_CONFORM") != nullptr ||
+         std::getenv("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
+         std::getenv("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
 }
 
 bool simplex_degenerate_frontier_remap_env_enabled() {
-  const char* e = std::getenv("HACDCPF_FORCE_DEGENERATE_FRONTIER_REMAP");
+  const char* e = std::getenv("MIPSOLVERS_FORCE_DEGENERATE_FRONTIER_REMAP");
   return e != nullptr && e[0] != '\0' && e[0] != '0';
 }
 
@@ -1156,7 +1156,7 @@ void populate_dual_certificate(const StandardFormLP& sf,
   (void)at_upper;
 }
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 const char* highs_sf_model_status_label(HighsModelStatus status) {
   switch (status) {
     case HighsModelStatus::kOptimal:
@@ -1219,6 +1219,32 @@ bool native_sf_basis_to_highs(const StandardFormLP& sf,
         HighsBasisStatus::kLower;
   }
   return true;
+}
+
+int native_sf_col_from_highs_basic(const StandardFormLP& sf,
+                                   HighsInt highs_basic) {
+  const int n = static_cast<int>(sf.A.cols());
+  if (highs_basic >= 0) {
+    const int col = static_cast<int>(highs_basic);
+    return (col >= 0 && col < n) ? col : -1;
+  }
+
+  // HiGHS reports a basic row/logical variable as -(row + 1).  Native's
+  // standard-form basis stores the corresponding explicit logical column.
+  const int row = static_cast<int>(-highs_basic - 1);
+  if (row < 0 || row >= static_cast<int>(sf.A.rows())) return -1;
+  auto row_col = [&](const std::vector<int>& map) -> int {
+    if (row >= static_cast<int>(map.size())) return -1;
+    const int col = map[static_cast<std::size_t>(row)];
+    return (col >= 0 && col < n) ? col : -1;
+  };
+  int col = row_col(sf.row_to_slack_col);
+  if (col >= 0) return col;
+  col = row_col(sf.row_to_surplus_col);
+  if (col >= 0) return col;
+  col = row_col(sf.row_to_artificial_col);
+  if (col >= 0) return col;
+  return -1;
 }
 
 bool pass_standard_form_to_highs(Highs& highs, const StandardFormLP& sf) {
@@ -1350,6 +1376,111 @@ bool audit_vendored_highs_sf_result(const StandardFormLP& sf,
          objective_gap <= obj_tol;
 }
 
+int inject_basic_degenerate_col_duals_from_highs(
+    const StandardFormLP& sf,
+    Highs& highs,
+    const HighsSolution& sol,
+    const std::vector<int>& basis_indices,
+    Eigen::VectorXd& reduced_costs,
+    double feastol,
+    double epsilon) {
+  const int m = static_cast<int>(sf.A.rows());
+  const int n = static_cast<int>(sf.A.cols());
+  const int n_orig = sf.n_original;
+  if (m <= 0 || n <= 0 || n_orig <= 0 ||
+      static_cast<int>(basis_indices.size()) != m ||
+      reduced_costs.size() != n ||
+      static_cast<int>(sol.col_value.size()) < n ||
+      static_cast<int>(sol.col_dual.size()) < n) {
+    return 0;
+  }
+
+  std::vector<int> basic_row_for_col(static_cast<std::size_t>(n), -1);
+  for (int row = 0; row < m; ++row) {
+    const int col = basis_indices[static_cast<std::size_t>(row)];
+    if (col >= 0 && col < n) basic_row_for_col[static_cast<std::size_t>(col)] = row;
+  }
+
+  const bool have_col_scale = sf.col_scale.size() == n;
+  const bool have_ub = sf.var_ub.size() == n;
+  const double dual_accept_tol = std::max(10.0 * feastol, epsilon);
+  std::vector<double> row_ap(static_cast<std::size_t>(n), 0.0);
+  int injected = 0;
+
+  for (int col = 0; col < n_orig; ++col) {
+    if (col >= static_cast<int>(sf.original_types.size())) break;
+    const VarType type = sf.original_types[static_cast<std::size_t>(col)];
+    if (type != VarType::Integer && type != VarType::Binary) continue;
+
+    const int basis_row = basic_row_for_col[static_cast<std::size_t>(col)];
+    if (basis_row < 0) continue;
+
+    const double lb = 0.0;
+    const double ub = have_ub ? sf.var_ub[col] : kInf;
+    if (std::isfinite(ub) && ub - lb < feastol) continue;
+
+    const double value = sol.col_value[static_cast<std::size_t>(col)];
+    double sign = 0.0;
+    if (!std::isfinite(ub) || value - lb < ub - value) {
+      if (value > lb + feastol) continue;
+      sign = 1.0;
+    } else {
+      if (value < ub - feastol) continue;
+      sign = -1.0;
+    }
+
+    std::fill(row_ap.begin(), row_ap.end(), 0.0);
+    if (highs.getReducedRow(static_cast<HighsInt>(basis_row),
+                            row_ap.data()) != HighsStatus::kOk) {
+      continue;
+    }
+
+    double degenerate_col_dual = kInf;
+    for (int j = 0; j < n; ++j) {
+      if (j == col) continue;
+      const double other_ub = have_ub ? sf.var_ub[j] : kInf;
+      if (std::isfinite(other_ub) && other_ub <= feastol) continue;
+      const double val = sign * row_ap[static_cast<std::size_t>(j)];
+      if (val > epsilon) {
+        if (sol.col_value[static_cast<std::size_t>(j)] > feastol) {
+          const double ratio =
+              -sol.col_dual[static_cast<std::size_t>(j)] / val;
+          if (std::isfinite(ratio)) {
+            degenerate_col_dual = std::min(degenerate_col_dual, ratio);
+          }
+        }
+      } else if (val < -epsilon) {
+        const bool has_room_to_upper =
+            !std::isfinite(other_ub) ||
+            other_ub - sol.col_value[static_cast<std::size_t>(j)] > feastol;
+        if (has_room_to_upper) {
+          const double ratio =
+              -sol.col_dual[static_cast<std::size_t>(j)] / val;
+          if (std::isfinite(ratio)) {
+            degenerate_col_dual = std::min(degenerate_col_dual, ratio);
+          }
+        }
+      }
+    }
+
+    if (!std::isfinite(degenerate_col_dual) ||
+        degenerate_col_dual <= dual_accept_tol) {
+      continue;
+    }
+
+    const double effective_col_dual = sign * degenerate_col_dual;
+    const double col_scale = have_col_scale ? sf.col_scale[col] : 1.0;
+    if (!std::isfinite(effective_col_dual) ||
+        !std::isfinite(col_scale) || std::abs(col_scale) <= 1e-18) {
+      continue;
+    }
+    reduced_costs[col] = -effective_col_dual * col_scale;
+    ++injected;
+  }
+
+  return injected;
+}
+
 class VendoredHighsBasis : public BasisOps {
  public:
   VendoredHighsBasis(std::shared_ptr<Highs> highs,
@@ -1393,6 +1524,25 @@ class VendoredHighsBasis : public BasisOps {
     return out;
   }
 
+  bool basis_inverse_row(int row, Eigen::VectorXd& out) const override {
+    out = Eigen::VectorXd::Zero(m_);
+    if (!highs_ || row < 0 || row >= m_) return false;
+    std::vector<double> row_vec(static_cast<std::size_t>(m_), 0.0);
+    HighsInt row_num_nz = 0;
+    std::vector<HighsInt> row_indices(static_cast<std::size_t>(m_), 0);
+    const HighsStatus st =
+        highs_->getBasisInverseRow(static_cast<HighsInt>(row), row_vec.data(),
+                                   &row_num_nz, row_indices.data());
+    if (st != HighsStatus::kOk) return false;
+    if (row_num_nz < 0 || row_num_nz > m_) return false;
+    for (HighsInt k = 0; k < row_num_nz; ++k) {
+      const int r = static_cast<int>(row_indices[static_cast<std::size_t>(k)]);
+      if (r < 0 || r >= m_) return false;
+      out[r] = row_vec[static_cast<std::size_t>(r)];
+    }
+    return out.allFinite();
+  }
+
   bool tableau_row(int row, Eigen::RowVectorXd& out) const override {
     if (!highs_ || row < 0 || row >= m_ || n_ <= 0) return false;
     std::vector<double> h_row(static_cast<std::size_t>(n_), 0.0);
@@ -1425,6 +1575,225 @@ class VendoredHighsBasis : public BasisOps {
     return A.rows() == m_ && A.cols() == n_;
   }
 
+  std::shared_ptr<Highs> highs_handle() const override { return highs_; }
+
+  bool import_optimal_result(const std::shared_ptr<Highs>& highs,
+                             const StandardFormLP& sf,
+                             const SimplexOptions& opt,
+                             bool solved_from_hint,
+                             const char* context,
+                             SimplexResult& out) {
+    if (!highs) return false;
+    const int m = static_cast<int>(sf.A.rows());
+    const int n = static_cast<int>(sf.A.cols());
+    if (m <= 0 || n <= 0) return false;
+    const HighsModelStatus model_status = highs->getModelStatus();
+    if (model_status != HighsModelStatus::kOptimal) {
+      out.result.stats.solver_name = "VendoredHighsLpKernel";
+      out.result.stats.success = false;
+      out.result.stats.status =
+          std::string("HiGHS ") + highs_sf_model_status_label(model_status);
+      return false;
+    }
+
+    const HighsSolution& sol = highs->getSolution();
+    const HighsBasis& basis = highs->getBasis();
+    if (!basis.valid || static_cast<int>(basis.col_status.size()) < n ||
+        static_cast<int>(basis.row_status.size()) < m ||
+        static_cast<int>(sol.col_value.size()) < n) {
+      return false;
+    }
+
+    out = SimplexResult{};
+    out.form = sf;
+    out.x_std = Eigen::VectorXd::Zero(n);
+    for (int j = 0; j < n; ++j) {
+      out.x_std[j] = sol.col_value[static_cast<std::size_t>(j)];
+    }
+    out.result.x = extract_solution(sf, out.x_std);
+    out.x_basic = Eigen::VectorXd::Zero(m);
+    out.basis.rows = m;
+    out.basis.cols = n;
+    out.basis.indices.assign(static_cast<std::size_t>(m), -1);
+    out.basis.at_upper.assign(static_cast<std::size_t>(n), 0);
+    out.basis.sf_n_slack = sf.n_slack;
+    out.basis.sf_n_surplus = sf.n_surplus;
+    out.basis.sf_n_artificial = sf.n_artificial;
+
+    for (int j = 0; j < n; ++j) {
+      out.basis.at_upper[static_cast<std::size_t>(j)] =
+          basis.col_status[static_cast<std::size_t>(j)] ==
+                  HighsBasisStatus::kUpper
+              ? 1
+              : 0;
+    }
+
+    std::vector<HighsInt> basic(static_cast<std::size_t>(m), 0);
+    if (highs->getBasicVariables(basic.data()) != HighsStatus::kOk) {
+      return false;
+    }
+    std::vector<char> is_artificial(static_cast<std::size_t>(n), 0);
+    for (int art : sf.row_to_artificial_col) {
+      if (art >= 0 && art < n) {
+        is_artificial[static_cast<std::size_t>(art)] = 1;
+      }
+    }
+    for (int row = 0; row < m; ++row) {
+      const int col = native_sf_col_from_highs_basic(
+          sf, basic[static_cast<std::size_t>(row)]);
+      if (col < 0 || col >= n) return false;
+      if (is_artificial[static_cast<std::size_t>(col)] &&
+          std::abs(out.x_std[col]) >
+              std::max(1e-7, opt.feasibility_tol * 20.0)) {
+        return false;
+      }
+      out.basis.indices[static_cast<std::size_t>(row)] = col;
+      out.x_basic[row] = out.x_std[col];
+    }
+
+    out.reduced_costs = Eigen::VectorXd::Zero(n);
+    const bool have_col_dual = static_cast<int>(sol.col_dual.size()) >= n;
+    if (!have_col_dual) return false;
+    const bool have_col_scale = sf.col_scale.size() == n;
+    for (int j = 0; j < n; ++j) {
+      const double col_scale = have_col_scale ? sf.col_scale[j] : 1.0;
+      out.reduced_costs[j] =
+          -sol.col_dual[static_cast<std::size_t>(j)] * col_scale;
+    }
+
+    const HighsInfo& info = highs->getInfo();
+    out.basis_inverse.resize(0, 0);
+    out.max_objective = info.objective_function_value;
+    out.result.stats.solver_name = "VendoredHighsLpKernel";
+    out.result.stats.iterations =
+        static_cast<int>(info.simplex_iteration_count);
+    out.result.stats.objective = sf.objective_const - out.max_objective;
+    out.result.stats.status = "Optimal";
+    out.result.stats.success = true;
+    out.result.stats.primal_feas = 0.0;
+    out.result.stats.residual_inf = 0.0;
+    out.solved_from_hint = solved_from_hint;
+    out.dual_reoptimized = solved_from_hint;
+    out.exact_optimal = true;
+    out.basis.cached_reduced_costs =
+        std::make_shared<const Eigen::VectorXd>(out.reduced_costs);
+    if (sf.col_scale.size() == n) {
+      out.basis.cached_col_scale =
+          std::make_shared<const Eigen::VectorXd>(sf.col_scale);
+    }
+    out.basis.cached_x_basic =
+        std::make_shared<const Eigen::VectorXd>(out.x_basic);
+    out.basis.cached_x_std = std::make_shared<const Eigen::VectorXd>(out.x_std);
+    out.basis.cached_max_objective = out.max_objective;
+    out.basis.has_cached_max_objective = true;
+    out.basis.cached_sparse_basis =
+        std::make_shared<VendoredHighsBasis>(highs, m, n, &out.form.A);
+    out.basis.persist_eta_count = 0;
+
+    double primal_residual = 0.0;
+    double bound_violation = 0.0;
+    double artificial_activity = 0.0;
+    double dual_violation = 0.0;
+    double objective_gap = 0.0;
+    const double highs_dual_violation =
+        info.num_dual_infeasibilities <= 0
+            ? 0.0
+            : (std::isfinite(info.max_dual_infeasibility)
+                   ? info.max_dual_infeasibility
+                   : std::numeric_limits<double>::infinity());
+    if (!audit_vendored_highs_sf_result(sf, opt, out, primal_residual,
+                                        bound_violation, artificial_activity,
+                                        dual_violation, objective_gap,
+                                        highs_dual_violation)) {
+      if (std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        fmt::print(stderr,
+                   "[SF_RELAX] VendoredHiGHS SF audit rejected: ctx={} "
+                   "primal={:.3e} bound={:.3e} art={:.3e} dual={:.3e} "
+                   "obj_gap={:.3e} m={} n={} hint={}\n",
+                   context != nullptr ? context : "solve", primal_residual,
+                   bound_violation, artificial_activity, dual_violation,
+                   objective_gap, m, n, solved_from_hint ? 1 : 0);
+      }
+      return false;
+    }
+    out.result.stats.primal_feas = std::max(primal_residual, bound_violation);
+    out.result.stats.residual_inf = primal_residual;
+    out.result.stats.dual_feas = dual_violation;
+    populate_dual_certificate(sf, out.basis.indices, out.basis.at_upper,
+                              out.basis_inverse, out.basis.cached_sparse_basis,
+                              out.reduced_costs, out.result);
+    return true;
+  }
+
+  bool delete_rows_cols_and_resolve(
+      const StandardFormLP& compact_sf,
+      const SimplexBasis* compact_basis_hint,
+      const std::vector<int>& delete_rows,
+      const std::vector<int>& delete_cols,
+      const SimplexOptions& opt,
+      SimplexResult& out) override {
+    if (!highs_ || delete_rows.empty() ||
+        compact_basis_hint == nullptr ||
+        compact_basis_hint->rows != static_cast<int>(compact_sf.A.rows()) ||
+        compact_basis_hint->cols != static_cast<int>(compact_sf.A.cols()) ||
+        static_cast<int>(compact_basis_hint->index_count()) !=
+            static_cast<int>(compact_sf.A.rows())) {
+      return false;
+    }
+    const int old_m = m_;
+    const int old_n = n_;
+    auto highs = highs_;
+    if (!delete_cols.empty()) {
+      std::vector<HighsInt> cols;
+      cols.reserve(delete_cols.size());
+      for (int col : delete_cols) {
+        if (col < 0 || col >= old_n) return false;
+        cols.push_back(static_cast<HighsInt>(col));
+      }
+      if (highs->deleteCols(static_cast<HighsInt>(cols.size()),
+                            cols.data()) != HighsStatus::kOk) {
+        return false;
+      }
+    }
+    {
+      std::vector<HighsInt> rows;
+      rows.reserve(delete_rows.size());
+      for (int row : delete_rows) {
+        if (row < 0 || row >= old_m) return false;
+        rows.push_back(static_cast<HighsInt>(row));
+      }
+      if (highs->deleteRows(static_cast<HighsInt>(rows.size()),
+                            rows.data()) != HighsStatus::kOk) {
+        return false;
+      }
+    }
+    if (highs->getNumRow() != compact_sf.A.rows() ||
+        highs->getNumCol() != compact_sf.A.cols()) {
+      return false;
+    }
+    HighsBasis hbasis;
+    if (!native_sf_basis_to_highs(compact_sf, compact_basis_hint, hbasis)) {
+      return false;
+    }
+    if (highs->setBasis(hbasis,
+                        "MIPSOLVERS vendored xpool aging removeCuts") !=
+        HighsStatus::kOk) {
+      return false;
+    }
+    const HighsStatus run_status = highs->run();
+    if (run_status != HighsStatus::kOk ||
+        highs->getModelStatus() != HighsModelStatus::kOptimal) {
+      out.result.stats.solver_name = "VendoredHighsLpKernel";
+      out.result.stats.success = false;
+      out.result.stats.status =
+          std::string("HiGHS ") +
+          highs_sf_model_status_label(highs->getModelStatus());
+      return false;
+    }
+    return import_optimal_result(highs, compact_sf, opt, true,
+                                 "delete_rows_cols_and_resolve", out);
+  }
+
  private:
   std::shared_ptr<Highs> highs_;
   int m_{0};
@@ -1441,6 +1810,7 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   if (m <= 0 || n <= 0) return false;
 
   const auto t0 = std::chrono::steady_clock::now();
+  const bool trace_sf = std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr;
   auto highs = std::make_shared<Highs>();
   highs->setOptionValue("output_flag", false);
   highs->setOptionValue("log_to_console", false);
@@ -1459,10 +1829,31 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
                        kHighsDefaultKktTolerance);
   highs->setOptionValue("mip_feasibility_tolerance",
                        kHighsDefaultMipTolerance);
-  if (!pass_standard_form_to_highs(*highs, sf)) return false;
+  auto reject = [&](const char* reason) {
+    out.result.stats.solver_name = "VendoredHighsLpKernel";
+    out.result.stats.success = false;
+    out.result.stats.status = std::string("VendoredHiGHS SF reject: ") +
+                              (reason != nullptr ? reason : "unknown");
+    out.result.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    if (trace_sf) {
+      fmt::print(stderr,
+                 "[SF_RELAX] VendoredHiGHS SF rejected: reason={} m={} n={} "
+                 "hint={} time={:.3f}ms\n",
+                 reason != nullptr ? reason : "unknown", m, n,
+                 basis_hint ? 1 : 0,
+                 out.result.stats.runtime_sec * 1000.0);
+    }
+    return false;
+  };
+
+  if (!pass_standard_form_to_highs(*highs, sf)) {
+    return reject("pass_model");
+  }
   HighsBasis hbasis;
   if (native_sf_basis_to_highs(sf, basis_hint, hbasis)) {
-    (void)highs->setBasis(hbasis, "HACDCPF native SF basis hint");
+    (void)highs->setBasis(hbasis, "MIPSOLVERS native SF basis hint");
   }
 
   const HighsStatus run_status = highs->run();
@@ -1480,10 +1871,66 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
       std::string("HiGHS ") + highs_sf_model_status_label(model_status);
   if (model_status == HighsModelStatus::kInfeasible) {
     out.result.stats.status = "LP infeasible";
+    out.result.stats.success = false;
+    out.result.stats.objective = kInf;
+    out.result.stats.has_farkas_certificate = true;
+    bool has_dual_ray = false;
+    std::vector<double> dual_ray(static_cast<std::size_t>(m), 0.0);
+    if (highs->getDualRay(has_dual_ray, dual_ray.data()) ==
+            HighsStatus::kOk &&
+        has_dual_ray) {
+      int eq_count = 0;
+      int ineq_count = 0;
+      for (int row = 0; row < m; ++row) {
+        if (sf.row_to_artificial_col[row] >= 0 &&
+            sf.row_to_surplus_col[row] < 0) {
+          ++eq_count;
+        } else {
+          ++ineq_count;
+        }
+      }
+      out.result.stats.farkas_ray =
+          Eigen::VectorXd::Zero(std::max(0, ineq_count));
+      out.result.stats.farkas_ray_eq =
+          Eigen::VectorXd::Zero(std::max(0, eq_count));
+      int ineq_pos = 0;
+      int eq_pos = 0;
+      for (int row = 0; row < m; ++row) {
+        const double value =
+            (row < static_cast<int>(sf.row_sign.size()) ? sf.row_sign[row]
+                                                        : 1.0) *
+            dual_ray[static_cast<std::size_t>(row)];
+        if (sf.row_to_artificial_col[row] >= 0 &&
+            sf.row_to_surplus_col[row] < 0) {
+          if (eq_pos < eq_count) out.result.stats.farkas_ray_eq[eq_pos++] = value;
+        } else {
+          if (ineq_pos < ineq_count) out.result.stats.farkas_ray[ineq_pos++] = value;
+        }
+      }
+    }
+    if (std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+      fmt::print(stderr,
+                 "[SF_RELAX] VendoredHiGHS SF: infeasible m={} n={} "
+                 "hint={} ray={} iter={} time={:.3f}ms\n",
+                 m, n, basis_hint ? 1 : 0, has_dual_ray ? 1 : 0,
+                 out.result.stats.iterations,
+                 out.result.stats.runtime_sec * 1000.0);
+    }
     return true;
   }
   if (run_status != HighsStatus::kOk ||
       model_status != HighsModelStatus::kOptimal) {
+    out.result.stats.status =
+        std::string("HiGHS ") + highs_sf_model_status_label(model_status);
+    if (trace_sf) {
+      fmt::print(stderr,
+                 "[SF_RELAX] VendoredHiGHS SF rejected: reason=status "
+                 "run={} model={} iter={} m={} n={} hint={} time={:.3f}ms\n",
+                 static_cast<int>(run_status),
+                 highs_sf_model_status_label(model_status),
+                 out.result.stats.iterations, m, n, basis_hint ? 1 : 0,
+                 out.result.stats.runtime_sec * 1000.0);
+    }
     return false;
   }
 
@@ -1492,7 +1939,7 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   if (!basis.valid || static_cast<int>(basis.col_status.size()) < n ||
       static_cast<int>(basis.row_status.size()) < m ||
       static_cast<int>(sol.col_value.size()) < n) {
-    return false;
+    return reject("invalid_basis_or_solution");
   }
 
   out.x_std = Eigen::VectorXd::Zero(n);
@@ -1518,18 +1965,20 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   }
 
   std::vector<HighsInt> basic(static_cast<std::size_t>(m), 0);
-  if (highs->getBasicVariables(basic.data()) != HighsStatus::kOk) return false;
+  if (highs->getBasicVariables(basic.data()) != HighsStatus::kOk) {
+    return reject("basic_variables");
+  }
   std::vector<char> is_artificial(static_cast<std::size_t>(n), 0);
   for (int art : sf.row_to_artificial_col) {
     if (art >= 0 && art < n) is_artificial[static_cast<std::size_t>(art)] = 1;
   }
   for (int row = 0; row < m; ++row) {
-    const HighsInt b = basic[static_cast<std::size_t>(row)];
-    if (b < 0 || b >= n) return false;
-    const int col = static_cast<int>(b);
+    const int col = native_sf_col_from_highs_basic(
+        sf, basic[static_cast<std::size_t>(row)]);
+    if (col < 0 || col >= n) return reject("basic_index_out_of_range");
     if (is_artificial[static_cast<std::size_t>(col)] &&
         std::abs(out.x_std[col]) > std::max(1e-7, opt.feasibility_tol * 20.0)) {
-      return false;
+      return reject("positive_artificial_basic");
     }
     out.basis.indices[static_cast<std::size_t>(row)] = col;
     out.x_basic[row] = out.x_std[col];
@@ -1560,7 +2009,7 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
       }
       if (highs->getBasisTransposeSolve(rhs.data(), y.data()) !=
           HighsStatus::kOk) {
-        return false;
+        return reject("basis_transpose_solve");
       }
       Eigen::VectorXd y_scaled = Eigen::VectorXd::Zero(m);
       for (int row = 0; row < m; ++row) {
@@ -1571,8 +2020,9 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
     }
   }
 
-  out.basis_inverse = Eigen::MatrixXd::Zero(m, m);
+  out.basis_inverse.resize(0, 0);
   if (m <= 4096) {
+    out.basis_inverse = Eigen::MatrixXd::Zero(m, m);
     std::vector<double> row_vec(static_cast<std::size_t>(m), 0.0);
     for (int row = 0; row < m; ++row) {
       std::fill(row_vec.begin(), row_vec.end(), 0.0);
@@ -1599,6 +2049,10 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   out.exact_optimal = true;
   out.basis.cached_reduced_costs =
       std::make_shared<const Eigen::VectorXd>(out.reduced_costs);
+  if (sf.col_scale.size() == n) {
+    out.basis.cached_col_scale =
+        std::make_shared<const Eigen::VectorXd>(sf.col_scale);
+  }
   out.basis.cached_x_basic =
       std::make_shared<const Eigen::VectorXd>(out.x_basic);
   out.basis.cached_x_std =
@@ -1608,6 +2062,18 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   out.basis.cached_sparse_basis =
       std::make_shared<VendoredHighsBasis>(highs, m, n, &out.form.A);
   out.basis.persist_eta_count = 0;
+  const int degenerate_duals = inject_basic_degenerate_col_duals_from_highs(
+      sf, *highs, sol, out.basis.basis_indices(), out.reduced_costs,
+      kHighsDefaultMipTolerance, kHighsDefaultKktTolerance);
+  if (degenerate_duals > 0) {
+    out.basis.cached_reduced_costs =
+        std::make_shared<const Eigen::VectorXd>(out.reduced_costs);
+  }
+  if (trace_sf && degenerate_duals > 0) {
+    fmt::print(stderr,
+               "[SF_RELAX] VendoredHiGHS basic-degenerate duals injected={}\n",
+               degenerate_duals);
+  }
   double primal_residual = 0.0;
   double bound_violation = 0.0;
   double artificial_activity = 0.0;
@@ -1623,7 +2089,7 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
                                       bound_violation, artificial_activity,
                                       dual_violation, objective_gap,
                                       highs_dual_violation)) {
-    if (std::getenv("HACDCPF_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+    if (std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       fmt::print(stderr,
                  "[SF_RELAX] VendoredHiGHS SF audit rejected: "
                  "primal={:.3e} bound={:.3e} art={:.3e} dual={:.3e} "
@@ -1639,7 +2105,7 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   populate_dual_certificate(sf, out.basis.indices, out.basis.at_upper,
                             out.basis_inverse, out.basis.cached_sparse_basis,
                             out.reduced_costs, out.result);
-  if (std::getenv("HACDCPF_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+  if (std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
     fmt::print(stderr,
                "[SF_RELAX] VendoredHiGHS SF: success=1 iter={} obj={:.12g} "
                "m={} n={} hint={} time={:.3f}ms\n",
@@ -2083,7 +2549,7 @@ bool dual_simplex_reoptimize(const StandardFormLP& sf,
       }
     }
     if (!dual_ok) {
-      if (m > 2000) HACDCPF_LOG_DEBUG("  [dual_reopt] FAIL: dual_infeas iter={} var={} rc={:.6e} at_up={}", iter, dual_fail_var, reduced_costs[dual_fail_var], (int)at_upper[dual_fail_var]);
+      if (m > 2000) MIPSOLVERS_LOG_DEBUG("  [dual_reopt] FAIL: dual_infeas iter={} var={} rc={:.6e} at_up={}", iter, dual_fail_var, reduced_costs[dual_fail_var], (int)at_upper[dual_fail_var]);
       return false;
     }
 
@@ -2188,7 +2654,7 @@ bool dual_simplex_reoptimize(const StandardFormLP& sf,
       pivot_tol_effective = std::max(pivot_tol, 1e-7 * dir_inf_norm);
     }
     if (std::abs(pivot_val) < pivot_tol_effective) {
-      if (m > 2000) HACDCPF_LOG_DEBUG("  [dual_reopt] FAIL: small pivot={:.4e} rel_tol={:.4e} iter={}", pivot_val, pivot_tol_effective, iter);
+      if (m > 2000) MIPSOLVERS_LOG_DEBUG("  [dual_reopt] FAIL: small pivot={:.4e} rel_tol={:.4e} iter={}", pivot_val, pivot_tol_effective, iter);
       return false;
     }
 
@@ -2359,7 +2825,7 @@ struct NativeLU {
   mutable std::vector<int> stk_edge;    // DFS stack: edge pointers (size m)
   mutable std::vector<int> seeds;       // nonzero seed indices (size m)
 
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
   bool extract(void* Numeric, int m_in) {
     m = m_in;
     valid = false;
@@ -2508,7 +2974,7 @@ struct NativeLU {
 
     return true;
   }
-#endif  // HACDCPF_HAVE_UMFPACK
+#endif  // MIPSOLVERS_HAVE_UMFPACK
 
   // DFS-based sparse reachability for a lower-triangular graph.
   // Adjacency: adj_start[j]..adj_start[j+1]-1 in adj_index (children > j).
@@ -2933,7 +3399,7 @@ class SparseBasis : public BasisOps {
     HiGHSForceFTB = 2,
     HiGHSShortChainB = 3,
     // U.7.118 Phase 3: vendored HiGHS HFactor as a drop-in basis-LU backend.
-    // Opt-in via environment variable `HACDCPF_FACTOR_BACKEND=hfactor`; the
+    // Opt-in via environment variable `MIPSOLVERS_FACTOR_BACKEND=hfactor`; the
     // public SimplexFactorBackend enum is intentionally not extended yet
     // until Phase 4 benchmarks justify a default-on flip.
     HFactorPort = 4,
@@ -2959,12 +3425,12 @@ class SparseBasis : public BasisOps {
       : A_(&A), m_(static_cast<int>(A.rows())), min_pivot_(1e30), max_eta_norm_(0.0),
         gen_(0), backend_kind_(backend_kind) {
     // U.7.118 Phase 3 opt-in: env var override → HFactorPort.
-    if (const char* e = std::getenv("HACDCPF_FACTOR_BACKEND")) {
+    if (const char* e = std::getenv("MIPSOLVERS_FACTOR_BACKEND")) {
       if (e[0] == 'h' || e[0] == 'H') {  // "hfactor" / "HFACTOR"
         backend_kind_ = FactorBackendKind::HFactorPort;
       }
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     // Initialize UMFPACK control with defaults, then customize for simplex:
     // - Disable iterative refinement (we control accuracy via refactorization)
     // - Use row-sum scaling for better numerical conditioning
@@ -2980,7 +3446,7 @@ class SparseBasis : public BasisOps {
   }
 
   ~SparseBasis() {
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (Numeric_) umfpack_di_free_numeric(&Numeric_);
     if (Symbolic_) umfpack_di_free_symbolic(&Symbolic_);
 #endif
@@ -3224,7 +3690,7 @@ class SparseBasis : public BasisOps {
     // FT diagnostics: show success/fail/chain-broken rates between
     // refactorisations.  Gated by env var so zero cost when disabled.
     static const bool ft_diag = []() {
-      const char* e = std::getenv("HACDCPF_P9_FT_DIAG");
+      const char* e = std::getenv("MIPSOLVERS_P9_FT_DIAG");
       return e && e[0] == '1';
     }();
     if (ft_diag && refactor_count_ > 1) {
@@ -3263,7 +3729,7 @@ class SparseBasis : public BasisOps {
       return ok;
     }
     B_ = build_sparse_basis(basis);
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (Numeric_) { umfpack_di_free_numeric(&Numeric_); Numeric_ = nullptr; }
 
     // Check if sparsity pattern is unchanged — if so, reuse Symbolic_.
@@ -3348,7 +3814,7 @@ class SparseBasis : public BasisOps {
       hfb_.ftran(rhs.data(), z.data());
       return z;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       slu_.ftran(rhs.data(), z.data());
     } else if (nlu_.valid && is_sparse_rhs(rhs.data(), m_)) {
@@ -3379,7 +3845,7 @@ class SparseBasis : public BasisOps {
       hfb_.ftran(solve_work_.data(), rhs.data());
       return;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       solve_work_.noalias() = rhs;
       slu_.ftran(solve_work_.data(), rhs.data());
@@ -3402,7 +3868,7 @@ class SparseBasis : public BasisOps {
   /// In-place FTRAN with nonzero index extraction.
   /// Overwrites rhs with solution and returns nonzero indices in nz.
   void ftran_sparse_inplace(Eigen::VectorXd& rhs, std::vector<int>& nz) const {
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       // slu_.ftran always populates out_nz (both hyper-sparse and dense
       // fallback paths).  Avoids an O(m) post-scan.
@@ -3431,7 +3897,7 @@ class SparseBasis : public BasisOps {
       hfb_.btran(rhs.data(), y.data());
       return y;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       slu_.btran(rhs.data(), y.data());
     } else {
@@ -3468,7 +3934,7 @@ class SparseBasis : public BasisOps {
       hfb_.btran(solve_work_.data(), rhs.data());
       return;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       solve_work_.noalias() = rhs;
       slu_.btran(solve_work_.data(), rhs.data());
@@ -3495,7 +3961,7 @@ class SparseBasis : public BasisOps {
   /// Overwrites rhs with solution and returns nonzero indices.
   void btran_sparse_inplace(Eigen::VectorXd& rhs, std::vector<int>& nz,
                             double tol = 1e-12, int /*initial_nz_row*/ = -1) const {
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       solve_work_.noalias() = rhs;
       slu_.btran(solve_work_.data(), rhs.data(), &nz);
@@ -3542,7 +4008,7 @@ class SparseBasis : public BasisOps {
       }
       return;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       // Build dense rhs from sparse input, use slu_ FTRAN.
       solve_work_.setZero();
@@ -3601,7 +4067,7 @@ class SparseBasis : public BasisOps {
       }
       return;
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     if (slu_.valid) {
       // slu_ BTRAN with unit vector e_{row}.
       solve_work_.setZero();
@@ -3880,6 +4346,13 @@ class SparseBasis : public BasisOps {
     }
     return weights;
   }
+  bool basis_inverse_row(int row, Eigen::VectorXd& out) const override {
+    if (row < 0 || row >= m_) return false;
+    Eigen::VectorXd e = Eigen::VectorXd::Zero(m_);
+    e[row] = 1.0;
+    out = btran(e);
+    return out.size() == m_ && out.allFinite();
+  }
   bool tableau_row(int row, Eigen::RowVectorXd& out) const override {
     if (A_ == nullptr || row < 0 || row >= m_) return false;
     Eigen::VectorXd e = Eigen::VectorXd::Zero(m_);
@@ -3903,7 +4376,7 @@ class SparseBasis : public BasisOps {
 
  private:
   bool prepare_factor_backend_after_numeric() {
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     switch (backend_kind_) {
       case FactorBackendKind::UmfpackNativeA:
         // Backend A (current production baseline): UMFPACK numeric factor
@@ -3923,7 +4396,7 @@ class SparseBasis : public BasisOps {
       case FactorBackendKind::HiGHSForceFTB:
       case FactorBackendKind::HiGHSShortChainB:
       {
-#if HACDCPF_ENABLE_FACTOR_BACKEND_B
+#if MIPSOLVERS_ENABLE_FACTOR_BACKEND_B
         constexpr int kBFTActivationThreshold = 3000;
         // ── P9.1 (2026-04-22, revised) ──
         // FT updates are always activated when m >= kBFTActivationThreshold.
@@ -3938,7 +4411,7 @@ class SparseBasis : public BasisOps {
           const bool ext_ok = (m_ >= kBFTActivationThreshold) && slu_.extract(Numeric_, m_);
           {
             static const bool ft_diag_b2 = []() {
-              const char* e = std::getenv("HACDCPF_P9_FT_DIAG");
+              const char* e = std::getenv("MIPSOLVERS_P9_FT_DIAG");
               return e && e[0] == '1';
             }();
             static int reported_prep = 0;
@@ -4006,7 +4479,7 @@ class SparseBasis : public BasisOps {
   bool try_incremental_basis_update(int pivot_row,
                                     const Eigen::SparseMatrix<double>& A,
                                     int entering_col) {
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     switch (backend_kind_) {
       case FactorBackendKind::UmfpackNativeA:
         if (!slu_.valid) return false;
@@ -4022,10 +4495,10 @@ class SparseBasis : public BasisOps {
       case FactorBackendKind::HiGHSSafeB:
       case FactorBackendKind::HiGHSForceFTB:
       case FactorBackendKind::HiGHSShortChainB:
-#if HACDCPF_ENABLE_FACTOR_BACKEND_B
+#if MIPSOLVERS_ENABLE_FACTOR_BACKEND_B
         if (!slu_.valid) {
           static const bool ft_diag_b = []() {
-            const char* e = std::getenv("HACDCPF_P9_FT_DIAG");
+            const char* e = std::getenv("MIPSOLVERS_P9_FT_DIAG");
             return e && e[0] == '1';
           }();
           static int reported = 0;
@@ -4065,7 +4538,7 @@ class SparseBasis : public BasisOps {
       if (!hfb_.valid) return true;
       return hfb_.needs_refactorise();
     }
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     switch (backend_kind_) {
       case FactorBackendKind::UmfpackNativeA:
         return slu_.valid && slu_.needs_refactorise();
@@ -4073,7 +4546,7 @@ class SparseBasis : public BasisOps {
       case FactorBackendKind::HiGHSForceFTB:
       case FactorBackendKind::HiGHSShortChainB:
       {
-#if HACDCPF_ENABLE_FACTOR_BACKEND_B
+#if MIPSOLVERS_ENABLE_FACTOR_BACKEND_B
         // ── P9.1b chain-broken detection (2026-04-22) ──
         // If slu_ was activated at the last refactorise (n_updates > 0
         // means at least one FT succeeded) and has since been
@@ -4253,7 +4726,7 @@ class SparseBasis : public BasisOps {
   const Eigen::SparseMatrix<double>* A_;
   int m_;
   Eigen::SparseMatrix<double> B_;
-#ifdef HACDCPF_HAVE_UMFPACK
+#ifdef MIPSOLVERS_HAVE_UMFPACK
   void* Symbolic_ = nullptr;
   void* Numeric_ = nullptr;
   std::vector<int> Ap_, Ai_;
@@ -4299,7 +4772,7 @@ class SparseBasis : public BasisOps {
   // ── P9.1 FT telemetry (2026-04-22) ──
   // Counters reset at every refactorize().  Used to diagnose why FT
   // underperforms on large UC bases; dumped to stderr at the end of
-  // the LP solve when HACDCPF_P9_FT_DIAG=1.
+  // the LP solve when MIPSOLVERS_P9_FT_DIAG=1.
   mutable int ft_success_count_ = 0;
   mutable int ft_fail_count_ = 0;
   mutable int ft_chain_broken_refactor_count_ = 0;
@@ -4887,7 +5360,7 @@ bool sparse_primal_simplex_optimize(
         if (min_xb < -feas_tol) {
           // Primal infeasible - likely at_upper corruption or numerical issues.
           // Return false to trigger fallback.
-          HACDCPF_LOG_DEBUG("[sparse_primal_simplex] PRIMAL INFEASIBLE at termination: min_xb={:.2e}", min_xb);
+          MIPSOLVERS_LOG_DEBUG("[sparse_primal_simplex] PRIMAL INFEASIBLE at termination: min_xb={:.2e}", min_xb);
           return false;
         }
         
@@ -5174,9 +5647,9 @@ bool sparse_dual_simplex_reoptimize(
   // vector (common after branching without basis change), reuse the
   // previously-converged weights instead of restarting from 1.0 (≡ Dantzig
   // pricing).  On uc_500g_24t / uc_1000g_24t this typically cuts iteration
-  // count by 3-5x on warm-started nodes.  Opt-out via HACDCPF_P10_NO_DSE_PERSIST=1.
+  // count by 3-5x on warm-started nodes.  Opt-out via MIPSOLVERS_P10_NO_DSE_PERSIST=1.
   static const bool p10_no_persist = []() {
-    const char* e = std::getenv("HACDCPF_P10_NO_DSE_PERSIST");
+    const char* e = std::getenv("MIPSOLVERS_P10_NO_DSE_PERSIST");
     return e && e[0] == '1';
   }();
   std::vector<double> dse_w;
@@ -5196,7 +5669,7 @@ bool sparse_dual_simplex_reoptimize(
     dse_w.assign(static_cast<size_t>(m), 1.0);
   }
   static const bool p10_diag = []() {
-    const char* e = std::getenv("HACDCPF_P10_DIAG");
+    const char* e = std::getenv("MIPSOLVERS_P10_DIAG");
     return e && e[0] == '1';
   }();
   if (p10_diag) {
@@ -5205,11 +5678,11 @@ bool sparse_dual_simplex_reoptimize(
                  dse_exact_initialized ? 1 : 0);
   }
   static const bool pivot_trace = []() {
-    const char* e = std::getenv("HACDCPF_XPOOL_PIVOT_TRACE");
+    const char* e = std::getenv("MIPSOLVERS_XPOOL_PIVOT_TRACE");
     return e && e[0] == '1';
   }();
   static const int pivot_trace_limit = []() {
-    const char* e = std::getenv("HACDCPF_XPOOL_PIVOT_TRACE_LIMIT");
+    const char* e = std::getenv("MIPSOLVERS_XPOOL_PIVOT_TRACE_LIMIT");
     if (!e || e[0] == '\0') return 80;
     return std::max(0, std::atoi(e));
   }();
@@ -5818,6 +6291,21 @@ Eigen::VectorXd sparse_basis_btran(const std::shared_ptr<BasisOps>& cached_spars
     return Eigen::VectorXd::Zero(rhs.size());
   }
   return cached_sparse_basis->btran(rhs);
+}
+
+bool sparse_basis_inverse_row(const std::shared_ptr<BasisOps>& cached_sparse_basis,
+                              int row,
+                              Eigen::VectorXd& out) {
+  if (!cached_sparse_basis) return false;
+  return cached_sparse_basis->basis_inverse_row(row, out);
+}
+
+bool sparse_basis_inverse_row_sparse_entries(
+    const std::shared_ptr<BasisOps>& cached_sparse_basis,
+    int row,
+    std::vector<std::pair<int, double>>& out) {
+  if (!cached_sparse_basis) return false;
+  return cached_sparse_basis->basis_inverse_row_sparse_entries(row, out);
 }
 
 bool sparse_basis_tableau_row(const std::shared_ptr<BasisOps>& cached_sparse_basis,
@@ -6460,7 +6948,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
       opt.exact_dse_initialization || simplex_exact_edge_env_enabled();
   auto t0 = std::chrono::high_resolution_clock::now();
   if (dbg) {
-    HACDCPF_LOG_DEBUG("[sf #{}] m={} n={} hint={}", sf_call_count, m, n, basis_hint ? "yes" : "no");
+    MIPSOLVERS_LOG_DEBUG("[sf #{}] m={} n={} hint={}", sf_call_count, m, n, basis_hint ? "yes" : "no");
   }
   if (m == 0) {
     out.x_std = Eigen::VectorXd::Zero(n);
@@ -6478,7 +6966,9 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
     }
     if (opt.require_vendored_highs_sf_backend) {
       out.result.stats.success = false;
-      out.result.stats.status = "VendoredHiGHS SF rejected";
+      if (out.result.stats.status.empty()) {
+        out.result.stats.status = "VendoredHiGHS SF rejected";
+      }
       return out;
     }
   }
@@ -6604,7 +7094,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
     }
 
     const bool reuse_appended_live_cache = []() {
-      const char* e = std::getenv("HACDCPF_XPOOL_REUSE_APPEND_LIVE_CACHE");
+      const char* e = std::getenv("MIPSOLVERS_XPOOL_REUSE_APPEND_LIVE_CACHE");
       return e && e[0] == '1';
     }();
 
@@ -6691,7 +7181,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
     extended_hint->has_cached_max_objective = extended_has_max_objective;
     extended_hint->cached_sparse_basis.reset();
     basis_hint = extended_hint.get();
-    if (dbg) HACDCPF_LOG_DEBUG("  extended hint {}→{} rows", old_rows, m);
+    if (dbg) MIPSOLVERS_LOG_DEBUG("  extended hint {}→{} rows", old_rows, m);
   }
 
   // BASIS PROJECTION: hint was built for a larger LP (e.g., root_lp+cuts),
@@ -6800,7 +7290,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         proj_hint->sf_n_artificial = sf.n_artificial;
         extended_hint = proj_hint;
         basis_hint = extended_hint.get();
-        if (dbg) HACDCPF_LOG_DEBUG("  projected hint {}→{} rows", old_rows, m);
+        if (dbg) MIPSOLVERS_LOG_DEBUG("  projected hint {}→{} rows", old_rows, m);
       }
     }
   }
@@ -6822,12 +7312,12 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
       basis = hint_indices;
       if (!basis_hint->at_upper.empty()) at_upper = basis_hint->at_upper;
       hint_match = true;
-      if (dbg) HACDCPF_LOG_DEBUG("  hint match rows={} cols={}", m, n);
+      if (dbg) MIPSOLVERS_LOG_DEBUG("  hint match rows={} cols={}", m, n);
     } else {
-      if (dbg) HACDCPF_LOG_DEBUG("[solve_lp_from_sf] hint indices OUT OF RANGE, ignoring");
+      if (dbg) MIPSOLVERS_LOG_DEBUG("[solve_lp_from_sf] hint indices OUT OF RANGE, ignoring");
     }
   } else if (basis_hint != nullptr) {
-    if (dbg) HACDCPF_LOG_DEBUG("[solve_lp_from_sf] hint MISMATCH: hint.rows={} hint.cols={} sf.m={} sf.n={} hint.sz={}",
+    if (dbg) MIPSOLVERS_LOG_DEBUG("[solve_lp_from_sf] hint MISMATCH: hint.rows={} hint.cols={} sf.m={} sf.n={} hint.sz={}",
             basis_hint->rows, basis_hint->cols, m, n,
             static_cast<int>(basis_hint->index_count()));
   }
@@ -6908,7 +7398,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
           }
         }
         if (dbg && art_swaps > 0) {
-          HACDCPF_LOG_DEBUG("  basis cleanup: swapped {} artificials for slacks", art_swaps);
+          MIPSOLVERS_LOG_DEBUG("  basis cleanup: swapped {} artificials for slacks", art_swaps);
         }
       }
 
@@ -6945,7 +7435,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
       bool used_appended_parent_factor = false;
       if (append_parent_sparse_basis && art_swaps == 0) {
         static const bool parent_factor_check = []() {
-          const char* e = std::getenv("HACDCPF_XPOOL_PARENT_FACTOR_CHECK");
+          const char* e = std::getenv("MIPSOLVERS_XPOOL_PARENT_FACTOR_CHECK");
           return e && e[0] == '1';
         }();
         used_appended_parent_factor = sbasis.init_appended_slack_extension(
@@ -7047,15 +7537,15 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         factorize_ok = sbasis.refactorize(basis);
         used_appended_parent_factor = false;
         if (factorize_ok) {
-          HACDCPF_LOG_DEBUG("[PATH A] singular crash repaired via crash_artificial_basis m={}", m);
+          MIPSOLVERS_LOG_DEBUG("[PATH A] singular crash repaired via crash_artificial_basis m={}", m);
         } else {
-          HACDCPF_LOG_DEBUG("[PATH A] refactorize FAILED m={} — crash_artificial_basis also singular", m);
+          MIPSOLVERS_LOG_DEBUG("[PATH A] refactorize FAILED m={} — crash_artificial_basis also singular", m);
         }
       }
 
       if (factorize_ok) {
         if (dbg && used_appended_parent_factor) {
-          HACDCPF_LOG_DEBUG("[PATH A] appended-row parent factor m={} old={} new={}",
+          MIPSOLVERS_LOG_DEBUG("[PATH A] appended-row parent factor m={} old={} new={}",
                             m, append_parent_old_rows,
                             append_parent_new_rows);
         }
@@ -7070,7 +7560,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         // Step 1: Reduced costs — reuse from parent if basis unchanged.
         if (can_reuse_parent_rc) {
           reduced_costs = *basis_hint->cached_reduced_costs;
-          if (dbg) HACDCPF_LOG_DEBUG("  REUSED reduced costs from parent");
+          if (dbg) MIPSOLVERS_LOG_DEBUG("  REUSED reduced costs from parent");
         } else {
           Eigen::VectorXd c_b(m);
           for (int i = 0; i < m; ++i) c_b[i] = sf.c_max[basis[i]];
@@ -7080,7 +7570,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         { auto t_now = tp(); lp_timing.btran_rc_us += us(t_phase, t_now); t_phase = t_now; }
 
         static const bool parent_state_diff_diag = []() {
-          const char* e = std::getenv("HACDCPF_XPOOL_PARENT_STATE_DIFF");
+          const char* e = std::getenv("MIPSOLVERS_XPOOL_PARENT_STATE_DIFF");
           return e && e[0] == '1';
         }();
         Eigen::VectorXd parent_diag_rc_before_side;
@@ -7103,7 +7593,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             if (at_upper[static_cast<size_t>(j)]) at_upper_nb.push_back(j);
           }
           at_upper_changed_from_hint = at_upper_flips > 0;
-          if (dbg && at_upper_flips > 0) HACDCPF_LOG_DEBUG("  at_upper fix: {} flips", at_upper_flips);
+          if (dbg && at_upper_flips > 0) MIPSOLVERS_LOG_DEBUG("  at_upper fix: {} flips", at_upper_flips);
         }
         { auto t_now = tp(); lp_timing.at_upper_us += us(t_phase, t_now); t_phase = t_now; }
 
@@ -7175,7 +7665,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         if (can_reuse_live_appended_state) {
           x_b = *basis_hint->cached_x_basic;
           obj = basis_hint->cached_max_objective;
-          if (dbg) HACDCPF_LOG_DEBUG("  REUSED appended live x_basic/objective");
+          if (dbg) MIPSOLVERS_LOG_DEBUG("  REUSED appended live x_basic/objective");
         } else {
           Eigen::VectorXd b_adj = sf.b;
           for (int j : at_upper_nb) {
@@ -7206,7 +7696,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             if (at_upper[static_cast<size_t>(j)] && reduced_costs[j] < -opt.optimality_tol) ++n_dual_viol;
             if (!at_upper[static_cast<size_t>(j)] && reduced_costs[j] > opt.optimality_tol) ++n_dual_viol;
           }
-          HACDCPF_LOG_DEBUG("  sparse warm: {} dual violations", n_dual_viol);
+          MIPSOLVERS_LOG_DEBUG("  sparse warm: {} dual violations", n_dual_viol);
         }
 
         // Check primal feasibility.
@@ -7230,10 +7720,10 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             out.solved_from_hint = true;
             out.dual_reoptimized = true;
             out.exact_optimal = true;  // Enable GMI cut generation
-            if (dbg) HACDCPF_LOG_DEBUG("[PATH A] primal+dual feasible (optimal) m={}", m);
+            if (dbg) MIPSOLVERS_LOG_DEBUG("[PATH A] primal+dual feasible (optimal) m={}", m);
             ++lp_timing.zero_iter;
           } else {
-            if (dbg) HACDCPF_LOG_DEBUG("[PATH A] primal feasible, dual infeasible m={}", m);
+            if (dbg) MIPSOLVERS_LOG_DEBUG("[PATH A] primal feasible, dual infeasible m={}", m);
             if (used_appended_parent_factor) {
               // The parent-factor block solve is first-class for constructing
               // the appended LP state and for zero-pivot optimality checks.
@@ -7246,14 +7736,14 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
               can_reuse_parent_rc = false;
               if (!sbasis.refactorize(basis)) {
                 factorize_ok = false;
-                HACDCPF_LOG_DEBUG("[PATH A] appended parent-factor primal fallback failed m={}", m);
+                MIPSOLVERS_LOG_DEBUG("[PATH A] appended parent-factor primal fallback failed m={}", m);
               } else {
                 sparse_full_recompute(sf, basis, at_upper, is_basic_sp,
                                       sbasis, x_b, reduced_costs, obj);
               }
             }
             if (!factorize_ok) {
-              HACDCPF_LOG_DEBUG("[PATH A] parent-factor primal fallback unavailable m={}", m);
+              MIPSOLVERS_LOG_DEBUG("[PATH A] parent-factor primal fallback unavailable m={}", m);
             } else {
             // Primal feasible but dual infeasible: need primal simplex Phase II.
             bool p2_ok = sparse_primal_simplex_optimize(sf, basis, sp_can_enter, opt,
@@ -7262,9 +7752,9 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
               out.solved_from_hint = true;
               out.dual_reoptimized = true;
               out.exact_optimal = true;  // Enable GMI cut generation
-              if (dbg) HACDCPF_LOG_DEBUG("  sparse warm: primal feasible, Phase II OK");
+              if (dbg) MIPSOLVERS_LOG_DEBUG("  sparse warm: primal feasible, Phase II OK");
             } else {
-              if (dbg) HACDCPF_LOG_DEBUG("  sparse warm: primal feasible, Phase II FAIL");
+              if (dbg) MIPSOLVERS_LOG_DEBUG("  sparse warm: primal feasible, Phase II FAIL");
             }
             }
           }
@@ -7279,14 +7769,14 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             can_reuse_parent_rc = false;
             if (!sbasis.refactorize(basis)) {
               factorize_ok = false;
-              HACDCPF_LOG_DEBUG("[PATH A] appended parent-factor refactor fallback failed m={}", m);
+              MIPSOLVERS_LOG_DEBUG("[PATH A] appended parent-factor refactor fallback failed m={}", m);
             } else {
               sparse_full_recompute(sf, basis, at_upper, is_basic_sp,
                                     sbasis, x_b, reduced_costs, obj);
             }
           }
           if (!factorize_ok) {
-            HACDCPF_LOG_DEBUG("[PATH A] parent-factor fallback unavailable m={}", m);
+            MIPSOLVERS_LOG_DEBUG("[PATH A] parent-factor fallback unavailable m={}", m);
           } else {
           // Primal infeasible: run dual simplex to restore primal feasibility.
           [[maybe_unused]] int n_primal_viol = 0;
@@ -7295,7 +7785,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             else if (has_ub && std::isfinite(sf.var_ub[basis[i]]) &&
                      x_b[i] > sf.var_ub[basis[i]] + opt.feasibility_tol) ++n_primal_viol;
           }
-          HACDCPF_LOG_DEBUG("[PATH A] primal infeasible: {} violations, trying dual reopt m={} max_iter={}",
+          MIPSOLVERS_LOG_DEBUG("[PATH A] primal infeasible: {} violations, trying dual reopt m={} max_iter={}",
                            n_primal_viol, m, opt.allow_cold_start ? std::max(2000, m) : std::max(500, m/2));
           bool proved_infeasible = false;
           bool cutoff_reached = false;
@@ -7322,7 +7812,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             out.solved_from_hint = true;
             out.dual_reoptimized = true;
             out.exact_optimal = true;  // Enable GMI cut generation
-            HACDCPF_LOG_DEBUG("[PATH A] dual reopt OK m={} iters={}", m, sbasis.eta_count());
+            MIPSOLVERS_LOG_DEBUG("[PATH A] dual reopt OK m={} iters={}", m, sbasis.eta_count());
           } else if (cutoff_reached) {
             out.result.stats.success = false;
             out.result.stats.iterations = actual_iters;
@@ -7334,10 +7824,10 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
             mark_proven_infeasible(out.result.stats);
             binv = sbasis.compute_dense_inverse(basis);
             extract_farkas_certificate(sf, basis, binv, out.result.stats);
-            HACDCPF_LOG_DEBUG("[PATH A] dual reopt INFEASIBLE m={}", m);
+            MIPSOLVERS_LOG_DEBUG("[PATH A] dual reopt INFEASIBLE m={}", m);
             return out;
           } else {
-            HACDCPF_LOG_DEBUG("[PATH A] dual reopt FAIL m={} etas={}", m, sbasis.eta_count());
+            MIPSOLVERS_LOG_DEBUG("[PATH A] dual reopt FAIL m={} etas={}", m, sbasis.eta_count());
             // Retry with crash_artificial_basis before expensive cold start.
             for (int ii = 0; ii < m; ++ii) {
               if (sf.row_to_slack_col[ii] >= 0) basis[ii] = sf.row_to_slack_col[ii];
@@ -7380,7 +7870,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                 out.solved_from_hint = true;
                 out.dual_reoptimized = true;
                 out.exact_optimal = true;
-                HACDCPF_LOG_DEBUG("[PATH A] crash-repair reopt OK m={} iters={}", m, sbasis.eta_count());
+                MIPSOLVERS_LOG_DEBUG("[PATH A] crash-repair reopt OK m={} iters={}", m, sbasis.eta_count());
               } else if (cutoff_reached2) {
                 out.result.stats.success = false;
                 out.result.stats.iterations = actual_iters;
@@ -7391,10 +7881,10 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                 mark_proven_infeasible(out.result.stats);
                 binv = sbasis.compute_dense_inverse(basis);
                 extract_farkas_certificate(sf, basis, binv, out.result.stats);
-                HACDCPF_LOG_DEBUG("[PATH A] crash-repair reopt INFEASIBLE m={}", m);
+                MIPSOLVERS_LOG_DEBUG("[PATH A] crash-repair reopt INFEASIBLE m={}", m);
                 return out;
               } else {
-                HACDCPF_LOG_DEBUG("[PATH A] crash-repair reopt FAIL m={}", m);
+                MIPSOLVERS_LOG_DEBUG("[PATH A] crash-repair reopt FAIL m={}", m);
               }
             }
           }
@@ -7412,7 +7902,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         solved_sparse_basis = sbasis_shared;
       }
       } else {  // factorize_ok == false
-        HACDCPF_LOG_DEBUG("[PATH A] refactorize FAILED m={} — singular crash basis", m);
+        MIPSOLVERS_LOG_DEBUG("[PATH A] refactorize FAILED m={} — singular crash basis", m);
       }
     }
     // Counter update for PATH A outcome.
@@ -7556,7 +8046,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
   // is too expensive for tree nodes (O(m³) dense or many-iteration sparse).
   // ══════════════════════════════════════════════════════════════════════
   if (!out.solved_from_hint) {
-    if (dbg) HACDCPF_LOG_DEBUG("[solve_lp_from_sf] COLD START m={} n={} hint_match={}", m, n, hint_match);
+    if (dbg) MIPSOLVERS_LOG_DEBUG("[solve_lp_from_sf] COLD START m={} n={} hint_match={}", m, n, hint_match);
   }
 
   // ── FALLBACK: Try root/fallback basis before expensive cold start ──
@@ -7584,7 +8074,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
   }
   if (!out.solved_from_hint) {
     g_slp_counters.cold_start.fetch_add(1, std::memory_order_relaxed);
-    if (dbg) HACDCPF_LOG_DEBUG("  COLD START");
+    if (dbg) MIPSOLVERS_LOG_DEBUG("  COLD START");
     at_upper.assign(static_cast<size_t>(n), 0);
 
     // Provable infeasibility check: if b[i] < 0 and all column coefficients
@@ -7638,7 +8128,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
           basis[i] == sf.row_to_artificial_col[i])
         ++art_remain;
     }
-    HACDCPF_LOG_DEBUG("[COLD] crash={:.1f}ms art_remain={}/{} m={} n={}",
+    MIPSOLVERS_LOG_DEBUG("[COLD] crash={:.1f}ms art_remain={}/{} m={} n={}",
         std::chrono::duration<double, std::milli>(t_crash_1 - t_crash_0).count(),
         art_remain, sf.n_artificial, m, n);
 
@@ -7848,7 +8338,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
       }
 
       [[maybe_unused]] auto t_p1_1 = std::chrono::high_resolution_clock::now();
-      HACDCPF_LOG_DEBUG("[COLD-CS] Dual Phase I: {:.1f}ms  dp1_ok={}",
+      MIPSOLVERS_LOG_DEBUG("[COLD-CS] Dual Phase I: {:.1f}ms  dp1_ok={}",
           std::chrono::duration<double, std::milli>(t_p1_1 - t_p1_0).count(),
           dp1_ok);
 
@@ -7905,7 +8395,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
                            p2_iters, true);
       [[maybe_unused]] auto t_p2_1 = std::chrono::high_resolution_clock::now();
       if (dbg) {
-        HACDCPF_LOG_DEBUG("  COLD START Dual Phase I: {:.1f}ms  Phase II: {:.1f}ms",
+        MIPSOLVERS_LOG_DEBUG("  COLD START Dual Phase I: {:.1f}ms  Phase II: {:.1f}ms",
             std::chrono::duration<double, std::milli>(t_p1_1 - t_p1_0).count(),
             std::chrono::duration<double, std::milli>(t_p2_1 - t_p1_1).count());
       }
@@ -7937,7 +8427,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
         return out;
       }
       if (-obj > opt.feasibility_tol) {
-        if (dbg) HACDCPF_LOG_DEBUG("  INFEAS-C: dense Phase I obj={:.4f}", -obj);
+        if (dbg) MIPSOLVERS_LOG_DEBUG("  INFEAS-C: dense Phase I obj={:.4f}", -obj);
         out.result.stats.status = "LP infeasible";
         extract_farkas_certificate(sf, basis, binv, out.result.stats);
         return out;
@@ -8072,7 +8562,7 @@ SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
   if (dbg) {
     auto t1 = std::chrono::high_resolution_clock::now();
     [[maybe_unused]] double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    HACDCPF_LOG_DEBUG("  → {} obj={:.2f}  time={:.1f}ms hint={} dreopt={}", out.result.stats.status.c_str(), out.result.stats.objective,
+    MIPSOLVERS_LOG_DEBUG("  → {} obj={:.2f}  time={:.1f}ms hint={} dreopt={}", out.result.stats.status.c_str(), out.result.stats.objective,
             ms, (int)out.solved_from_hint, (int)out.dual_reoptimized);
   }
   return out;

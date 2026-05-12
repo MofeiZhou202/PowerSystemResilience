@@ -55,7 +55,7 @@ std::string format_ineq_row_contributors(
     int row,
     int max_terms = 8);
 
-#ifdef HACDCPF_HAVE_PAPILO
+#ifdef MIPSOLVERS_HAVE_PAPILO
 std::string format_papilo_reduced_row_mapping_detail(
     const PaPILOPresolveResult& ps,
     const LPModel& reduced_lp,

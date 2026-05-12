@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,8 +21,9 @@
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/ipm_solver.hpp"
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #include "Highs.h"
+#include "util/HVector.h"
 #endif
 
 namespace mipsolvers::engine::detail {
@@ -32,19 +34,19 @@ constexpr double kHighsDefaultKktTolerance = 1e-7;
 constexpr double kHighsDefaultMipTolerance = 1e-6;
 
 bool lp_basis_trace_enabled() {
-  return std::getenv("HACDCPF_LP_BASIS_TRACE") != nullptr;
+  return std::getenv("MIPSOLVERS_LP_BASIS_TRACE") != nullptr;
 }
 
 bool root_simplex_conformance_enabled() {
-  return std::getenv("HACDCPF_ROOT_COLDSTATE_DIAG") != nullptr ||
-         std::getenv("HACDCPF_LPSTATE_CONFORM") != nullptr ||
-         std::getenv("HACDCPF_FRONTIER_CONFORM") != nullptr ||
-         std::getenv("HACDCPF_XPOOL_EXACT_DSE") != nullptr ||
-         std::getenv("HACDCPF_XPOOL_PARENT_EXACT_DSE") != nullptr;
+  return std::getenv("MIPSOLVERS_ROOT_COLDSTATE_DIAG") != nullptr ||
+         std::getenv("MIPSOLVERS_LPSTATE_CONFORM") != nullptr ||
+         std::getenv("MIPSOLVERS_FRONTIER_CONFORM") != nullptr ||
+         std::getenv("MIPSOLVERS_XPOOL_EXACT_DSE") != nullptr ||
+         std::getenv("MIPSOLVERS_XPOOL_PARENT_EXACT_DSE") != nullptr;
 }
 
 bool vendored_highs_lp_kernel_enabled(const BCOptions& opt) {
-  const char* env = std::getenv("HACDCPF_USE_VENDORED_HIGHS_LP");
+  const char* env = std::getenv("MIPSOLVERS_USE_VENDORED_HIGHS_LP");
   const bool env_enabled =
       env != nullptr && env[0] != '\0' && env[0] != '0';
   return opt.use_vendored_highs_lp_kernel || env_enabled;
@@ -60,7 +62,7 @@ void apply_root_simplex_conformance_options(SimplexOptions& opt,
 }
 
 int lp_basis_trace_terms() {
-  const char* env = std::getenv("HACDCPF_LP_BASIS_TRACE_TERMS");
+  const char* env = std::getenv("MIPSOLVERS_LP_BASIS_TRACE_TERMS");
   if (env == nullptr) return 8;
   char* end = nullptr;
   long val = std::strtol(env, &end, 10);
@@ -172,7 +174,7 @@ bool lp_solution_feasible(const LPModel& lp, const SolveResult& res, double tol)
 }
 
 bool ipm_handoff_audit_enabled(const BCOptions& opt) {
-  return opt.verbose || std::getenv("HACDCPF_IPM_HANDOFF_AUDIT") != nullptr;
+  return opt.verbose || std::getenv("MIPSOLVERS_IPM_HANDOFF_AUDIT") != nullptr;
 }
 
 struct PrimalAuditMetrics {
@@ -267,7 +269,7 @@ make_first_class_basis_hint_from_simplex(const SimplexResult& simplex) {
   return basis;
 }
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 const char* highs_model_status_label(HighsModelStatus status) {
   switch (status) {
     case HighsModelStatus::kOptimal:
@@ -290,6 +292,124 @@ const char* highs_model_status_label(HighsModelStatus status) {
       return "Other";
   }
 }
+
+class DirectHighsLpBasisOps : public BasisOps {
+ public:
+  DirectHighsLpBasisOps(std::shared_ptr<Highs> highs,
+                        int rows,
+                        int cols,
+                        const Eigen::SparseMatrix<double>* A)
+      : highs_(std::move(highs)),
+        m_(rows),
+        n_(cols),
+        A_owned_(A != nullptr ? *A : Eigen::SparseMatrix<double>()) {}
+
+  BasisOpsKind kind() const override { return BasisOpsKind::VendoredHighs; }
+
+  Eigen::VectorXd ftran(const Eigen::VectorXd& rhs) const override {
+    Eigen::VectorXd out = Eigen::VectorXd::Zero(m_);
+    if (!highs_ || rhs.size() != m_) return out;
+    std::vector<double> h_rhs(static_cast<std::size_t>(m_), 0.0);
+    std::vector<double> h_out(static_cast<std::size_t>(m_), 0.0);
+    for (int i = 0; i < m_; ++i) h_rhs[static_cast<std::size_t>(i)] = rhs[i];
+    if (highs_->getBasisSolve(h_rhs.data(), h_out.data()) !=
+        HighsStatus::kOk) {
+      return Eigen::VectorXd::Constant(m_,
+                                       std::numeric_limits<double>::quiet_NaN());
+    }
+    for (int i = 0; i < m_; ++i) out[i] = h_out[static_cast<std::size_t>(i)];
+    return out;
+  }
+
+  Eigen::VectorXd btran(const Eigen::VectorXd& rhs) const override {
+    Eigen::VectorXd out = Eigen::VectorXd::Zero(m_);
+    if (!highs_ || rhs.size() != m_) return out;
+    std::vector<double> h_rhs(static_cast<std::size_t>(m_), 0.0);
+    std::vector<double> h_out(static_cast<std::size_t>(m_), 0.0);
+    for (int i = 0; i < m_; ++i) h_rhs[static_cast<std::size_t>(i)] = rhs[i];
+    if (highs_->getBasisTransposeSolve(h_rhs.data(), h_out.data()) !=
+        HighsStatus::kOk) {
+      return Eigen::VectorXd::Constant(m_,
+                                       std::numeric_limits<double>::quiet_NaN());
+    }
+    for (int i = 0; i < m_; ++i) out[i] = h_out[static_cast<std::size_t>(i)];
+    return out;
+  }
+
+  bool basis_inverse_row(int row, Eigen::VectorXd& out) const override {
+    out = Eigen::VectorXd::Zero(m_);
+    if (!highs_ || row < 0 || row >= m_) return false;
+    std::vector<double> row_vec(static_cast<std::size_t>(m_), 0.0);
+    HighsInt row_num_nz = 0;
+    std::vector<HighsInt> row_indices(static_cast<std::size_t>(m_), 0);
+    const HighsStatus st = highs_->getBasisInverseRow(
+        static_cast<HighsInt>(row), row_vec.data(), &row_num_nz,
+        row_indices.data());
+    if (st != HighsStatus::kOk || row_num_nz < 0 || row_num_nz > m_) {
+      return false;
+    }
+    for (HighsInt k = 0; k < row_num_nz; ++k) {
+      const int r = static_cast<int>(row_indices[static_cast<std::size_t>(k)]);
+      if (r < 0 || r >= m_) return false;
+      out[r] = row_vec[static_cast<std::size_t>(r)];
+    }
+    return out.allFinite();
+  }
+
+  bool basis_inverse_row_sparse_entries(
+      int row,
+      std::vector<std::pair<int, double>>& out) const override {
+    out.clear();
+    if (!highs_ || row < 0 || row >= m_) return false;
+    HVector row_ep;
+    row_ep.setup(static_cast<HighsInt>(m_));
+    if (highs_->getBasisInverseRowSparse(static_cast<HighsInt>(row),
+                                         row_ep) != HighsStatus::kOk) {
+      return false;
+    }
+    out.reserve(static_cast<std::size_t>(std::max<HighsInt>(0, row_ep.count)));
+    for (HighsInt k = 0; k < row_ep.count; ++k) {
+      const int r = static_cast<int>(row_ep.index[static_cast<std::size_t>(k)]);
+      if (r < 0 || r >= m_) return false;
+      const double value = row_ep.array[static_cast<std::size_t>(r)];
+      if (!std::isfinite(value)) return false;
+      out.emplace_back(r, value);
+    }
+    return true;
+  }
+
+  bool tableau_row(int row, Eigen::RowVectorXd& out) const override {
+    if (!highs_ || row < 0 || row >= m_ || n_ <= 0) return false;
+    Eigen::VectorXd y;
+    if (!basis_inverse_row(row, y)) return false;
+    if (A_owned_.rows() != m_ || A_owned_.cols() != n_) return false;
+    out = y.transpose() * A_owned_;
+    return out.allFinite();
+  }
+
+  SparseFactorTelemetry factor_telemetry() const override {
+    SparseFactorTelemetry t;
+    t.backend_id = 100;
+    t.ft_backend = false;
+    t.ft_valid = true;
+    return t;
+  }
+
+  void rebind_A(const Eigen::SparseMatrix<double>& A) override { A_owned_ = A; }
+
+  bool bound_to_A(const Eigen::SparseMatrix<double>& A) const override {
+    return A.rows() == m_ && A.cols() == n_;
+  }
+
+  std::shared_ptr<Highs> highs_handle() const override { return highs_; }
+  int row_count() const { return m_; }
+
+ private:
+  std::shared_ptr<Highs> highs_;
+  int m_{0};
+  int n_{0};
+  Eigen::SparseMatrix<double> A_owned_;
+};
 
 bool highs_pass_lp_model(Highs& highs, const LPModel& lp) {
   const int ncols = static_cast<int>(lp.vars.size());
@@ -359,42 +479,143 @@ bool highs_pass_lp_model(Highs& highs, const LPModel& lp) {
   return pass_status == HighsStatus::kOk;
 }
 
-int native_standard_form_col_from_highs_basic(const StandardFormLP& sf,
-                                             int n_orig,
-                                             HighsInt highs_basic) {
-  if (highs_basic >= 0) return static_cast<int>(highs_basic);
-  const int row = static_cast<int>(-highs_basic - 1);
-  if (row < 0 || row >= static_cast<int>(sf.A.rows())) return -1;
-  if (row < static_cast<int>(sf.row_to_slack_col.size()) &&
-      sf.row_to_slack_col[static_cast<std::size_t>(row)] >= 0) {
-    return sf.row_to_slack_col[static_cast<std::size_t>(row)];
-  }
-  if (row < static_cast<int>(sf.row_to_surplus_col.size()) &&
-      sf.row_to_surplus_col[static_cast<std::size_t>(row)] >= 0) {
-    return sf.row_to_surplus_col[static_cast<std::size_t>(row)];
-  }
-  if (row < static_cast<int>(sf.row_to_artificial_col.size()) &&
-      sf.row_to_artificial_col[static_cast<std::size_t>(row)] >= 0) {
-    return sf.row_to_artificial_col[static_cast<std::size_t>(row)];
-  }
-  return n_orig + row;
-}
-
 bool build_native_simplex_state_from_highs(const LPModel& lp,
-                                           Highs& highs,
+                                           const std::shared_ptr<Highs>& highs,
                                            const SolveResult& primal,
                                            SimplexResult& simplex) {
-  simplex.form = build_standard_form_lp(lp);
-  // Match the native first-class LP path so cut/proof code sees the same
-  // transformed model shape it currently expects.
-  ruiz_scale_standard_form(simplex.form);
-  const int m = static_cast<int>(simplex.form.A.rows());
-  const int n_sf = static_cast<int>(simplex.form.A.cols());
-  const int n_orig = simplex.form.n_original;
+  if (!highs) return false;
+  const int n_orig = static_cast<int>(lp.vars.size());
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  const int m = m_ineq + m_eq;
+  const int n_sf = n_orig + m;
+
+  simplex.form = StandardFormLP{};
+  simplex.form.n_original = n_orig;
+  simplex.form.original_types.reserve(static_cast<std::size_t>(n_orig));
+  simplex.form.lb_shift = Eigen::VectorXd::Zero(n_orig);
+  for (int j = 0; j < n_orig; ++j) {
+    simplex.form.original_types.push_back(lp.vars[static_cast<std::size_t>(j)].type);
+    simplex.form.lb_shift[j] = lp.vars[static_cast<std::size_t>(j)].lb;
+  }
+  simplex.form.n_slack = m;
+  simplex.form.n_surplus = 0;
+  simplex.form.n_artificial = 0;
+  simplex.form.row_to_slack_col.assign(static_cast<std::size_t>(m), -1);
+  simplex.form.row_to_surplus_col.assign(static_cast<std::size_t>(m), -1);
+  simplex.form.row_to_artificial_col.assign(static_cast<std::size_t>(m), -1);
+  simplex.form.row_sign.assign(static_cast<std::size_t>(m), 1);
+  simplex.form.row_rhs_value = Eigen::VectorXd::Zero(m);
+  simplex.form.ub_row_var.assign(static_cast<std::size_t>(m), -1);
+  simplex.form.source_highs_row.assign(static_cast<std::size_t>(m), -1);
+  if (static_cast<int>(lp.highs_row_to_native_row.size()) >= m &&
+      static_cast<int>(lp.highs_row_start.size()) >=
+          static_cast<int>(lp.highs_row_to_native_row.size()) + 1) {
+    for (int highs_row = 0;
+         highs_row < static_cast<int>(lp.highs_row_to_native_row.size());
+         ++highs_row) {
+      const int native_row =
+          lp.highs_row_to_native_row[static_cast<std::size_t>(highs_row)];
+      if (native_row >= 0 && native_row < m) {
+        simplex.form.source_highs_row[static_cast<std::size_t>(native_row)] =
+            highs_row;
+      }
+    }
+    simplex.form.source_row_start = lp.highs_row_start;
+    simplex.form.source_row_index = lp.highs_row_index;
+    simplex.form.source_row_value = lp.highs_row_value;
+  }
+  for (int row = 0; row < m; ++row) {
+    simplex.form.row_to_slack_col[static_cast<std::size_t>(row)] = n_orig + row;
+  }
+  for (int row = 0; row < m_ineq; ++row) {
+    simplex.form.row_rhs_value[row] = lp.b[row];
+  }
+  for (int row = 0; row < m_eq; ++row) {
+    simplex.form.row_rhs_value[m_ineq + row] = lp.beq[row];
+  }
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(lp.A.nonZeros() +
+                                            lp.Aeq.nonZeros() + m));
+  for (int col = 0; col < lp.A.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it; ++it) {
+      if (std::abs(it.value()) > 1e-15) {
+        triplets.emplace_back(static_cast<int>(it.row()), col, it.value());
+      }
+    }
+  }
+  for (int col = 0; col < lp.Aeq.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, col); it; ++it) {
+      if (std::abs(it.value()) > 1e-15) {
+        triplets.emplace_back(m_ineq + static_cast<int>(it.row()), col,
+                              it.value());
+      }
+    }
+  }
+  for (int row = 0; row < m; ++row) {
+    triplets.emplace_back(row, n_orig + row, -1.0);
+  }
+  simplex.form.A.resize(m, n_sf);
+  simplex.form.A.setFromTriplets(triplets.begin(), triplets.end());
+  simplex.form.A.makeCompressed();
+  simplex.form.A_row = simplex.form.A;
+  simplex.form.b = Eigen::VectorXd::Zero(m);
+  simplex.form.c_max = Eigen::VectorXd::Zero(n_sf);
+  const Eigen::VectorXd c_min = lp.sense == Sense::Minimize ? lp.c : (-lp.c);
+  simplex.form.c_max.head(n_orig) = -c_min;
+  simplex.form.objective_const = 0.0;
+  simplex.form.var_ub =
+      Eigen::VectorXd::Constant(n_sf, std::numeric_limits<double>::infinity());
+  for (int j = 0; j < n_orig; ++j) {
+    if (std::isfinite(lp.vars[static_cast<std::size_t>(j)].ub) &&
+        std::isfinite(lp.vars[static_cast<std::size_t>(j)].lb)) {
+      simplex.form.var_ub[j] =
+          lp.vars[static_cast<std::size_t>(j)].ub -
+          lp.vars[static_cast<std::size_t>(j)].lb;
+    }
+  }
+  for (int row = 0; row < m_ineq; ++row) {
+    const double lhs = lp_row_lhs_or_neg_inf(lp, row);
+    const double rhs = lp.b[row];
+    simplex.form.b[row] = 0.0;
+    if (std::isfinite(lhs) && std::isfinite(rhs)) {
+      simplex.form.var_ub[n_orig + row] = std::max(0.0, rhs - lhs);
+    }
+  }
+  for (int row = 0; row < m_eq; ++row) {
+    simplex.form.var_ub[n_orig + m_ineq + row] = 0.0;
+  }
 
   simplex.result = primal;
   simplex.result.stats.solver_name = "VendoredHighsLpKernel";
-  simplex.x_std = primal_to_scaled_standard_form(simplex.form, primal.x);
+  simplex.x_std = Eigen::VectorXd::Zero(n_sf);
+  if (primal.x.size() != n_orig) return false;
+  for (int j = 0; j < n_orig; ++j) {
+    const double lb = lp.vars[static_cast<std::size_t>(j)].lb;
+    simplex.x_std[j] = primal.x[j] - lb;
+  }
+  const HighsSolution& hsol = highs->getSolution();
+  if (static_cast<int>(hsol.row_value.size()) < m) return false;
+  for (int row = 0; row < m; ++row) {
+    double lower = -std::numeric_limits<double>::infinity();
+    double upper = std::numeric_limits<double>::infinity();
+    if (row < m_ineq) {
+      lower = lp_row_lhs_or_neg_inf(lp, row);
+      upper = lp.b[row];
+    } else {
+      lower = lp.beq[row - m_ineq];
+      upper = lower;
+    }
+    const double row_value = hsol.row_value[static_cast<std::size_t>(row)];
+    if (std::isfinite(lower)) {
+      simplex.x_std[n_orig + row] = row_value - lower;
+    } else if (std::isfinite(upper)) {
+      simplex.x_std[n_orig + row] = row_value - upper;
+    } else {
+      simplex.x_std[n_orig + row] = row_value;
+    }
+  }
   if (simplex.x_std.size() != n_sf) return false;
 
   simplex.x_basic = Eigen::VectorXd::Zero(m);
@@ -406,7 +627,7 @@ bool build_native_simplex_state_from_highs(const LPModel& lp,
   simplex.basis.sf_n_surplus = simplex.form.n_surplus;
   simplex.basis.sf_n_artificial = simplex.form.n_artificial;
 
-  const HighsBasis& hbasis = highs.getBasis();
+  const HighsBasis& hbasis = highs->getBasis();
   if (!hbasis.valid ||
       static_cast<int>(hbasis.col_status.size()) < n_orig ||
       static_cast<int>(hbasis.row_status.size()) < m) {
@@ -420,69 +641,154 @@ bool build_native_simplex_state_from_highs(const LPModel& lp,
   }
   for (int row = 0; row < m; ++row) {
     const auto st = hbasis.row_status[static_cast<std::size_t>(row)];
-    int logical_col = -1;
-    if (st == HighsBasisStatus::kUpper) {
-      logical_col =
-          row < static_cast<int>(simplex.form.row_to_slack_col.size())
-              ? simplex.form.row_to_slack_col[static_cast<std::size_t>(row)]
-              : -1;
-      if (logical_col >= 0 && logical_col < n_sf) {
-        simplex.basis.at_upper[static_cast<std::size_t>(logical_col)] = 1;
-      }
+    const int logical_col = n_orig + row;
+    if (st == HighsBasisStatus::kUpper && logical_col < n_sf) {
+      simplex.basis.at_upper[static_cast<std::size_t>(logical_col)] = 1;
     }
   }
 
   std::vector<HighsInt> basic(static_cast<std::size_t>(std::max(0, m)), 0);
   if (m > 0 &&
-      highs.getBasicVariables(basic.data()) != HighsStatus::kOk) {
+      highs->getBasicVariables(basic.data()) != HighsStatus::kOk) {
     return false;
   }
   for (int row = 0; row < m; ++row) {
-    const int col = native_standard_form_col_from_highs_basic(
-        simplex.form, n_orig, basic[static_cast<std::size_t>(row)]);
+    const HighsInt hbasic = basic[static_cast<std::size_t>(row)];
+    const int col =
+        hbasic >= 0 ? static_cast<int>(hbasic)
+                    : n_orig + static_cast<int>(-hbasic - 1);
     if (col < 0 || col >= n_sf) return false;
     simplex.basis.indices[static_cast<std::size_t>(row)] = col;
     simplex.x_basic[row] = simplex.x_std[col];
   }
 
-  simplex.basis_inverse = Eigen::MatrixXd::Zero(m, m);
-  if (m > 0 && m <= 4096) {
-    std::vector<double> row_vec(static_cast<std::size_t>(m), 0.0);
-    for (int row = 0; row < m; ++row) {
-      std::fill(row_vec.begin(), row_vec.end(), 0.0);
-      if (highs.getBasisInverseRow(static_cast<HighsInt>(row),
-                                   row_vec.data()) != HighsStatus::kOk) {
-        simplex.basis_inverse.resize(0, 0);
-        break;
-      }
-      for (int col = 0; col < m; ++col) {
-        simplex.basis_inverse(row, col) =
-            row_vec[static_cast<std::size_t>(col)];
-      }
-    }
-  }
+  simplex.basis_inverse.resize(0, 0);
 
   simplex.reduced_costs = Eigen::VectorXd::Zero(n_sf);
   if (primal.box_dual_lb.size() == n_orig &&
       primal.box_dual_ub.size() == n_orig) {
-    const bool have_col_scale = simplex.form.col_scale.size() == n_sf;
     std::vector<char> is_basic(static_cast<std::size_t>(n_sf), 0);
     for (int col : simplex.basis.indices) {
       if (col >= 0 && col < n_sf) is_basic[static_cast<std::size_t>(col)] = 1;
     }
     for (int j = 0; j < n_orig; ++j) {
       if (is_basic[static_cast<std::size_t>(j)]) continue;
-      const double col_scale = have_col_scale ? simplex.form.col_scale[j] : 1.0;
       const double lb_dual = primal.box_dual_lb[j];
       const double ub_dual = primal.box_dual_ub[j];
-      simplex.reduced_costs[j] = -(lb_dual - ub_dual) * col_scale;
+      simplex.reduced_costs[j] = -(lb_dual - ub_dual);
     }
   }
 
-  simplex.max_objective =
-      simplex.form.objective_const - simplex.result.stats.objective;
+  simplex.max_objective = -simplex.result.stats.objective;
   simplex.exact_optimal = simplex.result.stats.success &&
-                          highs.getModelStatus() == HighsModelStatus::kOptimal;
+                          highs->getModelStatus() == HighsModelStatus::kOptimal;
+  simplex.basis.cached_sparse_basis =
+      std::make_shared<DirectHighsLpBasisOps>(highs, m, n_sf,
+                                              &simplex.form.A);
+  simplex.basis.persist_eta_count = 0;
+  return true;
+}
+
+bool finish_vendored_highs_relaxation(const LPModel& lp,
+                                      const std::shared_ptr<Highs>& highs,
+                                      HighsStatus run_status,
+                                      HighsModelStatus model_status,
+                                      double runtime_sec,
+                                      const char* label,
+                                      const BCOptions& opt,
+                                      LPRelaxationResult& out) {
+  if (!highs) return false;
+  const int m = static_cast<int>(lp.A.rows() + lp.Aeq.rows());
+  const int n = static_cast<int>(lp.vars.size());
+  const HighsInfo& info = highs->getInfo();
+
+  SolveResult primal;
+  primal.stats.solver_name =
+      (label != nullptr && std::strstr(label, "live append") != nullptr)
+          ? "VendoredHighsLiveAppendLpKernel"
+          : "VendoredHighsDirectLpKernel";
+  primal.stats.iterations = static_cast<int>(info.simplex_iteration_count);
+  primal.stats.objective = info.objective_function_value;
+  primal.stats.status = std::string("HiGHS ") +
+                        highs_model_status_label(model_status);
+  primal.stats.success = run_status == HighsStatus::kOk &&
+                         model_status == HighsModelStatus::kOptimal;
+  primal.stats.runtime_sec = runtime_sec;
+
+  if (model_status == HighsModelStatus::kInfeasible) {
+    primal.stats.status = "HiGHS Infeasible";
+    primal.stats.has_farkas_certificate = true;
+    primal.stats.success = false;
+    out.primal = std::move(primal);
+    out.dual_bound = std::numeric_limits<double>::infinity();
+    return true;
+  }
+  if (!primal.stats.success) {
+    out.primal = std::move(primal);
+    out.dual_bound = std::numeric_limits<double>::infinity();
+    return true;
+  }
+
+  const auto finish_t0 = std::chrono::steady_clock::now();
+  const HighsSolution& sol = highs->getSolution();
+  primal.x = Eigen::VectorXd::Zero(n);
+  for (int j = 0; j < n && j < static_cast<int>(sol.col_value.size()); ++j) {
+    primal.x[j] = sol.col_value[static_cast<std::size_t>(j)];
+  }
+  primal.constraint_duals = Eigen::VectorXd::Zero(m);
+  for (int i = 0; i < m && i < static_cast<int>(sol.row_dual.size()); ++i) {
+    primal.constraint_duals[i] = sol.row_dual[static_cast<std::size_t>(i)];
+  }
+  primal.box_dual_lb = Eigen::VectorXd::Zero(n);
+  primal.box_dual_ub = Eigen::VectorXd::Zero(n);
+  if (static_cast<int>(sol.col_dual.size()) >= n) {
+    for (int j = 0; j < n; ++j) {
+      const double dj = sol.col_dual[static_cast<std::size_t>(j)];
+      if (dj >= 0.0) {
+        primal.box_dual_lb[j] = dj;
+      } else {
+        primal.box_dual_ub[j] = -dj;
+      }
+    }
+  }
+
+  auto simplex = std::make_shared<SimplexResult>();
+  const auto import_t0 = std::chrono::steady_clock::now();
+  if (!build_native_simplex_state_from_highs(lp, highs, primal, *simplex)) {
+    if (opt.verbose ||
+        std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+      std::fprintf(stderr,
+                   "[BC_RELAX] VendoredHiGHS %s solved but basis import "
+                   "failed\n",
+                   label != nullptr ? label : "direct LP");
+    }
+    return false;
+  }
+  const double import_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - import_t0)
+          .count();
+  const double finish_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - finish_t0)
+          .count();
+
+  out.simplex = simplex;
+  out.primal = std::move(primal);
+  out.dual_bound = out.primal.stats.objective;
+  out.row_duals = out.primal.constraint_duals;
+  out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
+  if (opt.verbose ||
+      std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+    std::fprintf(stderr,
+                 "[BC_RELAX] VendoredHiGHS %s: success=1 iter=%d "
+                 "obj=%.12g rows=%d cols=%d basisRows=%d time=%.3fms "
+                 "finishMs=%.3f importMs=%.3f\n",
+                 label != nullptr ? label : "direct LP",
+                 out.primal.stats.iterations, out.primal.stats.objective, m,
+                 n, out.basis_hint ? out.basis_hint->rows : -1,
+                 out.primal.stats.runtime_sec * 1000.0, finish_ms, import_ms);
+  }
   return true;
 }
 
@@ -497,6 +803,90 @@ bool native_basis_to_highs_basis(const LPModel& lp,
       static_cast<int>(basis_hint->at_upper.size()) < n) {
     return false;
   }
+  const auto direct_lp_basis =
+      std::dynamic_pointer_cast<DirectHighsLpBasisOps>(
+          basis_hint->cached_sparse_basis);
+  if (direct_lp_basis &&
+      basis_hint->cols == n + basis_hint->rows &&
+      basis_hint->sf_n_slack == basis_hint->rows &&
+      basis_hint->sf_n_surplus == 0 &&
+      basis_hint->sf_n_artificial == 0) {
+    const int m_eq = static_cast<int>(lp.Aeq.rows());
+    const int old_rows = basis_hint->rows;
+    const int new_rows = m - old_rows;
+    const int old_m_ineq = old_rows - m_eq;
+    if (new_rows < 0 || old_m_ineq < 0) return false;
+    auto map_old_row = [&](int old_row) -> int {
+      if (old_row < 0 || old_row >= old_rows) return -1;
+      return old_row < old_m_ineq ? old_row : old_row + new_rows;
+    };
+
+    std::vector<int> mapped_basis(static_cast<std::size_t>(m), -1);
+    for (int row = 0; row < m; ++row) {
+      mapped_basis[static_cast<std::size_t>(row)] = n + row;
+    }
+    const auto& hint = basis_hint->basis_indices();
+    for (int old_basis_row = 0; old_basis_row < old_rows; ++old_basis_row) {
+      const int new_basis_row = map_old_row(old_basis_row);
+      if (new_basis_row < 0 || new_basis_row >= m) return false;
+      int col = hint[static_cast<std::size_t>(old_basis_row)];
+      if (col >= n) {
+        const int old_logical_row = col - n;
+        const int new_logical_row = map_old_row(old_logical_row);
+        if (new_logical_row < 0 || new_logical_row >= m) return false;
+        col = n + new_logical_row;
+      }
+      if (col < 0 || col >= n + m) return false;
+      mapped_basis[static_cast<std::size_t>(new_basis_row)] = col;
+    }
+
+    hbasis.valid = false;
+    hbasis.alien = true;
+    hbasis.useful = true;
+    hbasis.col_status.assign(static_cast<std::size_t>(n),
+                             HighsBasisStatus::kLower);
+    hbasis.row_status.assign(static_cast<std::size_t>(m),
+                             HighsBasisStatus::kLower);
+    for (int j = 0; j < n; ++j) {
+      const bool fixed =
+          std::isfinite(lp.vars[static_cast<std::size_t>(j)].lb) &&
+          std::isfinite(lp.vars[static_cast<std::size_t>(j)].ub) &&
+          std::abs(lp.vars[static_cast<std::size_t>(j)].ub -
+                   lp.vars[static_cast<std::size_t>(j)].lb) <= 1e-12;
+      if (!fixed && basis_hint->at_upper[static_cast<std::size_t>(j)] != 0) {
+        hbasis.col_status[static_cast<std::size_t>(j)] =
+            HighsBasisStatus::kUpper;
+      }
+    }
+    const int old_at_upper_n =
+        std::min(basis_hint->cols,
+                 static_cast<int>(basis_hint->at_upper.size()));
+    for (int old_col = n; old_col < old_at_upper_n; ++old_col) {
+      const int new_row = map_old_row(old_col - n);
+      if (new_row >= 0 && new_row < m) {
+        hbasis.row_status[static_cast<std::size_t>(new_row)] =
+            HighsBasisStatus::kUpper;
+      }
+    }
+
+    std::vector<char> seen(static_cast<std::size_t>(n + m), 0);
+    for (int row = 0; row < m; ++row) {
+      const int col = mapped_basis[static_cast<std::size_t>(row)];
+      if (col < 0 || col >= n + m) return false;
+      if (seen[static_cast<std::size_t>(col)] != 0) return false;
+      seen[static_cast<std::size_t>(col)] = 1;
+      if (col < n) {
+        hbasis.col_status[static_cast<std::size_t>(col)] =
+            HighsBasisStatus::kBasic;
+      } else {
+        hbasis.row_status[static_cast<std::size_t>(col - n)] =
+            HighsBasisStatus::kBasic;
+      }
+    }
+    hbasis.valid = true;
+    return true;
+  }
+
   const StandardFormLP sf = build_standard_form_lp(lp);
   const int sf_n = static_cast<int>(sf.A.cols());
   if (sf.n_original != n || sf.A.rows() != m || sf_n < n) {
@@ -633,118 +1023,302 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
                                              const BCOptions& opt,
                                              LPRelaxationResult& out) {
   const auto t0 = std::chrono::steady_clock::now();
-  Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
-  highs.setOptionValue("threads", 1);
-  highs.setOptionValue("presolve", "off");
-  highs.setOptionValue("solver", "simplex");
-  highs.setOptionValue("simplex_strategy", 1);
-  highs.setOptionValue("simplex_scale_strategy", 2);
-  highs.setOptionValue("simplex_initial_condition_check", false);
-  highs.setOptionValue("kkt_tolerance", kHighsDefaultKktTolerance);
-  highs.setOptionValue("primal_feasibility_tolerance",
-                       kHighsDefaultKktTolerance);
-  highs.setOptionValue("dual_feasibility_tolerance",
-                       kHighsDefaultKktTolerance);
-  highs.setOptionValue("mip_feasibility_tolerance",
-                       kHighsDefaultMipTolerance);
-  highs.setOptionValue("simplex_iteration_limit",
-                       std::max(opt.max_lp_iter * 50, 10000));
-
-  if (!highs_pass_lp_model(highs, lp)) return false;
-  HighsBasis warm_basis;
-  if (native_basis_to_highs_basis(lp, basis_hint, warm_basis)) {
-    (void)highs.setBasis(warm_basis, "HACDCPF native basis hint");
+  std::optional<std::string> live_append_reject;
+  const int live_append_candidate_rows =
+      static_cast<int>(lp.A.rows() + lp.Aeq.rows());
+  const bool has_appended_rows =
+      basis_hint != nullptr && basis_hint->rows >= 0 &&
+      basis_hint->rows < live_append_candidate_rows;
+  const bool require_live_append =
+      opt.auto_highs_root_pipeline && has_appended_rows;
+  if ((require_live_append ||
+       std::getenv("MIPSOLVERS_VENDORED_HIGHS_LIVE_APPEND") != nullptr) &&
+      basis_hint != nullptr) {
+    const int n = static_cast<int>(lp.vars.size());
+    const int m_ineq = static_cast<int>(lp.A.rows());
+    const int m_eq = static_cast<int>(lp.Aeq.rows());
+    const int m = m_ineq + m_eq;
+    const auto direct_lp_basis =
+        std::dynamic_pointer_cast<DirectHighsLpBasisOps>(
+            basis_hint->cached_sparse_basis);
+    if (!direct_lp_basis || !direct_lp_basis->highs_handle()) {
+      live_append_reject = "missing direct HiGHS basis";
+    } else if (m_eq != 0) {
+      live_append_reject = "equalities not supported by live append";
+    } else if (basis_hint->rows != direct_lp_basis->row_count()) {
+      live_append_reject = "basis row count changed";
+    } else if (basis_hint->rows < 0 || basis_hint->rows >= m) {
+      live_append_reject = "no appended rows";
+    } else if (basis_hint->cols != n + basis_hint->rows) {
+      live_append_reject = "basis column count changed";
+    } else {
+      const bool live_perf_trace =
+          std::getenv("MIPSOLVERS_XPOOL_LEDGER") != nullptr ||
+          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr;
+      const int old_rows = basis_hint->rows;
+      const int new_rows = m - old_rows;
+      const auto pack_t0 = std::chrono::steady_clock::now();
+      std::vector<double> lower(static_cast<std::size_t>(new_rows));
+      std::vector<double> upper(static_cast<std::size_t>(new_rows));
+      std::vector<HighsInt> starts(static_cast<std::size_t>(new_rows + 1), 0);
+      std::vector<HighsInt> indices;
+      std::vector<double> values;
+      std::vector<std::vector<std::pair<HighsInt, double>>> row_entries(
+          static_cast<std::size_t>(new_rows));
+      for (int col = 0; col < lp.A.outerSize(); ++col) {
+        for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, col); it;
+             ++it) {
+          const int row = static_cast<int>(it.row());
+          if (row < old_rows || row >= m_ineq || it.value() == 0.0) continue;
+          row_entries[static_cast<std::size_t>(row - old_rows)].emplace_back(
+              static_cast<HighsInt>(col), it.value());
+        }
+      }
+      for (int row = old_rows; row < m_ineq; ++row) {
+        const int local = row - old_rows;
+        starts[static_cast<std::size_t>(local)] =
+            static_cast<HighsInt>(indices.size());
+        lower[static_cast<std::size_t>(local)] = lp_row_lhs_or_neg_inf(lp, row);
+        upper[static_cast<std::size_t>(local)] = lp.b[row];
+        for (const auto& entry : row_entries[static_cast<std::size_t>(local)]) {
+          indices.push_back(entry.first);
+          values.push_back(entry.second);
+        }
+      }
+      starts[static_cast<std::size_t>(new_rows)] =
+          static_cast<HighsInt>(indices.size());
+      auto highs = direct_lp_basis->highs_handle();
+      const double pack_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - pack_t0)
+              .count();
+      const auto add_t0 = std::chrono::steady_clock::now();
+      const HighsStatus add_status = highs->addRows(
+          static_cast<HighsInt>(new_rows), lower.data(), upper.data(),
+          static_cast<HighsInt>(indices.size()), starts.data(), indices.data(),
+          values.data());
+      const double add_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - add_t0)
+              .count();
+      if (add_status == HighsStatus::kOk || add_status == HighsStatus::kWarning) {
+        const auto run_t0 = std::chrono::steady_clock::now();
+        const HighsStatus run_status = highs->run();
+        const double run_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - run_t0)
+                .count();
+        const HighsModelStatus model_status = highs->getModelStatus();
+        const double runtime_sec =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                .count();
+        const bool finished = finish_vendored_highs_relaxation(
+                lp, highs, run_status, model_status, runtime_sec,
+                "live append LP", opt, out);
+        if (live_perf_trace) {
+          std::fprintf(stderr,
+                       "[BC_RELAX-LIVEAPPEND-PERF] rows=%d nnz=%zu packMs=%.6f "
+                       "addRowsMs=%.6f runMs=%.6f totalMs=%.6f finished=%d\n",
+                       new_rows, values.size(), pack_ms, add_ms, run_ms,
+                       runtime_sec * 1000.0, finished ? 1 : 0);
+        }
+        if (finished) {
+          return true;
+        }
+      }
+      live_append_reject = "Highs::addRows/run failed";
+    }
+    if (require_live_append) {
+      if (opt.verbose ||
+          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "[BC_RELAX] VendoredHiGHS live append required but "
+                     "unavailable: %s\n",
+                     live_append_reject ? live_append_reject->c_str()
+                                        : "unknown");
+      }
+      return false;
+    }
   }
-  const HighsStatus run_status = highs.run();
-  const HighsModelStatus model_status = highs.getModelStatus();
-  const HighsInfo& info = highs.getInfo();
+  const bool use_direct_highs_lp =
+      opt.auto_highs_root_pipeline ||
+      std::getenv("MIPSOLVERS_VENDORED_HIGHS_DIRECT_LP") != nullptr;
+  if (use_direct_highs_lp) {
+    auto highs = std::make_shared<Highs>();
+    highs->setOptionValue("output_flag", false);
+    highs->setOptionValue("log_to_console", false);
+    highs->setOptionValue("random_seed", 0);
+    highs->setOptionValue("threads", 1);
+    highs->setOptionValue("presolve", "off");
+    highs->setOptionValue("parallel", "off");
+    highs->setOptionValue("solver", "simplex");
+    highs->setOptionValue("simplex_strategy", 1);
+    highs->setOptionValue("simplex_scale_strategy", 2);
+    highs->setOptionValue("simplex_initial_condition_check", false);
+    highs->setOptionValue("primal_feasibility_tolerance",
+                          kHighsDefaultMipTolerance);
+    highs->setOptionValue("dual_feasibility_tolerance",
+                          kHighsDefaultKktTolerance);
+    highs->setOptionValue("mip_feasibility_tolerance",
+                          kHighsDefaultMipTolerance);
+    highs->setOptionValue("simplex_iteration_limit",
+                          std::max(opt.max_lp_iter * 50, 10000));
 
-  SolveResult primal;
-  primal.stats.solver_name = "VendoredHighsLpKernel";
-  primal.stats.iterations =
-      static_cast<int>(info.simplex_iteration_count);
-  primal.stats.objective = info.objective_function_value;
-  primal.stats.status =
-      std::string("HiGHS ") + highs_model_status_label(model_status);
-  primal.stats.success = run_status == HighsStatus::kOk &&
-                         model_status == HighsModelStatus::kOptimal;
-  primal.stats.runtime_sec =
-      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-          .count();
+    if (!highs_pass_lp_model(*highs, lp)) {
+      if (opt.verbose ||
+          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "[BC_RELAX] VendoredHiGHS direct LP failed: pass_model\n");
+      }
+      return false;
+    }
+    HighsBasis warm_basis;
+    if (native_basis_to_highs_basis(lp, basis_hint, warm_basis)) {
+      (void)highs->setBasis(warm_basis, "MIPSOLVERS direct LP basis hint");
+    }
 
-  if (model_status == HighsModelStatus::kInfeasible) {
-    primal.stats.status = "HiGHS Infeasible";
-    primal.stats.has_farkas_certificate = true;
+    const HighsStatus run_status = highs->run();
+    const HighsModelStatus model_status = highs->getModelStatus();
+    const HighsInfo& info = highs->getInfo();
+
+    SolveResult primal;
+    primal.stats.solver_name = "VendoredHighsDirectLpKernel";
+    primal.stats.iterations =
+        static_cast<int>(info.simplex_iteration_count);
+    primal.stats.objective = info.objective_function_value;
+      primal.stats.status =
+        std::string("HiGHS ") + highs_model_status_label(model_status);
+    primal.stats.success = run_status == HighsStatus::kOk &&
+                           model_status == HighsModelStatus::kOptimal;
+    primal.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+
+    if (model_status == HighsModelStatus::kInfeasible) {
+      primal.stats.status = "HiGHS Infeasible";
+      primal.stats.has_farkas_certificate = true;
+      out.primal = std::move(primal);
+      out.dual_bound = std::numeric_limits<double>::infinity();
+      return true;
+    }
+    if (!primal.stats.success) {
+      if (opt.verbose ||
+          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "[BC_RELAX] VendoredHiGHS direct LP rejected: run=%d "
+                     "status=%s iter=%d\n",
+                     static_cast<int>(run_status),
+                     highs_model_status_label(model_status),
+                     primal.stats.iterations);
+      }
+      return false;
+    }
+
+    const int n = static_cast<int>(lp.vars.size());
+    const int m = static_cast<int>(lp.A.rows() + lp.Aeq.rows());
+    const HighsSolution& sol = highs->getSolution();
+    if (static_cast<int>(sol.col_value.size()) < n) return false;
+
+    primal.x = Eigen::VectorXd::Zero(n);
+    primal.box_dual_lb = Eigen::VectorXd::Zero(n);
+    primal.box_dual_ub = Eigen::VectorXd::Zero(n);
+    for (int j = 0; j < n; ++j) {
+      primal.x[j] = sol.col_value[static_cast<std::size_t>(j)];
+      const double cd = static_cast<int>(sol.col_dual.size()) > j
+                            ? sol.col_dual[static_cast<std::size_t>(j)]
+                            : 0.0;
+      if (cd > 0.0) {
+        primal.box_dual_lb[j] = cd;
+      } else if (cd < 0.0) {
+        primal.box_dual_ub[j] = -cd;
+      }
+    }
+    if (static_cast<int>(sol.row_dual.size()) >= m) {
+      primal.constraint_duals = Eigen::VectorXd::Zero(m);
+      for (int i = 0; i < m; ++i) {
+        primal.constraint_duals[i] =
+            sol.row_dual[static_cast<std::size_t>(i)];
+      }
+    }
+
+    auto simplex = std::make_shared<SimplexResult>();
+    if (!build_native_simplex_state_from_highs(lp, highs, primal, *simplex)) {
+      if (opt.verbose ||
+          std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "[BC_RELAX] VendoredHiGHS direct LP solved but basis "
+                     "import failed\n");
+      }
+      return false;
+    }
+
+    out.simplex = simplex;
     out.primal = std::move(primal);
-    out.dual_bound = std::numeric_limits<double>::infinity();
+    out.dual_bound = out.primal.stats.objective;
+    out.row_duals = out.primal.constraint_duals;
+    out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
+    if (opt.verbose ||
+        std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+      std::fprintf(stderr,
+                   "[BC_RELAX] VendoredHiGHS direct LP: success=1 iter=%d "
+                   "obj=%.12g rows=%d cols=%d basisRows=%d time=%.3fms\n",
+                   out.primal.stats.iterations, out.primal.stats.objective, m,
+                   n, out.basis_hint ? out.basis_hint->rows : -1,
+                   out.primal.stats.runtime_sec * 1000.0);
+    }
     return true;
   }
-  if (!primal.stats.success) {
-    if (opt.verbose) {
+
+  StandardFormLP sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf);
+  SimplexOptions sf_opt;
+  sf_opt.max_iter = std::max(opt.max_lp_iter * 50, 10000);
+  sf_opt.feasibility_tol = kHighsDefaultKktTolerance;
+  sf_opt.optimality_tol = kHighsDefaultKktTolerance;
+  sf_opt.verbose = false;
+  sf_opt.allow_cold_start = true;
+  sf_opt.use_partial_pricing = false;
+  sf_opt.perturb_degenerate_primal = false;
+  sf_opt.allow_vendored_highs_sf_backend = true;
+  sf_opt.require_vendored_highs_sf_backend = true;
+  sf_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
+  apply_root_simplex_conformance_options(sf_opt, /*force=*/true);
+
+  auto simplex = std::make_shared<SimplexResult>(
+      solve_lp_from_sf(sf, sf_opt, basis_hint));
+  if (simplex->result.stats.status == "LP infeasible") {
+    out.primal = simplex->result;
+    out.dual_bound = std::numeric_limits<double>::infinity();
+    out.simplex = simplex;
+    return true;
+  }
+  if (simplex->result.stats.success &&
+      simplex->result.x.size() == static_cast<int>(lp.vars.size())) {
+    out.simplex = simplex;
+    out.primal = simplex->result;
+    out.dual_bound = out.primal.stats.objective;
+    out.row_duals = out.primal.constraint_duals;
+    out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
+    if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
-                   "[BC_RELAX] VendoredHiGHS LP failed: run=%d status=%s\n",
-                   static_cast<int>(run_status),
-                   highs_model_status_label(model_status));
+                   "[BC_RELAX] VendoredHiGHS SF LP: success=1 iter=%d obj=%.12g "
+                   "rows=%d cols=%d basisRows=%d time=%.3fms\n",
+                   out.primal.stats.iterations, out.primal.stats.objective,
+                   static_cast<int>(sf.A.rows()), static_cast<int>(sf.A.cols()),
+                   out.basis_hint ? out.basis_hint->rows : -1,
+                   std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - t0).count());
     }
-    return false;
+    return true;
   }
 
-  const int n = static_cast<int>(lp.vars.size());
-  const int m_ineq = static_cast<int>(lp.A.rows());
-  const int m_eq = static_cast<int>(lp.Aeq.rows());
-  const int m = m_ineq + m_eq;
-  const HighsSolution& sol = highs.getSolution();
-  if (static_cast<int>(sol.col_value.size()) < n) return false;
-
-  primal.x = Eigen::VectorXd::Zero(n);
-  primal.box_dual_lb = Eigen::VectorXd::Zero(n);
-  primal.box_dual_ub = Eigen::VectorXd::Zero(n);
-  for (int j = 0; j < n; ++j) {
-    primal.x[j] = sol.col_value[static_cast<std::size_t>(j)];
-    const double cd = static_cast<int>(sol.col_dual.size()) > j
-                          ? sol.col_dual[static_cast<std::size_t>(j)]
-                          : 0.0;
-    if (cd > 0.0) primal.box_dual_lb[j] = cd;
-    else if (cd < 0.0) primal.box_dual_ub[j] = -cd;
-  }
-  if (static_cast<int>(sol.row_dual.size()) >= m) {
-    primal.constraint_duals = Eigen::VectorXd::Zero(m);
-    for (int i = 0; i < m; ++i) {
-      primal.constraint_duals[i] =
-          sol.row_dual[static_cast<std::size_t>(i)];
-    }
-  }
-
-  auto simplex = std::make_shared<SimplexResult>();
-  if (!build_native_simplex_state_from_highs(lp, highs, primal, *simplex)) {
-    if (opt.verbose) {
-      std::fprintf(stderr,
-                   "[BC_RELAX] VendoredHiGHS LP solved but basis import failed\n");
-    }
-    return false;
-  }
-
-  out.simplex = simplex;
-  out.primal = std::move(primal);
-  out.dual_bound = out.primal.stats.objective;
-  out.row_duals = out.primal.constraint_duals;
-  // Publish the imported HiGHS basis as the B&C first-class LP state.  The hint
-  // carries canonical standard-form basis indices, reduced costs, x_B/x_std and
-  // nonbasic-side status; solve_lp_from_sf can remap it into the vendored HiGHS
-  // SF backend without pretending it owns a native LU factorization.
-  out.basis_hint = make_first_class_basis_hint_from_simplex(*simplex);
-  out.basis_hint->cached_sparse_basis.reset();
-  if (opt.verbose || std::getenv("HACDCPF_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+  if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
     std::fprintf(stderr,
-                 "[BC_RELAX] VendoredHiGHS LP: success=1 iter=%d obj=%.12g "
-                 "rows=%d cols=%d basisRows=%d time=%.3fms\n",
-                 out.primal.stats.iterations, out.primal.stats.objective,
-                 m, n, out.basis_hint ? out.basis_hint->rows : -1,
-                 out.primal.stats.runtime_sec * 1000.0);
+                 "[BC_RELAX] VendoredHiGHS SF LP failed: status=%s rows=%d cols=%d\n",
+                 simplex->result.stats.status.c_str(),
+                 static_cast<int>(sf.A.rows()), static_cast<int>(sf.A.cols()));
   }
-  return true;
+  return false;
 }
 #else
 bool solve_lp_relaxation_with_vendored_highs(const LPModel&,
@@ -1243,7 +1817,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     if (solve_lp_relaxation_with_vendored_highs(lp, basis_hint, opt, out)) {
       return out;
     }
-    if (opt.verbose || std::getenv("HACDCPF_HIGHS_LP_KERNEL_TRACE") != nullptr) {
+    if (opt.verbose || std::getenv("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
       std::fprintf(stderr,
                    "[BC_RELAX] VendoredHiGHS LP unavailable/failed; "
                    "strict HiGHS LP contract rejects native fallback\n");

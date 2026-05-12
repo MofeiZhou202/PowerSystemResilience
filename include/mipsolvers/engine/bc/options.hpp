@@ -510,7 +510,7 @@ struct BCOptions {
   /// simplex.  When true, sets simplex_factor_backend = 1
   /// (BackendB_HiGHSSafe) throughout cut LP / node LP / push / cleanup
   /// dispatches.  Requires CMake build flag
-  /// HACDCPF_ENABLE_FACTOR_BACKEND_B=ON; otherwise the backend id is
+  /// MIPSOLVERS_ENABLE_FACTOR_BACKEND_B=ON; otherwise the backend id is
   /// silently clamped to 0 (Backend A) at compile time.  Disabled by
   /// default because of measured drift in certain MIP paths.
   bool use_forrest_tomlin_updates{false};

@@ -51,6 +51,21 @@ struct HiGHSPresolvedModelStats {
   int probing_substitutions{0};
   std::uint64_t vub_hash{0};
   std::uint64_t vlb_hash{0};
+  bool presolved_lp_available{false};
+  double presolved_objective_offset{0.0};
+  LPModel presolved_lp;
+  std::vector<double> presolved_row_lower;
+  std::vector<double> presolved_row_upper;
+  std::vector<double> presolved_col_lower;
+  std::vector<double> presolved_col_upper;
+  std::vector<int> presolved_col_orig;
+  std::vector<unsigned char> presolved_col_type;
+  std::vector<double> presolved_col_scale;
+  std::vector<double> presolved_col_constant;
+  std::vector<unsigned char> presolved_col_linearly_transformable;
+  std::vector<int> presolved_a_start;
+  std::vector<int> presolved_a_index;
+  std::vector<double> presolved_a_value;
   struct VarBoundRecord {
     int target_col{-1};
     int trigger_col{-1};

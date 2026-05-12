@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Core>
@@ -12,9 +13,14 @@
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
 
+class Highs;
+
 namespace mipsolvers::engine {
 
 struct SimplexBasis;  // forward declaration
+struct SimplexOptions;
+struct StandardFormLP;
+struct SimplexResult;
 struct SparseFactorTelemetry;
 
 enum class BasisOpsKind {
@@ -33,6 +39,14 @@ struct BasisOps {
   virtual BasisOpsKind kind() const = 0;
   virtual Eigen::VectorXd ftran(const Eigen::VectorXd& rhs) const = 0;
   virtual Eigen::VectorXd btran(const Eigen::VectorXd& rhs) const = 0;
+  /// Return row i of B^{-1} in the owner LP row space.  HiGHS' tableau
+  /// separator uses this exact object as rowEp before aggregation.
+  virtual bool basis_inverse_row(int row, Eigen::VectorXd& out) const = 0;
+  virtual bool basis_inverse_row_sparse_entries(
+      int,
+      std::vector<std::pair<int, double>>&) const {
+    return false;
+  }
   virtual bool tableau_row(int row, Eigen::RowVectorXd& out) const = 0;
   virtual void clear_etas() {}
   virtual void truncate_etas_to(int) {}
@@ -41,6 +55,18 @@ struct BasisOps {
   virtual SparseFactorTelemetry factor_telemetry() const;
   virtual void rebind_A(const Eigen::SparseMatrix<double>&) {}
   virtual bool bound_to_A(const Eigen::SparseMatrix<double>&) const {
+    return false;
+  }
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
+  virtual std::shared_ptr<Highs> highs_handle() const { return nullptr; }
+#endif
+  virtual bool delete_rows_cols_and_resolve(
+      const StandardFormLP&,
+      const SimplexBasis*,
+      const std::vector<int>&,
+      const std::vector<int>&,
+      const SimplexOptions&,
+      SimplexResult&) {
     return false;
   }
 };
@@ -263,6 +289,10 @@ struct StandardFormLP {
   // For ranged rows oriented from their lower side this is row_lhs[i], not b[i].
   Eigen::VectorXd row_rhs_value;
   std::vector<int> ub_row_var;  // For upper-bound rows: var index; -1 otherwise
+  std::vector<int> source_highs_row;  // Native SF row -> HiGHS presolved row.
+  std::vector<int> source_row_start;
+  std::vector<int> source_row_index;
+  std::vector<double> source_row_value;
   // Ruiz equilibration scale factors (populated by ruiz_scale_standard_form).
   // Scaled LP: D_r * A * D_c,  D_r * b,  D_c * c_max,  var_ub / D_c.
   Eigen::VectorXd row_scale;    // length m; empty if unscaled
@@ -381,6 +411,17 @@ void dump_solve_lp_counters();
 // Returns zero vector if cached_sparse_basis is null.
 Eigen::VectorXd sparse_basis_btran(const std::shared_ptr<BasisOps>& cached_sparse_basis,
                                    const Eigen::VectorXd& rhs);
+
+/// Return row i of B^{-1}; this is the HiGHS rowEp object used by tableau
+/// separation before row aggregation.
+bool sparse_basis_inverse_row(const std::shared_ptr<BasisOps>& cached_sparse_basis,
+                              int row,
+                              Eigen::VectorXd& out);
+
+bool sparse_basis_inverse_row_sparse_entries(
+  const std::shared_ptr<BasisOps>& cached_sparse_basis,
+  int row,
+  std::vector<std::pair<int, double>>& out);
 
 /// Return a tableau row e_i^T B^{-1} A in the owning StandardFormLP space.
 bool sparse_basis_tableau_row(const std::shared_ptr<BasisOps>& cached_sparse_basis,

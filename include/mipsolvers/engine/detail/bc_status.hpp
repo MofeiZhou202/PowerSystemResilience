@@ -12,10 +12,15 @@ inline constexpr char kInfeasiblePapiloPresolve[] = "Infeasible (PaPILO presolve
 inline constexpr char kInvalidReducedIncumbent[] = "Invalid reduced-space incumbent";
 inline constexpr char kInvalidPapiloPostsolveIncumbent[] = "Invalid incumbent after PaPILO postsolve";
 inline constexpr char kInfeasibleVariableBounds[] = "Infeasible variable bounds";
+inline constexpr char kHighsPresolvedWorkingLpUnavailable[] =
+    "HiGHS presolved working LP unavailable";
+inline constexpr char kHighsPresolvedWorkingLpMismatch[] =
+    "HiGHS presolved working LP mismatch";
 inline constexpr char kRootRelaxationFailed[] = "Root relaxation failed";
 inline constexpr char kRootRelaxationNanObjective[] = "Root relaxation returned NaN objective";
 inline constexpr char kRootNlpRelaxationFailed[] = "Root NLP relaxation failed";
 inline constexpr char kOptimalRootGapClosed[] = "Optimal (root gap closed)";
+inline constexpr char kRootSeparationOnly[] = "Stopped after root separation";
 inline constexpr char kTimeLimitReached[] = "Time limit reached";
 inline constexpr char kNodeLimitReached[] = "Node limit reached";
 inline constexpr char kSearchQueueExhausted[] = "Search queue exhausted";

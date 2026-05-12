@@ -20,7 +20,9 @@ LP, QP, NLP, MILP, and MINLP, and abstracts away solver-specific APIs behind a s
    - [Branching and Node Selection](#72-branching-and-node-selection)
    - [Cut Generation](#73-cut-generation)
    - [Warm-Start](#74-warm-start)
-   - [ML Hooks](#75-ml-hooks)
+   - [Cut Validity Scope](#75-cut-validity-scope)
+   - [Dynamic Node Cuts](#76-dynamic-node-cuts)
+   - [ML Hooks](#77-ml-hooks)
 8. [Strategy Dispatcher](#8-strategy-dispatcher)
 9. [Include Layout](#9-include-layout)
 
@@ -708,7 +710,73 @@ struct BCPrimalHint {
 A primal hint with `verified = false` undergoes an internal LP feasibility
 check before being accepted as an incumbent.
 
-### 7.5 ML Hooks
+### 7.5 Cut Validity Scope
+
+When using the dynamic-node-cut or other callback-based cut injection paths,
+each cut can be annotated with a `ValidityScope` that controls how the engine
+manages it:
+
+```cpp
+enum class ValidityScope {
+  GlobalCut,       // Added to the global cut pool; shared across all nodes
+  LocalNodeCut,    // Valid only for the current node and its subtree
+  LazyConstraint,  // Lazy constraint; activates once a violating integer point is found
+};
+```
+
+This enum is declared in `mipsolvers/engine/bc/enums.hpp`.
+
+### 7.6 Dynamic Node Cuts
+
+`BCCallbacks` includes a `dynamic_node_cut` hook for injecting user-generated
+cuts at integer feasible nodes (lazy-constraint / user-cut style):
+
+```cpp
+struct BCDynamicNodeCutContext {
+  int                    node_id;
+  int                    depth;
+  const Eigen::VectorXd& x;         // current LP/node solution
+  const BCStats&         stats;
+};
+
+struct BCDynamicNodeCut {
+  Eigen::SparseVector<double> coeff;  // row of coeff*x <= rhs
+  double                      rhs;
+  bool                        integral{false};   // cut is integrality-valid
+  bool                        propagate{true};   // allow domain propagation
+  std::string                 audit_family;      // diagnostic tag
+  std::string                 audit_key;
+  ValidityScope               validity_scope{ValidityScope::GlobalCut};
+};
+
+using BCDynamicNodeCutFn = std::function<int(
+    const BCDynamicNodeCutContext& ctx,
+    std::vector<BCDynamicNodeCut>& out_cuts)>;
+```
+
+Register it via `BCCallbacks::dynamic_node_cut`:
+
+```cpp
+BCCallbacks cbs;
+cbs.dynamic_node_cut = [](const BCDynamicNodeCutContext& ctx,
+                           std::vector<BCDynamicNodeCut>& cuts) -> int {
+  // inspect ctx.x and add violated inequalities to cuts
+  if (/* constraint violated */) {
+    BCDynamicNodeCut cut;
+    cut.coeff = /* sparse row */;
+    cut.rhs   = /* rhs */;
+    cut.validity_scope = ValidityScope::LazyConstraint;
+    cuts.push_back(std::move(cut));
+    return 1;
+  }
+  return 0;  // no cuts generated
+};
+BCResult result = solve_milp_bc(mip, opt, ws, cbs);
+```
+
+Return value is the number of cuts generated; return 0 to signal no violation.
+
+### 7.7 ML Hooks
 
 `BCCallbacks` provides extension points for learned policies:
 
@@ -720,6 +788,7 @@ check before being accepted as an incumbent.
 | `branching_advisor` | `BCBranchingPrior(node_id, fracs, features)` | Suggest branching variable |
 | `incumbent_callback` | `void(x, obj, stats)` | Called each time a better incumbent is found |
 | `termination_check` | `bool(stats)` | Custom early-termination condition |
+| `dynamic_node_cut` | `int(ctx, out_cuts)` | Inject user cuts at integer feasible nodes |
 
 ---
 
@@ -773,10 +842,10 @@ include/mipsolvers/engine/
   bc/
     api.hpp                     ← solve_milp_bc / solve_minlp_bc
     options.hpp                 ← BCOptions
-    stats.hpp                   ← BCStats
+    stats.hpp                   ← BCStats, BCRootStats
     warmstart.hpp               ← BCWarmStart, BCPrimalHint, …
-    ml_hooks.hpp                ← BCCallbacks, BCInstanceFeatures, …
-    enums.hpp                   ← BranchingStrategy, NodeSelection, CutType
+    ml_hooks.hpp                ← BCCallbacks, BCInstanceFeatures, BCDynamicNodeCut, …
+    enums.hpp                   ← BranchingStrategy, NodeSelection, CutType, ValidityScope
   strategy/
     dispatcher.hpp              ← StrategyDispatcher
 ```

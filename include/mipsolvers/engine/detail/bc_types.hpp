@@ -18,6 +18,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "mipsolvers/engine/bc/enums.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
@@ -312,6 +313,19 @@ public:
   std::size_t size() const { return storage_.size(); }
 };
 
+/// @brief Sparse cut row plus its validity scope.
+struct PoolCut {
+  Eigen::SparseVector<double> coeff;  ///< Sparse inequality coeff*x <= rhs
+  double rhs;
+  int age{0};              ///< Consecutive non-violations (purge when > max_age)
+  double best_efficacy;    ///< Best violation/||coeff|| ever seen
+  double norm{0.0};        ///< Cached ||coeff||
+  std::size_t hash{0};     ///< Structural hash for fast duplicate rejection
+  bool domain_only{false}; ///< Propagation-only row; do not inject into node LPs.
+  std::uint64_t source_trace_id{0};  ///< Diagnostic transformed-cut source id.
+  ValidityScope validity_scope{ValidityScope::GlobalCut};
+};
+
 /// @brief Legacy Node structure (kept for compatibility during transition).
 struct Node {
   Eigen::VectorXd lb;
@@ -333,6 +347,7 @@ struct Node {
   std::vector<LocalBinaryImplication> local_binary_implications;
   std::vector<std::vector<BranchDomainLiteral>> local_conflict_clauses;
   std::vector<ScopedConflictClause> scoped_conflict_clauses;
+  std::vector<PoolCut> local_cuts;
   std::uint64_t domain_learning_epoch{0};
   std::uint64_t objective_artifact_epoch{0};
   std::uint64_t domain_closure_epoch{0};
@@ -360,6 +375,7 @@ struct Node {
     c.local_binary_implications = local_binary_implications;
     c.local_conflict_clauses = local_conflict_clauses;
     c.scoped_conflict_clauses = scoped_conflict_clauses;
+    c.local_cuts = local_cuts;
     c.domain_learning_epoch = domain_learning_epoch;
     c.objective_artifact_epoch = objective_artifact_epoch;
     c.domain_closure_epoch = domain_closure_epoch;
@@ -513,17 +529,6 @@ inline bool is_integer_type(const VariableMeta& v) {
 inline bool is_integral(double x, double tol) {
   return std::abs(x - std::round(x)) <= tol;
 }
-
-/// @brief Cut stored in the global cut pool (sparse storage).
-struct PoolCut {
-  Eigen::SparseVector<double> coeff;  ///< Sparse inequality coeff*x <= rhs
-  double rhs;
-  int age{0};              ///< Consecutive non-violations (purge when > max_age)
-  double best_efficacy;    ///< Best violation/||coeff|| ever seen
-  double norm{0.0};        ///< Cached ||coeff||
-  std::size_t hash{0};     ///< Structural hash for fast duplicate rejection
-  bool domain_only{false}; ///< Propagation-only row; do not inject into node LPs.
-};
 
 /// @brief Cut family identifiers for efficacy tracking (P2.1).
 enum class CutFamily : int {

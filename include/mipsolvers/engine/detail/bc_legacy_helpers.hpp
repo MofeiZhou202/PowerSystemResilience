@@ -14,7 +14,7 @@
 #include "mipsolvers/engine/detail/bc_types.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 #include "Highs.h"
 #endif
 
@@ -25,7 +25,7 @@ int bc_conformance_trace_terms(const char* env_name, int default_value = 32);
 bool bc_frontier_conformance_enabled();
 bool bc_first_class_lp_state_conformance_enabled();
 bool bc_vendored_highs_lp_kernel_enabled(const BCOptions& opt);
-bool bc_vendored_highs_root_frontier_enabled();
+bool bc_vendored_highs_root_frontier_enabled(const BCOptions& opt);
 
 void apply_bc_first_class_simplex_state(SimplexOptions& opt,
                                         bool allow_frontier_remap);
@@ -62,7 +62,7 @@ class VendoredHighsSfBackendScope {
   bool old_{false};
 };
 
-#ifdef HACDCPF_HAVE_HIGHS_LIB
+#ifdef MIPSOLVERS_HAVE_HIGHS_LIB
 const char* bc_highs_model_status_label(HighsModelStatus status);
 
 bool bc_native_basis_to_highs_basis(const LPModel& lp,
