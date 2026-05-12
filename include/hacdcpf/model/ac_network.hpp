@@ -30,6 +30,9 @@ struct ACBus {
   int n_customers{0};        // number of customers at this bus
   double importance{1.0};    // weight for resilience metrics
 
+  // Bearing capability assessment (DL/T 2041)
+  double i_breaker_ka{0.0};   // breaker interrupting capacity at this bus [kA]
+
   // Geographical (for planning / visualization)
   double latitude{0.0};
   double longitude{0.0};
@@ -58,9 +61,18 @@ struct ACBranch {
   // Physical parameters (for stability / EMT)
   double length_km{0.0};
 
+  // Per-km electrical parameters (for line impedance calculation)
+  // When set (>0), they determine r_pu, x_pu, b_pu via:
+  //   r_pu = r_ohm_per_km * length_km / z_base
+  //   x_pu = x_ohm_per_km * length_km / z_base
+  //   b_pu = b_us_per_km * length_km * z_base * 1e-6
+  // where z_base = base_kv² / base_mva
+  double r_ohm_per_km{0.0};  // resistance (Ω/km)
+  double x_ohm_per_km{0.0};  // reactance (Ω/km)
+  double b_us_per_km{0.0};   // susceptance (μS/km)
+  double c_nf_per_km{0.0};   // capacitance (nF/km), alternative to b_us_per_km
+
   // Reliability (for planning)
-  // For line length L_km, annual expected failures can be approximated by:
-  //   N_fail/yr ~= failure_rate * L_km
   double failure_rate{0.0};  // failures per year per km
   double mttr_hr{0.0};       // mean time to repair (hours)
   double t_scheduled_hr{0.0}; // scheduled maintenance (hours/year)
@@ -120,9 +132,8 @@ struct Transformer2W {
   double x0_r0{0.0};
 
   // Reliability
-  // Availability: A = MTBF / (MTBF + MTTR)
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};  // scheduled maintenance (hours/year)
 
   // Parallel transformers
@@ -173,38 +184,9 @@ struct Transformer3W {
   double shift_lv_deg{0.0};
 
   // Reliability
-  // Availability: A = MTBF / (MTBF + MTTR)
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};  // scheduled maintenance (hours/year)
-};
-
-// ═══════════════════════════════════════════════════════════════════════
-// Regulator control (minimal DSS-aligned control object for Transformer2W)
-// ═══════════════════════════════════════════════════════════════════════
-struct RegulatorControl {
-  int index{0};
-  std::string name;
-
-  // Controlled Transformer2W reference.
-  int transformer_index{0};
-  std::string transformer_name;
-
-  // OpenDSS-aligned control semantics.
-  int winding{0};                  // monitored winding
-  int tap_winding{0};              // winding carrying the actual taps
-  int monitored_bus{0};            // 0 => monitor the controlled winding bus
-  int monitored_node{1};           // currently only single-phase node=1 is supported
-  double vreg_volts{0.0};          // PT-secondary target voltage
-  double band_volts{0.0};          // PT-secondary bandwidth
-  double ptratio{0.0};             // local PT ratio
-  double remote_ptratio{0.0};      // used when monitored_bus != 0; 0 => fall back to ptratio
-  double ct_primary_amps{0.0};     // CT primary current used by LDC scaling
-  double r_volts{0.0};             // line-drop compensation R setting on PT secondary
-  double x_volts{0.0};             // line-drop compensation X setting on PT secondary
-  int max_tap_change{1};           // maximum discrete tap steps per control iteration
-  bool reversible{false};          // currently unsupported if true
-  bool enabled{true};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

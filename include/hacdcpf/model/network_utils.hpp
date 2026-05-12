@@ -107,6 +107,13 @@ constexpr double kBusMergeZThreshold = 1e-4;
 // Populates sys.bus_merge_map.  No-op if no zero-Z branches exist.
 void merge_zero_impedance_buses(HybridPowerSystem& sys);
 
+// Detect connected components via BFS on in-service AC branches.
+// Components with no generation source (dead islands) are stripped:
+// their buses and attached components are removed, surviving buses are
+// renumbered 1..N.  The BusMergeMap is updated so that
+// unproject_bus_vector returns 0.0 for dead-island positions.
+void strip_dead_islands(HybridPowerSystem& sys);
+
 // Expand a merged result vector (indexed by internal position, 0-based)
 // back to the original external bus count using the merge map.
 // Buses that were merged receive the representative bus's value.

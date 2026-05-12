@@ -117,14 +117,12 @@ DCPowerFlowResult DCSolver::solve(const SolverData& data,
     Eigen::FullPivLU<Eigen::MatrixXd> lu(jac);
     if (!lu.isInvertible()) {
       out.converged = false;
-      out.failure_reason = SolverFailureReason::SingularJacobian;
       break;
     }
 
     const Eigen::VectorXd dx = lu.solve(mismatch);
     if (!dx.allFinite()) {
       out.converged = false;
-      out.failure_reason = SolverFailureReason::NonFiniteSolution;
       break;
     }
 

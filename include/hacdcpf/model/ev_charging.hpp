@@ -30,8 +30,8 @@ struct Charger {
   double p_ev_kw{0.0};            // current EV power demand
 
   // Reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 
@@ -63,8 +63,8 @@ struct ChargingStation {
   int n_cars{0};                   // number of currently connected EVs
 
   // Reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 

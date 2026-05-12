@@ -2,6 +2,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace hacdcpf {
@@ -59,7 +60,26 @@ struct BusMergeMap {
   // Number of buses after merging.
   int n_merged{0};
 
+  // External bus indices of dead-island buses stripped during projection.
+  // These buses have no generation path and were removed from the
+  // projected system.  unproject_bus_vector returns 0.0 for them.
+  std::unordered_set<int> dead_bus_indices;
+
+  // Original branch count before projection — used to unproject branch
+  // flow results back to original branch indexing.
+  int n_original_branches{0};
+
+  // Maps original branch position (0-based) → projected branch position
+  // (0-based).  Dead-island branches get -1.
+  std::unordered_map<int, int> branch_orig_to_proj;
+
   bool has_merges() const { return n_merged > 0 && n_merged < n_original; }
+
+  // Returns true if any dead-island buses were stripped.
+  bool has_dead_buses() const { return !dead_bus_indices.empty(); }
+
+  // Check if a bus (by external 1-based index) is a dead island bus.
+  bool is_dead_bus(int ext_bus) const { return dead_bus_indices.count(ext_bus) > 0; }
 
   // Build identity (no-op) mapping for n buses with external indices
   // taken from a bus vector.  Used when no merging occurs.
@@ -67,16 +87,6 @@ struct BusMergeMap {
     BusMergeMap m;
     m.n_original = n;
     m.n_merged = n;
-    const int count = n > 0 ? n : 0;
-    m.int_to_ext.reserve(static_cast<size_t>(count));
-    m.groups.reserve(static_cast<size_t>(count));
-    for (int i = 0; i < n; ++i) {
-      const int ext = i + 1;
-      m.ext_to_int[ext] = i;
-      m.ext_to_orig_pos[ext] = i;
-      m.int_to_ext.push_back(ext);
-      m.groups.push_back({ext});
-    }
     return m;
   }
 };

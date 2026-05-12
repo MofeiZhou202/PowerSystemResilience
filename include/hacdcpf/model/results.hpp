@@ -30,7 +30,7 @@ struct SolverProfiling {
   double linear_solve_ms_total{0.0};
   double line_search_ms_total{0.0};
 
-  // Phase 1 robust diagnostics.
+  // Phase 1 robust diagnostics (used by newton_solver).
   double raw_residual_norm{0.0};
   double scaled_residual_norm{0.0};
   double condition_estimate{0.0};
@@ -64,6 +64,17 @@ struct DCDCTransfer {
   double loss_mw{0.0};
 };
 
+struct Trafo3WFlow {
+  int index{0};
+  int hv_bus{0}, mv_bus{0}, lv_bus{0};
+  double p_hv_mw{0.0}, q_hv_mvar{0.0};
+  double p_mv_mw{0.0}, q_mv_mvar{0.0};
+  double p_lv_mw{0.0}, q_lv_mvar{0.0};
+  double loss_mw{0.0};
+  double loading_pct{0.0};
+  double rate_mva{0.0};
+};
+
 struct ERPortTransfer {
   int router_index{0};
   int port_index{0};
@@ -74,15 +85,6 @@ struct ERPortTransfer {
   double v_pu{1.0};
 };
 
-/// Reason a solver returned converged=false.  None means success.
-enum class SolverFailureReason {
-  None,                  ///< Solver converged successfully.
-  SingularJacobian,      ///< LU factorization failed (singular or ill-conditioned matrix).
-  NonFiniteSolution,     ///< Newton step or state vector contained NaN or Inf.
-  InvalidInitialState,   ///< Provided initial state contained NaN, Inf, or out-of-range values.
-  MaxIterationsReached,  ///< Iteration limit exceeded without convergence.
-};
-
 struct PowerFlowResult {
   std::vector<double> vm;
   std::vector<double> va;
@@ -90,11 +92,11 @@ struct PowerFlowResult {
   bool converged{false};
   int iterations{0};
   double residual{0.0};
-  SolverFailureReason failure_reason{SolverFailureReason::None};
   SolverProfiling profiling;
   std::vector<BranchFlow> branch_flows;
   std::vector<VSCTransfer> vsc_transfers;
   std::vector<DCDCTransfer> dcdc_transfers;
+  std::vector<Trafo3WFlow> trafo3w_flows;
   std::vector<ERPortTransfer> er_port_transfers;
 };
 
@@ -103,7 +105,6 @@ struct DCPowerFlowResult {
   bool converged{false};
   int iterations{0};
   double residual{0.0};
-  SolverFailureReason failure_reason{SolverFailureReason::None};
 };
 
 struct AdaptiveSolveResult {

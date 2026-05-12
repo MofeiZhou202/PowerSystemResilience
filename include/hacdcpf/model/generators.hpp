@@ -62,8 +62,6 @@ struct Generator {
   double r0_pu{0.0};           // zero-sequence resistance (pu on mbase)
 
   // Carbon emission
-  // Emission accounting per period dt (hour):
-  //   E_co2 = emission_factor_tco2_mwh * Pg_MW * dt
   double emission_factor_tco2_mwh{0.0};  // tCO2/MWh
   double nox_factor_kg_mwh{0.0};         // kg NOx/MWh
   double so2_factor_kg_mwh{0.0};         // kg SO2/MWh
@@ -71,15 +69,10 @@ struct Generator {
   // Time-series hook (index into external profile, -1 = none)
   int profile_id{-1};
 
-  // Reliability (FOR-based: FOR = MTTR / (MTBF + MTTR))
-  // Availability: A = 1 - FOR
+  // Reliability
   double forced_outage_rate{0.0};  // probability of forced outage
   double mttr_hr{0.0};             // mean time to repair (hours)
   double t_scheduled_hr{0.0};      // scheduled maintenance (hours/year)
-  // Derived MTBF (for cross-interface compatibility with MTBF-based structs):
-  //   mtbf_hr = mttr_hr * (1.0 - forced_outage_rate) / forced_outage_rate
-  // Set explicitly when importing from MTBF-based data sources (0 = derive from FOR+MTTR).
-  double mtbf_hr{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -113,12 +106,11 @@ struct StaticGenerator {
   double rx{0.0};                 // R/X ratio
 
   // Carbon
-  double emission_factor_tco2_mwh{0.0};  // tCO2/MWh
+  double co2_emission_rate{0.0};  // tCO2/MWh
 
-  // Reliability (MTBF-based: A = MTBF / (MTBF + MTTR))
-  // Forced outage rate conversion: FOR = 1 - A
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  // Reliability
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};     // scheduled maintenance (hours/year)
 
   // Frequency reference (droop control)
@@ -155,10 +147,9 @@ struct RenewableGen {
   // Carbon offset
   double emission_offset_tco2_mwh{0.0};  // avoided tCO2/MWh
 
-  // Reliability (MTBF-based: A = MTBF / (MTBF + MTTR))
-  // Forced outage rate conversion: FOR = 1 - A
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  // Reliability
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};     // scheduled maintenance (hours/year)
 };
 
@@ -207,11 +198,9 @@ struct PVSystem {
   // Time-series hook (index into external profile, -1 = none)
   int profile_id{-1};
 
-  // System-level reliability (MTBF-based: A = MTBF / (MTBF + MTTR))
-  // Series reliability approximation with panel+inverter:
-  //   A_sys ~= A_panel * A_inverter
-  double mtbf_hr{0.0};            // system-level MTBF (hours)
-  double mttr_hr{0.0};            // system-level MTTR (hours)
+  // System-level reliability
+  double mtbf_hours{0.0};            // system-level MTBF (hours)
+  double mttr_hours{0.0};            // system-level MTTR (hours)
   double t_scheduled_hr{0.0};        // scheduled maintenance (hours/year)
 
   // Sub-system reliability (panel + inverter)

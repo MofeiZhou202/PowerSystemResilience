@@ -373,7 +373,7 @@ static HybridPowerSystem build_all29_system() {
   {
     VirtualPowerPlant vpp;
     vpp.index           = 1;
-    vpp.pcc_bus = 4;
+    vpp.aggregation_bus = 4;
     vpp.in_service      = true;
     vpp.p_output_mw     = 2.5;
     vpp.q_output_mvar   = 0.4;
@@ -386,7 +386,7 @@ static HybridPowerSystem build_all29_system() {
   {
     Microgrid mg;
     mg.index          = 1;
-    mg.pcc_bus        = 4;
+    mg.aggregation_bus        = 4;
     mg.in_service     = true;
     mg.operating_mode = MicrogridMode::GridConnected;
     mg.p_exchange_mw  = 1.5;   // positive = export to main grid
@@ -525,7 +525,7 @@ static HybridPowerSystem build_all29_system() {
     dcdc.eta          = 0.97;
     dcdc.pmax_mw      = 5.0;
     dcdc.name = "DCDC1";
-    sys.dc.dcdc_converters = {dcdc};
+    sys.dcdc_converters = {dcdc};
   }
 
   // ── StaticGeneratorDC (type 27) at DCBus2 — DC-native PV ────────────────
@@ -934,7 +934,7 @@ TEST_CASE("all29 – each component type measurably affects PF result", "[integr
   // ── DCDCConverter ────────────────────────────────────────────────────────
   SECTION("DCDCConverter: disabling changes DC bus voltages") {
     auto sys = build_all29_system();
-    sys.dc.dcdc_converters[0].in_service = false;
+    sys.dcdc_converters[0].in_service = false;
     const auto res = solve_power_flow(sys, opt);
     REQUIRE(res.converged);
     CHECK(std::fabs(sum_dc_vdc(res) - base_vdc) > kDelta);
@@ -1045,7 +1045,7 @@ TEST_CASE("all29 – build_all29_system populates every component collection", "
 
   // Hybrid top-level
   CHECK(!s.vsc_converters.empty());
-  CHECK(!s.dc.dcdc_converters.empty());
+  CHECK(!s.dcdc_converters.empty());
   CHECK(!s.energy_routers.empty());
   CHECK(!s.mobile_storage.empty());
   CHECK(!s.vpps.empty());

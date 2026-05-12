@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <complex>
 #include <limits>
 #include <map>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -116,27 +116,14 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
     x_pu = 1e-4;
   }
 
-  // When the physical tap is on the LV winding (tap_side == 1), the canonical
-  // branch model stores the tap as 1/tap_pu so that the branch equation
-  //   V_lv = V_hv / branch.tap
-  // correctly represents V_lv = V_hv * tap_pu (boost on LV side).
-  // For HV-side tap (tap_side == 0), branch.tap == tap_pu directly.
-  // The impedance values (expressed on the winding's own base) must also be
-  // scaled by tap_pu² when the tap is on the LV side, matching the
-  // CanonicalTapProjection logic in three_phase_nr.cpp.
-  const double raw_tap = tap_from_step(tr.tap_pos, tr.tap_neutral, tr.tap_step_percent);
-  const double clamped_tap = std::max(1e-6, raw_tap);
-  const double canonical_tap = (tr.tap_side == 1) ? (1.0 / clamped_tap) : clamped_tap;
-  const double impedance_scale = (tr.tap_side == 1) ? (clamped_tap * clamped_tap) : 1.0;
-
   ACBranch br;
   br.index = next_idx++;
   br.from_bus = tr.hv_bus;
   br.to_bus = tr.lv_bus;
-  br.r_pu = r_pu * impedance_scale;
-  br.x_pu = x_pu * impedance_scale;
+  br.r_pu = r_pu;
+  br.x_pu = x_pu;
   br.b_pu = 0.0;
-  br.tap = canonical_tap;
+  br.tap = tap_from_step(tr.tap_pos, tr.tap_neutral, tr.tap_step_percent);
   br.shift_deg = tr.shift_deg;
   br.rate_a_mva = tr.sn_mva;
   br.in_service = true;
@@ -152,154 +139,31 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
 }
 
 void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
-                                                 ACSystem& ac,
-                                                 double base_mva,
-                                                 int& next_idx) {
+                                                ACSystem& ac,
+                                                double base_mva,
+                                                int& next_idx) {
   if (!tr.in_service) return;
   if (tr.hv_bus == 0 || tr.mv_bus == 0 || tr.lv_bus == 0) return;
-
-  using Complex = std::complex<double>;
-
-  // Compute the winding tap ratio.  The tap_neutral for Transformer3W uses
-  // tap_pos relative to neutral position 0 (consistent with Transformer2W
-  // conventions in this code-base).
-  const double winding_tap_pu =
-      std::max(1e-6, tap_from_step(tr.tap_pos, 0, tr.tap_step_percent));
-
-  // Canonical branch tap assignment for three-winding Kron equivalent:
-  //   branch.tap represents  V_to = V_from / branch.tap
-  // We assign a per-winding scalar: w[HV]=1, w[MV]=1, w[LV]=1 for the
-  // untapped windings; the tapped winding gets w=winding_tap_pu.
-  // For a branch FROM winding A TO winding B:
-  //   If tap is on the FROM side  →  branch.tap = winding_tap_pu  (raises V at to)
-  //   If tap is on the TO   side  →  branch.tap = 1/winding_tap_pu (raises V at to)
-  //   If tap is on neither  side  →  branch.tap = 1.0
-  //
-  // Mapping:  tap_side 0=HV, 1=MV, 2=LV
-  // pairs:    0=HV_MV, 1=HV_LV, 2=MV_LV
-  //
-  // tap_side=0(HV): pair0=t, pair1=t,   pair2=1
-  // tap_side=1(MV): pair0=1/t, pair1=1, pair2=t
-  // tap_side=2(LV): pair0=1,  pair1=1/t, pair2=1/t
-  const double t = winding_tap_pu;
-  const double inv_t = 1.0 / t;
-  double tap_by_pair[3];
-  // Per-winding tap scalars (tau_H, tau_M, tau_L) — used for impedance
-  // calculation.  The tapped winding carries tau=t; others carry tau=1.
-  double tau_winding[3] = {1.0, 1.0, 1.0};
-  if (tr.tap_side == 0) {        // HV tapped
-    tap_by_pair[0] = t;
-    tap_by_pair[1] = t;
-    tap_by_pair[2] = 1.0;
-    tau_winding[0] = t;
-  } else if (tr.tap_side == 1) { // MV tapped
-    tap_by_pair[0] = inv_t;
-    tap_by_pair[1] = 1.0;
-    tap_by_pair[2] = t;
-    tau_winding[1] = t;
-  } else {                       // LV tapped (tap_side == 2)
-    tap_by_pair[0] = 1.0;
-    tap_by_pair[1] = inv_t;
-    tap_by_pair[2] = inv_t;
-    tau_winding[2] = t;
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Kron-correct impedance computation for three-winding equivalent branches
-  //
-  // The three-winding Kron equivalent is constructed by:
-  //   1. Converting pair short-circuit data to star (T) impedances.
-  //   2. Applying per-winding tap ratios to form the full 4-bus admittance
-  //      matrix (3 external buses + 1 star node).
-  //   3. Kron-eliminating the star node to get a 3×3 Y-bus.
-  //
-  // For each pair branch (from→to, tap=tau_pair) the contribution to the
-  // off-diagonal element Y[from][to] is:
-  //   Y_branch[from][to] = -y_branch / conj(tau_pair)
-  //
-  // The required element from the Kron Y-bus is:
-  //   kron_y[from][to] = -(y_from * y_to) / (tau_from * tau_to * Y_ss)
-  //
-  // where tau_i is the per-winding tap (tau_winding[i]) and Y_ss = Σ y_i.
-  // Equating the two and solving for y_branch (all taps are real here):
-  //   y_branch = y_from * y_to * tau_pair / (tau_from * tau_to * Y_ss)
-  //   z_branch = tau_from * tau_to * Y_ss / (y_from * y_to * tau_pair)
-  //
-  // Index mapping: 0=HV, 1=MV, 2=LV
-  // pair indices:  pair0=(HV,MV)=winding(0,1), pair1=(HV,LV)=(0,2), pair2=(MV,LV)=(1,2)
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // Step 1: Compute pair impedances (on system base) for each winding pair.
-  const double sn_hv_mv = std::max(1e-9, std::min(tr.sn_hv_mva, tr.sn_mv_mva));
-  const double sn_hv_lv = std::max(1e-9, std::min(tr.sn_hv_mva, tr.sn_lv_mva));
-  const double sn_mv_lv = std::max(1e-9, std::min(tr.sn_mv_mva, tr.sn_lv_mva));
-
-  auto [r_hm, x_hm] = rx_from_vk_vkr(tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, base_mva, sn_hv_mv);
-  auto [r_hl, x_hl] = rx_from_vk_vkr(tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, base_mva, sn_hv_lv);
-  auto [r_ml, x_ml] = rx_from_vk_vkr(tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, base_mva, sn_mv_lv);
-
-  const Complex Z_hm(r_hm, x_hm);
-  const Complex Z_hl(r_hl, x_hl);
-  const Complex Z_ml(r_ml, x_ml);
-
-  // Step 2: Convert to star (T-equivalent) impedances.
-  const Complex Z_H = 0.5 * (Z_hm + Z_hl - Z_ml);
-  const Complex Z_M = 0.5 * (Z_hm + Z_ml - Z_hl);
-  const Complex Z_L = 0.5 * (Z_hl + Z_ml - Z_hm);
-
-  // Guard against near-singular star impedances.
-  const double kZmin = 1e-12;
-  const Complex y_H = (std::abs(Z_H) > kZmin) ? (Complex{1.0, 0.0} / Z_H) : Complex{1.0 / kZmin, 0.0};
-  const Complex y_M = (std::abs(Z_M) > kZmin) ? (Complex{1.0, 0.0} / Z_M) : Complex{1.0 / kZmin, 0.0};
-  const Complex y_L = (std::abs(Z_L) > kZmin) ? (Complex{1.0, 0.0} / Z_L) : Complex{1.0 / kZmin, 0.0};
-
-  // Step 3: Compute Y_ss (denominator for all pair impedances).
-  const Complex Y_ss = y_H + y_M + y_L;
-
-  // Star admittances indexed by winding [0=HV, 1=MV, 2=LV].
-  const Complex y_winding[3] = {y_H, y_M, y_L};
-
-  // Winding index pairs for each branch pair.
-  const int pair_from_winding[3] = {0, 0, 1};  // HV, HV, MV
-  const int pair_to_winding[3]   = {1, 2, 2};  // MV, LV, LV
 
   struct PairData {
     int from_bus;
     int to_bus;
+    double vk_percent;
+    double vkr_percent;
     double sn_from;
     double sn_to;
     const char* suffix;
   };
   const PairData pairs[3] = {
-      {tr.hv_bus, tr.mv_bus, tr.sn_hv_mva, tr.sn_mv_mva, "HV_MV"},
-      {tr.hv_bus, tr.lv_bus, tr.sn_hv_mva, tr.sn_lv_mva, "HV_LV"},
-      {tr.mv_bus, tr.lv_bus, tr.sn_mv_mva, tr.sn_lv_mva, "MV_LV"},
+      {tr.hv_bus, tr.mv_bus, tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, tr.sn_hv_mva, tr.sn_mv_mva, "HV_MV"},
+      {tr.hv_bus, tr.lv_bus, tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, tr.sn_hv_mva, tr.sn_lv_mva, "HV_LV"},
+      {tr.mv_bus, tr.lv_bus, tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, tr.sn_mv_mva, tr.sn_lv_mva, "MV_LV"},
   };
 
-  for (int pair_idx = 0; pair_idx < 3; ++pair_idx) {
-    const auto& p = pairs[pair_idx];
-    const int fw = pair_from_winding[pair_idx];
-    const int tw = pair_to_winding[pair_idx];
-
-    // Kron-correct pair impedance:
-    //   z_branch = tau_from * tau_to * Y_ss / (y_from * y_to * tau_pair)
-    // (all taps are real-valued here)
-    const double tau_from = tau_winding[fw];
-    const double tau_to   = tau_winding[tw];
-    const double tau_pair = tap_by_pair[pair_idx];
-
-    const Complex y_numerator = y_winding[fw] * y_winding[tw] * Complex{tau_pair, 0.0};
-    const Complex z_denominator = Complex{tau_from * tau_to, 0.0} * Y_ss;
-
-    if (std::abs(y_numerator) < 1e-30) continue;  // degenerate — skip
-
-    const Complex Z_branch = z_denominator / y_numerator;
-    const double r_pu = Z_branch.real();
-    const double x_pu = Z_branch.imag();
-
-    if (r_pu == 0.0 && x_pu == 0.0) continue;
-
+  for (const auto& p : pairs) {
     const double sn_pair = std::max(1e-9, std::min(p.sn_from, p.sn_to));
+    auto [r_pu, x_pu] = rx_from_vk_vkr(p.vk_percent, p.vkr_percent, base_mva, sn_pair);
+    if (r_pu == 0.0 && x_pu == 0.0) continue;
 
     ACBranch br;
     br.index = next_idx++;
@@ -308,7 +172,7 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     br.r_pu = r_pu;
     br.x_pu = x_pu;
     br.b_pu = 0.0;
-    br.tap = tap_by_pair[pair_idx];
+    br.tap = tap_from_step(tr.tap_pos, 0, tr.tap_step_percent);
     br.shift_deg = (p.from_bus == tr.hv_bus && p.to_bus == tr.mv_bus) ? tr.shift_mv_deg
                   : (p.from_bus == tr.hv_bus && p.to_bus == tr.lv_bus) ? tr.shift_lv_deg
                                                                         : (tr.shift_lv_deg - tr.shift_mv_deg);
@@ -361,14 +225,58 @@ void add_equivalent_branch_from_switch(const Switch& sw,
   ac.branches.push_back(br);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Motor → canonical Load
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// CircuitBreaker 鈫?canonical ACBranch
+//
+// A circuit breaker is modelled identically to a Switch: an
+// equivalent branch is always created, with in_service = cb.closed.
+// A closed breaker becomes a near-zero-impedance branch that the
+// downstream merge_zero_impedance_buses() step contracts into a
+// single node.  An open breaker becomes an out-of-service branch,
+// which electrically disconnects the two buses 鈥?the island detector
+// and adaptive solver then handle the resulting dead island.
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+void add_equivalent_branch_from_circuit_breaker(const CircuitBreaker& cb,
+                                                 ACSystem& ac,
+                                                 double base_mva,
+                                                 int& next_idx) {
+  if (!cb.in_service) return;
+  if (cb.bus_from == 0 || cb.bus_to == 0) return;
+
+  ACBranch br;
+  br.index = next_idx++;
+  br.from_bus = cb.bus_from;
+  br.to_bus = cb.bus_to;
+  br.in_service = cb.closed;   // open 鈫?out-of-service branch (same as Switch)
+  br.name = cb.name.empty() ? ("CB_" + std::to_string(cb.index)) : (cb.name + "_eq");
+
+  const double kv = bus_base_kv_or_default(ac, cb.bus_from);
+  const double z_base = (kv * kv) / std::max(1e-9, base_mva);
+  const double z_ohm = std::max(0.0, cb.z_ohm);
+  // For a circuit breaker, z_ohm is typically pure resistance
+  br.r_pu = z_ohm / z_base;
+  br.x_pu = 0.0;
+  // If both are zero (ideal CB) and the breaker is closed, assign tiny
+  // impedance so the merge heuristic can identify this as a zero-Z link.
+  if (br.r_pu < 1e-8 && br.x_pu < 1e-8 && br.in_service) {
+    br.r_pu = 1e-6;
+    br.x_pu = 1e-6;
+  }
+  br.b_pu = 0.0;
+  br.tap = 1.0;
+  br.shift_deg = 0.0;
+  br.rate_a_mva = (cb.i_rated_ka > 0.0) ? (std::sqrt(3.0) * kv * cb.i_rated_ka) : 0.0;
+  ac.branches.push_back(br);
+}
+
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Motor 鈫?canonical Load
 //
 // An AsynchronousMotor is a constant-power consumer.  Its rated power
-// draw is:  P = sn_mva × cos_phi,  Q = sn_mva × sin(φ).
+// draw is:  P = sn_mva 脳 cos_phi,  Q = sn_mva 脳 sin(蠁).
 // The SC subtransient impedance fields (sn_mva, r_sc_pu, x_sub_pu with
 // motor_percent = 1) allow the Load-based SC path to model this motor.
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void add_equivalent_load_from_motor(const AsynchronousMotor& m,
                                     ACSystem& ac,
                                     int& next_idx) {
@@ -389,7 +297,7 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ld.p_percent_p = 100.0;
   ld.p_percent_q = 100.0;
 
-  // SC subtransient impedance — convert from ohms to pu on motor base so that
+  // SC subtransient impedance 鈥?convert from ohms to pu on motor base so that
   // the Load motor-fraction SC path (sn_mva, motor_percent, r_sc_pu, x_sub_pu)
   // produces the same admittance as the dedicated Motor path.
   ld.sn_mva       = m.sn_mva;
@@ -406,20 +314,20 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ac.loads.push_back(ld);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// VirtualPowerPlant → canonical StaticGenerator
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// VirtualPowerPlant 鈫?canonical StaticGenerator
 //
-// The VPP pcc_bus receives the net injection from the fleet.
-// ─────────────────────────────────────────────────────────────────────
+// The VPP aggregation_bus receives the net injection from the fleet.
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void add_equivalent_static_gen_from_vpp(const VirtualPowerPlant& vpp,
                                         ACSystem& ac,
                                         int& next_idx) {
   if (!vpp.in_service) return;
-  if (vpp.pcc_bus == 0) return;
+  if (vpp.aggregation_bus == 0) return;
 
   StaticGenerator sg;
   sg.index      = next_idx++;
-  sg.bus        = vpp.pcc_bus;
+  sg.bus        = vpp.aggregation_bus;
   sg.in_service = true;
   sg.name       = vpp.name.empty() ? ("VPP_" + std::to_string(vpp.index)) : (vpp.name + "_eq");
   sg.sgen_type  = SgenType::Other;
@@ -430,36 +338,36 @@ void add_equivalent_static_gen_from_vpp(const VirtualPowerPlant& vpp,
   sg.pmin_mw   = vpp.pmin_mw;
   sg.controllable = true;
 
-  // Regulation capability → reactive limits (symmetric if not given)
+  // Regulation capability 鈫?reactive limits (symmetric if not given)
   sg.qmax_mvar = (vpp.q_output_mvar >= 0.0) ? vpp.q_output_mvar : 0.0;
   sg.qmin_mvar = (vpp.q_output_mvar < 0.0)  ? vpp.q_output_mvar : 0.0;
 
   ac.static_generators.push_back(sg);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Microgrid → canonical StaticGenerator at PCC bus
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Microgrid 鈫?canonical StaticGenerator at PCC bus
 //
 // In grid-connected mode, the microgrid net exchange appears as a
 // StaticGenerator at the point of common coupling.  Positive p_mw
 // means the microgrid is exporting (injecting into the main grid).
 // Islanded microgrids are skipped (they decouple from the main grid).
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
                                               ACSystem& ac,
                                               int& next_idx) {
   if (!mg.in_service) return;
-  if (mg.pcc_bus == 0) return;
+  if (mg.aggregation_bus == 0) return;
   if (mg.operating_mode == MicrogridMode::Islanded) return;
 
   StaticGenerator sg;
   sg.index      = next_idx++;
-  sg.bus        = mg.pcc_bus;
+  sg.bus        = mg.aggregation_bus;
   sg.in_service = true;
   sg.name       = mg.name.empty() ? ("Microgrid_" + std::to_string(mg.index)) : (mg.name + "_eq");
   sg.sgen_type  = SgenType::Other;
 
-  // p_exchange_mw > 0 means export from microgrid → injection into main grid
+  // p_exchange_mw > 0 means export from microgrid 鈫?injection into main grid
   sg.p_mw      = mg.p_exchange_mw;
   sg.q_mvar    = 0.0;   // reactive exchange not tracked in Microgrid model
   // Limits: export is positive (pmax) and import negative (pmin)
@@ -470,18 +378,18 @@ void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
   ac.static_generators.push_back(sg);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// MobileStorage → canonical AC Storage at current bus
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// MobileStorage 鈫?canonical AC Storage at current bus
 //
 // When the unit is stationary and connected (bus != 0), it behaves
 // identically to a fixed Storage unit.
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void add_equivalent_storage_from_mobile_storage(const MobileStorage& ms,
                                                 ACSystem& ac,
                                                 int& next_idx) {
   if (!ms.in_service) return;
   if (ms.bus == 0) return;
-  // Only project if at rest — mobile/transit units are not yet connected.
+  // Only project if at rest 鈥?mobile/transit units are not yet connected.
   if (ms.status == MobileStorageStatus::InTransit) return;
 
   Storage st;
@@ -679,9 +587,9 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
 
 }  // namespace
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Count queries
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 int n_ac_buses(const HybridPowerSystem& sys) {
   return static_cast<int>(sys.ac.buses.size());
 }
@@ -720,9 +628,9 @@ int n_converters(const HybridPowerSystem& sys) {
   return static_cast<int>(sys.vsc_converters.size());
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Aggregation queries
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 double total_gen_capacity_mw(const HybridPowerSystem& sys) {
   double total = 0.0;
   for (const auto& g : sys.ac.generators) {
@@ -814,9 +722,9 @@ double total_emission_tco2_h(const HybridPowerSystem& sys) {
   return total;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Validation
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 ValidationResult validate(const HybridPowerSystem& sys) {
   ValidationResult res;
 
@@ -952,48 +860,48 @@ ValidationResult validate(const HybridPowerSystem& sys) {
   return res;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Summary printing
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 void print_summary(const HybridPowerSystem& sys, std::ostream& os) {
-  os << "╔══════════════════════════════════════════════════════════════╗\n";
-  os << "║  Power System: " << sys.name << "\n";
-  os << "║  Base MVA: " << sys.base_mva << "\n";
-  os << "╠══════════════════════════════════════════════════════════════╣\n";
-  os << "║  AC buses:        " << n_ac_buses(sys) << "\n";
-  os << "║  AC branches:     " << n_ac_branches(sys) << "\n";
-  os << "║  DC buses:        " << n_dc_buses(sys) << "\n";
-  os << "║  DC branches:     " << n_dc_branches(sys) << "\n";
-  os << "║  Generators:      " << n_generators(sys) << "\n";
-  os << "║  Loads:           " << n_loads(sys) << "\n";
-  os << "║  Shunts:          " << n_shunts(sys) << "\n";
-  os << "║  Storage:         " << n_storage(sys) << "\n";
-  os << "║  Renewables:      " << n_renewable_gens(sys) << "\n";
-  os << "║  VSC converters:  " << n_converters(sys) << "\n";
-  os << "╠══════════════════════════════════════════════════════════════╣\n";
-  os << "║  Total gen capacity:   " << total_gen_capacity_mw(sys)
+  os << "鈺斺晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晽\n";
+  os << "鈺? Power System: " << sys.name << "\n";
+  os << "鈺? Base MVA: " << sys.base_mva << "\n";
+  os << "鈺犫晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨暎\n";
+  os << "鈺? AC buses:        " << n_ac_buses(sys) << "\n";
+  os << "鈺? AC branches:     " << n_ac_branches(sys) << "\n";
+  os << "鈺? DC buses:        " << n_dc_buses(sys) << "\n";
+  os << "鈺? DC branches:     " << n_dc_branches(sys) << "\n";
+  os << "鈺? Generators:      " << n_generators(sys) << "\n";
+  os << "鈺? Loads:           " << n_loads(sys) << "\n";
+  os << "鈺? Shunts:          " << n_shunts(sys) << "\n";
+  os << "鈺? Storage:         " << n_storage(sys) << "\n";
+  os << "鈺? Renewables:      " << n_renewable_gens(sys) << "\n";
+  os << "鈺? VSC converters:  " << n_converters(sys) << "\n";
+  os << "鈺犫晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨暎\n";
+  os << "鈺? Total gen capacity:   " << total_gen_capacity_mw(sys)
      << " MW\n";
-  os << "║  Total load (P):       " << total_load_p_mw(sys) << " MW\n";
-  os << "║  Total load (Q):       " << total_load_q_mvar(sys)
+  os << "鈺? Total load (P):       " << total_load_p_mw(sys) << " MW\n";
+  os << "鈺? Total load (Q):       " << total_load_q_mvar(sys)
      << " Mvar\n";
 
   double re_cap = total_renewable_capacity_mw(sys);
   double st_cap = total_storage_capacity_mwh(sys);
   if (re_cap > 0.0) {
-    os << "║  Renewable capacity:   " << re_cap << " MW\n";
+    os << "鈺? Renewable capacity:   " << re_cap << " MW\n";
   }
   if (st_cap > 0.0) {
-    os << "║  Storage energy:       " << st_cap << " MWh\n";
-    os << "║  Storage power:        " << total_storage_power_mw(sys)
+    os << "鈺? Storage energy:       " << st_cap << " MWh\n";
+    os << "鈺? Storage power:        " << total_storage_power_mw(sys)
        << " MW\n";
   }
 
   double inertia = total_system_inertia_mws(sys);
   if (inertia > 0.0) {
-    os << "║  System inertia:       " << inertia << " MW·s\n";
+    os << "鈺? System inertia:       " << inertia << " MW路s\n";
   }
 
-  os << "╚══════════════════════════════════════════════════════════════╝\n";
+  os << "鈺氣晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨暆\n";
 }
 
 std::string summary_string(const HybridPowerSystem& sys) {
@@ -1002,9 +910,9 @@ std::string summary_string(const HybridPowerSystem& sys) {
   return oss.str();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Topology helpers
-// ═══════════════════════════════════════════════════════════════════════
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 std::vector<std::vector<int>> ac_adjacency_list(const HybridPowerSystem& sys) {
   const int nb = n_ac_buses(sys);
 
@@ -1047,9 +955,9 @@ std::vector<int> generators_per_bus(const HybridPowerSystem& sys) {
   return count;
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // Union-Find for bus merging
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 namespace {
 
 class UnionFind {
@@ -1090,16 +998,311 @@ int bus_type_priority(BusType bt) {
 
 }  // namespace
 
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// strip_dead_islands
+//
+// After canonical projection (switch/CB expansion and bus merging),
+// detect connected components via BFS on in-service AC branches.
+// Components that have no generation source (no SLACK/PV bus, no
+// in-service generator, external grid, static generator, renewable,
+// PV system, or storage with non-zero output) are "dead islands".
+//
+// Dead island buses and all components attached to them are removed
+// from the system, and surviving buses are renumbered 1..N_live.
+// The BusMergeMap is updated (or created) so that unproject_bus_vector
+// maps dead-island positions back to zero in the original bus space.
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+void strip_dead_islands(HybridPowerSystem& sys) {
+  auto& buses = sys.ac.buses;
+  auto& branches = sys.ac.branches;
+  const int n = static_cast<int>(buses.size());
+  if (n <= 1) return;
+
+  // Build index鈫抪osition lookup and adjacency list (in-service branches only)
+  std::unordered_map<int, int> idx_to_pos;
+  idx_to_pos.reserve(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    idx_to_pos[buses[static_cast<size_t>(i)].index] = i;
+  }
+
+  std::vector<std::vector<int>> adj(static_cast<size_t>(n));
+  for (const auto& br : branches) {
+    if (!br.in_service) continue;
+    auto it_f = idx_to_pos.find(br.from_bus);
+    auto it_t = idx_to_pos.find(br.to_bus);
+    if (it_f == idx_to_pos.end() || it_t == idx_to_pos.end()) continue;
+    adj[static_cast<size_t>(it_f->second)].push_back(it_t->second);
+    adj[static_cast<size_t>(it_t->second)].push_back(it_f->second);
+  }
+
+  // BFS to identify connected components
+  std::vector<int> comp_id(static_cast<size_t>(n), -1);
+  std::vector<std::vector<int>> components;  // component 鈫?list of positions
+  for (int i = 0; i < n; ++i) {
+    if (comp_id[static_cast<size_t>(i)] >= 0) continue;
+    int cid = static_cast<int>(components.size());
+    components.emplace_back();
+    std::queue<int> q;
+    q.push(i);
+    comp_id[static_cast<size_t>(i)] = cid;
+    while (!q.empty()) {
+      int cur = q.front(); q.pop();
+      components.back().push_back(cur);
+      for (int nb : adj[static_cast<size_t>(cur)]) {
+        if (comp_id[static_cast<size_t>(nb)] >= 0) continue;
+        comp_id[static_cast<size_t>(nb)] = cid;
+        q.push(nb);
+      }
+    }
+  }
+
+  if (components.size() <= 1) return;  // single component 鈫?nothing to strip
+
+  // Check each component for generation sources
+  // Collect bus indices (1-based .index) into a set per component for fast lookup
+  std::vector<std::unordered_set<int>> comp_buses(components.size());
+  for (size_t c = 0; c < components.size(); ++c) {
+    for (int pos : components[c]) {
+      comp_buses[c].insert(buses[static_cast<size_t>(pos)].index);
+    }
+  }
+
+  auto has_generation = [&](size_t c) -> bool {
+    const auto& bset = comp_buses[c];
+    // Check bus types
+    for (int pos : components[c]) {
+      auto bt = buses[static_cast<size_t>(pos)].bus_type;
+      if (bt == BusType::SLACK || bt == BusType::PV) return true;
+    }
+    // Check generators
+    for (const auto& g : sys.ac.generators) {
+      if (g.in_service && bset.count(g.bus) && (g.pg_mw > 1e-9 || g.is_slack)) return true;
+    }
+    // Check external grids
+    for (const auto& eg : sys.ac.external_grids) {
+      if (eg.in_service && bset.count(eg.bus)) return true;
+    }
+    // Check static generators
+    for (const auto& sg : sys.ac.static_generators) {
+      if (sg.in_service && bset.count(sg.bus) && sg.p_mw * sg.scaling > 1e-9) return true;
+    }
+    // Check renewable gens
+    for (const auto& rg : sys.ac.renewable_gens) {
+      if (rg.in_service && bset.count(rg.bus) && rg.p_mw > 1e-9) return true;
+    }
+    // Check PV systems
+    for (const auto& pv : sys.ac.pv_systems) {
+      if (pv.in_service && bset.count(pv.bus) && pv.p_mw > 1e-9) return true;
+    }
+    // Check storage with active dispatch
+    for (const auto& st : sys.ac.storage) {
+      if (st.in_service && bset.count(st.bus) && std::abs(st.p_mw) > 1e-9) return true;
+    }
+    // Check VSC converters (they inject into AC bus)
+    for (const auto& conv : sys.vsc_converters) {
+      if (conv.in_service && bset.count(conv.bus_ac)) return true;
+    }
+    return false;
+  };
+
+  // Collect dead bus indices (1-based) into a flat set
+  std::unordered_set<int> dead_buses;
+  for (size_t c = 0; c < components.size(); ++c) {
+    if (!has_generation(c)) {
+      for (int pos : components[c]) {
+        dead_buses.insert(buses[static_cast<size_t>(pos)].index);
+      }
+    }
+  }
+
+  if (dead_buses.empty()) return;  // all islands are solvable
+
+  // 鈹€鈹€ Update BusMergeMap: record dead bus entries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  // If no merge map exists yet, create an identity map so that
+  // unproject_bus_vector can later expand the result back to full size.
+  if (!sys.bus_merge_map) {
+    BusMergeMap m;
+    m.n_original = n;
+    m.n_merged = n;
+    m.int_to_ext.resize(static_cast<size_t>(n));
+    m.groups.resize(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      const int ext = buses[static_cast<size_t>(i)].index;
+      m.ext_to_int[ext] = i;
+      m.ext_to_orig_pos[ext] = i;
+      m.int_to_ext[static_cast<size_t>(i)] = ext;
+      m.groups[static_cast<size_t>(i)] = {ext};
+    }
+    sys.bus_merge_map = std::move(m);
+  }
+
+  // Mark dead bus entries in the merge map with int_pos = -1
+  // so that unproject_bus_vector outputs 0.0 for them.
+  for (int dead_ext : dead_buses) {
+    auto it = sys.bus_merge_map->ext_to_int.find(dead_ext);
+    if (it != sys.bus_merge_map->ext_to_int.end()) {
+      it->second = -1;
+    }
+  }
+
+  // Record dead bus indices in the merge map for downstream use.
+  sys.bus_merge_map->dead_bus_indices = dead_buses;
+
+  // Record original branch count and build branch position mapping.
+  const int n_branches_orig = static_cast<int>(branches.size());
+  sys.bus_merge_map->n_original_branches = n_branches_orig;
+
+  // 鈹€鈹€ Remove dead buses 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+  std::vector<ACBus> live_buses;
+  live_buses.reserve(buses.size() - dead_buses.size());
+  for (auto& b : buses) {
+    if (dead_buses.count(b.index) == 0) live_buses.push_back(std::move(b));
+  }
+
+  // Build renumber map: old bus index 鈫?new bus index (1-based contiguous)
+  const int n_live = static_cast<int>(live_buses.size());
+  std::unordered_map<int, int> renum;
+  renum.reserve(static_cast<size_t>(n_live));
+  for (int i = 0; i < n_live; ++i) {
+    renum[live_buses[static_cast<size_t>(i)].index] = i + 1;
+    live_buses[static_cast<size_t>(i)].index = i + 1;
+  }
+  buses = std::move(live_buses);
+
+  // Update merge map int_pos for surviving buses
+  for (auto& [ext, int_pos] : sys.bus_merge_map->ext_to_int) {
+    if (int_pos < 0) continue;  // dead 鈫?keep at -1
+    // Find the old internal bus index this mapped to, then renumber
+    auto old_ext = sys.bus_merge_map->int_to_ext[static_cast<size_t>(int_pos)];
+    auto rit = renum.find(old_ext);
+    if (rit != renum.end()) {
+      int_pos = rit->second - 1;  // new 0-based position
+    } else {
+      int_pos = -1;  // shouldn't happen, but safety
+    }
+  }
+  // Rebuild int_to_ext and groups for the new numbering
+  sys.bus_merge_map->int_to_ext.clear();
+  sys.bus_merge_map->int_to_ext.resize(static_cast<size_t>(n_live));
+  // Build new int_to_ext from ext_to_int
+  for (const auto& [ext, int_pos] : sys.bus_merge_map->ext_to_int) {
+    if (int_pos >= 0 && int_pos < n_live) {
+      sys.bus_merge_map->int_to_ext[static_cast<size_t>(int_pos)] = ext;
+    }
+  }
+  sys.bus_merge_map->n_merged = n_live;
+
+  // 鈹€鈹€ Remap bus references in surviving components, remove dead 鈹€鈹€
+  auto remap = [&](int old_bus) -> int {
+    auto it = renum.find(old_bus);
+    return (it != renum.end()) ? it->second : 0;
+  };
+  auto is_dead = [&](int bus) -> bool { return dead_buses.count(bus) > 0; };
+
+  // Branches: remap and remove branches connecting to dead buses.
+  // Build orig鈫抪roj position mapping so branch_flows can be unprojected.
+  std::vector<ACBranch> live_br;
+  live_br.reserve(branches.size());
+  for (int orig_i = 0; orig_i < static_cast<int>(branches.size()); ++orig_i) {
+    auto& br = branches[static_cast<size_t>(orig_i)];
+    if (is_dead(br.from_bus) || is_dead(br.to_bus)) {
+      sys.bus_merge_map->branch_orig_to_proj[orig_i] = -1;  // dead
+      continue;
+    }
+    sys.bus_merge_map->branch_orig_to_proj[orig_i] = static_cast<int>(live_br.size());
+    br.from_bus = remap(br.from_bus);
+    br.to_bus = remap(br.to_bus);
+    if (br.from_bus == 0 || br.to_bus == 0) continue;
+    live_br.push_back(std::move(br));
+  }
+  branches = std::move(live_br);
+
+  // Helper: filter + remap for single-bus components
+  auto filter_remap = [&](auto& vec) {
+    using T = typename std::decay_t<decltype(vec)>::value_type;
+    std::vector<T> kept;
+    kept.reserve(vec.size());
+    for (auto& item : vec) {
+      if (is_dead(item.bus)) continue;
+      item.bus = remap(item.bus);
+      if (item.bus == 0) continue;
+      kept.push_back(std::move(item));
+    }
+    vec = std::move(kept);
+  };
+
+  filter_remap(sys.ac.generators);
+  filter_remap(sys.ac.loads);
+  filter_remap(sys.ac.static_generators);
+  filter_remap(sys.ac.renewable_gens);
+  filter_remap(sys.ac.pv_systems);
+  filter_remap(sys.ac.storage);
+  filter_remap(sys.ac.external_grids);
+  filter_remap(sys.ac.shunts);
+  filter_remap(sys.ac.charging_stations);
+  filter_remap(sys.ac.motors);
+  filter_remap(sys.ac.flexible_loads);
+  filter_remap(sys.ac.asymmetric_loads);
+
+  // Switches and circuit breakers: two-bus components
+  auto filter_remap_2bus = [&](auto& vec) {
+    using T = typename std::decay_t<decltype(vec)>::value_type;
+    std::vector<T> kept;
+    kept.reserve(vec.size());
+    for (auto& item : vec) {
+      if (is_dead(item.bus_from) || is_dead(item.bus_to)) continue;
+      item.bus_from = remap(item.bus_from);
+      item.bus_to = remap(item.bus_to);
+      if (item.bus_from == 0 || item.bus_to == 0) continue;
+      kept.push_back(std::move(item));
+    }
+    vec = std::move(kept);
+  };
+
+  filter_remap_2bus(sys.ac.switches);
+  filter_remap_2bus(sys.ac.circuit_breakers);
+
+  // Transformers (if any remain after projection)
+  {
+    std::vector<Transformer2W> kept;
+    for (auto& tr : sys.ac.transformers_2w) {
+      if (is_dead(tr.hv_bus) || is_dead(tr.lv_bus)) continue;
+      tr.hv_bus = remap(tr.hv_bus);
+      tr.lv_bus = remap(tr.lv_bus);
+      kept.push_back(std::move(tr));
+    }
+    sys.ac.transformers_2w = std::move(kept);
+  }
+
+  // VSC converters: AC side
+  {
+    std::vector<VSCConverter> kept;
+    for (auto& conv : sys.vsc_converters) {
+      if (is_dead(conv.bus_ac)) continue;
+      conv.bus_ac = remap(conv.bus_ac);
+      kept.push_back(std::move(conv));
+    }
+    sys.vsc_converters = std::move(kept);
+  }
+
+  // Energy routers: AC ports
+  for (auto& er : sys.energy_routers) {
+    for (auto& p : er.ports) {
+      if (p.port_type == ERPortType::AC) p.bus = remap(p.bus);
+    }
+  }
+}
+
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // merge_zero_impedance_buses
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void merge_zero_impedance_buses(HybridPowerSystem& sys) {
   auto& buses = sys.ac.buses;
   auto& branches = sys.ac.branches;
   const int n = static_cast<int>(buses.size());
   if (n <= 1) return;
 
-  // Build position lookup: bus.index → 0-based position
+  // Build position lookup: bus.index 鈫?0-based position
   std::unordered_map<int, int> idx_to_pos;
   idx_to_pos.reserve(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) {
@@ -1113,11 +1316,11 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
     if (!br.in_service) continue;
     // A true zero-impedance element (CB/switch) has both R and X tiny
     // AND negligible charging susceptance.  Short lines may have small
-    // R and X but non-zero B — these must NOT be merged because merging
+    // R and X but non-zero B 鈥?these must NOT be merged because merging
     // discards their charging and distorts the admittance model.
     if (std::abs(br.r_pu) >= kBusMergeZThreshold ||
         std::abs(br.x_pu) >= kBusMergeZThreshold) continue;
-    if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging → real line
+    if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging 鈫?real line
 
     auto it_f = idx_to_pos.find(br.from_bus);
     auto it_t = idx_to_pos.find(br.to_bus);
@@ -1131,19 +1334,19 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
   if (!any_merged) return;
 
   // Phase 2: build equivalence classes (use std::map for deterministic
-  // iteration order — groups are visited in ascending root_pos, guaranteeing
+  // iteration order 鈥?groups are visited in ascending root_pos, guaranteeing
   // stable bus index assignment across runs and platforms)
-  std::map<int, std::vector<int>> group_map;  // root_pos → positions
+  std::map<int, std::vector<int>> group_map;  // root_pos 鈫?positions
   for (int i = 0; i < n; ++i) {
     group_map[uf.find(i)].push_back(i);
   }
 
   // Pick representative per group: highest bus-type priority, then lowest index
-  // Build old-position → new-position mapping
+  // Build old-position 鈫?new-position mapping
   BusMergeMap merge_map;
   merge_map.n_original = n;
 
-  // new_pos: representative position → new sequential position
+  // new_pos: representative position 鈫?new sequential position
   std::vector<int> old_pos_to_new(static_cast<size_t>(n), -1);
   std::vector<ACBus> merged_buses;
   merged_buses.reserve(group_map.size());
@@ -1199,14 +1402,14 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
 
   merge_map.n_merged = static_cast<int>(merged_buses.size());
 
-  // Build ext_to_int: original external bus index → new internal position
+  // Build ext_to_int: original external bus index 鈫?new internal position
   for (int i = 0; i < n; ++i) {
     const int ext = buses[static_cast<size_t>(i)].index;
     merge_map.ext_to_int[ext] = old_pos_to_new[static_cast<size_t>(i)];
     merge_map.ext_to_orig_pos[ext] = i;
   }
 
-  // Helper: reindex an AC bus reference (1-based external → new 1-based)
+  // Helper: reindex an AC bus reference (1-based external 鈫?new 1-based)
   auto remap_ac = [&](int old_bus) -> int {
     auto it = merge_map.ext_to_int.find(old_bus);
     if (it != merge_map.ext_to_int.end()) return it->second + 1;
@@ -1243,11 +1446,15 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
     sw.bus_from = remap_ac(sw.bus_from);
     sw.bus_to = remap_ac(sw.bus_to);
   }
+  for (auto& cb : sys.ac.circuit_breakers) {
+    cb.bus_from = remap_ac(cb.bus_from);
+    cb.bus_to = remap_ac(cb.bus_to);
+  }
   for (auto& cs : sys.ac.charging_stations) cs.bus = remap_ac(cs.bus);
   for (auto& mot : sys.ac.motors) mot.bus = remap_ac(mot.bus);
 
   // Transformers: only reindex the original rich types (not the branches
-  // expanded from them — those were already handled above).
+  // expanded from them 鈥?those were already handled above).
   for (auto& tr : sys.ac.transformers_2w) {
     tr.hv_bus = remap_ac(tr.hv_bus);
     tr.lv_bus = remap_ac(tr.lv_bus);
@@ -1269,13 +1476,13 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
   }
 
   // Aggregation: VPPs, Microgrids
-  for (auto& vpp : sys.vpps) vpp.pcc_bus = remap_ac(vpp.pcc_bus);
+  for (auto& vpp : sys.vpps) vpp.aggregation_bus = remap_ac(vpp.aggregation_bus);
   for (auto& mg : sys.microgrids) {
-    mg.pcc_bus = remap_ac(mg.pcc_bus);
+    mg.aggregation_bus = remap_ac(mg.aggregation_bus);
     for (auto& ib : mg.internal_buses) ib = remap_ac(ib);
   }
 
-  // Mobile storage: bus might be AC or DC — only remap if it could be AC.
+  // Mobile storage: bus might be AC or DC 鈥?only remap if it could be AC.
   // Since MobileStorage lives at the HybridPowerSystem level and typically
   // references AC buses, remap both bus and target_bus.
   for (auto& ms : sys.mobile_storage) {
@@ -1286,9 +1493,9 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
   sys.bus_merge_map = std::move(merge_map);
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // unproject_bus_vector
-// ─────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
     const BusMergeMap& map) {
@@ -1301,13 +1508,265 @@ std::vector<double> unproject_bus_vector(
       orig_pos = it_pos->second;
     } else {
       // Backward-compatibility fallback for legacy maps that did not store
-      // explicit external-index → original-position mapping.
+      // explicit external-index 鈫?original-position mapping.
       orig_pos = ext_bus - 1;
     }
     if (orig_pos < 0 || orig_pos >= map.n_original) continue;
     out[static_cast<size_t>(orig_pos)] = merged[static_cast<size_t>(int_pos)];
   }
   return out;
+}
+
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// Energy Router 鈫?macro expansion into internal DC buses + VSCs + DCDC
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+//
+// Topology:
+//   AC port (side A) 鈹€鈹€[VSC]鈹€鈹€ DC_伪 鈹€鈹€[DCDC]鈹€鈹€ DC_尾 鈹€鈹€[VSC]鈹€鈹€ AC port (side B)
+//
+// Control mode mapping (ERControlMode 鈫?ConverterMode / DCDCControlMode):
+//   port VF  鈫?VSC VDC_Q_MODE  (establishes internal DC bus voltage)
+//              + AC bus promoted to PV (holds AC voltage at v_set_pu)
+//   port PQ  鈫?VSC PQ_MODE     (specified power transfer)
+//   port Droop鈫?VSC DROOP_MODE (frequency/voltage droop)
+//
+// If no port on a side has VF control, the first in-service port on
+// that side is auto-promoted to VDC_Q_MODE.
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+static void expand_energy_routers(HybridPowerSystem& sys) {
+  if (sys.energy_routers.empty()) return;
+
+  // Find the next available indices for new elements.
+  int next_dc_bus = next_index_of(sys.dc.buses);
+  int next_vsc    = next_index_of(sys.vsc_converters);
+  int next_dcdc   = next_index_of(sys.dcdc_converters);
+
+  for (const auto& er : sys.energy_routers) {
+    if (!er.in_service) continue;
+
+    // Partition ports by side.
+    std::vector<const EnergyRouterPort*> side_a, side_b;
+    for (const auto& port : er.ports) {
+      if (!port.in_service) continue;
+      if (port.bus == 0) continue;
+      if (port.side == 0)
+        side_a.push_back(&port);
+      else
+        side_b.push_back(&port);
+    }
+
+    if (side_a.empty() && side_b.empty()) continue;
+
+    // 鈹€鈹€ Create Internal DC Buses 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    const double dc_kv = (er.vn_dc_kv > 0.0) ? er.vn_dc_kv : 20.0;
+    const double dcdc_eta = (er.loss_percent > 0.0 && er.loss_percent < 100.0)
+                                ? (1.0 - er.loss_percent / 100.0)
+                                : 0.98;
+
+    DCBus dc_alpha;
+    dc_alpha.index      = next_dc_bus++;
+    dc_alpha.bus_type    = DCBusType::DC_P;
+    dc_alpha.vm_pu       = 1.0;
+    dc_alpha.base_kv     = dc_kv;
+    dc_alpha.in_service  = true;
+    dc_alpha.name        = er.name + "_DC_alpha";
+
+    DCBus dc_beta;
+    dc_beta.index       = next_dc_bus++;
+    dc_beta.bus_type     = DCBusType::DC_P;
+    dc_beta.vm_pu        = 1.0;
+    dc_beta.base_kv      = dc_kv;
+    dc_beta.in_service   = true;
+    dc_beta.name         = er.name + "_DC_beta";
+
+    sys.dc.buses.push_back(dc_alpha);
+    sys.dc.buses.push_back(dc_beta);
+
+    // --- Compute appropriate k_vdc for VDC_Q modes ---
+    // The VDC_Q formula is p = k_vdc * (vdc^2 - v_set^2) [per-unit].
+    // k_vdc must be large enough so that rated power transfers with
+    // only a small DC-voltage deviation.
+    const double base = (sys.base_mva > 0.0) ? sys.base_mva : 100.0;
+    const double p_rated_pu = er.p_rated_mw / base;
+    // VF / auto-promote: large gain for tight voltage control (like DCDC test k=100)
+    const double k_vdc_tight = std::max(p_rated_pu * 100.0, 25.0);
+    // Droop: moderate gain derived from rated power and 5% droop bandwidth
+    const double k_vdc_droop = std::max(p_rated_pu / (2.0 * 0.05), 1.0);
+
+    // 鈹€鈹€ Create VSCs for Side A ports 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // Check if any side A port has VF control.
+    bool side_a_has_vf = false;
+    for (const auto* p : side_a) {
+      if (p->control_mode == ERControlMode::VF) { side_a_has_vf = true; break; }
+    }
+    for (size_t i = 0; i < side_a.size(); ++i) {
+      const auto* p = side_a[i];
+      VSCConverter vsc;
+      vsc.index        = next_vsc++;
+      vsc.bus_ac       = p->bus;
+      vsc.bus_dc       = dc_alpha.index;
+      vsc.in_service   = true;
+      vsc.name         = er.name + "_VSC_A" + std::to_string(p->index);
+
+      // Map control mode.
+      if (p->control_mode == ERControlMode::VF) {
+        vsc.control_mode = ConverterMode::VDC_Q;
+        vsc.v_dc_set_pu  = p->v_set_pu;
+        vsc.k_vdc        = k_vdc_tight;
+        // VF (grid-forming) also controls AC voltage: promote AC bus to PV.
+        if (p->port_type == ERPortType::AC) {
+          for (auto& ab : sys.ac.buses) {
+            if (ab.index == p->bus && ab.bus_type == BusType::PQ) {
+              ab.bus_type = BusType::PV;
+              ab.vm_pu    = p->v_set_pu;
+              break;
+            }
+          }
+        }
+      } else if (p->control_mode == ERControlMode::Droop) {
+        // Map Droop to VDC_Q with non-zero droop gain k_vdc.
+        vsc.control_mode = ConverterMode::VDC_Q;
+        vsc.v_dc_set_pu  = p->v_set_pu;
+        vsc.k_vdc        = k_vdc_droop;
+        side_a_has_vf = true;  // droop provides DC voltage reference
+      } else {
+        // PQ mode.
+        // Auto-promote first port to VDC if no VF exists on this side.
+        if (!side_a_has_vf && i == 0) {
+          vsc.control_mode = ConverterMode::VDC_Q;
+          vsc.v_dc_set_pu  = 1.0;
+          vsc.k_vdc        = k_vdc_tight;
+          side_a_has_vf = true;  // prevent further promotions
+        } else {
+          vsc.control_mode = ConverterMode::PQ_MODE;
+        }
+      }
+
+      vsc.p_set_mw     = p->p_set_mw;
+      vsc.q_set_mvar   = p->q_set_mvar;
+      vsc.v_ac_set_pu  = p->v_set_pu;
+      vsc.eta          = (p->eta > 1e-9 && p->eta <= 1.0) ? p->eta : 0.98;
+      vsc.pmax_mw      = (p->pmax_mw != 0.0) ? p->pmax_mw : er.pmax_mw;
+      vsc.pmin_mw      = (p->pmin_mw != 0.0) ? p->pmin_mw : er.pmin_mw;
+      vsc.qmax_mvar    = (p->qmax_mvar != 0.0) ? p->qmax_mvar : er.qmax_mvar;
+      vsc.qmin_mvar    = (p->qmin_mvar != 0.0) ? p->qmin_mvar : er.qmin_mvar;
+      vsc.p_rated_mw   = er.p_rated_mw;
+      vsc.vn_ac_kv     = (p->voltage_level_kv > 0.0) ? p->voltage_level_kv : er.vn_ac_kv;
+      vsc.vn_dc_kv     = dc_kv;
+      vsc.controllable = true;
+
+      sys.vsc_converters.push_back(vsc);
+    }
+
+    // 鈹€鈹€ Create VSCs for Side B ports 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    bool side_b_has_vf = false;
+    for (const auto* p : side_b) {
+      if (p->control_mode == ERControlMode::VF) { side_b_has_vf = true; break; }
+    }
+    for (size_t i = 0; i < side_b.size(); ++i) {
+      const auto* p = side_b[i];
+      VSCConverter vsc;
+      vsc.index        = next_vsc++;
+      vsc.bus_ac       = p->bus;
+      vsc.bus_dc       = dc_beta.index;
+      vsc.in_service   = true;
+      vsc.name         = er.name + "_VSC_B" + std::to_string(p->index);
+
+      if (p->control_mode == ERControlMode::VF) {
+        vsc.control_mode = ConverterMode::VDC_Q;
+        vsc.v_dc_set_pu  = p->v_set_pu;
+        vsc.k_vdc        = k_vdc_tight;
+        // VF (grid-forming) also controls AC voltage: promote AC bus to PV.
+        if (p->port_type == ERPortType::AC) {
+          for (auto& ab : sys.ac.buses) {
+            if (ab.index == p->bus && ab.bus_type == BusType::PQ) {
+              ab.bus_type = BusType::PV;
+              ab.vm_pu    = p->v_set_pu;
+              break;
+            }
+          }
+        }
+      } else if (p->control_mode == ERControlMode::Droop) {
+        vsc.control_mode = ConverterMode::VDC_Q;
+        vsc.v_dc_set_pu  = p->v_set_pu;
+        vsc.k_vdc        = k_vdc_droop;
+      } else {
+        // PQ — side B ports are normally PQ since DCDC controls DC_β.
+        vsc.control_mode = ConverterMode::PQ_MODE;
+      }
+
+      vsc.p_set_mw     = p->p_set_mw;
+      vsc.q_set_mvar   = p->q_set_mvar;
+      vsc.v_ac_set_pu  = p->v_set_pu;
+      vsc.eta          = (p->eta > 1e-9 && p->eta <= 1.0) ? p->eta : 0.98;
+      vsc.pmax_mw      = (p->pmax_mw != 0.0) ? p->pmax_mw : er.pmax_mw;
+      vsc.pmin_mw      = (p->pmin_mw != 0.0) ? p->pmin_mw : er.pmin_mw;
+      vsc.qmax_mvar    = (p->qmax_mvar != 0.0) ? p->qmax_mvar : er.qmax_mvar;
+      vsc.qmin_mvar    = (p->qmin_mvar != 0.0) ? p->qmin_mvar : er.qmin_mvar;
+      vsc.p_rated_mw   = er.p_rated_mw;
+      vsc.vn_ac_kv     = (p->voltage_level_kv > 0.0) ? p->voltage_level_kv : er.vn_ac_kv;
+      vsc.vn_dc_kv     = dc_kv;
+      vsc.controllable = true;
+
+      sys.vsc_converters.push_back(vsc);
+    }
+
+    // ── Create DCDC converter between DC_α and DC_β ─────────────────
+    // Check if side B has voltage-forming ports.  When side B has VF/Droop,
+    // the expanded VSC already controls dc_beta via VDC_Q.  Using DCDC in
+    // Voltage mode would ALSO clamp dc_beta → VDC_Q formula gives zero
+    // power (k*(V²−V_set²)=0).  So switch DCDC to Power mode, with
+    // p_ref estimated from the sum of side B PQ port setpoints.
+    bool side_b_controls_dc = false;
+    for (const auto* p : side_b) {
+      if (p->control_mode == ERControlMode::VF ||
+          p->control_mode == ERControlMode::Droop) {
+        side_b_controls_dc = true;
+        break;
+      }
+    }
+
+    DCDCConverter dcdc;
+    dcdc.index        = next_dcdc++;
+    dcdc.bus_in       = dc_alpha.index;
+    dcdc.bus_out      = dc_beta.index;
+    dcdc.in_service   = true;
+    dcdc.name         = er.name + "_DCDC";
+    if (side_b_controls_dc) {
+      // Side B VF/Droop controls dc_beta voltage → DCDC uses Power mode.
+      dcdc.control_mode = DCDCControlMode::Power;
+      double p_ref = 0.0;
+      for (const auto* p : side_b) {
+        if (p->control_mode == ERControlMode::PQ && p->p_set_mw > 0.0)
+          p_ref += p->p_set_mw;
+      }
+      // Add headroom for the VF port (estimate: half of remaining rated capacity)
+      double remaining = er.p_rated_mw - p_ref;
+      if (remaining > 0.0) p_ref += remaining * 0.5;
+      dcdc.p_ref_mw  = p_ref;
+      dcdc.v_ref_pu  = 1.0;
+    } else {
+      dcdc.control_mode = DCDCControlMode::Voltage;
+      dcdc.v_ref_pu     = 1.0;
+    }
+    dcdc.eta          = dcdc_eta;
+    dcdc.sn_mva       = er.p_rated_mw;
+    dcdc.vn_in_kv     = dc_kv;
+    dcdc.vn_out_kv    = dc_kv;
+    dcdc.pmax_mw      = er.pmax_mw;
+    dcdc.pmin_mw      = er.pmin_mw;
+    dcdc.controllable = true;
+    dcdc.mtbf_hours   = er.mtbf_hours;
+    dcdc.mttr_hours   = er.mttr_hours;
+
+    sys.dcdc_converters.push_back(dcdc);
+  }
+
+  // All ERs have been expanded 鈥?clear the vector to prevent double-counting
+  // in residual_evaluator / jacobian_builder which still iterate over
+  // energy_routers for legacy fixed-injection paths.
+  sys.energy_routers.clear();
 }
 
 // Internal helper: project a mutable HybridPowerSystem in place.
@@ -1370,7 +1829,10 @@ static void project_in_place(HybridPowerSystem& out) {
     add_equivalent_load_from_motor(m, out.ac, next_ld);
   }
 
-  // VirtualPowerPlants → StaticGenerator at aggregation bus
+  // EnergyRouters 鈫?macro expansion into internal DC buses + VSCs + DCDC
+  expand_energy_routers(out);
+
+  // VirtualPowerPlants 鈫?StaticGenerator at aggregation bus
   int next_sg = next_index_of(out.ac.static_generators);
   for (const auto& vpp : out.vpps) {
     add_equivalent_static_gen_from_vpp(vpp, out.ac, next_sg);
@@ -1379,7 +1841,7 @@ static void project_in_place(HybridPowerSystem& out) {
     add_equivalent_static_gen_from_microgrid(mg, out.ac, next_sg);
   }
 
-  // MobileStorage → canonical AC Storage at current bus
+  // MobileStorage 鈫?canonical AC Storage at current bus
   int next_st = next_index_of(out.ac.storage);
   for (const auto& ms : out.mobile_storage) {
     add_equivalent_storage_from_mobile_storage(ms, out.ac, next_st);
@@ -1394,11 +1856,11 @@ static void project_in_place(HybridPowerSystem& out) {
     if (tr.source_branch_idx > 0) {
       // This Transformer2W was auto-extracted from a MATPOWER branch
       // that is still in the branch list.  The original branch retains
-      // exact pi-model data (r, x, b, tap) — do NOT overwrite with
+      // exact pi-model data (r, x, b, tap) 鈥?do NOT overwrite with
       // round-tripped values.  Just record the provenance mapping.
       bmap.entries.push_back({tr.source_branch_idx, BranchOriginType::Transformer2W, tr.index, 0});
     } else {
-      // Standalone Transformer2W (e.g. from Excel/JSON import) — create
+      // Standalone Transformer2W (e.g. from Excel/JSON import) 鈥?create
       // equivalent branch as before.
       const int br_before = next_br;
       add_equivalent_branch_from_transformer2w(tr, out.ac, out.base_mva, next_br);
@@ -1422,6 +1884,13 @@ static void project_in_place(HybridPowerSystem& out) {
       bmap.entries.push_back({br_before, BranchOriginType::Switch, sw.index, 0});
     }
   }
+  for (const auto& cb : out.ac.circuit_breakers) {
+    const int br_before = next_br;
+    add_equivalent_branch_from_circuit_breaker(cb, out.ac, out.base_mva, next_br);
+    if (next_br > br_before) {
+      bmap.entries.push_back({br_before, BranchOriginType::Switch, cb.index, 0});
+    }
+  }
   if (!bmap.empty()) out.branch_expand_map = std::move(bmap);
 
   // Remove rich elements that are fully represented by their canonical
@@ -1434,12 +1903,19 @@ static void project_in_place(HybridPowerSystem& out) {
   out.mobile_storage.clear();
 
   // Merge buses connected by zero-impedance branches created from switch
-  // expansion.  Only perform merging when the system actually contains
-  // switches; for pure MATPOWER imports the near-zero-Z branches are real
-  // short lines and must not be merged.
-  if (!out.ac.switches.empty()) {
+  // or circuit breaker expansion.  Only perform merging when the system
+  // actually contains switches or circuit breakers; for pure MATPOWER
+  // imports the near-zero-Z branches are real short lines and must not
+  // be merged.
+  if (!out.ac.switches.empty() || !out.ac.circuit_breakers.empty()) {
     merge_zero_impedance_buses(out);
   }
+
+  // Strip dead islands: remove buses with no path to any generation
+  // source.  This ensures all downstream algorithms (PF, OPF, DPF,
+  // time-series, reliability, etc.) receive a clean system without
+  // isolated dead nodes that would cause singular admittance matrices.
+  strip_dead_islands(out);
 
   if (!out.ac.chargers.empty()) {
     if (out.ac.charging_stations.empty()) {

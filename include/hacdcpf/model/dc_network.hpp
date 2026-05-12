@@ -51,8 +51,8 @@ struct DCBranch {
   int n_parallel{1};
 
   // Reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 
@@ -75,8 +75,8 @@ struct StaticGeneratorDC {
   bool controllable{false};
 
   // Reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 
@@ -107,8 +107,8 @@ struct PVArrayDC {
   double irradiance{1000.0};     // W/m2
 
   // Reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 

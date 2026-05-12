@@ -155,7 +155,7 @@ std::vector<ACBus> buses_with_aggregated_ac_loads(const HybridPowerSystem& sys) 
   // Aggregation-level flexible demand terms.
   for (const auto& vpp : sys.vpps) {
     if (!vpp.in_service) continue;
-    auto& acc = by_bus[vpp.pcc_bus];
+    auto& acc = by_bus[vpp.aggregation_bus];
     if (vpp.p_load_controllable_mw > 0.0) acc.first += vpp.p_load_controllable_mw;
     if (vpp.p_output_mw < 0.0) acc.first += -vpp.p_output_mw;
     if (vpp.q_output_mvar < 0.0) acc.second += -vpp.q_output_mvar;
@@ -165,7 +165,7 @@ std::vector<ACBus> buses_with_aggregated_ac_loads(const HybridPowerSystem& sys) 
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
     if (mg.p_exchange_mw < 0.0) {
-      by_bus[mg.pcc_bus].first += -mg.p_exchange_mw;
+      by_bus[mg.aggregation_bus].first += -mg.p_exchange_mw;
     }
   }
 
@@ -239,15 +239,15 @@ std::vector<Load> make_aggregated_ac_load_table(const HybridPowerSystem& sys) {
 
   for (const auto& vpp : sys.vpps) {
     if (!vpp.in_service) continue;
-    add(vpp.pcc_bus, "VPPControllableLoad", std::max(0.0, vpp.p_load_controllable_mw), 0.0);
-    add(vpp.pcc_bus, "VPPNetImport", (vpp.p_output_mw < 0.0) ? -vpp.p_output_mw : 0.0,
+    add(vpp.aggregation_bus, "VPPControllableLoad", std::max(0.0, vpp.p_load_controllable_mw), 0.0);
+    add(vpp.aggregation_bus, "VPPNetImport", (vpp.p_output_mw < 0.0) ? -vpp.p_output_mw : 0.0,
         (vpp.q_output_mvar < 0.0) ? -vpp.q_output_mvar : 0.0);
   }
 
   for (const auto& mg : sys.microgrids) {
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
-    add(mg.pcc_bus, "MicrogridImport", (mg.p_exchange_mw < 0.0) ? -mg.p_exchange_mw : 0.0, 0.0);
+    add(mg.aggregation_bus, "MicrogridImport", (mg.p_exchange_mw < 0.0) ? -mg.p_exchange_mw : 0.0, 0.0);
   }
 
   for (const auto& er : sys.energy_routers) {
@@ -1123,8 +1123,8 @@ void write_dc_static_generators(XLWorksheet ws, const std::vector<StaticGenerato
     ws.cell(r, 8).value() = g.pmax_mw;
     ws.cell(r, 9).value() = g.pmin_mw;
     ws.cell(r, 10).value() = bool_str(g.controllable);
-    ws.cell(r, 11).value() = g.mtbf_hr;
-    ws.cell(r, 12).value() = g.mttr_hr;
+    ws.cell(r, 11).value() = g.mtbf_hours;
+    ws.cell(r, 12).value() = g.mttr_hours;
     ws.cell(r, 13).value() = g.t_scheduled_hr;
     ws.cell(r, 14).value() = bool_str(g.in_service);
   }
@@ -1147,8 +1147,8 @@ std::vector<StaticGeneratorDC> read_dc_static_generators(const XLWorksheet& ws) 
     g.pmax_mw = dbl_from_str(cell_by_name(ws, r, col, "pmax_mw"), g.pmax_mw);
     g.pmin_mw = dbl_from_str(cell_by_name(ws, r, col, "pmin_mw"), g.pmin_mw);
     g.controllable = bool_from_str(cell_by_name(ws, r, col, "controllable"), g.controllable);
-    g.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), g.mtbf_hr);
-    g.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), g.mttr_hr);
+    g.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), g.mtbf_hours);
+    g.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), g.mttr_hours);
     g.t_scheduled_hr = dbl_from_str(cell_by_name(ws, r, col, "t_scheduled_hr"), g.t_scheduled_hr);
     g.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), g.in_service);
     out.push_back(std::move(g));
@@ -1178,8 +1178,8 @@ void write_dc_pv_arrays(XLWorksheet ws, const std::vector<PVArrayDC>& arrays) {
     ws.cell(r, 13).value() = p.beta_voc;
     ws.cell(r, 14).value() = p.temperature;
     ws.cell(r, 15).value() = p.irradiance;
-    ws.cell(r, 16).value() = p.mtbf_hr;
-    ws.cell(r, 17).value() = p.mttr_hr;
+    ws.cell(r, 16).value() = p.mtbf_hours;
+    ws.cell(r, 17).value() = p.mttr_hours;
     ws.cell(r, 18).value() = p.t_scheduled_hr;
     ws.cell(r, 19).value() = bool_str(p.in_service);
   }
@@ -1207,8 +1207,8 @@ std::vector<PVArrayDC> read_dc_pv_arrays(const XLWorksheet& ws) {
     p.beta_voc = dbl_from_str(cell_by_name(ws, r, col, "beta_voc"), p.beta_voc);
     p.temperature = dbl_from_str(cell_by_name(ws, r, col, "temperature"), p.temperature);
     p.irradiance = dbl_from_str(cell_by_name(ws, r, col, "irradiance"), p.irradiance);
-    p.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), p.mtbf_hr);
-    p.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), p.mttr_hr);
+    p.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), p.mtbf_hours);
+    p.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), p.mttr_hours);
     p.t_scheduled_hr = dbl_from_str(cell_by_name(ws, r, col, "t_scheduled_hr"), p.t_scheduled_hr);
     p.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), p.in_service);
     out.push_back(std::move(p));
@@ -1597,8 +1597,8 @@ void write_transformers_3w(XLWorksheet ws, const std::vector<Transformer3W>& tx)
     ws.cell(r, 23).value() = t.tap_step_percent;
     ws.cell(r, 24).value() = t.shift_mv_deg;
     ws.cell(r, 25).value() = t.shift_lv_deg;
-    ws.cell(r, 26).value() = t.mtbf_hr;
-    ws.cell(r, 27).value() = t.mttr_hr;
+    ws.cell(r, 26).value() = t.mtbf_hours;
+    ws.cell(r, 27).value() = t.mttr_hours;
     ws.cell(r, 28).value() = bool_str(t.in_service);
   }
 }
@@ -1635,8 +1635,8 @@ std::vector<Transformer3W> read_transformers_3w(const XLWorksheet& ws) {
     t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "tap_step_percent"), t.tap_step_percent);
     t.shift_mv_deg = dbl_from_str(cell_by_name(ws, r, col, "shift_mv_deg"), t.shift_mv_deg);
     t.shift_lv_deg = dbl_from_str(cell_by_name(ws, r, col, "shift_lv_deg"), t.shift_lv_deg);
-    t.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), t.mtbf_hr);
-    t.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), t.mttr_hr);
+    t.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), t.mtbf_hours);
+    t.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), t.mttr_hours);
     t.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), t.in_service);
     out.push_back(std::move(t));
   }
@@ -1709,8 +1709,8 @@ void write_chargers(XLWorksheet ws, const std::vector<Charger>& chargers) {
     ws.cell(r, 9).value() = c.eta;
     ws.cell(r, 10).value() = bool_str(c.v2g_capable);
     ws.cell(r, 11).value() = c.p_dis_max_kw;
-    ws.cell(r, 12).value() = c.mtbf_hr;
-    ws.cell(r, 13).value() = c.mttr_hr;
+    ws.cell(r, 12).value() = c.mtbf_hours;
+    ws.cell(r, 13).value() = c.mttr_hours;
   }
 }
 
@@ -1732,8 +1732,8 @@ std::vector<Charger> read_chargers(const XLWorksheet& ws) {
     c.eta = dbl_from_str(cell_by_name(ws, r, col, "eta"), c.eta);
     c.v2g_capable = bool_from_str(cell_by_name(ws, r, col, "v2g_capable"), c.v2g_capable);
     c.p_dis_max_kw = dbl_from_str(cell_by_name(ws, r, col, "p_dis_max_kw"), c.p_dis_max_kw);
-    c.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), c.mtbf_hr);
-    c.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), c.mttr_hr);
+    c.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), c.mtbf_hours);
+    c.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), c.mttr_hours);
     out.push_back(std::move(c));
   }
   return out;
@@ -1970,8 +1970,8 @@ void write_three_phase_transformers(XLWorksheet ws, const std::vector<ThreePhase
     ws.cell(r, 22).value() = t.tap_neutral;
     ws.cell(r, 23).value() = t.tap_step_percent;
     ws.cell(r, 24).value() = t.shift_deg;
-    ws.cell(r, 25).value() = t.mtbf_hr;
-    ws.cell(r, 26).value() = t.mttr_hr;
+    ws.cell(r, 25).value() = t.mtbf_hours;
+    ws.cell(r, 26).value() = t.mttr_hours;
     ws.cell(r, 27).value() = bool_str(t.in_service);
   }
 }
@@ -2007,8 +2007,8 @@ std::vector<ThreePhaseTransformer> read_three_phase_transformers(const XLWorkshe
     t.tap_neutral = int_from_str(cell_by_name(ws, r, col, "tap_neutral"), t.tap_neutral);
     t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "tap_step_percent"), t.tap_step_percent);
     t.shift_deg = dbl_from_str(cell_by_name(ws, r, col, "shift_deg"), t.shift_deg);
-    t.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), t.mtbf_hr);
-    t.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), t.mttr_hr);
+    t.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), t.mtbf_hours);
+    t.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), t.mttr_hours);
     t.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), t.in_service);
     out.push_back(std::move(t));
   }
@@ -2505,8 +2505,8 @@ void write_energy_routers(XLWorksheet ws, const std::vector<EnergyRouter>& route
     ws.cell(r, 10).value() = rtr.pmin_mw;
     ws.cell(r, 11).value() = rtr.qmax_mvar;
     ws.cell(r, 12).value() = rtr.qmin_mvar;
-    ws.cell(r, 13).value() = rtr.mtbf_hr;
-    ws.cell(r, 14).value() = rtr.mttr_hr;
+    ws.cell(r, 13).value() = rtr.mtbf_hours;
+    ws.cell(r, 14).value() = rtr.mttr_hours;
     ws.cell(r, 15).value() = bool_str(rtr.in_service);
   }
 }
@@ -2530,8 +2530,8 @@ std::vector<EnergyRouter> read_energy_routers(const XLWorksheet& ws) {
     er.pmin_mw = dbl_from_str(cell_by_name(ws, r, col, "pmin_mw"), er.pmin_mw);
     er.qmax_mvar = dbl_from_str(cell_by_name(ws, r, col, "qmax_mvar"), er.qmax_mvar);
     er.qmin_mvar = dbl_from_str(cell_by_name(ws, r, col, "qmin_mvar"), er.qmin_mvar);
-    er.mtbf_hr = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), er.mtbf_hr);
-    er.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), er.mttr_hr);
+    er.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "mtbf_hr"), er.mtbf_hours);
+    er.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), er.mttr_hours);
     er.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), er.in_service);
     out.push_back(std::move(er));
   }
@@ -2626,7 +2626,7 @@ void write_vpp(XLWorksheet ws, const std::vector<VirtualPowerPlant>& vpps) {
     const uint32_t r = static_cast<uint32_t>(i + 2);
     ws.cell(r, 1).value() = v.index;
     ws.cell(r, 2).value() = v.name;
-    ws.cell(r, 3).value() = v.pcc_bus;
+    ws.cell(r, 3).value() = v.aggregation_bus;
     ws.cell(r, 4).value() = v.p_output_mw;
     ws.cell(r, 5).value() = v.q_output_mvar;
     ws.cell(r, 6).value() = v.pmax_mw;
@@ -2647,7 +2647,7 @@ std::vector<VirtualPowerPlant> read_vpp(const XLWorksheet& ws) {
     VirtualPowerPlant v;
     v.index = int_from_str(idx, v.index);
     v.name = cell_by_name(ws, r, col, "name");
-    v.pcc_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), v.pcc_bus);
+    v.aggregation_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), v.aggregation_bus);
     v.p_output_mw = dbl_from_str(cell_by_name(ws, r, col, "p_output_mw"), v.p_output_mw);
     v.q_output_mvar = dbl_from_str(cell_by_name(ws, r, col, "q_output_mvar"), v.q_output_mvar);
     v.pmax_mw = dbl_from_str(cell_by_name(ws, r, col, "pmax_mw"), v.pmax_mw);
@@ -2669,7 +2669,7 @@ void write_microgrids(XLWorksheet ws, const std::vector<Microgrid>& mgs) {
     const uint32_t r = static_cast<uint32_t>(i + 2);
     ws.cell(r, 1).value() = m.index;
     ws.cell(r, 2).value() = m.name;
-    ws.cell(r, 3).value() = m.pcc_bus;
+    ws.cell(r, 3).value() = m.aggregation_bus;
     ws.cell(r, 4).value() = microgrid_mode_str(m.operating_mode);
     ws.cell(r, 5).value() = bool_str(m.islanding_capability);
     ws.cell(r, 6).value() = m.p_exchange_mw;
@@ -2689,7 +2689,7 @@ std::vector<Microgrid> read_microgrids(const XLWorksheet& ws) {
     Microgrid m;
     m.index = int_from_str(idx, m.index);
     m.name = cell_by_name(ws, r, col, "name");
-    m.pcc_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), m.pcc_bus);
+    m.aggregation_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), m.aggregation_bus);
     m.operating_mode = microgrid_mode_from_str(cell_by_name(ws, r, col, "operating_mode"));
     m.islanding_capability = bool_from_str(cell_by_name(ws, r, col, "islanding_capability"), m.islanding_capability);
     m.p_exchange_mw = dbl_from_str(cell_by_name(ws, r, col, "p_exchange_mw"), m.p_exchange_mw);
@@ -2954,8 +2954,8 @@ void write_results(const HybridPowerSystem& sys,
   {
     auto ws = ensure_sheet(wb, "Results_DCDCConverter");
     write_headers(ws, {"index", "name", "bus_in", "bus_out", "in_service", "control_mode", "p_ref_mw", "v_ref_pu", "v_in_pu", "v_out_pu", "eta", "p_in_mw", "p_out_mw", "loss_mw"});
-    for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
-      const auto& c = sys.dc.dcdc_converters[i];
+    for (size_t i = 0; i < sys.dcdc_converters.size(); ++i) {
+      const auto& c = sys.dcdc_converters[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
       const double v_in = dc_v_by_index(c.bus_in, 1.0);
       const double v_out = dc_v_by_index(c.bus_out, 1.0);
@@ -3125,14 +3125,14 @@ void write_results(const HybridPowerSystem& sys,
       const uint32_t r = static_cast<uint32_t>(i + 2);
       ws.cell(r, 1).value() = vpp.index;
       ws.cell(r, 2).value() = vpp.name;
-      ws.cell(r, 3).value() = vpp.pcc_bus;
+      ws.cell(r, 3).value() = vpp.aggregation_bus;
       ws.cell(r, 4).value() = bool_str(vpp.in_service);
       ws.cell(r, 5).value() = vpp.p_output_mw;
       ws.cell(r, 6).value() = vpp.q_output_mvar;
       ws.cell(r, 7).value() = vpp.pmax_mw;
       ws.cell(r, 8).value() = vpp.pmin_mw;
-      ws.cell(r, 9).value() = ac_vm_by_index(vpp.pcc_bus, 1.0);
-      ws.cell(r, 10).value() = ac_va_by_index(vpp.pcc_bus, 0.0);
+      ws.cell(r, 9).value() = ac_vm_by_index(vpp.aggregation_bus, 1.0);
+      ws.cell(r, 10).value() = ac_va_by_index(vpp.aggregation_bus, 0.0);
     }
   }
 
@@ -3149,14 +3149,14 @@ void write_results(const HybridPowerSystem& sys,
       }
       ws.cell(r, 1).value() = mg.index;
       ws.cell(r, 2).value() = mg.name;
-      ws.cell(r, 3).value() = mg.pcc_bus;
+      ws.cell(r, 3).value() = mg.aggregation_bus;
       ws.cell(r, 4).value() = microgrid_mode_str(mg.operating_mode);
       ws.cell(r, 5).value() = bool_str(mg.in_service);
       ws.cell(r, 6).value() = mg.p_exchange_mw;
       ws.cell(r, 7).value() = mg.total_generation_mw;
       ws.cell(r, 8).value() = mg.total_load_mw;
-      ws.cell(r, 9).value() = ac_vm_by_index(mg.pcc_bus, 1.0);
-      ws.cell(r, 10).value() = ac_va_by_index(mg.pcc_bus, 0.0);
+      ws.cell(r, 9).value() = ac_vm_by_index(mg.aggregation_bus, 1.0);
+      ws.cell(r, 10).value() = ac_va_by_index(mg.aggregation_bus, 0.0);
       ws.cell(r, 11).value() = buses;
     }
   }
@@ -3398,8 +3398,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     const uint16_t c_loss = ensure_header_column(ws, "result_loss_mw");
     const uint16_t c_vin = ensure_header_column(ws, "result_v_in_pu");
     const uint16_t c_vout = ensure_header_column(ws, "result_v_out_pu");
-    for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
-      const auto& c = sys.dc.dcdc_converters[i];
+    for (size_t i = 0; i < sys.dcdc_converters.size(); ++i) {
+      const auto& c = sys.dcdc_converters[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
       auto it = dcdc_by_index.find(c.index);
       const DCDCTransfer tr = (it != dcdc_by_index.end()) ? it->second : DCDCTransfer{};
@@ -3418,8 +3418,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     for (size_t i = 0; i < sys.vpps.size(); ++i) {
       const auto& vpp = sys.vpps[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
-      ws.cell(r, c_vm).value() = ac_vm_by_index(vpp.pcc_bus, 1.0);
-      ws.cell(r, c_va).value() = ac_va_by_index(vpp.pcc_bus, 0.0);
+      ws.cell(r, c_vm).value() = ac_vm_by_index(vpp.aggregation_bus, 1.0);
+      ws.cell(r, c_va).value() = ac_va_by_index(vpp.aggregation_bus, 0.0);
     }
   }
 
@@ -3430,8 +3430,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     for (size_t i = 0; i < sys.microgrids.size(); ++i) {
       const auto& mg = sys.microgrids[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
-      ws.cell(r, c_vm).value() = ac_vm_by_index(mg.pcc_bus, 1.0);
-      ws.cell(r, c_va).value() = ac_va_by_index(mg.pcc_bus, 0.0);
+      ws.cell(r, c_vm).value() = ac_vm_by_index(mg.aggregation_bus, 1.0);
+      ws.cell(r, c_va).value() = ac_va_by_index(mg.aggregation_bus, 0.0);
     }
   }
 
@@ -3524,7 +3524,7 @@ void save_xlsx(const HybridPowerSystem& sys, const std::string& path) {
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
 
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);
@@ -3594,7 +3594,7 @@ HybridPowerSystem load_xlsx(const std::string& path) {
   if (wb.worksheetExists("DCCircuitBreaker")) sys.dc.dc_circuit_breakers = read_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"));
 
   if (wb.worksheetExists("VSCConverter")) sys.vsc_converters = read_vsc(wb.worksheet("VSCConverter"));
-  if (wb.worksheetExists("DCDCConverter")) sys.dc.dcdc_converters = read_dcdc(wb.worksheet("DCDCConverter"));
+  if (wb.worksheetExists("DCDCConverter")) sys.dcdc_converters = read_dcdc(wb.worksheet("DCDCConverter"));
   if (wb.worksheetExists("EnergyRouter")) sys.energy_routers = read_energy_routers(wb.worksheet("EnergyRouter"));
   if (wb.worksheetExists("EnergyRouterPort")) read_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   if (wb.worksheetExists("VPP")) sys.vpps = read_vpp(wb.worksheet("VPP"));
@@ -3712,7 +3712,7 @@ void save_results_compact_xlsx(const HybridPowerSystem& sys,
   write_dc_pv_arrays(wb.worksheet("DCPVArray"), sys.dc.pv_arrays);
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);
@@ -3902,8 +3902,8 @@ void write_opf_results(const HybridPowerSystem& sys,
         oi = result.dcdc_map[k].original_index;
       ws.cell(r, 2).value() = oi;
 
-      if (static_cast<size_t>(oi) < sys.dc.dcdc_converters.size()) {
-        const auto& d = sys.dc.dcdc_converters[static_cast<size_t>(oi)];
+      if (static_cast<size_t>(oi) < sys.dcdc_converters.size()) {
+        const auto& d = sys.dcdc_converters[static_cast<size_t>(oi)];
         ws.cell(r, 3).value() = d.name;
         ws.cell(r, 4).value() = d.bus_in;
         ws.cell(r, 5).value() = d.bus_out;
@@ -4062,7 +4062,7 @@ void save_opf_results_compact_xlsx(const HybridPowerSystem& sys,
   write_dc_pv_arrays(wb.worksheet("DCPVArray"), sys.dc.pv_arrays);
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);

@@ -132,9 +132,8 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
       add_pattern_position(q_row, vdc_col, triplets, seen);
       // DC-row(dc_bus) → Vdc-col(dc_bus) (already present from Gdc, but ensure)
       add_pattern_position(dc_row, vdc_col, triplets, seen);
-      // DC-row(dc_bus) → Vm-col(ac_bus)  [AC-resistance cross-coupling; always reserve
-      // the structural slot so the pattern does not need rebuilding when r_conv_ac_pu
-      // is changed.  Value is zero when r_conv_ac_pu == 0.]
+      // DC-row(dc_bus) → Vm-col(ac_bus)  [AC–AC cross-coupling; always reserve
+      // the structural slot so the sparsity pattern is fixed across iterations.]
       const int vm_col_ac = ctx.vm_col[static_cast<size_t>(ac_bus)];
       add_pattern_position(dc_row, vm_col_ac, triplets, seen);
     }

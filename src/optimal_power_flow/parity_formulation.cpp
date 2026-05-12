@@ -381,7 +381,7 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   // VPP (fixed)
   for (const auto& vpp : prob.data.vpps) {
     if (!vpp.in_service) continue;
-    const int bus = vpp.pcc_bus - 1;
+    const int bus = vpp.aggregation_bus - 1;
     if (bus < 0 || bus >= nb) continue;
     prob.p_fixed_inj[bus] += vpp.p_output_mw / prob.data.base_mva;
     prob.q_fixed_inj[bus] += vpp.q_output_mvar / prob.data.base_mva;
@@ -391,7 +391,7 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   for (const auto& mg : prob.data.microgrids) {
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
-    const int bus = mg.pcc_bus - 1;
+    const int bus = mg.aggregation_bus - 1;
     if (bus < 0 || bus >= nb) continue;
     prob.p_fixed_inj[bus] += mg.p_exchange_mw / prob.data.base_mva;
   }

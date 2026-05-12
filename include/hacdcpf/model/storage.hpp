@@ -37,8 +37,6 @@ struct Storage {
   double self_discharge_pct{0.0}; // self-discharge rate (%/hour)
 
   // Lifecycle (for planning)
-  // A common equivalent-cycle surrogate is:
-  //   equivalent_cycles += |DeltaE| / (2 * e_rated_mwh)
   int max_cycles{5000};           // rated cycle life
   int current_cycles{0};          // accumulated cycles
   double soh{1.0};                // state of health [0,1]
@@ -49,10 +47,6 @@ struct Storage {
   double replacement_cost{0.0};   // $/kWh replacement
 
   // Current energy state
-  // Discrete energy update for step dt (hour):
-  //   E_{t+1} = E_t + eta_charge * P_ch * dt - (P_dis * dt) / eta_discharge
-  //             - (self_discharge_pct/100) * E_t * dt
-  // where P_ch >= 0 and P_dis >= 0 are charging/discharging magnitudes.
   double e_mwh{0.0};              // current stored energy (MWh)
 
   // Time-series hook (index into external profile, -1 = none)
@@ -60,7 +54,6 @@ struct Storage {
 
   // Control
   bool controllable{true};
-  bool grid_forming{false};       // true = can black-start / anchor an island in restoration studies
   std::string control_mode;       // e.g. "self_consumption", "peak_shaving", "market"
   std::string type;               // e.g. "Li-ion", "flow", "pumped_hydro"
 
@@ -69,14 +62,12 @@ struct Storage {
   double discharge_bid_price{0.0};   // λ^dis: discharging bid price [$/MWh]
   double daily_cycle_limit{0.0};     // §2.6.3.16(5): max daily cycles (0 = unlimited)
 
-  // System-level reliability (FOR-based: FOR = MTTR / (MTBF + MTTR))
-  // Note: sub-system components below use MTBF-based fields for finer granularity.
+  // System-level reliability
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
 
-  // Sub-system reliability (MTBF-based: battery cell/pack, PCS, BMS)
-  // System FOR can be derived: A_sys = A_battery * A_pcs * A_bms (series reliability)
+  // Sub-system reliability (battery cell/pack, PCS, BMS)
   double mtbf_battery_hr{0.0};
   double mttr_battery_hr{0.0};
   double mtbf_pcs_hr{0.0};
@@ -138,8 +129,8 @@ struct MobileStorage {
   double t_stay_max_hr{0.0};
 
   // System-level reliability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 
   // Sub-system reliability

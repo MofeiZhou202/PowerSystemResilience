@@ -174,7 +174,7 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     }
     if (!has_generators) {
       for (const auto& vpp : sys.vpps) {
-        if (!vpp.in_service || ac_set.count(vpp.pcc_bus) == 0) continue;
+        if (!vpp.in_service || ac_set.count(vpp.aggregation_bus) == 0) continue;
         if (vpp.p_output_mw > 1e-9) { has_generators = true; break; }
       }
     }
@@ -438,20 +438,20 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
   // Copy VPP/Microgrid/MobileStorage with bus remapping.
   for (const auto& vpp : sys.vpps) {
     if (!vpp.in_service) continue;
-    const auto it = ac_map.find(vpp.pcc_bus);
+    const auto it = ac_map.find(vpp.aggregation_bus);
     if (it == ac_map.end()) continue;
     VirtualPowerPlant copy = vpp;
     copy.index = static_cast<int>(sub.vpps.size()) + 1;
-    copy.pcc_bus = it->second;
+    copy.aggregation_bus = it->second;
     sub.vpps.push_back(std::move(copy));
   }
   for (const auto& mg : sys.microgrids) {
     if (!mg.in_service) continue;
-    const auto it = ac_map.find(mg.pcc_bus);
+    const auto it = ac_map.find(mg.aggregation_bus);
     if (it == ac_map.end()) continue;
     Microgrid copy = mg;
     copy.index = static_cast<int>(sub.microgrids.size()) + 1;
-    copy.pcc_bus = it->second;
+    copy.aggregation_bus = it->second;
     sub.microgrids.push_back(std::move(copy));
   }
   for (const auto& ms : sys.mobile_storage) {

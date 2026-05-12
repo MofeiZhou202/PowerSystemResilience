@@ -322,8 +322,8 @@ static json dc_static_generator_to_json(const StaticGeneratorDC& g) {
   j["pmax_mw"] = g.pmax_mw;
   j["pmin_mw"] = g.pmin_mw;
   j["controllable"] = g.controllable;
-  j["mtbf_hr"] = g.mtbf_hr;
-  j["mttr_hr"] = g.mttr_hr;
+  j["mtbf_hours"] = g.mtbf_hours;
+  j["mttr_hours"] = g.mttr_hours;
   j["t_scheduled_hr"] = g.t_scheduled_hr;
   return j;
 }
@@ -341,8 +341,8 @@ static StaticGeneratorDC dc_static_generator_from_json(const json& j) {
   g.pmax_mw = jget(j, "pmax_mw", 0.0);
   g.pmin_mw = jget(j, "pmin_mw", 0.0);
   g.controllable = jget(j, "controllable", false);
-  g.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  g.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   g.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   return g;
 }
@@ -365,8 +365,8 @@ static json pv_array_dc_to_json(const PVArrayDC& p) {
   j["beta_voc"] = p.beta_voc;
   j["temperature"] = p.temperature;
   j["irradiance"] = p.irradiance;
-  j["mtbf_hr"] = p.mtbf_hr;
-  j["mttr_hr"] = p.mttr_hr;
+  j["mtbf_hours"] = p.mtbf_hours;
+  j["mttr_hours"] = p.mttr_hours;
   j["t_scheduled_hr"] = p.t_scheduled_hr;
   return j;
 }
@@ -389,8 +389,8 @@ static PVArrayDC pv_array_dc_from_json(const json& j) {
   p.beta_voc = jget(j, "beta_voc", 0.0);
   p.temperature = jget(j, "temperature", 25.0);
   p.irradiance = jget(j, "irradiance", 1000.0);
-  p.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  p.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  p.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  p.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   p.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
   return p;
 }
@@ -433,7 +433,6 @@ static json generator_to_json(const Generator& g) {
   j["profile_id"] = g.profile_id;
   j["forced_outage_rate"] = g.forced_outage_rate;
   j["mttr_hr"] = g.mttr_hr;
-  j["mtbf_hr"] = g.mtbf_hr;
   return j;
 }
 
@@ -475,8 +474,6 @@ static Generator generator_from_json(const json& j) {
   g.profile_id = jget(j, "profile_id", -1);
   g.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   g.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
-  g.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  reconcile_for_mtbf(g.forced_outage_rate, g.mttr_hr, g.mtbf_hr);
   return g;
 }
 
@@ -579,7 +576,6 @@ static json storage_to_json(const Storage& st) {
   j["eta_charge"] = st.eta_charge;
   j["eta_discharge"] = st.eta_discharge;
   j["self_discharge_pct"] = st.self_discharge_pct;
-  j["grid_forming"] = st.grid_forming;
   j["max_cycles"] = st.max_cycles;
   j["current_cycles"] = st.current_cycles;
   j["soh"] = st.soh;
@@ -611,7 +607,6 @@ static Storage storage_from_json(const json& j) {
   st.eta_charge = jget(j, "eta_charge", 0.95);
   st.eta_discharge = jget(j, "eta_discharge", 0.95);
   st.self_discharge_pct = jget(j, "self_discharge_pct", 0.0);
-  st.grid_forming = jget(j, "grid_forming", false);
   st.max_cycles = jget(j, "max_cycles", 5000);
   st.current_cycles = jget(j, "current_cycles", 0);
   st.soh = jget(j, "soh", 1.0);
@@ -685,7 +680,6 @@ static json vsc_to_json(const VSCConverter& c) {
   j["name"] = c.name;
   j["forced_outage_rate"] = c.forced_outage_rate;
   j["mttr_hr"] = c.mttr_hr;
-  j["mtbf_hr"] = c.mtbf_hr;
   return j;
 }
 
@@ -713,8 +707,6 @@ static VSCConverter vsc_from_json(const json& j) {
   c.name = jget<std::string>(j, "name", "");
   c.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
-  c.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  reconcile_for_mtbf(c.forced_outage_rate, c.mttr_hr, c.mtbf_hr);
   return c;
 }
 
@@ -740,9 +732,9 @@ static json static_generator_to_json(const StaticGenerator& g) {
   j["k_q"] = g.k_q;
   j["k"] = g.k;
   j["rx"] = g.rx;
-  j["emission_factor_tco2_mwh"] = g.emission_factor_tco2_mwh;
-  j["mtbf_hr"] = g.mtbf_hr;
-  j["mttr_hr"] = g.mttr_hr;
+  j["co2_emission_rate"] = g.co2_emission_rate;
+  j["mtbf_hours"] = g.mtbf_hours;
+  j["mttr_hours"] = g.mttr_hours;
   return j;
 }
 
@@ -768,9 +760,9 @@ static StaticGenerator static_generator_from_json(const json& j) {
   g.k_q = jget(j, "k_q", 0.0);
   g.k = jget(j, "k", 1.0);
   g.rx = jget(j, "rx", 0.0);
-  g.emission_factor_tco2_mwh = jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
-  g.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  g.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  g.co2_emission_rate = jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
+  g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return g;
 }
 
@@ -1014,8 +1006,8 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["vector_group"] = t.vector_group;
   j["z0_percent"] = t.z0_percent;
   j["x0_r0"] = t.x0_r0;
-  j["mtbf_hr"] = t.mtbf_hr;
-  j["mttr_hr"] = t.mttr_hr;
+  j["mtbf_hours"] = t.mtbf_hours;
+  j["mttr_hours"] = t.mttr_hours;
   return j;
 }
 
@@ -1045,8 +1037,8 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.vector_group = jget<std::string>(j, "vector_group", "");
   t.z0_percent = jget(j, "z0_percent", 0.0);
   t.x0_r0 = jget(j, "x0_r0", 0.0);
-  t.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  t.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
+  t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   return t;
 }
 
@@ -1078,8 +1070,8 @@ static json transformer3w_to_json(const Transformer3W& t) {
   j["tap_step_percent"] = t.tap_step_percent;
   j["shift_mv_deg"] = t.shift_mv_deg;
   j["shift_lv_deg"] = t.shift_lv_deg;
-  j["mtbf_hr"] = t.mtbf_hr;
-  j["mttr_hr"] = t.mttr_hr;
+  j["mtbf_hours"] = t.mtbf_hours;
+  j["mttr_hours"] = t.mttr_hours;
   return j;
 }
 
@@ -1111,8 +1103,8 @@ static Transformer3W transformer3w_from_json(const json& j) {
   t.tap_step_percent = jget(j, "tap_step_percent", 0.0);
   t.shift_mv_deg = jget(j, "shift_mv_deg", 0.0);
   t.shift_lv_deg = jget(j, "shift_lv_deg", 0.0);
-  t.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  t.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
+  t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   return t;
 }
 
@@ -1303,8 +1295,8 @@ static json three_phase_transformer_to_json(const ThreePhaseTransformer& t) {
   j["tap_neutral"] = t.tap_neutral;
   j["tap_step_percent"] = t.tap_step_percent;
   j["shift_deg"] = t.shift_deg;
-  j["mtbf_hr"] = t.mtbf_hr;
-  j["mttr_hr"] = t.mttr_hr;
+  j["mtbf_hours"] = t.mtbf_hours;
+  j["mttr_hours"] = t.mttr_hours;
   return j;
 }
 
@@ -1335,8 +1327,8 @@ static ThreePhaseTransformer three_phase_transformer_from_json(const json& j) {
   t.tap_neutral = jget(j, "tap_neutral", 0);
   t.tap_step_percent = jget(j, "tap_step_percent", 0.0);
   t.shift_deg = jget(j, "shift_deg", 0.0);
-  t.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  t.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
+  t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   return t;
 }
 
@@ -1539,8 +1531,8 @@ static json switch_to_json(const Switch& s) {
   j["is_automated"] = s.is_automated;
   j["t_operation_s"] = s.t_operation_s;
   j["p_sw_fail"] = s.p_sw_fail;
-  j["mtbf_hr"] = s.mtbf_hr;
-  j["mttr_hr"] = s.mttr_hr;
+  j["mtbf_hours"] = s.mtbf_hours;
+  j["mttr_hours"] = s.mttr_hours;
   return j;
 }
 
@@ -1563,8 +1555,8 @@ static Switch switch_from_json(const json& j) {
   s.is_automated = jget(j, "is_automated", false);
   s.t_operation_s = jget(j, "t_operation_s", 0.0);
   s.p_sw_fail = jget(j, "p_sw_fail", 0.0);
-  s.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  s.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  s.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
+  s.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   return s;
 }
 
@@ -1658,8 +1650,8 @@ static json charging_station_to_json(const ChargingStation& c) {
   j["utilization_rate"] = c.utilization_rate;
   j["p_total_kw"] = c.p_total_kw;
   j["q_total_kvar"] = c.q_total_kvar;
-  j["mtbf_hr"] = c.mtbf_hr;
-  j["mttr_hr"] = c.mttr_hr;
+  j["mtbf_hours"] = c.mtbf_hours;
+  j["mttr_hours"] = c.mttr_hours;
   return j;
 }
 
@@ -1681,8 +1673,8 @@ static ChargingStation charging_station_from_json(const json& j) {
   c.utilization_rate = jget(j, "utilization_rate", 0.0);
   c.p_total_kw = jget(j, "p_total_kw", 0.0);
   c.q_total_kvar = jget(j, "q_total_kvar", 0.0);
-  c.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  c.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
+  c.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   return c;
 }
 
@@ -1699,8 +1691,8 @@ static json charger_to_json(const Charger& c) {
   j["eta"] = c.eta;
   j["v2g_capable"] = c.v2g_capable;
   j["p_dis_max_kw"] = c.p_dis_max_kw;
-  j["mtbf_hr"] = c.mtbf_hr;
-  j["mttr_hr"] = c.mttr_hr;
+  j["mtbf_hours"] = c.mtbf_hours;
+  j["mttr_hours"] = c.mttr_hours;
   return j;
 }
 
@@ -1717,8 +1709,8 @@ static Charger charger_from_json(const json& j) {
   c.eta = jget(j, "eta", 0.95);
   c.v2g_capable = jget(j, "v2g_capable", false);
   c.p_dis_max_kw = jget(j, "p_dis_max_kw", 0.0);
-  c.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return c;
 }
 
@@ -1740,8 +1732,8 @@ static json dcdc_to_json(const DCDCConverter& c) {
   j["pmax_mw"] = c.pmax_mw;
   j["pmin_mw"] = c.pmin_mw;
   j["k_droop"] = c.k_droop;
-  j["mtbf_hr"] = c.mtbf_hr;
-  j["mttr_hr"] = c.mttr_hr;
+  j["mtbf_hours"] = c.mtbf_hours;
+  j["mttr_hours"] = c.mttr_hours;
   return j;
 }
 
@@ -1763,8 +1755,8 @@ static DCDCConverter dcdc_from_json(const json& j) {
   c.pmax_mw = jget(j, "pmax_mw", 0.0);
   c.pmin_mw = jget(j, "pmin_mw", 0.0);
   c.k_droop = jget(j, "k_droop", 0.0);
-  c.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return c;
 }
 
@@ -1829,8 +1821,8 @@ static json energy_router_to_json(const EnergyRouter& r) {
   j["pmin_mw"] = r.pmin_mw;
   j["qmax_mvar"] = r.qmax_mvar;
   j["qmin_mvar"] = r.qmin_mvar;
-  j["mtbf_hr"] = r.mtbf_hr;
-  j["mttr_hr"] = r.mttr_hr;
+  j["mtbf_hours"] = r.mtbf_hours;
+  j["mttr_hours"] = r.mttr_hours;
   return j;
 }
 
@@ -1852,8 +1844,8 @@ static EnergyRouter energy_router_from_json(const json& j) {
   r.pmin_mw = jget(j, "pmin_mw", 0.0);
   r.qmax_mvar = jget(j, "qmax_mvar", 0.0);
   r.qmin_mvar = jget(j, "qmin_mvar", 0.0);
-  r.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  r.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  r.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  r.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return r;
 }
 
@@ -1885,8 +1877,8 @@ static json mobile_storage_to_json(const MobileStorage& s) {
   j["target_bus"] = s.target_bus;
   j["e_consumption_mwh_km"] = s.e_consumption_mwh_km;
   j["max_travel_distance_km"] = s.max_travel_distance_km;
-  j["mtbf_hr"] = s.mtbf_hr;
-  j["mttr_hr"] = s.mttr_hr;
+  j["mtbf_hours"] = s.mtbf_hours;
+  j["mttr_hours"] = s.mttr_hours;
   return j;
 }
 
@@ -1918,8 +1910,8 @@ static MobileStorage mobile_storage_from_json(const json& j) {
   s.target_bus = jget(j, "target_bus", 0);
   s.e_consumption_mwh_km = jget(j, "e_consumption_mwh_km", 0.0);
   s.max_travel_distance_km = jget(j, "max_travel_distance_km", 0.0);
-  s.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  s.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  s.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  s.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return s;
 }
 
@@ -1928,7 +1920,7 @@ static json vpp_to_json(const VirtualPowerPlant& v) {
   j["index"] = v.index;
   j["name"] = v.name;
   j["description"] = v.description;
-  j["pcc_bus"] = v.pcc_bus;
+  j["pcc_bus"] = v.aggregation_bus;
   j["in_service"] = v.in_service;
   j["n_pv_systems"] = v.n_pv_systems;
   j["n_wind_turbines"] = v.n_wind_turbines;
@@ -1944,8 +1936,8 @@ static json vpp_to_json(const VirtualPowerPlant& v) {
   j["pmin_mw"] = v.pmin_mw;
   j["ramp_up_max_mw_min"] = v.ramp_up_max_mw_min;
   j["ramp_down_max_mw_min"] = v.ramp_down_max_mw_min;
-  j["mtbf_hr"] = v.mtbf_hr;
-  j["mttr_hr"] = v.mttr_hr;
+  j["mtbf_hours"] = v.mtbf_hours;
+  j["mttr_hours"] = v.mttr_hours;
   return j;
 }
 
@@ -1954,7 +1946,7 @@ static VirtualPowerPlant vpp_from_json(const json& j) {
   v.index = j.at("index").get<int>();
   v.name = jget<std::string>(j, "name", "");
   v.description = jget<std::string>(j, "description", "");
-  v.pcc_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
+  v.aggregation_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
   v.in_service = jget(j, "in_service", true);
   v.n_pv_systems = jget(j, "n_pv_systems", 0);
   v.n_wind_turbines = jget(j, "n_wind_turbines", 0);
@@ -1970,8 +1962,8 @@ static VirtualPowerPlant vpp_from_json(const json& j) {
   v.pmin_mw = jget(j, "pmin_mw", 0.0);
   v.ramp_up_max_mw_min = jget(j, "ramp_up_max_mw_min", 0.0);
   v.ramp_down_max_mw_min = jget(j, "ramp_down_max_mw_min", 0.0);
-  v.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  v.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  v.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  v.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return v;
 }
 
@@ -1981,7 +1973,7 @@ static json microgrid_to_json(const Microgrid& m) {
   j["name"] = m.name;
   j["description"] = m.description;
   j["in_service"] = m.in_service;
-  j["pcc_bus"] = m.pcc_bus;
+  j["pcc_bus"] = m.aggregation_bus;
   j["internal_buses"] = m.internal_buses;
   j["operating_mode"] = microgrid_mode_str(m.operating_mode);
   j["islanding_capability"] = m.islanding_capability;
@@ -2000,8 +1992,8 @@ static json microgrid_to_json(const Microgrid& m) {
   j["v_set_pu"] = m.v_set_pu;
   j["k_droop"] = m.k_droop;
   j["area"] = m.area;
-  j["mtbf_hr"] = m.mtbf_hr;
-  j["mttr_hr"] = m.mttr_hr;
+  j["mtbf_hours"] = m.mtbf_hours;
+  j["mttr_hours"] = m.mttr_hours;
   return j;
 }
 
@@ -2011,7 +2003,7 @@ static Microgrid microgrid_from_json(const json& j) {
   m.name = jget<std::string>(j, "name", "");
   m.description = jget<std::string>(j, "description", "");
   m.in_service = jget(j, "in_service", true);
-  m.pcc_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
+  m.aggregation_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
   if (j.contains("internal_buses")) m.internal_buses = j["internal_buses"].get<std::vector<int>>();
   m.operating_mode = microgrid_mode_from_str(jget<std::string>(j, "operating_mode", "GridConnected"));
   m.islanding_capability = jget(j, "islanding_capability", false);
@@ -2030,8 +2022,8 @@ static Microgrid microgrid_from_json(const json& j) {
   m.v_set_pu = jget(j, "v_set_pu", 1.0);
   m.k_droop = jget(j, "k_droop", 0.0);
   m.area = jget(j, "area", 0);
-  m.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
-  m.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  m.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  m.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return m;
 }
 
@@ -2135,7 +2127,7 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
   for (const auto& p : sys.dc.pv_arrays) dc["pv_arrays"].push_back(pv_array_dc_to_json(p));
 
   dc["dcdc_converters"] = json::array();
-  for (const auto& c : sys.dc.dcdc_converters) dc["dcdc_converters"].push_back(dcdc_to_json(c));
+  for (const auto& c : sys.dcdc_converters) dc["dcdc_converters"].push_back(dcdc_to_json(c));
 
   dc["dc_circuit_breakers"] = json::array();
   for (const auto& cb : sys.dc.dc_circuit_breakers) dc["dc_circuit_breakers"].push_back(dc_circuit_breaker_to_json(cb));
@@ -2246,7 +2238,7 @@ HybridPowerSystem from_json(const std::string& json_str) {
     if (dc.contains("pv_arrays"))
       for (const auto& j : dc["pv_arrays"]) sys.dc.pv_arrays.push_back(pv_array_dc_from_json(j));
     if (dc.contains("dcdc_converters"))
-      for (const auto& j : dc["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
+      for (const auto& j : dc["dcdc_converters"]) sys.dcdc_converters.push_back(dcdc_from_json(j));
     if (dc.contains("dc_circuit_breakers"))
       for (const auto& j : dc["dc_circuit_breakers"]) sys.dc.dc_circuit_breakers.push_back(dc_circuit_breaker_from_json(j));
   }
@@ -2255,7 +2247,7 @@ HybridPowerSystem from_json(const std::string& json_str) {
     for (const auto& j : root["vsc_converters"]) sys.vsc_converters.push_back(vsc_from_json(j));
 
   if (root.contains("dcdc_converters"))
-    for (const auto& j : root["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
+    for (const auto& j : root["dcdc_converters"]) sys.dcdc_converters.push_back(dcdc_from_json(j));
 
   if (root.contains("energy_routers"))
     for (const auto& j : root["energy_routers"]) sys.energy_routers.push_back(energy_router_from_json(j));

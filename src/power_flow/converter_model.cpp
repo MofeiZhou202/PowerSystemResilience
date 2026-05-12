@@ -97,28 +97,6 @@ double converter_dc_injection(const VSCConverter& conv,
     pdc_base = -conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
   }
 
-  // AC-side conduction loss coupling: the DC bus supplies the extra loss.
-  if (conv.r_conv_ac_pu > 0.0) {
-    // pac0 for the PQ_MODE case is pset; for VDC modes compute from pdc.
-    double pac0 = 0.0;
-    if (conv.control_mode == ConverterMode::PQ_MODE) {
-      pac0 = pset;
-    } else {
-      // pac0 = p_transfer - ploss_DC (recompute for accuracy)
-      const double p_transfer = conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
-      const auto [dploss_dp, dploss_dvdc] =
-          converter_loss_jacobian(conv, p_transfer, vdc_bus, base_mva, loss_model);
-      (void)dploss_dp;
-      (void)dploss_dvdc;
-      pac0 = p_transfer - converter_loss(conv, p_transfer, vdc_bus, base_mva, loss_model);
-    }
-    const int ac_idx = conv.bus_ac - 1;
-    const double vm_ac = (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.01) : 1.0;
-    // ploss_AC = r * pac0² / Vm_AC²  (pu power = pu resistance * pu current²)
-    const double ploss_ac = conv.r_conv_ac_pu * pac0 * pac0 / (vm_ac * vm_ac);
-    pdc_base -= ploss_ac;
-  }
-
   return pdc_base;
 }
 
@@ -240,15 +218,8 @@ ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
                                                      double pac0,
                                                      double /*base_mva*/) {
   ConverterJacobianDCVmAC jac;
-  if (!conv.in_service || conv.r_conv_ac_pu <= 0.0) return jac;
-
-  const int ac_idx = conv.bus_ac - 1;
-  const double vm_ac = (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.01) : 1.0;
-
-  // d(pdc)/d(Vm_AC):
-  //   pdc includes -ploss_AC = -r * pac0² / Vm_AC²
-  //   d(-ploss_AC)/d(Vm_AC) = +2·r·pac0² / Vm_AC³
-  jac.dpdc_dvm_ac = 2.0 * conv.r_conv_ac_pu * pac0 * pac0 / (vm_ac * vm_ac * vm_ac);
+  (void)conv; (void)vm; (void)pac0;
+  // r_conv_ac_pu removed from VSCConverter; this Jacobian entry is always zero.
   return jac;
 }
 

@@ -599,7 +599,7 @@ void attach_case33mg_microgrids(HybridPowerSystem& sys) {
     mg.name = name;
     mg.description = description;
     mg.in_service = true;
-    mg.pcc_bus = pcc_bus;
+    mg.aggregation_bus = pcc_bus;
     mg.internal_buses = std::move(internal_buses);
     mg.operating_mode = MicrogridMode::GridConnected;
     mg.islanding_capability = true;
@@ -928,7 +928,7 @@ HybridPowerSystem build_ieee24_3area_acdc_expanded() {
     d.pmin_mw = -120.0;
     d.sn_mva = 150.0;
     d.v_ref_pu = 1.0;
-    sys.dc.dcdc_converters.push_back(d);
+    sys.dcdc_converters.push_back(d);
   };
   add_dcdc(1, 5, 7, 35.0, 0.985, "DCDC1");
   add_dcdc(2, 6, 8, 30.0, 0.982, "DCDC2");
@@ -1292,7 +1292,7 @@ HybridPowerSystem build_demo_multizone_acdc() {
     sg.pmax_mw = pmax_mw;
     sg.pmin_mw = 0.0;
     sg.scaling = 1.0;
-    sg.emission_factor_tco2_mwh = co2;
+    sg.co2_emission_rate = co2;
     return sg;
   };
   sys.ac.static_generators.push_back(
@@ -1414,7 +1414,7 @@ HybridPowerSystem build_demo_multizone_acdc() {
     sg.pmax_mw = pmax_mw;
     sg.pmin_mw = 0.0;
     sg.scaling = 1.0;
-    sg.emission_factor_tco2_mwh = co2;
+    sg.co2_emission_rate = co2;
     return sg;
   };
   sys.dc.static_generators.push_back(
@@ -1479,7 +1479,7 @@ HybridPowerSystem build_demo_multizone_acdc() {
   dcdc.eta = 0.975;
   dcdc.pmax_mw = 40.0;
   dcdc.pmin_mw = -40.0;
-  sys.dc.dcdc_converters.push_back(dcdc);
+  sys.dcdc_converters.push_back(dcdc);
 
   for (auto& vsc : sys.vsc_converters) {
     vsc.eta = 0.985;
@@ -1567,7 +1567,6 @@ HybridPowerSystem build_dist33_microgrid_der() {
     bess1.eol_percent = 0.8;
     bess1.replacement_cost = 120.0;  // $/kWh
     bess1.type = "Li-ion";
-    bess1.grid_forming = true;
     bess1.soc_carbon_intensity_tco2_mwh = 0.30;
     bess1.daily_cycle_limit = 2.2;
     bess1.charge_bid_price = -2.0;
@@ -1627,7 +1626,6 @@ HybridPowerSystem build_dist33_microgrid_der() {
     bess2.eol_percent = 0.8;
     bess2.replacement_cost = 220.0;
     bess2.type = "Li-ion";
-    bess2.grid_forming = true;
     bess2.soc_carbon_intensity_tco2_mwh = 0.28;
     bess2.daily_cycle_limit = 1.4;
     bess2.charge_bid_price = 1.5;
@@ -1647,7 +1645,7 @@ HybridPowerSystem build_dist33_microgrid_der() {
     diesel1.pmax_mw = 0.5;
     diesel1.pmin_mw = 0.0;
     diesel1.scaling = 1.0;
-    diesel1.emission_factor_tco2_mwh = 0.70;  // diesel emission factor
+    diesel1.co2_emission_rate = 0.70;  // diesel emission factor
     sys.ac.static_generators.push_back(diesel1);
   }
 
@@ -1703,7 +1701,6 @@ HybridPowerSystem build_dist33_microgrid_der() {
     bess3.eol_percent = 0.8;
     bess3.replacement_cost = 200.0;
     bess3.type = "Li-ion";
-    bess3.grid_forming = true;
     bess3.soc_carbon_intensity_tco2_mwh = 0.25;
     bess3.daily_cycle_limit = 1.6;
     bess3.charge_bid_price = 1.0;
@@ -1723,7 +1720,7 @@ HybridPowerSystem build_dist33_microgrid_der() {
     gas1.pmax_mw = 1.0;
     gas1.pmin_mw = 0.0;
     gas1.scaling = 1.0;
-    gas1.emission_factor_tco2_mwh = 0.45;  // natural gas emission factor
+    gas1.co2_emission_rate = 0.45;  // natural gas emission factor
     sys.ac.static_generators.push_back(gas1);
   }
 
@@ -2466,7 +2463,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   mg1.name = "Industrial-Microgrid";
   mg1.description = "Industrial park with wind, PV, and BESS";
   mg1.in_service = true;
-  mg1.pcc_bus = 6;
+  mg1.aggregation_bus = 6;
   mg1.internal_buses = {6, 7, 8};
   mg1.operating_mode = MicrogridMode::GridConnected;
   mg1.islanding_capability = true;
@@ -2491,7 +2488,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   mg2.name = "Residential-Microgrid";
   mg2.description = "Community microgrid with solar and storage";
   mg2.in_service = true;
-  mg2.pcc_bus = 18;
+  mg2.aggregation_bus = 18;
   mg2.internal_buses = {18, 19, 20, 21};
   mg2.operating_mode = MicrogridMode::GridConnected;
   mg2.islanding_capability = true;
@@ -2715,7 +2712,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   diesel1.q_mvar = 0.0;
   diesel1.qmax_mvar = 0.5;
   diesel1.qmin_mvar = -0.3;
-  diesel1.emission_factor_tco2_mwh = 0.70;
+  diesel1.co2_emission_rate = 0.70;
   diesel1.scaling = 1.0;
   sys.ac.static_generators.push_back(diesel1);
 
@@ -2733,7 +2730,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   gas1.q_mvar = 0.0;
   gas1.qmax_mvar = 1.0;
   gas1.qmin_mvar = -0.5;
-  gas1.emission_factor_tco2_mwh = 0.45;
+  gas1.co2_emission_rate = 0.45;
   gas1.scaling = 1.0;
   sys.ac.static_generators.push_back(gas1);
 
@@ -2751,7 +2748,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   fc1.q_mvar = 0.05;
   fc1.qmax_mvar = 0.2;
   fc1.qmin_mvar = -0.1;
-  fc1.emission_factor_tco2_mwh = 0.35;  // Lower than gas
+  fc1.co2_emission_rate = 0.35;  // Lower than gas
   fc1.scaling = 1.0;
   sys.ac.static_generators.push_back(fc1);
 
@@ -2820,7 +2817,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dcdc1.pmax_mw = 2.0;
   dcdc1.pmin_mw = 0.0;
   dcdc1.controllable = true;
-  sys.dc.dcdc_converters.push_back(dcdc1);
+  sys.dcdc_converters.push_back(dcdc1);
 
   DCDCConverter dcdc2;
   dcdc2.index = 2;
@@ -2838,7 +2835,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dcdc2.pmax_mw = 1.0;
   dcdc2.pmin_mw = -1.0;
   dcdc2.controllable = true;
-  sys.dc.dcdc_converters.push_back(dcdc2);
+  sys.dcdc_converters.push_back(dcdc2);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DC STATIC GENERATORS

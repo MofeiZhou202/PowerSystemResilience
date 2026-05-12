@@ -25,9 +25,6 @@ struct VSCConverter {
   double v_dc_set_pu{1.0};
   double v_ac_set_pu{1.0};
 
-  // Power conversion approximation:
-  //   P_dc ~= eta * P_ac - P_loss
-  //   P_loss ~= (loss_percent/100) * |P_ac| + loss_mw
   double eta{0.99};
   double loss_percent{0.0};
   double loss_mw{0.0};
@@ -42,22 +39,12 @@ struct VSCConverter {
   double vn_dc_kv{0.0};             // rated DC voltage
 
   // Droop parameters (grid-forming mode)
-  //   DeltaP ~= -k_p * Deltaf
-  //   DeltaQ ~= -k_q * DeltaV
   double k_p{0.0};                  // active power droop gain (%/Hz)
   double k_q{0.0};                  // reactive power droop gain (%/kV)
   double v_ref_pu{1.0};             // voltage reference
   double f_ref_hz{50.0};            // frequency reference
 
   bool controllable{true};
-
-  // Steady-state AC-side conduction resistance (pu on base_mva / system base).
-  // When > 0, the converter draws additional power from the DC bus to cover
-  // I²·r losses on the AC transformer/reactor side:
-  //   ploss_AC = r_conv_ac_pu * pac² / Vm_AC²
-  // This couples the DC power-balance equation to the AC terminal voltage,
-  // producing the cross-block Jacobian entry ∂P_DC / ∂V_AC_m.
-  double r_conv_ac_pu{0.0};
 
   // Short-circuit impedance (IEC 60909)
   double r_sc_pu{0.0};              // positive-seq SC resistance (pu on s_rated)
@@ -69,13 +56,10 @@ struct VSCConverter {
 
   std::string name;
 
-  // Reliability (FOR-based: FOR = MTTR / (MTBF + MTTR))
-  // Availability: A = 1 - FOR = MTBF / (MTBF + MTTR)
+  // Reliability
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
-  // Derived MTBF — see Generator::mtbf_hr note above for convention.
-  double mtbf_hr{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -127,9 +111,8 @@ struct DCDCConverter {
   double f_switching_hz{0.0};      // switching frequency
 
   // Reliability
-  // Availability: A = MTBF / (MTBF + MTTR)
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
 };
 
@@ -139,13 +122,15 @@ struct DCDCConverter {
 struct EnergyRouterPort {
   int index{0};
   std::string name;
-  int bus{0};                      // connected bus (AC or DC)
+  int bus{0};                      // connected AC bus
   ERPortType port_type{ERPortType::AC};
+  int side{0};                     // 0 = Side A (left), 1 = Side B (right)
 
   double voltage_level_kv{0.0};
   double p_mw{0.0};               // active power (bus injection: positive = into bus)
   double q_mvar{0.0};             // reactive power (bus injection: positive = into bus)
   double v_pu{1.0};
+  double eta{0.98};               // VSC efficiency for this port
 
   double pmax_mw{0.0};
   double pmin_mw{0.0};
@@ -179,18 +164,16 @@ struct EnergyRouter {
   // Control strategy
   std::string control_mode;            // e.g. "autonomous", "centralized"
   std::string power_dispatch_strategy; // e.g. "priority", "proportional"
+  double t_scheduled_hr{0.0};
 
   double pmax_mw{0.0};
   double pmin_mw{0.0};
   double qmax_mvar{0.0};
   double qmin_mvar{0.0};
 
-  // Reliability (MTBF-based: A = MTBF / (MTBF + MTTR))
-  // Multi-port active-power balance:
-  //   sum_k p_k + P_loss = 0, with p_k > 0 meaning injection into bus k.
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
-  double t_scheduled_hr{0.0};          // scheduled maintenance (hours/year)
+  // Reliability
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
 };
 
 }  // namespace hacdcpf

@@ -130,6 +130,9 @@ target_include_directories(hacdcpf
 )
 
 # ── Compile definitions ───────────────────────────────────────────────────────
+target_compile_definitions(hacdcpf PRIVATE
+  HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
+)
 if(NOT HACDCPF_ENABLE_EXCEL)
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_EXCEL)
 endif()

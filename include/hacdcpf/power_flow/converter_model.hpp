@@ -63,7 +63,6 @@ ConverterJacobianDC converter_dc_jacobian_vdc(const VSCConverter& conv,
                                                LossModelType loss_model);
 
 /// Jacobian of DC power balance w.r.t. AC terminal voltage magnitude.
-/// Non-zero only when conv.r_conv_ac_pu > 0 (AC-side conduction loss model).
 /// @param pac0  Nominal AC injection (pre-computed, in pu on base_mva).
 ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
                                                      const Eigen::VectorXd& vm,

@@ -272,25 +272,6 @@ double evaluate_residual_impl(const SolverData& data,
         // It is now handled unconditionally in the "always-on DC self-consistency" block
         // below, so that the DC Newton equations have exact Jacobians regardless of
         // enable_coupled_jacobian.
-        // AC-resistance cross-coupling: ∂pdc/∂Vm_AC (Gap 1: full AC/DC block Jacobian).
-        if (ce.dc_vm_nz >= 0 && conv.r_conv_ac_pu > 0.0) {
-          // pac0: nominal AC injection pre-AC-resistance (PQ_MODE → pset, VDC → p_transfer-loss).
-          const int dc_idx = conv.bus_dc - 1;
-          const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
-          double pac0 = 0.0;
-          if (conv.control_mode == ConverterMode::PQ_MODE) {
-            pac0 = conv.p_set_mw / data.base_mva;
-          } else {
-            const double p_transfer = conv.k_vdc *
-                (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
-            pac0 = p_transfer -
-                   converter_loss(conv, p_transfer, vdc_bus, data.base_mva, data.loss_model);
-          }
-          const auto vm_jac =
-              converter_dc_jacobian_vm_ac(conv, vm, pac0, data.base_mva);
-          // Convention: pdc_mismatch = pdc_spec - pdc_calc, J = ∂pdc_calc/∂Vm_AC.
-          values[ce.dc_vm_nz] -= vm_jac.dpdc_dvm_ac;
-        }
       }
     }
 

@@ -85,14 +85,12 @@ PowerFlowResult FDPFSolver::solve(const SolverData& data,
   lu_bp.compute(Bp_red);
   if (lu_bp.info() != Eigen::Success) {
     out.converged = false;
-    out.failure_reason = SolverFailureReason::SingularJacobian;
     return out;
   }
   if (npq > 0) {
     lu_bpp.compute(Bpp_red);
     if (lu_bpp.info() != Eigen::Success) {
       out.converged = false;
-      out.failure_reason = SolverFailureReason::SingularJacobian;
       return out;
     }
   }

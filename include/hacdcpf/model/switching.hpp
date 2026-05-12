@@ -35,11 +35,9 @@ struct Switch {
   double t_operation_s{0.0};      // operation time (seconds)
 
   // Reliability
-  // Availability: A = MTBF / (MTBF + MTTR), switch failure probability is p_sw_fail.
-  // Topology switching delay can be represented by t_operation_s and t_tp_hr.
   double p_sw_fail{0.0};          // switching failure probability
-  double mtbf_hr{0.0};
-  double mttr_hr{0.0};
+  double mtbf_hours{0.0};
+  double mttr_hours{0.0};
   double t_scheduled_hr{0.0};     // scheduled maintenance (hours/year)
   double t_tp_hr{0.0};            // topology reconfiguration time (hours)
 };
