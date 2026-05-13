@@ -50,30 +50,6 @@ add_library(mipsolvers STATIC
   src/engine/solver/native/native_adapters.cpp
   src/engine/solver/external/adapters.cpp
   src/engine/solver/native/lp/pdlp_solver.cpp
-  src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_utils.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_branching.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_cglp.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_cglp_model.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_clique_table.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_conformance_trace.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_minlp_legacy.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_proof_artifacts.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_uc_trace.cpp
-  src/engine/solver/native/milp/bc/legacy/bc_validation.cpp
-  src/engine/solver/native/milp/bc/milp_presolve.cpp
-  src/engine/solver/native/milp/bc/parallel/shared_state.cpp
-  src/engine/solver/native/milp/bc/parallel/parallel_search.cpp
-  src/engine/solver/native/milp/bc/api.cpp
-  src/engine/solver/native/milp/bc/search/node_evaluator.cpp
-  src/engine/solver/native/milp/bc/root/root_solve.cpp
-  src/engine/solver/native/milp/bc/search/sequential_search.cpp
   src/engine/solver/native/nle/nle_solver.cpp
   src/engine/kernel/linear_algebra/linear_solver.cpp
   src/engine/kernel/linear_algebra/sparse_lu_factor.cpp
@@ -125,6 +101,10 @@ if(MIPSOLVERS_BUILD_HFACTOR)
 endif()
 
 # ── HiGHS in-process library ─────────────────────────────────────────────────
+# The native branch-and-cut solver requires the in-process HiGHS library for
+# LP relaxation and dynamic cut generation (strict-HiGHS mode).  When HiGHS is
+# not available the B&C sources are excluded entirely, following the same
+# pattern as HybridACDCPowerSystemsPlanning/CMakeLists.txt.
 if(MIPSOLVERS_HAVE_HIGHS_LIB)
   target_link_libraries(mipsolvers PRIVATE highs::highs)
   target_compile_definitions(mipsolvers PUBLIC
@@ -132,6 +112,86 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
   target_compile_definitions(mipsolvers PRIVATE
     MIPSOLVERS_HIGHS_LIB_SOURCE="${MIPSOLVERS_HIGHS_LIB_SOURCE}"
     HACDCPF_HIGHS_LIB_SOURCE="${MIPSOLVERS_HIGHS_LIB_SOURCE}")
+
+  # Native B&C: strict HiGHS + dynamic cutting planes
+  target_sources(mipsolvers PRIVATE
+    src/engine/solver/native/milp/bc/legacy/branch_and_cut.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_parallel.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_utils.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_branching.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_cuts.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_cglp.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_cglp_model.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_clique_table.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_relaxation.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_conformance_trace.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_legacy_helpers.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_minlp_legacy.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_proof_artifacts.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_root_audit.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_uc_trace.cpp
+    src/engine/solver/native/milp/bc/legacy/bc_validation.cpp
+    src/engine/solver/native/milp/bc/milp_presolve.cpp
+    src/engine/solver/native/milp/bc/parallel/shared_state.cpp
+    src/engine/solver/native/milp/bc/parallel/parallel_search.cpp
+    src/engine/solver/native/milp/bc/api.cpp
+    src/engine/solver/native/milp/bc/search/node_evaluator.cpp
+    src/engine/solver/native/milp/bc/root/root_solve.cpp
+    src/engine/solver/native/milp/bc/search/sequential_search.cpp
+  )
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_NATIVE_BC_STRICT_HIGHS=1
+    MIPSOLVERS_NATIVE_BC_DYNAMIC_CUTS=1)
+
+  # MILP benchmark runner: tests native B&C performance with strict HiGHS LP
+  # kernel and dynamic cutting planes.  Only built when the benchmark source
+  # exists and HiGHS is available (mirrors the pattern in
+  # HybridACDCPowerSystemsPlanning/CMakeLists.txt).
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/milp_benchmark_runner.cpp")
+    add_executable(milp_benchmark_runner
+      benchmark/milp_benchmark_runner.cpp)
+    target_include_directories(milp_benchmark_runner PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(milp_benchmark_runner PRIVATE mipsolvers highs::highs)
+    if(NOT MSVC)
+      target_compile_options(milp_benchmark_runner PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+
+    # CTest integration: run the --full suite (6 UC cases, ~30 s on CI) with
+    # B&C[StrictHiGHS] only (no external solvers).  JSON output is written to
+    # the build tree so a post-step can compare against the stored baseline.
+    if(MIPSOLVERS_BUILD_TESTS)
+      add_test(NAME milp_benchmark
+        COMMAND milp_benchmark_runner
+                --full
+                --no-highs-adapter
+                --json "${CMAKE_CURRENT_BINARY_DIR}/milp_benchmark_result.json")
+      set_tests_properties(milp_benchmark PROPERTIES
+        LABELS   "benchmark"
+        TIMEOUT  300)
+
+      # Cross-platform perf-regression check: compare the JSON output from the
+      # run above against the checked-in baseline using the Python helper.
+      if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/check_perf_regression.py")
+        find_program(_PYTHON_EXE NAMES python3 python)
+        if(_PYTHON_EXE)
+          add_test(NAME milp_benchmark_regression
+            COMMAND "${_PYTHON_EXE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/check_perf_regression.py"
+              "--result"    "${CMAKE_CURRENT_BINARY_DIR}/milp_benchmark_result.json"
+              "--baseline"  "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/milp_benchmark_baseline.json"
+              "--tolerance" "0.25")
+          set_tests_properties(milp_benchmark_regression PROPERTIES
+            LABELS   "benchmark"
+            TIMEOUT  30
+            DEPENDS  milp_benchmark)
+        endif()
+      endif()
+    endif()
+  endif()
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────

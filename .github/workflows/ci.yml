@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  build-and-test:
+  # ── Linux: unit tests + MILP benchmark ──────────────────────────────────────
+  linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,7 +20,8 @@ jobs:
             libeigen3-dev \
             libfmt-dev \
             nlohmann-json3-dev \
-            catch2
+            catch2 \
+            python3
 
       - name: Configure
         run: >
@@ -37,14 +39,79 @@ jobs:
       - name: Run unit tests
         run: ctest --test-dir build -L unit --output-on-failure
 
-  windows-scuc-regression:
+      - name: Build milp_benchmark_runner
+        run: cmake --build build --target milp_benchmark_runner --parallel 2
+
+      - name: Run MILP benchmark (full suite, B&C only)
+        run: >
+          ctest --test-dir build
+          -R milp_benchmark$
+          --output-on-failure
+          --timeout 300
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: milp-benchmark-linux
+          path: build/milp_benchmark_result.json
+          if-no-files-found: ignore
+
+  # ── macOS: unit tests + MILP benchmark ──────────────────────────────────────
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install macOS dependencies
+        run: |
+          brew install eigen fmt nlohmann-json catch2 python3
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DMIPSOLVERS_BUILD_TESTS=ON
+          -DMIPSOLVERS_BUILD_PYTHON=OFF
+          -DMIPSOLVERS_BUILD_SCUC=OFF
+          -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
+          -DMIPSOLVERS_ENABLE_WERROR=OFF
+
+      - name: Build
+        run: cmake --build build --parallel 3
+
+      - name: Run unit tests
+        run: ctest --test-dir build -L unit --output-on-failure
+
+      - name: Build milp_benchmark_runner
+        run: cmake --build build --target milp_benchmark_runner --parallel 3
+
+      - name: Run MILP benchmark (full suite, B&C only)
+        run: >
+          ctest --test-dir build
+          -R milp_benchmark$
+          --output-on-failure
+          --timeout 300
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: milp-benchmark-macos
+          path: build/milp_benchmark_result.json
+          if-no-files-found: ignore
+
+  # ── Windows: regression tests + MILP benchmark ──────────────────────────────
+  windows:
     runs-on: windows-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Configure Windows regression build
+      - name: Configure Windows build
         run: >-
           cmake -S . -B build-win -A x64
           -DMIPSOLVERS_BUILD_TESTS=ON
@@ -53,10 +120,12 @@ jobs:
           -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
           -DMIPSOLVERS_ENABLE_WERROR=OFF
 
-      - name: Build Windows regression targets
+      - name: Build Windows targets
         run: >-
           cmake --build build-win --config Release
-          --target test_engine_api test_milp_solver test_ipm_solver test_scuc_module test_market_simulation
+          --target test_engine_api test_milp_solver test_ipm_solver
+                  test_scuc_module test_market_simulation
+                  milp_benchmark_runner
           --parallel 2
 
       - name: Run Windows regression tests
@@ -64,3 +133,51 @@ jobs:
           ctest --test-dir build-win --build-config Release
           -R "test_(engine_api|milp_solver|ipm_solver|scuc_module|market_simulation)"
           --output-on-failure --parallel 2
+
+      - name: Run MILP benchmark (full suite, B&C only)
+        run: >-
+          ctest --test-dir build-win --build-config Release
+          -R milp_benchmark$
+          --output-on-failure
+          --timeout 300
+
+      - name: Upload benchmark JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: milp-benchmark-windows
+          path: build-win/milp_benchmark_result.json
+          if-no-files-found: ignore
+
+  # ── Cross-platform perf comparison ──────────────────────────────────────────
+  perf-compare:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download all benchmark artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bench-results
+
+      - name: Cross-platform performance comparison
+        run: |
+          python3 benchmark/check_perf_regression.py \
+            --result   bench-results/milp-benchmark-linux/milp_benchmark_result.json \
+            --baseline benchmark/milp_benchmark_baseline.json \
+            --tolerance 0.30 \
+            --label linux || true
+          python3 benchmark/check_perf_regression.py \
+            --result   bench-results/milp-benchmark-macos/milp_benchmark_result.json \
+            --baseline benchmark/milp_benchmark_baseline.json \
+            --tolerance 0.30 \
+            --label macos || true
+          python3 benchmark/check_perf_regression.py \
+            --result   bench-results/milp-benchmark-windows/milp_benchmark_result.json \
+            --baseline benchmark/milp_benchmark_baseline.json \
+            --tolerance 0.35 \
+            --label windows || true

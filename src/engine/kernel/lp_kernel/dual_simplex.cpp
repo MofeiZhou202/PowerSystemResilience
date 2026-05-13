@@ -3707,8 +3707,14 @@ class SparseBasis : public BasisOps {
           "slu_n_upd=%d etas=%d slu_valid=%d\n",
           m_, static_cast<int>(backend_kind_), refactor_count_,
           ft_success_count_, ft_fail_count_,
-          ft_chain_broken_refactor_count_, slu_.n_updates,
-          static_cast<int>(etas_.size()), slu_.valid ? 1 : 0);
+          ft_chain_broken_refactor_count_,
+#ifdef MIPSOLVERS_HAVE_UMFPACK
+          slu_.n_updates,
+          static_cast<int>(etas_.size()), slu_.valid ? 1 : 0
+#else
+          0, static_cast<int>(etas_.size()), 0
+#endif
+          );
     }
     ft_success_count_ = 0;
     ft_fail_count_ = 0;
@@ -3728,13 +3734,19 @@ class SparseBasis : public BasisOps {
     // directly, performs its own Markowitz-style factor, and serves
     // FTRAN/BTRAN/UPDATE.  All slu_/nlu_/etas state is left disabled.
     if (backend_kind_ == FactorBackendKind::HFactorPort) {
+#ifdef MIPSOLVERS_HAVE_UMFPACK
       slu_.valid = false;
+#endif
       etas_.clear();
       min_pivot_ = 1e30;
       max_eta_norm_ = 0.0;
       accumulated_fill_ = 0;
+#ifdef MIPSOLVERS_HAVE_HFACTOR
       const bool ok = hfb_.factorize(*A_, basis.data(), m_);
       return ok;
+#else
+      return false;  // HFactorPort requested but MIPSOLVERS_HAVE_HFACTOR not compiled
+#endif
     }
     B_ = build_sparse_basis(basis);
 #ifdef MIPSOLVERS_HAVE_UMFPACK
@@ -4218,6 +4230,7 @@ class SparseBasis : public BasisOps {
       default: t.backend_id = 0; break;
     }
     t.ft_backend = (backend_kind_ != FactorBackendKind::UmfpackNativeA);
+#ifdef MIPSOLVERS_HAVE_UMFPACK
     t.ft_valid = slu_.valid;
     t.ft_updates = slu_.valid ? slu_.n_updates : 0;
     t.eta_updates = static_cast<int>(etas_.size());
@@ -4231,6 +4244,14 @@ class SparseBasis : public BasisOps {
     t.u_fill_ratio = (slu_.valid && slu_.fresh_U_nnz > 0)
         ? static_cast<double>(cur_U_nnz) / static_cast<double>(slu_.fresh_U_nnz)
         : 1.0;
+#else
+    t.ft_valid    = false;
+    t.ft_updates  = 0;
+    t.eta_updates = static_cast<int>(etas_.size());
+    t.min_pivot   = (min_pivot_ < 1e29) ? min_pivot_ : 0.0;
+    t.max_growth  = 1.0;
+    t.u_fill_ratio = 1.0;
+#endif
     t.refactor_generation = gen_;
     return t;
   }
@@ -4734,20 +4755,26 @@ class SparseBasis : public BasisOps {
   const Eigen::SparseMatrix<double>* A_;
   int m_;
   Eigen::SparseMatrix<double> B_;
+  // Shared solve workspace (used by both the UMFPACK path and HFactor path).
+  mutable Eigen::VectorXd solve_work_;
+
+  // U.7.118 Phase 3: vendored HiGHS HFactor backend (FactorBackendKind::HFactorPort).
+  // Available whenever MIPSOLVERS_HAVE_HFACTOR is defined, independent of UMFPACK.
+#ifdef MIPSOLVERS_HAVE_HFACTOR
+  mutable HFactorBackend hfb_;
+  mutable std::vector<double> spike_buf_;  // Pre-allocated spike buffer for FT update
+#endif
+
 #ifdef MIPSOLVERS_HAVE_UMFPACK
   void* Symbolic_ = nullptr;
   void* Numeric_ = nullptr;
   std::vector<int> Ap_, Ai_;
   std::vector<double> Ax_;
   double Control_[UMFPACK_CONTROL];       // UMFPACK control parameters
-  mutable Eigen::VectorXd solve_work_;    // Pre-allocated workspace for in-place solves
   mutable std::vector<double> wsolve_W_;  // Pre-allocated wsolve workspace (5*m doubles)
   mutable std::vector<int> wsolve_Wi_;    // Pre-allocated wsolve workspace (m ints)
   mutable NativeLU nlu_;                  // Extracted L,U for sparse solves
   mutable SparseLUFactor slu_;             // Sparse LU with Forrest-Tomlin update
-  // U.7.118 Phase 3: vendored HiGHS HFactor backend (FactorBackendKind::HFactorPort).
-  mutable HFactorBackend hfb_;
-  mutable std::vector<double> spike_buf_;  // Pre-allocated spike buffer for FT update
   mutable std::vector<double> entering_col_buf_;  // Buffer for FT entering column
   mutable std::vector<int> sparse_nz_idx_;    // Scratch for sparse BTRAN
   mutable std::vector<double> sparse_nz_val_; // Scratch for sparse BTRAN

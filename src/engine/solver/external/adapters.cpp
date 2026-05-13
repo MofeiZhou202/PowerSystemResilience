@@ -492,8 +492,9 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
 
   Highs highs;
-  highs.setOptionValue("output_flag", false);
-  highs.setOptionValue("log_to_console", false);
+  const bool highs_log_on = std::getenv("MIPSOLVERS_HIGHS_ADAPTER_LOG") != nullptr;
+  highs.setOptionValue("output_flag", highs_log_on);
+  highs.setOptionValue("log_to_console", highs_log_on);
   highs.setOptionValue("threads", 1);
   if (with_integer_markers) {
     highs.setOptionValue("mip_rel_gap", 1e-4);
@@ -1600,6 +1601,11 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   }
 
 #ifdef HACDCPF_HAVE_HIGHS_LIB
+  // The native B&C solver may have already initialized HiGHS's global thread
+  // scheduler (with num_threads > 1).  Resetting it before constructing a new
+  // Highs instance allows solve_lp_with_embedded_highs to set its own thread
+  // count without triggering the "scheduler already initialized" error.
+  Highs::resetGlobalScheduler(/*blocking=*/true);
   if (auto embedded = solve_lp_with_embedded_highs(lp, true, name())) {
     return *embedded;
   }
