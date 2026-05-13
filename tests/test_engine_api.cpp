@@ -166,3 +166,153 @@ TEST_CASE("Default sparse solver handles empty square systems", "[engine][api][l
   CHECK(solver->solve(rhs, x));
   CHECK(x.size() == 0);
 }
+
+// ─── Shared helper: run a 3×3 sparse solve through any SparseLinearSolver ────
+// System:  [ 4  1  0 ] [x]   [9 ]
+//          [ 1  3  1 ] [y] = [10]
+//          [ 0  1  2 ] [z]   [7 ]
+// Solution: x=1, y=2, z=2.5  (but exact fractions, tolerance 1e-10)
+static void run_sparse_solve_3x3(SparseLinearSolver& solver) {
+  Eigen::SparseMatrix<double> A(3, 3);
+  A.insert(0, 0) = 4.0; A.insert(0, 1) = 1.0;
+  A.insert(1, 0) = 1.0; A.insert(1, 1) = 3.0; A.insert(1, 2) = 1.0;
+  A.insert(2, 1) = 1.0; A.insert(2, 2) = 2.0;
+  A.makeCompressed();
+
+  Eigen::VectorXd rhs(3);
+  rhs << 6.0, 10.0, 7.0;  // rhs chosen so x=1, y=2, z=2.5
+
+  // Correct rhs: A*[1,2,2.5]^T = [4+2,1+6+2.5,2+5] = [6,9.5,7] — recompute
+  // A*[1,2,2.5]^T:
+  //   row0: 4*1 + 1*2 + 0     = 6
+  //   row1: 1*1 + 3*2 + 1*2.5 = 1+6+2.5 = 9.5
+  //   row2: 0   + 1*2 + 2*2.5 = 2+5     = 7
+  rhs << 6.0, 9.5, 7.0;
+
+  // --- test with analyze_pattern then factorize (normal path) ---
+  solver.analyze_pattern(A);
+  REQUIRE(solver.factorize(A));
+  Eigen::VectorXd x;
+  REQUIRE(solver.solve(rhs, x));
+  REQUIRE(x.size() == 3);
+  CHECK(x[0] == Approx(1.0).epsilon(1e-10));
+  CHECK(x[1] == Approx(2.0).epsilon(1e-10));
+  CHECK(x[2] == Approx(2.5).epsilon(1e-10));
+}
+
+static void run_factorize_without_analyze(SparseLinearSolver& solver) {
+  // Bug fix #1: factorize() called without prior analyze_pattern() must not
+  // crash or assert-fail; it should auto-run analyzePattern internally.
+  Eigen::SparseMatrix<double> A(3, 3);
+  A.insert(0, 0) = 4.0; A.insert(0, 1) = 1.0;
+  A.insert(1, 0) = 1.0; A.insert(1, 1) = 3.0; A.insert(1, 2) = 1.0;
+  A.insert(2, 1) = 1.0; A.insert(2, 2) = 2.0;
+  A.makeCompressed();
+
+  Eigen::VectorXd rhs(3);
+  rhs << 6.0, 9.5, 7.0;
+
+  // Intentionally skip analyze_pattern()
+  REQUIRE(solver.factorize(A));
+  Eigen::VectorXd x;
+  REQUIRE(solver.solve(rhs, x));
+  CHECK(x[0] == Approx(1.0).epsilon(1e-10));
+  CHECK(x[1] == Approx(2.0).epsilon(1e-10));
+  CHECK(x[2] == Approx(2.5).epsilon(1e-10));
+}
+
+// ─── EigenSparseLU ────────────────────────────────────────────────────────────
+TEST_CASE("EigenSparseLU: 3x3 sparse solve", "[engine][linear-solver][eigen]") {
+  EigenSparseLUSolver solver;
+  run_sparse_solve_3x3(solver);
+}
+
+TEST_CASE("EigenSparseLU: empty-system path (no analyze_pattern)", "[engine][linear-solver][eigen]") {
+  EigenSparseLUSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  // factorize without analyze_pattern on empty system
+  CHECK(solver.factorize(a));
+  Eigen::VectorXd rhs(0), x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
+
+// ─── Default solver (dispatches to best available backend) ───────────────────
+TEST_CASE("Default sparse solver: 3x3 correctness + backend reported",
+          "[engine][linear-solver][default]") {
+  auto solver = make_default_sparse_solver();
+  REQUIRE(solver != nullptr);
+  INFO("Backend in use: " << solver->backend_name());
+  run_sparse_solve_3x3(*solver);
+}
+
+TEST_CASE("Default sparse solver: factorize without analyze_pattern",
+          "[engine][linear-solver][default]") {
+  auto solver = make_default_sparse_solver();
+  REQUIRE(solver != nullptr);
+  // Only SuperLU and Pardiso have the auto-analyze fix; EigenSparseLU and
+  // SuiteSparse wrappers rely on Eigen which handles this gracefully already.
+  // This test exercises whichever backend is active.
+  run_factorize_without_analyze(*solver);
+}
+
+// ─── SuperLU (compiled in only when HACDCPF_HAVE_SUPERLU is set) ─────────────
+#ifdef HACDCPF_HAVE_SUPERLU
+TEST_CASE("SuperLUSolver: 3x3 sparse solve", "[engine][linear-solver][superlu]") {
+  SuperLUSolver solver;
+  run_sparse_solve_3x3(solver);
+}
+
+TEST_CASE("SuperLUSolver: factorize without prior analyze_pattern",
+          "[engine][linear-solver][superlu]") {
+  SuperLUSolver solver;
+  run_factorize_without_analyze(solver);
+}
+
+TEST_CASE("SuperLUSolver: empty square system", "[engine][linear-solver][superlu]") {
+  SuperLUSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  solver.analyze_pattern(a);
+  CHECK(solver.factorize(a));
+  Eigen::VectorXd rhs(0), x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
+
+TEST_CASE("SuperLUSolver: backend name is correct", "[engine][linear-solver][superlu]") {
+  SuperLUSolver solver;
+  CHECK(std::string(solver.backend_name()) == "SuperLU(Eigen)");
+}
+#endif  // HACDCPF_HAVE_SUPERLU
+
+// ─── MKL PARDISO (compiled in only when HACDCPF_HAVE_MKL_PARDISO is set) ─────
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+TEST_CASE("MKLPardisoSolver: 3x3 sparse solve", "[engine][linear-solver][pardiso]") {
+  MKLPardisoSolver solver;
+  run_sparse_solve_3x3(solver);
+}
+
+TEST_CASE("MKLPardisoSolver: factorize without prior analyze_pattern",
+          "[engine][linear-solver][pardiso]") {
+  MKLPardisoSolver solver;
+  run_factorize_without_analyze(solver);
+}
+
+TEST_CASE("MKLPardisoSolver: empty square system", "[engine][linear-solver][pardiso]") {
+  MKLPardisoSolver solver;
+  Eigen::SparseMatrix<double> a(0, 0);
+  a.makeCompressed();
+  solver.analyze_pattern(a);
+  CHECK(solver.factorize(a));
+  Eigen::VectorXd rhs(0), x;
+  CHECK(solver.solve(rhs, x));
+  CHECK(x.size() == 0);
+}
+
+TEST_CASE("MKLPardisoSolver: backend name is correct", "[engine][linear-solver][pardiso]") {
+  MKLPardisoSolver solver;
+  CHECK(std::string(solver.backend_name()) == "Intel-MKL-PARDISO(Eigen)");
+}
+#endif  // HACDCPF_HAVE_MKL_PARDISO

@@ -265,7 +265,7 @@ endif()
 # so MIPSOLVERS_SUPERLU_INCLUDE_DIR must be the folder that directly contains them.
 set(MIPSOLVERS_HAVE_SUPERLU OFF)
 set(MIPSOLVERS_SUPERLU_INCLUDE_DIR "")
-set(MIPSOLVERS_SUPERLU_LIBRARY "")
+set(MIPSOLVERS_SUPERLU_LIBRARIES "")  # list: superlu + transitive BLAS
 option(MIPSOLVERS_USE_SUPERLU "Enable SuperLU backend when available" ON)
 if(MIPSOLVERS_USE_SUPERLU)
   set(_SLU_HINTS
@@ -274,15 +274,23 @@ if(MIPSOLVERS_USE_SUPERLU)
     /usr/local
     /usr
     "C:/vcpkg/installed/x64-windows"
+    "C:/vcpkg/installed/arm64-windows"
     "C:/SuperLU")
   find_path(MIPSOLVERS_SUPERLU_INCLUDE_DIR NAMES slu_ddefs.h
     HINTS ${_SLU_HINTS}
     PATH_SUFFIXES include/superlu include superlu)
-  find_library(MIPSOLVERS_SUPERLU_LIBRARY
+  find_library(_MIPSOLVERS_SUPERLU_LIB
     NAMES superlu superlu_5.3 superlu_5.2 superlu_5.1 superlu_5.0 superlu_4.3
     HINTS ${_SLU_HINTS} PATH_SUFFIXES lib lib64)
-  if(MIPSOLVERS_SUPERLU_INCLUDE_DIR AND MIPSOLVERS_SUPERLU_LIBRARY)
+  if(MIPSOLVERS_SUPERLU_INCLUDE_DIR AND _MIPSOLVERS_SUPERLU_LIB)
     set(MIPSOLVERS_HAVE_SUPERLU ON)
+    list(APPEND MIPSOLVERS_SUPERLU_LIBRARIES ${_MIPSOLVERS_SUPERLU_LIB})
+    # SuperLU requires BLAS; in shared-lib builds BLAS is embedded, but for
+    # static builds (e.g. vcpkg x64-windows-static) it must be linked explicitly.
+    find_package(BLAS QUIET)
+    if(BLAS_FOUND)
+      list(APPEND MIPSOLVERS_SUPERLU_LIBRARIES ${BLAS_LIBRARIES})
+    endif()
     message(STATUS "mipsolvers: SuperLU detected at ${MIPSOLVERS_SUPERLU_INCLUDE_DIR}")
   else()
     message(STATUS "mipsolvers: SuperLU not found")
@@ -290,14 +298,19 @@ if(MIPSOLVERS_USE_SUPERLU)
 endif()
 
 # ── Intel MKL PARDISO (optional) ──────────────────────────────────────────────
+# Intel MKL PARDISO is only available on Linux and Windows (not macOS).
 set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
 set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
 set(MIPSOLVERS_MKL_LIBRARIES "")
 option(MIPSOLVERS_USE_MKL "Enable Intel MKL PARDISO backend when available" ON)
-if(MIPSOLVERS_USE_MKL)
-  set(_MKL_HINTS
-    $ENV{MKLROOT}
-    "$ENV{ONEAPI_ROOT}/mkl/latest"
+if(MIPSOLVERS_USE_MKL AND NOT APPLE)
+  # Build the hints list carefully: $ENV{ONEAPI_ROOT} may be unset, which
+  # would expand to the bogus path "/mkl/latest" inside a quoted string.
+  set(_MKL_HINTS $ENV{MKLROOT})
+  if(DEFINED ENV{ONEAPI_ROOT})
+    list(APPEND _MKL_HINTS "$ENV{ONEAPI_ROOT}/mkl/latest")
+  endif()
+  list(APPEND _MKL_HINTS
     "/opt/intel/oneapi/mkl/latest"
     "/opt/intel/mkl"
     "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
@@ -325,7 +338,15 @@ if(MIPSOLVERS_USE_MKL)
     list(APPEND MIPSOLVERS_MKL_INCLUDE_DIRS ${MIPSOLVERS_MKL_INCLUDE_DIR})
     list(APPEND MIPSOLVERS_MKL_LIBRARIES
       ${MIPSOLVERS_MKL_LP64_LIB} ${MIPSOLVERS_MKL_THREAD_LIB} ${MIPSOLVERS_MKL_CORE_LIB})
-    if(UNIX AND NOT APPLE)
+    if(WIN32)
+      # mkl_intel_thread requires the Intel OpenMP runtime on Windows.
+      find_library(_MKL_IOMP5MD NAMES libiomp5md
+        HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
+        PATH_SUFFIXES lib lib/intel64 redist/intel64/compiler)
+      if(_MKL_IOMP5MD)
+        list(APPEND MIPSOLVERS_MKL_LIBRARIES ${_MKL_IOMP5MD})
+      endif()
+    elseif(UNIX)
       find_library(_MKL_IOMP5 NAMES iomp5
         HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
         PATH_SUFFIXES lib lib/intel64)

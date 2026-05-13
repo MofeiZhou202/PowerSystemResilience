@@ -28,6 +28,7 @@ class EigenSparseLUSolver final : public SparseLinearSolver {
  private:
   Eigen::SparseLU<Eigen::SparseMatrix<double>> solver_;
   bool empty_system_{false};
+  bool analysis_done_{false};
 };
 
 #ifdef HACDCPF_HAVE_UMFPACK

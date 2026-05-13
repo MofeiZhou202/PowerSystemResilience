@@ -31,11 +31,18 @@ void EigenSparseLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) 
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   solver_.analyzePattern(a);
+  analysis_done_ = true;
 }
 
 bool EigenSparseLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
+  if (!analysis_done_) {
+    // analyze_pattern() was not called; run it now so that
+    // Eigen::SparseLU::m_analysisIsOk is set before factorize() is called.
+    solver_.analyzePattern(a);
+    analysis_done_ = true;
+  }
   solver_.factorize(a);
   return solver_.info() == Eigen::Success;
 }
@@ -70,7 +77,13 @@ void EigenUmfPackSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 bool EigenUmfPackSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
+  const bool needs_analyze = !impl_;
   if (!impl_) impl_ = std::make_unique<Impl>();
+  if (needs_analyze) {
+    // analyze_pattern() was not called; run it now so that UMFPACK
+    // has a symbolic factorization before the numerical step.
+    impl_->solver.analyzePattern(a);
+  }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }
@@ -107,7 +120,13 @@ void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
+  const bool needs_analyze = !impl_;
   if (!impl_) impl_ = std::make_unique<Impl>();
+  if (needs_analyze) {
+    // analyze_pattern() was not called; run it now so that KLU
+    // has a symbolic factorization before the numerical step.
+    impl_->solver.analyzePattern(a);
+  }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }
@@ -144,7 +163,12 @@ void SuperLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 bool SuperLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
-  if (!impl_) impl_ = std::make_unique<Impl>();
+  if (!impl_) {
+    // analyze_pattern() was not called; run it now so that
+    // Eigen::SuperLU::m_analysisIsOk is set before factorize() is called.
+    impl_ = std::make_unique<Impl>();
+    impl_->solver.analyzePattern(a);
+  }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }
@@ -181,7 +205,12 @@ void MKLPardisoSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 bool MKLPardisoSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
-  if (!impl_) impl_ = std::make_unique<Impl>();
+  if (!impl_) {
+    // analyze_pattern() was not called; run it now so that
+    // Eigen::PardisoLU::m_analysisIsOk is set before factorize() is called.
+    impl_ = std::make_unique<Impl>();
+    impl_->solver.analyzePattern(a);
+  }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
 }

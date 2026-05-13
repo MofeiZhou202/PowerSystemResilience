@@ -168,9 +168,15 @@ endif()
 # ── SuperLU ───────────────────────────────────────────────────────────────────
 if(MIPSOLVERS_HAVE_SUPERLU)
   target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_INCLUDE_DIR})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_LIBRARY})
+  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_LIBRARIES})
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_SUPERLU=1 HACDCPF_HAVE_SUPERLU=1)
+  if(UNIX AND NOT APPLE)
+    # MKL and user-installed SuperLU live in non-standard prefixes; set rpath
+    # so the binary can find the shared library at runtime.
+    get_filename_component(_SLU_RPATH "${_MIPSOLVERS_SUPERLU_LIB}" DIRECTORY)
+    target_link_options(mipsolvers PUBLIC "-Wl,-rpath,${_SLU_RPATH}")
+  endif()
 endif()
 
 # ── Intel MKL PARDISO ─────────────────────────────────────────────────────────
@@ -179,6 +185,10 @@ if(MIPSOLVERS_HAVE_MKL_PARDISO)
   target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_MKL_LIBRARIES})
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_MKL_PARDISO=1 HACDCPF_HAVE_MKL_PARDISO=1)
+  if(UNIX AND NOT APPLE)
+    get_filename_component(_MKL_RPATH "${MIPSOLVERS_MKL_LP64_LIB}" DIRECTORY)
+    target_link_options(mipsolvers PUBLIC "-Wl,-rpath,${_MKL_RPATH}")
+  endif()
 endif()
 
 # ── Ipopt ─────────────────────────────────────────────────────────────────────
