@@ -31,7 +31,7 @@ namespace mipsolvers::engine {
 //
 // Env overrides:
 //   HACDCPF_HYPER_SPARSE=0          disable entirely (debug)
-//   HACDCPF_HYPER_SPARSE_DENSITY=x  override density gate (default 0.20)
+//   HACDCPF_HYPER_SPARSE_DENSITY=x  override density gate (default 0.95)
 // ═══════════════════════════════════════════════════════════════════════════
 namespace {
 inline bool hyper_sparse_enabled() {
@@ -542,89 +542,6 @@ void SparseLUFactor::btran(const double* rhs, double* result,
         const double v = work[k] / Rs[P[k]];
         result[P[k]] = v;
         if (out_nz && v != 0.0) out_nz->push_back(P[k]);
-      }
-      work[k] = 0.0;
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Sparse BTRAN with pre-computed nonzero indices
-// ═══════════════════════════════════════════════════════════════════════════
-void SparseLUFactor::btran_sparse(const int* rhs_nz_idx, const double* rhs_nz_val,
-                                  int rhs_nnz, double* result,
-                                  int* out_nz_idx, int& out_nnz) const {
-  constexpr double tol = 1e-20;
-
-  // Sparse gather only writes touched output positions. Clear the full output
-  // buffer so repeated calls remain correct even when the caller reuses a
-  // dirty result array across FT update chains.
-  std::memset(result, 0, m * sizeof(double));
-
-  // Step 1: Scatter to LU-permuted space.
-  int n_seeds = 0;
-  for (int s = 0; s < rhs_nnz; ++s) {
-    const int orig = rhs_nz_idx[s];
-    const int k = Qinv[orig];
-    work[k] = rhs_nz_val[s];
-    seeds[n_seeds++] = k;
-  }
-
-  // Step 2: DFS + U^T forward solve.
-  int topo_count = 0;
-  dfs_reach(seeds.data(), n_seeds, Ur_start.data(), Ur_index.data(), topo_count);
-  for (int t = topo_count - 1; t >= 0; --t) {
-    const int i = topo[t];
-    if (std::abs(work[i]) > tol) {
-      work[i] /= Uc_diag[i];
-      const double wi = work[i];
-      for (int k = Ur_start[i]; k < Ur_start[i + 1]; ++k)
-        work[Ur_index[k]] -= Ur_value[k] * wi;
-    } else {
-      work[i] = 0.0;
-    }
-  }
-
-  // Step 3: FT backward replay: E^T then S^T (newest to oldest).
-  for (int f = static_cast<int>(ft_entries.size()) - 1; f >= 0; --f) {
-    const auto& ft = ft_entries[f];
-    const int q = ft.col_pos;
-    const int n_steps = static_cast<int>(ft.mult.size());
-    for (int k = n_steps - 1; k >= 0; --k) {
-      work[q + k] -= ft.mult[k] * work[q + k + 1];
-      if (k < static_cast<int>(ft.is_swap.size()) && ft.is_swap[k])
-        std::swap(work[q + k], work[q + k + 1]);
-    }
-  }
-
-  // Step 4: L^T backward solve.
-  if (!l_is_identity) {
-    for (int i = m - 1; i >= 0; --i) {
-      if (work[i] != 0.0 && std::abs(work[i]) > tol) {
-        const double wi = work[i];
-        for (int k = Lr_start[i]; k < Lr_start[i + 1]; ++k)
-          work[Lr_index[k]] -= Lr_value[k] * wi;
-      }
-    }
-  }
-
-  // Step 5: Gather result.
-  out_nnz = 0;
-  if (do_recip) {
-    for (int k = 0; k < m; ++k) {
-      if (work[k] != 0.0) {
-        const double v = work[k] * Rs[P[k]];
-        result[P[k]] = v;
-        out_nz_idx[out_nnz++] = P[k];
-      }
-      work[k] = 0.0;
-    }
-  } else {
-    for (int k = 0; k < m; ++k) {
-      if (work[k] != 0.0) {
-        const double v = work[k] / Rs[P[k]];
-        result[P[k]] = v;
-        out_nz_idx[out_nnz++] = P[k];
       }
       work[k] = 0.0;
     }

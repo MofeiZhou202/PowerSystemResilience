@@ -159,11 +159,6 @@ struct SparseLUFactor {
   void btran(const double* rhs, double* result,
              std::vector<int>* out_nz = nullptr) const;
 
-  // Sparse BTRAN with pre-computed nonzero indices.
-  void btran_sparse(const int* rhs_nz_idx, const double* rhs_nz_val,
-                    int rhs_nnz, double* result,
-                    int* out_nz_idx, int& out_nnz) const;
-
   // ════════════════════════════════════════════════════════════════════════
   // FORREST-TOMLIN UPDATE
   // ════════════════════════════════════════════════════════════════════════

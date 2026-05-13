@@ -41,6 +41,10 @@ struct HFactorBackend::Impl {
   // Set by the most-recent factorize() to indicate the bound matrix is
   // ready for build/ftran/btran/update.
   bool setup_done = false;
+
+  // Reusable scratch buffer for ftran/btran to avoid per-call heap allocation
+  // in the dual-simplex inner loop.  Sized to num_row after each factorize().
+  mutable std::vector<double> solve_buf;
 };
 
 HFactorBackend::HFactorBackend() : p_(std::make_unique<Impl>()) {}
@@ -149,6 +153,8 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
     return false;
   }
 
+  p_->solve_buf.assign(static_cast<size_t>(num_row), 0.0);
+
   m = static_cast<int>(num_row);
   valid = true;
   return true;
@@ -161,7 +167,8 @@ bool HFactorBackend::factorize(const Eigen::SparseMatrix<double>& A,
 // ────────────────────────────────────────────────────────────────────────────
 void HFactorBackend::ftran(const double* rhs, double* result) const {
   if (!valid) return;
-  std::vector<double> buf(static_cast<size_t>(m));
+  // Use pre-allocated scratch buffer to avoid per-call heap allocation.
+  std::vector<double>& buf = p_->solve_buf;
   std::memcpy(buf.data(), rhs, static_cast<size_t>(m) * sizeof(double));
   // ftranCall(std::vector<double>&) is non-const because it uses the internal
   // rhs_ HVector workspace.  Cast away constness on the stored HFactor — the
@@ -173,7 +180,8 @@ void HFactorBackend::ftran(const double* rhs, double* result) const {
 
 void HFactorBackend::btran(const double* rhs, double* result) const {
   if (!valid) return;
-  std::vector<double> buf(static_cast<size_t>(m));
+  // Use pre-allocated scratch buffer to avoid per-call heap allocation.
+  std::vector<double>& buf = p_->solve_buf;
   std::memcpy(buf.data(), rhs, static_cast<size_t>(m) * sizeof(double));
   HFactor& nc = const_cast<HFactor&>(p_->f);
   nc.btranCall(buf, /*factor_timer_clock_pointer*/ nullptr);
