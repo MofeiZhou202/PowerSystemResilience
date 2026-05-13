@@ -60,6 +60,36 @@ class EigenKluSolver final : public SparseLinearSolver {
 };
 #endif
 
+#ifdef HACDCPF_HAVE_SUPERLU
+class SuperLUSolver final : public SparseLinearSolver {
+ public:
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+#endif
+
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+class MKLPardisoSolver final : public SparseLinearSolver {
+ public:
+  const char* backend_name() const override;
+  void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
+  bool factorize(const Eigen::SparseMatrix<double>& a) override;
+  bool solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) override;
+
+ private:
+  class Impl;
+  std::unique_ptr<Impl> impl_;
+  bool empty_system_{false};
+};
+#endif
+
 std::unique_ptr<SparseLinearSolver> make_default_sparse_solver();
 
 }  // namespace mipsolvers::engine

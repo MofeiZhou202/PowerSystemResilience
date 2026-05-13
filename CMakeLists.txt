@@ -165,6 +165,22 @@ if(MIPSOLVERS_HAVE_SUITESPARSE)
   endif()
 endif()
 
+# ── SuperLU ───────────────────────────────────────────────────────────────────
+if(MIPSOLVERS_HAVE_SUPERLU)
+  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_INCLUDE_DIR})
+  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_LIBRARY})
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_HAVE_SUPERLU=1 HACDCPF_HAVE_SUPERLU=1)
+endif()
+
+# ── Intel MKL PARDISO ─────────────────────────────────────────────────────────
+if(MIPSOLVERS_HAVE_MKL_PARDISO)
+  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_MKL_INCLUDE_DIRS})
+  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_MKL_LIBRARIES})
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_HAVE_MKL_PARDISO=1 HACDCPF_HAVE_MKL_PARDISO=1)
+endif()
+
 # ── Ipopt ─────────────────────────────────────────────────────────────────────
 if(MIPSOLVERS_HAVE_IPOPT)
   target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_IPOPT_INCLUDE_DIRS})

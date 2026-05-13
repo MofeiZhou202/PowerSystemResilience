@@ -260,6 +260,86 @@ if(MIPSOLVERS_USE_SUITESPARSE)
   endif()
 endif()
 
+# ── SuperLU (optional) ────────────────────────────────────────────────────────
+# Eigen/SuperLUSupport includes headers as <slu_ddefs.h> (no subdirectory prefix),
+# so MIPSOLVERS_SUPERLU_INCLUDE_DIR must be the folder that directly contains them.
+set(MIPSOLVERS_HAVE_SUPERLU OFF)
+set(MIPSOLVERS_SUPERLU_INCLUDE_DIR "")
+set(MIPSOLVERS_SUPERLU_LIBRARY "")
+option(MIPSOLVERS_USE_SUPERLU "Enable SuperLU backend when available" ON)
+if(MIPSOLVERS_USE_SUPERLU)
+  set(_SLU_HINTS
+    $ENV{SUPERLU_ROOT}
+    /opt/homebrew
+    /usr/local
+    /usr
+    "C:/vcpkg/installed/x64-windows"
+    "C:/SuperLU")
+  find_path(MIPSOLVERS_SUPERLU_INCLUDE_DIR NAMES slu_ddefs.h
+    HINTS ${_SLU_HINTS}
+    PATH_SUFFIXES include/superlu include superlu)
+  find_library(MIPSOLVERS_SUPERLU_LIBRARY
+    NAMES superlu superlu_5.3 superlu_5.2 superlu_5.1 superlu_5.0 superlu_4.3
+    HINTS ${_SLU_HINTS} PATH_SUFFIXES lib lib64)
+  if(MIPSOLVERS_SUPERLU_INCLUDE_DIR AND MIPSOLVERS_SUPERLU_LIBRARY)
+    set(MIPSOLVERS_HAVE_SUPERLU ON)
+    message(STATUS "mipsolvers: SuperLU detected at ${MIPSOLVERS_SUPERLU_INCLUDE_DIR}")
+  else()
+    message(STATUS "mipsolvers: SuperLU not found")
+  endif()
+endif()
+
+# ── Intel MKL PARDISO (optional) ──────────────────────────────────────────────
+set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
+set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
+set(MIPSOLVERS_MKL_LIBRARIES "")
+option(MIPSOLVERS_USE_MKL "Enable Intel MKL PARDISO backend when available" ON)
+if(MIPSOLVERS_USE_MKL)
+  set(_MKL_HINTS
+    $ENV{MKLROOT}
+    "$ENV{ONEAPI_ROOT}/mkl/latest"
+    "/opt/intel/oneapi/mkl/latest"
+    "/opt/intel/mkl"
+    "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+    "C:/Program Files/Intel/oneAPI/mkl/latest")
+  find_path(MIPSOLVERS_MKL_INCLUDE_DIR NAMES mkl_pardiso.h
+    HINTS ${_MKL_HINTS} PATH_SUFFIXES include)
+  if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_lp64
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+    find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+    find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+  else()
+    find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_c
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+    find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+    find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
+      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+  endif()
+  if(MIPSOLVERS_MKL_INCLUDE_DIR AND MIPSOLVERS_MKL_LP64_LIB
+      AND MIPSOLVERS_MKL_THREAD_LIB AND MIPSOLVERS_MKL_CORE_LIB)
+    set(MIPSOLVERS_HAVE_MKL_PARDISO ON)
+    list(APPEND MIPSOLVERS_MKL_INCLUDE_DIRS ${MIPSOLVERS_MKL_INCLUDE_DIR})
+    list(APPEND MIPSOLVERS_MKL_LIBRARIES
+      ${MIPSOLVERS_MKL_LP64_LIB} ${MIPSOLVERS_MKL_THREAD_LIB} ${MIPSOLVERS_MKL_CORE_LIB})
+    if(UNIX AND NOT APPLE)
+      find_library(_MKL_IOMP5 NAMES iomp5
+        HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
+        PATH_SUFFIXES lib lib/intel64)
+      if(_MKL_IOMP5)
+        list(APPEND MIPSOLVERS_MKL_LIBRARIES ${_MKL_IOMP5})
+      endif()
+      list(APPEND MIPSOLVERS_MKL_LIBRARIES -lpthread -lm -ldl)
+    endif()
+    message(STATUS "mipsolvers: Intel MKL detected at ${MIPSOLVERS_MKL_INCLUDE_DIR}")
+  else()
+    message(STATUS "mipsolvers: Intel MKL not found")
+  endif()
+endif()
+
 # ── Eigen3 (header-only) — use installed package, system include path, or local sibling ──
 find_package(Eigen3 3.3 CONFIG QUIET)
 

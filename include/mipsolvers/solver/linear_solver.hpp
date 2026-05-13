@@ -9,5 +9,11 @@ using mipsolvers::engine::EigenUmfPackSolver;
 #ifdef HACDCPF_HAVE_KLU
 using mipsolvers::engine::EigenKluSolver;
 #endif
+#ifdef HACDCPF_HAVE_SUPERLU
+using mipsolvers::engine::SuperLUSolver;
+#endif
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+using mipsolvers::engine::MKLPardisoSolver;
+#endif
 using mipsolvers::engine::make_default_sparse_solver;
 }  // namespace mipsolvers::solver

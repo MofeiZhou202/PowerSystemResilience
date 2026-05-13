@@ -6,6 +6,12 @@
 #ifdef HACDCPF_HAVE_KLU
 #include <Eigen/KLUSupport>
 #endif
+#ifdef HACDCPF_HAVE_SUPERLU
+#include <Eigen/SuperLUSupport>
+#endif
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+#include <Eigen/PardisoSupport>
+#endif
 
 namespace mipsolvers::engine {
 
@@ -118,11 +124,89 @@ bool EigenKluSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
 }
 #endif
 
+#ifdef HACDCPF_HAVE_SUPERLU
+class SuperLUSolver::Impl {
+ public:
+  Eigen::SuperLU<Eigen::SparseMatrix<double>> solver;
+};
+
+const char* SuperLUSolver::backend_name() const {
+  return "SuperLU(Eigen)";
+}
+
+void SuperLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.analyzePattern(a);
+}
+
+bool SuperLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.factorize(a);
+  return impl_->solver.info() == Eigen::Success;
+}
+
+bool SuperLUSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
+  if (!impl_) return false;
+  x = impl_->solver.solve(rhs);
+  return impl_->solver.info() == Eigen::Success;
+}
+#endif
+
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+class MKLPardisoSolver::Impl {
+ public:
+  Eigen::PardisoLU<Eigen::SparseMatrix<double>> solver;
+};
+
+const char* MKLPardisoSolver::backend_name() const {
+  return "Intel-MKL-PARDISO(Eigen)";
+}
+
+void MKLPardisoSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.analyzePattern(a);
+}
+
+bool MKLPardisoSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  empty_system_ = is_empty_square_system(a);
+  if (empty_system_) return true;
+  if (!impl_) impl_ = std::make_unique<Impl>();
+  impl_->solver.factorize(a);
+  return impl_->solver.info() == Eigen::Success;
+}
+
+bool MKLPardisoSolver::solve(const Eigen::VectorXd& rhs, Eigen::VectorXd& x) {
+  if (empty_system_) {
+    if (rhs.size() != 0) return false;
+    x.resize(0);
+    return true;
+  }
+  if (!impl_) return false;
+  x = impl_->solver.solve(rhs);
+  return impl_->solver.info() == Eigen::Success;
+}
+#endif
+
 std::unique_ptr<SparseLinearSolver> make_default_sparse_solver() {
 #ifdef HACDCPF_HAVE_KLU
   return std::make_unique<EigenKluSolver>();
 #elif defined(HACDCPF_HAVE_UMFPACK)
   return std::make_unique<EigenUmfPackSolver>();
+#elif defined(HACDCPF_HAVE_MKL_PARDISO)
+  return std::make_unique<MKLPardisoSolver>();
+#elif defined(HACDCPF_HAVE_SUPERLU)
+  return std::make_unique<SuperLUSolver>();
 #else
   return std::make_unique<EigenSparseLUSolver>();
 #endif
