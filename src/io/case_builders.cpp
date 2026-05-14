@@ -928,7 +928,7 @@ HybridPowerSystem build_ieee24_3area_acdc_expanded() {
     d.pmin_mw = -120.0;
     d.sn_mva = 150.0;
     d.v_ref_pu = 1.0;
-    sys.dcdc_converters.push_back(d);
+    sys.dc.dcdc_converters.push_back(d);
   };
   add_dcdc(1, 5, 7, 35.0, 0.985, "DCDC1");
   add_dcdc(2, 6, 8, 30.0, 0.982, "DCDC2");
@@ -1479,7 +1479,7 @@ HybridPowerSystem build_demo_multizone_acdc() {
   dcdc.eta = 0.975;
   dcdc.pmax_mw = 40.0;
   dcdc.pmin_mw = -40.0;
-  sys.dcdc_converters.push_back(dcdc);
+  sys.dc.dcdc_converters.push_back(dcdc);
 
   for (auto& vsc : sys.vsc_converters) {
     vsc.eta = 0.985;
@@ -2817,7 +2817,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dcdc1.pmax_mw = 2.0;
   dcdc1.pmin_mw = 0.0;
   dcdc1.controllable = true;
-  sys.dcdc_converters.push_back(dcdc1);
+  sys.dc.dcdc_converters.push_back(dcdc1);
 
   DCDCConverter dcdc2;
   dcdc2.index = 2;
@@ -2835,7 +2835,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   dcdc2.pmax_mw = 1.0;
   dcdc2.pmin_mw = -1.0;
   dcdc2.controllable = true;
-  sys.dcdc_converters.push_back(dcdc2);
+  sys.dc.dcdc_converters.push_back(dcdc2);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // DC STATIC GENERATORS

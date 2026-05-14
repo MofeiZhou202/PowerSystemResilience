@@ -12,16 +12,15 @@ contract explicit at workbook-column and JSON-key level.
 Artifact & Export path & Direction & Current note \\
 \midrule
 \endhead
-\texttt{PowerFlowResult} dedicated workbook & \texttt{save\_results\_xlsx} & export only & writes the \texttt{Results\_*} sheets only; there is no dedicated PF result JSON serializer today. \\
+\texttt{PowerFlowResult} dedicated workbook & source-only workbook helper & export only & writes the \texttt{Results\_*} sheets only when optional Excel support is compiled. \\
 \texttt{PowerFlowResult} compact workbook & \texttt{save\_results\_compact\_xlsx} & export only & rewrites input sheets and appends \texttt{result\_*} columns to selected tables, plus \texttt{Results\_Summary}. \\
+\texttt{PowerFlowResult} JSON & \texttt{power\_flow\_result\_to\_json} / \texttt{save\_power\_flow\_result\_json} & export only & serializes convergence summary plus AC/DC bus states, AC/DC branch flows, VSC transfers, and DC/DC transfers. \\
 \texttt{ACOPFResult} dedicated workbook & \texttt{save\_opf\_results\_xlsx} & export only & writes \texttt{OPF\_*} sheets only. \\
 \texttt{ACOPFResult} compact workbook & \texttt{save\_opf\_results\_compact\_xlsx} & export only & rewrites input sheets but still emits separate \texttt{OPF\_*} sheets; no \texttt{opf\_*} columns are appended into input tables. \\
-\texttt{ACOPFResult} JSON & \texttt{opf\_result\_to\_json} / \texttt{opf\_result\_from\_json} & bidirectional & serializes the scalar solver summary, core bus / generator / converter vectors, and OPF profiling block. \\
+\texttt{ACOPFResult} JSON & \texttt{opf\_result\_to\_json} / \texttt{opf\_result\_from\_json} & bidirectional & serializes scalar summary, \texttt{solver\_path}, bus / generator / converter vectors, enhanced dispatch objects with maps, legacy dispatch arrays, and OPF profiling block. \\
 \texttt{CarbonAnalysisResult} workbook & \texttt{save\_carbon\_results\_xlsx} & export only & writes AC/DC load and bus sheets, AC/DC branch-loss sheets, converter-loss sheets, storage / EnergyRouter sheets, and block-style \texttt{Summary}. \\
 \texttt{CarbonAnalysisResult} JSON & \texttt{carbon\_result\_to\_json} / \texttt{carbon\_result\_from\_json} & bidirectional & preserves the richer tracing maps and the hybrid AC/DC carrier results that the workbook flattens. \\
-\texttt{SCResult} / \texttt{BusFaultResult} API & \texttt{compute\_short\_circuit} / \texttt{compute\_fault\_at\_bus} & in-memory only & no workbook / JSON serializer exists yet; batch results follow projected AC-bus order. \\
-\texttt{SCDetailedResult} API & \texttt{run\_short\_circuit\_detailed} / \texttt{run\_short\_circuit\_detailed\_batch} & in-memory only & detailed IEC-style current quantities are exposed only through the C++ API; the header still carries legacy scaffold flags. \\
-\texttt{ONRResult} API & \texttt{solve\_optimal\_reconfiguration} & in-memory only & no workbook / JSON serializer exists yet; branch-status vectors currently report branch-table positions rather than original \texttt{ACBranch::index} values. \\
+Short-circuit and ONR artifacts & absent from the current public API & none & the current public headers in this repository do not expose \texttt{compute\_short\_circuit}, \texttt{BusFaultResult}, or \texttt{solve\_optimal\_reconfiguration}; no output field contract is documented for them. \\
 \bottomrule
 \end{longtable}
 
@@ -35,15 +34,14 @@ Semantic aspect & Current rule & Main artifacts & Engineering note \\
 Electrical units & Active power uses MW, reactive power uses Mvar, AC / DC voltage magnitudes use pu, AC voltage angle uses degree, and current stays in pu unless the field name explicitly says \texttt{ka}. & PF / OPF workbooks and JSON & Workbook and JSON field names usually encode the unit directly, for example \texttt{pg\_mw}, \texttt{va\_deg}, \texttt{loss\_mw}, and \texttt{matrix\_residual}. \\
 Carbon units & Carbon intensity uses \texttt{tCO2/MWh}; total emissions use \texttt{tCO2}. & Carbon workbook and JSON & The JSON / workbook field names use the suffixes \texttt{\_tco2\_mwh} and \texttt{\_tco2}; no implicit mass-unit conversion is applied by the exporter. \\
 Vector order & Numerical result vectors follow solver-side component order, not sparse physical ids.  \texttt{vm}, \texttt{va}, \texttt{dpd\_mw}, and \texttt{dqd\_mvar} follow AC-bus order; \texttt{vdc} follows DC-bus order; \texttt{pg\_mw}, \texttt{qg\_mvar} follow AC-generator order; \texttt{pac\_mw}, \texttt{qac\_mvar} follow VSC order. & PF / OPF JSON and workbook exports & Consumers should treat workbook rows and JSON vectors as aligned to the source component arrays unless a sheet explicitly says otherwise. \\
-Row identity & Most workbook result sheets copy the source model \texttt{index} and \texttt{name}.  The main exception is \texttt{Results\_BranchFlow.index}, which is the export row ordinal \texttt{i+1}. & PF workbooks & For branch-flow joins, use source branch order or the \texttt{from\_bus}/\texttt{to\_bus} pair rather than assuming the result-sheet \texttt{index} is the original branch id. \\
+Row identity & Workbook result sheets copy source model \texttt{index} values when a source component exists; \texttt{Results\_BranchFlow.index} is currently \texttt{ACBranch::index}. & PF workbooks and PF JSON & For branch-flow joins, use the source component index plus terminal buses; do not assume row number equals component id. \\
 Fallback values & When a solver vector entry is absent or out of range, exporters write deterministic defaults: typically \texttt{0.0} for powers, angles, counters, and residual-like scalars, or \texttt{1.0} for voltage magnitudes. & PF / OPF workbooks & This keeps workbook shapes stable, but it means a consumer must distinguish ``solver wrote a fallback'' from ``the physical result is exactly zero'' using convergence and artifact context. \\
 JSON missing keys & JSON importers keep absent arrays or object maps empty and default absent scalar keys to false, zero, or empty string according to the target field type. & OPF / carbon JSON & The JSON contracts are intentionally sparse-friendly; round-trip consumers should not require every optional key to be present. \\
 Echoed vs solved values & Some exported fields are metadata echoes or derived annotations rather than true solver states: storage \texttt{soc} comes from input \texttt{soc\_init}; router port sums come from stored port structs; \texttt{Results\_DCBranch} is recomputed from solved voltages and branch resistance. & PF workbooks & Consumers should not infer that every result-sheet field belongs to the nonlinear state vector. \\
 Boolean spelling & PF / OPF workbook booleans use the standard workbook token form produced by \texttt{bool\_str}; carbon \texttt{Summary} uses lowercase \texttt{true}/\texttt{false}. & Result workbooks & Downstream parsers should normalize workbook booleans instead of assuming one literal spelling. \\
 Conditional sheets & Some result sheets are pre-created even when no rows are written.  \texttt{OPF\_Converter} is the main example. & PF / OPF workbooks & Empty sheets are part of the current export contract and do not by themselves indicate an error. \\
 Object-map semantics & Carbon contribution maps are exported as JSON object maps keyed by internal carbon-source id rather than positional arrays. & Carbon JSON & Map-key order is not semantically meaningful; workbook export intentionally flattens these maps away. \\
-Projected API order & \texttt{SCResult.bus\_results} and \texttt{SCDetailedResult.bus\_results} follow projected AC-bus order; \texttt{ONRResult.open\_branch\_ids} / \texttt{closed\_branch\_ids} contain stable \texttt{ACBranch::index} values from the projected AC system. & SC / ONR C++ API results & When a \texttt{HybridPowerSystem} overload expands transformers, switches, or chargers, the result identities belong to the projected equivalents rather than the original composite component tables.  ONR branch-status lists now use durable component indices rather than positional offsets. \\
-Fault-current units & \texttt{z\_thevenin} and \texttt{i\_fault\_pu} stay in per-unit complex form, while \texttt{ikpp\_ka}, \texttt{ikss\_ka}, \texttt{ip\_ka}, \texttt{ib\_ka}, and \texttt{ik\_ka} are reported in kA. & SC C++ API results & Consumers should not compare per-unit and kA fields directly without the documented base quantities. \\
+Stub / absent analysis outputs & Distribution power flow, resilience, and carbon analysis currently return stub-style results; short-circuit and ONR public output APIs are absent. & analysis namespace and scope boundary & The serializers listed here describe existing export code paths, but they do not imply that every analysis family has an implemented solver producing those artifacts. \\
 \bottomrule
 \end{longtable}
 
@@ -61,9 +59,7 @@ Parity OPF formulation & \texttt{dpd\_mw}, \texttt{dqd\_mvar} & \texttt{OPF\_Bus
 OPF fallback selection & \texttt{status}, convergence flags, and partial vectors & \texttt{OPF\_Summary}, \texttt{ACOPFResult} JSON & Consumers should read \texttt{status} together with \texttt{converged}; some fallback paths can return structurally valid but less detailed result blocks. \\
 Carbon tracing method & \texttt{tracing\_verified} and \texttt{tracing\_summary.*} & carbon workbook and JSON & These fields describe graph-tracing consistency, not matrix-solver success. \\
 Carbon matrix method & \texttt{matrix\_solved}, \texttt{matrix\_residual}, and \texttt{matrix\_summary.*} & carbon workbook and JSON & \texttt{matrix\_residual} is specific to the matrix solve; it is not directly comparable to PF or OPF residual metrics. \\
-Simplified short-circuit path & \texttt{z\_thevenin}, \texttt{i\_fault\_pu}, \texttt{sk\_mva}, \texttt{ikpp\_ka} & \texttt{SCResult} / \texttt{BusFaultResult} & The batch and single-bus APIs share the same projected fault-admittance model; they differ only in whether every bus or one selected bus is evaluated. \\
-Detailed short-circuit path & \texttt{ikss\_*}, \texttt{ip\_ka}, \texttt{ib\_ka}, \texttt{ik\_ka}, legacy \texttt{placeholders\_only} & \texttt{SCDetailedResult} API & The detailed path now produces populated current fields for all buses, but \texttt{placeholders\_only} and \texttt{pending\_functions} remain legacy compatibility fields and explicit external-grid contribution is still folded into \texttt{ikss\_no\_motor\_ka}. \\
-ONR MILP plus verification PF & \texttt{open\_branch\_ids}, \texttt{closed\_branch\_ids}, \texttt{milp\_objective}, \texttt{estimated\_loss\_mw}, \texttt{verification\_pf}, \texttt{bc\_stats} & \texttt{ONRResult} API & The branch-status lists describe the MILP topology decision, while \texttt{verification\_pf} re-runs the nonlinear PF solver on the snapped binary topology. \\
+Distribution resilience stub & \texttt{completed=false}, \texttt{status=not\_implemented} & public API result object & the facade exposes \texttt{run\_distribution\_resilience\_assessment}, but the implementation currently returns a stub result rather than a populated report workbook or JSON artifact. \\
 \bottomrule
 \end{longtable}
 
@@ -79,7 +75,7 @@ Consumer slice & Join key & Stable / optional fields & Compatibility constraint 
 \texttt{Results\_ACBus}, \texttt{Results\_DCBus} & \texttt{index} & voltage fields are stable; \texttt{name} is descriptive only & consumers should join by \texttt{index} rather than row number even though row order follows the source bus tables. \\
 Entity sheets with explicit ids & \texttt{index} on converter, storage, charging-station, charger, router, VPP, microgrid, and mobile-storage sheets & identity and metadata columns are stable; solved voltages / transfer values may fall back to deterministic defaults & additive columns are expected to be backward compatible; consumers should read by header name instead of fixed workbook position. \\
 \texttt{Results\_EnergyRouterPort} & pair \texttt{(router\_index, port\_index)} & solved transfer fields may fall back to stored port metadata; \texttt{port\_name} is descriptive only & the flattened port contract is stable at the key-field level, not at the row-order level. \\
-\texttt{Results\_BranchFlow} & exported row order aligned to the source branch table, plus \texttt{from\_bus}/\texttt{to\_bus}; not \texttt{index} & flow fields are stable; \texttt{index} is only the export row ordinal & consumers must not persist \texttt{Results\_BranchFlow.index} as a durable foreign key because it is not the original branch id. \\
+\texttt{Results\_BranchFlow} & \texttt{index} copied from \texttt{ACBranch::index}, plus \texttt{from\_bus}/\texttt{to\_bus} & flow, \texttt{loss\_mw}, and \texttt{loading\_pct} fields are stable & consumers should still read by header name and tolerate non-contiguous source branch ids. \\
 \texttt{Results\_Summary} & \texttt{Key} & current scalar keys are stable; extra keys may appear additively & consumers should parse it as a name/value sheet and must not depend on fixed row numbers. \\
 \bottomrule
 \end{longtable}
@@ -94,8 +90,8 @@ Consumer slice & Join key & Stable / optional fields & Compatibility constraint 
 \texttt{OPF\_Bus} & \texttt{index} & \texttt{vm\_pu}, \texttt{va\_deg}, \texttt{dpd\_mw}, and \texttt{dqd\_mvar} are the stable solved fields; \texttt{name} and \texttt{base\_kv} are echoes & workbook rows align to \texttt{sys.ac.buses}, but consumers should still join by \texttt{index}. \\
 \texttt{OPF\_Generator} & \texttt{index} & dispatch fields are stable; cost and \texttt{fuel\_type} columns are echoed metadata & unknown future columns should be ignored, and consumers should not assume the sheet contains only solved variables. \\
 \texttt{OPF\_Converter} & \texttt{index} & \texttt{pac\_mw} and \texttt{qac\_mvar} are stable when the sheet has rows & the sheet may be present but empty when no VSC converters exist, so emptiness is not itself an error condition. \\
-\texttt{OPF\_Summary} and JSON scalar block & workbook \texttt{Key}; JSON top-level scalar names & convergence, iteration, objective, residual-like, and status fields are stable & summary consumers should tolerate additive keys while continuing to treat existing keys as stable. \\
-\texttt{ACOPFResult} vector blocks & AC-bus order for \texttt{vm}, \texttt{va}, \texttt{dpd\_mw}, \texttt{dqd\_mvar}; generator order for \texttt{pg\_mw}, \texttt{qg\_mvar}; VSC order for \texttt{pac\_mw}, \texttt{qac\_mvar} & the profiling object is optional on import; absent arrays stay empty & the current public JSON / workbook contract still omits \texttt{pren\_mw}, \texttt{qren\_mvar}, \texttt{pstor\_mw}, \texttt{qstor\_mvar}, \texttt{pdcdc\_mw}, and \texttt{pflex\_mw} even though the in-memory result struct already contains them. \\
+\texttt{OPF\_Summary} and JSON scalar block & workbook \texttt{Key}; JSON top-level scalar names & convergence, iteration, objective, residual-like, \texttt{solver\_path}, and status fields are stable & summary consumers should tolerate additive keys while continuing to treat existing keys as stable. \\
+\texttt{ACOPFResult} vector and dispatch blocks & AC-bus order for \texttt{vm}, \texttt{va}, \texttt{vdc}, \texttt{dpd\_mw}, \texttt{dqd\_mvar}; generator order for \texttt{pg\_mw}, \texttt{qg\_mvar}; VSC order for \texttt{pac\_mw}, \texttt{qac\_mvar}; map arrays for enhanced dispatch & the profiling object is optional on import; absent arrays stay empty & JSON serializes \texttt{renewable\_dispatch}, \texttt{storage\_dispatch}, \texttt{dcdc\_dispatch}, \texttt{flex\_dispatch}, plus legacy arrays \texttt{pren\_mw}, \texttt{qren\_mvar}, \texttt{pstor\_mw}, \texttt{qstor\_mvar}, \texttt{pdcdc\_mw}, and \texttt{pflex\_mw}. \\
 \bottomrule
 \end{longtable}
 
@@ -114,6 +110,23 @@ top-level scalar block & top-level key names & \texttt{tracing\_verified}, \text
 \texttt{storage\_carbon[]} & pair \texttt{(storage\_index, is\_dc)} & scalar storage-state fields are stable; \texttt{source\_supply\_mw} may be absent and then defaults to an empty map & \texttt{p\_mw} uses the bus-injection sign convention and determines whether the row should be interpreted as discharge or charging sink. \\
 \texttt{energy\_router\_carbon[]} & \texttt{router\_index} & scalar router loss fields are stable; \texttt{source\_loss\_mw} may be absent and then defaults to an empty map & consumers should join by router index and not infer semantics from workbook row order. \\
 generator-allocation maps and summary blocks & source-id string for maps; top-level object name for summaries & \texttt{generator\_loss\_allocation}, \texttt{tracing\_summary}, and \texttt{matrix\_summary} are stable object names & map keys are JSON strings of internal source ids, and consumers must normalize them back to integer identifiers if a typed downstream schema requires that. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Power-Flow Result JSON}
+
+\begin{longtable}{@{}L{0.20\linewidth}L{0.24\linewidth}L{0.22\linewidth}L{0.26\linewidth}@{}}
+\toprule
+JSON key / row object & Fields & Population rule & Meaning / note \\
+\midrule
+\endhead
+top-level scalar block & \texttt{converged}, \texttt{iterations}, \texttt{residual} & copied from \texttt{PowerFlowResult} & solver summary for the exported result \\
+\texttt{ac\_buses[]} & \texttt{index}, \texttt{name}, \texttt{vm\_pu}, \texttt{va\_deg} & component identity from \texttt{sys.ac.buses}; solved values from \texttt{result.vm}/\texttt{result.va}, falling back to stored bus \texttt{vm\_pu}/\texttt{va\_deg} & solved AC bus states \\
+\texttt{dc\_buses[]} & \texttt{index}, \texttt{name}, \texttt{vm\_pu} & component identity from \texttt{sys.dc.buses}; solved value from \texttt{result.vdc}, falling back to stored bus \texttt{vm\_pu} & solved DC bus states \\
+\texttt{ac\_branch\_flows[]} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{pf\_mw}, \texttt{qf\_mvar}, \texttt{pt\_mw}, \texttt{qt\_mvar}, \texttt{loss\_mw}, \texttt{loading\_pct} & \texttt{index} and terminals copied from \texttt{ACBranch}; flow values copied from \texttt{result.branch\_flows}; loading computed against rating fallback logic & AC branch-flow rows use original branch indices, not row ordinals \\
+\texttt{dc\_branch\_flows[]} & \texttt{index}, \texttt{name}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{pf\_mw}, \texttt{pt\_mw}, \texttt{loss\_mw}, \texttt{loading\_pct} & component identity from \texttt{DCBranch}; flow values from \texttt{result.dc\_branch\_flows} when present & DC branch-flow rows \\
+\texttt{vsc\_transfers[]} & \texttt{index}, \texttt{bus\_ac}, \texttt{bus\_dc}, \texttt{p\_ac\_mw}, \texttt{q\_ac\_mvar}, \texttt{p\_dc\_mw}, \texttt{loss\_mw} & copied from \texttt{result.vsc\_transfers} aligned with VSC order & AC/DC converter transfer rows \\
+\texttt{dcdc\_transfers[]} & \texttt{index}, \texttt{bus\_in}, \texttt{bus\_out}, \texttt{p\_in\_mw}, \texttt{p\_out\_mw}, \texttt{loss\_mw} & copied from \texttt{result.dcdc\_transfers} aligned with DC/DC converter order & DC/DC converter transfer rows \\
 \bottomrule
 \end{longtable}
 
@@ -154,10 +167,12 @@ Field & Workbook sheet / column & Population rule & Meaning / note \\
 Field & Workbook sheet / column & Population rule & Meaning / note \\
 \midrule
 \endhead
-\texttt{index} & \texttt{Results\_BranchFlow.index} & row ordinal \texttt{i+1}, not the source AC branch \texttt{index} field & export-side branch-flow row id \\
+\texttt{index} & \texttt{Results\_BranchFlow.index} & copied from \texttt{sys.ac.branches[i].index} & source AC branch identifier \\
 \texttt{from\_bus}, \texttt{to\_bus} & same columns & copied from \texttt{sys.ac.branches[i]} when present; fallback \texttt{0} & terminal buses of the reported AC branch row \\
 \texttt{pf\_mw}, \texttt{qf\_mvar} & same columns & copied from \texttt{result.branch\_flows[i]} & sending-end active and reactive power \\
 \texttt{pt\_mw}, \texttt{qt\_mvar} & same columns & copied from \texttt{result.branch\_flows[i]} & receiving-end active and reactive power \\
+\texttt{loss\_mw} & \texttt{Results\_BranchFlow.loss\_mw} & computed as \texttt{max(pf\_mw + pt\_mw, 0.0)} & exported AC branch loss \\
+\texttt{loading\_pct} & \texttt{Results\_BranchFlow.loading\_pct} & computed from the larger terminal apparent power over \texttt{rate\_a\_mva}, system base MVA, or AC base MVA fallback & branch loading percentage \\
 \bottomrule
 \end{longtable}
 
@@ -175,6 +190,7 @@ Field & Workbook sheet / column & Population rule & Meaning / note \\
 \texttt{i\_pu} & \texttt{Results\_DCBranch.i\_pu} & computed as \((v_{\mathrm{from}}-v_{\mathrm{to}})/r_{\mathrm{pu}}\) when in service and \texttt{r\_pu>0}; else \texttt{0.0} & derived branch current on system base \\
 \texttt{p\_from\_mw}, \texttt{p\_to\_mw} & same columns & computed from solved terminal voltages, derived current, and system base MVA & terminal powers implied by the solved DC branch state \\
 \texttt{loss\_mw} & \texttt{Results\_DCBranch.loss\_mw} & computed as \texttt{p\_from\_mw + p\_to\_mw} & exported branch-loss figure \\
+\texttt{loading\_pct} & \texttt{Results\_DCBranch.loading\_pct} & computed from terminal active powers over \texttt{s\_max\_mva}, \texttt{rate\_a\_mva}, or base MVA fallback & DC branch loading percentage \\
 \bottomrule
 \end{longtable}
 
@@ -628,57 +644,6 @@ Field & Workbook sheet / cell block & Population rule & Meaning / note \\
 \bottomrule
 \end{longtable}
 
-\subsection{Short-Circuit and Network-Reconfiguration API Results}
-
-\subsubsection*{\texttt{BusFaultResult} and \texttt{SCResult}}
-
-\begin{longtable}{@{}L{0.18\linewidth}L{0.26\linewidth}L{0.22\linewidth}L{0.28\linewidth}@{}}
-\toprule
-Field & API path & Population rule & Meaning / note \\
-\midrule
-\endhead
-\texttt{base\_mva} & \texttt{SCResult.base\_mva} & copied from the projected study base MVA & system base used when converting per-unit short-circuit quantities to engineering units \\
-\texttt{bus\_results[]} & \texttt{SCResult.bus\_results} & one row per projected AC bus in projected bus order & batch short-circuit output vector for the simplified solver path \\
-\texttt{bus\_id} & \texttt{bus\_results[k].bus\_id} & copied from \texttt{projected.ac.buses[k].index} & stable projected-bus join key \\
-\texttt{z\_thevenin} & \texttt{bus\_results[k].z\_thevenin} & diagonal Thevenin term recovered from the factored fault network & complex Thevenin impedance seen at the faulted bus in per-unit \\
-\texttt{i\_fault\_pu} & \texttt{bus\_results[k].i\_fault\_pu} & derived from the selected fault-type equation and the computed Thevenin impedance & complex fault current in per-unit on the study base \\
-\texttt{sk\_mva}, \texttt{ikpp\_ka} & corresponding fields & converted from the per-unit fault result using base MVA and base kV & reported three-phase short-circuit power and initial symmetrical current in engineering units \\
-\bottomrule
-\end{longtable}
-
-\subsubsection*{\texttt{SCDetailedResult} and \texttt{SCDetailedBusResult}}
-
-\begin{longtable}{@{}L{0.18\linewidth}L{0.26\linewidth}L{0.22\linewidth}L{0.28\linewidth}@{}}
-\toprule
-Field & API path & Population rule & Meaning / note \\
-\midrule
-\endhead
-\texttt{fault\_bus\_id} & \texttt{SCDetailedResult.fault\_bus\_id} & copied from the user-selected fault bus index & stable identifier of the studied fault location \\
-\texttt{placeholders\_only}, \texttt{pending\_functions} & top-level legacy fields & current implementation sets them to \texttt{false} and empty respectively & compatibility-only scaffold markers retained in the public header; they no longer describe the current runtime behavior accurately \\
-\texttt{bus\_results[]} & \texttt{SCDetailedResult.bus\_results} & one row per projected AC bus in projected bus order & detailed IEC-style current report for the selected fault case \\
-\texttt{bus\_id}, \texttt{ikss\_ka}, \texttt{ikss\_1\_ka}, \texttt{ikss\_2\_ka} & nested fields on each bus row & computed from the dense positive- / zero-sequence matrices and transfer terms & bus identity plus initial short-circuit current totals in kA \\
-\texttt{ikss\_gen\_contrib\_ka}, \texttt{ikss\_motor\_contrib\_ka}, \texttt{ikss\_load\_contrib\_ka}, \texttt{ikss\_sgen\_contrib\_ka} & nested fields on each bus row & derived from the current implementation's explicit per-source buckets & explicit contribution buckets currently cover generators, motors, load-motor fractions, and static generators only \\
-\texttt{ikss\_no\_motor\_ka} & nested field on each bus row & computed as the residual after subtracting the explicit contribution buckets from total \texttt{ikss} & currently absorbs external-grid contribution and any remaining network-side residual, so it is not a pure ``network only'' channel \\
-\texttt{ip\_ka}, \texttt{ib\_ka}, \texttt{ik\_ka} & nested fields on each bus row & derived from the detailed \(\kappa\)-factor, breaking-current, and steady-state-current calculations & detailed IEC-style peak, breaking, and steady-state short-circuit currents in kA \\
-\bottomrule
-\end{longtable}
-
-\subsubsection*{\texttt{ONRResult}}
-
-\begin{longtable}{@{}L{0.18\linewidth}L{0.26\linewidth}L{0.22\linewidth}L{0.28\linewidth}@{}}
-\toprule
-Field & API path & Population rule & Meaning / note \\
-\midrule
-\endhead
-\texttt{open\_branch\_ids}, \texttt{closed\_branch\_ids} & top-level vectors & built from the rounded \(\alpha_b\) topology decision after the MILP solve & branch-status lists contain stable \texttt{ACBranch::index} values from the projected AC system, enabling consumers to join results back to the original branch table by component identity \\
-\texttt{milp\_objective} & \texttt{ONRResult.milp\_objective} & copied from the native branch-and-cut solve statistics & linearized MILP objective value before the nonlinear verification PF \\
-\texttt{estimated\_loss\_mw} & \texttt{ONRResult.estimated\_loss\_mw} & recomputed from closed-branch \(\sum r_b |P_b|\) on system base & engineering-unit approximation of the MILP loss proxy \\
-\texttt{verification\_pf} & \texttt{ONRResult.verification\_pf} & produced by rerunning the nonlinear PF solver on the snapped binary topology & full \texttt{PowerFlowResult} verification artifact for the chosen reconfiguration plan \\
-\texttt{feasible}, \texttt{optimal} & corresponding flags & copied from branch-and-cut success / gap checks & high-level solve-status flags; \texttt{optimal} is tied to the MILP gap criterion, not to the nonlinear verification PF result \\
-\texttt{bc\_stats} & \texttt{ONRResult.bc\_stats} & copied from the native branch-and-cut engine result & node counts, cut counts, gap, runtime, and other MILP diagnostics \\
-\bottomrule
-\end{longtable}
-
 \subsection{Current Output-Side Gaps}
 
 \begin{longtable}{@{}L{0.18\linewidth}L{0.20\linewidth}L{0.14\linewidth}L{0.38\linewidth}@{}}
@@ -686,15 +651,13 @@ Field & API path & Population rule & Meaning / note \\
 Area & Artifact & Status & Engineering consequence \\
 \midrule
 \endhead
-\texttt{PowerFlowResult} JSON & none & not implemented & PF profiling, branch flows, and converter transfer vectors cannot currently round-trip through a dedicated JSON result file. \\
+\texttt{PowerFlowResult} JSON import & PF JSON & export only & PF result JSON can be written, but there is no matching public result-from-JSON reader. \\
 PF profiling block & PF workbooks & not exported & the in-memory \texttt{PowerFlowResult.profiling} structure is not written to workbook output. \\
 \texttt{ACOPFResult} enhanced dispatch vectors & OPF JSON / workbook & exported with packed semantics & Renewable, storage, DC/DC, and flexible-load dispatch vectors are exported as packed variable arrays with companion \texttt{ComponentRef} identity maps.  JSON uses structured \texttt{renewable\_dispatch} / \texttt{storage\_dispatch} / \texttt{dcdc\_dispatch} / \texttt{flex\_dispatch} objects; workbook sheets use \texttt{var\_idx}, \texttt{source\_type}, and \texttt{component\_index} columns. \\
 carbon contribution maps & carbon workbook & not exported & \texttt{generator\_supply\_mw}, \texttt{generator\_loss\_mw}, \texttt{source\_supply\_mw}, \texttt{source\_loss\_mw}, and \texttt{generator\_loss\_allocation} are available only in JSON. \\
 \texttt{OPF\_Converter} & OPF workbook & conditional population & the sheet is only populated when VSC converters exist; otherwise the sheet may stay empty even though the workbook pre-creates it. \\
-short-circuit result serialization & SC outputs & not implemented & \texttt{SCResult} and \texttt{SCDetailedResult} can only be consumed through the C++ API today. \\
-ONR result serialization & ONR outputs & not implemented & \texttt{ONRResult} has no workbook / JSON export, so reconfiguration studies do not yet have a stable file-level output contract. \\
-ONR branch identity & \texttt{ONRResult} & resolved & branch-status vectors now emit stable \texttt{ACBranch::index} values from the projected system, matching the component identity contract. \\
-\texttt{SCDetailedResult} legacy fields & detailed SC API & stale public contract & \texttt{placeholders\_only} and \texttt{pending\_functions} remain in the public header even though the implementation now fills detailed results. \\
+short-circuit outputs & public API / files & absent & this repository does not currently expose a short-circuit result API or any workbook / JSON serializer for it. \\
+ONR outputs & public API / files & absent & this repository does not currently expose \texttt{solve\_optimal\_reconfiguration} or a workbook / JSON output contract for network reconfiguration. \\
 \bottomrule
 \end{longtable}
 

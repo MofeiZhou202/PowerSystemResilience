@@ -2127,7 +2127,7 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
   for (const auto& p : sys.dc.pv_arrays) dc["pv_arrays"].push_back(pv_array_dc_to_json(p));
 
   dc["dcdc_converters"] = json::array();
-  for (const auto& c : sys.dcdc_converters) dc["dcdc_converters"].push_back(dcdc_to_json(c));
+  for (const auto& c : sys.dc.dcdc_converters) dc["dcdc_converters"].push_back(dcdc_to_json(c));
 
   dc["dc_circuit_breakers"] = json::array();
   for (const auto& cb : sys.dc.dc_circuit_breakers) dc["dc_circuit_breakers"].push_back(dc_circuit_breaker_to_json(cb));
@@ -2238,7 +2238,7 @@ HybridPowerSystem from_json(const std::string& json_str) {
     if (dc.contains("pv_arrays"))
       for (const auto& j : dc["pv_arrays"]) sys.dc.pv_arrays.push_back(pv_array_dc_from_json(j));
     if (dc.contains("dcdc_converters"))
-      for (const auto& j : dc["dcdc_converters"]) sys.dcdc_converters.push_back(dcdc_from_json(j));
+      for (const auto& j : dc["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
     if (dc.contains("dc_circuit_breakers"))
       for (const auto& j : dc["dc_circuit_breakers"]) sys.dc.dc_circuit_breakers.push_back(dc_circuit_breaker_from_json(j));
   }
@@ -2247,7 +2247,7 @@ HybridPowerSystem from_json(const std::string& json_str) {
     for (const auto& j : root["vsc_converters"]) sys.vsc_converters.push_back(vsc_from_json(j));
 
   if (root.contains("dcdc_converters"))
-    for (const auto& j : root["dcdc_converters"]) sys.dcdc_converters.push_back(dcdc_from_json(j));
+    for (const auto& j : root["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
 
   if (root.contains("energy_routers"))
     for (const auto& j : root["energy_routers"]) sys.energy_routers.push_back(energy_router_from_json(j));

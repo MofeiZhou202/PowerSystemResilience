@@ -5,35 +5,48 @@
 
 \subsection{Scope and Architecture Overview}
 
-This chapter documents the steady-state hybrid AC/DC power-flow (PF) module
-in \texttt{src/power_flow/} and \texttt{src/engine/solver/native/nle/}.
-The module is production-quality and ships as the primary numerical engine for
-planning, optimization warm-starts, and annual simulation.
+This chapter documents the steady-state hybrid AC/DC power-flow (PF) module in
+\texttt{src/power\_flow/}.  The legacy engine include path
+\texttt{include/hacdcpf/engine/solver/native/nle/newton\_solver.hpp} is a
+declaration/compatibility entry point for the same Newton class; there is no
+corresponding \texttt{src/engine} implementation directory in this repository.
 
-The module exposes seven public solver paths:
+The facade in \texttt{include/hacdcpf/api/hacdcpf.hpp} exposes these public PF
+entry points:
 
 \begin{longtable}{L{0.24\linewidth}L{0.22\linewidth}L{0.46\linewidth}}
 \toprule
-Public API & Primary file & Scope \\
+Public API & Primary implementation / declaration & Scope \\
 \midrule
 \endhead
-\texttt{solve\_power\_flow} & \texttt{hybrid.cpp} & Hybrid AC/DC Newton; full coupling \\
-\texttt{solve\_dc\_power\_flow} & \texttt{dc.cpp} & DC-only Newton \\
-\texttt{solve\_ac\_power\_flow} (FDPF) & \texttt{fdpf\_solver.cpp} & Fast-decoupled AC-only \\
-\texttt{solve\_ac\_dc\_power\_flow} & \texttt{ac\_linearized\_pf.cpp} & Linearized DC-load-flow angle + DC \\
-\texttt{solve\_adaptive\_power\_flow} & \texttt{adaptive\_solver.cpp} & Island-aware with fallback chain \\
-\texttt{solve\_islanded\_power\_flow} & \texttt{adaptive\_solver.cpp} & Explicit per-island solve \\
-\texttt{solve\_distributed\_slack\_pf} & \texttt{distributed\_slack\_solver.cpp} & Multi-source slack participation \\
+\texttt{solve\_power\_flow} & \texttt{src/power\_flow/hybrid.cpp} & Hybrid AC/DC Newton through \texttt{powerflow::solve\_hybrid}. \\
+\texttt{solve\_dc\_power\_flow} & \texttt{src/power\_flow/dc.cpp} / \texttt{dc\_solver.cpp} & DC-only Newton result wrapper. \\
+\texttt{solve\_power\_flow\_adaptive} & \texttt{src/power\_flow/adaptive\_solver.cpp} & Adaptive island-aware solve through \texttt{powerflow::solve\_hybrid\_adaptive}. \\
+\texttt{solve\_power\_flow\_islanded} & \texttt{src/power\_flow/adaptive\_solver.cpp} & Explicit islanded solve wrapper. \\
+\texttt{solve\_power\_flow\_distributed\_slack} & \texttt{src/power\_flow/distributed\_slack\_solver.cpp} & Simplified distributed-slack solve. \\
+\texttt{solve\_power\_flow\_distributed\_slack\_full} & \texttt{src/power\_flow/distributed\_slack\_solver.cpp} & Full-Jacobian distributed-slack solve. \\
+\texttt{create\_solver\_handle}, \texttt{reset\_solver\_handle}, \texttt{solve\_handle}, \texttt{solve\_dc\_handle}, \texttt{destroy\_solver\_handle} & API handle facade & Reusable solver-handle lifecycle and solve calls. \\
+\texttt{solve\_power\_flow\_fdpf} & \texttt{src/power\_flow/fdpf\_solver.cpp} & Fast-decoupled AC-only PF. \\
+\texttt{solve\_ac\_dc\_power\_flow} & \texttt{src/power\_flow/ac\_linearized\_pf.cpp} & Linearized AC-angle/DC result helper. \\
 \bottomrule
 \caption{Public power-flow API family.}
 \label{tab:pf-api}
 \end{longtable}
 
-All paths share the same canonical preprocessing pipeline
-(\texttt{solver\_data.cpp}, \texttt{admittance\_builder.cpp}) and differ only
-in their iteration loops or post-processing.  The main Newton kernel lives in
-\texttt{src/engine/solver/native/nle/newton\_solver.cpp} and is reused by the
-hybrid solver, the OPF warm-start path, and the adaptive solver.
+The lower-level \texttt{hacdcpf::powerflow} namespace additionally declares
+\texttt{solve\_ac}, \texttt{solve\_dc}, \texttt{FDPFSolver::solve},
+\texttt{AdaptiveSolver::solve}, \texttt{DistributedSlackSolver} simplified and
+full-Jacobian solves, \texttt{HelmSolver::solve}, \texttt{CpfSolver::solve},
+and \texttt{HomotopyContinuationSolver::solve}.  The header-only
+\texttt{three\_phase.hpp} wrapper references an analysis-side
+\texttt{solve\_three\_phase\_nr} symbol that is not part of the public
+\texttt{hacdcpf.hpp} facade.
+
+The standard PF paths share canonical preprocessing through model projection,
+\texttt{solver\_data.cpp}, and \texttt{admittance\_builder.cpp}.  The main Newton
+kernel is implemented in \texttt{src/power\_flow/newton\_solver.cpp}; its class is
+declared through the legacy engine header and re-exported from
+\texttt{include/hacdcpf/power\_flow/newton\_solver.hpp}.
 
 \begin{figure}[H]
 \centering
@@ -160,8 +173,10 @@ P^{\qual{conv,ac}} = P^{\qual{tr}} - P^{\qual{loss}},\quad
 P^{\qual{conv,dc}} = -P^{\qual{tr}}.
 \end{align}
 In \texttt{VDC\_VAC} mode the Newton loop enforces
-\(v^{\qual{ac}}=v^{\qual{ac,set}}\) for the converter AC bus via an augmented
-setpoint equation.
+\(v^{\qual{ac}}=v^{\qual{ac,set}}\) for the converter AC bus by hard-clamping
+the trial AC voltage after updates.  If \texttt{SolverData::enable\_augmented\_equations}
+is enabled, that clamp is skipped and the VDC/VAC bus is instead handled by
+the augmented-equation path in \texttt{newton\_solver.cpp}.
 
 % ------------------------------------------------------------
 \subsection{DCDC Converter Model}
@@ -224,10 +239,13 @@ G_{km}^{\qual{dc}}v_k^{\qual{dc}}, & m\neq k.
 When \texttt{enable\_coupled\_jacobian} is set, the converter Jacobian blocks
 \(\partial P^{\qual{vsc}}/\partial v^{\qual{dc}}\),
 \(\partial Q^{\qual{vsc}}/\partial v^{\qual{dc}}\), and
-\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) are inserted analytically.
-The coupling entries are pre-registered as \texttt{CouplingEntry} records in
-\texttt{JacobianPattern} and updated in-place each iteration without
-re-analyzing the pattern.
+\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) have pattern slots.  The
+current \texttt{converter\_dc\_jacobian\_vm\_ac} implementation returns zero
+because the old AC-side converter resistance term was removed, so the
+\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) block is structurally present
+but numerically zero today.  The coupling entries are pre-registered as
+\texttt{CouplingEntry} records in \texttt{JacobianPattern} and updated in-place
+each iteration without re-analyzing the pattern.
 
 % ------------------------------------------------------------
 \subsection{Hybrid Newton Algorithm}
@@ -277,7 +295,7 @@ re-analyzing the pattern.
     \State Backtracking line search; accept best step
     \State PV/PQ hysteresis switching; converter mode switching
   \EndFor
-  \State \textbf{if} not converged \textbf{then} set \texttt{failure\_reason}
+  \State \textbf{if} not converged \textbf{then} return a result with \texttt{converged=false}, final iteration count, residual, and any available state vectors
   \State Post-process branch, VSC, DCDC, router flows; \Return result
 \EndProcedure
 \end{algorithmic}
@@ -323,9 +341,9 @@ converter coupling).
 \begin{algorithmic}[1]
 \Procedure{\texttt{FDPFSolver::solve}}{$\textit{data},\,\textit{opt}$}
   \State Build reduced $B'_{\mathcal{N}\setminus\{sl\}}$, $B''_{\mathcal{N}_{PQ}}$; factorize
-  \If{factorization failed} set \texttt{SingularJacobian}; \Return \EndIf
+  \If{factorization failed} return non-converged result \EndIf
   \For{$k=1,\ldots,\textit{opt.fdpf\_max\_iter}$}
-    \State Compute $\Delta P/v$, $\Delta Q/v$ using \textbf{sparse} $Y_{bus}$ iteration
+    \State Convert/use dense \texttt{ybus\_dense}; compute $\Delta P/v$, $\Delta Q/v$ with all-pairs loops
     \If{$\|\Delta P/v\|_\infty < \varepsilon$ and $\|\Delta Q/v\|_\infty < \varepsilon$} \textbf{break} \EndIf
     \State $\Delta\theta \gets (B')^{-1}(\Delta P/v)$; update $\theta$
     \State $\Delta v \gets (B'')^{-1}(\Delta Q/v)$; update $v$
@@ -394,26 +412,21 @@ embedding of the network equations.  Convergence is tested via Padé approximant
 \begin{align}
 V_i(1) \approx \frac{P_M(1)}{Q_M(1)}.
 \end{align}
-The HELM solver is used as a DC warm-start supplier for the hybrid Newton path
-(\texttt{HelmWarmStart::DCPF}) and as a standalone fallback in the adaptive
-solver chain.
+In the current source, HELM is a standalone \texttt{HelmSolver::solve} path.
+\texttt{HelmWarmStart::DCPF} and \texttt{HelmWarmStart::GaussSeidel} are options
+consumed inside \texttt{HelmSolver::solve}; the hybrid Newton and adaptive
+solver paths do not call HELM as an automatic fallback.
 
 % ------------------------------------------------------------
 \subsection{Error Handling and Diagnostics}
 % ------------------------------------------------------------
 
-All solvers return a result struct with a \texttt{SolverFailureReason} field
-(added in the May~2026 hardening pass):
-\begin{itemize}
-  \item \texttt{None} --- converged successfully,
-  \item \texttt{SingularJacobian} --- \texttt{SparseLU} or dense LU
-    factorization reported failure (B\({}'\), B\({}''\), or DC Jacobian),
-  \item \texttt{NonFiniteSolution} --- Newton step or intermediate state
-    contained NaN or Inf,
-  \item \texttt{InvalidInitialState} --- provided \texttt{InitialState} contained
-    non-finite values (guarded by \texttt{validate\_initial\_state}),
-  \item \texttt{MaxIterationsReached} --- tolerance not met within the iteration limit.
-\end{itemize}
+The public result structs do not contain a \texttt{SolverFailureReason} enum.
+\texttt{PowerFlowResult} exposes \texttt{converged}, \texttt{iterations},
+\texttt{residual}, solved state vectors, flow/transfer vectors, and profiling
+metadata.  \texttt{DCPowerFlowResult}, \texttt{AdaptiveSolveResult},
+\texttt{IslandedSolveResult}, and \texttt{DistributedSlackResult} use their own
+compact status fields and nested results.
 
 The solver \textbf{throws} \texttt{std::invalid\_argument} for structural API
 violations (e.g., size mismatch, NaN in initial state) and \textbf{returns
@@ -484,7 +497,7 @@ compilation units:
 \end{itemize}
 The cross-file linkage between \texttt{jacobian\_builder.cpp} and
 \texttt{ac\_kernel.cpp} is provided by an internal header
-\texttt{src/power_flow/ac\_kernel\_impl.hpp} (not installed).
+\texttt{include/hacdcpf/power\_flow/ac\_kernel\_impl.hpp}.
 
 % ------------------------------------------------------------
 \subsection{Numerical Performance (Release Mode)}

@@ -38,12 +38,68 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     }
   }
 
+  // Closed AC switches connect their two buses (zero/near-zero impedance link).
+  // Without this, a system whose connectivity is dominated by switches/CBs
+  // (e.g. ring distribution networks with circuit breakers between feeders)
+  // would be reported as many disjoint islands, causing the GUI to dispatch
+  // the adaptive solver and leave most buses with vm = 0.
+  for (const auto& sw : sys.ac.switches) {
+    if (!sw.in_service || !sw.closed) continue;
+    const int u = sw.bus_from - 1;
+    const int v = sw.bus_to - 1;
+    if (u >= 0 && v >= 0 && u < nac && v < nac) {
+      add_edge(u, v);
+    }
+  }
+
+  // Closed AC circuit breakers also act as zero-impedance connections.
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    if (!cb.in_service || !cb.closed) continue;
+    const int u = cb.bus_from - 1;
+    const int v = cb.bus_to - 1;
+    if (u >= 0 && v >= 0 && u < nac && v < nac) {
+      add_edge(u, v);
+    }
+  }
+
+  // 2W and 3W transformers connect AC buses (in-service ones contribute
+  // electrical paths just like branches).  Without these edges, a network
+  // whose AC connectivity goes through transformers would be fragmented
+  // into many spurious singleton islands.
+  for (const auto& tr : sys.ac.transformers_2w) {
+    if (!tr.in_service) continue;
+    const int u = tr.hv_bus - 1;
+    const int v = tr.lv_bus - 1;
+    if (u >= 0 && v >= 0 && u < nac && v < nac) {
+      add_edge(u, v);
+    }
+  }
+  for (const auto& tr : sys.ac.transformers_3w) {
+    if (!tr.in_service) continue;
+    const int h = tr.hv_bus - 1;
+    const int m = tr.mv_bus - 1;
+    const int l = tr.lv_bus - 1;
+    if (h >= 0 && m >= 0 && h < nac && m < nac) add_edge(h, m);
+    if (h >= 0 && l >= 0 && h < nac && l < nac) add_edge(h, l);
+    if (m >= 0 && l >= 0 && m < nac && l < nac) add_edge(m, l);
+  }
+
   for (const auto& br : sys.dc.branches) {
     if (!br.in_service) {
       continue;
     }
     const int u = nac + br.from_bus - 1;
     const int v = nac + br.to_bus - 1;
+    if (u >= nac && v >= nac && u < n_total && v < n_total) {
+      add_edge(u, v);
+    }
+  }
+
+  // Closed DC circuit breakers connect their two DC buses.
+  for (const auto& cb : sys.dc.dc_circuit_breakers) {
+    if (!cb.in_service || !cb.closed) continue;
+    const int u = nac + cb.bus_from - 1;
+    const int v = nac + cb.bus_to - 1;
     if (u >= nac && v >= nac && u < n_total && v < n_total) {
       add_edge(u, v);
     }
@@ -57,6 +113,37 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     const int v = nac + conv.bus_dc - 1;
     if (u >= 0 && u < nac && v >= nac && v < n_total) {
       add_edge(u, v);
+    }
+  }
+
+  for (const auto& dcdc : sys.dc.dcdc_converters) {
+    if (!dcdc.in_service) {
+      continue;
+    }
+    const int u = nac + dcdc.bus_in - 1;
+    const int v = nac + dcdc.bus_out - 1;
+    if (u >= nac && v >= nac && u < n_total && v < n_total) {
+      add_edge(u, v);
+    }
+  }
+
+  // Energy Routers: before expansion, their ports bridge AC buses
+  // that would otherwise be in separate islands.  Chain all in-service
+  // port buses of the same ER so the BFS recognises the connection.
+  for (const auto& er : sys.energy_routers) {
+    if (!er.in_service) {
+      continue;
+    }
+    int prev = -1;
+    for (const auto& port : er.ports) {
+      if (!port.in_service || port.bus <= 0 || port.bus > nac) {
+        continue;
+      }
+      const int u = port.bus - 1;
+      if (prev >= 0) {
+        add_edge(prev, u);
+      }
+      prev = u;
     }
   }
 
@@ -120,22 +207,21 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     }
 
     bool has_generators = false;
-    for (int bus : ac_buses) {
-      const auto& b = sys.ac.buses[static_cast<size_t>(bus - 1)];
-      if (b.bus_type == BusType::SLACK || b.bus_type == BusType::PV) {
+    // NOTE: We do NOT use ``bus_type == SLACK`` (or PV) as a proxy for a
+    // real injection.  A SLACK-typed bus without an actual source element
+    // attached is a data artifact (commonly seen after a circuit breaker
+    // disconnects a feeder, leaving its terminal bus stranded as a SLACK
+    // node with no backing generator/ext-grid).  Treating such buses as
+    // sources would make the adaptive solver believe a sourceless island
+    // is alive — and produce physically meaningless voltages instead of
+    // zeros.  Below we look only at concrete in-service injections.
+    for (const auto& g : sys.ac.generators) {
+      if (!g.in_service || ac_set.count(g.bus) == 0) {
+        continue;
+      }
+      if (g.pg_mw > 1e-9 || g.is_slack) {
         has_generators = true;
         break;
-      }
-    }
-    if (!has_generators) {
-      for (const auto& g : sys.ac.generators) {
-        if (!g.in_service || ac_set.count(g.bus) == 0) {
-          continue;
-        }
-        if (g.pg_mw > 1e-9 || g.is_slack) {
-          has_generators = true;
-          break;
-        }
       }
     }
     if (!has_generators) {
@@ -178,6 +264,17 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
         if (vpp.p_output_mw > 1e-9) { has_generators = true; break; }
       }
     }
+    // External grids act as an unlimited slack source — treat any island
+    // hosting an in-service ExternalGrid as solvable, even if the bus
+    // type has not yet been promoted to BusType::SLACK (promotion happens
+    // later in solver_data.cpp).
+    if (!has_generators) {
+      for (const auto& eg : sys.ac.external_grids) {
+        if (!eg.in_service || ac_set.count(eg.bus) == 0) continue;
+        has_generators = true;
+        break;
+      }
+    }
 
     bool has_ac_slack = false;
     int ac_slack_bus = 0;
@@ -185,6 +282,15 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
       if (sys.ac.buses[static_cast<size_t>(bus - 1)].bus_type == BusType::SLACK) {
         has_ac_slack = true;
         ac_slack_bus = bus;
+        break;
+      }
+    }
+    // External grids implicitly provide a slack reference at their bus.
+    if (!has_ac_slack) {
+      for (const auto& eg : sys.ac.external_grids) {
+        if (!eg.in_service || ac_set.count(eg.bus) == 0) continue;
+        has_ac_slack = true;
+        ac_slack_bus = eg.bus;
         break;
       }
     }
@@ -282,6 +388,60 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     copy.from_bus = itf->second;
     copy.to_bus = itt->second;
     sub.ac.branches.push_back(std::move(copy));
+  }
+
+  // AC switches and circuit breakers act as connectivity (when closed).
+  // Without copying them into the sub-system the canonical projection
+  // run inside the adaptive solver will not be able to splice them
+  // into branches, leaving most buses electrically disconnected and
+  // producing a singular Jacobian.
+  for (const auto& sw : sys.ac.switches) {
+    const auto itf = ac_map.find(sw.bus_from);
+    const auto itt = ac_map.find(sw.bus_to);
+    if (itf == ac_map.end() || itt == ac_map.end()) continue;
+    Switch copy = sw;
+    copy.index = static_cast<int>(sub.ac.switches.size()) + 1;
+    copy.bus_from = itf->second;
+    copy.bus_to = itt->second;
+    sub.ac.switches.push_back(std::move(copy));
+  }
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    const auto itf = ac_map.find(cb.bus_from);
+    const auto itt = ac_map.find(cb.bus_to);
+    if (itf == ac_map.end() || itt == ac_map.end()) continue;
+    CircuitBreaker copy = cb;
+    copy.index = static_cast<int>(sub.ac.circuit_breakers.size()) + 1;
+    copy.bus_from = itf->second;
+    copy.bus_to = itt->second;
+    sub.ac.circuit_breakers.push_back(std::move(copy));
+  }
+
+  // 2W / 3W transformers carry their own bus references and contribute
+  // to branch admittance via canonical projection, so they must be
+  // copied as well.
+  for (const auto& tr : sys.ac.transformers_2w) {
+    if (!tr.in_service) continue;
+    const auto itf = ac_map.find(tr.hv_bus);
+    const auto itt = ac_map.find(tr.lv_bus);
+    if (itf == ac_map.end() || itt == ac_map.end()) continue;
+    Transformer2W copy = tr;
+    copy.index = static_cast<int>(sub.ac.transformers_2w.size()) + 1;
+    copy.hv_bus = itf->second;
+    copy.lv_bus = itt->second;
+    sub.ac.transformers_2w.push_back(std::move(copy));
+  }
+  for (const auto& tr : sys.ac.transformers_3w) {
+    if (!tr.in_service) continue;
+    const auto ith = ac_map.find(tr.hv_bus);
+    const auto itm = ac_map.find(tr.mv_bus);
+    const auto itl = ac_map.find(tr.lv_bus);
+    if (ith == ac_map.end() || itm == ac_map.end() || itl == ac_map.end()) continue;
+    Transformer3W copy = tr;
+    copy.index = static_cast<int>(sub.ac.transformers_3w.size()) + 1;
+    copy.hv_bus = ith->second;
+    copy.mv_bus = itm->second;
+    copy.lv_bus = itl->second;
+    sub.ac.transformers_3w.push_back(std::move(copy));
   }
 
   for (const auto& gen : sys.ac.generators) {
@@ -414,6 +574,33 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     copy.bus = it->second;
     sub.ac.external_grids.push_back(std::move(copy));
   }
+  for (const auto& fl : sys.ac.flexible_loads) {
+    if (!fl.in_service) continue;
+    const auto it = ac_map.find(fl.bus);
+    if (it == ac_map.end()) continue;
+    FlexibleLoad copy = fl;
+    copy.index = static_cast<int>(sub.ac.flexible_loads.size()) + 1;
+    copy.bus = it->second;
+    sub.ac.flexible_loads.push_back(std::move(copy));
+  }
+  for (const auto& al : sys.ac.asymmetric_loads) {
+    if (!al.in_service) continue;
+    const auto it = ac_map.find(al.bus);
+    if (it == ac_map.end()) continue;
+    AsymmetricLoad copy = al;
+    copy.index = static_cast<int>(sub.ac.asymmetric_loads.size()) + 1;
+    copy.bus = it->second;
+    sub.ac.asymmetric_loads.push_back(std::move(copy));
+  }
+  for (const auto& m : sys.ac.motors) {
+    if (!m.in_service) continue;
+    const auto it = ac_map.find(m.bus);
+    if (it == ac_map.end()) continue;
+    AsynchronousMotor copy = m;
+    copy.index = static_cast<int>(sub.ac.motors.size()) + 1;
+    copy.bus = it->second;
+    sub.ac.motors.push_back(std::move(copy));
+  }
 
   // Copy DC component tables with bus remapping.
   for (const auto& st : sys.dc.storage) {
@@ -433,6 +620,56 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     copy.index = static_cast<int>(sub.dc.static_generators.size()) + 1;
     copy.bus = it->second;
     sub.dc.static_generators.push_back(std::move(copy));
+  }
+  for (const auto& ld : sys.dc.loads) {
+    if (!ld.in_service) continue;
+    const auto it = dc_map.find(ld.bus);
+    if (it == dc_map.end()) continue;
+    DCLoad copy = ld;
+    copy.index = static_cast<int>(sub.dc.loads.size()) + 1;
+    copy.bus = it->second;
+    sub.dc.loads.push_back(std::move(copy));
+  }
+  for (const auto& sg : sys.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    const auto it = dc_map.find(sg.bus);
+    if (it == dc_map.end()) continue;
+    StaticGeneratorDC copy = sg;
+    copy.index = static_cast<int>(sub.dc.dc_static_generators.size()) + 1;
+    copy.bus = it->second;
+    sub.dc.dc_static_generators.push_back(std::move(copy));
+  }
+  for (const auto& pv : sys.dc.pv_arrays) {
+    if (!pv.in_service) continue;
+    const auto it = dc_map.find(pv.bus);
+    if (it == dc_map.end()) continue;
+    PVArrayDC copy = pv;
+    copy.index = static_cast<int>(sub.dc.pv_arrays.size()) + 1;
+    copy.bus = it->second;
+    sub.dc.pv_arrays.push_back(std::move(copy));
+  }
+  for (const auto& cb : sys.dc.dc_circuit_breakers) {
+    const auto itf = dc_map.find(cb.bus_from);
+    const auto itt = dc_map.find(cb.bus_to);
+    if (itf == dc_map.end() || itt == dc_map.end()) continue;
+    DCCircuitBreaker copy = cb;
+    copy.index = static_cast<int>(sub.dc.dc_circuit_breakers.size()) + 1;
+    copy.bus_from = itf->second;
+    copy.bus_to = itt->second;
+    sub.dc.dc_circuit_breakers.push_back(std::move(copy));
+  }
+
+  // DCDC converters: copy when both buses are in this island.
+  for (const auto& dc : sys.dc.dcdc_converters) {
+    if (!dc.in_service) continue;
+    const auto iti = dc_map.find(dc.bus_in);
+    const auto ito = dc_map.find(dc.bus_out);
+    if (iti == dc_map.end() || ito == dc_map.end()) continue;
+    DCDCConverter copy = dc;
+    copy.index = static_cast<int>(sub.dc.dcdc_converters.size()) + 1;
+    copy.bus_in = iti->second;
+    copy.bus_out = ito->second;
+    sub.dc.dcdc_converters.push_back(std::move(copy));
   }
 
   // Copy VPP/Microgrid/MobileStorage with bus remapping.

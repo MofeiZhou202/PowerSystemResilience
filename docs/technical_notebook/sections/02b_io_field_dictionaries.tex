@@ -257,6 +257,24 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \bottomrule
 \end{longtable}
 
+\subsubsection*{\texttt{CircuitBreaker} : \texttt{ac.circuit\_breakers[]} / sheet \texttt{CircuitBreaker}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus\_from}, \texttt{bus\_to} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and terminal bus indices \\
+\texttt{name} & \texttt{CircuitBreaker.name} & default empty string & breaker label \\
+\texttt{in\_service} & \texttt{CircuitBreaker.in\_service} & default \texttt{true} & availability flag \\
+\texttt{breaker\_type} & \texttt{CircuitBreaker.breaker\_type} & default \texttt{CB} & breaker-type token parsed by \texttt{breaker\_type\_from\_str} \\
+\texttt{closed} & \texttt{CircuitBreaker.closed} & default \texttt{true} & topology status flag \\
+\texttt{z\_ohm} & \texttt{CircuitBreaker.z\_ohm} & default \texttt{0.0} & AC breaker impedance \\
+\texttt{rated\_voltage\_kv}, \texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka} & same columns & default \texttt{0.0} & voltage and current ratings \\
+\texttt{element\_type}, \texttt{element\_id} & same columns & defaults empty string, \texttt{0} & optional protected-element reference \\
+\bottomrule
+\end{longtable}
+
 \subsubsection*{\texttt{ChargingStation} : \texttt{ac.charging\_stations[]} / sheet \texttt{ChargingStation}}
 
 \begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
@@ -437,6 +455,8 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{vmax\_pu}, \texttt{vmin\_pu} & same columns & defaults \texttt{1.1}, \texttt{0.9} & DC voltage operating bounds \\
 \texttt{pd\_mw} & \texttt{DCBus.pd\_mw} & default \texttt{0.0} & embedded DC demand snapshot; workbook export may reflect synchronized aggregate demand \\
 \texttt{in\_service} & \texttt{DCBus.in\_service} & default \texttt{true} & availability flag \\
+\texttt{latitude}, \texttt{longitude} & \texttt{none} & defaults \texttt{0.0}; import also accepts \texttt{lat}/\texttt{lon} aliases & JSON-only coordinates \\
+\texttt{base\_kv}, \texttt{area}, \texttt{zone}, \texttt{n\_customers}, \texttt{importance}, \texttt{is\_load} & \texttt{none} & not part of current JSON / Excel contract & C++ struct fields that are not preserved by either serializer \\
 \bottomrule
 \end{longtable}
 
@@ -453,6 +473,7 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{rate\_a\_mva} & \texttt{DCBranch.rate\_a\_mva} & default \texttt{0.0} & branch rating \\
 \texttt{length\_km} & \texttt{DCBranch.length\_km} & default \texttt{0.0} & physical route length metadata \\
 \texttt{in\_service} & \texttt{DCBranch.in\_service} & default \texttt{true} & availability flag \\
+\texttt{base\_kv}, \texttt{s\_max\_mva}, \texttt{n\_parallel}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & C++ struct fields that are not preserved by either serializer \\
 \bottomrule
 \end{longtable}
 
@@ -471,6 +492,48 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{p\_min\_mw} & same column & default \texttt{0.0} & minimum retained demand under curtailment \\
 \texttt{cost\_mw} & same column & default \texttt{0.0} & marginal curtailment penalty \\
 \texttt{profile\_id} & \texttt{none} & default \texttt{-1} & JSON-only profile linkage identifier \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{StaticGeneratorDC} : \texttt{dc.dc\_static\_generators[]} / sheet \texttt{DCStaticGenerator}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected DC bus \\
+\texttt{name} & \texttt{DCStaticGenerator.name} & default empty string & source label \\
+\texttt{in\_service} & \texttt{DCStaticGenerator.in\_service} & default \texttt{true} & availability flag \\
+\texttt{type} & \texttt{DCStaticGenerator.type} & default empty string & free-form DC source type \\
+\texttt{p\_set\_mw} & \texttt{DCStaticGenerator.p\_set\_mw} & default \texttt{0.0} & active-power setpoint \\
+\texttt{scaling} & \texttt{DCStaticGenerator.scaling} & default \texttt{1.0} & profile scaling factor \\
+\texttt{profile\_id} & \texttt{DCStaticGenerator.profile\_id} & default \texttt{-1} & profile linkage identifier \\
+\texttt{pmax\_mw}, \texttt{pmin\_mw} & same columns & default \texttt{0.0} & operating limits \\
+\texttt{controllable} & \texttt{DCStaticGenerator.controllable} & default \texttt{false} & controllability flag \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & Excel columns \texttt{mtbf\_hr}, \texttt{mttr\_hr} & default \texttt{0.0} & reliability metadata; Excel uses the \texttt{hr} suffix \\
+\texttt{t\_scheduled\_hr} & same column & default \texttt{0.0} & scheduled outage duration metadata \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{PVArrayDC} : \texttt{dc.pv\_arrays[]} / sheet \texttt{DCPVArray}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and connected DC bus \\
+\texttt{name} & \texttt{DCPVArray.name} & default empty string & DC PV array label \\
+\texttt{in\_service} & \texttt{DCPVArray.in\_service} & default \texttt{true} & availability flag \\
+\texttt{p\_set\_mw} & \texttt{DCPVArray.p\_set\_mw} & default \texttt{0.0} & active-power setpoint \\
+\texttt{profile\_id} & \texttt{DCPVArray.profile\_id} & default \texttt{-1} & profile linkage identifier \\
+\texttt{num\_series}, \texttt{num\_parallel} & same columns & default \texttt{0} & array topology \\
+\texttt{vmpp}, \texttt{impp}, \texttt{voc}, \texttt{isc} & same columns & default \texttt{0.0} & module electrical parameters \\
+\texttt{alpha\_isc}, \texttt{beta\_voc} & same columns & default \texttt{0.0} & temperature coefficients \\
+\texttt{temperature}, \texttt{irradiance} & same columns & defaults \texttt{25.0}, \texttt{1000.0} & operating condition inputs \\
+\texttt{mtbf\_hours}, \texttt{mttr\_hours} & Excel columns \texttt{mtbf\_hr}, \texttt{mttr\_hr} & default \texttt{0.0} & reliability metadata; Excel uses the \texttt{hr} suffix \\
+\texttt{t\_scheduled\_hr} & same column & default \texttt{0.0} & scheduled outage duration metadata \\
 \bottomrule
 \end{longtable}
 
@@ -494,10 +557,11 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
 \texttt{p\_rated\_mw} & \texttt{VSCConverter.p\_rated\_mw} & default \texttt{0.0} & converter rating \\
 \texttt{forced\_outage\_rate}, \texttt{mttr\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\texttt{type}, \texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv}, \texttt{k\_p}, \texttt{k\_q}, \texttt{v\_ref\_pu}, \texttt{f\_ref\_hz}, \texttt{controllable}, grid-forming / SC fields, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & newer C++ struct fields that are not preserved by either serializer \\
 \bottomrule
 \end{longtable}
 
-\subsubsection*{\texttt{DCDCConverter} : \texttt{dcdc\_converters[]} / sheet \texttt{DCDCConverter}}
+\subsubsection*{\texttt{DCDCConverter} : \texttt{dc.dcdc\_converters[]} / sheet \texttt{DCDCConverter}}
 
 \begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
 \toprule
@@ -517,6 +581,25 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{pmax\_mw}, \texttt{pmin\_mw} & same columns & default \texttt{0.0} & power limits \\
 \texttt{k\_droop} & \texttt{none} & default \texttt{0.0} & JSON-only droop coefficient \\
 \texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
+\texttt{controllable}, \texttt{f\_switching\_hz}, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & C++ struct fields that are not preserved by either serializer \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{\texttt{DCCircuitBreaker} : \texttt{dc.dc\_circuit\_breakers[]} / sheet \texttt{DCCircuitBreaker}}
+
+\begin{longtable}{L{0.20\linewidth}L{0.24\linewidth}L{0.20\linewidth}L{0.26\linewidth}}
+\toprule
+Field & Excel sheet / column & JSON default / import rule & Meaning / preservation note \\
+\midrule
+\endhead
+\texttt{index}, \texttt{bus\_from}, \texttt{bus\_to} & corresponding columns & required on JSON import; blank Excel \texttt{index} stops table import & stable identifier and terminal DC bus indices \\
+\texttt{name} & \texttt{DCCircuitBreaker.name} & default empty string & breaker label \\
+\texttt{in\_service} & \texttt{DCCircuitBreaker.in\_service} & default \texttt{true} & availability flag \\
+\texttt{breaker\_type} & \texttt{DCCircuitBreaker.breaker\_type} & default \texttt{CB} & breaker-type token parsed by \texttt{breaker\_type\_from\_str} \\
+\texttt{closed} & \texttt{DCCircuitBreaker.closed} & default \texttt{true} & topology status flag \\
+\texttt{r\_ohm} & \texttt{DCCircuitBreaker.r\_ohm} & default \texttt{0.0} & DC breaker resistance \\
+\texttt{rated\_voltage\_kv}, \texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka} & same columns & default \texttt{0.0} & voltage and current ratings \\
+\texttt{element\_type}, \texttt{element\_id} & same columns & defaults empty string, \texttt{0} & optional protected-element reference \\
 \bottomrule
 \end{longtable}
 
@@ -538,6 +621,7 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{loss\_percent} & \texttt{EnergyRouter.loss\_percent} & default \texttt{0.0} & aggregate conversion loss factor \\
 \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & aggregate operating limits \\
 \texttt{mtbf\_hours}, \texttt{mttr\_hours} & same columns & default \texttt{0.0} & reliability metadata preserved in both JSON and workbook \\
+\texttt{control\_mode}, \texttt{power\_dispatch\_strategy}, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & C++ struct fields that are not preserved by either serializer \\
 \bottomrule
 \end{longtable}
 
@@ -560,6 +644,7 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{control\_mode} & \shortstack[l]{\texttt{EnergyRouterPort.}\\\texttt{control\_mode}} & default \texttt{PQ} & control-mode token \texttt{PQ}/\texttt{VF}/\texttt{Droop} \\
 \texttt{p\_set\_mw}, \texttt{q\_set\_mvar}, \texttt{v\_set\_pu} & same columns & defaults \texttt{0.0}, \texttt{0.0}, \texttt{1.0} & reference setpoints for the local port controller \\
 \texttt{in\_service} & \texttt{EnergyRouterPort.in\_service} & default \texttt{true} & availability flag \\
+\texttt{side}, \texttt{eta} & \texttt{none} & not part of current JSON / Excel contract & C++ port fields that are not preserved by either serializer \\
 \bottomrule
 \end{longtable}
 
@@ -573,7 +658,7 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{index} & \texttt{VPP.index} & required on JSON import; blank Excel \texttt{index} stops table import & stable VPP identifier \\
 \texttt{name} & \texttt{VPP.name} & default empty string & VPP label \\
 \texttt{description} & \texttt{none} & default empty string & JSON-only free-form description \\
-\texttt{aggregation\_bus} & \texttt{VPP.aggregation\_bus} & default \texttt{0} & reporting / control aggregation bus \\
+\texttt{aggregation\_bus} / JSON \texttt{pcc\_bus} & \texttt{VPP.pcc\_bus} & exporter writes \texttt{pcc\_bus}; importer accepts \texttt{pcc\_bus} or legacy \texttt{aggregation\_bus}; default \texttt{0} & reporting / control aggregation bus stored in the C++ \texttt{aggregation\_bus} member \\
 \texttt{in\_service} & \texttt{VPP.in\_service} & default \texttt{true} & availability flag \\
 \texttt{n\_pv\_systems}, \texttt{n\_wind\_turbines}, \texttt{n\_battery\_systems} & same columns & default \texttt{0} & asset counts preserved in both JSON and workbook \\
 \texttt{n\_ev\_chargers}, \texttt{n\_controllable\_loads} & \texttt{none} & default \texttt{0} & JSON-only aggregation metadata \\
@@ -596,7 +681,7 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{name} & \texttt{Microgrid.name} & default empty string & microgrid label \\
 \texttt{description} & \texttt{none} & default empty string & JSON-only free-form description \\
 \texttt{in\_service} & \texttt{Microgrid.in\_service} & default \texttt{true} & availability flag \\
-\texttt{pcc\_bus} & \texttt{Microgrid.pcc\_bus} & default \texttt{0} & point-of-common-coupling bus index \\
+\texttt{pcc\_bus} & \texttt{Microgrid.pcc\_bus} & exporter writes \texttt{pcc\_bus}; importer accepts \texttt{pcc\_bus} or legacy \texttt{aggregation\_bus}; default \texttt{0} & point-of-common-coupling bus index stored in the C++ \texttt{aggregation\_bus} member \\
 \texttt{internal\_buses} & \texttt{none} & missing JSON array keeps the vector empty & JSON-only explicit internal bus membership list \\
 \texttt{operating\_mode} & \texttt{Microgrid.operating\_mode} & default \texttt{GridConnected} & operating-mode token; one of \texttt{GridConnected}, \texttt{Islanded}, or \texttt{Transition} \\
 \texttt{islanding\_capability} & \texttt{Microgrid.islanding\_capability} & default \texttt{false} & whether the microgrid may island \\

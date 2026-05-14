@@ -1540,7 +1540,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
   // Find the next available indices for new elements.
   int next_dc_bus = next_index_of(sys.dc.buses);
   int next_vsc    = next_index_of(sys.vsc_converters);
-  int next_dcdc   = next_index_of(sys.dcdc_converters);
+  int next_dcdc   = next_index_of(sys.dc.dcdc_converters);
 
   for (const auto& er : sys.energy_routers) {
     if (!er.in_service) continue;
@@ -1760,7 +1760,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
     dcdc.mtbf_hours   = er.mtbf_hours;
     dcdc.mttr_hours   = er.mttr_hours;
 
-    sys.dcdc_converters.push_back(dcdc);
+    sys.dc.dcdc_converters.push_back(dcdc);
   }
 
   // All ERs have been expanded 鈥?clear the vector to prevent double-counting

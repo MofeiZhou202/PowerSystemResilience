@@ -74,7 +74,7 @@ static void scale_system_by_lambda(HybridPowerSystem& sys, double lambda) {
     vsc.p_set_mw *= lambda;
   }
   // DC/DC converter power reference.
-  for (auto& dcdc : sys.dcdc_converters) {
+  for (auto& dcdc : sys.dc.dcdc_converters) {
     dcdc.p_ref_mw *= lambda;
   }
   // Mobile storage.

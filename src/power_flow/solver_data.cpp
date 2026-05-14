@@ -213,7 +213,7 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
   data.dc_buses = std::move(projected.dc.buses);
   data.dc_branches = std::move(projected.dc.branches);
   data.converters = std::move(projected.vsc_converters);
-  data.dcdc_converters = std::move(projected.dcdc_converters);
+  data.dcdc_converters = std::move(projected.dc.dcdc_converters);
   data.energy_routers = std::move(projected.energy_routers);
   data.generators = std::move(projected.ac.generators);
   data.loads = std::move(projected.ac.loads);
@@ -286,7 +286,7 @@ SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelTy
   data.dc_buses = std::move(projected.dc.buses);
   data.dc_branches = std::move(projected.dc.branches);
   data.converters = std::move(projected.vsc_converters);
-  data.dcdc_converters = std::move(projected.dcdc_converters);
+  data.dcdc_converters = std::move(projected.dc.dcdc_converters);
   data.energy_routers = std::move(projected.energy_routers);
   data.generators = std::move(projected.ac.generators);
   data.loads = std::move(projected.ac.loads);

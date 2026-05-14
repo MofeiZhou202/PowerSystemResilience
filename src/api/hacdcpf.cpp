@@ -50,7 +50,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.branches.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.loads.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.vsc_converters.size()));
-  h = hash_combine(h, static_cast<std::uint64_t>(sys.dcdc_converters.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dcdc_converters.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.energy_routers.size()));
 
   for (const auto& b : sys.ac.buses) {
@@ -119,7 +119,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, hash_double(c.qmin_mvar));
     h = hash_combine(h, hash_double(c.p_rated_mw));
   }
-  for (const auto& c : sys.dcdc_converters) {
+  for (const auto& c : sys.dc.dcdc_converters) {
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_in));
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_out));
     h = hash_combine(h, static_cast<std::uint64_t>(c.control_mode));

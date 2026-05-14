@@ -42,6 +42,7 @@ struct DCSystem {
   std::vector<StaticGenerator> static_generators;
   std::vector<StaticGeneratorDC> dc_static_generators;
   std::vector<PVArrayDC> pv_arrays;
+  std::vector<DCDCConverter> dcdc_converters;
   std::vector<DCCircuitBreaker> dc_circuit_breakers;
   double base_mva{100.0};
   std::string name{"DC System"};
@@ -51,7 +52,6 @@ struct HybridPowerSystem {
   ACSystem ac;
   DCSystem dc;
   std::vector<VSCConverter> vsc_converters;
-  std::vector<DCDCConverter> dcdc_converters;
   std::vector<EnergyRouter> energy_routers;
   std::vector<MobileStorage> mobile_storage;
   std::vector<VirtualPowerPlant> vpps;

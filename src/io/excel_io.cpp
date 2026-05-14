@@ -2954,8 +2954,8 @@ void write_results(const HybridPowerSystem& sys,
   {
     auto ws = ensure_sheet(wb, "Results_DCDCConverter");
     write_headers(ws, {"index", "name", "bus_in", "bus_out", "in_service", "control_mode", "p_ref_mw", "v_ref_pu", "v_in_pu", "v_out_pu", "eta", "p_in_mw", "p_out_mw", "loss_mw"});
-    for (size_t i = 0; i < sys.dcdc_converters.size(); ++i) {
-      const auto& c = sys.dcdc_converters[i];
+    for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
+      const auto& c = sys.dc.dcdc_converters[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
       const double v_in = dc_v_by_index(c.bus_in, 1.0);
       const double v_out = dc_v_by_index(c.bus_out, 1.0);
@@ -3398,8 +3398,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     const uint16_t c_loss = ensure_header_column(ws, "result_loss_mw");
     const uint16_t c_vin = ensure_header_column(ws, "result_v_in_pu");
     const uint16_t c_vout = ensure_header_column(ws, "result_v_out_pu");
-    for (size_t i = 0; i < sys.dcdc_converters.size(); ++i) {
-      const auto& c = sys.dcdc_converters[i];
+    for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
+      const auto& c = sys.dc.dcdc_converters[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
       auto it = dcdc_by_index.find(c.index);
       const DCDCTransfer tr = (it != dcdc_by_index.end()) ? it->second : DCDCTransfer{};
@@ -3524,7 +3524,7 @@ void save_xlsx(const HybridPowerSystem& sys, const std::string& path) {
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
 
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);
@@ -3594,7 +3594,7 @@ HybridPowerSystem load_xlsx(const std::string& path) {
   if (wb.worksheetExists("DCCircuitBreaker")) sys.dc.dc_circuit_breakers = read_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"));
 
   if (wb.worksheetExists("VSCConverter")) sys.vsc_converters = read_vsc(wb.worksheet("VSCConverter"));
-  if (wb.worksheetExists("DCDCConverter")) sys.dcdc_converters = read_dcdc(wb.worksheet("DCDCConverter"));
+  if (wb.worksheetExists("DCDCConverter")) sys.dc.dcdc_converters = read_dcdc(wb.worksheet("DCDCConverter"));
   if (wb.worksheetExists("EnergyRouter")) sys.energy_routers = read_energy_routers(wb.worksheet("EnergyRouter"));
   if (wb.worksheetExists("EnergyRouterPort")) read_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   if (wb.worksheetExists("VPP")) sys.vpps = read_vpp(wb.worksheet("VPP"));
@@ -3712,7 +3712,7 @@ void save_results_compact_xlsx(const HybridPowerSystem& sys,
   write_dc_pv_arrays(wb.worksheet("DCPVArray"), sys.dc.pv_arrays);
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);
@@ -3902,8 +3902,8 @@ void write_opf_results(const HybridPowerSystem& sys,
         oi = result.dcdc_map[k].original_index;
       ws.cell(r, 2).value() = oi;
 
-      if (static_cast<size_t>(oi) < sys.dcdc_converters.size()) {
-        const auto& d = sys.dcdc_converters[static_cast<size_t>(oi)];
+      if (static_cast<size_t>(oi) < sys.dc.dcdc_converters.size()) {
+        const auto& d = sys.dc.dcdc_converters[static_cast<size_t>(oi)];
         ws.cell(r, 3).value() = d.name;
         ws.cell(r, 4).value() = d.bus_in;
         ws.cell(r, 5).value() = d.bus_out;
@@ -4062,7 +4062,7 @@ void save_opf_results_compact_xlsx(const HybridPowerSystem& sys,
   write_dc_pv_arrays(wb.worksheet("DCPVArray"), sys.dc.pv_arrays);
   write_dc_circuit_breakers(wb.worksheet("DCCircuitBreaker"), sys.dc.dc_circuit_breakers);
   write_vsc(wb.worksheet("VSCConverter"), sys.vsc_converters);
-  write_dcdc(wb.worksheet("DCDCConverter"), sys.dcdc_converters);
+  write_dcdc(wb.worksheet("DCDCConverter"), sys.dc.dcdc_converters);
   write_energy_routers(wb.worksheet("EnergyRouter"), sys.energy_routers);
   write_energy_router_ports(wb.worksheet("EnergyRouterPort"), sys.energy_routers);
   write_vpp(wb.worksheet("VPP"), sys.vpps);

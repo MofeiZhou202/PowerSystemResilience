@@ -4,11 +4,12 @@
 \subsection{Problem Form and Runtime Scope}
 
 This chapter covers the OPF family built on top of canonical AC/DC network
-projection.  The implemented problem classes are:
+projection.  The implemented runtime problem classes are:
 \begin{itemize}
   \item nonlinear AC/DC OPF for the native primal-dual and parity-IPM routes,
-  \item convex DC OPF in LP or QP form,
-  \item mixed-integer reactive-power optimization over discrete taps and shunts.
+  \item DC OPF with a true-QP model and LP fallback backends,
+  \item reactive-power optimization over discrete taps and shunts by
+  outer-approximation / coordinate-search heuristics.
 \end{itemize}
 The runtime solver family is selected from option flags and DC-network presence.
 
@@ -19,26 +20,27 @@ The current implementation is concentrated in:
   \item \texttt{src/optimal_power_flow/ac\_opf.cpp} for top-level AC OPF routing and native reduced-space solve orchestration,
   \item \texttt{src/optimal_power_flow/parity\_formulation.cpp} and \texttt{src/optimal_power_flow/parity\_ipm.cpp} for the parity full-space NLP route,
   \item \texttt{src/optimal_power_flow/dc\_opf.cpp} for DC OPF model build and backend selection,
-  \item \texttt{src/optimal_power_flow/reactive\_power\_opt.cpp} for the four-phase outer-approximation MINLP,
-  \item \texttt{src/engine/lcqp\_solver.cpp}, \texttt{src/engine/dual\_simplex.cpp}, and the adapter layer for native and external backend execution.
+  \item \texttt{src/optimal_power_flow/reactive\_power\_opt.cpp} for the four-phase outer-approximation / coordinate-search workflow,
+  \item \texttt{include/hacdcpf/engine} forwarding headers for LCQP, dual simplex, HiGHS, Gurobi, and related engine facilities supplied by the \texttt{mipsolvers} dependency.
 \end{itemize}
+There is no \texttt{src/engine} directory in this repository.
 
 \subsection{Pseudocode Map}
 
 The relevant code-aligned workflows are:
 \begin{itemize}
-  \item Algorithms A8--A11 in Section~\ref{sec:algorithms} for AC OPF routing, fast dispatch fallback, native primal-dual OPF, and parity-IPM build/solve,
-  \item Algorithm A16 for DC OPF,
-  \item Algorithm A17 for reactive-power optimization,
-  \item Algorithms E5--E8 in Section~\ref{sec:engine-solver-system} for the native LCQP, LP IPM, dual simplex, and PDLP backends used underneath those routes.
+  \item Algorithms A8--A10 in Section~\ref{sec:algorithms} for AC OPF routing, parity-NLP construction, and parity-IPM solve,
+  \item Algorithm A11 for DC OPF,
+  \item Algorithm A12 for reactive-power optimization,
+  \item Section~\ref{sec:engine-solver-system} for the forwarding engine surface used by DC OPF and RPO result statistics.
 \end{itemize}
 
 \subsection{Current Status}
 
-This is an active production chapter with multiple live backends.  The AC OPF
-family is fully implemented, but backend coverage differs by path: parity and
-native nonlinear routes are the main AC/DC engines, while DC OPF and RPO reuse
-the solver infrastructure through specialized model builders.
+The AC OPF family has multiple implemented routes, but backend coverage differs
+by path.  Parity and native nonlinear routes are the main AC/DC engines; DC OPF
+builds a specialized QP/LP model; RPO currently runs an OA/coordinate-search
+workflow and reuses branch-and-cut-style statistics fields for counters.
 
 \subsection{Top-Level Solver Routing}
 
@@ -188,7 +190,7 @@ The parity NLP includes AC, DC, converter, shedding, and enhanced DER variables:
 x_{par}=
 \begin{bmatrix}
 \theta,\ v^{\qual{ac}},\ P_g,\ Q_g,\ v^{\qual{dc}},\ P^{\qual{conv,ac}},\ Q^{\qual{conv,ac}},\ P^{\qual{conv,dc}}, \\
-\Delta P_d,\ \Delta Q_d,\ P^{\qual{ren}},\ Q^{\qual{ren}},\ P^{\qual{stor}},\ Q^{\qual{stor}}, \\
+\Delta P_d,\ \Delta Q_d,\ P^{\qual{ren}},\ Q^{\qual{ren}},\ P^{\qual{stor,ac}},\ Q^{\qual{stor,ac}},\ P^{\qual{stor,dc}}, \\
 P^{\qual{dcdc}},\ P^{\qual{flex}}
 \end{bmatrix}^{\top}.
 \end{align}
@@ -238,9 +240,10 @@ P^{\qual{in}}/\eta - r_{eq}(P^{\qual{in}})^2/(V^{\qual{dc}})^2,
 & P^{\qual{in}}<0.
 \end{cases}
 \end{align}
-There is no separate converter-balance constraint row for DCDC converters;
-their power contributions are folded directly into the two DC bus balance
-equations:
+The parity \texttt{ConstraintIndex} allocates dedicated DCDC balance slots and
+counts them in the equality total, but the current equality evaluator leaves
+those dedicated rows unpopulated.  The actual DCDC physics is folded directly
+into the two DC bus balance equations:
 \begin{align}
 g_{\texttt{bus\_in}} &\mathrel{+}= P^{\qual{in}}, &
 g_{\texttt{bus\_out}} &\mathrel{-}= P^{\qual{out}}.
@@ -314,7 +317,8 @@ z \circ \mu &= \gamma\mathbf{1}.
 A Mehrotra predictor-corrector method is used, with:
 \begin{enumerate}
   \item affine predictor step,
-  \item adaptive centering parameter \(\sigma = \min(0.3,\, 100\mu)\),
+  \item adaptive centering parameter
+  \(\sigma = (\mu_{aff}/(\mu_{cur}+10^{-16}))^3\) after clamping the ratio to \([0,1]\),
   \item corrector step with second-order compensation,
   \item iterative refinement (2 steps) for conditioning of the KKT solve,
   \item fraction-to-boundary step lengths for primal and dual updates.
@@ -322,7 +326,7 @@ A Mehrotra predictor-corrector method is used, with:
 
 \paragraph{Implementation note.}
 The current \texttt{parity\_ipm.cpp} uses the Mehrotra predictor-corrector
-scheme.  Gondzio extra corrections are \textbf{not} implemented.
+scheme and implements up to two Gondzio extra correctors.
 The KKT system is solved using either Eigen \texttt{SparseLU} for sparse or
 \texttt{PartialPivLU} for dense factorizations.
 
@@ -343,12 +347,42 @@ AC branch MVA limits & nonlinear penalty term & nonlinear inequality + slack \\
 DC branch power limits & not explicit in native path & nonlinear inequality + slack \\
 Load shedding \((\Delta P_d,\Delta Q_d)\) & not modeled & decision variable with VOLL penalty \\
 Curtailable renewable / controllable PV & not modeled as variable & decision variable \\
-Storage dispatch & not modeled as variable & decision variable \\
+AC storage dispatch & not modeled as variable & decision variable \\
+DC storage dispatch & not modeled as variable & decision variable; packed into \texttt{ACOPFResult::pstor\_mw} with \texttt{stor\_map.source\_type} identifying AC vs DC storage \\
 DCDC dispatch & not modeled as variable & decision variable + DC coupling \\
 Flexible load dispatch & not modeled as variable & decision variable \\
 StaticGen / fixed DER aggregates & not explicit variable in native objective model & included as fixed injections \\
 \bottomrule
 \end{longtable}
+
+\subsection{AC OPF Result JSON Contract}
+
+\texttt{opf\_result\_to\_json} writes the scalar solve summary
+\texttt{converged}, \texttt{iterations}, \texttt{outer\_iterations},
+\texttt{objective}, \texttt{max\_constraint\_violation},
+\texttt{max\_stationarity}, \texttt{status}, and \texttt{solver\_path}.  The
+\texttt{solver\_path} token is \texttt{NativeAC}, \texttt{ParityIPM}, or
+\texttt{Unknown}.
+
+The core vectors are \texttt{vm}, \texttt{va}, \texttt{vdc}, \texttt{pg\_mw},
+\texttt{qg\_mvar}, \texttt{dpd\_mw}, \texttt{dqd\_mvar}, \texttt{pac\_mw}, and
+\texttt{qac\_mvar}.  Enhanced dispatch is serialized both as structured objects
+and as legacy bare arrays:
+\begin{itemize}
+  \item \texttt{renewable\_dispatch}: \texttt{pren\_mw}, \texttt{qren\_mvar}, and
+  a \texttt{map} array of \texttt{original\_index}/\texttt{source\_type} records;
+  \item \texttt{storage\_dispatch}: \texttt{pstor\_mw}, \texttt{qstor\_mvar}, and
+  a \texttt{map} array; this packed storage array includes AC and DC storage;
+  \item \texttt{dcdc\_dispatch}: \texttt{pdcdc\_mw} and a \texttt{map} array;
+  \item \texttt{flex\_dispatch}: \texttt{pflex\_mw} and a \texttt{map} array;
+  \item legacy top-level \texttt{pren\_mw}, \texttt{qren\_mvar}, \texttt{pstor\_mw},
+  \texttt{qstor\_mvar}, \texttt{pdcdc\_mw}, and \texttt{pflex\_mw} arrays.
+\end{itemize}
+The \texttt{profiling} object contains \texttt{linear\_solver\_backend},
+\texttt{analyze\_calls}, \texttt{factorization\_calls},
+\texttt{linear\_solve\_calls}, \texttt{total\_iterations},
+\texttt{accepted\_steps}, \texttt{rejected\_steps}, and
+\texttt{final\_barrier\_mu}.
 
 \subsection{Fallback Behavior}
 
@@ -394,9 +428,11 @@ with the bus susceptance matrix \(B\) assembled from branch reactances
 
 \subsubsection{Objective Function}
 
-The DC OPF supports two cost modes:
+The DC OPF builder constructs both an LP model and a QP model.  The QP model
+keeps true quadratic generator costs for QP-capable backends; LP backends use
+the linearized model.
 
-\paragraph{Linear cost (default).}
+\paragraph{LP linearized cost.}
 \begin{align}
 \min \sum_{g\in\mathcal{G}}
 c_g^{\qual{lin}} P_g
@@ -407,12 +443,13 @@ where the linearized coefficient is evaluated at the generator midpoint:
 c_g^{\qual{lin}} = c_{1g} + 2c_{2g}\frac{P_g^{\qual{min}}+P_g^{\qual{max}}}{2}.
 \end{align}
 
-\paragraph{Quadratic cost (optional).}
+\paragraph{QP quadratic cost.}
 \begin{align}
 \min \frac{1}{2}x^{\top}Qx + c^{\top}x,
 \end{align}
 where \(Q_{gg} = 2c_{2g}S_{\qual{base}}^2\) and \(c_g = c_{1g}S_{\qual{base}}\).
-This mode requires a QP-capable backend (LCQP or Gurobi).
+This mode is used by \texttt{NativeQP} and Gurobi.  The HiGHS path currently
+calls the LP adapter; QP support there is marked TODO in the source.
 
 \paragraph{VOLL auto-tuning.}
 The load-shedding penalty is auto-tuned as \(1.1\times\) the maximum generator
@@ -444,28 +481,30 @@ P_g^{\qual{min}} &\le P_g \le P_g^{\qual{max}}, \\
 
 \subsubsection{Solver Backend Selection}
 
-The DC OPF solver selects among backends via \texttt{DCOPFSolverBackend}:
+\texttt{DCOPFOptions::solver} defaults to \texttt{DCOPFSolverBackend::Auto}.  The
+solver always builds the QP form and then dispatches by backend:
 \begin{enumerate}
   \item \textbf{NativeQP} (LCQP solver): true quadratic costs via primal-dual IPM.
   \item \textbf{Gurobi}: commercial QP solver.
   \item \textbf{HiGHS}: open-source LP solver (linearized costs).
   \item \textbf{Native Dual Simplex}: via \texttt{solve\_lp\_with\_basis()}.
-  \item \textbf{Auto}: tries each in sequence until success.
+  \item \textbf{Auto}: tries \texttt{NativeQP}, then Gurobi, then HiGHS, then native dual simplex.
 \end{enumerate}
 
 \subsubsection{Locational Marginal Prices}
 
-LMPs are extracted from the dual variables on the per-bus power balance
-equality constraints.  The dual on bus \(i\) balance yields the locational
-marginal price at bus \(i\).
+LMP extraction is not implemented in the current source.  \texttt{dc\_opf.cpp}
+contains a TODO for dual extraction and fills \texttt{lmp},
+\texttt{branch\_mu\_lower}, and \texttt{branch\_mu\_upper} with zeros.
 
-\subsection{Reactive Power Optimization (\texttt{solve\_reactive\_power\_opt})}
+\subsection{Reactive Power Optimization (\texttt{solve\_rpo})}
 \label{sec:rpo}
 
-The reactive power optimization (RPO) module solves a mixed-integer nonlinear
-program for optimal voltage/reactive power control by coordinating discrete
-control devices (transformer on-load tap changers and switchable shunt steps)
-with continuous AC OPF.
+The reactive power optimization (RPO) module searches over discrete voltage and
+reactive-power controls (transformer on-load tap changers and switchable shunt
+steps) with continuous AC OPF evaluations.  The current source implements the
+OA/coordinate-search/ternary/pairwise refinement workflow below rather than a
+generic branch-and-bound MINLP solve loop.
 
 \subsubsection{Problem Structure}
 
@@ -532,5 +571,6 @@ discrete configuration key avoids redundant NLP evaluations.
 \subsubsection{Result Structure}
 
 The result includes per-device tap/shunt adjustments, the number of NLP solves,
-OA cuts added, nodes explored, and the final status
-(\texttt{"Optimal (OA)"}, \texttt{"Time limit"}, or \texttt{"Node limit"}).
+OA cuts added, nodes explored, and the final status.  Current source status
+strings include \texttt{"Optimal (OA)"}, \texttt{"Time limit (OA)"},
+\texttt{"Node limit (OA)"}, and \texttt{"No feasible configuration found (OA)"}.
