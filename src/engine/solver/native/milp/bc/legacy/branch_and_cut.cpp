@@ -1559,6 +1559,15 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         }
       }
 
+      // obj and dual_bound are in the internal minimization convention:
+      // for Maximize problems, objective_value() returns -c.dot(x) and
+      // dual_bound was negated from info.mip_dual_bound.  Convert to the
+      // user-facing (sense-correct) values before writing to public fields.
+      const double user_facing_obj =
+          (prob.linear_part.sense == Sense::Minimize) ? obj : -obj;
+      const double user_facing_bound =
+          (prob.linear_part.sense == Sense::Minimize) ? dual_bound : -dual_bound;
+
       out.stats.solver_name = "NativeBranchAndCut[StrictHiGHSStateMachine]";
       out.stats.runtime_sec = runtime;
       out.stats.iterations = static_cast<int>(std::min<int64_t>(
@@ -1567,7 +1576,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.stats.status = fmt::format("StrictHiGHS {} run={}",
                                      bc_highs_model_status_label(model_status),
                                      static_cast<int>(run_status));
-      out.stats.objective = std::isfinite(obj) ? obj : 0.0;
+      out.stats.objective = std::isfinite(user_facing_obj) ? user_facing_obj : 0.0;
       out.stats.mip_gap = std::isfinite(gap) ? gap : kInf;
       out.stats.primal_feas = has_solution ? 0.0 : kInf;
       out.stats.residual_inf = has_solution ? 0.0 : kInf;
@@ -1576,8 +1585,8 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.bc_stats.nodes_explored = static_cast<int>(std::min<int64_t>(
           info.mip_node_count, std::numeric_limits<int>::max()));
       out.bc_stats.lp_solves = std::max(1, out.bc_stats.nodes_explored + 1);
-      out.bc_stats.best_bound = std::isfinite(dual_bound) ? dual_bound : -kInf;
-      out.bc_stats.best_obj = std::isfinite(obj) ? obj : kInf;
+      out.bc_stats.best_bound = std::isfinite(user_facing_bound) ? user_facing_bound : -kInf;
+      out.bc_stats.best_obj = std::isfinite(user_facing_obj) ? user_facing_obj : kInf;
       out.bc_stats.gap = out.stats.mip_gap;
       out.bc_stats.status = out.stats.status;
       out.bc_stats.parallel_requested_threads =
