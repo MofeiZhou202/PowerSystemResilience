@@ -20,13 +20,14 @@ static void print_usage(const char* progname) {
   std::cerr
     << "Usage: " << progname
     << " <input.json> [output.json]"
-    << " [--solver <Auto|Gurobi|HiGHS|SCIP|NativeBranchAndCut>]"
+    << " [--solver <Auto|StrictHiGHS|Gurobi|HiGHS|SCIP|NativeBranchAndCut>]"
     << " [--no-sced] [--no-lmp]"
     << " [--indent <n>]\n"
     << "\n"
     << "Solver choices (case-sensitive):\n"
-    << "  Auto                — let the engine pick the best available solver\n"
-    << "  HiGHS               — open-source LP/MILP (HiGHS)\n"
+    << "  Auto                — use the production MILP policy\n"
+    << "  StrictHiGHS         — embedded HiGHS state machine with MIPSolvers contract\n"
+    << "  HiGHS               — direct open-source LP/MILP (HiGHS)\n"
     << "  SCIP                — open-source MILP/MINLP (SCIP)\n"
     << "  NativeBranchAndCut  — built-in B&C in MIPSolvers\n"
     << "  Gurobi              — commercial MILP (requires licence)\n"

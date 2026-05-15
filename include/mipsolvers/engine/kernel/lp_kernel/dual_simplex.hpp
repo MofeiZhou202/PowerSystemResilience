@@ -114,6 +114,8 @@ struct SparseFactorTelemetry {
 
 struct SimplexOptions {
   int max_iter{2000};
+  double time_limit_sec{0.0};
+  bool* time_limit_hit{nullptr};
   double feasibility_tol{1e-8};
   double optimality_tol{1e-8};
   bool prefer_dual_simplex_reopt{true};

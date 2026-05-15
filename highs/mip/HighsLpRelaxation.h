@@ -385,6 +385,10 @@ class HighsLpRelaxation {
   double getObjective() const { return objective; }
 
   void setIterationLimit(HighsInt limit = kHighsIInf) {
+    if (!mipsolver.submip && !solved_first_lp &&
+        mipsolver.options_mip_->simplex_iteration_limit < limit) {
+      limit = mipsolver.options_mip_->simplex_iteration_limit;
+    }
     lpsolver.setOptionValue("simplex_iteration_limit", limit);
   }
   void setSolvedFirstLp(const bool solved_first_lp_) {

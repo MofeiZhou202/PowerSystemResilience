@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/scuc/scuc.hpp"
 
 namespace mipsolvers::scuc {
@@ -37,5 +38,10 @@ SCUCInput build_ieee118_case(int T = 24, double dt = 1.0,
 /// Serialize SCUCInput to JSON string (for export / golden-file testing).
 /// Pass indent >= 0 for pretty-printing, -1 for compact.
 std::string scuc_input_to_json(const SCUCInput& inp, int indent = 2);
+
+/// Build the raw SCUC MIP model from a SCUCInput without solving it.
+/// Used by the benchmark runner to call solve_milp_bc() directly with
+/// custom BCOptions (e.g., to inject warm starts or tune solver settings).
+mipsolvers::engine::MIPModel build_scuc_mip(const SCUCInput& inp);
 
 }  // namespace mipsolvers::scuc

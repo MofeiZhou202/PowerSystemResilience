@@ -968,6 +968,17 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::Vecto
   };
 
   for (int iter = 0; iter < max_iter; ++iter) {
+    if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
+      const double elapsed =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+              .count();
+      if (elapsed >= opt_.time_limit_sec) {
+        out.stats.success = false;
+        out.stats.iterations = iter;
+        out.stats.status = "Time limit";
+        break;
+      }
+    }
     auto t_s = tnow();
 
     // Residuals: r_p = b - Ae*x, r_d = c - Ae'*y (merged single pass)
@@ -1981,6 +1992,20 @@ SolveResult NativeIPMLPAdapter::solve_cached_node_lp(
 
   double last_pfeas = 0.0, last_dfeas = 0.0, last_mu = 0.0;
   for (int iter = 0; iter < max_iter; ++iter) {
+    if (opt_.time_limit_sec > 0.0 && std::isfinite(opt_.time_limit_sec)) {
+      const double elapsed =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+              .count();
+      if (elapsed >= opt_.time_limit_sec) {
+        out.stats.success = false;
+        out.stats.iterations = iter;
+        out.stats.status = "Time limit";
+        out.stats.primal_feas = last_pfeas;
+        out.stats.dual_feas = last_dfeas;
+        out.stats.complementarity = last_mu;
+        break;
+      }
+    }
     // Residuals
     compute_residuals(x_d, y_d, r_p_d, r_d_d);
 

@@ -73,6 +73,13 @@ bool hacdcpfXpoolStateTraceEnabled() {
   return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
+bool hacdcpfRootIpmTraceEnabled() {
+  const char* env = std::getenv("MIPSOLVERS_HIGHS_ROOT_IPM_TRACE");
+  if (env != nullptr && env[0] != '\0' && env[0] != '0') return true;
+  env = std::getenv("MIPSOLVERS_BC_TIMELINE");
+  return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
 int hacdcpfXpoolStateTraceTerms() {
   const char* env = std::getenv("HACDCPF_XPOOL_STATE_TRACE_TERMS");
   if (env == nullptr || env[0] == '\0') return 24;
@@ -1787,6 +1794,14 @@ HighsLpRelaxation::Status HighsLpRelaxation::run(bool resolve_on_error) {
   bool use_simplex = !use_ipm;
   if (use_ipm) {
     assert(!valid_basis);
+    // Propagate run_crossover from the outer MIP options so callers can
+    // control whether IPM performs the crossover step to produce a simplex
+    // basis.  "off" → pure IPM (fastest for degenerate LPs, no basis
+    // handoff); "on"/"choose" → standard crossover (default).
+    lpsolver.setOptionValue("run_crossover",
+                            mipsolver.options_mip_->run_crossover);
+    const std::string root_crossover = mipsolver.options_mip_->run_crossover;
+    const bool crossover_requested = root_crossover != kHighsOffString;
     const bool ipm_logging = false;
     if (ipm_logging) {
       std::string presolve;
@@ -1810,7 +1825,29 @@ HighsLpRelaxation::Status HighsLpRelaxation::run(bool resolve_on_error) {
       fflush(stdout);
       exit(1);
     }
+    const auto ipm_t0 = std::chrono::steady_clock::now();
     callstatus = lpsolver.optimizeLp();
+    const double ipm_wall_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - ipm_t0).count();
+    const HighsModelStatus ipm_model_status = lpsolver.getModelStatus();
+    const bool basis_valid_after_ipm = lpsolver.getBasis().valid &&
+                                       info.basis_validity != kBasisValidityInvalid;
+    const bool trace_root_ipm = hacdcpfRootIpmTraceEnabled() &&
+                                !mipsolver.submip && !this->solved_first_lp;
+    if (trace_root_ipm) {
+      std::fprintf(stderr,
+                   "[HIGHS-ROOT-IPM] status=%s call=%d ipmIters=%lld "
+                   "xoverIters=%lld simplexIters=%lld basis=%d "
+                   "infoBasis=%d crossover=%s timeLimit=%.6g ipmWall=%.3g\n",
+                   lpsolver.modelStatusToString(ipm_model_status).c_str(),
+                   static_cast<int>(callstatus),
+                   static_cast<long long>(info.ipm_iteration_count),
+                   static_cast<long long>(info.crossover_iteration_count),
+                   static_cast<long long>(info.simplex_iteration_count),
+                   basis_valid_after_ipm ? 1 : 0,
+                   static_cast<int>(info.basis_validity),
+                   root_crossover.c_str(), this_time_limit, ipm_wall_sec);
+    }
     if (ipm_logging) lpsolver.setOptionValue("output_flag", false);
     if (callstatus == HighsStatus::kError) {
       highsLogDev(
@@ -1819,6 +1856,38 @@ HighsLpRelaxation::Status HighsLpRelaxation::run(bool resolve_on_error) {
           lpsolver.modelStatusToString(lpsolver.getModelStatus()).c_str());
       lpsolver.setOptionValue("solver", kSimplexString);
       use_simplex = true;
+    }
+    // Fallback to simplex only when IPM converged but crossover failed to
+    // produce a vertex basis (e.g. HiPO returned kUnknown without a valid
+    // basis).  Do NOT fall back when the cause is kTimeLimit: IPM already
+    // consumed the full budget, so a simplex restart immediately re-hits the
+    // time limit and produces bound=0 — which is worse than leaving the node
+    // unsolved and relying on the B&C incumbent for pruning.
+    if (!use_simplex && crossover_requested && !basis_valid_after_ipm &&
+        (ipm_model_status == HighsModelStatus::kOptimal ||
+         ipm_model_status == HighsModelStatus::kUnknown)) {
+      if (trace_root_ipm) {
+        std::fprintf(stderr,
+                     "[HIGHS-ROOT-IPM-FALLBACK] reason=no_crossover_basis "
+                     "status=%s remainingLimit=%.6g\n",
+                     lpsolver.modelStatusToString(ipm_model_status).c_str(),
+                     this_time_limit);
+      }
+      lpsolver.setOptionValue("solver", kSimplexString);
+      use_simplex = true;
+    }
+    // Log when IPM hits the time limit without completing crossover.
+    if (!use_simplex && crossover_requested && !basis_valid_after_ipm &&
+        ipm_model_status == HighsModelStatus::kTimeLimit) {
+      if (trace_root_ipm) {
+        std::fprintf(stderr,
+                     "[HIGHS-ROOT-IPM-TIMEOUT] reason=ipm_time_limit "
+                     "ipmIters=%lld xoverIters=%lld ipmWall=%.3gs "
+                     "— skipping simplex fallback (no remaining budget)\n",
+                     static_cast<long long>(info.ipm_iteration_count),
+                     static_cast<long long>(info.crossover_iteration_count),
+                     ipm_wall_sec);
+      }
     }
   }
   if (use_simplex) {

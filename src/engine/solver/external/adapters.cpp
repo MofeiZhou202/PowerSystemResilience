@@ -414,7 +414,8 @@ bool highs_status_has_solution(HighsModelStatus status) {
 
 std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
                                                         bool with_integer_markers,
-                                                        const std::string& solver_name) {
+                                                        const std::string& solver_name,
+                                                        const Eigen::VectorXd* mip_start) {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = solver_name;
@@ -512,6 +513,27 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   if (pass_status == HighsStatus::kError) {
     out.stats.status = "HiGHS passModel failed";
     return out;
+  }
+
+  if (with_integer_markers && mip_start != nullptr &&
+      static_cast<int>(mip_start->size()) == ncols) {
+    HighsSolution start;
+    start.value_valid = true;
+    start.dual_valid = false;
+    start.col_value.resize(static_cast<std::size_t>(ncols), 0.0);
+    for (int j = 0; j < ncols; ++j) {
+      double value_j = (*mip_start)[j];
+      if (!std::isfinite(value_j)) value_j = col_lower[static_cast<std::size_t>(j)];
+      value_j = std::min(col_upper[static_cast<std::size_t>(j)],
+                         std::max(col_lower[static_cast<std::size_t>(j)], value_j));
+      if (integrality[static_cast<std::size_t>(j)] !=
+          static_cast<HighsInt>(HighsVarType::kContinuous)) {
+        const double rounded = std::round(value_j);
+        if (std::abs(value_j - rounded) <= 1e-5) value_j = rounded;
+      }
+      start.col_value[static_cast<std::size_t>(j)] = value_j;
+    }
+    highs.setSolution(start);
   }
 
   const auto run_status = highs.run();
@@ -1490,7 +1512,7 @@ const std::string& HighsAdapter::executable() const {
 SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
 #ifdef HACDCPF_HAVE_HIGHS_LIB
-  if (auto embedded = solve_lp_with_embedded_highs(prob, false, name())) {
+  if (auto embedded = solve_lp_with_embedded_highs(prob, false, name(), nullptr)) {
     return *embedded;
   }
 #endif
@@ -1606,7 +1628,11 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   // Highs instance allows solve_lp_with_embedded_highs to set its own thread
   // count without triggering the "scheduler already initialized" error.
   Highs::resetGlobalScheduler(/*blocking=*/true);
-  if (auto embedded = solve_lp_with_embedded_highs(lp, true, name())) {
+  const Eigen::VectorXd* mip_start =
+      prob.initial_solution.size() == static_cast<int>(lp.vars.size())
+          ? &prob.initial_solution
+          : nullptr;
+  if (auto embedded = solve_lp_with_embedded_highs(lp, true, name(), mip_start)) {
     return *embedded;
   }
 #endif

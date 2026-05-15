@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
@@ -394,6 +395,67 @@ NativeBranchAndCutAdapter::NativeBranchAndCutAdapter(BCOptions opt) : opt_(opt) 
   // adapter.  Any caller-supplied BCOptions value for use_vendored_highs_lp_kernel
   // is overridden here so that the deployment contract is unconditional.
   opt_.use_vendored_highs_lp_kernel = true;
+}
+
+BCOptions make_strict_highs_production_options(BCOptions opt) {
+  opt.use_vendored_highs_lp_kernel = true;
+  opt.auto_highs_root_pipeline = true;
+  opt.enable_domain_heuristics = false;
+  opt.accept_verified_warm_start_incumbent = true;
+  return opt;
+}
+
+BCOptions make_strict_highs_problem_options(const MIPModel& prob, BCOptions opt) {
+  opt = make_strict_highs_production_options(std::move(opt));
+  const int num_cols = static_cast<int>(prob.linear_part.vars.size());
+  const int num_rows = static_cast<int>(prob.linear_part.A.rows() +
+                                        prob.linear_part.Aeq.rows());
+  const bool large_root =
+      num_cols >= opt.highs_strict_auto_ipm_root_min_cols ||
+      num_rows >= opt.highs_strict_auto_ipm_root_min_rows;
+  // Minimum time budget: take the larger of the fixed floor and a
+  // size-proportional component.  Crossover cost scales roughly linearly with
+  // LP column count (e.g. 118-bus/26k cols needs ~728 crossover pivots vs ~6
+  // for 39-bus/6k cols), so the effective minimum is:
+  //   max(min_time_sec, n_cols * secs_per_kcol / 1000)
+  // With the default secs_per_kcol=2.0:
+  //   39-bus  (6360 cols)  → max(30, 12.7) = 30.0 s  (unchanged)
+  //   118-bus (26400 cols) → max(30, 52.8) = 52.8 s  (larger problem needs more)
+  const double size_min_time_sec =
+      std::max(opt.highs_strict_auto_ipm_root_min_time_sec,
+               static_cast<double>(num_cols) *
+                   opt.highs_strict_auto_ipm_root_secs_per_kcol / 1000.0);
+  const bool enough_time_for_ipm_root =
+      !(opt.time_limit_sec > 0.0) ||
+      opt.time_limit_sec >= size_min_time_sec;
+  if (opt.highs_strict_auto_ipm_root_for_large_models && large_root &&
+      enough_time_for_ipm_root &&
+      opt.highs_mip_lp_solver == "choose") {
+    opt.highs_mip_lp_solver = "ipm";
+    if (opt.highs_mip_root_crossover.empty() ||
+        opt.highs_mip_root_crossover == "choose") {
+      opt.highs_mip_root_crossover = "on";
+    }
+  }
+  return opt;
+}
+
+StrictHighsBranchAndCutAdapter::StrictHighsBranchAndCutAdapter(BCOptions opt)
+    : opt_(make_strict_highs_production_options(std::move(opt))) {}
+
+std::string StrictHighsBranchAndCutAdapter::name() const {
+  return "StrictHiGHS";
+}
+
+bool StrictHighsBranchAndCutAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::MILP;
+}
+
+SolveResult StrictHighsBranchAndCutAdapter::solve_milp(const MIPModel& prob) const {
+  NativeBranchAndCutAdapter delegate(make_strict_highs_problem_options(prob, opt_));
+  SolveResult out = delegate.solve_milp(prob);
+  out.stats.solver_name = name();
+  return out;
 }
 
 std::string NativeBranchAndCutAdapter::name() const {

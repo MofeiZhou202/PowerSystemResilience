@@ -115,6 +115,29 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kHighsDefaultKktTolerance = 1e-7;
 constexpr double kHighsDefaultMipTolerance = 1e-6;
 
+bool simplex_wall_time_limit_hit(
+    const SimplexOptions& opt,
+    const std::chrono::steady_clock::time_point& start) {
+  if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
+    return false;
+  }
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+  if (elapsed < opt.time_limit_sec) return false;
+  if (opt.time_limit_hit != nullptr) *opt.time_limit_hit = true;
+  return true;
+}
+
+void mark_simplex_time_limit(SolveStats& stats,
+                             const std::chrono::steady_clock::time_point& start) {
+  stats.success = false;
+  stats.status = "Time limit";
+  stats.runtime_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+          .count();
+}
+
 void mark_proven_infeasible(SolveStats& stats) {
   stats.success = false;
   stats.status = "LP infeasible";
@@ -1830,6 +1853,9 @@ bool solve_standard_form_with_vendored_highs(const StandardFormLP& sf,
   highs->setOptionValue("simplex_initial_condition_check", false);
   highs->setOptionValue("simplex_iteration_limit",
                        std::max(opt.max_iter * 10, 10000));
+  if (opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)) {
+    highs->setOptionValue("time_limit", std::max(0.001, opt.time_limit_sec));
+  }
   highs->setOptionValue("kkt_tolerance", kHighsDefaultKktTolerance);
   highs->setOptionValue("primal_feasibility_tolerance",
                        kHighsDefaultKktTolerance);
@@ -2314,8 +2340,12 @@ bool primal_simplex_optimize(const StandardFormLP& sf,
   Eigen::RowVectorXd pivot_row_buf(m);
   Eigen::VectorXd alpha(n);
   bool just_refactored = true;  // Initial compute_basis_state counts.
+  const auto wall_t0 = std::chrono::steady_clock::now();
 
   for (int iter = 0; iter < opt.max_iter; ++iter) {
+    if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
+      return false;
+    }
     int entering = -1;
     double best_rc_abs = opt.optimality_tol;
     bool enter_from_upper = false;
@@ -2541,8 +2571,12 @@ bool dual_simplex_reoptimize(const StandardFormLP& sf,
   Eigen::VectorXd row_vec(n);
   Eigen::VectorXd direction(m);
   Eigen::RowVectorXd pivot_row(m);
+  const auto wall_t0 = std::chrono::steady_clock::now();
 
   for (int iter = 0; iter < opt.max_iter; ++iter) {
+    if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
+      return false;
+    }
     // Dual feasibility check (with bounded variables).
     // For non-basic at lower: rc_j ≤ 0 (maximization convention: rc ≤ 0).
     // For non-basic at upper: rc_j ≥ 0 (flipped: profitable to decrease).
@@ -5327,6 +5361,7 @@ bool sparse_primal_simplex_optimize(
   if (exact_edge_mode) {
     rebuild_primal_edge_weights();
   }
+  const auto wall_t0 = std::chrono::steady_clock::now();
 
   // ── Partial pricing: for large LPs, scan a sector of columns per iteration
   // instead of all n columns. Rotates through sectors, guaranteeing a full
@@ -5336,6 +5371,9 @@ bool sparse_primal_simplex_optimize(
   int sector_start = 0;
 
   for (int iter = 0; iter < opt.max_iter; ++iter) {
+    if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
+      return false;
+    }
     // Devex steepest-edge pricing: select entering variable with largest
     // rc^2 / devex_edge score (approximates steepest-edge simplex).
     int entering = -1;
@@ -5779,8 +5817,12 @@ bool sparse_dual_simplex_reoptimize(
   } iter_timing;
   auto it_tp = [](){ return std::chrono::high_resolution_clock::now(); };
   auto it_ns = [](auto a, auto b){ return std::chrono::duration_cast<std::chrono::nanoseconds>(b-a).count(); };
+  const auto wall_t0 = std::chrono::steady_clock::now();
 
   for (int iter = 0; iter < opt.max_iter; ++iter) {
+    if ((iter & 15) == 0 && simplex_wall_time_limit_hit(opt, wall_t0)) {
+      return false;
+    }
     ++tl_dual_reopt_iters;
     auto t0 = it_tp();
     // Early termination: if an incumbent bound is provided (B&C solver),
@@ -6351,9 +6393,25 @@ bool sparse_basis_tableau_row(const std::shared_ptr<BasisOps>& cached_sparse_bas
 }
 
 SimplexResult solve_lp_with_basis(const LPModel& lp,
-                                  const SimplexOptions& opt,
+                                  const SimplexOptions& input_opt,
                                   const SimplexBasis* basis_hint) {
+  SimplexOptions opt = input_opt;
+  bool local_time_limit_hit = false;
+  if (opt.time_limit_hit == nullptr) opt.time_limit_hit = &local_time_limit_hit;
   SimplexResult out;
+  const auto solve_wall_t0 = std::chrono::steady_clock::now();
+  struct TimeLimitStatusGuard {
+    SimplexResult& out;
+    const SimplexOptions& opt;
+    const std::chrono::steady_clock::time_point& start;
+    ~TimeLimitStatusGuard() {
+      const bool hit = opt.time_limit_hit != nullptr && *opt.time_limit_hit;
+      if (!out.result.stats.success &&
+          (hit || simplex_wall_time_limit_hit(opt, start))) {
+        mark_simplex_time_limit(out.result.stats, start);
+      }
+    }
+  } time_limit_guard{out, opt, solve_wall_t0};
   out.form = build_standard_form_lp(lp);
   ruiz_scale_standard_form(out.form);
   out.result.stats.solver_name = "NativeSimplex";
@@ -6964,14 +7022,30 @@ bool vendored_highs_sf_backend_thread_enabled() {
 }
 
 SimplexResult solve_lp_from_sf(const StandardFormLP& sf,
-                               const SimplexOptions& opt,
+                               const SimplexOptions& input_opt,
                                const SimplexBasis* basis_hint,
                                [[maybe_unused]] const std::vector<BoundChangeInfo>* bound_changes) {
   // bound_changes: when provided, describes which bounds changed since the
   // last solve. Reserved for future incremental warm-start optimisation
   // (e.g., skip O(n) at_upper scan, incremental FTRAN via delta_b).
+  SimplexOptions opt = input_opt;
+  bool local_time_limit_hit = false;
+  if (opt.time_limit_hit == nullptr) opt.time_limit_hit = &local_time_limit_hit;
   SimplexResult out;
   out.result.stats.solver_name = "NativeSimplex";
+  const auto solve_wall_t0 = std::chrono::steady_clock::now();
+  struct TimeLimitStatusGuard {
+    SimplexResult& out;
+    const SimplexOptions& opt;
+    const std::chrono::steady_clock::time_point& start;
+    ~TimeLimitStatusGuard() {
+      const bool hit = opt.time_limit_hit != nullptr && *opt.time_limit_hit;
+      if (!out.result.stats.success &&
+          (hit || simplex_wall_time_limit_hit(opt, start))) {
+        mark_simplex_time_limit(out.result.stats, start);
+      }
+    }
+  } time_limit_guard{out, opt, solve_wall_t0};
 
   const int m = sf.A.rows();
   const int n = sf.A.cols();

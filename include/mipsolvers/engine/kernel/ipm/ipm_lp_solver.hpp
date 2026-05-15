@@ -27,6 +27,7 @@ namespace mipsolvers::engine {
 /// Suitable as the LP relaxation solver in Branch & Cut.
 struct IPMLPOptions {
   int max_iter{200};          ///< Maximum IPM iterations
+  double time_limit_sec{0.0}; ///< Wall-clock limit for this LP solve (0 disables)
   double tol_primal{1e-8};   ///< Primal feasibility tolerance
   double tol_dual{1e-8};     ///< Dual feasibility tolerance
   double tol_gap{1e-8};      ///< Complementarity gap tolerance

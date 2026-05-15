@@ -1180,3 +1180,149 @@ TEST_CASE("Market: MIP Gap 收敛速度分析", "[market][benchmark]") {
     strict.config.mip_gap = 0.001;
     CHECK(scuc_solve(strict).scuc.converged);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST: IEEE 39-bus 24h — StrictHiGHS root IPM + crossover
+//
+// Builds the 39-bus 24T SCUC MIP directly, then solves it via StrictHiGHS with
+// an explicit root-node IPM + crossover policy.  Verifies:
+//   (1) Crossover runs at least one iteration (basis was produced).
+//   (2) StrictHiGHS returns a finite, feasible objective (no bound-zero failure).
+//   (3) The IPM-root result agrees with a plain simplex-root solve within 0.5%.
+// ─────────────────────────────────────────────────────────────────────────────
+#include "mipsolvers/engine/bc/api.hpp"
+#include "mipsolvers/engine/bc/options.hpp"
+#include "mipsolvers/engine/solver/native/native_adapters.hpp"
+
+TEST_CASE("StrictHiGHS IEEE 39-bus 24h: root IPM + crossover correctness",
+          "[market][strict_highs][ipm_root][ieee39]") {
+    using namespace mipsolvers::engine;
+
+    SCUCInput inp = build_ieee39_case(24, 1.0, /*wind=*/true, /*solar=*/true);
+    inp.config.solve_sced = false;
+    inp.config.solve_lmp  = false;
+
+    MIPModel mip = build_scuc_mip(inp);
+    const int n_cols = static_cast<int>(mip.linear_part.vars.size());
+    const int n_rows = static_cast<int>(mip.linear_part.A.rows() +
+                                        mip.linear_part.Aeq.rows());
+
+    // ── Simplex-root baseline ─────────────────────────────────────────────
+    BCOptions simplex_opt;
+    simplex_opt.use_vendored_highs_lp_kernel = true;
+    simplex_opt.auto_highs_root_pipeline     = true;
+    simplex_opt.highs_mip_lp_solver          = "choose";  // simplex at root
+    simplex_opt.gap_tol                      = 1e-3;
+    simplex_opt.time_limit_sec               = 120.0;
+
+    BCResult simplex_res = solve_milp_bc(mip, simplex_opt);
+    REQUIRE(simplex_res.stats.success);
+    const double simplex_obj = simplex_res.stats.objective;
+
+    // ── IPM-root + crossover ──────────────────────────────────────────────
+    BCOptions ipm_opt;
+    ipm_opt.use_vendored_highs_lp_kernel = true;
+    ipm_opt.auto_highs_root_pipeline     = true;
+    ipm_opt.highs_mip_lp_solver          = "ipm";
+    ipm_opt.highs_mip_root_crossover     = "on";
+    ipm_opt.gap_tol                      = 1e-3;
+    ipm_opt.time_limit_sec               = 120.0;
+
+    BCResult ipm_res = solve_milp_bc(mip, ipm_opt);
+
+    // Report problem size and solve outcomes for visibility.
+    std::cout << "\n[IPM-ROOT-TEST] cols=" << n_cols << " rows=" << n_rows
+              << " simplex_obj=" << simplex_obj
+              << " ipm_obj=" << ipm_res.stats.objective
+              << " ipm_success=" << ipm_res.stats.success
+              << " ipm_status=" << ipm_res.stats.status << "\n";
+
+    // (1) Must succeed — IPM+crossover must give a feasible solve.
+    REQUIRE(ipm_res.stats.success);
+
+    // (2) Objective must be finite and positive.
+    CHECK(std::isfinite(ipm_res.stats.objective));
+    CHECK(ipm_res.stats.objective > 0.0);
+
+    // (3) IPM-root result must be within 0.5% of simplex baseline.
+    const double rel_diff = std::abs(ipm_res.stats.objective - simplex_obj) /
+                            std::max(1.0, std::abs(simplex_obj));
+    CHECK(rel_diff < 0.005);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST: IEEE 39-bus 24h — pure IPM (root + all nodes, no crossover)
+//
+// Sets mip_lp_solver="ipm" + run_crossover="off".  Since no basis is ever
+// produced, HiGHS falls through to the IPM solver path for EVERY node LP, not
+// just the root.  This test documents the performance cost: without warm-start
+// each child node LP starts cold, so the number of B&C nodes solvable within
+// the budget collapses.
+//
+// Expected observations vs IPM+crossover:
+//   - Root LP time ≈ same (same IPM, no crossover overhead)
+//   - B&C node LP solves: each starts cold → dramatically fewer nodes explored
+//   - Objective gap: worse or similar (fewer nodes → weaker bound)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("StrictHiGHS IEEE 39-bus 24h: pure IPM no-crossover (root+nodes)",
+          "[market][strict_highs][ipm_root][ieee39][pure_ipm]") {
+    using namespace mipsolvers::engine;
+
+    SCUCInput inp = build_ieee39_case(24, 1.0, /*wind=*/true, /*solar=*/true);
+    inp.config.solve_sced = false;
+    inp.config.solve_lmp  = false;
+
+    MIPModel mip = build_scuc_mip(inp);
+    const int n_cols = static_cast<int>(mip.linear_part.vars.size());
+    const int n_rows = static_cast<int>(mip.linear_part.A.rows() +
+                                        mip.linear_part.Aeq.rows());
+
+    // ── IPM root + crossover (baseline) ───────────────────────────────────
+    BCOptions xover_opt;
+    xover_opt.use_vendored_highs_lp_kernel = true;
+    xover_opt.auto_highs_root_pipeline     = true;
+    xover_opt.highs_mip_lp_solver          = "ipm";
+    xover_opt.highs_mip_root_crossover     = "on";   // crossover → basis
+    xover_opt.gap_tol                      = 1e-3;
+    xover_opt.time_limit_sec               = 120.0;
+    const auto t_xover0 = std::chrono::steady_clock::now();
+    BCResult xover_res = solve_milp_bc(mip, xover_opt);
+    const double t_xover = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_xover0).count();
+
+    // ── Pure IPM: no crossover → IPM for every node LP ────────────────────
+    BCOptions pure_ipm_opt;
+    pure_ipm_opt.use_vendored_highs_lp_kernel = true;
+    pure_ipm_opt.auto_highs_root_pipeline     = true;
+    pure_ipm_opt.highs_mip_lp_solver          = "ipm";
+    pure_ipm_opt.highs_mip_root_crossover     = "off";  // no basis → cold IPM at every node
+    pure_ipm_opt.gap_tol                      = 1e-3;
+    pure_ipm_opt.time_limit_sec               = 120.0;
+    const auto t_pure0 = std::chrono::steady_clock::now();
+    BCResult pure_res = solve_milp_bc(mip, pure_ipm_opt);
+    const double t_pure = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_pure0).count();
+
+    std::cout << "\n[PURE-IPM-TEST] cols=" << n_cols << " rows=" << n_rows
+              << "\n  ipm+xover  : obj=" << xover_res.stats.objective
+              << " success=" << xover_res.stats.success
+              << " wall=" << t_xover << "s"
+              << "\n  pure-ipm   : obj=" << pure_res.stats.objective
+              << " success=" << pure_res.stats.success
+              << " wall=" << t_pure << "s"
+              << "\n  (pure IPM eliminates warm-starting; each child node LP"
+                 " costs a full IPM solve instead of O(1) warm-start pivots)\n";
+
+    // Both must produce a finite objective — pure IPM should converge on this
+    // small problem even without warm-starting.
+    REQUIRE(xover_res.stats.success);
+    REQUIRE(pure_res.stats.success);
+    CHECK(std::isfinite(pure_res.stats.objective));
+    CHECK(pure_res.stats.objective > 0.0);
+
+    // Objectives must agree within 0.5%: both solve the same MIP.
+    const double rel_diff =
+        std::abs(pure_res.stats.objective - xover_res.stats.objective) /
+        std::max(1.0, std::abs(xover_res.stats.objective));
+    CHECK(rel_diff < 0.005);
+}

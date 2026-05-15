@@ -451,6 +451,153 @@ RootXpoolStateSignature root_xpool_state_signature_from_highs(
   }
   return sig;
 }
+
+// ── StrictHiGHS warm-start injection ─────────────────────────────────────────
+// Injects a caller-provided initial_solution into a HiGHS MIP instance before
+// highs.run().  Strategy:
+//   1. Direct injection: clamp+project, check satisfies_with_bounds(tol=1e-4).
+//      Works whenever the solution was produced by a prior MIP solve.
+//   2. Dispatch LP fallback: if the direct check fails AND ws_nfree ≤ 8000,
+//      fix integer variables and re-solve continuous dispatch via IPM.
+//   3. Skip: direct check failed and ws_nfree > 8000 (dispatch LP too large).
+// Returns the number of LP solves consumed (0 or 1).
+int bc_strict_highs_inject_warm_start(Highs& highs,
+                                      const LPModel& base_lp,
+                                      const Eigen::VectorXd& initial_solution,
+                                      const BCOptions& opt) {
+  const int orig_n = static_cast<int>(base_lp.vars.size());
+  if (static_cast<int>(initial_solution.size()) != orig_n) return 0;
+
+  Eigen::VectorXd olb(orig_n), oub(orig_n);
+  for (int i = 0; i < orig_n; ++i) {
+    olb[i] = base_lp.vars[i].lb;
+    oub[i] = base_lp.vars[i].ub;
+  }
+  Eigen::VectorXd x0 =
+      project_integer_solution(base_lp.vars, initial_solution, olb, oub);
+
+  std::vector<int> ws_free, ws_fixed;
+  for (int i = 0; i < orig_n; ++i) {
+    if (is_integer_type(base_lp.vars[i]) || olb[i] >= oub[i] - 1e-12)
+      ws_fixed.push_back(i);
+    else
+      ws_free.push_back(i);
+  }
+  const int ws_nfree = static_cast<int>(ws_free.size());
+  if (ws_nfree == 0) return 0;
+
+  static constexpr int kMaxDispatchFreeVars = 8000;
+  const Eigen::VectorXd x0c = clamp_to_bounds(x0, olb, oub);
+
+  if (satisfies_with_bounds(base_lp, x0c, olb, oub, 1e-4)) {
+    // ── Direct injection ──────────────────────────────────────────────────
+    HighsSolution mip_start;
+    mip_start.value_valid = true;
+    mip_start.dual_valid = false;
+    mip_start.col_value.assign(x0c.data(), x0c.data() + orig_n);
+    highs.setSolution(mip_start);
+    if (opt.verbose) {
+      fmt::print(stderr,
+                 "[B&C-STRICT] warm-start direct inject: obj={:.6g}\n",
+                 objective_value(base_lp.c, x0c, base_lp.sense));
+    }
+    return 0;
+  }
+
+  if (ws_nfree > kMaxDispatchFreeVars) {
+    if (opt.verbose) {
+      fmt::print(stderr,
+                 "[B&C-STRICT] warm-start skipped: solution not feasible and "
+                 "nfree={} > {} (dispatch LP too large)\n",
+                 ws_nfree, kMaxDispatchFreeVars);
+    }
+    return 0;
+  }
+
+  // ── Dispatch LP (small problems only) ────────────────────────────────────
+  // Fix integer variables, re-solve continuous dispatch via IPM.
+  Eigen::VectorXd b_adj = base_lp.b;
+  Eigen::VectorXd beq_adj = base_lp.beq;
+  for (int j : ws_fixed) {
+    if (std::abs(x0[j]) < 1e-15) continue;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(base_lp.A, j); it; ++it)
+      b_adj[it.row()] -= it.value() * x0[j];
+    for (Eigen::SparseMatrix<double>::InnerIterator it(base_lp.Aeq, j); it; ++it)
+      beq_adj[it.row()] -= it.value() * x0[j];
+  }
+  std::vector<Eigen::Triplet<double>> a_trips, aeq_trips;
+  for (int k = 0; k < ws_nfree; ++k) {
+    const int j = ws_free[k];
+    for (Eigen::SparseMatrix<double>::InnerIterator it(base_lp.A, j); it; ++it)
+      a_trips.emplace_back(it.row(), k, it.value());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(base_lp.Aeq, j); it; ++it)
+      aeq_trips.emplace_back(it.row(), k, it.value());
+  }
+  LPModel ws_lp;
+  ws_lp.sense = base_lp.sense;
+  ws_lp.vars.resize(ws_nfree);
+  ws_lp.c = Eigen::VectorXd::Zero(ws_nfree);
+  for (int k = 0; k < ws_nfree; ++k) {
+    const int j = ws_free[k];
+    ws_lp.vars[k] = base_lp.vars[j];
+    ws_lp.vars[k].type = VarType::Continuous;
+    ws_lp.c[k] = base_lp.c[j];
+  }
+  Eigen::SparseMatrix<double> Ar(
+      static_cast<int>(base_lp.A.rows()), ws_nfree);
+  Ar.setFromTriplets(a_trips.begin(), a_trips.end());
+  ws_lp.A = std::move(Ar);
+  ws_lp.b = b_adj;
+  Eigen::SparseMatrix<double> Aeqr(
+      static_cast<int>(base_lp.Aeq.rows()), ws_nfree);
+  Aeqr.setFromTriplets(aeq_trips.begin(), aeq_trips.end());
+  ws_lp.Aeq = std::move(Aeqr);
+  ws_lp.beq = beq_adj;
+  Eigen::VectorXd x0f(ws_nfree);
+  for (int k = 0; k < ws_nfree; ++k) x0f[k] = x0[ws_free[k]];
+  IPMLPOptions ws_ipm_opt;
+  ws_ipm_opt.max_iter = 50;
+  ws_ipm_opt.tol_primal = 1e-6;
+  ws_ipm_opt.tol_dual = 1e-6;
+  ws_ipm_opt.tol_gap = 1e-6;
+  ws_ipm_opt.verbose = false;
+  NativeIPMLPAdapter ws_ipm(ws_ipm_opt);
+  const auto ws_t0 = std::chrono::steady_clock::now();
+  const auto ws_res = ws_ipm.solve_lp(ws_lp, x0f);
+  if (ws_res.stats.success &&
+      static_cast<int>(ws_res.x.size()) >= ws_nfree) {
+    Eigen::VectorXd xr = x0;
+    for (int k = 0; k < ws_nfree; ++k) xr[ws_free[k]] = ws_res.x[k];
+    xr = clamp_to_bounds(xr, olb, oub);
+    for (int j : ws_fixed) xr[j] = x0[j];
+    if (satisfies_with_bounds(base_lp, xr, olb, oub, 1e-6)) {
+      HighsSolution mip_start;
+      mip_start.value_valid = true;
+      mip_start.dual_valid = false;
+      mip_start.col_value.assign(xr.data(), xr.data() + orig_n);
+      highs.setSolution(mip_start);
+      if (opt.verbose) {
+        const double ws_obj = objective_value(base_lp.c, xr, base_lp.sense);
+        const double ws_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - ws_t0)
+                .count();
+        fmt::print(stderr,
+                   "[B&C-STRICT] warm-start injected: obj={:.6g} ({:.1f}ms)\n",
+                   ws_obj, ws_ms);
+      }
+    } else if (opt.verbose) {
+      fmt::print(stderr,
+                 "[B&C-STRICT] warm-start dispatch feasible but "
+                 "fails bounds check; not injected\n");
+    }
+  } else if (opt.verbose) {
+    fmt::print(stderr, "[B&C-STRICT] warm-start dispatch LP {}\n",
+               ws_res.stats.success ? "clamped infeasible" : "infeasible");
+  }
+  return 1;  // consumed one LP solve
+}
+
 #endif
 constexpr int kHighsDefaultMipLpAgeLimit = 10;
 
@@ -1085,6 +1232,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   };
 
   const auto t0 = std::chrono::steady_clock::now();
+  auto bc_elapsed_sec = [&]() -> double {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+  auto bc_remaining_sec = [&]() -> double {
+    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return opt.time_limit_sec - bc_elapsed_sec();
+  };
+  auto bc_time_limit_expired = [&]() -> bool {
+    return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
+  };
 
   if (prob.linear_part.vars.empty() || prob.linear_part.c.size() == 0) {
     out.stats.status = bc_status::kEmptyMilpModel;
@@ -1119,8 +1279,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     highs.setOptionValue("threads", strict_highs_threads);
     highs.setOptionValue("presolve", "choose");
     highs.setOptionValue("solver", "choose");
-    highs.setOptionValue("mip_lp_solver", "choose");
-    highs.setOptionValue("mip_ipm_solver", "choose");
+    // [I] Root LP solver: "ipm" → IPX/HiPO at root (no basis).
+    //     If highs_mip_root_crossover="on"  (default): crossover → simplex basis
+    //       → dual simplex warm-starts at all sub-tree node LPs.
+    //     If highs_mip_root_crossover="off": pure IPM, no degenerate crossover;
+    //       fastest for large degenerate LPs (118-bus); no basis handoff.
+    highs.setOptionValue("mip_lp_solver", opt.highs_mip_lp_solver);
+    highs.setOptionValue("mip_ipm_solver", "choose");  // pick IPX vs HiPO automatically
+    highs.setOptionValue("run_crossover", opt.highs_mip_root_crossover);
+    if (opt.highs_mip_root_simplex_iteration_limit > 0) {
+      highs.setOptionValue(
+          "simplex_iteration_limit",
+          static_cast<HighsInt>(opt.highs_mip_root_simplex_iteration_limit));
+    }
     highs.setOptionValue("mip_rel_gap", opt.gap_tol);
     highs.setOptionValue("time_limit", std::max(0.001, opt.time_limit_sec));
     highs.setOptionValue("mip_max_nodes",
@@ -1131,6 +1302,18 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                          std::max(1e-10, opt.lp_tol));
     highs.setOptionValue("dual_feasibility_tolerance",
                          std::max(1e-10, opt.lp_tol));
+    // [D] Symmetry detection: controlled by opt.highs_mip_detect_symmetry.
+    highs.setOptionValue("mip_detect_symmetry", opt.highs_mip_detect_symmetry);
+    // [C] Root heuristic effort: controlled by opt.highs_mip_heuristic_effort.
+    highs.setOptionValue("mip_heuristic_effort", opt.highs_mip_heuristic_effort);
+    // [E] Pseudocost reliability: controlled by opt.highs_mip_pscost_minreliable.
+    highs.setOptionValue("mip_pscost_minreliable",
+                         static_cast<HighsInt>(opt.highs_mip_pscost_minreliable));
+    // [H] Stall node limit: controlled by opt.highs_mip_max_stall_nodes.
+    if (opt.highs_mip_max_stall_nodes > 0) {
+      highs.setOptionValue("mip_max_stall_nodes",
+                           static_cast<HighsInt>(opt.highs_mip_max_stall_nodes));
+    }
 
     bool strict_highs_ok =
         bc_pass_mip_model_to_highs(highs, strict_highs_original_entry_lp,
@@ -1139,6 +1322,150 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (!strict_highs_ok) {
       strict_highs_error = "pass_model_failed";
     } else {
+      // [A] Warm-start injection: verify the caller-supplied initial solution
+      // in the original LP space (no PaPILO reduction; dispatch LP fixes
+      // integers and solves one IPM LP for the continuous dispatch) and pass
+      // it to HiGHS via setSolution().  HighsMipSolver's constructor reads
+      // solution_.value_valid, calls solutionFeasible(), sets
+      // solution_objective_, and stores solution_.  HighsMipSolverData then
+      // projects it to the presolved space via
+      // postSolveStack.getReducedPrimalSolution(), calls addIncumbent(), and
+      // sets upper_limit -- enabling pruning via
+      // ObjectivePropagation::propagate() from the first B&B node.
+      // [B] upper_limit is set automatically once setSolution() succeeds;
+      // no separate objective_bound option call is needed for MIP.
+      out.bc_stats.lp_solves += bc_strict_highs_inject_warm_start(
+          highs, base_lp, prob.initial_solution, opt);
+
+      // [J] Native crash-basis root seeding.
+      // Solve a bounded auxiliary root LP with HiGHS IPM (no crossover) to get
+      // an interior primal point quickly, recover a native SimplexBasis from
+      // the IPM partition signal, convert it to a HighsBasis (alien=true,
+      // useful=true), and inject it via Highs::setBasis().  This keeps the
+      // expensive native IPM/push/cleanup phases out of the StrictHiGHS wall
+      // clock while still giving HiGHS a root basis better than the default
+      // logical crash basis on highly degenerate UC LPs.
+      if (opt.highs_strict_seed_native_ipm_basis) {
+        const bool seed_trace =
+          opt.verbose || bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE");
+        const auto t_seed0 = std::chrono::steady_clock::now();
+        const double seed_time_limit = std::max(
+            0.001, std::min(opt.highs_strict_seed_native_ipm_basis_time_limit_sec,
+                            0.25 * opt.time_limit_sec));
+        if (seed_trace) {
+          std::fprintf(stderr,
+            "[STRICT_HIGHS] Native IPM crash-basis seed start "
+            "(vars=%d, rows=%d, lpTime=%.3fs)\n",
+            static_cast<int>(strict_highs_original_entry_lp.vars.size()),
+            static_cast<int>(strict_highs_original_entry_lp.A.rows() +
+                     strict_highs_original_entry_lp.Aeq.rows()),
+            seed_time_limit);
+        }
+
+        Highs seed_highs;
+        seed_highs.setOptionValue("output_flag", false);
+        seed_highs.setOptionValue("log_to_console", false);
+        seed_highs.setOptionValue("threads", strict_highs_threads);
+        seed_highs.setOptionValue("presolve", "choose");
+        seed_highs.setOptionValue("solver", "ipm");
+        seed_highs.setOptionValue("run_crossover", "off");
+        seed_highs.setOptionValue("time_limit", seed_time_limit);
+        seed_highs.setOptionValue("primal_feasibility_tolerance",
+                                  std::max(1e-10, opt.lp_tol));
+        seed_highs.setOptionValue("dual_feasibility_tolerance",
+                                  std::max(1e-10, opt.lp_tol));
+        LPModel seed_lp = strict_highs_original_entry_lp;
+        for (auto& var : seed_lp.vars) var.type = VarType::Continuous;
+        const bool seed_lp_passed =
+            bc_pass_mip_model_to_highs(seed_highs, seed_lp, nullptr, nullptr);
+
+        SolveResult seed_ipm_res;
+        HighsModelStatus seed_model_status = HighsModelStatus::kNotset;
+        HighsStatus seed_run_status = HighsStatus::kError;
+        if (seed_lp_passed) {
+          seed_run_status = seed_highs.run();
+          seed_model_status = seed_highs.getModelStatus();
+          const HighsSolution& seed_sol = seed_highs.getSolution();
+          const int seed_n = static_cast<int>(strict_highs_original_entry_lp.vars.size());
+          if (static_cast<int>(seed_sol.col_value.size()) >= seed_n &&
+              (seed_sol.value_valid ||
+               seed_model_status == HighsModelStatus::kOptimal ||
+               seed_model_status == HighsModelStatus::kTimeLimit)) {
+            seed_ipm_res.x = Eigen::VectorXd::Zero(seed_n);
+            for (int j = 0; j < seed_n; ++j) {
+              seed_ipm_res.x[j] = seed_sol.col_value[static_cast<std::size_t>(j)];
+            }
+            const int seed_rows = static_cast<int>(
+                strict_highs_original_entry_lp.A.rows() +
+                strict_highs_original_entry_lp.Aeq.rows());
+            if (static_cast<int>(seed_sol.row_dual.size()) >= seed_rows) {
+              seed_ipm_res.constraint_duals = Eigen::VectorXd::Zero(seed_rows);
+              for (int i = 0; i < seed_rows; ++i) {
+                seed_ipm_res.constraint_duals[i] =
+                    seed_sol.row_dual[static_cast<std::size_t>(i)];
+              }
+            }
+            seed_ipm_res.stats.success = seed_ipm_res.x.allFinite();
+            seed_ipm_res.stats.status = bc_highs_model_status_label(seed_model_status);
+            seed_ipm_res.stats.objective = objective_value(
+                strict_highs_original_entry_lp.c, seed_ipm_res.x,
+                strict_highs_original_entry_lp.sense);
+          }
+        }
+        bool seed_injected = false;
+        CrashBasisRecoveryStats seed_recovery;
+        if (seed_ipm_res.stats.success &&
+            seed_ipm_res.x.size() ==
+                static_cast<int>(strict_highs_original_entry_lp.vars.size())) {
+          StandardFormLP seed_sf = build_standard_form_lp(strict_highs_original_entry_lp);
+          ruiz_scale_standard_form(seed_sf);
+          SimplexBasis seed_basis;
+          seed_recovery = recover_primal_activity_basis(
+              seed_sf, seed_ipm_res.x, &seed_ipm_res,
+              /*seed_basis=*/nullptr, seed_basis);
+          seed_basis.sf_n_slack = seed_sf.n_slack;
+          seed_basis.sf_n_surplus = seed_sf.n_surplus;
+          seed_basis.sf_n_artificial = seed_sf.n_artificial;
+          if (seed_recovery.selected_swaps > 0) {
+            HighsBasis seed_hbasis;
+            if (bc_native_basis_to_highs_basis(strict_highs_original_entry_lp,
+                                               &seed_basis, seed_hbasis)) {
+              (void)highs.setBasis(
+                  seed_hbasis,
+                  "MIPSOLVERS native IPM crash root basis");
+              seed_injected = true;
+            }
+          }
+        }
+        const auto t_seed1 = std::chrono::steady_clock::now();
+        const double seed_ms =
+          std::chrono::duration<double, std::milli>(t_seed1 - t_seed0)
+            .count();
+        out.bc_stats.lp_solves += 1;
+        if (seed_trace && seed_injected) {
+          std::fprintf(stderr,
+              "[STRICT_HIGHS] Native IPM crash-basis injected "
+              "(time=%.1fms, obj=%.6g, swaps=%d, candRows=%d, screen=%d)\n",
+              seed_ms, seed_ipm_res.stats.objective,
+              seed_recovery.selected_swaps, seed_recovery.candidate_rows,
+              seed_recovery.passes_screen ? 1 : 0);
+        } else if (seed_trace) {
+          std::fprintf(stderr,
+              "[STRICT_HIGHS] Native IPM crash-basis seed skipped "
+            "(pass=%d, run=%d, lpStatus=%s, ipm_success=%d, swaps=%d, "
+            "time=%.1fms)\n",
+            seed_lp_passed ? 1 : 0,
+            static_cast<int>(seed_run_status),
+            bc_highs_model_status_label(seed_model_status),
+              seed_ipm_res.stats.success ? 1 : 0,
+              seed_recovery.selected_swaps, seed_ms);
+        }
+        const double elapsed_sec =
+            std::chrono::duration<double>(t_seed1 - t0).count();
+        highs.setOptionValue(
+            "time_limit", std::max(0.001, opt.time_limit_sec - elapsed_sec));
+      }
+
       StrictHighsNodeCutCallbackBridge callback_bridge{
           callbacks, &strict_highs_original_entry_lp};
       if (callbacks != nullptr && callbacks->dynamic_node_cut) {
@@ -1605,11 +1932,14 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (opt.verbose || bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
         fmt::print(stderr,
                    "[B&C-STRICT-HIGHS-FULL] status={} run={} nodes={} "
-                   "iters={} obj={:.17g} bound={:.17g} gap={:.6g} "
+                   "iters={} ipm={} xover={} obj={:.17g} bound={:.17g} gap={:.6g} "
                    "wall={:.3f}s highsWall={:.3f}s dynamicNodeCut={}\n",
                    bc_highs_model_status_label(model_status),
                    static_cast<int>(run_status), out.bc_stats.nodes_explored,
-                   out.stats.iterations, out.stats.objective,
+                   out.stats.iterations,
+                   static_cast<long long>(info.ipm_iteration_count),
+                   static_cast<long long>(info.crossover_iteration_count),
+                   out.stats.objective,
                    out.bc_stats.best_bound, out.stats.mip_gap, runtime,
                    highs_runtime,
                    callbacks != nullptr && callbacks->dynamic_node_cut ? 1 : 0);
@@ -1761,8 +2091,26 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         free_cols.push_back(i);
     }
     const int n_free = static_cast<int>(free_cols.size());
+    static constexpr int kMaxDispatchFreeVars = 8000;
 
-    if (n_free > 0) {
+    Eigen::VectorXd x0_checked = clamp_to_bounds(x0, olb, oub);
+    if (satisfies_with_bounds(base_lp, x0_checked, olb, oub, 1e-6)) {
+      heuristic_obj = objective_value(base_lp.c, x0_checked, base_lp.sense);
+      heuristic_x_orig = std::move(x0_checked);
+      if (opt.verbose) {
+        auto dt = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_heur0).count();
+        fmt::print(stderr,
+                   "[B&C] heuristic accepted directly: obj={:.2f} ({:.1f}ms)\n",
+                   heuristic_obj, dt);
+      }
+    } else if (n_free > kMaxDispatchFreeVars) {
+      if (opt.verbose) {
+        fmt::print(stderr,
+                   "[B&C] heuristic dispatch LP skipped: nfree={} > {}\n",
+                   n_free, kMaxDispatchFreeVars);
+      }
+    } else if (n_free > 0) {
       Eigen::VectorXd b_adj = base_lp.b;
       Eigen::VectorXd beq_adj = base_lp.beq;
       for (int j : fixed_cols) {
@@ -1809,6 +2157,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       disp_opt.tol_primal = 1e-6;
       disp_opt.tol_dual = 1e-6;
       disp_opt.tol_gap = 1e-6;
+      disp_opt.time_limit_sec = std::max(0.001, bc_remaining_sec());
       disp_opt.verbose = false;
       NativeIPMLPAdapter disp_ipm(disp_opt);
       auto disp_res = disp_ipm.solve_lp(dispatch_lp, x0_free);
@@ -1840,6 +2189,33 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     fmt::print(stderr,
                "[B&C] heuristic verification skipped (strict_highs_lp={} n={})\n",
                strict_highs_lp_contract ? 1 : 0, orig_n);
+  }
+
+  auto publish_verified_warm_start_time_limit = [&]() {
+    out.stats.status = bc_status::kTimeLimitReached;
+    out.bc_stats.status = out.stats.status;
+    out.stats.runtime_sec = bc_elapsed_sec();
+    out.bc_stats.runtime_sec = out.stats.runtime_sec;
+    out.stats.solver_name = "NativeBranchAndCut";
+    if (heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj)) {
+      out.x = heuristic_x_orig;
+      out.stats.success = true;
+      out.stats.objective = objective_value(prob.linear_part.c, out.x,
+                                            prob.linear_part.sense);
+      out.stats.primal_feas = 0.0;
+      out.stats.residual_inf = 0.0;
+      out.bc_stats.best_obj = heuristic_obj;
+      out.bc_stats.incumbent_updates = std::max<std::uint64_t>(
+          out.bc_stats.incumbent_updates, 1);
+      out.bc_stats.first_incumbent_node = 0;
+      out.bc_stats.last_incumbent_node = 0;
+      out.bc_stats.last_incumbent_depth = 0;
+    }
+  };
+
+  if (bc_time_limit_expired()) {
+    publish_verified_warm_start_time_limit();
+    return return_with_profile();
   }
 
   std::vector<NativeVariableBoundSourceEntry> original_presolve_vb_sources;
@@ -2145,16 +2521,28 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                model_integer_cols, declared_branchable_count,
                declared_binary_count, n, presolve_tag, mapped_tag);
   }
+  if (bc_time_limit_expired()) {
+    publish_verified_warm_start_time_limit();
+    return return_with_profile();
+  }
+  if (!strict_highs_lp_contract && opt.time_limit_sec <= 10.0 && n > 10000 &&
+      heuristic_x_orig.size() == orig_n && std::isfinite(heuristic_obj)) {
+    publish_verified_warm_start_time_limit();
+    return return_with_profile();
+  }
   // ── Auto-tune IPM for large (post-presolve) problems ──
   // Use presolved dimensions for a more accurate threshold. Presolve can
   // dramatically reduce row count (e.g., 10320→4709 for IEEE-118).
   const int presolved_m = static_cast<int>(base_lp.A.rows()) +
                           static_cast<int>(base_lp.Aeq.rows());
-  if (presolved_m > opt.ipm_auto_threshold && !opt.use_ipm_root) {
+  const bool allow_auto_native_ipm_root =
+      strict_highs_lp_contract || opt.time_limit_sec > 10.0;
+  if (allow_auto_native_ipm_root && presolved_m > opt.ipm_auto_threshold &&
+      !opt.use_ipm_root) {
     opt.use_ipm_root = true;
   }
-  if (presolved_m > opt.ipm_auto_threshold && !opt.use_ipm_nodes &&
-      !opt.use_simplex_lp_nodes) {
+  if (allow_auto_native_ipm_root && presolved_m > opt.ipm_auto_threshold &&
+      !opt.use_ipm_nodes && !opt.use_simplex_lp_nodes) {
     opt.use_ipm_nodes = true;
   }
 
@@ -2634,8 +3022,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   LPModel root_lp = base_lp;
   apply_node_bounds(root_lp.vars, root.lb, root.ub);
 
-	  std::vector<char> root_implied_integer_cols =
-	      detect_implied_integer_columns(root_lp);
+  const bool skip_large_short_limit_root_implied_detection =
+      !strict_highs_lp_contract && n > 10000 && opt.time_limit_sec <= 10.0;
+  	  std::vector<char> root_implied_integer_cols =
+      skip_large_short_limit_root_implied_detection
+          ? std::vector<char>(static_cast<std::size_t>(n), 0)
+	      : detect_implied_integer_columns(root_lp);
       const int root_highs_native_rows =
           static_cast<int>(root_lp.A.rows()) +
           static_cast<int>(root_lp.Aeq.rows());
@@ -3697,6 +4089,11 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   if (use_huge_warmstart_root_shortcut && !root_solve_opt.use_ipm_root) {
     root_solve_opt.use_ipm_root = true;
   }
+  if (bc_time_limit_expired()) {
+    publish_verified_warm_start_time_limit();
+    return return_with_profile();
+  }
+  root_solve_opt.time_limit_sec = std::max(0.001, bc_remaining_sec());
 
   // ── P8.1: Background analytic-centre thread ─────────────────────────────
   // Spawn concurrently with the root LP solve so it overlaps with the root LP
@@ -3711,8 +4108,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   std::optional<Eigen::VectorXd> analytic_centre;
   std::unique_ptr<std::thread> ac_thread_ptr;
   {
+    const double remaining_before_root = bc_remaining_sec();
     const bool spawn_analytic_centre =
-        opt.use_analytic_centre && n >= 100;
+        opt.use_analytic_centre && n >= 100 && remaining_before_root > 2.0;
     if (spawn_analytic_centre) {
       LPModel ac_lp_copy = root_lp;  // copy with node bounds
       ac_lp_copy.c.setZero();        // zero cost → interior-point solution
@@ -3722,12 +4120,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           v.type = VarType::Continuous;
         }
       }
-      const int ac_iter = opt.analytic_centre_max_iter;
+      const int ac_iter = std::max(
+          1, std::min(opt.analytic_centre_max_iter,
+                      static_cast<int>(remaining_before_root * 20.0)));
       const int ac_n = n;
       ac_thread_ptr = std::make_unique<std::thread>(
-          [ac_lp = std::move(ac_lp_copy), &analytic_centre, ac_iter, ac_n]() mutable {
+          [ac_lp = std::move(ac_lp_copy), &analytic_centre, ac_iter, ac_n,
+           remaining_before_root]() mutable {
             IPMLPOptions ac_opt;
             ac_opt.max_iter   = ac_iter;
+            ac_opt.time_limit_sec = std::max(0.001, 0.5 * remaining_before_root);
             ac_opt.tol_primal = 1e-5;
             ac_opt.tol_dual   = 1e-5;
             ac_opt.tol_gap    = 1e-5;
@@ -3766,7 +4168,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                     static_cast<int>(root_lp.vars.size()));
   out.bc_stats.lp_solves += 1;
   if (!root_relax.primal.stats.success || root_relax.primal.x.size() != n) {
-    out.stats.status = bc_status::kRootRelaxationFailed;
+    out.stats.status = root_relax.primal.stats.status == "Time limit"
+                           ? bc_status::kTimeLimitReached
+                           : bc_status::kRootRelaxationFailed;
+    if (out.stats.status == bc_status::kTimeLimitReached) {
+      publish_verified_warm_start_time_limit();
+    }
     join_root_background_tasks();
     return return_with_profile();
 	  }

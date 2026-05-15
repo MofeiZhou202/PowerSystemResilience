@@ -167,7 +167,7 @@ struct Section {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct SCUCConfig {
-  /// Solver name: "Auto", "Gurobi", "HiGHS", "SCIP", "NativeBranchAndCut"
+  /// Solver name: "Auto", "StrictHiGHS", "Gurobi", "HiGHS", "SCIP", "NativeBranchAndCut"
   std::string solver{"Auto"};
   bool allow_fallback{true};  ///< Fall back to next available solver on failure
 

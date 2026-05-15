@@ -72,8 +72,10 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
     case ProblemClass::NLP:
       return {"Ipopt", "NativeIPM", "NativeNLP"};
     case ProblemClass::MILP:
-      // Phase-3 policy: prefer available external solvers by default.
-      return {"HiGHS", "Gurobi", "NativeBranchAndCut"};
+      // Production MILP default: use the embedded StrictHiGHS state machine
+      // first so MIP starts, callbacks, status mapping, and option plumbing
+      // follow the same bounded deployment contract.
+      return {"StrictHiGHS", "HiGHS", "Gurobi", "NativeBranchAndCut"};
     case ProblemClass::MINLP:
       return {"Scip", "NativeBranchAndCut"};
   }
@@ -85,7 +87,7 @@ bool is_external_adapter_name(const std::string& name) {
 }
 
 bool is_native_adapter_name(const std::string& name) {
-  return name.rfind("Native", 0) == 0;
+  return name == "StrictHiGHS" || name.rfind("Native", 0) == 0;
 }
 
 StrategyPolicy effective_policy(

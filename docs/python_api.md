@@ -108,7 +108,7 @@ input_data = {
     "config": {
         "num_periods": 24,           # 调度周期数
         "period_length_hr": 1.0,     # 每期时长（小时）
-        "solver": "Auto",            # 求解器："Auto"|"Gurobi"|"HiGHS"
+        "solver": "Auto",            # 求解器："Auto"|"StrictHiGHS"|"Gurobi"|"HiGHS"
         "mip_gap": 0.001,            # MIP 相对间隙容差
         "time_limit_sec": 300.0,     # 时间限制（秒）
         "solve_sced": True,          # 是否运行 SCED
@@ -181,7 +181,7 @@ if lmp["converged"]:
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `config.num_periods` | int | 是 | 调度周期数 T |
-| `config.solver` | str | 否 | `"Auto"` / `"Gurobi"` / `"HiGHS"` |
+| `config.solver` | str | 否 | `"Auto"` / `"StrictHiGHS"` / `"Gurobi"` / `"HiGHS"` |
 | `generators[].name` | str | 是 | 机组名称（唯一） |
 | `generators[].bus` | int | 是 | 所在母线编号（0-indexed） |
 | `generators[].bid_segments` | list | 是 | 报价曲线段列表 |
@@ -379,7 +379,7 @@ res = mipsolvers.engine.solve_milp(
     lb       = lb,
     ub       = ub,
     vartypes = ["B", "B", "B"],       # 二进制变量
-    solver   = "Auto",                # "Auto"|"Gurobi"|"HiGHS"|"NativeBranchAndCut"
+    solver   = "Auto",                # "Auto"|"StrictHiGHS"|"Gurobi"|"HiGHS"|"NativeBranchAndCut"
     mip_gap        = 1e-4,
     time_limit_sec = 60.0
 )
@@ -446,7 +446,8 @@ print(mipsolvers.engine.list_solvers("NLP"))
 | 求解器名 | 适用问题 | 说明 |
 |----------|----------|------|
 | `Gurobi` | LP / MILP | 商业求解器（需许可证） |
-| `HiGHS` | LP / MILP | 开源，推荐 MILP 首选 |
+| `StrictHiGHS` | MILP | 生产默认：嵌入式 HiGHS 状态机 + MIPSolvers 合约 |
+| `HiGHS` | LP / MILP | 直接 HiGHS 适配器 |
 | `NativeIPMLP` | LP | 内置内点法（小型 LP） |
 | `NativePDLP` | LP | 内置一阶方法（大规模 LP） |
 | `NativeLCQP` | LP / QP | 内置线性化 CQP |
@@ -454,7 +455,7 @@ print(mipsolvers.engine.list_solvers("NLP"))
 | `Ipopt` | NLP / MINLP | 内置非线性求解器 |
 | `Auto` | 任意 | 按内置优先级自动选择 |
 
-> **`"Auto"` 优先级（MILP）**：Gurobi（若有许可证）→ HiGHS → NativeBranchAndCut
+> **`"Auto"` 优先级（MILP）**：StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut
 
 ---
 

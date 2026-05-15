@@ -1846,6 +1846,13 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   }
   const bool trace_huge_root_relax = opt.verbose;
   auto relax_t0 = std::chrono::steady_clock::now();
+  const double lp_wall_budget = opt.time_limit_sec > 0.0 ? opt.time_limit_sec : 0.0;
+  auto apply_simplex_budget = [&](SimplexOptions& simplex_opt) {
+    simplex_opt.time_limit_sec = lp_wall_budget;
+  };
+  auto apply_ipm_budget = [&](IPMLPOptions& ipm_opt) {
+    ipm_opt.time_limit_sec = lp_wall_budget;
+  };
 
   const int n_lp = static_cast<int>(lp.vars.size());
   const bool huge_warmstart_root =
@@ -1866,6 +1873,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     warm_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
     warm_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
     warm_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    apply_simplex_budget(warm_opt);
     apply_root_simplex_conformance_options(warm_opt, opt.use_simplex_lp_nodes);
 
     auto warm_simplex = std::make_shared<SimplexResult>(
@@ -1908,9 +1916,15 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     ipm_opt.tol_dual = std::max(1e-9, opt.lp_tol * 0.1);
     ipm_opt.tol_gap = std::max(1e-9, opt.lp_tol * 0.1);
     ipm_opt.verbose = false;
+    apply_ipm_budget(ipm_opt);
 
     NativeIPMLPAdapter ipm_solver(ipm_opt);
     SolveResult ipm_res = ipm_solver.solve_lp(lp);
+    if (ipm_res.stats.status == "Time limit") {
+      out.primal = std::move(ipm_res);
+      out.dual_bound = out.primal.stats.objective;
+      return out;
+    }
     if (ipm_res.constraint_duals.size() == lp.A.rows() + lp.Aeq.rows()) {
       out.row_duals = ipm_res.constraint_duals;
     }
@@ -2227,6 +2241,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         push_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
         push_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
         push_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        apply_simplex_budget(push_opt);
         apply_root_simplex_conformance_options(push_opt, require_simplex_crossover);
 
 	        simplex = std::make_shared<SimplexResult>(
@@ -2290,6 +2305,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
           cleanup_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
           cleanup_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
           cleanup_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+          apply_simplex_budget(cleanup_opt);
           apply_root_simplex_conformance_options(cleanup_opt, require_simplex_crossover);
 
           auto cleanup_res = std::make_shared<SimplexResult>(
@@ -2333,6 +2349,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         sx_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
         sx_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
         sx_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+        apply_simplex_budget(sx_opt);
         apply_root_simplex_conformance_options(sx_opt, require_simplex_crossover);
         if (lp_basis_trace_enabled()) {
           std::fprintf(stderr,
@@ -2470,12 +2487,19 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
     simplex_opt.factor_backend = simplex_factor_backend_from_id(opt.simplex_factor_backend);
     simplex_opt.allow_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
     simplex_opt.require_vendored_highs_sf_backend = opt.use_vendored_highs_lp_kernel;
+    apply_simplex_budget(simplex_opt);
     apply_root_simplex_conformance_options(simplex_opt, opt.use_simplex_lp_nodes);
 
     auto simplex = std::make_shared<SimplexResult>(solve_lp_with_basis(lp, simplex_opt, basis_hint));
     out.simplex = simplex;
     out.primal = simplex->result;
     if (!out.primal.stats.success) {
+      if (lp_wall_budget > 0.0 && lp_wall_budget <= 10.0) {
+        out.primal.stats.success = false;
+        out.primal.stats.status = "Time limit";
+        out.dual_bound = out.primal.stats.objective;
+        return out;
+      }
       if (opt.verbose) {
         fprintf(stderr, "[BC_RELAX] Pure simplex FAILED: status='%s' — trying IPM-LP fallback\n",
                 simplex->result.stats.status.c_str());
@@ -2491,8 +2515,14 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
       ipm_fb.tol_dual   = std::max(1e-9, opt.lp_tol * 0.1);
       ipm_fb.tol_gap    = std::max(1e-9, opt.lp_tol * 0.1);
       ipm_fb.verbose = false;
+      apply_ipm_budget(ipm_fb);
       NativeIPMLPAdapter ipm_fb_solver(ipm_fb);
       SolveResult ipm_fb_res = ipm_fb_solver.solve_lp(lp);
+      if (ipm_fb_res.stats.status == "Time limit") {
+        out.primal = std::move(ipm_fb_res);
+        out.dual_bound = out.primal.stats.objective;
+        return out;
+      }
       if (ipm_fb_res.constraint_duals.size() == lp.A.rows() + lp.Aeq.rows()) {
         out.row_duals = ipm_fb_res.constraint_duals;
       }
@@ -2534,6 +2564,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
         repair_opt.allow_cold_start = true;
         repair_opt.prefer_dual_simplex_reopt = false;
         repair_opt.use_partial_pricing = false;
+        apply_simplex_budget(repair_opt);
         apply_root_simplex_conformance_options(repair_opt, true);
 
         auto repair_simplex = std::make_shared<SimplexResult>(
@@ -2610,6 +2641,7 @@ LPRelaxationResult solve_lp_relaxation(const LPModel& lp,
   ipm_opt.tol_dual = std::max(1e-9, opt.lp_tol * 0.1);
   ipm_opt.tol_gap = std::max(1e-9, opt.lp_tol * 0.1);
   ipm_opt.verbose = opt.verbose;
+  apply_ipm_budget(ipm_opt);
   
   NativeIPMLPAdapter ipm_solver(ipm_opt);
   out.primal = ipm_solver.solve_lp(lp);

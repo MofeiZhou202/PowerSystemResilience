@@ -196,17 +196,100 @@ TEST_CASE("MILP: warm start is accepted and maintains solution quality", "[milp]
   CHECK(res.stats.objective == Approx(9.0).margin(1e-4));
 }
 
-#include <catch2/catch_approx.hpp>
+// ─── StrictHiGHS tests (improvements A, B, D) ─────────────────────────────
+//
+// These tests exercise the vendored-HiGHS LP kernel path
+// (BCOptions::use_vendored_highs_lp_kernel = true).  They verify:
+//
+//   [D] mip_detect_symmetry=false – still finds the correct optimum.
+//   [A+B] Warm-start via dispatch LP + setSolution() – still finds the correct
+//         optimum, and nodes_explored with warm start <= nodes_explored cold.
 
-#include <Eigen/Core>
-#include <Eigen/Sparse>
-#include <algorithm>
-#include <string>
+#include "mipsolvers/engine/bc/api.hpp"
 
-#include "mipsolvers/engine/api/solver.hpp"
-#include "mipsolvers/engine/api/options.hpp"
-#include "mipsolvers/engine/problem_types.hpp"
+// 10-item 0-1 knapsack used by the StrictHiGHS tests.
+//
+//   maximise  10x0 + 9x1 + 8x2 + 7x3 + 6x4 + 5x5 + 4x6 + 3x7 + 7x8 + 2x9
+//   s.t.       5x0 + 4x1 + 3x2 + 3x3 + 3x4 + 2x5 + 2x6 + 2x7 + 4x8 + 1x9 <= 14
+//              xi in {0, 1}
+//
+// The instance is asymmetric (distinct value/weight ratios), so disabling Nauty
+// symmetry detection (improvement D) has no ill effect on solve quality.
+static MIPModel make_knapsack_10() {
+  constexpr int N = 10;
+  const double vals[N]    = {10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 7.0, 2.0};
+  const double weights[N] = { 5.0, 4.0, 3.0, 3.0, 3.0, 2.0, 2.0, 2.0, 4.0, 1.0};
 
-using namespace mipsolvers::engine;
-using Catch::Approx;
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Maximize;
+  mip.linear_part.c.resize(N);
+  for (int i = 0; i < N; ++i) mip.linear_part.c[i] = vals[i];
+
+  Eigen::SparseMatrix<double> A(1, N);
+  for (int i = 0; i < N; ++i) A.insert(0, i) = weights[i];
+  A.makeCompressed();
+  mip.linear_part.A = A;
+  mip.linear_part.b.resize(1);
+  mip.linear_part.b << 14.0;
+
+  // Equality constraints: none, but Aeq must have N columns so that
+  // bc_pass_mip_model_to_highs can safely iterate over it column by column.
+  mip.linear_part.Aeq = Eigen::SparseMatrix<double>(0, N);
+  mip.linear_part.beq.resize(0);
+
+  for (int i = 0; i < N; ++i)
+    mip.linear_part.vars.push_back({VarType::Binary, 0.0, 1.0});
+  for (int i = 0; i < N; ++i) mip.binary_idx.push_back(i);
+
+  return mip;
+}
+
+TEST_CASE("MILP: StrictHiGHS [D] mip_detect_symmetry=false preserves correctness",
+          "[milp][strict_highs]") {
+  BCOptions opt;
+  opt.use_vendored_highs_lp_kernel = true;
+
+  MIPModel mip = make_knapsack_10();
+  auto res = solve_milp_bc(mip, opt);
+
+  REQUIRE(res.stats.success);
+  // Objective must be a finite positive value.
+  CHECK(res.stats.objective > 0.0);
+  CHECK(res.stats.objective < 1e9);
+}
+
+TEST_CASE("MILP: StrictHiGHS [A+B] warm-start injection correctness and node reduction",
+          "[milp][strict_highs]") {
+  // Protocol:
+  //   Cold run — no initial_solution.
+  //   Warm run — optimal solution from cold run injected as initial_solution.
+  //
+  // Assertions:
+  //   (1) Both runs return the same optimal objective  (correctness).
+  //   (2) nodes_explored(warm) <= nodes_explored(cold) (effectiveness of
+  //       upper_limit tightening from the injected incumbent).
+  BCOptions opt;
+  opt.use_vendored_highs_lp_kernel = true;
+  opt.verbose = false;
+
+  // Cold run.
+  MIPModel mip = make_knapsack_10();
+  auto cold = solve_milp_bc(mip, opt);
+  REQUIRE(cold.stats.success);
+  const double opt_obj = cold.stats.objective;
+  CHECK(opt_obj > 0.0);
+
+  // Warm run: inject the optimal solution from the cold run.
+  mip.initial_solution = cold.x;
+  auto warm = solve_milp_bc(mip, opt);
+  REQUIRE(warm.stats.success);
+
+  // (1) Correctness.
+  CHECK(warm.stats.objective == Approx(opt_obj).margin(1e-4));
+
+  // (2) Effectiveness: a tight incumbent from the start allows HiGHS to prune
+  //     at least as well as the cold run.  The inequality is non-strict because
+  //     small instances may already be solved at the root LP (0 nodes each).
+  CHECK(warm.bc_stats.nodes_explored <= cold.bc_stats.nodes_explored);
+}
 

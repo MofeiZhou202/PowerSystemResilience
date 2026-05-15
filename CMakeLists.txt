@@ -150,7 +150,9 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
   # HybridACDCPowerSystemsPlanning/CMakeLists.txt).
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/milp_benchmark_runner.cpp")
     add_executable(milp_benchmark_runner
-      benchmark/milp_benchmark_runner.cpp)
+      benchmark/milp_benchmark_runner.cpp
+      src/scuc/scuc.cpp
+      src/scuc/case_builder.cpp)
     target_include_directories(milp_benchmark_runner PRIVATE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
     target_link_libraries(milp_benchmark_runner PRIVATE mipsolvers highs::highs)

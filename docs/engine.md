@@ -295,6 +295,7 @@ public:
 | `NativeLCQPAdapter` | QP |
 | `NativeIPMAdapter` | NLP |
 | `NativeNLPAdapter` | NLP |
+| `StrictHiGHS` | MILP |
 | `NativeBranchAndCut` | MILP, MINLP |
 | `Gurobi` *(if available)* | LP, QP, MILP |
 | `HiGHS` | LP, MILP |
@@ -327,6 +328,7 @@ struct SolveOptions {
 |---|---|
 | `"Gurobi"` | GurobiAdapter |
 | `"HiGHS"` | HighsAdapter |
+| `"StrictHiGHS"` | Embedded HiGHS state machine with the MIPSolvers production contract; large roots use IPM with crossover by default |
 | `"SCIP"` | ScipAdapter (MINLP only) |
 | `"Ipopt"` | IpoptAdapter |
 | `"NativeBranchAndCut"` | NativeBranchAndCutAdapter |
@@ -551,6 +553,12 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 | `use_ipm_root` | `false` | Use IPM for root LP relaxation |
 | `use_ipm_nodes` | `false` | Use IPM for all node LPs |
 | `use_vendored_highs_lp_kernel` | `false` | Use embedded HiGHS simplex kernel for node LPs |
+| `highs_mip_lp_solver` | `"choose"` | StrictHiGHS root LP solver; production auto-policy may set large roots to `"ipm"` |
+| `highs_mip_root_crossover` | `"on"` | Crossover policy for StrictHiGHS root IPM; keep `"on"` when following node LPs need simplex bases |
+| `highs_strict_auto_ipm_root_for_large_models` | `true` | If the root solver is still `"choose"`, use IPM for large StrictHiGHS roots |
+| `highs_strict_auto_ipm_root_min_cols` | 10 000 | Column threshold for StrictHiGHS root-IPM auto-selection |
+| `highs_strict_auto_ipm_root_min_rows` | 10 000 | Row threshold for StrictHiGHS root-IPM auto-selection |
+| `highs_strict_auto_ipm_root_min_time_sec` | 30.0 | Minimum MIP time limit for automatic root IPM; short caps keep simplex unless IPM is explicit |
 | `simplex_factor_backend` | 0 | Factor backend: 0=UmfpackNative, 1=HiGHSSafe, 2=ForceFT, 3=ShortChain |
 
 #### Heuristics
@@ -803,8 +811,8 @@ Selection order when `preferred_solver` is `""` (Auto):
 1. If the user set a per-class preference via `set_solver_preference`, that
    adapter is tried first.
 2. Otherwise, `StrategyPolicy` governs the ordering:
-   - `Auto` — the dispatcher calls `estimate_best_solver()` to score problem
-     characteristics (size, sparsity, integrality density) and ranks adapters.
+   - `Auto` — MILP uses `StrictHiGHS` first, then direct `HiGHS`, `Gurobi`,
+     and `NativeBranchAndCut` as fallbacks.
    - `NativeFirst` — all native adapters come before external ones.
    - `ExternalFirst` — external adapters (Gurobi, HiGHS) come before native.
 3. If the chosen adapter fails and `allow_fallback = true`, the dispatcher

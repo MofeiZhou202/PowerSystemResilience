@@ -266,7 +266,7 @@ Solver and model configuration.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `solver` | `string` | `"Auto"` | Solver name: `"Auto"`, `"Gurobi"`, `"HiGHS"`, `"SCIP"`, `"NativeBranchAndCut"` |
+| `solver` | `string` | `"Auto"` | Solver name: `"Auto"`, `"StrictHiGHS"`, `"Gurobi"`, `"HiGHS"`, `"SCIP"`, `"NativeBranchAndCut"` |
 | `allow_fallback` | `bool` | `true` | Fall back to next solver on failure |
 | `num_periods` | `int` | 24 | Dispatch time periods $T$ |
 | `period_length_hr` | `double` | 1.0 | Hours per period $\Delta t$ |
@@ -777,7 +777,8 @@ Line flow inequality duals are tracked per row index during formulation.
 
 | Value | Adapter | Notes |
 |---|---|---|
-| `"Auto"` | Engine heuristic | MILP priority: HiGHS → Gurobi → NativeBranchAndCut |
+| `"Auto"` | Engine heuristic | MILP priority: StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut |
+| `"StrictHiGHS"` | StrictHighsBranchAndCutAdapter | Embedded HiGHS state machine with MIPSolvers production contract; large roots use IPM with crossover by default |
 | `"Gurobi"` | GurobiAdapter | Requires Gurobi licence; returns duals |
 | `"HiGHS"` | HighsAdapter | Open-source; **no constraint duals** (LMP uses fallback) |
 | `"SCIP"` | ScipAdapter | Open-source **MINLP only** (not registered for MILP dispatch) |
@@ -804,7 +805,7 @@ The `scuc_solve` executable is built when `MIPSOLVERS_BUILD_SCUC=ON` (default).
 ```
 Usage:
   scuc_solve <input.json> [output.json]
-             [--solver <Auto|Gurobi|HiGHS|SCIP|NativeBranchAndCut>]
+             [--solver <Auto|StrictHiGHS|Gurobi|HiGHS|SCIP|NativeBranchAndCut>]
              [--no-sced]
              [--no-lmp]
              [--indent <n>]
@@ -967,8 +968,8 @@ Environment: macOS ARM64 (Apple M4), Release build, MIP gap 1%, HiGHS 4.x.
 >   framework.
 > - All three solvers agree on objective values (differences < 1 $ within MIP
 >   tolerance).
-> - `"Auto"` mode selects HiGHS first for MILP, then falls back to
->   Gurobi → NativeBranchAndCut.
+> - `"Auto"` mode selects StrictHiGHS first for MILP, then falls back to
+>   HiGHS → Gurobi → NativeBranchAndCut.
 > - Zero load-shed for all IEEE 39-bus cases (VOLL penalty = $0).
 > - The wind+solar case objective (891,466 $) is lower than wind-only (976,359 $):
 >   solar generation displaces expensive peak-period thermal capacity.

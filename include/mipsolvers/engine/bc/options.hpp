@@ -500,6 +500,103 @@ struct BCOptions {
   /// problem size, not on benchmark/domain metadata.
   bool auto_highs_root_pipeline{true};
 
+  /// [D] Disable HiGHS symmetry detection (Nauty/Nauty-like).  UC/SCUC
+  /// variables are not interchangeable (distinct cost curves, ramp rates,
+  /// min up/down times), so symmetry detection finds nothing useful while
+  /// adding Nauty preprocessing overhead.  Set to true to re-enable.
+  bool highs_mip_detect_symmetry{false};
+
+  /// [C] Root MIP heuristic effort fraction passed to HiGHS
+  /// (mip_heuristic_effort).  HiGHS default is 0.05; 0.15 gives RENS and
+  /// central rounding enough budget to find a good incumbent without
+  /// significantly delaying the first B&B node.
+  double highs_mip_heuristic_effort{0.15};
+
+  /// [E] Pseudocost reliability threshold (mip_pscost_minreliable).  HiGHS
+  /// default is 8; a value of 3 reaches statistical reliability faster,
+  /// reducing expensive strong-branching LP solves at shallow nodes.
+  int highs_mip_pscost_minreliable{3};
+
+  /// [H] Maximum B&B nodes processed while the best bound has not improved
+  /// (stall detection).  0 = disabled (HiGHS default).  When a good incumbent
+  /// is injected via improvement A/B, setting this to 2000–5000 allows early
+  /// termination on problems where the dual gap cannot be closed within
+  /// the node budget, returning the best incumbent instead of timing out.
+  int highs_mip_max_stall_nodes{0};
+
+  /// [I] LP solver for the MIP root-node LP relaxation (maps to HiGHS
+  /// mip_lp_solver).  When no basis is available (root node), HiGHS routes
+  /// the solve as follows:
+  ///   "ipm"    — IPX/HiPO interior-point method; crossover behaviour is
+  ///              controlled by highs_mip_root_crossover below.  Use for
+  ///              large or highly degenerate UC LPs.
+  ///   "choose" — Let HiGHS decide; currently defaults to simplex everywhere.
+  ///              Default; safe for all problem sizes.
+  /// When a basis IS available (every sub-tree node LP), HiGHS always uses
+  /// dual simplex regardless of this setting.
+  std::string highs_mip_lp_solver{"choose"};
+
+  /// [I-xover] Crossover behaviour when mip_lp_solver="ipm".
+  ///   "on"    — Standard IPM → crossover → simplex-basis handoff (default).
+  ///             Crossover drives the interior point to a vertex so all
+  ///             sub-tree node LPs can be warm-started with dual simplex.
+  ///   "off"   — Pure IPM, no crossover.  Fastest for highly degenerate LPs
+  ///             (e.g., 118-bus UC) where crossover itself incurs O(10k–100k)
+  ///             degenerate simplex pivots.  No basis handoff: node LPs are
+  ///             solved from scratch (IPM or simplex per mip_lp_solver).
+  ///   "choose"— Let HiGHS decide (currently treated as "on").
+  /// Has no effect when mip_lp_solver="choose" (simplex root, no IPM).
+  std::string highs_mip_root_crossover{"on"};
+
+  /// [I-fallback] Iteration cap for the first StrictHiGHS root simplex LP.
+  /// When positive, the cap is passed to HiGHS' simplex_iteration_limit for
+  /// the first root LP only.  If simplex reaches the cap, HiGHS' existing MIP
+  /// relaxation logic falls back to IPM, obtains an IPM/crossover basis, and
+  /// re-solves simplex from that basis.  0 leaves HiGHS' default infinite root
+  /// simplex limit unchanged.
+  int highs_mip_root_simplex_iteration_limit{0};
+
+  /// Production StrictHiGHS policy: when the caller has left
+  /// highs_mip_lp_solver="choose", route large root LP relaxations through
+  /// HiGHS IPM.  Crossover remains controlled by highs_mip_root_crossover;
+  /// the production default is "on" so the tree receives a simplex basis for
+  /// following node LP kernels.  Explicit caller choices for highs_mip_lp_solver
+  /// are respected and are not overwritten by this auto policy.
+  bool highs_strict_auto_ipm_root_for_large_models{true};
+  int highs_strict_auto_ipm_root_min_cols{10000};
+  int highs_strict_auto_ipm_root_min_rows{10000};
+  /// Fixed floor on the time budget required to activate auto root-IPM.
+  double highs_strict_auto_ipm_root_min_time_sec{30.0};
+  /// Size-proportional time scaling: require at least
+  ///   max(min_time_sec, n_cols * secs_per_kcol / 1000)
+  /// seconds of budget before engaging auto root-IPM.
+  /// Rationale: crossover cost grows roughly linearly with LP column count
+  /// (empirically ~728 pivots for 26k cols vs ~6 pivots for 6k cols).  For
+  /// small problems (39-bus, 6360 cols) this evaluates to 12.7s < 30s floor,
+  /// so the floor dominates.  For large problems (118-bus, 26400 cols) it
+  /// evaluates to 52.8s > 30s floor, correctly requiring a larger budget.
+  double highs_strict_auto_ipm_root_secs_per_kcol{2.0};
+
+  /// [J] Native IPM crash-basis seeding for StrictHiGHS.
+  /// When true, before calling Highs::run() on the MIP, the StrictHiGHS path
+  /// runs a bounded auxiliary HiGHS IPM LP solve (with crossover disabled) on
+  /// the root LP relaxation, recovers a native SimplexBasis from the IPM
+  /// primal/dual partition signal,
+  /// converts it to a HighsBasis (alien=true, useful=true), and injects it via
+  /// Highs::setBasis() with label "MIPSOLVERS native IPM crash root basis".
+  /// HiGHS MIP can then repair/dual-simplex warm-start the root LP from this
+  /// basis instead of beginning from the default logical root basis.  Designed
+  /// for large, highly degenerate UC LPs (e.g., 118-bus 24T) where HiGHS root
+  /// crossover incurs O(30k+) pivots.
+  /// Default off (opt-in); set to true to evaluate.
+  bool highs_strict_seed_native_ipm_basis{false};
+
+  /// Time budget for the auxiliary root-LP IPM solve used by
+  /// highs_strict_seed_native_ipm_basis.  The StrictHiGHS path caps the seed
+  /// solve by this value and by 25% of the caller's MIP time limit, then gives
+  /// the remaining wall time back to Highs::run().
+  double highs_strict_seed_native_ipm_basis_time_limit_sec{5.0};
+
   /// P8: Maximum IPM iterations for the analytic-centre sub-solve.
   int analytic_centre_max_iter{200};
 

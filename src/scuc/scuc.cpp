@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 
@@ -19,6 +20,8 @@
 #include "mipsolvers/engine/engine.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/api/result.hpp"
+#include "mipsolvers/engine/solver/native/native_adapters.hpp"
+#include "mipsolvers/scuc/case_builder.hpp"
 
 namespace mipsolvers::scuc {
 
@@ -28,6 +31,14 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 constexpr double kEps = 1e-9;
+
+engine::BCOptions make_scuc_bc_options(const SCUCConfig& cfg) {
+  engine::BCOptions opt;
+  opt.time_limit_sec = cfg.time_limit_sec;
+  opt.gap_tol = cfg.mip_gap;
+  opt.verbose = cfg.verbose;
+  return engine::make_strict_highs_production_options(opt);
+}
 
 inline double clampd(double v, double lo, double hi) {
   return std::max(lo, std::min(hi, v));
@@ -1281,7 +1292,10 @@ SCUCSolveResult extract_result(
 // Solver factory: configure SolverEngine from config.solver name
 // ─────────────────────────────────────────────────────────────────────────────
 engine::api::Result run_milp(const engine::MIPModel& mip, const SCUCConfig& cfg) {
-  engine::SolverEngine eng;
+  engine::SolverEngine eng(false);
+  const engine::BCOptions bc_opt = make_scuc_bc_options(cfg);
+  eng.register_adapter(std::make_shared<engine::StrictHighsBranchAndCutAdapter>(bc_opt));
+  eng.register_adapter(std::make_shared<engine::NativeBranchAndCutAdapter>(bc_opt));
   eng.register_default_adapters();
 
   engine::SolveOptions opts;
@@ -1855,6 +1869,10 @@ std::string scuc_output_to_json(const SCUCOutput& output,
   }
 
   return indent >= 0 ? j.dump(indent) : j.dump();
+}
+
+engine::MIPModel build_scuc_mip(const SCUCInput& inp) {
+  return build_formulation(inp).mip;
 }
 
 }  // namespace mipsolvers::scuc

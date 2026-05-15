@@ -148,6 +148,7 @@ std::size_t SolverEngine::register_default_adapters() {
   register_if_missing(std::make_shared<NativeLCQPAdapter>());
   register_if_missing(std::make_shared<NativeIPMAdapter>());
   register_if_missing(std::make_shared<NativeNLPAdapter>());
+  register_if_missing(std::make_shared<StrictHighsBranchAndCutAdapter>());
   register_if_missing(std::make_shared<NativeBranchAndCutAdapter>());
 
   auto gurobi = std::make_shared<GurobiAdapter>();

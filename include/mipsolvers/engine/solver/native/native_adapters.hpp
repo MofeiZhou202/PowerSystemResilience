@@ -55,6 +55,22 @@ class NativeNLPAdapter final : public SolverAdapter {
   NativeNLPOptions opt_;
 };
 
+BCOptions make_strict_highs_production_options(BCOptions opt = {});
+BCOptions make_strict_highs_problem_options(const MIPModel& prob,
+                                            BCOptions opt = {});
+
+class StrictHighsBranchAndCutAdapter final : public SolverAdapter {
+ public:
+  explicit StrictHighsBranchAndCutAdapter(BCOptions opt = {});
+
+  std::string name() const override;
+  bool supports(ProblemClass cls) const override;
+  SolveResult solve_milp(const MIPModel& prob) const override;
+
+ private:
+  BCOptions opt_;
+};
+
 class NativeBranchAndCutAdapter final : public SolverAdapter {
  public:
   explicit NativeBranchAndCutAdapter(BCOptions opt = {});

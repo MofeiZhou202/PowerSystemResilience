@@ -44,7 +44,7 @@ SCUC 模块实现了安全约束机组组合（Security-Constrained Unit Commitm
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `solver` | string | `"Auto"` | 求解器：Auto / Gurobi / HiGHS / SCIP |
+| `solver` | string | `"Auto"` | 求解器：Auto / StrictHiGHS / Gurobi / HiGHS / SCIP |
 | `allow_fallback` | bool | true | 首选求解器失败时自动回退 |
 | `num_periods` | int | 24 | 调度时段数 $T$ |
 | `period_length_hr` | float | 1.0 | 每时段小时数 $\Delta t$ |
@@ -441,7 +441,7 @@ SCUCInput (JSON)
   scuc_output_to_json()        ← 序列化输出 (JSON)
 ```
 
-**MILP 求解器优先级**（`solver = "Auto"`）：HiGHS → Gurobi → NativeBranchAndCut
+**MILP 求解器优先级**（`solver = "Auto"`）：StrictHiGHS → HiGHS → Gurobi → NativeBranchAndCut
 
 > 注：SCIP 在本框架中仅支持 MINLP，不参与 MILP 调度。HiGHS 不返回对偶变量，
 > 因此当 `solve_lmp = true` 时 LMP 阶段会自动回退到 Gurobi 或 NativeBranchAndCut。
@@ -608,7 +608,7 @@ inp.initial_status.dispatch   = {500,300,0,0,200,0,0,0,0,600};
 > **说明**：
 > - SCIP 在本框架中仅支持 MINLP，不参与 MILP 基准。
 > - 三个求解器目标函数差异 < 1 $（MIP 间隙范围内），结果一致。
-> - Auto 模式（`solver="Auto"`）默认优先 HiGHS，不可用时依次回退到 Gurobi → NativeBranchAndCut。
+> - Auto 模式（`solver="Auto"`）默认优先 StrictHiGHS，不可用时依次回退到 HiGHS → Gurobi → NativeBranchAndCut。
 > - 「风+光」案例目标函数（891,466 $）低于纯风案例（976,359 $）：光伏日间出力替代了边际成本较高的调峰机组。
 > - 「风+光+储」在「风+光」基础上增加 2 台电池（bus 3: 200MW/800MWh，bus 19: 150MW/600MWh），目标函数相同，割平面增加 2 条（SOC 约束）。
 

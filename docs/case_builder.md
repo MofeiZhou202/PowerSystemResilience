@@ -320,21 +320,21 @@ std::ofstream("/tmp/ieee39_24h.json") << json;
 
 ## 7. 性能基准
 
-测试环境：macOS ARM64（Apple M4），Release 模式，MIP 间隙 1%，HiGHS 4.x。
+测试环境：macOS ARM64（Apple M4 Pro），Release 模式，MIP 间隙 1%，HiGHS 4.x。
 
 ### 各求解器耗时对比
 
-| 算例 | T | 新能源/储能 | HiGHS | Gurobi | NativeBranchAndCut | 目标函数 ($) | 割平面 |
-|------|---|----------|-------|--------|--------------------|------------|------|
-| 3-bus | 6 | 无 | 22 ms | 4 ms | 48 ms | 746,316 | 32 |
-| 6-bus | 8 | 风+储 | 22 ms | 6 ms | 70 ms | 76,478 | 86 |
-| IEEE 39-bus | 4 | 风 | 21 ms | 5 ms | 16 ms | 203,130 | 122 |
-| IEEE 39-bus | 24 | 风+光 | 91 ms | 77 ms | 96 ms | 891,466 | 898 |
-| **IEEE 39-bus** | **24** | **风+光+储** | **96 ms** | **84 ms** | **147 ms** | **891,466** | **900** |
+| 算例 | T | 新能源/储能 | StrictHiGHS | HiGHS | Gurobi | NativeBranchAndCut | 目标函数 ($) | 割平面 |
+|------|---|----------|-------------|-------|--------|--------------------|------------|------|
+| 3-bus | 6 | 无 | 9 ms | 7 ms | 3 ms | 7 ms | 746,317 | 32 |
+| 6-bus | 8 | 风+储 | 14 ms | 14 ms | 6 ms | 14 ms | 76,478 | 86 |
+| IEEE 39-bus | 4 | 风 | 5 ms | 5 ms | 4 ms | 5 ms | 203,130 | 122 |
+| IEEE 39-bus | 24 | 风+光 | 44 ms | 45 ms | 74 ms | 43 ms | 891,466 | 898 |
+| **IEEE 39-bus** | **24** | **风+光+储** | **27 ms** | **27 ms** | **81 ms** | **26 ms** | **891,466** | **900** |
 
 > **说明**：
 > - SCIP 在本框架中仅支持 MINLP，不参与 MILP 调度。
-> - Auto 模式（`solver="Auto"`）默认优先选用 HiGHS，如不可用则依次回退到 Gurobi → NativeBranchAndCut。
+> - Auto 模式（`solver="Auto"`）默认优先选用 StrictHiGHS（含生产级参数），如不可用则依次回退到 HiGHS → Gurobi → NativeBranchAndCut。
 > - MIP 间隙均为 0.000%，所有算例均收敛，切负荷为零。
 > - 「风+光」目标函数（891,466 $）低于纯风案例（976,359 $）：光伏日间出力替代了高价调峰机组。
 > - 「风+光+储」在风+光基础上添加 2 台电池（bus 3: 200 MW/800 MWh，bus 19: 150 MW/600 MWh），目标函数不变，割平面增 2 条。
@@ -352,6 +352,22 @@ std::ofstream("/tmp/ieee39_24h.json") << json;
 
 切负荷：**0 MWh**（无切负荷），功率平衡误差 < 5 MW/时段。
 
+### IEEE 39-bus 24h IPM 根节点 + 交叉迭代测试（风电+光伏）
+
+测试路径：`tests/test_market_simulation.cpp` → `[market][strict_highs][ipm_root][ieee39]`
+
+| 求解配置 | 目标函数 ($) | 节点数 | 根节点迭代 | 交叉迭代 | 耗时 |
+|---------|------------|--------|-----------|---------|------|
+| StrictHiGHS 单纯形根（基线） | 891,466 | 1 | 330（单纯形） | — | 55 ms |
+| **StrictHiGHS IPM根 + 交叉** | **891,466** | **1** | **27（IPM）** | **6** | **57 ms** |
+
+**问题规模**：6,360 列，6,946 行（含等式约束）。
+
+> - IPM 用 27 次内点迭代求解根节点 LP 松弛，交叉阶段（6 次枢轴）将内点解恢复为顶点基，
+>   为后续所有节点 LP 重用该基（warm-start），节点数维持为 1（根节点即最优）。
+> - 两种配置目标函数一致（差 < 0.5%），验证 IPM→交叉→单纯形 路径的正确性。
+> - 运行方式：`MIPSOLVERS_BC_TIMELINE=1 ./build_mipsolvers/test_market_simulation "[ipm_root]"`
+
 ### 快速复现
 
 ```bash
@@ -359,14 +375,17 @@ std::ofstream("/tmp/ieee39_24h.json") << json;
 cmake -S . -B build_rel -DCMAKE_BUILD_TYPE=Release
 cmake --build build_rel --target test_market_simulation -j8
 
-# 运行 benchmark
+# 运行全求解器 benchmark
 ./build_rel/test_market_simulation "[market][benchmark]" 2>/dev/null
 
 # 运行 IEEE 39-bus 24h 完整流程
 ./build_rel/test_market_simulation "[market][viz][ieee39]" 2>/dev/null | \
   grep -E "切负荷|SCUC|收敛|求解器"
+
+# 运行 IPM 根节点 + 交叉迭代正确性测试（含交叉诊断日志）
+MIPSOLVERS_BC_TIMELINE=1 ./build_rel/test_market_simulation "[ipm_root]" 2>&1
 ```
 
 ---
 
-*文档日期：2026-05-06 | 对应源文件：`include/mipsolvers/scuc/case_builder.hpp`，`src/scuc/case_builder.cpp`*
+*文档日期：2026-05-15 | 对应源文件：`include/mipsolvers/scuc/case_builder.hpp`，`src/scuc/case_builder.cpp`*
