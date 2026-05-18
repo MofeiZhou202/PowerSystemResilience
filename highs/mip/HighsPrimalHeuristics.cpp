@@ -265,6 +265,13 @@ bool HighsPrimalHeuristics::solveSubMip(
     HighsInt maxleaves, HighsInt maxnodes, HighsInt stallnodes) {
   HighsOptions submipoptions = *mipsolver.options_mip_;
   HighsLp submip = lp;
+  if (!mipsolver.submip &&
+      mipsolver.hacdcpf_heuristic_submip_node_limit >= 0) {
+    const HighsInt node_limit = mipsolver.hacdcpf_heuristic_submip_node_limit;
+    maxnodes = std::min(maxnodes, node_limit);
+    maxleaves = std::min(maxleaves, std::max<HighsInt>(1, node_limit));
+    stallnodes = std::min(stallnodes, std::max<HighsInt>(1, node_limit));
+  }
   hacdcpfLogHighsRepairBounds(
       mipsolver, "solve_submip_bounds", lp, &basis,
       mipsolver.mipdata_->rootlpsol.empty() ? mipsolver.mipdata_->firstlpsol

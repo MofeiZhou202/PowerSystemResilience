@@ -237,6 +237,7 @@ struct MIPModel {
     /// original-space constraint family is certified here.
     bool certifies_power_balance_rows{false};
     bool certifies_generation_capacity_rows{false};
+    bool certifies_ramping_rows{false};
     bool certifies_min_up_down_rows{false};
     bool certifies_segment_bound_rows{false};
     bool certifies_system_reserve_rows{false};
@@ -252,6 +253,13 @@ struct MIPModel {
     std::vector<int> gen_bus;            ///< generator -> bus index, ng entries
     std::vector<double> demand;          ///< demand[t], T entries
     std::vector<double> reserve_requirement;  ///< optional reserve[t], T entries
+    std::vector<double> spinning_requirement;  ///< spinning reserve req[t]
+    std::vector<double> regulation_up_requirement;  ///< reg-up reserve req[t]
+    std::vector<double> regulation_down_requirement;  ///< reg-down reserve req[t]
+    std::vector<double> up_reserve_headroom_cap;  ///< max spin+reg-up per unit
+    std::vector<double> spinning_reserve_cap;     ///< max spin per unit
+    std::vector<double> regulation_up_cap;        ///< max reg-up per unit
+    std::vector<double> regulation_down_cap;      ///< max reg-down per unit
 
     /// Optional balancing-area metadata. Area-indexed arrays use
     /// area*T + t ordering. area_import_capacity is a certified upper bound on

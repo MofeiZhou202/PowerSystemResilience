@@ -1683,6 +1683,22 @@ void HighsMipSolverData::runSetup() {
 
   basisTransfer();
 
+  // [HACDCP improvement (7)] Build presolved col_branch_priority_ by mapping
+  // original-space priorities through the postSolveStack.
+  if (!mipsolver.col_branch_priority.empty()) {
+    const HighsInt num_orig = static_cast<HighsInt>(mipsolver.col_branch_priority.size());
+    const HighsInt num_presolved = mipsolver.numCol();
+    col_branch_priority_.assign(static_cast<size_t>(num_presolved), 0);
+    for (HighsInt c = 0; c < num_presolved; ++c) {
+      const HighsInt orig_c = postSolveStack.getOrigColIndex(c);
+      if (orig_c >= 0 && orig_c < num_orig)
+        col_branch_priority_[static_cast<size_t>(c)] =
+            mipsolver.col_branch_priority[static_cast<size_t>(orig_c)];
+    }
+  } else {
+    col_branch_priority_.clear();
+  }
+
   numintegercols = integer_cols.size();
   detectSymmetries = detectSymmetries && num_binary > 0;
   numCliqueEntriesAfterPresolve = cliquetable.getNumEntries();
@@ -2463,7 +2479,8 @@ bool HighsMipSolverData::rootSeparationRound(
 
   const std::vector<double>& solvals = lp.getLpSolver().getSolution().col_value;
 
-  if (mipsolver.submip || incumbent.empty()) {
+  if (!mipsolver.hacdcpf_skip_primal_heuristics &&
+      (mipsolver.submip || incumbent.empty())) {
     heuristics.randomizedRounding(solvals);
     if (mipsolver.options_mip_->mip_heuristic_run_shifting)
       heuristics.shifting(solvals);
@@ -2532,7 +2549,8 @@ HighsLpRelaxation::Status HighsMipSolverData::evaluateRootLp() {
         return HighsLpRelaxation::Status::kInfeasible;
       }
 
-      if (status == HighsLpRelaxation::Status::kOptimal &&
+        if (!mipsolver.hacdcpf_skip_primal_heuristics &&
+          status == HighsLpRelaxation::Status::kOptimal &&
           mipsolver.options_mip_->mip_heuristic_run_zi_round)
         heuristics.ziRound(lp.getLpSolver().getSolution().col_value);
 
@@ -2590,12 +2608,18 @@ static void clockOff(HighsMipAnalysis& analysis) {
 }
 
 void HighsMipSolverData::evaluateRootNode() {
-  const bool compute_analytic_centre = true;
+  const bool run_primal_heuristics = !mipsolver.hacdcpf_skip_primal_heuristics;
+  const bool compute_analytic_centre =
+      run_primal_heuristics && !mipsolver.hacdcpf_skip_analytic_center;
   if (!compute_analytic_centre) printf("NOT COMPUTING ANALYTIC CENTRE!\n");
   HighsInt maxSepaRounds = mipsolver.submip ? 5 : kHighsIInf;
   if (numRestarts == 0)
     maxSepaRounds =
         std::min(HighsInt(2 * std::sqrt(maxTreeSizeLog2)), maxSepaRounds);
+  // [K6] Cap with user-provided limit (hacdcpf_max_root_sepa_rounds).
+  if (mipsolver.options_mip_->hacdcpf_max_root_sepa_rounds < kHighsIInf)
+    maxSepaRounds = std::min(maxSepaRounds,
+                             mipsolver.options_mip_->hacdcpf_max_root_sepa_rounds);
   std::unique_ptr<SymmetryDetectionData> symData;
   highs::parallel::TaskGroup tg;
   HighsMipAnalysis& analysis = mipsolver.analysis_;
@@ -2926,22 +2950,24 @@ restart:
   last_disptime = -kHighsInf;
   disptime = 0;
 
-  if (mipsolver.options_mip_->mip_heuristic_run_zi_round)
-    heuristics.ziRound(firstlpsol);
-  analysis.mipTimerStart(kMipClockRandomizedRounding);
-  heuristics.randomizedRounding(firstlpsol);
-  analysis.mipTimerStop(kMipClockRandomizedRounding);
-  if (mipsolver.options_mip_->mip_heuristic_run_shifting)
-    heuristics.shifting(firstlpsol);
+  if (run_primal_heuristics) {
+    if (mipsolver.options_mip_->mip_heuristic_run_zi_round)
+      heuristics.ziRound(firstlpsol);
+    analysis.mipTimerStart(kMipClockRandomizedRounding);
+    heuristics.randomizedRounding(firstlpsol);
+    analysis.mipTimerStop(kMipClockRandomizedRounding);
+    if (mipsolver.options_mip_->mip_heuristic_run_shifting)
+      heuristics.shifting(firstlpsol);
 
-  heuristics.flushStatistics();
+    heuristics.flushStatistics();
 
-  analysis.mipTimerStart(kMipClockEvaluateRootLp);
-  status = evaluateRootLp();
-  analysis.mipTimerStop(kMipClockEvaluateRootLp);
-  if (status == HighsLpRelaxation::Status::kInfeasible)
-    return clockOff(analysis);
-  hacdcpfLogHighsFrontierConformance(*this, lp, "after_initial_heuristics");
+    analysis.mipTimerStart(kMipClockEvaluateRootLp);
+    status = evaluateRootLp();
+    analysis.mipTimerStop(kMipClockEvaluateRootLp);
+    if (status == HighsLpRelaxation::Status::kInfeasible)
+      return clockOff(analysis);
+    hacdcpfLogHighsFrontierConformance(*this, lp, "after_initial_heuristics");
+  }
 
   rootlpsolobj = firstlpsolobj;
   removeFixedIndices();
@@ -3159,11 +3185,13 @@ restart:
   lp.setIterationLimit(std::max(10000, int(10 * avgrootlpiters)));
   hacdcpfLogHighsFrontierConformance(*this, lp, "after_root_separation");
 
-  if (mipsolver.options_mip_->mip_heuristic_run_zi_round) {
+  if (run_primal_heuristics &&
+      mipsolver.options_mip_->mip_heuristic_run_zi_round) {
     heuristics.ziRound(firstlpsol);
     heuristics.flushStatistics();
   }
-  if (mipsolver.options_mip_->mip_heuristic_run_shifting) {
+  if (run_primal_heuristics &&
+      mipsolver.options_mip_->mip_heuristic_run_shifting) {
     heuristics.shifting(rootlpsol);
     heuristics.flushStatistics();
   }
@@ -3223,6 +3251,7 @@ restart:
   analysis.mipTimerStop(kMipClockEvaluateRootNode0);
   analysis.mipTimerStart(kMipClockEvaluateRootNode1);
   do {
+    if (!run_primal_heuristics) break;
     if (rootlpsol.empty()) break;
     if (upper_limit != kHighsInf && !moreHeuristicsAllowed()) break;
 
@@ -3361,6 +3390,10 @@ restart:
 
   removeFixedIndices();
   if (lp.getLpSolver().getBasis().valid) lp.removeObsoleteRows();
+  hacdcpf_root_lp_basis.clear();
+  if (!mipsolver.submip && lp.getLpSolver().getBasis().valid) {
+    hacdcpf_root_lp_basis = lp.getLpSolver().getBasis();
+  }
   rootlpsolobj = lp.getObjective();
 
   printDisplayLine();

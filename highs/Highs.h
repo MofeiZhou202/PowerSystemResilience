@@ -21,11 +21,27 @@
 #include "lp_data/HighsSolutionDebug.h"
 #include "model/HighsModel.h"
 #include "mip/HighsPresolveSideState.h"
+#include "mip/HighsPseudocost.h"
 #include "presolve/ICrash.h"
 #include "presolve/PresolveComponent.h"
 
 struct HighsMipSolverData;
 class HighsLpRelaxation;
+
+/// \brief Root cut pool for warm-starting a HiGHS MIP solve on a repeated or
+/// structurally identical problem instance.  Column indices are in the
+/// **original** (pre-presolve) LP column space; bounds follow HiGHS conventions
+/// (use -kHighsInf / +kHighsInf for one-sided constraints).
+struct HacdcpfRootCuts {
+  std::vector<HighsInt> start;   ///< row starts, size = n_cuts+1
+  std::vector<HighsInt> index;   ///< original column indices
+  std::vector<double>   value;   ///< coefficients rescaled to original space
+  std::vector<double>   lower;   ///< row lower bounds
+  std::vector<double>   upper;   ///< row upper bounds
+  HighsInt numCuts() const { return static_cast<HighsInt>(lower.size()); }
+  bool     empty()   const { return lower.empty(); }
+  void     clear()   { start.clear(); index.clear(); value.clear(); lower.clear(); upper.clear(); }
+};
 
 /**
  * @brief Return the version
@@ -238,6 +254,94 @@ class Highs {
   HighsStatus hacdcpfSetNodeCutCallback(
       HacdcpfNodeCutCallback callback,
       void* user_callback_data = nullptr);
+
+  /**
+   * [HACDCP] Set per-column branching priorities for the MIP solver.
+   * Higher values are branched on first when pseudocost scores are tied.
+   * num_col must equal the number of columns in the model.
+   * Pass priority == nullptr to clear priorities.
+   * Must be called after passModel/passLp and before run().
+   */
+  HighsStatus hacdcpfSetColBranchingPriorities(HighsInt num_col,
+                                               const HighsInt* priority);
+
+  /**
+   * [HACDCP] Set an original-space simplex basis for the next MIP root LP.
+   * The basis is mapped through MIP presolve via HighsMipSolverData::basisTransfer().
+   * Pass an invalid basis to clear the pending warm-start.
+   */
+  HighsStatus hacdcpfSetRootBasis(const HighsBasis& basis);
+
+  /**
+   * [HACDCP] Extract root cuts generated during the last Highs::run() MIP
+   * solve.  The cuts are mapped back to the original (pre-presolve) column
+   * space and stored in \p cuts.  Call immediately after run() to capture
+   * them; the internal cache is valid until the next run() call.
+   * Returns kOk even when no cuts are available (cuts.empty() == true).
+   */
+  HighsStatus hacdcpfExtractRootCuts(HacdcpfRootCuts& cuts);
+
+  /**
+   * [HACDCP] Extract the final root LP simplex basis from the last MIP solve,
+   * mapped to the original model rows plus extracted root cuts.  The row order
+   * is original model rows followed by HacdcpfRootCuts rows.
+   */
+  HighsStatus hacdcpfExtractRootBasis(HighsBasis& basis);
+
+  /**
+   * [HACDCP] When val=true, skip the analytic-centre IPM computation at the
+   * root node of the next MIP solve (saves 30-60 s on large instances).
+   * Must be called before run().
+   */
+  void hacdcpfSetSkipAnalyticCenter(bool val);
+
+  /**
+   * [HACDCP] When val=true, skip LP-based primal heuristics in the next MIP
+   * solve. Intended for warm-cut/warm-incumbent re-solves where feasibility is
+   * already known and the time budget should go to proof/tree search.
+   * Must be called before run().
+   */
+  void hacdcpfSetSkipPrimalHeuristics(bool val);
+
+  /**
+   * [HACDCP] When val=true, skip dive-loop RENS/RINS sub-MIP heuristics in the
+   * next MIP solve while preserving setup/root incumbent heuristics.
+   * Must be called before run().
+   */
+  void hacdcpfSetSkipDiveSubMipHeuristics(bool val);
+
+  /**
+   * [HACDCP] Limit dive-loop RENS/RINS sub-MIP heuristic calls in the next MIP
+   * solve. A negative limit leaves HiGHS default behaviour unchanged.
+   * Must be called before run().
+   */
+  void hacdcpfSetDiveSubMipHeuristicLimit(HighsInt limit);
+
+  /**
+   * [HACDCP] Limit nodes inside primal-heuristic sub-MIPs in the next MIP
+   * solve. A negative limit leaves HiGHS default behaviour unchanged.
+   * Must be called before run().
+   */
+  void hacdcpfSetHeuristicSubMipNodeLimit(HighsInt limit);
+
+  /**
+   * [HACDCP] Seed the pseudocost table for the next MIP solve with branching
+   * statistics collected during a previous solve of the same (or structurally
+   * identical) problem.  Enables near-optimal branching decisions from node 1
+   * on warm runs.  Pass nullptr to clear any pending initialisation.
+   * Must be called before run().
+   */
+  void hacdcpfSetPseudocostInitialization(
+      std::shared_ptr<HighsPseudocostInitialization> init);
+
+  /**
+   * [HACDCP] Copy the pseudocost data collected during the most recent MIP
+   * solve (in original pre-presolve column space) into @p out.  Returns true
+   * on success; returns false if no branching data is available (e.g. the
+   * solver terminated at the root without exploring any nodes).
+   */
+  bool hacdcpfExtractPseudocostInitialization(
+      HighsPseudocostInitialization& out) const;
 
   /**
    * @brief Postsolve the incumbent model using a solution
@@ -1577,6 +1681,34 @@ class Highs {
   HighsIis iis_;
   std::vector<HighsObjectiveSolution> saved_objective_and_solution_;
   std::unique_ptr<HighsMipSolverData> hacdcpf_root_mipdata_;
+  /// Per-column branching priorities (original column space).
+  /// Transferred to HighsMipSolver::col_branch_priority before each MIP solve.
+  std::vector<HighsInt> hacdcpf_col_branch_priority_;
+  /// When true, skip analytic-center IPM at the root node.
+  /// Transferred to HighsMipSolver::hacdcpf_skip_analytic_center before each MIP solve.
+  bool hacdcpf_skip_analytic_center_ = false;
+  /// When true, skip LP-based primal heuristics in the next MIP solve.
+  /// Transferred to HighsMipSolver::hacdcpf_skip_primal_heuristics.
+  bool hacdcpf_skip_primal_heuristics_ = false;
+  /// When true, skip dive-loop RENS/RINS sub-MIP heuristics only.
+  /// Transferred to HighsMipSolver::hacdcpf_skip_dive_submip_heuristics.
+  bool hacdcpf_skip_dive_submip_heuristics_ = false;
+  /// Limit for dive-loop RENS/RINS sub-MIP heuristic calls; negative = default.
+  /// Transferred to HighsMipSolver::hacdcpf_dive_submip_heuristic_limit.
+  HighsInt hacdcpf_dive_submip_heuristic_limit_ = -1;
+  /// Limit for primal-heuristic sub-MIP nodes; negative = default.
+  /// Transferred to HighsMipSolver::hacdcpf_heuristic_submip_node_limit.
+  HighsInt hacdcpf_heuristic_submip_node_limit_ = -1;
+  /// Root cuts extracted after each MIP solve (original column space).
+  /// Populated in solveMip(); returned by hacdcpfExtractRootCuts().
+  HacdcpfRootCuts hacdcpf_extracted_root_cuts_;
+  /// Pending/extracted root basis for the HACDCPF root cut warm-start path.
+  HighsBasis hacdcpf_root_basis_warm_start_;
+  HighsBasis hacdcpf_extracted_root_basis_;
+  /// Pending pseudocost initialisation to inject before the next MIP solve.
+  std::shared_ptr<HighsPseudocostInitialization> hacdcpf_pscost_init_;
+  /// Pseudocost data extracted after the most recent MIP solve.
+  std::shared_ptr<HighsPseudocostInitialization> hacdcpf_extracted_pscost_;
 
   HighsPresolveStatus model_presolve_status_ =
       HighsPresolveStatus::kNotPresolved;

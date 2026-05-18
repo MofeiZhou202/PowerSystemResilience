@@ -402,6 +402,25 @@ BCOptions make_strict_highs_production_options(BCOptions opt) {
   opt.auto_highs_root_pipeline = true;
   opt.enable_domain_heuristics = false;
   opt.accept_verified_warm_start_incumbent = true;
+  // Improvement (1): turn on the two cheap HiGHS rounding heuristics that
+  // are off by default upstream.  ZI-Round and Shifting cost only a handful
+  // of rounding passes per call but routinely produce improved UC
+  // incumbents on large degenerate LPs (e.g. 118-bus 24T).
+  opt.highs_mip_run_zi_round = true;
+  opt.highs_mip_run_shifting = true;
+  // Improvement (2): force presolve "on" and raise the substitution maxfillin
+  // so the LP relaxation tightens enough to attack the dual-bound bottleneck
+  // observed on IEEE 118-bus 24T (gap 7.11% at 60s with default presolve).
+  opt.highs_force_presolve_on = true;
+  opt.highs_presolve_substitution_maxfillin = 30;
+  // Improvement (3): keep dynamic LP cuts alive across more tree nodes
+  // (HiGHS default mip_lp_age_limit=10 → 30) and enable HiGHS symmetry
+  // detection so UC time-shift permutations between identical generators
+  // are pruned from the search tree.  Both target the dual-bound bottleneck
+  // identified in (1): primal heuristics cannot move the gap when the
+  // incumbent is already optimal — only the bound can.
+  opt.highs_mip_lp_age_limit = 30;
+  opt.highs_mip_detect_symmetry = true;
   return opt;
 }
 

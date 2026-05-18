@@ -4,9 +4,11 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <Eigen/Core>
 
+#include "mipsolvers/engine/bc/options.hpp"
 #include "mipsolvers/engine/solver/solver_adapter.hpp"
 
 namespace mipsolvers::engine {
@@ -373,6 +375,17 @@ struct BCResult {
   Eigen::VectorXd x;
   SolveStats      stats;     ///< Standard SolveStats (compatible with SolverAdapter)
   BCStats         bc_stats;  ///< Additional B&C diagnostics
+  /// Root cuts extracted from this solve (HiGHS StrictHiGHS path only).
+  /// Pass as BCOptions::highs_root_cut_warm_start on the next solve of the
+  /// same problem to skip the ~40 s root cutting loop.
+  std::shared_ptr<BCRootCuts> highs_root_cuts;
+  /// Root simplex basis extracted from the same solve, in original row/column
+  /// space.  Pass with highs_root_cuts to warm-start the augmented root LP.
+  std::shared_ptr<BCRootBasis> highs_root_basis;
+  /// Pseudocost data extracted from this solve's B&B tree, in original column
+  /// space.  Pass as BCOptions::highs_pseudocost_warm_start on the next solve
+  /// of the same problem to seed branching decisions from node 1.
+  std::shared_ptr<BCPseudocostInit> highs_pseudocost_init;
 };
 
 }  // namespace mipsolvers::engine

@@ -721,8 +721,46 @@ the LP relaxation and reduce the branch-and-bound tree.
 |---|---|
 | **Family 6** | Symmetry-breaking for generators with identical bid curves |
 | **Family A** | Segment commitment coupling: $q_{g,k,t} \le Q_{g,k} \cdot u_{g,h(t)}$ |
+| **Family T** | Transition hull cuts: startup/shutdown implications such as $v_{g,t}\le u_{g,t}$ and $v_{g,t}+u_{g,t-1}\le 1$ |
 | **Family G** | Extended startup clique: at most one startup in a min-up window |
+| **Family H** | Min-up/min-down transition-conflict covers: $v_{g,s}+w_{g,t}\le 1$ inside min-up windows and $w_{g,s}+v_{g,t}\le 1$ inside min-down windows |
+| **Family R** | Ramp-perspective cuts: commitment-scaled ramp allowances for adjacent dispatch periods |
+| **Family C** | System reserve-cover aggregations from power balance and reserve headroom rows |
+| **Family V** | Reserve deliverability covers: projected commitment-only rows requiring enough online spin, reg-up, reg-down, and combined up-reserve capability |
 | **Family 11** | Cyclic SOC bound for storage: ensures feasibility of the return constraint |
+
+By default, the SCUC builder also creates a primal repair seed: it constructs a
+cost-ordered commitment schedule that respects transition and min-up/min-down
+logic, then lets the MILP backend repair the continuous dispatch as a MIP start.
+Set `enable_primal_repair = false` or `MIPSOLVERS_DISABLE_SCUC_PRIMAL_REPAIR=1`
+to disable this seed.
+
+For StrictHiGHS experiments, setting `MIPSOLVERS_ENABLE_SCUC_DYNAMIC_CUTS=1`
+also enables violated user cuts at shallow dynamic nodes.  The dynamic separator
+is adaptive: it scores rows by violation/efficacy, skips the root callback,
+limits the number of returned rows per call, and focuses on system ramp
+aggregates, reserve deliverability covers, and violated min-up/min-down
+transition conflicts such as $v_{g,t}+w_{g,\tau}\le 1$ for
+$\tau<t+T_g^{up}$.  Per-unit dynamic ramp rows are available for experiments
+with `MIPSOLVERS_SCUC_DYNAMIC_UNIT_RAMP_CUTS=1`; the static Family R rows remain
+the default path.
+
+Dynamic callback rows use a HiGHS-style admission policy before reaching the
+node LP.  A candidate row is first filtered by violation and efficacy, then
+scored as
+
+$$
+\operatorname{score} = \frac{a^\top x - b}{|A(a,x)|\,\|a_{A(a,x)}\|_2},
+$$
+
+where $A(a,x)$ is the active support: positive coefficients whose variables are
+above their lower bound, and negative coefficients whose variables are below
+their upper bound.  The selector keeps only rows above a fraction of the best
+score, limits rows per family, and rejects rows nearly parallel to already kept
+cuts.  Tuning knobs are `MIPSOLVERS_SCUC_DYNAMIC_MIN_SCORE_FACTOR`,
+`MIPSOLVERS_SCUC_DYNAMIC_MAX_PARALLELISM`,
+`MIPSOLVERS_SCUC_DYNAMIC_MAX_PER_FAMILY`, and
+`MIPSOLVERS_SCUC_DYNAMIC_SCORE_TRACE`.
 
 ---
 

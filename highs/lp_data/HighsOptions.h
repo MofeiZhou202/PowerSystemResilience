@@ -505,6 +505,7 @@ struct HighsOptionsStruct {
   bool mip_root_presolve_only;
   HighsInt mip_lifting_for_probing;
   bool mip_allow_cut_separation_at_nodes;
+  HighsInt hacdcpf_max_root_sepa_rounds;
 
   // Logging callback identifiers
   HighsLogOptions log_options;
@@ -668,7 +669,8 @@ struct HighsOptionsStruct {
         mip_root_presolve_only(false),
         mip_lifting_for_probing(-1),
         // clang-format off
-        mip_allow_cut_separation_at_nodes(true) {};
+        mip_allow_cut_separation_at_nodes(true),
+        hacdcpf_max_root_sepa_rounds(kHighsIInf) {};
   // clang-format on
 };
 
@@ -1246,6 +1248,12 @@ class HighsOptions : public HighsOptionsStruct {
         "Whether cut separation at nodes other than the root node is permitted",
         advanced, &mip_allow_cut_separation_at_nodes, true);
     records.push_back(record_bool);
+
+    record_int = new OptionRecordInt(
+        "hacdcpf_max_root_sepa_rounds",
+        "Maximum number of root-node cut separation rounds (0 = no limit)",
+        advanced, &hacdcpf_max_root_sepa_rounds, 0, kHighsIInf, kHighsIInf);
+    records.push_back(record_int);
 
     record_double = new OptionRecordDouble(
         "mip_rel_gap",

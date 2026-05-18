@@ -91,6 +91,11 @@ struct HighsMipSolverData {
   HighsInt numCliqueEntriesAfterPresolve;
   HighsInt numCliqueEntriesAfterFirstPresolve;
 
+  /// Per-column branching priority in the *presolved* column space.
+  /// Empty = all equal.  Built from HighsMipSolver::col_branch_priority
+  /// after presolve maps original columns to presolved columns.
+  std::vector<HighsInt> col_branch_priority_;
+
   std::vector<HighsInt> ARstart_;
   std::vector<HighsInt> ARindex_;
   std::vector<double> ARvalue_;
@@ -115,6 +120,7 @@ struct HighsMipSolverData {
   std::vector<double> rootlpsol;
   double firstlpsolobj;
   HighsBasis firstrootbasis;
+  HighsBasis hacdcpf_root_lp_basis;
   double rootlpsolobj;
   HighsInt numintegercols;
   HighsInt maxTreeSizeLog2;

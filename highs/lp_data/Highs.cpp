@@ -96,6 +96,74 @@ HighsStatus Highs::hacdcpfSetNodeCutCallback(
   return HighsStatus::kOk;
 }
 
+HighsStatus Highs::hacdcpfSetColBranchingPriorities(HighsInt num_col,
+                                                     const HighsInt* priority) {
+  if (priority == nullptr || num_col <= 0) {
+    hacdcpf_col_branch_priority_.clear();
+    return HighsStatus::kOk;
+  }
+  hacdcpf_col_branch_priority_.assign(priority, priority + num_col);
+  return HighsStatus::kOk;
+}
+
+HighsStatus Highs::hacdcpfSetRootBasis(const HighsBasis& basis) {
+  if (!basis.valid || basis.col_status.empty() || basis.row_status.empty()) {
+    hacdcpf_root_basis_warm_start_.clear();
+    return HighsStatus::kOk;
+  }
+  hacdcpf_root_basis_warm_start_ = basis;
+  hacdcpf_root_basis_warm_start_.valid = true;
+  hacdcpf_root_basis_warm_start_.useful = true;
+  hacdcpf_root_basis_warm_start_.alien = true;
+  hacdcpf_root_basis_warm_start_.debug_origin_name =
+      "HACDCPF original-space root basis warm-start";
+  return HighsStatus::kOk;
+}
+
+HighsStatus Highs::hacdcpfExtractRootCuts(HacdcpfRootCuts& cuts) {
+  cuts = hacdcpf_extracted_root_cuts_;
+  return HighsStatus::kOk;
+}
+
+HighsStatus Highs::hacdcpfExtractRootBasis(HighsBasis& basis) {
+  basis = hacdcpf_extracted_root_basis_;
+  return HighsStatus::kOk;
+}
+
+void Highs::hacdcpfSetSkipAnalyticCenter(bool val) {
+  hacdcpf_skip_analytic_center_ = val;
+}
+
+void Highs::hacdcpfSetSkipPrimalHeuristics(bool val) {
+  hacdcpf_skip_primal_heuristics_ = val;
+}
+
+void Highs::hacdcpfSetSkipDiveSubMipHeuristics(bool val) {
+  hacdcpf_skip_dive_submip_heuristics_ = val;
+}
+
+void Highs::hacdcpfSetDiveSubMipHeuristicLimit(HighsInt limit) {
+  hacdcpf_dive_submip_heuristic_limit_ = limit;
+}
+
+void Highs::hacdcpfSetHeuristicSubMipNodeLimit(HighsInt limit) {
+  hacdcpf_heuristic_submip_node_limit_ = limit;
+}
+
+void Highs::hacdcpfSetPseudocostInitialization(
+    std::shared_ptr<HighsPseudocostInitialization> init) {
+  hacdcpf_pscost_init_ = std::move(init);
+}
+
+bool Highs::hacdcpfExtractPseudocostInitialization(
+    HighsPseudocostInitialization& out) const {
+  if (!hacdcpf_extracted_pscost_ ||
+      hacdcpf_extracted_pscost_->pseudocostup.empty())
+    return false;
+  out = *hacdcpf_extracted_pscost_;
+  return true;
+}
+
 HighsStatus Highs::clear() {
   resetOptions();
   return clearModel();
@@ -4244,7 +4312,167 @@ HighsStatus Highs::callSolveMip() {
   }
   HighsLp& lp = has_semi_variables ? use_lp : model_.lp_;
   HighsMipSolver solver(callback_, options_, lp, solution_);
+  if (!hacdcpf_col_branch_priority_.empty())
+    solver.col_branch_priority = hacdcpf_col_branch_priority_;
+  if (hacdcpf_root_basis_warm_start_.valid)
+    solver.rootbasis = &hacdcpf_root_basis_warm_start_;
+  solver.hacdcpf_skip_analytic_center = hacdcpf_skip_analytic_center_;
+  solver.hacdcpf_skip_primal_heuristics = hacdcpf_skip_primal_heuristics_;
+  solver.hacdcpf_skip_dive_submip_heuristics =
+      hacdcpf_skip_dive_submip_heuristics_;
+  solver.hacdcpf_dive_submip_heuristic_limit =
+      hacdcpf_dive_submip_heuristic_limit_;
+  solver.hacdcpf_heuristic_submip_node_limit =
+      hacdcpf_heuristic_submip_node_limit_;
+  // Inject pending pseudocost initialisation (reset after injection).
+  solver.pscostinit = hacdcpf_pscost_init_.get();
+  hacdcpf_skip_analytic_center_ = false;  // reset after each solve
+  hacdcpf_skip_primal_heuristics_ = false;
+  hacdcpf_skip_dive_submip_heuristics_ = false;
+  hacdcpf_dive_submip_heuristic_limit_ = -1;
+  hacdcpf_heuristic_submip_node_limit_ = -1;
   solver.run();
+  solver.rootbasis = nullptr;
+  hacdcpf_root_basis_warm_start_.clear();
+  hacdcpf_pscost_init_.reset();  // release after injection (solver.run is done)
+  // [K6] Extract root cuts for warm-starting future solves of this instance.
+  // We extract immediately after solver.run() while mipdata_ is still alive.
+  hacdcpf_extracted_root_cuts_.clear();
+  hacdcpf_extracted_root_basis_.clear();
+  hacdcpf_extracted_pscost_.reset();
+  if (solver.mipdata_) {
+    const HighsLpRelaxation& lp_relax = solver.mipdata_->lp;
+    const HighsInt n_model_rows = lp_relax.getNumModelRows();
+    const HighsInt n_total_rows = lp_relax.numRows();
+    const HighsInt n_cuts = n_total_rows - n_model_rows;
+    const HighsInt orig_n_col =
+        solver.mipdata_->postSolveStack.getOrigNumCol();
+    if (n_cuts > 0) {
+      auto& cuts = hacdcpf_extracted_root_cuts_;
+      cuts.start.push_back(0);
+      for (HighsInt r = n_model_rows; r < n_total_rows; ++r) {
+        HighsInt len = 0;
+        const HighsInt* inds = nullptr;
+        const double* vals = nullptr;
+        lp_relax.getRow(r, len, inds, vals);
+        double rhs_adjust = 0.0;
+        bool row_valid = true;
+        const HighsInt old_nz =
+            static_cast<HighsInt>(cuts.index.size());
+        for (HighsInt k = 0; k < len && row_valid; ++k) {
+          const HighsInt pc = inds[k];
+          const double   pv = vals[k];
+          const HighsInt orig_col =
+              solver.mipdata_->postSolveStack.getOrigColIndex(pc);
+          if (orig_col < 0 || orig_col >= orig_n_col) {
+            row_valid = false;
+            break;
+          }
+          if (solver.mipdata_->postSolveStack
+                  .isColLinearlyTransformable(pc)) {
+            const double sc =
+                solver.mipdata_->postSolveStack
+                    .getColLinearTransformScale(pc);
+            const double co =
+                solver.mipdata_->postSolveStack
+                    .getColLinearTransformConstant(pc);
+            if (sc == 0.0) { row_valid = false; break; }
+            cuts.index.push_back(orig_col);
+            cuts.value.push_back(pv / sc);
+            rhs_adjust += pv * co / sc;
+          } else {
+            // Column involved in a complex substitution (e.g. duplicate
+            // column merge): skip this cut to avoid injecting an incorrect
+            // constraint.
+            row_valid = false;
+            break;
+          }
+        }
+        if (row_valid) {
+          cuts.start.push_back(static_cast<HighsInt>(cuts.index.size()));
+          const double rl = lp_relax.rowLower(r);
+          const double ru = lp_relax.rowUpper(r);
+          cuts.lower.push_back(
+              std::isfinite(rl) ? rl + rhs_adjust : -kHighsInf);
+          cuts.upper.push_back(
+              std::isfinite(ru) ? ru + rhs_adjust : kHighsInf);
+        } else {
+          // Roll back any partial nonzeros we pushed for this row.
+          cuts.index.resize(static_cast<size_t>(old_nz));
+          cuts.value.resize(static_cast<size_t>(old_nz));
+        }
+      }
+      if (cuts.lower.empty()) {
+        // Nothing was extracted: reset to empty state (start is non-empty).
+        cuts.clear();
+      }
+    }
+    const HighsBasis& root_basis = solver.mipdata_->hacdcpf_root_lp_basis.valid
+                                       ? solver.mipdata_->hacdcpf_root_lp_basis
+                                       : lp_relax.getLpSolver().getBasis();
+    const bool root_basis_rows_match =
+        root_basis.valid &&
+        root_basis.col_status.size() >=
+            static_cast<std::size_t>(solver.mipdata_->mipsolver.numCol()) &&
+        root_basis.row_status.size() ==
+            static_cast<std::size_t>(n_total_rows);
+    const bool all_cut_rows_extracted =
+        n_cuts >= 0 && hacdcpf_extracted_root_cuts_.numCuts() == n_cuts;
+    if (root_basis_rows_match && all_cut_rows_extracted) {
+      auto& basis = hacdcpf_extracted_root_basis_;
+      basis.clear();
+      basis.col_status.assign(static_cast<std::size_t>(orig_n_col),
+                              HighsBasisStatus::kNonbasic);
+      const HighsInt orig_n_row = solver.mipdata_->postSolveStack.getOrigNumRow();
+      basis.row_status.assign(static_cast<std::size_t>(orig_n_row + n_cuts),
+                              HighsBasisStatus::kBasic);
+      bool basis_valid = true;
+      for (HighsInt c = 0; c < solver.mipdata_->mipsolver.numCol(); ++c) {
+        const HighsInt orig_col = solver.mipdata_->postSolveStack.getOrigColIndex(c);
+        if (orig_col < 0 || orig_col >= orig_n_col) {
+          basis_valid = false;
+          break;
+        }
+        basis.col_status[static_cast<std::size_t>(orig_col)] =
+            root_basis.col_status[static_cast<std::size_t>(c)];
+      }
+      for (HighsInt r = 0; basis_valid && r < n_model_rows; ++r) {
+        const HighsInt orig_row = solver.mipdata_->postSolveStack.getOrigRowIndex(r);
+        if (orig_row < 0 || orig_row >= orig_n_row) {
+          basis_valid = false;
+          break;
+        }
+        basis.row_status[static_cast<std::size_t>(orig_row)] =
+            root_basis.row_status[static_cast<std::size_t>(r)];
+      }
+      for (HighsInt r = 0; basis_valid && r < n_cuts; ++r) {
+        basis.row_status[static_cast<std::size_t>(orig_n_row + r)] =
+            root_basis.row_status[static_cast<std::size_t>(n_model_rows + r)];
+      }
+      if (basis_valid) {
+        basis.valid = true;
+        basis.useful = true;
+        basis.alien = true;
+        basis.debug_origin_name = "HACDCPF extracted root cut basis";
+      } else {
+        basis.clear();
+      }
+    }
+    // Extract pseudocosts (in original column space) for warm-starting the
+    // next solve's branching table.
+    if (solver.options_mip_->mip_pscost_minreliable >= 0) {
+      try {
+        auto init = std::make_shared<HighsPseudocostInitialization>(
+            solver.mipdata_->pseudocost,
+            solver.options_mip_->mip_pscost_minreliable,
+            solver.mipdata_->postSolveStack);
+        if (init->nsamplestotal > 0)
+          hacdcpf_extracted_pscost_ = std::move(init);
+      } catch (...) {
+        hacdcpf_extracted_pscost_.reset();
+      }
+    }
+  }
   hacdcpf_root_mipdata_.reset();
   if (hacdcpfRetainRootLpRelaxation() && solver.mipdata_ &&
       solver.mipdata_->lp.getLpSolver().getLp().num_col_ > 0) {

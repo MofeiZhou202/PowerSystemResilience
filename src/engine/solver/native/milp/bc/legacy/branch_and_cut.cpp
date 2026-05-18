@@ -101,6 +101,394 @@ struct StrictHighsNodeCutCallbackBridge {
   const LPModel* original_lp{nullptr};
 };
 
+struct StrictScucDynamicCutCandidate {
+  BCDynamicNodeCut cut;
+  double score{0.0};
+  double violation{0.0};
+  double norm{0.0};
+  int active_nnz{0};
+  int ordinal{0};
+};
+
+int strict_scuc_uc_col(const std::vector<int>& cols,
+                       const MIPModel::UCGenHint& uc, int g, int t) {
+  if (g < 0 || t < 0 || g >= uc.ng || t >= uc.T) return -1;
+  const std::size_t pos = static_cast<std::size_t>(t * uc.ng + g);
+  return pos < cols.size() ? cols[pos] : -1;
+}
+
+int strict_scuc_env_int(const char* name, int fallback, int lo, int hi) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || *raw == '\0') return fallback;
+  char* end = nullptr;
+  const long parsed = std::strtol(raw, &end, 10);
+  if (end == raw) return fallback;
+  return std::max(lo, std::min(hi, static_cast<int>(parsed)));
+}
+
+double strict_scuc_env_double(const char* name, double fallback,
+                              double lo, double hi) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || *raw == '\0') return fallback;
+  char* end = nullptr;
+  const double parsed = std::strtod(raw, &end);
+  if (end == raw || !std::isfinite(parsed)) return fallback;
+  return std::max(lo, std::min(hi, parsed));
+}
+
+double strict_scuc_original_value(const BCDynamicNodeCutContext& ctx, int col) {
+  if (col < 0 || col >= static_cast<int>(ctx.original_col_value.size())) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return ctx.original_col_value[static_cast<std::size_t>(col)];
+}
+
+bool strict_scuc_dynamic_cuts_enabled(const MIPModel::UCGenHint& uc) {
+  if (std::getenv("MIPSOLVERS_ENABLE_SCUC_DYNAMIC_CUTS") == nullptr) {
+    return false;
+  }
+  if (std::getenv("MIPSOLVERS_DISABLE_SCUC_DYNAMIC_CUTS") != nullptr) {
+    return false;
+  }
+  const std::size_t block = static_cast<std::size_t>(std::max(0, uc.ng) *
+                                                    std::max(0, uc.T));
+  if (uc.ng <= 0 || uc.T <= 0 || block == 0) return false;
+  const bool has_transition_maps = uc.ig_cols.size() >= block &&
+                                   uc.su_cols.size() >= block &&
+                                   uc.sd_cols.size() >= block;
+  return has_transition_maps &&
+     (uc.certifies_min_up_down_rows || uc.certifies_ramping_rows ||
+      uc.certifies_system_reserve_rows);
+}
+
+void append_strict_scuc_dynamic_cuts(const MIPModel::UCGenHint& uc,
+                                    const BCOptions& opt,
+                                    const BCDynamicNodeCutContext& ctx,
+                                    const LPModel* original_lp,
+                                    std::vector<BCDynamicNodeCut>& rows) {
+  if (!strict_scuc_dynamic_cuts_enabled(uc)) return;
+  const bool root_event =
+      ctx.depth <= 0 || ctx.event.find("root") != std::string::npos;
+  if (root_event) return;
+  const int max_depth = opt.max_cut_depth > 0 ? opt.max_cut_depth : 4;
+  if (!root_event && ctx.depth > max_depth) return;
+  if (ctx.original_col_value.empty()) return;
+
+  const int ng = uc.ng;
+  const int T = uc.T;
+  const double abs_tol = strict_scuc_env_double(
+      "MIPSOLVERS_SCUC_DYNAMIC_MIN_VIOLATION", 1e-6, 0.0, 1e-2);
+  const double eff_tol = strict_scuc_env_double(
+      "MIPSOLVERS_SCUC_DYNAMIC_MIN_EFFICACY", 1e-8, 0.0, 1e-2);
+  const double pair_floor = strict_scuc_env_double(
+      "MIPSOLVERS_SCUC_DYNAMIC_PAIR_FLOOR", 1e-5, 0.0, 0.25);
+  const int depth_budget = ctx.depth <= 1 ? 4 : (ctx.depth <= 3 ? 6 : 3);
+  const int max_return = strict_scuc_env_int(
+      "MIPSOLVERS_SCUC_DYNAMIC_MAX_CUTS", depth_budget, 1, 32);
+  const int max_per_family = strict_scuc_env_int(
+      "MIPSOLVERS_SCUC_DYNAMIC_MAX_PER_FAMILY", 1, 1, 16);
+  const double min_score_factor = strict_scuc_env_double(
+      "MIPSOLVERS_SCUC_DYNAMIC_MIN_SCORE_FACTOR", 0.20, 0.0, 1.0);
+  const double max_parallelism = strict_scuc_env_double(
+      "MIPSOLVERS_SCUC_DYNAMIC_MAX_PARALLELISM", 0.10, 0.0, 1.0);
+  const bool unit_ramp_cuts =
+      std::getenv("MIPSOLVERS_SCUC_DYNAMIC_UNIT_RAMP_CUTS") != nullptr;
+
+  std::vector<StrictScucDynamicCutCandidate> candidates;
+  candidates.reserve(static_cast<std::size_t>(max_return * 8));
+
+  auto add_upper_cut = [&](std::vector<std::pair<int, double>> terms,
+                           double upper, const char* family,
+                           const std::string& key, int period,
+                           bool integral, bool propagate) {
+    if (!std::isfinite(upper) || terms.empty()) return;
+    double activity = 0.0;
+    double norm_sq = 0.0;
+    double active_norm_sq = 0.0;
+    int active_nnz = 0;
+    for (const auto& [col, value] : terms) {
+      if (col < 0 || col >= static_cast<int>(ctx.original_col_value.size()) ||
+          !std::isfinite(value)) {
+        return;
+      }
+      const double x = ctx.original_col_value[static_cast<std::size_t>(col)];
+      if (!std::isfinite(x)) return;
+      activity += value * x;
+      norm_sq += value * value;
+      if (original_lp != nullptr &&
+          col < static_cast<int>(original_lp->vars.size())) {
+        const auto& var = original_lp->vars[static_cast<std::size_t>(col)];
+        const double lb = var.lb;
+        const double ub = var.ub;
+        if ((value > 0.0 && x > lb + kHighsDefaultMipFeasibilityTolerance) ||
+            (value < 0.0 && x < ub - kHighsDefaultMipFeasibilityTolerance)) {
+          active_norm_sq += value * value;
+          ++active_nnz;
+        }
+      }
+    }
+    const double norm = std::sqrt(std::max(0.0, norm_sq));
+    const double violation = activity - upper;
+    const double scale =
+      std::max({1.0, norm, std::fabs(activity), std::fabs(upper)});
+    const double efficacy = violation / std::max(1.0, norm);
+    if (violation <= abs_tol * scale || efficacy <= eff_tol) return;
+    if (active_nnz == 0 || !(active_norm_sq > 0.0) ||
+      !std::isfinite(active_norm_sq)) {
+      active_nnz = static_cast<int>(terms.size());
+      active_norm_sq = norm_sq;
+    }
+    if (active_nnz <= 0 || !(active_norm_sq > 0.0)) return;
+    const double highs_score = violation /
+        (static_cast<double>(active_nnz) * std::sqrt(active_norm_sq));
+    if (!std::isfinite(highs_score)) return;
+
+    BCDynamicNodeCut cut;
+    cut.indices.reserve(terms.size());
+    cut.values.reserve(terms.size());
+    for (const auto& [col, value] : terms) {
+      cut.indices.push_back(col);
+      cut.values.push_back(value);
+    }
+    cut.upper = upper;
+    cut.integral = integral;
+    cut.propagate = propagate;
+    cut.column_space = BCDynamicNodeCut::ColumnSpace::Original;
+    cut.validity_scope = ValidityScope::GlobalCut;
+    cut.audit_family = family;
+    cut.audit_key = key;
+    cut.audit_period = period;
+    const int ordinal = static_cast<int>(candidates.size());
+    candidates.push_back({std::move(cut), highs_score, violation, norm,
+                          active_nnz, ordinal});
+  };
+
+  auto add_reserve_cover_cut = [&](const std::vector<double>& caps,
+                                   double requirement,
+                                   const char* family,
+                                   int period) {
+    if (!(requirement > 0.0) || caps.size() < static_cast<std::size_t>(ng)) {
+      return;
+    }
+    std::vector<std::pair<int, double>> terms;
+    terms.reserve(static_cast<std::size_t>(ng));
+    for (int g = 0; g < ng; ++g) {
+      const int ig = strict_scuc_uc_col(uc.ig_cols, uc, g, period);
+      const double cap = std::max(0.0, caps[static_cast<std::size_t>(g)]);
+      if (ig < 0 || !(cap > 0.0)) continue;
+      terms.emplace_back(ig, -cap);
+    }
+    add_upper_cut(std::move(terms), -requirement, family,
+                  fmt::format("t{}", period), period, false, true);
+  };
+
+  if (uc.certifies_system_reserve_rows &&
+      uc.ig_cols.size() >= static_cast<std::size_t>(ng * T)) {
+    for (int t = 0; t < T; ++t) {
+      if (uc.reserve_requirement.size() >= static_cast<std::size_t>(T) &&
+          uc.up_reserve_headroom_cap.size() >= static_cast<std::size_t>(ng)) {
+        add_reserve_cover_cut(uc.up_reserve_headroom_cap,
+                              uc.reserve_requirement[static_cast<std::size_t>(t)],
+                              "SCUC_UP_RESERVE_COVER", t);
+      }
+      if (uc.spinning_requirement.size() >= static_cast<std::size_t>(T) &&
+          uc.spinning_reserve_cap.size() >= static_cast<std::size_t>(ng)) {
+        add_reserve_cover_cut(uc.spinning_reserve_cap,
+                              uc.spinning_requirement[static_cast<std::size_t>(t)],
+                              "SCUC_SPIN_RESERVE_COVER", t);
+      }
+      if (uc.regulation_up_requirement.size() >= static_cast<std::size_t>(T) &&
+          uc.regulation_up_cap.size() >= static_cast<std::size_t>(ng)) {
+        add_reserve_cover_cut(uc.regulation_up_cap,
+                              uc.regulation_up_requirement[static_cast<std::size_t>(t)],
+                              "SCUC_REGUP_RESERVE_COVER", t);
+      }
+      if (uc.regulation_down_requirement.size() >= static_cast<std::size_t>(T) &&
+          uc.regulation_down_cap.size() >= static_cast<std::size_t>(ng)) {
+        add_reserve_cover_cut(uc.regulation_down_cap,
+                              uc.regulation_down_requirement[static_cast<std::size_t>(t)],
+                              "SCUC_REGDOWN_RESERVE_COVER", t);
+      }
+    }
+  }
+
+  if (uc.certifies_ramping_rows &&
+      uc.pg_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.pmax.size() >= static_cast<std::size_t>(ng) &&
+      uc.ramp.size() >= static_cast<std::size_t>(ng)) {
+    for (int t = 1; t < T; ++t) {
+      std::vector<std::pair<int, double>> up_terms;
+      std::vector<std::pair<int, double>> down_terms;
+      up_terms.reserve(static_cast<std::size_t>(4 * ng));
+      down_terms.reserve(static_cast<std::size_t>(4 * ng));
+      for (int g = 0; g < ng; ++g) {
+        const int pg_t = strict_scuc_uc_col(uc.pg_cols, uc, g, t);
+        const int pg_prev = strict_scuc_uc_col(uc.pg_cols, uc, g, t - 1);
+        const int ig_prev = strict_scuc_uc_col(uc.ig_cols, uc, g, t - 1);
+        const int ig_t = strict_scuc_uc_col(uc.ig_cols, uc, g, t);
+        const int su_t = strict_scuc_uc_col(uc.su_cols, uc, g, t);
+        const int sd_t = strict_scuc_uc_col(uc.sd_cols, uc, g, t);
+        const double pmax = std::max(0.0, uc.pmax[static_cast<std::size_t>(g)]);
+        const double ramp = std::min(pmax, std::max(0.0, uc.ramp[static_cast<std::size_t>(g)]));
+        if (pg_t < 0 || pg_prev < 0 || ig_prev < 0 || ig_t < 0 || su_t < 0 || sd_t < 0) {
+          continue;
+        }
+        if (unit_ramp_cuts) {
+          add_upper_cut({{pg_t, 1.0}, {pg_prev, -1.0}, {ig_prev, -ramp}, {su_t, -pmax}},
+                        0.0, "SCUC_RAMP_UP_PERSPECTIVE",
+                        fmt::format("g{}:t{}", g, t), t, false, false);
+          add_upper_cut({{pg_prev, 1.0}, {pg_t, -1.0}, {ig_t, -ramp}, {sd_t, -pmax}},
+                        0.0, "SCUC_RAMP_DOWN_PERSPECTIVE",
+                        fmt::format("g{}:t{}", g, t), t, false, false);
+        }
+        up_terms.emplace_back(pg_t, 1.0);
+        up_terms.emplace_back(pg_prev, -1.0);
+        up_terms.emplace_back(ig_prev, -ramp);
+        up_terms.emplace_back(su_t, -pmax);
+        down_terms.emplace_back(pg_prev, 1.0);
+        down_terms.emplace_back(pg_t, -1.0);
+        down_terms.emplace_back(ig_t, -ramp);
+        down_terms.emplace_back(sd_t, -pmax);
+      }
+      add_upper_cut(std::move(up_terms), 0.0, "SCUC_SYSTEM_RAMP_UP",
+                    fmt::format("t{}", t), t, false, false);
+      add_upper_cut(std::move(down_terms), 0.0, "SCUC_SYSTEM_RAMP_DOWN",
+                    fmt::format("t{}", t), t, false, false);
+    }
+  }
+
+  if (!root_event && uc.certifies_min_up_down_rows) {
+    for (int g = 0; g < ng; ++g) {
+      const int min_up = (g < static_cast<int>(uc.min_up.size()))
+          ? std::max(0, uc.min_up[static_cast<std::size_t>(g)])
+          : 0;
+      const int min_down = (g < static_cast<int>(uc.min_down.size()))
+          ? std::max(0, uc.min_down[static_cast<std::size_t>(g)])
+          : 0;
+      if (min_up > 1) {
+        for (int start = 0; start < T; ++start) {
+          const int su = strict_scuc_uc_col(uc.su_cols, uc, g, start);
+          if (su < 0) continue;
+          const double su_val = strict_scuc_original_value(ctx, su);
+          if (!(su_val > pair_floor)) continue;
+          const int last = std::min(T - 1, start + min_up - 1);
+          for (int shut = start + 1; shut <= last; ++shut) {
+            const int sd = strict_scuc_uc_col(uc.sd_cols, uc, g, shut);
+            if (sd < 0) continue;
+            const double sd_val = strict_scuc_original_value(ctx, sd);
+            if (!(sd_val > pair_floor) || su_val + sd_val <= 1.0 + pair_floor) continue;
+            add_upper_cut({{su, 1.0}, {sd, 1.0}}, 1.0,
+                          "SCUC_MINUP_START_SHUT_CONFLICT",
+                          fmt::format("g{}:{}-{}", g, start, shut),
+                          shut, true, true);
+          }
+        }
+      }
+      if (min_down > 1) {
+        for (int shut = 0; shut < T; ++shut) {
+          const int sd = strict_scuc_uc_col(uc.sd_cols, uc, g, shut);
+          if (sd < 0) continue;
+          const double sd_val = strict_scuc_original_value(ctx, sd);
+          if (!(sd_val > pair_floor)) continue;
+          const int last = std::min(T - 1, shut + min_down - 1);
+          for (int start = shut + 1; start <= last; ++start) {
+            const int su = strict_scuc_uc_col(uc.su_cols, uc, g, start);
+            if (su < 0) continue;
+            const double su_val = strict_scuc_original_value(ctx, su);
+            if (!(su_val > pair_floor) || sd_val + su_val <= 1.0 + pair_floor) continue;
+            add_upper_cut({{sd, 1.0}, {su, 1.0}}, 1.0,
+                          "SCUC_MINDOWN_SHUT_START_CONFLICT",
+                          fmt::format("g{}:{}-{}", g, shut, start),
+                          start, true, true);
+          }
+        }
+      }
+    }
+  }
+
+  if (candidates.empty()) return;
+  std::sort(candidates.begin(), candidates.end(),
+            [](const StrictScucDynamicCutCandidate& a,
+               const StrictScucDynamicCutCandidate& b) {
+              if (a.score != b.score) return a.score > b.score;
+              if (a.violation != b.violation) return a.violation > b.violation;
+              if (a.cut.indices.size() != b.cut.indices.size()) {
+                return a.cut.indices.size() < b.cut.indices.size();
+              }
+              return a.ordinal < b.ordinal;
+            });
+  const double best_score = candidates.front().score;
+  const double min_score = min_score_factor * best_score;
+  std::vector<StrictScucDynamicCutCandidate*> selected;
+  selected.reserve(static_cast<std::size_t>(max_return));
+  std::map<std::string, int> family_count;
+  auto row_parallelism = [](const BCDynamicNodeCut& lhs, double lhs_norm,
+                            const BCDynamicNodeCut& rhs, double rhs_norm) {
+    if (!(lhs_norm > 0.0) || !(rhs_norm > 0.0)) return 0.0;
+    double dot = 0.0;
+    for (std::size_t i = 0; i < lhs.indices.size(); ++i) {
+      const int col = lhs.indices[i];
+      for (std::size_t j = 0; j < rhs.indices.size(); ++j) {
+        if (rhs.indices[j] == col) dot += lhs.values[i] * rhs.values[j];
+      }
+    }
+    return dot / (lhs_norm * rhs_norm);
+  };
+
+  for (StrictScucDynamicCutCandidate& cand : candidates) {
+    if (static_cast<int>(selected.size()) >= max_return) break;
+    if (cand.score < min_score) break;
+    const std::string family = cand.cut.audit_family;
+    if (family_count[family] >= max_per_family) continue;
+    bool parallel = false;
+    for (const StrictScucDynamicCutCandidate* keep : selected) {
+      if (row_parallelism(cand.cut, cand.norm, keep->cut, keep->norm) >
+          max_parallelism) {
+        parallel = true;
+        break;
+      }
+    }
+    if (parallel) continue;
+    ++family_count[family];
+    selected.push_back(&cand);
+  }
+
+  if (const char* trace_env = std::getenv("MIPSOLVERS_SCUC_DYNAMIC_SCORE_TRACE")) {
+    int trace_limit = 16;
+    if (std::string(trace_env) == "all") {
+      trace_limit = std::numeric_limits<int>::max();
+    } else if (trace_env[0] != '\0') {
+      char* end = nullptr;
+      const long parsed = std::strtol(trace_env, &end, 10);
+      if (end != trace_env) {
+        trace_limit = parsed > 0
+                          ? static_cast<int>(std::min<long>(parsed, 1000000))
+                          : 0;
+      }
+    }
+    for (int ord = 0; ord < static_cast<int>(candidates.size()) && ord < trace_limit;
+         ++ord) {
+      const auto& cand = candidates[static_cast<std::size_t>(ord)];
+      fmt::print(stderr,
+                 "[SCUC-DYNCUT-SCORED] ord={} family={} key={} score={:.12g} "
+                 "viol={:.12g} active={} nnz={} norm={:.12g}\n",
+                 ord, cand.cut.audit_family, cand.cut.audit_key, cand.score,
+                 cand.violation, cand.active_nnz,
+                 static_cast<int>(cand.cut.indices.size()), cand.norm);
+    }
+    fmt::print(stderr,
+               "[SCUC-DYNCUT-SELECT] selected={} candidates={} bestScore={:.12g} "
+               "minScore={:.12g} maxPar={:.3g} maxPerFamily={}\n",
+               static_cast<int>(selected.size()), static_cast<int>(candidates.size()),
+               best_score, min_score, max_parallelism, max_per_family);
+  }
+
+  rows.reserve(rows.size() + selected.size());
+  for (StrictScucDynamicCutCandidate* cand : selected) {
+    rows.push_back(std::move(cand->cut));
+  }
+}
+
 class RootHighsOracleBasisOps : public BasisOps {
  public:
   RootHighsOracleBasisOps(std::shared_ptr<Highs> highs, int rows, int cols,
@@ -1267,8 +1655,9 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 #ifdef MIPSOLVERS_HAVE_HIGHS_LIB
     const auto t_highs_full0 = std::chrono::steady_clock::now();
     Highs highs;
-    highs.setOptionValue("output_flag", false);
-    highs.setOptionValue("log_to_console", false);
+    const bool highs_timeline_log = bc_env_flag_enabled("HACDCPF_HIGHS_TIMELINE");
+    highs.setOptionValue("output_flag", highs_timeline_log);
+    highs.setOptionValue("log_to_console", highs_timeline_log);
     // Match HiGHS' own threading contract in strict full-solve mode:
     // threads=0 means automatic.  Forcing the native wrapper to one thread
     // while the reference HiGHS row uses automatic threading makes the
@@ -1277,7 +1666,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         opt.num_threads >= 1 ? static_cast<HighsInt>(opt.num_threads)
                              : static_cast<HighsInt>(0);
     highs.setOptionValue("threads", strict_highs_threads);
-    highs.setOptionValue("presolve", "choose");
+    highs.setOptionValue("presolve", opt.highs_force_presolve_on ? "on" : "choose");
+    if (opt.highs_presolve_substitution_maxfillin > 0) {
+      highs.setOptionValue(
+          "presolve_substitution_maxfillin",
+          static_cast<HighsInt>(opt.highs_presolve_substitution_maxfillin));
+    }
     highs.setOptionValue("solver", "choose");
     // [I] Root LP solver: "ipm" → IPX/HiPO at root (no basis).
     //     If highs_mip_root_crossover="on"  (default): crossover → simplex basis
@@ -1315,6 +1709,31 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                            static_cast<HighsInt>(opt.highs_mip_max_stall_nodes));
     }
 
+    // [K1] Improvement (1): extra HiGHS primal heuristics.  ZI-Round and
+    // Shifting are cheap LP-rounding heuristics that HiGHS leaves off by
+    // default; enabling them here is opt-in via BCOptions so callers that
+    // need the historical HiGHS-default behaviour are unaffected.
+    highs.setOptionValue("mip_heuristic_run_zi_round",
+                         opt.highs_mip_run_zi_round);
+    highs.setOptionValue("mip_heuristic_run_shifting",
+                         opt.highs_mip_run_shifting);
+    // [K2] Improvement (1): cutpool size overrides.  0 → keep HiGHS defaults.
+    if (opt.highs_mip_pool_age_limit > 0) {
+      highs.setOptionValue("mip_pool_age_limit",
+                           static_cast<HighsInt>(opt.highs_mip_pool_age_limit));
+    }
+    if (opt.highs_mip_pool_soft_limit > 0) {
+      highs.setOptionValue("mip_pool_soft_limit",
+                           static_cast<HighsInt>(opt.highs_mip_pool_soft_limit));
+    }
+    // [K4] Improvement (3): raise mip_lp_age_limit to retain dynamic cuts in
+    // the per-node LP relaxation longer, tightening the bound across deep
+    // sub-trees.  0 leaves HiGHS' default (10).
+    if (opt.highs_mip_lp_age_limit > 0) {
+      highs.setOptionValue("mip_lp_age_limit",
+                           static_cast<HighsInt>(opt.highs_mip_lp_age_limit));
+    }
+
     bool strict_highs_ok =
         bc_pass_mip_model_to_highs(highs, strict_highs_original_entry_lp,
                                    nullptr, nullptr);
@@ -1322,6 +1741,89 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     if (!strict_highs_ok) {
       strict_highs_error = "pass_model_failed";
     } else {
+      // [K7] Improvement (7): inject per-variable branching priorities so
+      // HiGHS branches on high-priority UC commitment binaries first.
+      if (!prob.branching_priority.empty() &&
+          static_cast<int>(prob.branching_priority.size()) == orig_n) {
+        std::vector<HighsInt> hp(prob.branching_priority.begin(),
+                                 prob.branching_priority.end());
+        highs.hacdcpfSetColBranchingPriorities(
+            static_cast<HighsInt>(hp.size()), hp.data());
+      }
+      // [K6] Improvement (6): inject root cuts from a previous solve of
+      // the same problem.  Each cut row is in the original (pre-presolve)
+      // column space; HiGHS presolve processes them normally.  Tight cuts
+      // survive presolve and let HiGHS skip ~40s of root cut generation.
+      if (opt.highs_root_cut_warm_start &&
+          !opt.highs_root_cut_warm_start->empty()) {
+        const auto& rc = *opt.highs_root_cut_warm_start;
+        const int nc = rc.numCuts();
+        const int nnz = static_cast<int>(rc.index.size());
+        // Convert BCRootCuts int indices to HighsInt if needed.
+        std::vector<HighsInt> hi_start(rc.start.begin(), rc.start.end());
+        std::vector<HighsInt> hi_index(rc.index.begin(), rc.index.end());
+        highs.addRows(static_cast<HighsInt>(nc), rc.lower.data(),
+                      rc.upper.data(), static_cast<HighsInt>(nnz),
+                      hi_start.data(), hi_index.data(), rc.value.data());
+        if (opt.highs_root_basis_warm_start &&
+            !opt.highs_root_basis_warm_start->empty() &&
+            opt.highs_root_basis_warm_start->col_status.size() ==
+                static_cast<std::size_t>(highs.getNumCol()) &&
+            opt.highs_root_basis_warm_start->row_status.size() ==
+                static_cast<std::size_t>(highs.getNumRow())) {
+          const auto& rb = *opt.highs_root_basis_warm_start;
+          HighsBasis basis;
+          basis.col_status.reserve(rb.col_status.size());
+          basis.row_status.reserve(rb.row_status.size());
+          bool basis_ok = true;
+          auto append_status = [&](int raw,
+                                   std::vector<HighsBasisStatus>& out) {
+            if (raw < static_cast<int>(HighsBasisStatus::kLower) ||
+                raw > static_cast<int>(HighsBasisStatus::kNonbasic)) {
+              basis_ok = false;
+              return;
+            }
+            out.push_back(static_cast<HighsBasisStatus>(raw));
+          };
+          for (int raw : rb.col_status) append_status(raw, basis.col_status);
+          for (int raw : rb.row_status) append_status(raw, basis.row_status);
+          if (basis_ok) {
+            basis.valid = true;
+            basis.useful = true;
+            basis.alien = true;
+            basis.debug_origin_name = "HACDCPF Baseline+Cuts root basis";
+            highs.hacdcpfSetRootBasis(basis);
+          }
+        }
+        // Enable root separation rounds: static injected UC cuts (families
+        // A/G/C/V/R) do not provide Gomory/MIR tightening — on large UC
+        // instances (e.g. IEEE 118-bus, 54G×24T) the LP bound is stuck at
+        // 149,035 vs optimal 156,199 (4.7% gap) with 0 rounds.  HiGHS's
+        // dynamic Gomory/MIR rounds are needed to close this gap.  Allow 50
+        // rounds by default (matching options.hpp documented behaviour); use
+        // the explicitly specified value when non-zero.
+        const int sepa_cap = (opt.highs_max_root_sepa_rounds > 0)
+                             ? opt.highs_max_root_sepa_rounds : 50;
+        highs.setOptionValue("hacdcpf_max_root_sepa_rounds",
+                             static_cast<HighsInt>(sepa_cap));
+        // When a warm incumbent will also be injected, suppress repeated
+        // dive-loop RENS/RINS sub-MIPs so the budget goes to the search tree.
+        // Analytic centre: skip it for simplex root LP (computing AC from a
+        // vertex requires a fresh interior LP solve, ~10-15s on a 30K-row UC
+        // LP, eating into B&B budget).  For IPM root LP the solver already has
+        // an interior primal point, so hacdcpf reuses it as the analytic centre
+        // at zero extra cost — producing tighter Gomory/MIR cuts.
+        if (prob.initial_solution.size() > 0) {
+          if (opt.highs_mip_lp_solver != "ipm") {
+            highs.hacdcpfSetSkipAnalyticCenter(true);
+          }
+          highs.hacdcpfSetDiveSubMipHeuristicLimit(4);
+          highs.hacdcpfSetHeuristicSubMipNodeLimit(120);
+        }
+      } else if (opt.highs_max_root_sepa_rounds > 0) {
+        highs.setOptionValue("hacdcpf_max_root_sepa_rounds",
+                             static_cast<HighsInt>(opt.highs_max_root_sepa_rounds));
+      }
       // [A] Warm-start injection: verify the caller-supplied initial solution
       // in the original LP space (no PaPILO reduction; dispatch LP fixes
       // integers and solves one IPM LP for the continuous dispatch) and pass
@@ -1466,9 +1968,32 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             "time_limit", std::max(0.001, opt.time_limit_sec - elapsed_sec));
       }
 
+      BCCallbacks strict_highs_effective_callbacks;
+      const BCCallbacks* strict_highs_callbacks = callbacks;
+      if (prob.uc_hint.has_value() &&
+          strict_scuc_dynamic_cuts_enabled(*prob.uc_hint)) {
+        if (callbacks != nullptr) strict_highs_effective_callbacks = *callbacks;
+        auto external_dynamic_node_cut = strict_highs_effective_callbacks.dynamic_node_cut;
+        strict_highs_effective_callbacks.dynamic_node_cut =
+            [external_dynamic_node_cut, &prob, &opt](
+                const BCDynamicNodeCutContext& ctx,
+                std::vector<BCDynamicNodeCut>& rows) {
+              if (external_dynamic_node_cut) {
+                external_dynamic_node_cut(ctx, rows);
+              }
+              if (prob.uc_hint.has_value()) {
+                append_strict_scuc_dynamic_cuts(*prob.uc_hint, opt, ctx,
+                                                &prob.linear_part, rows);
+              }
+            };
+        strict_highs_callbacks = &strict_highs_effective_callbacks;
+      }
+      const bool strict_highs_dynamic_callback_active =
+          strict_highs_callbacks != nullptr &&
+          static_cast<bool>(strict_highs_callbacks->dynamic_node_cut);
       StrictHighsNodeCutCallbackBridge callback_bridge{
-          callbacks, &strict_highs_original_entry_lp};
-      if (callbacks != nullptr && callbacks->dynamic_node_cut) {
+          strict_highs_callbacks, &strict_highs_original_entry_lp};
+      if (strict_highs_dynamic_callback_active) {
         highs.hacdcpfSetNodeCutCallback(
             [](const char* event, HighsLpRelaxation* lp,
                const HighsDomain* local_domain,
@@ -1833,7 +2358,116 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (bc_env_flag_enabled("MIPSOLVERS_STRICT_FULL_RETAIN_ROOT_LP")) {
         retain_root_lp_env.emplace("MIPSOLVERS_RETAIN_ROOT_LP_RELAXATION", "1");
       }
+      // [K7] Inject pseudocost warm-start (original → presolved space mapping
+      // is handled inside HighsPseudocost constructor using postSolveStack).
+      if (opt.highs_pseudocost_warm_start &&
+          !opt.highs_pseudocost_warm_start->empty() &&
+          opt.highs_pseudocost_warm_start->n_orig_cols == highs.getNumCol()) {
+        const auto& bp = *opt.highs_pseudocost_warm_start;
+        auto hi_pscost = std::make_shared<HighsPseudocostInitialization>();
+        hi_pscost->pseudocostup.assign(bp.pseudocostup.begin(),
+                                       bp.pseudocostup.end());
+        hi_pscost->pseudocostdown.assign(bp.pseudocostdown.begin(),
+                                         bp.pseudocostdown.end());
+        hi_pscost->nsamplesup.assign(bp.nsamplesup.begin(),
+                                     bp.nsamplesup.end());
+        hi_pscost->nsamplesdown.assign(bp.nsamplesdown.begin(),
+                                       bp.nsamplesdown.end());
+        hi_pscost->inferencesup.assign(bp.inferencesup.begin(),
+                                        bp.inferencesup.end());
+        hi_pscost->inferencesdown.assign(bp.inferencesdown.begin(),
+                                          bp.inferencesdown.end());
+        hi_pscost->ninferencesup.assign(bp.ninferencesup.begin(),
+                                         bp.ninferencesup.end());
+        hi_pscost->ninferencesdown.assign(bp.ninferencesdown.begin(),
+                                           bp.ninferencesdown.end());
+        hi_pscost->conflictscoreup.assign(bp.conflictscoreup.begin(),
+                                           bp.conflictscoreup.end());
+        hi_pscost->conflictscoredown.assign(bp.conflictscoredown.begin(),
+                                             bp.conflictscoredown.end());
+        hi_pscost->cost_total         = bp.cost_total;
+        hi_pscost->inferences_total   = bp.inferences_total;
+        hi_pscost->conflict_avg_score = bp.conflict_avg_score;
+        hi_pscost->nsamplestotal      = bp.nsamplestotal;
+        hi_pscost->ninferencestotal   = bp.ninferencestotal;
+        highs.hacdcpfSetPseudocostInitialization(std::move(hi_pscost));
+      }
       const HighsStatus run_status = highs.run();
+      // [K6] Extract root cuts immediately after run() for warm-starting
+      // future solves of this problem.  Convert HacdcpfRootCuts (HighsInt
+      // column indices) to BCRootCuts (int column indices).
+      {
+        HacdcpfRootCuts hacdcpf_cuts;
+        highs.hacdcpfExtractRootCuts(hacdcpf_cuts);
+        if (!hacdcpf_cuts.empty()) {
+          auto bc_cuts = std::make_shared<BCRootCuts>();
+          bc_cuts->start.assign(hacdcpf_cuts.start.begin(),
+                                hacdcpf_cuts.start.end());
+          bc_cuts->index.assign(hacdcpf_cuts.index.begin(),
+                                hacdcpf_cuts.index.end());
+          bc_cuts->value = std::move(hacdcpf_cuts.value);
+          bc_cuts->lower = std::move(hacdcpf_cuts.lower);
+          bc_cuts->upper = std::move(hacdcpf_cuts.upper);
+          out.highs_root_cuts = std::move(bc_cuts);
+        }
+        HighsBasis hacdcpf_basis;
+        highs.hacdcpfExtractRootBasis(hacdcpf_basis);
+        if (hacdcpf_basis.valid && !hacdcpf_basis.col_status.empty() &&
+            !hacdcpf_basis.row_status.empty()) {
+          auto bc_basis = std::make_shared<BCRootBasis>();
+          bc_basis->valid = true;
+          bc_basis->col_status.reserve(hacdcpf_basis.col_status.size());
+          bc_basis->row_status.reserve(hacdcpf_basis.row_status.size());
+          for (HighsBasisStatus status : hacdcpf_basis.col_status) {
+            bc_basis->col_status.push_back(static_cast<int>(status));
+          }
+          for (HighsBasisStatus status : hacdcpf_basis.row_status) {
+            bc_basis->row_status.push_back(static_cast<int>(status));
+          }
+          out.highs_root_basis = std::move(bc_basis);
+        }
+      }
+      // [K7] Extract pseudocost data for warm-starting branching in the next
+      // solve.  HighsPseudocostInitialization maps presolved → original space.
+      {
+        HighsPseudocostInitialization hacdcpf_pscost;
+        if (highs.hacdcpfExtractPseudocostInitialization(hacdcpf_pscost)) {
+          auto bc_pscost = std::make_shared<BCPseudocostInit>();
+          bc_pscost->n_orig_cols = static_cast<int>(
+              hacdcpf_pscost.pseudocostup.size());
+          bc_pscost->pseudocostup.assign(hacdcpf_pscost.pseudocostup.begin(),
+                                         hacdcpf_pscost.pseudocostup.end());
+          bc_pscost->pseudocostdown.assign(
+              hacdcpf_pscost.pseudocostdown.begin(),
+              hacdcpf_pscost.pseudocostdown.end());
+          bc_pscost->nsamplesup.assign(hacdcpf_pscost.nsamplesup.begin(),
+                                       hacdcpf_pscost.nsamplesup.end());
+          bc_pscost->nsamplesdown.assign(hacdcpf_pscost.nsamplesdown.begin(),
+                                         hacdcpf_pscost.nsamplesdown.end());
+          bc_pscost->inferencesup.assign(hacdcpf_pscost.inferencesup.begin(),
+                                          hacdcpf_pscost.inferencesup.end());
+          bc_pscost->inferencesdown.assign(
+              hacdcpf_pscost.inferencesdown.begin(),
+              hacdcpf_pscost.inferencesdown.end());
+          bc_pscost->ninferencesup.assign(hacdcpf_pscost.ninferencesup.begin(),
+                                           hacdcpf_pscost.ninferencesup.end());
+          bc_pscost->ninferencesdown.assign(
+              hacdcpf_pscost.ninferencesdown.begin(),
+              hacdcpf_pscost.ninferencesdown.end());
+          bc_pscost->conflictscoreup.assign(
+              hacdcpf_pscost.conflictscoreup.begin(),
+              hacdcpf_pscost.conflictscoreup.end());
+          bc_pscost->conflictscoredown.assign(
+              hacdcpf_pscost.conflictscoredown.begin(),
+              hacdcpf_pscost.conflictscoredown.end());
+          bc_pscost->cost_total        = hacdcpf_pscost.cost_total;
+          bc_pscost->inferences_total  = hacdcpf_pscost.inferences_total;
+          bc_pscost->conflict_avg_score = hacdcpf_pscost.conflict_avg_score;
+          bc_pscost->nsamplestotal     = hacdcpf_pscost.nsamplestotal;
+          bc_pscost->ninferencestotal  = hacdcpf_pscost.ninferencestotal;
+          out.highs_pseudocost_init    = std::move(bc_pscost);
+        }
+      }
       const auto t_highs_full1 = std::chrono::steady_clock::now();
       const double runtime =
           std::chrono::duration<double>(t_highs_full1 - t0).count();
@@ -1942,7 +2576,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                    out.stats.objective,
                    out.bc_stats.best_bound, out.stats.mip_gap, runtime,
                    highs_runtime,
-                   callbacks != nullptr && callbacks->dynamic_node_cut ? 1 : 0);
+                   strict_highs_dynamic_callback_active ? 1 : 0);
       }
       return return_with_profile();
     }
@@ -2661,6 +3295,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       ruc.pmin = uc.pmin;
       ruc.pmax = uc.pmax;
       ruc.ramp = uc.ramp;
+      ruc.certifies_power_balance_rows = uc.certifies_power_balance_rows;
+      ruc.certifies_generation_capacity_rows = uc.certifies_generation_capacity_rows;
+      ruc.certifies_ramping_rows = uc.certifies_ramping_rows;
+      ruc.certifies_min_up_down_rows = uc.certifies_min_up_down_rows;
+      ruc.certifies_segment_bound_rows = uc.certifies_segment_bound_rows;
+      ruc.certifies_system_reserve_rows = uc.certifies_system_reserve_rows;
+      ruc.certifies_area_import_rows = uc.certifies_area_import_rows;
+      ruc.certifies_hard_network_flow_rows = uc.certifies_hard_network_flow_rows;
+      ruc.certifies_hard_section_flow_rows = uc.certifies_hard_section_flow_rows;
+      ruc.certifies_storage_cycle_rows = uc.certifies_storage_cycle_rows;
       // Build per-element column maps (eliminated cols get -1)
       ruc.ig_cols.resize(static_cast<size_t>(block_size));
       ruc.su_cols.resize(static_cast<size_t>(block_size), -1);
@@ -33193,10 +33837,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              }
 	            }
 	          }
-		          const int j_global = choose_branch_var_pseudocost(frac, cur.x_relax, pc);
+              const int j_global = branch_priority.empty()
+                                       ? choose_branch_var_pseudocost(frac, cur.x_relax, pc)
+                                       : choose_branch_var_pseudocost(
+                                             frac, cur.x_relax, pc, branch_priority);
 		          int j_probe = -1;
 		          double j_probe_score = -kInf;
+              int j_probe_priority = std::numeric_limits<int>::min();
 		          std::unordered_set<int> probed_vars;
+              auto branch_priority_at = [&](int cand) {
+                return (cand >= 0 && cand < static_cast<int>(branch_priority.size()))
+                           ? branch_priority[static_cast<std::size_t>(cand)]
+                           : 0;
+              };
 			          for (const auto& pr : probe_results) {
 			            if (!pr.available || pr.var < 0) continue;
 			            if (pr.failure_type != LPFailureType::Success &&
@@ -33211,9 +33864,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		            const double score = compute_branch_var_score(
 		                cand, cur.x_relax, pc,
 		                branch_priority.empty() ? nullptr : &branch_priority);
-		            if (score > j_probe_score) {
+                const int prio = branch_priority_at(cand);
+                if (prio > j_probe_priority ||
+                    (prio == j_probe_priority && score > j_probe_score)) {
 		              j_probe_score = score;
 		              j_probe = cand;
+                  j_probe_priority = prio;
 		            }
 		          }
 		          j = (j_probe >= 0) ? j_probe : j_global;
@@ -33282,13 +33938,20 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       if (audit_res.result.stats.success &&
           audit_res.result.x.size() == cur.x_relax.size()) {
         double best_score = -1.0;
+        int best_priority = std::numeric_limits<int>::min();
         int fresh_j = -1;
         for (int cand : frac) {
           const double score = compute_branch_var_score(
               cand, audit_res.result.x, pc,
               branch_priority.empty() ? nullptr : &branch_priority);
-          if (score > best_score) {
+          const int prio = (cand >= 0 &&
+                            cand < static_cast<int>(branch_priority.size()))
+                               ? branch_priority[static_cast<std::size_t>(cand)]
+                               : 0;
+          if (prio > best_priority ||
+              (prio == best_priority && score > best_score)) {
             best_score = score;
+            best_priority = prio;
             fresh_j = cand;
           }
         }

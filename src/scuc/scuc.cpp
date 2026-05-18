@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -248,6 +250,608 @@ double solar_at(const SCUCInput& inp, int s, int t) {
   return inp.solar[static_cast<size_t>(s)].pmax;
 }
 
+bool scuc_primal_repair_enabled(const SCUCConfig& cfg) {
+  if (!cfg.enable_primal_repair) return false;
+  return std::getenv("MIPSOLVERS_DISABLE_SCUC_PRIMAL_REPAIR") == nullptr;
+}
+
+double scuc_thermal_target_mw(const SCUCInput& inp, int dispatch_period) {
+  const auto& cfg = inp.config;
+  double load = 0.0;
+  for (int load_idx = 0; load_idx < static_cast<int>(inp.loads.size()); ++load_idx)
+    load += load_at(inp, load_idx, dispatch_period);
+
+  double renewable = 0.0;
+  for (int wind_idx = 0; wind_idx < static_cast<int>(inp.wind.size()); ++wind_idx)
+    renewable += std::max(0.0, wind_at(inp, wind_idx, dispatch_period));
+  for (int solar_idx = 0; solar_idx < static_cast<int>(inp.solar.size()); ++solar_idx)
+    renewable += std::max(0.0, solar_at(inp, solar_idx, dispatch_period));
+
+  const double upward_reserve =
+      (cfg.spinning_reserve_req + cfg.regulation_up_req) * load;
+  const double net_load = std::max(0.0, load - renewable);
+  return net_load + upward_reserve;
+}
+
+double scuc_segment_capacity(const Generator& gen, int n_segments) {
+  double capacity = 0.0;
+  for (int seg = 0; seg < n_segments; ++seg) {
+    if (seg < static_cast<int>(gen.bid_segments.size()))
+      capacity += std::max(0.0, gen.bid_segments[static_cast<size_t>(seg)].quantity);
+  }
+  return capacity;
+}
+
+bool scuc_seed_satisfies(const engine::LPModel& lp, const Eigen::VectorXd& seed,
+                         double tol, double* max_violation_out = nullptr) {
+  if (seed.size() != static_cast<int>(lp.vars.size())) {
+    if (max_violation_out != nullptr) *max_violation_out = std::numeric_limits<double>::infinity();
+    return false;
+  }
+  double max_violation = 0.0;
+  for (int col = 0; col < seed.size(); ++col) {
+    const auto& var = lp.vars[static_cast<size_t>(col)];
+    max_violation = std::max(max_violation, var.lb - seed[col]);
+    max_violation = std::max(max_violation, seed[col] - var.ub);
+    if (!std::isfinite(seed[col])) max_violation = std::numeric_limits<double>::infinity();
+  }
+  if (lp.A.rows() > 0) {
+    const Eigen::VectorXd act = lp.A * seed;
+    for (int row = 0; row < act.size(); ++row) {
+      max_violation = std::max(max_violation, act[row] - lp.b[row]);
+    }
+  }
+  if (lp.Aeq.rows() > 0) {
+    const Eigen::VectorXd act = lp.Aeq * seed;
+    for (int row = 0; row < act.size(); ++row) {
+      max_violation = std::max(max_violation, std::abs(act[row] - lp.beq[row]));
+    }
+  }
+  if (max_violation_out != nullptr) *max_violation_out = max_violation;
+  return max_violation <= tol;
+}
+
+Eigen::VectorXd scuc_initial_seed_vector(const VarIndex& v,
+                                         const engine::LPModel& lp) {
+  Eigen::VectorXd seed(v.nx);
+  for (int col = 0; col < v.nx; ++col) {
+    const auto& var = lp.vars[static_cast<size_t>(col)];
+    double value = std::isfinite(var.lb) ? var.lb : 0.0;
+    value = std::max(var.lb, std::min(var.ub, value));
+    seed[col] = std::isfinite(value) ? value : 0.0;
+  }
+  return seed;
+}
+
+void scuc_fill_segments_for_dispatch(const SCUCInput& inp, const VarIndex& v,
+                                     int gen_idx, int dispatch_period,
+                                     Eigen::VectorXd& seed) {
+  const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+  const int commit_period = dispatch_period / v.intervals_per_hour;
+  const double committed = seed[v.IG_start + gen_idx * v.T_commit + commit_period];
+  double remaining = std::max(0.0, seed[v.PG_start + gen_idx * v.T + dispatch_period] -
+                                       std::max(0.0, gen.pmin) * committed);
+  for (int seg = 0; seg < v.n_segments; ++seg) {
+    const int col = v.SEG_start[static_cast<size_t>(seg)] + gen_idx * v.T + dispatch_period;
+    double cap = 0.0;
+    if (seg < static_cast<int>(gen.bid_segments.size()))
+      cap = std::max(0.0, gen.bid_segments[static_cast<size_t>(seg)].quantity);
+    const double value = std::min(cap, remaining);
+    seed[col] = value;
+    remaining -= value;
+  }
+}
+
+void scuc_repair_network_slacks(const VarIndex& v, const engine::LPModel& lp,
+                                Eigen::VectorXd& seed) {
+  auto is_network_slack = [&](int col) {
+    return (col >= v.SL_LINE_POS_start && col < v.SL_LINE_POS_end) ||
+           (col >= v.SL_LINE_NEG_start && col < v.SL_LINE_NEG_end) ||
+           (col >= v.SL_SEC_POS_start && col < v.SL_SEC_POS_end) ||
+           (col >= v.SL_SEC_NEG_start && col < v.SL_SEC_NEG_end);
+  };
+  if (lp.A.rows() == 0) return;
+  Eigen::SparseMatrix<double, Eigen::RowMajor> row_major = lp.A;
+  for (int pass = 0; pass < 2; ++pass) {
+    const Eigen::VectorXd activity = lp.A * seed;
+    bool changed = false;
+    for (int row = 0; row < row_major.rows(); ++row) {
+      double violation = activity[row] - lp.b[row];
+      if (violation <= 1e-7) continue;
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(row_major, row); it; ++it) {
+        const int col = static_cast<int>(it.col());
+        const double coeff = it.value();
+        if (!is_network_slack(col) || !(coeff < -kEps)) continue;
+        const double room = lp.vars[static_cast<size_t>(col)].ub - seed[col];
+        if (room <= kEps) continue;
+        const double delta = std::min(room, violation / (-coeff));
+        seed[col] += delta;
+        violation -= (-coeff) * delta;
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+Eigen::VectorXd recover_scuc_continuous_seed(
+    const SCUCInput& inp, const VarIndex& v, const engine::LPModel& lp,
+    const std::vector<std::vector<int>>& online) {
+  const auto& cfg = inp.config;
+  const int T = cfg.num_periods;
+  const double dt = cfg.period_length_hr;
+  const bool has_ren_curt = cfg.M2_renewable_curtail_penalty > kEps;
+  Eigen::VectorXd seed = scuc_initial_seed_vector(v, lp);
+
+  for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+    int previous =
+        (gen_idx < static_cast<int>(inp.initial_status.commitment.size()) &&
+         inp.initial_status.commitment[static_cast<size_t>(gen_idx)] > 0.5) ? 1 : 0;
+    for (int commit_period = 0; commit_period < v.T_commit; ++commit_period) {
+      const int now = online[static_cast<size_t>(gen_idx)][static_cast<size_t>(commit_period)];
+      seed[v.IG_start + gen_idx * v.T_commit + commit_period] = static_cast<double>(now);
+      seed[v.SU_start + gen_idx * v.T_commit + commit_period] =
+          (previous == 0 && now == 1) ? 1.0 : 0.0;
+      seed[v.SD_start + gen_idx * v.T_commit + commit_period] =
+          (previous == 1 && now == 0) ? 1.0 : 0.0;
+      previous = now;
+    }
+  }
+
+  for (int period = 0; period < T; ++period) {
+    for (int wind_idx = 0; wind_idx < v.nw; ++wind_idx) {
+      const double forecast = std::max(0.0, wind_at(inp, wind_idx, period));
+      const int pw_col = v.PW_start + wind_idx * T + period;
+      seed[pw_col] = std::max(lp.vars[static_cast<size_t>(pw_col)].lb,
+                              std::min(lp.vars[static_cast<size_t>(pw_col)].ub, forecast));
+      if (has_ren_curt && v.WIND_CURT_start < v.WIND_CURT_end) {
+        seed[v.WIND_CURT_start + wind_idx * T + period] =
+            std::max(0.0, forecast - seed[pw_col]);
+      }
+    }
+    for (int solar_idx = 0; solar_idx < v.npv; ++solar_idx) {
+      const double forecast = std::max(0.0, solar_at(inp, solar_idx, period));
+      const int pv_col = v.PPV_start + solar_idx * T + period;
+      seed[pv_col] = std::max(lp.vars[static_cast<size_t>(pv_col)].lb,
+                              std::min(lp.vars[static_cast<size_t>(pv_col)].ub, forecast));
+      if (has_ren_curt && v.SOL_CURT_start < v.SOL_CURT_end) {
+        seed[v.SOL_CURT_start + solar_idx * T + period] =
+            std::max(0.0, forecast - seed[pv_col]);
+      }
+    }
+  }
+
+  for (int storage_idx = 0; storage_idx < v.nstorage; ++storage_idx) {
+    const auto& sto = inp.storage[static_cast<size_t>(storage_idx)];
+    const double e_cap = std::max(0.0, sto.energy_capacity_mwh);
+    const double eta_rt = clampd(sto.efficiency, 0.1, 1.0);
+    const double eta_sq = std::sqrt(eta_rt);
+    const double eta_ch = (sto.eta_charge > 0) ? clampd(sto.eta_charge, 0.01, 1.0) : eta_sq;
+    const double eta_dis = (sto.eta_discharge > 0) ? clampd(sto.eta_discharge, 0.01, 1.0) : eta_sq;
+    const double soc_lo = (sto.soc_min >= 0) ? clampd(sto.soc_min, 0.0, 1.0) * e_cap : 0.1 * e_cap;
+    double energy = sto.soc_init * e_cap;
+    if (storage_idx < static_cast<int>(inp.initial_status.storage_soc.size())) {
+      const double initial = std::max(0.0, inp.initial_status.storage_soc[static_cast<size_t>(storage_idx)]);
+      energy = (initial <= 1.0 + 1e-8) ? initial * e_cap : initial;
+    }
+    energy = clampd(energy, 0.0, e_cap);
+    const double soc_fin = (sto.soc_final >= 0) ? clampd(sto.soc_final, 0.0, 1.0) * e_cap : energy;
+    for (int period = 0; period < T; ++period) {
+      const int p_in = v.PSTO_IN_start + storage_idx * T + period;
+      const int p_out = v.PSTO_OUT_start + storage_idx * T + period;
+      const int soc = v.SOC_start + storage_idx * T + period;
+      const double period_target = (period == T - 1) ? std::max(soc_lo, soc_fin) : soc_lo;
+      double charge = 0.0;
+      if (energy + 1e-8 < period_target && eta_ch > kEps && dt > kEps) {
+        charge = (period_target - energy) / (eta_ch * dt);
+        if (sto.use_binary_indicators && sto.pmin_charge > kEps) charge = std::max(charge, sto.pmin_charge);
+        charge = std::min(std::max(0.0, sto.pmax_charge), charge);
+      }
+      seed[p_in] = charge;
+      seed[p_out] = 0.0;
+      if (v.use_sto_binaries && sto.use_binary_indicators) {
+        seed[v.XI_CH_start + storage_idx * T + period] = charge > kEps ? 1.0 : 0.0;
+        seed[v.XI_DIS_start + storage_idx * T + period] = 0.0;
+      }
+      energy = clampd(energy + eta_ch * charge * dt, 0.0, e_cap);
+      (void)eta_dis;
+      seed[soc] = energy;
+    }
+  }
+
+  for (int dc_idx = 0; dc_idx < v.ndc; ++dc_idx) {
+    for (int period = 0; period < T; ++period) {
+      const int col = v.PDC_start + dc_idx * T + period;
+      seed[col] = std::max(lp.vars[static_cast<size_t>(col)].lb,
+                           std::min(lp.vars[static_cast<size_t>(col)].ub, 0.0));
+    }
+  }
+
+  struct DispatchUnit {
+    int gen_idx{0};
+    double score{0.0};
+    double pmin{0.0};
+    double pmax{0.0};
+    double ramp_up{0.0};
+    double ramp_down{0.0};
+    double lower{0.0};
+    double upper{0.0};
+  };
+  std::vector<double> prev_pg(static_cast<size_t>(v.ng), 0.0);
+  for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+    if (gen_idx < static_cast<int>(inp.initial_status.dispatch.size()))
+      prev_pg[static_cast<size_t>(gen_idx)] = std::max(0.0, inp.initial_status.dispatch[static_cast<size_t>(gen_idx)]);
+  }
+
+  for (int period = 0; period < T; ++period) {
+    const int commit_period = period / v.intervals_per_hour;
+    double load = 0.0;
+    for (int load_idx = 0; load_idx < static_cast<int>(inp.loads.size()); ++load_idx)
+      load += load_at(inp, load_idx, period);
+    const double spin_req = cfg.spinning_reserve_req * load;
+    const double reg_up_req = cfg.regulation_up_req * load;
+    const double reg_down_req = cfg.regulation_down_req * load;
+
+    std::vector<DispatchUnit> units;
+    units.reserve(static_cast<size_t>(v.ng));
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+      const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+      const int online_now = online[static_cast<size_t>(gen_idx)][static_cast<size_t>(commit_period)];
+      const double committed = static_cast<double>(online_now);
+      const double pmin = std::max(0.0, gen.pmin) * committed;
+      const double seg_cap = scuc_segment_capacity(gen, v.n_segments);
+      const double dispatch_max = committed * std::min(std::max(0.0, gen.pmax), std::max(0.0, gen.pmin) + seg_cap);
+      const double pmax = committed * std::max(0.0, gen.pmax);
+      const double ramp_up = std::max(0.0, gen.ramp_up_mw_min * 60.0 * dt);
+      const double ramp_down = std::max(0.0, gen.ramp_dn_mw_min * 60.0 * dt);
+      const double su = seed[v.SU_start + gen_idx * v.T_commit + commit_period];
+      const double sd = seed[v.SD_start + gen_idx * v.T_commit + commit_period];
+      const double prev_commit = period == 0
+          ? ((gen_idx < static_cast<int>(inp.initial_status.commitment.size()) &&
+              inp.initial_status.commitment[static_cast<size_t>(gen_idx)] > 0.5) ? 1.0 : 0.0)
+          : seed[v.IG_start + gen_idx * v.T_commit + ((period - 1) / v.intervals_per_hour)];
+      double lower = pmin;
+      double upper = dispatch_max;
+      upper = std::min(upper, prev_pg[static_cast<size_t>(gen_idx)] + ramp_up + std::max(0.0, gen.pmax) * su);
+      lower = std::max(lower, prev_pg[static_cast<size_t>(gen_idx)] - ramp_down - std::max(0.0, gen.pmax) * sd);
+      if (period > 0) {
+        upper = std::min(upper, prev_pg[static_cast<size_t>(gen_idx)] +
+                                    std::min(std::max(0.0, gen.pmax), ramp_up) * prev_commit +
+                                    std::max(0.0, gen.pmax) * su);
+        lower = std::max(lower, prev_pg[static_cast<size_t>(gen_idx)] -
+                                    std::min(std::max(0.0, gen.pmax), ramp_down) * committed -
+                                    std::max(0.0, gen.pmax) * sd);
+      }
+      lower = std::max(0.0, lower);
+      upper = std::max(lower, upper);
+      double marginal = 0.0;
+      if (!gen.bid_segments.empty()) marginal = gen.bid_segments.front().price;
+      const double score = marginal + gen.no_load_cost / std::max(1.0, std::max(0.0, gen.pmax));
+      units.push_back({gen_idx, score, pmin, pmax, ramp_up, ramp_down, lower, upper});
+      seed[v.PG_start + gen_idx * T + period] = lower;
+    }
+    std::sort(units.begin(), units.end(), [](const DispatchUnit& lhs, const DispatchUnit& rhs) {
+      if (lhs.score != rhs.score) return lhs.score < rhs.score;
+      return lhs.pmax > rhs.pmax;
+    });
+
+    double down_available = 0.0;
+    for (const DispatchUnit& unit : units) {
+      const double pg = seed[v.PG_start + unit.gen_idx * T + period];
+      const auto& gen = inp.generators[static_cast<size_t>(unit.gen_idx)];
+      const double down_cap = gen.ramp_dn_mw_min > kEps ? gen.ramp_dn_mw_min * 10.0 : std::numeric_limits<double>::infinity();
+      down_available += std::min(std::max(0.0, pg - unit.pmin), down_cap);
+    }
+    double down_deficit = std::max(0.0, reg_down_req - down_available);
+    for (const DispatchUnit& unit : units) {
+      if (down_deficit <= kEps) break;
+      const auto& gen = inp.generators[static_cast<size_t>(unit.gen_idx)];
+      const int pg_col = v.PG_start + unit.gen_idx * T + period;
+      const double down_cap = gen.ramp_dn_mw_min > kEps ? gen.ramp_dn_mw_min * 10.0 : unit.upper - unit.pmin;
+      const double current_down = std::min(std::max(0.0, seed[pg_col] - unit.pmin), down_cap);
+      const double useful_room = std::max(0.0, std::min(unit.upper - seed[pg_col], down_cap - current_down));
+      const double delta = std::min(useful_room, down_deficit);
+      seed[pg_col] += delta;
+      down_deficit -= delta;
+    }
+
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx)
+      scuc_fill_segments_for_dispatch(inp, v, gen_idx, period, seed);
+
+    double reg_down_remaining = reg_down_req;
+    double reg_up_remaining = reg_up_req;
+    double spin_remaining = spin_req;
+    for (const DispatchUnit& unit : units) {
+      const auto& gen = inp.generators[static_cast<size_t>(unit.gen_idx)];
+      const double pg = seed[v.PG_start + unit.gen_idx * T + period];
+      const int rd_col = v.RG_reg_down_start + unit.gen_idx * T + period;
+      const int ru_col = v.RG_reg_up_start + unit.gen_idx * T + period;
+      const int rs_col = v.RG_spin_start + unit.gen_idx * T + period;
+      const double down_cap = gen.ramp_dn_mw_min > kEps ? gen.ramp_dn_mw_min * 10.0 : std::numeric_limits<double>::infinity();
+      const double rd = std::min({reg_down_remaining, std::max(0.0, pg - unit.pmin), down_cap});
+      seed[rd_col] = rd;
+      reg_down_remaining -= rd;
+
+      double headroom = std::max(0.0, unit.pmax - pg);
+      const double up_cap = gen.ramp_up_mw_min > kEps ? gen.ramp_up_mw_min * 10.0 : std::numeric_limits<double>::infinity();
+      const double ru = std::min({reg_up_remaining, headroom, up_cap});
+      seed[ru_col] = ru;
+      reg_up_remaining -= ru;
+      headroom -= ru;
+      const double spin = std::min({spin_remaining, headroom, std::max(0.0, unit.pmax - unit.pmin)});
+      seed[rs_col] = spin;
+      spin_remaining -= spin;
+    }
+
+    double supply = 0.0;
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) supply += seed[v.PG_start + gen_idx * T + period];
+    for (int wind_idx = 0; wind_idx < v.nw; ++wind_idx) supply += seed[v.PW_start + wind_idx * T + period];
+    for (int solar_idx = 0; solar_idx < v.npv; ++solar_idx) supply += seed[v.PPV_start + solar_idx * T + period];
+    for (int storage_idx = 0; storage_idx < v.nstorage; ++storage_idx) {
+      supply += seed[v.PSTO_OUT_start + storage_idx * T + period];
+      supply -= seed[v.PSTO_IN_start + storage_idx * T + period];
+    }
+    for (int dc_idx = 0; dc_idx < v.ndc; ++dc_idx) supply += seed[v.PDC_start + dc_idx * T + period];
+    const double imbalance = load - supply;
+    seed[v.LOAD_SHED_start + period] = std::max(0.0, imbalance);
+    seed[v.GEN_CURT_start + period] = std::max(0.0, -imbalance);
+
+    for (const DispatchUnit& unit : units)
+      prev_pg[static_cast<size_t>(unit.gen_idx)] = seed[v.PG_start + unit.gen_idx * T + period];
+  }
+
+  scuc_repair_network_slacks(v, lp, seed);
+  for (int col = 0; col < v.nx; ++col) {
+    const auto& var = lp.vars[static_cast<size_t>(col)];
+    seed[col] = std::max(var.lb, std::min(var.ub, seed[col]));
+  }
+  return seed;
+}
+
+Eigen::VectorXd build_scuc_primal_repair_seed(const SCUCInput& inp,
+                                              const VarIndex& v,
+                                              const engine::LPModel& lp) {
+  if (!scuc_primal_repair_enabled(inp.config) || v.ng <= 0 || v.T_commit <= 0 ||
+      static_cast<int>(lp.vars.size()) != v.nx) {
+    return Eigen::VectorXd();
+  }
+
+  struct SeedUnit {
+    int gen_idx{0};
+    double score{0.0};
+    double pmax{0.0};
+  };
+
+  std::vector<SeedUnit> merit;
+  merit.reserve(static_cast<size_t>(v.ng));
+  for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+    const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+    const double pmax = std::max(0.0, gen.pmax);
+    if (pmax <= kEps) continue;
+    double marginal = 0.0;
+    if (!gen.bid_segments.empty()) {
+      marginal = gen.bid_segments.front().price;
+      for (const auto& segment : gen.bid_segments) {
+        if (segment.quantity > kEps) {
+          marginal = segment.price;
+          break;
+        }
+      }
+    }
+    const double startup_adder = gen.startup_cost /
+        std::max(1.0, std::ceil(std::max(1.0, gen.min_up_time_hr)));
+    const double score = (gen.must_run ? -1.0e12 : 0.0) +
+                         marginal + (gen.no_load_cost + startup_adder) /
+                                        std::max(1.0, pmax);
+    merit.push_back({gen_idx, score, pmax});
+  }
+  if (merit.empty()) return Eigen::VectorXd();
+
+  std::sort(merit.begin(), merit.end(),
+            [](const SeedUnit& lhs, const SeedUnit& rhs) {
+              if (lhs.score != rhs.score) return lhs.score < rhs.score;
+              return lhs.pmax > rhs.pmax;
+            });
+  std::vector<SeedUnit> expensive = merit;
+  std::sort(expensive.begin(), expensive.end(),
+            [](const SeedUnit& lhs, const SeedUnit& rhs) {
+              if (lhs.score != rhs.score) return lhs.score > rhs.score;
+              return lhs.pmax < rhs.pmax;
+            });
+
+  std::vector<std::vector<int>> online(static_cast<size_t>(v.ng),
+                                       std::vector<int>(static_cast<size_t>(v.T_commit), 0));
+  std::vector<int> state(static_cast<size_t>(v.ng), 0);
+  std::vector<int> lock_on(static_cast<size_t>(v.ng), 0);
+  std::vector<int> lock_off(static_cast<size_t>(v.ng), 0);
+  for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+    const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+    const int min_up = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
+    const int min_down = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
+    const bool initially_on =
+        gen.must_run ||
+        (gen_idx < static_cast<int>(inp.initial_status.commitment.size()) &&
+         inp.initial_status.commitment[static_cast<size_t>(gen_idx)] > 0.5);
+    state[static_cast<size_t>(gen_idx)] = initially_on ? 1 : 0;
+    if (gen_idx < static_cast<int>(inp.initial_status.time_in_state.size())) {
+      const double time_in_state = inp.initial_status.time_in_state[static_cast<size_t>(gen_idx)];
+      if (initially_on && time_in_state > 0.0) {
+        lock_on[static_cast<size_t>(gen_idx)] =
+            std::max(0, min_up - static_cast<int>(std::floor(time_in_state)));
+      } else if (!initially_on && time_in_state < 0.0) {
+        lock_off[static_cast<size_t>(gen_idx)] =
+            std::max(0, min_down - static_cast<int>(std::floor(-time_in_state)));
+      }
+    }
+  }
+
+  struct CommitmentCapability {
+    double capacity{0.0};
+    double up_headroom{0.0};
+    double spinning{0.0};
+    double reg_up{0.0};
+    double reg_down{0.0};
+  };
+
+  auto reserve_capability = [](const Generator& gen) {
+    CommitmentCapability cap;
+    cap.capacity = std::max(0.0, gen.pmax);
+    cap.up_headroom = std::max(0.0, gen.pmax - gen.pmin);
+    cap.spinning = cap.up_headroom;
+    const double r10u = std::max(0.0, gen.ramp_up_mw_min * 10.0);
+    const double r10d = std::max(0.0, gen.ramp_dn_mw_min * 10.0);
+    cap.reg_up = r10u > kEps ? std::min(cap.up_headroom, r10u) : cap.up_headroom;
+    cap.reg_down = r10d > kEps ? std::min(cap.up_headroom, r10d) : cap.up_headroom;
+    return cap;
+  };
+
+  auto commitment_capability = [&](const std::vector<int>& commitment) {
+    CommitmentCapability cap;
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+      if (commitment[static_cast<size_t>(gen_idx)] == 0) continue;
+      const CommitmentCapability unit =
+          reserve_capability(inp.generators[static_cast<size_t>(gen_idx)]);
+      cap.capacity += unit.capacity;
+      cap.up_headroom += unit.up_headroom;
+      cap.spinning += unit.spinning;
+      cap.reg_up += unit.reg_up;
+      cap.reg_down += unit.reg_down;
+    }
+    return cap;
+  };
+
+  for (int commit_period = 0; commit_period < v.T_commit; ++commit_period) {
+    std::vector<int> current = state;
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+      const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+      if (gen.must_run) current[static_cast<size_t>(gen_idx)] = 1;
+      if (lock_on[static_cast<size_t>(gen_idx)] > 0) current[static_cast<size_t>(gen_idx)] = 1;
+      if (lock_off[static_cast<size_t>(gen_idx)] > 0 && !gen.must_run)
+        current[static_cast<size_t>(gen_idx)] = 0;
+    }
+
+    double target = 0.0;
+    double spin_req = 0.0;
+    double rup_req = 0.0;
+    double rdn_req = 0.0;
+    const int first_t = commit_period * v.intervals_per_hour;
+    const int last_t = std::min(v.T - 1, first_t + v.intervals_per_hour - 1);
+    for (int dispatch_period = first_t; dispatch_period <= last_t; ++dispatch_period) {
+      target = std::max(target, scuc_thermal_target_mw(inp, dispatch_period));
+      double load_t = 0.0;
+      for (int load_idx = 0; load_idx < static_cast<int>(inp.loads.size()); ++load_idx)
+        load_t += load_at(inp, load_idx, dispatch_period);
+      spin_req = std::max(spin_req, inp.config.spinning_reserve_req * load_t);
+      rup_req = std::max(rup_req, inp.config.regulation_up_req * load_t);
+      rdn_req = std::max(rdn_req, inp.config.regulation_down_req * load_t);
+    }
+    // Reserve capability is checked separately below; adding an extra capacity
+    // margin here tends to keep one more expensive peaker online in large UC
+    // cases without improving feasibility.
+
+    CommitmentCapability capacity = commitment_capability(current);
+    auto meets_requirements = [&]() {
+      return capacity.capacity + kEps >= target &&
+             capacity.up_headroom + kEps >= spin_req + rup_req &&
+             capacity.spinning + kEps >= spin_req &&
+             capacity.reg_up + kEps >= rup_req &&
+             capacity.reg_down + kEps >= rdn_req;
+    };
+    auto try_start_units = [&](bool allow_locked_off) {
+      for (const SeedUnit& unit : merit) {
+        const int gen_idx = unit.gen_idx;
+        if (current[static_cast<size_t>(gen_idx)] != 0) continue;
+        if (!allow_locked_off && lock_off[static_cast<size_t>(gen_idx)] > 0) continue;
+        current[static_cast<size_t>(gen_idx)] = 1;
+        lock_off[static_cast<size_t>(gen_idx)] = 0;
+        const CommitmentCapability added =
+            reserve_capability(inp.generators[static_cast<size_t>(gen_idx)]);
+        capacity.capacity += added.capacity;
+        capacity.up_headroom += added.up_headroom;
+        capacity.spinning += added.spinning;
+        capacity.reg_up += added.reg_up;
+        capacity.reg_down += added.reg_down;
+        if (meets_requirements()) return true;
+      }
+      return meets_requirements();
+    };
+    if (!meets_requirements() && !try_start_units(false)) {
+      (void)try_start_units(true);
+    }
+
+    for (const SeedUnit& unit : expensive) {
+      const int gen_idx = unit.gen_idx;
+      const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+      if (current[static_cast<size_t>(gen_idx)] == 0 || gen.must_run) continue;
+      if (lock_on[static_cast<size_t>(gen_idx)] > 0) continue;
+      const CommitmentCapability removed = reserve_capability(gen);
+      capacity.capacity -= removed.capacity;
+      capacity.up_headroom -= removed.up_headroom;
+      capacity.spinning -= removed.spinning;
+      capacity.reg_up -= removed.reg_up;
+      capacity.reg_down -= removed.reg_down;
+      if (!meets_requirements()) {
+        capacity.capacity += removed.capacity;
+        capacity.up_headroom += removed.up_headroom;
+        capacity.spinning += removed.spinning;
+        capacity.reg_up += removed.reg_up;
+        capacity.reg_down += removed.reg_down;
+        continue;
+      }
+      current[static_cast<size_t>(gen_idx)] = 0;
+    }
+
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+      online[static_cast<size_t>(gen_idx)][static_cast<size_t>(commit_period)] =
+          current[static_cast<size_t>(gen_idx)];
+      const auto& gen = inp.generators[static_cast<size_t>(gen_idx)];
+      const int min_up = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
+      const int min_down = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
+      const int previous = state[static_cast<size_t>(gen_idx)];
+      const int now = current[static_cast<size_t>(gen_idx)];
+      if (previous == 0 && now == 1) {
+        lock_on[static_cast<size_t>(gen_idx)] = std::max(0, min_up);
+        lock_off[static_cast<size_t>(gen_idx)] = 0;
+      } else if (previous == 1 && now == 0) {
+        lock_off[static_cast<size_t>(gen_idx)] = std::max(0, min_down);
+        lock_on[static_cast<size_t>(gen_idx)] = 0;
+      }
+    }
+
+    for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+      if (current[static_cast<size_t>(gen_idx)] != 0) {
+        if (lock_on[static_cast<size_t>(gen_idx)] > 0) --lock_on[static_cast<size_t>(gen_idx)];
+      } else if (lock_off[static_cast<size_t>(gen_idx)] > 0) {
+        --lock_off[static_cast<size_t>(gen_idx)];
+      }
+    }
+    state = std::move(current);
+  }
+
+  double max_violation = std::numeric_limits<double>::infinity();
+  Eigen::VectorXd seed = recover_scuc_continuous_seed(inp, v, lp, online);
+  if (scuc_seed_satisfies(lp, seed, 1e-5, &max_violation)) return seed;
+
+  std::vector<std::vector<int>> dense_online(static_cast<size_t>(v.ng),
+                                             std::vector<int>(static_cast<size_t>(v.T_commit), 1));
+  for (int gen_idx = 0; gen_idx < v.ng; ++gen_idx) {
+    if (inp.generators[static_cast<size_t>(gen_idx)].must_run) continue;
+    for (int commit_period = 0; commit_period < v.T_commit; ++commit_period) {
+      dense_online[static_cast<size_t>(gen_idx)][static_cast<size_t>(commit_period)] = 1;
+    }
+  }
+  Eigen::VectorXd dense_seed = recover_scuc_continuous_seed(inp, v, lp, dense_online);
+  double dense_violation = std::numeric_limits<double>::infinity();
+  if (scuc_seed_satisfies(lp, dense_seed, 1e-5, &dense_violation)) return dense_seed;
+
+  if (std::getenv("MIPSOLVERS_SCUC_PRIMAL_REPAIR_LOG") != nullptr) {
+    std::cerr << "[SCUC-REPAIR] seed remains infeasible: merit_violation="
+              << max_violation << " dense_violation=" << dense_violation << "\n";
+  }
+  return max_violation <= dense_violation ? seed : dense_seed;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Formulation: builds MIPModel for SCUC (or SCED when binaries fixed)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -411,19 +1015,25 @@ Formulation build_formulation(const SCUCInput& inp) {
         add_eq(row, 0.0);
       }
 
-      // PG <= Pmax * IG (§2.6.3.8)
+      // PG <= Pmax * IG  (§2.6.3.8)
       add_le({{pg, 1.0}, {ig, -pmax}}, 0.0);
-      // PG >= Pmin * IG
-      add_le({{pg, -1.0}, {ig, pmin}}, 0.0);
 
-      // Segment capacity upper bounds (§2.6.3.7 segment bounds)
+      // PG >= Pmin * IG  (§2.6.3.8, lower coupling)
+      if (pmin > kEps)
+        add_le({{pg, -1.0}, {ig, pmin}}, 0.0);
+
+      // Segment capacity upper bounds (§2.6.3.7)
       for (int k = 0; k < v.n_segments; ++k) {
-        const auto& seg_idx = v.SEG_start[static_cast<size_t>(k)] + g * T + t;
+        const int seg_idx = v.SEG_start[static_cast<size_t>(k)] + g * T + t;
         const auto& gen = inp.generators[static_cast<size_t>(g)];
         double q = 0.0;
         if (k < static_cast<int>(gen.bid_segments.size()))
           q = gen.bid_segments[static_cast<size_t>(k)].quantity;
-        lp.vars[static_cast<size_t>(seg_idx)].ub = std::max(0.0, q);
+        q = std::max(0.0, q);
+        lp.vars[static_cast<size_t>(seg_idx)].ub = q;
+        if (q > kEps) {
+          add_le({{seg_idx, 1.0}, {ig, -q}}, 0.0);
+        }
       }
     }
   }
@@ -967,6 +1577,20 @@ Formulation build_formulation(const SCUCInput& inp) {
   // ── LP-valid pre-formulation market cutting planes ─────────────────────────
   int n_cuts = 0;
   if (cfg.enable_market_cuts) {
+    // For large UC problems the root LP solve is already the binding constraint
+    // on solver time.  Adding extended cut families (T, H, R) inflates the LP
+    // by O(G × T_commit) rows each; beyond the threshold below they make the
+    // root LP slower without tightening the bound (since the LP never finishes
+    // within the time budget anyway).  Small cases (< threshold) benefit from
+    // these families via presolve/clique detection, so they remain enabled there.
+    //
+    // Threshold separation (2025-05):
+    //   large_uc (> 800): disables Families T, H, and R (adds 4×G×T +
+    //   conflict-cover + 2×G×(T-1) rows; row overhead dominates LP-tightening
+    //   gain for the 118-bus case 54×24=1296 where even with warm-start the
+    //   harder per-node LP degrades primal quality and stochastic B&B bound).
+    const bool large_uc = (v.ng * v.T_commit > 800);
+
     // Family 6: symmetry-breaking for identical generators
     {
       struct GenKey { int pmax_bkt, pmin_bkt, tu, td;
@@ -993,33 +1617,63 @@ Formulation build_formulation(const SCUCInput& inp) {
       }
     }
 
-    // Family A: segment commitment coupling
+    // Family A: cumulative segment coupling cuts.
+    // For each generator g, dispatch period t, and segment prefix m:
+    //   SEG_0 + SEG_1 + ... + SEG_m <= cumQ_m * IG
+    // where cumQ_m = Σ_{k=0}^{m} q_k.  These LP-valid inequalities tighten the
+    // root LP relaxation; HiGHS extracts them as warm root cuts for re-injection
+    // at every B&C node, yielding fast per-node LP solves.
     for (int g = 0; g < v.ng; ++g) {
       const auto& gen = inp.generators[static_cast<size_t>(g)];
       for (int t = 0; t < T; ++t) {
         const int h = t / iph;
         const int ig = v.IG_start + g * v.T_commit + h;
-        double cumQ = 0.0;
+        double cum_q = 0.0;
         for (int m = 0; m < v.n_segments; ++m) {
-          double q = 0.0;
+          double q_m = 0.0;
           if (m < static_cast<int>(gen.bid_segments.size()))
-            q = gen.bid_segments[static_cast<size_t>(m)].quantity;
-          if (q < kEps) continue;
-          cumQ += q;
-          const int seg = v.SEG_start[static_cast<size_t>(m)] + g * T + t;
-          // Cumulative segment cut (Family A from tex §2.6.6)
-          std::vector<std::pair<int,double>> row;
-          for (int mm = 0; mm <= m; ++mm) {
-            if (mm < static_cast<int>(gen.bid_segments.size()) && gen.bid_segments[static_cast<size_t>(mm)].quantity > kEps)
-              row.emplace_back(v.SEG_start[static_cast<size_t>(mm)] + g * T + t, 1.0);
+            q_m = gen.bid_segments[static_cast<size_t>(m)].quantity;
+          cum_q += q_m;
+          if (m == 0) continue;
+          if (cum_q > kEps) {
+            std::vector<std::pair<int,double>> row;
+            for (int k = 0; k <= m; ++k)
+              row.emplace_back(v.SEG_start[static_cast<size_t>(k)] + g * T + t, 1.0);
+            row.emplace_back(ig, -cum_q);
+            add_le(row, 0.0);
+            ++n_cuts;
           }
-          row.emplace_back(ig, -cumQ);
-          add_le(row, 0.0);
-          ++n_cuts;
-          (void)seg;
         }
       }
     }
+
+    // Family T: transition hull cuts.  Provides the convex-hull
+    // characterisation of SU/SD vs IG transitions; adds 4 × G × T_commit rows.
+    // Disabled for large_uc (> 800) — row overhead hurts primal quality for
+    // 118-bus-scale instances (degrades cold incumbent, increases objective gap).
+    if (!large_uc) {
+    for (int g = 0; g < v.ng; ++g) {
+      const double ig0 =
+          (g < static_cast<int>(inp.initial_status.commitment.size()) &&
+           inp.initial_status.commitment[static_cast<size_t>(g)] > 0.5) ? 1.0 : 0.0;
+      for (int h = 0; h < v.T_commit; ++h) {
+        const int su = v.SU_start + g * v.T_commit + h;
+        const int sd = v.SD_start + g * v.T_commit + h;
+        const int ig = v.IG_start + g * v.T_commit + h;
+        add_le({{su, 1.0}, {ig, -1.0}}, 0.0);
+        add_le({{sd, 1.0}, {ig, 1.0}}, 1.0);
+        if (h == 0) {
+          add_le({{su, 1.0}}, 1.0 - ig0);
+          add_le({{sd, 1.0}}, ig0);
+        } else {
+          const int ig_prev = v.IG_start + g * v.T_commit + (h - 1);
+          add_le({{su, 1.0}, {ig_prev, 1.0}}, 1.0);
+          add_le({{sd, 1.0}, {ig_prev, -1.0}}, 0.0);
+        }
+        n_cuts += 4;
+      }
+    }
+    } // !large_uc (Family T)
 
     // Family G: extended startup clique (TU + TD window)
     for (int g = 0; g < v.ng; ++g) {
@@ -1035,6 +1689,235 @@ Formulation build_formulation(const SCUCInput& inp) {
         add_le(row, 1.0);
         ++n_cuts;
       }
+    }
+
+    // Family H: transition-conflict cover cuts.  Fully implied by Family G + T,
+    // so it has zero independent LP value but inflates the LP significantly.
+    // Disabled for large_uc (> 800) — pure overhead at this scale.
+    if (!large_uc) {
+    for (int g = 0; g < v.ng; ++g) {
+      const auto& gen = inp.generators[static_cast<size_t>(g)];
+      const int TU = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
+      const int TD = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
+      if (TU > 1) {
+        for (int start = 0; start < v.T_commit; ++start) {
+          const int su = v.SU_start + g * v.T_commit + start;
+          const int last = std::min(v.T_commit - 1, start + TU - 1);
+          for (int shut = start + 1; shut <= last; ++shut) {
+            const int sd = v.SD_start + g * v.T_commit + shut;
+            add_le({{su, 1.0}, {sd, 1.0}}, 1.0);
+            ++n_cuts;
+          }
+        }
+      }
+      if (TD > 1) {
+        for (int shut = 0; shut < v.T_commit; ++shut) {
+          const int sd = v.SD_start + g * v.T_commit + shut;
+          const int last = std::min(v.T_commit - 1, shut + TD - 1);
+          for (int start = shut + 1; start <= last; ++start) {
+            const int su = v.SU_start + g * v.T_commit + start;
+            add_le({{sd, 1.0}, {su, 1.0}}, 1.0);
+            ++n_cuts;
+          }
+        }
+      }
+    }
+    } // !large_uc (Family H)
+
+    // Family R: tight ramp-perspective cuts.  Uses startup/shutdown capacity
+    // coefficients min(Pmin+R, Pmax) instead of big-M Pmax in the SU/SD term:
+    //   P_t - P_{t-1} <= R · IG_{t-1} + min(Pmin+R, Pmax) · SU_t
+    //   P_{t-1} - P_t <= R · IG_t     + min(Pmin+R, Pmax) · SD_t
+    // At startup (IG_{t-1}=0, SU_t=1): P_t <= min(Pmin+R, Pmax) instead of
+    // Pmax — a factor 2-4× tighter for typical slow-ramping generators.
+    // Adds 2 × G × (T-1) rows.  Disabled for large_uc (> 800): for the 118-bus
+    // 54G×24T case these generators have ramp rates large enough that su_cap ≈
+    // Pmax so tightening is negligible, while the extra rows degrade node LP
+    // performance and primal heuristic quality.
+    if (!large_uc) {
+    for (int g = 0; g < v.ng; ++g) {
+      const auto& gen = inp.generators[static_cast<size_t>(g)];
+      const double pmax = std::max(0.0, gen.pmax);
+      const double pmin = std::max(0.0, gen.pmin);
+      if (pmax <= kEps) continue;
+      const double rup = std::min(pmax, std::max(0.0, gen.ramp_up_mw_min * 60.0 * dt));
+      const double rdn = std::min(pmax, std::max(0.0, gen.ramp_dn_mw_min * 60.0 * dt));
+      // Tight coefficients: at startup/shutdown the unit can only produce
+      // up to Pmin + one-period ramp capacity (not the big-M Pmax).
+      const double su_cap = std::min(pmax, pmin + rup);
+      const double sd_cap = std::min(pmax, pmin + rdn);
+      for (int t = 1; t < T; ++t) {
+        const int h      = t / iph;
+        const int h_prev = (t - 1) / iph;
+        const int pg_t    = v.PG_start + g * T + t;
+        const int pg_prev = v.PG_start + g * T + (t - 1);
+        const int ig_prev = v.IG_start + g * v.T_commit + h_prev;
+        const int ig_t    = v.IG_start + g * v.T_commit + h;
+        const int su_h    = v.SU_start + g * v.T_commit + h;
+        const int sd_h    = v.SD_start + g * v.T_commit + h;
+        add_le({{pg_t, 1.0}, {pg_prev, -1.0}, {ig_prev, -rup}, {su_h, -su_cap}}, 0.0);
+        add_le({{pg_prev, 1.0}, {pg_t, -1.0}, {ig_t,    -rdn}, {sd_h, -sd_cap}}, 0.0);
+        n_cuts += 2;
+      }
+    }
+    } // !large_uc (Family R)
+
+    // Family P: startup-ramp capacity upper bounds (multi-lag).
+    // If the unit started k periods ago (SU_{g,s}=1 at s=h-k+1), its output
+    // at period h is bounded by Pmin + k·Rup (k ramp steps from Pmin):
+    //   P_{g,h} + max(0, Pmax-Pmin-k·Rup) · SU_{g,h-k+1} <= Pmax · IG_{g,h}
+    // For k=1 this directly bounds the startup period itself.  For k=2..k_max
+    // it tightens the LP relaxation beyond what Family R provides when IG is
+    // fractional across periods (Family R only uses adjacent periods).
+    // Disabled for large_uc: same reasoning as Family R (generators have large
+    // ramp rates, excess≈0, negligible LP tightening but significant overhead).
+    // Only active when T == T_commit (iph=1) for exact period alignment.
+    if (v.T == v.T_commit && !large_uc) {
+      for (int g = 0; g < v.ng; ++g) {
+        const auto& gen = inp.generators[static_cast<size_t>(g)];
+        const double pmax = std::max(0.0, gen.pmax);
+        const double pmin = std::max(0.0, gen.pmin);
+        if (pmax <= pmin + kEps) continue;
+        const double rup = std::max(0.0, gen.ramp_up_mw_min * 60.0 * dt);
+        const int tu = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
+        const int k_limit = std::min(std::max(0, tu - 1), 8);
+        for (int k = 1; k <= k_limit; ++k) {
+          const double excess = pmax - pmin - static_cast<double>(k) * rup;
+          if (excess < kEps) break;  // k·Rup covers full range — no tightening
+          for (int h = k - 1; h < v.T_commit; ++h) {
+            const int su_per = h - k + 1;   // startup period (>= 0)
+            add_le({{v.PG_start + g * T + h,            1.0},
+                    {v.SU_start + g * v.T_commit + su_per, excess},
+                    {v.IG_start + g * v.T_commit + h,    -pmax}}, 0.0);
+            ++n_cuts;
+          }
+        }
+      }
+    }
+
+    // Family Q: shutdown-ramp capacity upper bounds (multi-lag).
+    // Symmetric to P: if the unit shuts down in k periods (SD_{g,h+k}=1),
+    // output at period h must leave room to ramp down to Pmin before shutdown:
+    //   P_{g,h} + max(0, Pmax-Pmin-k·Rdn) · SD_{g,h+k} <= Pmax · IG_{g,h}
+    // Disabled for large_uc: same reasoning as Family P.
+    if (v.T == v.T_commit && !large_uc) {
+      for (int g = 0; g < v.ng; ++g) {
+        const auto& gen = inp.generators[static_cast<size_t>(g)];
+        const double pmax = std::max(0.0, gen.pmax);
+        const double pmin = std::max(0.0, gen.pmin);
+        if (pmax <= pmin + kEps) continue;
+        const double rdn = std::max(0.0, gen.ramp_dn_mw_min * 60.0 * dt);
+        const int td = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
+        const int k_limit = std::min(std::max(0, td - 1), 8);
+        for (int k = 1; k <= k_limit; ++k) {
+          const double excess = pmax - pmin - static_cast<double>(k) * rdn;
+          if (excess < kEps) break;
+          for (int h = 0; h + k < v.T_commit; ++h) {
+            const int sd_per = h + k;       // shutdown period
+            add_le({{v.PG_start + g * T + h,            1.0},
+                    {v.SD_start + g * v.T_commit + sd_per, excess},
+                    {v.IG_start + g * v.T_commit + h,    -pmax}}, 0.0);
+            ++n_cuts;
+          }
+        }
+      }
+    }
+
+    // Family C: system reserve-cover aggregations.  Summing the individual
+    // headroom rows with the reserve requirements and power balance yields
+    // compact cover inequalities that expose system capacity and downward
+    // reserve pressure directly in the root LP.
+    for (int t = 0; t < T; ++t) {
+      double load_t = 0.0;
+      for (int d = 0; d < static_cast<int>(inp.loads.size()); ++d)
+        load_t += load_at(inp, d, t);
+      const double up_req = (cfg.spinning_reserve_req + cfg.regulation_up_req) * load_t;
+      const double down_req = cfg.regulation_down_req * load_t;
+      if (up_req > kEps) {
+        std::vector<std::pair<int,double>> row;
+        for (int g = 0; g < v.ng; ++g) {
+          const int h = t / iph;
+          row.emplace_back(v.IG_start + g * v.T_commit + h,
+                           -std::max(0.0, inp.generators[static_cast<size_t>(g)].pmax));
+        }
+        for (int w = 0; w < v.nw; ++w) row.emplace_back(v.PW_start + w * T + t, -1.0);
+        for (int s = 0; s < v.npv; ++s) row.emplace_back(v.PPV_start + s * T + t, -1.0);
+        for (int s = 0; s < v.nstorage; ++s) {
+          row.emplace_back(v.PSTO_OUT_start + s * T + t, -1.0);
+          row.emplace_back(v.PSTO_IN_start  + s * T + t,  1.0);
+        }
+        for (int dcl = 0; dcl < v.ndc; ++dcl) row.emplace_back(v.PDC_start + dcl * T + t, -1.0);
+        row.emplace_back(v.LOAD_SHED_start + t, -1.0);
+        row.emplace_back(v.GEN_CURT_start  + t,  1.0);
+        add_le(row, -(load_t + up_req));
+        ++n_cuts;
+      }
+      if (down_req > kEps) {
+        std::vector<std::pair<int,double>> row;
+        for (int g = 0; g < v.ng; ++g) {
+          const int h = t / iph;
+          row.emplace_back(v.IG_start + g * v.T_commit + h,
+                           std::max(0.0, inp.generators[static_cast<size_t>(g)].pmin));
+        }
+        for (int w = 0; w < v.nw; ++w) row.emplace_back(v.PW_start + w * T + t, 1.0);
+        for (int s = 0; s < v.npv; ++s) row.emplace_back(v.PPV_start + s * T + t, 1.0);
+        for (int s = 0; s < v.nstorage; ++s) {
+          row.emplace_back(v.PSTO_OUT_start + s * T + t,  1.0);
+          row.emplace_back(v.PSTO_IN_start  + s * T + t, -1.0);
+        }
+        for (int dcl = 0; dcl < v.ndc; ++dcl) row.emplace_back(v.PDC_start + dcl * T + t, 1.0);
+        row.emplace_back(v.LOAD_SHED_start + t,  1.0);
+        row.emplace_back(v.GEN_CURT_start  + t, -1.0);
+        add_le(row, load_t - down_req);
+        ++n_cuts;
+      }
+    }
+
+    // Family V: reserve deliverability covers.  These are projected cover
+    // inequalities obtained by summing reserve requirements with each unit's
+    // certified reserve capability.  They remove the continuous reserve
+    // variables from the row, so fractional commitment must already carry
+    // enough online capability at the root node.
+    for (int t = 0; t < T; ++t) {
+      double load_t = 0.0;
+      for (int d = 0; d < static_cast<int>(inp.loads.size()); ++d)
+        load_t += load_at(inp, d, t);
+      const double spin_req = cfg.spinning_reserve_req * load_t;
+      const double rup_req = cfg.regulation_up_req * load_t;
+      const double rdn_req = cfg.regulation_down_req * load_t;
+      const int h = t / iph;
+
+      auto add_reserve_cover = [&](double req, auto cap_of_unit) {
+        if (!(req > kEps)) return;
+        std::vector<std::pair<int,double>> row;
+        row.reserve(static_cast<size_t>(v.ng));
+        for (int g = 0; g < v.ng; ++g) {
+          const double cap = std::max(0.0, cap_of_unit(inp.generators[static_cast<size_t>(g)]));
+          if (cap > kEps)
+            row.emplace_back(v.IG_start + g * v.T_commit + h, -cap);
+        }
+        if (!row.empty()) {
+          add_le(row, -req);
+          ++n_cuts;
+        }
+      };
+
+      add_reserve_cover(spin_req + rup_req, [](const Generator& gen) {
+        return std::max(0.0, gen.pmax - gen.pmin);
+      });
+      add_reserve_cover(spin_req, [](const Generator& gen) {
+        return std::max(0.0, gen.pmax - gen.pmin);
+      });
+      add_reserve_cover(rup_req, [](const Generator& gen) {
+        const double headroom = std::max(0.0, gen.pmax - gen.pmin);
+        const double r10 = std::max(0.0, gen.ramp_up_mw_min * 10.0);
+        return r10 > kEps ? std::min(headroom, r10) : headroom;
+      });
+      add_reserve_cover(rdn_req, [](const Generator& gen) {
+        const double headroom = std::max(0.0, gen.pmax - gen.pmin);
+        const double r10 = std::max(0.0, gen.ramp_dn_mw_min * 10.0);
+        return r10 > kEps ? std::min(headroom, r10) : headroom;
+      });
     }
 
     // Family 11: cyclic SOC bound for storage (corrected for separate eta)
@@ -1074,10 +1957,13 @@ Formulation build_formulation(const SCUCInput& inp) {
   f.n_ineq_rows = static_cast<int>(b_vec.size());
   f.n_eq_rows   = static_cast<int>(beq_vec.size());
 
+  mip.initial_solution = build_scuc_primal_repair_seed(inp, v, lp);
+
   // UC hint for native B&C
   {
     engine::MIPModel::UCGenHint uc;
     uc.ng = v.ng; uc.T = v.T_commit;
+    uc.period_hours = cfg.period_length_hr;
     uc.pg_start = v.PG_start;
     uc.ig_start = v.IG_start; uc.su_start = v.SU_start; uc.sd_start = v.SD_start;
     uc.min_up.resize(static_cast<size_t>(v.ng));
@@ -1086,8 +1972,21 @@ Formulation build_formulation(const SCUCInput& inp) {
     uc.pmin.resize(static_cast<size_t>(v.ng));
     uc.pmax.resize(static_cast<size_t>(v.ng));
     uc.ramp.resize(static_cast<size_t>(v.ng));
+    uc.up_reserve_headroom_cap.resize(static_cast<size_t>(v.ng));
+    uc.spinning_reserve_cap.resize(static_cast<size_t>(v.ng));
+    uc.regulation_up_cap.resize(static_cast<size_t>(v.ng));
+    uc.regulation_down_cap.resize(static_cast<size_t>(v.ng));
+    const int block_size = v.ng * v.T_commit;
+    uc.ig_cols.assign(static_cast<size_t>(block_size), -1);
+    uc.su_cols.assign(static_cast<size_t>(block_size), -1);
+    uc.sd_cols.assign(static_cast<size_t>(block_size), -1);
+    if (v.T == v.T_commit) {
+      uc.pg_cols.assign(static_cast<size_t>(block_size), -1);
+    }
+    uc.gen_bus.resize(static_cast<size_t>(v.ng), -1);
     for (int g = 0; g < v.ng; ++g) {
       const auto& gen = inp.generators[static_cast<size_t>(g)];
+      uc.gen_bus[static_cast<size_t>(g)] = gen.bus;
       uc.min_up[static_cast<size_t>(g)]   = std::max(0, static_cast<int>(std::ceil(gen.min_up_time_hr)));
       uc.min_down[static_cast<size_t>(g)] = std::max(0, static_cast<int>(std::ceil(gen.min_dn_time_hr)));
       uc.ig0[static_cast<size_t>(g)] =
@@ -1096,8 +1995,93 @@ Formulation build_formulation(const SCUCInput& inp) {
       uc.pmin[static_cast<size_t>(g)] = gen.pmin;
       uc.pmax[static_cast<size_t>(g)] = gen.pmax;
       uc.ramp[static_cast<size_t>(g)] = std::max(gen.ramp_up_mw_min, gen.ramp_dn_mw_min) * 60.0 * dt;
+        const double headroom = std::max(0.0, gen.pmax - gen.pmin);
+        const double r10u = std::max(0.0, gen.ramp_up_mw_min * 10.0);
+        const double r10d = std::max(0.0, gen.ramp_dn_mw_min * 10.0);
+        uc.up_reserve_headroom_cap[static_cast<size_t>(g)] = headroom;
+        uc.spinning_reserve_cap[static_cast<size_t>(g)] = headroom;
+        uc.regulation_up_cap[static_cast<size_t>(g)] =
+          r10u > kEps ? std::min(headroom, r10u) : headroom;
+        uc.regulation_down_cap[static_cast<size_t>(g)] =
+          r10d > kEps ? std::min(headroom, r10d) : headroom;
+      for (int h = 0; h < v.T_commit; ++h) {
+        const size_t pos = static_cast<size_t>(h * v.ng + g);
+        uc.ig_cols[pos] = v.IG_start + g * v.T_commit + h;
+        uc.su_cols[pos] = v.SU_start + g * v.T_commit + h;
+        uc.sd_cols[pos] = v.SD_start + g * v.T_commit + h;
+        if (!uc.pg_cols.empty()) {
+          uc.pg_cols[pos] = v.PG_start + g * T + h;
+        }
+      }
     }
+    uc.demand.assign(static_cast<size_t>(T), 0.0);
+    uc.reserve_requirement.assign(static_cast<size_t>(T), 0.0);
+    uc.spinning_requirement.assign(static_cast<size_t>(T), 0.0);
+    uc.regulation_up_requirement.assign(static_cast<size_t>(T), 0.0);
+    uc.regulation_down_requirement.assign(static_cast<size_t>(T), 0.0);
+    for (int t = 0; t < T; ++t) {
+      double load_t = 0.0;
+      for (int d = 0; d < static_cast<int>(inp.loads.size()); ++d)
+        load_t += load_at(inp, d, t);
+      uc.demand[static_cast<size_t>(t)] = load_t;
+      uc.reserve_requirement[static_cast<size_t>(t)] =
+          (cfg.spinning_reserve_req + cfg.regulation_up_req) * load_t;
+      uc.spinning_requirement[static_cast<size_t>(t)] =
+          cfg.spinning_reserve_req * load_t;
+      uc.regulation_up_requirement[static_cast<size_t>(t)] =
+          cfg.regulation_up_req * load_t;
+      uc.regulation_down_requirement[static_cast<size_t>(t)] =
+          cfg.regulation_down_req * load_t;
+    }
+    uc.n_segments = v.n_segments;
+    uc.segment_cols.assign(static_cast<size_t>(v.ng * v.T_commit * v.n_segments), -1);
+    uc.segment_cap.assign(static_cast<size_t>(v.ng * v.n_segments), 0.0);
+    if (v.T == v.T_commit) {
+      for (int t = 0; t < T; ++t) {
+        for (int g = 0; g < v.ng; ++g) {
+          const auto& gen = inp.generators[static_cast<size_t>(g)];
+          for (int k = 0; k < v.n_segments; ++k) {
+            const size_t pos = static_cast<size_t>((t * v.ng + g) * v.n_segments + k);
+            uc.segment_cols[pos] = v.SEG_start[static_cast<size_t>(k)] + g * T + t;
+            if (k < static_cast<int>(gen.bid_segments.size())) {
+              uc.segment_cap[static_cast<size_t>(g * v.n_segments + k)] =
+                  std::max(0.0, gen.bid_segments[static_cast<size_t>(k)].quantity);
+            }
+          }
+        }
+      }
+    }
+    uc.certifies_power_balance_rows = true;
+    uc.certifies_generation_capacity_rows = true;
+    uc.certifies_ramping_rows = true;
+    uc.certifies_min_up_down_rows = true;
+    uc.certifies_segment_bound_rows = true;
+    uc.certifies_system_reserve_rows = true;
+    uc.certifies_storage_cycle_rows = (v.nstorage > 0);
     mip.uc_hint = std::move(uc);
+  }
+
+  // [Improvement (7)]: per-variable branching priorities for HiGHS/native B&B.
+  // The UC state variable u(g,t) drives capacity, ramping, reserve, and the
+  // min-up/down transition logic, so it gets the highest structural priority.
+  // Startup/shutdown binaries encode transitions and are prioritized next.
+  // Within each class, earlier periods dominate later periods.
+  {
+    const int n_vars = static_cast<int>(v.nx);
+    const int T_c = v.T_commit;
+    const int class_stride = T_c + 1;
+    mip.branching_priority.assign(static_cast<size_t>(n_vars), 0);
+    for (int g = 0; g < v.ng; ++g) {
+      for (int t = 0; t < T_c; ++t) {
+        const int time_prio = T_c - t;   // t=0 -> highest within class
+        mip.branching_priority[static_cast<size_t>(v.IG_start + g * T_c + t)] =
+            3 * class_stride + time_prio;
+        mip.branching_priority[static_cast<size_t>(v.SU_start + g * T_c + t)] =
+            2 * class_stride + time_prio;
+        mip.branching_priority[static_cast<size_t>(v.SD_start + g * T_c + t)] =
+            2 * class_stride + time_prio;
+      }
+    }
   }
 
   return f;
@@ -1606,6 +2590,7 @@ SCUCInput scuc_from_json(const std::string& json_str) {
     gs("vocc",                      inp.config.vocc);
     gs("renewable_min_output_coeff",inp.config.renewable_min_output_coeff);
     gs("enable_market_cuts",        inp.config.enable_market_cuts);
+    gs("enable_primal_repair",      inp.config.enable_primal_repair);
     gs("M1_line_slack_penalty",            inp.config.M1_line_slack_penalty);
     gs("M2_renewable_curtail_penalty",      inp.config.M2_renewable_curtail_penalty);
     gs("neg_reserve_req",                   inp.config.neg_reserve_req);

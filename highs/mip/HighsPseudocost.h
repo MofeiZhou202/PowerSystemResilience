@@ -43,6 +43,8 @@ struct HighsPseudocostInitialization {
   int64_t nsamplestotal;
   int64_t ninferencestotal;
 
+  HighsPseudocostInitialization() = default;
+
   HighsPseudocostInitialization(const HighsPseudocost& pscost,
                                 HighsInt maxCount);
   HighsPseudocostInitialization(

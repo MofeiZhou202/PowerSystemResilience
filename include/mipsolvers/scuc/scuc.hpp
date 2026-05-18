@@ -207,6 +207,10 @@ struct SCUCConfig {
   /// Add LP-valid pre-formulation cutting planes to SCUC
   bool enable_market_cuts{true};
 
+  /// Build a UC-specific commitment seed and let the MILP backend repair the
+  /// continuous dispatch before branch-and-bound.
+  bool enable_primal_repair{true};
+
   /// Big-M penalty for line/section flow slack variables (§2.6.3.14–2.6.3.15)
   double M1_line_slack_penalty{1.0e5};
 

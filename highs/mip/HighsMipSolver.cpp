@@ -174,7 +174,8 @@ restart:
       return;
     }
     // Apply the feasibility jump heuristic (if enabled)
-    if (options_mip_->mip_heuristic_run_feasibility_jump) {
+    if (!hacdcpf_skip_primal_heuristics &&
+      options_mip_->mip_heuristic_run_feasibility_jump) {
       analysis_.mipTimerStart(kMipClockFeasibilityJump);
       HighsModelStatus returned_model_status = mipdata_->feasibilityJump();
       analysis_.mipTimerStop(kMipClockFeasibilityJump);
@@ -251,6 +252,7 @@ restart:
   double upperLimLastCheck = mipdata_->upper_limit;
   double lowerBoundLastCheck = mipdata_->lower_bound;
   analysis_.mipTimerStart(kMipClockSearch);
+  HighsInt hacdcpf_dive_submip_heuristic_calls = 0;
   while (search.hasNode()) {
     // Possibly query existence of an external solution
     if (!submip)
@@ -288,7 +290,7 @@ restart:
         if (search.currentNodePruned()) {
           ++mipdata_->num_leaves;
           search.flushStatistics();
-        } else {
+        } else if (!hacdcpf_skip_primal_heuristics) {
           analysis_.mipTimerStart(kMipClockDivePrimalHeuristics);
           if (mipdata_->incumbent.empty()) {
             analysis_.mipTimerStart(kMipClockDiveRandomizedRounding);
@@ -297,15 +299,26 @@ restart:
             analysis_.mipTimerStop(kMipClockDiveRandomizedRounding);
           }
 
+          auto hacdcpfDiveSubMipHeuristicAllowed = [&]() {
+            return !hacdcpf_skip_dive_submip_heuristics &&
+                   (hacdcpf_dive_submip_heuristic_limit < 0 ||
+                    hacdcpf_dive_submip_heuristic_calls <
+                        hacdcpf_dive_submip_heuristic_limit);
+          };
+
           if (mipdata_->incumbent.empty()) {
-            if (options_mip_->mip_heuristic_run_rens) {
+            if (hacdcpfDiveSubMipHeuristicAllowed() &&
+                options_mip_->mip_heuristic_run_rens) {
+              ++hacdcpf_dive_submip_heuristic_calls;
               analysis_.mipTimerStart(kMipClockDiveRens);
               mipdata_->heuristics.RENS(
                   mipdata_->lp.getLpSolver().getSolution().col_value);
               analysis_.mipTimerStop(kMipClockDiveRens);
             }
           } else {
-            if (options_mip_->mip_heuristic_run_rins) {
+            if (hacdcpfDiveSubMipHeuristicAllowed() &&
+                options_mip_->mip_heuristic_run_rins) {
+              ++hacdcpf_dive_submip_heuristic_calls;
               analysis_.mipTimerStart(kMipClockDiveRins);
               mipdata_->heuristics.RINS(
                   mipdata_->lp.getLpSolver().getSolution().col_value);

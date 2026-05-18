@@ -13,6 +13,70 @@
 
 #include "mipsolvers/engine/bc/enums.hpp"
 
+#include <memory>
+#include <vector>
+
+namespace mipsolvers::engine {
+
+/// \brief Root cut pool for warm-starting HiGHS MIP solves on repeated
+/// solves of the same (or structurally identical) problem.
+///
+/// All column indices are in the **original** (pre-presolve) LP column space
+/// of the model passed to HiGHS.  Each row i represents:
+///   lower[i] <= sum_{k=start[i]}^{start[i+1]-1} value[k] * x[index[k]] <= upper[i]
+/// Use -kInf / +kInf (e.g. -1e30 / 1e30) for one-sided constraints.
+struct BCRootCuts {
+  std::vector<int>    start;   ///< row starts, size = n_cuts+1
+  std::vector<int>    index;   ///< original column indices
+  std::vector<double> value;   ///< coefficients rescaled to original space
+  std::vector<double> lower;   ///< row lower bounds (-1e30 for pure ≤ cuts)
+  std::vector<double> upper;   ///< row upper bounds (+1e30 for pure ≥ cuts)
+  int  numCuts() const { return static_cast<int>(lower.size()); }
+  bool empty()   const { return lower.empty(); }
+};
+
+/// \brief Original-space root simplex basis matching a BCRootCuts warm-start.
+///
+/// Status codes use HiGHSBasisStatus integer values, but this struct stays
+/// independent of HiGHS headers so BCOptions remains a lightweight API type.
+/// row_status covers the original model rows followed by the injected root-cut
+/// rows in BCRootCuts order.
+struct BCRootBasis {
+  std::vector<int> col_status;
+  std::vector<int> row_status;
+  bool valid{false};
+  bool empty() const { return !valid || col_status.empty() || row_status.empty(); }
+};
+
+/// \brief Pseudocost initialization for warm-starting branching decisions on
+/// repeated solves of the same (or structurally identical) problem.
+///
+/// All arrays are in the **original** (pre-presolve) LP column space.
+/// Populated by BCResult::highs_pseudocost_init after a solve; pass as
+/// BCOptions::highs_pseudocost_warm_start to the next solve to seed the
+/// HiGHS pseudocost table with data learned during the previous B&B.
+struct BCPseudocostInit {
+  std::vector<double> pseudocostup;
+  std::vector<double> pseudocostdown;
+  std::vector<int>    nsamplesup;
+  std::vector<int>    nsamplesdown;
+  std::vector<double> inferencesup;
+  std::vector<double> inferencesdown;
+  std::vector<int>    ninferencesup;
+  std::vector<int>    ninferencesdown;
+  std::vector<double> conflictscoreup;
+  std::vector<double> conflictscoredown;
+  double  cost_total{0.0};
+  double  inferences_total{0.0};
+  double  conflict_avg_score{0.0};
+  int64_t nsamplestotal{0};
+  int64_t ninferencestotal{0};
+  int     n_orig_cols{0};   ///< Number of original LP columns (for validation)
+  bool empty() const { return pseudocostup.empty(); }
+};
+
+}  // namespace mipsolvers::engine
+
 namespace mipsolvers::engine {
 
 /// Option bundle for the branch-and-cut algorithm.
@@ -524,6 +588,51 @@ struct BCOptions {
   /// the node budget, returning the best incumbent instead of timing out.
   int highs_mip_max_stall_nodes{0};
 
+  /// [K1] Improvement (1): Extra HiGHS primal heuristics.
+  /// ZI-Round and Shifting are cheap rounding heuristics that HiGHS disables
+  /// by default but that frequently find good UC incumbents quickly.  They
+  /// share the LP relaxation with the rest of root processing, so the cost is
+  /// dominated by a few rounding passes per heuristic call.
+  ///   highs_mip_run_zi_round: maps to HiGHS option mip_heuristic_run_zi_round.
+  ///   highs_mip_run_shifting: maps to HiGHS option mip_heuristic_run_shifting.
+  /// Both default to false here to preserve the previous strict-HiGHS contract;
+  /// make_strict_highs_production_options() turns them on for the production
+  /// StrictHiGHS adapter.
+  bool highs_mip_run_zi_round{false};
+  bool highs_mip_run_shifting{false};
+
+  /// [K2] Improvement (1): Cutpool size knobs.  0 leaves HiGHS' defaults in
+  /// place (mip_pool_age_limit=30, mip_pool_soft_limit=10000).  Non-zero
+  /// values are passed through.  Use for very degenerate UC LPs where the
+  /// default cutpool size is too small to retain effective MIR/cover cuts
+  /// across the deep tree.
+  int highs_mip_pool_age_limit{0};
+  int highs_mip_pool_soft_limit{0};
+
+  /// [K3] Improvement (2): Force HiGHS presolve to "on" (instead of
+  /// "choose") for the StrictHiGHS path, and raise the substitution maxfillin
+  /// threshold so degenerate UC blocks have more room to collapse.  These
+  /// knobs trade a slightly longer root-presolve wall time for a tighter LP
+  /// relaxation and stronger dual bound progression in the tree.
+  ///   highs_force_presolve_on:               maps to HiGHS option presolve="on".
+  ///   highs_presolve_substitution_maxfillin: maps to HiGHS option
+  ///       presolve_substitution_maxfillin.  0 leaves the HiGHS default (10).
+  /// Defaults preserve previous behaviour; make_strict_highs_production_options()
+  /// turns them on for the production StrictHiGHS adapter.
+  bool highs_force_presolve_on{false};
+  int highs_presolve_substitution_maxfillin{0};
+
+  /// [K4] Improvement (3): Dual-side knobs.  Raising mip_lp_age_limit keeps
+  /// dynamic LP cuts in the relaxation for more node visits, tightening the
+  /// per-node LP and propagating cuts across more of the tree before the
+  /// pool deletion sweep.  Enabling mip_detect_symmetry turns on HiGHS' Nauty
+  /// detection so UC time-shift symmetries between identical generators are
+  /// folded out of the search tree.
+  ///   highs_mip_lp_age_limit: maps to HiGHS option mip_lp_age_limit
+  ///       (HiGHS default = 10).  0 means "leave HiGHS default".
+  /// (Symmetry detection has its own boolean above: highs_mip_detect_symmetry.)
+  int highs_mip_lp_age_limit{0};
+
   /// [I] LP solver for the MIP root-node LP relaxation (maps to HiGHS
   /// mip_lp_solver).  When no basis is available (root node), HiGHS routes
   /// the solve as follows:
@@ -633,6 +742,32 @@ struct BCOptions {
   // Internal: recursive sub-MIP flag
   // ═══════════════════════════════════════════════════════════════════════
   bool _is_stage3_submip{false};
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // [K6] Root cut warm-start
+  // ═══════════════════════════════════════════════════════════════════════
+  /// When non-null, inject these pre-computed root cuts into the HiGHS model
+  /// before calling Highs::run().  The cuts come from a previous solve of the
+  /// same (or structurally identical) problem and are in the **original** LP
+  /// column space (see BCRootCuts).  HiGHS presolve processes them normally;
+  /// cuts that are made redundant by bounds are dropped, while tight cuts
+  /// carry over and let HiGHS skip most of the root cutting loop, saving
+  /// ~40s on large UC instances.
+  std::shared_ptr<const BCRootCuts> highs_root_cut_warm_start;
+  /// Optional simplex basis paired with highs_root_cut_warm_start.  When the
+  /// row count matches the HiGHS model after cut injection, HiGHS maps this
+  /// original-space basis through presolve and starts the augmented root LP
+  /// from a warm vertex instead of a crash basis.
+  std::shared_ptr<const BCRootBasis> highs_root_basis_warm_start;
+  /// When >0, cap the number of HiGHS root-node cut separation rounds.
+  /// Automatically set to 50 when highs_root_cut_warm_start is non-null
+  /// and this field is 0 (i.e. not explicitly overridden).
+  int highs_max_root_sepa_rounds{0};
+  /// When non-null, seed the HiGHS pseudocost table with branching data
+  /// learned during a previous solve of the same (or structurally identical)
+  /// problem.  This lets the warm run make near-optimal branching decisions
+  /// from the very first node, rather than spending ~50 nodes learning them.
+  std::shared_ptr<const BCPseudocostInit> highs_pseudocost_warm_start;
 
   // ═══════════════════════════════════════════════════════════════════════
   // High-performance auto-tuning knobs (2026-Q2)

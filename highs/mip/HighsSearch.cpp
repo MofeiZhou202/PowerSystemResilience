@@ -405,6 +405,7 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
     double bestscore = -1.0;
     double bestnodes = -1.0;
     int64_t bestnumnodes = 0;
+    HighsInt bestprio = 0;  // [HACDCP (7)] priority of current best candidate
 
     double oldminscore = minScore;
     for (HighsInt k : evalqueue) {
@@ -438,14 +439,27 @@ HighsInt HighsSearch::selectBranchingCandidate(int64_t maxSbIters,
       if (upnodes != 0 || downnodes != 0)
         nodes =
             (downnodes / (double)(numnodes)) * (upnodes / (double)(numnodes));
-      if (score > bestscore ||
+
+      // [HACDCP improvement (7)]: look up branching priority for this column
+      const HighsInt col_k = fracints[k].first;
+      const HighsInt col_prio_k =
+          col_k < static_cast<HighsInt>(
+                      mipsolver.mipdata_->col_branch_priority_.size())
+              ? mipsolver.mipdata_->col_branch_priority_[
+                    static_cast<size_t>(col_k)]
+              : 0;
+
+        if (col_prio_k > bestprio ||
+          (col_prio_k == bestprio &&
+           (score > bestscore ||
           (score > bestscore - mipsolver.mipdata_->feastol &&
            std::make_pair(nodes, numnodes) >
-               std::make_pair(bestnodes, bestnumnodes))) {
+             std::make_pair(bestnodes, bestnumnodes))))) {
         bestscore = score;
         best = k;
         bestnodes = nodes;
         bestnumnodes = numnodes;
+        bestprio = col_prio_k;
       }
     }
 

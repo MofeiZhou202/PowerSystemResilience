@@ -64,6 +64,30 @@ class HighsMipSolver {
   const HighsPseudocostInitialization* pscostinit;
   const HighsCliqueTable* clqtableinit;
   const HighsImplications* implicinit;
+  /// Per-column branching priorities in the original (pre-presolve) column
+  /// space.  Higher value = branch first.  Empty = all equal priority.
+  /// Set via Highs::hacdcpfSetColBranchingPriorities before run().
+  std::vector<HighsInt> col_branch_priority;
+
+  /// When true, skip the analytic-center IPM computation at the root node.
+  /// Set via Highs::hacdcpfSetSkipAnalyticCenter before run().
+  bool hacdcpf_skip_analytic_center = false;
+
+  /// When true, skip LP-based primal heuristics for warm incumbent re-solves.
+  /// Set via Highs::hacdcpfSetSkipPrimalHeuristics before run().
+  bool hacdcpf_skip_primal_heuristics = false;
+
+  /// When true, skip only dive-loop RENS/RINS sub-MIP heuristics.
+  /// Set via Highs::hacdcpfSetSkipDiveSubMipHeuristics before run().
+  bool hacdcpf_skip_dive_submip_heuristics = false;
+
+  /// Maximum number of dive-loop RENS/RINS calls; negative = no limit.
+  /// Set via Highs::hacdcpfSetDiveSubMipHeuristicLimit before run().
+  HighsInt hacdcpf_dive_submip_heuristic_limit = -1;
+
+  /// Maximum nodes inside primal-heuristic sub-MIPs; negative = no limit.
+  /// Set via Highs::hacdcpfSetHeuristicSubMipNodeLimit before run().
+  HighsInt hacdcpf_heuristic_submip_node_limit = -1;
 
   std::unique_ptr<HighsMipSolverData> mipdata_;
 

@@ -28,18 +28,15 @@ double directional_branch_cost(const PseudoCost& pseudocost,
 
 double pseudocost_branch_score(int j,
                                const Eigen::VectorXd& x,
-                               const std::vector<PseudoCost>& pc,
-                               const std::vector<int>* priority = nullptr) {
+                               const std::vector<PseudoCost>& pc) {
   const double frac = x[j] - std::floor(x[j]);
   const double qd = directional_branch_cost(pc[j], frac, false);
   const double qu = directional_branch_cost(pc[j], 1.0 - frac, true);
-  double score = qd * qu;
+  return qd * qu;
+}
 
-  if (priority) {
-    const int pri = (j < static_cast<int>(priority->size())) ? (*priority)[j] : 0;
-    if (pri > 0) score *= std::sqrt(static_cast<double>(pri + 1));
-  }
-  return score;
+int branch_priority_value(int j, const std::vector<int>& priority) {
+  return (j >= 0 && j < static_cast<int>(priority.size())) ? priority[j] : 0;
 }
 
 }  // namespace
@@ -48,7 +45,8 @@ double compute_branch_var_score(int j,
                                 const Eigen::VectorXd& x,
                                 const std::vector<PseudoCost>& pc,
                                 const std::vector<int>* priority) {
-  return pseudocost_branch_score(j, x, pc, priority);
+  (void)priority;
+  return pseudocost_branch_score(j, x, pc);
 }
 
 int choose_branch_var_most_infeasible(const std::vector<int>& cand,
@@ -88,11 +86,14 @@ int choose_branch_var_pseudocost(const std::vector<int>& cand,
   if (priority.empty()) return choose_branch_var_pseudocost(cand, x, pc);
   int best = cand.front();
   double best_score = -1.0;
+  int best_priority = branch_priority_value(best, priority);
   for (int j : cand) {
-    const double score = pseudocost_branch_score(j, x, pc, &priority);
-    if (score > best_score) {
+    const int prio = branch_priority_value(j, priority);
+    const double score = pseudocost_branch_score(j, x, pc);
+    if (prio > best_priority || (prio == best_priority && score > best_score)) {
       best_score = score;
       best = j;
+      best_priority = prio;
     }
   }
   return best;

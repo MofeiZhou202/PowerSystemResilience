@@ -1753,7 +1753,14 @@ HighsLpRelaxation::Status HighsLpRelaxation::run(bool resolve_on_error) {
                0.0);
   lpsolver.setOptionValue("time_limit", this_time_limit);
   // lpsolver.setOptionValue("output_flag", true);
-  const bool valid_basis = lpsolver.getBasis().valid;
+  // MIPSOLVERS_IPM_ALL_NODES=1: force IPM at every B&B node regardless of
+  // whether a warm basis is available.  Used for empirical per-node IPM
+  // timing experiments.  Checked dynamically so setenv/unsetenv from the
+  // benchmark runner takes effect per-run.
+  const bool ipm_all_nodes_override =
+      (std::getenv("MIPSOLVERS_IPM_ALL_NODES") != nullptr);
+  const bool valid_basis =
+      ipm_all_nodes_override ? false : lpsolver.getBasis().valid;
 
   if (mipsolver.analysis_.analyse_mip_time && !mipsolver.submip &&
       !this->solved_first_lp) {
