@@ -115,3 +115,9 @@ reports/study_contracts/results/*
 !.github/workflows/ci.yml
 
 .idea/
+
+LearningtoOptimize/
+
+.github/
+
+._deps/
