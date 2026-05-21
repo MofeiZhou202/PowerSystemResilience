@@ -390,12 +390,7 @@ SolveResult NativeNLPAdapter::solve_nlp(const NLPModel& prob) const {
   return out;
 }
 
-NativeBranchAndCutAdapter::NativeBranchAndCutAdapter(BCOptions opt) : opt_(opt) {
-  // The vendored HiGHS LP kernel is always active in the deployed Native B&C
-  // adapter.  Any caller-supplied BCOptions value for use_vendored_highs_lp_kernel
-  // is overridden here so that the deployment contract is unconditional.
-  opt_.use_vendored_highs_lp_kernel = true;
-}
+NativeBranchAndCutAdapter::NativeBranchAndCutAdapter(BCOptions opt) : opt_(std::move(opt)) {}
 
 BCOptions make_strict_highs_production_options(BCOptions opt) {
   opt.use_vendored_highs_lp_kernel = true;

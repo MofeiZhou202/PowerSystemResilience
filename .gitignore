@@ -64,9 +64,6 @@ cmake_install.cmake
 *.sublime-project
 *.sublime-workspace
 
-# benchmark results
-benchmark/
-
 # AGI
 .claude/
 

@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -2070,7 +2071,903 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob) const {
 // ---------------------------------------------------------------------------
 #ifdef HACDCPF_HAVE_GUROBI
 #include "gurobi_c.h"
-#endif
+
+namespace {
+
+// Per-solve context passed to the Gurobi MIP callback for dynamic cut injection.
+struct GurobiScucCutData {
+  int n{0};                              // total variable count
+  const MIPModel::UCGenHint* uc{nullptr}; // SCUC structural hints
+  double pair_floor{0.05};              // min fractional value to trigger cut check
+  int max_cuts_per_call{256};           // cap on cuts injected per MIPNODE event
+  int total_cuts_added{0};             // accumulator reported in SolveStats
+  bool enable_dynamic_cuts{true};       // false when callback is diagnostics-only
+  bool separate_network{false};         // add PTDF rows through lazy/user cuts
+  double network_cut_tol{1e-6};
+  int max_network_user_cuts_per_call{128};
+  int max_network_lazy_cuts_per_call{4096};
+  int network_user_cuts_added{0};
+  int network_lazy_cuts_added{0};
+  std::vector<unsigned char> network_user_cut_seen;
+  std::vector<unsigned char> network_lazy_cut_seen;
+  bool analyze_gap{false};              // emit one relaxation violation report
+  bool analyze_done{false};
+  double analyze_gap_trigger{0.014};    // default: sample near the observed 1.35% gap
+  int analyze_top{20};
+};
+
+struct ScucNetworkCutCandidate {
+  int row{-1};
+  double violation{0.0};
+};
+
+struct ScucRelaxationViolation {
+  std::string family;
+  double violation{0.0};
+  int g{-1};
+  int t{-1};
+  int aux{-1};
+  double lhs{0.0};
+  double rhs{0.0};
+};
+
+struct ScucRelaxationSummary {
+  int count{0};
+  double max_violation{0.0};
+  double sum_violation{0.0};
+};
+
+struct ScucCoverItem {
+  int g{-1};
+  double weight{0.0};
+  double z_value{0.0};
+  bool complemented{false};
+  bool s_class{false};
+};
+
+struct ScucPtdfRowCandidate {
+  int line{-1};
+  int direction{0};
+  double rhs{0.0};
+  double slack{0.0};
+  std::vector<double> coeff;
+};
+
+static int scuc_col(const std::vector<int>& cols, int ng, int T, int g, int t) {
+  if (g < 0 || g >= ng || t < 0 || t >= T) return -1;
+  const auto pos = static_cast<std::size_t>(t * ng + g);
+  return pos < cols.size() ? cols[pos] : -1;
+}
+
+static double scuc_val(const std::vector<double>& sol, int col) {
+  if (col < 0 || col >= static_cast<int>(sol.size())) return 0.0;
+  return sol[static_cast<std::size_t>(col)];
+}
+
+static void record_scuc_relaxation_violation(
+    std::vector<ScucRelaxationViolation>& top,
+    std::map<std::string, ScucRelaxationSummary>& summary,
+    const std::string& family,
+    double violation,
+    int g,
+    int t,
+    int aux,
+    double lhs,
+    double rhs) {
+  constexpr double kTol = 1e-6;
+  if (!(violation > kTol)) return;
+  auto& s = summary[family];
+  ++s.count;
+  s.max_violation = std::max(s.max_violation, violation);
+  s.sum_violation += violation;
+  top.push_back({family, violation, g, t, aux, lhs, rhs});
+}
+
+static void analyze_scuc_relaxation_at_gap(
+    const MIPModel::UCGenHint& uc,
+    const std::vector<double>& sol,
+    double incumbent,
+    double bound,
+    double rel_gap,
+    double runtime,
+    double node_count,
+    int top_limit) {
+  const int ng = uc.ng;
+  const int T = uc.T;
+  if (ng <= 0 || T <= 0) return;
+
+  std::vector<ScucRelaxationViolation> top;
+  std::map<std::string, ScucRelaxationSummary> summary;
+
+  auto get_ig = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.ig_cols, ng, T, g, t));
+  };
+  auto get_su = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.su_cols, ng, T, g, t));
+  };
+  auto get_sd = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.sd_cols, ng, T, g, t));
+  };
+  auto get_pg = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.pg_cols, ng, T, g, t));
+  };
+  auto record = [&](const std::string& family, double lhs, double rhs,
+                    int g, int t, int aux = -1) {
+    record_scuc_relaxation_violation(top, summary, family, lhs - rhs,
+                                     g, t, aux, lhs, rhs);
+  };
+  auto record_violation = [&](const std::string& family, double violation,
+                              int g, int t, int aux, double lhs, double rhs) {
+    record_scuc_relaxation_violation(top, summary, family, violation,
+                                     g, t, aux, lhs, rhs);
+  };
+  auto record_fractional = [&](const std::string& family, double value,
+                               int g, int t) {
+    const double rounded = (value >= 0.5) ? 1.0 : 0.0;
+    const double frac = std::abs(value - rounded);
+    record_scuc_relaxation_violation(top, summary, family, frac,
+                                     g, t, -1, value, rounded);
+  };
+  auto frac_distance = [](double value) {
+    const double rounded = (value >= 0.5) ? 1.0 : 0.0;
+    return std::abs(value - rounded);
+  };
+  auto pmax_tier = [](double pmax) {
+    return (pmax > 600.0) ? 6
+         : (pmax > 500.0) ? 5
+         : (pmax > 400.0) ? 4
+         : (pmax > 250.0) ? 3
+         : (pmax > 150.0) ? 2
+         : (pmax > 100.0) ? 1
+         : 0;
+  };
+  const char* tier_label[7] = {
+      "<=100", "100-150", "150-250", "250-400", "400-500", "500-600", ">600"};
+  std::vector<double> gen_ig_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_su_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_sd_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_u_sum(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> time_ig_frac(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_u_sum(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_pmin_u(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_pmax_u(static_cast<std::size_t>(T), 0.0);
+  int tier_count[7] = {0, 0, 0, 0, 0, 0, 0};
+  double tier_ig_frac[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double tier_u_sum[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double tier_pmax_u[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  int s_group_id = -1;
+  int s_group_size = 0;
+  if (uc.identical_group_count > 0 &&
+      uc.group_member_start.size() >= static_cast<std::size_t>(uc.identical_group_count + 1) &&
+      uc.group_is_s_class.size() >= static_cast<std::size_t>(uc.identical_group_count)) {
+    for (int q = 0; q < uc.identical_group_count; ++q) {
+      if (uc.group_is_s_class[static_cast<std::size_t>(q)] == 0) continue;
+      const int begin = uc.group_member_start[static_cast<std::size_t>(q)];
+      const int end = uc.group_member_start[static_cast<std::size_t>(q + 1)];
+      const int size = std::max(0, end - begin);
+      if (size > s_group_size) {
+        s_group_id = q;
+        s_group_size = size;
+      }
+    }
+  }
+
+  // Binary fractionality is not a valid cut by itself, but it tells us where
+  // the relaxation is escaping the commitment polytope at the sampled gap.
+  for (int g = 0; g < ng; ++g) {
+    const double pmin = uc.pmin.size() > static_cast<std::size_t>(g)
+                            ? std::max(0.0, uc.pmin[static_cast<std::size_t>(g)]) : 0.0;
+    const double pmax = uc.pmax.size() > static_cast<std::size_t>(g)
+                            ? std::max(0.0, uc.pmax[static_cast<std::size_t>(g)]) : 0.0;
+    const int tier = pmax_tier(pmax);
+    if (tier >= 0 && tier < 7) ++tier_count[tier];
+    for (int t = 0; t < T; ++t) {
+      const double u = get_ig(g, t);
+      const double su = get_su(g, t);
+      const double sd = get_sd(g, t);
+      const double ig_frac = frac_distance(u);
+      const double su_frac = frac_distance(su);
+      const double sd_frac = frac_distance(sd);
+      gen_ig_frac[static_cast<std::size_t>(g)] += ig_frac;
+      gen_su_frac[static_cast<std::size_t>(g)] += su_frac;
+      gen_sd_frac[static_cast<std::size_t>(g)] += sd_frac;
+      gen_u_sum[static_cast<std::size_t>(g)] += u;
+      time_ig_frac[static_cast<std::size_t>(t)] += ig_frac;
+      time_u_sum[static_cast<std::size_t>(t)] += u;
+      time_pmin_u[static_cast<std::size_t>(t)] += pmin * u;
+      time_pmax_u[static_cast<std::size_t>(t)] += pmax * u;
+      if (tier >= 0 && tier < 7) {
+        tier_ig_frac[tier] += ig_frac;
+        tier_u_sum[tier] += u;
+        tier_pmax_u[tier] += pmax * u;
+      }
+      record_fractional("fractional_IG", u, g, t);
+      record_fractional("fractional_SU", su, g, t);
+      record_fractional("fractional_SD", sd, g, t);
+    }
+  }
+
+  // Family T (transition hull), currently disabled for large UC instances.
+  if (uc.ig_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.su_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.sd_cols.size() >= static_cast<std::size_t>(ng * T)) {
+    for (int g = 0; g < ng; ++g) {
+      const double ig0 =
+          (uc.ig0.size() > static_cast<std::size_t>(g) && uc.ig0[static_cast<std::size_t>(g)] != 0)
+              ? 1.0 : 0.0;
+      for (int t = 0; t < T; ++t) {
+        const double u = get_ig(g, t);
+        const double su = get_su(g, t);
+        const double sd = get_sd(g, t);
+        record("T:SU<=IG", su, u, g, t);
+        record("T:SD<=1-IG", sd + u, 1.0, g, t);
+        if (t == 0) {
+          record("T:SU<=1-IG0", su, 1.0 - ig0, g, t);
+          record("T:SD<=IG0", sd, ig0, g, t);
+        } else {
+          const double up = get_ig(g, t - 1);
+          record("T:SU+IGprev<=1", su + up, 1.0, g, t);
+          record("T:SD<=IGprev", sd, up, g, t);
+        }
+      }
+    }
+  }
+
+  // Pairwise SU/SD conflict rows should already be present in the tight Gurobi
+  // path.  Keeping them in the report is a quick sanity check that the sampled
+  // relaxation is not escaping already-added min-up/down user cuts.
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+      uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      if (mu > 1) {
+        for (int t1 = 0; t1 < T; ++t1) {
+          const double su = get_su(g, t1);
+          for (int t2 = t1 + 1; t2 <= std::min(T - 1, t1 + mu - 1); ++t2)
+            record("H:SU+SD<=1", su + get_sd(g, t2), 1.0, g, t1, t2);
+        }
+      }
+      if (md > 1) {
+        for (int t1 = 0; t1 < T; ++t1) {
+          const double sd = get_sd(g, t1);
+          for (int t2 = t1 + 1; t2 <= std::min(T - 1, t1 + md - 1); ++t2)
+            record("H:SD+SU<=1", sd + get_su(g, t2), 1.0, g, t1, t2);
+        }
+      }
+    }
+  }
+
+  // Ramp-perspective and multi-lag startup/shutdown capacity cuts, using the
+  // conservative ramp value available in UCGenHint.  These are valid but weaker
+  // than a direction-specific test if ramp-up and ramp-down differ.
+  if (!uc.pg_cols.empty() && uc.pg_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.pmax.size() >= static_cast<std::size_t>(ng) &&
+      uc.pmin.size() >= static_cast<std::size_t>(ng) &&
+      uc.ramp.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng; ++g) {
+      const double pmax = std::max(0.0, uc.pmax[static_cast<std::size_t>(g)]);
+      const double pmin = std::max(0.0, uc.pmin[static_cast<std::size_t>(g)]);
+      const double ramp = std::min(pmax, std::max(0.0, uc.ramp[static_cast<std::size_t>(g)]));
+      if (!(pmax > 1e-9)) continue;
+      const double su_cap = std::min(pmax, pmin + ramp);
+      const double sd_cap = std::min(pmax, pmin + ramp);
+      for (int t = 1; t < T; ++t) {
+        const double pg = get_pg(g, t);
+        const double pg_prev = get_pg(g, t - 1);
+        record("R:up_perspective", pg - pg_prev, ramp * get_ig(g, t - 1) + su_cap * get_su(g, t), g, t);
+        record("R:down_perspective", pg_prev - pg, ramp * get_ig(g, t) + sd_cap * get_sd(g, t), g, t);
+      }
+
+      const int tu = uc.min_up.size() > static_cast<std::size_t>(g)
+                         ? uc.min_up[static_cast<std::size_t>(g)] : 0;
+      const int td = uc.min_down.size() > static_cast<std::size_t>(g)
+                         ? uc.min_down[static_cast<std::size_t>(g)] : 0;
+      for (int k = 1; k <= std::min(std::max(0, tu - 1), 8); ++k) {
+        const double excess = pmax - pmin - static_cast<double>(k) * ramp;
+        if (!(excess > 1e-9)) break;
+        for (int t = k - 1; t < T; ++t) {
+          const int su_t = t - k + 1;
+          record("P:startup_multilag", get_pg(g, t) + excess * get_su(g, su_t),
+                 pmax * get_ig(g, t), g, t, k);
+        }
+      }
+      for (int k = 1; k <= std::min(std::max(0, td - 1), 8); ++k) {
+        const double excess = pmax - pmin - static_cast<double>(k) * ramp;
+        if (!(excess > 1e-9)) break;
+        for (int t = 0; t + k < T; ++t) {
+          const int sd_t = t + k;
+          record("Q:shutdown_multilag", get_pg(g, t) + excess * get_sd(g, sd_t),
+                 pmax * get_ig(g, t), g, t, k);
+        }
+      }
+    }
+  }
+
+  // Full-density Family C check.  The production cut currently drops small
+  // positive coefficients below 1 MW; violations here measure whether those
+  // dropped valid terms still matter at the sampled relaxation.
+  if (uc.certifies_hard_network_flow_rows && uc.network_line_count > 0 &&
+      !uc.line_gsf.empty() && !uc.line_fwd_rhs.empty() && !uc.line_rev_rhs.empty() &&
+      uc.pmin.size() >= static_cast<std::size_t>(ng) &&
+      uc.pmax.size() >= static_cast<std::size_t>(ng)) {
+    const int nl = uc.network_line_count;
+    for (int l = 0; l < nl; ++l) {
+      for (int t = 0; t < T; ++t) {
+        const double fwd_rhs = uc.line_fwd_rhs[static_cast<std::size_t>(l * T + t)];
+        const double rev_rhs = uc.line_rev_rhs[static_cast<std::size_t>(l * T + t)];
+        if (fwd_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double gsf = uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            if (std::abs(gsf) < 1e-10) continue;
+            const double coeff = (gsf > 0.0 ? gsf * uc.pmin[static_cast<std::size_t>(g)]
+                                            : gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += coeff * get_ig(g, t);
+          }
+          record("C_full:fwd", lhs, fwd_rhs, -1, t, l);
+        }
+        if (rev_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double neg_gsf = -uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            if (std::abs(neg_gsf) < 1e-10) continue;
+            const double coeff = (neg_gsf > 0.0 ? neg_gsf * uc.pmin[static_cast<std::size_t>(g)]
+                                                : neg_gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += coeff * get_ig(g, t);
+          }
+          record("C_full:rev", lhs, rev_rhs, -1, t, l);
+        }
+      }
+    }
+
+    auto scan_s_group_cover = [&](const std::string& family,
+                                  const std::vector<double>& row_coeff,
+                                  double rhs,
+                                  int line,
+                                  int t) {
+      if (s_group_id < 0 || rhs >= 1e8) return;
+      if (uc.identical_group_id.size() < static_cast<std::size_t>(ng)) return;
+      double transformed_rhs = rhs;
+      for (int g = 0; g < ng; ++g) {
+        const double coeff = row_coeff[static_cast<std::size_t>(g)];
+        if (coeff < -1e-10) transformed_rhs -= coeff;
+      }
+      std::vector<ScucCoverItem> items;
+      std::vector<ScucCoverItem> s_items;
+      items.reserve(static_cast<std::size_t>(ng));
+      s_items.reserve(static_cast<std::size_t>(s_group_size));
+      for (int g = 0; g < ng; ++g) {
+        const bool is_s = uc.identical_group_id[static_cast<std::size_t>(g)] == s_group_id;
+        const double coeff = row_coeff[static_cast<std::size_t>(g)];
+        if (std::abs(coeff) <= 1e-10) continue;
+        ScucCoverItem item;
+        item.g = g;
+        item.s_class = is_s;
+        if (coeff > 0.0) {
+          item.weight = coeff;
+          item.z_value = get_ig(g, t);
+          item.complemented = false;
+        } else {
+          item.weight = -coeff;
+          item.z_value = 1.0 - get_ig(g, t);
+          item.complemented = true;
+        }
+        items.push_back(item);
+        if (is_s) s_items.push_back(item);
+      }
+      if (items.empty() || transformed_rhs < -1e-8) return;
+
+      auto evaluate_order = [&](std::vector<ScucCoverItem> ordered,
+                                const std::string& tag,
+                                bool require_s_member) {
+        double weight_sum = 0.0;
+        double z_sum = 0.0;
+        int complement_count = 0;
+        int s_count = 0;
+        for (int k = 0; k < static_cast<int>(ordered.size()); ++k) {
+          weight_sum += ordered[static_cast<std::size_t>(k)].weight;
+          z_sum += ordered[static_cast<std::size_t>(k)].z_value;
+          complement_count += ordered[static_cast<std::size_t>(k)].complemented ? 1 : 0;
+          s_count += ordered[static_cast<std::size_t>(k)].s_class ? 1 : 0;
+          if (weight_sum <= transformed_rhs + 1e-8) continue;
+          const double cover_rhs = static_cast<double>(k);
+          const double violation = z_sum - cover_rhs;
+          if (violation > 1e-6 && (!require_s_member || s_count > 0)) {
+            const std::string name = family + tag + (complement_count > 0 ? ":mixed" : ":pos");
+            record_violation(name, violation, s_group_id, t, line, z_sum, cover_rhs);
+          }
+          break;
+        }
+      };
+
+      auto evaluate_family = [&](const std::vector<ScucCoverItem>& source,
+                                 const std::string& tag,
+                                 bool require_s_member) {
+        if (source.empty()) return;
+        auto by_z = source;
+        std::sort(by_z.begin(), by_z.end(), [](const auto& a, const auto& b) {
+          if (std::abs(a.z_value - b.z_value) > 1e-12) return a.z_value > b.z_value;
+          return a.weight > b.weight;
+        });
+        evaluate_order(std::move(by_z), tag, require_s_member);
+
+        auto by_weight = source;
+        std::sort(by_weight.begin(), by_weight.end(), [](const auto& a, const auto& b) {
+          if (std::abs(a.weight - b.weight) > 1e-12) return a.weight > b.weight;
+          return a.z_value > b.z_value;
+        });
+        evaluate_order(std::move(by_weight), tag, require_s_member);
+
+        auto by_score = source;
+        std::sort(by_score.begin(), by_score.end(), [](const auto& a, const auto& b) {
+          const double sa = a.z_value * std::max(1e-9, a.weight);
+          const double sb = b.z_value * std::max(1e-9, b.weight);
+          if (std::abs(sa - sb) > 1e-12) return sa > sb;
+          return a.z_value > b.z_value;
+        });
+        evaluate_order(std::move(by_score), tag, require_s_member);
+      };
+
+      evaluate_family(s_items, ":SOnly", false);
+      evaluate_family(items, ":WithS", true);
+    };
+
+    std::vector<double> row_coeff(static_cast<std::size_t>(ng), 0.0);
+    std::vector<std::vector<ScucPtdfRowCandidate>> rows_by_time(static_cast<std::size_t>(T));
+    for (int l = 0; l < nl; ++l) {
+      for (int t = 0; t < T; ++t) {
+        const double fwd_rhs = uc.line_fwd_rhs[static_cast<std::size_t>(l * T + t)];
+        const double rev_rhs = uc.line_rev_rhs[static_cast<std::size_t>(l * T + t)];
+        if (fwd_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double gsf = uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            row_coeff[static_cast<std::size_t>(g)] =
+                (gsf > 0.0 ? gsf * uc.pmin[static_cast<std::size_t>(g)]
+                           : gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += row_coeff[static_cast<std::size_t>(g)] * get_ig(g, t);
+          }
+          scan_s_group_cover("SGroupCover:C_fwd", row_coeff, fwd_rhs, l, t);
+          rows_by_time[static_cast<std::size_t>(t)].push_back(
+              {l, 1, fwd_rhs, fwd_rhs - lhs, row_coeff});
+        }
+        if (rev_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double neg_gsf = -uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            row_coeff[static_cast<std::size_t>(g)] =
+                (neg_gsf > 0.0 ? neg_gsf * uc.pmin[static_cast<std::size_t>(g)]
+                               : neg_gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += row_coeff[static_cast<std::size_t>(g)] * get_ig(g, t);
+          }
+          scan_s_group_cover("SGroupCover:C_rev", row_coeff, rev_rhs, l, t);
+          rows_by_time[static_cast<std::size_t>(t)].push_back(
+              {l, -1, rev_rhs, rev_rhs - lhs, row_coeff});
+        }
+      }
+    }
+
+    std::vector<double> agg_coeff(static_cast<std::size_t>(ng), 0.0);
+    for (int t = 0; t < T; ++t) {
+      auto& rows = rows_by_time[static_cast<std::size_t>(t)];
+      if (rows.size() < 2) continue;
+      std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+        return a.slack < b.slack;
+      });
+      const int limit = std::min<int>(12, static_cast<int>(rows.size()));
+      for (int i = 0; i < limit; ++i) {
+        for (int j = i + 1; j < limit; ++j) {
+          for (int g = 0; g < ng; ++g) {
+            agg_coeff[static_cast<std::size_t>(g)] =
+                rows[static_cast<std::size_t>(i)].coeff[static_cast<std::size_t>(g)] +
+                rows[static_cast<std::size_t>(j)].coeff[static_cast<std::size_t>(g)];
+          }
+          const double agg_rhs = rows[static_cast<std::size_t>(i)].rhs +
+                                 rows[static_cast<std::size_t>(j)].rhs;
+          const int aux = rows[static_cast<std::size_t>(i)].line * 1000 +
+                          rows[static_cast<std::size_t>(j)].line;
+          scan_s_group_cover("SGroupCover:C_pair", agg_coeff, agg_rhs, aux, t);
+        }
+      }
+    }
+  }
+
+  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+    return a.violation > b.violation;
+  });
+
+  std::fprintf(stderr,
+               "[Gurobi][SCUC gap analysis] node=%.0f time=%.2fs incumbent=%.8g bound=%.8g rel_gap=%.4f\n",
+               node_count, runtime, incumbent, bound, rel_gap);
+  if (summary.empty()) {
+    std::fprintf(stderr, "[Gurobi][SCUC gap analysis] no tested violations above tolerance\n");
+    return;
+  }
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] violation summary:\n");
+  for (const auto& [family, s] : summary) {
+    std::fprintf(stderr,
+                 "  %-24s count=%5d max=%11.6g sum=%11.6g\n",
+                 family.c_str(), s.count, s.max_violation, s.sum_violation);
+  }
+  if (s_group_id >= 0) {
+    const double pmin = uc.group_pmin.size() > static_cast<std::size_t>(s_group_id)
+                            ? uc.group_pmin[static_cast<std::size_t>(s_group_id)] : 0.0;
+    const double pmax = uc.group_pmax.size() > static_cast<std::size_t>(s_group_id)
+                            ? uc.group_pmax[static_cast<std::size_t>(s_group_id)] : 0.0;
+    std::fprintf(stderr,
+                 "[Gurobi][SCUC gap analysis] S-class group q=%d size=%d pmin=%.2f pmax=%.2f\n",
+                 s_group_id, s_group_size, pmin, pmax);
+  }
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] IG fractionality by pmax tier:\n");
+  for (int tier = 0; tier < 7; ++tier) {
+    if (tier_count[tier] == 0) continue;
+    std::fprintf(stderr,
+                 "  tier=%-7s gens=%2d ig_frac_sum=%10.6f u_sum=%10.6f pmax_u=%12.3f\n",
+                 tier_label[tier], tier_count[tier], tier_ig_frac[tier],
+                 tier_u_sum[tier], tier_pmax_u[tier]);
+  }
+
+  std::vector<int> gen_order;
+  gen_order.reserve(static_cast<std::size_t>(ng));
+  for (int g = 0; g < ng; ++g) gen_order.push_back(g);
+  std::sort(gen_order.begin(), gen_order.end(), [&](int a, int b) {
+    return gen_ig_frac[static_cast<std::size_t>(a)] >
+           gen_ig_frac[static_cast<std::size_t>(b)];
+  });
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top generators by IG fractionality:\n");
+  const int gen_limit = std::min(12, ng);
+  for (int i = 0; i < gen_limit; ++i) {
+    const int g = gen_order[static_cast<std::size_t>(i)];
+    const double pmin = uc.pmin.size() > static_cast<std::size_t>(g) ? uc.pmin[static_cast<std::size_t>(g)] : 0.0;
+    const double pmax = uc.pmax.size() > static_cast<std::size_t>(g) ? uc.pmax[static_cast<std::size_t>(g)] : 0.0;
+    std::fprintf(stderr,
+                 "  g=%3d pmin=%7.2f pmax=%7.2f ig_frac_sum=%9.6f u_sum=%9.6f su_frac=%9.6f sd_frac=%9.6f\n",
+                 g, pmin, pmax, gen_ig_frac[static_cast<std::size_t>(g)],
+                 gen_u_sum[static_cast<std::size_t>(g)],
+                 gen_su_frac[static_cast<std::size_t>(g)],
+                 gen_sd_frac[static_cast<std::size_t>(g)]);
+  }
+
+  std::vector<int> time_order;
+  time_order.reserve(static_cast<std::size_t>(T));
+  for (int t = 0; t < T; ++t) time_order.push_back(t);
+  std::sort(time_order.begin(), time_order.end(), [&](int a, int b) {
+    return time_ig_frac[static_cast<std::size_t>(a)] >
+           time_ig_frac[static_cast<std::size_t>(b)];
+  });
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top periods by IG fractionality:\n");
+  const int time_limit = std::min(12, T);
+  for (int i = 0; i < time_limit; ++i) {
+    const int t = time_order[static_cast<std::size_t>(i)];
+    const double demand = uc.demand.size() > static_cast<std::size_t>(t) ? uc.demand[static_cast<std::size_t>(t)] : 0.0;
+    const double up_req = uc.reserve_requirement.size() > static_cast<std::size_t>(t)
+                              ? uc.reserve_requirement[static_cast<std::size_t>(t)] : 0.0;
+    std::fprintf(stderr,
+                 "  t=%3d ig_frac_sum=%9.6f u_sum=%9.6f pmin_u=%10.3f pmax_u=%10.3f demand=%10.3f up_req=%9.3f cap_slack=%10.3f\n",
+                 t, time_ig_frac[static_cast<std::size_t>(t)],
+                 time_u_sum[static_cast<std::size_t>(t)],
+                 time_pmin_u[static_cast<std::size_t>(t)],
+                 time_pmax_u[static_cast<std::size_t>(t)], demand, up_req,
+                 time_pmax_u[static_cast<std::size_t>(t)] - demand - up_req);
+  }
+  const int limit = std::max(0, std::min(top_limit, static_cast<int>(top.size())));
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top %d violations:\n", limit);
+  for (int i = 0; i < limit; ++i) {
+    const auto& v = top[static_cast<std::size_t>(i)];
+    std::fprintf(stderr,
+                 "  %-24s viol=%11.6g g=%3d t=%3d aux=%3d lhs=%12.6f rhs=%12.6f\n",
+                 v.family.c_str(), v.violation, v.g, v.t, v.aux, v.lhs, v.rhs);
+  }
+}
+
+static int separate_scuc_network_rows(void* cbdata, const std::vector<double>& sol,
+                                      GurobiScucCutData& data, bool as_lazy) {
+  const auto* uc_ptr = data.uc;
+  if (uc_ptr == nullptr) return 0;
+  const auto& uc = *uc_ptr;
+  const int row_count = uc.network_flow_row_count;
+  if (row_count <= 0 || data.n <= 0) return 0;
+  if (uc.network_flow_row_start.size() != static_cast<std::size_t>(row_count + 1) ||
+      uc.network_flow_rhs.size() < static_cast<std::size_t>(row_count)) {
+    return 0;
+  }
+
+  auto& seen = as_lazy ? data.network_lazy_cut_seen : data.network_user_cut_seen;
+  if (seen.size() < static_cast<std::size_t>(row_count))
+    seen.assign(static_cast<std::size_t>(row_count), 0);
+
+  std::vector<ScucNetworkCutCandidate> candidates;
+  candidates.reserve(64);
+  for (int r = 0; r < row_count; ++r) {
+    if (seen[static_cast<std::size_t>(r)] != 0) continue;
+    const int begin = uc.network_flow_row_start[static_cast<std::size_t>(r)];
+    const int end = uc.network_flow_row_start[static_cast<std::size_t>(r + 1)];
+    if (begin < 0 || end < begin ||
+        end > static_cast<int>(uc.network_flow_col.size()) ||
+        end > static_cast<int>(uc.network_flow_value.size())) {
+      continue;
+    }
+    double activity = 0.0;
+    for (int k = begin; k < end; ++k) {
+      const int col = uc.network_flow_col[static_cast<std::size_t>(k)];
+      if (col < 0 || col >= data.n) continue;
+      activity += uc.network_flow_value[static_cast<std::size_t>(k)] *
+                  sol[static_cast<std::size_t>(col)];
+    }
+    const double rhs = uc.network_flow_rhs[static_cast<std::size_t>(r)];
+    const double violation = activity - rhs;
+    if (violation > data.network_cut_tol)
+      candidates.push_back({r, violation});
+  }
+
+  if (candidates.empty()) return 0;
+  std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+    return a.violation > b.violation;
+  });
+
+  const int max_cuts = as_lazy ? data.max_network_lazy_cuts_per_call
+                               : data.max_network_user_cuts_per_call;
+  if (max_cuts <= 0) return 0;
+  int cuts_added = 0;
+  std::vector<int> ind;
+  std::vector<double> val;
+  for (const auto& candidate : candidates) {
+    if (cuts_added >= max_cuts) break;
+    const int r = candidate.row;
+    const int begin = uc.network_flow_row_start[static_cast<std::size_t>(r)];
+    const int end = uc.network_flow_row_start[static_cast<std::size_t>(r + 1)];
+    ind.clear();
+    val.clear();
+    ind.reserve(static_cast<std::size_t>(end - begin));
+    val.reserve(static_cast<std::size_t>(end - begin));
+    for (int k = begin; k < end; ++k) {
+      const int col = uc.network_flow_col[static_cast<std::size_t>(k)];
+      if (col < 0 || col >= data.n) continue;
+      const double coeff = uc.network_flow_value[static_cast<std::size_t>(k)];
+      if (std::abs(coeff) <= 1e-15) continue;
+      ind.push_back(col);
+      val.push_back(coeff);
+    }
+    if (ind.empty()) continue;
+    const double rhs = uc.network_flow_rhs[static_cast<std::size_t>(r)];
+    int err = 0;
+    if (as_lazy) {
+      err = GRBcblazy(cbdata, static_cast<int>(ind.size()), ind.data(),
+                      val.data(), GRB_LESS_EQUAL, rhs);
+    } else {
+      err = GRBcbcut(cbdata, static_cast<int>(ind.size()), ind.data(),
+                     val.data(), GRB_LESS_EQUAL, rhs);
+    }
+    if (err == 0) {
+      seen[static_cast<std::size_t>(r)] = 1;
+      ++cuts_added;
+    }
+  }
+
+  data.total_cuts_added += cuts_added;
+  if (as_lazy) data.network_lazy_cuts_added += cuts_added;
+  else data.network_user_cuts_added += cuts_added;
+  return cuts_added;
+}
+
+// Gurobi MIP callback: inject violated pairwise min-up/down conflict cuts as
+// user cuts at every MIPNODE LP-optimal node during branch-and-bound.
+//
+//   SU(g,t1) + SD(g,t2) <= 1   for 0 < t2 - t1 < min_up[g]   (min-up conflict)
+//   SD(g,t1) + SU(g,t2) <= 1   for 0 < t2 - t1 < min_down[g] (min-down conflict)
+//
+// These are valid implied cuts derived from the min-up/down constraints that
+// are NOT present in the base SCUC formulation, mirroring the native B&C
+// append_strict_scuc_dynamic_cuts() logic.
+static int gurobi_scuc_cut_callback(
+    GRBmodel* /*model*/, void* cbdata, int where, void* usrdata) {
+  auto* data = static_cast<GurobiScucCutData*>(usrdata);
+  if (!data || !data->uc) return 0;
+  const auto& uc = *data->uc;
+
+  if (where == GRB_CB_MIPSOL) {
+    if (!data->separate_network) return 0;
+    std::vector<double> sol(static_cast<std::size_t>(data->n), 0.0);
+    if (GRBcbget(cbdata, where, GRB_CB_MIPSOL_SOL, sol.data()) != 0) return 0;
+    separate_scuc_network_rows(cbdata, sol, *data, true);
+    return 0;
+  }
+
+  if (where != GRB_CB_MIPNODE) return 0;
+
+  // Only proceed when the LP relaxation is LP-optimal at this node.
+  int node_status = 0;
+  if (GRBcbget(cbdata, where, GRB_CB_MIPNODE_STATUS, &node_status) != 0)
+    return 0;
+  if (node_status != GRB_OPTIMAL) return 0;
+
+  const int ng = uc.ng, T = uc.T, n = data->n;
+  if (ng <= 0 || T <= 0 || n <= 0) return 0;
+  // (su_cols/sd_cols size guards are per-block below; absent data causes those
+  // blocks to be skipped gracefully via internal bounds checks.)
+
+  // Fetch LP relaxation solution at this node.
+  std::vector<double> sol(static_cast<std::size_t>(n), 0.0);
+  if (GRBcbget(cbdata, where, GRB_CB_MIPNODE_REL, sol.data()) != 0) return 0;
+
+  if (data->separate_network)
+    separate_scuc_network_rows(cbdata, sol, *data, false);
+
+  if (data->analyze_gap && !data->analyze_done) {
+    double incumbent = 0.0;
+    double bound = 0.0;
+    double node_count = 0.0;
+    double runtime = 0.0;
+    const int ok_best = GRBcbget(cbdata, where, GRB_CB_MIPNODE_OBJBST, &incumbent);
+    const int ok_bound = GRBcbget(cbdata, where, GRB_CB_MIPNODE_OBJBND, &bound);
+    GRBcbget(cbdata, where, GRB_CB_MIPNODE_NODCNT, &node_count);
+    GRBcbget(cbdata, where, GRB_CB_RUNTIME, &runtime);
+    if (ok_best == 0 && ok_bound == 0 && std::isfinite(incumbent) &&
+        std::isfinite(bound) && std::abs(incumbent) < 1e90) {
+      const double rel_gap = std::abs(incumbent - bound) /
+                             std::max(1.0, std::abs(incumbent));
+      if (rel_gap <= data->analyze_gap_trigger) {
+        analyze_scuc_relaxation_at_gap(uc, sol, incumbent, bound, rel_gap,
+                                       runtime, node_count, data->analyze_top);
+        data->analyze_done = true;
+      }
+    }
+  }
+
+  if (!data->enable_dynamic_cuts) return 0;
+  if (!uc.certifies_min_up_down_rows) return 0;
+
+  const double pf = data->pair_floor;
+  const int max_cuts = data->max_cuts_per_call;
+  int cuts_added = 0;
+
+  auto get_col = [&](const std::vector<int>& cols, int g, int t) -> int {
+    if (g < 0 || g >= ng || t < 0 || t >= T) return -1;
+    const auto idx = static_cast<std::size_t>(t * ng + g);
+    if (idx >= cols.size()) return -1;
+    return cols[idx];
+  };
+  auto get_val = [&](int col) -> double {
+    if (col < 0 || col >= n) return 0.0;
+    return sol[static_cast<std::size_t>(col)];
+  };
+
+  // Min-up violations: SU(g,t1) + SD(g,t2) > 1
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      if (mu <= 1) continue;
+      for (int t1 = 0; t1 < T && cuts_added < max_cuts; ++t1) {
+        const int su_col = get_col(uc.su_cols, g, t1);
+        if (su_col < 0) continue;
+        const double su_v = get_val(su_col);
+        if (su_v <= pf) continue;
+        const int last = std::min(T - 1, t1 + mu - 1);
+        for (int t2 = t1 + 1; t2 <= last && cuts_added < max_cuts; ++t2) {
+          const int sd_col = get_col(uc.sd_cols, g, t2);
+          if (sd_col < 0) continue;
+          const double sd_v = get_val(sd_col);
+          if (sd_v <= pf || su_v + sd_v <= 1.0 + pf) continue;
+          const int ind[2] = {su_col, sd_col};
+          const double val[2] = {1.0, 1.0};
+          GRBcbcut(cbdata, 2, ind, val, GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  // Min-down violations: SD(g,t1) + SU(g,t2) > 1
+  if (uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      if (md <= 1) continue;
+      for (int t1 = 0; t1 < T && cuts_added < max_cuts; ++t1) {
+        const int sd_col = get_col(uc.sd_cols, g, t1);
+        if (sd_col < 0) continue;
+        const double sd_v = get_val(sd_col);
+        if (sd_v <= pf) continue;
+        const int last = std::min(T - 1, t1 + md - 1);
+        for (int t2 = t1 + 1; t2 <= last && cuts_added < max_cuts; ++t2) {
+          const int su_col = get_col(uc.su_cols, g, t2);
+          if (su_col < 0) continue;
+          const double su_v = get_val(su_col);
+          if (su_v <= pf || sd_v + su_v <= 1.0 + pf) continue;
+          const int ind[2] = {sd_col, su_col};
+          const double val[2] = {1.0, 1.0};
+          GRBcbcut(cbdata, 2, ind, val, GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Family B (dynamic): reserve-commitment cover violations
+  //   sum_g cap[g] * u_lp(g,t) < requirement[t]  → inject GEQ cut
+  // -------------------------------------------------------------------
+  if (uc.certifies_system_reserve_rows &&
+      uc.ig_cols.size() >= static_cast<std::size_t>(ng * T)) {
+    auto check_reserve_cover = [&](const std::vector<double>& caps,
+                                   const std::vector<double>& req) {
+      for (int t = 0; t < T && cuts_added < max_cuts; ++t) {
+        if (req.size() <= static_cast<std::size_t>(t)) continue;
+        const double requirement = req[static_cast<std::size_t>(t)];
+        if (!(requirement > 0.0)) continue;
+        if (caps.size() < static_cast<std::size_t>(ng)) continue;
+        std::vector<int>    r_ind;
+        std::vector<double> r_val;
+        double lhs = 0.0;
+        for (int g = 0; g < ng; ++g) {
+          const int ig = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+          if (ig < 0 || ig >= n) continue;
+          const double cap = std::max(0.0, caps[static_cast<std::size_t>(g)]);
+          if (!(cap > 0.0)) continue;
+          const double u_v = get_val(ig);
+          lhs += cap * u_v;
+          r_ind.push_back(ig); r_val.push_back(cap);
+        }
+        if (!r_ind.empty() && lhs < requirement - pf) {
+          GRBcbcut(cbdata, static_cast<int>(r_ind.size()), r_ind.data(),
+                   r_val.data(), GRB_GREATER_EQUAL, requirement);
+          ++cuts_added;
+        }
+      }
+    };
+
+    if (!uc.up_reserve_headroom_cap.empty() && !uc.reserve_requirement.empty())
+      check_reserve_cover(uc.up_reserve_headroom_cap, uc.reserve_requirement);
+    if (!uc.spinning_reserve_cap.empty() && !uc.spinning_requirement.empty())
+      check_reserve_cover(uc.spinning_reserve_cap, uc.spinning_requirement);
+    if (!uc.regulation_up_cap.empty() && !uc.regulation_up_requirement.empty())
+      check_reserve_cover(uc.regulation_up_cap, uc.regulation_up_requirement);
+    if (!uc.regulation_down_cap.empty() &&
+        !uc.regulation_down_requirement.empty())
+      check_reserve_cover(uc.regulation_down_cap, uc.regulation_down_requirement);
+  }
+
+  // -------------------------------------------------------------------
+  // Family G (extended clique): sum_{t'=t}^{t+T^U+T^D-1} SU(g,t') <= 1
+  // Check each startup window; inject cut when LP sum > 1.
+  // When static tight SCUC is enabled these rows are already in the model
+  // and no violations will be found; cost is O(ng*T) dot product per node.
+  // -------------------------------------------------------------------
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+      uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      const int L = mu + md;
+      if (L <= 1) continue;
+      for (int t = 0; t < T && cuts_added < max_cuts; ++t) {
+        const int last = std::min(T - 1, t + L - 1);
+        if (last == t) continue;
+        std::vector<int>    w_ind;
+        std::vector<double> w_val;
+        double sum_su = 0.0;
+        for (int t2 = t; t2 <= last; ++t2) {
+          const int col = get_col(uc.su_cols, g, t2);
+          if (col < 0) continue;
+          const double v = get_val(col);
+          w_ind.push_back(col); w_val.push_back(1.0); sum_su += v;
+        }
+        if (static_cast<int>(w_ind.size()) >= 2 && sum_su > 1.0 + pf) {
+          GRBcbcut(cbdata, static_cast<int>(w_ind.size()), w_ind.data(),
+                   w_val.data(), GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  data->total_cuts_added += cuts_added;
+  return 0;
+}
+
+}  // anonymous namespace
+
+#endif  // HACDCPF_HAVE_GUROBI
 
 GurobiAdapter::GurobiAdapter() {
 #ifdef HACDCPF_HAVE_GUROBI
@@ -2386,93 +3283,526 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
              obj_coeff.data(), lb_vec.data(), ub_vec.data(), vtype.data(), nullptr);
   GRBsetintattr(model, "ModelSense", GRB_MINIMIZE);
 
-  // Inequality constraints.
-  for (int i = 0; i < m_ineq; ++i) {
-    std::vector<int> ind;
-    std::vector<double> val;
-    for (int j = 0; j < n; ++j) {
-      const double v = lp.A.coeff(i, j);
-      if (std::abs(v) > 1e-15) {
-        ind.push_back(j);
-        val.push_back(v);
+  const bool separate_gurobi_network =
+      prob.uc_hint.has_value() && prob.uc_hint->certifies_hard_network_flow_rows &&
+      prob.uc_hint->network_flow_row_count > 0 &&
+      prob.uc_hint->network_flow_row_start.size() ==
+          static_cast<std::size_t>(prob.uc_hint->network_flow_row_count + 1) &&
+      (std::getenv("MIPSOLVERS_GUROBI_SEPARATE_NETWORK") != nullptr ||
+       std::getenv("MIPSOLVERS_SCUC_LAZY_NETWORK") != nullptr);
+  std::vector<unsigned char> skip_ineq_row(static_cast<std::size_t>(m_ineq), 0);
+  int skipped_network_rows = 0;
+  if (separate_gurobi_network) {
+    for (int row : prob.uc_hint->network_flow_original_row) {
+      if (row >= 0 && row < m_ineq && skip_ineq_row[static_cast<std::size_t>(row)] == 0) {
+        skip_ineq_row[static_cast<std::size_t>(row)] = 1;
+        ++skipped_network_rows;
       }
-    }
-    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
-                 GRB_LESS_EQUAL, lp.b[i], nullptr);
-    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
-    if (std::isfinite(lhs)) {
-      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
-                   GRB_GREATER_EQUAL, lhs, nullptr);
     }
   }
 
-  // Equality constraints.
-  for (int i = 0; i < m_eq; ++i) {
-    std::vector<int> ind;
-    std::vector<double> val;
-    for (int j = 0; j < n; ++j) {
-      const double v = lp.Aeq.coeff(i, j);
-      if (std::abs(v) > 1e-15) {
-        ind.push_back(j);
-        val.push_back(v);
+  // Load inequality constraints using row-major sparse iteration.
+  // The dense lp.A.coeff(i,j) approach is O(n) per entry (O(m*n) total),
+  // which is prohibitive for large SCUC instances (26k vars × 32k rows).
+  // Converting to row-major once and iterating over nonzeros is O(nnz).
+  {
+    Eigen::SparseMatrix<double, Eigen::RowMajor> A_rm(lp.A);
+    for (int i = 0; i < m_ineq; ++i) {
+      if (skip_ineq_row[static_cast<std::size_t>(i)] != 0) continue;
+      std::vector<int> ind;
+      std::vector<double> val;
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_rm, i); it; ++it) {
+        if (std::abs(it.value()) > 1e-15) {
+          ind.push_back(static_cast<int>(it.col()));
+          val.push_back(it.value());
+        }
+      }
+      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                   GRB_LESS_EQUAL, lp.b[i], nullptr);
+      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+      if (std::isfinite(lhs)) {
+        GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                     GRB_GREATER_EQUAL, lhs, nullptr);
       }
     }
-    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
-                 GRB_EQUAL, lp.beq[i], nullptr);
+  }
+
+  // Load equality constraints using row-major sparse iteration.
+  {
+    Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_rm(lp.Aeq);
+    for (int i = 0; i < m_eq; ++i) {
+      std::vector<int> ind;
+      std::vector<double> val;
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_rm, i); it; ++it) {
+        if (std::abs(it.value()) > 1e-15) {
+          ind.push_back(static_cast<int>(it.col()));
+          val.push_back(it.value());
+        }
+      }
+      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                   GRB_EQUAL, lp.beq[i], nullptr);
+    }
+  }
+
+  // Tight SCUC formulation: add pairwise min-up/down conflict cuts as static
+  // constraints before solve.  These are valid implied cuts not in the base
+  // formulation that tighten the LP relaxation root bound.
+  //   SU(g,t1) + SD(g,t2) <= 1  for 0 < t2-t1 < min_up[g]
+  //   SD(g,t1) + SU(g,t2) <= 1  for 0 < t2-t1 < min_down[g]
+  // Enable by setting MIPSOLVERS_GUROBI_TIGHT_SCUC=1.
+  const bool add_tight_scuc =
+      prob.uc_hint.has_value() &&
+      prob.uc_hint->certifies_min_up_down_rows &&
+      std::getenv("MIPSOLVERS_GUROBI_TIGHT_SCUC") != nullptr;
+  if (add_tight_scuc) {
+    const auto& uc = *prob.uc_hint;
+    const int ng = uc.ng, T_uc = uc.T;
+    int static_cuts = 0;
+    auto add_pair = [&](int col_a, int col_b) {
+      if (col_a < 0 || col_b < 0 || col_a >= n || col_b >= n) return;
+      int ind[2] = {col_a, col_b};
+      double val[2] = {1.0, 1.0};
+      GRBaddconstr(model, 2, ind, val, GRB_LESS_EQUAL, 1.0, nullptr);
+      ++static_cuts;
+    };
+    if (uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.sd_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_up.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int mu = uc.min_up[static_cast<std::size_t>(g)];
+        if (mu <= 1) continue;
+        for (int t1 = 0; t1 < T_uc; ++t1) {
+          const int su = uc.su_cols[static_cast<std::size_t>(t1 * ng + g)];
+          if (su < 0) continue;
+          for (int t2 = t1 + 1; t2 <= std::min(T_uc - 1, t1 + mu - 1); ++t2)
+            add_pair(su, uc.sd_cols[static_cast<std::size_t>(t2 * ng + g)]);
+        }
+      }
+    }
+    if (uc.sd_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int md = uc.min_down[static_cast<std::size_t>(g)];
+        if (md <= 1) continue;
+        for (int t1 = 0; t1 < T_uc; ++t1) {
+          const int sd = uc.sd_cols[static_cast<std::size_t>(t1 * ng + g)];
+          if (sd < 0) continue;
+          for (int t2 = t1 + 1; t2 <= std::min(T_uc - 1, t1 + md - 1); ++t2)
+            add_pair(sd, uc.su_cols[static_cast<std::size_t>(t2 * ng + g)]);
+        }
+      }
+    }
+    // -------------------------------------------------------------------
+    // Family G: Extended startup clique (no two startups within T^U+T^D window)
+    //   sum_{t'=t}^{t+T^U+T^D-1} SU(g,t') <= 1   for each g, t
+    // Also: total startup count bound
+    //   sum_t SU(g,t) <= floor(T / (T^U + T^D))
+    // These dominate the pairwise SU+SD cuts and tighten the LP relaxation
+    // by 25-30% expected gap closure.
+    // -------------------------------------------------------------------
+    if (uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+        uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int mu = uc.min_up[static_cast<std::size_t>(g)];
+        const int md = uc.min_down[static_cast<std::size_t>(g)];
+        const int L = mu + md;
+        if (L <= 1) continue;
+
+        // Clique cuts: at most 1 startup in each window [t, t+L-1].
+        for (int t = 0; t < T_uc; ++t) {
+          const int last = std::min(T_uc - 1, t + L - 1);
+          if (last == t) continue;
+          std::vector<int> ind;
+          std::vector<double> val;
+          for (int t2 = t; t2 <= last; ++t2) {
+            const int col = uc.su_cols[static_cast<std::size_t>(t2 * ng + g)];
+            if (col >= 0 && col < n) { ind.push_back(col); val.push_back(1.0); }
+          }
+          if (static_cast<int>(ind.size()) >= 2) {
+            GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                         GRB_LESS_EQUAL, 1.0, nullptr);
+            ++static_cuts;
+          }
+        }
+
+        // Total startup count bound: sum_t SU(g,t) <= floor(T / L).
+        const int max_starts = T_uc / L;
+        if (max_starts >= 1) {
+          std::vector<int> ind;
+          std::vector<double> val;
+          for (int t = 0; t < T_uc; ++t) {
+            const int col = uc.su_cols[static_cast<std::size_t>(t * ng + g)];
+            if (col >= 0 && col < n) { ind.push_back(col); val.push_back(1.0); }
+          }
+          if (!ind.empty()) {
+            GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                         GRB_LESS_EQUAL, static_cast<double>(max_starts), nullptr);
+            ++static_cuts;
+          }
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Family A: Bid-segment cumulative coupling
+    //   sum_{m=0}^{k-1} seg(g,t,m) <= cumcap[g,k] * u(g,t)   for each g,t,k
+    // Prevents the LP from using fractional commitment to spread dispatch
+    // evenly across bid segments (dispatch fills sequentially).
+    // -------------------------------------------------------------------
+    if (uc.n_segments > 1 &&
+        uc.segment_cols.size() >=
+            static_cast<std::size_t>(ng * T_uc * uc.n_segments) &&
+        uc.segment_cap.size() >= static_cast<std::size_t>(ng * uc.n_segments) &&
+        uc.ig_cols.size() >= static_cast<std::size_t>(ng * T_uc)) {
+      const int ns = uc.n_segments;
+      // Precompute cumulative capacities per generator.
+      std::vector<double> cumcap(static_cast<std::size_t>(ng * ns), 0.0);
+      for (int g = 0; g < ng; ++g)
+        for (int m = 1; m < ns; ++m)
+          cumcap[static_cast<std::size_t>(g * ns + m)] =
+              cumcap[static_cast<std::size_t>(g * ns + m - 1)] +
+              uc.segment_cap[static_cast<std::size_t>(g * ns + m - 1)];
+
+      for (int g = 0; g < ng; ++g) {
+        for (int k = 1; k < ns; ++k) {   // prefix 1..ns-1
+          const double cc = cumcap[static_cast<std::size_t>(g * ns + k)];
+          if (cc <= 0.0) continue;
+          for (int t = 0; t < T_uc; ++t) {
+            const int ig_col = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+            if (ig_col < 0 || ig_col >= n) continue;
+            std::vector<int> ind;
+            std::vector<double> val;
+            for (int m = 0; m < k; ++m) {
+              const int sc = uc.segment_cols[
+                  static_cast<std::size_t>((t * ng + g) * ns + m)];
+              if (sc >= 0 && sc < n) { ind.push_back(sc); val.push_back(1.0); }
+            }
+            // sum seg - cc * u(g,t) <= 0
+            ind.push_back(ig_col);
+            val.push_back(-cc);
+            if (static_cast<int>(ind.size()) >= 2) {
+              GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(),
+                           val.data(), GRB_LESS_EQUAL, 0.0, nullptr);
+              ++static_cuts;
+            }
+          }
+        }
+      }
+    }
+
+    if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+      std::fprintf(stderr, "[Gurobi] tight SCUC: %d static cuts added"
+                   " (pairwise SU/SD + Family G clique + Family A segment)\n",
+                   static_cuts);
+
+    // -------------------------------------------------------------------
+    // Family B: Reserve-commitment cover inequalities
+    //   sum_g cap[g] * u(g,t) >= requirement[t]   for each reserve type, t
+    // Mirrors native branch_and_cut.cpp: add_reserve_cover_cut().
+    // These implied rows (derivable from headroom bound + reserve balance)
+    // are explicitly added to strengthen the LP at root and all nodes.
+    // -------------------------------------------------------------------
+    if (uc.certifies_system_reserve_rows &&
+        uc.ig_cols.size() >= static_cast<std::size_t>(ng * T_uc)) {
+      int b_cuts = 0;
+
+      auto add_reserve_cover_static = [&](const std::vector<double>& caps,
+                                          const std::vector<double>& req, int t) {
+        if (req.size() <= static_cast<std::size_t>(t) ||
+            !(req[static_cast<std::size_t>(t)] > 0.0)) return;
+        if (caps.size() < static_cast<std::size_t>(ng)) return;
+        const double rhs = req[static_cast<std::size_t>(t)];
+        std::vector<int> ind;
+        std::vector<double> val;
+        for (int g = 0; g < ng; ++g) {
+          const int ig = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+          if (ig < 0 || ig >= n) continue;
+          const double cap = std::max(0.0, caps[static_cast<std::size_t>(g)]);
+          if (!(cap > 0.0)) continue;
+          ind.push_back(ig); val.push_back(cap);
+        }
+        if (!ind.empty()) {
+          GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                       GRB_GREATER_EQUAL, rhs, nullptr);
+          ++static_cuts; ++b_cuts;
+        }
+      };
+
+      for (int t = 0; t < T_uc; ++t) {
+        if (!uc.up_reserve_headroom_cap.empty() && !uc.reserve_requirement.empty())
+          add_reserve_cover_static(uc.up_reserve_headroom_cap,
+                                   uc.reserve_requirement, t);
+        if (!uc.spinning_reserve_cap.empty() && !uc.spinning_requirement.empty())
+          add_reserve_cover_static(uc.spinning_reserve_cap,
+                                   uc.spinning_requirement, t);
+        if (!uc.regulation_up_cap.empty() &&
+            !uc.regulation_up_requirement.empty())
+          add_reserve_cover_static(uc.regulation_up_cap,
+                                   uc.regulation_up_requirement, t);
+        if (!uc.regulation_down_cap.empty() &&
+            !uc.regulation_down_requirement.empty())
+          add_reserve_cover_static(uc.regulation_down_cap,
+                                   uc.regulation_down_requirement, t);
+      }
+
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+        std::fprintf(stderr, "[Gurobi] tight SCUC: %d Family B reserve-cover"
+                     " rows added statically\n", b_cuts);
+    }
+
+    // Family C: network line capacity commitment cuts.
+    // For each monitored line l and period t, the maximum possible flow from
+    // committed generators must not exceed the line thermal limit:
+    //   Forward: sum_g coeff_fwd(g,l) * u(g,t) <= line_fwd_rhs[l,t]
+    //   Reverse: sum_g coeff_rev(g,l) * u(g,t) <= line_rev_rhs[l,t]
+    // where coeff_fwd(g,l) = max(0,gsf)*pmin[g] + min(0,gsf)*pmax[g] and
+    //       coeff_rev(g,l) = max(0,-gsf)*pmin[g] + min(0,-gsf)*pmax[g].
+    // Lines with sentinel RHS (1e8+) are unconstrained and skipped.
+    if (uc.certifies_hard_network_flow_rows &&
+        uc.network_line_count > 0 && !uc.line_gsf.empty() &&
+        !uc.line_fwd_rhs.empty() && !uc.line_rev_rhs.empty() &&
+        !uc.pmax.empty() && !uc.pmin.empty()) {
+      const int nl = uc.network_line_count;
+      int c_cuts = 0;
+      std::vector<int>    cidx;
+      std::vector<double> cval;
+      for (int l = 0; l < nl; ++l) {
+        for (int t = 0; t < T_uc; ++t) {
+          const double fwd_rhs = uc.line_fwd_rhs[static_cast<size_t>(l * T_uc + t)];
+          const double rev_rhs = uc.line_rev_rhs[static_cast<size_t>(l * T_uc + t)];
+
+          // Forward capacity cut: sum_{gsf>0} gsf*pmin*u + sum_{gsf<0} gsf*pmax*u <= fwd_rhs
+          // Derived from: flow_min_from_committed <= actual_flow <= fwd_rhs
+          //
+          // Density filter: drop positive terms with coeff < 1 MW.  Dropping a
+          // positive LHS term only weakens (relaxes) the cut, so validity is
+          // preserved.  Negative terms are always kept (dropping them would
+          // tighten the cut and could cut off feasible solutions).
+          // All non-empty cuts are added regardless of trivial satisfaction;
+          // trivially-satisfied cuts still provide LP dual information that
+          // helps Gurobi's internal cut separation.
+          if (fwd_rhs < 1e8) {
+            cidx.clear(); cval.clear();
+            for (int g = 0; g < ng; ++g) {
+              const double gsf = uc.line_gsf[static_cast<size_t>(l * ng + g)];
+              if (std::abs(gsf) < 1e-10) continue;
+              const int ig_col = uc.ig_cols[static_cast<size_t>(t * ng + g)];
+              if (ig_col < 0) continue;
+              const double coeff = (gsf > 0.0 ? gsf * uc.pmin[g] : gsf * uc.pmax[g]);
+              if (std::abs(coeff) < 1e-10) continue;
+              if (coeff > 0.0 && coeff < 1.0) continue;  // drop small positive terms (< 1 MW)
+              cidx.push_back(ig_col);
+              cval.push_back(coeff);
+            }
+            if (!cidx.empty()) {
+              GRBaddconstr(model, static_cast<int>(cidx.size()),
+                           cidx.data(), cval.data(),
+                           GRB_LESS_EQUAL, fwd_rhs, nullptr);
+              ++c_cuts;
+            }
+          }
+
+          // Reverse capacity cut: sum_{gsf<0} (-gsf)*pmin*u + sum_{gsf>0} (-gsf)*pmax*u <= rev_rhs
+          if (rev_rhs < 1e8) {
+            cidx.clear(); cval.clear();
+            for (int g = 0; g < ng; ++g) {
+              const double neg_gsf = -uc.line_gsf[static_cast<size_t>(l * ng + g)];
+              if (std::abs(neg_gsf) < 1e-10) continue;
+              const int ig_col = uc.ig_cols[static_cast<size_t>(t * ng + g)];
+              if (ig_col < 0) continue;
+              const double coeff = (neg_gsf > 0.0 ? neg_gsf * uc.pmin[g] : neg_gsf * uc.pmax[g]);
+              if (std::abs(coeff) < 1e-10) continue;
+              if (coeff > 0.0 && coeff < 1.0) continue;  // drop small positive terms (< 1 MW)
+              cidx.push_back(ig_col);
+              cval.push_back(coeff);
+            }
+            if (!cidx.empty()) {
+              GRBaddconstr(model, static_cast<int>(cidx.size()),
+                           cidx.data(), cval.data(),
+                           GRB_LESS_EQUAL, rev_rhs, nullptr);
+              ++c_cuts;
+            }
+          }
+        }
+      }
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+        std::fprintf(stderr, "[Gurobi] tight SCUC: %d Family C network-line"
+                     " capacity cuts added statically\n", c_cuts);
+    }
   }
 
   GRBupdatemodel(model);
 
-  // Benchmark/reference solves use Gurobi as the objective-quality oracle.
-  // Tighten the default 1e-4 MIPGap so "Optimal" is suitable for validating
-  // native incumbent objectives, not merely for fast production stopping.
+  // --- Solver options ---
   if (GRBenv* model_env = GRBgetenv(model)) {
+    // Tighten default 1e-4 MIPGap for oracle-quality solves.
     GRBsetdblparam(model_env, "MIPGap", 1e-9);
     GRBsetdblparam(model_env, "MIPGapAbs", 1e-6);
+
+    // BranchDir=1: branch toward commitment (u=1) first.  For UC problems the
+    // optimal solution has most generators committed; branching up first finds
+    // good primal solutions earlier, enabling tighter pruning of the B&B tree.
+    // Heuristics=0.15: modest increase from default 0.05 to allocate more of
+    // the B&B time to primal improvement heuristics (RINS, local branching)
+    // so the optimal incumbent is found earlier, enabling tighter pruning.
+    if (std::getenv("MIPSOLVERS_GUROBI_TIGHT_SCUC") != nullptr) {
+      GRBsetintparam(model_env, "BranchDir", 1);
+      GRBsetdblparam(model_env, "Heuristics", 0.15);
+    }
+
+    // Optional time limit from env var MIPSOLVERS_GUROBI_TIME_LIMIT (seconds).
+    if (const char* tl_env = std::getenv("MIPSOLVERS_GUROBI_TIME_LIMIT")) {
+      char* endp = nullptr;
+      const double tl = std::strtod(tl_env, &endp);
+      if (endp != tl_env && tl > 0.0)
+        GRBsetdblparam(model_env, "TimeLimit", tl);
+    }
+
+    // Output to stderr when MIPSOLVERS_GUROBI_VERBOSE is set.
+    if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+      GRBsetintparam(model_env, "OutputFlag", 1);
+
+    // PreCrush=1 allows Gurobi to presolve user cuts (required for GRBcbcut).
+    // Only set when the callback is expected.
+    if (prob.uc_hint.has_value() &&
+        (prob.uc_hint->certifies_min_up_down_rows ||
+         prob.uc_hint->certifies_hard_network_flow_rows))
+      GRBsetintparam(model_env, "PreCrush", 1);
+    if (separate_gurobi_network)
+      GRBsetintparam(model_env, "LazyConstraints", 1);
   }
 
-  // Provide warm-start (MIP start) if available.
-  if (prob.initial_solution.size() == n) {
+  // Branching priorities: set from MIPModel::branching_priority when provided.
+  if (!prob.branching_priority.empty()) {
+    const int prio_n = std::min(n, static_cast<int>(prob.branching_priority.size()));
+    std::vector<int> priorities(static_cast<std::size_t>(prio_n));
+    for (int j = 0; j < prio_n; ++j)
+      priorities[static_cast<std::size_t>(j)] = prob.branching_priority[static_cast<std::size_t>(j)];
+    GRBsetintattrarray(model, "BranchPriority", 0, prio_n, priorities.data());
+  }
+
+  // Warm start.
+  if (static_cast<int>(prob.initial_solution.size()) == n) {
     GRBsetdblattrarray(model, "Start", 0, n,
                        const_cast<double*>(prob.initial_solution.data()));
+  }
+
+  // Dynamic SCUC callback: inject violated min-up/down conflict cuts as user
+  // cuts at every LP-optimal MIPNODE.  Disable with MIPSOLVERS_GUROBI_NO_DYNAMIC_CUTS.
+  GurobiScucCutData cut_data;
+  const bool analyze_scuc_gap =
+      prob.uc_hint.has_value() &&
+      std::getenv("MIPSOLVERS_GUROBI_ANALYZE_GAP") != nullptr;
+  const bool enable_dynamic_scuc_cuts =
+      prob.uc_hint.has_value() &&
+      (prob.uc_hint->certifies_min_up_down_rows ||
+       (prob.uc_hint->certifies_hard_network_flow_rows &&
+        prob.uc_hint->network_line_count > 0 &&
+        !prob.uc_hint->line_gsf.empty())) &&
+      std::getenv("MIPSOLVERS_GUROBI_NO_DYNAMIC_CUTS") == nullptr;
+  const bool enable_cb = enable_dynamic_scuc_cuts || analyze_scuc_gap || separate_gurobi_network;
+  if (enable_cb) {
+    cut_data.n = n;
+    cut_data.uc = &(*prob.uc_hint);
+    cut_data.enable_dynamic_cuts = enable_dynamic_scuc_cuts;
+    cut_data.separate_network = separate_gurobi_network;
+    if (const char* tol_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_CUT_TOL")) {
+      char* endp = nullptr;
+      const double value = std::strtod(tol_env, &endp);
+      if (endp != tol_env && value > 0.0)
+        cut_data.network_cut_tol = value;
+    }
+    if (const char* cap_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_USER_CUTS")) {
+      char* endp = nullptr;
+      const long value = std::strtol(cap_env, &endp, 10);
+      if (endp != cap_env && value >= 0)
+        cut_data.max_network_user_cuts_per_call = static_cast<int>(std::min<long>(value, 100000));
+    }
+    if (const char* cap_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_LAZY_CUTS")) {
+      char* endp = nullptr;
+      const long value = std::strtol(cap_env, &endp, 10);
+      if (endp != cap_env && value >= 0)
+        cut_data.max_network_lazy_cuts_per_call = static_cast<int>(std::min<long>(value, 100000));
+    }
+    if (separate_gurobi_network) {
+      const int row_count = prob.uc_hint->network_flow_row_count;
+      cut_data.network_user_cut_seen.assign(static_cast<std::size_t>(row_count), 0);
+      cut_data.network_lazy_cut_seen.assign(static_cast<std::size_t>(row_count), 0);
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr) {
+        std::fprintf(stderr,
+                     "[Gurobi] lazy network: skipped %d upfront PTDF rows, callback rows=%d\n",
+                     skipped_network_rows, row_count);
+      }
+    }
+    cut_data.analyze_gap = analyze_scuc_gap;
+    if (const char* gap_env = std::getenv("MIPSOLVERS_GUROBI_ANALYZE_GAP_TRIGGER")) {
+      char* endp = nullptr;
+      const double value = std::strtod(gap_env, &endp);
+      if (endp != gap_env && value > 0.0)
+        cut_data.analyze_gap_trigger = value;
+    }
+    if (const char* top_env = std::getenv("MIPSOLVERS_GUROBI_ANALYZE_TOP")) {
+      char* endp = nullptr;
+      const long value = std::strtol(top_env, &endp, 10);
+      if (endp != top_env && value > 0)
+        cut_data.analyze_top = static_cast<int>(std::min<long>(value, 200));
+    }
+    GRBsetcallbackfunc(model, gurobi_scuc_cut_callback, &cut_data);
   }
 
   GRBoptimize(model);
 
   int status = 0;
   GRBgetintattr(model, "Status", &status);
+  int sol_count = 0;
+  GRBgetintattr(model, "SolCount", &sol_count);
+  const bool has_incumbent = sol_count > 0;
 
   if (status == GRB_OPTIMAL) {
     out.stats.success = true;
     out.stats.status = "Optimal";
+  } else if ((status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT) && has_incumbent) {
+    out.stats.success = true;
+    out.stats.status = (status == GRB_TIME_LIMIT) ? "Time limit" : "Node limit";
+  } else if (status == GRB_INFEASIBLE) {
+    out.stats.status = "Infeasible";
+  } else {
+    out.stats.status = "Gurobi status=" + std::to_string(status);
+  }
+
+  if (has_incumbent && out.stats.success) {
     double objval = 0.0;
     GRBgetdblattr(model, "ObjVal", &objval);
     out.stats.objective = obj_sign * objval;
     out.x.resize(n);
     GRBgetdblattrarray(model, "X", 0, n, out.x.data());
     double mip_gap = 0.0;
-    if (GRBgetdblattr(model, "MIPGap", &mip_gap) == 0) {
+    if (GRBgetdblattr(model, "MIPGap", &mip_gap) == 0)
       out.stats.mip_gap = mip_gap;
-    }
 
     // Extract constraint duals (Pi) for pure LP problems.
-    // When all variables are continuous, Gurobi provides shadow prices.
     if (prob.binary_idx.empty() && prob.integer_idx.empty()) {
       const int m_total = m_ineq + m_eq;
       out.constraint_duals.resize(m_total);
       if (GRBgetdblattrarray(model, "Pi", 0, m_total,
                              out.constraint_duals.data()) == 0) {
-        // Gurobi minimises obj_sign * c'x → duals are in minimisation space.
-        // Convert back: original dual = obj_sign * gurobi_dual.
         out.constraint_duals *= obj_sign;
       } else {
         out.constraint_duals.resize(0);
       }
     }
-  } else if (status == GRB_INFEASIBLE) {
-    out.stats.status = "Infeasible";
-  } else {
-    out.stats.status = "Gurobi status=" + std::to_string(status);
+  }
+
+  // Report dynamic cuts injected via callback.
+  if (enable_cb && cut_data.total_cuts_added > 0)
+    out.stats.cglp_cuts_added = cut_data.total_cuts_added;
+  if (separate_gurobi_network && std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr) {
+    std::fprintf(stderr,
+                 "[Gurobi] lazy network: user_cuts=%d lazy_cuts=%d total_callback_rows=%d\n",
+                 cut_data.network_user_cuts_added, cut_data.network_lazy_cuts_added,
+                 cut_data.total_cuts_added);
   }
 
   const auto t1 = std::chrono::steady_clock::now();

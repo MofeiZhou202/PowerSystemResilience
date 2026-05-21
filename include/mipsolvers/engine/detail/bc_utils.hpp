@@ -2281,6 +2281,14 @@ int choose_branch_var_pseudocost(const std::vector<int>& cand,
                                  const std::vector<PseudoCost>& pc,
                                  const std::vector<int>& priority);
 
+/// @brief Select branch variable by pseudo-cost, static priority, and a dynamic prior callback.
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const std::vector<PseudoCost>& pc,
+                                 const std::vector<int>& priority,
+                                 const BCBranchingPriorFn& dynamic_prior,
+                                 const BCBranchContext& context);
+
 double compute_branch_var_score(int j,
                                 const Eigen::VectorXd& x,
                                 const std::vector<PseudoCost>& pc,
@@ -2298,6 +2306,15 @@ int choose_branch_var(const BCOptions& opt,
                       const Eigen::VectorXd& x,
                       const std::vector<PseudoCost>& pc,
                       const std::vector<int>& priority);
+
+/// @brief Select branch variable using static priorities and a dynamic prior callback.
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const std::vector<PseudoCost>& pc,
+                      const std::vector<int>& priority,
+                      const BCBranchingPriorFn& dynamic_prior,
+                      const BCBranchContext& context);
 
 /// @brief Reliability branching: probe unreliable candidates with LP solves.
 /// @details For candidates with insufficient pseudo-cost data (< reliability_limit

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <Eigen/Core>
@@ -37,6 +38,117 @@ double pseudocost_branch_score(int j,
 
 int branch_priority_value(int j, const std::vector<int>& priority) {
   return (j >= 0 && j < static_cast<int>(priority.size())) ? priority[j] : 0;
+}
+
+bool collect_dynamic_prior_scores(const std::vector<int>& cand,
+                                  const Eigen::VectorXd& x,
+                                  const BCBranchingPriorFn& dynamic_prior,
+                                  const BCBranchContext& context,
+                                  std::vector<double>& mapped_scores) {
+  if (!dynamic_prior || cand.empty()) return false;
+
+  BCBranchContext local_context = context;
+  if (local_context.candidates == nullptr) {
+    local_context.candidates = &cand;
+  }
+  if (local_context.lp_x == nullptr || local_context.lp_x_size == 0) {
+    local_context.lp_x = x.data();
+    local_context.lp_x_size = static_cast<std::size_t>(x.size());
+  }
+  if (local_context.candidates->size() != cand.size()) return false;
+  const auto& score_columns = *local_context.candidates;
+
+  std::vector<double> raw_scores;
+  try {
+    dynamic_prior(local_context, raw_scores);
+  } catch (...) {
+    return false;
+  }
+  if (raw_scores.empty()) return false;
+
+  mapped_scores.assign(cand.size(), 0.0);
+  if (raw_scores.size() == cand.size()) {
+    bool any = false;
+    for (std::size_t k = 0; k < cand.size(); ++k) {
+      const double score = raw_scores[k];
+      if (!std::isfinite(score)) continue;
+      mapped_scores[k] = score;
+      any = any || std::abs(score) > 0.0;
+    }
+    return any;
+  }
+
+  int max_col = -1;
+  for (int j : score_columns) max_col = std::max(max_col, j);
+  if (max_col < 0 || static_cast<int>(raw_scores.size()) <= max_col) {
+    return false;
+  }
+  bool any = false;
+  for (std::size_t k = 0; k < cand.size(); ++k) {
+    const int col = score_columns[k];
+    if (col < 0) continue;
+    const double score = raw_scores[static_cast<std::size_t>(col)];
+    if (!std::isfinite(score)) continue;
+    mapped_scores[k] = score;
+    any = any || std::abs(score) > 0.0;
+  }
+  return any;
+}
+
+double most_infeasible_score(int j, const Eigen::VectorXd& x) {
+  const double frac = std::abs(x[j] - std::floor(x[j]));
+  return 0.5 - std::abs(frac - 0.5);
+}
+
+double base_branch_score(BranchingStrategy strategy,
+                         int ordinal,
+                         int j,
+                         const Eigen::VectorXd& x,
+                         const std::vector<PseudoCost>& pc) {
+  switch (strategy) {
+    case BranchingStrategy::FirstFractional:
+      return -static_cast<double>(ordinal) * 1e-9;
+    case BranchingStrategy::MostInfeasible:
+      return most_infeasible_score(j, x);
+    case BranchingStrategy::Pseudocost:
+    default:
+      return std::log1p(std::max(0.0, pseudocost_branch_score(j, x, pc)));
+  }
+}
+
+int choose_branch_var_with_dynamic_prior(const BCOptions& opt,
+                                         const std::vector<int>& cand,
+                                         const Eigen::VectorXd& x,
+                                         const std::vector<PseudoCost>& pc,
+                                         const std::vector<int>& priority,
+                                         const BCBranchingPriorFn& dynamic_prior,
+                                         const BCBranchContext& context) {
+  std::vector<double> prior_scores;
+  if (!collect_dynamic_prior_scores(cand, x, dynamic_prior, context, prior_scores)) {
+    return priority.empty() ? choose_branch_var(opt, cand, x, pc)
+                            : choose_branch_var(opt, cand, x, pc, priority);
+  }
+
+  int best = cand.front();
+  int best_priority = priority.empty()
+                          ? std::numeric_limits<int>::min()
+                          : branch_priority_value(best, priority);
+  double best_score = -std::numeric_limits<double>::infinity();
+  for (std::size_t k = 0; k < cand.size(); ++k) {
+    const int j = cand[k];
+    const int prio = priority.empty() ? 0 : branch_priority_value(j, priority);
+    if (!priority.empty() && prio < best_priority) continue;
+    const double base = base_branch_score(opt.branching, static_cast<int>(k), j, x, pc);
+    const double combined = base + prior_scores[k];
+    if ((!priority.empty() && prio > best_priority) ||
+        combined > best_score ||
+        (std::abs(combined - best_score) <= 1e-12 && j < best)) {
+      best = j;
+      best_priority = prio;
+      best_score = combined;
+    }
+  }
+  return best;
 }
 
 }  // namespace
@@ -99,6 +211,20 @@ int choose_branch_var_pseudocost(const std::vector<int>& cand,
   return best;
 }
 
+int choose_branch_var_pseudocost(const std::vector<int>& cand,
+                                 const Eigen::VectorXd& x,
+                                 const std::vector<PseudoCost>& pc,
+                                 const std::vector<int>& priority,
+                                 const BCBranchingPriorFn& dynamic_prior,
+                                 const BCBranchContext& context) {
+  if (cand.empty()) return -1;
+  if (!dynamic_prior) return choose_branch_var_pseudocost(cand, x, pc, priority);
+  BCOptions opt;
+  opt.branching = BranchingStrategy::Pseudocost;
+  return choose_branch_var_with_dynamic_prior(
+      opt, cand, x, pc, priority, dynamic_prior, context);
+}
+
 int choose_branch_var(const BCOptions& opt,
                       const std::vector<int>& cand,
                       const Eigen::VectorXd& x,
@@ -134,6 +260,23 @@ int choose_branch_var(const BCOptions& opt,
     default:
       return choose_branch_var_pseudocost(cand, x, pc, priority);
   }
+}
+
+int choose_branch_var(const BCOptions& opt,
+                      const std::vector<int>& cand,
+                      const Eigen::VectorXd& x,
+                      const std::vector<PseudoCost>& pc,
+                      const std::vector<int>& priority,
+                      const BCBranchingPriorFn& dynamic_prior,
+                      const BCBranchContext& context) {
+  if (cand.empty()) {
+    return -1;
+  }
+  if (!dynamic_prior) {
+    return choose_branch_var(opt, cand, x, pc, priority);
+  }
+  return choose_branch_var_with_dynamic_prior(
+      opt, cand, x, pc, priority, dynamic_prior, context);
 }
 
 int choose_branch_var_reliability(

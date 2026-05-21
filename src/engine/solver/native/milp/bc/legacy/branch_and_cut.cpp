@@ -33613,6 +33613,80 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     // (Hard filtering removed — it caused excess numerical failures.)
     const auto loop_t1 = std::chrono::steady_clock::now();
 
+    struct BranchPriorContextState {
+      BCBranchContext ctx;
+      std::vector<int> original_candidates;
+      Eigen::VectorXd original_lp_x;
+    };
+    auto make_branch_context = [&](const std::vector<int>& candidates) {
+      BranchPriorContextState state;
+      state.ctx.node_id = static_cast<int>(out.bc_stats.nodes_explored);
+      state.ctx.depth = cur.depth;
+      state.ctx.node_lb = cur.bound;
+      state.ctx.best_obj = has_incumbent
+                               ? incumbent_obj
+                               : std::numeric_limits<double>::infinity();
+      state.ctx.candidates = &candidates;
+      state.ctx.lp_x = cur.x_relax.data();
+      state.ctx.lp_x_size = static_cast<std::size_t>(cur.x_relax.size());
+#ifdef MIPSOLVERS_HAVE_PAPILO
+      if (papilo_ps.success && !papilo_ps.reduced_to_orig_col.empty()) {
+        const auto& reduced_to_orig = papilo_ps.reduced_to_orig_col;
+        bool mapping_ok = true;
+        state.original_candidates.reserve(candidates.size());
+        for (int red_col : candidates) {
+          if (red_col < 0 || red_col >= static_cast<int>(reduced_to_orig.size())) {
+            mapping_ok = false;
+            break;
+          }
+          const int orig_col = reduced_to_orig[static_cast<std::size_t>(red_col)];
+          if (orig_col < 0 || orig_col >= orig_n) {
+            mapping_ok = false;
+            break;
+          }
+          state.original_candidates.push_back(orig_col);
+        }
+        if (mapping_ok && state.original_candidates.size() == candidates.size()) {
+          state.original_lp_x = Eigen::VectorXd::Zero(orig_n);
+          const int n_red = std::min(static_cast<int>(cur.x_relax.size()),
+                                     static_cast<int>(reduced_to_orig.size()));
+          for (int red_col = 0; red_col < n_red; ++red_col) {
+            const int orig_col = reduced_to_orig[static_cast<std::size_t>(red_col)];
+            if (orig_col >= 0 && orig_col < orig_n) {
+              state.original_lp_x[orig_col] = cur.x_relax[red_col];
+            }
+          }
+          state.ctx.candidates = &state.original_candidates;
+          state.ctx.lp_x = state.original_lp_x.data();
+          state.ctx.lp_x_size = static_cast<std::size_t>(state.original_lp_x.size());
+        }
+      }
+#endif
+      return state;
+    };
+    auto choose_branch_var_for_node = [&](const std::vector<int>& candidates) {
+      if (callbacks && callbacks->branching_prior) {
+        auto branch_context = make_branch_context(candidates);
+        return choose_branch_var(opt, candidates, cur.x_relax, pc,
+                                 branch_priority, callbacks->branching_prior,
+                                 branch_context.ctx);
+      }
+      return choose_branch_var(opt, candidates, cur.x_relax, pc, branch_priority);
+    };
+    auto choose_pseudocost_branch_var_for_node =
+        [&](const std::vector<int>& candidates) {
+      if (callbacks && callbacks->branching_prior) {
+        auto branch_context = make_branch_context(candidates);
+        return choose_branch_var_pseudocost(
+            candidates, cur.x_relax, pc, branch_priority,
+            callbacks->branching_prior, branch_context.ctx);
+      }
+      return branch_priority.empty()
+                 ? choose_branch_var_pseudocost(candidates, cur.x_relax, pc)
+                 : choose_branch_var_pseudocost(candidates, cur.x_relax, pc,
+                                                branch_priority);
+    };
+
 	    int j = -1;
 	    StrongBranchProbeResult retained_down_probe;
 	    StrongBranchProbeResult retained_up_probe;
@@ -33622,7 +33696,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      bool incumbent_changed_by_probe = false;
 	      if (opt.branching == BranchingStrategy::Pseudocost) {
 	        if (proof_tail_mode_now && has_incumbent) {
-	          j = choose_branch_var(opt, frac, cur.x_relax, pc, branch_priority);
+            j = choose_branch_var_for_node(frac);
 	        } else
         // When using IPM for node solves, skip expensive simplex probing
         // and use IPM-based probing or pure pseudocost instead.
@@ -33700,7 +33774,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
               }
             }
           }
-          j = choose_branch_var(opt, frac, cur.x_relax, pc, branch_priority);
+            j = choose_branch_var_for_node(frac);
 	        } else {
 	          // HiGHS strong-branching is a proof-bearing node evaluation.  Keep
 	          // the child LP states produced by probing so the selected branch
@@ -33837,10 +33911,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	              }
 	            }
 	          }
-              const int j_global = branch_priority.empty()
-                                       ? choose_branch_var_pseudocost(frac, cur.x_relax, pc)
-                                       : choose_branch_var_pseudocost(
-                                             frac, cur.x_relax, pc, branch_priority);
+                const int j_global = choose_pseudocost_branch_var_for_node(frac);
 		          int j_probe = -1;
 		          double j_probe_score = -kInf;
               int j_probe_priority = std::numeric_limits<int>::min();
@@ -33891,7 +33962,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		          }
 		        }
 	      } else {
-	        j = choose_branch_var(opt, frac, cur.x_relax, pc, branch_priority);
+            j = choose_branch_var_for_node(frac);
 	      }
 	      if (incumbent_changed_by_probe) {
 	        highs_style_post_incumbent_domain_closure(
@@ -35171,6 +35242,16 @@ BCInstanceFeatures compute_instance_features(const MIPModel& prob) {
   f.n_nnz  = static_cast<int>(lp.A.nonZeros() + lp.Aeq.nonZeros());
   f.n_bin  = static_cast<int>(prob.binary_idx.size());
   f.n_int  = static_cast<int>(prob.integer_idx.size());
+  if (prob.uc_hint) {
+    const auto& hint = *prob.uc_hint;
+    f.num_binary_blocks = hint.ng * hint.T;
+    f.extra = {1.0,
+               static_cast<double>(hint.ng),
+               static_cast<double>(hint.T),
+               static_cast<double>(hint.n_segments),
+               static_cast<double>(hint.n_storage),
+               static_cast<double>(hint.network_line_count)};
+  }
   if (f.n_vars > 0) {
     int cnnz = 0;
     for (int i = 0; i < lp.c.size(); ++i) if (lp.c[i] != 0.0) ++cnnz;

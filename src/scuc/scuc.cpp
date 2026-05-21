@@ -1301,6 +1301,31 @@ Formulation build_formulation(const SCUCInput& inp) {
   f.line_fwd_row.assign(static_cast<size_t>(v.nl * T), -1);
   f.line_rev_row.assign(static_cast<size_t>(v.nl * T), -1);
 
+  // Pre-compute per-generator line sensitivities for Family C commitment cuts.
+  // uc_line_gsf[l*ng+g] = PTDF(l, bus_g); uc_line_{fwd,rev}_rhs populated
+  // inside the constraint loop below where load_ptdf is already computed.
+  std::vector<double> uc_line_gsf(static_cast<size_t>(v.nl * v.ng), 0.0);
+  std::vector<double> uc_line_fwd_rhs(static_cast<size_t>(v.nl * T), 1e9);
+  std::vector<double> uc_line_rev_rhs(static_cast<size_t>(v.nl * T), 1e9);
+  std::vector<int> uc_network_flow_row_start;
+  std::vector<int> uc_network_flow_col;
+  std::vector<double> uc_network_flow_value;
+  std::vector<double> uc_network_flow_rhs;
+  std::vector<int> uc_network_flow_original_row;
+  std::vector<int> uc_network_flow_line;
+  std::vector<int> uc_network_flow_time;
+  std::vector<int> uc_network_flow_direction;
+  uc_network_flow_row_start.push_back(0);
+  if (PTDF.rows() == v.nl && PTDF.cols() == v.nb) {
+    for (int l = 0; l < v.nl; ++l) {
+      for (int g = 0; g < v.ng; ++g) {
+        const int bus_g = inp.generators[static_cast<size_t>(g)].bus;
+        if (bus_g >= 0 && bus_g < v.nb)
+          uc_line_gsf[static_cast<size_t>(l * v.ng + g)] = PTDF(l, bus_g);
+      }
+    }
+  }
+
   // Build per-bus incidence lists for fast PTDF row construction
   const int nb = v.nb;
   std::vector<std::vector<int>> gens_at(static_cast<size_t>(nb)),
@@ -1328,6 +1353,23 @@ Formulation build_formulation(const SCUCInput& inp) {
     int b = inp.storage[static_cast<size_t>(s)].bus;
     if (b >= 0 && b < nb) sto_at[static_cast<size_t>(b)].push_back(s);
   }
+
+  auto record_network_flow_row = [&](const std::vector<std::pair<int,double>>& terms,
+                                     double rhs, int original_row,
+                                     int line, int time, int direction) {
+    for (const auto& [col, coeff] : terms) {
+      if (col >= 0 && col < v.nx && std::isfinite(coeff) && std::abs(coeff) > 1e-12) {
+        uc_network_flow_col.push_back(col);
+        uc_network_flow_value.push_back(coeff);
+      }
+    }
+    uc_network_flow_rhs.push_back(std::isfinite(rhs) ? rhs : 0.0);
+    uc_network_flow_original_row.push_back(original_row);
+    uc_network_flow_line.push_back(line);
+    uc_network_flow_time.push_back(time);
+    uc_network_flow_direction.push_back(direction);
+    uc_network_flow_row_start.push_back(static_cast<int>(uc_network_flow_col.size()));
+  };
 
   // Line flow constraints
   if (PTDF.rows() == v.nl && PTDF.cols() == nb) {
@@ -1378,14 +1420,20 @@ Formulation build_formulation(const SCUCInput& inp) {
             rev.emplace_back(v.PDC_start + dcl * T + t, -coeff);
           }
         }
-        fwd.emplace_back(sl_pos_idx, -1.0);
-        rev.emplace_back(sl_neg_idx, -1.0);
+        const double fwd_rhs = lim + load_ptdf;
+        const double rev_rhs = lim - load_ptdf;
         fwd_r = static_cast<int>(b_vec.size());
-        add_le(fwd, lim + load_ptdf);
+        record_network_flow_row(fwd, fwd_rhs, fwd_r, l, t, 1);
+        fwd.emplace_back(sl_pos_idx, -1.0);
+        add_le(fwd, fwd_rhs);
         rev_r = static_cast<int>(b_vec.size());
-        add_le(rev, lim - load_ptdf);
+        record_network_flow_row(rev, rev_rhs, rev_r, l, t, -1);
+        rev.emplace_back(sl_neg_idx, -1.0);
+        add_le(rev, rev_rhs);
         f.line_fwd_row[static_cast<size_t>(l * T + t)] = fwd_r;
         f.line_rev_row[static_cast<size_t>(l * T + t)] = rev_r;
+        uc_line_fwd_rhs[static_cast<size_t>(l * T + t)] = fwd_rhs;
+        uc_line_rev_rhs[static_cast<size_t>(l * T + t)] = rev_rhs;
       }
     }
   }
@@ -2014,6 +2062,65 @@ Formulation build_formulation(const SCUCInput& inp) {
         }
       }
     }
+    {
+      struct GroupKey {
+        int pmin_bkt{0};
+        int pmax_bkt{0};
+        int ramp_bkt{0};
+        int min_up{0};
+        int min_down{0};
+        bool operator<(const GroupKey& o) const {
+          return std::tie(pmin_bkt, pmax_bkt, ramp_bkt, min_up, min_down) <
+                 std::tie(o.pmin_bkt, o.pmax_bkt, o.ramp_bkt, o.min_up, o.min_down);
+        }
+      };
+      std::map<GroupKey, std::vector<int>> grouped;
+      auto bucket = [](double value) { return static_cast<int>(std::llround(value * 1000.0)); };
+      for (int g = 0; g < v.ng; ++g) {
+        const GroupKey key{bucket(uc.pmin[static_cast<size_t>(g)]),
+                           bucket(uc.pmax[static_cast<size_t>(g)]),
+                           bucket(uc.ramp[static_cast<size_t>(g)]),
+                           uc.min_up[static_cast<size_t>(g)],
+                           uc.min_down[static_cast<size_t>(g)]};
+        grouped[key].push_back(g);
+      }
+
+      uc.identical_group_count = static_cast<int>(grouped.size());
+      uc.identical_group_id.assign(static_cast<size_t>(v.ng), -1);
+      uc.group_member_start.clear();
+      uc.group_members.clear();
+      uc.group_pmin.clear();
+      uc.group_pmax.clear();
+      uc.group_min_up.clear();
+      uc.group_min_down.clear();
+      uc.group_bus.clear();
+      uc.group_is_s_class.clear();
+      uc.group_member_start.reserve(static_cast<size_t>(uc.identical_group_count + 1));
+      uc.group_member_start.push_back(0);
+      int q = 0;
+      for (const auto& [key, members] : grouped) {
+        const int first = members.empty() ? -1 : members.front();
+        const double pmin = first >= 0 ? uc.pmin[static_cast<size_t>(first)] : 0.0;
+        const double pmax = first >= 0 ? uc.pmax[static_cast<size_t>(first)] : 0.0;
+        int common_bus = first >= 0 ? uc.gen_bus[static_cast<size_t>(first)] : -1;
+        for (int g : members) {
+          uc.identical_group_id[static_cast<size_t>(g)] = q;
+          uc.group_members.push_back(g);
+          if (uc.gen_bus[static_cast<size_t>(g)] != common_bus) common_bus = -1;
+        }
+        uc.group_pmin.push_back(pmin);
+        uc.group_pmax.push_back(pmax);
+        uc.group_min_up.push_back(key.min_up);
+        uc.group_min_down.push_back(key.min_down);
+        uc.group_bus.push_back(common_bus);
+        uc.group_is_s_class.push_back(
+            (std::abs(pmin - 20.0) <= 1e-6 && std::abs(pmax - 100.0) <= 1e-6 &&
+             key.min_up == 2 && key.min_down == 2)
+                ? 1 : 0);
+        uc.group_member_start.push_back(static_cast<int>(uc.group_members.size()));
+        ++q;
+      }
+    }
     uc.demand.assign(static_cast<size_t>(T), 0.0);
     uc.reserve_requirement.assign(static_cast<size_t>(T), 0.0);
     uc.spinning_requirement.assign(static_cast<size_t>(T), 0.0);
@@ -2058,6 +2165,24 @@ Formulation build_formulation(const SCUCInput& inp) {
     uc.certifies_segment_bound_rows = true;
     uc.certifies_system_reserve_rows = true;
     uc.certifies_storage_cycle_rows = (v.nstorage > 0);
+    // Family C: populate line GSF + flow limit data for network commitment cuts.
+    if (v.nl > 0 && !uc_line_gsf.empty()) {
+      uc.certifies_hard_network_flow_rows = true;
+      uc.network_line_count = v.nl;
+      uc.network_period_count = T;
+      uc.line_gsf = std::move(uc_line_gsf);
+      uc.line_fwd_rhs = std::move(uc_line_fwd_rhs);
+      uc.line_rev_rhs = std::move(uc_line_rev_rhs);
+      uc.network_flow_row_count = static_cast<int>(uc_network_flow_rhs.size());
+      uc.network_flow_row_start = std::move(uc_network_flow_row_start);
+      uc.network_flow_col = std::move(uc_network_flow_col);
+      uc.network_flow_value = std::move(uc_network_flow_value);
+      uc.network_flow_rhs = std::move(uc_network_flow_rhs);
+      uc.network_flow_original_row = std::move(uc_network_flow_original_row);
+      uc.network_flow_line = std::move(uc_network_flow_line);
+      uc.network_flow_time = std::move(uc_network_flow_time);
+      uc.network_flow_direction = std::move(uc_network_flow_direction);
+    }
     mip.uc_hint = std::move(uc);
   }
 
@@ -2072,10 +2197,21 @@ Formulation build_formulation(const SCUCInput& inp) {
     const int class_stride = T_c + 1;
     mip.branching_priority.assign(static_cast<size_t>(n_vars), 0);
     for (int g = 0; g < v.ng; ++g) {
+      // Scale priority within the IG class by generator capacity: larger
+      // generators affect network flows and system cost much more than small
+      // ones, so branching them first accelerates LP dual-bound convergence.
+      const double pmax_g = inp.generators[static_cast<size_t>(g)].pmax;
+      const int gen_prio = (pmax_g > 600) ? 6
+                         : (pmax_g > 500) ? 5
+                         : (pmax_g > 400) ? 4
+                         : (pmax_g > 250) ? 3
+                         : (pmax_g > 150) ? 2
+                         : (pmax_g > 100) ? 1
+                         : 0;
       for (int t = 0; t < T_c; ++t) {
         const int time_prio = T_c - t;   // t=0 -> highest within class
         mip.branching_priority[static_cast<size_t>(v.IG_start + g * T_c + t)] =
-            3 * class_stride + time_prio;
+            3 * class_stride + gen_prio * class_stride + time_prio;
         mip.branching_priority[static_cast<size_t>(v.SU_start + g * T_c + t)] =
             2 * class_stride + time_prio;
         mip.branching_priority[static_cast<size_t>(v.SD_start + g * T_c + t)] =

@@ -12,17 +12,18 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
       "Build type (Debug, Release, RelWithDebInfo)" FORCE)
 endif()
 
-# Link-time optimization for Release.
-include(CheckIPOSupported)
-check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
-if(_ipo_ok)
-  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
-endif()
-
 # ── Options ───────────────────────────────────────────────────────────────────
 option(MIPSOLVERS_BUILD_TESTS     "Build unit/integration tests"               ON)
 option(MIPSOLVERS_ENABLE_WERROR   "Treat warnings as errors for core library"  OFF)
+if(APPLE)
+  set(_MIPSOLVERS_ENABLE_IPO_DEFAULT OFF)
+else()
+  set(_MIPSOLVERS_ENABLE_IPO_DEFAULT ON)
+endif()
+option(MIPSOLVERS_ENABLE_IPO
+       "Enable interprocedural/link-time optimization for optimized builds"
+       ${_MIPSOLVERS_ENABLE_IPO_DEFAULT})
+unset(_MIPSOLVERS_ENABLE_IPO_DEFAULT)
 option(MIPSOLVERS_BUILD_HFACTOR   "Build vendored HiGHS HFactor static lib"    ON)
 option(MIPSOLVERS_EIGEN_VECTORIZE "Enable Eigen vectorization intrinsics"      ON)
 option(MIPSOLVERS_ENABLE_NATIVE_ARCH
@@ -32,6 +33,20 @@ option(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER "Build scuc_case_builder tool"       O
 option(MIPSOLVERS_BUILD_PYTHON "Build Python (pybind11) bindings"              OFF)
 set(MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES "32" CACHE STRING
     "Eigen max alignment bytes (16/32/64; empty = Eigen default)")
+
+# Link-time optimization for optimized builds. AppleClang embeds SDK-version
+# module flags in LTO objects; mixing static libraries built under nearby SDKs
+# emits noisy linker warnings, so macOS defaults this option off.
+if(MIPSOLVERS_ENABLE_IPO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
+  if(_ipo_ok)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+  else()
+    message(STATUS "mipsolvers: IPO/LTO requested but unavailable: ${_ipo_out}")
+  endif()
+endif()
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 include(cmake/Dependencies.cmake)
@@ -64,6 +79,14 @@ add_library(mipsolvers STATIC
   src/engine/kernel/ipm/ipm_scaling.cpp
   src/engine/kernel/ipm/ipm_restoration.cpp
   src/engine/util/problem_validation.cpp
+  src/l2o/branching_policy.cpp
+  src/l2o/feature_schema.cpp
+  src/l2o/model_fingerprint.cpp
+  src/l2o/policy.cpp
+  src/l2o/scuc_warm_start.cpp
+  src/l2o/solver_config_policy.cpp
+  src/l2o/trace_event.cpp
+  src/l2o/trace_writer.cpp
   src/aml/model.cpp
   src/aml/set.cpp
 )
@@ -353,6 +376,7 @@ if(MIPSOLVERS_BUILD_TESTS)
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)
+  mipsolvers_add_test(test_l2o_trace           TIER unit)
 
   # SCUC module test requires scuc.cpp (not in base mipsolvers lib)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scuc_module.cpp" AND MIPSOLVERS_BUILD_SCUC)
@@ -458,14 +482,18 @@ if(MIPSOLVERS_BUILD_PYTHON)
 
   # Use pybind11's own CMake integration.
   list(APPEND CMAKE_PREFIX_PATH "${_pb11_cmake_root}")
-  find_package(pybind11 REQUIRED CONFIG)
+  set(Python3_EXECUTABLE "${PYTHON_EXECUTABLE}" CACHE FILEPATH
+      "Python interpreter used for MIPSolvers Python bindings" FORCE)
   find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+  set(PYBIND11_FINDPYTHON ON)
+  find_package(pybind11 REQUIRED CONFIG)
 
   # Build the extension module.
   pybind11_add_module(mipsolvers_py MODULE
     src/python/mipsolvers_py.cpp
     src/python/aml_bindings.cpp
     src/scuc/scuc.cpp          # SCUC is header-only-ish; include impl
+    src/scuc/case_builder.cpp
   )
 
   target_include_directories(mipsolvers_py PRIVATE

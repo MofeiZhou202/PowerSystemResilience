@@ -41,13 +41,17 @@ struct BCBranchingPrior {
 };
 
 /// Lightweight snapshot passed to dynamic-prior callbacks.
+///
+/// Callback-facing indices are in original model space. Solver internals may
+/// branch in a presolved/reduced model, but they should map candidate columns
+/// and LP values back before invoking user or L2O policy callbacks.
 struct BCBranchContext {
   int    node_id{-1};
   int    depth{0};
   double node_lb{-1e30};
   double best_obj{1e30};
 
-  /// Candidate variables that are currently fractional.
+  /// Candidate variables that are currently fractional, in original space.
   const std::vector<int>* candidates{nullptr};
 
   /// Current LP relaxation primal vector, in original-variable space.

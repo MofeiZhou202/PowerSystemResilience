@@ -232,6 +232,21 @@ struct MIPModel {
     std::vector<int> sd_cols;   ///< sd_cols[t*ng+g] = reduced col for sd(g,t)
     std::vector<int> pg_cols;   ///< pg_cols[t*ng+g] = reduced col for p(g,t)
 
+    /// Identical-generator commitment groups for diagnostic cut separation.
+    /// Groups are physical/commitment groups, not necessarily same-bus network
+    /// groups. Members are stored in CSR style: members for group q are in
+    /// group_members[group_member_start[q]..group_member_start[q+1]).
+    int identical_group_count{0};
+    std::vector<int> identical_group_id;       ///< generator -> group id, ng entries
+    std::vector<int> group_member_start;       ///< size identical_group_count + 1
+    std::vector<int> group_members;            ///< flattened generator ids
+    std::vector<double> group_pmin;
+    std::vector<double> group_pmax;
+    std::vector<int> group_min_up;
+    std::vector<int> group_min_down;
+    std::vector<int> group_bus;                ///< common bus, or -1 when mixed
+    std::vector<int> group_is_s_class;         ///< 1 for pmin=20,pmax=100,TU=TD=2
+
     /// Constraint certificates for dynamic user cuts. Metadata by itself is
     /// only descriptive; a callback may generate a row only when the matching
     /// original-space constraint family is certified here.
@@ -279,6 +294,24 @@ struct MIPModel {
     std::vector<double> line_gsf;
     std::vector<double> line_fwd_rhs;
     std::vector<double> line_rev_rhs;
+
+    /// Full sparse PTDF flow rows for solver-side lazy/user separation.
+    /// Rows are stored in CSR format and represent hard inequalities without
+    /// emergency slack variables: network_flow_row_start[r]..
+    /// network_flow_row_start[r+1] indexes network_flow_col/value.
+    /// network_flow_original_row[r] is the corresponding original inequality
+    /// row in LPModel::A, allowing an adapter to omit that upfront row and
+    /// enforce it through callbacks instead.
+    int network_flow_row_count{0};
+    int network_period_count{0};
+    std::vector<int> network_flow_row_start;
+    std::vector<int> network_flow_col;
+    std::vector<double> network_flow_value;
+    std::vector<double> network_flow_rhs;
+    std::vector<int> network_flow_original_row;
+    std::vector<int> network_flow_line;
+    std::vector<int> network_flow_time;
+    std::vector<int> network_flow_direction;  ///< +1 forward, -1 reverse
 
     /// Optional monitored-section / corridor metadata, with the same layout
     /// as line_gsf and line_*_rhs. A section row must be a nonnegative
