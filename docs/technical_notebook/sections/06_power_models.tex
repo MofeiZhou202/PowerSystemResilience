@@ -1,0 +1,288 @@
+% ============================================================
+\section{Power-Model Builders (AML Layer)}
+\label{sec:power-models}
+% ============================================================
+
+The \texttt{src/power\_models/} subsystem provides four algebraic model
+builders that construct optimisation or simulation models using the AML
+expression layer.  All builders live under the namespace
+\texttt{hacdcpf::power\_models} and are declared in
+\texttt{include/hacdcpf/power\_models/}.
+
+% ------------------------------------------------------------
+\subsection{AML Abstraction Layer}
+\label{sec:aml}
+% ------------------------------------------------------------
+
+The AML layer (\texttt{include/hacdcpf/aml/aml.hpp}) is a thin namespace
+alias:
+\begin{verbatim}
+#include <mipsolvers/aml/aml.hpp>
+namespace hacdcpf {
+  namespace aml = mipsolvers::aml;
+}
+\end{verbatim}
+All expression types (\texttt{Variable}, \texttt{NonlinearExpr},
+\texttt{Constraint}, etc.) and the \texttt{AMLModel} container are inherited
+from the \texttt{mipsolvers} library.  The builders populate an
+\texttt{AMLModel} instance and hand it to the solver engine.
+
+% ------------------------------------------------------------
+\subsection{LinDistFlow Builder}
+\label{sec:lindistflow}
+% ------------------------------------------------------------
+
+\subsubsection{Mathematical Formulation}
+
+The \texttt{LinDistFlowBuilder} constructs a linearised DistFlow LP
+(Baran \& Wu, 1989) for a radial distribution network.
+
+\paragraph{Variables}
+\begin{itemize}
+  \item $P_{ij}$ (MW) -- active power flow on branch $(i,j)$;
+  \item $Q_{ij}$ (MVAr) -- reactive power flow on branch $(i,j)$;
+  \item $v_i$ (pu$^2$) -- squared voltage magnitude at bus $i$.
+\end{itemize}
+
+\paragraph{Constraints (per non-root bus $j$)}
+Active power balance:
+\begin{align}
+P_{\pi(j),j} - P_{j}^{\mathrm{load}} - \sum_{k:\,(j,k)\in\mathcal{E}} P_{jk} = 0.
+\end{align}
+Reactive power balance:
+\begin{align}
+Q_{\pi(j),j} - Q_{j}^{\mathrm{load}} - \sum_{k:\,(j,k)\in\mathcal{E}} Q_{jk} = 0.
+\end{align}
+Linearised voltage drop on branch $(i,j)$ with resistance $r_{ij}$ and
+reactance $x_{ij}$:
+\begin{align}
+v_j = v_i - 2(r_{ij}\,P_{ij} + x_{ij}\,Q_{ij}).
+\end{align}
+Thermal limits (VA rating $S_{ij}^{\max}$):
+\begin{align}
+P_{ij}^2 + Q_{ij}^2 \le (S_{ij}^{\max})^2 \quad \text{(relaxed as LP box in
+current version)}.
+\end{align}
+Voltage bounds:
+\begin{align}
+v_{\min} \le v_i \le v_{\max}\quad \forall i,
+\end{align}
+with defaults $v_{\min}=0.81$ (pu$^2$, i.e.\ 0.9~pu) and
+$v_{\max}=1.21$ (pu$^2$, i.e.\ 1.1~pu).
+
+\paragraph{Objective}
+Minimise total active-power loss (or external generator cost when provided):
+\begin{align}
+\min\;\sum_{(i,j)\in\mathcal{E}} r_{ij}\,I_{ij}^2
+\;\approx\;
+\min\;\sum_{(i,j)\in\mathcal{E}} r_{ij}\,\frac{P_{ij}^2+Q_{ij}^2}{v_i}.
+\end{align}
+In the pure LP (default) the loss objective uses the DistFlow convex-relaxation
+approximation.
+
+\subsubsection{Input/Output Structs}
+
+\begin{longtable}{L{0.27\linewidth}L{0.17\linewidth}L{0.47\linewidth}}
+\toprule
+\texttt{LinDistFlowData} field & Type & Meaning \\
+\midrule
+\endhead
+\texttt{bus\_ids} & \texttt{vector<string>} & Ordered list of bus IDs (root first). \\
+\texttt{root\_bus} & \texttt{string} & Root bus ID (voltage fixed to $v_0 = 1.0$ pu$^2$). \\
+\texttt{branches} & \texttt{vector<LinBranchData>} & Each branch: \texttt{id}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{x\_pu}, \texttt{rate\_a\_mva}. \\
+\texttt{p\_load\_mw} & \texttt{map<string,double>} & Active load by bus ID (MW). \\
+\texttt{q\_load\_mvar} & \texttt{map<string,double>} & Reactive load by bus ID (MVAr). \\
+\texttt{v\_min\_pu\_sq} & \texttt{double} & Squared lower voltage bound; default 0.81. \\
+\texttt{v\_max\_pu\_sq} & \texttt{double} & Squared upper voltage bound; default 1.21. \\
+\texttt{base\_mva} & \texttt{double} & System base MVA. \\
+\bottomrule
+\end{longtable}
+
+\texttt{LinDistFlowResult} provides per-bus squared voltages $v_i$, per-branch
+$P_{ij}$ and $Q_{ij}$, total loss, and the AML solver status.
+
+% ------------------------------------------------------------
+\subsection{AC OPF Builder}
+\label{sec:acopf-builder}
+% ------------------------------------------------------------
+
+\subsubsection{Mathematical Formulation}
+
+The \texttt{ACOPFBuilder} populates an \texttt{AMLModel} with the standard
+MATPOWER AC OPF.  All quantities are in per-unit on the system \texttt{base\_mva}.
+
+\paragraph{Objective}
+\begin{align}
+\min\;\sum_{g}\bigl[c_{2,g}\,(P_{g}\,S_b)^2 + c_{1,g}\,(P_{g}\,S_b) + c_{0,g}\bigr].
+\end{align}
+
+\paragraph{Power balance at bus $i$}
+\begin{align}
+\sum_{g\in i} P_g - P_{d,i} - G_{s,i}V_i^2 - \sum_\ell (P_{f,\ell}+P_{t,\ell}) &= 0, \\
+\sum_{g\in i} Q_g - Q_{d,i} + B_{s,i}V_i^2 - \sum_\ell (Q_{f,\ell}+Q_{t,\ell}) &= 0.
+\end{align}
+
+\paragraph{Branch $\pi$-model flows}
+
+For branch $\ell = (i \to k)$ with admittance $y_s = 1/(r+jx)$,
+off-nominal tap $\tau$, phase shift $\varphi$ and shunt $b_c$:
+\begin{align}
+Y_{ff} &= \tfrac{y_s + jb_c/2}{\tau^2},\quad
+Y_{tt} = y_s + jb_c/2, \\
+Y_{ft} &= -\tfrac{y_s}{\tau\,e^{-j\varphi}},\quad
+Y_{tf} = -\tfrac{y_s}{\tau\,e^{j\varphi}}.
+\end{align}
+\begin{align}
+P_{f,\ell} &= \Re(Y_{ff})\,V_i^2 + \Re(Y_{ft})\,V_i V_k\cos(\theta_i-\theta_k) + \Im(Y_{ft})\,V_i V_k\sin(\theta_i-\theta_k), \\
+Q_{f,\ell} &= -\Im(Y_{ff})\,V_i^2 - \Im(Y_{ft})\,V_i V_k\cos(\theta_i-\theta_k) + \Re(Y_{ft})\,V_i V_k\sin(\theta_i-\theta_k).
+\end{align}
+(Identical expressions for $P_{t,\ell}$, $Q_{t,\ell}$ with subscripts swapped.)
+
+\paragraph{Branch thermal limits}
+\begin{align}
+P_{f,\ell}^2 + Q_{f,\ell}^2 &\le (S_{\ell}^{\max})^2, \\
+P_{t,\ell}^2 + Q_{t,\ell}^2 &\le (S_{\ell}^{\max})^2.
+\end{align}
+
+\paragraph{Voltage/generation limits}
+\begin{align}
+V_{i,\min} \le V_i \le V_{i,\max},\quad
+P_{g,\min} \le P_g \le P_{g,\max},\quad
+Q_{g,\min} \le Q_g \le Q_{g,\max}.
+\end{align}
+
+\subsubsection{Input Structs}
+
+\begin{longtable}{L{0.22\linewidth}L{0.72\linewidth}}
+\toprule
+Struct & Key fields \\
+\midrule
+\endhead
+\texttt{ACOPFBusData} & \texttt{id}, \texttt{pd\_pu}, \texttt{qd\_pu}, \texttt{gs\_pu}, \texttt{bs\_pu}, \texttt{vm\_min}, \texttt{vm\_max}, \texttt{vm0}, \texttt{va0\_rad}, \texttt{is\_ref}. \\
+\texttt{ACOPFGenData} & \texttt{id}, \texttt{bus\_id}, \texttt{pg\_min\_pu}, \texttt{pg\_max\_pu}, \texttt{qg\_min\_pu}, \texttt{qg\_max\_pu}, \texttt{cost\_c2}, \texttt{cost\_c1}, \texttt{cost\_c0}. \\
+\texttt{ACOPFBranchData} & \texttt{id}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{x\_pu}, \texttt{bc\_pu}, \texttt{tap}, \texttt{shift\_deg}, \texttt{rate\_a\_pu}. \\
+\texttt{ACOPFData} & Container: \texttt{buses}, \texttt{generators}, \texttt{branches}, \texttt{base\_mva}. \\
+\bottomrule
+\end{longtable}
+
+\texttt{ACOPFBuilderResult} exposes the populated \texttt{AMLModel}, variable
+handles (\texttt{Pg}, \texttt{Qg}, \texttt{Vm}, \texttt{Va}), and the
+constraint ranges for post-solution dual extraction (LMPs).
+
+% ------------------------------------------------------------
+\subsection{Hybrid AC/DC OPF Builder}
+\label{sec:acdcopf-builder}
+% ------------------------------------------------------------
+
+The \texttt{ACDCOPFBuilder} extends \texttt{ACOPFBuilder} with DC buses, DC
+branches, and VSC converter coupling.  It inherits all AC OPF data structs and
+adds the following.
+
+\subsubsection{Mathematical Formulation}
+
+\paragraph{DC bus voltage bounds}
+\begin{align}
+V_{k,\min}^{dc} \le V_k^{dc} \le V_{k,\max}^{dc}\quad \forall k\in\mathcal{B}^{dc}.
+\end{align}
+
+\paragraph{DC power balance at bus $k$}
+\begin{align}
+\sum_{m\in\delta^+(k)} \frac{V_k^{dc} - V_m^{dc}}{r_{km}}
+- \sum_{m\in\delta^-(k)} \frac{V_m^{dc} - V_k^{dc}}{r_{mk}}
++ P_k^{dc,\mathrm{conv}} = 0.
+\end{align}
+VDC-Q converters enforce $V_c^{dc} = V_c^{dc,\mathrm{set}}$ via equality
+constraints.
+
+\paragraph{VSC converter coupling}
+
+Per converter $c$ with AC bus $i$ and DC bus $k$:
+\begin{align}
+P_{ac,c} &\in [p_{c,\min},\, p_{c,\max}] / S_b,\\
+Q_{ac,c} &\in [q_{c,\min},\, q_{c,\max}] / S_b.
+\end{align}
+Quadratic loss model:
+\begin{align}
+P_{ac,c} + P_{dc,c} + a_c + b_c\,I_{ac,c} + c_c\,I_{ac,c}^2 = 0,
+\end{align}
+where $I_{ac,c} = \sqrt{P_{ac,c}^2 + Q_{ac,c}^2 + \varepsilon}\;/\;V_{i}$
+and the loss parameters are
+$a_c = \texttt{loss\_mw}/S_b$, $b_c = \texttt{loss\_percent}/100$,
+$c_c = 1-\eta_c$.
+
+\subsubsection{Additional Input Structs}
+
+\begin{longtable}{L{0.25\linewidth}L{0.70\linewidth}}
+\toprule
+Struct & Key fields \\
+\midrule
+\endhead
+\texttt{ACDCOPFDCBusData} & \texttt{id}, \texttt{vdc\_min=0.9}, \texttt{vdc\_max=1.1}, \texttt{vdc0=1.0}, \texttt{pd\_pu=0.0}, \texttt{is\_vdc\_slack}, \texttt{vdc\_set=1.0}. \\
+\texttt{ACDCOPFDCBranchData} & \texttt{id}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu=0.01}. \\
+\texttt{ACDCOPFConverterData} & \texttt{id}, \texttt{ac\_bus\_id}, \texttt{dc\_bus\_id}, power bounds (\texttt{pac\_min/max}, \texttt{qac\_min/max}), warm-start (\texttt{pac0}, \texttt{qac0}), loss coefficients (\texttt{a\_pu}, \texttt{b\_loss}, \texttt{c\_loss}). \\
+\texttt{ACDCOPFData} & AC data via \texttt{ACOPFData} base, plus \texttt{dc\_buses}, \texttt{dc\_branches}, \texttt{converters}. \\
+\bottomrule
+\end{longtable}
+
+% ------------------------------------------------------------
+\subsection{Security-Constrained Unit Commitment (SCUC) Builder}
+\label{sec:scuc-builder}
+% ------------------------------------------------------------
+
+\subsubsection{Mathematical Formulation}
+
+The \texttt{SCUCBuilder} constructs a MILP unit commitment over a
+multi-period horizon $\mathcal{T}$.
+
+\paragraph{Decision variables}
+\begin{itemize}
+  \item $p_{g,t} \ge 0$ -- dispatch level (MW) of unit $g$ in period $t$;
+  \item $u_{g,t} \in \{0,1\}$ -- on/off binary status;
+  \item $s_{g,t} \ge 0$ -- start-up cost incurred if unit starts in period $t$.
+\end{itemize}
+
+\paragraph{Objective}
+\begin{align}
+\min\;\sum_{t\in\mathcal{T}}\sum_{g}\bigl[c_g\,p_{g,t} + S_g\,s_{g,t} + C_g\,u_{g,t}\bigr].
+\end{align}
+
+\paragraph{Constraints}
+System balance:
+\begin{align}
+\sum_g p_{g,t} = D_t\quad \forall t.
+\end{align}
+Capacity:
+\begin{align}
+P_{g,\min}\,u_{g,t} \le p_{g,t} \le P_{g,\max}\,u_{g,t}\quad \forall g,t.
+\end{align}
+Ramp limits:
+\begin{align}
+p_{g,t} - p_{g,t-1} \le R_g^{up},\qquad p_{g,t-1} - p_{g,t} \le R_g^{dn}.
+\end{align}
+Start-up logic:
+\begin{align}
+s_{g,t} \ge u_{g,t} - u_{g,t-1}\ge 0.
+\end{align}
+
+\subsubsection{Input/Output Structs}
+
+\begin{longtable}{L{0.28\linewidth}L{0.17\linewidth}L{0.46\linewidth}}
+\toprule
+\texttt{SCUCData} field & Type & Meaning \\
+\midrule
+\endhead
+\texttt{generator\_ids} & \texttt{vector<string>} & Generator IDs. \\
+\texttt{period\_ids} & \texttt{vector<string>} & Period labels (e.g.\ ``H01'' \dots ``H24''). \\
+\texttt{demand\_MW} & \texttt{map<string,double>} & System demand per period (MW). \\
+\texttt{cost\_per\_MWh} & \texttt{map<string,double>} & Energy cost $c_g$ per generator (\$/MWh). \\
+\texttt{startup\_cost} & \texttt{map<string,double>} & Start-up cost $S_g$ (\$). \\
+\texttt{fixed\_cost} & \texttt{map<string,double>} & No-load cost $C_g$ (\$/h). \\
+\texttt{pmin\_MW} & \texttt{map<string,double>} & Minimum stable generation $P_{g,\min}$ (MW). \\
+\texttt{pmax\_MW} & \texttt{map<string,double>} & Maximum generation $P_{g,\max}$ (MW). \\
+\texttt{ramp\_up\_MW} & \texttt{map<string,double>} & Ramp-up limit $R_g^{up}$ (MW/period). \\
+\texttt{ramp\_dn\_MW} & \texttt{map<string,double>} & Ramp-down limit $R_g^{dn}$ (MW/period). \\
+\bottomrule
+\end{longtable}
+
+\texttt{SCUCResult} provides per-generator, per-period schedules
+($p_{g,t}$, $u_{g,t}$, $s_{g,t}$), total cost, and solver status.

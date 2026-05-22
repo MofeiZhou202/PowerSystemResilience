@@ -12,7 +12,7 @@ enum class SwitchType {
   Sectionalizer = 5,
 };
 
-// Breaker type (matching Julia HighVoltageCircuitBreaker.type)
+// Breaker type
 enum class BreakerType {
   CB = 0,   // Circuit Breaker
   LS = 1,   // Load Switch

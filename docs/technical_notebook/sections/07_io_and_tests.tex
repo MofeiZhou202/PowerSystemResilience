@@ -1,0 +1,140 @@
+% ============================================================
+\section{I/O Layer: Parsers, Case Builders, and JSON Contracts}
+\label{sec:io}
+% ============================================================
+
+% ------------------------------------------------------------
+\subsection{MATPOWER Parser}
+\label{sec:matpower-parser}
+% ------------------------------------------------------------
+
+\texttt{hacdcpf::io::MatpowerParser} reads MATPOWER \texttt{.m} case files
+from disk (\texttt{include/hacdcpf/io/matpower\_parser.hpp}).  The parser
+understands the \texttt{mpc.version~=~'2'} format used by MATPOWER~6 and
+populates a \texttt{HybridPowerSystem} object.
+
+\paragraph{Covered table sections}
+\begin{longtable}{L{0.22\linewidth}L{0.70\linewidth}}
+\toprule
+Section & Mapped struct(s) \\
+\midrule
+\endhead
+\texttt{mpc.bus} & \texttt{ACBus} (type, Pd, Qd, Gs, Bs, Vm, Va, Vmin, Vmax). \\
+\texttt{mpc.gen} & \texttt{Generator} (bus, Pg, Qg, Qmax, Qmin, Vg, Pmax, Pmin, status). \\
+\texttt{mpc.branch} & \texttt{ACBranch} (from, to, r, x, b, rateA/B/C, tap, shift, status). \\
+\texttt{mpc.gencost} & Generator cost model: polynomial (type 2) or piecewise-linear (type 1). \\
+\texttt{mpc.dcline} & \texttt{VSCConverter} (basic two-terminal DC; mapped to converter pair). \\
+\texttt{mpc.bus\_name} & Populates \texttt{ACBus::name}. \\
+\bottomrule
+\end{longtable}
+
+Data directory \texttt{data/} ships with 80+ MATPOWER case files covering
+IEEE~9, 14, 30, 57, 118, 300, and a range of synthetic US/European grids up to
+70\,000 buses.
+
+% ------------------------------------------------------------
+\subsection{JSON I/O}
+\label{sec:json-io}
+% ------------------------------------------------------------
+
+\texttt{include/hacdcpf/io/json\_io.hpp} provides:
+\begin{itemize}
+  \item \texttt{load\_hybrid\_system\_from\_json(path)} -- read a
+  \texttt{HybridPowerSystem} from disk;
+  \item \texttt{save\_hybrid\_system\_to\_json(sys, path)} -- write to disk;
+  \item \texttt{result\_to\_json(result)} -- serialise a
+  \texttt{PowerFlowResult} to JSON;
+  \item \texttt{opf\_result\_to\_json(result)} -- serialise an
+  \texttt{OPFResult}.
+\end{itemize}
+The on-disk schema mirrors the field names of the C++ structs and includes
+metadata (\texttt{name}, \texttt{base\_mva}, timestamps).
+
+% ------------------------------------------------------------
+\subsection{Pre-built Test Networks (\texttt{case\_builders.hpp})}
+\label{sec:case-builders}
+% ------------------------------------------------------------
+
+\texttt{hacdcpf::io} exposes a library of factory functions for use in tests
+and benchmarks.  All returned systems include at least one DC bus and VSC
+converter unless the \texttt{\_ac\_only} variant is used.
+
+\begin{longtable}{L{0.44\linewidth}L{0.50\linewidth}}
+\toprule
+Function & Description \\
+\midrule
+\endhead
+\texttt{build\_ieee14\_acdc()} & IEEE 14-bus AC + one DC link. \\
+\texttt{build\_ieee24\_3area\_acdc()} & IEEE 24-bus RTS divided into 3 control areas, interconnected via DC. \\
+\texttt{build\_ieee24\_3area\_acdc\_expanded()} & Expanded version with additional DER and storage. \\
+\texttt{build\_ieee118\_acdc()} & IEEE 118-bus + multi-terminal DC grid. \\
+\texttt{build\_ac\_only\_version(sys)} & Strip all DC components from an existing system. \\
+\texttt{build\_case33bw\_acdc()} & Baran--Wu 33-bus distribution + DC microgrid. \\
+\texttt{build\_case33mg\_acdc()} & 33-bus microgrid variant with storage. \\
+\texttt{build\_case69\_acdc()} & 69-bus radial distribution + DC feeder. \\
+\texttt{build\_case300\_acdc()} & IEEE 300-bus + HVDC link. \\
+\texttt{build\_demo\_multizone\_acdc()} & Multi-zone demonstration system. \\
+\texttt{build\_case2000\_acdc()} & 2000-bus synthetic + DC overlay. \\
+\texttt{build\_dist33\_microgrid\_der()} & 33-bus distribution with DER and battery storage. \\
+\texttt{build\_comprehensive\_hybrid\_acdc()} & Stress-test system with all component types. \\
+\texttt{build\_market\_3bus\_toy()} & 3-bus toy system for market/OPF unit tests. \\
+\texttt{build\_market\_5bus\_acdc\_toy()} & 5-bus AC/DC toy for hybrid OPF unit tests. \\
+\bottomrule
+\end{longtable}
+
+% ============================================================
+\section{Test Suite}
+\label{sec:tests}
+% ============================================================
+
+All tests use the Catch2 framework (fetched automatically by CMake via
+\texttt{FetchContent}).  Build and run with:
+\begin{verbatim}
+cmake -B build -DHACDCPF_BUILD_TESTS=ON
+cmake --build build
+cd build && ctest --output-on-failure
+\end{verbatim}
+
+% ------------------------------------------------------------
+\subsection{Test File Overview}
+% ------------------------------------------------------------
+
+\begin{longtable}{L{0.38\linewidth}L{0.55\linewidth}}
+\toprule
+File & Coverage \\
+\midrule
+\endhead
+\texttt{test\_hacdcpf.cpp} & Smoke tests for model construction, power flow, OPF, and basic analysis on 2-bus AC and IEEE~14 AC/DC systems.  Uses \texttt{make\_simple\_ac\_system()} and \texttt{build\_ieee14\_acdc()}. \\
+\texttt{test\_hacdcdss.cpp} & Smoke tests for the \texttt{hacdcdss} module: \texttt{NetworkModel}, \texttt{ScenarioData}, \texttt{TimeSeriesLoader}, \texttt{AdmittanceModel}, \texttt{PFSolver} (hacdcdss namespace), and \texttt{OPFModel}.  Validates a 2-bus AC network and a 4-bus DC ring.\\
+\texttt{test\_all\_components\_pf.cpp} & Exercises every component type (VSC, DCDC converters, ChargingStation, AsymmetricLoad, Switch, CircuitBreaker, Storage, RenewableGen, etc.) through the full power-flow pipeline.\\
+\texttt{test\_acopf\_dcopf\_crossval.cpp} & Cross-validates AC OPF, DC OPF (LP), and power-flow feasibility on a batch of MATPOWER cases from the \texttt{data/} directory.  Compares generation costs and bus-voltage ranges. \\
+\texttt{test\_enhanced\_solver.cpp} & Tests the multi-phase robust pipeline: island detection, distributed slack solver, \texttt{RobustNonlinearOptions} phase toggling, and fallback path activation. \\
+\texttt{test\_powerflow\_performance.cpp} & Wall-clock performance regression tests on medium-to-large cases (IEEE~118, case300, case2000).  Fails if solve time exceeds reference limits.\\
+\texttt{test\_scaling\_regression.cpp} & Numerical scaling regression: checks that per-unit results match reference solutions to prescribed tolerance after toggling residual/variable/Jacobian scaling options. \\
+\texttt{test\_unified\_pf\_upgrade.cpp} & Integration tests for the unified PF upgrade path.  Uses \texttt{hacdcpf::powerflow::inf\_norm} to verify residual norms on upgraded systems. \\
+\bottomrule
+\end{longtable}
+
+% ------------------------------------------------------------
+\subsection{Example Test Pattern}
+% ------------------------------------------------------------
+
+The typical Catch2 test pattern in this project:
+
+\begin{verbatim}
+TEST_CASE("brief description", "[tag1][tag2]") {
+    auto sys = hacdcpf::io::build_ieee14_acdc();
+    hacdcpf::PowerFlowOptions opt;
+    opt.tol = 1e-8;
+
+    auto result = hacdcpf::solve_power_flow(sys, opt);
+
+    REQUIRE(result.converged);
+    REQUIRE_THAT(result.buses[0].vm_pu,
+                 Catch::Matchers::WithinAbs(1.06, 1e-4));
+}
+\end{verbatim}
+
+Tags used across the suite include \texttt{[model]}, \texttt{[pf]},
+\texttt{[opf]}, \texttt{[integration]}, \texttt{[enhanced]}, \texttt{[island]},
+\texttt{[performance]}, and \texttt{[scaling]}.

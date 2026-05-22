@@ -1,0 +1,318 @@
+% ============================================================
+\section{Advanced and Fallback Power-Flow Solvers}
+\label{sec:advanced-pf}
+% ============================================================
+
+This chapter documents the remaining power-flow solver families declared in
+\texttt{include/hacdcpf/power\_flow/}: the Continuation Power Flow
+(\texttt{CpfSolver}), the Homotopy Continuation Solver, the Distributed Slack
+Solver mathematical model, and the Newton--Krylov GMRES fallback.  It also
+provides the complete \texttt{RobustNonlinearOptions} and
+\texttt{PowerFlowOptions} reference tables.
+
+% ------------------------------------------------------------
+\subsection{Continuation Power Flow (CPF) / Voltage Stability}
+\label{sec:cpf}
+% ------------------------------------------------------------
+
+The \texttt{CpfSolver} traces the P--V curve of a parameterized power system
+from the base operating point (\(\lambda=0\)) toward the voltage-collapse nose
+point.  The implementation lives in
+\texttt{src/power\_flow/homotopy\_continuation.cpp} (the CPF corrector) and
+\texttt{include/hacdcpf/power\_flow/voltage\_stability.hpp}.  It is exposed at
+the lower-level \texttt{hacdcpf::powerflow} namespace and is not part of the
+public \texttt{hacdcpf.hpp} facade.
+
+\subsubsection{Parameterized Power System}
+
+The loading direction is described by \texttt{CpfDirection}:
+\begin{align}
+P_{L,i}(\lambda) &= P_{L,i}^0 + \lambda\,\Delta P_{L,i}, \\
+Q_{L,i}(\lambda) &= Q_{L,i}^0 + \lambda\,\Delta Q_{L,i}, \\
+P_{G,i}(\lambda) &= P_{G,i}^0 + \lambda\,\Delta P_{G,i},\quad \text{(non-slack only)}.
+\end{align}
+Here \(\lambda=0\) is the base case; \(\lambda=1\) doubles all loads when
+using the proportional direction.  Two factory methods build standard directions:
+\begin{itemize}
+  \item \texttt{CpfDirection::proportional(data)} --- all buses scale in
+  proportion to their base-case power.
+  \item \texttt{CpfDirection::at\_buses(data, bus\_indices)} --- uniform
+  1~MW/Mvar per bus in the specified list.
+\end{itemize}
+
+\subsubsection{Predictor--Corrector Continuation}
+
+The predictor step uses a secant (or constant) approximation:
+\begin{align}
+x_{\lambda+\Delta\lambda} \approx x_\lambda + \Delta\lambda\,\frac{x_\lambda - x_{\lambda-\Delta\lambda}}{\Delta\lambda_{\mathrm{prev}}}.
+\end{align}
+
+The corrector step solves the parameterized Newton system at the predicted point
+by running the hybrid Newton PF with the modified injection vector and
+convergence tolerance \texttt{corrector\_tol}.
+
+Step adaptation:
+\begin{align}
+\Delta\lambda_{\mathrm{new}} =
+\begin{cases}
+\min(\texttt{step\_grow}\cdot\Delta\lambda,\;\texttt{step\_max}), & \text{corrector converged,} \\
+\texttt{step\_shrink}\cdot\Delta\lambda, & \text{corrector failed.}
+\end{cases}
+\end{align}
+If \(\Delta\lambda < \texttt{step\_min}\), the solver reports the nose point
+and stops.
+
+\subsubsection{\texttt{CpfOptions} Reference}
+
+\begin{longtable}{L{0.26\linewidth}L{0.13\linewidth}L{0.48\linewidth}}
+\toprule
+Field & Default & Meaning \\
+\midrule
+\endhead
+\texttt{lambda\_max} & 5.0 & Maximum loading factor \(\lambda\) to trace. \\
+\texttt{step\_init} & 0.05 & Initial continuation step \(\Delta\lambda\). \\
+\texttt{step\_min} & 1e-5 & Minimum step size; stop and declare nose point reached. \\
+\texttt{step\_max} & 0.20 & Maximum step size (prevents skipping over the nose). \\
+\texttt{step\_grow} & 2.0 & Growth factor applied after a successful corrector solve. \\
+\texttt{step\_shrink} & 0.5 & Shrink factor applied after a corrector failure. \\
+\texttt{corrector\_max\_iter} & 50 & Max Newton iterations in each corrector call. \\
+\texttt{corrector\_tol} & 1e-8 & Convergence tolerance for the corrector (p.u.). \\
+\texttt{monitor\_bus} & -1 & Bus index to plot on the P--V curve; $-1$ = auto-select max demand. \\
+\texttt{trace\_all\_buses} & false & Store full \texttt{vm}/\texttt{va} vectors at every CPF step. \\
+\texttt{max\_steps} & 2000 & Safety cap on total predictor--corrector steps. \\
+\texttt{vm\_min\_pu} & 0.25 & Voltage floor; stop if any bus falls below this (p.u.). \\
+\texttt{use\_secant\_predictor} & true & Use secant (two-point) predictor; false = constant predictor. \\
+\bottomrule
+\end{longtable}
+
+\subsubsection{CPF Result Structure}
+
+Each tracing step produces a \texttt{CpfPoint}:
+\begin{itemize}
+  \item \texttt{lambda} -- continuation parameter value at this step;
+  \item \texttt{vm\_monitor} -- monitor-bus voltage magnitude (p.u.).
+\end{itemize}
+The top-level result includes the full trace of \texttt{CpfPoint} records, the
+final converged solution, estimated nose-point \(\lambda^*\) and minimum
+voltage, and the convergence status.
+
+% ------------------------------------------------------------
+\subsection{Homotopy Continuation Solver}
+\label{sec:homotopy}
+% ------------------------------------------------------------
+
+The \texttt{HomotopyContinuationSolver} solves the hybrid power flow by
+gradually ramping ``difficult'' injections from a flat-start base to the target
+values.  It is invoked as a last-resort fallback when the direct Newton solve
+fails (Phase~4 of the robust pipeline).
+
+\subsubsection{Homotopy Path}
+
+The homotopy path scales all active/reactive loads and converter setpoints:
+\begin{align}
+P_{L}(\lambda) &= \lambda\,P_{L}^{\mathrm{target}}, &
+Q_{L}(\lambda) &= \lambda\,Q_{L}^{\mathrm{target}}, \\
+P_{\mathrm{vsc}}(\lambda) &= \lambda\,P_{\mathrm{vsc}}^{\mathrm{target}}, &
+P_{\mathrm{dcdc}}(\lambda) &= \lambda\,P_{\mathrm{dcdc}}^{\mathrm{target}}.
+\end{align}
+At \(\lambda=0\) the system is trivially solved from the flat start.
+At \(\lambda=1\) the full target system is solved.
+
+\subsubsection{Step Adaptation}
+
+\begin{align}
+\text{Success:}\quad\Delta\lambda &\leftarrow \min(2\,\Delta\lambda,\,\Delta\lambda_{\max}), \\
+\text{Failure:}\quad\Delta\lambda &\leftarrow \frac{\Delta\lambda}{2};\quad
+\text{fail if}\;\Delta\lambda < \Delta\lambda_{\min}.
+\end{align}
+The current implementation records accepted/rejected steps in a
+\texttt{HomotopyState} diagnostic struct and returns both the final
+\texttt{PowerFlowResult} and the state for instrumentation.
+
+% ------------------------------------------------------------
+\subsection{Distributed Slack Solver}
+\label{sec:distributed-slack}
+% ------------------------------------------------------------
+
+The distributed-slack solver distributes the active-power mismatch across a set
+of participating buses according to participation factors instead of assigning
+it all to a single slack bus.  Two variants are exposed:
+\begin{itemize}
+  \item \texttt{solve\_power\_flow\_distributed\_slack} -- simplified form
+  (one extra slack sweep);
+  \item \texttt{solve\_power\_flow\_distributed\_slack\_full} -- full-Jacobian
+  distributed-slack, as described below.
+\end{itemize}
+
+\subsubsection{Problem Formulation}
+
+Let $\alpha_g \ge 0$ be participation factors (normalized to sum to 1) and let
+$P_s$ be the total system mismatch.  Each participating generator $g$ receives
+an additional dispatch increment:
+\begin{align}
+\delta P_g = \alpha_g P_s,
+\end{align}
+subject to individual upper bounds \(\texttt{max\_participation\_p}_g\) when
+provided.  The reference bus ($\texttt{reference\_bus}$) provides the angle
+reference; it need not be the same as the swing generator.
+
+\subsubsection{Convergence Criterion}
+
+In the full-Jacobian variant, the distributed-slack equations are appended to
+the standard Newton residual and solved simultaneously.  Convergence is judged
+on the extended infinity-norm \(\|\Delta F\|_\infty < \varepsilon\).
+
+\subsubsection{Result Structure}
+
+\texttt{DistributedSlackResult} extends the standard bus-voltage vectors with:
+\begin{itemize}
+  \item \texttt{distributed\_slack\_p} -- map from participating bus index to
+  final slack-share allocation (MW);
+  \item \texttt{hit\_limits} -- list of buses that reached
+  \texttt{max\_participation\_p} and were clamped.
+\end{itemize}
+
+% ------------------------------------------------------------
+\subsection{Newton--Krylov GMRES Fallback (Phase 5)}
+\label{sec:newton-krylov}
+% ------------------------------------------------------------
+
+Phase~5 of the robust pipeline replaces the direct-factorization linear solve
+with a GMRES iterative solver inside the Newton loop.  The implementation lives
+in \texttt{src/power\_flow/newton\_krylov.cpp} and is declared in
+\texttt{include/hacdcpf/power\_flow/newton\_krylov.hpp}.  It is opt-in and not
+active by default (\texttt{RobustNonlinearOptions::enable\_krylov\_fallback}).
+
+At each Newton iteration the augmented linear system
+\begin{align}
+(J + \alpha M^{-1})\,\Delta x = -F
+\end{align}
+is solved via GMRES with a Schur-complement AC/DC block preconditioner $M$:
+\begin{align}
+M =
+\begin{bmatrix}
+J_{ac} & 0 \\
+0 & J_{dc}
+\end{bmatrix},
+\end{align}
+where $J_{ac}$ is the AC subsystem Jacobian and $J_{dc}$ is the DC subsystem
+Jacobian.  The Krylov fallback is most effective when the Jacobian is ill-
+conditioned due to strong AC/DC coupling, but adds per-iteration overhead
+compared to the direct SparseLU path.
+
+% ------------------------------------------------------------
+\subsection{Complete \texttt{RobustNonlinearOptions} Reference}
+\label{sec:robust-options-table}
+% ------------------------------------------------------------
+
+\begin{longtable}{L{0.35\linewidth}L{0.12\linewidth}L{0.42\linewidth}}
+\toprule
+Field & Default & Description \\
+\midrule
+\endhead
+\multicolumn{3}{l}{\textbf{Phase~1: Scaling and diagnostics}}\\
+\midrule
+\texttt{enable\_residual\_scaling} & \texttt{true} & Scale residual equations by \(\max|F_i^{\mathrm{spec}}|\). \\
+\texttt{enable\_variable\_scaling} & \texttt{true} & Scale Newton variables (\(\theta,V,V^{dc}\)) to \(O(1)\). \\
+\texttt{enable\_jacobian\_row\_col\_equilibration} & \texttt{true} & Apply \(D_F J D_x^{-1}\) row/column equilibration. \\
+\texttt{enable\_condition\_monitor} & \texttt{true} & Compute \(\ell_1\) row/col proxy for condition number each iteration. \\
+\texttt{min\_scale} & 1e-6 & Floor for any scale factor. \\
+\texttt{max\_scale} & 1e6 & Ceiling for any scale factor. \\
+\texttt{min\_vm\_pu} & 1e-8 & Voltage magnitude floor (pu) in Jacobian \(\partial P/\partial V\). \\
+\texttt{min\_branch\_x\_pu} & 1e-20 & Min branch reactance; below this, branch excluded from FDPF \(B'\). \\
+\texttt{bad\_condition\_threshold} & 1e10 & Proxy condition number above which Jacobian is flagged ``bad''. \\
+\texttt{tiny\_pivot\_threshold} & 1e-12 & Pivot magnitude threshold for informational logging. \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~2: Nonmonotone line search}}\\
+\midrule
+\texttt{enable\_nonmonotone\_linesearch} & \texttt{true} & Use GLL nonmonotone Armijo search with sliding window. \\
+\texttt{nonmonotone\_window} & 5 & Sliding window \(M\) for nonmonotone reference merit. \\
+\texttt{armijo\_c} & 1e-4 & Armijo sufficient-decrease constant \(c_1 \in (0,1)\). \\
+\texttt{line\_search\_beta} & 0.5 & Step-length reduction factor \(\beta\) per backtrack trial. \\
+\texttt{max\_line\_search\_trials} & 12 & Maximum backtrack trials before step rejection. \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~2: Smooth Fischer--Burmeister NCP (off by default)}}\\
+\midrule
+\texttt{enable\_smooth\_ncp} & \texttt{false} & Use \(\mu\)-perturbed smooth-FB for PV/PQ complementarity. \\
+\texttt{ncp\_mu0} & 1e-2 & Initial smoothing parameter \(\mu_0\). \\
+\texttt{ncp\_mu\_min} & 1e-12 & Minimum smoothing parameter (limit of continuation). \\
+\texttt{ncp\_mu\_factor} & 0.1 & Fine-phase annealing factor (near-convergence). \\
+\texttt{ncp\_mu\_factor\_coarse} & 0.5 & Coarse-phase annealing factor (large residual). \\
+\texttt{ncp\_mu\_phase\_transition} & 0.1 & Fraction of initial residual to switch to fine annealing. \\
+\texttt{enable\_activity\_hysteresis} & \texttt{true} & Hold PV/PQ active-set for \texttt{min\_active\_set\_hold\_iters} iterations. \\
+\texttt{min\_active\_set\_hold\_iters} & 3 & Minimum iterations between consecutive PV/PQ status changes. \\
+\texttt{q\_limit\_hysteresis} & 1e-4 & Hysteresis band on Q-limit proximity (pu) before switching. \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~3: LM trust-region fallback}}\\
+\midrule
+\texttt{enable\_lm\_trust\_region\_fallback} & \texttt{true} & Compute LM step \((J^\top J+\lambda I)\Delta x=-J^\top F\) on Newton failure. \\
+\texttt{lm\_lambda0} & 1e-4 & Initial LM damping parameter \(\lambda_0\). \\
+\texttt{lm\_lambda\_min} & 1e-12 & Minimum LM damping. \\
+\texttt{lm\_lambda\_max} & 1e8 & Maximum LM damping. \\
+\texttt{trust\_region\_radius0} & 1.0 & Initial trust-region radius. \\
+\texttt{trust\_region\_radius\_min} & 1e-6 & Minimum radius; below this the LM fallback is abandoned. \\
+\texttt{trust\_region\_radius\_max} & 100.0 & Maximum trust-region radius. \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~3: PTC-SER pseudo-transient continuation}}\\
+\midrule
+\texttt{enable\_ptc\_ser} & \texttt{true} & Use Self-Equalising Residual (SER) exponent for adaptive PTC. \\
+\texttt{ptc\_dt0} & 0.1 & Initial pseudo-timestep \(\delta t_0\). \\
+\texttt{ptc\_dt\_min} & 1e-4 & Minimum pseudo-timestep (large damping). \\
+\texttt{ptc\_dt\_max} & 1e6 & Maximum pseudo-timestep (approaches pure Newton). \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~4: Homotopy continuation (see Section~\ref{sec:homotopy})}}\\
+\midrule
+\texttt{enable\_homotopy\_fallback} & configurable & Trigger \texttt{HomotopyContinuationSolver} when Phase~3 fails. \\
+\midrule
+\multicolumn{3}{l}{\textbf{Phase~5: Krylov fallback (off by default)}}\\
+\midrule
+\texttt{enable\_krylov\_fallback} & \texttt{false} & Replace SparseLU with Newton--GMRES + Schur-complement preconditioner. \\
+\bottomrule
+\end{longtable}
+
+% ------------------------------------------------------------
+\subsection{\texttt{PowerFlowOptions} Complete Reference}
+\label{sec:pf-options-table}
+% ------------------------------------------------------------
+
+\begin{longtable}{L{0.38\linewidth}L{0.14\linewidth}L{0.37\linewidth}}
+\toprule
+Field & Default & Description \\
+\midrule
+\endhead
+\texttt{max\_iter} & 50 & Maximum Newton iterations. \\
+\texttt{tol} & 1e-8 & Convergence tolerance \(\varepsilon\) (p.u., \(\ell^\infty\)). \\
+\texttt{ac\_eval\_threads} & 1 & Threads for AC kernel; 0 = hardware auto-detect. \\
+\texttt{enable\_solver\_profiling} & false & Populate \texttt{PowerFlowResult::profiling} counters and timings. \\
+\texttt{max\_line\_search\_steps} & 10 & Max backtrack trials in standard monotone search. \\
+\texttt{max\_regularization\_steps} & 8 & Max Jacobian regularization attempts. \\
+\texttt{regularization\_lambda0} & 1e-6 & Initial regularization shift \(\lambda_{\mathrm{reg}}\). \\
+\texttt{regularization\_growth} & 10.0 & Growth factor applied to \(\lambda_{\mathrm{reg}}\) each retry. \\
+\texttt{max\_delta\_va\_rad} & 1.50 & Max step size clamp for \(\Delta\theta\) (rad). \\
+\texttt{max\_delta\_vm\_pu} & 0.50 & Max step size clamp for \(\Delta V\) (pu). \\
+\texttt{max\_delta\_vdc\_pu} & 0.50 & Max step size clamp for \(\Delta V^{dc}\) (pu). \\
+\texttt{pv\_q\_hysteresis\_pu} & 0.01 & Q-limit proximity band for PV$\to$PQ switching (pu). \\
+\texttt{pv\_recover\_vm\_tol\_pu} & 0.01 & Voltage recovery tolerance for PQ$\to$PV switching (pu). \\
+\texttt{converter\_vdc\_switch\_high\_pu} & 0.03 & DC voltage deviation threshold (high) for mode switching. \\
+\texttt{converter\_vdc\_switch\_low\_pu} & 0.01 & DC voltage deviation threshold (low) for mode switching. \\
+\texttt{mode\_hysteresis\_iters} & 2 & Minimum iterations between converter mode switches. \\
+\texttt{enable\_pv\_pq\_conversion} & true & Enable PV/PQ generator switching. \\
+\texttt{enable\_auto\_swing\_selection} & true & Auto-assign swing bus if none is specified. \\
+\texttt{enable\_converter\_mode\_switching} & true & Enable VSC control-mode switching during Newton. \\
+\texttt{verbose} & false & Print iteration diagnostics to stdout. \\
+\texttt{loss\_model} & Linear & VSC loss model; \texttt{Linear} or \texttt{CurrentDependent}. \\
+\texttt{zip\_pw[3]} & \{1,0,0\} & ZIP active-power weights [const-P, const-I, const-Z]. \\
+\texttt{zip\_qw[3]} & \{1,0,0\} & ZIP reactive-power weights [const-P, const-I, const-Z]. \\
+\texttt{fdpf\_max\_iter} & 1000 & Maximum FDPF P/Q sweep iterations. \\
+\texttt{enable\_coupled\_jacobian} & false & Include cross-coupling Jacobian blocks (\(\partial P^{vsc}/\partial V^{dc}\) etc.). \\
+\texttt{enable\_augmented\_equations} & false & Use augmented-equation path for VDC/VAC bus setpoints. \\
+\texttt{enable\_semi\_smooth\_newton} & false & Use NCP-based PV/PQ switching. \\
+\texttt{globalization} & LineSearch & \texttt{LineSearch}, \texttt{TrustRegion}, or \texttt{PseudoTransient}. \\
+\texttt{trust\_region\_radius0} & 1.0 & Initial trust-region radius (used when \texttt{TrustRegion} is selected). \\
+\texttt{trust\_region\_max} & 10.0 & Maximum trust-region radius. \\
+\texttt{ptc\_delta0} & 1.0 & Initial PTC pseudo-timestep. \\
+\texttt{ptc\_growth} & 2.0 & PTC pseudo-timestep growth factor. \\
+\texttt{initial\_state} & empty & Optional warm-start \texttt{InitialState} (\texttt{vm}, \texttt{va}, \texttt{vdc}). \\
+\texttt{robust\_nonlinear} & (defaults above) & \texttt{RobustNonlinearOptions} sub-struct. \\
+\bottomrule
+\end{longtable}
