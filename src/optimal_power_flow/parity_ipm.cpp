@@ -1,4 +1,4 @@
-#include "hacdcpf/optimal_power_flow/parity_ipm.hpp"
+#include "hacdcpf/optimal_power_flow/native_ipm_solver.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
-#include "hacdcpf/core/logging.hpp"
+#include "hacdcpf/detail/logging.hpp"
 
 namespace hacdcpf::opf::parity {
 

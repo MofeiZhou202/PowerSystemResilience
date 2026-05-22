@@ -1,8 +1,8 @@
 #pragma once
 
-#include "hacdcpf/model/options.hpp"
-#include "hacdcpf/model/results.hpp"
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 
 namespace hacdcpf::powerflow {
 

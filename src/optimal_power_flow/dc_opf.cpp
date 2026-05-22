@@ -1,4 +1,4 @@
-#include "hacdcpf/optimal_power_flow/dc_opf.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 
 #include <algorithm>
 #include <chrono>

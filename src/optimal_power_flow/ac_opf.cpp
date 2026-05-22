@@ -1,4 +1,5 @@
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
 
 #include <algorithm>
 #include <array>
@@ -16,13 +17,12 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 
-#include "hacdcpf/core/jacobian_builder.hpp"
-#include "hacdcpf/core/linear_solver.hpp"
-#include "hacdcpf/core/newton_solver.hpp"
-#include "hacdcpf/core/solver_data.hpp"
-#include "hacdcpf/model/network_utils.hpp"
-#include "hacdcpf/optimal_power_flow/parity_formulation.hpp"
-#include "hacdcpf/optimal_power_flow/parity_ipm.hpp"
+#include "hacdcpf/power_flow/jacobian_builder.hpp"
+#include "hacdcpf/detail/core_compat.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/optimal_power_flow/formulation.hpp"
+#include "hacdcpf/optimal_power_flow/native_ipm_solver.hpp"
 
 namespace hacdcpf::opf {
 

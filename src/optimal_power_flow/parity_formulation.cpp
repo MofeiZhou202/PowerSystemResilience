@@ -1,4 +1,5 @@
-#include "hacdcpf/optimal_power_flow/parity_formulation.hpp"
+#include "hacdcpf/optimal_power_flow/formulation.hpp"
+#include "hacdcpf/detail/core_compat.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +11,7 @@
 #include <Eigen/Dense>
 #include <Eigen/SparseLU>
 
-#include "hacdcpf/core/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 namespace hacdcpf::opf::parity {

@@ -2,24 +2,43 @@
 
 #include <vector>
 
-#include "hacdcpf/model/options.hpp"
-#include "hacdcpf/model/results.hpp"
-#include "hacdcpf/model/system.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
-#include "hacdcpf/optimal_power_flow/dc_opf.hpp"
+#include "hacdcpf/detail/internal_helpers.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/analysis/carbon_analysis.hpp"
 #include "hacdcpf/analysis/time_series_pf.hpp"
 #include "hacdcpf/analysis/reliability_assessment.hpp"
 #include "hacdcpf/analysis/resilience_assessment.hpp"
+#include "hacdcpf/validation/validate_system.hpp"
 
 namespace hacdcpf {
 
 struct SolverHandle;
 
+// ── Validation ────────────────────────────────────────────────────────────────
+
+/// Full model validation — returns a structured ValidationReport.
+/// The existing validate() in network_utils.hpp remains for backward compatibility.
+validation::ValidationReport validate_full(const HybridPowerSystem& sys);
+
+// ── Power flow ────────────────────────────────────────────────────────────────
+
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys,
                                  const PowerFlowOptions& opt = {});
+
+/// Exception-free variant: returns Result<PowerFlowResult>.
+/// Performs model validation before solving when `validate_input` is true.
+Result<PowerFlowResult> safe_solve_power_flow(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt = {},
+    bool validate_input = true);
 
 DCPowerFlowResult solve_dc_power_flow(const HybridPowerSystem& sys,
                                       const PowerFlowOptions& opt = {});
@@ -61,6 +80,8 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
 powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,
                                                         const PowerFlowOptions& opt = {});
 
+// ── OPF ───────────────────────────────────────────────────────────────────────
+
 opf::ACOPFResult solve_ac_opf(const HybridPowerSystem& sys,
                               const opf::ACOPFOptions& opt = {});
 
@@ -69,6 +90,8 @@ opf::DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
 
 opf::RPOResult solve_rpo(const HybridPowerSystem& sys,
                          const opf::RPOOptions& opt = {});
+
+// ── Analysis ──────────────────────────────────────────────────────────────────
 
 analysis::DistributionResilienceResult run_distribution_resilience_assessment(
     const HybridPowerSystem& sys,

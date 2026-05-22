@@ -9,8 +9,8 @@
 #include <utility>
 #include <vector>
 
-#include "hacdcpf/core/string_utils.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
+#include "hacdcpf/detail/string_utils.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
 
 // OpenXLSX master branch has defaulted copy/move on non-copyable members;
 // suppress the resulting -Wdefaulted-function-deleted diagnostic.

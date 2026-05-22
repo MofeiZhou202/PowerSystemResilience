@@ -5,9 +5,9 @@
 #include <future>
 #include <vector>
 
-#include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
 

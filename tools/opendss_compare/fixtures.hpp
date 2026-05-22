@@ -15,9 +15,9 @@
 #include <string>
 #include <vector>
 
-#include "hacdcpf/model/components.hpp"
-#include "hacdcpf/model/system.hpp"
-#include "hacdcpf/model/three_phase.hpp"
+#include hacdcpf/model/hybrid_power_system.hpp
+#include hacdcpf/model/hybrid_power_system.hpp
+#include hacdcpf/model/ac_components.hpp
 
 namespace hacdcpf_compare_fixtures {
 

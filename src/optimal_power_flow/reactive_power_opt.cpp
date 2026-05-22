@@ -21,8 +21,10 @@
 ///   • Solution cache (avoid redundant NLP evaluations)
 
 #include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
+#include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
 
 #include <algorithm>

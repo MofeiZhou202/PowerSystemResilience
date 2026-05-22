@@ -54,9 +54,9 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "hacdcpf/api/hacdcpf.hpp"
-#include "hacdcpf/model/components.hpp"
-#include "hacdcpf/model/network_utils.hpp"
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 
 using namespace hacdcpf;
 using Catch::Matchers::WithinAbs;

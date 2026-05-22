@@ -1,21 +1,23 @@
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
 
-#include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/branch_flow.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/dc_solver.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/adaptive_solver.hpp"
 #include "hacdcpf/power_flow/distributed_slack_solver.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
+#include "hacdcpf/validation/validate_system.hpp"
 
 namespace hacdcpf {
 
@@ -517,6 +519,31 @@ void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
 
 }  // namespace
 
+// ── Validation wrapper ────────────────────────────────────────────────────────
+
+validation::ValidationReport validate_full(const HybridPowerSystem& sys) {
+  return validation::validate(sys);
+}
+
+// ── Exception-free solve ──────────────────────────────────────────────────────
+
+Result<PowerFlowResult> safe_solve_power_flow(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt,
+    bool validate_input)
+{
+  if (validate_input) {
+    auto report = validate_full(sys);
+    if (report.has_errors())
+      return Error::validation_failed(std::move(report));
+  }
+  try {
+    return solve_power_flow(sys, opt);
+  } catch (const std::exception& e) {
+    return Error{ErrorCode::NumericalFailure, e.what(), {}};
+  }
+}
+
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   apply_zip_weights(data, opt);
@@ -652,5 +679,75 @@ analysis::DistributionResilienceResult run_distribution_resilience_assessment(
   return analysis::run_distribution_resilience_assessment(sys, opt);
 }
 
+// ── PowerFlowOptions::from_parts ─────────────────────────────────────────────
+
+PowerFlowOptions PowerFlowOptions::from_parts(
+    const ConvergenceOptions&      conv,
+    const LinearSolverOptions&     linear,
+    const GlobalizationOptions&    glob,
+    const PVPQSwitchingOptions&    switching,
+    const ConverterModeOptions&    converter,
+    const ZipLoadOptions&          zip,
+    const RuntimeOptions&          runtime)
+{
+  PowerFlowOptions o;
+
+  // Convergence
+  o.max_iter      = conv.max_iter;
+  o.tol           = conv.tol;
+  o.fdpf_max_iter = conv.fdpf_max_iter;
+
+  // Linear solver
+  o.max_line_search_steps      = linear.max_line_search_steps;
+  o.max_regularization_steps   = linear.max_regularization_steps;
+  o.regularization_lambda0     = linear.regularization_lambda0;
+  o.regularization_growth      = linear.regularization_growth;
+  o.max_delta_va_rad            = linear.max_delta_va_rad;
+  o.max_delta_vm_pu             = linear.max_delta_vm_pu;
+  o.max_delta_vdc_pu            = linear.max_delta_vdc_pu;
+  o.enable_coupled_jacobian     = linear.enable_coupled_jacobian;
+  o.enable_augmented_equations  = linear.enable_augmented_equations;
+  o.enable_semi_smooth_newton   = linear.enable_semi_smooth_newton;
+
+  // Globalization
+  using GS = PowerFlowOptions::GlobalizationStrategy;
+  using GIn = GlobalizationOptions::Strategy;
+  switch (glob.strategy) {
+    case GIn::TrustRegion:    o.globalization = GS::TrustRegion;    break;
+    case GIn::PseudoTransient: o.globalization = GS::PseudoTransient; break;
+    default:                  o.globalization = GS::LineSearch;     break;
+  }
+  o.trust_region_radius0 = glob.trust_region_radius0;
+  o.trust_region_max     = glob.trust_region_max;
+  o.ptc_delta0           = glob.ptc_delta0;
+  o.ptc_growth           = glob.ptc_growth;
+
+  // PV/PQ switching
+  o.pv_q_hysteresis_pu        = switching.pv_q_hysteresis_pu;
+  o.pv_recover_vm_tol_pu      = switching.pv_recover_vm_tol_pu;
+  o.enable_pv_pq_conversion   = switching.enable_pv_pq_conversion;
+  o.enable_auto_swing_selection = switching.enable_auto_swing_selection;
+
+  // Converter mode
+  o.converter_vdc_switch_high_pu    = converter.converter_vdc_switch_high_pu;
+  o.converter_vdc_switch_low_pu     = converter.converter_vdc_switch_low_pu;
+  o.mode_hysteresis_iters           = converter.mode_hysteresis_iters;
+  o.enable_converter_mode_switching = converter.enable_converter_mode_switching;
+  o.loss_model                      = converter.loss_model;
+
+  // ZIP
+  for (int i = 0; i < 3; ++i) {
+    o.zip_pw[i] = zip.pw[i];
+    o.zip_qw[i] = zip.qw[i];
+  }
+
+  // Runtime
+  o.ac_eval_threads         = runtime.ac_eval_threads;
+  o.enable_solver_profiling = runtime.enable_solver_profiling;
+  o.enable_iteration_log    = runtime.enable_iteration_log;
+  o.verbose                 = runtime.verbose;
+
+  return o;
+}
 
 }  // namespace hacdcpf

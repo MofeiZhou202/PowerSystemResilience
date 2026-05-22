@@ -17,8 +17,8 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
-#include "hacdcpf/optimal_power_flow/dc_opf.hpp"
+#include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 namespace fs = std::filesystem;

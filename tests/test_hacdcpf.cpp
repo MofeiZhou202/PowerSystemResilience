@@ -8,9 +8,9 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
-#include "hacdcpf/model/system.hpp"
-#include "hacdcpf/model/options.hpp"
-#include "hacdcpf/model/results.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
 
 using Catch::Matchers::WithinAbs;
 

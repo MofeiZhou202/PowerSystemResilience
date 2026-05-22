@@ -19,7 +19,7 @@
 #include "hacdcpf/power_flow/newton_krylov.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
 #include "hacdcpf/engine/kernel/globalization/globalization.hpp"
-#include "hacdcpf/power_flow/linear_solver.hpp"
+#include "hacdcpf/backend/linear_solver.hpp"
 
 namespace hacdcpf::engine {
 

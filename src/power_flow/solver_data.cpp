@@ -1,9 +1,9 @@
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 
 #include <atomic>
 #include <cmath>
 
-#include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
 #include "hacdcpf/power_flow/admittance_builder.hpp"

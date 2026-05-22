@@ -1,4 +1,4 @@
-#include "hacdcpf/power_models/dc_opf_builder.hpp"
+#include "hacdcpf/power_models/dc_opf_model_builder.hpp"
 
 #include <cmath>
 #include <stdexcept>

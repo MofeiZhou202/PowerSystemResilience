@@ -23,10 +23,10 @@
 
 #include "hacdcpf/analysis/distribution_power_flow.hpp"
 #include "hacdcpf/io/opendss_bridge.hpp"
-#include "hacdcpf/model/components.hpp"
-#include "hacdcpf/model/network_utils.hpp"
-#include "hacdcpf/model/system.hpp"
-#include "hacdcpf/model/three_phase.hpp"
+#include hacdcpf/model/hybrid_power_system.hpp
+#include hacdcpf/projection/project_to_canonical.hpp
+#include hacdcpf/model/hybrid_power_system.hpp
+#include hacdcpf/model/ac_components.hpp
 
 // Single source of truth for case builders.
 // Lives in tools/opendss_compare/ — internal support, not public hacdcpf API.

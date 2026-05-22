@@ -1,4 +1,4 @@
-#include "hacdcpf/power_models/acopf_builder.hpp"
+#include "hacdcpf/power_models/ac_pf_model_builder.hpp"
 
 #include <algorithm>
 #include <cmath>

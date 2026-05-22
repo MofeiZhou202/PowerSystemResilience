@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "hacdcpf/core/string_utils.hpp"
+#include "hacdcpf/detail/string_utils.hpp"
 
 namespace hacdcpf::io {
 

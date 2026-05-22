@@ -4,7 +4,7 @@
 
 #include <Eigen/Core>
 
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 
 namespace hacdcpf::powerflow {
 

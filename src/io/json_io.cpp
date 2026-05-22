@@ -10,8 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "hacdcpf/model/enum_strings.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
+#include "hacdcpf/detail/internal_helpers.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/analysis/time_series_pf.hpp"
 
 using json = nlohmann::json;

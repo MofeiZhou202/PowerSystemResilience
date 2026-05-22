@@ -1,0 +1,70 @@
+#pragma once
+
+/// optimal_power_flow/opf_options.hpp
+/// =====================================
+/// Options for AC OPF, DC OPF, and combined OPF solvers.
+/// Consolidates: ac_opf.hpp (ACOPFOptions) + dc_opf.hpp (DCOPFOptions).
+
+#include <string>
+
+namespace hacdcpf::opf {
+
+// ═══════════════════════════════════════════════════════════════════════
+// AC OPF Options
+// ═══════════════════════════════════════════════════════════════════════
+struct ACOPFOptions {
+  int max_inner_iterations{80};
+  int max_outer_iterations{8};
+  int max_line_search_steps{20};
+
+  double feasibility_tol{1e-6};
+  double stationarity_tol{1e-6};
+
+  double barrier_mu0{1e-2};
+  double barrier_mu_reduction{0.2};
+  double barrier_mu_min{1e-8};
+
+  double merit_penalty{10.0};
+  double regularization{1e-6};
+  double step_backoff{0.5};
+  double interior_fraction{0.995};
+
+  int ac_eval_threads{1};
+  bool enable_primal_dual{false};
+  bool use_parity_ipm{false};
+  bool allow_fallback{true};
+  bool verbose{false};
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// DC OPF Solver Backend
+// ═══════════════════════════════════════════════════════════════════════
+enum class DCOPFSolverBackend {
+  Auto,
+  Native,
+  NativeQP,
+  HiGHS,
+  Gurobi
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// DC OPF Options
+// ═══════════════════════════════════════════════════════════════════════
+struct DCOPFOptions {
+  double feasibility_tol{1e-6};
+  double optimality_tol{1e-6};
+  int max_iterations{10000};
+  bool verbose{false};
+
+  DCOPFSolverBackend solver{DCOPFSolverBackend::Auto};
+
+  int pwl_segments{4};
+
+  bool include_branch_limits{true};
+  double branch_limit_margin{1.0};
+
+  bool load_shedding{true};
+  double voll{0.0};
+};
+
+}  // namespace hacdcpf::opf

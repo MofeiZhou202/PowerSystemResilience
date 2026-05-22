@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-#include "hacdcpf/model/generators.hpp"
+#include "hacdcpf/model/ac_components.hpp"
 
 namespace hacdcpf::powerflow {
 

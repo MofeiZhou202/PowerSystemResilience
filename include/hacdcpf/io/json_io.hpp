@@ -3,11 +3,27 @@
 
 #include "hacdcpf/analysis/carbon_analysis.hpp"
 #include "hacdcpf/analysis/time_series_pf.hpp"
-#include "hacdcpf/model/results.hpp"
-#include "hacdcpf/model/system.hpp"
-#include "hacdcpf/optimal_power_flow/ac_opf.hpp"
+#include "hacdcpf/model/defaults.hpp"
+#include "hacdcpf/model/error.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
 
 namespace hacdcpf::io {
+
+// ── Schema versioning ─────────────────────────────────────────────────────────
+
+/// Current on-disk JSON schema version for HybridPowerSystem.
+/// Increment the minor version when adding optional fields; increment the
+/// major version (and bump kSchemaVersion in defaults.hpp) when making
+/// backward-incompatible changes.
+inline constexpr const char* kCurrentSchemaVersion  = Defaults::kSchemaVersion;
+inline constexpr const char* kCurrentPackageVersion = Defaults::kPackageVersion;
+
+/// Check whether a JSON string's "schema_version" field is compatible with
+/// this build.  Returns an Error if incompatible, empty Result<void> otherwise.
+/// Compatibility: same major version is required; minor version may differ.
+Result<bool> check_schema_version(const std::string& json_str);
 
 // ── HybridPowerSystem serialisation ──────────────────────────────────────────
 

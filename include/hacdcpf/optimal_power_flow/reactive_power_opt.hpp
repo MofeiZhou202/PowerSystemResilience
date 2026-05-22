@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/engine/branch_and_cut.hpp"
 #include <string>
 #include <vector>

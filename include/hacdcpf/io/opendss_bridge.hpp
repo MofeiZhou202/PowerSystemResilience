@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 
 namespace hacdcpf::io {
 

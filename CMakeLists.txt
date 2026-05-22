@@ -85,6 +85,8 @@ set(HACDCPF_SOURCES
   src/power_flow/voltage_stability.cpp
   src/power_flow/workspace.cpp
   src/power_flow/newton_solver.cpp
+  src/power_flow/jacobian_check.cpp
+  src/power_flow/jacobian_check.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
   src/optimal_power_flow/ac_opf.cpp
   src/optimal_power_flow/dc_opf.cpp
@@ -95,6 +97,8 @@ set(HACDCPF_SOURCES
   src/io/json_io.cpp
   src/io/matpower_parser.cpp
   src/io/case_builders.cpp
+  # ── validation ────────────────────────────────────────────────────────────
+  src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
   src/api/hacdcpf.cpp  # ── analysis stubs ───────────────────────────────────────────────────
   src/analysis/carbon_analysis.cpp

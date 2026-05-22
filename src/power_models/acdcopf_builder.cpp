@@ -12,7 +12,7 @@
 ///
 /// The AC OPF core (branches, balance, thermal) is unchanged.
 
-#include "hacdcpf/power_models/acdcopf_builder.hpp"
+#include "hacdcpf/power_models/hybrid_opf_model_builder.hpp"
 
 #include <algorithm>
 #include <cmath>

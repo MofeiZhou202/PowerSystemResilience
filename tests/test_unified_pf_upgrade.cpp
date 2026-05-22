@@ -31,11 +31,11 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
-#include "hacdcpf/model/options.hpp"
-#include "hacdcpf/model/system.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/power_flow/pf_utils.hpp"
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::powerflow;

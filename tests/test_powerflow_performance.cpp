@@ -28,7 +28,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/power_flow/residual_evaluator.hpp"
-#include "hacdcpf/power_flow/solver_data.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
 
 namespace fs = std::filesystem;
 

@@ -11,7 +11,7 @@
 // hacdcpf::analysis::solve_three_phase_distribution_pf() for radial
 // single-source networks.
 
-#include "hacdcpf/model/three_phase.hpp"
+#include "hacdcpf/model/ac_components.hpp"
 #include "hacdcpf/analysis/distribution_power_flow.hpp"
 
 namespace hacdcpf::powerflow {

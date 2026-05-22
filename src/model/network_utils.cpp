@@ -1,4 +1,4 @@
-#include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 #include <algorithm>
 #include <cmath>
