@@ -1,8 +1,8 @@
 #pragma once
 #include <string>
 
-#include "hacdcpf/analysis/carbon_analysis.hpp"
-#include "hacdcpf/analysis/time_series_pf.hpp"
+#include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
+#include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/model/defaults.hpp"
 #include "hacdcpf/model/error.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
@@ -10,7 +10,17 @@
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 
 namespace hacdcpf::io {
+// ── Import mode ──────────────────────────────────────────────────────────────
 
+/// Controls strictness of JSON / Excel import.
+enum class ImportMode {
+    /// Unknown fields cause an error; invalid enum strings cause an error;
+    /// missing required fields cause an error.
+    Strict,
+    /// Unknown fields become warnings in the result diagnostics;
+    /// invalid enum strings fall back to defaults with a warning.
+    Permissive,
+};
 // ── Schema versioning ─────────────────────────────────────────────────────────
 
 /// Current on-disk JSON schema version for HybridPowerSystem.
@@ -35,7 +45,14 @@ void save_json(const HybridPowerSystem& sys, const std::string& path,
                int indent = 2);
 
 HybridPowerSystem load_json(const std::string& path);
+/// Exception-free variants — return Result<HybridPowerSystem> instead of
+/// throwing.  On failure the Result holds an Error with an appropriate
+/// ErrorCode (ParseError, FileNotFound, SchemaVersionMismatch).
+Result<HybridPowerSystem> try_from_json(const std::string& json_str,
+                                        ImportMode mode = ImportMode::Strict);
 
+Result<HybridPowerSystem> try_load_json(const std::string& path,
+                                        ImportMode mode = ImportMode::Strict);
 // ── JPC (Julia Power Case) format ────────────────────────────────────────────
 
 std::string to_jpc_json(const HybridPowerSystem& sys, int indent = 2);

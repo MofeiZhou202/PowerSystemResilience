@@ -12,7 +12,7 @@
 // single-source networks.
 
 #include "hacdcpf/model/ac_components.hpp"
-#include "hacdcpf/analysis/distribution_power_flow.hpp"
+#include "hacdcpf/power_flow/distribution_power_flow.hpp"
 
 namespace hacdcpf::powerflow {
 

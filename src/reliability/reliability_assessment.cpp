@@ -1,4 +1,4 @@
-#include "hacdcpf/analysis/reliability_assessment.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
 
 namespace hacdcpf::analysis {
 

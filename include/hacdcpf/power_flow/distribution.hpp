@@ -3,7 +3,7 @@
 // Re-export the distribution BFS power flow under the powerflow namespace.
 // No additional .cpp needed — this is a header-only re-export.
 
-#include "hacdcpf/analysis/distribution_power_flow.hpp"
+#include "hacdcpf/power_flow/distribution_power_flow.hpp"
 
 namespace hacdcpf::powerflow {
 

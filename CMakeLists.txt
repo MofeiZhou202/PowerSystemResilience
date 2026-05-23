@@ -101,11 +101,11 @@ set(HACDCPF_SOURCES
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
   src/api/hacdcpf.cpp  # ── analysis stubs ───────────────────────────────────────────────────
-  src/analysis/carbon_analysis.cpp
-  src/analysis/distribution_power_flow.cpp
-  src/analysis/reliability_assessment.cpp
-  src/analysis/resilience_assessment.cpp
-  src/analysis/time_series_pf.cpp
+  src/carbon_analysis/carbon_analysis.cpp
+  src/power_flow/distribution_power_flow.cpp
+  src/reliability/reliability_assessment.cpp
+  src/resilience/resilience_assessment.cpp
+  src/time_series/time_series_pf.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

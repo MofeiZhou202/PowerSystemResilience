@@ -1,0 +1,685 @@
+% ============================================================
+\section{Architecture Assessment and Roadmap}
+\label{sec:arch-assessment}
+% ============================================================
+
+This chapter records an external architectural review of the
+\texttt{hacdcpf} package conducted against the updated codebase described
+in Chapters~\ref{sec:data-model-deep}--\ref{sec:analysis}.
+It documents observed strengths, remaining design risks, module-level
+recommendations, testing strategy, dependency rules, and a prioritised
+roadmap.
+
+% ------------------------------------------------------------
+\subsection{Overall Quality Assessment}
+\label{sec:quality-table}
+% ------------------------------------------------------------
+
+The package architecture now resembles a mature scientific computing library.
+Table~\ref{tab:quality} summarises the current design quality by area.
+
+\begin{longtable}{lrl}
+\caption{Architecture quality by area.\label{tab:quality}} \\
+\hline\hline
+\textbf{Area} & \textbf{Quality} & \textbf{Comment} \\
+\hline\endfirsthead
+\hline\hline
+\textbf{Area} & \textbf{Quality} & \textbf{Comment} \\
+\hline\endhead
+\hline\endfoot
+Public model design & Strong & Rich component model; clear I/O field dictionaries \\
+Solver layering & Strong & Projection and assembly separation is a major improvement \\
+PF solver design & Strong & Multiple routes and fallback methods well documented \\
+OPF design & Good--Strong & Native, parity-IPM, DC-QP, and reactive routes well separated \\
+I/O contracts & Strong & JSON and Excel field dictionaries are detailed \\
+Error handling & Improved & \texttt{Result<T>}, \texttt{Error}, \texttt{ErrorCode} are good foundations \\
+Analysis modules & Promising & Requires careful dependency control \\
+Backend abstraction & Improved & Linear/NLP/QP backend split is the right direction \\
+Documentation & Strong & Implementation-facing handbook is detailed \\
+Testability & Likely improved & Needs evidence through test matrix and CI policy \\
+\end{longtable}
+
+The overall data-flow pipeline is now clearly separated:
+
+\begin{center}
+\texttt{HybridPowerSystem}
+$\;\downarrow\;$
+Projection Layer
+$\;\downarrow\;$
+Canonical Models
+$\;\downarrow\;$
+Assembly Layer
+$\;\downarrow\;$
+Flat Solver Data
+$\;\downarrow\;$
+PF / OPF / Analysis Solvers
+$\;\downarrow\;$
+Result Objects
+$\;\downarrow\;$
+I/O and Reports
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Confirmed Strengths}
+\label{sec:confirmed-strengths}
+% ------------------------------------------------------------
+
+\subsubsection{Horizontal Infrastructure Layer}
+
+The dedicated solver-infrastructure layer covering assembly, projection,
+backend abstractions, and the thread pool (Chapter~\ref{sec:solver-infra})
+is a major improvement.  This separation is essential for long-term
+maintainability: the rich physical model can evolve without destabilising
+the numerical kernels.
+
+\subsubsection{Monadic Result Handling}
+
+The \texttt{Result<T>} / \texttt{Error} / \texttt{ErrorCode} design
+(Section~\ref{sec:error-result}) addresses one of the most important concerns in
+simulation packages: handling invalid input and solver failures predictably.
+A monadic result type is much better than relying on bare exceptions,
+booleans, or string messages.
+
+\subsubsection{Backward-Compatible Option Refactoring}
+
+\texttt{PowerFlowOptions::from\_parts()} preserves flat API compatibility for
+existing users while enabling structured internal configuration.  The
+recommended long-term pattern is:
+
+\begin{verbatim}
+struct PowerFlowOptions {
+    // Legacy flat fields
+    double tolerance;
+    int max_iterations;
+    bool enable_homotopy;
+
+    static PowerFlowOptions from_parts(
+        const ConvergenceOptions& convergence,
+        const LinearSolverOptions& linear,
+        const GlobalizationOptions& globalization,
+        const PVPQSwitchingOptions& pvpq,
+        const ConverterModeOptions& converter,
+        const ZipLoadOptions& zip,
+        const RuntimeOptions& runtime
+    );
+
+    PowerFlowOptionParts to_parts() const; // optional round-trip
+};
+\end{verbatim}
+
+\subsubsection{Explicit Validation Subsystem}
+
+A dedicated validation layer capable of catching missing slack buses,
+duplicate IDs, invalid branch endpoints, inconsistent voltage limits,
+unsupported OPF configurations, and islands without a source gives the
+package its primary defence against badly formed inputs.  The recommended
+list of checks is given in Section~\ref{sec:validation-deep}.
+
+\subsubsection{Projection plus Assembly Separation}
+
+\begin{itemize}
+  \item \textbf{Projection}: rich physical model $\to$ canonical electrical model.
+  \item \textbf{Assembly}: canonical model $\to$ numerical vectors, matrices,
+        and residual functions.
+\end{itemize}
+
+This boundary allows rich devices (motors, chargers, PV arrays, flexible
+loads, switches, transformers, VSC and DCDC converters) to evolve independently
+of solver kernels.
+
+\subsubsection{Centralised Defaults}
+
+Every default is now traceable to one of: engineering convention, MATPOWER
+compatibility, package-specific design, safety fallback, or numerical
+stabilisation.  Avoid silent defaults for safety-critical fields; such fields
+should be required rather than defaulted.
+
+% ------------------------------------------------------------
+\subsection{Remaining Design Risks}
+\label{sec:design-risks}
+% ------------------------------------------------------------
+
+\subsubsection{Analysis Layer May Become Too Broad}
+
+The \texttt{analysis/} module currently covers carbon tracing, distribution
+PF, three-phase unbalanced PF, PV modelling, reliability, resilience, and
+time-series simulation.  These are not all the same type of functionality.
+Consider explicit subdomains:
+
+\begin{verbatim}
+include/hacdcpf/analysis/
+  carbon/
+  distribution/
+  three_phase/
+  pv/
+  reliability/
+  resilience/
+  time_series/
+\end{verbatim}
+
+\paragraph{Dependency rule for analysis}
+Analysis modules may depend on:
+\begin{itemize}
+  \item public model and validation API,
+  \item public solver API and result types.
+\end{itemize}
+They must not depend on private Newton/IPM internals, assembly private data,
+or backend private classes.
+
+\subsubsection{Three-Phase and Balanced PF Should Not Share One Abstraction}
+
+Three-phase unbalanced PF is structurally different from balanced
+positive-sequence PF.  Prefer distinct free functions over one overly
+generic virtual interface:
+
+\begin{verbatim}
+BalancedPowerFlowResult solve_power_flow(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& opt
+);
+
+ThreePhasePowerFlowResult solve_three_phase_power_flow(
+    const ThreePhaseSystem& sys,
+    const ThreePhasePowerFlowOptions& opt
+);
+\end{verbatim}
+
+A common \texttt{SolverSummary} (converged, iterations, max residual, status)
+can be shared where natural without forcing identical result shapes.
+
+\subsubsection{Error Handling Policy Needs Explicit Definition}
+
+Now that both \texttt{Result<T>} and exceptions are present, define exactly
+when each mechanism is used.  A recommended policy is given in
+Table~\ref{tab:error-policy}.
+
+\begin{longtable}{ll}
+\caption{Recommended error handling policy.\label{tab:error-policy}} \\
+\hline\hline
+\textbf{Situation} & \textbf{Mechanism} \\
+\hline\endfirsthead\hline\hline\textbf{Situation}&\textbf{Mechanism}\\\hline\endhead\hline\endfoot
+Expected input validation failure & \texttt{Result<T>} \\
+Solver non-convergence & result object with status \\
+Optional feature unavailable & \texttt{Result<T>} consistently \\
+Programmer error / invariant violation & assertion or internal exception \\
+File not found & \texttt{Result<T>} for library API \\
+JSON parse failure & \texttt{Result<T>} with error code and location \\
+Backend crash / failure & \texttt{Result<T>} with backend diagnostic \\
+\end{longtable}
+
+Provide both styles where helpful:
+\begin{verbatim}
+Result<HybridPowerSystem> try_load_json(const std::string& path);
+HybridPowerSystem load_json_or_throw(const std::string& path);
+\end{verbatim}
+
+\subsubsection{Field Dictionary / Serializer Drift}
+
+Detailed I/O field dictionaries are excellent, but documentation, serializers,
+and model structs can drift apart over time.  Automated tests should verify:
+\begin{itemize}
+  \item every documented field exists in the serializer,
+  \item every serializer field is documented,
+  \item JSON round-trip preserves each field,
+  \item each documented default equals the code default.
+\end{itemize}
+
+A single machine-readable field-descriptor registry
+(see Section~\ref{sec:field-registry}) is the preferred long-term solution.
+
+\subsubsection{Backend Capability Discovery}
+
+Since the package has optional backends (HiGHS, Gurobi, Ipopt, native IPM,
+etc.), expose a runtime capability query:
+
+\begin{verbatim}
+struct SolverCapabilities {
+    bool has_sparse_lu;
+    bool has_highs;
+    bool has_gurobi;
+    bool has_native_ipm;
+    bool has_excel;
+    bool supports_quadratic_objective;
+    bool supports_integer_variables;
+};
+
+SolverCapabilities get_solver_capabilities();
+\end{verbatim}
+
+This enables portable user code that selects a backend based on availability
+rather than compile-time flags alone.
+
+% ------------------------------------------------------------
+\subsection{Module-Level Recommendations}
+\label{sec:module-recommendations}
+% ------------------------------------------------------------
+
+\subsubsection{Model Layer}
+
+\paragraph{Separate persistent fields from runtime fields}
+If any model struct contains both user-input data and runtime caches, split
+them.  Do not mix result fields into input model objects unless explicitly
+supporting in-place result annotation.
+
+\paragraph{Strong IDs at boundaries}
+At projection boundaries, typed reference structs avoid accidentally
+connecting a DC converter terminal to an AC bus field:
+\begin{verbatim}
+struct ACBusId { std::string value; };
+struct DCBusId { std::string value; };
+\end{verbatim}
+
+\paragraph{Stable enum serialisation}
+Treat enum string names as serialised API.  Document whether strings are
+case-sensitive.  Avoid casual renaming once a version ships.
+
+\subsubsection{Validation Layer}
+
+Use tiered validation levels:
+
+\begin{verbatim}
+enum class ValidationLevel {
+    Basic,        // required fields, references, limits
+    Electrical,   // topology, slack/reference, physical consistency
+    SolverReady,  // checks required by PF/OPF kernels
+    Strict        // warnings promoted to errors
+};
+\end{verbatim}
+
+A structured diagnostic shape supports GUIs, APIs, and batch workflows:
+
+\begin{verbatim}
+struct Diagnostic {
+    Severity severity;   // Info, Warning, Error
+    ErrorCode code;
+    std::string message;
+    std::string component_type;
+    std::string component_id;
+    std::string field;
+};
+\end{verbatim}
+
+\subsubsection{Projection Layer}
+
+\paragraph{Projection report}
+Every projection should optionally return a diagnostic report that records
+mappings such as:
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Source} & \textbf{Canonical} \\
+\hline
+\texttt{PVSystem pv\_12} & \texttt{StaticGenerator sg\_pv\_12} \\
+\texttt{Motor motor\_7} & \texttt{EquivalentLoad load\_motor\_7} \\
+\texttt{ClosedSwitch sw\_3} & \texttt{BusMerge group\_2} \\
+\texttt{OpenSwitch sw\_4} & \texttt{DisabledBranch branch\_sw\_4} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Reversible mapping}
+Maintain a \texttt{ComponentMapping} record with source type, source ID,
+canonical type, canonical ID, and participation factor.  This is essential
+for result attribution, carbon tracing, and reporting.
+
+\subsubsection{Assembly Layer}
+
+Assembly should be \emph{deterministic}: given the same canonical system,
+it must produce the same ordering, index maps, vector layout, and sparsity
+pattern.  Explicit layout objects make residual code readable:
+
+\begin{verbatim}
+struct PowerFlowVariableLayout {
+    std::vector<ACBusIndex>  angle_variables;
+    std::vector<ACBusIndex>  voltage_variables;
+    std::vector<DCBusIndex>  dc_voltage_variables;
+    std::vector<VSCIndex>    converter_variables;
+};
+\end{verbatim}
+
+\subsubsection{Power-Flow Layer}
+
+\paragraph{Standardise solver status}
+Every PF route should return a common summary:
+\begin{verbatim}
+struct SolverSummary {
+    TerminationStatus status;
+    bool   converged;
+    int    iterations;
+    double max_mismatch;
+    double elapsed_ms;
+    std::vector<Diagnostic> diagnostics;
+};
+\end{verbatim}
+
+\paragraph{Visible fallback trace}
+Record every solver method transition in the result:
+\begin{verbatim}
+{
+  "solver_trace": [
+    {"method":"Newton",
+     "status":"SingularJacobian", "iterations":4},
+    {"method":"HomotopyContinuation",
+     "status":"Converged", "iterations":12}
+  ]
+}
+\end{verbatim}
+
+\subsubsection{OPF Layer}
+
+\paragraph{Formulation separate from solver}
+For each OPF route maintain the pipeline:
+model extraction $\to$ formulation construction $\to$ backend solve
+$\to$ result mapping $\to$ post-check.
+
+\paragraph{Independent feasibility audit}
+After every solve, independently check AC/DC power balance, voltage limits,
+generator and branch limits, converter limits, and objective recomputation.
+Return a structured \texttt{OpfAudit} object.
+
+\paragraph{Explainable infeasibility}
+Provide likely-cause diagnostics instead of a bare ``infeasible'' status:
+\begin{itemize}
+  \item bus has load but no connected source,
+  \item generator \texttt{p\_min\_mw} $>$ \texttt{p\_max\_mw},
+  \item voltage upper limit below lower limit,
+  \item converter power exceeds DC grid capacity.
+\end{itemize}
+
+\subsubsection{I/O Layer}
+\label{sec:io-recommendations}
+
+\paragraph{Format versioning}
+Every exported JSON should include:
+\begin{verbatim}
+{
+  "format": "hacdcpf.hybrid_power_system",
+  "format_version": "1.0",
+  "package_version": "x.y.z"
+}
+\end{verbatim}
+
+\paragraph{Import modes}
+\begin{verbatim}
+enum class ImportMode { Strict, Permissive };
+\end{verbatim}
+In Strict mode unknown columns are errors; in Permissive mode they become
+warnings.
+
+\paragraph{Field-descriptor registry}
+\label{sec:field-registry}
+
+A machine-readable registry derives the serialiser, documentation table, and
+tests from one source:
+\begin{verbatim}
+constexpr FieldDescriptor ac_bus_fields[] = {
+    {"id",    Required::Yes, DefaultPolicy::None},
+    {"vn_kv", Required::Yes, DefaultPolicy::None},
+    {"vm_pu", Required::No,  DefaultPolicy::One},
+};
+\end{verbatim}
+
+\subsubsection{Analysis Suite}
+
+\paragraph{Carbon tracing}
+Expose the tracing method explicitly:
+\begin{verbatim}
+enum class CarbonTracingMethod {
+    AverageMix, ProportionalSharing,
+    MarginalEmission, FlowTracing
+};
+\end{verbatim}
+
+\paragraph{Time-series simulation}
+Avoid mutating the base system in uncontrolled ways.  Recommended pattern:
+\begin{verbatim}
+struct TimeSeriesScenario {
+    HybridPowerSystem base_system;
+    std::vector<TimeStepInput> steps;
+};
+\end{verbatim}
+
+% ------------------------------------------------------------
+\subsection{Recommended Testing Matrix}
+\label{sec:test-matrix}
+% ------------------------------------------------------------
+
+Testing should be organised by layer.
+Table~\ref{tab:test-matrix} lists the recommended test groups.
+
+\begin{longtable}{ll}
+\caption{Recommended test groups by layer.\label{tab:test-matrix}} \\
+\hline\hline
+\textbf{Layer} & \textbf{Test groups} \\
+\hline\endfirsthead\hline\hline\textbf{Layer}&\textbf{Test groups}\\\hline\endhead\hline\endfoot
+Model / validation & ModelDefaultsTest, EnumSerializationTest, \\
+ & ValidationDuplicateIdsTest, ValidationDanglingReferencesTest, \\
+ & ValidationInvalidLimitsTest, ValidationIslandWithoutSlackTest \\
+Projection & ProjectionSwitchMergingTest, ProjectionMotorAsLoadTest, \\
+ & ProjectionPVAsStaticGeneratorTest, ProjectionStorageMappingTest \\
+Assembly & AssemblyVariableOrderingTest, AssemblySparsePatternTest, \\
+ & AssemblyIndexMapTest, AssemblyPerUnitConversionTest \\
+Power flow & PFIEEE14ConvergenceTest, PFHybridTwoBusVSCTest, \\
+ & PFDCGridConvergenceTest, PFIslandedSystemTest, \\
+ & PFHomotopyFallbackTest, PFNewtonKrylovFallbackTest, \\
+ & PFNCPComplementarityTest \\
+OPF & OPFACSmallCaseTest, OPFDCQPBackendTest, OPFParityIPMTest, \\
+ & OPFReactiveTapShuntTest, OPFInfeasibilityDiagnosticTest \\
+I/O & JsonRoundTripAllComponentsTest, MatpowerImportIEEE14Test, \\
+ & UnknownFieldStrictModeTest, MissingOptionalFieldDefaultTest, \\
+ & ResultJsonSchemaTest \\
+Analysis & CarbonTracingKnownCaseTest, DistributionRadialFeederTest, \\
+ & ThreePhaseUnbalancedKnownCaseTest, PVArrayIrradianceCurveTest, \\
+ & ReliabilitySingleOutageTest, TimeSeriesProfileReplayTest \\
+\end{longtable}
+
+For complementarity variables $a$ and $b$, each NCP unit test should verify:
+\begin{equation}
+  \phi(a,b)=0 \iff a\ge 0,\; b\ge 0,\; ab=0.
+\end{equation}
+
+% ------------------------------------------------------------
+\subsection{Recommended CI Pipeline}
+\label{sec:ci-pipeline}
+% ------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{cl}
+\hline\hline
+\textbf{Stage} & \textbf{Jobs} \\
+\hline
+1 & \texttt{clang-format} check \\
+2 & \texttt{clang-tidy} selected checks \\
+3 & Build matrix: Debug / Release, Excel OFF / ON, backends disabled / enabled \\
+4 & Unit tests: model, validation, projection, assembly, I/O \\
+5 & Numerical tests: PF, OPF, analysis \\
+6 & Sanitizers: AddressSanitizer, UndefinedBehaviorSanitizer \\
+7 & Documentation: LaTeX build \\
+\hline
+Nightly & Large benchmarks, ThreadSanitizer, coverage, performance regression \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Dependency Boundary Rules}
+\label{sec:dep-rules}
+% ------------------------------------------------------------
+
+\subsubsection{Allowed Dependencies}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Module} & \textbf{May depend on} \\
+\hline
+\texttt{api} & \texttt{model, io, validation, power\_flow, optimal\_power\_flow, analysis} \\
+\texttt{io} & \texttt{model, validation, result types} \\
+\texttt{validation} & \texttt{model} \\
+\texttt{projection} & \texttt{model, validation} \\
+\texttt{assembly} & canonical/projection output, model enums, utilities \\
+\texttt{power\_flow} & \texttt{assembly, backend, model result types} \\
+\texttt{optimal\_power\_flow} & \texttt{assembly, backend, power\_models} \\
+\texttt{power\_models} & AML, canonical model data \\
+\texttt{analysis} & \texttt{model, result types, public solver APIs} \\
+\texttt{backend} & external solver libraries \\
+\texttt{engine} & compatibility/adapters only \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Disallowed Dependencies}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Module} & \textbf{Must not depend on} \\
+\hline
+\texttt{model} & \texttt{io, power\_flow, optimal\_power\_flow, analysis} \\
+\texttt{validation} & solver internals \\
+\texttt{power\_flow} & \texttt{io} \\
+\texttt{optimal\_power\_flow} & \texttt{io} \\
+\texttt{assembly} & Excel / JSON I/O \\
+\texttt{backend} & model-specific business logic \\
+\texttt{analysis} & private Newton/IPM internals (unless intentionally internal) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+These boundaries can be enforced by include-guard audits or a build-system
+layer-visibility policy.
+
+% ------------------------------------------------------------
+\subsection{Priority Roadmap}
+\label{sec:roadmap}
+% ------------------------------------------------------------
+
+\paragraph{Priority 1 --- Trustworthiness}
+\begin{enumerate}
+  \item Add independent PF and OPF audit checks (\texttt{OpfAudit}).
+  \item Add derivative finite-difference tests for Jacobians.
+  \item Add serialisation completeness tests.
+  \item Add projection mapping reports.
+  \item Add solver trace reporting for fallback method transitions.
+\end{enumerate}
+
+\paragraph{Priority 2 --- User Experience}
+\begin{enumerate}
+  \item Add strict/permissive import modes.
+  \item Add runtime capability discovery API (\texttt{get\_solver\_capabilities()}).
+  \item Add better infeasibility diagnostics with probable causes.
+  \item Add example workflows (see Section~\ref{sec:example-workflow}).
+  \item Publish JSON schema files.
+\end{enumerate}
+
+\paragraph{Priority 3 --- Maintainability}
+\begin{enumerate}
+  \item Enforce dependency boundaries via build-system rules.
+  \item Split large analysis submodules if necessary.
+  \item Centralise field descriptors into a machine-readable registry.
+  \item Keep \texttt{engine/} as adapter/fa\c{c}ade only.
+\end{enumerate}
+
+\paragraph{Priority 4 --- Performance and Scalability}
+\begin{enumerate}
+  \item Benchmark assembly time separately from solve time.
+  \item Track sparse-matrix nonzero counts across test cases.
+  \item Add performance regression cases for large networks.
+  \item Profile three-phase and time-series simulation.
+  \item Cache symbolic factorisations where safe.
+\end{enumerate}
+
+% ------------------------------------------------------------
+\subsection{Example Clean Public Workflow}
+\label{sec:example-workflow}
+% ------------------------------------------------------------
+
+A mature public API should look like the following.  The pattern
+``load, validate, configure, solve, report'' captures the full user
+journey:
+
+\begin{verbatim}
+#include <hacdcpf/api/hacdcpf.hpp>
+
+int main() {
+    // 1. Load with error propagation
+    auto system_result = hacdcpf::try_load_json("case.json");
+    if (!system_result) {
+        std::cerr << system_result.error().message << "\n";
+        return 1;
+    }
+    auto system = system_result.value();
+
+    // 2. Validate before solving
+    auto report = hacdcpf::validate(
+        system, hacdcpf::ValidationLevel::SolverReady);
+    if (!report.ok()) {
+        std::cerr << report.summary() << "\n";
+        return 1;
+    }
+
+    // 3. Structured option assembly
+    auto options = hacdcpf::PowerFlowOptions::from_parts(
+        hacdcpf::ConvergenceOptions{},
+        hacdcpf::LinearSolverOptions{},
+        hacdcpf::GlobalizationOptions{},
+        hacdcpf::PVPQSwitchingOptions{},
+        hacdcpf::ConverterModeOptions{},
+        hacdcpf::ZipLoadOptions{},
+        hacdcpf::RuntimeOptions{}
+    );
+
+    // 4. Solve
+    auto pf = hacdcpf::solve_power_flow(system, options);
+    if (!pf.converged) {
+        std::cerr << pf.diagnostics.termination_reason << "\n";
+        return 2;
+    }
+
+    // 5. Save result
+    hacdcpf::save_power_flow_result_json(pf, "pf_result.json");
+
+    // 6. Post-solve analysis
+    auto carbon = hacdcpf::analysis::run_carbon_analysis(system, options);
+    hacdcpf::analysis::save_carbon_report_json(carbon, "carbon.json");
+
+    return 0;
+}
+\end{verbatim}
+
+% ------------------------------------------------------------
+\subsection{Final Recommendation Summary}
+\label{sec:final-recommendation}
+% ------------------------------------------------------------
+
+The package has moved substantially in the right direction.
+The next most valuable work is not adding more solver features,
+but improving \textbf{trust, diagnostics, and maintainability}:
+
+\begin{enumerate}
+  \item Add independent numerical audit reports for PF and OPF.
+  \item Add automated serialisation completeness tests.
+  \item Add projection mapping reports.
+  \item Add runtime backend capability discovery.
+  \item Enforce dependency boundary rules.
+  \item Keep analysis modules modular and subdomain-separated.
+  \item Improve infeasibility and non-convergence explanations.
+  \item Build benchmark and regression infrastructure.
+\end{enumerate}
+
+The main remaining structural risks are:
+
+\begin{itemize}
+  \item \texttt{analysis/} becoming a miscellaneous collection without
+        subdomain separation.
+  \item Documentation and serialisers drifting without a field-descriptor
+        registry.
+  \item Incomplete backend capability discovery forcing compile-time
+        conditional code into user applications.
+  \item Three-phase unbalanced models being over-coupled to balanced PF
+        abstractions.
+  \item OPF infeasibility diagnostics remaining too coarse for user debugging.
+\end{itemize}
+
+If the roadmap in Section~\ref{sec:roadmap} is followed, the package will be
+significantly easier to maintain, debug, validate, and adopt by external users.

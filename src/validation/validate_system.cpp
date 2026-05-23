@@ -173,4 +173,46 @@ ValidationReport validate(const HybridPowerSystem& sys) {
     return r;
 }
 
+ValidationReport validate(const HybridPowerSystem& sys, ValidationLevel level) {
+    auto r = validate(sys);
+
+    switch (level) {
+    case ValidationLevel::SolverReady:
+        return r;  // unchanged
+
+    case ValidationLevel::Strict: {
+        // Promote all Warnings to Errors.
+        for (auto& issue : r.issues)
+            if (issue.severity == Severity::Warning)
+                issue.severity = Severity::Error;
+        return r;
+    }
+
+    case ValidationLevel::Basic: {
+        // Suppress all Warnings; keep only hard structural Errors.
+        ValidationReport out;
+        for (const auto& issue : r.issues)
+            if (issue.severity == Severity::Error)
+                out.issues.push_back(issue);
+        return out;
+    }
+
+    case ValidationLevel::Electrical: {
+        // Keep Errors + system-level topology / slack Warnings.
+        ValidationReport out;
+        for (const auto& issue : r.issues) {
+            if (issue.severity == Severity::Error) {
+                out.issues.push_back(issue);
+            } else if (issue.component_type == "ACSystem" ||
+                       issue.component_type == "DCSystem") {
+                // Slack-bus, multiple-slack, base_mva mismatch — topology-level.
+                out.issues.push_back(issue);
+            }
+        }
+        return out;
+    }
+    }
+    return r;  // unreachable, but avoids compiler warning
+}
+
 }  // namespace hacdcpf::validation

@@ -12,7 +12,7 @@
 
 #include "hacdcpf/detail/internal_helpers.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
-#include "hacdcpf/analysis/time_series_pf.hpp"
+#include "hacdcpf/time_series/time_series_pf.hpp"
 
 using json = nlohmann::json;
 
@@ -2276,6 +2276,37 @@ HybridPowerSystem load_json(const std::string& path) {
   std::string content((std::istreambuf_iterator<char>(ifs)),
                       std::istreambuf_iterator<char>());
   return from_json(content);
+}
+
+// ── Exception-free safe variants ─────────────────────────────────────────────
+
+Result<HybridPowerSystem> try_from_json(const std::string& json_str,
+                                        ImportMode /*mode*/) {
+  // ImportMode::Permissive tolerance reserved for future field-level handling.
+  try {
+    return from_json(json_str);
+  } catch (const nlohmann::json::exception& e) {
+    return Error{ErrorCode::ParseError,
+                 std::string("JSON parse error: ") + e.what(), {}};
+  } catch (const std::exception& e) {
+    return Error{ErrorCode::ParseError,
+                 std::string("Failed to parse JSON system: ") + e.what(), {}};
+  }
+}
+
+Result<HybridPowerSystem> try_load_json(const std::string& path,
+                                        ImportMode mode) {
+  std::ifstream ifs(path);
+  if (!ifs)
+    return Error{ErrorCode::FileNotFound, "File not found: " + path, {}};
+  try {
+    std::string content((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+    return try_from_json(content, mode);
+  } catch (const std::exception& e) {
+    return Error{ErrorCode::ParseError,
+                 std::string("Failed to load '") + path + "': " + e.what(), {}};
+  }
 }
 
 std::string power_flow_result_to_json(const HybridPowerSystem& sys,

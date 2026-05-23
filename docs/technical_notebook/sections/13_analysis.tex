@@ -1,0 +1,324 @@
+% ============================================================
+\section{Analysis Suite: Carbon, Distribution, Reliability, and Time Series}
+\label{sec:analysis}
+% ============================================================
+
+This chapter documents the \texttt{include/hacdcpf/analysis/} module, which
+provides post-solve analytical capabilities: carbon emissions tracing,
+distribution network power flow, three-phase unbalanced power flow, PV array
+power modelling, reliability and resilience assessments, and time-series
+simulation.
+
+% ------------------------------------------------------------
+\subsection{Carbon Emissions Analysis}
+\label{sec:carbon}
+% ------------------------------------------------------------
+
+Declared in \texttt{analysis/carbon\_analysis.hpp},
+implemented in \texttt{src/analysis/carbon\_analysis.cpp}.
+
+\texttt{run\_carbon\_analysis(sys, opt)} performs power-flow-based emissions
+attribution via two independent methods:
+\begin{enumerate}
+  \item \textbf{Proportional tracing} --- Kirchhoff-based upstream tracing that
+        allocates each generator's output to loads and losses in proportion to
+        power flow direction.
+  \item \textbf{Nodal matrix method} --- Builds and solves a linear system
+        $\mathbf{A}\,\mathbf{c} = \mathbf{q}$ where $c_i$ is the carbon
+        intensity at bus $i$ (tCO\textsubscript{2}/MWh).
+\end{enumerate}
+
+\subsubsection{Options and Result Types}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field (CarbonAnalysisOptions)} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{enable\_tracing} & true & Run proportional tracing method \\
+\texttt{enable\_matrix} & true & Run nodal matrix method \\
+\texttt{base\_mva} & 100.0 & System base MVA \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\texttt{CarbonAnalysisResult} aggregates per-component results:
+
+\begin{longtable}{ll}
+\hline\hline
+\textbf{Field} & \textbf{Description} \\
+\hline\endhead\hline\endfoot
+\texttt{tracing\_verified} & Tracing mass-balance check passed \\
+\texttt{matrix\_solved} & Matrix method converged \\
+\texttt{matrix\_residual} & Residual of the linear system \\
+\texttt{load\_carbon} & Per-AC-load: demand, carbon intensity, total emissions, supply mix \\
+\texttt{dc\_load\_carbon} & Same for DC loads \\
+\texttt{branch\_carbon} & Per-AC-branch: loss, carbon intensity, generator attribution \\
+\texttt{dc\_branch\_carbon} & Same for DC branches \\
+\texttt{bus\_carbon} & Per-AC-bus carbon intensity (tCO\textsubscript{2}/MWh) \\
+\texttt{dc\_bus\_carbon} & Same for DC buses \\
+\texttt{vsc\_carbon} & Per-VSC: input/output power, losses, carbon attribution \\
+\texttt{dcdc\_carbon} & Per-DC-DC converter: same \\
+\texttt{storage\_carbon} & Per-storage: SoC, stored energy, emissions \\
+\texttt{energy\_router\_carbon} & Per-router: port-level power and emissions \\
+\texttt{generator\_loss\_allocation} & Per-generator share of network losses \\
+\texttt{tracing\_summary} & \texttt{EmissionsSummary}: generation, load, loss, balance error \\
+\texttt{matrix\_summary} & Same from matrix method \\
+\end{longtable}
+
+\subsubsection{EmissionsSummary}
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field} & \textbf{Description} \\
+\hline
+\texttt{total\_generation\_emissions\_tco2} & Weighted sum of generator emission rates \\
+\texttt{total\_load\_emissions\_tco2} & Emissions attributed to all loads \\
+\texttt{total\_loss\_emissions\_tco2} & Emissions attributed to network losses \\
+\texttt{balance\_error\_tco2} & $|E_{gen} - E_{load} - E_{loss}|$ \\
+\texttt{balance\_error\_pct} & Relative balance error (\%) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Distribution Network Power Flow}
+\label{sec:dist-pf}
+% ------------------------------------------------------------
+
+Declared in \texttt{analysis/distribution\_power\_flow.hpp},
+implemented in \texttt{src/analysis/distribution\_power\_flow.cpp}.
+
+Two solver variants are provided for radial distribution networks:
+
+\begin{enumerate}
+  \item \textbf{Backward-Forward Sweep (BFS)} --- classical two-pass algorithm
+        for single-source radial feeders.  Fast and numerically robust for
+        weakly meshed topologies.
+  \item \textbf{Three-phase Newton-Raphson} --- full $3n \times 3n$ abc-domain
+        admittance formulation for meshed and unbalanced networks
+        (\texttt{solve\_three\_phase\_nr(sys, opt)}).
+\end{enumerate}
+
+\subsubsection{Distribution PF Options and Results}
+
+\begin{center}
+\begin{tabular}{llll}
+\hline\hline
+\textbf{Field (DistributionPFOptions)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{max\_iterations} & 100 & --- & Maximum BFS/NR iterations \\
+\texttt{convergence\_tolerance} & \(10^{-6}\) & pu & Residual convergence tolerance \\
+\texttt{backward\_forward\_sweep} & true & --- & Use BFS (false = use NR) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (DistributionPFResult)} & \textbf{Description} \\
+\hline
+\texttt{converged, iterations, residual} & Convergence indicators \\
+\texttt{buses} & \texttt{DistributionBusResult} list: $V_m$, $V_a$, $P$, $Q$ per bus \\
+\texttt{status} & Human-readable solver status string \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Three-Phase Unbalanced Power Flow}
+\label{sec:three-phase}
+% ------------------------------------------------------------
+
+Declared in \texttt{power\_flow/three\_phase.hpp}.  The primary solver
+(\texttt{solve\_three\_phase(sys, opt)}) delegates to
+\texttt{analysis::solve\_three\_phase\_nr()} and reports:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (ThreePhaseFlowResult)} & \textbf{Description} \\
+\hline
+\texttt{bus\_results} & Per-bus three-phase voltages (\texttt{ThreePhaseBusResult}) \\
+\texttt{converged, iterations, residual} & Convergence indicators \\
+\texttt{total\_p\_loss\_mw} & Total three-phase active power loss \\
+\texttt{total\_q\_loss\_mvar} & Total three-phase reactive power loss \\
+\texttt{max\_vuf\_percent} & Worst-case Voltage Unbalance Factor (\%) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\texttt{ThreePhaseFlowOptions} mirrors \texttt{DistributionPFOptions} with an
+additional \texttt{include\_shunts} flag (default true).
+
+% ------------------------------------------------------------
+\subsection{PV Array Power Curve Model}
+\label{sec:pv-curve}
+% ------------------------------------------------------------
+
+Declared in \texttt{power\_flow/pv\_power\_curve.hpp}.  Implements the
+empirical five-parameter PV module model:
+
+\begin{equation}
+  I(V) = I_{sc}\,\left(1 - \left(\frac{V}{V_{oc}}\right)^a\right)^b
+           \left(1 - c\left(\frac{V}{V_{mpp}}\right)^2\right),
+\end{equation}
+
+with fixed constants $a = 10.0$, $b = 0.5476$, $c = 0.02381$ (Julia
+DistributionPowerFlow parity).
+
+\texttt{compute\_pv\_power\_mw(pv)} evaluates the complete PV system output:
+\begin{equation}
+  P_{array} = I(V_{mpp}) \cdot V_{mpp} \cdot N_{series} \cdot N_{parallel}
+              \cdot \frac{G}{1000} \cdot \eta_{inv},
+\end{equation}
+where $G$ is irradiance (W/m\textsuperscript{2}) and $\eta_{inv}$ is inverter
+efficiency.  Falls back to \texttt{pv.p\_mw} when array parameters are absent.
+
+% ------------------------------------------------------------
+\subsection{Reliability Assessment}
+\label{sec:reliability}
+% ------------------------------------------------------------
+
+Declared in \texttt{analysis/reliability\_assessment.hpp}.  Performs
+Monte Carlo reliability simulation over a configurable time horizon.
+
+\begin{center}
+\begin{tabular}{llll}
+\hline\hline
+\textbf{Field (Options)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{num\_simulations} & 10000 & --- & Monte Carlo sample count \\
+\texttt{time\_horizon\_years} & 1.0 & years & Simulation time horizon \\
+\texttt{random\_seed} & 42 & --- & RNG seed for reproducibility \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Metric (Result)} & \textbf{Acronym} & \textbf{Description} \\
+\hline
+\texttt{lolp} & LOLP & Loss of Load Probability \\
+\texttt{eens\_mwh} & EENS & Expected Energy Not Supplied (MWh/year) \\
+\texttt{saidi\_hr} & SAIDI & System Average Interruption Duration Index (hr/cust/year) \\
+\texttt{saifi} & SAIFI & System Average Interruption Frequency Index (interr/cust/year) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\texttt{ReliabilityComponent} describes each component's failure model:
+\texttt{failure\_rate\_per\_year} and \texttt{repair\_time\_hr}.
+
+% ------------------------------------------------------------
+\subsection{Resilience Assessment}
+\label{sec:resilience}
+% ------------------------------------------------------------
+
+Declared in \texttt{analysis/resilience\_assessment.hpp},
+implemented in \texttt{src/analysis/resilience\_assessment.cpp}.
+
+\texttt{run\_distribution\_resilience\_assessment(sys, opt)} evaluates
+load curtailment under fault scenarios with optional microgrid islanding and
+storage dispatch:
+
+\begin{center}
+\begin{tabular}{llll}
+\hline\hline
+\textbf{Field (Options)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{fault\_duration\_hr} & 1.0 & hr & Fault scenario duration \\
+\texttt{curtailment\_penalty} & 1000.0 & --- & Load shedding penalty weight \\
+\texttt{enable\_islanding} & true & --- & Allow microgrid island operation \\
+\texttt{enable\_storage\_dispatch} & true & --- & Dispatch storage during outage \\
+\texttt{max\_restoration\_hr} & 8.0 & hr & Maximum restoration time \\
+\texttt{verbose} & false & --- & Print diagnostic output \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (DistributionResilienceResult)} & \textbf{Description} \\
+\hline
+\texttt{total\_ens\_mwh} & Total Energy Not Served (MWh) \\
+\texttt{max\_curtailment\_mw} & Peak curtailment power (MW) \\
+\texttt{restoration\_time\_hr} & Time to restore full supply (hr) \\
+\texttt{bus\_curtailments} & Per-bus: curtailed load, duration, ENS \\
+\texttt{completed, status} & Success flag and status message \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Time-Series Power Flow}
+\label{sec:time-series-pf}
+% ------------------------------------------------------------
+
+Declared in \texttt{analysis/time\_series\_pf.hpp}.  Provides the data types
+for multi-period simulation.
+
+\subsubsection{Time-Series Data Model}
+
+The data types live in the global \texttt{hacdcpf} namespace for backward
+compatibility with JSON serialisation:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Type} & \textbf{Fields} & \textbf{Description} \\
+\hline
+\texttt{TimeSeriesProfile} & \texttt{id, name, values} & Named time profile vector \\
+\texttt{TimeSeriesData} & \texttt{num\_steps=24} & Collection of named profiles \\
+ & \texttt{step\_duration\_hr=1.0} & Step width in hours \\
+ & \texttt{profiles} & Vector of \texttt{TimeSeriesProfile} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Time-Series PF Results}
+
+In namespace \texttt{hacdcpf::analysis}:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (TimeSeriesPFOptions)} & \textbf{Description} \\
+\hline
+\texttt{num\_threads=1} & Parallel threads for multi-step solve \\
+\texttt{abort\_on\_failure=false} & Stop on first diverged step if true \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (TimeSeriesPFSnapshot)} & \textbf{Description} \\
+\hline
+\texttt{step, time\_hr} & Step index and absolute time \\
+\texttt{converged} & Per-step convergence flag \\
+\texttt{vm, va, vdc} & Bus voltage magnitudes and angles at this step \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (TimeSeriesPFResult)} & \textbf{Description} \\
+\hline
+\texttt{all\_converged} & True if every step converged \\
+\texttt{num\_steps, num\_failed} & Step counts \\
+\texttt{snapshots} & Ordered vector of \texttt{TimeSeriesPFSnapshot} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Multi-step parallelism is coordinated through the thread pool
+(\S\ref{sec:thread-pool}): each step's \texttt{HybridPowerSystem} is projected
+and assembled independently; threads claim steps from a work queue to avoid
+shared mutable state.

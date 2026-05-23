@@ -21,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "hacdcpf/analysis/distribution_power_flow.hpp"
+#include "hacdcpf/power_flow/distribution_power_flow.hpp"
 #include "hacdcpf/io/opendss_bridge.hpp"
 #include hacdcpf/model/hybrid_power_system.hpp
 #include hacdcpf/projection/project_to_canonical.hpp

@@ -2,6 +2,7 @@
 
 #include <vector>
 
+#include "hacdcpf/api/solver_capabilities.hpp"
 #include "hacdcpf/detail/internal_helpers.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
@@ -12,16 +13,19 @@
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
-#include "hacdcpf/analysis/carbon_analysis.hpp"
-#include "hacdcpf/analysis/time_series_pf.hpp"
-#include "hacdcpf/analysis/reliability_assessment.hpp"
-#include "hacdcpf/analysis/resilience_assessment.hpp"
+#include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 
 namespace hacdcpf {
 
 struct SolverHandle;
+// ── Capabilities ──────────────────────────────────────────────────────────────────
 
+// get_solver_capabilities() is declared in api/solver_capabilities.hpp
+// and implemented in src/api/hacdcpf.cpp.
 // ── Validation ────────────────────────────────────────────────────────────────
 
 /// Full model validation — returns a structured ValidationReport.
@@ -90,7 +94,11 @@ opf::DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
 
 opf::RPOResult solve_rpo(const HybridPowerSystem& sys,
                          const opf::RPOOptions& opt = {});
-
+/// Run an independent post-solve feasibility audit on an AC OPF result.
+/// Checks power balance, voltage limits, branch limits, generator limits,
+/// and objective consistency.  Populates result.audit and appends to
+/// result.infeasibility_hints.
+void verify_opf_result(const HybridPowerSystem& sys, opf::ACOPFResult& result);
 // ── Analysis ──────────────────────────────────────────────────────────────────
 
 analysis::DistributionResilienceResult run_distribution_resilience_assessment(

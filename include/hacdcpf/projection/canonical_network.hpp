@@ -89,4 +89,38 @@ struct BusMergeMap {
   }
 };
 
+// ───────────────────────────────────────────────────────────────────
+// Projection provenance mapping
+//
+// Records which canonical component was synthesised from which rich
+// source component during project_to_canonical_models().  Used for
+// result attribution, carbon tracing, and user-facing diagnostics.
+// ───────────────────────────────────────────────────────────────────
+struct ComponentMapping {
+  std::string source_type;          ///< e.g. "PVSystem", "Motor", "Transformer2W"
+  std::string source_id;            ///< original component index or name
+  std::string canonical_type;       ///< e.g. "StaticGenerator", "ACBranch", "BusMerge"
+  std::string canonical_id;         ///< canonical component index or representative bus
+  double participation_factor{1.0}; ///< fraction of source output attributed here
+};
+
+/// Optional report returned alongside a projected system.
+/// Populated when the caller requests diagnostic detail.
+struct ProjectionReport {
+  std::vector<ComponentMapping> mappings;
+  std::vector<std::string>      diagnostics;  ///< human-readable notes
+
+  bool empty() const noexcept {
+    return mappings.empty() && diagnostics.empty();
+  }
+
+  /// Number of mappings for a given source type.
+  int count_source(const std::string& type) const noexcept {
+    int n = 0;
+    for (const auto& m : mappings)
+      if (m.source_type == type) ++n;
+    return n;
+  }
+};
+
 }  // namespace hacdcpf

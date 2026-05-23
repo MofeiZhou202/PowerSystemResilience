@@ -1,4 +1,4 @@
-#include "hacdcpf/analysis/distribution_power_flow.hpp"
+#include "hacdcpf/power_flow/distribution_power_flow.hpp"
 
 namespace hacdcpf::analysis {
 

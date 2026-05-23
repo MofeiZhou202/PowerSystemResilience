@@ -1,4 +1,4 @@
-#include "hacdcpf/analysis/carbon_analysis.hpp"
+#include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 
 namespace hacdcpf::analysis {
 

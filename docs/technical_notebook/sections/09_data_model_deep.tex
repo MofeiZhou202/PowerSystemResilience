@@ -1,0 +1,369 @@
+% ============================================================
+\section{Complete Data Model: Enumerations, Defaults, and Error Types}
+\label{sec:data-model-deep}
+% ============================================================
+
+This chapter provides the complete reference for the lower layers of the
+\texttt{model/} subsystem: the enumeration hierarchy (nine sub-headers under
+\texttt{include/hacdcpf/model/enums/}), the centralised \texttt{Defaults}
+constant struct, the \texttt{Result<T>}/\texttt{Error}/\texttt{ErrorCode}
+monadic result type, and the validation subsystem.
+
+% ------------------------------------------------------------
+\subsection{Enumeration Hierarchy}
+\label{sec:enums}
+% ------------------------------------------------------------
+
+All domain enumerations live in \texttt{include/hacdcpf/model/enums/} and are
+re-exported by the umbrella header \texttt{include/hacdcpf/model/enums.hpp}.
+Each enum is a scoped \texttt{enum class} in namespace \texttt{hacdcpf}.
+
+\subsubsection{Bus Type Enumerations}
+\label{sec:bus-enums}
+
+Declared in \texttt{model/enums/bus\_types.hpp}.
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Enum} & \textbf{Enumerator} & \textbf{Meaning} \\
+\hline
+\texttt{BusType} & \texttt{PQ=1} & Constant-power load bus \\
+ & \texttt{PV=2} & Voltage-controlled generator bus \\
+ & \texttt{SLACK=3} & Swing bus (voltage \& angle reference) \\
+ & \texttt{ISOLATED=4} & Disconnected bus (removed from solve) \\
+\hline
+\texttt{DCBusType} & \texttt{DC\_P=1} & DC active-power controlled bus \\
+ & \texttt{DC\_V=3} & DC voltage-controlled bus \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Generator Enumerations}
+\label{sec:gen-enums}
+
+Declared in \texttt{model/enums/generator\_enums.hpp}.
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Enum} & \textbf{Enumerator} & \textbf{Meaning} \\
+\hline
+\texttt{GenCostModel} & \texttt{Polynomial=2} & \(f(P_g)=c_2 P_g^2+c_1 P_g+c_0\) \\
+ & \texttt{PiecewiseLinear=1} & Segmented cost curve \\
+\hline
+\texttt{FuelType} & \texttt{Coal, Gas, Oil, Nuclear} & Conventional thermal \\
+ & \texttt{Hydro, Wind, Solar} & Renewable hydro / wind / PV \\
+ & \texttt{Biomass, Geothermal} & Alternative renewables \\
+ & \texttt{Storage} & Storage acting as generator \\
+ & \texttt{Unknown=0} & Unspecified \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Converter and Loss Model Enumerations}
+\label{sec:converter-enums}
+
+Declared in \texttt{model/enums/converter\_enums.hpp}.
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Enum} & \textbf{Enumerator} & \textbf{Meaning} \\
+\hline
+\texttt{ConverterMode} & \texttt{PQ\_MODE} & Fixed active + reactive injection \\
+ & \texttt{VDC\_Q} & DC voltage regulation + fixed Q \\
+ & \texttt{VDC\_VAC} & DC voltage + AC voltage regulation \\
+\hline
+\texttt{LossModelType} & \texttt{Linear} & \(P_{loss}=a_0+a_1 I\) \\
+ & \texttt{CurrentBased} & \(P_{loss}=a_0+a_1 I+a_2 I^2\) \\
+\hline
+\texttt{DCDCControlMode} & \texttt{Voltage=0} & Regulate DC output voltage \\
+ & \texttt{Power=1} & Regulate transferred power \\
+ & \texttt{Droop=2} & Droop-controlled power sharing \\
+\hline
+\texttt{ERPortType} & \texttt{AC=0} & AC-side energy-router port \\
+ & \texttt{DC=1} & DC-side energy-router port \\
+\hline
+\texttt{ERControlMode} & \texttt{PQ=0} & Fixed power dispatch \\
+ & \texttt{VF=1} & Grid-forming voltage/frequency control \\
+ & \texttt{Droop=2} & Droop-based power sharing \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Load, Storage, and Renewable Enumerations}
+
+Declared in \texttt{model/enums/load\_enums.hpp}, \texttt{storage\_enums.hpp},
+and \texttt{renewable\_enums.hpp}.
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Enum} & \textbf{Enumerator} & \textbf{Meaning} \\
+\hline
+\texttt{LoadModel} & \texttt{ConstantPower=0} & Standard PQ bus \\
+ & \texttt{ZIP=1} & Polynomial: \(P=P_0(Z|V|^2+I|V|+P)\) \\
+ & \texttt{Exponential=2} & \(P=P_0 V^\alpha\) \\
+\hline
+\texttt{LoadPriority} & \texttt{Low=1} to \texttt{Critical=4} & Shedding priority \\
+\hline
+\texttt{StorageMode} & \texttt{Idle=0, Charging=1, Discharging=2} & Operating mode \\
+\hline
+\texttt{MobileStorageStatus} & \texttt{Stationary=0} & Not in transit \\
+ & \texttt{InTransit=1} & Relocating between sites \\
+ & \texttt{Deployed=2} & Operational at new site \\
+\hline
+\texttt{RenewableType} & \texttt{Wind=0, SolarPV=1, SolarCSP=2, Hydro=3} & Renewable technology \\
+\hline
+\texttt{SgenType} & \texttt{PV=0, Wind=1, CHP=2, Diesel=3, FuelCell=4} & Distributed generation \\
+\hline
+\texttt{PVControlMode} & \texttt{MPPT=0} & Max power point tracking \\
+ & \texttt{PQ=1} & Fixed P and Q setpoints \\
+ & \texttt{VQ=2} & Voltage reactive support \\
+ & \texttt{Curtailed=3} & Output curtailment \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Switching and Grid Enumerations}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Enum} & \textbf{Enumerator} & \textbf{Meaning} \\
+\hline
+\texttt{SwitchType} & \texttt{CircuitBreaker=0} & Full fault-interrupting capability \\
+ & \texttt{Disconnector=1} & No-load isolation \\
+ & \texttt{LoadBreakSwitch=2} & Switching under load \\
+ & \texttt{Fuse=3} & Overcurrent protection \\
+ & \texttt{Recloser=4} & Auto-reclosing \\
+ & \texttt{Sectionalizer=5} & Sectionalization \\
+\hline
+\texttt{BreakerType} & \texttt{CB=0, LS=1, DS=2} & Circuit breaker / load switch / disconnector \\
+\hline
+\texttt{MicrogridMode} & \texttt{GridConnected=0} & Connected to utility \\
+ & \texttt{Islanded=1} & Autonomous operation \\
+ & \texttt{Transition=2} & Mode-change transient \\
+\hline
+\texttt{ChargerType} & \texttt{AC\_L1=0} & Level 1 AC (\(\leq\)3.7~kW) \\
+ & \texttt{AC\_L2=1} & Level 2 AC (\(\leq\)22~kW) \\
+ & \texttt{DC\_Fast=2} & DC fast charge (\(\leq\)350~kW) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{EnumStrings Utility}
+\label{sec:enum-strings}
+% ------------------------------------------------------------
+
+The header \texttt{include/hacdcpf/model/enum\_strings.hpp} provides
+header-only inline bidirectional string converters for every enum type.
+Each type \texttt{X} has two functions:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Function} & \textbf{Description} \\
+\hline
+\texttt{x\_str(X)} $\to$ \texttt{std::string} & Enum value to string \\
+\texttt{x\_from\_str(std::string)} $\to$ \texttt{X} & String to enum (default on unknown) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Converters exist for: \texttt{BusType}, \texttt{DCBusType}, \texttt{ConverterMode},
+\texttt{FuelType}, \texttt{LossModelType}, \texttt{LoadModel}, \texttt{StorageMode},
+\texttt{RenewableType}, \texttt{SgenType}, \texttt{PVControlMode},
+\texttt{MicrogridMode}, \texttt{SwitchType}, and \texttt{ChargerType}.
+They are consumed by \texttt{json\_io}, \texttt{excel\_io}, and any future
+serialisers.
+
+% ------------------------------------------------------------
+\subsection{Defaults: System-Wide Numerical Constants}
+\label{sec:defaults}
+% ------------------------------------------------------------
+
+\texttt{include/hacdcpf/model/defaults.hpp} declares a single POD struct
+\texttt{hacdcpf::Defaults} whose static \texttt{constexpr} members serve as
+the single source of truth for all numerical defaults across JSON/Excel import,
+the MATPOWER parser, model constructors, solver assembly, and tests.
+
+\begin{longtable}{llll}
+\hline\hline
+\textbf{Constant} & \textbf{Value} & \textbf{Units} & \textbf{Description} \\
+\hline\endhead\hline\endfoot
+\texttt{kBaseMva} & 100.0 & MVA & System base apparent power \\
+\texttt{kFreqHz} & 50.0 & Hz & Nominal network frequency \\
+\texttt{kBusVoltage} & 1.0 & pu & Bus voltage magnitude initial value \\
+\texttt{kBusAngleDeg} & 0.0 & deg & Bus voltage angle initial value \\
+\texttt{kVoltageMinPu} & 0.9 & pu & AC bus lower voltage bound \\
+\texttt{kVoltageMaxPu} & 1.1 & pu & AC bus upper voltage bound \\
+\texttt{kDCVoltageMinPu} & 0.9 & pu & DC bus lower voltage bound \\
+\texttt{kDCVoltageMaxPu} & 1.1 & pu & DC bus upper voltage bound \\
+\texttt{kTapRatio} & 1.0 & pu & Transformer tap ratio \\
+\texttt{kShiftDeg} & 0.0 & deg & Phase-shifting transformer angle \\
+\texttt{kRateAMva} & 0.0 & MVA & Thermal rating (0 = unlimited) \\
+\texttt{kGenPmax} & \(10^6\) & MW & Default generator upper active limit \\
+\texttt{kGenPmin} & 0.0 & MW & Default generator lower active limit \\
+\texttt{kGenQmax} & \(10^6\) & MVAr & Default reactive upper limit \\
+\texttt{kGenQmin} & \(-10^6\) & MVAr & Default reactive lower limit \\
+\texttt{kGenVgPu} & 1.0 & pu & Generator terminal voltage setpoint \\
+\texttt{kPFTol} & \(10^{-8}\) & pu & Newton PF convergence tolerance \\
+\texttt{kPFMaxIter} & 50 & --- & Newton PF maximum iterations \\
+\texttt{kOPFTol} & \(10^{-8}\) & pu & OPF convergence tolerance \\
+\texttt{kOPFMaxIter} & 300 & --- & OPF maximum iterations \\
+\texttt{kCostScaleFactor} & 1.0 & \$/h & Objective cost scale factor \\
+\texttt{kSchemaVersion} & \texttt{"1.0"} & --- & JSON schema version string \\
+\texttt{kPackageVersion} & \texttt{"0.5.0"} & --- & Library release version string \\
+\end{longtable}
+
+Usage pattern: \texttt{using D = hacdcpf::Defaults; double tol = D::kPFTol;}.
+
+% ------------------------------------------------------------
+\subsection{Structured Error and Result Types}
+\label{sec:error-result}
+% ------------------------------------------------------------
+
+\texttt{include/hacdcpf/model/error.hpp} provides lightweight, exception-free
+error propagation for batch workflows.  It is header-only with no dependencies
+beyond the C++ standard library.
+
+\subsubsection{\texttt{ErrorCode} Enumeration}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Code} & \textbf{Value} & \textbf{Description} \\
+\hline
+\texttt{InvalidInput} & 1000 & Malformed input data \\
+\texttt{ValidationFailed} & 1001 & Pre-solve validation returned errors \\
+\texttt{MissingSlackBus} & 1002 & No swing bus defined \\
+\texttt{DisconnectedNetwork} & 1003 & Network has isolated subsystem \\
+\texttt{SingularAdmittance} & 1004 & Ybus is numerically singular \\
+\texttt{NotConverged} & 2000 & Newton solver did not converge \\
+\texttt{MaxIterationsReached} & 2001 & Iteration limit exceeded \\
+\texttt{NumericalFailure} & 2002 & Floating-point failure (NaN/Inf) \\
+\texttt{JacobianSingular} & 2003 & Jacobian is numerically singular \\
+\texttt{HomotopyFailed} & 2004 & Homotopy path tracking failed \\
+\texttt{FileNotFound} & 3000 & File path does not exist \\
+\texttt{ParseError} & 3001 & File format / parsing error \\
+\texttt{SchemaVersionMismatch} & 3002 & JSON schema version incompatible \\
+\texttt{NotImplemented} & 9000 & Feature not yet implemented \\
+\texttt{Unknown} & 9999 & Unclassified error \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{\texttt{Error} Descriptor}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\hline
+\texttt{code} & \texttt{ErrorCode} & Machine-readable error code \\
+\texttt{message} & \texttt{std::string} & Human-readable description \\
+\texttt{details} & \texttt{vector<ValidationIssue}>} & Attached validation issues (optional) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Three factory methods simplify common cases:
+\begin{itemize}
+  \item \texttt{Error::validation\_failed(report)} --- attaches a \texttt{ValidationReport}.
+  \item \texttt{Error::not\_converged(reason)} --- fills code \texttt{NotConverged} with a message.
+  \item \texttt{Error::parse\_error(path, msg)} --- fills code \texttt{ParseError}.
+\end{itemize}
+
+\subsubsection{\texttt{Result<T>} Monad}
+
+\texttt{Result<T}>} is a \texttt{std::variant<T,Error}>}
+wrapper that carries either a success value or an error:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Member} & \textbf{Description} \\
+\hline
+\texttt{has\_value()} $\to$ \texttt{bool} & True if successful \\
+\texttt{operator bool()} & Alias for \texttt{has\_value()} \\
+\texttt{value()} $\to$ \texttt{T\&} & Access success payload (UB on error) \\
+\texttt{operator*(), operator->()} & Dereference to payload \\
+\texttt{error()} $\to$ \texttt{Error\&} & Access error payload \\
+\texttt{value\_or\_throw()} $\to$ \texttt{T\&} & Access value or throw \texttt{std::runtime\_error} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Typical usage:
+\begin{verbatim}
+auto res = safe_solve_power_flow(sys, opt);
+if (!res) { std::cerr << res.error().message; return; }
+auto& r = res.value();
+\end{verbatim}
+
+% ------------------------------------------------------------
+\subsection{Validation Subsystem}
+\label{sec:validation-deep}
+% ------------------------------------------------------------
+
+\texttt{include/hacdcpf/validation/} contains two headers that implement
+static pre-solve network validation.
+
+\subsubsection{ValidationReport and ValidationIssue}
+
+Declared in \texttt{validation\_report.hpp}:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Type / Member} & \textbf{Description} \\
+\hline
+\texttt{Severity::Info} & Informational note; solving proceeds \\
+\texttt{Severity::Warning} & Degraded results possible; solving proceeds \\
+\texttt{Severity::Error} & Fatal; system cannot be solved as-is \\
+\hline
+\texttt{ValidationIssue::severity} & Diagnostic severity level \\
+\texttt{ValidationIssue::component\_type} & e.g.\ \texttt{"ACBus"}, \texttt{"VSCConverter"} \\
+\texttt{ValidationIssue::component\_id} & External ID / name \\
+\texttt{ValidationIssue::field} & Field name that is problematic \\
+\texttt{ValidationIssue::message} & Human-readable description \\
+\hline
+\texttt{ValidationReport::is\_valid()} & True if no \texttt{Error}-severity issues \\
+\texttt{ValidationReport::has\_errors()} & Alias for \texttt{!is\_valid()} \\
+\texttt{ValidationReport::has\_warnings()} & True if any \texttt{Warning} issues \\
+\texttt{ValidationReport::count(Severity)} & Count of issues at a given severity \\
+\texttt{ValidationReport::add(s,type,id,field,msg)} & Append a new issue \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Validation Checks}
+
+\texttt{validate(const HybridPowerSystem\&)} in
+\texttt{validation/validate\_system.hpp} / \texttt{src/validation/validate\_system.cpp}
+runs 15 static checks and returns a \texttt{ValidationReport}:
+
+\begin{enumerate}
+  \item \textbf{base\_mva $>$ 0} --- system base must be positive.
+  \item \textbf{Duplicate AC bus IDs} --- no two AC buses share an index.
+  \item \textbf{Duplicate DC bus IDs} --- no two DC buses share an index.
+  \item \textbf{AC branch bus references} --- \texttt{from\_bus} and \texttt{to\_bus} exist.
+  \item \textbf{DC branch bus references} --- same, in the DC network.
+  \item \textbf{AC voltage limits} --- $V_{min} > 0$, $V_{min} < V_{max}$.
+  \item \textbf{Generator P limits} --- $P_{min} \leq P_{max}$.
+  \item \textbf{Generator Q limits} --- $Q_{min} \leq Q_{max}$.
+  \item \textbf{Generator bus reference} --- generator bus exists in AC network.
+  \item \textbf{Slack bus presence} --- at least one \texttt{BusType::SLACK} bus.
+  \item \textbf{Transformer tap ratio} --- $0.5 < \texttt{tap} < 2.0$.
+  \item \textbf{VSC converter bus references} --- AC and DC bus indices exist.
+  \item \textbf{DC-DC converter bus references} --- both DC buses exist.
+  \item \textbf{Non-negative AC branch resistance} --- $r_{pu} \geq 0$.
+  \item \textbf{AC/DC base MVA consistency} --- subsystem base MVA matches system base.
+\end{enumerate}
+
+Any \texttt{Error}-severity result from \texttt{validate()} will prevent the
+solver from proceeding.  The \texttt{Error::validation\_failed()} factory
+method wraps a failed report into the structured error type for API return.

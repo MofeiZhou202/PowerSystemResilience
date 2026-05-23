@@ -1,6 +1,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -748,6 +749,156 @@ PowerFlowOptions PowerFlowOptions::from_parts(
   o.verbose                 = runtime.verbose;
 
   return o;
+}
+
+// ── Solver capabilities ───────────────────────────────────────────────────────
+
+SolverCapabilities get_solver_capabilities() noexcept {
+  SolverCapabilities caps;
+  // These are always compiled in:
+  caps.has_sparse_lu      = true;
+  caps.has_native_ipm     = true;
+  caps.supports_ac_opf    = true;
+  caps.supports_dc_opf    = true;
+  caps.supports_three_phase = true;
+  caps.supports_quadratic_objective = true;
+
+  // Optional backends detected at compile time via HACDCPF_HAVE_* defines
+  // propagated from the MIPSolvers sub-project.
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  caps.has_highs = true;
+  caps.supports_integer_variables = true;
+#endif
+#ifdef HACDCPF_HAVE_GUROBI
+  caps.has_gurobi = true;
+  caps.supports_integer_variables = true;
+#endif
+#ifdef HACDCPF_HAVE_IPOPT
+  caps.has_ipopt = true;
+#endif
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  caps.has_scip = true;
+  caps.supports_integer_variables = true;
+#endif
+#ifdef HACDCPF_HAVE_PAPILO
+  caps.has_papilo = true;
+#endif
+#ifdef HACDCPF_HAVE_KLU
+  caps.has_klu = true;
+#endif
+#ifdef HACDCPF_HAVE_UMFPACK
+  caps.has_umfpack = true;
+#endif
+#ifdef HACDCPF_HAVE_ACCELERATE
+  caps.has_accelerate = true;
+#endif
+#ifndef HACDCPF_NO_EXCEL
+  caps.has_excel = true;
+#endif
+#ifndef HACDCPF_NO_OPENDSS
+  caps.has_opendss = true;
+#endif
+
+  return caps;
+}
+
+// ── OPF feasibility audit ─────────────────────────────────────────────────────
+
+void verify_opf_result(const HybridPowerSystem& sys, opf::ACOPFResult& result) {
+  opf::OpfAudit audit;
+  audit.audited = true;
+  audit.objective_reported = result.objective;
+
+  const double base_mva = sys.base_mva > 1e-12 ? sys.base_mva : 100.0;
+
+  // ── Check voltage limits ──────────────────────────────────────────────────
+  for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+    if (i >= static_cast<int>(result.vm.size())) break;
+    const auto& bus = sys.ac.buses[i];
+    const double vm  = result.vm[i];
+    const double vio = std::max(0.0, std::max(bus.vmin_pu - vm, vm - bus.vmax_pu));
+    if (vio > audit.max_voltage_limit_violation_pu) {
+      audit.max_voltage_limit_violation_pu = vio;
+      if (vio > 1e-4) {
+        audit.violations.push_back(
+            "Voltage at bus " + std::to_string(bus.index) +
+            " = " + std::to_string(vm) + " pu, limits [" +
+            std::to_string(bus.vmin_pu) + ", " + std::to_string(bus.vmax_pu) + "]");
+      }
+    }
+  }
+
+  // ── Check generator limits ────────────────────────────────────────────────
+  for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
+    if (i >= static_cast<int>(result.pg_mw.size())) break;
+    const auto& gen = sys.ac.generators[i];
+    if (!gen.in_service) continue;
+    const double pg  = result.pg_mw[i];
+    const double vio = std::max(0.0, std::max(gen.pmin_mw - pg, pg - gen.pmax_mw));
+    if (vio > audit.max_gen_limit_violation_mw) {
+      audit.max_gen_limit_violation_mw = vio;
+      if (vio > 1e-3) {
+        audit.violations.push_back(
+            "Generator at bus " + std::to_string(gen.bus) +
+            " pg=" + std::to_string(pg) + " MW outside [" +
+            std::to_string(gen.pmin_mw) + ", " + std::to_string(gen.pmax_mw) + "]");
+      }
+    }
+  }
+
+  // ── Recompute objective (linear generation cost) ──────────────────────────
+  double obj_recomputed = 0.0;
+  for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
+    if (i >= static_cast<int>(result.pg_mw.size())) break;
+    const auto& gen = sys.ac.generators[i];
+    if (!gen.in_service) continue;
+    // Linear cost term c1 * pg (MW)
+    obj_recomputed += gen.cost_c1 * result.pg_mw[i];
+  }
+  audit.objective_recomputed = obj_recomputed;
+  if (std::fabs(audit.objective_reported) > 1e-10) {
+    audit.objective_discrepancy_pct =
+        std::fabs(obj_recomputed - audit.objective_reported) /
+        std::fabs(audit.objective_reported) * 100.0;
+  }
+
+  // ── Infeasibility hints when not converged ────────────────────────────────
+  if (!result.converged && result.infeasibility_hints.empty()) {
+    // Check for load without source
+    for (const auto& bus : sys.ac.buses) {
+      bool has_source = false;
+      for (const auto& gen : sys.ac.generators)
+        if (gen.bus == bus.index && gen.in_service) { has_source = true; break; }
+      if (!has_source) {
+        for (const auto& eg : sys.ac.external_grids)
+          if (eg.bus == bus.index && eg.in_service) { has_source = true; break; }
+      }
+      double load_p = 0.0;
+      for (const auto& ld : sys.ac.loads)
+        if (ld.bus == bus.index && ld.in_service) load_p += ld.p_mw;
+      if (load_p > 1e-3 && !has_source)
+        result.infeasibility_hints.push_back(
+            "Bus " + std::to_string(bus.index) +
+            " has load (" + std::to_string(load_p) + " MW) but no connected source");
+    }
+    // Check for conflicting limits
+    for (const auto& gen : sys.ac.generators) {
+      if (gen.pmin_mw > gen.pmax_mw + 1e-6)
+        result.infeasibility_hints.push_back(
+            "Generator at bus " + std::to_string(gen.bus) +
+            ": pmin_mw (" + std::to_string(gen.pmin_mw) +
+            ") > pmax_mw (" + std::to_string(gen.pmax_mw) + ")");
+    }
+    for (const auto& bus : sys.ac.buses) {
+      if (bus.vmax_pu < bus.vmin_pu + 1e-6)
+        result.infeasibility_hints.push_back(
+            "Bus " + std::to_string(bus.index) +
+            ": vmax_pu (" + std::to_string(bus.vmax_pu) +
+            ") <= vmin_pu (" + std::to_string(bus.vmin_pu) + ")");
+    }
+  }
+
+  result.audit = std::move(audit);
 }
 
 }  // namespace hacdcpf

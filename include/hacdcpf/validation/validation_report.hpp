@@ -57,6 +57,31 @@ struct ValidationReport {
         issues.push_back({s, std::move(type), std::move(id),
                           std::move(field), std::move(msg)});
     }
+
+    /// Alias for is_valid() — no Error-severity issues present.
+    [[nodiscard]] bool ok() const noexcept { return is_valid(); }
+
+    /// Returns a single human-readable summary string.
+    /// Example: "OK" / "2 error(s), 1 warning(s): [ACBus/1/vmin_pu] ..."
+    [[nodiscard]] std::string summary() const {
+        int nerr  = count(Severity::Error);
+        int nwarn = count(Severity::Warning);
+        if (nerr == 0 && nwarn == 0) return "OK";
+        std::string s;
+        if (nerr  > 0) s += std::to_string(nerr)  + " error(s)";
+        if (nwarn > 0) {
+            if (!s.empty()) s += ", ";
+            s += std::to_string(nwarn) + " warning(s)";
+        }
+        s += ":";
+        for (const auto& i : issues) {
+            s += " [" + i.component_type;
+            if (!i.component_id.empty()) s += "/" + i.component_id;
+            if (!i.field.empty())        s += "/" + i.field;
+            s += "] " + i.message + ";";
+        }
+        return s;
+    }
 };
 
 }  // namespace hacdcpf::validation

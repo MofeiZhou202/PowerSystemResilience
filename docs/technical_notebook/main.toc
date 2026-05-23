@@ -1,0 +1,380 @@
+\contentsline {section}{\numberline {1}Scope and Documentation Contract}{1}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Implemented Runtime Families}{1}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Current Stub and Absent Boundaries}{1}{subsection.1.2}%
+\contentsline {subsection}{\numberline {1.3}Documentation Principle}{2}{subsection.1.3}%
+\contentsline {subsection}{\numberline {1.4}Canonical Modeling Pipeline}{2}{subsection.1.4}%
+\contentsline {subsection}{\numberline {1.5}Important Boundary Between ``Implemented'' and ``Declared''}{3}{subsection.1.5}%
+\contentsline {section}{\numberline {2}Nomenclature}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Notation Policy}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Index and Qualifier Conventions}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Canonical Naming Grammar}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Superscript/Subscript Rule}{4}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Integration Status Codes}{5}{subsection.2.5}%
+\contentsline {section}{\numberline {3}Current C++ Architecture}{5}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Source Layout}{5}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Top-Level Public API}{6}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Build-Time Optional Features}{6}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Algorithm Index}{6}{subsection.3.4}%
+\contentsline {section}{\numberline {4}Engine Solver System}{7}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Forwarded Engine Surface}{8}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Local Newton Solver Class}{8}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}OPF Use of Engine Facilities}{8}{subsection.4.3}%
+\contentsline {section}{\numberline {5}Native NLP and Interior-Point Details}{9}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Native AC OPF Loop}{9}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Parity IPM Loop}{9}{subsection.5.2}%
+\contentsline {section}{\numberline {6}Native IPM Versus Parity IPM}{9}{section.6}%
+\contentsline {section}{\numberline {7}Symbols, Indexing, and Sign Convention}{10}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Electrical Bases}{10}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Sets and Indexing}{11}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Core AC and DC State Variables}{11}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}Unified Sign Convention: Bus Injection Positive}{11}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Power-Balance Template}{12}{subsection.7.5}%
+\contentsline {section}{\numberline {8}Information Models and Field Dictionaries}{12}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Modeling Layers Used by the Code}{12}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}System Containers and Solver-Level Metadata}{13}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Component Inventory}{15}{subsection.8.3}%
+\contentsline {subsection}{\numberline {8.4}AC Network Elements}{17}{subsection.8.4}%
+\contentsline {subsection}{\numberline {8.5}Load Models and Demand-Side Components}{20}{subsection.8.5}%
+\contentsline {subsection}{\numberline {8.6}Generation, Storage, and Aggregation Components}{20}{subsection.8.6}%
+\contentsline {subsection}{\numberline {8.7}DC and Power-Electronic Components}{22}{subsection.8.7}%
+\contentsline {subsection}{\numberline {8.8}Optional Three-Phase Models}{23}{subsection.8.8}%
+\contentsline {section}{\numberline {9}I/O Contracts, Sheet Dictionaries, and JSON Keys}{24}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Serialization Families}{24}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Global Parsing and Workbook Rules}{25}{subsection.9.2}%
+\contentsline {subsection}{\numberline {9.3}Hybrid System JSON Contract}{26}{subsection.9.3}%
+\contentsline {subsection}{\numberline {9.4}Excel Input Workbook Contract}{32}{subsection.9.4}%
+\contentsline {subsection}{\numberline {9.5}Compact Power-Flow Workbook Additions}{41}{subsection.9.5}%
+\contentsline {subsection}{\numberline {9.6}Dedicated Result Workbooks}{42}{subsection.9.6}%
+\contentsline {subsection}{\numberline {9.7}Current I/O Coverage Gaps That Matter to Engineering Work}{45}{subsection.9.7}%
+\contentsline {subsection}{\numberline {9.8}Interpretation}{46}{subsection.9.8}%
+\contentsline {section}{\numberline {10}Detailed I/O Field Dictionaries}{47}{section.10}%
+\contentsline {subsection}{\numberline {10.1}System Metadata}{47}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}AC Network and Demand Models}{47}{subsection.10.2}%
+\contentsline {subsection}{\numberline {10.3}Generation and Storage Models}{55}{subsection.10.3}%
+\contentsline {subsection}{\numberline {10.4}DC and Hybrid Coordination Models}{58}{subsection.10.4}%
+\contentsline {subsection}{\numberline {10.5}Cross-Reference}{66}{subsection.10.5}%
+\contentsline {section}{\numberline {11}Output and Report Field Dictionaries}{66}{section.11}%
+\contentsline {subsection}{\numberline {11.1}Export Families}{66}{subsection.11.1}%
+\contentsline {subsection}{\numberline {11.2}Result Semantic Conventions}{67}{subsection.11.2}%
+\contentsline {subsection}{\numberline {11.3}Solver-Specific Result Notes}{69}{subsection.11.3}%
+\contentsline {subsection}{\numberline {11.4}Consumer Contracts}{70}{subsection.11.4}%
+\contentsline {subsection}{\numberline {11.5}Power-Flow Result JSON}{73}{subsection.11.5}%
+\contentsline {subsection}{\numberline {11.6}Dedicated Power-Flow Result Sheets}{74}{subsection.11.6}%
+\contentsline {subsection}{\numberline {11.7}Compact Power-Flow Result Columns}{79}{subsection.11.7}%
+\contentsline {subsection}{\numberline {11.8}Dedicated OPF Sheets}{80}{subsection.11.8}%
+\contentsline {subsection}{\numberline {11.9}Carbon Result JSON and Workbook Dictionaries}{82}{subsection.11.9}%
+\contentsline {subsection}{\numberline {11.10}Current Output-Side Gaps}{87}{subsection.11.10}%
+\contentsline {section}{\numberline {12}Power-Flow Models}{88}{section.12}%
+\contentsline {subsection}{\numberline {12.1}Scope and Architecture Overview}{88}{subsection.12.1}%
+\contentsline {subsection}{\numberline {12.2}Mathematical Problem Form}{89}{subsection.12.2}%
+\contentsline {paragraph}{AC bus mismatch.}{90}{section*.88}%
+\contentsline {paragraph}{DC bus mismatch.}{90}{section*.89}%
+\contentsline {paragraph}{Specified-injection assembly.}{90}{section*.90}%
+\contentsline {paragraph}{ZIP demand model.}{90}{section*.91}%
+\contentsline {subsection}{\numberline {12.3}VSC Converter Model}{90}{subsection.12.3}%
+\contentsline {paragraph}{Loss model.}{90}{section*.92}%
+\contentsline {paragraph}{\texttt {PQ\_MODE}.}{91}{section*.93}%
+\contentsline {paragraph}{\texttt {VDC\_Q} and \texttt {VDC\_VAC}.}{91}{section*.94}%
+\contentsline {subsection}{\numberline {12.4}DCDC Converter Model}{91}{subsection.12.4}%
+\contentsline {subsection}{\numberline {12.5}Jacobian Structure}{91}{subsection.12.5}%
+\contentsline {paragraph}{AC diagonal entries (with ZIP load corrections).}{91}{section*.95}%
+\contentsline {paragraph}{DC entries.}{91}{section*.96}%
+\contentsline {paragraph}{AC/DC coupling.}{91}{section*.97}%
+\contentsline {subsection}{\numberline {12.6}Hybrid Newton Algorithm}{92}{subsection.12.6}%
+\contentsline {paragraph}{Algorithm PF-1: Hybrid Newton PF}{92}{section*.98}%
+\contentsline {paragraph}{Robust nonlinear pipeline.}{93}{section*.99}%
+\contentsline {subsection}{\numberline {12.7}Fast-Decoupled Power Flow (FDPF)}{93}{subsection.12.7}%
+\contentsline {paragraph}{Algorithm PF-2: Fast-Decoupled PF}{93}{section*.100}%
+\contentsline {subsection}{\numberline {12.8}DC-Only Power Flow}{94}{subsection.12.8}%
+\contentsline {subsection}{\numberline {12.9}Adaptive Islanded Solver}{94}{subsection.12.9}%
+\contentsline {subsection}{\numberline {12.10}HELM Solver}{95}{subsection.12.10}%
+\contentsline {subsection}{\numberline {12.11}Error Handling and Diagnostics}{95}{subsection.12.11}%
+\contentsline {subsection}{\numberline {12.12}Maintainability Roadmap: Code-Duplication Inventory}{95}{subsection.12.12}%
+\contentsline {paragraph}{D1 --- \texttt {inf\_norm} \textnormal {(}\textbf {DONE}\textnormal {)}.}{95}{section*.101}%
+\contentsline {paragraph}{D2 --- DC injection assembly \textnormal {(}\textbf {DONE}\textnormal {)}.}{95}{section*.102}%
+\contentsline {paragraph}{D3 --- Duplicated B\('\) matrix construction \textnormal {(}\textbf {DONE}\textnormal {)}.}{95}{section*.103}%
+\contentsline {paragraph}{D4 --- DC initial-state warm-start \textnormal {(}\textbf {DONE}\textnormal {)}.}{96}{section*.104}%
+\contentsline {paragraph}{D5 --- Bus-type classification loop \textnormal {(}\textbf {DONE}\textnormal {)}.}{96}{section*.105}%
+\contentsline {paragraph}{D6 --- \texttt {jacobian\_builder.cpp} file split \textnormal {(}\textbf {DONE}\textnormal {)}.}{96}{section*.106}%
+\contentsline {subsection}{\numberline {12.13}Numerical Performance (Release Mode)}{96}{subsection.12.13}%
+\contentsline {section}{\numberline {13}Advanced and Fallback Power-Flow Solvers}{97}{section.13}%
+\contentsline {subsection}{\numberline {13.1}Continuation Power Flow (CPF) / Voltage Stability}{97}{subsection.13.1}%
+\contentsline {subsubsection}{\numberline {13.1.1}Parameterized Power System}{97}{subsubsection.13.1.1}%
+\contentsline {subsubsection}{\numberline {13.1.2}Predictor--Corrector Continuation}{98}{subsubsection.13.1.2}%
+\contentsline {subsubsection}{\numberline {13.1.3}\texttt {CpfOptions} Reference}{98}{subsubsection.13.1.3}%
+\contentsline {subsubsection}{\numberline {13.1.4}CPF Result Structure}{99}{subsubsection.13.1.4}%
+\contentsline {subsection}{\numberline {13.2}Homotopy Continuation Solver}{99}{subsection.13.2}%
+\contentsline {subsubsection}{\numberline {13.2.1}Homotopy Path}{99}{subsubsection.13.2.1}%
+\contentsline {subsubsection}{\numberline {13.2.2}Step Adaptation}{99}{subsubsection.13.2.2}%
+\contentsline {subsection}{\numberline {13.3}Distributed Slack Solver}{99}{subsection.13.3}%
+\contentsline {subsubsection}{\numberline {13.3.1}Problem Formulation}{99}{subsubsection.13.3.1}%
+\contentsline {subsubsection}{\numberline {13.3.2}Convergence Criterion}{100}{subsubsection.13.3.2}%
+\contentsline {subsubsection}{\numberline {13.3.3}Result Structure}{100}{subsubsection.13.3.3}%
+\contentsline {subsection}{\numberline {13.4}Newton--Krylov GMRES Fallback (Phase 5)}{100}{subsection.13.4}%
+\contentsline {subsection}{\numberline {13.5}Complete \texttt {RobustNonlinearOptions} Reference}{100}{subsection.13.5}%
+\contentsline {subsection}{\numberline {13.6}\texttt {PowerFlowOptions} Complete Reference}{102}{subsection.13.6}%
+\contentsline {section}{\numberline {14}Optimal Power Flow Models}{103}{section.14}%
+\contentsline {subsection}{\numberline {14.1}Problem Form and Runtime Scope}{103}{subsection.14.1}%
+\contentsline {subsection}{\numberline {14.2}Code Map}{104}{subsection.14.2}%
+\contentsline {subsection}{\numberline {14.3}Pseudocode Map}{104}{subsection.14.3}%
+\contentsline {subsection}{\numberline {14.4}Current Status}{104}{subsection.14.4}%
+\contentsline {subsection}{\numberline {14.5}Top-Level Solver Routing}{104}{subsection.14.5}%
+\contentsline {subsection}{\numberline {14.6}Fast Dispatch + PF Fallback (AC-Only Path)}{105}{subsection.14.6}%
+\contentsline {paragraph}{Economic dispatch stage.}{105}{section*.107}%
+\contentsline {paragraph}{Feasibility projection stage.}{105}{section*.108}%
+\contentsline {subsection}{\numberline {14.7}Native Primal-Dual OPF Formulation}{105}{subsection.14.7}%
+\contentsline {subsubsection}{\numberline {14.7.1}Decision Variables}{105}{subsubsection.14.7.1}%
+\contentsline {subsubsection}{\numberline {14.7.2}Objective}{105}{subsubsection.14.7.2}%
+\contentsline {subsubsection}{\numberline {14.7.3}Equality Constraints}{106}{subsubsection.14.7.3}%
+\contentsline {paragraph}{AC equations.}{106}{section*.109}%
+\contentsline {paragraph}{DC equations.}{106}{section*.110}%
+\contentsline {paragraph}{Converter energy balance.}{106}{section*.111}%
+\contentsline {subsubsection}{\numberline {14.7.4}Bounds and Nonlinear Limits}{106}{subsubsection.14.7.4}%
+\contentsline {subsubsection}{\numberline {14.7.5}KKT System and Globalization}{106}{subsubsection.14.7.5}%
+\contentsline {subsection}{\numberline {14.8}Parity Full-Space Formulation}{106}{subsection.14.8}%
+\contentsline {subsubsection}{\numberline {14.8.1}Decision Variables}{106}{subsubsection.14.8.1}%
+\contentsline {subsubsection}{\numberline {14.8.2}Objective}{107}{subsubsection.14.8.2}%
+\contentsline {subsubsection}{\numberline {14.8.3}Equality Constraints}{107}{subsubsection.14.8.3}%
+\contentsline {paragraph}{AC full-bus balance (scaled).}{107}{section*.112}%
+\contentsline {paragraph}{DC balance with DCDC coupling.}{107}{section*.113}%
+\contentsline {paragraph}{DCDC Jacobian and Hessian.}{107}{section*.114}%
+\contentsline {paragraph}{OPF warm-start convention.}{108}{section*.115}%
+\contentsline {paragraph}{Converter balance.}{108}{section*.116}%
+\contentsline {subsubsection}{\numberline {14.8.4}Inequality Constraints}{108}{subsubsection.14.8.4}%
+\contentsline {subsubsection}{\numberline {14.8.5}Primal-Dual IPM System}{108}{subsubsection.14.8.5}%
+\contentsline {paragraph}{Implementation note.}{108}{section*.117}%
+\contentsline {subsection}{\numberline {14.9}Component Coverage by Solver Path}{108}{subsection.14.9}%
+\contentsline {subsection}{\numberline {14.10}AC OPF Result JSON Contract}{109}{subsection.14.10}%
+\contentsline {subsection}{\numberline {14.11}Fallback Behavior}{110}{subsection.14.11}%
+\contentsline {subsection}{\numberline {14.12}DC Optimal Power Flow (\texttt {solve\_dc\_opf})}{110}{subsection.14.12}%
+\contentsline {subsubsection}{\numberline {14.12.1}Decision Variables}{110}{subsubsection.14.12.1}%
+\contentsline {subsubsection}{\numberline {14.12.2}Network Model}{110}{subsubsection.14.12.2}%
+\contentsline {subsubsection}{\numberline {14.12.3}Objective Function}{110}{subsubsection.14.12.3}%
+\contentsline {paragraph}{LP linearized cost.}{110}{section*.118}%
+\contentsline {paragraph}{QP quadratic cost.}{110}{section*.119}%
+\contentsline {paragraph}{VOLL auto-tuning.}{111}{section*.120}%
+\contentsline {subsubsection}{\numberline {14.12.4}Constraints}{111}{subsubsection.14.12.4}%
+\contentsline {paragraph}{Power balance (per bus).}{111}{section*.121}%
+\contentsline {paragraph}{Flow definition.}{111}{section*.122}%
+\contentsline {paragraph}{Variable bounds.}{111}{section*.123}%
+\contentsline {subsubsection}{\numberline {14.12.5}Solver Backend Selection}{111}{subsubsection.14.12.5}%
+\contentsline {subsubsection}{\numberline {14.12.6}Locational Marginal Prices}{111}{subsubsection.14.12.6}%
+\contentsline {subsection}{\numberline {14.13}Reactive Power Optimization (\texttt {solve\_rpo})}{111}{subsection.14.13}%
+\contentsline {subsubsection}{\numberline {14.13.1}Problem Structure}{111}{subsubsection.14.13.1}%
+\contentsline {paragraph}{Discrete variables.}{111}{section*.124}%
+\contentsline {paragraph}{Continuous variables.}{112}{section*.125}%
+\contentsline {subsubsection}{\numberline {14.13.2}Objective Functions}{112}{subsubsection.14.13.2}%
+\contentsline {subsubsection}{\numberline {14.13.3}Algorithm: Four-Phase Outer Approximation}{112}{subsubsection.14.13.3}%
+\contentsline {paragraph}{Phase~0: Sensitivity ranking.}{112}{section*.126}%
+\contentsline {paragraph}{Phase~1: Ternary-search sweep.}{112}{section*.127}%
+\contentsline {paragraph}{Phase~2: Coordinate descent with OA pruning (up to 3 cycles).}{112}{section*.128}%
+\contentsline {paragraph}{Phase~3: Pairwise neighborhood polishing.}{112}{section*.129}%
+\contentsline {subsubsection}{\numberline {14.13.4}Inner NLP Solver}{112}{subsubsection.14.13.4}%
+\contentsline {subsubsection}{\numberline {14.13.5}Result Structure}{112}{subsubsection.14.13.5}%
+\contentsline {section}{\numberline {15}Power-Model Builders (AML Layer)}{112}{section.15}%
+\contentsline {subsection}{\numberline {15.1}AML Abstraction Layer}{113}{subsection.15.1}%
+\contentsline {subsection}{\numberline {15.2}LinDistFlow Builder}{113}{subsection.15.2}%
+\contentsline {subsubsection}{\numberline {15.2.1}Mathematical Formulation}{113}{subsubsection.15.2.1}%
+\contentsline {paragraph}{Variables}{113}{section*.130}%
+\contentsline {paragraph}{Constraints (per non-root bus $j$)}{113}{section*.131}%
+\contentsline {paragraph}{Objective}{113}{section*.132}%
+\contentsline {subsubsection}{\numberline {15.2.2}Input/Output Structs}{114}{subsubsection.15.2.2}%
+\contentsline {subsection}{\numberline {15.3}AC OPF Builder}{114}{subsection.15.3}%
+\contentsline {subsubsection}{\numberline {15.3.1}Mathematical Formulation}{114}{subsubsection.15.3.1}%
+\contentsline {paragraph}{Objective}{114}{section*.133}%
+\contentsline {paragraph}{Power balance at bus $i$}{114}{section*.134}%
+\contentsline {paragraph}{Branch $\pi $-model flows}{114}{section*.135}%
+\contentsline {paragraph}{Branch thermal limits}{115}{section*.136}%
+\contentsline {paragraph}{Voltage/generation limits}{115}{section*.137}%
+\contentsline {subsubsection}{\numberline {15.3.2}Input Structs}{115}{subsubsection.15.3.2}%
+\contentsline {subsection}{\numberline {15.4}Hybrid AC/DC OPF Builder}{115}{subsection.15.4}%
+\contentsline {subsubsection}{\numberline {15.4.1}Mathematical Formulation}{115}{subsubsection.15.4.1}%
+\contentsline {paragraph}{DC bus voltage bounds}{115}{section*.138}%
+\contentsline {paragraph}{DC power balance at bus $k$}{115}{section*.139}%
+\contentsline {paragraph}{VSC converter coupling}{115}{section*.140}%
+\contentsline {subsubsection}{\numberline {15.4.2}Additional Input Structs}{116}{subsubsection.15.4.2}%
+\contentsline {subsection}{\numberline {15.5}Security-Constrained Unit Commitment (SCUC) Builder}{116}{subsection.15.5}%
+\contentsline {subsubsection}{\numberline {15.5.1}Mathematical Formulation}{116}{subsubsection.15.5.1}%
+\contentsline {paragraph}{Decision variables}{116}{section*.141}%
+\contentsline {paragraph}{Objective}{116}{section*.142}%
+\contentsline {paragraph}{Constraints}{116}{section*.143}%
+\contentsline {subsubsection}{\numberline {15.5.2}Input/Output Structs}{116}{subsubsection.15.5.2}%
+\contentsline {section}{\numberline {16}I/O Layer: Parsers, Case Builders, and JSON Contracts}{117}{section.16}%
+\contentsline {subsection}{\numberline {16.1}MATPOWER Parser}{117}{subsection.16.1}%
+\contentsline {paragraph}{Covered table sections}{117}{section*.144}%
+\contentsline {subsection}{\numberline {16.2}JSON I/O}{118}{subsection.16.2}%
+\contentsline {subsection}{\numberline {16.3}Pre-built Test Networks (\texttt {case\_builders.hpp})}{118}{subsection.16.3}%
+\contentsline {section}{\numberline {17}Test Suite}{118}{section.17}%
+\contentsline {subsection}{\numberline {17.1}Test File Overview}{119}{subsection.17.1}%
+\contentsline {subsection}{\numberline {17.2}Example Test Pattern}{119}{subsection.17.2}%
+\contentsline {section}{\numberline {18}Architecture Assessment and Roadmap}{120}{section.18}%
+\contentsline {subsection}{\numberline {18.1}Overall Quality Assessment}{120}{subsection.18.1}%
+\contentsline {subsection}{\numberline {18.2}Confirmed Strengths}{120}{subsection.18.2}%
+\contentsline {subsubsection}{\numberline {18.2.1}Horizontal Infrastructure Layer}{120}{subsubsection.18.2.1}%
+\contentsline {subsubsection}{\numberline {18.2.2}Monadic Result Handling}{120}{subsubsection.18.2.2}%
+\contentsline {subsubsection}{\numberline {18.2.3}Backward-Compatible Option Refactoring}{121}{subsubsection.18.2.3}%
+\contentsline {subsubsection}{\numberline {18.2.4}Explicit Validation Subsystem}{121}{subsubsection.18.2.4}%
+\contentsline {subsubsection}{\numberline {18.2.5}Projection plus Assembly Separation}{121}{subsubsection.18.2.5}%
+\contentsline {subsubsection}{\numberline {18.2.6}Centralised Defaults}{121}{subsubsection.18.2.6}%
+\contentsline {subsection}{\numberline {18.3}Remaining Design Risks}{121}{subsection.18.3}%
+\contentsline {subsubsection}{\numberline {18.3.1}Analysis Layer May Become Too Broad}{121}{subsubsection.18.3.1}%
+\contentsline {paragraph}{Dependency rule for analysis}{122}{section*.145}%
+\contentsline {subsubsection}{\numberline {18.3.2}Three-Phase and Balanced PF Should Not Share One Abstraction}{122}{subsubsection.18.3.2}%
+\contentsline {subsubsection}{\numberline {18.3.3}Error Handling Policy Needs Explicit Definition}{122}{subsubsection.18.3.3}%
+\contentsline {subsubsection}{\numberline {18.3.4}Field Dictionary / Serializer Drift}{123}{subsubsection.18.3.4}%
+\contentsline {subsubsection}{\numberline {18.3.5}Backend Capability Discovery}{123}{subsubsection.18.3.5}%
+\contentsline {subsection}{\numberline {18.4}Module-Level Recommendations}{123}{subsection.18.4}%
+\contentsline {subsubsection}{\numberline {18.4.1}Model Layer}{123}{subsubsection.18.4.1}%
+\contentsline {paragraph}{Separate persistent fields from runtime fields}{123}{section*.146}%
+\contentsline {paragraph}{Strong IDs at boundaries}{123}{section*.147}%
+\contentsline {paragraph}{Stable enum serialisation}{123}{section*.148}%
+\contentsline {subsubsection}{\numberline {18.4.2}Validation Layer}{124}{subsubsection.18.4.2}%
+\contentsline {subsubsection}{\numberline {18.4.3}Projection Layer}{124}{subsubsection.18.4.3}%
+\contentsline {paragraph}{Projection report}{124}{section*.149}%
+\contentsline {paragraph}{Reversible mapping}{124}{section*.150}%
+\contentsline {subsubsection}{\numberline {18.4.4}Assembly Layer}{124}{subsubsection.18.4.4}%
+\contentsline {subsubsection}{\numberline {18.4.5}Power-Flow Layer}{125}{subsubsection.18.4.5}%
+\contentsline {paragraph}{Standardise solver status}{125}{section*.151}%
+\contentsline {paragraph}{Visible fallback trace}{125}{section*.152}%
+\contentsline {subsubsection}{\numberline {18.4.6}OPF Layer}{125}{subsubsection.18.4.6}%
+\contentsline {paragraph}{Formulation separate from solver}{125}{section*.153}%
+\contentsline {paragraph}{Independent feasibility audit}{125}{section*.154}%
+\contentsline {paragraph}{Explainable infeasibility}{125}{section*.155}%
+\contentsline {subsubsection}{\numberline {18.4.7}I/O Layer}{125}{subsubsection.18.4.7}%
+\contentsline {paragraph}{Format versioning}{125}{section*.156}%
+\contentsline {paragraph}{Import modes}{126}{section*.157}%
+\contentsline {paragraph}{Field-descriptor registry}{126}{section*.158}%
+\contentsline {subsubsection}{\numberline {18.4.8}Analysis Suite}{126}{subsubsection.18.4.8}%
+\contentsline {paragraph}{Carbon tracing}{126}{section*.159}%
+\contentsline {paragraph}{Time-series simulation}{126}{section*.160}%
+\contentsline {subsection}{\numberline {18.5}Recommended Testing Matrix}{126}{subsection.18.5}%
+\contentsline {subsection}{\numberline {18.6}Recommended CI Pipeline}{127}{subsection.18.6}%
+\contentsline {subsection}{\numberline {18.7}Dependency Boundary Rules}{127}{subsection.18.7}%
+\contentsline {subsubsection}{\numberline {18.7.1}Allowed Dependencies}{127}{subsubsection.18.7.1}%
+\contentsline {subsubsection}{\numberline {18.7.2}Disallowed Dependencies}{128}{subsubsection.18.7.2}%
+\contentsline {subsection}{\numberline {18.8}Priority Roadmap}{128}{subsection.18.8}%
+\contentsline {paragraph}{Priority 1 --- Trustworthiness}{128}{section*.161}%
+\contentsline {paragraph}{Priority 2 --- User Experience}{128}{section*.162}%
+\contentsline {paragraph}{Priority 3 --- Maintainability}{128}{section*.163}%
+\contentsline {paragraph}{Priority 4 --- Performance and Scalability}{128}{section*.164}%
+\contentsline {subsection}{\numberline {18.9}Example Clean Public Workflow}{129}{subsection.18.9}%
+\contentsline {subsection}{\numberline {18.10}Final Recommendation Summary}{130}{subsection.18.10}%
+\contentsline {section}{\numberline {19}Complete Data Model: Enumerations, Defaults, and Error Types}{130}{section.19}%
+\contentsline {subsection}{\numberline {19.1}Enumeration Hierarchy}{130}{subsection.19.1}%
+\contentsline {subsubsection}{\numberline {19.1.1}Bus Type Enumerations}{131}{subsubsection.19.1.1}%
+\contentsline {subsubsection}{\numberline {19.1.2}Generator Enumerations}{131}{subsubsection.19.1.2}%
+\contentsline {subsubsection}{\numberline {19.1.3}Converter and Loss Model Enumerations}{131}{subsubsection.19.1.3}%
+\contentsline {subsubsection}{\numberline {19.1.4}Load, Storage, and Renewable Enumerations}{131}{subsubsection.19.1.4}%
+\contentsline {subsubsection}{\numberline {19.1.5}Switching and Grid Enumerations}{132}{subsubsection.19.1.5}%
+\contentsline {subsection}{\numberline {19.2}EnumStrings Utility}{132}{subsection.19.2}%
+\contentsline {subsection}{\numberline {19.3}Defaults: System-Wide Numerical Constants}{133}{subsection.19.3}%
+\contentsline {subsection}{\numberline {19.4}Structured Error and Result Types}{133}{subsection.19.4}%
+\contentsline {subsubsection}{\numberline {19.4.1}\texttt {ErrorCode} Enumeration}{134}{subsubsection.19.4.1}%
+\contentsline {subsubsection}{\numberline {19.4.2}\texttt {Error} Descriptor}{134}{subsubsection.19.4.2}%
+\contentsline {subsubsection}{\numberline {19.4.3}\texttt {Result<T>} Monad}{134}{subsubsection.19.4.3}%
+\contentsline {subsection}{\numberline {19.5}Validation Subsystem}{135}{subsection.19.5}%
+\contentsline {subsubsection}{\numberline {19.5.1}ValidationReport and ValidationIssue}{135}{subsubsection.19.5.1}%
+\contentsline {subsubsection}{\numberline {19.5.2}Validation Checks}{135}{subsubsection.19.5.2}%
+\contentsline {section}{\numberline {20}Solver Infrastructure: Assembly, Projection, Backend, and Utilities}{136}{section.20}%
+\contentsline {subsection}{\numberline {20.1}Assembly Layer}{136}{subsection.20.1}%
+\contentsline {subsubsection}{\numberline {20.1.1}SolverData}{136}{subsubsection.20.1.1}%
+\contentsline {paragraph}{Component vectors}{136}{section*.165}%
+\contentsline {paragraph}{Numerical parameters and flags}{137}{section*.166}%
+\contentsline {paragraph}{Factory and utility functions}{137}{section*.167}%
+\contentsline {subsubsection}{\numberline {20.1.2}Index Maps}{137}{subsubsection.20.1.2}%
+\contentsline {subsubsection}{\numberline {20.1.3}Admittance (Y-bus) Builder}{138}{subsubsection.20.1.3}%
+\contentsline {paragraph}{Functions}{138}{section*.168}%
+\contentsline {paragraph}{BpBuildFlags}{138}{section*.169}%
+\contentsline {subsection}{\numberline {20.2}Projection Layer}{138}{subsection.20.2}%
+\contentsline {subsubsection}{\numberline {20.2.1}Canonical Network Types}{138}{subsubsection.20.2.1}%
+\contentsline {subsubsection}{\numberline {20.2.2}Projection Functions}{139}{subsubsection.20.2.2}%
+\contentsline {paragraph}{Count queries (read-only)}{139}{section*.170}%
+\contentsline {paragraph}{Aggregation queries}{139}{section*.171}%
+\contentsline {paragraph}{Topology helpers}{139}{section*.172}%
+\contentsline {paragraph}{Projection pipeline}{139}{section*.173}%
+\contentsline {paragraph}{Zero-impedance bus merging}{140}{section*.174}%
+\contentsline {subsection}{\numberline {20.3}Backend Solver Abstractions}{140}{subsection.20.3}%
+\contentsline {subsubsection}{\numberline {20.3.1}Linear Solver Backend}{140}{subsubsection.20.3.1}%
+\contentsline {subsubsection}{\numberline {20.3.2}NLP Solver Backend}{140}{subsubsection.20.3.2}%
+\contentsline {subsubsection}{\numberline {20.3.3}QP Solver Backend}{140}{subsubsection.20.3.3}%
+\contentsline {subsection}{\numberline {20.4}Thread Pool}{141}{subsection.20.4}%
+\contentsline {subsection}{\numberline {20.5}Detail Utilities}{141}{subsection.20.5}%
+\contentsline {section}{\numberline {21}Power-Flow Options, Results, and NCP Complementarity}{141}{section.21}%
+\contentsline {subsection}{\numberline {21.1}PowerFlowOptions Sub-Structs}{141}{subsection.21.1}%
+\contentsline {subsubsection}{\numberline {21.1.1}ConvergenceOptions}{142}{subsubsection.21.1.1}%
+\contentsline {subsubsection}{\numberline {21.1.2}LinearSolverOptions}{142}{subsubsection.21.1.2}%
+\contentsline {subsubsection}{\numberline {21.1.3}GlobalizationOptions}{142}{subsubsection.21.1.3}%
+\contentsline {subsubsection}{\numberline {21.1.4}PVPQSwitchingOptions}{142}{subsubsection.21.1.4}%
+\contentsline {subsubsection}{\numberline {21.1.5}ConverterModeOptions}{142}{subsubsection.21.1.5}%
+\contentsline {subsubsection}{\numberline {21.1.6}ZipLoadOptions}{143}{subsubsection.21.1.6}%
+\contentsline {subsubsection}{\numberline {21.1.7}RuntimeOptions}{143}{subsubsection.21.1.7}%
+\contentsline {subsection}{\numberline {21.2}Power-Flow Result Hierarchy}{143}{subsection.21.2}%
+\contentsline {subsubsection}{\numberline {21.2.1}ResidualBreakdown}{143}{subsubsection.21.2.1}%
+\contentsline {subsubsection}{\numberline {21.2.2}IterationLogEntry}{144}{subsubsection.21.2.2}%
+\contentsline {subsubsection}{\numberline {21.2.3}SolverDiagnostics}{144}{subsubsection.21.2.3}%
+\contentsline {subsubsection}{\numberline {21.2.4}SolverProfiling}{144}{subsubsection.21.2.4}%
+\contentsline {subsubsection}{\numberline {21.2.5}Component Flow Result Types}{145}{subsubsection.21.2.5}%
+\contentsline {subsubsection}{\numberline {21.2.6}Top-Level Result Types}{145}{subsubsection.21.2.6}%
+\contentsline {subsection}{\numberline {21.3}Fischer-Burmeister NCP Functions}{146}{subsection.21.3}%
+\contentsline {subsubsection}{\numberline {21.3.1}Standard Fischer-Burmeister Function}{146}{subsubsection.21.3.1}%
+\contentsline {subsubsection}{\numberline {21.3.2}PV/PQ Complementarity Equation}{146}{subsubsection.21.3.2}%
+\contentsline {subsubsection}{\numberline {21.3.3}Smooth ($\mu $-Perturbed) Fischer-Burmeister}{146}{subsubsection.21.3.3}%
+\contentsline {section}{\numberline {22}Analysis Suite: Carbon, Distribution, Reliability, and Time Series}{147}{section.22}%
+\contentsline {subsection}{\numberline {22.1}Carbon Emissions Analysis}{147}{subsection.22.1}%
+\contentsline {subsubsection}{\numberline {22.1.1}Options and Result Types}{147}{subsubsection.22.1.1}%
+\contentsline {subsubsection}{\numberline {22.1.2}EmissionsSummary}{148}{subsubsection.22.1.2}%
+\contentsline {subsection}{\numberline {22.2}Distribution Network Power Flow}{148}{subsection.22.2}%
+\contentsline {subsubsection}{\numberline {22.2.1}Distribution PF Options and Results}{148}{subsubsection.22.2.1}%
+\contentsline {subsection}{\numberline {22.3}Three-Phase Unbalanced Power Flow}{148}{subsection.22.3}%
+\contentsline {subsection}{\numberline {22.4}PV Array Power Curve Model}{149}{subsection.22.4}%
+\contentsline {subsection}{\numberline {22.5}Reliability Assessment}{149}{subsection.22.5}%
+\contentsline {subsection}{\numberline {22.6}Resilience Assessment}{149}{subsection.22.6}%
+\contentsline {subsection}{\numberline {22.7}Time-Series Power Flow}{150}{subsection.22.7}%
+\contentsline {subsubsection}{\numberline {22.7.1}Time-Series Data Model}{150}{subsubsection.22.7.1}%
+\contentsline {subsubsection}{\numberline {22.7.2}Time-Series PF Results}{150}{subsubsection.22.7.2}%
+\contentsline {section}{\numberline {23}Test Suite: Design, Coverage, and Results}{151}{section.23}%
+\contentsline {subsection}{\numberline {23.1}Overview of the Eight New Suites}{151}{subsection.23.1}%
+\contentsline {subsection}{\numberline {23.2}\texttt {test\_hacdcdss}: Model, Power Models, Power Flow, DC OPF}{151}{subsection.23.2}%
+\contentsline {subsubsection}{\numberline {23.2.1}Module: Model (tests \#48--\#51)}{151}{subsubsection.23.2.1}%
+\contentsline {subsubsection}{\numberline {23.2.2}Module: Power Models (tests \#52--\#54)}{151}{subsubsection.23.2.2}%
+\contentsline {subsubsection}{\numberline {23.2.3}Module: Power Flow (tests \#55--\#60)}{152}{subsubsection.23.2.3}%
+\contentsline {subsubsection}{\numberline {23.2.4}Module: DC OPF (tests \#61--\#63)}{152}{subsubsection.23.2.4}%
+\contentsline {subsection}{\numberline {23.3}\texttt {test\_io\_json}: JSON I/O and MATPOWER Parsing}{152}{subsection.23.3}%
+\contentsline {subsubsection}{\numberline {23.3.1}JSON Round-trip Fidelity (tests \#64--\#67)}{152}{subsubsection.23.3.1}%
+\contentsline {subsubsection}{\numberline {23.3.2}Safe Monadic API (tests \#68--\#75)}{152}{subsubsection.23.3.2}%
+\contentsline {subsubsection}{\numberline {23.3.3}OPF/PF Result Serialisation (tests \#76--\#77)}{153}{subsubsection.23.3.3}%
+\contentsline {subsubsection}{\numberline {23.3.4}MATPOWER Parser (tests \#78--\#97)}{153}{subsubsection.23.3.4}%
+\contentsline {subsection}{\numberline {23.4}\texttt {test\_rich\_components}: 24-Type Component Coverage}{153}{subsection.23.4}%
+\contentsline {subsubsection}{\numberline {23.4.1}Component Round-trip Tests (tests \#98--\#118)}{153}{subsubsection.23.4.1}%
+\contentsline {subsubsection}{\numberline {23.4.2}System Builder Tests (tests \#119--\#122)}{153}{subsubsection.23.4.2}%
+\contentsline {subsection}{\numberline {23.5}\texttt {test\_matpower\_cases}: MATPOWER Convergence Coverage}{154}{subsection.23.5}%
+\contentsline {subsubsection}{\numberline {23.5.1}Tier-1: Core Cases (tests \#123--\#135)}{154}{subsubsection.23.5.1}%
+\contentsline {subsubsection}{\numberline {23.5.2}Tier-2: Medium Cases (tests \#136--\#204)}{155}{subsubsection.23.5.2}%
+\contentsline {subsubsection}{\numberline {23.5.3}Tier-3: Large Cases (tests \#136--\#204, large/very\_large tag)}{155}{subsubsection.23.5.3}%
+\contentsline {subsubsection}{\numberline {23.5.4}Safe API and DC OPF (tests \#206--\#209)}{155}{subsubsection.23.5.4}%
+\contentsline {subsection}{\numberline {23.6}\texttt {test\_validation}: Validation API Coverage}{155}{subsection.23.6}%
+\contentsline {subsubsection}{\numberline {23.6.1}ValidationReport API (tests \#210--\#213)}{155}{subsubsection.23.6.1}%
+\contentsline {subsubsection}{\numberline {23.6.2}Positive and Negative Validation (tests \#214--\#223)}{156}{subsubsection.23.6.2}%
+\contentsline {subsubsection}{\numberline {23.6.3}ValidationLevel Behaviour (tests \#224--\#230)}{156}{subsubsection.23.6.3}%
+\contentsline {subsubsection}{\numberline {23.6.4}Validate-then-Solve Pattern (tests \#231--\#234)}{156}{subsubsection.23.6.4}%
+\contentsline {subsubsection}{\numberline {23.6.5}Regression Guardrails (tests \#235--\#239)}{156}{subsubsection.23.6.5}%
+\contentsline {subsection}{\numberline {23.7}\texttt {test\_solver\_capabilities}: Compile-time Flags and Audit}{156}{subsection.23.7}%
+\contentsline {subsubsection}{\numberline {23.7.1}SolverCapabilities Struct (tests \#240--\#246)}{156}{subsubsection.23.7.1}%
+\contentsline {subsubsection}{\numberline {23.7.2}Compile-time Solver Flags (tests \#247--\#252)}{156}{subsubsection.23.7.2}%
+\contentsline {subsubsection}{\numberline {23.7.3}verify\_opf\_result Audit (tests \#253--\#255)}{157}{subsubsection.23.7.3}%
+\contentsline {subsection}{\numberline {23.8}\texttt {test\_advanced\_pf}: Island Detection, Distributed Slack, PV/PQ Control}{157}{subsection.23.8}%
+\contentsline {subsubsection}{\numberline {23.8.1}Island Detection and Islanded Solving (tests \#256--\#266)}{157}{subsubsection.23.8.1}%
+\contentsline {subsubsection}{\numberline {23.8.2}Distributed Slack Buses (tests \#267--\#276)}{157}{subsubsection.23.8.2}%
+\contentsline {subsubsection}{\numberline {23.8.3}PV/PQ Conversion and Integration (tests \#277--\#281)}{157}{subsubsection.23.8.3}%
+\contentsline {subsection}{\numberline {23.9}\texttt {test\_three\_phase\_pf}: Three-Phase Power Flow}{157}{subsection.23.9}%
+\contentsline {subsubsection}{\numberline {23.9.1}Data Model (tests \#282--\#286)}{157}{subsubsection.23.9.1}%
+\contentsline {subsubsection}{\numberline {23.9.2}Projection-Based Solve (tests \#287--\#292)}{158}{subsubsection.23.9.2}%
+\contentsline {subsubsection}{\numberline {23.9.3}Unbalanced, Meshed, and Multi-Source Topologies (tests \#293--\#299)}{158}{subsubsection.23.9.3}%
+\contentsline {subsubsection}{\numberline {23.9.4}Transformer Support (test \#300)}{158}{subsubsection.23.9.4}%
+\contentsline {subsubsection}{\numberline {23.9.5}Distribution PF Stub and JSON Round-Trip (tests \#301--\#307)}{158}{subsubsection.23.9.5}%
+\contentsline {subsection}{\numberline {23.10}Quantitative Results and Timing}{158}{subsection.23.10}%
+\contentsline {subsubsection}{\numberline {23.10.1}Per-Suite Assertion and Timing Summary}{158}{subsubsection.23.10.1}%
+\contentsline {subsubsection}{\numberline {23.10.2}Tier-3 Scaling: Bus Count vs.\ Solve Time}{159}{subsubsection.23.10.2}%
+\contentsline {subsubsection}{\numberline {23.10.3}Key Accuracy Metrics}{159}{subsubsection.23.10.3}%
+\contentsline {subsubsection}{\numberline {23.10.4}Performance Sweep (test \#256)}{159}{subsubsection.23.10.4}%
+\contentsline {subsection}{\numberline {23.11}Summary and Pass Rates}{159}{subsection.23.11}%

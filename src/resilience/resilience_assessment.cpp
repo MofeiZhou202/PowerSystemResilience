@@ -1,4 +1,4 @@
-#include "hacdcpf/analysis/resilience_assessment.hpp"
+#include "hacdcpf/resilience/resilience_assessment.hpp"
 
 namespace hacdcpf::analysis {
 

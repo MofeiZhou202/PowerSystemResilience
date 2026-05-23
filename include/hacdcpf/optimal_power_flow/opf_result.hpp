@@ -10,8 +10,27 @@
 
 namespace hacdcpf::opf {
 
-// ═══════════════════════════════════════════════════════════════════════
-// OPF solver path selector
+// ═══════════════════════════════════════════════════════════════════════// OPF Feasibility Audit
+//
+// Independent post-solve feasibility check.  Populated by
+// verify_opf_result() when called after solve_ac_opf().
+// ═══════════════════════════════════════════════════════════════════
+struct OpfAudit {
+  bool   audited{false};                         ///< true after verify_opf_result() runs
+  double max_power_balance_violation_mw{0.0};   ///< max |P_gen - P_load - P_loss| per bus
+  double max_voltage_limit_violation_pu{0.0};   ///< max voltage outside [Vmin, Vmax]
+  double max_branch_limit_violation_pu{0.0};    ///< max branch loading above rate_a_mva
+  double max_gen_limit_violation_mw{0.0};       ///< max generator output outside [Pmin,Pmax]
+  double objective_recomputed{0.0};             ///< cost recomputed from pg_mw / qg_mvar
+  double objective_reported{0.0};               ///< cost as reported by the solver
+  double objective_discrepancy_pct{0.0};        ///< |recomputed - reported| / |reported| * 100
+  std::vector<std::string> violations;          ///< human-readable violation descriptions
+
+  /// True if no violations were found.
+  [[nodiscard]] bool feasible() const noexcept { return violations.empty(); }
+};
+
+// ═══════════════════════════════════════════════════════════════════// OPF solver path selector
 // ═══════════════════════════════════════════════════════════════════════
 enum class OPFSolverPath {
   Unknown,
@@ -77,6 +96,14 @@ struct ACOPFResult {
   std::string status;
   OPFSolverPath solver_path{OPFSolverPath::Unknown};
   ACOPFProfiling profiling;
+
+  /// Probable causes of infeasibility / non-convergence.
+  /// Populated when converged==false by the solver and/or verify_opf_result().
+  std::vector<std::string> infeasibility_hints;
+
+  /// Independent post-solve feasibility audit.
+  /// Populated by verify_opf_result(sys, result).
+  OpfAudit audit;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
