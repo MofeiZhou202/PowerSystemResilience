@@ -106,6 +106,8 @@ set(HACDCPF_SOURCES
   src/reliability/reliability_assessment.cpp
   src/resilience/resilience_assessment.cpp
   src/time_series/time_series_pf.cpp
+  src/time_series/annual_production_sim.cpp
+  src/time_series/lifecycle_simulation.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

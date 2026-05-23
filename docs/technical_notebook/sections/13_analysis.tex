@@ -1,21 +1,38 @@
 % ============================================================
-\section{Analysis Suite: Carbon, Distribution, Reliability, and Time Series}
+\section{Analysis Suite: Carbon, Production, Lifecycle, Distribution, Reliability, and Time Series}
 \label{sec:analysis}
 % ============================================================
 
-This chapter documents the \texttt{include/hacdcpf/analysis/} module, which
-provides post-solve analytical capabilities: carbon emissions tracing,
-distribution network power flow, three-phase unbalanced power flow, PV array
-power modelling, reliability and resilience assessments, and time-series
-simulation.
+This chapter documents the analytical capability modules of the
+\texttt{hacdcpf} library.  Following a module restructuring, each family of
+analytical algorithms now lives in its own peer directory rather than a shared
+\texttt{analysis/} facade.  The current layout is:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Module directory} & \textbf{Contents} \\
+\hline
+\texttt{include/hacdcpf/carbon\_analysis} / \texttt{src/carbon\_analysis} & Carbon emissions analysis (\texttt{run\_carbon\_analysis}) \\
+\texttt{include/hacdcpf/time\_series} / \texttt{src/time\_series} & UC/OPF/PF multi-period pipeline, annual production simulation, lifecycle simulation \\
+\texttt{include/hacdcpf/reliability} / \texttt{src/reliability} & Monte Carlo reliability assessment \\
+\texttt{include/hacdcpf/resilience} / \texttt{src/resilience} & Distribution resilience assessment \\
+\texttt{include/hacdcpf/power\_flow} / \texttt{src/power\_flow} & Core Newton PF solvers \emph{and} distribution network PF \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+All modules are declared in namespace \texttt{hacdcpf::analysis} (or the
+top-level \texttt{hacdcpf} namespace for shared data types) and exposed
+through \texttt{include/hacdcpf/api/hacdcpf.hpp}.
 
 % ------------------------------------------------------------
 \subsection{Carbon Emissions Analysis}
 \label{sec:carbon}
 % ------------------------------------------------------------
 
-Declared in \texttt{analysis/carbon\_analysis.hpp},
-implemented in \texttt{src/analysis/carbon\_analysis.cpp}.
+Declared in \texttt{carbon\_analysis/carbon\_analysis.hpp},
+implemented in \texttt{src/carbon\_analysis/carbon\_analysis.cpp}.
 
 \texttt{run\_carbon\_analysis(sys, opt)} performs power-flow-based emissions
 attribution via two independent methods:
@@ -27,6 +44,44 @@ attribution via two independent methods:
         $\mathbf{A}\,\mathbf{c} = \mathbf{q}$ where $c_i$ is the carbon
         intensity at bus $i$ (tCO\textsubscript{2}/MWh).
 \end{enumerate}
+
+\subsubsection{Mathematical Formulation}
+
+\paragraph{Proportional Tracing.}
+Let $\mathcal{G}_i$ denote generators injecting into bus $i$, and let
+$\mathcal{U}(i) = \{j : P_{j\to i} > 0\}$ be the set of upstream buses
+with active inflow.  The total inflow at bus $i$ is:
+\begin{equation}
+  T_i = \sum_{g \in \mathcal{G}_i} P_{g,i} + \sum_{j \in \mathcal{U}(i)} P_{j\to i}.
+  \label{eq:carbon-inflow}
+\end{equation}
+The carbon intensity at bus $i$ is computed by the upstream tracing rule:
+\begin{equation}
+  c_i = \frac{\sum_{g \in \mathcal{G}_i} e_g\,P_{g,i}
+              + \sum_{j \in \mathcal{U}(i)} c_j\,P_{j\to i}}{T_i},
+  \label{eq:carbon-tracing}
+\end{equation}
+where $e_g$ (tCO\textsubscript{2}/MWh) is the emission factor of generator $g$.
+The system is solved by topological ordering from generator buses outward.
+Mass-balance verification requires:
+\begin{equation}
+  \left|\sum_{g} e_g\,P_g - \sum_{i\in\mathcal{L}} c_i\,P_i^L
+        - \sum_{(i,j)} c_i\,P_{ij}^{loss}\right| \leq \varepsilon_{bal}.
+\end{equation}
+
+\paragraph{Nodal Matrix Method.}
+Equations~\eqref{eq:carbon-inflow}--\eqref{eq:carbon-tracing} can be
+recast as a linear system $\mathbf{A}\mathbf{c} = \mathbf{q}$ with:
+\begin{align}
+  A_{ii} &= T_i = \sum_{g\in\mathcal{G}_i} P_{g,i}
+                  + \sum_{j\in\mathcal{U}(i)} P_{j\to i}, \\
+  A_{ij} &= -P_{j\to i} \quad (j \neq i,\; j \in \mathcal{U}(i)), \\
+  q_i    &= \sum_{g\in\mathcal{G}_i} e_g\,P_{g,i}.
+\end{align}
+The matrix $\mathbf{A}$ is diagonally dominant and its solution $\mathbf{c}$
+is identical to the tracing result when $\mathbf{A}$ is non-singular.
+The residual $\|\mathbf{A}\mathbf{c} - \mathbf{q}\|_\infty$ is stored in
+\texttt{CarbonAnalysisResult::matrix\_residual}.
 
 \subsubsection{Options and Result Types}
 
@@ -86,8 +141,8 @@ attribution via two independent methods:
 \label{sec:dist-pf}
 % ------------------------------------------------------------
 
-Declared in \texttt{analysis/distribution\_power\_flow.hpp},
-implemented in \texttt{src/analysis/distribution\_power\_flow.cpp}.
+Declared in \texttt{power\_flow/distribution\_power\_flow.hpp},
+implemented in \texttt{src/power\_flow/distribution\_power\_flow.cpp}.
 
 Two solver variants are provided for radial distribution networks:
 
@@ -99,6 +154,60 @@ Two solver variants are provided for radial distribution networks:
         admittance formulation for meshed and unbalanced networks
         (\texttt{solve\_three\_phase\_nr(sys, opt)}).
 \end{enumerate}
+
+\subsubsection{Backward-Forward Sweep}
+
+Let the network be a rooted tree with root bus $0$ (substation).  Denote
+$\mathcal{C}(j)$ as the set of children of bus $j$, $Z_{ij} = R_{ij}+jX_{ij}$
+as the series impedance of branch $(i,j)$, and $S_j^L = P_j^L + jQ_j^L$ as
+the complex load at bus $j$.
+
+\paragraph{Backward sweep} (leaves to root — load aggregation):
+\begin{equation}
+  S_{ij}^{(k)} = S_j^L + \sum_{m \in \mathcal{C}(j)}
+    \left(S_{jm}^{(k)} + Z_{jm}\left|I_{jm}^{(k)}\right|^2\right),
+  \label{eq:bfs-backward}
+\end{equation}
+where $I_{jm}^{(k)} = \left(S_{jm}^{(k)} / V_j^{(k)}\right)^*$.
+
+\paragraph{Forward sweep} (root to leaves — voltage propagation):
+\begin{equation}
+  V_j^{(k+1)} = V_i^{(k+1)} - Z_{ij}\,
+    \frac{\left(S_{ij}^{(k)}\right)^*}{\left(V_i^{(k+1)}\right)^*}.
+  \label{eq:bfs-forward}
+\end{equation}
+Iteration terminates when $\max_j\left|V_j^{(k+1)} - V_j^{(k)}\right| \leq \epsilon$.
+
+\subsubsection{Three-Phase Newton-Raphson}
+
+For an $n$-bus system with per-phase admittances, define the $3n$-element
+state vector $\mathbf{x} = [\boldsymbol{\theta}^a, \boldsymbol{\theta}^b,
+\boldsymbol{\theta}^c, \mathbf{V}_m^a, \mathbf{V}_m^b, \mathbf{V}_m^c]^\top$.
+The three-phase nodal admittance matrix is:
+\begin{equation}
+  \mathbf{Y}^{abc}_{ij} = \begin{bmatrix}
+    Y_{ij}^{aa} & Y_{ij}^{ab} & Y_{ij}^{ac} \\
+    Y_{ij}^{ba} & Y_{ij}^{bb} & Y_{ij}^{bc} \\
+    Y_{ij}^{ca} & Y_{ij}^{cb} & Y_{ij}^{cc}
+  \end{bmatrix}.
+\end{equation}
+The power-mismatch residual at each phase-bus is:
+\begin{equation}
+  \mathbf{f}(\mathbf{x}) = \mathbf{S}^{inj} - \text{diag}(\mathbf{V}^{abc})
+    \left(\mathbf{Y}^{abc}_{bus}\,\mathbf{V}^{abc}\right)^* = \mathbf{0},
+\end{equation}
+and the Newton step solves:
+\begin{equation}
+  \mathbf{J}^{(k)}\,\Delta\mathbf{x}^{(k)} = -\mathbf{f}\!\left(\mathbf{x}^{(k)}\right),
+  \qquad \mathbf{x}^{(k+1)} = \mathbf{x}^{(k)} + \Delta\mathbf{x}^{(k)},
+\end{equation}
+where $\mathbf{J}^{(k)} = \partial\mathbf{f}/\partial\mathbf{x}|_{\mathbf{x}^{(k)}}$
+is the $6n\times 6n$ Jacobian.  The voltage unbalance factor at bus $i$ is:
+\begin{equation}
+  \text{VUF}_i = \frac{|V_i^{neg}|}{|V_i^{pos}|}\times 100\,\%,
+\end{equation}
+where $V_i^{neg}$/$V_i^{pos}$ are the negative and positive sequence
+components from Fortescue's symmetrical-components transformation.
 
 \subsubsection{Distribution PF Options and Results}
 
@@ -181,7 +290,8 @@ efficiency.  Falls back to \texttt{pv.p\_mw} when array parameters are absent.
 \label{sec:reliability}
 % ------------------------------------------------------------
 
-Declared in \texttt{analysis/reliability\_assessment.hpp}.  Performs
+Declared in \texttt{reliability/reliability\_assessment.hpp},
+implemented in \texttt{src/reliability/reliability\_assessment.cpp}.  Performs
 Monte Carlo reliability simulation over a configurable time horizon.
 
 \begin{center}
@@ -212,17 +322,81 @@ Monte Carlo reliability simulation over a configurable time horizon.
 \texttt{ReliabilityComponent} describes each component's failure model:
 \texttt{failure\_rate\_per\_year} and \texttt{repair\_time\_hr}.
 
+\subsubsection{Mathematical Formulation}
+
+\paragraph{Sequential Monte Carlo.}
+Each component $k$ has exponentially distributed times to failure and repair:
+\begin{equation}
+  TTF_k \sim \mathrm{Exp}(\lambda_k), \qquad
+  TTR_k \sim \mathrm{Exp}(\mu_k),
+\end{equation}
+where $\lambda_k$ (failures/year) is the failure rate and $\mu_k = 1/r_k$
+(h\textsuperscript{-1}) is the repair rate.  The simulation advances a
+chronological event queue and records load-curtailment intervals.
+
+\paragraph{Reliability Metrics.}
+Over simulation horizon $T_{sim}$ (hours):
+\begin{align}
+  \mathrm{LOLP} &= \frac{\text{hours with unserved load}}{T_{sim}}, \\[4pt]
+  \mathrm{EENS} &= \sum_{t} \max\!\bigl(0,\,P_{load}(t) - P_{cap}(t)\bigr)\,\Delta t
+                   \quad [\text{MWh/year}],\\[4pt]
+  \mathrm{SAIDI} &= \frac{\sum_{i} r_i N_i}{N_{cust}}
+                   \quad [\text{hr/customer/year}],\\[4pt]
+  \mathrm{SAIFI} &= \frac{\sum_{i} \lambda_i N_i}{N_{cust}}
+                   \quad [\text{interruptions/customer/year}],
+\end{align}
+where $r_i$ is the outage duration, $N_i$ the number of affected customers,
+and $N_{cust}$ the total customer count.
+
 % ------------------------------------------------------------
 \subsection{Resilience Assessment}
 \label{sec:resilience}
 % ------------------------------------------------------------
 
-Declared in \texttt{analysis/resilience\_assessment.hpp},
-implemented in \texttt{src/analysis/resilience\_assessment.cpp}.
+Declared in \texttt{resilience/resilience\_assessment.hpp},
+implemented in \texttt{src/resilience/resilience\_assessment.cpp}.
 
 \texttt{run\_distribution\_resilience\_assessment(sys, opt)} evaluates
 load curtailment under fault scenarios with optional microgrid islanding and
 storage dispatch:
+
+\subsubsection{Mathematical Formulation}
+
+\paragraph{Load-Curtailment Optimisation.}
+For each fault scenario (one branch out of service), the minimum-curtailment
+dispatch is:
+\begin{equation}
+  \min_{\mathbf{p}^g, \boldsymbol{\delta}} \quad
+    c_{pen}\sum_{i\in\mathcal{L}} \delta_i
+    \label{eq:resilience-obj}
+\end{equation}
+\begin{align}
+  \text{s.t.} \quad
+  &P_i^{inj} = P_i^{gen} - (1-\delta_i)P_i^{load},
+    \quad \forall i \in \mathcal{L}, \label{eq:res-pb}\\
+  &\text{AC/DC power-flow equations hold on the remaining topology}, \\
+  &0 \leq \delta_i \leq 1, \quad \forall i \in \mathcal{L},
+\end{align}
+where $\delta_i$ is the curtailment fraction at load bus $i$ and
+$c_{pen}$ is the \texttt{curtailment\_penalty} weight.
+
+\paragraph{Energy Not Served.}
+\begin{equation}
+  \mathrm{ENS} = \sum_{i\in\mathcal{L}} \delta_i^*\,P_i^{load}\,\Delta t_{fault}
+  \quad [\text{MWh}].
+\end{equation}
+
+\paragraph{Microgrid Islanding.}
+When \texttt{enable\_islanding} is true, each island $\mathcal{I}$ satisfies
+an independent power balance:
+\begin{equation}
+  \sum_{g\in\mathcal{G}_\mathcal{I}} P_g
+  + \sum_{s\in\mathcal{S}_\mathcal{I}} P_s^{dis}
+  = \sum_{i\in\mathcal{L}_\mathcal{I}} (1-\delta_i)P_i^{load}
+    + P_{loss,\mathcal{I}},
+\end{equation}
+with storage dispatch subject to $0 \leq P_s^{dis} \leq P_s^{max}$ and
+$E_{s,0} - P_s^{dis}\,\Delta t_{fault}/\eta_s \geq E_s^{min}$.
 
 \begin{center}
 \begin{tabular}{llll}
@@ -258,8 +432,107 @@ storage dispatch:
 \label{sec:time-series-pf}
 % ------------------------------------------------------------
 
-Declared in \texttt{analysis/time\_series\_pf.hpp}.  Provides the data types
-for multi-period simulation.
+Declared in \texttt{time\_series/time\_series\_pf.hpp},
+implemented in \texttt{src/time\_series/time\_series\_pf.cpp}.  Provides a
+three-stage UC~$\to$~OPF~$\to$~PF pipeline for multi-period simulation.
+
+\subsubsection{DC Network Model for Unit Commitment}
+
+The UC stage uses a lossless DC power flow approximation over the AC network.
+For $n_{bus}$ buses with susceptance matrix $\mathbf{B}$ (entry
+$B_{ij} = -1/x_{ij}$), the reduced system (slack bus removed) gives:
+\begin{equation}
+  \mathbf{B}_{red}\,\boldsymbol{\theta}_{-s} = \mathbf{p}_{-s},
+  \qquad \theta_{slack} = 0,
+  \label{eq:dc-pf-uc}
+\end{equation}
+where $p_i = P_i^{gen} - P_i^{load}$ is the net injection at bus $i$.
+Branch flow: $P_{ij} = B_{ij}(\theta_i - \theta_j)$.
+Thermal limit constraint: $|P_{ij,t}| \leq F_{ij}^{max}$.
+
+For the DC grid, an analogous conductance matrix $\mathbf{G}$ is built from
+DC branch resistances ($G_{ij} = -1/r_{ij}$), with the voltage-controlled
+DC bus as slack: $\mathbf{G}_{red}\,\mathbf{V}_{DC,-s} = \mathbf{P}_{DC,-s}$.
+
+\subsubsection{Unit Commitment MILP Formulation}
+
+\paragraph{Decision variables.}
+Over $T$ time steps of width $\Delta t$ (hours):
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Variable} & \textbf{Type} & \textbf{Bounds} \\
+\hline
+$p_{g,t}$ & continuous & $[0,\;P_g^{max}]$ \\
+$u_{g,t}$ & binary & $\{0,1\}$ \\
+$s_{g,t}$ & continuous & $[0,\;C_g^{su}]$ \\
+$p_{s,t}$ & continuous & $[P_s^{min},\;P_s^{max}]$ (AC ESS, $+$discharge) \\
+$E_{s,t}$ & continuous & $[E_s^{min},\;E_s^{max}]$ \\
+$p_{r,t}$ & continuous & $[0,\;\bar{p}_{r,t}]$ (renewable, $\bar{p}_{r,t}=$ profile$\times$rated) \\
+$\theta_{i,t}$ & continuous & $[-\pi,\pi]$ (with DC network) \\
+$p_{vsc,c,t}$ & continuous & $[P_c^{min},\;P_c^{max}]$ (with DC network) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Objective.}
+\begin{equation}
+  \min \sum_{g=1}^G\sum_{t=0}^{T-1}
+    \bigl(c_g^1\,p_{g,t} + c_g^0\,u_{g,t} + s_{g,t}\bigr)\Delta t,
+  \label{eq:uc-obj}
+\end{equation}
+where $c_g^1$ (\$/MWh), $c_g^0$ (\$/h on-cost), $s_{g,t}$ captures startup cost.
+
+\paragraph{Constraints.}
+\begin{align}
+  \text{Power balance:} \quad &
+    \sum_g p_{g,t} + \sum_s p_{s,t} + \sum_r p_{r,t} = P_t^{load},
+    \quad \forall t, \label{eq:uc-pb}\\
+  \text{Generator limits:} \quad &
+    P_g^{min}\,u_{g,t} \;\leq\; p_{g,t} \;\leq\; P_g^{max}\,u_{g,t},
+    \quad \forall g,t, \label{eq:uc-gen}\\
+  \text{Ramp up:} \quad &
+    p_{g,t} - p_{g,t-1} \;\leq\; RR_g^{up}\,\Delta t\cdot 60,
+    \quad \forall g,t\geq 1, \label{eq:uc-ramp-up}\\
+  \text{Ramp down:} \quad &
+    p_{g,t-1} - p_{g,t} \;\leq\; RR_g^{dn}\,\Delta t\cdot 60,
+    \quad \forall g,t\geq 1, \label{eq:uc-ramp-dn}\\
+  \text{Startup cost:} \quad &
+    s_{g,t} \;\geq\; C_g^{su}\bigl(u_{g,t} - u_{g,t-1}\bigr),
+    \quad \forall g,t, \label{eq:uc-su}\\
+  \text{ESS SoC:} \quad &
+    E_{s,t} = E_{s,t-1}(1{-}\sigma_s)
+      - \frac{p_{s,t}^{dis}\,\Delta t}{\eta_s^{dis}}
+      + p_{s,t}^{chg}\,\Delta t\,\eta_s^{chg},
+    \quad \forall s,t, \label{eq:uc-soc}\\
+  \text{Reserve:} \quad &
+    \sum_g P_g^{max}\,u_{g,t} - \sum_g p_{g,t}
+    \;\geq\; R_{req}\,P_t^{load},
+    \quad \forall t \;\text{(if enabled)}, \label{eq:uc-reserve}\\
+  \text{DC line thermal:} \quad &
+    \bigl|B_{ij}(\theta_{i,t}-\theta_{j,t})\bigr|
+    \;\leq\; F_{ij}^{max}, \quad \forall (i,j),t \;\text{(if enabled)}.
+    \label{eq:uc-thermal}
+\end{align}
+In~\eqref{eq:uc-soc}, $\sigma_s$ is the self-discharge fraction per step,
+$\eta_s^{dis}$ and $\eta_s^{chg}$ are round-trip efficiency components
+($\eta_s^{RT} = \eta_s^{dis}\cdot\eta_s^{chg}$), and $p_{s,t}$ is split into
+discharge ($p_{s,t}^{dis} \geq 0$) and charge ($p_{s,t}^{chg} \geq 0$)
+components with $p_{s,t} = p_{s,t}^{dis} - p_{s,t}^{chg}$.
+
+\paragraph{OPF--PF Cross-Validation Metrics.}
+For each step~$t$ where both solvers run:
+\begin{align}
+  \Delta V_{m,t} &= \max_i\bigl|V_{i,t}^{OPF} - V_{i,t}^{PF}\bigr|
+    \quad [\text{pu}], \\
+  \Delta\theta_t &= \max_i\bigl|\theta_{i,t}^{OPF} - \theta_{i,t}^{PF}\bigr|
+    \quad [\text{rad}], \\
+  \Delta P_{loss,t} &= P_{loss,t}^{PF} - P_{loss,t}^{OPF}
+    \quad [\text{MW}].
+\end{align}
+The OPF--PF tracking bands $(\pm 20\%/5\,\text{MW}$ for slack,
+$\pm 2\%/1\,\text{MW}$ for non-slack) prevent large re-dispatch between
+stages.
 
 \subsubsection{Time-Series Data Model}
 
@@ -271,7 +544,7 @@ compatibility with JSON serialisation:
 \hline\hline
 \textbf{Type} & \textbf{Fields} & \textbf{Description} \\
 \hline
-\texttt{TimeSeriesProfile} & \texttt{id, name, values} & Named time profile vector \\
+\texttt{TimeSeriesProfile} & \texttt{id, name, values} & Named time profile vector (scaling factors per step) \\
 \texttt{TimeSeriesData} & \texttt{num\_steps=24} & Collection of named profiles \\
  & \texttt{step\_duration\_hr=1.0} & Step width in hours \\
  & \texttt{profiles} & Vector of \texttt{TimeSeriesProfile} \\
@@ -279,29 +552,59 @@ compatibility with JSON serialisation:
 \end{tabular}
 \end{center}
 
-\subsubsection{Time-Series PF Results}
+\subsubsection{Unit Commitment Schedule}
 
-In namespace \texttt{hacdcpf::analysis}:
+\texttt{UCSchedule} carries the MILP dispatch output from Stage~I:
 
 \begin{center}
 \begin{tabular}{ll}
 \hline\hline
-\textbf{Field (TimeSeriesPFOptions)} & \textbf{Description} \\
+\textbf{Field} & \textbf{Description} \\
 \hline
-\texttt{num\_threads=1} & Parallel threads for multi-step solve \\
-\texttt{abort\_on\_failure=false} & Stop on first diverged step if true \\
+\texttt{gen\_dispatch[g][t]} & Generator dispatch (MW) \\
+\texttt{gen\_commit[g][t]} & Binary commitment status \\
+\texttt{ess\_dispatch[s][t]} & Storage dispatch (MW, $+$discharge) \\
+\texttt{ess\_soc[s][t]} & Storage SOC $\in [0,1]$ \\
+\texttt{renewable\_dispatch[r][t]} & Renewable output (MW) \\
+\texttt{vsc\_dispatch[c][t]} & VSC AC-side injection (MW, with DC network) \\
+\texttt{dcdc\_dispatch[dd][t]} & DC/DC converter flow (MW, with DC network) \\
+\texttt{total\_cost, feasible, solver\_name} & Schedule scalar metadata \\
 \hline\hline
 \end{tabular}
 \end{center}
 
+\subsubsection{OPF/PF Cross-Validation}
+
+For each step where both OPF and PF are run, \texttt{CrossValStep} captures:
+
 \begin{center}
 \begin{tabular}{ll}
 \hline\hline
-\textbf{Field (TimeSeriesPFSnapshot)} & \textbf{Description} \\
+\textbf{Field} & \textbf{Description} \\
 \hline
-\texttt{step, time\_hr} & Step index and absolute time \\
-\texttt{converged} & Per-step convergence flag \\
-\texttt{vm, va, vdc} & Bus voltage magnitudes and angles at this step \\
+\texttt{max\_vm\_diff} & $\max_i|V^{OPF}_i - V^{PF}_i|$ (pu) \\
+\texttt{max\_va\_diff} & $\max_i|\theta^{OPF}_i - \theta^{PF}_i|$ relative to slack (rad) \\
+\texttt{opf\_loss\_mw, pf\_loss\_mw, loss\_diff\_mw} & Loss comparison \\
+\texttt{opf\_converged, pf\_converged} & Per-step convergence flags \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Pipeline Options and Result}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field (TimeSeriesPFOptions)} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{skip\_uc} & false & Skip UC, dispatch from profiles directly \\
+\texttt{enable\_network\_constraints} & false & Nodal DC network constraints in UC MILP \\
+\texttt{enable\_dc\_network\_constraints} & false & Full AC-DC coupling in UC (requires network constraints) \\
+\texttt{run\_opf} & true & UC $\to$ OPF $\to$ PF pipeline; false skips OPF \\
+\texttt{reserve\_requirement\_fraction} & 0.0 & Spinning reserve as fraction of demand \\
+\texttt{enable\_uc\_opf\_tracking\_band} & true & Allow OPF to deviate $\pm$20\% / 5~MW from UC dispatch \\
+\texttt{enforce\_non\_slack\_strict\_tracking} & true & Tighten non-slack tracking to $\pm$2\% / 1~MW \\
+\texttt{verbose} & false & Print diagnostic output \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -311,14 +614,469 @@ In namespace \texttt{hacdcpf::analysis}:
 \hline\hline
 \textbf{Field (TimeSeriesPFResult)} & \textbf{Description} \\
 \hline
-\texttt{all\_converged} & True if every step converged \\
-\texttt{num\_steps, num\_failed} & Step counts \\
-\texttt{snapshots} & Ordered vector of \texttt{TimeSeriesPFSnapshot} \\
+\texttt{opf\_results[t]} & Per-step \texttt{ACOPFResult} (if OPF enabled) \\
+\texttt{num\_opf\_converged} & Count of converged OPF steps \\
+\texttt{pf\_results[t]} & Per-step \texttt{PowerFlowResult} \\
+\texttt{num\_converged} & Count of converged PF steps \\
+\texttt{crossval[t]} & Per-step OPF/PF cross-validation \\
+\texttt{num\_steps} & Total time steps simulated \\
+\texttt{total\_generation\_cost} & Sum of OPF objective across all steps \\
+\texttt{uc\_solve\_sec} & Wall-clock time for UC MILP (seconds) \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-Multi-step parallelism is coordinated through the thread pool
-(\S\ref{sec:thread-pool}): each step's \texttt{HybridPowerSystem} is projected
-and assembled independently; threads claim steps from a work queue to avoid
-shared mutable state.
+\subsubsection{Public API}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Function} & \textbf{Description} \\
+\hline
+\texttt{solve\_unit\_commitment(sys, ts, opts)} & Run UC MILP only; returns \texttt{UCSchedule} \\
+\texttt{solve\_time\_series\_pf(sys, ts, opts)} & Full UC $\to$ OPF $\to$ PF pipeline; returns \texttt{TimeSeriesPFResult} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Annual Production Simulation}
+\label{sec:annual-production-sim}
+% ------------------------------------------------------------
+
+Declared in \texttt{time\_series/annual\_production\_sim.hpp},
+implemented in \texttt{src/time\_series/annual\_production\_sim.cpp}.
+Ported from the reference implementation in Sipeng Luo's
+\textit{HybridACDCPowerSystemsPlanning} repository.
+
+\texttt{solve\_annual\_production\_simulation(sys, ts, opts)} solves a full
+year of system operation through a four-level hierarchical temporal
+decomposition:
+
+\begin{enumerate}
+  \item \textbf{L0 --- Annual planning}: Coarse monthly (or weekly)
+        maintenance scheduling with aggregate energy and fuel budgets, storage
+        SoC boundary conditions, and block-level cost targets.
+  \item \textbf{L1 --- Monthly coordination}: Bridges annual plan to weekly
+        UC solves; enforces cyclic SoC continuity across block boundaries.
+  \item \textbf{L2 --- Weekly unit commitment}: 168-step binding MILP window
+        with 48-hour lookahead; inherits energy budgets from L0/L1.
+  \item \textbf{L3 --- Daily UC $\to$ OPF $\to$ PF replay}: 24-step daily
+        sub-horizon; pipes each UC schedule into the full
+        \texttt{solve\_time\_series\_pf} OPF/PF pipeline.
+\end{enumerate}
+
+\subsubsection{Mathematical Formulation}
+
+\paragraph{Block Range Construction.}
+Given $T_{yr}$ total time steps of width $\Delta t$ (hours):
+\begin{equation}
+  T_{yr} = \lfloor 8760 / \Delta t \rfloor.
+\end{equation}
+For \texttt{Monthly} blocks, block $b$ spans $d_b\lfloor 24/\Delta t\rfloor$
+steps, where $d_b \in \{28,29,30,31\}$ (days per month; January absorbs
+any rounding remainder).  For \texttt{Weekly} blocks:
+$T_b = \lfloor 168/\Delta t\rfloor$ for 52 blocks.
+
+\paragraph{L0 Annual Planning Optimisation.}
+The coarse-level problem determines maintenance schedules and energy budgets
+per block $b \in \{1,\ldots,N_B\}$:
+\begin{equation}
+  \min_{\mathbf{u}^{maint},\mathbf{E}^{budget}} \;
+    \sum_{b=1}^{N_B} c_b^{plan}
+    \label{eq:l0-obj}
+\end{equation}
+\begin{align}
+  \text{s.t.} \quad &
+    x_{g,b}^{maint} \in \{0,1\},
+    \quad \sum_b x_{g,b}^{maint} = K_g^{maint}, \quad \forall g,
+    \label{eq:l0-maint}\\
+    &E_{g,b} \leq E_g^{budget,yr}, \quad \forall g,b,
+    \label{eq:l0-energy}\\
+    &\sum_g h_g\,E_{g,b} \leq F_b^{budget}, \quad \forall b,
+    \label{eq:l0-fuel}\\
+    &E_{s,0} = E_{s,T-1} \quad \text{(cyclic SoC, if \texttt{enforce\_cyclic\_soc})},
+    \label{eq:cyclic-soc}
+\end{align}
+where $K_g^{maint}$ is the required maintenance block count for generator $g$
+and $h_g$ is the heat rate.
+
+\paragraph{L2 Weekly Rolling Horizon.}
+Each week solves a rolling MILP with a binding window $[0, T_{bind})$ and
+an advisory look-ahead $[T_{bind}, T_{bind}+T_{look})$:
+\begin{equation}
+  \min_{\mathbf{x}} \;
+  \sum_{t=0}^{T_{bind}+T_{look}-1} c_t(\mathbf{x}_t)
+  \label{eq:l2-obj}
+\end{equation}
+subject to the UC constraints~\eqref{eq:uc-gen}--\eqref{eq:uc-soc} plus the
+inherited energy budget from L0:
+\begin{equation}
+  \sum_{t=0}^{T_{bind}-1} p_{g,t}\,\Delta t \;\leq\; E_{g,b}^{remain}.
+  \label{eq:l2-budget}
+\end{equation}
+Only $\mathbf{x}_{0:T_{bind}-1}$ are committed; the look-ahead window is
+re-solved in the next rolling step.
+
+\paragraph{Annual Cost and Energy Aggregates.}
+\begin{align}
+  J^{yr}     &= \sum_{b=1}^{N_B} c_b^{total}, &
+  E^{gen,yr} &= \sum_{t=0}^{T_{yr}-1} P_t^{gen}\,\Delta t,\\
+  E^{RE,yr}  &= \sum_{t=0}^{T_{yr}-1} P_t^{ren}\,\Delta t, &
+  E^{ENS,yr} &= \sum_{t=0}^{T_{yr}-1} P_t^{shed}\,\Delta t.
+\end{align}
+
+\subsubsection{Decomposition Data Types}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Type} & \textbf{Description} \\
+\hline
+\texttt{AnnualPlanBlock} & L0 block (month/week): maintenance flags, energy budgets, fuel cap, SoC boundary \\
+\texttt{AnnualPlanResult} & Collection of blocks with total plan cost and feasibility \\
+\texttt{WeeklySchedule} & L2 UC schedule with binding window, lookahead, and remaining energy budget \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Per-Step and Per-Block Results}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Type / Field} & \textbf{Description} \\
+\hline
+\texttt{AnnualStepResult} & Lightweight per-hour snapshot: generation, load, renewable, curtailment, ESS, loss, ENS, convergence \\
+\texttt{BlockSummary} & Monthly aggregation: energy MWh totals, ENS, cost, PF/OPF convergence count \\
+\texttt{PFSnapshot} & Sampled voltage/branch-flow snapshot for dashboard visualisation \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Component Annual Statistics}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Type} & \textbf{Key fields} \\
+\hline
+\texttt{GenAnnualStats} & Total energy MWh, capacity factor, startups/shutdowns, hours online \\
+\texttt{StorageAnnualStats} & Total charge/discharge MWh, cycle count \\
+\texttt{RenewableAnnualStats} & Total energy MWh, curtailed MWh, capacity factor, curtailment rate \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Annual Production Simulation Options}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{block\_type} & Monthly & L0 decomposition granularity (Monthly or Weekly) \\
+\texttt{weekly\_lookahead\_hours} & 48 & L2 advisory look-ahead buffer \\
+\texttt{daily\_window\_hours} & 24 & L3 daily sub-horizon size \\
+\texttt{enforce\_cyclic\_soc} & true & Require $E_{s,T-1} = E_{s,0}$ \\
+\texttt{iterative\_feedback} & false & Bottom-up $\to$ top-level re-solve loop \\
+\texttt{max\_feedback\_iterations} & 3 & Max feedback rounds \\
+\texttt{skip\_replay} & false & Schedule-only mode (no OPF/PF) \\
+\texttt{pf\_snapshot\_interval} & 24 & Store PF snapshot every $N$ steps (0 = off) \\
+\texttt{curtailment\_penalty} & 50 & Curtailment penalty (\$/MWh) \\
+\texttt{ens\_penalty} & 10000 & Energy not served penalty (\$/MWh) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Annual Production Simulation Result}
+
+\texttt{AnnualProductionSimResult} aggregates the full hierarchy output:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field} & \textbf{Description} \\
+\hline
+\texttt{annual\_plan} & L0 \texttt{AnnualPlanResult} \\
+\texttt{weekly\_schedules} & Vector of L2 \texttt{WeeklySchedule} \\
+\texttt{step\_results[t]} & Per-hour \texttt{AnnualStepResult} (8760 entries) \\
+\texttt{pf\_snapshots} & Sampled \texttt{PFSnapshot} for visualisation \\
+\texttt{monthly\_summaries} & Per-block \texttt{BlockSummary} \\
+\texttt{gen\_stats, storage\_stats, renewable\_stats} & Component-level annual statistics \\
+\texttt{total\_cost, total\_gen\_mwh, total\_load\_mwh} & Scalar annual aggregates \\
+\texttt{total\_renewable\_mwh, total\_curtailment\_mwh} & Renewable integration metrics \\
+\texttt{total\_ens\_mwh, total\_loss\_mwh} & Reliability and loss aggregates \\
+\texttt{num\_pf\_converged, num\_opf\_converged} & Convergence counts \\
+\texttt{feasible, solver\_name} & Overall feasibility and solver used \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ------------------------------------------------------------
+\subsection{Lifecycle Simulation}
+\label{sec:lifecycle-sim}
+% ------------------------------------------------------------
+
+Declared in \texttt{time\_series/lifecycle\_simulation.hpp},
+implemented in \texttt{src/time\_series/lifecycle\_simulation.cpp}.
+Ported from the reference implementation in Sipeng Luo's
+\textit{HybridACDCPowerSystemsPlanning} repository.
+
+\texttt{run\_lifecycle\_simulation(sys, ts, opts)} runs a multi-year (default
+20~year) planning horizon, advancing the system state year by year:
+
+\begin{enumerate}
+  \item For each year, scale loads by the cumulative growth factor and
+        apply current component capacities (accounting for degradation and
+        derating).
+  \item Run the annual production simulation (Tier~1).
+  \item Compute annual carbon emissions with stratified-sampling carbon
+        attribution (Tier~2) and theoretical error bounds (Tier~3).
+  \item Apply battery state-of-health (SoH) degradation (cycle and
+        calendar) and trigger replacement when SoH falls below
+        \texttt{replacement\_soh\_threshold}.
+  \item Apply annual renewable derating.
+  \item Discount annual costs at \texttt{discount\_rate} and accumulate
+        the net present value of the total lifecycle cost.
+\end{enumerate}
+
+\subsubsection{Mathematical Formulation}
+
+\paragraph{Demand and Supply Scaling.}
+In year $y$ ($y=1,\ldots,N_Y$), the time-varying load profile is scaled by the
+cumulative growth factor:
+\begin{equation}
+  P_t^{load}(y) = P_t^{load}(1)\cdot(1+\rho_{lg})^{y-1},
+\end{equation}
+and each renewable's rated capacity declines by annual derating rate
+$\alpha_r^{der}$:
+\begin{equation}
+  P_{r,y}^{rated} = P_{r,0}^{rated}\cdot(1-\alpha_r^{der})^{y-1}.
+\end{equation}
+
+\paragraph{Battery State-of-Health (SoH) Degradation.}
+Two degradation mechanisms are tracked independently.
+\textit{Cycle ageing} accumulates full-equivalent cycles $N_{s,y}^{cum}$ from
+the annual production simulation; \textit{calendar ageing} grows linearly with
+time:
+\begin{align}
+  \text{SoH}_{s,y}^{cycle} &= 1 - \alpha_s^{cyc}\,N_{s,y}^{cum},
+    \label{eq:soh-cyc} \\
+  \text{SoH}_{s,y}^{cal}   &= 1 - \alpha_s^{cal}\,(y-1),
+    \label{eq:soh-cal} \\
+  \text{SoH}_{s,y}         &= \min\!\left(\text{SoH}_{s,y}^{cycle},\;
+                               \text{SoH}_{s,y}^{cal}\right).
+    \label{eq:soh-combined}
+\end{align}
+When $\text{SoH}_{s,y} \leq \text{SoH}_{EoL}$
+(\texttt{replacement\_soh\_threshold}), the battery is replaced (SoH reset
+to~1) and the replacement capital cost $C_s^{rep}$ is added to year~$y$.
+The effective energy capacity in year~$y$ is:
+\begin{equation}
+  E_s^{eff}(y) = E_s^{rated}\cdot\text{SoH}_{s,y}.
+\end{equation}
+
+\paragraph{Net Present Value.}
+\begin{equation}
+  J^{NPV} = \sum_{y=1}^{N_Y} \frac{J_y^{ann} + C_y^{rep}}{(1+r_d)^{y-1}},
+  \label{eq:npv}
+\end{equation}
+where $r_d$ is the annual discount rate (\texttt{discount\_rate}),
+$J_y^{ann}$ is the total operational cost from the annual production simulation,
+and $C_y^{rep}$ is the battery replacement cost in year~$y$ (zero if no
+replacement occurs).
+
+\subsubsection{Stratified Carbon Attribution (Tier~2)}
+
+The full-year carbon estimate is computed from a stratified random sample of
+operating hours to reduce the computational cost of per-hour power-flow
+evaluations.
+
+\paragraph{Tier-1 Dense Baseline.}
+Using the mean fleet emission intensity $\bar{e}$ (tCO\textsubscript{2}/MWh):
+\begin{equation}
+  \hat{C}_y^{dense} = \bar{e}\sum_{t=0}^{T_{yr}-1} P_t^{gen}\,\Delta t.
+  \label{eq:tier1}
+\end{equation}
+
+\paragraph{Strata Classification.}
+The $T_{yr}$ hours are partitioned into $M=7$ strata according to system
+operating state (implemented in \texttt{classify\_strata()}):
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Stratum} & \textbf{Index} & \textbf{Classification condition} \\
+\hline
+Peak Load       & 0 & $P_t^{load} \geq 0.85\,P_{load}^{max}$ \\
+Low Renewable   & 1 & $P_t^{ren} \leq 0.10\,P_{ren}^{max}$ \\
+High Curtailment & 2 & $c_t \geq 0.30\,c_{max}$ \\
+Heavy Charging  & 3 & $P_{ess,t} < -0.50\,P_{chg}^{max}$ \\
+Heavy Discharging & 4 & $P_{ess,t} > +0.50\,P_{dis}^{max}$ \\
+Low Load        & 5 & $P_t^{load} \leq 0.30\,P_{load}^{max}$ \\
+Normal          & 6 & all remaining hours \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Each hour is placed in the first matching stratum (priority order as listed).
+$N_m = |\mathcal{H}_m|$ is the stratum population size.
+
+\paragraph{Neyman Sample Allocation.}
+The total sample budget $n = \sum_m n_m$ is distributed proportional to
+$N_m\,\hat\sigma_m$:
+\begin{equation}
+  n_m = \left\lfloor n\cdot
+    \frac{N_m\,\hat\sigma_m}{\sum_{m'} N_{m'}\,\hat\sigma_{m'}}
+  \right\rfloor,
+\end{equation}
+with at least one sample per non-empty stratum.
+
+\paragraph{Stratified Estimator.}
+Let $\xi_t = \bar{e}\,P_t^{gen}\,\Delta t$ and
+$\bar\xi_m = n_m^{-1}\sum_{t\in\mathcal{S}_m}\xi_t$.  Then:
+\begin{equation}
+  \hat{C}_y^{samp} = \sum_{m=1}^M N_m\,\bar\xi_m,
+  \label{eq:tier2}
+\end{equation}
+with stratified variance:
+\begin{equation}
+  \hat{V}\!\left[\hat{C}_y^{samp}\right]
+  = \sum_{m=1}^M \frac{N_m^2}{n_m}\,\hat\sigma_m^2
+    \!\left(1 - \frac{n_m}{N_m}\right),
+  \label{eq:strat-var}
+\end{equation}
+where $\hat\sigma_m^2$ is the sample variance within stratum $m$.
+
+\subsubsection{Theoretical Error Bounds (Tier~3)}
+
+The lifecycle module computes guaranteed upper bounds on the carbon
+estimation error across three error sources:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Bound type} & \textbf{Struct} & \textbf{Formula / parameter} \\
+\hline
+Dispatch approximation & \texttt{DispatchErrorBound} & $\varepsilon_{\text{disp}} \leq \bar{e}\sum_t L_{\max} P_{\text{load}} \Delta t$ \\
+Stratified sampling & \texttt{SamplingErrorBound} & $\varepsilon_{\text{samp}} \leq z_{1-\alpha/2}\sqrt{\hat{\sigma}^2_{\text{strat}}}$ \\
+Storage carbon propagation & \texttt{StorageCarbonErrorBound} & $\varepsilon_{\text{stor}} \leq K_w \Delta_{\max}$ \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Dispatch bound} (UC linearisation error):
+\begin{equation}
+  \varepsilon_{disp} = \bar{e}\cdot L_{max}\sum_t P_t^{load}\,\Delta t,
+  \label{eq:bound-disp}
+\end{equation}
+where $L_{max}$ is the per-step Lipschitz constant for the dispatch-to-carbon
+map.
+
+\paragraph{Sampling bound} ($95\,\%$ confidence half-width):
+\begin{equation}
+  \varepsilon_{samp} = z_{1-\alpha/2}\sqrt{\hat{V}\!\left[\hat{C}_y^{samp}\right]},
+  \label{eq:bound-samp}
+\end{equation}
+with $z_{0.975} = 1.96$ for a two-sided $\alpha = 0.05$ interval.
+
+\paragraph{Storage carbon propagation bound}:
+\begin{equation}
+  \varepsilon_{stor} = K_w\cdot\Delta_{max}\cdot E_{ess}^{total},
+  \label{eq:bound-stor}
+\end{equation}
+where $K_w = \max_t|\delta P_t^{gen}|\times 10^{-3}$ is the Lipschitz
+constant from the maximum generation shift, and $\Delta_{max}$ is the
+maximum temporal gap between sampled hours.
+
+\paragraph{Combined bound}:
+\begin{equation}
+  \varepsilon_{total} = \varepsilon_{disp} + \varepsilon_{samp} + \varepsilon_{stor}.
+  \label{eq:bound-total}
+\end{equation}
+
+Per-year combined bounds are stored in \texttt{YearlyErrorBounds}; cross-
+validation between the dense Tier~1 and sampled Tier~2 estimates is
+recorded in \texttt{BoundCrossValidation}.  The cross-validation metrics are:
+\begin{align}
+  \text{SamplingGap}    &= \frac{|\hat{C}^{dense} - \hat{C}^{samp}|}
+                            {\hat{C}^{dense}}, \\
+  \text{BoundTightness} &= \frac{\varepsilon_{total}}{\hat{C}^{dense}}.
+\end{align}
+
+\subsubsection{Lifecycle Simulation Options}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{num\_years} & 20 & Planning horizon \\
+\texttt{discount\_rate} & 0.05 & Annual NPV discount rate \\
+\texttt{load\_growth\_rate} & 0.02 & Annual load growth rate \\
+\texttt{cycle\_degradation\_per\_cycle} & $4\times10^{-5}$ & SoH loss per cycle (25\,000 cycles $\to$ 100\%) \\
+\texttt{calendar\_degradation\_per\_year} & 0.005 & Annual calendar SoH loss \\
+\texttt{replacement\_soh\_threshold} & 0.7 & Replace battery when SoH $<$ 70\% \\
+\texttt{replacement\_cost\_per\_kwh} & 250 & Replacement cost (\$/kWh) \\
+\texttt{renewable\_derating\_per\_year} & 0.005 & Annual renewable capacity derating \\
+\texttt{step\_duration\_hr} & 6.0 & Intra-year time step size (hours) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Lifecycle Result Types}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Type / Field} & \textbf{Description} \\
+\hline
+\texttt{YearResult} & Full annual result: cost, energy, carbon, SoH states, error bounds, replacements \\
+\texttt{StorageYearState} & Per-storage: SoH (cycle + calendar), effective capacity, cycle count, replacement flag \\
+\texttt{RenewableYearState} & Per-renewable: derated capacity, original capacity, derating factor \\
+\texttt{ReplacementEvent} & Year, storage index/name, pre-replacement SoH, cost \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (LifecycleSimResult)} & \textbf{Description} \\
+\hline
+\texttt{year\_results} & Ordered \texttt{YearResult} for each year \\
+\texttt{npv\_total\_cost} & Net present value of total costs over the horizon \\
+\texttt{total\_carbon\_tco2} & Cumulative carbon emissions (tCO\textsubscript{2}) \\
+\texttt{total\_replacement\_cost} & Sum of all battery replacement costs \\
+\texttt{total\_replacements} & Count of replacement events \\
+\texttt{all\_replacements} & Flat list of all \texttt{ReplacementEvent}s \\
+\texttt{feasible, summary\_text} & Overall feasibility and text summary \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Capacity Scaling and Comparison}
+
+\texttt{apply\_capacity\_scaling(sys, scaling)} scales component capacities
+in-place before a lifecycle run, enabling long-term planning studies:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (CapacityScaling)} & \textbf{Applies to} \\
+\hline
+\texttt{pv\_scale} & PV \texttt{pmax\_mw} \\
+\texttt{wind\_scale} & Wind generator \texttt{p\_rated\_mw} \\
+\texttt{bess\_power\_scale} & Battery \texttt{p\_rated\_mw}, \texttt{pmax}, \texttt{pmin} \\
+\texttt{bess\_energy\_scale} & Battery \texttt{e\_rated\_mwh} \\
+\texttt{diesel\_scale} & Diesel/gas generator \texttt{pmax} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\texttt{run\_lifecycle\_comparison(sys, ts, opts, sweep\_param, scale\_values)}
+sweeps one parameter (e.g.\ \texttt{"pv"}, \texttt{"bess\_power"}) across
+the provided scale factors and returns a \texttt{LifecycleCompareResult}
+containing a \texttt{ScenarioResult} for each point, with per-year carbon
+and cost trajectories and installed capacity metadata.

@@ -14,6 +14,8 @@
 #include "hacdcpf/power_flow/power_flow_result.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
+#include "hacdcpf/time_series/annual_production_sim.hpp"
+#include "hacdcpf/time_series/lifecycle_simulation.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"

@@ -1,0 +1,830 @@
+#include "hacdcpf/time_series/annual_production_sim.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+
+namespace hacdcpf::analysis {
+
+// ═══════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Build block boundaries for the year (monthly or weekly).
+static std::vector<std::pair<int, int>> build_block_ranges(
+    int total_steps, double step_hr, AnnualBlockType btype) {
+  std::vector<std::pair<int, int>> blocks;
+
+  if (btype == AnnualBlockType::Weekly) {
+    // 52 weekly blocks (last block absorbs remainder)
+    const int steps_per_week =
+        static_cast<int>(std::round(168.0 / step_hr));
+    for (int w = 0; w < 52; ++w) {
+      int s = w * steps_per_week;
+      int e = (w == 51) ? total_steps
+                        : std::min((w + 1) * steps_per_week, total_steps);
+      if (s >= total_steps) break;
+      blocks.emplace_back(s, e);
+    }
+  } else {
+    // Monthly blocks: approximate days-per-month
+    static constexpr int days_per_month[] = {31, 28, 31, 30, 31, 30,
+                                              31, 31, 30, 31, 30, 31};
+    const int steps_per_day = static_cast<int>(std::round(24.0 / step_hr));
+    int cursor = 0;
+    for (int m = 0; m < 12; ++m) {
+      int s = cursor;
+      int e = cursor + days_per_month[m] * steps_per_day;
+      if (m == 11) e = total_steps;  // absorb rounding into last month
+      e = std::min(e, total_steps);
+      if (s >= total_steps) break;
+      blocks.emplace_back(s, e);
+      cursor = e;
+    }
+  }
+  return blocks;
+}
+
+/// Create a TimeSeriesData slice for a sub-horizon [t_start, t_end).
+static TimeSeriesData slice_ts_data(const TimeSeriesData& full,
+                                     int t_start, int t_end) {
+  TimeSeriesData sub;
+  sub.num_steps = t_end - t_start;
+  sub.step_duration_hr = full.step_duration_hr;
+
+  sub.profiles.reserve(full.profiles.size());
+  for (const auto& p : full.profiles) {
+    TimeSeriesProfile sp;
+    sp.id = p.id;
+    sp.name = p.name;
+    const int n = static_cast<int>(p.values.size());
+    sp.values.reserve(static_cast<size_t>(sub.num_steps));
+    for (int t = t_start; t < t_end; ++t) {
+      sp.values.push_back(t < n ? p.values[static_cast<size_t>(t)] : 1.0);
+    }
+    sub.profiles.push_back(std::move(sp));
+  }
+  return sub;
+}
+
+/// Extract per-step metrics from a TimeSeriesPFResult into
+/// the corresponding range of AnnualStepResult entries.
+static void fill_step_results(std::vector<AnnualStepResult>& steps,
+                               int global_offset,
+                               const TimeSeriesPFResult& sub_result,
+                               const HybridPowerSystem& sys,
+                               const TimeSeriesData& sub_ts,
+                               int sub_T) {
+  // Build profile map for load calculations
+  std::unordered_map<int, const TimeSeriesProfile*> pmap;
+  for (const auto& p : sub_ts.profiles) pmap[p.id] = &p;
+  auto get_scale = [&](int pid, int t) -> double {
+    auto it = pmap.find(pid);
+    if (it == pmap.end()) return 1.0;
+    if (t < 0 || t >= static_cast<int>(it->second->values.size())) return 1.0;
+    return it->second->values[static_cast<size_t>(t)];
+  };
+
+  for (int t = 0; t < sub_T; ++t) {
+    const int g_idx = global_offset + t;
+    if (g_idx >= static_cast<int>(steps.size())) break;
+    auto& sr = steps[static_cast<size_t>(g_idx)];
+
+    // PF convergence
+    if (t < static_cast<int>(sub_result.pf_results.size())) {
+      sr.pf_converged = sub_result.pf_results[static_cast<size_t>(t)].converged;
+    }
+    // OPF convergence
+    if (t < static_cast<int>(sub_result.opf_results.size())) {
+      sr.opf_converged =
+          sub_result.opf_results[static_cast<size_t>(t)].converged;
+      sr.opf_cost =
+          sub_result.opf_results[static_cast<size_t>(t)].objective;
+    }
+
+    // Aggregate generation from UC schedule
+    double gen = 0.0;
+    for (size_t g = 0; g < sub_result.uc_schedule.gen_dispatch.size(); ++g) {
+      const auto& disp = sub_result.uc_schedule.gen_dispatch[g];
+      if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
+    }
+    sr.total_gen_mw = gen;
+
+    // Aggregate load from profiles (ac.loads or bus pd_mw fallback)
+    double load = 0.0;
+    if (!sys.ac.loads.empty()) {
+      for (const auto& ld : sys.ac.loads) {
+        if (!ld.in_service) continue;
+        double scale = get_scale(ld.profile_id, t);
+        load += ld.p_mw * scale * ld.scaling;
+      }
+    } else {
+      for (const auto& bus : sys.ac.buses) {
+        if (bus.pd_mw > 0.0) load += bus.pd_mw * get_scale(0, t);
+      }
+    }
+    sr.total_load_mw = load;
+
+    // Renewable dispatch
+    double ren = 0.0;
+    for (size_t r = 0;
+         r < sub_result.uc_schedule.renewable_dispatch.size(); ++r) {
+      const auto& rd = sub_result.uc_schedule.renewable_dispatch[r];
+      if (t < static_cast<int>(rd.size())) ren += rd[static_cast<size_t>(t)];
+    }
+    sr.total_renewable_mw = ren;
+
+    // ESS net dispatch
+    double ess = 0.0;
+    for (size_t s = 0; s < sub_result.uc_schedule.ess_dispatch.size(); ++s) {
+      const auto& ed = sub_result.uc_schedule.ess_dispatch[s];
+      if (t < static_cast<int>(ed.size())) ess += ed[static_cast<size_t>(t)];
+    }
+    sr.total_ess_mw = ess;
+
+    // Loss from PF result
+    if (t < static_cast<int>(sub_result.pf_results.size()) &&
+        sub_result.pf_results[static_cast<size_t>(t)].converged) {
+      const auto& pfr = sub_result.pf_results[static_cast<size_t>(t)];
+      double loss = 0.0;
+      for (const auto& bf : pfr.branch_flows)
+        loss += bf.pf_mw + bf.pt_mw;  // net power = loss
+      for (const auto& vt : pfr.vsc_transfers)
+        loss += vt.loss_mw;
+      for (const auto& dt_ : pfr.dcdc_transfers)
+        loss += dt_.loss_mw;
+      sr.total_loss_mw = loss;
+    }
+  }
+}
+
+/// Aggregate step results into a block summary.
+static BlockSummary aggregate_block(int block_id, int start, int end,
+                                     const std::vector<AnnualStepResult>& steps,
+                                     double dt) {
+  BlockSummary bs;
+  bs.block_id = block_id;
+  bs.start_step = start;
+  bs.end_step = end;
+  bs.num_steps = end - start;
+  for (int t = start; t < end && t < static_cast<int>(steps.size()); ++t) {
+    const auto& s = steps[static_cast<size_t>(t)];
+    bs.total_gen_mwh += s.total_gen_mw * dt;
+    bs.total_load_mwh += s.total_load_mw * dt;
+    bs.total_renewable_mwh += s.total_renewable_mw * dt;
+    bs.total_curtailment_mwh += s.total_curtailment_mw * dt;
+    bs.total_loss_mwh += s.total_loss_mw * dt;
+    bs.total_ens_mwh += s.load_shed_mw * dt;
+    bs.total_cost += s.opf_cost * dt;
+    if (s.pf_converged) ++bs.num_pf_converged;
+    if (s.opf_converged) ++bs.num_opf_converged;
+  }
+  return bs;
+}
+
+/// Compute generator annual statistics from step results and UC schedules.
+static std::vector<GenAnnualStats> compute_gen_stats(
+    const HybridPowerSystem& sys,
+    const std::vector<WeeklySchedule>& weekly,
+    double dt) {
+  const auto& gens = sys.ac.generators;
+  std::vector<GenAnnualStats> stats(gens.size());
+  for (size_t g = 0; g < gens.size(); ++g) {
+    stats[g].name = gens[g].name;
+    stats[g].gen_index = static_cast<int>(g);
+  }
+
+  // Map in-service generator indices to UC vector positions
+  std::vector<int> gen_uc_pos(gens.size(), -1);
+  {
+    int pos = 0;
+    for (size_t g = 0; g < gens.size(); ++g) {
+      if (!gens[g].in_service) continue;
+      gen_uc_pos[g] = pos++;
+    }
+  }
+
+  for (const auto& ws : weekly) {
+    const auto& uc = ws.uc;
+    for (size_t g = 0; g < gens.size(); ++g) {
+      int pos = gen_uc_pos[g];
+      if (pos < 0) continue;
+      if (static_cast<size_t>(pos) >= uc.gen_dispatch.size()) continue;
+
+      const auto& disp = uc.gen_dispatch[static_cast<size_t>(pos)];
+      const auto& commit =
+          (static_cast<size_t>(pos) < uc.gen_commit.size())
+              ? uc.gen_commit[static_cast<size_t>(pos)]
+              : std::vector<int>{};
+
+      int prev_commit = -1;
+      for (int t = 0; t < static_cast<int>(disp.size()) && t < ws.num_steps;
+           ++t) {
+        stats[g].total_energy_mwh += disp[static_cast<size_t>(t)] * dt;
+        int c = (t < static_cast<int>(commit.size()))
+                    ? commit[static_cast<size_t>(t)]
+                    : 1;
+        if (c) stats[g].total_hours_online += dt;
+        if (prev_commit == 0 && c == 1) ++stats[g].total_startups;
+        if (prev_commit == 1 && c == 0) ++stats[g].total_shutdowns;
+        prev_commit = c;
+      }
+    }
+  }
+
+  for (size_t g = 0; g < gens.size(); ++g) {
+    double pmax = gens[g].pmax_mw;
+    double total_hours =
+        static_cast<double>(weekly.empty() ? 0 : weekly.back().start_step +
+                                                      weekly.back().num_steps) *
+        dt;
+    if (pmax > 0.0 && total_hours > 0.0)
+      stats[g].capacity_factor = stats[g].total_energy_mwh / (pmax * total_hours);
+  }
+  return stats;
+}
+
+/// Compute storage annual statistics.
+static std::vector<StorageAnnualStats> compute_storage_stats(
+    const HybridPowerSystem& sys,
+    const std::vector<WeeklySchedule>& weekly,
+    double dt) {
+  const auto& storage = sys.ac.storage;
+  std::vector<StorageAnnualStats> stats(storage.size());
+
+  std::vector<int> ess_uc_pos(storage.size(), -1);
+  {
+    int pos = 0;
+    for (size_t s = 0; s < storage.size(); ++s) {
+      if (!storage[s].in_service) continue;
+      ess_uc_pos[s] = pos++;
+    }
+  }
+
+  for (size_t s = 0; s < storage.size(); ++s) {
+    stats[s].name = storage[s].name;
+    stats[s].storage_index = static_cast<int>(s);
+  }
+
+  for (const auto& ws : weekly) {
+    const auto& uc = ws.uc;
+    for (size_t s = 0; s < storage.size(); ++s) {
+      int pos = ess_uc_pos[s];
+      if (pos < 0) continue;
+      if (static_cast<size_t>(pos) >= uc.ess_dispatch.size()) continue;
+      const auto& disp = uc.ess_dispatch[static_cast<size_t>(pos)];
+      for (int t = 0; t < static_cast<int>(disp.size()) && t < ws.num_steps;
+           ++t) {
+        double p = disp[static_cast<size_t>(t)];
+        if (p > 0.0)
+          stats[s].total_discharge_mwh += p * dt;
+        else
+          stats[s].total_charge_mwh += (-p) * dt;
+      }
+    }
+  }
+
+  for (size_t s = 0; s < storage.size(); ++s) {
+    double cap = storage[s].e_rated_mwh;
+    if (cap > 0.0)
+      stats[s].cycles = stats[s].total_discharge_mwh / cap;
+  }
+  return stats;
+}
+
+/// Compute renewable annual statistics.
+static std::vector<RenewableAnnualStats> compute_renewable_stats(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const std::vector<WeeklySchedule>& weekly,
+    double dt) {
+  const auto& rens = sys.ac.renewable_gens;
+  std::vector<RenewableAnnualStats> stats(rens.size());
+
+  std::vector<int> ren_uc_pos(rens.size(), -1);
+  {
+    int pos = 0;
+    for (size_t r = 0; r < rens.size(); ++r) {
+      if (!rens[r].in_service) continue;
+      ren_uc_pos[r] = pos++;
+    }
+  }
+
+  // Build profile map for availability computation
+  std::unordered_map<int, const TimeSeriesProfile*> pmap;
+  for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+
+  for (size_t r = 0; r < rens.size(); ++r) {
+    stats[r].name = rens[r].name;
+    stats[r].ren_index = static_cast<int>(r);
+  }
+
+  for (const auto& ws : weekly) {
+    const auto& uc = ws.uc;
+    for (size_t r = 0; r < rens.size(); ++r) {
+      int pos = ren_uc_pos[r];
+      if (pos < 0) continue;
+      if (static_cast<size_t>(pos) >= uc.renewable_dispatch.size()) continue;
+      const auto& disp = uc.renewable_dispatch[static_cast<size_t>(pos)];
+      for (int t = 0; t < static_cast<int>(disp.size()) && t < ws.num_steps;
+           ++t) {
+        stats[r].total_energy_mwh += disp[static_cast<size_t>(t)] * dt;
+
+        // Compute availability at global step for curtailment
+        int global_t = ws.start_step + t;
+        double avail = rens[r].p_rated_mw;
+        auto pit = pmap.find(rens[r].profile_id);
+        if (pit != pmap.end() &&
+            global_t < static_cast<int>(pit->second->values.size())) {
+          avail *= pit->second->values[static_cast<size_t>(global_t)];
+        }
+        double curtailed = avail - disp[static_cast<size_t>(t)];
+        if (curtailed > 0.0) stats[r].total_curtailed_mwh += curtailed * dt;
+      }
+    }
+  }
+
+  double total_year_hours = ts_data.num_steps * dt;
+  for (size_t r = 0; r < rens.size(); ++r) {
+    double pmax = rens[r].p_rated_mw;
+    if (pmax > 0.0 && total_year_hours > 0.0)
+      stats[r].capacity_factor = stats[r].total_energy_mwh / (pmax * total_year_hours);
+    double total_available = stats[r].total_energy_mwh + stats[r].total_curtailed_mwh;
+    if (total_available > 0.0)
+      stats[r].curtailment_rate = stats[r].total_curtailed_mwh / total_available;
+  }
+  return stats;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L0: Annual Planning (coarse energy + maintenance schedule)
+// ═══════════════════════════════════════════════════════════════════════
+
+static AnnualPlanResult solve_annual_plan(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const std::vector<std::pair<int, int>>& block_ranges,
+    const AnnualProductionSimOptions& /*opts*/) {
+  AnnualPlanResult plan;
+  plan.feasible = true;
+  plan.solver_name = "annual_plan_default";
+
+  const auto& gens = sys.ac.generators;
+  const auto& storage = sys.ac.storage;
+  const int n_blocks = static_cast<int>(block_ranges.size());
+
+  // Build profile map for load/renewable estimation
+  std::unordered_map<int, const TimeSeriesProfile*> pmap;
+  for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+  auto get_scale = [&](int pid, int t) -> double {
+    auto it = pmap.find(pid);
+    if (it == pmap.end()) return 1.0;
+    if (t < 0 || t >= static_cast<int>(it->second->values.size())) return 1.0;
+    return it->second->values[static_cast<size_t>(t)];
+  };
+
+  plan.blocks.resize(static_cast<size_t>(n_blocks));
+  double dt = ts_data.step_duration_hr;
+
+  for (int b = 0; b < n_blocks; ++b) {
+    auto& blk = plan.blocks[static_cast<size_t>(b)];
+    blk.block_id = b;
+    blk.start_step = block_ranges[static_cast<size_t>(b)].first;
+    blk.end_step = block_ranges[static_cast<size_t>(b)].second;
+    int steps = blk.end_step - blk.start_step;
+
+    // Default: no maintenance
+    blk.gen_maintenance.assign(gens.size(), 0);
+
+    // Energy budget: pmax * steps * dt per generator (unconstrained default)
+    blk.gen_energy_budget_mwh.resize(gens.size());
+    for (size_t g = 0; g < gens.size(); ++g) {
+      blk.gen_energy_budget_mwh[g] = gens[g].pmax_mw * steps * dt;
+    }
+
+    blk.fuel_budget = 1e30;  // no fuel constraint by default
+
+    // Storage SOC: propagate linearly
+    blk.storage_init_soc.resize(storage.size());
+    blk.storage_terminal_soc.resize(storage.size());
+    for (size_t s = 0; s < storage.size(); ++s) {
+      blk.storage_init_soc[s] = storage[s].soc_init;
+      blk.storage_terminal_soc[s] = storage[s].soc_init;
+    }
+
+    // Estimate block cost (load-weighted average generation cost)
+    double block_load_mwh = 0.0;
+    for (int t = blk.start_step; t < blk.end_step; ++t) {
+      for (const auto& ld : sys.ac.loads) {
+        if (!ld.in_service) continue;
+        block_load_mwh += ld.p_mw * get_scale(ld.profile_id, t) * ld.scaling * dt;
+      }
+    }
+    // Simple cost estimate using average generator marginal cost
+    double avg_mc = 0.0;
+    int n_gen = 0;
+    for (const auto& g : gens) {
+      if (!g.in_service) continue;
+      avg_mc += g.cost_c1;
+      ++n_gen;
+    }
+    if (n_gen > 0) avg_mc /= n_gen;
+    blk.block_cost = block_load_mwh * avg_mc;
+    plan.total_plan_cost += blk.block_cost;
+  }
+
+  return plan;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L2: Weekly Rolling UC
+// ═══════════════════════════════════════════════════════════════════════
+
+static WeeklySchedule solve_weekly_uc(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    int week_id, int start_step, int bind_steps, int la_steps,
+    const AnnualPlanBlock& block,
+    const AnnualProductionSimOptions& opts) {
+  WeeklySchedule ws;
+  ws.week_id = week_id;
+  ws.start_step = start_step;
+  ws.num_steps = bind_steps;
+  ws.lookahead_steps = la_steps;
+
+  int total_window = bind_steps + la_steps;
+  int t_end = std::min(start_step + total_window, ts_data.num_steps);
+  total_window = t_end - start_step;
+
+  // Slice profiles for the sub-horizon
+  auto sub_ts = slice_ts_data(ts_data, start_step, t_end);
+
+  // Apply maintenance masks from L0 plan
+  HybridPowerSystem sub_sys = sys;
+  for (size_t g = 0; g < sub_sys.ac.generators.size() &&
+                      g < block.gen_maintenance.size();
+       ++g) {
+    if (block.gen_maintenance[g]) {
+      sub_sys.ac.generators[g].in_service = false;
+    }
+  }
+
+  // Set initial SOC from L0/L1 boundary
+  for (size_t s = 0; s < sub_sys.ac.storage.size() &&
+                      s < block.storage_init_soc.size();
+       ++s) {
+    sub_sys.ac.storage[s].soc_init =
+        block.storage_init_soc[s];
+  }
+
+  // Solve UC for the sub-horizon
+  ws.uc = solve_unit_commitment(sub_sys, sub_ts, opts.ts_pf_options);
+
+  return ws;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// L3: Daily OPF/PF Replay
+// ═══════════════════════════════════════════════════════════════════════
+
+static TimeSeriesPFResult solve_daily_replay(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    int start_step, int num_steps,
+    const UCSchedule& weekly_uc,
+    int uc_offset,  // offset within the weekly UC arrays
+    const AnnualPlanBlock& block,
+    const AnnualProductionSimOptions& opts) {
+  // Create day-sized slice
+  int t_end = std::min(start_step + num_steps, ts_data.num_steps);
+  auto sub_ts = slice_ts_data(ts_data, start_step, t_end);
+  int sub_T = t_end - start_step;
+
+  // Build a pre-committed UC schedule for the day by slicing the weekly UC
+  UCSchedule day_uc;
+  day_uc.feasible = weekly_uc.feasible;
+  day_uc.solver_name = weekly_uc.solver_name;
+
+  auto slice_2d_double = [&](const std::vector<std::vector<double>>& src) {
+    std::vector<std::vector<double>> dst;
+    dst.reserve(src.size());
+    for (const auto& row : src) {
+      std::vector<double> sub;
+      sub.reserve(static_cast<size_t>(sub_T));
+      for (int t = uc_offset; t < uc_offset + sub_T; ++t) {
+        sub.push_back(
+            t < static_cast<int>(row.size()) ? row[static_cast<size_t>(t)] : 0.0);
+      }
+      dst.push_back(std::move(sub));
+    }
+    return dst;
+  };
+
+  auto slice_2d_int = [&](const std::vector<std::vector<int>>& src) {
+    std::vector<std::vector<int>> dst;
+    dst.reserve(src.size());
+    for (const auto& row : src) {
+      std::vector<int> sub;
+      sub.reserve(static_cast<size_t>(sub_T));
+      for (int t = uc_offset; t < uc_offset + sub_T; ++t) {
+        sub.push_back(
+            t < static_cast<int>(row.size()) ? row[static_cast<size_t>(t)] : 0);
+      }
+      dst.push_back(std::move(sub));
+    }
+    return dst;
+  };
+
+  day_uc.gen_dispatch = slice_2d_double(weekly_uc.gen_dispatch);
+  day_uc.gen_commit = slice_2d_int(weekly_uc.gen_commit);
+  day_uc.ess_dispatch = slice_2d_double(weekly_uc.ess_dispatch);
+  day_uc.ess_soc = slice_2d_double(weekly_uc.ess_soc);
+  day_uc.renewable_dispatch = slice_2d_double(weekly_uc.renewable_dispatch);
+  day_uc.dc_pv_dispatch = slice_2d_double(weekly_uc.dc_pv_dispatch);
+  day_uc.dc_ess_dispatch = slice_2d_double(weekly_uc.dc_ess_dispatch);
+  day_uc.dc_sgen_dispatch = slice_2d_double(weekly_uc.dc_sgen_dispatch);
+  day_uc.dc_load_demand = slice_2d_double(weekly_uc.dc_load_demand);
+
+  // Apply maintenance from L0
+  HybridPowerSystem sub_sys = sys;
+  for (size_t g = 0; g < sub_sys.ac.generators.size() &&
+                      g < block.gen_maintenance.size();
+       ++g) {
+    if (block.gen_maintenance[g]) {
+      sub_sys.ac.generators[g].in_service = false;
+    }
+  }
+
+  // Run the full UC→OPF→PF pipeline with skip_uc=true (UC already done)
+  TimeSeriesPFOptions pf_opts = opts.ts_pf_options;
+  pf_opts.skip_uc = true;  // we inject the pre-solved UC schedule
+
+  TimeSeriesPFResult result = solve_time_series_pf(sys, sub_ts, pf_opts);
+  // Overwrite the schedule with our pre-sliced one
+  result.uc_schedule = day_uc;
+
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Main Orchestrator
+// ═══════════════════════════════════════════════════════════════════════
+
+AnnualProductionSimResult solve_annual_production_simulation(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const AnnualProductionSimOptions& opts) {
+  AnnualProductionSimResult result;
+
+  const int T_yr = ts_data.num_steps;
+  const double dt = ts_data.step_duration_hr;
+  result.num_steps = T_yr;
+  result.step_duration_hr = dt;
+
+  if (T_yr <= 0) {
+    return result;
+  }
+
+  result.step_results.resize(static_cast<size_t>(T_yr));
+
+  // ─── L0: Annual Planning ───
+  auto block_ranges = build_block_ranges(T_yr, dt, opts.block_type);
+  result.annual_plan = solve_annual_plan(sys, ts_data, block_ranges, opts);
+
+  // ─── L1/L2: Monthly → Weekly Rolling UC ───
+  const int steps_per_week =
+      static_cast<int>(std::round(168.0 / dt));
+  const int steps_per_day =
+      std::max(1, static_cast<int>(std::round(
+                      static_cast<double>(opts.daily_window_hours) / dt)));
+  const int la_steps =
+      static_cast<int>(std::round(
+          static_cast<double>(opts.weekly_lookahead_hours) / dt));
+
+  int week_counter = 0;
+
+  for (size_t b = 0; b < result.annual_plan.blocks.size(); ++b) {
+    const auto& block = result.annual_plan.blocks[b];
+    int block_start = block.start_step;
+    int block_end = block.end_step;
+
+    // Partition block into weekly windows
+    int cursor = block_start;
+    while (cursor < block_end) {
+      int bind_end = std::min(cursor + steps_per_week, block_end);
+      int bind_steps = bind_end - cursor;
+
+      // L2: Solve weekly UC
+      WeeklySchedule ws = solve_weekly_uc(
+          sys, ts_data, week_counter, cursor, bind_steps, la_steps,
+          block, opts);
+
+      // ─── L3: Daily OPF/PF Replay ───
+      if (!opts.skip_replay) {
+        int day_cursor = 0;
+        while (day_cursor < bind_steps) {
+          int day_steps = std::min(steps_per_day, bind_steps - day_cursor);
+          int global_day_start = cursor + day_cursor;
+
+          TimeSeriesPFResult day_result = solve_daily_replay(
+              sys, ts_data, global_day_start, day_steps,
+              ws.uc, day_cursor, block, opts);
+
+          // Fill annual step results
+          auto sub_ts_slice = slice_ts_data(ts_data, global_day_start,
+                                             global_day_start + day_steps);
+          fill_step_results(result.step_results, global_day_start,
+                            day_result, sys, sub_ts_slice, day_steps);
+
+          // Store PF snapshots at configured interval
+          if (opts.pf_snapshot_interval > 0) {
+            for (int t = 0; t < day_steps; ++t) {
+              int g_step = global_day_start + t;
+              if (g_step % opts.pf_snapshot_interval != 0) continue;
+              if (t >= static_cast<int>(day_result.pf_results.size())) continue;
+              const auto& pfr = day_result.pf_results[static_cast<size_t>(t)];
+              if (!pfr.converged) continue;
+              PFSnapshot snap;
+              snap.global_step = g_step;
+              snap.vm = pfr.vm;
+              snap.vdc = pfr.vdc;
+              snap.branch_flows = pfr.branch_flows;
+              snap.vsc_transfers = pfr.vsc_transfers;
+              snap.dcdc_transfers = pfr.dcdc_transfers;
+              snap.converged = true;
+              result.pf_snapshots.push_back(std::move(snap));
+            }
+          }
+
+          day_cursor += day_steps;
+        }
+      }
+
+      result.weekly_schedules.push_back(std::move(ws));
+      cursor = bind_end;
+      ++week_counter;
+    }
+  }
+
+  // ─── Populate step_results from UC schedules when replay was skipped ───
+  if (opts.skip_replay) {
+    // Build profile map for load calculations
+    std::unordered_map<int, const TimeSeriesProfile*> pmap;
+    for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+    auto get_scale = [&](int pid, int t) -> double {
+      auto it = pmap.find(pid);
+      if (it == pmap.end()) return 1.0;
+      if (t < 0 || t >= static_cast<int>(it->second->values.size())) return 1.0;
+      return it->second->values[static_cast<size_t>(t)];
+    };
+
+    for (const auto& ws : result.weekly_schedules) {
+      for (int t = 0; t < ws.num_steps; ++t) {
+        int g_idx = ws.start_step + t;
+        if (g_idx < 0 || g_idx >= static_cast<int>(result.step_results.size())) continue;
+        auto& sr = result.step_results[static_cast<size_t>(g_idx)];
+
+        // Generation from UC schedule
+        double gen = 0.0;
+        for (size_t g = 0; g < ws.uc.gen_dispatch.size(); ++g) {
+          const auto& disp = ws.uc.gen_dispatch[g];
+          if (t < static_cast<int>(disp.size())) gen += disp[static_cast<size_t>(t)];
+        }
+        sr.total_gen_mw = gen;
+
+        // Load from profiles (ac.loads + bus pd_mw fallback)
+        double load = 0.0;
+        if (!sys.ac.loads.empty()) {
+          for (const auto& ld : sys.ac.loads) {
+            if (!ld.in_service) continue;
+            load += ld.p_mw * get_scale(ld.profile_id, g_idx) * ld.scaling;
+          }
+        } else {
+          for (const auto& b : sys.ac.buses) {
+            if (b.pd_mw > 0.0) load += b.pd_mw * get_scale(0, g_idx);
+          }
+        }
+        sr.total_load_mw = load;
+
+        // Renewable dispatch
+        double ren = 0.0;
+        for (size_t r = 0; r < ws.uc.renewable_dispatch.size(); ++r) {
+          const auto& rd = ws.uc.renewable_dispatch[r];
+          if (t < static_cast<int>(rd.size())) ren += rd[static_cast<size_t>(t)];
+        }
+        sr.total_renewable_mw = ren;
+
+        // ESS net dispatch
+        double ess = 0.0;
+        for (size_t s = 0; s < ws.uc.ess_dispatch.size(); ++s) {
+          const auto& ed = ws.uc.ess_dispatch[s];
+          if (t < static_cast<int>(ed.size())) ess += ed[static_cast<size_t>(t)];
+        }
+        sr.total_ess_mw = ess;
+
+        // Approximate cost from generation
+        double cost = 0.0;
+        int gpos = 0;
+        for (const auto& gg : sys.ac.generators) {
+          if (!gg.in_service) { continue; }
+          if (gpos < static_cast<int>(ws.uc.gen_dispatch.size()) &&
+              t < static_cast<int>(ws.uc.gen_dispatch[static_cast<size_t>(gpos)].size())) {
+            double p = ws.uc.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
+            cost += gg.cost_c0 + gg.cost_c1 * p + gg.cost_c2 * p * p;
+          }
+          ++gpos;
+        }
+        sr.opf_cost = cost;
+        sr.opf_converged = true;
+        sr.pf_converged = true;
+      }
+    }
+  }
+
+  // ─── Aggregate monthly summaries ───
+  result.monthly_summaries.reserve(block_ranges.size());
+  for (size_t b = 0; b < block_ranges.size(); ++b) {
+    result.monthly_summaries.push_back(aggregate_block(
+        static_cast<int>(b),
+        block_ranges[b].first,
+        block_ranges[b].second,
+        result.step_results, dt));
+  }
+
+  // ─── Component-level statistics ───
+  result.gen_stats = compute_gen_stats(sys, result.weekly_schedules, dt);
+  result.storage_stats = compute_storage_stats(sys, result.weekly_schedules, dt);
+  result.renewable_stats =
+      compute_renewable_stats(sys, ts_data, result.weekly_schedules, dt);
+
+  // ─── Scalar annual metrics ───
+  for (const auto& ms : result.monthly_summaries) {
+    result.total_gen_mwh += ms.total_gen_mwh;
+    result.total_load_mwh += ms.total_load_mwh;
+    result.total_renewable_mwh += ms.total_renewable_mwh;
+    result.total_curtailment_mwh += ms.total_curtailment_mwh;
+    result.total_ens_mwh += ms.total_ens_mwh;
+    result.total_loss_mwh += ms.total_loss_mwh;
+    result.total_cost += ms.total_cost;
+    result.num_pf_converged += ms.num_pf_converged;
+    result.num_opf_converged += ms.num_opf_converged;
+  }
+
+  result.feasible = result.annual_plan.feasible;
+  result.solver_name = result.annual_plan.solver_name;
+
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Text summary
+// ═══════════════════════════════════════════════════════════════════════
+
+std::string AnnualProductionSimResult::summary() const {
+  std::ostringstream ss;
+  ss << "=== Annual Production Simulation Summary ===\n";
+  ss << "Steps:        " << num_steps << " (dt=" << step_duration_hr << " h)\n";
+  ss << "Feasible:     " << (feasible ? "yes" : "no") << "\n";
+  ss << "Solver:       " << solver_name << "\n";
+  ss << "Total cost:   " << total_cost << " $/yr\n";
+  ss << "Generation:   " << total_gen_mwh << " MWh\n";
+  ss << "Load:         " << total_load_mwh << " MWh\n";
+  ss << "Renewable:    " << total_renewable_mwh << " MWh\n";
+  ss << "Curtailment:  " << total_curtailment_mwh << " MWh\n";
+  ss << "ENS:          " << total_ens_mwh << " MWh\n";
+  ss << "Losses:       " << total_loss_mwh << " MWh\n";
+  ss << "PF converged: " << num_pf_converged << " / " << num_steps << "\n";
+  ss << "OPF converged:" << num_opf_converged << " / " << num_steps << "\n";
+  ss << "\n--- Monthly Summaries ---\n";
+  static const char* month_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  for (size_t m = 0; m < monthly_summaries.size(); ++m) {
+    const auto& ms = monthly_summaries[m];
+    const char* mname = (m < 12) ? month_names[m] : "Blk";
+    ss << "  " << mname << ": gen=" << ms.total_gen_mwh
+       << " load=" << ms.total_load_mwh
+       << " ren=" << ms.total_renewable_mwh
+       << " loss=" << ms.total_loss_mwh
+       << " cost=" << ms.total_cost << "\n";
+  }
+  ss << "\n--- Generator Stats ---\n";
+  for (const auto& gs : gen_stats) {
+    if (gs.total_energy_mwh < 1e-6) continue;
+    ss << "  " << gs.name << ": E=" << gs.total_energy_mwh
+       << " MWh, CF=" << (gs.capacity_factor * 100.0) << "%"
+       << ", SU=" << gs.total_startups
+       << ", hours=" << gs.total_hours_online << "\n";
+  }
+  ss << "\n--- Renewable Stats ---\n";
+  for (const auto& rs : renewable_stats) {
+    ss << "  " << rs.name << ": E=" << rs.total_energy_mwh
+       << " MWh, curt=" << rs.total_curtailed_mwh
+       << " MWh (" << (rs.curtailment_rate * 100.0) << "%)\n";
+  }
+  return ss.str();
+}
+
+}  // namespace hacdcpf::analysis
