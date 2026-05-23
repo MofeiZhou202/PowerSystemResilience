@@ -21,6 +21,17 @@ The current notebook covers these implemented module families:
   and parity full-space IPM routes;
   \item DC OPF through \texttt{solve\_dc\_opf};
   \item reactive-power optimization through \texttt{solve\_rpo};
+  \item carbon emissions analysis through \texttt{compute\_carbon\_analysis}
+  (BFS proportional tracing + matrix solve, with optional PTDF weighting and
+  sector-level attribution);
+  \item time-series power flow pipeline through
+  \texttt{run\_time\_series\_power\_flow} (multi-scenario, multi-horizon
+  profiles with snapshot solve per time step);
+  \item annual production simulation through
+  \texttt{run\_annual\_production\_simulation} (hourly PV/wind dispatch,
+  curtailment accounting, energy yield statistics);
+  \item lifecycle simulation through \texttt{run\_lifecycle\_simulation}
+  (multi-year degradation, replacement scheduling, levelised cost computation);
   \item JSON, MATPOWER/JPC, case-builder, PF result JSON, OPF result JSON, and
   carbon result JSON support;
   \item optional Excel workbook I/O when \texttt{HACDCPF\_ENABLE\_EXCEL=ON};
@@ -38,12 +49,10 @@ Area & Current code status \\
 \endhead
 \texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/analysis/distribution\_power\_flow.cpp} returns a non-converged result with \texttt{status="not\_implemented"}. \\
 \texttt{run\_distribution\_resilience\_assessment} & Public facade exists, but \texttt{src/analysis/resilience\_assessment.cpp} returns \texttt{completed=false} and \texttt{status="not\_implemented"}. \\
-\texttt{analysis::run\_carbon\_analysis} & Result structs and JSON/Excel serializers exist; the analysis source currently returns \texttt{tracing\_verified=false}, \texttt{matrix\_solved=false}, and empty result arrays. \\
-Time-series PF & \texttt{time\_series\_pf.hpp} defines data types; \texttt{time\_series\_pf.cpp} is a stub translation unit and does not implement a simulation routine. \\
 Reliability assessment & Headers define option/result types; no implemented public assessment solver is exposed by \texttt{hacdcpf.hpp}. \\
 Short-circuit analysis & No public \texttt{compute\_short\_circuit}, \texttt{SCOptions}, or \texttt{BusFaultResult} header exists in the current include tree. \\
 Optimal network reconfiguration & No public \texttt{solve\_optimal\_reconfiguration} header/API exists in the current include tree. \\
-Annual production and lifecycle simulation & No public annual-production or lifecycle-simulation solver APIs exist in the current include tree. \\
+
 \bottomrule
 \end{longtable}
 

@@ -116,7 +116,7 @@ Default weights $\{1, 0, 0\}$ recover the constant-power (PQ) model.
 \hline\hline
 \textbf{Field} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
 \hline
-\texttt{ac\_eval\_threads} & 1 & --- & Parallel threads for Jacobian evaluation \\
+\texttt{ac\_eval\_threads} & 0 & --- & Parallel threads for Jacobian evaluation; 0 = auto-detect (\texttt{hardware\_concurrency()}) \\
 \texttt{enable\_solver\_profiling} & false & --- & Collect per-call timing counters \\
 \texttt{enable\_iteration\_log} & false & --- & Store per-iteration log entries \\
 \texttt{verbose} & false & --- & Print convergence progress to stdout \\

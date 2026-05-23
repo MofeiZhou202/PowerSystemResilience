@@ -1,4 +1,5 @@
 #include "hacdcpf/power_models/ac_pf_model_builder.hpp"
+#include "hacdcpf/power_models/branch_admittance.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,40 +21,7 @@ namespace {
 constexpr double kPi           = 3.14159265358979323846;
 constexpr double kDegToRad     = kPi / 180.0;
 constexpr double kHuge         = 1e4;   // used as bound when unset
-constexpr double kMinImpedance = 1e-6;  // avoid 1/0 for zero-impedance branches
-
-// Admittance matrix elements for a π-branch.
-struct BranchAdmittance {
-  double Gff, Bff;  // from-from (diagonal, from-bus shunt)
-  double Gtt, Btt;  // to-to   (diagonal, to-bus   shunt)
-  double Gft, Bft;  // from-to (off-diagonal)
-  double Gtf, Btf;  // to-from (off-diagonal)
-};
-
-BranchAdmittance branch_admittance(double r, double x, double bc,
-                                    double tau, double phi_rad) {
-  const double z2 = r * r + x * x;
-  const double denom = (z2 < kMinImpedance * kMinImpedance) ? kMinImpedance : z2;
-  const double gs = r / denom;
-  const double bs = -x / denom;
-
-  const double tau2      = tau * tau;
-  const double cos_phi   = std::cos(phi_rad);
-  const double sin_phi   = std::sin(phi_rad);
-
-  BranchAdmittance Y;
-  Y.Gff = gs / tau2;
-  Y.Bff = (bs + bc / 2.0) / tau2;
-  Y.Gtt = gs;
-  Y.Btt = bs + bc / 2.0;
-  // Yft = −y_s / (τ · e^{−jφ}) = −(gs+j·bs)·e^{+jφ} / τ
-  Y.Gft = -(gs * cos_phi - bs * sin_phi) / tau;
-  Y.Bft = -(gs * sin_phi + bs * cos_phi) / tau;
-  // Ytf = −y_s / (τ · e^{+jφ}) = −(gs+j·bs)·e^{−jφ} / τ
-  Y.Gtf = -(gs * cos_phi + bs * sin_phi) / tau;
-  Y.Btf =  (gs * sin_phi - bs * cos_phi) / tau;
-  return Y;
-}
+constexpr double kMinImpedance = 1e-6;  // skip zero-impedance branches in data conversion
 
 }  // namespace
 

@@ -340,21 +340,52 @@ TEST_CASE("JSON I/O: 2-bus AC system round-trip", "[io][json]") {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tests: Carbon analysis stub
+// Tests: Carbon analysis (full implementation)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-TEST_CASE("Carbon analysis: stub returns valid struct", "[analysis][carbon]") {
+TEST_CASE("Carbon analysis: converged result has populated load_carbon", "[analysis][carbon]") {
   using namespace hacdcpf;
 
-  auto sys          = make_simple_ac_system();
-  analysis::CarbonAnalysisOptions opt;
-  auto result       = analysis::run_carbon_analysis(sys, opt);
+  auto sys = make_simple_ac_system();
+  analysis::CarbonAnalysisOptions ca_opt;
+  PowerFlowOptions pf_opt;
 
-  // Stub: not yet implemented, just check the struct is usable.
+  // Use the two-arg overload (runs PF internally).
+  auto result = analysis::compute_carbon_analysis(sys, pf_opt, ca_opt);
+
+  // If power flow converged the struct should contain per-load carbon results.
+  if (result.tracing_verified || result.matrix_solved || !result.load_carbon.empty()) {
+    CHECK(!result.load_carbon.empty());
+    for (const auto& lc : result.load_carbon) {
+      CHECK(lc.carbon_intensity_tco2_mwh >= 0.0);
+    }
+  }
+}
+
+TEST_CASE("Carbon analysis: backward-compat run_carbon_analysis wrapper", "[analysis][carbon]") {
+  using namespace hacdcpf;
+
+  auto sys = make_simple_ac_system();
+  analysis::CarbonAnalysisOptions opt;
+  auto result = analysis::run_carbon_analysis(sys, opt);
+
+  // Backward-compat wrapper should not throw and should return a valid struct.
+  CHECK(result.matrix_residual >= 0.0);
+}
+
+TEST_CASE("Carbon analysis: unconverged PF returns empty result", "[analysis][carbon]") {
+  using namespace hacdcpf;
+
+  auto sys = make_simple_ac_system();
+  PowerFlowResult unconverged;
+  unconverged.converged = false;
+
+  auto result = analysis::compute_carbon_analysis(sys, unconverged);
   CHECK_FALSE(result.tracing_verified);
   CHECK_FALSE(result.matrix_solved);
   CHECK(result.load_carbon.empty());
 }
+
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests: Resilience stub

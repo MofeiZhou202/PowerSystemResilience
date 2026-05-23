@@ -1,11 +1,55 @@
 #pragma once
-#include <map>
+
+// Carbon Flow Analysis — Proportional Power Tracing + Matrix-based Carbon Intensity
+// Ported from luosipeng/HybridACDCPowerSystemsPlanning (luosipeng branch).
+//
+// Two methods:
+//   1. Proportional Tracing (BFS-based): traces each generator's contribution
+//      to every load and branch loss proportionally to power flow directions.
+//   2. Matrix-based: builds a linear system A·w = b where w is the carbon
+//      intensity vector at each bus, solved via sparse LU.
+//
+// Both methods require a converged PowerFlowResult plus the HybridPowerSystem
+// (generator emission factors, load locations, and hybrid topology).
+
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"
 
 namespace hacdcpf::analysis {
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+struct CarbonAnalysisOptions {
+  /// Minimum power contribution to track (MW).
+  double min_contribution_mw{1e-6};
+
+  /// Relative tolerance for allocation verification (load / loss balance).
+  double verification_tol{1e-4};
+
+  /// Maximum BFS tracing depth (0 = unlimited).
+  int max_tracing_depth{0};
+
+  /// Fraction of branch loss "charged" to the outgoing (to-bus) side for the
+  /// matrix method.  0.5 = equal split, 0.0 = all on from-side.
+  double loss_allocation_alpha{0.5};
+
+  /// Regularisation for near-singular system matrix (matrix method).
+  double regularization_eps{1e-8};
+
+  /// Print progress to stdout.
+  bool verbose{false};
+};
+
+// ---------------------------------------------------------------------------
+// Results
+// ---------------------------------------------------------------------------
 
 struct EmissionsSummary {
   double total_generation_emissions_tco2{0.0};
@@ -21,7 +65,8 @@ struct LoadCarbonResult {
   double demand_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> generator_supply_mw;
+  /// Generator index → MW supplied to this load.
+  std::unordered_map<int, double> generator_supply_mw;
 };
 
 struct BranchCarbonResult {
@@ -31,7 +76,8 @@ struct BranchCarbonResult {
   double loss_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> generator_loss_mw;
+  /// Generator index → MW loss attributable to this generator.
+  std::unordered_map<int, double> generator_loss_mw;
 };
 
 struct BusCarbonResult {
@@ -49,7 +95,7 @@ struct VSCCarbonResult {
   double loss_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> generator_loss_mw;
+  std::unordered_map<int, double> generator_loss_mw;
 };
 
 struct DCDCCarbonResult {
@@ -62,20 +108,20 @@ struct DCDCCarbonResult {
   double loss_mw{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> generator_loss_mw;
+  std::unordered_map<int, double> generator_loss_mw;
 };
 
 struct StorageCarbonResult {
   int storage_index{0};
   int bus{0};
   bool is_dc{false};
-  double p_mw{0.0};
+  double p_mw{0.0};                           ///< signed; positive = discharge
   double soc{0.0};
   double stored_energy_mwh{0.0};
   double soc_carbon_intensity_tco2_mwh{0.0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> source_supply_mw;
+  std::unordered_map<int, double> source_supply_mw;
 };
 
 struct EnergyRouterCarbonResult {
@@ -87,39 +133,67 @@ struct EnergyRouterCarbonResult {
   int active_output_ports{0};
   double carbon_intensity_tco2_mwh{0.0};
   double total_emissions_tco2{0.0};
-  std::map<int, double> source_loss_mw;
+  std::unordered_map<int, double> source_loss_mw;
 };
 
 struct CarbonAnalysisResult {
+  /// Per-load results (AC loads), indexed same order as ACSystem::loads.
+  std::vector<LoadCarbonResult>         load_carbon;
+  /// Per-load results for DC loads.
+  std::vector<LoadCarbonResult>         dc_load_carbon;
+  /// Per-branch loss results for AC branches.
+  std::vector<BranchCarbonResult>       branch_carbon;
+  /// Per-branch loss results for DC branches.
+  std::vector<BranchCarbonResult>       dc_branch_carbon;
+  /// Per-bus intensity from matrix method (AC buses).
+  std::vector<BusCarbonResult>          bus_carbon;
+  /// Per-bus intensity from matrix method (DC buses).
+  std::vector<BusCarbonResult>          dc_bus_carbon;
+  /// Per-VSC converter loss results.
+  std::vector<VSCCarbonResult>          vsc_carbon;
+  /// Per-DC/DC converter loss results.
+  std::vector<DCDCCarbonResult>         dcdc_carbon;
+  /// Per-storage charge/discharge carbon.
+  std::vector<StorageCarbonResult>      storage_carbon;
+  /// Per-energy-router loss results.
+  std::vector<EnergyRouterCarbonResult> energy_router_carbon;
+
+  /// Source id → total MW allocated to network / converter losses.
+  std::unordered_map<int, double> generator_loss_allocation;
+
+  /// System-level summary from proportional tracing.
+  EmissionsSummary tracing_summary;
+  /// System-level summary from matrix method.
+  EmissionsSummary matrix_summary;
+
   bool tracing_verified{false};
   bool matrix_solved{false};
   double matrix_residual{0.0};
-
-  std::vector<LoadCarbonResult>         load_carbon;
-  std::vector<LoadCarbonResult>         dc_load_carbon;
-  std::vector<BranchCarbonResult>       branch_carbon;
-  std::vector<BranchCarbonResult>       dc_branch_carbon;
-  std::vector<BusCarbonResult>          bus_carbon;
-  std::vector<BusCarbonResult>          dc_bus_carbon;
-  std::vector<VSCCarbonResult>          vsc_carbon;
-  std::vector<DCDCCarbonResult>         dcdc_carbon;
-  std::vector<StorageCarbonResult>      storage_carbon;
-  std::vector<EnergyRouterCarbonResult> energy_router_carbon;
-
-  std::map<int, double> generator_loss_allocation;
-
-  EmissionsSummary tracing_summary;
-  EmissionsSummary matrix_summary;
 };
 
-struct CarbonAnalysisOptions {
-  bool enable_tracing{true};
-  bool enable_matrix{true};
-  double base_mva{100.0};
-};
+// ---------------------------------------------------------------------------
+// Primary interface
+// ---------------------------------------------------------------------------
 
-CarbonAnalysisResult run_carbon_analysis(
+/// Run carbon flow analysis using both proportional tracing and the matrix
+/// method.  Requires a converged PowerFlowResult with branch flows.
+CarbonAnalysisResult compute_carbon_analysis(
     const HybridPowerSystem& sys,
+    const PowerFlowResult& pf_result,
     const CarbonAnalysisOptions& opt = {});
+
+/// Convenience overload: run power flow first, then carbon analysis.
+CarbonAnalysisResult compute_carbon_analysis(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions& pf_opt = {},
+    const CarbonAnalysisOptions& ca_opt = {});
+
+/// Backward-compatible wrapper: runs power flow with default options then
+/// calls compute_carbon_analysis.  Prefer compute_carbon_analysis() for new code.
+inline CarbonAnalysisResult run_carbon_analysis(
+    const HybridPowerSystem& sys,
+    const CarbonAnalysisOptions& opt = {}) {
+  return compute_carbon_analysis(sys, PowerFlowOptions{}, opt);
+}
 
 }  // namespace hacdcpf::analysis

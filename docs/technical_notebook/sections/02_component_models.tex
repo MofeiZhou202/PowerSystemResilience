@@ -232,6 +232,131 @@ Struct & Field-level explanation & Current treatment \\
 \bottomrule
 \end{longtable}
 
+% ------------------------------------------------------------
+\subsection{EnergyRouter Multi-Port Model}
+\label{sec:er-multiport}
+% ------------------------------------------------------------
+
+An \texttt{EnergyRouter} is a power-electronic converter hub that simultaneously
+connects to an arbitrary number of AC and DC buses.  Each physical terminal is
+represented by one \texttt{EnergyRouterPort} entry in the router's
+\texttt{ports} vector.
+
+\subsubsection*{Port attributes}
+
+\begin{longtable}{L{0.22\linewidth}L{0.20\linewidth}L{0.50\linewidth}}
+\toprule
+Field & Type / default & Description \\
+\midrule
+\endhead
+\texttt{port\_type} & \texttt{ERPortType::AC} & \texttt{AC} or \texttt{DC}: determines which bus network this port injects into \\
+\texttt{side} & \texttt{int\{0\}} & Physical winding side: 0 = Side A, 1 = Side B (used by SST/UPFC topologies) \\
+\texttt{bus} & \texttt{int\{0\}} & Index of the connected AC or DC bus \\
+\texttt{p\_mw}, \texttt{q\_mvar} & \texttt{double\{0\}} & Bus-injection sign convention: positive = power into bus \\
+\texttt{eta} & \texttt{double\{0.98\}} & Per-port conversion efficiency for loss allocation \\
+\texttt{control\_mode} & \texttt{ERControlMode::PQ} & Per-port control law: \texttt{PQ} (fixed setpoint), \texttt{VQ} (voltage-droop reactive), or \texttt{Slack} (voltage-forming) \\
+\texttt{p\_set\_mw}, \texttt{q\_set\_mvar} & \texttt{double\{0\}} & Active/reactive setpoints when \texttt{control\_mode = PQ} \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{Multi-port power balance}
+
+Let port~$k$ carry active injection $P_k$ (positive = into bus) and efficiency
+$\eta_k$.  The lossless internal balance constraint is:
+\begin{equation}
+  \sum_{k=1}^{N_p} P_k \;=\; 0 \qquad \text{(lossless ER)}.
+  \label{eq:er-balance-lossless}
+\end{equation}
+When per-port efficiency $\eta_k < 1$, the actual balance allocates losses to
+each port proportionally:
+\begin{equation}
+  \sum_{k : P_k < 0} |P_k| \;=\; \sum_{k : P_k > 0} \frac{P_k}{\eta_k}
+  \qquad \text{(lossy ER, simplified allocation)}.
+  \label{eq:er-balance-lossy}
+\end{equation}
+In the current projection path, an \texttt{EnergyRouter} is expanded into a
+set of internal DC buses, VSC equivalents for each AC port, and DCDC converter
+equivalents for each DC port.  The internal bus forms the power-exchange node;
+\eqref{eq:er-balance-lossless} is enforced implicitly by the solver topology.
+
+\subsubsection*{Router-level fields}
+
+\begin{longtable}{L{0.30\linewidth}L{0.20\linewidth}L{0.42\linewidth}}
+\toprule
+Field & Default & Description \\
+\midrule
+\endhead
+\texttt{router\_type} & \texttt{""} & Topology identifier, e.g.\ \texttt{"SST"} (solid-state transformer), \texttt{"UPFC"} (unified power-flow controller) \\
+\texttt{num\_ports} & 0 & Number of \texttt{EnergyRouterPort} entries in \texttt{ports} \\
+\texttt{control\_mode} & \texttt{""} & Router-level dispatch strategy: \texttt{"autonomous"} or \texttt{"centralized"} \\
+\texttt{power\_dispatch\_strategy} & \texttt{""} & Inter-port power allocation policy: \texttt{"priority"} or \texttt{"proportional"} \\
+\texttt{p\_rated\_mw} & 0 & Rated through-power capacity of the device \\
+\texttt{loss\_percent} & 0 & Device-level loss as a percentage of rated power \\
+\bottomrule
+\end{longtable}
+
+% ------------------------------------------------------------
+\subsection{VirtualPowerPlant Fleet Aggregation Model}
+\label{sec:vpp-model}
+% ------------------------------------------------------------
+
+A \texttt{VirtualPowerPlant} (VPP) represents a portfolio of distributed
+energy resources (DERs) co-dispatched as a single grid entity.  The struct
+carries both static fleet composition data and dynamic dispatch outputs.
+
+\subsubsection*{Fleet composition}
+
+\begin{longtable}{L{0.30\linewidth}L{0.15\linewidth}L{0.47\linewidth}}
+\toprule
+Field & Default & Meaning \\
+\midrule
+\endhead
+\texttt{n\_pv\_systems} & 0 & Number of rooftop/ground-mounted PV units in portfolio \\
+\texttt{n\_wind\_turbines} & 0 & Number of wind turbines \\
+\texttt{n\_battery\_systems} & 0 & Number of battery storage units \\
+\texttt{n\_ev\_chargers} & 0 & Number of V2G-capable EV chargers \\
+\texttt{n\_controllable\_loads} & 0 & Demand-response resources \\
+\texttt{n\_chp} & 0 & Combined heat-and-power units \\
+\texttt{n\_biomass}, \texttt{n\_thermal\_storage}, \texttt{n\_hvac}, \texttt{n\_industrial} & 0 & Other flexible DER categories \\
+\texttt{p\_pv\_sum\_mw}, \texttt{p\_wind\_sum\_mw} & 0 & Aggregated renewable capacity \\
+\texttt{e\_storage\_sum\_mwh} & 0 & Total usable storage energy \\
+\bottomrule
+\end{longtable}
+
+\subsubsection*{Aggregation dispatch model}
+
+Let $P_i^{\mathrm{DER}}$ be the net active output of DER unit~$i$ (positive =
+generation, negative = consumption).  The VPP aggregates to:
+\begin{equation}
+  P^{\mathrm{VPP}} \;=\; \sum_{i \in \mathcal{F}} P_i^{\mathrm{DER}}
+  \;=\; P^{\mathrm{gen}} - P^{\mathrm{flex,abs}},
+  \label{eq:vpp-agg}
+\end{equation}
+where $P^{\mathrm{gen}}$ is the total scheduled generation and
+$P^{\mathrm{flex,abs}}$ is the absorbed flexible load.
+The field \texttt{p\_output\_mw} stores this aggregated value;
+\texttt{q\_output\_mvar} carries the corresponding reactive output.
+
+Regulation capability is bounded by:
+\begin{equation}
+  -P^{\mathrm{reg,down}} \;\le\; \Delta P \;\le\; P^{\mathrm{reg,up}},
+  \label{eq:vpp-reg}
+\end{equation}
+stored in \texttt{p\_regulation\_down\_mw} and \texttt{p\_regulation\_up\_mw}.
+
+\subsubsection*{Projection to grid model}
+
+In the current solver path, a \texttt{VirtualPowerPlant} is projected to a
+single AC \texttt{StaticGenerator} at \texttt{aggregation\_bus} with:
+\[
+  p_{\mathrm{sg}} = \texttt{p\_output\_mw}, \quad
+  q_{\mathrm{sg}} = \texttt{q\_output\_mvar}.
+\]
+Ramp-rate fields (\texttt{ramp\_up\_max\_mw\_min},
+\texttt{ramp\_down\_max\_mw\_min}) and regulation bounds are available to
+time-series and OPF formulations but are not yet enforced by the snapshot PF
+solver.
+
 \subsection{Optional Three-Phase Models}
 
 \begin{longtable}{L{0.20\linewidth}L{0.53\linewidth}L{0.19\linewidth}}

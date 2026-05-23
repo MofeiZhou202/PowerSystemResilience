@@ -275,44 +275,31 @@ Field & Default & Description \\
 \label{sec:pf-options-table}
 % ------------------------------------------------------------
 
+The complete field-by-field reference for \texttt{PowerFlowOptions} and its
+seven orthogonal sub-structs (\texttt{ConvergenceOptions},
+\texttt{LinearSolverOptions}, \texttt{GlobalizationOptions},
+\texttt{PVPQSwitchingOptions}, \texttt{ConverterModeOptions},
+\texttt{ZipLoadOptions}, \texttt{RuntimeOptions}) is in
+Section~\ref{sec:pf-options-sub}.  Table~\ref{tab:pf-options-flat} below
+lists only the fields that are directly relevant to the advanced solver paths
+described in this chapter.
+
 \begin{longtable}{L{0.38\linewidth}L{0.14\linewidth}L{0.37\linewidth}}
 \toprule
 Field & Default & Description \\
 \midrule
 \endhead
-\texttt{max\_iter} & 50 & Maximum Newton iterations. \\
-\texttt{tol} & 1e-8 & Convergence tolerance \(\varepsilon\) (p.u., \(\ell^\infty\)). \\
-\texttt{ac\_eval\_threads} & 1 & Threads for AC kernel; 0 = hardware auto-detect. \\
-\texttt{enable\_solver\_profiling} & false & Populate \texttt{PowerFlowResult::profiling} counters and timings. \\
-\texttt{max\_line\_search\_steps} & 10 & Max backtrack trials in standard monotone search. \\
-\texttt{max\_regularization\_steps} & 8 & Max Jacobian regularization attempts. \\
-\texttt{regularization\_lambda0} & 1e-6 & Initial regularization shift \(\lambda_{\mathrm{reg}}\). \\
-\texttt{regularization\_growth} & 10.0 & Growth factor applied to \(\lambda_{\mathrm{reg}}\) each retry. \\
-\texttt{max\_delta\_va\_rad} & 1.50 & Max step size clamp for \(\Delta\theta\) (rad). \\
-\texttt{max\_delta\_vm\_pu} & 0.50 & Max step size clamp for \(\Delta V\) (pu). \\
-\texttt{max\_delta\_vdc\_pu} & 0.50 & Max step size clamp for \(\Delta V^{dc}\) (pu). \\
-\texttt{pv\_q\_hysteresis\_pu} & 0.01 & Q-limit proximity band for PV$\to$PQ switching (pu). \\
-\texttt{pv\_recover\_vm\_tol\_pu} & 0.01 & Voltage recovery tolerance for PQ$\to$PV switching (pu). \\
-\texttt{converter\_vdc\_switch\_high\_pu} & 0.03 & DC voltage deviation threshold (high) for mode switching. \\
-\texttt{converter\_vdc\_switch\_low\_pu} & 0.01 & DC voltage deviation threshold (low) for mode switching. \\
-\texttt{mode\_hysteresis\_iters} & 2 & Minimum iterations between converter mode switches. \\
-\texttt{enable\_pv\_pq\_conversion} & true & Enable PV/PQ generator switching. \\
-\texttt{enable\_auto\_swing\_selection} & true & Auto-assign swing bus if none is specified. \\
-\texttt{enable\_converter\_mode\_switching} & true & Enable VSC control-mode switching during Newton. \\
-\texttt{verbose} & false & Print iteration diagnostics to stdout. \\
-\texttt{loss\_model} & Linear & VSC loss model; \texttt{Linear} or \texttt{CurrentDependent}. \\
-\texttt{zip\_pw[3]} & \{1,0,0\} & ZIP active-power weights [const-P, const-I, const-Z]. \\
-\texttt{zip\_qw[3]} & \{1,0,0\} & ZIP reactive-power weights [const-P, const-I, const-Z]. \\
-\texttt{fdpf\_max\_iter} & 1000 & Maximum FDPF P/Q sweep iterations. \\
-\texttt{enable\_coupled\_jacobian} & false & Include cross-coupling Jacobian blocks (\(\partial P^{vsc}/\partial V^{dc}\) etc.). \\
-\texttt{enable\_augmented\_equations} & false & Use augmented-equation path for VDC/VAC bus setpoints. \\
-\texttt{enable\_semi\_smooth\_newton} & false & Use NCP-based PV/PQ switching. \\
-\texttt{globalization} & LineSearch & \texttt{LineSearch}, \texttt{TrustRegion}, or \texttt{PseudoTransient}. \\
+\texttt{ac\_eval\_threads} & 0 & Threads for AC Jacobian evaluation; 0 = hardware auto-detect (\texttt{std::thread::hardware\_concurrency()}). \\
+\texttt{globalization} & \texttt{LineSearch} & \texttt{LineSearch}, \texttt{TrustRegion}, or \texttt{PseudoTransient}. \\
 \texttt{trust\_region\_radius0} & 1.0 & Initial trust-region radius (used when \texttt{TrustRegion} is selected). \\
 \texttt{trust\_region\_max} & 10.0 & Maximum trust-region radius. \\
 \texttt{ptc\_delta0} & 1.0 & Initial PTC pseudo-timestep. \\
 \texttt{ptc\_growth} & 2.0 & PTC pseudo-timestep growth factor. \\
-\texttt{initial\_state} & empty & Optional warm-start \texttt{InitialState} (\texttt{vm}, \texttt{va}, \texttt{vdc}). \\
-\texttt{robust\_nonlinear} & (defaults above) & \texttt{RobustNonlinearOptions} sub-struct. \\
+\texttt{enable\_semi\_smooth\_newton} & false & Use NCP-based PV/PQ switching (Fischer-Burmeister). \\
+\texttt{enable\_coupled\_jacobian} & false & Include cross-coupling Jacobian blocks. \\
+\texttt{enable\_augmented\_equations} & false & Use augmented-equation path for VDC/VAC bus setpoints. \\
+\texttt{enable\_krylov\_fallback} & false & Replace SparseLU with Newton--GMRES + Schur-complement preconditioner. \\
+\texttt{enable\_homotopy\_fallback} & configurable & Trigger \texttt{HomotopyContinuationSolver} when Phase~3 fails. \\
 \bottomrule
 \end{longtable}
+\label{tab:pf-options-flat}

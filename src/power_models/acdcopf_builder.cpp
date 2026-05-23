@@ -13,10 +13,10 @@
 /// The AC OPF core (branches, balance, thermal) is unchanged.
 
 #include "hacdcpf/power_models/hybrid_opf_model_builder.hpp"
+#include "hacdcpf/power_models/branch_admittance.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <complex>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -28,41 +28,9 @@ using namespace hacdcpf::aml;
 
 namespace {
 static constexpr double kDegToRad = M_PI / 180.0;
-static constexpr double kMinImpedance = 1e-8;
-static constexpr double kHuge = 1e6;
-static constexpr double kPi   = M_PI;
-static constexpr double kEpsIac = 1e-6;   // numerical regularisation inside sqrt
-
-/// Re-used from acopf_builder (duplicated here to stay self-contained).
-struct BranchAdmittance {
-  double Gff, Bff, Gft, Bft, Gtt, Btt, Gtf, Btf;
-};
-
-static BranchAdmittance branch_admittance(double r, double x, double bc,
-                                           double tap, double shift_rad) {
-  BranchAdmittance Y{};
-  const double z2 = r * r + x * x;
-  if (z2 < kMinImpedance * kMinImpedance) return Y;
-  const double gs = r / z2;
-  const double bs = -x / z2;
-  const double tap2 = tap * tap;
-  const std::complex<double> ys(gs, bs);
-  const std::complex<double> e_phi(std::cos(shift_rad), std::sin(shift_rad));
-  // From-side shunt: ys/τ²  (with tap and phase shift)
-  Y.Gff =  std::real(ys) / tap2 + 0.0;
-  Y.Bff = -std::imag(ys) / tap2 + bc * 0.5 / tap2;   // NOTE: bc already halved per bus
-  // Cross terms
-  const std::complex<double> yft = -ys / (tap * std::conj(e_phi));
-  Y.Gft =  std::real(yft);
-  Y.Bft = -std::imag(yft);
-  const std::complex<double> ytf = -ys / (tap * e_phi);
-  Y.Gtf =  std::real(ytf);
-  Y.Btf = -std::imag(ytf);
-  // To-side shunt: ys
-  Y.Gtt =  std::real(ys);
-  Y.Btt = -std::imag(ys) + bc * 0.5;
-  return Y;
-}
+static constexpr double kHuge     = 1e6;
+static constexpr double kPi       = M_PI;
+static constexpr double kEpsIac   = 1e-6;   // numerical regularisation inside sqrt
 }  // namespace
 
 // ════════════════════════════════════════════════════════════════════════════

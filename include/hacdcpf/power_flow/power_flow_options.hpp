@@ -87,7 +87,7 @@ struct ZipLoadOptions {
 };
 
 struct RuntimeOptions {
-  int  ac_eval_threads{1};
+  int  ac_eval_threads{0};
   bool enable_solver_profiling{false};
   bool enable_iteration_log{false};
   bool verbose{false};
@@ -100,7 +100,7 @@ struct PowerFlowOptions {
   int max_iter{Defaults::kPFMaxIter};
   double tol{Defaults::kPFTol};
 
-  int ac_eval_threads{1};
+  int ac_eval_threads{0};
 
   bool enable_solver_profiling{false};
   bool enable_iteration_log{false};

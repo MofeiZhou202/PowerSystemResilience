@@ -265,7 +265,7 @@ beyond the C++ standard library.
 \hline
 \texttt{code} & \texttt{ErrorCode} & Machine-readable error code \\
 \texttt{message} & \texttt{std::string} & Human-readable description \\
-\texttt{details} & \texttt{vector<ValidationIssue}>} & Attached validation issues (optional) \\
+\texttt{details} & \texttt{vector<ValidationIssue>} & Attached validation issues (optional) \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -279,7 +279,7 @@ Three factory methods simplify common cases:
 
 \subsubsection{\texttt{Result<T>} Monad}
 
-\texttt{Result<T}>} is a \texttt{std::variant<T,Error}>}
+\texttt{Result<T>} is a \texttt{std::variant<T,Error>}
 wrapper that carries either a success value or an error:
 
 \begin{center}

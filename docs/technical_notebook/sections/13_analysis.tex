@@ -13,7 +13,7 @@ analytical algorithms now lives in its own peer directory rather than a shared
 \hline\hline
 \textbf{Module directory} & \textbf{Contents} \\
 \hline
-\texttt{include/hacdcpf/carbon\_analysis} / \texttt{src/carbon\_analysis} & Carbon emissions analysis (\texttt{run\_carbon\_analysis}) \\
+\texttt{include/hacdcpf/carbon\_analysis} / \texttt{src/carbon\_analysis} & Carbon emissions analysis (\texttt{compute\_carbon\_analysis}) \\
 \texttt{include/hacdcpf/time\_series} / \texttt{src/time\_series} & UC/OPF/PF multi-period pipeline, annual production simulation, lifecycle simulation \\
 \texttt{include/hacdcpf/reliability} / \texttt{src/reliability} & Monte Carlo reliability assessment \\
 \texttt{include/hacdcpf/resilience} / \texttt{src/resilience} & Distribution resilience assessment \\
@@ -34,7 +34,25 @@ through \texttt{include/hacdcpf/api/hacdcpf.hpp}.
 Declared in \texttt{carbon\_analysis/carbon\_analysis.hpp},
 implemented in \texttt{src/carbon\_analysis/carbon\_analysis.cpp}.
 
-\texttt{run\_carbon\_analysis(sys, opt)} performs power-flow-based emissions
+The primary entry point is \texttt{compute\_carbon\_analysis}, which has two
+overloads:
+\begin{verbatim}
+// Overload 1: supply an already-computed power-flow result.
+CarbonAnalysisResult compute_carbon_analysis(
+    const HybridPowerSystem& sys,
+    const PowerFlowResult&   pf_result,
+    const CarbonAnalysisOptions& opt = {});
+
+// Overload 2: run power flow internally, then analyse.
+CarbonAnalysisResult compute_carbon_analysis(
+    const HybridPowerSystem& sys,
+    const PowerFlowOptions&  pf_opt  = {},
+    const CarbonAnalysisOptions& ca_opt = {});
+\end{verbatim}
+A backward-compatible inline wrapper \texttt{run\_carbon\_analysis(sys, opt)}
+calls overload~2 with default \texttt{PowerFlowOptions}.
+
+\texttt{compute\_carbon\_analysis} performs power-flow-based emissions
 attribution via two independent methods:
 \begin{enumerate}
   \item \textbf{Proportional tracing} --- Kirchhoff-based upstream tracing that
@@ -90,9 +108,12 @@ The residual $\|\mathbf{A}\mathbf{c} - \mathbf{q}\|_\infty$ is stored in
 \hline\hline
 \textbf{Field (CarbonAnalysisOptions)} & \textbf{Default} & \textbf{Description} \\
 \hline
-\texttt{enable\_tracing} & true & Run proportional tracing method \\
-\texttt{enable\_matrix} & true & Run nodal matrix method \\
-\texttt{base\_mva} & 100.0 & System base MVA \\
+\texttt{min\_contribution\_mw} & \texttt{1e-6} & Minimum generator contribution to track (MW) \\
+\texttt{verification\_tol} & \texttt{1e-4} & Relative balance tolerance for tracing verification \\
+\texttt{max\_tracing\_depth} & 0 & BFS depth limit (0~=~unlimited) \\
+\texttt{loss\_allocation\_alpha} & 0.5 & Loss split: $\alpha$ at sending end, $(1-\alpha)$ at receiving end \\
+\texttt{regularization\_eps} & \texttt{1e-8} & Diagonal regulariser for near-zero pivot buses \\
+\texttt{verbose} & false & Emit debug-level logging during analysis \\
 \hline\hline
 \end{tabular}
 \end{center}
