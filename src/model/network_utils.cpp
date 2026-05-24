@@ -317,17 +317,17 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // VirtualPowerPlant 鈫?canonical StaticGenerator
 //
-// The VPP aggregation_bus receives the net injection from the fleet.
+// The VPP pcc_bus receives the net injection from the fleet.
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void add_equivalent_static_gen_from_vpp(const VirtualPowerPlant& vpp,
                                         ACSystem& ac,
                                         int& next_idx) {
   if (!vpp.in_service) return;
-  if (vpp.aggregation_bus == 0) return;
+  if (vpp.pcc_bus == 0) return;
 
   StaticGenerator sg;
   sg.index      = next_idx++;
-  sg.bus        = vpp.aggregation_bus;
+  sg.bus        = vpp.pcc_bus;
   sg.in_service = true;
   sg.name       = vpp.name.empty() ? ("VPP_" + std::to_string(vpp.index)) : (vpp.name + "_eq");
   sg.sgen_type  = SgenType::Other;
@@ -357,12 +357,12 @@ void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
                                               ACSystem& ac,
                                               int& next_idx) {
   if (!mg.in_service) return;
-  if (mg.aggregation_bus == 0) return;
+  if (mg.pcc_bus == 0) return;
   if (mg.operating_mode == MicrogridMode::Islanded) return;
 
   StaticGenerator sg;
   sg.index      = next_idx++;
-  sg.bus        = mg.aggregation_bus;
+  sg.bus        = mg.pcc_bus;
   sg.in_service = true;
   sg.name       = mg.name.empty() ? ("Microgrid_" + std::to_string(mg.index)) : (mg.name + "_eq");
   sg.sgen_type  = SgenType::Other;
@@ -1476,9 +1476,9 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
   }
 
   // Aggregation: VPPs, Microgrids
-  for (auto& vpp : sys.vpps) vpp.aggregation_bus = remap_ac(vpp.aggregation_bus);
+  for (auto& vpp : sys.vpps) vpp.pcc_bus = remap_ac(vpp.pcc_bus);
   for (auto& mg : sys.microgrids) {
-    mg.aggregation_bus = remap_ac(mg.aggregation_bus);
+    mg.pcc_bus = remap_ac(mg.pcc_bus);
     for (auto& ib : mg.internal_buses) ib = remap_ac(ib);
   }
 

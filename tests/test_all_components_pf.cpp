@@ -373,7 +373,7 @@ static HybridPowerSystem build_all29_system() {
   {
     VirtualPowerPlant vpp;
     vpp.index           = 1;
-    vpp.aggregation_bus = 4;
+    vpp.pcc_bus = 4;
     vpp.in_service      = true;
     vpp.p_output_mw     = 2.5;
     vpp.q_output_mvar   = 0.4;
@@ -386,7 +386,7 @@ static HybridPowerSystem build_all29_system() {
   {
     Microgrid mg;
     mg.index          = 1;
-    mg.aggregation_bus        = 4;
+    mg.pcc_bus        = 4;
     mg.in_service     = true;
     mg.operating_mode = MicrogridMode::GridConnected;
     mg.p_exchange_mw  = 1.5;   // positive = export to main grid

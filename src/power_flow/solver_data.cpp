@@ -65,7 +65,7 @@ void aggregate_generation(SolverData& data) {
   // Virtual Power Plants (aggregated DER output at aggregation bus).
   for (const auto& vpp : data.vpps) {
     if (!vpp.in_service) continue;
-    const int idx = vpp.aggregation_bus - 1;
+    const int idx = vpp.pcc_bus - 1;
     if (idx < 0 || idx >= nac) continue;
     data.pg[idx] += vpp.p_output_mw / data.base_mva;
     data.qg[idx] += vpp.q_output_mvar / data.base_mva;
@@ -76,7 +76,7 @@ void aggregate_generation(SolverData& data) {
   for (const auto& mg : data.microgrids) {
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
-    const int idx = mg.aggregation_bus - 1;
+    const int idx = mg.pcc_bus - 1;
     if (idx < 0 || idx >= nac) continue;
     data.pg[idx] += mg.p_exchange_mw / data.base_mva;
   }

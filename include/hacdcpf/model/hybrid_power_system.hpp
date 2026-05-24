@@ -25,7 +25,7 @@ struct VirtualPowerPlant {
   int index{0};
   std::string name;
   std::string description;
-  int aggregation_bus{0};
+  int pcc_bus{0};
   bool in_service{true};
 
   int n_pv_systems{0};
@@ -69,7 +69,7 @@ struct Microgrid {
   std::string description;
   bool in_service{true};
 
-  int aggregation_bus{0};
+  int pcc_bus{0};
   std::vector<int> internal_buses;
 
   MicrogridMode operating_mode{MicrogridMode::GridConnected};

@@ -1920,7 +1920,7 @@ static json vpp_to_json(const VirtualPowerPlant& v) {
   j["index"] = v.index;
   j["name"] = v.name;
   j["description"] = v.description;
-  j["pcc_bus"] = v.aggregation_bus;
+  j["pcc_bus"] = v.pcc_bus;
   j["in_service"] = v.in_service;
   j["n_pv_systems"] = v.n_pv_systems;
   j["n_wind_turbines"] = v.n_wind_turbines;
@@ -1946,7 +1946,7 @@ static VirtualPowerPlant vpp_from_json(const json& j) {
   v.index = j.at("index").get<int>();
   v.name = jget<std::string>(j, "name", "");
   v.description = jget<std::string>(j, "description", "");
-  v.aggregation_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
+  v.pcc_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
   v.in_service = jget(j, "in_service", true);
   v.n_pv_systems = jget(j, "n_pv_systems", 0);
   v.n_wind_turbines = jget(j, "n_wind_turbines", 0);
@@ -1973,7 +1973,7 @@ static json microgrid_to_json(const Microgrid& m) {
   j["name"] = m.name;
   j["description"] = m.description;
   j["in_service"] = m.in_service;
-  j["pcc_bus"] = m.aggregation_bus;
+  j["pcc_bus"] = m.pcc_bus;
   j["internal_buses"] = m.internal_buses;
   j["operating_mode"] = microgrid_mode_str(m.operating_mode);
   j["islanding_capability"] = m.islanding_capability;
@@ -2003,7 +2003,7 @@ static Microgrid microgrid_from_json(const json& j) {
   m.name = jget<std::string>(j, "name", "");
   m.description = jget<std::string>(j, "description", "");
   m.in_service = jget(j, "in_service", true);
-  m.aggregation_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
+  m.pcc_bus = jget_alias(j, "pcc_bus", "aggregation_bus", 0);
   if (j.contains("internal_buses")) m.internal_buses = j["internal_buses"].get<std::vector<int>>();
   m.operating_mode = microgrid_mode_from_str(jget<std::string>(j, "operating_mode", "GridConnected"));
   m.islanding_capability = jget(j, "islanding_capability", false);

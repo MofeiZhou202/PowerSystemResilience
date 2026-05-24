@@ -528,7 +528,7 @@ static HybridPowerSystem make_multi_vpp_system() {
   {
     VirtualPowerPlant vpp;
     vpp.index           = 1;
-    vpp.aggregation_bus = 2;
+    vpp.pcc_bus = 2;
     vpp.in_service      = true;
     vpp.n_wind_turbines = 4;
     vpp.n_pv_systems    = 6;
@@ -544,7 +544,7 @@ static HybridPowerSystem make_multi_vpp_system() {
   {
     VirtualPowerPlant vpp;
     vpp.index           = 2;
-    vpp.aggregation_bus = 3;
+    vpp.pcc_bus = 3;
     vpp.in_service      = true;
     vpp.n_ev_chargers   = 20;
     vpp.n_controllable_loads = 5;
@@ -560,7 +560,7 @@ static HybridPowerSystem make_multi_vpp_system() {
   {
     VirtualPowerPlant vpp;
     vpp.index              = 3;
-    vpp.aggregation_bus    = 4;
+    vpp.pcc_bus    = 4;
     vpp.in_service         = true;
     vpp.n_battery_systems  = 3;
     vpp.p_output_mw        = +1.5;

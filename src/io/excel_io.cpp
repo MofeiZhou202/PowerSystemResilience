@@ -155,7 +155,7 @@ std::vector<ACBus> buses_with_aggregated_ac_loads(const HybridPowerSystem& sys) 
   // Aggregation-level flexible demand terms.
   for (const auto& vpp : sys.vpps) {
     if (!vpp.in_service) continue;
-    auto& acc = by_bus[vpp.aggregation_bus];
+    auto& acc = by_bus[vpp.pcc_bus];
     if (vpp.p_load_controllable_mw > 0.0) acc.first += vpp.p_load_controllable_mw;
     if (vpp.p_output_mw < 0.0) acc.first += -vpp.p_output_mw;
     if (vpp.q_output_mvar < 0.0) acc.second += -vpp.q_output_mvar;
@@ -165,7 +165,7 @@ std::vector<ACBus> buses_with_aggregated_ac_loads(const HybridPowerSystem& sys) 
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
     if (mg.p_exchange_mw < 0.0) {
-      by_bus[mg.aggregation_bus].first += -mg.p_exchange_mw;
+      by_bus[mg.pcc_bus].first += -mg.p_exchange_mw;
     }
   }
 
@@ -239,15 +239,15 @@ std::vector<Load> make_aggregated_ac_load_table(const HybridPowerSystem& sys) {
 
   for (const auto& vpp : sys.vpps) {
     if (!vpp.in_service) continue;
-    add(vpp.aggregation_bus, "VPPControllableLoad", std::max(0.0, vpp.p_load_controllable_mw), 0.0);
-    add(vpp.aggregation_bus, "VPPNetImport", (vpp.p_output_mw < 0.0) ? -vpp.p_output_mw : 0.0,
+    add(vpp.pcc_bus, "VPPControllableLoad", std::max(0.0, vpp.p_load_controllable_mw), 0.0);
+    add(vpp.pcc_bus, "VPPNetImport", (vpp.p_output_mw < 0.0) ? -vpp.p_output_mw : 0.0,
         (vpp.q_output_mvar < 0.0) ? -vpp.q_output_mvar : 0.0);
   }
 
   for (const auto& mg : sys.microgrids) {
     if (!mg.in_service) continue;
     if (mg.operating_mode != MicrogridMode::GridConnected) continue;
-    add(mg.aggregation_bus, "MicrogridImport", (mg.p_exchange_mw < 0.0) ? -mg.p_exchange_mw : 0.0, 0.0);
+    add(mg.pcc_bus, "MicrogridImport", (mg.p_exchange_mw < 0.0) ? -mg.p_exchange_mw : 0.0, 0.0);
   }
 
   for (const auto& er : sys.energy_routers) {
@@ -2626,7 +2626,7 @@ void write_vpp(XLWorksheet ws, const std::vector<VirtualPowerPlant>& vpps) {
     const uint32_t r = static_cast<uint32_t>(i + 2);
     ws.cell(r, 1).value() = v.index;
     ws.cell(r, 2).value() = v.name;
-    ws.cell(r, 3).value() = v.aggregation_bus;
+    ws.cell(r, 3).value() = v.pcc_bus;
     ws.cell(r, 4).value() = v.p_output_mw;
     ws.cell(r, 5).value() = v.q_output_mvar;
     ws.cell(r, 6).value() = v.pmax_mw;
@@ -2647,7 +2647,7 @@ std::vector<VirtualPowerPlant> read_vpp(const XLWorksheet& ws) {
     VirtualPowerPlant v;
     v.index = int_from_str(idx, v.index);
     v.name = cell_by_name(ws, r, col, "name");
-    v.aggregation_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), v.aggregation_bus);
+    v.pcc_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), v.pcc_bus);
     v.p_output_mw = dbl_from_str(cell_by_name(ws, r, col, "p_output_mw"), v.p_output_mw);
     v.q_output_mvar = dbl_from_str(cell_by_name(ws, r, col, "q_output_mvar"), v.q_output_mvar);
     v.pmax_mw = dbl_from_str(cell_by_name(ws, r, col, "pmax_mw"), v.pmax_mw);
@@ -2669,7 +2669,7 @@ void write_microgrids(XLWorksheet ws, const std::vector<Microgrid>& mgs) {
     const uint32_t r = static_cast<uint32_t>(i + 2);
     ws.cell(r, 1).value() = m.index;
     ws.cell(r, 2).value() = m.name;
-    ws.cell(r, 3).value() = m.aggregation_bus;
+    ws.cell(r, 3).value() = m.pcc_bus;
     ws.cell(r, 4).value() = microgrid_mode_str(m.operating_mode);
     ws.cell(r, 5).value() = bool_str(m.islanding_capability);
     ws.cell(r, 6).value() = m.p_exchange_mw;
@@ -2689,7 +2689,7 @@ std::vector<Microgrid> read_microgrids(const XLWorksheet& ws) {
     Microgrid m;
     m.index = int_from_str(idx, m.index);
     m.name = cell_by_name(ws, r, col, "name");
-    m.aggregation_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), m.aggregation_bus);
+    m.pcc_bus = int_from_str(cell_by_name(ws, r, col, "pcc_bus"), m.pcc_bus);
     m.operating_mode = microgrid_mode_from_str(cell_by_name(ws, r, col, "operating_mode"));
     m.islanding_capability = bool_from_str(cell_by_name(ws, r, col, "islanding_capability"), m.islanding_capability);
     m.p_exchange_mw = dbl_from_str(cell_by_name(ws, r, col, "p_exchange_mw"), m.p_exchange_mw);
@@ -3125,14 +3125,14 @@ void write_results(const HybridPowerSystem& sys,
       const uint32_t r = static_cast<uint32_t>(i + 2);
       ws.cell(r, 1).value() = vpp.index;
       ws.cell(r, 2).value() = vpp.name;
-      ws.cell(r, 3).value() = vpp.aggregation_bus;
+      ws.cell(r, 3).value() = vpp.pcc_bus;
       ws.cell(r, 4).value() = bool_str(vpp.in_service);
       ws.cell(r, 5).value() = vpp.p_output_mw;
       ws.cell(r, 6).value() = vpp.q_output_mvar;
       ws.cell(r, 7).value() = vpp.pmax_mw;
       ws.cell(r, 8).value() = vpp.pmin_mw;
-      ws.cell(r, 9).value() = ac_vm_by_index(vpp.aggregation_bus, 1.0);
-      ws.cell(r, 10).value() = ac_va_by_index(vpp.aggregation_bus, 0.0);
+      ws.cell(r, 9).value() = ac_vm_by_index(vpp.pcc_bus, 1.0);
+      ws.cell(r, 10).value() = ac_va_by_index(vpp.pcc_bus, 0.0);
     }
   }
 
@@ -3149,14 +3149,14 @@ void write_results(const HybridPowerSystem& sys,
       }
       ws.cell(r, 1).value() = mg.index;
       ws.cell(r, 2).value() = mg.name;
-      ws.cell(r, 3).value() = mg.aggregation_bus;
+      ws.cell(r, 3).value() = mg.pcc_bus;
       ws.cell(r, 4).value() = microgrid_mode_str(mg.operating_mode);
       ws.cell(r, 5).value() = bool_str(mg.in_service);
       ws.cell(r, 6).value() = mg.p_exchange_mw;
       ws.cell(r, 7).value() = mg.total_generation_mw;
       ws.cell(r, 8).value() = mg.total_load_mw;
-      ws.cell(r, 9).value() = ac_vm_by_index(mg.aggregation_bus, 1.0);
-      ws.cell(r, 10).value() = ac_va_by_index(mg.aggregation_bus, 0.0);
+      ws.cell(r, 9).value() = ac_vm_by_index(mg.pcc_bus, 1.0);
+      ws.cell(r, 10).value() = ac_va_by_index(mg.pcc_bus, 0.0);
       ws.cell(r, 11).value() = buses;
     }
   }
@@ -3418,8 +3418,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     for (size_t i = 0; i < sys.vpps.size(); ++i) {
       const auto& vpp = sys.vpps[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
-      ws.cell(r, c_vm).value() = ac_vm_by_index(vpp.aggregation_bus, 1.0);
-      ws.cell(r, c_va).value() = ac_va_by_index(vpp.aggregation_bus, 0.0);
+      ws.cell(r, c_vm).value() = ac_vm_by_index(vpp.pcc_bus, 1.0);
+      ws.cell(r, c_va).value() = ac_va_by_index(vpp.pcc_bus, 0.0);
     }
   }
 
@@ -3430,8 +3430,8 @@ void write_results_compact(const HybridPowerSystem& sys,
     for (size_t i = 0; i < sys.microgrids.size(); ++i) {
       const auto& mg = sys.microgrids[i];
       const uint32_t r = static_cast<uint32_t>(i + 2);
-      ws.cell(r, c_vm).value() = ac_vm_by_index(mg.aggregation_bus, 1.0);
-      ws.cell(r, c_va).value() = ac_va_by_index(mg.aggregation_bus, 0.0);
+      ws.cell(r, c_vm).value() = ac_vm_by_index(mg.pcc_bus, 1.0);
+      ws.cell(r, c_va).value() = ac_va_by_index(mg.pcc_bus, 0.0);
     }
   }
 

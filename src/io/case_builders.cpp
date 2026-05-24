@@ -599,7 +599,7 @@ void attach_case33mg_microgrids(HybridPowerSystem& sys) {
     mg.name = name;
     mg.description = description;
     mg.in_service = true;
-    mg.aggregation_bus = pcc_bus;
+    mg.pcc_bus = pcc_bus;
     mg.internal_buses = std::move(internal_buses);
     mg.operating_mode = MicrogridMode::GridConnected;
     mg.islanding_capability = true;
@@ -2463,7 +2463,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   mg1.name = "Industrial-Microgrid";
   mg1.description = "Industrial park with wind, PV, and BESS";
   mg1.in_service = true;
-  mg1.aggregation_bus = 6;
+  mg1.pcc_bus = 6;
   mg1.internal_buses = {6, 7, 8};
   mg1.operating_mode = MicrogridMode::GridConnected;
   mg1.islanding_capability = true;
@@ -2488,7 +2488,7 @@ HybridPowerSystem build_comprehensive_hybrid_acdc() {
   mg2.name = "Residential-Microgrid";
   mg2.description = "Community microgrid with solar and storage";
   mg2.in_service = true;
-  mg2.aggregation_bus = 18;
+  mg2.pcc_bus = 18;
   mg2.internal_buses = {18, 19, 20, 21};
   mg2.operating_mode = MicrogridMode::GridConnected;
   mg2.islanding_capability = true;

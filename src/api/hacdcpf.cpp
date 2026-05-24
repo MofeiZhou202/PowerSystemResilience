@@ -231,14 +231,14 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   // VPP / Microgrid / MobileStorage
   h = hash_combine(h, static_cast<std::uint64_t>(sys.vpps.size()));
   for (const auto& vpp : sys.vpps) {
-    h = hash_combine(h, static_cast<std::uint64_t>(vpp.aggregation_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(vpp.pcc_bus));
     h = hash_combine(h, hash_double(vpp.p_output_mw));
     h = hash_combine(h, hash_double(vpp.q_output_mvar));
     h = hash_combine(h, static_cast<std::uint64_t>(vpp.in_service));
   }
   h = hash_combine(h, static_cast<std::uint64_t>(sys.microgrids.size()));
   for (const auto& mg : sys.microgrids) {
-    h = hash_combine(h, static_cast<std::uint64_t>(mg.aggregation_bus));
+    h = hash_combine(h, static_cast<std::uint64_t>(mg.pcc_bus));
     h = hash_combine(h, hash_double(mg.p_exchange_mw));
     h = hash_combine(h, static_cast<std::uint64_t>(mg.operating_mode));
     h = hash_combine(h, static_cast<std::uint64_t>(mg.in_service));

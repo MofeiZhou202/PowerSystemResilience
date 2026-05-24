@@ -397,7 +397,7 @@ TEST_CASE("VirtualPowerPlant: aggregated DER at bus 3", "[rich_components][vpp]"
 
     VirtualPowerPlant vpp;
     vpp.index            = 1;
-    vpp.aggregation_bus  = 3;
+    vpp.pcc_bus  = 3;
     vpp.p_output_mw      = 12.0;
     vpp.q_output_mvar    = 4.0;
     vpp.pmax_mw          = 20.0;
@@ -407,7 +407,7 @@ TEST_CASE("VirtualPowerPlant: aggregated DER at bus 3", "[rich_components][vpp]"
 
     auto restored = from_json(to_json(sys));
     CHECK(restored.vpps.size() == 1);
-    CHECK(restored.vpps[0].aggregation_bus == 3);
+    CHECK(restored.vpps[0].pcc_bus == 3);
     CHECK_THAT(restored.vpps[0].p_output_mw, WithinAbs(12.0, 1e-9));
 }
 
