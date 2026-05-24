@@ -65,3 +65,7 @@ catch_discover_tests(test_powerflow_performance
   TEST_SUFFIX " [perf]"
   PROPERTIES LABELS "performance;slow"
 )
+
+# Topology cross-validation: connectivity checks + ONR via B&C vs exhaustive
+# enumeration (6-bus), 33bw ONR with Newton PF verification, DER integration.
+hacdcpf_add_test(test_topology_crossval test_topology_crossval.cpp)

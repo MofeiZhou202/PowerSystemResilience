@@ -47,8 +47,8 @@ The current notebook covers these implemented module families:
 Area & Current code status \\
 \midrule
 \endhead
-\texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/analysis/distribution\_power\_flow.cpp} returns a non-converged result with \texttt{status="not\_implemented"}. \\
-\texttt{run\_distribution\_resilience\_assessment} & Public facade exists, but \texttt{src/analysis/resilience\_assessment.cpp} returns \texttt{completed=false} and \texttt{status="not\_implemented"}. \\
+\texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/power\_flow/} returns a non-converged result with \texttt{status="not\_implemented"}. \\
+\texttt{run\_distribution\_resilience\_assessment} & Public facade exists, but \texttt{src/reliability/} returns \texttt{completed=false} and \texttt{status="not\_implemented"}. \\
 Reliability assessment & Headers define option/result types; no implemented public assessment solver is exposed by \texttt{hacdcpf.hpp}. \\
 Short-circuit analysis & No public \texttt{compute\_short\_circuit}, \texttt{SCOptions}, or \texttt{BusFaultResult} header exists in the current include tree. \\
 Optimal network reconfiguration & No public \texttt{solve\_optimal\_reconfiguration} header/API exists in the current include tree. \\

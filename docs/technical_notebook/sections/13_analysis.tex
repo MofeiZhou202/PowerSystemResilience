@@ -311,63 +311,299 @@ efficiency.  Falls back to \texttt{pv.p\_mw} when array parameters are absent.
 \label{sec:reliability}
 % ------------------------------------------------------------
 
-Declared in \texttt{reliability/reliability\_assessment.hpp},
-implemented in \texttt{src/reliability/reliability\_assessment.cpp}.  Performs
-Monte Carlo reliability simulation over a configurable time horizon.
+Declared in \texttt{include/hacdcpf/reliability/reliability\_assessment.hpp},
+implemented in \texttt{src/reliability/reliability\_assessment.cpp}.  Provides
+four complementary methods for bulk-power and distribution reliability
+assessment, all in namespace \texttt{hacdcpf::analysis}:
+
+\begin{itemize}
+  \item \textbf{Non-Sequential Monte Carlo} (\texttt{run\_nonsequential\_mc}) ---
+        State sampling via Bernoulli trials; each sample draws an independent
+        system state and evaluates load curtailment with DC-OPF.  Converges by
+        Coefficient of Variation (CoV).
+  \item \textbf{Sequential Monte Carlo} (\texttt{run\_sequential\_mc}) ---
+        Chronological simulation driven by an hourly load profile; advances an
+        event queue of exponential TTF/TTR variates to capture time correlations
+        and produce annual per-year statistics.
+  \item \textbf{Frequency \& Duration} (\texttt{run\_frequency\_duration\_analysis}) ---
+        Analytical COPT-based method; builds a Capacity Outage Probability Table
+        (COPT) by recursive convolution and computes LOLP/LOLE/LOLF without
+        sampling variance.
+  \item \textbf{Distribution FMEA} (\texttt{run\_distribution\_fmea}) ---
+        Deterministic $N-1$ failure-mode enumeration for distribution systems;
+        evaluates switching and repair stages via DC-OPF and aggregates
+        frequency-weighted reliability indices.
+\end{itemize}
+
+Two utility functions populate component-level reliability data:
+\texttt{apply\_ieee24\_reliability\_data(sys)} (IEEE RTS-24 generators and
+branches) and \texttt{apply\_comprehensive\_reliability\_data(sys)} (full
+hybrid AC/DC distribution topology including transformers, VSCs, DC branches,
+static generators, renewables, PV, and storage).
+
+\subsubsection{Options: \texttt{ReliabilityOptions}}
 
 \begin{center}
 \begin{tabular}{llll}
 \hline\hline
-\textbf{Field (Options)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\textbf{Field} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
 \hline
-\texttt{num\_simulations} & 10000 & --- & Monte Carlo sample count \\
-\texttt{time\_horizon\_years} & 1.0 & years & Simulation time horizon \\
-\texttt{random\_seed} & 42 & --- & RNG seed for reproducibility \\
+\texttt{max\_iterations} & 10000 & --- & NSQ: max samples; SEQ: max years \\
+\texttt{cov\_threshold} & 0.05 & --- & CoV convergence criterion \\
+\texttt{curtail\_threshold\_mw} & 0.01 & MW & Minimum curtailment to count \\
+\texttt{seed} & 0 & --- & RNG seed (0 = non-deterministic) \\
+\texttt{load\_scale\_factor} & 1.0 & --- & Global load scaling \\
+\texttt{hours\_per\_year} & 8736 & hr & Calendar (IEEE RTS uses 8736) \\
+\texttt{compute\_tail\_risk} & true & --- & Compute VaR/CVaR metrics \\
+\texttt{var\_confidence} & 0.95 & --- & Confidence level for VaR/CVaR \\
+\texttt{compute\_distribution\_indices} & false & --- & Compute SAIFI/SAIDI/ASAI \\
+\texttt{use\_importance\_sampling} & false & --- & Variance reduction (experimental) \\
+\texttt{verbose} & false & --- & Print diagnostic output \\
 \hline\hline
 \end{tabular}
 \end{center}
+
+\subsubsection{Results: \texttt{ReliabilityResult}}
 
 \begin{center}
 \begin{tabular}{lll}
 \hline\hline
-\textbf{Metric (Result)} & \textbf{Acronym} & \textbf{Description} \\
+\textbf{Field} & \textbf{Units} & \textbf{Description} \\
 \hline
-\texttt{lolp} & LOLP & Loss of Load Probability \\
-\texttt{eens\_mwh} & EENS & Expected Energy Not Supplied (MWh/year) \\
-\texttt{saidi\_hr} & SAIDI & System Average Interruption Duration Index (hr/cust/year) \\
-\texttt{saifi} & SAIFI & System Average Interruption Frequency Index (interr/cust/year) \\
+\texttt{converged} & --- & Whether CoV criterion was satisfied \\
+\texttt{iterations\_used} & --- & Samples (NSQ) or years (SEQ) used \\
+\texttt{final\_cov} & --- & Final Coefficient of Variation \\
+\texttt{eens\_mwh\_yr} & MWh/yr & Expected Energy Not Supplied \\
+\texttt{edns\_mw} & MW & Expected Demand Not Supplied \\
+\texttt{lole\_hr\_yr} & hr/yr & Loss of Load Expectation \\
+\texttt{lolf\_occ\_yr} & occ/yr & Loss of Load Frequency (SEQ only) \\
+\texttt{plc} & --- & Probability of Load Curtailment \\
+\texttt{nodal\_eens\_mwh\_yr} & MWh/yr & Per-bus EENS vector \\
+\texttt{critical\_components} & --- & Sorted component importance list \\
+\texttt{annual\_eens / \_lole / \_lolf} & MWh, hr, occ & Per-year values (SEQ only) \\
+\texttt{tail\_risk} & --- & \texttt{TailRiskMetrics} (VaR/CVaR) \\
+\texttt{distribution\_idx} & --- & \texttt{DistributionIndices} (if enabled) \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-\texttt{ReliabilityComponent} describes each component's failure model:
-\texttt{failure\_rate\_per\_year} and \texttt{repair\_time\_hr}.
+\subsubsection{Advanced Result Structs}
+
+\paragraph{TailRiskMetrics.}
+Computed when \texttt{compute\_tail\_risk = true}:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field} & \textbf{Description} \\
+\hline
+\texttt{eens\_var}, \texttt{lole\_var} & VaR of EENS/LOLE at confidence level \\
+\texttt{eens\_cvar}, \texttt{lole\_cvar} & CVaR (Expected Shortfall) of EENS/LOLE \\
+\texttt{eens\_percentiles}, \texttt{lole\_percentiles} & 5th/25th/50th/75th/95th percentiles \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{DistributionIndices (IEEE Std 1366-2012).}
+Computed when \texttt{compute\_distribution\_indices = true} (requires
+\texttt{Load::num\_customers} set):
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{saifi} & int/cust/yr & System Average Interruption Frequency Index \\
+\texttt{saidi} & hr/cust/yr & System Average Interruption Duration Index \\
+\texttt{caidi} & hr/int & Customer Average Interruption Duration Index \\
+\texttt{asai} & fraction & Average Service Availability Index \\
+\texttt{asui} & fraction & Average Service Unavailability Index ($= 1 - \mathrm{ASAI}$) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{FrequencyDurationResult.}
+Returned by \texttt{run\_frequency\_duration\_analysis}:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{capacity\_outage\_levels} & MW & COPT capacity outage steps \\
+\texttt{cumulative\_probability} & --- & $P(\text{outage} \ge X)$ per step \\
+\texttt{cumulative\_frequency} & occ/yr & $F(\text{outage} \ge X)$ per step \\
+\texttt{lolp} & --- & Loss of Load Probability \\
+\texttt{lole\_fd} & hr/yr & LOLE from F\&D method \\
+\texttt{lolf\_fd} & occ/yr & LOLF from F\&D method \\
+\texttt{lold} & hr/occ & Loss of Load Duration ($= \mathrm{LOLE}/\mathrm{LOLF}$) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{FMEA Options and Results}
+
+\paragraph{Key FMEAOptions fields:}
+
+\begin{center}
+\begin{tabular}{llll}
+\hline\hline
+\textbf{Field} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{load\_scale\_factor} & 1.0 & --- & Global load scaling \\
+\texttt{switching\_time\_hr} & 0.5 & hr & Default switching/isolation time \\
+\texttt{voll} & 10000.0 & \$/MWh & Value of Lost Load \\
+\texttt{enable\_microgrid\_islanding} & true & --- & Allow island-capable microgrids to remain energized \\
+\texttt{enable\_repair\_reconfiguration} & true & --- & Promote DERs for island service after isolation \\
+\texttt{enable\_switch\_reconfiguration} & true & --- & Explicit AC switch/tie topology search \\
+\texttt{max\_repair\_switch\_actions} & 2 & --- & Max simultaneous switch actions in repair stage \\
+\texttt{enable\_storage\_dispatch} & true & --- & Model storage as emergency source \\
+\texttt{enable\_grid\_forming\_vsc\_support} & true & --- & Grid-forming VSC anchors energised island \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{FMEAResult system indices:}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Units} & \textbf{Description} \\
+\hline
+\texttt{n\_contingencies} & --- & Total $N-1$ contingencies evaluated \\
+\texttt{n\_loss\_contingencies} & --- & Contingencies causing any load loss \\
+\texttt{eens\_mwh\_yr} & MWh/yr & Frequency-weighted EENS \\
+\texttt{edns\_mw} & MW & Expected Demand Not Supplied \\
+\texttt{lole\_hr\_yr} & hr/yr & Loss of Load Expectation \\
+\texttt{lolf\_occ\_yr} & occ/yr & Loss of Load Frequency \\
+\texttt{distribution\_idx} & --- & IEEE 1366 indices (SAIFI/SAIDI/ASAI) \\
+\texttt{contingencies} & --- & Per-contingency detail, sorted by EENS$\downarrow$ \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Each entry in \texttt{contingencies} (\texttt{FMEAContingencyDetail}) records
+\texttt{failure\_rate}, switching-stage shed/ENS (\texttt{shed\_sw\_mw},
+\texttt{ens\_sw\_mwh}), repair-stage shed/ENS (\texttt{shed\_rep\_mw},
+\texttt{ens\_rep\_mwh}), annual contributions
+(\texttt{eens\_contribution} $= \lambda_k(E^{sw}_k + E^{rep}_k)$,
+\texttt{lole\_contribution}), per-bus nodal shed vectors, and the explicit
+repair-stage switch actions selected by the topology search.
 
 \subsubsection{Mathematical Formulation}
 
-\paragraph{Sequential Monte Carlo.}
-Each component $k$ has exponentially distributed times to failure and repair:
+\paragraph{Component Failure Model.}
+Each component $k$ is parameterised by annual failure rate $\lambda_k$
+(occ/yr) and mean time to repair $r_k$ (hr).  For generators the forced
+outage rate $\mathrm{FOR}_k$ is the primary input:
 \begin{equation}
-  TTF_k \sim \mathrm{Exp}(\lambda_k), \qquad
-  TTR_k \sim \mathrm{Exp}(\mu_k),
+  \lambda_k = \frac{\mathrm{FOR}_k}{(1 - \mathrm{FOR}_k)\,r_k}, \qquad
+  \mu_k = \frac{1}{r_k}.
 \end{equation}
-where $\lambda_k$ (failures/year) is the failure rate and $\mu_k = 1/r_k$
-(h\textsuperscript{-1}) is the repair rate.  The simulation advances a
-chronological event queue and records load-curtailment intervals.
 
-\paragraph{Reliability Metrics.}
-Over simulation horizon $T_{sim}$ (hours):
+\paragraph{Non-Sequential Monte Carlo.}
+Each sample $s$ draws an independent system state:
+\begin{equation}
+  X_k^{(s)} \sim \mathrm{Bernoulli}\!\left(\mathrm{FOR}_k\right), \quad
+  k = 1,\ldots,K.
+\end{equation}
+Available capacity is evaluated by DC-OPF with load-shedding variables.
+Convergence is declared when the Coefficient of Variation of the running EENS
+estimate falls below \texttt{cov\_threshold}:
+\begin{equation}
+  \mathrm{CoV}_n = \frac{\hat{\sigma}_n}{\hat{\mu}_n \sqrt{n}} \le \epsilon_{CoV}.
+\end{equation}
+System indices are estimated as sample means:
 \begin{align}
-  \mathrm{LOLP} &= \frac{\text{hours with unserved load}}{T_{sim}}, \\[4pt]
-  \mathrm{EENS} &= \sum_{t} \max\!\bigl(0,\,P_{load}(t) - P_{cap}(t)\bigr)\,\Delta t
-                   \quad [\text{MWh/year}],\\[4pt]
-  \mathrm{SAIDI} &= \frac{\sum_{i} r_i N_i}{N_{cust}}
-                   \quad [\text{hr/customer/year}],\\[4pt]
-  \mathrm{SAIFI} &= \frac{\sum_{i} \lambda_i N_i}{N_{cust}}
-                   \quad [\text{interruptions/customer/year}],
+  \widehat{\mathrm{EENS}} &= \frac{1}{n}\sum_{s=1}^{n} C_s
+    \quad [\text{MWh/yr}], \\
+  \widehat{\mathrm{LOLE}} &= \frac{T_{yr}}{n}\sum_{s=1}^{n} \mathbf{1}[C_s > 0]
+    \quad [\text{hr/yr}], \\
+  \widehat{\mathrm{PLC}} &= \frac{1}{n}\sum_{s=1}^{n} \mathbf{1}[C_s > 0],
 \end{align}
-where $r_i$ is the outage duration, $N_i$ the number of affected customers,
-and $N_{cust}$ the total customer count.
+where $C_s$ (MWh) is the load curtailment in sample $s$ and $T_{yr} =
+\texttt{hours\_per\_year}$.
+
+\paragraph{Sequential Monte Carlo.}
+Each component $k$ cycles through exponentially distributed times to failure
+and repair:
+\begin{equation}
+  \mathrm{TTF}_k \sim \mathrm{Exp}(\lambda_k), \qquad
+  \mathrm{TTR}_k \sim \mathrm{Exp}(\mu_k).
+\end{equation}
+The simulator maintains a chronological event queue, applies the hourly load
+profile \texttt{LoadProfile::factors}, solves DC-OPF at each curtailment
+interval, and accumulates annual statistics.  Per-year vectors
+\texttt{annual\_eens/lole/lolf} enable tail-risk post-processing.
+
+\paragraph{Frequency \& Duration (COPT).}
+Generator outage states are convolved recursively.  Starting from the
+all-in-service state, generator $i$ with capacity $C_i$ and FOR $q_i$ is
+added via:
+\begin{align}
+  P(X + C_i \ge x) &\leftarrow
+    (1-q_i)\,P(X \ge x) + q_i\,P(X \ge x - C_i), \\
+  F(X + C_i \ge x) &\leftarrow
+    (1-q_i)\,F(X \ge x) + q_i\,F(X \ge x - C_i)
+    + \lambda_i\,P(X \ge x) - \lambda_i\,P(X \ge x - C_i).
+\end{align}
+System indices follow from the final COPT evaluated at peak load $L$:
+\begin{align}
+  \mathrm{LOLP} &= P(C_{out} \ge C_{avail} - L), \\
+  \mathrm{LOLE} &= T_{yr} \times \mathrm{LOLP} \quad [\text{hr/yr}], \\
+  \mathrm{LOLF} &= F(C_{out} \ge C_{avail} - L) \quad [\text{occ/yr}], \\
+  \mathrm{LOLD} &= \mathrm{LOLE} / \mathrm{LOLF} \quad [\text{hr/occ}].
+\end{align}
+
+\paragraph{FMEA Frequency Weighting.}
+For each $N-1$ contingency $k$ and stage $s \in \{\mathrm{sw}, \mathrm{rep}\}$:
+\begin{equation}
+  E^s_k = P^{shed}_{k,s} \cdot \tau_{k,s}, \qquad
+  \mathrm{EENS} = \sum_k \lambda_k (E^{sw}_k + E^{rep}_k),
+\end{equation}
+\begin{equation}
+  \mathrm{LOLF} = \sum_{k:\, E^{sw}_k + E^{rep}_k > 0} \lambda_k, \qquad
+  \mathrm{LOLE} = \sum_k \lambda_k \!\sum_{s} \tau_{k,s}\,\mathbf{1}[P^{shed}_{k,s} > 0].
+\end{equation}
+
+\paragraph{Tail Risk (VaR/CVaR).}
+Given $n$ per-sample EENS values $\{e_1,\ldots,e_n\}$ sorted ascending, the
+$\alpha$-VaR and $\alpha$-CVaR at confidence level $\alpha$ are:
+\begin{align}
+  \mathrm{VaR}_\alpha &= e_{\lceil \alpha n \rceil}, \\
+  \mathrm{CVaR}_\alpha &= \frac{1}{n(1-\alpha)}
+    \sum_{i=\lceil \alpha n \rceil}^{n} e_i.
+\end{align}
+
+\subsubsection{Reference Benchmarks}
+
+Table~\ref{tab:reliability-benchmarks} summarises expected results on the two
+standard test cases.
+
+\begin{table}[h]
+\centering
+\caption{Reliability module reference benchmarks.}
+\label{tab:reliability-benchmarks}
+\begin{tabular}{llllll}
+\hline\hline
+\textbf{Test system} & \textbf{Method} & \textbf{Peak load} & \textbf{Reserve} &
+  \textbf{EENS (MWh/yr)} & \textbf{LOLE (hr/yr)} \\
+\hline
+IEEE RTS-24 & NSQ MC & 2\,850 MW & 75\,\% & $\approx 0$ & $\approx 0$ \\
+IEEE RTS-24 (stressed) & NSQ MC & 4\,600 MW & 8\,\% & $>0$ & $>0$ \\
+IEEE RTS-24 & F\&D & 2\,850 MW & 75\,\% & ---\,(analytical) & $\ll 1$ \\
+Comprehensive HACDCSS & FMEA & nominal & --- & $\ge 0$ & $\ge 0$ \\
+Comprehensive HACDCSS (2$\times$ load) & FMEA & $2\times$ nominal & --- & $>0$ & $>0$ \\
+\hline\hline
+\end{tabular}
+\end{table}
+
+For the IEEE RTS-24 case with its high installed reserve ($\approx 75\,\%$
+above peak), single-component contingencies rarely cause load shedding and
+both EENS and LOLE converge to zero under the standard load.  The stressed
+scenario (\texttt{load\_scale\_factor} $\approx 1.61$, corresponding to an
+8\,\% reserve margin) produces non-trivial reliability indices consistent with
+published RTS values (LOLE $\approx 9$ hr/yr, EENS $\approx 1{,}100$ MWh/yr).
 
 % ------------------------------------------------------------
 \subsection{Resilience Assessment}

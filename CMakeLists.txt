@@ -100,11 +100,15 @@ set(HACDCPF_SOURCES
   # ── validation ────────────────────────────────────────────────────────────
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
-  src/api/hacdcpf.cpp  # ── analysis stubs ───────────────────────────────────────────────────
+  src/api/hacdcpf.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
+  src/network_reconfiguration/topology_analysis.cpp
+  src/network_reconfiguration/topology_reconfiguration.cpp
+  # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
   src/carbon_analysis/annual_carbon_analysis.cpp
   src/power_flow/distribution_power_flow.cpp
   src/reliability/reliability_assessment.cpp
+  src/reliability/reliability_data.cpp
   src/resilience/resilience_assessment.cpp
   src/time_series/time_series_pf.cpp
   src/time_series/annual_production_sim.cpp
