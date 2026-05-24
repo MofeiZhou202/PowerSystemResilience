@@ -69,3 +69,9 @@ catch_discover_tests(test_powerflow_performance
 # Topology cross-validation: connectivity checks + ONR via B&C vs exhaustive
 # enumeration (6-bus), 33bw ONR with Newton PF verification, DER integration.
 hacdcpf_add_test(test_topology_crossval test_topology_crossval.cpp)
+
+# Comprehensive cross-module integration: PF ↔ OPF ↔ ONR ↔ Carbon analysis.
+# Catches high-level contradictions across all four solver modules:
+#   A+B: IEEE 14-bus — PF/OPF consistency + carbon balance (tests A1–A6, B1–B4)
+#   C+D: IEEE 33-bus BW — ONR loss improvement + carbon balance (tests C1–C4, D1–D3)
+hacdcpf_add_test(test_crossmodule_integration test_crossmodule_integration.cpp)

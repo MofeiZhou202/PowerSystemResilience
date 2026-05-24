@@ -3,10 +3,10 @@
 \label{sec:test_results}
 % ============================================================
 
-This chapter documents the ten new test suites added to the project during the
-most recent development cycles.  All 325 CTest entries are registered (323 active, 2 skipped due to
+This chapter documents the twelve new test suites added to the project during the
+most recent development cycles.  All 327 CTest entries are registered (325 active, 2 skipped due to
 a parser limitation) in the \texttt{build\_rel} configuration, giving a total
-of \textbf{323/323 active tests passing} on macOS with Apple Silicon
+of \textbf{325/325 active tests passing} on macOS with Apple Silicon
 (Accelerate, HiGHS, Gurobi, Ipopt, SCIP, KLU, UMFPACK, PaPILO all active).
 The two skipped tests (\texttt{case533mt\_hi} and \texttt{case533mt\_lo})
 contain arithmetic expressions (\texttt{135/sqrt(3)}) in their data files
@@ -40,8 +40,9 @@ CTest registration ranges.
 \texttt{test\_multiport\_vpp\_er}  & Multi-port Energy Router and VPP modes           & 310--323 & 14 \\
 \texttt{test\_powerflow\_performance} & Large-system power-flow benchmark sweep (75 cases) & 324  & 1 \\
 \texttt{test\_topology\_crossval}  & Connectivity, ONR B\&C, exhaustive enum., 33bw   & 325      & 1 \\
+\texttt{test\_crossmodule\_integration} & Pipeline: OPF$\to$PF$\to$Carbon, ONR$\to$OPF$\to$PF$\to$Carbon & 326--327 & 2 \\
 \hline
-\textbf{Total (new)}                & & 48--325 & \textbf{278} \\
+\textbf{Total (new)}                & & 48--327 & \textbf{280} \\
 \hline
 \end{tabular}
 \end{table}
@@ -856,12 +857,12 @@ Catch2 compact reporter) and the accumulated CTest time for each suite.
 \hline
 \texttt{test\_powerflow\_performance}& 1  &   3  &        5.05   & 75-case perf sweep \\
 \hline
-\textbf{Grand total}               & \textbf{325} & \textbf{$\approx$3\,213} & \textbf{12.52} & \\
+\textbf{Grand total}               & \textbf{327} & \textbf{$\approx$3\,295} & \textbf{12.52} & \\
 \hline
 \end{tabular}
 \end{table}
 
-The total CTest wall-clock time is \textbf{12.52\,s} for all 325 registered entries (323 active), of
+The total CTest wall-clock time is \textbf{12.52\,s} for all 327 registered entries (325 active), of
 which 5.05\,s is the performance sweep (\texttt{test\_powerflow\_performance})
 and 1.16\,s is the ACOPF vs DCOPF comprehensive comparison.  Excluding the
 performance suite, all functional tests complete in under 7.5\,s.
@@ -932,6 +933,261 @@ Total wall-clock time for the sweep is \textbf{5.05\,s} on the reference
 machine.
 
 % ------------------------------------------------------------
+\subsection{\texttt{test\_crossmodule\_integration}: Cross-Module Pipeline Tests}
+\label{sec:test_crossmodule_integration}
+% ------------------------------------------------------------
+
+\texttt{tests/test\_crossmodule\_integration.cpp} implements two sequential
+pipeline tests where the result of each module is explicitly transferred as
+input to the next module.  Any failing assertion indicates a high-level
+contradiction between modules.
+
+\subsubsection{Pipeline 1: OPF $\to$ PF $\to$ Carbon Analysis (IEEE 14-bus, test \#326)}
+
+\begin{figure}[ht]
+\centering
+\begin{tabular}{ccccc}
+  \textbf{AC OPF} & $\xrightarrow{\{P_g,Q_g,V_m\}}$ &
+  \textbf{Newton PF} & $\xrightarrow{\{V_m,V_a,\text{branch flows}\}}$ &
+  \textbf{Carbon Analysis}
+\end{tabular}
+\caption{Pipeline 1 data-flow on the IEEE 14-bus test case.}
+\label{fig:pipeline1_flow}
+\end{figure}
+
+\textbf{Stage 0 (reference):} Base Newton PF on \texttt{case14.m} establishes
+a reference operating point and total active loss.
+
+\textbf{Stage 1 (AC OPF):} The optimal generator dispatch
+$\{P_g, Q_g, V_m\}$ is obtained from the native IPM-based AC OPF solver.
+A DC OPF is also run independently; its objective must satisfy the
+relaxation property $f_{\text{DC}} \leq 1.05\,f_{\text{AC}}$.
+
+\textbf{Stage 1 $\to$ 2 transfer:} The helper \texttt{apply\_acopf\_dispatch}
+creates a copy of the system with $P_g$, $Q_g$ set from
+\texttt{ACOPFResult::pg\_mw} / \texttt{qg\_mvar} and the PV-bus terminal
+voltage $V_g$ set from \texttt{ACOPFResult::vm}.  This ensures Newton PF
+starts at the OPF operating point.
+
+\textbf{Stage 2 (Newton PF):} Newton's method is run on the dispatched
+system.  Two cross-checks validate the transfer:
+\begin{itemize}
+  \item \textbf{P1-A6 (OPF feasibility):} Newton PF must converge.  A
+        divergence here means the OPF found an operating point that does not
+        satisfy the full AC power-flow equations.
+  \item \textbf{P1-A7 (voltage consistency):} $|V_{m,\text{PF}}^{(i)} -
+        V_{m,\text{OPF}}^{(i)}| < 0.05$\,pu for every bus~$i$.  The Newton
+        solution must lie within 0.05\,pu of the OPF solution; a larger
+        deviation indicates either a model inconsistency between the two
+        solvers or an OPF convergence to a local infeasible point.
+\end{itemize}
+
+\textbf{Stage 2 $\to$ 3 transfer:} The \texttt{PowerFlowResult} from Stage~2
+(containing $V_m$, $V_a$, and all branch flows) is passed directly to
+\texttt{compute\_carbon\_analysis}.
+
+\textbf{Stage 3 (Carbon Analysis):} Carbon tracing and the nodal carbon
+matrix are computed on the pipeline PF result.  Checks P1-B1 and P1-B2
+enforce a balance error below 1\,\%.
+
+\subsubsection{Pipeline 2: ONR $\to$ DC OPF $\to$ PF $\to$ Carbon Analysis
+               (IEEE 33-bus BW, test \#327)}
+
+\begin{figure}[ht]
+\centering
+\begin{tabular}{ccccccccc}
+  \textbf{ONR} &
+  $\xrightarrow{\text{topology}}$ &
+  \textbf{DC OPF} &
+  $\xrightarrow{\{P_g\}}$ &
+  \textbf{Newton PF} &
+  $\xrightarrow{\text{PF result}}$ &
+  \textbf{Carbon}
+\end{tabular}
+\caption{Pipeline 2 data-flow on the IEEE 33-bus BW distribution case.}
+\label{fig:pipeline2_flow}
+\end{figure}
+
+\textbf{Stage 0 (reference):} Base Newton PF and DC OPF on the original
+33-bus topology.  The DC OPF objective (\$20/MWh \texttimes{} $P_g$)
+establishes the reference dispatch cost before reconfiguration.
+
+\textbf{Stage 1 (ONR):} The B\&B optimal network reconfiguration solver
+finds the radial spanning tree that minimises the LinDistFlow loss proxy.
+The result contains \texttt{open\_branch\_ids} and
+\texttt{closed\_branch\_ids}.
+
+\textbf{Stage 1 $\to$ 2 transfer:} The helper \texttt{apply\_onr\_topology}
+creates a system copy with \texttt{ACBranch::in\_service} flags set
+according to the ONR output.  \texttt{is\_radial()} and the spanning-tree
+cardinality check (exactly $n{-}1$ closed branches) verify structural
+integrity.
+
+\textbf{Stage 2 (DC OPF on reconfigured system):} Cross-checks:
+\begin{itemize}
+  \item \textbf{P2-C4:} DC OPF must converge on the reconfigured topology.
+  \item \textbf{P2-C5 (ONR$\to$OPF cost check):} DC OPF cost on the
+        reconfigured topology must be $\leq 1.05\times$ the reference DC OPF
+        cost.  Because ONR reduces active losses, the slack generator
+        dispatches less power, directly lowering the linear dispatch cost.
+        A violation would indicate that ONR reconfigured to a topology that
+        \emph{increases} the dispatch cost --- a fundamental contradiction.
+\end{itemize}
+
+\textbf{Stage 2 $\to$ 3 transfer:} The helper \texttt{apply\_dcopf\_dispatch}
+writes \texttt{ACGenerator::pg\_mw} from \texttt{DCOPFResult::pg\_mw} into
+the reconfigured system copy.
+
+\textbf{Stage 3 (Newton PF on reconfigured system with OPF dispatch):}
+Cross-checks:
+\begin{itemize}
+  \item \textbf{P2-C7 (OPF feasibility after ONR):} Newton PF must converge
+        with the DC OPF dispatch on the reconfigured topology.
+  \item \textbf{P2-C8 (loss improvement):} Active losses at the pipeline
+        endpoint must satisfy
+        $\text{loss}_{\text{pipeline}} \leq 1.10 \times
+        \text{loss}_{\text{base}}$.  A regression here means the
+        combined ONR$+$OPF operating point does not preserve the
+        loss-reduction objective that ONR was designed to achieve.
+\end{itemize}
+
+\textbf{Stage 3 $\to$ 4 transfer:} The \texttt{PowerFlowResult} is passed
+directly to \texttt{compute\_carbon\_analysis}.
+
+\textbf{Stage 4 (Carbon Analysis):} Cross-checks:
+\begin{itemize}
+  \item \textbf{P2-D1:} Carbon tracing balance error $< 1\,\%$.
+  \item \textbf{P2-D2 (source purity):} The carbon intensity at every load
+        bus must satisfy
+        $\lambda_i \leq 0.6 \times 1.01$\,tCO$_2$/MWh.
+        The 33-bus network is fed from a single source with emission
+        factor 0.6\,tCO$_2$/MWh; the carbon intensity cannot exceed the
+        source rate in a passive distribution network.  Any violation
+        indicates a tracer implementation error.
+\end{itemize}
+
+\subsubsection{Pipeline Test: Cross-Check Summary}
+
+Table~\ref{tab:pipeline_checks} lists all assertions enforced by
+\texttt{test\_crossmodule\_integration} and the cross-module inconsistency
+each one would expose if it failed.  All 82 assertions pass (none of the
+listed contradictions occurred).
+
+\begin{table}[ht]
+\centering
+\caption{Cross-checks in the two pipeline tests (tests \#326--\#327).}
+\label{tab:pipeline_checks}
+\small
+\begin{tabular}{lllp{5.5cm}}
+\hline
+\textbf{ID} & \textbf{Pipeline} & \textbf{Transfer point} & \textbf{Cross-module bug indicated on failure} \\
+\hline
+P1-A1 & 1 & Stage 0 & Base PF diverges (setup failure) \\
+P1-A2 & 1 & Stage 1 & AC OPF infeasible or unbounded \\
+P1-A3 & 1 & Stage 1 & DC OPF infeasible \\
+P1-A4 & 1 & Stage 1 & DC OPF cost $>$ AC OPF cost (relaxation violated) \\
+P1-A5 & 1 & Stage 1 & Generator dispatch outside $[P_{\min},P_{\max}]$ \\
+P1-A6 & 1 & Stage 1$\to$2 & OPF operating point fails Newton PF \\
+P1-A7 & 1 & Stage 1$\to$2 & OPF and PF voltages disagree by $>0.05$\,pu \\
+P1-B1 & 1 & Stage 2$\to$3 & Carbon tracing generation $\neq$ load+loss \\
+P1-B2 & 1 & Stage 2$\to$3 & Carbon matrix generation $\neq$ load+loss \\
+\hline
+P2-C1 & 2 & Stage 0 & Base PF diverges (setup failure) \\
+P2-C2 & 2 & Stage 0 & Base DC OPF infeasible \\
+P2-C3 & 2 & Stage 1 & ONR fails to find feasible radial topology \\
+P2-C4 & 2 & Stage 1$\to$2 & DC OPF diverges on reconfigured topology \\
+P2-C5 & 2 & Stage 1$\to$2 & ONR increases dispatch cost (cost regression) \\
+P2-C6 & 2 & Stage 2 & DC OPF dispatch outside $[P_{\min},P_{\max}]$ \\
+P2-C7 & 2 & Stage 2$\to$3 & OPF dispatch infeasible for Newton PF after ONR \\
+P2-C8 & 2 & Stage 2$\to$3 & ONR+OPF fails to reduce losses vs.~base \\
+P2-D1 & 2 & Stage 3$\to$4 & Carbon tracing balance error $\geq 1\,\%$ \\
+P2-D2 & 2 & Stage 3$\to$4 & Carbon intensity exceeds source rate (tracer bug) \\
+\hline
+\end{tabular}
+\end{table}
+
+All 82 assertions pass on the reference machine (82 assertions in 2 test cases,
+$\approx$9\,s wall-clock time).
+
+\subsubsection{Observed Numerical Results}
+
+Tables~\ref{tab:pipeline1_results} and~\ref{tab:pipeline2_results} record the
+exact values observed on the reference machine (macOS, Apple M4, debug build).
+
+\begin{table}[ht]
+\centering
+\caption{Pipeline 1 observed numerical results — IEEE 14-bus (test \#326).}
+\label{tab:pipeline1_results}
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Check} & \textbf{Quantity} & \textbf{Threshold} & \textbf{Observed} \\
+\hline
+P1-A1 & Base Newton PF residual            & $< 10^{-4}$\,pu       & $1.32 \times 10^{-10}$\,pu \\
+      & Base active loss                   & —                     & 13.393\,MW \\
+\hline
+P1-A2 & AC OPF objective                   & $\geq 0$              & \$8\,171.73/h \\
+P1-A3 & DC OPF objective                   & $\geq 0$              & \$7\,642.59/h \\
+P1-A4 & DC OPF / AC OPF ratio              & $\leq 1.05$           & 0.935 \\
+\hline
+P1-A5 & Gen\,0 ($P_g$)                     & $[0,\,332.4]$\,MW     & 232.4\,MW \\
+      & Gen\,1 ($P_g$)                     & $[0,\,140]$\,MW       & 40.0\,MW \\
+      & Gen\,2–4 ($P_g$)                   & $[0,\,100]$\,MW each  & ${\approx}0$\,MW \\
+\hline
+P1-A6 & Newton PF residual (OPF dispatch)  & $< 10^{-4}$\,pu       & $1.32 \times 10^{-10}$\,pu \\
+P1-A7 & Max per-bus $|V_{m,\text{PF}} - V_{m,\text{OPF}}|$ & $< 0.05$\,pu & $< 10^{-13}$\,pu \\
+\hline
+P1-B1 & Carbon tracing balance error        & $< 1\,\%$             & 0.0660\,\% \\
+P1-B2 & Carbon matrix balance error         & $< 1\,\%$             & 0.0751\,\% \\
+\hline
+      & Pipeline PF active loss            & —                     & 13.393\,MW (= base) \\
+      & Gen emissions (base / OPF dispatch) & —                     & $\approx$229\,tCO$_2$/h (both) \\
+      & \quad Gen\,0: $232.4\,\text{MW}\times 0.90$ & —          & 209.2\,tCO$_2$/h \\
+      & \quad Gen\,1: $40.0\,\text{MW}\times 0.50$  & —          & 20.0\,tCO$_2$/h \\
+      & \quad Gen\,2–4: $\approx 0$\,MW              & —          & 0.0\,tCO$_2$/h \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Pipeline 2 observed numerical results — IEEE 33-bus BW (test \#327).}
+\label{tab:pipeline2_results}
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Check} & \textbf{Quantity} & \textbf{Threshold} & \textbf{Observed} \\
+\hline
+P2-C1 & Base Newton PF residual            & $< 10^{-4}$\,pu       & $7.47 \times 10^{-9}$\,pu \\
+      & Base active loss                   & —                     & 0.2027\,MW \\
+P2-C2 & Base DC OPF objective              & $\geq 0$              & ${\approx}$0\,\$/h$^{\dagger}$ \\
+\hline
+P2-C3 & ONR result                         & feasible              & OPTIMAL \\
+      & ONR MILP objective (LinDistFlow)   & —                     & 0.07476\,pu \\
+      & ONR estimated loss                 & —                     & 0.748\,MW \\
+      & Open branches (tie switches)       & 5 open                & 10, 13, 16, 28, 33 \\
+      & B\&C nodes / gap / runtime         & —                     & 25 / 0\,\% / 6.36\,s \\
+\hline
+P2-C4 & Reconfigured DC OPF converged      & true                  & true \\
+P2-C5 & Reconfig.\ DC OPF cost $\leq$ base & $\leq 1.05\times$     & ${\approx}0 \leq {\approx}0$ \\
+P2-C6 & Gen\,0 dispatch ($P_g$)            & $[0,\,10]$\,MW        & 0\,MW \\
+\hline
+P2-C7 & Newton PF residual (pipeline end)  & $< 10^{-4}$\,pu       & $1.90 \times 10^{-9}$\,pu \\
+P2-C8 & Pipeline active loss               & $\leq 1.10 \times$ base & 0.1616\,MW ($-$20.3\,\%) \\
+\hline
+P2-D1 & Carbon tracing balance error        & $< 1\,\%$             & $2.25 \times 10^{-10}$\,\% \\
+P2-D2 & Carbon intensity (all 32 load buses) & $\leq 0.606$\,tCO$_2$/MWh & 0.600\,tCO$_2$/MWh (exact) \\
+\hline
+      & Gen emissions (base, 3.92\,MW gen) & —                     & 2.351\,tCO$_2$/h \\
+      & Gen emissions (pipeline, 3.88\,MW gen) & —                & 2.326\,tCO$_2$/h \\
+\hline
+\multicolumn{4}{l}{$^{\dagger}$The case33bw slack generator dispatches 0\,MW in the DC OPF formulation;} \\
+\multicolumn{4}{l}{\phantom{$^{\dagger}$}the slack power injection is not tracked in the DC OPF cost function.} \\
+\hline
+\end{tabular}
+\end{table}
+
+% ------------------------------------------------------------
 \subsection{Summary and Pass Rates}
 \label{sec:test_summary}
 % ------------------------------------------------------------
@@ -955,10 +1211,11 @@ machine.
 \texttt{test\_multiport\_vpp\_er}   & 310--323 & 14  & 14  & 100\,\% \\
 \texttt{test\_topology\_crossval}   & 325      &  1  &  1  & 100\,\% \\
 \texttt{test\_powerflow\_performance} & 324      &  1  &  1  & 100\,\% \\
+\texttt{test\_crossmodule\_integration} & 326--327 &  2  &  2  & 100\,\% \\
 \hline
 Pre-existing suites                 & 1--47 & 47  & 47  & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--325   & \textbf{325} & \textbf{323}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--327   & \textbf{327} & \textbf{325}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline
