@@ -144,6 +144,9 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
       h = hash_combine(h, static_cast<std::uint64_t>(p.in_service));
       h = hash_combine(h, hash_double(p.p_mw));
       h = hash_combine(h, hash_double(p.q_mvar));
+      h = hash_combine(h, hash_double(p.p_set_mw));
+      h = hash_combine(h, hash_double(p.q_set_mvar));
+      h = hash_combine(h, hash_double(p.v_set_pu));
     }
   }
   // Hash component tables that affect power flow results.

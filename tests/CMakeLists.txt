@@ -44,6 +44,11 @@ hacdcpf_add_test(test_advanced_pf         test_advanced_pf.cpp)
 # topologies, transformer, distribution PF stub, and JSON round-trip.
 hacdcpf_add_test(test_three_phase_pf      test_three_phase_pf.cpp)
 
+# Multi-port ER / multi-mode VPP: robustness tests for EnergyRouter ports with
+# mixed control modes (VF + PQ + Droop) and VirtualPowerPlants operating in
+# generation, demand-response, and reactive-support modes simultaneously.
+hacdcpf_add_test(test_multiport_vpp_er    test_multiport_vpp_er.cpp)
+
 # Performance test: MATPOWER cases — built with release-level optimisation
 # regardless of overall build type, so timing numbers are meaningful.
 add_executable(test_powerflow_performance test_powerflow_performance.cpp)

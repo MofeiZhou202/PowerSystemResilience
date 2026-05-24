@@ -48,6 +48,15 @@ struct VSCConverter {
 
   bool controllable{true};
 
+  // Steady-state AC-side conduction resistance (pu on base_mva / system base).
+  // When > 0, the converter draws additional power from the DC bus to cover
+  // I²·r losses on the AC transformer/reactor side:
+  //   ploss_AC = r_conv_ac_pu * pac² / Vm_AC²
+  // This couples the DC power-balance equation to the AC terminal voltage,
+  // producing the cross-block Jacobian entry ∂P_DC / ∂V_AC_m.
+  double r_conv_ac_pu{0.0};
+
+  // Short-circuit impedance (IEC 60909)
   double r_sc_pu{0.0};
   double x_sc_pu{0.15};
   double r2_sc_pu{0.0};
@@ -60,6 +69,8 @@ struct VSCConverter {
   double forced_outage_rate{0.0};
   double mttr_hr{0.0};
   double t_scheduled_hr{0.0};
+  // Derived MTBF -- see Generator::mtbf_hr note for convention.
+  double mtbf_hr{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

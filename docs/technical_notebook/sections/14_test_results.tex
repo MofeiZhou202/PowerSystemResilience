@@ -658,6 +658,102 @@ values, line parameters, and power-flow results are preserved exactly.
 All 26 tests pass in $\approx$0.01\,s.
 
 % ------------------------------------------------------------
+\subsection{\texttt{test\_multiport\_vpp\_er}: Multi-Port Energy Router and Virtual Power Plant}
+\label{sec:test_multiport_vpp_er}
+% ------------------------------------------------------------
+
+This suite validates the correct behaviour of two advanced components:
+\begin{itemize}
+  \item \textbf{Multi-port \texttt{EnergyRouter} (ER)} --- a solid-state transformer
+    that simultaneously connects to multiple AC buses via independently
+    controlled VSC ports.  Ports are partitioned into Side~A
+    (VF or PQ mode) and Side~B (Droop or PQ mode), bridged by an internal
+    DC/DC converter.  Tests cover a 3-port configuration
+    (VF + PQ on Side~A, Droop on Side~B) and a 4-port configuration
+    (VF + PQ on Side~A, Droop + PQ on Side~B).
+  \item \textbf{Multi-mode \texttt{VirtualPowerPlant} (VPP)} --- a distributed
+    energy aggregator that collapses to a single-bus static generator.  Tests
+    cover three control regimes: generation mode ($p > 0$), demand-response
+    mode ($p < 0$), and reactive-support mode ($q \neq 0$).
+\end{itemize}
+
+All tests share a common 5-bus AC backbone: Bus~1 (SLACK, 110\,kV)
+$\to$ 110/20\,kV transformer $\to$ Bus~2, followed by a radial chain
+Bus~2 $\to$ Bus~3 $\to$ Bus~4 $\to$ Bus~5 (20\,kV, $r = 0.04$,
+$x = 0.12$, $b = 0.005$\,pu per branch).
+
+\subsubsection{3-Port Energy Router (tests \#309--\#313)}
+
+Five tests verify the 3-port ER (Port~0: Bus~2, VF, $v^\star = 1.02$\,pu;
+Port~1: Bus~3, PQ, $p^\star = 1.7$\,MW; Port~2: Bus~4, Droop,
+$v^\star_{\mathrm{dc}} = 1.0$\,pu):
+\begin{enumerate}
+  \item \textbf{Convergence} --- the Newton solver converges with residual
+    $< 10^{-4}$; all five solved bus voltages remain in
+    $[0.85,\,1.15]$\,pu.
+  \item \textbf{VF voltage control} --- Bus~2 voltage is within
+    $\pm 0.02$\,pu of the VF setpoint (1.02\,pu), confirming that the
+    PQ $\to$ PV bus promotion works correctly.
+  \item \textbf{PQ port measurability} --- zeroing Port~1's active and
+    reactive setpoints changes the network-wide sum of bus voltages by
+    more than $10^{-3}$\,pu.
+  \item \textbf{Droop-port robustness} --- changing the droop DC setpoint
+    from 1.0 to 0.98\,pu still converges; the VF port at Bus~2 remains
+    within tolerance (the droop setpoint affects the DC-beta bus voltage
+    regulation and has negligible direct impact on AC bus voltitudes).
+  \item \textbf{ER disable} --- disabling the entire ER changes
+    $\sum V_m$ by more than $10^{-3}$\,pu relative to the active baseline.
+\end{enumerate}
+
+\subsubsection{VF Setpoint Observability (test \#314)}
+
+Two independent systems are solved with VF setpoints 1.04 and 0.98\,pu
+respectively.  The higher setpoint must produce a Bus~2 voltage at least
+$10^{-3}$\,pu higher, confirming end-to-end propagation from the ER
+expansion layer through the Newton solver.
+
+\subsubsection{4-Port Energy Router (tests \#315--\#317)}
+
+Three tests verify the 4-port ER (adds Port~3: Bus~5, PQ, $p^\star = 1.5$\,MW
+on Side~B in addition to the 3-port configuration):
+\begin{enumerate}
+  \item \textbf{Convergence and voltage range} --- same criteria as the 3-port
+    suite.
+  \item \textbf{VF voltage control} --- Bus~2 within $\pm 0.02$\,pu of 1.02.
+  \item \textbf{Side-B PQ setpoint change} --- doubling Port~3's active
+    injection (1.5 $\to$ 3.0\,MW) raises Bus~5 voltage by more than
+    $10^{-4}$\,pu.
+  \item \textbf{Four-port voltage signatures} --- the full-ER bus-voltage
+    sum differs from the no-ER baseline by more than 0.01\,pu; Bus~5 with
+    the ER active is at least $10^{-3}$\,pu higher than without it.
+\end{enumerate}
+
+\subsubsection{Multi-Mode VPP (tests \#318--\#322)}
+
+Five tests exercise the three VPP control regimes on the same backbone:
+\begin{enumerate}
+  \item \textbf{Convergence} --- all three VPPs active; residual $< 10^{-4}$.
+  \item \textbf{Generation mode (VPP1, Bus~2)} --- removing the 4\,MW
+    generation VPP changes Bus~2 voltage by more than $2 \times 10^{-4}$\,pu
+    (Bus~2 is tightly coupled to the slack bus via the transformer, so the
+    voltage sensitivity is small).
+  \item \textbf{Demand-response mode (VPP2, Bus~3)} --- disabling the
+    2.5\,MW EV-charger aggregator raises Bus~3 voltage by more than
+    $10^{-3}$\,pu (removing 2.5\,MW extra load reduces the branch
+    current on Bus~2$\to$Bus~3).
+  \item \textbf{Reactive-support mode (VPP3, Bus~4)} --- zeroing the
+    1.5\,Mvar injection lowers Bus~4 voltage by more than $10^{-4}$\,pu.
+  \item \textbf{Individual impact} --- disabling each VPP in turn changes
+    $\sum V_m$ by more than $5 \times 10^{-4}$\,pu; all results converge.
+  \item \textbf{Monotone output sweep} --- three output levels for VPP1
+    (0.5, 4.0, 7.0\,MW) produce strictly increasing Bus~2 voltages
+    (increment $> 10^{-4}$\,pu per step), confirming that the static-
+    generator projection honours the output-level ordering.
+\end{enumerate}
+
+All 14 tests pass in $\approx$0.01\,s.
+
+% ------------------------------------------------------------
 \subsection{Quantitative Results and Timing}
 \label{sec:test_timing}
 % ------------------------------------------------------------
@@ -695,15 +791,16 @@ Catch2 compact reporter) and the accumulated CTest time for each suite.
 \texttt{test\_solver\_capabilities}& 16  &  58  & $\approx$0.16 & Solver flags \& audit \\
 \texttt{test\_advanced\_pf}        & 26  & 119  & $\approx$0.03 & Islands, distr.\ slack, PV/PQ \\
 \texttt{test\_three\_phase\_pf}    & 26  &  94  & $\approx$0.01 & Three-phase projection \& JSON \\
+\texttt{test\_multiport\_vpp\_er}  & 14  &  95  & $\approx$0.01 & Multi-port ER \& VPP modes \\
 \hline
 \texttt{test\_powerflow\_performance}& 1  &   3  &        5.00   & 75-case perf sweep \\
 \hline
-\textbf{Grand total}               & \textbf{308} & \textbf{$\approx$3\,060} & \textbf{11.70} & \\
+\textbf{Grand total}               & \textbf{322} & \textbf{$\approx$3\,155} & \textbf{11.71} & \\
 \hline
 \end{tabular}
 \end{table}
 
-The total CTest wall-clock time is \textbf{11.70\,s} for all 308 entries, of
+The total CTest wall-clock time is \textbf{11.71\,s} for all 322 entries, of
 which 5.00\,s is the performance sweep (\texttt{test\_powerflow\_performance})
 and 1.16\,s is the ACOPF vs DCOPF comprehensive comparison.  Excluding the
 performance suite, all functional tests complete in under 6.8\,s.
@@ -794,10 +891,11 @@ machine.
 \texttt{test\_solver\_capabilities} & 240--255 & 16  & 16  & 100\,\% \\
 \texttt{test\_advanced\_pf}         & 256--281 & 26  & 26  & 100\,\% \\
 \texttt{test\_three\_phase\_pf}    & 282--307 & 26  & 26  & 100\,\% \\
+\texttt{test\_multiport\_vpp\_er}   & 309--322 & 14  & 14  & 100\,\% \\
 \hline
 Pre-existing suites                 & 1--47, 308 & 48  & 48  & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--308   & \textbf{308} & \textbf{306}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--322   & \textbf{322} & \textbf{320}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline

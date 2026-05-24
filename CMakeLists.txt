@@ -102,6 +102,7 @@ set(HACDCPF_SOURCES
   # ── api ──────────────────────────────────────────────────────────────────
   src/api/hacdcpf.cpp  # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
+  src/carbon_analysis/annual_carbon_analysis.cpp
   src/power_flow/distribution_power_flow.cpp
   src/reliability/reliability_assessment.cpp
   src/resilience/resilience_assessment.cpp

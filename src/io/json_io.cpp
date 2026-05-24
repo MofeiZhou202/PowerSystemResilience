@@ -1295,8 +1295,8 @@ static json three_phase_transformer_to_json(const ThreePhaseTransformer& t) {
   j["tap_neutral"] = t.tap_neutral;
   j["tap_step_percent"] = t.tap_step_percent;
   j["shift_deg"] = t.shift_deg;
-  j["mtbf_hours"] = t.mtbf_hours;
-  j["mttr_hours"] = t.mttr_hours;
+  j["mtbf_hr"] = t.mtbf_hr;
+  j["mttr_hr"] = t.mttr_hr;
   return j;
 }
 
@@ -1327,8 +1327,8 @@ static ThreePhaseTransformer three_phase_transformer_from_json(const json& j) {
   t.tap_neutral = jget(j, "tap_neutral", 0);
   t.tap_step_percent = jget(j, "tap_step_percent", 0.0);
   t.shift_deg = jget(j, "shift_deg", 0.0);
-  t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
-  t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
+  t.mtbf_hr = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
+  t.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return t;
 }
 
