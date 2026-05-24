@@ -103,6 +103,8 @@ set(HACDCPF_SOURCES
   src/api/hacdcpf.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
+  # ── analysis ────────────────────────────────────────────────────────
+  src/analysis/short_circuit.cpp
   # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
   src/carbon_analysis/annual_carbon_analysis.cpp

@@ -1187,6 +1187,215 @@ P2-D2 & Carbon intensity (all 32 load buses) & $\leq 0.606$\,tCO$_2$/MWh & 0.600
 \end{tabular}
 \end{table}
 
+% ============================================================
+\subsection{\texttt{test\_short\_circuit\_crossval}: Short-Circuit Z-bus Cross-Validation}
+\label{sec:sc_crossval}
+% ============================================================
+
+\subsubsection{Mathematical Model}
+
+The short-circuit solver implements the Z-bus Thévenin method following
+IEC~60909~\cite{IEC60909}.
+The network is characterised by its nodal admittance matrix
+$\mathbf{Y}_{\text{fault}} \in \mathbb{C}^{n \times n}$, assembled from
+series branch admittances and generator shunt contributions.
+
+\paragraph{Pre-fault voltage and Thévenin impedance.}
+The pre-fault voltage at each bus is set to the IEC voltage factor
+$c$ (default $c = 1.1$) at zero angle:
+\begin{equation}
+  V_0 = c \angle 0^{\circ}.
+\end{equation}
+The Thévenin impedance looking into bus $k$ is the $k$-th diagonal entry of
+$\mathbf{Z}_{\text{bus}} = \mathbf{Y}_{\text{fault}}^{-1}$, obtained via a
+sparse LU solve:
+\begin{equation}
+  \mathbf{Y}_{\text{fault}}\,\mathbf{z}_k = \mathbf{e}_k
+  \quad \Longrightarrow \quad
+  Z_{kk} = (\mathbf{z}_k)_k .
+\end{equation}
+
+\paragraph{Fault current and fault level.}
+For a balanced three-phase (3PH) fault the initial symmetrical
+short-circuit current and fault level are:
+\begin{equation}
+  I''_{k} = \frac{V_0}{Z_{kk}}, \qquad
+  S_k = S_{\text{base}}\,\frac{|V_0|^2}{|Z_{kk}|}.
+\end{equation}
+For unbalanced faults the sequence-network method is used.
+With positive-sequence impedance $Z_1 = Z_{kk}$, negative-sequence $Z_2$, and
+zero-sequence $Z_0$:
+\begin{align}
+  \text{SLG:} & \quad I''_k = \frac{3\,c}{Z_1 + Z_2 + Z_0}, \\
+  \text{LL:}  & \quad I''_k = \frac{\sqrt{3}\,c}{Z_1 + Z_2}, \\
+  \text{DLG:} & \quad I''_k = \frac{c}{Z_1 + Z_2 \| Z_0}.
+\end{align}
+
+\paragraph{Peak current.}
+The peak short-circuit current follows IEC~60909 with the $\kappa$ factor:
+\begin{equation}
+  i_p = \kappa\,\sqrt{2}\,I''_k, \qquad
+  \kappa = 1.02 + 0.98\,e^{-3R/X}.
+\end{equation}
+
+\paragraph{Analytical reference for radial networks.}
+For an $n$-bus radial feeder fed from bus~1 through series impedances
+$Z_{12}, Z_{23}, \ldots$, the Thévenin impedance at bus $k$ equals the
+sum of impedances along the path from the source to bus $k$:
+\begin{equation}
+  Z_{kk}^{\text{Thev}} = \sum_{i=1}^{k-1} Z_{i,i+1}.
+\end{equation}
+This identity is used as the analytical reference for Tests~SC-1 and SC-2.
+
+\subsubsection{Cross-Check Table}
+
+\begin{table}[ht]
+\centering
+\caption{Short-circuit cross-validation: what each test catches.}
+\label{tab:sc_crossval}
+\small
+\begin{tabular}{clp{5.5cm}c}
+\hline
+\textbf{Test} & \textbf{Tag} & \textbf{What a failure indicates} & \textbf{Cross-module bug indicated on failure} \\
+\hline
+SC-1 & \texttt{[analytical]} &
+  $Z_{\text{Thev}}(\text{bus}2) \neq Z_{\text{line}}$ — Z-bus construction or
+  LU solve is wrong for the minimal 2-bus case. &
+  \texttt{build\_fault\_ybus} / \texttt{compute\_zkk} \\
+SC-2 & \texttt{[analytical]} &
+  $Z_{kk}$ does not accumulate correctly along a radial path — series-impedance
+  superposition is broken. &
+  \texttt{compute\_zkk} / Y-bus assembly \\
+SC-3 & \texttt{[ieee14]} &
+  Non-positive $S_k$ or negative $\mathrm{Re}(Z_{kk})$ on the 14-bus system —
+  passivity or sign convention violated; API consistency failure. &
+  \texttt{compute\_short\_circuit} \\
+SC-4 & \texttt{[api]} &
+  Single-bus API (\texttt{compute\_fault\_at\_bus}) disagrees with the full
+  batch solve — two code paths use different factorisations. &
+  \texttt{compute\_fault\_at\_bus} vs batch \\
+SC-5 & \texttt{[fault\_types]} &
+  $I_{\text{SLG}} < 0.99\,I_{\text{3PH}}$ for $Z_0 = Z_1$ — the SLG formula
+  or sequence-impedance routing is wrong. &
+  Sequence-network assembly \\
+SC-6 & \texttt{[iec60909]} &
+  $S_k(c=1.1)$ is not $\approx 21\,\%$ larger than $S_k(c=1.0)$ — the
+  $c$-factor scaling in $V_0$ or $S_k$ formula is broken. &
+  \texttt{SCOptions::c\_factor} path \\
+SC-7 & \texttt{[ieee33bw]} &
+  $S_k(\text{bus}1) < S_k(\text{bus}18)$, or single-bus API disagrees with
+  batch — radial-feeder attenuation not reproduced. &
+  Feeder topology / API round-trip \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Observed Numerical Results}
+
+\paragraph{Test SC-1 — 2-bus analytical.}
+\begin{table}[ht]
+\centering
+\caption{Test SC-1: 2-bus Thévenin impedance (100\,MVA base, $Z_{\text{line}} = 0.20 + 0.40j$\,pu).}
+\label{tab:sc1_results}
+\small
+\begin{tabular}{lll}
+\hline
+\textbf{Quantity} & \textbf{Analytical} & \textbf{Computed} \\
+\hline
+$Z_{\text{Thev}}(\text{bus}2)$ & $0.200 + 0.400j$\,pu & $0.200 + 0.401j$\,pu \\
+$|Z_{\text{Thev}} - Z_{\text{line}}|$ & — & $0.001$\,pu \\
+$S_k(\text{bus}2)$ & — & $223.16$\,MVA \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Test SC-2 — 3-bus radial analytical.}
+\begin{table}[ht]
+\centering
+\caption{Test SC-2: 3-bus radial Thévenin impedances
+  ($Z_{12} = 0.20+0.40j$\,pu, $Z_{23} = 0.30+0.60j$\,pu, 100\,MVA base).}
+\label{tab:sc2_results}
+\small
+\begin{tabular}{lllll}
+\hline
+\textbf{Bus} & \textbf{Analytical $Z_{kk}$} & \textbf{Computed $Z_{kk}$} & \textbf{Error} & \textbf{$S_k$ (MVA)} \\
+\hline
+1 (source) & $0$\,pu (ideal) & — & — & $100\,000$ \\
+2           & $0.20 + 0.40j$ & $0.200 + 0.401j$ & $0.001$\,pu & $223.16$ \\
+3           & $0.50 + 1.00j$ & $0.500 + 1.001j$ & $0.001$\,pu & $89.37$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Test SC-3 — IEEE 14-bus self-consistency.}
+\begin{table}[ht]
+\centering
+\caption{Test SC-3: IEEE 14-bus 3PH short-circuit levels ($c = 1.1$, 100\,MVA base).}
+\label{tab:sc3_results}
+\small
+\begin{tabular}{rrrr}
+\hline
+\textbf{Bus} & \textbf{$S_k$ (MVA)} & \textbf{$I''_{k}$ (kA)} & \textbf{$Z_{kk}$ (pu)} \\
+\hline
+ 1 & 1783.23 & 8.51 & $0.00804 + 0.06738j$ \\
+ 2 & 2239.62 & 10.68 & $0.00581 + 0.05371j$ \\
+ 3 & 1488.46 & 7.10 & $0.01109 + 0.08053j$ \\
+ 4 & 2847.76 & 13.58 & $0.00291 + 0.04239j$ \\
+ 5 & 2487.39 & 11.86 & $0.00461 + 0.04843j$ \\
+ 6 & 1521.29 & 7.25 & $0.00436 + 0.07942j$ \\
+ 7 & 1526.74 & 7.28 & $0.00155 + 0.07924j$ \\
+ 8 & 1042.55 & 4.97 & $0.000437 + 0.11606j$ \\
+ 9 & 1163.88 & 5.55 & $0.00894 + 0.10358j$ \\
+10 &  799.78 & 3.81 & $0.03229 + 0.14781j$ \\
+11 &  681.67 & 3.25 & $0.05146 + 0.16988j$ \\
+12 &  515.53 & 2.46 & $0.09446 + 0.21486j$ \\
+13 &  755.63 & 3.60 & $0.04856 + 0.15259j$ \\
+14 &  496.14 & 2.37 & $0.08268 + 0.22944j$ \\
+\hline
+\multicolumn{4}{l}{$S_k^{\max}$ at bus~4 (2847.76\,MVA); all $\mathrm{Re}(Z_{kk}) \geq 0$.} \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Tests SC-4, SC-5, SC-6 — API round-trip, fault types, c-factor.}
+\begin{table}[ht]
+\centering
+\caption{Tests SC-4 through SC-6 observed results.}
+\label{tab:sc456_results}
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Test} & \textbf{Quantity} & \textbf{Threshold / expected} & \textbf{Observed} \\
+\hline
+SC-4 & $|Z_{kk}^{\text{single}} - Z_{kk}^{\text{batch}}|$  & $< 10^{-12}$\,pu & $0$\,pu (exact) \\
+     & $|S_k^{\text{single}} - S_k^{\text{batch}}|$  & $< 10^{-12}$\,MVA & $0$\,MVA \\
+SC-5 & $I_{\text{3PH}}$      & $> 0$            & 3.153\,pu \\
+     & $I_{\text{SLG}}$      & $\geq 0.99\,I_{\text{3PH}}$ & 3.153\,pu ($= I_{\text{3PH}}$) \\
+SC-6 & $S_k(c=1.0)$         & —                & 392.23\,MVA \\
+     & $S_k(c=1.1)$         & $\in [1.15,\,1.30]\times S_k(c=1.0)$ & 474.60\,MVA (ratio\,1.21) \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Test SC-7 — IEEE 33-bus BW feeder.}
+\begin{table}[ht]
+\centering
+\caption{Test SC-7: IEEE 33-bus BW radial feeder short-circuit levels ($c = 1.1$, 10\,MVA base).}
+\label{tab:sc7_results}
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Check} & \textbf{Quantity} & \textbf{Threshold} & \textbf{Observed} \\
+\hline
+SC-7a & $S_k(\text{bus}1) = S_k^{\max}$  & equality & 60.50\,MVA (bus~1 = max over 33 buses) \\
+SC-7b & $S_k(\text{bus}18)$              & $< 0.5 \times S_k(\text{bus}1)$ & 11.70\,MVA ($19.3\,\%$ of bus~1) \\
+SC-7c & API round-trip bus~18            & $|S_k^{\text{single}} - S_k^{\text{batch}}| < 10^{-4}$ & $0$\,MVA (exact) \\
+\hline
+\multicolumn{4}{l}{All 33 buses: $S_k > 0$, $\mathrm{Re}(Z_{kk}) \geq 0$, $I''_k > 0$ and finite.} \\
+\hline
+\end{tabular}
+\end{table}
+
 % ------------------------------------------------------------
 \subsection{Summary and Pass Rates}
 \label{sec:test_summary}
@@ -1212,10 +1421,11 @@ P2-D2 & Carbon intensity (all 32 load buses) & $\leq 0.606$\,tCO$_2$/MWh & 0.600
 \texttt{test\_topology\_crossval}   & 325      &  1  &  1  & 100\,\% \\
 \texttt{test\_powerflow\_performance} & 324      &  1  &  1  & 100\,\% \\
 \texttt{test\_crossmodule\_integration} & 326--327 &  2  &  2  & 100\,\% \\
+\texttt{test\_short\_circuit\_crossval} & 328--334 &  7  &  7  & 100\,\% \\
 \hline
 Pre-existing suites                 & 1--47 & 47  & 47  & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--327   & \textbf{327} & \textbf{325}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--334   & \textbf{334} & \textbf{332}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline

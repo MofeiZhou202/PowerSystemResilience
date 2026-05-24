@@ -75,3 +75,13 @@ hacdcpf_add_test(test_topology_crossval test_topology_crossval.cpp)
 #   A+B: IEEE 14-bus — PF/OPF consistency + carbon balance (tests A1–A6, B1–B4)
 #   C+D: IEEE 33-bus BW — ONR loss improvement + carbon balance (tests C1–C4, D1–D3)
 hacdcpf_add_test(test_crossmodule_integration test_crossmodule_integration.cpp)
+
+# Short-circuit analysis: Z-bus Thévenin cross-validation + IEC 60909 checks.
+#   1. 2-bus analytical: Z_Thev = Z_line
+#   2. 3-bus radial: Z_Thev(k) = sum of series impedances along path to source
+#   3. IEEE 14-bus: positivity, passivity, single-bus API consistency
+#   4. Single-bus API round-trip (compute_fault_at_bus matches full batch solve)
+#   5. Fault-type ratios: SLG ≈ 3PH for simplified Z0=Z1 model
+#   6. IEC c-factor: Sk ∝ c²  (ratio ≈ 1.21 for c=1.0 vs c=1.1)
+#   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
+hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)

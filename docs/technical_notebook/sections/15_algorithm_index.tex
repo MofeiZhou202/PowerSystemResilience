@@ -1,0 +1,1256 @@
+% ============================================================
+\section{Algorithm Index: Pseudo-Code and Flowcharts}
+\label{sec:algo-full}
+% ============================================================
+
+This section provides the detailed pseudo-code and TikZ flowchart for every
+algorithm listed in the quick-reference table of
+Section~\ref{sec:algorithms}.  The presentation is code-aligned: each
+pseudo-code block reflects the actual control flow of the corresponding C++
+translation unit, and each flowchart can be used to validate the
+implementation at a glance.  Cross-references to the mathematical
+formulations are given inline.
+
+% ============================================================
+\subsection{Model Utilities (A1--A2)}
+\label{sec:algo-model-utils}
+% ============================================================
+
+% ─── A1 ────────────────────────────────────────────────────────────────────
+\subsubsection{A1: Rich-Model Projection (\texttt{project\_to\_canonical})}
+\label{algo:a1}
+
+\texttt{A1} maps the rich \texttt{HybridPowerSystem} (which may contain
+three-winding transformers, merged bus groups, per-unit inconsistencies, and
+multi-period storage) to a \texttt{CanonicalPowerSystem} consumed by all
+downstream solvers.  The projection enforces a single global per-unit base,
+linearises transformer models, and aggregates shunt admittances.
+
+\paragraph{Algorithm A1: Rich-Model Projection}
+\begin{algorithmic}[1]
+\Procedure{project\_to\_canonical}{$\mathit{sys}$: HybridPowerSystem}
+  \State Validate $S_\mathrm{base}$ and bus $V_\mathrm{base}$ vectors; raise on NaN/Inf
+  \State Expand three-winding transformers to three star branches (with virtual bus)
+  \State Merge bus groups via \texttt{bus\_merge\_map}: re-index all device references
+  \State For each AC branch: convert $r,x,b$ to pu on system base; store tap ratio
+  \For{each generator $g$}
+    \State Convert $P_g, Q_g, P_g^{\min}, P_g^{\max}$ to pu; clip to limits
+  \EndFor
+  \For{each AC bus $i$}
+    \State Aggregate shunt $G_i + jB_i$ from inline shunts, transformers, and line charging
+    \State Aggregate load $P_{L,i} + jQ_{L,i}$ from all attached load objects
+  \EndFor
+  \State Project DC network: convert DC bus voltages and branch resistances to pu
+  \State Project VSC converters: map $P_\mathrm{set}, Q_\mathrm{set}$ to pu
+  \State \Return $\mathit{canonical}$
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (in)  {HybridPowerSystem \textit{sys}};
+  \node[flowbox, below=of in]  (val)  {Validate base MVA / kV};
+  \node[flowbox, below=of val] (t3w)  {Expand 3W transformers\\to star branches};
+  \node[flowbox, below=of t3w] (mrg)  {Merge bus groups};
+  \node[flowbox, below=of mrg] (br)   {Convert branches to pu};
+  \node[flowbox, below=of br]  (gen)  {Convert generators to pu};
+  \node[flowbox, below=of gen] (shnt) {Aggregate shunts \& loads};
+  \node[flowbox, below=of shnt](dc)   {Project DC network \& VSC};
+  \node[flowbox, below=of dc]  (out)  {Return CanonicalPowerSystem};
+  \draw[flowline] (in)   -- (val);
+  \draw[flowline] (val)  -- (t3w);
+  \draw[flowline] (t3w)  -- (mrg);
+  \draw[flowline] (mrg)  -- (br);
+  \draw[flowline] (br)   -- (gen);
+  \draw[flowline] (gen)  -- (shnt);
+  \draw[flowline] (shnt) -- (dc);
+  \draw[flowline] (dc)   -- (out);
+\end{tikzpicture}
+\caption{Algorithm A1: rich-model projection (\texttt{project\_to\_canonical}).}
+\label{fig:a1-flow}
+\end{figure}
+
+% ─── A2 ────────────────────────────────────────────────────────────────────
+\subsubsection{A2: \texttt{SolverData} Construction}
+\label{algo:a2}
+
+\texttt{A2} transforms the canonical model into the internal \texttt{SolverData}
+structure that the Newton, FDPF, and DC solvers consume.  It builds the nodal
+admittance matrix $\mathbf{Y}_\mathrm{bus}$, assembles net injection vectors,
+and classifies buses by type (Slack, PV, PQ, DC).
+
+\paragraph{Algorithm A2: SolverData Construction}
+\begin{algorithmic}[1]
+\Procedure{make\_solver\_data}{$\mathit{sys}$: HybridPowerSystem, $\mathit{loss}$: LossModel}
+  \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$} \Comment{A1}
+  \State Allocate $\mathbf{Y}_\mathrm{bus} \in \mathbb{C}^{n \times n}$ (sparse, COO triplets)
+  \For{each branch $(i,j)$ with $y_{ij} = 1/(r_{ij}+jx_{ij})$, tap $t_{ij}$}
+    \State $\mathbf{Y}_{ii} \mathrel{+}= y_{ij}/|t_{ij}|^2 + jb_{ij}/2$;\quad
+           $\mathbf{Y}_{jj} \mathrel{+}= y_{ij} + jb_{ij}/2$;\quad
+           $\mathbf{Y}_{ij} \mathrel{-}= y_{ij}/\bar{t}_{ij}$
+  \EndFor
+  \For{each bus $i$}
+    \State $\mathbf{Y}_{ii} \mathrel{+}= G_i + jB_i$ \Comment{shunts}
+    \State $P_i \gets P_{G,i} - P_{L,i}$;\quad $Q_i \gets Q_{G,i} - Q_{L,i}$
+  \EndFor
+  \State Identify slack bus (angle reference); classify PV / PQ buses
+  \State Build Jacobian sparsity from $\mathbf{Y}_\mathrm{bus}$ non-zero pattern
+  \State Attach converter interface data (VSC, DCDC) to \texttt{SolverData}
+  \State \Return \textit{SolverData}\{$\mathbf{Y}_\mathrm{bus}$, $\mathbf{P}$, $\mathbf{Q}$, bus\_types, \ldots\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (a1)   {Call A1: project\_to\_canonical};
+  \node[flowbox, below=of a1]  (ybus) {Build $\mathbf{Y}_\mathrm{bus}$ (sparse COO)};
+  \node[flowbox, below=of ybus](inj)  {Compute net $P_i$, $Q_i$ injections};
+  \node[flowbox, below=of inj] (cls)  {Classify buses: Slack/PV/PQ/DC};
+  \node[flowbox, below=of cls] (jac)  {Build Jacobian sparsity pattern};
+  \node[flowbox, below=of jac] (conv) {Attach converter models};
+  \node[flowbox, below=of conv](out)  {Return SolverData};
+  \draw[flowline] (a1)   -- (ybus);
+  \draw[flowline] (ybus) -- (inj);
+  \draw[flowline] (inj)  -- (cls);
+  \draw[flowline] (cls)  -- (jac);
+  \draw[flowline] (jac)  -- (conv);
+  \draw[flowline] (conv) -- (out);
+\end{tikzpicture}
+\caption{Algorithm A2: \texttt{SolverData} construction.}
+\label{fig:a2-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Power-Flow Solvers (A3--A7)}
+\label{sec:algo-pf}
+% ============================================================
+
+% ─── A3 ────────────────────────────────────────────────────────────────────
+\subsubsection{A3: Hybrid AC/DC Newton Power Flow (\texttt{NewtonSolver})}
+\label{algo:a3}
+
+The full pseudo-code for \textbf{A3} appears in Section~\ref{sec:pf-newton-algorithm}
+(Algorithm PF-1).  Here we provide the condensed flowchart for the
+validation-oriented view.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 22mm]
+  \node[flowbox]   (init)  {Flat start or warm init $x^{(0)}$};
+  \node[flowbox,   below=of init]  (res)   {Evaluate $F(x^{(k)})$, form $J$};
+  \node[decision,  below=of res]   (conv)  {$\|F\|_\infty < \varepsilon$?};
+  \node[flowbox,   below=of conv]  (lu)    {SparseLU: solve $J\Delta x = -F$};
+  \node[flowbox,   below=of lu]    (clip)  {Clip $\Delta\theta, \Delta V$; line search};
+  \node[flowbox,   below=of clip]  (upd)   {$x \gets x + \alpha\Delta x$; PV/PQ switch};
+  \node[decision,  below=of upd]   (lim)   {Iteration limit?};
+  \node[flowbox,   right=3cm of conv] (ok) {Return converged result};
+  \node[flowbox,   right=3cm of lim]  (fail){Return non-converged};
+  \draw[flowline] (init) -- (res);
+  \draw[flowline] (res)  -- (conv);
+  \draw[flowline] (conv) -- node[right,font=\small]{no} (lu);
+  \draw[flowline] (lu)   -- (clip);
+  \draw[flowline] (clip) -- (upd);
+  \draw[flowline] (upd)  -- (lim);
+  \draw[flowline] (lim)  -- node[above,font=\small]{yes} (fail);
+  \draw[flowline] (conv) -- node[above,font=\small]{yes} (ok);
+  \draw[flowline] (lim.west) -- ++(-0.5,0) |- (res.west)
+    node[pos=0.25,left,font=\small]{no};
+\end{tikzpicture}
+\caption{Algorithm A3: Hybrid Newton PF (\texttt{NewtonSolver::solve}).}
+\label{fig:a3-flow}
+\end{figure}
+
+% ─── A4 ────────────────────────────────────────────────────────────────────
+\subsubsection{A4: Fast-Decoupled Power Flow (\texttt{FDPFSolver})}
+\label{algo:a4}
+
+The full pseudo-code for \textbf{A4} appears in Section~\ref{sec:pf-newton-algorithm}
+(Algorithm PF-2).  The flowchart below highlights the two-matrix decoupled
+structure.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 20mm]
+  \node[flowbox]  (bld)  {Build $B'$, $B''$; factorize};
+  \node[decision, below=of bld]  (fok) {Factorization OK?};
+  \node[flowbox,  below=of fok]  (dp)  {$B'\,\Delta\theta = \Delta P/V$; update $\theta$};
+  \node[flowbox,  below=of dp]   (dq)  {$B''\,\Delta V = \Delta Q/V$; update $V$};
+  \node[decision, below=of dq]   (cv)  {$\|\Delta P\|,\|\Delta Q\| < \varepsilon$?};
+  \node[flowbox,  right=2.8cm of cv]  (ok)   {Return converged};
+  \node[flowbox,  right=2.8cm of fok] (fail) {Return non-converged};
+  \draw[flowline] (bld) -- (fok);
+  \draw[flowline] (fok) -- node[right,font=\small]{yes} (dp);
+  \draw[flowline] (fok) -- node[above,font=\small]{no}  (fail);
+  \draw[flowline] (dp)  -- (dq);
+  \draw[flowline] (dq)  -- (cv);
+  \draw[flowline] (cv)  -- node[above,font=\small]{yes} (ok);
+  \draw[flowline] (cv.west) -- ++(-0.45,0) |- (dp.west)
+    node[pos=0.25,left,font=\small]{no};
+\end{tikzpicture}
+\caption{Algorithm A4: Fast-decoupled PF (\texttt{FDPFSolver::solve}).}
+\label{fig:a4-flow}
+\end{figure}
+
+% ─── A5 ────────────────────────────────────────────────────────────────────
+\subsubsection{A5: DC-Only Power Flow (\texttt{DCSolver})}
+\label{algo:a5}
+
+The DC solver solves the linear system $B'\theta = P_\mathrm{inj}$ via a single
+SparseLU factorisation.  It is used as the DC-network sub-solver inside all
+hybrid AC/DC routines.
+
+\paragraph{Algorithm A5: DC-Only PF}
+\begin{algorithmic}[1]
+\Procedure{DCSolver::solve}{$\mathit{data}$: SolverData}
+  \State Identify DC slack bus; remove its row/column from $B'$
+  \State $B' \gets -\Im\{\mathbf{Y}_\mathrm{dc}\}$ (reduced, AC shunts excluded)
+  \State Factorize $B'$ via \texttt{Eigen::SparseLU}; abort if singular
+  \State $\theta \gets (B')^{-1} P_\mathrm{inj}$;\quad insert $\theta_\mathrm{slack}=0$
+  \State For each branch $(i,j)$: $P_{ij} = B_{ij}(\theta_i - \theta_j)$
+  \State \Return DCPFResult\{$\theta, P_{ij}$, converged=true\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (bld)  {Build reduced $B'$ matrix};
+  \node[decision, below=of bld]  (fok) {Factorize $B'$ (SparseLU) OK?};
+  \node[flowbox,  below=of fok]  (slv) {Solve $B'\theta = P_\mathrm{inj}$};
+  \node[flowbox,  below=of slv]  (flw) {Compute branch flows $P_{ij}$};
+  \node[flowbox,  below=of flw]  (out) {Return DCPFResult};
+  \node[flowbox,  right=2.8cm of fok] (fail){Return singular / failed};
+  \draw[flowline] (bld)  -- (fok);
+  \draw[flowline] (fok)  -- node[right,font=\small]{yes} (slv);
+  \draw[flowline] (fok)  -- node[above,font=\small]{no}  (fail);
+  \draw[flowline] (slv)  -- (flw);
+  \draw[flowline] (flw)  -- (out);
+\end{tikzpicture}
+\caption{Algorithm A5: DC-only power flow (\texttt{DCSolver::solve}).}
+\label{fig:a5-flow}
+\end{figure}
+
+% ─── A6 ────────────────────────────────────────────────────────────────────
+\subsubsection{A6: Island-Aware Adaptive Solver (\texttt{AdaptiveSolver})}
+\label{algo:a6}
+
+\texttt{A6} detects connected components (islands) in the hybrid network graph
+and dispatches each island to a sub-solver independently.  Islands without
+generators are declared dead (zero voltage); energised islands are solved in
+parallel via a thread pool.
+
+\paragraph{Algorithm A6: Island-Aware Adaptive Solver}
+\begin{algorithmic}[1]
+\Procedure{AdaptiveSolver::solve}{$\mathit{sys}$, $\mathit{opt}$}
+  \State $\mathit{islands} \gets$ \Call{detect\_islands}{$\mathit{sys}$}
+  \If{$|\mathit{islands}| = 1$ \textbf{and} $\mathit{islands}[0]$.has\_generators}
+    \State $\mathit{data} \gets$ \Call{make\_solver\_data}{$\mathit{sys}$}
+    \State \Return \Call{NewtonSolver::solve}{$\mathit{data}$, $\mathit{opt}$} \Comment{fast path}
+  \EndIf
+  \For{each island $\mathit{isl}$ \textbf{in parallel}}
+    \If{\textbf{not} $\mathit{isl}$.has\_generators}
+      \State Set all bus voltages in $\mathit{isl}$ to zero \Comment{dead island}
+    \Else
+      \State $\mathit{sub} \gets$ \Call{make\_solver\_data\_projected}{$\mathit{sys}$, $\mathit{isl}$}
+      \State $r_\mathit{isl} \gets$ \Call{NewtonSolver::solve}{$\mathit{sub}$, $\mathit{opt}$}
+      \State Map $r_\mathit{isl}$ back to global bus indices
+    \EndIf
+  \EndFor
+  \State Assemble and \Return \textit{AdaptiveSolveResult}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 24mm]
+  \node[flowbox]  (det)  {Detect islands (graph connectivity)};
+  \node[decision, below=of det]  (one)  {Single energised island?};
+  \node[flowbox,  right=3.2cm of one] (fast) {Direct Newton solve (A3)};
+  \node[flowbox,  below=of one]  (for)  {For each island (thread pool)};
+  \node[decision, below=of for]  (gen)  {Has generators?};
+  \node[flowbox,  right=3.2cm of gen]  (dead) {Zero voltage (dead island)};
+  \node[flowbox,  below=of gen]  (sub)  {Extract subgraph; Newton solve};
+  \node[flowbox,  below=of sub]  (map)  {Map results to global indices};
+  \node[flowbox,  below=of map]  (asm)  {Assemble AdaptiveSolveResult};
+  \draw[flowline] (det)  -- (one);
+  \draw[flowline] (one)  -- node[above,font=\small]{yes} (fast);
+  \draw[flowline] (one)  -- node[right,font=\small]{no}  (for);
+  \draw[flowline] (for)  -- (gen);
+  \draw[flowline] (gen)  -- node[above,font=\small]{no}  (dead);
+  \draw[flowline] (gen)  -- node[right,font=\small]{yes} (sub);
+  \draw[flowline] (sub)  -- (map);
+  \draw[flowline] (map)  -- (asm);
+  \draw[flowline] (dead.south) |- (asm.east);
+  \draw[flowline] (fast.south) |- (asm.east);
+\end{tikzpicture}
+\caption{Algorithm A6: island-aware adaptive solver (\texttt{AdaptiveSolver::solve}).}
+\label{fig:a6-flow}
+\end{figure}
+
+% ─── A7 ────────────────────────────────────────────────────────────────────
+\subsubsection{A7: Distributed-Slack Power Flow}
+\label{algo:a7}
+
+The distributed-slack solver (Section~\ref{sec:distributed-slack}) allocates
+the active-power mismatch across a set of participating generators according to
+normalized participation factors $\alpha_g$.  Two variants are provided:
+\emph{simplified} (one post-Newton redistribution pass) and
+\emph{full-Jacobian} (augmented Newton system).
+
+\paragraph{Algorithm A7: Distributed-Slack PF (simplified variant)}
+\begin{algorithmic}[1]
+\Procedure{DistributedSlackSolver::solve\_simplified}{$\mathit{sys}$, $\mathit{cfg}$, $\mathit{opt}$}
+  \State $\mathit{data} \gets$ \Call{make\_solver\_data}{$\mathit{sys}$}
+  \State $r \gets$ \Call{NewtonSolver::solve}{$\mathit{data}$, $\mathit{opt}$}
+  \State $\Delta P_s \gets$ total active mismatch at slack bus
+  \State Normalize: $\alpha_g \gets \alpha_g^0 / \sum \alpha_g^0$ for participating generators
+  \For{each generator $g$ in participating set}
+    \State $P_g \gets P_g + \alpha_g\,\Delta P_s$;\quad clamp to $[P_g^{\min}, P_g^{\max}]$
+  \EndFor
+  \State Re-run Newton on updated dispatch; \Return \textit{DistributedSlackResult}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 20mm]
+  \node[flowbox]  (nr)   {Newton PF base solve (A3)};
+  \node[flowbox,  below=of nr]   (mis)  {Compute slack mismatch $\Delta P_s$};
+  \node[flowbox,  below=of mis]  (nrm)  {Normalize participation factors $\alpha_g$};
+  \node[flowbox,  below=of nrm]  (red)  {Redistribute: $P_g \mathrel{+}= \alpha_g\Delta P_s$};
+  \node[flowbox,  below=of red]  (nr2)  {Re-run Newton on updated dispatch};
+  \node[flowbox,  below=of nr2]  (out)  {Return DistributedSlackResult};
+  \draw[flowline] (nr)  -- (mis);
+  \draw[flowline] (mis) -- (nrm);
+  \draw[flowline] (nrm) -- (red);
+  \draw[flowline] (red) -- (nr2);
+  \draw[flowline] (nr2) -- (out);
+\end{tikzpicture}
+\caption{Algorithm A7: distributed-slack power flow (simplified variant).}
+\label{fig:a7-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Optimal Power Flow Solvers (A8--A12)}
+\label{sec:algo-opf}
+% ============================================================
+
+% ─── A8 ────────────────────────────────────────────────────────────────────
+\subsubsection{A8: AC OPF Top-Level Routing (\texttt{solve\_ac\_opf})}
+\label{algo:a8}
+
+\texttt{A8} implements the fallback cascade described in
+Section~\ref{sec:advanced-pf}: native IPM $\to$ parity NLP (Ipopt/SCIP)
+$\to$ fast dispatch + PF $\to$ DC OPF lower bound.
+
+\paragraph{Algorithm A8: AC OPF Routing}
+\begin{algorithmic}[1]
+\Procedure{solve\_ac\_opf}{$\mathit{sys}$, $\mathit{opt}$}
+  \If{$\mathit{opt}$.use\_native\_ipm}
+    \State $r \gets$ \Call{native\_ipm\_solve}{$\mathit{sys}$, $\mathit{opt}$} \Comment{A9 + A10}
+    \If{$r$.converged} \Return $r$ \EndIf
+  \EndIf
+  \If{$\mathit{opt}$.use\_parity}
+    \State $\mathit{nlp} \gets$ \Call{build\_parity\_nlp}{$\mathit{sys}$} \Comment{A9}
+    \State $r \gets$ \Call{ipopt\_solve}{$\mathit{nlp}$}
+    \If{$r$.converged} \Return $r$ \EndIf
+  \EndIf
+  \If{$\mathit{opt}$.use\_fast\_dispatch}
+    \State $r \gets$ \Call{fast\_dispatch\_plus\_pf}{$\mathit{sys}$, $\mathit{opt}$}
+    \If{$r$.converged} \Return $r$ \EndIf
+  \EndIf
+  \State \Return \Call{solve\_dc\_opf}{$\mathit{sys}$, $\mathit{opt}$} \Comment{A11, lower bound}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 24mm]
+  \node[flowbox]  (nat)  {Try native IPM (A9+A10)};
+  \node[decision, below=of nat]  (d1)   {Converged?};
+  \node[flowbox,  below=of d1]   (par)  {Try parity NLP $\to$ Ipopt};
+  \node[decision, below=of par]  (d2)   {Converged?};
+  \node[flowbox,  below=of d2]   (fd)   {Try fast dispatch + PF};
+  \node[decision, below=of fd]   (d3)   {Converged?};
+  \node[flowbox,  below=of d3]   (dc)   {DC OPF lower bound (A11)};
+  \node[flowbox,  right=3.2cm of d1] (ok) {Return ACOPFResult};
+  \draw[flowline] (nat) -- (d1);
+  \draw[flowline] (d1)  -- node[right,font=\small]{no}  (par);
+  \draw[flowline] (d1)  -- node[above,font=\small]{yes} (ok);
+  \draw[flowline] (par) -- (d2);
+  \draw[flowline] (d2)  -- node[right,font=\small]{no}  (fd);
+  \draw[flowline] (d2.east) -- node[above,font=\small]{yes} (ok.south |- d2.east);
+  \draw[flowline] (fd)  -- (d3);
+  \draw[flowline] (d3)  -- node[right,font=\small]{no}  (dc);
+  \draw[flowline] (d3.east) -- node[above,font=\small]{yes} (ok.south |- d3.east);
+  \draw[flowline] (dc.east)  -| (ok);
+\end{tikzpicture}
+\caption{Algorithm A8: AC OPF top-level routing cascade.}
+\label{fig:a8-flow}
+\end{figure}
+
+% ─── A9 ────────────────────────────────────────────────────────────────────
+\subsubsection{A9: Parity Full-Space NLP Construction}
+\label{algo:a9}
+
+\texttt{A9} constructs the full-space NLP (Section~\ref{sec:opf})
+with analytic first and second derivatives.  All variable bounds, power-balance
+equalities, and branch-flow inequalities are encoded as standard NLP callbacks.
+
+\paragraph{Algorithm A9: Parity NLP Construction}
+\begin{algorithmic}[1]
+\Procedure{build\_parity\_nlp}{$\mathit{data}$: SolverData}
+  \State Enumerate decision variables: $\theta_i$, $V_i$, $P_g$, $Q_g$, $P_\mathrm{vsc}$, $Q_\mathrm{vsc}$
+  \State Build cost function: $f = \sum_g (c_{2,g} P_g^2 + c_{1,g} P_g + c_{0,g})$
+  \State Add AC power-balance equalities (\ref{eq:pf-residual}):
+    $P_i(\theta,V) = P_{\mathrm{inj},i}$ and $Q_i(\theta,V) = Q_{\mathrm{inj},i}$
+  \State Add VSC P/Q coupling constraints
+  \State Add DC power-balance equalities
+  \State Add inequality constraints: $P_g^{\min} \le P_g \le P_g^{\max}$;
+    $|S_{ij}|^2 \le S_{ij,\max}^2$
+  \State Compute analytic sparse Jacobian structure (row/col pattern)
+  \State Compute Lagrangian Hessian sparsity (upper triangle)
+  \State Implement $f$, $\nabla f$, $g$, $\nabla g$, $\mathcal{L}_{xx}$ callbacks
+  \State \Return \textit{NLPProblem}\{callbacks, sparsity, bounds\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (var)  {Enumerate variables ($\theta$, $V$, $P_g$, $Q_g$, VSC)};
+  \node[flowbox,  below=of var]  (obj)  {Build quadratic cost $f$};
+  \node[flowbox,  below=of obj]  (eq)   {Add AC/DC power-balance equalities};
+  \node[flowbox,  below=of eq]   (vsc)  {Add VSC coupling constraints};
+  \node[flowbox,  below=of vsc]  (ineq) {Add gen limits + branch thermal limits};
+  \node[flowbox,  below=of ineq] (jac)  {Compute Jacobian sparsity};
+  \node[flowbox,  below=of jac]  (hess) {Compute Hessian sparsity};
+  \node[flowbox,  below=of hess] (ret)  {Return NLPProblem};
+  \draw[flowline] (var)  -- (obj);
+  \draw[flowline] (obj)  -- (eq);
+  \draw[flowline] (eq)   -- (vsc);
+  \draw[flowline] (vsc)  -- (ineq);
+  \draw[flowline] (ineq) -- (jac);
+  \draw[flowline] (jac)  -- (hess);
+  \draw[flowline] (hess) -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A9: parity full-space NLP construction.}
+\label{fig:a9-flow}
+\end{figure}
+
+% ─── A10 ───────────────────────────────────────────────────────────────────
+\subsubsection{A10: Parity Primal-Dual IPM Solve (\texttt{parity\_ipm})}
+\label{algo:a10}
+
+\texttt{A10} implements a Mehrotra predictor-corrector interior-point method
+on the NLP produced by A9.  It solves the KKT system (Section~\ref{sec:engine-nlp-ipm})
+at each outer iteration.
+
+\paragraph{Algorithm A10: Parity IPM}
+\begin{algorithmic}[1]
+\Procedure{parity\_ipm\_solve}{$\mathit{nlp}$: NLPProblem, $\mathit{opt}$: IPMOptions}
+  \State Initialise: $x_0$ interior, slacks $s_0 > 0$, duals $\lambda_0, \mu_0 > 0$,
+    barrier $\bar\mu_0$
+  \For{$k = 1,\ldots,\mathit{opt.max\_iter}$}
+    \State Evaluate $f,\nabla f, g, \nabla g, \mathcal{L}_{xx}$
+    \State \emph{Predictor}: solve KKT with $\sigma=0$ (affine direction)
+      $\Rightarrow (\Delta x_a, \Delta\lambda_a, \Delta s_a)$
+    \State Compute $\bar\mu_a \gets (s_0 + \alpha_a \Delta s_a)^\top
+      (\mu_0 + \alpha_a \Delta\mu_a) / n_s$
+    \State Centering: $\sigma \gets (\bar\mu_a / \bar\mu)^3$
+    \State \emph{Corrector}: solve KKT with $\sigma\bar\mu$ centering
+      $\Rightarrow (\Delta x, \Delta\lambda, \Delta s)$
+    \State Step sizes: $\alpha_p \gets$ primal fraction-to-boundary;
+      $\alpha_d \gets$ dual
+    \State Update $(x, \lambda, s, \mu) \mathrel{+}= (\alpha_p, \alpha_d, \alpha_p, \alpha_d)
+      \cdot (\Delta x, \Delta\lambda, \Delta s, \Delta\mu)$
+    \State $\bar\mu \gets s^\top\mu / n_s$
+    \If{$\|r_\mathrm{KKT}\|_\infty < \varepsilon$ \textbf{and} $\bar\mu < \varepsilon_\mu$}
+      \Return OPTIMAL
+    \EndIf
+  \EndFor
+  \State \Return MAXITER (infeasible / ill-posed signal)
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 20mm]
+  \node[flowbox]  (ini)  {Initialise interior point $(x_0, s_0, \lambda_0, \bar\mu_0)$};
+  \node[flowbox,  below=of ini]  (eval) {Evaluate $f$, $\nabla f$, $g$, $\nabla g$, $\mathcal{L}_{xx}$};
+  \node[flowbox,  below=of eval] (pred) {Mehrotra predictor: KKT ($\sigma{=}0$)};
+  \node[flowbox,  below=of pred] (cent) {Compute centering $\sigma = (\bar\mu_a/\bar\mu)^3$};
+  \node[flowbox,  below=of cent] (corr) {Corrector: KKT ($\sigma\bar\mu$ centering)};
+  \node[flowbox,  below=of corr] (step) {Fraction-to-boundary step $\alpha_p, \alpha_d$};
+  \node[flowbox,  below=of step] (upd)  {Update $(x, \lambda, s, \mu)$};
+  \node[decision, below=of upd]  (kkt)  {KKT residual $<\varepsilon$?};
+  \node[flowbox,  right=3.2cm of kkt]  (opt)  {Return OPTIMAL};
+  \node[flowbox,  right=3.2cm of eval] (fail) {Return MAXITER};
+  \draw[flowline] (ini)  -- (eval);
+  \draw[flowline] (eval) -- (pred);
+  \draw[flowline] (pred) -- (cent);
+  \draw[flowline] (cent) -- (corr);
+  \draw[flowline] (corr) -- (step);
+  \draw[flowline] (step) -- (upd);
+  \draw[flowline] (upd)  -- (kkt);
+  \draw[flowline] (kkt)  -- node[above,font=\small]{yes} (opt);
+  \draw[flowline] (kkt.west) -- ++(-0.5,0) |- (eval.west)
+    node[pos=0.25,left,font=\small]{no};
+  \draw[flowline] (eval.east) -- node[above,font=\small]{iter limit} (fail);
+\end{tikzpicture}
+\caption{Algorithm A10: parity Mehrotra IPM solve.}
+\label{fig:a10-flow}
+\end{figure}
+
+% ─── A11 ───────────────────────────────────────────────────────────────────
+\subsubsection{A11: DC Optimal Power Flow (\texttt{solve\_dc\_opf})}
+\label{algo:a11}
+
+\texttt{A11} solves a linear (or quadratic cost) DC OPF as a LP/QP using
+HiGHS or SCIP as the backend.  Locational marginal prices are extracted as
+the dual variables of the nodal power-balance constraints.
+
+\paragraph{Algorithm A11: DC OPF}
+\begin{algorithmic}[1]
+\Procedure{solve\_dc\_opf}{$\mathit{sys}$, $\mathit{opt}$}
+  \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$}
+  \State Variables: $P_g \in [P_g^{\min}, P_g^{\max}]$ and $\theta_i$ (free)
+  \State Objective: $\min\sum_g (c_{2,g}P_g^2 + c_{1,g}P_g)$
+  \State Add DC power balance: $B'\theta = P_\mathrm{inj}$
+  \State Add branch flow limits: $|B_{ij}(\theta_i-\theta_j)| \le P_{ij}^{\max}$
+  \State Select backend: HiGHS (LP) if $c_{2,g}=0$, else QP
+  \State Submit and solve; extract $P_g^*, \theta^*$, duals $\pi^*$ (LMPs)
+  \State \Return \textit{DCOPFResult}\{$P_g^*, \theta^*, \pi^*$, status\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (can)  {project\_to\_canonical (A1)};
+  \node[flowbox,  below=of can]  (var)  {Declare $P_g$, $\theta_i$ with bounds};
+  \node[flowbox,  below=of var]  (obj)  {Build linear/quadratic cost};
+  \node[flowbox,  below=of obj]  (pf)   {Add DC PF constraints $B'\theta = P_\mathrm{inj}$};
+  \node[flowbox,  below=of pf]   (lim)  {Add branch flow limits};
+  \node[flowbox,  below=of lim]  (slv)  {Dispatch to HiGHS / SCIP};
+  \node[flowbox,  below=of slv]  (lmp)  {Extract $P_g^*$, LMPs $\pi^*$};
+  \node[flowbox,  below=of lmp]  (ret)  {Return DCOPFResult};
+  \draw[flowline] (can) -- (var);
+  \draw[flowline] (var) -- (obj);
+  \draw[flowline] (obj) -- (pf);
+  \draw[flowline] (pf)  -- (lim);
+  \draw[flowline] (lim) -- (slv);
+  \draw[flowline] (slv) -- (lmp);
+  \draw[flowline] (lmp) -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A11: DC OPF build and solve.}
+\label{fig:a11-flow}
+\end{figure}
+
+% ─── A12 ───────────────────────────────────────────────────────────────────
+\subsubsection{A12: Reactive-Power Optimization (\texttt{solve\_rpo})}
+\label{algo:a12}
+
+\texttt{A12} optimises discrete and continuous reactive-power resources
+(transformer tap positions, switched capacitors, generator $Q$ dispatch)
+via a four-phase outer approximation loop.  A final Newton PF verifies
+feasibility of the discrete solution.
+
+\paragraph{Algorithm A12: Reactive-Power Optimization (Outer Approximation)}
+\begin{algorithmic}[1]
+\Procedure{solve\_rpo}{$\mathit{sys}$, $\mathit{opt}$}
+  \State \textbf{Phase 1}: Build LP relaxation (relax discrete taps to continuous);
+    solve; check voltage bounds
+  \State \textbf{Phase 2}: Fix discrete taps at rounded LP solution;
+    solve NLP (inner Newton, A3) for continuous $Q$
+  \If{voltage violations detected}
+    \State Generate OA linearisation cuts around the violated point
+  \EndIf
+  \State \textbf{Phase 3}: Solve MILP with accumulated OA cuts;
+    update discrete variable set
+  \State \textbf{Phase 4}: Polish with NLP + PF verification (A3)
+  \State \Return \textit{RPOResult}\{tap positions, $Q$ dispatch, voltages, status\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 20mm]
+  \node[flowbox]  (lp)   {Phase 1: LP relaxation};
+  \node[decision, below=of lp]   (vv)   {Voltage violations?};
+  \node[flowbox,  right=3.2cm of vv]  (cut) {Generate OA cuts};
+  \node[flowbox,  below=of vv]   (nlp)  {Phase 2: NLP with fixed discrete taps};
+  \node[flowbox,  below=of nlp]  (milp) {Phase 3: MILP with OA cuts};
+  \node[flowbox,  below=of milp] (pol)  {Phase 4: NLP polish + PF verify (A3)};
+  \node[flowbox,  below=of pol]  (ret)  {Return RPOResult};
+  \draw[flowline] (lp)   -- (vv);
+  \draw[flowline] (vv)   -- node[right,font=\small]{no}  (nlp);
+  \draw[flowline] (vv)   -- node[above,font=\small]{yes} (cut);
+  \draw[flowline] (cut.south) |- (nlp.east);
+  \draw[flowline] (nlp)  -- (milp);
+  \draw[flowline] (milp) -- (pol);
+  \draw[flowline] (pol)  -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A12: reactive-power optimization (four-phase OA).}
+\label{fig:a12-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Advanced and Fallback Solvers (A13--A15)}
+\label{sec:algo-fallback}
+% ============================================================
+
+% ─── A13 ───────────────────────────────────────────────────────────────────
+\subsubsection{A13: Continuation Power Flow, Predictor--Corrector (\texttt{CpfSolver})}
+\label{algo:a13}
+
+The CPF solver (Section~\ref{sec:cpf}) traces the P--V nose curve from
+$\lambda=0$ to $\lambda_{\max}$ using a secant predictor and a Newton
+corrector at each step, with adaptive step control.
+
+\paragraph{Algorithm A13: CPF Predictor--Corrector}
+\begin{algorithmic}[1]
+\Procedure{CpfSolver::solve}{$\mathit{base}$, $\mathit{dir}$, $\mathit{opts}$}
+  \State Solve base case $\lambda=0$ via Newton (A3); \textbf{abort} if not converged
+  \State $\lambda \gets 0$;\quad $\Delta\lambda \gets \mathit{opts.step\_init}$;\quad
+    keep last two accepted solutions $x_{\mathrm{prev}}, x_\mathrm{curr}$
+  \For{$\mathit{iter} = 1,\ldots,\mathit{opts.max\_steps}$}
+    \State $\lambda_{\mathrm{next}} \gets \min(\lambda + \Delta\lambda,\;\mathit{opts.lambda\_max})$
+    \State Predictor: $x_{\mathrm{pred}} \gets x_\mathrm{curr} + \Delta\lambda \cdot
+      (x_\mathrm{curr}-x_\mathrm{prev})/(\lambda_\mathrm{curr}-\lambda_\mathrm{prev})$
+      (secant; constant on first step)
+    \State Apply loading $\lambda_{\mathrm{next}}$ to injection vector
+    \State Corrector: run Newton (A3) warm-started from $x_{\mathrm{pred}}$
+    \If{Newton converged}
+      \State Record \texttt{CpfPoint}; advance $\lambda$;
+        $\Delta\lambda \gets \min(\mathit{step\_grow}\cdot\Delta\lambda, \mathit{step\_max})$
+      \If{$\lambda \ge \lambda_{\max}$ \textbf{or} $V_{\min} < \mathit{opts.vm\_min\_pu}$}
+        \textbf{break}
+      \EndIf
+    \Else
+      \State $\Delta\lambda \gets \mathit{step\_shrink}\cdot\Delta\lambda$
+      \If{$\Delta\lambda < \mathit{opts.step\_min}$} declare nose point; \textbf{break} \EndIf
+    \EndIf
+  \EndFor
+  \State \Return \textit{CpfResult}\{trace, nose point $\lambda^*$, status\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 24mm]
+  \node[flowbox]  (base) {Solve base case $\lambda{=}0$ (A3)};
+  \node[flowbox,  below=of base] (pred) {Secant predictor $\to x_\mathrm{pred}$};
+  \node[flowbox,  below=of pred] (corr) {Newton corrector at $\lambda_\mathrm{next}$};
+  \node[decision, below=of corr] (cv)   {Corrector converged?};
+  \node[flowbox,  below=of cv]   (acc)  {Accept; grow $\Delta\lambda$; record CpfPoint};
+  \node[flowbox,  right=3.2cm of cv]  (shr)  {Shrink $\Delta\lambda$};
+  \node[decision, below=of acc]  (done) {$\lambda \ge \lambda_{\mathrm{max}}$ or nose?};
+  \node[decision, right=3.2cm of shr]  (tiny) {$\Delta\lambda < \Delta\lambda_{\mathrm{min}}$?};
+  \node[flowbox,  below=of done] (ret)  {Return CpfResult};
+  \draw[flowline] (base) -- (pred);
+  \draw[flowline] (pred) -- (corr);
+  \draw[flowline] (corr) -- (cv);
+  \draw[flowline] (cv)   -- node[right,font=\small]{yes} (acc);
+  \draw[flowline] (cv)   -- node[above,font=\small]{no}  (shr);
+  \draw[flowline] (acc)  -- (done);
+  \draw[flowline] (done) -- node[right,font=\small]{yes} (ret);
+  \draw[flowline] (done.west) -- ++(-0.5,0) |- (pred.west)
+    node[pos=0.25,left,font=\small]{no};
+  \draw[flowline] (shr)  -- (tiny);
+  \draw[flowline] (tiny.south) |- node[right,font=\small]{yes} (ret.east);
+  \draw[flowline] (tiny.west) -- ++(-0.5,0) |- (pred.north east)
+    node[pos=0.15,below,font=\small]{no};
+\end{tikzpicture}
+\caption{Algorithm A13: CPF predictor--corrector (\texttt{CpfSolver::solve}).}
+\label{fig:a13-flow}
+\end{figure}
+
+% ─── A14 ───────────────────────────────────────────────────────────────────
+\subsubsection{A14: Homotopy Continuation Fallback (\texttt{HomotopyContinuationSolver})}
+\label{algo:a14}
+
+The homotopy solver (Section~\ref{sec:homotopy}) scales all injections from
+zero to their target values and traces the solution path in adaptive steps.
+It is triggered as Phase~4 of the robust pipeline when direct Newton fails.
+
+\paragraph{Algorithm A14: Homotopy Continuation}
+\begin{algorithmic}[1]
+\Procedure{HomotopyContinuationSolver::solve}{$\mathit{sys}$, $\mathit{opt}$}
+  \State $\Delta\lambda \gets \mathit{opt.step\_init}$;\quad
+    \Call{scale\_to\_lambda}{$\mathit{base}$, $0$};\quad
+    solve trivial system (always converges)
+  \State $\lambda \gets 0$
+  \While{$\lambda < 1 - \varepsilon$}
+    \State $\lambda_\mathrm{next} \gets \min(1,\;\lambda + \Delta\lambda)$
+    \State $\mathit{trial} \gets$ copy of $\mathit{sys}$;
+      \Call{scale\_to\_lambda}{$\mathit{trial}$, $\lambda_\mathrm{next}$}
+    \State $r \gets$ \Call{NewtonSolver::solve}{$\mathit{trial}$} \Comment{sub-budget}
+    \If{$r$.converged}
+      \State $\lambda \gets \lambda_\mathrm{next}$; current solution $\gets r$
+      \State $\Delta\lambda \gets \min(2\,\Delta\lambda,\;\Delta\lambda_{\max})$
+    \Else
+      \State $\Delta\lambda \gets \Delta\lambda / 2$
+      \If{$\Delta\lambda < \Delta\lambda_{\min}$} \Return failed \EndIf
+    \EndIf
+  \EndWhile
+  \State \Return $r$ at $\lambda=1$
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 22mm]
+  \node[flowbox]  (zero) {Scale to $\lambda{=}0$; trivial solve};
+  \node[flowbox,  below=of zero] (step) {Advance: $\lambda_\mathrm{next} = \min(1,\lambda+\Delta\lambda)$};
+  \node[flowbox,  below=of step] (scl)  {Scale trial system to $\lambda_\mathrm{next}$};
+  \node[flowbox,  below=of scl]  (nr)   {Newton sub-solve (A3)};
+  \node[decision, below=of nr]   (cv)   {Converged?};
+  \node[flowbox,  below=of cv]   (acc)  {$\lambda\gets\lambda_\mathrm{next}$; double $\Delta\lambda$};
+  \node[flowbox,  right=3.2cm of cv]   (shr)  {Halve $\Delta\lambda$};
+  \node[decision, below=of acc]  (done) {$\lambda = 1$?};
+  \node[decision, right=3.2cm of shr]  (tiny) {Too small?};
+  \node[flowbox,  below=of done] (ret)  {Return result at $\lambda{=}1$};
+  \node[flowbox,  below=of tiny] (fail) {Return failed};
+  \draw[flowline] (zero) -- (step);
+  \draw[flowline] (step) -- (scl);
+  \draw[flowline] (scl)  -- (nr);
+  \draw[flowline] (nr)   -- (cv);
+  \draw[flowline] (cv)   -- node[right,font=\small]{yes} (acc);
+  \draw[flowline] (cv)   -- node[above,font=\small]{no}  (shr);
+  \draw[flowline] (acc)  -- (done);
+  \draw[flowline] (done) -- node[right,font=\small]{yes} (ret);
+  \draw[flowline] (done.west) -- ++(-0.5,0) |- (step.west)
+    node[pos=0.25,left,font=\small]{no};
+  \draw[flowline] (shr)  -- (tiny);
+  \draw[flowline] (tiny) -- node[right,font=\small]{yes} (fail);
+  \draw[flowline] (tiny.west) -- ++(-0.5,0) |- (step.north east)
+    node[pos=0.2,below,font=\small]{no};
+\end{tikzpicture}
+\caption{Algorithm A14: homotopy continuation fallback.}
+\label{fig:a14-flow}
+\end{figure}
+
+% ─── A15 ───────────────────────────────────────────────────────────────────
+\subsubsection{A15: Newton--Krylov GMRES Fallback (\texttt{NewtonKrylovSolver})}
+\label{algo:a15}
+
+The Newton--GMRES solver (Section~\ref{sec:newton-krylov}) replaces the
+direct SparseLU inner solve with GMRES($m$) using a Schur-complement
+AC/DC block preconditioner.
+
+\paragraph{Algorithm A15: Newton--Krylov GMRES}
+\begin{algorithmic}[1]
+\Procedure{NewtonKrylovSolver::solve}{$\mathit{data}$, $\mathit{opt}$}
+  \State Compute $F(x)$; form sparse Jacobian $J$
+  \State Build Schur preconditioner $M$: factorize $J_\mathrm{AC}$ and $J_\mathrm{DC}$ blocks
+  \For{Newton outer iteration $k = 1,\ldots,\mathit{opt.max\_iter}$}
+    \If{$\|F\|_\infty < \mathit{opt.tol}$} \textbf{break} \EndIf
+    \State \textbf{GMRES($m$) inner loop}:
+    \For{outer cycle $\ell = 1,\ldots,\mathit{max\_outer}$}
+      \State $r \gets M^{-1}(F - Jx)$;\quad $\beta \gets \|r\|$
+      \For{Arnoldi step $j = 1,\ldots,m$}
+        \State $w \gets M^{-1}J\,v_j$; Modified Gram-Schmidt orthogonalise
+        \State Apply Givens rotations; update $\|r\|$ estimate
+        \If{$\|r\| < \mathit{tol\_gmres}$} \textbf{break} \EndIf
+      \EndFor
+      \State Solve upper-Hessenberg LS; back-substitute $\Delta x$
+      \If{$\|r\| < \mathit{tol\_gmres}$} \textbf{break} \EndIf
+    \EndFor
+    \State $x \gets x + \Delta x$;\quad re-evaluate $F(x)$
+  \EndFor
+  \State \Return \textit{NewtonKrylovResult}\{$x$, stats, converged\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 20mm]
+  \node[flowbox]  (jac)  {Form $J$; build Schur preconditioner $M$};
+  \node[flowbox,  below=of jac]  (res)  {Evaluate $F(x)$};
+  \node[decision, below=of res]  (cv)   {$\|F\|_\infty < \varepsilon$?};
+  \node[flowbox,  below=of cv]   (gmr)  {GMRES($m$): Arnoldi + Givens rotations};
+  \node[flowbox,  below=of gmr]  (bk)   {Back-substitute $\Delta x$};
+  \node[flowbox,  below=of bk]   (upd)  {$x \gets x + \Delta x$};
+  \node[decision, below=of upd]  (lim)  {Iteration limit?};
+  \node[flowbox,  right=3.2cm of cv]  (ok)   {Return converged};
+  \node[flowbox,  right=3.2cm of lim] (fail) {Return failed};
+  \draw[flowline] (jac)  -- (res);
+  \draw[flowline] (res)  -- (cv);
+  \draw[flowline] (cv)   -- node[above,font=\small]{yes} (ok);
+  \draw[flowline] (cv)   -- node[right,font=\small]{no}  (gmr);
+  \draw[flowline] (gmr)  -- (bk);
+  \draw[flowline] (bk)   -- (upd);
+  \draw[flowline] (upd)  -- (lim);
+  \draw[flowline] (lim)  -- node[above,font=\small]{yes} (fail);
+  \draw[flowline] (lim.west) -- ++(-0.5,0) |- (res.west)
+    node[pos=0.25,left,font=\small]{no};
+\end{tikzpicture}
+\caption{Algorithm A15: Newton--Krylov GMRES fallback.}
+\label{fig:a15-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Power Model Builders (A16--A19)}
+\label{sec:algo-builders}
+% ============================================================
+
+% ─── A16 ───────────────────────────────────────────────────────────────────
+\subsubsection{A16: LinDistFlow LP Builder (\texttt{lindistflow\_builder})}
+\label{algo:a16}
+
+\texttt{A16} assembles the linearised DistFlow LP/MILP used by both the
+distribution PF solver and the ONR module.  Variables are branch active and
+reactive power flows $P_{ij}$, $Q_{ij}$, squared voltage magnitude $v_i$,
+and (in the ONR case) binary switch status $u_{ij}$.
+
+\paragraph{Algorithm A16: LinDistFlow LP Construction}
+\begin{algorithmic}[1]
+\Procedure{build\_lindistflow}{$\mathit{sys}$, $\mathit{opt}$}
+  \State Project to canonical; enumerate $n$ buses, $l$ branches
+  \State Declare continuous: $P_{ij}, Q_{ij}$ for each branch; $v_i$ for each bus
+  \If{network reconfiguration mode}
+    \State Declare binary: $u_{ij} \in \{0,1\}$ for each switchable branch
+    \State Add big-$M$ flow coupling: $-M u_{ij} \le P_{ij} \le M u_{ij}$
+  \EndIf
+  \For{each bus $i$}
+    \State Power balance:
+      $\sum_{j:(i,j)\in\mathcal{E}} P_{ij} - \sum_{k:(k,i)\in\mathcal{E}} P_{ki}
+       + r_{ki}P_{ki}^2/v_i = P_{G,i} - P_{L,i}$ (linearised)
+  \EndFor
+  \For{each branch $(i,j)$}
+    \State Voltage drop: $v_j = v_i - 2(r_{ij}P_{ij} + x_{ij}Q_{ij})$
+    \State Flow limits: $|P_{ij}| \le P_{ij}^{\max}$, $|Q_{ij}| \le Q_{ij}^{\max}$
+  \EndFor
+  \State Voltage bounds: $V_{\min}^2 \le v_i \le V_{\max}^2$
+  \If{spanning-tree radiality required}
+    \State Add single-commodity flow constraints to enforce tree topology
+  \EndIf
+  \State Objective: minimize losses $\sum_{ij} r_{ij}(P_{ij}^2+Q_{ij}^2)/v_i$
+    (linearised) or load shedding
+  \State \Return LP/MILP model
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (prj)  {Project to canonical; enumerate buses/branches};
+  \node[flowbox,  below=of prj]  (var)  {Declare $P_{ij}, Q_{ij}, v_i$ (+ binary $u_{ij}$)};
+  \node[flowbox,  below=of var]  (bal)  {Add power-balance constraints per bus};
+  \node[flowbox,  below=of bal]  (vdrop){Add voltage-drop constraints per branch};
+  \node[flowbox,  below=of vdrop](rad)  {Add radiality (spanning-tree) constraints};
+  \node[flowbox,  below=of rad]  (obj)  {Set objective (loss or load shedding)};
+  \node[flowbox,  below=of obj]  (ret)  {Return LP/MILP model};
+  \draw[flowline] (prj)   -- (var);
+  \draw[flowline] (var)   -- (bal);
+  \draw[flowline] (bal)   -- (vdrop);
+  \draw[flowline] (vdrop) -- (rad);
+  \draw[flowline] (rad)   -- (obj);
+  \draw[flowline] (obj)   -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A16: LinDistFlow LP builder.}
+\label{fig:a16-flow}
+\end{figure}
+
+% ─── A17 ───────────────────────────────────────────────────────────────────
+\subsubsection{A17: AML AC OPF Model Builder (\texttt{acopf\_builder})}
+\label{algo:a17}
+
+\texttt{A17} constructs a standard single-period AC OPF model using the
+Algebraic Modelling Layer (AML).  It produces a symbolic model object that
+can be compiled to a dense or sparse NLP via A9.
+
+\paragraph{Algorithm A17: AML AC OPF Builder}
+\begin{algorithmic}[1]
+\Procedure{build\_acopf}{$\mathit{sys}$, $\mathit{opt}$}
+  \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$}
+  \State Declare: $\theta_i \in [-\pi,\pi]$, $V_i \in [V_i^{\min},V_i^{\max}]$
+  \State Declare: $P_g \in [P_g^{\min},P_g^{\max}]$,
+    $Q_g \in [Q_g^{\min},Q_g^{\max}]$
+  \State Objective: $\min \sum_g c_g(P_g)$ (polynomial cost)
+  \For{each bus $i$}
+    \State Add AC power balance: $P_i(\theta,V) = P_{G,i} - P_{L,i}$
+    \State Add AC reactive balance: $Q_i(\theta,V) = Q_{G,i} - Q_{L,i}$
+  \EndFor
+  \For{each branch $(i,j)$}
+    \State Add apparent power limit:
+      $P_{ij}^2 + Q_{ij}^2 \le S_{ij,\max}^2$
+  \EndFor
+  \State \Return model
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (can)  {project\_to\_canonical (A1)};
+  \node[flowbox,  below=of can]  (var)  {Declare $\theta_i, V_i, P_g, Q_g$};
+  \node[flowbox,  below=of var]  (obj)  {Set polynomial cost objective};
+  \node[flowbox,  below=of obj]  (pbal) {Add AC power-balance per bus};
+  \node[flowbox,  below=of pbal] (br)   {Add branch apparent-power limits};
+  \node[flowbox,  below=of br]   (ret)  {Return AML model};
+  \draw[flowline] (can)  -- (var);
+  \draw[flowline] (var)  -- (obj);
+  \draw[flowline] (obj)  -- (pbal);
+  \draw[flowline] (pbal) -- (br);
+  \draw[flowline] (br)   -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A17: AML AC OPF model builder.}
+\label{fig:a17-flow}
+\end{figure}
+
+% ─── A18 ───────────────────────────────────────────────────────────────────
+\subsubsection{A18: AML Hybrid AC/DC OPF Model Builder (\texttt{acdcopf\_builder})}
+\label{algo:a18}
+
+\texttt{A18} extends the AC OPF model of A17 with DC network variables and
+VSC converter linking constraints.
+
+\paragraph{Algorithm A18: AML Hybrid AC/DC OPF Builder}
+\begin{algorithmic}[1]
+\Procedure{build\_acdcopf}{$\mathit{sys}$, $\mathit{opt}$}
+  \State Build AC OPF base model (A17)
+  \State Declare: $V_{\mathrm{dc},i}$ for each DC bus; $P_{\mathrm{dc},ij}$ for DC branches
+  \State Add DC power balance per DC bus:
+    $\sum_j P_{\mathrm{dc},ij} = P_{\mathrm{gen,dc},i} - P_{\mathrm{load,dc},i}$
+  \For{each VSC converter $(k_\mathrm{ac}, k_\mathrm{dc})$}
+    \State Coupling: $P_{\mathrm{ac},k} + P_{\mathrm{dc},k} + P_{\mathrm{loss},k} = 0$
+    \State PQ circle: $P_{\mathrm{ac},k}^2 + Q_{\mathrm{ac},k}^2 \le S_{\mathrm{vsc},k}^2$
+    \State DC branch flow: $|P_{\mathrm{dc},ij}| \le P_{\mathrm{dc},ij}^{\max}$
+  \EndFor
+  \State \Return hybrid model
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (ac)   {Build AC OPF model (A17)};
+  \node[flowbox,  below=of ac]   (dcv)  {Declare DC bus voltages $V_{\mathrm{dc},i}$};
+  \node[flowbox,  below=of dcv]  (dcpf) {Add DC power balance};
+  \node[flowbox,  below=of dcpf] (vsc)  {Add VSC coupling \& PQ limits};
+  \node[flowbox,  below=of vsc]  (dcbr) {Add DC branch flow limits};
+  \node[flowbox,  below=of dcbr] (ret)  {Return hybrid AC/DC model};
+  \draw[flowline] (ac)   -- (dcv);
+  \draw[flowline] (dcv)  -- (dcpf);
+  \draw[flowline] (dcpf) -- (vsc);
+  \draw[flowline] (vsc)  -- (dcbr);
+  \draw[flowline] (dcbr) -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A18: AML hybrid AC/DC OPF model builder.}
+\label{fig:a18-flow}
+\end{figure}
+
+% ─── A19 ───────────────────────────────────────────────────────────────────
+\subsubsection{A19: MILP SCUC Builder (\texttt{scuc\_builder})}
+\label{algo:a19}
+
+\texttt{A19} assembles the Security-Constrained Unit Commitment (SCUC) MILP
+over a planning horizon of $T$ periods.  Binary commitment variables
+$y_{g,t}$ enforce minimum up/down-time, ramp rate, and N-1 contingency
+requirements.
+
+\paragraph{Algorithm A19: MILP SCUC Builder}
+\begin{algorithmic}[1]
+\Procedure{build\_scuc}{$\mathit{sys}$, $\mathit{ts}$, $\mathit{opt}$}
+  \State $N_g \gets |\mathit{sys.generators}|$;\quad $T \gets \mathit{ts.num\_steps}$
+  \State Declare: $y_{g,t} \in \{0,1\}$ (commitment); $P_{g,t}$ (dispatch)
+  \State Declare: $u_{g,t}$ (startup), $d_{g,t}$ (shutdown) binary auxiliaries
+  \State Objective:
+    $\min \sum_{g,t} [c_{g,t}P_{g,t} + C_g^u u_{g,t} + C_g^d d_{g,t}]$
+  \For{each generator $g$, time $t$}
+    \State Commitment logic: $y_{g,t} - y_{g,t-1} = u_{g,t} - d_{g,t}$
+    \State Min up-time: $\sum_{\tau=t}^{t+T_g^u-1} y_{g,\tau} \ge T_g^u\,u_{g,t}$
+    \State Min down-time: $\sum_{\tau=t}^{t+T_g^d-1}(1-y_{g,\tau}) \ge T_g^d\,d_{g,t}$
+    \State Dispatch bounds: $y_{g,t}P_g^{\min} \le P_{g,t} \le y_{g,t}P_g^{\max}$
+    \State Ramp limits: $|P_{g,t} - P_{g,t-1}| \le R_g\,\Delta t$
+  \EndFor
+  \For{each time $t$}
+    \State Power balance: $\sum_g P_{g,t} = \sum_i P_{L,i,t}$
+    \State Reserve: $\sum_g (y_{g,t}P_g^{\max} - P_{g,t}) \ge R_{\min,t}$
+  \EndFor
+  \If{N-1 security requested}
+    \State Add contingency power-flow constraints for each monitored branch
+  \EndIf
+  \State \Return MILP model
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (var)  {Declare $y_{g,t}$, $P_{g,t}$, $u_{g,t}$, $d_{g,t}$};
+  \node[flowbox,  below=of var]  (obj)  {Build cost + startup/shutdown objective};
+  \node[flowbox,  below=of obj]  (uc)   {Add commitment logic + up/down-time};
+  \node[flowbox,  below=of uc]   (disp) {Add dispatch bounds + ramp limits};
+  \node[flowbox,  below=of disp] (bal)  {Add power balance + reserve per period};
+  \node[flowbox,  below=of bal]  (n1)   {Add N-1 contingency constraints (optional)};
+  \node[flowbox,  below=of n1]   (ret)  {Return MILP model};
+  \draw[flowline] (var)  -- (obj);
+  \draw[flowline] (obj)  -- (uc);
+  \draw[flowline] (uc)   -- (disp);
+  \draw[flowline] (disp) -- (bal);
+  \draw[flowline] (bal)  -- (n1);
+  \draw[flowline] (n1)   -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A19: MILP SCUC builder.}
+\label{fig:a19-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Network Reconfiguration (A22)}
+\label{sec:algo-onr}
+% ============================================================
+
+% ─── A22 ───────────────────────────────────────────────────────────────────
+\subsubsection{A22: Optimal Network Reconfiguration Orchestration (\texttt{solve\_onr})}
+\label{algo:a22}
+
+\texttt{A22} orchestrates the full ONR pipeline described in
+Section~\ref{sec:onr}: it calls the LinDistFlow MILP builder (A16), solves
+the MILP with the HiGHS branch-and-cut engine, validates the resulting
+topology as a spanning tree, and verifies the solution with a Newton PF.
+
+\paragraph{Algorithm A22: ONR Orchestration}
+\begin{algorithmic}[1]
+\Procedure{solve\_onr}{$\mathit{sys}$, $\mathit{opt}$}
+  \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$} \Comment{A1}
+  \State $\mathit{model} \gets$ \Call{build\_lindistflow}{$\mathit{can}$, \{radiality=true\}} \Comment{A16}
+  \State Configure HiGHS B\&C: time limit, MIP gap, branching strategy
+  \State $\mathit{sol} \gets$ \Call{highs\_solve}{$\mathit{model}$}
+  \If{$\mathit{sol}$.status $\ne$ OPTIMAL and $\ne$ FEASIBLE}
+    \State \Return infeasible ONRResult
+  \EndIf
+  \State Extract open branch set $\mathcal{O} \gets \{ij : u_{ij}^* < 0.5\}$
+  \State Validate spanning tree: BFS from source;
+    check all buses reached exactly once
+  \If{topology invalid} \Return infeasible \EndIf
+  \State Configure $\mathit{sys'}$ with branches in $\mathcal{O}$ set out-of-service
+  \State $r \gets$ \Call{AdaptiveSolver::solve}{$\mathit{sys'}$, $\mathit{opt.pf}$} \Comment{A6}
+  \State \Return \textit{ONRResult}\{$\mathcal{O}$, MILP objective, $r$\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 22mm]
+  \node[flowbox]  (can)  {project\_to\_canonical (A1)};
+  \node[flowbox,  below=of can]  (ldf)  {Build LinDistFlow MILP (A16)};
+  \node[flowbox,  below=of ldf]  (bnc)  {HiGHS branch-and-cut solve};
+  \node[decision, below=of bnc]  (feas) {Optimal / feasible?};
+  \node[flowbox,  below=of feas] (ext)  {Extract open branch set $\mathcal{O}$};
+  \node[flowbox,  below=of ext]  (bfs)  {Validate spanning-tree topology (BFS)};
+  \node[decision, below=of bfs]  (tree) {Valid spanning tree?};
+  \node[flowbox,  below=of tree] (pf)   {Newton PF on reconfigured system (A6)};
+  \node[flowbox,  below=of pf]   (ret)  {Return ONRResult};
+  \node[flowbox,  right=3.0cm of feas] (inf) {Return infeasible};
+  \draw[flowline] (can)  -- (ldf);
+  \draw[flowline] (ldf)  -- (bnc);
+  \draw[flowline] (bnc)  -- (feas);
+  \draw[flowline] (feas) -- node[right,font=\small]{yes} (ext);
+  \draw[flowline] (feas) -- node[above,font=\small]{no}  (inf);
+  \draw[flowline] (ext)  -- (bfs);
+  \draw[flowline] (bfs)  -- (tree);
+  \draw[flowline] (tree) -- node[right,font=\small]{yes} (pf);
+  \draw[flowline] (tree.east) -- node[above,font=\small]{no} (inf.south);
+  \draw[flowline] (pf)   -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A22: ONR orchestration (\texttt{solve\_onr}).}
+\label{fig:a22-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Time-Series Simulation (A20--A21)}
+\label{sec:algo-ts}
+% ============================================================
+
+% ─── A20 ───────────────────────────────────────────────────────────────────
+\subsubsection{A20: Annual Production Simulation (Hierarchical)}
+\label{algo:a20}
+
+\texttt{A20} decomposes the year into a four-level hierarchy
+(L0 annual plan $\to$ L1 monthly $\to$ L2 weekly unit commitment $\to$
+L3 per-step OPF/PF), as described in Section~\ref{sec:analysis}.
+
+\paragraph{Algorithm A20: Annual Production Simulation}
+\begin{algorithmic}[1]
+\Procedure{run\_annual\_production\_sim}{$\mathit{sys}$, $\mathit{ts}$, $\mathit{opt}$}
+  \State \textbf{L0}: Compute annual peak plan; set generation capacities for the year
+  \State Partition $\mathit{ts}$ into $B$ blocks (monthly or weekly) with boundaries $[t_b, t_{b+1})$
+  \For{each block $b = 1,\ldots,B$}
+    \State Extract time-series slice $\mathit{ts}_b \gets \mathit{ts}[t_b : t_{b+1}]$
+    \State \textbf{L1/L2}: Run SCUC (A19 $\to$ HiGHS) on $\mathit{ts}_b$
+      $\Rightarrow$ commitment schedule $y_{g,t}$
+    \For{each step $t \in [t_b, t_{b+1})$}
+      \State Apply profile values to $\mathit{sys}$ (loads, renewables)
+      \If{$\mathit{opt}$.use\_opf}
+        \State \textbf{L3 (OPF)}: \Call{solve\_dc\_opf}{$\mathit{sys}$, commitment=$y_{g,t}$}
+      \Else
+        \State \textbf{L3 (PF)}: \Call{AdaptiveSolver::solve}{$\mathit{sys}$}
+      \EndIf
+      \State Record \textit{AnnualStepResult}\{$P_g$, load, loss, carbon, gen cost\}
+    \EndFor
+  \EndFor
+  \State Aggregate: stratified sampling statistics, peak demand, total energy
+  \State \Return \textit{AnnualSimResult}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 22mm]
+  \node[flowwide] (l0)   {L0: Annual peak plan\\(capacity check)};
+  \node[flowwide, below=of l0]  (part) {Partition year into $B$ blocks};
+  \node[flowwide, below=of part](l12)  {L1/L2: SCUC per block (A19)\\$\Rightarrow$ commitment $y_{g,t}$};
+  \node[decision, below=of l12] (opf)  {Use OPF?};
+  \node[flowbox,  right=3.0cm of opf]  (dcopf){L3: DC OPF (A11)};
+  \node[flowbox,  below=of opf]  (pf)   {L3: Adaptive PF (A6)};
+  \node[flowwide, below=of pf]   (rec)  {Record step metrics\\(gen, loss, carbon)};
+  \node[decision, below=of rec]  (more) {More blocks?};
+  \node[flowwide, below=of more] (agg)  {Aggregate statistics};
+  \node[flowwide, below=of agg]  (ret)  {Return AnnualSimResult};
+  \draw[flowline] (l0)   -- (part);
+  \draw[flowline] (part) -- (l12);
+  \draw[flowline] (l12)  -- (opf);
+  \draw[flowline] (opf)  -- node[above,font=\small]{yes} (dcopf);
+  \draw[flowline] (opf)  -- node[right,font=\small]{no}  (pf);
+  \draw[flowline] (dcopf.south) |- (rec.east);
+  \draw[flowline] (pf)   -- (rec);
+  \draw[flowline] (rec)  -- (more);
+  \draw[flowline] (more.west) -- ++(-0.5,0) |- (l12.west)
+    node[pos=0.25,left,font=\small]{yes};
+  \draw[flowline] (more) -- node[right,font=\small]{no} (agg);
+  \draw[flowline] (agg)  -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A20: hierarchical annual production simulation.}
+\label{fig:a20-flow}
+\end{figure}
+
+% ─── A21 ───────────────────────────────────────────────────────────────────
+\subsubsection{A21: Multi-Year Lifecycle Simulation}
+\label{algo:a21}
+
+\texttt{A21} iterates over $N_{\mathrm{yr}}$ years, applying storage SoH and
+renewable capacity degradation, running A20, and accumulating NPV-discounted
+cost and carbon metrics with Tier-1/2/3 error bounds.
+
+\paragraph{Algorithm A21: Lifecycle Simulation}
+\begin{algorithmic}[1]
+\Procedure{run\_lifecycle\_simulation}{$\mathit{sys}_0$, $\mathit{ts}$, $\mathit{opt}$}
+  \State Initialise: $\mathit{sys} \gets \mathit{sys}_0$;
+    $\mathrm{NPV}_\mathrm{total} \gets 0$;
+    $E_\mathrm{CO_2} \gets 0$
+  \For{year $y = 1,\ldots,\mathit{opt.n\_years}$}
+    \For{each storage unit $s$}
+      \State $\mathrm{cap}_{s,y} \gets \mathrm{cap}_{s,0}\,(1 - \delta_s^{\mathrm{SoH}})^y$
+    \EndFor
+    \For{each PV / renewable source $r$}
+      \State $P_{r,y}^{\max} \gets P_{r,0}^{\max}(1 - \delta_r^{\mathrm{PV}})^y$
+    \EndFor
+    \State $\mathit{result}_y \gets$ \Call{run\_annual\_production\_sim}{$\mathit{sys}$, $\mathit{ts}$, $\mathit{opt.annual}$}
+    \Comment{A20}
+    \State NPV discount: $\mathrm{NPV}_y \gets \mathit{result}_y.\mathrm{cost}/(1+r_d)^y$
+    \State $\mathrm{NPV}_\mathrm{total} \mathrel{+}= \mathrm{NPV}_y$;\quad
+      $E_{\mathrm{CO_2}} \mathrel{+}= \mathit{result}_y.\mathrm{emissions}$
+  \EndFor
+  \State Compute LCOE $= \mathrm{NPV}_\mathrm{total} / E_\mathrm{energy}$
+  \State Compute Tier-1/2/3 carbon error bounds (confidence intervals)
+  \State \Return \textit{LifecycleResult}\{LCOE, $E_{\mathrm{CO_2}}$,
+    per-year results, error bounds\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 22mm]
+  \node[flowwide] (ini)  {Initialise baseline system $\mathit{sys}_0$};
+  \node[flowwide, below=of ini]  (deg)  {Apply SoH / PV derating for year $y$};
+  \node[flowwide, below=of deg]  (a20)  {Run A20 annual simulation};
+  \node[flowwide, below=of a20]  (npv)  {Compute NPV discount factor $(1+r_d)^{-y}$};
+  \node[flowwide, below=of npv]  (acc)  {Accumulate cost, energy, CO$_2$};
+  \node[decision, below=of acc]  (done) {$y = N_\mathrm{yr}$?};
+  \node[flowwide, below=of done] (lcoe) {Compute LCOE; Tier-1/2/3 error bounds};
+  \node[flowwide, below=of lcoe] (ret)  {Return LifecycleResult};
+  \draw[flowline] (ini)  -- (deg);
+  \draw[flowline] (deg)  -- (a20);
+  \draw[flowline] (a20)  -- (npv);
+  \draw[flowline] (npv)  -- (acc);
+  \draw[flowline] (acc)  -- (done);
+  \draw[flowline] (done) -- node[right,font=\small]{yes} (lcoe);
+  \draw[flowline] (done.west) -- ++(-0.5,0) |- (deg.west)
+    node[pos=0.25,left,font=\small]{no, $y\mathrel{+}=1$};
+  \draw[flowline] (lcoe) -- (ret);
+\end{tikzpicture}
+\caption{Algorithm A21: multi-year lifecycle simulation.}
+\label{fig:a21-flow}
+\end{figure}
+
+% ============================================================
+\subsection{Short-Circuit Analysis (A23)}
+\label{sec:algo-sc}
+% ============================================================
+
+% ─── A23 ───────────────────────────────────────────────────────────────────
+\subsubsection{A23: Short-Circuit Z-bus Solver (\texttt{compute\_short\_circuit})}
+\label{algo:a23}
+
+\texttt{A23} implements the Z-bus Thévenin method for balanced and unbalanced
+fault analysis following IEC~60909 (Section~\ref{sec:sc_crossval}).
+The factorised $\mathbf{Y}_\mathrm{fault}$ is reused across all bus solves,
+so the per-bus cost is a single triangular back-substitution.
+
+\paragraph{Algorithm A23: Short-Circuit Z-bus}
+\begin{algorithmic}[1]
+\Procedure{compute\_short\_circuit}{$\mathit{sys}$, $\mathit{opt}$: SCOptions}
+  \State Build bus ID $\to$ local index map from canonical buses
+  \State Assemble $\mathbf{Y}_\mathrm{fault}$ (sparse, COO):
+    branch admittances + generator subtransient shunts $y_g = 1/(jx''_d)$
+  \State Factorize: \texttt{SparseLU}($\mathbf{Y}_\mathrm{fault}$)
+  \For{each fault bus $k \in \{1,\ldots,n\}$}
+    \State Solve $\mathbf{Y}_\mathrm{fault}\,\mathbf{z}_k = \mathbf{e}_k$
+      $\Rightarrow$ $Z_{kk} = (\mathbf{z}_k)_k$ (Thévenin impedance)
+    \State $V_0 \gets c\angle 0^\circ$ where $c = \mathit{opt.c\_factor}$ (default 1.1)
+    \If{3-phase fault}
+      \State $I''_k = V_0 / Z_{kk}$
+    \ElsIf{SLG fault}
+      \State $I''_k = 3V_0 / (Z_1 + Z_2 + Z_0)$
+        where $Z_1 = Z_{kk}$, $Z_2 \approx Z_1$, $Z_0$ from zero-seq Y-bus
+    \ElsIf{LL fault}
+      \State $I''_k = \sqrt{3}V_0 / (Z_1 + Z_2)$
+    \EndIf
+    \State $S_k = S_\mathrm{base}\,|V_0|^2 / |Z_{kk}|$;\quad
+      $\kappa = 1.02 + 0.98\,e^{-3R/X}$;\quad
+      $i_p = \kappa\sqrt{2}\,|I''_k|$
+    \State Store \textit{BusFaultResult}\{$k$, $Z_{kk}$, $I''_k$, $S_k$, $i_p$\}
+  \EndFor
+  \State \Return \textit{SCResult}\{bus\_results, $S_\mathrm{base}$, summary()\}
+\EndProcedure
+\end{algorithmic}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 18mm]
+  \node[flowbox]  (ybus) {Build $\mathbf{Y}_\mathrm{fault}$ (branch admittances\\+ generator subtransient shunts)};
+  \node[flowbox,  below=of ybus] (lu)   {SparseLU factorize $\mathbf{Y}_\mathrm{fault}$};
+  \node[flowbox,  below=of lu]   (solve){For each bus $k$: solve $\mathbf{Y}_\mathrm{fault}\mathbf{z}_k = \mathbf{e}_k$};
+  \node[flowbox,  below=of solve](zkk)  {$Z_{kk} = (\mathbf{z}_k)_k$; apply fault-type formula};
+  \node[flowbox,  below=of zkk]  (sk)   {Compute $S_k$, $i_p = \kappa\sqrt{2}|I''_k|$};
+  \node[flowbox,  below=of sk]   (acc)  {Accumulate BusFaultResult};
+  \node[decision, below=of acc]  (more) {More buses?};
+  \node[flowbox,  below=of more] (ret)  {Return SCResult};
+  \draw[flowline] (ybus) -- (lu);
+  \draw[flowline] (lu)   -- (solve);
+  \draw[flowline] (solve) -- (zkk);
+  \draw[flowline] (zkk)  -- (sk);
+  \draw[flowline] (sk)   -- (acc);
+  \draw[flowline] (acc)  -- (more);
+  \draw[flowline] (more.west) -- ++(-0.5,0) |- (solve.west)
+    node[pos=0.25,left,font=\small]{yes};
+  \draw[flowline] (more) -- node[right,font=\small]{no} (ret);
+\end{tikzpicture}
+\caption{Algorithm A23: short-circuit Z-bus solver (\texttt{compute\_short\_circuit}).}
+\label{fig:a23-flow}
+\end{figure}

@@ -104,5 +104,7 @@ A18 & \texttt{src/power\_models/acdcopf\_builder.cpp} & AML hybrid AC/DC OPF mod
 A19 & \texttt{src/power\_models/scuc\_builder.cpp} & MILP Security-Constrained Unit Commitment builder (§\ref{sec:scuc-builder}). \\
 A20 & \texttt{src/time\_series/annual\_production\_sim.cpp} & Hierarchical temporal decomposition annual production simulation: L0 annual plan $\to$ L1 monthly $\to$ L2 weekly UC $\to$ L3 daily OPF/PF replay. \\
 A21 & \texttt{src/time\_series/lifecycle\_simulation.cpp} & Multi-year lifecycle simulation with storage SoH degradation, renewable derating, NPV cost roll-up, and Tier-1/2/3 theoretical carbon error bounds. \\
+A22 & \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} & Optimal Network Reconfiguration (ONR): LinDistFlow MILP build (A16), HiGHS B\&C solve, spanning-tree validation, Newton PF verification (§\ref{sec:algo-onr}). \\
+A23 & \texttt{src/analysis/short\_circuit.cpp} & Short-circuit Z-bus analysis: assemble $\mathbf{Y}_\mathrm{fault}$, SparseLU factorize, per-bus Thévenin solve, IEC~60909 fault-current and fault-level computation (§\ref{sec:algo-sc}). \\
 \bottomrule
 \end{longtable}

@@ -96,6 +96,30 @@ The top-level result includes the full trace of \texttt{CpfPoint} records, the
 final converged solution, estimated nose-point \(\lambda^*\) and minimum
 voltage, and the convergence status.
 
+\subsubsection{Algorithm A13: CPF Predictor--Corrector (condensed)}
+\label{algo:a13-inline}
+The full pseudo-code and flowchart appear in Section~\ref{algo:a13}.
+The condensed form below highlights the inner step logic.
+
+\begin{algorithmic}[1]
+\Procedure{CpfSolver::solve}{$\mathit{base}$, $\mathit{dir}$, $\mathit{opts}$}
+  \State Solve base case at $\lambda{=}0$ via \texttt{NewtonSolver} (A3)
+  \State $\lambda \gets 0$;\quad $\Delta\lambda \gets \mathit{opts.step\_init}$
+  \While{$\lambda < \lambda_{\max}$ and iter $<$ max\_steps}
+    \State Predictor: secant extrapolation $\to x_{\mathrm{pred}}$ at $\lambda + \Delta\lambda$
+    \State Corrector: Newton from $x_{\mathrm{pred}}$ at $\lambda_{\mathrm{next}}$
+    \If{converged}
+      \State Accept; $\lambda \gets \lambda_{\mathrm{next}}$;\quad
+        $\Delta\lambda \gets \min(\mathit{step\_grow}\cdot\Delta\lambda,\,\mathit{step\_max})$
+    \Else
+      \State $\Delta\lambda \gets \mathit{step\_shrink}\cdot\Delta\lambda$
+      \If{$\Delta\lambda < \mathit{step\_min}$} declare nose; \textbf{break} \EndIf
+    \EndIf
+  \EndWhile
+  \State \Return \textit{CpfResult}\{trace, nose~$\lambda^*$, status\}
+\EndProcedure
+\end{algorithmic}
+
 % ------------------------------------------------------------
 \subsection{Homotopy Continuation Solver}
 \label{sec:homotopy}
@@ -128,6 +152,27 @@ At \(\lambda=1\) the full target system is solved.
 The current implementation records accepted/rejected steps in a
 \texttt{HomotopyState} diagnostic struct and returns both the final
 \texttt{PowerFlowResult} and the state for instrumentation.
+
+\subsubsection{Algorithm A14: Homotopy Continuation (condensed)}
+\label{algo:a14-inline}
+See Section~\ref{algo:a14} for the full pseudo-code and flowchart.
+
+\begin{algorithmic}[1]
+\Procedure{HomotopyContinuationSolver::solve}{$\mathit{sys}$, $\mathit{opt}$}
+  \State Scale to $\lambda{=}0$; solve trivially
+  \While{$\lambda < 1$}
+    \State $\lambda_{\mathrm{next}} \gets \min(1,\,\lambda + \Delta\lambda)$;\quad
+      scale trial system
+    \If{Newton (A3) from current solution converges}
+      \State Accept; $\lambda \gets \lambda_{\mathrm{next}}$;\quad $\Delta\lambda \gets \min(2\Delta\lambda,\,\Delta\lambda_{\max})$
+    \Else
+      \State $\Delta\lambda \gets \Delta\lambda/2$
+      \If{$\Delta\lambda < \Delta\lambda_{\min}$} \Return failed \EndIf
+    \EndIf
+  \EndWhile
+  \State \Return PowerFlowResult at $\lambda{=}1$
+\EndProcedure
+\end{algorithmic}
 
 % ------------------------------------------------------------
 \subsection{Distributed Slack Solver}
@@ -172,6 +217,22 @@ on the extended infinity-norm \(\|\Delta F\|_\infty < \varepsilon\).
   \texttt{max\_participation\_p} and were clamped.
 \end{itemize}
 
+\subsubsection{Algorithm A7: Distributed-Slack PF (condensed)}
+\label{algo:a7-inline}
+See Section~\ref{algo:a7} for the full pseudo-code and flowchart.
+
+\begin{algorithmic}[1]
+\Procedure{solve\_distributed\_slack}{$\mathit{sys}$, $\mathit{cfg}$, $\mathit{opt}$}
+  \State Run base Newton PF (A3); compute slack-bus mismatch $\Delta P_s$
+  \State Normalize participation factors $\alpha_g$
+  \For{each participating generator $g$}
+    \State $P_g \gets P_g + \alpha_g \Delta P_s$;\quad clamp to $[P_g^{\min}, P_g^{\max}]$
+  \EndFor
+  \State Re-run Newton PF on updated dispatch
+  \State \Return \textit{DistributedSlackResult}
+\EndProcedure
+\end{algorithmic}
+
 % ------------------------------------------------------------
 \subsection{Newton--Krylov GMRES Fallback (Phase 5)}
 \label{sec:newton-krylov}
@@ -199,6 +260,21 @@ where $J_{ac}$ is the AC subsystem Jacobian and $J_{dc}$ is the DC subsystem
 Jacobian.  The Krylov fallback is most effective when the Jacobian is ill-
 conditioned due to strong AC/DC coupling, but adds per-iteration overhead
 compared to the direct SparseLU path.
+
+\subsubsection{Algorithm A15: Newton--Krylov GMRES (condensed)}
+\label{algo:a15-inline}
+See Section~\ref{algo:a15} for the full pseudo-code and flowchart.
+
+\begin{algorithmic}[1]
+\Procedure{NewtonKrylovSolver::solve}{$\mathit{data}$, $\mathit{opt}$}
+  \State Compute $F(x)$; form $J$; build Schur preconditioner $M = \mathrm{blkdiag}(J_{\mathrm{AC}}, J_{\mathrm{DC}})$
+  \While{$\|F\|_\infty \ge \varepsilon$ and iter $<$ max}
+    \State GMRES($m$): solve $(J + \alpha M^{-1})\Delta x = -F$ iteratively
+    \State $x \gets x + \Delta x$;\quad re-evaluate $F(x)$
+  \EndWhile
+  \State \Return \textit{NewtonKrylovResult}
+\EndProcedure
+\end{algorithmic}
 
 % ------------------------------------------------------------
 \subsection{Complete \texttt{RobustNonlinearOptions} Reference}
