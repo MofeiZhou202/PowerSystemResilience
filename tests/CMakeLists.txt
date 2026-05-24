@@ -90,3 +90,9 @@ hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
 # meshed topology, multi-source PV, HybridPowerSystem overload, VUF, losses,
 # zero-load no-load, and 2-bus analytical cross-validation.
 hacdcpf_add_test(test_three_phase_nr test_three_phase_nr.cpp)
+
+# Distribution resilience assessment: empty/invalid rejection, no-fault zero-shed,
+# single-fault shedding, fault repair restoration, tie-switch reconfiguration,
+# MESS dispatch, demo data, summary(), progress callback, custom profiles,
+# resilience index bounds, fault sequence, legacy field sync, step count, MIP stub.
+hacdcpf_add_test(test_resilience_assessment test_resilience_assessment.cpp)
