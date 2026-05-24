@@ -157,6 +157,185 @@ The residual $\|\mathbf{A}\mathbf{c} - \mathbf{q}\|_\infty$ is stored in
 \end{tabular}
 \end{center}
 
+\subsubsection{Loss Allocation and Directed Flow Edges}
+\label{sec:carbon-flow-edges}
+
+Every branch in the hybrid AC/DC network is represented as a directed
+\emph{flow edge} $(i \to j)$ carrying three power quantities:
+\begin{equation}
+  P_{i\to j}^{\text{send}},\quad
+  P_{i\to j}^{\text{recv}},\quad
+  \ell_{ij} = P_{i\to j}^{\text{send}} - P_{i\to j}^{\text{recv}} \geq 0.
+\end{equation}
+For AC branches the direction follows the sign of $P_{ij}^{\text{from}}$;
+for DC branches $P^{\text{from}} = V_i(V_i - V_j)/R$.  VSC converters,
+DC/DC converters and Energy Routers contribute edges whose
+$(P^{\text{send}}, P^{\text{recv}})$ are taken directly from the
+power-flow transfer objects.
+
+The loss-allocation parameter $\alpha \in [0,1]$ (default $0.5$) splits
+each branch loss between the sending and receiving nodes.  The power
+\emph{transported} from $i$ to $j$ (i.e.\ available to downstream buses)
+is:
+\begin{equation}
+  P_{ij}^{\text{trans}} = \max\!\bigl(P_{i\to j}^{\text{send}}
+                           - \alpha\,\ell_{ij},\;0\bigr).
+  \label{eq:carbon-transported}
+\end{equation}
+For the nodal matrix method, the receiving-end power balance adds
+$P_{ij}^{\text{trans}}$ to bus~$j$'s total inflow while attributing
+$(1-\alpha)\ell_{ij}$ to bus~$j$'s outflow (as a local loss sink):
+\begin{equation}
+  P_{\text{in}}(j) \mathrel{+}= P_{ij}^{\text{trans}}, \qquad
+  P_{\text{out}}(i) \mathrel{+}= P_{i\to j}^{\text{send}}, \qquad
+  P_{\text{out}}(j) \mathrel{+}= (1-\alpha)\,\ell_{ij}.
+\end{equation}
+The matrix system then becomes:
+\begin{equation}
+  A_{ii} = P_{\text{out}}(i), \qquad
+  A_{ij} = -P_{ji}^{\text{trans}} \quad (j \neq i),
+  \qquad b_i = \sum_{g \in \mathcal{G}_i} e_g\,P_{g,i},
+  \label{eq:carbon-matrix-full}
+\end{equation}
+where $P_{ji}^{\text{trans}}$ is the transported power on any edge
+arriving at bus~$i$ from bus~$j$.  Isolated transit buses (zero load
+and generation, $P_{\text{out}}(i) < \varepsilon_{\text{reg}}$) are
+regularised by a Laplacian-average constraint using neighbouring bus
+intensities.
+
+\subsubsection{Storage State-of-Charge Carbon Intensity}
+\label{sec:carbon-storage}
+
+Battery storage is modelled as a carbon-carrying reservoir.  When a
+storage unit charges ($p^{\text{ch}} > 0$, net inflow), the stored
+energy carbon intensity is updated by energy-weighted mixing:
+\begin{equation}
+  \lambda_{t+1}^{\text{soc}} =
+    \frac{E_t\,\lambda_t^{\text{soc}} + \Delta E_{\text{in}}\,c_b}{E_{t+1}},
+  \label{eq:storage-soc-carbon}
+\end{equation}
+where $E_t = \text{SoC}_t \times E_{\text{rated}}$ is stored energy at
+the start of the step, $\Delta E_{\text{in}} = \max(E_{t+1}-E_t, 0)$
+is the incremental charge, and $c_b$ is the nodal carbon intensity of
+the charging bus (from the proportional tracing or matrix method).
+When the unit discharges, $\lambda^{\text{soc}}$ carries forward
+unchanged and is used to attribute emissions to the discharged energy.
+
+% ------------------------------------------------------------
+\subsection{Annual Carbon Analysis}
+\label{sec:annual-carbon}
+% ------------------------------------------------------------
+
+Declared in \texttt{annual\_carbon\_analysis.hpp},
+implemented in \texttt{src/carbon\_analysis/annual\_carbon\_analysis.cpp}.
+The primary entry point is:
+\begin{verbatim}
+AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
+    const HybridPowerSystem& sys,                   // or vector<HybridPowerSystem>
+    const std::vector<PowerFlowResult>& pf_results,
+    double step_duration_hr,
+    const AnnualCarbonAnalysisOptions& options = {});
+\end{verbatim}
+
+\subsubsection{Multi-Step Aggregation}
+
+Given $N_T$ converged time steps each of duration $\Delta t$ (hours), the
+per-step emissions and energy at bus~$i$ are:
+\begin{equation}
+  E_i(t) = P_i^L(t)\,\Delta t, \qquad
+  \epsilon_i(t) = c_i(t)\,E_i(t),
+\end{equation}
+where $c_i(t)$ is the nodal carbon intensity (tCO\textsubscript{2}/MWh)
+from \texttt{compute\_carbon\_analysis} at step $t$.  Annual totals:
+\begin{equation}
+  E_i^{\text{ann}} = \sum_{t=1}^{N_T} E_i(t), \qquad
+  \epsilon_i^{\text{ann}} = \sum_{t=1}^{N_T} \epsilon_i(t).
+\end{equation}
+Two distinct carbon-intensity averages are reported for each bus:
+\begin{align}
+  \bar{c}_i^{\text{load}} &= \frac{\epsilon_i^{\text{ann}}}{E_i^{\text{ann}}}
+    = \frac{\sum_t c_i(t)\,E_i(t)}{\sum_t E_i(t)},
+    \label{eq:annual-load-weighted} \\[4pt]
+  \bar{c}_i^{\text{time}} &= \frac{\sum_t c_i(t)\,\Delta t}{N_T\,\Delta t}
+    = \frac{1}{N_T}\sum_t c_i(t).
+    \label{eq:annual-time-weighted}
+\end{align}
+$\bar{c}_i^{\text{load}}$ weights by energy consumed (equivalent to
+average emission rate per kWh delivered) while $\bar{c}_i^{\text{time}}$
+weights uniformly by time (average grid carbon intensity experienced over
+the study period).
+
+\subsubsection{Storage Carbon State Propagation}
+
+When the multi-system overload is used (one \texttt{HybridPowerSystem}
+per step, enabling topology and dispatch changes), the storage SoC
+carbon intensity $\lambda^{\text{soc}}$ is carried forward between
+consecutive systems according to Equation~\eqref{eq:storage-soc-carbon}.
+This preserves the carbon provenance of energy stored in earlier periods.
+
+\subsubsection{Green Energy Certificate (GEC) Accounting}
+\label{sec:gec}
+
+A user $u$ owns a portfolio of loads $\mathcal{L}_u$ and holds an annual
+GEC quota $G_u$ (MWh) with a certificate carbon intensity $\lambda_G^u$
+(tCO\textsubscript{2}/MWh) representing the renewable source.
+\texttt{compute\_annual\_user\_gec\_accounting} distributes $G_u$ across
+time steps pro-rata to the user's consumption share and computes net
+emissions after GEC offsetting.
+
+\paragraph{Step-level GEC allocation.}
+The planned GEC fraction for step $t$ is proportional to the step's
+energy share:
+\begin{equation}
+  \phi_{u,t} = \frac{E_{u,t}}{E_u^{\text{ann}}}, \qquad
+  G_{u,t}^{\text{plan}} = G_u\,\phi_{u,t}.
+\end{equation}
+To ensure GECs do not exceed actual consumption, the allocated volume is
+capped:
+\begin{equation}
+  G_{u,t} = \min\!\bigl(G_{u,t}^{\text{plan}},\; E_{u,t}\bigr).
+  \label{eq:gec-allocated}
+\end{equation}
+Net emissions for step $t$ are then:
+\begin{equation}
+  \epsilon_{u,t}^{\text{net}} =
+    \underbrace{(E_{u,t} - G_{u,t})\,c_u(t)}_{\text{grid-sourced emissions}}
+    + \underbrace{G_{u,t}\,\lambda_G^u}_{\text{GEC emissions}},
+  \label{eq:gec-net}
+\end{equation}
+where $c_u(t) = \epsilon_{u,t}^{\text{gross}} / E_{u,t}$ is the gross
+nodal carbon intensity averaged over the user's loads.
+
+\paragraph{Annual GEC summary.}
+Annual totals follow directly:
+\begin{equation}
+  G_u^{\text{used}} = \sum_t G_{u,t}, \qquad
+  G_u^{\text{unused}} = G_u - G_u^{\text{used}}.
+\end{equation}
+The avoided emissions and net intensity are:
+\begin{align}
+  \epsilon_u^{\text{avoided}} &= \epsilon_u^{\text{gross}} - \epsilon_u^{\text{net}}, \\
+  \bar{c}_u^{\text{gross}}    &= \frac{\epsilon_u^{\text{gross}}}{E_u^{\text{ann}}}, \\
+  \bar{c}_u^{\text{net}}      &= \frac{\epsilon_u^{\text{net}}}{E_u^{\text{ann}}}, \\
+  \rho_u                      &= \frac{G_u^{\text{used}}}{E_u^{\text{ann}}},
+  \label{eq:gec-coverage}
+\end{align}
+where $\rho_u \in [0,1]$ is the GEC coverage ratio (fraction of annual
+consumption offset by certificates).
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field (AnnualCarbonAnalysisOptions)} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{carbon\_options} & (default) & \texttt{CarbonAnalysisOptions} forwarded to each step \\
+\texttt{keep\_hourly\_bus\_intensity} & false & Retain per-step bus intensity matrix \\
+\texttt{keep\_hourly\_load\_emissions} & false & Retain per-step load emissions matrix \\
+\texttt{keep\_hourly\_load\_energy} & false & Retain per-step load energy matrix \\
+\hline\hline
+\end{tabular}
+\end{center}
+
 % ------------------------------------------------------------
 \subsection{Distribution Network Power Flow}
 \label{sec:dist-pf}
@@ -1337,3 +1516,522 @@ sweeps one parameter (e.g.\ \texttt{"pv"}, \texttt{"bess\_power"}) across
 the provided scale factors and returns a \texttt{LifecycleCompareResult}
 containing a \texttt{ScenarioResult} for each point, with per-year carbon
 and cost trajectories and installed capacity metadata.
+
+% ------------------------------------------------------------
+\subsection{Short-Circuit Analysis (IEC~60909)}
+\label{sec:short-circuit-math}
+% ------------------------------------------------------------
+
+Declared in \texttt{include/hacdcpf/analysis/short\_circuit.hpp},
+implemented in \texttt{src/analysis/short\_circuit.cpp}.
+The solver computes subtransient short-circuit currents, short-circuit
+power, peak current, and remaining voltages for arbitrary fault types
+according to IEC~60909:2016.
+
+\subsubsection{Voltage Factor}
+
+IEC~60909 introduces a voltage factor $c$ to account for pre-fault
+operating conditions:
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Nominal voltage} & \textbf{Maximum ($c_{\max}$)} & \textbf{Minimum ($c_{\min}$)} \\
+\hline
+$V_n > 1\,\text{kV}$ (HV)           & 1.10 & 1.00 \\
+$V_n \in (0.1,\,1]\,\text{kV}$ (LV) & 1.10 & 0.90 \\
+$V_n \le 0.1\,\text{kV}$            & 1.05 & 0.95 \\
+\hline\hline
+\end{tabular}
+\end{center}
+The initial symmetrical short-circuit voltage source at the fault bus
+is modelled as $\underline{V}_0 = c\,V_n$ in the equivalent circuit.
+
+\subsubsection{Sequence Admittance Matrices}
+
+Three symmetric admittance matrices $\mathbf{Y}_1$, $\mathbf{Y}_2$,
+$\mathbf{Y}_0 \in \mathbb{C}^{n\times n}$ are assembled from:
+\begin{itemize}
+  \item \textbf{Branches} (lines and 2-winding transformers): standard
+        $\pi$-model with series admittance $y_s = (r+jx)^{-1}$ and
+        shunt susceptance $b/2$.  For off-nominal tap ratio $\tau$:
+        \begin{equation}
+          Y_{ii}^{(1)} \mathrel{+}= \frac{y_s}{|\tau|^2} + \frac{jb}{2|\tau|^2},
+          \quad Y_{jj}^{(1)} \mathrel{+}= y_s + \frac{jb}{2},
+          \quad Y_{ij}^{(1)} \mathrel{+}= -\frac{y_s}{\tau^*}.
+          \label{eq:sc-ybus-branch}
+        \end{equation}
+        Zero-sequence branches use $(r_0, x_0, b_0)$ identically.
+  \item \textbf{Synchronous generators}: subtransient impedance
+        $\underline{z}_g = (r_a + jx''_d)\,(S_{\text{base}}/S_g)$ is
+        corrected by the KG factor:
+        \begin{equation}
+          K_G = \frac{c}{1 + x''_d\,\sin\phi_G},
+          \qquad
+          \underline{z}_g^{\text{corr}} = K_G\,\underline{z}_g,
+          \label{eq:sc-KG}
+        \end{equation}
+        where $\sin\phi_G = \sqrt{1-\cos^2\!\phi_G}$.
+        The corrected shunt admittance $1/\underline{z}_g^{\text{corr}}$
+        is added to the diagonal of $\mathbf{Y}_1$ and $\mathbf{Y}_2$
+        (since $Z_2 \approx Z_1$ for synchronous machines).
+  \item \textbf{Asynchronous motors}: modelled as an impedance shunt
+        $\underline{z}_m = (r_m + jx_m)\,S_{\text{base}}/(V_n^2)$ added
+        to $\mathbf{Y}_1$ and $\mathbf{Y}_2$.
+  \item \textbf{External grids}: when the maximum short-circuit current
+        $I_{kq}$ is given, the equivalent impedance is
+        $z_{\text{ext}} = c\,U_{nq}/(\sqrt{3}\,I_{kq})$; otherwise
+        direct $(r, x)$ shunt.
+  \item \textbf{Grid-forming VSC converters}: source behind filter
+        impedance $\underline{z}_{\text{conv}} = (r_1 + jx_1)
+        (S_{\text{base}}/S_{\text{rated}})$ added to $\mathbf{Y}_1$.
+  \item \textbf{3-winding transformers}: star-branch equivalent with
+        arm impedances
+        $Z_H = \tfrac{1}{2}(Z_{HM}+Z_{HL}-Z_{ML})$, etc.; Kron-reduced
+        as in the 2W case.
+\end{itemize}
+
+\subsubsection{Thévenin Impedance and Initial Symmetric Current}
+
+The Thévenin impedance at fault bus $k$ is the diagonal element of the
+positive-sequence Z-bus:
+\begin{equation}
+  Z_{kk}^{(1)} = \bigl[\mathbf{Y}_1^{-1}\bigr]_{kk}.
+  \label{eq:sc-Zkk}
+\end{equation}
+In the implementation $Z_{kk}$ is obtained efficiently via a single
+right-hand-side solve ($\mathbf{Y}_1\,\mathbf{e}_k = \mathbf{y}$, then
+$Z_{kk} = \mathbf{e}_k^\top\mathbf{y}$) using a pre-factored SparseLU
+decomposition, avoiding a full matrix inversion.
+
+\paragraph{Fault-type effective impedances.}
+The effective impedance $Z_k^{\text{eff}}$ and initial symmetrical
+short-circuit current $I''_k$ depend on the fault type:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Fault type} & \textbf{Effective impedance $Z_k^{\text{eff}}$}
+  & \textbf{$I''_k$ (pu, base $V = 1$)} \\
+\hline
+3-phase (3PH)
+  & $Z_1 + Z_f$
+  & $c\,/\,|Z_k^{\text{eff}}|$ \\
+Single-line-to-ground (SLG)
+  & $(Z_1 + Z_2 + Z_0 + 3Z_f)/3$
+  & $c\,/\,|Z_k^{\text{eff}}|$ \\
+Line-to-line (LL)
+  & $(Z_1 + Z_2)/\sqrt{3}$
+  & $c\,/\,|Z_k^{\text{eff}}|$ \\
+Double-line-to-ground (DLG)
+  & $Z_1 + Z_2 \,\|\, Z_0 + Z_f$
+  & $c\,/\,|Z_k^{\text{eff}}|$ \\
+\hline\hline
+\end{tabular}
+\renewcommand{\arraystretch}{1.0}
+\end{center}
+where $Z_2 \approx Z_1$ for passive networks, $Z_f$ is the fault
+impedance (zero for bolted faults), and $\,\|\,$ denotes parallel
+combination.
+
+\paragraph{Short-circuit MVA.}
+\begin{equation}
+  S''_k = S_{\text{base}}\,\frac{c^2}{\left|Z_{kk}^{(1)}\right|}.
+  \label{eq:sc-Sk}
+\end{equation}
+
+\subsubsection{Peak Current and Kappa Factor}
+
+The peak (asymmetric) short-circuit current accounts for the decaying
+DC offset.  The peak factor $\kappa$ is defined by the equivalent
+$R/X$ ratio at the fault bus:
+\begin{equation}
+  \kappa = 1.02 + 0.98\,e^{-3R/X}, \qquad \kappa \in [1.0,\,2.0].
+  \label{eq:sc-kappa}
+\end{equation}
+For meshed networks with Method~B (IEC~60909 §C.3), $\kappa$ is
+multiplied by 1.15 before clamping.  The peak current is:
+\begin{equation}
+  i_p = \kappa\,\sqrt{2}\,I''_k.
+  \label{eq:sc-ip}
+\end{equation}
+
+\subsubsection{Breaking Current}
+
+The symmetrical breaking current $I_b$ accounts for AC-component decay
+during the fault-clearing interval $t_{\text{break}}$:
+\begin{equation}
+  I_b = \mu\,I''_k,
+  \label{eq:sc-Ib}
+\end{equation}
+where the decay factor $\mu$ (IEC~60909 \S4.7) is:
+\begin{equation}
+  \mu(t_{\text{break}}) = \begin{cases}
+    0.84 + 0.26\,e^{-0.26\,I''_k/I_r} & t_{\text{break}} \le 0.02\,\text{s}, \\
+    0.71 + 0.51\,e^{-0.30\,I''_k/I_r} & t_{\text{break}} \le 0.05\,\text{s}, \\
+    0.62 + 0.72\,e^{-0.32\,I''_k/I_r} & t_{\text{break}} \le 0.10\,\text{s}, \\
+    0.56 + 0.94\,e^{-0.38\,I''_k/I_r} & \text{otherwise},
+  \end{cases}
+\end{equation}
+with $I_r$ being the rated current.  For asynchronous motor contributions
+a $q$-factor correction applies:
+\begin{equation}
+  I_{b,m} = \mu\,q\,I''_{km}, \qquad
+  q \approx 0.26 + 0.10\ln(P_n/p), \quad p = \text{number of pole pairs}.
+\end{equation}
+
+\subsubsection{Thermal Equivalent Current}
+
+The equivalent thermal current (for cable rating and equipment
+verification) is computed per IEC~60909 \S4.9:
+\begin{equation}
+  I_{\text{th}} = I''_k\,\sqrt{m + n},
+  \label{eq:sc-Ith}
+\end{equation}
+where the $m$ factor captures the DC-component heating integral and
+the $n$ factor captures the AC-component decay integral over the
+short-circuit duration $T_k$.
+
+\subsubsection{Voltage at Non-Faulted Buses}
+
+The remaining (residual) voltage at any bus~$j$ during a fault at
+bus~$k$ is (IEC~60909 \S4.3):
+\begin{equation}
+  \hat{V}_j = c\,\left(1 - \frac{Z_{jk}^{(1)}}{Z_{kk}^{(1)}}\right),
+  \label{eq:sc-Vrem}
+\end{equation}
+expressed in per-unit on the nominal voltage.  For unbalanced faults
+the transfer impedances from all three sequence networks are combined
+according to the fault-type effective-impedance formula.
+
+\subsubsection{Options and Result Types}
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field (SCDetailedOptions)} & \textbf{Default} & \textbf{Description} \\
+\hline
+\texttt{c\_factor} & 1.10 & IEC~60909 voltage factor $c$ \\
+\texttt{fault\_type} & \texttt{ThreePhase} & Fault type (3PH, SLG, LL, DLG) \\
+\texttt{calc\_type} & \texttt{Max} & Maximum or minimum calculation \\
+\texttt{kappa\_method} & \texttt{A} & Kappa method (A = radial, B = meshed $\times 1.15$) \\
+\texttt{topology} & \texttt{Meshed} & Network topology hint for $\kappa$ \\
+\texttt{default\_xdpp} & 0.1 & Default $x''_d$ when not specified (pu) \\
+\texttt{t\_break} & 0.1\,s & Breaking time for $\mu$/$I_b$ computation \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field (SCBusResult)} & \textbf{Description} \\
+\hline
+\texttt{bus\_id} & Bus identifier \\
+\texttt{ikss\_ka} & Initial symmetrical s.c.\ current $I''_k$ (kA, total) \\
+\texttt{ikss\_1\_ka} & $I''_k$ without converter contributions (kA) \\
+\texttt{ikss\_no\_motor\_ka} & $I''_k$ less motor contributions (kA) \\
+\texttt{ip\_ka} & Peak current $i_p$ (kA) \\
+\texttt{ib\_ka} & Symmetrical breaking current $I_b$ (kA) \\
+\texttt{sk\_mva} & Short-circuit power $S''_k$ (MVA) \\
+\texttt{z\_thevenin} & Thévenin impedance $Z_{kk}$ (pu, complex) \\
+\texttt{v\_remaining} & Residual voltage vector at all buses (pu) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ============================================================
+\subsection{Three-Phase Newton-Raphson Power Flow}
+\label{sec:three-phase-nr}
+% ============================================================
+
+\subsubsection{Mathematical Model}
+\label{sec:3ph-nr-math}
+
+\paragraph{Network model.}
+The three-phase unbalanced network is represented by a compact
+$abc$-domain admittance matrix $\mathbf{Y}_{\text{bus}} \in
+\mathbb{C}^{n_\phi \times n_\phi}$, where $n_\phi \le 3N$ is the
+number of \emph{active} phase-nodes ($N$ buses, each present on up to
+three phases~$a, b, c$).  Phase membership is encoded by a bitmask
+$\mathcal{P}_i \subseteq \{a,b,c\}$ for each bus~$i$; only the nodes
+in $\bigcup_i \mathcal{P}_i$ appear in $\mathbf{Y}_{\text{bus}}$, giving
+a reduced problem that handles single-phase laterals and two-phase branches
+exactly without phantom nodes.
+
+Each three-phase line contributes a $3\times 3$ (or smaller) block to
+$\mathbf{Y}_{\text{bus}}$.  The model supports two impedance representations:
+\begin{enumerate}
+  \item \textbf{Sequence-derived circulant}: positive-sequence impedance
+    $z_1 = r_1 + jx_1$ and zero-sequence impedance $z_0 = r_0 + jx_0$
+    give the symmetrical component matrix
+    \[
+      \mathbf{Z}_{abc} = \mathbf{T}
+      \begin{pmatrix} z_1 & & \\ & z_1 & \\ & & z_0 \end{pmatrix}
+      \mathbf{T}^{-1},
+    \]
+    where $\mathbf{T} = \bigl[\mathbf{a}_0,\, \mathbf{a}_1,\, \mathbf{a}_2\bigr]$
+    is the symmetrical components transformation matrix with
+    $a = e^{j2\pi/3}$.
+  \item \textbf{Explicit phase-domain matrix}: when
+    \texttt{use\_phase\_matrix = true}, the full $3\times 3$ pu impedance
+    matrix $\mathbf{Z}^{abc}$ is used directly, enabling any
+    asymmetric mutual coupling.
+\end{enumerate}
+
+\paragraph{State vector.}
+The NR state is expressed in polar form:
+\[
+  \mathbf{x} =
+  \bigl[\theta_{a,1},\; \theta_{b,1},\; \theta_{c,1},\;\ldots,\;
+        \theta_{a,N},\; \theta_{b,N},\; \theta_{c,N},\;
+        |V_{a,1}|,\; |V_{b,1}|,\; |V_{c,1}|,\;\ldots\bigr]^{\top},
+\]
+where $\theta_{\varphi,i}$ is the voltage angle and $|V_{\varphi,i}|$
+the magnitude on phase $\varphi$ at bus~$i$.  Slack bus phases are
+excluded from $\theta$ (fixed reference); PQ bus phases contribute
+to both the $\theta$ and $|V|$ sub-vectors.  PV bus phases are fixed
+in magnitude (set on the bus struct) and contribute only to $\theta$.
+
+\paragraph{Mismatch equations.}
+For each active phase-node $(\varphi, i)$ the active and reactive power
+mismatches are:
+\begin{align}
+  \Delta P_{\varphi i} &= P^{\text{spec}}_{\varphi i}
+    - \sum_{j}\sum_{\psi}
+      |V_{\varphi i}|\,|V_{\psi j}|
+      \Bigl(
+        G_{\varphi\psi,ij}\cos(\theta_{\varphi i}-\theta_{\psi j})
+       +B_{\varphi\psi,ij}\sin(\theta_{\varphi i}-\theta_{\psi j})
+      \Bigr),
+  \label{eq:3ph-p-mismatch}\\[4pt]
+  \Delta Q_{\varphi i} &= Q^{\text{spec}}_{\varphi i}
+    - \sum_{j}\sum_{\psi}
+      |V_{\varphi i}|\,|V_{\psi j}|
+      \Bigl(
+        G_{\varphi\psi,ij}\sin(\theta_{\varphi i}-\theta_{\psi j})
+       -B_{\varphi\psi,ij}\cos(\theta_{\varphi i}-\theta_{\psi j})
+      \Bigr),
+  \label{eq:3ph-q-mismatch}
+\end{align}
+where $G_{\varphi\psi,ij}+jB_{\varphi\psi,ij}$ is the
+$(\varphi i,\psi j)$ entry of $\mathbf{Y}_{\text{bus}}$, and the
+specified injections are
+\[
+  P^{\text{spec}}_{\varphi i} =
+    P^{\text{gen}}_{\varphi i} - P^{\text{load}}_{\varphi i}, \qquad
+  Q^{\text{spec}}_{\varphi i} =
+    Q^{\text{gen}}_{\varphi i} - Q^{\text{load}}_{\varphi i}.
+\]
+ZIP loads are linearised around the operating voltage; delta-connected
+loads are handled via a Norton-equivalent current injection before
+forming the mismatch.
+
+\paragraph{Jacobian.}
+The Jacobian $\mathbf{J} \in \mathbb{R}^{n_\text{var} \times n_\text{var}}$
+with $n_\text{var} = n_{\theta} + n_{|V|}$ has the standard four sub-blocks:
+\[
+  \mathbf{J} =
+  \begin{pmatrix}
+    \dfrac{\partial\boldsymbol{\Delta P}}{\partial\boldsymbol{\theta}} &
+    \dfrac{\partial\boldsymbol{\Delta P}}{\partial|\mathbf{V}|} \\[8pt]
+    \dfrac{\partial\boldsymbol{\Delta Q}}{\partial\boldsymbol{\theta}} &
+    \dfrac{\partial\boldsymbol{\Delta Q}}{\partial|\mathbf{V}|}
+  \end{pmatrix}.
+\]
+The diagonal and off-diagonal entries follow the standard polar-form
+expressions (Arrillaga \& Watson, 2001, Ch.\,7), extended to the
+multi-phase case by replacing the scalar admittances
+$G_{ij}, B_{ij}$ with their inter-phase counterparts
+$G_{\varphi\psi,ij}, B_{\varphi\psi,ij}$.
+$\mathbf{J}$ is assembled as a sparse matrix and factorised with
+Eigen's~\texttt{SparseLU} (or KLU/UMFPACK when available) at each
+iteration.
+
+\paragraph{Voltage Unbalance Factor (VUF).}
+After convergence the VUF at bus~$i$ is computed via symmetrical
+components:
+\[
+  \mathrm{VUF}_i = \frac{|V_2|_i}{|V_1|_i} \times 100\,\%,
+  \qquad
+  \begin{pmatrix}V_0\\V_1\\V_2\end{pmatrix}_{\!i}
+  = \mathbf{T}^{-1}
+  \begin{pmatrix}V_a\\V_b\\V_c\end{pmatrix}_{\!i}.
+\]
+The result field \texttt{max\_vuf\_percent} reports
+$\max_i \mathrm{VUF}_i$.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsubsection{Algorithm}
+\label{sec:3ph-nr-algo}
+
+\begin{algorithm}[H]
+\caption{Three-Phase Newton-Raphson Power Flow (\texttt{solve\_three\_phase\_nr})}
+\label{alg:3ph-nr}
+\begin{algorithmic}[1]
+\Require $\mathcal{S}$ (ThreePhaseACSystem), options $(k_{\max}, \varepsilon)$
+\Ensure  $\mathbf{r}$ (ThreePhaseDPFResult)
+
+\State Build \textbf{PhaseNodeIndexer}: map each active $(\varphi, i)$ pair to compact index
+\State Assemble compact $\mathbf{Y}_{\text{bus}}$ from lines (sequence or phase-domain)
+\State Initialise state $\mathbf{x}^{(0)}$ from bus flat-start or per-phase setpoints
+\State Build load model: resolve per-phase PQ, ZIP, delta-wye Norton equivalents
+\State Compute specified injections $P^{\text{spec}}, Q^{\text{spec}}$ for all active nodes
+
+\For{$k = 0, 1, \ldots, k_{\max}$}
+  \State Evaluate mismatch $\boldsymbol{\Delta}(\mathbf{x}^{(k)})$ via
+         Eqs.~(\ref{eq:3ph-p-mismatch})--(\ref{eq:3ph-q-mismatch})
+  \State $\rho \leftarrow \|\boldsymbol{\Delta}\|_\infty$ \Comment{convergence check}
+  \If{$\rho < \varepsilon$}
+    \State \textbf{break}
+  \EndIf
+  \State Assemble sparse Jacobian $\mathbf{J}(\mathbf{x}^{(k)})$
+  \State Solve $\mathbf{J}\,\delta\mathbf{x} = \boldsymbol{\Delta}$
+         \hfill (SparseLU / KLU)
+  \State $\mathbf{x}^{(k+1)} \leftarrow \mathbf{x}^{(k)} + \delta\mathbf{x}$
+  \State Clamp $|V| \ge 0.05$\,pu (projection step)
+\EndFor
+
+\State Unpack $\mathbf{x}^{(k)} \to |V_{\varphi i}|,\; \theta_{\varphi i}$
+\State Compute per-phase branch power flows and losses
+\State Compute transformer terminal observations
+\State Compute VUF at each bus $\to$ \texttt{max\_vuf\_percent}
+\State \Return $\mathbf{r}$ with \texttt{bus\_voltages}, \texttt{branch\_powers},
+               \texttt{converged}, \texttt{iterations}, \texttt{residual}
+\end{algorithmic}
+\end{algorithm}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsubsection{Flowchart}
+\label{sec:3ph-nr-flowchart}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance = 6mm and 32mm,
+    box/.style = {rectangle, draw, rounded corners=3pt,
+                  minimum width=52mm, minimum height=8mm,
+                  text centered, font=\small},
+    dec/.style = {diamond, draw, aspect=2.4,
+                  minimum width=52mm, minimum height=8mm,
+                  text centered, font=\small},
+    arr/.style = {-Latex, thick},
+    every node/.append style={align=center}
+  ]
+
+  \node[box]             (init)    {Build PhaseNodeIndexer,\\
+                                    assemble $\mathbf{Y}_{\text{bus}}$,\\
+                                    init flat start $\mathbf{x}^{(0)}$};
+  \node[box, below=of init] (load)  {Resolve loads: PQ, ZIP,\\
+                                     delta Norton, transformers};
+  \node[box, below=of load] (spec)  {Compute $P^{\text{spec}},Q^{\text{spec}}$};
+  \node[dec, below=of spec] (iter)  {$k \le k_{\max}$?};
+  \node[box, below=of iter] (mism)  {Evaluate mismatch\\
+                                     $\boldsymbol{\Delta}(\mathbf{x}^{(k)})$};
+  \node[dec, below=of mism] (conv)  {$\|\boldsymbol{\Delta}\|_\infty < \varepsilon$?};
+  \node[box, below=of conv] (jac)   {Assemble sparse\\
+                                     Jacobian $\mathbf{J}$};
+  \node[box, below=of jac]  (solve) {Solve $\mathbf{J}\,\delta\mathbf{x}=\boldsymbol{\Delta}$\\
+                                     (SparseLU / KLU)};
+  \node[box, below=of solve](upd)   {$\mathbf{x} \leftarrow \mathbf{x}+\delta\mathbf{x}$,\\
+                                     clamp $|V|\ge 0.05$};
+  \node[box, right=of conv, xshift=4mm] (post)  {Unpack voltages,\\
+                                     compute branch\\
+                                     power \& losses,\\
+                                     VUF};
+
+  \draw[arr] (init) -- (load);
+  \draw[arr] (load) -- (spec);
+  \draw[arr] (spec) -- (iter);
+  \draw[arr] (iter) -- node[right, font=\scriptsize]{yes} (mism);
+  \draw[arr] (mism) -- (conv);
+  \draw[arr] (conv) -- node[right, font=\scriptsize]{no} (jac);
+  \draw[arr] (jac)  -- (solve);
+  \draw[arr] (solve)-- (upd);
+  % loop back
+  \draw[arr] (upd.west) -- ++(-14mm,0) |- (iter.west);
+  % converged exit
+  \draw[arr] (conv.east) -- node[above, font=\scriptsize]{yes} (post.west);
+  % diverged exit
+  \draw[arr] (iter.east) -- ++(12mm,0) |- node[above right,
+              font=\scriptsize, pos=0.25]{no (diverged)} (post.north);
+\end{tikzpicture}
+\caption{Three-phase Newton-Raphson power flow algorithm flow. The loop
+iterates over the outer \texttt{k} counter; early exit occurs when the
+maximum mismatch $\|\boldsymbol{\Delta}\|_\infty$ falls below tolerance
+$\varepsilon$.  Both normal convergence and iteration-limit exits feed
+the post-processing block that computes branch powers and the VUF.}
+\label{fig:3ph-nr-flowchart}
+\end{figure}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsubsection{Solver Options and Result Fields}
+\label{sec:3ph-nr-options}
+
+\begin{center}
+\small
+\begin{tabular}{lll}
+\hline\hline
+Field & Type & Description \\
+\hline
+\multicolumn{3}{l}{\textbf{ThreePhaseNROptions}} \\
+\texttt{max\_iter}         & int    & Maximum NR iterations (default 50) \\
+\texttt{max\_control\_iter}& int    & Maximum outer regulator-control iterations (100) \\
+\texttt{tol}               & double & Convergence tolerance on
+                                       $\|\boldsymbol{\Delta}\|_\infty$ (1e-6) \\
+\texttt{verbose}           & bool   & Print per-iteration residual \\
+\texttt{include\_shunts}   & bool   & Add bus shunt $g_s + jb_s$ to $\mathbf{Y}_{\text{bus}}$ \\
+\hline
+\multicolumn{3}{l}{\textbf{ThreePhaseDPFResult}} \\
+\texttt{bus\_voltages}     & vector & Per-bus per-phase $(|V|, \theta)$ \\
+\texttt{branch\_powers}    & vector & Per-branch per-phase sending-end $P, Q$ (MW/MVAr) \\
+\texttt{p\_loss\_[a/b/c]\_mw}   & double & Per-phase active loss (MW) \\
+\texttt{q\_loss\_[a/b/c]\_mvar} & double & Per-phase reactive loss (MVAr) \\
+\texttt{total\_p\_loss\_mw}     & double & $\sum_\varphi P^\text{loss}_\varphi$ \\
+\texttt{total\_q\_loss\_mvar}   & double & $\sum_\varphi Q^\text{loss}_\varphi$ \\
+\texttt{max\_vuf\_percent}      & double & Maximum voltage unbalance factor (\%) \\
+\texttt{converged}         & bool   & \texttt{true} if NR converged \\
+\texttt{iterations}        & int    & NR iterations taken \\
+\texttt{residual}          & double & Final $\|\boldsymbol{\Delta}\|_\infty$ \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsubsection{Numerical Verification}
+\label{sec:3ph-nr-results}
+
+\paragraph{Balanced 3-bus radial feeder.}
+A balanced three-bus radial system ($S_{\text{base}} = 10\,\text{MVA}$,
+line $r + jx = 0.04 + j0.08$\,pu) with equal per-phase loads
+($P_\varphi = 0.3$\,MW, $Q_\varphi = 0.1$\,MVAr at bus~2;
+ $P_\varphi = 0.2$\,MW, $Q_\varphi = 0.08$\,MVAr at bus~3)
+converges in $\leq 5$ iterations with $\|\boldsymbol{\Delta}\|_\infty < 10^{-8}$.
+All per-phase magnitudes are equal at each bus:
+$|V_{a,i}| = |V_{b,i}| = |V_{c,i}|$, consistent with balanced loading.
+The VUF is below $0.5\,\%$.
+
+\paragraph{Unbalanced feeder (asymmetric loads).}
+With loads concentrated on phase~A (0.5\,MW/0.2\,MVAr at bus~2),
+phase~A exhibits the greatest voltage drop.  The NR solver still
+converges, and $|V_{a,2}| < |V_{b,2}|$, correctly reflecting the
+heavier loading.
+
+\paragraph{Meshed topology.}
+A ring branch from bus~3 back to bus~1 ($r + jx = 0.06 + j0.12$\,pu)
+creates a meshed network unsolvable by backward-forward sweep.
+The three-phase NR converges in all test cases; all per-phase voltages
+remain in the range $(0.85, 1.0)$\,pu.
+
+\paragraph{Single-phase lateral.}
+Bus~3 connected via a phase-A-only branch returns
+$|V_{b,3}| = |V_{c,3}| = 0$ (no phase-B/C nodes present at that bus),
+and all branch-power entries for phases~B and~C are identically zero.
+
+\paragraph{Zero-load (no-load) case.}
+With all demand set to zero, all bus voltages converge to exactly
+$1.0$\,pu and total losses are zero to machine precision.
+
+\noindent
+All 16 test cases in \texttt{tests/test\_three\_phase\_nr.cpp}
+(97 assertions) pass with zero failures.

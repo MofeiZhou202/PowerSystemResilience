@@ -85,3 +85,8 @@ hacdcpf_add_test(test_crossmodule_integration test_crossmodule_integration.cpp)
 #   6. IEC c-factor: Sk ∝ c²  (ratio ≈ 1.21 for c=1.0 vs c=1.1)
 #   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
 hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
+
+# Three-phase Newton-Raphson: phase-node indexer, balanced/unbalanced radial,
+# meshed topology, multi-source PV, HybridPowerSystem overload, VUF, losses,
+# zero-load no-load, and 2-bus analytical cross-validation.
+hacdcpf_add_test(test_three_phase_nr test_three_phase_nr.cpp)
