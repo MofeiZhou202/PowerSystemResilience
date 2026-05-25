@@ -117,7 +117,6 @@ set(HACDCPF_SOURCES
   # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
   src/carbon_analysis/annual_carbon_analysis.cpp
-  src/power_flow/distribution_power_flow.cpp
   src/power_flow/three_phase_nr.cpp
   src/reliability/reliability_assessment.cpp
   src/reliability/reliability_data.cpp

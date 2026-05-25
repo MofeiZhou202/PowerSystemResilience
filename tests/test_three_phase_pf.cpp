@@ -22,8 +22,7 @@
 ///   5.  Meshed topology      — 3-bus with ring branch, solver still converges
 ///   6.  Multi-source         — DG at bus 3, slack-only at bus 1
 ///   7.  Transformer          — Δ-Yg 3-bus with two-winding transformer
-///   8.  Distribution PF      — solve_distribution_power_flow stub behaviour
-///   9.  JSON round-trip      — serialize / deserialize ThreePhaseACSystem
+///   8.  JSON round-trip      — serialize / deserialize ThreePhaseACSystem
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
@@ -458,36 +457,7 @@ TEST_CASE("Three-phase transformer: 3-bus with transformer between buses 2-3 con
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Section 8 – Distribution PF stub
-// ══════════════════════════════════════════════════════════════════════════════
-
-TEST_CASE("solve_distribution_power_flow: stub returns not_implemented", "[three_phase]") {
-    HybridPowerSystem sys;
-    sys.base_mva = 10.0;
-    // Minimal single-bus system
-    ACBus b; b.index = 1; b.bus_type = BusType::SLACK;
-    b.vm_pu = 1.0; b.va_deg = 0.0; b.in_service = true;
-    sys.ac.buses = {b};
-
-    analysis::DistributionPFOptions opt;
-    opt.max_iterations = 50;
-    opt.convergence_tolerance = 1e-6;
-
-    auto r = analysis::solve_distribution_power_flow(sys, opt);
-    // Implementation is a stub — it should not crash, regardless of converged state
-    CHECK(r.status == "not_implemented");
-    CHECK_FALSE(r.converged);
-}
-
-TEST_CASE("solve_distribution_power_flow: default options compile and run", "[three_phase]") {
-    HybridPowerSystem sys;
-    auto r = analysis::solve_distribution_power_flow(sys);
-    // Should not throw; stub returns immediately
-    CHECK(r.iterations == 0);
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Section 9 – JSON round-trip
+// Section 8 – JSON round-trip
 // ══════════════════════════════════════════════════════════════════════════════
 
 TEST_CASE("Three-phase JSON round-trip: bus count and topology preserved", "[three_phase]") {
