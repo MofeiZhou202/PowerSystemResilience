@@ -398,6 +398,6 @@ TEST_CASE("Resilience assessment: stub returns valid struct", "[analysis][resili
   analysis::DistributionResilienceOptions opt;
   auto result = hacdcpf::run_distribution_resilience_assessment(sys, opt);
 
-  CHECK_FALSE(result.completed);
-  CHECK(result.status == "not_implemented");
+  CHECK(result.completed);
+  CHECK(result.status == "Completed");
 }

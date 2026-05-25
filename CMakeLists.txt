@@ -103,6 +103,14 @@ set(HACDCPF_SOURCES
   src/api/hacdcpf.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
+  # ── graph analysis & reduction ────────────────────────────────────────
+  src/graph/power_system_graph.cpp
+  src/graph/topology_analysis.cpp
+  src/graph/switch_contraction.cpp
+  src/graph/reduction_plan.cpp
+  src/graph/series_reduction.cpp
+  src/graph/kron_reduction.cpp
+  src/graph/result_recovery.cpp
   # ── analysis ────────────────────────────────────────────────────────
   src/analysis/short_circuit.cpp
   # ── analysis stubs ───────────────────────────────────────────────────

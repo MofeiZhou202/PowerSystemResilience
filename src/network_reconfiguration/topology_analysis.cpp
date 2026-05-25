@@ -32,6 +32,7 @@
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/solver/branch_and_cut.hpp"
 #include "hacdcpf/solver/problem_types.hpp"
 
@@ -158,6 +159,45 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
 
   ONRResult result;
   if (n == 0 || m == 0) return result;
+
+  // ── Graph-based topology pre-analysis ─────────────────────────────────
+  // Identify bridge edges so their alpha lower bound is fixed to 1 in the
+  // MILP (opening a bridge disconnects the network → always infeasible).
+  // Also pre-validates topology (missing slack, isolated loads) and logs
+  // the loop/bridge counts when verbose mode is on.
+  //
+  // IMPORTANT: build the "potential" graph with ALL branches treated as
+  // in-service (including normally-open tie switches), so that fundamental
+  // cycles formed by switchable branches are visible. A branch is only a
+  // true structural bridge (and thus must stay closed) if it remains a
+  // bridge even when all switchable branches are available.
+  std::vector<bool> is_bridge(m, false);
+  {
+    HybridPowerSystem wrap;
+    wrap.ac = ac_sys;
+    // Temporarily mark all branches as in-service so the graph includes the
+    // full potential topology (tie switches included).
+    for (auto& br : wrap.ac.branches) br.in_service = true;
+    auto g    = hacdcpf::graph::build_power_system_graph(wrap);
+    auto topo = hacdcpf::graph::analyze_topology(g);
+
+    if (!topo.all_islands_valid) {
+      for (const auto& d : topo.diagnostics)
+        spdlog::warn("ONR: topology pre-check: {}", d.message);
+    }
+
+    // build_power_system_graph inserts AC branches first, so
+    // g.edges[eid] corresponds to ac_sys.branches[eid] for eid < m.
+    for (int eid : topo.bridge_edge_ids) {
+      if (eid >= 0 && eid < m) is_bridge[eid] = true;
+    }
+
+    if (opt.verbose) {
+      int nb = static_cast<int>(std::count(is_bridge.begin(), is_bridge.end(), true));
+      spdlog::info("ONR: {} buses, {} branches, {} bridge(s), {} fundamental cycle(s)",
+                   n, m, nb, topo.fundamental_cycles.size());
+    }
+  }
 
   // --- Determine candidate (switchable) branch set -----------------------
   // If ONROptions::switchable_branch_ids is empty ⇒ all branches are candidates.
@@ -316,8 +356,8 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
   const double vmax2 = opt.v_max_pu * opt.v_max_pu;
 
   for (int b = 0; b < m; ++b) {
-    // alpha
-    lp.vars[idx_alpha(b)] = {VarType::Binary, 0.0, 1.0, "a" + std::to_string(b)};
+    // alpha  (bridge edges must stay closed: lb = 1)
+    lp.vars[idx_alpha(b)] = {VarType::Binary, is_bridge[b] ? 1.0 : 0.0, 1.0, "a" + std::to_string(b)};
     // P (active power flow)
     double pmax = (branches[b].rate_a_mva > 1e-9)
                   ? branches[b].rate_a_mva / base_mva : Pmax_default;

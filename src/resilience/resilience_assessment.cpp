@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 
@@ -1221,6 +1222,26 @@ DistributionResilienceResult run_distribution_resilience_assessment(
     const auto comp = compute_components(sys, closed, bus_pos);
     const auto islands = build_islands(comp, source_bus, demand_by_bus);
     sr.island_count = static_cast<int>(islands.size());
+
+    // ── Graph topology analysis: cut-vertices and bridges for restoration priority
+    {
+      namespace gr = hacdcpf::graph;
+      // Build a graph snapshot reflecting the current closed[]/open[] state.
+      HybridPowerSystem sys_snap = sys;
+      for (size_t i = 0; i < sys_snap.ac.branches.size(); ++i)
+        sys_snap.ac.branches[i].in_service = closed[i];
+      const auto g    = gr::build_power_system_graph(sys_snap);
+      const auto topo = gr::analyze_topology(g);
+      sr.cut_vertex_bus_ids = topo.cut_vertex_bus_ids;
+      // Map graph bridge edge IDs back to AC branch indices.
+      sr.bridge_branch_ids.clear();
+      sr.bridge_branch_ids.reserve(topo.bridge_edge_ids.size());
+      const int n_branches = static_cast<int>(sys.ac.branches.size());
+      for (int eid : topo.bridge_edge_ids) {
+        if (eid >= 0 && eid < n_branches)
+          sr.bridge_branch_ids.push_back(sys.ac.branches[static_cast<size_t>(eid)].index);
+      }
+    }
 
     std::vector<ComponentEvaluation> evals(islands.size());
     const StepContext ctx{sys, loads, comp, bus_pos, fixed_storage, mess,

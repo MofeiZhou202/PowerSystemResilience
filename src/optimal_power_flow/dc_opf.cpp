@@ -4,9 +4,12 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+
+#include "hacdcpf/graph/graph.hpp"
 
 #include <Eigen/Core>
 #include <Eigen/Sparse>
@@ -593,20 +596,83 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
 DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
                          const DCOPFOptions& opt) {
   auto start_time = std::chrono::high_resolution_clock::now();
-  
+
   DCOPFResult result;
-  
+
+  // ── Graph topology pre-check ─────────────────────────────────────────────
+  // Detect isolated load islands before the expensive LP build; pre-shed their
+  // load and return infeasible immediately when no slack-connected island exists.
+  double direct_shed_mw = 0.0;
+  const HybridPowerSystem* sys_ptr = &sys;
+  std::optional<HybridPowerSystem> sys_pruned;
+
+  if (!sys.ac.buses.empty()) {
+    namespace gr = hacdcpf::graph;
+    const auto g    = gr::build_power_system_graph(sys);
+    const auto topo = gr::analyze_topology(g);
+    if (!topo.all_islands_valid) {
+      std::unordered_set<int> dead_buses;
+      for (const auto& isl : topo.islands) {
+        if (isl.status == gr::IslandStatus::IsolatedLoad ||
+            isl.status == gr::IslandStatus::NoSlack) {
+          dead_buses.insert(isl.bus_ids.begin(), isl.bus_ids.end());
+        }
+      }
+      if (!sys.ac.loads.empty()) {
+        for (const auto& ld : sys.ac.loads) {
+          if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
+          direct_shed_mw += std::max(0.0, ld.p_mw * ld.scaling);
+        }
+      } else {
+        for (const auto& b : sys.ac.buses) {
+          if (!dead_buses.count(b.index)) continue;
+          direct_shed_mw += std::max(0.0, b.pd_mw);
+        }
+      }
+      const bool has_valid = std::any_of(
+          topo.islands.begin(), topo.islands.end(),
+          [](const gr::IslandInfo& i) {
+            return i.status == gr::IslandStatus::Valid;
+          });
+      if (!has_valid) {
+        if (opt.verbose)
+          spdlog::warn("DC OPF: no valid island — {:.2f} MW direct shed, infeasible",
+                       direct_shed_mw);
+        result.status = "Infeasible: no island with slack bus";
+        result.converged = false;
+        result.total_load_shedding_mw = direct_shed_mw;
+        return result;
+      }
+      // Prune dead-bus loads from a local copy before building the formulation.
+      sys_pruned = sys;
+      for (auto& b : sys_pruned->ac.buses) {
+        if (!dead_buses.count(b.index)) continue;
+        b.pd_mw = 0.0;
+        b.qd_mvar = 0.0;
+      }
+      for (auto& ld : sys_pruned->ac.loads) {
+        if (!dead_buses.count(ld.bus)) continue;
+        ld.in_service = false;
+      }
+      sys_ptr = &(*sys_pruned);
+      if (opt.verbose)
+        spdlog::warn("DC OPF: {:.2f} MW in isolated islands pre-shed before LP solve",
+                     direct_shed_mw);
+    }
+  }
+
   // Build LP formulation (constraint structure)
-  DCOPFFormulation form = build_dc_opf_lp(sys, opt);
+  DCOPFFormulation form = build_dc_opf_lp(*sys_ptr, opt);
   
   if (form.nb == 0 || form.ng == 0) {
     result.status = "Empty system or no generators";
     result.converged = false;
+    result.total_load_shedding_mw += direct_shed_mw;
     return result;
   }
   
   // Build QP model with true quadratic costs
-  build_dc_opf_qp(form, sys);
+  build_dc_opf_qp(form, *sys_ptr);
   
   if (opt.verbose) {
     spdlog::info("DC OPF: {} buses, {} generators, {} branches, {} variables",
@@ -687,6 +753,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       if (!solved) {
         result.status = "Gurobi not available";
         result.converged = false;
+        result.total_load_shedding_mw += direct_shed_mw;
         return result;
       }
       break;
@@ -696,6 +763,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       if (!solved) {
         result.status = "HiGHS not available";
         result.converged = false;
+        result.total_load_shedding_mw += direct_shed_mw;
         return result;
       }
       break;
@@ -724,11 +792,11 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   double runtime_sec = std::chrono::duration<double>(end_time - start_time).count();
   
   // Extract results
-  result = extract_dc_opf_result(form, sol, sys, runtime_sec);
+  result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);
   
   // For QP solvers, recompute the true quadratic objective including constant terms
   if (use_qp && result.converged && sol.x.size() >= form.nvar) {
-    result.objective = compute_qp_objective(form, sol.x, sys);
+    result.objective = compute_qp_objective(form, sol.x, *sys_ptr);
   }
   
   if (opt.verbose) {
@@ -737,6 +805,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
                  result.runtime_sec);
   }
   
+  result.total_load_shedding_mw += direct_shed_mw;
   return result;
 }
 

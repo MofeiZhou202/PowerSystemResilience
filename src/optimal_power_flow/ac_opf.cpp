@@ -17,6 +17,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 
+#include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/power_flow/jacobian_builder.hpp"
 #include "hacdcpf/detail/core_compat.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
@@ -2048,6 +2049,34 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   if (sys.ac.buses.empty()) {
     out.status = "AC OPF failed: empty AC bus set.";
     return out;
+  }
+
+  // ── Graph topology pre-check ────────────────────────────────────────────────
+  // Detect topology problems before building the full IPM formulation.
+  {
+    namespace gr = hacdcpf::graph;
+    const auto g    = gr::build_power_system_graph(sys);
+    const auto topo = gr::analyze_topology(g);
+    const bool has_valid = std::any_of(
+        topo.islands.begin(), topo.islands.end(),
+        [](const gr::IslandInfo& i) { return i.status == gr::IslandStatus::Valid; });
+    if (!has_valid) {
+      out.status = "AC OPF infeasible: no island with slack bus";
+      for (const auto& diag : topo.diagnostics)
+        out.infeasibility_hints.push_back(diag.message);
+      if (out.infeasibility_hints.empty())
+        out.infeasibility_hints.push_back("No AC island contains a slack bus");
+      return out;
+    }
+    for (const auto& isl : topo.islands) {
+      if (isl.status == gr::IslandStatus::IsolatedLoad ||
+          isl.status == gr::IslandStatus::NoSlack) {
+        out.infeasibility_hints.push_back(
+            "Island " + std::to_string(isl.island_id) +
+            " (" + std::to_string(isl.bus_ids.size()) +
+            " buses) has no slack — buses will be unservable");
+      }
+    }
   }
 
   // Auto-enable parity IPM when DC network exists to properly optimize DC side

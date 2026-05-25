@@ -96,3 +96,13 @@ hacdcpf_add_test(test_three_phase_nr test_three_phase_nr.cpp)
 # MESS dispatch, demo data, summary(), progress callback, custom profiles,
 # resilience index bounds, fault sequence, legacy field sync, step count, MIP stub.
 hacdcpf_add_test(test_resilience_assessment test_resilience_assessment.cpp)
+
+# ── Graph analysis & reduction ──────────────────────────────────────────────
+
+# Graph topology analysis, switch contraction, series/pendant reduction,
+# and result recovery.
+hacdcpf_add_test(test_graph test_graph.cpp)
+
+# Kron (Schur complement) reduction: Y-bus partitioning, voltage recovery,
+# fill-in guard, extended injection variant.
+hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)

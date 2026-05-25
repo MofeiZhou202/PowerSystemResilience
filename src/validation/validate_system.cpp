@@ -5,7 +5,10 @@
 #include "hacdcpf/validation/validate_system.hpp"
 
 #include <cmath>
+#include <string>
 #include <unordered_set>
+
+#include "hacdcpf/graph/graph.hpp"
 
 namespace hacdcpf::validation {
 
@@ -169,6 +172,29 @@ ValidationReport validate(const HybridPowerSystem& sys) {
               "DCSystem base_mva (" + std::to_string(sys.dc.base_mva) +
               ") differs from HybridPowerSystem base_mva (" +
               std::to_string(sys.base_mva) + ")");
+
+    // ── 13. Graph connectivity check ──────────────────────────────────────────
+    // Use the graph module to detect isolated load islands and no-slack islands.
+    if (!sys.ac.buses.empty()) {
+        namespace gr = hacdcpf::graph;
+        const auto g    = gr::build_power_system_graph(sys);
+        const auto topo = gr::analyze_topology(g);
+        for (const auto& isl : topo.islands) {
+            if (isl.status == gr::IslandStatus::IsolatedLoad) {
+                for (int bid : isl.bus_ids)
+                    r.add(S::Warning, "ACBus", std::to_string(bid),
+                          "connectivity",
+                          "bus " + std::to_string(bid) +
+                          " is in an isolated load island (no path to any slack)");
+            } else if (isl.status == gr::IslandStatus::NoSlack &&
+                       isl.domain == gr::NodeDomain::AC) {
+                r.add(S::Warning, "ACSystem", "", "connectivity",
+                      "AC island " + std::to_string(isl.island_id) +
+                      " (" + std::to_string(isl.bus_ids.size()) +
+                      " buses) contains no slack bus");
+            }
+        }
+    }
 
     return r;
 }

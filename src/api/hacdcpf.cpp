@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 
+#include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/branch_flow.hpp"
@@ -549,6 +550,24 @@ Result<PowerFlowResult> safe_solve_power_flow(
 }
 
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  // ── Graph topology pre-check ──────────────────────────────────────────────
+  // Return immediately (before Y-bus assembly) if no island has a slack bus.
+  if (!sys.ac.buses.empty()) {
+    namespace gr = hacdcpf::graph;
+    const auto g    = gr::build_power_system_graph(sys);
+    const auto topo = gr::analyze_topology(g);
+    const bool has_valid = std::any_of(
+        topo.islands.begin(), topo.islands.end(),
+        [](const gr::IslandInfo& i) { return i.status == gr::IslandStatus::Valid; });
+    if (!has_valid) {
+      PowerFlowResult result;
+      result.converged = false;
+      result.diagnostics.termination_reason = "No AC island with slack bus (graph pre-check)";
+      for (const auto& diag : topo.diagnostics)
+        result.diagnostics.warnings.push_back(diag.message);
+      return result;
+    }
+  }
   powerflow::SolverData& data = get_cached_solver_data(sys, opt.loss_model);
   apply_zip_weights(data, opt);
   static thread_local powerflow::NewtonSolver solver;

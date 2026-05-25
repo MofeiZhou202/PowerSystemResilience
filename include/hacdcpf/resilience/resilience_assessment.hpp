@@ -210,6 +210,15 @@ struct DistributionResilienceStepResult {
   double pf_residual{0.0};
   std::vector<BusVoltageStep> bus_voltages;
   std::vector<BranchFlowStep> branch_flows;
+
+  /// Bus IDs of cut-vertices (articulation points) in the current topology.
+  /// Removing any of these buses would split the connected network further.
+  /// Useful for prioritizing repair crew dispatch.
+  std::vector<int> cut_vertex_bus_ids;
+
+  /// Branch IDs of bridges (cut-edges) in the current topology.
+  /// Restoring a failed bridge reconnects the largest sub-tree downstream.
+  std::vector<int> bridge_branch_ids;
 };
 
 struct FaultSequenceEntry {

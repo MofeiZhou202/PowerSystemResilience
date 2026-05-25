@@ -11,6 +11,8 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "hacdcpf/graph/graph.hpp"
+#include <spdlog/spdlog.h>
 #include "hacdcpf/engine/adapter_registry.hpp"
 #include "hacdcpf/engine/native_adapters.hpp"
 #include "hacdcpf/engine/external_adapters.hpp"
@@ -2196,6 +2198,49 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
     return sys_t;
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Graph topology cache — built once per unique in-service configuration.
+  // Avoids re-running build_power_system_graph + analyze_topology every step.
+  // ─────────────────────────────────────────────────────────────────────────
+  namespace gr = hacdcpf::graph;
+  {
+    const auto g_base = gr::build_power_system_graph(sys);
+    const auto topo   = gr::analyze_topology(g_base);
+    if (!topo.all_islands_valid && !topo.diagnostics.empty()) {
+      for (const auto& d : topo.diagnostics)
+        spdlog::warn("TimeSeries topology (base): {}", d.message);
+    }
+  }
+  // Track branch in-service state to detect topology changes between steps.
+  std::vector<bool> topo_cache_in_service(sys.ac.branches.size(), true);
+  for (size_t i = 0; i < sys.ac.branches.size(); ++i)
+    topo_cache_in_service[i] = sys.ac.branches[i].in_service;
+  hacdcpf::graph::TopologyReport topo_cache = [&] {
+    const auto g = gr::build_power_system_graph(sys);
+    return gr::analyze_topology(g);
+  }();
+
+  // Helper: rebuild topology cache when branch in-service flags change.
+  auto refresh_topo_if_needed = [&](const HybridPowerSystem& sys_t) {
+    bool changed = false;
+    const size_t nb = std::min(sys_t.ac.branches.size(), topo_cache_in_service.size());
+    for (size_t i = 0; i < nb; ++i) {
+      if (sys_t.ac.branches[i].in_service != topo_cache_in_service[i]) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) return;
+    for (size_t i = 0; i < nb; ++i)
+      topo_cache_in_service[i] = sys_t.ac.branches[i].in_service;
+    const auto g_t = gr::build_power_system_graph(sys_t);
+    topo_cache = gr::analyze_topology(g_t);
+    if (!topo_cache.all_islands_valid && !topo_cache.diagnostics.empty()) {
+      for (const auto& d : topo_cache.diagnostics)
+        spdlog::warn("TimeSeries topology change at step: {}", d.message);
+    }
+  };
+
   // ═══════════════════════════════════════════════════════════════
   // Stage 2: OPF per timestep (when run_opf=true)
   // ═══════════════════════════════════════════════════════════════
@@ -2221,6 +2266,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
 
     for (int t = 0; t < T; ++t) {
       HybridPowerSystem sys_t = prepare_system(t);
+      refresh_topo_if_needed(sys_t);
 
       // ── Run OPF on sys_t ──
       auto& opf_res = result.opf_results[static_cast<size_t>(t)];
@@ -2418,6 +2464,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
 
     for (int t = 0; t < T; ++t) {
       HybridPowerSystem sys_t = prepare_system(t);
+      refresh_topo_if_needed(sys_t);
 
       // Accumulate gen cost from UC dispatch
       if (!opts.skip_uc && schedule.feasible) {

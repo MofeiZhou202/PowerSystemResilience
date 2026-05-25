@@ -3,10 +3,9 @@
 \label{sec:test_results}
 % ============================================================
 
-This chapter documents the twelve new test suites added to the project during the
-most recent development cycles.  All 327 CTest entries are registered (325 active, 2 skipped due to
+This chapter documents the new test suites added to the project.  All 393 CTest entries are registered (391 active, 2 skipped due to
 a parser limitation) in the \texttt{build\_rel} configuration, giving a total
-of \textbf{325/325 active tests passing} on macOS with Apple Silicon
+of \textbf{391/391 active tests passing} on macOS with Apple Silicon
 (Accelerate, HiGHS, Gurobi, Ipopt, SCIP, KLU, UMFPACK, PaPILO all active).
 The two skipped tests (\texttt{case533mt\_hi} and \texttt{case533mt\_lo})
 contain arithmetic expressions (\texttt{135/sqrt(3)}) in their data files
@@ -18,7 +17,7 @@ identified and skipped at runtime rather than failing.
 \label{sec:test_suites_overview}
 % ------------------------------------------------------------
 
-Table~\ref{tab:test_suites} summarises the eight new executables and their
+Table~\ref{tab:test_suites} summarises all new test executables and their
 CTest registration ranges.
 
 \begin{table}[ht]
@@ -41,8 +40,13 @@ CTest registration ranges.
 \texttt{test\_powerflow\_performance} & Large-system power-flow benchmark sweep (75 cases) & 324  & 1 \\
 \texttt{test\_topology\_crossval}  & Connectivity, ONR B\&C, exhaustive enum., 33bw   & 325      & 1 \\
 \texttt{test\_crossmodule\_integration} & Pipeline: OPF$\to$PF$\to$Carbon, ONR$\to$OPF$\to$PF$\to$Carbon & 326--327 & 2 \\
+\texttt{test\_short\_circuit\_crossval} & Short-circuit Z-bus cross-validation              & 328--334 & 7  \\
+\texttt{test\_three\_phase\_nr}         & Three-phase Newton--Raphson power flow            & 335--350 & 16 \\
+\texttt{test\_resilience\_assessment}   & Resilience: faults, reconfiguration, MESS dispatch & 351--367 & 17 \\
+\texttt{test\_graph}                    & Graph topology, contraction, series/pendant, recovery & 368--386 & 19 \\
+\texttt{test\_graph\_kron}              & Kron Y-bus reduction and voltage recovery         & 387--393 & 7  \\
 \hline
-\textbf{Total (new)}                & & 48--327 & \textbf{280} \\
+\textbf{Total (new)}                & & 48--393 & \textbf{346} \\
 \hline
 \end{tabular}
 \end{table}
@@ -1397,6 +1401,155 @@ SC-7c & API round-trip bus~18            & $|S_k^{\text{single}} - S_k^{\text{ba
 \end{table}
 
 % ------------------------------------------------------------
+\subsection{\texttt{test\_three\_phase\_nr}: Three-Phase Newton--Raphson Solver}
+\label{sec:test_three_phase_nr}
+% ------------------------------------------------------------
+
+\texttt{tests/test\_three\_phase\_nr.cpp} (CTest \#335--\#350) adds 16 tests for the
+native three-phase Newton--Raphson solver (\texttt{solve\_three\_phase\_nr}) and
+its companion \texttt{PhaseNodeIndexer} infrastructure.
+
+\subsubsection{PhaseNodeIndexer (tests \#335--\#337)}
+
+The \texttt{PhaseNodeIndexer} maps each (bus, phase) pair to a compact integer
+index used for the per-branch $6 \times 6$ admittance matrix and the Jacobian.
+Three tests verify: (a)~a balanced 3-bus system has exactly 9 compact nodes;
+(b)~a Phase-A lateral network has 7 compact nodes (2 phase-B/C slots absent);
+(c)~\texttt{bus\_phase\_mask(bus\_id)} returns the correct \texttt{PhaseMask}.
+
+\subsubsection{Solver Convergence and Physical Checks (tests \#338--\#350)}
+
+\begin{table}[ht]
+\centering
+\caption{Selected results from \texttt{test\_three\_phase\_nr} (macOS, Apple M4, \texttt{build\_rel}).}
+\label{tab:3ph_nr_results}
+\small
+\begin{tabular}{llll}
+\hline
+\textbf{Test} & \textbf{Topology} & \textbf{Assertion} & \textbf{Observed} \\
+\hline
+\#338 & Balanced radial 3-bus & Per-phase $|V_a - V_b| < 10^{-6}$\,pu & Pass \\
+\#339 & Unbalanced loads      & Per-phase $|V_a - V_b| > 10^{-3}$\,pu & Pass \\
+\#340 & Radial 3-bus          & Residual $< 10^{-6}$ at convergence     & $< 10^{-6}$ \\
+\#341 & Radial 3-bus          & Converges within 30 Newton iterations   & $\leq 6$\,iter \\
+\#342 & Phase-A lateral       & $V_b = V_c = 0$ on phase-A-only bus     & Pass \\
+\#343 & Ring (meshed, 3-bus)  & \texttt{converged == true}              & true \\
+\#344 & Multi-source + DG PV  & \texttt{converged == true}              & true \\
+\#345 & HPS overload wrap     & \texttt{ThreePhaseACSystem} fields match & Pass \\
+\#346 & Balanced input        & VUF $< 10^{-6}$                         & $< 10^{-6}$ \\
+\#347 & Radial 3-bus          & $\sum P_{\text{loss,ph}} = P_{\text{loss,total}}$ & Pass \\
+\#348 & Zero-load             & $|V_m - 1.0| < 10^{-9}$\,pu at all buses & Pass \\
+\#349 & In-service lines      & \texttt{branch\_powers} count equals in-service count & Pass \\
+\#350 & 2-bus exact balance   & $|P_{\text{injected}} - P_{\text{load}} - P_{\text{loss}}| < 10^{-6}$\,MW & Pass \\
+\hline
+\end{tabular}
+\end{table}
+
+All 16 tests pass in $\approx$0.02\,s.
+
+% ------------------------------------------------------------
+\subsection{\texttt{test\_resilience\_assessment}: Distribution Resilience}
+\label{sec:test_resilience_assessment}
+% ------------------------------------------------------------
+
+\texttt{tests/test\_resilience\_assessment.cpp} (CTest \#351--\#367) adds 17 tests
+for \texttt{hacdcpf::analysis::run\_resilience\_assessment()}.  The module
+simulates time-stepped post-fault behaviour including feeder protection,
+network reconfiguration via tie-switch closing, and mobile energy storage
+(MESS) dispatch.
+
+Two synthetic networks underpin the tests:
+\begin{itemize}
+  \item \textbf{Radial 3-bus} --- Bus~1 (slack) $\to$ Bus~2 $\to$ Bus~3; two
+        branches of length 1\,km; 1\,MW load at Bus~2 and Bus~3.
+  \item \textbf{Ring 4-bus with tie switch} --- Bus~1--2--3--4 radial;
+        Branch~4 (Bus~4 $\to$ Bus~1) is a normally-open tie switch.
+\end{itemize}
+
+\subsubsection{API and Boundary Checks (tests \#351--\#352)}
+
+An empty \texttt{HybridPowerSystem} and an options struct with
+\texttt{horizon\_steps = 0} both return an error result rather than throwing.
+
+\subsubsection{Fault Behaviour and Load Restoration (tests \#353--\#357)}
+
+\begin{table}[ht]
+\centering
+\caption{Resilience fault tests \#353--\#357: key assertions.}
+\label{tab:resilience_fault}
+\small
+\begin{tabular}{llp{6.5cm}l}
+\hline
+\textbf{Test} & \textbf{Scenario} & \textbf{Assertion} & \textbf{Result} \\
+\hline
+\#353 & No-fault 3-bus radial    & \texttt{total\_shed\_mwh == 0}                & 0\,MWh \\
+\#354 & Branch~2 fault; Bus~3 isolated & Shed $> 0$\,MWh                       & $> 0$\,MWh \\
+\#355 & Branch~1 fault; repair at step~3 & Load restored after repair          & \texttt{Restored} \\
+\#356 & Branch~1 fault; tie-switch closes & Bus~3 sustained shed~$= 0$         & 0\,MWh \\
+\#357 & Branch~2 fault; MESS at Bus~3 & Shed with MESS $<$ shed without        & confirmed \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Infrastructure and Regression Tests (tests \#358--\#367)}
+
+\begin{itemize}
+  \item \textbf{Demo data injection} (\#358) --- pre-populated result fields run
+        \texttt{summary()} without exception.
+  \item \textbf{summary() non-empty} (\#359) --- a completed simulation produces a
+        non-empty string.
+  \item \textbf{Progress callback cancellation} (\#360) --- returning \texttt{false}
+        at step~2 terminates the loop; fewer steps execute than the full horizon.
+  \item \textbf{Custom profiles} (\#361) --- flat load and RES profile vectors are
+        accepted and the simulation completes.
+  \item \textbf{Resilience index} (\#362) --- index is in $[0, 1]$ for all runs.
+  \item \textbf{Fault sequence} (\#363) --- auto-generated sequences are non-empty
+        for branches with nonzero failure rates.
+  \item \textbf{Legacy field sync} (\#364) --- \texttt{total\_ens\_mwh} equals
+        \texttt{total\_shed\_mwh} (backward-compatibility alias).
+  \item \textbf{Step count} (\#365) --- executed steps equal \texttt{horizon\_steps}
+        exactly.
+  \item \textbf{MIP stub} (\#366) --- MIP reconfiguration mode delegates to the
+        heuristic fallback and completes without exception.
+  \item \textbf{Peak shed non-negative} (\#367) --- \texttt{peak\_shed\_mw} $\geq 0$
+        for all runs.
+\end{itemize}
+
+All 17 resilience tests pass.
+
+% ------------------------------------------------------------
+\subsection{\texttt{test\_graph} and \texttt{test\_graph\_kron}: Graph Module}
+\label{sec:test_graph}
+% ------------------------------------------------------------
+
+\texttt{tests/test\_graph.cpp} (CTest \#368--\#386, 19~tests) and
+\texttt{tests/test\_graph\_kron.cpp} (CTest \#387--\#393, 7~tests) validate the
+\texttt{hacdcpf::graph} module.  Section~\ref{sec:graph} (Graph Analysis and
+Reduction Module) contains the full mathematical derivation and detailed test
+scenarios; Table~\ref{tab:graph_test_xref} provides the cross-reference.
+
+\begin{table}[ht]
+\centering
+\caption{Graph module test cross-reference.}
+\label{tab:graph_test_xref}
+\small
+\begin{tabular}{lll}
+\hline
+\textbf{IDs} & \textbf{File} & \textbf{Coverage area} \\
+\hline
+368--373 & \texttt{test\_graph.cpp}      & Topology: islands, bridge/cut-vertex, cycles \\
+374--377 & \texttt{test\_graph.cpp}      & Switch contraction \\
+378--380 & \texttt{test\_graph.cpp}      & Series reduction and pendant folding \\
+381--382 & \texttt{test\_graph.cpp}      & Result recovery (switch, series) \\
+383--386 & \texttt{test\_graph.cpp}      & Construction (empty, single-bus, AC+DC, flags) \\
+387--393 & \texttt{test\_graph\_kron.cpp}& Kron Y-bus reduction and voltage recovery \\
+\hline
+\end{tabular}
+\end{table}
+
+All 26 graph tests pass in $< 0.01$\,s.
+
+% ------------------------------------------------------------
 \subsection{Summary and Pass Rates}
 \label{sec:test_summary}
 % ------------------------------------------------------------
@@ -1422,10 +1575,14 @@ SC-7c & API round-trip bus~18            & $|S_k^{\text{single}} - S_k^{\text{ba
 \texttt{test\_powerflow\_performance} & 324      &  1  &  1  & 100\,\% \\
 \texttt{test\_crossmodule\_integration} & 326--327 &  2  &  2  & 100\,\% \\
 \texttt{test\_short\_circuit\_crossval} & 328--334 &  7  &  7  & 100\,\% \\
+\texttt{test\_three\_phase\_nr}         & 335--350 & 16  & 16  & 100\,\% \\
+\texttt{test\_resilience\_assessment}   & 351--367 & 17  & 17  & 100\,\% \\
+\texttt{test\_graph}                    & 368--386 & 19  & 19  & 100\,\% \\
+\texttt{test\_graph\_kron}              & 387--393 &  7  &  7  & 100\,\% \\
 \hline
 Pre-existing suites                 & 1--47 & 47  & 47  & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--334   & \textbf{334} & \textbf{332}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--393   & \textbf{393} & \textbf{391}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline

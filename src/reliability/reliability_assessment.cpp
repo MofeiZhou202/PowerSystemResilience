@@ -10,6 +10,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 
@@ -166,14 +167,93 @@ StateEvalResult evaluate_state(
       ld.q_mvar *= load_scale;
     }
   }
-  
+
+  // ── Island pre-screening ──────────────────────────────────────────────────
+  // Identify islands with no voltage reference (IsolatedLoad / NoSlack).
+  // Their loads are shed directly without running OPF, and the bus-level
+  // pd_mw is zeroed to keep the DC-OPF B-matrix well-posed.
+  double direct_shed_mw = 0.0;
+  std::vector<double> nodal_direct_shed(sys.ac.buses.size(), 0.0);
+  {
+    namespace gr = hacdcpf::graph;
+    auto g    = gr::build_power_system_graph(sys);
+    auto topo = gr::analyze_topology(g);
+
+    // Build bus_id → array-position map
+    std::unordered_map<int, int> bus_pos;
+    bus_pos.reserve(sys.ac.buses.size());
+    for (int i = 0; i < (int)sys.ac.buses.size(); ++i)
+      bus_pos[sys.ac.buses[i].index] = i;
+
+    // Collect all buses belonging to dead islands
+    std::unordered_set<int> dead_buses;
+    for (const auto& isl : topo.islands) {
+      if (isl.status == gr::IslandStatus::IsolatedLoad ||
+          isl.status == gr::IslandStatus::NoSlack) {
+        for (int bid : isl.bus_ids) dead_buses.insert(bid);
+      }
+    }
+
+    // Accumulate curtailment.  Convention (matching ONR and DC-OPF):
+    // if sys.ac.loads is non-empty it is the authoritative load source;
+    // bus.pd_mw is used only when the Load table is empty.
+    // NOTE: if dc_opf_solver ever changes to treat them as additive, this
+    // logic must be updated to sum both to avoid under-counting curtailment.
+    if (!sys.ac.loads.empty()) {
+      for (auto& ld : sys.ac.loads) {
+        if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
+        double extra = std::max(0.0, ld.p_mw * ld.scaling);
+        direct_shed_mw += extra;
+        if (auto it = bus_pos.find(ld.bus); it != bus_pos.end())
+          nodal_direct_shed[it->second] += extra;
+        ld.in_service = false;  // prevent OPF from seeing this load
+      }
+    } else {
+      for (int bid : dead_buses) {
+        auto it = bus_pos.find(bid);
+        if (it == bus_pos.end()) continue;
+        int pos = it->second;
+        double load = std::max(0.0, sys.ac.buses[pos].pd_mw);
+        direct_shed_mw += load;
+        nodal_direct_shed[pos] += load;
+      }
+    }
+
+    // Always zero bus-level loads for dead buses to prevent a singular
+    // B-matrix in the DC-OPF (isolated bus ⇒ zero row in B).
+    for (int bid : dead_buses) {
+      auto it = bus_pos.find(bid);
+      if (it == bus_pos.end()) continue;
+      sys.ac.buses[it->second].pd_mw   = 0.0;
+      sys.ac.buses[it->second].qd_mvar = 0.0;
+    }
+
+    // Fast path: skip OPF if no valid island exists
+    bool has_valid = std::any_of(topo.islands.begin(), topo.islands.end(),
+        [](const gr::IslandInfo& x) { return x.status == gr::IslandStatus::Valid; });
+    if (!has_valid) {
+      result.curtailment_mw       = direct_shed_mw;
+      result.nodal_curtailment_mw = std::move(nodal_direct_shed);
+      result.is_loss_state        = (result.curtailment_mw > 0.01);
+      return result;
+    }
+  }
+
   // Run DC-OPF with load shedding enabled
   auto opf_result = opf::solve_dc_opf(sys, opf_opt);
-  
-  result.curtailment_mw = opf_result.total_load_shedding_mw;
-  result.nodal_curtailment_mw = opf_result.load_shedding_mw;
+
+  // Combine direct shed (dead islands) + OPF shed (surviving islands)
+  result.curtailment_mw       = direct_shed_mw + opf_result.total_load_shedding_mw;
+  result.nodal_curtailment_mw = std::move(nodal_direct_shed);
+  if (!opf_result.load_shedding_mw.empty()) {
+    result.nodal_curtailment_mw.resize(
+        std::max(result.nodal_curtailment_mw.size(),
+                 opf_result.load_shedding_mw.size()), 0.0);
+    for (size_t i = 0; i < opf_result.load_shedding_mw.size(); ++i)
+      result.nodal_curtailment_mw[i] += opf_result.load_shedding_mw[i];
+  }
   result.is_loss_state = (result.curtailment_mw > 0.01);
-  
+
   return result;
 }
 

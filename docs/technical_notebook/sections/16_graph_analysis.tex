@@ -1,0 +1,855 @@
+% ============================================================
+\section{Graph Analysis and Reduction Module}
+\label{sec:graph}
+% ============================================================
+
+This chapter documents the \texttt{hacdcpf::graph} module, which provides a
+common topological and electrical-equivalence infrastructure shared by the
+power-flow, OPF, ONR, reliability, resilience, and time-series simulation
+workflows.  The module is not merely a connectivity finder: it acts as a
+\emph{bottom-layer topology and electrical-equivalence engine} whose outputs
+drive island decomposition, solver pre-conditioning, radiality enforcement,
+and post-solve voltage recovery.
+
+% ============================================================
+\subsection{Design Motivation}
+\label{sec:graph-motivation}
+% ============================================================
+
+Every downstream solver faces the same set of graph-level problems before it
+can do useful numerical work:
+
+\begin{enumerate}
+  \item \textbf{Connectivity} — which buses form coherent AC or DC islands?
+        Does each island have a valid voltage reference?
+  \item \textbf{Structural integrity} — are there bridges or articulation
+        points that expose single-point-of-failure in the topology?
+  \item \textbf{Network size} — can the Y-bus be reduced before the solve to
+        improve conditioning and wall-clock time?
+  \item \textbf{Result recovery} — after solving on a reduced network, how
+        are voltages and flows mapped back to every original node?
+\end{enumerate}
+
+Centralising these concerns in \texttt{hacdcpf::graph} avoids code
+duplication and ensures that PF, OPF, and ONR use identical topology
+semantics.
+
+% ============================================================
+\subsection{Module Layout}
+\label{sec:graph-layout}
+% ============================================================
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Header} & \textbf{Contents} \\
+\hline
+\texttt{graph/power\_system\_graph.hpp} & Core graph data structure and build function \\
+\texttt{graph/topology\_analysis.hpp}  & Island detection, bridges, cut-vertices, cycles \\
+\texttt{graph/reduction\_plan.hpp}     & Options, candidate classification, reduction plan \\
+\texttt{graph/reduction\_mapping.hpp}  & Audit trail: original $\to$ reduced mapping records \\
+\texttt{graph/switch\_contraction.hpp} & Zero-impedance supernode merging \\
+\texttt{graph/series\_reduction.hpp}   & Series (degree-2) and pendant (leaf) reduction \\
+\texttt{graph/kron\_reduction.hpp}     & Kron--Schur complement reduction + recovery \\
+\texttt{graph/result\_recovery.hpp}    & Back-propagation of voltages to all original nodes \\
+\texttt{graph/graph.hpp}               & Umbrella include for the entire module \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+All declarations are in namespace \texttt{hacdcpf::graph}.  Implementations
+live in \texttt{src/graph/}.  The module is compiled as part of the main
+\texttt{hacdcpf} static library target.
+
+The overall data flow through the module is:
+
+\begin{center}
+\begin{tikzpicture}[node distance=5mm and 14mm]
+  \node[flowwide]  (sys)  {\texttt{HybridPowerSystem}};
+  \node[flowbox, below=of sys]  (build) {\texttt{build\_power\_system\_graph}};
+  \node[flowbox, below=of build](topo)  {\texttt{analyze\_topology}\\$\to$ \texttt{TopologyReport}};
+  \node[flowbox, below=of topo] (clas)  {\texttt{classify\_reduction\_candidates}\\$\to$ \texttt{ReductionCandidates}};
+  \node[flowbox, below=of clas] (plan)  {\texttt{make\_reduction\_plan}\\$\to$ \texttt{ReductionPlan}};
+  \node[flowbox, below=of plan] (red)   {Apply reductions\\(contract / series / pendant / Kron)};
+  \node[flowwide, below=of red] (solv)  {Reduced-network solve\\(PF / OPF / ONR \ldots)};
+  \node[flowbox, below=of solv] (rec)   {Result recovery\\$\to$ \texttt{FullNetworkVoltages}};
+
+  \draw[flowline] (sys)  -- (build);
+  \draw[flowline] (build)-- (topo);
+  \draw[flowline] (topo) -- (clas);
+  \draw[flowline] (clas) -- (plan);
+  \draw[flowline] (plan) -- (red);
+  \draw[flowline] (red)  -- (solv);
+  \draw[flowline] (solv) -- (rec);
+\end{tikzpicture}
+\end{center}
+
+% ============================================================
+\subsection{Core Graph Data Structure}
+\label{sec:graph-datastructure}
+% ============================================================
+
+The graph is built once from a \texttt{HybridPowerSystem} and then consumed
+read-only by all analysis and reduction routines.
+
+\subsubsection{GraphNode}
+
+Each bus becomes one \texttt{GraphNode}:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Type} & \textbf{Meaning} \\
+\hline
+\texttt{bus\_id}            & \texttt{int}       & Original bus index in the model \\
+\texttt{domain}             & \texttt{NodeDomain}& \texttt{AC} or \texttt{DC} \\
+\texttt{ac\_bus\_type}      & \texttt{BusType}   & \texttt{PQ / PV / SLACK / ISOLATED} \\
+\texttt{dc\_bus\_type}      & \texttt{DCBusType} & \texttt{DC\_P / DC\_V} \\
+\texttt{base\_kv}           & \texttt{double}    & Nominal voltage base [kV] \\
+\texttt{is\_slack}          & \texttt{bool}      & AC slack or DC voltage reference \\
+\texttt{has\_generator}     & \texttt{bool}      & Generator or external grid present \\
+\texttt{has\_load}          & \texttt{bool}      & Load connected \\
+\texttt{has\_shunt}         & \texttt{bool}      & Shunt admittance present \\
+\texttt{has\_storage}       & \texttt{bool}      & Storage device \\
+\texttt{has\_vsc\_ac/dc}    & \texttt{bool}      & VSC converter terminal \\
+\texttt{has\_dcdc}          & \texttt{bool}      & DCDC converter terminal \\
+\texttt{has\_controllable}  & \texttt{bool}      & Tap/voltage-control device \\
+\texttt{is\_monitored}      & \texttt{bool}      & User-marked output node \\
+\texttt{is\_voltage\_controlled} & \texttt{bool} & Active PV/slack voltage control \\
+\texttt{in\_service}        & \texttt{bool}      & Bus is energised \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{GraphEdge}
+
+Each branch, switch, breaker, or converter link becomes one
+\texttt{GraphEdge}:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Field} & \textbf{Type} & \textbf{Meaning} \\
+\hline
+\texttt{edge\_id}          & \texttt{int}           & Original branch/device index \\
+\texttt{from\_node / to\_node} & \texttt{int}       & Indices into \texttt{nodes[]} \\
+\texttt{category}          & \texttt{EdgeCategory}  & See below \\
+\texttt{r\_pu, x\_pu, b\_pu} & \texttt{double}     & Impedance pu ($\pi$ model) \\
+\texttt{tap, shift\_deg}   & \texttt{double}        & Transformer tap and phase shift \\
+\texttt{rate\_a\_mva}      & \texttt{double}        & Thermal rating [MVA] \\
+\texttt{is\_zero\_impedance} & \texttt{bool}        & $|Z| < \epsilon_Z$ \\
+\texttt{is\_closed\_switch} & \texttt{bool}         & Closed switch or breaker \\
+\texttt{in\_service}       & \texttt{bool}          & Edge is active \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Edge categories enumerated in \texttt{EdgeCategory}:
+\texttt{AC\_Line}, \texttt{AC\_Transformer}, \texttt{Switch},
+\texttt{Breaker}, \texttt{DC\_Line}, \texttt{DC\_Switch},
+\texttt{VSC\_Coupling} (virtual AC$\leftrightarrow$DC link),
+\texttt{DCDC\_Coupling} (virtual DC$\leftrightarrow$DC link).
+
+\subsubsection{PowerSystemGraph}
+
+\begin{verbatim}
+struct PowerSystemGraph {
+  vector<GraphNode>  nodes;
+  vector<GraphEdge>  edges;
+  unordered_map<int,int> bus_id_to_node_idx;
+  vector<vector<pair<int,int>>> adj;  // node→ (edge_idx, neighbor_idx)
+};
+
+PowerSystemGraph build_power_system_graph(
+    const HybridPowerSystem& sys,
+    double zero_impedance_threshold = 1e-8);
+\end{verbatim}
+
+The build function iterates over all AC buses, DC buses, AC branches,
+transformers, switches, breakers, DC branches, DC switches, VSC converters,
+and DCDC converters in the \texttt{HybridPowerSystem}, emitting nodes and
+edges and populating the adjacency list.  Only in-service components are
+inserted.
+
+% ============================================================
+\subsection{Topology Analysis}
+\label{sec:graph-topology}
+% ============================================================
+
+\subsubsection{Overview}
+
+\texttt{analyze\_topology(graph)} performs a full structural inspection and
+returns a \texttt{TopologyReport}.  The report is consumed by the island
+solver dispatcher (PF), by OPF feasibility checks, and by ONR radiality
+enforcement.
+
+\begin{verbatim}
+TopologyReport analyze_topology(const PowerSystemGraph& graph);
+bool is_connected (const PowerSystemGraph& graph);
+bool is_radial    (const PowerSystemGraph& graph);
+int  count_islands(const PowerSystemGraph& graph);
+vector<int> find_bridges           (const PowerSystemGraph& graph);
+vector<int> find_articulation_points(const PowerSystemGraph& graph);
+vector<vector<int>> find_fundamental_cycles(const PowerSystemGraph& graph);
+\end{verbatim}
+
+\subsubsection{TopologyReport Fields}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Field} & \textbf{Meaning} \\
+\hline
+\texttt{islands}            & Per-island breakdown: bus list, domain, validity \\
+\texttt{n\_ac\_islands}     & Number of AC connected components \\
+\texttt{n\_dc\_islands}     & Number of DC connected components \\
+\texttt{all\_islands\_valid}& All islands have a voltage reference \\
+\texttt{is\_connected}      & Single connected component \\
+\texttt{is\_radial}         & Connected and spanning tree (no cycle) \\
+\texttt{cycle\_count}       & $|E| - |V| + c$, $c$ = number of components \\
+\texttt{bridge\_edge\_ids}  & Edge IDs of cut-edges \\
+\texttt{cut\_vertex\_bus\_ids} & Bus IDs of articulation points \\
+\texttt{fundamental\_cycles} & Each cycle as a list of node indices \\
+\texttt{diagnostics}        & Warning and error messages (see below) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Island Validity}
+
+Each \texttt{IslandInfo} carries an \texttt{IslandStatus}:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Status} & \textbf{Condition} \\
+\hline
+\texttt{Valid}          & Island has a voltage reference and is energised \\
+\texttt{NoSlack}        & AC island with no slack / external-grid bus \\
+\texttt{NoDCVoltageRef} & DC island with no \texttt{DC\_V} reference bus \\
+\texttt{IsolatedLoad}   & Load node with no path to any source \\
+\texttt{Empty}          & No in-service buses \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Diagnostic Codes}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{DiagCode} & \textbf{Trigger} \\
+\hline
+\texttt{GraphNoSlackInIsland}    & AC island without slack bus \\
+\texttt{GraphNoDCVoltageRef}     & DC island without voltage-reference bus \\
+\texttt{GraphIsolatedLoad}       & Load bus unreachable from any source \\
+\texttt{GraphDisconnectedBus}    & Bus is in-service but isolated \\
+\texttt{GraphVoltageBaseMismatch}& Switch contraction crosses base-kV boundary \\
+\texttt{GraphMultipleSlack}      & Switch merge would fuse two slack buses \\
+\texttt{NodeHasInjection}        & Candidate node has load/gen (must retain) \\
+\texttt{NodeIsRetained}          & Node flagged as monitored (must retain) \\
+\texttt{NodeDegreeNotTwo}        & Degree $\neq 2$ for series-reduction candidate \\
+\texttt{KronFillInTooLarge}      & Fill-in guard triggered \\
+\texttt{KronSingularYbb}         & $\mathbf{Y}_{\beta\beta}$ is numerically singular \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Algorithms}
+
+\paragraph{Connected components.}
+An iterative depth-first search assigns each in-service node to a component
+label.  AC and DC nodes are treated uniformly so that VSC and DCDC coupling
+edges can be optionally included or excluded.
+
+\paragraph{Bridges and articulation points.}
+Tarjan's classical DFS-based bridge and articulation-point algorithm
+(\emph{low-link values}).  Runs in $O(|V|+|E|)$ time.
+
+\paragraph{Fundamental cycle basis.}
+A BFS spanning forest is built first.  Every non-tree edge $(u,v)$ defines
+one fundamental cycle: the unique path from $u$ to $v$ in the spanning tree
+(found via LCA tracing with a Union-Find structure) plus the non-tree edge
+itself.  This avoids the cross-edge misclassification that affects
+single-pass iterative DFS on multi-child nodes.
+
+The cycle count satisfies:
+\begin{equation}
+  \mu = |E_{\text{in-service}}| - |V_{\text{in-service}}| + c,
+  \label{eq:cyclomatic}
+\end{equation}
+where $c$ is the number of connected components.
+
+% ============================================================
+\subsection{Reduction Pipeline}
+\label{sec:graph-reduction}
+% ============================================================
+
+Graph reduction compresses the network before the numerical solve.  Four
+strategies are available, applied in the order shown below.
+
+\begin{center}
+\begin{tabular}{clll}
+\hline\hline
+\textbf{Step} & \textbf{Strategy} & \textbf{Lossless?} & \textbf{Default} \\
+\hline
+1 & Switch contraction   & Yes (exact)   & On \\
+2 & Series reduction     & Yes (exact)   & On \\
+3 & Pendant reduction    & Approximate   & Off \\
+4 & Kron reduction       & Yes for passive; approx for PQ loads & Off \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Reduction Options and Mode}
+
+\begin{verbatim}
+struct GraphReductionOptions {
+  bool enable_switch_contraction{true};
+  bool enable_series_reduction{true};
+  bool enable_pendant_reduction{false};
+  bool enable_kron_reduction{false};
+  bool preserve_all_load_buses{true};
+  bool preserve_all_generator_buses{true};
+  bool preserve_all_voltage_constrained_buses{true};
+  bool preserve_all_monitored_buses{true};
+  double zero_impedance_threshold{1e-8};
+  double voltage_base_tolerance{1e-6};
+  double max_fill_ratio{2.0};
+  ReductionMode mode{ReductionMode::Safe};
+};
+\end{verbatim}
+
+\texttt{ReductionMode::Safe} enables only provably lossless steps (switch
+contraction + series reduction).  \texttt{Moderate} additionally enables Kron
+reduction for purely passive nodes.  \texttt{Aggressive} enables all four
+steps including approximate pendant folding.
+
+\subsubsection{Candidate Classification and Reduction Plan}
+
+Before any network is modified, every bus is classified:
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{CandidateType} & \textbf{Meaning} \\
+\hline
+\texttt{MustRetain}                    & Slack, PV gen, load, storage, VSC, DCDC, monitored \\
+\texttt{ZeroInjectionDegree2}          & Passive, degree-2 $\to$ series reduction \\
+\texttt{ZeroInjectionPassiveInterior}  & Passive, interior $\to$ Kron candidate \\
+\texttt{PendantLoad}                   & Leaf node with load only \\
+\texttt{RadialFeederSegment}           & Segment of a radial feeder \\
+\texttt{KronPassiveNode}               & Pure passive node for Kron elimination \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\texttt{make\_reduction\_plan} converts the classified candidates into an
+ordered list of \texttt{ReductionAction} records:
+
+\begin{verbatim}
+ReductionCandidates classify_reduction_candidates(
+    const PowerSystemGraph&, const HybridPowerSystem&,
+    const GraphReductionOptions& = {});
+
+ReductionPlan make_reduction_plan(
+    const PowerSystemGraph&, const ReductionCandidates&,
+    const GraphReductionOptions& = {});
+\end{verbatim}
+
+The plan is auditable and can be logged or rejected before any network data
+is modified.
+
+% ============================================================
+\subsection{Switch Contraction}
+\label{sec:graph-contraction}
+% ============================================================
+
+\subsubsection{Rationale}
+
+When $|Z_{ij}| \to 0$ (closed switch, closed breaker, or zero-impedance
+line), we have $V_i = V_j$ exactly.  Keeping such edges in the Y-bus
+produces an ill-conditioned $\mathbf{Y}$ matrix; contraction removes the
+degeneracy by merging the two buses into a single super-node.
+
+\subsubsection{Algorithm}
+
+A Disjoint-Set Union (DSU) structure with path compression and union by rank
+processes all zero-impedance edges.  For each candidate edge $(i,j)$:
+
+\begin{enumerate}
+  \item Check that $\texttt{base\_kv}_i \approx \texttt{base\_kv}_j$ (within
+        \texttt{voltage\_base\_tolerance}); otherwise emit
+        \texttt{GraphVoltageBaseMismatch}.
+  \item If both $i$ and $j$ are slack buses and
+        \texttt{allow\_multi\_slack\_merge=false}, emit
+        \texttt{GraphMultipleSlack} and skip.
+  \item Merge with bus-type priority: SLACK $>$ PV $>$ PQ $>$ ISOLATED.
+\end{enumerate}
+
+After all merges, each super-node $K$ aggregates:
+\begin{align}
+  P_K &= \sum_{i \in K} P_i, \quad Q_K = \sum_{i \in K} Q_i, \\
+  G_K &= \sum_{i \in K} G_i, \quad B_K = \sum_{i \in K} B_i.
+\end{align}
+All branches whose endpoints lie entirely within $K$ become self-loops and
+are removed.  All other branches are re-indexed to the super-node
+representative.
+
+\begin{verbatim}
+ContractionResult contract_zero_impedance_edges(
+    const PowerSystemGraph&, const HybridPowerSystem&,
+    const ContractionOptions& = {});
+\end{verbatim}
+
+The result contains both the contracted \texttt{PowerSystemGraph} and a
+modified \texttt{HybridPowerSystem} with aggregated data, plus the
+\texttt{bus\_to\_super} / \texttt{super\_to\_buses} maps needed for voltage
+recovery.
+
+% ============================================================
+\subsection{Series Reduction}
+\label{sec:graph-series}
+% ============================================================
+
+\subsubsection{Theory}
+
+For a passive node $j$ with degree 2, no injection ($S_j = 0$), no shunt
+($Y_{\text{sh},j} = 0$), and no control device, the two adjacent branches
+$Z_{ij}$ and $Z_{jk}$ can be merged into a single equivalent:
+
+\begin{align}
+  Z_{ik}^{\text{eq}} &= Z_{ij} + Z_{jk}, \\
+  B_{ik}^{\text{eq}} &\approx B_{ij} + B_{jk},
+\end{align}
+
+where the charging susceptance is summed (the $\pi$-model approximation).
+The result is exact for lossless reduction of passive conductors.
+
+\subsubsection{Implementation}
+
+\begin{verbatim}
+SeriesReductionResult apply_series_reduction(
+    const PowerSystemGraph&, const HybridPowerSystem&,
+    const ReductionPlan&, const GraphReductionOptions& = {});
+\end{verbatim}
+
+Each eliminated node $j$ is recorded in a \texttt{SeriesReductionRecord}
+containing the equivalent $r_{\text{eq}}, x_{\text{eq}}, b_{\text{eq}}$ and
+the two original branch IDs.
+
+% ============================================================
+\subsection{Pendant Reduction}
+\label{sec:graph-pendant}
+% ============================================================
+
+\subsubsection{Theory}
+
+For a leaf node $j$ (degree 1, connected to parent $i$ via $Z_{ij}$) that
+carries only a constant-power load $S_j = P_j + jQ_j$ and no generator, the
+node can be folded into the parent with an approximate loss correction:
+
+\begin{align}
+  P_i^{\text{new}} &= P_i + P_j + R_{ij}\,\frac{P_j^2 + Q_j^2}{|V_i|^2}, \\
+  Q_i^{\text{new}} &= Q_i + Q_j + X_{ij}\,\frac{P_j^2 + Q_j^2}{|V_i|^2}.
+\end{align}
+
+When $|V_i|$ is unknown a priori, the approximation $|V_i| = 1.0\,\text{pu}$
+is used.  This introduces a small error that vanishes near nominal voltage.
+
+\begin{verbatim}
+PendantReductionResult apply_pendant_reduction(
+    const PowerSystemGraph&, const HybridPowerSystem&,
+    const ReductionPlan&, const GraphReductionOptions& = {});
+\end{verbatim}
+
+% ============================================================
+\subsection{Kron Reduction (Schur Complement)}
+\label{sec:graph-kron}
+% ============================================================
+
+\subsubsection{Theory}
+
+Partition the network admittance matrix $\mathbf{Y}$ into retained nodes
+$\alpha$ and eliminated nodes $\beta$:
+
+\begin{equation}
+  \begin{bmatrix} \mathbf{Y}_{\alpha\alpha} & \mathbf{Y}_{\alpha\beta} \\
+                  \mathbf{Y}_{\beta\alpha}  & \mathbf{Y}_{\beta\beta}  \end{bmatrix}
+  \begin{bmatrix} \mathbf{V}_\alpha \\ \mathbf{V}_\beta \end{bmatrix}
+  =
+  \begin{bmatrix} \mathbf{I}_\alpha \\ \mathbf{I}_\beta \end{bmatrix}.
+  \label{eq:kron-full}
+\end{equation}
+
+When $\mathbf{I}_\beta = \mathbf{0}$ (purely passive interior nodes), the
+Schur complement (Kron reduction) yields the reduced admittance:
+
+\begin{equation}
+  \boxed{\mathbf{Y}_{\text{red}} = \mathbf{Y}_{\alpha\alpha}
+         - \mathbf{Y}_{\alpha\beta}\,\mathbf{Y}_{\beta\beta}^{-1}\,
+           \mathbf{Y}_{\beta\alpha}.}
+  \label{eq:kron-red}
+\end{equation}
+
+For nodes with a known constant-current injection $\mathbf{I}_\beta \neq
+\mathbf{0}$ (extended Kron), the reduced injection vector is:
+
+\begin{equation}
+  \mathbf{I}_{\text{red}} = \mathbf{I}_\alpha
+    - \mathbf{Y}_{\alpha\beta}\,\mathbf{Y}_{\beta\beta}^{-1}\,\mathbf{I}_\beta.
+  \label{eq:kron-inj}
+\end{equation}
+
+\begin{remark}
+  Kron reduction is exact for linear passive networks.  For AC power flow
+  with constant-power (PQ) loads, it is an operating-point approximation
+  and should be used in \texttt{Moderate} or \texttt{Aggressive} mode only
+  after verifying that the linearisation error is acceptable.
+\end{remark}
+
+\subsubsection{Fill-In Guard}
+
+Dense Schur complement computation can produce a denser $\mathbf{Y}_{\text{red}}$
+than the original.  The module computes
+
+\begin{equation}
+  \rho = \frac{\mathrm{nnz}(\mathbf{Y}_{\text{red}})}
+              {\mathrm{nnz}(\mathbf{Y})},
+\end{equation}
+
+and aborts with a \texttt{KronFillInTooLarge} diagnostic if
+$\rho > \texttt{max\_fill\_ratio}$ (default 2.0).
+
+\subsubsection{Invertibility Check}
+
+$\mathbf{Y}_{\beta\beta}$ is checked via \texttt{Eigen::FullPivLU}.  If the
+matrix is numerically singular, a \texttt{KronSingularYbb} diagnostic is
+returned and the reduction is skipped.
+
+\subsubsection{API}
+
+\begin{verbatim}
+// Passive Kron (I_beta = 0)
+KronReductionResult apply_kron_reduction(
+    const SparseMatrix<complex<double>>& Y_full,
+    const vector<int>& retained_indices,
+    const vector<int>& eliminated_indices,
+    double max_fill_ratio = 2.0);
+
+// Extended Kron (I_beta != 0)
+KronReductionResult apply_kron_reduction_with_injection(
+    const SparseMatrix<complex<double>>& Y_full,
+    const VectorXcd& I_full,
+    const vector<int>& retained_indices,
+    const vector<int>& eliminated_indices,
+    double max_fill_ratio = 2.0);
+
+// Voltage recovery after solve
+VectorXcd recover_eliminated_voltages(
+    const KronData& kron_data, const VectorXcd& V_alpha);
+\end{verbatim}
+
+The \texttt{KronData} struct caches
+$\mathbf{Y}_{\beta\beta}^{-1}\mathbf{Y}_{\beta\alpha}$ and
+$\mathbf{Y}_{\alpha\beta}\mathbf{Y}_{\beta\beta}^{-1}$ for re-use at the
+recovery stage without re-inverting.
+
+% ============================================================
+\subsection{Reduction Mapping (Audit Trail)}
+\label{sec:graph-mapping}
+% ============================================================
+
+Every reduction step produces a typed record that is accumulated in a
+\texttt{ReductionMapping}:
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Record type} & \textbf{Produced by} & \textbf{Key fields} \\
+\hline
+\texttt{SwitchContractionRecord} & Switch contraction & merged bus list, super-bus ID \\
+\texttt{SeriesReductionRecord}   & Series reduction   & $r_{\text{eq}}, x_{\text{eq}}, b_{\text{eq}}$, original branch IDs \\
+\texttt{PendantReductionRecord}  & Pendant reduction  & absorbed $P, Q$, parent bus ID \\
+\texttt{KronReductionRecord}     & Kron reduction     & retained / eliminated bus lists \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+The mapping also maintains bidirectional bus and branch index maps
+(\texttt{original\_to\_reduced\_bus}, \texttt{reduced\_to\_original\_buses},
+and the branch equivalents) for result recovery and for reporting purposes.
+
+% ============================================================
+\subsection{Result Recovery}
+\label{sec:graph-recovery}
+% ============================================================
+
+After solving on the reduced network, \texttt{FullNetworkVoltages} is
+populated for every bus in the original network by reversing the reduction
+steps in LIFO order.
+
+\begin{verbatim}
+struct FullNetworkVoltages {
+  unordered_map<int, complex<double>> bus_voltage;  // bus_id → V (pu)
+  double vm_pu (int bus_id, double default_val=1.0) const;
+  double va_deg(int bus_id, double default_val=0.0) const;
+};
+\end{verbatim}
+
+\subsubsection{Switch Contraction Recovery}
+
+Exact: every member of a super-node $K$ receives the same voltage.
+\begin{equation}
+  V_i = V_K \quad \forall\, i \in K.
+  \label{eq:rec-switch}
+\end{equation}
+
+\begin{verbatim}
+void recover_switch_contracted_buses(
+    FullNetworkVoltages&, const unordered_map<int,int>& bus_to_super,
+    const unordered_map<int,vector<int>>& super_to_buses);
+\end{verbatim}
+
+\subsubsection{Series Reduction Recovery}
+
+Exact: for each record ($i$--$j$--$k$, node $j$ eliminated):
+\begin{align}
+  I_{ik} &= \frac{V_i - V_k}{Z_{ik}^{\text{eq}}}, \\
+  V_j    &= V_i - Z_{ij}\,I_{ik}.
+  \label{eq:rec-series}
+\end{align}
+
+\begin{verbatim}
+void recover_series_reduced_buses(
+    FullNetworkVoltages&, const ReductionMapping&,
+    const HybridPowerSystem& original_system);
+\end{verbatim}
+
+\subsubsection{Kron Reduction Recovery}
+
+Uses the pre-computed $\mathbf{Y}_{\beta\beta}^{-1}\mathbf{Y}_{\beta\alpha}$:
+\begin{equation}
+  \mathbf{V}_\beta = -\mathbf{Y}_{\beta\beta}^{-1}\,\mathbf{Y}_{\beta\alpha}\,
+                      \mathbf{V}_\alpha.
+  \label{eq:rec-kron}
+\end{equation}
+
+\begin{verbatim}
+void recover_kron_eliminated_buses(
+    FullNetworkVoltages&, const KronData&,
+    const vector<int>& bus_ids_alpha,
+    const vector<int>& bus_ids_beta);
+\end{verbatim}
+
+\subsubsection{Pendant Reduction Recovery}
+
+Iterative fixed-point for the constant-power load:
+\begin{equation}
+  V_j^{(t+1)} = V_i - Z_{ij}\,\left(\frac{S_j}{V_j^{(t)}}\right)^{\!\!*},
+  \quad V_j^{(0)} = V_i,
+  \label{eq:rec-pendant}
+\end{equation}
+iterated until $|V_j^{(t+1)} - V_j^{(t)}| < \texttt{pendant\_convergence\_tol}$
+or \texttt{max\_pendant\_iterations} is reached.
+
+\begin{verbatim}
+void recover_pendant_buses(
+    FullNetworkVoltages&, const ReductionMapping&,
+    const HybridPowerSystem& original_system,
+    const RecoveryOptions& opts = {});
+\end{verbatim}
+
+% ============================================================
+\subsection{Test Coverage}
+\label{sec:graph-tests}
+% ============================================================
+
+The graph module is validated by two test targets that contribute 23 test
+cases to the main test suite (test IDs 368--393 out of 393 total).
+
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Test file} & \textbf{IDs} & \textbf{Coverage} \\
+\hline
+\texttt{tests/test\_graph.cpp}      & 368--386 & Topology, contraction, series,
+                                                  pendant, recovery, build \\
+\texttt{tests/test\_graph\_kron.cpp}& 387--393 & Kron Y-bus, boundary consistency,
+                                                  voltage recovery, extended Kron,
+                                                  fill-in guard, empty $\beta$ \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Selected test scenarios:
+
+\begin{itemize}
+  \item \textbf{Single island with slack} — verifies \texttt{IslandStatus::Valid}.
+  \item \textbf{Multi-island with missing slack} — verifies
+        \texttt{GraphNoSlackInIsland} diagnostic.
+  \item \textbf{3-bus ring} — verifies cycle count $= 1$ and that the
+        BFS+Union-Find fundamental cycle finder returns the correct cycle.
+  \item \textbf{Bridge detection} — 4-bus chain with one articulation point.
+  \item \textbf{Switch contraction} — two buses connected by a closed switch;
+        merged loads sum correctly ($25\,\text{MW}$).
+  \item \textbf{Voltage-base mismatch} — switch spanning 11\,kV / 33\,kV
+        boundary is rejected with \texttt{GraphVoltageBaseMismatch}.
+  \item \textbf{Series reduction} — passive degree-2 node: new branch has
+        $r = r_{12} + r_{23}$ exactly.
+  \item \textbf{Pendant folding} — leaf load absorbed with
+        $P_{\text{loss}} = R\,|S|^2/|V|^2$.
+  \item \textbf{Kron 3-bus passive interior} — analytically: $y_{\text{eq}} =
+        y_{12}\,y_{23}/(y_{12}+y_{23})$, verified numerically.
+  \item \textbf{Kron fill-in guard} — \texttt{max\_fill\_ratio=0.0} forces
+        abort.
+  \item \textbf{Voltage recovery} — Kron-eliminated bus voltage matches
+        full-network solve.
+\end{itemize}
+
+% ============================================================
+\subsection{Integration with Downstream Solvers}
+\label{sec:graph-integration}
+% ============================================================
+
+\begin{center}
+\begin{tabular}{lp{9.5cm}}
+\hline\hline
+\textbf{Solver} & \textbf{Graph module usage} \\
+\hline
+Power flow (PF)           & \texttt{analyze\_topology} identifies islands; each
+                            island dispatched to its own Newton solver; switch
+                            contraction prevents Y-bus singularity from
+                            zero-impedance ties \\
+OPF                       & Topology report provides feasibility pre-check
+                            (missing slack $\to$ infeasible); series reduction
+                            shrinks the variable count before IPM \\
+ONR                       & \texttt{is\_radial} and \texttt{bridge\_edge\_ids}
+                            feed the radiality constraints; fundamental cycles
+                            define the set of switchable loop edges \\
+Reliability (Monte Carlo) & Island enumeration on each contingency topology;
+                            \texttt{GraphIsolatedLoad} triggers curtailment
+                            accounting \\
+Resilience                & Same as reliability; additionally uses cut-vertex
+                            analysis to rank restoration priorities \\
+Time-series               & Graph built once per period (topology changes);
+                            switch contraction applied before each PF dispatch \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+% ============================================================
+\subsection{Numerical Results: Graph-Aware ONR and Reliability}
+\label{sec:graph-numerical}
+% ============================================================
+
+This section presents the observable numerical effects of integrating the
+\texttt{hacdcpf::graph} module into the ONR solver and the reliability
+assessment engine.
+
+\subsubsection{ONR Bridge Detection --- IEEE 33-bus BW Feeder}
+
+The IEEE 33-bus BW radial feeder (\texttt{case33bw}) has 33 buses and 32
+in-service branches with no tie switches.  Because the network is purely
+radial (tree topology), every branch is a bridge; none can be opened without
+disconnecting a load bus.
+
+\begin{table}[ht]
+\centering
+\caption{ONR graph pre-analysis on \texttt{case33bw} (purely radial, no tie switches).}
+\label{tab:onr_bridge_33bw}
+\begin{tabular}{ll}
+\hline
+\textbf{Quantity} & \textbf{Value} \\
+\hline
+Buses ($n$)                        & 33 \\
+Branches ($m$)                     & 32 \\
+Bridge branches detected           & 32 (all branches are bridges) \\
+Fundamental cycles                 & 0 (tree topology) \\
+Free $\alpha$ variables            & 0 \\
+Fixed $\alpha = 1$ branches        & 32 \\
+MILP outcome                       & Topology already radial; B\&C exits after feasibility check \\
+\hline
+\end{tabular}
+\end{table}
+
+When \texttt{ONROptions::verbose = true}, the pre-analysis is logged:
+
+\begin{verbatim}
+ONR: 33 buses, 32 branches, 32 bridge(s), 0 fundamental cycle(s)
+\end{verbatim}
+
+For comparison, the cross-module integration test (\#327) uses a mesh
+extension of \texttt{case33bw} with five normally-open tie switches added to
+form five additional loops.  There the pre-analysis identifies 32 bridges and
+5 loop edges, fixing 32 binary variables and leaving only 5 free.  The
+observed B\&C runtime for that instance is 6.36\,s with a 0\,\% optimality
+gap (see Table~\ref{tab:pipeline2_results}).
+
+\subsubsection{Reliability Island Pre-Screening --- Radial Feeder Contingency}
+
+\paragraph{Network description.}
+The 3-bus radial feeder from \texttt{test\_resilience\_assessment} serves as
+the canonical reliability example:
+\[
+  \underbrace{\text{Bus\,1}}_{\text{slack}}
+  \xrightarrow{Z_1}\text{Bus\,2}\;(1\,\text{MW})
+  \xrightarrow{Z_2}\text{Bus\,3}\;(1\,\text{MW}),
+  \quad Z_i = 0.01 + 0.01j\;\text{pu}, \quad \text{MTTR} = 6\,\text{h}.
+\]
+
+\paragraph{Contingency: Branch 2 failure (Bus 3 isolated).}
+
+\begin{table}[ht]
+\centering
+\caption{%
+  Reliability island pre-screening: Branch~2 failure on the 3-bus radial feeder.
+  Both paths yield the same total curtailment; the graph path skips the OPF.}
+\label{tab:reliability_island}
+\small
+\begin{tabular}{lll}
+\hline
+\textbf{Quantity} & \textbf{Graph fast path} & \textbf{OPF-only baseline} \\
+\hline
+Dead buses identified          & \{Bus~3\}      & (inferred by OPF feasibility) \\
+\texttt{direct\_shed\_mw}      & 1.0\,MW        & 0.0\,MW (no pre-screen) \\
+DC-OPF called?                 & No             & Yes \\
+\texttt{curtailment\_mw}       & 1.0\,MW        & 1.0\,MW \\
+Bus~3 \texttt{pd\_mw} zeroed?  & Yes            & No \\
+$B$-matrix singularity risk    & Prevented      & Potential (zero row for Bus~3) \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Contingency: Branch 1 failure (Buses 2 and 3 isolated).}
+
+When Branch~1 fails the entire downstream subtree is islanded.
+\texttt{has\_valid == false} triggers the unconditional fast path and the
+DC-OPF is never called.
+
+\begin{table}[ht]
+\centering
+\caption{Reliability island pre-screening: Branch~1 failure (whole subtree isolated).}
+\label{tab:reliability_island_br1}
+\small
+\begin{tabular}{ll}
+\hline
+\textbf{Quantity} & \textbf{Value} \\
+\hline
+Dead buses                      & \{Bus~2, Bus~3\} \\
+\texttt{direct\_shed\_mw}       & 2.0\,MW \\
+DC-OPF called?                  & No (no valid island present) \\
+\texttt{curtailment\_mw}        & 2.0\,MW \\
+\hline
+\end{tabular}
+\end{table}
+
+\paragraph{Performance.}
+
+For distribution-scale networks the graph pre-analysis adds a fixed overhead
+of $\lesssim 100\,\mu\mathrm{s}$ per contingency evaluation (33-bus case on
+Apple M4).  For radial feeders, where every single-branch failure isolates a
+load island, the DC-OPF is skipped on every contingency sample.  The DC-OPF
+for the same case runs in approximately 1--5\,ms; the net speedup for radial
+contingency evaluation is therefore in the range $10\times$--$50\times$ per
+sample, compounding across all Monte Carlo iterations.
