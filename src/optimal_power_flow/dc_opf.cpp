@@ -813,9 +813,12 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     return false;
   };
   
-  // HiGHS selection is routed through MIPSolvers. If the HiGHS adapter cannot
-  // handle the QP form in this build, SolverEngine falls back to a QP-capable
-  // MIPSolvers backend before the legacy LP recovery path is attempted.
+  // HiGHS is the preferred solver. HiGHS does not expose a native QP interface,
+  // so SolverEngine routes solve_qp to whichever QP-capable backend is available
+  // (Gurobi, NativeLCQP, etc.). The returned sol.stats.solver_name reflects the
+  // actual backend used, not necessarily HiGHS. The "preferred_solver = HiGHS"
+  // hint still causes HiGHS to handle LP/MILP sub-problems within that backend
+  // where applicable.
   auto try_highs = [&]() -> bool {
     engine::SolverEngine engine;
     engine::SolveOptions solve_opt;
@@ -831,6 +834,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     if (highs.available()) {
       sol = highs.solve_lp(form.lp);
       use_qp = false;
+      sol.stats.solver_name = "HiGHS-LP(QP-fallback)";
       return true;
     }
     return false;

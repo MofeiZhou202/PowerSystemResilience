@@ -269,7 +269,10 @@ struct DistributionResilienceResult {
 /// Fill missing resilience-relevant fields with plausible demo values.
 void apply_distribution_resilience_demo_data(HybridPowerSystem& sys);
 
-/// MIP-based multi-period restoration (stub — falls back to heuristic).
+/// MIP-based multi-period restoration. Builds a binary MILP with branch-switching
+/// variables, bus energisation variables, and commodity flow constraints, then
+/// solves it with the registered MILP backend (Gurobi / HiGHS / NativeBranchAndCut).
+/// Does NOT delegate to the heuristic path.
 DistributionResilienceResult run_distribution_resilience_mip_assessment(
     const HybridPowerSystem& sys,
     const DistributionResilienceOptions& opts = {});

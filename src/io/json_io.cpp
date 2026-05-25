@@ -159,10 +159,40 @@ static json ac_bus_to_json(const ACBus& b) {
   return j;
 }
 
+// Reads "bus_type" accepting both MATPOWER integer codes (1=PQ,2=PV,3=SLACK,4=ISOLATED)
+// and string names, returning the canonical string for bus_type_from_str().
+static std::string jget_ac_bus_type_str(const json& j) {
+  if (!j.contains("bus_type") || j["bus_type"].is_null()) return "PQ";
+  const auto& v = j["bus_type"];
+  if (v.is_string()) return v.get<std::string>();
+  if (v.is_number_integer()) {
+    switch (v.get<int>()) {
+      case 2: return "PV";
+      case 3: return "SLACK";
+      case 4: return "ISOLATED";
+      default: return "PQ";
+    }
+  }
+  return "PQ";
+}
+
+// Same for DC buses: MATPOWER codes 1=DC_P, 3=DC_V; JPC codes 1=DC_P, 2=DC_V.
+static std::string jget_dc_bus_type_str(const json& j) {
+  if (!j.contains("bus_type") || j["bus_type"].is_null()) return "DC_P";
+  const auto& v = j["bus_type"];
+  if (v.is_string()) return v.get<std::string>();
+  if (v.is_number_integer()) {
+    const int code = v.get<int>();
+    // Accept both MATPOWER (3=DC_V) and JPC (2=DC_V) integer conventions.
+    return (code == 2 || code == 3) ? "DC_V" : "DC_P";
+  }
+  return "DC_P";
+}
+
 static ACBus ac_bus_from_json(const json& j) {
   ACBus b;
   b.index = j.at("index").get<int>();
-  b.bus_type = bus_type_from_str(jget<std::string>(j, "bus_type", "PQ"));
+  b.bus_type = bus_type_from_str(jget_ac_bus_type_str(j));
   b.pd_mw = jget(j, "pd_mw", 0.0);
   b.qd_mvar = jget(j, "qd_mvar", 0.0);
   b.vm_pu = jget(j, "vm_pu", 1.0);
@@ -243,7 +273,7 @@ static json dc_bus_to_json(const DCBus& b) {
 static DCBus dc_bus_from_json(const json& j) {
   DCBus b;
   b.index = j.at("index").get<int>();
-  b.bus_type = dc_bus_type_from_str(jget<std::string>(j, "bus_type", "DC_P"));
+  b.bus_type = dc_bus_type_from_str(jget_dc_bus_type_str(j));
   b.vm_pu = jget(j, "vm_pu", 1.0);
   b.vmax_pu = jget(j, "vmax_pu", 1.1);
   b.vmin_pu = jget(j, "vmin_pu", 0.9);
@@ -1183,7 +1213,7 @@ static json three_phase_bus_to_json(const ThreePhaseACBus& b) {
 static ThreePhaseACBus three_phase_bus_from_json(const json& j) {
   ThreePhaseACBus b;
   b.index = j.at("index").get<int>();
-  b.bus_type = bus_type_from_str(jget<std::string>(j, "bus_type", "PQ"));
+  b.bus_type = bus_type_from_str(jget_ac_bus_type_str(j));
   b.name = jget<std::string>(j, "name", "");
   b.base_kv = jget(j, "base_kv", 0.0);
   b.in_service = jget(j, "in_service", true);
@@ -3418,6 +3448,43 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
   for (const auto& m : sys.microgrids) {
     root["microgrid"].push_back(microgrid_to_json(m));
   }
+  // ── Additional rich tables not covered by the JPC matrix core ──────────────
+  root["shuntAC"] = json::array();
+  for (const auto& s : sys.ac.shunts)
+    root["shuntAC"].push_back(shunt_to_json(s));
+  root["renewableAC"] = json::array();
+  for (const auto& r : sys.ac.renewable_gens)
+    root["renewableAC"].push_back(renewable_gen_to_json(r));
+  root["trafo2w"] = json::array();
+  for (const auto& t : sys.ac.transformers_2w)
+    root["trafo2w"].push_back(transformer2w_to_json(t));
+  root["trafo3w"] = json::array();
+  for (const auto& t : sys.ac.transformers_3w)
+    root["trafo3w"].push_back(transformer3w_to_json(t));
+  root["switch_ac"] = json::array();
+  for (const auto& s : sys.ac.switches)
+    root["switch_ac"].push_back(switch_to_json(s));
+  root["ev_station"] = json::array();
+  for (const auto& c : sys.ac.charging_stations)
+    root["ev_station"].push_back(charging_station_to_json(c));
+  root["charger"] = json::array();
+  for (const auto& c : sys.ac.chargers)
+    root["charger"].push_back(charger_to_json(c));
+  root["motorAC"] = json::array();
+  for (const auto& m : sys.ac.motors)
+    root["motorAC"].push_back(asynchronous_motor_to_json(m));
+  root["mobile_storage"] = json::array();
+  for (const auto& s : sys.mobile_storage)
+    root["mobile_storage"].push_back(mobile_storage_to_json(s));
+  root["vpp"] = json::array();
+  for (const auto& v : sys.vpps)
+    root["vpp"].push_back(vpp_to_json(v));
+  root["dcdcconv"] = json::array();
+  for (const auto& c : sys.dc.dcdc_converters)
+    root["dcdcconv"].push_back(dcdc_to_json(c));
+  root["dccb"] = json::array();
+  for (const auto& cb : sys.dc.dc_circuit_breakers)
+    root["dccb"].push_back(dc_circuit_breaker_to_json(cb));
   root["bus_name_to_id"] = json::object();
   
   // Add bus names to ID mapping
@@ -3640,7 +3707,123 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       sys.ac.external_grids.push_back(e);
     }
   }
-  
+
+  // ── Rich component tables (structured JSON, preserved across JPC round-trips) ──
+
+  if (root.contains("genDC") && root["genDC"].is_array())
+    for (const auto& j : root["genDC"])
+      sys.dc.dc_static_generators.push_back(dc_static_generator_from_json(j));
+
+  if (root.contains("loadAC_flex") && root["loadAC_flex"].is_array())
+    for (const auto& j : root["loadAC_flex"])
+      sys.ac.flexible_loads.push_back(flexible_load_from_json(j));
+
+  if (root.contains("loadAC_asymm") && root["loadAC_asymm"].is_array())
+    for (const auto& j : root["loadAC_asymm"])
+      sys.ac.asymmetric_loads.push_back(asymmetric_load_from_json(j));
+
+  if (root.contains("sgenAC") && root["sgenAC"].is_array())
+    for (const auto& j : root["sgenAC"])
+      sys.ac.static_generators.push_back(static_generator_from_json(j));
+
+  if (root.contains("sgenDC") && root["sgenDC"].is_array())
+    for (const auto& j : root["sgenDC"])
+      sys.dc.static_generators.push_back(static_generator_from_json(j));
+
+  // storageetap is the structured replacement for the JPC matrix "storage" table.
+  // AC storage may already have been loaded from the matrix form above; only
+  // populate DC storage from storageetap (which carries a "domain" tag), and fall
+  // back to AC import when no matrix storage was present.
+  if (root.contains("storageetap") && root["storageetap"].is_array()) {
+    const bool ac_already_loaded = !sys.ac.storage.empty();
+    for (const auto& j : root["storageetap"]) {
+      const std::string dom = jget<std::string>(j, "domain", "AC");
+      if (dom == "DC")
+        sys.dc.storage.push_back(storage_from_json(j));
+      else if (!ac_already_loaded)
+        sys.ac.storage.push_back(storage_from_json(j));
+    }
+  }
+
+  if (root.contains("pv") && root["pv"].is_array())
+    for (const auto& j : root["pv"])
+      sys.dc.pv_arrays.push_back(pv_array_dc_from_json(j));
+
+  if (root.contains("pv_acsystem") && root["pv_acsystem"].is_array())
+    for (const auto& j : root["pv_acsystem"])
+      sys.ac.pv_systems.push_back(pv_system_from_json(j));
+
+  if (root.contains("hvcb") && root["hvcb"].is_array())
+    for (const auto& j : root["hvcb"])
+      sys.ac.circuit_breakers.push_back(circuit_breaker_from_json(j));
+
+  if (root.contains("microgrid") && root["microgrid"].is_array())
+    for (const auto& j : root["microgrid"])
+      sys.microgrids.push_back(microgrid_from_json(j));
+
+  // energyrouterCore already embeds ports as a nested "ports" array; the flat
+  // energyrouterConverter table is a redundant export for external tooling only.
+  if (root.contains("energyrouterCore") && root["energyrouterCore"].is_array())
+    for (const auto& j : root["energyrouterCore"])
+      sys.energy_routers.push_back(energy_router_from_json(j));
+
+  // branch3ph: flat array of ThreePhaseACLine records exported from sys.three_phase_ac.
+  if (root.contains("branch3ph") && root["branch3ph"].is_array() &&
+      !root["branch3ph"].empty()) {
+    if (!sys.three_phase_ac) sys.three_phase_ac = ThreePhaseACSystem{};
+    for (const auto& j : root["branch3ph"])
+      sys.three_phase_ac->lines.push_back(three_phase_line_from_json(j));
+  }
+
+  // ── Additional rich tables not covered by the JPC matrix core ──────────────
+  if (root.contains("shuntAC") && root["shuntAC"].is_array())
+    for (const auto& j : root["shuntAC"])
+      sys.ac.shunts.push_back(shunt_from_json(j));
+
+  if (root.contains("renewableAC") && root["renewableAC"].is_array())
+    for (const auto& j : root["renewableAC"])
+      sys.ac.renewable_gens.push_back(renewable_gen_from_json(j));
+
+  if (root.contains("trafo2w") && root["trafo2w"].is_array())
+    for (const auto& j : root["trafo2w"])
+      sys.ac.transformers_2w.push_back(transformer2w_from_json(j));
+
+  if (root.contains("trafo3w") && root["trafo3w"].is_array())
+    for (const auto& j : root["trafo3w"])
+      sys.ac.transformers_3w.push_back(transformer3w_from_json(j));
+
+  if (root.contains("switch_ac") && root["switch_ac"].is_array())
+    for (const auto& j : root["switch_ac"])
+      sys.ac.switches.push_back(switch_from_json(j));
+
+  if (root.contains("ev_station") && root["ev_station"].is_array())
+    for (const auto& j : root["ev_station"])
+      sys.ac.charging_stations.push_back(charging_station_from_json(j));
+
+  if (root.contains("charger") && root["charger"].is_array())
+    for (const auto& j : root["charger"])
+      sys.ac.chargers.push_back(charger_from_json(j));
+
+  if (root.contains("motorAC") && root["motorAC"].is_array())
+    for (const auto& j : root["motorAC"])
+      sys.ac.motors.push_back(asynchronous_motor_from_json(j));
+
+  if (root.contains("mobile_storage") && root["mobile_storage"].is_array())
+    for (const auto& j : root["mobile_storage"])
+      sys.mobile_storage.push_back(mobile_storage_from_json(j));
+
+  if (root.contains("vpp") && root["vpp"].is_array())
+    for (const auto& j : root["vpp"])
+      sys.vpps.push_back(vpp_from_json(j));
+
+  if (root.contains("dcdcconv") && root["dcdcconv"].is_array())
+    for (const auto& j : root["dcdcconv"])
+      sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
+
+  if (root.contains("dccb") && root["dccb"].is_array())
+    for (const auto& j : root["dccb"])
+      sys.dc.dc_circuit_breakers.push_back(dc_circuit_breaker_from_json(j));
+
   return sys;
 }
 

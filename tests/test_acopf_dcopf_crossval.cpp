@@ -554,3 +554,176 @@ TEST_CASE("ACOPF vs DCOPF comprehensive comparison", "[slow][opf][benchmark]") {
   CHECK(acopf_pass > 0);
   CHECK(dcopf_pass > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: DC OPF LMP sign and scale
+// Verifies that LMPs are non-negative and have sensible magnitude relative to
+// generator marginal costs (detects base_mva scaling bugs).
+// Note: LMP extraction works via the supporting simplex LP which succeeds when
+// branch-flow (Pf) variables are absent (include_branch_limits=false).
+// ---------------------------------------------------------------------------
+TEST_CASE("DC OPF LMP: sign and scale", "[integration][opf][dcopf][lmp]") {
+  using namespace hacdcpf;
+
+  std::string data_dir = get_project_root() + "/data";
+  std::string case_path = data_dir + "/case14.m";
+  if (!fs::exists(case_path)) {
+    SKIP("case14.m not found");
+    return;
+  }
+
+  HybridPowerSystem sys = io::parse_matpower(case_path);
+  const int nb = static_cast<int>(sys.ac.buses.size());
+
+  opf::DCOPFOptions opt;
+  opt.solver = opf::DCOPFSolverBackend::NativeQP;  // QP + supporting LP for duals
+  opt.include_branch_limits = false;  // no Pf vars → supporting LP succeeds
+  opf::DCOPFResult result = opf::solve_dc_opf(sys, opt);
+
+  REQUIRE(result.converged);
+  REQUIRE(static_cast<int>(result.lmp.size()) == nb);
+
+  // Highest linearised marginal cost across all in-service generators.
+  double max_mc = 0.0;
+  for (const auto& gen : sys.ac.generators) {
+    if (!gen.in_service) continue;
+    const double mc = gen.cost_c1 + 2.0 * gen.cost_c2 * gen.pmax_mw;
+    max_mc = std::max(max_mc, mc);
+  }
+  if (max_mc <= 0.0) max_mc = 1e4;
+
+  for (int i = 0; i < nb; ++i) {
+    INFO("bus[" << i << "] LMP=" << result.lmp[i]);
+    // LMP must be non-negative: adding load costs money.
+    CHECK(result.lmp[i] >= -1e-4);
+    // LMP must not exceed the most expensive generator's marginal cost by
+    // a large factor (base_mva scaling bug would produce values ~100x too large).
+    CHECK(result.lmp[i] <= max_mc * 10.0 + 1.0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: DC OPF LMP uniformity without congestion
+// Without branch limits a single marginal price clears the whole market: all
+// bus LMPs must be equal (within numerical noise).
+// ---------------------------------------------------------------------------
+TEST_CASE("DC OPF LMP: uncongested uniformity", "[integration][opf][dcopf][lmp]") {
+  using namespace hacdcpf;
+
+  std::string data_dir = get_project_root() + "/data";
+  std::string case_path = data_dir + "/case9.m";
+  if (!fs::exists(case_path)) {
+    SKIP("case9.m not found");
+    return;
+  }
+
+  HybridPowerSystem sys = io::parse_matpower(case_path);
+  const int nb = static_cast<int>(sys.ac.buses.size());
+
+  opf::DCOPFOptions opt;
+  opt.solver = opf::DCOPFSolverBackend::NativeQP;
+  opt.include_branch_limits = false;  // no congestion → single uniform price
+  opf::DCOPFResult result = opf::solve_dc_opf(sys, opt);
+
+  REQUIRE(result.converged);
+  REQUIRE(static_cast<int>(result.lmp.size()) == nb);
+
+  double lmp_min = *std::min_element(result.lmp.begin(), result.lmp.end());
+  double lmp_max = *std::max_element(result.lmp.begin(), result.lmp.end());
+  double lmp_avg = 0.0;
+  for (double v : result.lmp) lmp_avg += v;
+  lmp_avg /= nb;
+
+  INFO("LMP range: [" << lmp_min << ", " << lmp_max << "]  avg=" << lmp_avg);
+
+  // With positive-cost generators the uniform LMP must be positive.
+  CHECK(lmp_avg > 0.0);
+
+  // Without congestion all bus LMPs equal the marginal unit's cost.
+  // Allow a small relative tolerance for floating-point rounding.
+  if (lmp_avg > 1e-6) {
+    double spread = (lmp_max - lmp_min) / lmp_avg;
+    INFO("LMP relative spread: " << spread);
+    CHECK(spread < 1e-4);  // sub-0.01 % spread → single uniform price
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: DC OPF congestion — flow feasibility and economic re-dispatch
+// Imposes a tight branch limit below the free-flow dispatch and verifies:
+//   (a) the solver still converges (problem remains feasible), and
+//   (b) the branch flow stays within the imposed limit, and
+//   (c) the total generation cost does not decrease (re-dispatch is costly).
+// Note: LMP/dual extraction with active Pf variable bounds requires the
+// supporting simplex LP to handle bounded Pf variables, which the current
+// native simplex does not support.  The economic and feasibility properties
+// are therefore tested directly on the primal solution.
+// ---------------------------------------------------------------------------
+TEST_CASE("DC OPF LMP: congestion re-dispatch and feasibility",
+          "[integration][opf][dcopf][lmp]") {
+  using namespace hacdcpf;
+
+  std::string data_dir = get_project_root() + "/data";
+  std::string case_path = data_dir + "/case14.m";
+  if (!fs::exists(case_path)) {
+    SKIP("case14.m not found");
+    return;
+  }
+
+  HybridPowerSystem sys = io::parse_matpower(case_path);
+  const size_t nbr = sys.ac.branches.size();
+
+  // ── Step 1: free-flow baseline ────────────────────────────────────────────
+  opf::DCOPFOptions opt_free;
+  opt_free.solver = opf::DCOPFSolverBackend::NativeQP;
+  opt_free.include_branch_limits = false;
+  auto r_free = opf::solve_dc_opf(sys, opt_free);
+  REQUIRE(r_free.converged);
+  REQUIRE(!r_free.pf_mw.empty());
+
+  // Find the branch carrying the highest absolute free-flow.
+  size_t target_br = 0;
+  double max_flow  = 0.0;
+  for (size_t k = 0; k < nbr; ++k) {
+    if (std::abs(r_free.pf_mw[k]) > max_flow) {
+      max_flow = std::abs(r_free.pf_mw[k]);
+      target_br = k;
+    }
+  }
+  INFO("Max-flow branch: " << target_br << "  |Pf|=" << max_flow << " MW");
+  if (max_flow < 1.0) {
+    SKIP("no meaningful flow found in case14 free-flow solve");
+    return;
+  }
+
+  // ── Step 2: impose a binding limit (50 % of free-flow) ───────────────────
+  const double tight_limit = max_flow * 0.5;
+  sys.ac.branches[target_br].rate_a_mva = tight_limit;
+  // Give all other branches generous limits so only the target is binding.
+  for (size_t k = 0; k < nbr; ++k) {
+    if (k != target_br) sys.ac.branches[k].rate_a_mva = 9999.0;
+  }
+
+  opf::DCOPFOptions opt_cong;
+  opt_cong.solver = opf::DCOPFSolverBackend::NativeQP;
+  opt_cong.include_branch_limits = true;
+  auto result = opf::solve_dc_opf(sys, opt_cong);
+
+  INFO("Baseline obj=" << r_free.objective
+       << "  Congested obj=" << result.objective);
+  INFO("Target branch flow (congested)=" << result.pf_mw[target_br]
+       << " MW  limit=" << tight_limit << " MW");
+
+  // ── (a) Solver must converge ──────────────────────────────────────────────
+  REQUIRE(result.converged);
+
+  // ── (b) Branch flow must respect the imposed limit ────────────────────────
+  REQUIRE(!result.pf_mw.empty());
+  const double abs_flow = std::abs(result.pf_mw[target_br]);
+  // Allow 1 % numerical slack beyond the limit.
+  CHECK(abs_flow <= tight_limit * 1.01 + 0.1);
+
+  // ── (c) Re-dispatch must not reduce cost vs the unconstrained baseline ────
+  // (Feasible re-dispatch can only cost the same or more; never less.)
+  CHECK(result.objective >= r_free.objective - 1.0);
+}

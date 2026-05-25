@@ -181,6 +181,7 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     const auto& br = sys.ac.branches[i];
     add_bus(c.buses, br.from_bus);
     add_bus(c.buses, br.to_bus);
+    if (!br.in_service) continue;  // out-of-service branches cannot fail
     c.faults.push_back({id++, true, i, br.from_bus, br.to_bus, br.in_service,
                         br.failure_rate > 0.0 ? br.failure_rate : kDefaultFailureRate});
   }
@@ -188,6 +189,7 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     const auto& br = sys.dc.branches[i];
     add_bus(c.buses, br.from_bus);
     add_bus(c.buses, br.to_bus);
+    if (!br.in_service) continue;  // out-of-service branches cannot fail
     double lambda = br.mtbf_hours > 0.0 ? 8760.0 / br.mtbf_hours : kDefaultFailureRate;
     c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda});
   }
@@ -220,8 +222,8 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     const auto& br = c.sys.ac.branches[i];
     bool on = br.in_service;
     if (fault.ac && i == fault.index && stage < 3) on = false;
-    if (!on && stage >= 2 && !(fault.ac && i == fault.index)) on = true;
-    if (stage >= 3) on = true;
+    if (!on && stage >= 2 && br.in_service && !(fault.ac && i == fault.index)) on = true;
+    if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
     if (on) connect(br.from_bus, br.to_bus);
   }
   for (const auto& sw : c.sys.ac.switches) {
@@ -241,8 +243,8 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     const auto& br = c.sys.dc.branches[i];
     bool on = br.in_service;
     if (!fault.ac && i == fault.index && stage < 3) on = false;
-    if (!on && stage >= 2 && !(!fault.ac && i == fault.index)) on = true;
-    if (stage >= 3) on = true;
+    if (!on && stage >= 2 && br.in_service && !(!fault.ac && i == fault.index)) on = true;
+    if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
     if (on) connect(br.from_bus, br.to_bus);
   }
   for (const auto& vsc : c.sys.vsc_converters) {
@@ -286,8 +288,19 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   lp.c = Eigen::VectorXd::Zero(nd);
   lp.vars.resize(nd);
   for (int i = 0; i < nd; ++i) {
-    lp.vars[i] = {engine::VarType::Continuous, 0.0, std::max(0.0, c.loads[i].p_kw), "shed_" + std::to_string(i)};
-    lp.c[i] = 1.0;
+    const double li = std::max(0.0, c.loads[i].p_kw);
+    // z_i ∈ {0,1}: 1 = load i completely shed (not served), 0 = fully served.
+    // Discrete all-or-nothing restorability is the standard assumption in
+    // distribution reliability assessment (IEC/DL-T 836, IEEE Std 1366).
+    lp.vars[i] = {engine::VarType::Binary, 0.0, 1.0, "z_" + std::to_string(i)};
+    lp.c[i] = li;  // minimize Σ z_i · load_i (total shed kW)
+    mip.binary_idx.push_back(i);  // required: native B&C takes LP fast-path when binary_idx is empty
+  }
+  // Loads whose bus is unreachable (isolated) must be completely shed.
+  for (int i = 0; i < nd; ++i) {
+    if (comp.find(c.loads[i].bus) == comp.end()) {
+      lp.vars[i].lb = 1.0;
+    }
   }
 
   std::unordered_map<int, std::vector<int>> loads_by_comp;
@@ -302,10 +315,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   int row = 0;
   for (const auto& [cid, ids] : loads_by_comp) {
     double demand = 0.0;
-    for (int i : ids) demand += c.loads[i].p_kw;
+    for (int i : ids) demand += std::max(0.0, c.loads[i].p_kw);
     const double cap = comp_cap[cid];
     const double min_shed = std::max(0.0, demand - cap);
-    for (int i : ids) trips.emplace_back(row, i, -1.0);
+    // Constraint: Σ z_i · load_i ≥ min_shed  →  -Σ z_i · load_i ≤ -min_shed
+    for (int i : ids) trips.emplace_back(row, i, -std::max(0.0, c.loads[i].p_kw));
     b[row] = -min_shed;
     ++row;
   }
@@ -329,7 +343,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   } else {
     out.status = "success";
     out.objective = res.stats.objective;
-    for (int i = 0; i < nd; ++i) out.shed_by_load[i] = std::clamp(res.x[i], 0.0, c.loads[i].p_kw);
+    // Map binary z_i back to shed kW: z_i > 0.5 → load completely shed.
+    for (int i = 0; i < nd; ++i) {
+      const double li = std::max(0.0, c.loads[i].p_kw);
+      out.shed_by_load[i] = (res.x[i] > 0.5) ? li : 0.0;
+    }
   }
   out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
   return out;
@@ -342,7 +360,18 @@ void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
   r.nl_ac = static_cast<int>(c.sys.ac.branches.size());
   r.nl_dc = static_cast<int>(c.sys.dc.branches.size());
   r.nl_vsc = static_cast<int>(c.sys.vsc_converters.size());
-  r.nl_sop = 0;
+  r.nl_sop = r.nl_vsc;  // each VSC converter is treated as one SOP port
+  r.sop_config.clear();
+  for (const auto& vsc : c.sys.vsc_converters) {
+    ThreeStageSopConfig sc;
+    sc.id        = vsc.index;
+    sc.node_a    = vsc.bus_ac;
+    sc.node_b    = vsc.bus_dc;
+    sc.pmax_kw   = vsc.pmax_mw * 1000.0;
+    sc.qmax_kw   = vsc.qmax_mvar * 1000.0;
+    sc.efficiency = (vsc.eta > 0.0 && vsc.eta <= 1.0) ? vsc.eta : 0.98;
+    r.sop_config.push_back(sc);
+  }
   r.nl = r.nl_ac + r.nl_dc + r.nl_vsc;
   r.nd = static_cast<int>(c.loads.size());
   r.ng = static_cast<int>(c.sources.size());
@@ -378,6 +407,10 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
     d.pls_stage3 = s3.shed_kw;
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
     d.objective = d.pls_stage1 * kTauSwitchHr + d.pls_stage2 * kTauTrippingHr + d.pls_stage3 * kTauRepairHr;
+    // SOP power vectors: zero-filled (full dispatch model not yet implemented).
+    d.psop1.assign(r.nl_sop, 0.0);
+    d.psop2.assign(r.nl_sop, 0.0);
+    d.psop3.assign(r.nl_sop, 0.0);
     r.faults.push_back(d);
 
     if (d.pls_total > max_pls) {
