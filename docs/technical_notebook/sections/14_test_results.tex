@@ -307,14 +307,23 @@ The original 25-case Tier-2 suite has been expanded with 30 additional cases
 covering small distribution networks, the IEEE RTS-GMLC benchmark, and
 additional European/synthetic transmission systems.
 
-\begin{table}[ht]
-\centering
+\begin{longtable}{lrl}
 \caption{Tier-2 MATPOWER cases solved in \texttt{test\_matpower\_cases} (original 25 + 30 new).}
-\label{tab:tier2}
-\begin{tabular}{lrl}
+\label{tab:tier2}\\
 \hline
 \textbf{Case file} & \textbf{Buses} & \textbf{Network type} \\
 \hline
+\endfirsthead
+\multicolumn{3}{l}{\small\itshape (continued from previous page)} \\
+\hline
+\textbf{Case file} & \textbf{Buses} & \textbf{Network type} \\
+\hline
+\endhead
+\hline
+\multicolumn{3}{r}{\small\itshape (continued on next page)} \\
+\endfoot
+\hline
+\endlastfoot
 \multicolumn{3}{l}{\textit{Original cases}} \\
 case33bw            &   33 & Distribution (radial) \\
 case33mg            &   33 & Microgrid \\
@@ -376,8 +385,7 @@ case533mt\_lo       &  533 & MT lo-load (skipped$^*$) \\
 \hline
 \multicolumn{3}{l}{$^*$ Parser does not evaluate \texttt{135/sqrt(3)} arithmetic expressions.} \\
 \hline
-\end{tabular}
-\end{table}
+\end{longtable}
 
 \subsubsection{Tier-3: Large Cases (tests \#136--\#204, large/very\_large tag)}
 
@@ -946,7 +954,7 @@ pipeline tests where the result of each module is explicitly transferred as
 input to the next module.  Any failing assertion indicates a high-level
 contradiction between modules.
 
-\subsubsection{Pipeline 1: OPF $\to$ PF $\to$ Carbon Analysis (IEEE 14-bus, test \#326)}
+\subsubsection{Pipeline 1: OPF \texorpdfstring{$\to$}{->} PF \texorpdfstring{$\to$}{->} Carbon Analysis (IEEE 14-bus, test \#326)}
 
 \begin{figure}[ht]
 \centering
@@ -994,8 +1002,7 @@ system.  Two cross-checks validate the transfer:
 matrix are computed on the pipeline PF result.  Checks P1-B1 and P1-B2
 enforce a balance error below 1\,\%.
 
-\subsubsection{Pipeline 2: ONR $\to$ DC OPF $\to$ PF $\to$ Carbon Analysis
-               (IEEE 33-bus BW, test \#327)}
+\subsubsection{Pipeline 2: ONR \texorpdfstring{$\to$}{->} DC OPF \texorpdfstring{$\to$}{->} PF \texorpdfstring{$\to$}{->} Carbon Analysis (IEEE 33-bus BW, test \#327)}
 
 \begin{figure}[ht]
 \centering
@@ -1199,7 +1206,9 @@ P2-D2 & Carbon intensity (all 32 load buses) & $\leq 0.606$\,tCO$_2$/MWh & 0.600
 \subsubsection{Mathematical Model}
 
 The short-circuit solver implements the Z-bus Thévenin method following
-IEC~60909~\cite{IEC60909}.
+IEC~60909.\footnote{IEC~60909-0:2016, \textit{Short-circuit currents in
+three-phase a.c.\ systems --- Part~0: Calculation of currents},
+International Electrotechnical Commission.}
 The network is characterised by its nodal admittance matrix
 $\mathbf{Y}_{\text{fault}} \in \mathbb{C}^{n \times n}$, assembled from
 series branch admittances and generator shunt contributions.

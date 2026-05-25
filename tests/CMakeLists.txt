@@ -106,3 +106,16 @@ hacdcpf_add_test(test_graph test_graph.cpp)
 # Kron (Schur complement) reduction: Y-bus partitioning, voltage recovery,
 # fill-in guard, extended injection variant.
 hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
+
+# Distribution CB/switch/VSC pipeline: rich model → graph analysis →
+# canonical projection → PF → DC OPF → short circuit → ONR → JSON export.
+# Traces information propagation through every analysis layer on a 9-bus AC
+# + 3-bus DC hybrid distribution network with circuit breakers, tie switches,
+# a VSC converter, a DC microgrid, and DER generation.
+hacdcpf_add_test(test_distribution_pipeline test_distribution_pipeline.cpp)
+
+# Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
+# runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).
+# TC-1 (symbol linkage + project tree check) runs unconditionally.
+# TC-5 (missing-file error handling) runs unconditionally.
+hacdcpf_add_test(test_three_stage_reliability test_three_stage_reliability.cpp)

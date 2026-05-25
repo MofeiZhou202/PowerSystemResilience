@@ -113,6 +113,7 @@ set(HACDCPF_SOURCES
   src/graph/result_recovery.cpp
   # ── analysis ────────────────────────────────────────────────────────
   src/analysis/short_circuit.cpp
+  src/analysis/three_stage_reliability.cpp
   # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp
   src/carbon_analysis/annual_carbon_analysis.cpp
