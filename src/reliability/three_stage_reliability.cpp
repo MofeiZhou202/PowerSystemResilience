@@ -282,6 +282,37 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     if (it != comp.end()) comp_cap[it->second] += s.p_kw;
   }
 
+  // ── Analytic shortcut ──────────────────────────────────────────────────────
+  // If every connected component has sufficient capacity to serve all its loads,
+  // the optimal all-or-nothing solution is trivially zero shed — skip B&C.
+  {
+    std::unordered_map<int, double> comp_demand;
+    for (int i = 0; i < nd; ++i) {
+      const double li = std::max(0.0, c.loads[i].p_kw);
+      auto it = comp.find(c.loads[i].bus);
+      if (it != comp.end()) comp_demand[it->second] += li;
+      // Loads on isolated buses always shed — any isolation disqualifies shortcut.
+      else if (li > 1e-6) goto full_milp;
+    }
+    {
+      bool feasible = true;
+      for (const auto& [cid, demand] : comp_demand) {
+        const auto ci = comp_cap.find(cid);
+        if (ci == comp_cap.end() || ci->second < demand - 1e-6) {
+          feasible = false;
+          break;
+        }
+      }
+      if (feasible) {
+        out.status = "success (analytical)";
+        out.shed_kw = 0.0;
+        std::fill(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+        return out;
+      }
+    }
+  }
+  full_milp:
+
   engine::MIPModel mip;
   auto& lp = mip.linear_part;
   lp.sense = engine::Sense::Minimize;
@@ -407,7 +438,10 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
     d.pls_stage3 = s3.shed_kw;
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
     d.objective = d.pls_stage1 * kTauSwitchHr + d.pls_stage2 * kTauTrippingHr + d.pls_stage3 * kTauRepairHr;
-    // SOP power vectors: zero-filled (full dispatch model not yet implemented).
+    // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
+    // yet implemented; the binary load-shedding MILP above does not dispatch
+    // SOP active-power flows. A dedicated OPF-based restoration model is
+    // needed to co-optimize SOP setpoints with load pickup decisions.
     d.psop1.assign(r.nl_sop, 0.0);
     d.psop2.assign(r.nl_sop, 0.0);
     d.psop3.assign(r.nl_sop, 0.0);

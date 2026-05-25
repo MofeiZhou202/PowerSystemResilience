@@ -1450,6 +1450,7 @@ std::vector<FMEAComponent> build_fmea_catalog(
 struct FMEAStageEval {
   StateEvalResult eval;
   std::vector<FMEAContingencyDetail::SwitchActionDetail> switch_actions;
+  bool search_truncated{false};  ///< true if OPF call budget was exhausted
 };
 
 void apply_fmea_component_outage(HybridPowerSystem& sys, const FMEAComponent& comp) {
@@ -1795,12 +1796,21 @@ FMEAStageEval evaluate_contingency_stage(
         branch_candidates.end());
   }
   const int max_actions = std::max(0, options.max_repair_switch_actions);
+  // Budget cap: 0 means unlimited.
+  const int opf_budget = std::max(0, options.max_repair_opf_calls);
+  int opf_calls = 1;  // baseline evaluation already counted
+
+  auto budget_exhausted = [&]() {
+    return opf_budget > 0 && opf_calls >= opf_budget;
+  };
 
   auto try_candidate = [&](const std::vector<int>& switches,
                            const std::vector<int>& branches) {
+    if (budget_exhausted()) return;
     HybridPowerSystem cand = sys_copy;
     close_repair_actions(cand, switches, branches);
     StateEvalResult ev = evaluate_prepared_fmea_system(cand, opf_opt);
+    ++opf_calls;
     if (ev.curtailment_mw + 1e-9 < best.eval.curtailment_mw) {
       best.eval = std::move(ev);
       best.switch_actions = describe_repair_actions(sys_copy, switches, branches);
@@ -1808,30 +1818,41 @@ FMEAStageEval evaluate_contingency_stage(
   };
 
   for (int s : switch_candidates) {
+    if (budget_exhausted()) break;
     try_candidate({s}, {});
+    // Early exit: curtailment already zeroed, no need to continue.
+    if (best.eval.curtailment_mw <= 1e-9) { return best; }
   }
   for (int b : branch_candidates) {
+    if (budget_exhausted()) break;
     try_candidate({}, {b});
+    if (best.eval.curtailment_mw <= 1e-9) { return best; }
   }
 
   if (max_actions >= 2) {
-    for (size_t i = 0; i < switch_candidates.size(); ++i) {
-      for (size_t j = i + 1; j < switch_candidates.size(); ++j) {
+    for (size_t i = 0; i < switch_candidates.size() && !budget_exhausted(); ++i) {
+      for (size_t j = i + 1; j < switch_candidates.size() && !budget_exhausted(); ++j) {
         try_candidate({switch_candidates[i], switch_candidates[j]}, {});
+        if (best.eval.curtailment_mw <= 1e-9) { return best; }
       }
     }
     for (int s : switch_candidates) {
+      if (budget_exhausted()) break;
       for (int b : branch_candidates) {
+        if (budget_exhausted()) break;
         try_candidate({s}, {b});
+        if (best.eval.curtailment_mw <= 1e-9) { return best; }
       }
     }
-    for (size_t i = 0; i < branch_candidates.size(); ++i) {
-      for (size_t j = i + 1; j < branch_candidates.size(); ++j) {
+    for (size_t i = 0; i < branch_candidates.size() && !budget_exhausted(); ++i) {
+      for (size_t j = i + 1; j < branch_candidates.size() && !budget_exhausted(); ++j) {
         try_candidate({}, {branch_candidates[i], branch_candidates[j]});
+        if (best.eval.curtailment_mw <= 1e-9) { return best; }
       }
     }
   }
 
+  best.search_truncated = budget_exhausted();
   return best;
 }
 
@@ -1897,6 +1918,7 @@ FMEAResult run_distribution_fmea(
     detail.causes_loss_rep = eval_rep.eval.is_loss_state;
     detail.nodal_shed_rep_mw = eval_rep.eval.nodal_curtailment_mw;
     detail.repair_switch_actions = std::move(eval_rep.switch_actions);
+    detail.repair_search_truncated = eval_rep.search_truncated;
 
     // 鈹€鈹€ Frequency-weighted contributions 鈹€鈹€
     double total_ens = detail.ens_sw_mwh + detail.ens_rep_mwh;

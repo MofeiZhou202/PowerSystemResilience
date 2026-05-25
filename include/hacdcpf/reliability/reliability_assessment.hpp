@@ -211,6 +211,13 @@ struct FMEAOptions {
   // stage explicit reconfiguration search.
   int max_repair_switch_actions{2};
 
+  // Maximum number of OPF evaluations in the repair-stage topology search
+  // across all candidate action combinations.  When this budget is reached the
+  // search stops and the best result found so far is returned with
+  // FMEAContingencyDetail::repair_search_truncated set to true.
+  // Set to 0 to disable the cap (unlimited — may be slow for large systems).
+  int max_repair_opf_calls{200};
+
   // When enabled, storage is modeled as a dispatchable emergency source during
   // FMEA stage evaluation with stage-specific SOC tracking.
   bool enable_storage_dispatch{true};
@@ -265,6 +272,11 @@ struct FMEAContingencyDetail {
 
   // Explicit repair-stage switch operations selected by the topology search.
   std::vector<SwitchActionDetail> repair_switch_actions;
+
+  // True if the repair-stage topology search was stopped early by the OPF
+  // call budget (max_repair_opf_calls). Results remain valid but may not
+  // reflect the globally optimal switching sequence.
+  bool repair_search_truncated{false};
 };
 
 /// Comprehensive FMEA result for distribution systems.

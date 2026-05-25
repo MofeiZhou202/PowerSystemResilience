@@ -446,3 +446,106 @@ TEST_CASE("JSON load: case3_case4 formal SOC piecewise file is valid JSON", "[io
     REQUIRE_NOTHROW(j = nlohmann::json::parse(ifs));
     CHECK(!j.empty());  // file is non-empty valid JSON
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// JPC JSON: full rich-component round-trip
+// Verifies that all 12 extended component types added in Round 3 survive the
+// to_jpc_json → from_jpc_json cycle with their collection sizes intact.
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("JPC JSON round-trip: all 12 rich component types preserved",
+          "[io][json][jpc][round-trip][integration]") {
+    using namespace hacdcpf::io;
+
+    // ── Base AC skeleton (minimal 2-bus) ────────────────────────────────────
+    HybridPowerSystem sys;
+    sys.name     = "jpc_richcomponent_rt";
+    sys.base_mva = 100.0;
+
+    ACBus b1; b1.index=1; b1.bus_type=BusType::SLACK; b1.vm_pu=1.0; b1.in_service=true;
+    ACBus b2; b2.index=2; b2.bus_type=BusType::PQ;   b2.vm_pu=1.0; b2.in_service=true;
+    sys.ac.buses = {b1, b2};
+
+    ACBranch br; br.from_bus=1; br.to_bus=2; br.r_pu=0.01; br.x_pu=0.04; br.in_service=true;
+    sys.ac.branches = {br};
+
+    Generator g; g.bus=1; g.is_slack=true; g.pmax_mw=100.0; g.pmin_mw=0.0; g.in_service=true;
+    sys.ac.generators = {g};
+
+    // ── One DC bus (needed by DCDCConverter / DCCircuitBreaker) ─────────────
+    DCBus db; db.index=10; db.in_service=true;
+    sys.dc.buses = {db};
+
+    // ── 1. ShuntAC ───────────────────────────────────────────────────────────
+    Shunt sh; sh.bus=2; sh.gs_mw=0.0; sh.bs_mvar=5.0; sh.in_service=true;
+    sys.ac.shunts = {sh};
+
+    // ── 2. RenewableGen ──────────────────────────────────────────────────────
+    RenewableGen rg; rg.bus=2; rg.p_mw=10.0; rg.in_service=true;
+    sys.ac.renewable_gens = {rg};
+
+    // ── 3. Transformer2W ─────────────────────────────────────────────────────
+    Transformer2W t2; t2.hv_bus=1; t2.lv_bus=2; t2.sn_mva=50.0; t2.in_service=true;
+    sys.ac.transformers_2w = {t2};
+
+    // ── 4. Transformer3W ─────────────────────────────────────────────────────
+    Transformer3W t3; t3.hv_bus=1; t3.mv_bus=2; t3.lv_bus=2; t3.sn_hv_mva=30.0; t3.in_service=true;
+    sys.ac.transformers_3w = {t3};
+
+    // ── 5. Switch ────────────────────────────────────────────────────────────
+    Switch sw; sw.bus_from=1; sw.bus_to=2; sw.closed=true; sw.in_service=true;
+    sys.ac.switches = {sw};
+
+    // ── 6. EVChargingStation ─────────────────────────────────────────────────
+    ChargingStation cs; cs.bus=2; cs.in_service=true;
+    sys.ac.charging_stations = {cs};
+
+    // ── 7. Charger ───────────────────────────────────────────────────────────
+    Charger ch; ch.p_ch_max_kw=50.0; ch.in_service=true;
+    sys.ac.chargers = {ch};
+
+    // ── 8. AsynchronousMotor ─────────────────────────────────────────────────
+    AsynchronousMotor mo; mo.bus=2; mo.sn_mva=5.0; mo.in_service=true;
+    sys.ac.motors = {mo};
+
+    // ── 9. MobileStorage ─────────────────────────────────────────────────────
+    MobileStorage ms; ms.bus=2; ms.e_rated_mwh=10.0; ms.in_service=true;
+    sys.mobile_storage = {ms};
+
+    // ── 10. VirtualPowerPlant ────────────────────────────────────────────────
+    VirtualPowerPlant vpp; vpp.pcc_bus=1; vpp.pmax_mw=20.0; vpp.in_service=true;
+    sys.vpps = {vpp};
+
+    // ── 11. DCDCConverter ────────────────────────────────────────────────────
+    DCDCConverter dcdc; dcdc.bus_in=10; dcdc.bus_out=10; dcdc.in_service=true;
+    sys.dc.dcdc_converters = {dcdc};
+
+    // ── 12. DCCircuitBreaker ─────────────────────────────────────────────────
+    DCCircuitBreaker dccb; dccb.bus_from=10; dccb.bus_to=10; dccb.in_service=true;
+    sys.dc.dc_circuit_breakers = {dccb};
+
+    // ── Serialize → deserialize ──────────────────────────────────────────────
+    const std::string jpc_str = to_jpc_json(sys);
+    REQUIRE_FALSE(jpc_str.empty());
+
+    HybridPowerSystem rt = from_jpc_json(jpc_str);
+
+    // ── Verify all 12 collection sizes survive the round-trip ────────────────
+    CHECK(rt.ac.shunts.size()            == sys.ac.shunts.size());
+    CHECK(rt.ac.renewable_gens.size()    == sys.ac.renewable_gens.size());
+    CHECK(rt.ac.transformers_2w.size()   == sys.ac.transformers_2w.size());
+    CHECK(rt.ac.transformers_3w.size()   == sys.ac.transformers_3w.size());
+    CHECK(rt.ac.switches.size()          == sys.ac.switches.size());
+    CHECK(rt.ac.charging_stations.size() == sys.ac.charging_stations.size());
+    CHECK(rt.ac.chargers.size()          == sys.ac.chargers.size());
+    CHECK(rt.ac.motors.size()            == sys.ac.motors.size());
+    CHECK(rt.mobile_storage.size()       == sys.mobile_storage.size());
+    CHECK(rt.vpps.size()                 == sys.vpps.size());
+    CHECK(rt.dc.dcdc_converters.size()   == sys.dc.dcdc_converters.size());
+    CHECK(rt.dc.dc_circuit_breakers.size() == sys.dc.dc_circuit_breakers.size());
+
+    // ── Core topology also preserved ─────────────────────────────────────────
+    CHECK(rt.ac.buses.size()      == sys.ac.buses.size());
+    CHECK(rt.ac.branches.size()   == sys.ac.branches.size());
+    CHECK(rt.ac.generators.size() == sys.ac.generators.size());
+}

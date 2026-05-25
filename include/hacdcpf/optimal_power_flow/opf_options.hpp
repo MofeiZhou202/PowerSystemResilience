@@ -65,6 +65,12 @@ struct DCOPFOptions {
 
   bool load_shedding{true};
   double voll{0.0};
+
+  // When true (default), the solver runs a supporting simplex LP after the
+  // primal solve to recover constraint dual variables (LMPs and congestion
+  // prices).  Set to false when only the primal dispatch is needed and the
+  // extra LP solve overhead should be avoided.
+  bool compute_lmp{true};
 };
 
 }  // namespace hacdcpf::opf

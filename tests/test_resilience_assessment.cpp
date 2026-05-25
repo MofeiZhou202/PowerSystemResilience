@@ -348,7 +348,7 @@ TEST_CASE("Resilience: step count matches horizon/timestep", "[resilience]") {
   CHECK(r.steps.size() == 6u);
 }
 
-TEST_CASE("Resilience: MIP stub delegates to heuristic", "[resilience]") {
+TEST_CASE("Resilience: MIP solver returns feasible on zero-fault system", "[resilience]") {
   auto sys = make_radial_3bus();
   DistributionResilienceOptions opts;
   opts.horizon_hours = 4;

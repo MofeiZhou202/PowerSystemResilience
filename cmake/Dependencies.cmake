@@ -8,6 +8,19 @@
 # No Homebrew or system-installed solver library is required or searched.
 
 # ── MIPSolvers ────────────────────────────────────────────────────────────────
+# MIPSolvers is consumed as a local sibling directory rather than through a
+# package manager or network fetch.  To keep the build reproducible:
+#
+#   * Record the expected commit hash below.  Update it whenever MIPSolvers is
+#     intentionally upgraded so reviewers can see the dependency version bump.
+#   * If the working tree does not match, CMake emits a WARNING (not an error)
+#     so that developers whose local clone is slightly ahead/behind can still
+#     build.  CI can be configured to treat the warning as an error.
+#
+# Last verified compatible commit (update when upgrading MIPSolvers):
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT ""
+    CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)")
+
 set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
 
 if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt")
@@ -15,6 +28,25 @@ if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt")
     "MIPSolvers source not found at ${_HACDCDSS_MIPSOLVERS_DIR}.\n"
     "Clone or symlink the MIPSolvers repository alongside this project so that\n"
     "  ${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt  exists.")
+endif()
+
+# Optionally verify the MIPSolvers commit matches the recorded pin.
+if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
+              rev-parse --verify HEAD
+      OUTPUT_VARIABLE _MIPSOLVERS_ACTUAL_COMMIT
+      ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _MIPSOLVERS_ACTUAL_COMMIT STREQUAL _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
+      message(WARNING
+        "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the\n"
+        "expected pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).\n"
+        "Update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT in cmake/Dependencies.cmake\n"
+        "if this upgrade is intentional.")
+    endif()
+  endif()
 endif()
 
 # Disable MIPSolvers' own tests and Python bindings when building as a

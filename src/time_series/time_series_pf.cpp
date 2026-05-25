@@ -1048,6 +1048,12 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       }
     }
 
+    // Pre-compute a row-major view of B to allow O(nnz) row iteration.
+    // net.B is column-major by default; scanning all columns via .coeff(b,j)
+    // is O(T·nb²).  Converting once to row-major reduces the balance-assembly
+    // loop to O(T·nnz(B)), which is O(T·nb·avg_degree) — typically 3–5×.
+    const Eigen::SparseMatrix<double, Eigen::RowMajor> B_rm = net.B;
+
     for (int t = 0; t < T; ++t) {
       for (int b = 0; b < net.n_bus; ++b) {
         const int row_bal = t * net.n_bus + b;
@@ -1072,14 +1078,15 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
           }
         }
 
-        for (int j = 0; j < net.n_bus; ++j) {
-          const double bij = net.B.coeff(b, j);
-          if (std::abs(bij) < 1e-12) continue;
-          const auto ib = non_slack_pos.find(b);
-          const auto ij = non_slack_pos.find(j);
+        // Iterate only over structural non-zeros in row b (O(nnz_per_row)).
+        const auto ib = non_slack_pos.find(b);
+        for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(B_rm, b); it; ++it) {
+          const int j = static_cast<int>(it.index());
+          const double bij = it.value();
           if (ib != non_slack_pos.end()) {
             eq_trips.emplace_back(row_bal, theta_idx(ib->second, t), -sys.base_mva * bij);
           }
+          const auto ij = non_slack_pos.find(j);
           if (ij != non_slack_pos.end()) {
             eq_trips.emplace_back(row_bal, theta_idx(ij->second, t), sys.base_mva * bij);
           }

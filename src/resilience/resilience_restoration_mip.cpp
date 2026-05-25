@@ -315,6 +315,9 @@ struct SolutionDiagnostics {
   std::string max_bound_var_name;
   double recomputed_objective{0.0};
   double min_objective_coeff{0.0};
+  // Constraint residuals (independent of the solver's internal tolerances).
+  double max_ineq_violation{0.0};   // max(A*x - b)  (>0 means infeasible)
+  double max_eq_violation{0.0};     // max|Aeq*x - beq|
 };
 
 SolutionDiagnostics analyze_solution(const solver::LPModel& lp,
@@ -337,6 +340,26 @@ SolutionDiagnostics analyze_solution(const solver::LPModel& lp,
     }
   }
   diag.recomputed_objective = lp.c.dot(x);
+
+  // ── Inequality residuals: A*x <= b (and optional row_lhs <= A*x) ──────────
+  if (lp.A.rows() > 0 && lp.b.size() == lp.A.rows()) {
+    const Eigen::VectorXd Ax = lp.A * x;
+    for (int i = 0; i < lp.A.rows(); ++i) {
+      // Upper-side violation: Ax[i] > b[i]
+      diag.max_ineq_violation = std::max(diag.max_ineq_violation, Ax[i] - lp.b[i]);
+      // Lower-side violation (range row): row_lhs[i] > Ax[i]
+      if (i < static_cast<int>(lp.row_lhs.size())) {
+        diag.max_ineq_violation = std::max(diag.max_ineq_violation, lp.row_lhs[i] - Ax[i]);
+      }
+    }
+  }
+
+  // ── Equality residuals: Aeq*x = beq ─────────────────────────────────────
+  if (lp.Aeq.rows() > 0 && lp.beq.size() == lp.Aeq.rows()) {
+    const Eigen::VectorXd res = lp.Aeq * x - lp.beq;
+    diag.max_eq_violation = res.cwiseAbs().maxCoeff();
+  }
+
   return diag;
 }
 
@@ -1020,11 +1043,15 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   result.model_stats.solver_status = solve_result.stats.status;
   result.model_stats.cglp_cuts_added = solve_result.stats.cglp_cuts_added;
 
+  constexpr double kFeasTol = 1.0e-6;
   const bool size_ok = solve_result.x.size() == built.model.linear_part.c.size();
-  const bool bounds_ok = solution_diag.max_bound_violation <= 1.0e-6;
+  const bool bounds_ok = solution_diag.max_bound_violation <= kFeasTol;
+  const bool ineq_ok   = solution_diag.max_ineq_violation  <= kFeasTol;
+  const bool eq_ok     = solution_diag.max_eq_violation    <= kFeasTol;
   const bool nonnegative_objective_ok =
       solution_diag.min_objective_coeff < -1.0e-9 || solution_diag.recomputed_objective >= -1.0e-6;
-  result.feasible = solve_result.stats.success && size_ok && bounds_ok && nonnegative_objective_ok;
+  result.feasible = solve_result.stats.success && size_ok && bounds_ok &&
+                    ineq_ok && eq_ok && nonnegative_objective_ok;
   if (!result.feasible) {
     std::ostringstream status;
     status << "Strict resilience MIP skeleton built but solver returned an invalid incumbent";
@@ -1039,6 +1066,10 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
         status << " [" << solution_diag.max_bound_var_name << "]";
       }
       status << ")";
+    } else if (!ineq_ok) {
+      status << " (max inequality residual=" << solution_diag.max_ineq_violation << ")";
+    } else if (!eq_ok) {
+      status << " (max equality residual=" << solution_diag.max_eq_violation << ")";
     } else if (!nonnegative_objective_ok) {
       status << " (negative objective " << solution_diag.recomputed_objective
              << " despite nonnegative objective coefficients)";

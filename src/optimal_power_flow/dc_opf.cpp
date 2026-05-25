@@ -35,7 +35,13 @@ std::unordered_map<int, int> build_bus_map(const std::vector<ACBus>& buses) {
   std::unordered_map<int, int> m;
   m.reserve(buses.size());
   for (int i = 0; i < static_cast<int>(buses.size()); ++i) {
-    m[buses[i].index] = i;
+    auto [it, inserted] = m.emplace(buses[i].index, i);
+    if (!inserted) {
+      spdlog::warn("DC OPF: duplicate bus ID {} at positions {} and {} — "
+                   "second occurrence overrides first",
+                   buses[i].index, it->second, i);
+      it->second = i;  // keep last occurrence (same behaviour as before)
+    }
   }
   return m;
 }
@@ -913,7 +919,10 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   auto end_time = std::chrono::high_resolution_clock::now();
   double runtime_sec = std::chrono::duration<double>(end_time - start_time).count();
 
-  populate_missing_duals_from_supporting_lp(form, sol, use_qp, opt);
+  // Supporting LP for dual extraction (LMPs) — skip when not requested.
+  if (opt.compute_lmp) {
+    populate_missing_duals_from_supporting_lp(form, sol, use_qp, opt);
+  }
   
   // Extract results
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);

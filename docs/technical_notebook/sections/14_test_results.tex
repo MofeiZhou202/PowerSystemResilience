@@ -1528,8 +1528,11 @@ An empty \texttt{HybridPowerSystem} and an options struct with
         \texttt{total\_shed\_mwh} (backward-compatibility alias).
   \item \textbf{Step count} (\#365) --- executed steps equal \texttt{horizon\_steps}
         exactly.
-  \item \textbf{MIP stub} (\#366) --- MIP reconfiguration mode delegates to the
-        heuristic fallback and completes without exception.
+  \item \textbf{MIP solver feasibility} (\#366) --- The MIP entry point
+        (\texttt{run\_distribution\_resilience\_mip\_assessment}) returns a feasible
+        incumbent on a zero-fault 3-bus system.  This test validates that the live
+        MIP solver (not a heuristic delegate) completes without exception and
+        satisfies all feasibility checks including constraint residuals.
   \item \textbf{Peak shed non-negative} (\#367) --- \texttt{peak\_shed\_mw} $\geq 0$
         for all runs.
 \end{itemize}
