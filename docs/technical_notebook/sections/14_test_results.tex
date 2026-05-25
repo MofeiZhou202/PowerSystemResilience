@@ -3,9 +3,9 @@
 \label{sec:test_results}
 % ============================================================
 
-This chapter documents the new test suites added to the project.  All 393 CTest entries are registered (391 active, 2 skipped due to
+This chapter documents the new test suites added to the project.  All 399 CTest entries are registered (397 active, 2 skipped due to
 a parser limitation) in the \texttt{build\_rel} configuration, giving a total
-of \textbf{391/391 active tests passing} on macOS with Apple Silicon
+of \textbf{397/397 active tests passing} on macOS with Apple Silicon
 (Accelerate, HiGHS, Gurobi, Ipopt, SCIP, KLU, UMFPACK, PaPILO all active).
 The two skipped tests (\texttt{case533mt\_hi} and \texttt{case533mt\_lo})
 contain arithmetic expressions (\texttt{135/sqrt(3)}) in their data files
@@ -45,8 +45,10 @@ CTest registration ranges.
 \texttt{test\_resilience\_assessment}   & Resilience: faults, reconfiguration, MESS dispatch & 351--367 & 17 \\
 \texttt{test\_graph}                    & Graph topology, contraction, series/pendant, recovery & 368--386 & 19 \\
 \texttt{test\_graph\_kron}              & Kron Y-bus reduction and voltage recovery         & 387--393 & 7  \\
+\texttt{test\_distribution\_pipeline}  & Distribution CB/switch/VSC pipeline: rich model $\to$ graph $\to$ PF $\to$ OPF $\to$ SC $\to$ ONR $\to$ export & 394 & 1 \\
+\texttt{test\_three\_stage\_reliability} & Three-stage MILP fault-recovery reliability      & 395--399 & 5  \\
 \hline
-\textbf{Total (new)}                & & 48--393 & \textbf{346} \\
+\textbf{Total (new)}                & & 48--399 & \textbf{352} \\
 \hline
 \end{tabular}
 \end{table}
@@ -866,18 +868,26 @@ Catch2 compact reporter) and the accumulated CTest time for each suite.
 \texttt{test\_three\_phase\_pf}    & 28  &  94  & $\approx$0.01 & Three-phase projection \& JSON \\
 \texttt{test\_multiport\_vpp\_er}  & 14  & 103  & $\approx$0.01 & Multi-port ER \& VPP modes \\
 \texttt{test\_topology\_crossval}  &  1  &  50  & $\approx$0.75 & ONR connectivity \& B\&C \\
+\texttt{test\_crossmodule\_integration} &  2  &  82  & $\approx$0.66 & Pipeline OPF$\to$PF$\to$Carbon, ONR$\to$OPF$\to$PF$\to$Carbon \\
+\texttt{test\_short\_circuit\_crossval} &  7  & 239  & $\approx$0.07 & SC Z-bus cross-validation \\
+\texttt{test\_three\_phase\_nr}         & 16  &  97  & $\approx$0.16 & Three-phase Newton--Raphson PF \\
+\texttt{test\_resilience\_assessment}   & 17  &  74  & $\approx$0.17 & Resilience: faults, reconfig, MESS \\
+\texttt{test\_graph}                    & 19  &  68  & $\approx$0.19 & Graph topology, contraction, reduction \\
+\texttt{test\_graph\_kron}              &  7  &  32  & $\approx$0.07 & Kron Y-bus reduction \\
+\texttt{test\_distribution\_pipeline}   &  1  & 158  & $\approx$0.10 & Distribution CB/switch/VSC pipeline \\
+\texttt{test\_three\_stage\_reliability}&  5  &  10  & $\approx$0.05 & Three-stage MILP reliability \\
 \hline
-\texttt{test\_powerflow\_performance}& 1  &   3  &        5.05   & 75-case perf sweep \\
+\texttt{test\_powerflow\_performance}& 1  &   3  &        5.74   & 75-case perf sweep \\
 \hline
-\textbf{Grand total}               & \textbf{327} & \textbf{$\approx$3\,295} & \textbf{12.52} & \\
+\textbf{Grand total}               & \textbf{399} & \textbf{$\approx$4\,123} & \textbf{16.08} & \\
 \hline
 \end{tabular}
 \end{table}
 
-The total CTest wall-clock time is \textbf{12.52\,s} for all 327 registered entries (325 active), of
-which 5.05\,s is the performance sweep (\texttt{test\_powerflow\_performance})
+The total CTest wall-clock time is \textbf{16.08\,s} for all 399 registered entries (397 active), of
+which 5.74\,s is the performance sweep (\texttt{test\_powerflow\_performance})
 and 1.16\,s is the ACOPF vs DCOPF comprehensive comparison.  Excluding the
-performance suite, all functional tests complete in under 7.5\,s.
+performance suite, all functional tests complete in under 11\,s.
 
 The \texttt{test\_matpower\_cases} suite time improved significantly from
 $\approx$5.0\,s to $\approx$2.5\,s following the PV/PQ conversion
@@ -941,7 +951,7 @@ through Tier-3).  The three asserted properties are:
   \item Tier-2 extended convergence rate $\geq 85\,\%$ (observed: 100\,\%).
   \item Tier-3 large-system count $\geq 11$ cases converging (observed: 11/11).
 \end{itemize}
-Total wall-clock time for the sweep is \textbf{5.05\,s} on the reference
+Total wall-clock time for the sweep is \textbf{5.74\,s} on the reference
 machine.
 
 % ------------------------------------------------------------
@@ -1588,10 +1598,12 @@ All 26 graph tests pass in $< 0.01$\,s.
 \texttt{test\_resilience\_assessment}   & 351--367 & 17  & 17  & 100\,\% \\
 \texttt{test\_graph}                    & 368--386 & 19  & 19  & 100\,\% \\
 \texttt{test\_graph\_kron}              & 387--393 &  7  &  7  & 100\,\% \\
+\texttt{test\_distribution\_pipeline}   & 394      &  1  &  1  & 100\,\% \\
+\texttt{test\_three\_stage\_reliability} & 395--399 &  5  &  5  & 100\,\% \\
 \hline
 Pre-existing suites                 & 1--47 & 47  & 47  & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--393   & \textbf{393} & \textbf{391}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--399   & \textbf{399} & \textbf{397}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline

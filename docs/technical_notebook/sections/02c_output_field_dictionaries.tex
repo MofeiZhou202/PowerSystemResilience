@@ -20,7 +20,7 @@ Artifact & Export path & Direction & Current note \\
 \texttt{ACOPFResult} JSON & \texttt{opf\_result\_to\_json} / \texttt{opf\_result\_from\_json} & bidirectional & serializes scalar summary, \texttt{solver\_path}, bus / generator / converter vectors, enhanced dispatch objects with maps, legacy dispatch arrays, and OPF profiling block. \\
 \texttt{CarbonAnalysisResult} workbook & \texttt{save\_carbon\_results\_xlsx} & export only & writes AC/DC load and bus sheets, AC/DC branch-loss sheets, converter-loss sheets, storage / EnergyRouter sheets, and block-style \texttt{Summary}. \\
 \texttt{CarbonAnalysisResult} JSON & \texttt{carbon\_result\_to\_json} / \texttt{carbon\_result\_from\_json} & bidirectional & preserves the richer tracing maps and the hybrid AC/DC carrier results that the workbook flattens. \\
-Short-circuit and ONR artifacts & absent from the current public API & none & the current public headers in this repository do not expose \texttt{compute\_short\_circuit}, \texttt{BusFaultResult}, or \texttt{solve\_optimal\_reconfiguration}; no output field contract is documented for them. \\
+Short-circuit and ONR artifacts & available via module headers; not forwarded from \texttt{hacdcpf.hpp} & \texttt{hacdcpf/analysis/short\_circuit.hpp}, \texttt{hacdcpf/network\_reconfiguration/topology\_analysis.hpp} & Fully implemented and tested.  No dedicated workbook serializer exists; results are consumed in-memory or logged.  Output field contracts are documented in those module headers. \\
 \bottomrule
 \end{longtable}
 
@@ -41,7 +41,7 @@ Echoed vs solved values & Some exported fields are metadata echoes or derived an
 Boolean spelling & PF / OPF workbook booleans use the standard workbook token form produced by \texttt{bool\_str}; carbon \texttt{Summary} uses lowercase \texttt{true}/\texttt{false}. & Result workbooks & Downstream parsers should normalize workbook booleans instead of assuming one literal spelling. \\
 Conditional sheets & Some result sheets are pre-created even when no rows are written.  \texttt{OPF\_Converter} is the main example. & PF / OPF workbooks & Empty sheets are part of the current export contract and do not by themselves indicate an error. \\
 Object-map semantics & Carbon contribution maps are exported as JSON object maps keyed by internal carbon-source id rather than positional arrays. & Carbon JSON & Map-key order is not semantically meaningful; workbook export intentionally flattens these maps away. \\
-Stub / absent analysis outputs & Distribution power flow, resilience, and carbon analysis currently return stub-style results; short-circuit and ONR public output APIs are absent. & analysis namespace and scope boundary & The serializers listed here describe existing export code paths, but they do not imply that every analysis family has an implemented solver producing those artifacts. \\
+Stub analysis outputs & Distribution power flow (\ \texttt{solve\_distribution\_power\_flow}) returns a stub result.  Three-stage MILP reliability is under development.  All other analysis modules (resilience, reliability MC, short-circuit, ONR, carbon, time-series) are fully implemented. & analysis namespace and scope boundary & The serializers listed here describe existing export code paths; see Section~\ref{sec:scope-boundary} for the up-to-date stub boundary. \\
 \bottomrule
 \end{longtable}
 
@@ -59,7 +59,7 @@ Parity OPF formulation & \texttt{dpd\_mw}, \texttt{dqd\_mvar} & \texttt{OPF\_Bus
 OPF fallback selection & \texttt{status}, convergence flags, and partial vectors & \texttt{OPF\_Summary}, \texttt{ACOPFResult} JSON & Consumers should read \texttt{status} together with \texttt{converged}; some fallback paths can return structurally valid but less detailed result blocks. \\
 Carbon tracing method & \texttt{tracing\_verified} and \texttt{tracing\_summary.*} & carbon workbook and JSON & These fields describe graph-tracing consistency, not matrix-solver success. \\
 Carbon matrix method & \texttt{matrix\_solved}, \texttt{matrix\_residual}, and \texttt{matrix\_summary.*} & carbon workbook and JSON & \texttt{matrix\_residual} is specific to the matrix solve; it is not directly comparable to PF or OPF residual metrics. \\
-Distribution resilience stub & \texttt{completed=false}, \texttt{status=not\_implemented} & public API result object & the facade exposes \texttt{run\_distribution\_resilience\_assessment}, but the implementation currently returns a stub result rather than a populated report workbook or JSON artifact. \\
+Distribution resilience & \texttt{completed}, \texttt{status}, \texttt{resilience\_index}, \texttt{steps[]}, \texttt{total\_served\_mwh} & \texttt{DistributionResilienceResult} & Fully implemented in \texttt{src/resilience/resilience\_assessment.cpp}.  Returns \texttt{status=\"Completed\"} on success and \texttt{status=\"Failed\"} when the solve is infeasible. \\
 \bottomrule
 \end{longtable}
 

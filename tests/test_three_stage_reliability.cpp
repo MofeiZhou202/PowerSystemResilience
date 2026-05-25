@@ -123,18 +123,17 @@ void check_result_shape(const ThreeStageReliabilityResult& r) {
 
 TEST_CASE("Three-stage reliability — symbol linkage and project tree",
           "[reliability][three_stage][smoke]") {
-  // Verify Julia project directory is present in this repository.
-  const fs::path julia_proj = repo_root() / "julia" / "reliability";
-  REQUIRE(fs::exists(julia_proj / "Project.toml"));
-  REQUIRE(fs::exists(julia_proj / "cli.jl"));
-  REQUIRE(fs::exists(julia_proj / "src" / "DistNetReliability.jl"));
-  REQUIRE(fs::exists(julia_proj / "src" / "three_stage_tp_model.jl"));
-  REQUIRE(fs::exists(julia_proj / "src" / "load_case_json.jl"));
-
   // Verify test data is present.
   REQUIRE(fs::exists(reliability_data("test_1_no_sop.json")));
   REQUIRE(fs::exists(reliability_data("case33mg_acdc.json")));
   REQUIRE(fs::exists(reliability_data("case33bw_acdc.json")));
+
+  // Verify symbol linkage: calling with empty JSON must return an error, not throw.
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  auto r = run_three_stage_reliability_from_string("", opts);
+  CHECK(!r.ok);
+  CHECK(!r.error.empty());
 }
 
 // ─── TC-2: test_1_no_sop — minimal 5-bus feeder ──────────────────────────────

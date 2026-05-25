@@ -51,7 +51,7 @@ Struct / group & Fields and meaning & Primary consumers \\
 \texttt{ACOPFResult} & Voltage solution, generator dispatch, optional bus-level load shedding, converter operating points, convergence metrics, status text, and profiling summary. & AC OPF output \\
 \texttt{DCOPFOptions}, \texttt{DCOPFResult} & DC approximation controls, backend selector, branch-limit flag, load-shedding flag, voltage angles, generator dispatch, branch flows, load shedding, zero-filled LMP/vector dual placeholders, and solver status. & DC OPF \\
 \texttt{RPOOptions}, \texttt{RPOResult} & Reactive-power objective settings, search limits, voltage/generator before/after vectors, tap and shunt changes, loss metrics, status, and B\&C-style statistics fields reused as counters. & RPO \\
-Analysis result types & Distribution PF, resilience, reliability, time-series, and carbon headers define option/result structs, but the corresponding analysis runtime implementations are currently stubs or type-only surfaces; see Section~\ref{sec:scope-boundary}. & analysis declarations \\
+Analysis result types & Resilience, reliability (MC), short-circuit, ONR, time-series, and carbon are fully implemented.  Distribution power flow (\texttt{solve\_distribution\_power\_flow}) returns a stub result.  The three-stage MILP reliability solver is under development; see Section~\ref{sec:scope-boundary} for the current stub boundary. & analysis declarations \\
 \bottomrule
 \end{longtable}
 

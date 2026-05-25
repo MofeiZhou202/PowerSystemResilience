@@ -52,12 +52,12 @@ distinct operational phases follow every contingency:
 \end{center}
 
 This three-stage framework, formalised for hybrid AC/DC networks with
-VSC links and Soft Open Points (SOP), is implemented as a
-Mixed-Integer Linear Programme (MILP) solved by Gurobi via JuMP in
-the Julia package \texttt{DistNetReliability}
-(\texttt{julia/reliability/}).  The C++ layer in
-\texttt{src/analysis/three\_stage\_reliability.cpp} invokes the Julia
-CLI out-of-process and parses the result JSON.
+VSC links and Soft Open Points (SOP), is formulated as a
+Mixed-Integer Linear Programme (MILP).  The C++ implementation resides
+in \texttt{src/reliability/three\_stage\_reliability.cpp}; the native
+C++ MILP solver (using the HiGHS / NativeBranchAndCut infrastructure
+described in Section~\ref{sec:solver_infra}) is under development and
+the current stub returns a graceful \texttt{not yet implemented} error.
 
 % ------------------------------------------------------------
 \subsection{Nomenclature}
@@ -348,17 +348,14 @@ System-level EENS is $\mathrm{EENS} = \sum_d \mathrm{EENS}_d$.
 \begin{center}
 \begin{tikzpicture}[node distance=8mm and 12mm]
   \node[flowbox] (json)    {Case JSON\\(HybridPowerSystem)};
-  \node[flowbox,right=of json] (load)    {Julia loader\\load\_case\_json.jl};
-  \node[flowbox,right=of load] (fault)   {Fault\\generation};
-  \node[flowbox,below=of fault] (s1)     {Stage 1\\MILP};
-  \node[flowbox,left=of s1]    (s2)     {Stage 2\\MILP};
+  \node[flowbox,right=of json] (fault)   {Fault\\generation};
+  \node[flowbox,right=of fault] (s1)     {Stage 1\\MILP};
+  \node[flowbox,below=of s1]   (s2)     {Stage 2\\MILP};
   \node[flowbox,left=of s2]    (s3)     {Stage 3\\MILP};
   \node[flowbox,below=of s2]   (idx)    {Index\\computation};
-  \node[flowbox,left=of idx]   (out)    {Result JSON\\save\_results\_json.jl};
-  \node[flowbox,left=of out]   (cpp)    {C++ bridge\\parse result};
+  \node[flowbox,left=of idx]   (out)    {Result\\(C++ struct)};
 
-  \draw[flowline] (json) -- (load);
-  \draw[flowline] (load) -- (fault);
+  \draw[flowline] (json) -- (fault);
   \draw[flowline] (fault) -- (s1);
   \draw[flowline] (s1) -- (s2);
   \draw[flowline] (s2) -- (s3);
@@ -366,9 +363,13 @@ System-level EENS is $\mathrm{EENS} = \sum_d \mathrm{EENS}_d$.
   \draw[flowline] (s2) -- (idx);
   \draw[flowline] (s3) -- (idx);
   \draw[flowline] (idx) -- (out);
-  \draw[flowline] (out) -- (cpp);
 \end{tikzpicture}
 \end{center}
+
+\textit{Note: the native C++ MILP implementation is under development.
+The diagram shows the planned data flow through the C++ solver.
+The current stub in \texttt{src/reliability/three\_stage\_reliability.cpp}
+returns a graceful error without solving.}
 
 \paragraph{C++ API.}
 \begin{verbatim}
@@ -585,8 +586,14 @@ Five test cases are implemented in
 \hline
 ID & Tag & Description \\
 \hline
-TC-1 & \texttt{[smoke]}       & Symbol linkage: verifies Julia project tree is
-                                 present; runs unconditionally. \\
+TC-1 & \texttt{[smoke]}       & Symbol linkage and data files: verifies
+                                 \texttt{test\_1\_no\_sop.json},
+                                 \texttt{case33mg\_acdc.json}, and
+                                 \texttt{case33bw\_acdc.json} are present in
+                                 \texttt{tests/data/reliability/}, and that
+                                 \texttt{run\_three\_stage\_reliability\_from\_string}
+                                 links and returns a graceful error on empty
+                                 input; runs unconditionally. \\
 TC-2 & \texttt{[integration]} & \texttt{test\_1\_no\_sop.json}: 5-bus network,
                                  checks shape invariants (nb, nl, nd, metric
                                  signs, worst\_line range). \\
@@ -600,7 +607,7 @@ TC-5 & \texttt{[error]}       & Missing-file graceful error; runs
 \end{tabular}
 \end{center}
 
-TC-2, TC-3, and TC-4 require Julia + Gurobi at runtime; they are skipped
-unless the environment variable \texttt{HACDCPF\_RUN\_JULIA\_RELIABILITY=1}
-is set.  TC-1 and TC-5 always run and verify the bridge infrastructure
-independently of the solver.
+TC-2, TC-3, and TC-4 are guarded by the environment variable
+\texttt{HACDCPF\_RUN\_JULIA\_RELIABILITY=1} and are skipped unless that
+variable is set (pending the native C++ MILP solver implementation).
+TC-1 and TC-5 always run.

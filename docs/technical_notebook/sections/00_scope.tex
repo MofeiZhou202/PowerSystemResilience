@@ -48,10 +48,7 @@ Area & Current code status \\
 \midrule
 \endhead
 \texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/power\_flow/} returns a non-converged result with \texttt{status="not\_implemented"}. \\
-\texttt{run\_distribution\_resilience\_assessment} & Public facade exists, but \texttt{src/reliability/} returns \texttt{completed=false} and \texttt{status="not\_implemented"}. \\
-Reliability assessment & Headers define option/result types; no implemented public assessment solver is exposed by \texttt{hacdcpf.hpp}. \\
-Short-circuit analysis & No public \texttt{compute\_short\_circuit}, \texttt{SCOptions}, or \texttt{BusFaultResult} header exists in the current include tree. \\
-Optimal network reconfiguration & No public \texttt{solve\_optimal\_reconfiguration} header/API exists in the current include tree. \\
+Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a placeholder that returns a graceful \texttt{not yet implemented} error.  The native C++ MILP solver is under development. \\
 
 \bottomrule
 \end{longtable}
