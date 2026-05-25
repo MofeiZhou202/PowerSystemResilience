@@ -884,15 +884,39 @@ TopoReconfResult run_topology_reconfiguration(
     solved_ok = true;
     result.milp_objective = c.dot(x_sol);
   } else {
-    // The graph heuristic covers single-switch swaps which handles
-    // all practical topology reconfiguration cases.  When it fails,
-    // skip the expensive B&C MILP fallback and declare INFEASIBLE
-    // immediately — this avoids a >3 s delay per branch on large
-    // systems (e.g. case300) and sidesteps a known SIGSEGV in the
-    // cold-start simplex when reliability branching probes trigger
-    // repeated LP fallback recovery.
-    spdlog::info("[拓扑重构] 启发式未找到可行方案，声明 INFEASIBLE");
-    solved_ok = false;
+    BCOptions bc_opt;
+    bc_opt.time_limit_sec = static_cast<double>(opt.max_time_s);
+    bc_opt.gap_tol = opt.mip_gap;
+    bc_opt.cuts = CutType::MIR;
+    bc_opt.root_cut_rounds = 5;
+    bc_opt.cuts_per_round = 20;
+    bc_opt.branching = BranchingStrategy::Pseudocost;
+    bc_opt.node_sel = NodeSelection::Hybrid;
+    bc_opt.use_feasibility_pump = true;
+    bc_opt.use_simplex_lp_nodes = true;
+    bc_opt.accept_verified_warm_start_incumbent = true;
+    bc_opt.verbose = opt.verbose;
+
+    if (x_heur.size() == idx.n_vars) {
+      milp.initial_solution = x_heur;
+    }
+
+    spdlog::info("[拓扑重构] 启发式未找到可行方案，调用本地 B&C MILP fallback");
+    BCResult bc_result = solve_milp_bc(milp, bc_opt);
+    result.bc_stats = bc_result.bc_stats;
+    if (bc_result.stats.success && bc_result.x.size() >= idx.n_vars) {
+      x_sol = bc_result.x;
+      solved_ok = true;
+      result.milp_objective = bc_result.stats.objective;
+      spdlog::info("[拓扑重构] B&C fallback 成功: nodes={} gap={:.6f} obj={:.6f}",
+                   bc_result.bc_stats.nodes_explored,
+                   bc_result.bc_stats.gap,
+                   result.milp_objective);
+    } else {
+      solved_ok = false;
+      spdlog::warn("[拓扑重构] B&C fallback 未找到可行解: {}",
+                   bc_result.stats.status);
+    }
   }
 
   // -------------------------------------------------------------------

@@ -121,6 +121,7 @@ set(HACDCPF_SOURCES
   src/reliability/reliability_assessment.cpp
   src/reliability/reliability_data.cpp
   src/resilience/resilience_assessment.cpp
+  src/resilience/resilience_restoration_mip.cpp
   src/time_series/time_series_pf.cpp
   src/time_series/annual_production_sim.cpp
   src/time_series/lifecycle_simulation.cpp

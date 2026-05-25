@@ -3352,20 +3352,72 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
   }
   root["ext_grid"] = ext_grid;
   
-  // Empty arrays for components not yet implemented
+  // Rich component tables.  These are exported as structured records instead
+  // of empty placeholders so JPC JSON export preserves model data even when a
+  // downstream Julia reader only consumes the matrix-style core tables.
   root["genDC"] = json::array();
+  for (const auto& g : sys.dc.dc_static_generators) {
+    root["genDC"].push_back(dc_static_generator_to_json(g));
+  }
   root["loadAC_flex"] = json::array();
+  for (const auto& l : sys.ac.flexible_loads) {
+    root["loadAC_flex"].push_back(flexible_load_to_json(l));
+  }
   root["loadAC_asymm"] = json::array();
+  for (const auto& l : sys.ac.asymmetric_loads) {
+    root["loadAC_asymm"].push_back(asymmetric_load_to_json(l));
+  }
   root["branch3ph"] = json::array();
+  if (sys.three_phase_ac) {
+    for (const auto& l : sys.three_phase_ac->lines) {
+      root["branch3ph"].push_back(three_phase_line_to_json(l));
+    }
+  }
   root["sgenAC"] = json::array();
+  for (const auto& g : sys.ac.static_generators) {
+    root["sgenAC"].push_back(static_generator_to_json(g));
+  }
   root["sgenDC"] = json::array();
+  for (const auto& g : sys.dc.static_generators) {
+    root["sgenDC"].push_back(static_generator_to_json(g));
+  }
   root["storageetap"] = json::array();
+  for (const auto& s : sys.ac.storage) {
+    auto js = storage_to_json(s);
+    js["domain"] = "AC";
+    root["storageetap"].push_back(std::move(js));
+  }
+  for (const auto& s : sys.dc.storage) {
+    auto js = storage_to_json(s);
+    js["domain"] = "DC";
+    root["storageetap"].push_back(std::move(js));
+  }
   root["pv"] = json::array();
+  for (const auto& p : sys.dc.pv_arrays) {
+    root["pv"].push_back(pv_array_dc_to_json(p));
+  }
   root["pv_acsystem"] = json::array();
+  for (const auto& p : sys.ac.pv_systems) {
+    root["pv_acsystem"].push_back(pv_system_to_json(p));
+  }
   root["energyrouterCore"] = json::array();
   root["energyrouterConverter"] = json::array();
+  for (const auto& er : sys.energy_routers) {
+    root["energyrouterCore"].push_back(energy_router_to_json(er));
+    for (const auto& p : er.ports) {
+      json jp = er_port_to_json(p);
+      jp["energy_router_id"] = er.index;
+      root["energyrouterConverter"].push_back(std::move(jp));
+    }
+  }
   root["hvcb"] = json::array();
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    root["hvcb"].push_back(circuit_breaker_to_json(cb));
+  }
   root["microgrid"] = json::array();
+  for (const auto& m : sys.microgrids) {
+    root["microgrid"].push_back(microgrid_to_json(m));
+  }
   root["bus_name_to_id"] = json::object();
   
   // Add bus names to ID mapping

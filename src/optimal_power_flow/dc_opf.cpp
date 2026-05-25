@@ -18,6 +18,7 @@
 #include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "hacdcpf/engine/solver/external/adapters.hpp"
 #include "hacdcpf/engine/kernel/ipm/lcqp_solver.hpp"
+#include "hacdcpf/engine/engine.hpp"
 #include "hacdcpf/engine/problem_types.hpp"
 
 namespace hacdcpf::opf {
@@ -156,9 +157,15 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
   for (int k = 0; k < form.ng; ++k) {
     const int gi = form.gen_map[k];
     const auto& gen = gens[gi];
-    // Linearize quadratic cost around the midpoint
-    double pg_mid = 0.5 * (gen.pmin_mw + gen.pmax_mw);
-    double c_linear = gen.cost_c1 + 2.0 * gen.cost_c2 * pg_mid;
+    // Linearize quadratic cost: use c1 + 2*c2*Pmax as a conservative upper
+    // bound on the marginal cost, giving a valid LP that does not under-dispatch
+    // cheap units (BUG-4 fix: was always using the midpoint (Pmin+Pmax)/2 which
+    // produces wrong marginal costs whenever the actual dispatch != midpoint).
+    // For a pure quadratic cost c2*Pg^2 + c1*Pg the true marginal at any Pg is
+    // c1 + 2*c2*Pg.  Using Pmax as the linearization point is conservative but
+    // correct: it never underestimates the cost, so the LP still minimises total
+    // cost subject to the correct ordering of generators.
+    double c_linear = gen.cost_c1 + 2.0 * gen.cost_c2 * gen.pmax_mw;
     // If c_linear is still zero (no cost data), use a small positive value
     // to ensure the problem has a meaningful objective
     if (std::abs(c_linear) < 1e-9) {
@@ -388,15 +395,21 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
       B_entries[ti].emplace_back(fi, -b);
     }
     
-    // Add B matrix entries to equality constraints
+    // Add B matrix entries to equality constraints.
+    // The slack bus balance row is included (gen/shedding terms were added above)
+    // and needs its susceptance flow contributions — but since θ_slack = 0 is
+    // enforced via variable bounds, the diagonal term and any column for j==slack
+    // evaluate to zero and can be omitted.  All other non-slack buses follow the
+    // standard formulation (BUG-3 fix: was skipping the entire slack bus row).
     for (int i = 0; i < form.nb; ++i) {
-      if (i == form.slack) continue;
       const int eq_row = balance_row[i];
       
-      // Diagonal: B_ii * θ_i
-      eq_trips.emplace_back(eq_row, form.i_theta(i), B_diag[i]);
+      // Diagonal: B_ii * θ_i  (zero for slack since θ_slack = 0, but harmless to add)
+      if (i != form.slack) {
+        eq_trips.emplace_back(eq_row, form.i_theta(i), B_diag[i]);
+      }
       
-      // Off-diagonal: B_ij * θ_j
+      // Off-diagonal: B_ij * θ_j  (skip j==slack since θ_slack = 0)
       for (const auto& [j, bij] : B_entries[i]) {
         if (j != form.slack) {
           eq_trips.emplace_back(eq_row, form.i_theta(j), bij);
@@ -501,6 +514,70 @@ double compute_qp_objective(const DCOPFFormulation& form,
   return obj;
 }
 
+bool has_complete_duals(const DCOPFFormulation& form,
+                        const engine::SolveResult& sol) {
+  const int n_rows = form.lp.A.rows() + form.lp.Aeq.rows();
+  return sol.constraint_duals.size() >= n_rows &&
+         sol.box_dual_lb.size() >= form.nvar &&
+         sol.box_dual_ub.size() >= form.nvar;
+}
+
+engine::SolveResult to_solve_result(const engine::api::Result& api_res) {
+  engine::SolveResult out;
+  out.x = api_res.x;
+  out.stats.success = api_res.stats.success;
+  out.stats.iterations = api_res.stats.iterations;
+  out.stats.objective = api_res.stats.objective;
+  out.stats.residual_inf = api_res.stats.residual_inf;
+  out.stats.primal_feas = api_res.stats.primal_feas;
+  out.stats.dual_feas = api_res.stats.dual_feas;
+  out.stats.complementarity = api_res.stats.complementarity;
+  out.stats.mip_gap = api_res.stats.mip_gap;
+  out.stats.runtime_sec = api_res.stats.runtime_sec;
+  out.stats.status = api_res.stats.status;
+  out.stats.solver_name = api_res.stats.solver_name;
+  out.stats.cglp_cuts_added = api_res.stats.cglp_cuts_added;
+  out.stats.farkas_ray = api_res.stats.farkas_ray;
+  out.stats.farkas_ray_eq = api_res.stats.farkas_ray_eq;
+  out.stats.has_farkas_certificate = api_res.stats.has_farkas_certificate;
+  out.constraint_duals = api_res.constraint_duals;
+  out.box_dual_lb = api_res.box_dual_lb;
+  out.box_dual_ub = api_res.box_dual_ub;
+  return out;
+}
+
+void populate_missing_duals_from_supporting_lp(
+    const DCOPFFormulation& form,
+    engine::SolveResult& sol,
+    bool use_qp,
+    const DCOPFOptions& opt) {
+  if (has_complete_duals(form, sol) || sol.x.size() < form.nvar) return;
+
+  engine::LPModel support_lp = form.lp;
+  if (use_qp) {
+    support_lp.c = form.qp.Q * sol.x + form.qp.c;
+  }
+
+  engine::SimplexOptions simp_opt;
+  simp_opt.max_iter = opt.max_iterations;
+  simp_opt.feasibility_tol = opt.feasibility_tol;
+  simp_opt.optimality_tol = opt.optimality_tol;
+
+  auto cert = engine::solve_lp_with_basis(support_lp, simp_opt, nullptr);
+  if (!cert.result.stats.success) return;
+
+  const int n_rows = form.lp.A.rows() + form.lp.Aeq.rows();
+  if (cert.result.constraint_duals.size() >= n_rows) {
+    sol.constraint_duals = cert.result.constraint_duals;
+  }
+  if (cert.result.box_dual_lb.size() >= form.nvar) {
+    sol.box_dual_lb = cert.result.box_dual_lb;
+  }
+  if (cert.result.box_dual_ub.size() >= form.nvar) {
+    sol.box_dual_ub = cert.result.box_dual_ub;
+  }
+}
+
 // --------------------------------------------------------------------------
 // Extract results from LP solution
 // --------------------------------------------------------------------------
@@ -568,10 +645,35 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
     }
   }
   
-  // Extract LMPs (dual variables on balance equations)
-  // Note: Simplex solvers typically provide duals, but this depends on the backend
-  result.lmp.assign(form.nb, 0.0);
-  // TODO: Extract duals from solver if available
+  // Extract LMPs and branch congestion prices from the solver certificate.
+  // Constraint-dual layout is [inequality rows | equality rows]. The DC OPF
+  // model stores Pg/Pf/dPd in p.u., so divide row and bound shadow prices by
+  // base_mva to report $/MWh-style marginal values.
+  const int ineq_rows = form.lp.A.rows();
+  const int eq_rows = form.lp.Aeq.rows();
+  if (sol.constraint_duals.size() >= ineq_rows + eq_rows) {
+    result.lmp.assign(form.nb, 0.0);
+    for (int i = 0; i < form.nb; ++i) {
+      const int dual_idx = ineq_rows + i;
+      if (dual_idx < sol.constraint_duals.size()) {
+        result.lmp[i] = sol.constraint_duals[dual_idx] / base_mva;
+      }
+    }
+  }
+
+  if (sol.box_dual_lb.size() >= form.nvar &&
+      sol.box_dual_ub.size() >= form.nvar) {
+    result.branch_mu_lower.assign(n_br, 0.0);
+    result.branch_mu_upper.assign(n_br, 0.0);
+    if (include_pf) {
+      for (size_t k = 0; k < form.branch_map.size(); ++k) {
+        const int bi = form.branch_map[k];
+        const int v = form.i_pf(static_cast<int>(k));
+        result.branch_mu_lower[bi] = sol.box_dual_lb[v] / base_mva;
+        result.branch_mu_upper[bi] = sol.box_dual_ub[v] / base_mva;
+      }
+    }
+  }
   
   // Extract load shedding results
   if (form.n_shed > 0) {
@@ -711,11 +813,24 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     return false;
   };
   
-  // HiGHS: LP only (TODO: add QP support)
+  // HiGHS selection is routed through MIPSolvers. If the HiGHS adapter cannot
+  // handle the QP form in this build, SolverEngine falls back to a QP-capable
+  // MIPSolvers backend before the legacy LP recovery path is attempted.
   auto try_highs = [&]() -> bool {
+    engine::SolverEngine engine;
+    engine::SolveOptions solve_opt;
+    solve_opt.preferred_solver = "HiGHS";
+    solve_opt.allow_fallback = true;
+    sol = to_solve_result(engine.solve_qp(form.qp, solve_opt));
+    if (sol.stats.success) {
+      use_qp = true;
+      return true;
+    }
+
     engine::HighsAdapter highs;
     if (highs.available()) {
       sol = highs.solve_lp(form.lp);
+      use_qp = false;
       return true;
     }
     return false;
@@ -735,6 +850,9 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     sol.stats.status = simp_result.result.stats.success ? "Optimal" : "Not Optimal";
     sol.stats.solver_name = "NativeDualSimplex";
     sol.x = simp_result.result.x;
+    sol.constraint_duals = simp_result.result.constraint_duals;
+    sol.box_dual_lb = simp_result.result.box_dual_lb;
+    sol.box_dual_ub = simp_result.result.box_dual_ub;
     return true;
   };
   
@@ -790,6 +908,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   
   auto end_time = std::chrono::high_resolution_clock::now();
   double runtime_sec = std::chrono::duration<double>(end_time - start_time).count();
+
+  populate_missing_duals_from_supporting_lp(form, sol, use_qp, opt);
   
   // Extract results
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);

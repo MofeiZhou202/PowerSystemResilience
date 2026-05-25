@@ -1105,13 +1105,6 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys) {
   }
 }
 
-/// MIP stub: falls back to the heuristic sequential model.
-DistributionResilienceResult run_distribution_resilience_mip_assessment(
-    const HybridPowerSystem& sys,
-    const DistributionResilienceOptions& opts) {
-  return hacdcpf::analysis::run_distribution_resilience_assessment(sys, opts);
-}
-
 /// Run the multi-hour distribution resilience assessment.
 ///
 /// Algorithm overview:

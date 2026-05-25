@@ -232,13 +232,7 @@ The following items are present in the public API but have documented implementa
 
 | Area | Status |
 |---|---|
-| `solve_distribution_power_flow` | **Stub.** Returns `status="not_implemented"`. The backward/forward sweep solver is not yet implemented. |
-| FMEA options (`enable_microgrid_islanding`, `enable_switch_reconfiguration`, `enable_repair_reconfiguration`, `enable_storage_dispatch`, `enable_grid_forming_vsc_support`, `enable_black_start_storage`) | **Option/contract mismatch.** All six default to `true` in the header but are marked `TODO(unimplemented)` in the source. |
-| `run_distribution_resilience_mip_assessment` | **MIP stub.** Delegates to the heuristic sequential model. No true MIP restoration is solved. |
-| Network reconfiguration MILP fallback | **Disabled.** The B&C MILP fallback is skipped when the greedy heuristic fails; infeasibility is declared immediately. |
-| DC OPF LMPs | **Not extracted.** `lmp` arrays are filled with zeros. Dual extraction is a TODO in `dc_opf.cpp`. |
-| HiGHS in DC OPF | **LP only.** QP support is a TODO; the quadratic cost model is not used via HiGHS. |
-| JPC JSON rich tables | **Empty on export.** `genDC`, `loadAC_flex`, `branch3ph`, `sgenAC`, `pv`, `storageetap`, `microgrid`, and related tables are written as empty arrays. |
+| AC OPF fallback path | Fast economic-dispatch plus AC-PF fallback can return `converged` for AC-only recovery; hybrid DC/converter subsystems ignored by that path are noted in the status string. |
 
 ---
 

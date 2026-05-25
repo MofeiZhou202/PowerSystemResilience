@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numeric>
 #include <random>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -35,10 +37,16 @@ double compute_unavailability_lambda(double lambda_per_yr, double repair_hr) {
 }
 
 // Hash function for state vectors (for state deduplication)
+// Uses a position-sensitive FNV-style contribution so that components at
+// positions i and i+64 produce distinct hash values (avoids BUG-1 collision).
 size_t hash_state(const std::vector<bool>& state) {
   size_t h = 0;
   for (size_t i = 0; i < state.size(); ++i) {
-    if (state[i]) h ^= (size_t(1) << (i % 64)) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    if (state[i]) {
+      // Mix the position index into the contribution so each slot is unique.
+      size_t val = (i + 1) * 2654435761ULL ^ 0x9e3779b97f4a7c15ULL;
+      h ^= val + 0x9e3779b9 + (h << 6) + (h >> 2);
+    }
   }
   return h;
 }
@@ -573,8 +581,18 @@ ReliabilityResult run_nonsequential_mc(
       double importance = comp_fail_count[c] / total_loss_samples;
       if (importance > 0.01) {
         ReliabilityResult::ComponentImportance ci;
-        ci.index = static_cast<int>(c < co.ng ? c : c - co.off_br);
-        ci.is_generator = (c < co.ng);
+        // Compute within-type index based on the component's section in the
+        // flat state vector (BUG-2 fix: was always using c - co.off_br).
+        if      (c < co.off_br)  { ci.index = static_cast<int>(c - co.off_gen); }
+        else if (c < co.off_sg)  { ci.index = static_cast<int>(c - co.off_br);  }
+        else if (c < co.off_rg)  { ci.index = static_cast<int>(c - co.off_sg);  }
+        else if (c < co.off_st)  { ci.index = static_cast<int>(c - co.off_rg);  }
+        else if (c < co.off_vsc) { ci.index = static_cast<int>(c - co.off_st);  }
+        else if (c < co.off_db)  { ci.index = static_cast<int>(c - co.off_vsc); }
+        else if (c < co.off_t2)  { ci.index = static_cast<int>(c - co.off_db);  }
+        else if (c < co.off_t3)  { ci.index = static_cast<int>(c - co.off_t2);  }
+        else                     { ci.index = static_cast<int>(c - co.off_t3);  }
+        ci.is_generator = (c < co.off_br);
         ci.importance = importance;
         result.critical_components.push_back(ci);
       }
@@ -879,8 +897,18 @@ ReliabilityResult run_sequential_mc(
       double importance = comp_fail_during_loss[c] / total_loss_hours;
       if (importance > 0.01) {
         ReliabilityResult::ComponentImportance ci;
-        ci.index = static_cast<int>(c < co.ng ? c : c - co.off_br);
-        ci.is_generator = (c < co.ng);
+        // Compute within-type index based on the component's section in the
+        // flat state vector (BUG-2 fix: was always using c - co.off_br).
+        if      (c < co.off_br)  { ci.index = static_cast<int>(c - co.off_gen); }
+        else if (c < co.off_sg)  { ci.index = static_cast<int>(c - co.off_br);  }
+        else if (c < co.off_rg)  { ci.index = static_cast<int>(c - co.off_sg);  }
+        else if (c < co.off_st)  { ci.index = static_cast<int>(c - co.off_rg);  }
+        else if (c < co.off_vsc) { ci.index = static_cast<int>(c - co.off_st);  }
+        else if (c < co.off_db)  { ci.index = static_cast<int>(c - co.off_vsc); }
+        else if (c < co.off_t2)  { ci.index = static_cast<int>(c - co.off_db);  }
+        else if (c < co.off_t3)  { ci.index = static_cast<int>(c - co.off_t2);  }
+        else                     { ci.index = static_cast<int>(c - co.off_t3);  }
+        ci.is_generator = (c < co.off_br);
         ci.importance = importance;
         result.critical_components.push_back(ci);
       }
@@ -1195,6 +1223,33 @@ struct FMEAComponent {
   double tau_rep_hr;    // Repair duration (hours)
 };
 
+std::string fmea_component_type_name(FMEAComponent::Type type) {
+  switch (type) {
+    case FMEAComponent::Generator:     return "generator";
+    case FMEAComponent::ACBranch:      return "ac_branch";
+    case FMEAComponent::DCBranch:      return "dc_branch";
+    case FMEAComponent::VSCConverter:  return "vsc_converter";
+    case FMEAComponent::StaticGen:     return "static_generator";
+    case FMEAComponent::RenewableGen:  return "renewable_gen";
+    case FMEAComponent::Storage:       return "storage";
+    case FMEAComponent::Transformer2W: return "transformer_2w";
+    case FMEAComponent::Transformer3W: return "transformer_3w";
+  }
+  return "unknown";
+}
+
+std::string switch_type_name(SwitchType type) {
+  switch (type) {
+    case SwitchType::CircuitBreaker: return "circuit_breaker";
+    case SwitchType::Disconnector: return "disconnector";
+    case SwitchType::LoadBreakSwitch: return "load_break_switch";
+    case SwitchType::Fuse: return "fuse";
+    case SwitchType::Recloser: return "recloser";
+    case SwitchType::Sectionalizer: return "sectionalizer";
+  }
+  return "switch";
+}
+
 // Build the component catalog from the system.
 std::vector<FMEAComponent> build_fmea_catalog(
     const HybridPowerSystem& sys,
@@ -1392,67 +1447,392 @@ std::vector<FMEAComponent> build_fmea_catalog(
   return catalog;
 }
 
-// Evaluate a single contingency (one component out) for a given stage
-// by running DC-OPF with load shedding.
-StateEvalResult evaluate_contingency_stage(
-    const HybridPowerSystem& sys,
-    const FMEAComponent& comp,
-    const opf::DCOPFOptions& opf_opt,
-    double load_scale) {
-  
-  HybridPowerSystem sys_copy = sys;
-  
-  // Apply load scaling
-  if (std::abs(load_scale - 1.0) > 1e-9) {
-    for (auto& bus : sys_copy.ac.buses) {
-      bus.pd_mw *= load_scale;
-      bus.qd_mvar *= load_scale;
-    }
-    for (auto& ld : sys_copy.ac.loads) {
-      ld.p_mw *= load_scale;
-      ld.q_mvar *= load_scale;
-    }
-  }
-  
-  // Take the failed component out of service
+struct FMEAStageEval {
+  StateEvalResult eval;
+  std::vector<FMEAContingencyDetail::SwitchActionDetail> switch_actions;
+};
+
+void apply_fmea_component_outage(HybridPowerSystem& sys, const FMEAComponent& comp) {
   switch (comp.type) {
     case FMEAComponent::Generator:
-      sys_copy.ac.generators[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.generators.size()))
+        sys.ac.generators[comp.idx].in_service = false;
       break;
     case FMEAComponent::ACBranch:
-      sys_copy.ac.branches[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.branches.size()))
+        sys.ac.branches[comp.idx].in_service = false;
       break;
     case FMEAComponent::DCBranch:
-      sys_copy.dc.branches[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.branches.size()))
+        sys.dc.branches[comp.idx].in_service = false;
       break;
     case FMEAComponent::VSCConverter:
-      sys_copy.vsc_converters[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.vsc_converters.size()))
+        sys.vsc_converters[comp.idx].in_service = false;
       break;
     case FMEAComponent::StaticGen:
-      sys_copy.ac.static_generators[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.static_generators.size()))
+        sys.ac.static_generators[comp.idx].in_service = false;
       break;
     case FMEAComponent::RenewableGen:
-      sys_copy.ac.renewable_gens[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.renewable_gens.size()))
+        sys.ac.renewable_gens[comp.idx].in_service = false;
       break;
     case FMEAComponent::Storage:
-      sys_copy.ac.storage[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.storage.size()))
+        sys.ac.storage[comp.idx].in_service = false;
       break;
     case FMEAComponent::Transformer2W:
-      sys_copy.ac.transformers_2w[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.transformers_2w.size()))
+        sys.ac.transformers_2w[comp.idx].in_service = false;
       break;
     case FMEAComponent::Transformer3W:
-      sys_copy.ac.transformers_3w[comp.idx].in_service = false;
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.transformers_3w.size()))
+        sys.ac.transformers_3w[comp.idx].in_service = false;
       break;
   }
+}
+
+void scale_fmea_loads(HybridPowerSystem& sys, double load_scale) {
+  if (std::abs(load_scale - 1.0) <= 1e-9) return;
+  for (auto& bus : sys.ac.buses) {
+    bus.pd_mw *= load_scale;
+    bus.qd_mvar *= load_scale;
+  }
+  for (auto& ld : sys.ac.loads) {
+    ld.p_mw *= load_scale;
+    ld.q_mvar *= load_scale;
+  }
+  for (auto& ld : sys.dc.loads) {
+    ld.p_mw *= load_scale;
+  }
+}
+
+double storage_available_mw(const Storage& st, double stage_duration_hr) {
+  const double p_rating = st.pmax_mw > 0.0 ? st.pmax_mw : st.p_rated_mw;
+  const double e_now = st.e_mwh > 0.0 ? st.e_mwh : st.e_rated_mwh * st.soc_init;
+  const double e_min = st.e_rated_mwh > 0.0 ? st.e_rated_mwh * st.soc_min : 0.0;
+  const double usable = std::max(0.0, e_now - e_min) * std::max(1e-6, st.eta_discharge);
+  const double energy_limited = usable / std::max(stage_duration_hr, 1e-6);
+  return std::max(0.0, std::min(p_rating, energy_limited));
+}
+
+int next_generator_index(const HybridPowerSystem& sys) {
+  int next = 1;
+  for (const auto& g : sys.ac.generators) next = std::max(next, g.index + 1);
+  return next;
+}
+
+bool bus_in_microgrid(const HybridPowerSystem& sys, int bus) {
+  for (const auto& mg : sys.microgrids) {
+    if (!mg.in_service || !mg.islanding_capability) continue;
+    if (mg.pcc_bus == bus) return true;
+    if (std::find(mg.internal_buses.begin(), mg.internal_buses.end(), bus) !=
+        mg.internal_buses.end()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void add_emergency_generator(
+    HybridPowerSystem& sys,
+    int bus,
+    double pmax_mw,
+    const std::string& name,
+    int& next_index,
+    double marginal_cost) {
+  if (bus <= 0 || pmax_mw <= 1e-9) return;
+  Generator g;
+  g.index = next_index++;
+  g.bus = bus;
+  g.in_service = true;
+  g.name = name;
+  g.pg_mw = 0.0;
+  g.pmin_mw = 0.0;
+  g.pmax_mw = pmax_mw;
+  g.qmin_mvar = -pmax_mw;
+  g.qmax_mvar = pmax_mw;
+  g.cost_c1 = marginal_cost;
+  g.cost_c2 = 0.0;
+  g.is_slack = false;
+  sys.ac.generators.push_back(std::move(g));
+}
+
+void mark_island_anchor(HybridPowerSystem& sys, int bus, int index, const std::string& name) {
+  if (bus <= 0) return;
+  for (auto& b : sys.ac.buses) {
+    if (b.index == bus) {
+      b.bus_type = BusType::SLACK;
+      break;
+    }
+  }
+  ExternalGrid eg;
+  eg.index = index;
+  eg.bus = bus;
+  eg.in_service = true;
+  eg.name = name;
+  eg.vm_pu = 1.0;
+  eg.va_deg = 0.0;
+  sys.ac.external_grids.push_back(std::move(eg));
+}
+
+int next_external_grid_index(const HybridPowerSystem& sys) {
+  int next = 1;
+  for (const auto& eg : sys.ac.external_grids) next = std::max(next, eg.index + 1);
+  return next;
+}
+
+double total_positive_ac_load_mw(const HybridPowerSystem& sys) {
+  double demand = 0.0;
+  for (const auto& b : sys.ac.buses) demand += std::max(0.0, b.pd_mw);
+  for (const auto& ld : sys.ac.loads) {
+    if (ld.in_service) demand += std::max(0.0, ld.p_mw * ld.scaling);
+  }
+  return demand;
+}
+
+void add_external_grid_dispatch_sources(HybridPowerSystem& sys, double marginal_cost) {
+  int next_gen = next_generator_index(sys);
+  const double demand = total_positive_ac_load_mw(sys);
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service || eg.bus <= 0) continue;
+    double pmax = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : std::max(1000.0, demand * 2.0);
+    if (pmax <= 1e-9) pmax = 1000.0;
+    Generator g;
+    g.index = next_gen++;
+    g.bus = eg.bus;
+    g.in_service = true;
+    g.name = eg.name.empty() ? "FMEA_external_grid_" + std::to_string(eg.index)
+                             : "FMEA_" + eg.name;
+    g.pg_mw = 0.0;
+    g.pmin_mw = 0.0;
+    g.pmax_mw = pmax;
+    g.qmin_mvar = -pmax;
+    g.qmax_mvar = pmax;
+    g.cost_c1 = marginal_cost;
+    g.is_slack = true;
+    sys.ac.generators.push_back(std::move(g));
+  }
+}
+
+void apply_fmea_support_sources(
+    HybridPowerSystem& sys,
+    const FMEAOptions& options,
+    double stage_duration_hr,
+    bool repair_stage) {
+  int next_gen = next_generator_index(sys);
+  int next_eg = next_external_grid_index(sys);
+  const double support_cost = std::max(1.0, options.voll * 0.01);
+
+  if (options.enable_storage_dispatch) {
+    for (auto& st : sys.ac.storage) {
+      if (!st.in_service || !st.controllable) continue;
+      const double p = storage_available_mw(st, stage_duration_hr);
+      if (p <= 1e-9) continue;
+      st.p_mw = std::max(st.p_mw, p);
+      const bool black_start_ok = options.enable_black_start_storage &&
+                                  st.grid_forming &&
+                                  bus_in_microgrid(sys, st.bus);
+      if (black_start_ok) {
+        add_emergency_generator(
+            sys, st.bus, p, "FMEA_black_start_storage_" + std::to_string(st.index),
+            next_gen, support_cost);
+        mark_island_anchor(
+            sys, st.bus, next_eg++,
+            "FMEA_black_start_storage_grid_" + std::to_string(st.index));
+      }
+    }
+  }
+
+  if (repair_stage && options.enable_repair_reconfiguration) {
+    for (auto& sg : sys.ac.static_generators) {
+      if (!sg.in_service || !sg.controllable) continue;
+      double p = sg.pmax_mw > 0.0 ? sg.pmax_mw : sg.p_rated_mw;
+      if (p <= 1e-9) continue;
+      sg.p_mw = 0.0;
+      add_emergency_generator(
+          sys, sg.bus, p, "FMEA_controllable_sgen_" + std::to_string(sg.index),
+          next_gen, support_cost);
+    }
+  }
+
+  if (options.enable_grid_forming_vsc_support) {
+    for (const auto& vsc : sys.vsc_converters) {
+      if (!vsc.in_service || !vsc.grid_forming) continue;
+      double p = vsc.pmax_mw > 0.0 ? vsc.pmax_mw : vsc.p_rated_mw;
+      if (p <= 1e-9 && std::abs(vsc.p_set_mw) > 1e-9) p = std::abs(vsc.p_set_mw);
+      add_emergency_generator(
+          sys, vsc.bus_ac, p, "FMEA_grid_forming_vsc_" + std::to_string(vsc.index),
+          next_gen, support_cost);
+      mark_island_anchor(
+          sys, vsc.bus_ac, next_eg++,
+          "FMEA_grid_forming_vsc_grid_" + std::to_string(vsc.index));
+    }
+  }
+
+  if (options.enable_microgrid_islanding) {
+    for (const auto& mg : sys.microgrids) {
+      if (!mg.in_service || !mg.islanding_capability) continue;
+      double p = mg.capacity_mw;
+      if (p <= 1e-9) p = mg.total_generation_mw;
+      if (p <= 1e-9) p = mg.total_dg_capacity_mw + mg.total_diesel_capacity_mw;
+      if (p <= 1e-9) p = mg.p_exchange_max_mw;
+      add_emergency_generator(
+          sys, mg.pcc_bus, p, "FMEA_microgrid_" + std::to_string(mg.index),
+          next_gen, support_cost);
+      mark_island_anchor(
+          sys, mg.pcc_bus, next_eg++,
+          "FMEA_microgrid_grid_" + std::to_string(mg.index));
+    }
+  }
+}
+
+std::vector<int> repair_switch_candidates(const HybridPowerSystem& sys) {
+  std::vector<int> candidates;
+  for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    if (!sw.in_service || sw.closed) continue;
+    if (!sw.is_automated && sw.t_operation_s <= 0.0) continue;
+    candidates.push_back(i);
+  }
+  return candidates;
+}
+
+std::vector<int> repair_branch_candidates(const HybridPowerSystem& sys) {
+  std::vector<int> candidates;
+  for (int i = 0; i < static_cast<int>(sys.ac.branches.size()); ++i) {
+    const auto& br = sys.ac.branches[i];
+    if (br.in_service) continue;
+    candidates.push_back(i);
+  }
+  return candidates;
+}
+
+void close_repair_actions(HybridPowerSystem& sys,
+                          const std::vector<int>& switch_indices,
+                          const std::vector<int>& branch_indices) {
+  for (int i : switch_indices) {
+    if (i >= 0 && i < static_cast<int>(sys.ac.switches.size())) {
+      sys.ac.switches[i].closed = true;
+      sys.ac.switches[i].in_service = true;
+    }
+  }
+  for (int i : branch_indices) {
+    if (i >= 0 && i < static_cast<int>(sys.ac.branches.size())) {
+      sys.ac.branches[i].in_service = true;
+    }
+  }
+}
+
+std::vector<FMEAContingencyDetail::SwitchActionDetail> describe_repair_actions(
+    const HybridPowerSystem& sys,
+    const std::vector<int>& switch_indices,
+    const std::vector<int>& branch_indices) {
+  std::vector<FMEAContingencyDetail::SwitchActionDetail> out;
+  out.reserve(switch_indices.size() + branch_indices.size());
+  for (int i : switch_indices) {
+    if (i < 0 || i >= static_cast<int>(sys.ac.switches.size())) continue;
+    const auto& sw = sys.ac.switches[i];
+    FMEAContingencyDetail::SwitchActionDetail a;
+    a.switch_index = i;
+    a.switch_name = sw.name.empty() ? "switch_" + std::to_string(sw.index) : sw.name;
+    a.switch_type = switch_type_name(sw.switch_type);
+    a.action = "close";
+    a.bus_from = sw.bus_from;
+    a.bus_to = sw.bus_to;
+    out.push_back(std::move(a));
+  }
+  for (int i : branch_indices) {
+    if (i < 0 || i >= static_cast<int>(sys.ac.branches.size())) continue;
+    const auto& br = sys.ac.branches[i];
+    FMEAContingencyDetail::SwitchActionDetail a;
+    a.switch_index = i;
+    a.switch_name = br.name.empty() ? "branch_" + std::to_string(br.index) : br.name;
+    a.switch_type = "normally_open_branch";
+    a.action = "close";
+    a.bus_from = br.from_bus;
+    a.bus_to = br.to_bus;
+    out.push_back(std::move(a));
+  }
+  return out;
+}
+
+StateEvalResult evaluate_prepared_fmea_system(
+    const HybridPowerSystem& sys,
+    const opf::DCOPFOptions& opf_opt) {
+  std::vector<bool> no_failures(ComponentOffsets(sys).total, false);
+  return evaluate_state(sys, no_failures, opf_opt, 1.0);
+}
+
+FMEAStageEval evaluate_contingency_stage(
+    const HybridPowerSystem& sys,
+    const FMEAComponent& comp,
+    const FMEAOptions& options,
+    const opf::DCOPFOptions& opf_opt,
+    double stage_duration_hr,
+    bool repair_stage) {
   
-  // Solve DC-OPF with load shedding
-  auto opf_result = opf::solve_dc_opf(sys_copy, opf_opt);
-  
-  StateEvalResult result;
-  result.curtailment_mw = opf_result.total_load_shedding_mw;
-  result.nodal_curtailment_mw = opf_result.load_shedding_mw;
-  result.is_loss_state = (result.curtailment_mw > 0.01);
-  return result;
+  HybridPowerSystem sys_copy = sys;
+  scale_fmea_loads(sys_copy, options.load_scale_factor);
+  apply_fmea_component_outage(sys_copy, comp);
+  add_external_grid_dispatch_sources(sys_copy, 1.0);
+  apply_fmea_support_sources(sys_copy, options, stage_duration_hr, repair_stage);
+
+  FMEAStageEval best;
+  best.eval = evaluate_prepared_fmea_system(sys_copy, opf_opt);
+
+  if (!repair_stage || !options.enable_switch_reconfiguration ||
+      options.max_repair_switch_actions <= 0) {
+    return best;
+  }
+
+  std::vector<int> switch_candidates = repair_switch_candidates(sys_copy);
+  std::vector<int> branch_candidates = repair_branch_candidates(sys_copy);
+  if (comp.type == FMEAComponent::ACBranch) {
+    branch_candidates.erase(
+        std::remove(branch_candidates.begin(), branch_candidates.end(), comp.idx),
+        branch_candidates.end());
+  }
+  const int max_actions = std::max(0, options.max_repair_switch_actions);
+
+  auto try_candidate = [&](const std::vector<int>& switches,
+                           const std::vector<int>& branches) {
+    HybridPowerSystem cand = sys_copy;
+    close_repair_actions(cand, switches, branches);
+    StateEvalResult ev = evaluate_prepared_fmea_system(cand, opf_opt);
+    if (ev.curtailment_mw + 1e-9 < best.eval.curtailment_mw) {
+      best.eval = std::move(ev);
+      best.switch_actions = describe_repair_actions(sys_copy, switches, branches);
+    }
+  };
+
+  for (int s : switch_candidates) {
+    try_candidate({s}, {});
+  }
+  for (int b : branch_candidates) {
+    try_candidate({}, {b});
+  }
+
+  if (max_actions >= 2) {
+    for (size_t i = 0; i < switch_candidates.size(); ++i) {
+      for (size_t j = i + 1; j < switch_candidates.size(); ++j) {
+        try_candidate({switch_candidates[i], switch_candidates[j]}, {});
+      }
+    }
+    for (int s : switch_candidates) {
+      for (int b : branch_candidates) {
+        try_candidate({s}, {b});
+      }
+    }
+    for (size_t i = 0; i < branch_candidates.size(); ++i) {
+      for (size_t j = i + 1; j < branch_candidates.size(); ++j) {
+        try_candidate({}, {branch_candidates[i], branch_candidates[j]});
+      }
+    }
+  }
+
+  return best;
 }
 
 }  // anonymous namespace
@@ -1481,14 +1861,6 @@ FMEAResult run_distribution_fmea(
   opf_opt.load_shedding = true;
   opf_opt.verbose = false;
 
-  // TODO(unimplemented): options.enable_microgrid_islanding — islands not formed
-  // TODO(unimplemented): options.enable_switch_reconfiguration — no network switching
-  // TODO(unimplemented): options.enable_repair_reconfiguration — repair stage reuses switching OPF result
-  // TODO(unimplemented): options.enable_storage_dispatch — storage not dispatched during contingency
-  // TODO(unimplemented): options.enable_grid_forming_vsc_support — VSC grid-forming not modelled
-  // TODO(unimplemented): options.enable_black_start_storage — black-start capability not modelled
-  // Currently the repair stage is identical to the switching stage (same topology, same OPF result).
-
   // Accumulators for SAIFI/SAIDI
   std::vector<double> nodal_cif(nb, 0.0);  // per-bus interruption frequency
   std::vector<double> nodal_cid(nb, 0.0);  // per-bus interruption duration
@@ -1507,35 +1879,24 @@ FMEAResult run_distribution_fmea(
     detail.failure_rate = comp.lambda;
     detail.tau_sw_hr = comp.tau_sw_hr;
     detail.tau_rep_hr = comp.tau_rep_hr;
-
-    switch (comp.type) {
-      case FMEAComponent::Generator:    detail.component_type = "generator"; break;
-      case FMEAComponent::ACBranch:     detail.component_type = "ac_branch"; break;
-      case FMEAComponent::DCBranch:     detail.component_type = "dc_branch"; break;
-      case FMEAComponent::VSCConverter: detail.component_type = "vsc_converter"; break;
-      case FMEAComponent::StaticGen:    detail.component_type = "static_generator"; break;
-      case FMEAComponent::RenewableGen: detail.component_type = "renewable_gen"; break;
-      case FMEAComponent::Storage:      detail.component_type = "storage"; break;
-      case FMEAComponent::Transformer2W: detail.component_type = "transformer_2w"; break;
-      case FMEAComponent::Transformer3W: detail.component_type = "transformer_3w"; break;
-    }
+    detail.component_type = fmea_component_type_name(comp.type);
 
     // 鈹€鈹€ Switching stage 鈹€鈹€
     auto eval_sw = evaluate_contingency_stage(
-        sys, comp, opf_opt, options.load_scale_factor);
-    detail.shed_sw_mw = eval_sw.curtailment_mw;
-    detail.ens_sw_mwh = eval_sw.curtailment_mw * comp.tau_sw_hr;
-    detail.causes_loss_sw = eval_sw.is_loss_state;
-    detail.nodal_shed_sw_mw = eval_sw.nodal_curtailment_mw;
+        sys, comp, options, opf_opt, comp.tau_sw_hr, false);
+    detail.shed_sw_mw = eval_sw.eval.curtailment_mw;
+    detail.ens_sw_mwh = eval_sw.eval.curtailment_mw * comp.tau_sw_hr;
+    detail.causes_loss_sw = eval_sw.eval.is_loss_state;
+    detail.nodal_shed_sw_mw = eval_sw.eval.nodal_curtailment_mw;
 
     // 鈹€鈹€ Repair stage 鈹€鈹€
-    // Same topology (component still out), same evaluation
-    // We reuse the same OPF result since the topology is unchanged in both
-    // stages; the only difference is the duration multiplied to get ENS.
-    detail.shed_rep_mw = eval_sw.curtailment_mw;
-    detail.ens_rep_mwh = eval_sw.curtailment_mw * comp.tau_rep_hr;
-    detail.causes_loss_rep = eval_sw.is_loss_state;
-    detail.nodal_shed_rep_mw = eval_sw.nodal_curtailment_mw;
+    auto eval_rep = evaluate_contingency_stage(
+        sys, comp, options, opf_opt, comp.tau_rep_hr, true);
+    detail.shed_rep_mw = eval_rep.eval.curtailment_mw;
+    detail.ens_rep_mwh = eval_rep.eval.curtailment_mw * comp.tau_rep_hr;
+    detail.causes_loss_rep = eval_rep.eval.is_loss_state;
+    detail.nodal_shed_rep_mw = eval_rep.eval.nodal_curtailment_mw;
+    detail.repair_switch_actions = std::move(eval_rep.switch_actions);
 
     // 鈹€鈹€ Frequency-weighted contributions 鈹€鈹€
     double total_ens = detail.ens_sw_mwh + detail.ens_rep_mwh;
@@ -1555,17 +1916,32 @@ FMEAResult run_distribution_fmea(
     }
 
     // 鈹€鈹€ Nodal EENS accumulation 鈹€鈹€
-    for (size_t b = 0; b < nb && b < eval_sw.nodal_curtailment_mw.size(); ++b) {
-      double nodal_ens = eval_sw.nodal_curtailment_mw[b] *
-                          (comp.tau_sw_hr + comp.tau_rep_hr);
+    for (size_t b = 0; b < nb; ++b) {
+      double shed_sw = b < detail.nodal_shed_sw_mw.size()
+                           ? detail.nodal_shed_sw_mw[b]
+                           : 0.0;
+      double shed_rep = b < detail.nodal_shed_rep_mw.size()
+                            ? detail.nodal_shed_rep_mw[b]
+                            : 0.0;
+      double nodal_ens = shed_sw * comp.tau_sw_hr + shed_rep * comp.tau_rep_hr;
       result.nodal_eens_mwh_yr[b] += comp.lambda * nodal_ens;
     }
 
     // 鈹€鈹€ Nodal CIF / CID for SAIFI/SAIDI 鈹€鈹€
-    for (size_t b = 0; b < nb && b < eval_sw.nodal_curtailment_mw.size(); ++b) {
-      if (eval_sw.nodal_curtailment_mw[b] > 0.01) {
+    for (size_t b = 0; b < nb; ++b) {
+      bool bus_loss = false;
+      double duration = 0.0;
+      if (b < detail.nodal_shed_sw_mw.size() && detail.nodal_shed_sw_mw[b] > 0.01) {
+        bus_loss = true;
+        duration += comp.tau_sw_hr;
+      }
+      if (b < detail.nodal_shed_rep_mw.size() && detail.nodal_shed_rep_mw[b] > 0.01) {
+        bus_loss = true;
+        duration += comp.tau_rep_hr;
+      }
+      if (bus_loss) {
         nodal_cif[b] += comp.lambda;
-        nodal_cid[b] += comp.lambda * (comp.tau_sw_hr + comp.tau_rep_hr);
+        nodal_cid[b] += comp.lambda * duration;
       }
     }
 
@@ -1573,7 +1949,7 @@ FMEAResult run_distribution_fmea(
     
     if (options.verbose) {
       spdlog::info("FMEA: {} -> shed={:.2f} MW, EENS_contrib={:.2f} MWh/yr",
-                   comp.name, eval_sw.curtailment_mw, detail.eens_contribution);
+                   comp.name, detail.shed_rep_mw, detail.eens_contribution);
     }
   }
 #if defined(__GNUC__) && !defined(__clang__)

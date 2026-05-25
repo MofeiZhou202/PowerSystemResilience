@@ -3,12 +3,9 @@
 // =============================================================================
 // three_stage_reliability.hpp
 //
-// C++ bridge for the Julia-implemented three-stage MILP fault-recovery
-// reliability evaluator under julia/reliability/.  The Julia engine is invoked
-// out-of-process via its CLI; data is exchanged through JSON files following
-// the schemas in:
-//   - julia/reliability/src/load_case_json.jl    (input case)
-//   - julia/reliability/src/save_results_json.jl (output result)
+// Native C++ three-stage MILP fault-recovery reliability evaluator.  The
+// implementation reads the existing HybridPowerSystem JSON schema and solves
+// each staged load-restoration subproblem with the embedded MIPSolvers backend.
 //
 // Three-stage framework (per IEEE Std 1366-2012 / Chinese DL/T 836):
 //   Stage 1  [0, τ_SW]:        Fault isolation   — protect healthy zones
@@ -17,13 +14,7 @@
 //   Stage 3  [τ_TP, τ_RP]:     Post-repair reconfig — re-optimise topology
 //                              after the faulted component is repaired
 //
-// Runtime requirements (validated lazily):
-//   * `julia` available on PATH (or pass an explicit path via options),
-//   * `julia/reliability/Project.toml` resolved (Pkg.instantiate already run),
-//   * Gurobi solver reachable from the Julia environment.
-//
-// This bridge is intentionally a thin wrapper — it does not duplicate the
-// optimisation model in C++.
+// No Julia runtime is required.
 // =============================================================================
 
 #include <filesystem>
@@ -86,40 +77,36 @@ struct ThreeStageReliabilityResult {
   // SOP configuration (empty when nl_sop == 0).
   std::vector<ThreeStageSopConfig> sop_config;
 
-  // Network counts as reported by the Julia loader.
+  // Network counts reported by the native loader.
   int nb{0},    nb_ac{0},  nb_dc{0};
   int nl{0},    nl_ac{0},  nl_dc{0};
   int nl_vsc{0}, nl_sop{0};
   int nd{0},    ng{0},     nmg{0};
 
-  /// Path to the result JSON written by the Julia engine. Populated when
-  /// ``ThreeStageReliabilityOptions::keep_workdir`` is true (or when a custom
-  /// workdir is provided), otherwise empty.
+  /// Reserved for backward compatibility with the historical process bridge.
   std::filesystem::path result_json_path;
 };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
 
-/// Options controlling how the Julia engine is invoked.
+/// Backward-compatible options. The native C++ implementation ignores the
+/// former Julia process-launch fields.
 struct ThreeStageReliabilityOptions {
-  /// Path to the `julia` executable. When empty, "julia" is looked up on PATH.
+  /// Deprecated: ignored by the native C++ implementation.
   std::filesystem::path julia_executable;
 
-  /// Path to the Julia project directory containing Project.toml. Defaults to
-  /// `<project-root>/julia/reliability` (resolved via HACDCPF_PROJECT_ROOT).
+  /// Deprecated: ignored by the native C++ implementation.
   std::filesystem::path julia_project_dir;
 
-  /// Path to the CLI script. Defaults to `<julia_project_dir>/cli.jl`.
+  /// Deprecated: ignored by the native C++ implementation.
   std::filesystem::path cli_script;
 
-  /// Working directory for the temp input/output JSON files. When empty an
-  /// auto-generated directory under `std::filesystem::temp_directory_path()`
-  /// is used and removed at the end (unless ``keep_workdir`` is true).
+  /// Deprecated: ignored by the native C++ implementation.
   std::filesystem::path workdir;
 
   bool keep_workdir{false};
 
-  /// Echo the Julia stdout/stderr stream to the parent terminal (default true).
+  /// Deprecated: ignored by the native C++ implementation.
   bool inherit_stdio{true};
 };
 
