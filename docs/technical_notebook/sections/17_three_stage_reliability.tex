@@ -53,11 +53,11 @@ distinct operational phases follow every contingency:
 
 This three-stage framework, formalised for hybrid AC/DC networks with
 VSC links and Soft Open Points (SOP), is formulated as a
-Mixed-Integer Linear Programme (MILP).  The C++ implementation resides
-in \texttt{src/reliability/three\_stage\_reliability.cpp}; the native
-C++ MILP solver (using the HiGHS / NativeBranchAndCut infrastructure
-described in Section~\ref{sec:solver_infra}) is under development and
-the current stub returns a graceful \texttt{not yet implemented} error.
+Mixed-Integer Linear Programme (MILP).  The current C++ implementation in
+\texttt{src/reliability/three\_stage\_reliability.cpp} is an out-of-process
+Julia CLI bridge and JSON parser.  It contains no native optimisation model;
+the MILP engine must be available in the external Julia/Gurobi environment.
+See Section~\ref{sec:implementation_gap_audit} for the implementation boundary.
 
 % ------------------------------------------------------------
 \subsection{Nomenclature}
@@ -366,10 +366,10 @@ System-level EENS is $\mathrm{EENS} = \sum_d \mathrm{EENS}_d$.
 \end{tikzpicture}
 \end{center}
 
-\textit{Note: the native C++ MILP implementation is under development.
-The diagram shows the planned data flow through the C++ solver.
-The current stub in \texttt{src/reliability/three\_stage\_reliability.cpp}
-returns a graceful error without solving.}
+\textit{Note: the native C++ MILP implementation is not present in this
+repository path.  The diagram shows the three-stage optimisation data flow,
+but the C++ entry point currently launches an external Julia CLI, waits for a
+result JSON file, and parses it into \texttt{ThreeStageReliabilityResult}.}
 
 \paragraph{C++ API.}
 \begin{verbatim}

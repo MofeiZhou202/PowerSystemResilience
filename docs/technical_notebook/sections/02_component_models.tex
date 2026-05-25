@@ -51,7 +51,7 @@ Struct / group & Fields and meaning & Primary consumers \\
 \texttt{ACOPFResult} & Voltage solution, generator dispatch, optional bus-level load shedding, converter operating points, convergence metrics, status text, and profiling summary. & AC OPF output \\
 \texttt{DCOPFOptions}, \texttt{DCOPFResult} & DC approximation controls, backend selector, branch-limit flag, load-shedding flag, voltage angles, generator dispatch, branch flows, load shedding, zero-filled LMP/vector dual placeholders, and solver status. & DC OPF \\
 \texttt{RPOOptions}, \texttt{RPOResult} & Reactive-power objective settings, search limits, voltage/generator before/after vectors, tap and shunt changes, loss metrics, status, and B\&C-style statistics fields reused as counters. & RPO \\
-Analysis result types & Resilience, reliability (MC), short-circuit, ONR, time-series, and carbon are fully implemented.  Distribution power flow (\texttt{solve\_distribution\_power\_flow}) returns a stub result.  The three-stage MILP reliability solver is under development; see Section~\ref{sec:scope-boundary} for the current stub boundary. & analysis declarations \\
+Analysis result types & Core resilience, reliability MC/FMEA, short-circuit, ONR, time-series, and carbon paths are implemented with documented limitations.  Distribution power flow (\texttt{solve\_distribution\_power\_flow}) returns a stub result; the resilience MIP entry point delegates to the heuristic model; several FMEA options are declared but marked unimplemented in source; the three-stage MILP reliability API is an external Julia bridge.  See Sections~\ref{sec:scope-boundary} and~\ref{sec:implementation_gap_audit}. & analysis declarations \\
 \bottomrule
 \end{longtable}
 

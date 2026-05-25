@@ -48,7 +48,7 @@ Area & Current code status \\
 \midrule
 \endhead
 \texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/power\_flow/} returns a non-converged result with \texttt{status="not\_implemented"}. \\
-Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a placeholder that returns a graceful \texttt{not yet implemented} error.  The native C++ MILP solver is under development. \\
+Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a thin Julia CLI bridge and JSON parser, not a native C++ MILP implementation.  It requires an external Julia/Gurobi environment and returns \texttt{ok=false} with an error when that environment or output JSON is unavailable. \\
 
 \bottomrule
 \end{longtable}

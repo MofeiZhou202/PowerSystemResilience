@@ -1,0 +1,105 @@
+% ============================================================
+\section{Implementation Gap and Stub Audit}
+\label{sec:implementation_gap_audit}
+% ============================================================
+
+This chapter records a code-backed audit of implementation gaps, placeholder
+paths, and documentation statements that can overstate the current runtime
+capability.  It is intentionally separated from the mathematical model chapters:
+a formula in this notebook is not proof that the corresponding production code
+solves that model end-to-end.
+
+\subsection{Audit Method}
+
+The audit covered \texttt{src/}, \texttt{include/}, \texttt{tests/}, and
+\texttt{docs/technical\_notebook/sections/}.  The review combined direct source
+inspection with searches for high-signal markers such as \texttt{TODO},
+\texttt{stub}, \texttt{not\_implemented}, \texttt{unimplemented},
+\texttt{placeholder}, \texttt{dummy}, \texttt{simplified}, \texttt{approximate},
+\texttt{fallback}, and \texttt{unsupported}.  The raw marker counts are not, by
+themselves, a defect count: many \texttt{fallback} and \texttt{unsupported}
+occurrences are legitimate guardrails.  The findings below list only cases where
+the public API, tests, or documentation can mislead a user about implemented
+behavior.
+
+\begin{longtable}{L{0.20\linewidth}L{0.18\linewidth}L{0.52\linewidth}}
+\toprule
+Marker class & Count observed & Interpretation \\
+\midrule
+\endhead
+\texttt{stub} & 24 & Includes real public stubs, tests that assert stub behavior, and compatibility forwarding headers. \\
+\texttt{unimplemented}/\texttt{not\_implemented} & 10 & High-signal items; several are in production reliability and distribution-PF paths. \\
+\texttt{placeholder} & 2 & Mostly documentation wording; still useful for stale-doc detection. \\
+\texttt{fallback} & 171 & Mixed quality: many are robustness mechanisms, but some return simplified results after dropping model detail. \\
+\texttt{simplified}/\texttt{approximate} & 44 & Mostly model approximations; acceptable when documented and not sold as exact models. \\
+\texttt{dummy} & 9 & Mixed: harmless temporary vectors in some code, but risky when tied to solver physics. \\
+\texttt{unsupported} & 19 & Mostly explicit input-domain limits; acceptable if surfaced to users. \\
+\bottomrule
+\end{longtable}
+
+\subsection{High-Risk Findings}
+
+\begin{longtable}{L{0.20\linewidth}L{0.30\linewidth}L{0.34\linewidth}L{0.08\linewidth}}
+\toprule
+Area & Evidence & Risk & Severity \\
+\midrule
+\endhead
+Distribution power flow public API & \texttt{src/power\_flow/distribution\_power\_flow.cpp} returns \texttt{converged=false}, \texttt{iterations=0}, and \texttt{status="not\_implemented"}.  \texttt{tests/test\_three\_phase\_pf.cpp} includes tests named ``stub returns not\_implemented'' and ``default options compile and run''. & This API is compiled and callable, but it does not solve a distribution backward/forward sweep problem.  A passing test only proves the stub is stable, not that the advertised solver works. & Critical \\
+FMEA distribution reliability options & \texttt{include/hacdcpf/reliability/reliability\_assessment.hpp} defaults \texttt{enable\_microgrid\_islanding}, \texttt{enable\_switch\_reconfiguration}, \texttt{enable\_repair\_reconfiguration}, \texttt{enable\_storage\_dispatch}, \texttt{enable\_grid\_forming\_vsc\_support}, and \texttt{enable\_black\_start\_storage} to \texttt{true}.  In \texttt{src/reliability/reliability\_assessment.cpp}, the FMEA implementation marks all six as \texttt{TODO(unimplemented)}. & This is a direct option-contract mismatch: users can enable features that the implementation says are not formed, not switched, not dispatched, or not modelled. & Critical \\
+Three-stage reliability implementation boundary & \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp} and \texttt{src/reliability/three\_stage\_reliability.cpp} implement a thin out-of-process Julia CLI bridge.  The C++ source explicitly says it contains no optimisation logic and only resolves paths, launches Julia, parses JSON, and handles errors. & The mathematical MILP chapter can be read as a native C++ solver description, but the C++ module only delegates to an external Julia/Gurobi environment.  Without that environment, the API returns \texttt{ok=false} with an error. & High \\
+Resilience MIP API & \texttt{include/hacdcpf/resilience/resilience\_assessment.hpp} labels \texttt{run\_distribution\_resilience\_mip\_assessment} as a MIP stub.  \texttt{src/resilience/resilience\_assessment.cpp} simply calls \texttt{run\_distribution\_resilience\_assessment}.  \texttt{tests/test\_resilience\_assessment.cpp} checks only that the delegated result is feasible. & A caller choosing the MIP entry point receives the heuristic sequential model, not a MIP restoration solve.  The test suite currently locks in that delegation instead of detecting missing MIP behavior. & High \\
+Network reconfiguration MILP fallback & \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} has a ``B\&C MILP solve (fallback)'' section, but when the heuristic fails the code skips the expensive B\&C fallback and immediately declares infeasibility to avoid a known simplex crash path. & The solver can report infeasible when the heuristic cannot find a solution, even though the MILP fallback advertised by the code structure is not attempted. & High \\
+\bottomrule
+\end{longtable}
+
+\subsection{Medium-Risk Findings}
+
+\begin{longtable}{L{0.22\linewidth}L{0.32\linewidth}L{0.34\linewidth}}
+\toprule
+Area & Evidence & Risk \\
+\midrule
+\endhead
+DC OPF economic outputs & \texttt{src/optimal\_power\_flow/dc\_opf.cpp} still has \texttt{TODO: Extract duals from solver if available}; \texttt{lmp} is assigned zeros.  The same file notes that the HiGHS path is LP-only and has \texttt{TODO: add QP support}. & Dispatch and shedding can still be useful, but LMP/dual-sensitive analysis is not implemented for the current result object, and HiGHS does not solve the true quadratic-cost model. \\
+AC OPF fallback path & \texttt{src/optimal\_power\_flow/ac\_opf.cpp} can return ``converged'' from a fast economic-dispatch plus AC-PF fallback.  When DC buses, DC branches, or VSC converters are present and the AC-only path is used, the status appends that DC/converter subsystems were ignored. & This is transparent in the status string, but downstream code that checks only \texttt{converged} can silently accept an AC-only answer for a hybrid case. \\
+JPC JSON export coverage & \texttt{src/io/json\_io.cpp} writes empty arrays for \texttt{genDC}, \texttt{loadAC\_flex}, \texttt{loadAC\_asymm}, \texttt{branch3ph}, \texttt{sgenAC}, \texttt{sgenDC}, \texttt{storageetap}, \texttt{pv}, \texttt{pv\_acsystem}, \texttt{energyrouterCore}, \texttt{energyrouterConverter}, \texttt{hvcb}, and \texttt{microgrid}, with the comment ``components not yet implemented''. & Exporting to JPC JSON can lose rich model data.  Round-trip tests should include non-empty examples for every supported table before this format is treated as complete. \\
+DC-only power-flow helper & \texttt{src/power\_flow/dc\_solver.cpp} uses \texttt{vm\_dummy} and \texttt{va\_dummy} when assembling DC injections. & This is likely acceptable for a DC-only helper, but it is a physical approximation when converter injections depend on AC-side state. \\
+Optional I/O headers & \texttt{include/hacdcpf/io/excel\_io.hpp} and \texttt{include/hacdcpf/io/opendss\_bridge.hpp} are stubs when the optional features are disabled. & This is a build-configuration boundary, not a deception by itself, but packaging and user docs must state which binaries were built with these options. \\
+\bottomrule
+\end{longtable}
+
+\subsection{Documentation Mismatches Found}
+
+Several existing notebook statements should be treated as stale or too broad:
+
+\begin{itemize}
+  \item \texttt{sections/17\_three\_stage\_reliability.tex} says the current C++ file is a stub returning a graceful error.  The source now implements a Julia bridge instead.  The correct boundary is: no native C++ MILP is present; external Julia/Gurobi execution is required.
+  \item Broad ``fully implemented'' wording in \texttt{sections/00\_scope.tex}, \texttt{sections/02\_component\_models.tex}, and \texttt{sections/02c\_output\_field\_dictionaries.tex} was too strong because FMEA options and the resilience MIP entry point have explicit unimplemented/stub behavior.  Those statements should remain narrowed to documented runtime boundaries.
+  \item \texttt{sections/14\_test\_results.tex} correctly records that some stub tests pass, but those passing tests should not be used as evidence that the underlying algorithm exists.
+\end{itemize}
+
+\subsection{Recommended Acceptance Criteria}
+
+Before presenting the module as complete, the following checks should be added
+or tightened:
+
+\begin{enumerate}
+  \item Replace \texttt{solve\_distribution\_power\_flow} with a real radial or weakly meshed distribution solver, or remove/rename the public API so callers cannot mistake it for production functionality.
+  \item Convert the distribution-PF stub tests into algorithmic tests on voltage drops, branch flows, losses, and non-convergence behavior.
+  \item Either implement the six FMEA options or default them to \texttt{false} and return an explicit unsupported-feature error when a caller enables them.
+  \item Rename the resilience MIP entry point or implement a true multi-period MIP.  A test should verify that the MIP path uses a different formulation from the heuristic path.
+  \item For three-stage reliability, add an integration smoke test that distinguishes missing Julia/Gurobi environment, malformed JSON, and successful external solve.  The notebook should state that the MILP engine is external, not native C++.
+  \item For network reconfiguration, expose the skipped B\&C fallback as an option or status code so ``heuristic failed'' is not confused with mathematical infeasibility.
+  \item Implement DC OPF dual extraction and add LMP regression tests, or mark \texttt{lmp} fields as unavailable instead of zero-valued economics.
+  \item Add JPC JSON round-trip tests with non-empty rich components, especially flexible/asymmetric loads, three-phase branches, PV, storage, energy routers, high-voltage circuit breakers, and microgrids.
+\end{enumerate}
+
+\subsection{Audit Conclusion}
+
+The repository is not an empty shell: many PF, OPF, graph, I/O, resilience, and
+reliability components are implemented and tested.  However, several public
+surfaces are materially weaker than a reader of the technical notebook could
+assume.  The most serious issues are the distribution-PF stub, the FMEA option
+contract mismatch, the resilience MIP alias to a heuristic, the skipped
+reconfiguration MILP fallback, and stale three-stage reliability documentation.
+Those items should be treated as release blockers if the project is being sold
+as a complete hybrid AC/DC distribution-system simulation studio.
