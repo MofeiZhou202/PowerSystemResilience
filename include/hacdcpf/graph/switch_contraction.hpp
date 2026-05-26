@@ -45,10 +45,25 @@ struct ContractionResult {
   PowerSystemGraph contracted_graph;
   /// System model after contraction (loads/gens/shunts aggregated)
   HybridPowerSystem contracted_system;
-  /// Mapping: original bus_ids → super-bus_ids
-  std::unordered_map<int, int> bus_to_super;
-  /// Mapping: super-bus_id → list of original bus_ids
+
+  // ── Domain-qualified maps (correct in all hybrid systems) ──────────
+  /// AC bus_id → AC super-bus_id.  Use this for AC component remapping.
+  std::unordered_map<int, int>              ac_bus_to_super;
+  /// DC bus_id → DC super-bus_id.  Use this for DC component remapping.
+  std::unordered_map<int, int>              dc_bus_to_super;
+  /// AC super-bus_id → list of original AC bus_ids in that super-node.
+  std::unordered_map<int, std::vector<int>> ac_super_to_buses;
+  /// DC super-bus_id → list of original DC bus_ids in that super-node.
+  std::unordered_map<int, std::vector<int>> dc_super_to_buses;
+
+  // ── Legacy combined maps (backward compat) ─────────────────────────
+  /// @deprecated  Only safe when AC and DC bus IDs are numerically disjoint.
+  ///   If AC bus N and DC bus N both exist, the DC entry overwrites the AC
+  ///   entry in this map.  Prefer ac_bus_to_super / dc_bus_to_super.
+  std::unordered_map<int, int>              bus_to_super;
+  /// @deprecated  Same caveat as bus_to_super.
   std::unordered_map<int, std::vector<int>> super_to_buses;
+
   std::vector<SwitchContractionRecord> switch_records;
   std::vector<Diagnostic>              diagnostics;
 };

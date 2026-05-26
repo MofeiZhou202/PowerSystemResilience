@@ -400,6 +400,15 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   } else {
     out.status = "success";
     out.objective = res.stats.objective;
+    // Post-solve constraint verification: Ax ≤ b
+    if (lp.A.rows() > 0) {
+      Eigen::VectorXd Ax = lp.A * res.x;
+      double ineq_viol = (Ax - lp.b).cwiseMax(0.0).maxCoeff();
+      if (ineq_viol > 1e-6) {
+        spdlog::warn("[三阶段可靠性] MIP 后验约束违约: ineq_viol={:.2e}", ineq_viol);
+        out.status = "success (constraint violation detected)";
+      }
+    }
     // Map binary z_i back to shed kW: z_i > 0.5 → load completely shed.
     for (int i = 0; i < nd; ++i) {
       const double li = std::max(0.0, c.loads[i].p_kw);

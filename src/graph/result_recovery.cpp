@@ -8,6 +8,8 @@
 #include <cmath>
 #include <complex>
 
+#include "hacdcpf/graph/switch_contraction.hpp"
+
 namespace hacdcpf::graph {
 
 // ─────────────────────────────────────────────────────────────────────
@@ -46,6 +48,47 @@ void recover_switch_contracted_buses(
   }
   // Also handle original buses not in any super-node
   for (const auto& [orig, sup] : bus_to_super) {
+    if (voltages.bus_voltage.count(orig) == 0) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end())
+        voltages.bus_voltage[orig] = it->second;
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// recover_switch_contracted_buses (ContractionResult overload)
+// ─────────────────────────────────────────────────────────────────────
+
+void recover_switch_contracted_buses(
+    FullNetworkVoltages&     voltages,
+    const ContractionResult& contraction)
+{
+  // AC recovery: propagate AC super-node voltages to all AC member buses
+  for (const auto& [sup, members] : contraction.ac_super_to_buses) {
+    auto it = voltages.bus_voltage.find(sup);
+    if (it == voltages.bus_voltage.end()) continue;
+    auto V_sup = it->second;
+    for (int bid : members)
+      voltages.bus_voltage[bid] = V_sup;
+  }
+  for (const auto& [orig, sup] : contraction.ac_bus_to_super) {
+    if (voltages.bus_voltage.count(orig) == 0) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end())
+        voltages.bus_voltage[orig] = it->second;
+    }
+  }
+
+  // DC recovery: propagate DC super-node voltages to all DC member buses
+  for (const auto& [sup, members] : contraction.dc_super_to_buses) {
+    auto it = voltages.bus_voltage.find(sup);
+    if (it == voltages.bus_voltage.end()) continue;
+    auto V_sup = it->second;
+    for (int bid : members)
+      voltages.bus_voltage[bid] = V_sup;
+  }
+  for (const auto& [orig, sup] : contraction.dc_bus_to_super) {
     if (voltages.bus_voltage.count(orig) == 0) {
       auto it = voltages.bus_voltage.find(sup);
       if (it != voltages.bus_voltage.end())

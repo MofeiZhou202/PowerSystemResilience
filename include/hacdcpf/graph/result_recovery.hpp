@@ -27,6 +27,7 @@
 
 #include "hacdcpf/graph/kron_reduction.hpp"
 #include "hacdcpf/graph/reduction_mapping.hpp"
+#include "hacdcpf/graph/switch_contraction.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
 namespace hacdcpf::graph {
@@ -59,10 +60,19 @@ struct RecoveryOptions {
 
 /// Expand switch-contracted super-node voltages back to all original buses.
 /// V_i = V_K for every bus i that was merged into super-node K.
+/// @deprecated  Prefer the ContractionResult overload below; this legacy
+///   variant is only correct when AC and DC bus IDs are numerically disjoint.
 void recover_switch_contracted_buses(
     FullNetworkVoltages&    voltages,
     const std::unordered_map<int, int>&                bus_to_super,
     const std::unordered_map<int, std::vector<int>>&   super_to_buses);
+
+/// Domain-safe variant: uses the domain-qualified maps in ContractionResult
+/// so that an AC bus and a DC bus that share the same numeric ID are never
+/// confused.  This is the preferred overload for hybrid AC/DC systems.
+void recover_switch_contracted_buses(
+    FullNetworkVoltages&     voltages,
+    const ContractionResult& contraction);
 
 /// Recover voltage at series-eliminated degree-2 nodes.
 /// For each record (i--j--k, j eliminated):

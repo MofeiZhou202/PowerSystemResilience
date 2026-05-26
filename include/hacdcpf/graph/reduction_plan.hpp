@@ -109,6 +109,9 @@ struct ReductionAction {
   std::vector<int>       eliminated_buses;
   std::vector<int>       eliminated_branches;
   std::vector<int>       retained_buses;
+  NodeDomain             bus_domain{NodeDomain::AC};  ///< Domain of eliminated_buses[0]; used by
+                                                       ///  series/pendant reducers for domain-correct
+                                                       ///  node lookup (ac_node_idx vs dc_node_idx).
   std::string            reason;
 };
 

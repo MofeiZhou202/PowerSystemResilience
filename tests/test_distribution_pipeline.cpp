@@ -239,8 +239,10 @@ static DCCircuitBreaker dc_cb(int idx, int from, int to) {
 /// leaving 8 canonical AC buses.  DC bus IDs start at 101 to avoid overlap
 /// with AC bus IDs 1-12 in the shared bus_id_to_node_idx graph map.
 ///
-/// DC Circuit Breaker:
-///   DCCB1: DCBus101→DCBus102
+/// DC Circuit Breaker (intermediate-bus pattern, same as AC CBs):
+///   DCCB1: DCBus101→DCBus104  (CB connects slack to dedicated intermediate output node)
+///   DC branch 1 then runs FROM DCBus104 TO DCBus102 (load)
+///   DCBus104 is the CB output node (no load)
 ///
 /// VSC:
 ///   VSC1: AC Bus8 ↔ DC Bus101 (PQ mode, p_set=+0.3 MW — import into AC)
@@ -325,22 +327,32 @@ static HybridPowerSystem build_distribution_system() {
     //   DCBus101: DC voltage reference (slack)
     //   DCBus102: DC load  (e.g. EV charger, 0.3 MW)
     //   DCBus103: DC PV source (−0.25 MW → net injection)
+    //   DCBus104: DCCB1 output node (intermediate CB output, no load)
     sys.dc.base_mva = 10.0;
     sys.dc.buses = {
         dc_bus(101, DCBusType::DC_V,  0.0),   // DC voltage reference
         dc_bus(102, DCBusType::DC_P,  0.3),   // 0.3 MW DC load
         dc_bus(103, DCBusType::DC_P, -0.25),  // 0.25 MW PV injection
+        dc_bus(104, DCBusType::DC_P,  0.0),   // DCCB1 output node (no load)
     };
 
     // ── DC branches ───────────────────────────────────────────────────
+    //   Branch 1 runs FROM the DCCB1 output node (DCBus104) to the DC load.
+    //   This mirrors the AC CB intermediate-bus pattern: the CB (101→104)
+    //   protects the branch (104→102), with non-overlapping endpoints.
     sys.dc.branches = {
-        dc_branch(1, 101, 102, 0.010),
-        dc_branch(2, 101, 103, 0.008),
+        dc_branch(1, 104, 102, 0.010),  // DC feeder FROM CB output → DC load
+        dc_branch(2, 101, 103, 0.008),  // DC feeder to PV injection bus
     };
 
-    // ── DC circuit breaker (metadata) ─────────────────────────────────
+    // ── DC circuit breaker (intermediate-bus pattern) ─────────────────
+    //   DCCB1 connects the DC slack (DCBus101) to the intermediate output
+    //   node (DCBus104).  The DC feeder branch then runs DCBus104→DCBus102.
+    //   This keeps CB endpoints non-overlapping with branch endpoints, so
+    //   the closed CB creates a zero-impedance DC_Switch edge without forming
+    //   a parallel path with any DC branch (graph remains radial).
     sys.dc.dc_circuit_breakers = {
-        dc_cb(1, 101, 102),
+        dc_cb(1, 101, 104),  // DCCB1: slack → CB output intermediate node
     };
 
     // ── VSC converter: AC Bus8 ↔ DC Bus1 ─────────────────────────────
@@ -410,7 +422,7 @@ TEST_CASE("Distribution CB/switch/VSC pipeline: rich model → graph → PF → 
         REQUIRE(sys.ac.circuit_breakers.size() == 3);   // CB1, CB2, CB3
 
         // DC topology
-        REQUIRE(sys.dc.buses.size()                == 3);
+        REQUIRE(sys.dc.buses.size()                == 4);  // +DCBus104 intermediate CB output
         REQUIRE(sys.dc.branches.size()             == 2);
         REQUIRE(sys.dc.dc_circuit_breakers.size()  == 1);
 
@@ -449,20 +461,21 @@ TEST_CASE("Distribution CB/switch/VSC pipeline: rich model → graph → PF → 
         const HybridPowerSystem sys = build_distribution_system();
         const PowerSystemGraph  g   = build_power_system_graph(sys);
 
-        // Node counts: 12 AC + 3 DC = 15
-        CHECK(static_cast<int>(g.nodes.size()) == 15);
+        // Node counts: 12 AC + 4 DC (101,102,103,104) = 16
+        CHECK(static_cast<int>(g.nodes.size()) == 16);
 
         // Active edge categories present:
-        //   AC_Line:  7 closed branches (A1..A7)  — CB output→load buses
-        //   Breaker:  3 (CB1..CB3), all closed  — source→intermediate buses
-        //   Switch:   1 (SW1, closed)
-        //   DC_Line:  2 (DC1, DC2)
+        //   AC_Line:     7 closed branches (A1..A7)  — CB output→load buses
+        //   Breaker:     3 (CB1..CB3), all closed  — source→intermediate buses
+        //   Switch:      1 (SW1, closed)
+        //   DC_Line:     2 (DC1, DC2)
+        //   DC_Switch:   1 (DCCB1, closed) — DC circuit breaker added as graph edge
         //   VSC_Coupling: 1 (virtual edge Bus8↔DCBus101)
-        // NOTE: DC circuit breakers are metadata only and NOT added to the graph.
         CHECK(count_active_edges(g, EdgeCategory::AC_Line)      >= 7);
         CHECK(count_active_edges(g, EdgeCategory::Breaker)       == 3);
         CHECK(count_active_edges(g, EdgeCategory::Switch)        == 1);
         CHECK(count_active_edges(g, EdgeCategory::DC_Line)       == 2);
+        CHECK(count_active_edges(g, EdgeCategory::DC_Switch)     == 1);
         CHECK(count_active_edges(g, EdgeCategory::VSC_Coupling)  == 1);
 
         // Inactive edges: 3 tie-switch ACBranches (TIE-1..TIE-3)

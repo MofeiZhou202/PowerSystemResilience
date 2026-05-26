@@ -288,6 +288,30 @@ PowerSystemGraph build_power_system_graph(
     add_edge(g, e);
   }
 
+  // ── 14.5. DC circuit breakers ─────────────────────────────────────
+  // island_detector.cpp treats closed DC CBs as connectivity edges; the
+  // graph model must match that semantic.  An open CB is inserted as an
+  // out-of-service edge so the topology-analysis DFS can still see the
+  // latent connection.
+  for (const auto& cb : system.dc.dc_circuit_breakers) {
+    int fn = g.dc_node_idx(cb.bus_from);
+    int tn = g.dc_node_idx(cb.bus_to);
+    if (fn < 0 || tn < 0) continue;
+    const bool closed = cb.in_service && cb.closed;
+    GraphEdge e;
+    e.edge_id    = edge_seq++;
+    e.from_node  = fn;
+    e.to_node    = tn;
+    e.from_bus_id = cb.bus_from;
+    e.to_bus_id   = cb.bus_to;
+    e.category   = EdgeCategory::DC_Switch;
+    e.in_service = closed;
+    e.r_pu       = 0.0;
+    e.is_zero_impedance = closed;
+    e.is_closed_switch  = closed;
+    add_edge(g, e);
+  }
+
   // ── 15. VSC coupling edges (virtual, for connectivity) ────────────
   for (const auto& vsc : system.vsc_converters) {
     if (!vsc.in_service) continue;

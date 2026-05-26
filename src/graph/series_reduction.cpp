@@ -25,10 +25,17 @@ SeriesReductionResult apply_series_reduction(
   // Copy the graph as a starting point
   result.reduced_graph = graph;
 
-  // Build initial identity mapping
+  // Build initial identity mapping (both legacy and domain-qualified maps)
   for (const auto& nd : graph.nodes) {
     result.mapping.original_to_reduced_bus[nd.bus_id] = nd.bus_id;
     result.mapping.reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    if (nd.domain == NodeDomain::DC) {
+      result.mapping.dc_original_to_reduced_bus[nd.bus_id] = nd.bus_id;
+      result.mapping.dc_reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    } else {
+      result.mapping.ac_original_to_reduced_bus[nd.bus_id] = nd.bus_id;
+      result.mapping.ac_reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    }
   }
   for (const auto& e : graph.edges) {
     result.mapping.original_to_reduced_branch[e.edge_id] = e.edge_id;
@@ -49,7 +56,9 @@ SeriesReductionResult apply_series_reduction(
     int eid_jk = action.eliminated_branches[1];
 
     // Find edges in the current reduced graph
-    int rni_j = result.reduced_graph.node_idx(elim_bus_id);
+    int rni_j = (action.bus_domain == NodeDomain::AC)
+                 ? result.reduced_graph.ac_node_idx(elim_bus_id)
+                 : result.reduced_graph.dc_node_idx(elim_bus_id);
     if (rni_j < 0) continue;
 
     // Identify the two edges from the eliminated node
@@ -114,6 +123,12 @@ SeriesReductionResult apply_series_reduction(
       result.mapping.original_to_reduced_branch[orig_eid] = new_edge.edge_id;
     }
     result.mapping.original_to_reduced_bus[elim_bus_id] = bus_i; // map to i
+    // Also update the domain-qualified map
+    if (action.bus_domain == NodeDomain::DC) {
+      result.mapping.dc_original_to_reduced_bus[elim_bus_id] = bus_i;
+    } else {
+      result.mapping.ac_original_to_reduced_bus[elim_bus_id] = bus_i;
+    }
 
     // Update reduced_to_original for new branch
     std::vector<int> orig_branches;
@@ -138,29 +153,41 @@ SeriesReductionResult apply_series_reduction(
     result.reduced_graph.adj[rni_i].emplace_back(new_eid_idx, rni_k);
     result.reduced_graph.adj[rni_k].emplace_back(new_eid_idx, rni_i);
 
-    // Update AC branch in the system
-    // Add a new ACBranch for the equivalent; mark originals out-of-service
-    ACBranch new_br;
-    new_br.index      = new_edge.edge_id;
-    new_br.from_bus   = bus_i;
-    new_br.to_bus     = bus_k;
-    new_br.r_pu       = r_eq;
-    new_br.x_pu       = x_eq;
-    new_br.b_pu       = b_eq;
-    new_br.tap        = 1.0;
-    new_br.in_service = true;
-    result.reduced_system.ac.branches.push_back(new_br);
-
-    for (auto& br : result.reduced_system.ac.branches) {
-      if (br.index == eid_ij || br.index == eid_jk)
-        br.in_service = false;
-    }
-
-    // Mark eliminated bus out-of-service in system
-    for (auto& bus : result.reduced_system.ac.buses) {
-      if (bus.index == elim_bus_id) {
-        bus.in_service = false;
-        break;
+    // Update branch in the system — domain-correct replacement
+    if (new_edge.category == EdgeCategory::DC_Line) {
+      // DC series segment: write merged equivalent to dc.branches
+      DCBranch new_br;
+      new_br.index      = new_edge.edge_id;
+      new_br.from_bus   = bus_i;
+      new_br.to_bus     = bus_k;
+      new_br.r_pu       = r_eq;
+      new_br.in_service = true;
+      result.reduced_system.dc.branches.push_back(new_br);
+      for (auto& br : result.reduced_system.dc.branches) {
+        if (br.index == eid_ij || br.index == eid_jk)
+          br.in_service = false;
+      }
+      for (auto& bus : result.reduced_system.dc.buses) {
+        if (bus.index == elim_bus_id) { bus.in_service = false; break; }
+      }
+    } else {
+      // AC segment (ACBranch, transformer, AC switch …)
+      ACBranch new_br;
+      new_br.index      = new_edge.edge_id;
+      new_br.from_bus   = bus_i;
+      new_br.to_bus     = bus_k;
+      new_br.r_pu       = r_eq;
+      new_br.x_pu       = x_eq;
+      new_br.b_pu       = b_eq;
+      new_br.tap        = 1.0;
+      new_br.in_service = true;
+      result.reduced_system.ac.branches.push_back(new_br);
+      for (auto& br : result.reduced_system.ac.branches) {
+        if (br.index == eid_ij || br.index == eid_jk)
+          br.in_service = false;
+      }
+      for (auto& bus : result.reduced_system.ac.buses) {
+        if (bus.index == elim_bus_id) { bus.in_service = false; break; }
       }
     }
   }
@@ -182,10 +209,17 @@ PendantReductionResult apply_pendant_reduction(
   result.reduced_system = system;
   result.reduced_graph  = graph;
 
-  // Identity mapping init
+  // Identity mapping init (both legacy and domain-qualified maps)
   for (const auto& nd : graph.nodes) {
     result.mapping.original_to_reduced_bus[nd.bus_id] = nd.bus_id;
     result.mapping.reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    if (nd.domain == NodeDomain::DC) {
+      result.mapping.dc_original_to_reduced_bus[nd.bus_id] = nd.bus_id;
+      result.mapping.dc_reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    } else {
+      result.mapping.ac_original_to_reduced_bus[nd.bus_id] = nd.bus_id;
+      result.mapping.ac_reduced_to_original_buses[nd.bus_id] = {nd.bus_id};
+    }
   }
 
   const double V_parent_sq = 1.0; // |V_i|² ≈ 1.0 pu² (flat-start approximation)
@@ -209,14 +243,23 @@ PendantReductionResult apply_pendant_reduction(
     double r_ij = edge_ptr->r_pu;
     double x_ij = edge_ptr->x_pu;
 
-    // Collect load from the eliminated bus
+    // Collect load from the eliminated bus (domain-aware)
     double p_j = 0.0, q_j = 0.0;
-    for (const auto& bus : system.ac.buses) {
-      if (bus.index == elim_bus_id) { p_j += bus.pd_mw;  q_j += bus.qd_mvar; break; }
-    }
-    for (const auto& ld : system.ac.loads) {
-      if (ld.bus == elim_bus_id && ld.in_service) {
-        p_j += ld.p_mw; q_j += ld.q_mvar;
+    if (action.bus_domain == NodeDomain::DC) {
+      for (const auto& bus : system.dc.buses) {
+        if (bus.index == elim_bus_id) { p_j += bus.pd_mw; break; }
+      }
+      for (const auto& ld : system.dc.loads) {
+        if (ld.bus == elim_bus_id && ld.in_service) p_j += ld.p_mw;
+      }
+    } else {
+      for (const auto& bus : system.ac.buses) {
+        if (bus.index == elim_bus_id) { p_j += bus.pd_mw;  q_j += bus.qd_mvar; break; }
+      }
+      for (const auto& ld : system.ac.loads) {
+        if (ld.bus == elim_bus_id && ld.in_service) {
+          p_j += ld.p_mw; q_j += ld.q_mvar;
+        }
       }
     }
 
@@ -225,10 +268,10 @@ PendantReductionResult apply_pendant_reduction(
     double p_pu = p_j / base_mva;
     double q_pu = q_j / base_mva;
 
-    // Approximate branch losses
+    // Approximate branch losses (DC networks: x_ij = 0, q_loss = 0)
     double s2 = p_pu * p_pu + q_pu * q_pu;
     double p_loss = r_ij * s2 / V_parent_sq;
-    double q_loss = x_ij * s2 / V_parent_sq;
+    double q_loss = (action.bus_domain == NodeDomain::DC) ? 0.0 : x_ij * s2 / V_parent_sq;
 
     double p_absorbed = p_pu + p_loss; // in pu
     double q_absorbed = q_pu + q_loss;
@@ -242,25 +285,41 @@ PendantReductionResult apply_pendant_reduction(
     rec.q_load_absorbed    = q_absorbed * base_mva;
     result.mapping.pendant_records.push_back(rec);
     result.mapping.original_to_reduced_bus[elim_bus_id] = parent_bus_id;
-
-    // Add load to parent bus in the reduced system
-    for (auto& bus : result.reduced_system.ac.buses) {
-      if (bus.index == parent_bus_id) {
-        bus.pd_mw   += rec.p_load_absorbed;
-        bus.qd_mvar += rec.q_load_absorbed;
-        break;
-      }
+    // Also update domain-qualified map
+    if (action.bus_domain == NodeDomain::DC) {
+      result.mapping.dc_original_to_reduced_bus[elim_bus_id] = parent_bus_id;
+    } else {
+      result.mapping.ac_original_to_reduced_bus[elim_bus_id] = parent_bus_id;
     }
 
-    // Mark eliminated bus out-of-service
-    for (auto& bus : result.reduced_system.ac.buses)
-      if (bus.index == elim_bus_id) { bus.in_service = false; break; }
+    // Add load to parent bus in the reduced system (domain-aware)
+    if (action.bus_domain == NodeDomain::DC) {
+      for (auto& bus : result.reduced_system.dc.buses) {
+        if (bus.index == parent_bus_id) { bus.pd_mw += rec.p_load_absorbed; break; }
+      }
+      // Mark eliminated DC bus and pendant DC branch out-of-service
+      for (auto& bus : result.reduced_system.dc.buses)
+        if (bus.index == elim_bus_id) { bus.in_service = false; break; }
+      for (auto& br : result.reduced_system.dc.branches)
+        if (br.index == branch_eid) { br.in_service = false; break; }
+    } else {
+      for (auto& bus : result.reduced_system.ac.buses) {
+        if (bus.index == parent_bus_id) {
+          bus.pd_mw   += rec.p_load_absorbed;
+          bus.qd_mvar += rec.q_load_absorbed;
+          break;
+        }
+      }
+      // Mark eliminated AC bus and pendant AC branch out-of-service
+      for (auto& bus : result.reduced_system.ac.buses)
+        if (bus.index == elim_bus_id) { bus.in_service = false; break; }
+      for (auto& e : result.reduced_system.ac.branches)
+        if (e.index == branch_eid) { e.in_service = false; break; }
+    }
 
-    // Mark the pendant branch out-of-service
-    for (auto& e : result.reduced_system.ac.branches)
-      if (e.index == branch_eid) { e.in_service = false; break; }
-
-    int rni_j = result.reduced_graph.node_idx(elim_bus_id);
+    int rni_j = (action.bus_domain == NodeDomain::AC)
+                 ? result.reduced_graph.ac_node_idx(elim_bus_id)
+                 : result.reduced_graph.dc_node_idx(elim_bus_id);
     if (rni_j >= 0) result.reduced_graph.nodes[rni_j].in_service = false;
     for (auto& e : result.reduced_graph.edges)
       if (e.edge_id == branch_eid) { e.in_service = false; break; }

@@ -934,6 +934,30 @@ TopoReconfResult run_topology_reconfiguration(
   }
 
   result.feasible = true;
+  // Post-solve constraint verification (mirrors resilience analyze_solution).
+  // Catches cases where the solver declares success but the solution violates
+  // a constraint beyond floating-point round-off.
+  {
+    double eq_viol   = 0.0;
+    double ineq_viol = 0.0;
+    if (Aeq_mat.rows() > 0) {
+      Eigen::VectorXd res_eq = Aeq_mat * x_sol - beq;
+      eq_viol = res_eq.cwiseAbs().maxCoeff();
+    }
+    if (A_ineq_mat.rows() > 0) {
+      Eigen::VectorXd res_ineq = A_ineq_mat * x_sol - b_ineq;
+      ineq_viol = res_ineq.cwiseMax(0.0).maxCoeff();
+    }
+    if (eq_viol > 1e-6 || ineq_viol > 1e-6) {
+      spdlog::warn("[拓扑重构] 后验约束违约: eq_viol={:.2e} ineq_viol={:.2e}",
+                   eq_viol, ineq_viol);
+      result.feasible = false;
+      result.solve_time_s = chr::duration<double>(
+          chr::steady_clock::now() - t_start).count();
+      return result;
+    }
+  }
+
   // optimal is only asserted when the B&C solver ran and proved the gap is
   // within tolerance.  A heuristic incumbent satisfies feasibility but carries
   // no optimality certificate, so optimal stays false in that case.
@@ -943,24 +967,45 @@ TopoReconfResult run_topology_reconfiguration(
     bool was_on = edge_status[i];
     bool now_on = (x_sol[idx.beta(i)] > 0.5);
 
-    if (now_on) result.closed_branch_ids.push_back(edge_orig_idx[i]);
-    else        result.open_branch_ids.push_back(edge_orig_idx[i]);
+    // Build a structured reference so callers can distinguish AC/DC/VSC.
+    BranchRef ref;
+    if      (i < idx.nl_ac) ref.category = graph::EdgeCategory::AC_Line;
+    else if (i < nl)        ref.category = graph::EdgeCategory::DC_Line;
+    else                    ref.category = graph::EdgeCategory::VSC_Coupling;
+    ref.index = edge_orig_idx[i];
+
+    if (now_on) {
+      result.closed_branch_ids.push_back(edge_orig_idx[i]);  // legacy
+      result.closed_branches.push_back(ref);
+    } else {
+      result.open_branch_ids.push_back(edge_orig_idx[i]);    // legacy
+      result.open_branches.push_back(ref);
+    }
 
     if (was_on && !now_on) {
-      result.switched_off_ids.push_back(edge_orig_idx[i]);
+      result.switched_off_ids.push_back(edge_orig_idx[i]);   // legacy
+      result.switched_off.push_back(ref);
       ++result.n_switch_off;
     } else if (!was_on && now_on) {
-      result.switched_on_ids.push_back(edge_orig_idx[i]);
+      result.switched_on_ids.push_back(edge_orig_idx[i]);    // legacy
+      result.switched_on.push_back(ref);
       ++result.n_switch_on;
     }
   }
 
   // Loss estimate
+  // NOTE: reconf_loss_mw is a nominal-current approximation, NOT a measured
+  // MW value.  loss_proxy = Σ r_pu for all closed branches.  Multiplying by
+  // base_mva gives r_pu × MVA, which equals I²R [MW] only when every branch
+  // carries its full rated current at 1 pu voltage — a rough proxy for
+  // topology comparison.  Do NOT multiply by lambda_loss (the MILP objective
+  // weight); that would mix a physical unit with a tuning parameter.
+  // For accurate loss accounting, run a full power flow after reconfiguration.
   double loss_proxy = 0.0;
   for (int i = 0; i < nl; ++i)
     if (x_sol[idx.beta(i)] > 0.5)
       loss_proxy += edge_r[i];
-  result.reconf_loss_mw = loss_proxy * base_mva * lambda_loss;
+  result.reconf_loss_mw = loss_proxy * base_mva;  // nominal-current proxy [MW]
   result.milp_objective = c.dot(x_sol);
 
   result.solve_time_s = chr::duration<double>(

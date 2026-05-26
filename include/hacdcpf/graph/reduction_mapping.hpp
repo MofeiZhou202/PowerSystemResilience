@@ -51,9 +51,17 @@ struct KronReductionRecord {
 
 struct ReductionMapping {
   /// original bus_id → reduced bus_id (after all reductions)
+  /// Legacy: safe only when AC and DC bus IDs never overlap.
   std::unordered_map<int, int> original_to_reduced_bus;
-  /// reduced bus_id → list of original bus_ids it represents
+  /// reduced bus_id → list of original bus_ids it represents (legacy)
   std::unordered_map<int, std::vector<int>> reduced_to_original_buses;
+
+  /// Domain-qualified bus maps — always correct in hybrid systems where AC
+  /// and DC buses may share the same numeric ID.
+  std::unordered_map<int, int>              ac_original_to_reduced_bus;
+  std::unordered_map<int, int>              dc_original_to_reduced_bus;
+  std::unordered_map<int, std::vector<int>> ac_reduced_to_original_buses;
+  std::unordered_map<int, std::vector<int>> dc_reduced_to_original_buses;
 
   /// original branch_id → reduced branch_id (-1 if eliminated)
   std::unordered_map<int, int> original_to_reduced_branch;

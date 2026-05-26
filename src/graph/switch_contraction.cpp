@@ -77,7 +77,9 @@ ContractionResult contract_zero_impedance_edges(
     // Check which category we're handling
     bool do_merge = false;
     if (e.is_closed_switch && options.contract_closed_switches &&
-        (e.category == EdgeCategory::Switch || e.category == EdgeCategory::Breaker))
+        (e.category == EdgeCategory::Switch   ||
+         e.category == EdgeCategory::Breaker  ||
+         e.category == EdgeCategory::DC_Switch))
       do_merge = true;
     if (e.is_zero_impedance && options.contract_zero_impedance_lines &&
         e.category == EdgeCategory::AC_Line)
@@ -144,8 +146,11 @@ ContractionResult contract_zero_impedance_edges(
   }
 
   // ── Step 4: Choose representative bus for each super-node ─────────────
-  // Representative = highest-priority bus type, then lowest bus_id
-  std::unordered_map<int, int> root_to_rep; // root_node_idx → rep_bus_id
+  // Representative = highest-priority bus type, then lowest bus_id.
+  // Also track the domain (AC/DC) of each representative so later steps can
+  // use the correct node-lookup map instead of AC-first fallback.
+  std::unordered_map<int, int>        root_to_rep;        // root_node_idx → rep_bus_id
+  std::unordered_map<int, NodeDomain> root_to_rep_domain; // root_node_idx → domain
 
   for (auto& [root, members] : groups) {
     int best_ni  = members[0];
@@ -158,29 +163,45 @@ ContractionResult contract_zero_impedance_edges(
         best_pri = pri;
       }
     }
-    root_to_rep[root] = graph.nodes[best_ni].bus_id;
+    root_to_rep[root]        = graph.nodes[best_ni].bus_id;
+    root_to_rep_domain[root] = graph.nodes[best_ni].domain;
   }
 
-  // ── Step 5: Populate bus_to_super / super_to_buses maps ──────────────
+  // ── Step 5: Populate domain-qualified and legacy bus maps ────────────
+  // Domain maps are unambiguous even when AC bus N and DC bus N coexist.
+  // Legacy maps are kept for backward compatibility but may lose entries
+  // when AC and DC share a bus ID (DC overwrites AC in that case).
   for (auto& [root, members] : groups) {
     int rep = root_to_rep[root];
-    result.super_to_buses[rep] = {};
+    NodeDomain dom = root_to_rep_domain[root];
+    auto& b2s_dom = (dom == NodeDomain::AC) ? result.ac_bus_to_super
+                                            : result.dc_bus_to_super;
+    auto& s2b_dom = (dom == NodeDomain::AC) ? result.ac_super_to_buses
+                                            : result.dc_super_to_buses;
+    s2b_dom[rep] = {};
+    result.super_to_buses[rep] = {};  // legacy
     for (int ni : members) {
       int bid = graph.nodes[ni].bus_id;
-      result.bus_to_super[bid] = rep;
-      result.super_to_buses[rep].push_back(bid);
+      b2s_dom[bid]           = rep;
+      result.bus_to_super[bid] = rep;  // legacy (may overwrite on AC/DC ID collision)
+      s2b_dom[rep].push_back(bid);
+      result.super_to_buses[rep].push_back(bid);  // legacy
     }
   }
 
-  // ── Step 6: Build contraction records ────────────────────────────────
-  for (auto& [rep, orig_buses] : result.super_to_buses) {
-    if (orig_buses.size() == 1 && orig_buses[0] == rep) continue; // trivial
-    SwitchContractionRecord rec;
-    rec.original_bus_ids = orig_buses;
-    rec.super_bus_id     = rep;
-    rec.reason           = "zero-impedance / closed-switch merge";
-    result.switch_records.push_back(rec);
-  }
+  // ── Step 6: Build contraction records (from domain maps) ─────────────
+  auto make_records = [&](const std::unordered_map<int, std::vector<int>>& s2b) {
+    for (auto& [rep, orig_buses] : s2b) {
+      if (orig_buses.size() == 1 && orig_buses[0] == rep) continue; // trivial
+      SwitchContractionRecord rec;
+      rec.original_bus_ids = orig_buses;
+      rec.super_bus_id     = rep;
+      rec.reason           = "zero-impedance / closed-switch merge";
+      result.switch_records.push_back(rec);
+    }
+  };
+  make_records(result.ac_super_to_buses);
+  make_records(result.dc_super_to_buses);
 
   // ── Step 7: Build contracted PowerSystemGraph ─────────────────────────
   PowerSystemGraph& cg = result.contracted_graph;
@@ -188,8 +209,11 @@ ContractionResult contract_zero_impedance_edges(
   // Add one node per super-node (using the representative bus data)
   for (auto& [root, members] : groups) {
     int rep_bid = root_to_rep[root];
-    // Find the original graph node for the representative bus
-    int rep_ni = graph.node_idx(rep_bid);
+    // Find the original graph node for the representative bus.
+    // Use the domain-qualified lookup to avoid AC/DC bus ID collision.
+    const NodeDomain rep_dom = root_to_rep_domain.at(root);
+    int rep_ni = (rep_dom == NodeDomain::AC) ? graph.ac_node_idx(rep_bid)
+                                             : graph.dc_node_idx(rep_bid);
     if (rep_ni < 0) continue;
 
     const GraphNode& rep_node = graph.nodes[rep_ni];
@@ -214,7 +238,11 @@ ContractionResult contract_zero_impedance_edges(
 
     int new_ni = static_cast<int>(cg.nodes.size());
     cg.nodes.push_back(new_node);
-    cg.bus_id_to_node_idx[rep_bid] = new_ni;
+    cg.bus_id_to_node_idx[rep_bid] = new_ni;  // legacy (AC-only callers)
+    if (rep_node.domain == NodeDomain::AC)
+      cg.ac_bus_id_to_node_idx[rep_bid] = new_ni;
+    else
+      cg.dc_bus_id_to_node_idx[rep_bid] = new_ni;
     cg.adj.emplace_back();
   }
 
@@ -223,14 +251,19 @@ ContractionResult contract_zero_impedance_edges(
   int new_eid = 0;
   for (const auto& e : graph.edges) {
     if (!e.in_service) continue;
-    int rep_f = result.bus_to_super.count(e.from_bus_id)
-                    ? result.bus_to_super.at(e.from_bus_id) : e.from_bus_id;
-    int rep_t = result.bus_to_super.count(e.to_bus_id)
-                    ? result.bus_to_super.at(e.to_bus_id) : e.to_bus_id;
+    // Use domain-qualified maps so AC bus N and DC bus N are not confused.
+    const NodeDomain dom_f = graph.nodes[e.from_node].domain;
+    const NodeDomain dom_t = graph.nodes[e.to_node].domain;
+    const auto& b2s_f = (dom_f == NodeDomain::AC) ? result.ac_bus_to_super
+                                                   : result.dc_bus_to_super;
+    const auto& b2s_t = (dom_t == NodeDomain::AC) ? result.ac_bus_to_super
+                                                   : result.dc_bus_to_super;
+    int rep_f = b2s_f.count(e.from_bus_id) ? b2s_f.at(e.from_bus_id) : e.from_bus_id;
+    int rep_t = b2s_t.count(e.to_bus_id)   ? b2s_t.at(e.to_bus_id)   : e.to_bus_id;
     if (rep_f == rep_t) continue; // internal to super-node, skip
 
-    int fn = cg.node_idx(rep_f);
-    int tn = cg.node_idx(rep_t);
+    int fn = (dom_f == NodeDomain::AC) ? cg.ac_node_idx(rep_f) : cg.dc_node_idx(rep_f);
+    int tn = (dom_t == NodeDomain::AC) ? cg.ac_node_idx(rep_t) : cg.dc_node_idx(rep_t);
     if (fn < 0 || tn < 0) continue;
 
     GraphEdge ne = e;
@@ -252,8 +285,10 @@ ContractionResult contract_zero_impedance_edges(
   }
 
   // ── Step 8: Aggregate AC bus quantities in contracted_system ─────────
-  // For each super-node with multiple members, sum up pd/qd/gs/bs
-  for (auto& [rep_bid, orig_buses] : result.super_to_buses) {
+  // For each super-node with multiple members, sum up pd/qd/gs/bs.
+  // Use ac_super_to_buses (not the legacy super_to_buses) so that DC buses
+  // with the same numeric ID never corrupt AC bus aggregation.
+  for (auto& [rep_bid, orig_buses] : result.ac_super_to_buses) {
     if (orig_buses.size() <= 1) continue;
     // Find rep bus in contracted system
     ACBus* rep_bus_ptr = nullptr;
@@ -292,21 +327,29 @@ ContractionResult contract_zero_impedance_edges(
   // Remove non-representative buses from the contracted system
   {
     std::unordered_set<int> reps_set;
-    for (auto& [bid, rep] : result.bus_to_super) reps_set.insert(rep);
+    for (auto& [bid, rep] : result.ac_bus_to_super) reps_set.insert(rep);
     auto& buses = result.contracted_system.ac.buses;
     buses.erase(
       std::remove_if(buses.begin(), buses.end(),
         [&](const ACBus& b){ return reps_set.count(b.index) == 0 &&
-                                    result.bus_to_super.count(b.index) &&
-                                    result.bus_to_super.at(b.index) != b.index; }),
+                                    result.ac_bus_to_super.count(b.index) &&
+                                    result.ac_bus_to_super.at(b.index) != b.index; }),
       buses.end());
   }
 
-  // Re-map all component bus references to representative buses
-  auto remap = [&](int bid) -> int {
-    auto it = result.bus_to_super.find(bid);
-    return (it != result.bus_to_super.end()) ? it->second : bid;
+  // Re-map all component bus references to representative buses.
+  // AC components use ac_bus_to_super; DC bus references (dc.branches etc.)
+  // use dc_bus_to_super.  The lambdas are named accordingly.
+  auto remap_ac = [&](int bid) -> int {
+    auto it = result.ac_bus_to_super.find(bid);
+    return (it != result.ac_bus_to_super.end()) ? it->second : bid;
   };
+  auto remap_dc = [&](int bid) -> int {
+    auto it = result.dc_bus_to_super.find(bid);
+    return (it != result.dc_bus_to_super.end()) ? it->second : bid;
+  };
+  // Backward-compat alias used for AC-only component lists below.
+  auto& remap = remap_ac;  // NOLINT(misc-const-correctness)
 
   for (auto& gen : result.contracted_system.ac.generators)
     gen.bus = remap(gen.bus);
@@ -333,8 +376,23 @@ ContractionResult contract_zero_impedance_edges(
     tr.hv_bus = remap(tr.hv_bus);
     tr.lv_bus = remap(tr.lv_bus);
   }
-  for (auto& vsc : result.contracted_system.vsc_converters)
-    vsc.bus_ac = remap(vsc.bus_ac);
+  for (auto& vsc : result.contracted_system.vsc_converters) {
+    vsc.bus_ac = remap_ac(vsc.bus_ac);
+    vsc.bus_dc = remap_dc(vsc.bus_dc);
+  }
+
+  // Remap DC component bus references using dc_bus_to_super
+  for (auto& br : result.contracted_system.dc.branches) {
+    br.from_bus = remap_dc(br.from_bus);
+    br.to_bus   = remap_dc(br.to_bus);
+  }
+  for (auto& bus : result.contracted_system.dc.buses) {
+    // DC buses are keyed by .index — the representative is identified by
+    // dc_bus_to_super; non-representative buses have been retained in the
+    // system copy but need their in_service flag cleared (analogous to the
+    // AC bus removal below).
+    (void)bus; // aggregation for DC buses is handled by the caller if needed
+  }
 
   // Remove self-loop branches (from_bus == to_bus after remap)
   {

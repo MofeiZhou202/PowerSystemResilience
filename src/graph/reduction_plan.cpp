@@ -181,6 +181,7 @@ ReductionPlan make_reduction_plan(
                                   graph.edges[nbrs[1].first].edge_id};
       act.retained_buses     = {graph.nodes[nbrs[0].second].bus_id,
                                   graph.nodes[nbrs[1].second].bus_id};
+      act.bus_domain = cand.domain;
       act.reason = cand.reason;
       plan.actions.push_back(act);
       eliminated_buses.insert(cand.bus_id);
@@ -195,7 +196,9 @@ ReductionPlan make_reduction_plan(
   if (options.enable_pendant_reduction) {
     for (const auto& cand : candidates.candidates) {
       if (cand.type != CandidateType::PendantLoad) continue;
-      int ni = graph.node_idx(cand.bus_id);
+      int ni = (cand.domain == NodeDomain::AC)
+               ? graph.ac_node_idx(cand.bus_id)
+               : graph.dc_node_idx(cand.bus_id);
       if (ni < 0) continue;
       if (eliminated_buses.count(cand.bus_id)) continue;
 
@@ -213,6 +216,7 @@ ReductionPlan make_reduction_plan(
       act.eliminated_buses    = {cand.bus_id};
       act.eliminated_branches = {graph.edges[nbr.first].edge_id};
       act.retained_buses      = {graph.nodes[nbr.second].bus_id};
+      act.bus_domain = cand.domain;
       act.reason = cand.reason;
       plan.actions.push_back(act);
       eliminated_buses.insert(cand.bus_id);

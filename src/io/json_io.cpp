@@ -3362,10 +3362,38 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
     row[jpc_idx::CONV_PMIN] = c.pmin_mw;
     row[jpc_idx::CONV_QMAX] = c.qmax_mvar;
     row[jpc_idx::CONV_QMIN] = c.qmin_mvar;
+    row[jpc_idx::CONV_LOSS_A]             = c.loss_mw;
+    row[jpc_idx::CONV_LOSS_B]             = c.loss_percent;
+    row[jpc_idx::CONV_AREA]               = 0.0;
+    row[jpc_idx::CONV_GRID_FORMING]       = c.grid_forming ? 1.0 : 0.0;
+    row[jpc_idx::CONV_CONTROL_STRATEGY]   = 0.0;
     converter.push_back(row_to_json_array(row));
   }
   root["converter"] = converter;
-  
+
+  // VSC supplemental data — fields not expressible in the fixed-column matrix.
+  // Written as a parallel positional array: vscdata[i] corresponds to
+  // converter[i].  On read these are merged back by position index.
+  {
+    json vscdata = json::array();
+    for (const auto& c : sys.vsc_converters) {
+      json obj;
+      obj["index"]              = c.index;
+      obj["name"]               = c.name;
+      obj["forced_outage_rate"] = c.forced_outage_rate;
+      obj["mttr_hr"]            = c.mttr_hr;
+      obj["mtbf_hr"]            = c.mtbf_hr;
+      obj["t_scheduled_hr"]     = c.t_scheduled_hr;
+      obj["r_conv_ac_pu"]       = c.r_conv_ac_pu;
+      obj["x_sc_pu"]            = c.x_sc_pu;
+      obj["vn_ac_kv"]           = c.vn_ac_kv;
+      obj["vn_dc_kv"]           = c.vn_dc_kv;
+      obj["controllable"]       = c.controllable;
+      vscdata.push_back(obj);
+    }
+    root["vscdata"] = vscdata;
+  }
+
   // External grids matrix
   json ext_grid = json::array();
   for (const auto& e : sys.ac.external_grids) {
@@ -3703,10 +3731,34 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       c.pmin_mw = r.size() > jpc_idx::CONV_PMIN ? r[jpc_idx::CONV_PMIN] : -100.0;
       c.qmax_mvar = r.size() > jpc_idx::CONV_QMAX ? r[jpc_idx::CONV_QMAX] : 50.0;
       c.qmin_mvar = r.size() > jpc_idx::CONV_QMIN ? r[jpc_idx::CONV_QMIN] : -50.0;
+      c.loss_mw   = r.size() > jpc_idx::CONV_LOSS_A ? r[jpc_idx::CONV_LOSS_A] : 0.0;
+      c.loss_percent = r.size() > jpc_idx::CONV_LOSS_B ? r[jpc_idx::CONV_LOSS_B] : 0.0;
+      c.grid_forming = r.size() > jpc_idx::CONV_GRID_FORMING && r[jpc_idx::CONV_GRID_FORMING] > 0.5;
       sys.vsc_converters.push_back(c);
     }
   }
-  
+
+  // VSC supplemental data — merge by position index into the converter list
+  // loaded from the "converter" matrix above.
+  if (root.contains("vscdata") && root["vscdata"].is_array()) {
+    const auto& vd = root["vscdata"];
+    for (size_t pos = 0; pos < vd.size() && pos < sys.vsc_converters.size(); ++pos) {
+      const auto& j = vd[pos];
+      auto& c = sys.vsc_converters[pos];
+      c.index              = jget<int>(j, "index", c.index);
+      c.name               = jget<std::string>(j, "name", c.name);
+      c.forced_outage_rate = jget<double>(j, "forced_outage_rate", c.forced_outage_rate);
+      c.mttr_hr            = jget<double>(j, "mttr_hr", c.mttr_hr);
+      c.mtbf_hr            = jget<double>(j, "mtbf_hr", c.mtbf_hr);
+      c.t_scheduled_hr     = jget<double>(j, "t_scheduled_hr", c.t_scheduled_hr);
+      c.r_conv_ac_pu       = jget<double>(j, "r_conv_ac_pu", c.r_conv_ac_pu);
+      c.x_sc_pu            = jget<double>(j, "x_sc_pu", c.x_sc_pu);
+      c.vn_ac_kv           = jget<double>(j, "vn_ac_kv", c.vn_ac_kv);
+      c.vn_dc_kv           = jget<double>(j, "vn_dc_kv", c.vn_dc_kv);
+      c.controllable       = jget<bool>(j, "controllable", c.controllable);
+    }
+  }
+
   // External grids
   if (root.contains("ext_grid")) {
     int idx = 0;

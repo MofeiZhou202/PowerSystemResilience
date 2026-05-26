@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/graph/power_system_graph.hpp"
 #include "hacdcpf/model/system.hpp"
 #include "hacdcpf/solver/branch_and_cut.hpp"
 
@@ -59,27 +60,52 @@ struct TopoReconfOptions {
 };
 
 // ── 拓扑重构结果 ───────────────────────────────────────────────────────
+
+/// Unambiguous branch reference for hybrid AC/DC systems.
+/// Holds both the edge category and the component-model index (.index field),
+/// replacing the bare int IDs in open_branch_ids / closed_branch_ids which
+/// conflate AC, DC, and VSC indices in the same numeric space.
+struct BranchRef {
+  graph::EdgeCategory category{graph::EdgeCategory::AC_Line}; ///< AC_Line, DC_Line, or VSC_Coupling
+  int                 index{-1};                              ///< Component .index field
+};
+
 struct TopoReconfResult {
   bool feasible{false};
   bool optimal{false};
 
-  /// 断开的支路/转换器编号。
-  /// ⚠ 混合系统：值为内部统一边索引 (edge_orig_idx)，前 nl_ac 条对应
-  /// ACBranch::index，后续为 DCBranch::index / VSCConverter::index。
-  /// 下游若将所有 ID 作为 ACBranch::index 使用会误操作同号的 DC/VSC 设备。
-  std::vector<int> open_branch_ids;
-  /// 闭合的支路/转换器编号（含义同 open_branch_ids）。
-  std::vector<int> closed_branch_ids;
+  // ── Structured branch references (unambiguous in hybrid systems) ────
+  /// Branches that are open (de-energised) in the optimal topology.
+  std::vector<BranchRef> open_branches;
+  /// Branches that are closed (energised) in the optimal topology.
+  std::vector<BranchRef> closed_branches;
+  /// Branches newly closed relative to the initial topology.
+  std::vector<BranchRef> switched_on;
+  /// Branches newly opened relative to the initial topology.
+  std::vector<BranchRef> switched_off;
 
-  /// 新闭合的联络开关（含义同 open_branch_ids）。
+  // ── Legacy integer ID vectors (backward compatibility) ─────────────
+  /// @deprecated  Use open_branches instead.  Value is edge_orig_idx:
+  ///   [0, nl_ac) → ACBranch::index, [nl_ac, nl) → DCBranch::index,
+  ///   [nl, nl+nl_vsc) → VSCConverter::index.  In hybrid systems these
+  ///   ranges may overlap, making bare ints ambiguous.
+  std::vector<int> open_branch_ids;
+  /// @deprecated  Use closed_branches instead.  Same caveat as open_branch_ids.
+  std::vector<int> closed_branch_ids;
+  /// @deprecated  Use switched_on instead.
   std::vector<int> switched_on_ids;
-  /// 新断开的支路（含义同 open_branch_ids）。
+  /// @deprecated  Use switched_off instead.
   std::vector<int> switched_off_ids;
 
   int n_switch_on{0};
   int n_switch_off{0};
 
   double base_loss_mw{0.0};
+  /// Approximate post-reconfiguration resistive loss [MW].
+  /// Computed as Σ r_pu × base_mva for all closed branches, assuming nominal
+  /// current (1 pu) on every branch.  This is a topology-comparison proxy
+  /// only — it is NOT the actual solved power loss.  For accurate loss values
+  /// run a full power flow on the reconfigured topology.
   double reconf_loss_mw{0.0};
   double loss_reduction_mw{0.0};
   double loss_reduction_pct{0.0};
