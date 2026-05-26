@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "hacdcpf/graph/power_system_graph.hpp"
+
 namespace hacdcpf::graph {
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -30,6 +32,7 @@ struct SeriesReductionRecord {
   double r_eq{0.0};         ///< Equivalent resistance [pu]
   double x_eq{0.0};         ///< Equivalent reactance [pu]
   double b_eq{0.0};         ///< Equivalent susceptance [pu]
+  NodeDomain domain{NodeDomain::AC}; ///< Domain of the eliminated bus (AC or DC)
 };
 
 struct PendantReductionRecord {
@@ -38,6 +41,7 @@ struct PendantReductionRecord {
   int    branch_id{0};
   double p_load_absorbed{0.0}; ///< P transferred to parent [pu]
   double q_load_absorbed{0.0}; ///< Q transferred to parent [pu]
+  NodeDomain domain{NodeDomain::AC}; ///< Domain of the eliminated bus (AC or DC)
 };
 
 struct KronReductionRecord {

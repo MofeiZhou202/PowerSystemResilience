@@ -694,6 +694,11 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
         result.branch_mu_upper[bi] = sol.box_dual_ub[v] / base_mva;
       }
     }
+    // H3: box duals for bounded Pf variables are unreliable whenever branch
+    // limits are active (see comment at the LP formulation block above).
+    // Always set branch_mu_valid = false until a proper KKT-based extraction
+    // is implemented.
+    result.branch_mu_valid = false;
   }
   
   // Extract load shedding results
@@ -741,16 +746,16 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
           dead_buses.insert(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end());
         }
       }
-      if (!sys.ac.loads.empty()) {
-        for (const auto& ld : sys.ac.loads) {
-          if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
-          direct_shed_mw += std::max(0.0, ld.p_mw * ld.scaling);
-        }
-      } else {
-        for (const auto& b : sys.ac.buses) {
-          if (!dead_buses.count(b.index)) continue;
-          direct_shed_mw += std::max(0.0, b.pd_mw);
-        }
+      // P1a: DC-OPF formulation adds bus.pd_mw and ac.loads additively as
+      // demand; direct-shed accounting must mirror the same convention to
+      // avoid under-counting curtailment when both sources are present.
+      for (const auto& b : sys.ac.buses) {
+        if (!dead_buses.count(b.index)) continue;
+        direct_shed_mw += std::max(0.0, b.pd_mw);
+      }
+      for (const auto& ld : sys.ac.loads) {
+        if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
+        direct_shed_mw += std::max(0.0, ld.p_mw * ld.scaling);
       }
       const bool has_valid = std::any_of(
           topo.islands.begin(), topo.islands.end(),

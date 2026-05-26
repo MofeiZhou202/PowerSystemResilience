@@ -83,6 +83,32 @@ static HybridPowerSystem make_ring_4bus() {
   return sys;
 }
 
+static HybridPowerSystem make_single_bus_shortage() {
+  HybridPowerSystem sys;
+
+  ACBus b;
+  b.index = 1;
+  b.bus_type = BusType::SLACK;
+  b.pd_mw = 2.0;
+  b.vm_pu = 1.0;
+  b.in_service = true;
+  sys.ac.buses = {b};
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.in_service = true;
+  g.is_slack = true;
+  g.pmax_mw = 1.0;
+  g.pmin_mw = 0.0;
+  g.qmax_mvar = 10.0;
+  g.qmin_mvar = -10.0;
+  g.cost_c1 = 1.0;
+  sys.ac.generators = {g};
+
+  return sys;
+}
+
 // ── Test cases ────────────────────────────────────────────────────────────────
 
 TEST_CASE("Resilience: empty system returns error", "[resilience]") {
@@ -371,6 +397,57 @@ TEST_CASE("Resilience: peak shed non-negative", "[resilience]") {
   CHECK(r.total_served_mwh >= 0.0);
   CHECK(r.total_demand_mwh >= 0.0);
   CHECK(r.total_served_mwh <= r.total_demand_mwh + 1e-6);
+}
+
+TEST_CASE("Sequential MC: N-0 baseline curtailment is counted every hour",
+          "[reliability][sequential]") {
+  auto sys = make_single_bus_shortage();
+
+  LoadProfile profile;
+  profile.factors = {1.0, 1.0, 1.0, 1.0};
+
+  ReliabilityOptions opts;
+  opts.max_iterations = 1;
+  opts.hours_per_year = 4;
+  opts.seed = 1234;
+  opts.compute_tail_risk = false;
+
+  const auto r = run_sequential_mc(sys, profile, opts);
+
+  CHECK(r.iterations_used == 1);
+  CHECK(r.eens_mwh_yr == Approx(4.0).margin(1e-6));
+  CHECK(r.lole_hr_yr == Approx(4.0).margin(1e-6));
+  REQUIRE(r.annual_eens.size() == 1);
+  CHECK(r.annual_eens.front() == Approx(4.0).margin(1e-6));
+}
+
+TEST_CASE("Sequential MC: inactive baseline components are not sampled as failures",
+          "[reliability][sequential]") {
+  auto sys = make_single_bus_shortage();
+
+  ACBranch inactive;
+  inactive.index = 99;
+  inactive.from_bus = 1;
+  inactive.to_bus = 1;
+  inactive.in_service = false;
+  inactive.failure_rate = 1.0e9;
+  inactive.mttr_hr = 1000.0;
+  sys.ac.branches.push_back(inactive);
+
+  LoadProfile profile;
+  profile.factors = {1.0, 1.0, 1.0, 1.0};
+
+  ReliabilityOptions opts;
+  opts.max_iterations = 1;
+  opts.hours_per_year = 4;
+  opts.seed = 1234;
+  opts.compute_tail_risk = false;
+
+  const auto r = run_sequential_mc(sys, profile, opts);
+
+  for (const auto& component : r.critical_components) {
+    CHECK(component.component_type != "ACBranch");
+  }
 }
 
 // ── FMEA budget-truncation tests ─────────────────────────────────────────────

@@ -133,9 +133,12 @@ struct ReliabilityResult {
 
   // Weak point detection
   struct ComponentImportance {
-    int index;            // generator or branch index (0-based)
-    bool is_generator;    // true = generator, false = branch
+    int index;            // within-type index (0-based within component_type group)
+    bool is_generator;    // true = generator, false = other
     double importance;    // P(component down | system failure)
+    std::string component_type;  // e.g. "Generator", "ACBranch", "VSCConverter"
+    std::string component_name;  // e.g. "Generator[2]", "ACBranch[5]"
+    size_t global_state_index{0}; // raw index into the flat component state vector
   };
   std::vector<ComponentImportance> critical_components;
 

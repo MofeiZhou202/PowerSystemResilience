@@ -155,6 +155,11 @@ double unavail_from_mttf(double mttf_hr, double mttr_hr) {
 // ═══════════════════════════════════════════════════════════════════════
 LoadProfile build_ieee_rts24_load_profile(int hours_per_year) {
   LoadProfile profile;
+  if (hours_per_year <= 0) {
+    spdlog::warn("build_ieee_rts24_load_profile: hours_per_year={} <= 0; returning empty profile",
+                 hours_per_year);
+    return profile;
+  }
   profile.factors.resize(hours_per_year);
 
   for (int h = 0; h < hours_per_year; ++h) {

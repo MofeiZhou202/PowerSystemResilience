@@ -17,6 +17,7 @@
 // No Julia runtime is required.
 // =============================================================================
 
+#include <climits>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -85,6 +86,23 @@ struct ThreeStageReliabilityResult {
 
   /// Reserved for backward compatibility with the historical process bridge.
   std::filesystem::path result_json_path;
+
+  /// Human-readable description of known modelling approximations in this
+  /// result.  Empty when the model is operating within its designed scope.
+  ///
+  /// Current limitations always present:
+  ///  - Stage 2 (switching) is connectivity-only: in-service branches
+  ///    reconnect automatically; already-closed switches stay closed;
+  ///    normally-open AC switches are closed greedily up to
+  ///    ThreeStageReliabilityOptions::max_switch_operations per fault.
+  ///    No radial-topology, line-flow, or voltage constraints are checked.
+  ///  - VSC converters and DC/DC converters are treated as lossless graph
+  ///    edges; their power-flow setpoints are NOT optimised.  psop vectors
+  ///    in FaultDetail are filled with zeros.
+  ///  - DC loads and DC generation are included in the connectivity model
+  ///    (reachability), but no DC power-flow constraints are enforced.
+  ///  - The shed-decision model is all-or-nothing per load point (binary z_i).
+  std::string model_limitations;
 };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
@@ -108,6 +126,15 @@ struct ThreeStageReliabilityOptions {
 
   /// Deprecated: ignored by the native C++ implementation.
   bool inherit_stdio{true};
+
+  /// Maximum number of switching operations allowed during Stage 2 (post-fault
+  /// switching restoration).  Each normally-open AC switch that is closed in
+  /// Stage 2 to merge two distinct connected components counts as one
+  /// operation.  Switches within the same component are free.
+  /// Use INT_MAX (default) to impose no limit.  A value of 0 disables all
+  /// Stage-2 normally-open switch closing.  Negative values are treated as 0.
+  /// Typical field values are 1–5 operations per fault.
+  int max_switch_operations{INT_MAX};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

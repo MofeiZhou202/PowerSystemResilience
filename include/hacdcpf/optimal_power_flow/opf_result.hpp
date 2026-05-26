@@ -136,6 +136,10 @@ struct DCOPFResult {
   std::vector<double> lmp;
   std::vector<double> branch_mu_lower;
   std::vector<double> branch_mu_upper;
+  /// True only when branch_mu_lower/upper are reliable congestion duals.
+  /// Current native supporting-LP extraction does not recover bounded Pf
+  /// variable duals robustly, so this remains false for branch-limit studies.
+  bool branch_mu_valid{false};
 
   std::vector<double> load_shedding_mw;
   double total_load_shedding_mw{0.0};

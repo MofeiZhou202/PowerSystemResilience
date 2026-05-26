@@ -464,13 +464,19 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     const double hour = static_cast<double>(t) * dt;
     const double load_mult = sample_profile(load_prof, hour);
     const double ren_mult = sample_profile(ren_prof, hour);
-    if (!sys.ac.loads.empty()) {
-      for (const auto& ld : sys.ac.loads) {
+    // P1b: DC-OPF formulation adds bus.pd_mw and ac.loads additively as demand;
+    // the demand matrix must mirror the same convention.  Both sources are
+    // always accumulated unconditionally so neither is silently omitted.
+    for (int i = 0; i < n_bus; ++i) {
+      const double demand = std::max(0.0, sys.ac.buses[static_cast<size_t>(i)].pd_mw * opts.load_scale_factor * load_mult);
+      out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)] += demand;
+    }
+    for (const auto& ld : sys.ac.loads) {
         if (!ld.in_service) continue;
         const auto it = bus_pos.find(ld.bus);
         if (it == bus_pos.end()) continue;
         const int i = it->second;
-        const double demand = std::max(0.0, ld.p_mw * std::max(ld.scaling, 1.0) * opts.load_scale_factor * load_mult);
+        const double demand = std::max(0.0, ld.p_mw * std::max(0.0, ld.scaling) * opts.load_scale_factor * load_mult);
         out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)] += demand;
         switch (ld.priority) {
           case LoadPriority::Critical: out.buses[static_cast<size_t>(i)].priority = PriorityTier::Critical; break;
@@ -482,12 +488,6 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
             break;
           case LoadPriority::Low: break;
         }
-      }
-    } else {
-      for (int i = 0; i < n_bus; ++i) {
-        const double demand = std::max(0.0, sys.ac.buses[static_cast<size_t>(i)].pd_mw * opts.load_scale_factor * load_mult);
-        out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)] += demand;
-      }
     }
     for (int i = 0; i < n_bus; ++i) system_peak_demand_mw = std::max(system_peak_demand_mw, out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)]);
     for (const auto& rg : sys.ac.renewable_gens) {
@@ -532,7 +532,7 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     const auto it = bus_pos.find(sg.bus);
     if (it == bus_pos.end()) continue;
     auto& bus = out.buses[static_cast<size_t>(it->second)];
-    const double cap = std::max(0.0, (sg.pmax_mw > 0.0 ? sg.pmax_mw : sg.p_mw) * std::max(sg.scaling, 1.0));
+    const double cap = std::max(0.0, (sg.pmax_mw > 0.0 ? sg.pmax_mw : sg.p_mw) * std::max(0.0, sg.scaling));
     bus.dispatchable_gen_cap_mw += cap;
     bus.base_source_cap_mw += cap;
     bus.base_source_available = bus.base_source_available || cap > kEps;

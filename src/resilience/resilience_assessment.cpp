@@ -145,8 +145,8 @@ struct IslandInfo {
 using Adj = std::vector<std::vector<std::pair<int, double>>>;
 
 template <class T>
-T positive_or(const T& value, const T& fallback) {
-  return value > T(0) ? value : fallback;
+T nonnegative_scale(const T& value) {
+  return std::max(T(0), value);
 }
 
 std::unordered_map<int, int> make_bus_pos_map(const HybridPowerSystem& sys) {
@@ -176,25 +176,12 @@ std::vector<BusLoadEntry> collect_bus_loads(const HybridPowerSystem& sys,
                                             const std::unordered_map<int, int>& bus_pos) {
   std::vector<BusLoadEntry> loads;
 
-  if (!sys.ac.loads.empty()) {
-    loads.reserve(sys.ac.loads.size());
-    for (const auto& ld : sys.ac.loads) {
-      if (!ld.in_service) continue;
-      const auto it = bus_pos.find(ld.bus);
-      if (it == bus_pos.end()) continue;
-      const auto& bus = sys.ac.buses[static_cast<size_t>(it->second)];
-      BusLoadEntry e;
-      e.bus_pos = it->second;
-      e.demand_mw = std::max(0.0, ld.p_mw * positive_or(ld.scaling, 1.0) * load_scale_factor);
-      e.importance = std::max(bus.importance, priority_weights(ld.priority).importance);
-      e.customers = ld.n_customers > 0 ? ld.n_customers
-                                       : std::max(1, static_cast<int>(std::lround(e.demand_mw * priority_weights(ld.priority).customers_per_mw)));
-      if (e.demand_mw > 0.0) loads.push_back(e);
-    }
-    return loads;
-  }
-
-  loads.reserve(sys.ac.buses.size());
+  // P1b: DC-OPF formulation adds bus.pd_mw and ac.loads additively as demand;
+  // resilience demand collection must mirror the same convention.  Both sources
+  // are always iterated unconditionally so neither is silently omitted when the
+  // other is present.  Callers aggregate demand_by_bus by bus_pos, so separate
+  // entries for the same bus are correctly summed downstream.
+  loads.reserve(sys.ac.buses.size() + sys.ac.loads.size());
   for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
     const auto& bus = sys.ac.buses[i];
     const double demand_mw = std::max(0.0, bus.pd_mw * load_scale_factor);
@@ -206,6 +193,19 @@ std::vector<BusLoadEntry> collect_bus_loads(const HybridPowerSystem& sys,
     e.customers = bus.n_customers > 0 ? bus.n_customers
                                       : std::max(1, static_cast<int>(std::lround(demand_mw * 100.0)));
     loads.push_back(e);
+  }
+  for (const auto& ld : sys.ac.loads) {
+    if (!ld.in_service) continue;
+    const auto it = bus_pos.find(ld.bus);
+    if (it == bus_pos.end()) continue;
+    const auto& bus = sys.ac.buses[static_cast<size_t>(it->second)];
+    BusLoadEntry e;
+    e.bus_pos = it->second;
+    e.demand_mw = std::max(0.0, ld.p_mw * nonnegative_scale(ld.scaling) * load_scale_factor);
+    e.importance = std::max(bus.importance, priority_weights(ld.priority).importance);
+    e.customers = ld.n_customers > 0 ? ld.n_customers
+                                     : std::max(1, static_cast<int>(std::lround(e.demand_mw * priority_weights(ld.priority).customers_per_mw)));
+    if (e.demand_mw > 0.0) loads.push_back(e);
   }
   return loads;
 }
@@ -384,7 +384,7 @@ double generator_capacity_mw(const Generator& g) {
 
 double static_generator_capacity_mw(const StaticGenerator& g) {
   const double p = g.pmax_mw > 0.0 ? g.pmax_mw : g.p_mw;
-  return std::max(0.0, p * positive_or(g.scaling, 1.0));
+  return std::max(0.0, p * nonnegative_scale(g.scaling));
 }
 
 double renewable_capacity_mw(const RenewableGen& g) {
@@ -1035,7 +1035,7 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys) {
       if (!ld.in_service) continue;
       const auto it = bus_pos.find(ld.bus);
       if (it == bus_pos.end()) continue;
-      bus_load[static_cast<size_t>(it->second)] += ld.p_mw * positive_or(ld.scaling, 1.0);
+      bus_load[static_cast<size_t>(it->second)] += ld.p_mw * nonnegative_scale(ld.scaling);
     }
   } else {
     for (size_t i = 0; i < sys.ac.buses.size(); ++i) bus_load[i] = std::max(0.0, sys.ac.buses[i].pd_mw);

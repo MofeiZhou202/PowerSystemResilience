@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <numeric>
 #include <random>
@@ -36,20 +37,28 @@ double compute_unavailability_lambda(double lambda_per_yr, double repair_hr) {
   return lambda_per_yr / (lambda_per_yr + mu);
 }
 
-// Hash function for state vectors (for state deduplication)
-// Uses a position-sensitive FNV-style contribution so that components at
-// positions i and i+64 produce distinct hash values (avoids BUG-1 collision).
-size_t hash_state(const std::vector<bool>& state) {
-  size_t h = 0;
+using StateKey = std::vector<std::uint64_t>;
+
+StateKey pack_state_key(const std::vector<bool>& state) {
+  StateKey key((state.size() + 63U) / 64U, 0U);
   for (size_t i = 0; i < state.size(); ++i) {
     if (state[i]) {
-      // Mix the position index into the contribution so each slot is unique.
-      size_t val = (i + 1) * 2654435761ULL ^ 0x9e3779b97f4a7c15ULL;
-      h ^= val + 0x9e3779b9 + (h << 6) + (h >> 2);
+      key[i / 64U] |= (std::uint64_t{1} << (i % 64U));
     }
   }
-  return h;
+  return key;
 }
+
+struct StateKeyHash {
+  size_t operator()(const StateKey& key) const noexcept {
+    size_t h = 1469598103934665603ULL;
+    for (std::uint64_t word : key) {
+      h ^= static_cast<size_t>(word);
+      h *= 1099511628211ULL;
+    }
+    return h;
+  }
+};
 
 // Returns total in-service DC load (MW) for the given system.
 // Used to populate model_limitations in exported result structs.
@@ -63,6 +72,21 @@ static double total_inservice_dc_load_mw(const HybridPowerSystem& sys) {
   return total;
 }
 
+// Returns true when the system contains any DC/VSC component (buses, branches,
+// loads, VSC converters, DC/DC converters, DC CBs, DC storage, DC PV).
+// Used as the trigger for model_limitations warnings — AC-only OPF cannot
+// faithfully model such systems regardless of whether DC load is currently > 0.
+static bool has_dc_rich_components(const HybridPowerSystem& sys) {
+  return !sys.dc.buses.empty()               ||
+         !sys.dc.branches.empty()            ||
+         !sys.dc.loads.empty()               ||
+         !sys.vsc_converters.empty()         ||
+         !sys.dc.dcdc_converters.empty()     ||
+         !sys.dc.dc_circuit_breakers.empty() ||
+         !sys.dc.storage.empty()             ||
+         !sys.dc.pv_arrays.empty();
+}
+
 // State evaluation result
 struct StateEvalResult {
   double curtailment_mw{0.0};
@@ -71,36 +95,180 @@ struct StateEvalResult {
 };
 
 // Compute full component count for extended state vector:
-// [generators | AC branches | static gens | renewable gens | storage |
-//  VSC converters | DC branches | transformers_2w | transformers_3w]
+// [generators | AC branches | static gens | renewable gens | AC storage |
+//  VSC converters | DC branches | transformers_2w | transformers_3w |
+//  DC/DC converters | DC circuit breakers | DC storage | DC PV arrays |
+//  AC switches | AC circuit breakers]
 struct ComponentOffsets {
   size_t ng, nl, nsg, nrg, nst, nvsc, ndb, nt2, nt3;
+  size_t ndcdc, ndccb, ndcst, ndcpv, nsw, ncb;
+  size_t npvs;    ///< ac.pv_systems (PVSystem)
+  size_t ndcsg;   ///< dc.static_generators (StaticGenerator AC-type in DC container)
+  size_t ndcsgx;  ///< dc.dc_static_generators (StaticGeneratorDC)
   size_t off_gen, off_br, off_sg, off_rg, off_st, off_vsc, off_db, off_t2, off_t3;
+  size_t off_dcdc, off_dccb, off_dcst, off_dcpv, off_sw, off_cb;
+  size_t off_pvs, off_dcsg, off_dcsgx;
   size_t total;
-  
+
   ComponentOffsets(const HybridPowerSystem& sys) {
-    ng  = sys.ac.generators.size();
-    nl  = sys.ac.branches.size();
-    nsg = sys.ac.static_generators.size();
-    nrg = sys.ac.renewable_gens.size();
-    nst = sys.ac.storage.size();
-    nvsc = sys.vsc_converters.size();
-    ndb = sys.dc.branches.size();
-    nt2 = sys.ac.transformers_2w.size();
-    nt3 = sys.ac.transformers_3w.size();
-    
-    off_gen = 0;
-    off_br  = ng;
-    off_sg  = off_br + nl;
-    off_rg  = off_sg + nsg;
-    off_st  = off_rg + nrg;
-    off_vsc = off_st + nst;
-    off_db  = off_vsc + nvsc;
-    off_t2  = off_db + ndb;
-    off_t3  = off_t2 + nt2;
-    total   = off_t3 + nt3;
+    ng    = sys.ac.generators.size();
+    nl    = sys.ac.branches.size();
+    nsg   = sys.ac.static_generators.size();
+    nrg   = sys.ac.renewable_gens.size();
+    nst   = sys.ac.storage.size();
+    nvsc  = sys.vsc_converters.size();
+    ndb   = sys.dc.branches.size();
+    nt2   = sys.ac.transformers_2w.size();
+    nt3   = sys.ac.transformers_3w.size();
+    ndcdc = sys.dc.dcdc_converters.size();
+    ndccb = sys.dc.dc_circuit_breakers.size();
+    ndcst = sys.dc.storage.size();
+    ndcpv = sys.dc.pv_arrays.size();
+    nsw   = sys.ac.switches.size();
+    ncb   = sys.ac.circuit_breakers.size();
+    npvs  = sys.ac.pv_systems.size();
+    ndcsg = sys.dc.static_generators.size();
+    ndcsgx= sys.dc.dc_static_generators.size();
+
+    off_gen   = 0;
+    off_br    = ng;
+    off_sg    = off_br   + nl;
+    off_rg    = off_sg   + nsg;
+    off_st    = off_rg   + nrg;
+    off_vsc   = off_st   + nst;
+    off_db    = off_vsc  + nvsc;
+    off_t2    = off_db   + ndb;
+    off_t3    = off_t2   + nt2;
+    off_dcdc  = off_t3   + nt3;
+    off_dccb  = off_dcdc + ndcdc;
+    off_dcst  = off_dccb + ndccb;
+    off_dcpv  = off_dcst + ndcst;
+    off_sw    = off_dcpv + ndcpv;
+    off_cb    = off_sw   + nsw;
+    off_pvs   = off_cb   + ncb;
+    off_dcsg  = off_pvs  + npvs;
+    off_dcsgx = off_dcsg + ndcsg;
+    total     = off_dcsgx + ndcsgx;
   }
 };
+
+// Decode a flat state-vector index c into {within-type index, type name}.
+// Must be called after ComponentOffsets is constructed.
+static std::pair<int, std::string>
+decode_component(size_t c, const ComponentOffsets& co) {
+  if      (c < co.off_br)    return {int(c - co.off_gen),   "Generator"};
+  else if (c < co.off_sg)    return {int(c - co.off_br),    "ACBranch"};
+  else if (c < co.off_rg)    return {int(c - co.off_sg),    "StaticGen"};
+  else if (c < co.off_st)    return {int(c - co.off_rg),    "RenewableGen"};
+  else if (c < co.off_vsc)   return {int(c - co.off_st),    "ACStorage"};
+  else if (c < co.off_db)    return {int(c - co.off_vsc),   "VSCConverter"};
+  else if (c < co.off_t2)    return {int(c - co.off_db),    "DCBranch"};
+  else if (c < co.off_t3)    return {int(c - co.off_t2),    "Transformer2W"};
+  else if (c < co.off_dcdc)  return {int(c - co.off_t3),    "Transformer3W"};
+  else if (c < co.off_dccb)  return {int(c - co.off_dcdc),  "DCDCConverter"};
+  else if (c < co.off_dcst)  return {int(c - co.off_dccb),  "DCCircuitBreaker"};
+  else if (c < co.off_dcpv)  return {int(c - co.off_dcst),  "DCStorage"};
+  else if (c < co.off_sw)    return {int(c - co.off_dcpv),  "DCPVArray"};
+  else if (c < co.off_cb)    return {int(c - co.off_sw),    "ACSwitch"};
+  else if (c < co.off_pvs)   return {int(c - co.off_cb),    "ACCircuitBreaker"};
+  else if (c < co.off_dcsg)  return {int(c - co.off_pvs),   "ACPVSystem"};
+  else if (c < co.off_dcsgx) return {int(c - co.off_dcsg),  "DCStaticGenAC"};
+  else                       return {int(c - co.off_dcsgx), "DCStaticGen"};
+}
+
+// Build the display name for a component from the actual system data.
+// Uses component.index (original element ID) and component.name (business
+// label) instead of the 0-based vector position, so that non-contiguous
+// numbering and named components are represented faithfully.
+// Format: "TypeName[index]" or "TypeName[name(index)]" when name is present.
+static std::string resolve_component_name(
+    int vec_idx, const std::string& type_name,
+    const HybridPowerSystem& sys)
+{
+  auto fmt = [&](int id, const std::string& nm) -> std::string {
+    return type_name + "[" +
+           (nm.empty() ? std::to_string(id) : nm + "(" + std::to_string(id) + ")") +
+           "]";
+  };
+  if (type_name == "Generator"       && vec_idx < (int)sys.ac.generators.size())
+    { const auto& x = sys.ac.generators[vec_idx];      return fmt(x.index, x.name); }
+  if (type_name == "ACBranch"        && vec_idx < (int)sys.ac.branches.size())
+    { const auto& x = sys.ac.branches[vec_idx];        return fmt(x.index, x.name); }
+  if (type_name == "StaticGen"       && vec_idx < (int)sys.ac.static_generators.size())
+    { const auto& x = sys.ac.static_generators[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "RenewableGen"    && vec_idx < (int)sys.ac.renewable_gens.size())
+    { const auto& x = sys.ac.renewable_gens[vec_idx];  return fmt(x.index, x.name); }
+  if (type_name == "ACStorage"       && vec_idx < (int)sys.ac.storage.size())
+    { const auto& x = sys.ac.storage[vec_idx];         return fmt(x.index, x.name); }
+  if (type_name == "VSCConverter"    && vec_idx < (int)sys.vsc_converters.size())
+    { const auto& x = sys.vsc_converters[vec_idx];     return fmt(x.index, x.name); }
+  if (type_name == "DCBranch"        && vec_idx < (int)sys.dc.branches.size())
+    { const auto& x = sys.dc.branches[vec_idx];        return fmt(x.index, x.name); }
+  if (type_name == "Transformer2W"   && vec_idx < (int)sys.ac.transformers_2w.size())
+    { const auto& x = sys.ac.transformers_2w[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "Transformer3W"   && vec_idx < (int)sys.ac.transformers_3w.size())
+    { const auto& x = sys.ac.transformers_3w[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "DCDCConverter"   && vec_idx < (int)sys.dc.dcdc_converters.size())
+    { const auto& x = sys.dc.dcdc_converters[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "DCCircuitBreaker"&& vec_idx < (int)sys.dc.dc_circuit_breakers.size())
+    { const auto& x = sys.dc.dc_circuit_breakers[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "DCStorage"       && vec_idx < (int)sys.dc.storage.size())
+    { const auto& x = sys.dc.storage[vec_idx];         return fmt(x.index, x.name); }
+  if (type_name == "DCPVArray"       && vec_idx < (int)sys.dc.pv_arrays.size())
+    { const auto& x = sys.dc.pv_arrays[vec_idx];       return fmt(x.index, x.name); }
+  if (type_name == "ACSwitch"        && vec_idx < (int)sys.ac.switches.size())
+    { const auto& x = sys.ac.switches[vec_idx];        return fmt(x.index, x.name); }
+  if (type_name == "ACCircuitBreaker"&& vec_idx < (int)sys.ac.circuit_breakers.size())
+    { const auto& x = sys.ac.circuit_breakers[vec_idx]; return fmt(x.index, x.name); }
+  if (type_name == "ACPVSystem"       && vec_idx < (int)sys.ac.pv_systems.size())
+    { const auto& x = sys.ac.pv_systems[vec_idx];           return fmt(x.index, x.name); }
+  if (type_name == "DCStaticGenAC"    && vec_idx < (int)sys.dc.static_generators.size())
+    { const auto& x = sys.dc.static_generators[vec_idx];    return fmt(x.index, x.name); }
+  if (type_name == "DCStaticGen"      && vec_idx < (int)sys.dc.dc_static_generators.size())
+    { const auto& x = sys.dc.dc_static_generators[vec_idx]; return fmt(x.index, x.name); }
+  // Fallback: vector position (unchanged from old behaviour)
+  return type_name + "[" + std::to_string(vec_idx) + "]";
+}
+
+static std::vector<bool> build_active_component_mask(
+    const HybridPowerSystem& sys,
+    const ComponentOffsets& co) {
+  std::vector<bool> active(co.total, true);
+  for (size_t i = 0; i < co.ng;    ++i) active[co.off_gen  + i] = sys.ac.generators[i].in_service;
+  for (size_t i = 0; i < co.nl;    ++i) active[co.off_br   + i] = sys.ac.branches[i].in_service;
+  for (size_t i = 0; i < co.nsg;   ++i) active[co.off_sg   + i] = sys.ac.static_generators[i].in_service;
+  for (size_t i = 0; i < co.nrg;   ++i) active[co.off_rg   + i] = sys.ac.renewable_gens[i].in_service;
+  for (size_t i = 0; i < co.nst;   ++i) active[co.off_st   + i] = sys.ac.storage[i].in_service;
+  for (size_t i = 0; i < co.nvsc;  ++i) active[co.off_vsc  + i] = sys.vsc_converters[i].in_service;
+  for (size_t i = 0; i < co.ndb;   ++i) active[co.off_db   + i] = sys.dc.branches[i].in_service;
+  for (size_t i = 0; i < co.nt2;   ++i) active[co.off_t2   + i] = sys.ac.transformers_2w[i].in_service;
+  for (size_t i = 0; i < co.nt3;   ++i) active[co.off_t3   + i] = sys.ac.transformers_3w[i].in_service;
+  for (size_t i = 0; i < co.ndcdc; ++i) active[co.off_dcdc + i] = sys.dc.dcdc_converters[i].in_service;
+  for (size_t i = 0; i < co.ndccb; ++i) active[co.off_dccb + i] = sys.dc.dc_circuit_breakers[i].in_service;
+  for (size_t i = 0; i < co.ndcst; ++i) active[co.off_dcst + i] = sys.dc.storage[i].in_service;
+  for (size_t i = 0; i < co.ndcpv; ++i) active[co.off_dcpv + i] = sys.dc.pv_arrays[i].in_service;
+  for (size_t i = 0; i < co.nsw;   ++i) active[co.off_sw   + i] = sys.ac.switches[i].in_service;
+  for (size_t i = 0; i < co.ncb;   ++i) active[co.off_cb   + i] = sys.ac.circuit_breakers[i].in_service;
+  for (size_t i = 0; i < co.npvs;  ++i) active[co.off_pvs  + i] = sys.ac.pv_systems[i].in_service;
+  for (size_t i = 0; i < co.ndcsg; ++i) active[co.off_dcsg + i] = sys.dc.static_generators[i].in_service;
+  for (size_t i = 0; i < co.ndcsgx;++i) active[co.off_dcsgx+ i] = sys.dc.dc_static_generators[i].in_service;
+  return active;
+}
+
+static long long load_scale_cache_key(double load_scale) {
+  return static_cast<long long>(std::llround(load_scale * 1.0e9));
+}
+
+static double hourly_load_scale(
+    const LoadProfile& load_profile,
+    const ReliabilityOptions& options,
+    int hour) {
+  double load_scale = options.load_scale_factor;
+  if (hour >= 0 && hour < static_cast<int>(load_profile.factors.size())) {
+    load_scale *= load_profile.factors[static_cast<size_t>(hour)];
+  }
+  return load_scale;
+}
 
 // Evaluate a single system state using DC-OPF
 // The state vector layout follows ComponentOffsets.
@@ -126,7 +294,8 @@ StateEvalResult evaluate_state(
     HybridPowerSystem sys,  // copy intentional
     const std::vector<bool>& component_failures,
     const opf::DCOPFOptions& opf_opt,
-    double load_scale = 1.0) {
+    double load_scale = 1.0,
+    double curtail_threshold_mw = 0.01) {
   
   StateEvalResult result;
   ComponentOffsets co(sys);
@@ -193,7 +362,70 @@ StateEvalResult evaluate_state(
       sys.ac.transformers_3w[i].in_service = false;
     }
   }
-  
+
+  // Apply DC/DC converter failures
+  for (size_t i = 0; i < co.ndcdc; ++i) {
+    if (component_failures[co.off_dcdc + i]) {
+      sys.dc.dcdc_converters[i].in_service = false;
+    }
+  }
+
+  // Apply DC circuit breaker failures
+  for (size_t i = 0; i < co.ndccb; ++i) {
+    if (component_failures[co.off_dccb + i]) {
+      sys.dc.dc_circuit_breakers[i].in_service = false;
+    }
+  }
+
+  // Apply DC storage failures
+  for (size_t i = 0; i < co.ndcst; ++i) {
+    if (component_failures[co.off_dcst + i]) {
+      sys.dc.storage[i].in_service = false;
+    }
+  }
+
+  // Apply DC PV array failures
+  for (size_t i = 0; i < co.ndcpv; ++i) {
+    if (component_failures[co.off_dcpv + i]) {
+      sys.dc.pv_arrays[i].in_service = false;
+    }
+  }
+
+  // Apply AC switch failures
+  for (size_t i = 0; i < co.nsw; ++i) {
+    if (component_failures[co.off_sw + i]) {
+      sys.ac.switches[i].in_service = false;
+    }
+  }
+
+  // Apply AC circuit breaker failures
+  for (size_t i = 0; i < co.ncb; ++i) {
+    if (component_failures[co.off_cb + i]) {
+      sys.ac.circuit_breakers[i].in_service = false;
+    }
+  }
+
+  // Apply AC PV system failures
+  for (size_t i = 0; i < co.npvs; ++i) {
+    if (component_failures[co.off_pvs + i]) {
+      sys.ac.pv_systems[i].in_service = false;
+    }
+  }
+
+  // Apply DC static generator failures (AC StaticGenerator type in DC container)
+  for (size_t i = 0; i < co.ndcsg; ++i) {
+    if (component_failures[co.off_dcsg + i]) {
+      sys.dc.static_generators[i].in_service = false;
+    }
+  }
+
+  // Apply DC static generator failures (StaticGeneratorDC type)
+  for (size_t i = 0; i < co.ndcsgx; ++i) {
+    if (component_failures[co.off_dcsgx + i]) {
+      sys.dc.dc_static_generators[i].in_service = false;
+    }
+  }
+
   // Apply load scaling if needed
   if (std::abs(load_scale - 1.0) > 1e-9) {
     for (auto& bus : sys.ac.buses) {
@@ -232,29 +464,25 @@ StateEvalResult evaluate_state(
       }
     }
 
-    // Accumulate curtailment.  Convention (matching ONR and DC-OPF):
-    // if sys.ac.loads is non-empty it is the authoritative load source;
-    // bus.pd_mw is used only when the Load table is empty.
-    // NOTE: if dc_opf_solver ever changes to treat them as additive, this
-    // logic must be updated to sum both to avoid under-counting curtailment.
-    if (!sys.ac.loads.empty()) {
-      for (auto& ld : sys.ac.loads) {
-        if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
-        double extra = std::max(0.0, ld.p_mw * ld.scaling);
-        direct_shed_mw += extra;
-        if (auto it = bus_pos.find(ld.bus); it != bus_pos.end())
-          nodal_direct_shed[it->second] += extra;
-        ld.in_service = false;  // prevent OPF from seeing this load
-      }
-    } else {
-      for (int bid : dead_buses) {
-        auto it = bus_pos.find(bid);
-        if (it == bus_pos.end()) continue;
-        int pos = it->second;
-        double load = std::max(0.0, sys.ac.buses[pos].pd_mw);
-        direct_shed_mw += load;
-        nodal_direct_shed[pos] += load;
-      }
+    // Accumulate curtailment for dead islands.
+    // P1b: DC-OPF adds bus.pd_mw and ac.loads as additive demand sources
+    // (both are summed in the B-matrix); direct-shed must use the same
+    // convention to avoid under-counting when a bus has both components.
+    for (int bid : dead_buses) {
+      auto it = bus_pos.find(bid);
+      if (it == bus_pos.end()) continue;
+      int pos = it->second;
+      double load = std::max(0.0, sys.ac.buses[pos].pd_mw);
+      direct_shed_mw += load;
+      nodal_direct_shed[pos] += load;
+    }
+    for (auto& ld : sys.ac.loads) {
+      if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
+      double extra = std::max(0.0, ld.p_mw * ld.scaling);
+      direct_shed_mw += extra;
+      if (auto it = bus_pos.find(ld.bus); it != bus_pos.end())
+        nodal_direct_shed[it->second] += extra;
+      ld.in_service = false;  // prevent OPF from seeing this load
     }
 
     // Always zero bus-level loads for dead buses to prevent a singular
@@ -272,18 +500,16 @@ StateEvalResult evaluate_state(
     if (!has_valid) {
       result.curtailment_mw       = direct_shed_mw;
       result.nodal_curtailment_mw = std::move(nodal_direct_shed);
-      result.is_loss_state        = (result.curtailment_mw > 0.01);
+      result.is_loss_state        = (result.curtailment_mw > curtail_threshold_mw);
       return result;
     }
   }
 
   // Run DC-OPF with load shedding enabled.
-  // Guard: warn if the system has non-trivial DC loads that this AC-only OPF
-  // cannot model.  The resulting EENS/LOLE will be optimistic for such systems.
+  // Guard: warn if the system has non-trivial DC loads (including DCBus::pd_mw)
+  // that this AC-only OPF cannot model.
   {
-    double total_dc_load_mw = 0.0;
-    for (const auto& ld : sys.dc.loads)
-      if (ld.in_service) total_dc_load_mw += ld.p_mw;
+    double total_dc_load_mw = total_inservice_dc_load_mw(sys);
     if (total_dc_load_mw > 0.01) {
       spdlog::warn("[FMEA] 系统含 DC 负荷 {:.3f} MW，但当前可靠性评估使用 AC-only DC-OPF。"
                    "DC 负荷中断不计入 OPF，EENS/LOLE 可能偏乐观。",
@@ -291,6 +517,36 @@ StateEvalResult evaluate_state(
     }
   }
   auto opf_result = opf::solve_dc_opf(sys, opf_opt);
+
+  // P1a: OPF infeasibility — treat all remaining surviving-bus load as shed.
+  // Covers: no generator on island, singular B-matrix, LP solver failure.
+  // Silently returning zero curtailment for infeasible states inflates EENS.
+  if (!opf_result.converged) {
+    spdlog::warn("evaluate_state: DC-OPF failed to converge; "
+                 "treating all surviving-island load as curtailed (conservative)");
+    result.curtailment_mw = direct_shed_mw;
+    result.nodal_curtailment_mw = std::move(nodal_direct_shed);
+    result.nodal_curtailment_mw.resize(sys.ac.buses.size(), 0.0);
+    // bus pd_mw was zeroed for dead-island buses above; remainder is live.
+    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      double load = std::max(0.0, sys.ac.buses[i].pd_mw);
+      result.curtailment_mw += load;
+      result.nodal_curtailment_mw[i] += load;
+    }
+    for (const auto& ld : sys.ac.loads) {
+      if (!ld.in_service) continue;  // dead-island loads already disabled
+      double load = std::max(0.0, ld.p_mw * ld.scaling);
+      result.curtailment_mw += load;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+        if (sys.ac.buses[i].index == ld.bus) {
+          result.nodal_curtailment_mw[i] += load;
+          break;
+        }
+      }
+    }
+    result.is_loss_state = (result.curtailment_mw > curtail_threshold_mw);
+    return result;
+  }
 
   // Combine direct shed (dead islands) + OPF shed (surviving islands)
   result.curtailment_mw       = direct_shed_mw + opf_result.total_load_shedding_mw;
@@ -302,7 +558,7 @@ StateEvalResult evaluate_state(
     for (size_t i = 0; i < opf_result.load_shedding_mw.size(); ++i)
       result.nodal_curtailment_mw[i] += opf_result.load_shedding_mw[i];
   }
-  result.is_loss_state = (result.curtailment_mw > 0.01);
+  result.is_loss_state = (result.curtailment_mw > curtail_threshold_mw);
 
   return result;
 }
@@ -340,18 +596,26 @@ ReliabilityResult run_nonsequential_mc(
     const ReliabilityOptions& options) {
   
   spdlog::info("Non-Sequential MC: Starting reliability assessment");
-  
-  ReliabilityResult result;
-  {
-    double dc_mw = total_inservice_dc_load_mw(sys);
-    if (dc_mw > 0.01)
-      result.model_limitations = "DC loads not modelled in OPF (" +
-          std::to_string(dc_mw) + " MW unaccounted)";
+
+  if (options.max_iterations <= 0) {
+    spdlog::warn("NSQ MC: max_iterations={} <= 0; returning empty result",
+                 options.max_iterations);
+    return {};
   }
+
+  ReliabilityResult result;
+  if (has_dc_rich_components(sys))
+    result.model_limitations =
+        "System contains DC/VSC components; AC-only OPF is used — "
+        "DC power-flow constraints are not enforced. "
+        "DC load curtailment is not captured in EENS/LOLE. "
+        "DC components (DC/DC, DCCB, DC storage, DC PV, DC static gens, AC switch, AC CB) "
+        "and AC PV systems are sampled in the state vector but failures affect only network "
+        "topology \u2014 no DC power-flow re-dispatch is performed.";
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
-  
+
   // Compute unavailabilities for all components
   std::vector<double> unavailabilities(nc);
   
@@ -450,9 +714,103 @@ ReliabilityResult run_nonsequential_mc(
       unavailabilities[co.off_t3 + i] = 0.005;
     }
   }
-  
-  spdlog::info("NSQ MC: {} total components (gen={}, br={}, sg={}, rg={}, st={}, vsc={}, db={}, t2={}, t3={})",
-               nc, co.ng, co.nl, co.nsg, co.nrg, co.nst, co.nvsc, co.ndb, co.nt2, co.nt3);
+
+  // --- DC/DC Converters ---
+  for (size_t i = 0; i < co.ndcdc; ++i) {
+    const auto& d = sys.dc.dcdc_converters[i];
+    unavailabilities[co.off_dcdc + i] =
+        (d.mtbf_hours > 0 && d.mttr_hours > 0)
+            ? compute_unavailability(d.mtbf_hours, d.mttr_hours)
+            : 0.02;  // default ~2 % annual unavailability
+  }
+
+  // --- DC Circuit Breakers ---
+  // DCCircuitBreaker has no reliability fields; use a conservative default.
+  for (size_t i = 0; i < co.ndccb; ++i) {
+    unavailabilities[co.off_dccb + i] = 0.01;
+  }
+
+  // --- DC Storage ---
+  for (size_t i = 0; i < co.ndcst; ++i) {
+    const auto& st = sys.dc.storage[i];
+    double u = st.forced_outage_rate;
+    if (u <= 0 && st.mttr_hr > 0) {
+      constexpr double kDefaultMttfHrs = 5000.0;
+      u = compute_unavailability(kDefaultMttfHrs, st.mttr_hr);
+    }
+    unavailabilities[co.off_dcst + i] = (u > 0) ? u : 0.02;
+  }
+
+  // --- DC PV Arrays ---
+  for (size_t i = 0; i < co.ndcpv; ++i) {
+    const auto& pv = sys.dc.pv_arrays[i];
+    unavailabilities[co.off_dcpv + i] =
+        (pv.mtbf_hours > 0 && pv.mttr_hours > 0)
+            ? compute_unavailability(pv.mtbf_hours, pv.mttr_hours)
+            : 0.03;
+  }
+
+  // --- AC Switches ---
+  // p_sw_fail is the per-operation failure probability; when non-zero use it
+  // directly as an unavailability proxy.  Otherwise derive from mtbf/mttr.
+  for (size_t i = 0; i < co.nsw; ++i) {
+    const auto& sw = sys.ac.switches[i];
+    double u = sw.p_sw_fail;
+    if (u <= 0 && sw.mtbf_hours > 0 && sw.mttr_hours > 0)
+      u = compute_unavailability(sw.mtbf_hours, sw.mttr_hours);
+    unavailabilities[co.off_sw + i] = (u > 0) ? u : 0.005;
+  }
+
+  // --- AC Circuit Breakers ---
+  // CircuitBreaker has no mtbf/mttr fields; use a conservative default.
+  for (size_t i = 0; i < co.ncb; ++i) {
+    unavailabilities[co.off_cb + i] = 0.01;
+  }
+
+  // --- AC PV Systems ---
+  for (size_t i = 0; i < co.npvs; ++i) {
+    const auto& pv = sys.ac.pv_systems[i];
+    unavailabilities[co.off_pvs + i] =
+        (pv.mtbf_hours > 0 && pv.mttr_hours > 0)
+            ? compute_unavailability(pv.mtbf_hours, pv.mttr_hours)
+            : 0.03;  // typical PV system ~3 % annual unavailability
+  }
+
+  // --- DC Static Generators (AC StaticGenerator type in DC container) ---
+  for (size_t i = 0; i < co.ndcsg; ++i) {
+    const auto& sg = sys.dc.static_generators[i];
+    unavailabilities[co.off_dcsg + i] =
+        (sg.mtbf_hours > 0 && sg.mttr_hours > 0)
+            ? compute_unavailability(sg.mtbf_hours, sg.mttr_hours)
+            : 0.03;
+  }
+
+  // --- DC Static Generators (StaticGeneratorDC type) ---
+  for (size_t i = 0; i < co.ndcsgx; ++i) {
+    const auto& sg = sys.dc.dc_static_generators[i];
+    unavailabilities[co.off_dcsgx + i] =
+        (sg.mtbf_hours > 0 && sg.mttr_hours > 0)
+            ? compute_unavailability(sg.mtbf_hours, sg.mttr_hours)
+            : 0.03;
+  }
+
+  spdlog::info("NSQ MC: {} total components "
+               "(gen={}, br={}, sg={}, rg={}, st={}, vsc={}, db={}, t2={}, t3={}, "
+               "dcdc={}, dccb={}, dcst={}, dcpv={}, sw={}, cb={}, pvs={}, dcsg={}, dcsgx={})",
+               nc, co.ng, co.nl, co.nsg, co.nrg, co.nst, co.nvsc, co.ndb, co.nt2, co.nt3,
+               co.ndcdc, co.ndccb, co.ndcst, co.ndcpv, co.nsw, co.ncb,
+               co.npvs, co.ndcsg, co.ndcsgx);
+
+  // P2b: Zero unavailability for base-case out-of-service components.
+  // Such components are already in their 'failed' state in the system baseline;
+  // randomly sampling them would create meaningless failure events and pollute
+  // critical-component statistics.  The FMEA catalog already skips !in_service;
+  // MC now uses the same semantic: unavailability = 0 means 'baseline outage'.
+  const auto active_component = build_active_component_mask(sys, co);
+  for (size_t c = 0; c < nc; ++c) {
+    if (!active_component[c]) unavailabilities[c] = 0.0;
+  }
+
   // Initialize random number generator
   std::mt19937 rng;
   if (options.seed != 0) {
@@ -468,8 +826,9 @@ ReliabilityResult run_nonsequential_mc(
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
-  // State database for deduplication
-  std::unordered_map<size_t, StateEvalResult> state_db;
+  // State database for deduplication.  Store the full packed bit pattern as the
+  // key, not just its hash, so a hash collision cannot alias two outage states.
+  std::unordered_map<StateKey, StateEvalResult, StateKeyHash> state_db;
   int n0_count = 0;  // Count of N-0 states
   int contingency_count = 0;  // Count of states with failures
   
@@ -492,25 +851,31 @@ ReliabilityResult run_nonsequential_mc(
   
   spdlog::info("NSQ MC: total load = {:.1f} MW (scale={:.2f})",
                total_load_mw * options.load_scale_factor, options.load_scale_factor);
-  
+
+  // P2a: Pre-compute the N-0 (all components healthy) baseline once.
+  // We cannot assume zero curtailment even when load_scale_factor <= 1.0:
+  // the base case may have islands, no-slack buses, or insufficient generation.
+  // The cached result is reused for every sampled N-0 state (no redundant OPF).
+  const StateEvalResult n0_result = evaluate_state(
+      sys, std::vector<bool>(nc, false), opf_opt, options.load_scale_factor,
+      options.curtail_threshold_mw);
+  if (n0_result.curtailment_mw > 1e-6)
+    spdlog::warn("NSQ MC: N-0 baseline has {:.3f} MW curtailment — "
+                 "base-case infeasibility will affect all samples' EENS/LOLE",
+                 n0_result.curtailment_mw);
+
   // Main simulation loop
   for (int iter = 1; iter <= options.max_iterations; ++iter) {
     // Sample component state
     auto state = sample_state(unavailabilities, rng);
-    
+
     // Check if N-0 (all up)
     bool is_n0 = std::none_of(state.begin(), state.end(), [](bool b) { return b; });
-    
+
     StateEvalResult eval_result;
     if (is_n0) {
       ++n0_count;
-      if (options.load_scale_factor > 1.0) {
-        eval_result = evaluate_state(sys, state, opf_opt, options.load_scale_factor);
-      } else {
-        eval_result.curtailment_mw = 0.0;
-        eval_result.nodal_curtailment_mw.resize(nb, 0.0);
-        eval_result.is_loss_state = false;
-      }
+      eval_result = n0_result;  // reuse pre-computed N-0 baseline; never assumed zero-shed
     } else {
       ++contingency_count;
       // Count failures
@@ -518,14 +883,15 @@ ReliabilityResult run_nonsequential_mc(
       for (size_t i = 0; i < nc; ++i) if (state[i]) ++num_fail;
       
       // Check state database
-      size_t state_hash = hash_state(state);
-      auto it = state_db.find(state_hash);
+      StateKey state_key = pack_state_key(state);
+      auto it = state_db.find(state_key);
       if (it != state_db.end()) {
         eval_result = it->second;
       } else {
         // Evaluate new state
-        eval_result = evaluate_state(sys, state, opf_opt, options.load_scale_factor);
-        state_db[state_hash] = eval_result;
+        eval_result = evaluate_state(sys, state, opf_opt, options.load_scale_factor,
+                                     options.curtail_threshold_mw);
+        state_db.emplace(std::move(state_key), eval_result);
         
         if (state_db.size() <= 5) {
           spdlog::info("NSQ MC: State #{} - {} failures -> shed={:.2f} MW",
@@ -584,6 +950,7 @@ ReliabilityResult run_nonsequential_mc(
     if (options.progress_callback) {
       if (!options.progress_callback(iter, eens, cov)) {
         spdlog::info("NSQ MC: Cancelled by user at iteration {}", iter);
+        result.iterations_used = iter;  // P2a: ensure denominator is valid
         break;
       }
     }
@@ -612,6 +979,10 @@ ReliabilityResult run_nonsequential_mc(
   
   // Final results
   int n = result.iterations_used;
+  if (n <= 0) {
+    spdlog::warn("NSQ MC: No iterations completed; metrics are undefined");
+    return result;
+  }
   result.edns_mw = sum_dns / n;
   result.eens_mwh_yr = result.edns_mw * 8760.0;
   result.lole_hr_yr = (double)loss_hours / n * 8760.0;
@@ -630,19 +1001,13 @@ ReliabilityResult run_nonsequential_mc(
       double importance = comp_fail_count[c] / total_loss_samples;
       if (importance > 0.01) {
         ReliabilityResult::ComponentImportance ci;
-        // Compute within-type index based on the component's section in the
-        // flat state vector (BUG-2 fix: was always using c - co.off_br).
-        if      (c < co.off_br)  { ci.index = static_cast<int>(c - co.off_gen); }
-        else if (c < co.off_sg)  { ci.index = static_cast<int>(c - co.off_br);  }
-        else if (c < co.off_rg)  { ci.index = static_cast<int>(c - co.off_sg);  }
-        else if (c < co.off_st)  { ci.index = static_cast<int>(c - co.off_rg);  }
-        else if (c < co.off_vsc) { ci.index = static_cast<int>(c - co.off_st);  }
-        else if (c < co.off_db)  { ci.index = static_cast<int>(c - co.off_vsc); }
-        else if (c < co.off_t2)  { ci.index = static_cast<int>(c - co.off_db);  }
-        else if (c < co.off_t3)  { ci.index = static_cast<int>(c - co.off_t2);  }
-        else                     { ci.index = static_cast<int>(c - co.off_t3);  }
-        ci.is_generator = (c < co.off_br);
-        ci.importance = importance;
+        auto [idx, type_name] = decode_component(c, co);
+        ci.index               = idx;
+        ci.global_state_index  = c;
+        ci.component_type      = type_name;
+        ci.component_name      = resolve_component_name(idx, type_name, sys);
+        ci.is_generator        = (c < co.off_br);
+        ci.importance          = importance;
         result.critical_components.push_back(ci);
       }
     }
@@ -669,14 +1034,28 @@ ReliabilityResult run_sequential_mc(
     const ReliabilityOptions& options) {
   
   spdlog::info("Sequential MC: Starting reliability assessment");
-  
-  ReliabilityResult result;
-  {
-    double dc_mw = total_inservice_dc_load_mw(sys);
-    if (dc_mw > 0.01)
-      result.model_limitations = "DC loads not modelled in OPF (" +
-          std::to_string(dc_mw) + " MW unaccounted)";
+
+  if (options.max_iterations <= 0) {
+    spdlog::warn("SEQ MC: max_iterations={} <= 0; returning empty result",
+                 options.max_iterations);
+    return {};
   }
+
+  if (options.hours_per_year <= 0) {
+    spdlog::warn("SEQ MC: hours_per_year={} <= 0; returning empty result",
+                 options.hours_per_year);
+    return {};
+  }
+
+  ReliabilityResult result;
+  if (has_dc_rich_components(sys))
+    result.model_limitations =
+        "System contains DC/VSC components; AC-only OPF is used — "
+        "DC power-flow constraints are not enforced. "
+        "DC load curtailment is not captured in EENS/LOLE. "
+        "DC components (DC/DC, DCCB, DC storage, DC PV, DC static gens, AC switch, AC CB) "
+        "and AC PV systems are sampled in the state vector but failures affect only network "
+        "topology \u2014 no DC power-flow re-dispatch is performed.";
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
@@ -756,8 +1135,64 @@ ReliabilityResult run_sequential_mc(
     mttr_v[co.off_t3 + i] = t.mttr_hours > 0 ? t.mttr_hours : 200.0;
     mttf[co.off_t3 + i] = t.mtbf_hours > 0 ? t.mtbf_hours : 300000.0;
   }
-  
-  // Initialize random number generator
+  // --- DC/DC Converters ---
+  for (size_t i = 0; i < co.ndcdc; ++i) {
+    const auto& d = sys.dc.dcdc_converters[i];
+    mttr_v[co.off_dcdc + i] = d.mttr_hours > 0 ? d.mttr_hours : 48.0;
+    mttf[co.off_dcdc + i]   = d.mtbf_hours > 0 ? d.mtbf_hours : 5000.0;
+  }
+  // --- DC Circuit Breakers ---
+  for (size_t i = 0; i < co.ndccb; ++i) {
+    mttr_v[co.off_dccb + i] = 8.0;
+    mttf[co.off_dccb + i]   = 87600.0;  // ~10 yr
+  }
+  // --- DC Storage ---
+  for (size_t i = 0; i < co.ndcst; ++i) {
+    const auto& st = sys.dc.storage[i];
+    mttr_v[co.off_dcst + i] = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
+    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1) {
+      mttf[co.off_dcst + i] = mttr_v[co.off_dcst + i] * (1.0 - st.forced_outage_rate) / st.forced_outage_rate;
+    } else {
+      mttf[co.off_dcst + i] = 5000.0;
+    }
+  }
+  // --- DC PV Arrays ---
+  for (size_t i = 0; i < co.ndcpv; ++i) {
+    const auto& pv = sys.dc.pv_arrays[i];
+    mttr_v[co.off_dcpv + i] = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
+    mttf[co.off_dcpv + i]   = pv.mtbf_hours > 0 ? pv.mtbf_hours : 4000.0;
+  }
+  // --- AC Switches ---
+  for (size_t i = 0; i < co.nsw; ++i) {
+    const auto& sw = sys.ac.switches[i];
+    mttr_v[co.off_sw + i] = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
+    mttf[co.off_sw + i]   = sw.mtbf_hours > 0 ? sw.mtbf_hours : 87600.0;
+  }
+  // --- AC Circuit Breakers ---
+  for (size_t i = 0; i < co.ncb; ++i) {
+    mttr_v[co.off_cb + i] = 8.0;
+    mttf[co.off_cb + i]   = 87600.0;
+  }
+  // --- AC PV Systems ---
+  for (size_t i = 0; i < co.npvs; ++i) {
+    const auto& pv = sys.ac.pv_systems[i];
+    mttr_v[co.off_pvs + i] = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
+    mttf[co.off_pvs + i]   = pv.mtbf_hours > 0 ? pv.mtbf_hours : 4000.0;
+  }
+  // --- DC Static Generators (AC StaticGenerator type in DC container) ---
+  for (size_t i = 0; i < co.ndcsg; ++i) {
+    const auto& sg = sys.dc.static_generators[i];
+    mttr_v[co.off_dcsg + i] = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
+    mttf[co.off_dcsg + i]   = sg.mtbf_hours > 0 ? sg.mtbf_hours : 5000.0;
+  }
+  // --- DC Static Generators (StaticGeneratorDC type) ---
+  for (size_t i = 0; i < co.ndcsgx; ++i) {
+    const auto& sg = sys.dc.dc_static_generators[i];
+    mttr_v[co.off_dcsgx + i] = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
+    mttf[co.off_dcsgx + i]   = sg.mtbf_hours > 0 ? sg.mtbf_hours : 5000.0;
+  }
+
+  const auto active_component = build_active_component_mask(sys, co);
   std::mt19937 rng;
   if (options.seed != 0) {
     rng.seed(options.seed);
@@ -778,6 +1213,22 @@ ReliabilityResult run_sequential_mc(
   int total_loss_hours = 0;
   
   spdlog::info("SEQ MC: {} total components, {} hours/year", nc, hours_per_year);
+
+  std::unordered_map<long long, StateEvalResult> n0_cache;
+  auto n0_for_hour = [&](int h) -> const StateEvalResult& {
+    const double load_scale = hourly_load_scale(load_profile, options, h);
+    const long long key = load_scale_cache_key(load_scale);
+    auto [it, inserted] = n0_cache.emplace(key, StateEvalResult{});
+    if (inserted) {
+      it->second = evaluate_state(sys, std::vector<bool>(nc, false), opf_opt, load_scale,
+                                   options.curtail_threshold_mw);
+      if (it->second.curtailment_mw > 1e-6) {
+        spdlog::warn("SEQ MC: N-0 baseline at load_scale={:.6f} has {:.3f} MW curtailment",
+                     load_scale, it->second.curtailment_mw);
+      }
+    }
+    return it->second;
+  };
   
   // Main simulation loop (years)
   for (int year = 1; year <= options.max_iterations; ++year) {
@@ -786,6 +1237,7 @@ ReliabilityResult run_sequential_mc(
     std::vector<std::vector<bool>> state_matrix(nc, std::vector<bool>(hours_per_year, false));
     
     for (size_t c = 0; c < nc; ++c) {
+      if (!active_component[c]) continue;
       double current_time = 0.0;
       bool is_up = true;
       std::uniform_real_distribution<double> dist(0.0, 1.0);
@@ -818,44 +1270,40 @@ ReliabilityResult run_sequential_mc(
       }
     }
     
-    // Identify contingency hours (any component down)
-    std::vector<int> contingency_hours;
-    for (int h = 0; h < hours_per_year; ++h) {
-      bool any_down = false;
-      for (size_t c = 0; c < nc; ++c) {
-        if (state_matrix[c][h]) {
-          any_down = true;
-          break;
+    if (options.verbose && year % 100 == 0) {
+      int contingency_hours = 0;
+      for (int h = 0; h < hours_per_year; ++h) {
+        for (size_t c = 0; c < nc; ++c) {
+          if (state_matrix[c][h]) {
+            ++contingency_hours;
+            break;
+          }
         }
       }
-      if (any_down) contingency_hours.push_back(h);
-    }
-    
-    if (options.verbose && year % 100 == 0) {
       spdlog::info("SEQ MC: Year {} has {} contingency hours",
-                   year, contingency_hours.size());
+                   year, contingency_hours);
     }
     
-    // Evaluate contingency hours
+    // Evaluate every hour.  N-0 hours are not assumed to have zero shed: the base
+    // system can already be islanded, capacity-short, or stressed by load profile.
     double year_eens = 0.0;
     int year_loss_hours = 0;
     std::vector<bool> year_loss_flags(hours_per_year, false);
     
-    for (int h : contingency_hours) {
+    for (int h = 0; h < hours_per_year; ++h) {
       // Build component state for this hour
       std::vector<bool> state(nc);
+      bool any_down = false;
       for (size_t c = 0; c < nc; ++c) {
         state[c] = state_matrix[c][h];
-      }
-      
-      // Get load scale factor (profile 脳 overall scale)
-      double load_scale = options.load_scale_factor;
-      if (h < (int)load_profile.factors.size()) {
-        load_scale *= load_profile.factors[h];
+        any_down = any_down || state[c];
       }
       
       // Evaluate state
-      auto eval_result = evaluate_state(sys, state, opf_opt, load_scale);
+      auto eval_result = any_down
+          ? evaluate_state(sys, state, opf_opt, hourly_load_scale(load_profile, options, h),
+                           options.curtail_threshold_mw)
+          : n0_for_hour(h);
       
       if (eval_result.is_loss_state) {
         year_eens += eval_result.curtailment_mw;
@@ -906,6 +1354,7 @@ ReliabilityResult run_sequential_mc(
     if (options.progress_callback) {
       if (!options.progress_callback(year, eens_avg, cov)) {
         spdlog::info("SEQ MC: Cancelled by user at year {}", year);
+        result.iterations_used = year;  // P2a: ensure denominator is valid
         break;
       }
     }
@@ -931,14 +1380,18 @@ ReliabilityResult run_sequential_mc(
   
   // Final results
   int n_years = result.iterations_used;
+  if (n_years <= 0) {
+    spdlog::warn("SEQ MC: No years completed; metrics are undefined");
+    return result;
+  }
   result.eens_mwh_yr = std::accumulate(result.annual_eens.begin(),
                                         result.annual_eens.end(), 0.0) / n_years;
   result.lole_hr_yr = std::accumulate(result.annual_lole.begin(),
                                        result.annual_lole.end(), 0.0) / n_years;
   result.lolf_occ_yr = std::accumulate(result.annual_lolf.begin(),
                                         result.annual_lolf.end(), 0.0) / n_years;
-  result.edns_mw = result.eens_mwh_yr / 8760.0;
-  result.plc = result.lole_hr_yr / 8760.0;
+  result.edns_mw = result.eens_mwh_yr / static_cast<double>(options.hours_per_year);
+  result.plc = result.lole_hr_yr / static_cast<double>(options.hours_per_year);
   result.final_cov = result.cov_history.empty() ? 0.0 : result.cov_history.back();
   
   // Nodal EENS
@@ -953,19 +1406,13 @@ ReliabilityResult run_sequential_mc(
       double importance = comp_fail_during_loss[c] / total_loss_hours;
       if (importance > 0.01) {
         ReliabilityResult::ComponentImportance ci;
-        // Compute within-type index based on the component's section in the
-        // flat state vector (BUG-2 fix: was always using c - co.off_br).
-        if      (c < co.off_br)  { ci.index = static_cast<int>(c - co.off_gen); }
-        else if (c < co.off_sg)  { ci.index = static_cast<int>(c - co.off_br);  }
-        else if (c < co.off_rg)  { ci.index = static_cast<int>(c - co.off_sg);  }
-        else if (c < co.off_st)  { ci.index = static_cast<int>(c - co.off_rg);  }
-        else if (c < co.off_vsc) { ci.index = static_cast<int>(c - co.off_st);  }
-        else if (c < co.off_db)  { ci.index = static_cast<int>(c - co.off_vsc); }
-        else if (c < co.off_t2)  { ci.index = static_cast<int>(c - co.off_db);  }
-        else if (c < co.off_t3)  { ci.index = static_cast<int>(c - co.off_t2);  }
-        else                     { ci.index = static_cast<int>(c - co.off_t3);  }
-        ci.is_generator = (c < co.off_br);
-        ci.importance = importance;
+        auto [idx, type_name] = decode_component(c, co);
+        ci.index               = idx;
+        ci.global_state_index  = c;
+        ci.component_type      = type_name;
+        ci.component_name      = resolve_component_name(idx, type_name, sys);
+        ci.is_generator        = (c < co.off_br);
+        ci.importance          = importance;
         result.critical_components.push_back(ci);
       }
     }
@@ -1198,21 +1645,34 @@ DistributionIndices compute_distribution_indices(
     int hours_per_year) {
   
   DistributionIndices idx;
+
+  // M4: guard against divide-by-zero in ASAI calculation (idx.saidi / hours_per_year).
+  if (hours_per_year <= 0) {
+    spdlog::warn("compute_distribution_indices: hours_per_year={} <= 0; defaulting to 8760",
+                 hours_per_year);
+    hours_per_year = 8760;
+  }
   
   // Get customer counts from loads
   // Note: In our model, we use load.p_mw as a proxy for customers if num_customers not available
   std::vector<double> customers_per_bus(sys.ac.buses.size(), 0.0);
   double total_customers = 0.0;
-  
+
+  // P2a: bus IDs may be non-contiguous; build a position map so that
+  // ld.bus is looked up correctly rather than using the unsafe ld.bus-1 offset.
+  std::unordered_map<int, size_t> bp_map;
+  bp_map.reserve(sys.ac.buses.size());
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i)
+    bp_map[sys.ac.buses[i].index] = i;
+
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service || ld.bus < 1) continue;
-    size_t bus_idx = static_cast<size_t>(ld.bus - 1);
-    if (bus_idx < customers_per_bus.size()) {
-      // Use n_customers if available, otherwise estimate from load
-      double nc = ld.n_customers > 0 ? ld.n_customers : std::max(1.0, ld.p_mw * 10.0);
-      customers_per_bus[bus_idx] += nc;
-      total_customers += nc;
-    }
+    const auto it = bp_map.find(ld.bus);
+    if (it == bp_map.end() || it->second >= customers_per_bus.size()) continue;
+    // Use n_customers if available, otherwise estimate from load
+    double nc = ld.n_customers > 0 ? ld.n_customers : std::max(1.0, ld.p_mw * 10.0);
+    customers_per_bus[it->second] += nc;
+    total_customers += nc;
   }
   
   // For buses without explicit loads, add customers based on pd_mw
@@ -1272,7 +1732,10 @@ struct FMEAComponent {
   enum Type { Generator, ACBranch, DCBranch, VSCConverter,
               StaticGen, RenewableGen, Storage, Transformer2W, Transformer3W,
               DCDCConv, DCCB, DCStorage, DCPVArray, DCStaticGen,
-              ACSwitch, ACCB };
+              ACSwitch, ACCB,
+              ACPVSystem,    ///< ac.pv_systems (PVSystem)
+              DCStaticGenAC  ///< dc.static_generators (StaticGenerator type in DC container)
+  };
   Type type = Generator;
   int idx;              // Index into corresponding vector
   std::string name;     // Human-readable label
@@ -1299,6 +1762,8 @@ std::string fmea_component_type_name(FMEAComponent::Type type) {
     case FMEAComponent::DCStaticGen:   return "dc_static_generator";
     case FMEAComponent::ACSwitch:      return "ac_switch";
     case FMEAComponent::ACCB:          return "ac_circuit_breaker";
+    case FMEAComponent::ACPVSystem:    return "ac_pv_system";
+    case FMEAComponent::DCStaticGenAC: return "dc_static_generator_ac";
   }
   return "unknown";
 }
@@ -1623,6 +2088,36 @@ std::vector<FMEAComponent> build_fmea_catalog(
     catalog.push_back(c);
   }
 
+  // ---- AC PV Systems ----
+  for (size_t i = 0; i < sys.ac.pv_systems.size(); ++i) {
+    const auto& pv = sys.ac.pv_systems[i];
+    if (!pv.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::ACPVSystem;
+    c.idx  = static_cast<int>(i);
+    c.name = pv.name.empty() ? "PV_" + std::to_string(pv.index) : pv.name;
+    double mttr  = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
+    c.lambda     = pv.mtbf_hours > 0 ? 8760.0 / pv.mtbf_hours : 1.5;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- DC Static Generators (AC StaticGenerator type in DC container) ----
+  for (size_t i = 0; i < sys.dc.static_generators.size(); ++i) {
+    const auto& sg = sys.dc.static_generators[i];
+    if (!sg.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCStaticGenAC;
+    c.idx  = static_cast<int>(i);
+    c.name = sg.name.empty() ? "DCSGen2_" + std::to_string(sg.index) : sg.name;
+    double mttr  = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
+    c.lambda     = sg.mtbf_hours > 0 ? 8760.0 / sg.mtbf_hours : 1.5;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
   return catalog;
 }
 
@@ -1697,6 +2192,14 @@ void apply_fmea_component_outage(HybridPowerSystem& sys, const FMEAComponent& co
     case FMEAComponent::ACCB:
       if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.circuit_breakers.size()))
         sys.ac.circuit_breakers[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::ACPVSystem:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.pv_systems.size()))
+        sys.ac.pv_systems[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCStaticGenAC:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.static_generators.size()))
+        sys.dc.static_generators[comp.idx].in_service = false;
       break;
   }
 }
@@ -2072,12 +2575,14 @@ FMEAResult run_distribution_fmea(
   spdlog::info("FMEA: Starting N-1 failure-mode enumeration");
   
   FMEAResult result;
-  {
-    double dc_mw = total_inservice_dc_load_mw(sys);
-    if (dc_mw > 0.01)
-      result.model_limitations = "DC loads not modelled in OPF (" +
-          std::to_string(dc_mw) + " MW unaccounted)";
-  }
+  if (has_dc_rich_components(sys))
+    result.model_limitations =
+        "System contains DC/VSC components; AC-only OPF is used \u2014 "
+        "DC power-flow constraints are not enforced. "
+        "DC load curtailment is not captured in EENS. "
+        "DC components (DC/DC, DCCB, DC storage, DC PV, DC static gens, AC switch, AC CB) "
+        "and AC PV systems are enumerated in FMEA catalog but their failures are evaluated "
+        "via AC-only DC-OPF \u2014 DC load curtailment may be underestimated.";
   const size_t nb = sys.ac.buses.size();
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
 

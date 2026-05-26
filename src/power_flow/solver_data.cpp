@@ -111,34 +111,49 @@ void aggregate_load_demand(SolverData& data) {
   data.bus_zip_iq = Eigen::VectorXd::Zero(nac);
   data.bus_zip_pq = Eigen::VectorXd::Zero(nac);
 
-  // When Load table is empty but charging stations exist, start from bus-level demand.
-  if (data.loads.empty()) {
-    for (int i = 0; i < nac; ++i) {
-      if (!data.ac_buses[static_cast<size_t>(i)].in_service) continue;
-      data.pd_pu[i] = data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
-      data.qd_pu[i] = data.ac_buses[static_cast<size_t>(i)].qd_mvar / data.base_mva;
-      // Default: constant power.
-      data.bus_zip_pp[i] = 1.0;
-      data.bus_zip_pq[i] = 1.0;
-    }
+  // H1: Always initialise pd_pu/qd_pu from bus-level demand so that the PF
+  // solver uses the same additive model as DC-OPF (bus.pd_mw + scaled loads).
+  // When no component loads are present this is the sole demand source.
+  for (int i = 0; i < nac; ++i) {
+    if (!data.ac_buses[static_cast<size_t>(i)].in_service) continue;
+    data.pd_pu[i] = data.ac_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+    data.qd_pu[i] = data.ac_buses[static_cast<size_t>(i)].qd_mvar / data.base_mva;
+    // Default: constant power (overwritten by ZIP normalisation when loads present).
+    data.bus_zip_pp[i] = 1.0;
+    data.bus_zip_pq[i] = 1.0;
   }
 
   // Accumulate per-bus load and track total P/Q weight for averaging ZIP.
   Eigen::VectorXd total_p_weight = Eigen::VectorXd::Zero(nac);
   Eigen::VectorXd total_q_weight = Eigen::VectorXd::Zero(nac);
 
+  // H1: When component loads are present, seed ZIP numerators and weights with
+  // bus-level demand (constant power, fraction=1.0) so that the weighted-average
+  // normalisation accounts for the base demand alongside component-load ZIP models.
+  if (!data.loads.empty()) {
+    for (int i = 0; i < nac; ++i) {
+      if (!data.ac_buses[static_cast<size_t>(i)].in_service) continue;
+      const double abs_p = std::abs(data.ac_buses[static_cast<size_t>(i)].pd_mw);
+      const double abs_q = std::abs(data.ac_buses[static_cast<size_t>(i)].qd_mvar);
+      data.bus_zip_pp[i] = 1.0 * abs_p;  // fraction=1.0, weight=abs_p
+      data.bus_zip_pq[i] = 1.0 * abs_q;
+      total_p_weight[i]  = abs_p;
+      total_q_weight[i]  = abs_q;
+    }
+  }
+
   for (const auto& ld : data.loads) {
     if (!ld.in_service) continue;
     const int idx = ld.bus - 1;
     if (idx < 0 || idx >= nac) continue;
 
-    const double pd = ld.p_mw / data.base_mva;
-    const double qd = ld.q_mvar / data.base_mva;
+    const double pd = ld.p_mw * ld.scaling / data.base_mva;   // H1: apply scaling
+    const double qd = ld.q_mvar * ld.scaling / data.base_mva; // H1: apply scaling
     data.pd_pu[idx] += pd;
     data.qd_pu[idx] += qd;
 
-    const double abs_p = std::abs(ld.p_mw);
-    const double abs_q = std::abs(ld.q_mvar);
+    const double abs_p = std::abs(ld.p_mw * ld.scaling);  // H1: scale ZIP weight
+    const double abs_q = std::abs(ld.q_mvar * ld.scaling);
 
     // Weighted sum of ZIP coefficients (weight = |P| or |Q|).
     data.bus_zip_pp[idx] += (ld.p_percent_p / 100.0) * abs_p;

@@ -82,25 +82,36 @@ ContractionResult contract_zero_impedance_edges(
   // ── Step 1: Union nodes connected by zero-impedance edges ──────────
   for (const auto& e : graph.edges) {
     if (!e.in_service) continue;
-    if (!e.is_zero_impedance && !e.is_closed_switch) continue;
+    // Quick reject: switch-type edges that are open can never contract;
+    // line-type edges are only candidates when contract_zero_impedance_lines
+    // is set; all other edge types (e.g. VSC) are never contracted.
+    const bool is_switch_type = (e.category == EdgeCategory::Switch ||
+                                 e.category == EdgeCategory::Breaker ||
+                                 e.category == EdgeCategory::DC_Switch);
+    const bool is_line_type   = (e.category == EdgeCategory::AC_Line ||
+                                 e.category == EdgeCategory::DC_Line);
+    if (is_switch_type && !e.is_closed_switch) continue;
+    if (is_line_type  && !options.contract_zero_impedance_lines) continue;
+    if (!is_switch_type && !is_line_type) continue;
 
-    // Check which category we're handling.
-    // contract_closed_switches controls Switch edges;
-    // contract_closed_breakers controls Breaker and DC_Switch edges;
-    // zero_impedance_threshold is re-evaluated here (may differ from the
-    // threshold used when the graph was originally built).
+    // Decide whether to merge this edge.
+    // contract_closed_switches governs Switch; contract_closed_breakers governs
+    // Breaker and DC_Switch.  For line edges, always re-evaluate from the raw
+    // impedance magnitude — the pre-set is_zero_impedance flag is intentionally
+    // ignored so that the threshold can be raised or lowered at contraction
+    // time independently of the value used when the graph was originally built.
     bool do_merge = false;
-    if (e.is_closed_switch && options.contract_closed_switches &&
-        e.category == EdgeCategory::Switch)
-      do_merge = true;
-    if (e.is_closed_switch && options.contract_closed_breakers &&
-        (e.category == EdgeCategory::Breaker ||
-         e.category == EdgeCategory::DC_Switch))
-      do_merge = true;
-    if (!do_merge && options.contract_zero_impedance_lines &&
-        e.category == EdgeCategory::AC_Line) {
-      double z_mag = std::hypot(e.r_pu, e.x_pu);
-      if (e.is_zero_impedance || z_mag < options.zero_impedance_threshold)
+    if (is_switch_type && e.is_closed_switch) {
+      if (e.category == EdgeCategory::Switch && options.contract_closed_switches)
+        do_merge = true;
+      if ((e.category == EdgeCategory::Breaker ||
+           e.category == EdgeCategory::DC_Switch) &&
+          options.contract_closed_breakers)
+        do_merge = true;
+    }
+    if (!do_merge && is_line_type && options.contract_zero_impedance_lines) {
+      // DC_Line and AC_Line both handled here.
+      if (std::hypot(e.r_pu, e.x_pu) < options.zero_impedance_threshold)
         do_merge = true;
     }
 
@@ -320,7 +331,11 @@ ContractionResult contract_zero_impedance_edges(
                                                    : result.dc_bus_to_super;
     int rep_f = b2s_f.count(e.from_bus_id) ? b2s_f.at(e.from_bus_id) : e.from_bus_id;
     int rep_t = b2s_t.count(e.to_bus_id)   ? b2s_t.at(e.to_bus_id)   : e.to_bus_id;
-    if (rep_f == rep_t) continue; // internal to super-node, skip
+    // Skip only when both endpoints collapse into the same super-node AND are
+    // in the same domain.  A cross-domain edge (e.g. a VSC connecting AC bus N
+    // to DC bus N) must NOT be discarded just because the two representative
+    // bus IDs happen to be numerically equal.
+    if (dom_f == dom_t && rep_f == rep_t) continue; // internal same-domain super-node
 
     int fn = (dom_f == NodeDomain::AC) ? cg.ac_node_idx(rep_f) : cg.dc_node_idx(rep_f);
     int tn = (dom_t == NodeDomain::AC) ? cg.ac_node_idx(rep_t) : cg.dc_node_idx(rep_t);
@@ -332,12 +347,11 @@ ContractionResult contract_zero_impedance_edges(
     ne.to_node     = tn;
     ne.from_bus_id = rep_f;
     ne.to_bus_id   = rep_t;
-    // Zero-impedance switches inside super-nodes were skipped above;
-    // remaining zero-impedance branches between different super-nodes
-    // are real branches (e.g. zero-resistance DC lines or distinct voltage
-    // levels) — preserve them.
-    ne.is_closed_switch   = false;
-    ne.is_zero_impedance  = false; // they now connect distinct super-nodes
+    // Retain is_closed_switch and is_zero_impedance from the source edge.
+    // If contraction was disabled or the edge spans distinct super-nodes due
+    // to a base-kv mismatch, the original semantics remain valid — clearing
+    // these flags would silently hide closed switches from downstream
+    // contraction passes, diagnostics, and export.
     int eid_idx = static_cast<int>(cg.edges.size());
     cg.edges.push_back(ne);
     cg.adj[fn].emplace_back(eid_idx, tn);

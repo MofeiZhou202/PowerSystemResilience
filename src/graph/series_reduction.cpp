@@ -116,6 +116,7 @@ SeriesReductionResult apply_series_reduction(
     rec.r_eq = r_eq;
     rec.x_eq = x_eq;
     rec.b_eq = b_eq;
+    rec.domain = action.bus_domain;
     result.mapping.series_records.push_back(rec);
 
     // Update mapping for original branches
@@ -283,6 +284,7 @@ PendantReductionResult apply_pendant_reduction(
     rec.branch_id          = branch_eid;
     rec.p_load_absorbed    = p_absorbed * base_mva; // store as MW
     rec.q_load_absorbed    = q_absorbed * base_mva;
+    rec.domain             = action.bus_domain;
     result.mapping.pendant_records.push_back(rec);
     result.mapping.original_to_reduced_bus[elim_bus_id] = parent_bus_id;
     // Also update domain-qualified map

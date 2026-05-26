@@ -762,3 +762,217 @@ TEST_CASE("Same-ID collision: series reduction domain maps are independent",
   REQUIRE((ac_parent == 1 || ac_parent == 3));
   REQUIRE((dc_parent == 1 || dc_parent == 3));
 }
+
+TEST_CASE("Series recovery: same-ID AC/DC voltages written to separate maps",
+          "[graph][series][recovery][collision]") {
+  // AC: 1 --(r=0.01, x=0.05)-- 2 --(r=0.02, x=0.04)-- 3
+  // DC: 1 --(r=0.10)-- 2 --(r=0.20)-- 3
+  // Bus ID 2 exists in both domains.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  sys.ac.buses = {
+      make_ac_bus(1, BusType::SLACK),
+      make_ac_bus(2, BusType::PQ),
+      make_ac_bus(3, BusType::PQ),
+  };
+  sys.ac.branches = {
+      make_ac_branch(0, 1, 2, 0.01, 0.05),
+      make_ac_branch(1, 2, 3, 0.02, 0.04),
+  };
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V; d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_P; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+  DCBranch dl0; dl0.index = 10; dl0.from_bus = 1; dl0.to_bus = 2;
+    dl0.r_pu = 0.10; dl0.in_service = true;
+  DCBranch dl1; dl1.index = 11; dl1.from_bus = 2; dl1.to_bus = 3;
+    dl1.r_pu = 0.20; dl1.in_service = true;
+  sys.dc.branches = {dl0, dl1};
+
+  auto g = build_power_system_graph(sys);
+  GraphReductionOptions opts;
+  opts.enable_series_reduction      = true;
+  opts.preserve_all_load_buses      = true;
+  opts.preserve_all_generator_buses = true;
+  auto candidates = classify_reduction_candidates(g, sys, opts);
+  auto plan       = make_reduction_plan(g, candidates, opts);
+  auto red        = apply_series_reduction(g, sys, plan, opts);
+
+  // Both bus 2s must have been eliminated in their respective domains.
+  REQUIRE(red.mapping.ac_original_to_reduced_bus.count(2) > 0);
+  REQUIRE(red.mapping.dc_original_to_reduced_bus.count(2) > 0);
+
+  // Seed solved voltages on the retained terminals.
+  FullNetworkVoltages voltages;
+  voltages.ac_bus_voltage[1] = {1.00, 0.0};
+  voltages.ac_bus_voltage[3] = {0.98, 0.0};
+  voltages.bus_voltage[1]    = {1.00, 0.0};
+  voltages.bus_voltage[3]    = {0.98, 0.0};
+  voltages.dc_bus_voltage[1] = {1.02, 0.0};
+  voltages.dc_bus_voltage[3] = {0.96, 0.0};
+
+  recover_series_reduced_buses(voltages, red.mapping, sys);
+
+  // AC bus 2 must appear in ac_bus_voltage — value must differ from DC (interpolated
+  // using AC impedances).
+  REQUIRE(voltages.ac_bus_voltage.count(2) > 0);
+  // DC bus 2 must appear in dc_bus_voltage — value must differ from AC (interpolated
+  // using DC resistance only).
+  REQUIRE(voltages.dc_bus_voltage.count(2) > 0);
+  // The two recovered voltages must be distinct (different domains, different impedances).
+  double ac_v = voltages.ac_bus_voltage.at(2).real();
+  double dc_v = voltages.dc_bus_voltage.at(2).real();
+  REQUIRE(std::abs(ac_v - dc_v) > 1e-9);  // same-ID must not collide
+  // Both values must lie strictly between the terminal voltages of their domain.
+  REQUIRE(ac_v > 0.97);
+  REQUIRE(ac_v < 1.01);
+  REQUIRE(dc_v > 0.95);
+  REQUIRE(dc_v < 1.03);
+  // Legacy bus_voltage for key 2 must match the AC value (AC wins on collision).
+  REQUIRE_THAT(voltages.bus_voltage.at(2).real(),
+               WithinAbs(voltages.ac_bus_voltage.at(2).real(), 1e-9));
+}
+
+TEST_CASE("Series recovery: DC-only caller via legacy bus_voltage fallback",
+          "[graph][series][recovery][dc][fallback]") {
+  // Single-domain DC system (no AC buses).  Caller only fills bus_voltage
+  // (legacy) — recover_series_reduced_buses must still recover bus 2
+  // via the fallback path.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V; d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_P; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+  DCBranch dl0; dl0.index = 0; dl0.from_bus = 1; dl0.to_bus = 2;
+    dl0.r_pu = 0.10; dl0.in_service = true;
+  DCBranch dl1; dl1.index = 1; dl1.from_bus = 2; dl1.to_bus = 3;
+    dl1.r_pu = 0.10; dl1.in_service = true;
+  sys.dc.branches = {dl0, dl1};
+
+  auto g = build_power_system_graph(sys);
+  GraphReductionOptions opts;
+  opts.enable_series_reduction      = true;
+  opts.preserve_all_load_buses      = true;
+  opts.preserve_all_generator_buses = true;
+  auto candidates = classify_reduction_candidates(g, sys, opts);
+  auto plan       = make_reduction_plan(g, candidates, opts);
+  auto red        = apply_series_reduction(g, sys, plan, opts);
+
+  REQUIRE(red.mapping.dc_original_to_reduced_bus.count(2) > 0);
+
+  // Legacy-only caller: only fills bus_voltage, not dc_bus_voltage.
+  FullNetworkVoltages voltages;
+  voltages.bus_voltage[1] = {1.00, 0.0};
+  voltages.bus_voltage[3] = {0.90, 0.0};
+
+  recover_series_reduced_buses(voltages, red.mapping, sys);
+
+  // Recovery must populate dc_bus_voltage via fallback.
+  REQUIRE(voltages.dc_bus_voltage.count(2) > 0);
+  double v2 = voltages.dc_bus_voltage.at(2).real();
+  REQUIRE(v2 > 0.89);
+  REQUIRE(v2 < 1.01);
+}
+
+TEST_CASE("Pendant recovery: DC pendant bus voltage recovered",
+          "[graph][pendant][recovery][dc]") {
+  // DC network: bus 1 (slack) -- branch r=0.05 -- bus 2 (pendant, pd=10 MW)
+  // Bus 3 is another non-pendant load bus to keep bus 1 non-pendant.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V; d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P;
+    d2.pd_mw = 10.0; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_P; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+
+  DCBranch dl0; dl0.index = 0; dl0.from_bus = 1; dl0.to_bus = 2;
+    dl0.r_pu = 0.05; dl0.in_service = true;
+  DCBranch dl1; dl1.index = 1; dl1.from_bus = 1; dl1.to_bus = 3;
+    dl1.r_pu = 0.10; dl1.in_service = true;
+  sys.dc.branches = {dl0, dl1};
+
+  auto g = build_power_system_graph(sys);
+  GraphReductionOptions opts;
+  opts.enable_series_reduction      = false;
+  opts.enable_pendant_reduction     = true;
+  opts.preserve_all_load_buses      = false;
+  opts.preserve_all_generator_buses = true;
+  auto candidates = classify_reduction_candidates(g, sys, opts);
+  auto plan       = make_reduction_plan(g, candidates, opts);
+  auto red        = apply_pendant_reduction(g, sys, plan, opts);
+
+  // Bus 2 or 3 should be eliminated as a pendant.
+  bool any_pendant = !red.mapping.pendant_records.empty();
+  if (!any_pendant) {
+    // If no pendant was eliminated, skip — system did not qualify.
+    SUCCEED("No pendant eliminated; skipping recovery test");
+    return;
+  }
+
+  // Seed parent (bus 1) voltage in dc_bus_voltage.
+  FullNetworkVoltages voltages;
+  voltages.dc_bus_voltage[1] = {1.0, 0.0};
+  voltages.bus_voltage[1]    = {1.0, 0.0};
+
+  RecoveryOptions ropts;
+  recover_pendant_buses(voltages, red.mapping, sys, ropts);
+
+  // The eliminated pendant bus must now have a DC voltage entry.
+  for (const auto& rec : red.mapping.pendant_records) {
+    REQUIRE(voltages.dc_bus_voltage.count(rec.eliminated_bus_id) > 0);
+    double v = voltages.dc_bus_voltage.at(rec.eliminated_bus_id).real();
+    // Voltage must be slightly below 1.0 (load draws current → resistive drop).
+    REQUIRE(v > 0.80);
+    REQUIRE(v < 1.01);
+  }
+}
+
+TEST_CASE("Pendant recovery: DC-only caller via legacy bus_voltage fallback",
+          "[graph][pendant][recovery][dc][fallback]") {
+  // Same topology as above; caller seeds only bus_voltage (legacy).
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V; d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P;
+    d2.pd_mw = 10.0; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_P; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+  DCBranch dl0; dl0.index = 0; dl0.from_bus = 1; dl0.to_bus = 2;
+    dl0.r_pu = 0.05; dl0.in_service = true;
+  DCBranch dl1; dl1.index = 1; dl1.from_bus = 1; dl1.to_bus = 3;
+    dl1.r_pu = 0.10; dl1.in_service = true;
+  sys.dc.branches = {dl0, dl1};
+
+  auto g = build_power_system_graph(sys);
+  GraphReductionOptions opts;
+  opts.enable_series_reduction      = false;
+  opts.enable_pendant_reduction     = true;
+  opts.preserve_all_load_buses      = false;
+  opts.preserve_all_generator_buses = true;
+  auto candidates = classify_reduction_candidates(g, sys, opts);
+  auto plan       = make_reduction_plan(g, candidates, opts);
+  auto red        = apply_pendant_reduction(g, sys, plan, opts);
+
+  if (red.mapping.pendant_records.empty()) {
+    SUCCEED("No pendant eliminated; skipping fallback test");
+    return;
+  }
+
+  // Legacy-only caller: only fills bus_voltage, not dc_bus_voltage.
+  FullNetworkVoltages voltages;
+  voltages.bus_voltage[1] = {1.0, 0.0};
+
+  RecoveryOptions ropts;
+  recover_pendant_buses(voltages, red.mapping, sys, ropts);
+
+  for (const auto& rec : red.mapping.pendant_records) {
+    REQUIRE(voltages.dc_bus_voltage.count(rec.eliminated_bus_id) > 0);
+    REQUIRE(voltages.dc_bus_voltage.at(rec.eliminated_bus_id).real() > 0.80);
+  }
+}

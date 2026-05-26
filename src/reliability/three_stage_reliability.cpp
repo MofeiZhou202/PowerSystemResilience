@@ -10,6 +10,7 @@
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -222,13 +223,14 @@ struct DSU {
 // MODEL SCOPE (connectivity-only, no physical constraints):
 //   Stage 1 — fault island: fault branch open, all other in-service branches/switches
 //             in their nominal state.
-//   Stage 2 — switching: fault branch stays open; ALL other in-service branches and
-//             switches are closed (best-case connectivity restoration).
-//             LIMITATION: this does not model radial-topology constraints, maximum
-//             switch-operation counts, power-flow limits, or voltage limits.
-//             It is a pure reachability model — if a source can reach a load bus via
-//             any path, the load is "restorable".  Physical feasibility of the
-//             resulting topology is NOT checked.
+//   Stage 2 — switching: fault branch stays open; in-service branches connect normally;
+//             switches are closed greedily up to max_sw_ops switching operations.
+//             If max_sw_ops == INT_MAX (default) all normally-open in-service switches
+//             are closed (best-case).  Each switch that merges two distinct components
+//             counts as one operation; switches within the same component are free.
+//             REMAINING LIMITATIONS: no radial-topology constraints, no line-flow
+//             limits, no voltage limits.  Greedy ordering is deterministic but not
+//             globally optimal when max_sw_ops < number of applicable switches.
 //   Stage 3 — repair: fault branch restored; all originally-in-service elements on.
 //
 // SOP/VSC dispatch is NOT modelled here; VSC converters are treated as lossless
@@ -236,7 +238,8 @@ struct DSU {
 // are NOT co-optimised; psop vectors in FaultDetail are filled with zeros.
 std::unordered_map<int, int> stage_components(const NativeCase& c,
                                               const FaultLine& fault,
-                                              int stage) {
+                                              int stage,
+                                              int max_sw_ops = INT_MAX) {
   auto pos = bus_position_map(c.buses);
   DSU dsu(static_cast<int>(c.buses.size()));
   auto connect = [&](int a, int b) {
@@ -251,11 +254,17 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
     if (on) connect(br.from_bus, br.to_bus);
   }
+  // Step 2: Passive (zero-operation) connectivity.
+  // All of these are connected BEFORE the normally-open greedy loop so that
+  // transformer / VSC / CB paths are already reflected in the DSU when a NO
+  // switch is evaluated.  A switch is only charged one operation when it truly
+  // merges two otherwise-disjoint components after ALL free edges are in.
+  //
+  // 2a — Already-closed AC switches (free; same semantics for stages 1, 2, 3).
   for (const auto& sw : c.sys.ac.switches) {
-    bool on = sw.in_service && sw.closed;
-    if (stage >= 2 && sw.in_service) on = true;
-    if (on) connect(sw.bus_from, sw.bus_to);
+    if (sw.in_service && sw.closed) connect(sw.bus_from, sw.bus_to);
   }
+  // 2b — Transformers (2-winding and 3-winding).
   for (const auto& tr : c.sys.ac.transformers_2w) {
     if (tr.in_service) connect(tr.hv_bus, tr.lv_bus);
   }
@@ -264,6 +273,7 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     connect(tr.hv_bus, tr.mv_bus);
     connect(tr.hv_bus, tr.lv_bus);
   }
+  // 2c — DC branches (same fault/stage conditions as AC branches above).
   for (int i = 0; i < static_cast<int>(c.sys.dc.branches.size()); ++i) {
     const auto& br = c.sys.dc.branches[i];
     bool on = br.in_service;
@@ -272,12 +282,40 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
     if (on) connect(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
   }
+  // 2d — VSC converters (lossless AC↔DC coupling; dispatch not modelled here).
   for (const auto& vsc : c.sys.vsc_converters) {
-    // VSC crosses domains: AC side has no offset, DC side has kDCBusOffset
     if (vsc.in_service) connect(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
   }
+  // 2e — DC/DC converters.
   for (const auto& dc : c.sys.dc.dcdc_converters) {
     if (dc.in_service) connect(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+  }
+  // 2f — AC circuit breakers (normally-closed; free).
+  for (const auto& cb : c.sys.ac.circuit_breakers) {
+    if (cb.in_service && cb.closed) connect(cb.bus_from, cb.bus_to);
+  }
+  // 2g — DC circuit breakers (normally-closed; free).
+  for (const auto& cb : c.sys.dc.dc_circuit_breakers) {
+    if (cb.in_service && cb.closed)
+      connect(cb.bus_from + kDCBusOffset, cb.bus_to + kDCBusOffset);
+  }
+  // Step 3: Greedy normally-open switch closing (Stage 2 only).
+  // The DSU now includes all passive connections; a switch is charged one
+  // operation only when it genuinely merges two isolated components.
+  if (stage >= 2 && max_sw_ops > 0) {
+    int ops = 0;
+    for (const auto& sw : c.sys.ac.switches) {
+      if (!sw.in_service || sw.closed) continue;  // skip out-of-service or already closed
+      auto ia = pos.find(sw.bus_from), ib = pos.find(sw.bus_to);
+      if (ia == pos.end() || ib == pos.end()) continue;
+      if (dsu.find(ia->second) != dsu.find(ib->second)) {
+        // Merges two distinct components — counts as one switching operation.
+        if (ops >= max_sw_ops) continue;
+        dsu.unite(ia->second, ib->second);
+        ++ops;
+      }
+      // Switch within same component: no connectivity effect; don't close (strict model).
+    }
   }
 
   std::unordered_map<int, int> out;
@@ -292,7 +330,8 @@ struct StageSolve {
   double objective{0.0};
 };
 
-StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage) {
+StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage,
+                            int max_sw_ops = INT_MAX) {
   StageSolve out;
   const int nd = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
@@ -301,7 +340,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     return out;
   }
 
-  const auto comp = stage_components(c, fault, stage);
+  const auto comp = stage_components(c, fault, stage, max_sw_ops);
   std::unordered_map<int, double> comp_cap;
   for (const auto& s : c.sources) {
     auto it = comp.find(s.bus);
@@ -398,7 +437,12 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     out.status = res.stats.status.empty() ? "failed" : res.stats.status;
     for (int i = 0; i < nd; ++i) out.shed_by_load[i] = c.loads[i].p_kw;
   } else {
-    out.status = "success";
+    // M3: Distinguish proven-optimal from time-limit-feasible (non-optimal).
+    // A residual mip_gap above the tolerance means the B&C hit its node/time
+    // budget without closing the optimality gap; mark as approximate so r.ok
+    // stays false and callers know the EENS/SAIDI values are upper-bound estimates.
+    const bool proven_optimal = (res.stats.mip_gap <= opt.gap_tol + 1e-12);
+    out.status = proven_optimal ? "success" : "success (approximate)";
     out.objective = res.stats.objective;
     // Post-solve constraint verification: Ax ≤ b.
     // A violated incumbent is treated as a failed solve to prevent bad values
@@ -475,7 +519,11 @@ void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
   r.nmg = static_cast<int>(c.sys.microgrids.size());
 }
 
-void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
+void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
+                     int max_sw_ops = INT_MAX) {
+  // Clamp negative values: negative has no sensible meaning; treat as 0
+  // (no switching) rather than propagating a misleading negative count string.
+  if (max_sw_ops < 0) max_sw_ops = 0;
   fill_summary(c, r);
   r.nodal_eens_kwh_yr.assign(c.loads.size(), 0.0);
   r.nodal_cif.assign(c.loads.size(), 0.0);
@@ -493,7 +541,7 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
 
   for (const auto& fault : c.faults) {
     auto s1 = solve_stage_milp(c, fault, 1);
-    auto s2 = solve_stage_milp(c, fault, 2);
+    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops);  // switch-count limit applies only to Stage 2
     auto s3 = solve_stage_milp(c, fault, 3);
 
     ThreeStageFaultDetail d;
@@ -506,7 +554,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
     d.pls_stage2 = s2.shed_kw;
     d.pls_stage3 = s3.shed_kw;
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
-    d.objective = d.pls_stage1 * kTauSwitchHr + d.pls_stage2 * kTauTrippingHr + d.pls_stage3 * kTauRepairHr;
+    // P1c: kTauSwitchHr/kTauTrippingHr/kTauRepairHr are boundary times
+    // (τ_SW, τ_TP, τ_RP).  Stage durations are τ_SW, τ_TP-τ_SW, τ_RP-τ_TP.
+    d.objective = d.pls_stage1 * kTauSwitchHr
+                + d.pls_stage2 * (kTauTrippingHr - kTauSwitchHr)
+                + d.pls_stage3 * (kTauRepairHr   - kTauTrippingHr);
     // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
     // yet implemented; the binary load-shedding MILP above does not dispatch
     // SOP active-power flows. A dedicated OPF-based restoration model is
@@ -524,16 +576,16 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
     for (size_t i = 0; i < c.loads.size(); ++i) {
       const double ens = fault.failure_rate *
           (s1.shed_by_load[i] * kTauSwitchHr +
-           s2.shed_by_load[i] * kTauTrippingHr +
-           s3.shed_by_load[i] * kTauRepairHr);
+           s2.shed_by_load[i] * (kTauTrippingHr - kTauSwitchHr) +
+           s3.shed_by_load[i] * (kTauRepairHr   - kTauTrippingHr));
       r.nodal_eens_kwh_yr[i] += ens;
       r.eens_kwh_yr += ens;
       const bool interrupted = s1.shed_by_load[i] > 1e-6 || s2.shed_by_load[i] > 1e-6 || s3.shed_by_load[i] > 1e-6;
       if (interrupted) {
         const double cust = std::max(1.0, c.loads[i].customers);
-        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? kTauSwitchHr : 0.0) +
-                                     (s2.shed_by_load[i] > 1e-6 ? kTauTrippingHr : 0.0) +
-                                     (s3.shed_by_load[i] > 1e-6 ? kTauRepairHr : 0.0)) * 60.0;
+        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? kTauSwitchHr                      : 0.0) +
+                                     (s2.shed_by_load[i] > 1e-6 ? (kTauTrippingHr - kTauSwitchHr)  : 0.0) +
+                                     (s3.shed_by_load[i] > 1e-6 ? (kTauRepairHr   - kTauTrippingHr) : 0.0)) * 60.0;
         r.nodal_cif[i] += fault.failure_rate;
         r.nodal_cid_min[i] += fault.failure_rate * duration_min;
         weighted_interruptions += fault.failure_rate * cust;
@@ -546,13 +598,33 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
   r.saifi = weighted_interruptions / total_customers;
   r.saidi_min = weighted_duration_min / total_customers;
   r.eens_cost = r.eens_kwh_yr * kReliabilityVoll;
+
+  // Populate model limitations so callers can surface the approximations.
+  r.model_limitations =
+      "Stage 2 switching: connectivity-only (no radial/capacity/voltage constraints). "
+      "Switch operations are greedy (order-dependent, not globally optimal"
+      + (max_sw_ops == INT_MAX
+           ? std::string("; no switch-count limit applied")
+           : "; limited to " + std::to_string(max_sw_ops) + " operations per fault")
+      + "). "
+      "VSC/DCDC treated as lossless connectivity edges; SOP setpoints (psop) are zero. "
+      "DC loads are included in reachability but DC power-flow constraints are not enforced. "
+      "Load shed decisions are all-or-nothing binary per load point.";
+
   // r.ok is true only when every fault stage solved to a verified optimum.
   // Any stage that returned "failed*" used conservative full-shed estimates;
   // those values are still accumulated into EENS but the result is flagged
   // so that callers know the metrics are upper-bound estimates, not exact.
+  // M3: "success (approximate)" stages also clear r.ok — the gap was not
+  // proven, so the shed values are feasible but potentially non-optimal.
   bool any_failed = false;
-  for (const auto& fd : r.faults)
-    if (fd.status.rfind("failed", 0) == 0) { any_failed = true; break; }
+  for (const auto& fd : r.faults) {
+    if (fd.status.rfind("failed", 0) == 0 ||
+        fd.status == "success (approximate)") {
+      any_failed = true;
+      break;
+    }
+  }
   r.ok = !any_failed;
 }
 
@@ -561,7 +633,6 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
 ThreeStageReliabilityResult run_three_stage_reliability(
     const fs::path& case_json,
     const ThreeStageReliabilityOptions& options) {
-  (void)options;
   ThreeStageReliabilityResult result;
   if (!fs::exists(case_json)) {
     result.error = "case JSON does not exist: " + case_json.string();
@@ -583,7 +654,7 @@ ThreeStageReliabilityResult run_three_stage_reliability(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result);
+    run_native_case(c, result, options.max_switch_operations);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
@@ -593,7 +664,6 @@ ThreeStageReliabilityResult run_three_stage_reliability(
 ThreeStageReliabilityResult run_three_stage_reliability_from_string(
     const std::string& case_json_text,
     const ThreeStageReliabilityOptions& options) {
-  (void)options;
   ThreeStageReliabilityResult result;
   if (case_json_text.empty()) {
     result.error = "case JSON text is empty";
@@ -610,7 +680,7 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result);
+    run_native_case(c, result, options.max_switch_operations);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
