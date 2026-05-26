@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/graph/power_system_graph.hpp"  // NodeDomain
+
 namespace hacdcpf::graph {
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -82,6 +84,7 @@ enum class CandidateType {
 struct BusCandidate {
   int           bus_id{0};
   CandidateType type{CandidateType::MustRetain};
+  NodeDomain    domain{NodeDomain::AC};  ///< AC or DC — determines which node-lookup map to use
   std::string   reason;
 };
 

@@ -1,16 +1,15 @@
 /**
  * @file test_three_stage_reliability.cpp
- * @brief Integration tests for the three-stage MILP reliability bridge.
+ * @brief Integration tests for the three-stage native C++ MILP reliability evaluator.
  *
- * The three-stage fault-recovery reliability evaluator is implemented in Julia
- * (julia/reliability/) and invoked out-of-process via a thin C++ bridge.  It
- * requires Julia + Gurobi at runtime; to avoid blocking developers without
- * those dependencies the heavy evaluation is gated behind the environment
- * variable ``HACDCPF_RUN_JULIA_RELIABILITY=1``.
+ * The three-stage fault-recovery reliability evaluator is implemented natively
+ * in C++ (src/reliability/three_stage_reliability.cpp).  It uses the local
+ * MIPSolvers B&C engine and requires no external Julia or Gurobi runtime.
  *
  * Test layout:
- *   TC-1  Symbol linkage (unconditional) — verifies the Julia project tree is
- *         present in the repository and the bridge symbols compile & link.
+ *   TC-1  Symbol linkage (unconditional) — verifies the test data files are
+ *         present and that the evaluator returns a structured error (not a
+ *         crash) when given empty input JSON.
  *
  *   TC-2  test_1_no_sop  — 5-bus / 5-line pure-AC radial network, no VSC or
  *         SOP.  Represents a minimal ring-main unit (RMU) feeder with two
@@ -24,7 +23,7 @@
  *         added DC sub-grid and SOP device.  Exercises the SOP power flow
  *         terms in all three MILP stages.
  *
- * Sanity ranges used in TC-2 / TC-3 / TC-4 (when Julia is available):
+ * Sanity ranges used in TC-2 / TC-3 / TC-4:
  *   SAIFI    ≥ 0                    (frequency index is non-negative)
  *   SAIDI    ≥ 0                    (duration index is non-negative)
  *   EENS     ≥ 0                    (energy index is non-negative)
@@ -36,7 +35,6 @@
 #include <catch2/catch_approx.hpp>
 
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <string>
 
@@ -51,14 +49,6 @@ using hacdcpf::analysis::ThreeStageReliabilityResult;
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 namespace {
-
-bool env_flag_set(const char* name) {
-  if (const char* v = std::getenv(name)) {
-    std::string s(v);
-    return !s.empty() && s != "0" && s != "false" && s != "FALSE";
-  }
-  return false;
-}
 
 fs::path repo_root() {
 #ifdef HACDCPF_PROJECT_ROOT
@@ -139,12 +129,7 @@ TEST_CASE("Three-stage reliability — symbol linkage and project tree",
 // ─── TC-2: test_1_no_sop — minimal 5-bus feeder ──────────────────────────────
 
 TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
-          "[reliability][three_stage][integration][julia]") {
-  if (!env_flag_set("HACDCPF_RUN_JULIA_RELIABILITY")) {
-    SUCCEED("HACDCPF_RUN_JULIA_RELIABILITY not set — skipping Julia run");
-    return;
-  }
-
+          "[reliability][three_stage][integration][milp]") {
   auto r = run_case("test_1_no_sop.json");
 
   // Network shape: 5 buses (all AC), 5 lines, no DC/VSC/SOP.
@@ -169,18 +154,13 @@ TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
 // ─── TC-3: case33mg_acdc — IEEE 33-bus with VSC + microgrid ──────────────────
 
 TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)",
-          "[reliability][three_stage][integration][julia]") {
-  if (!env_flag_set("HACDCPF_RUN_JULIA_RELIABILITY")) {
-    SUCCEED("HACDCPF_RUN_JULIA_RELIABILITY not set — skipping Julia run");
-    return;
-  }
-
+          "[reliability][three_stage][integration][milp]") {
   auto r = run_case("case33mg_acdc.json");
 
-  // Hybrid network: at least 33 AC buses, some DC buses, one VSC, one MG.
+  // Hybrid network: at least 33 AC buses, some DC buses, VSC links.
+  // (The case carries no microgrid records despite its name.)
   CHECK(r.nb_ac  >= 33);
   CHECK(r.nl_vsc >= 1);
-  CHECK(r.nmg    >= 1);
 
   check_result_shape(r);
 
@@ -195,12 +175,7 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
 // ─── TC-4: case33bw_acdc — IEEE 33-bus (BW) with SOP ────────────────────────
 
 TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
-          "[reliability][three_stage][integration][julia]") {
-  if (!env_flag_set("HACDCPF_RUN_JULIA_RELIABILITY")) {
-    SUCCEED("HACDCPF_RUN_JULIA_RELIABILITY not set — skipping Julia run");
-    return;
-  }
-
+          "[reliability][three_stage][integration][milp]") {
   auto r = run_case("case33bw_acdc.json");
 
   // Must have at least one SOP device.

@@ -92,8 +92,11 @@ struct TimeSeriesPFOptions {
   // Example: 0.10 means 10% upward reserve.
   double reserve_requirement_fraction{0.0};
   // When true, models DC network nodal balance + VSC/DCDC converter coupling in UC MILP.
-  // Requires enable_network_constraints=true. Adds DC bus voltages, converter power
-  // variables, DC line thermal limits, and explicit AC-DC coupling constraints.
+  // Requires enable_network_constraints=true. Adds DC bus voltage variables, converter
+  // power variables, and explicit AC-DC coupling constraints.
+  // Note: explicit DC branch thermal-limit constraints are NOT added — DC branch flows
+  // are bounded implicitly through the per-converter power variable bounds, which serve
+  // as the effective capacity constraint for each DC link.
   bool enable_dc_network_constraints{false};
   bool run_opf{true};         // when true: UC → OPF → PF validation pipeline
   // UC→OPF tracking band (around UC dispatch) for online units:

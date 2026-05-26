@@ -13,15 +13,24 @@
 #
 #   * Record the expected commit hash below.  Update it whenever MIPSolvers is
 #     intentionally upgraded so reviewers can see the dependency version bump.
-#   * If the working tree does not match, CMake emits a WARNING (not an error)
-#     so that developers whose local clone is slightly ahead/behind can still
-#     build.  CI can be configured to treat the warning as an error.
+#   * If the working tree does not match, CMake emits a FATAL_ERROR that halts
+#     the configure step.  Update the pin below whenever MIPSolvers is upgraded.
+#   * Override the default sibling path by setting MIPSOLVERS_SOURCE_DIR
+#     (e.g. cmake -DMIPSOLVERS_SOURCE_DIR=/opt/MIPSolvers ..) — useful for CI
+#     environments where the tree layout differs from the default.
 #
 # Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT ""
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "f0916c99f7f1364b825cabb58b50c3cc3d20eddd"
     CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)")
 
-set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
+set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH
+    "Explicit path to the MIPSolvers source tree. \
+When empty, defaults to ../MIPSolvers relative to this project.")
+if(MIPSOLVERS_SOURCE_DIR STREQUAL "")
+  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
+else()
+  set(_HACDCDSS_MIPSOLVERS_DIR "${MIPSOLVERS_SOURCE_DIR}")
+endif()
 
 if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt")
   message(FATAL_ERROR
@@ -40,11 +49,12 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
       OUTPUT_VARIABLE _MIPSOLVERS_ACTUAL_COMMIT
       ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT _MIPSOLVERS_ACTUAL_COMMIT STREQUAL _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
-      message(WARNING
-        "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the\n"
-        "expected pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).\n"
-        "Update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT in cmake/Dependencies.cmake\n"
-        "if this upgrade is intentional.")
+      message(FATAL_ERROR
+        "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the "
+        "expected pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).  "
+        "Either update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT in "
+        "cmake/Dependencies.cmake to record the intentional upgrade, or "
+        "check out the pinned commit in the MIPSolvers clone.")
     endif()
   endif()
 endif()

@@ -324,13 +324,17 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
     isl.bus_ids.push_back(g.nodes[ni].bus_id);
 
     if (g.nodes[ni].domain == NodeDomain::AC) {
-      isl.domain = NodeDomain::AC;
-      ++rep.n_ac_islands;  // overcounts, fixed below
+      isl.ac_bus_ids.push_back(g.nodes[ni].bus_id);
       if (g.nodes[ni].is_slack) isl.has_ac_slack = true;
     } else {
-      isl.domain = NodeDomain::DC;
+      isl.dc_bus_ids.push_back(g.nodes[ni].bus_id);
       if (g.nodes[ni].is_slack) isl.has_dc_voltage_ref = true;
     }
+  }
+
+  // domain = AC if the island has any AC nodes (hybrid AC+DC islands are AC-primary)
+  for (auto& isl : rep.islands) {
+    isl.domain = isl.ac_bus_ids.empty() ? NodeDomain::DC : NodeDomain::AC;
   }
 
   // Fix island count (overcounted above)

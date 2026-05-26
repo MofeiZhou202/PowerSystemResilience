@@ -25,6 +25,7 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::analysis;
@@ -370,4 +371,75 @@ TEST_CASE("Resilience: peak shed non-negative", "[resilience]") {
   CHECK(r.total_served_mwh >= 0.0);
   CHECK(r.total_demand_mwh >= 0.0);
   CHECK(r.total_served_mwh <= r.total_demand_mwh + 1e-6);
+}
+
+// ── FMEA budget-truncation tests ─────────────────────────────────────────────
+
+/// When max_repair_opf_calls=1 the repair-stage topology search is capped to
+/// a single OPF evaluation (the baseline with no switch actions).  With budget
+/// exhausted at call 1, budget_exhausted() is true, so repair_search_truncated
+/// must be set on every contingency that reaches the repair stage.
+TEST_CASE("FMEA: repair_search_truncated set when budget=1 with switch reconfiguration",
+          "[fmea][reliability][truncation]") {
+  // Build the 3-bus radial system and add a normally-open tie switch so the
+  // repair stage has at least one candidate to enumerate.
+  auto sys = make_radial_3bus();
+
+  // Generator at the slack bus to supply load in the healthy state.
+  Generator g;
+  g.index = 1; g.bus = 1; g.in_service = true;
+  g.pg_mw = 5.0; g.pmax_mw = 5.0; g.pmin_mw = 0.0;
+  sys.ac.generators = {g};
+
+  // Normally-open automated tie switch Bus3 → Bus1 (ring-back path).
+  Switch sw;
+  sw.index = 1; sw.bus_from = 3; sw.bus_to = 1;
+  sw.in_service = true; sw.closed = false;
+  sw.is_automated = true;
+  sys.ac.switches = {sw};
+
+  analysis::FMEAOptions opts;
+  opts.enable_switch_reconfiguration = true;
+  opts.max_repair_switch_actions = 1;
+  opts.max_repair_opf_calls = 1;  // only baseline OPF allowed → every repair search truncates
+
+  const auto result = analysis::run_distribution_fmea(sys, opts);
+
+  REQUIRE(result.n_contingencies > 0);
+
+  // Every contingency that visits the repair reconfiguration path must be
+  // flagged (budget exhausted immediately because baseline used all 1 call).
+  bool any_truncated = false;
+  for (const auto& det : result.contingencies) {
+    if (det.repair_search_truncated) { any_truncated = true; break; }
+  }
+  CHECK(any_truncated);
+}
+
+/// With unlimited budget (max_repair_opf_calls=0) no contingency should be
+/// flagged as truncated on this small system.
+TEST_CASE("FMEA: repair_search_truncated false with unlimited budget",
+          "[fmea][reliability][truncation]") {
+  auto sys = make_radial_3bus();
+
+  Generator g;
+  g.index = 1; g.bus = 1; g.in_service = true;
+  g.pg_mw = 5.0; g.pmax_mw = 5.0; g.pmin_mw = 0.0;
+  sys.ac.generators = {g};
+
+  Switch sw;
+  sw.index = 1; sw.bus_from = 3; sw.bus_to = 1;
+  sw.in_service = true; sw.closed = false; sw.is_automated = true;
+  sys.ac.switches = {sw};
+
+  analysis::FMEAOptions opts;
+  opts.enable_switch_reconfiguration = true;
+  opts.max_repair_switch_actions = 1;
+  opts.max_repair_opf_calls = 0;  // 0 = unlimited
+
+  const auto result = analysis::run_distribution_fmea(sys, opts);
+
+  for (const auto& det : result.contingencies) {
+    CHECK_FALSE(det.repair_search_truncated);
+  }
 }

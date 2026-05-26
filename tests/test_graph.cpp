@@ -595,7 +595,7 @@ TEST_CASE("Graph build: AC+DC hybrid", "[graph][build]") {
   auto g = build_power_system_graph(sys);
   REQUIRE(g.node_count() == 4); // 2 AC + 2 DC
   // DC Vref bus should be marked slack
-  int ni_dc1 = g.node_idx(10);
+  int ni_dc1 = g.dc_node_idx(10);
   REQUIRE(ni_dc1 >= 0);
   REQUIRE(g.nodes[ni_dc1].is_slack == true);
   REQUIRE(g.nodes[ni_dc1].domain == NodeDomain::DC);

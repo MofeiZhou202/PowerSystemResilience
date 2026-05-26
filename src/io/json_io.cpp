@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -710,6 +711,7 @@ static json vsc_to_json(const VSCConverter& c) {
   j["name"] = c.name;
   j["forced_outage_rate"] = c.forced_outage_rate;
   j["mttr_hr"] = c.mttr_hr;
+  j["grid_forming"] = c.grid_forming;
   return j;
 }
 
@@ -737,6 +739,7 @@ static VSCConverter vsc_from_json(const json& j) {
   c.name = jget<std::string>(j, "name", "");
   c.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  c.grid_forming = jget(j, "grid_forming", false);
   return c;
 }
 
@@ -3545,7 +3548,11 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
     for (const auto& row : root["branchAC"]) {
       ACBranch br;
       auto r = row.get<std::vector<double>>();
-      br.index = idx++;
+      // Prefer the stored DICTKEY index so that br.index survives an
+      // export→import round-trip unchanged (non-sequential IDs preserved).
+      br.index = (r.size() > static_cast<size_t>(jpc_idx::DICTKEY) && r[jpc_idx::DICTKEY] >= 0)
+                     ? static_cast<int>(r[jpc_idx::DICTKEY]) : idx;
+      ++idx;
       br.from_bus = static_cast<int>(r[jpc_idx::F_BUS]);
       br.to_bus = static_cast<int>(r[jpc_idx::T_BUS]);
       br.r_pu = r.size() > jpc_idx::BR_R ? r[jpc_idx::BR_R] : 0.0;
@@ -3561,6 +3568,13 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
     }
   }
   
+  // Build set of slack bus IDs from already-imported AC buses (BUS_TYPE == 3 in JPC).
+  // Used below to determine Generator::is_slack without hardcoding bus 1.
+  std::unordered_set<int> slack_bus_ids;
+  for (const auto& b : sys.ac.buses) {
+    if (b.bus_type == BusType::SLACK) slack_bus_ids.insert(b.index);
+  }
+
   // Generators
   if (root.contains("genAC")) {
     int idx = 0;
@@ -3579,7 +3593,9 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       g.pmin_mw = r.size() > jpc_idx::PMIN ? r[jpc_idx::PMIN] : 0.0;
       g.cost_c2 = r.size() > jpc_idx::COST ? r[jpc_idx::COST] : 0.0;
       g.emission_factor_tco2_mwh = r.size() > jpc_idx::CARBON_EMISSION ? r[jpc_idx::CARBON_EMISSION] : 0.0;
-      g.is_slack = (r[jpc_idx::GEN_BUS] == 1);  // Assume bus 1 is slack
+      // Determine slack status from the bus BUS_TYPE column (JPC type 3 = REF/SLACK)
+      // rather than hardcoding bus index 1, which breaks multi-area or renumbered cases.
+      g.is_slack = slack_bus_ids.count(g.bus) > 0;
       sys.ac.generators.push_back(g);
     }
   }
@@ -3622,7 +3638,9 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
     for (const auto& row : root["branchDC"]) {
       DCBranch br;
       auto r = row.get<std::vector<double>>();
-      br.index = idx++;
+      br.index = (r.size() > static_cast<size_t>(jpc_idx::DICTKEY) && r[jpc_idx::DICTKEY] >= 0)
+                     ? static_cast<int>(r[jpc_idx::DICTKEY]) : idx;
+      ++idx;
       br.from_bus = static_cast<int>(r[jpc_idx::F_BUS]);
       br.to_bus = static_cast<int>(r[jpc_idx::T_BUS]);
       br.r_pu = r.size() > jpc_idx::BR_R ? r[jpc_idx::BR_R] : 0.0;
@@ -3731,16 +3749,23 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       sys.dc.static_generators.push_back(static_generator_from_json(j));
 
   // storageetap is the structured replacement for the JPC matrix "storage" table.
-  // AC storage may already have been loaded from the matrix form above; only
-  // populate DC storage from storageetap (which carries a "domain" tag), and fall
-  // back to AC import when no matrix storage was present.
+  // It carries richer fields (eta_charge, eta_discharge, soc_init, etc.) and a
+  // "domain" tag that distinguishes AC from DC storage.
+  // When storageetap is present and contains AC entries, prefer it over the
+  // matrix-form "storage" import (which carries fewer fields) by clearing any
+  // AC storage that was loaded from the matrix form first.
   if (root.contains("storageetap") && root["storageetap"].is_array()) {
-    const bool ac_already_loaded = !sys.ac.storage.empty();
+    bool has_ac = false;
+    for (const auto& j : root["storageetap"]) {
+      if (jget<std::string>(j, "domain", "AC") != "DC") { has_ac = true; break; }
+    }
+    if (has_ac)
+      sys.ac.storage.clear();  // discard matrix-form entries; prefer storageetap
     for (const auto& j : root["storageetap"]) {
       const std::string dom = jget<std::string>(j, "domain", "AC");
       if (dom == "DC")
         sys.dc.storage.push_back(storage_from_json(j));
-      else if (!ac_already_loaded)
+      else
         sys.ac.storage.push_back(storage_from_json(j));
     }
   }

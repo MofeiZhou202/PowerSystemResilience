@@ -54,10 +54,15 @@ distinct operational phases follow every contingency:
 This three-stage framework, formalised for hybrid AC/DC networks with
 VSC links and Soft Open Points (SOP), is formulated as a
 Mixed-Integer Linear Programme (MILP).  The current C++ implementation in
-\texttt{src/reliability/three\_stage\_reliability.cpp} is an out-of-process
-Julia CLI bridge and JSON parser.  It contains no native optimisation model;
-the MILP engine must be available in the external Julia/Gurobi environment.
-See Section~\ref{sec:implementation_gap_audit} for the implementation boundary.
+\texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++
+evaluator that uses the embedded MIPSolvers B\&C engine directly — no
+external Julia or Gurobi environment is required.  The file header states:
+\emph{``The previous implementation was a Julia process bridge; this version
+keeps the public JSON schema but evaluates the staged load restoration with
+the embedded MIPSolvers C++ MILP engine.''}  An O($n$) analytical pre-check
+skips the B\&C solve when every connected component already has demand
+covered by local generation capacity.
+See Section~\ref{sec:implementation_gap_audit} for the audit summary.
 
 % ------------------------------------------------------------
 \subsection{Nomenclature}

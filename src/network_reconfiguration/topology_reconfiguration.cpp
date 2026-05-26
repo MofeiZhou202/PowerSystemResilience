@@ -235,8 +235,11 @@ TopoReconfResult run_topology_reconfiguration(
   // -------------------------------------------------------------------
   std::vector<double> zeta(nl + nl_vsc, 1.0);
   for (int f : opt.line_failures) {
-    // Map branch original index to edge array position
-    for (int i = 0; i < nl + nl_vsc; ++i) {
+    // line_failures contains ACBranch::index values (the .index field stored on each
+    // branch), NOT 0-based array positions.  edge_orig_idx[i] == br.index, so the
+    // match is correct.  Search only AC branch edges [0, nl_ac) to avoid spurious
+    // matches against DC branches or VSC converters that may share the same index value.
+    for (int i = 0; i < nl_ac; ++i) {
       if (edge_orig_idx[i] == f) { zeta[i] = 0.0; break; }
     }
   }
@@ -931,7 +934,10 @@ TopoReconfResult run_topology_reconfiguration(
   }
 
   result.feasible = true;
-  result.optimal  = true;
+  // optimal is only asserted when the B&C solver ran and proved the gap is
+  // within tolerance.  A heuristic incumbent satisfies feasibility but carries
+  // no optimality certificate, so optimal stays false in that case.
+  result.optimal = !heuristic_solved && (result.bc_stats.gap <= opt.mip_gap + 1e-9);
 
   for (int i = 0; i < nl + nl_vsc; ++i) {
     bool was_on = edge_status[i];

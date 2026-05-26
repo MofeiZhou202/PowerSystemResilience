@@ -37,10 +37,11 @@ std::unordered_map<int, int> build_bus_map(const std::vector<ACBus>& buses) {
   for (int i = 0; i < static_cast<int>(buses.size()); ++i) {
     auto [it, inserted] = m.emplace(buses[i].index, i);
     if (!inserted) {
-      spdlog::warn("DC OPF: duplicate bus ID {} at positions {} and {} — "
-                   "second occurrence overrides first",
-                   buses[i].index, it->second, i);
-      it->second = i;  // keep last occurrence (same behaviour as before)
+      throw std::invalid_argument(
+          "DC OPF: duplicate bus ID " + std::to_string(buses[i].index) +
+          " at positions " + std::to_string(it->second) +
+          " and " + std::to_string(i) +
+          " — topology is invalid; fix the input before solving");
     }
   }
   return m;
@@ -552,6 +553,20 @@ engine::SolveResult to_solve_result(const engine::api::Result& api_res) {
   return out;
 }
 
+// NOTE — congested LMP / branch_mu limitation:
+// This function recovers dual variables by solving a supporting equality-form
+// LP (the original LP formulation with the primal solution fixed as the
+// starting basis).  The native simplex solver used here (solve_lp_with_basis)
+// does NOT handle bounded-variable LP problems correctly: when
+// include_branch_limits=true, the Pf branch-flow variables have active box
+// constraints (lower/upper branch limits), and the simplex cannot recover their
+// correct dual values (box_dual_lb / box_dual_ub).  As a result:
+//   - LMP values (nodal prices) are valid and usable for economic dispatch.
+//   - branch_mu_lower / branch_mu_upper are UNRELIABLE when
+//     include_branch_limits=true and a branch limit is actually binding.
+// Callers must check DCOPFOptions::include_branch_limits before using
+// branch_mu for congestion analysis.  See also the test comment in
+// test_acopf_dcopf_crossval.cpp and the documentation in 04_opf.tex.
 void populate_missing_duals_from_supporting_lp(
     const DCOPFFormulation& form,
     engine::SolveResult& sol,
@@ -723,7 +738,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       for (const auto& isl : topo.islands) {
         if (isl.status == gr::IslandStatus::IsolatedLoad ||
             isl.status == gr::IslandStatus::NoSlack) {
-          dead_buses.insert(isl.bus_ids.begin(), isl.bus_ids.end());
+          dead_buses.insert(isl.ac_bus_ids.begin(), isl.ac_bus_ids.end());
         }
       }
       if (!sys.ac.loads.empty()) {
@@ -770,7 +785,15 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   }
 
   // Build LP formulation (constraint structure)
-  DCOPFFormulation form = build_dc_opf_lp(*sys_ptr, opt);
+  DCOPFFormulation form;
+  try {
+    form = build_dc_opf_lp(*sys_ptr, opt);
+  } catch (const std::invalid_argument& e) {
+    spdlog::error("DC OPF: invalid topology — {}", e.what());
+    result.status = std::string("Invalid topology: ") + e.what();
+    result.converged = false;
+    return result;
+  }
   
   if (form.nb == 0 || form.ng == 0) {
     result.status = "Empty system or no generators";
@@ -1020,7 +1043,16 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
     if (it == bus_map.end()) continue;
     p_net[it->second] -= ld.p_mw * ld.scaling;
   }
-  
+
+  // Add back load shedding — the OPF formulation includes a dpd[i] variable
+  // that reduces the effective demand at each bus.  Omitting this step makes
+  // every OPF solution that exercised load shedding appear infeasible.
+  if (!result.load_shedding_mw.empty()) {
+    for (size_t i = 0; i < buses.size() && i < result.load_shedding_mw.size(); ++i) {
+      p_net[i] += result.load_shedding_mw[i];
+    }
+  }
+
   // Add generation
   for (size_t gi = 0; gi < gens.size(); ++gi) {
     if (!gens[gi].in_service) continue;

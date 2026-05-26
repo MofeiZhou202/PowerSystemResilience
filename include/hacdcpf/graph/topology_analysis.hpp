@@ -68,8 +68,12 @@ enum class IslandStatus {
 
 struct IslandInfo {
   int            island_id{0};
-  std::vector<int> bus_ids;   ///< All buses in this island (original IDs)
-  NodeDomain     domain{NodeDomain::AC};
+  std::vector<int> bus_ids;       ///< All buses in this island (original IDs) — legacy; may contain
+                                  ///  duplicate integers when AC and DC bus IDs overlap.  Prefer
+                                  ///  ac_bus_ids / dc_bus_ids for domain-correct operations.
+  std::vector<int> ac_bus_ids;    ///< AC-domain bus IDs in this island
+  std::vector<int> dc_bus_ids;    ///< DC-domain bus IDs in this island
+  NodeDomain     domain{NodeDomain::AC};  ///< Primary domain (AC if island has any AC nodes)
   bool           has_ac_slack{false};
   bool           has_dc_voltage_ref{false};
   IslandStatus   status{IslandStatus::Valid};

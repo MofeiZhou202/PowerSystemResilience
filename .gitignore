@@ -3,3 +3,23 @@ data/
 
 build/
 build_rel/
+
+# LaTeX build artifacts
+docs/**/*.aux
+docs/**/*.log
+docs/**/*.out
+docs/**/*.toc
+docs/**/*.synctex.gz
+docs/**/*.fls
+docs/**/*.fdb_latexmk
+docs/**/*.bbl
+docs/**/*.blg
+docs/**/*.idx
+docs/**/*.ilg
+docs/**/*.ind
+docs/**/*.lof
+docs/**/*.lot
+docs/**/*.nav
+docs/**/*.snm
+docs/**/*.vrb
+docs/**/_minted-*

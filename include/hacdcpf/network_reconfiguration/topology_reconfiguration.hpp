@@ -27,7 +27,7 @@ namespace hacdcpf::analysis {
 
 // ── 拓扑重构选项 ───────────────────────────────────────────────────────
 struct TopoReconfOptions {
-  /// 故障线路编号列表（在 AC branches 中的索引，0-based）
+  /// 故障线路编号列表（每个元素为 ACBranch::index 字段值，非数组下标）
   /// 这些线路将被强制断开，然后通过闭合联络开关恢复供电
   std::vector<int> line_failures;
 
@@ -63,14 +63,17 @@ struct TopoReconfResult {
   bool feasible{false};
   bool optimal{false};
 
-  /// 断开的支路编号 (ACBranch::index)
+  /// 断开的支路/转换器编号。
+  /// ⚠ 混合系统：值为内部统一边索引 (edge_orig_idx)，前 nl_ac 条对应
+  /// ACBranch::index，后续为 DCBranch::index / VSCConverter::index。
+  /// 下游若将所有 ID 作为 ACBranch::index 使用会误操作同号的 DC/VSC 设备。
   std::vector<int> open_branch_ids;
-  /// 闭合的支路编号 (ACBranch::index)
+  /// 闭合的支路/转换器编号（含义同 open_branch_ids）。
   std::vector<int> closed_branch_ids;
 
-  /// 新闭合的联络开关 (原始 off → 重构后 on)
+  /// 新闭合的联络开关（含义同 open_branch_ids）。
   std::vector<int> switched_on_ids;
-  /// 新断开的支路 (原始 on → 重构后 off，含故障线路)
+  /// 新断开的支路（含义同 open_branch_ids）。
   std::vector<int> switched_off_ids;
 
   int n_switch_on{0};

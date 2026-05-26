@@ -493,9 +493,29 @@ solver always builds the QP form and then dispatches by backend:
 
 \subsubsection{Locational Marginal Prices}
 
-LMP extraction is not implemented in the current source.  \texttt{dc\_opf.cpp}
-contains a TODO for dual extraction and fills \texttt{lmp},
-\texttt{branch\_mu\_lower}, and \texttt{branch\_mu\_upper} with zeros.
+LMP extraction is controlled by \texttt{DCOPFOptions::compute\_lmp} (default
+\texttt{true}).  When enabled, the solver runs a supporting simplex LP after
+the primal solve to recover constraint dual variables; the resulting nodal
+prices populate \texttt{DCOPFResult::lmp}.  Set
+\texttt{compute\_lmp=false} in high-volume loops (Monte Carlo, FMEA) where
+price signals are not needed, to skip the dual extraction overhead.
+
+\textbf{Branch shadow prices} (\texttt{branch\_mu\_lower}/\texttt{branch\_mu\_upper})
+are populated \emph{only} when branch-flow variables ($P_{ij}$) are included
+in the formulation, i.e.\ when \texttt{include\_branch\_limits=true} (the
+default).  When branch limits are disabled or the LP is solved without
+explicit $P_{ij}$ variables (e.g.\ after a QP solve without a supporting LP),
+both vectors are left zero-filled.  Do \textbf{not} interpret zero values as
+``uncongested''; check \texttt{DCOPFOptions::include\_branch\_limits} first.
+
+\textbf{Known limitation — congested branch shadow prices:}
+The supporting simplex LP used for dual recovery (\texttt{solve\_lp\_with\_basis})
+does not handle bounded-variable LP problems.  When \texttt{include\_branch\_limits=true}
+and a branch limit is actively binding (congestion), the native simplex cannot
+recover correct $P_{ij}$ box duals; \texttt{branch\_mu\_lower/upper} will be
+unreliable (typically zero).  LMP nodal prices remain valid.  A bounded-variable
+simplex or an interior-point solver would be required to obtain correct branch
+shadow prices under congestion.
 
 \subsection{Reactive Power Optimization (\texttt{solve\_rpo})}
 \label{sec:rpo}

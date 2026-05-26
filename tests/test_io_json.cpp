@@ -549,3 +549,56 @@ TEST_CASE("JPC JSON round-trip: all 12 rich component types preserved",
     CHECK(rt.ac.branches.size()   == sys.ac.branches.size());
     CHECK(rt.ac.generators.size() == sys.ac.generators.size());
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// JPC JSON: field-level round-trip correctness (Round 7 regression guard)
+// Checks that branch indices (DICTKEY), generator is_slack, and storage
+// fields survive the to_jpc_json → from_jpc_json cycle without loss.
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_CASE("JPC JSON round-trip: branch index and generator slack preserved",
+          "[io][json][jpc][round-trip][fields][integration]") {
+    using namespace hacdcpf::io;
+    using Catch::Matchers::WithinAbs;
+
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+
+    // Bus 5 is SLACK (non-default index, non-1)
+    ACBus b5; b5.index=5; b5.bus_type=BusType::SLACK; b5.vm_pu=1.0; b5.in_service=true;
+    ACBus b7; b7.index=7; b7.bus_type=BusType::PQ;   b7.vm_pu=1.0; b7.in_service=true;
+    sys.ac.buses = {b5, b7};
+
+    // Branch with non-zero, non-sequential index
+    ACBranch br; br.index=42; br.from_bus=5; br.to_bus=7;
+    br.r_pu=0.02; br.x_pu=0.05; br.in_service=true;
+    sys.ac.branches = {br};
+
+    // Generator on bus 5 (SLACK)
+    Generator g; g.bus=5; g.is_slack=true; g.pmax_mw=200.0; g.in_service=true;
+    sys.ac.generators = {g};
+
+    // Storage with non-default fields
+    Storage st; st.index=0; st.bus=7; st.pmax_mw=10.0; st.e_rated_mwh=20.0;
+    st.soc_init=0.6; st.soc_min=0.1; st.soc_max=0.95;
+    st.eta_charge=0.93; st.eta_discharge=0.91; st.in_service=true;
+    sys.ac.storage = {st};
+
+    const std::string jpc_str = to_jpc_json(sys);
+    HybridPowerSystem rt = from_jpc_json(jpc_str);
+
+    // Branch index must survive via DICTKEY column
+    REQUIRE(rt.ac.branches.size() == 1);
+    CHECK(rt.ac.branches[0].index == 42);
+
+    // Generator is_slack must be derived from bus type, not hardcoded bus 1
+    REQUIRE(rt.ac.generators.size() == 1);
+    CHECK(rt.ac.generators[0].is_slack == true);
+
+    // Storage fields must survive via storageetap (structured JSON)
+    REQUIRE(rt.ac.storage.size() == 1);
+    CHECK_THAT(rt.ac.storage[0].e_rated_mwh,     WithinAbs(20.0, 1e-9));
+    CHECK_THAT(rt.ac.storage[0].soc_init,         WithinAbs(0.6,  1e-9));
+    CHECK_THAT(rt.ac.storage[0].eta_charge,       WithinAbs(0.93, 1e-9));
+    CHECK_THAT(rt.ac.storage[0].eta_discharge,    WithinAbs(0.91, 1e-9));
+}

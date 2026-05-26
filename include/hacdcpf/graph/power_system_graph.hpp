@@ -108,8 +108,17 @@ struct PowerSystemGraph {
   std::vector<GraphNode> nodes;
   std::vector<GraphEdge> edges;
 
-  /// bus_id → index in nodes[]
+  /// bus_id → index in nodes[] for AC buses only.
+  /// Use ac_node_idx() / dc_node_idx() for domain-specific lookups in hybrid
+  /// systems.  The legacy bus_id_to_node_idx is kept for backward-compatibility
+  /// with AC-only consumers (graph reduction, contraction, etc.) but MUST NOT
+  /// be used when both domains share the same bus-index values.
   std::unordered_map<int, int> bus_id_to_node_idx;
+
+  /// Domain-qualified lookup maps.  These are populated by
+  /// build_power_system_graph() and are always authoritative.
+  std::unordered_map<int, int> ac_bus_id_to_node_idx;
+  std::unordered_map<int, int> dc_bus_id_to_node_idx;
 
   /// Adjacency list: node_idx → list of (edge_idx, neighbor_node_idx)
   std::vector<std::vector<std::pair<int, int>>> adj;
@@ -117,9 +126,23 @@ struct PowerSystemGraph {
   int node_count() const { return static_cast<int>(nodes.size()); }
   int edge_count() const { return static_cast<int>(edges.size()); }
 
+  /// Legacy lookup — searches the shared map.  Works correctly for AC-only
+  /// graphs; for hybrid graphs prefer ac_node_idx() / dc_node_idx().
   int node_idx(int bus_id) const {
     auto it = bus_id_to_node_idx.find(bus_id);
     return (it == bus_id_to_node_idx.end()) ? -1 : it->second;
+  }
+
+  /// AC-domain lookup: returns -1 if the AC bus does not exist.
+  int ac_node_idx(int bus_id) const {
+    auto it = ac_bus_id_to_node_idx.find(bus_id);
+    return (it == ac_bus_id_to_node_idx.end()) ? -1 : it->second;
+  }
+
+  /// DC-domain lookup: returns -1 if the DC bus does not exist.
+  int dc_node_idx(int bus_id) const {
+    auto it = dc_bus_id_to_node_idx.find(bus_id);
+    return (it == dc_bus_id_to_node_idx.end()) ? -1 : it->second;
   }
 };
 

@@ -28,7 +28,11 @@ static int add_ac_node(PowerSystemGraph& g, const ACBus& bus) {
   nd.has_load = (bus.pd_mw != 0.0 || bus.qd_mvar != 0.0);
   nd.has_shunt = (bus.gs_mw != 0.0 || bus.bs_mvar != 0.0);
   g.nodes.push_back(nd);
+  // Populate both the legacy shared map and the AC-specific map.
+  // The shared map is for AC-only graph consumers; the AC-specific map is
+  // authoritative for hybrid lookups.
   g.bus_id_to_node_idx[bus.index] = idx;
+  g.ac_bus_id_to_node_idx[bus.index] = idx;
   g.adj.emplace_back();
   return idx;
 }
@@ -48,7 +52,10 @@ static int add_dc_node(PowerSystemGraph& g, const DCBus& bus) {
   nd.is_voltage_controlled = nd.is_slack;
   nd.has_load = (bus.pd_mw != 0.0) || bus.is_load;
   g.nodes.push_back(nd);
-  g.bus_id_to_node_idx[bus.index] = idx;
+  // Write ONLY to the DC-specific map.  DC and AC buses may share the same
+  // index values (e.g. both have bus 1), so we must NOT write DC nodes to
+  // the shared bus_id_to_node_idx map, which is reserved for AC consumers.
+  g.dc_bus_id_to_node_idx[bus.index] = idx;
   g.adj.emplace_back();
   return idx;
 }
@@ -88,7 +95,7 @@ PowerSystemGraph build_power_system_graph(
   // ── 3. Mark generators on their AC buses ─────────────────────────
   for (const auto& gen : system.ac.generators) {
     if (!gen.in_service) continue;
-    int ni = g.node_idx(gen.bus);
+    int ni = g.ac_node_idx(gen.bus);
     if (ni >= 0) {
       g.nodes[ni].has_generator = true;
       if (gen.is_slack) g.nodes[ni].is_slack = true;
@@ -98,7 +105,7 @@ PowerSystemGraph build_power_system_graph(
   }
   for (const auto& eg : system.ac.external_grids) {
     if (!eg.in_service) continue;
-    int ni = g.node_idx(eg.bus);
+    int ni = g.ac_node_idx(eg.bus);
     if (ni >= 0) {
       g.nodes[ni].has_generator = true;
       g.nodes[ni].is_slack      = true;
@@ -107,48 +114,48 @@ PowerSystemGraph build_power_system_graph(
   }
   for (const auto& sg : system.ac.static_generators) {
     if (!sg.in_service) continue;
-    int ni = g.node_idx(sg.bus);
+    int ni = g.ac_node_idx(sg.bus);
     if (ni >= 0) g.nodes[ni].has_generator = true;
   }
   for (const auto& rg : system.ac.renewable_gens) {
     if (!rg.in_service) continue;
-    int ni = g.node_idx(rg.bus);
+    int ni = g.ac_node_idx(rg.bus);
     if (ni >= 0) g.nodes[ni].has_generator = true;
   }
   for (const auto& pv : system.ac.pv_systems) {
     if (!pv.in_service) continue;
-    int ni = g.node_idx(pv.bus);
+    int ni = g.ac_node_idx(pv.bus);
     if (ni >= 0) g.nodes[ni].has_generator = true;
   }
 
   // ── 4. Mark loads on their AC buses ──────────────────────────────
   for (const auto& ld : system.ac.loads) {
     if (!ld.in_service) continue;
-    int ni = g.node_idx(ld.bus);
+    int ni = g.ac_node_idx(ld.bus);
     if (ni >= 0) g.nodes[ni].has_load = true;
   }
   for (const auto& ld : system.ac.flexible_loads) {
-    int ni = g.node_idx(ld.bus);
+    int ni = g.ac_node_idx(ld.bus);
     if (ni >= 0) g.nodes[ni].has_load = true;
   }
 
   // ── 5. Mark storage ──────────────────────────────────────────────
   for (const auto& st : system.ac.storage) {
-    int ni = g.node_idx(st.bus);
+    int ni = g.ac_node_idx(st.bus);
     if (ni >= 0) g.nodes[ni].has_storage = true;
   }
 
   // ── 6. Mark shunts ───────────────────────────────────────────────
   for (const auto& sh : system.ac.shunts) {
-    int ni = g.node_idx(sh.bus);
+    int ni = g.ac_node_idx(sh.bus);
     if (ni >= 0) g.nodes[ni].has_shunt = true;
   }
 
   // ── 7. Mark VSC connections ───────────────────────────────────────
   for (const auto& vsc : system.vsc_converters) {
     if (!vsc.in_service) continue;
-    int ni_ac = g.node_idx(vsc.bus_ac);
-    int ni_dc = g.node_idx(vsc.bus_dc);
+    int ni_ac = g.ac_node_idx(vsc.bus_ac);
+    int ni_dc = g.dc_node_idx(vsc.bus_dc);
     if (ni_ac >= 0) g.nodes[ni_ac].has_vsc_ac = true;
     if (ni_dc >= 0) g.nodes[ni_dc].has_vsc_dc = true;
   }
@@ -156,8 +163,8 @@ PowerSystemGraph build_power_system_graph(
   // ── 8. Mark DCDC connections ─────────────────────────────────────
   for (const auto& dc : system.dc.dcdc_converters) {
     if (!dc.in_service) continue;
-    int ni_in  = g.node_idx(dc.bus_in);
-    int ni_out = g.node_idx(dc.bus_out);
+    int ni_in  = g.dc_node_idx(dc.bus_in);
+    int ni_out = g.dc_node_idx(dc.bus_out);
     if (ni_in  >= 0) g.nodes[ni_in ].has_dcdc = true;
     if (ni_out >= 0) g.nodes[ni_out].has_dcdc = true;
   }
@@ -165,20 +172,20 @@ PowerSystemGraph build_power_system_graph(
   // ── 9. Mark DC generators / loads ────────────────────────────────
   for (const auto& sg : system.dc.dc_static_generators) {
     if (!sg.in_service) continue;
-    int ni = g.node_idx(sg.bus);
+    int ni = g.dc_node_idx(sg.bus);
     if (ni >= 0) g.nodes[ni].has_generator = true;
   }
   for (const auto& ld : system.dc.loads) {
     if (!ld.in_service) continue;
-    int ni = g.node_idx(ld.bus);
+    int ni = g.dc_node_idx(ld.bus);
     if (ni >= 0) g.nodes[ni].has_load = true;
   }
 
   // ── 10. AC branches ───────────────────────────────────────────────
   int edge_seq = 0;
   for (const auto& br : system.ac.branches) {
-    int fn = g.node_idx(br.from_bus);
-    int tn = g.node_idx(br.to_bus);
+    int fn = g.ac_node_idx(br.from_bus);
+    int tn = g.ac_node_idx(br.to_bus);
     if (fn < 0 || tn < 0) continue;
     const double z_mag = std::hypot(br.r_pu, br.x_pu);
     GraphEdge e;
@@ -201,8 +208,8 @@ PowerSystemGraph build_power_system_graph(
 
   // ── 11. Transformer 2W as AC branches ────────────────────────────
   for (const auto& tr : system.ac.transformers_2w) {
-    int fn = g.node_idx(tr.hv_bus);
-    int tn = g.node_idx(tr.lv_bus);
+    int fn = g.ac_node_idx(tr.hv_bus);
+    int tn = g.ac_node_idx(tr.lv_bus);
     if (fn < 0 || tn < 0) continue;
     // Mark controllable flag
     if (tr.tap_min != tr.tap_max) {
@@ -223,8 +230,8 @@ PowerSystemGraph build_power_system_graph(
 
   // ── 12. Switches ─────────────────────────────────────────────────
   for (const auto& sw : system.ac.switches) {
-    int fn = g.node_idx(sw.bus_from);
-    int tn = g.node_idx(sw.bus_to);
+    int fn = g.ac_node_idx(sw.bus_from);
+    int tn = g.ac_node_idx(sw.bus_to);
     if (fn < 0 || tn < 0) continue;
     const bool closed = sw.closed;
     GraphEdge e;
@@ -244,8 +251,8 @@ PowerSystemGraph build_power_system_graph(
 
   // ── 13. Circuit breakers ──────────────────────────────────────────
   for (const auto& cb : system.ac.circuit_breakers) {
-    int fn = g.node_idx(cb.bus_from);
-    int tn = g.node_idx(cb.bus_to);
+    int fn = g.ac_node_idx(cb.bus_from);
+    int tn = g.ac_node_idx(cb.bus_to);
     if (fn < 0 || tn < 0) continue;
     const bool closed = cb.closed;
     GraphEdge e;
@@ -265,8 +272,8 @@ PowerSystemGraph build_power_system_graph(
 
   // ── 14. DC branches ───────────────────────────────────────────────
   for (const auto& br : system.dc.branches) {
-    int fn = g.node_idx(br.from_bus);
-    int tn = g.node_idx(br.to_bus);
+    int fn = g.dc_node_idx(br.from_bus);
+    int tn = g.dc_node_idx(br.to_bus);
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
@@ -284,8 +291,8 @@ PowerSystemGraph build_power_system_graph(
   // ── 15. VSC coupling edges (virtual, for connectivity) ────────────
   for (const auto& vsc : system.vsc_converters) {
     if (!vsc.in_service) continue;
-    int fn = g.node_idx(vsc.bus_ac);
-    int tn = g.node_idx(vsc.bus_dc);
+    int fn = g.ac_node_idx(vsc.bus_ac);
+    int tn = g.dc_node_idx(vsc.bus_dc);
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
@@ -303,8 +310,8 @@ PowerSystemGraph build_power_system_graph(
   // ── 16. DCDC coupling edges ───────────────────────────────────────
   for (const auto& dc : system.dc.dcdc_converters) {
     if (!dc.in_service) continue;
-    int fn = g.node_idx(dc.bus_in);
-    int tn = g.node_idx(dc.bus_out);
+    int fn = g.dc_node_idx(dc.bus_in);
+    int tn = g.dc_node_idx(dc.bus_out);
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;

@@ -318,10 +318,13 @@ struct SolutionDiagnostics {
   // Constraint residuals (independent of the solver's internal tolerances).
   double max_ineq_violation{0.0};   // max(A*x - b)  (>0 means infeasible)
   double max_eq_violation{0.0};     // max|Aeq*x - beq|
+  // Integrality: max |x[i] - round(x[i])| over all binary/integer variables.
+  double max_integrality_violation{0.0};
 };
 
-SolutionDiagnostics analyze_solution(const solver::LPModel& lp,
+SolutionDiagnostics analyze_solution(const solver::MIPModel& mip,
                                      const Eigen::VectorXd& x) {
+  const solver::LPModel& lp = mip.linear_part;
   SolutionDiagnostics diag;
   const int n = static_cast<int>(lp.vars.size());
   diag.min_objective_coeff = n > 0 ? lp.c.minCoeff() : 0.0;
@@ -344,11 +347,13 @@ SolutionDiagnostics analyze_solution(const solver::LPModel& lp,
   // ── Inequality residuals: A*x <= b (and optional row_lhs <= A*x) ──────────
   if (lp.A.rows() > 0 && lp.b.size() == lp.A.rows()) {
     const Eigen::VectorXd Ax = lp.A * x;
+    // lp_has_row_lhs requires row_lhs.size() == A.rows() — check once outside loop.
+    const bool has_lhs = (lp.row_lhs.size() == static_cast<Eigen::Index>(lp.A.rows()));
     for (int i = 0; i < lp.A.rows(); ++i) {
       // Upper-side violation: Ax[i] > b[i]
       diag.max_ineq_violation = std::max(diag.max_ineq_violation, Ax[i] - lp.b[i]);
       // Lower-side violation (range row): row_lhs[i] > Ax[i]
-      if (i < static_cast<int>(lp.row_lhs.size())) {
+      if (has_lhs) {
         diag.max_ineq_violation = std::max(diag.max_ineq_violation, lp.row_lhs[i] - Ax[i]);
       }
     }
@@ -359,6 +364,18 @@ SolutionDiagnostics analyze_solution(const solver::LPModel& lp,
     const Eigen::VectorXd res = lp.Aeq * x - lp.beq;
     diag.max_eq_violation = res.cwiseAbs().maxCoeff();
   }
+
+  // ── Integrality: max |x[i] - round(x[i])| over binary + integer vars ─────
+  auto check_integrality = [&](const std::vector<int>& idx_vec) {
+    for (int i : idx_vec) {
+      if (i >= 0 && i < n)
+        diag.max_integrality_violation = std::max(
+            diag.max_integrality_violation,
+            std::abs(x[i] - std::round(x[i])));
+    }
+  };
+  check_integrality(mip.binary_idx);
+  check_integrality(mip.integer_idx);
 
   return diag;
 }
@@ -398,15 +415,24 @@ int count_islands(const std::vector<BranchData>& branches,
   return comp;
 }
 
+// ── AC-ONLY MODEL SCOPE ───────────────────────────────────────────────────────
+// build_mip_skeleton() and run_distribution_resilience_mip_assessment() model
+// the AC distribution network only (sys.ac.buses, sys.ac.branches).
+// DC buses, DC branches, VSC converters, and DC loads are NOT represented in
+// the MILP; their energy cannot be dispatched and their faults cannot be
+// scheduled.  The restoration result therefore applies only to the AC side.
+// Do not advertise this as a full hybrid AC/DC restoration MIP.
+// ─────────────────────────────────────────────────────────────────────────────
 BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
                                   const DistributionResilienceOptions& opts) {
   BuildArtifacts out;
   out.stats.model = DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
   out.stats.model_built = false;
   out.stats.formulation_notes =
-      "Strict unexpected-fault restoration skeleton: multi-period MILP with "
-      "forest radiality, active-power LinDistFlow voltage envelopes, fixed "
-      "storage energy dynamics, and time-space MESS routing arcs.";
+      "Strict unexpected-fault restoration skeleton (AC network only): "
+      "multi-period MILP with forest radiality, active-power LinDistFlow "
+      "voltage envelopes, fixed storage energy dynamics, and time-space MESS "
+      "routing arcs.  DC buses / branches / VSC not modelled.";
 
   const auto bus_pos = make_bus_pos_map(sys);
   const auto branch_pos = make_branch_pos_map(sys);
@@ -1034,7 +1060,7 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
     }
   }
 
-  const auto solution_diag = analyze_solution(built.model.linear_part, solve_result.x);
+  const auto solution_diag = analyze_solution(built.model, solve_result.x);
   result.model_stats.model_solved = true;
   result.model_stats.objective_value = solution_diag.recomputed_objective;
   result.model_stats.mip_gap = solve_result.stats.mip_gap;
@@ -1045,13 +1071,14 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
 
   constexpr double kFeasTol = 1.0e-6;
   const bool size_ok = solve_result.x.size() == built.model.linear_part.c.size();
-  const bool bounds_ok = solution_diag.max_bound_violation <= kFeasTol;
-  const bool ineq_ok   = solution_diag.max_ineq_violation  <= kFeasTol;
-  const bool eq_ok     = solution_diag.max_eq_violation    <= kFeasTol;
+  const bool bounds_ok       = solution_diag.max_bound_violation      <= kFeasTol;
+  const bool ineq_ok         = solution_diag.max_ineq_violation        <= kFeasTol;
+  const bool eq_ok           = solution_diag.max_eq_violation          <= kFeasTol;
+  const bool integrality_ok  = solution_diag.max_integrality_violation <= kFeasTol;
   const bool nonnegative_objective_ok =
       solution_diag.min_objective_coeff < -1.0e-9 || solution_diag.recomputed_objective >= -1.0e-6;
   result.feasible = solve_result.stats.success && size_ok && bounds_ok &&
-                    ineq_ok && eq_ok && nonnegative_objective_ok;
+                    ineq_ok && eq_ok && integrality_ok && nonnegative_objective_ok;
   if (!result.feasible) {
     std::ostringstream status;
     status << "Strict resilience MIP skeleton built but solver returned an invalid incumbent";
@@ -1070,6 +1097,9 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       status << " (max inequality residual=" << solution_diag.max_ineq_violation << ")";
     } else if (!eq_ok) {
       status << " (max equality residual=" << solution_diag.max_eq_violation << ")";
+    } else if (!integrality_ok) {
+      status << " (max integrality violation=" << solution_diag.max_integrality_violation
+             << " — binary/integer variable not rounded)";
     } else if (!nonnegative_objective_ok) {
       status << " (negative objective " << solution_diag.recomputed_objective
              << " despite nonnegative objective coefficients)";

@@ -1127,6 +1127,14 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys) {
 DistributionResilienceResult run_distribution_resilience_assessment(
     const HybridPowerSystem& input_sys,
     const DistributionResilienceOptions& opts) {
+  // Dispatch to the strict multi-period MIP when requested.
+  // run_distribution_resilience_mip_assessment() is the canonical entry
+  // point for MultiPeriodMIPLinDistFlow; callers that set opts.model to that
+  // value will now reach it through this unified gateway.
+  if (opts.model == DistributionResilienceModel::MultiPeriodMIPLinDistFlow) {
+    return run_distribution_resilience_mip_assessment(input_sys, opts);
+  }
+
   DistributionResilienceResult result;
   if (opts.horizon_hours <= 0 || opts.time_step_hr <= 0.0) {
     result.feasible = false;

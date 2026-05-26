@@ -92,6 +92,24 @@ struct ComponentOffsets {
 
 // Evaluate a single system state using DC-OPF
 // The state vector layout follows ComponentOffsets.
+//
+// ── HYBRID AC/DC PHYSICS LIMITATION ──────────────────────────────────────────
+// Despite accepting VSC and DC branch failures (via component_failures),
+// the underlying power-balance evaluation is an AC-only DC OPF (solve_dc_opf).
+// DC bus loads, DC bus generation, and VSC/DC branch flow constraints are NOT
+// included in the OPF model.  The effect of a failed VSC or DC branch is
+// captured only indirectly: the AC-side island pre-screening may detect that
+// the AC network has become disconnected, and any AC-side load stranded in a
+// dead island is shed directly.  However:
+//   • DC loads are not shed through the OPF; their curtailment is zero.
+//   • VSC power injection into the AC network is treated as zero when the VSC
+//     is out of service, but DC-side reserves are NOT re-dispatched.
+//   • EENS/LOLE computed from this function will underestimate true mixed-
+//     system curtailment for systems with significant DC load or DC generation.
+// See also apply_fmea_support_sources() which approximates grid-forming VSC
+// converters as AC emergency generators — a conservative approximation that
+// can overestimate available support in post-fault AC-island scenarios.
+// ─────────────────────────────────────────────────────────────────────────────
 StateEvalResult evaluate_state(
     HybridPowerSystem sys,  // copy intentional
     const std::vector<bool>& component_failures,
@@ -198,7 +216,7 @@ StateEvalResult evaluate_state(
     for (const auto& isl : topo.islands) {
       if (isl.status == gr::IslandStatus::IsolatedLoad ||
           isl.status == gr::IslandStatus::NoSlack) {
-        for (int bid : isl.bus_ids) dead_buses.insert(bid);
+        for (int bid : isl.ac_bus_ids) dead_buses.insert(bid);
       }
     }
 
@@ -418,6 +436,7 @@ ReliabilityResult run_nonsequential_mc(
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
   opf_opt.verbose = false;
+  opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
   // State database for deduplication
   std::unordered_map<size_t, StateEvalResult> state_db;
@@ -715,6 +734,7 @@ ReliabilityResult run_sequential_mc(
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
   opf_opt.verbose = false;
+  opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
   // Accumulators
   std::vector<double> nodal_eens_accum(nb, 0.0);
@@ -1881,6 +1901,7 @@ FMEAResult run_distribution_fmea(
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
   opf_opt.verbose = false;
+  opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
 
   // Accumulators for SAIFI/SAIDI
   std::vector<double> nodal_cif(nb, 0.0);  // per-bus interruption frequency

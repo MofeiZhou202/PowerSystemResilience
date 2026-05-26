@@ -36,6 +36,13 @@ constexpr double kTauTrippingHr = 1.0 / 30.0;
 constexpr double kTauRepairHr = 1.0;
 constexpr double kReliabilityVoll = 10.0;
 constexpr double kDefaultFailureRate = 0.1;
+
+// DC bus IDs are shifted by kDCBusOffset throughout the NativeCase model so
+// that DC bus k is represented as (k + kDCBusOffset) in the c.buses / c.loads /
+// c.sources vectors.  This prevents ID collisions when AC bus i and DC bus i
+// both exist in the hybrid system (e.g. AC bus 1 vs DC bus 1).  The offset is
+// purely internal; it is never exposed to the caller.
+constexpr int kDCBusOffset = 1'000'000;
 struct LoadPoint {
   int bus{0};
   double p_kw{0.0};
@@ -109,7 +116,7 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     if (b.in_service) add_bus(c.buses, b.index);
   }
   for (const auto& b : sys.dc.buses) {
-    if (b.in_service) add_bus(c.buses, b.index);
+    if (b.in_service) add_bus(c.buses, b.index + kDCBusOffset);
   }
 
   for (const auto& ld : sys.ac.loads) {
@@ -123,13 +130,13 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
   }
   for (const auto& ld : sys.dc.loads) {
     if (!ld.in_service) continue;
-    add_bus(c.buses, ld.bus);
-    c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
+    add_bus(c.buses, ld.bus + kDCBusOffset);
+    c.loads.push_back({ld.bus + kDCBusOffset, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
                        std::max(1.0, ld.p_mw * 10.0)});
   }
   for (const auto& b : sys.dc.buses) {
     if (!b.in_service || b.pd_mw <= 1e-9) continue;
-    c.loads.push_back({b.index, b.pd_mw * 1000.0,
+    c.loads.push_back({b.index + kDCBusOffset, b.pd_mw * 1000.0,
                        b.n_customers > 0 ? static_cast<double>(b.n_customers) : std::max(1.0, b.pd_mw * 10.0)});
   }
 
@@ -161,19 +168,19 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
   }
   for (const auto& g : sys.dc.dc_static_generators) {
     if (!g.in_service) continue;
-    add_source(c.sources, g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.p_set_mw * g.scaling);
+    add_source(c.sources, g.bus + kDCBusOffset, g.pmax_mw > 0.0 ? g.pmax_mw : g.p_set_mw * g.scaling);
   }
   for (const auto& g : sys.dc.static_generators) {
     if (!g.in_service) continue;
     double p = g.pmax_mw > 0.0 ? g.pmax_mw : (g.p_rated_mw > 0.0 ? g.p_rated_mw : g.p_mw * g.scaling);
-    add_source(c.sources, g.bus, p);
+    add_source(c.sources, g.bus + kDCBusOffset, p);
   }
   for (const auto& pv : sys.dc.pv_arrays) {
     if (!pv.in_service) continue;
-    add_source(c.sources, pv.bus, pv.p_set_mw);
+    add_source(c.sources, pv.bus + kDCBusOffset, pv.p_set_mw);
   }
   for (const auto& b : sys.dc.buses) {
-    if (b.in_service && b.bus_type == DCBusType::DC_V) add_source(c.sources, b.index, 1.0e4);
+    if (b.in_service && b.bus_type == DCBusType::DC_V) add_source(c.sources, b.index + kDCBusOffset, 1.0e4);
   }
 
   int id = 1;
@@ -187,10 +194,11 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
   }
   for (int i = 0; i < static_cast<int>(sys.dc.branches.size()); ++i) {
     const auto& br = sys.dc.branches[i];
-    add_bus(c.buses, br.from_bus);
-    add_bus(c.buses, br.to_bus);
+    add_bus(c.buses, br.from_bus + kDCBusOffset);
+    add_bus(c.buses, br.to_bus + kDCBusOffset);
     if (!br.in_service) continue;  // out-of-service branches cannot fail
     double lambda = br.mtbf_hours > 0.0 ? 8760.0 / br.mtbf_hours : kDefaultFailureRate;
+    // from_bus/to_bus stored without offset — informational only, not used in stage_components
     c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda});
   }
 
@@ -209,6 +217,23 @@ struct DSU {
   }
 };
 
+// stage_components() — build connected-component map for the given fault stage.
+//
+// MODEL SCOPE (connectivity-only, no physical constraints):
+//   Stage 1 — fault island: fault branch open, all other in-service branches/switches
+//             in their nominal state.
+//   Stage 2 — switching: fault branch stays open; ALL other in-service branches and
+//             switches are closed (best-case connectivity restoration).
+//             LIMITATION: this does not model radial-topology constraints, maximum
+//             switch-operation counts, power-flow limits, or voltage limits.
+//             It is a pure reachability model — if a source can reach a load bus via
+//             any path, the load is "restorable".  Physical feasibility of the
+//             resulting topology is NOT checked.
+//   Stage 3 — repair: fault branch restored; all originally-in-service elements on.
+//
+// SOP/VSC dispatch is NOT modelled here; VSC converters are treated as lossless
+// graph edges (always connected when in_service).  Actual SOP dispatch setpoints
+// are NOT co-optimised; psop vectors in FaultDetail are filled with zeros.
 std::unordered_map<int, int> stage_components(const NativeCase& c,
                                               const FaultLine& fault,
                                               int stage) {
@@ -245,13 +270,14 @@ std::unordered_map<int, int> stage_components(const NativeCase& c,
     if (!fault.ac && i == fault.index && stage < 3) on = false;
     if (!on && stage >= 2 && br.in_service && !(!fault.ac && i == fault.index)) on = true;
     if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
-    if (on) connect(br.from_bus, br.to_bus);
+    if (on) connect(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
   }
   for (const auto& vsc : c.sys.vsc_converters) {
-    if (vsc.in_service) connect(vsc.bus_ac, vsc.bus_dc);
+    // VSC crosses domains: AC side has no offset, DC side has kDCBusOffset
+    if (vsc.in_service) connect(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
   }
   for (const auto& dc : c.sys.dc.dcdc_converters) {
-    if (dc.in_service) connect(dc.bus_in, dc.bus_out);
+    if (dc.in_service) connect(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
   }
 
   std::unordered_map<int, int> out;
@@ -432,7 +458,10 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
-    d.status = (s1.status == "success" && s2.status == "success" && s3.status == "success") ? "success" : "failed";
+    // Accept both "success" (MILP path) and "success (analytical)" (shortcut
+    // path) as successful outcomes — they both mean zero or modelled load shed.
+    auto is_ok = [](const std::string& s) { return s.rfind("success", 0) == 0; };
+    d.status = (is_ok(s1.status) && is_ok(s2.status) && is_ok(s3.status)) ? "success" : "failed";
     d.pls_stage1 = s1.shed_kw;
     d.pls_stage2 = s2.shed_kw;
     d.pls_stage3 = s3.shed_kw;

@@ -28,6 +28,7 @@ ReductionCandidates classify_reduction_candidates(
 
     BusCandidate cand;
     cand.bus_id = nd.bus_id;
+    cand.domain = nd.domain;
 
     // ── Must-retain rules ───────────────────────────────────────────
     bool must_retain = false;
@@ -141,7 +142,9 @@ ReductionPlan make_reduction_plan(
   if (options.enable_series_reduction) {
     for (const auto& cand : candidates.candidates) {
       if (cand.type != CandidateType::ZeroInjectionDegree2) continue;
-      int ni = graph.node_idx(cand.bus_id);
+      int ni = (cand.domain == NodeDomain::AC)
+               ? graph.ac_node_idx(cand.bus_id)
+               : graph.dc_node_idx(cand.bus_id);
       if (ni < 0) continue;
 
       // Collect the two in-service neighbours

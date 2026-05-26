@@ -778,16 +778,20 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_startup = G * T;
 
   // Min-up/min-down time constraints (count depends on per-generator parameters).
+  // Guard must match the assembly loop below (>= 2, not >= 3): a 2-period
+  // min-up/min-down constraint (k=1 only) is a real binding constraint and was
+  // added in the assembly in Round 6.  Counting fewer rows than the assembly
+  // writes causes silent out-of-bounds writes into b_ineq.
   int n_ineq_min_updn = 0;
   for (int gi = 0; gi < G; ++gi) {
     const auto& gen = sys.ac.generators[static_cast<size_t>(res.gen_indices[static_cast<size_t>(gi)])];
     const int up_periods = static_cast<int>(std::ceil(gen.min_up_time_hr / dt));
     const int dn_periods = static_cast<int>(std::ceil(gen.min_dn_time_hr / dt));
-    if (up_periods >= 3) {
+    if (up_periods >= 2) {
       for (int t = 1; t < T; ++t)
         n_ineq_min_updn += std::min(up_periods - 1, T - 1 - t);
     }
-    if (dn_periods >= 3) {
+    if (dn_periods >= 2) {
       for (int t = 1; t < T; ++t)
         n_ineq_min_updn += std::min(dn_periods - 1, T - 1 - t);
     }
@@ -1307,12 +1311,12 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   // (6) Min-up time: if generator starts at t, it must stay on for min_up periods.
   //     u[g,t] - u[g,t-1] ≤ u[g,t+k]  for k=1..min(up_periods-1, T-1-t)
   //     Rearranged: u[g,t] - u[g,t-1] - u[g,t+k] ≤ 0
-  //     Only added when up_periods >= 3 (up_periods=2 constraints are weak and
-  //     inflate the LP without meaningfully tightening the relaxation).
+  //     Added for up_periods >= 2: the k=1 case (2-period min-up) is a real
+  //     binding constraint — a generator that starts at t must be on at t+1.
   for (int gi = 0; gi < G; ++gi) {
     const auto& gen = sys.ac.generators[static_cast<size_t>(res.gen_indices[static_cast<size_t>(gi)])];
     const int up_periods = static_cast<int>(std::ceil(gen.min_up_time_hr / dt));
-    if (up_periods >= 3) {
+    if (up_periods >= 2) {
       for (int t = 1; t < T; ++t) {
         const int reach = std::min(up_periods - 1, T - 1 - t);
         for (int k = 1; k <= reach; ++k) {
@@ -1329,11 +1333,11 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   // (7) Min-down time: if generator shuts down at t, it must stay off for min_dn periods.
   //     u[g,t-1] - u[g,t] ≤ 1 - u[g,t+k]  for k=1..min(dn_periods-1, T-1-t)
   //     Rearranged: u[g,t-1] - u[g,t] + u[g,t+k] ≤ 1
-  //     Only added when dn_periods >= 3.
+  //     Added for dn_periods >= 2: the k=1 case is binding and must be included.
   for (int gi = 0; gi < G; ++gi) {
     const auto& gen = sys.ac.generators[static_cast<size_t>(res.gen_indices[static_cast<size_t>(gi)])];
     const int dn_periods = static_cast<int>(std::ceil(gen.min_dn_time_hr / dt));
-    if (dn_periods >= 3) {
+    if (dn_periods >= 2) {
       for (int t = 1; t < T; ++t) {
         const int reach = std::min(dn_periods - 1, T - 1 - t);
         for (int k = 1; k <= reach; ++k) {
