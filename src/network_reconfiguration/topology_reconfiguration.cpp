@@ -956,6 +956,33 @@ TopoReconfResult run_topology_reconfiguration(
           chr::steady_clock::now() - t_start).count();
       return result;
     }
+    // Binary integrality check: each declared-binary variable must be within
+    // 1e-4 of 0 or 1.  A tolerance of 0.1 would accept 0.09 / 0.91, which
+    // the >0.5 rounding step turns into 0/1 without re-checking feasibility.
+    for (int bi : milp.binary_idx) {
+      if (bi >= static_cast<int>(x_sol.size())) continue;
+      double v = x_sol[bi];
+      double frac = std::min(v - std::floor(v), std::ceil(v) - v);
+      if (frac > 1e-4) {
+        spdlog::warn("[拓扑重构] 后验整数性违约: var[{}]={:.6f} (frac={:.2e})", bi, v, frac);
+        result.feasible = false;
+        result.solve_time_s = chr::duration<double>(
+            chr::steady_clock::now() - t_start).count();
+        return result;
+      }
+    }
+    // Variable bounds check
+    for (int i = 0; i < idx.n_vars; ++i) {
+      if (i >= static_cast<int>(x_sol.size())) continue;
+      if (x_sol[i] < lb[i] - 1e-6 || x_sol[i] > ub[i] + 1e-6) {
+        spdlog::warn("[拓扑重构] 后验变量界违约: var[{}]={:.4f} bounds=[{:.4f},{:.4f}]",
+                     i, x_sol[i], lb[i], ub[i]);
+        result.feasible = false;
+        result.solve_time_s = chr::duration<double>(
+            chr::steady_clock::now() - t_start).count();
+        return result;
+      }
+    }
   }
 
   // optimal is only asserted when the B&C solver ran and proved the gap is

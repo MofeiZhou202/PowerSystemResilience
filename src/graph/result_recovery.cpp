@@ -64,36 +64,88 @@ void recover_switch_contracted_buses(
     FullNetworkVoltages&     voltages,
     const ContractionResult& contraction)
 {
-  // AC recovery: propagate AC super-node voltages to all AC member buses
+  // AC recovery: propagate AC super-node voltages to all AC member buses.
+  // Prefer the domain-qualified map (written by AC solvers) before falling
+  // back to the legacy map, so that callers using only the new API are handled
+  // symmetrically with callers that only write legacy bus_voltage.
   for (const auto& [sup, members] : contraction.ac_super_to_buses) {
-    auto it = voltages.bus_voltage.find(sup);
-    if (it == voltages.bus_voltage.end()) continue;
-    auto V_sup = it->second;
-    for (int bid : members)
-      voltages.bus_voltage[bid] = V_sup;
+    std::complex<double> V_sup;
+    bool found = false;
+    {
+      auto it = voltages.ac_bus_voltage.find(sup);
+      if (it != voltages.ac_bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) continue;
+    for (int bid : members) {
+      voltages.ac_bus_voltage[bid] = V_sup;
+      voltages.bus_voltage[bid]    = V_sup;  // legacy map (AC wins on collision)
+    }
   }
   for (const auto& [orig, sup] : contraction.ac_bus_to_super) {
-    if (voltages.bus_voltage.count(orig) == 0) {
-      auto it = voltages.bus_voltage.find(sup);
-      if (it != voltages.bus_voltage.end())
-        voltages.bus_voltage[orig] = it->second;
+    if (voltages.ac_bus_voltage.count(orig) > 0) continue;
+    std::complex<double> V_sup;
+    bool found = false;
+    {
+      auto it = voltages.ac_bus_voltage.find(sup);
+      if (it != voltages.ac_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
+    if (!found) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) continue;
+    voltages.ac_bus_voltage[orig] = V_sup;
+    voltages.bus_voltage[orig]    = V_sup;
   }
 
-  // DC recovery: propagate DC super-node voltages to all DC member buses
+  // DC recovery: propagate DC super-node voltages to all DC member buses.
+  // Lookup priority: dc_bus_voltage (set by DC solver) → legacy bus_voltage
+  // (set by any prior recovery).  Writes to dc_bus_voltage AND to the legacy
+  // bus_voltage so that DC-only / disjoint-ID callers still see results there.
+  // When an AC bus shares the same integer ID, the AC write above already
+  // populated bus_voltage; we skip the DC overwrite in that case to let AC win.
   for (const auto& [sup, members] : contraction.dc_super_to_buses) {
-    auto it = voltages.bus_voltage.find(sup);
-    if (it == voltages.bus_voltage.end()) continue;
-    auto V_sup = it->second;
-    for (int bid : members)
-      voltages.bus_voltage[bid] = V_sup;
+    // Resolve the super-node voltage: prefer the domain-qualified map, fall
+    // back to the legacy map.  Use separate iterator variables to avoid
+    // comparing iterators from different containers (UB).
+    std::complex<double> V_sup;
+    bool found = false;
+    {
+      auto it = voltages.dc_bus_voltage.find(sup);
+      if (it != voltages.dc_bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) continue;
+    for (int bid : members) {
+      voltages.dc_bus_voltage[bid] = V_sup;
+      // Write to legacy map only if no AC bus has already claimed this key.
+      if (voltages.ac_bus_voltage.count(bid) == 0)
+        voltages.bus_voltage[bid] = V_sup;
+    }
   }
   for (const auto& [orig, sup] : contraction.dc_bus_to_super) {
-    if (voltages.bus_voltage.count(orig) == 0) {
-      auto it = voltages.bus_voltage.find(sup);
-      if (it != voltages.bus_voltage.end())
-        voltages.bus_voltage[orig] = it->second;
+    if (voltages.dc_bus_voltage.count(orig) > 0) continue;
+    std::complex<double> V_sup;
+    bool found = false;
+    {
+      auto it = voltages.dc_bus_voltage.find(sup);
+      if (it != voltages.dc_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
+    if (!found) {
+      auto it = voltages.bus_voltage.find(sup);
+      if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
+    }
+    if (!found) continue;
+    voltages.dc_bus_voltage[orig] = V_sup;
+    if (voltages.ac_bus_voltage.count(orig) == 0)
+      voltages.bus_voltage[orig] = V_sup;
   }
 }
 

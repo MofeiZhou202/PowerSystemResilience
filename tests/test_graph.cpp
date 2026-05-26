@@ -690,16 +690,23 @@ TEST_CASE("Same-ID collision: switch contraction isolates AC and DC domains",
 
   // ── Domain-aware recovery should not mix AC and DC voltages ──────
   FullNetworkVoltages voltages;
-  // Suppose AC solver returns V(AC rep) = 1.02 pu
+  // Seed representative bus voltages as if the two independent solves returned:
+  //   AC bus 1 (rep) = 1.02 pu,  DC bus 1 (rep) = 0.98 pu
+  // Because AC and DC share the same integer key "1" we write to the
+  // domain-qualified maps directly so the two solvers don't overwrite each other.
+  voltages.ac_bus_voltage[ac_rep] = std::complex<double>{1.02, 0.0};
+  voltages.dc_bus_voltage[dc_rep] = std::complex<double>{0.98, 0.0};
+  // Seed the legacy flat map too (AC rep wins for the shared key).
   voltages.bus_voltage[ac_rep] = std::complex<double>{1.02, 0.0};
-  // Suppose DC solver returns V(DC rep) = 0.98 pu (stored as real)
-  voltages.bus_voltage[dc_rep] = std::complex<double>{0.98, 0.0};
-  // But AC rep == DC rep when IDs overlap — so the AC and DC voltages would
-  // overwrite each other in the legacy flat map.  The ContractionResult
-  // overload at least propagates to the right member sets.
   recover_switch_contracted_buses(voltages, res);
-  // After recovery, AC bus 2 should have 1.02 pu (from AC super)
-  REQUIRE(voltages.bus_voltage.count(2) > 0); // the LAST written wins in legacy flat map
+  // After recovery, AC bus 2 should carry the AC super-node voltage (1.02 pu)
+  REQUIRE(voltages.ac_bus_voltage.count(2) > 0);
+  REQUIRE(std::abs(voltages.ac_bus_voltage.at(2).real() - 1.02) < 1e-9);
+  // DC bus 2 should carry the DC super-node voltage (0.98 pu), not the AC voltage
+  REQUIRE(voltages.dc_bus_voltage.count(2) > 0);
+  REQUIRE(std::abs(voltages.dc_bus_voltage.at(2).real() - 0.98) < 1e-9);
+  // Legacy map: AC voltage for bus 1 must not have been overwritten by DC value
+  REQUIRE(std::abs(voltages.bus_voltage.at(ac_rep).real() - 1.02) < 1e-9);
 }
 
 TEST_CASE("Same-ID collision: series reduction domain maps are independent",

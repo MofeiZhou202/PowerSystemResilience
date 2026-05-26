@@ -3086,7 +3086,11 @@ enum GenIdx {
   GEN_BUS = 0, PG, QG, QMAX, QMIN, VG, MBASE, GEN_STATUS, PMAX, PMIN,
   PC1, PC2, QC1MIN, QC1MAX, QC2MIN, QC2MAX, RAMP_AGC, RAMP_10, RAMP_30,
   RAMP_Q, APF, MODEL, STARTUP, SHUTDOWN, NCOST, COST, CARBON_EMISSION,
-  MU_PMAX, MU_PMIN, MU_QMAX, MU_QMIN, GEN_AREA, N_GEN_COLS = 32
+  MU_PMAX, MU_PMIN, MU_QMAX, MU_QMIN, GEN_AREA,
+  // COST1 and COST2 are appended after the standard 32 columns so that
+  // existing JPC files (32 cols) parse correctly with c1/c0 defaulting to 0.
+  COST1, COST2,
+  N_GEN_COLS
 };
 
 // Load columns (idx_ld)
@@ -3263,7 +3267,9 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
     row[jpc_idx::PMIN] = g.pmin_mw;
     row[jpc_idx::MODEL] = 2.0;  // Polynomial model
     row[jpc_idx::NCOST] = 3.0;  // Quadratic cost
-    row[jpc_idx::COST] = g.cost_c2;
+    row[jpc_idx::COST]  = g.cost_c2;
+    row[jpc_idx::COST1] = g.cost_c1;
+    row[jpc_idx::COST2] = g.cost_c0;
     row[jpc_idx::CARBON_EMISSION] = g.emission_factor_tco2_mwh;
     genAC.push_back(row_to_json_array(row));
   }
@@ -3619,7 +3625,9 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       g.in_service = r.size() > jpc_idx::GEN_STATUS ? r[jpc_idx::GEN_STATUS] > 0.5 : true;
       g.pmax_mw = r.size() > jpc_idx::PMAX ? r[jpc_idx::PMAX] : 0.0;
       g.pmin_mw = r.size() > jpc_idx::PMIN ? r[jpc_idx::PMIN] : 0.0;
-      g.cost_c2 = r.size() > jpc_idx::COST ? r[jpc_idx::COST] : 0.0;
+      g.cost_c2 = r.size() > jpc_idx::COST  ? r[jpc_idx::COST]  : 0.0;
+      g.cost_c1 = r.size() > jpc_idx::COST1 ? r[jpc_idx::COST1] : 0.0;
+      g.cost_c0 = r.size() > jpc_idx::COST2 ? r[jpc_idx::COST2] : 0.0;
       g.emission_factor_tco2_mwh = r.size() > jpc_idx::CARBON_EMISSION ? r[jpc_idx::CARBON_EMISSION] : 0.0;
       // Determine slack status from the bus BUS_TYPE column (JPC type 3 = REF/SLACK)
       // rather than hardcoding bus index 1, which breaks multi-area or renumbered cases.

@@ -52,6 +52,16 @@ static int bus_type_priority(BusType t) {
   }
 }
 
+// DC_V (voltage reference) must survive contraction; DC_P (load/gen) is
+// subordinate — mirrors the AC SLACK > PV > PQ hierarchy.
+static int dc_bus_type_priority(DCBusType t) {
+  switch (t) {
+    case DCBusType::DC_V: return 2;
+    case DCBusType::DC_P: return 1;
+    default:              return 0;
+  }
+}
+
 }  // anonymous namespace
 
 // ─────────────────────────────────────────────────────────────────────
@@ -74,16 +84,25 @@ ContractionResult contract_zero_impedance_edges(
     if (!e.in_service) continue;
     if (!e.is_zero_impedance && !e.is_closed_switch) continue;
 
-    // Check which category we're handling
+    // Check which category we're handling.
+    // contract_closed_switches controls Switch edges;
+    // contract_closed_breakers controls Breaker and DC_Switch edges;
+    // zero_impedance_threshold is re-evaluated here (may differ from the
+    // threshold used when the graph was originally built).
     bool do_merge = false;
     if (e.is_closed_switch && options.contract_closed_switches &&
-        (e.category == EdgeCategory::Switch   ||
-         e.category == EdgeCategory::Breaker  ||
+        e.category == EdgeCategory::Switch)
+      do_merge = true;
+    if (e.is_closed_switch && options.contract_closed_breakers &&
+        (e.category == EdgeCategory::Breaker ||
          e.category == EdgeCategory::DC_Switch))
       do_merge = true;
-    if (e.is_zero_impedance && options.contract_zero_impedance_lines &&
-        e.category == EdgeCategory::AC_Line)
-      do_merge = true;
+    if (!do_merge && options.contract_zero_impedance_lines &&
+        e.category == EdgeCategory::AC_Line) {
+      double z_mag = std::hypot(e.r_pu, e.x_pu);
+      if (e.is_zero_impedance || z_mag < options.zero_impedance_threshold)
+        do_merge = true;
+    }
 
     if (!do_merge) continue;
 
@@ -107,6 +126,34 @@ ContractionResult contract_zero_impedance_edges(
       continue;
     }
 
+    // ── Multi-slack guard ──────────────────────────────────────────────
+    // If merging fn and tn would create a super-node containing more than
+    // one slack bus, and allow_multi_slack_merge is false, skip the union
+    // and record a diagnostic.  Checking here (before unite) avoids the need
+    // to undo DSU merges later.
+    if (!options.allow_multi_slack_merge &&
+        dsu.find(fn) != dsu.find(tn)) {
+      // Scan all nodes to check if each group already has a slack.
+      bool fn_root_has_slack = false, tn_root_has_slack = false;
+      int fn_root = dsu.find(fn), tn_root = dsu.find(tn);
+      for (int k = 0; k < n; ++k) {
+        if (!graph.nodes[k].in_service || !graph.nodes[k].is_slack) continue;
+        int kr = dsu.find(k);
+        if (kr == fn_root) fn_root_has_slack = true;
+        if (kr == tn_root) tn_root_has_slack = true;
+      }
+      if (fn_root_has_slack && tn_root_has_slack) {
+        Diagnostic d;
+        d.code    = DiagCode::GraphMultipleSlack;
+        d.message = "Skipped merge of buses " +
+                    std::to_string(e.from_bus_id) + " and " +
+                    std::to_string(e.to_bus_id) +
+                    ": would combine two slack buses into one super-node.";
+        d.related_buses = {e.from_bus_id, e.to_bus_id};
+        result.diagnostics.push_back(d);
+        continue;  // do NOT unite
+      }
+    }
     dsu.unite(fn, tn);
   }
 
@@ -154,15 +201,24 @@ ContractionResult contract_zero_impedance_edges(
 
   for (auto& [root, members] : groups) {
     int best_ni  = members[0];
-    int best_pri = bus_type_priority(graph.nodes[best_ni].ac_bus_type);
+    // Use the domain-appropriate priority function so that a DC_V bus is
+    // always preferred over DC_P when contracting DC super-nodes.
+    const NodeDomain grp_dom = graph.nodes[best_ni].domain;
+    auto node_pri = [&](int ni) -> int {
+      return (graph.nodes[ni].domain == NodeDomain::DC)
+          ? dc_bus_type_priority(graph.nodes[ni].dc_bus_type)
+          : bus_type_priority(graph.nodes[ni].ac_bus_type);
+    };
+    int best_pri = node_pri(best_ni);
     for (int ni : members) {
-      int pri = bus_type_priority(graph.nodes[ni].ac_bus_type);
+      int pri = node_pri(ni);
       if (pri > best_pri || (pri == best_pri &&
           graph.nodes[ni].bus_id < graph.nodes[best_ni].bus_id)) {
         best_ni  = ni;
         best_pri = pri;
       }
     }
+    (void)grp_dom;
     root_to_rep[root]        = graph.nodes[best_ni].bus_id;
     root_to_rep_domain[root] = graph.nodes[best_ni].domain;
   }
@@ -238,7 +294,11 @@ ContractionResult contract_zero_impedance_edges(
 
     int new_ni = static_cast<int>(cg.nodes.size());
     cg.nodes.push_back(new_node);
-    cg.bus_id_to_node_idx[rep_bid] = new_ni;  // legacy (AC-only callers)
+    // Legacy map: only AC representatives, matching the convention in
+    // power_system_graph.cpp (DC bus IDs are NOT written to the legacy map
+    // to prevent AC/DC same-ID collisions).
+    if (rep_node.domain == NodeDomain::AC)
+      cg.bus_id_to_node_idx[rep_bid] = new_ni;
     if (rep_node.domain == NodeDomain::AC)
       cg.ac_bus_id_to_node_idx[rep_bid] = new_ni;
     else
@@ -324,6 +384,38 @@ ContractionResult contract_zero_impedance_edges(
     rep_bus_ptr->bus_type = best_type;
   }
 
+  // ── Step 8b: Aggregate DC bus quantities in contracted_system ────────
+  // Same logic as Step 8 above, but for dc_super_to_buses.
+  // DCBus::pd_mw holds bus-level DC load; n_customers / is_load are OR-ed;
+  // bus_type is chosen using dc_bus_type_priority (DC_V beats DC_P).
+  for (auto& [rep_bid, orig_buses] : result.dc_super_to_buses) {
+    if (orig_buses.size() <= 1) continue;
+    DCBus* rep_ptr = nullptr;
+    for (auto& bus : result.contracted_system.dc.buses) {
+      if (bus.index == rep_bid) { rep_ptr = &bus; break; }
+    }
+    if (!rep_ptr) continue;
+
+    double pd_sum   = 0.0;
+    int    n_cust   = 0;
+    bool   is_load  = false;
+    DCBusType best_type = DCBusType::DC_P;
+    for (int bid : orig_buses) {
+      for (const auto& b : system.dc.buses) {
+        if (b.index != bid) continue;
+        pd_sum  += b.pd_mw;
+        n_cust  += b.n_customers;
+        is_load |= b.is_load;
+        if (dc_bus_type_priority(b.bus_type) > dc_bus_type_priority(best_type))
+          best_type = b.bus_type;
+      }
+    }
+    rep_ptr->pd_mw        = pd_sum;
+    rep_ptr->n_customers  = n_cust;
+    rep_ptr->is_load      = is_load;
+    rep_ptr->bus_type     = best_type;
+  }
+
   // Remove non-representative buses from the contracted system
   {
     std::unordered_set<int> reps_set;
@@ -367,6 +459,23 @@ ContractionResult contract_zero_impedance_edges(
     rg.bus = remap(rg.bus);
   for (auto& pv  : result.contracted_system.ac.pv_systems)
     pv.bus = remap(pv.bus);
+  // Remaining AC bus-referencing components
+  for (auto& fl  : result.contracted_system.ac.flexible_loads)
+    fl.bus = remap(fl.bus);
+  for (auto& al  : result.contracted_system.ac.asymmetric_loads)
+    al.bus = remap(al.bus);
+  for (auto& cs  : result.contracted_system.ac.charging_stations)
+    cs.bus = remap(cs.bus);
+  for (auto& mo  : result.contracted_system.ac.motors)
+    mo.bus = remap(mo.bus);
+  for (auto& sw  : result.contracted_system.ac.switches) {
+    sw.bus_from = remap(sw.bus_from);
+    sw.bus_to   = remap(sw.bus_to);
+  }
+  for (auto& cb  : result.contracted_system.ac.circuit_breakers) {
+    cb.bus_from = remap(cb.bus_from);
+    cb.bus_to   = remap(cb.bus_to);
+  }
 
   for (auto& br  : result.contracted_system.ac.branches) {
     br.from_bus = remap(br.from_bus);
@@ -375,6 +484,11 @@ ContractionResult contract_zero_impedance_edges(
   for (auto& tr  : result.contracted_system.ac.transformers_2w) {
     tr.hv_bus = remap(tr.hv_bus);
     tr.lv_bus = remap(tr.lv_bus);
+  }
+  for (auto& tr3 : result.contracted_system.ac.transformers_3w) {
+    tr3.hv_bus = remap(tr3.hv_bus);
+    tr3.mv_bus = remap(tr3.mv_bus);
+    tr3.lv_bus = remap(tr3.lv_bus);
   }
   for (auto& vsc : result.contracted_system.vsc_converters) {
     vsc.bus_ac = remap_ac(vsc.bus_ac);
@@ -386,12 +500,41 @@ ContractionResult contract_zero_impedance_edges(
     br.from_bus = remap_dc(br.from_bus);
     br.to_bus   = remap_dc(br.to_bus);
   }
-  for (auto& bus : result.contracted_system.dc.buses) {
-    // DC buses are keyed by .index — the representative is identified by
-    // dc_bus_to_super; non-representative buses have been retained in the
-    // system copy but need their in_service flag cleared (analogous to the
-    // AC bus removal below).
-    (void)bus; // aggregation for DC buses is handled by the caller if needed
+
+  // Single-bus DC components
+  for (auto& ld  : result.contracted_system.dc.loads)
+    ld.bus = remap_dc(ld.bus);
+  for (auto& st  : result.contracted_system.dc.storage)
+    st.bus = remap_dc(st.bus);
+  for (auto& sg  : result.contracted_system.dc.static_generators)
+    sg.bus = remap_dc(sg.bus);
+  for (auto& dsg : result.contracted_system.dc.dc_static_generators)
+    dsg.bus = remap_dc(dsg.bus);
+  for (auto& pv  : result.contracted_system.dc.pv_arrays)
+    pv.bus = remap_dc(pv.bus);
+
+  // Two-terminal DC components
+  for (auto& dd  : result.contracted_system.dc.dcdc_converters) {
+    dd.bus_in  = remap_dc(dd.bus_in);
+    dd.bus_out = remap_dc(dd.bus_out);
+  }
+  for (auto& cb  : result.contracted_system.dc.dc_circuit_breakers) {
+    cb.bus_from = remap_dc(cb.bus_from);
+    cb.bus_to   = remap_dc(cb.bus_to);
+  }
+
+  // Remove non-representative DC buses (analogous to the AC bus removal above)
+  {
+    std::unordered_set<int> dc_reps_set;
+    for (auto& [bid, rep] : result.dc_bus_to_super) dc_reps_set.insert(rep);
+    auto& dc_buses = result.contracted_system.dc.buses;
+    dc_buses.erase(
+      std::remove_if(dc_buses.begin(), dc_buses.end(),
+        [&](const DCBus& b) {
+          return result.dc_bus_to_super.count(b.index) &&
+                 result.dc_bus_to_super.at(b.index) != b.index;
+        }),
+      dc_buses.end());
   }
 
   // Remove self-loop branches (from_bus == to_bus after remap)
@@ -400,6 +543,40 @@ ContractionResult contract_zero_impedance_edges(
     brs.erase(std::remove_if(brs.begin(), brs.end(),
         [](const ACBranch& b){ return b.from_bus == b.to_bus; }),
       brs.end());
+  }
+  {
+    auto& brs = result.contracted_system.dc.branches;
+    brs.erase(std::remove_if(brs.begin(), brs.end(),
+        [](const DCBranch& b){ return b.from_bus == b.to_bus; }),
+      brs.end());
+  }
+  // Remove two-terminal DC components that became self-loops after remap
+  {
+    auto& dcs = result.contracted_system.dc.dcdc_converters;
+    dcs.erase(std::remove_if(dcs.begin(), dcs.end(),
+        [](const DCDCConverter& d){ return d.bus_in == d.bus_out; }),
+      dcs.end());
+  }
+  {
+    auto& cbs = result.contracted_system.dc.dc_circuit_breakers;
+    cbs.erase(std::remove_if(cbs.begin(), cbs.end(),
+        [](const DCCircuitBreaker& c){ return c.bus_from == c.bus_to; }),
+      cbs.end());
+  }
+  // Remove AC switch / circuit-breaker self-loops that formed after remap.
+  // Without this cleanup, subsequent graph builds would see self-loop edges
+  // that corrupt radiality, cycle, and topology analyses.
+  {
+    auto& sws = result.contracted_system.ac.switches;
+    sws.erase(std::remove_if(sws.begin(), sws.end(),
+        [](const Switch& sw){ return sw.bus_from == sw.bus_to; }),
+      sws.end());
+  }
+  {
+    auto& cbs = result.contracted_system.ac.circuit_breakers;
+    cbs.erase(std::remove_if(cbs.begin(), cbs.end(),
+        [](const CircuitBreaker& cb){ return cb.bus_from == cb.bus_to; }),
+      cbs.end());
   }
 
   return result;

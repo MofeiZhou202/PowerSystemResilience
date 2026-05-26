@@ -144,6 +144,12 @@ struct ReliabilityResult {
   std::vector<double> annual_lole;
   std::vector<double> annual_lolf;
 
+  // ─── Modelling Scope Limitations ───
+  /// Non-empty when the evaluation could not model all components of the
+  /// submitted system.  Callers should treat metrics as approximate when
+  /// this field is set.  Example: "DC loads not modelled (AC-only OPF)".
+  std::string model_limitations;
+
   // ─── Advanced Results ───
   TailRiskMetrics tail_risk;             // VaR/CVaR metrics
   DistributionIndices distribution_idx;  // SAIFI/SAIDI/ASAI (if computed)
@@ -298,6 +304,9 @@ struct FMEAResult {
 
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;
+
+  // Non-empty when evaluation uses simplified physics (e.g. DC loads ignored).
+  std::string model_limitations;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

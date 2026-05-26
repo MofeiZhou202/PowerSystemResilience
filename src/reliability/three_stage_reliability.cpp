@@ -400,13 +400,44 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   } else {
     out.status = "success";
     out.objective = res.stats.objective;
-    // Post-solve constraint verification: Ax ≤ b
+    // Post-solve constraint verification: Ax ≤ b.
+    // A violated incumbent is treated as a failed solve to prevent bad values
+    // from polluting EENS/PLS calculations downstream.
     if (lp.A.rows() > 0) {
       Eigen::VectorXd Ax = lp.A * res.x;
       double ineq_viol = (Ax - lp.b).cwiseMax(0.0).maxCoeff();
       if (ineq_viol > 1e-6) {
-        spdlog::warn("[三阶段可靠性] MIP 后验约束违约: ineq_viol={:.2e}", ineq_viol);
-        out.status = "success (constraint violation detected)";
+        spdlog::warn("[三阶段可靠性] MIP 后验约束违约: ineq_viol={:.2e} — 按失败处理", ineq_viol);
+        out.status = "failed (constraint violation)";
+        for (int i = 0; i < nd; ++i)
+          out.shed_by_load[i] = std::max(0.0, c.loads[i].p_kw);
+        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+        return out;
+      }
+    }
+    // Post-solve bounds and integrality check for binary shed variables z_i.
+    // Each z_i must be in [0,1] and within 1e-4 of an integer.  A fractional
+    // or out-of-bounds variable from a failed B&C node indicates an unsound
+    // solution that must not be used to infer load curtailment.
+    for (int i = 0; i < nd; ++i) {
+      double v = res.x[i];
+      if (v < -1e-6 || v > 1.0 + 1e-6) {
+        spdlog::warn("[三阶段可靠性] MIP 变量越界: z[{}]={:.6f} — 按失败处理", i, v);
+        out.status = "failed (constraint violation)";
+        for (int j = 0; j < nd; ++j)
+          out.shed_by_load[j] = std::max(0.0, c.loads[j].p_kw);
+        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+        return out;
+      }
+      double frac = std::min(v - std::floor(v), std::ceil(v) - v);
+      if (frac > 1e-4) {
+        spdlog::warn("[三阶段可靠性] MIP 整数变量非整数: z[{}]={:.6f} (frac={:.2e}) — 按失败处理",
+                     i, v, frac);
+        out.status = "failed (constraint violation)";
+        for (int j = 0; j < nd; ++j)
+          out.shed_by_load[j] = std::max(0.0, c.loads[j].p_kw);
+        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+        return out;
       }
     }
     // Map binary z_i back to shed kW: z_i > 0.5 → load completely shed.
@@ -515,7 +546,14 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r) {
   r.saifi = weighted_interruptions / total_customers;
   r.saidi_min = weighted_duration_min / total_customers;
   r.eens_cost = r.eens_kwh_yr * kReliabilityVoll;
-  r.ok = true;
+  // r.ok is true only when every fault stage solved to a verified optimum.
+  // Any stage that returned "failed*" used conservative full-shed estimates;
+  // those values are still accumulated into EENS but the result is flagged
+  // so that callers know the metrics are upper-bound estimates, not exact.
+  bool any_failed = false;
+  for (const auto& fd : r.faults)
+    if (fd.status.rfind("failed", 0) == 0) { any_failed = true; break; }
+  r.ok = !any_failed;
 }
 
 }  // anonymous namespace

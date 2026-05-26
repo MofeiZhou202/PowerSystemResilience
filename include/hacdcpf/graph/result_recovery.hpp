@@ -38,9 +38,19 @@ namespace hacdcpf::graph {
 
 struct FullNetworkVoltages {
   /// bus_id → complex voltage in pu  (V = Vm · e^{jθ})
+  /// @note Legacy map: written for all buses; when AC and DC share a bus ID
+  ///   the AC voltage wins (last-write semantics preserved from earlier
+  ///   releases).  For hybrid systems with same-numeric-ID AC/DC buses prefer
+  ///   the domain-qualified maps below.
   std::unordered_map<int, std::complex<double>> bus_voltage;
 
-  /// Convenience accessors
+  /// Domain-safe voltages: bus_id → voltage pu for AC buses only.
+  std::unordered_map<int, std::complex<double>> ac_bus_voltage;
+  /// Domain-safe voltages: bus_id → voltage pu for DC buses only.
+  std::unordered_map<int, std::complex<double>> dc_bus_voltage;
+
+  /// Convenience accessors (use the legacy map; suitable for AC-only or
+  /// numerically-disjoint systems)
   double vm_pu(int bus_id, double default_val = 1.0) const;
   double va_deg(int bus_id, double default_val = 0.0) const;
 };

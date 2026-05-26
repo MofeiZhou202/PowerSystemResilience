@@ -51,6 +51,18 @@ size_t hash_state(const std::vector<bool>& state) {
   return h;
 }
 
+// Returns total in-service DC load (MW) for the given system.
+// Used to populate model_limitations in exported result structs.
+static double total_inservice_dc_load_mw(const HybridPowerSystem& sys) {
+  double total = 0.0;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) total += ld.p_mw;
+  // Also count direct DCBus::pd_mw loads (not backed by a DCLoad element).
+  for (const auto& b : sys.dc.buses)
+    if (b.in_service) total += b.pd_mw;
+  return total;
+}
+
 // State evaluation result
 struct StateEvalResult {
   double curtailment_mw{0.0};
@@ -265,7 +277,19 @@ StateEvalResult evaluate_state(
     }
   }
 
-  // Run DC-OPF with load shedding enabled
+  // Run DC-OPF with load shedding enabled.
+  // Guard: warn if the system has non-trivial DC loads that this AC-only OPF
+  // cannot model.  The resulting EENS/LOLE will be optimistic for such systems.
+  {
+    double total_dc_load_mw = 0.0;
+    for (const auto& ld : sys.dc.loads)
+      if (ld.in_service) total_dc_load_mw += ld.p_mw;
+    if (total_dc_load_mw > 0.01) {
+      spdlog::warn("[FMEA] 系统含 DC 负荷 {:.3f} MW，但当前可靠性评估使用 AC-only DC-OPF。"
+                   "DC 负荷中断不计入 OPF，EENS/LOLE 可能偏乐观。",
+                   total_dc_load_mw);
+    }
+  }
   auto opf_result = opf::solve_dc_opf(sys, opf_opt);
 
   // Combine direct shed (dead islands) + OPF shed (surviving islands)
@@ -318,6 +342,12 @@ ReliabilityResult run_nonsequential_mc(
   spdlog::info("Non-Sequential MC: Starting reliability assessment");
   
   ReliabilityResult result;
+  {
+    double dc_mw = total_inservice_dc_load_mw(sys);
+    if (dc_mw > 0.01)
+      result.model_limitations = "DC loads not modelled in OPF (" +
+          std::to_string(dc_mw) + " MW unaccounted)";
+  }
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
@@ -641,6 +671,12 @@ ReliabilityResult run_sequential_mc(
   spdlog::info("Sequential MC: Starting reliability assessment");
   
   ReliabilityResult result;
+  {
+    double dc_mw = total_inservice_dc_load_mw(sys);
+    if (dc_mw > 0.01)
+      result.model_limitations = "DC loads not modelled in OPF (" +
+          std::to_string(dc_mw) + " MW unaccounted)";
+  }
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
@@ -1234,7 +1270,9 @@ namespace {
 // Represent a single component eligible for N-1 contingency.
 struct FMEAComponent {
   enum Type { Generator, ACBranch, DCBranch, VSCConverter,
-              StaticGen, RenewableGen, Storage, Transformer2W, Transformer3W };
+              StaticGen, RenewableGen, Storage, Transformer2W, Transformer3W,
+              DCDCConv, DCCB, DCStorage, DCPVArray, DCStaticGen,
+              ACSwitch, ACCB };
   Type type = Generator;
   int idx;              // Index into corresponding vector
   std::string name;     // Human-readable label
@@ -1254,6 +1292,13 @@ std::string fmea_component_type_name(FMEAComponent::Type type) {
     case FMEAComponent::Storage:       return "storage";
     case FMEAComponent::Transformer2W: return "transformer_2w";
     case FMEAComponent::Transformer3W: return "transformer_3w";
+    case FMEAComponent::DCDCConv:      return "dcdc_converter";
+    case FMEAComponent::DCCB:          return "dc_circuit_breaker";
+    case FMEAComponent::DCStorage:     return "dc_storage";
+    case FMEAComponent::DCPVArray:     return "dc_pv_array";
+    case FMEAComponent::DCStaticGen:   return "dc_static_generator";
+    case FMEAComponent::ACSwitch:      return "ac_switch";
+    case FMEAComponent::ACCB:          return "ac_circuit_breaker";
   }
   return "unknown";
 }
@@ -1464,6 +1509,120 @@ std::vector<FMEAComponent> build_fmea_catalog(
     catalog.push_back(c);
   }
 
+  // ---- DC-DC Converters ----
+  for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
+    const auto& d = sys.dc.dcdc_converters[i];
+    if (!d.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCDCConv;
+    c.idx  = static_cast<int>(i);
+    c.name = d.name.empty() ? "DCDC_" + std::to_string(d.index) : d.name;
+    double mttr = d.mttr_hours > 0 ? d.mttr_hours : 48.0;
+    c.lambda = d.mtbf_hours > 0 ? 8760.0 / d.mtbf_hours : 0.20;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- DC Circuit Breakers ----
+  for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
+    const auto& cb = sys.dc.dc_circuit_breakers[i];
+    if (!cb.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCCB;
+    c.idx  = static_cast<int>(i);
+    c.name = cb.name.empty() ? "DCCB_" + std::to_string(cb.index) : cb.name;
+    // DCCircuitBreaker has no mtbf/mttr fields; use typical CB defaults.
+    c.lambda     = 0.10;   // ~0.1 failures/yr
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = 8.0;    // 8-hr typical repair
+    catalog.push_back(c);
+  }
+
+  // ---- DC Storage ----
+  for (size_t i = 0; i < sys.dc.storage.size(); ++i) {
+    const auto& st = sys.dc.storage[i];
+    if (!st.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCStorage;
+    c.idx  = static_cast<int>(i);
+    c.name = st.name.empty() ? "DCStorage_" + std::to_string(st.index) : st.name;
+    double mttr = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
+    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1.0)
+      c.lambda = st.forced_outage_rate / ((1.0 - st.forced_outage_rate) * mttr) * 8760.0;
+    else
+      c.lambda = 1.0;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- DC PV Arrays ----
+  for (size_t i = 0; i < sys.dc.pv_arrays.size(); ++i) {
+    const auto& pv = sys.dc.pv_arrays[i];
+    if (!pv.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCPVArray;
+    c.idx  = static_cast<int>(i);
+    c.name = pv.name.empty() ? "DCPV_" + std::to_string(pv.index) : pv.name;
+    double mttr = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
+    c.lambda = pv.mtbf_hours > 0 ? 8760.0 / pv.mtbf_hours : 1.5;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- DC Static Generators ----
+  for (size_t i = 0; i < sys.dc.dc_static_generators.size(); ++i) {
+    const auto& sg = sys.dc.dc_static_generators[i];
+    if (!sg.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::DCStaticGen;
+    c.idx  = static_cast<int>(i);
+    c.name = sg.name.empty() ? "DCSGen_" + std::to_string(sg.index) : sg.name;
+    double mttr = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
+    c.lambda = sg.mtbf_hours > 0 ? 8760.0 / sg.mtbf_hours : 1.5;
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- AC Switches (protection device failure → section de-energised) ----
+  for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    if (!sw.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::ACSwitch;
+    c.idx  = static_cast<int>(i);
+    c.name = sw.name.empty() ? "SW_" + std::to_string(sw.index) : sw.name;
+    double mttr = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
+    // p_sw_fail as annual failure probability if set, else use MTBF.
+    if (sw.mtbf_hours > 0)
+      c.lambda = 8760.0 / sw.mtbf_hours;
+    else if (sw.p_sw_fail > 0 && sw.p_sw_fail < 1.0)
+      c.lambda = sw.p_sw_fail;   // already in occ/yr convention
+    else
+      c.lambda = 0.05;  // typical distribution switch ~0.05 failures/yr
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = mttr;
+    catalog.push_back(c);
+  }
+
+  // ---- AC Circuit Breakers ----
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    if (!cb.in_service) continue;
+    FMEAComponent c;
+    c.type = FMEAComponent::ACCB;
+    c.idx  = static_cast<int>(i);
+    c.name = cb.name.empty() ? "CB_" + std::to_string(cb.index) : cb.name;
+    // CircuitBreaker has no mtbf/mttr; use utility-typical CB defaults.
+    c.lambda     = 0.05;   // ~0.05 failures/yr
+    c.tau_sw_hr  = default_sw_hr;
+    c.tau_rep_hr = 8.0;
+    catalog.push_back(c);
+  }
+
   return catalog;
 }
 
@@ -1510,6 +1669,34 @@ void apply_fmea_component_outage(HybridPowerSystem& sys, const FMEAComponent& co
     case FMEAComponent::Transformer3W:
       if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.transformers_3w.size()))
         sys.ac.transformers_3w[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCDCConv:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.dcdc_converters.size()))
+        sys.dc.dcdc_converters[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCCB:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.dc_circuit_breakers.size()))
+        sys.dc.dc_circuit_breakers[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCStorage:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.storage.size()))
+        sys.dc.storage[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCPVArray:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.pv_arrays.size()))
+        sys.dc.pv_arrays[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::DCStaticGen:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.dc.dc_static_generators.size()))
+        sys.dc.dc_static_generators[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::ACSwitch:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.switches.size()))
+        sys.ac.switches[comp.idx].in_service = false;
+      break;
+    case FMEAComponent::ACCB:
+      if (comp.idx >= 0 && comp.idx < static_cast<int>(sys.ac.circuit_breakers.size()))
+        sys.ac.circuit_breakers[comp.idx].in_service = false;
       break;
   }
 }
@@ -1885,6 +2072,12 @@ FMEAResult run_distribution_fmea(
   spdlog::info("FMEA: Starting N-1 failure-mode enumeration");
   
   FMEAResult result;
+  {
+    double dc_mw = total_inservice_dc_load_mw(sys);
+    if (dc_mw > 0.01)
+      result.model_limitations = "DC loads not modelled in OPF (" +
+          std::to_string(dc_mw) + " MW unaccounted)";
+  }
   const size_t nb = sys.ac.buses.size();
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
 

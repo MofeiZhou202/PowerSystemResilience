@@ -640,6 +640,39 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
 
   const Eigen::VectorXd& x_sol = bc_result.x;
 
+  // Post-solve constraint verification — mirrors topology_reconfiguration.cpp.
+  // Catches spurious "success" returns from the B&C solver.
+  if (lp.Aeq.rows() > 0) {
+    Eigen::VectorXd res_eq = lp.Aeq * x_sol - lp.beq;
+    double eq_viol = res_eq.cwiseAbs().maxCoeff();
+    if (eq_viol > 1e-6) {
+      spdlog::warn("[ONR 旧路径] 后验等式约束违约: eq_viol={:.2e}", eq_viol);
+      result.feasible = false;
+      return result;
+    }
+  }
+  if (lp.A.rows() > 0) {
+    Eigen::VectorXd res_ineq = lp.A * x_sol - lp.b;
+    double ineq_viol = res_ineq.cwiseMax(0.0).maxCoeff();
+    if (ineq_viol > 1e-6) {
+      spdlog::warn("[ONR 旧路径] 后验不等式约束违约: ineq_viol={:.2e}", ineq_viol);
+      result.feasible = false;
+      return result;
+    }
+  }
+  // Binary integrality check on alpha variables.
+  // Use 1e-4 (not 0.1) so that marginally fractional B&C solutions are
+  // rejected before the Kruskal rounding step produces an unverified topology.
+  for (int b = 0; b < m; ++b) {
+    double v    = x_sol[idx_alpha(b)];
+    double frac = std::min(v - std::floor(v), std::ceil(v) - v);
+    if (frac > 1e-4) {
+      spdlog::warn("[ONR 旧路径] 后验整数性违约: alpha[{}]={:.6f} (frac={:.2e})", b, v, frac);
+      result.feasible = false;
+      return result;
+    }
+  }
+
   // -------------------------------------------------------------------
   // Round alpha to binary AND guarantee a valid spanning tree
   // (connected, exactly n-1 closed branches, no islands).
