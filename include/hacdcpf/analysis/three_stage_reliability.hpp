@@ -30,7 +30,13 @@ namespace hacdcpf::analysis {
 /// Per-fault detail record produced by the three-stage reliability solver.
 struct ThreeStageFaultDetail {
   int line_id{0};
-  std::string status;         ///< "success" | "failed"
+  std::string status;         ///< "success" | "success (approximate)" | "failed"
+  std::string stage1_status;
+  std::string stage2_status;
+  std::string stage3_status;
+  double stage1_mip_gap{0.0};
+  double stage2_mip_gap{0.0};
+  double stage3_mip_gap{0.0};
   double objective{0.0};
   double pls_stage1{0.0};     ///< load shed in Stage 1 (kW)
   double pls_stage2{0.0};     ///< load shed in Stage 2 (kW)

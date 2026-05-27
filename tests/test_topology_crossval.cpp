@@ -58,6 +58,49 @@ static hacdcpf::ACBranch make_branch(int id, int f, int t,
   return br;
 }
 
+static hacdcpf::DCBus make_dc_bus(int id, hacdcpf::DCBusType type,
+                                  double pd = 0.0) {
+  hacdcpf::DCBus b;
+  b.index = id;
+  b.bus_type = type;
+  b.vm_pu = 1.0;
+  b.pd_mw = pd;
+  b.in_service = true;
+  return b;
+}
+
+static hacdcpf::DCBranch make_dc_branch(int id, int f, int t,
+                                        double r, bool in_svc = true) {
+  hacdcpf::DCBranch br;
+  br.index = id;
+  br.from_bus = f;
+  br.to_bus = t;
+  br.r_pu = r;
+  br.in_service = in_svc;
+  br.rate_a_mva = 10.0;
+  return br;
+}
+
+static hacdcpf::VSCConverter make_vsc(int id, int ac_bus, int dc_bus) {
+  hacdcpf::VSCConverter vsc;
+  vsc.index = id;
+  vsc.bus_ac = ac_bus;
+  vsc.bus_dc = dc_bus;
+  vsc.in_service = true;
+  vsc.p_rated_mw = 10.0;
+  vsc.pmax_mw = 10.0;
+  vsc.pmin_mw = -10.0;
+  return vsc;
+}
+
+static bool contains_ref(const std::vector<hacdcpf::analysis::BranchRef>& refs,
+                         hacdcpf::graph::EdgeCategory category,
+                         int index) {
+  return std::any_of(refs.begin(), refs.end(), [&](const auto& ref) {
+    return ref.category == category && ref.index == index;
+  });
+}
+
 TEST_CASE("Topology reconfiguration treats ExternalGrid-only systems as sourced",
           "[topology][reconfiguration][regression]") {
   using namespace hacdcpf;
@@ -135,6 +178,119 @@ TEST_CASE("Topology reconfiguration load accounting adds bus demand and Load rec
   REQUIRE(base.feasible);
   REQUIRE(additive.feasible);
   CHECK(additive.milp_objective > base.milp_objective + 1e-6);
+}
+
+  TEST_CASE("Topology reconfiguration honors explicit switchable_branch_ids",
+        "[topology][reconfiguration][regression]") {
+    using namespace hacdcpf;
+
+    ACSystem ac;
+    ac.base_mva = 10.0;
+    ac.buses = {
+    make_bus(1, BusType::SLACK, 0.0, 0.0),
+    make_bus(2, BusType::PQ,    0.4, 0.0),
+    make_bus(3, BusType::PQ,    0.4, 0.0),
+    make_bus(4, BusType::PQ,    0.4, 0.0),
+    };
+    ac.branches = {
+    make_branch(1, 1, 2, 0.02, 0.02, true),
+    make_branch(2, 2, 3, 0.02, 0.02, true),
+    make_branch(3, 3, 4, 0.02, 0.02, true),
+    make_branch(4, 1, 4, 0.001, 0.001, false),
+    make_branch(5, 2, 4, 0.05, 0.05, false),
+    };
+    Generator g;
+    g.index = 1;
+    g.bus = 1;
+    g.in_service = true;
+    g.is_slack = true;
+    g.pg_mw = 0.0;
+    g.pmax_mw = 10.0;
+    g.pmin_mw = 0.0;
+    g.qmax_mvar = 10.0;
+    g.qmin_mvar = -10.0;
+    ac.generators = {g};
+
+    HybridPowerSystem sys;
+    sys.ac = ac;
+
+    analysis::TopoReconfOptions opt;
+    opt.line_failures = {2};
+    opt.switchable_branch_ids = {5};
+    opt.enable_pf = false;
+    opt.skip_heuristic = true;
+    opt.max_time_s = 20;
+    opt.verbose = false;
+
+    const auto result = analysis::run_topology_reconfiguration(sys, opt);
+    REQUIRE(result.feasible);
+    CHECK(result.optimal == result.proven_optimal);
+    CHECK(!result.solver_backend.empty());
+    CHECK(!result.solver_status.empty());
+
+    CHECK(std::find(result.switched_on_ids.begin(), result.switched_on_ids.end(), 5) !=
+      result.switched_on_ids.end());
+    CHECK(std::find(result.switched_on_ids.begin(), result.switched_on_ids.end(), 4) ==
+      result.switched_on_ids.end());
+    CHECK(std::find(result.closed_branch_ids.begin(), result.closed_branch_ids.end(), 1) !=
+      result.closed_branch_ids.end());
+    CHECK(std::find(result.open_branch_ids.begin(), result.open_branch_ids.end(), 4) !=
+      result.open_branch_ids.end());
+  }
+
+TEST_CASE("Topology reconfiguration disambiguates structured switchable branches",
+          "[topology][reconfiguration][regression]") {
+  using namespace hacdcpf;
+
+  ACSystem ac;
+  ac.base_mva = 10.0;
+  ac.buses = {
+      make_bus(1, BusType::SLACK, 0.0, 0.0),
+      make_bus(2, BusType::PQ,    0.1, 0.0),
+  };
+  ac.branches = {
+      make_branch(1, 1, 2, 0.001, 0.001, false),
+      make_branch(2, 1, 2, 0.01,  0.01,  true),
+  };
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.in_service = true;
+  g.is_slack = true;
+  g.pmax_mw = 10.0;
+  g.pmin_mw = 0.0;
+  g.qmax_mvar = 10.0;
+  g.qmin_mvar = -10.0;
+  ac.generators = {g};
+
+  HybridPowerSystem sys;
+  sys.ac = ac;
+  sys.dc.base_mva = 10.0;
+  sys.dc.buses = {
+      make_dc_bus(101, DCBusType::DC_V, 0.0),
+      make_dc_bus(102, DCBusType::DC_P, 0.0),
+  };
+  sys.dc.branches = {make_dc_branch(1, 101, 102, 0.001, false)};
+  sys.vsc_converters = {make_vsc(1, 1, 101)};
+
+  analysis::TopoReconfOptions structured;
+  structured.switchable_branches = {{graph::EdgeCategory::DC_Line, 1}};
+  structured.enable_pf = false;
+  structured.skip_heuristic = true;
+  structured.max_time_s = 20;
+  structured.verbose = false;
+
+  const auto structured_result = analysis::run_topology_reconfiguration(sys, structured);
+  REQUIRE(structured_result.feasible);
+  CHECK(contains_ref(structured_result.switched_on, graph::EdgeCategory::DC_Line, 1));
+  CHECK(!contains_ref(structured_result.switched_on, graph::EdgeCategory::AC_Line, 1));
+  CHECK(contains_ref(structured_result.open_branches, graph::EdgeCategory::AC_Line, 1));
+
+  analysis::TopoReconfOptions legacy_ac_only = structured;
+  legacy_ac_only.switchable_branches.clear();
+  legacy_ac_only.switchable_branch_ids = {1};
+  const auto legacy_result = analysis::run_topology_reconfiguration(sys, legacy_ac_only);
+  CHECK_FALSE(legacy_result.feasible);
 }
 
 // ---------------------------------------------------------------------------

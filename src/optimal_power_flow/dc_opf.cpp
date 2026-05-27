@@ -804,6 +804,26 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
         if (!dead_buses.count(ld.bus)) continue;
         ld.in_service = false;
       }
+      for (auto& gen : sys_pruned->ac.generators) {
+        if (dead_buses.count(gen.bus)) gen.in_service = false;
+      }
+      for (auto& sg : sys_pruned->ac.static_generators) {
+        if (dead_buses.count(sg.bus)) sg.in_service = false;
+      }
+      for (auto& rg : sys_pruned->ac.renewable_gens) {
+        if (dead_buses.count(rg.bus)) rg.in_service = false;
+      }
+      for (auto& pv : sys_pruned->ac.pv_systems) {
+        if (dead_buses.count(pv.bus)) pv.in_service = false;
+      }
+      for (auto& st : sys_pruned->ac.storage) {
+        if (dead_buses.count(st.bus)) st.in_service = false;
+      }
+      for (auto& br : sys_pruned->ac.branches) {
+        if (dead_buses.count(br.from_bus) || dead_buses.count(br.to_bus)) {
+          br.in_service = false;
+        }
+      }
       sys_ptr = &(*sys_pruned);
       if (opt.verbose)
         spdlog::warn("DC OPF: {:.2f} MW in isolated islands pre-shed before LP solve",

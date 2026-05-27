@@ -583,3 +583,52 @@ TEST_CASE("FMEA: hybrid catalog optimizes DC load and VSC transfer",
   }
   CHECK(saw_vsc_loss);
 }
+
+TEST_CASE("FMEA: load_scale_factor scales DC bus-level demand",
+          "[fmea][reliability][regression]") {
+  auto sys = make_radial_3bus();
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.in_service = true;
+  g.pg_mw = 10.0;
+  g.pmax_mw = 10.0;
+  g.pmin_mw = 0.0;
+  sys.ac.generators = {g};
+
+  DCBus dc_bus;
+  dc_bus.index = 101;
+  dc_bus.in_service = true;
+  dc_bus.pd_mw = 0.75;
+  dc_bus.is_load = true;
+  sys.dc.buses = {dc_bus};
+
+  VSCConverter vsc;
+  vsc.index = 1;
+  vsc.bus_ac = 1;
+  vsc.bus_dc = 101;
+  vsc.in_service = true;
+  vsc.controllable = true;
+  vsc.p_rated_mw = 5.0;
+  vsc.pmin_mw = -5.0;
+  vsc.pmax_mw = 5.0;
+  vsc.mttr_hr = 10.0;
+  vsc.forced_outage_rate = 0.01;
+  sys.vsc_converters = {vsc};
+
+  analysis::FMEAOptions opts;
+  opts.enable_switch_reconfiguration = false;
+  opts.load_scale_factor = 2.0;
+  const auto result = analysis::run_distribution_fmea(sys, opts);
+
+  bool saw_vsc_loss = false;
+  for (const auto& detail : result.contingencies) {
+    if (detail.component_type != "vsc_converter") continue;
+    saw_vsc_loss = true;
+    CHECK(detail.shed_rep_mw == Approx(1.5).margin(1e-6));
+    REQUIRE(detail.nodal_shed_rep_mw.size() == sys.ac.buses.size() + sys.dc.buses.size());
+    CHECK(detail.nodal_shed_rep_mw.back() == Approx(1.5).margin(1e-6));
+  }
+  CHECK(saw_vsc_loss);
+}

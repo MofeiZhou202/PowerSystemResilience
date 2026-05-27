@@ -15,8 +15,11 @@ native B\&C engine only as fallback.
 The implemented physical model is intentionally narrower than the full hybrid
 research formulation.  AC restoration is a finite-source LinDistFlow MILP.  DC
 buses, DC branches, VSC links, DC/DC converters, and SOP devices are handled by
-a connectivity/capacity fallback after the AC MILP.  VSC/SOP dispatch is not
-co-optimised, and the exported \texttt{psop} vectors are filled with zeroes.
+a connectivity/capacity fallback after the AC MILP.  The fallback includes DC
+source capacity and AC-source surplus transferable through VSC active-power
+capacity limits, but it does not enforce DC voltage or DC branch-flow physics.
+SOP dispatch is not co-optimised, and the exported \texttt{psop} vectors are
+filled with zeroes.
 
 % ------------------------------------------------------------
 \subsection{Three Operational Stages}
@@ -172,21 +175,28 @@ $\sum_{\ell\in\mathcal{L}^{NO}} z_\ell \le K^{sw}$ when
 \texttt{max\_switch\_operations} is finite.
 
 \paragraph{Strict radial energized forest.}
-Let $C=|\mathcal{B}|-1$.  The radiality constraints are
+Let $C=|\mathcal{B}|-1$ and let $\kappa$ be the number of source-containing
+connected components in the mandatory healthy normally-closed AC graph for the
+current stage.  This is not simply $|\mathcal{S}|$: a multi-source radial feeder
+may have several sources in one energized tree.  The radiality constraints are
 \begin{align}
 -Cz_\ell \le f_\ell &\le Cz_\ell, && \forall\ell\in\mathcal{L},
   \label{eq:cxx-f-bound}\\
 z_{(i,j)} &\le y_i, \qquad z_{(i,j)} \le y_j,
   && \forall(i,j)\in\mathcal{L}, \label{eq:cxx-z-y}\\
+z_{(i,j)} &\ge y_i+y_j-1,
+  && \forall(i,j)\in\mathcal{L}^{NC}_{\mathrm{healthy}}, \label{eq:cxx-z-lower}\\
 \sum_{\ell=(j,i)} f_\ell - \sum_{\ell=(i,j)} f_\ell &= y_i,
   && \forall i\in\mathcal{B}\setminus\mathcal{S}, \label{eq:cxx-flow-load}\\
 \sum_{\ell=(j,i)} f_\ell - \sum_{\ell=(i,j)} f_\ell &\le 0,
   && \forall i\in\mathcal{S}, \label{eq:cxx-flow-source}\\
 \sum_{\ell\in\mathcal{L}} z_\ell &\le
-\sum_{i\in\mathcal{B}} y_i - |\mathcal{S}|. \label{eq:cxx-forest-count}
+\sum_{i\in\mathcal{B}} y_i - \kappa. \label{eq:cxx-forest-count}
 \end{align}
 These rows jointly enforce that energized non-source buses connect to a source
-and that the energized topology contains no redundant cycles.
+and that the energized topology contains no redundant cycles.  The lower-bound
+row for healthy normally-closed edges prevents Stage~1 and Stage~3 from opening
+energized closed lines for free merely to satisfy radiality.
 
 % ------------------------------------------------------------
 \subsection{Hybrid Fallback and Validity Flags}
@@ -199,9 +209,10 @@ Hybrid components are represented as follows:
 \begin{itemize}
   \item DC loads and DC sources enter a graph-based connectivity/capacity
         fallback; no DC voltage or branch-flow equation is enforced.
-  \item VSC and DC/DC converters are graph edges for connectivity/capacity
-        transfer only; converter loss and dispatch constraints are not
-        co-optimised.
+  \item VSC converters are graph edges with active transfer capped by the best
+    available converter rating field and efficiency.  DC/DC converters are
+    graph connectivity/capacity edges; converter loss and dispatch
+    constraints are not co-optimised.
   \item SOP configurations are echoed in \texttt{sop\_config}, but
         \texttt{psop1}, \texttt{psop2}, and \texttt{psop3} are zero vectors.
 \end{itemize}
@@ -278,6 +289,8 @@ Field & Type & Current meaning \\
 \texttt{worst\_line} & int & branch id with maximum stage-shed total \\
 \texttt{nodal\_*} & vector & per-load-point EENS/CIF/CID \\
 \texttt{faults} & vector & per-contingency stage shed and SOP vectors \\
+\texttt{faults[*].stage\{1,2,3\}\_status} & string & per-stage exact/approximate/failure status \\
+\texttt{faults[*].stage\{1,2,3\}\_mip\_gap} & double & per-stage solver MIP gap certificate \\
 \texttt{sop\_config} & vector & SOP metadata echoed from the case \\
 \texttt{nb}, \texttt{nl}, \texttt{nd}, \texttt{ng}, \texttt{nmg} & int & network counts \\
 \texttt{model\_scope} & string & AC MILP or AC MILP plus DC fallback \\
@@ -319,6 +332,8 @@ the model contract:
   \item finite source capacity prevents treating a source bus as infinite slack;
   \item standalone AC switches can be Stage~2 candidate edges when a switch
         operation is available.
+  \item Stage~1 and Stage~3 cannot open healthy normally-closed lines for free;
+  \item AC-source surplus can support DC load only through VSC capacity limits.
 \end{itemize}
 
 \begin{center}
@@ -334,11 +349,13 @@ TC-5 & \texttt{[error]} & missing-file graceful error \\
 TC-6 & \texttt{[regression]} & bus-level load is not double-counted \\
 TC-7 & \texttt{[regression]} & source capacity is finite \\
 TC-8 & \texttt{[regression]} & standalone AC switch can restore Stage~2 load \\
+TC-9 & \texttt{[regression]} & healthy normally-closed lines cannot be opened for free \\
+TC-10 & \texttt{[regression]} & VSC capacity limits AC support to DC load \\
 \hline
 \end{tabular}
 \end{center}
 
 In the current \texttt{build\_rel} CTest registration this executable contributes
-8 tests.  The latest full-suite validation after the implementation/documentation
-sync reported 422 registered CTest entries, with 420 active tests passing and
+10 tests.  The latest full-suite validation after the implementation/documentation
+sync reported 428 registered CTest entries, with 426 active tests passing and
 the two known MATPOWER parser cases handled as skips.

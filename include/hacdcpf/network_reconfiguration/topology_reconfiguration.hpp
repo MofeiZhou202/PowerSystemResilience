@@ -26,13 +26,28 @@
 
 namespace hacdcpf::analysis {
 
+/// Unambiguous branch reference for hybrid AC/DC systems.
+/// Holds both the edge category and the component-model index (.index field),
+/// replacing bare int IDs which conflate AC, DC, and VSC indices in the same
+/// numeric space.
+struct BranchRef {
+  graph::EdgeCategory category{graph::EdgeCategory::AC_Line}; ///< AC_Line, DC_Line, or VSC_Coupling
+  int                 index{-1};                              ///< Component .index field
+};
+
 // ── 拓扑重构选项 ───────────────────────────────────────────────────────
 struct TopoReconfOptions {
   /// 故障线路编号列表（每个元素为 ACBranch::index 字段值，非数组下标）
   /// 这些线路将被强制断开，然后通过闭合联络开关恢复供电
   std::vector<int> line_failures;
 
-  /// 可切换支路编号列表（空 = 自动识别联络开关）
+  /// Structured switchable branch list. Use this for hybrid systems where
+  /// AC, DC, and VSC components may share the same numeric .index value.
+  /// Empty = automatic tie-switch detection.
+  std::vector<BranchRef> switchable_branches;
+
+  /// Legacy AC-only switchable branch IDs (ACBranch::index values).
+  /// Empty = automatic tie-switch detection when switchable_branches is also empty.
   std::vector<int> switchable_branch_ids;
 
   /// 是否启用 LinDistFlow 潮流约束
@@ -60,15 +75,6 @@ struct TopoReconfOptions {
 };
 
 // ── 拓扑重构结果 ───────────────────────────────────────────────────────
-
-/// Unambiguous branch reference for hybrid AC/DC systems.
-/// Holds both the edge category and the component-model index (.index field),
-/// replacing the bare int IDs in open_branch_ids / closed_branch_ids which
-/// conflate AC, DC, and VSC indices in the same numeric space.
-struct BranchRef {
-  graph::EdgeCategory category{graph::EdgeCategory::AC_Line}; ///< AC_Line, DC_Line, or VSC_Coupling
-  int                 index{-1};                              ///< Component .index field
-};
 
 struct TopoReconfResult {
   bool feasible{false};
@@ -112,8 +118,14 @@ struct TopoReconfResult {
   double milp_objective{0.0};
   double solve_time_s{0.0};
 
-  /// B&C 求解器诊断信息
+  /// Native B&C solver diagnostics.
   solver::BCStats bc_stats;
+
+  /// Unified solver certificate for heuristic, HiGHS, and native B&C paths.
+  std::string solver_backend;
+  std::string solver_status;
+  double solver_mip_gap{0.0};
+  bool proven_optimal{false};
 
   /// 摘要信息
   std::string summary() const;

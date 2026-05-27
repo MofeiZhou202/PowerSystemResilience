@@ -18,9 +18,10 @@ inspection with searches for high-signal markers such as \texttt{stub},
 \texttt{simplified}, \texttt{approximate}, \texttt{dummy}, and
 \texttt{unsupported}.  Marker counts are not used as defect counts: many
 occurrences are legitimate solver fallback paths, explicit input-domain checks,
-or tests that verify a declared boundary.  The latest pass also searched for
-the removed distribution power-flow API names and reran the full
-\texttt{build\_rel} CTest suite.
+or tests that verify a declared boundary.  The latest pass also audited the
+three-stage reliability MILP, fault-topology reconfiguration, DCOPF isolated
+island pruning, FMEA load scaling, and reran the full \texttt{build\_rel} CTest
+suite.
 
 \subsection{High-Risk Items Closed in This Pass}
 
@@ -50,8 +51,10 @@ converter transfers.  Reports set \texttt{model\_scope} to
 \texttt{hybrid-acdc-network-lp} and mark DC-load curtailment plus VSC/DC power
 flow as included. &
 \texttt{FMEA: hybrid catalog optimizes DC load and VSC transfer} is registered
-as CTest \#381 and asserts the hybrid scope string, validity flags, AC+DC nodal
-curtailment vector, and VSC outage DC-load shedding. \\
+as CTest \#383 and asserts the hybrid scope string, validity flags, AC+DC nodal
+curtailment vector, and VSC outage DC-load shedding.  CTest \#384 proves that
+\texttt{load\_scale\_factor} scales \texttt{DCBus::pd\_mw} demand as well as
+explicit \texttt{DCLoad} records. \\
 AC OPF fallback for hybrid cases &
 Hybrid AC/DC cases are detected before fallback selection.  If the nonlinear
 hybrid path fails, \texttt{solve\_ac\_opf} suppresses the AC-only
@@ -59,7 +62,7 @@ economic-dispatch plus AC-PF fallback and attaches an explicit diagnostic that
 the case contains DC/VSC components.  The fast AC-only route is still available
 for AC-only cases. &
 \texttt{AC OPF: hybrid cases suppress AC-only fallback} is registered as CTest
-\#265 and asserts that a failing hybrid OPF does not report the AC-only fallback
+\#266 and asserts that a failing hybrid OPF does not report the AC-only fallback
 status and does include the suppression hint. \\
 \bottomrule
 \end{longtable}
@@ -75,18 +78,32 @@ Three-stage reliability &
 \texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++ evaluator.
 It solves finite-source AC LinDistFlow restoration with explicit source bounds,
 load-shed variables, branch limits, voltage bounds, strict radial forest
-constraints, and Stage~2 switch-operation limits.  True MILPs use HiGHS first
-and native B\&C as fallback.  No Julia or Gurobi runtime is required. &
+constraints, healthy normally-closed edge coupling, and Stage~2
+switch-operation limits.  The forest edge budget now counts source-containing
+mandatory components rather than raw source buses, so multi-source radial
+feeders are feasible without reopening healthy lines.  True MILPs use HiGHS
+first and native B\&C as fallback; per-stage status and MIP gaps are surfaced.
+No Julia or Gurobi runtime is required. &
 Section~\ref{sec:three_stage_reliability} documents the implemented AC MILP and
-explicitly labels DC/VSC/DCDC/SOP handling as connectivity/capacity fallback
-with zero SOP dispatch vectors. \\
+explicitly labels DC/VSC/DCDC/SOP handling as connectivity/capacity fallback.
+CTest \#427 protects the no-free-open rule for healthy normally-closed lines;
+CTest \#428 protects VSC-capacity-limited AC support to DC load. \\
 Network reconfiguration MILP fallback &
 \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} no longer
 skips the mathematical fallback after heuristic failure.  It tries HiGHS when
 available and otherwise calls the native B\&C fallback.  Source detection now
-includes generators, external grids, and SLACK-bus fallback. &
-The previous audit item saying the fallback was skipped is resolved.  The
-remaining boundary is model scope, not a missing fallback call. \\
+includes generators, external grids, and SLACK-bus fallback.  The result exposes
+\texttt{solver\_backend}, \texttt{solver\_status}, \texttt{solver\_mip\_gap}, and
+\texttt{proven\_optimal}; \texttt{optimal} mirrors that certificate.  The
+switchable-edge input now accepts structured \texttt{BranchRef} values via
+\texttt{switchable\_branches}; the legacy \texttt{switchable\_branch\_ids} field
+is AC-only.  Status certificates use exact normalized optimality labels rather
+than substring matching, and topology/native B\&C diagnostic logs honor
+\texttt{verbose=false}. &
+The previous audit item saying the fallback was skipped is resolved.  CTest
+\#335 verifies that explicit \texttt{switchable\_branch\_ids} gates all topology
+changes and that the solver certificate is coherent.  CTest \#336 verifies
+mixed AC/DC/VSC same-ID disambiguation for structured switchable input. \\
 Topology load accounting &
 Fault reconfiguration adds explicit \texttt{ACSystem::loads} demand and direct
 \texttt{ACBus::pd\_mw}/\texttt{qd\_mvar} demand instead of treating one as a
@@ -102,9 +119,13 @@ AC-only LinDistFlow and reports that scope explicitly. \\
 DC OPF load-shedding audit &
 Direct isolated-island shedding is now written to both
 \texttt{total\_load\_shedding\_mw} and the per-bus
-\texttt{load\_shedding\_mw} vector.  The independent feasibility check includes
-slack-bus balance. &
-Regression coverage lives in \texttt{test\_acopf\_dcopf\_crossval}. \\
+\texttt{load\_shedding\_mw} vector.  The topology pre-prune removes loads,
+generators, fixed injections, storage, and AC branches attached to dead islands
+before LP construction.  The independent feasibility check includes slack-bus
+balance. &
+Regression coverage lives in \texttt{test\_acopf\_dcopf\_crossval}: CTest \#44
+checks per-bus isolated shedding, CTest \#45 checks dead-island generator and
+branch pruning, and CTest \#46 checks slack-bus balance. \\
 DC OPF JSON contract &
 \texttt{dc\_opf\_result\_to\_json}, \texttt{dc\_opf\_result\_from\_json},
 \texttt{save\_dc\_opf\_result\_json}, and \texttt{load\_dc\_opf\_result\_json}
@@ -146,13 +167,19 @@ After the implementation pass, the following commands were run from the
 repository root using the \texttt{build\_rel} tree:
 \begin{verbatim}
 cmake --build build_rel -j4
+./build_rel/tests/test_three_stage_reliability \
+      "[reliability][three_stage][regression]"
+./build_rel/tests/test_topology_crossval \
+      "[topology][reconfiguration][regression]"
+./build_rel/tests/test_acopf_dcopf_crossval \
+      "[opf][dcopf][regression]"
 ./build_rel/tests/test_resilience_assessment \
-      "FMEA: hybrid catalog optimizes DC load and VSC transfer"
+      "[fmea][reliability][regression]"
 ./build_rel/tests/test_solver_capabilities \
       "AC OPF: hybrid cases suppress AC-only fallback"
 ctest --test-dir build_rel --output-on-failure
 \end{verbatim}
-The full CTest result is \textbf{422 registered tests}: \textbf{420 active
+The full CTest result is \textbf{428 registered tests}: \textbf{426 active
 tests passed}, \textbf{0 failed}, and \textbf{2 expected MATPOWER parser skips}
 (\texttt{case533mt\_hi}, \texttt{case533mt\_lo}).
 
@@ -160,10 +187,12 @@ tests passed}, \textbf{0 failed}, and \textbf{2 expected MATPOWER parser skips}
 
 The repository is not an empty shell: PF, OPF, graph, I/O, carbon, time-series,
 resilience, FMEA, topology reconfiguration, and three-stage reliability paths
-are implemented and covered by the current 422-entry CTest suite.  The three
+are implemented and covered by the current 428-entry CTest suite.  The three
 previous high-risk audit items in this chapter are now closed in code and in
 tests: the legacy distribution power-flow public API is removed, hybrid FMEA
 optimizes DC networks and VSC transfers, and hybrid AC OPF can no longer accept
-an AC-only fallback as a converged hybrid result.  The remaining risks are
-bounded model-scope statements surfaced through result fields, validity flags,
-and regression tests.
+an AC-only fallback as a converged hybrid result.  This pass also closed the
+newly audited logic holes in three-stage reliability, topology reconfiguration,
+DCOPF isolated-island pruning, and FMEA DC load scaling.  The remaining risks
+are bounded model-scope statements surfaced through result fields, validity
+flags, and regression tests.

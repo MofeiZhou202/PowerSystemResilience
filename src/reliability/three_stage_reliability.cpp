@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -285,7 +286,19 @@ struct StageSolve {
   std::vector<double> shed_by_load;
   std::string status{"unknown"};
   double objective{0.0};
+  double mip_gap{0.0};
+  bool proven_optimal{true};
 };
+
+double vsc_transfer_capacity_kw(const VSCConverter& vsc) {
+  const double capacity_mw = std::max({std::abs(vsc.pmax_mw),
+                                       std::abs(vsc.pmin_mw),
+                                       std::abs(vsc.p_set_mw),
+                                       vsc.p_rated_mw});
+  if (!std::isfinite(capacity_mw) || capacity_mw <= 0.0) return 0.0;
+  const double eta = (vsc.eta > 0.0 && vsc.eta <= 1.0) ? vsc.eta : 1.0;
+  return capacity_mw * eta * 1000.0;
+}
 
 // solve_stage_milp() — LinDistFlow MILP for stages 1, 2, and 3.
 //
@@ -482,6 +495,21 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
 
   const int n_sources = static_cast<int>(std::count(is_source.begin(), is_source.end(), true));
+  int n_source_components = 0;
+  if (n_sources > 0) {
+    DSU source_dsu(n_bus);
+    for (int b = 0; b < n_br; ++b) {
+      const auto& br = ac_branches[b];
+      if (br.normally_open) continue;
+      if (br.failed && stage < 3) continue;
+      source_dsu.unite(br.from_pos, br.to_pos);
+    }
+    std::unordered_set<int> source_components;
+    for (int i = 0; i < n_bus; ++i) {
+      if (is_source[i]) source_components.insert(source_dsu.find(i));
+    }
+    n_source_components = std::max(1, static_cast<int>(source_components.size()));
+  }
 
   // y_i — energized/served bus indicator.  Source buses are energized roots.
   // If no source exists, all y_i are fixed to zero and the model sheds all load.
@@ -691,6 +719,12 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     add_le({{ off_f + b, -1.0}, { off_z + b, -commodity_cap}}, 0.0);  // -f ≤ cap·z
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].from_pos, -1.0}}, 0.0);
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].to_pos,   -1.0}}, 0.0);
+    if (!ac_branches[b].normally_open && !(ac_branches[b].failed && stage < 3)) {
+      add_le({{ off_y + ac_branches[b].from_pos, 1.0},
+              { off_y + ac_branches[b].to_pos,   1.0},
+              { off_z + b,                      -1.0}},
+             1.0);
+    }
   }
   for (int i = 0; i < n_bus; ++i) {
     std::vector<std::pair<int,double>> terms;
@@ -710,7 +744,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     std::vector<std::pair<int,double>> forest_terms;
     for (int b = 0; b < n_br; ++b) forest_terms.push_back({off_z + b, 1.0});
     for (int i = 0; i < n_bus; ++i) forest_terms.push_back({off_y + i, -1.0});
-    add_le(forest_terms, -static_cast<double>(n_sources));
+    add_le(forest_terms, -static_cast<double>(n_source_components));
   }
 
   // ── C9 (eq. 14): Switch count ≤ K^sw ────────────────────────────────────
@@ -810,7 +844,54 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
 
   const bool proven_optimal = (res_mip_gap <= kGapTol + 1e-9);
   out.status = proven_optimal ? "success" : "success (approximate)";
+  out.mip_gap = res_mip_gap;
+  out.proven_optimal = proven_optimal;
   out.objective = res_objective;
+
+  const double bound_tol = 1e-6;
+  const double integer_tol = 1e-4;
+  auto fail_postsolve = [&]() {
+    out.status = "failed (constraint violation)";
+    out.proven_optimal = false;
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] >= 0) out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
+    }
+    out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+  };
+  for (int var = 0; var < n_vars; ++var) {
+    const double value = res_x[var];
+    const auto& bounds = lp.vars[static_cast<size_t>(var)];
+    if (value < bounds.lb - bound_tol || value > bounds.ub + bound_tol) {
+      spdlog::warn("[三阶段可靠性] LinDistFlow MILP bound violation: var[{}]={:.8f} bounds=[{:.8f},{:.8f}]",
+                   var, value, bounds.lb, bounds.ub);
+      fail_postsolve();
+      return out;
+    }
+  }
+  auto check_integer = [&](int var) -> bool {
+    if (var < 0 || var >= n_vars) return true;
+    const double value = res_x[var];
+    if (std::abs(value - std::round(value)) <= integer_tol) return true;
+    spdlog::warn("[三阶段可靠性] LinDistFlow MILP integrality violation: var[{}]={:.8f}",
+                 var, value);
+    return false;
+  };
+  for (int var : mip.binary_idx) {
+    if (!check_integer(var)) { fail_postsolve(); return out; }
+  }
+  for (int var : mip.integer_idx) {
+    if (!check_integer(var)) { fail_postsolve(); return out; }
+  }
+  const double recomputed_objective = lp.c.dot(res_x);
+  const double objective_tol = 1e-5 * std::max(1.0, std::abs(recomputed_objective));
+  if (std::isfinite(res_objective) &&
+      std::abs(res_objective - recomputed_objective) > objective_tol) {
+    spdlog::warn("[三阶段可靠性] LinDistFlow MILP objective mismatch: solver={:.8f} recomputed={:.8f}",
+                 res_objective, recomputed_objective);
+    fail_postsolve();
+    return out;
+  }
+  out.objective = recomputed_objective;
 
   // Post-solve: verify equality and inequality residuals
   if (n_eq > 0) {
@@ -864,6 +945,13 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       auto ia = dc_pos.find(a), ib = dc_pos.find(b_bus);
       if (ia != dc_pos.end() && ib != dc_pos.end()) dsu_dc.unite(ia->second, ib->second);
     };
+    for (int b = 0; b < static_cast<int>(sys.ac.branches.size()); ++b) {
+      const auto& br = sys.ac.branches[b];
+      bool on = br.in_service;
+      if (fault.ac && b == fault.index && stage < 3) on = false;
+      if (stage >= 3 && br.in_service) on = true;
+      if (on) connect_dc(br.from_bus, br.to_bus);
+    }
     for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
       const auto& br = sys.dc.branches[b];
       bool on = br.in_service;
@@ -882,23 +970,30 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int i = 0; i < static_cast<int>(c.buses.size()); ++i)
       dc_comp[c.buses[i]] = dsu_dc.find(i);
 
-    std::unordered_map<int, double> comp_cap_dc;
+    std::unordered_map<int, double> comp_ac_source_kw;
+    std::unordered_map<int, double> comp_dc_source_kw;
     for (const auto& s : c.sources) {
-      if (ac_bus_pos.count(s.bus)) continue;  // AC source — already in MILP
       auto it = dc_comp.find(s.bus);
-      if (it != dc_comp.end()) comp_cap_dc[it->second] += s.p_kw;
+      if (it == dc_comp.end()) continue;
+      if (s.bus >= kDCBusOffset) comp_dc_source_kw[it->second] += s.p_kw;
+      else comp_ac_source_kw[it->second] += s.p_kw;
     }
+    std::unordered_map<int, double> comp_ac_served_kw;
     for (int li = 0; li < nd_total; ++li) {
-      if (load_ac_bus[li] >= 0) continue;  // AC load — already handled
-      const double li_kw = std::max(0.0, c.loads[li].p_kw);
+      if (load_ac_bus[li] < 0) continue;
       auto it = dc_comp.find(c.loads[li].bus);
-      if (it == dc_comp.end()) {
-        out.shed_by_load[li] = li_kw;  // isolated
-      } else {
-        const double cap = comp_cap_dc[it->second];
-        // Simple: if capacity ≥ demand for this component, zero shed; else full shed.
-        // (Full per-component capacity check done below)
-        out.shed_by_load[li] = (cap < li_kw * 0.5) ? li_kw : 0.0;
+      if (it == dc_comp.end()) continue;
+      comp_ac_served_kw[it->second] +=
+          std::max(0.0, c.loads[li].p_kw - out.shed_by_load[li]);
+    }
+    std::unordered_map<int, double> comp_vsc_transfer_kw;
+    for (const auto& vsc : sys.vsc_converters) {
+      if (!vsc.in_service) continue;
+      auto ac_it = dc_comp.find(vsc.bus_ac);
+      auto dc_it = dc_comp.find(vsc.bus_dc + kDCBusOffset);
+      if (ac_it == dc_comp.end() || dc_it == dc_comp.end()) continue;
+      if (ac_it->second == dc_it->second) {
+        comp_vsc_transfer_kw[ac_it->second] += vsc_transfer_capacity_kw(vsc);
       }
     }
     // Proper per-component capacity check for DC loads
@@ -914,7 +1009,12 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       auto it = dc_comp.find(c.loads[li].bus);
       if (it == dc_comp.end()) { out.shed_by_load[li] = li_kw; continue; }
       const int cid = it->second;
-      const double cap = comp_cap_dc.count(cid) ? comp_cap_dc.at(cid) : 0.0;
+      const double dc_cap = comp_dc_source_kw.count(cid) ? comp_dc_source_kw.at(cid) : 0.0;
+      const double ac_cap = comp_ac_source_kw.count(cid) ? comp_ac_source_kw.at(cid) : 0.0;
+      const double ac_served = comp_ac_served_kw.count(cid) ? comp_ac_served_kw.at(cid) : 0.0;
+      const double ac_surplus = std::max(0.0, ac_cap - ac_served);
+      const double transfer_cap = comp_vsc_transfer_kw.count(cid) ? comp_vsc_transfer_kw.at(cid) : 0.0;
+      const double cap = dc_cap + std::min(ac_surplus, transfer_cap);
       const double demand = dc_comp_demand.count(cid) ? dc_comp_demand.at(cid) : 0.0;
       if (cap >= demand - 1e-6) {
         out.shed_by_load[li] = 0.0;
@@ -982,10 +1082,20 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
-    // Accept both "success" (MILP path) and "success (analytical)" (shortcut
-    // path) as successful outcomes — they both mean zero or modelled load shed.
-    auto is_ok = [](const std::string& s) { return s.rfind("success", 0) == 0; };
-    d.status = (is_ok(s1.status) && is_ok(s2.status) && is_ok(s3.status)) ? "success" : "failed";
+    d.stage1_status = s1.status;
+    d.stage2_status = s2.status;
+    d.stage3_status = s3.status;
+    d.stage1_mip_gap = s1.mip_gap;
+    d.stage2_mip_gap = s2.mip_gap;
+    d.stage3_mip_gap = s3.mip_gap;
+    auto is_success_like = [](const std::string& s) { return s.rfind("success", 0) == 0; };
+    const bool all_success = is_success_like(s1.status) &&
+                 is_success_like(s2.status) &&
+                 is_success_like(s3.status);
+    const bool any_approx = s1.status == "success (approximate)" ||
+                s2.status == "success (approximate)" ||
+                s3.status == "success (approximate)";
+    d.status = !all_success ? "failed" : (any_approx ? "success (approximate)" : "success");
     d.pls_stage1 = s1.shed_kw;
     d.pls_stage2 = s2.shed_kw;
     d.pls_stage3 = s3.shed_kw;
@@ -1049,8 +1159,9 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
            ? std::string(" (no limit)")
            : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
       + ". "
-      "DC sub-network: connectivity/capacity fallback (no DC power-flow constraints). "
-      "VSC/DCDC treated as lossless edges between AC and DC buses. "
+       "DC sub-network: connectivity/capacity fallback with DC source capacity and "
+       "AC-source surplus transferable through VSC capacity limits; no DC power-flow constraints. "
+       "DCDC devices are still treated as lossless connectivity edges. "
       "SOP setpoints (psop) are zero (VSC dispatch not co-optimised in this model). "
       "Reactive power modelled as p_d * tan(arccos(0.9)); loss terms dropped (LinDistFlow).";
 

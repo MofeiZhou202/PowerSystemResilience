@@ -19,13 +19,16 @@
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <queue>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Core>
@@ -40,6 +43,43 @@
 #include "hacdcpf/solver/problem_types.hpp"
 
 namespace hacdcpf::analysis {
+
+namespace {
+
+std::string normalize_status(std::string status) {
+  std::transform(status.begin(), status.end(), status.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  const auto first = status.find_first_not_of(" \t\n\r");
+  if (first == std::string::npos) return {};
+  const auto last = status.find_last_not_of(" \t\n\r");
+  std::string trimmed = status.substr(first, last - first + 1);
+  std::string collapsed;
+  collapsed.reserve(trimmed.size());
+  bool previous_space = false;
+  for (char ch : trimmed) {
+    const bool is_space = std::isspace(static_cast<unsigned char>(ch)) != 0;
+    if (is_space) {
+      if (!previous_space) collapsed.push_back(' ');
+    } else {
+      collapsed.push_back(ch);
+    }
+    previous_space = is_space;
+  }
+  return collapsed;
+}
+
+bool status_indicates_optimal(const std::string& status) {
+  const std::string normalized = normalize_status(status);
+  return normalized == "optimal" ||
+         normalized == "highs optimal" ||
+         normalized == "optimal solution found" ||
+         normalized == "optimal (root gap closed)" ||
+         normalized == "optimal (tree exhausted)" ||
+         normalized == "optimality gap reached" ||
+         normalized == "solved to optimality";
+}
+
+}  // namespace
 
 // =====================================================================
 // summary()
@@ -157,13 +197,17 @@ TopoReconfResult run_topology_reconfiguration(
 
   TopoReconfResult result;
   if (nb == 0 || nl == 0) {
-    spdlog::warn("[拓扑重构] 系统为空 (nb={}, nl={})", nb, nl);
+    if (opt.verbose) {
+      spdlog::warn("[拓扑重构] 系统为空 (nb={}, nl={})", nb, nl);
+    }
     return result;
   }
 
-  spdlog::info("[拓扑重构] 系统: {} 母线(AC={},DC={}), {} 支路(AC={},DC={}), "
-               "{} VSC, {} 发电机",
-               nb, nb_ac, nb_dc, nl, nl_ac, nl_dc, nl_vsc, n_ac_gen);
+  if (opt.verbose) {
+    spdlog::info("[拓扑重构] 系统: {} 母线(AC={},DC={}), {} 支路(AC={},DC={}), "
+                 "{} VSC, {} 发电机",
+                 nb, nb_ac, nb_dc, nl, nl_ac, nl_dc, nl_vsc, n_ac_gen);
+  }
 
   // -------------------------------------------------------------------
   // Bus ID → local index (AC 0..nb_ac-1, DC nb_ac..nb-1)
@@ -185,7 +229,39 @@ TopoReconfResult run_topology_reconfiguration(
   std::vector<double> edge_r(nl + nl_vsc, 0.0), edge_x(nl + nl_vsc, 0.0);
   std::vector<double> edge_rate(nl + nl_vsc, 0.0);
   std::vector<bool> edge_status(nl + nl_vsc, true);  // α (initial in_service)
+  std::vector<bool> edge_switchable(nl + nl_vsc, false);
   std::vector<int> edge_orig_idx(nl + nl_vsc, -1);
+
+  const bool has_explicit_switchables = !opt.switchable_branches.empty() ||
+                                        !opt.switchable_branch_ids.empty();
+  std::unordered_set<int> explicit_ac_switchables(
+      opt.switchable_branch_ids.begin(), opt.switchable_branch_ids.end());
+  std::unordered_set<int> explicit_dc_switchables;
+  std::unordered_set<int> explicit_vsc_switchables;
+  for (const auto& ref : opt.switchable_branches) {
+    switch (ref.category) {
+      case graph::EdgeCategory::AC_Line:
+        explicit_ac_switchables.insert(ref.index);
+        break;
+      case graph::EdgeCategory::DC_Line:
+        explicit_dc_switchables.insert(ref.index);
+        break;
+      case graph::EdgeCategory::VSC_Coupling:
+        explicit_vsc_switchables.insert(ref.index);
+        break;
+      default:
+        break;
+    }
+  }
+  auto is_explicit_ac_switchable = [&](int id) {
+    return explicit_ac_switchables.find(id) != explicit_ac_switchables.end();
+  };
+  auto is_explicit_dc_switchable = [&](int id) {
+    return explicit_dc_switchables.find(id) != explicit_dc_switchables.end();
+  };
+  auto is_explicit_vsc_switchable = [&](int id) {
+    return explicit_vsc_switchables.find(id) != explicit_vsc_switchables.end();
+  };
 
   const double default_rate_pu = opt.default_rate_mva / base_mva;
 
@@ -201,6 +277,7 @@ TopoReconfResult run_topology_reconfiguration(
     edge_rate[i]     = (br.rate_a_mva > 1e-9) ? br.rate_a_mva / base_mva : default_rate_pu;
     edge_status[i]   = br.in_service;
     edge_orig_idx[i] = br.index;
+    edge_switchable[i] = has_explicit_switchables ? is_explicit_ac_switchable(br.index) : !br.in_service;
   }
   for (int i = 0; i < nl_dc; ++i) {
     const auto& br = dc.branches[i];
@@ -215,6 +292,7 @@ TopoReconfResult run_topology_reconfiguration(
     edge_rate[e]     = (br.rate_a_mva > 1e-9) ? br.rate_a_mva / base_mva : default_rate_pu;
     edge_status[e]   = br.in_service;
     edge_orig_idx[e] = br.index;
+    edge_switchable[e] = has_explicit_switchables ? is_explicit_dc_switchable(br.index) : !br.in_service;
   }
   for (int i = 0; i < nl_vsc; ++i) {
     const auto& vsc = vscs[i];
@@ -229,6 +307,7 @@ TopoReconfResult run_topology_reconfiguration(
     edge_rate[e]     = (vsc.pmax_mw > 1e-9) ? vsc.pmax_mw / base_mva : default_rate_pu;
     edge_status[e]   = vsc.in_service;
     edge_orig_idx[e] = vsc.index;
+    edge_switchable[e] = has_explicit_switchables && is_explicit_vsc_switchable(vsc.index);
   }
 
   // -------------------------------------------------------------------
@@ -306,7 +385,9 @@ TopoReconfResult run_topology_reconfiguration(
   // Variable layout
   // -------------------------------------------------------------------
   VarLayout idx(nl, nl_vsc, ng, nb, nb_ac, nl_ac, opt.enable_pf);
-  spdlog::info("[拓扑重构] 变量数: {} (enable_pf={})", idx.n_vars, opt.enable_pf);
+  if (opt.verbose) {
+    spdlog::info("[拓扑重构] 变量数: {} (enable_pf={})", idx.n_vars, opt.enable_pf);
+  }
 
   // -------------------------------------------------------------------
   // Safety bound propagation (Julia T5):
@@ -335,8 +416,17 @@ TopoReconfResult run_topology_reconfiguration(
       if (i < nl) { lb[idx.Fij(i)] = 0.0; ub[idx.Fij(i)] = 0.0; }
       else        { lb[idx.Fij_vsc(i-nl)] = 0.0; ub[idx.Fij_vsc(i-nl)] = 0.0; }
       ++n_beta_fixed;
-    } else {
+    } else if (edge_switchable[i]) {
       beta_free[i] = true;
+    } else {
+      const double fixed = edge_status[i] ? 1.0 : 0.0;
+      lb[idx.beta(i)] = fixed;
+      ub[idx.beta(i)] = fixed;
+      if (fixed < 0.5) {
+        if (i < nl) { lb[idx.Fij(i)] = 0.0; ub[idx.Fij(i)] = 0.0; }
+        else        { lb[idx.Fij_vsc(i-nl)] = 0.0; ub[idx.Fij_vsc(i-nl)] = 0.0; }
+      }
+      ++n_beta_fixed;
     }
   }
   int n_beta_free = static_cast<int>(
@@ -347,7 +437,9 @@ TopoReconfResult run_topology_reconfiguration(
   }
   if (ng > 0) { lb[idx.gamma(0)] = 1.0; ub[idx.gamma(0)] = 1.0; }
 
-  spdlog::info("[拓扑重构] β固定={}, β自由(联络线)={}", n_beta_fixed, n_beta_free);
+  if (opt.verbose) {
+    spdlog::info("[拓扑重构] β固定={}, β自由(联络线)={}", n_beta_fixed, n_beta_free);
+  }
 
   // -------------------------------------------------------------------
   // Connected component awareness: fix same-component tie switches
@@ -393,8 +485,10 @@ TopoReconfResult run_topology_reconfiguration(
       }
       n_beta_free = static_cast<int>(
           std::count(beta_free.begin(), beta_free.end(), true));
-      spdlog::info("[拓扑重构] 连通分量: {} 个, 同分量固定={}, 跨分量={}",
-                   n_comp, n_comp_fixed, n_beta_free);
+      if (opt.verbose) {
+        spdlog::info("[拓扑重构] 连通分量: {} 个, 同分量固定={}, 跨分量={}",
+                     n_comp, n_comp_fixed, n_beta_free);
+      }
     }
   }
 
@@ -759,9 +853,11 @@ TopoReconfResult run_topology_reconfiguration(
     milp.binary_idx.push_back(idx.gamma(g));
   }
 
-  spdlog::info("[拓扑重构] MILP: {} 变量, {} 等式, {} 不等式, {} 二元",
-               idx.n_vars, n_eq, n_ineq,
-               static_cast<int>(milp.binary_idx.size()));
+  if (opt.verbose) {
+    spdlog::info("[拓扑重构] MILP: {} 变量, {} 等式, {} 不等式, {} 二元",
+                 idx.n_vars, n_eq, n_ineq,
+                 static_cast<int>(milp.binary_idx.size()));
+  }
 
   // -------------------------------------------------------------------
   // Graph heuristic: O(V+E) BFS for cheapest reconnecting tie switch
@@ -810,6 +906,7 @@ TopoReconfResult run_topology_reconfiguration(
     int best_edge = -1;
     double best_cost = 1e20;
     for (int i = 0; i < nl + nl_vsc; ++i) {
+      if (!beta_free[i]) continue;
       if (edge_status[i]) continue;
       if (zeta[i] < 0.5 || edge_from[i] < 0) continue;
       bool f_vis = visited[edge_from[i]], t_vis = visited[edge_to[i]];
@@ -882,23 +979,31 @@ TopoReconfResult run_topology_reconfiguration(
         ub_viol = std::max(ub_viol, x_heur[i] - ub[i]);
       }
       double total = std::max({eq_viol, iq_viol, lb_viol, ub_viol});
-      spdlog::info("[拓扑重构] 启发式: obj={:.6f}, viol={:.8f}",
-                   c.dot(x_heur), total);
+      if (opt.verbose) {
+        spdlog::info("[拓扑重构] 启发式: obj={:.6f}, viol={:.8f}",
+                     c.dot(x_heur), total);
+      }
       return total < 1e-6;
     };
 
     if (best_edge >= 0 && n_reachable < nb) {
-      spdlog::info("[拓扑重构] 启发式: 替换边 #{} ({}→{})",
-                   best_edge, edge_from[best_edge], edge_to[best_edge]);
+      if (opt.verbose) {
+        spdlog::info("[拓扑重构] 启发式: 替换边 #{} ({}→{})",
+                     best_edge, edge_from[best_edge], edge_to[best_edge]);
+      }
       heuristic_solved = try_heuristic(true);
     } else if (n_reachable == nb) {
-      spdlog::info("[拓扑重构] 启发式: 网络仍连通（故障非桥边）");
+      if (opt.verbose) {
+        spdlog::info("[拓扑重构] 启发式: 网络仍连通（故障非桥边）");
+      }
       heuristic_solved = try_heuristic(false);
     }
     if (heuristic_solved) {
       double ms = chr::duration<double,std::milli>(
           chr::steady_clock::now() - t_heur).count();
-      spdlog::info("[拓扑重构] 启发式成功，耗时 {:.1f}ms", ms);
+      if (opt.verbose) {
+        spdlog::info("[拓扑重构] 启发式成功，耗时 {:.1f}ms", ms);
+      }
     }
   }
 
@@ -912,6 +1017,10 @@ TopoReconfResult run_topology_reconfiguration(
     x_sol = x_heur;
     solved_ok = true;
     result.milp_objective = c.dot(x_sol);
+    result.solver_backend = "graph-heuristic";
+    result.solver_status = "feasible incumbent";
+    result.solver_mip_gap = std::numeric_limits<double>::infinity();
+    result.proven_optimal = false;
   } else {
     BCOptions bc_opt;
     bc_opt.time_limit_sec = static_cast<double>(opt.max_time_s);
@@ -930,7 +1039,9 @@ TopoReconfResult run_topology_reconfiguration(
       milp.initial_solution = x_heur;
     }
 
-    spdlog::info("[拓扑重构] 启发式未找到可行方案，调用 MILP fallback");
+    if (opt.verbose) {
+      spdlog::info("[拓扑重构] 启发式未找到可行方案，调用 MILP fallback");
+    }
     engine::HighsAdapter highs;
     if (highs.available()) {
       auto highs_result = highs.solve_milp(milp);
@@ -938,12 +1049,22 @@ TopoReconfResult run_topology_reconfiguration(
         x_sol = highs_result.x;
         solved_ok = true;
         result.milp_objective = highs_result.stats.objective;
-        spdlog::info("[拓扑重构] HiGHS fallback 成功: obj={:.6f}",
-                     result.milp_objective);
+        result.solver_backend = "HiGHS";
+        result.solver_status = highs_result.stats.status;
+        result.solver_mip_gap = highs_result.stats.mip_gap;
+        result.proven_optimal = status_indicates_optimal(result.solver_status) &&
+          std::isfinite(result.solver_mip_gap) &&
+          result.solver_mip_gap <= opt.mip_gap + 1e-9;
+        if (opt.verbose) {
+          spdlog::info("[拓扑重构] HiGHS fallback 成功: obj={:.6f}",
+                       result.milp_objective);
+        }
       } else {
         solved_ok = false;
-        spdlog::warn("[拓扑重构] HiGHS fallback 未找到可行解: {}",
-                     highs_result.stats.status);
+        if (opt.verbose) {
+          spdlog::warn("[拓扑重构] HiGHS fallback 未找到可行解: {}",
+                       highs_result.stats.status);
+        }
       }
     } else {
       BCResult bc_result = solve_milp_bc(milp, bc_opt);
@@ -952,14 +1073,24 @@ TopoReconfResult run_topology_reconfiguration(
         x_sol = bc_result.x;
         solved_ok = true;
         result.milp_objective = bc_result.stats.objective;
-        spdlog::info("[拓扑重构] B&C fallback 成功: nodes={} gap={:.6f} obj={:.6f}",
-                     bc_result.bc_stats.nodes_explored,
-                     bc_result.bc_stats.gap,
-                     result.milp_objective);
+        result.solver_backend = "NativeB&C";
+        result.solver_status = bc_result.stats.status;
+        result.solver_mip_gap = bc_result.bc_stats.gap;
+        result.proven_optimal = status_indicates_optimal(result.solver_status) &&
+          std::isfinite(result.solver_mip_gap) &&
+          result.solver_mip_gap <= opt.mip_gap + 1e-9;
+        if (opt.verbose) {
+          spdlog::info("[拓扑重构] B&C fallback 成功: nodes={} gap={:.6f} obj={:.6f}",
+                       bc_result.bc_stats.nodes_explored,
+                       bc_result.bc_stats.gap,
+                       result.milp_objective);
+        }
       } else {
         solved_ok = false;
-        spdlog::warn("[拓扑重构] B&C fallback 未找到可行解: {}",
-                     bc_result.stats.status);
+        if (opt.verbose) {
+          spdlog::warn("[拓扑重构] B&C fallback 未找到可行解: {}",
+                       bc_result.stats.status);
+        }
       }
     }
   }
@@ -971,7 +1102,9 @@ TopoReconfResult run_topology_reconfiguration(
     result.feasible = false;
     result.solve_time_s = chr::duration<double>(
         chr::steady_clock::now() - t_start).count();
-    spdlog::warn("[拓扑重构] 求解失败");
+    if (opt.verbose) {
+      spdlog::warn("[拓扑重构] 求解失败");
+    }
     return result;
   }
 
@@ -991,8 +1124,10 @@ TopoReconfResult run_topology_reconfiguration(
       ineq_viol = res_ineq.cwiseMax(0.0).maxCoeff();
     }
     if (eq_viol > 1e-6 || ineq_viol > 1e-6) {
-      spdlog::warn("[拓扑重构] 后验约束违约: eq_viol={:.2e} ineq_viol={:.2e}",
-                   eq_viol, ineq_viol);
+      if (opt.verbose) {
+        spdlog::warn("[拓扑重构] 后验约束违约: eq_viol={:.2e} ineq_viol={:.2e}",
+                     eq_viol, ineq_viol);
+      }
       result.feasible = false;
       result.solve_time_s = chr::duration<double>(
           chr::steady_clock::now() - t_start).count();
@@ -1006,7 +1141,9 @@ TopoReconfResult run_topology_reconfiguration(
       double v = x_sol[bi];
       double frac = std::min(v - std::floor(v), std::ceil(v) - v);
       if (frac > 1e-4) {
-        spdlog::warn("[拓扑重构] 后验整数性违约: var[{}]={:.6f} (frac={:.2e})", bi, v, frac);
+        if (opt.verbose) {
+          spdlog::warn("[拓扑重构] 后验整数性违约: var[{}]={:.6f} (frac={:.2e})", bi, v, frac);
+        }
         result.feasible = false;
         result.solve_time_s = chr::duration<double>(
             chr::steady_clock::now() - t_start).count();
@@ -1017,8 +1154,10 @@ TopoReconfResult run_topology_reconfiguration(
     for (int i = 0; i < idx.n_vars; ++i) {
       if (i >= static_cast<int>(x_sol.size())) continue;
       if (x_sol[i] < lb[i] - 1e-6 || x_sol[i] > ub[i] + 1e-6) {
-        spdlog::warn("[拓扑重构] 后验变量界违约: var[{}]={:.4f} bounds=[{:.4f},{:.4f}]",
-                     i, x_sol[i], lb[i], ub[i]);
+        if (opt.verbose) {
+          spdlog::warn("[拓扑重构] 后验变量界违约: var[{}]={:.4f} bounds=[{:.4f},{:.4f}]",
+                       i, x_sol[i], lb[i], ub[i]);
+        }
         result.feasible = false;
         result.solve_time_s = chr::duration<double>(
             chr::steady_clock::now() - t_start).count();
@@ -1030,7 +1169,7 @@ TopoReconfResult run_topology_reconfiguration(
   // optimal is only asserted when the B&C solver ran and proved the gap is
   // within tolerance.  A heuristic incumbent satisfies feasibility but carries
   // no optimality certificate, so optimal stays false in that case.
-  result.optimal = !heuristic_solved && (result.bc_stats.gap <= opt.mip_gap + 1e-9);
+  result.optimal = result.proven_optimal;
 
   for (int i = 0; i < nl + nl_vsc; ++i) {
     bool was_on = edge_status[i];
@@ -1080,9 +1219,11 @@ TopoReconfResult run_topology_reconfiguration(
   result.solve_time_s = chr::duration<double>(
       chr::steady_clock::now() - t_start).count();
 
-  spdlog::info("[拓扑重构] 完成: 合闸={} 分闸={} obj={:.4f} time={:.2f}s",
-               result.n_switch_on, result.n_switch_off,
-               result.milp_objective, result.solve_time_s);
+  if (opt.verbose) {
+    spdlog::info("[拓扑重构] 完成: 合闸={} 分闸={} obj={:.4f} time={:.2f}s",
+                 result.n_switch_on, result.n_switch_off,
+                 result.milp_objective, result.solve_time_s);
+  }
 
   return result;
 }

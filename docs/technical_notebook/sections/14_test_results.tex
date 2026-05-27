@@ -4,8 +4,8 @@
 % ============================================================
 
 This chapter documents the current CTest suite in the \texttt{build\_rel}
-configuration.  The current registration contains \textbf{422 CTest entries}:
-420 active tests pass and 2 MATPOWER parser cases are intentionally skipped.
+configuration.  The current registration contains \textbf{428 CTest entries}:
+426 active tests pass and 2 MATPOWER parser cases are intentionally skipped.
 The skipped tests (\texttt{case533mt\_hi} and \texttt{case533mt\_lo}) contain
 arithmetic expressions (\texttt{135/sqrt(3)}) that the current MATPOWER parser
 does not evaluate; they are identified and skipped at runtime rather than
@@ -31,30 +31,30 @@ for every test executable in the current build tree.
 \texttt{test\_hacdcpf}             & Core public API and baseline PF/OPF checks & 1--22 & 22 \\
 \texttt{test\_all\_components\_pf} & all-component PF smoke coverage & 23--26 & 4 \\
 \texttt{test\_unified\_pf\_upgrade} & unified PF option and compatibility checks & 27--36 & 10 \\
-\texttt{test\_acopf\_dcopf\_crossval} & ACOPF/DCOPF/PF cross-validation and DCOPF regressions & 37--45 & 9 \\
-\texttt{test\_enhanced\_solver}    & robust PF/island solver checks & 46--47 & 2 \\
-\texttt{test\_scaling\_regression} & scaling and conditioning guardrails & 48--54 & 7 \\
-\texttt{test\_hacdcdss}            & Model, power models, power flow, DC OPF smoke tests & 55--71 & 17 \\
-\texttt{test\_io\_json}            & JSON I/O, MATPOWER parsing, result round-trips & 72--107 & 36 \\
-\texttt{test\_rich\_components}    & rich component round-trips and builders & 108--132 & 25 \\
-\texttt{test\_matpower\_cases}     & Power-flow convergence on MATPOWER cases & 133--219 & 87 \\
-\texttt{test\_validation}          & Validation API, levels, regression guardrails & 220--249 & 30 \\
-\texttt{test\_solver\_capabilities} & Compile-time solver flags, OPF audit helper, hybrid fallback suppression & 250--266 & 17 \\
-\texttt{test\_advanced\_pf}        & Island detection, distributed slack, PV/PQ control & 267--292 & 26 \\
-\texttt{test\_three\_phase\_pf}   & Three-phase data model, projection, meshed, JSON & 293--316 & 24 \\
-\texttt{test\_multiport\_vpp\_er} & Multi-port Energy Router and VPP modes & 317--330 & 14 \\
-\texttt{test\_powerflow\_performance} & Large-system power-flow benchmark sweep & 331 & 1 \\
-\texttt{test\_topology\_crossval} & Connectivity, ONR B\&C, exhaustive enum., 33bw & 332--334 & 3 \\
-\texttt{test\_crossmodule\_integration} & Pipeline: OPF$\to$PF$\to$Carbon, ONR$\to$OPF$\to$PF$\to$Carbon & 335--336 & 2 \\
-\texttt{test\_short\_circuit\_crossval} & Short-circuit Z-bus cross-validation & 337--343 & 7 \\
-\texttt{test\_three\_phase\_nr} & Three-phase Newton--Raphson power flow & 344--359 & 16 \\
-\texttt{test\_resilience\_assessment} & Resilience heuristic, strict MIP, and hybrid FMEA regressions & 360--381 & 22 \\
-\texttt{test\_graph} & Graph topology, contraction, series/pendant, recovery & 382--406 & 25 \\
-\texttt{test\_graph\_kron} & Kron Y-bus reduction and voltage recovery & 407--413 & 7 \\
-\texttt{test\_distribution\_pipeline} & Distribution CB/switch/VSC pipeline & 414 & 1 \\
-\texttt{test\_three\_stage\_reliability} & Three-stage native MILP fault-recovery reliability & 415--422 & 8 \\
+\texttt{test\_acopf\_dcopf\_crossval} & ACOPF/DCOPF/PF cross-validation and DCOPF regressions & 37--46 & 10 \\
+\texttt{test\_enhanced\_solver}    & robust PF/island solver checks & 47--48 & 2 \\
+\texttt{test\_scaling\_regression} & scaling and conditioning guardrails & 49--55 & 7 \\
+\texttt{test\_hacdcdss}            & Model, power models, power flow, DC OPF smoke tests & 56--72 & 17 \\
+\texttt{test\_io\_json}            & JSON I/O, MATPOWER parsing, result round-trips & 73--108 & 36 \\
+\texttt{test\_rich\_components}    & rich component round-trips and builders & 109--133 & 25 \\
+\texttt{test\_matpower\_cases}     & Power-flow convergence on MATPOWER cases & 134--220 & 87 \\
+\texttt{test\_validation}          & Validation API, levels, regression guardrails & 221--250 & 30 \\
+\texttt{test\_solver\_capabilities} & Compile-time solver flags, OPF audit helper, hybrid fallback suppression & 251--267 & 17 \\
+\texttt{test\_advanced\_pf}        & Island detection, distributed slack, PV/PQ control & 268--293 & 26 \\
+\texttt{test\_three\_phase\_pf}   & Three-phase data model, projection, meshed, JSON & 294--317 & 24 \\
+\texttt{test\_multiport\_vpp\_er} & Multi-port Energy Router and VPP modes & 318--331 & 14 \\
+\texttt{test\_powerflow\_performance} & Large-system power-flow benchmark sweep & 332 & 1 \\
+\texttt{test\_topology\_crossval} & Connectivity, ONR B\&C, exhaustive enum., 33bw & 333--337 & 5 \\
+\texttt{test\_crossmodule\_integration} & Pipeline: OPF$\to$PF$\to$Carbon, ONR$\to$OPF$\to$PF$\to$Carbon & 338--339 & 2 \\
+\texttt{test\_short\_circuit\_crossval} & Short-circuit Z-bus cross-validation & 340--346 & 7 \\
+\texttt{test\_three\_phase\_nr} & Three-phase Newton--Raphson power flow & 347--362 & 16 \\
+\texttt{test\_resilience\_assessment} & Resilience heuristic, strict MIP, and hybrid FMEA regressions & 363--385 & 23 \\
+\texttt{test\_graph} & Graph topology, contraction, series/pendant, recovery & 386--410 & 25 \\
+\texttt{test\_graph\_kron} & Kron Y-bus reduction and voltage recovery & 411--417 & 7 \\
+\texttt{test\_distribution\_pipeline} & Distribution CB/switch/VSC pipeline & 418 & 1 \\
+\texttt{test\_three\_stage\_reliability} & Three-stage native MILP fault-recovery reliability & 419--428 & 10 \\
 \hline
-\textbf{Grand total}                & & 1--422 & \textbf{422} \\
+\textbf{Grand total}                & & 1--428 & \textbf{428} \\
 \hline
 \end{tabular}
 \end{table}
@@ -64,12 +64,15 @@ for every test executable in the current build tree.
 \label{sec:test_acopf_dcopf_crossval}
 % ------------------------------------------------------------
 
-\texttt{tests/test\_acopf\_dcopf\_crossval.cpp} contributes nine CTest entries
-(\#37--\#45).  In addition to the existing ACOPF/DCOPF/PF consistency and
+\texttt{tests/test\_acopf\_dcopf\_crossval.cpp} contributes ten CTest entries
+(\#37--\#46).  In addition to the existing ACOPF/DCOPF/PF consistency and
 dispatch-quality checks, the current suite includes DCOPF regressions for:
 \begin{itemize}
   \item per-bus reporting of direct isolated-island shedding through
         \texttt{DCOPFResult::load\_shedding\_mw};
+  \item pruning dead-island generators, fixed injections, and branches before
+        LP construction, so isolated generator lower bounds cannot make the
+        surviving slack-connected island infeasible;
   \item slack-bus balance in the independent DCOPF feasibility audit;
       \item LMP sign, scale, uncongested uniformity, and congestion redispatch.
 \end{itemize}
@@ -588,7 +591,7 @@ machine (all backends active).
 \end{tabular}
 \end{table}
 
-\subsubsection{verify\_opf\_result Audit (tests \#263--\#265)}
+\subsubsection{verify\_opf\_result Audit (tests \#264--\#266)}
 
 \begin{itemize}
   \item \textbf{Converged result passes audit}: a clean \texttt{OPFResult}
@@ -599,14 +602,14 @@ machine (all backends active).
         \texttt{true} for a clean result with no hints.
 \end{itemize}
 
-All 16 solver-capability tests pass.
+All 17 solver-capability tests pass.
 
 % ------------------------------------------------------------
 \subsection{\texttt{test\_advanced\_pf}: Island Detection, Distributed Slack, PV/PQ Control}
 \label{sec:test_advanced_pf}
 % ------------------------------------------------------------
 
-\texttt{tests/test\_advanced\_pf.cpp} (CTest \#266--\#291) adds 26 tests and
+\texttt{tests/test\_advanced\_pf.cpp} (CTest \#268--\#293) adds 26 tests and
 119 assertions covering three power-flow control features that were not
 exercised by any existing suite.
 
@@ -800,19 +803,25 @@ All 14 tests pass in $\approx$0.01\,s.
 \label{sec:test_topology_crossval}
 % ------------------------------------------------------------
 
-\texttt{tests/test\_topology\_crossval.cpp} (CTest \#331--\#333) validates the
-\texttt{hacdcpf::network\_reconfiguration} module through three Catch2 tests,
+\texttt{tests/test\_topology\_crossval.cpp} (CTest \#333--\#337) validates the
+\texttt{hacdcpf::network\_reconfiguration} module through five Catch2 tests,
 including topology primitives, ONR cross-validation, and fault-reconfiguration
 regressions.
 
 \subsubsection{Fault-Reconfiguration Regressions}
 
-Two regression tests exercise \texttt{run\_topology\_reconfiguration()} rather
+Four regression tests exercise \texttt{run\_topology\_reconfiguration()} rather
 than the steady ONR path.  The first verifies that an AC system with only an
 \texttt{ExternalGrid} source is treated as sourced and can return a feasible
 restoration plan.  The second verifies additive load accounting: explicit
 \texttt{Load} records and direct \texttt{ACBus::pd\_mw} demand both contribute to
-the restoration objective instead of one source overwriting the other.
+the restoration objective instead of one source overwriting the other.  The
+third verifies that \texttt{switchable\_branch\_ids} is enforced: non-listed
+normally-open ties remain open, only the listed tie may close, and the unified
+solver certificate fields are coherent.  The fourth verifies hybrid ID
+disambiguation: structured \texttt{switchable\_branches} can switch a DC branch
+whose numeric index collides with AC and VSC indices, while the legacy
+\texttt{switchable\_branch\_ids} field remains AC-only.
 
 \subsubsection{Connectivity Primitives}
 Three graph-theoretic helpers are verified on hand-constructed graphs:
@@ -891,7 +900,7 @@ pass/skip status.
 \texttt{test\_hacdcpf}             & 22 & Core API \\
 \texttt{test\_all\_components\_pf} &  4 & all-component PF smoke \\
 \texttt{test\_unified\_pf\_upgrade} & 10 & PF options refactor \\
-\texttt{test\_acopf\_dcopf\_crossval} & 9 & ACOPF/DCOPF cross-validation and DCOPF regressions \\
+\texttt{test\_acopf\_dcopf\_crossval} & 10 & ACOPF/DCOPF cross-validation and DCOPF regressions \\
 \texttt{test\_enhanced\_solver}    &  2 & robust PF/island solver \\
 \texttt{test\_scaling\_regression} &  7 & Scaling + conditioning \\
 \hline
@@ -905,17 +914,17 @@ pass/skip status.
 \texttt{test\_three\_phase\_pf}    & 24 & Three-phase projection \& JSON \\
 \texttt{test\_multiport\_vpp\_er}  & 14 & Multi-port ER \& VPP modes \\
 \texttt{test\_powerflow\_performance} & 1 & large-system PF benchmark \\
-\texttt{test\_topology\_crossval}  &  3 & ONR and fault reconfiguration \\
+\texttt{test\_topology\_crossval}  &  5 & ONR and fault reconfiguration \\
 \texttt{test\_crossmodule\_integration} &  2 & Pipeline OPF/PF/Carbon and ONR/DCOPF/PF/Carbon \\
 \texttt{test\_short\_circuit\_crossval} &  7 & SC Z-bus cross-validation \\
 \texttt{test\_three\_phase\_nr}         & 16 & Three-phase Newton--Raphson PF \\
-\texttt{test\_resilience\_assessment}   & 22 & Heuristic, strict MIP, and hybrid FMEA resilience \\
+\texttt{test\_resilience\_assessment}   & 23 & Heuristic, strict MIP, and hybrid FMEA resilience \\
 \texttt{test\_graph}                    & 25 & Graph topology, contraction, reduction \\
 \texttt{test\_graph\_kron}              &  7 & Kron Y-bus reduction \\
 \texttt{test\_distribution\_pipeline}   &  1 & Distribution CB/switch/VSC pipeline \\
-\texttt{test\_three\_stage\_reliability}&  8 & Three-stage native MILP reliability \\
+\texttt{test\_three\_stage\_reliability}& 10 & Three-stage native MILP reliability \\
 \hline
-\textbf{Grand total}               & \textbf{422} & 420 active pass; 2 parser skips \\
+\textbf{Grand total}               & \textbf{428} & 426 active pass; 2 parser skips \\
 \hline
 \end{tabular}
 \end{table}
@@ -1505,7 +1514,7 @@ All 16 tests pass in $\approx$0.02\,s.
 \label{sec:test_resilience_assessment}
 % ------------------------------------------------------------
 
-\texttt{tests/test\_resilience\_assessment.cpp} (CTest \#359--\#380) adds 22 tests
+\texttt{tests/test\_resilience\_assessment.cpp} (CTest \#362--\#384) adds 23 tests
 for \texttt{hacdcpf::analysis::run\_resilience\_assessment()}.  The module
 simulates time-stepped post-fault behaviour including feeder protection,
 network reconfiguration via tie-switch closing, and mobile energy storage
@@ -1569,17 +1578,19 @@ An empty \texttt{HybridPowerSystem} and an options struct with
         satisfies all feasibility checks including constraint residuals.
   \item \textbf{Peak shed non-negative} --- \texttt{peak\_shed\_mw} $\geq 0$
         for all runs.
+  \item \textbf{Hybrid FMEA DC load scaling} --- \texttt{load\_scale\_factor}
+        scales DC bus-level demand as well as explicit DC load records.
 \end{itemize}
 
-All 22 resilience tests pass.
+All 23 resilience and FMEA tests pass.
 
 % ------------------------------------------------------------
 \subsection{\texttt{test\_graph} and \texttt{test\_graph\_kron}: Graph Module}
 \label{sec:test_graph}
 % ------------------------------------------------------------
 
-\texttt{tests/test\_graph.cpp} (CTest \#381--\#405, 25~tests) and
-\texttt{tests/test\_graph\_kron.cpp} (CTest \#406--\#412, 7~tests) validate the
+\texttt{tests/test\_graph.cpp} (CTest \#385--\#409, 25~tests) and
+\texttt{tests/test\_graph\_kron.cpp} (CTest \#410--\#416, 7~tests) validate the
 \texttt{hacdcpf::graph} module.  Section~\ref{sec:graph} (Graph Analysis and
 Reduction Module) contains the full mathematical derivation and detailed test
 scenarios; Table~\ref{tab:graph_test_xref} provides the cross-reference.
@@ -1593,17 +1604,17 @@ scenarios; Table~\ref{tab:graph_test_xref} provides the cross-reference.
 \hline
 \textbf{IDs} & \textbf{File} & \textbf{Coverage area} \\
 \hline
-368--373 & \texttt{test\_graph.cpp}      & Topology: islands, bridge/cut-vertex, cycles \\
-374--377 & \texttt{test\_graph.cpp}      & Switch contraction \\
-378--380 & \texttt{test\_graph.cpp}      & Series reduction and pendant folding \\
-381--382 & \texttt{test\_graph.cpp}      & Result recovery (switch, series) \\
-383--386 & \texttt{test\_graph.cpp}      & Construction (empty, single-bus, AC+DC, flags) \\
-387--393 & \texttt{test\_graph\_kron.cpp}& Kron Y-bus reduction and voltage recovery \\
+385--390 & \texttt{test\_graph.cpp}      & Topology: islands, radiality, bridge/cut-vertex, cycles \\
+391--394 & \texttt{test\_graph.cpp}      & Switch contraction \\
+395--397 & \texttt{test\_graph.cpp}      & Series reduction and pendant folding \\
+398--399 & \texttt{test\_graph.cpp}      & Result recovery (switch, series) \\
+400--409 & \texttt{test\_graph.cpp}      & Construction, AC/DC same-ID isolation, DC recovery fallbacks \\
+410--416 & \texttt{test\_graph\_kron.cpp}& Kron Y-bus reduction and voltage recovery \\
 \hline
 \end{tabular}
 \end{table}
 
-All 26 graph tests pass in $< 0.01$\,s.
+All 32 graph and Kron tests pass in $< 0.01$\,s.
 
 % ------------------------------------------------------------
 \subsection{Summary and Pass Rates}
@@ -1621,30 +1632,30 @@ All 26 graph tests pass in $< 0.01$\,s.
 \texttt{test\_hacdcpf}             & 1--22    & 22  & 22  & 100\,\% \\
 \texttt{test\_all\_components\_pf} & 23--26   &  4  &  4  & 100\,\% \\
 \texttt{test\_unified\_pf\_upgrade} & 27--36  & 10  & 10  & 100\,\% \\
-\texttt{test\_acopf\_dcopf\_crossval} & 37--45 &  9  &  9  & 100\,\% \\
-\texttt{test\_enhanced\_solver}    & 46--47   &  2  &  2  & 100\,\% \\
-\texttt{test\_scaling\_regression} & 48--54   &  7  &  7  & 100\,\% \\
-\texttt{test\_hacdcdss}            & 55--71   & 17  & 17  & 100\,\% \\
-\texttt{test\_io\_json}            & 72--107  & 36  & 36  & 100\,\% \\
-\texttt{test\_rich\_components}    & 108--132 & 25  & 25  & 100\,\% \\
-\texttt{test\_matpower\_cases}     & 133--219 & 87  & 85\,($^*$)  & 100\,\% (active) \\
-\texttt{test\_validation}          & 220--249 & 30  & 30  & 100\,\% \\
-\texttt{test\_solver\_capabilities} & 250--266 & 17 & 17  & 100\,\% \\
-\texttt{test\_advanced\_pf}        & 267--292 & 26  & 26  & 100\,\% \\
-\texttt{test\_three\_phase\_pf}    & 293--316 & 24  & 24  & 100\,\% \\
-\texttt{test\_multiport\_vpp\_er}  & 317--330 & 14  & 14  & 100\,\% \\
-\texttt{test\_powerflow\_performance} & 331    &  1  &  1  & 100\,\% \\
-\texttt{test\_topology\_crossval}  & 332--334 &  3  &  3  & 100\,\% \\
-\texttt{test\_crossmodule\_integration} & 335--336 & 2 & 2 & 100\,\% \\
-\texttt{test\_short\_circuit\_crossval} & 337--343 & 7 & 7 & 100\,\% \\
-\texttt{test\_three\_phase\_nr}    & 344--359 & 16  & 16  & 100\,\% \\
-\texttt{test\_resilience\_assessment} & 360--381 & 22 & 22 & 100\,\% \\
-\texttt{test\_graph}               & 382--406 & 25  & 25  & 100\,\% \\
-\texttt{test\_graph\_kron}         & 407--413 &  7  &  7  & 100\,\% \\
-\texttt{test\_distribution\_pipeline} & 414    &  1  &  1  & 100\,\% \\
-\texttt{test\_three\_stage\_reliability} & 415--422 & 8 & 8 & 100\,\% \\
+\texttt{test\_acopf\_dcopf\_crossval} & 37--46 & 10  & 10  & 100\,\% \\
+\texttt{test\_enhanced\_solver}    & 47--48   &  2  &  2  & 100\,\% \\
+\texttt{test\_scaling\_regression} & 49--55   &  7  &  7  & 100\,\% \\
+\texttt{test\_hacdcdss}            & 56--72   & 17  & 17  & 100\,\% \\
+\texttt{test\_io\_json}            & 73--108  & 36  & 36  & 100\,\% \\
+\texttt{test\_rich\_components}    & 109--133 & 25  & 25  & 100\,\% \\
+\texttt{test\_matpower\_cases}     & 134--220 & 87  & 85\,($^*$)  & 100\,\% (active) \\
+\texttt{test\_validation}          & 221--250 & 30  & 30  & 100\,\% \\
+\texttt{test\_solver\_capabilities} & 251--267 & 17 & 17  & 100\,\% \\
+\texttt{test\_advanced\_pf}        & 268--293 & 26  & 26  & 100\,\% \\
+\texttt{test\_three\_phase\_pf}    & 294--317 & 24  & 24  & 100\,\% \\
+\texttt{test\_multiport\_vpp\_er}  & 318--331 & 14  & 14  & 100\,\% \\
+\texttt{test\_powerflow\_performance} & 332    &  1  &  1  & 100\,\% \\
+\texttt{test\_topology\_crossval}  & 333--337 &  5  &  5  & 100\,\% \\
+\texttt{test\_crossmodule\_integration} & 338--339 & 2 & 2 & 100\,\% \\
+\texttt{test\_short\_circuit\_crossval} & 340--346 & 7 & 7 & 100\,\% \\
+\texttt{test\_three\_phase\_nr}    & 347--362 & 16  & 16  & 100\,\% \\
+\texttt{test\_resilience\_assessment} & 363--385 & 23 & 23 & 100\,\% \\
+\texttt{test\_graph}               & 386--410 & 25  & 25  & 100\,\% \\
+\texttt{test\_graph\_kron}         & 411--417 &  7  &  7  & 100\,\% \\
+\texttt{test\_distribution\_pipeline} & 418    &  1  &  1  & 100\,\% \\
+\texttt{test\_three\_stage\_reliability} & 419--428 & 10 & 10 & 100\,\% \\
 \hline
-\textbf{Grand total}                & 1--422   & \textbf{422} & \textbf{420}\,($^*$) & \textbf{100\,\% (active)} \\
+\textbf{Grand total}                & 1--428   & \textbf{428} & \textbf{426}\,($^*$) & \textbf{100\,\% (active)} \\
 \hline
 \multicolumn{5}{l}{$^*$ 2 tests skipped: parser does not evaluate \texttt{135/sqrt(3)} arithmetic.} \\
 \hline

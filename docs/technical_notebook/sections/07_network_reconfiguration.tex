@@ -159,12 +159,25 @@ DC load rows are also mapped onto the hybrid restoration graph when the DC bus
 is present.  The implementation does not treat bus demand and load records as
 mutually exclusive encodings.
 
+Switchable restoration edges are category-aware in hybrid systems.  New code
+should populate \texttt{TopoReconfOptions::switchable\_branches} with
+\texttt{BranchRef\{category,index\}} values so AC branches, DC branches, and
+VSC couplings that share the same numeric \texttt{index} remain distinct.  The
+legacy \texttt{switchable\_branch\_ids} vector is retained for compatibility but
+is interpreted only as AC \texttt{ACBranch::index} values.  With no explicit
+switchable list, the implementation keeps the historical automatic detection of
+normally-open AC/DC tie branches.
+
 If the heuristic warm start fails to produce a feasible restoration plan, the
 code builds the full MILP fallback.  It uses HiGHS when the adapter is
 available; otherwise it calls the native branch-and-cut fallback with the same
 model and optional heuristic initial solution.  The stale behavior where a
 missing heuristic plan directly implied infeasibility is no longer the current
-runtime path.
+runtime path.  Solver certificates use exact normalized optimality statuses plus
+the MIP gap, avoiding substring matches such as ``not optimal''.  Runtime trace
+output in this path and the native branch-and-cut fallback honors
+\texttt{verbose=false}, keeping batch and CI runs quiet unless verbose logging is
+requested.
 
 \subsection{Postprocessing and Verification}
 

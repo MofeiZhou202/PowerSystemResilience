@@ -97,6 +97,12 @@ void check_result_shape(const ThreeStageReliabilityResult& r) {
   // Per-fault details have been parsed.
   CHECK(!r.faults.empty());
   for (const auto& f : r.faults) {
+    CHECK(!f.stage1_status.empty());
+    CHECK(!f.stage2_status.empty());
+    CHECK(!f.stage3_status.empty());
+    CHECK(f.stage1_mip_gap >= 0.0);
+    CHECK(f.stage2_mip_gap >= 0.0);
+    CHECK(f.stage3_mip_gap >= 0.0);
     CHECK(f.pls_stage1 >= 0.0);
     CHECK(f.pls_stage2 >= 0.0);
     CHECK(f.pls_stage3 >= 0.0);
@@ -324,4 +330,74 @@ TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candida
   const auto& faulted_source_edge = r.faults.front();
   CHECK(faulted_source_edge.pls_stage1 > 900.0);
   CHECK(faulted_source_edge.pls_stage2 == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Three-stage reliability — Stage 1/3 cannot open healthy closed lines for free",
+          "[reliability][three_stage][regression]") {
+  const char* json = R"json({
+    "name":"closed_loop_no_free_open", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"from_bus":2,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":3,"from_bus":1,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  auto r = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(r.ok);
+  REQUIRE(!r.faults.empty());
+
+  for (const auto& fault : r.faults) {
+    CHECK(fault.stage3_status == "success");
+    CHECK(fault.pls_stage3 >= 999.0);
+  }
+}
+
+TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for DC load",
+          "[reliability][three_stage][regression]") {
+  const char* json = R"json({
+    "name":"vsc_capacity_limited_dc_load", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{
+      "buses":[{"index":101,"bus_type":1,"vm_pu":1.0,"in_service":true,"pd_mw":1.0,"is_load":true,"n_customers":1}],
+      "branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]
+    },
+    "vsc_converters":[{"index":1,"bus_ac":1,"bus_dc":101,"in_service":true,"eta":1.0,"p_rated_mw":0.6,"pmin_mw":-0.6,"pmax_mw":0.6}],
+    "dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  auto r = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(r.ok);
+  REQUIRE(r.faults.size() == 1);
+
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(400.0).margin(1e-3));
 }

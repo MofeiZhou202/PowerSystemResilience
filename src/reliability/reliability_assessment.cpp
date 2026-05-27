@@ -2244,6 +2244,9 @@ void scale_fmea_loads(HybridPowerSystem& sys, double load_scale) {
   for (auto& ld : sys.dc.loads) {
     ld.p_mw *= load_scale;
   }
+  for (auto& bus : sys.dc.buses) {
+    bus.pd_mw *= load_scale;
+  }
 }
 
 double storage_available_mw(const Storage& st, double stage_duration_hr) {

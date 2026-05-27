@@ -393,6 +393,58 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
     CHECK(result.total_load_shedding_mw == Catch::Approx(5.0).margin(1e-8));
   }
 
+  TEST_CASE("DC OPF prunes dead-island generators and branches before LP solve",
+        "[opf][dcopf][regression]") {
+    using namespace hacdcpf;
+
+    HybridPowerSystem sys;
+    sys.ac.base_mva = 10.0;
+    auto make_test_bus = [](int index, BusType type, double pd_mw) {
+      ACBus b;
+      b.index = index;
+      b.bus_type = type;
+      b.pd_mw = pd_mw;
+      b.base_kv = 10.0;
+      b.vm_pu = 1.0;
+      b.vmin_pu = 0.95;
+      b.vmax_pu = 1.05;
+      b.in_service = true;
+      return b;
+    };
+    sys.ac.buses = {
+      make_test_bus(1, BusType::SLACK, 0.0),
+      make_test_bus(2, BusType::PQ, 1.0),
+      make_test_bus(3, BusType::PQ, 5.0),
+      make_test_bus(4, BusType::PQ, 0.0),
+    };
+    ACBranch main;
+    main.index = 1; main.from_bus = 1; main.to_bus = 2;
+    main.r_pu = 0.001; main.x_pu = 0.01; main.rate_a_mva = 10.0; main.in_service = true;
+    ACBranch dead_branch;
+    dead_branch.index = 2; dead_branch.from_bus = 3; dead_branch.to_bus = 4;
+    dead_branch.r_pu = 0.001; dead_branch.x_pu = 0.01; dead_branch.rate_a_mva = 10.0; dead_branch.in_service = true;
+    sys.ac.branches = {main, dead_branch};
+
+    Generator slack;
+    slack.index = 1; slack.bus = 1; slack.in_service = true;
+    slack.pg_mw = 1.0; slack.pmax_mw = 10.0; slack.pmin_mw = 0.0; slack.cost_c1 = 1.0;
+    Generator dead_gen;
+    dead_gen.index = 2; dead_gen.bus = 3; dead_gen.in_service = true;
+    dead_gen.pg_mw = 3.0; dead_gen.pmax_mw = 10.0; dead_gen.pmin_mw = 3.0; dead_gen.cost_c1 = 1.0;
+    sys.ac.generators = {slack, dead_gen};
+
+    opf::DCOPFOptions opt;
+    opt.solver = opf::DCOPFSolverBackend::Native;
+    opt.load_shedding = true;
+    opt.voll = 10000.0;
+
+    const opf::DCOPFResult result = opf::solve_dc_opf(sys, opt);
+    REQUIRE(result.converged);
+    REQUIRE(result.load_shedding_mw.size() == sys.ac.buses.size());
+    CHECK(result.load_shedding_mw[2] == Catch::Approx(5.0).margin(1e-8));
+    CHECK(result.total_load_shedding_mw == Catch::Approx(5.0).margin(1e-8));
+  }
+
   TEST_CASE("DC OPF feasibility check includes slack-bus balance",
         "[opf][dcopf][regression]") {
     using namespace hacdcpf;
