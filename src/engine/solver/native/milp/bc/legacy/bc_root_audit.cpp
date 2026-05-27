@@ -295,6 +295,7 @@ void print_root_phase_timing(std::chrono::steady_clock::time_point t0,
                              const std::vector<RootSubsolveTrace>& traces,
                              int root_frac_bin_count,
                              const std::string& root_incumbent_source) {
+  if (!trace_root_subsolves) return;
   const auto t_now = std::chrono::steady_clock::now();
   const double t_root_lp =
       std::chrono::duration<double, std::milli>(t_root1 - t_root0).count();
@@ -321,10 +322,8 @@ void print_root_phase_timing(std::chrono::steady_clock::time_point t0,
                "dive=%.0f lns=%.0f rest=%.0f total=%.0fms inc=%d\n",
                t_root_lp, t_cuts, t_pump, t_prog, t_dive, t_lns, t_rest,
                t_total, has_incumbent ? 1 : 0);
-  if (trace_root_subsolves) {
-    print_root_subsolve_traces(traces, root_frac_bin_count,
-                               root_incumbent_source);
-  }
+  print_root_subsolve_traces(traces, root_frac_bin_count,
+                             root_incumbent_source);
 }
 
 }  // namespace mipsolvers::engine::detail

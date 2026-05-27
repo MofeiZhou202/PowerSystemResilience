@@ -4806,10 +4806,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   const Eigen::VectorXd* root_lp_seed = reduced_warmstart_available ? &root.x_seed : nullptr;
   LPRelaxationResult root_relax = solve_lp_relaxation(root_lp, root_lp_seed, nullptr, root_solve_opt);
   [[maybe_unused]] auto t_root1 = std::chrono::steady_clock::now();
-  MIPSOLVERS_LOG_DEBUG("[B&C] Root LP: {:.1f}ms (m={}, n={})",
-                    std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
-                    static_cast<int>(root_lp.A.rows()) + static_cast<int>(root_lp.Aeq.rows()),
-                    static_cast<int>(root_lp.vars.size()));
+  if (opt.verbose) {
+    MIPSOLVERS_LOG_DEBUG("[B&C] Root LP: {:.1f}ms (m={}, n={})",
+                      std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
+                      static_cast<int>(root_lp.A.rows()) + static_cast<int>(root_lp.Aeq.rows()),
+                      static_cast<int>(root_lp.vars.size()));
+  }
   out.bc_stats.lp_solves += 1;
   if (!root_relax.primal.stats.success || root_relax.primal.x.size() != n) {
     out.stats.status = root_relax.primal.stats.status == "Time limit"
@@ -5055,7 +5057,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                         opt.int_tol, root.bound);
 
   // Count fractional binaries at root
-  {
+  if (opt.verbose) {
     int n_frac = 0, n_bin = 0;
     for (int i = 0; i < n; ++i) {
       if (base_lp.vars[i].type == VarType::Binary) {
@@ -6481,44 +6483,46 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                                     objective_propagation_build_policy());
       }
     }
-    auto t_cq1 = std::chrono::steady_clock::now();
-    fmt::print(stderr,
-               "[B&C CLIQUE] n_cols={} n_edges={} lit_edges={} base_edges={} "
-	               "impl_rows={} impl_lit_rows={} impl_bound_cand={} "
-	               "impl_bound_imp={} impl_conflicts={} impl_arcs={} "
-	               "impl_clique_edges={} lit_pair={}/{} obj_lit_pair={}/{} "
-	               "varbounds={} vb_src={} vb_single={} vb_cand={} "
-               "cutRows={} cutMixed={} cutVUB={} cutVLB={} "
-	               "vub={}/{} vlb={}/{} vb_exp={} cutExp={} "
-               "build={:.1f}ms\n",
-               clique_table.n_cols(), clique_table.n_edges(),
-               clique_table.n_literal_edges(), edges,
-               artifact_stats.row_sides_scanned,
-               artifact_stats.row_sides_with_binary_literals,
-               artifact_stats.bound_candidates,
-               artifact_stats.bound_improvements,
-               artifact_stats.conflicts_added,
-               artifact_stats.implications_added,
-               artifact_stats.clique_edges_added,
-               artifact_stats.literal_pair_conflicts,
-               artifact_stats.literal_pair_tests,
-               artifact_stats.objective_literal_pair_conflicts,
-               artifact_stats.objective_literal_pair_tests,
-               variable_bound_table.size(),
-	               variable_bound_source_stats.row_sides_scanned,
-	               variable_bound_source_stats.single_binary_row_sides,
-	               variable_bound_source_stats.candidates,
-	               variable_bound_source_stats.cut_rows_scanned,
-	               variable_bound_source_stats.cut_mixed_rows,
-	               variable_bound_source_stats.cut_vub_candidates,
-	               variable_bound_source_stats.cut_vlb_candidates,
-	               variable_bound_table.stats().vub_accepted,
-	               variable_bound_table.stats().vub_attempts,
-	               variable_bound_table.stats().vlb_accepted,
-	               variable_bound_table.stats().vlb_attempts,
-	               variable_bound_source_stats.exported_implications,
-	               variable_bound_source_stats.cut_exported_implications,
-               std::chrono::duration<double, std::milli>(t_cq1 - t_cq0).count());
+    if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+      auto t_cq1 = std::chrono::steady_clock::now();
+      fmt::print(stderr,
+                 "[B&C CLIQUE] n_cols={} n_edges={} lit_edges={} base_edges={} "
+	                 "impl_rows={} impl_lit_rows={} impl_bound_cand={} "
+	                 "impl_bound_imp={} impl_conflicts={} impl_arcs={} "
+	                 "impl_clique_edges={} lit_pair={}/{} obj_lit_pair={}/{} "
+	                 "varbounds={} vb_src={} vb_single={} vb_cand={} "
+                 "cutRows={} cutMixed={} cutVUB={} cutVLB={} "
+	                 "vub={}/{} vlb={}/{} vb_exp={} cutExp={} "
+                 "build={:.1f}ms\n",
+                 clique_table.n_cols(), clique_table.n_edges(),
+                 clique_table.n_literal_edges(), edges,
+                 artifact_stats.row_sides_scanned,
+                 artifact_stats.row_sides_with_binary_literals,
+                 artifact_stats.bound_candidates,
+                 artifact_stats.bound_improvements,
+                 artifact_stats.conflicts_added,
+                 artifact_stats.implications_added,
+                 artifact_stats.clique_edges_added,
+                 artifact_stats.literal_pair_conflicts,
+                 artifact_stats.literal_pair_tests,
+                 artifact_stats.objective_literal_pair_conflicts,
+                 artifact_stats.objective_literal_pair_tests,
+                 variable_bound_table.size(),
+	                 variable_bound_source_stats.row_sides_scanned,
+	                 variable_bound_source_stats.single_binary_row_sides,
+	                 variable_bound_source_stats.candidates,
+	                 variable_bound_source_stats.cut_rows_scanned,
+	                 variable_bound_source_stats.cut_mixed_rows,
+	                 variable_bound_source_stats.cut_vub_candidates,
+	                 variable_bound_source_stats.cut_vlb_candidates,
+	                 variable_bound_table.stats().vub_accepted,
+	                 variable_bound_table.stats().vub_attempts,
+	                 variable_bound_table.stats().vlb_accepted,
+	                 variable_bound_table.stats().vlb_attempts,
+	                 variable_bound_source_stats.exported_implications,
+	                 variable_bound_source_stats.cut_exported_implications,
+                 std::chrono::duration<double, std::milli>(t_cq1 - t_cq0).count());
+    }
   }
 
   Eigen::VectorXd verified_root_cutoff_x;
@@ -6739,81 +6743,85 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     out.bc_stats.root_reduced_cost_abs_max = root_rc_audit.rc_abs_max;
     out.bc_stats.root_reduced_cost_gap = root_rc_audit.gap;
   }
-	  fmt::print(stderr,
-	             "[ROOT-AUDIT] native presolved rows={} compact_rows={} "
-	             "two_sided_expanded={} finite_lhs={} cols={} bin={} int={} implied_int={} "
-	             "cont={} obj_clq_part={} obj_clq_terms={} clq_edges={} "
-	             "impl_arcs={} varbounds={} vub={}/{} vlb={}/{} "
-	             "cutRows={} cutMixed={} cutVUB={} cutVLB={} "
-	             "cutoff={} source={}\n",
-             out.bc_stats.root_presolved_rows,
-             out.bc_stats.root_presolved_compact_rows,
-             out.bc_stats.root_two_sided_rows_expanded,
+  if (opt.verbose) {
+    fmt::print(stderr,
+               "[ROOT-AUDIT] native presolved rows={} compact_rows={} "
+               "two_sided_expanded={} finite_lhs={} cols={} bin={} int={} implied_int={} "
+               "cont={} obj_clq_part={} obj_clq_terms={} clq_edges={} "
+               "impl_arcs={} varbounds={} vub={}/{} vlb={}/{} "
+               "cutRows={} cutMixed={} cutVUB={} cutVLB={} "
+               "cutoff={} source={}\n",
+               out.bc_stats.root_presolved_rows,
+               out.bc_stats.root_presolved_compact_rows,
+               out.bc_stats.root_two_sided_rows_expanded,
 #ifdef MIPSOLVERS_HAVE_PAPILO
-             papilo_ps.success ? papilo_ps.reduced_rows_with_finite_lhs : 0,
+               papilo_ps.success ? papilo_ps.reduced_rows_with_finite_lhs : 0,
 #else
-             0,
+               0,
 #endif
-             out.bc_stats.root_presolved_cols,
-             out.bc_stats.root_presolved_binary_cols,
-             out.bc_stats.root_presolved_integer_cols,
-             out.bc_stats.root_implied_integer_cols,
-             out.bc_stats.root_presolved_continuous_cols,
-             static_cast<std::uint64_t>(objective_propagation.partitions.size()),
-             std::accumulate(
-                 objective_propagation.partitions.begin(),
-                 objective_propagation.partitions.end(), std::uint64_t{0},
-                 [](std::uint64_t s,
-                    const ObjectivePropagationState::Partition& p) {
-                   return s + static_cast<std::uint64_t>(p.terms.size());
-             }),
-             out.bc_stats.root_clique_edges, out.bc_stats.root_implication_arcs,
-             out.bc_stats.variable_bound_table_size,
-	             out.bc_stats.variable_bound_vub_accepted,
-	             out.bc_stats.variable_bound_vub_attempts,
-	             out.bc_stats.variable_bound_vlb_accepted,
-	             out.bc_stats.variable_bound_vlb_attempts,
-	             out.bc_stats.variable_bound_cut_rows_scanned,
-	             out.bc_stats.variable_bound_cut_mixed_rows,
-	             out.bc_stats.variable_bound_cut_vub_candidates,
-	             out.bc_stats.variable_bound_cut_vlb_candidates,
-	             has_root_cutoff_for_propagation
-	                 ? fmt::format("{:.2f}", root_cutoff_for_propagation)
+               out.bc_stats.root_presolved_cols,
+               out.bc_stats.root_presolved_binary_cols,
+               out.bc_stats.root_presolved_integer_cols,
+               out.bc_stats.root_implied_integer_cols,
+               out.bc_stats.root_presolved_continuous_cols,
+               static_cast<std::uint64_t>(objective_propagation.partitions.size()),
+               std::accumulate(
+                   objective_propagation.partitions.begin(),
+                   objective_propagation.partitions.end(), std::uint64_t{0},
+                   [](std::uint64_t s,
+                      const ObjectivePropagationState::Partition& p) {
+                     return s + static_cast<std::uint64_t>(p.terms.size());
+                   }),
+               out.bc_stats.root_clique_edges, out.bc_stats.root_implication_arcs,
+               out.bc_stats.variable_bound_table_size,
+               out.bc_stats.variable_bound_vub_accepted,
+               out.bc_stats.variable_bound_vub_attempts,
+               out.bc_stats.variable_bound_vlb_accepted,
+               out.bc_stats.variable_bound_vlb_attempts,
+               out.bc_stats.variable_bound_cut_rows_scanned,
+               out.bc_stats.variable_bound_cut_mixed_rows,
+               out.bc_stats.variable_bound_cut_vub_candidates,
+               out.bc_stats.variable_bound_cut_vlb_candidates,
+               has_root_cutoff_for_propagation
+                 ? fmt::format("{:.2f}", root_cutoff_for_propagation)
                  : std::string("none"),
-             root_cutoff_source_for_propagation);
+               root_cutoff_source_for_propagation);
+  }
   trace_highs_native_varbound_diff("root_audit", highs_presolve_side_state,
                                    &root_lp,
                                    variable_bound_table,
                                    bc_conformance_trace_terms(
                                        "MIPSOLVERS_HIGHS_VB_DIFF_TERMS", 8));
-  fmt::print(stderr,
-             "[OBJ-CLQ-AUDIT] cand_lit={} pair_tests={} pair_conf={} "
-             "literal_conf={} implication_conf={} artifact_pair={}/{} "
-             "artifact_obj_pair={}/{}\n",
-             objective_propagation.objective_clique_candidate_literals,
-             objective_propagation.objective_clique_pair_tests,
-             objective_propagation.objective_clique_pair_conflicts,
-             objective_propagation.objective_clique_literal_conflicts,
-             objective_propagation.objective_clique_implication_conflicts,
-             artifact_stats.literal_pair_conflicts,
-             artifact_stats.literal_pair_tests,
-             artifact_stats.objective_literal_pair_conflicts,
-             artifact_stats.objective_literal_pair_tests);
-  fmt::print(stderr,
-             "[ROOT-RC-AUDIT] rc_nz={} rc_int_nz={} rc_implint_nz={} "
-             "at_lb={} at_ub={} "
-             "cutoff_fix_candidates={} rc_abs_sum={:.3e} rc_abs_max={:.3e} "
-             "gap={} rowdual_nz={} rowdual_abs_sum={:.3e} "
-             "rowdual_abs_max={:.3e}\n",
-             root_rc_audit.rc_nonzero, root_rc_audit.rc_integer_nonzero,
-             root_rc_audit.rc_implied_integer_nonzero,
-             root_rc_audit.rc_at_lower, root_rc_audit.rc_at_upper,
-             root_rc_audit.cutoff_fix_candidates, root_rc_audit.rc_abs_sum,
-             root_rc_audit.rc_abs_max,
-             std::isfinite(root_rc_audit.gap)
-                 ? fmt::format("{:.3e}", root_rc_audit.gap)
-                 : std::string("inf"),
-             root_row_dual_nnz, root_row_dual_abs_sum, root_row_dual_abs_max);
+  if (opt.verbose) {
+    fmt::print(stderr,
+               "[OBJ-CLQ-AUDIT] cand_lit={} pair_tests={} pair_conf={} "
+               "literal_conf={} implication_conf={} artifact_pair={}/{} "
+               "artifact_obj_pair={}/{}\n",
+               objective_propagation.objective_clique_candidate_literals,
+               objective_propagation.objective_clique_pair_tests,
+               objective_propagation.objective_clique_pair_conflicts,
+               objective_propagation.objective_clique_literal_conflicts,
+               objective_propagation.objective_clique_implication_conflicts,
+               artifact_stats.literal_pair_conflicts,
+               artifact_stats.literal_pair_tests,
+               artifact_stats.objective_literal_pair_conflicts,
+               artifact_stats.objective_literal_pair_tests);
+    fmt::print(stderr,
+               "[ROOT-RC-AUDIT] rc_nz={} rc_int_nz={} rc_implint_nz={} "
+               "at_lb={} at_ub={} "
+               "cutoff_fix_candidates={} rc_abs_sum={:.3e} rc_abs_max={:.3e} "
+               "gap={} rowdual_nz={} rowdual_abs_sum={:.3e} "
+               "rowdual_abs_max={:.3e}\n",
+               root_rc_audit.rc_nonzero, root_rc_audit.rc_integer_nonzero,
+               root_rc_audit.rc_implied_integer_nonzero,
+               root_rc_audit.rc_at_lower, root_rc_audit.rc_at_upper,
+               root_rc_audit.cutoff_fix_candidates, root_rc_audit.rc_abs_sum,
+               root_rc_audit.rc_abs_max,
+               std::isfinite(root_rc_audit.gap)
+                   ? fmt::format("{:.3e}", root_rc_audit.gap)
+                   : std::string("inf"),
+               root_row_dual_nnz, root_row_dual_abs_sum, root_row_dual_abs_max);
+  }
 
   auto conformance_objective_terms = [&]() -> std::uint64_t {
     return std::accumulate(
@@ -6836,12 +6844,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                objective_propagation.implied_events.size());
   };
 
+  auto bc_conf_diag_enabled = [&]() -> bool {
+    return opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr;
+  };
+
   auto record_conformance_source = [&](const char* phase) -> std::uint64_t {
     const std::uint64_t obj_terms = conformance_objective_terms();
     const std::uint64_t sources = conformance_source_total();
     ++out.bc_stats.conformance_source_phases;
     if (sources > 0) ++out.bc_stats.conformance_source_nonempty_phases;
-    if (opt.verbose || sources > 0) {
+    if (bc_conf_diag_enabled()) {
       fmt::print(stderr,
                  "[B&C-CONF] phase={} source implInt={} clqEdges={} "
                  "implArcs={} varbounds={} objClq={}/{} objEvt={} evtMax={:.6g} "
@@ -6948,8 +6960,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.bc_stats.conformance_bound_lift_max =
           std::max(out.bc_stats.conformance_bound_lift_max, lift);
     }
-    if (opt.verbose || bound_changes > 0 || prunes > 0 || lift > 0.0 ||
-        sources > 0) {
+    if (bc_conf_diag_enabled()) {
       fmt::print(stderr,
                  "[B&C-CONF] phase={} propagate sources={} "
                  "bound_changes={} max_move={:.6g} prunes={} "
@@ -7184,7 +7195,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           root_bound_delta.first, root_bound_delta.second, 1,
           /*resolved=*/false, /*resolve_ok=*/true, root_bound_before_prop,
           root.bound, root_conf_detail);
-      if (opt.verbose || total_root_tightened > 0 || objective_pruned > 0) {
+      if (bc_conf_diag_enabled()) {
 	        fmt::print(stderr,
 	                   "[B&C ROOT-PROP] pruned root by propagation "
 	                   "row={} clique={} conflict={} impl={} proof_target={} obj={} "
@@ -7233,7 +7244,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             root_bound_delta.first, root_bound_delta.second, 0,
             /*resolved=*/true, /*resolve_ok=*/true, root_bound_before_prop,
             root.bound, root_conf_detail);
-	        if (opt.verbose || total_root_tightened > 0) {
+          if (bc_conf_diag_enabled()) {
 	          fmt::print(stderr,
 	                     "[B&C ROOT-PROP] row={} clique={} conflict={} impl={} "
 	                     "proof_target={} obj={} "
@@ -14283,7 +14294,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         out.bc_stats.root_cut_rows_rejected_nonmoving +=
             static_cast<std::uint64_t>(actual_added_rows);
         ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
-        if (opt.verbose || force_root_cut_audit || actual_added_rows > 0) {
+        if (opt.verbose || force_root_cut_audit) {
           fmt::print(stderr,
                      "[CUT-AUDIT] rejected nonmoving root cut round {}: "
                      "rows={} bound={:.2f}->{:.2f} lift={:.3e} "
@@ -14343,14 +14354,16 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 
   // Diagnostic: root LP bound before and after cuts
   out.bc_stats.root_cut_bound_lift = std::max(0.0, root.bound - pre_cut_bound);
-  fmt::print(stderr, "[B&C DIAG] root_lp_bound_pre_cut={:.2f}  root_lp_bound_post_cut={:.2f}  cuts_added={}  gap_closed_by_cuts={:.4f}% rejected_nonmoving_rows={} domain_tight={}\n",
-             pre_cut_bound, root.bound, out.bc_stats.cuts_added,
-             (std::abs(root.bound) > 1e-6) ? 100.0 * (root.bound - pre_cut_bound) / std::abs(root.bound) : 0.0,
-             out.bc_stats.root_cut_rows_rejected_nonmoving,
-             out.bc_stats.root_cut_domain_tightenings);
+  if (opt.verbose) {
+    fmt::print(stderr, "[B&C DIAG] root_lp_bound_pre_cut={:.2f}  root_lp_bound_post_cut={:.2f}  cuts_added={}  gap_closed_by_cuts={:.4f}% rejected_nonmoving_rows={} domain_tight={}\n",
+               pre_cut_bound, root.bound, out.bc_stats.cuts_added,
+               (std::abs(root.bound) > 1e-6) ? 100.0 * (root.bound - pre_cut_bound) / std::abs(root.bound) : 0.0,
+               out.bc_stats.root_cut_rows_rejected_nonmoving,
+               out.bc_stats.root_cut_domain_tightenings);
+  }
 
-  // Per-family cut diagnostic (always printed to help identify which families fired).
-  {
+  // Per-family cut diagnostic.
+  if (opt.verbose) {
     const char* family_names[] = {"Gomory", "MIR", "Cover", "Clique", "ZeroHalf", "FlowCover", "ImpliedBound"};
     bool any = false;
     for (int f = 0; f < static_cast<int>(CutFamily::Count); ++f) {
@@ -15294,17 +15307,19 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	      last_objective_cutoff_artifact_domain_epoch = current_domain_learning_epoch();
 	      last_objective_cutoff_artifact_root_signature = root_domain_signature();
 	      record_conformance_source("incumbent_objective_source_none");
+      if (bc_conf_diag_enabled()) {
 	      fmt::print(stderr,
-                 "[B&C OBJ-CLIQUE] {} none cand={} eventCand={} cap={:.6g} "
-                 "raw_lb={:.2f} max_delta={:.6g} cutClqCand={} "
-                 "cutClqPairs={} cutClqConf={} cutClqAdded={}\n",
-                 reason != nullptr ? reason : "incumbent",
-                 stats.candidates, stats.implied_event_candidates,
-                 stats.cutoff_capacity,
-                 stats.raw_objective_lower, stats.max_delta,
-                 clique_stats.candidates, clique_stats.pair_tests,
-                 clique_stats.pair_conflicts,
-                 clique_stats.clique_edges_added);
+                   "[B&C OBJ-CLIQUE] {} none cand={} eventCand={} cap={:.6g} "
+                   "raw_lb={:.2f} max_delta={:.6g} cutClqCand={} "
+                   "cutClqPairs={} cutClqConf={} cutClqAdded={}\n",
+                   reason != nullptr ? reason : "incumbent",
+                   stats.candidates, stats.implied_event_candidates,
+                   stats.cutoff_capacity,
+                   stats.raw_objective_lower, stats.max_delta,
+                   clique_stats.candidates, clique_stats.pair_tests,
+                   clique_stats.pair_conflicts,
+                   clique_stats.clique_edges_added);
+      }
       return 0;
     }
 
@@ -15323,8 +15338,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 		    last_objective_cutoff_artifact_domain_epoch = current_domain_learning_epoch();
 		    last_objective_cutoff_artifact_root_signature = root_domain_signature();
 	    record_conformance_source("incumbent_objective_source");
-	    if (opt.verbose || stats.implications_added > 0 ||
-	        stats.clique_edges_added > 0) {
+    if (bc_conf_diag_enabled()) {
       fmt::print(stderr,
                  "[B&C OBJ-CLIQUE] {} cand={} eventCand={} conflicts={} "
                  "confQ={} unary={} pair={} impl={} clique_edges={} "
@@ -15994,8 +16008,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           root_inc_delta.first, root_inc_delta.second, 1,
           /*resolved=*/false, /*resolve_ok=*/true, old_bound, root.bound,
           root_inc_detail);
-	      if (opt.verbose || total_tightened > 0 ||
-	          objective_pruned > 0 || redcost_pruned > 0) {
+      if (bc_conf_diag_enabled() || trace_bc_timeline) {
 		        fmt::print(stderr,
 		                   "[B&C ROOT-INC-PROP] {} pruned root "
 		                   "pass={} obj={} conflict={} impl={} row={} clique={} "
@@ -16067,7 +16080,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          root_inc_delta.first, root_inc_delta.second, 0,
 	          /*resolved=*/true, /*resolve_ok=*/false, old_bound, root.bound,
 	          root_inc_detail + " root_resolve_failed=1");
-	      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+        if (bc_conf_diag_enabled()) {
 	        fmt::print(stderr,
 	                   "[B&C ROOT-INC-PROP] {} pass={} root_resolve_failed "
 	                   "status={} bound={:.2f}->{:.2f}\n",
@@ -16121,8 +16134,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        root_inc_detail +
 	            fmt::format(" root_resolve=1 rcAdded={}",
 	                        rc_add_stats.records_added));
-	    if (opt.verbose || total_tightened > 0 ||
-	        std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
+    if (bc_conf_diag_enabled() || trace_bc_timeline) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-INC-PROP] {} pass={} obj={} conflict={} impl={} "
 	                 "row={} clique={} cutpool={} rc={} rc_active={} "
@@ -22702,20 +22714,22 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	          (void)refresh_objective_domain_sources(
 	              "root_dual_proof_artifacts", /*force=*/true);
 	        }
-        fmt::print(stderr,
-                   "[B&C PROOF-IMPL] root cand={} conflicts={} confQ={} impl={} "
-                   "clique_edges={} cap={:.6g} max_delta={:.6g} "
-                   "frontier_pri={} obj_parts={} arcs={}\n",
-                   proof_artifacts.candidates,
-                   proof_artifacts.conflicts_seen,
-                   proof_artifacts.conflict_clauses_added,
-                   proof_artifacts.implications_added,
-                   proof_artifacts.clique_edges_added,
-                   proof_artifacts.proof_capacity,
-                   proof_artifacts.max_delta,
-                   proof_artifacts.frontier_priority_updates,
-                   objective_propagation.partitions.size(),
-                   implication_graph.size());
+        if (bc_conf_diag_enabled() || trace_bc_timeline) {
+          fmt::print(stderr,
+                     "[B&C PROOF-IMPL] root cand={} conflicts={} confQ={} impl={} "
+                     "clique_edges={} cap={:.6g} max_delta={:.6g} "
+                     "frontier_pri={} obj_parts={} arcs={}\n",
+                     proof_artifacts.candidates,
+                     proof_artifacts.conflicts_seen,
+                     proof_artifacts.conflict_clauses_added,
+                     proof_artifacts.implications_added,
+                     proof_artifacts.clique_edges_added,
+                     proof_artifacts.proof_capacity,
+                     proof_artifacts.max_delta,
+                     proof_artifacts.frontier_priority_updates,
+                     objective_propagation.partitions.size(),
+                     implication_graph.size());
+        }
 	        cached_queue_dual_proof = full_proof;
 	        cached_queue_dual_proof_upper = root_upper_limit_for_proof;
         have_cached_queue_dual_proof = true;
@@ -28562,8 +28576,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
             std::max(
                 out.bc_stats.conformance_objective_capacity_max_proof_excess,
                 queue_objcap_max_proof_excess);
-        if (opt.verbose || queue_objcap_raw_exceed > 0 ||
-            queue_objcap_proof_exceed > 0 || queue_objcap_one_events > 0) {
+        if (bc_conf_diag_enabled()) {
           fmt::print(stderr,
                      "[B&C-CONF] phase=queue_objective_capacity nodes={} "
                      "raw_cap_min={:.10g} proof_cap_min={:.10g} "
@@ -28577,8 +28590,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
                      queue_objcap_max_proof_excess);
         }
       }
-	      if ((opt.verbose || queue_proof_stats.fixings > 0 ||
-	           queue_proof_stats.prunes > 0) &&
+        if ((bc_conf_diag_enabled() || trace_bc_timeline) &&
 	          (queue_proof_stats.candidates > 0 ||
 	           queue_proof_stats.skip_coeff > 0 ||
 	           queue_proof_stats.skip_budget > 0 ||
@@ -28658,8 +28670,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       out.bc_stats.conformance_queue_lift_max =
           std::max(out.bc_stats.conformance_queue_lift_max, queue_lift);
     }
-    if (opt.verbose || queue_tightenings > 0 || pruned > 0 ||
-        queue_lift > 0.0 || queue_sources > 0) {
+    if (bc_conf_diag_enabled()) {
       fmt::print(stderr,
                  "[B&C-CONF] phase=queue_domain_learning sources={} "
                  "qsize={}->{} qlb={:.10g}->{:.10g} lift={:.6g} "
@@ -33103,10 +33114,12 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
   out.bc_stats.parallel_schedule_reason =
       (num_threads > 1) ? "enabled" : parallel_schedule_reason;
 
-  print_root_phase_timing(t0, t_root0, t_root1, t_cuts_done, t_pump_done,
-                          t_prog_done, t_dive_done, t_lns_done, has_incumbent,
-                          trace_root_subsolves, root_subsolve_traces,
-                          root_frac_bin_count, root_incumbent_source);
+  if (opt.verbose) {
+    print_root_phase_timing(t0, t_root0, t_root1, t_cuts_done, t_pump_done,
+                            t_prog_done, t_dive_done, t_lns_done, has_incumbent,
+                            trace_root_subsolves, root_subsolve_traces,
+                            root_frac_bin_count, root_incumbent_source);
+  }
 	  if (opt.verbose) {
 	    const double root_time = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 	    fmt::print(stderr, "[B&C] root done: {:.3f}s inc={} root_bound={:.2f}\n",
@@ -34950,7 +34963,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
     }
   }
 
-  if (out.bc_stats.conformance_source_phases > 0) {
+  if (bc_conf_diag_enabled() && out.bc_stats.conformance_source_phases > 0) {
     fmt::print(stderr,
                "[B&C-CONF-SUMMARY] source={}/{} prop={} "
                "bound_change_phases={} bound_changes={} prunes={} "
