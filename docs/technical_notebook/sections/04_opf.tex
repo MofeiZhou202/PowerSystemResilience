@@ -448,8 +448,11 @@ c_g^{\qual{lin}} = c_{1g} + 2c_{2g}\frac{P_g^{\qual{min}}+P_g^{\qual{max}}}{2}.
 \min \frac{1}{2}x^{\top}Qx + c^{\top}x,
 \end{align}
 where \(Q_{gg} = 2c_{2g}S_{\qual{base}}^2\) and \(c_g = c_{1g}S_{\qual{base}}\).
-This mode is used by \texttt{NativeQP} and Gurobi.  The HiGHS path currently
-calls the LP adapter; QP support there is marked TODO in the source.
+This true-QP form is used by \texttt{NativeQP} and Gurobi.  The HiGHS-selected
+path routes the QP through the shared solver engine with
+\texttt{preferred\_solver="HiGHS"}; if no QP-capable route succeeds it falls back
+to a HiGHS LP solve with the linearized cost model, and records that choice in
+\texttt{solver\_chain} and \texttt{objective\_model}.
 
 \paragraph{VOLL auto-tuning.}
 The load-shedding penalty is auto-tuned as \(1.1\times\) the maximum generator
@@ -507,7 +510,7 @@ solver always builds the QP form and then dispatches by backend:
 \begin{enumerate}
   \item \textbf{NativeQP} (LCQP solver): true quadratic costs via primal-dual IPM.
   \item \textbf{Gurobi}: commercial QP solver.
-  \item \textbf{HiGHS}: open-source LP solver (linearized costs).
+  \item \textbf{HiGHS}: shared-engine QP route with HiGHS preference, then HiGHS LP fallback using linearized costs.
   \item \textbf{Native Dual Simplex}: via \texttt{solve\_lp\_with\_basis()}.
   \item \textbf{Auto}: tries \texttt{NativeQP}, then Gurobi, then HiGHS, then native dual simplex.
 \end{enumerate}

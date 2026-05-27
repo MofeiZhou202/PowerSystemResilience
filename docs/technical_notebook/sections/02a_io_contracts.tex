@@ -1,4 +1,5 @@
 \section{I/O Contracts, Sheet Dictionaries, and JSON Keys}
+\label{sec:io_contracts}
 
 The model dictionaries in the previous section explain the physical meaning of
 each field.  This section documents the external I/O contract actually exposed
@@ -244,7 +245,6 @@ Field & Excel sheet / column & JSON default / import rule & Meaning \\
 \endhead
 \texttt{name} & \texttt{Info[three\_phase\_name]} & default \texttt{"Three-Phase AC System"} & user-visible subsystem name for the optional explicit unbalanced AC network \\
 \texttt{base\_mva} & \texttt{Info[three\_phase\_base\_mva]} & default \texttt{100.0} & per-subsystem power base; independent from top-level \texttt{base\_mva} \\
-	exttt{CircuitBreaker} & \texttt{ac.circuit\_breakers[]} & \texttt{index}, \texttt{bus\_from}, \texttt{bus\_to} & \texttt{name}, \texttt{in\_service}, \texttt{breaker\_type}, \texttt{closed}, \texttt{z\_ohm}, \texttt{rated\_voltage\_kv}, \texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka}, \texttt{element\_type}, \texttt{element\_id} \\
 \texttt{base\_freq\_hz} & \texttt{Info[three\_phase\_base\_freq\_hz]} & default \texttt{50.0} & nominal subsystem frequency in Hz \\
 \texttt{buses[]} & sheet \texttt{ThreePhaseBus} & missing array / sheet keeps vector empty & explicit three-phase bus family \\
 \texttt{lines[]} & sheet \texttt{ThreePhaseLine} & missing array / sheet keeps vector empty & explicit three-phase line family \\

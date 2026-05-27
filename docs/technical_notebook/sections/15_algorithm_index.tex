@@ -1012,28 +1012,33 @@ requirements.
 \subsubsection{A22: Optimal Network Reconfiguration Orchestration (\texttt{solve\_onr})}
 \label{algo:a22}
 
-\texttt{A22} orchestrates the full ONR pipeline described in
-Section~\ref{sec:onr}: it calls the LinDistFlow MILP builder (A16), solves
-the MILP with the HiGHS branch-and-cut engine, validates the resulting
-topology as a spanning tree, and verifies the solution with a Newton PF.
+\texttt{A22} summarises the reconfiguration family described in
+Section~\ref{sec:onr}.  The steady AC ONR path solves a LinDistFlow MILP with
+native B\&C and verifies the returned topology with Newton PF.  The
+fault-triggered hybrid path builds a restoration MILP over AC/DC/VSC edges,
+tries HiGHS, retries native B\&C on HiGHS failure or malformed solution vectors,
+and returns explicit solver certificates plus model-scope/validity flags rather
+than a full post-reconfiguration AC/DC PF certificate.
 
 \paragraph{Algorithm A22: ONR Orchestration}
 \begin{algorithmic}[1]
 \Procedure{solve\_onr}{$\mathit{sys}$, $\mathit{opt}$}
   \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$} \Comment{A1}
   \State $\mathit{model} \gets$ \Call{build\_lindistflow}{$\mathit{can}$, \{radiality=true\}} \Comment{A16}
-  \State Configure HiGHS B\&C: time limit, MIP gap, branching strategy
+  \State Configure solver limits: time limit, MIP gap, branch-and-cut options
   \State $\mathit{sol} \gets$ \Call{highs\_solve}{$\mathit{model}$}
+  \If{HiGHS unavailable, failed, or returned malformed solution}
+    \State $\mathit{sol} \gets$ \Call{native\_bc\_solve}{$\mathit{model}$}
+  \EndIf
   \If{$\mathit{sol}$.status $\ne$ OPTIMAL and $\ne$ FEASIBLE}
-    \State \Return infeasible ONRResult
+    \State \Return infeasible topology result
   \EndIf
   \State Extract open branch set $\mathcal{O} \gets \{ij : u_{ij}^* < 0.5\}$
-  \State Validate spanning tree: BFS from source;
-    check all buses reached exactly once
-  \If{topology invalid} \Return infeasible \EndIf
-  \State Configure $\mathit{sys'}$ with branches in $\mathcal{O}$ set out-of-service
-  \State $r \gets$ \Call{AdaptiveSolver::solve}{$\mathit{sys'}$, $\mathit{opt.pf}$} \Comment{A6}
-  \State \Return \textit{ONRResult}\{$\mathcal{O}$, MILP objective, $r$\}
+  \State Validate equality rows, inequality rows, bounds, and binary integrality
+  \If{post-solve checks fail} \Return infeasible \EndIf
+  \State Extract structured open/closed \texttt{BranchRef} sets and solver certificate
+  \State Set \texttt{model\_scope} and validity flags for PF/OPF coverage
+  \State \Return \textit{TopoReconfResult}\{$\mathcal{O}$, objective, certificate, validity\}
 \EndProcedure
 \end{algorithmic}
 
@@ -1042,13 +1047,13 @@ topology as a spanning tree, and verifies the solution with a Newton PF.
 \begin{tikzpicture}[node distance=5mm and 22mm]
   \node[flowbox]  (can)  {project\_to\_canonical (A1)};
   \node[flowbox,  below=of can]  (ldf)  {Build LinDistFlow MILP (A16)};
-  \node[flowbox,  below=of ldf]  (bnc)  {HiGHS branch-and-cut solve};
+  \node[flowbox,  below=of ldf]  (bnc)  {HiGHS solve; retry native B\&C on failure};
   \node[decision, below=of bnc]  (feas) {Optimal / feasible?};
   \node[flowbox,  below=of feas] (ext)  {Extract open branch set $\mathcal{O}$};
-  \node[flowbox,  below=of ext]  (bfs)  {Validate spanning-tree topology (BFS)};
-  \node[decision, below=of bfs]  (tree) {Valid spanning tree?};
-  \node[flowbox,  below=of tree] (pf)   {Newton PF on reconfigured system (A6)};
-  \node[flowbox,  below=of pf]   (ret)  {Return ONRResult};
+  \node[flowbox,  below=of ext]  (bfs)  {Post-solve row, bound, and integrality checks};
+  \node[decision, below=of bfs]  (tree) {Checks pass?};
+  \node[flowbox,  below=of tree] (pf)   {Set model scope and validity flags};
+  \node[flowbox,  below=of pf]   (ret)  {Return topology result};
   \node[flowbox,  right=3.0cm of feas] (inf) {Return infeasible};
   \draw[flowline] (can)  -- (ldf);
   \draw[flowline] (ldf)  -- (bnc);
@@ -1061,7 +1066,7 @@ topology as a spanning tree, and verifies the solution with a Newton PF.
   \draw[flowline] (tree.east) -- node[above,font=\small]{no} (inf.south);
   \draw[flowline] (pf)   -- (ret);
 \end{tikzpicture}
-\caption{Algorithm A22: ONR orchestration (\texttt{solve\_onr}).}
+\caption{Algorithm A22: steady ONR and fault-triggered topology reconfiguration orchestration.}
 \label{fig:a22-flow}
 \end{figure}
 

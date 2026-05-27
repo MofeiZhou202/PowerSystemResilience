@@ -1,4 +1,5 @@
 \section{Output and Report Field Dictionaries}
+\label{sec:output_field_dictionaries}
 
 This section applies the same field-level dictionary template to the current
 export artifacts.  Section \texttt{02a\_io\_contracts} already catalogs which
@@ -460,7 +461,7 @@ Field & JSON key / path & Export / import rule & Meaning / note \\
 \shortstack[l]{\texttt{profiling.}\\\texttt{accepted\_steps}} & same nested key & bidirectional; default \texttt{0} & accepted line-search steps \\
 \shortstack[l]{\texttt{profiling.}\\\texttt{rejected\_steps}} & same nested key & bidirectional; default \texttt{0} & rejected line-search steps \\
 \texttt{profiling.final\_barrier\_mu} & \texttt{profiling[final\_barrier\_mu]} & bidirectional; default \texttt{0.0} & final barrier parameter reported by the IPM path \\
-\texttt{pren\_mw}, \texttt{qren\_mvar}, \texttt{pstor\_mw}, \texttt{qstor\_mvar}, \texttt{pdcdc\_mw}, \texttt{pflex\_mw} & \texttt{none} & not part of the current JSON or workbook contract & enhanced component-dispatch vectors exist in \texttt{ACOPFResult} but are not serialized today \\
+\texttt{pren\_mw}, \texttt{qren\_mvar}, \texttt{pstor\_mw}, \texttt{qstor\_mvar}, \texttt{pdcdc\_mw}, \texttt{pflex\_mw} and companion maps & top-level legacy arrays plus \texttt{renewable\_dispatch}, \texttt{storage\_dispatch}, \texttt{dcdc\_dispatch}, \texttt{flex\_dispatch}; workbook sheets \texttt{OPF\_Renewable}, \texttt{OPF\_Storage}, \texttt{OPF\_DCDC}, \texttt{OPF\_FlexLoad} & exported/imported in JSON; exported in OPF workbooks when the corresponding vectors are non-empty & enhanced component-dispatch vectors use packed solver-variable order with \texttt{ComponentRef} identity maps, \texttt{source\_type}, and \texttt{component\_index} metadata \\
 \bottomrule
 \end{longtable}
 
@@ -658,8 +659,8 @@ PF profiling block & PF workbooks & not exported & the in-memory \texttt{PowerFl
 \texttt{ACOPFResult} enhanced dispatch vectors & OPF JSON / workbook & exported with packed semantics & Renewable, storage, DC/DC, and flexible-load dispatch vectors are exported as packed variable arrays with companion \texttt{ComponentRef} identity maps.  JSON uses structured \texttt{renewable\_dispatch} / \texttt{storage\_dispatch} / \texttt{dcdc\_dispatch} / \texttt{flex\_dispatch} objects; workbook sheets use \texttt{var\_idx}, \texttt{source\_type}, and \texttt{component\_index} columns. \\
 carbon contribution maps & carbon workbook & not exported & \texttt{generator\_supply\_mw}, \texttt{generator\_loss\_mw}, \texttt{source\_supply\_mw}, \texttt{source\_loss\_mw}, and \texttt{generator\_loss\_allocation} are available only in JSON. \\
 \texttt{OPF\_Converter} & OPF workbook & conditional population & the sheet is only populated when VSC converters exist; otherwise the sheet may stay empty even though the workbook pre-creates it. \\
-short-circuit outputs & public API / files & absent & this repository does not currently expose a short-circuit result API or any workbook / JSON serializer for it. \\
-ONR outputs & public API / files & absent & this repository does not currently expose \texttt{solve\_optimal\_reconfiguration} or a workbook / JSON output contract for network reconfiguration. \\
+short-circuit outputs & workbook / JSON files & in-memory only & short-circuit result structs and APIs are available in \texttt{hacdcpf/analysis/short\_circuit.hpp}, but no workbook or JSON serializer is currently exposed for them. \\
+ONR / topology reconfiguration outputs & workbook / JSON files & in-memory only & \texttt{solve\_optimal\_reconfiguration} and \texttt{run\_topology\_reconfiguration} return structured in-memory result objects; no workbook or JSON output contract is currently exposed for these results. \\
 \bottomrule
 \end{longtable}
 

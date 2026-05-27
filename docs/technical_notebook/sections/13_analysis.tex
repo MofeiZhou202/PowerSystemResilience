@@ -650,7 +650,7 @@ Returned by \texttt{run\_frequency\_duration\_analysis}:
 \texttt{contingencies} & --- & Per-contingency detail, sorted by EENS$\downarrow$ \\
 \texttt{model\_scope} & --- & \texttt{ac-only-dcopf} for AC-only systems; \texttt{hybrid-acdc-network-lp} when DC/VSC components are present \\
 \texttt{model\_limitations} & --- & Mandatory report text describing linearized scope and nonlinear AC voltage/reactive limits \\
-\texttt{validity} & --- & Flags for DC-load curtailment, VSC/DC power flow, and AC OPF scope \\
+\texttt{validity} & --- & Flags for DC-load curtailment, VSC/DC power flow, AC OPF scope, nonlinear AC feasibility, and repair-stage AC/DC reconfiguration coverage \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -660,10 +660,12 @@ Engineering reports and JSON exports that include FMEA results must surface
 catalog enumerates AC, DC, VSC, DCDC, switch, breaker, storage, PV, and static
 generator contingencies.  AC-only systems use the established DCOPF evaluator;
 hybrid systems use a linear AC/DC network LP that co-optimizes AC load shedding,
-DC load shedding, DC sources, DC branches, VSC active-power transfers, and
-DC/DC converter transfers.  The hybrid LP does not claim full nonlinear AC
-voltage/reactive feasibility, so that boundary remains explicit in
-\texttt{model\_limitations}.
+DC load shedding, DC sources, DC branches, DC circuit-breaker edges, VSC
+active-power transfers, and DC/DC converter transfers.  The hybrid LP does not
+claim full nonlinear AC voltage/reactive feasibility.  Repair-stage explicit
+switch search enumerates AC switches and normally-open AC branches only; DC
+breakers, DC branches, DCDC devices, and VSC topology actions are disclosed as
+not modelled by \texttt{repair\_dc\_side\_reconfiguration\_modelled=false}.
 
 Each entry in \texttt{contingencies} (\texttt{FMEAContingencyDetail}) records
 \texttt{failure\_rate}, switching-stage shed/ENS (\texttt{shed\_sw\_mw},
@@ -1066,7 +1068,7 @@ status, objective value, MIP gap, runtime, formulation notes,
 
 The following results are representative checks from
 \texttt{tests/test\_resilience\_assessment.cpp}.  The current registered suite
-contains 22 CTest entries covering heuristic resilience, the strict MIP entry
+contains 23 CTest entries covering heuristic resilience, the strict MIP entry
 point, sequential Monte Carlo regressions, and FMEA scope/repair-search flags.
 
 \paragraph{3-bus radial, no fault.}

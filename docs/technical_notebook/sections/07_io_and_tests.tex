@@ -8,7 +8,7 @@
 \label{sec:matpower-parser}
 % ------------------------------------------------------------
 
-\texttt{hacdcpf::io::MatpowerParser} reads MATPOWER \texttt{.m} case files
+\texttt{hacdcpf::io::parse\_matpower(path)} reads MATPOWER \texttt{.m} case files
 from disk (\texttt{include/hacdcpf/io/matpower\_parser.hpp}).  The parser
 understands the \texttt{mpc.version~=~'2'} format used by MATPOWER~6 and
 populates a \texttt{HybridPowerSystem} object.
@@ -30,25 +30,55 @@ Section & Mapped struct(s) \\
 
 Data directory \texttt{data/} ships with 80+ MATPOWER case files covering
 IEEE~9, 14, 30, 57, 118, 300, and a range of synthetic US/European grids up to
-70\,000 buses.
+82\,000 buses.
 
 % ------------------------------------------------------------
 \subsection{JSON I/O}
 \label{sec:json-io}
 % ------------------------------------------------------------
 
-\texttt{include/hacdcpf/io/json\_io.hpp} provides:
+\texttt{include/hacdcpf/io/json\_io.hpp} provides the always-built JSON API:
 \begin{itemize}
-  \item \texttt{load\_hybrid\_system\_from\_json(path)} -- read a
-  \texttt{HybridPowerSystem} from disk;
-  \item \texttt{save\_hybrid\_system\_to\_json(sys, path)} -- write to disk;
-  \item \texttt{result\_to\_json(result)} -- serialise a
-  \texttt{PowerFlowResult} to JSON;
-  \item \texttt{opf\_result\_to\_json(result)} -- serialise an
-  \texttt{OPFResult}.
+  \item \texttt{to\_json(sys)} / \texttt{from\_json(json)} and
+        \texttt{save\_json(sys,path)} / \texttt{load\_json(path)} for
+        \texttt{HybridPowerSystem};
+  \item \texttt{try\_from\_json(json,mode)} and
+        \texttt{try\_load\_json(path,mode)} for exception-free import using
+        \texttt{Result<HybridPowerSystem>};
+  \item \texttt{to\_jpc\_json(sys)} / \texttt{from\_jpc\_json(json)} and
+        \texttt{save\_jpc\_json} / \texttt{load\_jpc\_json} for the
+        MATPOWER-like JPC JSON interchange format;
+  \item \texttt{power\_flow\_result\_to\_json(sys,result)} and
+        \texttt{save\_power\_flow\_result\_json(sys,result,path)} for PF
+        results;
+  \item \texttt{opf\_result\_to\_json(result)} /
+        \texttt{opf\_result\_from\_json(json)} and
+        \texttt{save\_opf\_result\_json} / \texttt{load\_opf\_result\_json}
+        for AC OPF results;
+  \item \texttt{dc\_opf\_result\_to\_json(result)} /
+        \texttt{dc\_opf\_result\_from\_json(json)} and corresponding
+        save/load helpers for DC OPF results;
+  \item \texttt{carbon\_result\_to\_json(result)} /
+        \texttt{carbon\_result\_from\_json(json)} and save/load helpers for
+        carbon-analysis results;
+  \item \texttt{time\_series\_data\_to\_json(ts)} /
+        \texttt{time\_series\_data\_from\_json(json)} for time-series input
+        data.
 \end{itemize}
-The on-disk schema mirrors the field names of the C++ structs and includes
-metadata (\texttt{name}, \texttt{base\_mva}, timestamps).
+The on-disk schema is sparse-friendly: optional arrays may be absent, identity
+and connectivity fields are generally required, and schema compatibility is
+checked through \texttt{check\_schema\_version}.  The detailed key-level
+contract is maintained in Sections~\ref{sec:io_contracts} and
+\ref{sec:output_field_dictionaries}.
+
+Excel I/O remains optional.  The public header declares
+\texttt{load\_excel}/\texttt{save\_excel}; without
+\texttt{HACDCPF\_ENABLE\_EXCEL} these inline functions throw.  When Excel
+support is compiled, \texttt{src/io/excel\_io.cpp} also contains source-level
+workbook helpers such as \texttt{load\_xlsx}, \texttt{save\_xlsx},
+\texttt{save\_results\_xlsx}, \texttt{save\_results\_compact\_xlsx},
+\texttt{save\_opf\_results\_xlsx}, \texttt{save\_opf\_results\_compact\_xlsx},
+and \texttt{save\_carbon\_results\_xlsx}.
 
 % ------------------------------------------------------------
 \subsection{Pre-built Test Networks (\texttt{case\_builders.hpp})}
@@ -56,8 +86,10 @@ metadata (\texttt{name}, \texttt{base\_mva}, timestamps).
 % ------------------------------------------------------------
 
 \texttt{hacdcpf::io} exposes a library of factory functions for use in tests
-and benchmarks.  All returned systems include at least one DC bus and VSC
-converter unless the \texttt{\_ac\_only} variant is used.
+and benchmarks.  Most named \texttt{\_acdc} builders add a DC overlay and VSC
+links; \texttt{build\_ac\_only\_version} strips those components, and
+\texttt{build\_market\_3bus\_toy} is intentionally AC-only for market/DCOPF
+unit tests.
 
 \begin{longtable}{L{0.44\linewidth}L{0.50\linewidth}}
 \toprule
@@ -88,30 +120,48 @@ Function & Description \\
 % ============================================================
 
 All tests use the Catch2 framework (fetched automatically by CMake via
-\texttt{FetchContent}).  Build and run with:
+\texttt{FetchContent}).  The authoritative Release test tree used by this
+notebook is \texttt{build\_rel}; build and run with:
 \begin{verbatim}
-cmake -B build -DHACDCPF_BUILD_TESTS=ON
-cmake --build build
-cd build && ctest --output-on-failure
+cmake -B build_rel -DCMAKE_BUILD_TYPE=Release -DHACDCPF_BUILD_TESTS=ON
+cmake --build build_rel
+ctest --test-dir build_rel --output-on-failure
 \end{verbatim}
 
 % ------------------------------------------------------------
 \subsection{Test File Overview}
 % ------------------------------------------------------------
 
-\begin{longtable}{L{0.38\linewidth}L{0.55\linewidth}}
+\begin{longtable}{L{0.34\linewidth}L{0.59\linewidth}}
 \toprule
 File & Coverage \\
 \midrule
 \endhead
-\texttt{test\_hacdcpf.cpp} & Smoke tests for model construction, power flow, OPF, and basic analysis on 2-bus AC and IEEE~14 AC/DC systems.  Uses \texttt{make\_simple\_ac\_system()} and \texttt{build\_ieee14\_acdc()}. \\
-\texttt{test\_hacdcdss.cpp} & Smoke tests for the \texttt{hacdcdss} module: \texttt{NetworkModel}, \texttt{ScenarioData}, \texttt{TimeSeriesLoader}, \texttt{AdmittanceModel}, \texttt{PFSolver} (hacdcdss namespace), and \texttt{OPFModel}.  Validates a 2-bus AC network and a 4-bus DC ring.\\
-\texttt{test\_all\_components\_pf.cpp} & Exercises every component type (VSC, DCDC converters, ChargingStation, AsymmetricLoad, Switch, CircuitBreaker, Storage, RenewableGen, etc.) through the full power-flow pipeline.\\
-\texttt{test\_acopf\_dcopf\_crossval.cpp} & Cross-validates AC OPF, DC OPF (LP), and power-flow feasibility on a batch of MATPOWER cases from the \texttt{data/} directory.  Compares generation costs and bus-voltage ranges. \\
-\texttt{test\_enhanced\_solver.cpp} & Tests the multi-phase robust pipeline: island detection, distributed slack solver, \texttt{RobustNonlinearOptions} phase toggling, and fallback path activation. \\
-\texttt{test\_powerflow\_performance.cpp} & Wall-clock performance regression tests on medium-to-large cases (IEEE~118, case300, case2000).  Fails if solve time exceeds reference limits.\\
-\texttt{test\_scaling\_regression.cpp} & Numerical scaling regression: checks that per-unit results match reference solutions to prescribed tolerance after toggling residual/variable/Jacobian scaling options. \\
-\texttt{test\_unified\_pf\_upgrade.cpp} & Integration tests for the unified PF upgrade path.  Uses \texttt{hacdcpf::powerflow::inf\_norm} to verify residual norms on upgraded systems. \\
+\texttt{test\_hacdcpf.cpp} & Core public API smoke tests: model construction, PF variants, solver handles, AC/DC OPF, carbon wrappers, and resilience wrapper linkage. \\
+\texttt{test\_all\_components\_pf.cpp} & All-component projection/PF pipeline on the rich model surface. \\
+\texttt{test\_unified\_pf\_upgrade.cpp} & Unified PF options, coupled Jacobian, augmented equations, semi-smooth Newton, globalization, and default-flag compatibility. \\
+\texttt{test\_acopf\_dcopf\_crossval.cpp} & ACOPF/DCOPF/PF cross-validation plus DCOPF isolated-island, pruning, slack-balance, dispatch-quality, and LMP regressions. \\
+\texttt{test\_enhanced\_solver.cpp} & Island detection/adaptive solver and distributed-slack participation factors. \\
+\texttt{test\_scaling\_regression.cpp} & Residual/variable/Jacobian scaling and conditioning guardrails. \\
+\texttt{test\_hacdcdss.cpp} & Current \texttt{hacdcpf} model/PF/DCOPF smoke suite, including validation, Y-bus/power-model checks, Newton PF, island/adaptive solver, distributed slack, and DCOPF regressions. \\
+\texttt{test\_io\_json.cpp} & JSON/JPC round-trips, safe import wrappers, PF/OPF result JSON, MATPOWER parser, and JPC rich-component preservation. \\
+\texttt{test\_rich\_components.cpp} & Rich component JSON round-trips and builder coverage for transformers, DER, storage, switches, converters, DC components, VPPs, microgrids, and external grids. \\
+\texttt{test\_matpower\_cases.cpp} & Tier-1/Tier-2/Tier-3 MATPOWER convergence, safe PF wrappers, and DCOPF case regressions. \\
+\texttt{test\_validation.cpp} & Validation report API, validation levels, negative structural cases, VSC endpoint checks, and rich AC/DC guardrails. \\
+\texttt{test\_solver\_capabilities.cpp} & Solver capability flags, always-on solver features, compile-time backend flags, AC/DC OPF availability, and OPF audit helpers. \\
+\texttt{test\_advanced\_pf.cpp} & Island detection/extraction, islanded/adaptive PF, distributed slack, PV/PQ conversion, and integration checks. \\
+\texttt{test\_three\_phase\_pf.cpp} & Three-phase data model, projection-based solve, unbalanced/meshed/multi-source cases, transformer support, and JSON round-trip. \\
+\texttt{test\_multiport\_vpp\_er.cpp} & Multi-port EnergyRouter controls and multi-mode VPP behaviour. \\
+\texttt{test\_powerflow\_performance.cpp} & Large-system Release performance sweep over MATPOWER tiers. \\
+\texttt{test\_topology\_crossval.cpp} & Fault-triggered topology reconfiguration regressions, source/load accounting, structured branch references, legacy ONR fixing, exhaustive enumeration, and 33-bus ONR. \\
+\texttt{test\_crossmodule\_integration.cpp} & End-to-end OPF$\rightarrow$PF$\rightarrow$Carbon and ONR$\rightarrow$DCOPF$\rightarrow$PF$\rightarrow$Carbon pipelines. \\
+\texttt{test\_short\_circuit\_crossval.cpp} & Z-bus Thévenin and IEC~60909 short-circuit cross-validation. \\
+\texttt{test\_three\_phase\_nr.cpp} & Native three-phase Newton--Raphson solver, phase-node indexer, VUF/loss/balance checks, and hybrid wrapper. \\
+\texttt{test\_resilience\_assessment.cpp} & Distribution resilience, strict MIP entry point, sequential MC, and hybrid FMEA regressions. \\
+\texttt{test\_graph.cpp} & Graph topology, switch contraction, series/pendant reduction, same-ID isolation, and result recovery. \\
+\texttt{test\_graph\_kron.cpp} & Kron Y-bus reduction, voltage recovery, fill-in guard, and approximation disclosure. \\
+\texttt{test\_distribution\_pipeline.cpp} & Rich distribution CB/switch/VSC pipeline through graph, PF, OPF, short circuit, ONR, and JSON export. \\
+\texttt{test\_three\_stage\_reliability.cpp} & Native C++ three-stage reliability evaluator, AC/hybrid model-scope regressions, finite-source capacity, switch candidates, and VSC transfer limits. \\
 \bottomrule
 \end{longtable}
 
@@ -130,11 +180,16 @@ TEST_CASE("brief description", "[tag1][tag2]") {
     auto result = hacdcpf::solve_power_flow(sys, opt);
 
     REQUIRE(result.converged);
-    REQUIRE_THAT(result.buses[0].vm_pu,
-                 Catch::Matchers::WithinAbs(1.06, 1e-4));
+    REQUIRE_FALSE(result.vm.empty());
+    REQUIRE_THAT(result.vm[0],
+                 Catch::Matchers::WithinAbs(1.0, 0.1));
 }
 \end{verbatim}
 
-Tags used across the suite include \texttt{[model]}, \texttt{[pf]},
-\texttt{[opf]}, \texttt{[integration]}, \texttt{[enhanced]}, \texttt{[island]},
-\texttt{[performance]}, and \texttt{[scaling]}.
+Tags used across the suite include \texttt{[model]}, \texttt{[power\_flow]},
+\texttt{[opf]}, \texttt{[integration]}, \texttt{[io]}, \texttt{[matpower]},
+\texttt{[validation]}, \texttt{[topology]}, \texttt{[graph]},
+\texttt{[resilience]}, \texttt{[reliability]}, \texttt{[short\_circuit]},
+\texttt{[three\_phase]}, \texttt{[performance]}, and \texttt{[scaling]}.
+Section~\ref{sec:test_results} gives the current 436-entry CTest registration
+with exact Release IDs and pass/skip status.

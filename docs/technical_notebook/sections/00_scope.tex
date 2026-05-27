@@ -39,7 +39,7 @@ The current notebook covers these implemented module families:
   \texttt{HACDCPF\_ENABLE\_OPENDSS=ON}.
 \end{itemize}
 
-\subsection{Current Stub and Absent Boundaries}
+\subsection{Current Boundaries and Removed Legacy APIs}
 \label{sec:scope-boundary}
 
 \begin{longtable}{L{0.26\linewidth}L{0.54\linewidth}}
@@ -47,7 +47,7 @@ The current notebook covers these implemented module families:
 Area & Current code status \\
 \midrule
 \endhead
-\texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/power\_flow/} returns a non-converged result with \texttt{status="not\_implemented"}. \\
+\texttt{analysis::solve\_distribution\_power\_flow} / legacy single-phase distribution PF & Removed from the public code surface.  Distribution-feeder studies now use the explicit three-phase NR interface in \texttt{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp}: \texttt{solve\_three\_phase\_nr}, \texttt{PhaseNodeIndexer}, and phase-domain Y-bus helpers. \\
 Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++ evaluator built on the embedded MIPSolvers engine.  The implemented physical optimization is the finite-source AC LinDistFlow restoration MILP; hybrid DC/VSC/DCDC/SOP objects are handled through connectivity/capacity fallback and reported through model-scope/validity fields.  No external Julia or Gurobi environment is required. \\
 
 \bottomrule

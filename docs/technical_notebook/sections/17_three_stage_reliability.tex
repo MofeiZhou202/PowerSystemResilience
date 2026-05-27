@@ -9,8 +9,9 @@ fault-recovery reliability evaluator in
 process bridge has been removed.  The current implementation reads the normal
 \texttt{HybridPowerSystem} JSON schema, builds a native case, and solves staged
 load-restoration subproblems with the embedded MIPSolvers stack.  Pure LP
-subproblems use the native simplex route; true MILPs use HiGHS first and the
-native B\&C engine only as fallback.
+subproblems use the native simplex route; true MILPs use HiGHS first and retry
+native B\&C when HiGHS is unavailable, fails, or returns a malformed solution
+vector.
 
 The implemented physical model is intentionally narrower than the full hybrid
 research formulation.  AC restoration is a finite-source LinDistFlow MILP.  DC
@@ -356,6 +357,6 @@ TC-10 & \texttt{[regression]} & VSC capacity limits AC support to DC load \\
 \end{center}
 
 In the current \texttt{build\_rel} CTest registration this executable contributes
-10 tests.  The latest full-suite validation after the implementation/documentation
-sync reported 428 registered CTest entries, with 426 active tests passing and
-the two known MATPOWER parser cases handled as skips.
+10 tests.  The current full-suite Release registration contains 436 CTest
+entries; 434 active tests pass and the two known MATPOWER parser cases are
+handled as skips.

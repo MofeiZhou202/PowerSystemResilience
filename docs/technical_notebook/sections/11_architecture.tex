@@ -16,14 +16,14 @@ Directory & Current role \\
 \endhead
 \texttt{include/hacdcpf/model} & Public data structures for AC, DC, converter, switching, three-phase, and result models. \\
 \texttt{include/hacdcpf/api} & High-level public API facade in \texttt{hacdcpf.hpp}. \\
-\texttt{include/hacdcpf/power\_flow} and \texttt{src/power\_flow} & Hybrid Newton PF, DC PF, FDPF, adaptive/islanded/distributed-slack variants, HELM, continuation, Jacobian assembly, PF utilities, \emph{and} distribution network (BFS/3-phase) power flow. \\
+\texttt{include/hacdcpf/power\_flow} and \texttt{src/power\_flow} & Hybrid Newton PF, DC PF, FDPF, adaptive/islanded/distributed-slack variants, HELM, continuation, Jacobian assembly, PF utilities, and three-phase distribution NR helpers.  The legacy single-phase distribution BFS public API has been removed. \\
 \texttt{include/hacdcpf/optimal\_power\_flow} and \texttt{src/optimal\_power\_flow} & AC OPF routing, parity formulation, parity IPM, DC OPF, and reactive-power optimization. \\
 \texttt{include/hacdcpf/power\_models} and \texttt{src/power\_models} & Builder-style models for AC OPF, AC/DC OPF, DC OPF, LinDistFlow, and SCUC experiments. \\
 \texttt{include/hacdcpf/io} and \texttt{src/io} & MATPOWER/JSON/JPC case I/O, optional Excel workbook I/O, optional OpenDSS bridge, and case builders. \\
 \texttt{include/hacdcpf/carbon\_analysis} and \texttt{src/carbon\_analysis} & Carbon emissions tracing (\texttt{run\_carbon\_analysis}). \\
 \texttt{include/hacdcpf/time\_series} and \texttt{src/time\_series} & UC/OPF/PF multi-period time-series pipeline (\texttt{solve\_time\_series\_pf}, \texttt{solve\_unit\_commitment}); annual production simulation via hierarchical temporal decomposition (\texttt{solve\_annual\_production\_simulation}); multi-year lifecycle simulation with degradation and NPV (\texttt{run\_lifecycle\_simulation}, \texttt{run\_lifecycle\_comparison}); shared \texttt{UCSchedule}, \texttt{TimeSeriesPFResult}, and \texttt{TimeSeriesData} types. \\
-\texttt{include/hacdcpf/reliability} and \texttt{src/reliability} & Monte Carlo reliability assessment (\texttt{LOLP}, \texttt{EENS}, \texttt{SAIDI}/\texttt{SAIFI}). \\
-\texttt{include/hacdcpf/resilience} and \texttt{src/resilience} & Distribution resilience assessment with microgrid islanding and storage dispatch (\texttt{run\_distribution\_resilience\_assessment}). \\
+\texttt{include/hacdcpf/reliability} and \texttt{src/reliability} & Monte Carlo, frequency-duration, FMEA, and native three-stage reliability assessment with explicit model-scope and validity contracts. \\
+\texttt{include/hacdcpf/resilience} and \texttt{src/resilience} & Distribution resilience assessment with heuristic restoration, storage/MESS dispatch, and the independent AC-only multi-period LinDistFlow MIP path. \\
 \texttt{include/hacdcpf/engine} & Compatibility/forwarding headers into \texttt{mipsolvers::engine}, plus the hacdcpf Newton PF class declaration and the \texttt{detail/core\_compat.hpp} backward-compat aliases.  There is no \texttt{src/engine} directory in this repository. \\
 \bottomrule
 \end{longtable}
@@ -50,8 +50,8 @@ The facade header \texttt{include/hacdcpf/api/hacdcpf.hpp} currently exposes:
   \texttt{run\_lifecycle\_comparison}, and \texttt{apply\_capacity\_scaling};
   \item reliability: \texttt{run\_reliability\_assessment};
   \item resilience: \texttt{run\_distribution\_resilience\_assessment};
-  \item distribution PF: \texttt{solve\_distribution\_power\_flow} and
-  \texttt{solve\_three\_phase\_nr}.
+  \item distribution PF: \texttt{solve\_three\_phase\_nr} and the
+  header-only \texttt{solve\_three\_phase} wrapper.
 \end{itemize}
 
 Lower-level namespaces expose additional solver objects and helper entry
@@ -104,7 +104,7 @@ A18 & \texttt{src/power\_models/acdcopf\_builder.cpp} & AML hybrid AC/DC OPF mod
 A19 & \texttt{src/power\_models/scuc\_builder.cpp} & MILP Security-Constrained Unit Commitment builder (§\ref{sec:scuc-builder}). \\
 A20 & \texttt{src/time\_series/annual\_production\_sim.cpp} & Hierarchical temporal decomposition annual production simulation: L0 annual plan $\to$ L1 monthly $\to$ L2 weekly UC $\to$ L3 daily OPF/PF replay. \\
 A21 & \texttt{src/time\_series/lifecycle\_simulation.cpp} & Multi-year lifecycle simulation with storage SoH degradation, renewable derating, NPV cost roll-up, and Tier-1/2/3 theoretical carbon error bounds. \\
-A22 & \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} & Optimal Network Reconfiguration (ONR): LinDistFlow MILP build (A16), HiGHS B\&C solve, spanning-tree validation, Newton PF verification (§\ref{sec:algo-onr}). \\
+A22 & \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} / \texttt{topology\_analysis.cpp} & Network reconfiguration: steady AC ONR with native B\&C and PF verification, plus fault-triggered hybrid topology restoration with HiGHS-to-native fallback, structured branch refs, and model-scope/validity flags (§\ref{sec:algo-onr}). \\
 A23 & \texttt{src/analysis/short\_circuit.cpp} & Short-circuit Z-bus analysis: assemble $\mathbf{Y}_\mathrm{fault}$, SparseLU factorize, per-bus Thévenin solve, IEC~60909 fault-current and fault-level computation (§\ref{sec:algo-sc}). \\
 \bottomrule
 \end{longtable}

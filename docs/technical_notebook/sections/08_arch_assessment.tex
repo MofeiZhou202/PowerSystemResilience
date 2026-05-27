@@ -204,7 +204,7 @@ Backend crash / failure & \texttt{Result<T>} with backend diagnostic \\
 
 Provide both styles where helpful:
 \begin{verbatim}
-Result<HybridPowerSystem> try_load_json(const std::string& path);
+Result<HybridPowerSystem> io::try_load_json(const std::string& path);
 HybridPowerSystem load_json_or_throw(const std::string& path);
 \end{verbatim}
 
@@ -225,24 +225,33 @@ A single machine-readable field-descriptor registry
 \subsubsection{Backend Capability Discovery}
 
 Since the package has optional backends (HiGHS, Gurobi, Ipopt, native IPM,
-etc.), expose a runtime capability query:
+etc.), the current public API exposes a runtime capability query:
 
 \begin{verbatim}
 struct SolverCapabilities {
     bool has_sparse_lu;
+    bool has_klu;
+    bool has_umfpack;
     bool has_highs;
     bool has_gurobi;
+    bool has_ipopt;
+    bool has_scip;
     bool has_native_ipm;
     bool has_excel;
+    bool has_opendss;
     bool supports_quadratic_objective;
     bool supports_integer_variables;
+    bool supports_ac_opf;
+    bool supports_dc_opf;
+    bool supports_three_phase;
 };
 
 SolverCapabilities get_solver_capabilities();
 \end{verbatim}
 
-This enables portable user code that selects a backend based on availability
-rather than compile-time flags alone.
+This enables portable user code that selects a backend based on compiled-in
+availability rather than on preprocessor flags alone.  Regression tests also
+check that these flags remain consistent with actual AC/DC OPF solve paths.
 
 % ------------------------------------------------------------
 \subsection{Module-Level Recommendations}
@@ -561,7 +570,8 @@ layer-visibility policy.
 \paragraph{Priority 2 --- User Experience}
 \begin{enumerate}
   \item Add strict/permissive import modes.
-  \item Add runtime capability discovery API (\texttt{get\_solver\_capabilities()}).
+  \item Extend the existing runtime capability discovery API with richer
+        version/path diagnostics for optional external backends.
   \item Add better infeasibility diagnostics with probable causes.
   \item Add example workflows (see Section~\ref{sec:example-workflow}).
   \item Publish JSON schema files.
@@ -595,10 +605,11 @@ journey:
 
 \begin{verbatim}
 #include <hacdcpf/api/hacdcpf.hpp>
+#include <hacdcpf/io/json_io.hpp>
 
 int main() {
     // 1. Load with error propagation
-    auto system_result = hacdcpf::try_load_json("case.json");
+    auto system_result = hacdcpf::io::try_load_json("case.json");
     if (!system_result) {
         std::cerr << system_result.error().message << "\n";
         return 1;
@@ -606,8 +617,8 @@ int main() {
     auto system = system_result.value();
 
     // 2. Validate before solving
-    auto report = hacdcpf::validate(
-        system, hacdcpf::ValidationLevel::SolverReady);
+    auto report = hacdcpf::validation::validate(
+        system, hacdcpf::validation::ValidationLevel::SolverReady);
     if (!report.ok()) {
         std::cerr << report.summary() << "\n";
         return 1;
@@ -632,11 +643,11 @@ int main() {
     }
 
     // 5. Save result
-    hacdcpf::save_power_flow_result_json(pf, "pf_result.json");
+    hacdcpf::io::save_power_flow_result_json(system, pf, "pf_result.json");
 
     // 6. Post-solve analysis
     auto carbon = hacdcpf::analysis::run_carbon_analysis(system, options);
-    hacdcpf::analysis::save_carbon_report_json(carbon, "carbon.json");
+    hacdcpf::io::save_carbon_result_json(carbon, "carbon.json");
 
     return 0;
 }
@@ -655,7 +666,8 @@ but improving \textbf{trust, diagnostics, and maintainability}:
   \item Add independent numerical audit reports for PF and OPF.
   \item Add automated serialisation completeness tests.
   \item Add projection mapping reports.
-  \item Add runtime backend capability discovery.
+  \item Extend runtime backend capability discovery with backend version and
+        executable-path diagnostics.
   \item Enforce dependency boundary rules.
   \item Keep analysis modules modular and subdomain-separated.
   \item Improve infeasibility and non-convergence explanations.
