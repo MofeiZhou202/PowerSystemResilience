@@ -201,20 +201,25 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
 
   // --- Determine candidate (switchable) branch set -----------------------
   // If ONROptions::switchable_branch_ids is empty ⇒ all branches are candidates.
-  std::vector<int> cand;   // local indices into branches[]
+  // Otherwise the input contains stable ACBranch::index values, not positions
+  // in branches[].  Non-candidates keep their current in_service state.
+  std::vector<bool> is_candidate(static_cast<std::size_t>(m), false);
   if (opt.switchable_branch_ids.empty()) {
-    cand.resize(m);
-    std::iota(cand.begin(), cand.end(), 0);
+    std::fill(is_candidate.begin(), is_candidate.end(), true);
   } else {
-    cand = opt.switchable_branch_ids;
-    for (int b : cand)
-      if (b < 0 || b >= m)
-        throw std::out_of_range("solve_optimal_reconfiguration: branch index out of range");
+    std::unordered_map<int, int> branch_id_to_pos;
+    branch_id_to_pos.reserve(static_cast<std::size_t>(m));
+    for (int pos = 0; pos < m; ++pos) {
+      branch_id_to_pos[branches[pos].index] = pos;
+    }
+    for (int branch_id : opt.switchable_branch_ids) {
+      const auto pos = branch_id_to_pos.find(branch_id);
+      if (pos == branch_id_to_pos.end()) {
+        throw std::out_of_range("solve_optimal_reconfiguration: ACBranch::index not found");
+      }
+      is_candidate[static_cast<std::size_t>(pos->second)] = true;
+    }
   }
-  // For ONR the MILP uses exactly the candidate branches.
-  // Non-candidate branches keep their current in_service status.
-  // For simplicity in this implementation all branches are candidates.
-  // (Non-switchable branches have alpha fixed to 1 if in_service else 0.)
 
   // --- Build bus-ID map ---------------------------------------------------
   const auto id_map = build_id_map(buses);
@@ -356,8 +361,20 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
   const double vmax2 = opt.v_max_pu * opt.v_max_pu;
 
   for (int b = 0; b < m; ++b) {
-    // alpha  (bridge edges must stay closed: lb = 1)
-    lp.vars[idx_alpha(b)] = {VarType::Binary, is_bridge[b] ? 1.0 : 0.0, 1.0, "a" + std::to_string(b)};
+    // alpha (bridges and non-candidates are fixed; candidates may switch)
+    double alpha_lb = 0.0;
+    double alpha_ub = 1.0;
+    if (is_bridge[b]) {
+      alpha_lb = 1.0;
+      alpha_ub = 1.0;
+    } else if (!is_candidate[static_cast<std::size_t>(b)]) {
+      const double fixed = branches[b].in_service ? 1.0 : 0.0;
+      alpha_lb = fixed;
+      alpha_ub = fixed;
+    }
+    const bool alpha_fixed = std::abs(alpha_lb - alpha_ub) <= 1e-12;
+    lp.vars[idx_alpha(b)] = {alpha_fixed ? VarType::Continuous : VarType::Binary,
+                 alpha_lb, alpha_ub, "a" + std::to_string(b)};
     // P (active power flow)
     double pmax = (branches[b].rate_a_mva > 1e-9)
                   ? branches[b].rate_a_mva / base_mva : Pmax_default;
@@ -374,8 +391,12 @@ ONRResult solve_optimal_reconfiguration(const ACSystem& ac_sys,
     double ub = (i == root) ? 1.0 : vmax2;
     lp.vars[idx_v(i)] = {VarType::Continuous, lb, ub, "v" + std::to_string(i)};
   }
-  milp.binary_idx.resize(m);
-  std::iota(milp.binary_idx.begin(), milp.binary_idx.end(), 0);
+  milp.binary_idx.clear();
+  for (int b = 0; b < m; ++b) {
+    if (lp.vars[idx_alpha(b)].type == VarType::Binary) {
+      milp.binary_idx.push_back(idx_alpha(b));
+    }
+  }
 
   // -----------------------------------------------------------------------
   // Equality constraints

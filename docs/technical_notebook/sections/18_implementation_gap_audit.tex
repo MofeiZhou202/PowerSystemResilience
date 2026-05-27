@@ -7,192 +7,248 @@ This chapter records the current code-backed boundary between implemented
 runtime behavior, transparent approximations, resolved gaps, and remaining
 bounded model scope.  It is intentionally separate from the mathematical model
 chapters: a formula in this notebook is not a claim that every richer physical
-variant is solved end-to-end in production code.
+variant is solved end-to-end in production code.  Each status item below is tied
+to a concrete API, source path, and regression test rather than to narrative
+intent alone.
 
 \subsection{Audit Method}
 
-The audit covered \texttt{src/}, \texttt{include/}, \texttt{tests/}, and the
-technical-notebook \texttt{sections/} directory.  The review combined source
-inspection with searches for high-signal markers such as \texttt{stub},
-\texttt{unimplemented}, \texttt{placeholder}, \texttt{fallback},
-\texttt{simplified}, \texttt{approximate}, \texttt{dummy}, and
-\texttt{unsupported}.  Marker counts are not used as defect counts: many
-occurrences are legitimate solver fallback paths, explicit input-domain checks,
-or tests that verify a declared boundary.  The latest pass also audited the
-three-stage reliability MILP, fault-topology reconfiguration, DCOPF isolated
-island pruning, FMEA load scaling, and reran the full \texttt{build\_rel} CTest
-suite.
+The audit covered \verb|src/|, \verb|include/|, \verb|tests/|, the
+technical-notebook \verb|sections/| directory, and the sibling external
+\verb|MIPSolvers| checkout used by CMake.  The review combined source inspection
+with searches for high-signal markers such as \verb|stub|, \verb|unimplemented|,
+\verb|placeholder|, \verb|fallback|, \verb|simplified|, \verb|approximate|,
+\verb|dummy|, and \verb|unsupported|.  Marker counts are not used as defect
+counts: many occurrences are legitimate solver fallback paths, explicit
+input-domain checks, or tests that verify a declared boundary.
 
-\subsection{High-Risk Items Closed in This Pass}
+The latest pass specifically audited external solver reproducibility, native
+B\&C quiet-mode behavior, hybrid topology fault addressing, topology load
+accounting, legacy ONR branch-ID semantics, three-stage reliability exactness,
+graph contraction domain maps, and DCOPF branch-dual validity.  A second claim
+audit then re-read this chapter against the code and tests.  It found no stale
+closed-gap statement, but it did expose one additional quiet-mode leak in the
+strict resilience MIP path; that leak is now gated in the external solver and
+covered by file-descriptor-level output capture.
 
-\begin{longtable}{L{0.22\linewidth}L{0.34\linewidth}L{0.34\linewidth}}
-\toprule
-Area & Current code state & Regression evidence \\
-\midrule
-\endhead
-Distribution power-flow public API &
-The legacy distribution power-flow compatibility header and public single-phase
-stub/BFS-style API are removed.  The public distribution feeder surface is now
-the three-phase NR contract in
-\texttt{include/hacdcpf/power\_flow/distribution\_power\_flow.hpp}:
-\texttt{solve\_three\_phase\_nr} and phase-domain Y-bus helpers.  Searches find
-no live \texttt{solve\_distribution\_pf}, \texttt{DistributionPFOptions}, or
-\texttt{DistributionPFResult} code symbols. &
-\texttt{test\_three\_phase\_pf} covers three-phase projection, meshed systems,
-multi-source systems, transformer support, and JSON round-trips (CTest
-\#293--\#316).  \texttt{test\_three\_phase\_nr} covers the native abc-domain NR
-solver directly (CTest \#344--\#359). \\
-Hybrid FMEA physical evaluation &
-Hybrid FMEA no longer scores DC/VSC systems through an AC-only DCOPF boundary.
-When DC or converter components exist, \texttt{run\_distribution\_fmea} uses a
-linear hybrid AC/DC network LP that co-optimizes AC load shedding, DC load
-shedding, AC/DC sources, DC branches, VSC active-power transfers, and DC/DC
-converter transfers.  Reports set \texttt{model\_scope} to
-\texttt{hybrid-acdc-network-lp} and mark DC-load curtailment plus VSC/DC power
-flow as included. &
-\texttt{FMEA: hybrid catalog optimizes DC load and VSC transfer} is registered
-as CTest \#383 and asserts the hybrid scope string, validity flags, AC+DC nodal
-curtailment vector, and VSC outage DC-load shedding.  CTest \#384 proves that
-\texttt{load\_scale\_factor} scales \texttt{DCBus::pd\_mw} demand as well as
-explicit \texttt{DCLoad} records. \\
-AC OPF fallback for hybrid cases &
-Hybrid AC/DC cases are detected before fallback selection.  If the nonlinear
-hybrid path fails, \texttt{solve\_ac\_opf} suppresses the AC-only
-economic-dispatch plus AC-PF fallback and attaches an explicit diagnostic that
-the case contains DC/VSC components.  The fast AC-only route is still available
-for AC-only cases. &
-\texttt{AC OPF: hybrid cases suppress AC-only fallback} is registered as CTest
-\#266 and asserts that a failing hybrid OPF does not report the AC-only fallback
-status and does include the suppression hint. \\
-\bottomrule
-\end{longtable}
+\subsection{High-Risk Items Closed}
+
+\begin{enumerate}
+  \item \textbf{External MIPSolvers reproducibility.}  The external dependency
+        is expected at pinned commit
+        \verb|f0916c99f7f1364b825cabb58b50c3cc3d20eddd|.  CMake treats any
+        external \verb|MIPSolvers| HEAD mismatch as fatal, and now also treats a
+        dirty external checkout as fatal for Release, RelWithDebInfo,
+        MinSizeRel, and CI configurations.  The local override
+        \verb|HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK| is rejected in those strict
+        modes, so a reproducible Release artifact cannot silently include
+        unpinned or uncommitted external solver edits.
+
+  \item \textbf{Distribution power-flow public API.}  The legacy distribution
+        power-flow compatibility header and public single-phase stub/BFS-style
+        API are removed.  The public distribution feeder surface is the
+        three-phase NR contract in
+        \verb|include/hacdcpf/power_flow/distribution_power_flow.hpp|:
+        \verb|solve_three_phase_nr| and phase-domain Y-bus helpers.  Searches
+        find no live \verb|solve_distribution_pf|, \verb|DistributionPFOptions|,
+        or \verb|DistributionPFResult| code symbols.
+
+  \item \textbf{Hybrid FMEA physical evaluation.}  Hybrid FMEA no longer scores
+        DC/VSC systems through an AC-only DCOPF boundary.  When DC or converter
+        components exist, \verb|run_distribution_fmea| uses a linear hybrid
+        AC/DC network LP that co-optimizes AC load shedding, DC load shedding,
+        AC/DC sources, DC branches, VSC active-power transfers, and DC/DC
+        converter transfers.  Reports set \verb|model_scope| to
+        \verb|hybrid-acdc-network-lp| and mark DC-load curtailment plus VSC/DC
+                        power flow as included.  The same validity contract now explicitly
+                        leaves \verb|ac_voltage_reactive_feasibility_certified=false| because
+                        nonlinear AC voltage/reactive checks are outside this LP evaluator.
+
+  \item \textbf{AC OPF fallback for hybrid cases.}  Hybrid AC/DC cases are
+        detected before fallback selection.  If the nonlinear hybrid path fails,
+        \verb|solve_ac_opf| suppresses the AC-only economic-dispatch plus AC-PF
+        fallback and attaches an explicit diagnostic that the case contains
+        DC/VSC components.  The fast AC-only route remains available for AC-only
+        cases.
+\end{enumerate}
 
 \subsection{Other Resolved or Explicitly Bounded Findings}
 
-\begin{longtable}{L{0.22\linewidth}L{0.34\linewidth}L{0.34\linewidth}}
-\toprule
-Area & Current code state & Documentation status \\
-\midrule
-\endhead
-Three-stage reliability &
-\texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++ evaluator.
-It solves finite-source AC LinDistFlow restoration with explicit source bounds,
-load-shed variables, branch limits, voltage bounds, strict radial forest
-constraints, healthy normally-closed edge coupling, and Stage~2
-switch-operation limits.  The forest edge budget now counts source-containing
-mandatory components rather than raw source buses, so multi-source radial
-feeders are feasible without reopening healthy lines.  True MILPs use HiGHS
-first and native B\&C as fallback; per-stage status and MIP gaps are surfaced.
-No Julia or Gurobi runtime is required. &
-Section~\ref{sec:three_stage_reliability} documents the implemented AC MILP and
-explicitly labels DC/VSC/DCDC/SOP handling as connectivity/capacity fallback.
-CTest \#427 protects the no-free-open rule for healthy normally-closed lines;
-CTest \#428 protects VSC-capacity-limited AC support to DC load. \\
-Network reconfiguration MILP fallback &
-\texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} no longer
-skips the mathematical fallback after heuristic failure.  It tries HiGHS when
-available and otherwise calls the native B\&C fallback.  Source detection now
-includes generators, external grids, and SLACK-bus fallback.  The result exposes
-\texttt{solver\_backend}, \texttt{solver\_status}, \texttt{solver\_mip\_gap}, and
-\texttt{proven\_optimal}; \texttt{optimal} mirrors that certificate.  The
-switchable-edge input now accepts structured \texttt{BranchRef} values via
-\texttt{switchable\_branches}; the legacy \texttt{switchable\_branch\_ids} field
-is AC-only.  Status certificates use exact normalized optimality labels rather
-than substring matching, and topology/native B\&C diagnostic logs honor
-\texttt{verbose=false}. &
-The previous audit item saying the fallback was skipped is resolved.  CTest
-\#335 verifies that explicit \texttt{switchable\_branch\_ids} gates all topology
-changes and that the solver certificate is coherent.  CTest \#336 verifies
-mixed AC/DC/VSC same-ID disambiguation for structured switchable input. \\
-Topology load accounting &
-Fault reconfiguration adds explicit \texttt{ACSystem::loads} demand and direct
-\texttt{ACBus::pd\_mw}/\texttt{qd\_mvar} demand instead of treating one as a
-replacement for the other. &
-Regression coverage in \texttt{test\_topology\_crossval} protects this behavior. \\
-Resilience MIP entry point &
-\texttt{run\_distribution\_resilience\_mip\_assessment} builds an independent
-multi-period LinDistFlow-style restoration MILP.  It does not delegate to the
-heuristic assessment.  Result statistics expose \texttt{model\_scope}, validity
-flags, solver name/status, objective, gap, and constraint counts. &
-The old ``heuristic delegate'' finding is resolved.  The MIP scope remains
-AC-only LinDistFlow and reports that scope explicitly. \\
-DC OPF load-shedding audit &
-Direct isolated-island shedding is now written to both
-\texttt{total\_load\_shedding\_mw} and the per-bus
-\texttt{load\_shedding\_mw} vector.  The topology pre-prune removes loads,
-generators, fixed injections, storage, and AC branches attached to dead islands
-before LP construction.  The independent feasibility check includes slack-bus
-balance. &
-Regression coverage lives in \texttt{test\_acopf\_dcopf\_crossval}: CTest \#44
-checks per-bus isolated shedding, CTest \#45 checks dead-island generator and
-branch pruning, and CTest \#46 checks slack-bus balance. \\
-DC OPF JSON contract &
-\texttt{dc\_opf\_result\_to\_json}, \texttt{dc\_opf\_result\_from\_json},
-\texttt{save\_dc\_opf\_result\_json}, and \texttt{load\_dc\_opf\_result\_json}
-serialize/restore solver audit fields, including \texttt{solver\_chain} and
-\texttt{objective\_model}. &
-The output contract is documented in Sections~\ref{sec:dc-opf} and the I/O
-contract sections. \\
-DC OPF LMPs and branch duals &
-Nodal LMP extraction is implemented through a supporting simplex LP when
-\texttt{compute\_lmp=true}.  Branch shadow prices are intentionally flagged with
-\texttt{branch\_mu\_valid=false} until bounded-variable congestion duals are
-recovered robustly. &
-This is no longer a zero-filled LMP TODO.  It is an implemented LMP path plus an
-explicit branch-dual validity boundary. \\
-JPC rich-component round-trip &
-\texttt{test\_io\_json} includes rich-component JPC round-trip coverage and
-asserts the populated component collections are preserved. &
-The previous missing-test item is resolved. \\
-\bottomrule
-\end{longtable}
+\begin{enumerate}
+  \item \textbf{Native B\&C quiet mode.}  The external native branch-and-cut
+        implementation now gates root-phase timing, conformance, clique,
+        propagation, reduced-cost lurking, implied-bound, proof, objective, and
+        queue diagnostics behind
+        \verb|BCOptions::verbose| or explicit diagnostic environment variables
+        such as \verb|MIPSOLVERS_BC_CONF| and \verb|MIPSOLVERS_BC_TIMELINE|.
+        File-descriptor-level stdout/stderr capture tests in topology
+        reconfiguration, legacy ONR, and the strict resilience MIP entry point
+        verify that \verb|verbose=false| is actually quiet.
 
-\subsection{Remaining Bounded Model Scope}
+  \item \textbf{Three-stage reliability exactness.}
+        \verb|src/reliability/three_stage_reliability.cpp| is a native C++
+        evaluator.  It solves finite-source AC LinDistFlow restoration with
+        explicit source bounds, load-shed variables, branch limits, voltage
+        bounds, strict radial forest constraints, healthy normally-closed edge
+        coupling, and Stage 2 switch-operation limits.  True MILPs use HiGHS
+        first and native B\&C as fallback; per-stage status and MIP gaps are
+        surfaced.  No Julia or Gurobi runtime is required.
+
+        Result field \verb|ok| now means verified exactness inside the
+        implemented physical scope, not merely successful metric production.
+        Pure AC cases can return \verb|ok=true|.  Hybrid DC/VSC/DCDC/SOP cases
+        return metrics with \verb|ok=false|, nonempty \verb|error|, and model
+        scope \verb|ac-lindistflow-milp+dc-connectivity-fallback|.  Regression
+        tests protect pure-AC exactness, hybrid non-exactness, finite source
+        capacity, AC bus load de-duplication, the no-free-open rule for healthy
+        normally-closed lines, and VSC-capacity-limited AC support to DC load.
+
+  \item \textbf{Topology reconfiguration hybrid addressing.}
+        \verb|src/network_reconfiguration/topology_reconfiguration.cpp| tries
+        HiGHS when available and otherwise calls the native B\&C fallback.
+        The result exposes \verb|solver_backend|, \verb|solver_status|,
+        \verb|solver_mip_gap|, and \verb|proven_optimal|; \verb|optimal| mirrors
+        that certificate.  Switchable-edge input accepts structured
+        \verb|BranchRef| values via \verb|switchable_branches|; fault input now
+        also accepts structured \verb|faulted_branches|.  The legacy
+        \verb|switchable_branch_ids| and \verb|line_failures| fields are AC-only
+        compatibility fields.
+
+  \item \textbf{Topology load accounting.}  Fault reconfiguration adds explicit
+        \verb|ACSystem::loads| demand, direct \verb|ACBus::pd_mw| and
+        \verb|ACBus::qd_mvar| demand, and direct \verb|DCBus::pd_mw| demand
+        instead of treating any one record type as a replacement for the others.
+
+  \item \textbf{Legacy ONR branch identity.}  The legacy AC ONR API documents
+        \verb|ONROptions::switchable_branch_ids| as stable \verb|ACBranch::index|
+        values, not vector positions.  Non-candidate branches are fixed to
+        their current \verb|in_service| state, and fixed \verb|alpha| variables
+        are continuous constants omitted from the native B\&C binary set.
+
+  \item \textbf{Resilience MIP entry point.}
+        \verb|run_distribution_resilience_mip_assessment| builds an independent
+        multi-period LinDistFlow-style restoration MILP.  It does not delegate
+        to the heuristic assessment.  Result statistics expose
+        \verb|model_scope|, validity flags, solver name/status, objective, gap,
+        and constraint counts.  The MIP scope remains AC-only LinDistFlow and
+        reports that scope explicitly through \verb|model_stats.model_scope|,
+        \verb|validity.dc_network_modelled=false|, and
+        \verb|validity.vsc_dispatch_modelled=false|.
+
+  \item \textbf{DC OPF load-shedding audit.}  Direct isolated-island shedding is
+        written to both \verb|total_load_shedding_mw| and the per-bus
+        \verb|load_shedding_mw| vector.  The topology pre-prune removes loads,
+        generators, fixed injections, storage, and AC branches attached to dead
+        islands before LP construction.  The independent feasibility check
+        includes slack-bus balance.
+
+  \item \textbf{DC OPF JSON contract.}  DCOPF result JSON helpers
+        serialize/restore solver audit fields, including \verb|solver_chain|
+        and \verb|objective_model|.
+
+  \item \textbf{DC OPF LMPs and branch duals.}  Nodal LMP extraction is
+        implemented through a supporting simplex LP when \verb|compute_lmp=true|.
+        Branch shadow-price arrays are intentionally flagged with
+        \verb|branch_mu_valid=false| until bounded-variable congestion duals are
+        recovered robustly.  The LMP regression asserts this uncertified
+        branch-dual boundary explicitly.
+
+  \item \textbf{Graph contraction and recovery maps.}  Hybrid graph contraction
+        results expose domain-qualified maps such as \verb|ac_bus_to_super| and
+        \verb|dc_bus_to_super|.  Recovery helpers can use the structured result
+        directly so same numeric AC/DC bus IDs are not collapsed through a
+        legacy combined map.
+
+  \item \textbf{JPC rich-component round-trip.}  \verb|test_io_json| includes
+        rich-component JPC round-trip coverage and asserts the populated
+        component collections are preserved.
+\end{enumerate}
+
+\subsection{Closed Model-Scope Contracts}
+
+The second pass treats the following items as closed contracts rather than open
+implementation gaps.  They are not silently solved by approximation and they are
+not advertised as richer physics than the code enforces; each boundary is
+visible through a result field and protected by regression tests.
 
 \begin{enumerate}
   \item Hybrid FMEA is a linear restoration/curtailment LP.  It includes DC
         loads, DC network edges, VSC active transfers, DC/DC transfers, and
         source limits, but it does not certify nonlinear AC voltage/reactive
-        feasibility for every restoration state.
+        feasibility for every restoration state.  Callers can check
+        \verb|FMEAResult::validity.ac_voltage_reactive_feasibility_certified|,
+        which remains false for this evaluator.
+
   \item The resilience MIP entry point remains an AC-only LinDistFlow
-        restoration MILP and reports that scope explicitly.
+        restoration MILP and reports that scope explicitly through
+        \verb|model_stats.model_scope=ac-only-lindistflow| plus false DC/VSC
+        validity flags.
+
+  \item Three-stage reliability is exact only for the pure-AC implemented
+        restoration MILP scope.  Hybrid DC/VSC/DCDC/SOP cases report useful
+        connectivity/capacity metrics but clear \verb|ok| and set validity
+        flags false for DC power flow and whole-system restoration MILP
+        coverage.
+
   \item DC OPF branch shadow-price arrays remain invalid unless
-        \texttt{branch\_mu\_valid=true}; bounded-variable branch-dual extraction
-        is still a deliberately exposed boundary.
+        \verb|branch_mu_valid=true|; bounded-variable branch-dual extraction is
+        still a deliberately exposed boundary.  Nodal LMPs remain available via
+        the supporting simplex LP when \verb|compute_lmp=true|.
 \end{enumerate}
 
 \subsection{Verification Snapshot}
 
 After the implementation pass, the following commands were run from the
-repository root using the \texttt{build\_rel} tree:
+repository root using the \verb|build| Debug tree.  A Release configure was also
+attempted specifically to prove that external \verb|MIPSolvers| reproducibility
+is enforced.  The latest rerun fails before dirty-tree checking because the
+local external checkout HEAD is not the pinned commit; therefore the full
+Release CTest suite is intentionally blocked until the external solver tree is
+checked out at the recorded pin and cleaned or the pin is intentionally updated.
+
 \begin{verbatim}
-cmake --build build_rel -j4
-./build_rel/tests/test_three_stage_reliability \
-      "[reliability][three_stage][regression]"
-./build_rel/tests/test_topology_crossval \
-      "[topology][reconfiguration][regression]"
-./build_rel/tests/test_acopf_dcopf_crossval \
-      "[opf][dcopf][regression]"
-./build_rel/tests/test_resilience_assessment \
-      "[fmea][reliability][regression]"
-./build_rel/tests/test_solver_capabilities \
-      "AC OPF: hybrid cases suppress AC-only fallback"
-ctest --test-dir build_rel --output-on-failure
+cmake --build build -j4
+./build/tests/test_three_stage_reliability "[reliability][three_stage][integration][milp]"
+./build/tests/test_three_stage_reliability "[reliability][three_stage][regression]"
+./build/tests/test_topology_crossval "[topology][reconfiguration][regression]"
+./build/tests/test_topology_crossval "[topology][onr][regression]"
+./build/tests/test_resilience_assessment "Resilience: MIP solver returns feasible on zero-fault system"
+./build/tests/test_resilience_assessment "[fmea][reliability][regression]"
+./build/tests/test_acopf_dcopf_crossval "[integration][opf][dcopf][lmp]"
+./build/tests/test_graph "[graph][contraction]"
+./build/tests/test_graph "[graph][recovery]"
+./build/tests/test_graph "[graph][collision]"
+cmake -S . -B /tmp/hacdcpf_release_dirty_check -DCMAKE_BUILD_TYPE=Release
+ctest --test-dir build --output-on-failure
 \end{verbatim}
-The full CTest result is \textbf{428 registered tests}: \textbf{426 active
-tests passed}, \textbf{0 failed}, and \textbf{2 expected MATPOWER parser skips}
-(\texttt{case533mt\_hi}, \texttt{case533mt\_lo}).
+
+Focused regression outcomes include: topology reconfiguration \textbf{28
+assertions in 7 cases}, legacy ONR \textbf{6 assertions in 1 case}, strict
+resilience MIP scope/quiet-mode \textbf{10 assertions in 1 case}, FMEA hybrid
+scope regressions \textbf{16 assertions in 2 cases}, three-stage regressions
+\textbf{24 assertions in 5 cases}, three-stage integration \textbf{1134
+assertions in 3 cases}, graph contraction / recovery / collision \textbf{23 /
+27 / 28 assertions}, and DCOPF LMP \textbf{41 assertions in 3 cases}.  The
+Release configure fails as expected with a fatal reproducibility message; in the
+latest rerun, CMake stopped at the external \verb|MIPSolvers| HEAD pin mismatch
+before reaching the dirty-tree check.  The full Debug CTest result is
+\textbf{432 registered tests}: \textbf{430 active tests passed}, \textbf{0
+failed}, and \textbf{2 expected MATPOWER parser skips} (\verb|case533mt_hi|,
+\verb|case533mt_lo|).
 
 \subsection{Audit Conclusion}
 
 The repository is not an empty shell: PF, OPF, graph, I/O, carbon, time-series,
 resilience, FMEA, topology reconfiguration, and three-stage reliability paths
-are implemented and covered by the current 428-entry CTest suite.  The three
+are implemented and covered by the current 432-entry CTest suite.  The three
 previous high-risk audit items in this chapter are now closed in code and in
 tests: the legacy distribution power-flow public API is removed, hybrid FMEA
 optimizes DC networks and VSC transfers, and hybrid AC OPF can no longer accept
 an AC-only fallback as a converged hybrid result.  This pass also closed the
-newly audited logic holes in three-stage reliability, topology reconfiguration,
-DCOPF isolated-island pruning, and FMEA DC load scaling.  The remaining risks
-are bounded model-scope statements surfaced through result fields, validity
-flags, and regression tests.
+newly audited logic holes in external MIPSolvers reproducibility, native B\&C
+quiet mode, three-stage reliability exactness, topology reconfiguration, legacy
+ONR branch identity, graph domain-map handling, DCOPF branch-dual validity, and
+FMEA DC load scaling.  The second-pass review found no remaining unsupported
+claim in this chapter; the items that would otherwise read as gaps are now
+explicit model-scope contracts surfaced through result fields, validity flags,
+diagnostics, and regression tests.

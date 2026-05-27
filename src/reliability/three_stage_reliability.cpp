@@ -1179,7 +1179,10 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
         .restoration_milp_solved     = !has_dc_or_vsc,
   };
 
-  // r.ok is true only when every fault stage solved to a verified optimum.
+  // r.ok is true only when every fault stage solved to a verified optimum and
+  // the submitted system is inside the evaluator's full physical scope.  Hybrid
+  // DC/VSC/SOP cases return metrics, but they use the documented connectivity
+  // fallback and therefore are not exact full-system MILP results.
   // Any stage that returned "failed*" used conservative full-shed estimates;
   // those values are still accumulated into EENS but the result is flagged
   // so that callers know the metrics are upper-bound estimates, not exact.
@@ -1193,7 +1196,15 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
       break;
     }
   }
-  r.ok = !any_failed;
+  r.ok = !any_failed && !has_dc_or_vsc;
+  if (!r.ok && r.error.empty()) {
+    if (has_dc_or_vsc) {
+      r.error = "hybrid three-stage reliability uses DC/VSC/SOP connectivity fallback; "
+                "full physical restoration MILP coverage is not available";
+    } else if (any_failed) {
+      r.error = "one or more fault stages failed or returned an approximate solution";
+    }
+  }
 }
 
 }  // anonymous namespace

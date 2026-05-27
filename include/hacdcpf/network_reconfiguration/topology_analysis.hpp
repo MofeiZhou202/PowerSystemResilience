@@ -42,7 +42,7 @@ int count_islands(const ACSystem& ac_sys);
 // ---------------------------------------------------------------------------
 
 struct ONROptions {
-  /// Indices of branches that the ONR may open or close.
+  /// Stable ACBranch::index values that the ONR may open or close.
   /// An empty vector means ALL branches in ac_sys.branches are candidates.
   std::vector<int> switchable_branch_ids;
 

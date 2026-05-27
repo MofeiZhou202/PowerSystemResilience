@@ -866,4 +866,8 @@ TEST_CASE("DC OPF LMP: congestion re-dispatch and feasibility",
   // ── (c) Re-dispatch must not reduce cost vs the unconstrained baseline ────
   // (Feasible re-dispatch can only cost the same or more; never less.)
   CHECK(result.objective >= r_free.objective - 1.0);
+
+  // Branch congestion duals are intentionally not certified until a KKT-based
+  // extraction is implemented.  Callers must gate branch_mu_lower/upper on this.
+  CHECK_FALSE(result.branch_mu_valid);
 }

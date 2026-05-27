@@ -70,9 +70,15 @@ ThreeStageReliabilityResult run_case(const char* json_name) {
 }
 
 /// Common post-run assertions shared by all integration test cases.
-void check_result_shape(const ThreeStageReliabilityResult& r) {
+void check_result_shape(const ThreeStageReliabilityResult& r,
+                        bool expect_exact_ok = true) {
   INFO("error: " << r.error);
-  REQUIRE(r.ok);
+  if (expect_exact_ok) {
+    REQUIRE(r.ok);
+  } else {
+    CHECK_FALSE(r.ok);
+    CHECK(!r.error.empty());
+  }
 
   // Indices must be finite non-negative.
   CHECK(r.saifi       >= 0.0);
@@ -178,7 +184,7 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK_FALSE(r.validity.dc_power_flow_enforced);
   CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
-  check_result_shape(r);
+  check_result_shape(r, false);
 
   std::printf("[TC-3] case33mg_acdc: nb=%d (ac=%d dc=%d), nl=%d (ac=%d dc=%d), "
                "vsc=%d, sop=%d, mg=%d\n",
@@ -208,7 +214,7 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
     CHECK(sop.efficiency <= 1.0);
   }
 
-  check_result_shape(r);
+  check_result_shape(r, false);
 
   // All three stage-1 SOP power vectors must have the right length.
   for (const auto& f : r.faults) {
@@ -396,7 +402,10 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   ThreeStageReliabilityOptions opts;
   opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
-  REQUIRE(r.ok);
+  REQUIRE_FALSE(r.ok);
+  REQUIRE(!r.error.empty());
+  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
+  CHECK_FALSE(r.validity.dc_power_flow_enforced);
   REQUIRE(r.faults.size() == 1);
 
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(400.0).margin(1e-3));

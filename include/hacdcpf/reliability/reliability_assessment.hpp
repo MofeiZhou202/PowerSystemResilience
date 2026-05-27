@@ -177,6 +177,10 @@ struct ReliabilityResult {
     /// True if AC load curtailment is computed via OPF (not all-or-nothing).
     /// True for NSQ/SEQ MC and FMEA paths that call solve_dc_opf.
     bool ac_opf_curtailment{true};
+    /// True only when nonlinear AC voltage/reactive feasibility is certified.
+    /// Reliability evaluators in this header use DC-OPF or linear hybrid LPs,
+    /// so this remains false unless a caller adds a post-solve AC validation.
+    bool ac_voltage_reactive_feasibility_certified{false};
   };
   ValidityFlags validity{};
 
@@ -349,6 +353,7 @@ struct FMEAResult {
     bool dc_load_curtailment_included{false};
     bool vsc_dc_power_flow_modelled{false};
     bool ac_opf_curtailment{true};
+    bool ac_voltage_reactive_feasibility_certified{false};
   };
   ValidityFlags validity{};
 };

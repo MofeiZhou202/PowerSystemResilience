@@ -63,6 +63,10 @@ struct ThreeStageSopConfig {
 
 /// Aggregate result of one three-stage reliability evaluation.
 struct ThreeStageReliabilityResult {
+  /// True only when the result is a verified exact evaluation inside the
+  /// evaluator's full physical scope.  Hybrid DC/VSC/SOP cases currently
+  /// return metrics with `ok == false` because they use the documented
+  /// DC-connectivity fallback rather than a full physical restoration MILP.
   bool ok{false};
   std::string error;          ///< populated when ok == false
 

@@ -41,6 +41,10 @@ struct TopoReconfOptions {
   /// 这些线路将被强制断开，然后通过闭合联络开关恢复供电
   std::vector<int> line_failures;
 
+  /// Structured faulted branch list. Use this for hybrid systems where AC,
+  /// DC, and VSC components may share the same numeric .index value.
+  std::vector<BranchRef> faulted_branches;
+
   /// Structured switchable branch list. Use this for hybrid systems where
   /// AC, DC, and VSC components may share the same numeric .index value.
   /// Empty = automatic tie-switch detection.

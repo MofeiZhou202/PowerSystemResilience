@@ -20,8 +20,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <cmath>
+#include <cstdio>
+#include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
@@ -32,6 +37,76 @@ using namespace hacdcpf::analysis;
 using Approx = Catch::Approx;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+class ScopedStdStreamCapture {
+public:
+  ScopedStdStreamCapture()
+      : stdout_file_(std::tmpfile()), stderr_file_(std::tmpfile()) {
+    if (stdout_file_ == nullptr || stderr_file_ == nullptr) {
+      throw std::runtime_error("failed to create temporary stream capture files");
+    }
+    flush_all();
+    stdout_saved_ = ::dup(STDOUT_FILENO);
+    stderr_saved_ = ::dup(STDERR_FILENO);
+    if (stdout_saved_ < 0 || stderr_saved_ < 0) {
+      throw std::runtime_error("failed to duplicate stdout/stderr");
+    }
+    if (::dup2(::fileno(stdout_file_), STDOUT_FILENO) < 0 ||
+        ::dup2(::fileno(stderr_file_), STDERR_FILENO) < 0) {
+      throw std::runtime_error("failed to redirect stdout/stderr");
+    }
+    active_ = true;
+  }
+
+  ~ScopedStdStreamCapture() {
+    restore();
+    if (stdout_file_ != nullptr) std::fclose(stdout_file_);
+    if (stderr_file_ != nullptr) std::fclose(stderr_file_);
+  }
+
+  ScopedStdStreamCapture(const ScopedStdStreamCapture&) = delete;
+  ScopedStdStreamCapture& operator=(const ScopedStdStreamCapture&) = delete;
+
+  void restore() {
+    if (!active_) return;
+    flush_all();
+    ::dup2(stdout_saved_, STDOUT_FILENO);
+    ::dup2(stderr_saved_, STDERR_FILENO);
+    ::close(stdout_saved_);
+    ::close(stderr_saved_);
+    stdout_saved_ = -1;
+    stderr_saved_ = -1;
+    active_ = false;
+  }
+
+  std::string stdout_text() const { return read_stream(stdout_file_); }
+  std::string stderr_text() const { return read_stream(stderr_file_); }
+
+private:
+  static void flush_all() {
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(nullptr);
+  }
+
+  static std::string read_stream(std::FILE* stream) {
+    std::fflush(stream);
+    std::rewind(stream);
+    std::string text;
+    char buffer[4096];
+    while (const std::size_t read_count =
+               std::fread(buffer, 1, sizeof(buffer), stream)) {
+      text.append(buffer, read_count);
+    }
+    return text;
+  }
+
+  std::FILE* stdout_file_{nullptr};
+  std::FILE* stderr_file_{nullptr};
+  int stdout_saved_{-1};
+  int stderr_saved_{-1};
+  bool active_{false};
+};
 
 /// Build a simple 3-bus radial AC system:
 ///   Bus1 (slack) --- Branch1 (1 km) --- Bus2 --- Branch2 (1 km) --- Bus3
@@ -381,8 +456,23 @@ TEST_CASE("Resilience: MIP solver returns feasible on zero-fault system", "[resi
   opts.horizon_hours = 4;
   opts.time_step_hr = 1.0;
   opts.default_fault_count = 0;
-  auto r = run_distribution_resilience_mip_assessment(sys, opts);
+
+  ScopedStdStreamCapture capture;
+  const auto r = run_distribution_resilience_mip_assessment(sys, opts);
+  capture.restore();
+  const std::string stdout_text = capture.stdout_text();
+  const std::string stderr_text = capture.stderr_text();
+
   CHECK(r.feasible);
+  CHECK(r.model == DistributionResilienceModel::MultiPeriodMIPLinDistFlow);
+  CHECK(r.model_stats.model_scope == "ac-only-lindistflow");
+  CHECK_FALSE(r.model_stats.validity.dc_network_modelled);
+  CHECK_FALSE(r.model_stats.validity.vsc_dispatch_modelled);
+  CHECK(r.model_stats.validity.ac_branch_flow_limits_enforced);
+  CHECK(r.model_stats.validity.lindistflow_voltage_envelope_enforced);
+  CHECK(r.model_stats.validity.radial_topology_enforced);
+  CHECK(stdout_text.empty());
+  CHECK(stderr_text.empty());
 }
 
 TEST_CASE("Resilience: peak shed non-negative", "[resilience]") {
@@ -571,6 +661,7 @@ TEST_CASE("FMEA: hybrid catalog optimizes DC load and VSC transfer",
   CHECK(result.validity.dc_load_curtailment_included);
   CHECK(result.validity.vsc_dc_power_flow_modelled);
   CHECK(result.validity.ac_opf_curtailment);
+  CHECK_FALSE(result.validity.ac_voltage_reactive_feasibility_certified);
   CHECK(result.nodal_eens_mwh_yr.size() == sys.ac.buses.size() + sys.dc.buses.size());
 
   bool saw_vsc_loss = false;

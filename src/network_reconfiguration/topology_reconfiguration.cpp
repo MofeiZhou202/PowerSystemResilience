@@ -314,14 +314,41 @@ TopoReconfResult run_topology_reconfiguration(
   // Fault status ζ: 1=available, 0=faulted
   // -------------------------------------------------------------------
   std::vector<double> zeta(nl + nl_vsc, 1.0);
+  auto mark_faulted_edge = [&](graph::EdgeCategory category, int component_index) {
+    int begin = 0;
+    int end = 0;
+    switch (category) {
+      case graph::EdgeCategory::AC_Line:
+        begin = 0;
+        end = nl_ac;
+        break;
+      case graph::EdgeCategory::DC_Line:
+        begin = nl_ac;
+        end = nl;
+        break;
+      case graph::EdgeCategory::VSC_Coupling:
+        begin = nl;
+        end = nl + nl_vsc;
+        break;
+      default:
+        return;
+    }
+    for (int edge = begin; edge < end; ++edge) {
+      if (edge_orig_idx[edge] == component_index) {
+        zeta[edge] = 0.0;
+        return;
+      }
+    }
+  };
   for (int f : opt.line_failures) {
     // line_failures contains ACBranch::index values (the .index field stored on each
     // branch), NOT 0-based array positions.  edge_orig_idx[i] == br.index, so the
     // match is correct.  Search only AC branch edges [0, nl_ac) to avoid spurious
     // matches against DC branches or VSC converters that may share the same index value.
-    for (int i = 0; i < nl_ac; ++i) {
-      if (edge_orig_idx[i] == f) { zeta[i] = 0.0; break; }
-    }
+    mark_faulted_edge(graph::EdgeCategory::AC_Line, f);
+  }
+  for (const auto& ref : opt.faulted_branches) {
+    mark_faulted_edge(ref.category, ref.index);
   }
 
   // -------------------------------------------------------------------
@@ -512,6 +539,9 @@ TopoReconfResult run_topology_reconfiguration(
   for (int i = 0; i < nb_ac; ++i) {
     Pd_pu[i] += ac.buses[i].pd_mw / base_mva;
     Qd_pu[i] += ac.buses[i].qd_mvar / base_mva;
+  }
+  for (int i = 0; i < nb_dc; ++i) {
+    Pd_pu[nb_ac + i] += dc.buses[i].pd_mw / base_mva;
   }
 
   // Voltage squared bounds

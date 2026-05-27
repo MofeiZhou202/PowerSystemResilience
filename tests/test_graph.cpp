@@ -239,10 +239,10 @@ TEST_CASE("Switch contraction: closed switch merges loads", "[graph][contraction
   auto res = contract_zero_impedance_edges(g, sys, opts);
 
   // Bus2 and Bus3 should be merged
-  REQUIRE(res.bus_to_super.count(2) > 0);
-  REQUIRE(res.bus_to_super.count(3) > 0);
-  int rep2 = res.bus_to_super.at(2);
-  int rep3 = res.bus_to_super.at(3);
+  REQUIRE(res.ac_bus_to_super.count(2) > 0);
+  REQUIRE(res.ac_bus_to_super.count(3) > 0);
+  int rep2 = res.ac_bus_to_super.at(2);
+  int rep3 = res.ac_bus_to_super.at(3);
   REQUIRE(rep2 == rep3); // same super-node
 
   // Super-node load should be sum: 25 MW
@@ -280,8 +280,8 @@ TEST_CASE("Switch contraction: voltage base mismatch rejected", "[graph][contrac
   REQUIRE(found);
 
   // Bus 2 and 3 must NOT be merged
-  if (res.bus_to_super.count(2) && res.bus_to_super.count(3))
-    REQUIRE(res.bus_to_super.at(2) != res.bus_to_super.at(3));
+  if (res.ac_bus_to_super.count(2) && res.ac_bus_to_super.count(3))
+    REQUIRE(res.ac_bus_to_super.at(2) != res.ac_bus_to_super.at(3));
 }
 
 TEST_CASE("Switch contraction: multiple slack in merge triggers diagnostic",
@@ -320,8 +320,8 @@ TEST_CASE("Switch contraction: open switch does not merge buses", "[graph][contr
   auto res = contract_zero_impedance_edges(g, sys, {});
 
   // Buses 2 and 3 must remain separate
-  if (res.bus_to_super.count(2) && res.bus_to_super.count(3))
-    REQUIRE(res.bus_to_super.at(2) != res.bus_to_super.at(3));
+  if (res.ac_bus_to_super.count(2) && res.ac_bus_to_super.count(3))
+    REQUIRE(res.ac_bus_to_super.at(2) != res.ac_bus_to_super.at(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -495,10 +495,10 @@ TEST_CASE("Result recovery: switch contraction voltage propagation",
 
   // Simulate: after solving, super-node (rep bus) has voltage
   FullNetworkVoltages voltages;
-  int rep = res.bus_to_super.at(1);
+  int rep = res.ac_bus_to_super.at(1);
   voltages.bus_voltage[rep] = std::complex<double>{1.05, 0.0}; // 1.05∠0°
 
-  recover_switch_contracted_buses(voltages, res.bus_to_super, res.super_to_buses);
+  recover_switch_contracted_buses(voltages, res);
 
   // Both Bus 1 and Bus 2 should have the same voltage
   REQUIRE(voltages.bus_voltage.count(1) > 0);

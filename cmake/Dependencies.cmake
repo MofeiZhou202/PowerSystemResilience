@@ -44,8 +44,34 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
   find_package(Git QUIET)
   if(Git_FOUND)
     option(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK
-           "Suppress the dirty-workspace warning for MIPSolvers (not recommended for releases)"
+           "Suppress the local dirty-workspace warning for MIPSolvers in non-release builds"
            OFF)
+
+    set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO OFF)
+    if(CMAKE_BUILD_TYPE)
+      string(TOUPPER "${CMAKE_BUILD_TYPE}" _HACDCDSS_BUILD_TYPE_UPPER)
+      if(_HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELEASE" OR
+         _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO" OR
+         _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "MINSIZEREL")
+        set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
+      endif()
+    endif()
+    if(DEFINED ENV{CI})
+      string(TOLOWER "$ENV{CI}" _HACDCDSS_CI_VALUE)
+      if(NOT _HACDCDSS_CI_VALUE STREQUAL "" AND
+         NOT _HACDCDSS_CI_VALUE STREQUAL "0" AND
+         NOT _HACDCDSS_CI_VALUE STREQUAL "false" AND
+         NOT _HACDCDSS_CI_VALUE STREQUAL "off")
+        set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
+      endif()
+    endif()
+    if(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK AND
+       _HACDCDSS_MIPSOLVERS_STRICT_REPRO)
+      message(FATAL_ERROR
+        "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK cannot be enabled for Release/CI "
+        "builds.  Dirty MIPSolvers sources make the pinned dependency "
+        "non-reproducible.")
+    endif()
     execute_process(
       COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
               rev-parse --verify HEAD
@@ -69,12 +95,20 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
         OUTPUT_VARIABLE _MIPSOLVERS_DIRTY
         ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
       if(_MIPSOLVERS_DIRTY)
-        message(WARNING
+        string(CONCAT _HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE
           "MIPSolvers working tree at ${_HACDCDSS_MIPSOLVERS_DIR} has "
           "uncommitted changes:\n${_MIPSOLVERS_DIRTY}\n"
-          "The build is NOT reproducible.  Commit or stash the changes before "
-          "producing a release artefact.  Set "
-          "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON to suppress this warning.")
+          "The build is NOT reproducible from the pinned commit.  Commit, "
+          "stash, or discard the MIPSolvers changes before producing a release "
+          "artefact.")
+        if(_HACDCDSS_MIPSOLVERS_STRICT_REPRO)
+          message(FATAL_ERROR "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE}")
+        else()
+          message(WARNING
+            "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE}  Set "
+            "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON to suppress this warning "
+            "in non-release local builds.")
+        endif()
       endif()
     endif()
   endif()
