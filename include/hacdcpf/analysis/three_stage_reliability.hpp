@@ -109,6 +109,9 @@ struct ThreeStageReliabilityResult {
   ///    optimised.  psop vectors in FaultDetail are filled with zeros.
   ///  - DC loads and DC generation are handled by a connectivity/capacity
   ///    fallback, but no DC power-flow constraints are enforced.
+  ///  - The N-1 contingency set enumerates in-service ACBranch and DCBranch
+  ///    outages only.  VSC, DC/DC, switch, breaker, transformer, generator,
+  ///    load, and storage outages are outside this evaluator's fault set.
   std::string model_limitations;
 
   /// Structured model-capability declaration.  Pure AC systems report

@@ -3128,15 +3128,22 @@ FMEAResult run_distribution_fmea(
     result.validity.dc_load_curtailment_included = true;
     result.validity.vsc_dc_power_flow_modelled = true;
     result.validity.ac_opf_curtailment = true;
+    result.validity.repair_ac_switch_reconfiguration_modelled =
+      options.enable_repair_reconfiguration && options.enable_switch_reconfiguration;
+    result.validity.repair_dc_side_reconfiguration_modelled = false;
     result.model_limitations =
         "FMEA uses a linear hybrid AC/DC restoration LP: AC and DC branch transfer "
         "limits, DC load shedding, DC sources, DC/DC converters, and VSC active-power "
         "transfers are optimized for each stage. Nonlinear AC voltage/reactive limits "
-        "are outside this reliability evaluator.";
+      "are outside this reliability evaluator. Repair-stage explicit switch search "
+      "enumerates AC switches/branches only; DC breakers, DC branches, DCDC devices, "
+      "and VSC topology actions are not repair reconfiguration candidates.";
   } else {
     result.model_scope = "ac-only-dcopf";
     result.validity = FMEAResult::ValidityFlags{};
     result.validity.ac_opf_curtailment = true;
+    result.validity.repair_ac_switch_reconfiguration_modelled =
+      options.enable_repair_reconfiguration && options.enable_switch_reconfiguration;
     result.model_limitations =
         "FMEA physical evaluation uses AC-only DC-OPF for AC distribution contingencies.";
   }

@@ -279,7 +279,7 @@ TEST_CASE("Topology reconfiguration load accounting includes DCBus demand",
     sys.ac.generators = {generator};
     sys.dc.base_mva = 10.0;
     sys.dc.buses = {
-        make_dc_bus(101, DCBusType::DC_V, 0.0),
+      make_dc_bus(101, DCBusType::DC_P, 0.0),
         make_dc_bus(102, DCBusType::DC_P, dc_bus_pd_mw),
     };
     sys.dc.branches = {make_dc_branch(1, 101, 102, 0.001, true)};
@@ -299,6 +299,71 @@ TEST_CASE("Topology reconfiguration load accounting includes DCBus demand",
   REQUIRE(base.feasible);
   REQUIRE(dc_bus_load.feasible);
   CHECK(dc_bus_load.milp_objective > base.milp_objective + 1.0);
+  CHECK(dc_bus_load.model_scope == "hybrid-acdc-topology-lindistflow");
+  CHECK(dc_bus_load.validity.radial_topology_enforced);
+  CHECK(dc_bus_load.validity.ac_lindistflow_enforced);
+  CHECK(dc_bus_load.validity.dc_network_modelled);
+  CHECK_FALSE(dc_bus_load.validity.dc_source_dispatch_modelled);
+  CHECK(dc_bus_load.validity.vsc_active_transfer_modelled);
+  CHECK_FALSE(dc_bus_load.validity.post_power_flow_validated);
+  CHECK_FALSE(dc_bus_load.validity.full_hybrid_opf_validated);
+}
+
+TEST_CASE("Topology reconfiguration uses DC sources without an AC root",
+          "[topology][reconfiguration][regression]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.dc.base_mva = 10.0;
+  sys.dc.buses = {
+      make_dc_bus(101, DCBusType::DC_P, 0.0),
+      make_dc_bus(102, DCBusType::DC_P, 1.0),
+  };
+  sys.dc.branches = {make_dc_branch(1, 101, 102, 0.001, true)};
+  StaticGeneratorDC gen;
+  gen.index = 1;
+  gen.bus = 101;
+  gen.in_service = true;
+  gen.p_set_mw = 2.0;
+  gen.pmax_mw = 2.0;
+  sys.dc.dc_static_generators = {gen};
+
+  analysis::TopoReconfOptions opt;
+  opt.enable_pf = true;
+  opt.skip_heuristic = true;
+  opt.max_time_s = 20;
+  const auto result = analysis::run_topology_reconfiguration(sys, opt);
+
+  REQUIRE(result.feasible);
+  CHECK(result.model_scope == "hybrid-acdc-topology-lindistflow");
+  CHECK(result.validity.dc_network_modelled);
+  CHECK(result.validity.dc_source_dispatch_modelled);
+  CHECK(result.validity.ac_lindistflow_enforced);
+  CHECK(result.closed_branch_ids == std::vector<int>{1});
+}
+
+TEST_CASE("Topology reconfiguration reports no-source networks as infeasible",
+          "[topology][reconfiguration][regression]") {
+  using namespace hacdcpf;
+
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.dc.base_mva = 10.0;
+  sys.dc.buses = {
+      make_dc_bus(101, DCBusType::DC_P, 0.0),
+      make_dc_bus(102, DCBusType::DC_P, 1.0),
+  };
+  sys.dc.branches = {make_dc_branch(1, 101, 102, 0.001, true)};
+
+  analysis::TopoReconfOptions opt;
+  opt.enable_pf = true;
+  opt.skip_heuristic = true;
+  const auto result = analysis::run_topology_reconfiguration(sys, opt);
+
+  CHECK_FALSE(result.feasible);
+  CHECK(result.solver_status.find("no AC/DC source bus") != std::string::npos);
+  CHECK(result.model_scope == "hybrid-acdc-topology-lindistflow");
 }
 
   TEST_CASE("Topology reconfiguration honors explicit switchable_branch_ids",

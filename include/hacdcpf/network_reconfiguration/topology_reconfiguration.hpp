@@ -125,6 +125,28 @@ struct TopoReconfResult {
   /// Native B&C solver diagnostics.
   solver::BCStats bc_stats;
 
+  /// Explicit physical/model scope for the returned topology solution.
+  /// Typical values are "hybrid-acdc-topology-lindistflow" when enable_pf is
+  /// true and "hybrid-acdc-topology-connectivity" when only graph constraints
+  /// are enforced.
+  std::string model_scope;
+
+  struct ValidityFlags {
+    bool radial_topology_enforced{false};
+    bool ac_lindistflow_enforced{false};
+    bool dc_network_modelled{false};
+    bool dc_source_dispatch_modelled{false};
+    bool vsc_active_transfer_modelled{false};
+    bool vsc_reactive_power_approximated{false};
+    bool post_power_flow_validated{false};
+    bool full_hybrid_opf_validated{false};
+  };
+
+  /// Machine-readable validity flags.  These distinguish the solved
+  /// graph/linear topology model from a full post-reconfiguration AC/DC PF/OPF
+  /// certificate.
+  ValidityFlags validity{};
+
   /// Unified solver certificate for heuristic, HiGHS, and native B&C paths.
   std::string solver_backend;
   std::string solver_status;

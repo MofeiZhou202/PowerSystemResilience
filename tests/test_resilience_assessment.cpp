@@ -658,10 +658,13 @@ TEST_CASE("FMEA: hybrid catalog optimizes DC load and VSC transfer",
   CHECK(result.model_scope == "hybrid-acdc-network-lp");
   CHECK_FALSE(result.model_limitations.empty());
   CHECK(result.model_limitations.find("DC load shedding") != std::string::npos);
+  CHECK(result.model_limitations.find("AC switches/branches only") != std::string::npos);
   CHECK(result.validity.dc_load_curtailment_included);
   CHECK(result.validity.vsc_dc_power_flow_modelled);
   CHECK(result.validity.ac_opf_curtailment);
   CHECK_FALSE(result.validity.ac_voltage_reactive_feasibility_certified);
+  CHECK_FALSE(result.validity.repair_ac_switch_reconfiguration_modelled);
+  CHECK_FALSE(result.validity.repair_dc_side_reconfiguration_modelled);
   CHECK(result.nodal_eens_mwh_yr.size() == sys.ac.buses.size() + sys.dc.buses.size());
 
   bool saw_vsc_loss = false;

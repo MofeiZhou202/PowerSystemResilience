@@ -354,6 +354,8 @@ struct FMEAResult {
     bool vsc_dc_power_flow_modelled{false};
     bool ac_opf_curtailment{true};
     bool ac_voltage_reactive_feasibility_certified{false};
+    bool repair_ac_switch_reconfiguration_modelled{false};
+    bool repair_dc_side_reconfiguration_modelled{false};
   };
   ValidityFlags validity{};
 };

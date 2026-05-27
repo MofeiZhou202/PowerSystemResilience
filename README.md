@@ -103,7 +103,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 |---|---|---|---|
 | AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow` | canonical AC/DC network + converter coupling | 电压、相角、潮流、收敛状态 |
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
-| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型 | 调度、目标值、LMP/dual、约束诊断 |
+| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型 | 调度、目标值、节点 LMP、约束诊断；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
 | 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
 | 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、关键元件 |

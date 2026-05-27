@@ -6,6 +6,7 @@
 ///
 /// Tags: [validation], [validate], [validation_level], [validation_report]
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -102,6 +103,14 @@ static HybridPowerSystem make_zero_base_mva() {
     sys.base_mva = 0.0;
     sys.ac.base_mva = 0.0;
     return sys;
+}
+
+static bool has_issue(const ValidationReport& report,
+                      const std::string& component_type,
+                      const std::string& field) {
+    return std::any_of(report.issues.begin(), report.issues.end(), [&](const auto& issue) {
+        return issue.component_type == component_type && issue.field == field;
+    });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -381,6 +390,85 @@ TEST_CASE("validate: VSC converter with missing DC bus produces Error", "[valida
 
     auto r = val::validate(sys);
     CHECK_FALSE(r.ok());
+}
+
+TEST_CASE("validate: rich AC component references and bounds are safety-gated",
+          "[validation][fault][rich_components]") {
+    auto sys = make_valid_2bus();
+
+    StaticGenerator sg;
+    sg.index = 7;
+    sg.bus = 99;
+    sg.in_service = true;
+    sg.pmin_mw = 3.0;
+    sg.pmax_mw = 1.0;
+    sys.ac.static_generators = {sg};
+
+    Storage storage;
+    storage.index = 8;
+    storage.bus = 2;
+    storage.in_service = true;
+    storage.soc_min = 0.9;
+    storage.soc_max = 0.1;
+    storage.eta_charge = 1.2;
+    sys.ac.storage = {storage};
+
+    Switch sw;
+    sw.index = 9;
+    sw.bus_from = 1;
+    sw.bus_to = 77;
+    sys.ac.switches = {sw};
+
+    const auto r = val::validate(sys);
+    CHECK_FALSE(r.ok());
+    CHECK(has_issue(r, "StaticGenerator", "bus"));
+    CHECK(has_issue(r, "StaticGenerator", "pmin_mw"));
+    CHECK(has_issue(r, "Storage", "soc_min"));
+    CHECK(has_issue(r, "Storage", "eta_charge"));
+    CHECK(has_issue(r, "Switch", "bus_to"));
+}
+
+TEST_CASE("validate: rich DC component references and converter bounds are safety-gated",
+          "[validation][fault][rich_components][dc]") {
+    auto sys = make_valid_2bus();
+
+    DCBus dc_bus;
+    dc_bus.index = 101;
+    dc_bus.vmin_pu = 0.9;
+    dc_bus.vmax_pu = 1.1;
+    sys.dc.buses = {dc_bus};
+
+    StaticGeneratorDC dc_gen;
+    dc_gen.index = 1;
+    dc_gen.bus = 999;
+    dc_gen.pmin_mw = 5.0;
+    dc_gen.pmax_mw = 2.0;
+    sys.dc.dc_static_generators = {dc_gen};
+
+    DCDCConverter dcdc;
+    dcdc.index = 2;
+    dcdc.bus_in = 101;
+    dcdc.bus_out = 202;
+    dcdc.eta = 0.0;
+    sys.dc.dcdc_converters = {dcdc};
+
+    VSCConverter vsc;
+    vsc.index = 3;
+    vsc.bus_ac = 1;
+    vsc.bus_dc = 101;
+    vsc.pmin_mw = 10.0;
+    vsc.pmax_mw = 1.0;
+    vsc.eta = 1.5;
+    sys.vsc_converters = {vsc};
+
+    const auto r = val::validate(sys);
+    CHECK_FALSE(r.ok());
+    CHECK(has_issue(r, "StaticGeneratorDC", "bus"));
+    CHECK(has_issue(r, "StaticGeneratorDC", "pmin_mw"));
+    CHECK(has_issue(r, "DCDCConverter", "bus_out"));
+    CHECK(has_issue(r, "DCDCConverter", "eta"));
+    CHECK(has_issue(r, "VSCConverter", "pmin_mw"));
+    CHECK(has_issue(r, "VSCConverter", "eta"));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

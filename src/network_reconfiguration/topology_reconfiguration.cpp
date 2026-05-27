@@ -36,6 +36,7 @@
 #include <spdlog/spdlog.h>
 
 #include "hacdcpf/model/components.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
 #include "hacdcpf/engine/engine.hpp"
@@ -196,6 +197,13 @@ TopoReconfResult run_topology_reconfiguration(
   const int n_ac_gen = static_cast<int>(ac.generators.size());
 
   TopoReconfResult result;
+  result.model_scope = opt.enable_pf ? "hybrid-acdc-topology-lindistflow"
+                                     : "hybrid-acdc-topology-connectivity";
+  result.validity.radial_topology_enforced = true;
+  result.validity.ac_lindistflow_enforced = opt.enable_pf;
+  result.validity.dc_network_modelled = nb_dc > 0;
+  result.validity.vsc_active_transfer_modelled = nl_vsc > 0;
+  result.validity.vsc_reactive_power_approximated = opt.enable_pf && nl_vsc > 0;
   if (nb == 0 || nl == 0) {
     if (opt.verbose) {
       spdlog::warn("[拓扑重构] 系统为空 (nb={}, nl={})", nb, nl);
@@ -352,20 +360,21 @@ TopoReconfResult run_topology_reconfiguration(
   }
 
   // -------------------------------------------------------------------
-  // Source buses (generators + external grids + slack bus fallback)
+  // Source buses (AC and DC controllable/fixed injections + voltage sources).
   // -------------------------------------------------------------------
   int root_bus = -1;
-  std::vector<bool> source_at(static_cast<size_t>(nb_ac), false);
-  std::vector<double> source_pmin(static_cast<size_t>(nb_ac), 0.0);
-  std::vector<double> source_pmax(static_cast<size_t>(nb_ac), 0.0);
-  std::vector<double> source_qmin(static_cast<size_t>(nb_ac), 0.0);
-  std::vector<double> source_qmax(static_cast<size_t>(nb_ac), 0.0);
+  std::vector<bool> source_at(static_cast<size_t>(nb), false);
+  std::vector<double> source_pmin(static_cast<size_t>(nb), 0.0);
+  std::vector<double> source_pmax(static_cast<size_t>(nb), 0.0);
+  std::vector<double> source_qmin(static_cast<size_t>(nb), 0.0);
+  std::vector<double> source_qmax(static_cast<size_t>(nb), 0.0);
+  bool dc_source_present = false;
 
-  auto add_source = [&](int bus, double pmin, double pmax, double qmin, double qmax) {
-    auto it = ac_id_map.find(bus);
-    if (it == ac_id_map.end()) return;
-    const int pos = it->second;
-    if (pos < 0 || pos >= nb_ac) return;
+  auto add_source_pos = [&](int pos, double pmin, double pmax, double qmin, double qmax) {
+    if (pos < 0 || pos >= nb) return;
+    const double p_cap = std::max({0.0, pmin, pmax});
+    const double q_cap = std::max(std::abs(qmin), std::abs(qmax));
+    if (p_cap <= 1e-9 && q_cap <= 1e-9) return;
     source_at[pos] = true;
     source_pmin[pos] += std::max(0.0, pmin) / base_mva;
     source_pmax[pos] += std::max(0.0, pmax) / base_mva;
@@ -373,32 +382,91 @@ TopoReconfResult run_topology_reconfiguration(
     source_qmax[pos] += std::max(0.0, qmax) / base_mva;
     if (root_bus < 0) root_bus = pos;
   };
+  auto add_ac_source = [&](int bus, double pmin, double pmax, double qmin, double qmax) {
+    auto it = ac_id_map.find(bus);
+    if (it == ac_id_map.end()) return;
+    add_source_pos(it->second, pmin, pmax, qmin, qmax);
+  };
+  auto add_dc_source = [&](int bus, double pmin, double pmax) {
+    auto it = dc_id_map.find(bus);
+    if (it == dc_id_map.end()) return;
+    const bool was_source = source_at[static_cast<size_t>(it->second)];
+    add_source_pos(it->second, pmin, pmax, 0.0, 0.0);
+    if (!was_source && source_at[static_cast<size_t>(it->second)]) {
+      dc_source_present = true;
+    }
+  };
 
   for (const auto& g : ac.generators) {
     if (!g.in_service) continue;
-    add_source(g.bus, g.pmin_mw, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw,
-               g.qmin_mvar, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
+    add_ac_source(g.bus, g.pmin_mw, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw,
+                  g.qmin_mvar, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
+  }
+  for (const auto& sg : ac.static_generators) {
+    const double cap = hacdcpf::model::effective_capacity_mw(sg);
+    if (cap > 0.0) add_ac_source(sg.bus, 0.0, cap, sg.qmin_mvar, sg.qmax_mvar);
+  }
+  for (const auto& rg : ac.renewable_gens) {
+    if (!rg.in_service) continue;
+    const double cap = rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw;
+    if (cap > 0.0) add_ac_source(rg.bus, 0.0, cap, rg.qmin_mvar, rg.qmax_mvar);
+  }
+  for (const auto& pv : ac.pv_systems) {
+    if (!pv.in_service) continue;
+    const double cap = pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw;
+    if (cap > 0.0) add_ac_source(pv.bus, 0.0, cap, pv.qmin_mvar, pv.qmax_mvar);
+  }
+  for (const auto& st : ac.storage) {
+    const double cap = hacdcpf::model::effective_capacity_mw(st);
+    if (cap > 0.0) add_ac_source(st.bus, 0.0, cap, st.qmin_mvar, st.qmax_mvar);
   }
   for (const auto& eg : ac.external_grids) {
     if (!eg.in_service) continue;
     const double cap = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : opt.default_rate_mva;
-    add_source(eg.bus, 0.0, cap, -cap, cap);
+    add_ac_source(eg.bus, 0.0, cap, -cap, cap);
+  }
+  for (const auto& sg : dc.dc_static_generators) {
+    const double cap = hacdcpf::model::effective_capacity_mw(sg);
+    if (cap > 0.0) add_dc_source(sg.bus, 0.0, cap);
+  }
+  for (const auto& sg : dc.static_generators) {
+    const double cap = hacdcpf::model::effective_capacity_mw(sg);
+    if (cap > 0.0) add_dc_source(sg.bus, 0.0, cap);
+  }
+  for (const auto& st : dc.storage) {
+    const double cap = hacdcpf::model::effective_capacity_mw(st);
+    if (cap > 0.0) add_dc_source(st.bus, 0.0, cap);
+  }
+  for (const auto& pv : dc.pv_arrays) {
+    if (!pv.in_service) continue;
+    if (pv.p_set_mw > 0.0) add_dc_source(pv.bus, 0.0, pv.p_set_mw);
+  }
+  for (const auto& b : dc.buses) {
+    if (!b.in_service || b.bus_type != DCBusType::DC_V) continue;
+    const double cap = std::max(opt.default_rate_mva, base_mva);
+    add_dc_source(b.index, 0.0, cap);
   }
   if (root_bus < 0) {
     for (int i = 0; i < nb_ac; ++i) {
       if (ac.buses[i].bus_type == BusType::SLACK) {
         const double cap = std::max(opt.default_rate_mva, base_mva);
-        add_source(ac.buses[i].index, 0.0, cap, -cap, cap);
-        root_bus = i;
+        add_ac_source(ac.buses[i].index, 0.0, cap, -cap, cap);
         break;
       }
     }
   }
-  if (root_bus < 0) root_bus = 0;
+  if (root_bus < 0) {
+    result.solver_status = "infeasible: no AC/DC source bus available";
+    if (opt.verbose) {
+      spdlog::warn("[拓扑重构] 无可用源节点，无法构造拓扑根节点");
+    }
+    return result;
+  }
+  result.validity.dc_source_dispatch_modelled = dc_source_present;
 
   std::vector<int> gen_bus;
   std::vector<double> gen_Pmax, gen_Pmin, gen_Qmax, gen_Qmin;
-  for (int i = 0; i < nb_ac; ++i) {
+  for (int i = 0; i < nb; ++i) {
     if (!source_at[i]) continue;
     gen_bus.push_back(i);
     gen_Pmax.push_back(source_pmax[i]);
@@ -1072,6 +1140,46 @@ TopoReconfResult run_topology_reconfiguration(
     if (opt.verbose) {
       spdlog::info("[拓扑重构] 启发式未找到可行方案，调用 MILP fallback");
     }
+
+    auto try_native_bc = [&](const std::string& previous_failure) -> bool {
+      BCResult bc_result = solve_milp_bc(milp, bc_opt);
+      result.bc_stats = bc_result.bc_stats;
+      if (bc_result.stats.success && bc_result.x.size() >= idx.n_vars) {
+        x_sol = bc_result.x;
+        result.milp_objective = bc_result.stats.objective;
+        result.solver_backend = previous_failure.empty()
+            ? "NativeB&C"
+            : "NativeB&C(after HiGHS failure)";
+        result.solver_status = previous_failure.empty()
+            ? bc_result.stats.status
+            : "HiGHS failed: " + previous_failure + "; NativeB&C: " + bc_result.stats.status;
+        result.solver_mip_gap = bc_result.bc_stats.gap;
+        result.proven_optimal = status_indicates_optimal(bc_result.stats.status) &&
+          std::isfinite(result.solver_mip_gap) &&
+          result.solver_mip_gap <= opt.mip_gap + 1e-9;
+        if (opt.verbose) {
+          spdlog::info("[拓扑重构] B&C fallback 成功: nodes={} gap={:.6f} obj={:.6f}",
+                       bc_result.bc_stats.nodes_explored,
+                       bc_result.bc_stats.gap,
+                       result.milp_objective);
+        }
+        return true;
+      }
+      result.solver_backend = previous_failure.empty()
+          ? "NativeB&C"
+          : "HiGHS+NativeB&C";
+      result.solver_status = previous_failure.empty()
+          ? bc_result.stats.status
+          : "HiGHS failed: " + previous_failure + "; NativeB&C failed: " + bc_result.stats.status;
+      result.solver_mip_gap = bc_result.bc_stats.gap;
+      result.proven_optimal = false;
+      if (opt.verbose) {
+        spdlog::warn("[拓扑重构] B&C fallback 未找到可行解: {}",
+                     bc_result.stats.status);
+      }
+      return false;
+    };
+
     engine::HighsAdapter highs;
     if (highs.available()) {
       auto highs_result = highs.solve_milp(milp);
@@ -1090,38 +1198,20 @@ TopoReconfResult run_topology_reconfiguration(
                        result.milp_objective);
         }
       } else {
-        solved_ok = false;
-        if (opt.verbose) {
-          spdlog::warn("[拓扑重构] HiGHS fallback 未找到可行解: {}",
-                       highs_result.stats.status);
+        std::string reason = highs_result.stats.status.empty()
+            ? std::string("unsuccessful solve")
+            : highs_result.stats.status;
+        if (highs_result.stats.success && highs_result.x.size() < idx.n_vars) {
+          reason += " (solution vector too small)";
         }
+        if (opt.verbose) {
+          spdlog::warn("[拓扑重构] HiGHS fallback 未找到可行解: {}; retry NativeB&C",
+                       reason);
+        }
+        solved_ok = try_native_bc(reason);
       }
     } else {
-      BCResult bc_result = solve_milp_bc(milp, bc_opt);
-      result.bc_stats = bc_result.bc_stats;
-      if (bc_result.stats.success && bc_result.x.size() >= idx.n_vars) {
-        x_sol = bc_result.x;
-        solved_ok = true;
-        result.milp_objective = bc_result.stats.objective;
-        result.solver_backend = "NativeB&C";
-        result.solver_status = bc_result.stats.status;
-        result.solver_mip_gap = bc_result.bc_stats.gap;
-        result.proven_optimal = status_indicates_optimal(result.solver_status) &&
-          std::isfinite(result.solver_mip_gap) &&
-          result.solver_mip_gap <= opt.mip_gap + 1e-9;
-        if (opt.verbose) {
-          spdlog::info("[拓扑重构] B&C fallback 成功: nodes={} gap={:.6f} obj={:.6f}",
-                       bc_result.bc_stats.nodes_explored,
-                       bc_result.bc_stats.gap,
-                       result.milp_objective);
-        }
-      } else {
-        solved_ok = false;
-        if (opt.verbose) {
-          spdlog::warn("[拓扑重构] B&C fallback 未找到可行解: {}",
-                       bc_result.stats.status);
-        }
-      }
+      solved_ok = try_native_bc("");
     }
   }
 

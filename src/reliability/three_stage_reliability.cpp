@@ -808,15 +808,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     res_objective= sr.result.stats.objective;
     res_mip_gap  = 0.0;  // pure LP has no integrality gap
   } else {
-    engine::HighsAdapter highs;
-    if (highs.available()) {
-      auto highs_res = highs.solve_milp(mip);
-      res_x        = highs_res.x;
-      res_success  = highs_res.stats.success;
-      res_status   = highs_res.stats.status;
-      res_objective= highs_res.stats.objective;
-      res_mip_gap  = highs_res.stats.mip_gap;
-    } else {
+    auto solve_with_native_bc = [&](const std::string& previous_failure) {
       engine::BCOptions opt;
       opt.max_nodes        = 2048;
       opt.time_limit_sec   = 30.0;
@@ -826,9 +818,31 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       auto bc_res  = engine::solve_milp_bc(mip, opt);
       res_x        = bc_res.x;
       res_success  = bc_res.stats.success;
-      res_status   = bc_res.stats.status;
+      res_status   = previous_failure.empty()
+          ? bc_res.stats.status
+          : "HiGHS failed: " + previous_failure + "; NativeB&C: " + bc_res.stats.status;
       res_objective= bc_res.stats.objective;
-      res_mip_gap  = bc_res.stats.mip_gap;
+      res_mip_gap  = std::isfinite(bc_res.bc_stats.gap) ? bc_res.bc_stats.gap
+                                                         : bc_res.stats.mip_gap;
+    };
+
+    engine::HighsAdapter highs;
+    if (highs.available()) {
+      auto highs_res = highs.solve_milp(mip);
+      res_x        = highs_res.x;
+      res_success  = highs_res.stats.success;
+      res_status   = highs_res.stats.status;
+      res_objective= highs_res.stats.objective;
+      res_mip_gap  = highs_res.stats.mip_gap;
+      if (!res_success || res_x.size() != static_cast<size_t>(n_vars)) {
+        std::string reason = res_status.empty() ? std::string("unsuccessful solve") : res_status;
+        if (res_success && res_x.size() != static_cast<size_t>(n_vars)) {
+          reason += " (solution vector has wrong size)";
+        }
+        solve_with_native_bc(reason);
+      }
+    } else {
+      solve_with_native_bc("");
     }
   }
 
@@ -1159,6 +1173,8 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
            ? std::string(" (no limit)")
            : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
       + ". "
+        "N-1 contingency enumeration is branch-only: ACBranch and DCBranch outages are evaluated; "
+        "VSC, DCDC, switch, breaker, transformer, generator, load, and storage outages are not enumerated as faults. "
        "DC sub-network: connectivity/capacity fallback with DC source capacity and "
        "AC-source surplus transferable through VSC capacity limits; no DC power-flow constraints. "
        "DCDC devices are still treated as lossless connectivity edges. "

@@ -158,6 +158,8 @@ TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
   CHECK(r.saifi < 1.0);
 
   CHECK(r.model_scope == "ac-lindistflow-milp");
+  CHECK(r.model_limitations.find("branch-only") != std::string::npos);
+  CHECK(r.model_limitations.find("VSC") != std::string::npos);
   CHECK(r.validity.branch_flow_enforced);
   CHECK(r.validity.voltage_constraints_enforced);
   CHECK(r.validity.radial_topology_enforced);
@@ -181,6 +183,7 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK(r.nl_vsc >= 1);
 
   CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
+  CHECK(r.model_limitations.find("branch-only") != std::string::npos);
   CHECK_FALSE(r.validity.dc_power_flow_enforced);
   CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
