@@ -4986,7 +4986,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
 	        root.basis_hint->cached_col_scale.get(),
 	        root.basis_hint->basis_indices(),
 	        root.lb, root.ub, root.bound, opt.int_tol);
-	    if (opt.verbose || stats.records_added > 0) {
+      if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
 	      fmt::print(stderr,
 	                 "[B&C ROOT-RC-LURK] phase={} cols={} added={} total={} "
 	                 "sideReject={} lpobj={:.10g}\n",
@@ -22409,7 +22409,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
           ++out.bc_stats.root_cut_rounds_rejected_nonmoving;
         }
 
-        if (opt.verbose || !ib_keep_rows) {
+        if (opt.verbose || std::getenv("MIPSOLVERS_BC_CONF") != nullptr) {
           fmt::print(stderr,
                      "[B&C IMPLIED-BOUND] graph_arcs={} cuts={} root_lb={:.2f} "
                      "kept={} domain_tight={}\n",
