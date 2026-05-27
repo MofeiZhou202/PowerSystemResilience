@@ -13,6 +13,7 @@
 
 #include "hacdcpf/detail/internal_helpers.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using json = nlohmann::json;
@@ -2556,6 +2557,75 @@ std::string opf_result_to_json(const opf::ACOPFResult& result, int indent) {
   j["profiling"] = prof;
 
   return j.dump(indent);
+}
+
+std::string dc_opf_result_to_json(const opf::DCOPFResult& result, int indent) {
+  json j;
+  j["converged"]               = result.converged;
+  j["iterations"]              = result.iterations;
+  j["objective"]               = result.objective;
+  j["status"]                  = result.status;
+  j["solver_name"]             = result.solver_name;
+  j["runtime_sec"]             = result.runtime_sec;
+  j["total_load_shedding_mw"]  = result.total_load_shedding_mw;
+
+  // Solver-path audit fields — the primary new data that callers care about.
+  j["solver_chain"]   = result.solver_chain;
+  j["objective_model"] = result.objective_model;
+
+  j["lmp"]                = result.lmp;
+  j["branch_mu_lower"]    = result.branch_mu_lower;
+  j["branch_mu_upper"]    = result.branch_mu_upper;
+  j["branch_mu_valid"]    = result.branch_mu_valid;
+  j["load_shedding_mw"]   = result.load_shedding_mw;
+  j["pg_mw"]              = result.pg_mw;
+  j["pf_mw"]              = result.pf_mw;
+  j["va"]                 = result.va;
+  return j.dump(indent);
+}
+
+opf::DCOPFResult dc_opf_result_from_json(const std::string& json_str) {
+  const json j = json::parse(json_str);
+  opf::DCOPFResult r;
+
+  r.converged = jget(j, "converged", false);
+  r.iterations = jget(j, "iterations", 0);
+  r.objective = jget(j, "objective", 0.0);
+  r.status = jget<std::string>(j, "status", "");
+  r.solver_name = jget<std::string>(j, "solver_name", "");
+  r.runtime_sec = jget(j, "runtime_sec", 0.0);
+  r.total_load_shedding_mw = jget(j, "total_load_shedding_mw", 0.0);
+  r.branch_mu_valid = jget(j, "branch_mu_valid", false);
+  r.objective_model = jget<std::string>(j, "objective_model", "");
+
+  if (j.contains("solver_chain")) r.solver_chain = j["solver_chain"].get<std::vector<std::string>>();
+  if (j.contains("lmp")) r.lmp = j["lmp"].get<std::vector<double>>();
+  if (j.contains("branch_mu_lower")) r.branch_mu_lower = j["branch_mu_lower"].get<std::vector<double>>();
+  if (j.contains("branch_mu_upper")) r.branch_mu_upper = j["branch_mu_upper"].get<std::vector<double>>();
+  if (j.contains("load_shedding_mw")) r.load_shedding_mw = j["load_shedding_mw"].get<std::vector<double>>();
+  if (j.contains("pg_mw")) r.pg_mw = j["pg_mw"].get<std::vector<double>>();
+  if (j.contains("pf_mw")) r.pf_mw = j["pf_mw"].get<std::vector<double>>();
+  if (j.contains("va")) r.va = j["va"].get<std::vector<double>>();
+  return r;
+}
+
+void save_dc_opf_result_json(const opf::DCOPFResult& result,
+                             const std::string& path, int indent) {
+  std::ofstream ofs(path);
+  if (!ofs) {
+    throw std::runtime_error("Cannot open file for writing: " + path);
+  }
+  ofs << dc_opf_result_to_json(result, indent);
+}
+
+opf::DCOPFResult load_dc_opf_result_json(const std::string& path) {
+  std::ifstream ifs(path);
+  if (!ifs) {
+    throw std::runtime_error("Cannot open file for reading: " + path);
+  }
+  std::stringstream buffer;
+  buffer << ifs.rdbuf();
+  return dc_opf_result_from_json(buffer.str());
 }
 
 void save_opf_result_json(const opf::ACOPFResult& result,

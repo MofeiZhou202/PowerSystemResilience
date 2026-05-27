@@ -17,7 +17,7 @@ analytical algorithms now lives in its own peer directory rather than a shared
 \texttt{include/hacdcpf/time\_series} / \texttt{src/time\_series} & UC/OPF/PF multi-period pipeline, annual production simulation, lifecycle simulation \\
 \texttt{include/hacdcpf/reliability} / \texttt{src/reliability} & Monte Carlo reliability assessment \\
 \texttt{include/hacdcpf/resilience} / \texttt{src/resilience} & Distribution resilience assessment \\
-\texttt{include/hacdcpf/power\_flow} / \texttt{src/power\_flow} & Core Newton PF solvers \emph{and} distribution network PF \\
+\texttt{include/hacdcpf/power\_flow} / \texttt{src/power\_flow} & Core Newton PF solvers plus the three-phase distribution power-flow NR helpers \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -342,41 +342,23 @@ consumption offset by certificates).
 % ------------------------------------------------------------
 
 Declared in \texttt{power\_flow/distribution\_power\_flow.hpp},
-implemented in \texttt{src/power\_flow/distribution\_power\_flow.cpp}.
+implemented in \texttt{src/power\_flow/three\_phase\_nr.cpp}.
+The public distribution power-flow surface is intentionally three-phase only:
+legacy single-phase radial/backward-forward sweep entry points and the old
+\texttt{DistributionPFOptions}/\texttt{DistributionPFResult} contract are not
+exported.  Distribution feeders are solved through the full abc-domain
+Newton--Raphson interface:
+\begin{verbatim}
+ThreePhaseDPFResult solve_three_phase_nr(
+    const ThreePhaseACSystem& sys,
+    const ThreePhaseNROptions& opt = {});
 
-Two solver variants are provided for radial distribution networks:
-
-\begin{enumerate}
-  \item \textbf{Backward-Forward Sweep (BFS)} --- classical two-pass algorithm
-        for single-source radial feeders.  Fast and numerically robust for
-        weakly meshed topologies.
-  \item \textbf{Three-phase Newton-Raphson} --- full $3n \times 3n$ abc-domain
-        admittance formulation for meshed and unbalanced networks
-        (\texttt{solve\_three\_phase\_nr(sys, opt)}).
-\end{enumerate}
-
-\subsubsection{Backward-Forward Sweep}
-
-Let the network be a rooted tree with root bus $0$ (substation).  Denote
-$\mathcal{C}(j)$ as the set of children of bus $j$, $Z_{ij} = R_{ij}+jX_{ij}$
-as the series impedance of branch $(i,j)$, and $S_j^L = P_j^L + jQ_j^L$ as
-the complex load at bus $j$.
-
-\paragraph{Backward sweep} (leaves to root — load aggregation):
-\begin{equation}
-  S_{ij}^{(k)} = S_j^L + \sum_{m \in \mathcal{C}(j)}
-    \left(S_{jm}^{(k)} + Z_{jm}\left|I_{jm}^{(k)}\right|^2\right),
-  \label{eq:bfs-backward}
-\end{equation}
-where $I_{jm}^{(k)} = \left(S_{jm}^{(k)} / V_j^{(k)}\right)^*$.
-
-\paragraph{Forward sweep} (root to leaves — voltage propagation):
-\begin{equation}
-  V_j^{(k+1)} = V_i^{(k+1)} - Z_{ij}\,
-    \frac{\left(S_{ij}^{(k)}\right)^*}{\left(V_i^{(k+1)}\right)^*}.
-  \label{eq:bfs-forward}
-\end{equation}
-Iteration terminates when $\max_j\left|V_j^{(k+1)} - V_j^{(k)}\right| \leq \epsilon$.
+ThreePhaseDPFResult solve_three_phase_nr(
+    const HybridPowerSystem& sys,
+    const ThreePhaseNROptions& opt = {});
+\end{verbatim}
+The same header also exports \texttt{build\_full\_ybus\_phase\_entries} for
+phase-domain admittance inspection and regression tests.
 
 \subsubsection{Three-Phase Newton-Raphson}
 
@@ -409,16 +391,18 @@ is the $6n\times 6n$ Jacobian.  The voltage unbalance factor at bus $i$ is:
 where $V_i^{neg}$/$V_i^{pos}$ are the negative and positive sequence
 components from Fortescue's symmetrical-components transformation.
 
-\subsubsection{Distribution PF Options and Results}
+\subsubsection{Three-Phase NR Options and Results}
 
 \begin{center}
 \begin{tabular}{llll}
 \hline\hline
-\textbf{Field (DistributionPFOptions)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
+\textbf{Field (ThreePhaseNROptions)} & \textbf{Default} & \textbf{Units} & \textbf{Description} \\
 \hline
-\texttt{max\_iterations} & 100 & --- & Maximum BFS/NR iterations \\
-\texttt{convergence\_tolerance} & \(10^{-6}\) & pu & Residual convergence tolerance \\
-\texttt{backward\_forward\_sweep} & true & --- & Use BFS (false = use NR) \\
+\texttt{max\_iter} & 50 & --- & Maximum Newton iterations per control step \\
+\texttt{max\_control\_iter} & 100 & --- & Maximum regulator/control iterations \\
+\texttt{tol} & \(10^{-6}\) & pu & Residual convergence tolerance \\
+\texttt{verbose} & false & --- & Emit iteration diagnostics \\
+\texttt{include\_shunts} & true & --- & Include shunt admittances in the phase-domain Y-bus \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -426,11 +410,15 @@ components from Fortescue's symmetrical-components transformation.
 \begin{center}
 \begin{tabular}{ll}
 \hline\hline
-\textbf{Field (DistributionPFResult)} & \textbf{Description} \\
+\textbf{Field (ThreePhaseDPFResult)} & \textbf{Description} \\
 \hline
-\texttt{converged, iterations, residual} & Convergence indicators \\
-\texttt{buses} & \texttt{DistributionBusResult} list: $V_m$, $V_a$, $P$, $Q$ per bus \\
-\texttt{status} & Human-readable solver status string \\
+\texttt{bus\_voltages} & Per-bus, per-phase voltage magnitudes and angles \\
+\texttt{branch\_powers} & Per-line, per-phase sending-end active/reactive powers \\
+\texttt{transformer\_terminal\_observations} & Per-terminal transformer voltage/current observations \\
+\texttt{regulator\_states}, \texttt{regulator\_trace} & Final regulator state and control trace \\
+\texttt{p/q\_loss\_*}, \texttt{total\_p/q\_loss\_*} & Per-phase and total losses \\
+\texttt{max\_vuf\_percent} & Worst voltage-unbalance factor \\
+\texttt{control\_converged, converged, iterations, residual} & Control and Newton convergence indicators \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -458,8 +446,11 @@ Declared in \texttt{power\_flow/three\_phase.hpp}.  The primary solver
 \end{tabular}
 \end{center}
 
-\texttt{ThreePhaseFlowOptions} mirrors \texttt{DistributionPFOptions} with an
-additional \texttt{include\_shunts} flag (default true).
+\texttt{ThreePhaseFlowOptions} is a lightweight wrapper over
+\texttt{ThreePhaseNROptions}: \texttt{max\_iter}, \texttt{tol},
+\texttt{verbose}, and \texttt{include\_shunts} are forwarded to
+\texttt{analysis::solve\_three\_phase\_nr}.  No backward-forward sweep selector
+is exposed.
 
 % ------------------------------------------------------------
 \subsection{PV Array Power Curve Model}
@@ -474,8 +465,8 @@ empirical five-parameter PV module model:
            \left(1 - c\left(\frac{V}{V_{mpp}}\right)^2\right),
 \end{equation}
 
-with fixed constants $a = 10.0$, $b = 0.5476$, $c = 0.02381$ (Julia
-DistributionPowerFlow parity).
+with fixed constants $a = 10.0$, $b = 0.5476$, $c = 0.02381$ retained for
+legacy DistributionPowerFlow parity.
 
 \texttt{compute\_pv\_power\_mw(pv)} evaluates the complete PV system output:
 \begin{equation}
@@ -632,12 +623,12 @@ Returned by \texttt{run\_frequency\_duration\_analysis}:
 \texttt{load\_scale\_factor} & 1.0 & --- & Global load scaling \\
 \texttt{switching\_time\_hr} & 0.5 & hr & Default switching/isolation time \\
 \texttt{voll} & 10000.0 & \$/MWh & Value of Lost Load \\
-\texttt{enable\_microgrid\_islanding} & true & --- & Allow island-capable microgrids to remain energized \\
-\texttt{enable\_repair\_reconfiguration} & true & --- & Promote DERs for island service after isolation \\
-\texttt{enable\_switch\_reconfiguration} & true & --- & Explicit AC switch/tie topology search \\
+\texttt{enable\_microgrid\_islanding} & true & --- & Enables source/island anchor handling before physical scoring \\
+\texttt{enable\_repair\_reconfiguration} & true & --- & Enables repair-stage topology candidate evaluation \\
+\texttt{enable\_switch\_reconfiguration} & true & --- & Enables the implemented AC switch/tie repair search \\
 \texttt{max\_repair\_switch\_actions} & 2 & --- & Max simultaneous switch actions in repair stage \\
-\texttt{enable\_storage\_dispatch} & true & --- & Model storage as emergency source \\
-\texttt{enable\_grid\_forming\_vsc\_support} & true & --- & Grid-forming VSC anchors energised island \\
+\texttt{enable\_storage\_dispatch} & true & --- & Storage contributes bounded source capacity in the FMEA physical evaluator \\
+\texttt{enable\_grid\_forming\_vsc\_support} & true & --- & Grid-forming VSCs anchor islands; VSC active transfers are dispatched in hybrid FMEA LPs \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -657,9 +648,22 @@ Returned by \texttt{run\_frequency\_duration\_analysis}:
 \texttt{lolf\_occ\_yr} & occ/yr & Loss of Load Frequency \\
 \texttt{distribution\_idx} & --- & IEEE 1366 indices (SAIFI/SAIDI/ASAI) \\
 \texttt{contingencies} & --- & Per-contingency detail, sorted by EENS$\downarrow$ \\
+\texttt{model\_scope} & --- & \texttt{ac-only-dcopf} for AC-only systems; \texttt{hybrid-acdc-network-lp} when DC/VSC components are present \\
+\texttt{model\_limitations} & --- & Mandatory report text describing linearized scope and nonlinear AC voltage/reactive limits \\
+\texttt{validity} & --- & Flags for DC-load curtailment, VSC/DC power flow, and AC OPF scope \\
 \hline\hline
 \end{tabular}
 \end{center}
+
+Engineering reports and JSON exports that include FMEA results must surface
+\texttt{model\_scope}, \texttt{model\_limitations}, and \texttt{validity}.  The
+catalog enumerates AC, DC, VSC, DCDC, switch, breaker, storage, PV, and static
+generator contingencies.  AC-only systems use the established DCOPF evaluator;
+hybrid systems use a linear AC/DC network LP that co-optimizes AC load shedding,
+DC load shedding, DC sources, DC branches, VSC active-power transfers, and
+DC/DC converter transfers.  The hybrid LP does not claim full nonlinear AC
+voltage/reactive feasibility, so that boundary remains explicit in
+\texttt{model\_limitations}.
 
 Each entry in \texttt{contingencies} (\texttt{FMEAContingencyDetail}) records
 \texttt{failure\_rate}, switching-stage shed/ENS (\texttt{shed\_sw\_mw},
@@ -759,7 +763,7 @@ $\alpha$-VaR and $\alpha$-CVaR at confidence level $\alpha$ are:
 Table~\ref{tab:reliability-benchmarks} summarises expected results on the two
 standard test cases.
 
-\begin{table}[h]
+\begin{table}[ht]
 \centering
 \caption{Reliability module reference benchmarks.}
 \label{tab:reliability-benchmarks}
@@ -1013,6 +1017,27 @@ The total Energy Not Served (ENS) is:
 \end{tabular}
 \end{center}
 
+\subsubsection{Strict Multi-Period MIP Path}
+\label{sec:resilience-mip}
+
+The heuristic assessment above is not the only resilience entry point.  When
+\texttt{DistributionResilienceOptions::model} is
+\texttt{MultiPeriodMIPLinDistFlow}, or when callers invoke
+\texttt{run\_distribution\_resilience\_mip\_assessment()} directly, the code
+uses \texttt{src/resilience/resilience\_restoration\_mip.cpp}.  This path builds
+an independent AC-only multi-period restoration MILP instead of delegating to
+the heuristic loop.
+
+The MIP skeleton includes multi-period branch status, forest/radiality logic,
+active-power LinDistFlow voltage envelopes, load-served/shedding variables,
+fixed-storage energy dynamics, and time-space MESS routing arcs.  Its declared
+model scope is \texttt{ac-only-lindistflow}; DC buses, DC branches, VSC
+converters, and DC loads are not represented by decision variables.  The result
+populates \texttt{model\_stats} with model-built/solved flags, solver name and
+status, objective value, MIP gap, runtime, formulation notes,
+\texttt{model\_scope}, and validity flags such as
+\texttt{mip\_gap\_within\_tolerance}.
+
 \begin{center}
 \begin{tabular}{lp{75mm}}
 \hline\hline
@@ -1039,8 +1064,10 @@ The total Energy Not Served (ENS) is:
 \subsubsection{Numerical Verification}
 \label{sec:resilience-numerical}
 
-The following results were obtained from
-\texttt{tests/test\_resilience\_assessment.cpp} (17 test cases, 74 assertions).
+The following results are representative checks from
+\texttt{tests/test\_resilience\_assessment.cpp}.  The current registered suite
+contains 22 CTest entries covering heuristic resilience, the strict MIP entry
+point, sequential Monte Carlo regressions, and FMEA scope/repair-search flags.
 
 \paragraph{3-bus radial, no fault.}
 A 3-bus radial feeder (Bus~1 slack, Bus~2/3 each with 1\,MW load),
@@ -1087,8 +1114,8 @@ total shed with MESS is less than or equal to shed without MESS:
 \]
 
 \noindent
-All 17 test cases in \texttt{tests/test\_resilience\_assessment.cpp}
-(74 assertions) pass with zero failures.
+All 22 resilience/FMEA regression entries pass in the current
+\texttt{build\_rel} suite, including the hybrid AC/DC FMEA LP regression.
 
 % ------------------------------------------------------------
 \subsection{Time-Series Power Flow}
@@ -2246,8 +2273,7 @@ heavier loading.
 
 \paragraph{Meshed topology.}
 A ring branch from bus~3 back to bus~1 ($r + jx = 0.06 + j0.12$\,pu)
-creates a meshed network unsolvable by backward-forward sweep.
-The three-phase NR converges in all test cases; all per-phase voltages
+creates a meshed network.  The three-phase NR converges in all test cases; all per-phase voltages
 remain in the range $(0.85, 1.0)$\,pu.
 
 \paragraph{Single-phase lateral.}

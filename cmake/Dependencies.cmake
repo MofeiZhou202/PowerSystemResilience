@@ -43,6 +43,9 @@ endif()
 if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
   find_package(Git QUIET)
   if(Git_FOUND)
+    option(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK
+           "Suppress the dirty-workspace warning for MIPSolvers (not recommended for releases)"
+           OFF)
     execute_process(
       COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
               rev-parse --verify HEAD
@@ -55,6 +58,24 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
         "Either update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT in "
         "cmake/Dependencies.cmake to record the intentional upgrade, or "
         "check out the pinned commit in the MIPSolvers clone.")
+    endif()
+
+    # Detect a dirty working tree — uncommitted local changes in MIPSolvers
+    # would cause builds to diverge from the pinned commit even if HEAD matches.
+    if(NOT HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK)
+      execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
+                status --porcelain
+        OUTPUT_VARIABLE _MIPSOLVERS_DIRTY
+        ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(_MIPSOLVERS_DIRTY)
+        message(WARNING
+          "MIPSolvers working tree at ${_HACDCDSS_MIPSOLVERS_DIR} has "
+          "uncommitted changes:\n${_MIPSOLVERS_DIRTY}\n"
+          "The build is NOT reproducible.  Commit or stash the changes before "
+          "producing a release artefact.  Set "
+          "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON to suppress this warning.")
+      endif()
     endif()
   endif()
 endif()

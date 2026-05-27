@@ -91,18 +91,35 @@ struct ThreeStageReliabilityResult {
   /// result.  Empty when the model is operating within its designed scope.
   ///
   /// Current limitations always present:
-  ///  - Stage 2 (switching) is connectivity-only: in-service branches
-  ///    reconnect automatically; already-closed switches stay closed;
-  ///    normally-open AC switches are closed greedily up to
-  ///    ThreeStageReliabilityOptions::max_switch_operations per fault.
-  ///    No radial-topology, line-flow, or voltage constraints are checked.
+  ///  - AC restoration is a finite-source LinDistFlow MILP with explicit
+  ///    p_g/q_g capacity bounds, energized-bus indicators, strict radial forest
+  ///    constraints, branch flow limits, voltage bounds, and continuous load shed.
   ///  - VSC converters and DC/DC converters are treated as lossless graph
-  ///    edges; their power-flow setpoints are NOT optimised.  psop vectors
-  ///    in FaultDetail are filled with zeros.
-  ///  - DC loads and DC generation are included in the connectivity model
-  ///    (reachability), but no DC power-flow constraints are enforced.
-  ///  - The shed-decision model is all-or-nothing per load point (binary z_i).
+  ///    edges only in the DC fallback; their power-flow setpoints are NOT
+  ///    optimised.  psop vectors in FaultDetail are filled with zeros.
+  ///  - DC loads and DC generation are handled by a connectivity/capacity
+  ///    fallback, but no DC power-flow constraints are enforced.
   std::string model_limitations;
+
+  /// Structured model-capability declaration.  Pure AC systems report
+  /// "ac-lindistflow-milp".  Hybrid systems report
+  /// "ac-lindistflow-milp+dc-connectivity-fallback" because DC/VSC/SOP
+  /// physics are not co-optimised in the restoration MILP.
+  std::string model_scope{"ac-lindistflow-milp+dc-connectivity-fallback"};
+
+  /// Per-feature validity flags so downstream code can branch on whether a
+  /// given physical constraint was actually enforced for the whole reported
+  /// system.  AC-only runs set branch/voltage/radial/restoration flags true;
+  /// hybrid runs keep them false because the DC/VSC/SOP portion is fallback-only.
+  struct ValidityFlags {
+    bool branch_flow_enforced{false};
+    bool voltage_constraints_enforced{false};
+    bool radial_topology_enforced{false};
+    bool sop_dispatch_optimised{false};
+    bool dc_power_flow_enforced{false};
+    bool restoration_milp_solved{false};
+  };
+  ValidityFlags validity{};
 };
 
 // ─── Options ─────────────────────────────────────────────────────────────────

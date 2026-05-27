@@ -153,6 +153,33 @@ struct ReliabilityResult {
   /// this field is set.  Example: "DC loads not modelled (AC-only OPF)".
   std::string model_limitations;
 
+  /// Structured model-capability declaration.  Always "ac-only-dcopf" for
+  /// the Monte Carlo / FMEA evaluators in this file: the state evaluator
+  /// calls `solve_dc_opf` on the AC network only — DC power-flow balance,
+  /// DC load curtailment, and VSC re-dispatch are NOT enforced.  EENS/LOLE
+  /// figures therefore do NOT include DC load interruptions and will
+  /// underestimate total curtailment on hybrid AC/DC systems.
+  ///
+  /// Do NOT treat `eens_mwh_yr` or `lole_hr_yr` as full-system reliability
+  /// indices when the submitted `HybridPowerSystem` contains DC components.
+  /// Check `validity.dc_load_curtailment_included` before using these figures.
+  std::string model_scope{"ac-only-dcopf"};
+
+  /// Per-feature validity flags so downstream code can branch on what the
+  /// evaluator actually modelled, rather than guessing from `model_scope`.
+  struct ValidityFlags {
+    /// True only if DC load curtailment contributes to EENS/LOLE.
+    /// Always false for the current AC-only DC-OPF evaluator.
+    bool dc_load_curtailment_included{false};
+    /// True if VSC/DC branch contingencies affect DC-side power balance.
+    /// Always false — failures only affect AC island topology, not DC flow.
+    bool vsc_dc_power_flow_modelled{false};
+    /// True if AC load curtailment is computed via OPF (not all-or-nothing).
+    /// True for NSQ/SEQ MC and FMEA paths that call solve_dc_opf.
+    bool ac_opf_curtailment{true};
+  };
+  ValidityFlags validity{};
+
   // ─── Advanced Results ───
   TailRiskMetrics tail_risk;             // VaR/CVaR metrics
   DistributionIndices distribution_idx;  // SAIFI/SAIDI/ASAI (if computed)
@@ -308,8 +335,22 @@ struct FMEAResult {
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;
 
-  // Non-empty when evaluation uses simplified physics (e.g. DC loads ignored).
+  // Non-empty when evaluation uses simplified physics.
   std::string model_limitations;
+
+  /// Structured model-capability declaration.  Hybrid AC/DC systems use
+  /// "hybrid-acdc-network-lp", which optimizes AC/DC branch transfer,
+  /// DC load shedding, DC sources, DC/DC converters, and VSC active-power
+  /// transfer.  AC-only systems use "ac-only-dcopf".
+  std::string model_scope{"ac-only-dcopf"};
+
+  /// Per-feature validity flags for the FMEA result.
+  struct ValidityFlags {
+    bool dc_load_curtailment_included{false};
+    bool vsc_dc_power_flow_modelled{false};
+    bool ac_opf_curtailment{true};
+  };
+  ValidityFlags validity{};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

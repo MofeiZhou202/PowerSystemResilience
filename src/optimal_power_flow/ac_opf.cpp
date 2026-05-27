@@ -2003,6 +2003,19 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   return out;
 }
 
+bool contains_hybrid_acdc_components(const HybridPowerSystem& sys) {
+  return !sys.dc.buses.empty()               ||
+         !sys.dc.branches.empty()            ||
+         !sys.dc.loads.empty()               ||
+         !sys.vsc_converters.empty()         ||
+         !sys.dc.dcdc_converters.empty()     ||
+         !sys.dc.dc_circuit_breakers.empty() ||
+         !sys.dc.storage.empty()             ||
+         !sys.dc.pv_arrays.empty()           ||
+         !sys.dc.static_generators.empty()   ||
+         !sys.dc.dc_static_generators.empty();
+}
+
 }  // namespace
 
 ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_in) {
@@ -2051,6 +2064,22 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return out;
   }
 
+  const bool has_hybrid_acdc = contains_hybrid_acdc_components(sys);
+  const bool dropped_dc = has_hybrid_acdc;
+  auto append_hybrid_fallback_suppression = [&]() {
+    if (!dropped_dc || !opt.allow_fallback) {
+      return;
+    }
+    const std::string hint =
+        "AC-only economic-dispatch fallback suppressed because the case contains DC/VSC components.";
+    const auto already_present = std::any_of(
+        out.infeasibility_hints.begin(), out.infeasibility_hints.end(),
+        [&](const std::string& existing) { return existing.find(hint) != std::string::npos; });
+    if (!already_present) {
+      out.infeasibility_hints.push_back(hint);
+    }
+  };
+
   // ── Graph topology pre-check ────────────────────────────────────────────────
   // Detect topology problems before building the full IPM formulation.
   {
@@ -2066,6 +2095,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
         out.infeasibility_hints.push_back(diag.message);
       if (out.infeasibility_hints.empty())
         out.infeasibility_hints.push_back("No AC island contains a slack bus");
+      append_hybrid_fallback_suppression();
       return out;
     }
     for (const auto& isl : topo.islands) {
@@ -2079,9 +2109,8 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     }
   }
 
-  // Auto-enable parity IPM when DC network exists to properly optimize DC side
-  const bool has_dc = !sys.dc.buses.empty() || !sys.vsc_converters.empty();
-  if (has_dc && !opt.enable_primal_dual) {
+  // Auto-enable a hybrid-capable primal-dual path when any DC/VSC subsystem is present.
+  if (has_hybrid_acdc && !opt.enable_primal_dual) {
     opt.enable_primal_dual = true;
     opt.use_parity_ipm = true;
   }
@@ -2101,47 +2130,48 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return parity_out;
   }
 
-  const bool dropped_dc = !sys.dc.buses.empty() || !sys.dc.branches.empty() || !sys.vsc_converters.empty();
   HybridPowerSystem ac_only = sys;
   ac_only.dc.buses.clear();
   ac_only.dc.branches.clear();
   ac_only.vsc_converters.clear();
 
-  core::SolverData data = core::make_solver_data(ac_only, LossModelType::Linear);
-  ACOPFIndex idx = build_index(data);
-
-  if (idx.nb == 0 || idx.nvar == 0 || idx.neq == 0) {
-    out.status = "AC OPF failed: degenerate model dimensions.";
-    return out;
-  }
-  if (idx.ng == 0) {
-    out.status = "AC OPF failed: no in-service generators.";
-    return out;
-  }
-
   if (!opt.enable_primal_dual) {
-    if (try_dispatch_pf_fallback(ac_only, data, idx, out)) {
+    if (dropped_dc) {
+      out.status = "AC OPF failed: hybrid AC/DC cases require a hybrid-capable primal-dual solver; "
+                   "AC-only economic-dispatch fallback was not used.";
+      append_hybrid_fallback_suppression();
+      out.infeasibility_hints.push_back(
+          "Hybrid AC/DC fallback must preserve DC/VSC equations; enable_primal_dual/use_parity_ipm is required.");
+      return out;
+    }
+    core::SolverData fallback_data = core::make_solver_data(ac_only, LossModelType::Linear);
+    ACOPFIndex fallback_idx = build_index(fallback_data);
+    if (fallback_idx.nb == 0 || fallback_idx.nvar == 0 || fallback_idx.neq == 0) {
+      out.status = "AC OPF failed: degenerate model dimensions.";
+      return out;
+    }
+    if (fallback_idx.ng == 0) {
+      out.status = "AC OPF failed: no in-service generators.";
+      return out;
+    }
+    if (try_dispatch_pf_fallback(ac_only, fallback_data, fallback_idx, out)) {
       out.status = "converged (fast economic-dispatch + AC PF path)";
-      if (dropped_dc) {
-        out.status += " (DC/converter subsystems ignored in AC-only solver)";
-      }
       return out;
     }
     out.status = "AC OPF failed: fast fallback path did not converge.";
-    if (dropped_dc) {
-      out.status += " (DC/converter subsystems ignored in AC-only solver)";
-    }
     return out;
   }
 
-  data = core::make_solver_data(sys, LossModelType::Linear);
-  idx = build_index(data);
+  core::SolverData data = core::make_solver_data(sys, LossModelType::Linear);
+  ACOPFIndex idx = build_index(data);
   if (idx.nb == 0 || idx.nvar == 0 || idx.neq == 0) {
     out.status = "AC OPF failed: degenerate model dimensions.";
+    append_hybrid_fallback_suppression();
     return out;
   }
   if (idx.ng == 0) {
     out.status = "AC OPF failed: no in-service generators.";
+    append_hybrid_fallback_suppression();
     return out;
   }
 
@@ -2164,6 +2194,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   initialize_bounds_and_state(data, idx, x, lower, upper);
   if (!is_strictly_inside(x, lower, upper)) {
     out.status = "AC OPF failed: unable to initialize a strictly interior point.";
+    append_hybrid_fallback_suppression();
     return out;
   }
 
@@ -2774,7 +2805,7 @@ finalize:
     }
   }
 
-  if (!out.converged && opt.allow_fallback) {
+  if (!out.converged && opt.allow_fallback && !dropped_dc) {
     ACOPFResult fallback = out;
     if (try_dispatch_pf_fallback(ac_only, data, idx, fallback)) {
       fallback.iterations = out.iterations;
@@ -2782,11 +2813,10 @@ finalize:
       fallback.profiling = out.profiling;
       fallback.status = "converged (economic-dispatch + AC PF fallback; primal-dual path did not converge: " +
                         failure_reason + ")";
-      if (dropped_dc) {
-        fallback.status += " (DC/converter subsystems ignored in AC-only solver)";
-      }
       return fallback;
     }
+  } else if (!out.converged && opt.allow_fallback && dropped_dc) {
+    append_hybrid_fallback_suppression();
   }
 
   if (out.converged) {

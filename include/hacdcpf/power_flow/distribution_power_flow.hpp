@@ -168,27 +168,6 @@ struct PhaseDomainSparseEntry {
   std::complex<double> value{0.0, 0.0};
 };
 
-/// Compact three-phase PF data (fixed-point / admittance formulation).
-struct ThreePhaseCompactPFData {
-  PhaseNodeIndexer indexer;
-  std::vector<int> fixed_indices;
-  std::vector<int> variable_indices;
-  std::vector<std::complex<double>> fixed_voltage;
-  std::vector<std::complex<double>> fixed_current;
-  std::vector<PhaseDomainSparseEntry> ybus_entries;
-  std::vector<PhaseDomainSparseEntry> y_vv_entries;
-  std::vector<PhaseDomainSparseEntry> y_vf_entries;
-};
-
-/// Options for the fixed-point three-phase solver.
-struct ThreePhaseFixedPointOptions {
-  int    max_iter{100};
-  double tol{1e-6};
-  bool   verbose{false};
-  bool   include_shunts{true};
-  double vmin_pu{0.95};
-};
-
 /// Options for the three-phase NR solver.
 struct ThreePhaseNROptions {
   int    max_iter{50};
@@ -221,31 +200,5 @@ std::vector<PhaseDomainSparseEntry> build_full_ybus_phase_entries(
 std::vector<PhaseDomainSparseEntry> build_full_ybus_phase_entries(
     const HybridPowerSystem& sys,
     bool include_shunts = true);
-
-/// Build compact PF data structure for fixed-point solver.
-ThreePhaseCompactPFData build_compact_pf_data(
-    const ThreePhaseACSystem& sys,
-    bool include_shunts = true);
-
-ThreePhaseCompactPFData build_compact_pf_data(
-    const HybridPowerSystem& sys,
-    bool include_shunts = true);
-
-/// Fixed-point (Gauss-Seidel) three-phase solver.
-ThreePhaseDPFResult solve_three_phase_compact_pf(
-    const ThreePhaseACSystem& sys,
-    const ThreePhaseFixedPointOptions& opt = {});
-
-ThreePhaseDPFResult solve_three_phase_compact_pf(
-    const HybridPowerSystem& sys,
-    const ThreePhaseFixedPointOptions& opt = {});
-
-ThreePhaseDPFResult solve_three_phase_fixed_point(
-    const ThreePhaseACSystem& sys,
-    const ThreePhaseFixedPointOptions& opt = {});
-
-ThreePhaseDPFResult solve_three_phase_fixed_point(
-    const HybridPowerSystem& sys,
-    const ThreePhaseFixedPointOptions& opt = {});
 
 }  // namespace hacdcpf::analysis

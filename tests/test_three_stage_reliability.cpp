@@ -4,7 +4,7 @@
  *
  * The three-stage fault-recovery reliability evaluator is implemented natively
  * in C++ (src/reliability/three_stage_reliability.cpp).  It uses the local
- * MIPSolvers B&C engine and requires no external Julia or Gurobi runtime.
+ * MIPSolvers/HiGHS stack and requires no external Julia or Gurobi runtime.
  *
  * Test layout:
  *   TC-1  Symbol linkage (unconditional) — verifies the test data files are
@@ -20,8 +20,8 @@
  *         for verifying hybrid network handling.
  *
  *   TC-4  case33bw_acdc  — modified IEEE 33-bus (Baran–Wu variant) with an
- *         added DC sub-grid and SOP device.  Exercises the SOP power flow
- *         terms in all three MILP stages.
+ *         added DC sub-grid and SOP device.  Exercises the documented hybrid
+ *         connectivity fallback and zero-dispatch SOP reporting.
  *
  * Sanity ranges used in TC-2 / TC-3 / TC-4:
  *   SAIFI    ≥ 0                    (frequency index is non-negative)
@@ -145,6 +145,12 @@ TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
   // SAIFI should be well below 1 interruption/customer/year.
   CHECK(r.saifi < 1.0);
 
+  CHECK(r.model_scope == "ac-lindistflow-milp");
+  CHECK(r.validity.branch_flow_enforced);
+  CHECK(r.validity.voltage_constraints_enforced);
+  CHECK(r.validity.radial_topology_enforced);
+  CHECK(r.validity.restoration_milp_solved);
+
   check_result_shape(r);
 
   std::printf("[TC-2] test_1_no_sop: SAIFI=%.4f, SAIDI=%.2f min/yr, EENS=%.1f kWh/yr\n",
@@ -161,6 +167,10 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   // (The case carries no microgrid records despite its name.)
   CHECK(r.nb_ac  >= 33);
   CHECK(r.nl_vsc >= 1);
+
+  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
+  CHECK_FALSE(r.validity.dc_power_flow_enforced);
+  CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
   check_result_shape(r);
 
@@ -180,6 +190,9 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
 
   // Must have at least one SOP device.
   CHECK(r.nl_sop >= 1);
+  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
+  CHECK_FALSE(r.validity.dc_power_flow_enforced);
+  CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
   // SOP configuration must be populated.
   CHECK(!r.sop_config.empty());
@@ -214,4 +227,101 @@ TEST_CASE("Three-stage reliability — graceful error on missing case file",
 
   CHECK(!r.ok);
   CHECK(!r.error.empty());
+}
+
+TEST_CASE("Three-stage reliability — AC bus load is not counted twice",
+          "[reliability][three_stage][regression]") {
+  const char* json = R"json({
+    "name":"bus_load_once", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],
+      "external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":1.0,"pmax_mw":1.0,"pmin_mw":0.0,"qmax_mvar":1.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  auto r = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(r.ok);
+  REQUIRE(r.faults.size() == 1);
+
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Three-stage reliability — source capacity is finite, not infinite slack",
+          "[reliability][three_stage][regression]") {
+  const char* json = R"json({
+    "name":"finite_source", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":3.0,"qd_mvar":0.0,"n_customers":3}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":1.0,"pmax_mw":1.0,"pmin_mw":0.0,"qmax_mvar":1.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  auto r = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(r.ok);
+  REQUIRE(r.faults.size() == 1);
+
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(2000.0).margin(1e-3));
+}
+
+TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candidate edge",
+          "[reliability][three_stage][regression]") {
+  const char* json = R"json({
+    "name":"standalone_switch_stage2", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":1},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"from_bus":2,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],
+      "switches":[{"index":1,"bus_from":1,"bus_to":3,"closed":false,"in_service":true}]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  opts.max_switch_operations = 1;
+  auto r = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(r.ok);
+  REQUIRE(r.faults.size() == 2);
+
+  const auto& faulted_source_edge = r.faults.front();
+  CHECK(faulted_source_edge.pls_stage1 > 900.0);
+  CHECK(faulted_source_edge.pls_stage2 == Catch::Approx(0.0).margin(1e-6));
 }

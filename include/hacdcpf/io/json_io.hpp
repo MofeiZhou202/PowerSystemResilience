@@ -83,6 +83,16 @@ void save_opf_result_json(const opf::ACOPFResult& result,
 
 opf::ACOPFResult opf_result_from_json(const std::string& json_str);
 
+/// Serialise a DC OPF result including solver_chain and objective_model fields.
+std::string dc_opf_result_to_json(const opf::DCOPFResult& result, int indent = 2);
+
+opf::DCOPFResult dc_opf_result_from_json(const std::string& json_str);
+
+void save_dc_opf_result_json(const opf::DCOPFResult& result,
+                             const std::string& path, int indent = 2);
+
+opf::DCOPFResult load_dc_opf_result_json(const std::string& path);
+
 opf::ACOPFResult load_opf_result_json(const std::string& path);
 
 // ── Carbon analysis result serialisation ─────────────────────────────────────

@@ -479,6 +479,27 @@ P_g^{\qual{min}} &\le P_g \le P_g^{\qual{max}}, \\
 0 &\le \Delta P_{d,i} \le \max(P_{d,i},\, 0.01/S_{\qual{base}}).
 \end{align}
 
+When a connected component has no online source and cannot enter the algebraic
+DCOPF block, the implementation directly curtails that component's AC demand.
+This direct-island curtailment is accumulated into both
+\texttt{DCOPFResult::total\_load\_shedding\_mw} and the matching per-bus entry
+of \texttt{DCOPFResult::load\_shedding\_mw}.  The independent feasibility audit
+also checks the slack-bus balance, so an otherwise plausible fabricated result
+cannot pass by hiding a mismatch at the reference bus.
+
+\subsubsection{Result Audit Fields}
+
+\texttt{DCOPFResult} records the numerical solution vectors
+\texttt{pg\_mw}, \texttt{pf\_mw}, \texttt{va}, \texttt{lmp},
+\texttt{branch\_mu\_lower}, \texttt{branch\_mu\_upper}, and
+\texttt{load\_shedding\_mw}.  It also records solver-audit metadata:
+\texttt{solver\_chain} stores each backend attempted by the Auto fallback
+sequence, and \texttt{objective\_model} is \texttt{QP} or \texttt{LP} according
+to the cost model used for the reported objective.  These fields are part of
+the bidirectional JSON contract through
+\texttt{dc\_opf\_result\_to\_json}/\texttt{dc\_opf\_result\_from\_json} and
+\texttt{save\_dc\_opf\_result\_json}/\texttt{load\_dc\_opf\_result\_json}.
+
 \subsubsection{Solver Backend Selection}
 
 \texttt{DCOPFOptions::solver} defaults to \texttt{DCOPFSolverBackend::Auto}.  The
@@ -501,21 +522,20 @@ prices populate \texttt{DCOPFResult::lmp}.  Set
 price signals are not needed, to skip the dual extraction overhead.
 
 \textbf{Branch shadow prices} (\texttt{branch\_mu\_lower}/\texttt{branch\_mu\_upper})
-are populated \emph{only} when branch-flow variables ($P_{ij}$) are included
-in the formulation, i.e.\ when \texttt{include\_branch\_limits=true} (the
-default).  When branch limits are disabled or the LP is solved without
-explicit $P_{ij}$ variables (e.g.\ after a QP solve without a supporting LP),
-both vectors are left zero-filled.  Do \textbf{not} interpret zero values as
-``uncongested''; check \texttt{DCOPFOptions::include\_branch\_limits} first.
+are exposed only with an explicit validity flag.  The implementation may fill
+the branch-dual vectors from solver certificates, but callers must treat them
+as congestion prices only when \texttt{DCOPFResult::branch\_mu\_valid=true}.
+The current code sets this flag to \texttt{false}; zero values therefore mean
+``not certified by the current extractor'', not necessarily ``uncongested''.
 
 \textbf{Known limitation — congested branch shadow prices:}
 The supporting simplex LP used for dual recovery (\texttt{solve\_lp\_with\_basis})
 does not handle bounded-variable LP problems.  When \texttt{include\_branch\_limits=true}
 and a branch limit is actively binding (congestion), the native simplex cannot
 recover correct $P_{ij}$ box duals; \texttt{branch\_mu\_lower/upper} will be
-unreliable (typically zero).  LMP nodal prices remain valid.  A bounded-variable
-simplex or an interior-point solver would be required to obtain correct branch
-shadow prices under congestion.
+unreliable (typically zero) and \texttt{branch\_mu\_valid=false}.  LMP nodal
+prices remain valid.  A bounded-variable simplex or an interior-point solver
+would be required to obtain correct branch shadow prices under congestion.
 
 \subsection{Reactive Power Optimization (\texttt{solve\_rpo})}
 \label{sec:rpo}

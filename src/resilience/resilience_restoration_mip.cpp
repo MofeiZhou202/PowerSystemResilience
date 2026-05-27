@@ -489,7 +489,13 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
           case LoadPriority::Low: break;
         }
     }
-    for (int i = 0; i < n_bus; ++i) system_peak_demand_mw = std::max(system_peak_demand_mw, out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)]);
+    // Track true system-wide peak demand: total demand across all buses at
+    // time t, max'd over t.  Earlier this variable was named "peak" but only
+    // tracked the largest *single-bus* load, which under-sizes default slack
+    // capacities (set to 1.5 * peak below) on systems with many small loads.
+    double system_demand_at_t = 0.0;
+    for (int i = 0; i < n_bus; ++i) system_demand_at_t += out.demand_mw[static_cast<size_t>(t)][static_cast<size_t>(i)];
+    system_peak_demand_mw = std::max(system_peak_demand_mw, system_demand_at_t);
     for (const auto& rg : sys.ac.renewable_gens) {
       if (!rg.in_service) continue;
       const auto it = bus_pos.find(rg.bus);
@@ -1068,6 +1074,17 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
   result.model_stats.solver_name = resilience_mip_solver_name(opts.mip.solver, bc_opts.num_threads);
   result.model_stats.solver_status = solve_result.stats.status;
   result.model_stats.cglp_cuts_added = solve_result.stats.cglp_cuts_added;
+
+  // Post-solve capability flags.  AC-only model_scope is hard-coded because
+  // the MIP skeleton does not represent DC components; flipping this string
+  // requires actually adding DC/VSC variables and constraints.  The
+  // `mip_solved_to_proven_optimum` flag is set only when the solver reports
+  // a closed optimality gap; non-zero gap means the incumbent is feasible
+  // but its global optimality is unproven.
+  result.model_stats.model_scope = "ac-only-lindistflow";
+  result.model_stats.validity = DistributionResilienceModelStats::ValidityFlags{};
+  result.model_stats.validity.mip_gap_within_tolerance =
+      solve_result.stats.success && solve_result.stats.mip_gap <= opts.mip.mip_gap + 1.0e-9;
 
   constexpr double kFeasTol = 1.0e-6;
   const bool size_ok = solve_result.x.size() == built.model.linear_part.c.size();

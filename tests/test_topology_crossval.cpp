@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "hacdcpf/network_reconfiguration/topology_analysis.hpp"
+#include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
@@ -55,6 +56,85 @@ static hacdcpf::ACBranch make_branch(int id, int f, int t,
   br.tap = 1.0; br.shift_deg = 0.0; br.in_service = in_svc;
   br.rate_a_mva = 10.0;
   return br;
+}
+
+TEST_CASE("Topology reconfiguration treats ExternalGrid-only systems as sourced",
+          "[topology][reconfiguration][regression]") {
+  using namespace hacdcpf;
+
+  ACSystem ac;
+  ac.base_mva = 10.0;
+  ac.buses = {
+      make_bus(1, BusType::SLACK),
+      make_bus(2, BusType::PQ, 1.0, 0.0),
+  };
+  ac.branches = {make_branch(1, 1, 2, 0.001, 0.001, true)};
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.in_service = true;
+  eg.s_sc_max_mva = 10.0;
+  ac.external_grids = {eg};
+
+  HybridPowerSystem sys;
+  sys.ac = ac;
+
+  analysis::TopoReconfOptions opt;
+  opt.max_time_s = 20;
+  opt.verbose = false;
+  const auto result = analysis::run_topology_reconfiguration(sys, opt);
+
+  CHECK(result.feasible);
+  CHECK(!result.closed_branch_ids.empty());
+}
+
+TEST_CASE("Topology reconfiguration load accounting adds bus demand and Load records",
+          "[topology][reconfiguration][regression]") {
+  using namespace hacdcpf;
+
+  ACSystem load_records_only;
+  load_records_only.base_mva = 10.0;
+  load_records_only.buses = {
+      make_bus(1, BusType::SLACK),
+      make_bus(2, BusType::PQ, 0.0, 0.0),
+  };
+  load_records_only.branches = {make_branch(1, 1, 2, 0.001, 0.001, true)};
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.in_service = true;
+  g.pg_mw = 2.5;
+  g.pmax_mw = 2.5;
+  g.pmin_mw = 0.0;
+  g.qmax_mvar = 10.0;
+  g.qmin_mvar = -10.0;
+  load_records_only.generators = {g};
+  Load load;
+  load.index = 1;
+  load.bus = 2;
+  load.in_service = true;
+  load.p_mw = 2.0;
+  load.q_mvar = 0.0;
+  load.scaling = 1.0;
+  load_records_only.loads = {load};
+
+  ACSystem bus_plus_load_records = load_records_only;
+  bus_plus_load_records.buses[1].pd_mw = 1.0;
+
+  HybridPowerSystem sys_base;
+  sys_base.ac = load_records_only;
+  HybridPowerSystem sys_additive;
+  sys_additive.ac = bus_plus_load_records;
+
+  analysis::TopoReconfOptions opt;
+  opt.max_time_s = 20;
+  opt.verbose = false;
+  const auto base = analysis::run_topology_reconfiguration(sys_base, opt);
+  const auto additive = analysis::run_topology_reconfiguration(sys_additive, opt);
+
+  REQUIRE(base.feasible);
+  REQUIRE(additive.feasible);
+  CHECK(additive.milp_objective > base.milp_objective + 1e-6);
 }
 
 // ---------------------------------------------------------------------------

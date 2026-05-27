@@ -46,7 +46,7 @@ backends.
 Consumer & Engine dependency & Current behavior \\
 \midrule
 \endhead
-DC OPF & LCQP, Gurobi, HiGHS, dual simplex & \texttt{Auto} tries \texttt{NativeQP}, then Gurobi, then HiGHS, then native dual simplex.  LMP arrays are currently filled with zeros because dual extraction is marked TODO in \texttt{dc\_opf.cpp}. \\
+DC OPF & LCQP, Gurobi, HiGHS, dual simplex & \texttt{Auto} tries \texttt{NativeQP}, then Gurobi, then HiGHS, then native dual simplex.  When \texttt{DCOPFOptions::compute\_lmp=true}, the solver runs a supporting simplex LP to recover nodal LMPs.  Branch congestion duals remain bounded-variable limited and are guarded by \texttt{DCOPFResult::branch\_mu\_valid=false}. \\
 RPO & \texttt{BCStats} only for result reporting & The current source runs an OA/coordinate-search workflow and reuses B\&C statistics fields for counters; it does not call a generic branch-and-bound solve loop. \\
 Parity AC OPF & local parity IPM & Uses the local KKT assembly and Eigen dense/sparse factorizations in \texttt{parity\_ipm.cpp}. \\
 Native AC OPF & local reduced-space KKT loop & Uses custom KKT assembly and factorization in \texttt{ac\_opf.cpp}. \\

@@ -48,7 +48,7 @@ Area & Current code status \\
 \midrule
 \endhead
 \texttt{analysis::solve\_distribution\_power\_flow} & Declared and compiled, but \texttt{src/power\_flow/} returns a non-converged result with \texttt{status="not\_implemented"}. \\
-Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++ MILP evaluator built on the embedded MIPSolvers engine (previous Julia CLI bridge was removed).  It includes an O($n$) analytical pre-check that skips B\&C when every connected component has sufficient generation capacity, and falls through to the full MILP solve otherwise.  No external Julia or Gurobi environment is required. \\
+Three-stage MILP reliability & Public API and data types defined in \texttt{include/hacdcpf/analysis/three\_stage\_reliability.hpp}; \texttt{src/reliability/three\_stage\_reliability.cpp} is a native C++ evaluator built on the embedded MIPSolvers engine.  The implemented physical optimization is the finite-source AC LinDistFlow restoration MILP; hybrid DC/VSC/DCDC/SOP objects are handled through connectivity/capacity fallback and reported through model-scope/validity fields.  No external Julia or Gurobi environment is required. \\
 
 \bottomrule
 \end{longtable}

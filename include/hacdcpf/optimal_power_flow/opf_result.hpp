@@ -143,6 +143,18 @@ struct DCOPFResult {
 
   std::vector<double> load_shedding_mw;
   double total_load_shedding_mw{0.0};
+
+  /// Ordered list of solver backends attempted (most-recent last).
+  /// Each entry is of the form "<backend>:<status>" where status is one of
+  /// "ok" or a short failure reason. Recorded by solve_dc_opf so callers can
+  /// audit the actual fallback chain rather than guessing from solver_name.
+  std::vector<std::string> solver_chain;
+
+  /// Objective model actually used to compute `objective`.
+  /// One of: "QP" (true quadratic costs, 0.5 x'Qx + c'x + c0),
+  ///         "LP" (linearised piecewise / linear costs).
+  /// Disambiguates QP-vs-LP semantics across fallback paths.
+  std::string objective_model;
 };
 
 }  // namespace hacdcpf::opf

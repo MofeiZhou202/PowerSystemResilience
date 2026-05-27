@@ -14,7 +14,8 @@ The current implementation is concentrated in:
 \begin{itemize}
   \item \texttt{src/network\_reconfiguration/topology\_analysis.cpp} for ONR model build, solve, and post-processing,
   \item \texttt{src/network\_reconfiguration/topology\_reconfiguration.cpp} for fault-triggered reconfiguration,
-  \item \texttt{src/engine/branch\_and\_cut.cpp} and its helper files for MILP solution.
+  \item the forwarded MIPSolvers engine for native branch-and-cut, simplex, and
+        external HiGHS/Gurobi adapters.
 \end{itemize}
 
 \subsection{Pseudocode Map}
@@ -31,6 +32,13 @@ The ONR route is a live MILP application using the native branch-and-cut stack.
 Its main current boundary is modeling scope: projected canonical AC components
 are supported, but higher-level hybrid overlays such as VPP, microgrid, and
 mobile-storage behavior are not yet injected directly into the ONR MILP.
+
+This chapter distinguishes two runtime paths.  The steady ONR path in
+\texttt{topology\_analysis.cpp} solves radial feeder reconfiguration for loss
+reduction.  The fault-triggered path in \texttt{topology\_reconfiguration.cpp}
+builds a restoration MILP with failed-line availability, source limits, load
+pickup, and optional PF-style constraints.  They share graph and MILP concepts
+but have different data assembly and fallback behavior.
 
 \subsection{Scope of the Current ONR Module}
 
@@ -135,6 +143,28 @@ following current tuning:
   \item LP node solver: simplex enabled,
   \item feasibility pump: enabled.
 \end{itemize}
+
+\subsection{Fault-Triggered Reconfiguration Path}
+
+\texttt{run\_topology\_reconfiguration()} builds its source set from all
+in-service AC generators, in-service \texttt{ExternalGrid} rows, and a SLACK-bus
+fallback if neither explicit source type is available.  This means an
+ExternalGrid-only distribution case is now a valid sourced system rather than
+an immediate infeasibility.
+
+Load demand is additive.  Active/reactive demand from explicit
+\texttt{ACSystem::loads} is accumulated first, and direct
+\texttt{ACBus::pd\_mw}/\texttt{qd\_mvar} demand is then added at the same bus.
+DC load rows are also mapped onto the hybrid restoration graph when the DC bus
+is present.  The implementation does not treat bus demand and load records as
+mutually exclusive encodings.
+
+If the heuristic warm start fails to produce a feasible restoration plan, the
+code builds the full MILP fallback.  It uses HiGHS when the adapter is
+available; otherwise it calls the native branch-and-cut fallback with the same
+model and optional heuristic initial solution.  The stale behavior where a
+missing heuristic plan directly implied infeasibility is no longer the current
+runtime path.
 
 \subsection{Postprocessing and Verification}
 

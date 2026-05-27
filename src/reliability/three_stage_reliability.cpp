@@ -25,8 +25,11 @@
 #include <spdlog/spdlog.h>
 
 #include "hacdcpf/engine/branch_and_cut.hpp"
+#include "hacdcpf/engine/engine.hpp"
+#include "hacdcpf/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "hacdcpf/engine/problem_types.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/model/effective_capacity.hpp"
 
 namespace fs = std::filesystem;
 namespace hacdcpf::analysis {
@@ -146,13 +149,15 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_source(c.sources, eg.bus, eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4);
   }
   for (const auto& g : sys.ac.generators) {
-    if (!g.in_service) continue;
-    add_source(c.sources, g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : std::max(0.0, g.pg_mw));
+    const double cap = hacdcpf::model::effective_capacity_mw(g);
+    if (cap > 0.0) add_source(c.sources, g.bus, cap);
   }
   for (const auto& sg : sys.ac.static_generators) {
-    if (!sg.in_service) continue;
-    double p = sg.pmax_mw > 0.0 ? sg.pmax_mw : (sg.p_rated_mw > 0.0 ? sg.p_rated_mw : sg.p_mw * sg.scaling);
-    add_source(c.sources, sg.bus, p);
+    // Effective fixed-injection capacity must honour `scaling`; without it,
+    // a unit scheduled out (scaling=0) would still appear at full nameplate
+    // power in the connectivity model and over-state restoration headroom.
+    const double cap = hacdcpf::model::effective_capacity_mw(sg);
+    if (cap > 0.0) add_source(c.sources, sg.bus, cap);
   }
   for (const auto& rg : sys.ac.renewable_gens) {
     if (!rg.in_service) continue;
@@ -163,18 +168,17 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_source(c.sources, pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
   }
   for (const auto& st : sys.ac.storage) {
-    if (!st.in_service) continue;
-    double p = st.pmax_mw > 0.0 ? st.pmax_mw : st.p_rated_mw;
-    add_source(c.sources, st.bus, p);
+    const double cap = hacdcpf::model::effective_capacity_mw(st);
+    if (cap > 0.0) add_source(c.sources, st.bus, cap);
   }
   for (const auto& g : sys.dc.dc_static_generators) {
-    if (!g.in_service) continue;
-    add_source(c.sources, g.bus + kDCBusOffset, g.pmax_mw > 0.0 ? g.pmax_mw : g.p_set_mw * g.scaling);
+    const double cap = hacdcpf::model::effective_capacity_mw(g);
+    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap);
   }
   for (const auto& g : sys.dc.static_generators) {
-    if (!g.in_service) continue;
-    double p = g.pmax_mw > 0.0 ? g.pmax_mw : (g.p_rated_mw > 0.0 ? g.p_rated_mw : g.p_mw * g.scaling);
-    add_source(c.sources, g.bus + kDCBusOffset, p);
+    // Same scaling-aware treatment as the AC counterpart above.
+    const double cap = hacdcpf::model::effective_capacity_mw(g);
+    if (cap > 0.0) add_source(c.sources, g.bus + kDCBusOffset, cap);
   }
   for (const auto& pv : sys.dc.pv_arrays) {
     if (!pv.in_service) continue;
@@ -218,110 +222,63 @@ struct DSU {
   }
 };
 
-// stage_components() — build connected-component map for the given fault stage.
+// ─── LinDistFlow MILP — stages 1, 2, 3 ───────────────────────────────────────
 //
-// MODEL SCOPE (connectivity-only, no physical constraints):
-//   Stage 1 — fault island: fault branch open, all other in-service branches/switches
-//             in their nominal state.
-//   Stage 2 — switching: fault branch stays open; in-service branches connect normally;
-//             switches are closed greedily up to max_sw_ops switching operations.
-//             If max_sw_ops == INT_MAX (default) all normally-open in-service switches
-//             are closed (best-case).  Each switch that merges two distinct components
-//             counts as one operation; switches within the same component are free.
-//             REMAINING LIMITATIONS: no radial-topology constraints, no line-flow
-//             limits, no voltage limits.  Greedy ordering is deterministic but not
-//             globally optimal when max_sw_ops < number of applicable switches.
-//   Stage 3 — repair: fault branch restored; all originally-in-service elements on.
+// Implements the exact mathematical model:
 //
-// SOP/VSC dispatch is NOT modelled here; VSC converters are treated as lossless
-// graph edges (always connected when in_service).  Actual SOP dispatch setpoints
-// are NOT co-optimised; psop vectors in FaultDetail are filled with zeros.
-std::unordered_map<int, int> stage_components(const NativeCase& c,
-                                              const FaultLine& fault,
-                                              int stage,
-                                              int max_sw_ops = INT_MAX) {
-  auto pos = bus_position_map(c.buses);
-  DSU dsu(static_cast<int>(c.buses.size()));
-  auto connect = [&](int a, int b) {
-    auto ia = pos.find(a), ib = pos.find(b);
-    if (ia != pos.end() && ib != pos.end()) dsu.unite(ia->second, ib->second);
-  };
-  for (int i = 0; i < static_cast<int>(c.sys.ac.branches.size()); ++i) {
-    const auto& br = c.sys.ac.branches[i];
-    bool on = br.in_service;
-    if (fault.ac && i == fault.index && stage < 3) on = false;
-    if (!on && stage >= 2 && br.in_service && !(fault.ac && i == fault.index)) on = true;
-    if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
-    if (on) connect(br.from_bus, br.to_bus);
-  }
-  // Step 2: Passive (zero-operation) connectivity.
-  // All of these are connected BEFORE the normally-open greedy loop so that
-  // transformer / VSC / CB paths are already reflected in the DSU when a NO
-  // switch is evaluated.  A switch is only charged one operation when it truly
-  // merges two otherwise-disjoint components after ALL free edges are in.
-  //
-  // 2a — Already-closed AC switches (free; same semantics for stages 1, 2, 3).
-  for (const auto& sw : c.sys.ac.switches) {
-    if (sw.in_service && sw.closed) connect(sw.bus_from, sw.bus_to);
-  }
-  // 2b — Transformers (2-winding and 3-winding).
-  for (const auto& tr : c.sys.ac.transformers_2w) {
-    if (tr.in_service) connect(tr.hv_bus, tr.lv_bus);
-  }
-  for (const auto& tr : c.sys.ac.transformers_3w) {
-    if (!tr.in_service) continue;
-    connect(tr.hv_bus, tr.mv_bus);
-    connect(tr.hv_bus, tr.lv_bus);
-  }
-  // 2c — DC branches (same fault/stage conditions as AC branches above).
-  for (int i = 0; i < static_cast<int>(c.sys.dc.branches.size()); ++i) {
-    const auto& br = c.sys.dc.branches[i];
-    bool on = br.in_service;
-    if (!fault.ac && i == fault.index && stage < 3) on = false;
-    if (!on && stage >= 2 && br.in_service && !(!fault.ac && i == fault.index)) on = true;
-    if (stage >= 3 && br.in_service) on = true;  // repair restores only originally-in-service branches
-    if (on) connect(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
-  }
-  // 2d — VSC converters (lossless AC↔DC coupling; dispatch not modelled here).
-  for (const auto& vsc : c.sys.vsc_converters) {
-    if (vsc.in_service) connect(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
-  }
-  // 2e — DC/DC converters.
-  for (const auto& dc : c.sys.dc.dcdc_converters) {
-    if (dc.in_service) connect(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
-  }
-  // 2f — AC circuit breakers (normally-closed; free).
-  for (const auto& cb : c.sys.ac.circuit_breakers) {
-    if (cb.in_service && cb.closed) connect(cb.bus_from, cb.bus_to);
-  }
-  // 2g — DC circuit breakers (normally-closed; free).
-  for (const auto& cb : c.sys.dc.dc_circuit_breakers) {
-    if (cb.in_service && cb.closed)
-      connect(cb.bus_from + kDCBusOffset, cb.bus_to + kDCBusOffset);
-  }
-  // Step 3: Greedy normally-open switch closing (Stage 2 only).
-  // The DSU now includes all passive connections; a switch is charged one
-  // operation only when it genuinely merges two isolated components.
-  if (stage >= 2 && max_sw_ops > 0) {
-    int ops = 0;
-    for (const auto& sw : c.sys.ac.switches) {
-      if (!sw.in_service || sw.closed) continue;  // skip out-of-service or already closed
-      auto ia = pos.find(sw.bus_from), ib = pos.find(sw.bus_to);
-      if (ia == pos.end() || ib == pos.end()) continue;
-      if (dsu.find(ia->second) != dsu.find(ib->second)) {
-        // Merges two distinct components — counts as one switching operation.
-        if (ops >= max_sw_ops) continue;
-        dsu.unite(ia->second, ib->second);
-        ++ops;
-      }
-      // Switch within same component: no connectivity effect; don't close (strict model).
-    }
-  }
+//   Objective (eq. 3):   min Σ_i w_i · p^sh_i
+//
+//   C0  (eq. 3a):  Energisation/load-pickup coupling:
+//                    P^d_i - p^sh_i ≤ P^d_i y_i, y_s = 1 for source buses
+//
+//   C1  (eq. 4'):  LinDistFlow active power balance at every AC bus i:
+//                    Σ_{j:(j,i)∈L} P_ji - Σ_{j:(i,j)∈L} P_ij + p_g,i + p^sh_i = P^d_i
+//                    0 ≤ p_g,i ≤ P^g,max_i
+//
+//   C2  (eq. 5):   Reactive power balance (q^sh_i = q_d,i · p^sh_i / p_d,i):
+//                    Σ_{j:(j,i)∈L} Q_ji - Σ_{j:(i,j)∈L} Q_ij + q_g,i + q^sh_i = Q^d_i
+//                    0 ≤ q_g,i ≤ Q^g,max_i
+//
+//   C3  (eq. 6'):  LinDistFlow voltage drop (linearised, losses dropped):
+//                    v_j = v_i - 2(r_ij P_ij + x_ij Q_ij)
+//                  Enforced via Big-M on z_ij:
+//                    v_j - v_i + 2(r P + x Q) ≤  M(1 - z_ij)
+//                    v_j - v_i + 2(r P + x Q) ≥ -M(1 - z_ij)
+//
+//   C4  (eq. 7–8): Branch active/reactive flow limits with Big-M:
+//                    -z_ij · S̄_ij ≤ P_ij ≤ z_ij · S̄_ij
+//                    -z_ij · S̄_ij ≤ Q_ij ≤ z_ij · S̄_ij
+//
+//   C5  (eq. 9):   Voltage bounds:   V̲² ≤ v_i ≤ V̄²
+//
+//   C6  (eq. 10–11): Strict energized radial forest:
+//                    Σ f_in - Σ f_out = y_i, ∀i∉S
+//                    Σ f_in - Σ f_out ≤ 0, ∀i∈S
+//                    |f_ij| ≤ (|B|-1) z_ij, z_ij ≤ y_i, z_ij ≤ y_j
+//                    Σ z_ij ≤ Σ y_i - |S|
+//
+//   C7  (eq. 12):  Forced-open failed branch:   z_k = 0
+//
+//   C8  (eq. 13):  Normally-closed non-switch branches stay closed:
+//                    z_ij = 1  ∀(i,j) ∉ (L^NO ∪ {k})
+//                  Stage 1: all switches remain at nominal position (no switching allowed).
+//                  Stage 2: normally-open switches are free (0 ≤ z_ij ≤ 1, binary) subject to C9.
+//                  Stage 3: fault branch is restored; all z_ij fixed at nominal (all n.c. = 1).
+//
+//   C9  (eq. 14):  Switch count:   Σ_{(i,j)∈L^NO} z_ij ≤ K^sw
+//
+//   C10 (eq. 15):  Load shed bounds:   0 ≤ p^sh_i ≤ p_d,i
+//
+// MODEL SCOPE: AC branches and buses only.  DC loads are handled by the
+// connectivity fallback (capacity ≥ demand per component).  VSC/DCDC elements
+// are graph edges in that fallback, not dispatch variables in this MILP.
+// ─────────────────────────────────────────────────────────────────────────────
 
-  std::unordered_map<int, int> out;
-  for (int i = 0; i < static_cast<int>(c.buses.size()); ++i) out[c.buses[i]] = dsu.find(i);
-  return out;
-}
+// Big-M constant for voltage-drop linearisation (in pu²).
+// The voltage span is at most [V̲², V̄²] ≈ [0.81, 1.21]; 2r·P + 2x·Q is
+// bounded in magnitude by 2·(r+x)·S̄.  A value of 2.0 pu² is conservative
+// enough for any realistic distribution system.
+constexpr double kBigMVoltage = 2.0;
 
 struct StageSolve {
   double shed_kw{0.0};
@@ -330,166 +287,645 @@ struct StageSolve {
   double objective{0.0};
 };
 
+// solve_stage_milp() — LinDistFlow MILP for stages 1, 2, and 3.
+//
+// The MILP is built over the AC sub-network only.  DC buses/branches/VSC are
+// excluded from the LinDistFlow equations (they have no r_pu / x_pu / voltage
+// bounds in the DC model).  DC loads that map to the same AC bus as a VSC
+// converter are implicitly covered by the AC power balance.  Purely DC-only
+// loads on buses with no AC equivalent are handled by the connectivity/capacity
+// fallback at the end of this function.
 StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage,
                             int max_sw_ops = INT_MAX) {
   StageSolve out;
-  const int nd = static_cast<int>(c.loads.size());
+  const int nd_total = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
-  if (nd == 0) {
+  if (nd_total == 0) {
     out.status = "success";
     return out;
   }
 
-  const auto comp = stage_components(c, fault, stage, max_sw_ops);
-  std::unordered_map<int, double> comp_cap;
-  for (const auto& s : c.sources) {
-    auto it = comp.find(s.bus);
-    if (it != comp.end()) comp_cap[it->second] += s.p_kw;
+  // ── Build index maps for the AC sub-network ──────────────────────────────
+  const HybridPowerSystem& sys = c.sys;
+
+  // AC buses: map bus_id → position in ac_buses vector (0-based)
+  const int n_bus = static_cast<int>(sys.ac.buses.size());
+  std::unordered_map<int, int> ac_bus_pos;
+  ac_bus_pos.reserve(static_cast<size_t>(n_bus));
+  for (int i = 0; i < n_bus; ++i) ac_bus_pos[sys.ac.buses[i].index] = i;
+
+  // AC candidate edges: all physical branches plus standalone switch elements.
+  // Closed/in-service edges are nominally closed.  Out-of-service branches and
+  // open switches are normally-open candidates that may close only in Stage 2.
+  struct BrInfo {
+    int idx_global;   // index in sys.ac.branches
+    int from_pos;     // position in ac_buses
+    int to_pos;
+    double r_pu;
+    double x_pu;
+    double s_max_mw;  // thermal limit in MW (= rate_a_mva, or default)
+    bool normally_open;  // true if this is a normally-open switch
+    bool failed;         // true if this is the faulted branch
+  };
+  // Default branch rating: 2× total system demand (ensures feasibility when
+  // no explicit rating is given, without making Big-M constraints too loose).
+  double total_demand_mw = 0.0;
+  for (const auto& ld : c.loads) total_demand_mw += std::max(0.0, ld.p_kw) / 1000.0;
+  const double default_rate_mw = std::max(10.0, 2.0 * total_demand_mw);
+
+  std::vector<BrInfo> ac_branches;
+  ac_branches.reserve(sys.ac.branches.size() + sys.ac.switches.size());
+  auto undirected_key = [](int a, int b) -> long long {
+    if (a > b) std::swap(a, b);
+    return (static_cast<long long>(a) << 32) ^ static_cast<unsigned int>(b);
+  };
+  std::unordered_map<long long, bool> branch_pair_seen;
+  for (int b = 0; b < static_cast<int>(sys.ac.branches.size()); ++b) {
+    const auto& br = sys.ac.branches[b];
+    auto it_f = ac_bus_pos.find(br.from_bus);
+    auto it_t = ac_bus_pos.find(br.to_bus);
+    if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+    branch_pair_seen[undirected_key(br.from_bus, br.to_bus)] = true;
+
+    bool has_open_switch = false;
+    for (const auto& sw : sys.ac.switches) {
+      if (!sw.in_service) continue;
+      if (!sw.closed &&
+          ((sw.bus_from == br.from_bus && sw.bus_to == br.to_bus) ||
+           (sw.bus_from == br.to_bus   && sw.bus_to == br.from_bus))) {
+        has_open_switch = true;
+        break;
+      }
+    }
+    const bool is_no_switch = !br.in_service || has_open_switch;
+    const bool is_failed = (fault.ac && b == fault.index);
+    const double s_max = br.rate_a_mva > 1e-9 ? br.rate_a_mva : default_rate_mw;
+    ac_branches.push_back({b, it_f->second, it_t->second,
+                           std::max(1e-6, br.r_pu),
+                           std::max(1e-6, br.x_pu),
+                           s_max,
+                           is_no_switch,
+                           is_failed});
+  }
+  for (const auto& sw : sys.ac.switches) {
+    if (!sw.in_service) continue;
+    if (branch_pair_seen.count(undirected_key(sw.bus_from, sw.bus_to))) continue;
+    auto it_f = ac_bus_pos.find(sw.bus_from);
+    auto it_t = ac_bus_pos.find(sw.bus_to);
+    if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+    ac_branches.push_back({-1, it_f->second, it_t->second,
+                           1e-6, 1e-6, default_rate_mw,
+                           !sw.closed,
+                           false});
+  }
+  const int n_br = static_cast<int>(ac_branches.size());
+
+  // ── Identify source buses (S set in radiality constraint C6) ────────────
+  // A bus is a source if it has an external grid, generator, static generator,
+  // storage, or renewable gen attached with positive capacity.
+  std::vector<bool> is_source(static_cast<size_t>(n_bus), false);
+  // p_gen[i]: maximum active injection in MW at AC bus i (sum over all generators)
+  std::vector<double> p_gen_max(static_cast<size_t>(n_bus), 0.0);
+  // q_gen[i]: maximum reactive injection in Mvar (used in reactive balance C2)
+  std::vector<double> q_gen_max(static_cast<size_t>(n_bus), 0.0);
+
+  auto mark_source = [&](int bus, double p_mw) {
+    auto it = ac_bus_pos.find(bus);
+    if (it == ac_bus_pos.end()) return;
+    is_source[it->second] = true;
+    p_gen_max[it->second] += std::max(0.0, p_mw);
+  };
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    const double cap = eg.s_sc_max_mva > 0.0 ? eg.s_sc_max_mva : 1.0e4;
+    mark_source(eg.bus, cap);
+    auto it = ac_bus_pos.find(eg.bus);
+    if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap;
+  }
+  for (const auto& g : sys.ac.generators) {
+    if (!g.in_service) continue;
+    mark_source(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
+    auto it = ac_bus_pos.find(g.bus);
+    if (it != ac_bus_pos.end())
+      q_gen_max[it->second] += std::max(0.0, g.qmax_mvar > 0.0 ? g.qmax_mvar : std::abs(g.qg_mvar));
+  }
+  for (const auto& sg : sys.ac.static_generators) {
+    if (!sg.in_service) continue;
+    const double cap = hacdcpf::model::effective_capacity_mw(sg);
+    mark_source(sg.bus, cap);
+    auto it = ac_bus_pos.find(sg.bus);
+    if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap * 0.5;
+  }
+  for (const auto& rg : sys.ac.renewable_gens) {
+    if (!rg.in_service) continue;
+    const double cap = rg.p_rated_mw > 0.0 ? rg.p_rated_mw * rg.capacity_factor : rg.p_mw;
+    mark_source(rg.bus, cap);
+  }
+  for (const auto& pv : sys.ac.pv_systems) {
+    if (!pv.in_service) continue;
+    mark_source(pv.bus, pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw);
+  }
+  for (const auto& st : sys.ac.storage) {
+    const double cap = hacdcpf::model::effective_capacity_mw(st);
+    if (cap > 1e-9) mark_source(st.bus, cap);
   }
 
-  // ── Analytic shortcut ──────────────────────────────────────────────────────
-  // If every connected component has sufficient capacity to serve all its loads,
-  // the optimal all-or-nothing solution is trivially zero shed — skip B&C.
-  {
-    std::unordered_map<int, double> comp_demand;
-    for (int i = 0; i < nd; ++i) {
-      const double li = std::max(0.0, c.loads[i].p_kw);
-      auto it = comp.find(c.loads[i].bus);
-      if (it != comp.end()) comp_demand[it->second] += li;
-      // Loads on isolated buses always shed — any isolation disqualifies shortcut.
-      else if (li > 1e-6) goto full_milp;
-    }
-    {
-      bool feasible = true;
-      for (const auto& [cid, demand] : comp_demand) {
-        const auto ci = comp_cap.find(cid);
-        if (ci == comp_cap.end() || ci->second < demand - 1e-6) {
-          feasible = false;
-          break;
-        }
-      }
-      if (feasible) {
-        out.status = "success (analytical)";
-        out.shed_kw = 0.0;
-        std::fill(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-        return out;
-      }
-    }
+  // ── Build per-bus demand vectors (MW and Mvar) for AC loads ────────────
+  // p_d[i]: net active demand at AC bus i (MW)
+  // q_d[i]: net reactive demand (Mvar); approximated as p_d * tan(arccos(0.9))
+  // Demand is sourced only from c.loads. build_native_case() already expands
+  // both ACLoad entries and ACBus::pd_mw into explicit LoadPoint records, so
+  // adding sys.ac.buses[i].pd_mw here would double-count bus-level demand.
+  std::vector<double> p_d(static_cast<size_t>(n_bus), 0.0);
+  std::vector<double> q_d(static_cast<size_t>(n_bus), 0.0);
+  // Map from load-point index (in c.loads) → AC bus position (-1 if DC-only)
+  std::vector<int> load_ac_bus(static_cast<size_t>(nd_total), -1);
+
+  for (int li = 0; li < nd_total; ++li) {
+    const int bus = c.loads[li].bus;
+    auto it = ac_bus_pos.find(bus);
+    if (it == ac_bus_pos.end()) continue;  // DC-only load — handled below
+    load_ac_bus[li] = it->second;
+    const double p_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
+    p_d[it->second] += p_mw;
+    q_d[it->second] += p_mw * 0.4843;  // tan(arccos(0.9)) ≈ 0.4843
   }
-  full_milp:
+  // Number of AC load points (those with AC bus)
+  // (DC-only loads get connectivity fallback below)
+
+  // ── Variable index helpers ────────────────────────────────────────────────
+  // Layout: [p^sh_i] [y_i] [z_ij] [P_ij] [Q_ij] [v_i] [f_ij] [p_g_i] [q_g_i]
+  const int off_shed  = 0;
+  const int off_y      = off_shed + n_bus;
+  const int off_z      = off_y     + n_bus;
+  const int off_P     = off_z    + n_br;
+  const int off_Q     = off_P   + n_br;
+  const int off_v     = off_Q   + n_br;
+  const int off_f     = off_v   + n_bus;
+  const int off_pg    = off_f   + n_br;
+  const int off_qg    = off_pg  + n_bus;
+  const int n_vars    = off_qg  + n_bus;
 
   engine::MIPModel mip;
   auto& lp = mip.linear_part;
   lp.sense = engine::Sense::Minimize;
-  lp.c = Eigen::VectorXd::Zero(nd);
-  lp.vars.resize(nd);
-  for (int i = 0; i < nd; ++i) {
-    const double li = std::max(0.0, c.loads[i].p_kw);
-    // z_i ∈ {0,1}: 1 = load i completely shed (not served), 0 = fully served.
-    // Discrete all-or-nothing restorability is the standard assumption in
-    // distribution reliability assessment (IEC/DL-T 836, IEEE Std 1366).
-    lp.vars[i] = {engine::VarType::Binary, 0.0, 1.0, "z_" + std::to_string(i)};
-    lp.c[i] = li;  // minimize Σ z_i · load_i (total shed kW)
-    mip.binary_idx.push_back(i);  // required: native B&C takes LP fast-path when binary_idx is empty
+  lp.vars.resize(static_cast<size_t>(n_vars));
+  lp.c = Eigen::VectorXd::Zero(n_vars);
+
+  // p^sh_i — continuous load shed (MW) at AC bus i
+  // Objective: min Σ_i p^sh_i  (weight w_i = 1 per MW shed, eq. 3)
+  for (int i = 0; i < n_bus; ++i) {
+    lp.vars[off_shed + i] = {engine::VarType::Continuous,
+                              0.0, p_d[i],
+                              "psh_" + std::to_string(sys.ac.buses[i].index)};
+    lp.c[off_shed + i] = 1.0;  // minimise total MW shed (eq. 3)
   }
-  // Loads whose bus is unreachable (isolated) must be completely shed.
-  for (int i = 0; i < nd; ++i) {
-    if (comp.find(c.loads[i].bus) == comp.end()) {
-      lp.vars[i].lb = 1.0;
+
+  const int n_sources = static_cast<int>(std::count(is_source.begin(), is_source.end(), true));
+
+  // y_i — energized/served bus indicator.  Source buses are energized roots.
+  // If no source exists, all y_i are fixed to zero and the model sheds all load.
+  for (int i = 0; i < n_bus; ++i) {
+    double y_lb = 0.0, y_ub = 1.0;
+    engine::VarType y_type = engine::VarType::Binary;
+    if (is_source[i]) {
+      y_lb = 1.0; y_ub = 1.0; y_type = engine::VarType::Continuous;
+    } else if (n_sources == 0) {
+      y_lb = 0.0; y_ub = 0.0; y_type = engine::VarType::Continuous;
+    }
+    lp.vars[off_y + i] = {y_type, y_lb, y_ub,
+                          "y_" + std::to_string(sys.ac.buses[i].index)};
+    if (y_type == engine::VarType::Binary) mip.binary_idx.push_back(off_y + i);
+  }
+
+  // z_ij — binary branch status (1 = closed, 0 = open)
+  const int n_no_switch = [&]() {
+    int cnt = 0;
+    for (const auto& br : ac_branches) if (br.normally_open) ++cnt;
+    return cnt;
+  }();
+  // Big-M commodity capacity = |B| − 1 (number of buses minus 1) so that the
+  // single-commodity flow can route one unit to every non-source bus (C6).
+  const double commodity_cap = std::max(1.0, static_cast<double>(n_bus - 1));
+
+  for (int b = 0; b < n_br; ++b) {
+    const auto& br = ac_branches[b];
+    double z_lb = 0.0, z_ub = 1.0;
+
+    // C7: Forced-open failed branch (eq. 12)
+    if (br.failed && stage < 3) {
+      z_lb = 0.0; z_ub = 0.0;
+    }
+    // C8: z denotes energized branch use, not the mechanical switch handle.
+    // Healthy normally-closed edges may de-energize when their endpoint bus is
+    // shed; the radial/commodity constraints choose the energized forest.
+    // Normally-open ties stay open in Stage 1/3 and are candidate switches in Stage 2.
+    else if (!br.normally_open) {
+      z_lb = 0.0; z_ub = 1.0;
+    } else if (stage == 1 || stage == 3) {
+      // Stage 1: no switching — normally-open switches stay open
+      // Stage 3: repair restores everything to nominal (normally-open stays open)
+      z_lb = 0.0; z_ub = 0.0;
+    }
+    // Stage 2: normally-open switch — free binary variable, subject to C9 (count constraint)
+
+    // Fixed z (lb==ub) → Continuous: pure-LP path, avoids B&C postsolve issues.
+    // Free z (lb < ub) → Binary: only for truly free NO switches in stage 2.
+    const engine::VarType z_type = (z_lb < z_ub) ? engine::VarType::Binary
+                                                   : engine::VarType::Continuous;
+    lp.vars[off_z + b] = {z_type, z_lb, z_ub, "z_" + std::to_string(b)};
+    if (z_lb < z_ub) mip.binary_idx.push_back(off_z + b);
+  }
+
+  // p_g_i / q_g_i — finite source dispatch at every AC bus.
+  for (int i = 0; i < n_bus; ++i) {
+    lp.vars[off_pg + i] = {engine::VarType::Continuous, 0.0, p_gen_max[i],
+                           "pg_" + std::to_string(sys.ac.buses[i].index)};
+    lp.vars[off_qg + i] = {engine::VarType::Continuous, 0.0, q_gen_max[i],
+                           "qg_" + std::to_string(sys.ac.buses[i].index)};
+  }
+
+  // P_ij — active power flow (MW, signed: positive = from_bus → to_bus)
+  for (int b = 0; b < n_br; ++b) {
+    const double s_max = ac_branches[b].s_max_mw;
+    lp.vars[off_P + b] = {engine::VarType::Continuous, -s_max, s_max,
+                           "P_" + std::to_string(b)};
+  }
+  // Q_ij — reactive power flow (Mvar, signed)
+  for (int b = 0; b < n_br; ++b) {
+    const double s_max = ac_branches[b].s_max_mw;
+    lp.vars[off_Q + b] = {engine::VarType::Continuous, -s_max, s_max,
+                           "Q_" + std::to_string(b)};
+  }
+  // v_i — squared voltage magnitude (pu²) at AC bus i
+  // Source (slack) buses are fixed at 1.0 pu² (nominal substation voltage).
+  // Load buses are bounded by [vmin², vmax²] per their bus data.
+  for (int i = 0; i < n_bus; ++i) {
+    double vmin2, vmax2;
+    if (is_source[i]) {
+      vmin2 = 1.0; vmax2 = 1.0;  // source bus: fixed at nominal 1.0 pu²
+    } else {
+      const double vmin = sys.ac.buses[i].vmin_pu;
+      const double vmax = sys.ac.buses[i].vmax_pu;
+      vmin2 = vmin * vmin;
+      vmax2 = vmax * vmax;
+    }
+    lp.vars[off_v + i] = {engine::VarType::Continuous, vmin2, vmax2,
+                           "v_" + std::to_string(sys.ac.buses[i].index)};
+  }
+  // f_ij — single-commodity flow auxiliary for radiality (C6)
+  // Signed: f_ij < 0 means commodity flows in reverse (to_bus → from_bus),
+  // which is needed when the source bus is at the to_bus end of a branch.
+  for (int b = 0; b < n_br; ++b) {
+    lp.vars[off_f + b] = {engine::VarType::Continuous, -commodity_cap, commodity_cap,
+                           "f_" + std::to_string(b)};
+  }
+
+  // ── Build constraint triplets (equality and inequality) ───────────────────
+  std::vector<Eigen::Triplet<double>> eq_trips, ineq_trips;
+  std::vector<double> beq_vals, b_vals;
+
+  auto add_eq = [&](const std::vector<std::pair<int,double>>& terms, double rhs) {
+    const int row = static_cast<int>(beq_vals.size());
+    for (const auto& [col, val] : terms)
+      if (std::abs(val) > 1e-12) eq_trips.emplace_back(row, col, val);
+    beq_vals.push_back(rhs);
+  };
+  auto add_le = [&](const std::vector<std::pair<int,double>>& terms, double rhs) {
+    const int row = static_cast<int>(b_vals.size());
+    for (const auto& [col, val] : terms)
+      if (std::abs(val) > 1e-12) ineq_trips.emplace_back(row, col, val);
+    b_vals.push_back(rhs);
+  };
+
+  // ── C0 (eq. 3a): energized/load-pickup coupling ─────────────────────────
+  // P^d_i - p^sh_i ≤ P^d_i y_i.  If y_i=0 the bus must shed all active load.
+  for (int i = 0; i < n_bus; ++i) {
+    if (p_d[i] <= 1e-9) continue;
+    add_le({{off_shed + i, -1.0}, {off_y + i, -p_d[i]}}, -p_d[i]);
+  }
+
+  // ── C1 (eq. 4'): LinDistFlow active power balance at every AC bus i ──────
+  // Σ_{j:(j,i)} P_ji - Σ_{j:(i,j)} P_ij + p_g,i + p^sh_i = P^d_i
+  // with 0 ≤ p_g,i ≤ P^g,max_i.  Source buses are no longer skipped: their
+  // injection is finite and appears explicitly through p_g,i.
+  for (int i = 0; i < n_bus; ++i) {
+    std::vector<std::pair<int,double>> terms = {{off_shed + i, 1.0},
+                                                {off_pg + i, 1.0}};
+    // Flow: +P_ji for branches where to_pos = i; -P_ij for branches where from_pos = i
+    for (int b = 0; b < n_br; ++b) {
+      if (ac_branches[b].to_pos   == i) terms.push_back({off_P + b,  1.0});
+      if (ac_branches[b].from_pos == i) terms.push_back({off_P + b, -1.0});
+    }
+    add_eq(terms, p_d[i]);
+  }
+
+  // ── C2 (eq. 5): Reactive power balance at every AC bus i ────────────────
+  // Σ Q_ji - Σ Q_ij + q_g,i + (q_d,i/p_d,i) · p^sh_i = Q^d_i
+  for (int i = 0; i < n_bus; ++i) {
+    std::vector<std::pair<int,double>> terms = {{off_qg + i, 1.0}};
+    // Reactive shed proportional to active shed
+    const double ratio = (p_d[i] > 1e-9) ? (q_d[i] / p_d[i]) : 0.0;
+    if (std::abs(ratio) > 1e-12) terms.push_back({off_shed + i, ratio});
+    for (int b = 0; b < n_br; ++b) {
+      if (ac_branches[b].to_pos   == i) terms.push_back({off_Q + b,  1.0});
+      if (ac_branches[b].from_pos == i) terms.push_back({off_Q + b, -1.0});
+    }
+    add_eq(terms, q_d[i]);
+  }
+
+  // ── C3 (eq. 6'): LinDistFlow voltage drop with Big-M on z_ij ────────────
+  // When z_ij = 1 (closed):  v_j = v_i - 2(r_pu/S_base · P_MW + x_pu/S_base · Q_MW)
+  // When z_ij = 0 (open):    v_j and v_i are decoupled (Big-M relaxation).
+  //
+  // Dimensional note: v is in pu², r/x are in pu, P/Q are in MW.
+  //   Per-unit equation: v_j = v_i - 2(r_pu · P_pu + x_pu · Q_pu)
+  //   Substituting P_pu = P_MW / S_base:  coefficient = 2 · r_pu / S_base
+  //
+  // Big-M formulation (with correct +M·z coefficient):
+  //   |v_j - v_i + 2(r/S·P + x/S·Q)| ≤ M·(1 - z_ij)
+  // As two ≤ constraints:
+  //   v_j - v_i + 2r/S·P + 2x/S·Q + M·z ≤ M
+  //  -v_j + v_i - 2r/S·P - 2x/S·Q + M·z ≤ M
+  const double base_mva = std::max(sys.ac.base_mva, 1.0);
+  for (int b = 0; b < n_br; ++b) {
+    const auto& br = ac_branches[b];
+    // Scale r/x by 2/S_base for dimensional consistency (MW → pu)
+    const double rc = 2.0 * br.r_pu / base_mva;
+    const double xc = 2.0 * br.x_pu / base_mva;
+    // Constraint 1: v_j - v_i + rc·P + xc·Q + M·z ≤ M
+    add_le({{ off_v + br.to_pos,    1.0},
+            { off_v + br.from_pos, -1.0},
+            { off_P + b,  rc},
+            { off_Q + b,  xc},
+            { off_z + b,  kBigMVoltage}},
+           kBigMVoltage);
+    // Constraint 2: -v_j + v_i - rc·P - xc·Q + M·z ≤ M
+    add_le({{ off_v + br.to_pos,   -1.0},
+            { off_v + br.from_pos,  1.0},
+            { off_P + b, -rc},
+            { off_Q + b, -xc},
+            { off_z + b,  kBigMVoltage}},
+           kBigMVoltage);
+  }
+
+  // ── C4 (eq. 7–8): Branch flow limits with Big-M ──────────────────────────
+  // -z_ij · S̄ ≤ P_ij ≤ z_ij · S̄
+  // P_ij - z_ij · S̄ ≤ 0    →   P_ij - S̄ · z_ij ≤ 0
+  // -P_ij - z_ij · S̄ ≤ 0   →  -P_ij - S̄ · z_ij ≤ 0
+  for (int b = 0; b < n_br; ++b) {
+    const double s = ac_branches[b].s_max_mw;
+    add_le({{ off_P + b,  1.0}, { off_z + b, -s}}, 0.0);  // P ≤ z·S̄
+    add_le({{ off_P + b, -1.0}, { off_z + b, -s}}, 0.0);  // -P ≤ z·S̄
+    add_le({{ off_Q + b,  1.0}, { off_z + b, -s}}, 0.0);  // Q ≤ z·S̄
+    add_le({{ off_Q + b, -1.0}, { off_z + b, -s}}, 0.0);  // -Q ≤ z·S̄
+  }
+
+  // ── C6 (eq. 10–11): strict energized radial forest ──────────────────────
+  // Energized non-source buses consume one commodity unit; source buses inject.
+  // z≤y endpoint constraints forbid closed branches touching de-energized buses.
+  // The edge-count inequality eliminates redundant energized cycles.
+  for (int b = 0; b < n_br; ++b) {
+    // |f_ij| ≤ (|B|-1) · z_ij  (bidirectional flow bound)
+    add_le({{ off_f + b,  1.0}, { off_z + b, -commodity_cap}}, 0.0);  // f ≤ cap·z
+    add_le({{ off_f + b, -1.0}, { off_z + b, -commodity_cap}}, 0.0);  // -f ≤ cap·z
+    add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].from_pos, -1.0}}, 0.0);
+    add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].to_pos,   -1.0}}, 0.0);
+  }
+  for (int i = 0; i < n_bus; ++i) {
+    std::vector<std::pair<int,double>> terms;
+    for (int b = 0; b < n_br; ++b) {
+      if (ac_branches[b].to_pos   == i) terms.push_back({off_f + b,  1.0});  // f_ji (inflow)
+      if (ac_branches[b].from_pos == i) terms.push_back({off_f + b, -1.0});  // f_ij (outflow)
+    }
+    if (is_source[i]) {
+      // Source bus: net outflow ≥ 0  →  -(net outflow) ≤ 0  →  Σ inflow - Σ outflow ≤ 0
+      add_le(terms, 0.0);
+    } else {
+      terms.push_back({off_y + i, -1.0});
+      add_eq(terms, 0.0);
+    }
+  }
+  if (n_sources > 0) {
+    std::vector<std::pair<int,double>> forest_terms;
+    for (int b = 0; b < n_br; ++b) forest_terms.push_back({off_z + b, 1.0});
+    for (int i = 0; i < n_bus; ++i) forest_terms.push_back({off_y + i, -1.0});
+    add_le(forest_terms, -static_cast<double>(n_sources));
+  }
+
+  // ── C9 (eq. 14): Switch count ≤ K^sw ────────────────────────────────────
+  // Σ_{(i,j)∈L^NO} z_ij ≤ K^sw   (Stage 2 only; K^sw = max_sw_ops)
+  // In stage 2, normally-open switches have free z_ij ∈ {0,1}.
+  if (stage == 2 && n_no_switch > 0) {
+    std::vector<std::pair<int,double>> sw_terms;
+    for (int b = 0; b < n_br; ++b) {
+      if (ac_branches[b].normally_open) sw_terms.push_back({off_z + b, 1.0});
+    }
+    if (!sw_terms.empty()) {
+      const double ksw = (max_sw_ops == INT_MAX)
+                           ? static_cast<double>(n_no_switch)  // no limit
+                           : static_cast<double>(max_sw_ops);
+      add_le(sw_terms, ksw);
     }
   }
 
-  std::unordered_map<int, std::vector<int>> loads_by_comp;
-  for (int i = 0; i < nd; ++i) {
-    auto it = comp.find(c.loads[i].bus);
-    if (it == comp.end()) continue;
-    loads_by_comp[it->second].push_back(i);
-  }
+  // C5 (eq. 9): Voltage bounds enforced via variable bounds [vmin², vmax²]
+  // (already set in lp.vars above — no additional constraint row needed)
 
-  std::vector<Eigen::Triplet<double>> trips;
-  Eigen::VectorXd b(static_cast<int>(loads_by_comp.size()));
-  int row = 0;
-  for (const auto& [cid, ids] : loads_by_comp) {
-    double demand = 0.0;
-    for (int i : ids) demand += std::max(0.0, c.loads[i].p_kw);
-    const double cap = comp_cap[cid];
-    const double min_shed = std::max(0.0, demand - cap);
-    // Constraint: Σ z_i · load_i ≥ min_shed  →  -Σ z_i · load_i ≤ -min_shed
-    for (int i : ids) trips.emplace_back(row, i, -std::max(0.0, c.loads[i].p_kw));
-    b[row] = -min_shed;
-    ++row;
-  }
-  lp.A.resize(row, nd);
-  lp.A.setFromTriplets(trips.begin(), trips.end());
+  // ── Finalise constraint matrices ─────────────────────────────────────────
+  const int n_eq   = static_cast<int>(beq_vals.size());
+  const int n_ineq = static_cast<int>(b_vals.size());
+
+  lp.Aeq.resize(n_eq, n_vars);
+  lp.beq.resize(n_eq);
+  lp.Aeq.setFromTriplets(eq_trips.begin(), eq_trips.end());
+  lp.Aeq.makeCompressed();
+  for (int r = 0; r < n_eq; ++r) lp.beq[r] = beq_vals[r];
+
+  lp.A.resize(n_ineq, n_vars);
+  lp.b.resize(n_ineq);
+  lp.A.setFromTriplets(ineq_trips.begin(), ineq_trips.end());
   lp.A.makeCompressed();
-  lp.b = b;
-  lp.Aeq.resize(0, nd);
-  lp.beq.resize(0);
+  for (int r = 0; r < n_ineq; ++r) lp.b[r] = b_vals[r];
 
-  engine::BCOptions opt;
-  opt.max_nodes = 512;
-  opt.time_limit_sec = 5.0;
-  opt.gap_tol = 1e-9;
-  opt.verbose = false;
-  opt.use_simplex_lp_nodes = true;
-  auto res = engine::solve_milp_bc(mip, opt);
-  if (!res.stats.success || res.x.size() != nd) {
-    out.status = res.stats.status.empty() ? "failed" : res.stats.status;
-    for (int i = 0; i < nd; ++i) out.shed_by_load[i] = c.loads[i].p_kw;
+  // ── Solve ─────────────────────────────────────────────────────────────────
+  // When all z variables are fixed (no free binary/integer decisions), bypass
+  // the B&C to avoid presolve/postsolve size-mismatch bugs on LP-only problems.
+  // Only use B&C when there are genuinely free binary/integer variables (stage 2
+  // with normally-open switches).
+  Eigen::VectorXd res_x;
+  bool res_success = false;
+  std::string res_status;
+  double res_objective = 0.0;
+  double res_mip_gap = 0.0;
+  constexpr double kGapTol = 1e-6;
+
+  if (mip.binary_idx.empty() && mip.integer_idx.empty()) {
+    // Pure LP — use the native dual simplex directly.
+    engine::SimplexOptions simp_opt;
+    simp_opt.max_iter        = 10000;
+    simp_opt.feasibility_tol = 1e-8;
+    simp_opt.optimality_tol  = 1e-8;
+    simp_opt.verbose         = false;
+    auto sr = engine::solve_lp_with_basis(lp, simp_opt, nullptr);
+    res_x        = sr.result.x;
+    res_success  = sr.result.stats.success;
+    res_status   = sr.result.stats.status;
+    res_objective= sr.result.stats.objective;
+    res_mip_gap  = 0.0;  // pure LP has no integrality gap
   } else {
-    // M3: Distinguish proven-optimal from time-limit-feasible (non-optimal).
-    // A residual mip_gap above the tolerance means the B&C hit its node/time
-    // budget without closing the optimality gap; mark as approximate so r.ok
-    // stays false and callers know the EENS/SAIDI values are upper-bound estimates.
-    const bool proven_optimal = (res.stats.mip_gap <= opt.gap_tol + 1e-12);
-    out.status = proven_optimal ? "success" : "success (approximate)";
-    out.objective = res.stats.objective;
-    // Post-solve constraint verification: Ax ≤ b.
-    // A violated incumbent is treated as a failed solve to prevent bad values
-    // from polluting EENS/PLS calculations downstream.
-    if (lp.A.rows() > 0) {
-      Eigen::VectorXd Ax = lp.A * res.x;
-      double ineq_viol = (Ax - lp.b).cwiseMax(0.0).maxCoeff();
-      if (ineq_viol > 1e-6) {
-        spdlog::warn("[三阶段可靠性] MIP 后验约束违约: ineq_viol={:.2e} — 按失败处理", ineq_viol);
-        out.status = "failed (constraint violation)";
-        for (int i = 0; i < nd; ++i)
-          out.shed_by_load[i] = std::max(0.0, c.loads[i].p_kw);
-        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-        return out;
-      }
-    }
-    // Post-solve bounds and integrality check for binary shed variables z_i.
-    // Each z_i must be in [0,1] and within 1e-4 of an integer.  A fractional
-    // or out-of-bounds variable from a failed B&C node indicates an unsound
-    // solution that must not be used to infer load curtailment.
-    for (int i = 0; i < nd; ++i) {
-      double v = res.x[i];
-      if (v < -1e-6 || v > 1.0 + 1e-6) {
-        spdlog::warn("[三阶段可靠性] MIP 变量越界: z[{}]={:.6f} — 按失败处理", i, v);
-        out.status = "failed (constraint violation)";
-        for (int j = 0; j < nd; ++j)
-          out.shed_by_load[j] = std::max(0.0, c.loads[j].p_kw);
-        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-        return out;
-      }
-      double frac = std::min(v - std::floor(v), std::ceil(v) - v);
-      if (frac > 1e-4) {
-        spdlog::warn("[三阶段可靠性] MIP 整数变量非整数: z[{}]={:.6f} (frac={:.2e}) — 按失败处理",
-                     i, v, frac);
-        out.status = "failed (constraint violation)";
-        for (int j = 0; j < nd; ++j)
-          out.shed_by_load[j] = std::max(0.0, c.loads[j].p_kw);
-        out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
-        return out;
-      }
-    }
-    // Map binary z_i back to shed kW: z_i > 0.5 → load completely shed.
-    for (int i = 0; i < nd; ++i) {
-      const double li = std::max(0.0, c.loads[i].p_kw);
-      out.shed_by_load[i] = (res.x[i] > 0.5) ? li : 0.0;
+    engine::HighsAdapter highs;
+    if (highs.available()) {
+      auto highs_res = highs.solve_milp(mip);
+      res_x        = highs_res.x;
+      res_success  = highs_res.stats.success;
+      res_status   = highs_res.stats.status;
+      res_objective= highs_res.stats.objective;
+      res_mip_gap  = highs_res.stats.mip_gap;
+    } else {
+      engine::BCOptions opt;
+      opt.max_nodes        = 2048;
+      opt.time_limit_sec   = 30.0;
+      opt.gap_tol          = kGapTol;
+      opt.verbose          = false;
+      opt.use_simplex_lp_nodes = true;
+      auto bc_res  = engine::solve_milp_bc(mip, opt);
+      res_x        = bc_res.x;
+      res_success  = bc_res.stats.success;
+      res_status   = bc_res.stats.status;
+      res_objective= bc_res.stats.objective;
+      res_mip_gap  = bc_res.stats.mip_gap;
     }
   }
+
+  if (!res_success || res_x.size() != static_cast<size_t>(n_vars)) {
+    out.status = res_status.empty() ? "failed" : res_status;
+    // Conservative fallback: shed all AC loads
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] >= 0) out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
+    }
+    out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+    return out;
+  }
+
+  const bool proven_optimal = (res_mip_gap <= kGapTol + 1e-9);
+  out.status = proven_optimal ? "success" : "success (approximate)";
+  out.objective = res_objective;
+
+  // Post-solve: verify equality and inequality residuals
+  if (n_eq > 0) {
+    const Eigen::VectorXd eq_res = (lp.Aeq * res_x - lp.beq).cwiseAbs();
+    if (eq_res.maxCoeff() > 1e-4) {
+      spdlog::warn("[三阶段可靠性] LinDistFlow MILP equality violation={:.2e} — fallback",
+                   eq_res.maxCoeff());
+      out.status = "failed (constraint violation)";
+      for (int li = 0; li < nd_total; ++li)
+        if (load_ac_bus[li] >= 0) out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
+      out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+      return out;
+    }
+  }
+  if (n_ineq > 0) {
+    const double ineq_viol = (lp.A * res_x - lp.b).cwiseMax(0.0).maxCoeff();
+    if (ineq_viol > 1e-4) {
+      spdlog::warn("[三阶段可靠性] LinDistFlow MILP inequality violation={:.2e} — fallback",
+                   ineq_viol);
+      out.status = "failed (constraint violation)";
+      for (int li = 0; li < nd_total; ++li)
+        if (load_ac_bus[li] >= 0) out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw);
+      out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
+      return out;
+    }
+  }
+
+  // ── Extract p^sh_i (per AC bus) → map back to load points ───────────────
+  // p^sh_i is defined per AC bus.  Each load point (c.loads[li]) that maps
+  // to AC bus i gets a shed proportional to its share of p_d[i].
+  for (int i = 0; i < n_bus; ++i) {
+    const double psh_bus_mw = std::max(0.0, std::min(res_x[off_shed + i], p_d[i]));
+    if (p_d[i] < 1e-9) continue;
+    // Distribute shed proportionally among load points at this bus
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] != i) continue;
+      const double ld_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
+      const double share = ld_mw / p_d[i];
+      out.shed_by_load[li] = psh_bus_mw * share * 1000.0;  // back to kW
+    }
+  }
+
+  // ── DC-only loads: connectivity/capacity fallback ─────────────────────────
+  // Loads whose bus is not in ac_bus_pos (i.e., DC buses not connected to any
+  // AC bus in this model) are handled by the original capacity-balance approach.
+  {
+    // Build DSU over DC buses for the current stage
+    auto dc_pos = bus_position_map(c.buses);
+    DSU dsu_dc(static_cast<int>(c.buses.size()));
+    auto connect_dc = [&](int a, int b_bus) {
+      auto ia = dc_pos.find(a), ib = dc_pos.find(b_bus);
+      if (ia != dc_pos.end() && ib != dc_pos.end()) dsu_dc.unite(ia->second, ib->second);
+    };
+    for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
+      const auto& br = sys.dc.branches[b];
+      bool on = br.in_service;
+      if (!fault.ac && b == fault.index && stage < 3) on = false;
+      if (stage >= 3 && br.in_service) on = true;
+      if (on) connect_dc(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
+    }
+    for (const auto& vsc : sys.vsc_converters) {
+      if (vsc.in_service) connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
+    }
+    for (const auto& dc : sys.dc.dcdc_converters) {
+      if (dc.in_service) connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+    }
+
+    std::unordered_map<int, int> dc_comp;
+    for (int i = 0; i < static_cast<int>(c.buses.size()); ++i)
+      dc_comp[c.buses[i]] = dsu_dc.find(i);
+
+    std::unordered_map<int, double> comp_cap_dc;
+    for (const auto& s : c.sources) {
+      if (ac_bus_pos.count(s.bus)) continue;  // AC source — already in MILP
+      auto it = dc_comp.find(s.bus);
+      if (it != dc_comp.end()) comp_cap_dc[it->second] += s.p_kw;
+    }
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] >= 0) continue;  // AC load — already handled
+      const double li_kw = std::max(0.0, c.loads[li].p_kw);
+      auto it = dc_comp.find(c.loads[li].bus);
+      if (it == dc_comp.end()) {
+        out.shed_by_load[li] = li_kw;  // isolated
+      } else {
+        const double cap = comp_cap_dc[it->second];
+        // Simple: if capacity ≥ demand for this component, zero shed; else full shed.
+        // (Full per-component capacity check done below)
+        out.shed_by_load[li] = (cap < li_kw * 0.5) ? li_kw : 0.0;
+      }
+    }
+    // Proper per-component capacity check for DC loads
+    std::unordered_map<int, double> dc_comp_demand;
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] >= 0) continue;
+      auto it = dc_comp.find(c.loads[li].bus);
+      if (it != dc_comp.end()) dc_comp_demand[it->second] += std::max(0.0, c.loads[li].p_kw);
+    }
+    for (int li = 0; li < nd_total; ++li) {
+      if (load_ac_bus[li] >= 0) continue;
+      const double li_kw = std::max(0.0, c.loads[li].p_kw);
+      auto it = dc_comp.find(c.loads[li].bus);
+      if (it == dc_comp.end()) { out.shed_by_load[li] = li_kw; continue; }
+      const int cid = it->second;
+      const double cap = comp_cap_dc.count(cid) ? comp_cap_dc.at(cid) : 0.0;
+      const double demand = dc_comp_demand.count(cid) ? dc_comp_demand.at(cid) : 0.0;
+      if (cap >= demand - 1e-6) {
+        out.shed_by_load[li] = 0.0;
+      } else {
+        // Proportional shed: each DC load gets shed proportional to its share
+        const double ratio = demand > 1e-9 ? (demand - cap) / demand : 1.0;
+        out.shed_by_load[li] = li_kw * std::min(1.0, std::max(0.0, ratio));
+      }
+    }
+  }
+
   out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
   return out;
 }
@@ -600,16 +1036,37 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   r.eens_cost = r.eens_kwh_yr * kReliabilityVoll;
 
   // Populate model limitations so callers can surface the approximations.
+  const bool has_dc_or_vsc = !c.sys.dc.buses.empty() || !c.sys.dc.branches.empty() ||
+                             !c.sys.dc.loads.empty() || !c.sys.vsc_converters.empty() ||
+                             !c.sys.dc.dcdc_converters.empty();
   r.model_limitations =
-      "Stage 2 switching: connectivity-only (no radial/capacity/voltage constraints). "
-      "Switch operations are greedy (order-dependent, not globally optimal"
+      "AC network: finite-source LinDistFlow restoration MILP with energized-bus variables, "
+      "explicit p_g/q_g source capacity bounds, strict commodity-flow radial forest, "
+      "branch active/reactive flow limits, voltage bounds [vmin², vmax²], "
+      "continuous load shed variables p^sh_i ∈ [0, p_d,i], "
+      "and switch-count constraint"
       + (max_sw_ops == INT_MAX
-           ? std::string("; no switch-count limit applied")
-           : "; limited to " + std::to_string(max_sw_ops) + " operations per fault")
-      + "). "
-      "VSC/DCDC treated as lossless connectivity edges; SOP setpoints (psop) are zero. "
-      "DC loads are included in reachability but DC power-flow constraints are not enforced. "
-      "Load shed decisions are all-or-nothing binary per load point.";
+           ? std::string(" (no limit)")
+           : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
+      + ". "
+      "DC sub-network: connectivity/capacity fallback (no DC power-flow constraints). "
+      "VSC/DCDC treated as lossless edges between AC and DC buses. "
+      "SOP setpoints (psop) are zero (VSC dispatch not co-optimised in this model). "
+      "Reactive power modelled as p_d * tan(arccos(0.9)); loss terms dropped (LinDistFlow).";
+
+      // Validity flags describe whole-result physical coverage.  They are true for
+      // pure-AC cases and intentionally false for hybrid cases because DC/VSC/SOP
+      // physics are not part of the MILP.
+      r.model_scope = has_dc_or_vsc ? "ac-lindistflow-milp+dc-connectivity-fallback"
+                    : "ac-lindistflow-milp";
+  r.validity = ThreeStageReliabilityResult::ValidityFlags{
+        .branch_flow_enforced        = !has_dc_or_vsc,
+        .voltage_constraints_enforced = !has_dc_or_vsc,
+        .radial_topology_enforced    = !has_dc_or_vsc,
+      .sop_dispatch_optimised      = false,  // VSC setpoints still zero
+      .dc_power_flow_enforced      = false,  // DC sub-network is connectivity-only
+        .restoration_milp_solved     = !has_dc_or_vsc,
+  };
 
   // r.ok is true only when every fault stage solved to a verified optimum.
   // Any stage that returned "failed*" used conservative full-shed estimates;

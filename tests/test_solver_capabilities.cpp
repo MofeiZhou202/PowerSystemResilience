@@ -227,6 +227,69 @@ TEST_CASE("verify_opf_result: infeasibility hints populated for non-converged re
     // At minimum, audit ran.
 }
 
+TEST_CASE("AC OPF: hybrid cases suppress AC-only fallback", "[opf][hybrid][regression]") {
+    HybridPowerSystem sys;
+    sys.base_mva = 10.0;
+    sys.ac.base_mva = 10.0;
+    sys.dc.base_mva = 10.0;
+
+    ACBus ac;
+    ac.index = 1;
+    ac.bus_type = BusType::SLACK;
+    ac.vm_pu = 1.0;
+    ac.in_service = true;
+    sys.ac.buses = {ac};
+
+    Generator gen;
+    gen.index = 1;
+    gen.bus = 1;
+    gen.in_service = true;
+    gen.is_slack = true;
+    gen.pmin_mw = 0.0;
+    gen.pmax_mw = 5.0;
+    gen.qmin_mvar = -5.0;
+    gen.qmax_mvar = 5.0;
+    gen.vg_pu = 1.0;
+    sys.ac.generators = {gen};
+
+    DCBus dc;
+    dc.index = 101;
+    dc.in_service = true;
+    dc.pd_mw = 1.0;
+    sys.dc.buses = {dc};
+
+    VSCConverter vsc;
+    vsc.index = 1;
+    vsc.bus_ac = 1;
+    vsc.bus_dc = 101;
+    vsc.in_service = true;
+    vsc.controllable = true;
+    vsc.p_rated_mw = 2.0;
+    vsc.pmin_mw = -2.0;
+    vsc.pmax_mw = 2.0;
+    sys.vsc_converters = {vsc};
+
+    opf::ACOPFOptions opt;
+    opt.enable_primal_dual = true;
+    opt.use_parity_ipm = false;
+    opt.allow_fallback = true;
+    opt.max_inner_iterations = 1;
+    opt.max_outer_iterations = 1;
+    opt.feasibility_tol = 1e-12;
+    opt.stationarity_tol = 1e-12;
+
+    const auto result = solve_ac_opf(sys, opt);
+    CHECK_FALSE(result.converged);
+    CHECK(result.status.find("economic-dispatch + AC PF fallback") == std::string::npos);
+    bool saw_suppressed_hint = false;
+    for (const auto& hint : result.infeasibility_hints) {
+        if (hint.find("AC-only economic-dispatch fallback suppressed") != std::string::npos) {
+            saw_suppressed_hint = true;
+        }
+    }
+    CHECK(saw_suppressed_hint);
+}
+
 TEST_CASE("verify_opf_result: audit feasible() true for clean result", "[capabilities][audit]") {
     opf::OpfAudit a;
     a.audited = true;

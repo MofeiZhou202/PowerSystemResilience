@@ -331,6 +331,29 @@ TEST_CASE("DC OPF: 3-bus test: cheaper generator dispatched first",
     CHECK(r.pg_mw[0] >= r.pg_mw[1] - 1e-3);
 }
 
+TEST_CASE("DC OPF: Native LP objective and LMP use MW scale",
+          "[opf][dc][native][lmp]")
+{
+    auto sys = make_light_2bus_ac();   // 10 MW load, 100 MVA base
+    sys.ac.generators[0].cost_c1 = 25.0;
+
+    opf::DCOPFOptions opt;
+    opt.solver = opf::DCOPFSolverBackend::Native;
+    opt.include_branch_limits = false;
+    opt.load_shedding = false;
+    opt.compute_lmp = true;
+
+    auto r = opf::solve_dc_opf(sys, opt);
+    REQUIRE(r.converged);
+    REQUIRE(r.pg_mw.size() >= 1);
+    REQUIRE(r.lmp.size() == sys.ac.buses.size());
+
+    CHECK_THAT(r.pg_mw[0], WithinAbs(10.0, 1e-4));
+    CHECK_THAT(r.objective, WithinAbs(250.0, 1e-3));
+    CHECK_THAT(r.lmp[0], WithinAbs(25.0, 1e-6));
+    CHECK_THAT(r.lmp[1], WithinAbs(25.0, 1e-6));
+}
+
 TEST_CASE("DC OPF: single generator covers load within limits",
           "[opf][dc]")
 {

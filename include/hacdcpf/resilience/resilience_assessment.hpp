@@ -80,6 +80,32 @@ struct DistributionResilienceModelStats {
   std::string formulation_notes;
   /// Number of CGLP disjunctive cuts admitted.
   int cglp_cuts_added{0};
+
+  /// Structured model-capability declaration.  Always "ac-only-lindistflow"
+  /// for the strict MIP path; DC buses / branches / VSC / DC loads are NOT
+  /// modelled in the restoration MILP and their contingencies cannot be
+  /// scheduled here.  Use this string to gate downstream consumers.
+  std::string model_scope{"ac-only-lindistflow"};
+
+  /// Per-feature validity flags so consumers can branch on whether a given
+  /// physical constraint was actually enforced.  These reflect what the
+  /// MIP skeleton built by `build_mip_skeleton` *does* enforce.
+  struct ValidityFlags {
+    bool dc_network_modelled{false};
+    bool vsc_dispatch_modelled{false};
+    bool ac_branch_flow_limits_enforced{true};
+    bool lindistflow_voltage_envelope_enforced{true};
+    bool radial_topology_enforced{true};
+    /// True when the MIP gap reported by the solver is within the requested
+    /// tolerance (`DistributionResilienceMIPOptions::mip_gap`).  This does NOT
+    /// mean the solution is the global optimum; it means the best known
+    /// bound is within `mip_gap * 100`% of the incumbent.  A non-zero gap
+    /// tolerance means the certificate is approximate.  Use `model_stats.mip_gap`
+    /// for the exact achieved gap.  Renamed from `mip_solved_to_proven_optimum`
+    /// which was misleading when users set a non-zero gap tolerance.
+    bool mip_gap_within_tolerance{false};
+  };
+  ValidityFlags validity{};
 };
 
 // ── Fault / transport description ────────────────────────────────────────────

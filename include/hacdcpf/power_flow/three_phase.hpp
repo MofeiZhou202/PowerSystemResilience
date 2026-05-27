@@ -7,9 +7,8 @@
 //   - Uses polar-form state variables and sparse Jacobian.
 //   - Delegates to hacdcpf::analysis::solve_three_phase_nr().
 //
-// Legacy BFS solver (backward-forward sweep) remains available via
-// hacdcpf::analysis::solve_three_phase_distribution_pf() for radial
-// single-source networks.
+// Legacy backward-forward sweep APIs are intentionally not exposed; distribution
+// feeders use the three-phase Newton-Raphson path.
 
 #include "hacdcpf/model/ac_components.hpp"
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"

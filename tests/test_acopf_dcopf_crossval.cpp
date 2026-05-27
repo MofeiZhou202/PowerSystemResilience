@@ -20,6 +20,7 @@
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 namespace fs = std::filesystem;
 
@@ -345,6 +346,93 @@ TEST_CASE("DC OPF solution feasibility", "[integration][opf][dcopf]") {
   
   CHECK(feasible);
 }
+
+  TEST_CASE("DC OPF isolated-island shedding is reported per bus",
+        "[opf][dcopf][regression]") {
+    using namespace hacdcpf;
+
+    HybridPowerSystem sys;
+    sys.ac.base_mva = 10.0;
+      auto make_test_bus = [](int index, BusType type, double pd_mw) {
+        ACBus b;
+        b.index = index;
+        b.bus_type = type;
+        b.pd_mw = pd_mw;
+        b.base_kv = 10.0;
+        b.vm_pu = 1.0;
+        b.vmin_pu = 0.95;
+        b.vmax_pu = 1.05;
+        b.in_service = true;
+        return b;
+      };
+    sys.ac.buses = {
+      make_test_bus(1, BusType::SLACK, 0.0),
+      make_test_bus(2, BusType::PQ, 1.0),
+      make_test_bus(3, BusType::PQ, 5.0),
+    };
+    ACBranch br;
+    br.index = 1; br.from_bus = 1; br.to_bus = 2;
+    br.r_pu = 0.001; br.x_pu = 0.01; br.rate_a_mva = 10.0; br.in_service = true;
+    sys.ac.branches = {br};
+    Generator g;
+    g.index = 1; g.bus = 1; g.in_service = true;
+    g.pg_mw = 1.0; g.pmax_mw = 10.0; g.pmin_mw = 0.0; g.cost_c1 = 1.0;
+    sys.ac.generators = {g};
+
+    opf::DCOPFOptions opt;
+    opt.solver = opf::DCOPFSolverBackend::Native;
+    opt.load_shedding = true;
+    opt.voll = 10000.0;
+
+    const opf::DCOPFResult result = opf::solve_dc_opf(sys, opt);
+    REQUIRE(result.converged);
+    REQUIRE(result.load_shedding_mw.size() == sys.ac.buses.size());
+    CHECK(result.load_shedding_mw[0] == Catch::Approx(0.0).margin(1e-8));
+    CHECK(result.load_shedding_mw[1] == Catch::Approx(0.0).margin(1e-8));
+    CHECK(result.load_shedding_mw[2] == Catch::Approx(5.0).margin(1e-8));
+    CHECK(result.total_load_shedding_mw == Catch::Approx(5.0).margin(1e-8));
+  }
+
+  TEST_CASE("DC OPF feasibility check includes slack-bus balance",
+        "[opf][dcopf][regression]") {
+    using namespace hacdcpf;
+
+    HybridPowerSystem sys;
+    sys.ac.base_mva = 10.0;
+    auto make_test_bus = [](int index, BusType type, double pd_mw) {
+      ACBus b;
+      b.index = index;
+      b.bus_type = type;
+      b.pd_mw = pd_mw;
+      b.base_kv = 10.0;
+      b.vm_pu = 1.0;
+      b.vmin_pu = 0.95;
+      b.vmax_pu = 1.05;
+      b.in_service = true;
+      return b;
+    };
+    sys.ac.buses = {
+        make_test_bus(1, BusType::SLACK, 5.0),
+        make_test_bus(2, BusType::PQ, 0.0),
+    };
+    Generator g;
+    g.index = 1; g.bus = 1; g.in_service = true;
+    g.pg_mw = 0.0; g.pmax_mw = 10.0; g.pmin_mw = 0.0;
+    sys.ac.generators = {g};
+
+    opf::DCOPFResult fabricated;
+    fabricated.converged = true;
+    fabricated.pg_mw = {0.0};
+    fabricated.va = {0.0, 0.0};
+    fabricated.pf_mw = {};
+    fabricated.load_shedding_mw = {0.0, 0.0};
+
+    auto [feasible, max_viol, viol_desc] =
+    opf::check_dc_opf_feasibility(sys, fabricated, 1e-6);
+    CHECK_FALSE(feasible);
+    CHECK(max_viol == Catch::Approx(5.0).margin(1e-8));
+    CHECK(viol_desc.find("Bus 0") != std::string::npos);
+  }
 
 // ---------------------------------------------------------------------------
 // Test 3: DC OPF vs AC OPF dispatch comparison

@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -819,6 +820,39 @@ TEST_CASE("Distribution CB/switch/VSC pipeline: rich model → graph → PF → 
         // DC OPF result: verify key fields are populated
         CHECK(!opf.status.empty());
         CHECK(opf.pg_mw.size() == sys.ac.generators.size());
+
+        // solver_chain and objective_model must be populated after a successful
+        // solve — these audit fields are the whole point of the new design.
+        CHECK(!opf.solver_chain.empty());
+        CHECK((!opf.objective_model.empty()
+               && (opf.objective_model == "QP" || opf.objective_model == "LP")));
+
+        // Verify dc_opf_result_to_json serialises the audit fields.
+        const std::string dc_json = hacdcpf::io::dc_opf_result_to_json(opf);
+        REQUIRE(!dc_json.empty());
+        CHECK(dc_json.find("\"solver_chain\"")    != std::string::npos);
+        CHECK(dc_json.find("\"objective_model\"") != std::string::npos);
+        CHECK(dc_json.find("\"converged\"")        != std::string::npos);
+
+        const DCOPFResult parsed = hacdcpf::io::dc_opf_result_from_json(dc_json);
+        CHECK(parsed.converged == opf.converged);
+        CHECK(parsed.status == opf.status);
+        CHECK(parsed.solver_chain == opf.solver_chain);
+        CHECK(parsed.objective_model == opf.objective_model);
+        CHECK(parsed.objective == Approx(opf.objective).margin(1e-8));
+        CHECK(parsed.total_load_shedding_mw == Approx(opf.total_load_shedding_mw).margin(1e-8));
+        CHECK(parsed.pg_mw == opf.pg_mw);
+        CHECK(parsed.pf_mw == opf.pf_mw);
+        CHECK(parsed.va == opf.va);
+
+        const auto path = std::filesystem::temp_directory_path() /
+            "hacdcpf_dcopf_result_roundtrip.json";
+        hacdcpf::io::save_dc_opf_result_json(opf, path.string());
+        const DCOPFResult loaded = hacdcpf::io::load_dc_opf_result_json(path.string());
+        CHECK(loaded.solver_chain == opf.solver_chain);
+        CHECK(loaded.objective_model == opf.objective_model);
+        CHECK(loaded.load_shedding_mw == opf.load_shedding_mw);
+        std::filesystem::remove(path);
 
         // PF JSON also verifiable
         const PowerFlowResult pf2 = solve_power_flow(sys);

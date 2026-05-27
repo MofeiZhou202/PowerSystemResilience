@@ -178,7 +178,10 @@ DCOPFFormulation build_dc_opf_lp(const HybridPowerSystem& sys,
     if (std::abs(c_linear) < 1e-9) {
       c_linear = 1.0;  // Default marginal cost of $1/MWh
     }
-    form.lp.c[form.i_pg(k)] = c_linear;
+    // Pg is a p.u. variable in the LP.  Convert the $/MWh marginal cost to
+    // a coefficient on Pg_pu so the reported objective and equality duals stay
+    // in MW-based engineering units.
+    form.lp.c[form.i_pg(k)] = c_linear * base_mva;
   }
   
   // --------------------------------------------------------------------------
@@ -731,8 +734,21 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   // Detect isolated load islands before the expensive LP build; pre-shed their
   // load and return infeasible immediately when no slack-connected island exists.
   double direct_shed_mw = 0.0;
+  std::vector<double> direct_shed_by_bus(sys.ac.buses.size(), 0.0);
+  const auto original_bus_pos = build_bus_map(sys.ac.buses);
   const HybridPowerSystem* sys_ptr = &sys;
   std::optional<HybridPowerSystem> sys_pruned;
+
+  auto apply_direct_shed_to_result = [&]() {
+    if (direct_shed_mw <= 1e-12) return;
+    if (result.load_shedding_mw.size() < direct_shed_by_bus.size()) {
+      result.load_shedding_mw.resize(direct_shed_by_bus.size(), 0.0);
+    }
+    for (size_t i = 0; i < direct_shed_by_bus.size(); ++i) {
+      result.load_shedding_mw[i] += direct_shed_by_bus[i];
+    }
+    result.total_load_shedding_mw += direct_shed_mw;
+  };
 
   if (!sys.ac.buses.empty()) {
     namespace gr = hacdcpf::graph;
@@ -751,11 +767,17 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       // avoid under-counting curtailment when both sources are present.
       for (const auto& b : sys.ac.buses) {
         if (!dead_buses.count(b.index)) continue;
-        direct_shed_mw += std::max(0.0, b.pd_mw);
+        const double shed = std::max(0.0, b.pd_mw);
+        auto it = original_bus_pos.find(b.index);
+        if (it != original_bus_pos.end()) direct_shed_by_bus[it->second] += shed;
+        direct_shed_mw += shed;
       }
       for (const auto& ld : sys.ac.loads) {
         if (!ld.in_service || !dead_buses.count(ld.bus)) continue;
-        direct_shed_mw += std::max(0.0, ld.p_mw * ld.scaling);
+        const double shed = std::max(0.0, ld.p_mw * ld.scaling);
+        auto it = original_bus_pos.find(ld.bus);
+        if (it != original_bus_pos.end()) direct_shed_by_bus[it->second] += shed;
+        direct_shed_mw += shed;
       }
       const bool has_valid = std::any_of(
           topo.islands.begin(), topo.islands.end(),
@@ -768,7 +790,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
                        direct_shed_mw);
         result.status = "Infeasible: no island with slack bus";
         result.converged = false;
-        result.total_load_shedding_mw = direct_shed_mw;
+        apply_direct_shed_to_result();
         return result;
       }
       // Prune dead-bus loads from a local copy before building the formulation.
@@ -797,13 +819,14 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     spdlog::error("DC OPF: invalid topology — {}", e.what());
     result.status = std::string("Invalid topology: ") + e.what();
     result.converged = false;
+    apply_direct_shed_to_result();
     return result;
   }
   
   if (form.nb == 0 || form.ng == 0) {
     result.status = "Empty system or no generators";
     result.converged = false;
-    result.total_load_shedding_mw += direct_shed_mw;
+    apply_direct_shed_to_result();
     return result;
   }
   
@@ -820,7 +843,19 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   engine::SolveResult sol;
   bool use_qp = false;  // Track if we used QP solver (for objective computation)
   
-  // NativeQP: Use LCQP solver with true quadratic costs
+  // Track the actual backend chain for post-solve auditing.
+  std::vector<std::string>& solver_chain = result.solver_chain;
+  auto record_chain = [&](const char* backend, bool ok, const std::string& detail = "") {
+    std::string entry = std::string(backend) + ":" + (ok ? "ok" : "fail");
+    if (!detail.empty()) entry += "(" + detail + ")";
+    solver_chain.push_back(std::move(entry));
+  };
+
+  // NativeQP: Use LCQP solver with true quadratic costs.
+  // IMPORTANT: use_qp must reflect whether the *converged* solution comes
+  // from a QP solver. If LCQP fails we must NOT leave use_qp=true, because a
+  // subsequent LP fallback would otherwise be reported with QP objective
+  // semantics.
   auto try_native_qp = [&]() -> bool {
     engine::LCQPOptions qp_opt;
     qp_opt.max_iter = opt.max_iterations;
@@ -832,7 +867,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     engine::NativeLCQPAdapter lcqp(qp_opt);
     sol = lcqp.solve_qp(form.qp);
     sol.stats.solver_name = "NativeLCQP";
-    use_qp = true;
+    use_qp = sol.stats.success;
+    record_chain("NativeLCQP", sol.stats.success, sol.stats.status);
     return true;
   };
   
@@ -841,9 +877,11 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     engine::GurobiAdapter gurobi;
     if (gurobi.available()) {
       sol = gurobi.solve_qp(form.qp);
-      use_qp = true;
+      use_qp = sol.stats.success;
+      record_chain("Gurobi-QP", sol.stats.success, sol.stats.status);
       return true;
     }
+    record_chain("Gurobi-QP", false, "unavailable");
     return false;
   };
   
@@ -854,27 +892,41 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
   // hint still causes HiGHS to handle LP/MILP sub-problems within that backend
   // where applicable.
   auto try_highs = [&]() -> bool {
-    engine::SolverEngine engine;
+    // Single QP attempt through SolverEngine with HiGHS preference.
+    // A previous version had two back-to-back calls with identical options;
+    // the first success path skipped solver_chain recording and the duplicate
+    // call was redundant.  Now: one call, record result, fall through to LP.
+    engine::SolverEngine eng;
     engine::SolveOptions solve_opt;
     solve_opt.preferred_solver = "HiGHS";
     solve_opt.allow_fallback = true;
-    sol = to_solve_result(engine.solve_qp(form.qp, solve_opt));
-    if (sol.stats.success) {
+    auto qp_res = to_solve_result(eng.solve_qp(form.qp, solve_opt));
+    if (qp_res.stats.success) {
+      sol = qp_res;
       use_qp = true;
+      record_chain("HiGHS-routed-QP", true, sol.stats.status);
       return true;
     }
+    record_chain("HiGHS-routed-QP", false, qp_res.stats.status);
 
     engine::HighsAdapter highs;
     if (highs.available()) {
       sol = highs.solve_lp(form.lp);
+      // LP fallback: objective and duals reflect linear cost model only.
       use_qp = false;
       sol.stats.solver_name = "HiGHS-LP(QP-fallback)";
+      record_chain("HiGHS-LP", sol.stats.success, sol.stats.status);
       return true;
     }
+    record_chain("HiGHS-LP", false, "unavailable");
     return false;
   };
   
-  // Native simplex: LP with linearized costs
+  // Native simplex: LP with linearized costs. Must reset use_qp=false because
+  // this path is taken as a fallback from NativeQP when the QP fails to
+  // converge; without the reset, downstream code would recompute the
+  // objective using the QP form against an LP-feasible (but not QP-optimal)
+  // point, producing inconsistent objective/dual semantics.
   auto try_native_simplex = [&]() -> bool {
     engine::SimplexOptions simp_opt;
     simp_opt.max_iter = opt.max_iterations;
@@ -891,6 +943,8 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     sol.constraint_duals = simp_result.result.constraint_duals;
     sol.box_dual_lb = simp_result.result.box_dual_lb;
     sol.box_dual_ub = simp_result.result.box_dual_ub;
+    use_qp = false;
+    record_chain("NativeDualSimplex", sol.stats.success, sol.stats.status);
     return true;
   };
   
@@ -909,7 +963,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       if (!solved) {
         result.status = "Gurobi not available";
         result.converged = false;
-        result.total_load_shedding_mw += direct_shed_mw;
+        apply_direct_shed_to_result();
         return result;
       }
       break;
@@ -919,7 +973,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
       if (!solved) {
         result.status = "HiGHS not available";
         result.converged = false;
-        result.total_load_shedding_mw += direct_shed_mw;
+        apply_direct_shed_to_result();
         return result;
       }
       break;
@@ -952,12 +1006,21 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
     populate_missing_duals_from_supporting_lp(form, sol, use_qp, opt);
   }
   
-  // Extract results
+  // Extract results. extract_dc_opf_result overwrites *result*, so preserve
+  // the solver_chain we accumulated during the fallback sequence and restore
+  // it afterwards.
+  std::vector<std::string> chain_snapshot = std::move(solver_chain);
   result = extract_dc_opf_result(form, sol, *sys_ptr, runtime_sec);
-  
-  // For QP solvers, recompute the true quadratic objective including constant terms
+  result.solver_chain = std::move(chain_snapshot);
+
+  // For QP solvers, recompute the true quadratic objective including constant
+  // terms. `objective_model` records which cost model the reported objective
+  // corresponds to, disambiguating QP-vs-LP semantics across fallback paths.
   if (use_qp && result.converged && sol.x.size() >= form.nvar) {
     result.objective = compute_qp_objective(form, sol.x, *sys_ptr);
+    result.objective_model = "QP";
+  } else {
+    result.objective_model = "LP";
   }
   
   if (opt.verbose) {
@@ -966,7 +1029,7 @@ DCOPFResult solve_dc_opf(const HybridPowerSystem& sys,
                  result.runtime_sec);
   }
   
-  result.total_load_shedding_mw += direct_shed_mw;
+  apply_direct_shed_to_result();
   return result;
 }
 
@@ -1104,10 +1167,9 @@ check_dc_opf_feasibility(const HybridPowerSystem& sys,
     p_net[it_t->second] += result.pf_mw[bi];
   }
   
-  // Check balance at each bus (skip slack - it absorbs imbalance)
-  int slack = find_slack_bus(buses);
+  // Check balance at each bus, including slack.  The LP formulation includes
+  // the slack-bus balance row; skipping it here would hide global imbalance.
   for (size_t i = 0; i < buses.size(); ++i) {
-    if (static_cast<int>(i) == slack) continue;
     double imbalance = std::abs(p_net[i]);
     if (imbalance > tol * base_mva) {
       if (imbalance > max_viol) {

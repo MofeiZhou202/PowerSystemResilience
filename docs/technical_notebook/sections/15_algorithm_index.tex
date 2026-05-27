@@ -508,21 +508,24 @@ at each outer iteration.
 \subsubsection{A11: DC Optimal Power Flow (\texttt{solve\_dc\_opf})}
 \label{algo:a11}
 
-\texttt{A11} solves a linear (or quadratic cost) DC OPF as a LP/QP using
-HiGHS or SCIP as the backend.  Locational marginal prices are extracted as
-the dual variables of the nodal power-balance constraints.
+\texttt{A11} solves a linear or quadratic-cost DC OPF as an LP/QP.  The current
+Auto backend chain tries NativeQP, Gurobi, HiGHS, and then native dual simplex.
+When \texttt{compute\_lmp=true}, a supporting simplex LP recovers nodal LMPs;
+branch congestion dual arrays are exposed only with
+\texttt{branch\_mu\_valid=false} until bounded-variable dual recovery is robust.
 
 \paragraph{Algorithm A11: DC OPF}
 \begin{algorithmic}[1]
 \Procedure{solve\_dc\_opf}{$\mathit{sys}$, $\mathit{opt}$}
   \State $\mathit{can} \gets$ \Call{project\_to\_canonical}{$\mathit{sys}$}
-  \State Variables: $P_g \in [P_g^{\min}, P_g^{\max}]$ and $\theta_i$ (free)
+  \State Variables: $P_g \in [P_g^{\min}, P_g^{\max}]$, $\theta_i$, optional $P_{ij}$, and optional load shedding
   \State Objective: $\min\sum_g (c_{2,g}P_g^2 + c_{1,g}P_g)$
   \State Add DC power balance: $B'\theta = P_\mathrm{inj}$
   \State Add branch flow limits: $|B_{ij}(\theta_i-\theta_j)| \le P_{ij}^{\max}$
-  \State Select backend: HiGHS (LP) if $c_{2,g}=0$, else QP
-  \State Submit and solve; extract $P_g^*, \theta^*$, duals $\pi^*$ (LMPs)
-  \State \Return \textit{DCOPFResult}\{$P_g^*, \theta^*, \pi^*$, status\}
+  \State Select backend through Auto or the requested \texttt{DCOPFSolverBackend}
+  \State Submit and solve; record \texttt{solver\_chain} and \texttt{objective\_model}
+  \State If requested, recover nodal duals $\pi^*$ (LMPs) with supporting LP
+  \State \Return \textit{DCOPFResult}\{$P_g^*, P_f^*, \theta^*, \pi^*$, shedding, audit fields, status\}
 \EndProcedure
 \end{algorithmic}
 
@@ -530,12 +533,12 @@ the dual variables of the nodal power-balance constraints.
 \centering
 \begin{tikzpicture}[node distance=5mm and 18mm]
   \node[flowbox]  (can)  {project\_to\_canonical (A1)};
-  \node[flowbox,  below=of can]  (var)  {Declare $P_g$, $\theta_i$ with bounds};
+  \node[flowbox,  below=of can]  (var)  {Declare $P_g$, $\theta_i$, optional $P_{ij}$ / shed};
   \node[flowbox,  below=of var]  (obj)  {Build linear/quadratic cost};
   \node[flowbox,  below=of obj]  (pf)   {Add DC PF constraints $B'\theta = P_\mathrm{inj}$};
   \node[flowbox,  below=of pf]   (lim)  {Add branch flow limits};
-  \node[flowbox,  below=of lim]  (slv)  {Dispatch to HiGHS / SCIP};
-  \node[flowbox,  below=of slv]  (lmp)  {Extract $P_g^*$, LMPs $\pi^*$};
+  \node[flowbox,  below=of lim]  (slv)  {Auto: NativeQP / Gurobi / HiGHS / simplex};
+  \node[flowbox,  below=of slv]  (lmp)  {Extract $P_g^*$, $P_f^*$, LMPs $\pi^*$};
   \node[flowbox,  below=of lmp]  (ret)  {Return DCOPFResult};
   \draw[flowline] (can) -- (var);
   \draw[flowline] (var) -- (obj);

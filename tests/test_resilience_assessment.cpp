@@ -520,3 +520,66 @@ TEST_CASE("FMEA: repair_search_truncated false with unlimited budget",
     CHECK_FALSE(det.repair_search_truncated);
   }
 }
+
+TEST_CASE("FMEA: hybrid catalog optimizes DC load and VSC transfer",
+          "[fmea][reliability][regression]") {
+  auto sys = make_radial_3bus();
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.in_service = true;
+  g.pg_mw = 5.0;
+  g.pmax_mw = 5.0;
+  g.pmin_mw = 0.0;
+  sys.ac.generators = {g};
+
+  DCBus dc_bus;
+  dc_bus.index = 101;
+  dc_bus.in_service = true;
+  dc_bus.pd_mw = 0.5;
+  dc_bus.is_load = true;
+  sys.dc.buses = {dc_bus};
+
+  DCLoad dc_load;
+  dc_load.index = 1;
+  dc_load.bus = 101;
+  dc_load.in_service = true;
+  dc_load.p_mw = 0.5;
+  sys.dc.loads = {dc_load};
+
+  VSCConverter vsc;
+  vsc.index = 1;
+  vsc.bus_ac = 1;
+  vsc.bus_dc = 101;
+  vsc.in_service = true;
+  vsc.controllable = true;
+  vsc.p_rated_mw = 2.0;
+  vsc.pmin_mw = -2.0;
+  vsc.pmax_mw = 2.0;
+  vsc.mttr_hr = 10.0;
+  vsc.forced_outage_rate = 0.01;
+  sys.vsc_converters = {vsc};
+
+  analysis::FMEAOptions opts;
+  opts.enable_switch_reconfiguration = false;
+  const auto result = analysis::run_distribution_fmea(sys, opts);
+
+  CHECK(result.model_scope == "hybrid-acdc-network-lp");
+  CHECK_FALSE(result.model_limitations.empty());
+  CHECK(result.model_limitations.find("DC load shedding") != std::string::npos);
+  CHECK(result.validity.dc_load_curtailment_included);
+  CHECK(result.validity.vsc_dc_power_flow_modelled);
+  CHECK(result.validity.ac_opf_curtailment);
+  CHECK(result.nodal_eens_mwh_yr.size() == sys.ac.buses.size() + sys.dc.buses.size());
+
+  bool saw_vsc_loss = false;
+  for (const auto& detail : result.contingencies) {
+    if (detail.component_type != "vsc_converter") continue;
+    saw_vsc_loss = true;
+    CHECK(detail.shed_rep_mw >= Approx(1.0).margin(1e-6));
+    REQUIRE(detail.nodal_shed_rep_mw.size() == sys.ac.buses.size() + sys.dc.buses.size());
+    CHECK(detail.nodal_shed_rep_mw.back() >= Approx(1.0).margin(1e-6));
+  }
+  CHECK(saw_vsc_loss);
+}
