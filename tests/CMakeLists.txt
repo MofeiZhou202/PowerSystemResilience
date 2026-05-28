@@ -132,6 +132,26 @@ hacdcpf_add_test(test_ev_power_traffic_largescale test_ev_power_traffic_largesca
 #   LMP-coupled iterative decomposition: traffic LP + DC-OPF per step.
 hacdcpf_add_test(test_ev_power_traffic_joint_opt test_ev_power_traffic_joint_opt.cpp)
 
+# CTM + MSA-DUE: Daganzo cell transmission model with dynamic user equilibrium.
+#   4-node 2-route network, symmetric and asymmetric cases, logit assignment,
+#   multi-departure-step, and auto CFL time-step selection.
+hacdcpf_add_test(test_ev_power_traffic_ctm_due test_ev_power_traffic_ctm_due.cpp)
+
+# Formulation C: CTM-DUE jointly coupled with DC-OPF LMP price feedback.
+#   2-bus grid, 4-node 2-route traffic, 4 EV vehicles, WTP=50 $/veh.
+#   Iterative price coordination: CTM-DUE inner step + DC-OPF per time step.
+#   Tests: fixed-price baseline, OPF-coupled convergence, welfare accounting,
+#   price-driven route choice (generalized cost), and analysis printout.
+hacdcpf_add_test(test_ev_power_traffic_ctm_joint test_ev_power_traffic_ctm_joint.cpp)
+
+# Formulation D: single LP/QP/MILP/MCP joint optimizer.
+#   2-bus grid, 4-node 2-route traffic, 4 EV vehicles, WTP=50 $/veh.
+#   Route assignment + station capacity + DC-OPF power balance assembled into
+#   one LP/MILP; solver-certified optimal solution (no iterative coordination).
+#   Tests: SocialWelfareMax LP, UserBenefitMax LP, OPF coupling, welfare
+#   accounting vs Formulation C, and MILP integer-flow mode.
+hacdcpf_add_test(test_ev_power_traffic_joint_opt_d test_ev_power_traffic_joint_opt_d.cpp)
+
 # Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
 # runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).
 # TC-1 (symbol linkage + project tree check) runs unconditionally.

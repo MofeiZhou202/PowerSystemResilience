@@ -103,8 +103,11 @@ set(HACDCPF_SOURCES
   src/api/hacdcpf.cpp
   # ── EV power-traffic coupling ───────────────────────────────────────────
   src/ev_power_traffic/ev_power_traffic_simulation.cpp
+  src/ev_power_traffic/assignment_lp.cpp
   src/ev_power_traffic/joint_social_welfare.cpp
-  # ── network reconfiguration (topology analysis + ONR) ──────────────────
+  src/ev_power_traffic/ctm_propagation.cpp
+  src/ev_power_traffic/ctm_joint_welfare.cpp
+  src/ev_power_traffic/joint_optimizer.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
   # ── graph analysis & reduction ────────────────────────────────────────

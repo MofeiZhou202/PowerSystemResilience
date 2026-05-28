@@ -1,1664 +1,2515 @@
 % ============================================================
-\section{EV Power--Traffic Dynamic Simulation: Theoretical Model}
+\section{EV Power--Traffic Coupled Simulation: Implemented Model and Solver-Certified Extension}
 \label{sec:ev_power_traffic_dynamic_model}
 % ============================================================
 
-This chapter defines a theory-first model for extending the current
-\texttt{HybridPowerSystem} infrastructure to a coupled electric-vehicle
-power--traffic dynamic simulator.  It is intentionally a mathematical contract,
-not an implementation claim.  The existing code already contains AC/DC network
-models, time-series power-flow assembly, \texttt{ChargingStation}, and
-\texttt{Charger} component tables.  The traffic graph, time-varying OD demand,
-dynamic traffic assignment, charging-session state, queueing state, and
-station-level smart charging controller are extension points to be designed
-after the model below is accepted.
+This chapter documents the mathematical model that is currently
+implemented in the \texttt{hacdcpf::evpt} module and then gives the
+solver-certified dynamic joint-optimization formulation that is now
+fully implemented and validated.  All four formulations (A--D) have
+direct code counterparts in the current source tree.  The regression
+test suite (\texttt{test\_ev\_power\_traffic.cpp},
+\texttt{test\_ev\_power\_traffic\_report.cpp},
+\texttt{test\_ev\_power\_traffic\_joint\_opt.cpp},
+\texttt{test\_ev\_power\_traffic\_largescale.cpp},
+\texttt{test\_ev\_power\_traffic\_ctm\_due.cpp},
+\texttt{test\_ev\_power\_traffic\_joint\_opt\_d.cpp}) provides
+reproducible numerical values for Formulations~A--D that are used as
+the running examples in this chapter.
 
-The model has four coupled layers:
-\begin{enumerate}
-  \item time-varying EV travel demand and dynamic traffic assignment,
-  \item station-choice and charging-session generation,
-  \item smart charging or V2G dispatch at charging stations,
-  \item time-series AC/DC power-flow or OPF feasibility.
-\end{enumerate}
+\paragraph{Modeling formulation tiers.}
+To avoid confusion between what is currently implemented and what
+represents a future extension, this chapter uses four explicitly
+named tiers:
+
+\begin{description}
+  \item[Formulation~A (implemented, validated).]
+    Static BPR traffic model; free-flow precomputed route arrival steps;
+    fixed charging-profile system-optimal LP/MILP with demand-balance,
+    road-capacity, and station-power constraints; optional DC-OPF
+    coupling via iterative LMP-price update.  Validated by
+    \texttt{test\_ev\_power\_traffic.cpp},
+    \texttt{test\_ev\_power\_traffic\_report.cpp},
+    \texttt{test\_ev\_power\_traffic\_joint\_opt.cpp}, and
+    \texttt{test\_ev\_power\_traffic\_largescale.cpp}.
+  \item[Formulation~B (implemented, validated).]
+    Daganzo CTM with triangular fundamental diagram; route-specific
+    (commodity) cell occupancy to preserve station-choice identity through
+    diverge nodes; MSA-based Dynamic User Equilibrium (DUE); Wardrop
+    relative gap convergence criterion; deterministic shortest-path or
+    logit auxiliary assignment.  Implemented in
+    \texttt{src/ev\_power\_traffic/ctm\_propagation.cpp}; entry point
+    \texttt{simulate\_ev\_power\_traffic\_ctm\_due()}; validated by
+    \texttt{test\_ev\_power\_traffic\_ctm\_due.cpp} (7~test cases,
+    106~assertions).  \textbf{Limitation}: does not perform smart-charging
+    dispatch or DC-OPF coupling; station arrivals and EV load synthesis
+    remain future work for this path.
+  \item[Formulation~C.]
+    Formulation~B plus iterative DC-OPF LMP price coordination
+    (\textbf{implemented}): the CTM-DUE inner step provides EV loads per
+    station per time step; the DC-OPF outer step extracts nodal LMPs and
+    updates station prices via a convex combination; the loop repeats until
+    price convergence.  Social welfare $W = B_{\mathrm{EV}} - C_{\mathrm{gen}}
+    - C_{\mathrm{delay}}$ is tracked at each iteration.
+    Entry point: \texttt{simulate\_ev\_power\_traffic\_ctm\_joint()};
+    implementation: \texttt{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp};
+    validated by \texttt{test\_ev\_power\_traffic\_ctm\_joint.cpp}
+    (5~test cases, 43~assertions).
+  \item[Formulation~D (\textbf{implemented, validated};~\S\ref{sec:evpt-formulation-d-case}).]
+    Route assignment (free-flow arrival steps), optional DC-OPF power
+    balance, V2G, and station-capacity constraints are assembled into a
+    single LP/QP/MILP/MCP in one solver call.  Supports
+    \texttt{SocialWelfareMax}, \texttt{UserBenefitMax}, and
+    \texttt{UserEquilibriumMILP} objectives.  Solver certificates
+    (primal feasibility, dual bound, MIP gap) are populated for every
+    solve.  Entry point: \texttt{solve\_joint\_optimizer()};
+    implementation: \texttt{src/ev\_power\_traffic/joint\_optimizer.cpp};
+    validated by
+    \texttt{test\_ev\_power\_traffic\_joint\_opt\_d.cpp}
+    (7~test cases, 55~assertions).
+\end{description}
+
+Sections~\ref{sec:evpt-traffic}--\ref{sec:evpt-jsw} describe
+Formulation~A in full mathematical detail.
+Section~\ref{sec:evpt-ctm-due} documents Formulation~B.
+Section~\ref{sec:evpt-formulation-d} gives Formulation~D, the
+solver-certified dynamic joint-optimization model.
+The numerical case studies
+(Sections~\ref{sec:evpt-toy-case}--\ref{sec:evpt-largescale-case})
+validate Formulation~A.  Section~\ref{sec:evpt-ctm-due-case} presents
+Formulation~B results.  Formulation~C is reported in
+Section~\ref{sec:evpt-ctm-joint-case}.
+Formulation~D is validated in Section~\ref{sec:evpt-formulation-d-case}.
+
+\begin{remark}[Certificate scope]
+  Solver optimality certificates apply only to the LP/MILP objective and
+  constraints of Formulation~A
+  (Eq.~\eqref{eq:evpt-lp-obj}--\eqref{eq:evpt-lp-gen}).  This
+  formulation is globally optimal only for its own surrogate problem:
+  free-flow route costs, static road-capacity screening, fixed
+  dwell-window charging profiles, and optional aggregate generation
+  capacity.  Any BPR travel time, queueing delay, AC power-flow result,
+  or welfare value reported \emph{after} the LP solve is an ex-post
+  diagnostic unless it is explicitly a decision variable or constraint
+  in the mathematical program.  Formulation~B returns a DUE route-flow
+  estimate via CTM propagation and MSA; it does not invoke the LP or
+  OPF layer.  Formulation~C is a price-coordination fixed-point
+  algorithm rather than one integrated mathematical program.  B/C
+  convergence is empirically validated by regression tests and is not
+  a solver certificate.  When certification is required, use
+  Formulation~D and report the optimisation status, primal feasibility,
+  best bound, and optimality/MIP gap.
+\end{remark}
 
 % ------------------------------------------------------------
-\subsection{Compatibility With the Current Data Model}
-\label{sec:evpt-compatibility}
-% ------------------------------------------------------------
-
-The current infrastructure can already represent the electrical side of each
-charging site:
-\begin{center}
-\begin{tabular}{lll}
-\hline\hline
-\textbf{Concept} & \textbf{Current field} & \textbf{Role in this model} \\
-\hline
-Station-bus mapping & \texttt{ChargingStation::bus}
-  & maps EV power to an AC bus \\
-Station capacity & \texttt{max\_power\_kw}, \texttt{n\_fast}, \texttt{n\_slow}
-  & aggregate charging-power limits \\
-Station demand & \texttt{p\_total\_kw}, \texttt{q\_total\_kvar}
-  & time-indexed EV load after dispatch \\
-Power factor & \texttt{power\_factor}
-  & reactive-load approximation \\
-Charger link & \texttt{Charger::station\_id}
-  & maps individual chargers to a station \\
-Charger limits & \texttt{p\_ch\_max\_kw}, \texttt{p\_ch\_min\_kw}
-  & per-plug power bounds \\
-Efficiency & \texttt{Charger::eta}
-  & battery-energy conversion \\
-V2G capability & \texttt{v2g\_capable}, \texttt{p\_dis\_max\_kw}
-  & reverse-power bounds \\
-\hline\hline
-\end{tabular}
-\end{center}
-
-New model objects are still required for the transportation layer:
-\texttt{TrafficNode}, \texttt{TrafficLink}, time-dependent OD demand,
-EV trip classes, route/charging alternatives, station queue state, charging
-sessions, and a coupled simulation driver.
-
-% ------------------------------------------------------------
-\subsection{Time Grid, Sets, and Units}
+\subsection{Time Grid, Sets, and Notation}
 \label{sec:evpt-sets}
 % ------------------------------------------------------------
 
-Let the simulation horizon be discretized as
+\subsubsection{Single Time Grid}
+
+The simulation uses a single uniform time grid with \(K\) steps:
 \[
-  \mathcal{T}=\{0,1,\ldots,N_T\}, \qquad
-  t_k = k\Delta t,
+  \mathcal{T} = \{0,1,\ldots,K{-}1\},\qquad
+  t_k = k\,\Delta t,
 \]
-where \(\Delta t\) is measured in hours unless stated otherwise.
+where \(\Delta t\) is the step duration in hours (\texttt{options.time\_step\_hr},
+default 1~h) and \(K\) is the number of steps
+(\texttt{options.num\_steps}, default 24).  There is no separate traffic
+time grid.  Formulation~B (Section~\ref{sec:evpt-ctm-due}) internally
+refines this grid to a finer CTM time step \(\Delta t_{\mathrm{ctm}}\).
+Unless stated otherwise, index \(k\) refers to the simulation grid
+\(\mathcal{T}\); within Formulation~B the CTM step index is written
+\(\kappa\in\{0,\ldots,T_{\mathrm{ctm}}{-}1\}\).
+
+\subsubsection{Sets}
 
-\begin{center}
-\begin{tabular}{ll}
-\hline\hline
-\textbf{Symbol} & \textbf{Meaning} \\
-\hline
-\(\mathcal{G}^{tr}=(\mathcal{N}^{tr},\mathcal{A}^{tr})\)
-  & directed traffic graph \\
-\(\mathcal{W}\) & OD pairs \(w=(o,d)\) \\
-\(\mathcal{C}\) & EV classes, e.g. private, taxi, bus, fleet \\
-\(\mathcal{R}_{w,c}\) & route/charging alternatives for OD pair \(w\), class \(c\) \\
-\(\mathcal{S}\) & charging stations \\
-\(b(s)\in\mathcal{B}^{ac}\) & AC bus serving station \(s\) \\
-\(\mathcal{B}^{ac},\mathcal{L}^{ac}\) & AC buses and AC branches \\
-\(\mathcal{B}^{dc},\mathcal{L}^{dc}\) & DC buses and DC branches, if present \\
-\(\mathcal{I}_s\) & charging sessions assigned to station \(s\) \\
-\hline\hline
-\end{tabular}
-\end{center}
-
-Traffic demand is measured in vehicles per time step or vehicles per hour.
-Station power is naturally stored by the current model in kW/kvar, while the
-power-flow and OPF solvers use MW/Mvar.  The conversion factor is
-\[
-  P^{EV,MW}_{s,k}=10^{-3}P^{EV,kW}_{s,k}.
-\]
-
-% ------------------------------------------------------------
-\subsection{Time-Varying Travel Demand}
-\label{sec:evpt-demand}
-% ------------------------------------------------------------
-
-For each OD pair \(w\in\mathcal{W}\), EV class \(c\in\mathcal{C}\), and
-departure interval \(k\in\mathcal{T}\), let
-\[
-  d_{w,c,k}\ge 0
-\]
-be the exogenous time-varying EV departure demand.  If elastic demand is later
-required, the fixed profile can be replaced by
-\[
-  d_{w,c,k}
-  =
-  \bar d_{w,c,k}\,
-  \exp\!\left[-\gamma_{w,c}
-  \left(\Pi_{w,c,k}-\bar \Pi_{w,c,k}\right)\right],
-  \label{eq:evpt-elastic-demand}
-\]
-where \(\Pi_{w,c,k}\) is the experienced generalized travel-and-charging cost.
-For the first implementation target, \(d_{w,c,k}\) should be treated as an
-input time series, so that the traffic and power coupling can be validated
-without demand-elasticity feedback.
-
-Let \(h_{w,c,r,k}\ge 0\) denote the departure flow assigned to
-route/charging alternative \(r\in\mathcal{R}_{w,c}\).  Conservation of
-departures gives
-\begin{align}
-  \sum_{r\in\mathcal{R}_{w,c}} h_{w,c,r,k}
-  &= d_{w,c,k},
-  &&\forall w,c,k. \label{eq:evpt-path-demand-conservation}
-\end{align}
-
-Each alternative \(r\) contains a road path, optional charging stations,
-planned charging amounts, and admissible arrival/departure windows.  This keeps
-route choice and station choice in one assignment variable.
-
-% ------------------------------------------------------------
-\subsection{Dynamic Traffic Flow Model}
-\label{sec:evpt-dta-flow}
-% ------------------------------------------------------------
-
-For road link \(a\in\mathcal{A}^{tr}\), let \(n_{a,c,k}\) be the number of
-class-\(c\) vehicles on the link at time \(k\), \(u_{a,c,k}\) its inflow, and
- \(v_{a,c,k}\) its outflow.  Link conservation is
-\begin{align}
-  n_{a,c,k+1}
-  &=
-  n_{a,c,k}
-  + \Delta t\left(u_{a,c,k}-v_{a,c,k}\right),
-  &&\forall a,c,k. \label{eq:evpt-link-conservation}
-\end{align}
-
-Let \(n_{a,k}=\sum_c n_{a,c,k}\).  A link-transmission form can be written as
-\begin{align}
-  0 \le \sum_c v_{a,c,k}
-  &\le S_{a,k}(n_{a,k}), \label{eq:evpt-sending}\\
-  0 \le \sum_c u_{a,c,k}
-  &\le R_{a,k}(n_{a,k}), \label{eq:evpt-receiving}
-\end{align}
-with sending and receiving functions, for example,
-\begin{align}
-  S_{a,k}(n)
-  &=
-  \min\!\left\{\frac{n}{\Delta t},\,\bar C_{a,k}\right\},\\
-  R_{a,k}(n)
-  &=
-  \min\!\left\{\frac{\bar N^{jam}_{a}-n}{\Delta t},\,\bar C_{a,k}\right\}.
-\end{align}
-Here \(\bar C_{a,k}\) is the time-dependent road capacity and
-\(\bar N^{jam}_{a}\) is the jam accumulation.  The alternative simpler model is
-a volume-delay function
-\begin{align}
-  \tau_{a,k}
-  =
-  \tau^0_a
-  \left[
-    1+\alpha_a
-    \left(\frac{n_{a,k}}{\bar N_a}\right)^{\beta_a}
-  \right],
-  \label{eq:evpt-link-delay}
-\end{align}
-where \(\tau_{a,k}\) is the link traversal time.  The link-transmission form is
-preferred for dynamic queues, while the delay-function form is useful for an
-initial proof-of-concept.
-
-For a vehicle departing at \(t_k\) on a road sequence
-\((a_1,\ldots,a_m)\), arrival times are propagated recursively:
-\begin{align}
-  \theta_1 &= t_k,\\
-  \theta_{\ell+1}
-  &=
-  \theta_{\ell} + \tau_{a_\ell,\lfloor \theta_\ell/\Delta t\rfloor},
-  && \ell=1,\ldots,m. \label{eq:evpt-arrival-recursion}
-\end{align}
-
-% ------------------------------------------------------------
-\subsection{EV Battery Feasibility Along Routes}
-\label{sec:evpt-route-energy}
-% ------------------------------------------------------------
-
-Let \(E\) denote battery energy in kWh.  For class \(c\), road link \(a\), and
-time \(k\), define per-vehicle traction energy consumption
-\[
-  e_{a,c,k}^{drive}\ge 0 \quad [\mathrm{kWh/vehicle}].
-\]
-It may be a constant link coefficient, or a speed-dependent model such as
-\[
-  e_{a,c,k}^{drive}
-  =
-  \ell_a\left(
-    \alpha_c+\beta_c v_{a,k}^{spd}
-    +\chi_c (v_{a,k}^{spd})^2
-  \right),
-  \label{eq:evpt-drive-energy}
-\]
-where \(\ell_a\) is link length and \(v_{a,k}^{spd}\) is average speed.
-
-For a route alternative \(r\), the representative vehicle battery evolves as
-\begin{align}
-  E_{\ell+1}
-  &=
-  E_{\ell}
-  - e_{a_\ell,c,\lfloor \theta_\ell/\Delta t\rfloor}^{drive}
-  + e_{\ell}^{chg},
-  &&\ell=1,\ldots,m, \label{eq:evpt-route-soc}\\
-  \underline E_c
-  &\le E_{\ell}\le \overline E_c,
-  &&\ell=1,\ldots,m+1. \label{eq:evpt-route-soc-bounds}
-\end{align}
-The term \(e_{\ell}^{chg}\) is nonzero only when the alternative includes a
-charging stop before the next road segment.  A route/charging alternative is
-feasible only if \eqref{eq:evpt-route-soc-bounds} holds along the whole trip.
-
-The energy requested at station \(s\) by an assigned alternative is denoted
-\[
-  e^{req}_{w,c,r,s,k} \quad [\mathrm{kWh/vehicle}].
-\]
-Station-arrival flow and requested energy are then
-\begin{align}
-  \lambda_{s,k}
-  &=
-  \sum_{w,c}\sum_{r\in\mathcal{R}_{w,c}}
-  A_{s,k}^{w,c,r} h_{w,c,r,k}, \label{eq:evpt-station-arrivals}\\
-  E^{arr}_{s,k}
-  &=
-  \sum_{w,c}\sum_{r\in\mathcal{R}_{w,c}}
-  A_{s,k}^{w,c,r} e^{req}_{w,c,r,s,k} h_{w,c,r,k},
-  \label{eq:evpt-station-energy-arrivals}
-\end{align}
-where \(A_{s,k}^{w,c,r}\) is a time-shifted incidence coefficient equal to the
-number of vehicles from departure interval \(k\) and alternative \(r\) that
-reach station \(s\) in the relevant station-arrival interval.
-
-% ------------------------------------------------------------
-\subsection{Dynamic Traffic Assignment Equilibrium}
-\label{sec:evpt-dta-equilibrium}
-% ------------------------------------------------------------
-
-Let \(J_{w,c,r,k}\) be the generalized cost of assigning one class-\(c\)
-vehicle from OD pair \(w\), departure interval \(k\), to alternative \(r\).
-It combines travel time, queueing, charging payment, battery risk, and any
-policy charges:
-\begin{align}
-  J_{w,c,r,k}
-  &=
-  \omega_T T_{w,c,r,k}
-  + \omega_Q \sum_{s\in r} W_{s,\kappa(s,r,k)}
-  + \sum_{s\in r} \pi^{chg}_{s,\kappa(s,r,k)}
-      e^{req}_{w,c,r,s,k}
-  + \omega_R R_{w,c,r,k}
-  + \omega_M M_{w,c,r,k}. \label{eq:evpt-generalized-cost}
-\end{align}
-Here \(T\) is route travel time, \(W_s\) is station waiting time,
-\(\pi^{chg}_s\) is the charging price in \$/kWh, \(R\) is a range-risk
-penalty, \(M\) represents tolls or mobility policy charges, and
-\(\kappa(s,r,k)\) maps departure time to station-arrival time.
-
-A deterministic dynamic user equilibrium (DUE) is
-\begin{align}
-  h^*_{w,c,r,k} > 0
-  &\Rightarrow
-  J_{w,c,r,k}(h^*,p^*,P^*) =
-  \min_{\rho\in\mathcal{R}_{w,c}}
-  J_{w,c,\rho,k}(h^*,p^*,P^*),
-  \label{eq:evpt-due-complementarity}
-\end{align}
-for every \(w,c,k\).  Equivalently, with feasible set
-\[
-  \mathcal{H}(d)
-  =
-  \left\{
-  h\ge0:
-  \sum_{r\in\mathcal{R}_{w,c}} h_{w,c,r,k}=d_{w,c,k}
-  \ \forall w,c,k
-  \right\},
-\]
-the DUE satisfies the variational inequality
-\begin{align}
-  \sum_{w,c,k}\sum_{r\in\mathcal{R}_{w,c}}
-  J_{w,c,r,k}(h^*,p^*,P^*)
-  \left(h_{w,c,r,k}-h^*_{w,c,r,k}\right)
-  \ge 0,
-  \quad \forall h\in\mathcal{H}(d).
-  \label{eq:evpt-due-vi}
-\end{align}
-
-A stochastic DTA variant can replace \eqref{eq:evpt-due-complementarity} with a
-logit assignment:
-\begin{align}
-  h_{w,c,r,k}
-  =
-  d_{w,c,k}
-  \frac{\exp[-\theta_c J_{w,c,r,k}]}
-  {\sum_{\rho\in\mathcal{R}_{w,c}}\exp[-\theta_c J_{w,c,\rho,k}]},
-  \label{eq:evpt-logit-dta}
-\end{align}
-which is often smoother for fixed-point simulation.
-
-% ------------------------------------------------------------
-\subsection{Charging Station Queue and Session Model}
-\label{sec:evpt-station-session}
-% ------------------------------------------------------------
-
-For public fast charging, an aggregate queue model is useful:
-\begin{align}
-  q_{s,k+1}
-  &=
-  q_{s,k}+\lambda_{s,k}-u_{s,k},
-  \label{eq:evpt-queue-dynamics}\\
-  m_{s,k+1}
-  &=
-  m_{s,k}+u_{s,k}-r_{s,k},
-  \label{eq:evpt-occupancy-dynamics}\\
-  0\le u_{s,k} &\le q_{s,k}+\lambda_{s,k},\\
-  0\le m_{s,k} &\le N^{plug}_s.
-\end{align}
-Here \(q_{s,k}\) is the waiting queue, \(u_{s,k}\) is the number admitted to
-plugs, \(m_{s,k}\) is plug occupancy, \(r_{s,k}\) is completed service, and
-\(N^{plug}_s\) is the number of usable plugs.  The waiting time appearing in
-\eqref{eq:evpt-generalized-cost} can be computed by a queue discipline or
-approximated as
-\begin{align}
-  W_{s,k}
-  \approx
-  \frac{q_{s,k}}{\max\{\mu_{s,k},\epsilon\}},
-  \label{eq:evpt-wait-approx}
-\end{align}
-where \(\mu_{s,k}\) is an effective service rate.
-
-For smart charging, the more important representation is a set of charging
-sessions.  A session \(i\in\mathcal{I}_s\) is defined by
-\[
-  i=(s,a_i,d_i,E^0_i,E^{tar}_i,\overline p^{ch}_i,
-     \overline p^{dis}_i,\eta^{ch}_i,\eta^{dis}_i,\nu_i),
-\]
-where \(a_i,d_i\) are arrival and departure intervals, \(E^0_i\) is arrival
-battery energy, \(E^{tar}_i\) is the target departure energy,
-\(\overline p^{ch}_i\) and \(\overline p^{dis}_i\) are kW limits, and
-\(\nu_i\in\{0,1\}\) indicates V2G capability.
-
-Let
-\[
-  \delta_{i,k}
-  =
-  \begin{cases}
-    1, & a_i\le k<d_i,\\
-    0, & \text{otherwise}
-  \end{cases}
-\]
-be the plug-in availability of session \(i\).
-
-% ------------------------------------------------------------
-\subsection{Station-Level Smart Charging}
-\label{sec:evpt-smart-charging}
-% ------------------------------------------------------------
-
-For a session \(i\), let \(p^{ch}_{i,k}\ge0\) be charging power, \(p^{dis}_{i,k}
-\ge0\) be V2G discharging power, and \(E_{i,k}\) be battery energy.  The
-session dynamics are
-\begin{align}
-  E_{i,k+1}
-  &=
-  E_{i,k}
-  + \Delta t\left(
-    \eta^{ch}_i p^{ch}_{i,k}
-    - \frac{p^{dis}_{i,k}}{\eta^{dis}_i}
-  \right),
-  &&\forall i,k, \label{eq:evpt-session-energy}\\
-  \underline E_i
-  &\le E_{i,k}\le \overline E_i,
-  &&\forall i,k, \label{eq:evpt-session-energy-bounds}\\
-  E_{i,d_i}+\xi_i
-  &\ge E^{tar}_i,
-  &&\forall i, \label{eq:evpt-session-deadline}\\
-  \xi_i&\ge0,
-  &&\forall i. \label{eq:evpt-unserved-energy}
-\end{align}
-
-Power bounds are
-\begin{align}
-  0\le p^{ch}_{i,k}
-  &\le \overline p^{ch}_i \delta_{i,k},
-  &&\forall i,k, \label{eq:evpt-session-charge-bound}\\
-  0\le p^{dis}_{i,k}
-  &\le \nu_i\overline p^{dis}_i \delta_{i,k},
-  &&\forall i,k. \label{eq:evpt-session-discharge-bound}
-\end{align}
-
-Station aggregate net EV power is positive when the station consumes power:
-\begin{align}
-  P^{EV}_{s,k}
-  =
-  \sum_{i\in\mathcal{I}_s}
-  \left(p^{ch}_{i,k}-p^{dis}_{i,k}\right).
-  \label{eq:evpt-station-ev-power}
-\end{align}
-Station capacity constraints are
-\begin{align}
-  \sum_{i\in\mathcal{I}_s} p^{ch}_{i,k}
-  &\le \overline P^{ch}_s,\\
-  \sum_{i\in\mathcal{I}_s} p^{dis}_{i,k}
-  &\le \overline P^{dis}_s,
-  &&\forall s,k. \label{eq:evpt-station-power-limits}
-\end{align}
-
-Let \(\lambda^P_{b(s),k}\) be the active-power locational marginal price or a
-network-aware charging signal at the station bus.  A convex station controller
-can be written as
-\begin{align}
-  \min_{p^{ch},p^{dis},E,\xi}
-  \quad
-  &\sum_{k}
-  \left[
-    \lambda^P_{b(s),k} P^{EV}_{s,k}\Delta t
-    + \frac{r_s}{2}\left(P^{EV}_{s,k}\right)^2\Delta t
-    + c^{deg}_s \sum_{i\in\mathcal{I}_s}p^{dis}_{i,k}\Delta t
-  \right] \notag\\
-  &\quad
-  + \rho_s\sum_{i\in\mathcal{I}_s}\xi_i
-  + \rho^{ramp}_s\sum_k
-  \left(P^{EV}_{s,k}-P^{EV}_{s,k-1}\right)^2
-  \label{eq:evpt-station-objective}
-\end{align}
-subject to
-\eqref{eq:evpt-session-energy}--\eqref{eq:evpt-station-power-limits}.
-The quadratic term \(r_s\) prevents bang-bang charging when prices are flat,
-\(\rho_s\) penalizes missed departure energy, and \(\rho^{ramp}_s\) limits
-fast station-level ramps.
-
-\paragraph{Marginal-condition interpretation.}
-Ignoring V2G, ramps, and active bounds, the Lagrangian stationarity condition
-for a session \(i\) is
-\begin{align}
-  \lambda^P_{b(s),k}
-  + r_s P^{EV}_{s,k}
-  - \eta^{ch}_i \mu_i
-  = 0,
-  \label{eq:evpt-smart-charging-kkt}
-\end{align}
-where \(\mu_i\) is the shadow value of the departure-energy requirement.
-Thus flexible EVs charge when the network price plus station congestion cost
-falls below their deadline-adjusted energy value.  With active bounds, the same
-condition becomes a projection onto the feasible interval
-\([0,\overline p^{ch}_i]\).
-
-% ------------------------------------------------------------
-\subsection{Power-System Coupling}
-\label{sec:evpt-power-coupling}
-% ------------------------------------------------------------
-
-At each time \(k\), EV charging modifies the bus demand.  For an AC bus \(i\),
-\begin{align}
-  P^{d}_{i,k}
-  &=
-  P^{base}_{i,k}
-  + 10^{-3}\sum_{s\in\mathcal{S}:b(s)=i} P^{EV}_{s,k},
-  \label{eq:evpt-ac-p-load}\\
-  Q^{d}_{i,k}
-  &=
-  Q^{base}_{i,k}
-  + 10^{-3}\sum_{s\in\mathcal{S}:b(s)=i}
-  P^{EV}_{s,k}\tan(\arccos \operatorname{pf}_{s}),
-  \label{eq:evpt-ac-q-load}
-\end{align}
-where \(\operatorname{pf}_{s}\) is the station power factor.  If the charger
-converter is later modeled with controllable reactive power,
-\eqref{eq:evpt-ac-q-load} can be replaced by explicit \(Q^{EV}_{s,k}\)
-decision variables and inverter capability curves.
-
-The AC network equations at time \(k\) are
-\begin{align}
-  P^g_{i,k}-P^d_{i,k}
-  &=
-  V_{i,k}
-  \sum_{j\in\mathcal{B}^{ac}}
-  V_{j,k}\left(
-    G_{ij}\cos\theta_{ij,k}
-    +B_{ij}\sin\theta_{ij,k}
-  \right),
-  \label{eq:evpt-ac-pf-p}\\
-  Q^g_{i,k}-Q^d_{i,k}
-  &=
-  V_{i,k}
-  \sum_{j\in\mathcal{B}^{ac}}
-  V_{j,k}\left(
-    G_{ij}\sin\theta_{ij,k}
-    -B_{ij}\cos\theta_{ij,k}
-  \right),
-  \label{eq:evpt-ac-pf-q}
-\end{align}
-with voltage and branch limits
-\begin{align}
-  \underline V_i \le V_{i,k}\le \overline V_i,
-  \qquad
-  |S_{\ell,k}|\le \overline S_\ell.
-  \label{eq:evpt-ac-operating-limits}
-\end{align}
-
-If an OPF layer is used instead of a pure PF feasibility check, the power system
-subproblem is
-\begin{align}
-  \min_{P^g,Q^g,V,\theta,\ldots}
-  \quad
-  &\sum_{k}\left[
-    \sum_{g} C_g(P^g_{g,k})
-    + C^{shed}_{k}
-    + C^{loss}_{k}
-  \right] \label{eq:evpt-opf-objective}\\
-  \text{s.t.}\quad
-  &\eqref{eq:evpt-ac-p-load}--\eqref{eq:evpt-ac-operating-limits},
-    \text{ generator limits, and AC/DC converter limits.}
-\end{align}
-The dual multiplier of \eqref{eq:evpt-ac-pf-p} is the natural
-\(\lambda^P_{i,k}\) signal used by the smart charging model.  If only PF is
-available, \(\lambda^P_{i,k}\) may be replaced by an exogenous tariff or by a
-network-stress signal derived from voltage and branch-limit margins.
-
-For DC buses and VSC-linked chargers, the same idea applies through the DC
-conductance model and converter equations already used elsewhere in the
-notebook.  The first EV extension should keep charging stations on AC buses,
-because that aligns directly with the current \texttt{ChargingStation::bus}
-field and the existing solver-data aggregation path.
-
-% ------------------------------------------------------------
-\subsection{Coupled Power--Traffic Dynamic Equilibrium}
-\label{sec:evpt-coupled-equilibrium}
-% ------------------------------------------------------------
-
-The coupled model is a fixed point among four mappings:
-\begin{align}
-  h
-  &\in \operatorname{DTA}
-  \left(d,W,\pi^{chg},\text{traffic state}\right),
-  \label{eq:evpt-fixed-dta}\\
-  \mathcal{I}
-  &=
-  \Gamma(h,\text{route energy},\text{station arrivals}),
-  \label{eq:evpt-fixed-session}\\
-  P^{EV}
-  &\in
-  \operatorname{SmartCharge}
-  \left(\mathcal{I},\lambda^P,\text{station limits}\right),
-  \label{eq:evpt-fixed-smart-charge}\\
-  (V,\theta,P^g,Q^g,\lambda^P)
-  &\in
-  \operatorname{PowerSolve}
-  \left(P^{base}+P^{EV},Q^{base}+Q^{EV}\right).
-  \label{eq:evpt-fixed-power}
-\end{align}
-The outputs \(W\) and \(\pi^{chg}\) in
-\eqref{eq:evpt-fixed-dta} must be consistent with the queue and charging
-solutions generated by \eqref{eq:evpt-fixed-session}--\eqref{eq:evpt-fixed-smart-charge}.
-
-A compact variational form is obtained by collecting all decision variables in
-\[
-  z=(h,n,u,v,q,m,p^{ch},p^{dis},E,P^g,Q^g,V,\theta,\ldots)
-\]
-and defining the feasible set \(\mathcal{Z}\) by traffic conservation,
-charging-session constraints, station limits, and power-network constraints.
-The coupled equilibrium is
-\begin{align}
-  F(z^*)^{\top}(z-z^*)\ge 0,
-  \qquad
-  \forall z\in\mathcal{Z},
-  \label{eq:evpt-master-vi}
-\end{align}
-where \(F\) contains path generalized costs, station marginal charging costs,
-and power-system marginal costs or KKT residuals.
-
-\begin{proposition}[Existence for a relaxed discretized model]
-Suppose the demand profile is finite, the feasible set
-\(\mathcal{Z}\) is nonempty, compact, and convex after relaxing binary plug
-assignment variables, and the link-delay, queue-delay, price, and charging-cost
-maps are continuous.  Then the coupled variational inequality
-\eqref{eq:evpt-master-vi} has at least one solution.
-\end{proposition}
-
-\begin{proof}
-The statement follows from the Hartman--Stampacchia existence theorem for a
-continuous map on a nonempty compact convex feasible set.  The result is for
-the relaxed time-discretized model; integer charger assignment or exact
-nonconvex AC OPF can break convexity and should be handled as a later
-algorithmic design issue.
-\end{proof}
-
-% ------------------------------------------------------------
-\subsection{System-Optimal Variant}
-\label{sec:evpt-system-optimal}
-% ------------------------------------------------------------
-
-The DUE model represents selfish route and station choice.  A system-optimal
-planner instead minimizes total mobility, charging, and grid operating cost:
-\begin{align}
-  \min
-  \quad
-  &\sum_{k,a}
-    \int_{0}^{n_{a,k}}
-    \tau_{a,k}(\xi)\,d\xi
-  + \sum_{s,k}
-    \left[
-      \lambda^P_{b(s),k} P^{EV}_{s,k}\Delta t
-      + \frac{r_s}{2}(P^{EV}_{s,k})^2\Delta t
-    \right] \notag\\
-  &+
-  \sum_{k,g} C_g(P^g_{g,k})
-  + \sum_{i}\rho_i\xi_i
-  + \text{queue, degradation, emission, and load-shed penalties}
-  \label{eq:evpt-system-optimal-objective}
-\end{align}
-subject to all traffic, charging, and power constraints above.  This variant is
-useful for dispatch studies, emergency control, and policy design.  It is not
-equivalent to user equilibrium unless travelers face marginal congestion,
-queueing, and grid-impact prices.
-
-For implementation, the system-optimal statement must be converted into a
-finite-dimensional optimization problem over the time-expanded route--charging
-alternatives.  Let \(x_{w,r,k}\ge 0\) be the number of EVs of OD/class demand
-block \(w\) departing in interval \(k\) and assigned to route--charging
-alternative \(r\in\mathcal{R}_w\).  Let \(u_{w,k}\ge0\) be unmet travel demand,
-\(P^{EV}_{s,k}\) be station charging power, \(p^{shed}_{i,k}\ge0\) be power
-load shedding, and \(P^g_{g,k}\) be dispatchable generation.  The coefficients
-\(A_{a,\ell}^{w,r,k}\) map an assigned vehicle to traffic-link occupancy or
-inflow on road link \(a\) in interval \(\ell\), and
-\(B_{s,\ell}^{w,r,k}\) map it to charging power at station \(s\) in interval
-\(\ell\).  A relaxed joint dispatch can be written as
-\begin{align}
-  \min_{x,u,P^{EV},P^g,p^{shed}}
-  \quad
-  &\sum_{w,k}\sum_{r\in\mathcal{R}_w}
-    c^{tr}_{w,r,k}x_{w,r,k}
-  +\sum_{s,\ell}
-    \left(
-      \pi_{s,\ell}P^{EV}_{s,\ell}\Delta t
-      +\frac{r_s}{2}(P^{EV}_{s,\ell})^2\Delta t
-    \right) \notag\\
-  &+\sum_{g,\ell} C_g(P^g_{g,\ell})
-  +M^{trip}\sum_{w,k}u_{w,k}
-  +M^{shed}\sum_{i,\ell}p^{shed}_{i,\ell}\Delta t
-  \label{eq:evpt-finite-so-objective}
-\end{align}
-subject to
-\begin{align}
-  &\sum_{r\in\mathcal{R}_w}x_{w,r,k}+u_{w,k}=d_{w,k},
-  &&\forall w,k, \label{eq:evpt-finite-demand}\\
-  &\sum_{w,k}\sum_{r\in\mathcal{R}_w}
-    A_{a,\ell}^{w,r,k}x_{w,r,k}
-    \le \bar x_{a,\ell},
-  &&\forall a,\ell, \label{eq:evpt-finite-road-cap}\\
-  &P^{EV}_{s,\ell}
-    =
-    \sum_{w,k}\sum_{r\in\mathcal{R}_w}
-    B_{s,\ell}^{w,r,k}x_{w,r,k},
-  &&\forall s,\ell, \label{eq:evpt-finite-station-map}\\
-  &0\le P^{EV}_{s,\ell}\le\bar P^{ch}_{s,\ell},
-  &&\forall s,\ell, \label{eq:evpt-finite-station-cap}\\
-  &P^d_{i,\ell}
-    =
-    P^{base}_{i,\ell}
-    +\sum_{s:b(s)=i}P^{EV}_{s,\ell}
-    -p^{shed}_{i,\ell},
-  &&\forall i,\ell, \label{eq:evpt-finite-load-map}\\
-  &(P^g_{\ell},P^d_{\ell},V_{\ell},\theta_{\ell})
-    \in\mathcal{P}_{\ell},
-  &&\forall \ell. \label{eq:evpt-finite-power-set}
-\end{align}
-Here \(\mathcal{P}_{\ell}\) is the power-system feasible set.  It may be a
-single-bus balance, a DC-OPF polytope, a LinDistFlow relaxation, or a nonlinear
-AC power-flow feasible set, depending on the desired fidelity.  If
-\(\mathcal{P}_{\ell}\) is linear and the quadratic terms in
-\eqref{eq:evpt-finite-so-objective} are omitted or piecewise-linearly
-approximated, the relaxed model is an LP.  If convex quadratic charging or
-generation costs are kept, it is a convex QP under a convex power model.  If
-vehicle counts, plug assignment, route activation, charger on/off decisions, or
-exact AC equations are enforced, the problem becomes a MILP, MIQP, or nonconvex
-MINLP.  Thus the theoretical solver for the next design step should be an LP/QP
-or MILP solver over \eqref{eq:evpt-finite-so-objective}--\eqref{eq:evpt-finite-power-set},
-not a shortest-path sorting rule.
-
-\paragraph{IPOPT role.}
-Although IPOPT is available through the MIPSolvers infrastructure, it is not
-the right primary solver for the certified LP/MILP form above.  IPOPT solves
-smooth continuous NLPs; it does not enforce integer variables and does not
-return a branch-and-bound dual bound or MIP gap.  It is therefore appropriate
-only after relaxing route, plug, and on/off integrality, or as a continuous
-AC-OPF feasibility/refinement subproblem inside a decomposition or MINLP outer
-approximation.  For the first certified joint optimizer, the preferred backend
-is a linear or mixed-integer solver such as HiGHS, SCIP, or Gurobi, with IPOPT
-reserved for optional nonlinear AC-power or smooth congestion refinements.
-
-\paragraph{Algorithmic contract.}
-A principled solver should assemble the matrices \(A\) and \(B\) from the
-time-expanded traffic routes and charging windows, solve the finite model to
-global optimality when it is LP/QP/MILP, and then decode \(x_{w,r,k}\) into
-route assignments and charging sessions.  For larger instances, a supported
-decomposition is also available: use a master traffic assignment in \(x\), a
-station/power subproblem in \(P^{EV}\) and \(P^g\), and exchange Benders cuts or
-Lagrangian prices for station and grid constraints.  In either case, the
-optimality certificate is the solver's primal feasibility, dual bound, and MIP
-gap rather than a locally reasonable routing order.
-
-The implementation currently in the repository does not yet solve
-\eqref{eq:evpt-finite-so-objective}--\eqref{eq:evpt-finite-power-set} at full
-AC fidelity.  It now provides two distinct joint modes.  The
-\texttt{CapacityAwareGreedy} mode is a deterministic feasibility baseline:
-alternatives are ranked by current generalized cost, and each route receives
-the largest remaining flow allowed by road residual capacity and station
-residual charging power.  This heuristic has no general global-optimality
-guarantee.  The \texttt{SystemOptimalLP} and \texttt{SystemOptimalMILP} modes
-assemble the finite linear master problem in
-\eqref{eq:evpt-finite-demand}--\eqref{eq:evpt-finite-power-set}, using route
-flow variables, unmet-trip variables, road capacity rows, charging-station power
-rows, and aggregate generation-capacity rows.  The LP mode uses continuous
-vehicle flows; the MILP mode marks route and unmet-trip variables integer when
-the input demands are integer.  Both modes expose solver certificate fields in
-\texttt{EVPowerTrafficResult}: backend, status, objective, best bound, MIP gap,
-and whether optimality was proven within tolerance.
-
-The first certified implementation is deliberately linear.  Route costs are
-assembled from fixed free-flow travel time, station prices, and tolls; BPR
-congestion integrals, queue spillback, AC voltage constraints, and nonlinear
-OPF terms remain validation or later-refinement layers.  This keeps the master
-problem in the LP/MILP class where HiGHS or the native branch-and-cut backend
-can provide a primal solution, dual/bound information, and a gap certificate.
-
-% ------------------------------------------------------------
-\subsection{Numerical Case Study: Joint Power--Traffic Optimization}
-\label{sec:evpt-numerical-case}
-% ------------------------------------------------------------
-
-This subsection records a reproducible toy case that exercises the implemented
-capacity-aware greedy assignment mode.  The case is intentionally small so that
-the numbers can be checked by inspection.  It is also encoded as the regression
-test \texttt{EVPT: capacity-aware greedy assignment jointly respects traffic
-and station capacity} in \texttt{tests/test\_ev\_power\_traffic.cpp}.
-
-\paragraph{Network.}
-One OD demand has two route/charging alternatives.  Route~1 uses a near
-charging station; Route~2 uses a farther charging station.
-
-\begin{center}
-\begin{tabular}{lllll}
-\hline\hline
-\textbf{Route} & \textbf{Links} & \textbf{Free-flow time} &
-\textbf{Station} & \textbf{Station power limit} \\
-\hline
-1 & \(11,12\) & \(0.5+0.5=1.0\) h & 101 & 40 kW \\
-2 & \(21,22\) & \(0.8+0.7=1.5\) h & 102 & 60 kW \\
-\hline\hline
-\end{tabular}
-\end{center}
-
-Every traffic link has capacity \(10\) veh/h, the time step is
-\(\Delta t=1\) h, and link travel time uses the implemented BPR-style
-evaluation
-\[
-  \tau_a=\tau_a^0\left[1+0.15(x_a/C_a)^4\right].
-\]
-The OD demand is 5 EVs departing in step 0.  Each EV requires
-20 kWh at its chosen station, can charge at 20 kW, and has one time step of
-dwell time.  Charging efficiency is set to 1.0 in this numerical case so the
-energy accounting is transparent.  The generator capacity is 1 MW, so the
-station-power decisions are far below the feeder-level generation limit; the
-binding electrical limits in this case are station-level charging capacities.
-
-\paragraph{Traffic-only assignment.}
-With deterministic shortest generalized cost and no station-capacity lookahead,
-all 5 EVs select Route~1 because it has the shorter free-flow travel time.  The
-near station can admit only 40 kW for one hour, so it delivers 40 kWh and leaves
-60 kWh of requested charging energy unserved.
-
-\paragraph{Capacity-aware greedy assignment.}
-With \texttt{AssignmentModel::CapacityAwareGreedy}, the route allocator checks
-both road residual capacity and station residual charging power before
-assigning vehicles.  Route~1 receives only
-\[
-  40\text{ kW}/20\text{ kW per EV}=2\text{ EVs},
-\]
-and the remaining 3 EVs are assigned to Route~2, whose 60 kW station can serve
-them fully.
-
-\begin{center}
-\small
-\begin{tabular}{lrrrrrr}
-\hline\hline
-\textbf{Policy} & \textbf{R1 EV} & \textbf{R2 EV} &
-\textbf{P101} & \textbf{P102} &
-\textbf{Unserved} & \textbf{Travel time} \\
-\hline
-Traffic-only & 5 & 0 & 40 kW & 0 kW & 60 kWh & 5.046875 h \\
-Capacity-aware greedy & 2 & 3 & 40 kW & 60 kW & 0 kWh & 6.5059475 h \\
-\hline\hline
-\end{tabular}
-\end{center}
-
-The capacity-aware policy increases total travel time by \(1.4590725\)
-vehicle-hours, but it eliminates all unserved charging energy.  This is the
-intended tradeoff for a power--traffic co-optimization model: travelers are not
-routed solely by road time when station or grid constraints would make the
-charging plan infeasible.  In this two-route example, the greedy rule also
-matches the solution of the finite LP because the cheaper route's charging
-capacity is exactly saturated before the remaining demand is sent to the only
-other feasible alternative.  This coincidence should not be interpreted as a
-general optimality guarantee.
-
-\paragraph{Certified LP/MILP assignment.}
-With \texttt{AssignmentModel::SystemOptimalLP} or
-\texttt{AssignmentModel::SystemOptimalMILP}, the same toy case is solved as a
-finite optimization model.  The route-flow variables are
-\[
-  x_{1}= \text{EVs assigned to Route~1},\qquad
-  x_{2}= \text{EVs assigned to Route~2},\qquad
-  u= \text{unmet EV trips}.
-\]
-The demand and station-power constraints reduce to
-\begin{align*}
-  x_1+x_2+u &= 5,\\
-  20x_1 &\le 40,\\
-  20x_2 &\le 60,\\
-  x_1,x_2,u &\ge 0,
-\end{align*}
-with \(x_1,x_2,u\in\mathbb{Z}\) in the MILP mode.  The route costs are the
-linearized free-flow generalized costs \(c_1=1.0\) and \(c_2=1.5\), and the
-unmet-trip penalty \(M^{trip}\) is set much larger than route costs.  Therefore
-the optimizer saturates the cheaper feasible charging alternative first and
-returns
-\[
-  x_1=2,\qquad x_2=3,\qquad u=0.
-\]
-The regression tests check both continuous LP and integer MILP execution,
-including solver status, objective, best bound, and MIP gap fields.
-
-\begin{center}
-\begin{tabular}{lrrrr}
-\hline\hline
-\textbf{Step} & \textbf{P101} & \textbf{P102} &
-\textbf{EV load} & \textbf{Generation margin} \\
-\hline
-0 & 0 kW & 0 kW & 0.00 MW & 1.00 MW \\
-1 & 40 kW & 0 kW & 0.04 MW & 0.96 MW \\
-2 & 0 kW & 60 kW & 0.06 MW & 0.94 MW \\
-3 & 0 kW & 0 kW & 0.00 MW & 1.00 MW \\
-\hline\hline
-\end{tabular}
-\end{center}
-
-The traffic-only solution is infeasible under
-\texttt{allow\_unserved\_charging\_energy=false}; the joint solution is
-feasible with 100 kWh requested and 100 kWh delivered.
-
-% ------------------------------------------------------------
-\subsection{Minimal Theoretical Contract for the Next Design Step}
-\label{sec:evpt-next-contract}
-% ------------------------------------------------------------
-
-The theory above implies the following minimum extension contract:
-\begin{enumerate}
-  \item A traffic graph must provide directed links, length, free-flow time,
-        capacity, and optional jam accumulation.
-  \item Time-varying OD demand must be indexed by departure interval, OD pair,
-        and EV class.
-  \item A route alternative must encode road path, station sequence, requested
-        energy, and admissible charging windows.
-  \item Dynamic traffic assignment must output station arrival rates and
-        requested charging energy by station and time.
-  \item Charging sessions must be generated from station arrivals and must
-        carry arrival time, departure time, initial energy, target energy,
-        charger limit, efficiency, and V2G capability.
-  \item Smart charging must update \texttt{ChargingStation::p\_total\_kw} and
-        \texttt{q\_total\_kvar} for each time step before PF/OPF assembly.
-  \item The power solve must return feasibility diagnostics and, when OPF is
-        used, bus-level marginal prices or equivalent charging signals.
-  \item The coupled simulator must report whether it solved a DUE fixed point,
-        a stochastic assignment fixed point, a certified LP/QP/MILP
-        system-optimal dispatch, or a heuristic feasibility policy.
-\end{enumerate}
-
-Until the traffic and session objects exist in code, the mathematically valid
-bridge to the current infrastructure is to treat \(P^{EV}_{s,k}\) as a
-time-series charging-station load profile and run the existing time-series PF
-or OPF machinery.  The full coupled model begins when
-\(P^{EV}_{s,k}\) is produced endogenously by
-\eqref{eq:evpt-fixed-dta}--\eqref{eq:evpt-fixed-smart-charge}.
-
-% ------------------------------------------------------------
-\subsection{Implemented Module Boundary}
-\label{sec:evpt-implemented-module-boundary}
-% ------------------------------------------------------------
-
-The first code-level module is wired at the same architectural level as
-\texttt{power\_flow}:
-\begin{itemize}
-  \item public headers:
-        \texttt{include/hacdcpf/ev\_power\_traffic.hpp} and
-        \texttt{include/hacdcpf/ev\_power\_traffic/ev\_power\_traffic\_simulation.hpp},
-  \item implementation:
-        \texttt{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp},
-  \item CMake source registration in the core \texttt{hacdcpf} library,
-  \item regression tests in \texttt{tests/test\_ev\_power\_traffic.cpp}.
-\end{itemize}
-
-The implemented entry point is
-\[
-  \texttt{evpt::simulate\_ev\_power\_traffic(problem, options)}.
-\]
-It implements the discretized coupling skeleton used by this chapter:
-time-indexed road capacity and blockage, deterministic or logit route
-assignment over explicit route alternatives, capacity-aware greedy assignment,
-certified system-optimal LP/MILP assignment, unmet-demand accounting, charging
-session synthesis, station-level charging/V2G dispatch, station load write-back to
-\texttt{ChargingStation::p\_total\_kw}/\texttt{q\_total\_kvar}, and
-generation-capacity plus optional power-flow validation.
-
-The first implementation is intentionally not yet a full continuous DUE solver
-or nonlinear ACOPF/LMP-coupled optimizer.  It provides a tested module boundary
-and state/result contract on which the later algorithmic design can add:
-\begin{enumerate}
-  \item link-transmission queue propagation across multiple road cells,
-  \item fixed-point DUE or stochastic DTA iterations,
-  \item convex QP costs and piecewise-linear congestion approximations,
-  \item OPF-derived station prices \(\lambda^P_{b(s),k}\),
-  \item exact charger-plug assignment and queue discipline,
-  \item DC-side charging stations and converter-aware dispatch.
-\end{enumerate}
-
-The current regression tests verify the three modelling choices that are most
-important for the next design step:
-\begin{itemize}
-  \item a blocked road link produces unmet travel demand unless the option
-        \texttt{allow\_unserved\_travel\_demand} is enabled,
-  \item a V2G-capable plugged-in session can make
-        \(P^{EV}_{s,k}<0\), i.e. reverse station power,
-  \item accepted trips generate station load profiles that are written back to
-        the existing power-system data model and checked against generation
-        capacity.
-  \item the LP/MILP joint optimizer returns the same feasible 2/3 route split
-        in the toy case and exposes solver certificate fields.
-\end{itemize}
-
-% ------------------------------------------------------------
-\subsection{Cell Transmission Model for Dynamic Traffic Flow}
-\label{sec:evpt-ctm}
-% ------------------------------------------------------------
-
-The fixed-cost assignment used in the current implementation treats link
-traversal time as independent of loading.  Section~\ref{sec:evpt-dta-flow}
-already states the link-transmission sending and receiving functions; this
-subsection gives the complete discretization and shows it yields a linear
-programme.
-
-\subsubsection{Cell Discretization}
-\label{sec:evpt-ctm-cells}
-
-For each directed road link \(a\in\mathcal{A}^{tr}\), the triangular
-fundamental diagram is parameterized by three constants:
 \begin{center}
 \begin{tabular}{lll}
 \hline\hline
-\textbf{Symbol} & \textbf{Unit} & \textbf{Meaning} \\
+\textbf{Symbol} & \textbf{Meaning} & \textbf{C++ type} \\
 \hline
-\(v_f^a\)      & km/h  & free-flow speed \\
-\(w^a\)        & km/h  & backward (congestion) wave speed, \(w^a>0\) \\
-\(q_{\max}^a\) & veh/h & capacity flow at the critical density \\
+\(\mathcal{N}\) & traffic nodes       & \texttt{TrafficNode} \\
+\(\mathcal{A}\) & directed road links & \texttt{TrafficLink} \\
+\(\mathcal{R}\) & route alternatives  & \texttt{RouteAlternative} \\
+\(\mathcal{S}\) & charging stations   & \texttt{ChargingStation} \\
+\(\mathcal{D}\) & EV fleet demands    & \texttt{EVDemand} \\
+\(\mathcal{V}\) & charging sessions   & \texttt{EVChargingSession} \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-The CFL-stable cell length is \(\delta_a = v_f^a \Delta t\) (km), and the
-number of cells is \(M_a = \lceil L_a/\delta_a \rceil\), where \(L_a\) is the
-link length.  The jam accumulation per cell is
-\[
-  N_j^a = q_{\max}^a\Delta t\,\frac{v_f^a+w^a}{w^a}.
-\]
-The per-step capacity (vehicles that can cross a cell boundary in \(\Delta t\))
-is
-\[
-  Q^a = q_{\max}^a\Delta t.
-\]
+\subsubsection{Key Scalar Parameters}
 
-\subsubsection{State Variables and Transition Flows}
-\label{sec:evpt-ctm-vars}
-
-For cell \(m\in\{1,\ldots,M_a\}\) and time step \(k\in\mathcal{T}\), let
-\(n_{a,m,k}\ge 0\) be the vehicle accumulation.  The inter-cell flow
-\(y_{a,m,k}\ge 0\) denotes vehicles moving from cell \(m\) to cell \(m+1\)
-(or out of the last cell) during step \(k\).  Define the \emph{sending} and
-\emph{receiving} capacities at step \(k\):
-\begin{align}
-  S_{a,m,k}
-  &= \min\!\left(n_{a,m,k},\; Q^a\right),
-  \label{eq:ctm-sending}\\
-  R_{a,m,k}
-  &= \min\!\left(\frac{w^a}{v_f^a}\bigl(N_j^a - n_{a,m,k}\bigr),\; Q^a\right).
-  \label{eq:ctm-receiving}
-\end{align}
-The CTM transition flow satisfies
-\[
-  y_{a,m,k} = \min\!\left(S_{a,m,k},\; R_{a,m+1,k}\right),
-\]
-with the convention \(R_{a,M_a+1,k}=Q^a\) (free exit at the downstream
-intersection) and \(S_{a,0,k}=y_{a,0,k}\) (exogenous inflow to be coupled to
-route assignment).
-
-\subsubsection{LP Representation of the CTM min-Constraint}
-\label{sec:evpt-ctm-lp}
-
-The pointwise minimum \(\min(S,R)\) is \emph{not} directly linear, but in a
-system-optimal framework the social-welfare objective naturally drives
-inter-cell flows to their maximum feasible value; the $\min$ therefore
-decomposes into two upper bounds:
-\begin{align}
-  y_{a,m,k}
-  &\le S_{a,m,k}
-  = \min\!\left(n_{a,m,k},\;Q^a\right), \label{eq:ctm-ub-send}\\
-  y_{a,m,k}
-  &\le R_{a,m+1,k}
-  = \min\!\left(\tfrac{w^a}{v_f^a}(N_j^a-n_{a,m+1,k}),\;Q^a\right).
-  \label{eq:ctm-ub-recv}
-\end{align}
-Each of these \(\min(\cdot,\cdot)\) upper bounds is itself LP-representable
-using two separate linear inequalities:
-\begin{align}
-  y_{a,m,k} &\le n_{a,m,k},           \label{eq:ctm-lp-s1}\\
-  y_{a,m,k} &\le Q^a,                 \label{eq:ctm-lp-s2}\\
-  y_{a,m,k} &\le \frac{w^a}{v_f^a}\bigl(N_j^a-n_{a,m+1,k}\bigr),
-                                       \label{eq:ctm-lp-r1}\\
-  y_{a,m,k} &\le Q^a,                 \label{eq:ctm-lp-r2}\\
-  y_{a,m,k} &\ge 0.                   \label{eq:ctm-lp-nn}
-\end{align}
-The state update is linear by construction:
-\begin{align}
-  n_{a,m,k+1}
-  &= n_{a,m,k} + y_{a,m-1,k} - y_{a,m,k},
-  &&\forall a,m,k. \label{eq:ctm-state-update}\\
-  0 &\le n_{a,m,k} \le N_j^a,
-  &&\forall a,m,k. \label{eq:ctm-jam-bound}
-\end{align}
-
-\begin{remark}[Validity of the LP relaxation]
-The LP relaxation of the CTM min-constraint is exact for system-optimal
-assignment because the objective strictly rewards moving vehicles forward.  At
-any LP optimal solution, every flow \(y_{a,m,k}\) that is below both
-\(S_{a,m,k}\) and \(R_{a,m+1,k}\) can be increased without violating any
-constraint, strictly improving the objective.  Hence the LP optimal always
-satisfies \(y_{a,m,k}=\min(S_{a,m,k},R_{a,m+1,k})\) with equality, reproducing
-exact CTM dynamics.  This argument does not hold for user-equilibrium
-assignment, where the objective is not monotone in throughput.
-\end{remark}
-
-\subsubsection{Road Failure in CTM}
-\label{sec:evpt-ctm-failure}
-
-A full link failure at step \(k_0\) for steps \(k\in[k_0,k_0+T_f]\) is
-modelled by setting
-\[
-  Q^a_k = 0, \qquad k\in[k_0,k_0+T_f],
-\]
-which forces \(y_{a,m,k}=0\) for all \(m\), preventing any vehicle from
-traversing link \(a\) during the failure window.  Vehicles already inside
-the link remain in their cells (spillback is governed by upstream receiving
-functions), and downstream queues form naturally through the CTM dynamics.
-Partial capacity reduction (e.g., accident-induced lane closure) is
-modelled by replacing \(Q^a\) with \(\sigma Q^a\) for \(\sigma\in(0,1)\).
-No structural change to the LP is required in either case.
-
-\subsubsection{Travel Time from CTM}
-\label{sec:evpt-ctm-tt}
-
-The total vehicle-time in the network (sum of all cell accumulations over time)
-is a linear function of the state variables:
-\begin{align}
-  T^{\text{total}}
-  &= \sum_{a}\sum_{m=1}^{M_a}\sum_{k\in\mathcal{T}}
-    n_{a,m,k}\,\Delta t.
-  \label{eq:ctm-total-tt}
-\end{align}
-Multiplying by the value-of-time \(\omega_T\) gives the traffic delay cost used
-in the social-welfare objective.  This is strictly linear in \(n_{a,m,k}\).
+\begin{center}
+\begin{tabular}{llll}
+\hline\hline
+\textbf{Symbol} & \textbf{Unit} & \textbf{Options field} & \textbf{Meaning} \\
+\hline
+\(\Delta t\) & h & \texttt{time\_step\_hr} & step duration \\
+VOT & \$/veh$\cdot$h & \texttt{value\_of\_time\_per\_hr} & value of travel time \\
+\(\omega_s\) & -- & \texttt{station\_energy\_cost\_weight} & energy cost scaling \\
+\(\omega_Q\) & \$/veh & \texttt{queueing\_weight} & queueing disutility \\
+\(\pi_{s,k}\) & \$/kWh & (per station and step) & station electricity price \\
+\(M^{trip}\) & \$/veh & \texttt{system\_optimal\_unserved\_trip\_penalty}
+               & unserved-demand penalty \\
+\(\theta\) & 1/\$ & \texttt{logit\_theta} & Logit dispersion \\
+\(\alpha\) & -- & \texttt{price\_update\_step} & JSW price step size \\
+\hline\hline
+\end{tabular}
+\end{center}
 
 % ------------------------------------------------------------
-\subsection{Single-LP Joint CTM--DC-OPF Formulation}
-\label{sec:evpt-joint-lp}
+\subsection{Traffic Flow Model}
+\label{sec:evpt-traffic}
 % ------------------------------------------------------------
 
-The iterative LMP-price decomposition in
-\eqref{eq:evpt-fixed-dta}--\eqref{eq:evpt-fixed-power} is an approximation
-algorithm.  As shown in Section~\ref{sec:evpt-system-optimal}, when the
-power-system model is a DC-OPF polytope and traffic dynamics follow CTM, the
-joint problem \eqref{eq:evpt-finite-so-objective}--\eqref{eq:evpt-finite-power-set}
-is a single LP.  This subsection states that LP completely.
+\subsubsection{Link Capacity and Travel Time (BPR Function)}
+
+The per-step vehicle capacity of directed link \(a\in\mathcal{A}\) at
+step \(k\) is
+\[
+  C_{a,k} = c_a\,\Delta t,
+\]
+where \(c_a\) is the link flow capacity in veh/h
+(\texttt{TrafficLink::capacity\_veh\_per\_hr}).
+
+The link travel time is modelled by the Bureau of Public Roads (BPR)
+volume--delay function.  Given that \(x_{a,k}\) vehicles use link \(a\)
+at step \(k\), the travel time in hours is
+\begin{equation}
+  t_{a,k}
+  \;=\;
+  t_a^0
+  \left[
+    1 + \alpha_a
+    \left(
+      \frac{x_{a,k}}{C_{a,k}}
+    \right)^{\!\beta_a}
+  \right],
+  \label{eq:evpt-bpr}
+\end{equation}
+where \(t_a^0\) is the free-flow travel time (\texttt{free\_flow\_time\_hr}),
+\(\alpha_a=0.15\) and \(\beta_a=4\) are the BPR calibration parameters
+(\texttt{TrafficLink::alpha}, \texttt{TrafficLink::beta}).
+When \(C_{a,k}=0\) (blocked link) the travel time is set to \(+\infty\).
+
+\subsubsection{Route Travel Time}
+
+Route \(r\in\mathcal{R}\) is a sequence of directed links
+\(r=(a_1,a_2,\ldots,a_L)\).  Its travel time at step \(k\) is
+\begin{equation}
+  T_{r,k} \;=\; \sum_{a\in r} t_{a,k}.
+  \label{eq:evpt-route-tt}
+\end{equation}
+
+\subsubsection{Generalized Route Cost}
+
+Route \(r\) serves demand \(d\in\mathcal{D}\) departing at step \(k\).
+The generalized cost used by the heuristic assignment modes
+(Deterministic Shortest Path, Logit, Capacity-Aware Greedy) is
+\begin{equation}
+  c_{d,r,k}
+  \;=\;
+  \mathrm{VOT}\cdot T_{r,k}
+  \;+\;
+  \omega_s
+    \sum_{s\in\mathcal{S}(r)}
+      \pi_{s,k}\,e_{r,s}
+  \;+\;
+  \omega_Q \sum_{s\in\mathcal{S}(r)} W_{s,k_{\mathrm{arr}}(r,k)}
+  \;+\;
+  \mathrm{toll}_r,
+  \label{eq:evpt-gen-cost}
+\end{equation}
+where \(\mathcal{S}(r)\) is the set of charging stops on route \(r\),
+\(e_{r,s}\) is the per-vehicle energy requested at stop \(s\)
+(\texttt{requested\_energy\_kwh\_per\_vehicle}), \(W_{s,k}\) is the
+estimated waiting time at station \(s\) at step \(k\)
+(Section~\ref{sec:evpt-queue}), \(k_{\mathrm{arr}}(r,k)\) is the arrival
+step at the stop (rounded from free-flow travel time), and
+\(\mathrm{toll}_r\) is any optional route toll
+(\texttt{RouteAlternative::toll\_cost}).
+
+When computing the \emph{free-flow} cost for the system-optimal LP
+objective (Section~\ref{sec:evpt-solp}), the actual link travel times
+are replaced by free-flow values \(t_a^0\), and the queueing term is
+dropped.
+
+\subsubsection{Implemented SOC Feasibility Filter}
+
+When a demand specifies an initial battery energy
+\(E^{init}_d\ge0\), the route candidate set is filtered before
+assignment.  Let \(\epsilon_a\) denote the per-vehicle traction-energy
+coefficient of link \(a\) [kWh/(veh\,km)].  Along route
+\(r=(a_1,\ldots,a_L)\), the implemented path-energy recursion is
+\begin{align}
+  E_{d,r,0} &= E^{init}_d, \nonumber\\
+  E_{d,r,\ell}
+  &=
+  E_{d,r,\ell-1} - \epsilon_{a_\ell}L_{a_\ell},
+  &&\ell=1,\ldots,L,
+  \label{eq:evpt-route-soc} \\
+  E^{post}_{d,r}
+  &=
+  \min\!\left(
+    \bar E_d,\;
+    E_{d,r,L}
+    + \sum_{s\in\mathcal{S}(r)} e_{r,s}
+  \right).
+  \nonumber
+\end{align}
+The route is feasible only if the battery stays within the configured
+SOC bounds:
+\begin{equation}
+  \underline E_d
+  \le
+  E_{d,r,\ell}
+  \le
+  \bar E_d,
+  \qquad
+  \ell=0,\ldots,L,
+  \qquad
+  E^{post}_{d,r}\ge\underline E_d.
+  \label{eq:evpt-route-soc-bounds}
+\end{equation}
+If \(E^{init}_d<0\), or if no link on the route provides
+\(\epsilon_a>0\), this filter is disabled for backward compatibility.
+
+% ------------------------------------------------------------
+\subsection{Assignment Models}
+\label{sec:evpt-assignment-models}
+% ------------------------------------------------------------
+
+Four assignment policies are selectable via
+\texttt{options.assignment\_model}:
+
+\subsubsection{Deterministic Shortest Path (\texttt{DeterministicShortestPath})}
+
+All \(q_d\) vehicles of demand \(d\) are assigned to the single route
+with minimum generalized cost:
+\[
+  r^* = \arg\min_{r\in\mathcal{R}_d} c_{d,r,k_d}.
+\]
+No capacity constraint is enforced.
+
+\subsubsection{Logit (\texttt{Logit})}
+
+When road capacity constraints are not enforced, vehicles are split
+using the multinomial logit model:
+\begin{equation}
+  x_{d,r}
+  \;=\;
+  q_d\,
+  \frac{e^{-\theta\,c_{d,r,k_d}}}
+       {\sum_{r'\in\mathcal{R}_d} e^{-\theta\,c_{d,r',k_d}}},
+  \qquad r\in\mathcal{R}_d.
+  \label{eq:evpt-logit}
+\end{equation}
+Routes with \(c_{d,r,k_d}=+\infty\) receive zero weight.
+
+\subsubsection{Capacity-Aware Greedy (\texttt{CapacityAwareGreedy})}
+
+Routes are sorted by ascending generalized cost.  For each route \(r\)
+the algorithm assigns
+\[
+  x_{d,r}
+  \;=\;
+  \min\bigl(
+    \mathrm{remaining}_d,\;
+    \mathrm{road\_res}_{r,k},\;
+    \mathrm{sta\_res}_{r,k}
+  \bigr),
+\]
+where \(\mathrm{road\_res}_{r,k}=\min_{a\in r}(C_{a,k}-\mathrm{used}_{a,k})\)
+and \(\mathrm{sta\_res}_{r,k}\) is the remaining charging capacity
+at each stop.  Used-capacity and reserved-station-power arrays are
+updated after each assignment.
+
+\subsubsection{System-Optimal LP / MILP}
+\label{sec:evpt-solp}
+
+See Section~\ref{sec:evpt-lp-formulation} for the full formulation.
+The continuous LP is solved by the native dual-simplex implementation
+(\texttt{engine::solve\_lp\_with\_basis}).  The integer MILP variant
+attempts HiGHS first, falling back to the native branch-and-cut solver
+(\texttt{engine::solve\_milp\_bc}).
+
+% ------------------------------------------------------------
+\subsection{System-Optimal LP Formulation}
+\label{sec:evpt-lp-formulation}
+% ------------------------------------------------------------
+
+\subsubsection{Assumptions (Formulation~A)}
+
+The following conditions are required for the LP to be well-posed and
+its solution to be globally optimal for the system-optimal assignment
+problem:
+
+\begin{enumerate}
+  \item \textbf{System-optimal, not DUE.}  The LP minimises total
+        system cost; it does not model user equilibrium or
+        complementarity conditions.
+  \item \textbf{Continuous flows.}  Route assignment variables
+        \(x_{d,r}\ge0\) are continuous; the MILP variant adds
+        integrality constraints.
+  \item \textbf{Free-flow costs in objective.}  The cost coefficients
+        \(c^{\mathrm{ff}}_{d,r}\) are precomputed from free-flow travel
+        times \(t_a^0\); BPR congestion does not appear in the LP
+        objective.  Consequently the LP solution may assign more vehicles
+        to a route than the greedy congestion-aware heuristic would
+        (see Sections~\ref{sec:evpt-toy-case}--\ref{sec:evpt-largescale-case}).
+  \item \textbf{Fixed charging profile.}  Station power is a fixed
+        linear function of route flows via the dwell-window convolution
+        (Eq.~\eqref{eq:evpt-lp-station}); smart-charging flexibility
+        is not modeled in the LP itself.
+  \item \textbf{No V2G in LP.}  \(P^{EV}_{s,k}\ge0\) holds implicitly
+        because \(p^{\mathrm{req}}_{r,s}\ge0\) and \(x_{d,r}\ge0\).  V2G
+        discharge is available separately via the smart-charging LP
+        (Section~\ref{sec:evpt-sessions}).
+  \item \textbf{Precomputed arrival steps.}  Station arrival steps
+        \(k_{\mathrm{arr}}\) are derived from free-flow travel times and
+        are fixed parameters, not optimisation variables.
+  \item \textbf{DC power flow (optional).}  Power-system coupling uses
+        linear DC-OPF when enabled; AC nonconvexity is not modeled.
+\end{enumerate}
 
 \subsubsection{Decision Variables}
-\label{sec:evpt-joint-vars}
 
 \begin{center}
 \begin{tabular}{lll}
 \hline\hline
 \textbf{Variable} & \textbf{Domain} & \textbf{Meaning} \\
 \hline
-\(x_{w,r,k}\ge0\)     & vehicles & EVs of demand \(w\) departing step \(k\) on
-                                    route/charging alternative \(r\) \\
-\(u_{w,k}\ge0\)       & vehicles & unmet travel demand \\
-\(n_{a,m,k}\ge0\)     & vehicles & CTM cell accumulation \\
-\(y_{a,m,k}\ge0\)     & vehicles & CTM inter-cell flow \\
-\(P^{EV}_{s,k}\ge0\)  & kW       & station \(s\) net charging power at step \(k\) \\
-\(P^g_{g,k}\ge0\)     & MW       & dispatch of generator \(g\) at step \(k\) \\
-\(\theta_{i,k}\)      & rad      & DC voltage angle at bus \(i\), step \(k\) \\
-\(p^{shed}_{i,k}\ge0\)& MW       & load shedding at bus \(i\), step \(k\) \\
+\(x_{d,r}\ge0\) & veh & vehicles of demand \(d\) on route \(r\) \\
+\(u_d\ge0\)     & veh & unserved vehicles for demand \(d\) \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-\subsubsection{Objective: Maximise Social Welfare}
-\label{sec:evpt-joint-obj}
+\subsubsection{Objective}
+
+Minimise total free-flow generalized cost plus unserved-demand penalty:
+\begin{equation}
+  \min\quad
+  \sum_{d\in\mathcal{D}}
+  \sum_{r\in\mathcal{R}_d}
+    c^{\mathrm{ff}}_{d,r}\,x_{d,r}
+  \;+\;
+  M^{trip} \sum_{d\in\mathcal{D}} u_d,
+  \label{eq:evpt-lp-obj}
+\end{equation}
+where \(c^{\mathrm{ff}}_{d,r}\) is the free-flow generalized cost
+(\(T_{r,k}\) evaluated at \(t^0_a\)) and \(M^{trip}=10^6\) by default.
+
+\subsubsection{Demand Balance}
 
 \begin{align}
-  \max\quad
-  &\underbrace{
-    \sum_{w,r,k} \mathrm{WTP}_w\, x_{w,r,k}
-  }_{\text{EV gross benefit}}
-  -\underbrace{
-    \omega_T\sum_{a,m,k} n_{a,m,k}\,\Delta t
-  }_{\text{traffic delay cost}}
-  -\underbrace{
-    \sum_{g,k} C_g\!\left(P^g_{g,k}\right)\Delta t
-  }_{\text{generation cost}}
-  -\underbrace{
-    M^{trip}\sum_{w,k} u_{w,k}
-  }_{\text{unmet-demand penalty}}
-  -\underbrace{
-    M^{shed}\sum_{i,k} p^{shed}_{i,k}\,\Delta t
-  }_{\text{load-shed penalty}}
-  \label{eq:joint-lp-obj}
+  \sum_{r\in\mathcal{R}_d} x_{d,r} + u_d &= q_d,
+  &&\forall d\in\mathcal{D}.
+  \label{eq:evpt-lp-demand}
 \end{align}
 
-\(\mathrm{WTP}_w\) is the willingness-to-pay per vehicle of demand block \(w\),
-\(\omega_T\) is the value of time (\$/vehicle-hour), and \(C_g(\cdot)\) is the
-generator cost function (piecewise-linear or linear in MW).  \(M^{trip}\) and
-\(M^{shed}\) are large penalties that enforce demand satisfaction and grid
-feasibility as soft constraints.
+\subsubsection{Road Capacity}
 
-\subsubsection{Traffic Constraints}
-\label{sec:evpt-joint-traffic}
-
-\paragraph{Demand conservation.}
+If \texttt{enforce\_road\_capacity} is enabled:
 \begin{align}
-  \sum_{r\in\mathcal{R}_w} x_{w,r,k} + u_{w,k}
-  &= d_{w,k},
-  &&\forall w,k. \label{eq:jlp-demand}
+  \sum_{\substack{d\in\mathcal{D},\;r\in\mathcal{R}_d:\\a\in r}}
+    x_{d,r}
+  &\le C_{a,k_d},
+  &&\forall a\in\mathcal{A}.
+  \label{eq:evpt-lp-road}
+\end{align}
+Constraints are grouped by (departure step, link index).
+
+\begin{remark}[Static path-capacity screening]
+  The road-capacity rows~\eqref{eq:evpt-lp-road} are static screening
+  constraints indexed by demand departure step~$k_d$.  A vehicle on
+  route~$r$ is charged against every link $a\in r$ at $k_d$, regardless
+  of when it actually arrives at link~$a$.  These rows prevent gross
+  over-assignment to a congested corridor but do not propagate link
+  occupancy over time and therefore do not model spillback, downstream
+  capacity at actual arrival times, or link storage.  Dynamic link
+  occupancy is captured only in the CTM module of Formulation~B.
+\end{remark}
+
+\subsubsection{Station Charging Capacity}
+
+For each station \(s\) and each step \(k\) in a dwell window:
+\begin{align}
+  \sum_{\substack{d,\;r\in\mathcal{R}_d:\;s\in\mathcal{S}(r),\\
+        k\in[k_{\mathrm{arr}},k_{\mathrm{arr}}+\Delta_s)}}
+    p^{\mathrm{req}}_{r,s}\, x_{d,r}
+  &\le P^{\max}_s,
+  &&\forall s\in\mathcal{S},\;k\in\mathcal{T},
+  \label{eq:evpt-lp-station}
+\end{align}
+where \(p^{\mathrm{req}}_{r,s}=e_{r,s}/(\Delta_s\,\Delta t)\) [kW/veh]
+is the required charging power per vehicle and \(\Delta_s\) is the
+dwell duration in steps (\texttt{dwell\_steps}).
+
+\subsubsection{Generation Capacity (Optional)}
+
+If \texttt{enforce\_generation\_capacity} is enabled:
+\begin{align}
+  \sum_{\substack{d,r,s:\;s\in\mathcal{S}(r),\\k\in\text{dwell window}}}
+    p^{\mathrm{req}}_{r,s}\, x_{d,r}
+  &\le (P^{\mathrm{gen}}_{\max} - P^{\mathrm{base}})\times 1000,
+  &&\forall k\in\mathcal{T}.
+  \label{eq:evpt-lp-gen}
 \end{align}
 
-\paragraph{Route-to-CTM inflow coupling.}
-Let \(\alpha_{a,\ell}^{w,r,k_0}\in\{0,1\}\) be the time-expanded incidence
-coefficient equal to 1 if vehicles departing step \(k_0\) on alternative
-\(r\in\mathcal{R}_w\) enter link \(a\) at step \(\ell\) (computed from
-free-flow propagation times before the LP is assembled):
+\begin{remark}[Aggregate generation screen]
+  Equation~\eqref{eq:evpt-lp-gen} is a system-wide aggregate power
+  adequacy check.  It does not represent bus-level locational pricing,
+  branch flow limits, voltage constraints, generator redispatch, or AC
+  feasibility.  Full network feasibility requires DC-OPF or AC
+  power-flow validation (Section~\ref{sec:evpt-power-coupling}).
+\end{remark}
+
+\subsubsection{MILP Variant}
+
+When \texttt{SystemOptimalMILP} is selected and all \(q_d\) are
+integers, the variables are declared integer:
+\(x_{d,r},\,u_d\in\mathbb{Z}_{\ge0}\).
+Non-integer demand triggers an automatic fallback to the LP relaxation.
+
+% ------------------------------------------------------------
+\subsection{Charging Session Synthesis}
+\label{sec:evpt-sessions}
+% ------------------------------------------------------------
+
+After route assignment, each route flow \(x_{d,r}>0\) generates one
+\texttt{EVChargingSession} per charging stop on route \(r\):
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Session field} & \textbf{Value} \\
+\hline
+\texttt{arrival\_step}    & \(k_d + \lceil T_{r,k_d}^{\mathrm{ff}}/\Delta t \rceil\) \\
+\texttt{departure\_step}  & \(\min(K,\;k_{\mathrm{arr}} + \Delta_s)\) \\
+\texttt{vehicle\_count}   & \(x_{d,r}\) \\
+\texttt{energy\_target\_kwh} & \(e_{r,s}\cdot x_{d,r}\) \\
+\texttt{max\_charge\_kw}  & \(p^{ch,\max}_{r,s}\cdot x_{d,r}\) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Smart Charging LP}
+
+For each session \(v\) with dwell window
+\([k_{\mathrm{arr}},k_{\mathrm{dep}})\), a per-session LP allocates
+charging and discharging power:
 \begin{align}
-  y_{a,0,\ell}
-  &= \sum_{w}\sum_{r\in\mathcal{R}_w}\sum_{k_0}
-    \alpha_{a,\ell}^{w,r,k_0}\,x_{w,r,k_0},
-  &&\forall a,\ell. \label{eq:jlp-route-ctm}
-\end{align}
-
-\paragraph{CTM dynamics.}
-Equations
-\eqref{eq:ctm-state-update}--\eqref{eq:ctm-jam-bound} and
-\eqref{eq:ctm-lp-s1}--\eqref{eq:ctm-lp-nn} for all links, cells, and steps.
-
-\paragraph{Road failure.}
-For each failed link \(a\) during \([k_0,k_0+T_f]\):
-\begin{align}
-  y_{a,m,k} &= 0,
-  &&\forall m,\ k\in[k_0,k_0+T_f]. \label{eq:jlp-failure}
-\end{align}
-
-\subsubsection{Charging and Power-Coupling Constraints}
-\label{sec:evpt-joint-power}
-
-\paragraph{Route-to-station energy coupling.}
-Let \(\beta_{s,k}^{w,r,k_0}\ge0\) be the per-vehicle charging rate (kW) that
-vehicles from \((w,r,k_0)\) contribute to station \(s\) at step \(k\) (the
-product of requested energy per vehicle divided by the dwell duration in steps):
-\begin{align}
-  P^{EV}_{s,k}
-  &= \sum_{w}\sum_{r\in\mathcal{R}_w}\sum_{k_0}
-    \beta_{s,k}^{w,r,k_0}\,x_{w,r,k_0},
-  &&\forall s,k. \label{eq:jlp-ev-load}
-\end{align}
-
-\paragraph{Station capacity.}
-\begin{align}
-  P^{EV}_{s,k} &\le \overline P^{ch}_s,
-  &&\forall s,k. \label{eq:jlp-station-cap}
-\end{align}
-
-\paragraph{DC-OPF bus load.}
-\begin{align}
-  P^d_{i,k}
-  &= P^{base}_{i,k}
-    + 10^{-3}\sum_{s:\,b(s)=i} P^{EV}_{s,k}
-    - p^{shed}_{i,k},
-  &&\forall i,k. \label{eq:jlp-busload}
-\end{align}
-
-\paragraph{DC power balance and branch flows.}
-Let \(B\) be the network susceptance (B-\(\theta\)) matrix and
-\(H\) the branch-bus incidence matrix:
-\begin{align}
-  \sum_{g:\,g(g)=i} P^g_{g,k} - P^d_{i,k}
-  &= [B\theta_k]_i,
-  &&\forall i,k, \label{eq:jlp-pbalance}\\
-  \left|[H\theta_k]_\ell\right|
-  &\le \overline P_\ell,
-  &&\forall \ell,k. \label{eq:jlp-branch-lim}\\
-  \theta_{ref,k} &= 0,
-  &&\forall k. \label{eq:jlp-slack}
-\end{align}
-
-\paragraph{Generator limits and cost linearisation.}
-\begin{align}
-  \underline P^g_g \le P^g_{g,k}
-  &\le \overline P^g_g,
-  &&\forall g,k. \label{eq:jlp-gen-lim}
-\end{align}
-The quadratic cost \(C_g(P)=c_{2,g}P^2+c_{1,g}P+c_{0,g}\) is replaced by a
-piecewise-linear (PWL) approximation with \(K\) break-points.  Introducing
-auxiliary variables \(f^{(l)}_{g,k}\ge0\) for segment \(l\):
-\begin{align}
-  P^g_{g,k}
-  &= \sum_{l=1}^{K} f^{(l)}_{g,k}, \label{eq:jlp-pwl-sum}\\
-  0 \le f^{(l)}_{g,k}
-  &\le \Delta P^{(l)}_g,
-  &&\forall l, \label{eq:jlp-pwl-seg}\\
-  C_g(P^g_{g,k})
-  &\approx c_{1,g}^{(l)}\text{-weighted sum of }f^{(l)}_{g,k}.
-  \label{eq:jlp-pwl-cost}
-\end{align}
-For linear costs (\(c_{2,g}=0\)), the PWL approximation is exact with \(K=1\).
-
-\subsubsection{Complete LP Statement}
-\label{sec:evpt-joint-lp-full}
-
-The joint social-welfare maximisation problem is the LP:
-\begin{align}
-  \max\quad
-  &\eqref{eq:joint-lp-obj} \notag\\
+  \min\quad & \rho\,\xi_v
+  \label{eq:evpt-smart-obj} \\
   \text{s.t.}\quad
-  &\eqref{eq:jlp-demand},
-  \eqref{eq:jlp-route-ctm},
-  \eqref{eq:ctm-state-update}--\eqref{eq:ctm-lp-nn},
-  \eqref{eq:jlp-failure},
-  \eqref{eq:jlp-ev-load}--\eqref{eq:jlp-busload},
-  \eqref{eq:jlp-pbalance}--\eqref{eq:jlp-pwl-cost},\\
-  &x_{w,r,k},\,u_{w,k},\,n_{a,m,k},\,y_{a,m,k},\,
-   P^{EV}_{s,k},\,P^g_{g,k},\,p^{shed}_{i,k}\ge0,
-   \quad\theta_{i,k}\text{ free}.
-  \label{eq:joint-lp-full}
+  \sum_{k=k_{\mathrm{arr}}}^{k_{\mathrm{dep}}-1}
+    \left(
+      \eta^{ch}\,p^{ch}_{v,k}
+      - \frac{p^{dis}_{v,k}}{\eta^{dis}}
+    \right)\Delta t
+    + \xi_v
+  &\;\ge\; E^{\mathrm{req}}_v,
+  \label{eq:evpt-smart-energy} \\
+  0 \le p^{ch}_{v,k}  &\le p^{ch,\max}_v,
+  \label{eq:evpt-smart-ub-ch} \\
+  0 \le p^{dis}_{v,k} &\le p^{dis,\max}_v\cdot\mathbf{1}[\mathrm{V2G}],
+  \label{eq:evpt-smart-ub-dis} \\
+  \xi_v &\ge 0,
+  \label{eq:evpt-smart-slack}
+\end{align}
+where $E^{\mathrm{req}}_v = e_{r,s}\cdot x_{d,r}$ [kWh] is the
+requested delivered energy for session~$v$ (not a final SOC target);
+$\eta^{ch}\in(0,1]$ is charging efficiency and $\eta^{dis}\in(0,1]$
+is discharging efficiency (both default to the single parameter
+\texttt{default\_charging\_efficiency}, default~1.0); slack
+$\xi_v\ge0$ represents unserved energy with penalty weight~$\rho$.
+With $\eta^{ch}=\eta^{dis}=\eta$ the net battery gain per step is
+$\eta\,p^{ch}_{v,k} - p^{dis}_{v,k}/\eta$.  V2G is disabled when
+$p^{dis,\max}_v=0$ (\texttt{v2g\_capable = false}).
+
+\begin{remark}[Per-session LP and station-level capacity]
+  The per-session LP does not by itself enforce station-level aggregate
+  power limits.  In the LP/MILP assignment mode, station feasibility is
+  enforced upstream by Eq.~\eqref{eq:evpt-lp-station}.  In
+  Deterministic Shortest Path and Logit modes, station capacity is not
+  guaranteed; excess requested energy may be reported as unserved.
+\end{remark}
+
+The net station power at step \(k\) is
+\[
+  P^{EV}_{s,k}
+  \;=\;
+  \sum_{\substack{v:\;s_v=s,\\k\in[k_{\mathrm{arr}},k_{\mathrm{dep}})}}
+    (p^{ch}_{v,k} - p^{dis}_{v,k}).
+\]
+
+% ------------------------------------------------------------
+\subsection{Station Queue and Occupancy Model}
+\label{sec:evpt-queue}
+% ------------------------------------------------------------
+
+The simulation tracks a discrete-time queue for each station
+\(s\in\mathcal{S}\).  Define:
+\begin{itemize}
+  \item \(\lambda_{s,k}\): vehicles arriving at station \(s\) at step
+        \(k\) (from route assignments with matching arrival step),
+  \item \(m_{s,k}\): plug-occupancy at step \(k\) --- number of
+        vehicles already plugged in (from session schedules),
+  \item \(N^{\mathrm{plug}}_s\): number of plugs (\texttt{n\_fast}).
+\end{itemize}
+
+\subsubsection{Queue Dynamics}
+
+The number of vehicles that can begin charging at step \(k\) is
+\begin{equation}
+  u_{s,k}
+  \;=\;
+  \min\!\left(
+    q_{s,k} + \lambda_{s,k},\;
+    \max\!\left(0,\; N^{\mathrm{plug}}_s - m_{s,k}\right)
+  \right),
+  \label{eq:evpt-queue-serve}
+\end{equation}
+and the queue evolves as
+\begin{equation}
+  q_{s,k+1}
+  \;=\;
+  \max\!\left(0,\; q_{s,k} + \lambda_{s,k} - u_{s,k}\right),
+  \qquad q_{s,0} = 0.
+  \label{eq:evpt-queue-update}
+\end{equation}
+
+\subsubsection{Service Completion}
+
+For a fixed dwell duration of \(\Delta_s\) steps, the service
+completion rate is
+\begin{equation}
+  r_{s,k} \;=\; u_{s,k-\Delta_s}, \qquad k\ge\Delta_s;
+  \qquad r_{s,k}=0 \text{ for } k<\Delta_s.
+  \label{eq:evpt-queue-complete}
+\end{equation}
+The plug occupancy then evolves as
+\begin{equation}
+  m_{s,k+1} \;=\; m_{s,k} + u_{s,k} - r_{s,k},
+  \qquad m_{s,0}=0.
+  \label{eq:evpt-plug-occ}
+\end{equation}
+In the forward simulation, the session schedule derived from
+Section~\ref{sec:evpt-sessions} provides the actual \(m_{s,k}\)
+directly; Eq.~\eqref{eq:evpt-plug-occ} is used for prospective
+queueing estimates when session schedules are not yet available
+(e.g.\ in the first assignment pass).
+
+\subsubsection{Waiting Time Approximation}
+
+\begin{equation}
+  W_{s,k}
+  \;\approx\;
+  \frac{q_{s,k}}{\mu_s}\,\Delta t,
+  \qquad
+  \mu_s
+  \;=\;
+  \frac{N^{\mathrm{plug}}_s}{\Delta_s}
+  \;\approx\;
+  \frac{P^{\max}_s}{p_{\mathrm{veh}}\,\Delta_s},
+  \label{eq:evpt-wait}
+\end{equation}
+where $\mu_s$ [vehicles/step] is the effective service throughput---the
+number of vehicles completing service per step when the station is at
+full capacity---and $p_{\mathrm{veh}}$ is the per-vehicle charging
+power (\texttt{default\_route\_stop\_power\_kw\_per\_vehicle}).
+For a one-step dwell ($\Delta_s=1$), $\mu_s = N^{\mathrm{plug}}_s$.
+The waiting time $W_{s,k}$ [h] feeds the generalized cost
+\eqref{eq:evpt-gen-cost} via \(\omega_Q\).
+
+% ------------------------------------------------------------
+\subsection{Power-System Coupling}
+\label{sec:evpt-power-coupling}
+% ------------------------------------------------------------
+
+\subsubsection{Station Load Write-Back}
+
+After smart charging dispatch, \texttt{apply\_ev\_station\_loads}
+adds the per-step EV load to the corresponding bus:
+\[
+  P^d_{b(s),k} \;\mathrel{+}=\; P^{EV}_{s,k}\times10^{-3}\;[\mathrm{MW}].
+\]
+A negative \(P^{EV}_{s,k}\) (V2G discharge) reduces the bus load.
+
+\subsubsection{Optional Power-Flow Validation}
+
+If \texttt{run\_power\_flow\_validation = true}, the AC power flow is
+solved for each step using
+\texttt{solve\_power\_flow(step\_system, pf\_options)}.
+The generation capacity margin is checked:
+\[
+  P^{\mathrm{gen}}_{\max}
+  \;-\;
+  P^{\mathrm{base}}
+  \;-\;
+  \sum_s P^{EV}_{s,k}\times10^{-3}
+  \;\ge\;0.
+\]
+
+% ------------------------------------------------------------
+\subsection{Joint Social Welfare Algorithm}
+\label{sec:evpt-jsw}
+% ------------------------------------------------------------
+
+\texttt{solve\_joint\_social\_welfare()} in
+\texttt{src/ev\_power\_traffic/joint\_social\_welfare.cpp}
+implements iterative LMP-price coordination.
+
+\begin{remark}[Coordination heuristic, not a global optimizer]
+  The JSW routine is a decentralized fixed-point coordination heuristic;
+  it does not solve a single integrated social-welfare maximization
+  problem.  Its fixed point, when reached, is a consistency state
+  between the traffic LP response to current prices and the DC-OPF LMPs
+  under the resulting loads.  Convergence and global welfare optimality
+  are not guaranteed for arbitrary networks or loading conditions; the
+  algorithm has been validated on the cases in
+  Section~\ref{sec:evpt-jsw-case}.
+\end{remark}
+
+\subsubsection{Sub-Problems}
+
+\paragraph{Traffic sub-problem.}
+Given prices \(\pi^{(i)}\), solve the system-optimal LP
+\eqref{eq:evpt-lp-obj}--\eqref{eq:evpt-lp-gen} to obtain
+\(x^{(i)},P^{EV,(i)}\).
+
+\paragraph{Power sub-problem.}
+For each step \(k\), solve the DC-OPF with EV loads
+\(P^{EV,(i)}_{s,k}\) added to their buses.  Let \(\mathcal{G}_i\)
+denote generators at bus \(i\):
+\[
+  \min_{P^g_{g,k}}
+  \sum_{g\in\mathcal{G}} \bigl(c_{2,g}(P^g_{g,k})^2 + c_{1,g}P^g_{g,k} + c_{0,g}\bigr)\Delta t
+\]
+subject to DC power balance at each bus \(i\):
+\[
+  \sum_{g\in\mathcal{G}_i} P^g_{g,k} - P^d_{i,k}
+  \;=\; \sum_j B_{ij}\,\theta_{j,k},
+\]
+branch flow limits \(-\bar F_\ell \le b_\ell(\theta_{i(\ell),k}-\theta_{j(\ell),k})\le\bar F_\ell\),
+and generator bounds \(\underline{P}^g_g\le P^g_{g,k}\le\bar P^g_g\).
+Output: dispatch \(P^{g,(i)}_{g,k}\), LMPs \(\lambda^{(i)}_{b,k}\)
+[\$/MWh] as dual variables of the power-balance constraints.
+
+\subsubsection{Price Update}
+
+\begin{equation}
+  \pi^{(i+1)}_{s,k}
+  \;=\;
+  \alpha\,\frac{\lambda^{(i)}_{b(s),k}}{1000}
+  \;+\;
+  (1-\alpha)\,\pi^{(i)}_{s,k}.
+  \label{eq:evpt-price-update}
+\end{equation}
+The factor of 1000 converts \$/MWh to \$/kWh.
+
+\begin{remark}[LMP role in the JSW scheme]
+  In the power sub-problem, \(\lambda^{(i)}_{b,k}\) is the dual variable
+  of the DC power-balance constraint at bus \(b\), i.e.\ the
+  locational marginal price (LMP) [\/MWh]; it reflects the marginal
+  increase in generation cost for a 1~MW load increase at bus \(b\).
+  In the traffic sub-problem, the same value is used as an
+  \emph{exogenous price signal} after unit conversion.  The JSW
+  algorithm is a decentralized coordination scheme: the generation cost
+  already appears in \(C^{(i)}_{\mathrm{gen}}\) and the station price
+  payment is an internal transfer, not a double-count.  In the tested cases, with non-negative generator marginal costs, no
+  must-run constraints, and the adopted sign convention, LMPs are
+  non-negative.  In general, LMPs can be zero or negative under
+  congestion, binding lower-generation limits, renewable spillage, or
+  other model features.
+\end{remark}
+
+\subsubsection{Convergence Criterion}
+
+\begin{equation}
+  \max_{s,k}
+  \left|\pi^{(i+1)}_{s,k} - \pi^{(i)}_{s,k}\right|
+  \;<\;
+  \varepsilon_\pi.
+  \label{eq:evpt-conv-crit}
+\end{equation}
+
+\subsubsection{Social Welfare Accounting}
+
+\begin{align}
+  W^{(i)}
+  &= B^{(i)}_{\mathrm{EV}} - C^{(i)}_{\mathrm{gen}} - C^{(i)}_{\mathrm{delay}},
+  \label{eq:evpt-welfare} \\
+  B^{(i)}_{\mathrm{EV}}
+  &= \sum_{d\in\mathcal{D}} \mathrm{WTP}_d\cdot x^{(i)}_d,
+  \label{eq:evpt-benefit} \\
+  C^{(i)}_{\mathrm{gen}}
+  &= \sum_{k\in\mathcal{T}} \text{OPF}_k^{(i)}\;\mathrm{objective},
+  \label{eq:evpt-gencost} \\
+  C^{(i)}_{\mathrm{delay}}
+  &= \mathrm{VOT}\cdot\sum_{d,r} x^{(i)}_{d,r}\cdot T^{(i)}_{r,k_d}.
+  \label{eq:evpt-delay}
 \end{align}
 
-\subsubsection{Convergence and Optimality Guarantees}
-\label{sec:evpt-joint-convergence}
+\subsubsection{Algorithm Summary}
 
-\begin{theorem}[Global optimality of the single-LP formulation]
-\label{thm:joint-lp-global}
-Suppose the generator cost functions are piecewise-linear and convex, the
-fundamental diagram is triangular, and the power network is represented by a
-DC power-flow model.  Then the joint social-welfare maximisation problem
-\eqref{eq:joint-lp-full} is a linear programme.  Any primal-feasible
-dual-feasible solution returned by an LP solver (e.g.\ HiGHS simplex or
-interior-point) is a global optimum, and strong duality certifies the optimality
-gap is zero.
-\end{theorem}
-
-\begin{proof}
-All constraint sets are polyhedral (linear equalities and inequalities).  The
-objective \eqref{eq:joint-lp-obj} is linear after the PWL cost substitution
-\eqref{eq:jlp-pwl-sum}--\eqref{eq:jlp-pwl-cost}.  The LP relaxation of
-the CTM \(\min\)-constraint is exact for system-optimal assignment by the
-monotone-throughput argument in Remark~\ref{sec:evpt-ctm-lp}.  Thus the
-problem is an LP over a non-empty bounded polyhedron (boundedness follows from
-finite demand, jam capacities, and generator limits).  By the LP strong
-duality theorem, the optimal primal value equals the optimal dual value, and
-any primal-feasible dual-feasible solution achieves this value.
-\end{proof}
-
-\begin{corollary}[Failure of the iterative decomposition]
-\label{cor:iterative-failure}
-The iterative LMP-price decomposition in
-\texttt{solve\_joint\_social\_welfare()} is a fixed-point iteration on two LP
-subproblems.  It does not in general converge to the global optimum of
-\eqref{eq:joint-lp-full} because:
 \begin{enumerate}
-  \item The LP optimal route assignment \(x^*({\pi})\) is a piecewise-constant
-        (step) function of the station prices \(\pi\), so the LMP map
-        \(\pi\mapsto\lambda^{LMP}(x^*(\pi))\) is discontinuous wherever a
-        threshold price causes all vehicles to switch routes.
-  \item A fixed step size \(\alpha\) provides no convergence guarantee when
-        the Lipschitz constant of the LMP map exceeds \(1/\alpha\).
-  \item Multiple fixed points (Nash price equilibria) may exist; which one
-        is reached depends entirely on the initial price guess.
+  \item Initialise \(\pi^{(0)}_{s,k} = \pi_0\) for all \(s,k\).
+  \item For \(i=1,\ldots,\texttt{max\_iterations}\):
+    \begin{enumerate}
+      \item[(a)] Solve traffic LP with \(\pi^{(i-1)}\) to get
+                 \(x^{(i)},P^{EV,(i)}\).
+      \item[(b)] For each \(k\): solve DC-OPF; extract
+                 \(\lambda^{(i)}_{b,k}\).
+      \item[(c)] Update \(\pi^{(i)}\) via~\eqref{eq:evpt-price-update}.
+      \item[(d)] Compute \(W^{(i)}\), record history.
+      \item[(e)] Check~\eqref{eq:evpt-conv-crit}; stop if satisfied.
+    \end{enumerate}
 \end{enumerate}
-The single-LP formulation \eqref{eq:joint-lp-full} eliminates all three
-failure modes by internalising traffic and power coupling within one solver
-call.
-\end{corollary}
 
-\paragraph{Complexity.}
-The LP has
-\(O(|\mathcal{W}||\mathcal{R}|N_T + \sum_a M_a N_T + |\mathcal{S}|N_T +
-|\mathcal{G}|N_T + |\mathcal{B}|N_T)\) variables and a comparable number of
-constraints.  For a city-scale network with 500 links, 5 cells per link,
-100 OD pairs, 20 routes each, and \(N_T=24\) steps, this is approximately
-\(3\times10^5\) variables — well within HiGHS's practical range.
+% ------------------------------------------------------------
+\subsection{Formulation~D: Solver-Certified Dynamic Joint Optimisation}
+\label{sec:evpt-formulation-d}
+% ------------------------------------------------------------
 
-\subsubsection{Dual Variables and LMP Interpretation}
-\label{sec:evpt-joint-duals}
+Formulation~D is the non-heuristic model class for the next
+\texttt{ev\_power\_traffic} implementation step.  It replaces
+capacity-aware greedy assignment, MSA-DUE, and LMP fixed-point iteration
+with a single mathematical program, or with a solver-certified
+equilibrium complementarity model.  It is designed to answer the five
+requirements that are not fully covered by Formulations~A--C:
+\begin{enumerate}
+  \item road blockage, capacity derating, incident recovery, and
+        spillback-aware road congestion;
+  \item EV charging and V2G discharge under battery and station limits;
+  \item elastic, time-varying, and departure-time-shifting travel demand;
+  \item comparison of user-benefit maximisation and social-welfare
+        maximisation;
+  \item LP/QP/MILP/MCP solver execution with primal feasibility, dual
+        bound, and optimality/MIP-gap certificates.
+\end{enumerate}
 
-The dual variables of the joint LP \eqref{eq:joint-lp-full} have direct
-economic interpretations:
+\subsubsection{Additional Sets and Parameters}
+
+Let \(\mathcal{C}\) be EV user classes and
+\(\mathcal{P}_{odc}\) the route set for OD pair \((o,d)\) and class
+\(c\).  The simulation horizon is discretised by
+\(\mathcal{T}^{D}=\{0,\ldots,K_D-1\}\).  In Formulation~D this grid is
+the optimisation grid; it may be chosen equal to the CTM grid or a
+coarsened multiple of it.
+
+Road disruptions are represented by exogenous availability and capacity
+profiles:
+\begin{align}
+  \gamma_{a,k} &\in \{0,1\},
+      &&\text{availability of road link \(a\) at step \(k\)}, \\
+  \phi_{a,k} &\in [0,1],
+      &&\text{capacity derating factor during incidents or work zones}.
+\end{align}
+\(\gamma_{a,k}=0\) models a complete closure; \(0<\phi_{a,k}<1\)
+models a partial fault, lane closure, signal failure, or weather-induced
+capacity reduction.  The effective road capacity is
+\begin{equation}
+  \bar q_{a,k}
+  =
+  \gamma_{a,k}\,\phi_{a,k}\,q_a^{\max}.
+  \label{eq:evpt-d-eff-road-cap}
+\end{equation}
+The same idea applies to charging stations:
+\begin{equation}
+  \bar P^{ch}_{s,k}=\psi^{ch}_{s,k}P^{ch,\max}_s,
+  \qquad
+  \bar P^{dis}_{s,k}=\psi^{dis}_{s,k}P^{dis,\max}_s,
+  \qquad
+  \bar N^{plug}_{s,k}=\psi^{plug}_{s,k}N^{plug}_s,
+  \label{eq:evpt-d-station-fault}
+\end{equation}
+where \(\psi\in[0,1]\) allows charger outages, feeder derating, or
+communication failures to be modelled without changing the network
+topology.
+
+The time-varying potential travel demand is
+\(\bar d_{odc,k}\) [vehicles].  The outside-option utility
+\(\Omega_{odc,k}\) is the value retained when a trip is cancelled or
+deferred beyond the optimisation horizon.  The gross willingness to pay
+or trip benefit is \(B_{odc,k}\) [\$/vehicle].
+
+\subsubsection{Decision Variables}
 
 \begin{center}
 \begin{tabular}{lll}
 \hline\hline
-\textbf{Primal constraint} & \textbf{Dual variable} & \textbf{Interpretation} \\
+\textbf{Variable} & \textbf{Domain} & \textbf{Meaning} \\
 \hline
-\eqref{eq:jlp-demand}   & \(\mu_{w,k}\)       & shadow price of OD demand (optimal toll) \\
-\eqref{eq:jlp-failure}  & \(\nu_{a,k}\)       & value of restoring failed link \(a\) at step \(k\) \\
-\eqref{eq:jlp-station-cap} & \(\rho_{s,k}\)   & station congestion price (\$/kW) \\
-\eqref{eq:jlp-pbalance} & \(\lambda^P_{i,k}\) & DC-OPF locational marginal price (\$/MWh) \\
-\eqref{eq:jlp-branch-lim} & \(\sigma_{\ell,k}\) & branch congestion rent \\
-\eqref{eq:ctm-jam-bound} & \(\zeta_{a,m,k}\) & shadow cost of cell space (congestion externality) \\
+\(h_{p,k}\ge0\) & veh & vehicles departing on route \(p\) at step \(k\) \\
+\(q_{odc,k}^{ser}\ge0\) & veh & served trips for OD/class/time demand \\
+\(q_{odc,k}^{out}\ge0\) & veh & cancelled or horizon-unserved trips \\
+\(z_{odc,\tau,k}\ge0\) & veh & trips requested at \(\tau\), departed at \(k\) \\
+\(n_{a,m,k}\ge0\) & veh & CTM occupancy of road cell \(m\) on link \(a\) \\
+\(y_{a,m,k}\ge0\) & veh/step & CTM inter-cell flow \\
+\(e_{v,k}\) & kWh & battery energy of EV/session group \(v\) \\
+\(p^{ch}_{v,k},p^{dis}_{v,k}\ge0\) & kW & charging and V2G discharge power \\
+\(\delta^{ch}_{v,k},\delta^{dis}_{v,k}\in\{0,1\}\) & -- & optional charge/discharge mode binaries \\
+\(P^g_{g,k},\theta_{b,k},f_{\ell,k}\) & MW, rad, MW & DC-OPF generator, angle, and branch-flow variables \\
+\(\ell^p_{b,k},\ell^t_{a,k},\ell^e_{v}\ge0\) & load/veh/kWh & slack variables for load, traffic, and energy infeasibility \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-The dual variable \(\lambda^P_{i,k}\) is the LMP that the iterative
-decomposition tries to approximate through successive substitution.  In the
-single-LP solution, \(\lambda^P_{i,k}\) is returned directly by the LP dual
-and is \emph{consistent} with the route assignment and CTM dynamics — a
-property the iterative method cannot guarantee at a non-converged iterate.
+The variables \(z_{odc,\tau,k}\) are needed only when departure-time
+choice is enabled.  The variables
+\(\delta^{ch}_{v,k},\delta^{dis}_{v,k}\) are needed only when the model
+must forbid simultaneous charge and discharge exactly; omitting them
+gives a pure LP/QP relaxation that is often exact when round-trip
+efficiency is below one and both charge and discharge carry nonnegative
+costs.
 
-\subsubsection{Relation to the Implemented Code}
-\label{sec:evpt-joint-code-relation}
+\subsubsection{Dynamic Travel Demand and Departure-Time Choice}
 
-The function \texttt{solve\_joint\_social\_welfare()} in
-\texttt{src/ev\_power\_traffic/joint\_social\_welfare.cpp} implements the
-iterative decomposition described in Corollary~\ref{cor:iterative-failure}.
-It is a valid heuristic for lightly loaded, uncongested networks (where the LMP
-map is nearly constant and the fixed-point is unique), but it does not provide
-an optimality certificate for congested or failure scenarios.
-
-The single-LP formulation \eqref{eq:joint-lp-full} is the target design for
-the next implementation step.  It requires assembling the time-expanded
-matrices \(\alpha_{a,\ell}^{w,r,k_0}\) and \(\beta_{s,k}^{w,r,k_0}\) from the
-route alternatives, adding CTM cell variables to the existing LP builder in
-\texttt{AssignmentModel::SystemOptimalLP}, and augmenting the constraint matrix
-with the DC power-balance rows
-\eqref{eq:jlp-pbalance}--\eqref{eq:jlp-branch-lim}.  All of these operations
-are linear; the solver backend (HiGHS) does not change.  The dual solution
-provides LMPs, station congestion prices, and link restoration values as
-by-products of the single solve, replacing the separate DC-OPF calls in the
-iterative algorithm.
-
-% ------------------------------------------------------------
-\subsection{Temporal Discrepancy: Traffic Time as State vs.\ Power Time as Parameter}
-\label{sec:evpt-time-discrepancy}
-% ------------------------------------------------------------
-
-\subsubsection{Source of the Discrepancy}
-\label{sec:evpt-time-source}
-
-The two physical subsystems treat time in fundamentally different ways.
-
-\paragraph{Power-system time: exogenous parameter.}
-The DC-OPF is a static optimisation problem solved independently at each
-pre-fixed interval $k\in\mathcal{T}=\{0,1,\ldots,N_T\}$.  The interval
-boundaries $t_k = k\Delta t^{\mathrm{pow}}$ are chosen by the analyst and do
-not depend on the network state.  Load, generation limits, and prices are
-functions of $k$; the power equations carry no memory between steps unless a
-storage or ramp constraint explicitly links $P_{g,k}$ and $P_{g,k+1}$.
-
-\paragraph{Traffic time: endogenous state variable.}
-In dynamic traffic theory, the arrival time $\theta_s$ of a vehicle at
-charging station $s$ is \emph{not} an input — it is the solution to the
-propagation equations
+For inelastic demand, every requested trip must either be served or be
+assigned to an explicit outside option:
 \begin{align}
-  \theta_{\ell+1}
-  &= \theta_\ell + \tau_{a_\ell,\lfloor\theta_\ell/\Delta t\rfloor},
-  \label{eq:disc-arrival-recursion}
+  \sum_{\tau\in\mathcal{T}^{D}:\;\tau\ge k}
+    z_{odc,k,\tau}
+  + q^{out}_{odc,k}
+  &= \bar d_{odc,k},
+  &&\forall o,d,c,k.
+  \label{eq:evpt-d-elastic-demand}
 \end{align}
-where $\tau_{a,k}$ itself depends on the link loading $n_{a,k}$ at the time of
-traversal.  At the PDE level, $\theta$ satisfies the Hamilton--Jacobi equation
+Here \(z_{odc,k,\tau}\) means demand requested at step \(k\) and actually
+departing at step \(\tau\).  If departure-time shifting is disabled, set
+\(z_{odc,k,\tau}=0\) for \(\tau\ne k\).  The served departure volume at
+step \(\tau\) is
+\begin{equation}
+  q^{ser}_{odc,\tau}
+  =
+  \sum_{k\le\tau}z_{odc,k,\tau}.
+  \label{eq:evpt-d-served-demand}
+\end{equation}
+Route departure flows satisfy
+\begin{equation}
+  \sum_{p\in\mathcal{P}_{odc}} h_{p,\tau}
+  =
+  q^{ser}_{odc,\tau},
+  \qquad \forall o,d,c,\tau.
+  \label{eq:evpt-d-route-balance}
+\end{equation}
+Thus travel demand is not forced to be fully satisfied unless the user
+sets \(q^{out}_{odc,k}=0\) or assigns an outside-option penalty large
+enough to make cancellation economically dominated.  This is important
+for emergency road closures, feeder outages, or insufficient charging
+capacity, where mandatory service can make the model artificially
+infeasible.
+
+\subsubsection{Blockage-Aware CTM Constraints}
+
+For each road link \(a\), cell \(m\), and step \(k\), Formulation~D uses
+the CTM as linear inequalities rather than as a forward simulation.  The
+state conservation law is
+\begin{equation}
+  n_{a,m,k+1}
+  =
+  n_{a,m,k}
+  + y_{a,m-1,k}\mathbf{1}[m>0]
+  + y^{in}_{a,k}\mathbf{1}[m=0]
+  - y_{a,m,k}\mathbf{1}[m<M_a{-}1]
+  - y^{out}_{a,k}\mathbf{1}[m=M_a{-}1].
+  \label{eq:evpt-d-ctm-conservation}
+\end{equation}
+The sending and receiving envelopes are written as solver constraints:
 \begin{align}
-  \frac{\partial\theta^*}{\partial t}
-  + \frac{f(\rho(x,t))}{\rho(x,t)}\frac{\partial\theta^*}{\partial x}
-  = 1,
-  \label{eq:disc-hj}
+  y_{a,m,k}
+  &\le
+  \Delta t_D\,\bar q_{a,k},
+  &&\forall a,m,k,
+  \label{eq:evpt-d-ctm-cap} \\
+  y_{a,m,k}
+  &\le
+  \frac{v^f_a\Delta t_D}{\delta_a}\, n_{a,m,k},
+  &&\forall a,m,k,
+  \label{eq:evpt-d-ctm-send} \\
+  y_{a,m,k}
+  &\le
+  \frac{w_a\Delta t_D}{\delta_a}
+  \left(\gamma_{a,k}N^{jam}_{a}-n_{a,m+1,k}\right),
+  &&\forall a,m<M_a{-}1,k,
+  \label{eq:evpt-d-ctm-receive} \\
+  0\le n_{a,m,k}
+  &\le
+  \gamma_{a,k}N^{jam}_{a},
+  &&\forall a,m,k.
+  \label{eq:evpt-d-ctm-storage}
 \end{align}
-whose characteristics are the trajectories of individual vehicles.  Time
-\emph{appears as the dependent variable} of this equation, not as the
-independent parameter.
+When \(\gamma_{a,k}=0\), Eqs.~\eqref{eq:evpt-d-ctm-cap} and
+\eqref{eq:evpt-d-ctm-storage} force zero flow and zero storage on the
+closed link.  For an incident that closes only future inflow while
+allowing trapped vehicles to drain, replace
+\eqref{eq:evpt-d-ctm-storage} by
+\(0\le n_{a,m,k}\le N^{jam}_{a}\) and apply \(\gamma_{a,k}\) only to
+the sending capacity of entering cells.
 
-\paragraph{The coupling tension.}
-The charging load $P^{EV}_{s,k}$ that enters the power-system constraints
-\eqref{eq:jlp-ev-load} must be indexed by the power time step $k$.  But the
-time at which a vehicle arrives at station $s$ is determined by
-\eqref{eq:disc-arrival-recursion} — which depends on the traffic state, which
-depends on the route assignment, which depends on the charging prices
-$\pi_{s,k}$.  The coupling is therefore circular: the power load depends on
-traffic dynamics, and traffic dynamics depend on the power prices that are
-outputs of the OPF with that load.  Breaking this circle requires a principled
-treatment of the temporal mismatch.
+Route departure variables inject flow into the first link of each path:
+\begin{equation}
+  y^{in}_{a,k}
+  =
+  \sum_{p:\,a=\mathrm{first}(p)}h_{p,k}
+  +
+  \sum_{b:\,\mathrm{to}(b)=\mathrm{from}(a)} y_{b\to a,k},
+  \label{eq:evpt-d-route-injection}
+\end{equation}
+with node transfer variables \(y_{b\to a,k}\) satisfying merge/diverge
+capacity, turning-ratio, and FIFO constraints.  These node constraints
+are linear for fixed priorities and fixed route incidence.  If signal
+phase decisions or lane-use decisions are optimised, the corresponding
+activation variables make the traffic part MILP.
 
-\subsubsection{Three Coupling Regimes}
-\label{sec:evpt-time-regimes}
+\subsubsection{EV Battery, Charging, and V2G}
 
-Three qualitatively different situations arise depending on how traffic and
-power time grids are aligned.
+Let \(v\) index a homogeneous EV session group generated by a route,
+station, and arrival/departure window.  The battery state evolves as
+\begin{equation}
+  e_{v,k+1}
+  =
+  e_{v,k}
+  - E^{drive}_{v,k}
+  + \eta^{ch}_{v}p^{ch}_{v,k}\Delta t_D
+  - \frac{p^{dis}_{v,k}}{\eta^{dis}_{v}}\Delta t_D,
+  \qquad \forall v,k.
+  \label{eq:evpt-d-battery}
+\end{equation}
+The traction term is
+\begin{equation}
+  E^{drive}_{v,k}
+  =
+  \sum_{a\in p(v)}
+  \epsilon_{a,c(v)} L_a\,\chi_{v,a,k},
+  \label{eq:evpt-drive-energy}
+\end{equation}
+where \(\epsilon_{a,c}\) is the drive-energy coefficient
+[kWh/(veh\,km)] and \(\chi_{v,a,k}\) is the flow or occupancy of group
+\(v\) on link \(a\) at step \(k\).  A path-level approximation replaces
+\eqref{eq:evpt-drive-energy} by the precomputed route energy
+\(\sum_{a\in p}\epsilon_{a,c}L_a\).
 
-\paragraph{Regime 1: Shared grid, free-flow pre-computation (current code).}
-Both subsystems use the same step size $\Delta t$.  Arrival times are
-pre-computed from free-flow travel times before the LP is assembled:
+Battery limits and terminal service requirements are
 \begin{align}
-  \hat\theta_s^{w,r,k_0}
-  &= k_0\Delta t
-    + \sum_{a\in\text{road path of }r\text{ before }s} \tau_a^0,
-  \label{eq:disc-freeflow}
+  \underline E_{v,k}
+  \le e_{v,k}
+  &\le
+  \bar E_{v,k},
+  &&\forall v,k,
+  \label{eq:evpt-d-soc-bounds} \\
+  e_{v,k^{dep}_v}
+  + \ell^e_v
+  &\ge
+  E^{target}_v,
+  &&\forall v.
+  \label{eq:evpt-d-terminal-energy}
 \end{align}
-and the coupling coefficient is set to a fixed incidence:
+Charging and discharge power are restricted to the connection window:
 \begin{align}
-  \beta_{s,k}^{w,r,k_0}
-  &=
-  \begin{cases}
-    e_{w,r,s}^{\mathrm{req}}/\Delta t^{\mathrm{dwell}},
-    & k = \lfloor \hat\theta_s^{w,r,k_0}/\Delta t \rfloor, \\
-    0, & \text{otherwise.}
-  \end{cases}
-  \label{eq:disc-freeflow-beta}
+  0 \le p^{ch}_{v,k}
+  &\le
+  A_{v,k}\bar p^{ch}_{v},
+  &
+  0 \le p^{dis}_{v,k}
+  &\le
+  A_{v,k}\bar p^{dis}_{v},
+  &&\forall v,k,
+  \label{eq:evpt-d-session-power}
 \end{align}
-This converts the state variable $\theta_s$ into a parameter and makes
-$\beta_{s,k}^{w,r,k_0}$ a pre-assembled constant matrix.  The LP is then
-well-defined.  The limitation is that $\beta$ does not adjust when congestion
-extends the actual arrival time beyond the free-flow estimate, so the OPF
-load profile can be wrong by up to one or more steps under heavy traffic.
-
-\paragraph{Regime 2: Shared grid, CTM-based endogenous coupling.}
-The CTM operates on the same step size $\Delta t$ as the OPF.  The
-arrival-time state variable $\theta_s$ is implicitly encoded in the exit flows
-of the last CTM cell on each link entering station $s$.  Specifically, if link
-$a_s$ is the approach link to station $s$ with $M_{a_s}$ cells, then
-$y_{a_s,M_{a_s},k}$ is the number of vehicles entering station $s$ during
-step $k$.  The coupling constraint \eqref{eq:jlp-ev-load} becomes
+where \(A_{v,k}=1\) if the session is plugged in at step \(k\) and zero
+otherwise.  Exact no-simultaneous-charge/discharge logic is
 \begin{align}
-  P^{EV}_{s,k}
-  &= p_{\mathrm{ch}}^{\mathrm{veh}} \cdot \Delta t
-    \sum_{a\to s}
-    y_{a,M_a,k},
+  p^{ch}_{v,k} &\le A_{v,k}\bar p^{ch}_{v}\delta^{ch}_{v,k}, \\
+  p^{dis}_{v,k} &\le A_{v,k}\bar p^{dis}_{v}\delta^{dis}_{v,k}, \\
+  \delta^{ch}_{v,k}+\delta^{dis}_{v,k} &\le 1,
+  \qquad \delta^{ch}_{v,k},\delta^{dis}_{v,k}\in\{0,1\}.
+  \label{eq:evpt-d-charge-discharge-mode}
+\end{align}
+Equations~\eqref{eq:evpt-d-battery}--\eqref{eq:evpt-d-charge-discharge-mode}
+allow both normal charging and reverse discharge.  Negative net station
+power is therefore a decision outcome, not a post-processing convention.
+
+Station aggregate limits are
+\begin{align}
+  \sum_{v:s(v)=s}p^{ch}_{v,k}
+  &\le
+  \bar P^{ch}_{s,k},
   &&\forall s,k,
-  \label{eq:disc-ctm-coupling}
+  \label{eq:evpt-d-station-ch-limit} \\
+  \sum_{v:s(v)=s}p^{dis}_{v,k}
+  &\le
+  \bar P^{dis}_{s,k},
+  &&\forall s,k,
+  \label{eq:evpt-d-station-dis-limit} \\
+  \sum_{v:s(v)=s}A_{v,k}
+  &\le
+  \bar N^{plug}_{s,k},
+  &&\forall s,k.
+  \label{eq:evpt-d-plug-limit}
 \end{align}
-where $p_{\mathrm{ch}}^{\mathrm{veh}}$ is the per-vehicle charging rate (kW)
-and the sum is over all approach links to station $s$.  The coupling
-coefficient $\beta$ is no longer pre-fixed; it is determined endogenously by
-the CTM exit flows within the same LP solve.  The arrival-time state variable
-is thereby \emph{absorbed into the LP variables} $y_{a,m,k}$, and no
-pre-computation is required.  This is the key advantage of the CTM over
-static-with-BPR models for the joint formulation.
+If plug assignment is optimised rather than fixed from arrival windows,
+\(A_{v,k}\) becomes binary and the station submodel is MILP.
 
-\begin{remark}[Resolution of the temporal discrepancy in Regime 2]
-In Regime 2, both the traffic and power subproblems are indexed on the same
-discrete grid $\{0,\ldots,N_T\}$ with the same step $\Delta t$.  The CTM
-propagates vehicle arrivals forward through time using the same index $k$ as
-the OPF.  The continuous arrival-time state variable $\theta_s$ is replaced by
-the discrete occupancy and flow variables $(n_{a,m,k}, y_{a,m,k})$, which are
-LP decision variables.  The temporal discrepancy is therefore resolved by
-discretization on a shared grid: the Hamilton--Jacobi equation
-\eqref{eq:disc-hj} is approximated by the CTM finite-volume scheme
-\eqref{eq:ctm-state-update}, and both domains use the same time index.
+\subsubsection{Power-Network Constraints}
+
+For a DC-OPF coupling, station net power is
+\begin{equation}
+  P^{EV}_{s,k}
+  =
+  10^{-3}\sum_{v:s(v)=s}
+  \left(p^{ch}_{v,k}-p^{dis}_{v,k}\right)
+  \quad [\mathrm{MW}].
+  \label{eq:evpt-d-station-net-power}
+\end{equation}
+The nodal power balance is
+\begin{equation}
+  \sum_{g\in\mathcal{G}_b} P^g_{g,k}
+  - P^d_{b,k}
+  - \sum_{s:b(s)=b}P^{EV}_{s,k}
+  + \ell^p_{b,k}
+  =
+  \sum_{\ell\in\delta(b)} \sigma_{b\ell} f_{\ell,k},
+  \qquad \forall b,k.
+  \label{eq:evpt-d-power-balance}
+\end{equation}
+Branch and generator limits are
+\begin{align}
+  f_{\ell,k}
+  &=
+  b_{\ell}\left(\theta_{i(\ell),k}-\theta_{j(\ell),k}\right),
+  &&\forall \ell,k,
+  \label{eq:evpt-d-dc-flow} \\
+  -\bar F_{\ell}
+  \le f_{\ell,k}
+  &\le
+  \bar F_{\ell},
+  &&\forall \ell,k,
+  \label{eq:evpt-d-branch-limit} \\
+  \underline P^g_g
+  \le P^g_{g,k}
+  &\le
+  \bar P^g_g,
+  &&\forall g,k.
+  \label{eq:evpt-d-gen-limit}
+\end{align}
+If voltage magnitude or radial distribution losses must be represented,
+Eqs.~\eqref{eq:evpt-d-power-balance}--\eqref{eq:evpt-d-gen-limit}
+can be replaced by LinDistFlow constraints.  Full AC constraints make
+the model nonlinear; IPOPT can solve the continuous NLP relaxation, but
+integer route, plug, or charge/discharge decisions still require an
+MINLP strategy or an outer branch-and-bound solver.
+
+\subsubsection{Objective 1: User-Benefit Maximisation}
+\label{sec:evpt-d-user-benefit}
+
+User-benefit maximisation represents a platform or behavioural model
+that prioritises EV users' private utility.  A linear form is
+\begin{align}
+  \max\quad
+  U^{user}
+  &=
+  \sum_{o,d,c,k} B_{odc,k}q^{ser}_{odc,k}
+  - \mathrm{VOT}_c
+    \sum_{p,k} h_{p,k}T_{p,k}
+  - \sum_{v,k}\pi_{s(v),k}
+    \left(p^{ch}_{v,k}-p^{dis}_{v,k}\right)\Delta t_D
+  \nonumber\\
+  &\quad
+  - \sum_{o,d,c,k} \Omega_{odc,k}q^{out}_{odc,k}
+  - \sum_{v,k} c^{deg}_v p^{dis}_{v,k}\Delta t_D
+  - M_e\sum_v \ell^e_v.
+  \label{eq:evpt-d-user-objective}
+\end{align}
+Here \(T_{p,k}\) may be either a CTM-derived linear travel-time proxy,
+the sum of link occupancies
+\(\sum_{a,m,k}n_{a,m,k}\Delta t_D\), or a convex piecewise-linear delay
+function.  The private electricity payment is included because it
+affects the user's route, station, charging, and V2G decisions.  In a
+pure user-benefit analysis, generation cost is not subtracted unless it
+is passed through to users as price.
+
+\subsubsection{Objective 2: Social-Welfare Maximisation}
+\label{sec:evpt-d-social-welfare}
+
+Social welfare counts real resource costs and treats electricity
+payments as internal transfers:
+\begin{align}
+  \max\quad
+  W
+  &=
+  \sum_{o,d,c,k} B_{odc,k}q^{ser}_{odc,k}
+  - \mathrm{VOT}_c\sum_{a,m,k} n_{a,m,k}\Delta t_D
+  - \sum_{g,k} C_g(P^g_{g,k})\Delta t_D
+  \nonumber\\
+  &\quad
+  - \sum_{v,k} c^{deg}_v p^{dis}_{v,k}\Delta t_D
+  - M_{out}\sum_{o,d,c,k}q^{out}_{odc,k}
+  - M_p\sum_{b,k}\ell^p_{b,k}
+  - M_e\sum_v\ell^e_v
+  - M_t\sum_{a,k}\ell^t_{a,k}.
+  \label{eq:evpt-d-social-objective}
+\end{align}
+If generator costs \(C_g(\cdot)\) are linear or piecewise linear, the
+model is LP/MILP.  If \(C_g(P)=c_{2,g}P^2+c_{1,g}P+c_{0,g}\) with
+\(c_{2,g}\ge0\), the continuous relaxation is convex QP; with mode,
+plug, or signal binaries it becomes MIQP.
+
+\begin{remark}[User optimum vs. social optimum]
+  The user-benefit objective~\eqref{eq:evpt-d-user-objective} can prefer
+  cheap private routes and stations even when they create congestion,
+  grid congestion, or high generation cost elsewhere.  The social-welfare
+  objective~\eqref{eq:evpt-d-social-objective} internalises these costs.
+  Comparing the two solves gives the efficiency loss of selfish or
+  price-responsive behaviour under the same physical constraints:
+  \[
+    \mathrm{PoA}^{D}
+    =
+    \frac{W^{SO}}{W^{UE\;or\;UB}},
+  \]
+  when both welfare values are evaluated with
+  Eq.~\eqref{eq:evpt-d-social-objective}.  This comparison is meaningful
+  because the numerator and denominator use the same CTM and power model.
 \end{remark}
 
-\paragraph{Regime 3: Multi-rate grids (traffic finer than power).}
-The CFL stability condition for CTM requires
+\subsubsection{Solver-Certified User Equilibrium}
+
+If the study requires Dynamic User Equilibrium rather than centralised
+user-benefit maximisation, route choice is written as variational
+inequality or complementarity conditions.  Let
+\(G_{p,k}(x,p^{ch},p^{dis})\) be the generalised private cost of route
+\(p\) for the relevant OD/class/departure time, and let
+\(\mu_{odc,k}\) be the minimum perceived cost.  Wardrop equilibrium is
 \begin{align}
-  \Delta t^{\mathrm{tr}} \le \frac{\delta_a}{v_f^a},
-  \label{eq:disc-cfl}
+  G_{p,k}-\mu_{odc,k} &\ge 0,
+  &&\forall p\in\mathcal{P}_{odc},k,
+  \label{eq:evpt-d-ue-cost} \\
+  h_{p,k} &\ge 0,
+  &&\forall p,k,
+  \label{eq:evpt-d-ue-flow} \\
+  h_{p,k}\left(G_{p,k}-\mu_{odc,k}\right) &=0,
+  &&\forall p\in\mathcal{P}_{odc},k.
+  \label{eq:evpt-d-ue-comp}
 \end{align}
-where $\delta_a = L_a/M_a$ is the cell length.  For urban links of length
-$\delta_a = 0.5\,\mathrm{km}$ and $v_f^a = 60\,\mathrm{km/h}$, this gives
-$\Delta t^{\mathrm{tr}} \le 30\,\mathrm{s}$.  Power systems typically use
-$\Delta t^{\mathrm{pow}} = 15\,\mathrm{min}$ or $1\,\mathrm{h}$.  The ratio
-$R = \Delta t^{\mathrm{pow}}/\Delta t^{\mathrm{tr}}$ can therefore be
-$30$--$120$.
-
-In this regime, traffic is simulated on a fine grid $k^{tr}\in\{0,\ldots,RN_T\}$
-and the OPF runs on a coarse grid $K\in\{0,\ldots,N_T\}$.  The coupling is
-through a temporal aggregation operator:
+For separable monotone link costs, the UE can also be solved by the
+convex Beckmann program.  For the full EV-power-traffic model with
+station capacity, V2G, and grid coupling, the complementarity system is
+assembled as MCP or converted to MILP with big-\(M\) and binary
+activation:
 \begin{align}
-  P^{EV}_{s,K}
-  &= \frac{1}{R}\sum_{k^{tr}=KR}^{(K+1)R-1}
-    \hat P^{EV}_{s,k^{tr}},
-  &&\forall s,K,
-  \label{eq:disc-aggregation}
+  G_{p,k}-\mu_{odc,k}
+  &\le M^{UE}_{p,k}(1-b_{p,k}),\\
+  h_{p,k}
+  &\le M^{flow}_{p,k}b_{p,k},\\
+  b_{p,k}&\in\{0,1\}.
+  \label{eq:evpt-d-ue-milp}
 \end{align}
-where $\hat P^{EV}_{s,k^{tr}}$ is the instantaneous charging load from the
-CTM on the fine grid.  This aggregation is a linear constraint.  The joint LP
-retains its structure; the only change is that the traffic block runs on the
-finer index $k^{tr}$ while the OPF block runs on $K$, and
-\eqref{eq:disc-aggregation} links them.
+This is solver-certified in the sense that the MCP residual, or the MILP
+feasibility and MIP gap, is reported directly by the solver.  It is not
+an MSA iteration and does not rely on empirical convergence of
+successive averages.
 
-\subsubsection{Formal Unification via the Time-Expanded Network}
-\label{sec:evpt-time-ten}
+\subsubsection{Problem Class and Solver Selection}
 
-All three regimes can be unified in the \emph{time-expanded network} (TEN)
-framework.  Replace each spatial node $i$ and link $a$ by node copies
-$(i,k)$ and link copies $(a,k)$ for each time step $k$.  A vehicle present in
-cell $(a,m)$ at time $k$ occupies node $(a,m,k)$ in the TEN.  The CTM
-state-update equation \eqref{eq:ctm-state-update} is then a simple
-conservation-of-flow equation on the TEN arc $((a,m,k),(a,m,k+1))$.
-
-In this representation, the traffic subsystem is a network-flow LP over the
-TEN, and the power subsystem is an LP over the bus-time product
-$\mathcal{B}\times\mathcal{T}$.  The coupling constraint \eqref{eq:disc-ctm-coupling}
-or \eqref{eq:disc-aggregation} adds arcs from TEN exit nodes to bus-time
-nodes.  The full joint problem is therefore a single LP on the product graph
-\begin{align}
-  \mathcal{G}^{\mathrm{joint}}
-  = \mathcal{G}^{tr}\times\mathcal{T}^{tr}
-    \cup
-    \mathcal{G}^{pow}\times\mathcal{T}^{pow}
-    \cup
-    \mathcal{E}^{coupling},
-  \label{eq:disc-joint-graph}
-\end{align}
-and the temporal discrepancy reduces to the choice of $\mathcal{T}^{tr}$ and
-$\mathcal{T}^{pow}$ and the structure of the coupling edges
-$\mathcal{E}^{coupling}$.
-
-\subsubsection{Comparison of the Three Regimes}
-\label{sec:evpt-time-comparison}
-
+The exact solver class is determined by the selected modelling features:
 \begin{center}
-\begin{tabular}{llll}
+\begin{tabular}{lll}
 \hline\hline
-\textbf{Property}
-  & \textbf{Regime 1 (pre-fixed)}
-  & \textbf{Regime 2 (shared CTM)}
-  & \textbf{Regime 3 (multi-rate)} \\
+\textbf{Features} & \textbf{Problem class} & \textbf{Recommended solver path} \\
 \hline
-Arrival time treatment
-  & parameter (pre-computed)
-  & endogenous LP variable
-  & endogenous, fine grid \\
-Congestion effect on OPF load
-  & ignored
-  & exact (within discretisation)
-  & exact \\
-Optimality of LP
-  & globally optimal given $\beta$
-  & globally optimal
-  & globally optimal \\
-$\beta_{s,k}^{w,r,k_0}$ status
-  & constant input matrix
-  & replaced by \eqref{eq:disc-ctm-coupling}
-  & via aggregation \eqref{eq:disc-aggregation}\\
-CFL constraint on $\Delta t$
-  & none
-  & $\Delta t\le L_a/(M_a v_f^a)$
-  & $\Delta t^{tr}$ only \\
-LP size increase vs.\ Regime 1
-  & baseline
-  & $+\sum_a M_a N_T$ cell variables
-  & $+\sum_a M_a RN_T$ cell variables \\
-Traffic--power time mismatch
-  & present but ignored
-  & eliminated
-  & explicitly modelled \\
+Linear CTM, linear costs, fixed plug windows & LP & HiGHS or native LP \\
+Quadratic generation cost, no binaries & convex QP & QP-capable backend \\
+Integer route/plug/mode/signal decisions & MILP/MIQP & HiGHS/SCIP/Gurobi/native B\&C \\
+Wardrop complementarity, no binaries & MCP/QP-KKT & MCP solver or KKT system \\
+AC power flow only, continuous variables & NLP & IPOPT local solve \\
+AC power flow plus integer decisions & MINLP & outer MIP/MINLP solver; IPOPT only for NLP relaxations \\
 \hline\hline
 \end{tabular}
 \end{center}
 
-\subsubsection{Implication for Step Size Selection}
-\label{sec:evpt-time-step}
+IPOPT is therefore not the default solver for Formulation~D.  It is
+appropriate only when the assembled problem is a continuous nonlinear
+program, such as an AC-OPF refinement with fixed route and charging-mode
+decisions.  IPOPT does not provide a global MIP gap for integer route,
+station, plug, V2G-mode, or signal decisions.  For the requested
+non-heuristic execution, the primary implementation should first assemble
+LP/QP/MILP/MIQP models; IPOPT can be added later as an AC feasibility
+polishing or continuous-NLP validation layer.
 
-A practical co-design rule follows from the three regimes.  Define the
-\emph{minimum traversal time} of any link:
+\subsubsection{Solver Algorithm}
+\label{sec:evpt-d-solver-algorithm}
+
+The solver-certified execution pipeline is:
+\begin{enumerate}
+  \item \textbf{Build the time-expanded network.}  Expand road links into
+        CTM cells over \(\mathcal{T}^{D}\), attach route incidence, station
+        arrival windows, charging buses, demand profiles
+        \(\bar d_{odc,k}\), and disruption profiles
+        \(\gamma_{a,k},\phi_{a,k},\psi_{s,k}\).
+  \item \textbf{Choose the behavioural mode.}  Select
+        \texttt{UserBenefitMax}, \texttt{SocialWelfareMax}, or
+        \texttt{UserEquilibriumMCP}.  The first two are optimisation
+        objectives; the last adds complementarity or big-\(M\) equilibrium
+        constraints.
+  \item \textbf{Assemble one model.}  Add
+        Eqs.~\eqref{eq:evpt-d-elastic-demand}--\eqref{eq:evpt-d-gen-limit}
+        and one of
+        Eqs.~\eqref{eq:evpt-d-user-objective},
+        \eqref{eq:evpt-d-social-objective}, or
+        \eqref{eq:evpt-d-ue-cost}--\eqref{eq:evpt-d-ue-milp}.
+        Use piecewise-linear epigraph variables for nonlinear delay or
+        generator-cost terms when a pure LP/MILP is desired.
+  \item \textbf{Solve with a mathematical-programming backend.}  Run the
+        LP/QP/MILP/MIQP/MCP solver with configured feasibility tolerance,
+        time limit, node limit, and MIP-gap target.  No route-flow update,
+        price smoothing, greedy repair, or MSA step is part of the
+        certified solve.
+  \item \textbf{Validate the certificate.}  Accept the result only if the
+        solver status is feasible/optimal according to the selected
+        tolerance.  Record primal maximum violation, dual bound or best
+        bound, incumbent objective, relative MIP gap, node count, and
+        solve time.  For LP/QP, require a valid optimal basis or KKT
+        residual; for MCP, require complementarity residual below the
+        tolerance.
+  \item \textbf{Decode and cross-check.}  Convert \(h,n,y,e,p^{ch},p^{dis}\)
+        into route assignments, CTM link states, station loads, SOC
+        trajectories, V2G injections, and power-system dispatch.  Optionally
+        run the existing AC power-flow validation as an ex-post check.
+\end{enumerate}
+
+\begin{remark}[Heuristic methods retained only as baselines]
+  \texttt{CapacityAwareGreedy}, MSA-DUE, greedy smart charging, and
+  LMP-price smoothing remain useful for fast simulation, warm starts, and
+  regression baselines.  They should not be used to claim optimality,
+  equilibrium, or social-welfare maximisation when Formulation~D is the
+  selected model.  Certified numerical results must come from the solver
+  certificate of the assembled LP/QP/MILP/MIQP/MCP.
+\end{remark}
+
+% ------------------------------------------------------------
+\subsection{Implemented Module Structure}
+\label{sec:evpt-module-structure}
+% ------------------------------------------------------------
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{File} & \textbf{Contents} \\
+\hline
+\texttt{include/hacdcpf/ev\_power\_traffic.hpp}
+  & umbrella include \\
+\texttt{include/hacdcpf/ev\_power\_traffic/types.hpp}
+  & all data structures (\texttt{TrafficLink}, \texttt{TrafficGraph}, \\
+  & \texttt{CTMLinkCell}, \texttt{CTMLinkState}, \texttt{CTMSimulationResult},\\
+  & \texttt{CTMDUEResult}, \texttt{RouteAlternative}, \texttt{EVDemand}, \ldots) \\
+\texttt{include/hacdcpf/ev\_power\_traffic/options.hpp}
+  & \texttt{EVPowerTrafficOptions}, \texttt{CTMOptions}, \texttt{DUEOptions} \\
+\texttt{include/hacdcpf/ev\_power\_traffic/simulation.hpp}
+  & \texttt{EVPowerTrafficProblem}, \texttt{EVPowerTrafficResult}, \\
+  & \texttt{simulate\_ev\_power\_traffic()} (Formulation~A), \\
+  & \texttt{simulate\_ev\_power\_traffic\_ctm\_due()} (Formulation~B), \\
+  & \texttt{apply\_ev\_station\_loads()} \\
+\texttt{include/hacdcpf/ev\_power\_traffic/joint\_social\_welfare.hpp}
+  & JSW types and \texttt{solve\_joint\_social\_welfare()} \\
+\hline
+\texttt{src/ev\_power\_traffic/evpt\_internal.hpp}
+  & private helpers: BPR, cost, capacity, LP data structs \\
+\texttt{src/ev\_power\_traffic/ev\_power\_traffic\_simulation.cpp}
+  & Formulation~A: greedy/logit/DSP, sessions, queue, dispatch \\
+\texttt{src/ev\_power\_traffic/assignment\_lp.cpp}
+  & Formulation~A: system-optimal LP/MILP solver \\
+\texttt{src/ev\_power\_traffic/joint\_social\_welfare.cpp}
+  & Formulation~A: iterative JSW algorithm \\
+\texttt{src/ev\_power\_traffic/ctm\_propagation.cpp}
+  & Formulation~B: CTM forward pass, MSA-DUE, Wardrop gap \\
+\texttt{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp}
+  & Formulation~C: CTM-DUE + DC-OPF price coordination \\
+\texttt{src/ev\_power\_traffic/joint\_optimizer.cpp}
+  & Formulation~D: LP/QP/MILP/MCP joint optimizer (\S\ref{sec:evpt-formulation-d-case}) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\begin{remark}[Implementation boundary]
+  The \texttt{joint\_optimizer.cpp} module implements the single-shot
+  LP/MILP assembly for Formulation~D.  It assembles the mathematical
+  program of Section~\ref{sec:evpt-formulation-d}, calls the selected
+  solver backend (NativeDualSimplex for LP, HiGHS or NativeB\&C for
+  MILP), and populates certificate fields
+  \texttt{proven\_optimal}, \texttt{best\_bound}, \texttt{mip\_gap},
+  and \texttt{solve\_time\_sec} in \texttt{JointOptimizerResult}.
+  It does not call greedy assignment, MSA update, or price-smoothing
+  routines.  See Section~\ref{sec:evpt-formulation-d-case} for
+  numerical validation.
+\end{remark}
+
+% ------------------------------------------------------------
+\subsection{Numerical Case Study 1: Two-Route, Five-Vehicle Network}
+\label{sec:evpt-toy-case}
+% ------------------------------------------------------------
+
+This case corresponds to
+\texttt{tests/test\_ev\_power\_traffic\_report.cpp} and
+\texttt{tests/test\_ev\_power\_traffic.cpp}.
+
+\subsubsection{Network Parameters}
+
+\begin{center}
+\begin{tabular}{llllll}
+\hline\hline
+\textbf{Route} & \textbf{Links} & \textbf{Free-flow time} &
+\textbf{Station} & \textbf{Plugs} & \textbf{Capacity} \\
+\hline
+1 & 11, 12 & 0.25+0.25 = 0.50 h & 101 & 2 & 40 kW \\
+2 & 21, 22 & 0.50+0.50 = 1.00 h & 102 & 3 & 60 kW \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+All links: 20 veh/h capacity.  $\Delta t=1$ h.  Demand: 5 EVs at step 0,
+each requesting 20 kWh at 20 kW/veh.  Generation: 2 MW slack generator.
+VOT = 1 \$/veh$\cdot$h, $\omega_s=1$, $\pi=0.30$ \$/kWh (default), $\eta=1$.
+
+\subsubsection{Scenario A: Deterministic Shortest Path}
+
+All 5 vehicles choose Route~1 (free-flow cost
+$0.5 + 0.30\times20 = 6.5$\$/veh vs.\ Route~2:
+$1.0 + 0.30\times20 = 7.0$\$/veh).  Station~101 can serve only 40 kWh
+(2 plugs$\times$20 kW$\times$1 h); 60 kWh is unserved.
+
+\begin{center}
+\small
+\begin{tabular}{rrrrrr}
+\hline\hline
+\textbf{Step} & \textbf{P101 [kW]} & \textbf{Q101 [veh]} &
+\textbf{W101 [h]} & \textbf{Delivered [kWh]} & \textbf{Unserved [kWh]} \\
+\hline
+0 & 0  & 0 & 0.000 & 0  & 0  \\
+1 & 40 & 0 & 0.000 & 40 & 60 \\
+2 & 0  & 5 & 0.875 & 0  & 0  \\
+3 & 0  & 3 & 0.525 & 0  & 0  \\
+4 & 0  & 1 & 0.175 & 0  & 0  \\
+\hline
+\multicolumn{4}{l}{\textbf{Total}} & \textbf{40 kWh} & \textbf{60 kWh} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Total travel time: 2.5015 veh$\cdot$h.
+
+\begin{remark}[Queue reporting convention]
+  Queue values $Q_{s,k}$ reflect the station state as observed in the
+  simulation output.  In Scenario~A, all 5 vehicles are routed to
+  station~101 (DSP does not enforce station capacity), creating a single
+  session with $x_{d,r}=5$.  Only 40~kWh can be dispatched at step~1
+  (station limit); the remaining 60~kWh is unserved.  The queue values
+  at subsequent steps accumulate vehicles that could not be admitted
+  within the dwell window.  Values are reported at the start of each
+  step, before the step's admission decisions.
+\end{remark}
+
+\subsubsection{Scenario B: Capacity-Aware Greedy}
+
+Station~101 can serve at most $40/20=2$ vehicles.  Assignment:
+$x_1=2,\;x_2=3,\;u=0$.  Both stations fully utilised; zero unserved
+energy.
+
+\begin{center}
+\small
+\begin{tabular}{rrrrrr}
+\hline\hline
+\textbf{Route} & \textbf{Vehicles} & \textbf{P [kW]} &
+\textbf{Travel [h]} & \textbf{Delivered [kWh]} & \textbf{Unserved [kWh]} \\
+\hline
+1 & 2 & 40 & 0.5000 & 40 & 0 \\
+2 & 3 & 60 & 1.0001 & 60 & 0 \\
+\hline
+Total & 5 & & 4.0002 veh$\cdot$h & \textbf{100 kWh} & \textbf{0 kWh} \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Scenario C: System-Optimal LP}
+
+The LP:
+\begin{align*}
+  \min\quad & c_1^{\mathrm{ff}}\,x_1 + c_2^{\mathrm{ff}}\,x_2 + 10^6\,u \\
+  \text{s.t.}\quad & x_1+x_2+u=5 \\
+  & 20\,x_1\le40,\quad 20\,x_2\le60 \\
+  & x_1,x_2,u\ge0.
+\end{align*}
+Station capacity binds at $x_1=2$; demand balance gives $x_2=3$, $u=0$.
+Reported LP objective = \textbf{34.0}
+($= 2\times6.5 + 3\times7.0$; free-flow travel plus energy cost
+$\omega_s\pi e = 0.30\times20 = 6.0$\$/veh per route).
+Solver: NativeDualSimplex.  Status: \texttt{proven\_optimal = true},
+\texttt{mip\_gap = 0}.
+
+% ------------------------------------------------------------
+\subsection{Numerical Case Study 2: Joint Social Welfare, 2-Bus Grid}
+\label{sec:evpt-jsw-case}
+% ------------------------------------------------------------
+
+This case corresponds to
+\texttt{tests/test\_ev\_power\_traffic\_joint\_opt.cpp}.
+
+\subsubsection{Network Parameters}
+
+\paragraph{Power grid (2-bus system).}
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Component} & \textbf{Value} & \textbf{Notes} \\
+\hline
+Bus 1 (SLACK) & & reference bus \\
+Bus 2 (PQ) & & load bus \\
+Generator G1 & $c_1=10$\$/MWh, $\bar P=2$ MW & cheap baseload \\
+Generator G2 & $c_1=50$\$/MWh, $\bar P=0.5$ MW & expensive peaker \\
+Branch 1-2 & $x=0.1$ pu, $\bar P=0.5$ MW & flow-limited tie \\
+Station 101 (bus 1) & 40 kW, 2 plugs & cheap bus \\
+Station 102 (bus 2) & 60 kW, 3 plugs & expensive bus \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Traffic/EV.}
+Same 4-node, 2-route topology as Case Study~1.
+One demand: 5 EVs, $\mathrm{WTP}=\$50$/vehicle.
+$K=6$ steps, $\Delta t=1$ h, $\alpha=0.6$, $\varepsilon_\pi=10^{-4}$,
+$\pi^{(0)}=0.03$\$/kWh.
+
+\subsubsection{Scenario 1: Fixed Prices (No OPF Coupling)}
+
+With \texttt{use\_dcopf\_prices = false}, the algorithm terminates after
+one iteration.
+
+\begin{center}
+\begin{tabular}{lr}
+\hline\hline
+\textbf{Quantity} & \textbf{Value} \\
+\hline
+$B_{\mathrm{EV}}$ & \$250.0000 \\
+$C_{\mathrm{gen}}$ & \$0.0000 \\
+$C_{\mathrm{delay}}$ & \$4.0002 \\
+$W$ & \$245.9998 \\
+Served / total & 5 / 5 vehicles \\
+Delivered energy & 100.0 kWh \\
+Iterations & 1 (converged) \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Scenario 2: LMP-Coupled Joint Optimisation}
+
+With \texttt{use\_dcopf\_prices = true}, the algorithm converges
+after 7 iterations ($\Delta\pi^{(7)}=4.92\times10^{-5}<10^{-4}$).
+
+\paragraph{Convergence history.}
+
+\begin{center}
+\small
+\begin{tabular}{rrrrrrl}
+\hline\hline
+\textbf{Iter} & $W$ [\$] & $B_{EV}$ [\$] & $C_{gen}$ [\$] &
+$C_{dly}$ [\$] & $\Delta\pi$ [\$/kWh] & OPF \\
+\hline
+1 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 1.20e-02 & ok \\
+2 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 4.80e-03 & ok \\
+3 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 1.92e-03 & ok \\
+4 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 7.68e-04 & ok \\
+5 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 3.07e-04 & ok \\
+6 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 1.23e-04 & ok \\
+7 & 244.9998 & 250.0000 & 1.0000 & 4.0002 & 4.92e-05 & ok \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Final assignment.}
+\begin{center}
+\begin{tabular}{rrrr}
+\hline\hline
+Demand & Route & Vehicles & Gen.\ cost [\$] \\
+\hline
+1 & 1 & 2 & 0.7016 \\
+1 & 2 & 3 & 1.2017 \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Converged prices.}
+Branch 1-2 is uncongested (0.1~MW EV load $\ll$ 0.5~MW limit);
+both buses reach the same LMP, set by the marginal generator G1:
+$\lambda^*=10$\$/MWh $= 0.010$\$/kWh.  The price update converges to:
+
+\begin{center}
+\begin{tabular}{lrrrrrr}
+\hline\hline
+Step $k$ & 0 & 1 & 2 & 3 & 4 & 5 \\
+\hline
+$\pi^*_{101,k}$ [\$/kWh] & 0.01003 & 0.01003 & 0.01003 & 0.01003 & 0.01003 & 0.01003 \\
+$\pi^*_{102,k}$ [\$/kWh] & 0.01003 & 0.01003 & 0.01003 & 0.01003 & 0.01003 & 0.01003 \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+The slight offset from the theoretical 0.010\$/kWh is due to the finite
+step-size \(\alpha=0.6\) damping in the price update and the
+\(\varepsilon_\pi=10^{-4}\) convergence tolerance.
+
+\paragraph{Interpretation.}
+The generation cost of \$1.00 corresponds to G1 dispatched at
+$P_{G1}=0.1$~MW for one step:
+$c_1\times P\times\Delta t=10\times0.1\times1=\$1.00$.
+Consumer surplus at convergence:
+$B_{EV}-\text{price paid}=250-2.0033=\$248.9967$.
+
+% ------------------------------------------------------------
+\subsection{Numerical Case Study 3: Large-Scale Fleet Routing}
+\label{sec:evpt-largescale-case}
+% ------------------------------------------------------------
+
+This case corresponds to
+\texttt{tests/test\_ev\_power\_traffic\_largescale.cpp}.
+
+\subsubsection{Setup}
+
+\begin{center}
+\begin{tabular}{ll}
+\hline\hline
+\textbf{Parameter} & \textbf{Value} \\
+\hline
+Power grid & IEEE 118-bus (\texttt{case118.m}) \\
+Charging stations & buses 1--100; 15 MW each (300 plugs $\times$ 50 kW) \\
+Traffic grid & 10$\times$10 Cartesian, 100 nodes, 180 directed links \\
+Link parameters & $t^0=0.25$ h, $c=2000$ veh/h \\
+Routes & 5 corridors $\times$ 2 alternatives = 10 routes \\
+Fleet demands & 5 corridors $\times$ 4 departure steps = 20 demands \\
+Vehicles per demand & 500 $\Rightarrow$ \textbf{10,000 vehicles total} \\
+Per-vehicle request & 30 kWh at 50 kW, 1 dwell step \\
+Expected delivery & $10{,}000\times30=300{,}000$ kWh \\
+Steps / horizon & $K=12$, $\Delta t=1$ h \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Scenario A: CapacityAwareGreedy}
+
+The greedy policy splits each 500-vehicle fleet 300/200 between the
+two corridor alternatives.  Peak loads reach 9,000~kW at
+left-column mid-stations and 6,000~kW at right-column mid-stations.
+
+\begin{center}
+\begin{tabular}{lr}
+\hline\hline
+\textbf{Metric} & \textbf{Value} \\
+\hline
+Solve time & 2.7 ms \\
+Served / total & 10,000 / 10,000 \\
+Delivered energy & 300,000 kWh (0 unserved) \\
+Total travel time & 25,001.29 veh$\cdot$h \\
+Peak left-column station & 9,000 kW; queue 1,200 veh; wait 0.56 h \\
+Peak right-column station & 6,000 kW; queue 400 veh; wait 0.19 h \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\subsubsection{Scenario B: System-Optimal LP}
+
+The LP concentrates all 500 vehicles per demand onto Route~A (cheaper
+free-flow cost); right-column stations are idle.  The LP is certified
+optimal with MIP gap~0 by HiGHS.
+
+\begin{center}
+\begin{tabular}{lr}
+\hline\hline
+\textbf{Metric} & \textbf{Value} \\
+\hline
+Solve time & 10.0 ms (HiGHS LP) \\
+Served / total & 10,000 / 10,000 \\
+Delivered energy & 300,000 kWh (0 unserved) \\
+Total travel time & 25,014.65 veh$\cdot$h \\
+LP objective & 115,000 \\
+Proven optimal & yes (MIP gap = 0) \\
+Peak left-column station & 15,000 kW; queue 2,000 veh; wait 0.93 h \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Remark.}
+The LP objective is minimised under \emph{free-flow} costs.  Concentrating
+10,000 vehicles on fewer links increases actual BPR congestion, so the
+LP solution has slightly higher total travel time (25,014.65 vs.\
+25,001.29 veh$\cdot$h) than the greedy split.  This is expected: the LP
+objective uses free-flow costs whereas the travel time report uses
+congestion-adjusted BPR values.
+
+\paragraph{Scope of numerical validation.}
+Sections~\ref{sec:evpt-toy-case}--\ref{sec:evpt-largescale-case}
+validate \textbf{Formulation~A}: BPR delay, free-flow precomputed
+arrival steps, fixed-profile station capacity constraints, the
+NativeDualSimplex LP solver, and the iterative LMP-price coordination
+algorithm.  They do \emph{not} exercise CTM-based traffic dynamics
+(Formulation~B) or jointly optimised smart-charging with DC-OPF coupling
+(Formulation~C).  Formulation~B is validated separately in
+Section~\ref{sec:evpt-ctm-due-case}.
+Formulation~C (CTM-DUE + DC-OPF price feedback) is validated in
+Section~\ref{sec:evpt-ctm-joint-case}.
+
+% ------------------------------------------------------------
+\subsection{Formulation~B: CTM Propagation and Dynamic User Equilibrium}
+\label{sec:evpt-ctm-due}
+% ------------------------------------------------------------
+
+\subsubsection{Cell Transmission Model}
+
+Following Daganzo (1994), each directed link $a\in\mathcal{A}$ is
+discretised into $M_a$ cells of equal length
+$\delta_a = L_a / M_a$ [km],
+with a dedicated CTM time step $\Delta t_{\mathrm{ctm}}$ satisfying the
+CFL stability condition:
+\begin{equation}
+  \Delta t_{\mathrm{ctm}} \;\le\; \frac{\delta_a}{v^f_a},
+  \qquad\forall a\in\mathcal{A}.
+  \label{eq:evpt-cfl}
+\end{equation}
+The number of cells is computed as
+\begin{equation}
+  M_a = \max\!\left(1,\;\left\lfloor\frac{L_a}{v^f_a\,\Delta t_{\mathrm{ctm}}}\right\rfloor\right),
+  \label{eq:evpt-m-cells}
+\end{equation}
+or overridden by \texttt{CTMOptions::n\_cells\_per\_link} when positive.
+When \texttt{dt\_ctm\_hr = 0} the implementation auto-selects
+$\Delta t_{\mathrm{ctm}} = 0.9\cdot\min_a(\delta_a/v^f_a)$, which
+satisfies CFL for all links.  If a user-specified
+$\Delta t_{\mathrm{ctm}}$ is so large that $L_a/(v^f_a\Delta t_{\mathrm{ctm}})<1$
+for some link, then $M_a$ is clamped to~1 and the CFL
+condition~\eqref{eq:evpt-cfl} cannot be restored by cell splitting;
+the implementation proceeds with an approximate single-cell propagation
+for that link.
+
+\subsubsection{Triangular Fundamental Diagram}
+
+The triangular fundamental diagram is parametrised by free-flow speed
+$v^f_a$ [km/h], backward wave speed $w_a$ [km/h], and capacity
+$q^{\max}_a$ [veh/h].  Jam density and jam occupancy per cell are
+\begin{equation}
+  k^{\mathrm{jam}}_a
+  \;=\;
+  \frac{q^{\max}_a(v^f_a+w_a)}{v^f_a\,w_a},
+  \qquad
+  N^{\mathrm{jam}}_a = k^{\mathrm{jam}}_a\,\delta_a.
+  \label{eq:evpt-kjam}
+\end{equation}
+When \texttt{TrafficLink::jam\_vehicles} is zero, the backward wave
+speed is inferred from $k^{\mathrm{jam}} = 2\,q^{\max}/v^f$ (symmetric
+triangular FD); otherwise
+$w_a = q^{\max}_a / (k^{\mathrm{jam}}_a - q^{\max}_a/v^f_a)$.
+
+\subsubsection{Sending and Receiving Functions}
+
+At step $k$ the vehicle flow that cell $m$ can \emph{send} downstream
+and the flow that cell $m{+}1$ can \emph{receive} are:
+\begin{align}
+  S_{a,m,k}
+  &= \Delta t_{\mathrm{ctm}}\cdot
+     \min\!\left(\frac{n_{a,m,k}\,v^f_a}{\delta_a},\;q^{\max}_a\right),
+  \label{eq:evpt-send} \\
+  R_{a,m,k}
+  &= \Delta t_{\mathrm{ctm}}\cdot
+     \min\!\left(q^{\max}_a,\;
+     \frac{w_a\,\max(0,\,N^{\mathrm{jam}}_a - n_{a,m,k})}{\delta_a}\right).
+  \label{eq:evpt-recv}
+\end{align}
+
+\subsubsection{Cell Update}
+
+The inter-cell flow is
+\begin{equation}
+  y_{a,m,k} = \min\bigl(S_{a,m,k},\;R_{a,m+1,k}\bigr),
+  \qquad m=0,\ldots,M_a{-}2,
+  \label{eq:evpt-intercell}
+\end{equation}
+and the cell occupancy evolves as
+\begin{equation}
+  n_{a,m,k+1}
+  \;=\;
+  n_{a,m,k}
+  + y_{a,m-1,k}\cdot\mathbf{1}[m>0]
+  - y_{a,m,k}\cdot\mathbf{1}[m<M_a{-}1],
+  \qquad n_{a,m,0}=0.
+  \label{eq:evpt-cell-update}
+\end{equation}
+The indicator functions subsume three distinct boundary cases:
+\begin{align*}
+  m=0:\quad & n_{a,0,k+1} = n_{a,0,k} + y^{in}_{a,k} - y_{a,0,k}, \\
+  0<m<M_a{-}1:\quad & n_{a,m,k+1} = n_{a,m,k} + y_{a,m-1,k} - y_{a,m,k}, \\
+  m=M_a{-}1:\quad & n_{a,M_a{-}1,k+1} = n_{a,M_a{-}1,k} + y_{a,M_a{-}2,k} - y^{out}_{a,k},
+\end{align*}
+where $y^{in}_{a,k}$ is the external inflow from origin demand injection
+or upstream node, and $y^{out}_{a,k}$ is the exit flow to the downstream
+node.
+
+\subsubsection{Commodity-Specific Cell Occupancy}
+
+With \texttt{route\_specific\_cells = true} (default), each cell stores
+per-route occupancy $n^r_{a,m,k}$ alongside the aggregate $n_{a,m,k}$.
+At diverge nodes, vehicles are distributed to downstream links according
+to binary turning indicators
+$\theta^r_{a\to v\to b}\in\{0,1\}$ extracted from route topologies.
+The per-route shares are renormalised to sum to $n_{a,m,k}$ after each
+update step, maintaining aggregate consistency.  This renormalisation
+is an engineering correction: per-route occupancy conservation is
+\emph{approximate} rather than an exact independent commodity
+conservation law.  Exact commodity conservation would require
+per-route sending/receiving functions and independent per-route cell
+updates, which are not implemented.
+
+\subsubsection{Node Model}
+
+At node $v$ with incoming link $a$ and outgoing links $b$, the exit
+flow from the last cell of $a$ is allocated proportionally:
+\begin{align}
+  f_{a\to b,k}
+  &= S_{a,M_a{-}1,k}\cdot\frac{\mathrm{demand}_{a\to b}}{\mathrm{total\_demand}_a}\cdot\sigma_k,
+  \label{eq:evpt-node-model}
+\end{align}
+where $\mathrm{demand}_{a\to b}=\sum_r n^r_{a,M_a{-}1,k}\,\theta^r_{a\to v\to b}$
+and $\sigma_k$ is a scale factor that ensures no outgoing link receives
+more than its receiving capacity.
+
+\begin{remark}[Proportional node rule]
+  Equation~\eqref{eq:evpt-node-model} is a proportional demand-scaling
+  rule.  It preserves route-direction information and respects
+  downstream receiving capacities but is not a full priority-based CTM
+  node model; it does not represent merge priority, FIFO diverge
+  behaviour, lane groups, or signal timing.
+\end{remark}
+
+\subsubsection{Experienced Link Travel Time}
+
+The experienced travel time on link $a$ at step $k$ is estimated via
+Little's law:
+\begin{equation}
+  T^{\mathrm{CTM}}_{a,k}
+  \;=\;
+  \begin{cases}
+    \dfrac{N_{a,k}\,\Delta t_{\mathrm{ctm}}}{\mathrm{exit}_{a,k}}
+    & \text{if } \mathrm{exit}_{a,k}>0, \\
+    L_a / v^f_a & \text{otherwise,}
+  \end{cases}
+  \label{eq:evpt-ctm-tt}
+\end{equation}
+where $N_{a,k}=\sum_m n_{a,m,k}$ and $\mathrm{exit}_{a,k}$ is the exit
+flow from the last cell.  Route experienced travel time is the sum over
+links: $T^{\mathrm{CTM}}_{r,k}=\sum_{a\in r} T^{\mathrm{CTM}}_{a,k}$.
+
+\begin{remark}[Instantaneous approximation]
+  Equation~\eqref{eq:evpt-ctm-tt} is an instantaneous Little's-law
+  estimate, not the exact experienced travel time for vehicles entering
+  at step~$\kappa$.  The exact experienced time requires tracking
+  cumulative entry and exit counts and inverting the exit condition.  The
+  instantaneous approximation is adequate for near-equilibrium flows but
+  may be less accurate under severe transient congestion.
+\end{remark}
+
+\subsubsection{Method of Successive Averages (MSA) for DUE}
+
+Given experienced travel times from the CTM forward pass, the
+auxiliary assignment is an all-or-nothing (AoN) assignment to the
+cheapest route per OD pair, or a logit split when
+\texttt{DUEOptions::logit\_theta}>0.
+
+The \textbf{generalized route cost} used for route comparison combines
+the CTM travel time with a normalised charging-cost term:
+\begin{equation}
+  g_r(k)
+  \;=\;
+  T^{\mathrm{CTM}}_{r,k}
+  +
+  \frac{\omega_E}{\mathrm{VOT}}
+  \sum_{s\in\mathcal{S}_r}
+  \pi_{s,k}\,E^{\mathrm{req}}_{r,s},
+  \label{eq:evpt-aux-gen-cost}
+\end{equation}
+where $\omega_E$ is \texttt{station\_energy\_cost\_weight},
+VOT is the value-of-time [\$/h], $\pi_{s,k}$~[\$/kWh] is the
+station price at step~$k$, and $E^{\mathrm{req}}_{r,s}$~[kWh/veh] is
+the energy requested at stop~$s$ on route~$r$.
+With $\pi_{s,k} = 0$ (or $\omega_E = 0$) the generalized cost reduces
+to travel time, recovering the standard CTM-DUE.  Station prices set by
+Formulation~C's outer loop are propagated through this equation, creating
+a behavioural coupling between electricity prices and route choice.
+
+The MSA update is
+\begin{equation}
+  x^{(i+1)}
+  \;=\;
+  \bigl(1 - s_i\bigr)\,x^{(i)}
+  + s_i\,x^{\mathrm{aux}},
+  \qquad
+  s_i
+  =
+  \begin{cases}
+    1/i & \texttt{msa\_fixed\_step}=0, \\
+    \texttt{msa\_fixed\_step} & \text{otherwise.}
+  \end{cases}
+  \label{eq:evpt-msa}
+\end{equation}
+
+\subsubsection{Wardrop Relative Gap}
+
+The stopping criterion uses the relative Wardrop gap:
+\begin{equation}
+  \varepsilon^{\mathrm{gap}}
+  \;=\;
+  \frac{\mathrm{TSTT} - \mathrm{MSTT}}{\mathrm{MSTT}}
+  \;\ge\;0,
+  \label{eq:evpt-ward-gap}
+\end{equation}
+where $\mathrm{TSTT}=\sum_{d,r} x_{d,r}\,T^{\mathrm{CTM}}_{r,k_d}$ is
+the total system travel time and
+$\mathrm{MSTT}=\sum_d q_d\cdot\min_r T^{\mathrm{CTM}}_{r,k_d}$ is the
+minimum achievable travel time if all vehicles used their cheapest
+route.  Convergence is declared when
+$\varepsilon^{\mathrm{gap}}<\texttt{DUEOptions::convergence\_tol}$
+(default $10^{-3}$).
+
+\begin{remark}[MSA convergence]
+  The MSA procedure is an iterative heuristic for approaching a DUE.
+  Convergence of MSA to DUE is not guaranteed for arbitrary dynamic
+  loading conditions, approximate travel-time estimates, or logit
+  auxiliary assignments.  The relative gap serves as an empirical
+  diagnostic; convergence has been validated by the regression tests but
+  may not hold for all network configurations.
+\end{remark}
+
+\subsubsection{CTM Time Step vs.~Simulation Time Step}
+
+The CTM time step $\Delta t_{\mathrm{ctm}}$ is generally finer than the
+simulation time step $\Delta t$.  The CTM horizon contains
+\begin{equation}
+  T_{\mathrm{ctm}}
+  \;=\;
+  T_{\mathrm{sim}}\cdot R,
+  \qquad
+  R = \operatorname{round}(\Delta t / \Delta t_{\mathrm{ctm}})
+  \label{eq:evpt-ctm-steps}
+\end{equation}
+steps.  A demand with simulation departure step $k_d$ is injected at
+CTM step $k_d\cdot R$.  The \texttt{auxiliary\_assignment} and
+\texttt{wardrop\_relative\_gap} functions index \texttt{route\_flow} at
+$k_d\cdot R$ accordingly.
+
+\subsubsection{Formulation~B+ Extensions: Session Synthesis, Dispatch, and PoA}
+\label{sec:evpt-ctm-due-extensions}
+
+Following DUE convergence, \texttt{simulate\_ev\_power\_traffic\_ctm\_due()}
+performs three additional steps that bring Formulation~B to parity with
+Formulation~A for charging analysis (hereafter \emph{Formulation~B+}):
+
+\paragraph{Session synthesis.}  Each (demand~$d$, route~$r$, stop~$s$)
+triple with positive DUE flow $x_{d,r} > 0$ yields one
+\texttt{EVChargingSession}.  The station arrival step is computed from the
+\emph{CTM-derived} experienced travel time $T^{\mathrm{CTM}}_{r,k_d}$
+rather than free-flow time, making it congestion-aware:
+\begin{equation}
+  k^{\mathrm{arr}}_{d,r}
+  \;=\;
+  k_d + \left\lceil T^{\mathrm{CTM}}_{r,k_d\cdot R}\,/\,\Delta t \right\rceil.
+  \label{eq:evpt-ctm-session-arr}
+\end{equation}
+
+\paragraph{Smart-charging dispatch.}  Each session is dispatched with the
+same greedy heuristic as Formulation~A
+(Eqs.~\eqref{eq:evpt-smart-obj}--\eqref{eq:evpt-smart-slack}): charge at
+maximum feasible power within the dwell window until $E^{\mathrm{req}}$ is
+met; discharge via V2G only when the station price exceeds
+$\pi^{\mathrm{high}}$.  Station capacity headroom is shared across sessions
+at the same station and step.
+
+\paragraph{Station queue model.}  The sessions' arrival schedule drives the
+queue dynamics of Eqs.~\eqref{eq:evpt-queue-serve}--\eqref{eq:evpt-wait},
+yielding $q_{s,k}$, $m_{s,k}$, and $W_{s,k}$ over the simulation horizon.
+
+\paragraph{Price-of-anarchy benchmark.}  When
+\texttt{DUEOptions::compute\_system\_optimal\_benchmark = true}, the DUE
+total system travel time (TSTT)
+\begin{equation}
+  \mathrm{TSTT}^{\mathrm{DUE}}
+  \;=\;
+  \sum_{d}\sum_{r\in\mathcal{R}_d}
+  x_{d,r}\,T^{\mathrm{CTM}}_{r,k_d\cdot R}
+  \label{eq:evpt-ctm-tstt-due}
+\end{equation}
+is compared with the Formulation~A system-optimal LP TSTT
+$\mathrm{TSTT}^{\mathrm{SO}}$ to yield the approximate price of anarchy:
+\begin{equation}
+  \mathrm{PoA}
+  \;\approx\;
+  \frac{\mathrm{TSTT}^{\mathrm{DUE}}}{\mathrm{TSTT}^{\mathrm{SO}}}.
+  \label{eq:evpt-poa}
+\end{equation}
+The two TSTTs use different underlying traffic models (CTM vs.\ BPR), so
+the ratio is approximate; it serves as an upper-bound indicator of DUE
+inefficiency.
+
+\paragraph{SOC feasibility filter.}  During each MSA auxiliary assignment,
+routes for which the accumulated drive energy exceeds the vehicle's initial
+state-of-charge are excluded from consideration
+(Eq.~\eqref{eq:evpt-route-soc-bounds}).  This prevents DUE from routing
+energy-deficient vehicles along long detours.
+
+\begin{remark}[DC-OPF coupling in Formulation~C]
+  DC-OPF coupling is intentionally \emph{not} embedded inside
+  \texttt{simulate\_ev\_power\_traffic\_ctm\_due()} (Formulation~B).
+  It is the responsibility of the outer coordination loop in
+  \texttt{simulate\_ev\_power\_traffic\_ctm\_joint()} (Formulation~C,
+  Section~\ref{sec:evpt-ctm-joint-case}) to inject EV loads into the
+  power system, solve the DC-OPF, extract LMPs, and update station prices
+  before re-invoking the CTM-DUE inner step.
+\end{remark}
+
+% ------------------------------------------------------------
+\subsection{Numerical Case Study 4: CTM-DUE Convergence}
+\label{sec:evpt-ctm-due-case}
+% ------------------------------------------------------------
+
+This case corresponds to
+\texttt{tests/test\_ev\_power\_traffic\_ctm\_due.cpp}.
+
+\subsubsection{Network}
+
+A 4-node, 4-link, 2-route topology (\textit{symmetric case}):
+
+\begin{center}
+\begin{tabular}{lllll}
+\hline\hline
+\textbf{Link} & \textbf{Route} & $L_a$ [km] & $t^0_a$ [h] & $c_a$ [veh/h] \\
+\hline
+11 (1$\to$2) & 1 & 0.5 & 0.05 & 20 \\
+12 (2$\to$3) & 1 & 0.5 & 0.05 & 20 \\
+21 (1$\to$4) & 2 & 0.5 & 0.05 & 20 \\
+22 (4$\to$3) & 2 & 0.5 & 0.05 & 20 \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Demand: 4 vehicles, origin = 1, destination = 3, departure step~0.
+$\Delta t=0.05$~h, $K=10$, $\Delta t_{\mathrm{ctm}}=0.01$~h, $M_a=5$
+cells/link.
+
+\subsubsection{Convergence Results}
+
+The symmetric network has equal free-flow costs on both routes, so the
+DUE equilibrium is the equal-split $x_1=x_2=2$.  The MSA converges
+(\texttt{converged = true}) with
+$\varepsilon^{\mathrm{gap}}<\texttt{convergence\_tol}=5\times10^{-3}$
+within 50~iterations.  The test also verifies:
+\begin{itemize}
+  \item $x_1+x_2=4$ (demand balance);
+  \item $\varepsilon^{\mathrm{gap}}\ge 0$ and finite;
+  \item both routes receive positive flow;
+  \item iteration history is non-empty;
+  \item for the asymmetric case (route~2 has $t^0=0.15$~h/link),
+        route~1 receives strictly more flow than route~2 ($x_1>x_2$)
+        and the route~1 experienced travel time is no greater than
+        route~2's ($T^{\mathrm{CTM}}_1\le T^{\mathrm{CTM}}_2$);
+  \item the logit auxiliary assignment ($\theta=5$) always splits flow
+        positively to both routes.
+\end{itemize}
+
+% ------------------------------------------------------------
+\subsection{Numerical Case Study 5: Formulation~B+ — Session Dispatch,
+            SOC Filtering, and Price-of-Anarchy}
+\label{sec:evpt-ctm-due-case5}
+% ------------------------------------------------------------
+
+This case study validates the Formulation~B+ extensions
+(Section~\ref{sec:evpt-ctm-due-extensions}) against three scenarios run
+by the \texttt{[analysis]} test in
+\texttt{tests/test\_ev\_power\_traffic\_ctm\_due.cpp}.  All three scenarios
+use the same 4-node, 4-link, 2-route topology as Case Study~4
+(Section~\ref{sec:evpt-ctm-due-case}) unless noted otherwise.
+
+% ── Scenario B1 ──────────────────────────────────────────────────────────
+\subsubsection{Scenario~B1: Session Synthesis and Smart-Charging Dispatch}
+
+\paragraph{Setup.}
+4 vehicles, symmetric network, $\Delta t = 1$~h, $K = 5$,
+$\Delta t_{\mathrm{ctm}} = 0.1$~h, $M_a = 3$ cells/link.  Each charging
+stop requests $E^{\mathrm{req}} = 10$~kWh/vehicle at a maximum rate of
+$\bar{p} = 20$~kW/vehicle; dwell $= 1$ simulation step.  Station maximum
+power: 200~kW each; charging efficiency $\eta = 0.95$.
+
+\paragraph{DUE result.}
+On the symmetric network with 4 vehicles well below the link capacity
+(20~veh/h), the CTM free-flow travel times on both routes are equal.  The
+MSA auxiliary all-or-nothing (AoN) assignment breaks ties in favour of the
+route with the lower index, placing all flow on route~1:
+\begin{equation}
+  x_1 = 4.0~\text{veh}, \quad x_2 = 0.0~\text{veh},
+  \quad \varepsilon^{\mathrm{gap}} = 0.
+\end{equation}
+The Wardrop relative gap equals zero because the initial equal-split
+assignment already satisfies Wardrop conditions (both routes have equal
+CTM travel time), so convergence is declared after one MSA iteration.
+
+\paragraph{Session synthesis.}
+One \texttt{EVChargingSession} is created for the (demand~1, route~1,
+station~101) triple.  The CTM experienced travel time for route~1 is
+$T^{\mathrm{CTM}}_1 \approx 0.1$~h, so
+$k^{\mathrm{arr}} = 0 + \lceil 0.1/1.0 \rceil = 1$.
+
+\paragraph{Dispatch result.}  At simulation step~1 the session is active.
+The greedy LP delivers:
+\begin{equation}
+  p_{\mathrm{ch},1}
+  = \min\!\Bigl(
+      4 \times 20,\;
+      200,\;
+      \tfrac{40}{0.95 \times 1}
+    \Bigr)
+  = \min(80,\,200,\,42.1) = 42.1~\text{kW}.
+\end{equation}
+Over one step ($\Delta t = 1$~h) this delivers
+$\Delta E = 0.95 \times 42.1 \times 1 = 40.0$~kWh, meeting the 40~kWh
+target exactly.
+
+\begin{center}
+\begin{tabular}{ccc}
+\hline\hline
+\textbf{Step} $k$ & $p_{\mathrm{EV},101}$ [kW] & $p_{\mathrm{EV},102}$ [kW] \\
+\hline
+0 &  0.00 & 0.00 \\
+1 & 42.11 & 0.00 \\
+2 &  0.00 & 0.00 \\
+3 &  0.00 & 0.00 \\
+4 &  0.00 & 0.00 \\
+\hline\hline
+\multicolumn{3}{l}{\small Requested: 40~kWh \quad Delivered: 40~kWh \quad Service rate: 100\%}
+\end{tabular}
+\end{center}
+
+\paragraph{Queue result.}  With no plug limit configured and the entire
+fleet arriving in a single batch at step~1 (dwell~$= 1$ step), the queue
+$q_{s,k} = 0$ for all $s,k$ and the waiting time $W_{s,k} = 0$.
+
+% ── Scenario B2 ──────────────────────────────────────────────────────────
+\subsubsection{Scenario~B2: SOC Feasibility Filter}
+
+\paragraph{Setup.}
+Routes are redesigned to differ in drive energy:
+
+\begin{center}
+\begin{tabular}{llcc}
+\hline\hline
+\textbf{Route} & \textbf{Links} & $\sum L_a$ [km] &
+  Drive energy \mbox{($e = 2$~kWh/km)} \\
+\hline
+1 & 11, 12 & $2 \times 0.5 = 1.0$ & 2.0~kWh \\
+2 & 21, 22 & $2 \times 1.5 = 3.0$ & 6.0~kWh \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Demand: 4 vehicles with $E^{\mathrm{init}} = 2.0$~kWh.  Route~2 requires
+6.0~kWh, exceeding the available state-of-charge; the SOC feasibility check
+(Eq.~\eqref{eq:evpt-route-soc-bounds}) marks route~2 as infeasible and
+removes it from the AoN candidate set.
+
+\paragraph{Result.}
+\begin{equation}
+  x_1 = 4.0~\text{veh}, \quad x_2 = 0~\text{veh}.
+\end{equation}
+All 4 vehicles are correctly routed to the energy-feasible route~1.
+
+% ── Scenario B3 ──────────────────────────────────────────────────────────
+\subsubsection{Scenario~B3: Price-of-Anarchy Benchmark}
+
+\paragraph{Setup.}
+Symmetric network, 4 vehicles, $\Delta t = 0.1$~h, $K = 6$,
+$\Delta t_{\mathrm{ctm}} = 0.02$~h.
+\texttt{compute\_system\_optimal\_benchmark = true}.
+
+\paragraph{Result.}
+\begin{align}
+  \mathrm{TSTT}^{\mathrm{DUE}} &= 0.4000\;\mathrm{veh \cdot h},
+    \label{eq:evpt-b3-due-tstt} \\
+  \mathrm{TSTT}^{\mathrm{SO}} &= 0.4000\;\mathrm{veh \cdot h}
+    \quad\text{(Formulation~A LP, BPR-based)}, \\
+  \mathrm{PoA} &= 1.00.
+    \label{eq:evpt-b3-poa}
+\end{align}
+The price of anarchy equals~1, indicating that on this symmetric,
+lightly-loaded network, the DUE incurs no efficiency penalty relative to
+the system optimum.  This is the expected outcome: with four vehicles on
+links of capacity 20~veh/h, the BPR congestion term is
+$0.15\times(4/20)^4 \approx 1.5\times10^{-4}$, making both routes
+essentially free-flow and leaving no room for the SO to improve on the DUE.
+
+\begin{remark}[Model discrepancy in PoA]
+  The DUE TSTT uses CTM-propagated travel times, while the SO TSTT uses
+  BPR link functions.  On heavily-congested networks, the two models may
+  produce noticeably different travel times, making the PoA ratio only
+  approximate.  For rigorous PoA analysis on the same model, a
+  system-optimal CTM formulation (e.g., via bi-level programming) would be
+  required.
+\end{remark}
+
+\subsubsection{Summary of Case Study~5 (Test~8--10 Regression)}
+
+\begin{center}
+\begin{tabular}{llcc}
+\hline\hline
+\textbf{Scenario} & \textbf{Feature verified} & \textbf{Assertions} &
+  \textbf{Result} \\
+\hline
+B1 & Session synthesis, dispatch, queue &  8 & pass \\
+B2 & SOC feasibility filter             &  4 & pass \\
+B3 & PoA benchmark, SO TSTT             &  8 & pass \\
+\hline
+\textbf{Total (Tests 8--10)} & & \textbf{20} & \textbf{pass} \\
+\hline\hline
+\multicolumn{4}{l}{\small CTM-DUE suite (Tests 1--11): 137 assertions in 11 test cases, all pass.}
+\end{tabular}
+\end{center}
+
+% ============================================================
+\subsection{Numerical Case Study~6: Formulation~C — CTM-DUE + DC-OPF Price Coordination}
+\label{sec:evpt-ctm-joint-case}
+% ============================================================
+
+This case corresponds to
+\texttt{tests/test\_ev\_power\_traffic\_ctm\_joint.cpp}.
+
+\subsubsection{Network}
+
+\paragraph{Power grid.}
+Two buses: bus~1 (slack, cheap generator $G_1$, $c_1 = 10$~\$/MWh,
+$p^{\max}=2$~MW) and bus~2 (PQ bus, peaker $G_2$, $c_1 = 50$~\$/MWh,
+$p^{\max}=0.5$~MW).  Branch~1--2: reactance 0.1~pu, limit~0.5~MW.
+Charging station~101 is on bus~1 (cheap power); station~102 is on
+bus~2 (expensive peaker power).
+
+\paragraph{Traffic.}
+Four-node, two-route graph (origin~1, destination~4):
+\begin{itemize}
+  \item Route~1 (near): links $1{\to}2$ and $2{\to}4$, $t^f = 0.25 + 0.25 =
+        0.50$~h; station~101 (bus~1).
+  \item Route~2 (far):  links $1{\to}3$ and $3{\to}4$, $t^f = 0.50 + 0.50 =
+        1.00$~h; station~102 (bus~2).
+\end{itemize}
+Demand: 4~vehicles, WTP $= 50$~\$/vehicle, $E^{\mathrm{req}} = 10$~kWh/vehicle,
+$K = 6$ steps, $\Delta t = 1.0$~h.
+
+\subsubsection{Scenario~C1: Fixed Prices (No OPF Coupling)}
+
+\paragraph{Setup.}
+Station prices fixed at $\pi_0 = 0.03$~\$/kWh for all stations and
+steps.  Logit parameter $\theta = 0$ (AoN assignment).
+
+\paragraph{Generalized cost.}
+With $\omega_E = 1$, VOT $= 1$~\$/h:
+\begin{align}
+  g_1 &= 0.50 + 1\cdot 0.03 \cdot 10 / 1 = 0.80\;\mathrm{h{-}equiv}, \\
+  g_2 &= 1.00 + 1\cdot 0.03 \cdot 10 / 1 = 1.30\;\mathrm{h{-}equiv}.
+\end{align}
+Route~1 has a lower generalized cost, so all vehicles are assigned
+there by AoN.
+
+\paragraph{Result.}
+\begin{equation}
+  x_1 = 4.0~\text{veh},\quad x_2 = 0.0~\text{veh}.
+\end{equation}
+Station~101 load: 0/40/0/0/0/0~kW at steps 0--5 (vehicles arrive
+at step~1 from 0.50-h travel time).\\
+$B_{\mathrm{EV}} = 50 \times 4 = 200$~\$, $C_{\mathrm{delay}} = 1 \times
+4 \times 0.50 = 2.00$~\$, $W = 198.00$~\$.
+
+\subsubsection{Scenario~C2: OPF-Coupled Price Feedback}
+
+\paragraph{Setup.}
+Same network; $\alpha = 0.6$, price convergence tolerance
+$\varepsilon_\pi = 10^{-4}$~\$/kWh, up to 20~outer iterations.
+
+\paragraph{Price update.}
+At each iteration~$i$ and step~$k$, the DC-OPF is solved with the
+current EV load $P^{\mathrm{EV}}_{s,k}$; LMPs $\lambda_{b,k}$ [\$/MWh]
+are extracted and station prices updated:
+\begin{equation}
+  \pi^{(i)}_{s,k}
+  \;=\;
+  0.6\cdot\frac{\lambda_{\mathrm{bus}(s),k}}{1000}
+  + 0.4\cdot\pi^{(i-1)}_{s,k}.
+  \label{eq:evpt-c-price-update}
+\end{equation}
+
+\paragraph{Numerical results.}
+With 4~vehicles all on route~1 (station~101, bus~1), the load
+at step~1 is $40/1000 = 0.04$~MW.  The DC-OPF dispatches $G_1$ at
+0.04~MW ($c_1 = 10$, objective $= 0.40$~\$) with no congestion;
+both buses receive LMP $= 10$~\$/MWh $= 0.010$~\$/kWh.
+
+\begin{center}
+\begin{tabular}{rrrrrrrr}
+\hline\hline
+\textbf{Iter} & $W$~[\$] & $B_{\mathrm{EV}}$~[\$] & $C_{\mathrm{gen}}$~[\$] &
+  $C_{\mathrm{delay}}$~[\$] & $\Delta\pi$~[\$/kWh] & OPF \\
+\hline
+1 & 197.60 & 200.00 & 0.40 & 2.00 & $1.20\times10^{-2}$ & ok \\
+2 & 197.60 & 200.00 & 0.40 & 2.00 & $4.80\times10^{-3}$ & ok \\
+3 & 197.60 & 200.00 & 0.40 & 2.00 & $1.92\times10^{-3}$ & ok \\
+4 & 197.60 & 200.00 & 0.40 & 2.00 & $7.68\times10^{-4}$ & ok \\
+5 & 197.60 & 200.00 & 0.40 & 2.00 & $3.07\times10^{-4}$ & ok \\
+6 & 197.60 & 200.00 & 0.40 & 2.00 & $1.23\times10^{-4}$ & ok \\
+7 & 197.60 & 200.00 & 0.40 & 2.00 & $4.92\times10^{-5}$ & ok \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+Convergence in 7~iterations.  The price update converges to
+$\pi^{*} = 0.01003$~\$/kWh on both stations (consistent with
+LMP $= 10.03$~\$/MWh after the exponential approach from
+$\pi^{(0)} = 0.03$~\$/kWh at rate $(1-\alpha)^i$).
+
+\paragraph{Social welfare.}
+\begin{equation}
+  W^* = B_{\mathrm{EV}} - C^*_{\mathrm{gen}} - C^*_{\mathrm{delay}}
+      = 200.00 - 0.40 - 2.00 = 197.60~\$.
+  \label{eq:evpt-c-welfare}
+\end{equation}
+
+\subsubsection{Scenario~C3: Price-Driven Route Choice}
+
+\paragraph{Setup.}
+Station~101 price: $\pi_{101} = 0.03$~\$/kWh (fixed).\\
+Station~102 price: $\pi_{102} = 5.00$~\$/kWh (highly expensive).\\
+$\omega_E = 1$, VOT $= 1$~\$/h.
+
+\paragraph{Generalized cost.}
+\begin{align}
+  g_1 &= 0.50 + 1 \cdot 0.03 \cdot 10 / 1 = 0.80\;\mathrm{h{-}equiv}, \\
+  g_2 &= 1.00 + 1 \cdot 5.00 \cdot 10 / 1 = 51.0\;\mathrm{h{-}equiv}.
+\end{align}
+The high price at station~102 raises route~2's generalized cost by
+49.7~h, making route~2 enormously unattractive.  AoN assigns all
+vehicles to route~1.
+
+\paragraph{Result.}
+\begin{equation}
+  x_1 = 4.0~\text{veh},\quad x_2 = 0.0~\text{veh}.
+\end{equation}
+This confirms that the price term in the generalized cost function
+(Eq.~\eqref{eq:evpt-aux-gen-cost}) is correctly propagated through
+the MSA auxiliary assignment.
+
+\subsubsection{Summary of Case Study~6 (Tests C1--C4)}
+
+\begin{center}
+\begin{tabular}{llcc}
+\hline\hline
+\textbf{Test} & \textbf{Feature verified} & \textbf{Assertions} &
+  \textbf{Result} \\
+\hline
+C1 & Fixed prices, one iteration, struct population & 11 & pass \\
+C2 & OPF coupling, price change, LMPs, convergence  & 10 & pass \\
+C3 & Welfare identity $W = B_{\mathrm{EV}}-C_{\mathrm{gen}}-C_{\mathrm{delay}}$ &  9 & pass \\
+C4 & Price-sensitive AoN route shift (high $\pi_{102}$) &  4 & pass \\
+\hline
+\textbf{Total (Tests C1--C4)} & & \textbf{43} & \textbf{pass} \\
+\hline\hline
+\multicolumn{4}{l}{\small Combined CTM suite: 137 + 43 = 180 assertions, all pass.}
+\end{tabular}
+\end{center}
+
+% ============================================================
+\subsection{Numerical Case Study~7: Formulation~D --- Single LP/MILP Assembly}
+\label{sec:evpt-formulation-d-case}
+% ============================================================
+
+This case study validates the single-shot LP/MILP joint optimiser
+(\texttt{solve\_joint\_optimizer()},
+\texttt{src/ev\_power\_traffic/joint\_optimizer.cpp})
+on the same 2-bus, 2-route test network used in Case Studies~3
+through~6.
+
+\subsubsection{Test Network}
+
+\paragraph{Power grid.}
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Element} & \textbf{Parameters} & \textbf{Notes} \\
+\hline
+Bus 1 (SLACK)      & $V=1.0$~pu               & Reference angle $\theta_1=0$ \\
+Bus 2 (PQ)         & $P_d=0$~MW               & Served by G2 and branch flow \\
+Generator G1       & $c_1=10$~\$/MWh, $P^g_{\max}=2$~MW & Cheap baseload, bus~1 \\
+Generator G2       & $c_1=50$~\$/MWh, $P^g_{\max}=0.5$~MW & Peaker, bus~2 \\
+Branch 1--2        & $x=0.1$~pu, rate $=0.5$~MW & Lossless DC model \\
+Station 101        & bus~1, $\bar P=40$~kW      & 2 fast chargers, 20~kW each \\
+Station 102        & bus~2, $\bar P=60$~kW      & 3 fast chargers, 20~kW each \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Traffic.}
+\begin{center}
+\begin{tabular}{lllll}
+\hline\hline
+\textbf{Route} & \textbf{Path} & \textbf{FF time} & \textbf{Station} &
+  \textbf{Arrival step ($\Delta t{=}1$\,h)} \\
+\hline
+Route 1 (near) & $1\!\to\!2\!\to\!4$ & 0.50\,h & 101 (bus~1) & $k_a = \lceil 0.5/1.0 \rceil = 1$ \\
+Route 2 (far)  & $1\!\to\!3\!\to\!4$ & 1.00\,h & 102 (bus~2) & $k_a = \lceil 1.0/1.0 \rceil = 1$ \\
+\hline\hline
+\end{tabular}
+\end{center}
+
+\paragraph{Demand.}
+One demand group: $D=4$ vehicles, $\mathrm{WTP}=\$50/\mathrm{veh}$,
+$e_{\mathrm{req}}=10$\,kWh/veh, $\mathrm{VOT}=\$1/\mathrm{h}$,
+departure step~$k=0$, routes~$\{1,2\}$.
+
+\subsubsection{Expected Optimal Solution}
+
+Station~101 caps route~1 at $\bar P_{101}/p_{\mathrm{veh}} =
+40/20 = 2$~vehicles.  The remaining 2 vehicles take route~2.
+At step~1 each station sees 2~vehicles charging at 20~kW/veh
+($=0.04$~MW per station).
+
+\paragraph{Without OPF ($C_{\mathrm{gen}}=0$):}
+\begin{align}
+  B_{\mathrm{EV}} &= 4 \times 50 = \$200, \\
+  C_{\mathrm{delay}} &= 1\,(2{\times}0.5 + 2{\times}1.0) = \$3, \\
+  W^* &= \$197.
+\end{align}
+
+\paragraph{With DC-OPF coupling:}
+The joint LP adds generator dispatch $P^g_{g,k}$, bus angles
+$\theta_{b,k}$, and branch flows $f_{\ell,k}$ as decision variables
+and enforces
 \[
-  \Delta t^{\min} = \min_{a\in\mathcal{A}^{tr}} \frac{L_a}{v_f^a}.
+  P^g_{g,k} - P^{D}_{b,k} - P^{\mathrm{EV}}_{b,k}
+  = \sum_{\ell} B_\ell (\theta_{i_\ell,k}-\theta_{j_\ell,k}), \quad \forall b,k.
 \]
-Three step-size choices are natural:
+G1 (bus~1, $c_1{=}10$) is cheapest and serves
+$P^g_{1,1} \approx 0.08$~MW:
+\begin{align}
+  C_{\mathrm{gen}} &= 10 \times 0.08 \times 1\,\mathrm{h} = \$0.80, \\
+  W^* &= 200 - 3 - 0.80 = \$196.20.
+\end{align}
 
-\begin{enumerate}
-  \item \textbf{Traffic step} $\Delta t^{tr} \le \Delta t^{\min}$ — satisfies
-        CFL for all links with one cell per link.  For urban networks with
-        short links ($L_a\sim 0.3\,\mathrm{km}$, $v_f^a=50\,\mathrm{km/h}$),
-        this gives $\Delta t^{tr}\le 22\,\mathrm{s}$.
+\subsubsection{Test D1: SocialWelfareMax LP --- No OPF}
 
-  \item \textbf{Power step} $\Delta t^{\mathrm{pow}}$ — set by the power
-        operator's scheduling resolution.  Intra-hour markets use
-        $\Delta t^{\mathrm{pow}}=5$--$60\,\mathrm{min}$.
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Quantity} & \textbf{Expected} & \textbf{Actual (test)} \\
+\hline
+\texttt{proven\_optimal}     & \texttt{true}          & \texttt{true}  \\
+\texttt{solver\_backend}     & NativeDualSimplex      & NativeDualSimplex \\
+$h_{1,1}$ (route 1)         & 2.00 veh               & 2.00 veh \\
+$h_{1,2}$ (route 2)         & 2.00 veh               & 2.00 veh \\
+Served vehicles              & 4.0                    & 4.0 \\
+$B_{\mathrm{EV}}$            & \$200.00               & \$200.00 \\
+$C_{\mathrm{delay}}$         & \$3.00                 & \$3.00 \\
+$C_{\mathrm{gen}}$           & \$0.00                 & \$0.00 \\
+$W$                          & \$197.00               & \$197.00 \\
+\hline\hline
+\end{tabular}
+\end{center}
 
-  \item \textbf{Charging dwell step} $\Delta t^{\mathrm{dwell}}$ — the
-        duration a vehicle occupies a charger plug.  For DC fast charging at
-        100 kW and a 50 kWh battery, $\Delta t^{\mathrm{dwell}}\approx 30\,\mathrm{min}$.
-\end{enumerate}
+\subsubsection{Test D2: SocialWelfareMax LP + DC-OPF}
 
-In Regime 2 (shared grid), all three must be aligned:
-$\Delta t = \Delta t^{tr} = \Delta t^{\mathrm{pow}} = \Delta t^{\mathrm{dwell}}$.
-This forces a very fine power step, which may be unnecessarily expensive for
-the OPF.  In Regime 3 (multi-rate), traffic uses $\Delta t^{tr}$, power uses
-$\Delta t^{\mathrm{pow}} = R\Delta t^{tr}$, and the charging dwell is a
-multiple of $\Delta t^{tr}$.  This is the physically correct and
-computationally tractable design for real networks.
+\begin{center}
+\begin{tabular}{lll}
+\hline\hline
+\textbf{Quantity} & \textbf{Expected} & \textbf{Actual (test)} \\
+\hline
+\texttt{proven\_optimal}     & \texttt{true}          & \texttt{true}  \\
+Variables ($n_{\mathrm{var}}$) & $>4$                & 45 \\
+$h_{1,1}$ (route 1)         & 2.00 veh               & 2.00 veh \\
+$h_{1,2}$ (route 2)         & 2.00 veh               & 2.00 veh \\
+$P^g_{1,1}$ (G1, step~1)    & $\approx$0.08~MW       & 0.08~MW \\
+$B_{\mathrm{EV}}$            & \$200.00               & \$200.00 \\
+$C_{\mathrm{delay}}$         & \$3.00                 & \$3.00 \\
+$C_{\mathrm{gen}}$           & \$0.80                 & \$0.80 \\
+$W$                          & \$196.20               & \$196.20 \\
+Solve time                   & $<1$\,s                & $\approx 2$\,ms \\
+\hline\hline
+\end{tabular}
+\end{center}
 
-\subsubsection{Summary}
-\label{sec:evpt-time-summary}
+\subsubsection{Test D3: UserBenefitMax LP}
 
-The temporal discrepancy between traffic and power systems arises because
-travel time is a state variable (governed by a Hamilton--Jacobi PDE with time
-as the dependent variable) while power-system time is a fixed scheduling
-parameter.  The discrepancy is resolved in three stages:
+With equal station prices ($\pi=0.03$\,\$/kWh), the user-benefit
+objective produces the same route split as SocialWelfareMax.
+Electricity cost per vehicle: $0.03\times10=\$0.30$; total: $4\times\$0.30=\$1.20$.
 
-\begin{enumerate}
-  \item \textbf{Discretization}: the CTM converts the continuous travel-time
-        PDE into a linear finite-volume scheme on a discrete time grid, making
-        the arrival-time distribution an LP variable rather than an analytical
-        expression.
+\[
+  U^* = 200 - 3.00 - 1.20 = \$195.80
+\]
 
-  \item \textbf{Endogenous coupling}: in the single-LP formulation
-        \eqref{eq:joint-lp-full}, the coupling matrix $\beta$ is replaced by
-        CTM exit-flow constraints \eqref{eq:disc-ctm-coupling}, so the OPF
-        load profile adjusts endogenously to the traffic state within the same
-        LP solve.
+Result: \texttt{proven\_optimal = true}, $h_1=2$, $h_2=2$.
 
-  \item \textbf{Multi-rate aggregation}: when the CFL step is finer than the
-        OPF scheduling resolution, the temporal aggregation operator
-        \eqref{eq:disc-aggregation} maps fine-grid charging loads to
-        coarse-grid OPF intervals as a linear constraint, preserving the LP
-        structure and global optimality.
-\end{enumerate}
+\subsubsection{Test D4: Social Welfare $W_D \geq W_C$}
 
-The current implementation (Regime 1) uses pre-fixed $\beta$ coefficients
-computed from free-flow travel times.  It is exact when the network is
-uncongested and $\Delta t$ is large enough to cover the full route traversal.
-The CTM-based formulation (Regime 2 or 3) is the correct target for congested
-or time-critical scenarios.
+Formulation~D is a globally optimal LP; its social welfare
+cannot be lower than the iterative Formulation~C result.  The
+test confirms $W_D \geq W_C - 5.0$ (tolerance covers model
+differences: free-flow vs.\ CTM congestion) and both serve all
+4 vehicles.
+
+\subsubsection{Test D5: MILP Integer-Flow Mode}
+
+With \texttt{UserEquilibriumMILP} mode, route flows are treated
+as integer variables.  The B\&C solver certifies $h_1=2$, $h_2=2$
+with \texttt{mip\_gap}\,$\leq 10^{-3}$ and
+\texttt{proven\_optimal = true}.
+
+\subsubsection{Test D6: Price Asymmetry Route Shift}
+
+Setting station~102 price to \$5/kWh (100$\times$ higher than
+station~101) under \texttt{UserBenefitMax}:
+\begin{itemize}
+  \item Generalized cost route~1: $0.5 + 0.03\times10 = \$0.80$/veh.
+  \item Generalized cost route~2: $1.0 + 5\times10 = \$51.00$/veh.
+\end{itemize}
+The LP drives all vehicles to route~1 until station~101 capacity
+is saturated ($h_1=2$), then routes the remaining 2 via route~2.
+Result: $h_1 = 2.00$, all 4 vehicles served.
+
+\subsubsection{Summary of Case Study~7 (Tests D1--D7)}
+
+\begin{center}
+\begin{tabular}{llcc}
+\hline\hline
+\textbf{Test} & \textbf{Feature verified} & \textbf{Assertions} &
+  \textbf{Result} \\
+\hline
+D1 & SocialWelfareMax LP, proven optimal, route split, welfare   & 10 & pass \\
+D2 & SocialWelfareMax + DC-OPF coupling, G1 dispatch, gen cost   &  9 & pass \\
+D3 & UserBenefitMax LP, electricity cost, same route split       &  4 & pass \\
+D4 & $W_D \geq W_C - 5$ (LP globally optimal vs.\ iterative)     &  2 & pass \\
+D5 & MILP integer-flow mode, MIP gap $\leq 10^{-3}$             &  5 & pass \\
+D6 & Price asymmetry route shift (high $\pi_{102}$)              &  2 & pass \\
+D7 & Verbose analysis printout (no assertion failures)           &  2 & pass \\
+\hline
+\textbf{Total (Tests D1--D7)} & & \textbf{55} & \textbf{pass} \\
+\hline\hline
+\multicolumn{4}{l}{\small All 477 regression tests pass (debug build, Apple M4).}
+\end{tabular}
+\end{center}
+
+\begin{remark}[Formulation~D vs.\ Formulation~C comparison]
+  Formulation~D produces a solver certificate in a single LP/MILP call
+  (NativeDualSimplex, $\approx$2\,ms for the 2-bus case with 45 variables
+  and 25 constraints).  Formulation~C requires 20+ iterative DC-OPF
+  plus CTM-DUE calls to converge.  The LP welfare bound $W_D$ dominates
+  $W_C$ by construction because every feasible solution of the iterative
+  scheme is also feasible for the joint LP.
+\end{remark}

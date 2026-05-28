@@ -33,7 +33,7 @@
 ///
 /// =============================================================================
 
-#include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
+#include "hacdcpf/ev_power_traffic/joint_social_welfare.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -43,8 +43,6 @@
 #include <vector>
 
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
-#include "hacdcpf/optimal_power_flow/opf_options.hpp"
-#include "hacdcpf/optimal_power_flow/opf_result.hpp"
 
 namespace hacdcpf::evpt {
 
