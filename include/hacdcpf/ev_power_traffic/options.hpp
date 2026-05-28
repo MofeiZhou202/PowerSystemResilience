@@ -78,6 +78,26 @@ struct CTMOptions {
   // identity through diverge nodes.  If false, aggregate CTM is used with
   // precomputed turning fractions (faster but loses per-route station tracking).
   bool route_specific_cells{true};
+
+  // ── Phase I: multi-class (heterogeneous vehicle) options ──────────────
+  //
+  // When enable_multiclass = true and EVPowerTrafficProblem::icv_demands is
+  // non-empty, the CTM-DUE loop maintains separate EV and ICV route-flow
+  // vectors and combines them with PCE weighting before the CTM forward pass.
+  //
+  // PCE-weighted aggregate occupancy:
+  //   n_eff_{a,m,k} = gamma_ev * n^EV_{a,m,k} + gamma_icv * n^ICV_{a,m,k}
+  //
+  // Sending/receiving are evaluated on n_eff so that all vehicle classes
+  // compete for the same physical road capacity.  Per-class route costs differ:
+  //   ICV: VOT_icv * T^CTM_{r,k} + fuel_cost/km * d_r
+  //   EV:  VOT_ev  * T^CTM_{r,k} + electricity_cost (unchanged)
+  //
+  // Single-class behavior is preserved when enable_multiclass = false.
+  bool   enable_multiclass{false}; ///< activate PCE-weighted multi-class CTM
+  double ev_pce{1.0};              ///< gamma^EV  — PCE factor for EVs
+  double icv_pce{1.0};             ///< gamma^ICV — PCE factor for ICVs
+  double phev_pce{1.0};            ///< gamma^PHEV — PCE factor for PHEVs
 };
 
 // ── Dynamic User Equilibrium (DUE) options ────────────────────────────────
@@ -160,11 +180,10 @@ struct CTMJointWelfareOptions {
 
 enum class JointOptimizerMode {
   SocialWelfareMax,    ///< max W = B_EV − C_gen − C_delay  (Eq. evpt-d-social-welfare)
-  UserBenefitMax,      ///< max U = B_EV − elec_cost − C_delay (Eq. evpt-d-user-benefit)
-  UserEquilibriumMILP, ///< Integer route flows solved by MILP.
-                       ///< \b Not Wardrop big-M complementarity: DUE
-                       ///< complementarity constraints are \b not yet
-                       ///< implemented in joint_optimizer.cpp.
+  UserBenefitMax,      ///< max U = B_EV − elec_cost + V2G revenue − C_delay − Ω·u
+  IntegerRouteMILP,    ///< Integer route/unserved flows solved by MILP;
+                       ///< \b not Wardrop big-M complementarity.
+  UserEquilibriumMILP = IntegerRouteMILP, ///< Backward-compatible legacy alias.
 };
 
 struct JointOptimizerOptions {
@@ -188,9 +207,8 @@ struct JointOptimizerOptions {
 
   /// Add binary δ^{ch}, δ^{dis} mode variables for every route-stop-time
   /// charging group and enforce δ^{ch}+δ^{dis}≤1.  This makes the model a
-  /// MILP.  Route flows and unserved demand are also integer when the demand
-  /// volume is integral, matching the existing UserEquilibriumMILP integer
-  /// route-flow mode.
+  /// MILP.  Route flows and unserved demand are also integer when
+  /// IntegerRouteMILP is selected and the demand volume is integral.
   bool charge_discharge_binaries{false};
 
   // ── Road and station defaults (passed to the routing sub-problem) ────
@@ -200,7 +218,7 @@ struct JointOptimizerOptions {
   // ── Penalty / big-M parameters ────────────────────────────────────────
   double unserved_trip_penalty{1.0e6};   ///< M_out [$/unserved vehicle]
   double power_slack_penalty{1.0e4};     ///< M_p   [$/MW power imbalance]
-  double outside_option_cost{0.0};       ///< Ω     [$/cancelled trip — UB mode]
+  double outside_option_cost{0.0};       ///< Ω     [$/cancelled trip, added in UB mode]
 
   // ── Objective weights ──────────────────────────────────────────────────
   double value_of_time_per_hr{1.0};        ///< VOT [$/veh·hr]

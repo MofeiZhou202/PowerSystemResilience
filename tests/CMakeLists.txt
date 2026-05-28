@@ -152,6 +152,11 @@ hacdcpf_add_test(test_ev_power_traffic_ctm_joint test_ev_power_traffic_ctm_joint
 #   accounting vs Formulation C, and MILP integer-flow mode.
 hacdcpf_add_test(test_ev_power_traffic_joint_opt_d test_ev_power_traffic_joint_opt_d.cpp)
 
+# Phase I: multi-class CTM-DUE with heterogeneous ICV and EV vehicles.
+# Covers: single-class EV baseline, mixed ICV+EV capacity sharing (PCE),
+# spillback propagation, road failure and rerouting, differential class costs.
+hacdcpf_add_test(test_ev_power_traffic_phase1 test_ev_power_traffic_phase1.cpp)
+
 # Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
 # runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).
 # TC-1 (symbol linkage + project tree check) runs unconditionally.

@@ -13,6 +13,45 @@
 
 namespace hacdcpf::evpt {
 
+// ── Vehicle class (Phase I: heterogeneous traffic) ──────────────────────
+
+/// Vehicle class identifier for heterogeneous (multi-class) CTM.
+/// Phase I extends the CTM to track ICVs and EVs separately while sharing
+/// road capacity through passenger-car-equivalent (PCE) weighting.
+enum class VehicleClass : int {
+  ICV  = 0,  ///< Internal Combustion Vehicle
+  EV   = 1,  ///< Battery Electric Vehicle
+  PHEV = 2,  ///< Plug-in Hybrid Electric Vehicle
+};
+
+/// Per-class fundamental-diagram and cost parameters.
+/// Used in CTMOptions to configure the multi-class CTM (Phase I).
+struct VehicleClassParams {
+  double pce{1.0};                            ///< γ^c — passenger-car-equivalent
+  double free_flow_speed_override_km_hr{0.0}; ///< v^{f,c} override; 0 = use link default
+  double fuel_cost_per_km{0.0};              ///< $/km fuel cost (ICV / PHEV)
+  double value_of_time_per_hr{0.0};          ///< $/veh·hr VOT override; 0 = use global
+};
+
+/// Non-electric ICV demand: shares road capacity with EV demands.
+/// ICVs route by minimum generalized cost (travel time + fuel cost);
+/// they do not charge at stations and do not have SOC constraints.
+/// Populated in EVPowerTrafficProblem::icv_demands (Phase I).
+struct ICVDemand {
+  int index{0};
+  int origin_node{0};
+  int destination_node{0};
+  int departure_step{0};
+  double vehicles{0.0};
+  VehicleClass vehicle_class{VehicleClass::ICV};
+
+  /// Candidate routes for this demand.  Empty = all OD-compatible routes.
+  std::vector<int> candidate_route_indices;
+
+  double value_of_time_per_hr{1.0};  ///< $/veh·hr
+  double fuel_cost_per_km{0.0};      ///< $/km — added to generalized cost
+};
+
 // ── Assignment model selector ─────────────────────────────────────────────
 
 enum class AssignmentModel {
@@ -21,8 +60,9 @@ enum class AssignmentModel {
   CapacityAwareGreedy,
   SystemOptimalLP,
   SystemOptimalMILP,
-  // Backward-compatible alias for earlier examples.  This mode is a
+  // Backward-compatible legacy alias for earlier examples.  This mode is a
   // capacity-aware greedy approximation, not an exact system-optimal solver.
+  // New exact studies should use SystemOptimalLP or SystemOptimalMILP.
   SystemOptimal = CapacityAwareGreedy,
 };
 
@@ -105,6 +145,10 @@ struct CTMLinkStepResult {
   double total_outflow_veh{0.0};   // y_{a,M,k}   – last-cell exit flow
   double total_occupancy_veh{0.0}; // Σ_m n_{a,m,k}
   double mean_travel_time_hr{0.0}; // experienced travel time this step
+
+  /// Per-class occupancy estimate [vehicles], keyed by static_cast<int>(VehicleClass).
+  /// Populated when CTMOptions::enable_multiclass = true.
+  std::unordered_map<int, double> class_occupancy_veh;
 };
 
 // Full CTM simulation result for one forward pass.
@@ -187,6 +231,21 @@ struct CTMDUEResult {
   double poa_tstt_ratio{1.0};  ///< TSTT_DUE(CTM) / TSTT_SO(LP)
   double due_tstt_hr{0.0};     ///< total system travel time under DUE
   double so_tstt_hr{0.0};      ///< total system travel time under SO LP
+
+  // ── Phase I: multi-class per-class stats ──────────────────────────────
+  // Populated when CTMOptions::enable_multiclass = true and icv_demands non-empty.
+  struct PerClassStats {
+    VehicleClass vehicle_class{VehicleClass::EV};
+    double total_demand{0.0};    ///< Σ_d vehicles [veh]
+    double tstt_hr{0.0};         ///< total system travel time [hr·veh]
+    double relative_gap{0.0};    ///< Wardrop relative gap at convergence
+    bool   converged{false};
+  };
+  std::vector<PerClassStats> class_stats;
+
+  /// ICV route flows (analogous to flow_by_demand_route for EV demands).
+  /// flow_by_icv_route[icv_demand_index][route_index] = vehicles.
+  std::unordered_map<int, std::unordered_map<int, double>> flow_by_icv_route;
 };
 
 // ── Route and charging stop definitions ───────────────────────────────────
@@ -230,6 +289,10 @@ struct EVDemand {
   // Used by solve_joint_social_welfare() to compute consumer benefit.
   // Zero means "not set"; only affects social welfare accounting.
   double willingness_to_pay_per_vehicle{0.0};
+
+  // ── Phase I multi-class fields ──────────────────────────────────────
+  VehicleClass vehicle_class{VehicleClass::EV};  ///< class tag (default EV)
+  double value_of_time_per_hr{0.0};              ///< 0 = inherit global options
 };
 
 struct EVChargingSession {

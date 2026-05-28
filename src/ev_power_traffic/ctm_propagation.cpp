@@ -541,19 +541,26 @@ CTMSimulationResult ctm_forward_pass(
       for (const auto& cell : ls.cells) tot_occ += cell.n;
       lr.total_occupancy_veh = tot_occ;
       // Experienced travel time: Little's law  T = N / q_out
+      const double q_eff_li = ctm_effective_capacity_veh_hr(
+          problem.traffic.links[li], k, dt_ctm);
       const double last_exit = sending(ls.cells[static_cast<std::size_t>(ls.n_cells - 1)].n,
                                         ls.free_flow_speed_km_hr,
                                         ls.cell_length_km,
-                        ctm_effective_capacity_veh_hr(
-                          problem.traffic.links[li], k, dt_ctm),
+                        q_eff_li,
                         dt_ctm);
       lr.total_outflow_veh = last_exit;
-      lr.mean_travel_time_hr =
-          (last_exit > kTol)
-              ? (tot_occ * dt_ctm / last_exit)
-              : (ls.free_flow_speed_km_hr > kTol
-                     ? ls.cell_length_km * ls.n_cells / ls.free_flow_speed_km_hr
-                     : 0.0);
+      if (q_eff_li <= kTol) {
+        // Link is unavailable (capacity = 0): report infinite travel time so
+        // the auxiliary assignment avoids routes through this link.
+        lr.mean_travel_time_hr = std::numeric_limits<double>::infinity();
+      } else if (last_exit > kTol) {
+        lr.mean_travel_time_hr = tot_occ * dt_ctm / last_exit;
+      } else {
+        lr.mean_travel_time_hr =
+            ls.free_flow_speed_km_hr > kTol
+                ? ls.cell_length_km * ls.n_cells / ls.free_flow_speed_km_hr
+                : 0.0;
+      }
     }
   }
 
@@ -742,6 +749,146 @@ std::vector<std::vector<double>> auxiliary_assignment(
     }
   }
   return x_aux;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 7a. Phase I: ICV auxiliary assignment for multi-class DUE
+// ────────────────────────────────────────────────────────────────────────────
+// All-or-nothing assignment for ICV demands.  Generalized cost:
+//   gc^ICV_{r,k} = VOT_icv * T^CTM_{r,k} + fuel_cost/km * d_r
+// ICVs share the route network with EVs; no SOC or charging cost is applied.
+
+std::vector<std::vector<double>> auxiliary_assignment_icv(
+    const EVPowerTrafficProblem& problem,
+    const CTMSimulationResult& ctm_res,
+    const std::unordered_map<int, int>& route_pos_map,
+    const std::unordered_map<int, std::size_t>& link_pos,
+    int T_ctm,
+    int R) {
+
+  const int n_routes = static_cast<int>(problem.routes.size());
+  std::vector<std::vector<double>> x_aux(
+      static_cast<std::size_t>(T_ctm),
+      std::vector<double>(static_cast<std::size_t>(n_routes), 0.0));
+
+  for (const auto& demand : problem.icv_demands) {
+    const int k_dep_ctm = demand.departure_step * R;
+    if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
+    const double vot = std::max(demand.value_of_time_per_hr, kTol);
+
+    // Candidate routes for this ICV OD pair
+    std::vector<const RouteAlternative*> cands;
+    for (const auto& route : problem.routes) {
+      if (route.origin_node == demand.origin_node &&
+          route.destination_node == demand.destination_node) {
+        cands.push_back(&route);
+      }
+    }
+    if (cands.empty()) continue;
+
+    // ICV generalized cost: travel time + fuel-distance term as time-equivalent
+    auto icv_gc = [&](const RouteAlternative* route) -> double {
+      double tt = std::numeric_limits<double>::infinity();
+      if (ctm_res.route_travel_time.count(route->index)) {
+        const auto& v = ctm_res.route_travel_time.at(route->index);
+        if (k_dep_ctm < static_cast<int>(v.size()))
+          tt = v[static_cast<std::size_t>(k_dep_ctm)];
+      }
+      if (!std::isfinite(tt)) return tt;
+      double fuel_time = 0.0;
+      if (demand.fuel_cost_per_km > kTol) {
+        double dist = 0.0;
+        for (int li : route->link_indices) {
+          if (link_pos.count(li))
+            dist += problem.traffic.links[link_pos.at(li)].length_km;
+        }
+        fuel_time = demand.fuel_cost_per_km * dist / vot;
+      }
+      return tt + fuel_time + route->toll_cost / vot;
+    };
+
+    // All-or-nothing: assign to minimum-cost route
+    const RouteAlternative* best = nullptr;
+    double best_gc = std::numeric_limits<double>::infinity();
+    for (const auto* route : cands) {
+      const double gc = icv_gc(route);
+      if (gc < best_gc) { best_gc = gc; best = route; }
+    }
+    if (best) {
+      const int rpos = route_pos_map.count(best->index)
+                           ? route_pos_map.at(best->index) : -1;
+      if (rpos >= 0)
+        x_aux[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)] +=
+            demand.vehicles;
+    }
+  }
+  return x_aux;
+}
+
+// Wardrop relative gap for ICV demands.
+double wardrop_relative_gap_icv(
+    const EVPowerTrafficProblem& problem,
+    const std::vector<std::vector<double>>& x_icv,
+    const CTMSimulationResult& ctm_res,
+    const std::unordered_map<int, int>& route_pos_map,
+    const std::unordered_map<int, std::size_t>& link_pos,
+    int T_ctm,
+    int R) {
+
+  double tstt = 0.0;
+  double mstt = 0.0;
+
+  for (const auto& demand : problem.icv_demands) {
+    const int k_dep_ctm = demand.departure_step * R;
+    if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
+    const double vot = std::max(demand.value_of_time_per_hr, kTol);
+
+    auto route_dist = [&](const RouteAlternative& r) {
+      double d = 0.0;
+      for (int li : r.link_indices)
+        if (link_pos.count(li))
+          d += problem.traffic.links[link_pos.at(li)].length_km;
+      return d;
+    };
+
+    double min_gc = std::numeric_limits<double>::infinity();
+    for (const auto& route : problem.routes) {
+      if (route.origin_node != demand.origin_node ||
+          route.destination_node != demand.destination_node) continue;
+      if (!ctm_res.route_travel_time.count(route.index)) continue;
+      const auto& tv = ctm_res.route_travel_time.at(route.index);
+      if (k_dep_ctm >= static_cast<int>(tv.size())) continue;
+      const double tt = tv[static_cast<std::size_t>(k_dep_ctm)];
+      if (!std::isfinite(tt)) continue;
+      const double gc = tt + demand.fuel_cost_per_km * route_dist(route) / vot
+                           + route.toll_cost / vot;
+      min_gc = std::min(min_gc, gc);
+    }
+    if (!std::isfinite(min_gc)) continue;
+    mstt += demand.vehicles * min_gc;
+
+    for (const auto& route : problem.routes) {
+      if (route.origin_node != demand.origin_node ||
+          route.destination_node != demand.destination_node) continue;
+      if (!route_pos_map.count(route.index)) continue;
+      const int rpos = route_pos_map.at(route.index);
+      if (k_dep_ctm >= static_cast<int>(x_icv.size())) continue;
+      if (rpos >= static_cast<int>(x_icv[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
+      const double x = x_icv[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
+      if (x <= kTol) continue;
+      if (!ctm_res.route_travel_time.count(route.index)) continue;
+      const auto& tv = ctm_res.route_travel_time.at(route.index);
+      if (k_dep_ctm >= static_cast<int>(tv.size())) continue;
+      const double tt = tv[static_cast<std::size_t>(k_dep_ctm)];
+      const double gc = (std::isfinite(tt) ? tt : 0.0)
+                      + demand.fuel_cost_per_km * route_dist(route) / vot
+                      + route.toll_cost / vot;
+      tstt += x * gc;
+    }
+  }
+
+  if (mstt < kTol) return 0.0;
+  return std::max(0.0, (tstt - mstt) / mstt);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1143,6 +1290,60 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
     }
   }
 
+  // ── Phase I: multi-class (heterogeneous ICV+EV) DUE ──────────────────
+  // When enable_multiclass = true and icv_demands is non-empty, maintain
+  // separate EV and ICV route-flow matrices and combine them with PCE
+  // weighting for the CTM forward pass.
+  //
+  // PCE-weighted combined flow:
+  //   combined[k][r] = pce_ev * x_ev[k][r] + pce_icv * x_icv[k][r]
+  //
+  // Sending/receiving are computed on combined so all classes compete for
+  // the same physical capacity.  Per-class route costs differ:
+  //   ICV: VOT_icv * T^CTM + fuel_cost/km * dist
+  //   EV:  VOT_ev  * T^CTM + electricity_cost  (unchanged)
+
+  const bool do_multiclass =
+      ctm_opts.enable_multiclass && !problem.icv_demands.empty();
+
+  std::vector<std::vector<double>> x_ev;    // EV-only flows (PCE=1 units)
+  std::vector<std::vector<double>> x_icv;   // ICV-only flows (PCE=1 units)
+
+  if (do_multiclass) {
+    // x_ev initialised from the equal-split above (all current route_flow = EV)
+    x_ev = route_flow;
+    // x_icv: equal split across candidate routes per ICV demand
+    x_icv.assign(
+        static_cast<std::size_t>(T_ctm),
+        std::vector<double>(static_cast<std::size_t>(n_routes), 0.0));
+    for (const auto& demand : problem.icv_demands) {
+      const int k_dep_ctm = demand.departure_step * R;
+      if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm || demand.vehicles <= kTol) continue;
+      std::vector<int> cand_rpos;
+      for (const auto& route : problem.routes) {
+        if (route.origin_node == demand.origin_node &&
+            route.destination_node == demand.destination_node) {
+          cand_rpos.push_back(route_pos_map.count(route.index)
+                                  ? route_pos_map.at(route.index) : -1);
+        }
+      }
+      cand_rpos.erase(std::remove(cand_rpos.begin(), cand_rpos.end(), -1), cand_rpos.end());
+      if (cand_rpos.empty()) continue;
+      const double share = demand.vehicles / static_cast<double>(cand_rpos.size());
+      for (int rpos : cand_rpos)
+        x_icv[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)] += share;
+    }
+
+    // Rebuild combined PCE-weighted route_flow for the first CTM pass
+    const double pce_ev  = std::max(kTol, ctm_opts.ev_pce);
+    const double pce_icv = std::max(kTol, ctm_opts.icv_pce);
+    for (int k = 0; k < T_ctm; ++k)
+      for (int ri = 0; ri < n_routes; ++ri)
+        route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] =
+            pce_ev  * x_ev [static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] +
+            pce_icv * x_icv[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)];
+  }
+
   // ── MSA DUE iteration ─────────────────────────────────────────────────
   CTMSimulationResult ctm_res;
 
@@ -1151,22 +1352,43 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
     ctm_res = ctm_forward_pass(problem, route_flow, link_pos, route_pos_map,
                                ctm_opts, dt_ctm, T_ctm);
 
-    // Step 2: Wardrop relative gap
-    const double rg = wardrop_relative_gap(problem, route_flow, ctm_res,
-                                           route_pos_map, T_ctm, R);
+    // Step 2: Wardrop relative gap (EV gap; include ICV gap for multi-class)
+    // In multi-class mode, pass x_ev (EV-only flow) so TSTT is computed on EV
+    // vehicles only — not the PCE-combined route_flow which includes ICV flow.
+    const double rg_ev = wardrop_relative_gap(problem,
+                                               do_multiclass ? x_ev : route_flow,
+                                               ctm_res,
+                                               route_pos_map, T_ctm, R);
+    const double rg_icv = do_multiclass
+        ? wardrop_relative_gap_icv(problem, x_icv, ctm_res,
+                                   route_pos_map, link_pos, T_ctm, R)
+        : 0.0;
+    const double rg = std::max(rg_ev, rg_icv);
 
-    // Step 3: Auxiliary all-or-nothing (or logit) assignment
-    auto x_aux = auxiliary_assignment(problem, ctm_res, route_pos_map,
-                                      link_pos, ev_options, due_opts, T_ctm, R);
+    // Step 3: Auxiliary all-or-nothing (or logit) assignment per class
+    auto x_ev_aux = auxiliary_assignment(problem, ctm_res, route_pos_map,
+                                         link_pos, ev_options, due_opts, T_ctm, R);
+    std::vector<std::vector<double>> x_icv_aux;
+    if (do_multiclass)
+      x_icv_aux = auxiliary_assignment_icv(problem, ctm_res, route_pos_map,
+                                           link_pos, T_ctm, R);
 
-    // Step 4: Max shift (absolute gap)
+    // Step 4: Max shift (absolute gap across both classes)
     double max_shift = 0.0;
+    const auto& base_flow = do_multiclass ? x_ev : route_flow;
     for (int k = 0; k < T_ctm; ++k) {
       for (int ri = 0; ri < n_routes; ++ri) {
         max_shift = std::max(max_shift,
-                             std::abs(x_aux[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] -
-                                      route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)]));
+            std::abs(x_ev_aux[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] -
+                     base_flow [static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)]));
       }
+    }
+    if (do_multiclass) {
+      for (int k = 0; k < T_ctm; ++k)
+        for (int ri = 0; ri < n_routes; ++ri)
+          max_shift = std::max(max_shift,
+              std::abs(x_icv_aux[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] -
+                       x_icv    [static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)]));
     }
 
     // Record history
@@ -1177,12 +1399,26 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
 
     result.history.push_back({iter, max_shift, rg, max_shift});
 
-    // Step 5: MSA update  x^{(i+1)} = (1 - 1/i) x^{(i)} + (1/i) x^{aux}
-    for (int k = 0; k < T_ctm; ++k) {
-      for (int ri = 0; ri < n_routes; ++ri) {
-        route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] =
-            (1.0 - step_i) * route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] +
-            step_i * x_aux[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)];
+    // Step 5: MSA update
+    if (do_multiclass) {
+      const double pce_ev  = std::max(kTol, ctm_opts.ev_pce);
+      const double pce_icv = std::max(kTol, ctm_opts.icv_pce);
+      for (int k = 0; k < T_ctm; ++k) {
+        for (int ri = 0; ri < n_routes; ++ri) {
+          const std::size_t ki = static_cast<std::size_t>(k);
+          const std::size_t ri2 = static_cast<std::size_t>(ri);
+          x_ev [ki][ri2] = (1.0 - step_i) * x_ev [ki][ri2] + step_i * x_ev_aux [ki][ri2];
+          x_icv[ki][ri2] = (1.0 - step_i) * x_icv[ki][ri2] + step_i * x_icv_aux[ki][ri2];
+          route_flow[ki][ri2] = pce_ev * x_ev[ki][ri2] + pce_icv * x_icv[ki][ri2];
+        }
+      }
+    } else {
+      for (int k = 0; k < T_ctm; ++k) {
+        for (int ri = 0; ri < n_routes; ++ri) {
+          route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] =
+              (1.0 - step_i) * route_flow[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)] +
+              step_i * x_ev_aux[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)];
+        }
       }
     }
 
@@ -1201,18 +1437,111 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
                                        ctm_opts, dt_ctm, T_ctm);
 
   // ── Pack route flow result ────────────────────────────────────────────
-  // Aggregate CTM steps back to simulation steps.
+  // EV route flows (from x_ev when multi-class, from route_flow otherwise)
   for (const auto& demand : problem.demands) {
     const int k_dep_ctm = demand.departure_step * R;
     if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
+    const auto& ev_flow = do_multiclass ? x_ev : route_flow;
     for (const auto& route : problem.routes) {
       if (route.origin_node != demand.origin_node ||
           route.destination_node != demand.destination_node) continue;
       if (!route_pos_map.count(route.index)) continue;
       const int rpos = route_pos_map.at(route.index);
-      if (rpos >= static_cast<int>(route_flow[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
-      const double x = route_flow[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
+      if (rpos >= static_cast<int>(ev_flow[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
+      const double x = ev_flow[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
       result.flow_by_demand_route[demand.index][route.index] = x;
+    }
+  }
+
+  // ICV route flows (Phase I multi-class)
+  if (do_multiclass) {
+    for (const auto& demand : problem.icv_demands) {
+      const int k_dep_ctm = demand.departure_step * R;
+      if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
+      for (const auto& route : problem.routes) {
+        if (route.origin_node != demand.origin_node ||
+            route.destination_node != demand.destination_node) continue;
+        if (!route_pos_map.count(route.index)) continue;
+        const int rpos = route_pos_map.at(route.index);
+        if (rpos >= static_cast<int>(x_icv[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
+        const double x = x_icv[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
+        result.flow_by_icv_route[demand.index][route.index] = x;
+      }
+    }
+
+    // Per-class stats (Phase I)
+    {
+      CTMDUEResult::PerClassStats ev_stats;
+      ev_stats.vehicle_class = VehicleClass::EV;
+      ev_stats.converged     = result.converged;
+      ev_stats.relative_gap  = wardrop_relative_gap(problem, x_ev, result.final_ctm,
+                                                     route_pos_map, T_ctm, R);
+      for (const auto& d : problem.demands) ev_stats.total_demand += d.vehicles;
+      for (const auto& d : problem.demands) {
+        const int k = d.departure_step * R;
+        for (const auto& route : problem.routes) {
+          if (route.origin_node != d.origin_node ||
+              route.destination_node != d.destination_node) continue;
+          if (!route_pos_map.count(route.index)) continue;
+          const int rpos = route_pos_map.at(route.index);
+          if (k >= static_cast<int>(x_ev.size())) continue;
+          const double x = x_ev[static_cast<std::size_t>(k)][static_cast<std::size_t>(rpos)];
+          double tt = 0.0;
+          if (result.final_ctm.route_travel_time.count(route.index)) {
+            const auto& tv = result.final_ctm.route_travel_time.at(route.index);
+            if (k < static_cast<int>(tv.size()))
+              tt = tv[static_cast<std::size_t>(k)];
+          }
+          ev_stats.tstt_hr += x * (std::isfinite(tt) ? tt : 0.0);
+        }
+      }
+      result.class_stats.push_back(ev_stats);
+
+      CTMDUEResult::PerClassStats icv_stats;
+      icv_stats.vehicle_class = VehicleClass::ICV;
+      icv_stats.converged     = result.converged;
+      icv_stats.relative_gap  = wardrop_relative_gap_icv(problem, x_icv, result.final_ctm,
+                                                          route_pos_map, link_pos, T_ctm, R);
+      for (const auto& d : problem.icv_demands) icv_stats.total_demand += d.vehicles;
+      for (const auto& d : problem.icv_demands) {
+        const int k = d.departure_step * R;
+        for (const auto& route : problem.routes) {
+          if (route.origin_node != d.origin_node ||
+              route.destination_node != d.destination_node) continue;
+          if (!route_pos_map.count(route.index)) continue;
+          const int rpos = route_pos_map.at(route.index);
+          if (k >= static_cast<int>(x_icv.size())) continue;
+          const double x = x_icv[static_cast<std::size_t>(k)][static_cast<std::size_t>(rpos)];
+          double tt = 0.0;
+          if (result.final_ctm.route_travel_time.count(route.index)) {
+            const auto& tv = result.final_ctm.route_travel_time.at(route.index);
+            if (k < static_cast<int>(tv.size()))
+              tt = tv[static_cast<std::size_t>(k)];
+          }
+          icv_stats.tstt_hr += x * (std::isfinite(tt) ? tt : 0.0);
+        }
+      }
+      result.class_stats.push_back(icv_stats);
+    }
+
+    // Per-link per-class occupancy estimates in step results (Phase I)
+    // Distributed proportionally to PCE-weighted class flow totals.
+    const double pce_ev  = std::max(kTol, ctm_opts.ev_pce);
+    const double pce_icv = std::max(kTol, ctm_opts.icv_pce);
+    for (int k = 0; k < T_ctm && k < static_cast<int>(result.final_ctm.step_link_results.size()); ++k) {
+      // Aggregate EV and ICV demand at this CTM step
+      double total_ev_dep = 0.0, total_icv_dep = 0.0;
+      for (int ri = 0; ri < n_routes; ++ri) {
+        total_ev_dep  += x_ev [static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)];
+        total_icv_dep += x_icv[static_cast<std::size_t>(k)][static_cast<std::size_t>(ri)];
+      }
+      const double total_pce = pce_ev * total_ev_dep + pce_icv * total_icv_dep;
+      const double frac_ev  = total_pce > kTol ? pce_ev  * total_ev_dep  / total_pce : 0.5;
+      const double frac_icv = total_pce > kTol ? pce_icv * total_icv_dep / total_pce : 0.5;
+      for (auto& lr : result.final_ctm.step_link_results[static_cast<std::size_t>(k)]) {
+        lr.class_occupancy_veh[static_cast<int>(VehicleClass::EV)]  = lr.total_occupancy_veh * frac_ev;
+        lr.class_occupancy_veh[static_cast<int>(VehicleClass::ICV)] = lr.total_occupancy_veh * frac_icv;
+      }
     }
   }
 

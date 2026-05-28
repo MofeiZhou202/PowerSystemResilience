@@ -43,10 +43,10 @@
 //
 // Objectives
 //   SocialWelfareMax (minimise):
-//     Σ c^1_g·P^g·Δt − Σ WTP·(D−u) + VOT·Σ T^ff·h + M_out·u + M_p·Σℓ^p
+//     Σ c^1_g·P^g·Δt − Σ WTP·h + VOT·Σ T^ff·h + M_out·u + M_p·Σℓ^p
 //
 //   UserBenefitMax (minimise):
-//     Σ π_s·p_per_veh·Δt·h − Σ WTP·(D−u) + VOT·Σ T^ff·h + M_out·u
+//     Σ π_s·(p^ch−p^dis)·Δt − Σ WTP·h + VOT·Σ T^ff·h + (M_out+Ω)·u
 
 #include "hacdcpf/ev_power_traffic/simulation.hpp"
 
@@ -365,8 +365,14 @@ JointOptimizerResult solve_joint_optimizer(
   std::vector<double>            obj;
   std::vector<engine::VariableMeta> vars;
 
-  const bool use_milp = (opts.mode == JointOptimizerMode::UserEquilibriumMILP) ||
+  const bool use_milp = (opts.mode == JointOptimizerMode::IntegerRouteMILP) ||
                         opts.charge_discharge_binaries;
+  if (opts.mode == JointOptimizerMode::IntegerRouteMILP) {
+    jo_warn(result,
+            "IntegerRouteMILP enforces integral route/unserved variables only; "
+            "Wardrop complementarity is not assembled.",
+            opts.verbose);
+  }
 
   auto add_col = [&](JOColumn c, double lb, double ub, double cost,
                      const std::string& name, bool integer_var) -> int {
@@ -457,19 +463,7 @@ JointOptimizerResult solve_joint_optimizer(
       // Objective cost for this route (depends on mode)
       double route_cost = opts.value_of_time_per_hr * ff_hr;  // VOT×T^ff
       route_cost -= demand.willingness_to_pay_per_vehicle;      // −WTP
-      if (opts.mode == JointOptimizerMode::UserBenefitMax) {
-        // Add electricity cost: Σ_s π_s·p_per_veh·Δt
-        for (const auto& stop : route->charging_stops) {
-          const double p_kw = jo_charge_power_kw_per_veh(stop, opts, dt);
-          const double dwell = std::max(1, stop.dwell_steps);
-          const double price = jo_station_price(problem, opts,
-                                                stop.station_id, arr);
-          route_cost += opts.station_energy_cost_weight *
-                        price * p_kw * dwell * dt;
-        }
-      }
-      // Note: SocialWelfareMax adds C_gen through generator dispatch variables;
-      // the route cost here contains only travel time and benefit terms.
+      // Electricity cost/revenue is attached only to p^ch/p^dis columns below.
 
       JOColumn jc;
       jc.kind          = JOColumn::Kind::RouteFlow;
@@ -632,8 +626,11 @@ JointOptimizerResult solve_joint_optimizer(
     uc.demand_pos = di;
     uc.departure_step = demand.departure_step;
 
-    const double unserved_cost = opts.unserved_trip_penalty -
-                                 demand.willingness_to_pay_per_vehicle;
+    const double outside_cost =
+      (opts.mode == JointOptimizerMode::UserBenefitMax)
+      ? opts.outside_option_cost
+      : 0.0;
+    const double unserved_cost = opts.unserved_trip_penalty + outside_cost;
 
     const bool int_var_u = (use_milp &&
                             std::abs(demand.vehicles - std::round(demand.vehicles)) < 1e-7);

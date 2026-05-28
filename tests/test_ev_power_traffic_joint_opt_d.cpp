@@ -22,13 +22,14 @@
 //       optimized p_ch=40 kW delivers exactly 40 kWh; W=200−2=$198
 //   D2: SocialWelfareMax LP + DC-OPF coupling (include_dcopf=true):
 //       W = $197.60 (C_gen = $0.40 from G1 serving 0.04 MW EV load × 10$/MWh)
-//   D3: UserBenefitMax LP — same route choice, obj includes electricity cost
-//   D4: Welfare ≥ Formulation C iterative (single-shot LP is at least as good)
-//   D5: MILP integer-flow mode — proven_optimal via B&C with integer vehicles
+//   D3: UserBenefitMax LP — same route choice, obj includes p_ch electricity cost once
+//   D4: small-case welfare comparison with Formulation C iterative result
+//   D5: IntegerRouteMILP mode — proven_optimal via B&C with integer vehicles
 //   D6: price asymmetry — validates UserBenefitMax station-price term
 //   D7: verbose SocialWelfareMax — analysis printout (no assertions, just runs)
-//   D8: time-varying road blockage — availability_profile enforced in LP
+//   D8: time-varying road availability/capacity profile enforced in LP
 //   D9: V2G + charge/discharge binaries — p_dis and δ mode constraints active
+//   D10: outside-option cost enters UserBenefitMax unserved slack
 
 #include <algorithm>
 #include <cmath>
@@ -355,16 +356,21 @@ TEST_CASE("FormD D3: UserBenefitMax LP — electricity cost in objective",
     CHECK(res.ev_benefit         == Approx(200.0).margin(0.1));
     CHECK(res.traffic_delay_cost == Approx(2.0).margin(0.1));
   }
+
+  SECTION("objective counts electricity once through p_ch") {
+    // min objective = delay − WTP + electricity = 2 − 200 + 1.20 = −196.80
+    CHECK(res.objective == Approx(-196.80).margin(1e-6));
+  }
 }
 
 // =============================================================================
-// Test D4: Welfare ≥ Formulation C (LP is globally optimal)
+// Test D4: Small-case welfare comparison against Formulation C
 // =============================================================================
-// Formulation D produces a single-shot LP optimal solution; its social welfare
-// is at least as large as the converged iterative Formulation C result.
-// Compare LP (D1) vs Formulation C on the same 2-bus network.
+// Compare the implemented free-flow FormD LP (D1 assumptions) against the
+// iterative Formulation C result on this 2-bus benchmark.  This is a regression
+// comparison, not a theorem that D dominates C for all model choices.
 // =============================================================================
-TEST_CASE("FormD D4: FormD social welfare >= FormC iterative (LP certified)",
+TEST_CASE("FormD D4: small-case welfare benchmark vs FormC iterative",
           "[ev_power_traffic][formulation_d][cross_validation]") {
 
   const auto prob = make_joint_opt_d_problem();
@@ -402,8 +408,8 @@ TEST_CASE("FormD D4: FormD social welfare >= FormC iterative (LP certified)",
   EVPowerTrafficProblem prob_c = prob;
   const auto res_c = simulate_ev_power_traffic_ctm_joint(prob_c, opts_c);
 
-  // Formulation D social welfare ≥ Formulation C (D is globally optimal LP)
-  // Allow 5% tolerance for model differences (CTM vs free-flow travel time)
+  // On this benchmark, the implemented D objective should not fall below C's
+  // iterative result beyond a tolerance for model differences (CTM vs free-flow).
   CHECK(res_d.social_welfare >= res_c.social_welfare - 5.0);
 
   // Both should serve all 4 vehicles
@@ -411,7 +417,7 @@ TEST_CASE("FormD D4: FormD social welfare >= FormC iterative (LP certified)",
 }
 
 // =============================================================================
-// Test D5: MILP integer-flow mode (UserEquilibriumMILP)
+// Test D5: MILP integer-flow mode (IntegerRouteMILP)
 // =============================================================================
 // With 4 integer vehicles, the MILP keeps all vehicles on the cheaper near
 // route because optimized charge power can deliver exactly 10 kWh/veh.
@@ -422,8 +428,8 @@ TEST_CASE("FormD D5: MILP integer route flows — proven optimal via B&C",
   // Use integer demand (4.0 vehicles → integer variables when mode = MILP)
   const auto prob = make_joint_opt_d_problem(4.0, 50.0, 10.0);
   auto opts = make_d_options(/*opf=*/false);
-  opts.mode                  = JointOptimizerMode::UserEquilibriumMILP;
-  opts.charge_discharge_binaries = false;  // only mode binaries for UE
+  opts.mode                  = JointOptimizerMode::IntegerRouteMILP;
+  opts.charge_discharge_binaries = false;  // integer route/unserved variables only
   opts.mip_gap               = 1e-4;
   opts.time_limit_sec        = 20.0;
   opts.max_nodes             = 2048;
@@ -453,21 +459,20 @@ TEST_CASE("FormD D5: MILP integer route flows — proven optimal via B&C",
 // =============================================================================
 // Test D6: Price asymmetry shifts flow to cheaper station
 // =============================================================================
-// Setting station 102 price very high → UserBenefitMax routes all vehicles
-// to station 101 (bus 1, cheap), with optimized charge power within capacity.
+// Setting station 101 price very high → UserBenefitMax routes all vehicles
+// to station 102 (bus 2, cheap), with optimized charge power within capacity.
 // =============================================================================
-TEST_CASE("FormD D6: UserBenefitMax — high price at station 102 → route shift",
+TEST_CASE("FormD D6: UserBenefitMax — high price at station 101 → route shift",
           "[ev_power_traffic][formulation_d][lp][price_sensitivity]") {
 
   auto prob = make_joint_opt_d_problem(4.0, 50.0, 10.0);
 
-  // Set station 102 price very high: 5 $/kWh
-  // Electricity cost per vehicle via route 2: 5 × 10 = $50/veh
-  // Generalized cost: route 2 = 1.0h + 50 = 51.0 [$/veh]; route 1 = 0.5h + 0.03×10 = 0.8 [$/veh]
-  // → LP wants to maximize h1 (route 1); exact p_ch variables make h1=4 feasible.
-  StationPriceProfile pp2; pp2.station_id = 102;
-  pp2.price_per_kwh.assign(6, 5.0);
-  prob.station_prices.push_back(pp2);
+  // Set station 101 price very high: 5 $/kWh.
+  // Route 1 generalized private cost: 0.5 + 5×10 = $50.50/veh.
+  // Route 2 generalized private cost: 1.0 + 0.03×10 = $1.30/veh.
+  StationPriceProfile pp1; pp1.station_id = 101;
+  pp1.price_per_kwh.assign(6, 5.0);
+  prob.station_prices.push_back(pp1);
 
   auto opts = make_d_options(/*opf=*/false);
   opts.mode = JointOptimizerMode::UserBenefitMax;
@@ -479,20 +484,24 @@ TEST_CASE("FormD D6: UserBenefitMax — high price at station 102 → route shif
 
   const auto& rf = res.route_flow.at(1);
   const double h1 = rf.count(1) ? rf.at(1) : 0.0;
+  const double h2 = rf.count(2) ? rf.at(2) : 0.0;
 
-  // Route 1 should carry all demand.
-  CHECK(h1 == Approx(4.0).margin(0.1));
+  CHECK(h1 == Approx(0.0).margin(0.1));
+  CHECK(h2 == Approx(4.0).margin(0.1));
   // All 4 served (u_d = 0 since WTP >> cost)
   CHECK(res.total_served_vehicles >= 3.9);
+  // min objective = route-2 delay − WTP + electricity = 4 − 200 + 1.20 = −194.80
+  CHECK(res.objective == Approx(-194.80).margin(1e-6));
 }
 
 // =============================================================================
-// Test D8: Time-varying road blockage profile
+// Test D8: Time-varying road availability profile
 // =============================================================================
 // Closing the first link on Route 1 at departure step 0 forces the LP to route
-// all demand over Route 2.  This validates that Formulation D uses
+// all demand over Route 2.  This validates that Formulation D uses the static
+// route-capacity row from
 // TrafficLink::availability_profile / capacity_profile_veh_per_hr rather than
-// only the scalar capacity_veh_per_hr field.
+// only the scalar capacity_veh_per_hr field; it is not CTM spillback propagation.
 // =============================================================================
 TEST_CASE("FormD D8: road availability profile blocks closed route",
           "[ev_power_traffic][formulation_d][lp][road_fault]") {
@@ -572,7 +581,39 @@ TEST_CASE("FormD D9: V2G discharge with charge/discharge binaries",
   CHECK(sr.p_discharge_kw[2] == Approx(10.0).margin(1e-6));
   CHECK(sr.energy_kwh[3] == Approx(30.0).margin(1e-6));
   CHECK(res.total_v2g_energy_kwh == Approx(20.0).margin(1e-6));
+  CHECK(res.objective == Approx(-69.50).margin(1e-6));
   CHECK(res.integrality_max_violation <= 1e-9);
+}
+
+// =============================================================================
+// Test D10: Outside-option cost in UserBenefitMax unserved slack
+// =============================================================================
+// Closing both routes makes every vehicle choose the unserved slack.  With zero
+// generic unserved penalty, the UserBenefitMax objective should equal
+// Ω × unserved vehicles; WTP is attached only to served route flows.
+// =============================================================================
+TEST_CASE("FormD D10: UserBenefitMax outside-option cost for unserved demand",
+          "[ev_power_traffic][formulation_d][lp][outside_option]") {
+
+  auto prob = make_joint_opt_d_problem(4.0, 50.0, 10.0);
+  for (auto& link : prob.traffic.links) {
+    if (link.index == 11 || link.index == 21) {
+      link.availability_profile.assign(6, true);
+      link.availability_profile[0] = false;
+    }
+  }
+
+  auto opts = make_d_options(/*opf=*/false);
+  opts.mode = JointOptimizerMode::UserBenefitMax;
+  opts.unserved_trip_penalty = 0.0;
+  opts.outside_option_cost = 7.0;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  REQUIRE(res.proven_optimal == true);
+  CHECK(res.total_served_vehicles == Approx(0.0).margin(1e-9));
+  CHECK(res.total_unserved_vehicles == Approx(4.0).margin(1e-9));
+  CHECK(res.objective == Approx(28.0).margin(1e-9));
 }
 
 // =============================================================================

@@ -24,6 +24,10 @@ struct EVPowerTrafficProblem {
   std::vector<EVDemand> demands;
   std::vector<EVChargingSession> initial_sessions;
   std::vector<StationPriceProfile> station_prices;
+
+  /// Phase I: heterogeneous ICV demand sharing road capacity with EVs.
+  /// Populated when CTMOptions::enable_multiclass = true; ignored otherwise.
+  std::vector<ICVDemand> icv_demands;
 };
 
 // ── Aggregate result ──────────────────────────────────────────────────────
@@ -164,15 +168,18 @@ CTMJointWelfareResult simulate_ev_power_traffic_ctm_joint(
 //              optional δ_ch/δ_dis mode binaries,
 //              P^g_{g,k}, θ_{b,k}, f_{ℓ,k}, ℓ^p_{b,k}  [if include_dcopf]
 //
+//   IntegerRouteMILP mode enforces integral route/unserved variables only;
+//   it is not a Wardrop MCP/KKT or big-M complementarity formulation.
+//
 //   Equality:   demand balance, DC flow, DC power balance
 //   Inequality: road capacity, station capacity
 //   Variable bounds: P^g ∈ [Pmin,Pmax], f ∈ [-Fmax,Fmax], ℓ^p ≥ 0
 //
 //   SocialWelfareMax (default):
-//     min Σ c_g·P^g·Δt − Σ WTP·(D−u) + VOT·TSTT + M_out·u + M_p·ℓ^p
+//     min Σ c_g·P^g·Δt − Σ WTP·h + VOT·TSTT + M_out·u + M_p·ℓ^p
 //
 //   UserBenefitMax:
-//     min Σ π_s·p_per_veh·Δt·h − Σ WTP·(D−u) + VOT·TSTT + M_out·u
+//     min Σ π_s·(p_ch−p_dis)·Δt − Σ WTP·h + VOT·TSTT + (M_out+Ω)·u
 
 struct JointOptimizerResult {
   // ── Solver certificate ─────────────────────────────────────────────────
@@ -180,7 +187,7 @@ struct JointOptimizerResult {
   bool   proven_optimal{false};
   std::string solver_backend;   ///< "NativeDualSimplex" / "HiGHS" / "NativeB&C"
   std::string solver_status;
-  double objective{0.0};        ///< primal objective value (negated; sign-convention: maximization)
+  double objective{0.0};        ///< solver minimization objective value
   double best_bound{0.0};       ///< dual bound (= objective for LP; best_bound ≥ objective for MILP)
   double mip_gap{0.0};
   double primal_max_violation{0.0};      ///< max bound/equality/inequality violation

@@ -1,8 +1,8 @@
 #pragma once
 
-// ev_power_traffic_simulation.hpp — umbrella header (backward-compatible)
-// All types and declarations are now in the split sub-headers.
-// Downstream code that includes this path continues to work unchanged.
+// ev_power_traffic_simulation.hpp — legacy umbrella header.
+// New code should include the split headers below directly. This path remains
+// only so downstream code that already includes it continues to build.
 
 #include "hacdcpf/ev_power_traffic/types.hpp"
 #include "hacdcpf/ev_power_traffic/options.hpp"

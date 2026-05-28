@@ -215,7 +215,6 @@ CTMJointWelfareResult simulate_ev_power_traffic_ctm_joint(
 
   // ── Outer iteration loop ───────────────────────────────────────────────────
   CTMDUEResult best_due;
-  int best_R = 1;
 
   for (int iter = 1; iter <= options.max_iterations; ++iter) {
 
@@ -234,7 +233,6 @@ CTMJointWelfareResult simulate_ev_power_traffic_ctm_joint(
     const int R_est = (T > 0 && T_ctm_final >= T)
                           ? T_ctm_final / T
                           : 1;
-    best_R = R_est;
 
     // ── (b) Power step: DC-OPF for each simulation time step ─────────────────
     std::unordered_map<int, std::vector<double>> new_prices = cur_prices;
