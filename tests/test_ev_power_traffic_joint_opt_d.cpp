@@ -18,14 +18,17 @@
 //
 // Test cases (Case Study 7 in technical notebook §Formulation D)
 // ──────────────────────────────────────────────────────────────────────────
-//   D1: SocialWelfareMax LP — proven_optimal=true, route split h1=2, h2=2,
-//       W = B_EV − C_delay = 200 − 3 = $197 (no OPF so no C_gen)
+//   D1: SocialWelfareMax LP — proven_optimal=true, h1=4, h2=0,
+//       optimized p_ch=40 kW delivers exactly 40 kWh; W=200−2=$198
 //   D2: SocialWelfareMax LP + DC-OPF coupling (include_dcopf=true):
-//       W = $196.20 (C_gen = $0.80 from G1 serving 0.08 MW EV load × 10$/MWh)
-//   D3: UserBenefitMax LP — same route split, obj includes electricity cost
+//       W = $197.60 (C_gen = $0.40 from G1 serving 0.04 MW EV load × 10$/MWh)
+//   D3: UserBenefitMax LP — same route choice, obj includes electricity cost
 //   D4: Welfare ≥ Formulation C iterative (single-shot LP is at least as good)
 //   D5: MILP integer-flow mode — proven_optimal via B&C with integer vehicles
-//   D6: verbose SocialWelfareMax — analysis printout (no assertions, just runs)
+//   D6: price asymmetry — validates UserBenefitMax station-price term
+//   D7: verbose SocialWelfareMax — analysis printout (no assertions, just runs)
+//   D8: time-varying road blockage — availability_profile enforced in LP
+//   D9: V2G + charge/discharge binaries — p_dis and δ mode constraints active
 
 #include <algorithm>
 #include <cmath>
@@ -188,13 +191,14 @@ static JointOptimizerOptions make_d_options(bool opf = false) {
 // =============================================================================
 // Expected:
 //   - proven_optimal = true, feasible = true
-//   - h_{1,1} = 2 vehicles (station 101 cap = 40 kW / 20 kW/veh = 2 max)
-//   - h_{1,2} = 2 vehicles (station 102 cap = 60 kW / 20 kW/veh = 3 max)
+//   - h_{1,1} = 4 vehicles: p_ch is optimized to 10 kW/veh for 1 h,
+//     so station 101's 40 kW cap can deliver exactly 40 kWh
+//   - h_{1,2} = 0 vehicles
 //   - u_d = 0 (all served)
 //   - B_EV = 4 × 50 = $200
-//   - C_delay = 1 × (2 × 0.5 + 2 × 1.0) = $3.00
+//   - C_delay = 1 × (4 × 0.5) = $2.00
 //   - C_gen = $0  (no OPF coupling → generator cost not in LP objective)
-//   - W = $197
+//   - W = $198
 // =============================================================================
 TEST_CASE("FormD D1: SocialWelfareMax LP — solver-certified, no OPF",
           "[ev_power_traffic][formulation_d][lp]") {
@@ -212,16 +216,19 @@ TEST_CASE("FormD D1: SocialWelfareMax LP — solver-certified, no OPF",
     CHECK(res.solver_backend != "");
     CHECK(res.n_variables    >  0);
     CHECK(res.n_constraints  >  0);
+    CHECK(res.primal_max_violation      <= 1e-7);
+    CHECK(res.integrality_max_violation <= 1e-9);
   }
 
-  SECTION("route assignment: station-capacity-limited split") {
-    // Demand 1 → 2 vehicles on Route 1, 2 on Route 2
+  SECTION("route assignment: optimized charging keeps all flow on near route") {
+    // Demand 1 → 4 vehicles on Route 1.  The LP chooses p_ch=40 kW,
+    // not the old fixed 20 kW/vehicle route coefficient.
     REQUIRE(res.route_flow.count(1));
     const auto& rf = res.route_flow.at(1);
     const double h1 = rf.count(1) ? rf.at(1) : 0.0;
     const double h2 = rf.count(2) ? rf.at(2) : 0.0;
-    CHECK(h1 == Approx(2.0).margin(0.01));
-    CHECK(h2 == Approx(2.0).margin(0.01));
+    CHECK(h1 == Approx(4.0).margin(0.01));
+    CHECK(h2 == Approx(0.0).margin(0.01));
     CHECK(res.total_served_vehicles   == Approx(4.0).margin(0.01));
     CHECK(res.total_unserved_vehicles == Approx(0.0).margin(0.01));
   }
@@ -229,19 +236,24 @@ TEST_CASE("FormD D1: SocialWelfareMax LP — solver-certified, no OPF",
   SECTION("welfare accounting — no OPF") {
     // B_EV = 4 × 50 = 200
     CHECK(res.ev_benefit         == Approx(200.0).margin(0.1));
-    // C_delay = VOT × (2×0.5 + 2×1.0) = 3.0
-    CHECK(res.traffic_delay_cost == Approx(3.0).margin(0.1));
+    // C_delay = VOT × (4×0.5) = 2.0
+    CHECK(res.traffic_delay_cost == Approx(2.0).margin(0.1));
     // No generator dispatch in LP → C_gen = 0
     CHECK(res.gen_cost           == Approx(0.0).margin(1e-6));
-    // W = 200 − 3 = 197
-    CHECK(res.social_welfare     == Approx(197.0).margin(0.1));
+    // W = 200 − 2 = 198
+    CHECK(res.social_welfare     == Approx(198.0).margin(0.1));
   }
 
-  SECTION("sessions created") {
-    // 2 sessions (one per route-stop pair with positive flow)
-    CHECK(res.sessions.size() >= 1u);
+  SECTION("charging variables deliver exact requested energy") {
+    REQUIRE(res.sessions.size() == 1u);
+    REQUIRE(res.session_results.size() == 1u);
     // Requested energy: 4 vehicles × 10 kWh = 40 kWh total
     CHECK(res.total_requested_energy_kwh == Approx(40.0).margin(0.1));
+    CHECK(res.total_delivered_energy_kwh == Approx(40.0).margin(0.1));
+    const auto& sr = res.session_results.front();
+    REQUIRE(sr.p_charge_kw.size() > 1u);
+    CHECK(sr.p_charge_kw[1] == Approx(40.0).margin(1e-5));
+    CHECK(sr.unserved_energy_kwh == Approx(0.0).margin(1e-6));
   }
 }
 
@@ -249,12 +261,11 @@ TEST_CASE("FormD D1: SocialWelfareMax LP — solver-certified, no OPF",
 // Test D2: SocialWelfareMax LP + DC-OPF power balance
 // =============================================================================
 // Expected:
-//   - same route split h1=2, h2=2
-//   - EV load at bus 1: 2 veh × 20 kW = 40 kW = 0.04 MW  (at step 1, arrival)
-//   - EV load at bus 2: 2 veh × 20 kW = 40 kW = 0.04 MW  (at step 1)
-//   - G1 dispatched at 0.08 MW, G2 = 0, f_12 = 0.04 MW
-//   - C_gen = 10 × 0.08 × 1h = $0.80
-//   - W = 200 − 3 − 0.80 = $196.20
+//   - h1=4, h2=0
+//   - EV load at bus 1: 40 kW = 0.04 MW (at step 1, arrival)
+//   - G1 dispatched at 0.04 MW, G2 = 0
+//   - C_gen = 10 × 0.04 × 1h = $0.40
+//   - W = 200 − 2 − 0.40 = $197.60
 // =============================================================================
 TEST_CASE("FormD D2: SocialWelfareMax LP + DC-OPF simultaneous coupling",
           "[ev_power_traffic][formulation_d][lp][dcopf]") {
@@ -277,25 +288,24 @@ TEST_CASE("FormD D2: SocialWelfareMax LP + DC-OPF simultaneous coupling",
     const auto& rf = res.route_flow.at(1);
     const double h1 = rf.count(1) ? rf.at(1) : 0.0;
     const double h2 = rf.count(2) ? rf.at(2) : 0.0;
-    CHECK(h1 == Approx(2.0).margin(0.05));
-    CHECK(h2 == Approx(2.0).margin(0.05));
+    CHECK(h1 == Approx(4.0).margin(0.05));
+    CHECK(h2 == Approx(0.0).margin(0.05));
     CHECK(res.total_unserved_vehicles == Approx(0.0).margin(0.01));
   }
 
   SECTION("welfare with generation cost") {
-    // B_EV = $200, C_delay = $3
+    // B_EV = $200, C_delay = $2
     CHECK(res.ev_benefit         == Approx(200.0).margin(0.1));
-    CHECK(res.traffic_delay_cost == Approx(3.0).margin(0.1));
-    // C_gen ≈ 0.80 (G1 cheap at 10 $/MWh × 0.08 MW × 1h)
-    CHECK(res.gen_cost           == Approx(0.80).margin(0.1));
-    // W = 200 − 3 − 0.80 = 196.20
-    CHECK(res.social_welfare     == Approx(196.20).margin(0.2));
+    CHECK(res.traffic_delay_cost == Approx(2.0).margin(0.1));
+    // C_gen ≈ 0.40 (G1 cheap at 10 $/MWh × 0.04 MW × 1h)
+    CHECK(res.gen_cost           == Approx(0.40).margin(0.1));
+    // W = 200 − 2 − 0.40 = 197.60
+    CHECK(res.social_welfare     == Approx(197.60).margin(0.2));
   }
 
   SECTION("generator dispatch populated") {
     REQUIRE_FALSE(res.gen_dispatch_mw.empty());
-    // At arrival step 1 (both routes arrive at step 1 with ff=0.5h, dt=1h):
-    // G1 should dispatch ≈ 0.08 MW to serve total EV load
+    // At arrival step 1, G1 should dispatch ≈ 0.04 MW to serve total EV load.
     bool g1_dispatched = false;
     for (const auto& step_map : res.gen_dispatch_mw) {
       for (const auto& [gidx, pmw] : step_map) {
@@ -309,13 +319,13 @@ TEST_CASE("FormD D2: SocialWelfareMax LP + DC-OPF simultaneous coupling",
 // =============================================================================
 // Test D3: UserBenefitMax LP
 // =============================================================================
-// With equal station prices (0.03 $/kWh), the user-benefit objective weights
-// routes by travel time and electricity cost symmetrically, producing the same
-// route split as SocialWelfareMax.
+// With equal station prices (0.03 $/kWh), the user-benefit objective prefers
+// the near route and uses optimized charge power to satisfy the requested
+// energy within the station capacity.
 // Expected:
 //   - proven_optimal = true
-//   - h1 = 2, h2 = 2 (station capacity binding, no price asymmetry)
-//   - B_EV = $200, C_delay = $3.00
+//   - h1 = 4, h2 = 0
+//   - B_EV = $200, C_delay = $2.00
 //   - User electricity cost = 4 × 10 kWh × 0.03 $/kWh = $1.20
 // =============================================================================
 TEST_CASE("FormD D3: UserBenefitMax LP — electricity cost in objective",
@@ -337,14 +347,13 @@ TEST_CASE("FormD D3: UserBenefitMax LP — electricity cost in objective",
     const auto& rf = res.route_flow.at(1);
     const double h1 = rf.count(1) ? rf.at(1) : 0.0;
     const double h2 = rf.count(2) ? rf.at(2) : 0.0;
-    // Station cap limits h1 ≤ 2.  h1+h2=4 → h1=2, h2=2.
-    CHECK(h1 == Approx(2.0).margin(0.05));
-    CHECK(h2 == Approx(2.0).margin(0.05));
+    CHECK(h1 == Approx(4.0).margin(0.05));
+    CHECK(h2 == Approx(0.0).margin(0.05));
   }
 
   SECTION("B_EV and delay computed correctly") {
     CHECK(res.ev_benefit         == Approx(200.0).margin(0.1));
-    CHECK(res.traffic_delay_cost == Approx(3.0).margin(0.1));
+    CHECK(res.traffic_delay_cost == Approx(2.0).margin(0.1));
   }
 }
 
@@ -404,7 +413,8 @@ TEST_CASE("FormD D4: FormD social welfare >= FormC iterative (LP certified)",
 // =============================================================================
 // Test D5: MILP integer-flow mode (UserEquilibriumMILP)
 // =============================================================================
-// With 4 integer vehicles, the MILP must assign h1 = 2, h2 = 2.
+// With 4 integer vehicles, the MILP keeps all vehicles on the cheaper near
+// route because optimized charge power can deliver exactly 10 kWh/veh.
 // =============================================================================
 TEST_CASE("FormD D5: MILP integer route flows — proven optimal via B&C",
           "[ev_power_traffic][formulation_d][milp]") {
@@ -432,19 +442,19 @@ TEST_CASE("FormD D5: MILP integer route flows — proven optimal via B&C",
     const auto& rf = res.route_flow.at(1);
     const double h1 = rf.count(1) ? rf.at(1) : 0.0;
     const double h2 = rf.count(2) ? rf.at(2) : 0.0;
-    // h1+h2 = 4, h1 ≤ 2 (station cap), h2 ≤ 3 (station cap)
     CHECK(h1 + h2 == Approx(4.0).margin(0.1));
-    CHECK(h1      <= 2.0 + 0.1);
-    CHECK(h2      <= 3.0 + 0.1);
+    CHECK(h1      == Approx(4.0).margin(0.1));
+    CHECK(h2      == Approx(0.0).margin(0.1));
     CHECK(res.total_served_vehicles == Approx(4.0).margin(0.01));
+    CHECK(res.integrality_max_violation <= 1e-9);
   }
 }
 
 // =============================================================================
 // Test D6: Price asymmetry shifts flow to cheaper station
 // =============================================================================
-// Setting station 102 price very high → UserBenefitMax routes more vehicles
-// to station 101 (bus 1, cheap), until station 101 capacity is reached.
+// Setting station 102 price very high → UserBenefitMax routes all vehicles
+// to station 101 (bus 1, cheap), with optimized charge power within capacity.
 // =============================================================================
 TEST_CASE("FormD D6: UserBenefitMax — high price at station 102 → route shift",
           "[ev_power_traffic][formulation_d][lp][price_sensitivity]") {
@@ -454,7 +464,7 @@ TEST_CASE("FormD D6: UserBenefitMax — high price at station 102 → route shif
   // Set station 102 price very high: 5 $/kWh
   // Electricity cost per vehicle via route 2: 5 × 10 = $50/veh
   // Generalized cost: route 2 = 1.0h + 50 = 51.0 [$/veh]; route 1 = 0.5h + 0.03×10 = 0.8 [$/veh]
-  // → LP wants to maximize h1 (route 1) limited by station cap = 2 veh
+  // → LP wants to maximize h1 (route 1); exact p_ch variables make h1=4 feasible.
   StationPriceProfile pp2; pp2.station_id = 102;
   pp2.price_per_kwh.assign(6, 5.0);
   prob.station_prices.push_back(pp2);
@@ -470,10 +480,99 @@ TEST_CASE("FormD D6: UserBenefitMax — high price at station 102 → route shif
   const auto& rf = res.route_flow.at(1);
   const double h1 = rf.count(1) ? rf.at(1) : 0.0;
 
-  // Route 1 should be at station capacity (2 vehicles)
-  CHECK(h1 == Approx(2.0).margin(0.1));
+  // Route 1 should carry all demand.
+  CHECK(h1 == Approx(4.0).margin(0.1));
   // All 4 served (u_d = 0 since WTP >> cost)
   CHECK(res.total_served_vehicles >= 3.9);
+}
+
+// =============================================================================
+// Test D8: Time-varying road blockage profile
+// =============================================================================
+// Closing the first link on Route 1 at departure step 0 forces the LP to route
+// all demand over Route 2.  This validates that Formulation D uses
+// TrafficLink::availability_profile / capacity_profile_veh_per_hr rather than
+// only the scalar capacity_veh_per_hr field.
+// =============================================================================
+TEST_CASE("FormD D8: road availability profile blocks closed route",
+          "[ev_power_traffic][formulation_d][lp][road_fault]") {
+
+  auto prob = make_joint_opt_d_problem(4.0, 50.0, 10.0);
+  for (auto& link : prob.traffic.links) {
+    if (link.index == 11) {
+      link.availability_profile.assign(6, true);
+      link.availability_profile[0] = false;
+    }
+  }
+
+  const auto opts = make_d_options(/*opf=*/false);
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  REQUIRE(res.proven_optimal == true);
+  REQUIRE(res.route_flow.count(1));
+  const auto& rf = res.route_flow.at(1);
+  const double h1 = rf.count(1) ? rf.at(1) : 0.0;
+  const double h2 = rf.count(2) ? rf.at(2) : 0.0;
+
+  CHECK(h1 == Approx(0.0).margin(1e-6));
+  CHECK(h2 == Approx(4.0).margin(1e-6));
+  CHECK(res.total_served_vehicles == Approx(4.0).margin(1e-6));
+  CHECK(res.total_requested_energy_kwh == Approx(40.0).margin(1e-6));
+  CHECK(res.total_delivered_energy_kwh == Approx(40.0).margin(1e-6));
+}
+
+// =============================================================================
+// Test D9: V2G discharge variables and charge/discharge mode binaries
+// =============================================================================
+// A high-price V2G-capable stop with initial battery surplus should discharge
+// up to its power limit while respecting aggregate battery energy and
+// δ_ch + δ_dis ≤ 1 mode constraints.
+// =============================================================================
+TEST_CASE("FormD D9: V2G discharge with charge/discharge binaries",
+          "[ev_power_traffic][formulation_d][milp][v2g]") {
+
+  auto prob = make_joint_opt_d_problem(1.0, 50.0, 0.0);
+  REQUIRE_FALSE(prob.routes.empty());
+  REQUIRE_FALSE(prob.routes.front().charging_stops.empty());
+  auto& stop = prob.routes.front().charging_stops.front();
+  stop.dwell_steps = 2;
+  stop.v2g_capable = true;
+  stop.max_discharge_kw_per_vehicle = 10.0;
+
+  REQUIRE_FALSE(prob.demands.empty());
+  prob.demands.front().initial_energy_kwh = 50.0;
+  prob.demands.front().energy_min_kwh = 20.0;
+  prob.demands.front().energy_max_kwh = 60.0;
+  prob.demands.front().candidate_route_indices = {1};
+
+  StationPriceProfile pp; pp.station_id = 101;
+  pp.price_per_kwh.assign(6, 1.0);
+  prob.station_prices.push_back(pp);
+
+  auto opts = make_d_options(/*opf=*/false);
+  opts.mode = JointOptimizerMode::UserBenefitMax;
+  opts.allow_v2g = true;
+  opts.charge_discharge_binaries = true;
+  opts.default_charging_efficiency = 1.0;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  REQUIRE(res.feasible == true);
+  REQUIRE(res.proven_optimal == true);
+  REQUIRE(res.session_results.size() == 1u);
+
+  const auto& sr = res.session_results.front();
+  REQUIRE(sr.p_charge_kw.size() > 2u);
+  REQUIRE(sr.p_discharge_kw.size() > 2u);
+  REQUIRE(sr.energy_kwh.size() > 3u);
+
+  CHECK(sr.p_charge_kw[1] == Approx(0.0).margin(1e-7));
+  CHECK(sr.p_charge_kw[2] == Approx(0.0).margin(1e-7));
+  CHECK(sr.p_discharge_kw[1] == Approx(10.0).margin(1e-6));
+  CHECK(sr.p_discharge_kw[2] == Approx(10.0).margin(1e-6));
+  CHECK(sr.energy_kwh[3] == Approx(30.0).margin(1e-6));
+  CHECK(res.total_v2g_energy_kwh == Approx(20.0).margin(1e-6));
+  CHECK(res.integrality_max_violation <= 1e-9);
 }
 
 // =============================================================================

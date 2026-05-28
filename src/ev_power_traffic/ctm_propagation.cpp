@@ -128,6 +128,13 @@ inline double receiving(double n, double w, double delta,
   return dt * std::min(q_max, w * std::max(0.0, n_jam - n) / delta);
 }
 
+inline double ctm_effective_capacity_veh_hr(const TrafficLink& link,
+                                            int step,
+                                            double dt) {
+  if (dt <= kTol) return 0.0;
+  return link_capacity_vehicles(link, step, dt) / dt;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // 3.  Node turning fractions
 // ────────────────────────────────────────────────────────────────────────────
@@ -305,10 +312,12 @@ CTMSimulationResult ctm_forward_pass(
         if (!link_pos.count(entry_link)) continue;
         const std::size_t li = link_pos.at(entry_link);
         CTMLinkState& ls = link_states[li];
+        const double q_eff = ctm_effective_capacity_veh_hr(
+          problem.traffic.links[li], k, dt_ctm);
         const double recv = receiving(ls.cells[0].n,
                                       ls.backward_wave_speed_km_hr,
                                       ls.cell_length_km,
-                                      ls.max_flow_veh_per_hr,
+                        q_eff,
                                       ls.jam_occupancy_per_cell,
                                       dt_ctm);
         const double enter = std::min(x_rk, recv);
@@ -329,7 +338,8 @@ CTMSimulationResult ctm_forward_pass(
       const double vf = ls.free_flow_speed_km_hr;
       const double w  = ls.backward_wave_speed_km_hr;
       const double delta = ls.cell_length_km;
-      const double q_max = ls.max_flow_veh_per_hr;
+        const double q_max = ctm_effective_capacity_veh_hr(
+          problem.traffic.links[li], k, dt_ctm);
       const double n_jam = ls.jam_occupancy_per_cell;
 
       // Compute inter-cell flows y_{a,m->m+1} for m = 0..M-2
@@ -394,7 +404,8 @@ CTMSimulationResult ctm_forward_pass(
         const double S_a = sending(last_cell.n,
                                     a_ls.free_flow_speed_km_hr,
                                     a_ls.cell_length_km,
-                                    a_ls.max_flow_veh_per_hr,
+                      ctm_effective_capacity_veh_hr(
+                        problem.traffic.links[a_li], k, dt_ctm),
                                     dt_ctm);
 
         if (S_a <= kTol) continue;
@@ -441,7 +452,8 @@ CTMSimulationResult ctm_forward_pass(
           recv_out[oi] = receiving(b_ls.cells[0].n,
                                     b_ls.backward_wave_speed_km_hr,
                                     b_ls.cell_length_km,
-                                    b_ls.max_flow_veh_per_hr,
+                        ctm_effective_capacity_veh_hr(
+                          problem.traffic.links[out_links[oi]], k, dt_ctm),
                                     b_ls.jam_occupancy_per_cell,
                                     dt_ctm);
         }
@@ -512,7 +524,8 @@ CTMSimulationResult ctm_forward_pass(
         const double arr = sending(n_last,
                                     ls.free_flow_speed_km_hr,
                                     ls.cell_length_km,
-                                    ls.max_flow_veh_per_hr,
+                      ctm_effective_capacity_veh_hr(
+                        problem.traffic.links[li], k, dt_ctm),
                                     dt_ctm);
         if (k < static_cast<int>(res.station_arrivals.at(station_id).size())) {
           res.station_arrivals.at(station_id)[static_cast<std::size_t>(k)] += arr;
@@ -531,7 +544,9 @@ CTMSimulationResult ctm_forward_pass(
       const double last_exit = sending(ls.cells[static_cast<std::size_t>(ls.n_cells - 1)].n,
                                         ls.free_flow_speed_km_hr,
                                         ls.cell_length_km,
-                                        ls.max_flow_veh_per_hr, dt_ctm);
+                        ctm_effective_capacity_veh_hr(
+                          problem.traffic.links[li], k, dt_ctm),
+                        dt_ctm);
       lr.total_outflow_veh = last_exit;
       lr.mean_travel_time_hr =
           (last_exit > kTol)

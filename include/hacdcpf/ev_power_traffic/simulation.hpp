@@ -150,15 +150,18 @@ CTMJointWelfareResult simulate_ev_power_traffic_ctm_joint(
     EVPowerTrafficProblem problem,   // taken by value; prices mutated internally
     const CTMJointWelfareOptions& options = {});
 
-// ── Formulation D: Single LP/QP/MILP/MCP joint optimizer ─────────────────
+// ── Formulation D: Single LP/MILP joint optimizer ────────────────────────
 //
-// Simultaneously optimises route-assignment, EV charging loads, and
+// Simultaneously optimises route-assignment, EV charge/discharge schedules,
+// aggregate battery energy, time-varying road capacity, station limits, and
 // (optionally) generator dispatch + power balance in a single LP/MILP.
 // Returns a solver-certified optimal solution — no iterative coordination.
 //
 // LP structure  (see §Formulation D in the technical notebook)
 // ──────────────────────────────────────────────────────────────
 //   Variables: h_{d,r}  (route flow), u_d (unserved),
+//              p_ch, p_dis, e for aggregate route-stop charging groups,
+//              optional δ_ch/δ_dis mode binaries,
 //              P^g_{g,k}, θ_{b,k}, f_{ℓ,k}, ℓ^p_{b,k}  [if include_dcopf]
 //
 //   Equality:   demand balance, DC flow, DC power balance
@@ -180,6 +183,8 @@ struct JointOptimizerResult {
   double objective{0.0};        ///< primal objective value (negated; sign-convention: maximization)
   double best_bound{0.0};       ///< dual bound (= objective for LP; best_bound ≥ objective for MILP)
   double mip_gap{0.0};
+  double primal_max_violation{0.0};      ///< max bound/equality/inequality violation
+  double integrality_max_violation{0.0}; ///< max distance to nearest integer/binary value
   double solve_time_sec{0.0};
   int    n_variables{0};
   int    n_constraints{0};
@@ -205,6 +210,8 @@ struct JointOptimizerResult {
   // ── Charging and energy ────────────────────────────────────────────────
   double total_requested_energy_kwh{0.0};
   double total_delivered_energy_kwh{0.0};
+  double total_v2g_energy_kwh{0.0};
+  double total_unserved_energy_kwh{0.0};
 
   std::vector<EVChargingSession>     sessions;
   std::vector<ChargingSessionResult> session_results;
@@ -219,9 +226,10 @@ struct JointOptimizerResult {
   std::vector<std::string> warnings;
 };
 
-/// Formulation D entry point — single LP/QP/MILP/MCP assembly.
-/// Assembles route flows, station capacity, and optionally DC-OPF power
-/// balance into one mathematical program; solves with HiGHS or native LP.
+/// Formulation D entry point — single LP/MILP assembly.
+/// Assembles route flows, aggregate charge/discharge schedules, battery
+/// energy, station capacity, and optionally DC-OPF power balance into one
+/// mathematical program; solves with HiGHS or native LP/MILP.
 JointOptimizerResult solve_joint_optimizer(
     const EVPowerTrafficProblem& problem,
     const JointOptimizerOptions& options = {});

@@ -252,6 +252,46 @@ TEST_CASE("CTM-DUE: single-route no crash, route flow equals demand",
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Test case 1b: CTM propagation honors time-varying road availability
+// ──────────────────────────────────────────────────────────────────────────
+TEST_CASE("CTM-DUE: road availability profile blocks CTM inflow",
+          "[ctm][due][road_fault]") {
+  auto prob = make_single_route_problem();
+  for (auto& link : prob.traffic.links) {
+    if (link.index == 11) {
+      link.availability_profile.assign(6, true);
+      link.availability_profile[0] = false;
+    }
+  }
+
+  EVPowerTrafficOptions ev_opts;
+  ev_opts.num_steps = 6;
+  ev_opts.time_step_hr = 0.1;
+
+  CTMOptions ctm_opts;
+  ctm_opts.dt_ctm_hr = 0.02;
+  ctm_opts.n_cells_per_link = 3;
+
+  DUEOptions due_opts;
+  due_opts.max_iterations = 1;
+  due_opts.convergence_tol = 1e-2;
+
+  CTMDUEResult res = simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+  REQUIRE_FALSE(res.final_ctm.step_link_results.empty());
+  const auto& step0 = res.final_ctm.step_link_results.front();
+  bool saw_closed_link = false;
+  for (const auto& link_result : step0) {
+    if (link_result.link_index == 11) {
+      saw_closed_link = true;
+      CHECK(link_result.total_inflow_veh == Approx(0.0).margin(1e-9));
+      CHECK(link_result.total_outflow_veh == Approx(0.0).margin(1e-9));
+    }
+  }
+  CHECK(saw_closed_link == true);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Test case 2: Symmetric 2-route network — demand balance
 // ──────────────────────────────────────────────────────────────────────────
 TEST_CASE("CTM-DUE: symmetric 2-route — total flow equals demand",
@@ -300,13 +340,16 @@ TEST_CASE("CTM-DUE: symmetric 2-route — total flow equals demand",
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Test case 3: Symmetric network — MSA converges, both routes used
+// Test case 3: Symmetric network — logit MSA converges, both routes used
 // ──────────────────────────────────────────────────────────────────────────
-TEST_CASE("CTM-DUE: symmetric — MSA converges, both routes receive positive flow",
+TEST_CASE("CTM-DUE: symmetric — logit MSA converges, both routes receive positive flow",
           "[ctm][due][convergence]") {
-  // With symmetric routes and enough iterations, DUE should equalise costs.
-  // Since the network is symmetric and demand is modest (below capacity),
-  // the equilibrium is the equal-split (x_r1 ≈ x_r2 ≈ demand/2).
+  // With symmetric routes, stochastic logit assignment (logit_theta > 0)
+  // guarantees both routes receive flow proportional to exp(-theta*cost).
+  // At equal cost, each route gets demand/2 = 2 vehicles.
+  // NOTE: deterministic MSA (logit_theta = 0) may concentrate all flow on
+  // one route when routes have equal cost (AoN tie-breaking), so we use
+  // logit_theta = 2.0 to make positive-flow assertions meaningful.
   auto prob = make_symmetric_problem(4.0);
 
   EVPowerTrafficOptions ev_opts;
@@ -321,20 +364,22 @@ TEST_CASE("CTM-DUE: symmetric — MSA converges, both routes receive positive fl
   DUEOptions due_opts;
   due_opts.max_iterations = 50;
   due_opts.convergence_tol = 5e-3;
+  due_opts.logit_theta = 2.0;  // stochastic logit — ensures both routes get flow
 
   CTMDUEResult res = simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
 
   // Should converge for this small problem
   CHECK(res.converged);
 
-  // Both routes should have positive flow (DUE spreads flow on equal-cost routes)
+  // Both routes receive positive flow under logit assignment on equal-cost routes
   REQUIRE(res.flow_by_demand_route.count(1) > 0);
   const auto& rm = res.flow_by_demand_route.at(1);
   const double x1 = rm.count(1) ? rm.at(1) : 0.0;
   const double x2 = rm.count(2) ? rm.at(2) : 0.0;
-  CHECK(x1 >= 0.0);
-  CHECK(x2 >= 0.0);
-  // At symmetric equilibrium, both should be non-negligible (> 0.1 * demand)
+  // At symmetric equilibrium under logit, each route gets ≈ 2.0 vehicles.
+  // Check both are meaningfully positive (> 10% of demand = 0.4 vehicles).
+  CHECK(x1 >= 0.4);
+  CHECK(x2 >= 0.4);
   CHECK(x1 + x2 == Approx(4.0).epsilon(1e-4));
 
   // Convergence: relative gap below tolerance
@@ -687,9 +732,17 @@ TEST_CASE("CTM-DUE: price-of-anarchy benchmark — SO TSTT populated",
 
   // PoA ratio: for symmetric uncongested network DUE ≈ SO → ratio near 1.
   // Use a loose bound [0.5, 5.0] to be robust to BPR vs. CTM discrepancy.
+  // NOTE: for uncongested networks SO TSTT and DUE TSTT are both near 0
+  // (all vehicles travel at free-flow speed).  PoA = DUE/SO is 0/0 in this
+  // limit, so the ratio check is only meaningful when SO TSTT > 1e-9.
+  // When SO TSTT ≈ 0, we verify that DUE TSTT is also near free-flow by
+  // checking it is similarly small.
   if (res.so_tstt_hr > 1e-9) {
     CHECK(res.poa_tstt_ratio >= 0.5);
     CHECK(res.poa_tstt_ratio <= 5.0);
+  } else {
+    // Uncongested: both TSTT should be small (< 1.0 hr for 4 vehicles)
+    CHECK(res.due_tstt_hr < 1.0);
   }
 }
 

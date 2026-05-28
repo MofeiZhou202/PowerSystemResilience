@@ -5,17 +5,30 @@
 
 This chapter documents the mathematical model that is currently
 implemented in the \texttt{hacdcpf::evpt} module and then gives the
-solver-certified dynamic joint-optimization formulation that is now
-fully implemented and validated.  All four formulations (A--D) have
-direct code counterparts in the current source tree.  The regression
-test suite (\texttt{test\_ev\_power\_traffic.cpp},
+solver-certified joint-optimization model.
+Formulations~A--C are fully implemented and validated.
+Formulation~D is \emph{partially implemented}: the current
+\texttt{joint\_optimizer.cpp} assembles a solver-certified LP/MILP with
+route assignment, unserved demand, time-varying road-capacity profiles,
+aggregate battery-energy variables, charge/discharge power variables,
+optional charge/discharge mode binaries, station power limits, V2G, and
+optional DC-OPF power balance (validated in Case Study~7,
+\S\ref{sec:evpt-formulation-d-case}).
+The remaining theoretical scope of Formulation~D --- CTM cell dynamics
+inside the joint LP, elastic departure-time shifting, Wardrop MCP/KKT or
+big-M complementarity, QP/MIQP quadratic generation costs, AC/MINLP
+variants, and exact LMP dual extraction --- is specified in
+\S\ref{sec:evpt-formulation-d} and remains future implementation work.
+The regression test suite
+(\texttt{test\_ev\_power\_traffic.cpp},
 \texttt{test\_ev\_power\_traffic\_report.cpp},
 \texttt{test\_ev\_power\_traffic\_joint\_opt.cpp},
 \texttt{test\_ev\_power\_traffic\_largescale.cpp},
 \texttt{test\_ev\_power\_traffic\_ctm\_due.cpp},
 \texttt{test\_ev\_power\_traffic\_joint\_opt\_d.cpp}) provides
-reproducible numerical values for Formulations~A--D that are used as
-the running examples in this chapter.
+reproducible numerical values for the implemented models (A--C fully,
+D LP/MILP subset) that are used as the running examples in this
+chapter.
 
 \paragraph{Modeling formulation tiers.}
 To avoid confusion between what is currently implemented and what
@@ -40,10 +53,12 @@ named tiers:
     logit auxiliary assignment.  Implemented in
     \texttt{src/ev\_power\_traffic/ctm\_propagation.cpp}; entry point
     \texttt{simulate\_ev\_power\_traffic\_ctm\_due()}; validated by
-    \texttt{test\_ev\_power\_traffic\_ctm\_due.cpp} (7~test cases,
-    106~assertions).  \textbf{Limitation}: does not perform smart-charging
-    dispatch or DC-OPF coupling; station arrivals and EV load synthesis
-    remain future work for this path.
+    \texttt{test\_ev\_power\_traffic\_ctm\_due.cpp} (12~test cases,
+    142~assertions).  \textbf{Limitation}: CTM propagation honors road
+    availability/capacity profiles, but CTM variables are still not part
+    of the joint Formulation-D LP/MILP.  The B-only path synthesizes
+    charging sessions and EV loads after DUE, but it does not include
+    charging dispatch or DC-OPF variables in the CTM equilibrium solve.
   \item[Formulation~C.]
     Formulation~B plus iterative DC-OPF LMP price coordination
     (\textbf{implemented}): the CTM-DUE inner step provides EV loads per
@@ -55,18 +70,28 @@ named tiers:
     implementation: \texttt{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp};
     validated by \texttt{test\_ev\_power\_traffic\_ctm\_joint.cpp}
     (5~test cases, 43~assertions).
-  \item[Formulation~D (\textbf{implemented, validated};~\S\ref{sec:evpt-formulation-d-case}).]
-    Route assignment (free-flow arrival steps), optional DC-OPF power
-    balance, V2G, and station-capacity constraints are assembled into a
-    single LP/QP/MILP/MCP in one solver call.  Supports
-    \texttt{SocialWelfareMax}, \texttt{UserBenefitMax}, and
-    \texttt{UserEquilibriumMILP} objectives.  Solver certificates
-    (primal feasibility, dual bound, MIP gap) are populated for every
-    solve.  Entry point: \texttt{solve\_joint\_optimizer()};
+  \item[Formulation~D (\textbf{partially implemented, validated};~\S\ref{sec:evpt-formulation-d-case}).]
+    \emph{Currently assembled in LP/MILP:} free-flow route assignment
+    $h_{d,r}$, unserved-demand slack $u_d$, time-varying road-capacity
+    and availability profiles, aggregate charging-group battery energy
+    $e$, charge/discharge powers $p^{\text{ch}},p^{\text{dis}}$, optional
+    charge/discharge mode binaries $\delta^{\text{ch}},\delta^{\text{dis}}$,
+    station charge/discharge power limits, V2G, optional DC-OPF power
+    balance (generator dispatch $P^g$, bus angles $\theta$, branch flows
+    $f$), and power-balance slack --- in a single LP/MILP call.
+    Objective modes: \texttt{SocialWelfareMax}, \texttt{UserBenefitMax},
+    and \texttt{UserEquilibriumMILP} (integer route flows; \emph{not}
+    Wardrop big-M complementarity).  Solver certificates now report
+    primal maximum violation, integrality maximum violation, dual/best
+    bound, and MIP gap.
+    \emph{Not yet in LP/MILP:} CTM cell occupancy and inter-cell flow
+    variables $n,y$ inside Formulation~D; elastic/time-shifting demand
+    $z$; Wardrop MCP/KKT or big-M complementarity; QP/MIQP quadratic
+    generator costs; AC/MINLP variants; and exact LMP dual extraction.
+    Entry point: \texttt{solve\_joint\_optimizer()};
     implementation: \texttt{src/ev\_power\_traffic/joint\_optimizer.cpp};
-    validated by
-    \texttt{test\_ev\_power\_traffic\_joint\_opt\_d.cpp}
-    (7~test cases, 55~assertions).
+    validated by \texttt{test\_ev\_power\_traffic\_joint\_opt\_d.cpp}
+    (9~test cases, 86~assertions).
 \end{description}
 
 Sections~\ref{sec:evpt-traffic}--\ref{sec:evpt-jsw} describe
@@ -775,10 +800,25 @@ The factor of 1000 converts \$/MWh to \$/kWh.
 \label{sec:evpt-formulation-d}
 % ------------------------------------------------------------
 
-Formulation~D is the non-heuristic model class for the next
-\texttt{ev\_power\_traffic} implementation step.  It replaces
+This section specifies the full mathematical target for
+Formulation~D.
+\begin{remark}[Current implementation scope]
+  The current \texttt{joint\_optimizer.cpp} realises the LP/MILP parts of
+  requirements~1,~2,~4, and~5 below: road availability/capacity profiles,
+  aggregate battery-energy dynamics, charging and V2G discharge variables,
+  station limits, optional charge/discharge binaries, route-assignment
+  objective modes, optional DC-OPF power balance, and solver certificates.
+  Requirement~3 (elastic departure-time shifting), CTM cell dynamics inside
+  the joint LP, and the Wardrop MCP/KKT form of requirement~5 are specified
+  here as design targets and are not yet present in the source tree.
+  See Case Study~7 (\S\ref{sec:evpt-formulation-d-case}) for the
+  current numerical validation of the implemented LP/MILP subset.
+\end{remark}
+
+Formulation~D is the non-heuristic model class for the
+\texttt{ev\_power\_traffic} module.  It replaces
 capacity-aware greedy assignment, MSA-DUE, and LMP fixed-point iteration
-with a single mathematical program, or with a solver-certified
+with a single mathematical program or a solver-certified
 equilibrium complementarity model.  It is designed to answer the five
 requirements that are not fully covered by Formulations~A--C:
 \begin{enumerate}
@@ -1329,18 +1369,25 @@ The solver-certified execution pipeline is:
 \texttt{src/ev\_power\_traffic/ctm\_joint\_welfare.cpp}
   & Formulation~C: CTM-DUE + DC-OPF price coordination \\
 \texttt{src/ev\_power\_traffic/joint\_optimizer.cpp}
-  & Formulation~D: LP/QP/MILP/MCP joint optimizer (\S\ref{sec:evpt-formulation-d-case}) \\
+  & Formulation~D: route/charging/V2G/DC-OPF LP/MILP joint optimizer (\S\ref{sec:evpt-formulation-d-case}) \\
 \hline\hline
 \end{tabular}
 \end{center}
 
 \begin{remark}[Implementation boundary]
   The \texttt{joint\_optimizer.cpp} module implements the single-shot
-  LP/MILP assembly for Formulation~D.  It assembles the mathematical
-  program of Section~\ref{sec:evpt-formulation-d}, calls the selected
-  solver backend (NativeDualSimplex for LP, HiGHS or NativeB\&C for
-  MILP), and populates certificate fields
+  LP/MILP assembly for Formulation~D.  It assembles the
+  implemented LP/MILP subset of Section~\ref{sec:evpt-formulation-d}:
+  route flows, unserved demand, road availability/capacity profiles,
+  aggregate battery energy, charging and V2G discharge powers, optional
+  charge/discharge mode binaries, station limits, and optional DC-OPF.
+  CTM cell variables, elastic departure-time shifting, Wardrop MCP/KKT,
+  QP/MIQP quadratic generator costs, AC/MINLP variants, and exact LMP dual
+  extraction are not yet included.  The module calls the selected solver
+  backend (NativeDualSimplex for LP,
+  HiGHS or NativeB\&C for MILP), and populates certificate fields
   \texttt{proven\_optimal}, \texttt{best\_bound}, \texttt{mip\_gap},
+  \texttt{primal\_max\_violation}, \texttt{integrality\_max\_violation},
   and \texttt{solve\_time\_sec} in \texttt{JointOptimizerResult}.
   It does not call greedy assignment, MSA update, or price-smoothing
   routines.  See Section~\ref{sec:evpt-formulation-d-case} for
@@ -2139,25 +2186,33 @@ $\Delta t_{\mathrm{ctm}} = 0.02$~h.
 \begin{align}
   \mathrm{TSTT}^{\mathrm{DUE}} &= 0.4000\;\mathrm{veh \cdot h},
     \label{eq:evpt-b3-due-tstt} \\
-  \mathrm{TSTT}^{\mathrm{SO}} &= 0.4000\;\mathrm{veh \cdot h}
+  \mathrm{TSTT}^{\mathrm{SO}} &\approx 0.0000\;\mathrm{veh \cdot h}
     \quad\text{(Formulation~A LP, BPR-based)}, \\
-  \mathrm{PoA} &= 1.00.
+  \mathrm{PoA} &= \tfrac{\mathrm{TSTT}^{\mathrm{DUE}}}{\mathrm{TSTT}^{\mathrm{SO}}}
+    \quad\text{indeterminate ($0/0$ limit)}.
     \label{eq:evpt-b3-poa}
 \end{align}
-The price of anarchy equals~1, indicating that on this symmetric,
-lightly-loaded network, the DUE incurs no efficiency penalty relative to
-the system optimum.  This is the expected outcome: with four vehicles on
-links of capacity 20~veh/h, the BPR congestion term is
-$0.15\times(4/20)^4 \approx 1.5\times10^{-4}$, making both routes
-essentially free-flow and leaving no room for the SO to improve on the DUE.
+The SO TSTT is effectively zero because the Formulation-A LP minimises
+BPR-based travel time; with only four vehicles on links of capacity
+20~veh/h the BPR congestion term is
+$0.15\times(4/20)^4 \approx 1.5\times10^{-4}$, driving $\mathrm{TSTT}^{\mathrm{SO}}
+\to 0$.  The CTM-DUE accumulates a non-zero travel time (0.4000~veh$\cdot$h)
+because the CTM discrete-time propagation includes a baseline propagation
+cost even in free-flow conditions.  Because the SO denominator is
+numerically zero, the PoA ratio is $0/0$ (indeterminate) for this
+degenerate free-flow scenario; the test code reports a sentinel value of
+1.0000 and the test suite validates that $\mathrm{TSTT}^{\mathrm{DUE}} < 1.0$~veh$\cdot$h
+in the uncongested branch (see~\S\ref{sec:evpt-ctm-due-case}).
 
 \begin{remark}[Model discrepancy in PoA]
   The DUE TSTT uses CTM-propagated travel times, while the SO TSTT uses
-  BPR link functions.  On heavily-congested networks, the two models may
-  produce noticeably different travel times, making the PoA ratio only
-  approximate.  For rigorous PoA analysis on the same model, a
-  system-optimal CTM formulation (e.g., via bi-level programming) would be
-  required.
+  BPR link functions.  These two cost models are not directly comparable:
+  CTM assigns a positive free-flow cost while BPR yields near-zero cost
+  on lightly-loaded links.  A meaningful PoA benchmark requires either
+  (a) using the same cost model for both DUE and SO, or
+  (b) operating in the congested regime where BPR costs are also
+  significant.  Future work: implement a system-optimal CTM formulation
+  (e.g., via min-cost flow) to obtain a true same-model PoA.
 \end{remark}
 
 \subsubsection{Summary of Case Study~5 (Test~8--10 Regression)}
@@ -2174,7 +2229,7 @@ B3 & PoA benchmark, SO TSTT             &  8 & pass \\
 \hline
 \textbf{Total (Tests 8--10)} & & \textbf{20} & \textbf{pass} \\
 \hline\hline
-\multicolumn{4}{l}{\small CTM-DUE suite (Tests 1--11): 137 assertions in 11 test cases, all pass.}
+\multicolumn{4}{l}{\small CTM-DUE suite (Tests 1--12): 142 assertions in 12 test cases, all pass.}
 \end{tabular}
 \end{center}
 
@@ -2322,7 +2377,7 @@ C4 & Price-sensitive AoN route shift (high $\pi_{102}$) &  4 & pass \\
 \hline
 \textbf{Total (Tests C1--C4)} & & \textbf{43} & \textbf{pass} \\
 \hline\hline
-\multicolumn{4}{l}{\small Combined CTM suite: 137 + 43 = 180 assertions, all pass.}
+\multicolumn{4}{l}{\small Combined CTM suite: 142 + 43 = 185 assertions, all pass.}
 \end{tabular}
 \end{center}
 
@@ -2330,6 +2385,20 @@ C4 & Price-sensitive AoN route shift (high $\pi_{102}$) &  4 & pass \\
 \subsection{Numerical Case Study~7: Formulation~D --- Single LP/MILP Assembly}
 \label{sec:evpt-formulation-d-case}
 % ============================================================
+
+\begin{remark}[Scope of Case Study~7]
+  The tests in this case study exercise only the
+  \emph{currently implemented} LP/MILP scope: free-flow route assignment,
+  road availability/capacity profiles, aggregate battery-energy variables,
+  charge/discharge power variables, optional charge/discharge mode binaries,
+  station charge/discharge limits, V2G, and optional DC-OPF power balance
+  (generator dispatch, bus angles, branch flows).  CTM cell dynamics
+  ($n,y$) inside the joint LP, elastic demand ($z$), power-slack
+  minimisation to zero, exact LMP dual extraction, QP/MIQP quadratic
+  generator costs, AC/MINLP variants, and Wardrop MCP/KKT or big-M
+  complementarity are specified in \S\ref{sec:evpt-formulation-d} but are
+  \emph{not} exercised here.
+\end{remark}
 
 This case study validates the single-shot LP/MILP joint optimiser
 (\texttt{solve\_joint\_optimizer()},
@@ -2376,16 +2445,18 @@ departure step~$k=0$, routes~$\{1,2\}$.
 
 \subsubsection{Expected Optimal Solution}
 
-Station~101 caps route~1 at $\bar P_{101}/p_{\mathrm{veh}} =
-40/20 = 2$~vehicles.  The remaining 2 vehicles take route~2.
-At step~1 each station sees 2~vehicles charging at 20~kW/veh
-($=0.04$~MW per station).
+In the implemented Formulation-D LP, station power is an explicit
+decision variable.  Therefore station~101 does \emph{not} cap route~1 at
+$40/20=2$ vehicles; instead the optimizer chooses
+$p^{\mathrm{ch}}=40$~kW for all four vehicles, delivering exactly
+40~kWh over the one-hour dwell window.  All 4 vehicles take the shorter
+route~1, and station~101 sees 0.04~MW of EV load at step~1.
 
 \paragraph{Without OPF ($C_{\mathrm{gen}}=0$):}
 \begin{align}
   B_{\mathrm{EV}} &= 4 \times 50 = \$200, \\
-  C_{\mathrm{delay}} &= 1\,(2{\times}0.5 + 2{\times}1.0) = \$3, \\
-  W^* &= \$197.
+  C_{\mathrm{delay}} &= 1\,(4{\times}0.5) = \$2, \\
+  W^* &= \$198.
 \end{align}
 
 \paragraph{With DC-OPF coupling:}
@@ -2397,10 +2468,10 @@ and enforces
   = \sum_{\ell} B_\ell (\theta_{i_\ell,k}-\theta_{j_\ell,k}), \quad \forall b,k.
 \]
 G1 (bus~1, $c_1{=}10$) is cheapest and serves
-$P^g_{1,1} \approx 0.08$~MW:
+$P^g_{1,1} \approx 0.04$~MW:
 \begin{align}
-  C_{\mathrm{gen}} &= 10 \times 0.08 \times 1\,\mathrm{h} = \$0.80, \\
-  W^* &= 200 - 3 - 0.80 = \$196.20.
+  C_{\mathrm{gen}} &= 10 \times 0.04 \times 1\,\mathrm{h} = \$0.40, \\
+  W^* &= 200 - 2 - 0.40 = \$197.60.
 \end{align}
 
 \subsubsection{Test D1: SocialWelfareMax LP --- No OPF}
@@ -2412,13 +2483,14 @@ $P^g_{1,1} \approx 0.08$~MW:
 \hline
 \texttt{proven\_optimal}     & \texttt{true}          & \texttt{true}  \\
 \texttt{solver\_backend}     & NativeDualSimplex      & NativeDualSimplex \\
-$h_{1,1}$ (route 1)         & 2.00 veh               & 2.00 veh \\
-$h_{1,2}$ (route 2)         & 2.00 veh               & 2.00 veh \\
+$h_{1,1}$ (route 1)         & 4.00 veh               & 4.00 veh \\
+$h_{1,2}$ (route 2)         & 0.00 veh               & 0.00 veh \\
 Served vehicles              & 4.0                    & 4.0 \\
 $B_{\mathrm{EV}}$            & \$200.00               & \$200.00 \\
-$C_{\mathrm{delay}}$         & \$3.00                 & \$3.00 \\
+$C_{\mathrm{delay}}$         & \$2.00                 & \$2.00 \\
 $C_{\mathrm{gen}}$           & \$0.00                 & \$0.00 \\
-$W$                          & \$197.00               & \$197.00 \\
+$W$                          & \$198.00               & \$198.00 \\
+Delivered energy             & 40.0~kWh               & 40.0~kWh \\
 \hline\hline
 \end{tabular}
 \end{center}
@@ -2431,14 +2503,14 @@ $W$                          & \$197.00               & \$197.00 \\
 \textbf{Quantity} & \textbf{Expected} & \textbf{Actual (test)} \\
 \hline
 \texttt{proven\_optimal}     & \texttt{true}          & \texttt{true}  \\
-Variables ($n_{\mathrm{var}}$) & $>4$                & 45 \\
-$h_{1,1}$ (route 1)         & 2.00 veh               & 2.00 veh \\
-$h_{1,2}$ (route 2)         & 2.00 veh               & 2.00 veh \\
-$P^g_{1,1}$ (G1, step~1)    & $\approx$0.08~MW       & 0.08~MW \\
+Variables ($n_{\mathrm{var}}$) & $>4$                & 53 \\
+$h_{1,1}$ (route 1)         & 4.00 veh               & 4.00 veh \\
+$h_{1,2}$ (route 2)         & 0.00 veh               & 0.00 veh \\
+$P^g_{1,1}$ (G1, step~1)    & $\approx$0.04~MW       & 0.04~MW \\
 $B_{\mathrm{EV}}$            & \$200.00               & \$200.00 \\
-$C_{\mathrm{delay}}$         & \$3.00                 & \$3.00 \\
-$C_{\mathrm{gen}}$           & \$0.80                 & \$0.80 \\
-$W$                          & \$196.20               & \$196.20 \\
+$C_{\mathrm{delay}}$         & \$2.00                 & \$2.00 \\
+$C_{\mathrm{gen}}$           & \$0.40                 & \$0.40 \\
+$W$                          & \$197.60               & \$197.60 \\
 Solve time                   & $<1$\,s                & $\approx 2$\,ms \\
 \hline\hline
 \end{tabular}
@@ -2447,14 +2519,14 @@ Solve time                   & $<1$\,s                & $\approx 2$\,ms \\
 \subsubsection{Test D3: UserBenefitMax LP}
 
 With equal station prices ($\pi=0.03$\,\$/kWh), the user-benefit
-objective produces the same route split as SocialWelfareMax.
+objective produces the same all-on-route-1 solution as SocialWelfareMax.
 Electricity cost per vehicle: $0.03\times10=\$0.30$; total: $4\times\$0.30=\$1.20$.
 
 \[
-  U^* = 200 - 3.00 - 1.20 = \$195.80
+  U^* = 200 - 2.00 - 1.20 = \$196.80
 \]
 
-Result: \texttt{proven\_optimal = true}, $h_1=2$, $h_2=2$.
+Result: \texttt{proven\_optimal = true}, $h_1=4$, $h_2=0$.
 
 \subsubsection{Test D4: Social Welfare $W_D \geq W_C$}
 
@@ -2467,7 +2539,7 @@ differences: free-flow vs.\ CTM congestion) and both serve all
 \subsubsection{Test D5: MILP Integer-Flow Mode}
 
 With \texttt{UserEquilibriumMILP} mode, route flows are treated
-as integer variables.  The B\&C solver certifies $h_1=2$, $h_2=2$
+as integer variables.  The MILP solver certifies $h_1=4$, $h_2=0$
 with \texttt{mip\_gap}\,$\leq 10^{-3}$ and
 \texttt{proven\_optimal = true}.
 
@@ -2479,11 +2551,28 @@ station~101) under \texttt{UserBenefitMax}:
   \item Generalized cost route~1: $0.5 + 0.03\times10 = \$0.80$/veh.
   \item Generalized cost route~2: $1.0 + 5\times10 = \$51.00$/veh.
 \end{itemize}
-The LP drives all vehicles to route~1 until station~101 capacity
-is saturated ($h_1=2$), then routes the remaining 2 via route~2.
-Result: $h_1 = 2.00$, all 4 vehicles served.
+The LP drives all vehicles to route~1 and chooses the required charging
+schedule within station~101 capacity.  Result: $h_1 = 4.00$, all
+4 vehicles served.
 
-\subsubsection{Summary of Case Study~7 (Tests D1--D7)}
+\subsubsection{Test D8: Road Availability Profile}
+
+Closing link~11 (the first link of route~1) at departure step~0 via
+\texttt{availability\_profile[0]=false} enforces zero route~1 flow in the
+LP road-capacity row.  The optimizer routes all 4 vehicles to route~2:
+$h_1=0$, $h_2=4$, with 40~kWh requested and delivered.
+
+\subsubsection{Test D9: V2G and Charge/Discharge Mode Binaries}
+
+A one-vehicle route with initial battery energy 50~kWh, minimum energy
+20~kWh, two plugged-in steps, and
+\texttt{max\_discharge\_kw\_per\_vehicle=10} validates the V2G part of
+the LP/MILP.  With \texttt{allow\_v2g=true} and
+\texttt{charge\_discharge\_binaries=true}, the MILP chooses
+$p^{\mathrm{dis}}=10$~kW in each plugged-in step, no simultaneous charging,
+final energy 30~kWh, and total V2G energy 20~kWh.
+
+\subsubsection{Summary of Case Study~7 (Tests D1--D9)}
 
 \begin{center}
 \begin{tabular}{llcc}
@@ -2491,15 +2580,17 @@ Result: $h_1 = 2.00$, all 4 vehicles served.
 \textbf{Test} & \textbf{Feature verified} & \textbf{Assertions} &
   \textbf{Result} \\
 \hline
-D1 & SocialWelfareMax LP, proven optimal, route split, welfare   & 10 & pass \\
+D1 & SocialWelfareMax LP, exact charging, certificate residuals  & 14 & pass \\
 D2 & SocialWelfareMax + DC-OPF coupling, G1 dispatch, gen cost   &  9 & pass \\
-D3 & UserBenefitMax LP, electricity cost, same route split       &  4 & pass \\
+D3 & UserBenefitMax LP, electricity cost, same route choice      &  4 & pass \\
 D4 & $W_D \geq W_C - 5$ (LP globally optimal vs.\ iterative)     &  2 & pass \\
-D5 & MILP integer-flow mode, MIP gap $\leq 10^{-3}$             &  5 & pass \\
+D5 & MILP integer-flow mode, MIP gap $\leq 10^{-3}$             &  6 & pass \\
 D6 & Price asymmetry route shift (high $\pi_{102}$)              &  2 & pass \\
 D7 & Verbose analysis printout (no assertion failures)           &  2 & pass \\
+D8 & Road availability profile blocks closed route               &  7 & pass \\
+D9 & V2G discharge with charge/discharge binaries                & 16 & pass \\
 \hline
-\textbf{Total (Tests D1--D7)} & & \textbf{55} & \textbf{pass} \\
+\textbf{Total (Tests D1--D9)} & & \textbf{86} & \textbf{pass} \\
 \hline\hline
 \multicolumn{4}{l}{\small All 477 regression tests pass (debug build, Apple M4).}
 \end{tabular}
@@ -2507,8 +2598,8 @@ D7 & Verbose analysis printout (no assertion failures)           &  2 & pass \\
 
 \begin{remark}[Formulation~D vs.\ Formulation~C comparison]
   Formulation~D produces a solver certificate in a single LP/MILP call
-  (NativeDualSimplex, $\approx$2\,ms for the 2-bus case with 45 variables
-  and 25 constraints).  Formulation~C requires 20+ iterative DC-OPF
+  (NativeDualSimplex, $\approx$5\,ms for the 2-bus case with 53 variables
+  and 45 constraints).  Formulation~C requires 20+ iterative DC-OPF
   plus CTM-DUE calls to converge.  The LP welfare bound $W_D$ dominates
   $W_C$ by construction because every feasible solution of the iterative
   scheme is also feasible for the joint LP.

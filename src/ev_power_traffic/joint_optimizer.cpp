@@ -1,19 +1,24 @@
 // joint_optimizer.cpp
 // ──────────────────────────────────────────────────────────────────────────
-// Formulation D: single LP/QP/MILP/MCP joint optimizer for EV-power-traffic.
+// Formulation D: single LP/MILP joint optimizer for EV-power-traffic.
 //
 // Key innovation over Formulations A/B/C
 // ─────────────────────────────────────────
 //   A: routing-only LP (no DC-OPF in the LP objective)
 //   C: iterative CTM-DUE ↔ DC-OPF price coordination (converged, not certified)
-//   D: route-assignment + DC-OPF power balance assembled into ONE LP/MILP,
-//      solved by a primal-certified optimal solver (HiGHS / native dual simplex).
+//   D: route-assignment + charging/V2G + DC-OPF power balance assembled into
+//      ONE LP/MILP, solved by a primal-certified optimal solver (HiGHS /
+//      native dual simplex).
 //
 // LP structure  (§Formulation D, technical notebook)
 // ───────────────────────────────────────────────────
 // Variables
 //   h_{d,r}     ≥ 0                 vehicles on demand d, route r
 //   u_d         ≥ 0                 unserved vehicles for demand d
+//   p^ch_{v,k}  ≥ 0                aggregate charge power [kW]
+//   p^dis_{v,k} ≥ 0                aggregate V2G discharge power [kW]
+//   e_{v,k}     ≥ 0                aggregate battery energy [kWh]
+//   δ^ch,δ^dis  ∈ {0,1}            optional mode binaries
 //   P^g_{g,k}   ∈ [Pmin,Pmax]      generator dispatch [MW]     (if OPF)
 //   θ_{b,k}     free                bus voltage angle [rad]     (if OPF)
 //   f_{ℓ,k}     ∈ [-Fmax,Fmax]     branch active flow [MW]     (if OPF)
@@ -21,16 +26,18 @@
 //
 // Equality constraints
 //   Demand balance   :  Σ_r h_{d,r} + u_d = D_d                (one/demand)
+//   Battery dynamics :  e_{v,k+1}=e_{v,k}+η p^ch Δt-p^dis Δt/η
 //   DC flow          :  f_{ℓ,k} − b_ℓ θ_{i,k} + b_ℓ θ_{j,k} = 0
 //   DC power balance :  Σ_g P^g_{g,k}[g@b] − Σ_ℓ A_{bℓ} f_{ℓ,k}
 //                       − P^{EV}_{b,k}(h) + ℓ^p_{b,k} = P^d_{b,k}
 //
 // Inequality constraints
-//   Road capacity    :  Σ_{d,r: a∈r, k_dep=k} h_{d,r} ≤ cap_a·Δt
-//   Station capacity :  Σ_{d,r: stop at s, k∈window} p_per_veh·h_{d,r} ≤ P̄^ch_s
+//   Road capacity    :  Σ_{d,r: a∈r, k_dep=k} h_{d,r} ≤ cap_{a,k}·Δt
+//   Station capacity :  Σ_v p^ch_{v,k} ≤ P̄^ch_s, Σ_v p^dis_{v,k} ≤ P̄^dis_s
+//   Power links      :  p^ch≤p̄^ch h, p^dis≤p̄^dis h, SOC bounds/terminal target
 //
-// The EV load at bus b at step k is a LINEAR function of route flows:
-//   P^{EV}_{b,k}[MW] = 1e-3 · Σ_{d,r,s: bus(s)=b, k∈window} p_per_veh · h_{d,r}
+// The EV load at bus b at step k is a LINEAR function of charge/discharge vars:
+//   P^{EV}_{b,k}[MW] = 1e-3 · Σ_{v:s(v)@b} (p^ch_{v,k}-p^dis_{v,k})
 //
 // This linearity is the key that makes Formulation D a pure LP.
 //
@@ -72,6 +79,11 @@ struct JOColumn {
     BusAngle,         // θ_{b,k}
     BranchFlow,       // f_{ℓ,k}
     PowerSlack,       // ℓ^p_{b,k}
+    ChargePower,      // p^ch_{v,k}
+    DischargePower,   // p^dis_{v,k}
+    BatteryEnergy,    // e_{v,k}
+    ChargeMode,       // δ^ch_{v,k}
+    DischargeMode,    // δ^dis_{v,k}
   };
   Kind   kind{Kind::RouteFlow};
   int    demand_pos{-1};     // index into active_demand_positions
@@ -84,6 +96,13 @@ struct JOColumn {
   int    bus_pos{-1};    // index into sys.ac.buses
   int    branch_pos{-1}; // index into sys.ac.branches
   int    step{-1};       // time step for gen/bus/branch columns
+  int    session_pos{-1}; // index into Form-D route-stop charging groups
+  int    offset{-1};      // local offset inside a charging group window
+};
+
+struct PendingEq {
+  std::vector<std::pair<int, double>> terms;
+  double rhs{0.0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -99,6 +118,36 @@ static double jo_charge_power_kw_per_veh(const RouteChargingStop& stop,
   if (stop.requested_energy_kwh_per_vehicle > kTol && dwell_hr > kTol)
     return stop.requested_energy_kwh_per_vehicle / dwell_hr;
   return opts.default_route_stop_power_kw_per_vehicle;
+}
+
+static double jo_route_drive_energy_kwh_per_veh(
+    const RouteAlternative& route,
+    const EVPowerTrafficProblem& problem,
+    const std::unordered_map<int, std::size_t>& link_pos) {
+  double energy = 0.0;
+  for (int link_index : route.link_indices) {
+    const auto it = link_pos.find(link_index);
+    if (it == link_pos.end()) continue;
+    const auto& link = problem.traffic.links[it->second];
+    energy += std::max(0.0, link.drive_energy_kwh_per_veh_km) *
+              std::max(0.0, link.length_km);
+  }
+  return energy;
+}
+
+static double jo_station_effective_cap_kw(const HybridPowerSystem& sys,
+                                          const JointOptimizerOptions& opts,
+                                          int station_id) {
+  for (const auto& cs : sys.ac.charging_stations) {
+    if (cs.index != station_id) continue;
+    if (!cs.in_service) return 0.0;
+    double cap = cs.max_power_kw > 0.0 ? cs.max_power_kw
+               : static_cast<double>(cs.n_fast) * cs.p_fast_max_kw +
+                 static_cast<double>(cs.n_slow) * cs.p_slow_max_kw;
+    if (cap <= kTol) cap = opts.default_station_power_kw;
+    return std::max(0.0, cap * std::clamp(cs.simultaneity_factor, 0.0, 1.0));
+  }
+  return opts.default_station_power_kw;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,10 +188,7 @@ jo_station_cap_kw(const HybridPowerSystem& sys,
                   const JointOptimizerOptions& opts) {
   std::unordered_map<int, double> m;
   for (const auto& cs : sys.ac.charging_stations) {
-    double cap = cs.max_power_kw > 0.0 ? cs.max_power_kw
-               : static_cast<double>(cs.n_fast) * cs.p_fast_max_kw;
-    if (cap <= kTol) cap = opts.default_station_power_kw;
-    m[cs.index] = cap;
+    m[cs.index] = jo_station_effective_cap_kw(sys, opts, cs.index);
   }
   return m;
 }
@@ -194,6 +240,41 @@ static void jo_warn(JointOptimizerResult& r,
   r.warnings.push_back(msg);
   if (verbose)
     std::fprintf(stderr, "[JointOptimizer] WARNING: %s\n", msg.c_str());
+}
+
+static void jo_compute_certificate_residuals(JointOptimizerResult& result,
+                                             const engine::MIPModel& mip,
+                                             const Eigen::VectorXd& x) {
+  const auto& lp = mip.linear_part;
+  double primal = 0.0;
+  double integ = 0.0;
+
+  for (int j = 0; j < x.size() && j < static_cast<int>(lp.vars.size()); ++j) {
+    const auto& var = lp.vars[static_cast<std::size_t>(j)];
+    primal = std::max(primal, std::max(0.0, var.lb - x[j]));
+    primal = std::max(primal, std::max(0.0, x[j] - var.ub));
+  }
+
+  if (lp.Aeq.rows() > 0) {
+    const Eigen::VectorXd r = lp.Aeq * x - lp.beq;
+    for (int i = 0; i < r.size(); ++i)
+      primal = std::max(primal, std::abs(r[i]));
+  }
+  if (lp.A.rows() > 0) {
+    const Eigen::VectorXd r = lp.A * x - lp.b;
+    for (int i = 0; i < r.size(); ++i)
+      primal = std::max(primal, std::max(0.0, r[i]));
+  }
+
+  auto check_integral = [&](int idx) {
+    if (idx < 0 || idx >= x.size()) return;
+    integ = std::max(integ, std::abs(x[idx] - std::round(x[idx])));
+  };
+  for (int idx : mip.integer_idx) check_integral(idx);
+  for (int idx : mip.binary_idx)  check_integral(idx);
+
+  result.primal_max_violation = primal;
+  result.integrality_max_violation = integ;
 }
 
 } // anonymous namespace
@@ -275,11 +356,6 @@ JointOptimizerResult solve_joint_optimizer(
   for (std::size_t li = 0; li < problem.traffic.links.size(); ++li)
     link_pos[problem.traffic.links[li].index] = li;
 
-  const std::size_t n_links = problem.traffic.links.size();
-  std::vector<double> link_cap(n_links, std::numeric_limits<double>::infinity());
-  for (std::size_t li = 0; li < n_links; ++li)
-    link_cap[li] = problem.traffic.links[li].capacity_veh_per_hr * dt;
-
   // ── Build LP variable columns ───────────────────────────────────────────
   engine::MIPModel mip;
   engine::LPModel& lp = mip.linear_part;
@@ -319,8 +395,36 @@ JointOptimizerResult solve_joint_optimizer(
     int col_idx{-1};
     int arrival_step{-1};
   };
+  struct ChargingEntry {
+    int demand_pos{-1};
+    int route_col_idx{-1};
+    const RouteAlternative* route{nullptr};
+    int station_id{0};
+    int arrival_step{0};
+    int departure_step{0};
+    int window{1};
+    double vehicles_ub{0.0};
+    double requested_kwh_per_veh{0.0};
+    double p_ch_max_per_veh{0.0};
+    double p_dis_max_per_veh{0.0};
+    double eta_ch{1.0};
+    double eta_dis{1.0};
+    double e_arrival_per_veh{0.0};
+    double e_min_per_veh{0.0};
+    double e_max_per_veh{0.0};
+    double e_target_per_veh{0.0};
+    bool has_e_max{false};
+    bool v2g{false};
+    std::vector<int> pch_cols;
+    std::vector<int> pdis_cols;
+    std::vector<int> energy_cols;
+    std::vector<int> dch_cols;
+    std::vector<int> ddis_cols;
+  };
   std::vector<std::vector<RouteEntry>> demand_routes(
       static_cast<std::size_t>(n_eq_demand));
+  std::vector<ChargingEntry> charging_entries;
+  std::vector<PendingEq> pending_eqs;
 
   for (int ei = 0; ei < n_eq_demand; ++ei) {
     const int di = active_demand_pos[static_cast<std::size_t>(ei)];
@@ -383,6 +487,143 @@ JointOptimizerResult solve_joint_optimizer(
 
       eq_trips.emplace_back(ei, cidx, 1.0);
       demand_routes[static_cast<std::size_t>(ei)].push_back({route, cidx, arr});
+
+      const double drive_kwh_per_veh =
+          jo_route_drive_energy_kwh_per_veh(*route, problem, link_pos);
+      double e_arrival = 0.0;
+      double e_min = 0.0;
+      double e_max = 0.0;
+      bool has_e_max = false;
+      if (demand.initial_energy_kwh >= 0.0) {
+        e_arrival = std::max(0.0, demand.initial_energy_kwh - drive_kwh_per_veh);
+        e_min = std::max(0.0, demand.energy_min_kwh);
+        if (demand.energy_max_kwh >= 0.0) {
+          e_max = std::max(e_min, demand.energy_max_kwh);
+          has_e_max = true;
+          e_arrival = std::min(e_arrival, e_max);
+        }
+      }
+
+      for (const auto& stop : route->charging_stops) {
+        const int window = std::max(1, stop.dwell_steps);
+        ChargingEntry ce;
+        ce.demand_pos = di;
+        ce.route_col_idx = cidx;
+        ce.route = route;
+        ce.station_id = stop.station_id;
+        ce.arrival_step = arr;
+        ce.departure_step = std::min(T, arr + window);
+        ce.window = std::max(1, ce.departure_step - ce.arrival_step);
+        ce.vehicles_ub = demand.vehicles;
+        ce.requested_kwh_per_veh = std::max(0.0, stop.requested_energy_kwh_per_vehicle);
+        ce.p_ch_max_per_veh = jo_charge_power_kw_per_veh(stop, opts, dt);
+        ce.p_dis_max_per_veh = (opts.allow_v2g && stop.v2g_capable)
+            ? std::max(0.0, stop.max_discharge_kw_per_vehicle)
+            : 0.0;
+        ce.eta_ch = std::max(opts.default_charging_efficiency, kTol);
+        ce.eta_dis = std::max(opts.default_charging_efficiency, kTol);
+        ce.e_arrival_per_veh = e_arrival;
+        ce.e_min_per_veh = e_min;
+        ce.has_e_max = has_e_max;
+        ce.e_target_per_veh = ce.requested_kwh_per_veh > kTol
+          ? e_arrival + ce.requested_kwh_per_veh
+          : ce.e_min_per_veh;
+        ce.e_max_per_veh = has_e_max
+            ? e_max
+            : std::max(ce.e_target_per_veh + ce.p_ch_max_per_veh * ce.window * dt,
+                       ce.e_arrival_per_veh + ce.requested_kwh_per_veh);
+        ce.v2g = ce.p_dis_max_per_veh > kTol;
+        const int session_pos = static_cast<int>(charging_entries.size());
+
+        for (int off = 0; off <= ce.window; ++off) {
+          JOColumn ec;
+          ec.kind = JOColumn::Kind::BatteryEnergy;
+          ec.demand_pos = di;
+          ec.route = route;
+          ec.session_pos = session_pos;
+          ec.step = ce.arrival_step + off;
+          ec.offset = off;
+          const double e_ub = std::max(ce.e_max_per_veh, ce.e_target_per_veh) *
+                              std::max(ce.vehicles_ub, 1.0);
+          ce.energy_cols.push_back(add_col(ec, 0.0, std::max(e_ub, 1.0e-6), 0.0,
+              "e_d" + std::to_string(demand.index) + "_r" +
+              std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
+              "_o" + std::to_string(off), false));
+        }
+
+        for (int off = 0; off < ce.window; ++off) {
+          const int k = ce.arrival_step + off;
+          JOColumn pc;
+          pc.kind = JOColumn::Kind::ChargePower;
+          pc.demand_pos = di;
+          pc.route = route;
+          pc.session_pos = session_pos;
+          pc.step = k;
+          pc.offset = off;
+          const double price = jo_station_price(problem, opts, stop.station_id, k);
+          const double ch_cost = (opts.mode == JointOptimizerMode::UserBenefitMax)
+              ? opts.station_energy_cost_weight * price * dt
+              : 0.0;
+          ce.pch_cols.push_back(add_col(pc, 0.0,
+              ce.p_ch_max_per_veh * std::max(ce.vehicles_ub, 0.0), ch_cost,
+              "pch_d" + std::to_string(demand.index) + "_r" +
+              std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
+              "_k" + std::to_string(k), false));
+
+          JOColumn pd;
+          pd.kind = JOColumn::Kind::DischargePower;
+          pd.demand_pos = di;
+          pd.route = route;
+          pd.session_pos = session_pos;
+          pd.step = k;
+          pd.offset = off;
+          const double dis_cost = (opts.mode == JointOptimizerMode::UserBenefitMax)
+              ? -opts.station_energy_cost_weight * price * dt
+              : 0.0;
+          ce.pdis_cols.push_back(add_col(pd, 0.0,
+              ce.p_dis_max_per_veh * std::max(ce.vehicles_ub, 0.0), dis_cost,
+              "pdis_d" + std::to_string(demand.index) + "_r" +
+              std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
+              "_k" + std::to_string(k), false));
+
+          if (opts.charge_discharge_binaries) {
+            JOColumn dc;
+            dc.kind = JOColumn::Kind::ChargeMode;
+            dc.demand_pos = di;
+            dc.route = route;
+            dc.session_pos = session_pos;
+            dc.step = k;
+            dc.offset = off;
+            ce.dch_cols.push_back(add_col(dc, 0.0, 1.0, 0.0,
+                "dch_d" + std::to_string(demand.index) + "_r" +
+                std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
+                "_k" + std::to_string(k), true));
+
+            JOColumn dd;
+            dd.kind = JOColumn::Kind::DischargeMode;
+            dd.demand_pos = di;
+            dd.route = route;
+            dd.session_pos = session_pos;
+            dd.step = k;
+            dd.offset = off;
+            ce.ddis_cols.push_back(add_col(dd, 0.0, 1.0, 0.0,
+                "ddis_d" + std::to_string(demand.index) + "_r" +
+                std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
+                "_k" + std::to_string(k), true));
+          }
+        }
+
+        pending_eqs.push_back({{{ce.energy_cols.front(), 1.0},
+                                {ce.route_col_idx, -ce.e_arrival_per_veh}}, 0.0});
+        for (int off = 0; off < ce.window; ++off) {
+          pending_eqs.push_back({{{ce.energy_cols[static_cast<std::size_t>(off + 1)], 1.0},
+                                  {ce.energy_cols[static_cast<std::size_t>(off)], -1.0},
+                                  {ce.pch_cols[static_cast<std::size_t>(off)], -ce.eta_ch * dt},
+                                  {ce.pdis_cols[static_cast<std::size_t>(off)], dt / ce.eta_dis}}, 0.0});
+        }
+
+        charging_entries.push_back(std::move(ce));
+      }
     }
 
     // Unserved demand u_d
@@ -499,8 +740,13 @@ JointOptimizerResult solve_joint_optimizer(
   // ────────────────────────────────────────────────────────────────────────
 
   int n_eq_total = n_eq_demand;
+  int eq_energy_start = -1;
   int eq_flow_start  = -1;
   int eq_pbal_start  = -1;
+  if (!pending_eqs.empty()) {
+    eq_energy_start = n_eq_total;
+    n_eq_total += static_cast<int>(pending_eqs.size());
+  }
   if (opts.include_dcopf) {
     eq_flow_start = n_eq_total;
     n_eq_total   += n_branches * T;
@@ -515,6 +761,15 @@ JointOptimizerResult solve_joint_optimizer(
   for (int ei = 0; ei < n_eq_demand; ++ei)
     beq[ei] = beq_demand[static_cast<std::size_t>(ei)];
   aeq_trips.insert(aeq_trips.end(), eq_trips.begin(), eq_trips.end());
+
+  if (eq_energy_start >= 0) {
+    for (int i = 0; i < static_cast<int>(pending_eqs.size()); ++i) {
+      const int row = eq_energy_start + i;
+      beq[row] = pending_eqs[static_cast<std::size_t>(i)].rhs;
+      for (const auto& [col, coeff] : pending_eqs[static_cast<std::size_t>(i)].terms)
+        aeq_trips.emplace_back(row, col, coeff);
+    }
+  }
 
   if (opts.include_dcopf) {
     // Block B: DC flow  f_{ℓ,k} − b_ℓ θ_{i,k} + b_ℓ θ_{j,k} = 0
@@ -583,22 +838,15 @@ JointOptimizerResult solve_joint_optimizer(
           }
         }
 
-        // EV load from route flows: −P^{EV}_{b,k}(h) on left → coefficients in Aeq
-        // P^{EV}_{b,k}[MW] = 1e-3 × Σ_{d,r,s: bus(s)=b, k∈window} p_per_veh × h_{d,r}
-        for (int ei = 0; ei < n_eq_demand; ++ei) {
-          for (const auto& re : demand_routes[static_cast<std::size_t>(ei)]) {
-            if (re.route == nullptr || re.col_idx < 0) continue;
-            for (const auto& stop : re.route->charging_stops) {
-              const auto it = stn_bus_map.find(stop.station_id);
-              if (it == stn_bus_map.end() || it->second != bus.index) continue;
-              const int window = std::max(1, stop.dwell_steps);
-              for (int off = 0; off < window; ++off) {
-                if (re.arrival_step + off != k) continue;
-                const double p_kw = jo_charge_power_kw_per_veh(stop, opts, dt);
-                // −P^{EV} term: coefficient is −(p_kw/1000) in power balance
-                aeq_trips.emplace_back(row, re.col_idx, -(p_kw / 1000.0));
-              }
-            }
+        // EV load from charge/discharge variables:
+        // −P^{EV} = −(p_ch-p_dis)/1000 in the power-balance equation.
+        for (const auto& ce : charging_entries) {
+          const auto it = stn_bus_map.find(ce.station_id);
+          if (it == stn_bus_map.end() || it->second != bus.index) continue;
+          for (int off = 0; off < ce.window; ++off) {
+            if (ce.arrival_step + off != k) continue;
+            aeq_trips.emplace_back(row, ce.pch_cols[static_cast<std::size_t>(off)], -1.0 / 1000.0);
+            aeq_trips.emplace_back(row, ce.pdis_cols[static_cast<std::size_t>(off)], 1.0 / 1000.0);
           }
         }
       }
@@ -617,6 +865,7 @@ JointOptimizerResult solve_joint_optimizer(
 
   std::map<std::pair<int,int>, int> road_rows;
   std::map<std::pair<int,int>, int> stn_rows;
+  std::map<std::pair<int,int>, int> stn_dis_rows;
   std::map<int, int>                gen_cap_rows;  // step → row
 
   std::vector<Eigen::Triplet<double>> aineq_trips;
@@ -642,6 +891,13 @@ JointOptimizerResult solve_joint_optimizer(
     return it->second;
   };
 
+  auto stn_dis_row = [&](int step, int station_id, double rhs) -> int {
+    const auto key = std::make_pair(step, station_id);
+    auto [it, ins] = stn_dis_rows.emplace(key, -1);
+    if (ins) it->second = add_ineq_row(rhs);
+    return it->second;
+  };
+
   auto gen_cap_row = [&](int step, double rhs) -> int {
     auto [it, ins] = gen_cap_rows.emplace(step, -1);
     if (ins) it->second = add_ineq_row(rhs);
@@ -662,35 +918,77 @@ JointOptimizerResult solve_joint_optimizer(
         for (int li : re.route->link_indices) {
           const auto it = link_pos.find(li);
           if (it == link_pos.end()) continue;
-          const double cap = link_cap[it->second];
+          const double cap = link_capacity_vehicles(
+              problem.traffic.links[it->second], k_dep, dt);
           if (!std::isfinite(cap)) continue;
           const int row = road_row(k_dep, li, cap);
           aineq_trips.emplace_back(row, re.col_idx, 1.0);
         }
       }
+    }
+  }
 
-      // Station capacity
-      for (const auto& stop : re.route->charging_stops) {
-        const double p_kw = jo_charge_power_kw_per_veh(stop, opts, dt);
-        if (p_kw <= kTol) continue;
-        const double stn_cap = stn_cap_kw.count(stop.station_id)
-                               ? stn_cap_kw.at(stop.station_id)
-                               : opts.default_station_power_kw;
-        const int window = std::max(1, stop.dwell_steps);
-        for (int off = 0; off < window; ++off) {
-          const int k = re.arrival_step + off;
-          if (k < 0 || k >= T) continue;
-          const int row = stn_row(k, stop.station_id, stn_cap);
-          aineq_trips.emplace_back(row, re.col_idx, p_kw);
+  for (const auto& ce : charging_entries) {
+    const int hcol = ce.route_col_idx;
+    for (int off = 0; off < ce.window; ++off) {
+      const int k = ce.arrival_step + off;
+      const int pch = ce.pch_cols[static_cast<std::size_t>(off)];
+      const int pdis = ce.pdis_cols[static_cast<std::size_t>(off)];
 
-          // Optional: total generation headroom (kW → same units)
-          if (opts.enforce_generation_capacity) {
-            const int gr = gen_cap_row(k, ev_headroom_kw);
-            aineq_trips.emplace_back(gr, re.col_idx, p_kw);
-          }
-        }
+      int row = add_ineq_row(0.0);
+      aineq_trips.emplace_back(row, pch, 1.0);
+      aineq_trips.emplace_back(row, hcol, -ce.p_ch_max_per_veh);
+
+      row = add_ineq_row(0.0);
+      aineq_trips.emplace_back(row, pdis, 1.0);
+      aineq_trips.emplace_back(row, hcol, -ce.p_dis_max_per_veh);
+
+      const double stn_cap = stn_cap_kw.count(ce.station_id)
+                             ? stn_cap_kw.at(ce.station_id)
+                             : opts.default_station_power_kw;
+      const int sr = stn_row(k, ce.station_id, stn_cap);
+      aineq_trips.emplace_back(sr, pch, 1.0);
+      const int sdr = stn_dis_row(k, ce.station_id, stn_cap);
+      aineq_trips.emplace_back(sdr, pdis, 1.0);
+
+      if (opts.enforce_generation_capacity) {
+        const int gr = gen_cap_row(k, ev_headroom_kw);
+        aineq_trips.emplace_back(gr, pch, 1.0);
+        aineq_trips.emplace_back(gr, pdis, -1.0);
+      }
+
+      if (opts.charge_discharge_binaries &&
+          off < static_cast<int>(ce.dch_cols.size()) &&
+          off < static_cast<int>(ce.ddis_cols.size())) {
+        const int dch = ce.dch_cols[static_cast<std::size_t>(off)];
+        const int ddis = ce.ddis_cols[static_cast<std::size_t>(off)];
+        row = add_ineq_row(0.0);
+        aineq_trips.emplace_back(row, pch, 1.0);
+        aineq_trips.emplace_back(row, dch, -ce.p_ch_max_per_veh * ce.vehicles_ub);
+        row = add_ineq_row(0.0);
+        aineq_trips.emplace_back(row, pdis, 1.0);
+        aineq_trips.emplace_back(row, ddis, -ce.p_dis_max_per_veh * ce.vehicles_ub);
+        row = add_ineq_row(1.0);
+        aineq_trips.emplace_back(row, dch, 1.0);
+        aineq_trips.emplace_back(row, ddis, 1.0);
       }
     }
+
+    for (int off = 0; off <= ce.window; ++off) {
+      const int ecol = ce.energy_cols[static_cast<std::size_t>(off)];
+      int row = add_ineq_row(0.0);
+      aineq_trips.emplace_back(row, ecol, -1.0);
+      aineq_trips.emplace_back(row, hcol, ce.e_min_per_veh);
+      if (ce.has_e_max || ce.e_max_per_veh < 1.0e8) {
+        row = add_ineq_row(0.0);
+        aineq_trips.emplace_back(row, ecol, 1.0);
+        aineq_trips.emplace_back(row, hcol, -ce.e_max_per_veh);
+      }
+    }
+    const int terminal = ce.energy_cols.back();
+    const int tr = add_ineq_row(0.0);
+    aineq_trips.emplace_back(tr, terminal, -1.0);
+    aineq_trips.emplace_back(tr, hcol, ce.e_target_per_veh);
   }
 
   lp.A.resize(static_cast<int>(b_vals.size()), n_vars);
@@ -705,9 +1003,10 @@ JointOptimizerResult solve_joint_optimizer(
 
   if (opts.verbose) {
     std::fprintf(stderr,
-        "[JointOptimizer] model: %d vars, %d eq, %d ineq, mode=%d, OPF=%d\n",
+      "[JointOptimizer] model: %d vars, %d eq, %d ineq, mode=%d, OPF=%d, charge_groups=%zu\n",
         n_vars, n_eq_total, static_cast<int>(b_vals.size()),
-        static_cast<int>(opts.mode), opts.include_dcopf ? 1 : 0);
+      static_cast<int>(opts.mode), opts.include_dcopf ? 1 : 0,
+      charging_entries.size());
   }
 
   // ── Solve ────────────────────────────────────────────────────────────────
@@ -768,7 +1067,10 @@ JointOptimizerResult solve_joint_optimizer(
       result.solver_status  = hr.stats.status;
       result.objective  = hr.stats.objective;
       result.mip_gap    = hr.stats.mip_gap;
-      result.best_bound = result.objective * (1.0 - result.mip_gap);
+      // HiGHS reports mip_gap = (obj - bound) / max(1, |obj|); infer bound
+      // using the same convention as assignment_lp.cpp and NativeB&C.
+      result.best_bound = inferred_minimization_bound(result.objective,
+                                                      result.mip_gap);
       result.proven_optimal = solved &&
                               std::isfinite(result.mip_gap) &&
                               result.mip_gap <= opts.mip_gap + 1e-9;
@@ -782,7 +1084,6 @@ JointOptimizerResult solve_joint_optimizer(
     }
   }
 
-  result.feasible = solved;
   const auto t_end = steady_clock::now();
   result.solve_time_sec =
       duration_cast<microseconds>(t_end - t_start).count() * 1e-6;
@@ -792,6 +1093,12 @@ JointOptimizerResult solve_joint_optimizer(
     return result;
   }
 
+  jo_compute_certificate_residuals(result, mip, x_sol);
+  const double cert_tol = is_mip_solve ? 1.0e-6 : 1.0e-7;
+  result.feasible = solved && result.primal_max_violation <= cert_tol &&
+                    result.integrality_max_violation <= cert_tol;
+  result.proven_optimal = result.proven_optimal && result.feasible;
+
   // ── Decode solution ─────────────────────────────────────────────────────
   int next_session = 0;
 
@@ -800,7 +1107,11 @@ JointOptimizerResult solve_joint_optimizer(
     const auto& col = cols[static_cast<std::size_t>(j)];
     double val = x_sol[j];
     if (!std::isfinite(val)) val = 0.0;
-    if (is_mip_solve) val = std::round(val);
+    if (is_mip_solve &&
+        j < static_cast<int>(lp.vars.size()) &&
+        lp.vars[static_cast<std::size_t>(j)].type != engine::VarType::Continuous) {
+      val = std::round(val);
+    }
 
     if (col.kind == JOColumn::Kind::RouteFlow) {
       if (val < kTol) continue;
@@ -827,35 +1138,6 @@ JointOptimizerResult solve_joint_optimizer(
           demand.index, route->index, col.departure_step,
           val, 0.0, ff_hr, true, "formulation-d-lp"});
 
-      // Sessions
-      for (const auto& stop : route->charging_stops) {
-        if (col.arrival_step >= T) continue;
-        EVChargingSession sess;
-        sess.index         = next_session++;
-        sess.station_id    = stop.station_id;
-        sess.arrival_step  = col.arrival_step;
-        sess.departure_step = std::min(T, col.arrival_step + std::max(1, stop.dwell_steps));
-        sess.vehicle_count = val;
-        const double e_req = std::max(0.0, stop.requested_energy_kwh_per_vehicle * val);
-        sess.energy_initial_kwh = 0.0;
-        sess.energy_target_kwh  = e_req;
-        sess.energy_min_kwh     = 0.0;
-        const double p_kw = jo_charge_power_kw_per_veh(stop, opts, dt);
-        sess.max_charge_kw  = p_kw * val;
-        sess.max_discharge_kw = stop.v2g_capable
-                                ? (stop.max_discharge_kw_per_vehicle > 0
-                                   ? stop.max_discharge_kw_per_vehicle * val
-                                   : p_kw * val)
-                                : 0.0;
-        sess.energy_max_kwh = e_req + sess.max_discharge_kw * dt;
-        sess.eta_charge     = opts.default_charging_efficiency;
-        sess.eta_discharge  = opts.default_charging_efficiency;
-        sess.v2g_capable    = stop.v2g_capable && opts.allow_v2g;
-        sess.source_demand_index = demand.index;
-        sess.source_route_index  = route->index;
-        result.sessions.push_back(sess);
-        result.total_requested_energy_kwh += e_req;
-      }
     } else if (col.kind == JOColumn::Kind::UnservedDemand) {
       if (val > kTol) {
         result.total_unserved_vehicles += val;
@@ -866,6 +1148,66 @@ JointOptimizerResult solve_joint_optimizer(
             val, 0.0, 0.0, false, "formulation-d unmet demand"});
       }
     }
+  }
+
+  for (const auto& ce : charging_entries) {
+    const double h = std::isfinite(x_sol[ce.route_col_idx]) ? x_sol[ce.route_col_idx] : 0.0;
+    if (h <= kTol || ce.route == nullptr) continue;
+    const auto& demand = problem.demands[static_cast<std::size_t>(ce.demand_pos)];
+
+    EVChargingSession sess;
+    sess.index = next_session++;
+    sess.station_id = ce.station_id;
+    sess.arrival_step = ce.arrival_step;
+    sess.departure_step = ce.departure_step;
+    sess.vehicle_count = h;
+    sess.energy_initial_kwh = ce.e_arrival_per_veh * h;
+    sess.energy_target_kwh = ce.e_target_per_veh * h;
+    sess.energy_min_kwh = ce.e_min_per_veh * h;
+    sess.energy_max_kwh = ce.e_max_per_veh * h;
+    sess.max_charge_kw = ce.p_ch_max_per_veh * h;
+    sess.max_discharge_kw = ce.p_dis_max_per_veh * h;
+    sess.eta_charge = ce.eta_ch;
+    sess.eta_discharge = ce.eta_dis;
+    sess.v2g_capable = ce.v2g;
+    sess.source_demand_index = demand.index;
+    sess.source_route_index = ce.route->index;
+
+    ChargingSessionResult sr;
+    sr.session_index = sess.index;
+    sr.station_id = ce.station_id;
+    sr.p_charge_kw.assign(static_cast<std::size_t>(T), 0.0);
+    sr.p_discharge_kw.assign(static_cast<std::size_t>(T), 0.0);
+    sr.energy_kwh.assign(static_cast<std::size_t>(T + 1), 0.0);
+
+    for (int off = 0; off < ce.window; ++off) {
+      const int k = ce.arrival_step + off;
+      if (k < 0 || k >= T) continue;
+      const double pch = std::max(0.0, x_sol[ce.pch_cols[static_cast<std::size_t>(off)]]);
+      const double pdis = std::max(0.0, x_sol[ce.pdis_cols[static_cast<std::size_t>(off)]]);
+      sr.p_charge_kw[static_cast<std::size_t>(k)] = pch;
+      sr.p_discharge_kw[static_cast<std::size_t>(k)] = pdis;
+      result.total_delivered_energy_kwh += ce.eta_ch * pch * dt;
+      result.total_v2g_energy_kwh += pdis * dt / ce.eta_dis;
+    }
+    for (int off = 0; off <= ce.window; ++off) {
+      const int k = ce.arrival_step + off;
+      if (k < 0 || k > T) continue;
+      sr.energy_kwh[static_cast<std::size_t>(k)] =
+          std::max(0.0, x_sol[ce.energy_cols[static_cast<std::size_t>(off)]]);
+    }
+    for (int k = 1; k <= T; ++k) {
+      if (sr.energy_kwh[static_cast<std::size_t>(k)] <= kTol)
+        sr.energy_kwh[static_cast<std::size_t>(k)] =
+            sr.energy_kwh[static_cast<std::size_t>(k - 1)];
+    }
+    sr.unserved_energy_kwh = std::max(0.0,
+        sess.energy_target_kwh - sr.energy_kwh[static_cast<std::size_t>(sess.departure_step)]);
+    result.total_unserved_energy_kwh += sr.unserved_energy_kwh;
+
+    result.total_requested_energy_kwh += ce.requested_kwh_per_veh * h;
+    result.sessions.push_back(sess);
+    result.session_results.push_back(std::move(sr));
   }
 
   // DC-OPF variable decoding
@@ -891,10 +1233,6 @@ JointOptimizerResult solve_joint_optimizer(
 
   // Social welfare
   result.social_welfare = result.ev_benefit - result.traffic_delay_cost - result.gen_cost;
-
-  // Total delivered energy estimate (assuming sessions fully charged)
-  for (const auto& sess : result.sessions)
-    result.total_delivered_energy_kwh += sess.energy_target_kwh;
 
   if (opts.verbose) {
     std::fprintf(stderr,

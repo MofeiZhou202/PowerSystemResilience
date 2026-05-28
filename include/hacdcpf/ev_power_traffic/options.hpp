@@ -138,26 +138,33 @@ struct CTMJointWelfareOptions {
   opf::DCOPFOptions     dcopf_opts;
 };
 
-// ── Formulation D: Single LP/QP/MILP/MCP joint optimizer ─────────────────
+// ── Formulation D: Single LP/MILP joint optimizer ────────────────────────
 //
-// Assembles route-assignment variables, EV charging loads, station power
-// limits, and optional DC-OPF power balance into a single LP/MILP and
-// solves it with a certified optimal solver.  Unlike the iterative
-// Formulation C (CTM-DUE + DC-OPF price coordination), Formulation D
-// produces a provably optimal social-welfare or user-benefit maximiser in
-// a single solver call.
+// Assembles route-assignment variables, aggregate EV charging/discharging
+// schedules, battery-energy constraints, station power limits, time-varying
+// road-capacity profiles, and optional DC-OPF power balance into a single
+// LP/MILP and solves it with a certified optimal solver.  Unlike the
+// iterative Formulation C (CTM-DUE + DC-OPF price coordination), Formulation D
+// produces a solver-certified social-welfare or user-benefit maximiser in a
+// single solver call.  Full CTM cell dynamics and MCP Wardrop complementarity
+// are documented in the technical notebook but are not part of this entry
+// point yet.
 //
 // Key differences from Formulations A/B/C:
 //   A: routes only LP, no DC-OPF coupling in the LP
 //   C: iterative CTM-DUE ↔ DC-OPF coordination (converged, not certified)
-//   D: simultaneous routes + DC-OPF in one LP/MILP (solver-certified)
+//   D: simultaneous routes + charging/V2G + DC-OPF in one LP/MILP
+//      (solver-certified; no MSA/greedy repair)
 //
 // Mathematical model — Eq. evpt-d-*  (technical notebook §Formulation D)
 
 enum class JointOptimizerMode {
   SocialWelfareMax,    ///< max W = B_EV − C_gen − C_delay  (Eq. evpt-d-social-welfare)
   UserBenefitMax,      ///< max U = B_EV − elec_cost − C_delay (Eq. evpt-d-user-benefit)
-  UserEquilibriumMILP, ///< Wardrop DUE via big-M complementarity (Eq. evpt-d-ue-milp)
+  UserEquilibriumMILP, ///< Integer route flows solved by MILP.
+                       ///< \b Not Wardrop big-M complementarity: DUE
+                       ///< complementarity constraints are \b not yet
+                       ///< implemented in joint_optimizer.cpp.
 };
 
 struct JointOptimizerOptions {
@@ -171,12 +178,19 @@ struct JointOptimizerOptions {
   /// reduces to a route-assignment-only formulation (same as Formulation A).
   bool include_dcopf{false};
 
-  /// Include V2G discharge.  Currently reserved; route-level discharge
-  /// models are post-processed after the LP solve.
+  /// Include V2G discharge variables \c p_dis in the Formulation-D LP/MILP.
+  /// When false, all discharge columns have zero upper bound.  When true,
+  /// route stops with \c v2g_capable=true and positive
+  /// \c max_discharge_kw_per_vehicle may discharge subject to the aggregate
+  /// battery-energy equations, station discharge limit, and optional mode
+  /// binaries below.
   bool allow_v2g{false};
 
-  /// Add binary δ^{ch}, δ^{dis} to prevent simultaneous charge/discharge.
-  /// Omitting yields the LP relaxation (exact when η < 1 and c_deg ≥ 0).
+  /// Add binary δ^{ch}, δ^{dis} mode variables for every route-stop-time
+  /// charging group and enforce δ^{ch}+δ^{dis}≤1.  This makes the model a
+  /// MILP.  Route flows and unserved demand are also integer when the demand
+  /// volume is integral, matching the existing UserEquilibriumMILP integer
+  /// route-flow mode.
   bool charge_discharge_binaries{false};
 
   // ── Road and station defaults (passed to the routing sub-problem) ────
