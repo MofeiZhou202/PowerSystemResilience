@@ -114,6 +114,24 @@ hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
 # a VSC converter, a DC microgrid, and DER generation.
 hacdcpf_add_test(test_distribution_pipeline test_distribution_pipeline.cpp)
 
+# EV power-traffic dynamic simulation: road blockage, unmet travel demand,
+# station load synthesis, V2G reverse power, and power-capacity validation.
+hacdcpf_add_test(test_ev_power_traffic test_ev_power_traffic.cpp)
+
+# EV power-traffic numerical results report: per-step traffic flow, charging
+# load, V2G discharge, queue state, and power balance for four scenarios.
+hacdcpf_add_test(test_ev_power_traffic_report test_ev_power_traffic_report.cpp)
+
+# Large-scale EV fleet routing benchmark:
+#   IEEE-118 bus grid, 100 fast-charging stations, 10x10 traffic grid,
+#   10 000 fleet vehicles, CapacityAwareGreedy vs SystemOptimalLP.
+hacdcpf_add_test(test_ev_power_traffic_largescale test_ev_power_traffic_largescale.cpp)
+
+# Joint power-traffic social welfare maximisation:
+#   2-bus grid (cheap + peaker generator), 2 routes, 5 EV vehicles.
+#   LMP-coupled iterative decomposition: traffic LP + DC-OPF per step.
+hacdcpf_add_test(test_ev_power_traffic_joint_opt test_ev_power_traffic_joint_opt.cpp)
+
 # Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
 # runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).
 # TC-1 (symbol linkage + project tree check) runs unconditionally.

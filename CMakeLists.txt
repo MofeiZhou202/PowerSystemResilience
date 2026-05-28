@@ -100,7 +100,11 @@ set(HACDCPF_SOURCES
   # ── validation ────────────────────────────────────────────────────────────
   src/validation/validate_system.cpp
   # ── api ──────────────────────────────────────────────────────────────────
-  src/api/hacdcpf.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
+  src/api/hacdcpf.cpp
+  # ── EV power-traffic coupling ───────────────────────────────────────────
+  src/ev_power_traffic/ev_power_traffic_simulation.cpp
+  src/ev_power_traffic/joint_social_welfare.cpp
+  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
   # ── graph analysis & reduction ────────────────────────────────────────
