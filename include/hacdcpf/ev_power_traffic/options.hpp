@@ -197,19 +197,15 @@ struct JointOptimizerOptions {
   /// reduces to a route-assignment-only formulation (same as Formulation A).
   bool include_dcopf{false};
 
-  /// Include V2G discharge variables \c p_dis in the Formulation-D LP/MILP.
+  /// Include V2G discharge variables \c p_dis in the Formulation-D LP.
   /// When false, all discharge columns have zero upper bound.  When true,
   /// route stops with \c v2g_capable=true and positive
   /// \c max_discharge_kw_per_vehicle may discharge subject to the aggregate
-  /// battery-energy equations, station discharge limit, and optional mode
-  /// binaries below.
+  /// battery-energy equations and station discharge limit.
+  /// Simultaneous charge/discharge at the same step is never cost-optimal
+  /// (Proposition 1 in the technical notebook), so no binary mode variables
+  /// are needed; the model remains a pure LP.
   bool allow_v2g{false};
-
-  /// Add binary δ^{ch}, δ^{dis} mode variables for every route-stop-time
-  /// charging group and enforce δ^{ch}+δ^{dis}≤1.  This makes the model a
-  /// MILP.  Route flows and unserved demand are also integer when
-  /// IntegerRouteMILP is selected and the demand volume is integral.
-  bool charge_discharge_binaries{false};
 
   // ── Road and station defaults (passed to the routing sub-problem) ────
   bool enforce_road_capacity{true};

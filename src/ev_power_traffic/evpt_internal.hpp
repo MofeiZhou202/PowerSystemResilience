@@ -127,6 +127,25 @@ inline double station_price(const EVPowerTrafficProblem& problem,
   return options.default_station_price_per_kwh;
 }
 
+// ── Schedule delay cost (eq:icv-schedule-delay) ───────────────────────────
+//
+// C^{schedule,F}_{w,r,k}(h) = γ_e · max(0, t*_w − t^arr) + γ_l · max(0, t^arr − t*_w)
+//
+// Parameters:
+//   t_arr_hr      — experienced arrival time [hr]:  t^arr = k·Δt + T^exp_{r,k}
+//   t_star_hr     — desired arrival time t*_w [hr]; negative = not set (returns 0)
+//   gamma_early   — γ_e [$/hr] — penalty per unit of early arrival
+//   gamma_late    — γ_l [$/hr] — penalty per unit of late arrival
+// Returns: schedule delay cost [$/vehicle].
+inline double schedule_delay_cost(double t_arr_hr,
+                                  double t_star_hr,
+                                  double gamma_early,
+                                  double gamma_late) noexcept {
+  if (t_star_hr < 0.0) return 0.0;
+  return gamma_early * std::max(0.0, t_star_hr - t_arr_hr) +
+         gamma_late  * std::max(0.0, t_arr_hr  - t_star_hr);
+}
+
 // ── Route cost helpers ─────────────────────────────────────────────────────
 
 // Forward-declare route_arrival_step so route_generalized_cost can use it.
@@ -162,6 +181,15 @@ inline double route_generalized_cost(
   for (const auto& stop : route.charging_stops) {
     charging_cost += station_price(problem, options, stop.station_id, step) *
                      stop.requested_energy_kwh_per_vehicle;
+    // V2G revenue: subtract π^dis · E^dis (eq:ev-energy-cost).
+    // C^energy = Σ(π^ch · p^ch − π^dis · p^dis) · Δt
+    // Uses station charging price as π^dis; callers may set separate
+    // discharge prices via station_discharge_prices in the future.
+    if (stop.v2g_capable &&
+        stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+      charging_cost -= station_price(problem, options, stop.station_id, step) *
+                       stop.requested_discharge_energy_kwh_per_vehicle;
+    }
   }
 
   // ── omega_Q * Σ_s W_{s, kappa(s,r,k)} (eq. evpt-generalized-cost) ────────
@@ -229,6 +257,12 @@ inline double route_free_flow_generalized_cost(
   for (const auto& stop : route.charging_stops) {
     charging_cost += station_price(problem, options, stop.station_id, step) *
                      stop.requested_energy_kwh_per_vehicle;
+    // V2G revenue: subtract π^dis · E^dis (eq:ev-energy-cost).
+    if (stop.v2g_capable &&
+        stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+      charging_cost -= station_price(problem, options, stop.station_id, step) *
+                       stop.requested_discharge_energy_kwh_per_vehicle;
+    }
   }
 
   return options.value_of_time_per_hr * travel_hr +
@@ -411,7 +445,13 @@ inline bool route_can_deliver_requested_energy(const RouteAlternative& route,
   return true;
 }
 
-// Battery SOC feasibility check (eqs. evpt-route-soc, evpt-route-soc-bounds).
+// Battery SOC feasibility check (eqs. evpt-route-soc, evpt-route-soc-bounds,
+// eq:soc-feasibility).
+// Two constraints are checked at every link traversal:
+//   1. Battery floor:    e_{v,k} ≥ E_min (energy_min_kwh)
+//   2. Mobility reserve: e_{v,k} − E^rem_{v,k} ≥ e^res_v (reserve_energy_kwh)
+// Constraint 2 uses the cumulative remaining drive energy from the current
+// position to the destination.  It is active only when demand.reserve_energy_kwh > 0.
 inline bool route_soc_feasible(const RouteAlternative& route,
                                const EVDemand& demand,
                                const EVPowerTrafficProblem& problem,
@@ -429,19 +469,42 @@ inline bool route_soc_feasible(const RouteAlternative& route,
   }
   if (!has_drive_data) return true;
 
-  const double E_min = demand.energy_min_kwh;
-  const double E_max = demand.energy_max_kwh >= 0.0
-                           ? demand.energy_max_kwh
-                           : std::numeric_limits<double>::infinity();
+  const double E_min    = demand.energy_min_kwh;
+  const double E_max    = demand.energy_max_kwh >= 0.0
+                              ? demand.energy_max_kwh
+                              : std::numeric_limits<double>::infinity();
+  const double e_res    = demand.reserve_energy_kwh;  // e^res_v
   double E = demand.initial_energy_kwh;
   if (E < E_min - kTol || E > E_max + kTol) return false;
 
-  for (int link_idx : route.link_indices) {
-    auto it = link_pos.find(link_idx);
+  // Pre-compute remaining drive energy from each position (right-to-left sum).
+  // e_rem[i] = total drive energy from link i through the end of the route.
+  const int n_links = static_cast<int>(route.link_indices.size());
+  std::vector<double> e_rem(static_cast<std::size_t>(n_links + 1), 0.0);
+  for (int i = n_links - 1; i >= 0; --i) {
+    auto it = link_pos.find(route.link_indices[static_cast<std::size_t>(i)]);
+    double seg = 0.0;
+    if (it != link_pos.end()) {
+      const auto& lnk = problem.traffic.links[it->second];
+      seg = lnk.drive_energy_kwh_per_veh_km * lnk.length_km;
+    }
+    e_rem[static_cast<std::size_t>(i)] =
+        e_rem[static_cast<std::size_t>(i + 1)] + seg;
+  }
+
+  for (int i = 0; i < n_links; ++i) {
+    auto it = link_pos.find(route.link_indices[static_cast<std::size_t>(i)]);
     if (it == link_pos.end()) continue;
     const auto& link = problem.traffic.links[it->second];
     E -= link.drive_energy_kwh_per_veh_km * link.length_km;
+    // Constraint 1: battery floor
     if (E < E_min - kTol) return false;
+    // Constraint 2: mobility reserve — e_{v,k} − E^rem_{v,k} ≥ e^res_v
+    // E^rem[i+1] = drive energy still needed after traversing link i
+    if (e_res > kTol &&
+        E - e_rem[static_cast<std::size_t>(i + 1)] < e_res - kTol) {
+      return false;
+    }
   }
 
   for (const auto& stop : route.charging_stops) {

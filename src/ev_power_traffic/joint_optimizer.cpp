@@ -365,8 +365,7 @@ JointOptimizerResult solve_joint_optimizer(
   std::vector<double>            obj;
   std::vector<engine::VariableMeta> vars;
 
-  const bool use_milp = (opts.mode == JointOptimizerMode::IntegerRouteMILP) ||
-                        opts.charge_discharge_binaries;
+  const bool use_milp = (opts.mode == JointOptimizerMode::IntegerRouteMILP);
   if (opts.mode == JointOptimizerMode::IntegerRouteMILP) {
     jo_warn(result,
             "IntegerRouteMILP enforces integral route/unserved variables only; "
@@ -424,8 +423,6 @@ JointOptimizerResult solve_joint_optimizer(
     std::vector<int> pch_cols;
     std::vector<int> pdis_cols;
     std::vector<int> energy_cols;
-    std::vector<int> dch_cols;
-    std::vector<int> ddis_cols;
   };
   std::vector<std::vector<RouteEntry>> demand_routes(
       static_cast<std::size_t>(n_eq_demand));
@@ -580,31 +577,6 @@ JointOptimizerResult solve_joint_optimizer(
               std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
               "_k" + std::to_string(k), false));
 
-          if (opts.charge_discharge_binaries) {
-            JOColumn dc;
-            dc.kind = JOColumn::Kind::ChargeMode;
-            dc.demand_pos = di;
-            dc.route = route;
-            dc.session_pos = session_pos;
-            dc.step = k;
-            dc.offset = off;
-            ce.dch_cols.push_back(add_col(dc, 0.0, 1.0, 0.0,
-                "dch_d" + std::to_string(demand.index) + "_r" +
-                std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
-                "_k" + std::to_string(k), true));
-
-            JOColumn dd;
-            dd.kind = JOColumn::Kind::DischargeMode;
-            dd.demand_pos = di;
-            dd.route = route;
-            dd.session_pos = session_pos;
-            dd.step = k;
-            dd.offset = off;
-            ce.ddis_cols.push_back(add_col(dd, 0.0, 1.0, 0.0,
-                "ddis_d" + std::to_string(demand.index) + "_r" +
-                std::to_string(route->index) + "_s" + std::to_string(stop.station_id) +
-                "_k" + std::to_string(k), true));
-          }
         }
 
         pending_eqs.push_back({{{ce.energy_cols.front(), 1.0},
@@ -954,21 +926,6 @@ JointOptimizerResult solve_joint_optimizer(
         aineq_trips.emplace_back(gr, pdis, -1.0);
       }
 
-      if (opts.charge_discharge_binaries &&
-          off < static_cast<int>(ce.dch_cols.size()) &&
-          off < static_cast<int>(ce.ddis_cols.size())) {
-        const int dch = ce.dch_cols[static_cast<std::size_t>(off)];
-        const int ddis = ce.ddis_cols[static_cast<std::size_t>(off)];
-        row = add_ineq_row(0.0);
-        aineq_trips.emplace_back(row, pch, 1.0);
-        aineq_trips.emplace_back(row, dch, -ce.p_ch_max_per_veh * ce.vehicles_ub);
-        row = add_ineq_row(0.0);
-        aineq_trips.emplace_back(row, pdis, 1.0);
-        aineq_trips.emplace_back(row, ddis, -ce.p_dis_max_per_veh * ce.vehicles_ub);
-        row = add_ineq_row(1.0);
-        aineq_trips.emplace_back(row, dch, 1.0);
-        aineq_trips.emplace_back(row, ddis, 1.0);
-      }
     }
 
     for (int off = 0; off <= ce.window; ++off) {

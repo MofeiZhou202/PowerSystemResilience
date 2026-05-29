@@ -602,50 +602,110 @@ double wardrop_relative_gap(
     const std::vector<std::vector<double>>& route_flow,   // [k_dep_ctm][route_pos]
     const CTMSimulationResult& ctm_res,
     const std::unordered_map<int, int>& route_pos_map,
+    const EVPowerTrafficOptions& ev_opts,
     int T_ctm,
     int R) {
 
-  double tstt = 0.0;  // Total System Travel Time under current flows
-  double mstt = 0.0;  // Min route cost for each demand unit
+  // ε^E = Σ_{w,r,k} h^E_{w,r,k} · (Ψ^E_{w,r,k} − μ^E_w)
+  //       ────────────────────────────────────────────────────  (eq:ev-gap)
+  //       Σ_w D^E_w · |μ^E_w| + ε
+  //
+  // Ψ^E_{w,r,k} = T^CTM_{r,k} + Σ_s π_{s,k} · E_{r,s}/VOT − V2G/VOT
+  //               + schedule_delay_cost(...) / VOT     (eq:psi-ev, eq:icv-schedule-delay)
+  // All terms in time-equivalent hours.
+
+  double numerator   = 0.0;  // Σ h^E · (Ψ^E − μ^E_w)
+  double denominator = 0.0;  // Σ D^E_w · |μ^E_w|
+
+  const double vot = std::max(ev_opts.value_of_time_per_hr, kTol);
+  const double ew  = ev_opts.station_energy_cost_weight;
 
   for (const auto& demand : problem.demands) {
-    // Map simulation departure step -> CTM departure step
     const int k_dep_ctm = demand.departure_step * R;
+    const int k_sim     = demand.departure_step;
     if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
 
-    // Find minimum experienced travel time across all candidate routes
-    double min_tt = std::numeric_limits<double>::infinity();
+    // Departure time [hr] for schedule delay computation
+    const double t_dep_hr = k_sim * ev_opts.time_step_hr;
+
+    // ── Compute μ^E_w = min_r Ψ^E_{w,r,k} ────────────────────────────
+    double mu_w = std::numeric_limits<double>::infinity();
     for (const auto& route : problem.routes) {
       if (route.origin_node != demand.origin_node ||
           route.destination_node != demand.destination_node) continue;
       if (!ctm_res.route_travel_time.count(route.index)) continue;
       const auto& tt_vec = ctm_res.route_travel_time.at(route.index);
-      if (k_dep_ctm < static_cast<int>(tt_vec.size())) {
-        min_tt = std::min(min_tt, tt_vec[static_cast<std::size_t>(k_dep_ctm)]);
-      }
-    }
-    if (!std::isfinite(min_tt)) continue;
-    mstt += demand.vehicles * min_tt;
+      if (k_dep_ctm >= static_cast<int>(tt_vec.size())) continue;
+      const double tt = tt_vec[static_cast<std::size_t>(k_dep_ctm)];
+      if (!std::isfinite(tt)) continue;
 
-    // TSTT: sum over all routes of x_{d,r} * T^CTM_{r,k_dep_ctm}
+      double gc = tt;
+      // Energy cost: Σ_s π_{s,k} · E_{r,s} / VOT  (charging cost)
+      // V2G revenue: − π_{s,k} · E^dis_{r,s} / VOT
+      for (const auto& stop : route.charging_stops) {
+        const double pi = station_price(problem, ev_opts, stop.station_id, k_sim);
+        gc += ew * pi * stop.requested_energy_kwh_per_vehicle / vot;
+        if (stop.v2g_capable &&
+            stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+          gc -= ew * pi * stop.requested_discharge_energy_kwh_per_vehicle / vot;
+        }
+      }
+      // Schedule delay: C^{schedule} / VOT  (eq:icv-schedule-delay)
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        const double t_arr = t_dep_hr + tt;
+        gc += schedule_delay_cost(t_arr, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+      mu_w = std::min(mu_w, gc);
+    }
+    if (!std::isfinite(mu_w)) continue;
+
+    // ── Numerator: Σ_r x_{d,r} · (Ψ^E_{r} − μ^E_w) ──────────────────
     for (const auto& route : problem.routes) {
       if (route.origin_node != demand.origin_node ||
           route.destination_node != demand.destination_node) continue;
       if (!route_pos_map.count(route.index)) continue;
       const int rpos = route_pos_map.at(route.index);
       if (k_dep_ctm >= static_cast<int>(route_flow.size())) continue;
-      if (rpos >= static_cast<int>(route_flow[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
-      const double x = route_flow[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
+      if (rpos >= static_cast<int>(
+              route_flow[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
+      const double x = route_flow[static_cast<std::size_t>(k_dep_ctm)]
+                                  [static_cast<std::size_t>(rpos)];
+      if (x <= kTol) continue;
+
       if (!ctm_res.route_travel_time.count(route.index)) continue;
       const auto& tt_vec = ctm_res.route_travel_time.at(route.index);
-      if (k_dep_ctm < static_cast<int>(tt_vec.size())) {
-        tstt += x * tt_vec[static_cast<std::size_t>(k_dep_ctm)];
+      if (k_dep_ctm >= static_cast<int>(tt_vec.size())) continue;
+      const double tt = tt_vec[static_cast<std::size_t>(k_dep_ctm)];
+      if (!std::isfinite(tt)) continue;
+
+      double gc = tt;
+      for (const auto& stop : route.charging_stops) {
+        const double pi = station_price(problem, ev_opts, stop.station_id, k_sim);
+        gc += ew * pi * stop.requested_energy_kwh_per_vehicle / vot;
+        if (stop.v2g_capable &&
+            stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+          gc -= ew * pi * stop.requested_discharge_energy_kwh_per_vehicle / vot;
+        }
       }
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        const double t_arr = t_dep_hr + tt;
+        gc += schedule_delay_cost(t_arr, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+      numerator += x * (gc - mu_w);
     }
+
+    // ── Denominator: D^E_w · |μ^E_w| ─────────────────────────────────
+    denominator += demand.vehicles * std::abs(mu_w);
   }
 
-  if (mstt < kTol) return 0.0;
-  return std::max(0.0, (tstt - mstt) / mstt);
+  if (denominator < kTol) return 0.0;
+  return std::max(0.0, numerator / (denominator + kTol));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -663,7 +723,10 @@ std::vector<std::vector<double>> auxiliary_assignment(
     const EVPowerTrafficOptions& ev_opts,
     const DUEOptions& due_opts,
     int T_ctm,
-    int R) {
+    int R,
+    // Optional: station waiting times W_{s,k} [hr] from queue model;
+    // used in Ψ^E when ev_opts.queueing_weight > 0.  Pass nullptr to disable.
+    const std::unordered_map<int, std::vector<double>>* station_wait_hr = nullptr) {
 
   const int n_routes = static_cast<int>(problem.routes.size());
   std::vector<std::vector<double>> x_aux(
@@ -671,6 +734,7 @@ std::vector<std::vector<double>> auxiliary_assignment(
       std::vector<double>(static_cast<std::size_t>(n_routes), 0.0));
 
   const double vot = std::max(ev_opts.value_of_time_per_hr, kTol);
+  const double ew  = ev_opts.station_energy_cost_weight;
 
   for (const auto& demand : problem.demands) {
     // Map simulation departure step -> CTM departure step
@@ -678,8 +742,10 @@ std::vector<std::vector<double>> auxiliary_assignment(
     if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
     // Simulation step for station price lookup
     const int k_sim = demand.departure_step;
+    // Departure time [hr] for schedule delay (eq:icv-schedule-delay)
+    const double t_dep_hr = k_sim * ev_opts.time_step_hr;
 
-    // Collect candidate routes and their experienced travel times
+    // Collect candidate routes
     std::vector<const RouteAlternative*> cands;
     for (const auto& route : problem.routes) {
       if (route.origin_node == demand.origin_node &&
@@ -689,9 +755,8 @@ std::vector<std::vector<double>> auxiliary_assignment(
     }
     if (cands.empty()) continue;
 
-    // Helper: compute generalized cost for a route.
-    // gen_cost = tt + (ω_s / VOT) * Σ_{s∈stops} π_{s,k} * E_{r,s}
-    // Units: hours (price term divided by VOT converts $/veh to hours-equivalent).
+    // Compute full EV generalized cost Ψ^E_{w,r,k} for a route (eq:psi-ev).
+    // Units: time-equivalent hours = gc_$ / VOT.
     auto route_gen_cost = [&](const RouteAlternative* route) -> double {
       double tt = std::numeric_limits<double>::infinity();
       if (ctm_res.route_travel_time.count(route->index)) {
@@ -700,13 +765,47 @@ std::vector<std::vector<double>> auxiliary_assignment(
           tt = v[static_cast<std::size_t>(k_dep_ctm)];
       }
       if (!std::isfinite(tt)) return tt;
-      // Add station price term
+
+      double gc = tt;
+
+      // Energy cost: Σ_s π_{s,k} · E_{r,s} / VOT  (eq:ev-energy-cost)
+      // V2G revenue: − π_{s,k} · E^dis_{r,s} / VOT
       for (const auto& stop : route->charging_stops) {
         const double pi = station_price(problem, ev_opts, stop.station_id, k_sim);
-        tt += ev_opts.station_energy_cost_weight * pi *
-              stop.requested_energy_kwh_per_vehicle / vot;
+        gc += ew * pi * stop.requested_energy_kwh_per_vehicle / vot;
+        if (stop.v2g_capable &&
+            stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+          gc -= ew * pi * stop.requested_discharge_energy_kwh_per_vehicle / vot;
+        }
       }
-      return tt;
+
+      // Schedule delay: C^{schedule} / VOT  (eq:icv-schedule-delay, eq:psi-ev)
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        const double t_arr = t_dep_hr + tt;
+        gc += schedule_delay_cost(t_arr, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+
+      // Station waiting time: α_w · W_{s,k^arr} / VOT  (eq:ev-wait-cost)
+      if (ev_opts.queueing_weight > kTol && station_wait_hr != nullptr) {
+        // Estimate arrival step from departure step + travel time
+        const int k_arr_sim =
+            ev_opts.time_step_hr > kTol
+                ? k_sim + std::max(0, static_cast<int>(std::ceil(tt / ev_opts.time_step_hr)))
+                : k_sim;
+        for (const auto& stop : route->charging_stops) {
+          auto it = station_wait_hr->find(stop.station_id);
+          if (it == station_wait_hr->end()) continue;
+          const auto& wvec = it->second;
+          if (k_arr_sim >= 0 && k_arr_sim < static_cast<int>(wvec.size())) {
+            gc += ev_opts.queueing_weight * wvec[static_cast<std::size_t>(k_arr_sim)] / vot;
+          }
+        }
+      }
+
+      return gc;
     };
 
     if (due_opts.logit_theta > kTol) {
@@ -729,7 +828,7 @@ std::vector<std::vector<double>> auxiliary_assignment(
             demand.vehicles * weights[ci] / weight_sum;
       }
     } else {
-      // All-or-nothing shortest path (minimum generalized cost)
+      // All-or-nothing shortest path (minimum generalized cost, eq:msa-aon-icv)
       const RouteAlternative* best = nullptr;
       double best_gc = std::numeric_limits<double>::infinity();
       for (const auto* route : cands) {
@@ -775,6 +874,10 @@ std::vector<std::vector<double>> auxiliary_assignment_icv(
     const int k_dep_ctm = demand.departure_step * R;
     if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
     const double vot = std::max(demand.value_of_time_per_hr, kTol);
+    // Departure time [hr] — used only if schedule delay is set
+    // (departure_step × dt_sim; dt_sim not passed, so we leave departure = 0
+    //  and use t_arr = tt directly, consistent with wardrop_relative_gap_icv)
+    const double t_dep_hr = 0.0;
 
     // Candidate routes for this ICV OD pair
     std::vector<const RouteAlternative*> cands;
@@ -786,7 +889,8 @@ std::vector<std::vector<double>> auxiliary_assignment_icv(
     }
     if (cands.empty()) continue;
 
-    // ICV generalized cost: travel time + fuel-distance term as time-equivalent
+    // ICV generalized cost Ψ^F_{w,r,k} = T^CTM + fuel·dist/VOT + toll/VOT
+    //                                   + schedule_delay/VOT  (eq:psi-icv)
     auto icv_gc = [&](const RouteAlternative* route) -> double {
       double tt = std::numeric_limits<double>::infinity();
       if (ctm_res.route_travel_time.count(route->index)) {
@@ -795,16 +899,26 @@ std::vector<std::vector<double>> auxiliary_assignment_icv(
           tt = v[static_cast<std::size_t>(k_dep_ctm)];
       }
       if (!std::isfinite(tt)) return tt;
-      double fuel_time = 0.0;
+
+      double gc = tt;
       if (demand.fuel_cost_per_km > kTol) {
         double dist = 0.0;
         for (int li : route->link_indices) {
           if (link_pos.count(li))
             dist += problem.traffic.links[link_pos.at(li)].length_km;
         }
-        fuel_time = demand.fuel_cost_per_km * dist / vot;
+        gc += demand.fuel_cost_per_km * dist / vot;
       }
-      return tt + fuel_time + route->toll_cost / vot;
+      gc += route->toll_cost / vot;
+
+      // Schedule delay (eq:icv-schedule-delay)
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        gc += schedule_delay_cost(t_dep_hr + tt, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+      return gc;
     };
 
     // All-or-nothing: assign to minimum-cost route
@@ -835,23 +949,37 @@ double wardrop_relative_gap_icv(
     int T_ctm,
     int R) {
 
-  double tstt = 0.0;
-  double mstt = 0.0;
+  // ε^F = Σ_{w,r,k} h^F_{w,r,k} · (Ψ^F_{w,r,k} − μ^F_w)
+  //       ─────────────────────────────────────────────────  (eq:icv-gap)
+  //       Σ_w D^F_w · |μ^F_w| + ε
+  //
+  // Ψ^F_{w,r,k} = T^CTM_{r,k} + fuel_cost·dist/VOT + toll/VOT
+  //               + schedule_delay_cost(...) / VOT     (eq:psi-icv)
+  // All terms in time-equivalent hours.
+
+  double numerator   = 0.0;
+  double denominator = 0.0;
+
+  auto route_dist = [&](const RouteAlternative& r) {
+    double d = 0.0;
+    for (int li : r.link_indices)
+      if (link_pos.count(li))
+        d += problem.traffic.links[link_pos.at(li)].length_km;
+    return d;
+  };
 
   for (const auto& demand : problem.icv_demands) {
     const int k_dep_ctm = demand.departure_step * R;
+    const int k_sim     = demand.departure_step;
     if (k_dep_ctm < 0 || k_dep_ctm >= T_ctm) continue;
     const double vot = std::max(demand.value_of_time_per_hr, kTol);
+    const double t_dep_hr = k_sim * 0.0;  // departure time: use step index if dt known;
+    // Note: exact departure_time_hr = departure_step × dt_sim, but dt_sim is not
+    // passed here.  We use t^arr = tt (travel time from dep) for schedule delay.
+    // This is consistent with auxiliary_assignment_icv which also uses tt directly.
 
-    auto route_dist = [&](const RouteAlternative& r) {
-      double d = 0.0;
-      for (int li : r.link_indices)
-        if (link_pos.count(li))
-          d += problem.traffic.links[link_pos.at(li)].length_km;
-      return d;
-    };
-
-    double min_gc = std::numeric_limits<double>::infinity();
+    // ── Compute μ^F_w = min_r Ψ^F_{w,r,k} ────────────────────────────
+    double mu_w = std::numeric_limits<double>::infinity();
     for (const auto& route : problem.routes) {
       if (route.origin_node != demand.origin_node ||
           route.destination_node != demand.destination_node) continue;
@@ -860,35 +988,60 @@ double wardrop_relative_gap_icv(
       if (k_dep_ctm >= static_cast<int>(tv.size())) continue;
       const double tt = tv[static_cast<std::size_t>(k_dep_ctm)];
       if (!std::isfinite(tt)) continue;
-      const double gc = tt + demand.fuel_cost_per_km * route_dist(route) / vot
-                           + route.toll_cost / vot;
-      min_gc = std::min(min_gc, gc);
-    }
-    if (!std::isfinite(min_gc)) continue;
-    mstt += demand.vehicles * min_gc;
 
+      double gc = tt;
+      if (demand.fuel_cost_per_km > kTol)
+        gc += demand.fuel_cost_per_km * route_dist(route) / vot;
+      gc += route.toll_cost / vot;
+      // Schedule delay (eq:icv-schedule-delay)
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        gc += schedule_delay_cost(t_dep_hr + tt, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+      mu_w = std::min(mu_w, gc);
+    }
+    if (!std::isfinite(mu_w)) continue;
+
+    // ── Numerator: Σ_r x^{ICV}_{d,r} · (Ψ^F_{r} − μ^F_w) ────────────
     for (const auto& route : problem.routes) {
       if (route.origin_node != demand.origin_node ||
           route.destination_node != demand.destination_node) continue;
       if (!route_pos_map.count(route.index)) continue;
       const int rpos = route_pos_map.at(route.index);
       if (k_dep_ctm >= static_cast<int>(x_icv.size())) continue;
-      if (rpos >= static_cast<int>(x_icv[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
-      const double x = x_icv[static_cast<std::size_t>(k_dep_ctm)][static_cast<std::size_t>(rpos)];
+      if (rpos >= static_cast<int>(
+              x_icv[static_cast<std::size_t>(k_dep_ctm)].size())) continue;
+      const double x = x_icv[static_cast<std::size_t>(k_dep_ctm)]
+                              [static_cast<std::size_t>(rpos)];
       if (x <= kTol) continue;
+
       if (!ctm_res.route_travel_time.count(route.index)) continue;
       const auto& tv = ctm_res.route_travel_time.at(route.index);
       if (k_dep_ctm >= static_cast<int>(tv.size())) continue;
       const double tt = tv[static_cast<std::size_t>(k_dep_ctm)];
-      const double gc = (std::isfinite(tt) ? tt : 0.0)
-                      + demand.fuel_cost_per_km * route_dist(route) / vot
-                      + route.toll_cost / vot;
-      tstt += x * gc;
+      if (!std::isfinite(tt)) continue;
+
+      double gc = tt;
+      if (demand.fuel_cost_per_km > kTol)
+        gc += demand.fuel_cost_per_km * route_dist(route) / vot;
+      gc += route.toll_cost / vot;
+      if (demand.desired_arrival_time_hr >= 0.0 &&
+          (demand.early_penalty_per_hr > kTol || demand.late_penalty_per_hr > kTol)) {
+        gc += schedule_delay_cost(t_dep_hr + tt, demand.desired_arrival_time_hr,
+                                  demand.early_penalty_per_hr,
+                                  demand.late_penalty_per_hr) / vot;
+      }
+      numerator += x * (gc - mu_w);
     }
+
+    // ── Denominator: D^F_w · |μ^F_w| ─────────────────────────────────
+    denominator += demand.vehicles * std::abs(mu_w);
   }
 
-  if (mstt < kTol) return 0.0;
-  return std::max(0.0, (tstt - mstt) / mstt);
+  if (denominator < kTol) return 0.0;
+  return std::max(0.0, numerator / (denominator + kTol));
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1124,6 +1277,73 @@ void dispatch_ctm_sessions(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// 10b. Station waiting time from CTM station arrivals (used inside MSA loop)
+// ────────────────────────────────────────────────────────────────────────────
+// Computes W_{s,k} [hr] using a simple queue model fed directly by
+// CTMSimulationResult::station_arrivals.  This provides an approximation of
+// station congestion during each MSA iteration for use in Ψ^E (eq:ev-wait-cost).
+// Only produces non-zero values when ev_options.queueing_weight > 0.
+//
+// Queue dynamics (eq:evpt-queue-serve, eq:evpt-queue-update):
+//   u_{s,k}   = min(Q_{s,k} + λ_{s,k}, service_cap_{s,k})
+//   Q_{s,k+1} = max(0, Q_{s,k} + λ_{s,k} − u_{s,k})
+//   W_{s,k}   = (Q_{s,k} / μ_s) · Δt_sim  [hr]  (Little's law, eq:evpt-wait)
+
+std::unordered_map<int, std::vector<double>>
+compute_station_wait_from_arrivals(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_options,
+    const CTMSimulationResult& ctm_res,
+    int T_sim,
+    int T_ctm,
+    int R) {
+
+  const auto charge_cap = station_capacity_kw(problem.system, ev_options);
+  const auto stn_ids    = active_station_ids(problem);
+  const double dt_sim   = ev_options.time_step_hr;
+  const double p_veh    =
+      std::max(kTol, ev_options.default_route_stop_power_kw_per_vehicle);
+
+  std::unordered_map<int, std::vector<double>> wait;
+  for (int sid : stn_ids) {
+    wait[sid].assign(static_cast<std::size_t>(T_sim), 0.0);
+
+    const double cap_kw =
+        charge_cap.count(sid) ? charge_cap.at(sid)
+                               : ev_options.default_station_power_kw;
+    // Service rate μ_s [veh/step]: vehicles that can be served per sim step
+    // μ_s = P^max_s / (p_veh · 1 step) — simplified (dwell = 1 step)
+    const double mu_s = cap_kw / p_veh;
+    // n_plug bound for throughput (possibly ∞ when no plug count specified)
+    const double n_plug = n_plugs_for_station(problem.system, sid);
+
+    double q = 0.0;
+    for (int ks = 0; ks < T_sim; ++ks) {
+      // Aggregate CTM arrivals over R CTM steps for this sim step
+      double lambda = 0.0;
+      if (ctm_res.station_arrivals.count(sid)) {
+        const auto& arr = ctm_res.station_arrivals.at(sid);
+        for (int r = 0; r < R; ++r) {
+          const int kc = ks * R + r;
+          if (kc < T_ctm && kc < static_cast<int>(arr.size()))
+            lambda += arr[static_cast<std::size_t>(kc)];
+        }
+      }
+
+      // W_{s,k} = q / μ_s · Δt  [hr]  (Little's law, eq:evpt-wait)
+      wait[sid][static_cast<std::size_t>(ks)] =
+          mu_s > kTol ? q / mu_s * dt_sim : 0.0;
+
+      // Service throughput: min(q + λ, μ_s) and optionally bounded by n_plug
+      const double service_cap = std::isinf(n_plug) ? mu_s : std::min(mu_s, n_plug);
+      const double u = std::min(q + lambda, service_cap);
+      q = std::max(0.0, q + lambda - u);
+    }
+  }
+  return wait;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // 11.  Station queue model for CTM-derived sessions
 // ────────────────────────────────────────────────────────────────────────────
 // Implements Eqs. evpt-queue-serve, evpt-queue-update, evpt-plug-occ, and
@@ -1352,22 +1572,33 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
     ctm_res = ctm_forward_pass(problem, route_flow, link_pos, route_pos_map,
                                ctm_opts, dt_ctm, T_ctm);
 
+    // Step 1b: Station waiting times W_{s,k} from current arrivals (eq:ev-wait-cost).
+    // Used in Ψ^E when queueing_weight > 0; otherwise an empty map is passed.
+    std::unordered_map<int, std::vector<double>> station_wait;
+    if (ev_options.queueing_weight > kTol) {
+      station_wait = compute_station_wait_from_arrivals(
+          problem, ev_options, ctm_res, T_sim, T_ctm, R);
+    }
+
     // Step 2: Wardrop relative gap (EV gap; include ICV gap for multi-class)
-    // In multi-class mode, pass x_ev (EV-only flow) so TSTT is computed on EV
+    // In multi-class mode, pass x_ev (EV-only flow) so gap is computed on EV
     // vehicles only — not the PCE-combined route_flow which includes ICV flow.
     const double rg_ev = wardrop_relative_gap(problem,
                                                do_multiclass ? x_ev : route_flow,
                                                ctm_res,
-                                               route_pos_map, T_ctm, R);
+                                               route_pos_map, ev_options, T_ctm, R);
     const double rg_icv = do_multiclass
         ? wardrop_relative_gap_icv(problem, x_icv, ctm_res,
                                    route_pos_map, link_pos, T_ctm, R)
         : 0.0;
     const double rg = std::max(rg_ev, rg_icv);
 
-    // Step 3: Auxiliary all-or-nothing (or logit) assignment per class
+    // Step 3: Auxiliary all-or-nothing (or logit) assignment per class.
+    // Pass station waiting times so Ψ^E includes C^wait when queueing_weight > 0.
+    const auto* wait_ptr = ev_options.queueing_weight > kTol ? &station_wait : nullptr;
     auto x_ev_aux = auxiliary_assignment(problem, ctm_res, route_pos_map,
-                                         link_pos, ev_options, due_opts, T_ctm, R);
+                                         link_pos, ev_options, due_opts, T_ctm, R,
+                                         wait_ptr);
     std::vector<std::vector<double>> x_icv_aux;
     if (do_multiclass)
       x_icv_aux = auxiliary_assignment_icv(problem, ctm_res, route_pos_map,
@@ -1425,6 +1656,8 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
     result.iterations = iter;
     result.gap = max_shift;
     result.relative_gap = rg;
+    result.ev_relative_gap  = rg_ev;   // ε^E (eq:ev-gap)
+    result.icv_relative_gap = rg_icv;  // ε^F (eq:icv-gap)
 
     if (rg < due_opts.convergence_tol) {
       result.converged = true;
@@ -1475,7 +1708,7 @@ CTMDUEResult simulate_ev_power_traffic_ctm_due(
       ev_stats.vehicle_class = VehicleClass::EV;
       ev_stats.converged     = result.converged;
       ev_stats.relative_gap  = wardrop_relative_gap(problem, x_ev, result.final_ctm,
-                                                     route_pos_map, T_ctm, R);
+                                                     route_pos_map, ev_options, T_ctm, R);
       for (const auto& d : problem.demands) ev_stats.total_demand += d.vehicles;
       for (const auto& d : problem.demands) {
         const int k = d.departure_step * R;

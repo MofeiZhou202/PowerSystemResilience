@@ -429,7 +429,6 @@ TEST_CASE("FormD D5: MILP integer route flows — proven optimal via B&C",
   const auto prob = make_joint_opt_d_problem(4.0, 50.0, 10.0);
   auto opts = make_d_options(/*opf=*/false);
   opts.mode                  = JointOptimizerMode::IntegerRouteMILP;
-  opts.charge_discharge_binaries = false;  // integer route/unserved variables only
   opts.mip_gap               = 1e-4;
   opts.time_limit_sec        = 20.0;
   opts.max_nodes             = 2048;
@@ -531,14 +530,15 @@ TEST_CASE("FormD D8: road availability profile blocks closed route",
 }
 
 // =============================================================================
-// Test D9: V2G discharge variables and charge/discharge mode binaries
+// Test D9: V2G discharge — pure LP without binary mode variables
 // =============================================================================
-// A high-price V2G-capable stop with initial battery surplus should discharge
-// up to its power limit while respecting aggregate battery energy and
-// δ_ch + δ_dis ≤ 1 mode constraints.
+// A V2G-capable stop with initial battery surplus should discharge up to its
+// power limit.  Proposition 1 (technical notebook) proves that simultaneous
+// charge/discharge is always cost-dominated, so the LP naturally finds a pure-
+// discharge solution without any binary δ^{ch}/δ^{dis} variables.
 // =============================================================================
-TEST_CASE("FormD D9: V2G discharge with charge/discharge binaries",
-          "[ev_power_traffic][formulation_d][milp][v2g]") {
+TEST_CASE("FormD D9: V2G discharge solved as pure LP",
+          "[ev_power_traffic][formulation_d][lp][v2g]") {
 
   auto prob = make_joint_opt_d_problem(1.0, 50.0, 0.0);
   REQUIRE_FALSE(prob.routes.empty());
@@ -561,7 +561,6 @@ TEST_CASE("FormD D9: V2G discharge with charge/discharge binaries",
   auto opts = make_d_options(/*opf=*/false);
   opts.mode = JointOptimizerMode::UserBenefitMax;
   opts.allow_v2g = true;
-  opts.charge_discharge_binaries = true;
   opts.default_charging_efficiency = 1.0;
 
   const auto res = solve_joint_optimizer(prob, opts);
@@ -582,7 +581,6 @@ TEST_CASE("FormD D9: V2G discharge with charge/discharge binaries",
   CHECK(sr.energy_kwh[3] == Approx(30.0).margin(1e-6));
   CHECK(res.total_v2g_energy_kwh == Approx(20.0).margin(1e-6));
   CHECK(res.objective == Approx(-69.50).margin(1e-6));
-  CHECK(res.integrality_max_violation <= 1e-9);
 }
 
 // =============================================================================

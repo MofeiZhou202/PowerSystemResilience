@@ -875,3 +875,123 @@ TEST_CASE("CTM-DUE: numerical analysis — print results for LaTeX",
   }
   printf("\n");
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Test case 11: Schedule-delay penalty reverses route preference (eq:psi-icv,
+//               eq:icv-schedule-delay)
+// ──────────────────────────────────────────────────────────────────────────
+// Asymmetric problem: route 1 (fast, ff≈0.10 hr total), route 2 (slow,
+// ff≈0.30 hr total).  Without schedule delay, route 1 wins.
+// With desired_arrival_time_hr=0.25 and large early penalty γ_e:
+//   Ψ^F_1 ≈ 0.10 + γ_e·max(0, 0.25−0.10)/VOT  → large (early by 0.15 hr)
+//   Ψ^F_2 ≈ 0.30 + γ_e·max(0, 0.25−0.30)/VOT  → 0.30 (not early, no late pen)
+// At γ_e large enough, Ψ^F_2 < Ψ^F_1 → AoN assigns all demand to route 2.
+// This directly tests eq:icv-schedule-delay and eq:psi-icv in C++.
+TEST_CASE("CTM-DUE: schedule delay early penalty reverses ICV route preference",
+          "[ctm][due][schedule_delay][icv]") {
+  // Build asymmetric ICV-only problem (no EV charging, no stations in route)
+  EVPowerTrafficProblem prob;
+  prob.system = make_two_station_system();
+  prob.traffic = make_asymmetric_traffic();
+
+  // Routes without charging stops so travel-time cost dominates
+  {
+    RouteAlternative r1; r1.index=1; r1.origin_node=1; r1.destination_node=3;
+    r1.link_indices = {11, 12};
+    prob.routes.push_back(r1);
+
+    RouteAlternative r2; r2.index=2; r2.origin_node=1; r2.destination_node=3;
+    r2.link_indices = {21, 22};
+    prob.routes.push_back(r2);
+  }
+
+  // ICV demand with schedule delay parameters
+  {
+    ICVDemand d;
+    d.index = 10; d.origin_node = 1; d.destination_node = 3;
+    d.departure_step = 0; d.vehicles = 6.0;
+    d.candidate_route_indices = {1, 2};
+    d.value_of_time_per_hr = 1.0;     // VOT = 1 $/hr (no scaling)
+    d.fuel_cost_per_km = 0.0;         // no fuel cost (isolate schedule delay)
+    // Desired arrival t* = 0.25 hr; γ_e = 20 $/hr, no late penalty
+    d.desired_arrival_time_hr = 0.25;
+    d.early_penalty_per_hr   = 20.0;  // large → route 1 (arrives at 0.10) very penalised
+    d.late_penalty_per_hr    = 0.0;
+    prob.icv_demands.push_back(d);
+  }
+
+  EVPowerTrafficOptions ev_opts;
+  ev_opts.num_steps    = 10;
+  ev_opts.time_step_hr = 0.1;
+
+  CTMOptions ctm_opts;
+  ctm_opts.dt_ctm_hr        = 0.01;
+  ctm_opts.n_cells_per_link = 3;
+  ctm_opts.enable_multiclass = true;  // required: ICV demands only processed in multi-class mode
+
+  DUEOptions due_opts;
+  due_opts.max_iterations  = 50;
+  due_opts.convergence_tol = 1e-3;
+  due_opts.logit_theta     = 0.0;  // pure AoN → decisive
+
+  CTMDUEResult res = simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+  CHECK(res.iterations >= 1);
+
+  // With γ_e=20, route 1 Ψ^F ≈ 0.10 + 20×0.15 = 3.10 >> route 2 Ψ^F ≈ 0.30
+  // → AoN should assign all ICV demand to route 2
+  REQUIRE(res.flow_by_icv_route.count(10) > 0);
+  const auto& rm = res.flow_by_icv_route.at(10);
+  double x1 = rm.count(1) ? rm.at(1) : 0.0;
+  double x2 = rm.count(2) ? rm.at(2) : 0.0;
+  // Route 2 should carry more than route 1 due to the early-arrival penalty
+  CHECK(x2 > x1);
+  // Total ICV flow is conserved
+  CHECK(x1 + x2 == Approx(6.0).epsilon(0.1));
+
+  // icv_relative_gap is populated
+  CHECK(res.icv_relative_gap >= 0.0);
+  CHECK(std::isfinite(res.icv_relative_gap));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Test case 12: CTMDUEResult.ev_relative_gap and icv_relative_gap fields
+//               are populated correctly (eq:ev-gap, eq:icv-gap)
+// ──────────────────────────────────────────────────────────────────────────
+// (a) EV-only problem: icv_relative_gap == 0, ev_relative_gap finite & ≥ 0;
+//     if converged, ev_relative_gap < convergence_tol + ε.
+// (b) After convergence, relative_gap == max(ev_relative_gap, icv_relative_gap).
+TEST_CASE("CTM-DUE: ev_relative_gap and icv_relative_gap fields populated",
+          "[ctm][due][gap_fields]") {
+  auto prob = make_symmetric_problem(4.0);
+
+  EVPowerTrafficOptions ev_opts;
+  ev_opts.num_steps    = 6;
+  ev_opts.time_step_hr = 0.05;
+
+  CTMOptions ctm_opts;
+  ctm_opts.dt_ctm_hr        = 0.01;
+  ctm_opts.n_cells_per_link = 3;
+
+  DUEOptions due_opts;
+  due_opts.max_iterations  = 60;
+  due_opts.convergence_tol = 1e-3;
+
+  CTMDUEResult res = simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+  // (a) EV-only → no ICV demands → icv_relative_gap should be 0
+  CHECK(res.icv_relative_gap == Approx(0.0).epsilon(1e-12));
+
+  // (b) ev_relative_gap is non-negative and finite
+  CHECK(res.ev_relative_gap >= 0.0);
+  CHECK(std::isfinite(res.ev_relative_gap));
+
+  // (c) if converged, ev_relative_gap is within tolerance
+  if (res.converged) {
+    CHECK(res.ev_relative_gap < due_opts.convergence_tol + 1e-6);
+  }
+
+  // (d) relative_gap == max(ev_relative_gap, icv_relative_gap)
+  const double expected_rg = std::max(res.ev_relative_gap, res.icv_relative_gap);
+  CHECK(res.relative_gap == Approx(expected_rg).epsilon(1e-9));
+}

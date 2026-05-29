@@ -162,3 +162,25 @@ hacdcpf_add_test(test_ev_power_traffic_phase1 test_ev_power_traffic_phase1.cpp)
 # TC-1 (symbol linkage + project tree check) runs unconditionally.
 # TC-5 (missing-file error handling) runs unconditionally.
 hacdcpf_add_test(test_three_stage_reliability test_three_stage_reliability.cpp)
+
+# LTM traffic framework: triangular FD sending/receiving, single-link LTM,
+# mesoscopic multi-link corridor, EV penetration sweep (station loading),
+# individual EV agent trajectory reconstruction (FIFO), and V2G potential.
+hacdcpf_add_test(test_ltm_traffic test_ltm_traffic.cpp)
+
+# LTM stress and cross-validation suite (Groups I–XX):
+#   Invariants (monotonicity, conservation, jam-density cap), propagation-delay
+#   accuracy, spillback/backward-wave, node-model conservation, station
+#   population balance, SOC energy balance, FIFO preservation, V2G bounds,
+#   large-scale scenarios (200-link chain, 32×32 grid, 500-link corridor),
+#   10× overcapacity saturation, mid-run contingency capacity loss, EV reserve
+#   edge cases, LTM vs quasi-static discrepancy report, numerical stability
+#   at extreme dt, 500 EV agents, tau off-by-one sweep, receiving-function
+#   boundary checks, and 100 000+ vehicle accumulation.
+#   Tests tagged [slow] target run times of 1–10 s each.
+hacdcpf_add_test(test_ltm_stress test_ltm_stress.cpp)
+
+# CTM vs LTM numerical cross-validation (Groups XXI–XXV):
+#   Pulse conservation, sustained-capacity comparison, CFL-violating regime,
+#   4-link corridor, and free-flow travel-time accuracy.
+hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)

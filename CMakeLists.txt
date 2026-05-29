@@ -106,6 +106,7 @@ set(HACDCPF_SOURCES
   src/ev_power_traffic/assignment_lp.cpp
   src/ev_power_traffic/joint_social_welfare.cpp
   src/ev_power_traffic/ctm_propagation.cpp
+  src/ev_power_traffic/ltm_propagation.cpp
   src/ev_power_traffic/ctm_joint_welfare.cpp
   src/ev_power_traffic/joint_optimizer.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp

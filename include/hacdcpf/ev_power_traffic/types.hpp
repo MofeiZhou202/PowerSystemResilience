@@ -50,6 +50,14 @@ struct ICVDemand {
 
   double value_of_time_per_hr{1.0};  ///< $/veh·hr
   double fuel_cost_per_km{0.0};      ///< $/km — added to generalized cost
+
+  // ── Schedule delay (eq:icv-schedule-delay, eq:psi-icv) ───────────────
+  /// t*_w — desired arrival time [hr].  Negative = not set (disables schedule delay).
+  double desired_arrival_time_hr{-1.0};
+  /// γ_e [$/hr] — penalty per hour of early arrival (t^arr < t*_w).
+  double early_penalty_per_hr{0.0};
+  /// γ_l [$/hr] — penalty per hour of late arrival (t^arr > t*_w).
+  double late_penalty_per_hr{0.0};
 };
 
 // ── Assignment model selector ─────────────────────────────────────────────
@@ -180,6 +188,10 @@ struct CTMDUEResult {
   int iterations{0};
   double gap{0.0};          // max |x^{(i)} - x^{(i-1)}| / demand
   double relative_gap{0.0}; // Wardrop relative gap: (SC - UC) / UC
+  /// ε^F — final ICV Wardrop relative gap (eq:icv-gap).
+  double icv_relative_gap{0.0};
+  /// ε^E — final EV Wardrop relative gap (eq:ev-gap).
+  double ev_relative_gap{0.0};
 
   // Final route flows x_{d,r,k} after convergence.
   // Indexed: flow_by_demand_route[demand_index][route_index] = vehicles.
@@ -253,6 +265,10 @@ struct CTMDUEResult {
 struct RouteChargingStop {
   int station_id{0};
   double requested_energy_kwh_per_vehicle{0.0};
+  /// E^dis_ω per vehicle [kWh] — planned V2G discharge energy at this stop.
+  /// Used in route cost (eq:ev-energy-cost): C^energy subtracts π^dis · E^dis.
+  /// Zero (default) disables the V2G revenue credit for this stop.
+  double requested_discharge_energy_kwh_per_vehicle{0.0};
   int dwell_steps{1};
   double max_charge_kw_per_vehicle{0.0};
   bool v2g_capable{false};
@@ -285,6 +301,11 @@ struct EVDemand {
   double energy_min_kwh{0.0};       // \underline{E}_c
   double energy_max_kwh{-1.0};      // \overline{E}_c (< 0 = unbounded)
 
+  /// e^res_v — mobility reserve energy [kWh] (eq:soc-feasibility).
+  /// route_soc_feasible() enforces e_{v,k} - E^rem_{v,k} >= reserve_energy_kwh
+  /// at every link traversal.  Zero (default) disables this check.
+  double reserve_energy_kwh{0.0};
+
   // Gross willingness-to-pay per served vehicle ($/vehicle).
   // Used by solve_joint_social_welfare() to compute consumer benefit.
   // Zero means "not set"; only affects social welfare accounting.
@@ -293,6 +314,14 @@ struct EVDemand {
   // ── Phase I multi-class fields ──────────────────────────────────────
   VehicleClass vehicle_class{VehicleClass::EV};  ///< class tag (default EV)
   double value_of_time_per_hr{0.0};              ///< 0 = inherit global options
+
+  // ── Schedule delay (eq:icv-schedule-delay, eq:psi-icv) ───────────────
+  /// t*_w — desired arrival time [hr].  Negative = not set (disables schedule delay).
+  double desired_arrival_time_hr{-1.0};
+  /// γ_e [$/hr] — penalty per hour of early arrival (t^arr < t*_w).
+  double early_penalty_per_hr{0.0};
+  /// γ_l [$/hr] — penalty per hour of late arrival (t^arr > t*_w).
+  double late_penalty_per_hr{0.0};
 };
 
 struct EVChargingSession {
