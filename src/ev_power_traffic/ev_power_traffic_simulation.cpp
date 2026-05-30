@@ -61,8 +61,29 @@ void apply_ev_station_loads(HybridPowerSystem& system,
 EVPowerTrafficResult simulate_ev_power_traffic(
     const EVPowerTrafficProblem& problem,
     const EVPowerTrafficOptions& options) {
+  if (options.auto_generate_routes) {
+    EVPowerTrafficOptions local_options = options;
+    local_options.auto_generate_routes = false;
+    const EVPowerTrafficProblem generated =
+        maybe_generate_candidate_routes(problem, options);
+    return simulate_ev_power_traffic(generated, local_options);
+  }
+
   EVPowerTrafficResult result;
   result.final_system = problem.system;
+
+  if (options.require_exact_mathematical_model) {
+    result.feasible = false;
+    result.status =
+        "unsupported: exact full EV power-traffic mathematical-model "
+        "verification is not available for the decomposed simulation path";
+    result.mathematical_model_verified = false;
+    result.mathematical_model_verification_status =
+        "unsupported: route assignment, charging dispatch, and power validation "
+        "are not one globally certified mathematical programme";
+    result.warnings.push_back(result.mathematical_model_verification_status);
+    return result;
+  }
 
   if (options.num_steps <= 0 || options.time_step_hr <= 0.0) {
     result.status = "invalid options: num_steps and time_step_hr must be positive";

@@ -427,3 +427,18 @@ TEST_CASE("EVPT: system-optimal MILP reports integer certificate",
   CHECK(assigned_vehicles(result, 2) == Approx(3.0).margin(1e-9));
   CHECK(result.total_unserved_energy_kwh == Approx(0.0).margin(1e-9));
 }
+
+TEST_CASE("EVPT: exact mathematical-model verification request is rejected",
+          "[evpt][honesty][exact_model]") {
+  const auto problem = make_joint_optimization_case();
+  auto opt = make_options();
+  opt.require_exact_mathematical_model = true;
+
+  const auto result = simulate_ev_power_traffic(problem, opt);
+
+  CHECK_FALSE(result.feasible);
+  CHECK(result.mathematical_model_verified == false);
+  CHECK(result.status.find("unsupported") != std::string::npos);
+  CHECK(result.mathematical_model_verification_status.find("unsupported") !=
+        std::string::npos);
+}

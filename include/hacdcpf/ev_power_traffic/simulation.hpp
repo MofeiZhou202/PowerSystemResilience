@@ -5,6 +5,7 @@
 // EVPowerTrafficProblem, EVPowerTrafficResult, and the public entry
 // points for the EV power-traffic simulation.
 
+#include <limits>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -17,6 +18,19 @@ namespace hacdcpf::evpt {
 
 // ── Problem definition ────────────────────────────────────────────────────
 
+/// Per-station road-access spillback configuration (eq:spillback-receiving).
+/// When queue_veh >= queue_capacity the nominal receiving capacity of the
+/// access link is reduced to zero, blocking entry.  Used by both CTM
+/// (ctm_forward_pass) and LTM (ltm_propagation) solvers.
+struct StationSpillbackConfig {
+  int station_id{0};
+  /// ID of the road link whose first cell feeds into this station's queue.
+  /// -1 = not set (spillback disabled for this station).
+  int access_link_id{-1};
+  /// Q̄_s — maximum vehicle queue capacity (eq:spillback).
+  double queue_capacity{std::numeric_limits<double>::infinity()};
+};
+
 struct EVPowerTrafficProblem {
   HybridPowerSystem system;
   TrafficGraph traffic;
@@ -28,6 +42,10 @@ struct EVPowerTrafficProblem {
   /// Phase I: heterogeneous ICV demand sharing road capacity with EVs.
   /// Populated when CTMOptions::enable_multiclass = true; ignored otherwise.
   std::vector<ICVDemand> icv_demands;
+
+  /// Per-station spillback configuration for CTM/LTM access-link receiving
+  /// capacity reduction (eq:spillback-receiving).  Empty = no spillback.
+  std::vector<StationSpillbackConfig> station_spillback;
 };
 
 // ── Aggregate result ──────────────────────────────────────────────────────
@@ -50,6 +68,9 @@ struct EVPowerTrafficResult {
   bool optimization_solved{false};
   bool optimization_is_mip{false};
   bool optimization_proven_optimal{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: simulation entry includes heuristic or decomposed layers"};
   std::string optimization_backend;
   std::string optimization_status;
   double optimization_objective{0.0};
@@ -185,6 +206,9 @@ struct JointOptimizerResult {
   // ── Solver certificate ─────────────────────────────────────────────────
   bool   feasible{false};
   bool   proven_optimal{false};
+  bool   mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: result certifies only the assembled solver subproblem"};
   std::string solver_backend;   ///< "NativeDualSimplex" / "HiGHS" / "NativeB&C"
   std::string solver_status;
   double objective{0.0};        ///< solver minimization objective value
@@ -195,6 +219,39 @@ struct JointOptimizerResult {
   double solve_time_sec{0.0};
   int    n_variables{0};
   int    n_constraints{0};
+
+  // ── Full-joint nonlinear / equilibrium certificate ─────────────────────
+  bool monolithic_full_joint_model{false};       ///< one assembled traffic-power programme
+  bool nonlinear_model{false};                   ///< solved as NLP/MPEC, not LP/MILP
+  bool local_optimum_certificate{false};         ///< local KKT/stationarity only
+  bool global_optimum_certificate{false};        ///< true only with a valid global proof
+  bool certified_dynamic_mpec_model{false};      ///< finite linear dynamic MILP/MPEC
+  bool certified_full_joint_ltm_pwl_milp_model{false}; ///< LTM-PWL global MILP approximation
+  bool endogenous_congestion_enforced{false};    ///< route costs depend on endogenous link flow
+  bool full_ltm_dynamics_enforced{false};         ///< cumulative-count LTM rows in the solver model
+  bool pwl_approximation_used{false};             ///< nonlinear costs represented by PWL envelopes
+  double pwl_max_abs_error_bound{0.0};            ///< conservative max travel-cost envelope error
+  double ltm_conservation_max_violation{0.0};     ///< max LTM conservation/envelope residual
+  /// False when route travel times came from a one-shot CTM pre-pass with
+  /// equal-split flows (Formulation D default).  In that case the LP/MILP
+  /// optimises over exogenous costs and the road constraints are route-capacity
+  /// rows, not endogenous CTM/LTM propagation equations.
+  bool travel_times_are_endogenous{false};
+  bool wardrop_complementarity_enforced{false};  ///< NCP rows for used-route equilibrium
+  bool dcopf_coupling_enforced{false};           ///< DC-OPF rows included in same programme
+  bool charging_v2g_enforced{false};             ///< charge/discharge/SOC rows included
+  bool sparse_derivatives_enabled{false};        ///< analytic sparse NLP gradient/Jacobians are used
+  bool sparse_derivatives_verified{false};       ///< optional FD check accepted the sparse derivatives
+  double derivative_check_max_abs_error{0.0};    ///< max |analytic - finite-difference|
+  double derivative_check_max_rel_error{0.0};    ///< max relative derivative error
+  int derivative_check_failures{0};              ///< entries failing the configured tolerance
+  int sparse_jacobian_nnz{0};                    ///< nnz(J_eq) + nnz(J_ineq) at the initial point
+  double nonlinear_stationarity_residual{0.0};
+  double nonlinear_constraint_violation{0.0};
+  double wardrop_gap{0.0};
+  double wardrop_complementarity_residual{0.0};
+  double road_capacity_max_violation{0.0};
+  double power_balance_max_violation{0.0};
 
   // ── Welfare decomposition ──────────────────────────────────────────────
   double social_welfare{0.0};        ///< W = B_EV − C_gen − C_delay
@@ -240,5 +297,93 @@ struct JointOptimizerResult {
 JointOptimizerResult solve_joint_optimizer(
     const EVPowerTrafficProblem& problem,
     const JointOptimizerOptions& options = {});
+
+// ── Formulation E: System-Optimal CTM LP ─────────────────────────────────
+
+CTMSOLPResult solve_ctm_so_lp(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_opts = {},
+    const CTMOptions& ctm_opts = {});
+
+// ── Formulation E-LTM: System-Optimal LTM LP ─────────────────────────────
+
+LTMSOLPResult solve_ltm_so_lp(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_opts = {},
+    const LTMSOLPOptions& ltm_opts = {});
+
+// ── Formulation F: DUE-VI / Beckmann Frank-Wolfe ─────────────────────────
+//
+// Frank-Wolfe descent on the Beckmann potential for the CTM-DUE problem.
+// Converges faster than MSA for well-conditioned networks; requires a
+// linesearch at each iteration.
+
+CTMDUEResult solve_ctm_due_vi(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_opts = {},
+    const CTMOptions& ctm_opts = {},
+    const CTMDUEVIOptions& vi_opts = {});
+
+// ── Formulation G: Infrastructure design MILP ────────────────────────────
+//
+// Joint optimisation of station location (open/close), plug count allocation,
+// and route flows in a single MILP.
+
+struct InfraDesignResult {
+  bool solved{false};
+  bool infeasible{false};
+  bool proven_optimal{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: infrastructure MILP is a reduced/approximated design model"};
+  bool dynamic_constraints_enforced{false};
+  std::string status;
+  double objective{0.0};
+  double best_bound{0.0};
+  double mip_gap{0.0};
+  double primal_max_violation{0.0};
+  double integrality_max_violation{0.0};
+  double dynamic_flow_conservation_max_violation{0.0};
+  int n_dynamic_flow_variables{0};
+  std::unordered_map<int, bool>   station_open;      ///< z_s
+  std::unordered_map<int, int>    station_plugs;     ///< B̄_s (optimised)
+  std::unordered_map<int, std::unordered_map<int, double>> flow_by_demand_route;
+  std::vector<std::string> warnings;
+};
+
+InfraDesignResult solve_infra_design_milp(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_opts = {},
+    const InfraDesignMILPOptions& opts = {});
+
+// ── Formulation H: LTM receding-horizon MPC ──────────────────────────────
+//
+// Minimises queue length + travel time - V2G revenue over a rolling horizon.
+// At each simulation step k, solves an LP over [k, k+H) and applies only
+// the first-step station admission decisions b_{s,k}.
+
+struct LTMMPCResult {
+  bool solved{false};
+  bool proven_optimal{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: LTM-MPC is forecast-driven and receding-horizon"};
+  bool forecast_arrivals_enforced{false};
+  std::string status;
+  /// Station admission decisions b_{s,k}: [station_id][sim_step] = vehicles admitted.
+  std::unordered_map<int, std::vector<double>> admission;
+  double total_objective{0.0};
+  double best_bound{0.0};
+  double mip_gap{0.0};
+  double primal_max_violation{0.0};
+  double integrality_max_violation{0.0};
+  double forecast_bound_max_violation{0.0};
+  std::unordered_map<int, std::vector<double>> forecast_arrivals;
+};
+
+LTMMPCResult solve_ltm_mpc(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& ev_opts = {},
+    const LTMMPCOptions& mpc_opts = {});
 
 }  // namespace hacdcpf::evpt

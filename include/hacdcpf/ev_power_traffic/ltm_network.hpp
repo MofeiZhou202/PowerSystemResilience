@@ -138,6 +138,18 @@ struct ChargingStationParams {
   double mean_dwell_time_hr{0.25}; ///< mean post-charge dwell time
   double dt_hr{0.25};
 
+  /// Q̄_s — maximum vehicle queue capacity (eq:spillback).
+  /// When Q_{s,k} ≥ queue_capacity, the receiving capacity of the
+  /// access_link_id road link is reduced to zero (full spillback).
+  /// Default = ∞ (unbounded queue — no spillback feedback).
+  double queue_capacity{std::numeric_limits<double>::infinity()};
+
+  /// ID of the road link whose exit feeds into this station's access queue.
+  /// -1 = not set (spillback is not wired for this station).
+  /// When Q_{s,k} ≥ queue_capacity and access_link_id ≥ 0, the model
+  /// reduces R_{access,k} proportionally (eq:spillback-receiving).
+  int access_link_id{-1};
+
   double mu_per_step() const { return dt_hr / mean_service_time_hr; }
   double dwell_rate() const  { return dt_hr / mean_dwell_time_hr; }
 

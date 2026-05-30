@@ -58,6 +58,14 @@ struct ICVDemand {
   double early_penalty_per_hr{0.0};
   /// γ_l [$/hr] — penalty per hour of late arrival (t^arr > t*_w).
   double late_penalty_per_hr{0.0};
+
+  // ── Full DUE / endogenous departure time (DUEMode::FullEndogenous) ─────
+  /// Candidate departure steps for this demand (K^{dep}_w in eq:full-due-set).
+  /// When non-empty and DUEMode::FullEndogenous is active, the DUE solver
+  /// distributes `vehicles` across these steps endogenously, minimising total
+  /// generalised cost (schedule delay + travel time + charging cost).
+  /// When empty, `departure_step` is used as a fixed departure (mode ii).
+  std::vector<int> departure_window_steps;
 };
 
 // ── Assignment model selector ─────────────────────────────────────────────
@@ -188,14 +196,36 @@ struct CTMDUEResult {
   int iterations{0};
   double gap{0.0};          // max |x^{(i)} - x^{(i-1)}| / demand
   double relative_gap{0.0}; // Wardrop relative gap: (SC - UC) / UC
+  bool vi_certificate_available{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: DUE is certified by fixed-point/VI residuals, not a full solver proof"};
+  double vi_gap{0.0};                 ///< c(h)^T (h - h_aon) at final CTM costs
+  double normalized_vi_gap{0.0};      ///< vi_gap / max(1, c(h)^T h)
+  double complementarity_max_violation{0.0}; ///< max used-path excess cost
+  double demand_conservation_max_violation{0.0};
   /// ε^F — final ICV Wardrop relative gap (eq:icv-gap).
   double icv_relative_gap{0.0};
   /// ε^E — final EV Wardrop relative gap (eq:ev-gap).
   double ev_relative_gap{0.0};
+  /// True when the VI certificate (vi_gap, complementarity_max_violation, etc.)
+  /// was computed over EV flows only (problem.demands), not the full
+  /// mixed-fleet flow including ICV demands.  Set to false when
+  /// CTMDUEVIOptions::include_icv_in_due is false or icv_demands is empty.
+  bool vi_certificate_covers_ev_only{false};
+  /// True when the charging dispatch used a greedy heuristic rather than a
+  /// monolithic optimal smart-charging/V2G LP solve.
+  bool charging_dispatch_is_greedy{false};
 
   // Final route flows x_{d,r,k} after convergence.
   // Indexed: flow_by_demand_route[demand_index][route_index] = vehicles.
   std::unordered_map<int, std::unordered_map<int, double>> flow_by_demand_route;
+  // Full-DUE disaggregate flows.
+  // Indexed: flow_by_demand_departure_route[demand_index][departure_step][route_index].
+  std::unordered_map<int, std::unordered_map<int, std::unordered_map<int, double>>>
+      flow_by_demand_departure_route;
+  bool full_due_enabled{false};
+  double departure_time_max_shift_veh{0.0};
 
   // Iteration history: [gap, relative_gap, max_shift].
   struct IterRecord {
@@ -260,6 +290,85 @@ struct CTMDUEResult {
   std::unordered_map<int, std::unordered_map<int, double>> flow_by_icv_route;
 };
 
+// ── System-Optimal CTM LP result (Formulation E) ─────────────────────────
+
+struct CTMSOLPResult {
+  bool solved{false};
+  bool infeasible{false};
+  bool proven_optimal{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: wrapper certificate covers the assembled SO-CTM LP only"};
+  bool dynamic_constraints_enforced{false};
+  bool node_flow_variables_enforced{false};
+  std::string status;
+  double objective{0.0};   ///< LP objective value [veh·hr]
+  double so_tstt_hr{0.0};  ///< total system travel time under SO-CTM [veh·hr]
+  double best_bound{0.0};  ///< LP dual bound; equals objective when certified
+  /// True when best_bound was set to the primal objective without an
+  /// independent dual-feasibility check.  The solver (HiGHS / NativeSimplex)
+  /// certifies optimality internally, but this wrapper does not re-verify dual
+  /// feasibility from the certificate residuals alone.
+  bool best_bound_is_primal_only{false};
+  double mip_gap{0.0};     ///< zero for this pure LP
+  double primal_max_violation{0.0};
+  double integrality_max_violation{0.0};
+  double node_flow_conservation_max_violation{0.0};
+  /// True when use_aggregate_link_variables=false (default): per-route
+  /// decomposition is used, which is a multi-commodity tighter relaxation
+  /// of the single-commodity aggregate SO programme.
+  bool per_route_decomposition_used{false};
+  /// In CTM aggregate mode (use_aggregate_link_variables=true), internal
+  /// boundary flows are shared (y_agg_int) and per-route OD entry flows are
+  /// kept.  Closed-link availability now zeros both per-route entry/exit and
+  /// shared internal flows, so this flag is true.  In per-route mode it is
+  /// also true.  This documents that closed-link handling is rigorous.
+  bool closed_link_handling_strict{true};
+  int n_node_flow_variables{0};
+
+  /// SO route flows: flow_by_demand_route[demand_index][route_index] = vehicles.
+  std::unordered_map<int, std::unordered_map<int, double>> flow_by_demand_route;
+};
+
+// ── System-Optimal LTM LP result (Formulation E-LTM) ─────────────────────
+
+struct LTMSOLPResult {
+  bool solved{false};
+  bool infeasible{false};
+  bool proven_optimal{false};
+  bool mathematical_model_verified{false};
+  std::string mathematical_model_verification_status{
+      "not verified: wrapper certificate covers the assembled SO-LTM LP only"};
+  bool dynamic_constraints_enforced{false};
+  bool node_flow_variables_enforced{false};
+  std::string status;
+  double objective{0.0};   ///< LP objective value [veh·hr]
+  double so_tstt_hr{0.0};  ///< total system travel time under SO-LTM [veh·hr]
+  double best_bound{0.0};  ///< LP dual bound; equals objective when certified
+  /// True when best_bound was set to the primal objective without an
+  /// independent dual-feasibility check.
+  bool best_bound_is_primal_only{false};
+  /// True when use_aggregate_link_variables=false (default): per-route
+  /// decomposition is used.
+  bool per_route_decomposition_used{false};
+  /// In LTM aggregate mode, Nin_agg is now lower-bounded by the cumulative
+  /// sum of upstream per-route Ynode movements arriving at each intermediate
+  /// link (Bug 5b fix).  This pins intermediate-link Nin_agg correctly.
+  bool aggregate_intermediate_conservation_strict{true};
+  /// In LTM aggregate mode, the timing of per-route origin injection at
+  /// entry links is NOT strictly enforced: only the cumulative total at
+  /// horizon end (Nin_agg[entry][T] = Σ h_route) is constrained.  Per-step
+  /// entry-link injection timing must be respected by the per-route mode.
+  /// This flag is true only in per-route mode (use_aggregate_link_variables=false).
+  bool aggregate_origin_timing_strict{false};
+  double mip_gap{0.0};     ///< zero for this pure LP
+  double primal_max_violation{0.0};
+  double integrality_max_violation{0.0};
+  double node_flow_conservation_max_violation{0.0};
+  int n_node_flow_variables{0};
+  std::unordered_map<int, std::unordered_map<int, double>> flow_by_demand_route;
+};
+
 // ── Route and charging stop definitions ───────────────────────────────────
 
 struct RouteChargingStop {
@@ -322,6 +431,13 @@ struct EVDemand {
   double early_penalty_per_hr{0.0};
   /// γ_l [$/hr] — penalty per hour of late arrival (t^arr > t*_w).
   double late_penalty_per_hr{0.0};
+
+  // ── Full DUE / endogenous departure time (DUEMode::FullEndogenous) ─────
+  /// Candidate departure steps for this demand (K^{dep}_w in eq:full-due-set).
+  /// When non-empty and DUEMode::FullEndogenous is active, the DUE solver
+  /// distributes `vehicles` across these steps endogenously.
+  /// When empty, `departure_step` is used as a fixed departure (mode ii).
+  std::vector<int> departure_window_steps;
 };
 
 struct EVChargingSession {

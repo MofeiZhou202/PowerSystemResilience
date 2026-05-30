@@ -219,6 +219,10 @@ TEST_CASE("FormD D1: SocialWelfareMax LP — solver-certified, no OPF",
     CHECK(res.n_constraints  >  0);
     CHECK(res.primal_max_violation      <= 1e-7);
     CHECK(res.integrality_max_violation <= 1e-9);
+    // Honesty: LP/MILP Formulation D uses exogenous route costs (free-flow
+    // or one-shot equal-split CTM pre-pass).  Travel times are NOT updated
+    // endogenously inside the optimisation.
+    CHECK(res.travel_times_are_endogenous == false);
   }
 
   SECTION("route assignment: optimized charging keeps all flow on near route") {
@@ -612,6 +616,298 @@ TEST_CASE("FormD D10: UserBenefitMax outside-option cost for unserved demand",
   CHECK(res.total_served_vehicles == Approx(0.0).margin(1e-9));
   CHECK(res.total_unserved_vehicles == Approx(4.0).margin(1e-9));
   CHECK(res.objective == Approx(28.0).margin(1e-9));
+}
+
+// =============================================================================
+// Test D11: Full-joint nonlinear mode is monolithic but locally certified only
+// =============================================================================
+// This mode assembles endogenous BPR congestion, charging/V2G constraints,
+// DC-OPF equations, and Wardrop complementarity rows in one NLP/MPEC.  The
+// certificate is intentionally not a global MIP gap: the local NLP path can only
+// report local NLP stationarity for this nonconvex reduced model.
+// =============================================================================
+TEST_CASE("FormD D11: FullJointSocialWelfareNLP reports local MPEC certificate",
+          "[ev_power_traffic][formulation_d][full_joint_nlp]") {
+
+  auto prob = make_joint_opt_d_problem(1.0, 50.0, 10.0);
+  REQUIRE_FALSE(prob.routes.empty());
+  REQUIRE_FALSE(prob.routes.front().charging_stops.empty());
+  auto& stop = prob.routes.front().charging_stops.front();
+  stop.dwell_steps = 2;
+  stop.v2g_capable = true;
+  stop.max_discharge_kw_per_vehicle = 2.0;
+
+  REQUIRE_FALSE(prob.demands.empty());
+  prob.demands.front().candidate_route_indices = {1, 2};
+  prob.demands.front().initial_energy_kwh = 30.0;
+  prob.demands.front().energy_min_kwh = 10.0;
+  prob.demands.front().energy_max_kwh = 50.0;
+
+  auto opts = make_d_options(/*opf=*/true);
+  opts.mode = JointOptimizerMode::FullJointSocialWelfareNLP;
+  opts.allow_v2g = true;
+  opts.full_joint_prefer_ipopt = false;
+  opts.full_joint_equilibrium_penalty = 1.0;
+  opts.full_joint_fd_step = 1e-6;
+  opts.full_joint_verify_sparse_derivatives = true;
+  opts.full_joint_derivative_check_tol = 1e-3;
+  opts.time_limit_sec = 20.0;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  CHECK(res.monolithic_full_joint_model == true);
+  CHECK(res.nonlinear_model == true);
+  CHECK(res.endogenous_congestion_enforced == true);
+  CHECK(res.wardrop_complementarity_enforced == true);
+  CHECK(res.dcopf_coupling_enforced == true);
+  CHECK(res.charging_v2g_enforced == true);
+  CHECK(res.sparse_derivatives_enabled == true);
+  CHECK(res.sparse_jacobian_nnz > 0);
+  CHECK(res.sparse_derivatives_verified == true);
+  CHECK(res.derivative_check_failures == 0);
+  CHECK(res.derivative_check_max_abs_error <= 1e-3);
+  CHECK(res.global_optimum_certificate == false);
+  CHECK(res.proven_optimal == false);
+  // FullJointNLP enforces BPR cost rows endogenously (true).
+  CHECK(res.travel_times_are_endogenous == true);
+  CHECK(res.best_bound != res.best_bound); // NaN: no global dual bound
+  CHECK(res.n_variables > 0);
+  CHECK(res.n_constraints > 0);
+  CHECK_FALSE(res.solver_backend.empty());
+  CHECK_FALSE(res.warnings.empty());
+}
+
+// =============================================================================
+// Test D12: A requested global exact nonlinear certificate is not faked
+// =============================================================================
+TEST_CASE("FormD D12: FullJointNLP refuses unsupported global exact certificate",
+          "[ev_power_traffic][formulation_d][full_joint_nlp][honesty]") {
+
+  const auto prob = make_joint_opt_d_problem();
+  auto opts = make_d_options(/*opf=*/true);
+  opts.mode = JointOptimizerMode::FullJointSocialWelfareNLP;
+  opts.require_global_nonlinear_certificate = true;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  CHECK(res.monolithic_full_joint_model == true);
+  CHECK(res.nonlinear_model == true);
+  CHECK(res.feasible == false);
+  CHECK(res.proven_optimal == false);
+  CHECK(res.global_optimum_certificate == false);
+  CHECK(res.solver_status.find("unsupported") != std::string::npos);
+}
+
+TEST_CASE("FormD D13: exact mathematical-model verification is a hard gate",
+          "[ev_power_traffic][formulation_d][honesty][exact_model]") {
+
+  SECTION("LP/MILP path refuses 100 percent mathematical-model verification") {
+    const auto prob = make_joint_opt_d_problem();
+    auto opts = make_d_options(/*opf=*/true);
+    opts.require_exact_mathematical_model = true;
+
+    const auto res = solve_joint_optimizer(prob, opts);
+
+    CHECK(res.feasible == false);
+    CHECK(res.proven_optimal == false);
+    CHECK(res.global_optimum_certificate == false);
+    CHECK(res.mathematical_model_verified == false);
+    CHECK(res.solver_status.find("unsupported") != std::string::npos);
+    CHECK(res.mathematical_model_verification_status.find("unsupported") !=
+          std::string::npos);
+  }
+
+  SECTION("FullJoint NLP also refuses a global 100 percent proof") {
+    const auto prob = make_joint_opt_d_problem();
+    auto opts = make_d_options(/*opf=*/true);
+    opts.mode = JointOptimizerMode::FullJointSocialWelfareNLP;
+    opts.require_exact_mathematical_model = true;
+
+    const auto res = solve_joint_optimizer(prob, opts);
+
+    CHECK(res.monolithic_full_joint_model == true);
+    CHECK(res.proven_optimal == false);
+    CHECK(res.global_optimum_certificate == false);
+    CHECK(res.mathematical_model_verified == false);
+    CHECK(res.solver_status.find("unsupported") != std::string::npos);
+  }
+}
+
+// =============================================================================
+// Test D14: Certified finite dynamic MPEC MILP
+// =============================================================================
+// This is the globally certified path for the implemented finite linear model:
+// endogenous affine link congestion costs, road-fault/capacity profiles,
+// charging/V2G/SOC, optional DC-OPF, and Wardrop complementarity all appear in
+// one MILP.  It is intentionally not a proof for the nonlinear CTM/LTM MPEC.
+// =============================================================================
+TEST_CASE("FormD D14: certified dynamic MPEC MILP gives global certificate",
+          "[ev_power_traffic][formulation_d][certified_mpec][milp]") {
+
+  auto prob = make_joint_opt_d_problem(4.0, 50.0, 0.0);
+  for (auto& bus : prob.system.ac.buses) {
+    if (bus.index == 2) bus.pd_mw = 0.03; // sink for station-102 V2G in DC-OPF
+  }
+  for (auto& link : prob.traffic.links) {
+    link.length_km = 1.0;
+    link.alpha = 0.5;
+    if (link.index == 11) {
+      link.availability_profile.assign(6, true);
+      link.availability_profile[0] = false; // road fault blocks near route at departure
+    }
+  }
+  REQUIRE_FALSE(prob.routes.empty());
+  REQUIRE(prob.routes.size() >= 2u);
+  auto& far_stop = prob.routes[1].charging_stops.front();
+  far_stop.requested_energy_kwh_per_vehicle = 0.0;
+  far_stop.dwell_steps = 2;
+  far_stop.v2g_capable = true;
+  far_stop.max_discharge_kw_per_vehicle = 5.0;
+
+  REQUIRE_FALSE(prob.demands.empty());
+  prob.demands.front().initial_energy_kwh = 40.0;
+  prob.demands.front().energy_min_kwh = 10.0;
+  prob.demands.front().energy_max_kwh = 60.0;
+  prob.demands.front().candidate_route_indices = {1, 2};
+
+  StationPriceProfile pp; pp.station_id = 102;
+  pp.price_per_kwh.assign(6, 1.0);
+  prob.station_prices.push_back(pp);
+
+  auto opts = make_d_options(/*opf=*/true);
+  opts.mode = JointOptimizerMode::CertifiedDynamicUserBenefitMPECMILP;
+  opts.allow_v2g = true;
+  opts.default_charging_efficiency = 1.0;
+  opts.mip_gap = 1e-6;
+  opts.time_limit_sec = 30.0;
+  opts.max_nodes = 8192;
+  opts.require_exact_mathematical_model = true;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  CHECK(res.certified_dynamic_mpec_model == true);
+  CHECK(res.monolithic_full_joint_model == true);
+  CHECK(res.nonlinear_model == false);
+  CHECK(res.endogenous_congestion_enforced == true);
+  CHECK(res.travel_times_are_endogenous == true);
+  CHECK(res.wardrop_complementarity_enforced == true);
+  CHECK(res.dcopf_coupling_enforced == true);
+  CHECK(res.charging_v2g_enforced == true);
+  CHECK(res.feasible == true);
+  CHECK(res.proven_optimal == true);
+  CHECK(res.global_optimum_certificate == true);
+  CHECK(res.mathematical_model_verified == true);
+  CHECK(res.mip_gap <= opts.mip_gap + 1e-9);
+  CHECK(res.primal_max_violation <= 1e-6);
+  CHECK(res.integrality_max_violation <= 1e-6);
+  CHECK(res.wardrop_complementarity_residual <= 1e-5);
+  CHECK(res.road_capacity_max_violation <= 1e-6);
+
+  REQUIRE(res.route_flow.count(1));
+  const auto& rf = res.route_flow.at(1);
+  const double h1 = rf.count(1) ? rf.at(1) : 0.0;
+  const double h2 = rf.count(2) ? rf.at(2) : 0.0;
+  CHECK(h1 == Approx(0.0).margin(1e-6));
+  CHECK(h2 == Approx(4.0).margin(1e-6));
+  CHECK(res.total_served_vehicles == Approx(4.0).margin(1e-6));
+  CHECK(res.total_v2g_energy_kwh > 0.0);
+  CHECK_FALSE(res.gen_dispatch_mw.empty());
+  CHECK(res.mathematical_model_verification_status.find("finite linear dynamic MPEC MILP") !=
+        std::string::npos);
+}
+
+// =============================================================================
+// Test D15: Certified full-joint LTM PWL-MILP
+// =============================================================================
+// This path upgrades the certified finite dynamic MILP with explicit
+// cumulative-count LTM rows and a PWL BPR travel-cost envelope.  The global
+// certificate applies to the assembled PWL-MILP approximation; the result must
+// report the approximation boundary instead of claiming an exact nonlinear
+// CTM/LTM proof.
+// =============================================================================
+TEST_CASE("FormD D15: certified full-joint LTM PWL-MILP reports bounded approximation",
+          "[ev_power_traffic][formulation_d][ltm][pwl][milp]") {
+
+  auto prob = make_joint_opt_d_problem(4.0, 50.0, 0.0);
+  for (auto& link : prob.traffic.links) {
+    link.length_km = std::max(1.0, link.free_flow_time_hr * 60.0);
+    link.alpha = 0.15;
+    link.beta = 4.0;
+    link.jam_vehicles = 20.0;
+    if (link.index == 11) {
+      link.availability_profile.assign(6, true);
+      link.availability_profile[0] = false;
+    }
+  }
+  for (auto& bus : prob.system.ac.buses) {
+    if (bus.index == 2) bus.pd_mw = 0.02;
+  }
+  REQUIRE(prob.routes.size() >= 2u);
+  auto& far_stop = prob.routes[1].charging_stops.front();
+  far_stop.requested_energy_kwh_per_vehicle = 0.0;
+  far_stop.dwell_steps = 2;
+  far_stop.v2g_capable = true;
+  far_stop.max_discharge_kw_per_vehicle = 5.0;
+
+  REQUIRE_FALSE(prob.demands.empty());
+  prob.demands.front().initial_energy_kwh = 40.0;
+  prob.demands.front().energy_min_kwh = 10.0;
+  prob.demands.front().energy_max_kwh = 60.0;
+  prob.demands.front().candidate_route_indices = {1, 2};
+
+  StationPriceProfile pp;
+  pp.station_id = 102;
+  pp.price_per_kwh.assign(6, 1.0);
+  prob.station_prices.push_back(pp);
+
+  auto opts = make_d_options(/*opf=*/true);
+  opts.mode = JointOptimizerMode::CertifiedFullJointLtmUserBenefitPwlMILP;
+  opts.allow_v2g = true;
+  opts.default_charging_efficiency = 1.0;
+  opts.full_joint_ltm_pwl_segments = 6;
+  opts.mip_gap = 1e-6;
+  opts.time_limit_sec = 30.0;
+  opts.max_nodes = 8192;
+  opts.require_exact_mathematical_model = true;
+
+  const auto res = solve_joint_optimizer(prob, opts);
+
+  CHECK(res.certified_full_joint_ltm_pwl_milp_model == true);
+  CHECK(res.certified_dynamic_mpec_model == false);
+  CHECK(res.monolithic_full_joint_model == true);
+  CHECK(res.nonlinear_model == false);
+  CHECK(res.full_ltm_dynamics_enforced == true);
+  CHECK(res.pwl_approximation_used == true);
+  CHECK(res.pwl_max_abs_error_bound >= 0.0);
+  CHECK(res.pwl_max_abs_error_bound < 0.1);
+  CHECK(res.endogenous_congestion_enforced == true);
+  CHECK(res.travel_times_are_endogenous == true);
+  CHECK(res.wardrop_complementarity_enforced == true);
+  CHECK(res.dcopf_coupling_enforced == true);
+  CHECK(res.charging_v2g_enforced == true);
+  CHECK(res.feasible == true);
+  CHECK(res.proven_optimal == true);
+  CHECK(res.global_optimum_certificate == true);
+  CHECK(res.mathematical_model_verified == true);
+  CHECK(res.mip_gap <= opts.mip_gap + 1e-9);
+  CHECK(res.primal_max_violation <= 1e-6);
+  CHECK(res.integrality_max_violation <= 1e-6);
+  CHECK(res.ltm_conservation_max_violation <= 1e-6);
+  CHECK(res.wardrop_complementarity_residual <= 1e-5);
+
+  REQUIRE(res.route_flow.count(1));
+  const auto& rf = res.route_flow.at(1);
+  const double h1 = rf.count(1) ? rf.at(1) : 0.0;
+  const double h2 = rf.count(2) ? rf.at(2) : 0.0;
+  CHECK(h1 == Approx(0.0).margin(1e-6));
+  CHECK(h2 == Approx(4.0).margin(1e-6));
+  CHECK(res.total_served_vehicles == Approx(4.0).margin(1e-6));
+  CHECK(res.total_v2g_energy_kwh > 0.0);
+  CHECK_FALSE(res.gen_dispatch_mw.empty());
+  CHECK(res.mathematical_model_verification_status.find("PWL-MILP approximation") !=
+        std::string::npos);
+  CHECK(res.mathematical_model_verification_status.find("not an exact global proof") !=
+        std::string::npos);
 }
 
 // =============================================================================

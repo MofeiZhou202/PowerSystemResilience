@@ -602,6 +602,96 @@ The user-benefit minimization objective is
 Electricity appears only through \(p^{ch}-p^{dis}\); it is not duplicated on
 route-flow columns.
 
+\paragraph{Certified finite dynamic MPEC MILP mode.}
+The code now also exposes
+\texttt{JointOptimizerMode::CertifiedDynamicMPECMILP} and
+\texttt{CertifiedDynamicUserBenefitMPECMILP}.  These modes are stricter than
+the default Formulation-D LP/MILP, but still narrower than the nonlinear
+CTM/LTM MPEC.  They assemble one finite MILP with route--departure choices
+\(h_i\), binary usage indicators \(z_i\), demand minimum-cost variables
+\(\mu_d\), endogenous link volumes \(v_{a,k}\), aggregate charge/discharge
+variables, battery-energy variables, and optional DC-OPF variables.  A choice
+\(i=(d,r,k)\) is admitted only if all link--time pairs on the route have
+positive capacity and are available, so road failures are part of the feasible
+choice set rather than a post-processing filter:
+\begin{equation}
+  v_{a,k}=\sum_{i:a\in r_i,\ \kappa_{i,a}=k} h_i,\qquad
+  0\le v_{a,k}\le \bar q_{a,k}\Delta t .
+  \label{eq:evpt-certified-link-volume}
+\end{equation}
+The endogenous travel-time term is a linear, globally certifiable affine
+congestion law
+\begin{equation}
+  \tau_{a,k}(v)=t^0_a+
+  \alpha_a\,\frac{t^0_a}{\bar q_{a,k}\Delta t}\,v_{a,k},
+  \qquad
+  C_i=\bar C_i+
+  \mathrm{VOT}_d\sum_{a\in r_i}
+  \alpha_a\,\frac{t^0_a}{\bar q_{a,\kappa_{i,a}}\Delta t}\,
+  v_{a,\kappa_{i,a}} .
+  \label{eq:evpt-certified-affine-cost}
+\end{equation}
+Wardrop equilibrium is encoded by standard big-\(M\) MPEC rows:
+\begin{align}
+  \mu_d &\le C_i, && i\in\mathcal A_d,\\
+  C_i &\le \mu_d + M(1-z_i), && i\in\mathcal A_d,\\
+  h_i &\le D_d z_i, && i\in\mathcal A_d,\\
+  \sum_{i\in\mathcal A_d}h_i+u_d &= D_d .
+  \label{eq:evpt-certified-wardrop-milp}
+\end{align}
+Thus any used route--departure choice has minimum generalized cost among the
+admitted feasible alternatives.  Charging/V2G and DC-OPF rows are the same
+linear rows as in the LP/MILP baseline, inserted in the same MILP.  The
+private generalized cost \(C_i\) uses route-level planned charging and V2G
+energy credits; the actual optimized charge/discharge powers are enforced by
+linear session/SOC rows and contribute directly to the objective where
+appropriate.  Feeding the realized ratio
+\((p^{ch}_{i,k}-p^{dis}_{i,k})/h_i\) back into \(C_i\) would be bilinear and
+is intentionally outside this globally certified MILP.  The solver
+sets \texttt{mathematical\_model\_verified=true} only when the assembled MILP
+is feasible, the primal and integrality residuals pass tolerance, and the MIP
+gap is within \texttt{JointOptimizerOptions::mip\_gap}.  This is a global
+certificate for Eqs.~\eqref{eq:evpt-certified-link-volume}--
+\eqref{eq:evpt-certified-wardrop-milp} plus the included charging/V2G and
+DC-OPF rows.  It is not claimed to be a global proof for nonlinear BPR,
+full CTM cell propagation, full LTM FIFO, or the nonlinear FullJoint NLP.
+
+\paragraph{Certified full-joint LTM PWL-MILP mode.}
+For a more faithful dynamic traffic representation, the implementation also
+provides
+\texttt{JointOptimizerMode::CertifiedFullJointLtmPwlMILP} and
+\texttt{CertifiedFullJointLtmUserBenefitPwlMILP}.  These modes keep the
+same route--departure, charging/V2G, DC-OPF, and Wardrop big-\(M\) structure,
+but add cumulative-count LTM state variables
+\(N^{in}_{a,k},N^{out}_{a,k}\) for every link and time step:
+\begin{align}
+  N^{in}_{a,k}-N^{in}_{a,k-1} &= v_{a,k-1},\\
+  N^{out}_{a,k} &\le N^{in}_{a,k-\tau^f_a},\\
+  N^{in}_{a,k} - N^{out}_{a,k-\tau^b_a} &\le N^{jam}_a,\\
+  0\le N^{in}_{a,k}-N^{in}_{a,k-1} &\le \bar q_{a,k}\Delta t,\\
+  0\le N^{out}_{a,k}-N^{out}_{a,k-1} &\le \bar q_{a,k}\Delta t .
+  \label{eq:evpt-certified-ltm-pwl}
+\end{align}
+Road closures and failures are represented by setting
+\(\bar q_{a,k}=0\) in the corresponding entry/exit-capacity rows.  The
+nonlinear BPR link travel-time law is not solved as a nonlinear global
+program.  Instead, the mode introduces an auxiliary \(\hat\tau_{a,k}\) and a
+piecewise-linear secant envelope over \(v_{a,k}\):
+\begin{equation}
+  \hat\tau_{a,k}\ge
+  m_{a,k,s}v_{a,k}+b_{a,k,s},\qquad s=1,\ldots,S,
+  \label{eq:evpt-certified-pwl-envelope}
+\end{equation}
+where the breakpoints partition \([0,\bar q_{a,k}\Delta t]\).  The solver
+certificate is therefore a global MILP certificate for
+Eqs.~\eqref{eq:evpt-certified-ltm-pwl}--\eqref{eq:evpt-certified-pwl-envelope}
+plus the charging/V2G, DC-OPF, and Wardrop rows.  The result reports
+\texttt{pwl\_approximation\_used=true},
+\texttt{full\_ltm\_dynamics\_enforced=true}, and the conservative field
+\texttt{pwl\_max\_abs\_error\_bound}.  This is an auditable, scalable
+global path for the assembled LTM PWL-MILP approximation; it is still not an
+exact global proof for the original nonlinear CTM/LTM--MPEC.
+
 \paragraph{Target D-CTM extension.}
 The paper-level integrated model should replace free-flow route timing by CTM
 constraints \eqref{eq:evpt-send}--\eqref{eq:evpt-node-model}, keep the
@@ -635,14 +725,29 @@ Formulation C & CTM-DUE plus repeated DC-OPF price coordination and welfare
 history. & pass \\
 Formulation D & Single LP/MILP route--charging--V2G--DC-OPF subset,
 objective accounting, road availability rows, outside-option cost, and MIP
-certificate fields. & pass \\
+certificate fields.  The new certified dynamic MPEC MILP adds affine
+endogenous congestion, road-fault choice filtering, Wardrop big-\(M\)
+complementarity, V2G, and DC-OPF in one globally certified MILP.  The
+new certified LTM PWL-MILP additionally enforces cumulative-count LTM rows
+and reports a PWL travel-cost error bound. & pass \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
-The latest full test run discovered 481 CTest entries: 479 passed and 2
-MATPOWER cases were skipped by design. Case Study D has 10 tests and 94
-assertions.
+The current configured build discovers 535 CTest entries.  The targeted
+Formulation-D regression binary has 15 test cases and 192 assertions, including
+honesty checks that distinguish the exogenous LP/MILP route-cost path from the
+certified finite MILP/MPEC path, the certified LTM PWL-MILP approximation, and
+the local FullJoint NLP path.
+After the strict-certification update, requests with
+\texttt{require\_exact\_mathematical\_model=true} are deliberately rejected by
+the reduced solvers that cannot certify their documented equations.  The
+exceptions are \texttt{CertifiedDynamic*MPECMILP}, which may set the flag true
+only for its finite linear dynamic MILP/MPEC, and
+\texttt{CertifiedFullJointLtm*PwlMILP}, which may set the flag true only for
+the assembled LTM PWL-MILP approximation with the reported approximation-error
+bound.  Neither is a global certificate for the original nonlinear CTM/LTM
+model.
 
 \begin{figure}[H]
 \centering

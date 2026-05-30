@@ -108,7 +108,13 @@ set(HACDCPF_SOURCES
   src/ev_power_traffic/ctm_propagation.cpp
   src/ev_power_traffic/ltm_propagation.cpp
   src/ev_power_traffic/ctm_joint_welfare.cpp
-  src/ev_power_traffic/joint_optimizer.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
+  src/ev_power_traffic/joint_optimizer.cpp
+  src/ev_power_traffic/joint_optimizer_full_nlp.cpp
+  src/ev_power_traffic/ctm_so_lp.cpp
+  src/ev_power_traffic/ltm_so_lp.cpp
+  src/ev_power_traffic/ctm_due_vi.cpp
+  src/ev_power_traffic/infra_design_milp.cpp
+  src/ev_power_traffic/ltm_mpc.cpp  # ── network reconfiguration (topology analysis + ONR) ──────────────────
   src/network_reconfiguration/topology_analysis.cpp
   src/network_reconfiguration/topology_reconfiguration.cpp
   # ── graph analysis & reduction ────────────────────────────────────────

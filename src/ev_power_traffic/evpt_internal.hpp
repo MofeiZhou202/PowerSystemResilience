@@ -17,21 +17,54 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
+#include "hacdcpf/engine/engine.hpp"
 #include "hacdcpf/ev_power_traffic/joint_social_welfare.hpp"
+#include "hacdcpf/ev_power_traffic/ltm_network.hpp"
 
 namespace hacdcpf::evpt {
 
 // ── Tolerance constant ─────────────────────────────────────────────────────
 
 inline constexpr double kTol = 1e-9;
+
+// ── CTM link helpers (shared with ctm_so_lp, ctm_due_vi) ──────────────────
+
+/// Derive free-flow speed [km/hr] from free_flow_time_hr and length_km.
+inline double link_free_flow_speed(const TrafficLink& link) noexcept {
+  if (link.length_km > kTol && link.free_flow_time_hr > kTol)
+    return link.length_km / link.free_flow_time_hr;
+  return 1.0e6;
+}
+
+/// Choose CTM sub-step Δt_ctm satisfying the CFL stability condition.
+inline double choose_ctm_dt(const EVPowerTrafficProblem& problem,
+                             const CTMOptions& ctm_opts,
+                             double dt_sim) {
+  if (ctm_opts.dt_ctm_hr > kTol) return ctm_opts.dt_ctm_hr;
+  double min_cfl = dt_sim;
+  for (const auto& lnk : problem.traffic.links) {
+    const double vf = link_free_flow_speed(lnk);
+    if (vf < kTol) continue;
+    const double delta = lnk.length_km > kTol
+        ? lnk.length_km / static_cast<double>(ctm_opts.n_cells_per_link > 0
+              ? ctm_opts.n_cells_per_link
+              : std::max(1, static_cast<int>(std::floor(lnk.length_km / (vf * dt_sim)))))
+        : vf * dt_sim;
+    min_cfl = std::min(min_cfl, delta / vf);
+  }
+  return std::max(kTol, 0.9 * min_cfl);
+}
 
 // ── Assignment-model predicates ────────────────────────────────────────────
 
@@ -154,6 +187,11 @@ inline int route_arrival_step(const RouteAlternative& route,
                               const EVPowerTrafficProblem& problem,
                               int departure_step,
                               double dt_hr);
+
+inline double route_free_flow_time(
+    const RouteAlternative& route,
+    const std::unordered_map<int, std::size_t>& link_pos,
+    const EVPowerTrafficProblem& problem) noexcept;
 
 inline double route_generalized_cost(
     const EVPowerTrafficProblem& problem,
@@ -651,6 +689,263 @@ inline double inferred_minimization_bound(double objective, double mip_gap) {
   return objective - std::max(0.0, mip_gap) * std::max(1.0, std::abs(objective));
 }
 
+struct SolverCertificateResiduals {
+  double primal_max_violation{0.0};
+  double integrality_max_violation{0.0};
+  int primal_violation_block{0};  // 1 bounds, 2 equality, 3 inequality
+  int primal_violation_index{-1};
+};
+
+struct DUEVICertificate {
+  bool available{false};
+  double vi_gap{0.0};
+  double normalized_vi_gap{0.0};
+  double complementarity_max_violation{0.0};
+  double demand_conservation_max_violation{0.0};
+};
+
+inline double finite_bound_violation(double value, double lower, double upper) {
+  double v = 0.0;
+  if (std::isfinite(lower)) v = std::max(v, lower - value);
+  if (std::isfinite(upper)) v = std::max(v, value - upper);
+  return std::max(0.0, v);
+}
+
+inline SolverCertificateResiduals compute_solver_certificate_residuals(
+    const engine::MIPModel& mip,
+    const Eigen::VectorXd& x) {
+  SolverCertificateResiduals cert;
+  const engine::LPModel& lp = mip.linear_part;
+  if (x.size() != static_cast<Eigen::Index>(lp.vars.size())) {
+    cert.primal_max_violation = std::numeric_limits<double>::infinity();
+    cert.integrality_max_violation = std::numeric_limits<double>::infinity();
+    return cert;
+  }
+
+  for (int j = 0; j < static_cast<int>(lp.vars.size()); ++j) {
+    const double xj = x[j];
+    const auto& var = lp.vars[static_cast<std::size_t>(j)];
+    const double v = finite_bound_violation(xj, var.lb, var.ub);
+    if (v > cert.primal_max_violation) {
+      cert.primal_max_violation = v;
+      cert.primal_violation_block = 1;
+      cert.primal_violation_index = j;
+    }
+    if (var.type == engine::VarType::Integer ||
+        var.type == engine::VarType::Binary) {
+      cert.integrality_max_violation = std::max(
+          cert.integrality_max_violation,
+          std::abs(xj - std::round(xj)));
+    }
+  }
+
+  if (lp.Aeq.rows() > 0) {
+    const Eigen::VectorXd r = lp.Aeq * x - lp.beq;
+    for (int i = 0; i < r.size(); ++i) {
+      const double v = std::abs(r[i]);
+      if (v > cert.primal_max_violation) {
+        cert.primal_max_violation = v;
+        cert.primal_violation_block = 2;
+        cert.primal_violation_index = i;
+      }
+    }
+  }
+  if (lp.A.rows() > 0) {
+    const Eigen::VectorXd ax = lp.A * x;
+    for (int i = 0; i < ax.size(); ++i) {
+      const double lhs = engine::lp_row_lhs_or_neg_inf(lp, i);
+      const double rhs = (i < lp.b.size()) ? lp.b[i]
+                                           : std::numeric_limits<double>::infinity();
+      const double v = finite_bound_violation(ax[i], lhs, rhs);
+      if (v > cert.primal_max_violation) {
+        cert.primal_max_violation = v;
+        cert.primal_violation_block = 3;
+        cert.primal_violation_index = i;
+      }
+    }
+  }
+  return cert;
+}
+
+inline std::unordered_map<int, std::vector<double>>
+forecast_station_arrivals_from_demands(const EVPowerTrafficProblem& problem,
+                                       const EVPowerTrafficOptions& opts) {
+  std::unordered_map<int, std::vector<double>> forecast;
+  for (int sid : active_station_ids(problem)) {
+    forecast[sid].assign(static_cast<std::size_t>(std::max(0, opts.num_steps)), 0.0);
+  }
+
+  std::unordered_map<int, std::size_t> link_pos;
+  for (std::size_t i = 0; i < problem.traffic.links.size(); ++i) {
+    link_pos[problem.traffic.links[i].index] = i;
+  }
+
+  for (const auto& demand : problem.demands) {
+    if (demand.vehicles <= kTol) continue;
+    const auto routes = candidate_routes(problem, demand);
+    if (routes.empty()) continue;
+
+    double inv_cost_sum = 0.0;
+    std::vector<double> weights;
+    weights.reserve(routes.size());
+    for (const auto* route : routes) {
+      if (!route || !route_soc_feasible(*route, demand, problem, link_pos)) {
+        weights.push_back(0.0);
+        continue;
+      }
+      const double tt = route_free_flow_time(*route, link_pos, problem);
+      const double w = 1.0 / std::max(kTol, tt);
+      weights.push_back(w);
+      inv_cost_sum += w;
+    }
+    if (inv_cost_sum <= kTol) continue;
+
+    for (std::size_t ri = 0; ri < routes.size(); ++ri) {
+      const auto* route = routes[ri];
+      if (!route || weights[ri] <= kTol) continue;
+      const double flow = demand.vehicles * weights[ri] / inv_cost_sum;
+      const int arrival_step =
+          route_arrival_step(*route, link_pos, problem,
+                             demand.departure_step, opts.time_step_hr);
+      for (const auto& stop : route->charging_stops) {
+        auto it = forecast.find(stop.station_id);
+        if (it == forecast.end()) {
+          it = forecast.emplace(stop.station_id,
+                                std::vector<double>(
+                                    static_cast<std::size_t>(
+                                        std::max(0, opts.num_steps)), 0.0)).first;
+        }
+        if (arrival_step >= 0 &&
+            arrival_step < static_cast<int>(it->second.size())) {
+          it->second[static_cast<std::size_t>(arrival_step)] += flow;
+        }
+      }
+    }
+  }
+  return forecast;
+}
+
+inline DUEVICertificate compute_due_vi_certificate(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& opts,
+    const CTMSimulationResult& ctm,
+    const std::unordered_map<int, int>& route_pos_map,
+    const std::vector<std::vector<double>>& flows,
+    int R) {
+  DUEVICertificate cert;
+  if (R <= 0 || flows.empty()) return cert;
+  cert.available = true;
+
+  auto dep_steps_for = [](const EVDemand& demand) {
+    if (!demand.departure_window_steps.empty()) {
+      return demand.departure_window_steps;
+    }
+    return std::vector<int>{demand.departure_step};
+  };
+
+  const int T_ctm = static_cast<int>(flows.size());
+  const double INF = std::numeric_limits<double>::infinity();
+
+  for (const auto& demand : problem.demands) {
+    if (demand.vehicles <= kTol) continue;
+    double demand_flow = 0.0;
+    double min_cost = INF;
+    double used_cost_weighted = 0.0;
+    double used_flow = 0.0;
+    std::vector<std::pair<double, double>> used_pairs;  // flow, cost
+
+    for (int dep : dep_steps_for(demand)) {
+      const int k_ctm = dep * R;
+      if (k_ctm < 0 || k_ctm >= T_ctm) continue;
+      for (const auto* route : candidate_routes(problem, demand)) {
+        if (!route || !route_pos_map.count(route->index)) continue;
+        const int rp = route_pos_map.at(route->index);
+        if (rp < 0 || rp >= static_cast<int>(flows[static_cast<std::size_t>(k_ctm)].size())) {
+          continue;
+        }
+        double tt = INF;
+        auto tt_it = ctm.route_travel_time.find(route->index);
+        if (tt_it != ctm.route_travel_time.end() &&
+            k_ctm < static_cast<int>(tt_it->second.size())) {
+          tt = tt_it->second[static_cast<std::size_t>(k_ctm)];
+        }
+        if (!std::isfinite(tt)) continue;
+        const double arr_hr = dep * opts.time_step_hr + tt;
+        double cost = opts.value_of_time_per_hr * tt + route->toll_cost +
+            schedule_delay_cost(arr_hr, demand.desired_arrival_time_hr,
+                                demand.early_penalty_per_hr,
+                                demand.late_penalty_per_hr);
+        for (const auto& stop : route->charging_stops) {
+          const double price = station_price(problem, opts, stop.station_id, dep);
+          cost += opts.station_energy_cost_weight * price *
+                  stop.requested_energy_kwh_per_vehicle;
+          if (stop.v2g_capable &&
+              stop.requested_discharge_energy_kwh_per_vehicle > kTol) {
+            cost -= opts.station_energy_cost_weight * price *
+                    stop.requested_discharge_energy_kwh_per_vehicle;
+          }
+        }
+        min_cost = std::min(min_cost, cost);
+        const double f = flows[static_cast<std::size_t>(k_ctm)]
+                              [static_cast<std::size_t>(rp)];
+        if (f > kTol) {
+          demand_flow += f;
+          used_flow += f;
+          used_cost_weighted += f * cost;
+          used_pairs.push_back({f, cost});
+        }
+      }
+    }
+
+    cert.demand_conservation_max_violation = std::max(
+        cert.demand_conservation_max_violation,
+        std::abs(demand_flow - demand.vehicles));
+    if (!std::isfinite(min_cost) || used_flow <= kTol) continue;
+
+    cert.vi_gap += std::max(0.0, used_cost_weighted -
+                                     demand.vehicles * min_cost);
+    for (const auto& [f, cost] : used_pairs) {
+      (void)f;
+      cert.complementarity_max_violation = std::max(
+          cert.complementarity_max_violation,
+          std::max(0.0, cost - min_cost));
+    }
+  }
+
+  double current_cost = 0.0;
+  for (const auto& demand : problem.demands) {
+    if (demand.vehicles <= kTol) continue;
+    for (int dep : dep_steps_for(demand)) {
+      const int k_ctm = dep * R;
+      if (k_ctm < 0 || k_ctm >= T_ctm) continue;
+      for (const auto* route : candidate_routes(problem, demand)) {
+        if (!route || !route_pos_map.count(route->index)) continue;
+        const int rp = route_pos_map.at(route->index);
+        if (rp < 0 || rp >= static_cast<int>(flows[static_cast<std::size_t>(k_ctm)].size())) {
+          continue;
+        }
+        const double f = flows[static_cast<std::size_t>(k_ctm)]
+                              [static_cast<std::size_t>(rp)];
+        if (f <= kTol) continue;
+        auto tt_it = ctm.route_travel_time.find(route->index);
+        if (tt_it == ctm.route_travel_time.end() ||
+            k_ctm >= static_cast<int>(tt_it->second.size())) {
+          continue;
+        }
+        const double tt = tt_it->second[static_cast<std::size_t>(k_ctm)];
+        current_cost += f * opts.value_of_time_per_hr * tt;
+      }
+    }
+  }
+  cert.normalized_vi_gap =
+      cert.vi_gap / std::max(1.0, std::abs(current_cost));
+  return cert;
+}
+
+inline EVPowerTrafficProblem maybe_generate_candidate_routes(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& opts);
+
 // ── Forward declaration ────────────────────────────────────────────────────
 // Defined in assignment_lp.cpp.
 
@@ -666,5 +961,356 @@ void solve_system_optimal_assignment(
     std::vector<std::vector<double>>& link_used,
     std::vector<EVChargingSession>& sessions,
     int& next_session_index);
+
+// ── K-shortest loopless paths (Yen 1971) ──────────────────────────────────
+//
+// Returns at most K loopless paths (by free_flow_time_hr, shortest-first)
+// from origin to destination in the traffic graph.
+// Each path stores the ordered list of link indices.
+// Links with available==false are impassable.
+// May return fewer than K paths if the graph has insufficient loopless paths.
+
+struct YenPath {
+  double cost{0.0};
+  std::vector<int> nodes;  ///< ordered node indices (size = links + 1)
+  std::vector<int> links;  ///< ordered link indices (size = nodes - 1)
+  bool operator>(const YenPath& o) const noexcept { return cost > o.cost; }
+  bool operator<(const YenPath& o) const noexcept { return cost < o.cost; }
+};
+
+inline std::vector<YenPath> yen_k_shortest_paths(
+    const TrafficGraph& graph,
+    int origin,
+    int destination,
+    int K)
+{
+  if (K <= 0) return {};
+
+  const int N = static_cast<int>(graph.nodes.size());
+  if (N == 0) return {};
+
+  // Map node *index* → position in graph.nodes
+  std::unordered_map<int, int> node_idx_to_pos;
+  node_idx_to_pos.reserve(static_cast<std::size_t>(N));
+  for (int i = 0; i < N; ++i)
+    node_idx_to_pos[graph.nodes[static_cast<std::size_t>(i)].index] = i;
+
+  auto pos_of = [&](int node_idx) -> int {
+    auto it = node_idx_to_pos.find(node_idx);
+    return (it != node_idx_to_pos.end()) ? it->second : -1;
+  };
+
+  const int src = pos_of(origin);
+  const int snk = pos_of(destination);
+  if (src < 0 || snk < 0) return {};
+  if (src == snk) {
+    YenPath p; p.nodes.push_back(origin); return {p};
+  }
+
+  // Adjacency list: pos -> {traffic link id, to_pos, cost}
+  struct Edge { int link_idx; int to_pos; double cost; };
+  std::vector<std::vector<Edge>> adj(static_cast<std::size_t>(N));
+  for (int li = 0; li < static_cast<int>(graph.links.size()); ++li) {
+    const auto& lnk = graph.links[static_cast<std::size_t>(li)];
+    if (!lnk.available) continue;
+    const int fp = pos_of(lnk.from_node);
+    const int tp = pos_of(lnk.to_node);
+    if (fp < 0 || tp < 0) continue;
+    adj[static_cast<std::size_t>(fp)].push_back(
+        {lnk.index, tp, std::max(0.0, lnk.free_flow_time_hr)});
+  }
+
+  // Dijkstra from start_pos to snk, excluding excl_links and excl_node_pos.
+  // Returns a YenPath with positions translated back to node indices.
+  auto dijkstra = [&](int start_pos,
+                      const std::unordered_set<int>& excl_links,
+                      const std::unordered_set<int>& excl_nodes_pos) -> YenPath {
+    const double INF = std::numeric_limits<double>::infinity();
+    std::vector<double> dist(static_cast<std::size_t>(N), INF);
+    std::vector<int>    prev_pos(static_cast<std::size_t>(N), -1);
+    std::vector<int>    prev_link(static_cast<std::size_t>(N), -1);
+    dist[static_cast<std::size_t>(start_pos)] = 0.0;
+
+    using P = std::pair<double, int>;
+    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;
+    pq.push({0.0, start_pos});
+
+    while (!pq.empty()) {
+      auto [d, u] = pq.top(); pq.pop();
+      if (d > dist[static_cast<std::size_t>(u)] + kTol) continue;
+      if (u == snk) break;
+      for (const auto& e : adj[static_cast<std::size_t>(u)]) {
+        if (excl_links.count(e.link_idx)) continue;
+        if (excl_nodes_pos.count(e.to_pos)) continue;
+        const double nd = d + e.cost;
+        if (nd < dist[static_cast<std::size_t>(e.to_pos)] - kTol) {
+          dist[static_cast<std::size_t>(e.to_pos)] = nd;
+          prev_pos[static_cast<std::size_t>(e.to_pos)] = u;
+          prev_link[static_cast<std::size_t>(e.to_pos)] = e.link_idx;
+          pq.push({nd, e.to_pos});
+        }
+      }
+    }
+
+    YenPath p;
+    if (!std::isfinite(dist[static_cast<std::size_t>(snk)])) return p;
+    p.cost = dist[static_cast<std::size_t>(snk)];
+    int cur = snk;
+    while (cur != start_pos) {
+      p.nodes.push_back(graph.nodes[static_cast<std::size_t>(cur)].index);
+      p.links.push_back(prev_link[static_cast<std::size_t>(cur)]);
+      cur = prev_pos[static_cast<std::size_t>(cur)];
+    }
+    p.nodes.push_back(graph.nodes[static_cast<std::size_t>(start_pos)].index);
+    std::reverse(p.nodes.begin(), p.nodes.end());
+    std::reverse(p.links.begin(), p.links.end());
+    return p;
+  };
+
+  std::vector<YenPath> A;  // confirmed shortest paths
+  // B: candidate min-heap
+  std::priority_queue<YenPath, std::vector<YenPath>, std::greater<YenPath>> B;
+
+  // First shortest path
+  {
+    YenPath p1 = dijkstra(src, {}, {});
+    if (p1.nodes.empty()) return {};
+    A.push_back(std::move(p1));
+  }
+
+  for (int k = 1; k < K; ++k) {
+    const YenPath& prev = A.back();
+    const int spur_count = static_cast<int>(prev.nodes.size()) - 1;
+
+    for (int i = 0; i < spur_count; ++i) {
+      const int spur_node_idx = prev.nodes[static_cast<std::size_t>(i)];
+      const int spur_pos      = pos_of(spur_node_idx);
+      if (spur_pos < 0) continue;
+
+      // Remove root-prefix links that lead to duplicate paths already in A
+      std::unordered_set<int> excl_links;
+      for (const auto& ap : A) {
+        if (static_cast<int>(ap.nodes.size()) <= i) continue;
+        bool same = true;
+        for (int j = 0; j <= i; ++j) {
+          if (ap.nodes[static_cast<std::size_t>(j)] !=
+              prev.nodes[static_cast<std::size_t>(j)]) { same = false; break; }
+        }
+        if (same && i < static_cast<int>(ap.links.size()))
+          excl_links.insert(ap.links[static_cast<std::size_t>(i)]);
+      }
+
+      // Remove all root nodes except spur (prevents loops)
+      std::unordered_set<int> excl_nodes_pos;
+      for (int j = 0; j < i; ++j) {
+        const int np = pos_of(prev.nodes[static_cast<std::size_t>(j)]);
+        if (np >= 0) excl_nodes_pos.insert(np);
+      }
+
+      YenPath spur = dijkstra(spur_pos, excl_links, excl_nodes_pos);
+      if (spur.nodes.empty()) continue;
+
+      // Combine root (nodes/links 0..i-1) + spur
+      YenPath cand;
+      cand.cost = 0.0;
+      for (int j = 0; j < i; ++j) {
+        cand.nodes.push_back(prev.nodes[static_cast<std::size_t>(j)]);
+        int li = prev.links[static_cast<std::size_t>(j)];
+        cand.links.push_back(li);
+        for (const auto& lnk : graph.links) {
+          if (lnk.index == li) {
+            cand.cost += std::max(0.0, lnk.free_flow_time_hr);
+            break;
+          }
+        }
+      }
+      for (int nd : spur.nodes) cand.nodes.push_back(nd);
+      for (int li : spur.links) cand.links.push_back(li);
+      cand.cost += spur.cost;
+
+      // Avoid duplicates already in A
+      bool dup = false;
+      for (const auto& ap : A) if (ap.links == cand.links) { dup = true; break; }
+      if (!dup) B.push(cand);
+    }
+
+    if (B.empty()) break;
+
+    // Pop the best candidate, skipping any that duplicate A
+    while (!B.empty()) {
+      YenPath best = B.top(); B.pop();
+      bool dup = false;
+      for (const auto& ap : A) if (ap.links == best.links) { dup = true; break; }
+      if (!dup) { A.push_back(std::move(best)); break; }
+    }
+    if (static_cast<int>(A.size()) == k) {
+      // Nothing new was added; keep trying remaining candidates
+    }
+  }
+  return A;
+}
+
+// ── Automatic candidate route generation ──────────────────────────────────
+//
+// Generates the set Ω_{w,k} (eq:plan-set) for all EV demands without
+// pre-assigned candidate_route_indices by:
+//   1. Running Yen's K-shortest-paths for each OD pair.
+//   2. For each path: (a) no-stop, (b) single-station, (c) two-station routes.
+//   3. Pruning infeasible routes by SOC feasibility.
+//
+// Returns a copy of `problem` with new routes appended and each demand's
+// candidate_route_indices populated.
+struct GenerateRoutesOptions {
+  int K{3};
+  bool add_no_stop_route{true};
+  bool add_single_station_routes{true};
+  bool add_two_station_routes{false};   ///< combinatorial — enable only for small nets
+  bool prune_by_soc{true};
+  double default_charge_energy_kwh{20.0};
+  int default_dwell_steps{2};
+  double default_max_charge_kw{50.0};
+};
+
+inline EVPowerTrafficProblem generate_candidate_routes(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& opts,
+    const GenerateRoutesOptions& gen = {})
+{
+  EVPowerTrafficProblem out = problem;
+  const int K = std::max(1, gen.K);
+
+  // link_pos map for SOC feasibility
+  std::unordered_map<int, std::size_t> lp;
+  for (std::size_t i = 0; i < out.traffic.links.size(); ++i)
+    lp[out.traffic.links[i].index] = i;
+
+  // station → bus and node → stations
+  std::unordered_map<int, std::vector<int>> node_to_stn;
+  for (const auto& st : out.system.ac.charging_stations)
+    node_to_stn[st.bus].push_back(st.index);
+
+  // next free route index
+  int nri = 0;
+  for (const auto& r : out.routes) nri = std::max(nri, r.index + 1);
+
+  auto make_stop = [&](int sid) {
+    RouteChargingStop s;
+    s.station_id = sid;
+    s.requested_energy_kwh_per_vehicle = gen.default_charge_energy_kwh;
+    s.dwell_steps = gen.default_dwell_steps;
+    s.max_charge_kw_per_vehicle = gen.default_max_charge_kw;
+    return s;
+  };
+
+  auto try_add = [&](RouteAlternative& r,
+                     const EVDemand& demand,
+                     std::vector<int>& indices) {
+    if (!gen.prune_by_soc || route_soc_feasible(r, demand, out, lp)) {
+      out.routes.push_back(r);
+      indices.push_back(r.index);
+    }
+  };
+
+  for (auto& demand : out.demands) {
+    if (!demand.candidate_route_indices.empty()) continue;
+
+    std::vector<YenPath> paths =
+        yen_k_shortest_paths(out.traffic, demand.origin_node, demand.destination_node, K);
+    if (paths.empty()) continue;
+
+    std::vector<int> new_idx;
+    for (const auto& path : paths) {
+      if (path.links.empty() && demand.origin_node != demand.destination_node) continue;
+
+      if (gen.add_no_stop_route) {
+        RouteAlternative r;
+        r.index = nri++; r.origin_node = demand.origin_node;
+        r.destination_node = demand.destination_node; r.link_indices = path.links;
+        try_add(r, demand, new_idx);
+      }
+
+      // Gather stations reachable from nodes on this path
+      std::vector<int> path_stns;
+      {
+        std::unordered_set<int> seen;
+        for (int nd : path.nodes) {
+          auto it = node_to_stn.find(nd);
+          if (it == node_to_stn.end()) continue;
+          for (int sid : it->second)
+            if (seen.insert(sid).second) path_stns.push_back(sid);
+        }
+      }
+
+      if (gen.add_single_station_routes) {
+        for (int sid : path_stns) {
+          RouteAlternative r;
+          r.index = nri++; r.origin_node = demand.origin_node;
+          r.destination_node = demand.destination_node; r.link_indices = path.links;
+          r.charging_stops = {make_stop(sid)};
+          try_add(r, demand, new_idx);
+        }
+      }
+
+      if (gen.add_two_station_routes && path_stns.size() >= 2) {
+        for (std::size_t a = 0; a < path_stns.size(); ++a) {
+          for (std::size_t b = a + 1; b < path_stns.size(); ++b) {
+            RouteAlternative r;
+            r.index = nri++; r.origin_node = demand.origin_node;
+            r.destination_node = demand.destination_node; r.link_indices = path.links;
+            r.charging_stops = {make_stop(path_stns[a]), make_stop(path_stns[b])};
+            try_add(r, demand, new_idx);
+          }
+        }
+      }
+    }
+    demand.candidate_route_indices = std::move(new_idx);
+  }
+  return out;
+}
+
+inline EVPowerTrafficProblem maybe_generate_candidate_routes(
+    const EVPowerTrafficProblem& problem,
+    const EVPowerTrafficOptions& opts) {
+  if (!opts.auto_generate_routes) return problem;
+  GenerateRoutesOptions gen;
+  gen.K = opts.k_shortest_paths;
+  return generate_candidate_routes(problem, opts, gen);
+}
+
+// ── Station spillback helper (eq:spillback-receiving) ─────────────────────
+//
+// Returns the reduced receiving capacity [veh per step] for the access link
+// of charging station `sp` at simulation step k, given the current queue
+// state Q_{s,k}.
+//
+// Reduction model (smooth sigmoid):
+//   R^access_{s,k} = R^0 × max(0, 1 − Q_{s,k} / Q̄_s)
+//
+// This returns a multiplicative factor ∈ [0, 1].  The caller multiplies
+// this by the nominal receiving capacity computed from the CTM or LTM formula.
+// Returns 1.0 if queue_capacity == inf (no spillback) or access_link_id < 0.
+inline double spillback_receiving_factor(const ChargingStationParams& sp,
+                                         double queue_veh) noexcept {
+  if (sp.access_link_id < 0) return 1.0;
+  if (!std::isfinite(sp.queue_capacity) || sp.queue_capacity <= kTol) return 1.0;
+  return std::max(0.0, 1.0 - queue_veh / sp.queue_capacity);
+}
+
+/// Free-flow travel time for a route [hr] (sum of link free-flow times).
+inline double route_free_flow_time(
+    const RouteAlternative& route,
+    const std::unordered_map<int, std::size_t>& link_pos,
+    const EVPowerTrafficProblem& problem) noexcept
+{
+  double tt = 0.0;
+  for (int li : route.link_indices) {
+    auto it = link_pos.find(li);
+    if (it == link_pos.end()) continue;
+    const auto& lnk = problem.traffic.links[it->second];
+    const double vf  = link_free_flow_speed(lnk);
+    tt += std::max(kTol, lnk.length_km) / vf;
+  }
+  return tt;
+}
 
 }  // namespace hacdcpf::evpt

@@ -625,6 +625,10 @@ TEST_CASE("CTM-DUE: session synthesis and dispatch — energy delivered",
     CHECK(static_cast<int>(wvec.size()) == ev_opts.num_steps);
     for (double w : wvec) CHECK(w >= 0.0);
   }
+
+  // (g) Honesty field: dispatch is a greedy per-session heuristic, not a
+  // monolithic joint charging/V2G optimisation.  This must be advertised.
+  CHECK(res.charging_dispatch_is_greedy == true);
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -994,4 +998,33 @@ TEST_CASE("CTM-DUE: ev_relative_gap and icv_relative_gap fields populated",
   // (d) relative_gap == max(ev_relative_gap, icv_relative_gap)
   const double expected_rg = std::max(res.ev_relative_gap, res.icv_relative_gap);
   CHECK(res.relative_gap == Approx(expected_rg).epsilon(1e-9));
+
+  // (e) Honesty field: with EV-only demands and no ICV participation, the VI
+  // certificate is not restricted relative to the represented EV game.
+  CHECK(res.vi_certificate_covers_ev_only == false);
+}
+
+TEST_CASE("CTM-DUE: exact mathematical-model request is rejected",
+          "[ctm][due][honesty][exact_model]") {
+  auto prob = make_symmetric_problem(4.0);
+
+  EVPowerTrafficOptions ev_opts;
+  ev_opts.num_steps = 6;
+  ev_opts.time_step_hr = 0.05;
+
+  CTMOptions ctm_opts;
+  ctm_opts.dt_ctm_hr = 0.01;
+  ctm_opts.n_cells_per_link = 3;
+
+  DUEOptions due_opts;
+  due_opts.require_exact_mathematical_model = true;
+
+  const auto res =
+      simulate_ev_power_traffic_ctm_due(prob, ev_opts, ctm_opts, due_opts);
+
+  CHECK(res.converged == false);
+  CHECK(res.vi_certificate_available == false);
+  CHECK(res.mathematical_model_verified == false);
+  CHECK(res.mathematical_model_verification_status.find("unsupported") !=
+        std::string::npos);
 }

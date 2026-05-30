@@ -143,6 +143,17 @@ LTMSimulationResult simulate_ltm_network(const LTMNetworkProblem& problem)
       R[lid] = ls.receiving(k);
     }
 
+    // Apply station spillback: reduce R for access links (eq:spillback-receiving).
+    for (const auto& sp : problem.stations) {
+      if (sp.access_link_id < 0) continue;
+      if (!R.count(sp.access_link_id)) continue;
+      if (!std::isfinite(sp.queue_capacity) || sp.queue_capacity <= kLTMTol) continue;
+      const ChargingStationState& ss = result.station_states.at(sp.id);
+      const double q_k = ss.Q[static_cast<std::size_t>(k)];
+      const double factor = std::max(0.0, 1.0 - q_k / sp.queue_capacity);
+      R[sp.access_link_id] *= factor;
+    }
+
     // Compute inflow u_k and outflow v_k for each link
     std::unordered_map<int, double> u_total, v_total;
     for (auto& [lid, _] : result.link_states) {

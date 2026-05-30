@@ -152,6 +152,11 @@ hacdcpf_add_test(test_ev_power_traffic_ctm_joint test_ev_power_traffic_ctm_joint
 #   accounting vs Formulation C, and MILP integer-flow mode.
 hacdcpf_add_test(test_ev_power_traffic_joint_opt_d test_ev_power_traffic_joint_opt_d.cpp)
 
+# Direct public-entry tests for the Section 20 solver-backed formulations:
+# SO-CTM LP, SO-LTM LP, CTM-DUE-VI, infrastructure MILP, LTM-MPC, and
+# automatic candidate-route generation wiring.
+hacdcpf_add_test(test_ev_power_traffic_formulations_e_f_g_h test_ev_power_traffic_formulations_e_f_g_h.cpp)
+
 # Phase I: multi-class CTM-DUE with heterogeneous ICV and EV vehicles.
 # Covers: single-class EV baseline, mixed ICV+EV capacity sharing (PCE),
 # spillback propagation, road failure and rerouting, differential class costs.
