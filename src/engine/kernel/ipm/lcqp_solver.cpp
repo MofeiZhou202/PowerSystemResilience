@@ -196,6 +196,74 @@ SolveResult NativeLCQPAdapter::solve_qp(const QPModel& prob) const {
     return result;
   }
 
+  const int m_ineq = static_cast<int>(prob.A.rows());
+
+  // If there are general inequality constraints A*x <= b, convert to equality
+  // form by introducing slack variables s >= 0:
+  //   [Aeq  0][x]   [beq]       0 <= s <= +inf
+  //   [A    I][s] = [b  ]
+  // This mirrors the same transformation done in solve_lp().
+  if (m_ineq > 0) {
+    const int n_aug = n + m_ineq;
+    const int m_eq  = static_cast<int>(prob.Aeq.rows());
+    const int m_all = m_eq + m_ineq;
+
+    QPModel qp_aug;
+    qp_aug.sense = prob.sense;
+
+    // Augmented Q: pad with zeros for slack columns/rows
+    qp_aug.Q.resize(n_aug, n_aug);
+    {
+      std::vector<Eigen::Triplet<double>> trips;
+      trips.reserve(static_cast<size_t>(prob.Q.nonZeros()));
+      for (int k = 0; k < prob.Q.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Q, k); it; ++it)
+          trips.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+      qp_aug.Q.setFromTriplets(trips.begin(), trips.end());
+      qp_aug.Q.makeCompressed();
+    }
+
+    // Augmented cost: [c; 0]
+    qp_aug.c.resize(n_aug);
+    qp_aug.c << prob.c, Eigen::VectorXd::Zero(m_ineq);
+
+    // Augmented equality constraint: [Aeq 0; A I]
+    qp_aug.Aeq.resize(m_all, n_aug);
+    {
+      std::vector<Eigen::Triplet<double>> trips;
+      trips.reserve(static_cast<size_t>(prob.Aeq.nonZeros() + prob.A.nonZeros() + m_ineq));
+      for (int k = 0; k < prob.Aeq.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, k); it; ++it)
+          trips.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+      for (int k = 0; k < prob.A.outerSize(); ++k)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, k); it; ++it)
+          trips.emplace_back(m_eq + static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+      for (int i = 0; i < m_ineq; ++i)
+        trips.emplace_back(m_eq + i, n + i, 1.0);  // slack identity block
+      qp_aug.Aeq.setFromTriplets(trips.begin(), trips.end());
+      qp_aug.Aeq.makeCompressed();
+    }
+
+    // Augmented RHS: [beq; b]
+    qp_aug.beq.resize(m_all);
+    if (m_eq > 0) qp_aug.beq.head(m_eq) = prob.beq;
+    qp_aug.beq.tail(m_ineq) = prob.b;
+
+    // Augmented variables: original + slack (lb=0, ub=+inf)
+    qp_aug.vars = prob.vars;
+    for (int i = 0; i < m_ineq; ++i)
+      qp_aug.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity(), {}});
+
+    SolveResult out = solve_qp(qp_aug);  // recurse (no ineq this time)
+    // Strip slack variables from solution
+    if (static_cast<int>(out.x.size()) == n_aug)
+      out.x.conservativeResize(n);
+    // Recompute objective using original cost (without slacks)
+    if (out.stats.success)
+      out.stats.objective = 0.5 * out.x.dot(prob.Q * out.x) + prob.c.dot(out.x);
+    return out;
+  }
+
   // Extract bounds
   Eigen::VectorXd lb(n), ub(n);
   for (int i = 0; i < n; ++i) {

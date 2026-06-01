@@ -1,0 +1,293 @@
+# cmake/BuildMUMPS.cmake
+# Builds MUMPS 5.7.3 from source (sequential, double-precision only).
+# Downloads the official MUMPS tarball from https://mumps-solver.org/
+# No GitHub dependency; all CMake build logic is inlined here.
+#
+# Requirements:
+#   Fortran compiler  — gfortran from 'brew install gcc' on macOS CI
+#
+# Targets created:
+#   dmumps        — static library: PORD + mpiseq + mumps_common + dmumps (double)
+#   MUMPS::MUMPS  — interface alias for dmumps
+
+include(FetchContent)
+include(GNUInstallDirs)
+
+# ── Enable Fortran (project uses only CXX C; we enable Fortran here) ──────────
+enable_language(Fortran)
+
+# ── Download MUMPS 5.7.3 ──────────────────────────────────────────────────────
+FetchContent_Declare(
+  mumps_upstream
+  URL      "https://mumps-solver.org/MUMPS_5.7.3.tar.gz"
+  URL_HASH "SHA256=84a47f7c4231b9efdf4d4f631a2cae2bdd9adeaabc088261d15af040143ed112"
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_GetProperties(mumps_upstream)
+if(NOT mumps_upstream_POPULATED)
+  FetchContent_Populate(mumps_upstream)
+endif()
+set(_M "${mumps_upstream_SOURCE_DIR}")
+
+# ── Generate mumps_int_def.h (32-bit integer variant) ────────────────────────
+file(WRITE "${_M}/include/mumps_int_def.h"
+  "#ifndef MUMPS_INT_H\n#define MUMPS_INT_H\n#define MUMPS_INTSIZE32\n#endif\n")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single dmumps STATIC library — all MUMPS sources compiled directly in.
+# CMake's built-in Fortran module dependency scanner handles ordering of
+# module-definition files automatically; no manual OBJECT-target chains needed.
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(dmumps STATIC
+
+  # ── PORD fill-reducing ordering library ──────────────────────────────────
+  "${_M}/PORD/lib/graph.c"
+  "${_M}/PORD/lib/gbipart.c"
+  "${_M}/PORD/lib/gbisect.c"
+  "${_M}/PORD/lib/ddcreate.c"
+  "${_M}/PORD/lib/ddbisect.c"
+  "${_M}/PORD/lib/nestdiss.c"
+  "${_M}/PORD/lib/multisector.c"
+  "${_M}/PORD/lib/gelim.c"
+  "${_M}/PORD/lib/bucket.c"
+  "${_M}/PORD/lib/tree.c"
+  "${_M}/PORD/lib/symbfac.c"
+  "${_M}/PORD/lib/interface.c"
+  "${_M}/PORD/lib/sort.c"
+  "${_M}/PORD/lib/minpriority.c"
+
+  # ── Sequential MPI stub (libseq) ─────────────────────────────────────────
+  "${_M}/libseq/elapse.c"
+  "${_M}/libseq/mpic.c"
+  "${_M}/libseq/mpi.f"
+
+  # ── MUMPS common — Fortran module definitions ─────────────────────────────
+  "${_M}/src/mumps_memory_mod.F"
+  "${_M}/src/double_linked_list.F"
+  "${_M}/src/lr_common.F"
+  "${_M}/src/ana_orderings_wrappers_m.F"
+  "${_M}/src/omp_tps_common_m.F"
+  "${_M}/src/mumps_l0_omp_m.F"
+  "${_M}/src/ana_omp_m.F"
+  "${_M}/src/fac_maprow_data_m.F"
+  "${_M}/src/fac_future_niv2_mod.F"
+  "${_M}/src/fac_descband_data_m.F"
+  "${_M}/src/front_data_mgt_m.F"
+  "${_M}/src/fac_asm_build_sort_index_m.F"
+  "${_M}/src/fac_asm_build_sort_index_ELT_m.F"
+  "${_M}/src/mumps_static_mapping.F"
+  "${_M}/src/mumps_ooc_common.F"
+  "${_M}/src/ana_blk_m.F"            # >= 5.3
+  "${_M}/src/mumps_pivnul_mod.F"     # >= 5.6
+  "${_M}/src/sol_ds_common_m.F"      # >= 5.7
+  "${_M}/src/fac_ibct_data_m.F"      # < 5.8 (5.7.x: yes)
+  "${_M}/src/mumps_comm_ibcast.F"    # < 5.8 (5.7.x: yes)
+  "${_M}/src/mumps_mpitoomp_m.F"
+
+  # ── MUMPS common — other Fortran routines ─────────────────────────────────
+  "${_M}/src/ana_orderings.F"
+  "${_M}/src/ana_set_ordering.F"
+  "${_M}/src/ana_AMDMF.F"
+  "${_M}/src/bcast_errors.F"
+  "${_M}/src/estim_flops.F"
+  "${_M}/src/mumps_type2_blocking.F"
+  "${_M}/src/mumps_version.F"
+  "${_M}/src/mumps_print_defined.F"
+  "${_M}/src/tools_common.F"
+  "${_M}/src/ana_blk.F"              # >= 5.3
+  "${_M}/src/sol_common.F"
+
+  # ── MUMPS common — C sources ──────────────────────────────────────────────
+  "${_M}/src/mumps_common.c"
+  "${_M}/src/mumps_io_basic.c"
+  "${_M}/src/mumps_io_thread.c"
+  "${_M}/src/mumps_io_err.c"
+  "${_M}/src/mumps_io.c"
+  "${_M}/src/mumps_numa.c"
+  "${_M}/src/mumps_pord.c"
+  "${_M}/src/mumps_thread.c"
+  "${_M}/src/mumps_save_restore_C.c"
+  "${_M}/src/mumps_addr.c"             # >= 5.6
+  "${_M}/src/mumps_config_file_C.c"
+  "${_M}/src/mumps_thread_affinity.c"
+  "${_M}/src/mumps_register_thread.c"  # >= 5.4
+
+  # ── dmumps double-precision Fortran sources ───────────────────────────────
+  "${_M}/src/dsol_distrhs.F"
+  "${_M}/src/dmumps_comm_buffer.F"
+  "${_M}/src/dmumps_ooc_buffer.F"
+  "${_M}/src/dmumps_ooc.F"
+  "${_M}/src/dmumps_struc_def.F"
+  "${_M}/src/dana_aux.F"
+  "${_M}/src/dana_aux_par.F"
+  "${_M}/src/dana_lr.F"
+  "${_M}/src/dfac_asm_master_ELT_m.F"
+  "${_M}/src/dfac_asm_master_m.F"
+  "${_M}/src/dfac_front_aux.F"
+  "${_M}/src/dfac_front_LU_type1.F"
+  "${_M}/src/dfac_front_LU_type2.F"
+  "${_M}/src/dfac_front_LDLT_type1.F"
+  "${_M}/src/dfac_front_LDLT_type2.F"
+  "${_M}/src/dfac_front_type2_aux.F"
+  "${_M}/src/dfac_lr.F"
+  "${_M}/src/dfac_omp_m.F"
+  "${_M}/src/dfac_par_m.F"
+  "${_M}/src/dlr_core.F"
+  "${_M}/src/dmumps_lr_data_m.F"
+  "${_M}/src/domp_tps_m.F"
+  "${_M}/src/dstatic_ptr_m.F"
+  "${_M}/src/dlr_type.F"
+  "${_M}/src/dmumps_save_restore.F"
+  "${_M}/src/dmumps_save_restore_files.F"
+  "${_M}/src/dfac_mem_dynamic.F"
+  "${_M}/src/dmumps_config_file.F"
+  "${_M}/src/dmumps_sol_es.F"
+  "${_M}/src/dsol_lr.F"
+  "${_M}/src/dfac_sispointers_m.F"   # >= 5.3
+  "${_M}/src/dfac_sol_l0omp_m.F"    # >= 5.3
+  "${_M}/src/dsol_omp_m.F"          # >= 5.3
+  "${_M}/src/dmumps_mpi3_mod.F"     # >= 5.6
+  "${_M}/src/dlr_stats.F"           # < 5.8 (5.7.x: yes)
+  "${_M}/src/dmumps_load.F"         # < 5.8 (5.7.x: yes)
+  "${_M}/src/dini_driver.F"
+  "${_M}/src/dana_driver.F"
+  "${_M}/src/dfac_driver.F"
+  "${_M}/src/dsol_driver.F"
+  "${_M}/src/dend_driver.F"
+  "${_M}/src/dana_aux_ELT.F"
+  "${_M}/src/dana_dist_m.F"
+  "${_M}/src/dana_LDLT_preprocess.F"
+  "${_M}/src/dana_reordertree.F"
+  "${_M}/src/darrowheads.F"
+  "${_M}/src/dbcast_int.F"
+  "${_M}/src/dfac_asm_ELT.F"
+  "${_M}/src/dfac_asm.F"
+  "${_M}/src/dfac_b.F"
+  "${_M}/src/dfac_distrib_distentry.F"
+  "${_M}/src/dfac_distrib_ELT.F"
+  "${_M}/src/dfac_lastrtnelind.F"
+  "${_M}/src/dfac_mem_alloc_cb.F"
+  "${_M}/src/dfac_mem_compress_cb.F"
+  "${_M}/src/dfac_mem_free_block_cb.F"
+  "${_M}/src/dfac_mem_stack_aux.F"
+  "${_M}/src/dfac_mem_stack.F"
+  "${_M}/src/dfac_process_band.F"
+  "${_M}/src/dfac_process_blfac_slave.F"
+  "${_M}/src/dfac_process_blocfacto_LDLT.F"
+  "${_M}/src/dfac_process_blocfacto.F"
+  "${_M}/src/dfac_process_bf.F"
+  "${_M}/src/dfac_process_end_facto_slave.F"
+  "${_M}/src/dfac_process_contrib_type1.F"
+  "${_M}/src/dfac_process_contrib_type2.F"
+  "${_M}/src/dfac_process_contrib_type3.F"
+  "${_M}/src/dfac_process_maprow.F"
+  "${_M}/src/dfac_process_master2.F"
+  "${_M}/src/dfac_process_message.F"
+  "${_M}/src/dfac_process_root2slave.F"
+  "${_M}/src/dfac_process_root2son.F"
+  "${_M}/src/dfac_process_rtnelind.F"
+  "${_M}/src/dfac_root_parallel.F"
+  "${_M}/src/dfac_scalings.F"
+  "${_M}/src/dfac_determinant.F"
+  "${_M}/src/dfac_scalings_simScaleAbs.F"
+  "${_M}/src/dfac_scalings_simScale_util.F"
+  "${_M}/src/dfac_sol_pool.F"
+  "${_M}/src/dfac_type3_symmetrize.F"
+  "${_M}/src/dini_defaults.F"
+  "${_M}/src/dmumps_driver.F"
+  "${_M}/src/dmumps_f77.F"
+  "${_M}/src/dmumps_iXamax.F"
+  "${_M}/src/dana_mtrans.F"
+  "${_M}/src/dooc_panel_piv.F"
+  "${_M}/src/drank_revealing.F"
+  "${_M}/src/dsol_aux.F"
+  "${_M}/src/dsol_bwd_aux.F"
+  "${_M}/src/dsol_bwd.F"
+  "${_M}/src/dsol_c.F"
+  "${_M}/src/dsol_fwd_aux.F"
+  "${_M}/src/dsol_fwd.F"
+  "${_M}/src/dsol_matvec.F"
+  "${_M}/src/dsol_root_parallel.F"
+  "${_M}/src/dtools.F"
+  "${_M}/src/dtype3_root.F"
+  "${_M}/src/dsol_distsol.F"         # >= 5.7
+  "${_M}/src/dfac_diag.F"            # >= 5.7
+  "${_M}/src/dfac_dist_arrowheads_omp.F"  # >= 5.7
+
+  # ── dmumps double-precision C interface ───────────────────────────────────
+  "${_M}/src/mumps_c.c"
+  "${_M}/src/dmumps_gpu.c"
+)
+
+# ── Include paths ─────────────────────────────────────────────────────────────
+# PUBLIC with BUILD_INTERFACE: ipopt_local needs MUMPS headers at build time
+# (dmumps_c.h, mpi.h from libseq), but they must not be exported with absolute
+# build-tree paths — consumers of an installed mipsolvers don't use MUMPS directly.
+target_include_directories(dmumps
+  PUBLIC
+    "$<BUILD_INTERFACE:${_M}/include>"
+    "$<BUILD_INTERFACE:${_M}/libseq>"
+  PRIVATE
+    "${_M}/PORD/include"
+)
+
+# ── Fortran module output directory ───────────────────────────────────────────
+set_target_properties(dmumps PROPERTIES
+  Fortran_MODULE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/_mumps_mods")
+
+# ── Compile options (language-guarded so C flags don't reach Fortran and v.v.) ─
+# -w                       suppress all warnings (MUMPS sources are not warning-clean)
+# -fno-strict-aliasing     prevents aliasing-related miscompilation
+# -fallow-argument-mismatch  required for GCC>=10 (MUMPS uses non-standard Fortran)
+# -fallow-invalid-boz        ditto
+# -Werror-implicit-function-declaration  catch missing C prototypes early
+target_compile_options(dmumps PRIVATE
+  $<$<COMPILE_LANGUAGE:Fortran>:
+    -w
+    -fno-strict-aliasing
+    $<$<VERSION_GREATER_EQUAL:${CMAKE_Fortran_COMPILER_VERSION},10>:
+      -fallow-argument-mismatch
+      -fallow-invalid-boz
+    >
+  >
+  $<$<COMPILE_LANGUAGE:C>:
+    -fno-strict-aliasing
+    -Werror-implicit-function-declaration
+  >
+)
+
+# ── Compile definitions ───────────────────────────────────────────────────────
+# Add_ = Fortran trailing-underscore name mangling (GNU/macOS standard)
+# pord  = use the PORD fill-reducing ordering (the only one we build)
+target_compile_definitions(dmumps PRIVATE
+  $<$<COMPILE_LANGUAGE:C>:Add_>
+  $<$<COMPILE_LANGUAGE:C>:pord>
+  $<$<COMPILE_LANGUAGE:Fortran>:pord>
+)
+# MUMPS_ARITH=MUMPS_ARITH_d selects double-precision types in mumps_c.c / dmumps_gpu.c
+set_source_files_properties(
+  "${_M}/src/mumps_c.c"
+  "${_M}/src/dmumps_gpu.c"
+  PROPERTIES COMPILE_DEFINITIONS "MUMPS_ARITH=MUMPS_ARITH_d"
+)
+
+# ── Runtime dependency: BLAS/LAPACK via Accelerate (macOS) ───────────────────
+target_link_libraries(dmumps PUBLIC
+  "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
+
+# ── MUMPS::MUMPS — interface alias (matches scivision's exported target name) ─
+if(NOT TARGET MUMPS)
+  add_library(MUMPS INTERFACE)
+  target_link_libraries(MUMPS INTERFACE dmumps)
+  add_library(MUMPS::MUMPS ALIAS MUMPS)
+endif()
+
+# ── Export dmumps and MUMPS so ipopt_local's install(EXPORT) succeeds ─────────
+install(TARGETS dmumps MUMPS
+  EXPORT  mipsolversTargets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+message(STATUS "mipsolvers: MUMPS 5.7.3 built from source (sequential, double precision)")

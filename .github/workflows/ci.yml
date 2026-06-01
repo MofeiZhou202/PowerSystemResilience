@@ -67,7 +67,7 @@ jobs:
 
       - name: Install macOS dependencies
         run: |
-          brew install eigen fmt nlohmann-json catch2 python3
+          brew install eigen fmt nlohmann-json catch2 python3 gcc
 
       - name: Configure
         run: >

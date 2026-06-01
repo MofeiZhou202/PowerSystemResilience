@@ -3,16 +3,26 @@
 # This replaces the system-wide or homebrew Ipopt detection for an embedded build.
 #
 # After inclusion, the following CMake target will exist:
-#   ipopt_local  — the Ipopt static library (with MUMPS linear solver via homebrew dylibs)
+#   ipopt_local  — the Ipopt static library (with MUMPS linear solver built from source)
+#
+# MUMPS is compiled from source via cmake/BuildMUMPS.cmake (uses
+# scivision/mumps-superbuild + FetchContent to download MUMPS 5.9).
+# This makes the build fully standalone: no homebrew ipopt required.
 
 if(NOT APPLE)
   message(FATAL_ERROR
-    "BuildIpopt.cmake is currently macOS/Homebrew-specific. "
+    "BuildIpopt.cmake is currently macOS-specific. "
     "No system Ipopt fallback is allowed for this project. Disable "
     "MIPSOLVERS_BUILD_LOCAL_IPOPT only if the TNLP bridge is intentionally "
     "unavailable, or add the required in-repository BLAS/LAPACK/MUMPS build "
     "for this platform.")
 endif()
+
+# ── Build MUMPS from source (sequential, no MPI) ──────────────────────────────
+# This must be done BEFORE the Ipopt targets are created, so that the dmumps
+# target is available for linking.
+# Requires: a Fortran compiler (brew install gcc provides gfortran on macOS).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildMUMPS.cmake")
 
 set(_IPOPT_SRC "${CMAKE_CURRENT_SOURCE_DIR}/ipopt")
 set(_IPOPT_BIN "${CMAKE_CURRENT_BINARY_DIR}/_deps/embedded_ipopt")
@@ -25,7 +35,7 @@ file(MAKE_DIRECTORY "${_IPOPT_BIN}")
 set(_IPOPT_CONFIG_H "${_IPOPT_BIN}/config.h")
 file(WRITE "${_IPOPT_CONFIG_H}" [=[
 /* config.h — generated for embedded Ipopt build on macOS.
- * MUMPS backend provided by libdmumps.dylib from homebrew ipopt cellar.
+ * MUMPS backend built from source (sequential, double-precision).
  * BLAS/LAPACK backend provided by macOS Accelerate framework. */
 #define PACKAGE_VERSION "3.14.20"
 #define PACKAGE "Ipopt"
@@ -38,7 +48,7 @@ file(WRITE "${_IPOPT_CONFIG_H}" [=[
 #define IPOPT_VERSION_MINOR 14
 #define IPOPT_VERSION_RELEASE 20
 
-/* Enable MUMPS linear solver (linked against homebrew libdmumps.dylib) */
+/* Enable MUMPS linear solver (built from source, sequential mode) */
 #define IPOPT_HAS_MUMPS 1
 
 /* Enable LAPACK (via Accelerate framework on macOS) */
@@ -161,33 +171,10 @@ target_compile_options(ipopt_local PRIVATE
 target_link_libraries(ipopt_local PRIVATE
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
 
-# MUMPS sequential linear solver from homebrew ipopt cellar
-# BUILD_INTERFACE：macOS Homebrew 绝对路径不写入安装树的 INTERFACE_LINK_LIBRARIES。
-set(_IPOPT_MUMPS_LIB_DIR "/opt/homebrew/opt/ipopt/lib")
-if(EXISTS "${_IPOPT_MUMPS_LIB_DIR}/libdmumps.dylib")
-  foreach(_mumps_lib
-      "${_IPOPT_MUMPS_LIB_DIR}/libdmumps.dylib"
-      "${_IPOPT_MUMPS_LIB_DIR}/libmumps_common.dylib"
-      "${_IPOPT_MUMPS_LIB_DIR}/libmpiseq.dylib"
-      "${_IPOPT_MUMPS_LIB_DIR}/libpord.dylib")
-    target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_mumps_lib}>")
-  endforeach()
-  # Need gcc runtime for Fortran-compiled MUMPS
-  find_library(_GFORTRAN_LIB gfortran
-    HINTS /opt/homebrew/opt/gcc/lib/gcc/current /opt/homebrew/lib
-    NO_DEFAULT_PATH)
-  if(_GFORTRAN_LIB)
-    target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_GFORTRAN_LIB}>")
-  endif()
-else()
-  message(WARNING "BuildIpopt: homebrew MUMPS dylibs not found at ${_IPOPT_MUMPS_LIB_DIR}")
-endif()
-
-# OpenBLAS used by MUMPS
-find_library(_OPENBLAS_LIB openblas HINTS /opt/homebrew/opt/openblas/lib NO_DEFAULT_PATH)
-if(_OPENBLAS_LIB)
-  target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_OPENBLAS_LIB}>")
-endif()
+# MUMPS sequential linear solver — built from source by cmake/BuildMUMPS.cmake.
+# MUMPS::MUMPS is an interface alias that transitively pulls in dmumps,
+# mumps_common, pord, and the mpiseq sequential stub.
+target_link_libraries(ipopt_local PRIVATE MUMPS::MUMPS)
 
 # dl (for dynamic loading of HSL solvers at runtime)
 target_link_libraries(ipopt_local PRIVATE ${CMAKE_DL_LIBS})

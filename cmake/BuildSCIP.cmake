@@ -81,6 +81,12 @@ else()
 endif()
 
 # Generate scip/config.h
+# SCIP_NO_SIGACTION: MSVC does not have sigaction (POSIX-only).
+# Set this before configure_file so the generated config.h uses the simple
+# signal() fallback path in interrupt.c.
+if(MSVC)
+  set(SCIP_NO_SIGACTION 1)
+endif()
 configure_file(
   "${_SCIP_SRC}/scip/config.h.in"
   "${_SCIP_BIN}/scip/config.h"
