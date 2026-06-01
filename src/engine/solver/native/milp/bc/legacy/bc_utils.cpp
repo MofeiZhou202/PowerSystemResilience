@@ -4238,7 +4238,9 @@ bool build_dual_proof_target_bound_conflict_clause(
           cover_rhs += term.coeff * term.root_bound;
           norm2 += term.coeff * term.coeff;
         }
-        cover_coeff.prune(0.0);
+        // prune(scalar, epsilon) overload is unambiguous across Eigen versions;
+        // prune(0.0) alone is mis-deduced as a functor in Eigen >= 3.4.
+        cover_coeff.prune(0.0, 0.0);
         const double lhs = cover_coeff.dot(x_relax);
         const double scale = 1.0 + std::abs(lhs) + std::abs(cover_rhs);
         const double cut_tol = std::max(1e-7, 1e-10 * scale);

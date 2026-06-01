@@ -73,7 +73,9 @@ std::uint64_t bc_model_side_state_signature(const LPModel& lp) {
     seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
     return seed;
   };
-  auto dbl = [](double value) {
+  // Explicit return type avoids 'inconsistent deduced types' on Linux GCC
+  // where uint64_t is 'unsigned long' but 0x...ULL literals are 'unsigned long long'.
+  auto dbl = [](double value) -> std::uint64_t {
     if (std::isinf(value)) {
       return value > 0.0 ? 0x7ff0000000000000ULL : 0xfff0000000000000ULL;
     }

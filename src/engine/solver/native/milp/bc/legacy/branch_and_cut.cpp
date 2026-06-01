@@ -20032,7 +20032,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         ++active_bins;
       }
       if (active_bins == 0) break;
-      lb_row.prune(0.0);
+      lb_row.prune(0.0, 0.0);  // explicit (ref, eps) avoids functor deduction in Eigen >= 3.4
       const double lb_rhs = static_cast<double>(radius - ones);
       add_sparse_rows_to_lp(sub_prob.linear_part,
                             std::vector<Eigen::SparseVector<double>>{lb_row},
