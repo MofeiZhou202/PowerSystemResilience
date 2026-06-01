@@ -69,10 +69,30 @@ jobs:
         run: |
           brew install eigen fmt nlohmann-json catch2 python3 gcc
 
+      - name: Locate gfortran
+        run: |
+          # Homebrew's gcc installs gfortran as a versioned binary
+          # (e.g. gfortran-15); the bare 'gfortran' symlink is not always on
+          # PATH for CMake's compiler detection. Resolve the real path and
+          # export it so the Configure step can build MUMPS (needs Fortran).
+          GF="$(command -v gfortran || true)"
+          if [ -z "$GF" ]; then
+            GF="$(ls "$(brew --prefix gcc)"/bin/gfortran* 2>/dev/null | head -n1)"
+          fi
+          if [ -z "$GF" ]; then
+            GF="$(ls /opt/homebrew/bin/gfortran* /usr/local/bin/gfortran* 2>/dev/null | head -n1)"
+          fi
+          if [ -z "$GF" ]; then
+            echo "::error::gfortran not found after 'brew install gcc'"; exit 1
+          fi
+          echo "Using gfortran: $GF"
+          echo "FC=$GF" >> "$GITHUB_ENV"
+
       - name: Configure
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_Fortran_COMPILER="$FC"
           -DMIPSOLVERS_BUILD_TESTS=ON
           -DMIPSOLVERS_BUILD_PYTHON=OFF
           -DMIPSOLVERS_BUILD_SCUC=OFF
