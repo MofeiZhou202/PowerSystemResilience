@@ -127,12 +127,13 @@ jobs:
             -DMIPSOLVERS_ENABLE_WERROR=OFF
 
       - name: Build Windows targets
-        run: >-
-          cmake --build build-win --config Release
-          --target test_engine_api test_milp_solver test_ipm_solver
-                  test_scuc_module test_market_simulation
-                  milp_benchmark_runner
-          --parallel 2
+        shell: pwsh
+        run: |
+          cmake --build build-win --config Release `
+            --target test_engine_api test_milp_solver test_ipm_solver `
+                    test_scuc_module test_market_simulation `
+                    milp_benchmark_runner `
+            --parallel 2
 
       - name: Run Windows regression tests
         run: >-

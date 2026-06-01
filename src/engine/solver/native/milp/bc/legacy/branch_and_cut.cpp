@@ -20846,7 +20846,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       ++active_bins;
     }
     if (active_bins == 0) return false;
-    lb_row.prune(0.0);
+    lb_row.prune(0.0, 0.0);
     const double lb_rhs = static_cast<double>(radius - ones);
 
     Eigen::SparseVector<double> obj_cut(n);
@@ -20860,7 +20860,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
     }
     if (obj_nnz == 0) return false;
-    obj_cut.prune(0.0);
+    obj_cut.prune(0.0, 0.0);
     const double improve_tol =
         std::max(1e-6, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
     const double obj_rhs = incumbent_obj - improve_tol;
@@ -24200,7 +24200,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
         norm2 += big_m * big_m;
       }
       rhs += big_m * static_cast<double>(fixed_one_terms);
-      coeff.prune(0.0);
+      coeff.prune(0.0, 0.0);
       out_cut = PoolCut{std::move(coeff), rhs, 0, 0.0, std::sqrt(norm2), 0};
       return sparse_dot(out_cut.coeff, *local_x) > out_cut.rhs + 1e-7;
     };
@@ -28807,7 +28807,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       ++active_bins;
     }
     if (active_bins == 0) return false;
-    lb_row.prune(0.0);
+    lb_row.prune(0.0, 0.0);
     const double lb_rhs = static_cast<double>(radius - ones);
 
     Eigen::SparseVector<double> obj_cut(n);
@@ -28821,7 +28821,7 @@ BCResult branch_and_cut_lp(const MIPModel& prob, BCOptions opt,
       }
     }
     if (obj_nnz == 0) return false;
-    obj_cut.prune(0.0);
+    obj_cut.prune(0.0, 0.0);
     const double improve_tol =
         std::max(1e-6, 1e-10 * std::max(1.0, std::abs(incumbent_obj)));
     const double obj_rhs = incumbent_obj - improve_tol;

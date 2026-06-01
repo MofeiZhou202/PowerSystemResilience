@@ -4728,7 +4728,7 @@ bool build_reduced_cost_cutoff_conflict_clause(
         cover_rhs += term.coeff * term.root_bound;
         norm2 += term.coeff * term.coeff;
       }
-      coeff.prune(0.0);
+      coeff.prune(0.0, 0.0);
       const double lhs = coeff.dot(x_relax);
       const double scale = 1.0 + std::abs(lhs) + std::abs(cover_rhs);
       if (lhs > cover_rhs + std::max(1e-7, 1e-10 * scale)) {
