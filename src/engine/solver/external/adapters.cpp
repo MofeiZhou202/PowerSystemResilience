@@ -3005,6 +3005,9 @@ bool GurobiAdapter::available() const {
 SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
   SolveResult out;
   out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;  // Gurobi disabled at compile time; param unused in stub
+#endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
   if (!available()) {
@@ -3131,6 +3134,9 @@ SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
 SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
   SolveResult out;
   out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;
+#endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
   if (!available()) {
@@ -3239,6 +3245,9 @@ SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
 SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   SolveResult out;
   out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;
+#endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
   if (!available()) {

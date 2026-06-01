@@ -813,7 +813,7 @@ double xtab_col_scale_or_one(const StandardFormLP& sf, int col) {
   return 1.0;
 }
 
-double xtab_source_row_coeff(const StandardFormLP& sf, int row, int col) {
+[[maybe_unused]] double xtab_source_row_coeff(const StandardFormLP& sf, int row, int col) {
   if (row < 0 || row >= sf.A_row.rows() || col < 0 ||
       col >= sf.n_original) {
     return 0.0;

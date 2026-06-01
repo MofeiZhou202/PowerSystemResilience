@@ -165,7 +165,7 @@ SolveResult NativeLCQPAdapter::solve_lp(const LPModel& prob) const {
   // Augmented variables: original vars + slack vars (lb=0, ub=+inf)
   qp.vars = prob.vars;
   for (int i = 0; i < m_ineq; ++i)
-    qp.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity()});
+    qp.vars.push_back({VarType::Continuous, 0.0, std::numeric_limits<double>::infinity(), {}});
 
   SolveResult out = solve_qp(qp);
   // Strip slack variables from solution

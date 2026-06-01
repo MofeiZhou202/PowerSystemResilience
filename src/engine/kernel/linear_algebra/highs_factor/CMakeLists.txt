@@ -18,23 +18,25 @@ set(HFACTOR_SOURCES
     util/HFactorExtend.cpp
     util/HFactorUtils.cpp
     util/HFactorDebug.cpp
-    util/HVectorBase.cpp
-    util/HSet.cpp
-    util/HighsSparseMatrix.cpp
-    util/HighsSort.cpp
-    util/HighsUtils.cpp
-    util/HighsMatrixUtils.cpp
-    util/HighsHash.cpp
-    util/stringutil.cpp
-    io/HighsIO.cpp
-    lp_data/HighsOptions.cpp
+    # NOTE: all other .cpp files that were previously listed here
+    # (HVectorBase, HSet, HighsSparseMatrix, HighsSort, HighsUtils,
+    #  HighsMatrixUtils, HighsHash, stringutil, HighsIO, HighsOptions)
+    # are already compiled by the main `highs` target in highs/sources.cmake.
+    # Compiling them again here with a different version of HighsOptions.h
+    # triggers -Wodr (C++ One-Definition-Rule) violations at link time.
+    # The symbols are resolved at final link time via the `highs` dependency.
 )
 
 add_library(mipsolvers_hfactor STATIC ${HFACTOR_SOURCES})
 
 # HFactor sources do `#include "util/HFactor.h"`, `#include "HConfig.h"`, etc.
-# so the include root is THIS directory.
-target_include_directories(mipsolvers_hfactor PRIVATE ${HFACTOR_ROOT})
+# ${PROJECT_SOURCE_DIR}/highs is listed FIRST so hfactor sees the same
+# HighsOptions.h (with hacdcpf custom fields) as the rest of the project.
+# Without this, the local highs_factor/lp_data/HighsOptions.h (an older
+# snapshot) would be picked up, causing -Wodr violations at link time.
+target_include_directories(mipsolvers_hfactor PRIVATE
+    ${PROJECT_SOURCE_DIR}/highs
+    ${HFACTOR_ROOT})
 
 # Match HiGHS' C++ standard (C++17 used by mipsolvers as well).
 target_compile_features(mipsolvers_hfactor PUBLIC cxx_std_17)
