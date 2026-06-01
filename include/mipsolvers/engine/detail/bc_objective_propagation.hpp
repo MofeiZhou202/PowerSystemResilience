@@ -714,6 +714,21 @@ struct ObjectivePropagationState {
           implied_bound =
               rounded_integral_bound(target, target_is_lower_bound,
                                      implied_bound);
+          // Clamp the implied bound to the variable's model domain. An implied
+          // bound beyond the domain would assert infeasibility-on-trigger;
+          // pinning it at the domain boundary yields a valid (weaker) lower
+          // bound on the forced objective contribution and prevents
+          // numerically degenerate (tiny-denominator) blow-ups from producing
+          // unbounded, unsound contributions.
+          if (target_is_lower_bound) {
+            if (finite_model_bound(target_var.ub)) {
+              implied_bound = std::min(implied_bound, target_var.ub);
+            }
+          } else {
+            if (finite_model_bound(target_var.lb)) {
+              implied_bound = std::max(implied_bound, target_var.lb);
+            }
+          }
           double contribution = 0.0;
           if (target_is_lower_bound) {
             if (implied_bound <= target_var.lb + 1e-8) return;
@@ -841,16 +856,32 @@ struct ObjectivePropagationState {
           finite_model_bound(target_var.ub) &&
           imp.value < target_var.ub - 1e-8;
       if (!lower_event && !upper_event) return;
+      // Clamp the implied bound to the variable's model domain (see the
+      // matching rationale in build_implied_contribution_events); an
+      // out-of-domain implied bound must not inflate the forced objective
+      // contribution.
+      double bound_value = imp.value;
+      if (lower_event) {
+        if (finite_model_bound(target_var.ub)) {
+          bound_value = std::min(bound_value, target_var.ub);
+        }
+        if (bound_value <= target_var.lb + 1e-8) return;
+      } else {
+        if (finite_model_bound(target_var.lb)) {
+          bound_value = std::max(bound_value, target_var.lb);
+        }
+        if (bound_value >= target_var.ub - 1e-8) return;
+      }
       const double contribution = lower_event
-          ? target_cost * (imp.value - target_var.lb)
-          : (-target_cost) * (target_var.ub - imp.value);
+          ? target_cost * (bound_value - target_var.lb)
+          : (-target_cost) * (target_var.ub - bound_value);
       if (!(contribution > 1e-7) || !std::isfinite(contribution)) return;
       max_implied_event_delta =
           std::max(max_implied_event_delta, contribution);
       const int event_idx = static_cast<int>(implied_events.size());
       implied_event_target_cols[static_cast<std::size_t>(target)] = 1;
       implied_events.push_back(ImpliedContributionEvent{
-          target, imp.value, target_cost, lower_event,
+          target, bound_value, target_cost, lower_event,
           std::vector<Literal>{Literal{trigger, trigger_one}}});
       if (lower_event) {
         ++implied_event_vlb_events;

@@ -1784,10 +1784,34 @@ const std::string& ScipAdapter::executable() const {
   return executable_;
 }
 
-SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
+SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = name();
+
+  // Default an absent/wrong-sized nonlinear x0 to a bounds-aware interior
+  // point so callers (the AML converter) need not pre-size it; validation and
+  // the NLP relaxation both require x0 to match the variable count.
+  MINLPModel prob = prob_in;
+  {
+    const int n_vars = static_cast<int>(prob.nonlinear_part.vars.size());
+    if (prob.nonlinear_part.x0.size() != n_vars && n_vars > 0) {
+      prob.nonlinear_part.x0 = Eigen::VectorXd::Zero(n_vars);
+      for (int i = 0; i < n_vars; ++i) {
+        const double lo = prob.nonlinear_part.vars[static_cast<std::size_t>(i)].lb;
+        const double hi = prob.nonlinear_part.vars[static_cast<std::size_t>(i)].ub;
+        double v = 0.0;
+        if (std::isfinite(lo) && std::isfinite(hi)) {
+          v = 0.5 * (lo + hi);
+        } else if (std::isfinite(lo)) {
+          v = lo;
+        } else if (std::isfinite(hi)) {
+          v = hi;
+        }
+        prob.nonlinear_part.x0[i] = v;
+      }
+    }
+  }
 
   const ValidationReport vr = validate(prob);
   if (!vr.valid) {
@@ -1999,12 +2023,36 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob) const {
 #endif  // HACDCPF_HAVE_SCIP_LIB
 }
 
-SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob) const {
+SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
 #ifdef HACDCPF_HAVE_IPOPT
   const auto t0 = std::chrono::steady_clock::now();
 #endif
   SolveResult out;
   out.stats.solver_name = name();
+
+  // Ensure an initial point sized to the variable count. Validation and the
+  // constraint callbacks (g/h, evaluated at x0 during CallbackTNLP
+  // construction) reject a mismatched x0, so default an absent/wrong-sized x0
+  // to a bounds-aware interior point here rather than requiring every caller
+  // (e.g. the SCIP MINLP relaxation) to supply one.
+  const int n_vars = static_cast<int>(prob_in.vars.size());
+  NLPModel prob = prob_in;
+  if (prob.x0.size() != n_vars && n_vars > 0) {
+    prob.x0 = Eigen::VectorXd::Zero(n_vars);
+    for (int i = 0; i < n_vars; ++i) {
+      const double lo = prob.vars[static_cast<std::size_t>(i)].lb;
+      const double hi = prob.vars[static_cast<std::size_t>(i)].ub;
+      double v = 0.0;
+      if (std::isfinite(lo) && std::isfinite(hi)) {
+        v = 0.5 * (lo + hi);
+      } else if (std::isfinite(lo)) {
+        v = lo;
+      } else if (std::isfinite(hi)) {
+        v = hi;
+      }
+      prob.x0[i] = v;
+    }
+  }
 
   const ValidationReport vr = validate(prob);
   if (!vr.valid) {

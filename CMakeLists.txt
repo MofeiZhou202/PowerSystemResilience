@@ -217,6 +217,23 @@ if(MIPSOLVERS_HAVE_HIGHS_LIB)
       endif()
     endif()
   endif()
+
+  # Cross-solver comparison driver: runs the same SCUC MIP instances through
+  # Native, Gurobi, HiGHS and SCIP and prints a side-by-side performance table.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/solver_comparison.cpp")
+    add_executable(solver_comparison
+      benchmark/solver_comparison.cpp
+      src/scuc/scuc.cpp
+      src/scuc/case_builder.cpp)
+    target_include_directories(solver_comparison PRIVATE
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(solver_comparison PRIVATE mipsolvers)
+    if(NOT MSVC)
+      target_compile_options(solver_comparison PRIVATE -Wall -Wextra
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>)
+    endif()
+  endif()
 endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────
@@ -330,6 +347,60 @@ if(APPLE)
 endif()
 target_link_libraries(mipsolvers PUBLIC
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
+
+# ── Bundled single static archive ─────────────────────────────────────────────
+# Merge libmipsolvers.a with every static dependency we build in-tree (HiGHS,
+# SCIP, Ipopt, MUMPS, HiGHS-factor) plus the static LUSOL archive into a single
+# self-contained archive `libmipsolvers_bundled.a`, for downstream applications
+# that want one .a to link.  External *shared* libraries (SuiteSparse, OpenBLAS,
+# fmt, GMP, TBB, Boost, Gurobi, gfortran/quadmath, Accelerate) cannot be merged
+# into a static archive and must still be provided by the consumer at link time;
+# see docs/build_and_deploy.md for the full consumer link line.
+option(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE
+  "Produce a single bundled static archive (libmipsolvers_bundled.a)" ON)
+if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
+  set(_bundle_inputs "$<TARGET_FILE:mipsolvers>")
+  foreach(_dep IN ITEMS mipsolvers_hfactor highs libscip ipopt_local dmumps)
+    if(TARGET ${_dep})
+      list(APPEND _bundle_inputs "$<TARGET_FILE:${_dep}>")
+    endif()
+  endforeach()
+  # Static LUSOL archive pulled in transitively via PaPILO (not a CMake target).
+  find_library(MIPSOLVERS_CLUSOL_STATIC_LIB
+    NAMES clusol libclusol
+    PATHS /opt/homebrew/lib /usr/local/lib
+    NO_CACHE)
+  if(MIPSOLVERS_CLUSOL_STATIC_LIB AND MIPSOLVERS_CLUSOL_STATIC_LIB MATCHES "\\.a$")
+    list(APPEND _bundle_inputs "${MIPSOLVERS_CLUSOL_STATIC_LIB}")
+  endif()
+
+  set(_bundle_output "${CMAKE_BINARY_DIR}/libmipsolvers_bundled.a")
+  if(APPLE)
+    # macOS libtool cleanly merges archives and de-dups member names.
+    add_custom_command(
+      OUTPUT "${_bundle_output}"
+      COMMAND libtool -static -o "${_bundle_output}" ${_bundle_inputs}
+      DEPENDS mipsolvers
+      COMMENT "Bundling single static archive: ${_bundle_output}"
+      VERBATIM)
+  else()
+    # GNU ar MRI script: ADDLIB each input, then SAVE.
+    set(_mri "${CMAKE_BINARY_DIR}/mipsolvers_bundle.mri")
+    set(_mri_lines "CREATE ${_bundle_output}")
+    foreach(_in IN LISTS _bundle_inputs)
+      string(APPEND _mri_lines "\nADDLIB ${_in}")
+    endforeach()
+    string(APPEND _mri_lines "\nSAVE\nEND\n")
+    file(GENERATE OUTPUT "${_mri}" CONTENT "${_mri_lines}")
+    add_custom_command(
+      OUTPUT "${_bundle_output}"
+      COMMAND "${CMAKE_AR}" -M < "${_mri}"
+      DEPENDS mipsolvers "${_mri}"
+      COMMENT "Bundling single static archive: ${_bundle_output}"
+      VERBATIM)
+  endif()
+  add_custom_target(mipsolvers_bundled ALL DEPENDS "${_bundle_output}")
+endif()
 
 # ── Compiler warnings ────────────────────────────────────────────────────────
 if(MSVC)

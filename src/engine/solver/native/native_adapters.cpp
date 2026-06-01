@@ -427,6 +427,13 @@ BCOptions make_strict_highs_problem_options(const MIPModel& prob, BCOptions opt)
   const bool large_root =
       num_cols >= opt.highs_strict_auto_ipm_root_min_cols ||
       num_rows >= opt.highs_strict_auto_ipm_root_min_rows;
+  // Above the upper cap the IPM-root + crossover policy is net-negative
+  // (proven on IEEE 118-bus 24T: worse incumbent, no bound gain), so keep
+  // very large degenerate UC roots on simplex.
+  const bool too_large_for_ipm_root =
+      num_cols >= opt.highs_strict_auto_ipm_root_max_cols ||
+      num_rows >= opt.highs_strict_auto_ipm_root_max_rows;
+  const bool ipm_root_band = large_root && !too_large_for_ipm_root;
   // Minimum time budget: take the larger of the fixed floor and a
   // size-proportional component.  Crossover cost scales roughly linearly with
   // LP column count (e.g. 118-bus/26k cols needs ~728 crossover pivots vs ~6
@@ -442,7 +449,7 @@ BCOptions make_strict_highs_problem_options(const MIPModel& prob, BCOptions opt)
   const bool enough_time_for_ipm_root =
       !(opt.time_limit_sec > 0.0) ||
       opt.time_limit_sec >= size_min_time_sec;
-  if (opt.highs_strict_auto_ipm_root_for_large_models && large_root &&
+  if (opt.highs_strict_auto_ipm_root_for_large_models && ipm_root_band &&
       enough_time_for_ipm_root &&
       opt.highs_mip_lp_solver == "choose") {
     opt.highs_mip_lp_solver = "ipm";

@@ -674,6 +674,15 @@ struct BCOptions {
   bool highs_strict_auto_ipm_root_for_large_models{true};
   int highs_strict_auto_ipm_root_min_cols{10000};
   int highs_strict_auto_ipm_root_min_rows{10000};
+  /// Upper cap on the auto root-IPM band.  Above this size the IPM root +
+  /// crossover policy is *disabled* and the root LP stays on simplex.
+  /// Rationale: on very large degenerate UC roots (e.g. IEEE 118-bus 24T,
+  /// 26400 cols / ~35600 rows) the IPM crossover produces a strictly worse
+  /// primal incumbent (167069 vs 159108, gap 15.8% vs 11.3%) for no dual-bound
+  /// benefit, so simplex-root is preferred there.  Models in the band
+  /// [min_cols, max_cols) keep the IPM-root policy.
+  int highs_strict_auto_ipm_root_max_cols{20000};
+  int highs_strict_auto_ipm_root_max_rows{20000};
   /// Fixed floor on the time budget required to activate auto root-IPM.
   double highs_strict_auto_ipm_root_min_time_sec{30.0};
   /// Size-proportional time scaling: require at least

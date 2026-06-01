@@ -268,6 +268,53 @@ endif()
 > (without an exported CMake target) they must be listed explicitly because
 > static libraries do not propagate their transitive dependencies.
 
+### Option C — single bundled static archive
+
+The build produces a single self-contained archive that merges
+`libmipsolvers.a` with every static dependency built in-tree (HiGHS, SCIP,
+Ipopt, MUMPS, the HiGHS-factor kernel, and the static LUSOL archive). This is
+controlled by `MIPSOLVERS_BUILD_BUNDLED_ARCHIVE` (default `ON`) and produced by
+the `mipsolvers_bundled` target:
+
+```bash
+cmake --build <build_dir> --target mipsolvers_bundled -j8
+# → <build_dir>/libmipsolvers_bundled.a   (one archive, ~36 MB on macOS)
+```
+
+A consumer then links a single archive plus the external *shared* libraries
+(these cannot be merged into a static archive):
+
+```cmake
+target_include_directories(my_app PRIVATE "/path/to/prefix/include")
+target_link_libraries(my_app PRIVATE
+  "/path/to/libmipsolvers_bundled.a"     # everything we build, in one .a
+
+  # External shared libraries the consumer must still provide:
+  /opt/homebrew/opt/suite-sparse/lib/libumfpack.dylib
+  /opt/homebrew/opt/suite-sparse/lib/libcholmod.dylib
+  /opt/homebrew/opt/suite-sparse/lib/libamd.dylib
+  /opt/homebrew/opt/suite-sparse/lib/libcolamd.dylib
+  /opt/homebrew/opt/suite-sparse/lib/libklu.dylib
+  /opt/homebrew/opt/suite-sparse/lib/libsuitesparseconfig.dylib
+  /opt/homebrew/opt/openblas/lib/libopenblas.dylib
+  fmt::fmt
+  /opt/homebrew/lib/libgmp.dylib /opt/homebrew/lib/libgmpxx.dylib
+  /opt/homebrew/lib/libtbb.dylib
+  # Boost (pulled in by SCIP): container iostreams program_options random regex serialization
+  # Gurobi (only if the Gurobi adapter is compiled in):
+  #   /Library/gurobi<ver>/macos_universal2/lib/libgurobi<ver>.dylib
+  -lgfortran -lquadmath                  # Fortran runtime (Ipopt/MUMPS/LUSOL)
+)
+if(APPLE)
+  target_link_libraries(my_app PRIVATE "-framework Accelerate")
+endif()
+```
+
+> The bundled archive contains only the libraries we build ourselves; system
+> numeric/shared libraries (SuiteSparse, OpenBLAS, GMP, TBB, Boost, the Fortran
+> runtime, and Accelerate) are intentionally left out and must be supplied by
+> the consumer at link time.
+
 ### Minimum consumer CMakeLists.txt example
 
 ```cmake

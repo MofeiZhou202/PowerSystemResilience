@@ -1216,7 +1216,12 @@ static int run_production_118_test(double time_limit_sec,
     opt.time_limit_sec = time_limit_sec;
     opt.gap_tol        = 1e-3;
     opt.verbose        = false;
-    opt = engine::make_strict_highs_production_options(opt);
+    // Use the SAME config path as the real StrictHighsBranchAndCutAdapter:
+    // make_strict_highs_problem_options applies the large-model IPM-root +
+    // crossover switch (needed for the 26400-var 118-bus root) on top of the
+    // base production options.  Calling make_strict_highs_production_options
+    // alone leaves the root on simplex and yields a weak (NoCuts-like) bound.
+    opt = engine::make_strict_highs_problem_options(mip, opt);
 
     print_header();
     const auto t0 = std::chrono::steady_clock::now();
@@ -1236,6 +1241,7 @@ static int run_production_118_test(double time_limit_sec,
     }
     print_record(rec);
     std::printf("  status: %s\n", rec.status.c_str());
+    std::fflush(stdout);
 
     if (!json_path.empty()) {
         json jout = json::array();
