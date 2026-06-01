@@ -15,7 +15,7 @@ endif()
 # Configure the config windows version file
 if(MSVC)
   string(REPLACE "." ","  PROJECT_RC_VERSION "${PROJECT_VERSION}")
-  configure_file(${PROJECT_SOURCE_DIR}/version.rc.in
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.rc.in
     "${HIGHS_BINARY_DIR}/version.rc" @ONLY)
   set(win_version_file ${HIGHS_BINARY_DIR}/version.rc)
 else()

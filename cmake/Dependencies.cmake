@@ -412,8 +412,21 @@ if(NOT Eigen3_FOUND)
     endif()
   endforeach()
   if(NOT _EIGEN_FOUND_LOCAL)
-    message(FATAL_ERROR
-      "Eigen3 not found. Install Eigen or set EIGEN3_ROOT/EIGEN_ROOT to its include prefix.")
+    # Last resort: fetch Eigen3 from GitLab (works on CI without any pre-installed packages)
+    message(STATUS "mipsolvers: Eigen3 not found locally; downloading via FetchContent...")
+    include(FetchContent)
+    FetchContent_Declare(
+      eigen
+      GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+      GIT_TAG        3.4.0
+      GIT_SHALLOW    TRUE)
+    # Disable Eigen's own install/test targets to keep the build clean
+    set(EIGEN_BUILD_DOC     OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
+    set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(eigen)
+    set(Eigen3_FOUND TRUE)
+    message(STATUS "mipsolvers: Eigen3 fetched via FetchContent")
   endif()
 endif()
 
