@@ -129,7 +129,7 @@ endif()
 # not available the B&C sources are excluded entirely, following the same
 # pattern as HybridACDCPowerSystemsPlanning/CMakeLists.txt.
 if(MIPSOLVERS_HAVE_HIGHS_LIB)
-  target_link_libraries(mipsolvers PRIVATE highs::highs)
+  target_link_libraries(mipsolvers PRIVATE highs)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_HIGHS_LIB=1 HACDCPF_HAVE_HIGHS_LIB=1)
   target_compile_definitions(mipsolvers PRIVATE
@@ -221,7 +221,7 @@ endif()
 
 # ── SCIP in-process library ───────────────────────────────────────────────────
 if(MIPSOLVERS_HAVE_SCIP_LIB)
-  target_link_libraries(mipsolvers PRIVATE SCIP::libscip)
+  target_link_libraries(mipsolvers PRIVATE libscip)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_SCIP_LIB=1 HACDCPF_HAVE_SCIP_LIB=1)
   target_compile_definitions(mipsolvers PRIVATE
@@ -230,9 +230,15 @@ if(MIPSOLVERS_HAVE_SCIP_LIB)
 endif()
 
 # ── SuiteSparse ───────────────────────────────────────────────────────────────
+# PRIVATE: 公共 API 头文件不暴露 SuiteSparse 类型；消费者不需要直接链接这些库。
+# 将绝对路径限定在本项目构建内，避免平台相关路径写入导出的 targets 文件。
 if(MIPSOLVERS_HAVE_SUITESPARSE)
-  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_SUITESPARSE_LIBRARIES})
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS})
+  # BUILD_INTERFACE: SuiteSparse 是平台特定共享库，不向消费者导出绝对路径；
+  # mipsolversConfig.cmake 会在消费者机器上用 find_package 重新找到它们。
+  foreach(_ss_lib IN LISTS MIPSOLVERS_SUITESPARSE_LIBRARIES)
+    target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_ss_lib}>")
+  endforeach()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_SUITESPARSE=1 HACDCPF_HAVE_SUITESPARSE=1)
   if(MIPSOLVERS_HAVE_UMFPACK)
@@ -244,67 +250,86 @@ if(MIPSOLVERS_HAVE_SUITESPARSE)
       MIPSOLVERS_HAVE_KLU=1 HACDCPF_HAVE_KLU=1)
   endif()
   if(APPLE)
-    target_link_options(mipsolvers PUBLIC
+    # PRIVATE rpath: 仅影响本项目产出物，不传播给消费者
+    target_link_options(mipsolvers PRIVATE
       "-Wl,-rpath,/opt/homebrew/opt/suite-sparse/lib"
       "-Wl,-rpath,/usr/local/opt/suite-sparse/lib")
   endif()
 endif()
 
 # ── SuperLU ───────────────────────────────────────────────────────────────────
+# PRIVATE：同 SuiteSparse，不向消费者传播绝对路径。
 if(MIPSOLVERS_HAVE_SUPERLU)
-  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_INCLUDE_DIR})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_SUPERLU_LIBRARIES})
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_SUPERLU_INCLUDE_DIR})
+  foreach(_slu_lib IN LISTS MIPSOLVERS_SUPERLU_LIBRARIES)
+    target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_slu_lib}>")
+  endforeach()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_SUPERLU=1 HACDCPF_HAVE_SUPERLU=1)
   if(UNIX AND NOT APPLE)
-    # MKL and user-installed SuperLU live in non-standard prefixes; set rpath
-    # so the binary can find the shared library at runtime.
+    # PRIVATE rpath：仅影响本项目产出物，不传播给消费者
     get_filename_component(_SLU_RPATH "${_MIPSOLVERS_SUPERLU_LIB}" DIRECTORY)
-    target_link_options(mipsolvers PUBLIC "-Wl,-rpath,${_SLU_RPATH}")
+    target_link_options(mipsolvers PRIVATE "-Wl,-rpath,${_SLU_RPATH}")
   endif()
 endif()
 
 # ── Intel MKL PARDISO ─────────────────────────────────────────────────────────
+# PRIVATE：MKL 路径平台相关（Linux/Windows 完全不同），不向消费者传播。
 if(MIPSOLVERS_HAVE_MKL_PARDISO)
-  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_MKL_INCLUDE_DIRS})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_MKL_LIBRARIES})
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_MKL_INCLUDE_DIRS})
+  foreach(_mkl_lib IN LISTS MIPSOLVERS_MKL_LIBRARIES)
+    target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_mkl_lib}>")
+  endforeach()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_MKL_PARDISO=1 HACDCPF_HAVE_MKL_PARDISO=1)
   if(UNIX AND NOT APPLE)
     get_filename_component(_MKL_RPATH "${MIPSOLVERS_MKL_LP64_LIB}" DIRECTORY)
-    target_link_options(mipsolvers PUBLIC "-Wl,-rpath,${_MKL_RPATH}")
+    target_link_options(mipsolvers PRIVATE "-Wl,-rpath,${_MKL_RPATH}")
   endif()
 endif()
 
 # ── Ipopt ─────────────────────────────────────────────────────────────────────
+# PRIVATE：Ipopt 及其 MUMPS/OpenBLAS/gfortran 传递依赖路径均为平台特定的
+# Homebrew/apt 绝对路径，不应写入导出的 targets 文件。
 if(MIPSOLVERS_HAVE_IPOPT)
-  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_IPOPT_INCLUDE_DIRS})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_IPOPT_LIBRARIES})
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_IPOPT_INCLUDE_DIRS})
+  target_link_libraries(mipsolvers PRIVATE ${MIPSOLVERS_IPOPT_LIBRARIES})
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_IPOPT=1 HACDCPF_HAVE_IPOPT=1)
 endif()
 
 # ── Gurobi ────────────────────────────────────────────────────────────────────
+# PRIVATE：Gurobi 动态库路径（/Library/gurobi.../macOS, C:\gurobi.../Windows）
+# 完全平台相关，且是可选外部适配器，不向消费者传播。
 if(MIPSOLVERS_HAVE_GUROBI)
-  target_include_directories(mipsolvers PUBLIC ${MIPSOLVERS_GUROBI_INCLUDE_DIRS})
-  target_link_libraries(mipsolvers PUBLIC ${MIPSOLVERS_GUROBI_LIBRARIES})
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_GUROBI_INCLUDE_DIRS})
+  # BUILD_INTERFACE: Gurobi 是可选外部适配器，路径因版本/平台而异，
+  # 消费者需自行安装 Gurobi 并提供链接路径。
+  foreach(_gurobi_lib IN LISTS MIPSOLVERS_GUROBI_LIBRARIES)
+    target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_gurobi_lib}>")
+  endforeach()
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_GUROBI=1 HACDCPF_HAVE_GUROBI=1)
 endif()
 
 # ── PaPILO ────────────────────────────────────────────────────────────────────
+# PRIVATE：papilo_presolve.hpp 使用完全前向声明，不 #include 任何 papilo 头文件，
+# 消费者无需 papilo 头文件或链接路径。
 if(MIPSOLVERS_HAVE_PAPILO)
-  target_link_libraries(mipsolvers PUBLIC papilo)
+  target_link_libraries(mipsolvers PRIVATE papilo)
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_PAPILO=1 HACDCPF_HAVE_PAPILO=1)
 endif()
 
 # ── Apple Accelerate ─────────────────────────────────────────────────────────
+# 使用 generator expression 而非裸字符串，使导出的 targets 文件在非 Apple
+# 平台（Linux/Windows）上不会尝试链接 -framework Accelerate。
 if(APPLE)
-  target_link_libraries(mipsolvers PUBLIC "-framework Accelerate")
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_ACCELERATE=1 HACDCPF_HAVE_ACCELERATE=1)
 endif()
+target_link_libraries(mipsolvers PUBLIC
+  "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
 
 # ── Compiler warnings ────────────────────────────────────────────────────────
 if(MSVC)
@@ -523,13 +548,107 @@ endif()
 
 # ── Install rules ─────────────────────────────────────────────────────────────
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(MIPSOLVERS_INSTALL_CMAKEDIR
+    "${CMAKE_INSTALL_LIBDIR}/cmake/mipsolvers"
+    CACHE STRING "Install directory for mipsolvers CMake package files")
+
+# ── Locate header-only dep sources for self-contained bundled install ─────────
+# Eigen3 和 nlohmann_json 均为纯头文件库，可随安装包一起分发，
+# 让消费者无需单独安装这两个依赖。
+if(TARGET Eigen3::Eigen)
+  get_target_property(_ms_eigen3_incs Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+  foreach(_inc IN LISTS _ms_eigen3_incs)
+    if(EXISTS "${_inc}/Eigen/Core")
+      set(_ms_eigen3_bundle_src "${_inc}")
+      break()
+    endif()
+  endforeach()
+  unset(_inc)
+endif()
+
+if(TARGET nlohmann_json::nlohmann_json)
+  get_target_property(_ms_json_incs nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+  foreach(_inc IN LISTS _ms_json_incs)
+    if(EXISTS "${_inc}/nlohmann/json.hpp")
+      set(_ms_json_bundle_src "${_inc}")
+      break()
+    endif()
+  endforeach()
+  unset(_inc)
+endif()
+
 install(TARGETS mipsolvers
+  EXPORT mipsolversTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(MIPSOLVERS_BUILD_HFACTOR)
   install(TARGETS mipsolvers_hfactor
+    EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+if(TARGET highs)
+  install(TARGETS highs
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(TARGET libscip)
+  install(TARGETS libscip
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(TARGET ipopt_local)
+  install(TARGETS ipopt_local
+    EXPORT mipsolversTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY include/mipsolvers
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# ── Bundle header-only deps ───────────────────────────────────────────────────
+# 安装包含 Eigen3 和 nlohmann_json 头文件，使外部项目无需系统安装即可使用。
+# mipsolversConfig.cmake 优先使用系统包，找不到时自动回退到此处的副本。
+if(_ms_eigen3_bundle_src)
+  install(DIRECTORY "${_ms_eigen3_bundle_src}/Eigen"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3")
+  if(EXISTS "${_ms_eigen3_bundle_src}/unsupported")
+    install(DIRECTORY "${_ms_eigen3_bundle_src}/unsupported"
+      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/eigen3")
+  endif()
+  message(STATUS "mipsolvers: bundling Eigen3 headers from ${_ms_eigen3_bundle_src}")
+endif()
+
+if(_ms_json_bundle_src)
+  install(DIRECTORY "${_ms_json_bundle_src}/nlohmann"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/nlohmann_json")
+  message(STATUS "mipsolvers: bundling nlohmann_json headers from ${_ms_json_bundle_src}")
+endif()
+
+install(EXPORT mipsolversTargets
+  FILE mipsolversTargets.cmake
+  NAMESPACE mipsolvers::
+  DESTINATION ${MIPSOLVERS_INSTALL_CMAKEDIR})
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mipsolversConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfig.cmake
+  INSTALL_DESTINATION ${MIPSOLVERS_INSTALL_CMAKEDIR}
+  PATH_VARS CMAKE_INSTALL_INCLUDEDIR)
+
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion)
+
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/mipsolversConfigVersion.cmake
+  DESTINATION ${MIPSOLVERS_INSTALL_CMAKEDIR})

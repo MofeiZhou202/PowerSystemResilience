@@ -34,7 +34,7 @@ add_library(mipsolvers_hfactor STATIC ${HFACTOR_SOURCES})
 
 # HFactor sources do `#include "util/HFactor.h"`, `#include "HConfig.h"`, etc.
 # so the include root is THIS directory.
-target_include_directories(mipsolvers_hfactor PUBLIC ${HFACTOR_ROOT})
+target_include_directories(mipsolvers_hfactor PRIVATE ${HFACTOR_ROOT})
 
 # Match HiGHS' C++ standard (C++17 used by mipsolvers as well).
 target_compile_features(mipsolvers_hfactor PUBLIC cxx_std_17)

@@ -157,25 +157,27 @@ target_compile_options(ipopt_local PRIVATE
 
 # ── 6. Link libraries ─────────────────────────────────────────────────────────
 # BLAS/LAPACK via macOS Accelerate framework
-target_link_libraries(ipopt_local
-  PUBLIC
-    "-framework Accelerate")
+# 使用 generator expression：非 Apple 平台上此条目求值为空，避免写入导出文件。
+target_link_libraries(ipopt_local PRIVATE
+  "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
 
 # MUMPS sequential linear solver from homebrew ipopt cellar
+# BUILD_INTERFACE：macOS Homebrew 绝对路径不写入安装树的 INTERFACE_LINK_LIBRARIES。
 set(_IPOPT_MUMPS_LIB_DIR "/opt/homebrew/opt/ipopt/lib")
 if(EXISTS "${_IPOPT_MUMPS_LIB_DIR}/libdmumps.dylib")
-  target_link_libraries(ipopt_local
-    PUBLIC
+  foreach(_mumps_lib
       "${_IPOPT_MUMPS_LIB_DIR}/libdmumps.dylib"
       "${_IPOPT_MUMPS_LIB_DIR}/libmumps_common.dylib"
       "${_IPOPT_MUMPS_LIB_DIR}/libmpiseq.dylib"
       "${_IPOPT_MUMPS_LIB_DIR}/libpord.dylib")
+    target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_mumps_lib}>")
+  endforeach()
   # Need gcc runtime for Fortran-compiled MUMPS
   find_library(_GFORTRAN_LIB gfortran
     HINTS /opt/homebrew/opt/gcc/lib/gcc/current /opt/homebrew/lib
     NO_DEFAULT_PATH)
   if(_GFORTRAN_LIB)
-    target_link_libraries(ipopt_local PUBLIC "${_GFORTRAN_LIB}")
+    target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_GFORTRAN_LIB}>")
   endif()
 else()
   message(WARNING "BuildIpopt: homebrew MUMPS dylibs not found at ${_IPOPT_MUMPS_LIB_DIR}")
@@ -184,10 +186,10 @@ endif()
 # OpenBLAS used by MUMPS
 find_library(_OPENBLAS_LIB openblas HINTS /opt/homebrew/opt/openblas/lib NO_DEFAULT_PATH)
 if(_OPENBLAS_LIB)
-  target_link_libraries(ipopt_local PUBLIC "${_OPENBLAS_LIB}")
+  target_link_libraries(ipopt_local PRIVATE "$<BUILD_INTERFACE:${_OPENBLAS_LIB}>")
 endif()
 
 # dl (for dynamic loading of HSL solvers at runtime)
-target_link_libraries(ipopt_local PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(ipopt_local PRIVATE ${CMAKE_DL_LIBS})
 
 message(STATUS "mipsolvers: building embedded Ipopt from ${_IPOPT_SRC}")
