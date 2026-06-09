@@ -107,6 +107,12 @@ hacdcpf_add_test(test_graph test_graph.cpp)
 # fill-in guard, extended injection variant.
 hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
 
+# Graph aggregation round-trip: solve PF/OPF before vs after network-level
+# aggregation (switch/breaker contraction, series/pendant reduction) and assert
+# the physical solution is preserved.  Covers islands, CB/switch types, meshed
+# and hybrid AC/DC topologies, and real distribution feeders.
+hacdcpf_add_test(test_graph_roundtrip test_graph_roundtrip.cpp)
+
 # Distribution CB/switch/VSC pipeline: rich model → graph analysis →
 # canonical projection → PF → DC OPF → short circuit → ONR → JSON export.
 # Traces information propagation through every analysis layer on a 9-bus AC

@@ -190,6 +190,7 @@ PowerSystemGraph build_power_system_graph(
     const double z_mag = std::hypot(br.r_pu, br.x_pu);
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = br.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = br.from_bus;
@@ -218,6 +219,7 @@ PowerSystemGraph build_power_system_graph(
     }
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = tr.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = tr.hv_bus;
@@ -236,6 +238,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = sw.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = sw.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = sw.bus_from;
@@ -257,6 +260,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = cb.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = cb.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = cb.bus_from;
@@ -277,6 +281,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = br.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = br.from_bus;
@@ -300,6 +305,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = cb.in_service && cb.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = cb.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = cb.bus_from;
@@ -320,6 +326,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = vsc.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = vsc.bus_ac;
@@ -339,6 +346,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = dc.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = dc.bus_in;
