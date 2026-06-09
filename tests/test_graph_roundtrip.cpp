@@ -26,8 +26,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <Eigen/Dense>
+#include <Eigen/Sparse>
+
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
 using namespace hacdcpf;
@@ -658,4 +662,325 @@ TEST_CASE("Round-trip: DC OPF objective preserved under series reduction",
   INFO("full obj=" << full_opf.objective << " reduced obj=" << red_opf.objective);
   REQUIRE_THAT(red_opf.objective, WithinAbs(full_opf.objective, 1e-3));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// E. Hybrid AC/DC + VSC + DC circuit-breaker contraction
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+DCBus mk_dc_bus(int idx, DCBusType type, double pd = 0.0, double base_kv = 0.4) {
+  DCBus b;
+  b.index      = idx;
+  b.bus_type   = type;
+  b.pd_mw      = pd;
+  b.base_kv    = base_kv;
+  b.vm_pu      = 1.0;
+  b.in_service = true;
+  return b;
+}
+
+DCBranch mk_dc_branch(int idx, int from, int to, double r) {
+  DCBranch br;
+  br.index      = idx;
+  br.from_bus   = from;
+  br.to_bus     = to;
+  br.r_pu       = r;
+  br.in_service = true;
+  return br;
+}
+
+DCCircuitBreaker mk_dc_cb(int idx, int from, int to, bool closed = true) {
+  DCCircuitBreaker cb;
+  cb.index      = idx;
+  cb.bus_from   = from;
+  cb.bus_to     = to;
+  cb.closed     = closed;
+  cb.in_service = true;
+  return cb;
+}
+
+}  // namespace
+
+TEST_CASE("Round-trip: hybrid AC/DC with VSC and a closed DC breaker",
+          "[graph][roundtrip][hybrid][contraction]") {
+  // AC: 1(slack) --line-- 2 --line-- 3, VSC couples AC bus 3 to DC bus 101.
+  // DC: 101(DC_V) --closed DC CB-- 104 --line-- 102(load).
+  // The closed DC breaker (101-104) is a zero-impedance DC_Switch edge that
+  // contraction merges; the VSC's bus_dc reference must follow the merge.
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.ac.buses = {
+      mk_bus(1, BusType::SLACK, 11.0),
+      mk_bus(2, BusType::PQ,    11.0, 0.5, 0.2),
+      mk_bus(3, BusType::PQ,    11.0, 0.4, 0.1),
+  };
+  sys.ac.branches   = {mk_branch(10, 1, 2, 0.02, 0.05),
+                       mk_branch(11, 2, 3, 0.02, 0.05)};
+  sys.ac.generators = {mk_slack_gen(0, 1)};
+
+  sys.dc.base_mva = 10.0;
+  sys.dc.buses = {
+      mk_dc_bus(101, DCBusType::DC_V, 0.0),
+      mk_dc_bus(102, DCBusType::DC_P, 0.3),
+      mk_dc_bus(104, DCBusType::DC_P, 0.0),   // DC CB output node
+  };
+  sys.dc.branches = {mk_dc_branch(1, 104, 102, 0.01)};
+  sys.dc.dc_circuit_breakers = {mk_dc_cb(1, 101, 104, /*closed=*/true)};
+
+  {
+    VSCConverter vsc;
+    vsc.index        = 1;
+    vsc.bus_ac       = 3;
+    vsc.bus_dc       = 101;
+    vsc.in_service   = true;
+    vsc.control_mode = ConverterMode::PQ_MODE;
+    vsc.p_set_mw     = 0.3;
+    vsc.q_set_mvar   = 0.0;
+    vsc.eta          = 0.98;
+    vsc.pmax_mw      = 2.0;
+    vsc.pmin_mw      = -2.0;
+    sys.vsc_converters = {vsc};
+  }
+
+  // ── Contract: the closed DC breaker merges DC buses 101 and 104 ─────────
+  auto g   = build_power_system_graph(sys);
+  auto res = contract_zero_impedance_edges(g, sys, ContractionOptions{});
+
+  REQUIRE(res.dc_bus_to_super.count(101) > 0);
+  REQUIRE(res.dc_bus_to_super.count(104) > 0);
+  const int dc_rep = res.dc_bus_to_super.at(101);
+  REQUIRE(res.dc_bus_to_super.at(104) == dc_rep);
+  // DC_V must win representative selection (voltage reference is preserved).
+  REQUIRE(dc_rep == 101);
+
+  // The VSC's DC terminal must now point at the surviving super-node.
+  REQUIRE(res.contracted_system.vsc_converters.size() == 1);
+  CHECK(res.contracted_system.vsc_converters[0].bus_dc == dc_rep);
+  CHECK(res.contracted_system.vsc_converters[0].bus_ac == 3);   // AC side intact
+
+  // The AC side is untouched (no AC zero-impedance elements).
+  REQUIRE(res.contracted_system.ac.buses.size() == 3);
+
+  // ── PF round-trip on the AC subsystem (VSC modelled as its scheduled
+  //    injection).  The hybrid solver path is exercised by other suites;
+  //    here we confirm the contracted hybrid system is still solvable and the
+  //    AC voltages are unchanged by the DC-side contraction. ────────────────
+  const SolvedPF full    = solve_pf(sys);
+  const SolvedPF reduced = solve_pf(res.contracted_system);
+  REQUIRE(full.converged);
+  REQUIRE(reduced.converged);
+  require_vm_match(full, reduced, {1, 2, 3}, 1e-6);
+}
+
+TEST_CASE("Round-trip: open DC breaker is not contracted in a hybrid system",
+          "[graph][roundtrip][hybrid][contraction]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.ac.buses = {mk_bus(1, BusType::SLACK, 11.0),
+                  mk_bus(2, BusType::PQ, 11.0, 0.5, 0.2)};
+  sys.ac.branches   = {mk_branch(10, 1, 2, 0.02, 0.05)};
+  sys.ac.generators = {mk_slack_gen(0, 1)};
+
+  sys.dc.base_mva = 10.0;
+  sys.dc.buses = {mk_dc_bus(101, DCBusType::DC_V, 0.0),
+                  mk_dc_bus(104, DCBusType::DC_P, 0.0)};
+  sys.dc.dc_circuit_breakers = {mk_dc_cb(1, 101, 104, /*closed=*/false)};
+
+  auto g   = build_power_system_graph(sys);
+  auto res = contract_zero_impedance_edges(g, sys, ContractionOptions{});
+
+  // Open breaker: DC buses 101 and 104 must NOT be merged.
+  if (res.dc_bus_to_super.count(101) && res.dc_bus_to_super.count(104))
+    REQUIRE(res.dc_bus_to_super.at(101) != res.dc_bus_to_super.at(104));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// F. Real distribution feeder (case33bw) series-reduction round-trip
+// ═══════════════════════════════════════════════════════════════════════
+
+namespace {
+
+// Split AC branch at array position `pos` (a→b) into a→N→b through a new
+// zero-injection bus N, halving the series impedance on each segment so the
+// electrical path is unchanged.  Series reduction must then collapse N back
+// and reproduce the original feeder's power flow exactly.
+void split_branch_through_passive_bus(HybridPowerSystem& sys, int pos,
+                                      int new_bus_id, int new_idx_a,
+                                      int new_idx_b) {
+  ACBranch& br = sys.ac.branches[static_cast<size_t>(pos)];
+  const int a = br.from_bus, b = br.to_bus;
+  const double r = br.r_pu, x = br.x_pu, bb = br.b_pu;
+  const double base_kv = sys.ac.buses.empty() ? 12.66 : sys.ac.buses.front().base_kv;
+
+  ACBus nb = mk_bus(new_bus_id, BusType::PQ, base_kv, 0.0, 0.0);  // passive
+  sys.ac.buses.push_back(nb);
+
+  ACBranch seg1 = mk_branch(new_idx_a, a, new_bus_id, r * 0.5, x * 0.5, bb * 0.5);
+  ACBranch seg2 = mk_branch(new_idx_b, new_bus_id, b, r * 0.5, x * 0.5, bb * 0.5);
+  // Remove the original branch, add the two segments.
+  sys.ac.branches.erase(sys.ac.branches.begin() + pos);
+  sys.ac.branches.push_back(seg1);
+  sys.ac.branches.push_back(seg2);
+}
+
+}  // namespace
+
+TEST_CASE("Round-trip: case33bw series reduction reproduces the feeder PF",
+          "[graph][roundtrip][series][case33bw]") {
+  const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/case33bw.m";
+  HybridPowerSystem base = io::parse_matpower(path);
+  REQUIRE(!base.ac.buses.empty());
+
+  const SolvedPF full = solve_pf(base);
+  REQUIRE(full.converged);
+
+  // Build a "split" feeder: insert a passive bus midway along three branches,
+  // using non-sequential indices to exercise the index-robust reducer.
+  HybridPowerSystem split = base;
+  int next_bus = 0;
+  for (const auto& b : split.ac.buses) next_bus = std::max(next_bus, b.index);
+  ++next_bus;
+  int next_idx = 0;
+  for (const auto& br : split.ac.branches) next_idx = std::max(next_idx, br.index);
+  next_idx += 100;  // deliberately non-sequential
+  for (int pos : {0, 5, 10}) {
+    split_branch_through_passive_bus(split, pos, next_bus, next_idx, next_idx + 1);
+    ++next_bus;
+    next_idx += 2;
+  }
+
+  // The split feeder is electrically identical to the original.
+  const SolvedPF split_full = solve_pf(split);
+  REQUIRE(split_full.converged);
+
+  // Series-reduce the passive split nodes back out.
+  auto red = reduce_series(split);
+  REQUIRE(red.mapping.series_records.size() >= 1);
+  const SolvedPF reduced = solve_pf(red.reduced_system);
+  REQUIRE(reduced.converged);
+
+  // The reduced feeder must reproduce the ORIGINAL case33bw voltages at every
+  // original bus.
+  std::vector<int> orig_ids;
+  for (const auto& b : base.ac.buses) orig_ids.push_back(b.index);
+  require_vm_match(full, reduced, orig_ids, 1e-6);
+  REQUIRE_THAT(reduced.total_loss_mw, WithinAbs(full.total_loss_mw, 1e-4));
+
+  // Every eliminated passive bus recovers to its split-feeder voltage.
+  FullNetworkVoltages volt = to_voltages(reduced);
+  recover_series_reduced_buses(volt, red.mapping, split);
+  for (const auto& rec : red.mapping.series_records) {
+    const int elim = rec.eliminated_bus_id;
+    REQUIRE(volt.ac_bus_voltage.count(elim) > 0);
+    INFO("eliminated bus " << elim);
+    REQUIRE_THAT(std::abs(volt.ac_bus_voltage.at(elim)),
+                 WithinAbs(split_full.vm.at(elim), 1e-4));
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// H. Pendant (leaf-load) folding round-trip (approximate)
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Round-trip: pendant load folding conserves total demand",
+          "[graph][roundtrip][pendant]") {
+  // 1(slack) --Z-- 2(load) --Z-- 3(leaf load).  Bus 3 is folded into bus 2.
+  HybridPowerSystem sys;
+  sys.base_mva = 10.0;
+  sys.ac.buses = {
+      mk_bus(1, BusType::SLACK, 11.0),
+      mk_bus(2, BusType::PQ,    11.0, 0.5, 0.2),
+      mk_bus(3, BusType::PQ,    11.0, 0.3, 0.1),   // pendant leaf
+  };
+  sys.ac.branches   = {mk_branch(40, 1, 2, 0.01, 0.02),
+                       mk_branch(41, 2, 3, 0.01, 0.02)};
+  sys.ac.generators = {mk_slack_gen(0, 1)};
+
+  auto g = build_power_system_graph(sys);
+  GraphReductionOptions opt;
+  opt.enable_pendant_reduction           = true;
+  opt.preserve_all_load_buses            = false;  // allow folding
+  opt.preserve_all_generator_buses       = true;
+  opt.preserve_branch_flow_limited_edges = false;
+  auto cand = classify_reduction_candidates(g, sys, opt);
+  auto plan = make_reduction_plan(g, cand, opt);
+  auto red  = apply_pendant_reduction(g, sys, plan, opt);
+
+  // Bus 3 eliminated; the connecting branch (index 41) disabled by comp_index.
+  REQUIRE(red.mapping.pendant_records.size() == 1);
+  bool bus3_inactive = false;
+  for (const auto& b : red.reduced_system.ac.buses)
+    if (b.index == 3 && !b.in_service) bus3_inactive = true;
+  REQUIRE(bus3_inactive);
+  CHECK(count_in_service_with_index(red.reduced_system, {41}) == 0);
+
+  // Parent bus 2 absorbs at least the leaf's demand (plus approximate I²R loss).
+  double pd2 = 0.0;
+  for (const auto& b : red.reduced_system.ac.buses)
+    if (b.index == 2) pd2 = b.pd_mw;
+  REQUIRE(pd2 >= 0.5 + 0.3 - 1e-9);   // original 0.5 + folded 0.3 (+ losses)
+
+  // The reduced (now 2-bus) feeder still solves.
+  const SolvedPF reduced = solve_pf(red.reduced_system);
+  REQUIRE(reduced.converged);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// I. Kron (Schur complement) elimination round-trip
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("Round-trip: Kron elimination of a passive interior node",
+          "[graph][roundtrip][kron]") {
+  // 4-bus star: passive hub (index 1, 0-based) joins buses 0, 2, 3.
+  // Eliminate the hub and verify the boundary solution is preserved and the
+  // hub voltage is recovered (V_beta = -Ybb^-1 Yba V_alpha).
+  using cplx = std::complex<double>;
+  auto y = [](double x) { return cplx{0.0, -1.0 / x}; };  // pure reactance line
+  const cplx y01 = y(0.10), y12 = y(0.12), y13 = y(0.08);
+
+  Eigen::MatrixXcd Y(4, 4);
+  Y.setZero();
+  // hub = node 1
+  Y(0, 0) += y01;  Y(0, 1) -= y01;  Y(1, 0) -= y01;  Y(1, 1) += y01;
+  Y(1, 1) += y12;  Y(1, 2) -= y12;  Y(2, 1) -= y12;  Y(2, 2) += y12;
+  Y(1, 1) += y13;  Y(1, 3) -= y13;  Y(3, 1) -= y13;  Y(3, 3) += y13;
+
+  Eigen::SparseMatrix<cplx> Ys = Y.sparseView();
+
+  std::vector<int> retained   = {0, 2, 3};
+  std::vector<int> eliminated = {1};
+  auto kr = apply_kron_reduction(Ys, retained, eliminated, 10.0);
+  REQUIRE(kr.kron_data.valid);
+
+  // Pick boundary voltages; the hub is passive (zero injection).  Its true
+  // voltage is determined by the boundary voltages, so set it from the
+  // analytical passive-node relation before forming the full-network currents.
+  Eigen::VectorXcd V_alpha(3);
+  V_alpha << cplx{1.00, 0.0}, cplx{0.99, -0.01}, cplx{0.98, 0.02};
+
+  // Recover the hub voltage from the reduced data.
+  Eigen::VectorXcd V_beta = recover_eliminated_voltages(kr.kron_data, V_alpha);
+  REQUIRE(V_beta.size() == 1);
+
+  // Analytical hub voltage for a passive node: V_hub = Σ y_k V_k / Σ y_k.
+  const cplx v_hub_expected =
+      (y01 * V_alpha(0) + y12 * V_alpha(1) + y13 * V_alpha(2)) /
+      (y01 + y12 + y13);
+  REQUIRE_THAT(std::abs(V_beta(0) - v_hub_expected), WithinAbs(0.0, 1e-9));
+
+  // Assemble the full voltage vector with the recovered hub voltage, so the
+  // hub row of (Y·V) is zero (passive) and the boundary currents of the full
+  // and reduced networks coincide.
+  Eigen::VectorXcd V_full(4);
+  V_full << V_alpha(0), V_beta(0), V_alpha(1), V_alpha(2);
+  Eigen::VectorXcd I_full = Y * V_full;
+  REQUIRE(std::abs(I_full(1)) < 1e-9);   // hub injection is ~0 (passive)
+
+  Eigen::VectorXcd I_alpha_expected(3);
+  I_alpha_expected << I_full(0), I_full(2), I_full(3);
+  Eigen::VectorXcd I_alpha_reduced = kr.Y_reduced * V_alpha;
+  REQUIRE((I_alpha_reduced - I_alpha_expected).cwiseAbs().maxCoeff() < 1e-9);
+}
+
 
