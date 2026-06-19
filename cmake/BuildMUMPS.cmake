@@ -34,6 +34,89 @@ file(WRITE "${_M}/include/mumps_int_def.h"
   "#ifndef MUMPS_INT_H\n#define MUMPS_INT_H\n#define MUMPS_INTSIZE32\n#endif\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# macOS: prefer the complete Homebrew MUMPS over the from-source static build.
+#
+# The from-source static libdmumps.a has exhibited *unresolvable* Fortran
+# symbols (e.g. _dmumps_diag_ana_, _dmumps_mtrans_driver_) when linked into an
+# executable on arm64 macOS — the symbols are present in the archive yet ld
+# reports them missing, and neither ranlib nor -force_load resolves it.
+# Homebrew's Ipopt ships a complete, working MUMPS (same Add_ trailing-underscore
+# ABI).  Use its dylibs for the *library* while keeping the downloaded MUMPS
+# 5.7.3 *headers* (dmumps_c.h, libseq/mpi.h) for compilation, so ipopt_local
+# still builds against a matching API.
+#
+# Override with -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON to force the from-source build.
+# ─────────────────────────────────────────────────────────────────────────────
+option(MIPSOLVERS_FORCE_BUILD_MUMPS
+  "Build MUMPS from source even when a system MUMPS is available" OFF)
+
+set(_ms_use_brew_mumps OFF)
+if(APPLE AND NOT MIPSOLVERS_FORCE_BUILD_MUMPS)
+  set(_ms_brew_mumps_dir "/opt/homebrew/opt/ipopt/lib")
+  set(_ms_brew_mumps_libs "")
+  set(_ms_brew_mumps_ok TRUE)
+  foreach(_ml dmumps mumps_common mpiseq pord)
+    find_library(_ms_brew_lib_${_ml}
+      NAMES ${_ml}
+      PATHS "${_ms_brew_mumps_dir}"
+      NO_DEFAULT_PATH)
+    if(_ms_brew_lib_${_ml})
+      list(APPEND _ms_brew_mumps_libs "${_ms_brew_lib_${_ml}}")
+    else()
+      set(_ms_brew_mumps_ok FALSE)
+    endif()
+  endforeach()
+  set(_ms_use_brew_mumps ${_ms_brew_mumps_ok})
+endif()
+
+if(_ms_use_brew_mumps)
+  # dmumps as an INTERFACE target: downloaded headers for build-time includes,
+  # Homebrew dylibs for linking.  No MUMPS sources are compiled.
+  add_library(dmumps INTERFACE)
+  target_include_directories(dmumps INTERFACE
+    "$<BUILD_INTERFACE:${_M}/include>"
+    "$<BUILD_INTERFACE:${_M}/libseq>")
+
+  # The Homebrew MUMPS dylibs need the gfortran/quadmath runtime.  A from-source
+  # build pulls these in automatically via the enabled Fortran language; an
+  # INTERFACE target must add them explicitly so the final executable link
+  # resolves Fortran runtime symbols (e.g. __gfortran_generate_error).
+  set(_ms_fortran_runtime "")
+  foreach(_fl gfortran quadmath)
+    find_library(_ms_fortran_${_fl}
+      NAMES ${_fl}
+      PATHS /opt/homebrew/opt/gcc/lib/gcc/current
+            /opt/homebrew/lib/gcc/current
+      NO_DEFAULT_PATH)
+    if(_ms_fortran_${_fl})
+      list(APPEND _ms_fortran_runtime "${_ms_fortran_${_fl}}")
+    endif()
+  endforeach()
+
+  target_link_libraries(dmumps INTERFACE
+    ${_ms_brew_mumps_libs}
+    ${_ms_fortran_runtime}
+    "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
+
+  if(NOT TARGET MUMPS)
+    add_library(MUMPS INTERFACE)
+    target_link_libraries(MUMPS INTERFACE dmumps)
+    add_library(MUMPS::MUMPS ALIAS MUMPS)
+  endif()
+
+  install(TARGETS dmumps MUMPS
+    EXPORT  mipsolversTargets
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+  message(STATUS
+    "mipsolvers: using Homebrew MUMPS at ${_ms_brew_mumps_dir} "
+    "(from-source build skipped; -DMIPSOLVERS_FORCE_BUILD_MUMPS=ON to override)")
+  return()
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Single dmumps STATIC library — all MUMPS sources compiled directly in.
 # CMake's built-in Fortran module dependency scanner handles ordering of
 # module-definition files automatically; no manual OBJECT-target chains needed.

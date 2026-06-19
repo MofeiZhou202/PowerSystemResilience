@@ -362,7 +362,14 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
   set(_bundle_inputs "$<TARGET_FILE:mipsolvers>")
   foreach(_dep IN ITEMS mipsolvers_hfactor highs libscip ipopt_local dmumps)
     if(TARGET ${_dep})
-      list(APPEND _bundle_inputs "$<TARGET_FILE:${_dep}>")
+      # Only static-library targets have an archive file to bundle.  When a
+      # dependency is provided as an INTERFACE target (e.g. dmumps wrapping a
+      # system/Homebrew MUMPS shared library), it has no $<TARGET_FILE> and is
+      # supplied to consumers at link time like the other external shared libs.
+      get_target_property(_dep_type ${_dep} TYPE)
+      if(_dep_type STREQUAL "STATIC_LIBRARY")
+        list(APPEND _bundle_inputs "$<TARGET_FILE:${_dep}>")
+      endif()
     endif()
   endforeach()
   # Static LUSOL archive pulled in transitively via PaPILO (not a CMake target).
