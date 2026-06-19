@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
 /// acdcopf_builder.cpp
 /// ====================
 /// Hybrid AC/DC Optimal Power Flow via the AML NonlinearExpr DAG.

@@ -105,11 +105,31 @@ int find_slack_bus(const HybridPowerSystem& sys) {
 }
 
 std::filesystem::path data_file_path(const std::string& name) {
+  // Search a list of candidate locations and return the first that exists.
+  // The MATPOWER `.m` library ships under <root>/external_data/matpower; the
+  // legacy sibling "HybridACDCPowerFlow/data" layout is kept as a fallback.
+  namespace fs = std::filesystem;
+  std::vector<fs::path> candidates;
 #ifdef HACDCPF_PROJECT_ROOT
-  const std::filesystem::path root(HACDCPF_PROJECT_ROOT);
+  const fs::path root(HACDCPF_PROJECT_ROOT);
+  candidates.push_back(root / "external_data" / "matpower" / name);
+  candidates.push_back(root / "data" / name);
+  candidates.push_back(root.parent_path() / "HybridACDCPowerFlow" / "data" / name);
+#endif
+  const fs::path cwd = fs::current_path();
+  candidates.push_back(cwd / "external_data" / "matpower" / name);
+  candidates.push_back(cwd / ".." / "external_data" / "matpower" / name);
+  candidates.push_back(cwd / "data" / name);
+  candidates.push_back(cwd / ".." / "data" / name);
+  for (const auto& c : candidates) {
+    std::error_code ec;
+    if (fs::exists(c, ec)) return c;
+  }
+  // None found: fall back to the legacy path so the error message is familiar.
+#ifdef HACDCPF_PROJECT_ROOT
   return root.parent_path() / "HybridACDCPowerFlow" / "data" / name;
 #else
-  return std::filesystem::path("../HybridACDCPowerFlow/data") / name;
+  return fs::path("../HybridACDCPowerFlow/data") / name;
 #endif
 }
 

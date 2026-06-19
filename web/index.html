@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
+<link rel="stylesheet" href="css/style.css"/>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+
+<!-- ===== Bar 1: Canvas Tools (Top Toolbar) ===== -->
+<div id="topToolbar" class="top-toolbar">
+  <div class="logo-mini" title="Hybrid AC/DC Power System Simulator">⚡</div>
+  <button id="btnLoadCase" class="toolbar-btn" title="加载算例">加载算例</button>
+  <button id="btnSelect" class="toolbar-btn canvas-tool active" title="选择 (V)">选择</button>
+  <button id="btnConnect" class="toolbar-btn canvas-tool" title="连线 (C)">连线</button>
+  <button id="btnBoxSelect" class="toolbar-btn canvas-tool" title="框选 (拖拽空白区域)">框选</button>
+  <button id="btnDelete" class="toolbar-btn" title="删除 (Del)">删除</button>
+  <button id="btnDeleteSelected" class="toolbar-btn" title="删除选中 (批量)">删除选中<br>（批量）</button>
+  <button id="btnZoomIn" class="toolbar-btn" title="放大">放大</button>
+  <button id="btnZoomOut" class="toolbar-btn" title="缩小">缩小</button>
+  <button id="btnZoomFit" class="toolbar-btn" title="适应画面">适应<br>画面</button>
+  <button id="btnAutoLayout" class="toolbar-btn" title="自动布局">自动<br>布局</button>
+  <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
+  <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
+  <span class="toolbar-spacer"></span>
+  <div class="toolbar-aux">
+    <button id="btnNewSystem" class="btn btn-sm" title="新建空白系统">新建</button>
+    <button id="btnExportJson" class="btn btn-sm" title="导出JSON">导出</button>
+    <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
+    <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
+    <span id="statusBadge" class="badge">就绪</span>
+  </div>
+</div>
+
+<!-- ===== Bar 2: Function Modules ===== -->
+<div id="moduleBar" class="module-bar">
+  <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
+  <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
+  <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
+  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序潮流</button>
+  <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
+  <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
+  <button id="moduleResilience"   class="module-btn" data-module="resilience">弹性评估</button>
+</div>
+
+<!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
+<div id="subToolbar" class="sub-toolbar hidden">
+  <!-- Power flow -->
+  <div class="sub-section" data-sub="powerFlow" hidden>
+    <label class="sub-label">潮流算法
+      <select id="pfMethod" title="潮流计算方法">
+        <option value="ac_newton">交直流统一NR</option>
+        <option value="pure_ac">交流NR</option>
+        <option value="dc">直流潮流(B-θ)</option>
+        <option value="fdpf">快速解耦</option>
+        <option value="adaptive">自适应分区</option>
+        <option value="hybrid_linearized">混合线性化</option>
+        <option value="islanded">孤岛检测</option>
+        <option value="distributed_slack">分布式平衡</option>
+        <option value="three_phase">三相不对称</option>
+      </select>
+    </label>
+    <label class="sub-label">单位切换
+      <select id="pfDisplayUnit" title="功率显示单位">
+        <option value="MW">MW / MVar</option>
+        <option value="kW">kW / kVar</option>
+        <option value="W">W / Var</option>
+      </select>
+    </label>
+    <label class="sub-label">可视化
+      <select id="vizMode" title="可视化模式">
+        <option value="off">关闭</option>
+        <option value="flow">潮流方向</option>
+        <option value="heatmap">热力图</option>
+        <option value="both">方向+热力图</option>
+      </select>
+    </label>
+    <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
+    <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
+  </div>
+  <!-- Short circuit -->
+  <div class="sub-section" data-sub="shortCircuit" hidden>
+    <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
+    <label class="sub-label">故障类型
+      <select id="faultTypeSelect">
+        <option value="ThreePhase">三相短路</option>
+        <option value="SinglePhaseGround">单相接地</option>
+        <option value="TwoPhase">两相短路</option>
+        <option value="TwoPhaseGround">两相接地</option>
+      </select>
+    </label>
+    <label class="sub-label">电压矫正系数
+      <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
+    </label>
+    <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
+  </div>
+  <!-- Topology reconstruction -->
+  <div class="sub-section" data-sub="topology" hidden>
+    <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
+  </div>
+  <!-- Time-series PF -->
+  <div class="sub-section" data-sub="timeSeries" hidden>
+    <button id="btnImportIrradiance"  class="toolbar-btn" title="导入辐照强度时序数据 (JSON / Excel)">辐照强度<br>数据导入</button>
+    <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
+    <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
+    <button id="btnImportGreenCert"   class="toolbar-btn" title="导入绿证数据 (JSON / Excel / CSV)">绿证数据<br>导入</button>
+    <input type="file" id="fileImportGreenCert" accept=".json,.xlsx,.xls,.csv" style="display:none"/>
+    <label class="sub-label">仿真时间(小时)
+      <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
+      <input id="tspfSkipUC" type="checkbox" checked/>
+      <span>跳过机组组合</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用经济调度（OPF）：每步以最低运行成本重分配可调机组出力">
+      <input id="tspfRunOPF" type="checkbox"/>
+      <span>启用OPF优化调度</span>
+    </label>
+    <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
+    <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
+    <button id="btnRunCarbonFlow"   class="toolbar-btn run-btn" title="碳流计算">碳流计算</button>
+    <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+    <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+    <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
+  </div>
+  <!-- Hosting capacity -->
+  <div class="sub-section" data-sub="hosting" hidden>
+    <button id="btnRunBearingCap" class="toolbar-btn run-btn" title="运行DG承载力评估">运行承载力评估</button>
+  </div>
+  <!-- Reliability -->
+  <div class="sub-section" data-sub="reliability" hidden>
+    <label class="sub-label" title="可靠性分析方法">方法
+      <select id="relMethod">
+        <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
+        <option value="seq">序贯蒙特卡洛 (SEQ)</option>
+        <option value="fmea">FMEA (N-1 枚举)</option>
+        <option value="fd">频率-持续时间 (F&amp;D)</option>
+      </select>
+    </label>
+    <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
+      <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+    </label>
+    <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
+    <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
+  </div>
+  <!-- Resilience -->
+  <div class="sub-section" data-sub="resilience" hidden>
+    <label class="sub-label" title="模拟故障数量">故障数量
+      <input id="resFaultCount" type="number" value="1" min="1" step="1"/>
+    </label>
+    <label class="sub-label" title="模拟故障位置 (元件ID或母线ID, 逗号分隔)">故障位置
+      <input id="resFaultLocations" type="text" placeholder="例: 5,12,18"/>
+    </label>
+    <label class="sub-label" title="故障开始时间 (小时)">故障时间
+      <input id="resFaultStartHour" type="number" value="0" min="0" step="1"/>
+    </label>
+    <label class="sub-label" title="故障持续时长 (小时)">故障时长
+      <input id="resFaultDuration" type="number" value="4" min="0" step="0.5"/>
+    </label>
+    <button id="btnGenExtremeScenario" class="toolbar-btn" title="基于风险/极端天气生成故障场景">极端场景<br>生成</button>
+    <label class="sub-label" title="故障元件修复时长 (小时)">修复时长
+      <input id="resRepairDuration" type="number" value="6" min="0" step="0.5"/>
+    </label>
+    <label class="sub-label" title="移动储能行驶速度 (km/h)">移储速度
+      <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
+    </label>
+    <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
+    <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
+  </div>
+</div>
+
+<!-- ===== Case Load Modal ===== -->
+<div id="caseLoadModal" class="modal case-modal" style="display:none">
+  <div class="modal-backdrop"></div>
+  <div class="case-modal-panel">
+    <div class="case-modal-header">
+      <h3>加载算例</h3>
+      <button id="btnCaseModalClose" class="case-modal-close" title="关闭">×</button>
+    </div>
+    <div class="case-modal-body">
+      <div class="case-modal-row">
+        <button id="btnImportLibraryCase" class="case-modal-btn">导入算例库算例</button>
+        <select id="caseSelect" class="case-modal-select"><option value="">-- 选择算例 --</option></select>
+      </div>
+      <div class="case-modal-row">
+        <button id="btnImportMatpowerCase" class="case-modal-btn">导入Matpower算例</button>
+        <select id="matpowerSelect" class="case-modal-select"><option value="">-- 选择MATPOWER文件 --</option></select>
+      </div>
+      <div class="case-modal-row">
+        <button id="btnImportJsonCase" class="case-modal-btn">导入Json文件</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Main Content ===== -->
+<div id="main">
+
+  <!-- Left: Component Library -->
+  <aside id="componentLib">
+    <h3>元件库</h3>
+    <div class="lib-section">
+      <h4>交流元件</h4>
+      <div class="lib-grid" id="acComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>直流元件</h4>
+      <div class="lib-grid" id="dcComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>换流器</h4>
+      <div class="lib-grid" id="converterComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>储能/新能源</h4>
+      <div class="lib-grid" id="renewableComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>充电设施</h4>
+      <div class="lib-grid" id="evComponents"></div>
+    </div>
+    <div class="lib-section">
+      <h4>聚合资源</h4>
+      <div class="lib-grid" id="aggregationComponents"></div>
+    </div>
+  </aside>
+
+  <!-- Center: Canvas -->
+  <div id="canvasContainer">
+    <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- Grid pattern -->
+        <pattern id="gridSmall" width="20" height="20" patternUnits="userSpaceOnUse">
+          <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e0e0e0" stroke-width="0.5"/>
+        </pattern>
+        <pattern id="gridLarge" width="100" height="100" patternUnits="userSpaceOnUse">
+          <rect width="100" height="100" fill="url(#gridSmall)"/>
+          <path d="M 100 0 L 0 0 0 100" fill="none" stroke="#ccc" stroke-width="1"/>
+        </pattern>
+        <!-- Arrow marker for connections -->
+        <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+        </marker>
+        <marker id="arrowhead-flow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#2196F3"/>
+        </marker>
+        <marker id="arrowhead-flow-anim" markerWidth="10" markerHeight="7" refX="5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#1976D2"/>
+        </marker>
+      </defs>
+      <rect id="canvasGrid" width="60000" height="60000" fill="url(#gridLarge)" x="-30000" y="-30000"/>
+      <g id="connectionsLayer"></g>
+      <g id="componentsLayer"></g>
+      <g id="resultsLayer"></g>
+      <g id="tempLayer"></g>
+    </svg>
+    <div id="vizLegend"><span class="legend-min">0%</span> <span class="legend-bar"></span> <span class="legend-max">100% 负载率</span></div>
+  </div>
+
+  <!-- Right: Property Editor + Topology Tables -->
+  <div id="rightPanelResizer"></div>
+  <aside id="rightPanel">
+    <!-- Tabs -->
+    <div class="panel-tabs">
+      <button class="panel-tab active" data-tab="properties">属性</button>
+      <button class="panel-tab" data-tab="topology">拓扑</button>
+      <button class="panel-tab" data-tab="results">结果</button>
+    </div>
+
+    <!-- Properties Tab -->
+    <div id="tabProperties" class="tab-content active">
+      <div id="propEmpty" class="empty-hint">点击画布上的元件查看/编辑属性</div>
+      <div id="propEditor" style="display:none">
+        <div class="prop-header">
+          <span id="propIcon" class="prop-comp-icon"></span>
+          <span id="propTitle">元件属性</span>
+        </div>
+        <div id="propFields"></div>
+        <button id="btnApplyProp" class="btn btn-primary btn-sm">应用修改</button>
+      </div>
+    </div>
+
+    <!-- Topology Tab -->
+    <div id="tabTopology" class="tab-content">
+      <div class="topo-section">
+        <h4>节点表 (Bus)</h4>
+        <div id="busTable" class="topo-table-wrap">
+          <table id="busTableInner"><thead><tr>
+            <th>ID</th><th>类型</th><th>Vm(pu)</th><th>Va(°)</th>
+            <th>Pd(MW)</th><th>Qd(MVar)</th><th>BaseKV</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section">
+        <h4>支路表 (Branch)</h4>
+        <div id="branchTable" class="topo-table-wrap">
+          <table id="branchTableInner"><thead><tr>
+            <th>From</th><th>To</th><th>R(pu)</th><th>X(pu)</th>
+            <th>B(pu)</th><th>Rate(MVA)</th><th>Tap</th><th>Shift(°)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section">
+        <h4>发电机表</h4>
+        <div id="genTable" class="topo-table-wrap">
+          <table id="genTableInner"><thead><tr>
+            <th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th><th>Vg(pu)</th>
+            <th>Pmax</th><th>Pmin</th><th>Slack</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="loadSection" style="display:none">
+        <h4>负荷表 (Load)</h4>
+        <div id="loadTable" class="topo-table-wrap">
+          <table id="loadTableInner"><thead><tr>
+            <th>Bus</th><th>P(MW)</th><th>Q(MVar)</th><th>Scaling</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="trafoSection" style="display:none">
+        <h4>变压器表 (Transformer)</h4>
+        <div id="trafoTable" class="topo-table-wrap">
+          <table id="trafoTableInner"><thead><tr>
+            <th>HV Bus</th><th>LV Bus</th><th>Sn(MVA)</th><th>Vk(%)</th><th>Shift(°)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="extGridSection" style="display:none">
+        <h4>外部电网 (External Grid)</h4>
+        <div id="extGridTable" class="topo-table-wrap">
+          <table id="extGridTableInner"><thead><tr>
+            <th>Bus</th><th>Vm(pu)</th><th>Va(°)</th><th>Ssc_max(MVA)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="storageSection" style="display:none">
+        <h4>储能 (Storage)</h4>
+        <div id="storageTable" class="topo-table-wrap">
+          <table id="storageTableInner"><thead><tr>
+            <th>Bus</th><th>P_rated(MW)</th><th>E_rated(MWh)</th><th>SOC</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="pvSection" style="display:none">
+        <h4>光伏 (PV System)</h4>
+        <div id="pvTable" class="topo-table-wrap">
+          <table id="pvTableInner"><thead><tr>
+            <th>Bus</th><th>P(MW)</th><th>Q(MVar)</th><th>Sn(MVA)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="renGenSection" style="display:none">
+        <h4>新能源发电 (Renewable Gen)</h4>
+        <div id="renGenTable" class="topo-table-wrap">
+          <table id="renGenTableInner"><thead><tr>
+            <th>Bus</th><th>类型</th><th>P(MW)</th><th>P_rated(MW)</th><th>CF</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="sgenSection" style="display:none">
+        <h4>静态发电机 (Static Gen)</h4>
+        <div id="sgenTable" class="topo-table-wrap">
+          <table id="sgenTableInner"><thead><tr>
+            <th>Bus</th><th>P(MW)</th><th>Q(MVar)</th><th>Type</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="shuntSection" style="display:none">
+        <h4>并联补偿 (Shunt)</h4>
+        <div id="shuntTable" class="topo-table-wrap">
+          <table id="shuntTableInner"><thead><tr>
+            <th>Bus</th><th>Gs(MW)</th><th>Bs(MVar)</th><th>Switchable</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="switchSection" style="display:none">
+        <h4>开关 (Switch)</h4>
+        <div id="switchTable" class="topo-table-wrap">
+          <table id="switchTableInner"><thead><tr>
+            <th>From</th><th>To</th><th>Closed</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="cbSection" style="display:none">
+        <h4>断路器 (Circuit Breaker)</h4>
+        <div id="cbTable" class="topo-table-wrap">
+          <table id="cbTableInner"><thead><tr>
+            <th>From</th><th>To</th><th>Closed</th><th>I_rated(kA)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="motorSection" style="display:none">
+        <h4>电动机 (Motor)</h4>
+        <div id="motorTable" class="topo-table-wrap">
+          <table id="motorTableInner"><thead><tr>
+            <th>Bus</th><th>Sn(MVA)</th><th>cos_phi</th><th>η</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="trafo3wSection" style="display:none">
+        <h4>三绕组变压器 (Transformer 3W)</h4>
+        <div id="trafo3wTable" class="topo-table-wrap">
+          <table id="trafo3wTableInner"><thead><tr>
+            <th>HV</th><th>MV</th><th>LV</th><th>Sn_HV(MVA)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="flexLoadSection" style="display:none">
+        <h4>柔性负荷 (Flexible Load)</h4>
+        <div id="flexLoadTable" class="topo-table-wrap">
+          <table id="flexLoadTableInner"><thead><tr>
+            <th>Bus</th><th>P(MW)</th><th>Flex↑(MW)</th><th>Flex↓(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="asymLoadSection" style="display:none">
+        <h4>不对称负荷 (Asymmetric Load)</h4>
+        <div id="asymLoadTable" class="topo-table-wrap">
+          <table id="asymLoadTableInner"><thead><tr>
+            <th>Bus</th><th>Pa(MW)</th><th>Pb(MW)</th><th>Pc(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="dcBusSection" style="display:none">
+        <h4>DC母线 (DC Bus)</h4>
+        <div id="dcBusTable" class="topo-table-wrap">
+          <table id="dcBusTableInner"><thead><tr>
+            <th>ID</th><th>Type</th><th>Vm(pu)</th><th>BaseKV</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="dcBranchSection" style="display:none">
+        <h4>DC支路 (DC Branch)</h4>
+        <div id="dcBranchTable" class="topo-table-wrap">
+          <table id="dcBranchTableInner"><thead><tr>
+            <th>From</th><th>To</th><th>R(pu)</th><th>Rate(MVA)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="dcLoadSection" style="display:none">
+        <h4>DC负荷 (DC Load)</h4>
+        <div id="dcLoadTable" class="topo-table-wrap">
+          <table id="dcLoadTableInner"><thead><tr>
+            <th>Bus</th><th>P(MW)</th><th>Scaling</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="vscSection" style="display:none">
+        <h4>VSC换流器</h4>
+        <div id="vscTable" class="topo-table-wrap">
+          <table id="vscTableInner"><thead><tr>
+            <th>AC Bus</th><th>DC Bus</th><th>P_set(MW)</th><th>Control</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="chargerSection" style="display:none">
+        <h4>充电桩 (Charger)</h4>
+        <div id="chargerTable" class="topo-table-wrap">
+          <table id="chargerTableInner"><thead><tr>
+            <th>Type</th><th>P_rated(kW)</th><th>η</th><th>V2G</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="csSection" style="display:none">
+        <h4>充电站 (Charging Station)</h4>
+        <div id="csTable" class="topo-table-wrap">
+          <table id="csTableInner"><thead><tr>
+            <th>Bus</th><th>快充</th><th>慢充</th><th>P_max(kW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="msSection" style="display:none">
+        <h4>移动储能 (Mobile Storage)</h4>
+        <div id="msTable" class="topo-table-wrap">
+          <table id="msTableInner"><thead><tr>
+            <th>Bus</th><th>P_rated(MW)</th><th>E_rated(MWh)</th><th>SOC</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="dcdcSection" style="display:none">
+        <h4>DC-DC变换器</h4>
+        <div id="dcdcTable" class="topo-table-wrap">
+          <table id="dcdcTableInner"><thead><tr>
+            <th>Bus_in</th><th>Bus_out</th><th>Control</th><th>P_ref(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="erSection" style="display:none">
+        <h4>能量路由器 (Energy Router)</h4>
+        <div id="erTable" class="topo-table-wrap">
+          <table id="erTableInner"><thead><tr>
+            <th>Type</th><th>Ports</th><th>P_rated(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="vppSection" style="display:none">
+        <h4>虚拟电厂 (VPP)</h4>
+        <div id="vppTable" class="topo-table-wrap">
+          <table id="vppTableInner"><thead><tr>
+            <th>PCC Bus</th><th>PV</th><th>Wind</th><th>Battery</th><th>P(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <div class="topo-section" id="mgSection" style="display:none">
+        <h4>微电网 (Microgrid)</h4>
+        <div id="mgTable" class="topo-table-wrap">
+          <table id="mgTableInner"><thead><tr>
+            <th>PCC Bus</th><th>Mode</th><th>P_exchange(MW)</th><th>Cap(MW)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results Tab -->
+    <div id="tabResults" class="tab-content">
+      <div id="resultsEmpty" class="empty-hint">运行计算后在此查看结果</div>
+      <div id="resultsContent" style="display:none">
+        <div id="resultsSummary" class="results-summary"></div>
+        <div class="result-group" data-result-group="powerFlow">
+        <div class="topo-section">
+          <h4>潮流结果 — AC节点电压</h4>
+          <div id="pfBusResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfDcBusSection" style="display:none">
+          <h4>潮流结果 — DC节点电压</h4>
+          <div id="pfDcBusResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfGenSection" style="display:none">
+          <h4>潮流结果 — 发电机出力</h4>
+          <div id="pfGenResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section">
+          <h4>潮流结果 — AC支路功率</h4>
+          <div id="pfBranchResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfDcBranchSection" style="display:none">
+          <h4>潮流结果 — DC支路功率</h4>
+          <div id="pfDcBranchResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfVscSection" style="display:none">
+          <h4>潮流结果 — VSC换流器</h4>
+          <div id="pfVscResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfDcdcSection" style="display:none">
+          <h4>潮流结果 — DCDC变换器</h4>
+          <div id="pfDcdcResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfTrafo3wSection" style="display:none">
+          <h4>潮流结果 — 三绕组变压器</h4>
+          <div id="pfTrafo3wResults" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group powerFlow -->
+        <div class="result-group" data-result-group="shortCircuit">
+        <div class="topo-section">
+          <h4>短路结果</h4>
+          <div id="scResults" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group shortCircuit -->
+        <div class="result-group" data-result-group="topology">
+        <div class="topo-section">
+          <h4>拓扑重构结果</h4>
+          <div id="topoResults" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group topology -->
+        <div class="result-group" data-result-group="hosting">
+        <div class="topo-section" id="bearingCapSection" style="display:none">
+          <h4>承载力评估结果 (DL/T 2041-2019)</h4>
+          <div id="bearingCapSummary" class="results-summary"></div>
+          <h5>区域评估等级</h5>
+          <div id="bearingAreaResults" class="topo-table-wrap"></div>
+          <h5>支路/变压器热稳定评估 (DL/T 2041 §5.1)</h5>
+          <div id="bearingBranchResults" class="topo-table-wrap"></div>
+          <h5>母线短路电流校核 / 电压偏差校核 / 谐波校核 (§5.2-5.4)</h5>
+          <div id="bearingBusResults" class="topo-table-wrap"></div>
+          <h5>承载力综合评估等级汇总 (附录C)</h5>
+          <div id="bearingSummaryTable" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group hosting -->
+        <div class="result-group" data-result-group="timeSeries">
+        <div class="topo-section" id="tspfResultsSection" style="display:none">
+          <h4>时序潮流结果</h4>
+          <div id="tspfSummary" class="results-summary"></div>
+          <div id="tspfGenChart" class="tspf-chart"></div>
+          <div id="tspfLoadChart" class="tspf-chart"></div>
+          <div id="tspfVoltChart" class="tspf-chart"></div>
+          <div id="tspfVoltHeatmap" class="tspf-chart"></div>
+          <div id="tspfLossChart" class="tspf-chart"></div>
+          <div id="tspfESSChart" class="tspf-chart"></div>
+          <div id="tspfESSDispatchChart" class="tspf-chart"></div>
+          <div id="tspfPVChart" class="tspf-chart"></div>
+          <div id="tspfDCChart" class="tspf-chart"></div>
+        </div>
+        </div><!-- /result-group timeSeries -->
+        <div class="result-group" data-result-group="reliability">
+          <div class="topo-section">
+            <h4>可靠性分析结果</h4>
+            <div id="reliabilityResults" class="topo-table-wrap">
+              <p class="empty-hint">运行可靠性分析后查看结果（后端接口 TODO）</p>
+            </div>
+          </div>
+        </div><!-- /result-group reliability -->
+        <div class="result-group" data-result-group="resilience">
+          <div class="topo-section">
+            <h4>弹性评估结果</h4>
+            <div id="resilienceResults" class="topo-table-wrap">
+              <p class="empty-hint">运行弹性评估后查看结果（后端接口 TODO）</p>
+            </div>
+          </div>
+        </div><!-- /result-group resilience -->
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- ===== Bottom Console ===== -->
+<div id="console">
+  <div class="console-header">
+    <span>控制台</span>
+    <button id="btnClearConsole" class="btn btn-xs">清除</button>
+  </div>
+  <div id="consoleLog"></div>
+</div>
+
+<!-- Short Circuit Dialog (only fault bus location; fault type & c-factor live in sub-toolbar) -->
+<div id="scDialog" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>故障点位设置</h3>
+    <p style="opacity:.7;font-size:12px;margin:6px 0 12px">短路类型与电压调节系数请在功能栏中设置。</p>
+    <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0"/></label>
+    <input type="hidden" id="scFaultType" value="ThreePhase"/>
+    <input type="hidden" id="scCFactor" value="1.1"/>
+    <div class="modal-actions">
+      <button id="btnScRun" class="btn btn-warn">确定</button>
+      <button id="btnScCancel" class="btn">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bearing Capacity Assessment Dialog -->
+<div id="bcDialog" class="modal" style="display:none">
+  <div class="modal-content">
+    <h3>承载力评估设置 (DL/T 2041-2019)</h3>
+    <label>设备运行裕度系数 k<sub>r</sub>: <input type="number" id="bcKr" value="0.8" step="0.05" min="0" max="1"/></label>
+    <label>正电压偏差限值 ΔU<sub>H</sub> (%): <input type="number" id="bcDeltaUH" value="7" step="0.5" min="0"/></label>
+    <label>负电压偏差限值 ΔU<sub>L</sub> (%): <input type="number" id="bcDeltaUL" value="7" step="0.5" min="0"/></label>
+    <label>谐波电压总畸变率限值 THD (%): <input type="number" id="bcThdLimit" value="5" step="0.5" min="0"/></label>
+    <div class="modal-actions">
+      <button id="btnBcRun" class="btn btn-accent">运行评估</button>
+      <button id="btnBcCancel" class="btn">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Time-Series PF Dialog -->
+<div id="tspfDialog" class="modal" style="display:none">
+  <div class="modal-content" style="min-width:420px">
+    <h3>时序潮流设置</h3>
+    <label>时间步数:
+      <select id="tspfNumSteps">
+        <option value="4">4 步 (快速测试)</option>
+        <option value="12">12 步 (半天)</option>
+        <option value="24" selected>24 步 (1天)</option>
+        <option value="48">48 步 (2天)</option>
+      </select>
+    </label>
+    <label>负荷曲线:
+      <select id="tspfProfileSource">
+        <option value="auto" selected>自动生成 (典型日曲线)</option>
+        <option value="import">导入CSV文件</option>
+      </select>
+    </label>
+    <div id="tspfImportRow" style="display:none">
+      <label>CSV文件 (每列一个profile，首行为名称):
+        <input type="file" id="tspfCsvFile" accept=".csv"/>
+      </label>
+    </div>
+    <label style="flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="tspfSkipUC" style="width:auto;min-width:auto"/>
+      跳过机组组合 (仅潮流)
+    </label>
+    <label style="flex-direction:row;align-items:center;gap:8px">
+      <input type="checkbox" id="tspfRunOPF" style="width:auto;min-width:auto"/>
+      启用OPF优化调度 (含光伏自适应出力调整)
+    </label>
+    <div class="modal-actions">
+      <button id="btnTspfRun" class="btn btn-accent">运行时序潮流</button>
+      <button id="btnTspfCancel" class="btn">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/components.js"></script>
+<script src="js/canvas.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

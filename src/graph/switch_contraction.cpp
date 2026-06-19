@@ -11,6 +11,7 @@
 
 #include "hacdcpf/graph/switch_contraction.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <unordered_set>

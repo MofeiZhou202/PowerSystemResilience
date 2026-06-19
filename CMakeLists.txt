@@ -6,6 +6,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Embedded dependencies (SCIP / HiGHS) declare cmake_minimum_required below the
+# floor that CMake >= 4.0 accepts. Pin a compatibility policy version so they
+# configure without each developer having to pass it on the command line
+# (where PowerShell also tends to mangle the "=3.5" argument).
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 # ── Build type defaults ───────────────────────────────────────────────────────
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING
@@ -30,6 +38,12 @@ option(HACDCPF_ENABLE_EXCEL   "Build Excel I/O   (requires OpenXLSX)"      OFF)
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
+# Embedded SCIP uses POSIX sigaction(), which the Windows/UCRT CRT does not
+# provide. Define SCIP_NO_SIGACTION so SCIP falls back to signal() there.
+# Applied before the dependency add_subdirectory so it propagates to SCIP.
+if(WIN32)
+  add_compile_definitions(SCIP_NO_SIGACTION)
+endif()
 include(cmake/Dependencies.cmake)
 
 # ── Core library ──────────────────────────────────────────────────────────────

@@ -1,0 +1,7634 @@
+#define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
+#include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#include "hacdcpf/analysis/short_circuit.hpp"
+#include "hacdcpf/power_flow/distribution_power_flow.hpp"
+#include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/power_flow/three_phase.hpp"
+#include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/network_reconfiguration/topology_analysis.hpp"
+#include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
+#include "hacdcpf/time_series/time_series_pf.hpp"
+#include "hacdcpf/time_series/annual_production_sim.hpp"
+#include "hacdcpf/time_series/lifecycle_simulation.hpp"
+#include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/power_flow/island_detector.hpp"
+
+using json = nlohmann::json;
+namespace fs = std::filesystem;
+
+namespace {
+
+struct Args {
+  std::string host{"127.0.0.1"};
+  int port{8088};
+  std::string data_dir{"../data"};
+  std::string matpower_dir{"../external_data/matpower"};
+};
+
+void usage(const char* prog) {
+  std::cerr << "Usage: " << prog
+            << " [--host <host>] [--port <port>] [--data-dir <path>] [--matpower-dir <path>]\n";
+}
+
+bool parse_args(int argc, char** argv, Args& args) {
+  for (int i = 1; i < argc; ++i) {
+    const std::string k = argv[i];
+    if (k == "--host") {
+      if (i + 1 >= argc) return false;
+      args.host = argv[++i];
+    } else if (k == "--port") {
+      if (i + 1 >= argc) return false;
+      args.port = std::atoi(argv[++i]);
+      if (args.port <= 0) return false;
+    } else if (k == "--data-dir") {
+      if (i + 1 >= argc) return false;
+      args.data_dir = argv[++i];
+    } else if (k == "--matpower-dir") {
+      if (i + 1 >= argc) return false;
+      args.matpower_dir = argv[++i];
+    } else if (k == "--help" || k == "-h") {
+      usage(argv[0]);
+      return false;
+    } else {
+      std::cerr << "Unknown arg: " << k << "\n";
+      return false;
+    }
+  }
+  return true;
+}
+
+// ---- global session state ----
+struct Session {
+  std::mutex mu;
+  std::optional<hacdcpf::HybridPowerSystem> current_system;
+  std::string current_name{"(none)"};
+  hacdcpf::TimeSeriesData ts_data;     // time-series profile store
+  std::atomic<bool> busy{false};       // true while a heavy computation runs
+  std::atomic<bool> cancel{false};     // set by cancel endpoint
+  // Last power flow result for carbon analysis reuse
+  std::optional<hacdcpf::PowerFlowResult> last_pf_result;
+  std::string last_pf_method;
+  // Persistent time-series binding spec — re-applied at every run_ts_pf call.
+  // Survives system replacement (e.g. canvas resync via load_json_string)
+  // so per-load profile mappings are not lost between set_ts_config and run.
+  struct TsBindingSpec {
+    bool valid = false;
+    std::vector<std::pair<int,int>> map_by_load_index; // (load_index, profile_id)
+    std::vector<std::pair<int,int>> map_by_bus;        // (bus, profile_id)
+    int assign_all_loads_to = -1;
+    int assign_all_pv_to = -1;
+  };
+  TsBindingSpec ts_binding;
+};
+Session g_session;
+
+// Build default 24-h (or N-step) scaling profiles
+hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
+  hacdcpf::TimeSeriesData ts;
+  ts.num_steps = steps;
+  ts.step_duration_hr = 1.0;
+  // Profile 0: daily load curve
+  hacdcpf::TimeSeriesProfile lp; lp.id = 0; lp.name = "daily_load";
+  if (steps == 24) {
+    lp.values = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
+                 0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
+  } else { lp.values.assign(steps, 0.80); }
+  ts.profiles.push_back(lp);
+  // Profile 1: wind
+  hacdcpf::TimeSeriesProfile wp; wp.id = 1; wp.name = "wind_daily";
+  if (steps == 24) {
+    wp.values = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
+                 0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
+  } else { wp.values.assign(steps, 0.40); }
+  ts.profiles.push_back(wp);
+  // Profile 2: solar
+  hacdcpf::TimeSeriesProfile sp; sp.id = 2; sp.name = "solar_daily";
+  if (steps == 24) {
+    sp.values = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
+                 0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
+  } else { sp.values.assign(steps, 0.30); }
+  ts.profiles.push_back(sp);
+  return ts;
+}
+
+// Build annual time-series data with seasonal variation
+hacdcpf::TimeSeriesData make_annual_ts_data(double step_hr = 6.0) {
+  const int steps_per_day = static_cast<int>(24.0 / step_hr);
+  const int total_steps = 365 * steps_per_day;
+  hacdcpf::TimeSeriesData ts;
+  ts.num_steps = total_steps;
+  ts.step_duration_hr = step_hr;
+  // Monthly seasonal factors: J,F,M,A,M,J,J,A,S,O,N,D
+  const double load_season[] = {1.05,1.02,0.95,0.88,0.85,0.92,1.10,1.12,1.00,0.90,0.95,1.08};
+  const double wind_season[] = {1.10,1.05,0.95,0.80,0.65,0.50,0.45,0.50,0.70,0.90,1.00,1.10};
+  const double sol_season[]  = {0.65,0.75,0.90,1.05,1.15,1.20,1.18,1.10,0.95,0.80,0.65,0.55};
+  // 24-h daily templates
+  const double load_daily[] = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
+                               0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
+  const double wind_daily[] = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
+                               0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
+  const double sol_daily[]  = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
+                               0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
+  // Month day counts
+  const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  auto make_profile = [&](int id, const char* name, const double* daily,
+                          const double* season) {
+    hacdcpf::TimeSeriesProfile p; p.id = id; p.name = name;
+    p.values.resize(static_cast<size_t>(total_steps));
+    int idx = 0;
+    for (int m = 0; m < 12; ++m) {
+      for (int d = 0; d < mdays[m]; ++d) {
+        for (int s = 0; s < steps_per_day; ++s) {
+          int hour = static_cast<int>(s * step_hr);
+          if (hour >= 24) hour = 23;
+          double v = daily[hour] * season[m];
+          if (v < 0.0) v = 0.0;
+          if (v > 1.5) v = 1.5;
+          p.values[static_cast<size_t>(idx++)] = v;
+        }
+      }
+    }
+    return p;
+  };
+  ts.profiles.push_back(make_profile(0, "annual_load", load_daily, load_season));
+  ts.profiles.push_back(make_profile(1, "annual_wind", wind_daily, wind_season));
+  ts.profiles.push_back(make_profile(2, "annual_solar", sol_daily, sol_season));
+  return ts;
+}
+
+std::vector<std::string> case_names() {
+  return {
+      "ieee14_acdc",
+      "ieee24_3area_acdc",
+      "ieee24_3area_acdc_expanded",
+      "ieee118_acdc",
+      "case33bw_acdc",
+      "case33mg_acdc",
+      "case69_acdc",
+      "case300_acdc",
+      "case2000_acdc",
+      "demo_multizone_acdc",
+      "dist33_microgrid_der",
+      "comprehensive_hybrid_acdc",
+      "market_3bus_toy",
+      "market_5bus_acdc_toy",
+  };
+}
+
+hacdcpf::HybridPowerSystem build_case(const std::string& name) {
+  using namespace hacdcpf::io;
+  if (name == "ieee14_acdc") return build_ieee14_acdc();
+  if (name == "ieee24_3area_acdc") return build_ieee24_3area_acdc();
+  if (name == "ieee24_3area_acdc_expanded") return build_ieee24_3area_acdc_expanded();
+  if (name == "ieee118_acdc") return build_ieee118_acdc();
+  if (name == "case33bw_acdc") return build_case33bw_acdc();
+  if (name == "case33mg_acdc") return build_case33mg_acdc();
+  if (name == "case69_acdc") return build_case69_acdc();
+  if (name == "case300_acdc") return build_case300_acdc();
+  if (name == "case2000_acdc") return build_case2000_acdc();
+  if (name == "demo_multizone_acdc") return build_demo_multizone_acdc();
+  if (name == "dist33_microgrid_der") return build_dist33_microgrid_der();
+  if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
+  if (name == "market_3bus_toy") return build_market_3bus_toy();
+  if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
+  throw std::runtime_error("Unsupported case: " + name);
+}
+
+hacdcpf::HybridPowerSystem system_from_request(const json& req) {
+  if (req.contains("system_json") && req["system_json"].is_string()) {
+    return hacdcpf::io::from_json(req["system_json"].get<std::string>());
+  }
+  std::string name = "ieee24_3area_acdc_expanded";
+  if (req.contains("case") && req["case"].is_string()) {
+    name = req["case"].get<std::string>();
+  }
+  return build_case(name);
+}
+
+// List MATPOWER .m files in a given directory
+std::vector<std::string> list_matpower_files(const std::string& dir) {
+  std::vector<std::string> result;
+  if (!fs::exists(dir) || !fs::is_directory(dir)) return result;
+  for (const auto& entry : fs::directory_iterator(dir)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".m") {
+      result.push_back(entry.path().filename().string());
+    }
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+// Build a component-level summary of a HybridPowerSystem
+json system_summary(const hacdcpf::HybridPowerSystem& sys) {
+  const json root = json::parse(hacdcpf::io::to_json(sys, 2));
+  json s;
+  s["name"] = sys.name;
+  s["base_mva"] = sys.base_mva;
+
+  auto get_nested_array = [&root](const std::vector<std::string>& path) -> json {
+    const json* cur = &root;
+    for (const auto& k : path) {
+      if (!cur->is_object() || !cur->contains(k)) return json::array();
+      cur = &((*cur)[k]);
+    }
+    return cur->is_array() ? *cur : json::array();
+  };
+
+  const std::vector<std::pair<std::string, std::vector<std::string>>> comp_map = {
+      {"ac_buses", {"ac", "buses"}},
+      {"ac_branches", {"ac", "branches"}},
+      {"generators", {"ac", "generators"}},
+      {"static_generators", {"ac", "static_generators"}},
+      {"loads", {"ac", "loads"}},
+      {"flexible_loads", {"ac", "flexible_loads"}},
+      {"asymmetric_loads", {"ac", "asymmetric_loads"}},
+      {"shunts", {"ac", "shunts"}},
+      {"storage", {"ac", "storage"}},
+      {"renewable_gens", {"ac", "renewable_gens"}},
+      {"pv_systems", {"ac", "pv_systems"}},
+      {"external_grids", {"ac", "external_grids"}},
+      {"transformers_2w", {"ac", "transformers_2w"}},
+      {"transformers_3w", {"ac", "transformers_3w"}},
+      {"switches", {"ac", "switches"}},
+      {"circuit_breakers", {"ac", "circuit_breakers"}},
+      {"charging_stations", {"ac", "charging_stations"}},
+      {"chargers", {"ac", "chargers"}},
+      {"motors", {"ac", "motors"}},
+      {"dc_buses", {"dc", "buses"}},
+      {"dc_branches", {"dc", "branches"}},
+      {"dc_loads", {"dc", "loads"}},
+      {"dc_storage", {"dc", "storage"}},
+      {"dc_static_generators", {"dc", "static_generators"}},
+      {"dc_native_static_generators", {"dc", "dc_static_generators"}},
+      {"pv_arrays", {"dc", "pv_arrays"}},
+      {"dc_circuit_breakers", {"dc", "dc_circuit_breakers"}},
+      {"vsc_converters", {"vsc_converters"}},
+      {"dcdc_converters", {"dcdc_converters"}},
+      {"energy_routers", {"energy_routers"}},
+      {"mobile_storage", {"mobile_storage"}},
+      {"vpps", {"vpps"}},
+      {"microgrids", {"microgrids"}},
+      {"tp_buses", {"three_phase_ac", "buses"}},
+      {"tp_lines", {"three_phase_ac", "lines"}},
+      {"tp_transformers", {"three_phase_ac", "transformers"}},
+      {"tp_loads", {"three_phase_ac", "loads"}},
+      {"tp_generators", {"three_phase_ac", "generators"}},
+      {"tp_external_grids", {"three_phase_ac", "external_grids"}},
+  };
+
+  json counts = json::object();
+  for (const auto& [k, path] : comp_map) {
+    s[k] = get_nested_array(path);
+    counts[k] = s[k].size();
+  }
+  s["counts"] = counts;
+  return s;
+}
+
+std::string make_index_html() {
+  return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Hybrid AC/DC Planning Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+:root {
+  --bg: #f3efe7; --paper: #fffdf8; --ink: #17252a;
+  --accent: #0b6e4f; --accent-2: #2c8c99; --muted: #5a666a;
+  --warn: #b5651d; --line: #d6d0c4; --danger: #c34d4d;
+}
+*{box-sizing:border-box;}
+body{margin:0;font-family:"Space Grotesk",sans-serif;color:var(--ink);
+  background:radial-gradient(circle at 10% 10%,rgba(44,140,153,0.14),transparent 35%),
+    radial-gradient(circle at 90% 80%,rgba(11,110,79,0.16),transparent 30%),
+    linear-gradient(165deg,#f8f3eb 0%,#ece7de 100%);min-height:100vh;}
+header{padding:16px 28px;border-bottom:1px solid var(--line);
+  backdrop-filter:blur(4px);background:rgba(255,253,248,0.85);
+  position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:18px;}
+header h1{margin:0;font-size:clamp(1rem,2vw,1.5rem);letter-spacing:.03em;}
+header .subtitle{color:var(--muted);font-size:.85rem;}
+header .spacer{flex:1;}
+.badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:.75rem;
+  font-weight:600;letter-spacing:.04em;}
+.badge-green{background:#d9f2e6;color:#0b6e4f;}
+.badge-orange{background:#fde8d0;color:#b5651d;}
+.container{width:min(1440px,97vw);margin:14px auto 28px;}
+.top-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;}
+.top-bar select,.top-bar input[type=file]{border-radius:10px;border:1px solid #cfc7ba;
+  padding:7px 10px;font:inherit;background:#fff;min-width:160px;}
+.top-bar .sep{width:1px;height:28px;background:var(--line);}
+.grid{display:grid;grid-template-columns:1fr;gap:14px;}
+.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;
+  box-shadow:0 10px 28px rgba(23,37,42,.08);}
+.tabs{display:flex;gap:6px;padding:8px 10px;border-bottom:1px solid var(--line);
+  overflow-x:auto;flex-wrap:nowrap;}
+.tab{padding:8px 14px;border-radius:8px;border:1px solid var(--line);
+  cursor:pointer;background:#fdf9f1;font-size:.85rem;white-space:nowrap;
+  transition:all .15s ease;}
+.tab.active{background:var(--accent-2);color:#fff;border-color:var(--accent-2);}
+.tab:hover:not(.active){background:#f0ede5;}
+.tabpane{display:none;padding:14px;animation:fadeIn .25s ease;}
+.tabpane.active{display:block;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
+.counts{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
+.count-chip{background:#fff;border:1px solid var(--line);border-radius:8px;
+  padding:5px 12px;font-size:.8rem;display:flex;align-items:center;gap:6px;}
+.count-chip .n{font-weight:700;color:var(--accent);font-size:.95rem;}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));
+  gap:8px;margin-bottom:10px;}
+.kpi{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 10px;}
+.kpi .v{font-size:1.1rem;font-weight:700;color:#15353a;}
+.kpi .l{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
+.stg{padding:4px 10px;border-radius:12px;font-size:.78rem;font-weight:600;background:#e9ecef;color:#6c757d;}
+.stg.done{background:#d4edda;color:#155724;} .stg.active{background:#cce5ff;color:#004085;animation:pulse 1s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.dtable-wrap{max-height:420px;overflow:auto;border:1px solid var(--line);
+  border-radius:10px;margin-bottom:10px;}
+table.dtable{width:100%;border-collapse:collapse;font-size:.8rem;}
+table.dtable th{position:sticky;top:0;background:#f4f1ea;border-bottom:2px solid var(--line);
+  padding:7px 8px;text-align:left;font-weight:600;white-space:nowrap;z-index:2;}
+table.dtable td{padding:5px 8px;border-bottom:1px solid #eae6de;white-space:nowrap;}
+table.dtable tr:hover{background:#f9f6ef;}
+table.dtable input,table.dtable select{border:1px solid transparent;background:transparent;
+  font:inherit;padding:2px 4px;width:100%;border-radius:4px;min-width:60px;}
+table.dtable input:focus,table.dtable select:focus{border-color:var(--accent-2);
+  background:#fff;outline:none;}
+table.dtable .row-del{cursor:pointer;color:var(--danger);font-size:.9rem;
+  background:none;border:none;width:auto;min-width:auto;padding:2px;}
+.chart{height:360px;border:1px solid var(--line);border-radius:10px;
+  background:#fff;margin-top:8px;}
+button,.btn{border-radius:10px;border:none;padding:8px 14px;font:inherit;
+  cursor:pointer;font-weight:600;font-size:.85rem;transition:all .15s ease;}
+.btn-primary{background:var(--accent);color:#fff;}
+.btn-primary:hover{box-shadow:0 6px 14px rgba(11,110,79,.25);transform:translateY(-1px);}
+.btn-secondary{background:#fff;color:var(--accent);border:1px solid var(--accent);}
+.btn-secondary:hover{background:#f0fdf6;}
+.btn-accent{background:var(--accent-2);color:#fff;}
+.btn-accent:hover{box-shadow:0 6px 14px rgba(44,140,153,.25);}
+.btn-danger{background:var(--danger);color:#fff;}
+.btn-sm{padding:5px 10px;font-size:.78rem;}
+.btn-group{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;}
+.status{margin-top:8px;border:1px dashed #bcc5bf;border-radius:9px;padding:8px 10px;
+  font-size:.85rem;color:#2d3f43;background:#fbfaf6;}
+.mono{font-family:"IBM Plex Mono",monospace;font-size:.78rem;}
+label{display:block;font-size:.82rem;margin:6px 0 4px;color:#294045;}
+select,input[type=number]{width:100%;border-radius:8px;border:1px solid #cfc7ba;
+  padding:7px 8px;font:inherit;background:#fff;}
+textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;
+  min-height:100px;resize:vertical;background:#fff;}
+.ctrl-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hybrid AC/DC Planning Studio</h1>
+  <span class="subtitle">Power Flow &bull; OPF &bull; UC &bull; Carbon &bull; Reconfig &bull; Annual Sim &bull; Dashboard</span>
+  <span class="spacer"></span>
+  <span id="sysLabel" class="badge badge-orange">No system loaded</span>
+</header>
+
+<div class="container">
+  <!-- Top bar: case loading & file I/O -->
+  <div class="top-bar">
+    <select id="builtinSelect" title="Built-in case"></select>
+    <button class="btn btn-primary btn-sm" id="loadBuiltinBtn">Load Built-in</button>
+    <span class="sep"></span>
+    <select id="matpowerSelect" title="MATPOWER case file"></select>
+    <button class="btn btn-accent btn-sm" id="loadMatpowerBtn">Load MATPOWER</button>
+    <span class="sep"></span>
+    <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
+    <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
+    <span class="sep"></span>
+    <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
+    <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
+  </div>
+
+  <!-- Component counts -->
+  <div id="countsBar" class="counts"></div>
+
+  <!-- Main panel -->
+  <div class="grid">
+    <div class="panel">
+      <div class="tabs">
+        <div class="tab active" data-tab="builderPane">Case Builder</div>
+        <div class="tab" data-tab="pfPane">Power Flow</div>
+        <div class="tab" data-tab="opfPane">OPF</div>
+        <div class="tab" data-tab="scPane">Short Circuit</div>
+        <div class="tab" data-tab="jsonPane">JSON Editor</div>
+        <div class="tab" data-tab="tsPane">Time-Series PF</div>
+        <div class="tab" data-tab="ucPane">Unit Commitment</div>
+        <div class="tab" data-tab="marketPane">Market Simulation</div>
+        <div class="tab" data-tab="carbonPane">Carbon Flow</div>
+        <div class="tab" data-tab="reliabilityPane">Reliability</div>
+        <div class="tab" data-tab="resiliencePane">Resilience</div>
+        <div class="tab" data-tab="rpoPane">RPO (MINLP)</div>
+        <div class="tab" data-tab="reconfigPane">Net. Reconfig</div>
+        <div class="tab" data-tab="annualPane">Annual Sim</div>
+        <div class="tab" data-tab="lifecyclePane">Lifecycle Sim</div>
+        <div class="tab" data-tab="dashPane">Dashboard</div>
+      </div>
+
+      <!-- ======================== CASE BUILDER TAB ======================== -->
+      <section id="builderPane" class="tabpane active">
+        <div class="tabs" id="compTabs" style="border:none;padding:0 0 8px 0;"></div>
+        <div class="btn-group">
+          <button class="btn btn-primary btn-sm" id="addRowBtn">+ Add Row</button>
+          <button class="btn btn-accent btn-sm" id="commitBtn">Commit Changes to System</button>
+        </div>
+        <div id="compTableArea"></div>
+      </section>
+
+      <!-- ======================== POWER FLOW TAB ========================= -->
+      <section id="pfPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Method</label>
+            <select id="pfMethod">
+              <option value="ac_newton">AC Newton-Raphson</option>
+              <option value="dc">DC Power Flow</option>
+              <option value="hybrid_linearized">Hybrid AC/DC Linearized</option>
+              <option value="fdpf">Fast-Decoupled PF</option>
+              <option value="adaptive">Adaptive PF</option>
+              <option value="islanded">Islanded PF</option>
+              <option value="distributed_slack">Distributed Slack PF</option>
+              <option value="three_phase">Three-Phase PF</option>
+            </select>
+          </div>
+          <div><label>Max iterations</label><input id="pfMaxIter" type="number" min="5" max="500" value="80"/></div>
+          <div><label>Tolerance</label><input id="pfTol" type="number" step="1e-8" value="1e-8"/></div>
+          <div><label>FDPF Max Iter</label><input id="pfFdpfMaxIter" type="number" min="10" max="5000" value="1000"/></div>
+        </div>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label><input type="checkbox" id="pfPvPq" checked style="width:auto;min-width:auto;"/> PV-PQ Conversion</label></div>
+          <div><label><input type="checkbox" id="pfAutoSwing" checked style="width:auto;min-width:auto;"/> Auto Swing Selection</label></div>
+          <div><label><input type="checkbox" id="pfConvSwitch" checked style="width:auto;min-width:auto;"/> Converter Mode Switching</label></div>
+          <div><label><input type="checkbox" id="pfVerbose" style="width:auto;min-width:auto;"/> Verbose</label></div>
+          <div><label>PV Q Hysteresis (pu)</label><input id="pfPvQHyst" type="number" step="0.001" value="0.01" style="width:90px;"/></div>
+          <div><label>Max ΔVa (rad)</label><input id="pfMaxDVa" type="number" step="0.1" value="1.5" style="width:80px;"/></div>
+          <div><label>Max ΔVm (pu)</label><input id="pfMaxDVm" type="number" step="0.1" value="0.5" style="width:80px;"/></div>
+          <div><label>Loss Model</label>
+            <select id="pfLossModel">
+              <option value="linear">Linear</option>
+              <option value="current_based">Current-Based</option>
+            </select>
+          </div>
+          <div><label>Display Unit</label>
+            <select id="pfDisplayUnit">
+              <option value="MW" selected>MW</option>
+              <option value="kW">kW</option>
+              <option value="W">W</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runPfBtn">Run Selected Method</button>
+          <button class="btn btn-accent" id="runPfCompareBtn">Compare All Methods</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="pfConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="pfIter" class="v">-</div><div class="l">Iterations</div></div>
+          <div class="kpi"><div id="pfRes" class="v">-</div><div class="l">Residual</div></div>
+          <div class="kpi"><div id="pfNBus" class="v">-</div><div class="l">AC Buses</div></div>
+        </div>
+        <div id="pfVoltChart" class="chart"></div>
+        <div id="pfDcVoltChart" class="chart"></div>
+        <div id="pfConverterChart" class="chart"></div>
+        <div id="pfBranchChart" class="chart"></div>
+        <div id="pfCompareChart" class="chart"></div>
+        <div id="pfCompareTable" class="status mono"></div>
+        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map</h3>
+        <div id="pfGeoMap" class="chart" style="height:500px;"></div>
+      </section>
+
+      <!-- ========================== OPF TAB ============================== -->
+      <section id="opfPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runAcOpfBtn">Run AC OPF</button>
+          <button class="btn btn-accent" id="runDcOpfBtn">Run DC OPF</button>
+          <button class="btn" id="runParityOpfBtn" style="background:#6a0dad;color:#fff;">Run Parity OPF</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="opfType" class="v">-</div><div class="l">Solver</div></div>
+          <div class="kpi"><div id="opfConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="opfObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="opfIter" class="v">-</div><div class="l">Iterations</div></div>
+        </div>
+        <div id="opfDispatchChart" class="chart"></div>
+        <div id="opfAuxChart" class="chart"></div>
+        <div id="opfLmpChart" class="chart"></div>
+        <div id="opfDcVoltChart" class="chart"></div>
+        <div id="opfConverterChart" class="chart"></div>
+      </section>
+
+      <!-- ========================== SC TAB =============================== -->
+      <section id="scPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Fault type</label>
+            <select id="scFaultType">
+              <option value="ThreePhase">Three-Phase</option>
+              <option value="SinglePhaseGround">Single-Phase-Ground</option>
+              <option value="TwoPhase">Two-Phase</option>
+              <option value="TwoPhaseGround">Two-Phase-Ground</option>
+            </select>
+          </div>
+          <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
+          <div><label>Fault Bus (blank=all)</label><input id="scFaultBus" type="text" placeholder="e.g. 0,3,5 or blank" style="width:130px;"/></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runScBtn">Run Short Circuit (All Buses)</button>
+          <button class="btn btn-accent" id="runScDetailedBtn">Run Detailed SC (Selected Buses)</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="scFault" class="v">-</div><div class="l">Fault Type</div></div>
+          <div class="kpi"><div id="scBuses" class="v">-</div><div class="l">Buses</div></div>
+          <div class="kpi"><div id="scMaxIk" class="v">-</div><div class="l">Max Ik" kA</div></div>
+          <div class="kpi"><div id="scMinIk" class="v">-</div><div class="l">Min Ik" kA</div></div>
+        </div>
+        <div id="scIkChart" class="chart"></div>
+        <div id="scSkChart" class="chart"></div>
+        <div id="scDetailedChart" class="chart"></div>
+        <div id="scContribChart" class="chart"></div>
+        <div id="scVremainChart" class="chart"></div>
+      </section>
+
+      <!-- ======================== JSON EDITOR TAB ======================== -->
+      <section id="jsonPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary btn-sm" id="applyJsonBtn">Apply JSON to System</button>
+          <button class="btn btn-secondary btn-sm" id="refreshJsonBtn">Refresh from System</button>
+        </div>
+        <textarea id="jsonEditor" style="min-height:500px;" placeholder="Load a case first..."></textarea>
+      </section>
+
+      <!-- =================== RPO (MINLP) TAB ========================= -->
+      <section id="rpoPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Objective</label>
+            <select id="rpoObjective">
+              <option value="voltage" selected>Minimize Voltage Deviation</option>
+              <option value="loss">Minimize Active Power Loss</option>
+              <option value="combined">Combined (Loss + V-dev)</option>
+            </select>
+          </div>
+          <div><label>MIP Gap (%)</label><input id="rpoMipGap" type="number" step="0.001" value="0.01"></div>
+          <div><label>Time Limit (s)</label><input id="rpoTimeLimit" type="number" min="10" max="600" value="120"></div>
+          <div><label>V-dev weight</label><input id="rpoVdevWeight" type="number" step="0.1" value="1.0"></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runRPOBtn">Run RPO (Branch &amp; Bound + IPM)</button>
+          <button class="btn btn-secondary" id="runRPORelaxBtn">Run Continuous Relaxation Only</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="rpoConv" class="v">-</div><div class="l">Converged</div></div>
+          <div class="kpi"><div id="rpoObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="rpoGap" class="v">-</div><div class="l">MIP Gap %</div></div>
+          <div class="kpi"><div id="rpoNodes" class="v">-</div><div class="l">B&amp;B Nodes</div></div>
+          <div class="kpi"><div id="rpoLPSolves" class="v">-</div><div class="l">NLP Solves</div></div>
+          <div class="kpi"><div id="rpoTime" class="v">-</div><div class="l">Runtime (s)</div></div>
+          <div class="kpi"><div id="rpoLossBefore" class="v">-</div><div class="l">Loss Before MW</div></div>
+          <div class="kpi"><div id="rpoLossAfter" class="v">-</div><div class="l">Loss After MW</div></div>
+          <div class="kpi"><div id="rpoVdevBefore" class="v">-</div><div class="l">Max |V-1| Before</div></div>
+          <div class="kpi"><div id="rpoVdevAfter" class="v">-</div><div class="l">Max |V-1| After</div></div>
+          <div class="kpi"><div id="rpoStatus" class="v" style="font-size:11px;">-</div><div class="l">Status</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="rpoVoltChart" class="chart"></div>
+          <div id="rpoQgChart" class="chart"></div>
+          <div id="rpoPgChart" class="chart"></div>
+          <div id="rpoVaChart" class="chart"></div>
+          <div id="rpoTapChart" class="chart"></div>
+          <div id="rpoShuntChart" class="chart"></div>
+        </div>
+        <div id="rpoDetailsChart" class="chart" style="height:300px;margin-top:10px;"></div>
+        <div id="rpoResultTable" class="status mono" style="margin-top:8px;white-space:pre;overflow-x:auto;"></div>
+      </section>
+
+      <!-- =================== TIME-SERIES PF TAB ======================= -->
+      <section id="tsPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="tsNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>Pipeline options</label>
+            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsSkipUC" style="width:auto;min-width:auto;"> Skip UC (PF only)</label>
+            <label style="font-size:.82rem;margin:2px 0;"><input type="checkbox" id="tsRunOPF" style="width:auto;min-width:auto;"> Include OPF validation</label>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runTsPfBtn">Run Time-Series PF</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="tsSteps" class="v">-</div><div class="l">Steps</div></div>
+          <div class="kpi"><div id="tsConv" class="v">-</div><div class="l">PF Converged</div></div>
+          <div class="kpi"><div id="tsOPFConv" class="v">-</div><div class="l">OPF Converged</div></div>
+          <div class="kpi"><div id="tsCost" class="v">-</div><div class="l">Total Gen Cost $</div></div>
+        </div>
+        <div id="tsGenDispatchChart" class="chart"></div>
+        <div id="tsVoltChart" class="chart"></div>
+        <div id="tsESSChart" class="chart"></div>
+      </section>
+
+      <!-- =================== UNIT COMMITMENT TAB ====================== -->
+      <section id="ucPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="ucNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>MILP Solver</label>
+            <select id="ucSolverChoice">
+              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
+              <option value="native">Native Branch &amp; Cut</option>
+              <option value="highs">HiGHS</option>
+              <option value="gurobi">Gurobi</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runUCBtn">Run Unit Commitment</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="ucFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="ucCost" class="v">-</div><div class="l">Total Cost $</div></div>
+          <div class="kpi"><div id="ucNGen" class="v">-</div><div class="l">Generators</div></div>
+          <div class="kpi"><div id="ucNESS" class="v">-</div><div class="l">Storage Units</div></div>
+        </div>
+        <div id="ucDispatchChart" class="chart"></div>
+        <div id="ucCommitChart" class="chart"></div>
+        <div id="ucESSSOCChart" class="chart"></div>
+      </section>
+
+      <!-- =================== MARKET SIMULATION TAB ==================== -->
+      <section id="marketPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="mktNumSteps">
+              <option value="4">4 steps (quick test)</option>
+              <option value="24" selected>24 hours (1 day)</option>
+              <option value="48">48 hours (2 days)</option>
+            </select>
+          </div>
+          <div><label>MILP Solver</label>
+            <select id="milpSolverChoice">
+              <option value="auto" selected>Auto (Gurobi &gt; HiGHS &gt; Native)</option>
+              <option value="native">Native Branch &amp; Cut</option>
+              <option value="highs">HiGHS</option>
+              <option value="gurobi">Gurobi</option>
+            </select>
+          </div>
+          <div><label><input type="checkbox" id="scenarioToggle"> Enable Scenario Generation</label></div>
+        </div>
+        <div id="scenarioConfigPanel" style="display:none;margin-bottom:10px;padding:8px;background:#f0f4f8;border-radius:6px;">
+          <div class="ctrl-row">
+            <div><label>Periods/Day</label><input type="number" id="scenPeriodsPerDay" value="96" style="width:70px;"></div>
+            <div><label>Period (min)</label><input type="number" id="scenPeriodLen" value="15" step="1" style="width:70px;"></div>
+            <div><label>Load Noise</label><input type="number" id="scenLoadNoise" value="0.05" step="0.01" style="width:70px;"></div>
+            <div><label>Wind Err</label><input type="number" id="scenWindErr" value="0.20" step="0.01" style="width:70px;"></div>
+            <div><label>Solar Err</label><input type="number" id="scenSolarErr" value="0.15" step="0.01" style="width:70px;"></div>
+            <div><label>Seed (0=rand)</label><input type="number" id="scenSeed" value="42" style="width:70px;"></div>
+            <div><label><input type="checkbox" id="scenWorkday" checked> Workday</label></div>
+          </div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-accent" id="runMarketBtn">Run Market Clearing (§2 Pipeline)</button>
+        </div>
+        <!-- §2 Parameters (expandable) -->
+        <details style="margin:8px 0;padding:8px;background:#f0f4f8;border-radius:6px;">
+          <summary style="cursor:pointer;font-weight:600;font-size:13px;">§2 Market Parameters (click to expand)</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>§2.2 Bid Segments</label><input type="number" id="s22BidSegs" value="3" min="1" max="10" style="width:55px;"></div>
+            <div><label>§2.2 Price Cap (¥/MWh)</label><input type="number" id="s22PriceCap" value="1500" style="width:75px;"></div>
+            <div><label>§2.2 Price Floor (¥/MWh)</label><input type="number" id="s22PriceFloor" value="0" style="width:70px;"></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.4 PTDF Threshold</label><input type="number" id="s24PtdfThresh" value="0.05" step="0.01" style="width:65px;"></div>
+            <div><label>§2.6 MIP Gap</label><input type="number" id="s26MipGap" value="0.0001" step="0.0001" style="width:75px;"></div>
+            <div><label>§2.6 Time Limit (s)</label><input type="number" id="s26TimeLimit" value="300" style="width:70px;"></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.6 LMP Delta</label><input type="number" id="s26LmpDelta" value="0.10" step="0.01" style="width:65px;"></div>
+            <div><label>§2.8 N-1 Contingencies</label><input type="number" id="s28MaxN1" value="50" style="width:65px;"></div>
+            <div><label><input type="checkbox" id="s28EnableN1" checked> §2.8 N-1 Check</label></div>
+          </div>
+          <div class="ctrl-row">
+            <div><label>§2.9 VOLL ($/MWh)</label><input type="number" id="s29VOLL" value="10000" style="width:80px;"></div>
+            <div><label>Reserve Req (%)</label><input type="number" id="s29SpinReq" value="5" step="1" style="width:55px;"></div>
+          </div>
+        </details>
+        <!-- §2 Pipeline Progress (9 stages per market_rules.pdf) -->
+        <div id="pipelineStages" style="display:none;margin:10px 0;padding:8px;background:#f8f9fa;border-radius:6px;overflow-x:auto;">
+          <div style="display:flex;gap:3px;align-items:center;flex-wrap:wrap;font-size:11px;">
+            <span id="stg1" class="stg">§2.2 Bids</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg2" class="stg">§2.3-4 Bounds</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg3" class="stg">§2.6.1 SCUC</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg4" class="stg">§2.6.2 SCED</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg5" class="stg">§2.6.3 LMP</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg6" class="stg">§2.7 ACPF</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg7" class="stg">§2.8 Security</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg8" class="stg">§2.9 Settlement</span>
+            <span style="color:#ccc;">&rarr;</span>
+            <span id="stg9" class="stg">§2.10 Results</span>
+          </div>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="mktFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="mktCost" class="v">-</div><div class="l">Total Cost $</div></div>
+          <div class="kpi"><div id="mktNGen" class="v">-</div><div class="l">Generators</div></div>
+          <div class="kpi"><div id="mktSolver" class="v">-</div><div class="l">Solver</div></div>
+          <div class="kpi"><div id="mktValidation" class="v">-</div><div class="l">Validation</div></div>
+          <div class="kpi"><div id="mktAvgLmp" class="v">-</div><div class="l">Avg LMP $/MWh</div></div>
+        </div>
+        <div id="scenarioProfileChart" class="chart"></div>
+        <div id="mktDispatchChart" class="chart"></div>
+        <div id="marketBidChart" class="chart"></div>
+        <div id="marketLmpHeatmap" class="chart"></div>
+        <div id="marketGenCoProfit" class="chart"></div>
+        <div id="mktGenCoIncomeTable" style="margin:10px 0;"></div>
+        <div id="marketPfResidualChart" class="chart"></div>
+        <div id="mktVoltageProfileChart" class="chart"></div>
+        <div id="mktReactivePowerChart" class="chart"></div>
+        <div id="mktPtdfHeatmap" class="chart"></div>
+        <div id="mktPtdfVerifyChart" class="chart"></div>
+        <div id="mktViolationPanel" style="margin:10px 0;"></div>
+        <div id="mktSecurityPanel" style="margin:10px 0;"></div>
+        <div id="marketValidationPanel" style="margin:10px 0;"></div>
+        <div class="dtable-wrap"><table class="dtable" id="marketLmpDecompTable"></table></div>
+        <h3 style="margin:1.5rem 0 0.5rem;color:var(--accent);">GIS Network Map (LMP)</h3>
+        <div id="mktGeoMap" class="chart" style="height:550px;"></div>
+      </section>
+
+      <!-- =================== CARBON FLOW TAB ========================== -->
+      <section id="carbonPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runCarbonBtn">Run Carbon Flow Analysis</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="carbonGenEmit" class="v">-</div><div class="l">Gen Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonLoadEmit" class="v">-</div><div class="l">Load Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonLossEmit" class="v">-</div><div class="l">Loss Emissions tCO&#x2082;</div></div>
+          <div class="kpi"><div id="carbonMatrix" class="v">-</div><div class="l">Matrix Solved</div></div>
+        </div>
+        <div id="carbonBusChart" class="chart"></div>
+        <div id="carbonDcBusChart" class="chart"></div>
+        <div id="carbonLoadChart" class="chart" style="height:260px;"></div>
+        <div id="carbonBranchChart" class="chart" style="height:260px;"></div>
+        <div id="carbonSankeyChart" class="chart" style="height:380px;"></div>
+      </section>
+
+      <!-- =================== NET. RECONFIGURATION TAB ================= -->
+      <section id="reconfigPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Time Steps</label>
+            <select id="rcNumSteps">
+              <option value="4" selected>4 steps (quick test)</option>
+              <option value="24">24 hours (1 day)</option>
+            </select>
+          </div>
+          <div><label>Voltage Limits</label>
+            <div style="display:flex;gap:6px;">
+              <input id="rcVmin" type="number" step=".01" value="0.95" placeholder="Vmin" style="width:80px;">
+              <input id="rcVmax" type="number" step=".01" value="1.05" placeholder="Vmax" style="width:80px;">
+            </div>
+          </div>
+          <div><label>MIP Gap</label><input id="rcMipGap" type="number" step=".005" value="0.01"></div>
+          <div><label>Max time (s)</label><input id="rcMaxTime" type="number" min="10" max="600" value="60"></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runReconfigBtn">Run Network Reconfiguration</button>
+        </div>
+        <div class="kpis">
+          <div class="kpi"><div id="rcFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="rcObj" class="v">-</div><div class="l">Objective</div></div>
+          <div class="kpi"><div id="rcACLoss" class="v">-</div><div class="l">Curtailment MW</div></div>
+          <div class="kpi"><div id="rcShed" class="v">-</div><div class="l">Branches</div></div>
+          <div class="kpi"><div id="rcSwActions" class="v">-</div><div class="l">Switch Actions</div></div>
+        </div>
+        <div id="rcLossChart" class="chart"></div>
+        <div id="rcSwitchChart" class="chart"></div>
+        <div id="rcESSChart" class="chart"></div>
+      </section>
+
+      <!-- =================== ANNUAL PRODUCTION SIM TAB ================ -->
+      <section id="annualPane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Resolution</label>
+            <select id="annualResolution">
+              <option value="6h" selected>6-hour (1460 steps)</option>
+              <option value="1h">Hourly (8760 steps)</option>
+            </select>
+          </div>
+          <div><label>Block Type</label>
+            <select id="annualBlockType">
+              <option value="monthly" selected>Monthly (12 blocks)</option>
+              <option value="weekly">Weekly (52 blocks)</option>
+            </select>
+          </div>
+          <div><label>PF Snapshot Interval</label><input id="annualSnapshotInterval" type="number" min="0" max="168" value="24"/></div>
+          <div><label><input type="checkbox" id="annualRunOPF" checked style="width:auto;min-width:auto;"/> Include OPF</label></div>
+          <div><label><input type="checkbox" id="annualCyclicSOC" checked style="width:auto;min-width:auto;"/> Cyclic SOC</label></div>
+          <div><label><input type="checkbox" id="annualSkipReplay" style="width:auto;min-width:auto;"/> Schedule Only (skip replay)</label></div>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runAnnualBtn">Run Annual Production Simulation</button>
+        </div>
+        <!-- Animation Playback Controls -->
+        <div id="annAnimControls" style="display:none;margin:12px 0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <button class="btn" id="annAnimPlayPause" style="width:80px;">&#9658; Play</button>
+            <button class="btn" id="annAnimReset" style="width:60px;">&#8634;</button>
+            <input type="range" id="annAnimSlider" min="0" max="100" value="0" style="flex:1;min-width:200px;"/>
+            <span id="annAnimTimeLabel" style="min-width:80px;font-weight:600;">Hour 0</span>
+            <select id="annAnimSpeed" style="width:100px;">
+              <option value="200">Fast</option>
+              <option value="500" selected>Medium</option>
+              <option value="1000">Slow</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="annAnimGeo" checked style="width:auto;min-width:auto;"/> GIS Map</label>
+          </div>
+        </div>
+        <div id="annGeoMap" class="chart" style="height:450px;display:none;"></div>
+        <div class="kpis">
+          <div class="kpi"><div id="annFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="annCost" class="v">-</div><div class="l">Annual Cost $</div></div>
+          <div class="kpi"><div id="annGenMWh" class="v">-</div><div class="l">Generation MWh</div></div>
+          <div class="kpi"><div id="annRenMWh" class="v">-</div><div class="l">Renewable MWh</div></div>
+          <div class="kpi"><div id="annCurtMWh" class="v">-</div><div class="l">Curtailed MWh</div></div>
+          <div class="kpi"><div id="annENSMWh" class="v">-</div><div class="l">ENS MWh</div></div>
+          <div class="kpi"><div id="annLossMWh" class="v">-</div><div class="l">Losses MWh</div></div>
+          <div class="kpi"><div id="annPFConv" class="v">-</div><div class="l">PF Converged</div></div>
+        </div>
+        <div id="annTimelineChart" class="chart"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="annMonthlyChart" class="chart" style="height:320px;"></div>
+          <div id="annMonthlyCostChart" class="chart" style="height:320px;"></div>
+          <div id="annGenStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annRenStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annStorageStatsChart" class="chart" style="height:320px;"></div>
+          <div id="annVoltHeatmap" class="chart" style="height:320px;"></div>
+        </div>
+      </section>
+
+      <!-- =================== LIFECYCLE SIM TAB ======================== -->
+      <section id="lifecyclePane" class="tabpane">
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Years</label><input id="lcNumYears" type="number" min="1" max="50" value="20"/></div>
+          <div><label>Discount Rate</label><input id="lcDiscountRate" type="number" min="0" max="0.2" step="0.01" value="0.05"/></div>
+          <div><label>Load Growth %/yr</label><input id="lcLoadGrowth" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
+          <div><label>PV Derating %/yr</label><input id="lcPVDerating" type="number" min="0" max="0.05" step="0.001" value="0.005"/></div>
+          <div><label>Cal. Degrad. %/yr</label><input id="lcCalDegrad" type="number" min="0" max="0.1" step="0.005" value="0.02"/></div>
+          <div><label>Resolution</label>
+            <select id="lcResolution">
+              <option value="6h" selected>6-hour (1460 steps)</option>
+              <option value="1h">Hourly (8760 steps)</option>
+            </select>
+          </div>
+        </div>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#9881; Capacity Scaling (Planning Parameters)</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>PV Scale</label><input id="lcPVScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>Wind Scale</label><input id="lcWindScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>BESS Power Scale</label><input id="lcBESSPowerScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>BESS Energy Scale</label><input id="lcBESSEnergyScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+            <div><label>Diesel/Gas Scale</label><input id="lcDieselScale" type="number" min="0" max="10" step="0.1" value="1.0"/></div>
+          </div>
+        </details>
+        <div class="btn-group" style="margin-bottom:10px;">
+          <button class="btn btn-primary" id="runLifecycleBtn">Run Lifecycle Simulation</button>
+        </div>
+        <details open style="margin-bottom:10px;border:1px solid var(--border);border-radius:6px;padding:8px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128202; Capacity Comparison Sweep</summary>
+          <div class="ctrl-row" style="margin-top:8px;">
+            <div><label>Sweep Parameter</label>
+              <select id="lcSweepParam">
+                <option value="pv">PV Capacity</option>
+                <option value="wind">Wind Capacity</option>
+                <option value="bess_power">BESS Power (MW)</option>
+                <option value="bess_energy" selected>BESS Energy (MWh)</option>
+                <option value="diesel">Diesel/Gas</option>
+              </select>
+            </div>
+            <div><label>Min Scale</label><input id="lcSweepMin" type="number" min="0" max="10" step="0.25" value="0.5"/></div>
+            <div><label>Max Scale</label><input id="lcSweepMax" type="number" min="0.5" max="10" step="0.25" value="3.0"/></div>
+            <div><label>Steps</label><input id="lcSweepSteps" type="number" min="3" max="20" value="6"/></div>
+          </div>
+          <div class="btn-group" style="margin-top:6px;">
+            <button class="btn" id="runCapCompareBtn" style="background:#8e44ad;color:#fff;">&#9654; Run Capacity Comparison</button>
+          </div>
+        </details>
+        <div class="kpis" id="lcKPIs">
+          <div class="kpi"><div id="lcFeas" class="v">-</div><div class="l">Feasible</div></div>
+          <div class="kpi"><div id="lcNPV" class="v">-</div><div class="l">NPV Cost $</div></div>
+          <div class="kpi"><div id="lcTotalCarbon" class="v">-</div><div class="l">Total CO&#8322;</div></div>
+          <div class="kpi"><div id="lcReplacements" class="v">-</div><div class="l">Replacements</div></div>
+          <div class="kpi"><div id="lcReplCost" class="v">-</div><div class="l">Replacement $</div></div>
+          <div class="kpi"><div id="lcYears" class="v">-</div><div class="l">Years</div></div>
+        </div>
+        <div id="lcCostChart" class="chart" style="height:360px;"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="lcCarbonChart" class="chart" style="height:320px;"></div>
+          <div id="lcCarbonIntensityChart" class="chart" style="height:320px;"></div>
+          <div id="lcEnergyChart" class="chart" style="height:320px;"></div>
+          <div id="lcSOHChart" class="chart" style="height:320px;"></div>
+          <div id="lcPVChart" class="chart" style="height:320px;"></div>
+          <div id="lcBoundsChart" class="chart" style="height:320px;"></div>
+          <div id="lcBoundsBreakdownChart" class="chart" style="height:320px;"></div>
+          <div id="lcCrossValChart" class="chart" style="height:320px;"></div>
+          <div id="lcTightnessChart" class="chart" style="height:320px;"></div>
+        </div>
+        <h3 style="margin-top:18px;color:var(--accent);">Capacity Comparison Results</h3>
+        <div id="lcCompareStatus" class="status mono" style="margin-bottom:6px;">Run a capacity comparison sweep above.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="lcCompNPVChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompCarbonChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompParetoChart" class="chart" style="height:340px;"></div>
+          <div id="lcCompCarbonTrajChart" class="chart" style="height:340px;"></div>
+        </div>
+      </section>
+
+      <!-- =================== RELIABILITY ASSESSMENT TAB ================ -->
+      <section id="reliabilityPane" class="tabpane">
+        <h3 style="color:var(--accent);margin-bottom:12px;">Monte Carlo Reliability Assessment</h3>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Load Scale Factor</label><input id="relLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0" title="Scale load (>1 reduces reserve margin)"/></div>
+          <div><label>CoV Threshold</label><input id="relCovThresh" type="number" min="0.01" max="0.5" step="0.01" value="0.05"/></div>
+          <div><label>Random Seed</label><input id="relSeed" type="number" min="0" max="999999" value="0" title="0 = non-deterministic"/></div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="relApplyIEEE24" checked/>
+            <label for="relApplyIEEE24" style="margin:0;">Apply IEEE-24 Reliability Data</label>
+          </div>
+        </div>
+        <!-- Advanced Options: Tail Risk -->
+        <div class="ctrl-row" style="margin-bottom:10px;background:#f5f7f5;padding:8px;border-radius:5px;">
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="relTailRisk"/>
+            <label for="relTailRisk" style="margin:0;">Compute Tail Risk (VaR/CVaR)</label>
+          </div>
+          <div><label>VaR Confidence</label><input id="relVarConf" type="number" min="0.80" max="0.99" step="0.01" value="0.95" title="Confidence level for VaR/CVaR"/></div>
+        </div>
+        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Non-Sequential Monte Carlo (State Sampling)</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Max Samples</label><input id="relNsqMaxIter" type="number" min="100" max="100000" value="5000"/></div>
+          </div>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn btn-primary" id="runNsqBtn">&#9654; Run NSQ Monte Carlo</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Sequential Monte Carlo (Chronological Simulation)</summary>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div><label>Max Years</label><input id="relSeqMaxYears" type="number" min="10" max="5000" value="500"/></div>
+            <div><label>Hours/Year</label>
+              <select id="relSeqHours">
+                <option value="8736">8736 (52 weeks)</option>
+                <option value="8760">8760 (full year)</option>
+              </select>
+            </div>
+          </div>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn" style="background:#8e44ad;color:#fff;" id="runSeqBtn">&#9654; Run SEQ Monte Carlo</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">Frequency &amp; Duration (Analytical)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Build COPT analytically (no simulation). Fast calculation of LOLP, LOLE, LOLF, LOLD.</p>
+          <div class="btn-group">
+            <button class="btn" style="background:#b57e2b;color:#fff;" id="runFDBtn">&#9654; Run F&amp;D Analysis</button>
+          </div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128270; FMEA (Failure Modes &amp; Effects Analysis)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">N-1 contingency enumeration for distribution system reliability. Evaluates each component failure individually.</p>
+          <div class="ctrl-row" style="margin-top:10px;">
+            <div style="display:flex;align-items:center;gap:4px;">
+              <input type="checkbox" id="relFmeaApplyComprehensive" checked/>
+              <label for="relFmeaApplyComprehensive" style="margin:0;">Apply Comprehensive Reliability Data</label>
+            </div>
+          </div>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn" style="background:#c0392b;color:#fff;" id="runFmeaBtn">&#9654; Run FMEA</button>
+          </div>
+        </details>
+        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128200; Cross-Validation (NSQ vs SEQ)</summary>
+          <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">Run both methods with the same settings and compare results.</p>
+          <div class="btn-group">
+            <button class="btn" style="background:#2c8c99;color:#fff;" id="runCrossValBtn">&#9654; Run Cross-Validation</button>
+          </div>
+        </details>
+        <div class="kpis" id="relKPIs">
+          <div class="kpi"><div id="relMethod" class="v">-</div><div class="l">Method</div></div>
+          <div class="kpi"><div id="relEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
+          <div class="kpi"><div id="relLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
+          <div class="kpi"><div id="relLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
+          <div class="kpi"><div id="relPLC" class="v">-</div><div class="l">PLC (%)</div></div>
+          <div class="kpi"><div id="relCoV" class="v">-</div><div class="l">Final CoV</div></div>
+          <div class="kpi"><div id="relIters" class="v">-</div><div class="l">Iterations</div></div>
+        </div>
+        <!-- Tail Risk KPIs -->
+        <div class="kpis" id="relTailKPIs" style="display:none;margin-top:8px;background:#f5f7f5;border-radius:6px;padding:6px;">
+          <div class="kpi"><div id="relEENSVar" class="v">-</div><div class="l">EENS VaR</div></div>
+          <div class="kpi"><div id="relEENSCVar" class="v">-</div><div class="l">EENS CVaR</div></div>
+          <div class="kpi"><div id="relLOLEVar" class="v">-</div><div class="l">LOLE VaR</div></div>
+          <div class="kpi"><div id="relLOLECVar" class="v">-</div><div class="l">LOLE CVaR</div></div>
+        </div>
+        <div id="relStatus" class="status mono" style="margin-bottom:10px;">Set parameters above and run an analysis.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div id="relConvergenceChart" class="chart" style="height:320px;"></div>
+          <div id="relNodalEENSChart" class="chart" style="height:320px;"></div>
+          <div id="relCriticalChart" class="chart" style="height:320px;"></div>
+          <div id="relCrossValChart" class="chart" style="height:320px;"></div>
+        </div>
+        <!-- FMEA Results Section -->
+        <div id="fmeaResultsSection" style="display:none;margin-top:14px;">
+          <h4 style="color:var(--accent);margin-bottom:8px;">FMEA Results</h4>
+          <div class="kpis" id="fmeaKPIs">
+            <div class="kpi"><div id="fmeaEENS" class="v">-</div><div class="l">EENS (MWh/yr)</div></div>
+            <div class="kpi"><div id="fmeaLOLE" class="v">-</div><div class="l">LOLE (hr/yr)</div></div>
+            <div class="kpi"><div id="fmeaLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
+            <div class="kpi"><div id="fmeaSAIFI" class="v">-</div><div class="l">SAIFI</div></div>
+            <div class="kpi"><div id="fmeaSAIDI" class="v">-</div><div class="l">SAIDI</div></div>
+            <div class="kpi"><div id="fmeaASAI" class="v">-</div><div class="l">ASAI</div></div>
+            <div class="kpi"><div id="fmeaContingencies" class="v">-</div><div class="l">Contingencies</div></div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+            <div id="fmeaContChart" class="chart" style="height:320px;"></div>
+            <div id="fmeaTypeChart" class="chart" style="height:320px;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================== RESILIENCE TAB ============================ -->
+      <section id="resiliencePane" class="tabpane">
+        <h3 style="color:var(--accent);margin-bottom:12px;">Distribution Resilience Assessment (MESS)</h3>
+        <p style="color:var(--muted);font-size:0.9em;margin:0 0 14px 0;">Multi-hour restoration study with time-varying load/RES profiles, feeder outages, repair windows, tie-switch reconfiguration, and mobile energy storage dispatch &amp; routing.</p>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Horizon (hr)</label><input id="resHorizonHours" type="number" min="1" max="168" value="24"/></div>
+          <div><label>Repair Time (hr)</label><input id="resRepairHours" type="number" min="1" max="72" value="6"/></div>
+          <div><label>Default Fault Count</label><input id="resFaultCount" type="number" min="1" max="10" value="1"/></div>
+          <div><label>MESS Speed (km/h)</label><input id="resMessSpeed" type="number" min="5" max="120" value="40"/></div>
+          <div><label>Load Scale Factor</label><input id="resLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0"/></div>
+        </div>
+        <div class="ctrl-row" style="margin-bottom:10px;">
+          <div style="min-width:260px;flex:1;"><label>Fault Branch IDs</label><input id="resFaultBranches" type="text" placeholder="e.g. 25,37 (blank = auto-select)"/></div>
+          <div><label>Fault Stagger (hr)</label><input id="resFaultStagger" type="number" min="0" max="24" step="0.5" value="0"/></div>
+          <div><label>First Fault at (hr)</label><input id="resFaultStartHr" type="number" min="0" max="48" step="0.5" value="0"/></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resApplyDemoData" checked/><label for="resApplyDemoData" style="margin:0;">Apply Demo Data</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowReconfig"/><label for="resAllowReconfig" style="margin:0;">Allow Reconfiguration</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resAllowMess" checked/><label for="resAllowMess" style="margin:0;">Allow MESS Dispatch</label></div>
+          <div style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="resRunPF"/><label for="resRunPF" style="margin:0;">Run Power Flow</label></div>
+        </div>
+        <details style="margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+          <summary style="cursor:pointer;font-weight:600;color:var(--accent);font-size:0.9em;">&#9881; Manual Fault Sequence Editor</summary>
+          <p style="color:var(--muted);font-size:0.82em;margin:4px 0 8px 0;">Define individual faults with branch ID, start time and repair duration. Leave empty to use auto-generation above.</p>
+          <table id="resFaultTable" style="width:100%;border-collapse:collapse;font-size:0.85em;">
+            <thead><tr style="background:var(--bg2);"><th style="padding:4px 8px;">Branch ID</th><th style="padding:4px 8px;">Start (hr)</th><th style="padding:4px 8px;">Repair (hr)</th><th style="padding:4px 8px;">Label</th><th style="width:40px;"></th></tr></thead>
+            <tbody id="resFaultTableBody"></tbody>
+          </table>
+          <button class="btn" style="margin-top:6px;font-size:0.82em;padding:4px 12px;" onclick="addFaultRow()">+ Add Fault</button>
+        </details>
+        <div class="btn-group" style="margin-bottom:10px;">
+          <button class="btn" style="background:#0f766e;color:#fff;" id="runResilienceBtn">&#9654; Run Resilience Assessment</button>
+        </div>
+        <div id="resStatus" class="status mono" style="margin-bottom:10px;">Set parameters and click Run.</div>
+        <div id="resilienceResultsSection" style="display:none;">
+          <div class="kpis" id="resilienceKPIs">
+            <div class="kpi"><div id="resilienceRI" class="v">-</div><div class="l">Resilience Index</div></div>
+            <div class="kpi"><div id="resilienceDemand" class="v">-</div><div class="l">Total Demand (MWh)</div></div>
+            <div class="kpi"><div id="resilienceShed" class="v">-</div><div class="l">Total Shed (MWh)</div></div>
+            <div class="kpi"><div id="resilienceFinalRestore" class="v">-</div><div class="l">Final Restoration (%)</div></div>
+            <div class="kpi"><div id="resilienceAvgRestore" class="v">-</div><div class="l">Avg Restoration (%)</div></div>
+            <div class="kpi"><div id="resiliencePeakShed" class="v">-</div><div class="l">Peak Shed (MW)</div></div>
+            <div class="kpi"><div id="resilienceMessEnergy" class="v">-</div><div class="l">MESS Energy (MWh)</div></div>
+            <div class="kpi"><div id="resilienceMessTravel" class="v">-</div><div class="l">MESS Travel (km)</div></div>
+            <div class="kpi"><div id="resilienceSwitches" class="v">-</div><div class="l">Switch Actions</div></div>
+            <div class="kpi"><div id="resilienceRepairs" class="v">-</div><div class="l">Repaired Faults</div></div>
+          </div>
+          <div id="resilienceCompareKPIs" style="display:none;margin-top:6px;padding:8px 14px;background:linear-gradient(135deg,#f0fdf4,#ecfdf5);border:1px solid #86efac;border-radius:8px;">
+            <span style="font-weight:600;color:#166534;font-size:0.85em;">&#9650; MESS Improvement:</span>
+            <span id="resCompRI" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+            <span id="resCompShed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+            <span id="resCompServed" style="margin-left:10px;font-weight:600;color:#166534;"></span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+            <div id="resilienceRestorationChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceMessChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceEnergyChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceIslandChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceProfileChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceTrajectoryChart" class="chart" style="height:340px;"></div>
+            <div id="resiliencePriorityChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceMessSOCChart" class="chart" style="height:340px;"></div>
+            <div id="resilienceVoltageChart" class="chart" style="height:340px;display:none;"></div>
+            <div id="resilienceBranchFlowChart" class="chart" style="height:340px;display:none;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================== DASHBOARD TAB ============================ -->
+      <section id="dashPane" class="tabpane">
+        <div class="btn-group">
+          <button class="btn btn-primary" id="runDashBtn">&#9654; Run Full Analysis (TS-PF + Carbon)</button>
+        </div>
+        <div id="dashStatus" class="status mono" style="margin-bottom:8px;">Not run yet. Load a case and click Run.</div>
+        <div id="dashKPIs" class="kpis"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+          <div id="dashGenChart" class="chart" style="height:300px;"></div>
+          <div id="dashCarbonChart" class="chart" style="height:300px;"></div>
+          <div id="dashVoltChart" class="chart" style="height:300px;"></div>
+          <div id="dashLossChart" class="chart" style="height:300px;"></div>
+          <div id="dashESSChart" class="chart" style="height:300px;"></div>
+          <div id="dashLoadChart" class="chart" style="height:300px;"></div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="statusBox" class="status" style="display:flex;align-items:center;gap:10px;">
+    <span id="statusText">Ready. Load a case to begin.</span>
+    <button id="cancelBtn" style="display:none;padding:2px 12px;background:#c34d4d;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;" onclick="cancelAnalysis()">Cancel</button>
+  </div>
+</div>
+
+<script>
+let SYS=null, activeComp='ac_buses', lastPfBody=null, lastPfCompareRows=[];
+const statusBox=document.getElementById('statusBox');
+const statusText=document.getElementById('statusText');
+const cancelBtn=document.getElementById('cancelBtn');
+function setStatus(m,e=false){statusText.textContent=m;statusBox.style.borderColor=e?'#c34d4d':'#bcc5bf';statusBox.style.background=e?'#fff1f1':'#fbfaf6';cancelBtn.style.display=m.includes('Running')?'inline-block':'none';}
+async function cancelAnalysis(){try{await fetch('/api/session/cancel',{method:'POST'});setStatus('Cancellation requested...');}catch(e){console.error(e);}}
+async function api(p,d,method='POST'){const o={method,headers:{'Content-Type':'application/json'}};if(d!==undefined)o.body=JSON.stringify(d);const r=await fetch(p,o);const t=await r.text();let b={};try{b=JSON.parse(t);}catch{b={error:t};}if(!r.ok||b.error)throw new Error(b.error||'HTTP '+r.status);return b;}
+function fmt(v,d=4){if(v==null||v===undefined||Number.isNaN(Number(v)))return'-';return Number(v).toFixed(d);}
+
+/* Power unit conversion helpers */
+function getPowerUnit(){return document.getElementById('pfDisplayUnit').value||'MW';}
+function pScale(){const u=getPowerUnit();if(u==='kW')return 1e3;if(u==='W')return 1e6;return 1;}
+function pUnit(){return getPowerUnit();}
+function pConv(mw){return mw*pScale();}
+function pFmt(mw,d=2){return (mw*pScale()).toFixed(d);}
+function qUnit(){const u=getPowerUnit();if(u==='kW')return 'kVar';if(u==='W')return 'Var';return 'MVar';}
+
+document.querySelectorAll('.panel > .tabs > .tab').forEach(tab=>{
+  tab.addEventListener('click',()=>{
+    document.querySelectorAll('.panel > .tabs > .tab').forEach(t=>t.classList.remove('active'));
+    document.querySelectorAll('.panel > .tabpane').forEach(p=>p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.tab).classList.add('active');
+  });
+});
+
+/* Case lists */
+async function loadCaseLists(){
+  const [cases,mfiles]=await Promise.all([fetch('/api/cases').then(r=>r.json()),fetch('/api/matpower_files').then(r=>r.json())]);
+  document.getElementById('builtinSelect').innerHTML=cases.cases.map(c=>`<option value="${c}"${c===cases.default_case?' selected':''}>${c}</option>`).join('');
+  document.getElementById('matpowerSelect').innerHTML=mfiles.files.map(f=>`<option value="${f}">${f}</option>`).join('');
+}
+
+async function loadSystem(ep,payload){
+  setStatus('Loading system...');
+  try{const d=await api(ep,payload);SYS=d;updateSystemUI();setStatus('Loaded: '+SYS.name+' ('+SYS.counts.ac_buses+' AC buses, '+SYS.counts.generators+' gens)');}
+  catch(e){setStatus(e.message,true);}
+}
+
+function updateSystemUI(){
+  if(!SYS)return;
+  document.getElementById('sysLabel').textContent=SYS.name;
+  document.getElementById('sysLabel').className='badge badge-green';
+  const cb=document.getElementById('countsBar');
+  const c=SYS.counts;
+  cb.innerHTML=Object.entries(c).map(([k,v])=>'<div class="count-chip"><span class="n">'+v+'</span>'+k.replace(/_/g,' ')+'</div>').join('');
+  renderCompTable(activeComp);
+  document.getElementById('jsonEditor').value=SYS._raw_json||'(use Refresh to load JSON)';
+}
+
+document.getElementById('loadBuiltinBtn').onclick=()=>loadSystem('/api/session/load_builtin',{case:document.getElementById('builtinSelect').value});
+document.getElementById('loadMatpowerBtn').onclick=()=>loadSystem('/api/session/load_matpower',{filename:document.getElementById('matpowerSelect').value});
+document.getElementById('uploadJsonBtn').onclick=()=>{
+  const fi=document.getElementById('jsonFileInput');
+  if(!fi.files.length){setStatus('Select a JSON file first.',true);return;}
+  const reader=new FileReader();
+  reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
+  reader.readAsText(fi.files[0]);
+};
+document.getElementById('exportJsonBtn').onclick=async()=>{
+  try{const d=await api('/api/session/export_json',{},'POST');
+  const blob=new Blob([d.json_string],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=(SYS?SYS.name.replace(/[^a-zA-Z0-9_-]/g,'_'):'system')+'.json';a.click();
+  setStatus('JSON exported.');}catch(e){setStatus(e.message,true);}
+};
+document.getElementById('newCaseBtn').onclick=()=>loadSystem('/api/session/new_empty',{});
+
+/* Case Builder tables – grouped by domain */
+const COMP_GROUPS=[
+  {label:'AC Network',items:[
+    ['ac_buses','Buses'],['ac_branches','Branches'],['transformers_2w','Trafo 2W'],['transformers_3w','Trafo 3W'],['switches','Switches'],['circuit_breakers','Breakers'],
+  ]},
+  {label:'AC Devices',items:[
+    ['generators','Generators'],['loads','Loads'],['shunts','Shunts'],['storage','Storage'],
+    ['static_generators','Static Gens'],['flexible_loads','Flex Loads'],['asymmetric_loads','Asym Loads'],
+    ['renewable_gens','Renewables'],['pv_systems','PV Systems'],['external_grids','Ext Grids'],
+    ['charging_stations','EV Stations'],['chargers','Chargers'],['motors','Motors'],
+  ]},
+  {label:'DC Network',items:[
+    ['dc_buses','Buses'],['dc_branches','Branches'],['vsc_converters','VSC Conv'],['dcdc_converters','DC/DC Conv'],['dc_circuit_breakers','Breakers'],
+  ]},
+  {label:'DC Devices',items:[
+    ['dc_loads','Loads'],['dc_storage','Storage'],['dc_static_generators','Static Gens'],
+    ['dc_native_static_generators','Native SGs'],['pv_arrays','PV Arrays'],
+    ['energy_routers','E-Routers'],['mobile_storage','Mobile Stor'],['vpps','VPPs'],['microgrids','Microgrids'],
+  ]},
+  {label:'Three-Phase',items:[
+    ['tp_buses','Buses'],['tp_lines','Lines'],['tp_transformers','Trafos'],
+    ['tp_loads','Loads'],['tp_generators','Generators'],['tp_external_grids','Ext Grids'],
+  ]},
+];
+/* flat list for legacy compat */
+const COMP_META=COMP_GROUPS.flatMap(g=>g.items);
+
+const COMP_COLS={
+  ac_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['PQ','PV','SLACK','ISOLATED']},{key:'base_kv',label:'Base kV',type:'num'},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'va_deg',label:'Va deg',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'qd_mvar',label:'Qd MVAr',type:'num'},{key:'vmax_pu',label:'Vmax',type:'num'},{key:'vmin_pu',label:'Vmin',type:'num'},{key:'i_breaker_ka',label:'Ib kA',type:'num'},{key:'area',label:'Area',type:'int'},{key:'zone',label:'Zone',type:'int'},{key:'in_service',label:'In Svc',type:'bool'}],
+  dc_buses:[{key:'index',label:'#',type:'int'},{key:'name',label:'Name',type:'str'},{key:'bus_type',label:'Type',type:'select',options:['DC_P','DC_V']},{key:'vm_pu',label:'Vm pu',type:'num'},{key:'pd_mw',label:'Pd MW',type:'num'},{key:'base_kv',label:'Base kV',type:'num'},{key:'in_service',label:'In Svc',type:'bool'}],
+};
+
+const COMP_DEFAULTS={
+  ac_buses:{index:0,name:'',bus_type:'PQ',base_kv:110,vm_pu:1.0,va_deg:0,pd_mw:0,qd_mvar:0,vmax_pu:1.05,vmin_pu:0.95,i_breaker_ka:0,area:1,zone:1,in_service:true},
+  ac_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,x_pu:0.1,b_pu:0,tap:1.0,shift_deg:0,rate_a_mva:100,in_service:true},
+  generators:{index:0,name:'',bus:1,is_slack:false,pg_mw:0,qg_mvar:0,vg_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,cost_c2:0,cost_c1:20,cost_c0:0,in_service:true},
+  loads:{index:0,name:'',bus:1,p_mw:10,q_mvar:5,in_service:true},
+  storage:{index:0,name:'',bus:1,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95,in_service:true},
+  dc_buses:{index:0,name:'',bus_type:'DC_P',vm_pu:1.0,pd_mw:0,base_kv:320,in_service:true},
+  dc_branches:{index:0,name:'',from_bus:1,to_bus:2,r_pu:0.01,rate_a_mva:100,in_service:true},
+  vsc_converters:{index:0,name:'',bus_ac:1,bus_dc:1,p_set_mw:0,q_set_mvar:0,v_dc_set_pu:1.0,eta:0.98,pmax_mw:100,p_rated_mw:100,in_service:true},
+  dcdc_converters:{index:0,name:'',bus_in:1,bus_out:2,p_ref_mw:0,v_ref_pu:1.0,eta:0.98,in_service:true},
+  energy_routers:{index:0,name:'',router_type:'SST',num_ports:0,ports:[],in_service:true},
+  mobile_storage:{index:0,name:'',bus:1,p_mw:0,e_rated_mwh:20,soc_init:0.5,in_service:true},
+  vpps:{index:0,name:'',pcc_bus:1,p_output_mw:0,q_output_mvar:0,in_service:true,aggregated_gen_ids:[],aggregated_storage_ids:[],aggregated_load_ids:[]},
+  microgrids:{index:0,name:'',pcc_bus:1,p_exchange_mw:0,in_service:true},
+  circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,z_ohm:0,rated_voltage_kv:110,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0,in_service:true},
+  dc_circuit_breakers:{index:0,name:'',bus_from:1,bus_to:2,breaker_type:'CB',closed:true,r_ohm:0,rated_voltage_kv:320,i_rated_ka:2.0,i_breaking_ka:20,element_type:'l',element_id:0,in_service:true},
+  transformers_2w:{index:0,name:'',std_type:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pk_kw:30,pfe_kw:20,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0,vector_group:'Dyn'},
+  transformers_3w:{index:0,name:'',std_type:'',hv_bus:1,mv_bus:2,lv_bus:3,in_service:true,sn_hv_mva:40,sn_mv_mva:20,sn_lv_mva:10,vn_hv_kv:110,vn_mv_kv:20,vn_lv_kv:10,vk_hv_mv_percent:10,vk_hv_lv_percent:10,vk_mv_lv_percent:10,vkr_hv_mv_percent:0.3,vkr_hv_lv_percent:0.3,vkr_mv_lv_percent:0.3,pfe_kw:30,i0_percent:0.5,tap_side:'hv',tap_pos:0,tap_step_percent:1.5,shift_mv_deg:0,shift_lv_deg:0},
+  switches:{index:0,name:'',bus_from:1,bus_to:2,in_service:true,switch_type:'CB',closed:true,r_contact_ohm:0,z_ohm:0,i_rated_ka:2.0,i_breaking_ka:40,element_type:'l',element_id:0},
+  shunts:{index:0,name:'',bus:1,in_service:true,gs_mw:0,bs_mvar:0,switchable:false,n_steps:1,current_step:1,bs_per_step:0},
+  static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
+  flexible_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,q_mvar:5,flex_up_mw:2,flex_down_mw:2,flex_duration_h:1,response_time_s:60,ramp_rate_mw_min:1,availability_pct:95,controllable:true,priority:1,control_area:''},
+  asymmetric_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,pa_mw:0,qa_mvar:0,pb_mw:0,qb_mvar:0,pc_mw:0,qc_mvar:0,scaling:1.0,controllable:false},
+  renewable_gens:{index:0,name:'',bus:1,in_service:true,type:'wind',p_mw:0,q_mvar:0,p_rated_mw:10,qmax_mvar:5,qmin_mvar:-5,curtailable:true,cost_curtail_mwh:0,capacity_factor:0.3,profile_id:''},
+  pv_systems:{index:0,name:'',bus:1,in_service:true,p_mw:0,q_mvar:0,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,control_mode:'PQ',controllable:false},
+  external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
+  charging_stations:{index:0,name:'',bus:1,location:'',in_service:true,n_fast:2,n_slow:4,num_chargers:6,p_fast_max_kw:150,p_slow_max_kw:22,max_power_kw:500,simultaneity_factor:0.8,power_factor:0.95,utilization_rate:0.3,p_total_kw:0,q_total_kvar:0},
+  chargers:{index:0,name:'',station_id:0,charger_type:'fast',in_service:true,p_rated_kw:150,p_ch_max_kw:150,p_ch_min_kw:0,eta:0.95,v2g_capable:false,p_dis_max_kw:0},
+  motors:{index:0,name:'',bus:1,in_service:true,vn_kv:0.4,sn_mva:0.1,r_pu:0.02,x_pu:0.15,x_r:7.5,lrc:6.0,poles:4,cos_phi:0.85,efficiency:0.9},
+  dc_loads:{index:0,name:'',bus:1,in_service:true,p_mw:10,controllable:false,p_min_mw:0,cost_mw:0,profile_id:''},
+  dc_storage:{index:0,name:'',bus:1,in_service:true,p_mw:0,p_rated_mw:10,e_rated_mwh:40,soc_init:0.5,eta_charge:0.95,eta_discharge:0.95},
+  dc_static_generators:{index:0,name:'',bus:1,in_service:true,sgen_type:'PQ',p_mw:0,q_mvar:0,p_rated_mw:10,sn_mva:10,pmax_mw:10,pmin_mw:0,qmax_mvar:5,qmin_mvar:-5,scaling:1.0,controllable:false},
+  dc_native_static_generators:{index:0,name:'',bus:1,in_service:true,type:'PQ',p_set_mw:0,scaling:1.0,profile_id:'',pmax_mw:10,pmin_mw:0,controllable:false},
+  pv_arrays:{index:0,name:'',bus:1,in_service:true,p_set_mw:0,profile_id:'',num_series:10,num_parallel:5,vmpp:30,impp:8,voc:37,isc:9,irradiance:1000,temperature:25},
+  tp_buses:{index:0,name:'',bus_type:'PQ',base_kv:20,in_service:true,vm_a_pu:1.0,va_a_deg:0,vm_b_pu:1.0,va_b_deg:-120,vm_c_pu:1.0,va_c_deg:120,vmin_pu:0.95,vmax_pu:1.05,area:1,zone:1},
+  tp_lines:{index:0,name:'',from_bus:1,to_bus:2,in_service:true,length_km:1,parallel:1,r1_ohm_per_km:0.1,x1_ohm_per_km:0.1,c1_nf_per_km:10,r0_ohm_per_km:0.3,x0_ohm_per_km:0.3,c0_nf_per_km:5,max_i_ka:0.5,rate_a_mva:20},
+  tp_transformers:{index:0,name:'',hv_bus:1,lv_bus:2,in_service:true,sn_mva:25,vn_hv_kv:110,vn_lv_kv:20,vk_percent:10,vkr_percent:0.3,pfe_kw:20,i0_percent:0.5,vector_group:'Dyn',tap_side:'hv',tap_pos:0,tap_min:-10,tap_max:10,tap_neutral:0,tap_step_percent:1.5,shift_deg:0},
+  tp_loads:{index:0,name:'',bus:1,in_service:true,connection:'wye',grounded:true,p_a_mw:0,q_a_mvar:0,p_b_mw:0,q_b_mvar:0,p_c_mw:0,q_c_mvar:0},
+  tp_generators:{index:0,name:'',bus:1,in_service:true,is_slack:false,p_mw:0,q_mvar:0,vm_pu:1.0,pmax_mw:100,pmin_mw:0,qmax_mvar:50,qmin_mvar:-50,mbase_mva:100},
+  tp_external_grids:{index:0,name:'',bus:1,in_service:true,vm_pu:1.0,va_deg:0,s_sc_max_mva:1000,s_sc_min_mva:500,rx_max:0.1,rx_min:0.1},
+};
+
+function prettyLabel(k){return k.replace(/_/g,' ').replace(/\b\w/g,m=>m.toUpperCase());}
+function inferType(v){if(typeof v==='boolean')return'bool';if(typeof v==='number')return'num';if(v===null||v===undefined)return'num';if(typeof v==='object')return'json';return'str';}
+function inferCols(comp,rows){
+  if(COMP_COLS[comp])return COMP_COLS[comp];
+  const keys=new Set(Object.keys(COMP_DEFAULTS[comp]||{}));
+  rows.forEach(r=>Object.keys(r||{}).forEach(k=>keys.add(k)));
+  return [...keys].map(k=>{
+    let sample=null;
+    for(const r of rows){if(r&&r[k]!==undefined&&r[k]!==null){sample=r[k];break;}}
+    if(sample===null&&COMP_DEFAULTS[comp]&&COMP_DEFAULTS[comp][k]!==undefined)sample=COMP_DEFAULTS[comp][k];
+    return {key:k,label:(k==='index'?'#':prettyLabel(k)),type:inferType(sample)};
+  });
+}
+
+function initCompTabs(){
+  const ct=document.getElementById('compTabs');
+  let html='',first=true;
+  COMP_GROUPS.forEach(g=>{
+    html+='<div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:2px;">';
+    html+='<span style="margin:2px 6px 2px 0;padding:2px 6px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;border-left:3px solid var(--accent);user-select:none;white-space:nowrap;">'+g.label+'</span>';
+    g.items.forEach(([k,l])=>{
+      html+='<div class="tab'+(first?' active':'')+'" data-comp="'+k+'">'+l+'</div>';
+      first=false;
+    });
+    html+='</div>';
+  });
+  ct.innerHTML=html;
+  ct.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{
+    ct.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    tab.classList.add('active');
+    activeComp=tab.dataset.comp;
+    renderCompTable(activeComp);
+  }));
+}
+initCompTabs();
+
+function renderCompTable(comp){
+  const area=document.getElementById('compTableArea');
+  if(!SYS){area.innerHTML='<div style="padding:20px;color:var(--muted);">Load a system first.</div>';return;}
+  if(!SYS[comp]||!Array.isArray(SYS[comp]))SYS[comp]=[];
+  const rows=SYS[comp];
+  const cols=inferCols(comp,rows);
+  let h='<div class="dtable-wrap"><table class="dtable"><thead><tr>';
+  cols.forEach(c=>h+='<th>'+c.label+'</th>');h+='<th></th></tr></thead><tbody>';
+  rows.forEach((row,ri)=>{
+    h+='<tr data-ri="'+ri+'">';
+    cols.forEach(c=>{
+      const v=row[c.key]??'';
+      if(c.type==='bool')h+='<td><input type="checkbox" data-key="'+c.key+'" '+(v?'checked':'')+' style="width:auto;min-width:auto;"/></td>';
+      else if(c.type==='select'){h+='<td><select data-key="'+c.key+'">';c.options.forEach(o=>h+='<option'+(o===String(v)?' selected':'')+'>'+o+'</option>');h+='</select></td>';}
+      else if(c.type==='json')h+='<td><input type="text" data-key="'+c.key+'" value="'+String(JSON.stringify(v)).replace(/"/g,'&quot;')+'"/></td>';
+      else h+='<td><input type="'+(c.type==='str'?'text':'number')+'" data-key="'+c.key+'" value="'+v+'" '+(c.type==='num'?'step="any"':'')+'/></td>';
+    });
+    h+='<td><button class="row-del" data-ri="'+ri+'" title="Delete row">&times;</button></td></tr>';
+  });
+  h+='</tbody></table></div>';area.innerHTML=h;
+  area.querySelectorAll('.row-del').forEach(btn=>btn.addEventListener('click',()=>{SYS[comp].splice(parseInt(btn.dataset.ri),1);renderCompTable(comp);}));
+  area.querySelectorAll('input,select').forEach(el=>el.addEventListener('change',()=>{
+    const ri=parseInt(el.closest('tr').dataset.ri),key=el.dataset.key,col=cols.find(c=>c.key===key);
+    if(col.type==='bool')SYS[comp][ri][key]=el.checked;
+    else if(col.type==='int')SYS[comp][ri][key]=parseInt(el.value)||0;
+    else if(col.type==='num')SYS[comp][ri][key]=parseFloat(el.value)||0;
+    else if(col.type==='json'){try{SYS[comp][ri][key]=JSON.parse(el.value);}catch{SYS[comp][ri][key]=el.value;}}
+    else SYS[comp][ri][key]=el.value;
+  }));
+}
+
+document.getElementById('addRowBtn').onclick=()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  if(!SYS[activeComp])SYS[activeComp]=[];
+  const def={index:0,name:'',in_service:true,...(COMP_DEFAULTS[activeComp]||{})};
+  def.index=SYS[activeComp].reduce((mx,r)=>Math.max(mx,r.index||0),0)+1;
+  SYS[activeComp].push(def);renderCompTable(activeComp);
+  const w=document.querySelector('.dtable-wrap');if(w)w.scrollTop=w.scrollHeight;
+};
+
+document.getElementById('commitBtn').onclick=async()=>{
+  if(!SYS){setStatus('No system to commit.',true);return;}
+  try{setStatus('Committing changes...');const d=await api('/api/session/update_components',SYS);SYS=d;updateSystemUI();setStatus('Changes committed successfully.');}
+  catch(e){setStatus(e.message,true);}
+};
+
+/* JSON editor */
+document.getElementById('refreshJsonBtn').onclick=async()=>{try{const d=await api('/api/session/export_json',{},'POST');document.getElementById('jsonEditor').value=d.json_string;setStatus('JSON refreshed.');}catch(e){setStatus(e.message,true);}};
+document.getElementById('applyJsonBtn').onclick=async()=>{const j=document.getElementById('jsonEditor').value.trim();if(!j){setStatus('JSON editor is empty.',true);return;}loadSystem('/api/session/load_json_string',{json_string:j});};
+
+/* Power Flow */
+const PF_METHOD_LABEL={
+  ac_newton:'AC Newton-Raphson',dc:'DC PF',hybrid_linearized:'Hybrid AC/DC Linearized',fdpf:'Fast-Decoupled PF',
+  adaptive:'Adaptive PF',islanded:'Islanded PF',distributed_slack:'Distributed Slack PF',three_phase:'Three-Phase PF',
+};
+
+async function runPfMethod(method){
+  const body=await api('/api/session/pf',{method,options:{
+    max_iter:Number(document.getElementById('pfMaxIter').value||80),
+    tol:Number(document.getElementById('pfTol').value||1e-8),
+    fdpf_max_iter:Number(document.getElementById('pfFdpfMaxIter').value||1000),
+    enable_pv_pq_conversion:document.getElementById('pfPvPq').checked,
+    enable_auto_swing_selection:document.getElementById('pfAutoSwing').checked,
+    enable_converter_mode_switching:document.getElementById('pfConvSwitch').checked,
+    verbose:document.getElementById('pfVerbose').checked,
+    pv_q_hysteresis_pu:Number(document.getElementById('pfPvQHyst').value||0.01),
+    max_delta_va_rad:Number(document.getElementById('pfMaxDVa').value||1.5),
+    max_delta_vm_pu:Number(document.getElementById('pfMaxDVm').value||0.5),
+    loss_model:document.getElementById('pfLossModel').value,
+  }});
+  body.method=method;
+  return body;
+}
+
+function renderPf(body){
+  document.getElementById('pfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('pfIter').textContent=body.iterations;
+  document.getElementById('pfRes').textContent=fmt(body.residual,3);
+  document.getElementById('pfNBus').textContent=(body.vm||[]).length;
+
+  const u=pUnit(), sc=pScale(), qu=qUnit();
+  const vm=body.vm||[];
+  const branch=body.branch_abs||[];
+  Plotly.newPlot('pfVoltChart',[{x:vm.map((_,i)=>i+1),y:vm,mode:'lines+markers',line:{color:'#0b6e4f',width:2},marker:{size:5},name:'Vm'}],
+    {title:`AC Voltage Magnitude (${PF_METHOD_LABEL[body.method]||body.method})`,xaxis:{title:'AC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+
+  /* DC Bus Voltages */
+  const vdc=body.vdc||[];
+  if(vdc.length>0){
+    Plotly.newPlot('pfDcVoltChart',[{x:vdc.map((_,i)=>i+1),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('pfDcVoltChart'); }
+
+  /* VSC Converter Transfers */
+  const vsc=body.vsc_transfers||[];
+  if(vsc.length>0){
+    const labels=vsc.map(v=>'VSC'+v.index+' (AC'+v.bus_ac+'↔DC'+v.bus_dc+')');
+    Plotly.newPlot('pfConverterChart',[
+      {x:labels,y:vsc.map(v=>pConv(v.p_ac_mw)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
+      {x:labels,y:vsc.map(v=>pConv(v.p_dc_mw)),type:'bar',name:`P_dc (${u})`,marker:{color:'#6a0dad'}},
+      {x:labels,y:vsc.map(v=>pConv(v.loss_mw)),type:'bar',name:`Loss (${u})`,marker:{color:'#c34d4d'}}
+    ],{title:'VSC Converter Power Transfers',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:80}},{responsive:true});
+  } else { Plotly.purge('pfConverterChart'); }
+
+  Plotly.newPlot('pfBranchChart',[{x:branch.map((_,i)=>i+1),y:branch.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],
+    {title:`Branch |P|`,xaxis:{title:'Branch'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+
+  // GIS Map
+  renderGeoMap(body);
+}
+
+function renderPfCompare(rows){
+  if(!rows.length){document.getElementById('pfCompareTable').textContent='No comparison results yet.';return;}
+  const methods=rows.map(r=>PF_METHOD_LABEL[r.method]||r.method);
+  const iters=rows.map(r=>r.iterations||0);
+  const residuals=rows.map(r=>Number(r.residual||0));
+  Plotly.newPlot('pfCompareChart',[
+    {x:methods,y:iters,type:'bar',name:'Iterations',marker:{color:'#0b6e4f'}},
+    {x:methods,y:residuals,type:'scatter',mode:'lines+markers',name:'Residual',yaxis:'y2',line:{color:'#b5651d',width:2}},
+  ],{title:'PF Method Comparison',yaxis:{title:'Iterations'},yaxis2:{title:'Residual',overlaying:'y',side:'right'},margin:{l:55,r:55,t:45,b:80}}, {responsive:true});
+  const lines=['Method | Conv | Iter | Residual | |Vm| count'];
+  rows.forEach(r=>lines.push(`${PF_METHOD_LABEL[r.method]||r.method} | ${r.converged?'Y':'N'} | ${r.iterations} | ${fmt(r.residual,4)} | ${(r.vm||[]).length}`));
+  document.getElementById('pfCompareTable').textContent=lines.join('\n');
+}
+
+function renderGeoMap(body){
+  const buses=body.geo_buses||[];
+  const acBranches=body.geo_ac_branches||[];
+  const dcBranches=body.geo_dc_branches||[];
+  const vsc=body.geo_vsc||[];
+  const dcdc=body.geo_dcdc||[];
+  const u=pUnit(), qu=qUnit();
+  
+  if(!buses.length){Plotly.purge('pfGeoMap');return;}
+  
+  // Check if we have valid geo coordinates (not all zeros)
+  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
+  
+  const traces=[];
+  
+  // AC Branches as lines
+  for(const br of acBranches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:Math.max(1,Math.min(6,(br.loading_pct||0)/20)),color:'#0b6e4f'},
+      hoverinfo:'text',
+      text:`AC ${br.from}-${br.to}: Pf=${pFmt(br.pf_mw||0)} Pt=${pFmt(br.pt_mw||0)} Loss=${pFmt(br.loss_mw||0,3)} ${u} (${(br.loading_pct||0).toFixed(1)}%)`,
+      showlegend:false
+    });
+  }
+  
+  // DC Branches as lines
+  for(const br of dcBranches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:2,color:'#6a0dad',dash:'dash'},
+      hoverinfo:'text',
+      text:`DC ${br.from}-${br.to}: ${pFmt(br.pf_mw||0)} ${u}`,
+      showlegend:false
+    });
+  }
+  
+  // VSC connections
+  for(const v of vsc){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[v.ac_lon,v.dc_lon],
+      lat:[v.ac_lat,v.dc_lat],
+      line:{width:3,color:'#b5651d'},
+      hoverinfo:'text',
+      text:`VSC: AC${v.bus_ac}↔DC${v.bus_dc} P=${pFmt(v.p_ac_mw||0)}${u}`,
+      showlegend:false
+    });
+  }
+  
+  // DC-DC converter connections
+  for(const d of dcdc){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[d.in_lon,d.out_lon],
+      lat:[d.in_lat,d.out_lat],
+      line:{width:3,color:'#c34d4d',dash:'dot'},
+      hoverinfo:'text',
+      text:`DCDC: DC${d.bus_in}↔DC${d.bus_out} P=${pFmt(d.p_in_mw||0)}${u}`,
+      showlegend:false
+    });
+  }
+  
+  // AC buses with dynamic voltage color range
+  const acBuses=buses.filter(b=>b.type==='AC');
+  if(acBuses.length){
+    const vmVals=acBuses.map(b=>b.vm_pu||1.0);
+    const vmMin=Math.min(...vmVals);
+    const vmMax=Math.max(...vmVals);
+    const vmRange=Math.max(vmMax-vmMin,0.005);
+    const cmin=Math.max(0.9, vmMin-vmRange*0.3);
+    const cmax=Math.min(1.1, vmMax+vmRange*0.3);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers+text',
+      lon:acBuses.map(b=>b.lon),
+      lat:acBuses.map(b=>b.lat),
+      marker:{size:acBuses.map(b=>b.bus_type==='SLACK'?14:10),color:vmVals,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
+      text:acBuses.map(b=>b.name||'AC'+b.id),
+      textposition:'top center',
+      textfont:{size:9},
+      hoverinfo:'text',
+      hovertext:acBuses.map(b=>`AC${b.id} ${b.name||''}<br>Vm=${(b.vm_pu||1.0).toFixed(4)} Va=${((b.va_rad||0)*180/Math.PI).toFixed(2)}°<br>P=${pFmt(b.pd_mw||0)}${u} Q=${pFmt(b.qd_mvar||0)}${qu}`),
+      name:'AC Buses',
+      showlegend:true
+    });
+  }
+  
+  // DC buses with voltage-based coloring
+  const dcBuses=buses.filter(b=>b.type==='DC');
+  if(dcBuses.length){
+    const vdcVals=dcBuses.map(b=>b.vm_pu||1.0);
+    const vdcMin=Math.min(...vdcVals);
+    const vdcMax=Math.max(...vdcVals);
+    const vdcRange=Math.max(vdcMax-vdcMin,0.005);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers+text',
+      lon:dcBuses.map(b=>b.lon),
+      lat:dcBuses.map(b=>b.lat),
+      marker:{size:12,color:vdcVals,colorscale:'Purples',cmin:Math.max(0.9,vdcMin-vdcRange*0.3),cmax:Math.min(1.1,vdcMax+vdcRange*0.3),symbol:'square'},
+      text:dcBuses.map(b=>b.name||'DC'+b.id),
+      textposition:'top center',
+      textfont:{size:9},
+      hoverinfo:'text',
+      hovertext:dcBuses.map(b=>`DC${b.id} ${b.name||''}<br>Vdc=${(b.vm_pu||1.0).toFixed(4)}<br>P=${pFmt(b.pd_mw||0)}${u}`),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+  
+  const layout={
+    title:'Network GIS Visualization',
+    geo:{
+      scope:hasGeo?undefined:'usa',
+      projection:{type:hasGeo?'mercator':'albers usa'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      showsubunits:true,subunitcolor:'#aaa',
+      resolution:hasGeo?50:110,
+      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
+      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
+    },
+    margin:{l:0,r:0,t:40,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  };
+  
+  Plotly.newPlot('pfGeoMap',traces,layout,{responsive:true});
+}
+
+// --- Market GIS Map: buses coloured by average LMP, branches/DC links overlaid ---
+function renderMktGeoMap(body, lmp, sced){
+  const el=document.getElementById('mktGeoMap');
+  if(!el)return;
+  if(!SYS||!SYS.ac_buses||!SYS.ac_buses.length){el.innerHTML='<p style=\"color:#999\">No system loaded.</p>';return;}
+
+  // Build bus coord map from the loaded system
+  const busList=SYS.ac_buses||[];
+  const brList=SYS.ac_branches||[];
+  const dcBusList=SYS.dc_buses||[];
+  const dcBrList=SYS.dc_branches||[];
+  const vscList=SYS.vsc_converters||[];
+
+  const hasGeo=busList.some(b=>(Math.abs(b.latitude||0)>0.001||Math.abs(b.longitude||0)>0.001));
+  if(!hasGeo){el.innerHTML='<p style=\"color:#999\">No geographic coordinates available for this case.</p>';return;}
+
+  // Average LMP per bus across all periods
+  const nodalLmp=lmp.nodal_lmp||[];
+  const T=nodalLmp.length>0?(nodalLmp[0]||[]).length:0;
+  const avgLmp=nodalLmp.map(arr=>{
+    if(!arr||!arr.length)return 0;
+    return arr.reduce((s,v)=>s+Number(v||0),0)/arr.length;
+  });
+  const maxLmp=Math.max(1,...avgLmp);
+  const minLmp=Math.min(0,...avgLmp);
+
+  // Province colour palette
+  const areaColors=['#666','#2c8c99','#ff9800','#6a0dad','#27ae60','#d32f2f'];
+
+  const traces=[];
+
+  // AC Branches
+  for(const br of brList){
+    const fb=busList.find(b=>b.index===br.from_bus);
+    const tb=busList.find(b=>b.index===br.to_bus);
+    if(!fb||!tb)continue;
+    const fromArea=fb.area||0, toArea=tb.area||0;
+    const isInterArea=fromArea!==toArea;
+    traces.push({
+      type:'scattergeo',mode:'lines',
+      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
+      line:{width:isInterArea?2.5:1.5,color:isInterArea?'#333':'#aaa',dash:isInterArea?'solid':'solid'},
+      hoverinfo:'text',
+      text:'AC '+(br.name||br.index)+' ('+fmt(br.rate_a_mva||0,0)+' MVA)',
+      showlegend:false
+    });
+  }
+
+  // DC Branches (dashed purple)
+  for(const dbr of dcBrList){
+    const fb=dcBusList.find(b=>b.index===dbr.from_bus);
+    const tb=dcBusList.find(b=>b.index===dbr.to_bus);
+    if(!fb||!tb)continue;
+    traces.push({
+      type:'scattergeo',mode:'lines',
+      lon:[fb.longitude,tb.longitude],lat:[fb.latitude,tb.latitude],
+      line:{width:3,color:'#6a0dad',dash:'dash'},
+      hoverinfo:'text',
+      text:'HVDC '+(dbr.name||dbr.index)+' ('+fmt(dbr.rate_a_mva||dbr.s_max_mva||0,0)+' MW)',
+      showlegend:false
+    });
+  }
+
+  // AC buses coloured by average LMP
+  if(busList.length){
+    traces.push({
+      type:'scattergeo',mode:'markers+text',
+      lon:busList.map(b=>b.longitude||0),
+      lat:busList.map(b=>b.latitude||0),
+      marker:{
+        size:busList.map((b,i)=>{const bt=b.bus_type||'PQ';return(bt==='SLACK'||bt===3||bt==='3')?14:10;}),
+        color:avgLmp.length>=busList.length?avgLmp.slice(0,busList.length):busList.map(()=>0),
+        colorscale:[[0,'#2166ac'],[0.25,'#67a9cf'],[0.5,'#f7f7f7'],[0.75,'#ef8a62'],[1,'#b2182b']],
+        cmin:minLmp,cmax:maxLmp,
+        colorbar:{title:'Avg LMP ($/MWh)',x:1.02,thickness:12,len:0.7},
+        line:{width:1,color:'#333'}
+      },
+      text:busList.map(b=>b.name||('Bus '+b.index)),
+      textposition:'top center',
+      textfont:{size:8},
+      hoverinfo:'text',
+      hovertext:busList.map((b,i)=>{
+        const al=avgLmp[i]||0;
+        return (b.name||'Bus '+b.index)+'<br>Area '+b.area+', Zone '+b.zone+
+          '<br>Avg LMP: $'+fmt(al,2)+'/MWh'+
+          '<br>Load: '+fmt(b.pd_mw||0,1)+' MW';
+      }),
+      name:'AC Buses (LMP)',
+      showlegend:true
+    });
+  }
+
+  // DC buses (squares)
+  if(dcBusList.length&&dcBusList.some(b=>Math.abs(b.latitude||0)>0.001)){
+    traces.push({
+      type:'scattergeo',mode:'markers+text',
+      lon:dcBusList.map(b=>b.longitude||0),
+      lat:dcBusList.map(b=>b.latitude||0),
+      marker:{size:10,color:'#6a0dad',symbol:'square'},
+      text:dcBusList.map(b=>b.name||('DC '+b.index)),
+      textposition:'top center',
+      textfont:{size:8},
+      hoverinfo:'text',
+      hovertext:dcBusList.map(b=>(b.name||'DC '+b.index)),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+
+  const lons=busList.map(b=>b.longitude||0).concat(dcBusList.map(b=>b.longitude||0));
+  const lats=busList.map(b=>b.latitude||0).concat(dcBusList.map(b=>b.latitude||0));
+  const lonMin=Math.min(...lons),lonMax=Math.max(...lons);
+  const latMin=Math.min(...lats),latMax=Math.max(...lats);
+  const lonPad=Math.max(0.5,(lonMax-lonMin)*0.08);
+  const latPad=Math.max(0.3,(latMax-latMin)*0.08);
+
+  Plotly.newPlot('mktGeoMap',traces,{
+    title:'GIS Network Map — Average LMP by Bus',
+    geo:{
+      projection:{type:'mercator'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      showsubunits:true,subunitcolor:'#aaa',
+      resolution:50,
+      lonaxis:{range:[lonMin-lonPad,lonMax+lonPad]},
+      lataxis:{range:[latMin-latPad,latMax+latPad]}
+    },
+    margin:{l:0,r:0,t:40,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  },{responsive:true});
+}
+
+document.getElementById('runPfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const method=document.getElementById('pfMethod').value;
+  try{
+    setStatus('Running '+(PF_METHOD_LABEL[method]||method)+'...');
+    const body=await runPfMethod(method);
+    lastPfBody=body; lastPfCompareRows=[body];
+    renderPf(body);
+    renderPfCompare([body]);
+    setStatus('Power flow completed: '+(PF_METHOD_LABEL[method]||method));
+  }catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runPfCompareBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const methods=['ac_newton','dc','hybrid_linearized','fdpf','adaptive','islanded','distributed_slack','three_phase'];
+  setStatus('Running comparison across PF methods...');
+  const rows=[];
+  for(const m of methods){
+    try{rows.push(await runPfMethod(m));}
+    catch(e){rows.push({method:m,converged:false,iterations:0,residual:NaN,vm:[],_error:e.message});}
+  }
+  const selected=rows.find(r=>r.method===document.getElementById('pfMethod').value)||rows[0];
+  if(selected){lastPfBody=selected;renderPf(selected);}
+  lastPfCompareRows=rows;
+  renderPfCompare(rows);
+  const ok=rows.filter(r=>r.converged).length;
+  setStatus(`PF comparison complete: ${ok}/${rows.length} methods converged.`);
+};
+
+/* Re-render on display unit change */
+document.getElementById('pfDisplayUnit').onchange=()=>{
+  if(lastPfBody)renderPf(lastPfBody);
+  if(lastPfCompareRows.length)renderPfCompare(lastPfCompareRows);
+};
+
+/* OPF */
+function renderOpfDcResults(body){
+  const vdc=body.vdc||[];
+  if(vdc.length>0){
+    Plotly.newPlot('opfDcVoltChart',[{x:vdc.map((_,i)=>i+1),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+      {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('opfDcVoltChart'); }
+  const pac=body.pac_mw||[], qac=body.qac_mvar||[];
+  if(pac.length>0){
+    const u=pUnit(), qu=qUnit();
+    Plotly.newPlot('opfConverterChart',[
+      {x:pac.map((_,i)=>'VSC'+(i+1)),y:pac.map(v=>pConv(v)),type:'bar',name:`P_ac (${u})`,marker:{color:'#0b6e4f'}},
+      {x:qac.map((_,i)=>'VSC'+(i+1)),y:qac.map(v=>pConv(v)),type:'bar',name:`Q_ac (${qu})`,marker:{color:'#2c8c99'}}
+    ],{title:'Converter Operating Points',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:`${u} / ${qu}`},margin:{l:55,r:15,t:45,b:65}},{responsive:true});
+  } else { Plotly.purge('opfConverterChart'); }
+  // LMP chart
+  const lp=body.lmp_p||[], lq=body.lmp_q||[], lmp=body.lmp||[];
+  if(lp.length>0){
+    const traces=[{x:lp.map((_,i)=>i+1),y:lp,type:'bar',name:'Active LMP ($/MWh)',marker:{color:'#0b6e4f'}}];
+    if(lq.length>0) traces.push({x:lq.map((_,i)=>i+1),y:lq,type:'bar',name:'Reactive LMP ($/MVArh)',marker:{color:'#2c8c99'}});
+    Plotly.newPlot('opfLmpChart',traces,{title:'Locational Marginal Prices',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.15}},{responsive:true});
+  } else if(lmp.length>0){
+    Plotly.newPlot('opfLmpChart',[{x:lmp.map((_,i)=>i+1),y:lmp,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5},name:'LMP ($/MWh)'}],
+      {title:'Locational Marginal Prices (DC OPF)',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  } else { Plotly.purge('opfLmpChart'); }
+}
+document.getElementById('runAcOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running AC OPF...');const body=await api('/api/session/opf_ac',{});
+  document.getElementById('opfType').textContent='AC';
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  renderOpfDcResults(body);
+  setStatus('AC OPF completed.');}catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runDcOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running DC OPF...');const body=await api('/api/session/opf_dc',{});
+  document.getElementById('opfType').textContent='DC';
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],{title:'DC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  Plotly.purge('opfAuxChart');
+  renderOpfDcResults(body);
+  setStatus('DC OPF completed.');}catch(e){setStatus(e.message,true);}
+};
+
+document.getElementById('runParityOpfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running Parity OPF (full-space IPM)...');const body=await api('/api/session/opf_parity',{});
+  document.getElementById('opfType').textContent='Parity IPM';
+  document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
+  document.getElementById('opfObj').textContent=fmt(body.objective,2);
+  document.getElementById('opfIter').textContent=body.iterations;
+  Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#6a0dad'}}],{title:'Parity OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'Parity OPF AC Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  renderOpfDcResults(body);
+  setStatus('Parity OPF completed.');}catch(e){setStatus(e.message,true);}
+};
+
+/* Short Circuit */
+document.getElementById('runScBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{setStatus('Running short circuit (all buses)...');
+  const body=await api('/api/session/sc',{options:{fault_type:document.getElementById('scFaultType').value,c_factor:Number(document.getElementById('scCFactor').value||1.1)}});
+  document.getElementById('scFault').textContent=body.fault_type;
+  document.getElementById('scBuses').textContent=body.bus_results.length;
+  const ik=body.bus_results.map(r=>r.ikpp_ka);
+  document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+  document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+  const busIds=body.bus_results.map(r=>'Bus '+r.bus_id);
+  Plotly.newPlot('scIkChart',[
+    {x:busIds,y:body.bus_results.map(r=>r.ikpp_ka),type:'bar',name:"Ik'' (initial)",marker:{color:'#0b6e4f'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
+    {x:busIds,y:body.bus_results.map(r=>r.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
+  ],{title:'Short Circuit Currents by Bus (kA)',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  Plotly.newPlot('scSkChart',[{x:body.bus_results.map(r=>r.bus_id),y:body.bus_results.map(r=>r.sk_mva),mode:'lines+markers',line:{color:'#2c8c99',width:2}}],{title:'Sk (SC Power) by Bus',xaxis:{title:'Bus'},yaxis:{title:'MVA'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  document.getElementById('scDetailedChart').innerHTML='';
+  document.getElementById('scContribChart').innerHTML='';
+  document.getElementById('scVremainChart').innerHTML='';
+  setStatus('Short circuit completed. '+body.bus_results.length+' buses analyzed.');}catch(e){setStatus(e.message,true);}
+};
+
+/* Detailed Short Circuit at Selected Buses */
+document.getElementById('runScDetailedBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const busInput=document.getElementById('scFaultBus').value.trim();
+  if(!busInput){setStatus('Enter bus IDs (e.g. 0,3,5) for detailed SC analysis.',true);return;}
+  const busIds=busInput.split(/[,\s]+/).map(Number).filter(n=>!isNaN(n));
+  if(!busIds.length){setStatus('Invalid bus IDs.',true);return;}
+  try{
+    setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
+    const body=await api('/api/session/sc_detailed',{
+      fault_bus_ids:busIds,
+      fault_type:document.getElementById('scFaultType').value,
+      c_factor:Number(document.getElementById('scCFactor').value||1.1),
+    });
+    document.getElementById('scFault').textContent=body.fault_type;
+    document.getElementById('scBuses').textContent=body.results.length+' (detailed)';
+    // Grouped bar: ikss, ip, ib, ik, ith for each fault bus
+    const faultBuses=body.results.map(r=>'Fault@Bus '+r.fault_bus_id);
+    const fb=body.results.map(r=>{const b=r.bus_results.find(x=>x.bus_id===r.fault_bus_id)||{};return b;});
+    Plotly.newPlot('scDetailedChart',[
+      {x:faultBuses,y:fb.map(b=>b.ikss_ka||0),type:'bar',name:'Ik\" (initial)',marker:{color:'#0b6e4f'}},
+      {x:faultBuses,y:fb.map(b=>b.ip_ka||0),type:'bar',name:'ip (peak)',marker:{color:'#e74c3c'}},
+      {x:faultBuses,y:fb.map(b=>b.ib_ka||0),type:'bar',name:'Ib (breaking)',marker:{color:'#2980b9'}},
+      {x:faultBuses,y:fb.map(b=>b.ik_ka||0),type:'bar',name:'Ik (steady)',marker:{color:'#f39c12'}},
+      {x:faultBuses,y:fb.map(b=>b.ith_ka||0),type:'bar',name:'Ith (thermal)',marker:{color:'#8e44ad'}},
+    ],{title:'Detailed SC Currents at Fault Buses (kA)',barmode:'group',
+       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
+       legend:{orientation:'h',y:-0.2}},{responsive:true});
+    document.getElementById('scMaxIk').textContent=fmt(Math.max(...fb.map(b=>b.ikss_ka||0)),3);
+    document.getElementById('scMinIk').textContent=fmt(Math.min(...fb.map(b=>b.ikss_ka||0)),3);
+    // Source contributions stacked bar
+    Plotly.newPlot('scContribChart',[
+      {x:faultBuses,y:fb.map(b=>b.ikss_gen_contrib_ka||0),type:'bar',name:'Generators',marker:{color:'#0b6e4f'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_motor_contrib_ka||0),type:'bar',name:'Motors',marker:{color:'#2c8c99'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_extgrid_contrib_ka||0),type:'bar',name:'External Grid',marker:{color:'#b5651d'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_converter_contrib_ka||0),type:'bar',name:'Converters',marker:{color:'#8e44ad'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_sgen_contrib_ka||0),type:'bar',name:'Static Gens',marker:{color:'#27ae60'}},
+      {x:faultBuses,y:fb.map(b=>b.ikss_load_contrib_ka||0),type:'bar',name:'Loads',marker:{color:'#f39c12'}},
+    ],{title:'SC Current Source Contributions (kA)',barmode:'stack',
+       xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60},
+       legend:{orientation:'h',y:-0.2}},{responsive:true});
+    // Remaining voltage profile for the first fault
+    if(body.results.length>0){
+      const r0=body.results[0];
+      const allBus=r0.bus_results.map(b=>b.bus_id);
+      const vr=r0.bus_results.map(b=>b.v_remaining_pu);
+      Plotly.newPlot('scVremainChart',[{x:allBus,y:vr,type:'bar',
+        marker:{color:vr.map(v=>v<0.8?'#e74c3c':v<0.9?'#f39c12':'#27ae60')}}],
+        {title:'Remaining Voltage During Fault at Bus '+r0.fault_bus_id+' (p.u.)',
+         xaxis:{title:'Bus'},yaxis:{title:'V (pu)',range:[0,1.2]},margin:{l:55,r:15,t:45,b:45},
+         shapes:[{type:'line',y0:0.8,y1:0.8,x0:-0.5,x1:allBus.length-0.5,line:{color:'#e74c3c',dash:'dash',width:1}}]
+        },{responsive:true});
+    }
+    setStatus('Detailed SC complete for bus(es): '+busIds.join(', ')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Init */
+(async function(){await loadCaseLists();setStatus('Ready. Load a built-in case, MATPOWER file, or upload a JSON file.');})();
+
+/* Time-Series PF */
+document.getElementById('runTsPfBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Time-Series PF pipeline (UC \u2192 PF)...');
+    const numSteps=parseInt(document.getElementById('tsNumSteps').value)||24;
+    const skipUC=document.getElementById('tsSkipUC').checked;
+    const runOPF=document.getElementById('tsRunOPF').checked;
+    const body=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:skipUC,run_opf:runOPF});
+    document.getElementById('tsSteps').textContent=body.num_steps;
+    document.getElementById('tsConv').textContent=body.num_converged+'/'+body.num_steps;
+    document.getElementById('tsOPFConv').textContent=body.num_opf_converged+'/'+body.num_steps;
+    document.getElementById('tsCost').textContent='$'+fmt(body.total_generation_cost,0);
+    const hrs=Array.from({length:body.num_steps},(_,i)=>i);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    // Generation dispatch stacked bar
+    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('tsGenDispatchChart',dtraces,{title:'Generation Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    // Voltage mean time series (with min/max band)
+    if(body.vm_mean&&body.vm_mean.length){
+      const vtraces=[];
+      if(body.vm_max&&body.vm_min){
+        vtraces.push({x:hrs,y:body.vm_max,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},name:'Vm max',showlegend:false});
+        vtraces.push({x:hrs,y:body.vm_min,mode:'lines',line:{width:0,color:'rgba(11,110,79,0.3)'},fill:'tonexty',fillcolor:'rgba(11,110,79,0.1)',name:'Vm range'});
+      }
+      vtraces.push({x:hrs,y:body.vm_mean,mode:'lines+markers',line:{color:'#0b6e4f',width:2},name:'Mean Vm'});
+      const allV=[...body.vm_mean,...(body.vm_min||[]),...(body.vm_max||[])].filter(v=>v>0);
+      const vLo=Math.min(...allV),vHi=Math.max(...allV),vP=Math.max((vHi-vLo)*0.15,0.005);
+      Plotly.newPlot('tsVoltChart',vtraces,{title:'Bus Voltage p.u. per Hour',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vLo-vP,vHi+vP]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    }
+    // ESS SOC
+    if(body.ess_soc&&body.ess_soc.length)
+      Plotly.newPlot('tsESSChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si,line:{width:2}})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    setStatus('Time-Series PF complete: '+body.num_converged+'/'+body.num_steps+' steps converged. Cost: $'+fmt(body.total_generation_cost,0)+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Unit Commitment */
+document.getElementById('runUCBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Unit Commitment MILP...');
+    const numSteps=parseInt(document.getElementById('ucNumSteps').value)||24;
+    const body=await api('/api/session/run_uc',{num_steps:numSteps});
+    document.getElementById('ucFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('ucCost').textContent='$'+fmt(body.total_cost,0);
+    document.getElementById('ucNGen').textContent=(body.gen_names||[]).length;
+    document.getElementById('ucNESS').textContent=(body.ess_names||[]).length;
+    const hrs=Array.from({length:(body.gen_dispatch[0]||[]).length},(_,i)=>i);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    const dtraces=(body.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:body.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (body.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:body.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('ucDispatchChart',dtraces,{title:'UC Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    if(body.gen_commit&&body.gen_commit.length)
+      Plotly.newPlot('ucCommitChart',[{z:body.gen_commit,x:hrs,y:body.gen_names,type:'heatmap',colorscale:[[0,'#f5f5f5'],[1,'#0b6e4f']],showscale:true,colorbar:{title:'Commit',tickvals:[0,1],ticktext:['Off','On']}}],{title:'Commitment Schedule',xaxis:{title:'Hour'},margin:{l:110,r:15,t:45,b:45}},{responsive:true});
+    if(body.ess_soc&&body.ess_soc.length)
+      Plotly.newPlot('ucESSSOCChart',(body.ess_soc||[]).map((soc,si)=>({x:hrs,y:soc,mode:'lines+markers',name:body.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    setStatus('Unit Commitment complete. Feasible: '+body.feasible+'. Total cost: $'+fmt(body.total_cost,0));
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Market Clearing (SCUC -> SCED -> ACPF -> LMP -> Settlement) */
+document.getElementById('scenarioToggle').onchange=function(){
+  document.getElementById('scenarioConfigPanel').style.display=this.checked?'block':'none';
+};
+document.getElementById('runMarketBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const useScenario=document.getElementById('scenarioToggle').checked;
+    setStatus('Running market clearing pipeline'+(useScenario?' with scenario generation':'')+'...');
+    const numSteps=parseInt(document.getElementById('mktNumSteps').value)||24;
+    const solverSel=document.getElementById('milpSolverChoice');
+    const milpSolver=solverSel?solverSel.value:'auto';
+    const payload={num_steps:numSteps,period_length_hr:1.0,milp_solver:milpSolver,
+      n_segments:parseInt(document.getElementById('s22BidSegs').value)||3,
+      price_cap:parseFloat(document.getElementById('s22PriceCap').value)||1500,
+      price_floor:parseFloat(document.getElementById('s22PriceFloor').value)||0,
+      mip_gap:parseFloat(document.getElementById('s26MipGap').value)||0.0001,
+      time_limit_sec:parseFloat(document.getElementById('s26TimeLimit').value)||300,
+      lmp_delta:parseFloat(document.getElementById('s26LmpDelta').value)||0.10,
+      enable_n1:document.getElementById('s28EnableN1').checked,
+      max_n1_contingencies:parseInt(document.getElementById('s28MaxN1').value)||50,
+      voll:parseFloat(document.getElementById('s29VOLL').value)||10000,
+      spinning_reserve_req:parseFloat(document.getElementById('s29SpinReq').value)/100.0||0.05,
+    };
+    if(useScenario){
+      payload.scenario={
+        periods_per_day:parseInt(document.getElementById('scenPeriodsPerDay').value)||96,
+        period_length_min:parseFloat(document.getElementById('scenPeriodLen').value)||15,
+        is_workday:document.getElementById('scenWorkday').checked,
+        load_variation_std:parseFloat(document.getElementById('scenLoadNoise').value)||0.05,
+        wind_forecast_error:parseFloat(document.getElementById('scenWindErr').value)||0.20,
+        solar_forecast_error:parseFloat(document.getElementById('scenSolarErr').value)||0.15,
+        seed:parseInt(document.getElementById('scenSeed').value)||0,
+      };
+    }
+    // Show pipeline stages
+    const stgPanel=document.getElementById('pipelineStages');
+    stgPanel.style.display='flex';
+    for(let i=1;i<=9;i++){const el=document.getElementById('stg'+i);el.className='stg';if(i===1)el.className='stg active';}
+
+    const body=await api('/api/session/run_market_clearing',payload);
+
+    // Update pipeline stages based on stages_completed
+    const sc=(body.summary||{}).stages_completed||0;
+    for(let i=1;i<=9;i++){
+      const el=document.getElementById('stg'+i);
+      el.className=i<=sc?'stg done':'stg';
+    }
+
+    const sced=body.sced||{};
+    const lmp=body.lmp||{};
+    const settlements=body.genco_settlements||[];
+    const bids=body.bids||[];
+
+    const scuc=body.scuc||{};
+    document.getElementById('mktFeas').textContent=
+      (scuc.converged?'\u2705':'\u274c')+'SCUC '+
+      (sced.converged?'\u2705':'\u274c')+'SCED '+
+      (lmp.converged?'\u2705':'\u274c')+'LMP';
+    document.getElementById('mktFeas').style.fontSize='11px';
+    document.getElementById('mktCost').textContent='$'+fmt((body.summary||{}).total_system_cost||0,0);
+    document.getElementById('mktNGen').textContent=(settlements||[]).length;
+    const solverEl=document.getElementById('mktSolver');
+    if(solverEl) solverEl.textContent=(body.summary||{}).solver_name||'N/A';
+    const valEl=document.getElementById('mktValidation');
+    const val=body.validation||{};
+    if(valEl) valEl.textContent=val.all_checks_passed?'\u2705 PASS':'\u274c FAIL';
+    document.getElementById('mktAvgLmp').textContent=fmt(lmp.avg_lmp||0,2);
+
+    // SCED dispatch stacked‐bar chart (generators × time steps)
+    const dsp=sced.dispatch||[];
+    if(dsp.length){
+      const T2=dsp[0].length;
+      const hrs2=Array.from({length:T2},(_,i)=>i);
+      const dspTraces=dsp.map((row,gi)=>({
+        x:hrs2,y:row,type:'bar',name:settlements[gi]?settlements[gi].name:('Gen '+gi)
+      }));
+      Plotly.newPlot('mktDispatchChart',dspTraces,{title:'SCED Generator Dispatch (MW)',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else { document.getElementById('mktDispatchChart').innerHTML=''; }
+
+    /* --- Validation panel --- */
+    const vp=document.getElementById('marketValidationPanel');
+    if(vp && val.sced_power_balance){
+      let html='<h3 style="margin:0 0 8px">Market Validation Results</h3>';
+      // Power Balance (use SCED result)
+      const pb=val.sced_power_balance||{};
+      html+='<h4>Power Balance Check '+(pb.balanced?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Hour</th><th>Gen (MW)</th><th>Load (MW)</th><th>Mismatch (MW)</th></tr></thead><tbody>';
+      const pmm=pb.mismatch||[];
+      const pGen=pb.gen_total||[];
+      const pLoad=pb.load_total||[];
+      for(let t=0;t<pmm.length;t++){
+        const mm=pmm[t], gn=pGen[t]||0, ld=pLoad[t]||0;
+        const cls=Math.abs(mm)>1e-3?'style="color:red"':'';
+        html+=`<tr><td>${t}</td><td>${fmt(gn,2)}</td><td>${fmt(ld,2)}</td><td ${cls}>${fmt(mm,4)}</td></tr>`;
+      }
+      html+='</tbody></table>';
+      html+='<p>Max mismatch: '+fmt(pb.max_abs_mismatch||0,4)+' MW</p>';
+      // Budget Balance
+      const bb=val.lmp_budget||{};
+      html+='<h4>LMP Budget Balance '+(bb.balanced?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value ($)</th></tr></thead><tbody>';
+      html+='<tr><td>Total Load Payment</td><td>'+fmt(bb.total_load_payment||0,2)+'</td></tr>';
+      html+='<tr><td>Total Gen Payment</td><td>'+fmt(bb.total_gen_payment||0,2)+'</td></tr>';
+      html+='<tr><td>Total Congestion Rent</td><td>'+fmt(bb.total_congestion_rent||0,2)+'</td></tr>';
+      html+='<tr><td>Imbalance</td><td>'+fmt(bb.max_abs_imbalance||0,4)+'</td></tr>';
+      html+='</tbody></table>';
+      html+='<p>Balance: Load Payment \u2248 Gen Payment + Congestion Rent</p>';
+      // Generator Income
+      const gens=val.gen_income||[];
+      const allProfitable=gens.every(g=>g.profitable);
+      html+='<h4>Generator Income '+(allProfitable?'\u2705':'\u274c')+'</h4>';
+      html+='<table class="tbl"><thead><tr><th>Generator</th><th>LMP Revenue ($)</th><th>Bid Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th><th>Profit ($)</th><th>Profitable</th></tr></thead><tbody>';
+      gens.forEach(g=>{
+        html+=`<tr><td>${g.name||''}</td><td>${fmt(g.lmp_revenue||0,2)}</td><td>${fmt(g.bid_cost||0,2)}</td><td>${fmt(g.startup_cost||0,2)}</td><td>${fmt(g.no_load_cost||0,2)}</td><td>${fmt(g.profit||0,2)}</td><td>${g.profitable?'\u2705':'\u274c'}</td></tr>`;
+      });
+      html+='</tbody></table>';
+      // ACPF Adjustment Summary
+      const adj=body.acpf_adjustment||{};
+      if(adj.enabled){
+        html+='<h4>AC Power Flow Post-Check</h4>';
+        html+='<table class="tbl"><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';
+        html+='<tr><td>Converged Before Adjustment</td><td>'+adj.num_converged_before+' / '+(adj.periods||[]).length+'</td></tr>';
+        html+='<tr><td>Converged After Adjustment</td><td>'+adj.num_converged_after+' / '+(adj.periods||[]).length+'</td></tr>';
+        html+='<tr><td>Periods Adjusted</td><td>'+adj.num_adjusted+'</td></tr>';
+        html+='<tr><td>Max Adjustment</td><td>'+fmt(adj.max_adjustment_mw||0,4)+' MW</td></tr>';
+        html+='</tbody></table>';
+      }
+      vp.innerHTML=html;
+      vp.style.display='block';
+    } else if(vp){
+      vp.style.display='none';
+    }
+
+    // Bid curves by GenCo
+    const bidTraces=[];
+    (bids||[]).forEach((b,gi)=>{
+      let x=[0], y=[0], cum=0;
+      (b.segments||[]).forEach(seg=>{
+        const q=Number(seg.quantity||0), p=Number(seg.price||0);
+        x.push(cum); y.push(p);
+        cum+=q;
+        x.push(cum); y.push(p);
+      });
+      bidTraces.push({x,y,mode:'lines',name:b.generator_name||('Gen '+gi),line:{shape:'hv',width:2}});
+    });
+    Plotly.newPlot('marketBidChart',bidTraces,{title:'GenCo Bidding Curves (Piecewise Linear)',xaxis:{title:'MW'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.25}},{responsive:true});
+
+    // Scenario profile charts (if scenario generation was used)
+    const scen=body.scenario||{};
+    if(scen.num_periods>0){
+      const nT=scen.num_periods;
+      const dt=scen.period_length_hr||0.25;
+      const hrs=Array.from({length:nT},(_,i)=>(i*dt).toFixed(2));
+      const traces=[];
+      if(scen.aggregate_load_profile) traces.push({x:hrs,y:scen.aggregate_load_profile,mode:'lines',name:'Agg Load (multiplier)',line:{color:'#e74c3c',width:2}});
+      // Show all wind source profiles (wind_profile_0, wind_profile_1, ...)
+      for(let w=0;w<20;w++){
+        const key='wind_profile_'+w;
+        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Wind #'+w+' CF',line:{color:'hsl('+(200+w*30)+',70%,50%)',width:1.5,dash:w>0?'dot':'solid'}});
+        else break;
+      }
+      // Show all solar source profiles
+      for(let s=0;s<20;s++){
+        const key='solar_profile_'+s;
+        if(scen[key]) traces.push({x:hrs,y:scen[key],mode:'lines',name:'Solar #'+s+' CF',line:{color:'hsl('+(30+s*20)+',80%,50%)',width:1.5,dash:s>0?'dot':'solid'}});
+        else break;
+      }
+      if(traces.length) Plotly.newPlot('scenarioProfileChart',traces,{title:'Scenario-Generated Profiles ('+nT+' periods, '+dt+'h each)'+(scen.bus_load_types?' — Load types: '+scen.bus_load_types.join(', '):''),xaxis:{title:'Hour'},yaxis:{title:'Profile Value'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+      else document.getElementById('scenarioProfileChart').innerHTML='';
+    } else {
+      document.getElementById('scenarioProfileChart').innerHTML='';
+    }
+
+    // LMP heatmap: bus x hour
+    if(lmp.nodal_lmp && lmp.nodal_lmp.length){
+      const nb=lmp.nodal_lmp.length;
+      const T=(lmp.nodal_lmp[0]||[]).length;
+      const hrs=Array.from({length:T},(_,i)=>i);
+      const buses=Array.from({length:nb},(_,i)=>'Bus '+i);
+      Plotly.newPlot('marketLmpHeatmap',[{z:lmp.nodal_lmp,x:hrs,y:buses,type:'heatmap',colorscale:'YlGnBu',colorbar:{title:'$/MWh'}}],{title:'LMP Heatmap',xaxis:{title:'Hour'},margin:{l:80,r:35,t:45,b:45}},{responsive:true});
+
+      const eLmp=lmp.energy_lmp||[];
+      const cLmp=lmp.congestion_lmp||[];
+      let table='<thead><tr><th>Bus</th><th>Hour</th><th>Energy LMP</th><th>Congestion LMP</th><th>Total LMP</th></tr></thead><tbody>';
+      for(let b=0;b<nb;b++){
+        for(let t=0;t<T;t++){
+          const e=Number((eLmp[b]||[])[t]||0);
+          const c=Number((cLmp[b]||[])[t]||0);
+          const total=Number((lmp.nodal_lmp[b]||[])[t]||0);
+          table += `<tr><td>${b}</td><td>${t}</td><td>${fmt(e,3)}</td><td>${fmt(c,3)}</td><td>${fmt(total,3)}</td></tr>`;
+        }
+      }
+      table += '</tbody>';
+      document.getElementById('marketLmpDecompTable').innerHTML=table;
+    } else {
+      document.getElementById('marketLmpHeatmap').innerHTML='';
+      document.getElementById('marketLmpDecompTable').innerHTML='';
+    }
+
+    // GenCo profit bars (§2.9 settlement with uplift)
+    Plotly.newPlot('marketGenCoProfit',[
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.energy_revenue||0),type:'bar',name:'Energy Rev.',marker:{color:'#2c8c99'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>(s.uplift_payment||0)),type:'bar',name:'Uplift (§2.9)',marker:{color:'#27ae60'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.total_cost||0),type:'bar',name:'Total Cost',marker:{color:'#b5651d'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.market_profit||0),type:'scatter',mode:'markers+lines',name:'Market Profit',marker:{color:'#d32f2f',size:9},line:{color:'#d32f2f',dash:'dot'}},
+      {x:settlements.map(s=>s.name||('Gen '+s.generator_index)),y:settlements.map(s=>s.profit||0),type:'scatter',mode:'markers+lines',name:'Net Profit (after uplift)',marker:{color:'#0b6e4f',size:9},line:{color:'#0b6e4f'}}
+    ],{title:'§2.9 GenCo Settlement (Revenue / Uplift / Cost / Market Profit / Net Profit)',barmode:'group',xaxis:{tickangle:-35},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
+
+    // GenCo Income Derivation Table — direct per-generator income breakdown
+    if(settlements.length){
+      let ht='<h3 style="margin:0 0 8px">§2.9 GenCo Income Derivation</h3>';
+      ht+='<table class="tbl"><thead><tr><th>Generator</th><th>Energy Revenue ($)</th><th>Reserve Revenue ($)</th>';
+      ht+='<th>Market Income ($)</th><th>Energy Cost ($)</th><th>Startup ($)</th><th>No-Load ($)</th>';
+      ht+='<th>Total Cost ($)</th><th>Market Profit ($)</th><th>Uplift ($)</th><th>Total Revenue ($)</th><th>Net Profit ($)</th></tr></thead><tbody>';
+      let totIncome=0,totCost=0,totMktProfit=0,totUplift=0,totProfit=0;
+      settlements.forEach(s=>{
+        const mi=s.market_income||((s.energy_revenue||0)+(s.reserve_revenue||0));
+        const tc=s.total_cost||0;
+        const mp=s.market_profit||(mi-tc);
+        totIncome+=mi; totCost+=tc; totMktProfit+=mp; totUplift+=(s.uplift_payment||0); totProfit+=(s.profit||0);
+        ht+=`<tr><td>${s.name||('Gen '+s.generator_index)}</td><td>${fmt(s.energy_revenue||0,2)}</td><td>${fmt(s.reserve_revenue||0,2)}</td>`;
+        ht+=`<td style="font-weight:bold">${fmt(mi,2)}</td><td>${fmt(s.energy_cost||0,2)}</td><td>${fmt(s.startup_cost||0,2)}</td><td>${fmt(s.no_load_cost||0,2)}</td>`;
+        ht+=`<td>${fmt(tc,2)}</td><td style="color:${mp>=0?'green':'red'};font-weight:bold">${fmt(mp,2)}</td><td>${fmt(s.uplift_payment||0,2)}</td><td>${fmt(s.total_revenue||0,2)}</td>`;
+        ht+=`<td style="color:${(s.profit||0)>=0?'green':'red'}">${fmt(s.profit||0,2)}</td></tr>`;
+      });
+      ht+=`<tr style="font-weight:bold;border-top:2px solid #333"><td>Total</td><td></td><td></td>`;
+      ht+=`<td>${fmt(totIncome,2)}</td><td></td><td></td><td></td>`;
+      ht+=`<td>${fmt(totCost,2)}</td><td style="color:${totMktProfit>=0?'green':'red'}">${fmt(totMktProfit,2)}</td><td>${fmt(totUplift,2)}</td><td>${fmt(totIncome+totUplift,2)}</td>`;
+      ht+=`<td style="color:${totProfit>=0?'green':'red'}">${fmt(totProfit,2)}</td></tr>`;
+      ht+='</tbody></table>';
+      ht+='<p style="font-size:11px;color:#666">Market Profit = Market Income \u2212 Total Cost (pre-uplift, can be negative). Uplift = max(0, \u2212Market Profit). Net Profit = Market Profit + Uplift (always \u2265 0 by §2.9).</p>';
+      document.getElementById('mktGenCoIncomeTable').innerHTML=ht;
+    } else { document.getElementById('mktGenCoIncomeTable').innerHTML=''; }
+
+    const pfPost=body.pf_post_check||{};
+    const pfResiduals=pfPost.residuals||[];
+    const pfConv=pfPost.converged||[];
+    if(pfResiduals.length){
+      const hrs=Array.from({length:pfResiduals.length},(_,i)=>i);
+      Plotly.newPlot('marketPfResidualChart',[
+        {x:hrs,y:pfResiduals,type:'scatter',mode:'lines+markers',name:'Residual',line:{color:'#b5651d',width:2}},
+        {x:hrs,y:pfConv.map(v=>v?1:0),type:'bar',name:'Converged',yaxis:'y2',marker:{color:'#0b6e4f',opacity:0.35}}
+      ],{title:'Nonlinear PF Post-Check by Hour',xaxis:{title:'Hour'},yaxis:{title:'Residual'},yaxis2:{title:'Converged (0/1)',overlaying:'y',side:'right',range:[-0.05,1.05]},margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    } else {
+      document.getElementById('marketPfResidualChart').innerHTML='';
+    }
+
+    // --- Voltage Profile Chart (bus voltage magnitudes across converged periods) ---
+    const adjPeriods=(body.acpf_adjustment||{}).periods||[];
+    const convPeriods=adjPeriods.filter(p=>p.converged_after&&p.vm_pu&&p.vm_pu.length>0);
+    if(convPeriods.length>0){
+      // Heatmap: buses × periods
+      const nb2=convPeriods[0].vm_pu.length;
+      const vmMatrix=convPeriods.map(p=>p.vm_pu);
+      const periods=convPeriods.map(p=>p.period);
+      const buses=Array.from({length:nb2},(_,i)=>'Bus '+i);
+      Plotly.newPlot('mktVoltageProfileChart',[{
+        z:vmMatrix,x:buses,y:periods,type:'heatmap',
+        colorscale:[[0,'#d32f2f'],[0.25,'#ff9800'],[0.5,'#4caf50'],[0.75,'#ff9800'],[1,'#d32f2f']],
+        zmin:0.90,zmax:1.10,
+        colorbar:{title:'V (pu)',len:0.7}
+      }],{title:'Bus Voltage Profile (pu) — AC PF',
+          xaxis:{title:'Bus'},yaxis:{title:'Period'},
+          margin:{l:55,r:80,t:45,b:55}},{responsive:true});
+
+      // Reactive power chart: bus Q injection for last converged period
+      const lastP=convPeriods[convPeriods.length-1];
+      if(lastP.bus_q_mvar&&lastP.bus_q_mvar.length>0){
+        const busLabels=Array.from({length:lastP.bus_q_mvar.length},(_,i)=>'Bus '+i);
+        Plotly.newPlot('mktReactivePowerChart',[{
+          x:busLabels,y:lastP.bus_q_mvar,type:'bar',
+          marker:{color:lastP.bus_q_mvar.map(v=>v>=0?'#2c8c99':'#b5651d')}
+        }],{title:'Bus Reactive Power Injection (Mvar) — Last Converged Period',
+            xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'Mvar'},
+            margin:{l:55,r:15,t:45,b:55}},{responsive:true});
+      } else { document.getElementById('mktReactivePowerChart').innerHTML=''; }
+    } else {
+      document.getElementById('mktVoltageProfileChart').innerHTML='';
+      document.getElementById('mktReactivePowerChart').innerHTML='';
+    }
+
+    // --- Voltage & Thermal Violation Summary ---
+    const violPanel=document.getElementById('mktViolationPanel');
+    const adjInfo=body.acpf_adjustment||{};
+    const totalVV=adjInfo.total_voltage_violations||0;
+    const totalTV=adjInfo.total_thermal_violations||0;
+    if(totalVV>0||totalTV>0){
+      let vhtml='<h3 style="margin:0 0 8px">AC PF Violation Summary</h3>';
+      vhtml+='<p>Total voltage violations: <b>'+totalVV+'</b>, Total thermal violations: <b>'+totalTV+'</b></p>';
+      // Collect violations across periods
+      let vRows=[];let tRows=[];
+      (adjInfo.periods||[]).forEach(p=>{
+        (p.voltage_violations||[]).forEach(v=>{
+          vRows.push({period:p.period,bus:v.bus,vm:v.vm_pu,limit:v.limit,type:v.is_low?'Under-voltage':'Over-voltage'});
+        });
+        (p.thermal_violations||[]).forEach(v=>{
+          tRows.push({period:p.period,branch:v.branch,flow:v.flow_mva,rating:v.rating_mva});
+        });
+      });
+      if(vRows.length){
+        vhtml+='<h4>Voltage Violations \u26a0\ufe0f</h4>';
+        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Bus</th><th>V (pu)</th><th>Limit (pu)</th><th>Type</th></tr></thead><tbody>';
+        vRows.slice(0,50).forEach(r=>{vhtml+=`<tr><td>${r.period}</td><td>${r.bus}</td><td style="color:red">${fmt(r.vm,4)}</td><td>${fmt(r.limit,3)}</td><td>${r.type}</td></tr>`;});
+        if(vRows.length>50)vhtml+='<tr><td colspan="5">... '+(vRows.length-50)+' more</td></tr>';
+        vhtml+='</tbody></table>';
+      }
+      if(tRows.length){
+        vhtml+='<h4>Thermal Violations \u26a0\ufe0f</h4>';
+        vhtml+='<table class="tbl"><thead><tr><th>Period</th><th>Branch</th><th>Flow (MVA)</th><th>Rating (MVA)</th><th>Overload %</th></tr></thead><tbody>';
+        tRows.slice(0,50).forEach(r=>{const pct=r.rating>0?100*(r.flow/r.rating-1):0;vhtml+=`<tr><td>${r.period}</td><td>${r.branch}</td><td style="color:red">${fmt(r.flow,2)}</td><td>${fmt(r.rating,2)}</td><td>${fmt(pct,1)}%</td></tr>`;});
+        if(tRows.length>50)vhtml+='<tr><td colspan="5">... '+(tRows.length-50)+' more</td></tr>';
+        vhtml+='</tbody></table>';
+      }
+      violPanel.innerHTML=vhtml;violPanel.style.display='block';
+    } else { violPanel.innerHTML='';violPanel.style.display='none'; }
+
+    // --- §2.8 Security Check Panel ---
+    const secPanel=document.getElementById('mktSecurityPanel');
+    const secData=body.security_check||{};
+    if(secPanel && secData.enabled){
+      let shtml='<h3 style="margin:0 0 8px">§2.8 Security Check Results '+(secData.all_secure?'\u2705':'\u274c')+'</h3>';
+      shtml+='<table class="tbl"><thead><tr><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>';
+      shtml+='<tr><td>Power Balance Adequacy</td><td>'+(secData.power_balance_adequate?'\u2705 Pass':'\u274c Fail')+'</td>';
+      shtml+='<td>Reserve margin: '+fmt(secData.reserve_margin_mw||0,1)+' MW (required: '+fmt(secData.reserve_requirement_mw||0,1)+' MW)</td></tr>';
+      shtml+='<tr><td>Base Case AC PF</td><td>'+(secData.base_case_secure?'\u2705 Secure':'\u274c Insecure')+'</td>';
+      shtml+='<td>Voltage violations: '+(secData.base_voltage_violations||0)+', Thermal violations: '+(secData.base_thermal_violations||0)+'</td></tr>';
+      shtml+='<tr><td>N-1 Contingency</td><td>'+((secData.n1_contingencies_failed||0)===0?'\u2705 Secure':'\u274c '+(secData.n1_contingencies_failed)+' failures')+'</td>';
+      shtml+='<td>Checked: '+(secData.n1_contingencies_checked||0)+', Failed: '+(secData.n1_contingencies_failed||0)+'</td></tr>';
+      shtml+='<tr><td>Curtailment Fairness</td><td>'+(secData.curtailment_fair?'\u2705 Fair':'\u274c Unfair')+'</td>';
+      shtml+='<td>Fairness index: '+fmt(secData.curtailment_fairness_index||0,3)+' (max ratio: '+fmt(secData.max_curtailment_ratio||0,3)+', min: '+fmt(secData.min_curtailment_ratio||0,3)+')</td></tr>';
+      shtml+='</tbody></table>';
+      // N-1 detail table for failed contingencies
+      const n1r=(secData.n1_results||[]).filter(r=>!r.secure);
+      if(n1r.length){
+        shtml+='<h4>N-1 Contingency Failures</h4>';
+        shtml+='<table class="tbl"><thead><tr><th>Branch</th><th>Name</th><th>Converged</th><th>Max Loading %</th><th>Max V Dev (pu)</th><th>V Viol</th><th>Thermal Viol</th></tr></thead><tbody>';
+        n1r.slice(0,30).forEach(r=>{
+          shtml+=`<tr><td>${r.branch}</td><td>${r.branch_name||''}</td><td>${r.converged?'Yes':'No'}</td>`;
+          shtml+=`<td style="color:${r.max_loading_pct>100?'red':'inherit'}">${fmt(r.max_loading_pct,1)}</td>`;
+          shtml+=`<td>${fmt(r.max_v_deviation_pu,4)}</td><td>${r.v_violations}</td><td>${r.thermal_violations}</td></tr>`;
+        });
+        if(n1r.length>30)shtml+='<tr><td colspan="7">... '+(n1r.length-30)+' more</td></tr>';
+        shtml+='</tbody></table>';
+      }
+      secPanel.innerHTML=shtml;secPanel.style.display='block';
+    } else if(secPanel){ secPanel.innerHTML='';secPanel.style.display='none'; }
+
+    // --- PTDF Heatmap ---
+    const ptdfV=body.ptdf_verification||{};
+    if(ptdfV.computed&&ptdfV.ptdf_matrix&&ptdfV.ptdf_matrix.length){
+      const bLabels=Array.from({length:ptdfV.num_buses},(_,i)=>'Bus '+i);
+      const lLabels=ptdfV.branch_labels||Array.from({length:ptdfV.num_branches},(_,i)=>'Br '+i);
+      Plotly.newPlot('mktPtdfHeatmap',[{
+        z:ptdfV.ptdf_matrix,x:bLabels,y:lLabels,type:'heatmap',
+        colorscale:'RdBu',zmid:0,
+        colorbar:{title:'PTDF',len:0.7}
+      }],{title:'Power Transfer Distribution Factors (PTDF)',
+          xaxis:{title:'Bus'},yaxis:{title:'Branch'},
+          margin:{l:90,r:60,t:45,b:55}},{responsive:true});
+
+      // PTDF vs ACPF verification bar chart
+      if(ptdfV.max_error_mw&&ptdfV.max_error_mw.length){
+        Plotly.newPlot('mktPtdfVerifyChart',[{
+          x:lLabels,y:ptdfV.max_error_mw,type:'bar',
+          marker:{color:ptdfV.max_error_mw.map(e=>e>5?'#d32f2f':e>1?'#ff9800':'#4caf50')}
+        }],{title:'PTDF vs AC PF Verification — Max Error per Branch (MW)<br>Overall Max: '+fmt(ptdfV.overall_max_error_mw,3)+' MW ('+fmt(ptdfV.overall_max_error_pct,1)+'% of rating), Mean: '+fmt(ptdfV.overall_mean_error_mw,3)+' MW',
+            xaxis:{title:'Branch',tickangle:-45},yaxis:{title:'Max Error (MW)'},
+            margin:{l:55,r:15,t:65,b:70}},{responsive:true});
+      } else { document.getElementById('mktPtdfVerifyChart').innerHTML=''; }
+    } else {
+      document.getElementById('mktPtdfHeatmap').innerHTML='';
+      document.getElementById('mktPtdfVerifyChart').innerHTML='';
+    }
+
+    // --- GIS Network Map with LMP colouring ---
+    renderMktGeoMap(body, lmp, sced);
+
+    setStatus('Market clearing complete. Avg LMP: $'+fmt(lmp.avg_lmp||0,2)+', renewable penetration: '+fmt((body.summary||{}).renewable_penetration||0,1)+'%, PF max residual: '+fmt(pfPost.max_residual||0,4)+
+      (totalVV>0?', \u26a0 '+totalVV+' voltage violations':'')+
+      (totalTV>0?', \u26a0 '+totalTV+' thermal violations':'')+
+      (secData.enabled?(secData.all_secure?', \u2705 Security check passed':' \u274c Security check failed'):'')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Carbon Flow Analysis */
+document.getElementById('runCarbonBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Carbon Flow Analysis (proportional tracing + matrix method)...');
+    const body=await api('/api/session/run_carbon',{});
+    const ts=body.tracing_summary||{};
+    document.getElementById('carbonGenEmit').textContent=fmt(ts.total_generation_emissions_tco2,2);
+    document.getElementById('carbonLoadEmit').textContent=fmt(ts.total_load_emissions_tco2,2);
+    document.getElementById('carbonLossEmit').textContent=fmt(ts.total_loss_emissions_tco2,3);
+    document.getElementById('carbonMatrix').textContent=body.matrix_solved?'Yes':'No';
+    // Carbon intensity by bus
+    if(body.bus_carbon&&body.bus_carbon.length){
+      const ci=body.bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+      const mx=Math.max(...ci)||1;
+      Plotly.newPlot('carbonBusChart',[{x:body.bus_carbon.map(b=>'Bus '+b.bus_index),y:ci,type:'bar',
+        marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
+        text:ci.map(v=>v.toFixed(4)),textposition:'auto'}],
+        {title:'AC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+    }
+    // DC bus carbon intensity
+    if(body.dc_bus_carbon&&body.dc_bus_carbon.length){
+      const dci=body.dc_bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+      const dmx=Math.max(...dci)||1;
+      Plotly.newPlot('carbonDcBusChart',[{x:body.dc_bus_carbon.map(b=>'DC Bus '+b.bus_index),y:dci,type:'bar',
+        marker:{color:dci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:dmx,showscale:true,colorbar:{title:'tCO\u2082/MWh',len:0.7}},
+        text:dci.map(v=>v.toFixed(4)),textposition:'auto'}],
+        {title:'DC Bus Carbon Intensity (tCO\u2082/MWh)',xaxis:{title:'DC Bus',tickangle:-45},yaxis:{title:'tCO\u2082/MWh'},margin:{l:55,r:80,t:45,b:60}},{responsive:true});
+    } else { document.getElementById('carbonDcBusChart').innerHTML=''; }
+    // Per-load total emissions bar
+    if(body.load_carbon&&body.load_carbon.length){
+      Plotly.newPlot('carbonLoadChart',[{x:body.load_carbon.map(l=>'Load '+l.load_index+' B'+l.bus),
+        y:body.load_carbon.map(l=>l.total_emissions_tco2),type:'bar',
+        marker:{color:'#c34d4d'}}],
+        {title:'Load Carbon Emissions (tCO\u2082)',xaxis:{title:'',tickangle:-35},yaxis:{title:'tCO\u2082'},margin:{l:55,r:15,t:45,b:70}},{responsive:true});
+    }
+    // Branch carbon emissions
+    if(body.branch_carbon&&body.branch_carbon.length){
+      const bc=body.branch_carbon.filter(b=>b.total_emissions_tco2>1e-6);
+      if(bc.length) Plotly.newPlot('carbonBranchChart',[
+        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.loss_mw),type:'bar',name:'Loss MW',marker:{color:'#b5651d'}},
+        {x:bc.map(b=>b.from_bus+'\u2192'+b.to_bus),y:bc.map(b=>b.total_emissions_tco2),type:'bar',name:'Emissions tCO\u2082',marker:{color:'#8e44ad'},yaxis:'y2'},
+      ],{title:'Branch Loss & Carbon Emissions',barmode:'group',xaxis:{title:'Branch',tickangle:-45},
+         yaxis:{title:'Loss MW',side:'left'},yaxis2:{title:'tCO\u2082',overlaying:'y',side:'right'},
+         margin:{l:55,r:55,t:45,b:70},legend:{orientation:'h',y:-0.3}},{responsive:true});
+      else document.getElementById('carbonBranchChart').innerHTML='';
+    } else { document.getElementById('carbonBranchChart').innerHTML=''; }
+    // Sankey: generators -> loads
+    if(body.sankey_sources&&body.sankey_sources.length){
+      Plotly.newPlot('carbonSankeyChart',[{type:'sankey',orientation:'h',
+        node:{pad:12,thickness:18,line:{color:'#ccc',width:0.5},label:body.sankey_labels,
+          color:body.sankey_labels.map((_,i)=>i<(SYS.generators||[]).length?'#0b6e4f':'#2c8c99')},
+        link:{source:body.sankey_sources,target:body.sankey_targets,value:body.sankey_values,
+          color:'rgba(44,140,153,0.3)'}}],
+        {title:'Carbon Flow Sankey: Generators \u2192 Loads (MW)',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
+    } else {
+      document.getElementById('carbonSankeyChart').innerHTML='<div style="padding:20px;color:var(--muted);">No generator-load supply data for Sankey (run AC power flow first or check case data).</div>';
+    }
+    setStatus('Carbon analysis complete. Gen: '+fmt(ts.total_generation_emissions_tco2,2)+' tCO\u2082, Load: '+fmt(ts.total_load_emissions_tco2,2)+' tCO\u2082. Balance err: '+fmt(ts.balance_error_pct,4)+'%.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Reliability Assessment (Monte Carlo) */
+let relLastNSQ=null, relLastSEQ=null, relLastFD=null, relLastResilience=null;
+
+function getRelOpts(){
+  return {
+    load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
+    cov_threshold: parseFloat(document.getElementById('relCovThresh').value)||0.05,
+    seed: parseInt(document.getElementById('relSeed').value)||0,
+    apply_ieee24_data: document.getElementById('relApplyIEEE24').checked,
+    compute_tail_risk: document.getElementById('relTailRisk').checked,
+    var_confidence: parseFloat(document.getElementById('relVarConf').value)||0.95,
+  };
+}
+
+function updateRelKPIs(body, method){
+  document.getElementById('relMethod').textContent=method;
+  document.getElementById('relEENS').textContent=fmt(body.eens_mwh_yr,1);
+  document.getElementById('relLOLE').textContent=fmt(body.lole_hr_yr,2);
+  document.getElementById('relLOLF').textContent=body.lolf_occ_yr!==undefined?fmt(body.lolf_occ_yr,2):'N/A';
+  document.getElementById('relPLC').textContent=fmt(body.plc*100,2);
+  document.getElementById('relCoV').textContent=fmt(body.final_cov,4);
+  document.getElementById('relIters').textContent=body.iterations_used;
+  
+  // Update tail risk KPIs if available
+  const tailKPIs=document.getElementById('relTailKPIs');
+  if(body.tail_risk&&(body.tail_risk.eens_var>0||body.tail_risk.eens_cvar>0)){
+    tailKPIs.style.display='flex';
+    document.getElementById('relEENSVar').textContent=fmt(body.tail_risk.eens_var,1);
+    document.getElementById('relEENSCVar').textContent=fmt(body.tail_risk.eens_cvar,1);
+    document.getElementById('relLOLEVar').textContent=fmt(body.tail_risk.lole_var,2);
+    document.getElementById('relLOLECVar').textContent=fmt(body.tail_risk.lole_cvar,2);
+  } else {
+    tailKPIs.style.display='none';
+  }
+}
+
+function updateFDKPIs(body){
+  document.getElementById('relMethod').textContent='F&D';
+  document.getElementById('relEENS').textContent='N/A';  // F&D doesn't compute EENS
+  document.getElementById('relLOLE').textContent=fmt(body.lole_fd,2);
+  document.getElementById('relLOLF').textContent=fmt(body.lolf_fd,2);
+  document.getElementById('relPLC').textContent=fmt(body.lolp*100,4);
+  document.getElementById('relCoV').textContent='N/A';
+  document.getElementById('relIters').textContent='Analytical';
+  document.getElementById('relTailKPIs').style.display='none';
+}
+
+function plotRelConvergence(body, title){
+  if(body.eens_history&&body.eens_history.length){
+    const iters=body.eens_history.map((_,i)=>i+1);
+    Plotly.newPlot('relConvergenceChart',[
+      {x:iters,y:body.eens_history,mode:'lines',name:'EENS (MWh/yr)',line:{color:'#0b6e4f'}},
+      {x:iters,y:body.cov_history,mode:'lines',name:'CoV',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
+    ],{title:title+' Convergence',xaxis:{title:'Iteration'},yaxis:{title:'EENS (MWh/yr)',side:'left'},
+       yaxis2:{title:'CoV',overlaying:'y',side:'right',rangemode:'tozero'},
+       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+  }
+}
+
+function plotNodalEENS(body){
+  if(body.nodal_eens_mwh_yr&&body.nodal_eens_mwh_yr.length){
+    const nz=body.nodal_eens_mwh_yr.map((v,i)=>({bus:i+1,eens:v})).filter(x=>x.eens>0.01);
+    if(nz.length){
+      Plotly.newPlot('relNodalEENSChart',[{x:nz.map(x=>'Bus '+x.bus),y:nz.map(x=>x.eens),type:'bar',
+        marker:{color:'#c34d4d'}}],{title:'Nodal EENS (MWh/yr)',xaxis:{title:'Bus',tickangle:-45},
+        yaxis:{title:'MWh/yr'},margin:{l:60,r:15,t:45,b:60}},{responsive:true});
+    } else {
+      document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No nodal EENS (all buses have zero curtailment)</div>';
+    }
+  }
+}
+
+function plotCriticalComponents(body){
+  if(body.critical_components&&body.critical_components.length){
+    const top10=body.critical_components.slice(0,10);
+    Plotly.newPlot('relCriticalChart',[{
+      x:top10.map(c=>c.importance*100),
+      y:top10.map(c=>(c.is_generator?'Gen ':'Br ')+c.index),
+      type:'bar',orientation:'h',
+      marker:{color:top10.map(c=>c.is_generator?'#0b6e4f':'#2c8c99')}
+    }],{title:'Top Critical Components (% importance)',xaxis:{title:'Importance (%)'},
+       yaxis:{autorange:'reversed'},margin:{l:80,r:15,t:45,b:50}},{responsive:true});
+  } else {
+    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">No critical component data (no loss events detected)</div>';
+  }
+}
+
+document.getElementById('runNsqBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
+    setStatus('Running Non-Sequential Monte Carlo ('+opts.max_iterations+' samples)...');
+    document.getElementById('relStatus').textContent='Running NSQ MC...';
+    const body=await api('/api/session/run_reliability_nsq',opts);
+    relLastNSQ=body;
+    updateRelKPIs(body,'NSQ');
+    plotRelConvergence(body,'NSQ MC');
+    plotNodalEENS(body);
+    plotCriticalComponents(body);
+    document.getElementById('relCrossValChart').innerHTML='';
+    const conv=body.converged?'Converged':'Max iterations';
+    document.getElementById('relStatus').textContent='NSQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr';
+    setStatus('NSQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, PLC='+fmt(body.plc*100,2)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runSeqBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
+    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
+    setStatus('Running Sequential Monte Carlo ('+opts.max_years+' years, '+opts.hours_per_year+' hr/yr)...');
+    document.getElementById('relStatus').textContent='Running SEQ MC (this may take a while)...';
+    const body=await api('/api/session/run_reliability_seq',opts);
+    relLastSEQ=body;
+    updateRelKPIs(body,'SEQ');
+    plotRelConvergence(body,'SEQ MC');
+    plotNodalEENS(body);
+    plotCriticalComponents(body);
+    document.getElementById('relCrossValChart').innerHTML='';
+    const conv=body.converged?'Converged':'Max years';
+    document.getElementById('relStatus').textContent='SEQ MC complete ('+conv+'). EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr';
+    setStatus('SEQ MC complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, LOLE='+fmt(body.lole_hr_yr,2)+' hr/yr, LOLF='+fmt(body.lolf_occ_yr,2)+' occ/yr');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runCrossValBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    opts.max_iterations=parseInt(document.getElementById('relNsqMaxIter').value)||5000;
+    opts.max_years=parseInt(document.getElementById('relSeqMaxYears').value)||500;
+    opts.hours_per_year=parseInt(document.getElementById('relSeqHours').value)||8736;
+    
+    // Run NSQ
+    setStatus('Cross-validation: Running NSQ MC...');
+    document.getElementById('relStatus').textContent='Running NSQ MC for cross-validation...';
+    const nsq=await api('/api/session/run_reliability_nsq',opts);
+    relLastNSQ=nsq;
+    
+    // Run SEQ
+    setStatus('Cross-validation: Running SEQ MC...');
+    document.getElementById('relStatus').textContent='Running SEQ MC for cross-validation...';
+    const seq=await api('/api/session/run_reliability_seq',opts);
+    relLastSEQ=seq;
+    
+    // Display comparison
+    updateRelKPIs(nsq,'NSQ vs SEQ');
+    plotRelConvergence(nsq,'NSQ MC');
+    plotNodalEENS(nsq);
+    plotCriticalComponents(nsq);
+    
+    // Cross-validation comparison chart
+    const indices=['EENS (MWh/yr)','LOLE (hr/yr)','PLC (%)'];
+    const nsqVals=[nsq.eens_mwh_yr, nsq.lole_hr_yr, nsq.plc*100];
+    const seqVals=[seq.eens_mwh_yr, seq.lole_hr_yr, seq.plc*100];
+    Plotly.newPlot('relCrossValChart',[
+      {x:indices,y:nsqVals,type:'bar',name:'NSQ MC',marker:{color:'#0b6e4f'}},
+      {x:indices,y:seqVals,type:'bar',name:'SEQ MC',marker:{color:'#8e44ad'}}
+    ],{title:'Cross-Validation: NSQ vs SEQ',barmode:'group',yaxis:{title:'Value'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    
+    // Calculate differences
+    const eensDiff=Math.abs(nsq.eens_mwh_yr-seq.eens_mwh_yr);
+    const eensPct=seq.eens_mwh_yr>0?(eensDiff/seq.eens_mwh_yr*100):0;
+    const loleDiff=Math.abs(nsq.lole_hr_yr-seq.lole_hr_yr);
+    const lolePct=seq.lole_hr_yr>0?(loleDiff/seq.lole_hr_yr*100):0;
+    
+    document.getElementById('relStatus').textContent='Cross-validation complete. EENS diff: '+fmt(eensDiff,1)+' MWh/yr ('+fmt(eensPct,1)+'%), LOLE diff: '+fmt(loleDiff,2)+' hr/yr ('+fmt(lolePct,1)+'%)';
+    setStatus('Cross-validation complete. NSQ: EENS='+fmt(nsq.eens_mwh_yr,0)+', SEQ: EENS='+fmt(seq.eens_mwh_yr,0)+'. Diff: '+fmt(eensPct,1)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+document.getElementById('runFDBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts=getRelOpts();
+    setStatus('Running Frequency & Duration analysis (analytical)...');
+    document.getElementById('relStatus').textContent='Running F&D analysis...';
+    const body=await api('/api/session/run_reliability_fd',opts);
+    relLastFD=body;
+    updateFDKPIs(body);
+    
+    // Plot COPT
+    if(body.capacity_outage_levels&&body.cumulative_probability){
+      Plotly.newPlot('relConvergenceChart',[
+        {x:body.capacity_outage_levels,y:body.cumulative_probability,mode:'lines',name:'Cum. Probability',line:{color:'#0b6e4f'}},
+        {x:body.capacity_outage_levels,y:body.cumulative_frequency,mode:'lines',name:'Cum. Frequency',yaxis:'y2',line:{color:'#c34d4d',dash:'dot'}}
+      ],{title:'Capacity Outage Probability Table (COPT)',xaxis:{title:'Outage Level (MW)'},
+         yaxis:{title:'Cumulative Probability',side:'left'},yaxis2:{title:'Cumulative Frequency (occ/hr)',overlaying:'y',side:'right'},
+         margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    }
+    
+    document.getElementById('relNodalEENSChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is a system-level method (no nodal breakdown)</div>';
+    document.getElementById('relCriticalChart').innerHTML='<div style="padding:40px;color:var(--muted);text-align:center;">F&D is an analytical method (no component breakdown)</div>';
+    document.getElementById('relCrossValChart').innerHTML='';
+    
+    document.getElementById('relStatus').textContent='F&D complete. LOLP='+fmt(body.lolp,6)+', LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr, LOLD='+fmt(body.lold,2)+' hr/occ';
+    setStatus('F&D complete. LOLP='+fmt(body.lolp*100,4)+'%, LOLE='+fmt(body.lole_fd,2)+' hr/yr, LOLF='+fmt(body.lolf_fd,2)+' occ/yr');
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+/* FMEA (Failure Modes & Effects Analysis) */
+let relLastFMEA=null;
+document.getElementById('runFmeaBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const opts={
+      load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
+      apply_comprehensive_data: document.getElementById('relFmeaApplyComprehensive').checked,
+      verbose: false,
+    };
+    setStatus('Running FMEA (N-1 contingency enumeration)...');
+    document.getElementById('relStatus').textContent='Running FMEA analysis...';
+    const body=await api('/api/session/run_reliability_fmea',opts);
+    relLastFMEA=body;
+    
+    // Update FMEA KPIs
+    document.getElementById('fmeaResultsSection').style.display='block';
+    document.getElementById('fmeaEENS').textContent=fmt(body.eens_mwh_yr,1);
+    document.getElementById('fmeaLOLE').textContent=fmt(body.lole_hr_yr,2);
+    document.getElementById('fmeaLOLF').textContent=fmt(body.lolf_occ_yr,2);
+    document.getElementById('fmeaSAIFI').textContent=fmt(body.saifi,4);
+    document.getElementById('fmeaSAIDI').textContent=fmt(body.saidi,4);
+    document.getElementById('fmeaASAI').textContent=fmt(body.asai,6);
+    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss)';
+    
+    // Plot top contingencies (bar chart)
+    if(body.contingencies&&body.contingencies.length>0){
+      const top=body.contingencies.slice(0,15);
+      Plotly.newPlot('fmeaContChart',[{
+        x:top.map(c=>c.component_name),
+        y:top.map(c=>c.eens_contribution),
+        type:'bar',
+        marker:{color:top.map(c=>c.shed_mw>0?'#c0392b':'#95a5a6')},
+        text:top.map(c=>c.component_type),
+        hovertemplate:'%{x}<br>Type: %{text}<br>EENS: %{y:.2f} MWh/yr<extra></extra>'
+      }],{title:'Top Contingencies by EENS Contribution',xaxis:{tickangle:-45},
+          yaxis:{title:'EENS (MWh/yr)'},margin:{l:60,r:15,t:45,b:120}},{responsive:true});
+    }
+    
+    // Plot EENS by component type (pie chart)
+    if(body.eens_by_type){
+      const types=Object.keys(body.eens_by_type).filter(k=>body.eens_by_type[k]>0);
+      const vals=types.map(k=>body.eens_by_type[k]);
+      Plotly.newPlot('fmeaTypeChart',[{
+        labels:types,values:vals,type:'pie',
+        marker:{colors:['#c0392b','#e67e22','#2ecc71','#3498db','#9b59b6','#1abc9c','#34495e','#e74c3c','#f39c12']},
+        textinfo:'label+percent',hovertemplate:'%{label}<br>EENS: %{value:.2f} MWh/yr<extra></extra>'
+      }],{title:'EENS Breakdown by Component Type',margin:{l:20,r:20,t:45,b:20}},{responsive:true});
+    }
+    
+    document.getElementById('relStatus').textContent='FMEA complete. EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4)+', SAIDI='+fmt(body.saidi,4)+', ASAI='+fmt(body.asai,6);
+    setStatus('FMEA: '+body.n_contingencies+' contingencies, EENS='+fmt(body.eens_mwh_yr,1)+' MWh/yr, SAIFI='+fmt(body.saifi,4));
+  }catch(e){setStatus(e.message,true);document.getElementById('relStatus').textContent='Error: '+e.message;}
+};
+
+/* Distribution Resilience (MESS) */
+function addFaultRow(bid,shr,rhr,lbl){
+  const tbody=document.getElementById('resFaultTableBody');
+  const tr=document.createElement('tr');
+  tr.innerHTML='<td><input type="number" min="1" value="'+(bid||'')+'" style="width:70px;"/></td>'
+    +'<td><input type="number" min="0" step="0.5" value="'+(shr||0)+'" style="width:70px;"/></td>'
+    +'<td><input type="number" min="1" step="0.5" value="'+(rhr||6)+'" style="width:70px;"/></td>'
+    +'<td><input type="text" value="'+(lbl||'')+'" style="width:120px;"/></td>'
+    +'<td><button onclick="this.closest(\'tr\').remove()" style="cursor:pointer;border:none;background:none;color:#ef4444;font-size:1.1em;">&#10005;</button></td>';
+  tbody.appendChild(tr);
+}
+function collectManualFaults(){
+  const rows=document.querySelectorAll('#resFaultTableBody tr');
+  const arr=[];
+  rows.forEach(r=>{
+    const cells=r.querySelectorAll('input');
+    const bid=parseInt(cells[0].value,10);
+    if(!Number.isFinite(bid)||bid<=0) return;
+    arr.push({branch_id:bid,start_hr:parseFloat(cells[1].value)||0,repair_hr:parseFloat(cells[2].value)||6,label:cells[3].value||''});
+  });
+  return arr;
+}
+async function runResilienceSingle(overrides={}){
+  const faultIds=(document.getElementById('resFaultBranches').value||'')
+    .split(',').map(s=>parseInt(s.trim(),10)).filter(v=>Number.isFinite(v));
+  const manualFaults=collectManualFaults();
+  const params=Object.assign({
+    horizon_hours: parseInt(document.getElementById('resHorizonHours').value)||8,
+    time_step_hr: 1.0,
+    load_scale_factor: parseFloat(document.getElementById('resLoadScale').value)||1.0,
+    repair_time_hr: parseFloat(document.getElementById('resRepairHours').value)||6.0,
+    default_fault_count: parseInt(document.getElementById('resFaultCount').value)||1,
+    fault_branch_ids: faultIds,
+    manual_faults: manualFaults,
+    auto_fault_stagger_hr: parseFloat(document.getElementById('resFaultStagger').value)||0,
+    auto_fault_start_hr: parseFloat(document.getElementById('resFaultStartHr').value)||0,
+    mess_travel_speed_kmph: parseFloat(document.getElementById('resMessSpeed').value)||40.0,
+    allow_reconfiguration: document.getElementById('resAllowReconfig').checked,
+    allow_mess_dispatch: document.getElementById('resAllowMess').checked,
+    apply_demo_data: document.getElementById('resApplyDemoData').checked,
+    run_power_flow: document.getElementById('resRunPF').checked,
+  },overrides);
+  return await api('/api/session/run_distribution_resilience',params);
+}
+
+function plotResilienceResults(body,baseBody){
+  document.getElementById('resilienceResultsSection').style.display='block';
+  document.getElementById('resilienceRI').textContent=fmt(body.resilience_index,4);
+  document.getElementById('resilienceDemand').textContent=fmt(body.total_demand_mwh,2);
+  document.getElementById('resilienceShed').textContent=fmt(body.total_shed_mwh,2);
+  document.getElementById('resilienceFinalRestore').textContent=fmt(body.final_restoration_ratio*100,2);
+  document.getElementById('resilienceAvgRestore').textContent=fmt(body.avg_restoration_ratio*100,2);
+  document.getElementById('resiliencePeakShed').textContent=fmt(body.peak_shed_mw,2);
+  document.getElementById('resilienceMessEnergy').textContent=fmt(body.mess_energy_delivered_mwh,2);
+  document.getElementById('resilienceMessTravel').textContent=fmt(body.mess_travel_distance_km,1);
+  document.getElementById('resilienceSwitches').textContent=body.total_switch_actions;
+  document.getElementById('resilienceRepairs').textContent=body.total_repaired_faults;
+
+  // Populate fault sequence table from response (so user can see & edit for re-run).
+  if(body.fault_sequence&&body.fault_sequence.length>0){
+    const tbody=document.getElementById('resFaultTableBody');
+    tbody.innerHTML='';
+    body.fault_sequence.forEach(f=>{addFaultRow(f.branch_index,f.start_hr,f.repair_hr,f.name);});
+  }
+
+  // Comparison improvement banner
+  const compDiv=document.getElementById('resilienceCompareKPIs');
+  if(baseBody&&baseBody.feasible){
+    compDiv.style.display='block';
+    const dRI=body.resilience_index-baseBody.resilience_index;
+    const dShed=baseBody.total_shed_mwh-body.total_shed_mwh;
+    const dServed=body.total_served_mwh-baseBody.total_served_mwh;
+    document.getElementById('resCompRI').textContent='RI: '+(dRI>=0?'+':'')+fmt(dRI,4);
+    document.getElementById('resCompShed').textContent='Shed: '+(dShed>=0?'\u2212':'+' )+fmt(Math.abs(dShed),2)+' MWh';
+    document.getElementById('resCompServed').textContent='Served: '+(dServed>=0?'+':'')+fmt(dServed,2)+' MWh';
+  }else{compDiv.style.display='none';}
+
+  // Chart 1: Restoration Timeline with optional baseline overlay
+  const restoTraces=[
+    {x:body.hours,y:body.demand_mw,mode:'lines+markers',name:'Demand',line:{color:'#475569',width:2}},
+    {x:body.hours,y:body.served_mw,mode:'lines+markers',name:'Served (MESS)',line:{color:'#0b6e4f',width:2},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
+    {x:body.hours,y:body.shed_mw,mode:'lines+markers',name:'Shed (MESS)',line:{color:'#c34d4d',width:2}},
+    {x:body.hours,y:body.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration %',yaxis:'y2',line:{color:'#0f766e',dash:'dot',width:2}}
+  ];
+  if(baseBody&&baseBody.feasible){
+    restoTraces.push({x:baseBody.hours,y:baseBody.served_mw,mode:'lines',name:'Served (baseline)',line:{color:'#94a3b8',dash:'dash',width:1.5}});
+    restoTraces.push({x:baseBody.hours,y:baseBody.shed_mw,mode:'lines',name:'Shed (baseline)',line:{color:'#f87171',dash:'dash',width:1.5}});
+    restoTraces.push({x:baseBody.hours,y:baseBody.restoration_ratio.map(v=>v*100),mode:'lines',name:'Restoration % (base)',yaxis:'y2',line:{color:'#a7f3d0',dash:'dashdot',width:1}});
+  }
+  Plotly.newPlot('resilienceRestorationChart',restoTraces,{title:'Restoration Timeline'+(baseBody?' (MESS vs Baseline)':''),
+    xaxis:{title:'Hour'},yaxis:{title:'MW'},yaxis2:{title:'Restoration (%)',overlaying:'y',side:'right',range:[0,105]},
+    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
+
+  // Chart 2: MESS Dispatch + Faults/Switching
+  const messTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    messTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:tr.name||('MESS '+tr.storage_index),line:{width:2}});
+  });
+  messTraces.push({x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',yaxis:'y2',marker:{color:'#f59e0b',opacity:0.35}});
+  messTraces.push({x:body.hours,y:body.switch_actions,mode:'lines+markers',name:'Switch Actions',yaxis:'y2',line:{color:'#7c3aed',dash:'dot'}});
+  Plotly.newPlot('resilienceMessChart',messTraces,{title:'MESS Dispatch & Restoration Actions',xaxis:{title:'Hour'},
+    yaxis:{title:'MESS Dispatch (MW)'},yaxis2:{title:'Faults / Switching',overlaying:'y',side:'right',rangemode:'tozero'},
+    margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+
+  // Chart 3: MESS Energy / SOC timeline
+  const energyTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    energyTraces.push({x:body.hours,y:tr.energy_mwh,mode:'lines+markers',name:(tr.name||'MESS')+' Energy',line:{width:2}});
+  });
+  if(energyTraces.length>0){
+    Plotly.newPlot('resilienceEnergyChart',energyTraces,{title:'MESS Stored Energy Over Time',
+      xaxis:{title:'Hour'},yaxis:{title:'Energy (MWh)',rangemode:'tozero'},
+      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  }else{
+    document.getElementById('resilienceEnergyChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
+  }
+
+  // Chart 4: Island count + fault/repair status over time
+  const islandCounts=(body.island_counts||body.hours.map(()=>0));
+  const repairCounts=(body.repaired_faults_arr||body.hours.map(()=>0));
+  Plotly.newPlot('resilienceIslandChart',[
+    {x:body.hours,y:body.active_faults,type:'bar',name:'Active Faults',marker:{color:'#fbbf24',opacity:0.5}},
+    {x:body.hours,y:repairCounts,type:'bar',name:'Repaired',marker:{color:'#34d399',opacity:0.5}},
+    {x:body.hours,y:islandCounts,mode:'lines+markers',name:'Islands',yaxis:'y2',line:{color:'#6366f1',width:2}}
+  ],{title:'Network Topology Over Time',xaxis:{title:'Hour'},
+    yaxis:{title:'Fault Count',rangemode:'tozero'},yaxis2:{title:'Island Count',overlaying:'y',side:'right',rangemode:'tozero'},
+    barmode:'stack',margin:{l:60,r:60,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+
+  // Chart 5: Load & RES multiplier profiles
+  const loadMults=body.load_multipliers||[];
+  const resMults=body.res_multipliers||[];
+  const resMwArr=body.res_mw||[];
+  if(loadMults.length>0 || resMults.length>0){
+    const profTraces=[];
+    if(loadMults.length>0) profTraces.push({x:body.hours,y:loadMults,mode:'lines+markers',name:'Load Multiplier',line:{color:'#0369a1',width:2}});
+    if(resMults.length>0)  profTraces.push({x:body.hours,y:resMults,mode:'lines+markers',name:'RES Multiplier',line:{color:'#f59e0b',width:2}});
+    if(resMwArr.length>0)  profTraces.push({x:body.hours,y:resMwArr,mode:'lines+markers',name:'RES Output (MW)',yaxis:'y2',line:{color:'#22c55e',width:2,dash:'dot'}});
+    const profLayout={title:'Load & Renewable Profiles',xaxis:{title:'Hour'},
+      yaxis:{title:'Multiplier',rangemode:'tozero'},margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.22}};
+    if(resMwArr.length>0) Object.assign(profLayout,{yaxis2:{title:'RES MW',overlaying:'y',side:'right',rangemode:'tozero'}});
+    Plotly.newPlot('resilienceProfileChart',profTraces,profLayout,{responsive:true});
+  }else{
+    document.getElementById('resilienceProfileChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No profile data</div>';
+  }
+
+  // Chart 6: MESS spatial trajectory (bus location over time)
+  const trajTraces=[];
+  (body.mess_traces||[]).forEach((tr,i)=>{
+    const buses=tr.target_bus||tr.bus||[];
+    if(buses.length>0){
+      trajTraces.push({x:body.hours.slice(0,buses.length),y:buses,mode:'lines+markers',name:(tr.name||'MESS '+tr.storage_index)+' Bus',
+        line:{width:2,shape:'hv'},marker:{size:7}});
+    }
+  });
+  if(trajTraces.length>0){
+    Plotly.newPlot('resilienceTrajectoryChart',trajTraces,{title:'MESS Spatial Trajectory (Bus Location)',
+      xaxis:{title:'Hour'},yaxis:{title:'Bus ID',dtick:1},
+      margin:{l:60,r:30,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+  }else{
+    document.getElementById('resilienceTrajectoryChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS trajectory data</div>';
+  }
+
+  // Chart 7: Load Shed by Priority Tier (stacked bar)
+  const sCrit=body.shed_critical||[];
+  const sHigh=body.shed_high||[];
+  const sMed=body.shed_medium||[];
+  const sLow=body.shed_low||[];
+  if(sCrit.length>0){
+    Plotly.newPlot('resiliencePriorityChart',[
+      {x:body.hours,y:sCrit,type:'bar',name:'Critical',marker:{color:'#dc2626'}},
+      {x:body.hours,y:sHigh,type:'bar',name:'High',marker:{color:'#f59e0b'}},
+      {x:body.hours,y:sMed,type:'bar',name:'Medium',marker:{color:'#3b82f6'}},
+      {x:body.hours,y:sLow,type:'bar',name:'Low',marker:{color:'#94a3b8'}},
+    ],{title:'Load Shed by Priority Tier',barmode:'stack',xaxis:{title:'Hour'},
+      yaxis:{title:'Shed (MW)',rangemode:'tozero'},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.22}},{responsive:true});
+  }else{
+    document.getElementById('resiliencePriorityChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No shed data</div>';
+  }
+
+  // Chart 8: MESS Dispatch vs SOC (dual-axis)
+  const messSOCTraces=[];
+  (body.mess_traces||[]).forEach((tr)=>{
+    const nm=tr.name||('MESS '+tr.storage_index);
+    messSOCTraces.push({x:body.hours,y:tr.dispatch_mw,mode:'lines+markers',name:nm+' Dispatch',line:{width:2}});
+    messSOCTraces.push({x:body.hours,y:(tr.soc||[]).map(v=>v*100),mode:'lines',name:nm+' SOC%',yaxis:'y2',line:{width:2,dash:'dot'}});
+  });
+  if(messSOCTraces.length>0){
+    Plotly.newPlot('resilienceMessSOCChart',messSOCTraces,{title:'MESS Dispatch vs SOC',
+      xaxis:{title:'Hour'},yaxis:{title:'Dispatch (MW)',rangemode:'tozero'},
+      yaxis2:{title:'SOC (%)',overlaying:'y',side:'right',range:[0,105]},
+      margin:{l:60,r:60,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    document.getElementById('resilienceMessSOCChart').innerHTML='<div style="padding:60px;color:var(--muted);text-align:center;">No MESS units active</div>';
+  }
+
+  // Chart 9: Bus Voltage Profile from Power Flow
+  const bvTraces=body.bus_voltage_traces||[];
+  const vChartDiv=document.getElementById('resilienceVoltageChart');
+  if(bvTraces.length>0){
+    vChartDiv.style.display='';
+    const vTraces=[];
+    bvTraces.forEach(bv=>{
+      vTraces.push({x:body.hours.slice(0,bv.vm_pu.length),y:bv.vm_pu,mode:'lines',name:'Bus '+bv.bus_index,line:{width:1.5}});
+    });
+    // Upper and lower voltage limits
+    vTraces.push({x:body.hours,y:body.hours.map(()=>1.05),mode:'lines',name:'V_max',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:true});
+    vTraces.push({x:body.hours,y:body.hours.map(()=>0.95),mode:'lines',name:'V_min',line:{color:'#c34d4d',dash:'dash',width:1},showlegend:false});
+    Plotly.newPlot('resilienceVoltageChart',vTraces,{title:'Bus Voltage Magnitude (from Power Flow)',
+      xaxis:{title:'Hour'},yaxis:{title:'Vm (p.u.)',range:[0.85,1.10]},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    vChartDiv.style.display='none';
+  }
+
+  // Chart 10: Branch Power Flow (MW) from Power Flow
+  const bfTraces=body.branch_flow_traces||[];
+  const fChartDiv=document.getElementById('resilienceBranchFlowChart');
+  if(bfTraces.length>0){
+    fChartDiv.style.display='';
+    const flowTraces=[];
+    bfTraces.forEach(bf=>{
+      flowTraces.push({x:body.hours.slice(0,bf.pf_mw.length),y:bf.pf_mw,mode:'lines',
+        name:'Br '+bf.branch_index+' ('+bf.from_bus+'\u2192'+bf.to_bus+')',line:{width:1.5}});
+    });
+    Plotly.newPlot('resilienceBranchFlowChart',flowTraces,{title:'Branch Active Power Flow (from Power Flow)',
+      xaxis:{title:'Hour'},yaxis:{title:'Pf (MW)'},
+      margin:{l:60,r:30,t:45,b:55},legend:{orientation:'h',y:-0.25}},{responsive:true});
+  }else{
+    fChartDiv.style.display='none';
+  }
+}
+
+document.getElementById('runResilienceBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running resilience assessment...');
+    document.getElementById('resStatus').textContent='Running resilience assessment...';
+    const useMess=document.getElementById('resAllowMess').checked;
+    let baseBody=null;
+    // Always run a baseline (no MESS) first for comparison if MESS is enabled
+    if(useMess){
+      setStatus('Running baseline (no MESS) for comparison...');
+      baseBody=await runResilienceSingle({allow_mess_dispatch:false});
+    }
+    setStatus('Running resilience with current settings...');
+    const body=await runResilienceSingle();
+    relLastResilience=body;
+    plotResilienceResults(body,baseBody);
+    document.getElementById('resStatus').textContent='Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, MESS='+fmt(body.mess_energy_delivered_mwh,2)+' MWh';
+    setStatus('Resilience complete. RI='+fmt(body.resilience_index,4)+', shed='+fmt(body.total_shed_mwh,2)+' MWh, final='+fmt(body.final_restoration_ratio*100,1)+'%');
+  }catch(e){setStatus(e.message,true);document.getElementById('resStatus').textContent='Error: '+e.message;}
+};
+
+/* Reactive Power Optimization (RPO) */
+async function runRPO(relaxOnly){
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running RPO '+(relaxOnly?'(continuous relaxation)':'(MINLP B&B + IPM)')+'...');
+    const body=await api('/api/session/run_rpo',{
+      objective:document.getElementById('rpoObjective').value,
+      mip_gap:parseFloat(document.getElementById('rpoMipGap').value)||0.01,
+      time_limit_s:parseInt(document.getElementById('rpoTimeLimit').value)||120,
+      vdev_weight:parseFloat(document.getElementById('rpoVdevWeight').value)||1.0,
+      relax_only:!!relaxOnly,
+    });
+    /* KPI cards */
+    document.getElementById('rpoConv').textContent=body.converged?'Yes':'No';
+    document.getElementById('rpoObj').textContent=fmt(body.objective,4);
+    document.getElementById('rpoGap').textContent=fmt(body.gap*100,2);
+    document.getElementById('rpoNodes').textContent=body.nodes_explored;
+    document.getElementById('rpoLPSolves').textContent=body.nlp_solves;
+    document.getElementById('rpoTime').textContent=fmt(body.runtime_sec,2);
+    document.getElementById('rpoLossBefore').textContent=fmt(body.total_loss_before,2);
+    document.getElementById('rpoLossAfter').textContent=fmt(body.total_loss_after,2);
+    document.getElementById('rpoVdevBefore').textContent=fmt(body.max_vdev_before,4);
+    document.getElementById('rpoVdevAfter').textContent=fmt(body.max_vdev_after,4);
+    document.getElementById('rpoStatus').textContent=body.status||'-';
+    const busIdx=(body.vm_before||[]).map((_,i)=>i+1);
+    /* 1. Bus Voltage Profile */
+    Plotly.newPlot('rpoVoltChart',[
+      {x:busIdx,y:body.vm_before||[],mode:'lines+markers',name:'Vm Before',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:4}},
+      {x:busIdx,y:body.vm_after||[],mode:'lines+markers',name:'Vm After',line:{color:'#0b6e4f',width:2},marker:{size:4}},
+      {x:busIdx,y:busIdx.map(()=>body.v_min||0.95),mode:'lines',name:'Vmin',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:true},
+      {x:busIdx,y:busIdx.map(()=>body.v_max||1.05),mode:'lines',name:'Vmax',line:{color:'#c34d4d',width:1,dash:'dash'},showlegend:false},
+    ],{title:'Bus Voltage Magnitude (p.u.)',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* 2. Generator Reactive Power */
+    const genNames=body.gen_names||(body.qg_before||[]).map((_,i)=>'Gen '+i);
+    Plotly.newPlot('rpoQgChart',[
+      {x:genNames,y:body.qg_before||[],type:'bar',name:'Qg Before',marker:{color:'#b5651d'}},
+      {x:genNames,y:body.qg_after||[],type:'bar',name:'Qg After',marker:{color:'#0b6e4f'}},
+    ],{title:'Generator Reactive Power Qg (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    /* 3. Generator Active Power */
+    Plotly.newPlot('rpoPgChart',[
+      {x:genNames,y:body.pg_before||[],type:'bar',name:'Pg Before',marker:{color:'#8e6f3e'}},
+      {x:genNames,y:body.pg_after||[],type:'bar',name:'Pg After',marker:{color:'#2c8c99'}},
+    ],{title:'Generator Active Power Pg (MW)',barmode:'group',xaxis:{title:''},yaxis:{title:'MW'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    /* 4. Bus Voltage Angle */
+    Plotly.newPlot('rpoVaChart',[
+      {x:busIdx,y:(body.va_before||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va Before (deg)',line:{color:'#b5651d',width:2,dash:'dot'},marker:{size:3}},
+      {x:busIdx,y:(body.va_after||[]).map(a=>a*180/Math.PI),mode:'lines+markers',name:'Va After (deg)',line:{color:'#0b6e4f',width:2},marker:{size:3}},
+    ],{title:'Bus Voltage Angle (degrees)',xaxis:{title:'Bus'},yaxis:{title:'deg'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* 5. Tap Changer Positions */
+    if(body.tap_names&&body.tap_names.length){
+      Plotly.newPlot('rpoTapChart',[
+        {x:body.tap_names,y:body.tap_before||[],type:'bar',name:'Ratio Before',marker:{color:'#8e44ad'}},
+        {x:body.tap_names,y:body.tap_after||[],type:'bar',name:'Ratio After',marker:{color:'#2c8c99'}},
+      ],{title:'OLTC Tap Ratio (p.u.)',barmode:'group',xaxis:{title:''},yaxis:{title:'Tap Ratio'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else {
+      document.getElementById('rpoTapChart').innerHTML='<div style="padding:20px;color:var(--muted);">No OLTC transformers detected.</div>';
+    }
+    /* 6. Switchable Shunt Steps */
+    if(body.shunt_names&&body.shunt_names.length){
+      Plotly.newPlot('rpoShuntChart',[
+        {x:body.shunt_names,y:body.shunt_mvar_before||body.shunt_before||[],type:'bar',name:'Before (MVAr)',marker:{color:'#e67e22'}},
+        {x:body.shunt_names,y:body.shunt_mvar_after||body.shunt_after||[],type:'bar',name:'After (MVAr)',marker:{color:'#27ae60'}},
+      ],{title:'Switchable Shunt Output (MVAr)',barmode:'group',xaxis:{title:''},yaxis:{title:'MVAr'},margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    } else {
+      document.getElementById('rpoShuntChart').innerHTML='<div style="padding:20px;color:var(--muted);">No switchable shunts detected.</div>';
+    }
+    /* 7. Voltage Deviation |V-1| per Bus */
+    const vdev_before=(body.vm_before||[]).map(v=>Math.abs(v-1.0));
+    const vdev_after=(body.vm_after||[]).map(v=>Math.abs(v-1.0));
+    Plotly.newPlot('rpoDetailsChart',[
+      {x:busIdx,y:vdev_before,type:'bar',name:'|V-1| Before',marker:{color:'rgba(181,101,29,0.6)'}},
+      {x:busIdx,y:vdev_after,type:'bar',name:'|V-1| After',marker:{color:'rgba(11,110,79,0.6)'}},
+    ],{title:'Voltage Deviation |V - 1.0| per Bus',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.2}},{responsive:true});
+    /* Debug summary table */
+    const L=s=>s;  // line helper
+    const lines=[];
+    lines.push('╔══════════════════════════════════════════════════════════════════╗');
+    lines.push('║  RPO (MINLP) Debug Summary                                     ║');
+    lines.push('╠══════════════════════════════════════════════════════════════════╣');
+    lines.push('  Solver:     Branch & Bound + Parity IPM');
+    lines.push('  Status:     '+(body.status||'N/A'));
+    lines.push('  Objective:  '+body.objective_type+' = '+fmt(body.objective,6));
+    lines.push('  Converged:  '+body.converged+'  |  Gap: '+fmt(body.gap*100,4)+'%');
+    lines.push('  B&B Nodes:  '+body.nodes_explored+'  |  NLP Solves: '+body.nlp_solves+'  |  Time: '+fmt(body.runtime_sec,2)+'s');
+    lines.push('');
+    lines.push('── Loss ─────────────────────────────────────────────────');
+    const dLoss=body.total_loss_after-body.total_loss_before;
+    const pLoss=body.total_loss_before?((dLoss/body.total_loss_before)*100):0;
+    lines.push('  Before: '+fmt(body.total_loss_before,3)+' MW  |  After: '+fmt(body.total_loss_after,3)+' MW  |  Δ: '+(dLoss>=0?'+':'')+fmt(dLoss,3)+' MW ('+fmt(pLoss,2)+'%)');
+    lines.push('');
+    lines.push('── Voltage Deviation ────────────────────────────────────');
+    const svb=vdev_before.reduce((a,b)=>a+b*b,0), sva=vdev_after.reduce((a,b)=>a+b*b,0);
+    lines.push('  Max |V-1|  Before: '+fmt(Math.max(...vdev_before),4)+' p.u.  |  After: '+fmt(Math.max(...vdev_after),4)+' p.u.');
+    lines.push('  Σ(V-1)²   Before: '+fmt(svb,6)+'  |  After: '+fmt(sva,6)+'  |  Δ: '+fmt(sva-svb,6)+' ('+(svb?fmt((sva-svb)/svb*100,2):'N/A')+'%)');
+    lines.push('');
+    if(body.tap_names&&body.tap_names.length){
+      lines.push('── OLTC Tap Changers ────────────────────────────────────');
+      lines.push('  Name              Pos Before  Pos After  Ratio Before  Ratio After');
+      body.tap_names.forEach((n,i)=>{
+        const pb=(body.tap_pos_before||[])[i], pa=(body.tap_pos_after||[])[i];
+        lines.push('  '+n.padEnd(18)+(pb!=null?String(pb).padStart(6):' ??   ')+'       '+(pa!=null?String(pa).padStart(6):' ??   ')+'       '+fmt(body.tap_before[i],4).padStart(10)+'    '+fmt(body.tap_after[i],4).padStart(10));
+      });
+      lines.push('');
+    }
+    if(body.shunt_names&&body.shunt_names.length){
+      lines.push('── Switchable Shunts ────────────────────────────────────');
+      lines.push('  Name                Step Before  Step After   MVAr Before   MVAr After');
+      body.shunt_names.forEach((n,i)=>{
+        const mb=(body.shunt_mvar_before||[])[i], ma=(body.shunt_mvar_after||[])[i];
+        lines.push('  '+n.padEnd(20)+String(body.shunt_before[i]).padStart(8)+'       '+String(body.shunt_after[i]).padStart(8)+'       '+(mb!=null?fmt(mb,2).padStart(10):' ??       ')+'    '+(ma!=null?fmt(ma,2).padStart(10):' ??       '));
+      });
+      lines.push('');
+    }
+    lines.push('── Generator Dispatch ───────────────────────────────────');
+    lines.push('  Name                 Pg Before    Pg After   ΔPg (MW)   Qg Before    Qg After   ΔQg (MVAr)');
+    (body.gen_names||[]).forEach((n,i)=>{
+      const pgb=(body.pg_before||[])[i]||0, pga=(body.pg_after||[])[i]||0;
+      const qgb=(body.qg_before||[])[i]||0, qga=(body.qg_after||[])[i]||0;
+      lines.push('  '+n.padEnd(20)+fmt(pgb,2).padStart(9)+'    '+fmt(pga,2).padStart(9)+'   '+(pga-pgb>=0?'+':'')+fmt(pga-pgb,2).padStart(8)+'   '+fmt(qgb,2).padStart(9)+'    '+fmt(qga,2).padStart(9)+'   '+(qga-qgb>=0?'+':'')+fmt(qga-qgb,2).padStart(8));
+    });
+    lines.push('');
+    lines.push('── Bus Voltages ─────────────────────────────────────────');
+    lines.push('  Bus   Vm Before   Vm After   ΔVm        Va Before°   Va After°   ΔVa°');
+    busIdx.forEach((b,i)=>{
+      const vmb=(body.vm_before||[])[i]||0, vma=(body.vm_after||[])[i]||0;
+      const vab=((body.va_before||[])[i]||0)*180/Math.PI, vaa=((body.va_after||[])[i]||0)*180/Math.PI;
+      lines.push('  '+String(b).padStart(3)+'    '+fmt(vmb,4).padStart(8)+'   '+fmt(vma,4).padStart(8)+'  '+(vma-vmb>=0?'+':'')+fmt(vma-vmb,4).padStart(7)+'     '+fmt(vab,2).padStart(8)+'    '+fmt(vaa,2).padStart(8)+'  '+(vaa-vab>=0?'+':'')+fmt(vaa-vab,2).padStart(7));
+    });
+    lines.push('╚══════════════════════════════════════════════════════════════════╝');
+    document.getElementById('rpoResultTable').textContent=lines.join('\n');
+    setStatus('RPO complete. Obj='+fmt(body.objective,4)+' ('+body.objective_type+'), Status: '+(body.status||'OK')+', Nodes='+body.nodes_explored+', Time='+fmt(body.runtime_sec,2)+'s');
+  }catch(e){setStatus(e.message,true);}
+}
+document.getElementById('runRPOBtn').onclick=()=>runRPO(false);
+document.getElementById('runRPORelaxBtn').onclick=()=>runRPO(true);
+
+/* Network Reconfiguration */
+document.getElementById('runReconfigBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Network Reconfiguration (TS-TR MILP)...');
+    const numSteps=parseInt(document.getElementById('rcNumSteps').value)||4;
+    const body=await api('/api/session/run_reconfig',{
+      num_steps:numSteps,
+      v_min:parseFloat(document.getElementById('rcVmin').value)||0.95,
+      v_max:parseFloat(document.getElementById('rcVmax').value)||1.05,
+      mip_gap:parseFloat(document.getElementById('rcMipGap').value)||0.01,
+      max_time_s:parseInt(document.getElementById('rcMaxTime').value)||60,
+    });
+    document.getElementById('rcFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('rcObj').textContent=fmt(body.total_objective,2);
+    const totalCurt=(body.curt_per_step||[]).reduce((a,b)=>a+b,0);
+    const totalSwOn=(body.sw_on_per_step||[]).reduce((a,b)=>a+b,0);
+    const totalSwOff=(body.sw_off_per_step||[]).reduce((a,b)=>a+b,0);
+    document.getElementById('rcACLoss').textContent=fmt(totalCurt,2);
+    document.getElementById('rcShed').textContent=body.num_branches;
+    document.getElementById('rcSwActions').textContent=totalSwOn+totalSwOff;
+    const T=body.num_steps||numSteps;
+    const hrs=Array.from({length:T},(_,i)=>i);
+    Plotly.newPlot('rcLossChart',[
+      {x:hrs,y:body.curt_per_step||[],mode:'lines+markers',name:'Curtailment MW',line:{color:'#b5651d',width:2}},
+      {x:hrs,y:body.sw_on_per_step||[],mode:'lines+markers',name:'Switch-On',line:{color:'#27ae60',width:2,dash:'dot'}},
+      {x:hrs,y:body.sw_off_per_step||[],mode:'lines+markers',name:'Switch-Off',line:{color:'#e74c3c',width:2,dash:'dash'}},
+    ],{title:'Curtailment & Switching per Step',xaxis:{title:'Step'},yaxis:{title:'Count / MW'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    Plotly.newPlot('rcSwitchChart',[
+      {x:hrs,y:body.sw_on_per_step||[],type:'bar',name:'Close (AC)',marker:{color:'#27ae60'}},
+      {x:hrs,y:body.sw_off_per_step||[],type:'bar',name:'Open (AC)',marker:{color:'#e74c3c'}},
+    ],{title:'AC Switching Actions per Step',barmode:'group',xaxis:{title:'Step'},yaxis:{title:'Count'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    const essSoc=body.ess_soc_by_step||[];
+    const nESS=body.num_ess||0;
+    const essSocData=nESS>0
+      ? Array.from({length:nESS},(_,si)=>({x:hrs,y:essSoc.map(row=>(row&&row[si])||0),mode:'lines+markers',name:'ESS '+(si+1)}))
+      : [];
+    if(essSocData.length)
+      Plotly.newPlot('rcESSChart',essSocData,{title:'ESS SOC during Reconfiguration',xaxis:{title:'Step'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+    else
+      document.getElementById('rcESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage units in this case.</div>';
+    setStatus('Reconfiguration done. Feasible: '+body.feasible+'. Obj: '+fmt(body.total_objective,2)+'. Switch actions: '+(totalSwOn+totalSwOff)+'. Solver: '+(body.solver_name||'native')+'.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Annual Production Simulation */
+document.getElementById('runAnnualBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Annual Production Simulation (this may take a while)...');
+    const body=await api('/api/session/run_annual_sim',{
+      resolution:document.getElementById('annualResolution').value,
+      block_type:document.getElementById('annualBlockType').value,
+      snapshot_interval:parseInt(document.getElementById('annualSnapshotInterval').value)||24,
+      run_opf:document.getElementById('annualRunOPF').checked,
+      cyclic_soc:document.getElementById('annualCyclicSOC').checked,
+      skip_replay:document.getElementById('annualSkipReplay').checked,
+    });
+    document.getElementById('annFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('annCost').textContent='$'+fmt(body.total_cost,0);
+    document.getElementById('annGenMWh').textContent=fmt(body.total_gen_mwh,0);
+    document.getElementById('annRenMWh').textContent=fmt(body.total_renewable_mwh,0);
+    document.getElementById('annCurtMWh').textContent=fmt(body.total_curtailment_mwh,0);
+    document.getElementById('annENSMWh').textContent=fmt(body.total_ens_mwh,0);
+    document.getElementById('annLossMWh').textContent=fmt(body.total_loss_mwh,0);
+    document.getElementById('annPFConv').textContent=body.num_pf_converged+'/'+body.num_steps;
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    // Timeline chart
+    const hrs=body.timeline_hours||[];
+    Plotly.newPlot('annTimelineChart',[
+      {x:hrs,y:body.timeline_gen,mode:'lines',name:'Generation',line:{color:pal[0],width:1.5}},
+      {x:hrs,y:body.timeline_load,mode:'lines',name:'Load',line:{color:pal[1],width:1.5}},
+      {x:hrs,y:body.timeline_ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:1.5}},
+      {x:hrs,y:body.timeline_curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1}},
+      {x:hrs,y:body.timeline_ess,mode:'lines',name:'ESS (net)',line:{color:pal[3],width:1,dash:'dot'}},
+    ],{title:'Annual Generation & Load Timeline (MW)',xaxis:{title:'Hour of Year'},yaxis:{title:'MW'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    // Monthly energy breakdown
+    const mo=body.monthly_summaries||[];
+    const mLabels=mo.map(m=>'Month '+(m.block_id+1));
+    Plotly.newPlot('annMonthlyChart',[
+      {x:mLabels,y:mo.map(m=>m.total_gen_mwh),type:'bar',name:'Generation',marker:{color:pal[0]}},
+      {x:mLabels,y:mo.map(m=>m.total_renewable_mwh),type:'bar',name:'Renewable',marker:{color:pal[6]}},
+      {x:mLabels,y:mo.map(m=>m.total_curtailment_mwh),type:'bar',name:'Curtailment',marker:{color:pal[5]}},
+      {x:mLabels,y:mo.map(m=>m.total_loss_mwh),type:'bar',name:'Losses',marker:{color:pal[2]}},
+    ],{title:'Monthly Energy Breakdown (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:60},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Monthly cost
+    Plotly.newPlot('annMonthlyCostChart',[
+      {x:mLabels,y:mo.map(m=>m.total_cost),type:'bar',name:'Cost',marker:{color:pal[3]}},
+    ],{title:'Monthly Cost ($)',xaxis:{title:''},yaxis:{title:'$'},
+       margin:{l:60,r:15,t:45,b:60}},{responsive:true});
+    // Generator stats
+    const gs=body.gen_stats||[];
+    if(gs.length) Plotly.newPlot('annGenStatsChart',[
+      {x:gs.map(g=>g.name||'Gen'),y:gs.map(g=>g.capacity_factor*100),type:'bar',name:'Capacity Factor %',marker:{color:pal[0]}},
+    ],{title:'Generator Capacity Factors (%)',xaxis:{title:''},yaxis:{title:'%'},
+       margin:{l:55,r:15,t:45,b:80}},{responsive:true});
+    // Renewable stats
+    const rns=body.renewable_stats||[];
+    if(rns.length) Plotly.newPlot('annRenStatsChart',[
+      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_energy_mwh),type:'bar',name:'Energy MWh',marker:{color:pal[6]}},
+      {x:rns.map(r=>r.name||'Ren'),y:rns.map(r=>r.total_curtailed_mwh),type:'bar',name:'Curtailed MWh',marker:{color:pal[5]}},
+    ],{title:'Renewable Energy vs Curtailment (MWh)',barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Storage stats
+    const stg=body.storage_stats||[];
+    if(stg.length) Plotly.newPlot('annStorageStatsChart',[
+      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_charge_mwh),type:'bar',name:'Charge MWh',marker:{color:pal[1]}},
+      {x:stg.map(s=>s.name||'ESS'),y:stg.map(s=>s.total_discharge_mwh),type:'bar',name:'Discharge MWh',marker:{color:pal[2]}},
+    ],{title:'Storage Charge/Discharge (MWh) — Cycles: '+stg.map(s=>fmt(s.cycles,1)).join(', '),
+       barmode:'group',xaxis:{title:''},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:80},legend:{orientation:'h',y:-0.25}},{responsive:true});
+    // Voltage heatmap from PF snapshots
+    const snapHrs=body.snapshot_hours||[];
+    const snapVm=body.snapshot_vm||[];
+    if(snapHrs.length&&snapVm.length){
+      const nBus=snapVm[0].length;
+      const busLabels=Array.from({length:nBus},(_,i)=>'Bus '+i);
+      Plotly.newPlot('annVoltHeatmap',[{z:snapVm,x:busLabels,y:snapHrs,type:'heatmap',
+        colorscale:'RdYlGn',zmin:0.9,zmax:1.1,colorbar:{title:'Vm (pu)',len:0.7}}],
+        {title:'Bus Voltage Heatmap over Year',xaxis:{title:'Bus'},yaxis:{title:'Hour'},
+         margin:{l:60,r:80,t:45,b:50}},{responsive:true});
+    }
+    setStatus('Annual simulation complete. Feasible: '+body.feasible+'. Annual cost: $'+fmt(body.total_cost,0)+'. Gen: '+fmt(body.total_gen_mwh,0)+' MWh.');
+    // Setup animation data
+    setupAnnualAnimation(body);
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Annual Animation Controls */
+let annAnimData=null;
+let annAnimPlaying=false;
+let annAnimFrame=0;
+let annAnimTimer=null;
+
+function setupAnnualAnimation(body){
+  // Store time-series data for animation
+  annAnimData={
+    hours:body.timeline_hours||[],
+    gen:body.timeline_gen||[],
+    load:body.timeline_load||[],
+    ren:body.timeline_ren||[],
+    curt:body.timeline_curt||[],
+    ess:body.timeline_ess||[],
+    snapshot_hours:body.snapshot_hours||[],
+    snapshot_vm:body.snapshot_vm||[],
+    geo_buses:body.geo_buses||[],
+    geo_ac_branches:body.geo_ac_branches||[],
+  };
+  annAnimFrame=0;
+  annAnimPlaying=false;
+  if(annAnimTimer)clearInterval(annAnimTimer);
+  annAnimTimer=null;
+  
+  const ctrl=document.getElementById('annAnimControls');
+  const slider=document.getElementById('annAnimSlider');
+  const geoMap=document.getElementById('annGeoMap');
+  
+  if(annAnimData.hours.length>0){
+    ctrl.style.display='block';
+    slider.max=annAnimData.hours.length-1;
+    slider.value=0;
+    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
+    document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
+    geoMap.style.display=document.getElementById('annAnimGeo').checked?'block':'none';
+    renderAnnualGeoFrame(0);
+  } else {
+    ctrl.style.display='none';
+    geoMap.style.display='none';
+  }
+}
+
+function renderAnnualGeoFrame(idx){
+  if(!annAnimData||!annAnimData.geo_buses.length)return;
+  
+  const buses=annAnimData.geo_buses;
+  const branches=annAnimData.geo_ac_branches||[];
+  const hasGeo=buses.some(b=>Math.abs(b.lat)>0.001||Math.abs(b.lon)>0.001);
+  
+  // Interpolate voltage from snapshots if available
+  let vmVals=null;
+  if(annAnimData.snapshot_vm.length>0&&annAnimData.snapshot_hours.length>0){
+    const hr=annAnimData.hours[idx];
+    // Find closest snapshot
+    let closest=0;
+    let minDiff=Math.abs(annAnimData.snapshot_hours[0]-hr);
+    for(let i=1;i<annAnimData.snapshot_hours.length;i++){
+      const d=Math.abs(annAnimData.snapshot_hours[i]-hr);
+      if(d<minDiff){minDiff=d;closest=i;}
+    }
+    vmVals=annAnimData.snapshot_vm[closest];
+  }
+  
+  const traces=[];
+  
+  // Branch traces
+  for(const br of branches){
+    traces.push({
+      type:'scattergeo',
+      mode:'lines',
+      lon:[br.from_lon,br.to_lon],
+      lat:[br.from_lat,br.to_lat],
+      line:{width:2,color:'#0b6e4f'},
+      hoverinfo:'text',
+      text:`${br.from_bus}-${br.to_bus}`,
+      showlegend:false
+    });
+  }
+  
+  // Bus markers with dynamic voltage coloring
+  const acBuses=buses.filter(b=>b.type==='AC');
+  if(acBuses.length){
+    const colors=vmVals?acBuses.map(b=>{const v=vmVals[b.id-1];return v!==undefined?v:1.0;}):acBuses.map(b=>1.0);
+    // Compute dynamic color range based on actual voltage spread
+    const vmMin=Math.min(...colors);
+    const vmMax=Math.max(...colors);
+    const vmRange=Math.max(vmMax-vmMin,0.01);  // At least 0.01 spread
+    const cmin=Math.max(0.9, vmMin-vmRange*0.2);
+    const cmax=Math.min(1.1, vmMax+vmRange*0.2);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers',
+      lon:acBuses.map(b=>b.lon),
+      lat:acBuses.map(b=>b.lat),
+      marker:{size:12,color:colors,colorscale:'RdYlGn',cmin:cmin,cmax:cmax,colorbar:{title:'Vm (pu)',x:1.02,thickness:12,len:0.7}},
+      hoverinfo:'text',
+      hovertext:acBuses.map((b,i)=>`AC${b.id} ${b.name||''}<br>Vm=${colors[i].toFixed(4)} pu`),
+      name:'AC Buses',
+      showlegend:true
+    });
+  }
+  
+  const dcBuses=buses.filter(b=>b.type==='DC');
+  if(dcBuses.length){
+    // DC buses also get voltage-based coloring from vdc data
+    const dcColors=annAnimData.snapshot_vdc&&annAnimData.snapshot_vdc[Math.floor(idx*annAnimData.snapshot_vdc.length/Math.max(1,annAnimData.hours.length))]||dcBuses.map(()=>1.0);
+    const dcMin=Math.min(...dcColors);
+    const dcMax=Math.max(...dcColors);
+    const dcRange=Math.max(dcMax-dcMin,0.01);
+    traces.push({
+      type:'scattergeo',
+      mode:'markers',
+      lon:dcBuses.map(b=>b.lon),
+      lat:dcBuses.map(b=>b.lat),
+      marker:{size:12,color:dcColors.slice(0,dcBuses.length),colorscale:'Purples',cmin:Math.max(0.9,dcMin-dcRange*0.2),cmax:Math.min(1.1,dcMax+dcRange*0.2),symbol:'square'},
+      hoverinfo:'text',
+      hovertext:dcBuses.map((b,i)=>`DC${b.id} ${b.name||''}<br>Vdc=${(dcColors[i]||1.0).toFixed(4)} pu`),
+      name:'DC Buses',
+      showlegend:true
+    });
+  }
+  
+  // Summary text annotation
+  const genVal=annAnimData.gen[idx]||0;
+  const loadVal=annAnimData.load[idx]||0;
+  const renVal=annAnimData.ren[idx]||0;
+  
+  const layout={
+    title:`Network State @ Hour ${annAnimData.hours[idx]} | Gen: ${genVal.toFixed(0)} MW | Load: ${loadVal.toFixed(0)} MW | Ren: ${renVal.toFixed(0)} MW`,
+    geo:{
+      scope:hasGeo?undefined:'usa',
+      projection:{type:hasGeo?'mercator':'albers usa'},
+      showland:true,landcolor:'#f5f5dc',
+      showlakes:true,lakecolor:'#a0d2db',
+      showcountries:true,countrycolor:'#888',
+      resolution:hasGeo?50:110,
+      lonaxis:hasGeo?(()=>{const lons=buses.map(b=>b.lon);const minL=Math.min(...lons),maxL=Math.max(...lons);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined,
+      lataxis:hasGeo?(()=>{const lats=buses.map(b=>b.lat);const minL=Math.min(...lats),maxL=Math.max(...lats);const span=maxL-minL;const pad=Math.max(0.002,span*0.08);return{range:[minL-pad,maxL+pad]};})():undefined
+    },
+    margin:{l:0,r:0,t:50,b:0},
+    legend:{x:0,y:1,bgcolor:'rgba(255,255,255,0.7)'}
+  };
+  
+  Plotly.react('annGeoMap',traces,layout);
+  
+  // Update timeline chart marker
+  Plotly.relayout('annTimelineChart',{
+    shapes:[{type:'line',x0:annAnimData.hours[idx],x1:annAnimData.hours[idx],y0:0,y1:1,yref:'paper',
+             line:{color:'red',width:2,dash:'dot'}}]
+  });
+}
+
+function stepAnnualAnimation(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimFrame++;
+  if(annAnimFrame>=annAnimData.hours.length){
+    annAnimFrame=0;
+  }
+  document.getElementById('annAnimSlider').value=annAnimFrame;
+  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
+  if(document.getElementById('annAnimGeo').checked){
+    renderAnnualGeoFrame(annAnimFrame);
+  }
+}
+
+document.getElementById('annAnimPlayPause').onclick=function(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimPlaying=!annAnimPlaying;
+  this.innerHTML=annAnimPlaying?'&#10074;&#10074; Pause':'&#9658; Play';
+  if(annAnimPlaying){
+    const speed=parseInt(document.getElementById('annAnimSpeed').value)||500;
+    annAnimTimer=setInterval(stepAnnualAnimation,speed);
+  } else {
+    if(annAnimTimer)clearInterval(annAnimTimer);
+    annAnimTimer=null;
+  }
+};
+
+document.getElementById('annAnimReset').onclick=function(){
+  annAnimPlaying=false;
+  if(annAnimTimer)clearInterval(annAnimTimer);
+  annAnimTimer=null;
+  annAnimFrame=0;
+  document.getElementById('annAnimPlayPause').innerHTML='&#9658; Play';
+  if(annAnimData&&annAnimData.hours.length){
+    document.getElementById('annAnimSlider').value=0;
+    document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[0];
+    renderAnnualGeoFrame(0);
+  }
+};
+
+document.getElementById('annAnimSlider').oninput=function(){
+  if(!annAnimData||annAnimData.hours.length===0)return;
+  annAnimFrame=parseInt(this.value);
+  document.getElementById('annAnimTimeLabel').textContent='Hour '+annAnimData.hours[annAnimFrame];
+  if(document.getElementById('annAnimGeo').checked){
+    renderAnnualGeoFrame(annAnimFrame);
+  }
+};
+
+document.getElementById('annAnimSpeed').onchange=function(){
+  if(annAnimPlaying&&annAnimTimer){
+    clearInterval(annAnimTimer);
+    const speed=parseInt(this.value)||500;
+    annAnimTimer=setInterval(stepAnnualAnimation,speed);
+  }
+};
+
+document.getElementById('annAnimGeo').onchange=function(){
+  const geoMap=document.getElementById('annGeoMap');
+  geoMap.style.display=this.checked?'block':'none';
+  if(this.checked&&annAnimData)renderAnnualGeoFrame(annAnimFrame);
+};
+
+/* Lifecycle Simulation */
+document.getElementById('runLifecycleBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    setStatus('Running Lifecycle Simulation (multi-year, may take a while)...');
+    const body=await api('/api/session/run_lifecycle_sim',{
+      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
+      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
+      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
+      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
+      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
+      resolution:document.getElementById('lcResolution').value,
+      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
+      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
+      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
+      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
+      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
+    });
+    document.getElementById('lcFeas').textContent=body.feasible?'Yes':'No';
+    document.getElementById('lcNPV').textContent='$'+fmt(body.npv_total_cost,0);
+    document.getElementById('lcTotalCarbon').textContent=fmt(body.total_carbon_tco2,0)+' tCO\u2082';
+    document.getElementById('lcReplacements').textContent=body.total_replacements;
+    document.getElementById('lcReplCost').textContent='$'+fmt(body.total_replacement_cost,0);
+    document.getElementById('lcYears').textContent=body.num_years;
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+    const yrs=(body.years||[]).map(y=>y.year);
+    // Cost trajectory with replacement markers
+    const costs=(body.years||[]).map(y=>y.annual_cost);
+    const replYears=(body.replacements||[]).map(r=>r.year);
+    const replCosts=(body.replacements||[]).map(r=>r.replacement_cost_usd);
+    Plotly.newPlot('lcCostChart',[
+      {x:yrs,y:costs,mode:'lines+markers',name:'Annual Cost',line:{color:pal[0],width:2},marker:{size:5}},
+      {x:replYears,y:replCosts,mode:'markers',name:'Replacement Cost',marker:{color:pal[5],size:12,symbol:'diamond'}},
+    ],{title:'Annual Cost Trajectory with Replacements',xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},yaxis:{title:'$ Cost'},
+       margin:{l:70,r:15,t:45,b:50},legend:{orientation:'h',y:-0.15}},{responsive:true});
+    // Carbon trajectory with bounds
+    const carbon=(body.years||[]).map(y=>y.annual_carbon_tco2);
+    const boundUpper=(body.years||[]).map(y=>y.annual_carbon_tco2+y.bounds.total_bound_tco2);
+    const boundLower=(body.years||[]).map(y=>Math.max(0,y.annual_carbon_tco2-y.bounds.total_bound_tco2));
+    Plotly.newPlot('lcCarbonChart',[
+      {x:yrs,y:boundUpper,mode:'lines',line:{color:'rgba(231,76,60,0.2)',width:0},showlegend:false},
+      {x:yrs,y:boundLower,mode:'lines',fill:'tonexty',fillcolor:'rgba(231,76,60,0.12)',line:{color:'rgba(231,76,60,0.2)',width:0},name:'Error Bound'},
+      {x:yrs,y:carbon,mode:'lines+markers',name:'Annual CO\u2082',line:{color:pal[5],width:2},marker:{size:5}},
+    ],{title:'Annual Carbon Emissions with Theoretical Bounds',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Carbon intensity trajectory
+    const carbonIntensity=(body.years||[]).map(y=>y.avg_carbon_intensity);
+    const cumCarbon=(body.years||[]).reduce((acc,y)=>{const prev=acc.length>0?acc[acc.length-1]:0;acc.push(prev+y.annual_carbon_tco2);return acc;},[]);
+    Plotly.newPlot('lcCarbonIntensityChart',[
+      {x:yrs,y:carbonIntensity,mode:'lines+markers',name:'Avg Intensity (tCO\u2082/MWh)',line:{color:pal[2],width:2},marker:{size:5},yaxis:'y'},
+      {x:yrs,y:cumCarbon,mode:'lines',name:'Cumulative CO\u2082 (tCO\u2082)',line:{color:pal[5],width:2,dash:'dot'},yaxis:'y2'},
+    ],{title:'Carbon Intensity & Cumulative Emissions',
+       xaxis:{title:'Year',dtick:Math.max(1,Math.floor(yrs.length/10))},
+       yaxis:{title:'tCO\u2082/MWh',rangemode:'tozero',side:'left'},
+       yaxis2:{title:'Cumulative tCO\u2082',overlaying:'y',side:'right',rangemode:'tozero'},
+       margin:{l:60,r:60,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Energy breakdown
+    const gen=(body.years||[]).map(y=>y.annual_gen_mwh);
+    const ren=(body.years||[]).map(y=>y.annual_renewable_mwh);
+    const load=(body.years||[]).map(y=>y.annual_load_mwh);
+    const curt=(body.years||[]).map(y=>y.annual_curtailment_mwh);
+    Plotly.newPlot('lcEnergyChart',[
+      {x:yrs,y:gen,mode:'lines',name:'Generation',line:{color:pal[0],width:2}},
+      {x:yrs,y:load,mode:'lines',name:'Load',line:{color:pal[1],width:2}},
+      {x:yrs,y:ren,mode:'lines',name:'Renewable',line:{color:pal[6],width:2}},
+      {x:yrs,y:curt,mode:'lines',name:'Curtailment',line:{color:pal[5],width:1,dash:'dot'}},
+    ],{title:'Energy Trajectories (MWh)',xaxis:{title:'Year'},yaxis:{title:'MWh'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Battery SOH curves
+    const storNames=[...new Set((body.years||[]).flatMap(y=>(y.storage_states||[]).map(s=>s.name)))];
+    const sohTraces=storNames.map((nm,si)=>{
+      const sohVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const s=(y.storage_states||[]).find(ss=>ss.name===nm);return s?s.soh:null;});
+      return {x:yrs,y:sohVals,mode:'lines+markers',name:nm,line:{color:pal[si%pal.length],width:2},marker:{size:4}};
+    });
+    // Add EOL threshold line
+    sohTraces.push({x:[yrs[0],yrs[yrs.length-1]],y:[0.8,0.8],mode:'lines',name:'EOL Threshold',line:{color:'#c34d4d',width:1,dash:'dash'}});
+    Plotly.newPlot('lcSOHChart',sohTraces,{title:'Battery State of Health',xaxis:{title:'Year'},yaxis:{title:'SOH',range:[0,1.05]},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // PV derating curves
+    const pvNames=[...new Set((body.years||[]).flatMap(y=>(y.renewable_states||[]).map(r=>r.name)))];
+    const pvTraces=pvNames.map((nm,ri)=>{
+      const capVals=yrs.map(yr=>{const y=(body.years||[]).find(yy=>yy.year===yr);if(!y)return null;const r=(y.renewable_states||[]).find(rr=>rr.name===nm);return r?r.derated_capacity_mw:null;});
+      return {x:yrs,y:capVals,mode:'lines+markers',name:nm,line:{color:pal[(ri+2)%pal.length],width:2},marker:{size:4}};
+    });
+    Plotly.newPlot('lcPVChart',pvTraces,{title:'PV Capacity Derating (MW)',xaxis:{title:'Year'},yaxis:{title:'MW'},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Theoretical bounds breakdown
+    const bDispatch=(body.years||[]).map(y=>y.bounds.dispatch_bound_tco2);
+    const bSampling=(body.years||[]).map(y=>y.bounds.sampling_bound_tco2);
+    const bStorage=(body.years||[]).map(y=>y.bounds.storage_carbon_bound_tco2);
+    Plotly.newPlot('lcBoundsChart',[
+      {x:yrs,y:bDispatch,type:'bar',name:'Dispatch Approx.',marker:{color:pal[2]}},
+      {x:yrs,y:bSampling,type:'bar',name:'Sampling Error',marker:{color:pal[3]}},
+      {x:yrs,y:bStorage,type:'bar',name:'Storage Carbon',marker:{color:pal[4]}},
+    ],{title:'Theoretical Error Bounds Breakdown (tCO\u2082)',barmode:'stack',xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Cross-validation: sampling gap (dense vs sampled)
+    const cvDense=(body.years||[]).map(y=>(y.cross_validation||{}).dense_carbon_tco2||0);
+    const cvSampled=(body.years||[]).map(y=>(y.cross_validation||{}).sampled_carbon_tco2||0);
+    const cvGapPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_gap_pct||0);
+    const cvBoundPct=(body.years||[]).map(y=>(y.cross_validation||{}).total_bound_pct||0);
+    const cvDispPct=(body.years||[]).map(y=>(y.cross_validation||{}).dispatch_bound_pct||0);
+    const cvSampPct=(body.years||[]).map(y=>(y.cross_validation||{}).sampling_bound_pct||0);
+    const cvStorPct=(body.years||[]).map(y=>(y.cross_validation||{}).storage_bound_pct||0);
+    Plotly.newPlot('lcBoundsBreakdownChart',[
+      {x:yrs,y:cvDispPct,type:'bar',name:'Dispatch Bound %',marker:{color:pal[2]}},
+      {x:yrs,y:cvSampPct,type:'bar',name:'Sampling Bound %',marker:{color:pal[3]}},
+      {x:yrs,y:cvStorPct,type:'bar',name:'Storage Bound %',marker:{color:pal[4]}},
+    ],{title:'Theoretical Error Bounds as % of Annual Carbon',barmode:'stack',
+       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    // Dense vs sampled carbon comparison
+    Plotly.newPlot('lcCrossValChart',[
+      {x:yrs,y:cvDense,mode:'lines+markers',name:'Dense (All Hours)',line:{color:pal[1],width:2},marker:{size:5}},
+      {x:yrs,y:cvSampled,mode:'lines+markers',name:'Stratified Sample',line:{color:pal[3],width:2,dash:'dash'},marker:{size:5}},
+    ],{title:'Carbon Cross-Validation: Dense vs Sampled Estimate (tCO\u2082)',
+       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
+    },{responsive:true});
+    // Sampling gap % vs total bound %
+    Plotly.newPlot('lcTightnessChart',[
+      {x:yrs,y:cvBoundPct,mode:'lines+markers',name:'Total Bound / Carbon %',line:{color:pal[5],width:2,dash:'dash'},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(231,76,60,0.08)'},
+      {x:yrs,y:cvGapPct,mode:'lines+markers',name:'Sampling Gap / Carbon %',line:{color:pal[0],width:2},marker:{size:5},fill:'tozeroy',fillcolor:'rgba(11,110,79,0.08)'},
+    ],{title:'Validation: Theoretical Bound vs Sampling Gap (% of Carbon)',
+       xaxis:{title:'Year'},yaxis:{title:'%',rangemode:'tozero'},
+       margin:{l:55,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}
+    },{responsive:true});
+    setStatus('Lifecycle simulation complete. '+body.num_years+' years. NPV: $'+fmt(body.npv_total_cost,0)+'. Carbon: '+fmt(body.total_carbon_tco2,0)+' tCO\u2082.');
+  }catch(e){setStatus(e.message,true);}
+};
+
+/* Capacity Comparison Sweep */
+document.getElementById('runCapCompareBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  try{
+    const sweepParam=document.getElementById('lcSweepParam').value;
+    const minS=parseFloat(document.getElementById('lcSweepMin').value)||0.5;
+    const maxS=parseFloat(document.getElementById('lcSweepMax').value)||3.0;
+    const steps=parseInt(document.getElementById('lcSweepSteps').value)||6;
+    document.getElementById('lcCompareStatus').textContent='Running '+steps+' scenarios for '+sweepParam+'...';
+    setStatus('Capacity comparison: sweeping '+sweepParam+' ('+steps+' scenarios)...');
+    const body=await api('/api/session/run_lifecycle_compare',{
+      num_years:parseInt(document.getElementById('lcNumYears').value)||20,
+      discount_rate:parseFloat(document.getElementById('lcDiscountRate').value)||0.05,
+      load_growth_rate:parseFloat(document.getElementById('lcLoadGrowth').value)||0.02,
+      pv_annual_derating:parseFloat(document.getElementById('lcPVDerating').value)||0.005,
+      calendar_degradation:parseFloat(document.getElementById('lcCalDegrad').value)||0.02,
+      resolution:document.getElementById('lcResolution').value,
+      pv_scale:parseFloat(document.getElementById('lcPVScale').value)||1.0,
+      wind_scale:parseFloat(document.getElementById('lcWindScale').value)||1.0,
+      bess_power_scale:parseFloat(document.getElementById('lcBESSPowerScale').value)||1.0,
+      bess_energy_scale:parseFloat(document.getElementById('lcBESSEnergyScale').value)||1.0,
+      diesel_scale:parseFloat(document.getElementById('lcDieselScale').value)||1.0,
+      sweep_param:sweepParam,
+      sweep_min:minS,
+      sweep_max:maxS,
+      sweep_steps:steps,
+    });
+    const scens=body.scenarios||[];
+    const labels=scens.map(s=>s.label);
+    const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12','#1abc9c','#d35400'];
+    const paramLabel={pv:'PV (MW)',wind:'Wind (MW)',bess_power:'BESS Power (MW)',bess_energy:'BESS Energy (MWh)',diesel:'Diesel (MW)'}[sweepParam]||sweepParam;
+    const capVals=scens.map(s=>{
+      if(sweepParam==='pv') return s.total_pv_mw;
+      if(sweepParam==='wind') return s.total_wind_mw;
+      if(sweepParam==='bess_power') return s.total_bess_mw;
+      if(sweepParam==='bess_energy') return s.total_bess_mwh;
+      if(sweepParam==='diesel') return s.total_diesel_mw;
+      return 0;
+    });
+    // NPV vs capacity
+    Plotly.newPlot('lcCompNPVChart',[
+      {x:capVals,y:scens.map(s=>s.npv_total_cost),mode:'lines+markers',name:'NPV Cost',line:{color:pal[0],width:2},marker:{size:8}},
+    ],{title:'NPV Total Cost vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'$ NPV Cost'},
+       margin:{l:70,r:15,t:45,b:50}},{responsive:true});
+    // Total carbon vs capacity
+    Plotly.newPlot('lcCompCarbonChart',[
+      {x:capVals,y:scens.map(s=>s.total_carbon_tco2),mode:'lines+markers',name:'Total CO\u2082',line:{color:pal[5],width:2},marker:{size:8}},
+    ],{title:'Total Carbon vs '+paramLabel,xaxis:{title:paramLabel},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50}},{responsive:true});
+    // Pareto: NPV vs Carbon
+    Plotly.newPlot('lcCompParetoChart',[
+      {x:scens.map(s=>s.total_carbon_tco2),y:scens.map(s=>s.npv_total_cost),
+       mode:'markers+text',text:labels,textposition:'top center',textfont:{size:9},
+       marker:{size:12,color:capVals,colorscale:'Viridis',showscale:true,colorbar:{title:paramLabel,len:0.7}},
+       name:'Scenarios'},
+    ],{title:'Pareto Front: NPV Cost vs Total Carbon',xaxis:{title:'Total tCO\u2082'},yaxis:{title:'$ NPV Cost'},
+       margin:{l:70,r:70,t:45,b:50}},{responsive:true});
+    // Carbon trajectory comparison (each scenario as a line)
+    const trajTraces=scens.map((s,si)=>{
+      const yrs=s.yearly_carbon.map((_,i)=>i+1);
+      return {x:yrs,y:s.yearly_carbon,mode:'lines',name:s.label,line:{color:pal[si%pal.length],width:1.5}};
+    });
+    Plotly.newPlot('lcCompCarbonTrajChart',trajTraces,{title:'Annual Carbon Trajectories by Scenario',
+       xaxis:{title:'Year'},yaxis:{title:'tCO\u2082'},
+       margin:{l:60,r:15,t:45,b:50},legend:{orientation:'h',y:-0.18}},{responsive:true});
+    document.getElementById('lcCompareStatus').textContent='\u2705 Comparison complete: '+scens.length+' scenarios for '+paramLabel;
+    setStatus('Capacity comparison complete. '+scens.length+' scenarios.');
+  }catch(e){setStatus(e.message,true);document.getElementById('lcCompareStatus').textContent='Error: '+e.message;}
+};
+
+/* Dashboard */
+document.getElementById('runDashBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  const ds=document.getElementById('dashStatus');
+  ds.textContent='Running Time-Series PF...'; setStatus('Dashboard: running full analysis...');
+  const numSteps=24; const hrs=Array.from({length:numSteps},(_,i)=>i);
+  const results={};
+  try{results.tspf=await api('/api/session/run_ts_pf',{num_steps:numSteps,skip_uc:false,run_opf:false});}
+  catch(e){results.tspf=null;ds.textContent='TS-PF failed: '+e.message;}
+  ds.textContent='Running Carbon Analysis...';
+  try{results.carbon=await api('/api/session/run_carbon',{});}
+  catch(e){results.carbon=null;}
+  // KPI row
+  const kd=[];
+  if(results.tspf){
+    kd.push({v:results.tspf.num_converged+'/'+results.tspf.num_steps,l:'TS-PF Conv.'});
+    kd.push({v:'$'+fmt(results.tspf.total_generation_cost,0),l:'Gen Cost'});
+    const avgLoss=results.tspf.losses_mw?(results.tspf.losses_mw.reduce((a,b)=>a+b,0)/numSteps).toFixed(2):'-';
+    kd.push({v:avgLoss+' MW',l:'Avg Losses'});
+  }
+  if(results.carbon){
+    const ts2=results.carbon.tracing_summary||{};
+    kd.push({v:fmt(ts2.total_generation_emissions_tco2,1)+' tCO\u2082',l:'Gen Emissions'});
+    kd.push({v:fmt(ts2.total_load_emissions_tco2,1)+' tCO\u2082',l:'Load Emissions'});
+    if(results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
+      const avgCI=results.carbon.bus_carbon.reduce((a,b)=>a+b.carbon_intensity_tco2_mwh,0)/results.carbon.bus_carbon.length;
+      kd.push({v:fmt(avgCI,3)+' tCO\u2082/MWh',l:'Avg Carbon Int.'});
+    }
+  }
+  document.getElementById('dashKPIs').innerHTML=kd.map(k=>'<div class="kpi"><div class="v">'+k.v+'</div><div class="l">'+k.l+'</div></div>').join('');
+  const pal=['#0b6e4f','#2c8c99','#b5651d','#8e44ad','#2980b9','#e74c3c','#27ae60','#f39c12'];
+  const M={l:50,r:15,t:40,b:45};
+  if(results.tspf){
+    const dtraces=(results.tspf.gen_dispatch||[]).map((d,gi)=>({x:hrs,y:d,type:'bar',name:results.tspf.gen_names[gi]||'Gen '+gi,marker:{color:pal[gi%pal.length]}}));
+    (results.tspf.renewable_dispatch||[]).forEach((rd,ri)=>dtraces.push({x:hrs,y:rd,type:'bar',name:results.tspf.ren_names[ri]||'Ren '+ri,marker:{color:'#27ae60'}}));
+    Plotly.newPlot('dashGenChart',dtraces,{title:'Generation Dispatch',barmode:'stack',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,showlegend:false,height:300},{responsive:true});
+    if(results.tspf.vm_mean){
+      const vt=[];const d2=results.tspf;
+      if(d2.vm_max&&d2.vm_min){vt.push({x:hrs,y:d2.vm_max,mode:'lines',line:{width:0},showlegend:false});vt.push({x:hrs,y:d2.vm_min,mode:'lines',line:{width:0},fill:'tonexty',fillcolor:'rgba(11,110,79,0.12)',name:'Range'});}
+      vt.push({x:hrs,y:d2.vm_mean,mode:'lines',line:{color:'#0b6e4f',width:2},name:'Mean'});
+      const allV2=[...d2.vm_mean,...(d2.vm_min||[]),...(d2.vm_max||[])].filter(v=>v>0);
+      const vL=Math.min(...allV2),vH=Math.max(...allV2),vP2=Math.max((vH-vL)*0.15,0.005);
+      Plotly.newPlot('dashVoltChart',vt,{title:'Bus Voltage (p.u.)',xaxis:{title:'Hour'},yaxis:{title:'p.u.',range:[vL-vP2,vH+vP2]},margin:M,height:300},{responsive:true});
+    }
+    if(results.tspf.losses_mw)
+      Plotly.newPlot('dashLossChart',[{x:hrs,y:results.tspf.losses_mw,type:'bar',marker:{color:'#b5651d'}}],{title:'System Losses per Hour (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
+    if(results.tspf.ess_soc&&results.tspf.ess_soc.length)
+      Plotly.newPlot('dashESSChart',(results.tspf.ess_soc||[]).map((s,si)=>({x:hrs,y:s,mode:'lines',name:results.tspf.ess_names[si]||'ESS '+si})),{title:'ESS State of Charge',xaxis:{title:'Hour'},yaxis:{title:'SOC',range:[0,1]},margin:M,height:300},{responsive:true});
+    else
+      document.getElementById('dashESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage data.</div>';
+    // Load demand profile (from load profile 0 scalings × total load)
+    const loadFromLoads=(SYS.loads||[]).reduce((s,l)=>s+(l.p_mw||0),0);
+    const loadFromBuses=(SYS.ac_buses||[]).reduce((s,b)=>s+(b.pd_mw||0),0);
+    const totalLoad=loadFromLoads>0?loadFromLoads:loadFromBuses;
+    const lpVals=[0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60];
+    Plotly.newPlot('dashLoadChart',[{x:hrs,y:lpVals.map(s=>s*totalLoad),mode:'lines',fill:'tozeroy',fillcolor:'rgba(44,140,153,0.1)',line:{color:'#2c8c99',width:2},name:'Load'}],{title:'Total Load Demand (MW)',xaxis:{title:'Hour'},yaxis:{title:'MW'},margin:M,height:300},{responsive:true});
+  }
+  if(results.carbon&&results.carbon.bus_carbon&&results.carbon.bus_carbon.length){
+    const ci=results.carbon.bus_carbon.map(b=>b.carbon_intensity_tco2_mwh);
+    const mx=Math.max(...ci)||1;
+    Plotly.newPlot('dashCarbonChart',[{x:results.carbon.bus_carbon.map(b=>'B'+b.bus_index),y:ci,type:'bar',
+      marker:{color:ci,colorscale:'RdYlGn',reversescale:true,cmin:0,cmax:mx,showscale:true,colorbar:{len:0.8}}}],
+      {title:'Carbon Intensity by Bus (tCO\u2082/MWh)',xaxis:{title:''},yaxis:{title:'tCO\u2082/MWh'},margin:{l:50,r:70,t:40,b:50},height:300},{responsive:true});
+  } else {
+    document.getElementById('dashCarbonChart').innerHTML='<div style="padding:20px;color:var(--muted);">Carbon data unavailable.</div>';
+  }
+  ds.textContent='\u2705 Full analysis complete! TS-PF: '+(results.tspf?results.tspf.num_converged+'/'+results.tspf.num_steps+' conv.':'failed')+'. Carbon: '+(results.carbon?(fmt(results.carbon.tracing_summary.total_generation_emissions_tco2,1)+' tCO\u2082'):'failed')+'.'
+  setStatus('Dashboard analysis complete.');
+};
+</script>
+</body>
+</html>)html";
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Args args;
+  if (!parse_args(argc, argv, args)) return 1;
+
+  httplib::Server svr;
+  svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+  svr.set_read_timeout(600, 0);   // 10 min to read request (long-running analysis)
+  svr.set_write_timeout(600, 0);  // 10 min to write response
+  svr.set_keep_alive_max_count(100);
+  svr.set_idle_interval(0, 500000); // 0.5 sec idle check
+
+  // Global exception handler — catch anything that escapes per-route handlers
+  svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
+    g_session.busy.store(false);
+    try {
+      if (ep) std::rethrow_exception(ep);
+    } catch (const std::exception& e) {
+      res.status = 500;
+      res.set_content(json{{"error", std::string("Server error: ") + e.what()}}.dump(), "application/json");
+      return;
+    } catch (...) {}
+    res.status = 500;
+    res.set_content(json{{"error", "Unknown server error"}}.dump(), "application/json");
+  });
+
+  const std::string data_dir = [&]() {
+    fs::path p(args.data_dir);
+    // If absolute and exists, use it directly
+    if (p.is_absolute() && fs::exists(p)) return p.string();
+    // Try relative to cwd
+    if (p.is_relative()) {
+      auto c1 = fs::current_path() / p;
+      if (fs::exists(c1)) return c1.string();
+    }
+    // Search common locations relative to cwd and executable
+    const std::vector<fs::path> candidates = {
+        fs::current_path() / ".." / "data",
+        fs::current_path() / "data",
+        fs::current_path() / ".." / "matpower" / "data",
+        fs::current_path() / "matpower" / "data",
+    };
+    for (const auto& c : candidates) {
+      if (fs::exists(c)) return fs::canonical(c).string();
+    }
+    return p.string();
+  }();
+  std::cout << "Data directory: " << data_dir << "\n";
+
+  // Resolve MATPOWER directory (independent of data_dir).
+  // Default: ../external_data/matpower, with auto-detection fallbacks so the
+  // server works regardless of cwd (build/, repo root, etc.).
+  const std::string matpower_dir = [&]() {
+    fs::path p(args.matpower_dir);
+    if (p.is_absolute() && fs::exists(p)) return p.string();
+    if (p.is_relative()) {
+      auto c1 = fs::current_path() / p;
+      if (fs::exists(c1)) return fs::canonical(c1).string();
+    }
+    const std::vector<fs::path> candidates = {
+        fs::current_path() / "external_data" / "matpower",
+        fs::current_path() / ".." / "external_data" / "matpower",
+        fs::current_path() / ".." / ".." / "external_data" / "matpower",
+        fs::path(data_dir),  // legacy fallback: matpower files in data dir
+    };
+    for (const auto& c : candidates) {
+      if (fs::exists(c)) return fs::canonical(c).string();
+    }
+    return p.string();
+  }();
+  std::cout << "MATPOWER directory: " << matpower_dir << "\n";
+
+  const auto html = make_index_html();
+
+  svr.Get("/", [&html](const httplib::Request&, httplib::Response& res) {
+    res.set_content(html, "text/html; charset=UTF-8");
+  });
+
+  svr.Get("/api/cases", [](const httplib::Request&, httplib::Response& res) {
+    json out;
+    out["cases"] = case_names();
+    out["default_case"] = "ieee24_3area_acdc_expanded";
+    res.set_content(out.dump(), "application/json");
+  });
+
+  svr.Get("/api/matpower_files", [&matpower_dir](const httplib::Request&, httplib::Response& res) {
+    json out;
+    out["files"] = list_matpower_files(matpower_dir);
+    out["data_dir"] = matpower_dir;
+    res.set_content(out.dump(), "application/json");
+  });
+
+  // ---- Session: load system ----
+  svr.Post("/api/session/load_builtin",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      std::string name = j.value("case", "ieee24_3area_acdc_expanded");
+      auto sys = build_case(name);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = name;
+      g_session.last_pf_result.reset(); g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/load_matpower",
+           [&matpower_dir](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      std::string filename = j.value("filename", "");
+      if (filename.empty()) throw std::runtime_error("No filename provided");
+      if (filename.find('/') != std::string::npos ||
+          filename.find('\\') != std::string::npos ||
+          filename.find("..") != std::string::npos) {
+        throw std::runtime_error("Invalid filename");
+      }
+      fs::path fpath = fs::path(matpower_dir) / filename;
+      if (!fs::exists(fpath)) throw std::runtime_error("File not found: " + filename);
+      auto sys = hacdcpf::io::parse_matpower(fpath.string());
+      sys.name = filename;
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = filename;
+      g_session.last_pf_result.reset(); g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/load_json_string",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      std::string js = j.value("json_string", "");
+      if (js.empty()) throw std::runtime_error("Empty JSON string");
+      // ── DEBUG: dump raw JSON to file for comparison ───────────
+      {
+        static int dump_counter = 0;
+        std::string fname = "debug_json_dump_" + std::to_string(dump_counter++) + ".json";
+        std::ofstream ofs(fname);
+        if (ofs) { ofs << js; ofs.close(); }
+        std::cerr << "[DEBUG] Dumped JSON to " << fname << " (" << js.size() << " bytes)\n" << std::flush;
+      }
+      // ── END dump ──────────────────────────────────────────────
+
+      auto sys = hacdcpf::io::from_json(js);
+
+      // ── DEBUG: dump critical fields after parsing ──────────────
+      std::cerr << "\n[DEBUG load_json_string] System: " << sys.name << "\n";
+      std::cerr << "  base_mva=" << sys.base_mva << "\n";
+      for (const auto& b : sys.ac.buses)
+        std::cerr << "  AC Bus " << b.index << " type=" << static_cast<int>(b.bus_type)
+                  << " vm=" << b.vm_pu << " va=" << b.va_deg << "\n";
+      for (const auto& eg : sys.ac.external_grids)
+        std::cerr << "  ExtGrid bus=" << eg.bus << " vm=" << eg.vm_pu << "\n";
+      for (const auto& br : sys.ac.branches)
+        std::cerr << "  AC Branch " << br.from_bus << "->" << br.to_bus
+                  << " r=" << br.r_pu << " x=" << br.x_pu << " b=" << br.b_pu
+                  << " tap=" << br.tap << "\n";
+      for (const auto& b : sys.dc.buses)
+        std::cerr << "  DC Bus " << b.index << " type="
+                  << (b.bus_type == hacdcpf::DCBusType::DC_V ? "DC_V" : "DC_P")
+                  << " vm=" << b.vm_pu << " base_kv=" << b.base_kv << "\n";
+      for (const auto& br : sys.dc.branches)
+        std::cerr << "  DC Branch " << br.from_bus << "->" << br.to_bus
+                  << " r=" << br.r_pu << "\n";
+      for (const auto& ld : sys.dc.loads)
+        std::cerr << "  DC Load bus=" << ld.bus << " p=" << ld.p_mw << "\n";
+      for (const auto& v : sys.vsc_converters)
+        std::cerr << "  VSC ac=" << v.bus_ac << " dc=" << v.bus_dc
+                  << " mode=" << static_cast<int>(v.control_mode)
+                  << " p=" << v.p_set_mw << " q=" << v.q_set_mvar
+                  << " eta=" << v.eta << "\n";
+      for (const auto& d : sys.dc.dcdc_converters)
+        std::cerr << "  DCDC in=" << d.bus_in << " out=" << d.bus_out
+                  << " mode=" << static_cast<int>(d.control_mode)
+                  << " p_ref=" << d.p_ref_mw << " v_ref=" << d.v_ref_pu
+                  << " eta=" << d.eta << "\n";
+      std::cerr << std::flush;
+      // ── END DEBUG ─────────────────────────────────────────────
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name;
+      g_session.last_pf_result.reset(); g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = js;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/new_empty",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      sys.name = "New System";
+      sys.base_mva = 100.0;
+      sys.ac.base_mva = 100.0;
+      sys.dc.base_mva = 100.0;
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = "New System";
+      g_session.last_pf_result.reset(); g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/export_json",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+      json out;
+      out["json_string"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      out["name"] = g_session.current_name;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: update components from Case Builder ----
+  svr.Post("/api/session/update_components",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      if (!g_session.current_system) throw std::runtime_error("No system loaded");
+
+      json root = json::parse(hacdcpf::io::to_json(*g_session.current_system, 2));
+
+      auto put_array = [&](const std::string& top,
+                           const std::string& key,
+                           const std::string& src) {
+        if (j.contains(src) && j[src].is_array()) root[top][key] = j[src];
+      };
+      auto put_root_array = [&](const std::string& key) {
+        if (j.contains(key) && j[key].is_array()) root[key] = j[key];
+      };
+
+      if (j.contains("name") && j["name"].is_string()) root["name"] = j["name"];
+      if (j.contains("base_mva") && j["base_mva"].is_number()) root["base_mva"] = j["base_mva"];
+
+      put_array("ac", "buses", "ac_buses");
+      put_array("ac", "branches", "ac_branches");
+      put_array("ac", "generators", "generators");
+      put_array("ac", "static_generators", "static_generators");
+      put_array("ac", "loads", "loads");
+      put_array("ac", "flexible_loads", "flexible_loads");
+      put_array("ac", "asymmetric_loads", "asymmetric_loads");
+      put_array("ac", "shunts", "shunts");
+      put_array("ac", "storage", "storage");
+      put_array("ac", "renewable_gens", "renewable_gens");
+      put_array("ac", "pv_systems", "pv_systems");
+      put_array("ac", "external_grids", "external_grids");
+      put_array("ac", "transformers_2w", "transformers_2w");
+      put_array("ac", "transformers_3w", "transformers_3w");
+      put_array("ac", "switches", "switches");
+      put_array("ac", "circuit_breakers", "circuit_breakers");
+      put_array("ac", "charging_stations", "charging_stations");
+      put_array("ac", "chargers", "chargers");
+      put_array("ac", "motors", "motors");
+
+      put_array("dc", "buses", "dc_buses");
+      put_array("dc", "branches", "dc_branches");
+      put_array("dc", "loads", "dc_loads");
+      put_array("dc", "storage", "dc_storage");
+      put_array("dc", "static_generators", "dc_static_generators");
+      put_array("dc", "dc_static_generators", "dc_native_static_generators");
+      put_array("dc", "pv_arrays", "pv_arrays");
+      put_array("dc", "dc_circuit_breakers", "dc_circuit_breakers");
+
+      put_root_array("vsc_converters");
+      put_root_array("dcdc_converters");
+      put_root_array("energy_routers");
+      put_root_array("mobile_storage");
+      put_root_array("vpps");
+      put_root_array("microgrids");
+
+      const bool has_tp = j.contains("tp_buses") || j.contains("tp_lines") ||
+                          j.contains("tp_transformers") || j.contains("tp_loads") ||
+                          j.contains("tp_generators") || j.contains("tp_external_grids");
+      if (has_tp) {
+        if (!root.contains("three_phase_ac") || !root["three_phase_ac"].is_object()) {
+          root["three_phase_ac"] = json::object();
+        }
+        if (j.contains("tp_buses") && j["tp_buses"].is_array()) root["three_phase_ac"]["buses"] = j["tp_buses"];
+        if (j.contains("tp_lines") && j["tp_lines"].is_array()) root["three_phase_ac"]["lines"] = j["tp_lines"];
+        if (j.contains("tp_transformers") && j["tp_transformers"].is_array()) root["three_phase_ac"]["transformers"] = j["tp_transformers"];
+        if (j.contains("tp_loads") && j["tp_loads"].is_array()) root["three_phase_ac"]["loads"] = j["tp_loads"];
+        if (j.contains("tp_generators") && j["tp_generators"].is_array()) root["three_phase_ac"]["generators"] = j["tp_generators"];
+        if (j.contains("tp_external_grids") && j["tp_external_grids"].is_array()) root["three_phase_ac"]["external_grids"] = j["tp_external_grids"];
+      }
+
+      g_session.current_system = hacdcpf::io::from_json(root.dump());
+      g_session.current_name = g_session.current_system->name;
+      g_session.last_pf_result.reset(); g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: cancel / status ----
+  svr.Post("/api/session/cancel",
+           [](const httplib::Request&, httplib::Response& res) {
+    g_session.cancel.store(true);
+    res.set_content(json{{"cancelled", true}}.dump(), "application/json");
+  });
+
+  svr.Get("/api/session/status",
+          [](const httplib::Request&, httplib::Response& res) {
+    json out;
+    out["busy"] = g_session.busy.load();
+    out["cancel"] = g_session.cancel.load();
+    res.set_content(out.dump(), "application/json");
+  });
+
+  // ---- Session: run analyses ----
+  svr.Post("/api/session/pf",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      // Copy system under short lock, then release
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string method = j.value("method", std::string("ac_newton"));
+
+      hacdcpf::PowerFlowOptions opt;
+      if (j.contains("options")) {
+        const auto& o = j["options"];
+        if (o.contains("max_iter")) opt.max_iter = o["max_iter"].get<int>();
+        if (o.contains("tol")) opt.tol = o["tol"].get<double>();
+        if (o.contains("fdpf_max_iter")) opt.fdpf_max_iter = o["fdpf_max_iter"].get<int>();
+        if (o.contains("enable_pv_pq_conversion")) opt.enable_pv_pq_conversion = o["enable_pv_pq_conversion"].get<bool>();
+        if (o.contains("enable_auto_swing_selection")) opt.enable_auto_swing_selection = o["enable_auto_swing_selection"].get<bool>();
+        if (o.contains("enable_converter_mode_switching")) opt.enable_converter_mode_switching = o["enable_converter_mode_switching"].get<bool>();
+        if (o.contains("verbose")) opt.verbose = o["verbose"].get<bool>();
+        if (o.contains("pv_q_hysteresis_pu")) opt.pv_q_hysteresis_pu = o["pv_q_hysteresis_pu"].get<double>();
+        if (o.contains("pv_recover_vm_tol_pu")) opt.pv_recover_vm_tol_pu = o["pv_recover_vm_tol_pu"].get<double>();
+        if (o.contains("max_delta_va_rad")) opt.max_delta_va_rad = o["max_delta_va_rad"].get<double>();
+        if (o.contains("max_delta_vm_pu")) opt.max_delta_vm_pu = o["max_delta_vm_pu"].get<double>();
+        if (o.contains("max_delta_vdc_pu")) opt.max_delta_vdc_pu = o["max_delta_vdc_pu"].get<double>();
+        if (o.contains("loss_model")) {
+          const std::string lm = o["loss_model"].get<std::string>();
+          if (lm == "current_based") opt.loss_model = hacdcpf::LossModelType::CurrentBased;
+          else opt.loss_model = hacdcpf::LossModelType::Linear;
+        }
+      }
+      json out;
+      out["method"] = method;
+      out["vm"] = json::array();
+      out["va"] = json::array();
+      out["vdc"] = json::array();
+      out["branch_abs"] = json::array();
+      out["dc_branch_flows"] = json::array();
+      out["vsc_transfers"] = json::array();
+      out["dcdc_transfers"] = json::array();
+      out["notes"] = "";
+
+      // Snapshot original energy routers BEFORE canonical projection clears them.
+      // After solve_power_flow → project_to_canonical_models → expand_energy_routers,
+      // sys.energy_routers is empty.  We reconstruct ER port flows from the
+      // expanded VSC transfers by matching bus_ac (each ER port becomes a VSC
+      // with bus_ac = port.bus after expansion).
+      const auto er_snapshot = sys.energy_routers;
+
+      // Helper to serialize VSC/DCDC transfers from a PowerFlowResult
+      auto add_transfers = [&](const hacdcpf::PowerFlowResult& pf) {
+        for (const auto& v : pf.vsc_transfers)
+          out["vsc_transfers"].push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
+            {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
+        for (const auto& d : pf.dcdc_transfers)
+          out["dcdc_transfers"].push_back(json{{"index",d.index},{"bus_in",d.bus_in},{"bus_out",d.bus_out},
+            {"p_in_mw",d.p_in_mw},{"p_out_mw",d.p_out_mw},{"loss_mw",d.loss_mw}});
+      };
+
+      // Helper to compute DC branch flows from DC bus voltages
+      auto add_dc_branch_flows = [&]() {
+        if (!out.contains("vdc") || !out["vdc"].is_array() || out["vdc"].empty() || sys.dc.branches.empty()) return;
+        // Build dc_bus_index → position map
+        std::unordered_map<int, size_t> dc_idx;
+        for (size_t i = 0; i < sys.dc.buses.size(); ++i) dc_idx[sys.dc.buses[i].index] = i;
+        const auto& vdc_arr = out["vdc"];
+        json dc_br = json::array();
+        for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
+          const auto& br = sys.dc.branches[i];
+          if (!br.in_service) { dc_br.push_back(json{{"from_bus", br.from_bus}, {"to_bus", br.to_bus}, {"pf_mw", 0.0}, {"pt_mw", 0.0}}); continue; }
+          auto fi = dc_idx.find(br.from_bus), ti = dc_idx.find(br.to_bus);
+          double pf_mw = 0.0, pt_mw = 0.0;
+          if (fi != dc_idx.end() && ti != dc_idx.end() && fi->second < vdc_arr.size() && ti->second < vdc_arr.size()) {
+            double vf = vdc_arr[fi->second].get<double>(), vt = vdc_arr[ti->second].get<double>();
+            double r_pu = br.r_pu;
+            if (r_pu > 1e-12) {
+              double i_pu = (vf - vt) / r_pu;
+              pf_mw = vf * i_pu * sys.base_mva;
+              pt_mw = -vt * i_pu * sys.base_mva;
+            }
+          }
+          dc_br.push_back(json{{"from_bus", br.from_bus}, {"to_bus", br.to_bus}, {"pf_mw", pf_mw}, {"pt_mw", pt_mw}});
+        }
+        out["dc_branch_flows"] = dc_br;
+      };
+
+      // Helper to add GIS/geographic data for map visualization
+      auto add_geo_data = [&](const hacdcpf::PowerFlowResult& pf) {
+        json geo_buses = json::array();
+        json geo_ac_branches = json::array();
+        json geo_dc_branches = json::array();
+        json geo_vsc = json::array();
+        json geo_dcdc = json::array();
+
+        // Aggregate load demand and generation per bus for display.
+        std::unordered_map<int, double> bus_pd, bus_qd, bus_pg, bus_qg;
+        for (const auto& ld : sys.ac.loads) {
+          if (!ld.in_service) continue;
+          bus_pd[ld.bus] += ld.p_mw * ld.scaling;
+          bus_qd[ld.bus] += ld.q_mvar * ld.scaling;
+        }
+        for (const auto& g : sys.ac.generators) {
+          if (!g.in_service) continue;
+          bus_pg[g.bus] += g.pg_mw;
+          bus_qg[g.bus] += g.qg_mvar;
+        }
+
+        // ── Compute solved per-generator P/Q from bus power balance ──
+        // For non-slack generators, scheduled pg_mw is enforced by the solver.
+        // For slack/PV generators, we back-calculate from branch flows.
+        std::unordered_map<int, double> bus_p_out, bus_q_out;
+        for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+          const auto& br = sys.ac.branches[i];
+          bus_p_out[br.from_bus] += pf.branch_flows[i].pf_mw;
+          bus_p_out[br.to_bus]   += pf.branch_flows[i].pt_mw;
+          bus_q_out[br.from_bus] += pf.branch_flows[i].qf_mvar;
+          bus_q_out[br.to_bus]   += pf.branch_flows[i].qt_mvar;
+        }
+        for (const auto& tf : pf.trafo3w_flows) {
+          bus_p_out[tf.hv_bus] += tf.p_hv_mw;
+          bus_p_out[tf.mv_bus] += tf.p_mv_mw;
+          bus_p_out[tf.lv_bus] += tf.p_lv_mw;
+          bus_q_out[tf.hv_bus] += tf.q_hv_mvar;
+          bus_q_out[tf.mv_bus] += tf.q_mv_mvar;
+          bus_q_out[tf.lv_bus] += tf.q_lv_mvar;
+        }
+        for (const auto& v : pf.vsc_transfers) {
+          bus_p_out[v.bus_ac] -= v.p_ac_mw;
+          bus_q_out[v.bus_ac] -= v.q_ac_mvar;
+        }
+
+        std::vector<double> gen_pg_solved(sys.ac.generators.size());
+        std::vector<double> gen_qg_solved(sys.ac.generators.size());
+        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+          gen_pg_solved[gi] = sys.ac.generators[gi].pg_mw;
+          gen_qg_solved[gi] = sys.ac.generators[gi].qg_mvar;
+        }
+        std::unordered_map<int, std::vector<size_t>> gens_at_bus;
+        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+          if (!sys.ac.generators[gi].in_service) continue;
+          gens_at_bus[sys.ac.generators[gi].bus].push_back(gi);
+        }
+        for (const auto& b : sys.ac.buses) {
+          auto git = gens_at_bus.find(b.index);
+          if (git == gens_at_bus.end()) continue;
+          const auto& gen_list = git->second;
+          double total_pd = b.pd_mw + (bus_pd.count(b.index) ? bus_pd[b.index] : 0.0);
+          double total_qd = b.qd_mvar + (bus_qd.count(b.index) ? bus_qd[b.index] : 0.0);
+          double total_pg_solved = bus_p_out[b.index] + total_pd;
+          double total_qg_solved = bus_q_out[b.index] + total_qd;
+          if (b.bus_type == hacdcpf::BusType::SLACK) {
+            double non_slack_pg = 0.0, non_slack_qg = 0.0;
+            int slack_gi = -1;
+            for (size_t gi : gen_list) {
+              if (sys.ac.generators[gi].is_slack) {
+                slack_gi = static_cast<int>(gi);
+              } else {
+                non_slack_pg += sys.ac.generators[gi].pg_mw;
+                non_slack_qg += sys.ac.generators[gi].qg_mvar;
+              }
+            }
+            if (slack_gi >= 0) {
+              gen_pg_solved[slack_gi] = total_pg_solved - non_slack_pg;
+              gen_qg_solved[slack_gi] = total_qg_solved - non_slack_qg;
+            }
+          } else if (b.bus_type == hacdcpf::BusType::PV) {
+            if (gen_list.size() == 1) {
+              gen_qg_solved[gen_list[0]] = total_qg_solved;
+            } else {
+              double q_range_sum = 0.0;
+              for (size_t gi : gen_list)
+                q_range_sum += std::max(sys.ac.generators[gi].qmax_mvar -
+                                        sys.ac.generators[gi].qmin_mvar, 0.01);
+              for (size_t gi : gen_list) {
+                double range = std::max(sys.ac.generators[gi].qmax_mvar -
+                                        sys.ac.generators[gi].qmin_mvar, 0.01);
+                gen_qg_solved[gi] = total_qg_solved * range / q_range_sum;
+              }
+            }
+          }
+        }
+
+        // Rebuild bus_pg/bus_qg with solved values for geo_buses display
+        bus_pg.clear(); bus_qg.clear();
+        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+          if (!sys.ac.generators[gi].in_service) continue;
+          bus_pg[sys.ac.generators[gi].bus] += gen_pg_solved[gi];
+          bus_qg[sys.ac.generators[gi].bus] += gen_qg_solved[gi];
+        }
+        for (const auto& sg : sys.ac.static_generators) {
+          if (!sg.in_service) continue;
+          bus_pg[sg.bus] += sg.p_mw * sg.scaling;
+          bus_qg[sg.bus] += sg.q_mvar * sg.scaling;
+        }
+
+        // Build AC bus coordinate lookup and geo_buses array
+        std::map<int, std::pair<double, double>> ac_bus_coords;
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          const auto& b = sys.ac.buses[i];
+          ac_bus_coords[b.index] = {b.latitude, b.longitude};
+          double vm_val = (i < pf.vm.size()) ? pf.vm[i] : b.vm_pu;
+          double va_val = (i < pf.va.size()) ? pf.va[i] : b.va_deg * M_PI / 180.0;
+          // A dead-island bus has Vm ≈ 0 — zero out all injections.
+          const bool is_dead = (vm_val < 1e-6);
+          double pd = b.pd_mw + (bus_pd.count(b.index) ? bus_pd[b.index] : 0.0);
+          double qd = b.qd_mvar + (bus_qd.count(b.index) ? bus_qd[b.index] : 0.0);
+          double pg = (bus_pg.count(b.index) ? bus_pg[b.index] : 0.0);
+          double qg = (bus_qg.count(b.index) ? bus_qg[b.index] : 0.0);
+          if (is_dead) { pd = 0.0; qd = 0.0; pg = 0.0; qg = 0.0; }
+          std::string bus_type_str = "PQ";
+          switch(b.bus_type) {
+            case hacdcpf::BusType::PV: bus_type_str = "PV"; break;
+            case hacdcpf::BusType::SLACK: bus_type_str = "SLACK"; break;
+            case hacdcpf::BusType::ISOLATED: bus_type_str = "ISOLATED"; break;
+            default: break;
+          }
+          geo_buses.push_back(json{
+            {"id", b.index}, {"name", b.name.empty() ? ("Bus" + std::to_string(b.index)) : b.name},
+            {"type", "AC"}, {"bus_type", is_dead ? "DEAD" : bus_type_str},
+            {"lat", b.latitude}, {"lon", b.longitude},
+            {"base_kv", b.base_kv}, {"area", b.area}, {"zone", b.zone},
+            {"vm_pu", vm_val}, {"va_rad", va_val},
+            {"pd_mw", pd}, {"qd_mvar", qd}, {"pg_mw", pg}, {"qg_mvar", qg}
+          });
+        }
+
+        // Build DC bus coordinate lookup and add to geo_buses
+        std::map<int, std::pair<double, double>> dc_bus_coords;
+        for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+          const auto& b = sys.dc.buses[i];
+          dc_bus_coords[b.index] = {b.latitude, b.longitude};
+          double vdc_val = (i < pf.vdc.size()) ? pf.vdc[i] : b.vm_pu;
+          std::string bus_type_str = (b.bus_type == hacdcpf::DCBusType::DC_V) ? "DC_V" : "DC_P";
+          geo_buses.push_back(json{
+            {"id", b.index}, {"name", b.name.empty() ? ("DCBus" + std::to_string(b.index)) : b.name},
+            {"type", "DC"}, {"bus_type", bus_type_str},
+            {"lat", b.latitude}, {"lon", b.longitude},
+            {"base_kv", b.base_kv}, {"area", b.area}, {"zone", b.zone},
+            {"vm_pu", vdc_val}, {"pd_mw", b.pd_mw}
+          });
+        }
+
+        // AC branches with coordinates and power flow
+        for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+          const auto& br = sys.ac.branches[i];
+          auto from_it = ac_bus_coords.find(br.from_bus);
+          auto to_it = ac_bus_coords.find(br.to_bus);
+          if (from_it == ac_bus_coords.end() || to_it == ac_bus_coords.end()) continue;
+          double pf_mw = 0.0, pt_mw = 0.0, qf_mvar = 0.0, qt_mvar = 0.0, loss_mw = 0.0, loading_pct = 0.0;
+          if (i < pf.branch_flows.size()) {
+            pf_mw = pf.branch_flows[i].pf_mw;
+            pt_mw = pf.branch_flows[i].pt_mw;
+            qf_mvar = pf.branch_flows[i].qf_mvar;
+            qt_mvar = pf.branch_flows[i].qt_mvar;
+            loss_mw = pf_mw + pt_mw;  // sum of from and to active power (loss = pf + pt if both signed into the branch)
+            if (br.rate_a_mva > 0) {
+              double smax = std::max(std::hypot(pf_mw, qf_mvar), std::hypot(pt_mw, qt_mvar));
+              loading_pct = 100.0 * smax / br.rate_a_mva;
+            }
+          }
+          geo_ac_branches.push_back(json{
+            {"name", br.name.empty() ? ("Line" + std::to_string(i)) : br.name},
+            {"from", br.from_bus}, {"to", br.to_bus},
+            {"from_lat", from_it->second.first}, {"from_lon", from_it->second.second},
+            {"to_lat", to_it->second.first}, {"to_lon", to_it->second.second},
+            {"pf_mw", pf_mw}, {"pt_mw", pt_mw}, {"qf_mvar", qf_mvar}, {"qt_mvar", qt_mvar},
+            {"loss_mw", loss_mw}, {"loading_pct", loading_pct}, {"rate_mva", br.rate_a_mva}
+          });
+        }
+
+        // DC branches with coordinates – compute power flow from DC bus voltages
+        {
+          // Build dc_bus_index → position map for voltage lookup
+          std::unordered_map<int, size_t> dc_idx_map;
+          for (size_t k = 0; k < sys.dc.buses.size(); ++k) dc_idx_map[sys.dc.buses[k].index] = k;
+          const bool has_vdc = out.contains("vdc") && out["vdc"].is_array() && !out["vdc"].empty();
+          for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
+            const auto& br = sys.dc.branches[i];
+            auto from_it = dc_bus_coords.find(br.from_bus);
+            auto to_it = dc_bus_coords.find(br.to_bus);
+            if (from_it == dc_bus_coords.end() || to_it == dc_bus_coords.end()) continue;
+            double pf_mw = 0.0, pt_mw = 0.0, loss_mw = 0.0, loading_pct = 0.0;
+            if (has_vdc && br.in_service) {
+              auto fi = dc_idx_map.find(br.from_bus), ti = dc_idx_map.find(br.to_bus);
+              if (fi != dc_idx_map.end() && ti != dc_idx_map.end() &&
+                  fi->second < out["vdc"].size() && ti->second < out["vdc"].size()) {
+                double vf = out["vdc"][fi->second].get<double>();
+                double vt = out["vdc"][ti->second].get<double>();
+                double r_pu = br.r_pu;
+                if (r_pu > 1e-12) {
+                  double i_pu = (vf - vt) / r_pu;
+                  pf_mw = vf * i_pu * sys.base_mva;    // power leaving from-bus (positive = from→to)
+                  pt_mw = -vt * i_pu * sys.base_mva;    // power arriving at to-bus (negative = into to-bus)
+                  loss_mw = pf_mw + pt_mw;               // branch loss
+                }
+              }
+              if (br.rate_a_mva > 0) loading_pct = 100.0 * std::abs(pf_mw) / br.rate_a_mva;
+            }
+            geo_dc_branches.push_back(json{
+              {"name", br.name.empty() ? ("DCLine" + std::to_string(i)) : br.name},
+              {"from", br.from_bus}, {"to", br.to_bus},
+              {"from_lat", from_it->second.first}, {"from_lon", from_it->second.second},
+              {"to_lat", to_it->second.first}, {"to_lon", to_it->second.second},
+              {"pf_mw", pf_mw}, {"pt_mw", pt_mw}, {"loss_mw", loss_mw},
+              {"loading_pct", loading_pct}, {"rate_mva", br.rate_a_mva}
+            });
+          }
+        }
+
+        // VSC converters connecting AC and DC buses
+        for (const auto& v : pf.vsc_transfers) {
+          auto ac_it = ac_bus_coords.find(v.bus_ac);
+          auto dc_it = dc_bus_coords.find(v.bus_dc);
+          if (ac_it == ac_bus_coords.end() || dc_it == dc_bus_coords.end()) continue;
+          geo_vsc.push_back(json{
+            {"bus_ac", v.bus_ac}, {"bus_dc", v.bus_dc},
+            {"ac_lat", ac_it->second.first}, {"ac_lon", ac_it->second.second},
+            {"dc_lat", dc_it->second.first}, {"dc_lon", dc_it->second.second},
+            {"p_ac_mw", v.p_ac_mw}, {"q_ac_mvar", v.q_ac_mvar}, {"p_dc_mw", v.p_dc_mw}, {"loss_mw", v.loss_mw}
+          });
+        }
+
+        // DCDC converters
+        for (const auto& d : pf.dcdc_transfers) {
+          auto in_it = dc_bus_coords.find(d.bus_in);
+          auto out_it = dc_bus_coords.find(d.bus_out);
+          if (in_it == dc_bus_coords.end() || out_it == dc_bus_coords.end()) continue;
+          geo_dcdc.push_back(json{
+            {"bus_in", d.bus_in}, {"bus_out", d.bus_out},
+            {"in_lat", in_it->second.first}, {"in_lon", in_it->second.second},
+            {"out_lat", out_it->second.first}, {"out_lon", out_it->second.second},
+            {"p_in_mw", d.p_in_mw}, {"p_out_mw", d.p_out_mw}, {"loss_mw", d.loss_mw}
+          });
+        }
+
+        // 3W transformers with per-winding power flow
+        json geo_trafo3w = json::array();
+        for (const auto& tf : pf.trafo3w_flows) {
+          auto hv_it = ac_bus_coords.find(tf.hv_bus);
+          auto mv_it = ac_bus_coords.find(tf.mv_bus);
+          auto lv_it = ac_bus_coords.find(tf.lv_bus);
+          if (hv_it == ac_bus_coords.end() || mv_it == ac_bus_coords.end() ||
+              lv_it == ac_bus_coords.end()) continue;
+          geo_trafo3w.push_back(json{
+            {"index", tf.index},
+            {"hv_bus", tf.hv_bus}, {"mv_bus", tf.mv_bus}, {"lv_bus", tf.lv_bus},
+            {"hv_lat", hv_it->second.first}, {"hv_lon", hv_it->second.second},
+            {"mv_lat", mv_it->second.first}, {"mv_lon", mv_it->second.second},
+            {"lv_lat", lv_it->second.first}, {"lv_lon", lv_it->second.second},
+            {"p_hv_mw", tf.p_hv_mw}, {"q_hv_mvar", tf.q_hv_mvar},
+            {"p_mv_mw", tf.p_mv_mw}, {"q_mv_mvar", tf.q_mv_mvar},
+            {"p_lv_mw", tf.p_lv_mw}, {"q_lv_mvar", tf.q_lv_mvar},
+            {"loss_mw", tf.loss_mw}, {"loading_pct", tf.loading_pct},
+            {"rate_mva", tf.rate_mva}
+          });
+        }
+
+        // Individual generator results for visualization
+        json geo_gen = json::array();
+        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+          const auto& g = sys.ac.generators[gi];
+          if (!g.in_service) continue;
+          geo_gen.push_back(json{
+            {"index", g.index}, {"bus", g.bus},
+            {"pg_mw", gen_pg_solved[gi]}, {"qg_mvar", gen_qg_solved[gi]},
+            {"vg_pu", g.vg_pu}, {"is_slack", g.is_slack},
+            {"pmax_mw", g.pmax_mw}, {"pmin_mw", g.pmin_mw},
+            {"name", g.name}
+          });
+        }
+
+        // Energy router port transfers – reconstructed from expanded VSC results.
+        // During canonical projection (inside solve_power_flow), each ER port
+        // becomes a VSC with bus_ac = port.bus.  Since solve_power_flow takes
+        // const& sys, the expanded VSCs are NOT in our sys copy.  Instead we
+        // match ER ports to VSCTransfer results by bus_ac number.
+        json geo_er = json::array();
+        {
+          // Build bus_ac → VSCTransfer lookup from solved results.
+          // If multiple VSC transfers share the same bus_ac the last one wins,
+          // but for ER-expanded VSCs each port connects to a unique AC bus.
+          std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_bus;
+          for (const auto& vt : pf.vsc_transfers)
+            vsc_tr_by_bus[vt.bus_ac] = &vt;
+
+          for (const auto& er : er_snapshot) {
+            if (!er.in_service) continue;
+            json port_arr = json::array();
+            for (const auto& p : er.ports) {
+              if (!p.in_service || p.bus == 0) continue;
+              double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
+              bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
+
+              // Match by bus number: the expanded VSC for this port has bus_ac == p.bus
+              auto tit = vsc_tr_by_bus.find(p.bus);
+              if (tit != vsc_tr_by_bus.end()) {
+                p_mw = tit->second->p_ac_mw;
+                q_mvar = tit->second->q_ac_mvar;
+              }
+              // Get voltage from PF results
+              if (is_ac) {
+                for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
+                  if (sys.ac.buses[bi].index == p.bus && bi < pf.vm.size()) {
+                    v_pu = pf.vm[bi]; break;
+                  }
+                }
+              } else {
+                for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi) {
+                  if (sys.dc.buses[bi].index == p.bus && bi < pf.vdc.size()) {
+                    v_pu = pf.vdc[bi]; break;
+                  }
+                }
+              }
+              port_arr.push_back(json{
+                {"port_index", p.index}, {"bus", p.bus},
+                {"is_ac", is_ac},
+                {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
+              });
+            }
+            // ER internal loss = -(sum of all port injections).
+            // In bus-injection-positive sign convention, sum(p_mw) < 0 means
+            // the ER consumes net power internally (VSC + DCDC losses).
+            double sum_p = 0.0;
+            for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
+            double total_loss = std::max(-sum_p, 0.0);
+            geo_er.push_back(json{
+              {"router_index", er.index}, {"ports", port_arr},
+              {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
+            });
+          }
+        }
+
+        out["geo_buses"] = geo_buses;
+        out["geo_ac_branches"] = geo_ac_branches;
+        out["geo_dc_branches"] = geo_dc_branches;
+        out["geo_vsc"] = geo_vsc;
+        out["geo_dcdc"] = geo_dcdc;
+        out["geo_trafo3w"] = geo_trafo3w;
+        out["geo_gen"] = geo_gen;
+        out["geo_er"] = geo_er;
+      };
+
+      if (method == "ac_newton") {
+        // Island detection: dead islands (no generation source) are
+        // automatically stripped during canonical projection
+        // (strip_dead_islands in project_in_place), so the monolithic
+        // solver always receives a system free of dead nodes.
+        // We only need the adaptive solver when multiple *solvable*
+        // islands exist (each needing its own slack bus).
+        auto islands = hacdcpf::powerflow::detect_islands(sys);
+        int solvable_islands = 0;
+        for (const auto& isle : islands) {
+          if (isle.has_generators) ++solvable_islands;
+        }
+        out["islands_detected"] = static_cast<int>(islands.size());
+        out["solvable_islands"] = solvable_islands;
+
+        if (solvable_islands > 1) {
+          // Multiple solvable islands: use adaptive solver which
+          // extracts and solves each island independently.
+          auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
+          out["converged"] = pf.converged;
+          out["iterations"] = pf.iterations;
+          out["residual"] = pf.residual;
+          out["vm"] = pf.vm;
+          out["va"] = pf.va;
+          out["vdc"] = pf.vdc;
+          for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+          out["method_actual"] = "adaptive (auto island)";
+          auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
+          if (ac_pf.converged) {
+            add_transfers(ac_pf);
+            add_geo_data(ac_pf);
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          }
+        } else {
+          auto pf = hacdcpf::solve_power_flow(sys, opt);
+          out["converged"] = pf.converged;
+          out["iterations"] = pf.iterations;
+          out["residual"] = pf.residual;
+          out["vm"] = pf.vm;
+          out["va"] = pf.va;
+          out["vdc"] = pf.vdc;
+          for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+          // Set descriptive method name: unified AC/DC when DC components exist
+          const bool has_dc = !sys.dc.buses.empty() || !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty();
+          out["method_actual"] = has_dc ? "hybrid_ac_dc_newton" : "ac_newton";
+          add_transfers(pf);
+          add_geo_data(pf);
+          { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
+        }
+      } else if (method == "pure_ac") {
+        // Pure AC Newton-Raphson: strip DC buses, DC branches, converters
+        // so the Jacobian and mismatch only contain AC equations.
+        hacdcpf::HybridPowerSystem ac_sys = sys;
+        ac_sys.dc.buses.clear();
+        ac_sys.dc.branches.clear();
+        ac_sys.dc.loads.clear();
+        ac_sys.dc.storage.clear();
+        ac_sys.dc.static_generators.clear();
+        ac_sys.dc.dc_static_generators.clear();
+        ac_sys.dc.pv_arrays.clear();
+        ac_sys.dc.dc_circuit_breakers.clear();
+        ac_sys.vsc_converters.clear();
+        ac_sys.dc.dcdc_converters.clear();
+        auto pf = hacdcpf::solve_power_flow(ac_sys, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = json::array();
+        for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+        add_geo_data(pf);
+        { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
+      } else if (method == "dc") {
+        auto pf = hacdcpf::solve_dc_power_flow(sys, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vdc"] = pf.vdc;
+        // Run AC PF to get branch flows and converter transfers for carbon analysis
+        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        if (ac_pf.converged) {
+          add_transfers(ac_pf);
+          add_geo_data(ac_pf);
+          for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+          out["vm"] = ac_pf.vm;
+          out["va"] = ac_pf.va;
+          std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+        }
+      } else if (method == "hybrid_linearized") {
+        auto pf = hacdcpf::solve_ac_dc_power_flow(sys, opt);
+        out["converged"] = pf.success;
+        out["iterations"] = 1;
+        out["residual"] = 0.0;
+        out["va"] = pf.va;
+        for (const auto& p : pf.pf_mw) out["branch_abs"].push_back(std::abs(p));
+        // Run AC PF to get converter transfers for carbon analysis
+        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        if (ac_pf.converged) {
+          add_transfers(ac_pf);
+          add_geo_data(ac_pf);
+          out["vm"] = ac_pf.vm;
+          out["vdc"] = ac_pf.vdc;
+          std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+        }
+      } else if (method == "fdpf") {
+        auto pf = hacdcpf::solve_power_flow_fdpf(sys, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = pf.vdc;
+        for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+        add_transfers(pf);
+        add_geo_data(pf);
+        { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
+      } else if (method == "adaptive") {
+        auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = pf.vdc;
+        for (const auto& bf : pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+        // Run AC PF to get converter transfers
+        if (pf.converged) {
+          auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
+          if (ac_pf.converged) {
+            add_transfers(ac_pf);
+            add_geo_data(ac_pf);
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          } else {
+            hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
+            pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
+            pfr.branch_flows = pf.branch_flows;
+            add_geo_data(pfr);
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+          }
+        }
+      } else if (method == "islanded") {
+        auto pf = hacdcpf::solve_power_flow_islanded(sys, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = pf.vdc;
+        // Run AC PF to get branch flows and converter transfers
+        if (pf.converged) {
+          auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
+          if (ac_pf.converged) {
+            add_transfers(ac_pf);
+            add_geo_data(ac_pf);
+            for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          } else {
+            hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
+            pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
+            add_geo_data(pfr);
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+          }
+        }
+      } else if (method == "distributed_slack") {
+        hacdcpf::DistributedSlack slack;
+        std::map<int, bool> seen;
+        for (const auto& g : sys.ac.generators) {
+          if (!g.in_service) continue;
+          if (!seen[g.bus]) {
+            slack.participating_buses.push_back(g.bus);
+            seen[g.bus] = true;
+          }
+        }
+        if (slack.participating_buses.empty() && !sys.ac.buses.empty()) {
+          slack.participating_buses.push_back(sys.ac.buses.front().index);
+        }
+        if (slack.participating_buses.empty()) {
+          throw std::runtime_error("No AC buses available for distributed slack");
+        }
+        slack.reference_bus = slack.participating_buses.front();
+        const double w = 1.0 / static_cast<double>(slack.participating_buses.size());
+        slack.participation_factors.assign(slack.participating_buses.size(), w);
+
+        auto pf = hacdcpf::solve_power_flow_distributed_slack_full(sys, slack, opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        out["vm"] = pf.vm;
+        out["va"] = pf.va;
+        out["vdc"] = pf.vdc;
+        // Run AC PF to get converter transfers for carbon analysis
+        if (pf.converged) {
+          auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
+          if (ac_pf.converged) {
+            add_transfers(ac_pf);
+            add_geo_data(ac_pf);
+            for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+          } else {
+            hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
+            pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
+            add_geo_data(pfr);
+            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+          }
+        }
+      } else if (method == "three_phase") {
+        if (!sys.three_phase_ac.has_value()) {
+          throw std::runtime_error("Three-phase subsystem not available in this case");
+        }
+        hacdcpf::powerflow::ThreePhaseFlowOptions tp_opt;
+        tp_opt.max_iter = opt.max_iter;
+        tp_opt.tol = opt.tol;
+        auto pf = hacdcpf::powerflow::solve_three_phase(*sys.three_phase_ac, tp_opt);
+        out["converged"] = pf.converged;
+        out["iterations"] = pf.iterations;
+        out["residual"] = pf.residual;
+        json vm = json::array();
+        json vm_a = json::array();
+        json vm_b = json::array();
+        json vm_c = json::array();
+        for (const auto& br : pf.bus_results) {
+          vm_a.push_back(br.vm_a_pu);
+          vm_b.push_back(br.vm_b_pu);
+          vm_c.push_back(br.vm_c_pu);
+          vm.push_back((br.vm_a_pu + br.vm_b_pu + br.vm_c_pu) / 3.0);
+        }
+        out["vm"] = vm;
+        out["vm_a"] = vm_a;
+        out["vm_b"] = vm_b;
+        out["vm_c"] = vm_c;
+      } else {
+        throw std::runtime_error("Unsupported power flow method: " + method);
+      }
+
+      add_dc_branch_flows();
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/opf_ac",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      hacdcpf::opf::ACOPFOptions opt;
+      opt.allow_fallback = true; opt.max_inner_iterations = 120;
+      auto r = hacdcpf::solve_ac_opf(sys, opt);
+      json out;
+      out["converged"]=r.converged; out["iterations"]=r.iterations;
+      out["objective"]=r.objective; out["status"]=r.status;
+      out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+      out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
+      if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
+      if (!r.lmp_q.empty()) out["lmp_q"]=r.lmp_q;
+      // Apply OPF dispatch and run AC PF for carbon analysis
+      if (r.converged) {
+        for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i) {
+          sys.ac.generators[i].pg_mw = r.pg_mw[i];
+          if (i < r.qg_mvar.size()) sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+        }
+        if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
+        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_ac"; }
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/opf_parity",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      hacdcpf::opf::ACOPFOptions opt;
+      opt.use_parity_ipm = true;
+      opt.allow_fallback = false;
+      opt.max_inner_iterations = 400;
+      auto r = hacdcpf::solve_ac_opf(sys, opt);
+      json out;
+      out["converged"]=r.converged; out["iterations"]=r.iterations;
+      out["objective"]=r.objective; out["status"]=r.status;
+      out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+      out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
+      out["dpd_mw"]=r.dpd_mw; out["dqd_mvar"]=r.dqd_mvar;
+      out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
+      out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
+      if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
+      if (!r.lmp_q.empty()) out["lmp_q"]=r.lmp_q;
+      // Apply OPF dispatch and run AC PF for carbon analysis
+      if (r.converged) {
+        for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i) {
+          sys.ac.generators[i].pg_mw = r.pg_mw[i];
+          if (i < r.qg_mvar.size()) sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+        }
+        if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
+        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_parity"; }
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/opf_dc",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      hacdcpf::opf::DCOPFOptions opt;
+      auto r = hacdcpf::solve_dc_opf(sys, opt);
+      json out;
+      out["converged"]=r.converged; out["iterations"]=r.iterations;
+      out["objective"]=r.objective; out["status"]=r.status;
+      out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
+      out["total_load_shedding_mw"]=r.total_load_shedding_mw;
+      // Apply DC OPF dispatch and run AC PF for carbon analysis
+      if (r.converged) {
+        for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i)
+          sys.ac.generators[i].pg_mw = r.pg_mw[i];
+        auto ac_pf = hacdcpf::solve_power_flow(sys);
+        if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf_dc"; }
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/sc",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::analysis::SCDetailedOptions dopt;
+      if (j.contains("options")) {
+        const auto& o = j["options"];
+        std::string ft = o.value("fault_type", std::string("ThreePhase"));
+        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
+        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
+        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
+        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
+      }
+      dopt.compute_branch_flows = false;
+      dopt.compute_voltage_drops = false;
+      dopt.compute_ith = true;
+      // Fault at every AC bus
+      std::vector<int> all_bus_ids;
+      std::unordered_map<int, double> bus_kv;
+      for (const auto& b : sys.ac.buses) {
+        if (b.in_service) {
+          all_bus_ids.push_back(b.index);
+          bus_kv[b.index] = b.base_kv;
+        }
+      }
+      auto detailed = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, all_bus_ids, dopt);
+      json out;
+      out["fault_type"] = [&](){
+        switch(dopt.fault_type){
+          case hacdcpf::analysis::FaultType::ThreePhase: return "ThreePhase";
+          case hacdcpf::analysis::FaultType::SinglePhaseGround: return "SinglePhaseGround";
+          case hacdcpf::analysis::FaultType::TwoPhase: return "TwoPhase";
+          case hacdcpf::analysis::FaultType::TwoPhaseGround: return "TwoPhaseGround";
+        } return "ThreePhase";
+      }();
+      out["bus_results"] = json::array();
+      for (const auto& dr : detailed) {
+        // Find the fault bus's own result
+        const auto it = std::find_if(dr.bus_results.begin(), dr.bus_results.end(),
+            [&](const hacdcpf::analysis::SCDetailedBusResult& br){ return br.bus_id == dr.fault_bus_id; });
+        if (it != dr.bus_results.end()) {
+          const double un = bus_kv.count(dr.fault_bus_id) ? bus_kv.at(dr.fault_bus_id) : 110.0;
+          const double sk = std::sqrt(3.0) * un * it->ikss_ka;
+          out["bus_results"].push_back(json{
+            {"bus_id", dr.fault_bus_id},
+            {"ikpp_ka", it->ikss_ka}, {"sk_mva", sk},
+            {"ip_ka", it->ip_ka}, {"ib_ka", it->ib_ka},
+            {"ik_ka", it->ik_ka}, {"ith_ka", it->ith_ka}
+          });
+        }
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- DG Bearing Capability Assessment (DL/T 2041-2019) ----
+  svr.Post("/api/session/run_bearing_capacity",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const double kr = j.value("kr", 0.8);   // equipment margin factor k_r
+      // Voltage deviation limits (GB/T 12325 defaults for 35-220kV)
+      const double delta_UH = j.value("delta_UH_pct", 7.0);  // max positive deviation %
+      const double delta_UL = j.value("delta_UL_pct", 7.0);  // max negative deviation %
+      // Harmonic limits (GB/T 14549 defaults — total harmonic distortion, %)
+      const double thd_limit = j.value("thd_limit_pct", 5.0);
+
+      // ══════════════════════════════════════════════════════════
+      // Step 1: Run Power Flow — obtain branch flows and bus voltages
+      // ══════════════════════════════════════════════════════════
+      hacdcpf::PowerFlowOptions pf_opt;
+      pf_opt.max_iter = 100;
+      pf_opt.tol = 1e-8;
+      auto pf = hacdcpf::solve_power_flow(sys, pf_opt);
+      if (!pf.converged) {
+        g_session.busy.store(false);
+        res.set_content(json{{"error","Power flow did not converge — cannot assess bearing capacity"},
+                             {"converged", false}}.dump(), "application/json");
+        return;
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 2: Run Short Circuit (three-phase) at all buses
+      // ══════════════════════════════════════════════════════════
+      hacdcpf::analysis::SCDetailedOptions sc_opt;
+      sc_opt.fault_type = hacdcpf::analysis::FaultType::ThreePhase;
+      sc_opt.compute_ith = true;
+      std::vector<int> bus_ids;
+      std::unordered_map<int, size_t> bus_idx_map; // bus_id → index in buses vector
+      std::unordered_map<int, double> bus_kv_map;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+        const auto& b = sys.ac.buses[i];
+        if (b.in_service) {
+          bus_ids.push_back(b.index);
+          bus_idx_map[b.index] = i;
+          bus_kv_map[b.index] = b.base_kv;
+        }
+      }
+      auto sc_results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, bus_ids, sc_opt);
+      // Build bus_id → ikss_ka map
+      std::unordered_map<int, double> bus_ikss;
+      for (const auto& dr : sc_results) {
+        for (const auto& br : dr.bus_results) {
+          if (br.bus_id == dr.fault_bus_id) {
+            bus_ikss[br.bus_id] = br.ikss_ka;
+          }
+        }
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 3: Aggregate DG injection and load per bus
+      //   P_D = DG output (pv_system, renewable_gen, static_generator)
+      //   P_L = conventional load
+      // ══════════════════════════════════════════════════════════
+      std::unordered_map<int, double> bus_dg_mw;   // total DG P at bus
+      std::unordered_map<int, double> bus_dg_qmax;  // max DG Q at bus
+      std::unordered_map<int, double> bus_dg_qmin;  // min DG Q at bus
+      for (const auto& pv : sys.ac.pv_systems) {
+        if (!pv.in_service) continue;
+        bus_dg_mw[pv.bus] += pv.p_mw;
+        double s = pv.sn_mva > 0 ? pv.sn_mva : std::abs(pv.p_mw) * 1.1;
+        double q = std::sqrt(std::max(0.0, s*s - pv.p_mw*pv.p_mw));
+        bus_dg_qmax[pv.bus] += q;
+        bus_dg_qmin[pv.bus] -= q;
+      }
+      for (const auto& rg : sys.ac.renewable_gens) {
+        if (!rg.in_service) continue;
+        bus_dg_mw[rg.bus] += rg.p_mw;
+        double s = rg.p_rated_mw > 0 ? rg.p_rated_mw * 1.1 : std::abs(rg.p_mw) * 1.1;
+        double q = std::sqrt(std::max(0.0, s*s - rg.p_mw*rg.p_mw));
+        bus_dg_qmax[rg.bus] += q;
+        bus_dg_qmin[rg.bus] -= q;
+      }
+      for (const auto& sg : sys.ac.static_generators) {
+        if (!sg.in_service) continue;
+        bus_dg_mw[sg.bus] += sg.p_mw;
+        double s = std::abs(sg.p_mw) * 1.1;
+        double q = std::sqrt(std::max(0.0, s*s - sg.p_mw*sg.p_mw));
+        bus_dg_qmax[sg.bus] += q;
+        bus_dg_qmin[sg.bus] -= q;
+      }
+      // Conventional loads
+      std::unordered_map<int, double> bus_load_mw;
+      for (const auto& ld : sys.ac.loads) {
+        if (ld.in_service) bus_load_mw[ld.bus] += ld.p_mw;
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 4: Branch/Transformer Thermal Stability Assessment
+      //   DL/T 2041 Eq.(1): λ = (P_D − P_L) / S_e × 100%
+      //   DL/T 2041 Eq.(2): P_m = (1 − λ_max) × S_e × k_r
+      //
+      //   For each branch (line or transformer), the reverse flow
+      //   P_reverse = P_D − P_L for the downstream area is the
+      //   absolute power flow when direction is from low-kV to high-kV.
+      //   We include ALL branches (even those without ratings) so the
+      //   user sees a complete thermal stability table.
+      // ══════════════════════════════════════════════════════════
+      json branch_results = json::array();
+      bool any_reverse_220 = false;
+      for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+        const auto& br = sys.ac.branches[i];
+        if (!br.in_service) continue;
+
+        // Determine equipment type (line vs transformer)
+        bool is_trafo = (br.sn_mva > 0.0 || std::abs(br.tap - 1.0) > 1e-6);
+        std::string equip_type = is_trafo ? "transformer" : "line";
+
+        // S_e: rated capacity (MVA). Use rate_a_mva first, fall back to sn_mva
+        double se = br.rate_a_mva;
+        if (se <= 0 && br.sn_mva > 0) se = br.sn_mva;
+        bool has_rating = (se > 0);
+
+        // Actual power flow on this branch
+        double pf_mw = 0.0, pt_mw = 0.0;
+        if (i < pf.branch_flows.size()) {
+          pf_mw = pf.branch_flows[i].pf_mw;   // from-bus injection
+          pt_mw = pf.branch_flows[i].pt_mw;    // to-bus injection
+        }
+
+        // Determine voltage levels to identify flow direction
+        double from_kv = bus_kv_map.count(br.from_bus) ? bus_kv_map[br.from_bus] : 0;
+        double to_kv = bus_kv_map.count(br.to_bus) ? bus_kv_map[br.to_bus] : 0;
+
+        // Reverse flow: power flowing from low-kV side toward high-kV side
+        // This represents P_D − P_L > 0 (DG exceeds load, surplus feeds upstream)
+        bool reverse = false;
+        double p_reverse_mw = 0.0;
+        if (std::abs(from_kv - to_kv) > 0.01) {
+          // Different voltage levels (transformer or inter-level line)
+          // Normal: high→low. Reverse: low→high.
+          if (from_kv > to_kv && pf_mw < 0) {
+            reverse = true; p_reverse_mw = std::abs(pf_mw);
+          } else if (to_kv > from_kv && pf_mw > 0) {
+            reverse = true; p_reverse_mw = std::abs(pf_mw);
+          }
+        } else {
+          // Same voltage level: reverse determined by net DG surplus
+          double dg_from = bus_dg_mw.count(br.from_bus) ? bus_dg_mw[br.from_bus] : 0.0;
+          double dg_to = bus_dg_mw.count(br.to_bus) ? bus_dg_mw[br.to_bus] : 0.0;
+          double ld_from = bus_load_mw.count(br.from_bus) ? bus_load_mw[br.from_bus] : 0.0;
+          double ld_to = bus_load_mw.count(br.to_bus) ? bus_load_mw[br.to_bus] : 0.0;
+          double net_from = dg_from - ld_from;
+          double net_to = dg_to - ld_to;
+          if (net_from > net_to && pf_mw > 0) {
+            reverse = true; p_reverse_mw = std::abs(pf_mw);
+          } else if (net_to > net_from && pf_mw < 0) {
+            reverse = true; p_reverse_mw = std::abs(pf_mw);
+          }
+        }
+
+        // DL/T 2041 Eq.(1): λ = P_reverse / S_e × 100%
+        // Only non-zero when flow is reverse
+        double lambda_pct = 0.0;
+        if (reverse && has_rating) {
+          lambda_pct = p_reverse_mw / se * 100.0;
+        }
+
+        // Check 220kV+ reverse flow → automatic Red
+        if (reverse && (std::max(from_kv, to_kv) >= 220.0)) any_reverse_220 = true;
+
+        // DL/T 2041 Eq.(2): P_m = (1 − λ/100) × S_e × k_r
+        double pm = 0.0;
+        if (has_rating) {
+          pm = std::max(0.0, (1.0 - lambda_pct / 100.0) * se * kr);
+        }
+
+        // Branch thermal grade
+        std::string thermal_grade = "green";
+        if (!has_rating) thermal_grade = "no_rating";
+        else if (lambda_pct > 80.0) thermal_grade = "red";
+        else if (lambda_pct > 0.0) thermal_grade = "yellow";
+
+        // Loading percentage (absolute flow / rating)
+        double loading_pct = (has_rating && se > 0) ?
+            std::max(std::abs(pf_mw), std::abs(pt_mw)) / se * 100.0 : 0.0;
+
+        std::string name = br.name.empty() ?
+            (equip_type == "transformer" ?
+                ("Trafo " + std::to_string(br.index)) :
+                ("Branch " + std::to_string(br.index))) :
+            br.name;
+
+        branch_results.push_back(json{
+          {"name", name}, {"index", br.index}, {"branch_pos", (int)i},
+          {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+          {"from_kv", from_kv}, {"to_kv", to_kv},
+          {"equip_type", equip_type},
+          {"se_mva", se}, {"has_rating", has_rating},
+          {"pf_mw", pf_mw}, {"loading_pct", loading_pct},
+          {"p_reverse_mw", p_reverse_mw},
+          {"lambda_pct", lambda_pct}, {"pm_mw", pm},
+          {"reverse_flow", reverse},
+          {"thermal_grade", thermal_grade}
+        });
+      }
+
+      // Also evaluate standalone 2W transformers that were NOT projected to branches
+      // (source_branch_idx > 0 means already represented in branches)
+      for (size_t ti = 0; ti < sys.ac.transformers_2w.size(); ++ti) {
+        const auto& tr = sys.ac.transformers_2w[ti];
+        if (!tr.in_service) continue;
+        if (tr.source_branch_idx > 0) continue;  // already in branches
+
+        double se = tr.sn_mva;
+        bool has_rating = (se > 0);
+        double hv_kv = bus_kv_map.count(tr.hv_bus) ? bus_kv_map[tr.hv_bus] : tr.vn_hv_kv;
+        double lv_kv = bus_kv_map.count(tr.lv_bus) ? bus_kv_map[tr.lv_bus] : tr.vn_lv_kv;
+
+        // No direct PF result for standalone transformers — estimate from bus DG/load
+        double dg_lv = bus_dg_mw.count(tr.lv_bus) ? bus_dg_mw[tr.lv_bus] : 0.0;
+        double ld_lv = bus_load_mw.count(tr.lv_bus) ? bus_load_mw[tr.lv_bus] : 0.0;
+        double p_net = dg_lv - ld_lv;  // positive = reverse
+        bool reverse = (p_net > 0);
+        double p_reverse_mw = reverse ? p_net : 0.0;
+
+        double lambda_pct = (reverse && has_rating) ? p_reverse_mw / se * 100.0 : 0.0;
+        if (reverse && (std::max(hv_kv, lv_kv) >= 220.0)) any_reverse_220 = true;
+        double pm = has_rating ? std::max(0.0, (1.0 - lambda_pct / 100.0) * se * kr) : 0.0;
+
+        std::string thermal_grade = "green";
+        if (!has_rating) thermal_grade = "no_rating";
+        else if (lambda_pct > 80.0) thermal_grade = "red";
+        else if (lambda_pct > 0.0) thermal_grade = "yellow";
+
+        std::string name = tr.name.empty() ?
+            ("Trafo2W " + std::to_string(tr.index)) : tr.name;
+        branch_results.push_back(json{
+          {"name", name}, {"index", tr.index}, {"branch_pos", -1},
+          {"from_bus", tr.hv_bus}, {"to_bus", tr.lv_bus},
+          {"from_kv", hv_kv}, {"to_kv", lv_kv},
+          {"equip_type", "transformer"},
+          {"se_mva", se}, {"has_rating", has_rating},
+          {"pf_mw", p_net}, {"loading_pct", 0.0},
+          {"p_reverse_mw", p_reverse_mw},
+          {"lambda_pct", lambda_pct}, {"pm_mw", pm},
+          {"reverse_flow", reverse},
+          {"thermal_grade", thermal_grade}
+        });
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 5: Bus-level Assessment
+      //   - Short circuit check:  I_k'' < I_m  (DL/T 2041 Eq.3)
+      //   - Voltage deviation:    δU = (R·P + X·Q)/U² (Eq.4-5)
+      //   - Harmonic check:       placeholder (no simulation data)
+      // ══════════════════════════════════════════════════════════
+      json bus_results = json::array();
+      for (const auto& b : sys.ac.buses) {
+        if (!b.in_service) continue;
+        double un = b.base_kv;
+        // PF voltage
+        auto idx_it = bus_idx_map.find(b.index);
+        size_t bidx = (idx_it != bus_idx_map.end()) ? idx_it->second : 0;
+        double vm = (bidx < pf.vm.size()) ? pf.vm[bidx] : 1.0;
+        double vm_deviation_pct = (vm - 1.0) * 100.0;
+
+        // ── Short circuit check: DL/T 2041 Eq.(3) ──
+        double ikss = bus_ikss.count(b.index) ? bus_ikss[b.index] : 0.0;
+        double i_limit = b.i_breaker_ka;
+        bool sc_pass = (i_limit <= 0) || (ikss < i_limit);
+
+        // ── Voltage deviation: DL/T 2041 Eq.(4-5) ──
+        double dg_p = bus_dg_mw.count(b.index) ? bus_dg_mw[b.index] : 0.0;
+        double dg_qmax = bus_dg_qmax.count(b.index) ? bus_dg_qmax[b.index] : 0.0;
+        double dg_qmin = bus_dg_qmin.count(b.index) ? bus_dg_qmin[b.index] : 0.0;
+        double delta_u_h_pct = 0.0, delta_u_l_pct = 0.0;
+        if (ikss > 0 && un > 0) {
+          // Thevenin impedance from SC: Z_th = U_N / (√3 · Ik'')
+          double z_th = un / (std::sqrt(3.0) * ikss); // ohm
+          double rx = 0.1; // typical R/X ratio for HV grid
+          double x_th = z_th / std::sqrt(1.0 + rx * rx);
+          double r_th = rx * x_th;
+          // Eq.(4): δU_H = (R_th·P_DG + X_th·Q_max) / U_N² × 100%
+          delta_u_h_pct = (r_th * dg_p + x_th * dg_qmax) / (un * un) * 100.0;
+          // Eq.(4): δU_L = |(R_th·P_DG + X_th·Q_min)| / U_N² × 100%
+          delta_u_l_pct = std::abs((r_th * dg_p + x_th * dg_qmin) / (un * un) * 100.0);
+        }
+        bool voltage_pass = (delta_u_h_pct < delta_UH) && (delta_u_l_pct < delta_UL);
+
+        // ── Harmonic check: DL/T 2041 Eq.(6) ──
+        // Requires measured harmonic data (I_h per bus). Since the simulator
+        // does not compute harmonics, we report "no_data" and default to pass
+        // if no harmonic data is provided by the user.
+        bool harmonic_pass = true;
+        std::string harmonic_status = "no_data"; // "pass", "fail", "no_data"
+
+        // ── Per-bus grade ──
+        std::string grade = "green";
+        if (!sc_pass || !voltage_pass || !harmonic_pass) grade = "red";
+
+        bus_results.push_back(json{
+          {"bus_id", b.index}, {"name", b.name}, {"base_kv", un}, {"area", b.area},
+          {"vm_pu", vm}, {"vm_deviation_pct", vm_deviation_pct},
+          {"ikss_ka", ikss}, {"i_breaker_ka", i_limit}, {"sc_pass", sc_pass},
+          {"dg_mw", dg_p},
+          {"delta_u_h_pct", delta_u_h_pct}, {"delta_u_l_pct", delta_u_l_pct},
+          {"delta_UH_limit", delta_UH}, {"delta_UL_limit", delta_UL},
+          {"voltage_pass", voltage_pass},
+          {"harmonic_pass", harmonic_pass}, {"harmonic_status", harmonic_status},
+          {"thd_limit_pct", thd_limit},
+          {"grade", grade}
+        });
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 6: Area/Zone Grading (DL/T 2041 Table 1)
+      //   Green:  λ ≤ 0 for all, SC/voltage/harmonic pass
+      //   Yellow: 0 < λ ≤ 80%, SC/voltage/harmonic pass
+      //   Red:    λ > 80%, or any check fails, or reverse to 220kV+
+      //   Lower-level inherits worst upper-level grade.
+      // ══════════════════════════════════════════════════════════
+      std::map<int, std::string> area_grade;
+      // Bus-level → area
+      for (const auto& bj : bus_results) {
+        int area = bj.value("area", 1);
+        std::string bg = bj["grade"].get<std::string>();
+        auto& ag = area_grade[area];
+        if (ag.empty()) ag = bg;
+        else if (bg == "red") ag = "red";
+        else if (bg == "yellow" && ag != "red") ag = "yellow";
+      }
+      // Branch thermal → area
+      for (const auto& bj : branch_results) {
+        std::string tg = bj.value("thermal_grade", std::string("green"));
+        if (tg == "no_rating") continue;
+        int from = bj["from_bus"].get<int>();
+        int area_from = 1;
+        for (const auto& b : sys.ac.buses) {
+          if (b.index == from) { area_from = b.area; break; }
+        }
+        auto& ag = area_grade[area_from];
+        if (tg == "red") ag = "red";
+        else if (tg == "yellow" && ag == "green") ag = "yellow";
+      }
+      // 220kV+ reverse → all areas red
+      if (any_reverse_220) {
+        for (auto& [a, g] : area_grade) g = "red";
+      }
+
+      json area_results = json::array();
+      for (const auto& [a, g] : area_grade) {
+        area_results.push_back(json{{"area", a}, {"grade", g}});
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // Step 7: Comprehensive Summary Table (DL/T 2041 Appendix C)
+      // Per-element: thermal λ, SC check, voltage check, harmonic, grade, P_m
+      // ══════════════════════════════════════════════════════════
+      json summary_table = json::array();
+      // Add branch entries
+      for (const auto& bj : branch_results) {
+        // Find worst bus-level checks for the buses connected to this branch
+        int from_id = bj["from_bus"].get<int>();
+        int to_id = bj["to_bus"].get<int>();
+        bool br_sc_pass = true, br_volt_pass = true, br_harm_pass = true;
+        std::string br_harm_status = "no_data";
+        for (const auto& bres : bus_results) {
+          int bid = bres["bus_id"].get<int>();
+          if (bid == from_id || bid == to_id) {
+            if (!bres["sc_pass"].get<bool>()) br_sc_pass = false;
+            if (!bres["voltage_pass"].get<bool>()) br_volt_pass = false;
+            if (!bres["harmonic_pass"].get<bool>()) br_harm_pass = false;
+            if (bres["harmonic_status"].get<std::string>() != "no_data")
+              br_harm_status = bres["harmonic_status"].get<std::string>();
+          }
+        }
+        std::string tg = bj.value("thermal_grade", std::string("green"));
+        // Composite grade
+        std::string grade = tg;
+        if (!br_sc_pass || !br_volt_pass || !br_harm_pass) grade = "red";
+        else if (tg == "no_rating") grade = "green"; // no thermal constraint
+        if (any_reverse_220 && std::max(bj["from_kv"].get<double>(),
+                                         bj["to_kv"].get<double>()) >= 220.0)
+          grade = "red";
+
+        summary_table.push_back(json{
+          {"name", bj["name"]},
+          {"type", bj["equip_type"]},
+          {"lambda_pct", bj["lambda_pct"]},
+          {"has_rating", bj["has_rating"]},
+          {"sc_pass", br_sc_pass},
+          {"voltage_pass", br_volt_pass},
+          {"harmonic_pass", br_harm_pass},
+          {"harmonic_status", br_harm_status},
+          {"grade", grade},
+          {"pm_mw", bj["pm_mw"]}
+        });
+      }
+      // Add bus entries
+      for (const auto& bj : bus_results) {
+        double bus_lam = 0.0;
+        // Find worst λ among branches connected to this bus
+        int bid = bj["bus_id"].get<int>();
+        for (const auto& brj : branch_results) {
+          if (brj["from_bus"].get<int>() == bid || brj["to_bus"].get<int>() == bid) {
+            bus_lam = std::max(bus_lam, brj["lambda_pct"].get<double>());
+          }
+        }
+        std::string grade = bj["grade"].get<std::string>();
+        // Incorporate thermal grade
+        if (bus_lam > 80.0) grade = "red";
+        else if (bus_lam > 0.0 && grade == "green") grade = "yellow";
+
+        summary_table.push_back(json{
+          {"name", bj.value("name", std::string("")) + " (Bus " +
+                   std::to_string(bj["bus_id"].get<int>()) + ")"},
+          {"type", "bus"},
+          {"lambda_pct", bus_lam},
+          {"has_rating", true},
+          {"sc_pass", bj["sc_pass"]},
+          {"voltage_pass", bj["voltage_pass"]},
+          {"harmonic_pass", bj["harmonic_pass"]},
+          {"harmonic_status", bj["harmonic_status"]},
+          {"grade", grade},
+          {"pm_mw", 0.0}
+        });
+      }
+
+      json out;
+      out["converged"] = true;
+      out["pf_iterations"] = pf.iterations;
+      out["pf_residual"] = pf.residual;
+      out["kr"] = kr;
+      out["delta_UH_limit"] = delta_UH;
+      out["delta_UL_limit"] = delta_UL;
+      out["thd_limit_pct"] = thd_limit;
+      out["any_reverse_220kv"] = any_reverse_220;
+      out["branch_results"] = branch_results;
+      out["bus_results"] = bus_results;
+      out["area_results"] = area_results;
+      out["summary_table"] = summary_table;
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+    // ---- Detailed Short Circuit at Selected Buses ----
+    svr.Post("/api/session/sc_detailed",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        std::vector<int> fault_bus_ids;
+        if (j.contains("fault_bus_ids") && j["fault_bus_ids"].is_array())
+          fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
+        if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
+        hacdcpf::analysis::SCDetailedOptions dopt;
+        const std::string ft = j.value("fault_type", std::string("ThreePhase"));
+        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
+        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
+        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
+        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
+        dopt.compute_branch_flows = true;
+        dopt.compute_voltage_drops = true;
+        dopt.compute_ith = true;
+        auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
+        json out;
+        out["fault_type"] = ft;
+        json res_arr = json::array();
+        for (const auto& dr : results) {
+          json rj;
+          rj["fault_bus_id"] = dr.fault_bus_id;
+          rj["solved"] = dr.solved;
+          json bus_arr = json::array();
+          for (const auto& br : dr.bus_results) {
+            bus_arr.push_back({
+              {"bus_id", br.bus_id}, {"ikss_ka", br.ikss_ka},
+              {"ip_ka", br.ip_ka}, {"ib_ka", br.ib_ka},
+              {"ik_ka", br.ik_ka}, {"ith_ka", br.ith_ka},
+              {"v_remaining_pu", br.v_remaining_pu},
+              {"ikss_gen_contrib_ka", br.ikss_gen_contrib_ka},
+              {"ikss_motor_contrib_ka", br.ikss_motor_contrib_ka},
+              {"ikss_load_contrib_ka", br.ikss_load_contrib_ka},
+              {"ikss_sgen_contrib_ka", br.ikss_sgen_contrib_ka},
+              {"ikss_extgrid_contrib_ka", br.ikss_extgrid_contrib_ka},
+              {"ikss_converter_contrib_ka", br.ikss_converter_contrib_ka},
+            });
+          }
+          rj["bus_results"] = bus_arr;
+          res_arr.push_back(rj);
+        }
+        out["results"] = res_arr;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Advanced analysis endpoints ----
+    // ---- Time-series configuration ----
+
+    // Helper: materialize loads from bus.pd_mw/qd_mvar (idempotent — only
+    // when ac.loads is empty, which is the case for any fresh MATPOWER
+    // parse) and re-apply a TsBindingSpec to the given system. Used by
+    // BOTH set_ts_config (mutates g_session.current_system) and run_ts_pf
+    // (mutates the per-call sys_ts copy, since canvas re-sync between
+    // set_ts_config and run_ts_pf would otherwise wipe profile_ids).
+    auto materialize_loads_and_apply_binding =
+        [](hacdcpf::HybridPowerSystem& sys,
+           const Session::TsBindingSpec& spec) -> int {
+      int n_materialized = 0;
+      if (sys.ac.loads.empty()) {
+        int li = 0;
+        for (const auto& b : sys.ac.buses) {
+          if (!b.in_service) continue;
+          if (std::fabs(b.pd_mw) < 1e-12 && std::fabs(b.qd_mvar) < 1e-12) continue;
+          hacdcpf::Load ld;
+          ld.index = li;
+          ld.bus = b.index;
+          ld.in_service = true;
+          ld.name = "load_bus" + std::to_string(b.index);
+          ld.p_mw = b.pd_mw;
+          ld.q_mvar = b.qd_mvar;
+          ld.scaling = 1.0;
+          sys.ac.loads.push_back(std::move(ld));
+          ++li;
+        }
+        for (auto& b : sys.ac.buses) { b.pd_mw = 0.0; b.qd_mvar = 0.0; }
+        n_materialized = li;
+      }
+      if (!spec.valid) return n_materialized;
+      auto& loads = sys.ac.loads;
+      for (const auto& [li, pid] : spec.map_by_load_index) {
+        if (li >= 0 && li < (int)loads.size()) loads[li].profile_id = pid;
+      }
+      for (const auto& [bus, pid] : spec.map_by_bus) {
+        for (auto& ld : loads)
+          if (ld.bus == bus) { ld.profile_id = pid; break; }
+      }
+      if (spec.assign_all_loads_to >= 0)
+        for (auto& ld : loads) ld.profile_id = spec.assign_all_loads_to;
+      if (spec.assign_all_pv_to >= 0) {
+        for (auto& pv : sys.ac.pv_systems) pv.profile_id = spec.assign_all_pv_to;
+        for (auto& pv : sys.dc.pv_arrays) pv.profile_id = spec.assign_all_pv_to;
+      }
+      return n_materialized;
+    };
+
+    svr.Post("/api/session/set_ts_config",
+             [materialize_loads_and_apply_binding]
+             (const httplib::Request& req, httplib::Response& res) {
+      try {
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        int num_steps = j.value("num_steps", 24);
+        double step_hr = j.value("step_duration_hr", 1.0);
+        if (j.contains("profiles") && j["profiles"].is_array()) {
+          hacdcpf::TimeSeriesData ts;
+          ts.num_steps = num_steps;
+          ts.step_duration_hr = step_hr;
+          for (const auto& p : j["profiles"]) {
+            hacdcpf::TimeSeriesProfile prof;
+            prof.id = p.value("id", 0);
+            prof.name = p.value("name", std::string{});
+            if (p.contains("values") && p["values"].is_array())
+              prof.values = p["values"].get<std::vector<double>>();
+            ts.profiles.push_back(prof);
+          }
+          g_session.ts_data = std::move(ts);
+        } else {
+          g_session.ts_data = make_default_ts_data(num_steps);
+        }
+        // Optional per-load mapping: bind each load to a specific profile id.
+        // Accepts either {load_index, profile_id} or {bus, profile_id}.
+        int n_load_mapped = 0;
+        int n_loads_materialized = 0;
+
+        // Build / refresh persistent binding spec from this request so that
+        // a later canvas re-sync (load_json_string) before run_ts_pf can be
+        // re-applied transparently.
+        Session::TsBindingSpec spec;
+        spec.valid = true;
+        if (j.contains("load_profile_map") && j["load_profile_map"].is_array()) {
+          for (const auto& m : j["load_profile_map"]) {
+            int pid = m.value("profile_id", -1);
+            if (pid < 0) continue;
+            if (m.contains("load_index")) {
+              int li = m.value("load_index", -1);
+              if (li >= 0) spec.map_by_load_index.emplace_back(li, pid);
+            } else if (m.contains("bus")) {
+              int bus = m.value("bus", -1);
+              if (bus >= 0) spec.map_by_bus.emplace_back(bus, pid);
+            }
+          }
+        }
+        if (j.contains("assign_all_loads_to"))
+          spec.assign_all_loads_to = j.value("assign_all_loads_to", -1);
+        if (j.contains("assign_all_pv_to"))
+          spec.assign_all_pv_to = j.value("assign_all_pv_to", -1);
+        g_session.ts_binding = spec;
+
+        if (g_session.current_system) {
+          n_loads_materialized = materialize_loads_and_apply_binding(
+              *g_session.current_system, spec);
+          // Count actual mapped loads (those whose profile_id matches the spec).
+          for (const auto& ld : g_session.current_system->ac.loads)
+            if (ld.profile_id >= 0) ++n_load_mapped;
+        }
+        json out;
+        out["num_steps"] = g_session.ts_data.num_steps;
+        out["step_duration_hr"] = g_session.ts_data.step_duration_hr;
+        out["num_profiles"] = (int)g_session.ts_data.profiles.size();
+        out["num_loads_mapped"] = n_load_mapped;
+        out["num_loads_materialized"] = n_loads_materialized;
+        json pnames = json::array();
+        for (const auto& p : g_session.ts_data.profiles) pnames.push_back(p.name);
+        out["profile_names"] = pnames;
+        res.set_content(out.dump(), "application/json");
+      } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Time-series PF pipeline (UC → PF) ----
+    svr.Post("/api/session/run_ts_pf",
+             [materialize_loads_and_apply_binding]
+             (const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_ts;
+        hacdcpf::TimeSeriesData ts_data;
+        Session::TsBindingSpec spec;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          const auto j2 = json::parse(req.body.empty() ? "{}" : req.body);
+          const int ns = j2.value("num_steps", 24);
+          if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
+            g_session.ts_data = make_default_ts_data(ns);
+          sys_ts = *g_session.current_system;
+          ts_data = g_session.ts_data;
+          spec = g_session.ts_binding;
+        }
+        // Re-apply persistent binding to the per-call sys copy. This
+        // protects against the common GUI flow where a canvas re-sync
+        // (load_json_string) replaces current_system between set_ts_config
+        // and run_ts_pf — which would otherwise wipe out the materialized
+        // loads + profile_id assignments and silently fall back to a
+        // constant-load solve.
+        int n_remat = materialize_loads_and_apply_binding(sys_ts, spec);
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const int num_steps = j.value("num_steps", 24);
+        const bool skip_uc = j.value("skip_uc", false);
+        const bool run_opf = j.value("run_opf", false);
+        // Auto-assign profiles to components without explicit ids
+        for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_ts.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+        // Auto-assign solar profile to PV systems and DC PV arrays
+        for (auto& pv : sys_ts.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
+        for (auto& pv : sys_ts.dc.pv_arrays) if (pv.profile_id < 0) pv.profile_id = 2;
+        // Auto-assign load profile to DC loads
+        for (auto& ld : sys_ts.dc.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        hacdcpf::TimeSeriesPFOptions opts;
+        opts.skip_uc = skip_uc;
+        opts.run_opf = run_opf;
+        opts.verbose = false;
+        auto result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, opts);
+        json out;
+        out["num_steps"] = result.num_steps;
+        out["num_converged"] = result.num_converged;
+        out["num_opf_converged"] = result.num_opf_converged;
+        out["total_generation_cost"] = result.total_generation_cost;
+        out["uc_feasible"] = result.uc_schedule.feasible;
+        out["uc_solver_name"] = result.uc_schedule.solver_name;
+        // Diagnostic: how many loads were materialized at PF time and how
+        // many ended up bound to a profile id. Helps catch silent mapping
+        // failures from the GUI side.
+        {
+          int n_bound = 0;
+          for (const auto& ld : sys_ts.ac.loads) if (ld.profile_id >= 0) ++n_bound;
+          out["num_loads"] = (int)sys_ts.ac.loads.size();
+          out["num_loads_materialized"] = n_remat;
+          out["num_loads_bound_to_profile"] = n_bound;
+          out["ts_binding_active"] = spec.valid;
+        }
+        // Per-step metrics
+        json vm_mean = json::array(), vm_min_arr = json::array(), vm_max_arr = json::array(), losses_mw = json::array();
+        for (const auto& pf : result.pf_results) {
+          double vmm = 0.0, vmin = 1e30, vmax = -1e30;
+          if (!pf.vm.empty()) {
+            for (double v : pf.vm) { vmm += v; vmin = std::min(vmin, v); vmax = std::max(vmax, v); }
+            vmm /= (double)pf.vm.size();
+          } else { vmin = 0.0; vmax = 0.0; }
+          vm_mean.push_back(vmm);
+          vm_min_arr.push_back(vmin);
+          vm_max_arr.push_back(vmax);
+          // Total system losses = AC branch losses + VSC converter losses + DC-DC losses
+          double loss = 0.0;
+          for (const auto& bf : pf.branch_flows) loss += (bf.pf_mw + bf.pt_mw);
+          for (const auto& vt : pf.vsc_transfers) loss += vt.loss_mw;
+          for (const auto& dt2 : pf.dcdc_transfers) loss += dt2.loss_mw;
+          losses_mw.push_back(std::max(loss, 0.0));
+        }
+        while ((int)vm_mean.size() < result.num_steps) { vm_mean.push_back(0.0); vm_min_arr.push_back(0.0); vm_max_arr.push_back(0.0); losses_mw.push_back(0.0); }
+        out["vm_mean"] = vm_mean;
+        out["vm_min"] = vm_min_arr;
+        out["vm_max"] = vm_max_arr;
+        out["losses_mw"] = losses_mw;
+        // UC schedule
+        const auto& uc = result.uc_schedule;
+        out["gen_dispatch"] = uc.gen_dispatch;
+        out["gen_commit"] = uc.gen_commit;
+        out["ess_dispatch"] = uc.ess_dispatch;
+        out["ess_soc"] = uc.ess_soc;
+        out["renewable_dispatch"] = uc.renewable_dispatch;
+        // DC-side dispatch
+        out["dc_pv_dispatch"] = uc.dc_pv_dispatch;
+        out["dc_ess_dispatch"] = uc.dc_ess_dispatch;
+        out["dc_sgen_dispatch"] = uc.dc_sgen_dispatch;
+        out["dc_load_demand"] = uc.dc_load_demand;
+        // AC PV dispatch — extract from OPF results when available,
+        // otherwise compute from solar profile for each timestep
+        {
+          std::unordered_map<int, const hacdcpf::TimeSeriesProfile*> pmap;
+          for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+
+          // Build an in-service PV index list (parallels the JSON output rows)
+          std::vector<size_t> pv_service_idx;
+          for (size_t pi = 0; pi < sys_ts.ac.pv_systems.size(); ++pi)
+            if (sys_ts.ac.pv_systems[pi].in_service)
+              pv_service_idx.push_back(pi);
+
+          json ac_pv_dispatch = json::array();
+          for (size_t si = 0; si < pv_service_idx.size(); ++si) {
+            const size_t pi = pv_service_idx[si];
+            const auto& pvsys = sys_ts.ac.pv_systems[pi];
+            json row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              // 1) Compute the profile-scaled (MPPT) baseline
+              double scale = 1.0;
+              if (pvsys.profile_id >= 0) {
+                auto it2 = pmap.find(pvsys.profile_id);
+                if (it2 != pmap.end() && t < (int)it2->second->values.size())
+                  scale = it2->second->values[t];
+              }
+              double pv_mw;
+              if (pvsys.voc > 0 && pvsys.isc > 0 && pvsys.vmpp > 0) {
+                hacdcpf::PVSystem pv_copy = pvsys;
+                pv_copy.irradiance = scale * 1000.0;
+                pv_mw = hacdcpf::powerflow::compute_pv_power_mw(pv_copy);
+              } else {
+                pv_mw = pvsys.p_mw * scale;
+              }
+
+              // 2) If OPF ran and converged, override with OPF dispatch
+              if (run_opf && t < (int)result.opf_results.size() &&
+                  result.opf_results[t].converged) {
+                const auto& opf_res = result.opf_results[t];
+                for (size_t k = 0; k < opf_res.pren_mw.size() &&
+                                    k < opf_res.ren_map.size(); ++k) {
+                  if (opf_res.ren_map[k].source_type == 1 &&
+                      opf_res.ren_map[k].original_index == (int)pi) {
+                    pv_mw = opf_res.pren_mw[k];
+                    break;
+                  }
+                }
+              }
+              row.push_back(pv_mw);
+            }
+            ac_pv_dispatch.push_back(row);
+          }
+          out["ac_pv_dispatch"] = ac_pv_dispatch;
+        }
+        // Component names — only in-service components to match UC dispatch indices
+        json gn = json::array(), rn = json::array(), en = json::array();
+        for (size_t i = 0; i < sys_ts.ac.generators.size(); ++i)
+          if (sys_ts.ac.generators[i].in_service)
+            gn.push_back(sys_ts.ac.generators[i].name.empty() ? "Gen"+std::to_string(i) : sys_ts.ac.generators[i].name);
+        for (size_t i = 0; i < sys_ts.ac.renewable_gens.size(); ++i)
+          if (sys_ts.ac.renewable_gens[i].in_service)
+            rn.push_back(sys_ts.ac.renewable_gens[i].name.empty() ? "Ren"+std::to_string(i) : sys_ts.ac.renewable_gens[i].name);
+        for (size_t i = 0; i < sys_ts.ac.storage.size(); ++i)
+          if (sys_ts.ac.storage[i].in_service)
+            en.push_back(sys_ts.ac.storage[i].name.empty() ? "ESS"+std::to_string(i) : sys_ts.ac.storage[i].name);
+        out["gen_names"] = gn; out["ren_names"] = rn; out["ess_names"] = en;
+        // PV system names
+        json pvn = json::array();
+        for (size_t i = 0; i < sys_ts.ac.pv_systems.size(); ++i)
+          pvn.push_back(sys_ts.ac.pv_systems[i].name.empty() ? "PV"+std::to_string(i) : sys_ts.ac.pv_systems[i].name);
+        out["pv_names"] = pvn;
+        // DC component names
+        json dcpv = json::array(), dcess = json::array();
+        for (size_t i = 0; i < sys_ts.dc.pv_arrays.size(); ++i)
+          dcpv.push_back(sys_ts.dc.pv_arrays[i].name.empty() ? "DC_PV"+std::to_string(i) : sys_ts.dc.pv_arrays[i].name);
+        for (size_t i = 0; i < sys_ts.dc.storage.size(); ++i)
+          dcess.push_back(sys_ts.dc.storage[i].name.empty() ? "DC_ESS"+std::to_string(i) : sys_ts.dc.storage[i].name);
+        out["dc_pv_names"] = dcpv; out["dc_ess_names"] = dcess;
+        // Per-step per-bus voltage matrix (vm) and angle matrix (va, radians)
+        {
+          json vm_matrix = json::array();
+          json va_matrix = json::array();
+          json bus_labels = json::array();
+          for (size_t b = 0; b < sys_ts.ac.buses.size(); ++b) {
+            bus_labels.push_back(sys_ts.ac.buses[b].name.empty()
+              ? ("Bus" + std::to_string(sys_ts.ac.buses[b].index))
+              : sys_ts.ac.buses[b].name);
+            json vm_row = json::array();
+            json va_row = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              double vm = 1.0, va = 0.0;
+              if (t < (int)result.pf_results.size()) {
+                const auto& pf = result.pf_results[t];
+                if (b < pf.vm.size()) vm = pf.vm[b];
+                if (b < pf.va.size()) va = pf.va[b];
+              }
+              vm_row.push_back(vm);
+              va_row.push_back(va);
+            }
+            vm_matrix.push_back(vm_row);
+            va_matrix.push_back(va_row);
+          }
+          out["vm_matrix"] = vm_matrix;
+          out["va_matrix"] = va_matrix;
+          out["bus_labels"] = bus_labels;
+        }
+        // Per-step per-branch flows (Pf, Pt, Qf, Qt in MW / MVAr) — ordered
+        // identically to sys.ac.branches so labels can be zipped client-side.
+        {
+          json pf_mat = json::array(), pt_mat = json::array();
+          json qf_mat = json::array(), qt_mat = json::array();
+          json branch_labels = json::array();
+          json branch_from = json::array(), branch_to = json::array();
+          const size_t nb = sys_ts.ac.branches.size();
+          for (size_t i = 0; i < nb; ++i) {
+            const auto& br = sys_ts.ac.branches[i];
+            branch_labels.push_back(br.name.empty()
+              ? ("Br" + std::to_string(br.index)) : br.name);
+            branch_from.push_back(br.from_bus);
+            branch_to.push_back(br.to_bus);
+            json pfr = json::array(), ptr = json::array();
+            json qfr = json::array(), qtr = json::array();
+            for (int t = 0; t < result.num_steps; ++t) {
+              double pfv = 0.0, ptv = 0.0, qfv = 0.0, qtv = 0.0;
+              if (t < (int)result.pf_results.size() &&
+                  i < result.pf_results[t].branch_flows.size()) {
+                const auto& bf = result.pf_results[t].branch_flows[i];
+                pfv = bf.pf_mw; ptv = bf.pt_mw;
+                qfv = bf.qf_mvar; qtv = bf.qt_mvar;
+              }
+              pfr.push_back(pfv); ptr.push_back(ptv);
+              qfr.push_back(qfv); qtr.push_back(qtv);
+            }
+            pf_mat.push_back(pfr); pt_mat.push_back(ptr);
+            qf_mat.push_back(qfr); qt_mat.push_back(qtr);
+          }
+          out["branch_pf_mw"] = pf_mat;
+          out["branch_pt_mw"] = pt_mat;
+          out["branch_qf_mvar"] = qf_mat;
+          out["branch_qt_mvar"] = qt_mat;
+          out["branch_labels"] = branch_labels;
+          out["branch_from_bus"] = branch_from;
+          out["branch_to_bus"]   = branch_to;
+        }
+        // Total load per timestep (from profile scaling)
+        {
+          std::unordered_map<int, const hacdcpf::TimeSeriesProfile*> pmap;
+          for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+          auto get_scale = [&](int pid, int t) -> double {
+            auto it = pmap.find(pid);
+            if (it == pmap.end()) return 1.0;
+            if (t < 0 || t >= (int)it->second->values.size()) return 1.0;
+            return it->second->values[t];
+          };
+          json total_load = json::array();
+          for (int t = 0; t < result.num_steps; ++t) {
+            double tl = 0.0;
+            if (!sys_ts.ac.loads.empty()) {
+              for (const auto& ld : sys_ts.ac.loads) {
+                if (!ld.in_service) continue;
+                tl += ld.p_mw * ld.scaling * get_scale(ld.profile_id, t);
+              }
+            } else {
+              double s0 = get_scale(0, t);
+              for (const auto& b : sys_ts.ac.buses) {
+                if (!b.in_service) continue;
+                tl += std::max(0.0, b.pd_mw) * s0;
+              }
+            }
+            for (const auto& dl : sys_ts.dc.loads) {
+              if (!dl.in_service) continue;
+              tl += dl.p_mw * dl.scaling * get_scale(dl.profile_id, t);
+            }
+            total_load.push_back(tl);
+          }
+          out["total_load"] = total_load;
+        }
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (...) {
+        g_session.busy.store(false);
+        res.status = 500;
+        res.set_content(json{{"error", "Unknown internal error in time-series PF"}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Unit Commitment only ----
+    svr.Post("/api/session/run_uc",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_ts;
+        hacdcpf::TimeSeriesData ts_data;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          const auto j2 = json::parse(req.body.empty() ? "{}" : req.body);
+          const int ns = j2.value("num_steps", 24);
+          if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
+            g_session.ts_data = make_default_ts_data(ns);
+          sys_ts = *g_session.current_system;
+          ts_data = g_session.ts_data;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const int num_steps = j.value("num_steps", 24);
+        for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_ts.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+        for (auto& pv : sys_ts.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
+        for (auto& pv : sys_ts.dc.pv_arrays) if (pv.profile_id < 0) pv.profile_id = 2;
+        for (auto& ld : sys_ts.dc.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        hacdcpf::TimeSeriesPFOptions opts; opts.verbose = false;
+        auto uc = hacdcpf::solve_unit_commitment(sys_ts, ts_data, opts);
+        json out;
+        out["feasible"] = uc.feasible; out["total_cost"] = uc.total_cost;
+        out["gen_dispatch"] = uc.gen_dispatch; out["gen_commit"] = uc.gen_commit;
+        out["ess_dispatch"] = uc.ess_dispatch; out["ess_soc"] = uc.ess_soc;
+        out["renewable_dispatch"] = uc.renewable_dispatch;
+        json gn = json::array(), rn = json::array(), en = json::array();
+        for (size_t i = 0; i < sys_ts.ac.generators.size(); ++i)
+          if (sys_ts.ac.generators[i].in_service)
+            gn.push_back(sys_ts.ac.generators[i].name.empty() ? "Gen"+std::to_string(i) : sys_ts.ac.generators[i].name);
+        for (size_t i = 0; i < sys_ts.ac.renewable_gens.size(); ++i)
+          if (sys_ts.ac.renewable_gens[i].in_service)
+            rn.push_back(sys_ts.ac.renewable_gens[i].name.empty() ? "Ren"+std::to_string(i) : sys_ts.ac.renewable_gens[i].name);
+        for (size_t i = 0; i < sys_ts.ac.storage.size(); ++i)
+          if (sys_ts.ac.storage[i].in_service)
+            en.push_back(sys_ts.ac.storage[i].name.empty() ? "ESS"+std::to_string(i) : sys_ts.ac.storage[i].name);
+        out["gen_names"] = gn; out["ren_names"] = rn; out["ess_names"] = en;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (...) {
+        g_session.busy.store(false);
+        res.status = 500;
+        res.set_content(json{{"error", "Unknown internal error in unit commitment"}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Market Clearing (SCUC -> SCED -> LMP -> Settlement) ----
+    svr.Post("/api/session/run_market_clearing",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+
+        // NOTE (simulation build): the full market-clearing pipeline
+        // (SCED + LMP + settlement) from HybridACDCPowerSystemsPlanning is a
+        // planning-only module and is not part of this distribution-simulation
+        // backend. We honour the request by running the SCUC unit-commitment
+        // stage (solve_unit_commitment) so a meaningful dispatch schedule is
+        // still returned. Full LMP/settlement fields are intentionally omitted.
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const int num_periods = std::max(1, j.value("num_steps", 24));
+
+        hacdcpf::TimeSeriesData ts_data;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.ts_data.num_steps != num_periods || g_session.ts_data.profiles.empty())
+            g_session.ts_data = make_default_ts_data(num_periods);
+          ts_data = g_session.ts_data;
+        }
+        for (auto& ld : sys.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+        for (auto& pv : sys.ac.pv_systems) if (pv.profile_id < 0) pv.profile_id = 2;
+
+        hacdcpf::TimeSeriesPFOptions opts; opts.verbose = false;
+        auto uc = hacdcpf::solve_unit_commitment(sys, ts_data, opts);
+
+        json payload;
+        payload["mode"] = "scuc";
+        payload["note"] = "Market settlement (SCED/LMP) not available in simulation build; "
+                          "returning SCUC unit-commitment dispatch.";
+        payload["num_periods"] = num_periods;
+        payload["feasible"] = uc.feasible;
+        payload["total_cost"] = uc.total_cost;
+        payload["solver_name"] = uc.solver_name;
+        payload["gen_dispatch"] = uc.gen_dispatch;
+        payload["gen_commit"] = uc.gen_commit;
+        payload["ess_dispatch"] = uc.ess_dispatch;
+        payload["ess_soc"] = uc.ess_soc;
+        payload["renewable_dispatch"] = uc.renewable_dispatch;
+
+        res.set_content(payload.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Carbon Flow Analysis ----
+    svr.Post("/api/session/run_carbon",
+             [](const httplib::Request&, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
+        // Use stored PF result if available, otherwise run fresh AC PF
+        hacdcpf::analysis::CarbonAnalysisResult carbon;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.last_pf_result && g_session.last_pf_result->converged) {
+            carbon = hacdcpf::analysis::compute_carbon_analysis(sys, *g_session.last_pf_result, ca_opt);
+          } else {
+            carbon = hacdcpf::analysis::compute_carbon_analysis(sys, hacdcpf::PowerFlowOptions{}, ca_opt);
+          }
+        }
+        json out;
+        // Indicate which PF result was used
+        { std::lock_guard<std::mutex> lk(g_session.mu);
+          out["pf_source"] = (g_session.last_pf_result && g_session.last_pf_result->converged) ? g_session.last_pf_method : "fresh_ac_newton";
+        }
+        out["matrix_solved"] = carbon.matrix_solved;
+        out["tracing_verified"] = carbon.tracing_verified;
+        out["matrix_residual"] = carbon.matrix_residual;
+        auto sumj = [](const hacdcpf::analysis::EmissionsSummary& s) {
+          return json{{"total_generation_emissions_tco2", s.total_generation_emissions_tco2},
+                      {"total_load_emissions_tco2", s.total_load_emissions_tco2},
+                      {"total_loss_emissions_tco2", s.total_loss_emissions_tco2},
+                      {"balance_error_pct", s.balance_error_pct}};
+        };
+        out["tracing_summary"] = sumj(carbon.tracing_summary);
+        out["matrix_summary"] = sumj(carbon.matrix_summary);
+        json bc = json::array();
+        for (const auto& b : carbon.bus_carbon)
+          bc.push_back({{"bus_index",b.bus_index},{"carbon_intensity_tco2_mwh",b.carbon_intensity_tco2_mwh}});
+        out["bus_carbon"] = bc;
+        json dbc = json::array();
+        for (const auto& b : carbon.dc_bus_carbon)
+          dbc.push_back({{"bus_index",b.bus_index},{"carbon_intensity_tco2_mwh",b.carbon_intensity_tco2_mwh}});
+        out["dc_bus_carbon"] = dbc;
+        json lc = json::array();
+        for (const auto& l : carbon.load_carbon)
+          lc.push_back({{"load_index",l.load_index},{"bus",l.bus},{"demand_mw",l.demand_mw},
+                        {"carbon_intensity_tco2_mwh",l.carbon_intensity_tco2_mwh},
+                        {"total_emissions_tco2",l.total_emissions_tco2}});
+        out["load_carbon"] = lc;
+        json brcc = json::array();
+        for (const auto& b : carbon.branch_carbon)
+          brcc.push_back({{"branch_index",b.branch_index},{"from_bus",b.from_bus},{"to_bus",b.to_bus},
+                          {"loss_mw",b.loss_mw},{"carbon_intensity_tco2_mwh",b.carbon_intensity_tco2_mwh},
+                          {"total_emissions_tco2",b.total_emissions_tco2}});
+        out["branch_carbon"] = brcc;
+        json vcc = json::array();
+        for (const auto& v : carbon.vsc_carbon)
+          vcc.push_back({{"converter_index",v.converter_index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
+                         {"loss_mw",v.loss_mw},{"total_emissions_tco2",v.total_emissions_tco2}});
+        out["vsc_carbon"] = vcc;
+        // Sankey: all sources → loads via supply_mw
+        // Build source labels in same order as carbon_analysis build_sources():
+        // generators, static_gens, renewable_gens, pv_systems, dc_static_gens, dc_dc_static_gens, dc_pv_arrays, ac_storage, dc_storage
+        json sk_labels = json::array(), sk_src = json::array(), sk_tgt = json::array(), sk_val = json::array();
+        int src_idx = 0;
+        for (const auto& g : sys.ac.generators) {
+          if (!g.in_service) continue;
+          sk_labels.push_back(g.name.empty() ? "Gen"+std::to_string(g.index) : g.name);
+          src_idx++;
+        }
+        for (const auto& sg : sys.ac.static_generators) {
+          if (!sg.in_service) continue;
+          sk_labels.push_back(sg.name.empty() ? "Sgen"+std::to_string(sg.index) : sg.name);
+          src_idx++;
+        }
+        for (const auto& rg : sys.ac.renewable_gens) {
+          if (!rg.in_service || rg.p_mw <= 1e-6) continue;
+          sk_labels.push_back(rg.name.empty() ? "Ren"+std::to_string(rg.index) : rg.name);
+          src_idx++;
+        }
+        for (const auto& pv : sys.ac.pv_systems) {
+          if (!pv.in_service || pv.p_mw <= 1e-6) continue;
+          sk_labels.push_back(pv.name.empty() ? "PV"+std::to_string(pv.index) : pv.name);
+          src_idx++;
+        }
+        for (const auto& sg : sys.dc.static_generators) {
+          if (!sg.in_service) continue;
+          sk_labels.push_back(sg.name.empty() ? "DCSgen"+std::to_string(sg.index) : sg.name);
+          src_idx++;
+        }
+        for (const auto& sg : sys.dc.dc_static_generators) {
+          if (!sg.in_service) continue;
+          sk_labels.push_back(sg.name.empty() ? "DCGen"+std::to_string(sg.index) : sg.name);
+          src_idx++;
+        }
+        for (const auto& pv : sys.dc.pv_arrays) {
+          if (!pv.in_service || pv.p_set_mw <= 1e-6) continue;
+          sk_labels.push_back(pv.name.empty() ? "DCPV"+std::to_string(pv.index) : pv.name);
+          src_idx++;
+        }
+        for (const auto& st : sys.ac.storage) {
+          if (!st.in_service || st.p_mw <= 1e-6) continue;
+          sk_labels.push_back(st.name.empty() ? "BESS"+std::to_string(st.index) : st.name);
+          src_idx++;
+        }
+        for (const auto& st : sys.dc.storage) {
+          if (!st.in_service || st.p_mw <= 1e-6) continue;
+          sk_labels.push_back(st.name.empty() ? "DCBESS"+std::to_string(st.index) : st.name);
+          src_idx++;
+        }
+        const int n_sources = src_idx;
+        // Add AC load labels
+        for (const auto& l : carbon.load_carbon) sk_labels.push_back("Load@Bus"+std::to_string(l.bus));
+        // Add DC load labels
+        const int n_ac_loads = static_cast<int>(carbon.load_carbon.size());
+        for (const auto& l : carbon.dc_load_carbon) sk_labels.push_back("DCLoad@Bus"+std::to_string(l.bus));
+        // Add AC load links
+        for (int li = 0; li < (int)carbon.load_carbon.size(); ++li) {
+          for (const auto& [gi, smw] : carbon.load_carbon.at((size_t)li).generator_supply_mw) {
+            if (smw < 1e-3 || gi < 0 || gi >= n_sources) continue;
+            sk_src.push_back(gi); sk_tgt.push_back(n_sources + li); sk_val.push_back(smw);
+          }
+        }
+        // Add DC load links
+        for (int li = 0; li < (int)carbon.dc_load_carbon.size(); ++li) {
+          for (const auto& [gi, smw] : carbon.dc_load_carbon.at((size_t)li).generator_supply_mw) {
+            if (smw < 1e-3 || gi < 0 || gi >= n_sources) continue;
+            sk_src.push_back(gi); sk_tgt.push_back(n_sources + n_ac_loads + li); sk_val.push_back(smw);
+          }
+        }
+        out["sankey_labels"] = sk_labels; out["sankey_sources"] = sk_src;
+        out["sankey_targets"] = sk_tgt; out["sankey_values"] = sk_val;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reactive Power Optimization (MINLP: B&B + IPM) ----
+    svr.Post("/api/session/run_rpo",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const std::string obj_type = j.value("objective", std::string("voltage"));
+
+        hacdcpf::opf::RPOOptions rpo_opt;
+        if (obj_type == "loss")
+          rpo_opt.objective = hacdcpf::opf::RPOObjective::MinActiveLoss;
+        else if (obj_type == "combined")
+          rpo_opt.objective = hacdcpf::opf::RPOObjective::Combined;
+        else
+          rpo_opt.objective = hacdcpf::opf::RPOObjective::MinVoltageDeviation;
+        rpo_opt.vdev_weight    = j.value("vdev_weight", 1.0);
+        rpo_opt.gap_tol        = j.value("mip_gap", 0.01);
+        rpo_opt.time_limit_sec = j.value("time_limit_s", 120.0);
+
+        if (j.value("relax_only", false)) {
+          rpo_opt.max_nodes = 1;   // root relaxation only
+        }
+
+        auto result = hacdcpf::solve_rpo(sys, rpo_opt);
+
+        // Build JSON response
+        json out;
+        out["converged"]       = result.converged;
+        out["objective"]       = result.objective;
+        out["objective_type"]  = obj_type;
+        out["gap"]             = result.gap;
+        out["nodes_explored"]  = result.nodes_explored;
+        out["nlp_solves"]      = result.nlp_solves;
+        out["runtime_sec"]     = result.runtime_sec;
+        out["vm_before"]       = result.vm_before;
+        out["vm_after"]        = result.vm_after;
+        out["va_before"]       = result.va_before;
+        out["va_after"]        = result.va_after;
+        out["pg_before"]       = result.pg_mw_before;
+        out["pg_after"]        = result.pg_mw_after;
+        out["qg_before"]       = result.qg_mvar_before;
+        out["qg_after"]        = result.qg_mvar_after;
+        out["total_loss_before"] = result.total_loss_before_mw;
+        out["total_loss_after"]  = result.total_loss_after_mw;
+        out["max_vdev_before"]   = result.max_vdev_before;
+        out["max_vdev_after"]    = result.max_vdev_after;
+        out["status"]            = result.status;
+        out["v_min"] = 0.95;
+        out["v_max"] = 1.05;
+
+        json tap_names = json::array(), tap_ratio_before = json::array(), tap_ratio_after = json::array();
+        json tap_pos_before = json::array(), tap_pos_after = json::array();
+        for (const auto& t : result.taps) {
+          tap_names.push_back(t.name);
+          tap_ratio_before.push_back(t.ratio_before);
+          tap_ratio_after.push_back(t.ratio_after);
+          tap_pos_before.push_back(t.tap_before);
+          tap_pos_after.push_back(t.tap_after);
+        }
+        out["tap_names"]        = tap_names;
+        out["tap_before"]       = tap_ratio_before;
+        out["tap_after"]        = tap_ratio_after;
+        out["tap_pos_before"]   = tap_pos_before;
+        out["tap_pos_after"]    = tap_pos_after;
+
+        json sh_names = json::array(), sh_before = json::array(), sh_after = json::array();
+        json sh_mvar_before = json::array(), sh_mvar_after = json::array();
+        for (const auto& s : result.shunts) {
+          sh_names.push_back(s.name);
+          sh_before.push_back(s.step_before);
+          sh_after.push_back(s.step_after);
+          sh_mvar_before.push_back(s.bs_mvar_before);
+          sh_mvar_after.push_back(s.bs_mvar_after);
+        }
+        out["shunt_names"]       = sh_names;
+        out["shunt_before"]      = sh_before;
+        out["shunt_after"]       = sh_after;
+        out["shunt_mvar_before"] = sh_mvar_before;
+        out["shunt_mvar_after"]  = sh_mvar_after;
+        out["n_taps"]   = (int)result.taps.size();
+        out["n_shunts"] = (int)result.shunts.size();
+
+        json gn = json::array();
+        for (size_t i = 0; i < sys.ac.generators.size(); ++i)
+          gn.push_back(sys.ac.generators[i].name.empty()
+                         ? "Gen" + std::to_string(i)
+                         : sys.ac.generators[i].name);
+        out["gen_names"] = gn;
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Network Reconfiguration (TS-TR MILP) ----
+    svr.Post("/api/session/run_reconfig",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_tr;
+        hacdcpf::TimeSeriesData ts_data;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          const auto j2 = json::parse(req.body.empty() ? "{}" : req.body);
+          const int ns = j2.value("num_steps", 4);
+          if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
+            g_session.ts_data = make_default_ts_data(ns);
+          sys_tr = *g_session.current_system;
+          ts_data = g_session.ts_data;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        int num_steps = j.value("num_steps", 4);
+        for (auto& ld : sys_tr.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_tr.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+
+        // ========== Step 1: Baseline loss (original topology) ==========
+        double base_loss_mw = 0.0;
+        bool base_pf_converged = false;
+        int base_pf_iterations = 0;
+        bool base_is_radial = hacdcpf::analysis::is_radial(sys_tr.ac);
+        bool base_is_connected = hacdcpf::analysis::is_connected(sys_tr.ac);
+        int base_islands = hacdcpf::analysis::count_islands(sys_tr.ac);
+        {
+          hacdcpf::PowerFlowOptions pf_opt;
+          pf_opt.max_iter = 200; pf_opt.tol = 1e-6;
+          auto pf_base = hacdcpf::solve_power_flow(sys_tr, pf_opt);
+          base_pf_converged = pf_base.converged;
+          base_pf_iterations = pf_base.iterations;
+          if (pf_base.converged) {
+            // Sum branch losses: loss = pf_from + pt_to for each branch
+            for (const auto& bf : pf_base.branch_flows) {
+              double loss = bf.pf_mw + bf.pt_mw;  // sending + receiving end
+              if (loss > 0.0) base_loss_mw += loss;
+            }
+          }
+        }
+
+        // ========== Step 2: Run topology reconfiguration (single snapshot) ==========
+        // The SIM backend exposes a single-snapshot MILP reconfiguration
+        // (run_topology_reconfiguration) rather than the time-series schedule
+        // used in HybridACDCPowerSystemsPlanning. Run it once and present the
+        // result below as a one-step schedule (num_steps == 1).
+        hacdcpf::analysis::TopoReconfOptions tr_opts;
+        const auto& opts = j.contains("options") ? j["options"] : j;
+        tr_opts.v_min_pu  = opts.value("v_min_pu", opts.value("v_min", 0.95));
+        tr_opts.v_max_pu  = opts.value("v_max_pu", opts.value("v_max", 1.05));
+        tr_opts.mip_gap   = opts.value("mip_gap", 0.01);
+        tr_opts.max_time_s = opts.value("max_time_s", 60);
+        tr_opts.enable_pf = true;
+        tr_opts.verbose   = false;
+        auto recon = hacdcpf::analysis::run_topology_reconfiguration(sys_tr, tr_opts);
+
+        // Per-branch closed flag (1 = in service) derived from the open-branch set,
+        // then exposed as a single-step [branch][1] matrix for the response code below.
+        std::vector<std::vector<int>> ac_branch_closed_ts(
+            sys_tr.ac.branches.size(), std::vector<int>(1, 1));
+        {
+          std::set<int> open_ac;
+          for (const auto& br : recon.open_branches)
+            if (br.category == hacdcpf::graph::EdgeCategory::AC_Line) open_ac.insert(br.index);
+          for (int id : recon.open_branch_ids) open_ac.insert(id);
+          for (size_t b = 0; b < sys_tr.ac.branches.size(); ++b)
+            ac_branch_closed_ts[b][0] = open_ac.count(sys_tr.ac.branches[b].index) ? 0 : 1;
+        }
+        // Single-step schedule view consumed by the response builder below.
+        struct ReconSchedView {
+          bool feasible;
+          double total_objective;
+          double total_shed_mw;
+          std::string solver_name;
+          std::vector<std::vector<int>>& ac_branch_closed;
+          std::vector<std::vector<int>> ac_switch_on;
+          std::vector<std::vector<int>> ac_switch_off;
+          std::vector<std::vector<double>> storage_ac_soc_mwh;
+          std::vector<std::vector<double>> ren_ac_curtail_mw;
+        } sched{recon.feasible, recon.milp_objective, 0.0,
+                recon.solver_backend.empty() ? recon.solver_status : recon.solver_backend,
+                ac_branch_closed_ts, {}, {}, {}, {}};
+        // Single-step switch counts.
+        sched.ac_switch_on.assign(1, std::vector<int>(1, recon.n_switch_on));
+        sched.ac_switch_off.assign(1, std::vector<int>(1, recon.n_switch_off));
+        num_steps = 1;
+
+        // ========== Step 3: Reconfigured loss + radiality check ==========
+        double reconfig_loss_mw = 0.0;
+        bool reconfig_pf_converged = false;
+        int reconfig_pf_iterations = 0;
+        double reconfig_pf_residual = 0.0;
+        bool reconfig_is_radial = false;
+        bool reconfig_is_connected = false;
+        int reconfig_islands = 0;
+        int reconfig_closed_count = 0;
+        int reconfig_open_count = 0;
+        if (sched.feasible) {
+          // Apply final-step topology to a copy
+          auto sys_reconfig = sys_tr;
+          const int last_t = std::max(0, num_steps - 1);
+          for (size_t b = 0; b < sys_reconfig.ac.branches.size(); ++b) {
+            bool is_closed = true;
+            if (b < sched.ac_branch_closed.size() && last_t < (int)sched.ac_branch_closed[b].size())
+              is_closed = (sched.ac_branch_closed[b][(size_t)last_t] != 0);
+            sys_reconfig.ac.branches[b].in_service = is_closed;
+            if (is_closed) ++reconfig_closed_count;
+            else ++reconfig_open_count;
+          }
+          reconfig_is_radial = hacdcpf::analysis::is_radial(sys_reconfig.ac);
+          reconfig_is_connected = hacdcpf::analysis::is_connected(sys_reconfig.ac);
+          reconfig_islands = hacdcpf::analysis::count_islands(sys_reconfig.ac);
+
+          // Run power flow on reconfigured topology
+          hacdcpf::PowerFlowOptions pf_opt;
+          pf_opt.max_iter = 200; pf_opt.tol = 1e-6;
+          auto pf_reconfig = hacdcpf::solve_power_flow(sys_reconfig, pf_opt);
+          reconfig_pf_converged = pf_reconfig.converged;
+          reconfig_pf_iterations = pf_reconfig.iterations;
+          reconfig_pf_residual = pf_reconfig.residual;
+          if (pf_reconfig.converged) {
+            for (const auto& bf : pf_reconfig.branch_flows) {
+              double loss = bf.pf_mw + bf.pt_mw;
+              if (loss > 0.0) reconfig_loss_mw += loss;
+            }
+          }
+        }
+
+        // ========== Build JSON response ==========
+        json out;
+        out["feasible"] = sched.feasible;
+        out["total_objective"] = sched.total_objective;
+        out["total_shed_mw"] = sched.total_shed_mw;
+        out["milp_objective"] = sched.total_objective;
+        out["estimated_loss_mw"] = sched.total_objective * sys_tr.base_mva;
+        out["solver_name"] = sched.solver_name;
+        out["num_steps"] = num_steps;
+
+        // Loss comparison (before vs after reconfiguration)
+        out["base_loss_mw"] = base_loss_mw;
+        out["base_pf_converged"] = base_pf_converged;
+        out["base_pf_iterations"] = base_pf_iterations;
+        out["reconfig_loss_mw"] = reconfig_loss_mw;
+        out["reconfig_pf_converged"] = reconfig_pf_converged;
+        out["reconfig_pf_iterations"] = reconfig_pf_iterations;
+        out["reconfig_pf_residual"] = reconfig_pf_residual;
+        double loss_reduction_mw = base_loss_mw - reconfig_loss_mw;
+        double loss_reduction_pct = (base_loss_mw > 1e-9) ? (loss_reduction_mw / base_loss_mw * 100.0) : 0.0;
+        out["loss_reduction_mw"] = loss_reduction_mw;
+        out["loss_reduction_pct"] = loss_reduction_pct;
+
+        // Topology verification
+        out["base_is_radial"] = base_is_radial;
+        out["base_is_connected"] = base_is_connected;
+        out["base_islands"] = base_islands;
+        out["reconfig_is_radial"] = reconfig_is_radial;
+        out["reconfig_is_connected"] = reconfig_is_connected;
+        out["reconfig_islands"] = reconfig_islands;
+        out["reconfig_closed_count"] = reconfig_closed_count;
+        out["reconfig_open_count"] = reconfig_open_count;
+        out["num_buses"] = (int)sys_tr.ac.buses.size();
+
+        // Verification PF
+        json vf;
+        vf["converged"] = reconfig_pf_converged;
+        vf["iterations"] = reconfig_pf_iterations;
+        vf["residual"] = reconfig_pf_residual;
+        out["verification_pf"] = vf;
+
+        json sw_on = json::array(), sw_off = json::array();
+        for (int t = 0; t < num_steps; ++t) {
+          int on_cnt = 0, off_cnt = 0;
+          for (const auto& bv : sched.ac_switch_on) if (t < (int)bv.size()) on_cnt += bv.at((size_t)t);
+          for (const auto& bv : sched.ac_switch_off) if (t < (int)bv.size()) off_cnt += bv.at((size_t)t);
+          sw_on.push_back(on_cnt); sw_off.push_back(off_cnt);
+        }
+        out["sw_on_per_step"] = sw_on; out["sw_off_per_step"] = sw_off;
+        out["ac_branch_closed"] = sched.ac_branch_closed;
+        // Derive open/closed branch ID lists from last timestep for frontend display
+        {
+          json open_ids = json::array(), closed_ids = json::array();
+          json branch_details = json::array();
+          const int last_t = std::max(0, num_steps - 1);
+          for (size_t b = 0; b < sys_tr.ac.branches.size(); ++b) {
+            const auto& br = sys_tr.ac.branches[b];
+            const int br_id = br.index;
+            int closed = 0;
+            if (b < sched.ac_branch_closed.size() && last_t < (int)sched.ac_branch_closed[b].size())
+              closed = sched.ac_branch_closed[b][(size_t)last_t];
+            if (closed) closed_ids.push_back(br_id);
+            else        open_ids.push_back(br_id);
+            // Detailed branch info for the table
+            json bd;
+            bd["id"] = br_id;
+            bd["from_bus"] = br.from_bus;
+            bd["to_bus"] = br.to_bus;
+            bd["closed"] = closed != 0;
+            bd["name"] = br.name;
+            branch_details.push_back(bd);
+          }
+          out["open_branch_ids"] = open_ids;
+          out["closed_branch_ids"] = closed_ids;
+          out["branch_details"] = branch_details;
+        }
+        // Per-step per-branch topology for detailed display
+        {
+          json steps_arr = json::array();
+          for (int t = 0; t < num_steps; ++t) {
+            json step_open = json::array(), step_closed = json::array();
+            for (size_t b = 0; b < sys_tr.ac.branches.size(); ++b) {
+              const int br_id = sys_tr.ac.branches[b].index;
+              int closed = 0;
+              if (b < sched.ac_branch_closed.size() && t < (int)sched.ac_branch_closed[b].size())
+                closed = sched.ac_branch_closed[b][(size_t)t];
+              if (closed) step_closed.push_back(br_id);
+              else        step_open.push_back(br_id);
+            }
+            steps_arr.push_back(json{{"open", step_open}, {"closed", step_closed}});
+          }
+          out["steps_topology"] = steps_arr;
+        }
+        const int n_ess = (int)sched.storage_ac_soc_mwh.size();
+        out["num_branches"] = (int)sched.ac_branch_closed.size();
+        out["num_ess"] = n_ess;
+        json soc_j = json::array();
+        for (int t = 0; t < num_steps; ++t) {
+          json row = json::array();
+          for (int s = 0; s < n_ess; ++s) {
+            double soc = 0.0;
+            const auto& sv = sched.storage_ac_soc_mwh.at((size_t)s);
+            if (t < (int)sv.size()) {
+              double cap = (s < (int)sys_tr.ac.storage.size())
+                             ? sys_tr.ac.storage.at((size_t)s).e_rated_mwh : 1.0;
+              soc = (cap > 0.0) ? sv.at((size_t)t) / cap : 0.0;
+            }
+            row.push_back(soc);
+          }
+          soc_j.push_back(row);
+        }
+        out["ess_soc_by_step"] = soc_j;
+        json curt_j = json::array();
+        for (int t = 0; t < num_steps; ++t) {
+          double curt = 0.0;
+          for (const auto& rv : sched.ren_ac_curtail_mw)
+            if (t < (int)rv.size()) curt += rv.at((size_t)t);
+          curt_j.push_back(curt);
+        }
+        out["curt_per_step"] = curt_j;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (...) {
+        g_session.busy.store(false);
+        res.status = 500;
+        res.set_content(json{{"error", "Unknown internal error in topology reconfiguration"}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Annual Production Simulation ----
+    svr.Post("/api/session/run_annual_sim",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_ann;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys_ann = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
+        auto ts_data = make_annual_ts_data(step_hr);
+        // Auto-assign profiles
+        for (auto& ld : sys_ann.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_ann.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+        hacdcpf::analysis::AnnualProductionSimOptions opts;
+        opts.block_type = (j.value("block_type", std::string("monthly")) == "weekly")
+            ? hacdcpf::analysis::AnnualBlockType::Weekly
+            : hacdcpf::analysis::AnnualBlockType::Monthly;
+        opts.ts_pf_options.run_opf = j.value("run_opf", true);
+        opts.ts_pf_options.verbose = false;
+        opts.skip_replay = j.value("skip_replay", false);
+        opts.enforce_cyclic_soc = j.value("cyclic_soc", true);
+        opts.pf_snapshot_interval = j.value("snapshot_interval", 24);
+        opts.verbose = false;
+        auto result = hacdcpf::analysis::solve_annual_production_simulation(sys_ann, ts_data, opts);
+        json out;
+        out["feasible"] = result.feasible;
+        out["num_steps"] = result.num_steps;
+        out["step_duration_hr"] = result.step_duration_hr;
+        out["total_cost"] = result.total_cost;
+        out["total_gen_mwh"] = result.total_gen_mwh;
+        out["total_load_mwh"] = result.total_load_mwh;
+        out["total_renewable_mwh"] = result.total_renewable_mwh;
+        out["total_curtailment_mwh"] = result.total_curtailment_mwh;
+        out["total_ens_mwh"] = result.total_ens_mwh;
+        out["total_loss_mwh"] = result.total_loss_mwh;
+        out["num_pf_converged"] = result.num_pf_converged;
+        out["num_opf_converged"] = result.num_opf_converged;
+        // Per-step timeline (subsample for large data)
+        const int max_timeline = 1000;
+        const int stride = std::max(1, (int)result.step_results.size() / max_timeline);
+        json tl_gen = json::array(), tl_load = json::array(), tl_ren = json::array(),
+             tl_curt = json::array(), tl_ess = json::array(), tl_loss = json::array(),
+             tl_hours = json::array();
+        for (size_t i = 0; i < result.step_results.size(); i += static_cast<size_t>(stride)) {
+          const auto& s = result.step_results[i];
+          tl_hours.push_back(static_cast<double>(i) * result.step_duration_hr);
+          tl_gen.push_back(s.total_gen_mw);
+          tl_load.push_back(s.total_load_mw);
+          tl_ren.push_back(s.total_renewable_mw);
+          tl_curt.push_back(s.total_curtailment_mw);
+          tl_ess.push_back(s.total_ess_mw);
+          tl_loss.push_back(s.total_loss_mw);
+        }
+        out["timeline_hours"] = tl_hours;
+        out["timeline_gen"] = tl_gen;
+        out["timeline_load"] = tl_load;
+        out["timeline_ren"] = tl_ren;
+        out["timeline_curt"] = tl_curt;
+        out["timeline_ess"] = tl_ess;
+        out["timeline_loss"] = tl_loss;
+        // Monthly summaries
+        json ms = json::array();
+        for (const auto& m : result.monthly_summaries) {
+          ms.push_back({{"block_id", m.block_id}, {"total_gen_mwh", m.total_gen_mwh},
+                        {"total_load_mwh", m.total_load_mwh},
+                        {"total_renewable_mwh", m.total_renewable_mwh},
+                        {"total_curtailment_mwh", m.total_curtailment_mwh},
+                        {"total_loss_mwh", m.total_loss_mwh},
+                        {"total_ens_mwh", m.total_ens_mwh},
+                        {"total_cost", m.total_cost},
+                        {"num_pf_converged", m.num_pf_converged},
+                        {"num_steps", m.num_steps}});
+        }
+        out["monthly_summaries"] = ms;
+        // Generator stats
+        json gs = json::array();
+        for (const auto& g : result.gen_stats) {
+          gs.push_back({{"name", g.name}, {"total_energy_mwh", g.total_energy_mwh},
+                        {"capacity_factor", g.capacity_factor},
+                        {"total_startups", g.total_startups},
+                        {"total_hours_online", g.total_hours_online}});
+        }
+        out["gen_stats"] = gs;
+        // Storage stats
+        json ss = json::array();
+        for (const auto& s : result.storage_stats) {
+          ss.push_back({{"name", s.name}, {"total_charge_mwh", s.total_charge_mwh},
+                        {"total_discharge_mwh", s.total_discharge_mwh},
+                        {"cycles", s.cycles}});
+        }
+        out["storage_stats"] = ss;
+        // Renewable stats
+        json rs = json::array();
+        for (const auto& r : result.renewable_stats) {
+          rs.push_back({{"name", r.name}, {"total_energy_mwh", r.total_energy_mwh},
+                        {"total_curtailed_mwh", r.total_curtailed_mwh},
+                        {"capacity_factor", r.capacity_factor},
+                        {"curtailment_rate", r.curtailment_rate}});
+        }
+        out["renewable_stats"] = rs;
+        // PF voltage snapshots (subsampled vm for heatmap)
+        json snap_hours = json::array(), snap_vm = json::array();
+        for (const auto& snap : result.pf_snapshots) {
+          if (!snap.converged || snap.vm.empty()) continue;
+          snap_hours.push_back(static_cast<double>(snap.global_step) * result.step_duration_hr);
+          snap_vm.push_back(snap.vm);
+        }
+        out["snapshot_hours"] = snap_hours;
+        out["snapshot_vm"] = snap_vm;
+        // Geo data for animation map
+        json geo_buses = json::array();
+        for (const auto& bus : sys_ann.ac.buses) {
+          geo_buses.push_back({{"id", bus.index}, {"name", bus.name}, {"type", "ac"},
+                               {"lat", bus.latitude}, {"lon", bus.longitude}});
+        }
+        for (const auto& bus : sys_ann.dc.buses) {
+          geo_buses.push_back({{"id", bus.index}, {"name", bus.name}, {"type", "dc"},
+                               {"lat", bus.latitude}, {"lon", bus.longitude}});
+        }
+        out["geo_buses"] = geo_buses;
+        json geo_ac_branches = json::array();
+        for (const auto& br : sys_ann.ac.branches) {
+          auto it_from = std::find_if(sys_ann.ac.buses.begin(), sys_ann.ac.buses.end(),
+                                      [&](const auto& b){ return b.index == br.from_bus; });
+          auto it_to = std::find_if(sys_ann.ac.buses.begin(), sys_ann.ac.buses.end(),
+                                    [&](const auto& b){ return b.index == br.to_bus; });
+          double from_lat = 0, from_lon = 0, to_lat = 0, to_lon = 0;
+          if (it_from != sys_ann.ac.buses.end()) { from_lat = it_from->latitude; from_lon = it_from->longitude; }
+          if (it_to != sys_ann.ac.buses.end()) { to_lat = it_to->latitude; to_lon = it_to->longitude; }
+          geo_ac_branches.push_back({{"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+                                     {"from_lat", from_lat}, {"from_lon", from_lon},
+                                     {"to_lat", to_lat}, {"to_lon", to_lon}});
+        }
+        out["geo_ac_branches"] = geo_ac_branches;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Lifecycle Simulation ----
+    svr.Post("/api/session/run_lifecycle_sim",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_lc;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys_lc = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
+        auto ts_data = make_annual_ts_data(step_hr);
+        // Auto-assign profiles
+        for (auto& ld : sys_lc.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_lc.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+
+        hacdcpf::analysis::LifecycleSimOptions opts;
+        opts.num_years = j.value("num_years", 20);
+        opts.discount_rate = j.value("discount_rate", 0.05);
+        opts.load_growth_rate = j.value("load_growth_rate", 0.02);
+        opts.pv_annual_derating = j.value("pv_annual_derating", 0.005);
+        opts.calendar_degradation_per_year = j.value("calendar_degradation", 0.02);
+        opts.step_duration_hr = step_hr;
+        opts.verbose = false;
+
+        // Apply capacity scaling
+        hacdcpf::analysis::CapacityScaling cap_scaling;
+        cap_scaling.pv_scale = j.value("pv_scale", 1.0);
+        cap_scaling.wind_scale = j.value("wind_scale", 1.0);
+        cap_scaling.bess_power_scale = j.value("bess_power_scale", 1.0);
+        cap_scaling.bess_energy_scale = j.value("bess_energy_scale", 1.0);
+        cap_scaling.diesel_scale = j.value("diesel_scale", 1.0);
+        hacdcpf::analysis::apply_capacity_scaling(sys_lc, cap_scaling);
+
+        auto result = hacdcpf::analysis::run_lifecycle_simulation(sys_lc, ts_data, opts);
+
+        json out;
+        out["feasible"] = result.feasible;
+        out["num_years"] = result.num_years;
+        out["npv_total_cost"] = result.npv_total_cost;
+        out["total_carbon_tco2"] = result.total_carbon_tco2;
+        out["total_replacement_cost"] = result.total_replacement_cost;
+        out["total_replacements"] = result.total_replacements;
+
+        // Per-year data
+        json years_arr = json::array();
+        for (const auto& yr : result.year_results) {
+          json yj;
+          yj["year"] = yr.year;
+          yj["load_growth_factor"] = yr.load_growth_factor;
+          yj["annual_cost"] = yr.annual_cost;
+          yj["annual_gen_mwh"] = yr.annual_gen_mwh;
+          yj["annual_load_mwh"] = yr.annual_load_mwh;
+          yj["annual_renewable_mwh"] = yr.annual_renewable_mwh;
+          yj["annual_curtailment_mwh"] = yr.annual_curtailment_mwh;
+          yj["annual_ens_mwh"] = yr.annual_ens_mwh;
+          yj["annual_carbon_tco2"] = yr.annual_carbon_tco2;
+          yj["avg_carbon_intensity"] = yr.avg_carbon_intensity;
+          yj["feasible"] = yr.feasible;
+
+          // Bounds
+          json bj;
+          bj["total_bound_tco2"] = yr.bounds.total_bound_tco2;
+          bj["dispatch_bound_tco2"] = yr.bounds.dispatch.bound_tco2;
+          bj["sampling_bound_tco2"] = yr.bounds.sampling.bound_tco2;
+          bj["storage_carbon_bound_tco2"] = yr.bounds.storage_carbon.bound_tco2;
+          yj["bounds"] = bj;
+
+          // Cross-validation
+          json cvj;
+          cvj["dense_carbon_tco2"] = yr.cross_validation.dense_carbon_tco2;
+          cvj["sampled_carbon_tco2"] = yr.cross_validation.sampled_carbon_tco2;
+          cvj["sampling_gap_tco2"] = yr.cross_validation.sampling_gap_tco2;
+          cvj["sampling_gap_pct"] = yr.cross_validation.sampling_gap_pct;
+          cvj["total_bound_pct"] = yr.cross_validation.total_bound_pct;
+          cvj["dispatch_bound_pct"] = yr.cross_validation.dispatch_bound_pct;
+          cvj["sampling_bound_pct"] = yr.cross_validation.sampling_bound_pct;
+          cvj["storage_bound_pct"] = yr.cross_validation.storage_bound_pct;
+          yj["cross_validation"] = cvj;
+
+          // Storage states
+          json ss_arr = json::array();
+          for (const auto& ss : yr.storage_states) {
+            ss_arr.push_back({
+              {"storage_index", ss.storage_index},
+              {"name", ss.name},
+              {"soh", ss.soh},
+              {"soh_cycle", ss.soh_cycle},
+              {"soh_calendar", ss.soh_calendar},
+              {"effective_capacity_mwh", ss.effective_capacity_mwh},
+              {"cycles_this_year", ss.cycles_this_year},
+              {"cumulative_cycles", ss.cumulative_cycles},
+              {"replaced", ss.replaced},
+            });
+          }
+          yj["storage_states"] = ss_arr;
+
+          // Renewable states
+          json rs_arr = json::array();
+          for (const auto& rs : yr.renewable_states) {
+            rs_arr.push_back({
+              {"ren_index", rs.ren_index},
+              {"name", rs.name},
+              {"derated_capacity_mw", rs.derated_capacity_mw},
+              {"original_capacity_mw", rs.original_capacity_mw},
+              {"derating_factor", rs.derating_factor},
+            });
+          }
+          yj["renewable_states"] = rs_arr;
+
+          years_arr.push_back(yj);
+        }
+        out["years"] = years_arr;
+
+        // Replacement events
+        json repl_arr = json::array();
+        for (const auto& re : result.all_replacements) {
+          repl_arr.push_back({
+            {"year", re.year},
+            {"storage_index", re.storage_index},
+            {"storage_name", re.storage_name},
+            {"old_soh", re.old_soh},
+            {"replacement_cost_usd", re.replacement_cost_usd},
+          });
+        }
+        out["replacements"] = repl_arr;
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Lifecycle Capacity Comparison ----
+    svr.Post("/api/session/run_lifecycle_compare",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys_base;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys_base = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const double step_hr = (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
+        auto ts_data = make_annual_ts_data(step_hr);
+        // Auto-assign profiles
+        for (auto& ld : sys_base.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
+        for (auto& ren : sys_base.ac.renewable_gens) {
+          if (ren.profile_id < 0)
+            ren.profile_id = (ren.type == hacdcpf::RenewableType::SolarPV ||
+                              ren.type == hacdcpf::RenewableType::SolarCSP) ? 2 : 1;
+        }
+
+        hacdcpf::analysis::LifecycleSimOptions opts;
+        opts.num_years = j.value("num_years", 20);
+        opts.discount_rate = j.value("discount_rate", 0.05);
+        opts.load_growth_rate = j.value("load_growth_rate", 0.02);
+        opts.pv_annual_derating = j.value("pv_annual_derating", 0.005);
+        opts.calendar_degradation_per_year = j.value("calendar_degradation", 0.02);
+        opts.step_duration_hr = step_hr;
+        opts.verbose = false;
+
+        // Base capacity scaling
+        hacdcpf::analysis::CapacityScaling base_scaling;
+        base_scaling.pv_scale = j.value("pv_scale", 1.0);
+        base_scaling.wind_scale = j.value("wind_scale", 1.0);
+        base_scaling.bess_power_scale = j.value("bess_power_scale", 1.0);
+        base_scaling.bess_energy_scale = j.value("bess_energy_scale", 1.0);
+        base_scaling.diesel_scale = j.value("diesel_scale", 1.0);
+
+        // Sweep configuration
+        const std::string sweep_param = j.value("sweep_param", std::string("bess_energy"));
+        const double sweep_min = j.value("sweep_min", 0.5);
+        const double sweep_max = j.value("sweep_max", 3.0);
+        const int sweep_steps = std::min(j.value("sweep_steps", 6), 20);
+
+        std::vector<double> scale_values;
+        for (int i = 0; i < sweep_steps; ++i) {
+          double sv = (sweep_steps <= 1) ? sweep_min :
+              sweep_min + (sweep_max - sweep_min) * i / (sweep_steps - 1);
+          scale_values.push_back(sv);
+        }
+
+        auto cmp = hacdcpf::analysis::run_lifecycle_comparison(
+            sys_base, ts_data, opts, sweep_param, scale_values, base_scaling);
+
+        json out;
+        out["sweep_parameter"] = cmp.sweep_parameter;
+        out["num_scenarios"] = cmp.num_scenarios;
+        json scens_arr = json::array();
+        for (const auto& sc : cmp.scenarios) {
+          json sj;
+          sj["label"] = sc.label;
+          sj["npv_total_cost"] = sc.npv_total_cost;
+          sj["total_carbon_tco2"] = sc.total_carbon_tco2;
+          sj["total_replacement_cost"] = sc.total_replacement_cost;
+          sj["total_replacements"] = sc.total_replacements;
+          sj["feasible"] = sc.feasible;
+          sj["yearly_carbon"] = sc.yearly_carbon;
+          sj["yearly_cost"] = sc.yearly_cost;
+          sj["total_pv_mw"] = sc.total_pv_mw;
+          sj["total_wind_mw"] = sc.total_wind_mw;
+          sj["total_bess_mw"] = sc.total_bess_mw;
+          sj["total_bess_mwh"] = sc.total_bess_mwh;
+          sj["total_diesel_mw"] = sc.total_diesel_mw;
+          scens_arr.push_back(sj);
+        }
+        out["scenarios"] = scens_arr;
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (Non-Sequential Monte Carlo) ----
+    svr.Post("/api/session/run_reliability_nsq",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        
+        // Apply IEEE-24 reliability data if requested
+        if (j.value("apply_ieee24_data", true)) {
+          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
+        }
+        
+        hacdcpf::analysis::ReliabilityOptions opts;
+        opts.max_iterations = j.value("max_iterations", 5000);
+        opts.cov_threshold = j.value("cov_threshold", 0.05);
+        opts.load_scale_factor = j.value("load_scale_factor", 1.0);
+        opts.seed = j.value("seed", 0);
+        opts.verbose = j.value("verbose", false);
+        opts.compute_tail_risk = j.value("compute_tail_risk", false);
+        opts.var_confidence = j.value("var_confidence", 0.95);
+        opts.opf_options.verbose = false;
+        
+        // Progress callback with cancellation support
+        opts.progress_callback = [](int iter, double eens, double cov) {
+          return !g_session.cancel.load();
+        };
+        
+        auto result = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
+        
+        json out;
+        out["converged"] = result.converged;
+        out["iterations_used"] = result.iterations_used;
+        out["final_cov"] = result.final_cov;
+        out["eens_mwh_yr"] = result.eens_mwh_yr;
+        out["edns_mw"] = result.edns_mw;
+        out["lole_hr_yr"] = result.lole_hr_yr;
+        out["plc"] = result.plc;
+        out["nodal_eens_mwh_yr"] = result.nodal_eens_mwh_yr;
+        out["eens_history"] = result.eens_history;
+        out["cov_history"] = result.cov_history;
+        
+        // Tail risk metrics
+        if (opts.compute_tail_risk) {
+          out["tail_risk"]["eens_var"] = result.tail_risk.eens_var;
+          out["tail_risk"]["eens_cvar"] = result.tail_risk.eens_cvar;
+          out["tail_risk"]["lole_var"] = result.tail_risk.lole_var;
+          out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
+        }
+        
+        // Critical components
+        json crit_arr = json::array();
+        for (const auto& ci : result.critical_components) {
+          crit_arr.push_back({
+            {"index", ci.index},
+            {"is_generator", ci.is_generator},
+            {"importance", ci.importance}
+          });
+        }
+        out["critical_components"] = crit_arr;
+        
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (Sequential Monte Carlo) ----
+    svr.Post("/api/session/run_reliability_seq",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        
+        // Apply IEEE-24 reliability data if requested
+        if (j.value("apply_ieee24_data", true)) {
+          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
+        }
+        
+        hacdcpf::analysis::ReliabilityOptions opts;
+        opts.max_iterations = j.value("max_years", 500);
+        opts.cov_threshold = j.value("cov_threshold", 0.05);
+        opts.load_scale_factor = j.value("load_scale_factor", 1.0);
+        opts.hours_per_year = j.value("hours_per_year", 8736);
+        opts.seed = j.value("seed", 0);
+        opts.verbose = j.value("verbose", false);
+        opts.compute_tail_risk = j.value("compute_tail_risk", false);
+        opts.var_confidence = j.value("var_confidence", 0.95);
+        opts.opf_options.verbose = false;
+        
+        // Progress callback with cancellation support
+        opts.progress_callback = [](int year, double eens, double cov) {
+          return !g_session.cancel.load();
+        };
+        
+        // Build load profile
+        auto load_profile = hacdcpf::analysis::build_ieee_rts24_load_profile(opts.hours_per_year);
+        
+        auto result = hacdcpf::analysis::run_sequential_mc(sys, load_profile, opts);
+        
+        json out;
+        out["converged"] = result.converged;
+        out["iterations_used"] = result.iterations_used;
+        out["final_cov"] = result.final_cov;
+        out["eens_mwh_yr"] = result.eens_mwh_yr;
+        out["edns_mw"] = result.edns_mw;
+        out["lole_hr_yr"] = result.lole_hr_yr;
+        out["lolf_occ_yr"] = result.lolf_occ_yr;
+        out["plc"] = result.plc;
+        out["nodal_eens_mwh_yr"] = result.nodal_eens_mwh_yr;
+        out["eens_history"] = result.eens_history;
+        out["cov_history"] = result.cov_history;
+        out["annual_eens"] = result.annual_eens;
+        out["annual_lole"] = result.annual_lole;
+        out["annual_lolf"] = result.annual_lolf;
+        
+        // Tail risk metrics
+        if (opts.compute_tail_risk) {
+          out["tail_risk"]["eens_var"] = result.tail_risk.eens_var;
+          out["tail_risk"]["eens_cvar"] = result.tail_risk.eens_cvar;
+          out["tail_risk"]["lole_var"] = result.tail_risk.lole_var;
+          out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
+        }
+        
+        // Critical components
+        json crit_arr = json::array();
+        for (const auto& ci : result.critical_components) {
+          crit_arr.push_back({
+            {"index", ci.index},
+            {"is_generator", ci.is_generator},
+            {"importance", ci.importance}
+          });
+        }
+        out["critical_components"] = crit_arr;
+        
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (FMEA - Distribution System) ----
+    svr.Post("/api/session/run_reliability_fmea",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        
+        // Apply comprehensive reliability data if requested
+        if (j.value("apply_comprehensive_data", true)) {
+          hacdcpf::analysis::apply_comprehensive_reliability_data(sys);
+        } else if (j.value("apply_ieee24_data", false)) {
+          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
+        }
+        
+        hacdcpf::analysis::FMEAOptions fmea_opts;
+        fmea_opts.load_scale_factor = j.value("load_scale_factor", 1.0);
+        fmea_opts.verbose = j.value("verbose", false);
+        
+        auto result = hacdcpf::analysis::run_distribution_fmea(sys, fmea_opts);
+        
+        json out;
+        out["eens_mwh_yr"] = result.eens_mwh_yr;
+        out["edns_mw"] = result.edns_mw;
+        out["lole_hr_yr"] = result.lole_hr_yr;
+        out["lolf_occ_yr"] = result.lolf_occ_yr;
+        out["saifi"] = result.distribution_idx.saifi;
+        out["saidi"] = result.distribution_idx.saidi;
+        out["caidi"] = result.distribution_idx.caidi;
+        out["asai"] = result.distribution_idx.asai;
+        out["n_contingencies"] = result.contingencies.size();
+        
+        // Count contingencies with loss
+        int n_with_loss = 0;
+        for (const auto& c : result.contingencies) {
+          if (c.shed_rep_mw > 0.01) n_with_loss++;
+        }
+        out["n_with_loss"] = n_with_loss;
+        
+        // Contingencies sorted by EENS contribution (descending)
+        auto sorted = result.contingencies;
+        std::sort(sorted.begin(), sorted.end(),
+          [](const auto& a, const auto& b) { return a.eens_contribution > b.eens_contribution; });
+        
+        json cont_arr = json::array();
+        for (const auto& c : sorted) {
+          cont_arr.push_back({
+            {"component_name", c.component_name},
+            {"component_type", c.component_type},
+            {"shed_mw", c.shed_rep_mw},
+            {"eens_contribution", c.eens_contribution},
+            {"failure_rate", c.failure_rate},
+            {"repair_time", c.tau_rep_hr}
+          });
+        }
+        out["contingencies"] = cont_arr;
+        
+        // Aggregate EENS by component type
+        json eens_by_type;
+        for (const auto& c : result.contingencies) {
+          std::string tp = c.component_type;
+          if (eens_by_type.contains(tp)) {
+            eens_by_type[tp] = eens_by_type[tp].get<double>() + c.eens_contribution;
+          } else {
+            eens_by_type[tp] = c.eens_contribution;
+          }
+        }
+        out["eens_by_type"] = eens_by_type;
+        
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Distribution Resilience Assessment (MESS) ----
+    svr.Post("/api/session/run_distribution_resilience",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+
+        if (j.value("apply_demo_data", true)) {
+          hacdcpf::analysis::apply_distribution_resilience_demo_data(sys);
+        }
+
+        hacdcpf::analysis::DistributionResilienceOptions opts;
+        opts.horizon_hours = j.value("horizon_hours", 8);
+        opts.time_step_hr = j.value("time_step_hr", 1.0);
+        opts.load_scale_factor = j.value("load_scale_factor", 1.0);
+        opts.allow_reconfiguration = j.value("allow_reconfiguration", false);
+        opts.allow_mess_dispatch = j.value("allow_mess_dispatch", true);
+        opts.mess_travel_speed_kmph = j.value("mess_travel_speed_kmph", 40.0);
+        opts.default_fault_count = j.value("default_fault_count", 1);
+        opts.default_repair_time_hr = j.value("repair_time_hr", 6.0);
+        opts.auto_fault_stagger_hr = j.value("auto_fault_stagger_hr", 0.0);
+        opts.auto_fault_start_hr = j.value("auto_fault_start_hr", 0.0);
+        opts.run_power_flow = j.value("run_power_flow", false);
+        // Manual faults with per-fault timing (takes priority over fault_branch_ids).
+        if (j.contains("manual_faults") && j["manual_faults"].is_array() && !j["manual_faults"].empty()) {
+          for (const auto& mf : j["manual_faults"]) {
+            const int bid = mf.value("branch_id", 0);
+            if (bid <= 0) continue;
+            opts.faults.push_back({bid,
+                                   mf.value("start_hr", 0.0),
+                                   mf.value("repair_hr", opts.default_repair_time_hr),
+                                   mf.value("label", std::string{})});
+          }
+        } else {
+          for (const auto& id : j.value("fault_branch_ids", std::vector<int>{})) {
+            opts.faults.push_back({id, 0.0, opts.default_repair_time_hr, std::string{}});
+          }
+        }
+        opts.progress_callback = [](int step, double ratio, double shed) {
+          return !g_session.cancel.load();
+        };
+
+        auto result = hacdcpf::analysis::run_distribution_resilience_assessment(sys, opts);
+
+        json out;
+        out["feasible"] = result.feasible;
+        out["status"] = result.status;
+        out["total_demand_mwh"] = result.total_demand_mwh;
+        out["total_served_mwh"] = result.total_served_mwh;
+        out["total_shed_mwh"] = result.total_shed_mwh;
+        out["weighted_unserved_mwh"] = result.weighted_unserved_mwh;
+        out["resilience_index"] = result.resilience_index;
+        out["avg_restoration_ratio"] = result.avg_restoration_ratio;
+        out["final_restoration_ratio"] = result.final_restoration_ratio;
+        out["peak_shed_mw"] = result.peak_shed_mw;
+        out["mess_energy_delivered_mwh"] = result.mess_energy_delivered_mwh;
+        out["mess_travel_distance_km"] = result.mess_travel_distance_km;
+        out["total_switch_actions"] = result.total_switch_actions;
+        out["total_repaired_faults"] = result.total_repaired_faults;
+
+        // Fault sequence used (auto-generated or user-specified).
+        {
+          json fs_arr = json::array();
+          for (const auto& f : result.fault_sequence) {
+            fs_arr.push_back(json{{"branch_index", f.branch_index},
+                                  {"start_hr", f.start_hr},
+                                  {"repair_hr", f.repair_hr},
+                                  {"name", f.name}});
+          }
+          out["fault_sequence"] = fs_arr;
+        }
+
+        json hours = json::array();
+        json demand = json::array();
+        json served = json::array();
+        json shed = json::array();
+        json ratio = json::array();
+        json active_faults = json::array();
+        json switch_actions = json::array();
+        json island_counts = json::array();
+        json repaired_faults_arr = json::array();
+        json load_multipliers = json::array();
+        json res_multipliers = json::array();
+        json res_mw_arr = json::array();
+        json shed_critical = json::array();
+        json shed_high = json::array();
+        json shed_medium = json::array();
+        json shed_low = json::array();
+        std::map<int, json> mess_traces;
+        std::map<int, std::string> mess_names;
+        // PF time-series accumulators (only populated when run_power_flow is on).
+        json pf_converged_arr = json::array();
+        // Per-bus: bus_index → {vm_pu: [...], va_deg: [...]}
+        std::map<int, json> bus_voltage_traces;
+        // Per-branch: branch_index → {pf_mw: [...], loading_pct: [...]}
+        std::map<int, json> branch_flow_traces;
+
+        for (const auto& step : result.steps) {
+          hours.push_back(step.hour);
+          demand.push_back(step.total_demand_mw);
+          served.push_back(step.served_mw);
+          shed.push_back(step.shed_mw);
+          ratio.push_back(step.restoration_ratio);
+          active_faults.push_back(step.active_faults);
+          switch_actions.push_back(step.switch_actions);
+          island_counts.push_back(step.island_count);
+          repaired_faults_arr.push_back(step.repaired_faults);
+          load_multipliers.push_back(step.load_multiplier);
+          res_multipliers.push_back(step.res_multiplier);
+          res_mw_arr.push_back(step.total_res_mw);
+          shed_critical.push_back(step.shed_by_priority.size() > 0 ? step.shed_by_priority[0] : 0.0);
+          shed_high.push_back(step.shed_by_priority.size() > 1 ? step.shed_by_priority[1] : 0.0);
+          shed_medium.push_back(step.shed_by_priority.size() > 2 ? step.shed_by_priority[2] : 0.0);
+          shed_low.push_back(step.shed_by_priority.size() > 3 ? step.shed_by_priority[3] : 0.0);
+          for (const auto& ms : step.mess_states) {
+            if (!mess_traces.count(ms.storage_index)) {
+              mess_traces[ms.storage_index] = json{{"storage_index", ms.storage_index},
+                                                   {"dispatch_mw", json::array()},
+                                                   {"energy_mwh", json::array()},
+                                                   {"soc", json::array()},
+                                                   {"bus", json::array()},
+                                                   {"target_bus", json::array()},
+                                                   {"remaining_travel_hr", json::array()},
+                                                   {"status", json::array()}};
+              mess_names[ms.storage_index] = "MESS " + std::to_string(ms.storage_index);
+            }
+            mess_traces[ms.storage_index]["dispatch_mw"].push_back(ms.dispatch_mw);
+            mess_traces[ms.storage_index]["energy_mwh"].push_back(ms.energy_mwh);
+            mess_traces[ms.storage_index]["soc"].push_back(ms.soc);
+            mess_traces[ms.storage_index]["bus"].push_back(ms.bus);
+            mess_traces[ms.storage_index]["target_bus"].push_back(ms.target_bus);
+            mess_traces[ms.storage_index]["remaining_travel_hr"].push_back(ms.remaining_travel_hr);
+            mess_traces[ms.storage_index]["status"].push_back(ms.status);
+          }
+          // Collect PF voltage & flow data for this step.
+          pf_converged_arr.push_back(step.pf_converged);
+          for (const auto& bv : step.bus_voltages) {
+            if (!bus_voltage_traces.count(bv.bus_index)) {
+              bus_voltage_traces[bv.bus_index] = json{{"bus_index", bv.bus_index},
+                                                      {"vm_pu", json::array()},
+                                                      {"va_deg", json::array()}};
+            }
+            bus_voltage_traces[bv.bus_index]["vm_pu"].push_back(bv.vm_pu);
+            bus_voltage_traces[bv.bus_index]["va_deg"].push_back(bv.va_deg);
+          }
+          for (const auto& bf : step.branch_flows) {
+            if (!branch_flow_traces.count(bf.branch_index)) {
+              branch_flow_traces[bf.branch_index] = json{{"branch_index", bf.branch_index},
+                                                          {"from_bus", bf.from_bus},
+                                                          {"to_bus", bf.to_bus},
+                                                          {"pf_mw", json::array()},
+                                                          {"qf_mvar", json::array()},
+                                                          {"loading_pct", json::array()}};
+            }
+            branch_flow_traces[bf.branch_index]["pf_mw"].push_back(bf.pf_mw);
+            branch_flow_traces[bf.branch_index]["qf_mvar"].push_back(bf.qf_mvar);
+            branch_flow_traces[bf.branch_index]["loading_pct"].push_back(bf.loading_percent);
+          }
+        }
+        out["hours"] = hours;
+        out["demand_mw"] = demand;
+        out["served_mw"] = served;
+        out["shed_mw"] = shed;
+        out["restoration_ratio"] = ratio;
+        out["active_faults"] = active_faults;
+        out["switch_actions"] = switch_actions;
+        out["island_counts"] = island_counts;
+        out["repaired_faults_arr"] = repaired_faults_arr;
+        out["load_multipliers"] = load_multipliers;
+        out["res_multipliers"] = res_multipliers;
+        out["res_mw"] = res_mw_arr;
+        out["shed_critical"] = shed_critical;
+        out["shed_high"] = shed_high;
+        out["shed_medium"] = shed_medium;
+        out["shed_low"] = shed_low;
+        json mess_arr = json::array();
+        for (auto& [storage_index, trace] : mess_traces) {
+          trace["name"] = mess_names[storage_index];
+          mess_arr.push_back(trace);
+        }
+        out["mess_traces"] = mess_arr;
+
+        // PF results
+        out["pf_converged"] = pf_converged_arr;
+        json bv_arr = json::array();
+        for (auto& [bus_idx, trace] : bus_voltage_traces) bv_arr.push_back(trace);
+        out["bus_voltage_traces"] = bv_arr;
+        json bf_arr = json::array();
+        for (auto& [br_idx, trace] : branch_flow_traces) bf_arr.push_back(trace);
+        out["branch_flow_traces"] = bf_arr;
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (Frequency & Duration - Analytical) ----
+    svr.Post("/api/session/run_reliability_fd",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        
+        // Apply IEEE-24 reliability data if requested
+        if (j.value("apply_ieee24_data", true)) {
+          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
+        }
+        
+        // Calculate total load (with optional scaling)
+        double load_scale = j.value("load_scale_factor", 1.0);
+        double total_load = 0.0;
+        for (const auto& bus : sys.ac.buses) {
+          total_load += bus.pd_mw;
+        }
+        for (const auto& ld : sys.ac.loads) {
+          if (ld.in_service) total_load += ld.p_mw * ld.scaling;
+        }
+        total_load *= load_scale;
+        
+        auto result = hacdcpf::analysis::run_frequency_duration_analysis(sys, total_load);
+        
+        json out;
+        out["lolp"] = result.lolp;
+        out["lole_fd"] = result.lole_fd;
+        out["lolf_fd"] = result.lolf_fd;
+        out["lold"] = result.lold;
+        out["capacity_outage_levels"] = result.capacity_outage_levels;
+        out["cumulative_probability"] = result.cumulative_probability;
+        out["cumulative_frequency"] = result.cumulative_frequency;
+        
+        res.set_content(out.dump(), "application/json");
+      } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+  // ---- Legacy endpoints ----
+  svr.Post("/api/load_case", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto sys = system_from_request(j);
+      json out;
+      out["case_name"] = j.value("case", "ieee24_3area_acdc_expanded");
+      out["system_json"] = hacdcpf::io::to_json(sys, 2);
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/pf", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto sys = system_from_request(j);
+      hacdcpf::PowerFlowOptions opt;
+      if (j.contains("options")) { auto& o=j["options"];
+        if(o.contains("max_iter"))opt.max_iter=o["max_iter"].get<int>();
+        if(o.contains("tol"))opt.tol=o["tol"].get<double>();
+      }
+      auto pf = hacdcpf::solve_power_flow(sys, opt);
+      json out;
+      out["converged"]=pf.converged; out["iterations"]=pf.iterations;
+      out["residual"]=pf.residual; out["vm"]=pf.vm; out["va"]=pf.va; out["vdc"]=pf.vdc;
+      json ba=json::array(); for(const auto& bf:pf.branch_flows)ba.push_back(std::abs(bf.pf_mw));
+      out["branch_abs"]=ba;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/opf/ac", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      auto sys = system_from_request(json::parse(req.body.empty() ? "{}" : req.body));
+      hacdcpf::opf::ACOPFOptions opt; opt.allow_fallback=true; opt.max_inner_iterations=120;
+      auto r = hacdcpf::solve_ac_opf(sys, opt);
+      json out;
+      out["converged"]=r.converged; out["iterations"]=r.iterations;
+      out["objective"]=r.objective; out["status"]=r.status;
+      out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/opf/dc", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      auto sys = system_from_request(json::parse(req.body.empty() ? "{}" : req.body));
+      hacdcpf::opf::DCOPFOptions opt;
+      auto r = hacdcpf::solve_dc_opf(sys, opt);
+      json out;
+      out["converged"]=r.converged; out["iterations"]=r.iterations;
+      out["objective"]=r.objective; out["status"]=r.status;
+      out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw;
+      out["lmp"]=r.lmp; out["total_load_shedding_mw"]=r.total_load_shedding_mw;
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/sc", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto sys = system_from_request(j);
+      hacdcpf::analysis::SCOptions opt;
+      if (j.contains("options")) { auto& o=j["options"];
+        std::string ft=o.value("fault_type",std::string("ThreePhase"));
+        if(ft=="SinglePhaseGround")opt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
+        else if(ft=="TwoPhase")opt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
+        else if(ft=="TwoPhaseGround")opt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
+        if(o.contains("c_factor"))opt.c_factor=o["c_factor"].get<double>();
+      }
+      auto sc = hacdcpf::analysis::compute_short_circuit(sys, opt);
+      json out;
+      out["fault_type"]=[&](){switch(opt.fault_type){
+        case hacdcpf::analysis::FaultType::ThreePhase:return"ThreePhase";
+        case hacdcpf::analysis::FaultType::SinglePhaseGround:return"SinglePhaseGround";
+        case hacdcpf::analysis::FaultType::TwoPhase:return"TwoPhase";
+        case hacdcpf::analysis::FaultType::TwoPhaseGround:return"TwoPhaseGround";
+      }return"ThreePhase";}();
+      out["bus_results"]=json::array();
+      for(const auto& br:sc.bus_results)
+        out["bus_results"].push_back(json{{"bus_id",br.bus_id},{"sk_mva",br.sk_mva},{"ikpp_ka",br.ikpp_ka}});
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // Serve static files for ETAP-like frontend from web/ directory
+  const auto web_dir = [&]() -> std::string {
+    const std::vector<fs::path> candidates = {
+        fs::current_path() / "web",
+        fs::current_path() / ".." / "web",
+    };
+    for (const auto& c : candidates) {
+      if (fs::exists(c)) return fs::canonical(c).string();
+    }
+    return (fs::current_path() / "web").string();
+  }();
+  if (fs::exists(web_dir)) {
+    svr.set_mount_point("/xjtu", web_dir);
+    std::cout << "XJTU frontend: http://" << args.host << ":" << args.port << "/xjtu/\n";
+    std::cout << "  (serving from " << web_dir << ")\n";
+  }
+
+  // CORS headers for cross-origin access
+  svr.set_default_headers({
+    {"Access-Control-Allow-Origin", "*"},
+    {"Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"},
+    {"Access-Control-Allow-Headers", "Content-Type, Authorization"}
+  });
+
+  // Handle OPTIONS preflight requests
+  svr.Options("/(.*)", [](const httplib::Request&, httplib::Response& res) {
+    res.status = 204;
+  });
+
+  std::cout << "Hybrid AC/DC Planning Studio running at http://"
+            << args.host << ":" << args.port << "\n";
+  std::cout << "Press Ctrl+C to stop.\n";
+  if (!svr.listen(args.host, args.port)) {
+    std::cerr << "Failed to start server on " << args.host << ":" << args.port << "\n";
+    return 2;
+  }
+  return 0;
+}

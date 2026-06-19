@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
 // Short Circuit Analysis — Z-bus method
 // DistributionPowerFlow.jl ShortCircuit module equivalent (C++20)
 //
