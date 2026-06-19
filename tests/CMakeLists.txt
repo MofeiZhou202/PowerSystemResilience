@@ -198,3 +198,19 @@ hacdcpf_add_test(test_ltm_stress test_ltm_stress.cpp)
 #   Pulse conservation, sustained-capacity comparison, CFL-violating regime,
 #   4-link corridor, and free-flow travel-time accuracy.
 hacdcpf_add_test(test_ctm_ltm_comparison test_ctm_ltm_comparison.cpp)
+
+# ── Web GUI server (ETAP-style single-line-diagram editor + REST backend) ──────
+# Migrated from HybridACDCPowerSystemsPlanning. Header-only httplib is vendored
+# under third_party/; nlohmann_json arrives transitively via hacdcpf -> mipsolvers.
+# Not a Catch2 test — a standalone executable serving web/ at /xjtu/ (port 8088).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
+  add_executable(run_gui_server run_gui_server.cpp)
+  target_link_libraries(run_gui_server PRIVATE hacdcpf::hacdcpf)
+  target_include_directories(run_gui_server PRIVATE "${CMAKE_SOURCE_DIR}/third_party")
+  target_compile_definitions(run_gui_server PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+  # httplib needs Winsock2 on Windows (freeaddrinfo / WSACleanup / socket).
+  if(WIN32)
+    target_link_libraries(run_gui_server PRIVATE ws2_32)
+  endif()
+endif()

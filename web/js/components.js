@@ -1,0 +1,686 @@
+/**
+ * components.js — Power system component definitions with SVG symbols.
+ * Defines all component types, their default parameters, SVG rendering,
+ * and port positions for connections.
+ */
+'use strict';
+
+const COMP = (() => {
+
+  // ============= SVG Symbol Generators =============
+  // Each returns an SVG string fragment (group content only, no outer <g>)
+  // Origin at (0,0), ports are defined separately
+
+  const symbols = {
+    ac_bus(p) {
+      return `<line x1="-40" y1="0" x2="40" y2="0" stroke-width="5" stroke="#61afef"/>
+              <text class="comp-label" x="0" y="-12">${p.name||'Bus'}</text>
+              <text class="comp-value" x="0" y="16">${p.base_kv||110}kV</text>`;
+    },
+    generator(p) {
+      return `<circle cx="0" cy="0" r="18" class="symbol" fill="none" stroke="#98c379" stroke-width="2"/>
+              <text x="0" y="5" text-anchor="middle" fill="#98c379" font-size="14" font-weight="700">G</text>
+              <line x1="0" y1="-18" x2="0" y2="-30" stroke="#98c379" stroke-width="2"/>
+              <text class="comp-label" x="0" y="32">${p.name||'Gen'}</text>
+              <text class="comp-value" x="0" y="44">${p.pg_mw||0}MW</text>`;
+    },
+    load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2"/>
+              <polygon points="-14,-8 14,-8 0,18" fill="none" stroke="#d19a66" stroke-width="2"/>
+              <text class="comp-label" x="0" y="34">${p.name||'Load'}</text>
+              <text class="comp-value" x="0" y="46">${p.p_mw||0}MW</text>`;
+    },
+    transformer_2w(p) {
+      return `<circle cx="0" cy="-10" r="12" class="symbol" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <circle cx="0" cy="10" r="12" class="symbol" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <line x1="0" y1="-30" x2="0" y2="-22" stroke="#c678dd" stroke-width="2"/>
+              <line x1="0" y1="22" x2="0" y2="30" stroke="#c678dd" stroke-width="2"/>
+              <text class="comp-label" x="22" y="4">${p.name||'Trafo'}</text>`;
+    },
+    ac_branch(p) {
+      return `<line x1="-40" y1="0" x2="40" y2="0" class="symbol" stroke="#abb2bf" stroke-width="2"/>
+              <rect x="-12" y="-6" width="24" height="12" fill="none" stroke="#abb2bf" stroke-width="1.5" rx="2"/>
+              <text class="comp-label" x="0" y="-12">${p.name||'Line'}</text>
+              <text class="comp-value" x="0" y="20">${(p.length_km||0).toFixed(1)}km</text>`;
+    },
+    external_grid(p) {
+      return `<line x1="0" y1="18" x2="0" y2="30" stroke="#e06c75" stroke-width="2"/>
+              <path d="M-14,-14 L14,-14 L14,14 L-14,14 Z" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <path d="M-8,0 Q-4,-8 0,0 Q4,8 8,0" fill="none" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="44">${p.name||'Grid'}</text>`;
+    },
+    storage(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
+              <rect x="-14" y="-14" width="28" height="22" rx="2" class="symbol" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="-8" y1="-4" x2="8" y2="-4" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="0" y1="-9" x2="0" y2="1" stroke="#e5c07b" stroke-width="1.5"/>
+              <text class="comp-label" x="0" y="20">${p.name||'ESS'}</text>
+              <text class="comp-value" x="0" y="32">${p.e_rated_mwh||0}MWh</text>`;
+    },
+    pv_system(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
+              <polygon points="-16,-14 16,-14 12,10 -12,10" class="symbol" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="-6" y1="-4" x2="6" y2="-4" stroke="#e5c07b" stroke-width="1"/>
+              <line x1="-4" y1="2" x2="4" y2="2" stroke="#e5c07b" stroke-width="1"/>
+              <text class="comp-label" x="0" y="24">${p.name||'PV'}</text>
+              <text class="comp-value" x="0" y="36">${p.p_mw||0}MW</text>`;
+    },
+    renewable_gen(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-16" stroke="#98c379" stroke-width="2"/>
+              <circle cx="0" cy="0" r="16" class="symbol" fill="none" stroke="#98c379" stroke-width="2"/>
+              <text x="0" y="5" text-anchor="middle" fill="#98c379" font-size="11" font-weight="700">~</text>
+              <text class="comp-label" x="0" y="28">${p.name||'REN'}</text>
+              <text class="comp-value" x="0" y="40">${p.p_rated_mw||0}MW</text>`;
+    },
+    static_generator(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-16" stroke="#98c379" stroke-width="2"/>
+              <circle cx="0" cy="0" r="16" class="symbol" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="5" text-anchor="middle" fill="#56b6c2" font-size="10" font-weight="700">DG</text>
+              <text class="comp-label" x="0" y="28">${p.name||'SGen'}</text>`;
+    },
+    vsc_converter(p) {
+      return `<rect x="-18" y="-18" width="36" height="36" rx="3" class="symbol" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#56b6c2" font-size="10" font-weight="700">VSC</text>
+              <line x1="-18" y1="0" x2="-30" y2="0" stroke="#61afef" stroke-width="2"/>
+              <line x1="18" y1="0" x2="30" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'VSC'}</text>`;
+    },
+    dc_bus(p) {
+      return `<line x1="-40" y1="0" x2="40" y2="0" stroke="#56b6c2" stroke-width="5" stroke-dasharray="8 4"/>
+              <text class="comp-label" x="0" y="-12">${p.name||'DC Bus'}</text>
+              <text class="comp-value" x="0" y="16">${p.base_kv||320}kV</text>`;
+    },
+    dc_branch(p) {
+      return `<line x1="-40" y1="0" x2="40" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="6 3"/>
+              <rect x="-10" y="-5" width="20" height="10" fill="none" stroke="#56b6c2" stroke-width="1.5" rx="2"/>
+              <text class="comp-label" x="0" y="-12">${p.name||'DC Line'}</text>`;
+    },
+    switch_comp(p) {
+      return `<line x1="-20" y1="0" x2="-6" y2="0" class="symbol" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="6" y1="0" x2="20" y2="0" class="symbol" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="-6" y1="0" x2="6" y2="-10" class="symbol" stroke="#abb2bf" stroke-width="2"/>
+              <circle cx="-6" cy="0" r="3" fill="#abb2bf"/>
+              <circle cx="6" cy="0" r="3" fill="none" stroke="#abb2bf" stroke-width="1.5"/>
+              <text class="comp-label" x="0" y="16">${p.name||'SW'}</text>`;
+    },
+    circuit_breaker(p) {
+      return `<line x1="-20" y1="0" x2="-8" y2="0" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="8" y1="0" x2="20" y2="0" stroke="#abb2bf" stroke-width="2"/>
+              <rect x="-8" y="-8" width="16" height="16" fill="none" stroke="#e06c75" stroke-width="2" rx="2"/>
+              <line x1="-5" y1="-5" x2="5" y2="5" stroke="#e06c75" stroke-width="2"/>
+              <line x1="5" y1="-5" x2="-5" y2="5" stroke="#e06c75" stroke-width="2"/>
+              <text class="comp-label" x="0" y="20">${p.name||'CB'}</text>`;
+    },
+    dc_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2" stroke-dasharray="4 2"/>
+              <polygon points="-14,-8 14,-8 0,18" fill="none" stroke="#d19a66" stroke-width="2"/>
+              <text class="comp-label" x="0" y="34">${p.name||'DC Load'}</text>
+              <text class="comp-value" x="0" y="46">${p.p_mw||0}MW</text>`;
+    },
+    dc_pv_array(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <polygon points="-16,-14 16,-14 12,10 -12,10" class="symbol" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <line x1="-6" y1="-4" x2="6" y2="-4" stroke="#56b6c2" stroke-width="1"/>
+              <line x1="-4" y1="2" x2="4" y2="2" stroke="#56b6c2" stroke-width="1"/>
+              <text x="0" y="-2" text-anchor="middle" fill="#56b6c2" font-size="7" font-weight="700">DC</text>
+              <text class="comp-label" x="0" y="24">${p.name||'DC PV'}</text>
+              <text class="comp-value" x="0" y="36">${p.p_set_mw||0}MW</text>`;
+    },
+    motor(p) {
+      return `<circle cx="0" cy="0" r="18" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="5" text-anchor="middle" fill="#56b6c2" font-size="14" font-weight="700">M</text>
+              <line x1="0" y1="-18" x2="0" y2="-30" stroke="#56b6c2" stroke-width="2"/>
+              <text class="comp-label" x="0" y="32">${p.name||'Motor'}</text>`;
+    },
+    flexible_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2"/>
+              <polygon points="-14,-8 14,-8 0,18" fill="none" stroke="#d19a66" stroke-width="2"/>
+              <line x1="-6" y1="2" x2="6" y2="2" stroke="#d19a66" stroke-width="1.5"/>
+              <path d="M-4,6 L4,6" stroke="#d19a66" stroke-width="1.5" stroke-dasharray="2 2"/>
+              <text class="comp-label" x="0" y="34">${p.name||'FlexLoad'}</text>
+              <text class="comp-value" x="0" y="46">${p.p_mw||0}MW</text>`;
+    },
+    asymmetric_load(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2"/>
+              <polygon points="-14,-8 14,-8 0,18" fill="none" stroke="#d19a66" stroke-width="2"/>
+              <text x="-6" y="6" fill="#d19a66" font-size="7" font-weight="700">A</text>
+              <text x="1" y="6" fill="#d19a66" font-size="7" font-weight="700">B</text>
+              <text x="-3" y="13" fill="#d19a66" font-size="7" font-weight="700">C</text>
+              <text class="comp-label" x="0" y="34">${p.name||'AsymLoad'}</text>`;
+    },
+    shunt(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-10" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="-12" y1="-10" x2="12" y2="-10" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="-12" y1="-4" x2="12" y2="-4" stroke="#abb2bf" stroke-width="2"/>
+              <line x1="-8" y1="4" x2="8" y2="4" stroke="#abb2bf" stroke-width="1"/>
+              <line x1="-4" y1="10" x2="4" y2="10" stroke="#abb2bf" stroke-width="1"/>
+              <text class="comp-label" x="0" y="24">${p.name||'Shunt'}</text>
+              <text class="comp-value" x="0" y="36">${p.bs_mvar||0}MVar</text>`;
+    },
+    transformer_3w(p) {
+      return `<circle cx="0" cy="-14" r="10" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <circle cx="-10" cy="10" r="10" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <circle cx="10" cy="10" r="10" fill="none" stroke="#c678dd" stroke-width="2"/>
+              <line x1="0" y1="-30" x2="0" y2="-24" stroke="#c678dd" stroke-width="2"/>
+              <line x1="-10" y1="20" x2="-10" y2="30" stroke="#c678dd" stroke-width="2"/>
+              <line x1="10" y1="20" x2="10" y2="30" stroke="#c678dd" stroke-width="2"/>
+              <text class="comp-label" x="22" y="0">${p.name||'Trafo3W'}</text>`;
+    },
+    charger(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
+              <rect x="-14" y="-14" width="28" height="24" rx="3" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <path d="M-2,-8 L2,-8 L0,-2 L4,-2 L-2,8 L0,2 L-4,2 Z" fill="#e5c07b"/>
+              <text class="comp-label" x="0" y="24">${p.name||'Charger'}</text>`;
+    },
+    charging_station(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-18" stroke="#e5c07b" stroke-width="2"/>
+              <rect x="-18" y="-18" width="36" height="30" rx="3" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <text x="0" y="-2" text-anchor="middle" fill="#e5c07b" font-size="9" font-weight="700">EV</text>
+              <path d="M-2,2 L2,2 L0,8 L4,8 L-2,14 L0,8 L-4,8 Z" fill="#e5c07b" transform="scale(0.6) translate(0,-4)"/>
+              <text class="comp-label" x="0" y="26">${p.name||'EVStation'}</text>`;
+    },
+    mobile_storage(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
+              <rect x="-16" y="-14" width="32" height="22" rx="2" fill="none" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="-10" y1="-4" x2="10" y2="-4" stroke="#e5c07b" stroke-width="2"/>
+              <line x1="0" y1="-9" x2="0" y2="1" stroke="#e5c07b" stroke-width="1.5"/>
+              <circle cx="-8" cy="14" r="3" fill="none" stroke="#e5c07b" stroke-width="1.5"/>
+              <circle cx="8" cy="14" r="3" fill="none" stroke="#e5c07b" stroke-width="1.5"/>
+              <text class="comp-label" x="0" y="28">${p.name||'MobESS'}</text>`;
+    },
+    dcdc_converter(p) {
+      return `<rect x="-18" y="-18" width="36" height="36" rx="3" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="-2" text-anchor="middle" fill="#56b6c2" font-size="8" font-weight="700">DC</text>
+              <text x="0" y="10" text-anchor="middle" fill="#56b6c2" font-size="8" font-weight="700">DC</text>
+              <line x1="-10" y1="2" x2="10" y2="2" stroke="#56b6c2" stroke-width="1"/>
+              <line x1="-18" y1="0" x2="-30" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <line x1="18" y1="0" x2="30" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'DC/DC'}</text>`;
+    },
+    energy_router(p) {
+      return `<polygon points="0,-22 22,0 0,22 -22,0" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <text x="0" y="4" text-anchor="middle" fill="#56b6c2" font-size="9" font-weight="700">ER</text>
+              <line x1="-22" y1="0" x2="-34" y2="0" stroke="#61afef" stroke-width="2"/>
+              <line x1="22" y1="0" x2="34" y2="0" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <line x1="0" y1="-22" x2="0" y2="-34" stroke="#61afef" stroke-width="2"/>
+              <line x1="0" y1="22" x2="0" y2="34" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <text class="comp-label" x="0" y="46">${p.name||'ERouter'}</text>`;
+    },
+    vpp(p) {
+      return `<rect x="-22" y="-18" width="44" height="36" rx="4" fill="none" stroke="#98c379" stroke-width="2" stroke-dasharray="6 3"/>
+              <text x="0" y="-2" text-anchor="middle" fill="#98c379" font-size="9" font-weight="700">VPP</text>
+              <text x="0" y="10" text-anchor="middle" fill="#98c379" font-size="7">${p.p_output_mw||0}MW</text>
+              <line x1="0" y1="-18" x2="0" y2="-30" stroke="#98c379" stroke-width="2"/>
+              <text class="comp-label" x="0" y="30">${p.name||'VPP'}</text>`;
+    },
+    microgrid(p) {
+      return `<rect x="-24" y="-20" width="48" height="40" rx="6" fill="none" stroke="#61afef" stroke-width="2" stroke-dasharray="8 4"/>
+              <text x="0" y="-4" text-anchor="middle" fill="#61afef" font-size="9" font-weight="700">MG</text>
+              <text x="0" y="8" text-anchor="middle" fill="#61afef" font-size="7">${p.operating_mode||'Grid'}</text>
+              <line x1="0" y1="-20" x2="0" y2="-32" stroke="#61afef" stroke-width="2"/>
+              <text class="comp-label" x="0" y="32">${p.name||'MicroGrid'}</text>`;
+    },
+  };
+
+  // ============= Port Definitions =============
+  // Ports are connection points relative to component origin
+  const ports = {
+    ac_bus:           [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0},
+                       {id:'top',   x:0, y:-6}, {id:'bottom',x:0, y:6}],
+    generator:        [{id:'top',   x:0, y:-30}],
+    load:             [{id:'top',   x:0, y:-30}],
+    transformer_2w:   [{id:'hv',    x:0, y:-30}, {id:'lv', x:0, y:30}],
+    ac_branch:        [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0}],
+    external_grid:    [{id:'bottom',x:0, y:30}],
+    storage:          [{id:'top',   x:0, y:-30}],
+    pv_system:        [{id:'top',   x:0, y:-30}],
+    renewable_gen:    [{id:'top',   x:0, y:-30}],
+    static_generator: [{id:'top',   x:0, y:-30}],
+    vsc_converter:    [{id:'ac',    x:-30, y:0}, {id:'dc', x:30, y:0}],
+    dc_bus:           [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0},
+                       {id:'top',   x:0, y:-6}, {id:'bottom',x:0, y:6}],
+    dc_branch:        [{id:'left',  x:-40, y:0}, {id:'right', x:40, y:0}],
+    switch_comp:      [{id:'left',  x:-20, y:0}, {id:'right', x:20, y:0}],
+    circuit_breaker:  [{id:'left',  x:-20, y:0}, {id:'right', x:20, y:0}],
+    dc_load:          [{id:'top',   x:0, y:-30}],
+    dc_pv_array:      [{id:'top',   x:0, y:-30}],
+    motor:            [{id:'top',   x:0, y:-30}],
+    flexible_load:    [{id:'top',   x:0, y:-30}],
+    asymmetric_load:  [{id:'top',   x:0, y:-30}],
+    shunt:            [{id:'top',   x:0, y:-30}],
+    transformer_3w:   [{id:'hv',    x:0, y:-30}, {id:'mv', x:-10, y:30}, {id:'lv', x:10, y:30}],
+    charger:          [{id:'top',   x:0, y:-30}],
+    charging_station: [{id:'top',   x:0, y:-30}],
+    mobile_storage:   [{id:'top',   x:0, y:-30}],
+    dcdc_converter:   [{id:'in',    x:-30, y:0}, {id:'out', x:30, y:0}],
+    energy_router:    [{id:'ac_left', x:-34, y:0}, {id:'dc_right', x:34, y:0},
+                       {id:'top',   x:0, y:-34}, {id:'bottom', x:0, y:34}],
+    vpp:              [{id:'top',   x:0, y:-30}],
+    microgrid:        [{id:'pcc',   x:0, y:-32}],
+  };
+
+  // ============= Default Parameters =============
+  const defaults = {
+    ac_bus: {
+      name: 'Bus', bus_type: 'PQ', base_kv: 110,
+      vm_pu: 1.0, va_deg: 0,
+      vmin_pu: 0.9, vmax_pu: 1.1, gs_mw: 0, bs_mvar: 0,
+      i_breaker_ka: 0, n_customers: 0, importance: 0,
+      in_service: true, area: 1, zone: 1
+    },
+    generator: {
+      name: 'Gen', bus: 0, pg_mw: 100, qg_mvar: 0, vg_pu: 1.0,
+      pmax_mw: 200, pmin_mw: 0, qmax_mvar: 100, qmin_mvar: -100,
+      mbase_mva: 100, is_slack: false, in_service: true,
+      cost_c2: 0.02, cost_c1: 20, cost_c0: 0,
+      startup_cost: 0, shutdown_cost: 0,
+      ramp_up_mw_min: 0, ramp_dn_mw_min: 0,
+      fuel_type: 'Thermal'
+    },
+    load: {
+      name: 'Load', bus: 0, p_mw: 50, q_mvar: 20,
+      scaling: 1.0, model: 'ConstantPower',
+      z_percent_p: 0, i_percent_p: 0, p_percent_p: 100,
+      z_percent_q: 0, i_percent_q: 0, p_percent_q: 100,
+      controllable: false, p_min_mw: 0, cost_mw: 0,
+      priority: 'Medium', n_customers: 0, profile_id: -1,
+      in_service: true
+    },
+    transformer_2w: {
+      name: 'Trafo', hv_bus: 0, lv_bus: 0,
+      sn_mva: 100, vn_hv_kv: 220, vn_lv_kv: 110,
+      vk_percent: 12, vkr_percent: 0.5,
+      pfe_kw: 30, i0_percent: 0.1,
+      shift_deg: 0, tap_side: 0,
+      tap_pos: 0, tap_min: -8, tap_max: 8,
+      tap_neutral: 0, tap_step_percent: 1.25,
+      vector_group: '',
+      in_service: true
+    },
+    ac_branch: {
+      name: 'Line', from_bus: 0, to_bus: 0,
+      r_pu: 0.01, x_pu: 0.1, b_pu: 0,
+      r_ohm_per_km: 0, x_ohm_per_km: 0, b_us_per_km: 0, c_nf_per_km: 0,
+      rate_a_mva: 100, rate_b_mva: 0, rate_c_mva: 0,
+      length_km: 0,
+      tap: 1.0, shift_deg: 0, in_service: true, n_parallel: 1
+    },
+    external_grid: {
+      name: 'Grid', bus: 0, vm_pu: 1.05, va_deg: 0,
+      s_sc_max_mva: 10000, s_sc_min_mva: 8000,
+      rx_max: 0.1, rx_min: 0.1,
+      r_pu: 0, x_pu: 0, r0_pu: 0, x0_pu: 0,
+      vn_kv: 0, controllable: false, in_service: true
+    },
+    storage: {
+      name: 'ESS', bus: 0, p_mw: 0, q_mvar: 0,
+      p_rated_mw: 10,
+      e_rated_mwh: 40, soc_init: 0.5, soc_min: 0.1, soc_max: 0.9,
+      eta_charge: 0.95, eta_discharge: 0.95,
+      pmax_mw: 10, pmin_mw: -10,
+      qmax_mvar: 0, qmin_mvar: 0,
+      self_discharge_pct: 0, profile_id: -1,
+      in_service: true
+    },
+    pv_system: {
+      name: 'PV', bus: 0, p_mw: 5, q_mvar: 0,
+      sn_mva: 6, p_rated_mw: 5,
+      pmax_mw: 0, pmin_mw: 0, qmax_mvar: 0, qmin_mvar: 0,
+      control_mode: 'MPPT', controllable: false,
+      v_ac_set_pu: 1.0, v_dc_set_pu: 1.0,
+      inverter_eff: 0.97, loss_percent: 0,
+      num_series: 0, num_parallel: 0,
+      vmpp: 0, impp: 0, voc: 0, isc: 0,
+      alpha_isc: 0, beta_voc: 0,
+      irradiance: 1000, temperature: 25, profile_id: -1,
+      in_service: true
+    },
+    renewable_gen: {
+      name: 'Wind', bus: 0, type: 'Wind',
+      p_mw: 20, q_mvar: 0, p_rated_mw: 30,
+      qmax_mvar: 0, qmin_mvar: 0,
+      curtailable: true, cost_curtail_mwh: 0,
+      capacity_factor: 0.3, profile_id: -1,
+      emission_offset_tco2_mwh: 0, in_service: true
+    },
+    static_generator: {
+      name: 'SGen', bus: 0, p_mw: 5, q_mvar: 0,
+      sgen_type: 'PV', p_rated_mw: 0, sn_mva: 0,
+      pmax_mw: 0, pmin_mw: 0, qmax_mvar: 0, qmin_mvar: 0,
+      scaling: 1.0, controllable: false, v_ref_pu: 0,
+      in_service: true
+    },
+    vsc_converter: {
+      name: 'VSC', bus_ac: 0, bus_dc: 0,
+      control_mode: 'PQ_MODE', type: 'two_level',
+      p_set_mw: 100, q_set_mvar: 0,
+      pmax_mw: 200, pmin_mw: -200,
+      qmax_mvar: 100, qmin_mvar: -100,
+      eta: 0.98, loss_percent: 1.0, loss_mw: 0,
+      v_dc_set_pu: 1.0, v_ac_set_pu: 1.0,
+      k_vdc: 0.1, p_rated_mw: 0, in_service: true
+    },
+    dc_bus: {
+      name: 'DC Bus', bus_type: 'DC_P', base_kv: 320,
+      vm_pu: 1.0, vmax_pu: 1.1, vmin_pu: 0.9, pd_mw: 0,
+      in_service: true
+    },
+    dc_branch: {
+      name: 'DC Line', from_bus: 0, to_bus: 0,
+      r_pu: 0.01, rate_a_mva: 200, length_km: 100,
+      in_service: true
+    },
+    switch_comp: {
+      name: 'Switch', from_bus: 0, to_bus: 0,
+      switch_type: '', closed: true,
+      r_contact_ohm: 0, z_ohm: 0,
+      i_rated_ka: 0, i_breaking_ka: 0,
+      in_service: true
+    },
+    circuit_breaker: {
+      name: 'CB', from_bus: 0, to_bus: 0,
+      breaker_type: '', closed: true,
+      z_ohm: 0, rated_voltage_kv: 0,
+      i_rated_ka: 0, i_breaking_ka: 0,
+      rated_current_ka: 2.0, in_service: true
+    },
+    dc_load: {
+      name: 'DC Load', bus: 0, p_mw: 10,
+      scaling: 1.0, controllable: false,
+      p_min_mw: 0, cost_mw: 0, profile_id: -1,
+      in_service: true
+    },
+    dc_pv_array: {
+      name: 'DC PV', bus: 0, p_set_mw: 5,
+      irradiance: 1000, temperature: 25,
+      num_series: 0, num_parallel: 0,
+      vmpp: 0, impp: 0, voc: 0, isc: 0,
+      alpha_isc: 0, beta_voc: 0,
+      profile_id: -1,
+      in_service: true
+    },
+    motor: {
+      name: 'Motor', bus: 0,
+      vn_kv: 6.3, sn_mva: 5, r_pu: 0.02, x_pu: 0.15,
+      x_r: 0, lrc: 0, poles: 0,
+      cos_phi: 0.85, efficiency: 0.94,
+      r0_pu: 0, x0_pu: 0, in_service: true
+    },
+    flexible_load: {
+      name: 'FlexLoad', bus: 0, p_mw: 20, q_mvar: 5,
+      flex_up_mw: 5, flex_down_mw: 5, flex_duration_h: 4,
+      response_time_s: 30, ramp_rate_mw_min: 2, availability_pct: 100,
+      controllable: true, priority: 'Medium', in_service: true
+    },
+    asymmetric_load: {
+      name: 'AsymLoad', bus: 0, connection: 'wye', grounded: true,
+      pa_mw: 10, qa_mvar: 3, pb_mw: 10, qb_mvar: 3, pc_mw: 10, qc_mvar: 3,
+      scaling: 1.0, const_z_percent: 0, const_i_percent: 0, const_p_percent: 100,
+      controllable: false, priority: 'Medium', in_service: true
+    },
+    shunt: {
+      name: 'Shunt', bus: 0, gs_mw: 0, bs_mvar: 10,
+      switchable: false, n_steps: 1, current_step: 1, bs_per_step: 0,
+      in_service: true
+    },
+    transformer_3w: {
+      name: 'Trafo3W', hv_bus: 0, mv_bus: 0, lv_bus: 0,
+      sn_hv_mva: 100, sn_mv_mva: 50, sn_lv_mva: 25,
+      vn_hv_kv: 220, vn_mv_kv: 110, vn_lv_kv: 35,
+      vk_hv_mv_percent: 12, vk_hv_lv_percent: 12, vk_mv_lv_percent: 10,
+      vkr_hv_mv_percent: 0.5, vkr_hv_lv_percent: 0.5, vkr_mv_lv_percent: 0.4,
+      pfe_kw: 30, i0_percent: 0.1,
+      tap_side: 0, tap_pos: 0, tap_step_percent: 0,
+      shift_mv_deg: 0, shift_lv_deg: 0,
+      in_service: true
+    },
+    charger: {
+      name: 'Charger', station_id: 0, charger_type: 'AC_L2',
+      p_rated_kw: 7, p_ch_max_kw: 7, p_ch_min_kw: 0,
+      eta: 0.95, v2g_capable: false, p_dis_max_kw: 0,
+      in_service: true
+    },
+    charging_station: {
+      name: 'EVStation', bus: 0, location: '',
+      n_fast: 4, n_slow: 8, num_chargers: 12,
+      p_fast_max_kw: 120, p_slow_max_kw: 7, max_power_kw: 600,
+      simultaneity_factor: 0.7, power_factor: 0.95,
+      utilization_rate: 0.3, p_total_kw: 0, q_total_kvar: 0,
+      in_service: true
+    },
+    mobile_storage: {
+      name: 'MobESS', bus: 0, p_mw: 0, q_mvar: 0,
+      p_rated_mw: 2, e_rated_mwh: 4, pmax_mw: 2, pmin_mw: -2,
+      qmax_mvar: 0, qmin_mvar: 0,
+      soc_init: 0.5, soc_min: 0.1, soc_max: 0.9,
+      eta_charge: 0.95, eta_discharge: 0.95,
+      is_mobile: true, status: 'Stationary', target_bus: 0,
+      in_service: true
+    },
+    dcdc_converter: {
+      name: 'DC/DC', bus_in: 0, bus_out: 0,
+      control_mode: 'Voltage', p_ref_mw: 0, v_ref_pu: 1.0,
+      sn_mva: 50, vn_in_kv: 320, vn_out_kv: 160,
+      eta: 0.98, r_eq_pu: 0.01, pmax_mw: 50, pmin_mw: -50,
+      k_droop: 0.05, in_service: true
+    },
+    energy_router: {
+      name: 'ERouter', router_type: 'hybrid', num_ports: 4,
+      p_rated_mw: 10, vn_ac_kv: 10, vn_dc_kv: 20,
+      loss_percent: 1.0, pmax_mw: 10, pmin_mw: -10,
+      qmax_mvar: 5, qmin_mvar: -5, in_service: true,
+      // Port parameters (4 AC ports: Side A left 2, Side B right 2)
+      port1_bus: 0, port1_side: 0, port1_control_mode: 'VF',
+      port1_p_set_mw: 0, port1_q_set_mvar: 0, port1_v_set_pu: 1.0, port1_eta: 0.98,
+      port2_bus: 0, port2_side: 0, port2_control_mode: 'PQ',
+      port2_p_set_mw: 0, port2_q_set_mvar: 0, port2_v_set_pu: 1.0, port2_eta: 0.98,
+      port3_bus: 0, port3_side: 1, port3_control_mode: 'PQ',
+      port3_p_set_mw: 0, port3_q_set_mvar: 0, port3_v_set_pu: 1.0, port3_eta: 0.98,
+      port4_bus: 0, port4_side: 1, port4_control_mode: 'PQ',
+      port4_p_set_mw: 0, port4_q_set_mvar: 0, port4_v_set_pu: 1.0, port4_eta: 0.98
+    },
+    vpp: {
+      name: 'VPP', pcc_bus: 0, description: '',
+      // Aggregated resources (lists of component IDs aggregated by this VPP)
+      aggregated_gen_ids: [], aggregated_storage_ids: [], aggregated_load_ids: [],
+      n_pv_systems: 0, n_wind_turbines: 0, n_battery_systems: 0,
+      n_ev_chargers: 0, n_controllable_loads: 0,
+      n_chp: 0, n_biomass: 0, n_thermal_storage: 0, n_hvac: 0, n_industrial: 0,
+      p_generation_sum_mw: 0, e_storage_sum_mwh: 0,
+      p_load_controllable_mw: 0, p_pv_sum_mw: 0, p_wind_sum_mw: 0,
+      p_regulation_up_mw: 0, p_regulation_down_mw: 0,
+      p_output_mw: 0, q_output_mvar: 0,
+      pmax_mw: 0, pmin_mw: 0, ramp_up_max_mw_min: 0, ramp_down_max_mw_min: 0,
+      mtbf_hr: 0, mttr_hr: 0, t_scheduled_hr: 0,
+      in_service: true
+    },
+    microgrid: {
+      name: 'MicroGrid', pcc_bus: 0, description: '',
+      operating_mode: 'GridConnected', islanding_capability: false,
+      auto_reconnection: false, p_exchange_max_mw: 10, p_exchange_min_mw: -10,
+      p_import_max_mw: 10, p_export_max_mw: 10, p_exchange_mw: 0,
+      total_generation_mw: 0, total_storage_mwh: 0, total_load_mw: 0,
+      capacity_mw: 0, peak_load_mw: 0, f_set_hz: 50, v_set_pu: 1.0,
+      k_droop: 0.05, area: 0, in_service: true
+    },
+  };
+
+  // ============= Component Categories for Library Panel =============
+  const categories = {
+    acComponents: [
+      { type: 'ac_bus',           label: '交流母线' },
+      { type: 'generator',        label: '发电机' },
+      { type: 'load',             label: '负荷' },
+      { type: 'flexible_load',    label: '柔性负荷' },
+      { type: 'asymmetric_load',  label: '不对称负荷' },
+      { type: 'ac_branch',        label: '线路' },
+      { type: 'transformer_2w',   label: '双绕组变压器' },
+      { type: 'transformer_3w',   label: '三绕组变压器' },
+      { type: 'external_grid',    label: '外部电网' },
+      { type: 'static_generator', label: '分布式电源' },
+      { type: 'shunt',            label: '并联补偿' },
+      { type: 'motor',            label: '电动机' },
+    ],
+    dcComponents: [
+      { type: 'dc_bus',       label: 'DC母线' },
+      { type: 'dc_branch',    label: 'DC线路' },
+      { type: 'dc_load',      label: 'DC负荷' },
+      { type: 'dc_pv_array',  label: 'DC光伏' },
+    ],
+    converterComponents: [
+      { type: 'vsc_converter',    label: 'VSC换流器' },
+      { type: 'dcdc_converter',   label: 'DC/DC变换器' },
+      { type: 'energy_router',    label: '能量路由器' },
+      { type: 'switch_comp',      label: '开关' },
+      { type: 'circuit_breaker',  label: '断路器' },
+    ],
+    renewableComponents: [
+      { type: 'storage',           label: '储能' },
+      { type: 'mobile_storage',    label: '移动储能' },
+      { type: 'pv_system',         label: '光伏' },
+      { type: 'renewable_gen',     label: '风电/可再生' },
+    ],
+    evComponents: [
+      { type: 'charger',           label: '充电桩' },
+      { type: 'charging_station',  label: '充电站' },
+    ],
+    aggregationComponents: [
+      { type: 'vpp',               label: '虚拟电厂' },
+      { type: 'microgrid',         label: '微电网' },
+    ],
+  };
+
+  // ============= Human-readable field labels =============
+  const fieldLabels = {
+    name: '名称', bus_type: '节点类型', base_kv: '基准电压(kV)',
+    vm_pu: '电压幅值(pu)', va_deg: '电压相角(°)', pd_mw: '有功负荷(MW)',
+    qd_mvar: '无功负荷(MVar)', vmin_pu: '最小电压(pu)', vmax_pu: '最大电压(pu)',
+    gs_mw: '对地电导(MW)', bs_mvar: '对地电纳(MVar)', in_service: '投运',
+    area: '区域', zone: '分区', bus: '所连母线', pg_mw: '有功出力(MW)',
+    qg_mvar: '无功出力(MVar)', vg_pu: '端电压(pu)', pmax_mw: '最大有功(MW)',
+    pmin_mw: '最小有功(MW)', qmax_mvar: '最大无功(MVar)', qmin_mvar: '最小无功(MVar)',
+    mbase_mva: '容量基准(MVA)', is_slack: '平衡节点', cost_c2: '成本系数c2',
+    cost_c1: '成本系数c1', cost_c0: '成本系数c0', fuel_type: '燃料类型',
+    p_mw: '有功(MW)', q_mvar: '无功(MVar)', scaling: '缩放因子',
+    model: '负荷模型', priority: '优先级',
+    hv_bus: '高压侧母线', lv_bus: '低压侧母线', sn_mva: '额定容量(MVA)',
+    vn_hv_kv: '高压侧电压(kV)', vn_lv_kv: '低压侧电压(kV)',
+    vk_percent: '短路阻抗(%)', vkr_percent: '短路电阻(%)',
+    pfe_kw: '空载损耗(kW)', i0_percent: '空载电流(%)',
+    shift_deg: '移相角(°)', tap_pos: '档位', tap_min: '最小档位',
+    tap_max: '最大档位', tap_step_percent: '档位步长(%)',
+    from_bus: '起始母线', to_bus: '终止母线',
+    r_pu: '电阻(pu)', x_pu: '电抗(pu)', b_pu: '电纳(pu)',
+    r_ohm_per_km: '电阻(Ω/km)', x_ohm_per_km: '电抗(Ω/km)',
+    b_us_per_km: '电纳(μS/km)', c_nf_per_km: '电容(nF/km)',
+    rate_a_mva: '额定容量(MVA)', length_km: '长度(km)',
+    tap: '变比', n_parallel: '并联数', s_sc_max_mva: '最大短路容量(MVA)',
+    s_sc_min_mva: '最小短路容量(MVA)', rx_max: 'R/X(max)', rx_min: 'R/X(min)',
+    p_rated_mw: '额定功率(MW)', e_rated_mwh: '额定能量(MWh)',
+    soc_init: '初始SOC', soc_min: '最小SOC', soc_max: '最大SOC',
+    eta_charge: '充电效率', eta_discharge: '放电效率',
+    type: '类型', curtailable: '可削减', capacity_factor: '容量因子',
+    sgen_type: '类型', controllable: '可控',
+    bus_ac: 'AC侧母线', bus_dc: 'DC侧母线', control_mode: '控制模式',
+    p_set_mw: '有功设定(MW)', q_set_mvar: '无功设定(MVar)',
+    irradiance: '辐照度(W/m²)', temperature: '温度(℃)',
+    num_series: '串联数', num_parallel: '并联数',
+    vmpp: 'MPP电压(V)', impp: 'MPP电流(A)',
+    voc: '开路电压(V)', isc: '短路电流(A)',
+    alpha_isc: 'Isc温度系数(%/℃)', beta_voc: 'Voc温度系数(%/℃)',
+    pmax_mw: '最大有功(MW)', pmin_mw: '最小有功(MW)',
+    eta: '效率', loss_percent: '损耗(%)',
+    v_dc_set_pu: 'DC电压设定(pu)', v_ac_set_pu: 'AC电压设定(pu)',
+    closed: '合闸状态', rated_current_ka: '额定电流(kA)',
+    vn_kv: '额定电压(kV)', cos_phi: '功率因数', efficiency: '效率',
+    // Flexible Load
+    flex_up_mw: '上调容量(MW)', flex_down_mw: '下调容量(MW)',
+    flex_duration_h: '响应持续(h)', response_time_s: '响应时间(s)',
+    ramp_rate_mw_min: '爬坡速率(MW/min)', availability_pct: '可用率(%)',
+    control_area: '控制区域',
+    // Asymmetric Load
+    connection: '接线方式', grounded: '接地',
+    pa_mw: 'A相有功(MW)', qa_mvar: 'A相无功(MVar)',
+    pb_mw: 'B相有功(MW)', qb_mvar: 'B相无功(MVar)',
+    pc_mw: 'C相有功(MW)', qc_mvar: 'C相无功(MVar)',
+    const_z_percent: '恒阻抗比(%)', const_i_percent: '恒电流比(%)', const_p_percent: '恒功率比(%)',
+    // Shunt
+    switchable: '可投切', n_steps: '步数', current_step: '当前步', bs_per_step: '每步电纳',
+    // Transformer 3W
+    hv_bus: '高压侧母线', mv_bus: '中压侧母线', lv_bus: '低压侧母线',
+    sn_hv_mva: 'HV容量(MVA)', sn_mv_mva: 'MV容量(MVA)', sn_lv_mva: 'LV容量(MVA)',
+    vn_mv_kv: '中压侧电压(kV)',
+    vk_hv_mv_percent: 'Vk_HV-MV(%)', vk_hv_lv_percent: 'Vk_HV-LV(%)', vk_mv_lv_percent: 'Vk_MV-LV(%)',
+    vkr_hv_mv_percent: 'Vkr_HV-MV(%)', vkr_hv_lv_percent: 'Vkr_HV-LV(%)', vkr_mv_lv_percent: 'Vkr_MV-LV(%)',
+    // Charger & Charging Station
+    station_id: '充电站ID', charger_type: '充电桩类型',
+    p_rated_kw: '额定功率(kW)', p_ch_max_kw: '最大充电(kW)', p_ch_min_kw: '最小充电(kW)',
+    v2g_capable: 'V2G能力', p_dis_max_kw: '最大放电(kW)',
+    location: '位置', n_fast: '快充桩数', n_slow: '慢充桩数', num_chargers: '充电桩总数',
+    p_fast_max_kw: '快充最大功率(kW)', p_slow_max_kw: '慢充最大功率(kW)', max_power_kw: '总最大功率(kW)',
+    simultaneity_factor: '同时率', power_factor: '功率因数',
+    utilization_rate: '利用率', p_total_kw: '总有功(kW)', q_total_kvar: '总无功(kVar)',
+    // Mobile Storage
+    is_mobile: '移动式', status: '状态', target_bus: '目标母线',
+    // DC/DC Converter
+    bus_in: '输入侧母线', bus_out: '输出侧母线',
+    p_ref_mw: '功率参考(MW)', v_ref_pu: '电压参考(pu)',
+    vn_in_kv: '输入电压(kV)', vn_out_kv: '输出电压(kV)',
+    r_eq_pu: '等效电阻(pu)', k_droop: '下垂系数',
+    // Energy Router
+    router_type: '路由器类型', num_ports: '端口数',
+    vn_ac_kv: 'AC电压(kV)', vn_dc_kv: 'DC电压(kV)',
+    // VPP
+    pcc_bus: 'PCC母线', aggregation_bus: 'PCC母线', description: '描述',
+    aggregated_gen_ids: '聚合发电机ID列表', aggregated_storage_ids: '聚合储能ID列表', aggregated_load_ids: '聚合负荷ID列表',
+    n_pv_systems: '光伏数', n_wind_turbines: '风机数', n_battery_systems: '电池数',
+    n_ev_chargers: '充电桩数', n_controllable_loads: '可控负荷数',
+    p_generation_sum_mw: '总发电(MW)', e_storage_sum_mwh: '总储能(MWh)',
+    p_load_controllable_mw: '可控负荷(MW)', p_output_mw: '输出功率(MW)', q_output_mvar: '输出无功(MVar)',
+    ramp_up_max_mw_min: '最大升坡(MW/min)', ramp_down_max_mw_min: '最大降坡(MW/min)',
+    // Microgrid
+    pcc_bus: 'PCC母线', operating_mode: '运行模式',
+    islanding_capability: '孤岛能力', auto_reconnection: '自动重合闸',
+    p_exchange_max_mw: '最大交换功率(MW)', p_exchange_min_mw: '最小交换功率(MW)',
+    p_import_max_mw: '最大输入(MW)', p_export_max_mw: '最大输出(MW)',
+    p_exchange_mw: '交换功率(MW)',
+    total_generation_mw: '总发电(MW)', total_storage_mwh: '总储能(MWh)',
+    total_load_mw: '总负荷(MW)', capacity_mw: '容量(MW)', peak_load_mw: '峰值负荷(MW)',
+    f_set_hz: '频率设定(Hz)', v_set_pu: '电压设定(pu)',
+  };
+
+  // ============= Mapping component types to JSON keys =============
+  const jsonMapping = {
+    ac_bus:           { collection: 'ac.buses',             idField: 'index' },
+    generator:        { collection: 'ac.generators',        idField: 'index' },
+    load:             { collection: 'ac.loads',             idField: 'index' },
+    transformer_2w:   { collection: 'ac.transformers_2w',   idField: null },
+    ac_branch:        { collection: 'ac.branches',          idField: 'index' },
+    external_grid:    { collection: 'ac.external_grids',    idField: null },
+    storage:          { collection: 'ac.storage',           idField: null },
+    pv_system:        { collection: 'ac.pv_systems',        idField: null },
+    renewable_gen:    { collection: 'ac.renewable_gens',     idField: null },
+    static_generator: { collection: 'ac.static_generators', idField: null },
+    vsc_converter:    { collection: 'vsc_converters',       idField: 'index' },
+    dc_bus:           { collection: 'dc.buses',             idField: 'index' },
+    dc_branch:        { collection: 'dc.branches',          idField: null },
+    dc_load:          { collection: 'dc.loads',             idField: null },
+    dc_pv_array:      { collection: 'dc.pv_arrays',          idField: null },
+    switch_comp:      { collection: 'ac.switches',          idField: null },
+    circuit_breaker:  { collection: 'ac.circuit_breakers',  idField: null },
+    motor:            { collection: 'ac.motors',            idField: null },
+    flexible_load:    { collection: 'ac.flexible_loads',    idField: 'index' },
+    asymmetric_load:  { collection: 'ac.asymmetric_loads',  idField: 'index' },
+    shunt:            { collection: 'ac.shunts',            idField: 'index' },
+    transformer_3w:   { collection: 'ac.transformers_3w',   idField: 'index' },
+    charger:          { collection: 'ac.chargers',          idField: 'index' },
+    charging_station: { collection: 'ac.charging_stations', idField: 'index' },
+    mobile_storage:   { collection: 'mobile_storage',       idField: 'index' },
+    dcdc_converter:   { collection: 'dcdc_converters',      idField: 'index' },
+    energy_router:    { collection: 'energy_routers',       idField: 'index' },
+    vpp:              { collection: 'vpps',                 idField: 'index' },
+    microgrid:        { collection: 'microgrids',           idField: 'index' },
+  };
+
+  return { symbols, ports, defaults, categories, fieldLabels, jsonMapping };
+})();

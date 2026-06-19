@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
 /// src/graph/result_recovery.cpp
 /// ==============================
 /// Reverse recovery of eliminated node voltages after solving on a

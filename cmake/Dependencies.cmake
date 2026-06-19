@@ -20,16 +20,20 @@
 #     environments where the tree layout differs from the default.
 #
 # Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "2bf7dda7fb20ea27d32772df471a09b3f12d3bfa"
+set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "606a35b525cc483a47d70f5966e101a142de3e55"
   CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)" FORCE)
 
 set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH
     "Explicit path to the MIPSolvers source tree. \
-When empty, defaults to ../MIPSolvers relative to this project.")
-if(MIPSOLVERS_SOURCE_DIR STREQUAL "")
-  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
-else()
+When empty, auto-detects ./MIPSolvers (in-repo) then ../MIPSolvers (sibling).")
+if(NOT MIPSOLVERS_SOURCE_DIR STREQUAL "")
   set(_HACDCDSS_MIPSOLVERS_DIR "${MIPSOLVERS_SOURCE_DIR}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/MIPSolvers/CMakeLists.txt")
+  # MIPSolvers deployed inside the repo (./MIPSolvers).
+  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/MIPSolvers")
+else()
+  # Legacy layout: sibling directory next to this project.
+  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
 endif()
 
 if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt")
