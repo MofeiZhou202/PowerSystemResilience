@@ -17,6 +17,9 @@
 
 #include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/power_flow/power_flow_options.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../../data"
@@ -80,6 +83,9 @@ HybridPowerSystem make_reference_system() {
   };
   sys.ac.branches.push_back(line(1, "L1", 1, 2, 0.01, 0.06, 0.02));
   sys.ac.branches.push_back(line(2, "L2", 2, 3, 0.015, 0.07, 0.03));
+  sys.ac.branches[0].failure_rate = 0.02;
+  sys.ac.branches[0].mttr_hr = 8.0;
+  sys.ac.branches[0].n_parallel = 2;
 
   // ── Transformer (110 / 20 kV) ─────────────────────────────────────────────
   Transformer2W t;
@@ -94,6 +100,8 @@ HybridPowerSystem make_reference_system() {
   t.vkr_percent = 0.5;
   t.shift_deg = 0.0;
   t.pk_kw = 150.0;
+  t.mtbf_hours = 87600.0;
+  t.mttr_hours = 24.0;
   sys.ac.transformers_2w.push_back(t);
 
   // ── External grid (utility / swing) ───────────────────────────────────────
@@ -123,6 +131,11 @@ HybridPowerSystem make_reference_system() {
   gen.vg_pu = 1.01;
   gen.mbase_mva = 60.0;
   gen.cos_phi = 0.9;
+  gen.cost_c2 = 0.01;
+  gen.cost_c1 = 25.0;
+  gen.cost_c0 = 100.0;
+  gen.forced_outage_rate = 0.03;
+  gen.mttr_hr = 12.0;
   sys.ac.generators.push_back(gen);
 
   // ── PV array ──────────────────────────────────────────────────────────────
@@ -138,6 +151,22 @@ HybridPowerSystem make_reference_system() {
   pv.qmin_mvar = -2.0;
   sys.ac.pv_systems.push_back(pv);
 
+  // ── Wind / renewable generator ────────────────────────────────────────────
+  RenewableGen wind;
+  wind.index = 1;
+  wind.name = "WT1";
+  wind.bus = 3;
+  wind.type = RenewableType::Wind;
+  wind.p_mw = 8.0;
+  wind.q_mvar = 1.0;
+  wind.p_rated_mw = 10.0;
+  wind.qmax_mvar = 3.0;
+  wind.qmin_mvar = -3.0;
+  wind.curtailable = true;
+  wind.capacity_factor = 0.35;
+  wind.cost_curtail_mwh = 5.0;
+  sys.ac.renewable_gens.push_back(wind);
+
   // ── Lumped loads ──────────────────────────────────────────────────────────
   auto load = [](int idx, const char* nm, int b, double p, double q) {
     Load l;
@@ -151,6 +180,14 @@ HybridPowerSystem make_reference_system() {
   };
   sys.ac.loads.push_back(load(1, "LD1", 2, 12.0, 4.0));
   sys.ac.loads.push_back(load(2, "LD2", 4, 6.0, 2.0));
+  sys.ac.loads[0].model = LoadModel::ZIP;
+  sys.ac.loads[0].z_percent_p = 20.0;
+  sys.ac.loads[0].i_percent_p = 30.0;
+  sys.ac.loads[0].p_percent_p = 50.0;
+  sys.ac.loads[0].z_percent_q = 10.0;
+  sys.ac.loads[0].i_percent_q = 40.0;
+  sys.ac.loads[0].p_percent_q = 50.0;
+  sys.ac.loads[0].priority = LoadPriority::High;
 
   // ── Capacitor (shunt) ─────────────────────────────────────────────────────
   Shunt sh;
@@ -333,6 +370,9 @@ void compare_systems(const HybridPowerSystem& a, const HybridPowerSystem& b,
     CHECK_THAT(x.x_pu, WithinAbs(y.x_pu, tol));
     CHECK_THAT(x.b_pu, WithinAbs(y.b_pu, tol));
     CHECK_THAT(x.rate_a_mva, WithinAbs(y.rate_a_mva, tol));
+    CHECK_THAT(x.failure_rate, WithinAbs(y.failure_rate, tol));
+    CHECK_THAT(x.mttr_hr, WithinAbs(y.mttr_hr, tol));
+    CHECK(x.n_parallel == y.n_parallel);
   }
 
   // Transformers
@@ -348,6 +388,8 @@ void compare_systems(const HybridPowerSystem& a, const HybridPowerSystem& b,
     CHECK_THAT(x.sn_mva, WithinAbs(y.sn_mva, tol));
     CHECK_THAT(x.vk_percent, WithinAbs(y.vk_percent, tol));
     CHECK_THAT(x.vkr_percent, WithinAbs(y.vkr_percent, tol));
+    CHECK_THAT(x.mtbf_hours, WithinAbs(y.mtbf_hours, tol));
+    CHECK_THAT(x.mttr_hours, WithinAbs(y.mttr_hours, tol));
   }
 
   // External grids
@@ -373,6 +415,11 @@ void compare_systems(const HybridPowerSystem& a, const HybridPowerSystem& b,
     CHECK_THAT(x.pmax_mw, WithinAbs(y.pmax_mw, tol));
     CHECK_THAT(x.qmax_mvar, WithinAbs(y.qmax_mvar, tol));
     CHECK_THAT(x.qmin_mvar, WithinAbs(y.qmin_mvar, tol));
+    CHECK_THAT(x.cost_c2, WithinAbs(y.cost_c2, tol));
+    CHECK_THAT(x.cost_c1, WithinAbs(y.cost_c1, tol));
+    CHECK_THAT(x.cost_c0, WithinAbs(y.cost_c0, tol));
+    CHECK_THAT(x.forced_outage_rate, WithinAbs(y.forced_outage_rate, tol));
+    CHECK_THAT(x.mttr_hr, WithinAbs(y.mttr_hr, tol));
   }
 
   // PV systems
@@ -383,6 +430,21 @@ void compare_systems(const HybridPowerSystem& a, const HybridPowerSystem& b,
     CHECK_THAT(a.ac.pv_systems[i].p_mw, WithinAbs(b.ac.pv_systems[i].p_mw, tol));
   }
 
+  // Renewable (wind) generators
+  REQUIRE(a.ac.renewable_gens.size() == b.ac.renewable_gens.size());
+  for (size_t i = 0; i < a.ac.renewable_gens.size(); ++i) {
+    const auto& x = a.ac.renewable_gens[i];
+    const auto& y = b.ac.renewable_gens[i];
+    CHECK(x.name == y.name);
+    CHECK(x.bus == y.bus);
+    CHECK(x.type == y.type);
+    CHECK_THAT(x.p_mw, WithinAbs(y.p_mw, tol));
+    CHECK_THAT(x.p_rated_mw, WithinAbs(y.p_rated_mw, tol));
+    CHECK(x.curtailable == y.curtailable);
+    CHECK_THAT(x.capacity_factor, WithinAbs(y.capacity_factor, tol));
+    CHECK_THAT(x.cost_curtail_mwh, WithinAbs(y.cost_curtail_mwh, tol));
+  }
+
   // Loads
   REQUIRE(a.ac.loads.size() == b.ac.loads.size());
   for (size_t i = 0; i < a.ac.loads.size(); ++i) {
@@ -390,6 +452,14 @@ void compare_systems(const HybridPowerSystem& a, const HybridPowerSystem& b,
     CHECK(a.ac.loads[i].bus == b.ac.loads[i].bus);
     CHECK_THAT(a.ac.loads[i].p_mw, WithinAbs(b.ac.loads[i].p_mw, tol));
     CHECK_THAT(a.ac.loads[i].q_mvar, WithinAbs(b.ac.loads[i].q_mvar, tol));
+    CHECK(a.ac.loads[i].model == b.ac.loads[i].model);
+    CHECK_THAT(a.ac.loads[i].z_percent_p, WithinAbs(b.ac.loads[i].z_percent_p, tol));
+    CHECK_THAT(a.ac.loads[i].i_percent_p, WithinAbs(b.ac.loads[i].i_percent_p, tol));
+    CHECK_THAT(a.ac.loads[i].p_percent_p, WithinAbs(b.ac.loads[i].p_percent_p, tol));
+    CHECK_THAT(a.ac.loads[i].z_percent_q, WithinAbs(b.ac.loads[i].z_percent_q, tol));
+    CHECK_THAT(a.ac.loads[i].i_percent_q, WithinAbs(b.ac.loads[i].i_percent_q, tol));
+    CHECK_THAT(a.ac.loads[i].p_percent_q, WithinAbs(b.ac.loads[i].p_percent_q, tol));
+    CHECK(a.ac.loads[i].priority == b.ac.loads[i].priority);
   }
 
   // Shunts
@@ -517,6 +587,7 @@ TEST_CASE("ETAP Excel round-circle (excel in / excel out)", "[io][etap][excel][r
     CHECK(sys1.ac.external_grids.size() == sys.ac.external_grids.size());
     CHECK(sys1.ac.generators.size() == sys.ac.generators.size());
     CHECK(sys1.ac.pv_systems.size() == sys.ac.pv_systems.size());
+    CHECK(sys1.ac.renewable_gens.size() == sys.ac.renewable_gens.size());
     CHECK(sys1.ac.loads.size() == sys.ac.loads.size());
     CHECK(sys1.ac.shunts.size() == sys.ac.shunts.size());
     CHECK(sys1.ac.circuit_breakers.size() == sys.ac.circuit_breakers.size());
@@ -611,4 +682,100 @@ TEST_CASE("ETAP real-export ingestion (etap-main toolkit schema)",
     EtapIoReport strict_rep;
     CHECK_THROWS(load_etap(path, EtapImportMode::Strict, strict_rep));
   }
+}
+
+TEST_CASE("ETAP I/O preserves power-flow solvability (case14)",
+          "[io][etap][excel][pf][roundtrip]") {
+  const std::string mp = std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m";
+  if (!fs::exists(mp)) {
+    WARN("case14.m not found at " << mp << "; skipping");
+    return;
+  }
+
+  HybridPowerSystem orig;
+  REQUIRE_NOTHROW(orig = parse_matpower(mp));
+
+  const fs::path dir = fs::temp_directory_path();
+  const std::string path = (dir / "hacdcpf_etap_case14.xlsx").string();
+
+  REQUIRE_NOTHROW(save_etap(orig, path));
+  HybridPowerSystem restored;
+  REQUIRE_NOTHROW(restored = load_etap(path));
+
+  // Topology is preserved.
+  REQUIRE(restored.ac.buses.size() == orig.ac.buses.size());
+  REQUIRE(restored.ac.branches.size() == orig.ac.branches.size());
+
+  // Power flow on the ETAP round-trip must converge to the same voltages.
+  const PowerFlowResult r_orig = solve_power_flow(orig);
+  const PowerFlowResult r_restored = solve_power_flow(restored);
+  REQUIRE(r_orig.converged);
+  REQUIRE(r_restored.converged);
+  REQUIRE(r_orig.vm.size() == r_restored.vm.size());
+  for (size_t i = 0; i < r_orig.vm.size(); ++i) {
+    CHECK_THAT(r_restored.vm[i], WithinAbs(r_orig.vm[i], 1e-6));
+  }
+
+  std::error_code ec;
+  fs::remove(path, ec);
+}
+
+TEST_CASE("ETAP ingested sample is power-flow solvable without crashing",
+          "[io][etap][excel][pf][ingest]") {
+  const std::string path =
+      std::string(HACDCPF_TEST_DATA_DIR) + "/etap_sample.xlsx";
+  if (!fs::exists(path)) {
+    WARN("ETAP sample workbook missing at " << path << "; skipping");
+    return;
+  }
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap(path));  // Permissive by default
+
+  // The exception-free solver must handle the toolkit's partial demo case
+  // gracefully — returning a value or a structured error, never throwing.
+  REQUIRE_NOTHROW([&] {
+    const auto result = safe_solve_power_flow(sys);
+    (void)result;
+  }());
+}
+
+TEST_CASE("ETAP fidelity check reports a lossless round-trip",
+          "[io][etap][excel][fidelity]") {
+  const HybridPowerSystem sys = make_reference_system();
+  const EtapFidelityReport fr = etap_fidelity_check(sys);
+  for (const auto& m : fr.mismatches) WARN(m);
+  CHECK(fr.fields_checked > 0);
+  CHECK(fr.fields_mismatched == 0);
+  CHECK(fr.lossless);
+}
+
+TEST_CASE("ETAP native XML import (Feeder.xml)", "[io][etap][xml][ingest]") {
+  const std::string path =
+      std::string(HACDCPF_TEST_DATA_DIR) + "/etap_feeder.xml";
+  if (!fs::exists(path)) {
+    WARN("ETAP XML fixture missing at " << path << "; skipping");
+    return;
+  }
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path, EtapImportMode::Permissive, rep));
+
+  // Element counts must match the raw <COMPONENTS> tag inventory of Feeder.xml.
+  CHECK(sys.ac.buses.size() == 43);
+  CHECK(sys.ac.branches.size() == 17);        // 16 XLINE + 1 CABLE
+  CHECK(sys.ac.transformers_2w.size() == 16);
+  CHECK(sys.ac.external_grids.size() == 3);
+  CHECK(sys.ac.generators.size() == 1);
+  CHECK(sys.ac.pv_systems.size() == 10);
+  CHECK(sys.ac.loads.size() == 4);
+  CHECK(sys.dc.buses.size() == 7);
+  CHECK(sys.dc.loads.size() == 3);
+  CHECK(sys.vsc_converters.size() == 10);     // 7 INVERTER + 3 CHARGER
+  CHECK(sys.dc.storage.size() == 3);          // BATTERY
+
+  // Utilities pin their AC bus to SLACK via bus-type derivation.
+  bool any_slack = false;
+  for (const auto& b : sys.ac.buses)
+    if (b.bus_type == BusType::SLACK) any_slack = true;
+  CHECK(any_slack);
 }

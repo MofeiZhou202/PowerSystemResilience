@@ -23,7 +23,8 @@
 ///   SYNGEN         ACSystem::generators            synchronous generator
 ///   MGSET          ACSystem::generators            motor-generator (import only)
 ///   PVARRAY        ACSystem::pv_systems            PV array (AC inverter)
-///   LUMPEDLOAD     ACSystem::loads                 lumped AC load
+///   WIND           ACSystem::renewable_gens        wind / renewable generator
+///   LUMPEDLOAD     ACSystem::loads                 lumped AC load (ZIP model)
 ///   CAPACITOR      ACSystem::shunts                shunt capacitor
 ///   HVCB           ACSystem::circuit_breakers      AC breaker
 ///   INDMOTOR       ACSystem::motors                induction motor
@@ -92,6 +93,16 @@ struct EtapIoReport {
   }
 };
 
+/// Result of an ETAP export/import round-trip fidelity check: which fields (if
+/// any) are not preserved by `save_etap` followed by `load_etap`.
+struct EtapFidelityReport {
+  bool lossless{true};
+  int fields_checked{0};
+  int fields_mismatched{0};
+  /// Human-readable "Type[i].field: before -> after" entries for each mismatch.
+  std::vector<std::string> mismatches;
+};
+
 #ifdef HACDCPF_ENABLE_ETAP
 
 /// Import an ETAP-schema Excel workbook into a HybridPowerSystem.
@@ -103,6 +114,19 @@ HybridPowerSystem load_etap(const std::string& path, EtapIoReport& report);
 /// Import with explicit strictness; warnings/errors are recorded in `report`.
 HybridPowerSystem load_etap(const std::string& path, EtapImportMode mode,
                             EtapIoReport& report);
+
+/// Round-trip `sys` through `save_etap`/`load_etap` (via a temporary workbook)
+/// and report any element counts or mapped fields that are not preserved.
+EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys,
+                                       double tol = 1e-6);
+
+/// Import a native ETAP project XML export (e.g. `Feeder.xml`) directly, without
+/// going through the Python toolkit.  Best-effort: recognised `<COMPONENTS>`
+/// element tags are mapped with the same ETAP attribute names and units as the
+/// Excel importer.  Attribute values containing a raw `>` are not supported.
+HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
+                                EtapIoReport& report);
+HybridPowerSystem load_etap_xml(const std::string& path);
 
 /// Export a HybridPowerSystem to an ETAP-schema Excel workbook.
 void save_etap(const HybridPowerSystem& sys, const std::string& path);
@@ -125,6 +149,23 @@ inline HybridPowerSystem load_etap(const std::string&, EtapIoReport&) {
 
 inline HybridPowerSystem load_etap(const std::string&, EtapImportMode,
                                    EtapIoReport&) {
+  throw std::runtime_error(
+      "ETAP Excel I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
+}
+
+inline EtapFidelityReport etap_fidelity_check(const HybridPowerSystem&,
+                                              double = 1e-6) {
+  throw std::runtime_error(
+      "ETAP Excel I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
+}
+
+inline HybridPowerSystem load_etap_xml(const std::string&, EtapImportMode,
+                                       EtapIoReport&) {
+  throw std::runtime_error(
+      "ETAP Excel I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
+}
+
+inline HybridPowerSystem load_etap_xml(const std::string&) {
   throw std::runtime_error(
       "ETAP Excel I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
 }

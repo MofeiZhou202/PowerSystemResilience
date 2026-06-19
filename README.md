@@ -214,6 +214,56 @@ MATPOWER / JPC JSON / Excel / OpenDSS
 
 JPC JSON export should be treated as a schema-preserving operation: rich component arrays must either be written faithfully or explicitly diagnosed as unsupported, because silently writing empty arrays can lose engineering data.
 
+### 8.5 ETAP I/O（导入/导出）
+
+ETAP 互操作由 `include/hacdcpf/io/etap_io.hpp` / `src/io/etap_io.cpp` 提供，编译开关
+`-DHACDCPF_ENABLE_ETAP=ON`（依赖 OpenXLSX；默认 OFF）。
+
+支持三条输入路径，全部映射到同一 `HybridPowerSystem`：
+
+1. **规范 ETAP 工作簿**（`save_etap` 产生、可无损 round-trip 的 schema）。
+2. **原始 ETAP 工具箱导出**（`etap-main/etap_output.py` 的列名与单位：`OpVMag`/`VMag`
+   为百分比、`NominalkV`、`RPos`/`XPos` 为欧姆、`AnsiPosZ`/`PosR` 为变压器 %Z/%R、
+   `ZBaseMVA` 为 kVA、`LUMPEDLOAD` 用 `MVA`+`PF`）。导入器通过别名表同时识别两套列名。
+3. **原生 ETAP 工程 XML**（如 `Feeder.xml`）：`load_etap_xml()` 直接解析 `<COMPONENTS>`
+   元素属性，无需 Python 工具箱。
+
+主要 API：
+
+| 功能 | 入口 |
+|---|---|
+| Excel 导入 | `load_etap(path[, mode, report])` |
+| Excel 导出 | `save_etap(sys, path[, report])` |
+| 原生 XML 导入 | `load_etap_xml(path[, mode, report])` |
+| 严格度 | `EtapImportMode::{Strict, Permissive}`（Strict 对悬空母线引用抛错，Permissive 记 warning） |
+| 往返保真度报告 | `etap_fidelity_check(sys)` → `EtapFidelityReport`（逐字段 before→after 差异） |
+| 诊断 | `EtapIoReport`（每个 sheet 计数 + warnings） |
+
+无显式 `Type` 列时，母线类型由所连 utility（→SLACK）/generator（→PV）推导；标幺↔欧姆
+阻抗用 `Z_base = base_kV² / base_MVA`（取自支路 from 母线），保证往返精确。
+
+支持的元件 sheet：`BUS, XLINE, CABLE, XFORM2W, XFORM3W, UTIL, SYNGEN, MGSET(仅导入),
+PVARRAY, WIND, LUMPEDLOAD(ZIP), CAPACITOR, HVCB, INDMOTOR, DCBUS, DCIMPEDANCE,
+DCLUMPLOAD, DCCONVERTER, DCCB, INVERTER, CHARGER, BATTERY` 外加 `PROJECT`。
+
+命令行工具 `etap_convert`（`-DHACDCPF_ENABLE_ETAP=ON` 时构建）：
+
+```text
+etap_convert etap2json  in.xlsx  out.json   [--strict]
+etap_convert xml2json   in.xml   out.json   [--strict]
+etap_convert json2etap  in.json  out.xlsx
+etap_convert etap2etap  in.xlsx  out.xlsx   [--strict]   # 规范化
+etap_convert fidelity   in.xlsx                          # 报告再导出会丢失的字段
+```
+
+Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列定义
+（`CANONICAL_COLUMNS`）、`write_canonical_workbook()` 与 `convert_raw_export()`，
+用于从工具箱直接产出规范工作簿。
+
+往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
+case14 潮流一致性、保真度、原生 XML），fixtures 见 `data/etap_sample.xlsx`、
+`data/etap_feeder.xml`。
+
 ## 9. 实现地图
 
 | 主题 | 主要文件 |

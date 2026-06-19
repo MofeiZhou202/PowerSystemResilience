@@ -5,7 +5,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -251,6 +255,8 @@ void validate_refs(const HybridPowerSystem& sys, EtapImportMode mode,
     check(l.bus != 0, "LUMPEDLOAD '" + l.name + "': unresolved bus reference");
   for (const auto& p : sys.ac.pv_systems)
     check(p.bus != 0, "PVARRAY '" + p.name + "': unresolved bus reference");
+  for (const auto& g : sys.ac.renewable_gens)
+    check(g.bus != 0, "WIND '" + g.name + "': unresolved bus reference");
   for (const auto& s : sys.ac.shunts)
     check(s.bus != 0, "CAPACITOR '" + s.name + "': unresolved bus reference");
   for (const auto& m : sys.ac.motors)
@@ -307,7 +313,7 @@ void write_bus(XLWorksheet ws, const HybridPowerSystem& sys) {
 void write_xline(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "FromBus", "ToBus", "R_ohm", "X_ohm",
                      "B_S", "Tap", "ShiftDeg", "Rate_MVA", "Length_km",
-                     "InService"});
+                     "InService", "FailureRate", "MTTR_hr", "N_parallel"});
   for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
     const auto& br = sys.ac.branches[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -324,13 +330,18 @@ void write_xline(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 10).value() = br.rate_a_mva;
     ws.cell(r, 11).value() = br.length_km;
     ws.cell(r, 12).value() = bool_str(br.in_service);
+    ws.cell(r, 13).value() = br.failure_rate;
+    ws.cell(r, 14).value() = br.mttr_hr;
+    ws.cell(r, 15).value() = br.n_parallel;
   }
 }
 
 void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "FromBus", "ToBus", "PrimkV", "SeckV",
                      "Sn_MVA", "Z_percent", "ZR_percent", "XR_ratio",
-                     "ShiftDeg", "Pk_kW", "InService"});
+                     "ShiftDeg", "Pk_kW", "InService", "MTBF_hr", "MTTR_hr",
+                     "TapSide", "TapPos", "TapMin", "TapMax", "TapNeutral",
+                     "TapStepPct"});
   for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
     const auto& t = sys.ac.transformers_2w[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -352,6 +363,14 @@ void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 11).value() = t.shift_deg;
     ws.cell(r, 12).value() = t.pk_kw;
     ws.cell(r, 13).value() = bool_str(t.in_service);
+    ws.cell(r, 14).value() = t.mtbf_hours;
+    ws.cell(r, 15).value() = t.mttr_hours;
+    ws.cell(r, 16).value() = t.tap_side;
+    ws.cell(r, 17).value() = t.tap_pos;
+    ws.cell(r, 18).value() = t.tap_min;
+    ws.cell(r, 19).value() = t.tap_max;
+    ws.cell(r, 20).value() = t.tap_neutral;
+    ws.cell(r, 21).value() = t.tap_step_percent;
   }
 }
 
@@ -401,7 +420,8 @@ void write_util(XLWorksheet ws, const HybridPowerSystem& sys) {
 void write_syngen(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "Bus", "KV", "PG_MW", "QG_Mvar", "Pmax_MW",
                      "Pmin_MW", "Qmax_Mvar", "Qmin_Mvar", "Vg_pu", "MVA",
-                     "CosPhi", "IsSlack", "InService"});
+                     "CosPhi", "IsSlack", "InService", "Cost_c2", "Cost_c1",
+                     "Cost_c0", "FailureRate", "MTTR_hr"});
   for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
     const auto& g = sys.ac.generators[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -420,6 +440,11 @@ void write_syngen(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 13).value() = g.cos_phi;
     ws.cell(r, 14).value() = bool_str(g.is_slack);
     ws.cell(r, 15).value() = bool_str(g.in_service);
+    ws.cell(r, 16).value() = g.cost_c2;
+    ws.cell(r, 17).value() = g.cost_c1;
+    ws.cell(r, 18).value() = g.cost_c0;
+    ws.cell(r, 19).value() = g.forced_outage_rate;
+    ws.cell(r, 20).value() = g.mttr_hr;
   }
 }
 
@@ -444,9 +469,33 @@ void write_pvarray(XLWorksheet ws, const HybridPowerSystem& sys) {
   }
 }
 
+void write_wind(XLWorksheet ws, const HybridPowerSystem& sys) {
+  write_headers(ws, {"Index", "ID", "Bus", "Type", "P_MW", "Q_Mvar",
+                     "P_rated_MW", "Qmax_Mvar", "Qmin_Mvar", "Curtailable",
+                     "CapacityFactor", "CostCurtail_MWh", "InService"});
+  for (size_t i = 0; i < sys.ac.renewable_gens.size(); ++i) {
+    const auto& g = sys.ac.renewable_gens[i];
+    const uint32_t r = static_cast<uint32_t>(i + 2);
+    ws.cell(r, 1).value() = static_cast<int>(i + 1);
+    ws.cell(r, 2).value() = g.name.empty() ? ("WIND" + std::to_string(g.index)) : g.name;
+    ws.cell(r, 3).value() = ac_bus_name(sys, g.bus);
+    ws.cell(r, 4).value() = renewable_type_str(g.type);
+    ws.cell(r, 5).value() = g.p_mw;
+    ws.cell(r, 6).value() = g.q_mvar;
+    ws.cell(r, 7).value() = g.p_rated_mw;
+    ws.cell(r, 8).value() = g.qmax_mvar;
+    ws.cell(r, 9).value() = g.qmin_mvar;
+    ws.cell(r, 10).value() = bool_str(g.curtailable);
+    ws.cell(r, 11).value() = g.capacity_factor;
+    ws.cell(r, 12).value() = g.cost_curtail_mwh;
+    ws.cell(r, 13).value() = bool_str(g.in_service);
+  }
+}
+
 void write_lumpedload(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "Bus", "KV", "P_MW", "Q_Mvar", "MVA", "PF",
-                     "Scaling", "InService"});
+                     "Scaling", "InService", "Model", "Z_pct_P", "I_pct_P",
+                     "P_pct_P", "Z_pct_Q", "I_pct_Q", "P_pct_Q", "Priority"});
   for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
     const auto& l = sys.ac.loads[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -461,6 +510,14 @@ void write_lumpedload(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 8).value() = (s > 0.0) ? (l.p_mw / s) : 1.0;
     ws.cell(r, 9).value() = l.scaling;
     ws.cell(r, 10).value() = bool_str(l.in_service);
+    ws.cell(r, 11).value() = load_model_str(l.model);
+    ws.cell(r, 12).value() = l.z_percent_p;
+    ws.cell(r, 13).value() = l.i_percent_p;
+    ws.cell(r, 14).value() = l.p_percent_p;
+    ws.cell(r, 15).value() = l.z_percent_q;
+    ws.cell(r, 16).value() = l.i_percent_q;
+    ws.cell(r, 17).value() = l.p_percent_q;
+    ws.cell(r, 18).value() = load_priority_str(l.priority);
   }
 }
 
@@ -686,7 +743,10 @@ void read_bus(const XLWorksheet& ws, HybridPowerSystem& sys, NameIndex& name2idx
     b.bus_type = bus_type_from_str(cell_by_name(ws, r, col, "Type"));
     const double nk = dbl_from_str(getv(ws, r, col, {"NominalkV", "NominalKV"}));
     const double bk = dbl_from_str(getv(ws, r, col, {"BasekV", "BaseKV", "base_kv"}));
-    b.base_kv = nk > 0.0 ? nk : (bk > 0.0 ? bk : b.base_kv);
+    // Use 0 (not the ACBus default of 110 kV) when no base voltage is given so
+    // that per-unit <-> ohm impedance conversion uses the same Z_base on import
+    // and export (both fall back to the 1.0 identity base).
+    b.base_kv = nk > 0.0 ? nk : bk;
     b.vm_pu = volt_pu(getv(ws, r, col, {"Vm_pu", "OpVMag", "VMag"}), b.vm_pu);
     b.va_deg = dbl_from_str(getv(ws, r, col, {"Va_deg", "OpVAng"}), b.va_deg);
     b.vmax_pu = volt_pu(getv(ws, r, col, {"VMaxLimit", "vmax_pu"}), b.vmax_pu);
@@ -732,6 +792,9 @@ void read_branch_sheet(const XLWorksheet& ws, HybridPowerSystem& sys,
     br.rate_a_mva = dbl_from_str(getv(ws, r, col, {"Rate_MVA", "RatedA"}));
     br.length_km = dbl_from_str(getv(ws, r, col, {"Length_km", "Length", "LengthValue"}));
     br.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    br.failure_rate = dbl_from_str(cell_by_name(ws, r, col, "FailureRate"), br.failure_rate);
+    br.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "MTTR_hr"), br.mttr_hr);
+    br.n_parallel = int_from_str(cell_by_name(ws, r, col, "N_parallel"), br.n_parallel);
     sys.ac.branches.push_back(std::move(br));
     ++n;
   }
@@ -762,6 +825,14 @@ void read_xform2w(const XLWorksheet& ws, HybridPowerSystem& sys,
     t.shift_deg = dbl_from_str(cell_by_name(ws, r, col, "ShiftDeg"));
     t.pk_kw = dbl_from_str(cell_by_name(ws, r, col, "Pk_kW"));
     t.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    t.mtbf_hours = dbl_from_str(cell_by_name(ws, r, col, "MTBF_hr"), t.mtbf_hours);
+    t.mttr_hours = dbl_from_str(cell_by_name(ws, r, col, "MTTR_hr"), t.mttr_hours);
+    t.tap_side = int_from_str(cell_by_name(ws, r, col, "TapSide"), t.tap_side);
+    t.tap_pos = int_from_str(cell_by_name(ws, r, col, "TapPos"), t.tap_pos);
+    t.tap_min = int_from_str(cell_by_name(ws, r, col, "TapMin"), t.tap_min);
+    t.tap_max = int_from_str(cell_by_name(ws, r, col, "TapMax"), t.tap_max);
+    t.tap_neutral = int_from_str(cell_by_name(ws, r, col, "TapNeutral"), t.tap_neutral);
+    t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "TapStepPct"), t.tap_step_percent);
     sys.ac.transformers_2w.push_back(std::move(t));
     ++n;
   }
@@ -879,6 +950,11 @@ void read_syngen(const XLWorksheet& ws, HybridPowerSystem& sys,
     g.cos_phi = dbl_from_str(cell_by_name(ws, r, col, "CosPhi"), g.cos_phi);
     g.is_slack = bool_from_str(cell_by_name(ws, r, col, "IsSlack"), false);
     g.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    g.cost_c2 = dbl_from_str(cell_by_name(ws, r, col, "Cost_c2"), g.cost_c2);
+    g.cost_c1 = dbl_from_str(cell_by_name(ws, r, col, "Cost_c1"), g.cost_c1);
+    g.cost_c0 = dbl_from_str(cell_by_name(ws, r, col, "Cost_c0"), g.cost_c0);
+    g.forced_outage_rate = dbl_from_str(cell_by_name(ws, r, col, "FailureRate"), g.forced_outage_rate);
+    g.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "MTTR_hr"), g.mttr_hr);
     sys.ac.generators.push_back(std::move(g));
     ++n;
   }
@@ -910,6 +986,33 @@ void read_pvarray(const XLWorksheet& ws, HybridPowerSystem& sys,
   add_count(rep, "PVARRAY", n);
 }
 
+void read_wind(const XLWorksheet& ws, HybridPowerSystem& sys,
+               const NameIndex& name2idx, EtapIoReport& rep) {
+  const auto col = make_colmap(ws);
+  int idx = 0, n = 0;
+  for (uint32_t r = 2; r <= ws.rowCount(); ++r) {
+    const std::string id = cell_by_name(ws, r, col, "ID");
+    if (trim(id).empty()) break;
+    RenewableGen g;
+    g.index = ++idx;
+    g.name = id;
+    g.bus = resolve(name2idx, cell_by_name(ws, r, col, "Bus"));
+    g.type = renewable_type_from_str(cell_by_name(ws, r, col, "Type"));
+    g.p_mw = dbl_from_str(cell_by_name(ws, r, col, "P_MW"));
+    g.q_mvar = dbl_from_str(cell_by_name(ws, r, col, "Q_Mvar"));
+    g.p_rated_mw = dbl_from_str(cell_by_name(ws, r, col, "P_rated_MW"));
+    g.qmax_mvar = dbl_from_str(cell_by_name(ws, r, col, "Qmax_Mvar"));
+    g.qmin_mvar = dbl_from_str(cell_by_name(ws, r, col, "Qmin_Mvar"));
+    g.curtailable = bool_from_str(cell_by_name(ws, r, col, "Curtailable"), g.curtailable);
+    g.capacity_factor = dbl_from_str(cell_by_name(ws, r, col, "CapacityFactor"), g.capacity_factor);
+    g.cost_curtail_mwh = dbl_from_str(cell_by_name(ws, r, col, "CostCurtail_MWh"), g.cost_curtail_mwh);
+    g.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    sys.ac.renewable_gens.push_back(std::move(g));
+    ++n;
+  }
+  add_count(rep, "WIND", n);
+}
+
 void read_lumpedload(const XLWorksheet& ws, HybridPowerSystem& sys,
                      const NameIndex& name2idx, EtapIoReport& rep) {
   const auto col = make_colmap(ws);
@@ -935,6 +1038,14 @@ void read_lumpedload(const XLWorksheet& ws, HybridPowerSystem& sys,
     }
     l.scaling = dbl_from_str(cell_by_name(ws, r, col, "Scaling"), 1.0);
     l.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    l.model = load_model_from_str(cell_by_name(ws, r, col, "Model"));
+    l.z_percent_p = dbl_from_str(cell_by_name(ws, r, col, "Z_pct_P"), l.z_percent_p);
+    l.i_percent_p = dbl_from_str(cell_by_name(ws, r, col, "I_pct_P"), l.i_percent_p);
+    l.p_percent_p = dbl_from_str(cell_by_name(ws, r, col, "P_pct_P"), l.p_percent_p);
+    l.z_percent_q = dbl_from_str(cell_by_name(ws, r, col, "Z_pct_Q"), l.z_percent_q);
+    l.i_percent_q = dbl_from_str(cell_by_name(ws, r, col, "I_pct_Q"), l.i_percent_q);
+    l.p_percent_q = dbl_from_str(cell_by_name(ws, r, col, "P_pct_Q"), l.p_percent_q);
+    l.priority = load_priority_from_str(cell_by_name(ws, r, col, "Priority"));
     sys.ac.loads.push_back(std::move(l));
     ++n;
   }
@@ -1046,7 +1157,7 @@ void read_dcimpedance(const XLWorksheet& ws, HybridPowerSystem& sys,
     br.from_bus = resolve(name2idx, fb);
     br.to_bus = resolve(name2idx, cell_by_name(ws, r, col, "ToBus"));
     const double zb = z_base(resolve_kv(name2kv, fb), base_mva);
-    br.r_pu = dbl_from_str(cell_by_name(ws, r, col, "R_ohm")) / zb;
+    br.r_pu = dbl_from_str(getv(ws, r, col, {"R_ohm", "RValue"})) / zb;
     br.rate_a_mva = dbl_from_str(cell_by_name(ws, r, col, "Rate_MVA"));
     br.length_km = dbl_from_str(cell_by_name(ws, r, col, "Length_km"));
     br.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
@@ -1089,9 +1200,16 @@ void read_dcconverter(const XLWorksheet& ws, HybridPowerSystem& sys,
     c.bus_in = resolve(name2idx, cell_by_name(ws, r, col, "InputBus"));
     c.bus_out = resolve(name2idx, cell_by_name(ws, r, col, "OutputBus"));
     c.p_ref_mw = dbl_from_str(cell_by_name(ws, r, col, "KW")) / 1000.0;  // kW -> MW
-    c.eta = dbl_from_str(cell_by_name(ws, r, col, "PercentEFF"), 98.0) / 100.0;
-    c.vn_in_kv = dbl_from_str(cell_by_name(ws, r, col, "Vin_kV"));
-    c.vn_out_kv = dbl_from_str(cell_by_name(ws, r, col, "Vout_kV"));
+    c.eta = dbl_from_str(getv(ws, r, col, {"PercentEFF", "DcPercentEFF"}), 98.0) / 100.0;
+    // ETAP exports input/output voltages in volts (InputV/OutputV).
+    {
+      const std::string vin = getv(ws, r, col, {"Vin_kV"});
+      c.vn_in_kv = !vin.empty() ? dbl_from_str(vin)
+                                : dbl_from_str(getv(ws, r, col, {"InputV"})) / 1000.0;
+      const std::string vout = getv(ws, r, col, {"Vout_kV"});
+      c.vn_out_kv = !vout.empty() ? dbl_from_str(vout)
+                                  : dbl_from_str(getv(ws, r, col, {"OutputV"})) / 1000.0;
+    }
     c.pmax_mw = dbl_from_str(cell_by_name(ws, r, col, "Pmax_MW"));
     c.pmin_mw = dbl_from_str(cell_by_name(ws, r, col, "Pmin_MW"));
     c.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
@@ -1136,10 +1254,16 @@ void read_converter_sheet(const XLWorksheet& ws, HybridPowerSystem& sys,
     v.index = ++idx;
     v.name = id;
     v.type = type_tag;
-    v.bus_ac = resolve(ac2idx, cell_by_name(ws, r, col, "ACBus"));
-    v.bus_dc = resolve(dc2idx, cell_by_name(ws, r, col, "DCBus"));
+    v.bus_ac = resolve(ac2idx, getv(ws, r, col, {"ACBus", "BusID", "Bus"}));
+    v.bus_dc = resolve(dc2idx, getv(ws, r, col, {"DCBus", "OutputBus"}));
     v.control_mode = converter_mode_from_str(cell_by_name(ws, r, col, "Mode"));
-    v.p_set_mw = dbl_from_str(cell_by_name(ws, r, col, "P_MW"));
+    {
+      // P_MW is the round-trip schema (MW); ETAP exports OpAcKw in kW.
+      const std::string pac = getv(ws, r, col, {"P_MW"});
+      v.p_set_mw = !pac.empty()
+                       ? dbl_from_str(pac)
+                       : dbl_from_str(getv(ws, r, col, {"OpAcKw"})) / 1000.0;
+    }
     v.q_set_mvar = dbl_from_str(cell_by_name(ws, r, col, "Q_Mvar"));
     v.v_dc_set_pu = dbl_from_str(cell_by_name(ws, r, col, "Vdc_set_pu"), v.v_dc_set_pu);
     v.v_ac_set_pu = dbl_from_str(cell_by_name(ws, r, col, "Vac_set_pu"), v.v_ac_set_pu);
@@ -1147,7 +1271,7 @@ void read_converter_sheet(const XLWorksheet& ws, HybridPowerSystem& sys,
     v.pmin_mw = dbl_from_str(cell_by_name(ws, r, col, "Pmin_MW"));
     v.qmax_mvar = dbl_from_str(cell_by_name(ws, r, col, "Qmax_Mvar"));
     v.qmin_mvar = dbl_from_str(cell_by_name(ws, r, col, "Qmin_Mvar"));
-    v.eta = dbl_from_str(cell_by_name(ws, r, col, "PercentEFF"), 99.0) / 100.0;
+    v.eta = dbl_from_str(getv(ws, r, col, {"PercentEFF", "DcPercentEFF"}), 99.0) / 100.0;
     v.vn_ac_kv = dbl_from_str(cell_by_name(ws, r, col, "Vac_kV"));
     v.vn_dc_kv = dbl_from_str(cell_by_name(ws, r, col, "Vdc_kV"));
     v.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
@@ -1175,7 +1299,7 @@ void read_battery(const XLWorksheet& ws, HybridPowerSystem& sys,
     s.soc_init = dbl_from_str(cell_by_name(ws, r, col, "SoC"), s.soc_init);
     s.soc_min = dbl_from_str(cell_by_name(ws, r, col, "SoCMin"), s.soc_min);
     s.soc_max = dbl_from_str(cell_by_name(ws, r, col, "SoCMax"), s.soc_max);
-    s.eta_charge = dbl_from_str(cell_by_name(ws, r, col, "EtaCh"), s.eta_charge);
+    s.eta_charge = dbl_from_str(getv(ws, r, col, {"EtaCh", "Eff"}), s.eta_charge);
     s.eta_discharge = dbl_from_str(cell_by_name(ws, r, col, "EtaDis"), s.eta_discharge);
     s.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
     sys.dc.storage.push_back(std::move(s));
@@ -1203,9 +1327,10 @@ void save_etap(const HybridPowerSystem& sys, const std::string& path,
 
   const std::vector<std::string> sheets = {
       "BUS",        "XLINE",      "CABLE",       "XFORM2W",   "XFORM3W",
-      "UTIL",       "SYNGEN",     "PVARRAY",     "LUMPEDLOAD", "CAPACITOR",
-      "HVCB",       "INDMOTOR",   "DCBUS",       "DCIMPEDANCE", "DCLUMPLOAD",
-      "DCCONVERTER", "DCCB",      "INVERTER",    "CHARGER",    "BATTERY"};
+      "UTIL",       "SYNGEN",     "PVARRAY",     "WIND",       "LUMPEDLOAD",
+      "CAPACITOR",  "HVCB",       "INDMOTOR",    "DCBUS",      "DCIMPEDANCE",
+      "DCLUMPLOAD", "DCCONVERTER", "DCCB",       "INVERTER",   "CHARGER",
+      "BATTERY"};
   for (const auto& s : sheets) ensure_sheet(wb, s);
 
   write_project(wb.worksheet("PROJECT"), sys);
@@ -1213,12 +1338,14 @@ void save_etap(const HybridPowerSystem& sys, const std::string& path,
   write_xline(wb.worksheet("XLINE"), sys);
   write_headers(wb.worksheet("CABLE"),
                 {"Index", "ID", "FromBus", "ToBus", "R_ohm", "X_ohm", "B_S",
-                 "Tap", "ShiftDeg", "Rate_MVA", "Length_km", "InService"});
+                 "Tap", "ShiftDeg", "Rate_MVA", "Length_km", "InService",
+                 "FailureRate", "MTTR_hr", "N_parallel"});
   write_xform2w(wb.worksheet("XFORM2W"), sys);
   write_xform3w(wb.worksheet("XFORM3W"), sys);
   write_util(wb.worksheet("UTIL"), sys);
   write_syngen(wb.worksheet("SYNGEN"), sys);
   write_pvarray(wb.worksheet("PVARRAY"), sys);
+  write_wind(wb.worksheet("WIND"), sys);
   write_lumpedload(wb.worksheet("LUMPEDLOAD"), sys);
   write_capacitor(wb.worksheet("CAPACITOR"), sys);
   write_hvcb(wb.worksheet("HVCB"), sys);
@@ -1239,6 +1366,7 @@ void save_etap(const HybridPowerSystem& sys, const std::string& path,
   add_count(report, "UTIL", static_cast<int>(sys.ac.external_grids.size()));
   add_count(report, "SYNGEN", static_cast<int>(sys.ac.generators.size()));
   add_count(report, "PVARRAY", static_cast<int>(sys.ac.pv_systems.size()));
+  add_count(report, "WIND", static_cast<int>(sys.ac.renewable_gens.size()));
   add_count(report, "LUMPEDLOAD", static_cast<int>(sys.ac.loads.size()));
   add_count(report, "CAPACITOR", static_cast<int>(sys.ac.shunts.size()));
   add_count(report, "HVCB", static_cast<int>(sys.ac.circuit_breakers.size()));
@@ -1284,6 +1412,7 @@ HybridPowerSystem load_etap(const std::string& path, EtapImportMode mode,
   if (!(s = find_sheet_name(wb, "SYNGEN")).empty()) read_syngen(wb.worksheet(s), sys, ac2idx, report);
   if (!(s = find_sheet_name(wb, "MGSET")).empty()) read_mgset(wb.worksheet(s), sys, ac2idx, report);
   if (!(s = find_sheet_name(wb, "PVARRAY")).empty()) read_pvarray(wb.worksheet(s), sys, ac2idx, report);
+  if (!(s = find_sheet_name(wb, "WIND")).empty()) read_wind(wb.worksheet(s), sys, ac2idx, report);
   if (!(s = find_sheet_name(wb, "LUMPEDLOAD")).empty()) read_lumpedload(wb.worksheet(s), sys, ac2idx, report);
   if (!(s = find_sheet_name(wb, "CAPACITOR")).empty()) read_capacitor(wb.worksheet(s), sys, ac2idx, report);
   if (!(s = find_sheet_name(wb, "HVCB")).empty()) read_hvcb(wb.worksheet(s), sys, ac2idx, report);
@@ -1312,6 +1441,370 @@ HybridPowerSystem load_etap(const std::string& path, EtapIoReport& report) {
 HybridPowerSystem load_etap(const std::string& path) {
   EtapIoReport report;
   return load_etap(path, EtapImportMode::Permissive, report);
+}
+
+EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol) {
+  EtapFidelityReport rep;
+  namespace fs = std::filesystem;
+  const std::string tmp =
+      (fs::temp_directory_path() / "hacdcpf_etap_fidelity.xlsx").string();
+  EtapIoReport io;
+  save_etap(sys, tmp, io);
+  const HybridPowerSystem rt = load_etap(tmp);
+  std::error_code ec;
+  fs::remove(tmp, ec);
+
+  auto fd = [&](const std::string& w, double a, double b) {
+    ++rep.fields_checked;
+    if (std::abs(a - b) > tol) {
+      ++rep.fields_mismatched;
+      rep.lossless = false;
+      char buf[160];
+      std::snprintf(buf, sizeof(buf), "%s: %.6g -> %.6g", w.c_str(), a, b);
+      rep.mismatches.emplace_back(buf);
+    }
+  };
+  auto fi = [&](const std::string& w, long long a, long long b) {
+    ++rep.fields_checked;
+    if (a != b) {
+      ++rep.fields_mismatched;
+      rep.lossless = false;
+      rep.mismatches.push_back(w + ": " + std::to_string(a) + " -> " + std::to_string(b));
+    }
+  };
+  auto fstr = [&](const std::string& w, const std::string& a, const std::string& b) {
+    ++rep.fields_checked;
+    if (a != b) {
+      ++rep.fields_mismatched;
+      rep.lossless = false;
+      rep.mismatches.push_back(w + ": '" + a + "' -> '" + b + "'");
+    }
+  };
+
+  fi("count ac.buses", sys.ac.buses.size(), rt.ac.buses.size());
+  fi("count ac.branches", sys.ac.branches.size(), rt.ac.branches.size());
+  fi("count ac.transformers_2w", sys.ac.transformers_2w.size(), rt.ac.transformers_2w.size());
+  fi("count ac.transformers_3w", sys.ac.transformers_3w.size(), rt.ac.transformers_3w.size());
+  fi("count ac.external_grids", sys.ac.external_grids.size(), rt.ac.external_grids.size());
+  fi("count ac.generators", sys.ac.generators.size(), rt.ac.generators.size());
+  fi("count ac.pv_systems", sys.ac.pv_systems.size(), rt.ac.pv_systems.size());
+  fi("count ac.renewable_gens", sys.ac.renewable_gens.size(), rt.ac.renewable_gens.size());
+  fi("count ac.loads", sys.ac.loads.size(), rt.ac.loads.size());
+  fi("count ac.shunts", sys.ac.shunts.size(), rt.ac.shunts.size());
+  fi("count ac.motors", sys.ac.motors.size(), rt.ac.motors.size());
+  fi("count ac.circuit_breakers", sys.ac.circuit_breakers.size(), rt.ac.circuit_breakers.size());
+  fi("count dc.buses", sys.dc.buses.size(), rt.dc.buses.size());
+  fi("count dc.branches", sys.dc.branches.size(), rt.dc.branches.size());
+  fi("count dc.loads", sys.dc.loads.size(), rt.dc.loads.size());
+  fi("count dc.dcdc_converters", sys.dc.dcdc_converters.size(), rt.dc.dcdc_converters.size());
+  fi("count dc.storage", sys.dc.storage.size(), rt.dc.storage.size());
+  fi("count vsc_converters", sys.vsc_converters.size(), rt.vsc_converters.size());
+
+  if (sys.ac.buses.size() == rt.ac.buses.size()) {
+    for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+      const auto& a = sys.ac.buses[i];
+      const auto& b = rt.ac.buses[i];
+      const std::string p = "ACBus[" + std::to_string(i) + "].";
+      fstr(p + "name", a.name, b.name);
+      fi(p + "bus_type", static_cast<int>(a.bus_type), static_cast<int>(b.bus_type));
+      fd(p + "base_kv", a.base_kv, b.base_kv);
+      fd(p + "pd_mw", a.pd_mw, b.pd_mw);
+      fd(p + "qd_mvar", a.qd_mvar, b.qd_mvar);
+      fd(p + "bs_mvar", a.bs_mvar, b.bs_mvar);
+    }
+  }
+  if (sys.ac.branches.size() == rt.ac.branches.size()) {
+    for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
+      const auto& a = sys.ac.branches[i];
+      const auto& b = rt.ac.branches[i];
+      const std::string p = "ACBranch[" + std::to_string(i) + "].";
+      fi(p + "from_bus", a.from_bus, b.from_bus);
+      fi(p + "to_bus", a.to_bus, b.to_bus);
+      fd(p + "r_pu", a.r_pu, b.r_pu);
+      fd(p + "x_pu", a.x_pu, b.x_pu);
+      fd(p + "b_pu", a.b_pu, b.b_pu);
+      fd(p + "tap", a.tap, b.tap);
+    }
+  }
+  if (sys.ac.transformers_2w.size() == rt.ac.transformers_2w.size()) {
+    for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
+      const auto& a = sys.ac.transformers_2w[i];
+      const auto& b = rt.ac.transformers_2w[i];
+      const std::string p = "Transformer2W[" + std::to_string(i) + "].";
+      fd(p + "vk_percent", a.vk_percent, b.vk_percent);
+      fd(p + "sn_mva", a.sn_mva, b.sn_mva);
+      fi(p + "tap_pos", a.tap_pos, b.tap_pos);
+      fd(p + "tap_step_percent", a.tap_step_percent, b.tap_step_percent);
+    }
+  }
+  if (sys.ac.generators.size() == rt.ac.generators.size()) {
+    for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+      const auto& a = sys.ac.generators[i];
+      const auto& b = rt.ac.generators[i];
+      const std::string p = "Generator[" + std::to_string(i) + "].";
+      fi(p + "bus", a.bus, b.bus);
+      fd(p + "pg_mw", a.pg_mw, b.pg_mw);
+      fd(p + "vg_pu", a.vg_pu, b.vg_pu);
+      fd(p + "qmax_mvar", a.qmax_mvar, b.qmax_mvar);
+    }
+  }
+  return rep;
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Native ETAP project XML (e.g. Feeder.xml) — best-effort direct importer.
+// ═════════════════════════════════════════════════════════════════════════
+HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
+                                EtapIoReport& report) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) throw std::runtime_error("ETAP XML: cannot open " + path);
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const std::string xml = ss.str();
+
+  using XmlAttrs = std::unordered_map<std::string, std::string>;
+  std::unordered_map<std::string, std::vector<XmlAttrs>> elems;
+  const std::regex tag_re(R"(<([A-Za-z][A-Za-z0-9_]*)\b([^>]*?)/?>)");
+  const std::regex attr_re(R"(([A-Za-z0-9_]+)\s*=\s*\"([^\"]*)\")");
+  for (auto it = std::sregex_iterator(xml.begin(), xml.end(), tag_re);
+       it != std::sregex_iterator(); ++it) {
+    const std::string tag = to_upper((*it)[1].str());
+    const std::string attrs = (*it)[2].str();
+    XmlAttrs a;
+    for (auto ai = std::sregex_iterator(attrs.begin(), attrs.end(), attr_re);
+         ai != std::sregex_iterator(); ++ai) {
+      a[to_upper((*ai)[1].str())] = (*ai)[2].str();
+    }
+    if (!a.empty()) elems[tag].push_back(std::move(a));
+  }
+
+  auto xget = [](const XmlAttrs& a,
+                 std::initializer_list<const char*> keys) -> std::string {
+    for (const char* k : keys) {
+      std::string up;
+      up.reserve(std::char_traits<char>::length(k));
+      for (const char* c = k; *c; ++c) up.push_back(static_cast<char>(std::toupper(*c)));
+      auto it = a.find(up);
+      if (it != a.end() && !trim(it->second).empty()) return it->second;
+    }
+    return "";
+  };
+
+  HybridPowerSystem sys;
+  NameIndex ac2idx, dc2idx;
+  NameKv ac2kv, dc2kv;
+
+  // AC buses first.
+  int idx = 0;
+  for (const auto& a : elems["BUS"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    ACBus b;
+    b.index = ++idx;
+    b.name = id;
+    const double nk = dbl_from_str(xget(a, {"NominalkV"}));
+    const double bk = dbl_from_str(xget(a, {"BasekV"}));
+    b.base_kv = nk > 0.0 ? nk : bk;
+    b.vm_pu = volt_pu(xget(a, {"OpVMag", "VMag"}), 1.0);
+    b.va_deg = dbl_from_str(xget(a, {"OpVAng"}));
+    b.vmax_pu = volt_pu(xget(a, {"VMaxLimit"}), 1.1);
+    b.vmin_pu = volt_pu(xget(a, {"VMinLimit"}), 0.9);
+    b.area = int_from_str(xget(a, {"Area"}), 1);
+    b.zone = int_from_str(xget(a, {"Zone"}), 1);
+    b.in_service = bool_from_str(xget(a, {"InService"}), true);
+    ac2idx[to_upper(id)] = b.index;
+    ac2kv[to_upper(id)] = b.base_kv;
+    sys.ac.buses.push_back(std::move(b));
+  }
+  // DC buses.
+  idx = 0;
+  for (const auto& a : elems["DCBUS"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    DCBus b;
+    b.index = ++idx;
+    b.name = id;
+    b.base_kv = dbl_from_str(xget(a, {"NominalV"})) / 1000.0;
+    b.in_service = bool_from_str(xget(a, {"InService"}), true);
+    dc2idx[to_upper(id)] = b.index;
+    dc2kv[to_upper(id)] = b.base_kv;
+    sys.dc.buses.push_back(std::move(b));
+  }
+
+  auto add_lines = [&](const char* tag) {
+    int li = static_cast<int>(sys.ac.branches.size());
+    for (const auto& a : elems[to_upper(tag)]) {
+      const std::string id = xget(a, {"ID"});
+      if (id.empty()) continue;
+      ACBranch br;
+      br.index = ++li;
+      br.name = id;
+      const std::string fb = xget(a, {"FromBus"});
+      br.from_bus = resolve(ac2idx, fb);
+      br.to_bus = resolve(ac2idx, xget(a, {"ToBus"}));
+      const double zb = z_base(resolve_kv(ac2kv, fb), sys.base_mva);
+      br.r_pu = dbl_from_str(xget(a, {"RPos", "RPosValue"})) / zb;
+      br.x_pu = dbl_from_str(xget(a, {"XPos", "XPosValue"})) / zb;
+      br.b_pu = dbl_from_str(xget(a, {"YPos", "YPosValue"})) * zb;
+      br.length_km = dbl_from_str(xget(a, {"Length", "LengthValue"}));
+      br.in_service = bool_from_str(xget(a, {"InService"}), true);
+      sys.ac.branches.push_back(std::move(br));
+    }
+  };
+  add_lines("XLINE");
+  add_lines("CABLE");
+
+  idx = 0;
+  for (const auto& a : elems["XFORM2W"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Transformer2W t;
+    t.index = ++idx;
+    t.name = id;
+    t.hv_bus = resolve(ac2idx, xget(a, {"FromBus"}));
+    t.lv_bus = resolve(ac2idx, xget(a, {"ToBus"}));
+    t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV"}));
+    t.vn_lv_kv = dbl_from_str(xget(a, {"SeckV"}));
+    t.sn_mva = dbl_from_str(xget(a, {"ZBaseMVA", "AnsiMVA"})) / 1000.0;
+    t.vk_percent = dbl_from_str(xget(a, {"AnsiPosZ"}));
+    t.vkr_percent = dbl_from_str(xget(a, {"PosR"}));
+    t.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.transformers_2w.push_back(std::move(t));
+  }
+
+  idx = 0;
+  for (const auto& a : elems["UTIL"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    ExternalGrid g;
+    g.index = ++idx;
+    g.name = id;
+    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.vn_kv = dbl_from_str(xget(a, {"KV"}));
+    g.vm_pu = volt_pu(xget(a, {"VoltageMagnitude", "OpVMag"}), 1.0);
+    g.r_pu = dbl_from_str(xget(a, {"PosR"}));
+    g.x_pu = dbl_from_str(xget(a, {"PosX"}));
+    g.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.external_grids.push_back(std::move(g));
+  }
+
+  idx = 0;
+  for (const auto& a : elems["SYNGEN"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Generator g;
+    g.index = ++idx;
+    g.name = id;
+    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.vn_kv = dbl_from_str(xget(a, {"KV"}));
+    g.pg_mw = dbl_from_str(xget(a, {"PG", "MW"}));
+    g.pmax_mw = dbl_from_str(xget(a, {"MW"}));
+    g.mbase_mva = dbl_from_str(xget(a, {"MVA"}));
+    g.cos_phi = dbl_from_str(xget(a, {"PowerFactor"}), 1.0);
+    g.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.generators.push_back(std::move(g));
+  }
+
+  idx = 0;
+  for (const auto& a : elems["PVARRAY"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    PVSystem p;
+    p.index = ++idx;
+    p.name = id;
+    p.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    p.p_mw = dbl_from_str(xget(a, {"PVAPower"})) / 1000.0;  // kW -> MW
+    p.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.pv_systems.push_back(std::move(p));
+  }
+
+  idx = 0;
+  for (const auto& a : elems["LUMPEDLOAD"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Load l;
+    l.index = ++idx;
+    l.name = id;
+    l.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    l.p_mw = dbl_from_str(xget(a, {"OpMW"}));
+    l.q_mvar = dbl_from_str(xget(a, {"OpMvar"}));
+    if (std::abs(l.p_mw) < 1e-12 && std::abs(l.q_mvar) < 1e-12) {
+      const double mva = dbl_from_str(xget(a, {"MVA"}));
+      if (mva > 0.0) {
+        const double pf = pf_fraction(dbl_from_str(xget(a, {"PF"}), 100.0));
+        l.p_mw = mva * pf;
+        l.q_mvar = mva * std::sqrt(std::max(0.0, 1.0 - pf * pf));
+      }
+    }
+    sys.ac.loads.push_back(std::move(l));
+  }
+
+  idx = 0;
+  for (const auto& a : elems["DCLUMPLOAD"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    DCLoad l;
+    l.index = ++idx;
+    l.name = id;
+    l.bus = resolve(dc2idx, xget(a, {"Bus"}));
+    l.p_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;
+    l.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.dc.loads.push_back(std::move(l));
+  }
+
+  // VSC converters (AC<->DC).  ETAP XML exposes the AC bus; the DC terminal is
+  // resolved best-effort and may be left unset.
+  auto add_vsc = [&](const char* tag, const char* type_tag) {
+    int vi = static_cast<int>(sys.vsc_converters.size());
+    for (const auto& a : elems[to_upper(tag)]) {
+      const std::string id = xget(a, {"ID"});
+      if (id.empty()) continue;
+      VSCConverter v;
+      v.index = ++vi;
+      v.name = id;
+      v.type = type_tag;
+      v.bus_ac = resolve(ac2idx, xget(a, {"BusID", "Bus", "ACBus"}));
+      v.bus_dc = resolve(dc2idx, xget(a, {"DCBus", "DcBusID", "OutputBus"}));
+      v.in_service = bool_from_str(xget(a, {"InService"}), true);
+      sys.vsc_converters.push_back(std::move(v));
+    }
+  };
+  add_vsc("INVERTER", "INVERTER");
+  add_vsc("CHARGER", "CHARGER");
+
+  idx = 0;
+  for (const auto& a : elems["BATTERY"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Storage s;
+    s.index = ++idx;
+    s.name = id;
+    s.bus = resolve(dc2idx, xget(a, {"Bus"}));
+    s.eta_charge = dbl_from_str(xget(a, {"Eff"}), s.eta_charge);
+    s.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.dc.storage.push_back(std::move(s));
+  }
+
+  add_count(report, "BUS", static_cast<int>(sys.ac.buses.size()));
+  add_count(report, "XLINE", static_cast<int>(sys.ac.branches.size()));
+  add_count(report, "XFORM2W", static_cast<int>(sys.ac.transformers_2w.size()));
+  add_count(report, "UTIL", static_cast<int>(sys.ac.external_grids.size()));
+  add_count(report, "SYNGEN", static_cast<int>(sys.ac.generators.size()));
+  add_count(report, "PVARRAY", static_cast<int>(sys.ac.pv_systems.size()));
+  add_count(report, "LUMPEDLOAD", static_cast<int>(sys.ac.loads.size()));
+  add_count(report, "DCBUS", static_cast<int>(sys.dc.buses.size()));
+  add_count(report, "DCLUMPLOAD", static_cast<int>(sys.dc.loads.size()));
+  add_count(report, "BATTERY", static_cast<int>(sys.dc.storage.size()));
+
+  // CHARGER/INVERTER counts are tracked together as VSC converters.
+  derive_bus_types(sys);
+  validate_refs(sys, mode, report);
+  return sys;
+}
+
+HybridPowerSystem load_etap_xml(const std::string& path) {
+  EtapIoReport report;
+  return load_etap_xml(path, EtapImportMode::Permissive, report);
 }
 
 }  // namespace hacdcpf::io

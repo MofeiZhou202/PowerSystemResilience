@@ -22,6 +22,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
@@ -428,6 +429,9 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
     <span class="sep"></span>
     <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
     <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
+    <span class="sep"></span>
+    <input type="file" id="etapXmlInput" accept=".xml" title="Import a native ETAP project XML (Feeder.xml)"/>
+    <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
     <span class="sep"></span>
     <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
     <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
@@ -1253,6 +1257,13 @@ document.getElementById('uploadJsonBtn').onclick=()=>{
   if(!fi.files.length){setStatus('Select a JSON file first.',true);return;}
   const reader=new FileReader();
   reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
+  reader.readAsText(fi.files[0]);
+};
+document.getElementById('loadEtapXmlBtn').onclick=()=>{
+  const fi=document.getElementById('etapXmlInput');
+  if(!fi.files.length){setStatus('Select an ETAP project .xml file first.',true);return;}
+  const reader=new FileReader();
+  reader.onload=()=>loadSystem('/api/session/load_etap_xml',{xml_string:reader.result});
   reader.readAsText(fi.files[0]);
 };
 document.getElementById('exportJsonBtn').onclick=async()=>{
@@ -3971,6 +3982,37 @@ int main(int argc, char** argv) {
       out["json_string"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       out["name"] = g_session.current_name;
       res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import a native ETAP project XML (e.g. Feeder.xml) ----
+  svr.Post("/api/session/load_etap_xml",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string xml = j.value("xml_string", "");
+      if (xml.empty()) throw std::runtime_error("Empty ETAP XML string");
+      const std::string tmp =
+          (std::filesystem::temp_directory_path() / "hacdcpf_gui_etap.xml").string();
+      { std::ofstream ofs(tmp, std::ios::binary); ofs << xml; }
+      hacdcpf::io::EtapIoReport rep;
+      auto sys = hacdcpf::io::load_etap_xml(
+          tmp, hacdcpf::io::EtapImportMode::Permissive, rep);
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name;
+      g_session.last_pf_result.reset();
+      g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_etap_warnings"] = rep.warnings;
+      res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");

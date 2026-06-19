@@ -22,11 +22,13 @@ namespace {
 
 int usage(const char* prog) {
   std::cerr
-      << "Usage: " << prog << " <mode> <input> <output> [--strict]\n"
+      << "Usage: " << prog << " <mode> <input> [output] [--strict]\n"
       << "  modes:\n"
       << "    etap2json   ETAP .xlsx  -> hacdcpf .json\n"
+      << "    xml2json    ETAP project .xml (Feeder.xml) -> hacdcpf .json\n"
       << "    json2etap   hacdcpf .json -> ETAP .xlsx\n"
-      << "    etap2etap   ETAP .xlsx  -> ETAP .xlsx   (normalise)\n";
+      << "    etap2etap   ETAP .xlsx  -> ETAP .xlsx   (normalise)\n"
+      << "    fidelity    ETAP .xlsx  (report fields lost on re-export)\n";
   return 2;
 }
 
@@ -36,13 +38,12 @@ int main(int argc, char** argv) {
   using namespace hacdcpf;
   using namespace hacdcpf::io;
 
-  if (argc < 4) return usage(argv[0]);
+  if (argc < 3) return usage(argv[0]);
 
   const std::string mode = argv[1];
   const std::string in = argv[2];
-  const std::string out = argv[3];
   bool strict = false;
-  for (int i = 4; i < argc; ++i) {
+  for (int i = 3; i < argc; ++i) {
     if (std::string(argv[i]) == "--strict") strict = true;
   }
   const EtapImportMode imode =
@@ -50,8 +51,23 @@ int main(int argc, char** argv) {
 
   try {
     EtapIoReport rep;
+    if (mode == "fidelity") {
+      const HybridPowerSystem sys = load_etap(in, imode, rep);
+      const EtapFidelityReport fr = etap_fidelity_check(sys);
+      std::cout << "fidelity: " << (fr.lossless ? "LOSSLESS" : "LOSSY") << "  ("
+                << fr.fields_mismatched << "/" << fr.fields_checked
+                << " fields differ)\n";
+      for (const auto& m : fr.mismatches) std::cout << "  " << m << "\n";
+      return fr.lossless ? 0 : 3;
+    }
+
+    if (argc < 4) return usage(argv[0]);
+    const std::string out = argv[3];
     if (mode == "etap2json") {
       const HybridPowerSystem sys = load_etap(in, imode, rep);
+      save_json(sys, out);
+    } else if (mode == "xml2json") {
+      const HybridPowerSystem sys = load_etap_xml(in, imode, rep);
       save_json(sys, out);
     } else if (mode == "json2etap") {
       const HybridPowerSystem sys = load_json(in);
