@@ -110,20 +110,29 @@ std::vector<int> find_dc_island_slacks(const SolverData& data) {
     ++num_components;
   }
 
-  // For each component, find the best slack bus (prefer DC_V, else first bus)
+  // For each component, find the best slack bus.  Preference order:
+  //   DC_V (voltage reference) > first non-isolated bus > first bus.
+  // DC_ISOLATED buses are de-energized and are only used as an anchor for a
+  // degenerate all-isolated component (where no other bus exists).
   std::vector<int> dc_slacks;
   dc_slacks.reserve(static_cast<size_t>(num_components));
   for (int c = 0; c < num_components; ++c) {
     int slack_bus = -1;
+    int first_non_isolated = -1;
     int first_bus_in_component = -1;
     for (int i = 0; i < ndc; ++i) {
       if (component[static_cast<size_t>(i)] != c) continue;
       if (first_bus_in_component < 0) first_bus_in_component = i;
-      if (data.dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_V) {
+      const auto bt = data.dc_buses[static_cast<size_t>(i)].bus_type;
+      if (bt == DCBusType::DC_V) {
         slack_bus = i;
         break;  // Found DC_V bus, use it
       }
+      if (first_non_isolated < 0 && bt != DCBusType::DC_ISOLATED) {
+        first_non_isolated = i;
+      }
     }
+    if (slack_bus < 0) slack_bus = first_non_isolated;
     if (slack_bus < 0) slack_bus = first_bus_in_component;
     if (slack_bus >= 0) dc_slacks.push_back(slack_bus);
   }
@@ -298,9 +307,14 @@ JacobianContext build_jacobian_context(const std::vector<ACBus>& ac_buses,
   // Build set of DC slack buses for O(1) lookup
   std::unordered_set<int> dc_slack_set(dc_slacks.begin(), dc_slacks.end());
   for (int i = 0; i < ndc; ++i) {
-    if (dc_slack_set.find(i) == dc_slack_set.end()) {
-      dc_non_slack.push_back(i);
+    if (dc_slack_set.find(i) != dc_slack_set.end()) continue;
+    // Isolated DC buses are de-energized and held at fixed voltage, so they are
+    // excluded from the solved equation set (mirrors DCSolver::solve).
+    if (data != nullptr && i < static_cast<int>(data->dc_buses.size()) &&
+        data->dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_ISOLATED) {
+      continue;
     }
+    dc_non_slack.push_back(i);
   }
 
   const int np = static_cast<int>(non_slack.size());

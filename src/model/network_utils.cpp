@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "hacdcpf/model/unit_conversion.hpp"
+
 namespace hacdcpf {
 
 namespace {
@@ -1798,6 +1800,11 @@ static void project_in_place(HybridPowerSystem& out) {
   if (out.dc.base_mva <= 1e-9) {
     out.dc.base_mva = out.base_mva;
   }
+
+  // Fill in per-unit branch impedances from any actual (ohm/km) engineering
+  // data so that the rest of projection and every downstream solver can start
+  // from real physical values.  No-op for systems already given in per-unit.
+  convert_actual_to_per_unit(out);
 
   project_three_phase_if_needed(out);
 

@@ -23,6 +23,9 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
+hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
+
 # Rich components: Transformer2W/3W, PVSystem, Storage, VSCConverter, etc.
 hacdcpf_add_test(test_rich_components     test_rich_components.cpp)
 

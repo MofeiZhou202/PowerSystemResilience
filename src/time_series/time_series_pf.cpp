@@ -442,14 +442,23 @@ DCGridData build_dc_grid(const HybridPowerSystem& sys) {
   dcg.n_dc_bus = static_cast<int>(sys.dc.buses.size());
   if (dcg.n_dc_bus == 0) return dcg;
 
-  // Find DC voltage-controlled (slack) bus
+  // Find DC voltage-controlled (slack) bus.  Prefer a DC_V reference; otherwise
+  // anchor on the first non-isolated bus.  DC_ISOLATED buses are de-energized
+  // and are only used as a fallback anchor when nothing else exists.
+  int first_non_isolated = -1;
   for (int i = 0; i < dcg.n_dc_bus; ++i) {
-    if (sys.dc.buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_V) {
+    const auto bt = sys.dc.buses[static_cast<size_t>(i)].bus_type;
+    if (bt == DCBusType::DC_V) {
       dcg.dc_slack_bus = i;
       break;
     }
+    if (first_non_isolated < 0 && bt != DCBusType::DC_ISOLATED) {
+      first_non_isolated = i;
+    }
   }
-  if (dcg.dc_slack_bus < 0) dcg.dc_slack_bus = 0;
+  if (dcg.dc_slack_bus < 0) {
+    dcg.dc_slack_bus = (first_non_isolated >= 0) ? first_non_isolated : 0;
+  }
 
   for (int i = 0; i < dcg.n_dc_bus; ++i) {
     if (i != dcg.dc_slack_bus) dcg.non_slack_dc.push_back(i);

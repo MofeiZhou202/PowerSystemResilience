@@ -150,10 +150,30 @@ Field group & Detailed explanation & Used by \\
 \endhead
 Connectivity & \texttt{index}, \texttt{from\_bus}, \texttt{to\_bus}, \texttt{in\_service}, \texttt{name}.  Bus references use external bus IDs. & PF, OPF \\
 Positive-sequence electrical data & \texttt{r\_pu}, \texttt{x\_pu}, \texttt{b\_pu}, \texttt{tap}, \texttt{shift\_deg}.  These define the AC \(\pi\)-model and branch-flow reporting. & PF, OPF \\
+Actual (engineering) values & \texttt{r\_ohm\_per\_km}, \texttt{x\_ohm\_per\_km}, \texttt{b\_us\_per\_km}, \texttt{c\_nf\_per\_km} together with \texttt{length\_km}, \texttt{n\_parallel} and the from-bus \texttt{base\_kv}.  When per-unit data is absent these supply the impedance instead (see the conversion note below). & projection (pre-solve) \\
 Ratings and physical metadata & \texttt{rate\_a\_mva}, \texttt{rate\_b\_mva}, \texttt{rate\_c\_mva}, \texttt{length\_km}.  \texttt{rate\_a\_mva} is used directly by OPF thermal limits. & OPF, reporting \\
 Reliability and sequence data & \texttt{failure\_rate}, \texttt{mttr\_hr}, \texttt{r0\_pu}, \texttt{x0\_pu}, \texttt{b0\_pu}, and transformer-nameplate fields \texttt{vn\_hv\_kv}, \texttt{vn\_lv\_kv}, \texttt{sn\_mva}.  These are stored for planning/fault-model extensions, but no public SC solver is present. & model/I/O metadata \\
 \bottomrule
 \end{longtable}
+
+\paragraph{Actual-value to per-unit conversion.}
+A branch may be specified either directly in per-unit (\texttt{r\_pu}, \texttt{x\_pu},
+\texttt{b\_pu}) or with engineering ``actual'' values --- resistance/reactance per
+kilometre, line length and a per-bus base voltage --- as produced by ETAP/OpenDSS
+style importers.  The routine \texttt{convert\_actual\_to\_per\_unit} (run at the
+start of \texttt{project\_to\_canonical\_models}) bridges the two: for any AC branch
+whose per-unit impedance is still zero but which carries
+\texttt{r\_ohm\_per\_km}/\texttt{x\_ohm\_per\_km} with a positive \texttt{length\_km}
+and from-bus \texttt{base\_kv}, it fills
+\[
+  r_{pu} = \frac{r_{\Omega/\mathrm{km}}\,\ell_{\mathrm{km}}/n_\parallel}{Z_\text{base}},\quad
+  x_{pu} = \frac{x_{\Omega/\mathrm{km}}\,\ell_{\mathrm{km}}/n_\parallel}{Z_\text{base}},\quad
+  Z_\text{base} = \frac{V_\text{base}^2}{S_\text{base}},
+\]
+and analogously \(b_{pu}=B_{[\mathrm S]}\,Z_\text{base}\) from \texttt{b\_us\_per\_km}.
+DC branches use the same base-impedance rule with \texttt{r\_ohm\_per\_km} and the DC
+base voltage.  The conversion is non-destructive and idempotent --- branches already
+given in per-unit are untouched --- so existing per-unit cases are unaffected.
 
 \subsubsection*{\texttt{Transformer2W}, \texttt{Transformer3W}, \texttt{Switch}, and \texttt{CircuitBreaker}}
 \begin{longtable}{L{0.20\linewidth}L{0.53\linewidth}L{0.19\linewidth}}
@@ -220,8 +240,8 @@ Struct & Field-level explanation & Current treatment \\
 Struct & Field-level explanation & Current treatment \\
 \midrule
 \endhead
-\texttt{DCBus} & \texttt{index}, \texttt{bus\_type}, \texttt{vm\_pu}, \texttt{vmax\_pu}, \texttt{vmin\_pu}, \texttt{pd\_mw}, \texttt{in\_service}, \texttt{name}, \texttt{base\_kv}, \texttt{area}, \texttt{zone}, \texttt{n\_customers}, \texttt{importance}, \texttt{is\_load}, \texttt{latitude}, \texttt{longitude}.  \texttt{pd\_mw} is used only when the dedicated DC load table is empty. & direct \\
-\texttt{DCBranch} & \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{rate\_a\_mva}, \texttt{length\_km}, \texttt{base\_kv}, \texttt{s\_max\_mva}, \texttt{n\_parallel}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{t\_scheduled\_hr}, \texttt{in\_service}. & direct \\
+\texttt{DCBus} & \texttt{index}, \texttt{bus\_type}, \texttt{vm\_pu}, \texttt{vmax\_pu}, \texttt{vmin\_pu}, \texttt{pd\_mw}, \texttt{in\_service}, \texttt{name}, \texttt{base\_kv}, \texttt{area}, \texttt{zone}, \texttt{n\_customers}, \texttt{importance}, \texttt{is\_load}, \texttt{latitude}, \texttt{longitude}.  \texttt{pd\_mw} is used only when the dedicated DC load table is empty.  \texttt{bus\_type} is one of \texttt{DC\_P} (active-power bus), \texttt{DC\_V} (voltage reference / DC slack), or \texttt{DC\_ISOLATED} (de-energized bus): an isolated bus is treated as out of service by the graph/island detection, is never chosen as a voltage anchor for an energized island, and is held at fixed voltage and removed from the solved DC equation set so it cannot make the Jacobian singular. & direct \\
+\texttt{DCBranch} & \texttt{from\_bus}, \texttt{to\_bus}, \texttt{r\_pu}, \texttt{rate\_a\_mva}, \texttt{length\_km}, \texttt{base\_kv}, \texttt{s\_max\_mva}, \texttt{n\_parallel}, \texttt{r\_ohm\_per\_km}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{t\_scheduled\_hr}, \texttt{in\_service}.  \texttt{r\_ohm\_per\_km} (with \texttt{length\_km} and a base voltage) supplies \texttt{r\_pu} when the latter is zero, via the actual-value conversion described for \texttt{ACBranch}. & direct \\
 \texttt{StaticGeneratorDC} & \texttt{index}, \texttt{bus}, \texttt{in\_service}, \texttt{name}, \texttt{type}, \texttt{p\_set\_mw}, \texttt{scaling}, \texttt{profile\_id}, \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{controllable}, \texttt{mtbf\_hours}, \texttt{mttr\_hours}, \texttt{t\_scheduled\_hr}. & stored in \texttt{dc.dc\_static\_generators}; serialized as its own DC source family \\
 \texttt{PVArrayDC} & \texttt{index}, \texttt{bus}, \texttt{in\_service}, \texttt{name}, \texttt{p\_set\_mw}, \texttt{profile\_id}, array electrical parameters, environmental state, and reliability fields. & stored in \texttt{dc.pv\_arrays}; serialized as its own DC PV family \\
 \texttt{DCCircuitBreaker} & \texttt{index}, \texttt{name}, \texttt{bus\_from}, \texttt{bus\_to}, \texttt{in\_service}, \texttt{breaker\_type}, \texttt{closed}, \texttt{r\_ohm}, \texttt{rated\_voltage\_kv}, \texttt{i\_rated\_ka}, \texttt{i\_breaking\_ka}, \texttt{element\_type}, \texttt{element\_id}. & stored and serialized; no current projection equivalent \\

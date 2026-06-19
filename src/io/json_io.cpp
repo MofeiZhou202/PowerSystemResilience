@@ -178,14 +178,17 @@ static std::string jget_ac_bus_type_str(const json& j) {
   return "PQ";
 }
 
-// Same for DC buses: MATPOWER codes 1=DC_P, 3=DC_V; JPC codes 1=DC_P, 2=DC_V.
+// Same for DC buses: MATPOWER codes 1=DC_P, 3=DC_V, 4=DC_ISOLATED;
+// JPC codes 1=DC_P, 2=DC_V, 4=DC_ISOLATED.
 static std::string jget_dc_bus_type_str(const json& j) {
   if (!j.contains("bus_type") || j["bus_type"].is_null()) return "DC_P";
   const auto& v = j["bus_type"];
   if (v.is_string()) return v.get<std::string>();
   if (v.is_number_integer()) {
     const int code = v.get<int>();
-    // Accept both MATPOWER (3=DC_V) and JPC (2=DC_V) integer conventions.
+    // Accept both MATPOWER (3=DC_V) and JPC (2=DC_V) integer conventions;
+    // 4 denotes an isolated/de-energized DC bus in both conventions.
+    if (code == 4) return "DC_ISOLATED";
     return (code == 2 || code == 3) ? "DC_V" : "DC_P";
   }
   return "DC_P";
@@ -297,6 +300,8 @@ static json dc_branch_to_json(const DCBranch& br) {
   j["in_service"] = br.in_service;
   j["name"] = br.name;
   j["length_km"] = br.length_km;
+  j["base_kv"] = br.base_kv;
+  j["r_ohm_per_km"] = br.r_ohm_per_km;
   return j;
 }
 
@@ -310,6 +315,8 @@ static DCBranch dc_branch_from_json(const json& j) {
   br.in_service = jget(j, "in_service", true);
   br.name = jget<std::string>(j, "name", "");
   br.length_km = jget(j, "length_km", 0.0);
+  br.base_kv = jget(j, "base_kv", 0.0);
+  br.r_ohm_per_km = jget(j, "r_ohm_per_km", 0.0);
   return br;
 }
 
@@ -3231,9 +3238,10 @@ static BusType jpc_to_bus_type(int bt) {
 // Helper: DC bus type to JPC integer
 static int dc_bus_type_to_jpc(DCBusType bt) {
   switch (bt) {
-    case DCBusType::DC_P: return 1;
-    case DCBusType::DC_V: return 2;
-    default:              return 1;  // DC_P default
+    case DCBusType::DC_P:        return 1;
+    case DCBusType::DC_V:        return 2;
+    case DCBusType::DC_ISOLATED: return 4;
+    default:                    return 1;  // DC_P default
   }
 }
 
@@ -3242,6 +3250,7 @@ static DCBusType jpc_to_dc_bus_type(int bt) {
   switch (bt) {
     case 1:  return DCBusType::DC_P;
     case 2:  return DCBusType::DC_V;
+    case 4:  return DCBusType::DC_ISOLATED;
     default: return DCBusType::DC_P;
   }
 }

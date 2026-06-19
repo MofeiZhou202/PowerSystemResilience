@@ -181,6 +181,32 @@ TEST_CASE("DC power flow: IEEE14 AC/DC", "[power_flow][dc]") {
   CHECK(result.converged);
 }
 
+TEST_CASE("DC power flow: isolated DC bus does not break the solve",
+          "[power_flow][dc][isolated]") {
+  using namespace hacdcpf;
+
+  // Start from a known-good hybrid case and append an unconnected DC bus that
+  // is explicitly typed DC_ISOLATED.  Without isolated-bus handling this bus
+  // would contribute a zero row/column to the DC system and make the Jacobian
+  // singular; the solve must still converge.
+  auto sys = hacdcpf::io::build_ieee14_acdc();
+  int max_idx = 0;
+  for (const auto& b : sys.dc.buses) max_idx = std::max(max_idx, b.index);
+
+  DCBus iso;
+  iso.index      = max_idx + 1;
+  iso.bus_type   = DCBusType::DC_ISOLATED;
+  iso.vm_pu      = 1.0;
+  iso.pd_mw      = 2.0;       // a load that is intentionally stranded
+  iso.in_service = true;
+  iso.name       = "DC_ISOLATED";
+  sys.dc.buses.push_back(iso);
+
+  auto result = solve_dc_power_flow(sys);
+  CHECK(result.converged);
+  for (double v : result.vdc) CHECK(std::isfinite(v));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests: FDPF solver
 // ═══════════════════════════════════════════════════════════════════════════════

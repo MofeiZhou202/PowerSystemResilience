@@ -976,3 +976,53 @@ TEST_CASE("Pendant recovery: DC-only caller via legacy bus_voltage fallback",
     REQUIRE(voltages.dc_bus_voltage.at(rec.eliminated_bus_id).real() > 0.80);
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DC_ISOLATED bus type — graph / island handling
+// ═══════════════════════════════════════════════════════════════════════
+
+TEST_CASE("DC_ISOLATED bus is excluded from graph topology and islands",
+          "[graph][topology][dc][isolated]") {
+  // DC island A: bus 1 (DC_V) -- bus 2 (DC_P), valid (has voltage ref).
+  // DC bus 3 is DC_ISOLATED with no in-service connection — it must be
+  // treated as out of service: not part of any island, no NoDCVoltageRef.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V;        d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P;        d2.pd_mw = 5.0; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_ISOLATED; d3.pd_mw = 5.0; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+
+  DCBranch dl0; dl0.index = 0; dl0.from_bus = 1; dl0.to_bus = 2;
+    dl0.r_pu = 0.10; dl0.in_service = true;
+  sys.dc.branches = {dl0};
+
+  auto g   = build_power_system_graph(sys);
+  auto rep = analyze_topology(g);
+
+  // The isolated DC node must exist in the map but be marked out of service.
+  REQUIRE(g.dc_bus_id_to_node_idx.count(3) > 0);
+  const int iso_node = g.dc_bus_id_to_node_idx.at(3);
+  REQUIRE(g.nodes[static_cast<size_t>(iso_node)].in_service == false);
+
+  // Bus 3 must not appear in any island's dc_bus_ids.
+  bool iso_in_island = false;
+  bool island_12_valid = false;
+  for (const auto& isl : rep.islands) {
+    bool has1 = false, has2 = false;
+    for (int bid : isl.dc_bus_ids) {
+      if (bid == 1) has1 = true;
+      if (bid == 2) has2 = true;
+      if (bid == 3) iso_in_island = true;
+    }
+    if (has1 && has2 && isl.status == IslandStatus::Valid) island_12_valid = true;
+  }
+  REQUIRE(iso_in_island == false);
+  REQUIRE(island_12_valid == true);
+
+  // No NoDCVoltageRef diagnostic should be raised for the isolated bus.
+  for (const auto& d : rep.diagnostics)
+    REQUIRE(d.code != DiagCode::GraphNoDCVoltageRef);
+}
+
