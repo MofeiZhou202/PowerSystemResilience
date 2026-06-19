@@ -1643,10 +1643,16 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       br.from_bus = resolve(ac2idx, fb);
       br.to_bus = resolve(ac2idx, xget(a, {"ToBus"}));
       const double zb = z_base(resolve_kv(ac2kv, fb), sys.base_mva);
-      br.r_pu = dbl_from_str(xget(a, {"RPos", "RPosValue"})) / zb;
-      br.x_pu = dbl_from_str(xget(a, {"XPos", "XPosValue"})) / zb;
-      br.b_pu = dbl_from_str(xget(a, {"YPos", "YPosValue"})) * zb;
-      br.length_km = dbl_from_str(xget(a, {"Length", "LengthValue"}));
+      br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RPos", "RPosValue"})) / zb;
+      br.x_pu = dbl_from_str(xget(a, {"X_ohm", "XPos", "XPosValue"})) / zb;
+      br.b_pu = dbl_from_str(xget(a, {"B_S", "YPos", "YPosValue"})) * zb;
+      br.tap = dbl_from_str(xget(a, {"Tap"}), 1.0);
+      br.shift_deg = dbl_from_str(xget(a, {"ShiftDeg"}));
+      br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA", "RatedA"}));
+      br.length_km = dbl_from_str(xget(a, {"Length_km", "Length", "LengthValue"}));
+      br.failure_rate = dbl_from_str(xget(a, {"FailureRate", "OutageRate"}), br.failure_rate);
+      br.mttr_hr = dbl_from_str(xget(a, {"MTTR_hr"}), br.mttr_hr);
+      br.n_parallel = int_from_str(xget(a, {"N_parallel"}), br.n_parallel);
       br.in_service = bool_from_str(xget(a, {"InService"}), true);
       sys.ac.branches.push_back(std::move(br));
     }
@@ -1654,6 +1660,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
   add_lines("XLINE");
   add_lines("CABLE");
 
+  // ---- 2-winding transformers (XFORM2W) ----
   idx = 0;
   for (const auto& a : elems["XFORM2W"]) {
     const std::string id = xget(a, {"ID"});
@@ -1661,17 +1668,73 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Transformer2W t;
     t.index = ++idx;
     t.name = id;
-    t.hv_bus = resolve(ac2idx, xget(a, {"FromBus"}));
-    t.lv_bus = resolve(ac2idx, xget(a, {"ToBus"}));
-    t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV"}));
-    t.vn_lv_kv = dbl_from_str(xget(a, {"SeckV"}));
-    t.sn_mva = dbl_from_str(xget(a, {"ZBaseMVA", "AnsiMVA"})) / 1000.0;
-    t.vk_percent = dbl_from_str(xget(a, {"AnsiPosZ"}));
-    t.vkr_percent = dbl_from_str(xget(a, {"PosR"}));
+    t.hv_bus = resolve(ac2idx, xget(a, {"FromBus", "PrimaryBus", "HVBus"}));
+    t.lv_bus = resolve(ac2idx, xget(a, {"ToBus", "SecondaryBus", "LVBus"}));
+    t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV", "PrimKV"}));
+    t.vn_lv_kv = dbl_from_str(xget(a, {"SeckV", "SecKV"}));
+    {
+      const std::string sn = xget(a, {"Sn_MVA"});
+      t.sn_mva = !sn.empty() ? dbl_from_str(sn)
+                             : dbl_from_str(xget(a, {"ZBaseMVA", "AnsiMVA"})) / 1000.0;
+    }
+    t.vk_percent = dbl_from_str(xget(a, {"Z_percent", "AnsiPosZ"}));
+    // %R: use an explicit value if present, else derive from %Z and the X/R ratio.
+    {
+      const std::string zr = xget(a, {"ZR_percent", "PosR"});
+      if (!zr.empty()) {
+        t.vkr_percent = dbl_from_str(zr);
+      } else {
+        const double xr = dbl_from_str(xget(a, {"AnsiPosXR"}));
+        if (xr > 0.0 && t.vk_percent > 0.0)
+          t.vkr_percent = t.vk_percent / std::sqrt(1.0 + xr * xr);
+      }
+    }
+    t.shift_deg = dbl_from_str(xget(a, {"ShiftDeg"}));
+    t.pk_kw = dbl_from_str(xget(a, {"Pk_kW"}));
+    t.mtbf_hours = dbl_from_str(xget(a, {"MTBF_hr"}), t.mtbf_hours);
+    t.mttr_hours = dbl_from_str(xget(a, {"MTTR_hr"}), t.mttr_hours);
+    t.tap_side = int_from_str(xget(a, {"TapSide"}), t.tap_side);
+    t.tap_pos = int_from_str(xget(a, {"TapPos"}), t.tap_pos);
+    t.tap_min = int_from_str(xget(a, {"TapMin", "NegTapSetting"}), t.tap_min);
+    t.tap_max = int_from_str(xget(a, {"TapMax", "PosTapSetting"}), t.tap_max);
+    t.tap_neutral = int_from_str(xget(a, {"TapNeutral"}), t.tap_neutral);
+    t.tap_step_percent =
+        dbl_from_str(xget(a, {"TapStepPct", "PrimaryStepPercentTap"}), t.tap_step_percent);
     t.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.transformers_2w.push_back(std::move(t));
   }
 
+  // ---- 3-winding transformers (XFORM3W) ----
+  idx = 0;
+  for (const auto& a : elems["XFORM3W"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Transformer3W t;
+    t.index = ++idx;
+    t.name = id;
+    t.hv_bus = resolve(ac2idx, xget(a, {"HVBus", "PrimaryBus", "FromBus", "PrimBus"}));
+    t.mv_bus = resolve(ac2idx, xget(a, {"MVBus", "SecondaryBus", "SecBus"}));
+    t.lv_bus =
+        resolve(ac2idx, xget(a, {"LVBus", "TertiaryBus", "TeritiaryBus", "TerBus"}));
+    t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV", "PrimKV"}));
+    t.vn_mv_kv = dbl_from_str(xget(a, {"SeckV", "SecKV"}));
+    t.vn_lv_kv = dbl_from_str(xget(a, {"TerkV", "TerKV"}));
+    auto mva3 = [&](std::initializer_list<const char*> mn,
+                    std::initializer_list<const char*> kn) {
+      const std::string m = xget(a, mn);
+      return !m.empty() ? dbl_from_str(m) : dbl_from_str(xget(a, kn)) / 1000.0;
+    };
+    t.sn_hv_mva = mva3({"Sn_HV_MVA"}, {"PrimkVA", "PrimKVA"});
+    t.sn_mv_mva = mva3({"Sn_MV_MVA"}, {"SeckVA", "SecKVA"});
+    t.sn_lv_mva = mva3({"Sn_LV_MVA"}, {"TerkVA", "TerKVA"});
+    t.vk_hv_mv_percent = dbl_from_str(xget(a, {"Z_HV_MV_pct", "PSPosZ"}));
+    t.vk_hv_lv_percent = dbl_from_str(xget(a, {"Z_HV_LV_pct", "PTPosZ"}));
+    t.vk_mv_lv_percent = dbl_from_str(xget(a, {"Z_MV_LV_pct", "STPosZ"}));
+    t.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.transformers_3w.push_back(std::move(t));
+  }
+
+  // ---- External grids (UTIL) ----
   idx = 0;
   for (const auto& a : elems["UTIL"]) {
     const std::string id = xget(a, {"ID"});
@@ -1681,13 +1744,15 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     g.name = id;
     g.bus = resolve(ac2idx, xget(a, {"Bus"}));
     g.vn_kv = dbl_from_str(xget(a, {"KV"}));
-    g.vm_pu = volt_pu(xget(a, {"VoltageMagnitude", "OpVMag"}), 1.0);
-    g.r_pu = dbl_from_str(xget(a, {"PosR"}));
-    g.x_pu = dbl_from_str(xget(a, {"PosX"}));
+    g.vm_pu = volt_pu(xget(a, {"Vm_pu", "VoltageMagnitude", "OpVMag"}), 1.0);
+    g.va_deg = dbl_from_str(xget(a, {"Va_deg", "VoltageAngle", "OpVAng"}));
+    g.r_pu = dbl_from_str(xget(a, {"R_pu", "PosR"}));
+    g.x_pu = dbl_from_str(xget(a, {"X_pu", "PosX"}));
     g.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.external_grids.push_back(std::move(g));
   }
 
+  // ---- Synchronous generators (SYNGEN) ----
   idx = 0;
   for (const auto& a : elems["SYNGEN"]) {
     const std::string id = xget(a, {"ID"});
@@ -1697,14 +1762,27 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     g.name = id;
     g.bus = resolve(ac2idx, xget(a, {"Bus"}));
     g.vn_kv = dbl_from_str(xget(a, {"KV"}));
-    g.pg_mw = dbl_from_str(xget(a, {"PG", "MW"}));
-    g.pmax_mw = dbl_from_str(xget(a, {"MW"}));
+    g.pg_mw = dbl_from_str(xget(a, {"PG_MW", "PG", "MW"}));
+    g.qg_mvar = dbl_from_str(xget(a, {"QG_Mvar"}));
+    g.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW", "MW"}));
+    g.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
+    g.qmax_mvar = dbl_from_str(xget(a, {"Qmax_Mvar"}));
+    g.qmin_mvar = dbl_from_str(xget(a, {"Qmin_Mvar"}));
+    g.vg_pu = volt_pu(xget(a, {"Vg_pu", "VoltageMagnitude"}), g.vg_pu);
     g.mbase_mva = dbl_from_str(xget(a, {"MVA"}));
-    g.cos_phi = dbl_from_str(xget(a, {"PowerFactor"}), 1.0);
+    g.cos_phi = dbl_from_str(xget(a, {"CosPhi", "PowerFactor"}), g.cos_phi);
+    g.is_slack = bool_from_str(xget(a, {"IsSlack"}), false);
+    g.cost_c2 = dbl_from_str(xget(a, {"Cost_c2"}), g.cost_c2);
+    g.cost_c1 = dbl_from_str(xget(a, {"Cost_c1"}), g.cost_c1);
+    g.cost_c0 = dbl_from_str(xget(a, {"Cost_c0"}), g.cost_c0);
+    g.forced_outage_rate =
+        dbl_from_str(xget(a, {"FailureRate", "OutageRate"}), g.forced_outage_rate);
+    g.mttr_hr = dbl_from_str(xget(a, {"MTTR_hr"}), g.mttr_hr);
     g.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.generators.push_back(std::move(g));
   }
 
+  // ---- PV arrays (PVARRAY) ----
   idx = 0;
   for (const auto& a : elems["PVARRAY"]) {
     const std::string id = xget(a, {"ID"});
@@ -1713,11 +1791,44 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     p.index = ++idx;
     p.name = id;
     p.bus = resolve(ac2idx, xget(a, {"Bus"}));
-    p.p_mw = dbl_from_str(xget(a, {"PVAPower"})) / 1000.0;  // kW -> MW
+    {
+      const std::string pmw = xget(a, {"P_MW"});
+      p.p_mw = !pmw.empty() ? dbl_from_str(pmw)
+                            : dbl_from_str(xget(a, {"PVAPower"})) / 1000.0;  // kW -> MW
+    }
+    p.q_mvar = dbl_from_str(xget(a, {"Q_Mvar"}));
+    p.sn_mva = dbl_from_str(xget(a, {"Sn_MVA"}));
+    p.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW"}));
+    p.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
+    p.qmax_mvar = dbl_from_str(xget(a, {"Qmax_Mvar"}));
+    p.qmin_mvar = dbl_from_str(xget(a, {"Qmin_Mvar"}));
     p.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.pv_systems.push_back(std::move(p));
   }
 
+  // ---- Wind / renewable generators (WIND) ----
+  idx = 0;
+  for (const auto& a : elems["WIND"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    RenewableGen g;
+    g.index = ++idx;
+    g.name = id;
+    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.type = renewable_type_from_str(xget(a, {"Type"}));
+    g.p_mw = dbl_from_str(xget(a, {"P_MW"}));
+    g.q_mvar = dbl_from_str(xget(a, {"Q_Mvar"}));
+    g.p_rated_mw = dbl_from_str(xget(a, {"P_rated_MW"}));
+    g.qmax_mvar = dbl_from_str(xget(a, {"Qmax_Mvar"}));
+    g.qmin_mvar = dbl_from_str(xget(a, {"Qmin_Mvar"}));
+    g.curtailable = bool_from_str(xget(a, {"Curtailable"}), g.curtailable);
+    g.capacity_factor = dbl_from_str(xget(a, {"CapacityFactor"}), g.capacity_factor);
+    g.cost_curtail_mwh = dbl_from_str(xget(a, {"CostCurtail_MWh"}), g.cost_curtail_mwh);
+    g.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.renewable_gens.push_back(std::move(g));
+  }
+
+  // ---- Lumped loads (LUMPEDLOAD) ----
   idx = 0;
   for (const auto& a : elems["LUMPEDLOAD"]) {
     const std::string id = xget(a, {"ID"});
@@ -1726,8 +1837,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     l.index = ++idx;
     l.name = id;
     l.bus = resolve(ac2idx, xget(a, {"Bus"}));
-    l.p_mw = dbl_from_str(xget(a, {"OpMW"}));
-    l.q_mvar = dbl_from_str(xget(a, {"OpMvar"}));
+    l.p_mw = dbl_from_str(xget(a, {"P_MW", "OpMW"}));
+    l.q_mvar = dbl_from_str(xget(a, {"Q_Mvar", "OpMvar"}));
     if (std::abs(l.p_mw) < 1e-12 && std::abs(l.q_mvar) < 1e-12) {
       const double mva = dbl_from_str(xget(a, {"MVA"}));
       if (mva > 0.0) {
@@ -1736,9 +1847,81 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
         l.q_mvar = mva * std::sqrt(std::max(0.0, 1.0 - pf * pf));
       }
     }
+    l.scaling = dbl_from_str(xget(a, {"Scaling"}), 1.0);
+    l.model = load_model_from_str(xget(a, {"Model", "ModelType"}));
+    l.priority = load_priority_from_str(xget(a, {"Priority"}));
+    l.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.loads.push_back(std::move(l));
   }
 
+  // ---- Shunt capacitors (CAPACITOR) ----
+  idx = 0;
+  for (const auto& a : elems["CAPACITOR"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    Shunt sh;
+    sh.index = ++idx;
+    sh.name = id;
+    sh.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    sh.gs_mw = dbl_from_str(xget(a, {"Gs_MW"}));
+    sh.bs_mvar = dbl_from_str(xget(a, {"Bs_Mvar", "Mvar", "Kvar"}));
+    sh.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.shunts.push_back(std::move(sh));
+  }
+
+  // ---- AC circuit breakers (HVCB) ----
+  idx = 0;
+  for (const auto& a : elems["HVCB"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    CircuitBreaker cb;
+    cb.index = ++idx;
+    cb.name = id;
+    cb.bus_from = resolve(ac2idx, xget(a, {"FromBus"}));
+    cb.bus_to = resolve(ac2idx, xget(a, {"ToBus"}));
+    cb.closed = bool_from_str(xget(a, {"Closed"}), true);
+    cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV", "MaxkV"}));
+    cb.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.circuit_breakers.push_back(std::move(cb));
+  }
+
+  // ---- Induction motors (INDMOTOR) ----
+  idx = 0;
+  for (const auto& a : elems["INDMOTOR"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    AsynchronousMotor m;
+    m.index = ++idx;
+    m.name = id;
+    m.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    m.vn_kv = dbl_from_str(xget(a, {"KV"}));
+    m.sn_mva = dbl_from_str(xget(a, {"MVA"}));
+    m.r_pu = dbl_from_str(xget(a, {"R_pu"}));
+    m.x_pu = dbl_from_str(xget(a, {"X_pu"}));
+    m.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.ac.motors.push_back(std::move(m));
+  }
+
+  // ---- DC branches (DCIMPEDANCE) ----
+  idx = 0;
+  for (const auto& a : elems["DCIMPEDANCE"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    DCBranch br;
+    br.index = ++idx;
+    br.name = id;
+    const std::string fb = xget(a, {"FromBus"});
+    br.from_bus = resolve(dc2idx, fb);
+    br.to_bus = resolve(dc2idx, xget(a, {"ToBus"}));
+    const double zb = z_base(resolve_kv(dc2kv, fb), sys.base_mva);
+    br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RValue"})) / zb;
+    br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA"}));
+    br.length_km = dbl_from_str(xget(a, {"Length_km", "LengthValue"}));
+    br.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.dc.branches.push_back(std::move(br));
+  }
+
+  // ---- DC loads (DCLUMPLOAD) ----
   idx = 0;
   for (const auto& a : elems["DCLUMPLOAD"]) {
     const std::string id = xget(a, {"ID"});
@@ -1748,12 +1931,55 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     l.name = id;
     l.bus = resolve(dc2idx, xget(a, {"Bus"}));
     l.p_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;
+    l.scaling = dbl_from_str(xget(a, {"Scaling"}), 1.0);
     l.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.dc.loads.push_back(std::move(l));
   }
 
-  // VSC converters (AC<->DC).  ETAP XML exposes the AC bus; the DC terminal is
-  // resolved best-effort and may be left unset.
+  // ---- DC/DC converters (DCCONVERTER) ----
+  idx = 0;
+  for (const auto& a : elems["DCCONVERTER"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    DCDCConverter c;
+    c.index = ++idx;
+    c.name = id;
+    c.bus_in = resolve(dc2idx, xget(a, {"InputBus"}));
+    c.bus_out = resolve(dc2idx, xget(a, {"OutputBus"}));
+    c.p_ref_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;  // kW -> MW
+    c.eta = dbl_from_str(xget(a, {"PercentEFF", "DcPercentEFF"}), 98.0) / 100.0;
+    {
+      const std::string vin = xget(a, {"Vin_kV"});
+      c.vn_in_kv = !vin.empty() ? dbl_from_str(vin)
+                                : dbl_from_str(xget(a, {"InputV"})) / 1000.0;  // V -> kV
+      const std::string vout = xget(a, {"Vout_kV"});
+      c.vn_out_kv = !vout.empty() ? dbl_from_str(vout)
+                                  : dbl_from_str(xget(a, {"OutputV"})) / 1000.0;
+    }
+    c.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW"}));
+    c.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
+    c.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.dc.dcdc_converters.push_back(std::move(c));
+  }
+
+  // ---- DC circuit breakers (DCCB) ----
+  idx = 0;
+  for (const auto& a : elems["DCCB"]) {
+    const std::string id = xget(a, {"ID"});
+    if (id.empty()) continue;
+    DCCircuitBreaker cb;
+    cb.index = ++idx;
+    cb.name = id;
+    cb.bus_from = resolve(dc2idx, xget(a, {"FromBus"}));
+    cb.bus_to = resolve(dc2idx, xget(a, {"ToBus"}));
+    cb.closed = bool_from_str(xget(a, {"Closed"}), true);
+    cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV"}));
+    cb.in_service = bool_from_str(xget(a, {"InService"}), true);
+    sys.dc.dc_circuit_breakers.push_back(std::move(cb));
+  }
+
+  // ---- VSC converters (AC<->DC).  ETAP XML exposes the AC bus; the DC terminal
+  // is resolved best-effort and may be left unset. ----
   auto add_vsc = [&](const char* tag, const char* type_tag) {
     int vi = static_cast<int>(sys.vsc_converters.size());
     for (const auto& a : elems[to_upper(tag)]) {
@@ -1763,8 +1989,24 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       v.index = ++vi;
       v.name = id;
       v.type = type_tag;
-      v.bus_ac = resolve(ac2idx, xget(a, {"BusID", "Bus", "ACBus"}));
+      v.bus_ac = resolve(ac2idx, xget(a, {"ACBus", "BusID", "Bus"}));
       v.bus_dc = resolve(dc2idx, xget(a, {"DCBus", "DcBusID", "OutputBus"}));
+      v.control_mode = converter_mode_from_str(xget(a, {"Mode"}));
+      {
+        const std::string pac = xget(a, {"P_MW"});
+        v.p_set_mw = !pac.empty() ? dbl_from_str(pac)
+                                  : dbl_from_str(xget(a, {"OpAcKw", "DckW"})) / 1000.0;
+      }
+      v.q_set_mvar = dbl_from_str(xget(a, {"Q_Mvar"}));
+      v.v_dc_set_pu = dbl_from_str(xget(a, {"Vdc_set_pu"}), v.v_dc_set_pu);
+      v.v_ac_set_pu = dbl_from_str(xget(a, {"Vac_set_pu"}), v.v_ac_set_pu);
+      v.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW"}));
+      v.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
+      v.qmax_mvar = dbl_from_str(xget(a, {"Qmax_Mvar"}));
+      v.qmin_mvar = dbl_from_str(xget(a, {"Qmin_Mvar"}));
+      v.eta = dbl_from_str(xget(a, {"PercentEFF", "DcPercentEFF"}), 99.0) / 100.0;
+      v.vn_ac_kv = dbl_from_str(xget(a, {"Vac_kV", "KV"}));
+      v.vn_dc_kv = dbl_from_str(xget(a, {"Vdc_kV"}));
       v.in_service = bool_from_str(xget(a, {"InService"}), true);
       sys.vsc_converters.push_back(std::move(v));
     }
@@ -1772,6 +2014,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
   add_vsc("INVERTER", "INVERTER");
   add_vsc("CHARGER", "CHARGER");
 
+  // ---- Batteries (BATTERY) ----
   idx = 0;
   for (const auto& a : elems["BATTERY"]) {
     const std::string id = xget(a, {"ID"});
@@ -1780,7 +2023,15 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     s.index = ++idx;
     s.name = id;
     s.bus = resolve(dc2idx, xget(a, {"Bus"}));
-    s.eta_charge = dbl_from_str(xget(a, {"Eff"}), s.eta_charge);
+    s.p_mw = dbl_from_str(xget(a, {"P_MW", "OpGenDisChargeMW"}));
+    s.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW", "Rated"}));
+    s.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
+    s.e_rated_mwh = dbl_from_str(xget(a, {"E_MWh"}));
+    s.soc_init = dbl_from_str(xget(a, {"SoC"}), s.soc_init);
+    s.soc_min = dbl_from_str(xget(a, {"SoCMin"}), s.soc_min);
+    s.soc_max = dbl_from_str(xget(a, {"SoCMax"}), s.soc_max);
+    s.eta_charge = dbl_from_str(xget(a, {"EtaCh", "Eff"}), s.eta_charge);
+    s.eta_discharge = dbl_from_str(xget(a, {"EtaDis"}), s.eta_discharge);
     s.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.dc.storage.push_back(std::move(s));
   }
@@ -1788,15 +2039,23 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
   add_count(report, "BUS", static_cast<int>(sys.ac.buses.size()));
   add_count(report, "XLINE", static_cast<int>(sys.ac.branches.size()));
   add_count(report, "XFORM2W", static_cast<int>(sys.ac.transformers_2w.size()));
+  add_count(report, "XFORM3W", static_cast<int>(sys.ac.transformers_3w.size()));
   add_count(report, "UTIL", static_cast<int>(sys.ac.external_grids.size()));
   add_count(report, "SYNGEN", static_cast<int>(sys.ac.generators.size()));
   add_count(report, "PVARRAY", static_cast<int>(sys.ac.pv_systems.size()));
+  add_count(report, "WIND", static_cast<int>(sys.ac.renewable_gens.size()));
   add_count(report, "LUMPEDLOAD", static_cast<int>(sys.ac.loads.size()));
+  add_count(report, "CAPACITOR", static_cast<int>(sys.ac.shunts.size()));
+  add_count(report, "HVCB", static_cast<int>(sys.ac.circuit_breakers.size()));
+  add_count(report, "INDMOTOR", static_cast<int>(sys.ac.motors.size()));
   add_count(report, "DCBUS", static_cast<int>(sys.dc.buses.size()));
+  add_count(report, "DCIMPEDANCE", static_cast<int>(sys.dc.branches.size()));
   add_count(report, "DCLUMPLOAD", static_cast<int>(sys.dc.loads.size()));
+  add_count(report, "DCCONVERTER", static_cast<int>(sys.dc.dcdc_converters.size()));
+  add_count(report, "DCCB", static_cast<int>(sys.dc.dc_circuit_breakers.size()));
+  add_count(report, "VSC", static_cast<int>(sys.vsc_converters.size()));
   add_count(report, "BATTERY", static_cast<int>(sys.dc.storage.size()));
 
-  // CHARGER/INVERTER counts are tracked together as VSC converters.
   derive_bus_types(sys);
   validate_refs(sys, mode, report);
   return sys;

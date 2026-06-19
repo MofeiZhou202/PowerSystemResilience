@@ -10,6 +10,7 @@
 /// Tags: [io], [etap], [excel], [roundtrip]
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>

@@ -236,7 +236,44 @@ const App = (() => {
     log('已导出系统JSON', 'success');
   }
 
-  function importJson(file) {
+  // Export the current system as an ETAP-schema .xlsx workbook (one sheet per
+  // ETAP element class).  The workbook is generated server-side by save_etap();
+  // here we push the latest canvas to the backend (if edited), then stream the
+  // binary response to a browser download.
+  async function exportEtap() {
+    setStatus('导出ETAP中...', 'busy');
+    try {
+      // Make sure the backend session reflects any unsaved canvas edits.  A
+      // non-forced sync is a no-op when the canvas is unchanged, preserving the
+      // full-fidelity system originally loaded into the backend.
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const resp = await fetch('/api/session/export_etap', { method: 'POST' });
+      if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (_) {}
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      let filename = 'system.xlsx';
+      const cd = resp.headers.get('Content-Disposition');
+      if (cd) {
+        const m = /filename="?([^"]+)"?/.exec(cd);
+        if (m && m[1]) filename = m[1];
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      log(`已导出ETAP工作簿: ${filename}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出ETAP失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
@@ -1791,6 +1828,7 @@ const App = (() => {
       if (filename) loadMatpowerCase(filename);
     });
     document.getElementById('btnExportJson').addEventListener('click', exportJson);
+    document.getElementById('btnExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnImportJson').addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
     });

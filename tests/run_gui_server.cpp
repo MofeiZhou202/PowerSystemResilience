@@ -1,11 +1,13 @@
 #define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -3782,15 +3784,21 @@ int main(int argc, char** argv) {
       auto c1 = fs::current_path() / p;
       if (fs::exists(c1)) return c1.string();
     }
-    // Search common locations relative to cwd and executable
-    const std::vector<fs::path> candidates = {
+    // Search common locations relative to cwd and the compile-time source root
+    // so the server works regardless of cwd (repo root, build/, build/tests/).
+    std::vector<fs::path> candidates = {
         fs::current_path() / ".." / "data",
         fs::current_path() / "data",
+        fs::current_path() / ".." / ".." / "data",
         fs::current_path() / ".." / "matpower" / "data",
         fs::current_path() / "matpower" / "data",
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "data");
+#endif
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return p.string();
   }();
@@ -3806,14 +3814,18 @@ int main(int argc, char** argv) {
       auto c1 = fs::current_path() / p;
       if (fs::exists(c1)) return fs::canonical(c1).string();
     }
-    const std::vector<fs::path> candidates = {
+    std::vector<fs::path> candidates = {
         fs::current_path() / "external_data" / "matpower",
         fs::current_path() / ".." / "external_data" / "matpower",
         fs::current_path() / ".." / ".." / "external_data" / "matpower",
-        fs::path(data_dir),  // legacy fallback: matpower files in data dir
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower");
+#endif
+    candidates.push_back(fs::path(data_dir));  // legacy fallback: matpower files in data dir
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return p.string();
   }();
@@ -3983,6 +3995,55 @@ int main(int argc, char** argv) {
       out["name"] = g_session.current_name;
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the current system as an ETAP-schema .xlsx workbook ----
+  // Returns the raw binary workbook (one sheet per ETAP element class) so the
+  // browser can download it directly.  save_etap() throws if ETAP support is not
+  // compiled in (HACDCPF_ENABLE_ETAP off), which surfaces here as a 400 error.
+  svr.Post("/api/session/export_etap",
+           [](const httplib::Request&, httplib::Response& res) {
+    std::string tmp;
+    try {
+      std::string name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        name = g_session.current_name;
+        // Write to a unique temp workbook, then read the bytes back out.
+        static std::atomic<int> export_counter{0};
+        tmp = (std::filesystem::temp_directory_path() /
+               ("hacdcpf_gui_export_" +
+                std::to_string(export_counter.fetch_add(1)) + ".xlsx"))
+                  .string();
+        hacdcpf::io::EtapIoReport rep;
+        hacdcpf::io::save_etap(*g_session.current_system, tmp, rep);
+      }
+      std::ifstream ifs(tmp, std::ios::binary);
+      if (!ifs) throw std::runtime_error("Failed to read generated ETAP workbook");
+      std::string bytes((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+      ifs.close();
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      // Sanitize the system name into a safe download filename.
+      std::string safe;
+      for (char ch : name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_header("Content-Disposition",
+                     "attachment; filename=\"" + safe + ".xlsx\"");
+      res.set_content(
+          bytes,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    } catch (const std::exception& e) {
+      if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -7636,14 +7697,28 @@ int main(int argc, char** argv) {
     }
   });
 
-  // Serve static files for ETAP-like frontend from web/ directory
+  // Serve static files for the ETAP-style frontend from the web/ directory.
+  // The directory is located robustly so the canvas UI loads regardless of the
+  // working directory the binary is launched from (repo root, build/,
+  // build/tests/, an installed prefix, ...).  Previously only cwd/web and
+  // cwd/../web were tried, so launching the binary from its build location
+  // (build/tests/) silently skipped the mount and every /xjtu/ asset 404'd —
+  // i.e. the toolbars rendered but no JS loaded, so buttons and the canvas were
+  // dead.  HACDCPF_PROJECT_ROOT (a compile-time define for this target) is the
+  // authoritative fallback for an in-tree build.
   const auto web_dir = [&]() -> std::string {
-    const std::vector<fs::path> candidates = {
+    std::vector<fs::path> candidates = {
         fs::current_path() / "web",
         fs::current_path() / ".." / "web",
+        fs::current_path() / ".." / ".." / "web",
+        fs::current_path() / ".." / ".." / ".." / "web",
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "web");
+#endif
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return (fs::current_path() / "web").string();
   }();
@@ -7651,6 +7726,14 @@ int main(int argc, char** argv) {
     svr.set_mount_point("/xjtu", web_dir);
     std::cout << "XJTU frontend: http://" << args.host << ":" << args.port << "/xjtu/\n";
     std::cout << "  (serving from " << web_dir << ")\n";
+  } else {
+    std::cerr << "WARNING: web/ frontend directory not found.\n"
+              << "         Looked relative to cwd (" << fs::current_path().string() << ")"
+#ifdef HACDCPF_PROJECT_ROOT
+              << " and " << HACDCPF_PROJECT_ROOT
+#endif
+              << ".\n         The /xjtu/ canvas UI will be unavailable (404). "
+                 "Launch from the repo root or pass a correct working directory.\n";
   }
 
   // CORS headers for cross-origin access
