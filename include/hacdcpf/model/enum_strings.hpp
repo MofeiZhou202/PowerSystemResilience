@@ -1,7 +1,7 @@
 #pragma once
 
 // Shared enum ↔ string conversions for all hacdcpf enum types.
-// Used by json_io, excel_io, html_visualizer, and any future serializers.
+// Used by json_io, etap_io, html_visualizer, and any future serializers.
 
 #include <string>
 

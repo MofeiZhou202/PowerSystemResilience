@@ -34,7 +34,7 @@ option(HACDCPF_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                     OFF)
 # IO optional features: OpenDSS and Excel require external libs not bundled here
 option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
-option(HACDCPF_ENABLE_EXCEL   "Build Excel I/O   (requires OpenXLSX)"      OFF)
+option(HACDCPF_ENABLE_ETAP    "Build ETAP Excel import/export (requires OpenXLSX)" OFF)
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
@@ -161,8 +161,8 @@ set(HACDCPF_SOURCES
   src/power_models/lindistflow_builder.cpp
   src/power_models/scuc_builder.cpp)
 
-if(HACDCPF_ENABLE_EXCEL)
-  list(APPEND HACDCPF_SOURCES src/io/excel_io.cpp)
+if(HACDCPF_ENABLE_ETAP)
+  list(APPEND HACDCPF_SOURCES src/io/etap_io.cpp)
 endif()
 if(HACDCPF_ENABLE_OPENDSS)
   list(APPEND HACDCPF_SOURCES src/io/opendss_bridge.cpp)
@@ -185,8 +185,8 @@ target_include_directories(hacdcpf
 target_compile_definitions(hacdcpf PRIVATE
   HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
 )
-if(NOT HACDCPF_ENABLE_EXCEL)
-  target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_EXCEL)
+if(HACDCPF_ENABLE_ETAP)
+  target_compile_definitions(hacdcpf PUBLIC HACDCPF_ENABLE_ETAP)
 endif()
 if(NOT HACDCPF_ENABLE_OPENDSS)
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_OPENDSS)
@@ -194,6 +194,11 @@ endif()
 
 # ── Link against MIPSolvers (brings Eigen3, fmt, nlohmann_json, HiGHS, Ipopt) ─
 target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
+
+# ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────
+if(HACDCPF_ENABLE_ETAP AND TARGET OpenXLSX::OpenXLSX)
+  target_link_libraries(hacdcpf PUBLIC OpenXLSX::OpenXLSX)
+endif()
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
 if(HACDCPF_ENABLE_WERROR)
@@ -205,6 +210,12 @@ endif()
 if(HACDCPF_ENABLE_NATIVE_ARCH)
   target_compile_options(hacdcpf PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>)
+endif()
+
+# ── ETAP <-> JSON command-line converter (requires ETAP/OpenXLSX) ─────────────
+if(HACDCPF_ENABLE_ETAP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/etap_convert.cpp")
+  add_executable(etap_convert tools/etap_convert.cpp)
+  target_link_libraries(etap_convert PRIVATE hacdcpf::hacdcpf)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

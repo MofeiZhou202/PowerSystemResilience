@@ -30,3 +30,7 @@ docs/**/*.nav
 docs/**/*.snm
 docs/**/*.vrb
 docs/**/_minted-*
+
+
+outputs/
+etap-main/

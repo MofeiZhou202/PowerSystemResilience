@@ -1,0 +1,76 @@
+/// tools/etap_convert.cpp
+/// =======================
+/// Command-line converter between the ETAP-schema Excel workbook and the native
+/// hacdcpf JSON model.  Built only when ETAP support is enabled
+/// (`-DHACDCPF_ENABLE_ETAP=ON`).
+///
+/// Usage:
+///   etap_convert etap2json  <in.xlsx>  <out.json>  [--strict]
+///   etap_convert json2etap  <in.json>  <out.xlsx>
+///   etap_convert etap2etap  <in.xlsx>  <out.xlsx>  [--strict]   (normalise)
+///
+/// `--strict` rejects unresolved bus references during ETAP import (default is
+/// permissive: such rows are imported best-effort and reported as warnings).
+
+#include <iostream>
+#include <string>
+
+#include "hacdcpf/io/etap_io.hpp"
+#include "hacdcpf/io/json_io.hpp"
+
+namespace {
+
+int usage(const char* prog) {
+  std::cerr
+      << "Usage: " << prog << " <mode> <input> <output> [--strict]\n"
+      << "  modes:\n"
+      << "    etap2json   ETAP .xlsx  -> hacdcpf .json\n"
+      << "    json2etap   hacdcpf .json -> ETAP .xlsx\n"
+      << "    etap2etap   ETAP .xlsx  -> ETAP .xlsx   (normalise)\n";
+  return 2;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  using namespace hacdcpf;
+  using namespace hacdcpf::io;
+
+  if (argc < 4) return usage(argv[0]);
+
+  const std::string mode = argv[1];
+  const std::string in = argv[2];
+  const std::string out = argv[3];
+  bool strict = false;
+  for (int i = 4; i < argc; ++i) {
+    if (std::string(argv[i]) == "--strict") strict = true;
+  }
+  const EtapImportMode imode =
+      strict ? EtapImportMode::Strict : EtapImportMode::Permissive;
+
+  try {
+    EtapIoReport rep;
+    if (mode == "etap2json") {
+      const HybridPowerSystem sys = load_etap(in, imode, rep);
+      save_json(sys, out);
+    } else if (mode == "json2etap") {
+      const HybridPowerSystem sys = load_json(in);
+      save_etap(sys, out, rep);
+    } else if (mode == "etap2etap") {
+      const HybridPowerSystem sys = load_etap(in, imode, rep);
+      save_etap(sys, out, rep);
+    } else {
+      return usage(argv[0]);
+    }
+
+    for (const auto& w : rep.warnings) std::cerr << "warning: " << w << "\n";
+    std::cout << "OK: " << mode << "  " << in << " -> " << out << "\n";
+    for (const auto& kv : rep.sheet_counts) {
+      std::cout << "  " << kv.first << ": " << kv.second << "\n";
+    }
+    return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "error: " << e.what() << "\n";
+    return 1;
+  }
+}

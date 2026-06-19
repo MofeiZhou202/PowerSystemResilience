@@ -23,6 +23,12 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
+# is only registered when ETAP support is compiled into the core library.
+if(HACDCPF_ENABLE_ETAP)
+  hacdcpf_add_test(test_io_etap           test_io_etap.cpp)
+endif()
+
 # Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
 hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 

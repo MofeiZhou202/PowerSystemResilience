@@ -37,7 +37,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "hacdcpf/ev_power_traffic.hpp"
+#include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
