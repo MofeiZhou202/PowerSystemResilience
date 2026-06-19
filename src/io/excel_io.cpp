@@ -446,10 +446,17 @@ BusType bus_type_from_str(const std::string& s) {
 }
 
 std::string dc_bus_type_str(DCBusType t) {
-  return (t == DCBusType::DC_V) ? "DC_V" : "DC_P";
+  switch (t) {
+    case DCBusType::DC_V: return "DC_V";
+    case DCBusType::DC_ISOLATED: return "DC_ISOLATED";
+    case DCBusType::DC_P: return "DC_P";
+  }
+  return "DC_P";
 }
 DCBusType dc_bus_type_from_str(const std::string& s) {
-  return (s == "DC_V") ? DCBusType::DC_V : DCBusType::DC_P;
+  if (s == "DC_V") return DCBusType::DC_V;
+  if (s == "DC_ISOLATED") return DCBusType::DC_ISOLATED;
+  return DCBusType::DC_P;
 }
 
 std::string fuel_type_str(FuelType f) {
@@ -779,7 +786,8 @@ std::vector<ACBus> read_ac_buses(const XLWorksheet& ws) {
 
 void write_ac_branches(XLWorksheet ws, const std::vector<ACBranch>& branches) {
   write_headers(ws, {"index", "name", "from_bus", "to_bus", "r_pu", "x_pu", "b_pu", "tap", "shift_deg", "rate_a_mva",
-                     "rate_b_mva", "rate_c_mva", "length_km", "in_service", "failure_rate", "mttr_hr"});
+                     "rate_b_mva", "rate_c_mva", "length_km", "in_service", "failure_rate", "mttr_hr",
+                     "r_ohm_per_km", "x_ohm_per_km", "b_us_per_km", "c_nf_per_km", "n_parallel"});
   for (size_t i = 0; i < branches.size(); ++i) {
     const auto& b = branches[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -799,6 +807,11 @@ void write_ac_branches(XLWorksheet ws, const std::vector<ACBranch>& branches) {
     ws.cell(r, 14).value() = bool_str(b.in_service);
     ws.cell(r, 15).value() = b.failure_rate;
     ws.cell(r, 16).value() = b.mttr_hr;
+    ws.cell(r, 17).value() = b.r_ohm_per_km;
+    ws.cell(r, 18).value() = b.x_ohm_per_km;
+    ws.cell(r, 19).value() = b.b_us_per_km;
+    ws.cell(r, 20).value() = b.c_nf_per_km;
+    ws.cell(r, 21).value() = b.n_parallel;
   }
 }
 
@@ -825,6 +838,12 @@ std::vector<ACBranch> read_ac_branches(const XLWorksheet& ws) {
     b.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), b.in_service);
     b.failure_rate = dbl_from_str(cell_by_name(ws, r, col, "failure_rate"), b.failure_rate);
     b.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "mttr_hr"), b.mttr_hr);
+    // Actual (engineering) values — used by convert_actual_to_per_unit when r_pu is zero.
+    b.r_ohm_per_km = dbl_from_str(cell_by_name(ws, r, col, "r_ohm_per_km"), b.r_ohm_per_km);
+    b.x_ohm_per_km = dbl_from_str(cell_by_name(ws, r, col, "x_ohm_per_km"), b.x_ohm_per_km);
+    b.b_us_per_km = dbl_from_str(cell_by_name(ws, r, col, "b_us_per_km"), b.b_us_per_km);
+    b.c_nf_per_km = dbl_from_str(cell_by_name(ws, r, col, "c_nf_per_km"), b.c_nf_per_km);
+    b.n_parallel = int_from_str(cell_by_name(ws, r, col, "n_parallel"), b.n_parallel);
     out.push_back(std::move(b));
   }
   return out;
@@ -2352,7 +2371,8 @@ std::vector<DCBus> read_dc_buses(const XLWorksheet& ws) {
 }
 
 void write_dc_branches(XLWorksheet ws, const std::vector<DCBranch>& branches) {
-  write_headers(ws, {"index", "name", "from_bus", "to_bus", "r_pu", "rate_a_mva", "length_km", "in_service"});
+  write_headers(ws, {"index", "name", "from_bus", "to_bus", "r_pu", "rate_a_mva", "length_km", "in_service",
+                     "base_kv", "r_ohm_per_km", "n_parallel"});
   for (size_t i = 0; i < branches.size(); ++i) {
     const auto& b = branches[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -2364,6 +2384,9 @@ void write_dc_branches(XLWorksheet ws, const std::vector<DCBranch>& branches) {
     ws.cell(r, 6).value() = b.rate_a_mva;
     ws.cell(r, 7).value() = b.length_km;
     ws.cell(r, 8).value() = bool_str(b.in_service);
+    ws.cell(r, 9).value() = b.base_kv;
+    ws.cell(r, 10).value() = b.r_ohm_per_km;
+    ws.cell(r, 11).value() = b.n_parallel;
   }
 }
 
@@ -2382,6 +2405,10 @@ std::vector<DCBranch> read_dc_branches(const XLWorksheet& ws) {
     b.rate_a_mva = dbl_from_str(cell_by_name(ws, r, col, "rate_a_mva"), b.rate_a_mva);
     b.length_km = dbl_from_str(cell_by_name(ws, r, col, "length_km"), b.length_km);
     b.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), b.in_service);
+    // Actual (engineering) values — used by convert_actual_to_per_unit when r_pu is zero.
+    b.base_kv = dbl_from_str(cell_by_name(ws, r, col, "base_kv"), b.base_kv);
+    b.r_ohm_per_km = dbl_from_str(cell_by_name(ws, r, col, "r_ohm_per_km"), b.r_ohm_per_km);
+    b.n_parallel = int_from_str(cell_by_name(ws, r, col, "n_parallel"), b.n_parallel);
     out.push_back(std::move(b));
   }
   return out;

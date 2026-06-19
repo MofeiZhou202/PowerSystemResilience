@@ -54,12 +54,14 @@ static int bus_type_priority(BusType t) {
 }
 
 // DC_V (voltage reference) must survive contraction; DC_P (load/gen) is
-// subordinate — mirrors the AC SLACK > PV > PQ hierarchy.
+// subordinate — mirrors the AC SLACK > PV > PQ hierarchy.  DC_ISOLATED is
+// de-energized and ranks below everything.
 static int dc_bus_type_priority(DCBusType t) {
   switch (t) {
-    case DCBusType::DC_V: return 2;
-    case DCBusType::DC_P: return 1;
-    default:              return 0;
+    case DCBusType::DC_V:        return 2;
+    case DCBusType::DC_P:        return 1;
+    case DCBusType::DC_ISOLATED: return 0;
+    default:                    return 0;
   }
 }
 

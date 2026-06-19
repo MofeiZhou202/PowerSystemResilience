@@ -168,6 +168,23 @@ ReductionPlan make_reduction_plan(
         }
       }
 
+      // Only merge plain line segments.  A transformer carries tap / phase
+      // shift (and lives in a separate component list), and a switch / breaker
+      // carries open-close status; a pure series Z-equivalent cannot represent
+      // any of these.  A degree-2 node incident to a non-line edge is therefore
+      // retained rather than series-reduced.
+      {
+        bool both_lines = true;
+        for (auto [eid, v] : nbrs) {
+          const EdgeCategory cat = graph.edges[eid].category;
+          if (cat != EdgeCategory::AC_Line && cat != EdgeCategory::DC_Line) {
+            both_lines = false;
+            break;
+          }
+        }
+        if (!both_lines) continue;
+      }
+
       // Check that neighbours are not in eliminated set (avoid chain issues)
       if (eliminated_buses.count(graph.nodes[nbrs[0].second].bus_id) ||
           eliminated_buses.count(graph.nodes[nbrs[1].second].bus_id))

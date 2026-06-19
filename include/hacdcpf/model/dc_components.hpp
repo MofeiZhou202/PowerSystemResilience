@@ -55,6 +55,11 @@ struct DCBranch {
   double s_max_mva{0.0};
   int n_parallel{1};
 
+  // Actual (engineering) resistance per unit length.  When provided together
+  // with length_km and a positive base voltage, convert_actual_to_per_unit()
+  // fills r_pu from it (used only when r_pu is still zero).
+  double r_ohm_per_km{0.0};
+
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};

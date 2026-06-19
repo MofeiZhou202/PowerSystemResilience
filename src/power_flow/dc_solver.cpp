@@ -45,9 +45,14 @@ DCPowerFlowResult DCSolver::solve(const SolverData& data,
   std::vector<int> dc_non_slack;
   dc_non_slack.reserve(static_cast<size_t>(std::max(0, ndc - 1)));
   for (int i = 0; i < ndc; ++i) {
-    if (i != dc_slack) {
-      dc_non_slack.push_back(i);
+    if (i == dc_slack) continue;
+    // Isolated DC buses are de-energized: hold them at their fixed voltage and
+    // exclude them from the solved equation set (otherwise an unconnected bus
+    // contributes a zero row/column and makes the Jacobian singular).
+    if (data.dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_ISOLATED) {
+      continue;
     }
+    dc_non_slack.push_back(i);
   }
 
   const int ndc_eq = static_cast<int>(dc_non_slack.size());

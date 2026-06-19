@@ -20,7 +20,10 @@ static int add_ac_node(PowerSystemGraph& g, const ACBus& bus) {
   nd.ac_bus_type  = bus.bus_type;
   nd.dc_bus_type  = DCBusType::DC_P; // unused for AC
   nd.base_kv  = bus.base_kv;
-  nd.in_service = bus.in_service;
+  // An ISOLATED bus is disconnected/removed from solve, so it is treated as
+  // out-of-service for all graph consumers (island detection, connectivity,
+  // switch contraction) — mirrors the DC_ISOLATED handling below.
+  nd.in_service = bus.in_service && (bus.bus_type != BusType::ISOLATED);
   nd.is_slack = (bus.bus_type == BusType::SLACK);
   nd.is_voltage_controlled = (bus.bus_type == BusType::PV ||
                                bus.bus_type == BusType::SLACK);
@@ -47,7 +50,10 @@ static int add_dc_node(PowerSystemGraph& g, const DCBus& bus) {
   nd.ac_bus_type  = BusType::PQ; // unused for DC
   nd.dc_bus_type  = bus.bus_type;
   nd.base_kv  = bus.base_kv;
-  nd.in_service = bus.in_service;
+  // An isolated DC bus is de-energized and removed from solve/topology, so it
+  // is treated as out-of-service for all graph consumers (island detection,
+  // connectivity, switch contraction).
+  nd.in_service = bus.in_service && (bus.bus_type != DCBusType::DC_ISOLATED);
   nd.is_slack = (bus.bus_type == DCBusType::DC_V);
   nd.is_voltage_controlled = nd.is_slack;
   nd.has_load = (bus.pd_mw != 0.0) || bus.is_load;
@@ -190,6 +196,7 @@ PowerSystemGraph build_power_system_graph(
     const double z_mag = std::hypot(br.r_pu, br.x_pu);
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = br.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = br.from_bus;
@@ -218,6 +225,7 @@ PowerSystemGraph build_power_system_graph(
     }
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = tr.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = tr.hv_bus;
@@ -236,6 +244,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = sw.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = sw.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = sw.bus_from;
@@ -257,6 +266,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = cb.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = cb.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = cb.bus_from;
@@ -277,6 +287,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = br.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = br.from_bus;
@@ -300,6 +311,7 @@ PowerSystemGraph build_power_system_graph(
     const bool closed = cb.in_service && cb.closed;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = cb.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = cb.bus_from;
@@ -320,6 +332,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = vsc.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = vsc.bus_ac;
@@ -339,6 +352,7 @@ PowerSystemGraph build_power_system_graph(
     if (fn < 0 || tn < 0) continue;
     GraphEdge e;
     e.edge_id    = edge_seq++;
+    e.comp_index = dc.index;
     e.from_node  = fn;
     e.to_node    = tn;
     e.from_bus_id = dc.bus_in;

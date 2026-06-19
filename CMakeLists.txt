@@ -64,6 +64,7 @@ include(cmake/Dependencies.cmake)
 set(HACDCPF_SOURCES
   # ── model ────────────────────────────────────────────────────────────────
   src/model/network_utils.cpp
+  src/model/unit_conversion.cpp
   # ── power_models ─────────────────────────────────────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

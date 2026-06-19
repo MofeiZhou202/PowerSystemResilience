@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "hacdcpf/model/unit_conversion.hpp"
+
 namespace hacdcpf {
 
 namespace {
@@ -1296,7 +1298,7 @@ void strip_dead_islands(HybridPowerSystem& sys) {
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // merge_zero_impedance_buses
 // 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-void merge_zero_impedance_buses(HybridPowerSystem& sys) {
+void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
   auto& buses = sys.ac.buses;
   auto& branches = sys.ac.branches;
   const int n = static_cast<int>(buses.size());
@@ -1309,29 +1311,47 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys) {
     idx_to_pos[buses[static_cast<size_t>(i)].index] = i;
   }
 
-  // Phase 1: identify zero-impedance branches and union buses
+  // Phase 1: identify zero-impedance branches and union buses.
+  // When allow_merge is false the function performs canonical reindexing only
+  // (no buses are merged) — used to guarantee 1-based contiguous indices for
+  // systems that contain near-zero-Z real lines rather than switches.
   UnionFind uf(n);
   bool any_merged = false;
-  for (const auto& br : branches) {
-    if (!br.in_service) continue;
-    // A true zero-impedance element (CB/switch) has both R and X tiny
-    // AND negligible charging susceptance.  Short lines may have small
-    // R and X but non-zero B 鈥?these must NOT be merged because merging
-    // discards their charging and distorts the admittance model.
-    if (std::abs(br.r_pu) >= kBusMergeZThreshold ||
-        std::abs(br.x_pu) >= kBusMergeZThreshold) continue;
-    if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging 鈫?real line
+  if (allow_merge) {
+    for (const auto& br : branches) {
+      if (!br.in_service) continue;
+      // A true zero-impedance element (CB/switch) has both R and X tiny
+      // AND negligible charging susceptance.  Short lines may have small
+      // R and X but non-zero B 鈥?these must NOT be merged because merging
+      // discards their charging and distorts the admittance model.
+      if (std::abs(br.r_pu) >= kBusMergeZThreshold ||
+          std::abs(br.x_pu) >= kBusMergeZThreshold) continue;
+      if (std::abs(br.b_pu) > 1e-6) continue;  // non-trivial charging 鈫?real line
 
-    auto it_f = idx_to_pos.find(br.from_bus);
-    auto it_t = idx_to_pos.find(br.to_bus);
-    if (it_f == idx_to_pos.end() || it_t == idx_to_pos.end()) continue;
+      auto it_f = idx_to_pos.find(br.from_bus);
+      auto it_t = idx_to_pos.find(br.to_bus);
+      if (it_f == idx_to_pos.end() || it_t == idx_to_pos.end()) continue;
 
-    if (uf.unite(it_f->second, it_t->second)) {
-      any_merged = true;
+      if (uf.unite(it_f->second, it_t->second)) {
+        any_merged = true;
+      }
     }
   }
 
-  if (!any_merged) return;
+  // The entire PF/OPF stack indexes buses positionally as (bus.index - 1)
+  // (see build_admittance_matrix, newton_solver, branch_flow, ac_opf …), so the
+  // canonical bus list must be 1-based contiguous before it reaches a solver.
+  // When nothing was merged we can normally skip this pass, but only if the
+  // buses already satisfy that invariant.  A sub-network that arrives with
+  // non-canonical indices — e.g. a graph-contracted island that preserves the
+  // original bus IDs — and has no zero-impedance branch to trigger a merge
+  // must still be reindexed; otherwise its branches map to out-of-range
+  // positions and are silently dropped, producing a singular Y-bus.
+  bool already_canonical = true;
+  for (int i = 0; i < n; ++i) {
+    if (buses[static_cast<size_t>(i)].index != i + 1) { already_canonical = false; break; }
+  }
+  if (!any_merged && already_canonical) return;
 
   // Phase 2: build equivalence classes (use std::map for deterministic
   // iteration order 鈥?groups are visited in ascending root_pos, guaranteeing
@@ -1781,6 +1801,11 @@ static void project_in_place(HybridPowerSystem& out) {
     out.dc.base_mva = out.base_mva;
   }
 
+  // Fill in per-unit branch impedances from any actual (ohm/km) engineering
+  // data so that the rest of projection and every downstream solver can start
+  // from real physical values.  No-op for systems already given in per-unit.
+  convert_actual_to_per_unit(out);
+
   project_three_phase_if_needed(out);
 
   // When FlexibleLoads or AsymmetricLoads will be projected into the loads
@@ -1906,10 +1931,14 @@ static void project_in_place(HybridPowerSystem& out) {
   // or circuit breaker expansion.  Only perform merging when the system
   // actually contains switches or circuit breakers; for pure MATPOWER
   // imports the near-zero-Z branches are real short lines and must not
-  // be merged.
-  if (!out.ac.switches.empty() || !out.ac.circuit_breakers.empty()) {
-    merge_zero_impedance_buses(out);
-  }
+  // be merged.  In either case the bus list is canonicalized to 1-based
+  // contiguous indices, which every positional PF/OPF builder (index-1)
+  // relies on — without this, a switch-free sub-network arriving with
+  // non-canonical IDs (e.g. a graph-contracted island) would have its
+  // branches dropped from the Y-bus and solve as a singular system.
+  const bool has_switch_elements =
+      !out.ac.switches.empty() || !out.ac.circuit_breakers.empty();
+  merge_zero_impedance_buses(out, has_switch_elements);
 
   // Strip dead islands: remove buses with no path to any generation
   // source.  This ensures all downstream algorithms (PF, OPF, DPF,

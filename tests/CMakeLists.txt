@@ -23,6 +23,9 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
+hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
+
 # Rich components: Transformer2W/3W, PVSystem, Storage, VSCConverter, etc.
 hacdcpf_add_test(test_rich_components     test_rich_components.cpp)
 
@@ -106,6 +109,12 @@ hacdcpf_add_test(test_graph test_graph.cpp)
 # Kron (Schur complement) reduction: Y-bus partitioning, voltage recovery,
 # fill-in guard, extended injection variant.
 hacdcpf_add_test(test_graph_kron test_graph_kron.cpp)
+
+# Graph aggregation round-trip: solve PF/OPF before vs after network-level
+# aggregation (switch/breaker contraction, series/pendant reduction) and assert
+# the physical solution is preserved.  Covers islands, CB/switch types, meshed
+# and hybrid AC/DC topologies, and real distribution feeders.
+hacdcpf_add_test(test_graph_roundtrip test_graph_roundtrip.cpp)
 
 # Distribution CB/switch/VSC pipeline: rich model → graph analysis →
 # canonical projection → PF → DC OPF → short circuit → ONR → JSON export.

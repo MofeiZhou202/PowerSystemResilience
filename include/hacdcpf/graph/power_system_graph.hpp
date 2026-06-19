@@ -78,7 +78,14 @@ struct GraphNode {
 // ═══════════════════════════════════════════════════════════════════════
 
 struct GraphEdge {
-  int edge_id{0};         ///< Original branch/switch/converter index
+  int edge_id{0};         ///< Unique positional ID within the graph (0 … E-1).
+                          ///  Used for graph-internal lookups and as the branch
+                          ///  key in ReductionMapping.  NOT the source model's
+                          ///  component index — use comp_index for that.
+  int comp_index{0};      ///< Original component .index in the source model
+                          ///  (ACBranch/DCBranch/Switch/CircuitBreaker/…).
+                          ///  Reducers disable the right model component by
+                          ///  matching this, never edge_id.
   int from_node{0};       ///< Index into PowerSystemGraph::nodes
   int to_node{0};         ///< Index into PowerSystemGraph::nodes
   int from_bus_id{0};     ///< Original bus ID

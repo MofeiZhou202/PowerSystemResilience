@@ -299,12 +299,22 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     int dc_slack_bus = 0;
     if (!dc_buses.empty()) {
       dc_slack_bus = dc_buses.front();
+      // Prefer a DC_V reference; otherwise anchor on the first non-isolated
+      // bus.  DC_ISOLATED buses are de-energized and are only used as a
+      // fallback anchor when the island contains nothing else.
+      int first_non_isolated = -1;
       for (int bus : dc_buses) {
-        if (sys.dc.buses[static_cast<size_t>(bus - 1)].bus_type == DCBusType::DC_V) {
+        const auto bt = sys.dc.buses[static_cast<size_t>(bus - 1)].bus_type;
+        if (bt == DCBusType::DC_V) {
           dc_slack_bus = bus;
+          first_non_isolated = bus;
           break;
         }
+        if (first_non_isolated < 0 && bt != DCBusType::DC_ISOLATED) {
+          first_non_isolated = bus;
+        }
       }
+      if (first_non_isolated >= 0) dc_slack_bus = first_non_isolated;
     }
 
     IslandInfo island;

@@ -81,7 +81,7 @@ HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys);
 // ═══════════════════════════════════════════════════════════════════════
 constexpr double kBusMergeZThreshold = 1e-4;
 
-void merge_zero_impedance_buses(HybridPowerSystem& sys);
+void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge = true);
 void strip_dead_islands(HybridPowerSystem& sys);
 
 std::vector<double> unproject_bus_vector(

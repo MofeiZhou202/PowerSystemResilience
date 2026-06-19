@@ -3864,4 +3864,76 @@ HybridPowerSystem build_five_province_acdc() {
   return sys;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// build_actual_value_demo_acdc
+// ─────────────────────────────────────────────────────────────────────────────
+// An ETAP/OpenDSS-style example specified entirely in *actual* engineering
+// values: AC cables carry resistance/reactance per kilometre plus a length, the
+// DC link carries resistance per kilometre, and every bus declares its base
+// voltage.  No per-unit impedance is supplied — convert_actual_to_per_unit (run
+// inside project_to_canonical_models) fills r_pu/x_pu/b_pu before any solve.
+HybridPowerSystem build_actual_value_demo_acdc() {
+  HybridPowerSystem sys;
+  sys.name = "actual_value_demo_acdc";
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 10.0;
+
+  // ── AC 11 kV radial feeder (bus 1 = substation / slack) ──────────────
+  auto ac_bus = [](int idx, BusType t, double pd, double qd) {
+    ACBus b;
+    b.index = idx; b.bus_type = t; b.base_kv = 11.0;
+    b.vm_pu = 1.0; b.va_deg = 0.0; b.pd_mw = pd; b.qd_mvar = qd;
+    b.vmin_pu = 0.9; b.vmax_pu = 1.1; b.in_service = true;
+    b.name = "AC" + std::to_string(idx);
+    return b;
+  };
+  sys.ac.buses = {
+      ac_bus(1, BusType::SLACK, 0.0, 0.0),
+      ac_bus(2, BusType::PQ,    1.2, 0.5),
+      ac_bus(3, BusType::PQ,    0.8, 0.3),
+      ac_bus(4, BusType::PQ,    0.6, 0.2),
+  };
+
+  Generator g;
+  g.index = 1; g.bus = 1; g.is_slack = true;
+  g.pg_mw = 0.0; g.qg_mvar = 0.0; g.vg_pu = 1.0;
+  g.pmax_mw = 50.0; g.pmin_mw = -50.0; g.qmax_mvar = 50.0; g.qmin_mvar = -50.0;
+  g.in_service = true; g.name = "Substation";
+  sys.ac.generators = {g};
+
+  // Underground cables described by per-km impedance and length (no r_pu).
+  auto cable = [](int idx, int f, int t, double r_km, double x_km, double len) {
+    ACBranch br;
+    br.index = idx; br.from_bus = f; br.to_bus = t;
+    br.r_ohm_per_km = r_km; br.x_ohm_per_km = x_km; br.length_km = len;
+    br.n_parallel = 1; br.rate_a_mva = 8.0; br.in_service = true;
+    br.name = "Cable" + std::to_string(idx);
+    return br;
+  };
+  sys.ac.branches = {
+      cable(1, 1, 2, 0.164, 0.080, 1.5),
+      cable(2, 2, 3, 0.206, 0.085, 1.0),
+      cable(3, 2, 4, 0.206, 0.085, 0.8),
+  };
+
+  // ── DC 5 kV two-bus segment (self-contained, DC_V reference) ─────────
+  auto dc_bus = [](int idx, DCBusType t, double pd) {
+    DCBus b;
+    b.index = idx; b.bus_type = t; b.base_kv = 5.0;
+    b.vm_pu = 1.0; b.vmin_pu = 0.9; b.vmax_pu = 1.1; b.pd_mw = pd;
+    b.in_service = true; b.name = "DC" + std::to_string(idx);
+    return b;
+  };
+  sys.dc.buses = {
+      dc_bus(1, DCBusType::DC_V, 0.0),
+      dc_bus(2, DCBusType::DC_P, 0.4),
+  };
+  DCBranch dl;
+  dl.index = 1; dl.from_bus = 1; dl.to_bus = 2;
+  dl.r_ohm_per_km = 0.05; dl.length_km = 1.0; dl.base_kv = 5.0;
+  dl.n_parallel = 1; dl.rate_a_mva = 2.0; dl.in_service = true; dl.name = "DCLink1";
+  sys.dc.branches = {dl};
+
+  return sys;
+}
+
 }  // namespace hacdcpf::io

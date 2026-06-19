@@ -27,14 +27,22 @@ inline int first_slack_or_default(const SolverData& data) {
   return data.ac_buses.empty() ? -1 : 0;
 }
 
-/// Return internal index of first DC voltage-controlled bus, or 0 if none found.
+/// Return internal index of the DC voltage reference bus.
+/// Prefers a DC_V bus; otherwise the first non-isolated bus; otherwise 0.
+/// DC_ISOLATED buses are de-energized and are never chosen as an anchor for an
+/// energized network unless no other bus exists.
 inline int first_dc_slack_or_default(const SolverData& data) {
-  for (int i = 0; i < static_cast<int>(data.dc_buses.size()); ++i) {
-    if (data.dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_V) {
-      return i;
+  const int ndc = static_cast<int>(data.dc_buses.size());
+  if (ndc == 0) return -1;
+  int first_non_isolated = -1;
+  for (int i = 0; i < ndc; ++i) {
+    const auto& b = data.dc_buses[static_cast<size_t>(i)];
+    if (b.bus_type == DCBusType::DC_V) return i;
+    if (first_non_isolated < 0 && b.bus_type != DCBusType::DC_ISOLATED) {
+      first_non_isolated = i;
     }
   }
-  return data.dc_buses.empty() ? -1 : 0;
+  return first_non_isolated >= 0 ? first_non_isolated : 0;
 }
 
 /// Load DC voltages from InitialState into @p vdc (size ndc).

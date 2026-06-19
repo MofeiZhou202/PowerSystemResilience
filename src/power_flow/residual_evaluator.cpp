@@ -50,7 +50,13 @@ ResidualBlocks evaluate_power_flow_residual(const SolverData& data,
   std::vector<int> dc_non_slack;
   dc_non_slack.reserve(static_cast<size_t>(std::max(0, ndc - 1)));
   for (int i = 0; i < ndc; ++i) {
-    if (i != dc_slack) dc_non_slack.push_back(i);
+    if (i == dc_slack) continue;
+    // Isolated DC buses are de-energized and held at fixed voltage, so they are
+    // not part of the solved equation set (mirrors DCSolver::solve).
+    if (data.dc_buses[static_cast<size_t>(i)].bus_type == DCBusType::DC_ISOLATED) {
+      continue;
+    }
+    dc_non_slack.push_back(i);
   }
 
   const int np = static_cast<int>(ac.non_slack.size());

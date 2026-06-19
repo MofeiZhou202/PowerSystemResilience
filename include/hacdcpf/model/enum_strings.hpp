@@ -28,10 +28,17 @@ inline BusType bus_type_from_str(const std::string& s) {
 
 // ── DCBusType ───────────────────────────────────────────────────────────
 inline std::string dc_bus_type_str(DCBusType t) {
-  return (t == DCBusType::DC_V) ? "DC_V" : "DC_P";
+  switch (t) {
+    case DCBusType::DC_V: return "DC_V";
+    case DCBusType::DC_ISOLATED: return "DC_ISOLATED";
+    case DCBusType::DC_P: return "DC_P";
+  }
+  return "DC_P";
 }
 inline DCBusType dc_bus_type_from_str(const std::string& s) {
-  return (s == "DC_V") ? DCBusType::DC_V : DCBusType::DC_P;
+  if (s == "DC_V") return DCBusType::DC_V;
+  if (s == "DC_ISOLATED") return DCBusType::DC_ISOLATED;
+  return DCBusType::DC_P;
 }
 
 // ── ConverterMode ───────────────────────────────────────────────────────

@@ -113,6 +113,33 @@ TEST_CASE("JSON round-trip: IEEE-14 AC/DC case preserves topology", "[io][json][
     CHECK(restored.vsc_converters.size()  == orig.vsc_converters.size());
 }
 
+TEST_CASE("JSON/JPC round-trip: DC_ISOLATED bus type preserved",
+          "[io][json][jpc][roundtrip][dc][isolated]") {
+    HybridPowerSystem sys;
+    sys.name = "dc_isolated_rt";
+    sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+
+    ACBus a1; a1.index = 1; a1.bus_type = BusType::SLACK; a1.in_service = true;
+    sys.ac.buses = {a1};
+
+    DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V;        d1.in_service = true;
+    DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P;        d2.in_service = true;
+    DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_ISOLATED; d3.in_service = true;
+    sys.dc.buses = {d1, d2, d3};
+
+    // Rich JSON round-trip preserves the bus type by string.
+    auto rj = from_json(to_json(sys));
+    REQUIRE(rj.dc.buses.size() == 3);
+    CHECK(rj.dc.buses[2].bus_type == DCBusType::DC_ISOLATED);
+    CHECK(rj.dc.buses[0].bus_type == DCBusType::DC_V);
+    CHECK(rj.dc.buses[1].bus_type == DCBusType::DC_P);
+
+    // JPC JSON round-trip preserves the bus type via integer code 4.
+    auto rp = from_jpc_json(to_jpc_json(sys));
+    REQUIRE(rp.dc.buses.size() == 3);
+    CHECK(rp.dc.buses[2].bus_type == DCBusType::DC_ISOLATED);
+}
+
 TEST_CASE("JSON round-trip: case118 MATPOWER preserves bus count", "[io][json][roundtrip][matpower]") {
     auto orig = load_mp("case118.m");
     const std::string json_str = to_json(orig);

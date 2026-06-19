@@ -36,7 +36,7 @@ Rich HybridPowerSystem
 | AC 负荷 | `Load`, `FlexibleLoad`, `AsymmetricLoad`, `AsynchronousMotor` | 静态负荷、柔性负荷、不对称负荷、电机 | 转换为 canonical load 或等效注入；ZIP 系数在组装阶段加权聚合 |
 | AC 设备 | `Transformer2W`, `Transformer3W`, `Switch`, `CircuitBreaker`, `Shunt` | 变压器、开关、断路器、并联补偿 | 变压器/开关可展开为等效 `ACBranch`；保留 provenance 映射 |
 | 充电设施 | `ChargingStation`, `Charger` | 站级或桩级 EV 负荷 | 桩级可投影到站级；作为恒功率负荷进入组装 |
-| DC 网络 | `DCBus`, `DCBranch`, `DCLoad` | DC 母线、线路、负荷 | 进入 DC 电导矩阵和混合潮流/优化模型 |
+| DC 网络 | `DCBus`, `DCBranch`, `DCLoad` | DC 母线（`DC_P` 有功母线 / `DC_V` 电压参考母线 / `DC_ISOLATED` 停电隔离母线）、线路、负荷 | 进入 DC 电导矩阵和混合潮流/优化模型；`DC_ISOLATED` 母线在图/孤岛分析中按停电处理，不作为电压参考，且在潮流方程组中以固定电压剔除，避免雅可比奇异 |
 | DC 电源/设备 | `StaticGeneratorDC`, `PVArrayDC`, `DCDCConverter`, `DCCircuitBreaker`, DC storage | DC 电源、PV 阵列、DC/DC、DC 开断设备 | 投影到 DC 注入、DC 边或耦合设备 |
 | AC/DC 耦合 | `VSCConverter`, `EnergyRouter` | 换流器、能量路由器、多端口耦合 | VSC 保留为耦合元件；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
 | 聚合资源 | `VirtualPowerPlant`, `Microgrid`, `MobileStorage` | VPP、微电网、移动储能 | VPP/Microgrid 可转换为 PCC 注入；移动储能按位置和状态注入 |
@@ -88,6 +88,7 @@ Canonical projection 的入口是 `project_to_canonical_models`，定义在 `inc
 典型转换包括：
 
 - 统一 base MVA，并把 bus-level load 与显式 `Load` 表保持一致，避免双计。
+- 实际工程值到标幺值转换：当支路只给出实际值（`r_ohm_per_km`、`x_ohm_per_km`、`b_us_per_km`、`length_km` 和母线 `base_kv`）而 `r_pu/x_pu` 仍为零时，`convert_actual_to_per_unit`（在 `project_to_canonical_models` 入口执行）按 `Z_base = base_kv² / base_mva` 计算 `r_pu/x_pu/b_pu`，AC 与 DC 支路同理。该步骤是非破坏性且幂等的：已给定标幺值的支路保持不变，因此既支持 ETAP/OpenDSS 风格的实际值输入，也完全兼容既有标幺值算例。
 - `FlexibleLoad`、`AsymmetricLoad`、`AsynchronousMotor` 转换为等效 `Load`。
 - `Transformer2W`、`Transformer3W`、`Switch`、`CircuitBreaker` 转换为等效 branch，并通过 `BranchExpandMap` 记录来源。
 - `EnergyRouter` 展开为内部 DC 母线、VSC 和 DC/DC 耦合。

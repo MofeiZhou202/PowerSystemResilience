@@ -5,6 +5,7 @@
 
 #include "hacdcpf/graph/series_reduction.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace hacdcpf::graph {
@@ -42,8 +43,14 @@ SeriesReductionResult apply_series_reduction(
     result.mapping.reduced_to_original_branches[e.edge_id] = {e.edge_id};
   }
 
-  // Track next IDs for new branches
+  // Track next IDs for new branches.  The new equivalent branch must not
+  // collide with any existing component index (the graph edge_id space and the
+  // model .index space are independent), so start beyond both.
   int next_branch_id = static_cast<int>(graph.edges.size());
+  for (const auto& br : system.ac.branches)
+    next_branch_id = std::max(next_branch_id, br.index + 1);
+  for (const auto& br : system.dc.branches)
+    next_branch_id = std::max(next_branch_id, br.index + 1);
 
   // Process series reduction actions
   for (const auto& action : plan.actions) {
@@ -74,6 +81,12 @@ SeriesReductionResult apply_series_reduction(
     const GraphEdge& e_ij = *e_ij_ptr;
     const GraphEdge& e_jk = *e_jk_ptr;
 
+    // Capture the source component indices by value NOW.  The push_back into
+    // reduced_graph.edges below may reallocate the vector and invalidate the
+    // e_ij / e_jk references, so they must not be dereferenced afterwards.
+    const int comp_ij = e_ij.comp_index;
+    const int comp_jk = e_jk.comp_index;
+
     // Determine node i and node k
     int rni_i = (e_ij.from_node == rni_j) ? e_ij.to_node : e_ij.from_node;
     int rni_k = (e_jk.from_node == rni_j) ? e_jk.to_node : e_jk.from_node;
@@ -91,6 +104,7 @@ SeriesReductionResult apply_series_reduction(
     // Create new merged edge
     GraphEdge new_edge;
     new_edge.edge_id      = next_branch_id++;
+    new_edge.comp_index   = new_edge.edge_id;
     new_edge.from_node    = rni_i;
     new_edge.to_node      = rni_k;
     new_edge.from_bus_id  = bus_i;
@@ -112,7 +126,11 @@ SeriesReductionResult apply_series_reduction(
     rec.from_bus_id        = bus_i;
     rec.to_bus_id          = bus_k;
     rec.new_branch_id      = new_edge.edge_id;
-    rec.original_branch_ids = {eid_ij, eid_jk};
+    // Store the source-model component indices (NOT positional edge ids) so
+    // result recovery can look the i–j segment impedance up in the original
+    // system's branch table by .index.  original_branch_ids[0] is the i–j
+    // segment (matching rec.from_bus_id = bus_i).
+    rec.original_branch_ids = {comp_ij, comp_jk};
     rec.r_eq = r_eq;
     rec.x_eq = x_eq;
     rec.b_eq = b_eq;
@@ -165,7 +183,7 @@ SeriesReductionResult apply_series_reduction(
       new_br.in_service = true;
       result.reduced_system.dc.branches.push_back(new_br);
       for (auto& br : result.reduced_system.dc.branches) {
-        if (br.index == eid_ij || br.index == eid_jk)
+        if (br.index == comp_ij || br.index == comp_jk)
           br.in_service = false;
       }
       for (auto& bus : result.reduced_system.dc.buses) {
@@ -184,7 +202,7 @@ SeriesReductionResult apply_series_reduction(
       new_br.in_service = true;
       result.reduced_system.ac.branches.push_back(new_br);
       for (auto& br : result.reduced_system.ac.branches) {
-        if (br.index == eid_ij || br.index == eid_jk)
+        if (br.index == comp_ij || br.index == comp_jk)
           br.in_service = false;
       }
       for (auto& bus : result.reduced_system.ac.buses) {
@@ -243,6 +261,7 @@ PendantReductionResult apply_pendant_reduction(
 
     double r_ij = edge_ptr->r_pu;
     double x_ij = edge_ptr->x_pu;
+    const int branch_comp = edge_ptr->comp_index;
 
     // Collect load from the eliminated bus (domain-aware)
     double p_j = 0.0, q_j = 0.0;
@@ -303,7 +322,7 @@ PendantReductionResult apply_pendant_reduction(
       for (auto& bus : result.reduced_system.dc.buses)
         if (bus.index == elim_bus_id) { bus.in_service = false; break; }
       for (auto& br : result.reduced_system.dc.branches)
-        if (br.index == branch_eid) { br.in_service = false; break; }
+        if (br.index == branch_comp) { br.in_service = false; break; }
     } else {
       for (auto& bus : result.reduced_system.ac.buses) {
         if (bus.index == parent_bus_id) {
@@ -316,7 +335,7 @@ PendantReductionResult apply_pendant_reduction(
       for (auto& bus : result.reduced_system.ac.buses)
         if (bus.index == elim_bus_id) { bus.in_service = false; break; }
       for (auto& e : result.reduced_system.ac.branches)
-        if (e.index == branch_eid) { e.in_service = false; break; }
+        if (e.index == branch_comp) { e.in_service = false; break; }
     }
 
     int rni_j = (action.bus_domain == NodeDomain::AC)
