@@ -10,9 +10,11 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/model/unit_conversion.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 using namespace hacdcpf;
 using Catch::Matchers::WithinAbs;
@@ -163,4 +165,75 @@ TEST_CASE("Power flow: actual-value branch matches equivalent per-unit branch",
         CHECK_THAT(res_actual.vm[i], WithinAbs(res_pu.vm[i], 1e-7));
         CHECK_THAT(res_actual.va[i], WithinAbs(res_pu.va[i], 1e-7));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ETAP-style example case builder: actual values all the way to a solved PF
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("build_actual_value_demo_acdc: actual-value case converts and solves",
+          "[unit_conversion][actual_values][case_builder]") {
+    auto sys = hacdcpf::io::build_actual_value_demo_acdc();
+
+    // As authored, the AC cables and DC link carry only actual values.
+    REQUIRE(sys.ac.branches.size() == 3);
+    for (const auto& br : sys.ac.branches) {
+        CHECK(br.r_pu == 0.0);
+        CHECK(br.x_pu == 0.0);
+        CHECK(br.r_ohm_per_km > 0.0);
+        CHECK(br.length_km > 0.0);
+    }
+    REQUIRE(sys.dc.branches.size() == 1);
+    CHECK(sys.dc.branches[0].r_pu == 0.0);
+    CHECK(sys.dc.branches[0].r_ohm_per_km > 0.0);
+
+    // The conversion fills every branch (3 AC + 1 DC).
+    auto copy = sys;
+    const int n = convert_actual_to_per_unit(copy);
+    CHECK(n == 4);
+    for (const auto& br : copy.ac.branches) {
+        CHECK(br.r_pu > 0.0);
+        CHECK(br.x_pu > 0.0);
+    }
+    CHECK(copy.dc.branches[0].r_pu > 0.0);
+
+    // End to end: the as-authored actual-value system solves (projection runs
+    // convert_actual_to_per_unit internally).
+    PowerFlowOptions opt;
+    auto res = solve_power_flow(sys, opt);
+    CHECK(res.converged);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Transformer2W nameplate (vk%) → per-unit on projection (already actual-value)
+// ──────────────────────────────────────────────────────────────────────────
+TEST_CASE("Transformer2W nameplate vk% maps to per-unit ACBranch on projection",
+          "[unit_conversion][actual_values][transformer]") {
+    HybridPowerSystem sys;
+    sys.base_mva = sys.ac.base_mva = 100.0;
+
+    ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 110.0; b1.in_service = true;
+    ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ;    b2.base_kv = 11.0;  b2.in_service = true;
+    sys.ac.buses = {b1, b2};
+
+    // Nameplate (actual) transformer data only — no per-unit impedance.
+    Transformer2W tr;
+    tr.index = 1; tr.hv_bus = 1; tr.lv_bus = 2;
+    tr.sn_mva = 25.0; tr.vk_percent = 6.0; tr.vkr_percent = 0.9;
+    tr.vn_hv_kv = 110.0; tr.vn_lv_kv = 11.0; tr.in_service = true; tr.name = "T1";
+    sys.ac.transformers_2w = {tr};
+
+    const auto proj = project_to_canonical_models(sys);
+
+    const ACBranch* eq = nullptr;
+    for (const auto& br : proj.ac.branches)
+        if (br.from_bus == 1 && br.to_bus == 2) { eq = &br; break; }
+    REQUIRE(eq != nullptr);
+
+    // scale = base/sn = 4; z = vk% * scale; r = vkr% * scale; x = sqrt(z^2 - r^2).
+    const double scale = 100.0 / 25.0;
+    const double z = 0.06 * scale;
+    const double r = 0.009 * scale;
+    const double x = std::sqrt(z * z - r * r);
+    CHECK_THAT(eq->r_pu, WithinRel(r, 1e-9));
+    CHECK_THAT(eq->x_pu, WithinRel(x, 1e-9));
 }

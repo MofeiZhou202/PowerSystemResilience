@@ -46,7 +46,11 @@ ACDCOPFData to_acdcopf_data(const HybridPowerSystem& sys) {
   // ── DC buses ────────────────────────────────────────────────────────────
   std::unordered_map<int, std::string> dc_idx_to_id;
   for (const auto& b : sys.dc.buses) {
-    if (!b.in_service) continue;
+    // Isolated DC buses are de-energized and removed from the solve, exactly
+    // like out-of-service buses: no Vdc variable, no balance constraint, and
+    // their loads are not served.  DC branches that reference them are dropped
+    // below because their endpoint never enters dc_idx_to_id.
+    if (!b.in_service || b.bus_type == DCBusType::DC_ISOLATED) continue;
     const std::string id = b.name.empty()
         ? ("DC" + std::to_string(b.index))
         : ("DC_" + b.name);

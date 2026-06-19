@@ -2405,6 +2405,10 @@ std::vector<DCBranch> read_dc_branches(const XLWorksheet& ws) {
     b.rate_a_mva = dbl_from_str(cell_by_name(ws, r, col, "rate_a_mva"), b.rate_a_mva);
     b.length_km = dbl_from_str(cell_by_name(ws, r, col, "length_km"), b.length_km);
     b.in_service = bool_from_str(cell_by_name(ws, r, col, "in_service"), b.in_service);
+    // Actual (engineering) values — used by convert_actual_to_per_unit when r_pu is zero.
+    b.base_kv = dbl_from_str(cell_by_name(ws, r, col, "base_kv"), b.base_kv);
+    b.r_ohm_per_km = dbl_from_str(cell_by_name(ws, r, col, "r_ohm_per_km"), b.r_ohm_per_km);
+    b.n_parallel = int_from_str(cell_by_name(ws, r, col, "n_parallel"), b.n_parallel);
     out.push_back(std::move(b));
   }
   return out;

@@ -24,5 +24,11 @@ HybridPowerSystem build_comprehensive_hybrid_acdc();
 HybridPowerSystem build_market_3bus_toy();
 HybridPowerSystem build_market_5bus_acdc_toy();
 
+/// ETAP/OpenDSS-style example specified entirely in *actual* engineering values
+/// (cable ohm/km + length, DC link ohm/km, per-bus base kV).  No per-unit
+/// impedance is supplied; convert_actual_to_per_unit fills it in during
+/// projection.  Useful for exercising the actual-value path end to end.
+HybridPowerSystem build_actual_value_demo_acdc();
+
 }  // namespace hacdcpf::io
 

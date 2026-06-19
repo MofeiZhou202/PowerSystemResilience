@@ -174,6 +174,12 @@ and analogously \(b_{pu}=B_{[\mathrm S]}\,Z_\text{base}\) from \texttt{b\_us\_pe
 DC branches use the same base-impedance rule with \texttt{r\_ohm\_per\_km} and the DC
 base voltage.  The conversion is non-destructive and idempotent --- branches already
 given in per-unit are untouched --- so existing per-unit cases are unaffected.
+Transformers are likewise authored in actual nameplate terms: \texttt{Transformer2W}
+and \texttt{Transformer3W} carry short-circuit voltages (\texttt{vk\_percent},
+\texttt{vkr\_percent}) on their rated \texttt{sn\_mva}, which projection converts to a
+per-unit equivalent \texttt{ACBranch} via
+\(r,x = f(\texttt{vk\%},\texttt{vkr\%})\cdot S_\text{base}/S_n\) --- so the whole
+network can be specified without pre-computing any per-unit impedance.
 
 \subsubsection*{\texttt{Transformer2W}, \texttt{Transformer3W}, \texttt{Switch}, and \texttt{CircuitBreaker}}
 \begin{longtable}{L{0.20\linewidth}L{0.53\linewidth}L{0.19\linewidth}}

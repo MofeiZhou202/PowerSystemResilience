@@ -11,6 +11,7 @@
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/power_models/hybrid_opf_model_builder.hpp"
 
 using Catch::Matchers::WithinAbs;
 
@@ -205,6 +206,35 @@ TEST_CASE("DC power flow: isolated DC bus does not break the solve",
   auto result = solve_dc_power_flow(sys);
   CHECK(result.converged);
   for (double v : result.vdc) CHECK(std::isfinite(v));
+}
+
+TEST_CASE("Hybrid OPF data: isolated DC bus is excluded from the model",
+          "[opf][dc][isolated]") {
+  using namespace hacdcpf;
+
+  // One DC_V reference, one DC_P load bus, and one DC_ISOLATED bus.  The
+  // isolated bus (and any branch touching it) must not enter the OPF model.
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+
+  ACBus a1; a1.index = 1; a1.bus_type = BusType::SLACK; a1.base_kv = 110.0; a1.in_service = true;
+  sys.ac.buses = {a1};
+
+  DCBus d1; d1.index = 1; d1.bus_type = DCBusType::DC_V;        d1.vm_pu = 1.0; d1.in_service = true;
+  DCBus d2; d2.index = 2; d2.bus_type = DCBusType::DC_P;        d2.pd_mw = 1.0; d2.in_service = true;
+  DCBus d3; d3.index = 3; d3.bus_type = DCBusType::DC_ISOLATED; d3.pd_mw = 1.0; d3.in_service = true;
+  sys.dc.buses = {d1, d2, d3};
+
+  DCBranch b12; b12.index = 1; b12.from_bus = 1; b12.to_bus = 2; b12.r_pu = 0.01; b12.in_service = true;
+  DCBranch b23; b23.index = 2; b23.from_bus = 2; b23.to_bus = 3; b23.r_pu = 0.01; b23.in_service = true;
+  sys.dc.branches = {b12, b23};
+
+  const auto data = power_models::to_acdcopf_data(sys);
+
+  // Only the two energized DC buses survive; the isolated one is dropped.
+  CHECK(data.dc_buses.size() == 2);
+  // The branch 2->3 that touches the isolated bus is dropped; 1->2 remains.
+  CHECK(data.dc_branches.size() == 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
