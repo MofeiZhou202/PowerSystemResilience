@@ -551,6 +551,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #resultsContent[data-active-group="powerFlow"]    .result-group[data-result-group="powerFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
+#resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
 #resultsContent[data-active-group="timeSeries"]   .result-group[data-result-group="timeSeries"],
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
@@ -562,6 +563,48 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   width: 100%;
   margin: 6px 0 10px;
 }
+
+/* ── Topology analysis: island legend + canvas overlay ───────────────── */
+.topo-island-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.topo-island-legend .legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.12);
+}
+.topo-island-legend .legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+.topo-island-legend .legend-item.invalid { outline: 1px dashed #e06c75; }
+
+/* SVG overlay markers drawn by Canvas.showTopologyResults() */
+.topo-island-halo { pointer-events: none; }
+.topo-cut-vertex-ring {
+  fill: none;
+  stroke: #d19a66;
+  stroke-width: 3;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+.topo-bridge-edge {
+  stroke: #e06c75 !important;
+  stroke-width: 4 !important;
+  stroke-dasharray: 8 4 !important;
+}
+.topo-clickable { cursor: pointer; }
+.topo-clickable:hover { text-decoration: underline; }
 .scenario-generation-charts h4 {
   margin: 8px 0 6px;
   font-size: 12px;

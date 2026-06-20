@@ -4357,6 +4357,93 @@ const Canvas = (() => {
     return maps;
   }
 
+  // ========== Topology Analysis overlay ==========
+  // Draw island halos (color per electrical island), cut-vertex warning rings,
+  // and bridge-edge highlights onto the results layer.  Keyed by model bus id
+  // so it matches the result tables in app.js.
+  function showTopologyResults(data, opts) {
+    opts = opts || {};
+    const showIslands = opts.showIslands !== false;
+    const showBridges = opts.showBridges !== false;
+    const showCutVertices = opts.showCutVertices !== false;
+    const islandColor = typeof opts.islandColor === 'function' ? opts.islandColor : () => '#61afef';
+
+    resultsLayer.innerHTML = '';
+    if (!data) return;
+
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const busMap = getCompBusMap(); // busModelId -> compId, per domain
+    const acComp = (id) => (busMap.ac[id] != null ? getComponent(busMap.ac[id]) : null);
+    const dcComp = (id) => (busMap.dc[id] != null ? getComponent(busMap.dc[id]) : null);
+
+    // model bus id -> island id, domain-separated
+    const acIsl = {}, dcIsl = {};
+    (data.islands || []).forEach(isl => {
+      (isl.ac_bus_ids || []).forEach(id => { acIsl[id] = isl.island_id; });
+      (isl.dc_bus_ids || []).forEach(id => { dcIsl[id] = isl.island_id; });
+    });
+    const cutSet = new Set(data.cut_vertex_bus_ids || []);
+
+    const drawBusOverlay = (comp, islandId, isCut) => {
+      if (!comp) return;
+      if (showIslands && islandId !== undefined && islandId !== null && islandId >= 0) {
+        const halo = document.createElementNS(SVGNS, 'circle');
+        halo.setAttribute('class', 'topo-island-halo');
+        halo.setAttribute('cx', comp.x);
+        halo.setAttribute('cy', comp.y);
+        halo.setAttribute('r', 18);
+        halo.setAttribute('fill', islandColor(islandId));
+        halo.setAttribute('fill-opacity', '0.28');
+        halo.setAttribute('stroke', islandColor(islandId));
+        halo.setAttribute('stroke-opacity', '0.9');
+        halo.setAttribute('stroke-width', '2');
+        resultsLayer.appendChild(halo);
+      }
+      if (showCutVertices && isCut) {
+        const ring = document.createElementNS(SVGNS, 'circle');
+        ring.setAttribute('class', 'topo-cut-vertex-ring');
+        ring.setAttribute('cx', comp.x);
+        ring.setAttribute('cy', comp.y);
+        ring.setAttribute('r', 23);
+        resultsLayer.appendChild(ring);
+      }
+    };
+
+    Object.keys(acIsl).forEach(id => drawBusOverlay(acComp(+id), acIsl[id], cutSet.has(+id)));
+    Object.keys(dcIsl).forEach(id => drawBusOverlay(dcComp(+id), dcIsl[id], cutSet.has(+id)));
+    // Cut vertices not covered by an island map (rare) still get a ring.
+    if (showCutVertices) {
+      cutSet.forEach(id => {
+        if (acIsl[id] === undefined) drawBusOverlay(acComp(id), undefined, true);
+        if (dcIsl[id] === undefined) drawBusOverlay(dcComp(id), undefined, true);
+      });
+    }
+
+    // Bridge edges: dashed line between the two endpoint buses.
+    if (showBridges) {
+      (data.bridges || []).forEach(b => {
+        const dc = b.domain === 'DC';
+        const fromComp = dc ? dcComp(b.from_bus) : acComp(b.from_bus);
+        const toComp = dc ? dcComp(b.to_bus) : acComp(b.to_bus);
+        if (!fromComp || !toComp) return;
+        const line = document.createElementNS(SVGNS, 'line');
+        line.setAttribute('class', 'topo-bridge-edge');
+        line.setAttribute('x1', fromComp.x);
+        line.setAttribute('y1', fromComp.y);
+        line.setAttribute('x2', toComp.x);
+        line.setAttribute('y2', toComp.y);
+        resultsLayer.appendChild(line);
+      });
+    }
+  }
+
+  // Pan/select the canvas to a bus by its model id (used by result-table clicks).
+  function panToBusId(busId) {
+    const busMap = getCompBusMap();
+    const compId = busMap.ac[busId] != null ? busMap.ac[busId] : busMap.dc[busId];
+    if (compId != null) panToComponent(compId);
+  }
+
   // ========== Public API ==========
   return {
     init,
@@ -4385,11 +4472,13 @@ const Canvas = (() => {
     loadFromSystemJson,
     showPowerFlowResults,
     showTopologyReconfigResults,
+    showTopologyResults,
     clearResults,
     setVisualizationMode,
     refreshVisualization: applyVisualizationOverlay,
     clearAll,
     panToComponent,
+    panToBusId,
     getCompBusMap,
     get state() { return state; },
   };

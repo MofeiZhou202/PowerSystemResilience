@@ -50,6 +50,7 @@ const App = (() => {
   let _lastResilienceData = null;
   let _lastCarbonData = null;
   let _lastScenarioGenerationData = null;
+  let _lastTopoAnalysisData = null;
   let _lastScenarioBaseSystemJson = null;
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
@@ -580,6 +581,152 @@ const App = (() => {
     } else {
       setStatus('计算失败', 'error');
     }
+  }
+
+  // ========== Topology Analysis (graph structure) ==========
+  // Palette for island coloring — shared between the legend, the result
+  // tables, and the canvas overlay so the same island is the same color.
+  const TOPO_ISLAND_COLORS = [
+    '#61afef', '#98c379', '#e5c07b', '#c678dd', '#56b6c2',
+    '#d19a66', '#e06c75', '#7f9f7f', '#b294bb', '#de935f',
+  ];
+  function topoIslandColor(islandId) {
+    if (islandId === undefined || islandId === null || islandId < 0) return '#888';
+    return TOPO_ISLAND_COLORS[islandId % TOPO_ISLAND_COLORS.length];
+  }
+  function topoOverlayOptions() {
+    return {
+      showIslands: document.getElementById('topoShowIslands')?.checked !== false,
+      showBridges: document.getElementById('topoShowBridges')?.checked !== false,
+      showCutVertices: document.getElementById('topoShowCutVertices')?.checked !== false,
+      islandColor: topoIslandColor,
+    };
+  }
+
+  async function runTopologyAnalysis() {
+    setStatus('拓扑分析中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const data = await apiPost('/api/session/topology', {});
+
+    if (data && !data.error) {
+      _lastTopoAnalysisData = data;
+      const nIsl = (data.n_ac_islands || 0) + (data.n_dc_islands || 0);
+      const radial = data.is_radial ? '辐射状' : `含${data.cycle_count || 0}个环`;
+      const conn = data.is_connected ? '连通' : '不连通';
+      const valid = data.all_islands_valid ? '全部有效' : '存在无效孤岛';
+      log(`拓扑分析完成: ${conn}, ${radial}, 孤岛${nIsl}个(${valid}), ` +
+          `桥支路${(data.bridges || []).length}条, 割点${(data.cut_vertex_bus_ids || []).length}个`,
+          data.all_islands_valid ? 'success' : 'warn');
+      setStatus('拓扑分析完成');
+      showTopologyAnalysisResults(data);
+      Canvas.showTopologyResults(data, topoOverlayOptions());
+      setActiveResultGroup('topologyAnalysis');
+      switchTab('results');
+    } else {
+      log(`拓扑分析失败: ${data?.error || '未知错误'}`, 'error');
+      setStatus('分析失败', 'error');
+    }
+  }
+
+  function showTopologyAnalysisResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('topologyAnalysis');
+
+    const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+    // ── Summary ──
+    const summary = document.getElementById('topoAnalysisSummary');
+    if (summary) {
+      summary.innerHTML =
+        `<span>母线: <b>${data.n_buses ?? '?'}</b></span>` +
+        `<span>支路: <b>${data.n_branches ?? '?'}</b></span>` +
+        `<span>连通性: <b>${data.is_connected ? '连通' : '不连通'}</b></span>` +
+        `<span>辐射性: <b>${data.is_radial ? '辐射状' : '含环网'}</b></span>` +
+        `<span>环路数: <b>${data.cycle_count ?? 0}</b></span>` +
+        `<span>AC孤岛: <b>${data.n_ac_islands ?? 0}</b></span>` +
+        `<span>DC孤岛: <b>${data.n_dc_islands ?? 0}</b></span>` +
+        `<span>孤岛状态: <b>${data.all_islands_valid ? '全部有效' : '存在无效'}</b></span>`;
+    }
+
+    // ── Island legend (color chips, matches canvas) ──
+    const legend = document.getElementById('topoAnalysisIslandLegend');
+    if (legend) {
+      const islands = data.islands || [];
+      legend.innerHTML = islands.map(isl => {
+        const invalid = isl.status !== 'Valid';
+        return `<span class="legend-item${invalid ? ' invalid' : ''}">` +
+          `<span class="legend-swatch" style="background:${topoIslandColor(isl.island_id)}"></span>` +
+          `孤岛 ${isl.island_id} (${isl.domain}, ${isl.n_buses}母线)</span>`;
+      }).join('') || '<span class="empty-hint">无孤岛</span>';
+    }
+
+    // ── Islands table ──
+    const islStatusLabel = {
+      Valid: '✅ 有效', NoSlack: '⚠️ 无平衡节点', NoDCVoltageRef: '⚠️ 无DC电压参考',
+      IsolatedLoad: '⚠️ 孤立负荷', Empty: '空',
+    };
+    const islEl = document.getElementById('topoAnalysisIslands');
+    if (islEl) {
+      const rows = (data.islands || []).map(isl => {
+        const buses = [...(isl.ac_bus_ids || []), ...(isl.dc_bus_ids || [])];
+        const busList = buses.slice(0, 12).join(', ') + (buses.length > 12 ? ` … (+${buses.length - 12})` : '');
+        return `<tr><td><span class="legend-swatch" style="background:${topoIslandColor(isl.island_id)}"></span> ${isl.island_id}</td>` +
+          `<td>${isl.domain}</td><td>${isl.n_buses}</td>` +
+          `<td>${islStatusLabel[isl.status] || esc(isl.status)}</td>` +
+          `<td>${esc(busList)}</td></tr>`;
+      }).join('');
+      islEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>孤岛</th><th>域</th><th>母线数</th><th>状态</th><th>母线 ID</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无孤岛</p>';
+    }
+
+    // ── Bridges table ──
+    const brEl = document.getElementById('topoAnalysisBridges');
+    if (brEl) {
+      const rows = (data.bridges || []).map(b =>
+        `<tr><td class="topo-clickable" data-bus="${b.from_bus}">${b.from_bus}</td>` +
+        `<td class="topo-clickable" data-bus="${b.to_bus}">${b.to_bus}</td>` +
+        `<td>${esc(b.category || '')}</td><td>${b.domain || ''}</td></tr>`).join('');
+      brEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>起始母线</th><th>终止母线</th><th>类型</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无桥支路（无单点故障支路）</p>';
+    }
+
+    // ── Cut vertices table ──
+    const cvEl = document.getElementById('topoAnalysisCutVertices');
+    if (cvEl) {
+      const ids = data.cut_vertex_bus_ids || [];
+      cvEl.innerHTML = ids.length
+        ? '<div class="topo-cutvertex-chips">' + ids.map(id =>
+            `<span class="legend-item topo-clickable" data-bus="${id}">母线 ${id}</span>`).join(' ') + '</div>'
+        : '<p class="empty-hint">无割点</p>';
+    }
+
+    // ── Diagnostics table ──
+    const dgEl = document.getElementById('topoAnalysisDiagnostics');
+    if (dgEl) {
+      const rows = (data.diagnostics || []).map(d => {
+        const buses = (d.related_buses || []).join(', ');
+        return `<tr><td>${esc(d.message || '')}</td><td>${esc(buses)}</td></tr>`;
+      }).join('');
+      dgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>诊断</th><th>相关母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无诊断信息（拓扑健康）</p>';
+    }
+
+    // Click-to-pan: any element carrying data-bus pans the canvas to that bus.
+    document.querySelectorAll('#topoAnalysisBridges [data-bus], #topoAnalysisCutVertices [data-bus]').forEach(el => {
+      el.addEventListener('click', () => {
+        const busId = parseInt(el.dataset.bus, 10);
+        if (Number.isInteger(busId) && Canvas.panToBusId) Canvas.panToBusId(busId);
+      });
+    });
   }
 
   // ========== Bearing Capability Assessment (DL/T 2041-2019) ==========
@@ -2199,6 +2346,21 @@ const App = (() => {
 
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);
+
+    // Bar 3: topology analysis (graph structure)
+    document.getElementById('btnRunTopologyAnalysis')?.addEventListener('click', runTopologyAnalysis);
+    document.getElementById('btnExportTopologyAnalysis')?.addEventListener('click', () => {
+      if (!_lastTopoAnalysisData) {
+        setStatus('请先运行拓扑分析', 'warn');
+        return;
+      }
+      downloadJsonFile('topology_analysis.json', _lastTopoAnalysisData);
+    });
+    ['topoShowIslands', 'topoShowBridges', 'topoShowCutVertices'].forEach(id => {
+      document.getElementById(id)?.addEventListener('change', () => {
+        if (_lastTopoAnalysisData) Canvas.showTopologyResults(_lastTopoAnalysisData, topoOverlayOptions());
+      });
+    });
 
     // Bar 3: hosting capacity
     document.getElementById('btnRunBearingCap')?.addEventListener('click', showBcDialog);
