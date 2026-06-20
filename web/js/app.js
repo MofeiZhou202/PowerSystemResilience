@@ -545,6 +545,48 @@ const App = (() => {
     switchTab('results');
   }
 
+  // ========== Harmonic Power Flow (hybrid AC/DC) ==========
+  function parseOrderList(raw, fallback) {
+    const list = (raw || '').split(/[,\s]+/)
+      .map(s => parseInt(s, 10))
+      .filter(n => Number.isInteger(n) && n >= 0);
+    return list.length ? list : fallback;
+  }
+
+  async function runHarmonics() {
+    setStatus('谐波潮流计算中...', 'busy');
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+    const acOrders = parseOrderList(document.getElementById('hpfAcOrders')?.value,
+                                    [5, 7, 11, 13, 17, 19, 23, 25]);
+    const dcOrders = parseOrderList(document.getElementById('hpfDcOrders')?.value,
+                                    [2, 6, 12, 18, 24]);
+    const loadImp = document.getElementById('hpfLoadImpedance')?.checked ?? true;
+    const autoNic = document.getElementById('hpfAutoNic')?.checked ?? true;
+    const xpp = parseFloat(document.getElementById('hpfSourceXpp')?.value || '0.2');
+
+    const data = await apiPost('/api/session/harmonics', {
+      options: {
+        ac_orders: acOrders,
+        dc_orders: dcOrders,
+        include_load_impedance: loadImp,
+        auto_nic_from_vscs: autoNic,
+        default_source_xpp_pu: Number.isFinite(xpp) ? xpp : 0.2,
+        run_base_power_flow: true,
+      }
+    });
+    if (data && data.ok) {
+      log(`谐波潮流完成: 最大 AC THD ${(data.max_ac_thd_pct || 0).toFixed(2)}% @ 母线 ${data.max_ac_thd_bus}`, 'success');
+      setStatus('谐波潮流完成');
+      showHarmonicsResults(data);
+      switchTab('results');
+    } else {
+      setStatus((data && data.message) || '谐波潮流失败', 'error');
+    }
+  }
+
   // ========== Topology Reconfiguration ==========
   async function runTopologyReconfig() {
     setStatus('拓扑重构中...', 'busy');
@@ -1571,6 +1613,87 @@ const App = (() => {
     scDiv.innerHTML = html;
   }
 
+  // Render hybrid AC/DC harmonic power-flow results (/api/session/harmonics).
+  function showHarmonicsResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('harmonics');
+
+    const fmt = (x, d = 2) =>
+      (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    const summary = document.getElementById('resultsSummary');
+    summary.innerHTML = `
+      <div class="result-item"><span class="result-label">状态</span>
+        <span class="result-value ${data.ok ? 'result-converged' : 'result-failed'}">
+          ${data.ok ? '完成' : '失败'}</span></div>
+      <div class="result-item"><span class="result-label">基波潮流</span>
+        <span class="result-value">${data.base_pf_converged ? '已收敛' : '未收敛/沿用存储电压'}</span></div>
+      <div class="result-item"><span class="result-label">AC 谐波次数</span>
+        <span class="result-value">${(data.ac_orders || []).join(', ') || '—'}</span></div>
+      <div class="result-item"><span class="result-label">DC 纹波次数</span>
+        <span class="result-value">${(data.dc_orders || []).join(', ') || '—'}</span></div>
+      <div class="result-item"><span class="result-label">最大 AC 电压 THD</span>
+        <span class="result-value">${fmt(data.max_ac_thd_pct)}% @ Bus ${data.max_ac_thd_bus}</span></div>
+      ${(data.dc_bus_results && data.dc_bus_results.length) ? `
+      <div class="result-item"><span class="result-label">最大 DC 纹波 THD</span>
+        <span class="result-value">${fmt(data.max_dc_thd_pct)}% @ Bus ${data.max_dc_thd_bus}</span></div>` : ''}
+    `;
+
+    const busMap = Canvas.getCompBusMap();
+    // Build a compact spectrum string (top contributing orders) for a bus row.
+    const specStr = (harmonics, fundOrder) => {
+      return (harmonics || [])
+        .filter(h => h.order !== fundOrder && h.mag_pu > 1e-6)
+        .sort((a, b) => b.mag_pu - a.mag_pu)
+        .slice(0, 3)
+        .map(h => `h${h.order}:${(h.mag_pu * 100).toFixed(1)}%`)
+        .join('  ') || '—';
+    };
+
+    const acDiv = document.getElementById('hpfAcResults');
+    const acRows = (data.ac_bus_results || []).slice()
+      .sort((a, b) => b.thd_pct - a.thd_pct);
+    if (acRows.length) {
+      let html = '<table><thead><tr><th>Bus</th><th>V<sub>1</sub>(p.u.)</th>' +
+                 '<th>THD<sub>V</sub>(%)</th><th>主要谐波</th></tr></thead><tbody>';
+      acRows.forEach(b => {
+        const compId = busMap.ac ? busMap.ac[b.bus] : undefined;
+        const attr = compId !== undefined
+          ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const hot = b.thd_pct >= 5.0 ? ' style="color:var(--red);font-weight:600"' : '';
+        html += `<tr${attr}><td>${b.bus}</td><td>${fmt(b.v_fund_pu, 4)}</td>` +
+                `<td${hot}>${fmt(b.thd_pct)}</td><td>${specStr(b.harmonics, 1)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      acDiv.innerHTML = html;
+    } else {
+      acDiv.innerHTML = '<p class="muted">无 AC 母线结果</p>';
+    }
+
+    const dcSection = document.getElementById('hpfDcSection');
+    const dcDiv = document.getElementById('hpfDcResults');
+    const dcRows = (data.dc_bus_results || []).slice()
+      .sort((a, b) => b.thd_pct - a.thd_pct);
+    if (dcRows.length) {
+      dcSection.style.display = 'block';
+      let html = '<table><thead><tr><th>Bus</th><th>V<sub>0</sub>(p.u.)</th>' +
+                 '<th>THD<sub>V</sub>(%)</th><th>主要纹波</th></tr></thead><tbody>';
+      dcRows.forEach(b => {
+        const compId = busMap.dc ? busMap.dc[b.bus] : undefined;
+        const attr = compId !== undefined
+          ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        html += `<tr${attr}><td>${b.bus}</td><td>${fmt(b.v_fund_pu, 4)}</td>` +
+                `<td>${fmt(b.thd_pct)}</td><td>${specStr(b.harmonics, 0)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      dcDiv.innerHTML = html;
+    } else {
+      dcSection.style.display = 'none';
+      dcDiv.innerHTML = '';
+    }
+  }
+
   function showTopologyResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -2343,6 +2466,9 @@ const App = (() => {
       if (cf) document.getElementById('scCFactor').value = cf;
       runShortCircuit();
     });
+
+    // Bar 3: harmonic power flow
+    document.getElementById('btnRunHarmonics')?.addEventListener('click', runHarmonics);
 
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);

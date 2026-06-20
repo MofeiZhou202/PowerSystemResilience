@@ -1,0 +1,425 @@
+// Harmonic Power Flow (hybrid AC/DC) — Numerical Verification Tests
+// ==================================================================
+// Validates hacdcpf::harmonics::solve_harmonic_power_flow against closed-form
+// analytical solutions on small networks, then runs self-consistency checks.
+//
+// The frequency-domain model is linear at each order, so every harmonic bus
+// voltage equals  I_inj * Z(bus->ground).  For a radial path this is simply the
+// sum of the series branch impedances plus the source internal impedance, which
+// makes the expected voltages exactly computable.
+//
+//   z_src,AC(h) = r + j*h*x''           (default x'' = 0.2 pu on a slack node)
+//   z_line(h)   = r + j*h*x
+//   z_src,DC    = dc_source_impedance_pu (default 0.01 pu, resistive)
+//   z_branch,DC = r                      (DC branches carry no inductance)
+//
+// Tests:
+//   1. AC 2-bus: V2(h) = I*(z_src+z_line), V1(h) = I*z_src, THD = |Vh|/|V1|
+//   2. AC impedance frequency scaling (lossless): |V(7)|/|V(5)| = 7/5
+//   3. AC linearity / superposition: 2*I -> 2*V
+//   4. AC radial feeder: monotone harmonic voltage, exact per-bus values
+//   5. DC 2-bus ripple: V2(r) = I*(z_src,DC + r_branch)
+//   6. NIC hybrid coupling: I_ac1 = conj(S)/conj(V), AC & DC ripple, P-scaling
+//   7. Multi-harmonic THD formula
+//   8. Default spectra, summary(), branch-flow output sanity
+
+#include <cmath>
+#include <complex>
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
+#include "hacdcpf/analysis/harmonics_power_flow.hpp"
+
+using namespace hacdcpf;
+using namespace hacdcpf::harmonics;
+using Cx = std::complex<double>;
+using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
+
+// ---------------------------------------------------------------------------
+// Builders
+// ---------------------------------------------------------------------------
+static ACBus ac_bus(int id, BusType t, double kv = 10.0) {
+  ACBus b;
+  b.index = id;
+  b.bus_type = t;
+  b.vm_pu = 1.0;
+  b.va_deg = 0.0;
+  b.base_kv = kv;
+  b.in_service = true;
+  return b;
+}
+
+static ACBranch ac_line(int id, int f, int t, double r, double x, double b = 0.0) {
+  ACBranch br;
+  br.index = id;
+  br.from_bus = f;
+  br.to_bus = t;
+  br.r_pu = r;
+  br.x_pu = x;
+  br.b_pu = b;
+  br.tap = 1.0;
+  br.in_service = true;
+  return br;
+}
+
+static DCBus dc_bus(int id, DCBusType t, double kv = 1.0) {
+  DCBus b;
+  b.index = id;
+  b.bus_type = t;
+  b.vm_pu = 1.0;
+  b.base_kv = kv;
+  b.in_service = true;
+  return b;
+}
+
+static DCBranch dc_line(int id, int f, int t, double r) {
+  DCBranch br;
+  br.index = id;
+  br.from_bus = f;
+  br.to_bus = t;
+  br.r_pu = r;
+  br.in_service = true;
+  return br;
+}
+
+// Look up the harmonic voltage phasor at a given bus and order.
+static Cx vbus(const HPFResult& r, int bus, int order, bool is_dc = false) {
+  const auto& vec = is_dc ? r.dc_bus_results : r.ac_bus_results;
+  for (const auto& br : vec) {
+    if (br.bus == bus) {
+      auto it = br.v_by_order.find(order);
+      if (it != br.v_by_order.end()) return it->second;
+    }
+  }
+  return Cx(0.0, 0.0);
+}
+
+static double thd_at(const HPFResult& r, int bus, bool is_dc = false) {
+  const auto& vec = is_dc ? r.dc_bus_results : r.ac_bus_results;
+  for (const auto& br : vec)
+    if (br.bus == bus) return br.thd_pct;
+  return -1.0;
+}
+
+// ===========================================================================
+// 1. AC 2-bus analytical
+// ===========================================================================
+TEST_CASE("HPF AC 2-bus analytical voltage and THD", "[harmonics][ac]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.is_dc = false;
+  src.i_base_pu = 1.0;          // 1.0 pu reference current
+  src.spectrum = {{5, 100.0, 0.0}};  // inject 1.0 pu at the 5th
+
+  HarmonicStudyInputs in;
+  in.sources = {src};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;   // operating point from stored voltages
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.ac_order_solved.at(5));
+
+  // z_src(5) = j*5*0.2 = j1.0 ; z_line(5) = 0.01 + j*0.5
+  // V2(5) = I*(z_src + z_line) = 0.01 + j1.5 ; V1(5) = I*z_src = j1.0
+  const Cx v2 = vbus(r, 2, 5);
+  const Cx v1 = vbus(r, 1, 5);
+  CHECK_THAT(v2.real(), WithinAbs(0.01, 1e-5));
+  CHECK_THAT(v2.imag(), WithinAbs(1.5, 1e-5));
+  CHECK_THAT(v1.real(), WithinAbs(0.0, 1e-5));
+  CHECK_THAT(v1.imag(), WithinAbs(1.0, 1e-5));
+
+  // THD at bus 2 = |V2(5)| / |V2(1)| with |V2(1)| = 1.0
+  const double expected_thd = std::abs(v2) * 100.0;  // since |V_fund| = 1
+  CHECK_THAT(thd_at(r, 2), WithinRel(expected_thd, 1e-6));
+  CHECK_THAT(thd_at(r, 2), WithinAbs(150.003, 1e-2));
+}
+
+// ===========================================================================
+// 2. Impedance frequency scaling (lossless)
+// ===========================================================================
+TEST_CASE("HPF AC impedance scales linearly with harmonic order", "[harmonics][ac]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};  // lossless
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // Lossless: V2(h) = j*h*(x'' + x_line)*I, so |V2(7)|/|V2(5)| = 7/5.
+  const double m5 = std::abs(vbus(r, 2, 5));
+  const double m7 = std::abs(vbus(r, 2, 7));
+  CHECK_THAT(m7 / m5, WithinRel(7.0 / 5.0, 1e-6));
+  // Absolute: x''=0.2, x_line=0.1 -> |V2(5)| = 5*0.3 = 1.5
+  CHECK_THAT(m5, WithinAbs(1.5, 1e-5));
+  CHECK_THAT(m7, WithinAbs(2.1, 1e-5));
+}
+
+// ===========================================================================
+// 3. Linearity / superposition
+// ===========================================================================
+TEST_CASE("HPF is linear in the injected current", "[harmonics][ac]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};
+
+  auto run = [&](double ibase) {
+    HarmonicCurrentSource src;
+    src.bus = 2;
+    src.i_base_pu = ibase;
+    src.spectrum = {{5, 100.0, 0.0}};
+    HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {5};
+    opt.dc_orders = {};
+    return solve_harmonic_power_flow(sys, in, opt);
+  };
+
+  const Cx v1 = vbus(run(1.0), 2, 5);
+  const Cx v2 = vbus(run(2.0), 2, 5);
+  CHECK_THAT(v2.real(), WithinRel(2.0 * v1.real(), 1e-9));
+  CHECK_THAT(v2.imag(), WithinRel(2.0 * v1.imag(), 1e-9));
+}
+
+// ===========================================================================
+// 4. Radial feeder: monotone harmonic voltage + exact per-bus values
+// ===========================================================================
+TEST_CASE("HPF radial feeder accumulates harmonic voltage to the source bus",
+          "[harmonics][ac]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ),
+                  ac_bus(3, BusType::PQ), ac_bus(4, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1), ac_line(2, 2, 3, 0.0, 0.1),
+                     ac_line(3, 3, 4, 0.0, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 4;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // z_src(5)=j1.0, each branch z(5)=j0.5. Path-to-ground impedance:
+  //   bus1: j1.0, bus2: j1.5, bus3: j2.0, bus4: j2.5
+  CHECK_THAT(std::abs(vbus(r, 1, 5)), WithinAbs(1.0, 1e-5));
+  CHECK_THAT(std::abs(vbus(r, 2, 5)), WithinAbs(1.5, 1e-5));
+  CHECK_THAT(std::abs(vbus(r, 3, 5)), WithinAbs(2.0, 1e-5));
+  CHECK_THAT(std::abs(vbus(r, 4, 5)), WithinAbs(2.5, 1e-5));
+
+  // THD increases monotonically toward the harmonic source.
+  CHECK(thd_at(r, 1) < thd_at(r, 2));
+  CHECK(thd_at(r, 2) < thd_at(r, 3));
+  CHECK(thd_at(r, 3) < thd_at(r, 4));
+  CHECK(r.max_ac_thd_bus == 4);
+}
+
+// ===========================================================================
+// 5. DC 2-bus ripple analytical
+// ===========================================================================
+TEST_CASE("HPF DC 2-bus ripple analytical voltage", "[harmonics][dc]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_V), dc_bus(2, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 1, 2, 0.05)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.is_dc = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{6, 100.0, 0.0}};
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.ac_orders = {};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.dc_order_solved.at(6));
+
+  // z_src,DC = 0.01, branch r = 0.05 -> V2(6) = I*(0.06) = 0.06 ; V1(6) = 0.01
+  CHECK_THAT(std::abs(vbus(r, 2, 6, true)), WithinAbs(0.06, 1e-6));
+  CHECK_THAT(std::abs(vbus(r, 1, 6, true)), WithinAbs(0.01, 1e-6));
+  // DC THD at bus 2 = 0.06 / 1.0 = 6 %
+  CHECK_THAT(thd_at(r, 2, true), WithinAbs(6.0, 1e-3));
+}
+
+// ===========================================================================
+// 6. NIC hybrid AC/DC coupling
+// ===========================================================================
+TEST_CASE("HPF NIC bridges AC and DC through a single operating point",
+          "[harmonics][nic][hybrid]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  // AC: slack(1) -- line -- VSC AC port(2)
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+  // DC: DC_V reference(10) -- line -- VSC DC port(11)
+  sys.dc.buses = {dc_bus(10, DCBusType::DC_V), dc_bus(11, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 10, 11, 0.05)};
+
+  VSCConverter v;
+  v.index = 0;
+  v.bus_ac = 2;
+  v.bus_dc = 11;
+  v.control_mode = ConverterMode::PQ_MODE;
+  v.in_service = true;
+  sys.vsc_converters = {v};
+
+  auto run = [&](double p_mw) {
+    HarmonicNIC nic;
+    nic.vsc_index = 0;
+    nic.ac_port = PortBehavior::GridFollowing;
+    nic.dc_port = PortBehavior::GridFollowing;  // current-injecting DC ripple
+    nic.ac_spectrum = {{5, 100.0, 0.0}};
+    nic.dc_spectrum = {{6, 100.0, 0.0}};
+    nic.s_ac_p_mw = p_mw;       // through-power operating point
+    nic.s_ac_q_mvar = 0.0;
+    nic.p_dc_mw = -p_mw;        // absorbed on DC side
+    HarmonicStudyInputs in{.sources = {}, .nics = {nic}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {5};
+    opt.dc_orders = {6};
+    opt.dc_source_impedance_pu = 0.01;
+    opt.auto_nic_from_vscs = true;  // must NOT double-count the explicit NIC
+    return solve_harmonic_power_flow(sys, in, opt);
+  };
+
+  // P = 100 MW = 1.0 pu, V_ac1 = 1.0 -> |I_ac1| = 1.0 -> AC 5th injection = 1.0
+  HPFResult r = run(100.0);
+  REQUIRE(r.ok);
+  // AC port harmonic voltage: V2(5) = 1.0*(j1.0 + j0.5) = j1.5
+  CHECK_THAT(std::abs(vbus(r, 2, 5)), WithinAbs(1.5, 1e-5));
+  // DC port ripple: |I_dc0| = |P_dc|/Vdc0 = 1.0 -> V11(6)=1.0*(0.01+0.05)=0.06
+  CHECK_THAT(std::abs(vbus(r, 11, 6, true)), WithinAbs(0.06, 1e-5));
+
+  // Doubling the through-power doubles both the AC harmonic and the DC ripple
+  // (the converter injection magnitudes scale with the operating-point current).
+  HPFResult r2 = run(200.0);
+  REQUIRE(r2.ok);
+  CHECK_THAT(std::abs(vbus(r2, 2, 5)), WithinRel(2.0 * std::abs(vbus(r, 2, 5)), 1e-6));
+  CHECK_THAT(std::abs(vbus(r2, 11, 6, true)),
+             WithinRel(2.0 * std::abs(vbus(r, 11, 6, true)), 1e-6));
+}
+
+// ===========================================================================
+// 7. Multi-harmonic THD formula
+// ===========================================================================
+TEST_CASE("HPF multi-harmonic THD matches RSS definition", "[harmonics][thd]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}, {7, 50.0, 0.0}};  // 1.0 pu @5th, 0.5 pu @7th
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // |V2(5)| = 1.0*5*0.3 = 1.5 ; |V2(7)| = 0.5*7*0.3 = 1.05
+  const double v5 = std::abs(vbus(r, 2, 5));
+  const double v7 = std::abs(vbus(r, 2, 7));
+  CHECK_THAT(v5, WithinAbs(1.5, 1e-5));
+  CHECK_THAT(v7, WithinAbs(1.05, 1e-5));
+  const double thd_expected = std::sqrt(v5 * v5 + v7 * v7) / 1.0 * 100.0;
+  CHECK_THAT(thd_at(r, 2), WithinRel(thd_expected, 1e-6));
+}
+
+// ===========================================================================
+// 8. Default spectra, summary(), branch-flow output sanity
+// ===========================================================================
+TEST_CASE("HPF default spectra and result metadata", "[harmonics][meta]") {
+  const auto ac = default_six_pulse_ac_spectrum();
+  REQUIRE(ac.size() >= 4);
+  CHECK(ac.front().order == 5);
+  CHECK_THAT(ac.front().mag_percent, WithinAbs(20.0, 1e-9));
+
+  const auto dc = default_dc_ripple_spectrum();
+  REQUIRE(dc.size() >= 1);
+  CHECK(dc.front().order == 6);
+  CHECK_THAT(dc.front().mag_percent, WithinAbs(4.5, 1e-9));
+
+  // Branch-flow output is populated and the summary string is non-empty.
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+  opt.compute_branch_flows = true;
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.ac_branch_flows.size() == 1);
+  // Radial branch carries the full injected current at the 5th (1.0 pu).
+  CHECK_THAT(r.ac_branch_flows[0].i_by_order.at(5), WithinAbs(1.0, 1e-5));
+  CHECK_FALSE(r.summary().empty());
+}
