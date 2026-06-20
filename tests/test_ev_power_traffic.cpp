@@ -1,7 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "hacdcpf/ev_power_traffic.hpp"
+#include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::evpt;

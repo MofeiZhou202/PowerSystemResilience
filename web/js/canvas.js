@@ -3740,6 +3740,7 @@ const Canvas = (() => {
   return {
     init,
     addComponent,
+    addConnection,
     removeComponent,
     removeConnection,
     removeSelected,

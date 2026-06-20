@@ -28,7 +28,7 @@ struct SolverCapabilities {
     bool has_native_ipm{true};            ///< Built-in primal-dual IPM (always)
 
     // ── I/O backends ─────────────────────────────────────────────────────────
-    bool has_excel{false};                ///< Excel I/O via OpenXLSX
+    bool has_excel{false};                ///< Excel-based ETAP I/O via OpenXLSX
     bool has_opendss{false};              ///< OpenDSS bridge
 
     // ── Solver feature flags ─────────────────────────────────────────────────
