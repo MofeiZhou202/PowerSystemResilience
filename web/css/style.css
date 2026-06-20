@@ -278,9 +278,14 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #canvas .port circle { fill: var(--accent2); stroke: #fff; stroke-width: 1; r: 4; }
 #canvas .port:hover circle { r: 6; fill: var(--accent); }
 #canvas .connection { cursor: pointer; }
+#canvas .connection path { fill: none; }
+#canvas .conn-line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 #canvas .connection:hover .conn-line { stroke: var(--accent); stroke-width: 3; }
 #canvas .connection.conn-selected .conn-line { stroke: #e06c75; stroke-width: 3; stroke-dasharray: 6 3; }
 #canvas .connection.conn-selected:hover .conn-line { stroke: #e06c75; stroke-width: 4; }
+#canvas .topo-reconfig-overlay { fill: none; }
+/* Alignment guide shown while dragging (doc §18 Phase 4 — snap-on-drag) */
+#canvas .align-guide { stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; pointer-events: none; }
 
 /* Component colors on canvas */
 .comp-bus line { stroke: var(--accent); stroke-width: 4; }
@@ -837,6 +842,19 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 .toolbar-select:hover { border-color: var(--tb-border-hover); }
 .toolbar-select:focus { outline: none; border-color: var(--tb-active-border); }
+.toolbar-check {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--tb-text);
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
 .toolbar-aux {
   display: flex;
   align-items: center;
