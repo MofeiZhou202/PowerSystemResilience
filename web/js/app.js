@@ -48,6 +48,7 @@ const App = (() => {
   let _lastTspfData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
+  let _lastCarbonData = null;
   let _lastScenarioGenerationData = null;
   let _lastScenarioBaseSystemJson = null;
   let _importedGeneratedScenario = null;
@@ -2096,16 +2097,6 @@ const App = (() => {
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
     });
 
-    // Bar 3: PF — Green-certificate data import (placeholder; backend TODO).
-    document.getElementById('btnImportGreenCert')?.addEventListener('click', () => {
-      document.getElementById('fileImportGreenCert')?.click();
-    });
-    document.getElementById('fileImportGreenCert')?.addEventListener('change', (e) => {
-      const f = e.target.files[0];
-      if (f) log(`已选择绿证数据文件: ${f.name}（TODO: 后端导入接口待对接）`, 'info');
-      e.target.value = '';
-    });
-
     // Bar 3: Reliability — run (NSQ/SEQ/FMEA/F&D) + export. Backend live.
     async function runReliability() {
       setStatus('可靠性分析中...', 'busy');
@@ -2200,6 +2191,131 @@ const App = (() => {
         return;
       }
       downloadJsonFile(`reliability_results_${tsTagForFilename()}.json`, _lastReliabilityData);
+    });
+
+    // ---- Carbon emission analysis ----
+    // Backend reuses the cached PF result if one exists, otherwise runs a fresh
+    // AC Newton power flow. Request body is empty; the server operates on the
+    // currently loaded system (synced from the canvas below).
+    async function runCarbonAnalysis() {
+      setStatus('碳排放分析中...', 'busy');
+      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+      const data = await apiPost('/api/session/run_carbon', {});
+      if (data && !data.error) {
+        _lastCarbonData = data;
+        showCarbonResults(data);
+        switchTab('results');
+        setStatus('碳排放分析完成');
+      } else {
+        setStatus('碳排放分析失败', 'error');
+      }
+    }
+
+    function showCarbonResults(data) {
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      setActiveResultGroup('carbonAnalysis');
+      const nf = (v, d = 3) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+
+      // Method / source header
+      let html = `<div style="margin-bottom:8px;">`
+        + `<b>潮流来源：</b>${data.pf_source || '—'} &nbsp; `
+        + `<b>矩阵法：</b>${data.matrix_solved ? '✓ 求解' : '✗ 未解'} &nbsp; `
+        + `<b>溯源校验：</b>${data.tracing_verified ? '✓ 通过' : '✗ 未通过'} &nbsp; `
+        + `<b>矩阵残差：</b>${nf(data.matrix_residual, 2)}</div>`;
+
+      // Emissions summary — proportional tracing vs matrix method
+      const ts = data.tracing_summary || {}, ms = data.matrix_summary || {};
+      html += '<h4 style="margin:6px 0 4px;">碳排放总量 (tCO₂)</h4>';
+      html += '<table><thead><tr><th>指标</th><th>比例溯源法</th><th>矩阵法</th></tr></thead><tbody>';
+      const rows = [
+        ['发电侧排放', 'total_generation_emissions_tco2'],
+        ['负荷侧排放', 'total_load_emissions_tco2'],
+        ['网损排放', 'total_loss_emissions_tco2'],
+        ['平衡误差 (%)', 'balance_error_pct'],
+      ];
+      for (const [label, key] of rows) {
+        html += `<tr><td>${label}</td><td class="result-value">${nf(ts[key])}</td><td class="result-value">${nf(ms[key])}</td></tr>`;
+      }
+      html += '</tbody></table>';
+
+      // Load carbon — sorted by total emissions, top 20
+      const loads = (data.load_carbon || []).slice().sort((a, b) => (b.total_emissions_tco2 || 0) - (a.total_emissions_tco2 || 0));
+      if (loads.length) {
+        html += '<h4 style="margin:10px 0 4px;">负荷碳排放 (Top 20)</h4>';
+        html += '<table><thead><tr><th>负荷</th><th>母线</th><th>需求(MW)</th><th>碳强度(tCO₂/MWh)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        loads.slice(0, 20).forEach(l => {
+          html += `<tr><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
+            + `<td>${nf(l.carbon_intensity_tco2_mwh, 4)}</td><td class="result-value">${nf(l.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // Bus carbon intensity — AC, sorted by intensity, top 20
+      const buses = (data.bus_carbon || []).slice().sort((a, b) => (b.carbon_intensity_tco2_mwh || 0) - (a.carbon_intensity_tco2_mwh || 0));
+      if (buses.length) {
+        html += '<h4 style="margin:10px 0 4px;">母线碳强度 (AC, Top 20)</h4>';
+        html += '<table><thead><tr><th>母线</th><th>碳强度(tCO₂/MWh)</th></tr></thead><tbody>';
+        buses.slice(0, 20).forEach(b => {
+          html += `<tr><td>${b.bus_index ?? '—'}</td><td class="result-value">${nf(b.carbon_intensity_tco2_mwh, 4)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // Branch loss carbon — sorted by emissions, top 15
+      const branches = (data.branch_carbon || []).slice().sort((a, b) => (b.total_emissions_tco2 || 0) - (a.total_emissions_tco2 || 0));
+      if (branches.length) {
+        html += '<h4 style="margin:10px 0 4px;">支路网损碳排放 (Top 15)</h4>';
+        html += '<table><thead><tr><th>支路</th><th>从→到</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        branches.slice(0, 15).forEach(b => {
+          html += `<tr><td>${b.branch_index ?? '—'}</td><td>${b.from_bus}→${b.to_bus}</td>`
+            + `<td>${nf(b.loss_mw, 4)}</td><td class="result-value">${nf(b.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // VSC converter carbon
+      const vscs = data.vsc_carbon || [];
+      if (vscs.length) {
+        html += '<h4 style="margin:10px 0 4px;">换流器 (VSC) 损耗碳排放</h4>';
+        html += '<table><thead><tr><th>换流器</th><th>AC母线</th><th>DC母线</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        vscs.forEach(v => {
+          html += `<tr><td>${v.converter_index ?? '—'}</td><td>${v.bus_ac ?? '—'}</td><td>${v.bus_dc ?? '—'}</td>`
+            + `<td>${nf(v.loss_mw, 4)}</td><td class="result-value">${nf(v.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      document.getElementById('carbonResults').innerHTML = html;
+
+      // Carbon flow Sankey: sources (generators/storage) → loads
+      const chartDiv = document.getElementById('carbonSankeyChart');
+      const labels = data.sankey_labels || [], srcs = data.sankey_sources || [],
+            tgts = data.sankey_targets || [], vals = data.sankey_values || [];
+      if (typeof Plotly !== 'undefined' && chartDiv && labels.length && srcs.length) {
+        Plotly.react(chartDiv, [{
+          type: 'sankey',
+          orientation: 'h',
+          node: { label: labels, pad: 12, thickness: 14,
+                  line: { color: '#3e4451', width: 0.5 },
+                  color: '#61afef' },
+          link: { source: srcs, target: tgts, value: vals,
+                  color: 'rgba(97,175,239,0.25)' },
+        }], {
+          paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#abb2bf', size: 11 },
+          margin: { l: 10, r: 10, t: 20, b: 10 }, title: '碳流溯源 (MW)',
+        }, { responsive: true });
+      } else if (chartDiv) {
+        chartDiv.innerHTML = '<p class="empty-hint">无碳流数据可视化</p>';
+      }
+    }
+
+    document.getElementById('btnRunCarbon')?.addEventListener('click', runCarbonAnalysis);
+    document.getElementById('btnExportCarbonResults')?.addEventListener('click', () => {
+      if (!_lastCarbonData) {
+        log('暂无碳排放分析结果可导出，请先运行碳排放分析', 'warn');
+        return;
+      }
+      downloadJsonFile(`carbon_results_${tsTagForFilename()}.json`, _lastCarbonData);
     });
 
     // Bar 3: Resilience — collect inline parameters into a payload (placeholder).

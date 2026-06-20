@@ -46,6 +46,7 @@
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
   <button id="moduleResilience"   class="module-btn" data-module="resilience">弹性评估</button>
+  <button id="moduleCarbonAnalysis" class="module-btn" data-module="carbonAnalysis">碳排放分析</button>
 </div>
 
 <!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
@@ -108,13 +109,11 @@
     <button id="btnImportIrradiance"  class="toolbar-btn" title="导入辐照强度时序数据 (JSON / Excel)">辐照强度<br>数据导入</button>
     <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
     <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
-    <button id="btnImportGreenCert"   class="toolbar-btn" title="导入绿证数据 (JSON / Excel / CSV)">绿证数据<br>导入</button>
     <button id="btnImportGeneratedRegularScenario" class="toolbar-btn" title="导入场景生成模块导出的常规场景 JSON">导入生成<br>场景</button>
     <label class="sub-label sub-checkbox" title="勾选后运行时序潮流时使用导入生成场景中的时序数据；不勾选则沿用当前手动/默认时序配置">
       <input id="regUseScenarioTimeSeries" type="checkbox"/>
       <span>使用场景时序</span>
     </label>
-    <input type="file" id="fileImportGreenCert" accept=".json,.xlsx,.xls,.csv" style="display:none"/>
     <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
     <label class="sub-label">仿真时间(小时)
       <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
@@ -222,6 +221,14 @@
     </label>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
+  </div>
+  <!-- Carbon Analysis -->
+  <div class="sub-section" data-sub="carbonAnalysis" hidden>
+    <label class="sub-label" title="碳排放分析基于当前潮流结果；若未运行潮流则自动求解一次交流潮流">潮流来源
+      <span class="sub-static" style="opacity:.8;">当前潮流 / 自动</span>
+    </label>
+    <button id="btnRunCarbon" class="toolbar-btn run-btn" title="基于当前系统与潮流结果进行碳排放溯源分析">运行碳排放分析</button>
+    <button id="btnExportCarbonResults" class="toolbar-btn" title="将碳排放分析结果导出为 JSON">结果导出</button>
   </div>
 </div>
 
@@ -680,6 +687,15 @@
             </div>
           </div>
         </div><!-- /result-group resilience -->
+        <div class="result-group" data-result-group="carbonAnalysis">
+          <div class="topo-section">
+            <h4>碳排放分析结果</h4>
+            <div id="carbonSankeyChart" class="tspf-chart" style="height:360px;"></div>
+            <div id="carbonResults" class="topo-table-wrap">
+              <p class="empty-hint">运行碳排放分析后查看发电/负荷/损耗碳排放与碳流溯源</p>
+            </div>
+          </div>
+        </div><!-- /result-group carbonAnalysis -->
       </div>
     </div>
   </aside>

@@ -277,7 +277,7 @@ struct Generator {
   double x0_pu{0.0};
   double r0_pu{0.0};
 
-  double emission_factor_tco2_mwh{0.0};
+  double emission_factor_tco2_mwh{500.0};
   double nox_factor_kg_mwh{0.0};
   double so2_factor_kg_mwh{0.0};
 
