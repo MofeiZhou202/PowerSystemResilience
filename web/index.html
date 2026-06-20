@@ -48,6 +48,7 @@
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
+  <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序潮流</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
@@ -110,6 +111,23 @@
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
     <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
+  </div>
+  <!-- Topology analysis (graph structure) -->
+  <div class="sub-section" data-sub="topologyAnalysis" hidden>
+    <label class="sub-label sub-checkbox" title="在画布上按电气孤岛着色母线">
+      <input id="topoShowIslands" type="checkbox" checked/>
+      <span>孤岛着色</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="高亮桥支路（割边 / 单点故障支路）">
+      <input id="topoShowBridges" type="checkbox" checked/>
+      <span>桥支路高亮</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="标记割点母线（关节点）">
+      <input id="topoShowCutVertices" type="checkbox" checked/>
+      <span>割点标记</span>
+    </label>
+    <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
+    <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
   </div>
   <!-- Time-series PF -->
   <div class="sub-section" data-sub="timeSeries" hidden>
@@ -640,6 +658,21 @@
           <div id="topoResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group topology -->
+        <div class="result-group" data-result-group="topologyAnalysis">
+        <div class="topo-section">
+          <h4>拓扑分析结果</h4>
+          <div id="topoAnalysisSummary" class="results-summary"></div>
+          <div id="topoAnalysisIslandLegend" class="topo-island-legend"></div>
+          <h5>电气孤岛</h5>
+          <div id="topoAnalysisIslands" class="topo-table-wrap"></div>
+          <h5>桥支路（割边 / 单点故障）</h5>
+          <div id="topoAnalysisBridges" class="topo-table-wrap"></div>
+          <h5>割点母线（关节点）</h5>
+          <div id="topoAnalysisCutVertices" class="topo-table-wrap"></div>
+          <h5>诊断信息</h5>
+          <div id="topoAnalysisDiagnostics" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group topologyAnalysis -->
         <div class="result-group" data-result-group="hosting">
         <div class="topo-section" id="bearingCapSection" style="display:none">
           <h4>承载力评估结果 (DL/T 2041-2019)</h4>

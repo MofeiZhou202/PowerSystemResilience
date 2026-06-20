@@ -41,6 +41,7 @@
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
+#include "hacdcpf/graph/graph.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -5062,6 +5063,156 @@ int main(int argc, char** argv) {
       }
 
       add_dc_branch_flows();
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: topology analysis (graph structure) ----
+  // Read-only structural analysis of the network graph: island / connectivity
+  // detection, radiality, bridges (cut-edges), articulation points (cut-vertices)
+  // and per-island validity diagnostics.  Backed by hacdcpf::graph.
+  svr.Post("/api/session/topology",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      namespace gr = hacdcpf::graph;
+      const gr::PowerSystemGraph graph = gr::build_power_system_graph(sys);
+      const gr::TopologyReport report = gr::analyze_topology(graph);
+
+      // ── Enum → string helpers ──────────────────────────────────────
+      auto island_status_str = [](gr::IslandStatus s) -> const char* {
+        switch (s) {
+          case gr::IslandStatus::Valid:          return "Valid";
+          case gr::IslandStatus::NoSlack:        return "NoSlack";
+          case gr::IslandStatus::NoDCVoltageRef: return "NoDCVoltageRef";
+          case gr::IslandStatus::IsolatedLoad:   return "IsolatedLoad";
+          case gr::IslandStatus::Empty:          return "Empty";
+        }
+        return "Unknown";
+      };
+      auto edge_cat_str = [](gr::EdgeCategory c) -> const char* {
+        switch (c) {
+          case gr::EdgeCategory::AC_Line:        return "AC_Line";
+          case gr::EdgeCategory::AC_Transformer: return "AC_Transformer";
+          case gr::EdgeCategory::Switch:         return "Switch";
+          case gr::EdgeCategory::Breaker:        return "Breaker";
+          case gr::EdgeCategory::DC_Line:        return "DC_Line";
+          case gr::EdgeCategory::DC_Switch:      return "DC_Switch";
+          case gr::EdgeCategory::VSC_Coupling:   return "VSC_Coupling";
+          case gr::EdgeCategory::DCDC_Coupling:  return "DCDC_Coupling";
+        }
+        return "Unknown";
+      };
+
+      // ── model bus_id → canvas position index (matches frontend ordering:
+      //    AC buses in sys.ac.buses order, DC buses in sys.dc.buses order) ──
+      std::unordered_map<int,int> ac_id_to_pos, dc_id_to_pos;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i) ac_id_to_pos[sys.ac.buses[i].index] = static_cast<int>(i);
+      for (size_t i = 0; i < sys.dc.buses.size(); ++i) dc_id_to_pos[sys.dc.buses[i].index] = static_cast<int>(i);
+
+      json out;
+      out["is_connected"]      = report.is_connected;
+      out["is_radial"]         = report.is_radial;
+      out["cycle_count"]       = report.cycle_count;
+      out["n_ac_islands"]      = report.n_ac_islands;
+      out["n_dc_islands"]      = report.n_dc_islands;
+      out["all_islands_valid"] = report.all_islands_valid;
+      out["n_buses"]           = graph.node_count();
+      out["n_branches"]        = graph.edge_count();
+
+      // ── Islands (+ per-bus island id arrays keyed by canvas position) ──
+      json islands = json::array();
+      std::vector<int> ac_bus_island(sys.ac.buses.size(), -1);
+      std::vector<int> dc_bus_island(sys.dc.buses.size(), -1);
+      for (const auto& isl : report.islands) {
+        json ji;
+        ji["island_id"]          = isl.island_id;
+        ji["domain"]             = (isl.domain == gr::NodeDomain::DC) ? "DC" : "AC";
+        ji["status"]             = island_status_str(isl.status);
+        ji["has_ac_slack"]       = isl.has_ac_slack;
+        ji["has_dc_voltage_ref"] = isl.has_dc_voltage_ref;
+        ji["n_buses"]            = static_cast<int>(isl.ac_bus_ids.size() + isl.dc_bus_ids.size());
+        ji["ac_bus_ids"]         = isl.ac_bus_ids;
+        ji["dc_bus_ids"]         = isl.dc_bus_ids;
+        islands.push_back(ji);
+        for (int bid : isl.ac_bus_ids) {
+          auto it = ac_id_to_pos.find(bid);
+          if (it != ac_id_to_pos.end()) ac_bus_island[it->second] = isl.island_id;
+        }
+        for (int bid : isl.dc_bus_ids) {
+          auto it = dc_id_to_pos.find(bid);
+          if (it != dc_id_to_pos.end()) dc_bus_island[it->second] = isl.island_id;
+        }
+      }
+      out["islands"]       = islands;
+      out["ac_bus_island"] = ac_bus_island;
+      out["dc_bus_island"] = dc_bus_island;
+
+      // ── Cut vertices (articulation points) ──────────────────────────
+      out["cut_vertex_bus_ids"] = report.cut_vertex_bus_ids;
+      std::vector<bool> ac_cut(sys.ac.buses.size(), false);
+      std::vector<bool> dc_cut(sys.dc.buses.size(), false);
+      for (int bid : report.cut_vertex_bus_ids) {
+        auto a = ac_id_to_pos.find(bid);
+        if (a != ac_id_to_pos.end()) ac_cut[a->second] = true;
+        auto d = dc_id_to_pos.find(bid);
+        if (d != dc_id_to_pos.end()) dc_cut[d->second] = true;
+      }
+      out["ac_cut_vertex"] = ac_cut;
+      out["dc_cut_vertex"] = dc_cut;
+
+      // ── Bridges (cut-edges) ─────────────────────────────────────────
+      json bridges = json::array();
+      for (int eid : report.bridge_edge_ids) {
+        if (eid < 0 || eid >= graph.edge_count()) continue;
+        const auto& e = graph.edges[eid];
+        const bool dc_edge = (e.category == gr::EdgeCategory::DC_Line ||
+                              e.category == gr::EdgeCategory::DC_Switch);
+        json jb;
+        jb["from_bus"] = e.from_bus_id;
+        jb["to_bus"]   = e.to_bus_id;
+        jb["category"] = edge_cat_str(e.category);
+        jb["domain"]   = dc_edge ? "DC" : "AC";
+        // Canvas positions (-1 when the endpoint is not in the matching domain map)
+        auto& fmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
+        auto& tmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
+        auto fit = fmap.find(e.from_bus_id);
+        auto tit = tmap.find(e.to_bus_id);
+        jb["from_pos"] = (fit != fmap.end()) ? fit->second : -1;
+        jb["to_pos"]   = (tit != tmap.end()) ? tit->second : -1;
+        bridges.push_back(jb);
+      }
+      out["bridges"] = bridges;
+
+      // ── Diagnostics ─────────────────────────────────────────────────
+      json diags = json::array();
+      for (const auto& d : report.diagnostics) {
+        diags.push_back(json{
+          {"code", static_cast<int>(d.code)},
+          {"message", d.message},
+          {"related_buses", d.related_buses},
+          {"related_branches", d.related_branches},
+        });
+      }
+      out["diagnostics"] = diags;
+
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {
