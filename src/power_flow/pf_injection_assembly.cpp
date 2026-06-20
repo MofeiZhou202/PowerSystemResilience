@@ -17,16 +17,20 @@ void assemble_dc_injections(const SolverData& data,
   pdc_spec.setZero();
 
   // DC loads (or bus pd_mw when the load table is absent).
+  // pdc_spec is the NET power injection at a bus (generation positive,
+  // consumption negative), matching pdc_calc = V .* (gdc * V) where gdc is the
+  // positive-diagonal nodal conductance Laplacian. A load therefore enters as a
+  // negative injection.
   if (data.dc_loads.empty()) {
     for (int i = 0; i < ndc; ++i) {
-      pdc_spec[i] = data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+      pdc_spec[i] = -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
     }
   } else {
     for (const auto& ld : data.dc_loads) {
       if (!ld.in_service) continue;
       const int dc_bus = ld.bus - 1;
       if (dc_bus >= 0 && dc_bus < ndc) {
-        pdc_spec[dc_bus] += ld.p_mw / data.base_mva;
+        pdc_spec[dc_bus] -= ld.p_mw / data.base_mva;
       }
     }
   }
@@ -49,12 +53,12 @@ void assemble_dc_injections(const SolverData& data,
     }
   }
 
-  // DC-side PV arrays (generation → negative demand convention).
+  // DC-side PV arrays: generation enters as a positive net injection.
   for (const auto& pv : data.dc_pv_arrays) {
     if (!pv.in_service) continue;
     const int dc_bus = pv.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] -= pv.p_set_mw / data.base_mva;
+      pdc_spec[dc_bus] += pv.p_set_mw / data.base_mva;
     }
   }
 

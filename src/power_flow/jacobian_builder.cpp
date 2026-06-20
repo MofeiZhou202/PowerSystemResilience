@@ -56,8 +56,11 @@ void build_power_spec(const SolverData& data,
     p_spec[i] = pg[i] - (pd * pw0 + pd * pw1 * v + pd * pw2 * v * v);
     q_spec[i] = qg[i] - (qd * qw0 + qd * qw1 * v + qd * qw2 * v * v);
   }
+  // pdc_spec is the net DC injection (generation positive, load negative),
+  // mirroring the AC convention p_spec = pg - pd above. Bus-level DC demand is
+  // therefore a negative injection.
   for (int i = 0; i < ndc; ++i) {
-    pdc_spec[i] = data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
+    pdc_spec[i] = -data.dc_buses[static_cast<size_t>(i)].pd_mw / data.base_mva;
   }
   // DC-side storage: positive p_mw = discharge = generation.
   for (const auto& st : data.dc_storage) {
@@ -75,20 +78,20 @@ void build_power_spec(const SolverData& data,
       pdc_spec[dc_bus] += sg.p_mw * sg.scaling / data.base_mva;
     }
   }
-  // DC-side component loads (additive to bus-level demand).
+  // DC-side component loads: consumption is a negative net injection.
   for (const auto& ld : data.dc_loads) {
     if (!ld.in_service) continue;
     const int dc_bus = ld.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] += ld.p_mw / data.base_mva;
+      pdc_spec[dc_bus] -= ld.p_mw / data.base_mva;
     }
   }
-  // DC-side PV arrays (generation subtracts from power-demand spec).
+  // DC-side PV arrays: generation is a positive net injection.
   for (const auto& pv : data.dc_pv_arrays) {
     if (!pv.in_service) continue;
     const int dc_bus = pv.bus - 1;
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] -= pv.p_set_mw / data.base_mva;
+      pdc_spec[dc_bus] += pv.p_set_mw / data.base_mva;
     }
   }
   // DC-DC converters: draw from input bus, inject into output bus.
