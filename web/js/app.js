@@ -208,6 +208,68 @@ const App = (() => {
     }
   }
 
+  // Render a freshly-loaded backend system onto the canvas (shared by the ETAP
+  // import paths); logs any permissive-import warnings.
+  function applyLoadedSystem(data, label) {
+    if (data._raw_json) {
+      try {
+        const sys = JSON.parse(data._raw_json);
+        Canvas.loadFromSystemJson(sys);
+        _canvasDirty = false;  // backend already has the correct system
+        log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+      } catch (e) {
+        log(`JSON解析失败: ${e.message}`, 'error');
+      }
+    }
+    const warns = data._etap_warnings;
+    if (Array.isArray(warns) && warns.length) {
+      log(`${label}：${warns.length} 条导入告警（宽松模式）`, 'warn');
+    }
+  }
+
+  // Import an ETAP-schema .xlsx workbook (raw binary upload -> load_etap).
+  async function loadEtapXlsx(file) {
+    if (!file) return;
+    setStatus('导入ETAP工作簿...', 'busy');
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await fetch(`${API_BASE}/api/session/load_etap_xlsx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf,
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        log(`导入ETAP工作簿失败: ${data.error || res.statusText}`, 'error');
+        setStatus('加载失败', 'error');
+        return;
+      }
+      log(`已导入ETAP工作簿: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'ETAP工作簿');
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入ETAP工作簿失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
+  // Import a native ETAP project .xml (text upload -> load_etap_xml).
+  async function loadEtapXml(file) {
+    if (!file) return;
+    setStatus('导入ETAP工程...', 'busy');
+    try {
+      const xml = await file.text();
+      const data = await apiPost('/api/session/load_etap_xml', { xml_string: xml });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入ETAP工程: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'ETAP工程');
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入ETAP工程失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
   async function createNewSystem() {
     setStatus('创建中...', 'busy');
     const data = await apiPost('/api/session/new_empty');
@@ -248,7 +310,13 @@ const App = (() => {
       // full-fidelity system originally loaded into the backend.
       const ok = await syncToBackend();
       if (!ok) { setStatus('导出失败', 'error'); return; }
-      const resp = await fetch('/api/session/export_etap', { method: 'POST' });
+      // Send an explicit (empty JSON) body so the request always carries a
+      // Content-Length; a body-less POST can stall some HTTP servers.
+      const resp = await fetch('/api/session/export_etap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
       if (!resp.ok) {
         let msg = 'HTTP ' + resp.status;
         try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (_) {}
@@ -274,6 +342,8 @@ const App = (() => {
       setStatus('导出失败', 'error');
     }
   }
+
+  function importJson(file) {
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
@@ -1817,6 +1887,24 @@ const App = (() => {
     });
     document.getElementById('btnImportJsonCase')?.addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
+    });
+    // ETAP workbook (.xlsx) import from the case-load modal.
+    document.getElementById('btnImportEtapXlsxCase')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXlsx')?.click();
+    });
+    document.getElementById('fileImportEtapXlsx')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) { hideCaseLoadModal(); loadEtapXlsx(f); }
+    });
+    // Native ETAP project (.xml) import from the case-load modal.
+    document.getElementById('btnImportEtapXmlCase')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXml')?.click();
+    });
+    document.getElementById('fileImportEtapXml')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) { hideCaseLoadModal(); loadEtapXml(f); }
     });
     document.getElementById('btnCaseModalClose')?.addEventListener('click', hideCaseLoadModal);
     document.querySelector('#caseLoadModal .modal-backdrop')?.addEventListener('click', hideCaseLoadModal);

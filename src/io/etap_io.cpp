@@ -341,7 +341,7 @@ void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
                      "Sn_MVA", "Z_percent", "ZR_percent", "XR_ratio",
                      "ShiftDeg", "Pk_kW", "InService", "MTBF_hr", "MTTR_hr",
                      "TapSide", "TapPos", "TapMin", "TapMax", "TapNeutral",
-                     "TapStepPct"});
+                     "TapStepPct", "Z0_percent"});
   for (size_t i = 0; i < sys.ac.transformers_2w.size(); ++i) {
     const auto& t = sys.ac.transformers_2w[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -371,13 +371,16 @@ void write_xform2w(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 19).value() = t.tap_max;
     ws.cell(r, 20).value() = t.tap_neutral;
     ws.cell(r, 21).value() = t.tap_step_percent;
+    ws.cell(r, 22).value() = t.z0_percent;
   }
 }
 
 void write_xform3w(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "HVBus", "MVBus", "LVBus", "PrimkV", "SeckV",
                      "TerkV", "Sn_HV_MVA", "Sn_MV_MVA", "Sn_LV_MVA",
-                     "Z_HV_MV_pct", "Z_HV_LV_pct", "Z_MV_LV_pct", "InService"});
+                     "Z_HV_MV_pct", "Z_HV_LV_pct", "Z_MV_LV_pct", "InService",
+                     "TapSide", "TapPos", "TapStepPct", "ShiftMV_deg",
+                     "ShiftLV_deg"});
   for (size_t i = 0; i < sys.ac.transformers_3w.size(); ++i) {
     const auto& t = sys.ac.transformers_3w[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -396,12 +399,18 @@ void write_xform3w(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 13).value() = t.vk_hv_lv_percent;
     ws.cell(r, 14).value() = t.vk_mv_lv_percent;
     ws.cell(r, 15).value() = bool_str(t.in_service);
+    ws.cell(r, 16).value() = t.tap_side;
+    ws.cell(r, 17).value() = t.tap_pos;
+    ws.cell(r, 18).value() = t.tap_step_percent;
+    ws.cell(r, 19).value() = t.shift_mv_deg;
+    ws.cell(r, 20).value() = t.shift_lv_deg;
   }
 }
 
 void write_util(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "Bus", "KV", "Vm_pu", "Va_deg", "R_pu",
-                     "X_pu", "InService"});
+                     "X_pu", "InService", "S_sc_max_MVA", "S_sc_min_MVA",
+                     "RX_max", "RX_min", "R0_pu", "X0_pu"});
   for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
     const auto& g = sys.ac.external_grids[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -414,6 +423,12 @@ void write_util(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 7).value() = g.r_pu;
     ws.cell(r, 8).value() = g.x_pu;
     ws.cell(r, 9).value() = bool_str(g.in_service);
+    ws.cell(r, 10).value() = g.s_sc_max_mva;
+    ws.cell(r, 11).value() = g.s_sc_min_mva;
+    ws.cell(r, 12).value() = g.rx_max;
+    ws.cell(r, 13).value() = g.rx_min;
+    ws.cell(r, 14).value() = g.r0_pu;
+    ws.cell(r, 15).value() = g.x0_pu;
   }
 }
 
@@ -421,7 +436,8 @@ void write_syngen(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "Bus", "KV", "PG_MW", "QG_Mvar", "Pmax_MW",
                      "Pmin_MW", "Qmax_Mvar", "Qmin_Mvar", "Vg_pu", "MVA",
                      "CosPhi", "IsSlack", "InService", "Cost_c2", "Cost_c1",
-                     "Cost_c0", "FailureRate", "MTTR_hr"});
+                     "Cost_c0", "FailureRate", "MTTR_hr", "Xdpp_pu", "Xdp_pu",
+                     "Xd_pu", "Ra_pu", "R0_pu", "X0_pu"});
   for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
     const auto& g = sys.ac.generators[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -445,6 +461,12 @@ void write_syngen(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 18).value() = g.cost_c0;
     ws.cell(r, 19).value() = g.forced_outage_rate;
     ws.cell(r, 20).value() = g.mttr_hr;
+    ws.cell(r, 21).value() = g.xdpp_pu;
+    ws.cell(r, 22).value() = g.xdp_pu;
+    ws.cell(r, 23).value() = g.xd_pu;
+    ws.cell(r, 24).value() = g.ra_pu;
+    ws.cell(r, 25).value() = g.r0_pu;
+    ws.cell(r, 26).value() = g.x0_pu;
   }
 }
 
@@ -537,7 +559,7 @@ void write_capacitor(XLWorksheet ws, const HybridPowerSystem& sys) {
 
 void write_hvcb(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "FromBus", "ToBus", "Closed", "RatedKV",
-                     "InService"});
+                     "InService", "I_rated_kA", "I_breaking_kA"});
   for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
     const auto& cb = sys.ac.circuit_breakers[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -548,6 +570,8 @@ void write_hvcb(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 5).value() = bool_str(cb.closed);
     ws.cell(r, 6).value() = cb.rated_voltage_kv;
     ws.cell(r, 7).value() = bool_str(cb.in_service);
+    ws.cell(r, 8).value() = cb.i_rated_ka;
+    ws.cell(r, 9).value() = cb.i_breaking_ka;
   }
 }
 
@@ -833,6 +857,7 @@ void read_xform2w(const XLWorksheet& ws, HybridPowerSystem& sys,
     t.tap_max = int_from_str(cell_by_name(ws, r, col, "TapMax"), t.tap_max);
     t.tap_neutral = int_from_str(cell_by_name(ws, r, col, "TapNeutral"), t.tap_neutral);
     t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "TapStepPct"), t.tap_step_percent);
+    t.z0_percent = dbl_from_str(getv(ws, r, col, {"Z0_percent", "AnsiZeroZ"}), t.z0_percent);
     sys.ac.transformers_2w.push_back(std::move(t));
     ++n;
   }
@@ -869,6 +894,11 @@ void read_xform3w(const XLWorksheet& ws, HybridPowerSystem& sys,
     t.vk_hv_lv_percent = dbl_from_str(getv(ws, r, col, {"Z_HV_LV_pct", "PTPosZ"}));
     t.vk_mv_lv_percent = dbl_from_str(getv(ws, r, col, {"Z_MV_LV_pct", "STPosZ"}));
     t.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
+    t.tap_side = int_from_str(cell_by_name(ws, r, col, "TapSide"), t.tap_side);
+    t.tap_pos = int_from_str(cell_by_name(ws, r, col, "TapPos"), t.tap_pos);
+    t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "TapStepPct"), t.tap_step_percent);
+    t.shift_mv_deg = dbl_from_str(cell_by_name(ws, r, col, "ShiftMV_deg"), t.shift_mv_deg);
+    t.shift_lv_deg = dbl_from_str(cell_by_name(ws, r, col, "ShiftLV_deg"), t.shift_lv_deg);
     sys.ac.transformers_3w.push_back(std::move(t));
     ++n;
   }
@@ -920,6 +950,12 @@ void read_util(const XLWorksheet& ws, HybridPowerSystem& sys,
     g.va_deg = dbl_from_str(getv(ws, r, col, {"Va_deg", "VoltageAngle", "OpVAng"}));
     g.r_pu = dbl_from_str(getv(ws, r, col, {"R_pu", "PosR"}));
     g.x_pu = dbl_from_str(getv(ws, r, col, {"X_pu", "PosX"}));
+    g.s_sc_max_mva = dbl_from_str(getv(ws, r, col, {"S_sc_max_MVA"}), g.s_sc_max_mva);
+    g.s_sc_min_mva = dbl_from_str(getv(ws, r, col, {"S_sc_min_MVA"}), g.s_sc_min_mva);
+    g.rx_max = dbl_from_str(getv(ws, r, col, {"RX_max"}), g.rx_max);
+    g.rx_min = dbl_from_str(getv(ws, r, col, {"RX_min"}), g.rx_min);
+    g.r0_pu = dbl_from_str(getv(ws, r, col, {"R0_pu", "ZeroR"}), g.r0_pu);
+    g.x0_pu = dbl_from_str(getv(ws, r, col, {"X0_pu", "ZeroX"}), g.x0_pu);
     g.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
     sys.ac.external_grids.push_back(std::move(g));
     ++n;
@@ -955,6 +991,12 @@ void read_syngen(const XLWorksheet& ws, HybridPowerSystem& sys,
     g.cost_c0 = dbl_from_str(cell_by_name(ws, r, col, "Cost_c0"), g.cost_c0);
     g.forced_outage_rate = dbl_from_str(cell_by_name(ws, r, col, "FailureRate"), g.forced_outage_rate);
     g.mttr_hr = dbl_from_str(cell_by_name(ws, r, col, "MTTR_hr"), g.mttr_hr);
+    g.xdpp_pu = dbl_from_str(getv(ws, r, col, {"Xdpp_pu", "Xdsat"}), g.xdpp_pu);
+    g.xdp_pu = dbl_from_str(cell_by_name(ws, r, col, "Xdp_pu"), g.xdp_pu);
+    g.xd_pu = dbl_from_str(cell_by_name(ws, r, col, "Xd_pu"), g.xd_pu);
+    g.ra_pu = dbl_from_str(cell_by_name(ws, r, col, "Ra_pu"), g.ra_pu);
+    g.r0_pu = dbl_from_str(cell_by_name(ws, r, col, "R0_pu"), g.r0_pu);
+    g.x0_pu = dbl_from_str(cell_by_name(ws, r, col, "X0_pu"), g.x0_pu);
     sys.ac.generators.push_back(std::move(g));
     ++n;
   }
@@ -1086,6 +1128,8 @@ void read_hvcb(const XLWorksheet& ws, HybridPowerSystem& sys,
     cb.bus_to = resolve(name2idx, cell_by_name(ws, r, col, "ToBus"));
     cb.closed = bool_from_str(cell_by_name(ws, r, col, "Closed"), true);
     cb.rated_voltage_kv = dbl_from_str(cell_by_name(ws, r, col, "RatedKV"));
+    cb.i_rated_ka = dbl_from_str(getv(ws, r, col, {"I_rated_kA", "Rated"}), cb.i_rated_ka);
+    cb.i_breaking_ka = dbl_from_str(getv(ws, r, col, {"I_breaking_kA", "Interrupting"}), cb.i_breaking_ka);
     cb.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
     sys.ac.circuit_breakers.push_back(std::move(cb));
     ++n;
@@ -1535,6 +1579,7 @@ EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol)
       fd(p + "sn_mva", a.sn_mva, b.sn_mva);
       fi(p + "tap_pos", a.tap_pos, b.tap_pos);
       fd(p + "tap_step_percent", a.tap_step_percent, b.tap_step_percent);
+      fd(p + "z0_percent", a.z0_percent, b.z0_percent);
     }
   }
   if (sys.ac.generators.size() == rt.ac.generators.size()) {
@@ -1546,6 +1591,179 @@ EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol)
       fd(p + "pg_mw", a.pg_mw, b.pg_mw);
       fd(p + "vg_pu", a.vg_pu, b.vg_pu);
       fd(p + "qmax_mvar", a.qmax_mvar, b.qmax_mvar);
+      fd(p + "xdpp_pu", a.xdpp_pu, b.xdpp_pu);
+      fd(p + "xdp_pu", a.xdp_pu, b.xdp_pu);
+      fd(p + "xd_pu", a.xd_pu, b.xd_pu);
+      fd(p + "x0_pu", a.x0_pu, b.x0_pu);
+      fd(p + "r0_pu", a.r0_pu, b.r0_pu);
+    }
+  }
+  if (sys.ac.external_grids.size() == rt.ac.external_grids.size()) {
+    for (size_t i = 0; i < sys.ac.external_grids.size(); ++i) {
+      const auto& a = sys.ac.external_grids[i];
+      const auto& b = rt.ac.external_grids[i];
+      const std::string p = "ExternalGrid[" + std::to_string(i) + "].";
+      fi(p + "bus", a.bus, b.bus);
+      fd(p + "vm_pu", a.vm_pu, b.vm_pu);
+      fd(p + "r_pu", a.r_pu, b.r_pu);
+      fd(p + "x_pu", a.x_pu, b.x_pu);
+      fd(p + "s_sc_max_mva", a.s_sc_max_mva, b.s_sc_max_mva);
+      fd(p + "s_sc_min_mva", a.s_sc_min_mva, b.s_sc_min_mva);
+      fd(p + "rx_max", a.rx_max, b.rx_max);
+      fd(p + "r0_pu", a.r0_pu, b.r0_pu);
+      fd(p + "x0_pu", a.x0_pu, b.x0_pu);
+    }
+  }
+  if (sys.ac.transformers_3w.size() == rt.ac.transformers_3w.size()) {
+    for (size_t i = 0; i < sys.ac.transformers_3w.size(); ++i) {
+      const auto& a = sys.ac.transformers_3w[i];
+      const auto& b = rt.ac.transformers_3w[i];
+      const std::string p = "Transformer3W[" + std::to_string(i) + "].";
+      fi(p + "hv_bus", a.hv_bus, b.hv_bus);
+      fi(p + "mv_bus", a.mv_bus, b.mv_bus);
+      fi(p + "lv_bus", a.lv_bus, b.lv_bus);
+      fd(p + "vn_hv_kv", a.vn_hv_kv, b.vn_hv_kv);
+      fd(p + "vn_mv_kv", a.vn_mv_kv, b.vn_mv_kv);
+      fd(p + "vn_lv_kv", a.vn_lv_kv, b.vn_lv_kv);
+      fd(p + "sn_hv_mva", a.sn_hv_mva, b.sn_hv_mva);
+      fd(p + "sn_mv_mva", a.sn_mv_mva, b.sn_mv_mva);
+      fd(p + "sn_lv_mva", a.sn_lv_mva, b.sn_lv_mva);
+      fd(p + "vk_hv_mv_percent", a.vk_hv_mv_percent, b.vk_hv_mv_percent);
+      fd(p + "vk_hv_lv_percent", a.vk_hv_lv_percent, b.vk_hv_lv_percent);
+      fd(p + "vk_mv_lv_percent", a.vk_mv_lv_percent, b.vk_mv_lv_percent);
+      fi(p + "tap_pos", a.tap_pos, b.tap_pos);
+      fd(p + "tap_step_percent", a.tap_step_percent, b.tap_step_percent);
+    }
+  }
+  if (sys.ac.pv_systems.size() == rt.ac.pv_systems.size()) {
+    for (size_t i = 0; i < sys.ac.pv_systems.size(); ++i) {
+      const auto& a = sys.ac.pv_systems[i];
+      const auto& b = rt.ac.pv_systems[i];
+      const std::string p = "PVSystem[" + std::to_string(i) + "].";
+      fd(p + "p_mw", a.p_mw, b.p_mw);
+      fd(p + "q_mvar", a.q_mvar, b.q_mvar);
+      fd(p + "sn_mva", a.sn_mva, b.sn_mva);
+      fd(p + "pmax_mw", a.pmax_mw, b.pmax_mw);
+      fd(p + "qmax_mvar", a.qmax_mvar, b.qmax_mvar);
+    }
+  }
+  if (sys.ac.renewable_gens.size() == rt.ac.renewable_gens.size()) {
+    for (size_t i = 0; i < sys.ac.renewable_gens.size(); ++i) {
+      const auto& a = sys.ac.renewable_gens[i];
+      const auto& b = rt.ac.renewable_gens[i];
+      const std::string p = "RenewableGen[" + std::to_string(i) + "].";
+      fi(p + "type", static_cast<int>(a.type), static_cast<int>(b.type));
+      fd(p + "p_mw", a.p_mw, b.p_mw);
+      fd(p + "p_rated_mw", a.p_rated_mw, b.p_rated_mw);
+      fd(p + "capacity_factor", a.capacity_factor, b.capacity_factor);
+      fi(p + "curtailable", a.curtailable ? 1 : 0, b.curtailable ? 1 : 0);
+    }
+  }
+  if (sys.ac.loads.size() == rt.ac.loads.size()) {
+    for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
+      const auto& a = sys.ac.loads[i];
+      const auto& b = rt.ac.loads[i];
+      const std::string p = "Load[" + std::to_string(i) + "].";
+      fd(p + "p_mw", a.p_mw, b.p_mw);
+      fd(p + "q_mvar", a.q_mvar, b.q_mvar);
+      fd(p + "scaling", a.scaling, b.scaling);
+      fi(p + "model", static_cast<int>(a.model), static_cast<int>(b.model));
+      fd(p + "z_percent_p", a.z_percent_p, b.z_percent_p);
+      fd(p + "i_percent_p", a.i_percent_p, b.i_percent_p);
+      fd(p + "p_percent_p", a.p_percent_p, b.p_percent_p);
+      fi(p + "priority", static_cast<int>(a.priority), static_cast<int>(b.priority));
+    }
+  }
+  if (sys.ac.shunts.size() == rt.ac.shunts.size()) {
+    for (size_t i = 0; i < sys.ac.shunts.size(); ++i) {
+      const auto& a = sys.ac.shunts[i];
+      const auto& b = rt.ac.shunts[i];
+      const std::string p = "Shunt[" + std::to_string(i) + "].";
+      fd(p + "gs_mw", a.gs_mw, b.gs_mw);
+      fd(p + "bs_mvar", a.bs_mvar, b.bs_mvar);
+    }
+  }
+  if (sys.ac.circuit_breakers.size() == rt.ac.circuit_breakers.size()) {
+    for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+      const auto& a = sys.ac.circuit_breakers[i];
+      const auto& b = rt.ac.circuit_breakers[i];
+      const std::string p = "CircuitBreaker[" + std::to_string(i) + "].";
+      fi(p + "bus_from", a.bus_from, b.bus_from);
+      fi(p + "bus_to", a.bus_to, b.bus_to);
+      fi(p + "closed", a.closed ? 1 : 0, b.closed ? 1 : 0);
+      fd(p + "rated_voltage_kv", a.rated_voltage_kv, b.rated_voltage_kv);
+      fd(p + "i_rated_ka", a.i_rated_ka, b.i_rated_ka);
+      fd(p + "i_breaking_ka", a.i_breaking_ka, b.i_breaking_ka);
+    }
+  }
+  if (sys.ac.motors.size() == rt.ac.motors.size()) {
+    for (size_t i = 0; i < sys.ac.motors.size(); ++i) {
+      const auto& a = sys.ac.motors[i];
+      const auto& b = rt.ac.motors[i];
+      const std::string p = "Motor[" + std::to_string(i) + "].";
+      fd(p + "vn_kv", a.vn_kv, b.vn_kv);
+      fd(p + "sn_mva", a.sn_mva, b.sn_mva);
+      fd(p + "r_pu", a.r_pu, b.r_pu);
+      fd(p + "x_pu", a.x_pu, b.x_pu);
+    }
+  }
+  if (sys.dc.branches.size() == rt.dc.branches.size()) {
+    for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
+      const auto& a = sys.dc.branches[i];
+      const auto& b = rt.dc.branches[i];
+      const std::string p = "DCBranch[" + std::to_string(i) + "].";
+      fd(p + "r_pu", a.r_pu, b.r_pu);
+      fd(p + "rate_a_mva", a.rate_a_mva, b.rate_a_mva);
+      fd(p + "length_km", a.length_km, b.length_km);
+    }
+  }
+  if (sys.dc.loads.size() == rt.dc.loads.size()) {
+    for (size_t i = 0; i < sys.dc.loads.size(); ++i) {
+      const std::string p = "DCLoad[" + std::to_string(i) + "].";
+      fd(p + "p_mw", sys.dc.loads[i].p_mw, rt.dc.loads[i].p_mw);
+      fd(p + "scaling", sys.dc.loads[i].scaling, rt.dc.loads[i].scaling);
+    }
+  }
+  if (sys.dc.dcdc_converters.size() == rt.dc.dcdc_converters.size()) {
+    for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
+      const auto& a = sys.dc.dcdc_converters[i];
+      const auto& b = rt.dc.dcdc_converters[i];
+      const std::string p = "DCDCConverter[" + std::to_string(i) + "].";
+      fd(p + "p_ref_mw", a.p_ref_mw, b.p_ref_mw);
+      fd(p + "eta", a.eta, b.eta);
+      fd(p + "vn_in_kv", a.vn_in_kv, b.vn_in_kv);
+      fd(p + "vn_out_kv", a.vn_out_kv, b.vn_out_kv);
+      fd(p + "pmax_mw", a.pmax_mw, b.pmax_mw);
+    }
+  }
+  if (sys.dc.storage.size() == rt.dc.storage.size()) {
+    for (size_t i = 0; i < sys.dc.storage.size(); ++i) {
+      const auto& a = sys.dc.storage[i];
+      const auto& b = rt.dc.storage[i];
+      const std::string p = "Storage[" + std::to_string(i) + "].";
+      fd(p + "pmax_mw", a.pmax_mw, b.pmax_mw);
+      fd(p + "e_rated_mwh", a.e_rated_mwh, b.e_rated_mwh);
+      fd(p + "soc_init", a.soc_init, b.soc_init);
+      fd(p + "soc_min", a.soc_min, b.soc_min);
+      fd(p + "eta_charge", a.eta_charge, b.eta_charge);
+      fd(p + "eta_discharge", a.eta_discharge, b.eta_discharge);
+    }
+  }
+  if (sys.vsc_converters.size() == rt.vsc_converters.size()) {
+    for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
+      const auto& a = sys.vsc_converters[i];
+      const auto& b = rt.vsc_converters[i];
+      const std::string p = "VSCConverter[" + std::to_string(i) + "].";
+      fi(p + "bus_ac", a.bus_ac, b.bus_ac);
+      fi(p + "bus_dc", a.bus_dc, b.bus_dc);
+      fi(p + "control_mode", static_cast<int>(a.control_mode), static_cast<int>(b.control_mode));
+      fd(p + "p_set_mw", a.p_set_mw, b.p_set_mw);
+      fd(p + "q_set_mvar", a.q_set_mvar, b.q_set_mvar);
+      fd(p + "pmax_mw", a.pmax_mw, b.pmax_mw);
+      fd(p + "qmax_mvar", a.qmax_mvar, b.qmax_mvar);
+      fd(p + "eta", a.eta, b.eta);
+      fd(p + "vn_ac_kv", a.vn_ac_kv, b.vn_ac_kv);
+      fd(p + "vn_dc_kv", a.vn_dc_kv, b.vn_dc_kv);
     }
   }
   return rep;
@@ -1700,6 +1918,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     t.tap_neutral = int_from_str(xget(a, {"TapNeutral"}), t.tap_neutral);
     t.tap_step_percent =
         dbl_from_str(xget(a, {"TapStepPct", "PrimaryStepPercentTap"}), t.tap_step_percent);
+    t.z0_percent = dbl_from_str(xget(a, {"Z0_percent", "AnsiZeroZ"}), t.z0_percent);
     t.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.transformers_2w.push_back(std::move(t));
   }
@@ -1730,6 +1949,9 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     t.vk_hv_mv_percent = dbl_from_str(xget(a, {"Z_HV_MV_pct", "PSPosZ"}));
     t.vk_hv_lv_percent = dbl_from_str(xget(a, {"Z_HV_LV_pct", "PTPosZ"}));
     t.vk_mv_lv_percent = dbl_from_str(xget(a, {"Z_MV_LV_pct", "STPosZ"}));
+    t.tap_side = int_from_str(xget(a, {"TapSide"}), t.tap_side);
+    t.tap_pos = int_from_str(xget(a, {"TapPos"}), t.tap_pos);
+    t.tap_step_percent = dbl_from_str(xget(a, {"TapStepPct", "PrimaryStepPercentTap"}), t.tap_step_percent);
     t.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.transformers_3w.push_back(std::move(t));
   }
@@ -1748,6 +1970,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     g.va_deg = dbl_from_str(xget(a, {"Va_deg", "VoltageAngle", "OpVAng"}));
     g.r_pu = dbl_from_str(xget(a, {"R_pu", "PosR"}));
     g.x_pu = dbl_from_str(xget(a, {"X_pu", "PosX"}));
+    g.r0_pu = dbl_from_str(xget(a, {"R0_pu", "ZeroR"}), g.r0_pu);
+    g.x0_pu = dbl_from_str(xget(a, {"X0_pu", "ZeroX"}), g.x0_pu);
     g.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.external_grids.push_back(std::move(g));
   }
@@ -1778,6 +2002,11 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     g.forced_outage_rate =
         dbl_from_str(xget(a, {"FailureRate", "OutageRate"}), g.forced_outage_rate);
     g.mttr_hr = dbl_from_str(xget(a, {"MTTR_hr"}), g.mttr_hr);
+    g.xdpp_pu = dbl_from_str(xget(a, {"Xdpp_pu", "Xdsat", "SubTransX"}), g.xdpp_pu);
+    g.xdp_pu = dbl_from_str(xget(a, {"Xdp_pu", "TransX"}), g.xdp_pu);
+    g.xd_pu = dbl_from_str(xget(a, {"Xd_pu", "SyncX"}), g.xd_pu);
+    g.r0_pu = dbl_from_str(xget(a, {"R0_pu", "ZeroR"}), g.r0_pu);
+    g.x0_pu = dbl_from_str(xget(a, {"X0_pu", "ZeroX"}), g.x0_pu);
     g.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.generators.push_back(std::move(g));
   }
@@ -1881,6 +2110,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     cb.bus_to = resolve(ac2idx, xget(a, {"ToBus"}));
     cb.closed = bool_from_str(xget(a, {"Closed"}), true);
     cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV", "MaxkV"}));
+    cb.i_rated_ka = dbl_from_str(xget(a, {"I_rated_kA", "RatedAmp"}), cb.i_rated_ka);
+    cb.i_breaking_ka = dbl_from_str(xget(a, {"I_breaking_kA", "Rated", "Interrupting"}), cb.i_breaking_ka);
     cb.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.circuit_breakers.push_back(std::move(cb));
   }

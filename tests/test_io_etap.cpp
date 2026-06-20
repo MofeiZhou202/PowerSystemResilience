@@ -103,6 +103,7 @@ HybridPowerSystem make_reference_system() {
   t.pk_kw = 150.0;
   t.mtbf_hours = 87600.0;
   t.mttr_hours = 24.0;
+  t.z0_percent = 9.5;
   sys.ac.transformers_2w.push_back(t);
 
   // ── External grid (utility / swing) ───────────────────────────────────────
@@ -115,6 +116,12 @@ HybridPowerSystem make_reference_system() {
   g.va_deg = 0.0;
   g.r_pu = 0.001;
   g.x_pu = 0.01;
+  g.s_sc_max_mva = 2500.0;
+  g.s_sc_min_mva = 2000.0;
+  g.rx_max = 10.0;
+  g.rx_min = 8.0;
+  g.r0_pu = 0.0015;
+  g.x0_pu = 0.015;
   sys.ac.external_grids.push_back(g);
 
   // ── Synchronous generator ─────────────────────────────────────────────────
@@ -137,6 +144,12 @@ HybridPowerSystem make_reference_system() {
   gen.cost_c0 = 100.0;
   gen.forced_outage_rate = 0.03;
   gen.mttr_hr = 12.0;
+  gen.xdpp_pu = 0.18;
+  gen.xdp_pu = 0.25;
+  gen.xd_pu = 1.8;
+  gen.ra_pu = 0.005;
+  gen.r0_pu = 0.01;
+  gen.x0_pu = 0.05;
   sys.ac.generators.push_back(gen);
 
   // ── PV array ──────────────────────────────────────────────────────────────
@@ -207,6 +220,8 @@ HybridPowerSystem make_reference_system() {
   cb.bus_to = 2;
   cb.closed = true;
   cb.rated_voltage_kv = 110.0;
+  cb.i_rated_ka = 2.0;
+  cb.i_breaking_ka = 40.0;
   sys.ac.circuit_breakers.push_back(cb);
 
   // ── Induction motor ───────────────────────────────────────────────────────
@@ -779,4 +794,364 @@ TEST_CASE("ETAP native XML import (Feeder.xml)", "[io][etap][xml][ingest]") {
   for (const auto& b : sys.ac.buses)
     if (b.bus_type == BusType::SLACK) any_slack = true;
   CHECK(any_slack);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 3-winding transformer with NO standard tap changer.
+//
+// ETAP's XFORM3W schema carries the three winding ratings (MVA), nominal
+// voltages and the three pairwise short-circuit impedances, but intentionally
+// carries no tap-changer state.  A 3-winding transformer modelled without a
+// standard tap changer (empty std_type; all tap_* at their neutral defaults)
+// must therefore survive an ETAP round-trip losslessly and must never acquire a
+// spurious off-nominal tap.  These cases also exercise the native ETAP XML
+// reader's newly added XFORM3W support.
+// ───────────────────────────────────────────────────────────────────────────
+namespace {
+
+HybridPowerSystem make_three_winding_system() {
+  HybridPowerSystem sys;
+  sys.name = "3W No Tap Changer";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  sys.dc.base_mva = 100.0;
+
+  auto bus = [](int idx, const char* nm, BusType t, double kv) {
+    ACBus b;
+    b.index = idx;
+    b.name = nm;
+    b.bus_type = t;
+    b.base_kv = kv;
+    b.vm_pu = 1.0;
+    b.vmax_pu = 1.1;
+    b.vmin_pu = 0.9;
+    b.area = 1;
+    b.zone = 1;
+    return b;
+  };
+  sys.ac.buses.push_back(bus(1, "HVB", BusType::SLACK, 220.0));
+  sys.ac.buses.push_back(bus(2, "MVB", BusType::PQ, 66.0));
+  sys.ac.buses.push_back(bus(3, "LVB", BusType::PQ, 11.0));
+
+  ExternalGrid g;
+  g.index = 1;
+  g.name = "U1";
+  g.bus = 1;
+  g.vn_kv = 220.0;
+  g.vm_pu = 1.0;
+  sys.ac.external_grids.push_back(g);
+
+  // 3-winding transformer — deliberately without a standard tap changer.
+  Transformer3W t;
+  t.index = 1;
+  t.name = "T3W";
+  t.hv_bus = 1;
+  t.mv_bus = 2;
+  t.lv_bus = 3;
+  t.vn_hv_kv = 220.0;
+  t.vn_mv_kv = 66.0;
+  t.vn_lv_kv = 11.0;
+  t.sn_hv_mva = 100.0;
+  t.sn_mv_mva = 60.0;
+  t.sn_lv_mva = 40.0;
+  t.vk_hv_mv_percent = 12.0;
+  t.vk_hv_lv_percent = 18.0;
+  t.vk_mv_lv_percent = 7.0;
+  t.in_service = true;
+  t.std_type.clear();        // no standard (library) tap definition
+  t.tap_side = 0;            // no regulated winding
+  t.tap_pos = 0;             // sitting on the neutral position
+  t.tap_step_percent = 0.0;  // no per-step voltage adjustment
+  sys.ac.transformers_3w.push_back(t);
+
+  auto load = [](int idx, const char* nm, int b, double p, double q) {
+    Load l;
+    l.index = idx;
+    l.name = nm;
+    l.bus = b;
+    l.p_mw = p;
+    l.q_mvar = q;
+    l.scaling = 1.0;
+    return l;
+  };
+  sys.ac.loads.push_back(load(1, "LD_MV", 2, 30.0, 10.0));
+  sys.ac.loads.push_back(load(2, "LD_LV", 3, 15.0, 5.0));
+  return sys;
+}
+
+}  // namespace
+
+TEST_CASE("ETAP 3-winding transformer without standard tap changer round-trips",
+          "[io][etap][excel][xform3w][roundtrip]") {
+  const HybridPowerSystem sys = make_three_winding_system();
+  REQUIRE(sys.ac.transformers_3w.size() == 1);
+
+  const fs::path dir = fs::temp_directory_path();
+  const std::string path = (dir / "hacdcpf_etap_xform3w.xlsx").string();
+
+  REQUIRE_NOTHROW(save_etap(sys, path));
+  HybridPowerSystem back;
+  REQUIRE_NOTHROW(back = load_etap(path));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  REQUIRE(back.ac.transformers_3w.size() == 1);
+  const auto& a = sys.ac.transformers_3w[0];
+  const auto& b = back.ac.transformers_3w[0];
+
+  SECTION("winding topology, ratings and impedances are preserved") {
+    CHECK(b.name == a.name);
+    CHECK(b.hv_bus == a.hv_bus);
+    CHECK(b.mv_bus == a.mv_bus);
+    CHECK(b.lv_bus == a.lv_bus);
+    CHECK_THAT(b.vn_hv_kv, WithinAbs(a.vn_hv_kv, kTol));
+    CHECK_THAT(b.vn_mv_kv, WithinAbs(a.vn_mv_kv, kTol));
+    CHECK_THAT(b.vn_lv_kv, WithinAbs(a.vn_lv_kv, kTol));
+    CHECK_THAT(b.sn_hv_mva, WithinAbs(a.sn_hv_mva, kTol));
+    CHECK_THAT(b.sn_mv_mva, WithinAbs(a.sn_mv_mva, kTol));
+    CHECK_THAT(b.sn_lv_mva, WithinAbs(a.sn_lv_mva, kTol));
+    CHECK_THAT(b.vk_hv_mv_percent, WithinAbs(a.vk_hv_mv_percent, kTol));
+    CHECK_THAT(b.vk_hv_lv_percent, WithinAbs(a.vk_hv_lv_percent, kTol));
+    CHECK_THAT(b.vk_mv_lv_percent, WithinAbs(a.vk_mv_lv_percent, kTol));
+    CHECK(b.in_service == a.in_service);
+
+    // The HV/MV/LV winding terminals still point at the right named buses.
+    REQUIRE(back.ac.buses.size() == 3);
+    CHECK(back.ac.buses.at(static_cast<size_t>(b.hv_bus - 1)).name == "HVB");
+    CHECK(back.ac.buses.at(static_cast<size_t>(b.mv_bus - 1)).name == "MVB");
+    CHECK(back.ac.buses.at(static_cast<size_t>(b.lv_bus - 1)).name == "LVB");
+  }
+
+  SECTION("no standard tap changer is introduced by the round-trip") {
+    CHECK(b.std_type.empty());
+    CHECK(b.tap_side == 0);
+    CHECK(b.tap_pos == 0);
+    CHECK_THAT(b.tap_step_percent, WithinAbs(0.0, kTol));
+  }
+}
+
+TEST_CASE("ETAP native XML imports a 3-winding transformer (no tap changer)",
+          "[io][etap][xml][xform3w]") {
+  // Minimal native-ETAP XML using raw toolkit attribute names: PrimkV/SeckV/
+  // TerkV, PrimkVA/SeckVA/TerkVA (kVA) and the PS/PT/ST pairwise %Z values.
+  // No tap-changer attributes are present.
+  const std::string xml = R"(<?xml version="1.0"?>
+<PROJECT>
+ <COMPONENTS>
+  <BUS ID="HVB" NominalkV="220" InService="true"/>
+  <BUS ID="MVB" NominalkV="66" InService="true"/>
+  <BUS ID="LVB" NominalkV="11" InService="true"/>
+  <UTIL ID="U1" Bus="HVB" KV="220" OpVMag="100"/>
+  <XFORM3W ID="T3W" HVBus="HVB" MVBus="MVB" LVBus="LVB" PrimkV="220" SeckV="66" TerkV="11" PrimkVA="100000" SeckVA="60000" TerkVA="40000" PSPosZ="12" PTPosZ="18" STPosZ="7" InService="true"/>
+ </COMPONENTS>
+</PROJECT>)";
+
+  const fs::path path = fs::temp_directory_path() / "hacdcpf_etap_xform3w.xml";
+  {
+    std::ofstream ofs(path);
+    ofs << xml;
+  }
+
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path.string(), EtapImportMode::Permissive, rep));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  REQUIRE(sys.ac.buses.size() == 3);
+  REQUIRE(sys.ac.transformers_3w.size() == 1);
+  const auto& t = sys.ac.transformers_3w[0];
+  CHECK(t.name == "T3W");
+  CHECK(sys.ac.buses.at(static_cast<size_t>(t.hv_bus - 1)).name == "HVB");
+  CHECK(sys.ac.buses.at(static_cast<size_t>(t.mv_bus - 1)).name == "MVB");
+  CHECK(sys.ac.buses.at(static_cast<size_t>(t.lv_bus - 1)).name == "LVB");
+  CHECK_THAT(t.vn_hv_kv, WithinAbs(220.0, kTol));
+  CHECK_THAT(t.vn_mv_kv, WithinAbs(66.0, kTol));
+  CHECK_THAT(t.vn_lv_kv, WithinAbs(11.0, kTol));
+  CHECK_THAT(t.sn_hv_mva, WithinAbs(100.0, kTol));  // 100000 kVA -> 100 MVA
+  CHECK_THAT(t.sn_mv_mva, WithinAbs(60.0, kTol));
+  CHECK_THAT(t.sn_lv_mva, WithinAbs(40.0, kTol));
+  CHECK_THAT(t.vk_hv_mv_percent, WithinAbs(12.0, kTol));  // PSPosZ
+  CHECK_THAT(t.vk_hv_lv_percent, WithinAbs(18.0, kTol));  // PTPosZ
+  CHECK_THAT(t.vk_mv_lv_percent, WithinAbs(7.0, kTol));   // STPosZ
+
+  // No standard tap changer present in the XML -> neutral defaults.
+  CHECK(t.std_type.empty());
+  CHECK(t.tap_pos == 0);
+  CHECK_THAT(t.tap_step_percent, WithinAbs(0.0, kTol));
+}
+
+TEST_CASE("ETAP 3-winding transformer WITH a tap changer round-trips",
+          "[io][etap][excel][xform3w][tap][roundtrip]") {
+  HybridPowerSystem sys = make_three_winding_system();
+  // Give the 3-winding transformer an off-nominal regulating tap + phase shift.
+  auto& t0 = sys.ac.transformers_3w[0];
+  t0.tap_side = 1;
+  t0.tap_pos = 2;
+  t0.tap_step_percent = 1.25;
+  t0.shift_mv_deg = 30.0;
+  t0.shift_lv_deg = -30.0;
+
+  SECTION("Excel round-trip preserves tap position, step and phase shift") {
+    const std::string path =
+        (fs::temp_directory_path() / "hacdcpf_etap_3w_tap.xlsx").string();
+    REQUIRE_NOTHROW(save_etap(sys, path));
+    HybridPowerSystem back;
+    REQUIRE_NOTHROW(back = load_etap(path));
+    std::error_code ec;
+    fs::remove(path, ec);
+
+    REQUIRE(back.ac.transformers_3w.size() == 1);
+    const auto& b = back.ac.transformers_3w[0];
+    CHECK(b.tap_side == 1);
+    CHECK(b.tap_pos == 2);
+    CHECK_THAT(b.tap_step_percent, WithinAbs(1.25, kTol));
+    CHECK_THAT(b.shift_mv_deg, WithinAbs(30.0, kTol));
+    CHECK_THAT(b.shift_lv_deg, WithinAbs(-30.0, kTol));
+  }
+
+  SECTION("fidelity check stays lossless with a tapped 3-winding transformer") {
+    const EtapFidelityReport fr = etap_fidelity_check(sys);
+    for (const auto& m : fr.mismatches) WARN(m);
+    CHECK(fr.fields_mismatched == 0);
+    CHECK(fr.lossless);
+  }
+}
+
+TEST_CASE("ETAP 3-winding transformer solves power flow (star-equivalent)",
+          "[io][etap][xform3w][pf]") {
+  const HybridPowerSystem sys = make_three_winding_system();
+  // The 3-winding transformer is expanded into three equivalent AC branches
+  // during projection; the resulting network must solve.
+  const PowerFlowResult r = solve_power_flow(sys);
+  CHECK(r.converged);
+  for (double vm : r.vm) CHECK((vm > 0.7 && vm < 1.2));
+}
+
+TEST_CASE("ETAP native XML import is power-flow solvable",
+          "[io][etap][xml][pf]") {
+  // A minimal but electrically complete ETAP project: a utility source, a line,
+  // a 2-winding transformer, and a lumped load.
+  const std::string xml = R"(<?xml version="1.0"?>
+<PROJECT>
+ <COMPONENTS>
+  <BUS ID="B1" NominalkV="110" InService="true"/>
+  <BUS ID="B2" NominalkV="110" InService="true"/>
+  <BUS ID="B3" NominalkV="20" InService="true"/>
+  <UTIL ID="U1" Bus="B1" KV="110" OpVMag="100" PosR="0.1" PosX="1.0"/>
+  <XLINE ID="L1" FromBus="B1" ToBus="B2" RPos="1.21" XPos="7.26"/>
+  <XFORM2W ID="T1" FromBus="B2" ToBus="B3" PrimkV="110" SeckV="20" AnsiMVA="40000" AnsiPosZ="10.5" AnsiPosXR="20"/>
+  <LUMPEDLOAD ID="LD1" Bus="B3" MVA="10" PF="90"/>
+ </COMPONENTS>
+</PROJECT>)";
+  const fs::path path = fs::temp_directory_path() / "hacdcpf_etap_pf.xml";
+  {
+    std::ofstream ofs(path);
+    ofs << xml;
+  }
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path.string(), EtapImportMode::Permissive, rep));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  REQUIRE(sys.ac.buses.size() == 3);
+  REQUIRE(sys.ac.external_grids.size() == 1);
+  REQUIRE(sys.ac.transformers_2w.size() == 1);
+  REQUIRE(sys.ac.loads.size() == 1);
+
+  // The imported system must be solvable without throwing, and converge.
+  const PowerFlowResult r = solve_power_flow(sys);
+  CHECK(r.converged);
+}
+
+TEST_CASE("3-winding OLTC scales only the regulated winding's branches",
+          "[io][etap][xform3w][tap][projection]") {
+  HybridPowerSystem sys = make_three_winding_system();
+  auto& t = sys.ac.transformers_3w[0];
+  t.tap_side = 0;             // HV winding regulated
+  t.tap_pos = 2;
+  t.tap_step_percent = 1.25;  // ratio = 1 + 2 * 1.25% = 1.025
+
+  // Projection expands the 3-winding transformer into three equivalent AC
+  // branches (a delta of pairwise impedances).  The HV winding's OLTC must
+  // scale only the two branches incident to the HV terminal (HV-MV, HV-LV),
+  // leaving the opposite MV-LV branch at unity ratio.
+  const HybridPowerSystem proj = project_to_canonical_models(sys);
+  double tap_hv_mv = -1.0, tap_hv_lv = -1.0, tap_mv_lv = -1.0;
+  for (const auto& br : proj.ac.branches) {
+    if (br.name.find("_HV_MV_eq") != std::string::npos) tap_hv_mv = br.tap;
+    else if (br.name.find("_HV_LV_eq") != std::string::npos) tap_hv_lv = br.tap;
+    else if (br.name.find("_MV_LV_eq") != std::string::npos) tap_mv_lv = br.tap;
+  }
+  CHECK_THAT(tap_hv_mv, WithinAbs(1.025, kTol));
+  CHECK_THAT(tap_hv_lv, WithinAbs(1.025, kTol));
+  CHECK_THAT(tap_mv_lv, WithinAbs(1.0, kTol));
+
+  // The tapped network still solves.
+  CHECK(solve_power_flow(sys).converged);
+}
+
+TEST_CASE("ETAP short-circuit data round-trips (Excel + native XML)",
+          "[io][etap][shortcircuit]") {
+  SECTION("Excel preserves source/generator/breaker/transformer SC fields") {
+    const HybridPowerSystem sys = make_reference_system();
+    const std::string path =
+        (fs::temp_directory_path() / "hacdcpf_etap_sc.xlsx").string();
+    REQUIRE_NOTHROW(save_etap(sys, path));
+    HybridPowerSystem back;
+    REQUIRE_NOTHROW(back = load_etap(path));
+    std::error_code ec;
+    fs::remove(path, ec);
+
+    REQUIRE(!back.ac.external_grids.empty());
+    const auto& g = back.ac.external_grids[0];
+    CHECK_THAT(g.s_sc_max_mva, WithinAbs(2500.0, kTol));
+    CHECK_THAT(g.s_sc_min_mva, WithinAbs(2000.0, kTol));
+    CHECK_THAT(g.rx_max, WithinAbs(10.0, kTol));
+    CHECK_THAT(g.x0_pu, WithinAbs(0.015, kTol));
+
+    REQUIRE(!back.ac.generators.empty());
+    const auto& gen = back.ac.generators[0];
+    CHECK_THAT(gen.xdpp_pu, WithinAbs(0.18, kTol));
+    CHECK_THAT(gen.xdp_pu, WithinAbs(0.25, kTol));
+    CHECK_THAT(gen.x0_pu, WithinAbs(0.05, kTol));
+
+    REQUIRE(!back.ac.circuit_breakers.empty());
+    const auto& cb = back.ac.circuit_breakers[0];
+    CHECK_THAT(cb.i_rated_ka, WithinAbs(2.0, kTol));
+    CHECK_THAT(cb.i_breaking_ka, WithinAbs(40.0, kTol));
+
+    REQUIRE(!back.ac.transformers_2w.empty());
+    CHECK_THAT(back.ac.transformers_2w[0].z0_percent, WithinAbs(9.5, kTol));
+  }
+
+  SECTION("native ETAP XML maps ZeroR/ZeroX and breaker Rated SC attributes") {
+    const std::string xml = R"(<?xml version="1.0"?>
+<PROJECT>
+ <COMPONENTS>
+  <BUS ID="B1" NominalkV="110" InService="true"/>
+  <BUS ID="B2" NominalkV="110" InService="true"/>
+  <UTIL ID="U1" Bus="B1" KV="110" OpVMag="100" PosR="0.1" PosX="1.0" ZeroR="0.12" ZeroX="1.2"/>
+  <HVCB ID="CB1" FromBus="B1" ToBus="B2" Closed="true" MaxkV="123" Rated="40"/>
+ </COMPONENTS>
+</PROJECT>)";
+    const fs::path path = fs::temp_directory_path() / "hacdcpf_etap_sc.xml";
+    {
+      std::ofstream ofs(path);
+      ofs << xml;
+    }
+    EtapIoReport rep;
+    HybridPowerSystem sys;
+    REQUIRE_NOTHROW(sys = load_etap_xml(path.string(), EtapImportMode::Permissive, rep));
+    std::error_code ec;
+    fs::remove(path, ec);
+
+    REQUIRE(sys.ac.external_grids.size() == 1);
+    CHECK_THAT(sys.ac.external_grids[0].r0_pu, WithinAbs(0.12, kTol));
+    CHECK_THAT(sys.ac.external_grids[0].x0_pu, WithinAbs(1.2, kTol));
+    REQUIRE(sys.ac.circuit_breakers.size() == 1);
+    CHECK_THAT(sys.ac.circuit_breakers[0].i_breaking_ka, WithinAbs(40.0, kTol));
+  }
 }

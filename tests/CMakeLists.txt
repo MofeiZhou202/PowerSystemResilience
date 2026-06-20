@@ -219,4 +219,19 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   if(WIN32)
     target_link_libraries(run_gui_server PRIVATE ws2_32)
   endif()
+
+  # End-to-end GUI/HTTP smoke test: starts the server and drives the REST API
+  # (load case -> export ETAP .xlsx -> re-import -> import ETAP XML -> PF -> SC).
+  # Requires ETAP I/O (binary export/import) and a Python 3 interpreter.
+  if(HACDCPF_ENABLE_ETAP)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME gui_api_e2e
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/gui_api_e2e.py"
+                --server "$<TARGET_FILE:run_gui_server>"
+                --data-dir "${CMAKE_SOURCE_DIR}/data")
+      set_tests_properties(gui_api_e2e PROPERTIES LABELS "gui;e2e" TIMEOUT 120)
+    endif()
+  endif()
 endif()

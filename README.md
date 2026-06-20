@@ -246,6 +246,17 @@ ETAP 互操作由 `include/hacdcpf/io/etap_io.hpp` / `src/io/etap_io.cpp` 提供
 PVARRAY, WIND, LUMPEDLOAD(ZIP), CAPACITOR, HVCB, INDMOTOR, DCBUS, DCIMPEDANCE,
 DCLUMPLOAD, DCCONVERTER, DCCB, INVERTER, CHARGER, BATTERY` 外加 `PROJECT`。
 
+**逐字段保真**：除拓扑与核心电气量外，往返还无损保留——2 绕组/3 绕组变压器分接头
+（`TapSide/TapPos/TapStepPct`，3W 含 `ShiftMV/LV`）、负荷 ZIP 模型与优先级、VSC 控制模式
+与设定点、电池 SoC/效率，以及**短路数据**：外部电网 `S_sc_max/min_MVA`、`RX_max/min`、
+零序 `R0/X0`；同步机次暂态/暂态/同步电抗 `Xdpp/Xdp/Xd`、`Ra`、零序 `R0/X0`；断路器额定/
+开断电流 `I_rated_kA`/`I_breaking_kA`；变压器零序 `Z0_percent`。原生 XML 同时识别 ETAP
+原始属性（`ZeroR/ZeroX`、断路器 `Rated`、`AnsiPosXR` 反推 %R 等）。
+
+**3 绕组变压器潮流**：投影时 3W 被展开为三条等效支路（成对短路阻抗构成的 Δ）。有载调压
+（OLTC）仅作用于与受调绕组端子相连的两条支路（`tap_side`：0=HV，1=MV，2=LV），不影响对边
+支路，物理上更准确。
+
 命令行工具 `etap_convert`（`-DHACDCPF_ENABLE_ETAP=ON` 时构建）：
 
 ```text
@@ -260,9 +271,18 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 （`CANONICAL_COLUMNS`）、`write_canonical_workbook()` 与 `convert_raw_export()`，
 用于从工具箱直接产出规范工作簿。
 
+**Web GUI 集成**（`tests/run_gui_server.cpp`，`web/` 下的画布编辑器挂载于 `/xjtu/`）：
+
+| 操作 | 入口 |
+|---|---|
+| 导出当前系统为 ETAP `.xlsx` | `POST /api/session/export_etap`（二进制下载）；工具栏「导出ETAP」按钮 |
+| 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
+| 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
+
 往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
-case14 潮流一致性、保真度、原生 XML），fixtures 见 `data/etap_sample.xlsx`、
-`data/etap_feeder.xml`。
+case14 潮流一致性、逐字段保真度、原生 XML、3 绕组变压器分接头/潮流、短路数据），
+fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到端冒烟测试见
+`tools/gui_api_e2e.py`（启动服务并驱动 加载/导出ETAP/重新导入/XML导入/潮流/短路 全链路）。
 
 ## 9. 实现地图
 

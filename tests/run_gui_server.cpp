@@ -436,6 +436,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
     <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
     <span class="sep"></span>
     <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
+    <button class="btn btn-secondary btn-sm" id="exportEtapBtn">Export ETAP</button>
     <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
   </div>
 
@@ -1274,6 +1275,15 @@ document.getElementById('exportJsonBtn').onclick=async()=>{
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=(SYS?SYS.name.replace(/[^a-zA-Z0-9_-]/g,'_'):'system')+'.json';a.click();
   setStatus('JSON exported.');}catch(e){setStatus(e.message,true);}
+};
+document.getElementById('exportEtapBtn').onclick=async()=>{
+  try{setStatus('Exporting ETAP workbook...');
+  const resp=await fetch('/api/session/export_etap',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  if(!resp.ok){let m='HTTP '+resp.status;try{const j=await resp.json();if(j&&j.error)m=j.error;}catch(e){}throw new Error(m);}
+  const blob=await resp.blob();let fn='system.xlsx';const cd=resp.headers.get('Content-Disposition');
+  if(cd){const mm=/filename="?([^"]+)"?/.exec(cd);if(mm&&mm[1])fn=mm[1];}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();URL.revokeObjectURL(a.href);
+  setStatus('ETAP workbook exported: '+fn);}catch(e){setStatus(e.message,true);}
 };
 document.getElementById('newCaseBtn').onclick=()=>loadSystem('/api/session/new_empty',{});
 
@@ -3756,8 +3766,12 @@ int main(int argc, char** argv) {
 
   httplib::Server svr;
   svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
-  svr.set_read_timeout(600, 0);   // 10 min to read request (long-running analysis)
-  svr.set_write_timeout(600, 0);  // 10 min to write response
+  // Request *reading* timeout — bounds how long a worker thread waits for the
+  // request bytes (NOT the handler/computation, which runs unbounded after the
+  // request is read).  Kept modest so a slow or body-less POST (e.g. a POST
+  // with no Content-Length) cannot tie up a pool thread for many minutes.
+  svr.set_read_timeout(120, 0);   // 2 min to read the request
+  svr.set_write_timeout(600, 0);  // 10 min to write response (large exports)
   svr.set_keep_alive_max_count(100);
   svr.set_idle_interval(0, 500000); // 0.5 sec idle check
 
@@ -4075,6 +4089,45 @@ int main(int argc, char** argv) {
       summary["_etap_warnings"] = rep.warnings;
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import an ETAP-schema .xlsx workbook (binary upload) ----
+  // The raw workbook bytes are sent as the request body (OpenXLSX needs a real
+  // file, so they are written to a temp file and load_etap() reads it back).
+  svr.Post("/api/session/load_etap_xlsx",
+           [](const httplib::Request& req, httplib::Response& res) {
+    std::string tmp;
+    try {
+      if (req.body.empty()) throw std::runtime_error("Empty ETAP workbook upload");
+      static std::atomic<int> import_counter{0};
+      tmp = (std::filesystem::temp_directory_path() /
+             ("hacdcpf_gui_import_" +
+              std::to_string(import_counter.fetch_add(1)) + ".xlsx"))
+                .string();
+      { std::ofstream ofs(tmp, std::ios::binary); ofs.write(req.body.data(),
+            static_cast<std::streamsize>(req.body.size())); }
+      hacdcpf::io::EtapIoReport rep;
+      auto sys = hacdcpf::io::load_etap(
+          tmp, hacdcpf::io::EtapImportMode::Permissive, rep);
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name.empty()
+                                   ? "ETAP workbook"
+                                   : g_session.current_system->name;
+      g_session.last_pf_result.reset();
+      g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_etap_warnings"] = rep.warnings;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
