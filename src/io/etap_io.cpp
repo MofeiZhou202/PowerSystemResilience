@@ -380,7 +380,8 @@ void write_xform3w(XLWorksheet ws, const HybridPowerSystem& sys) {
                      "TerkV", "Sn_HV_MVA", "Sn_MV_MVA", "Sn_LV_MVA",
                      "Z_HV_MV_pct", "Z_HV_LV_pct", "Z_MV_LV_pct", "InService",
                      "TapSide", "TapPos", "TapStepPct", "ShiftMV_deg",
-                     "ShiftLV_deg"});
+                     "ShiftLV_deg", "ZR_HV_MV_pct", "ZR_HV_LV_pct",
+                     "ZR_MV_LV_pct"});
   for (size_t i = 0; i < sys.ac.transformers_3w.size(); ++i) {
     const auto& t = sys.ac.transformers_3w[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -404,6 +405,9 @@ void write_xform3w(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 18).value() = t.tap_step_percent;
     ws.cell(r, 19).value() = t.shift_mv_deg;
     ws.cell(r, 20).value() = t.shift_lv_deg;
+    ws.cell(r, 21).value() = t.vkr_hv_mv_percent;
+    ws.cell(r, 22).value() = t.vkr_hv_lv_percent;
+    ws.cell(r, 23).value() = t.vkr_mv_lv_percent;
   }
 }
 
@@ -899,6 +903,9 @@ void read_xform3w(const XLWorksheet& ws, HybridPowerSystem& sys,
     t.tap_step_percent = dbl_from_str(cell_by_name(ws, r, col, "TapStepPct"), t.tap_step_percent);
     t.shift_mv_deg = dbl_from_str(cell_by_name(ws, r, col, "ShiftMV_deg"), t.shift_mv_deg);
     t.shift_lv_deg = dbl_from_str(cell_by_name(ws, r, col, "ShiftLV_deg"), t.shift_lv_deg);
+    t.vkr_hv_mv_percent = dbl_from_str(getv(ws, r, col, {"ZR_HV_MV_pct", "PSPosR"}), t.vkr_hv_mv_percent);
+    t.vkr_hv_lv_percent = dbl_from_str(getv(ws, r, col, {"ZR_HV_LV_pct", "PTPosR"}), t.vkr_hv_lv_percent);
+    t.vkr_mv_lv_percent = dbl_from_str(getv(ws, r, col, {"ZR_MV_LV_pct", "STPosR"}), t.vkr_mv_lv_percent);
     sys.ac.transformers_3w.push_back(std::move(t));
     ++n;
   }
@@ -1631,6 +1638,9 @@ EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol)
       fd(p + "vk_hv_mv_percent", a.vk_hv_mv_percent, b.vk_hv_mv_percent);
       fd(p + "vk_hv_lv_percent", a.vk_hv_lv_percent, b.vk_hv_lv_percent);
       fd(p + "vk_mv_lv_percent", a.vk_mv_lv_percent, b.vk_mv_lv_percent);
+      fd(p + "vkr_hv_mv_percent", a.vkr_hv_mv_percent, b.vkr_hv_mv_percent);
+      fd(p + "vkr_hv_lv_percent", a.vkr_hv_lv_percent, b.vkr_hv_lv_percent);
+      fd(p + "vkr_mv_lv_percent", a.vkr_mv_lv_percent, b.vkr_mv_lv_percent);
       fi(p + "tap_pos", a.tap_pos, b.tap_pos);
       fd(p + "tap_step_percent", a.tap_step_percent, b.tap_step_percent);
     }
@@ -1949,6 +1959,9 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     t.vk_hv_mv_percent = dbl_from_str(xget(a, {"Z_HV_MV_pct", "PSPosZ"}));
     t.vk_hv_lv_percent = dbl_from_str(xget(a, {"Z_HV_LV_pct", "PTPosZ"}));
     t.vk_mv_lv_percent = dbl_from_str(xget(a, {"Z_MV_LV_pct", "STPosZ"}));
+    t.vkr_hv_mv_percent = dbl_from_str(xget(a, {"ZR_HV_MV_pct", "PSPosR"}), t.vkr_hv_mv_percent);
+    t.vkr_hv_lv_percent = dbl_from_str(xget(a, {"ZR_HV_LV_pct", "PTPosR"}), t.vkr_hv_lv_percent);
+    t.vkr_mv_lv_percent = dbl_from_str(xget(a, {"ZR_MV_LV_pct", "STPosR"}), t.vkr_mv_lv_percent);
     t.tap_side = int_from_str(xget(a, {"TapSide"}), t.tap_side);
     t.tap_pos = int_from_str(xget(a, {"TapPos"}), t.tap_pos);
     t.tap_step_percent = dbl_from_str(xget(a, {"TapStepPct", "PrimaryStepPercentTap"}), t.tap_step_percent);

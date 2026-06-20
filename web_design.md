@@ -168,6 +168,7 @@ DOM 容器：`<div id="subToolbar" class="sub-toolbar">`，每个模块对应一
 | `rotateSelected(deg)` | 旋转选中元件 |
 | `removeSelected()` | 删除选中（单个或批量） |
 | `loadFromSystemJson(sys)` | 从后端 JSON 重建画布 |
+| `addComponent(type,x,y[,params,rotation])` / `addConnection(fromId,fromPort,toId,toPort)` | 编程式放置元件 / 连线（端到端测试与脚本化建模用） |
 | `serializeToSystemJson()` | 导出当前画布为 `HybridPowerSystem` JSON |
 | `showPowerFlowResults(data)` | 在线路上叠加潮流箭头/热力图 |
 | `setVisualizationMode('off'\|'flow'\|'heatmap'\|'both')` | 切换可视化模式 |

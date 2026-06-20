@@ -19,6 +19,7 @@
 #include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/analysis/short_circuit.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 
@@ -858,6 +859,9 @@ HybridPowerSystem make_three_winding_system() {
   t.vk_hv_mv_percent = 12.0;
   t.vk_hv_lv_percent = 18.0;
   t.vk_mv_lv_percent = 7.0;
+  t.vkr_hv_mv_percent = 0.6;
+  t.vkr_hv_lv_percent = 0.9;
+  t.vkr_mv_lv_percent = 0.35;
   t.in_service = true;
   t.std_type.clear();        // no standard (library) tap definition
   t.tap_side = 0;            // no regulated winding
@@ -1154,4 +1158,56 @@ TEST_CASE("ETAP short-circuit data round-trips (Excel + native XML)",
     REQUIRE(sys.ac.circuit_breakers.size() == 1);
     CHECK_THAT(sys.ac.circuit_breakers[0].i_breaking_ka, WithinAbs(40.0, kTol));
   }
+}
+
+TEST_CASE("ETAP utility short-circuit MVA drives the fault current",
+          "[io][etap][shortcircuit][fault]") {
+  // An external grid specified only by its 3-phase short-circuit MVA + R/X (the
+  // common ETAP utility case, with no explicit r_pu/x_pu/ikq) must still
+  // contribute a finite source impedance — and a stronger grid (higher SC MVA)
+  // must yield a larger fault current.
+  auto build = [](double s_sc_mva) {
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+    sys.ac.base_mva = 100.0;
+    sys.ac.freq_hz = 50.0;
+    ACBus b1;
+    b1.index = 1; b1.name = "B1"; b1.bus_type = BusType::SLACK;
+    b1.base_kv = 110.0; b1.vm_pu = 1.0;
+    ACBus b2;
+    b2.index = 2; b2.name = "B2"; b2.bus_type = BusType::PQ;
+    b2.base_kv = 110.0; b2.vm_pu = 1.0;
+    sys.ac.buses = {b1, b2};
+    ACBranch br;
+    br.index = 1; br.name = "L1"; br.from_bus = 1; br.to_bus = 2;
+    br.r_pu = 0.01; br.x_pu = 0.05; br.rate_a_mva = 100.0;
+    sys.ac.branches = {br};
+    ExternalGrid g;
+    g.index = 1; g.name = "U1"; g.bus = 1; g.vn_kv = 110.0; g.vm_pu = 1.0;
+    g.s_sc_max_mva = s_sc_mva;  // no r_pu/x_pu/ikq -> derived from SC MVA
+    g.rx_max = 0.1;
+    sys.ac.external_grids = {g};
+    return sys;
+  };
+
+  using namespace hacdcpf::analysis;
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.calc_type = SCCalcType::Max;
+
+  auto ik_at_bus1 = [&](const SCDetailedResult& r) -> double {
+    for (const auto& b : r.bus_results)
+      if (b.bus_id == 1) return b.ikss_ka;
+    return -1.0;
+  };
+
+  const SCDetailedResult weak = run_short_circuit_detailed(build(500.0), 1, opt);
+  const SCDetailedResult strong = run_short_circuit_detailed(build(5000.0), 1, opt);
+  REQUIRE(weak.solved);
+  REQUIRE(strong.solved);
+
+  const double ik_weak = ik_at_bus1(weak);
+  const double ik_strong = ik_at_bus1(strong);
+  CHECK(ik_weak > 0.0);
+  CHECK(ik_strong > ik_weak);  // a stronger source (more SC MVA) faults harder
 }

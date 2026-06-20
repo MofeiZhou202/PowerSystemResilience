@@ -282,7 +282,10 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
 case14 潮流一致性、逐字段保真度、原生 XML、3 绕组变压器分接头/潮流、短路数据），
 fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到端冒烟测试见
-`tools/gui_api_e2e.py`（启动服务并驱动 加载/导出ETAP/重新导入/XML导入/潮流/短路 全链路）。
+`tools/gui_api_e2e.py`（启动服务并驱动 加载/导出ETAP/重新导入/XML导入/潮流/短路 全链路，
+已接入 ctest 目标 `gui_api_e2e`）。画布层浏览器端到端测试见 `tests/e2e/canvas_3w_e2e.mjs`
+（Playwright：在画布上放置并连线一台三绕组变压器+外网+负荷，同步后端并跑潮流；需
+`npm i -D playwright && npx playwright install chromium`）。
 
 ## 9. 实现地图
 
