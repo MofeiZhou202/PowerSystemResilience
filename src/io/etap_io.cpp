@@ -671,7 +671,7 @@ void write_dcconverter(XLWorksheet ws, const HybridPowerSystem& sys) {
 
 void write_dccb(XLWorksheet ws, const HybridPowerSystem& sys) {
   write_headers(ws, {"Index", "ID", "FromBus", "ToBus", "Closed", "RatedKV",
-                     "InService"});
+                     "InService", "I_breaking_kA", "R_ohm"});
   for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
     const auto& cb = sys.dc.dc_circuit_breakers[i];
     const uint32_t r = static_cast<uint32_t>(i + 2);
@@ -682,6 +682,8 @@ void write_dccb(XLWorksheet ws, const HybridPowerSystem& sys) {
     ws.cell(r, 5).value() = bool_str(cb.closed);
     ws.cell(r, 6).value() = cb.rated_voltage_kv;
     ws.cell(r, 7).value() = bool_str(cb.in_service);
+    ws.cell(r, 8).value() = cb.i_breaking_ka;
+    ws.cell(r, 9).value() = cb.r_ohm;
   }
 }
 
@@ -1284,6 +1286,8 @@ void read_dccb(const XLWorksheet& ws, HybridPowerSystem& sys,
     cb.bus_to = resolve(name2idx, cell_by_name(ws, r, col, "ToBus"));
     cb.closed = bool_from_str(cell_by_name(ws, r, col, "Closed"), true);
     cb.rated_voltage_kv = dbl_from_str(cell_by_name(ws, r, col, "RatedKV"));
+    cb.i_breaking_ka = dbl_from_str(getv(ws, r, col, {"I_breaking_kA", "Rated"}), cb.i_breaking_ka);
+    cb.r_ohm = dbl_from_str(cell_by_name(ws, r, col, "R_ohm"), cb.r_ohm);
     cb.in_service = bool_from_str(cell_by_name(ws, r, col, "InService"), true);
     sys.dc.dc_circuit_breakers.push_back(std::move(cb));
     ++n;
@@ -2218,6 +2222,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     cb.bus_to = resolve(dc2idx, xget(a, {"ToBus"}));
     cb.closed = bool_from_str(xget(a, {"Closed"}), true);
     cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV"}));
+    cb.i_breaking_ka = dbl_from_str(xget(a, {"I_breaking_kA", "Rated"}), cb.i_breaking_ka);
+    cb.r_ohm = dbl_from_str(xget(a, {"R_ohm", "RValue"}), cb.r_ohm);
     cb.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.dc.dc_circuit_breakers.push_back(std::move(cb));
   }

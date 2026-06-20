@@ -1211,3 +1211,60 @@ TEST_CASE("ETAP utility short-circuit MVA drives the fault current",
   CHECK(ik_weak > 0.0);
   CHECK(ik_strong > ik_weak);  // a stronger source (more SC MVA) faults harder
 }
+
+TEST_CASE("ETAP native XML imports ETAP load-flow result voltages",
+          "[io][etap][xml][crossval]") {
+  const std::string path =
+      std::string(HACDCPF_TEST_DATA_DIR) + "/etap_feeder.xml";
+  if (!fs::exists(path)) {
+    WARN("ETAP XML fixture missing at " << path << "; skipping");
+    return;
+  }
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path, EtapImportMode::Permissive, rep));
+
+  // ETAP's load-flow study result (per-bus OpVMag/OpVAng) is imported as the bus
+  // voltage state — e.g. Bus18 sits at ~0.9914 pu / -29.8 deg in the ETAP study,
+  // so importing the project also imports ETAP's computed operating point.
+  const ACBus* b18 = nullptr;
+  for (const auto& b : sys.ac.buses)
+    if (b.name == "Bus18") b18 = &b;
+  REQUIRE(b18 != nullptr);
+  CHECK_THAT(b18->vm_pu, WithinAbs(0.991366, 1e-4));
+  CHECK_THAT(b18->va_deg, WithinAbs(-29.8026, 1e-2));
+}
+
+TEST_CASE("ETAP operating-point round-trip cross-validates with our power flow",
+          "[io][etap][excel][crossval][pf]") {
+  const std::string mp = std::string(HACDCPF_TEST_DATA_DIR) + "/case14.m";
+  if (!fs::exists(mp)) {
+    WARN("case14.m not found at " << mp << "; skipping");
+    return;
+  }
+  HybridPowerSystem orig;
+  REQUIRE_NOTHROW(orig = parse_matpower(mp));
+
+  // Round-trip the system through the ETAP schema, then cross-validate our power
+  // flow on the original vs the ETAP-reloaded model.  Both solves go through the
+  // same projection (so the bus ordering is consistent), and the ETAP-reloaded
+  // operating point must reproduce the original to solver tolerance.
+  const std::string path =
+      (fs::temp_directory_path() / "hacdcpf_etap_crossval.xlsx").string();
+  REQUIRE_NOTHROW(save_etap(orig, path));
+  HybridPowerSystem back;
+  REQUIRE_NOTHROW(back = load_etap(path));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  const PowerFlowResult r_orig = solve_power_flow(orig);
+  const PowerFlowResult r_back = solve_power_flow(back);
+  REQUIRE(r_orig.converged);
+  REQUIRE(r_back.converged);
+  REQUIRE(r_orig.vm.size() == r_back.vm.size());
+  double max_dvm = 0.0;
+  for (size_t i = 0; i < r_orig.vm.size(); ++i)
+    max_dvm = std::max(max_dvm, std::abs(r_orig.vm[i] - r_back.vm[i]));
+  INFO("max |Vm(ours) - Vm(ETAP round-trip)| = " << max_dvm << " pu");
+  CHECK(max_dvm < 1e-6);
+}

@@ -7,6 +7,12 @@ build_rel/
 # Web GUI server runtime artifacts (written by run_gui_server on load_json_string)
 debug_json_dump_*.json
 
+# Node / Playwright (browser e2e tooling under tests/e2e/)
+node_modules/
+package-lock.json
+test-results/
+playwright-report/
+
 # Bundled MATPOWER case library + time-series profiles (~83 MB, copied from
 # HybridACDCPowerSystemsPlanning). Tracked out-of-band, not in git.
 external_data/
@@ -34,3 +40,4 @@ docs/**/_minted-*
 
 outputs/
 etap-main/
+.github/
