@@ -22,6 +22,12 @@
   <button id="btnZoomOut" class="toolbar-btn" title="缩小">缩小</button>
   <button id="btnZoomFit" class="toolbar-btn" title="适应画面">适应<br>画面</button>
   <button id="btnAutoLayout" class="toolbar-btn" title="自动布局">自动<br>布局</button>
+  <select id="layoutDirSelect" class="toolbar-select" title="自动布局方向">
+    <option value="TB">↧ 上下</option>
+    <option value="LR">↦ 左右</option>
+    <option value="RADIAL">◎ 径向</option>
+    <option value="COMPACT">▦ 紧凑</option>
+  </select>
   <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
   <span class="toolbar-spacer"></span>
@@ -31,6 +37,7 @@
     <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
     <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
   </div>

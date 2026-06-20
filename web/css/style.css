@@ -16,11 +16,57 @@
   --border: #3e4451;
   --border2: #4b5263;
   --shadow: rgba(0,0,0,0.3);
+  --canvas-bg: #1e2127;
   --radius: 6px;
   --header-h: 48px;
   --console-h: 120px;
   --lib-w: 180px;
   --right-w: 340px;
+}
+
+/* Light background theme (toggled via <html data-theme="light">).  Keeps the
+   same variable names so every surface that already uses them re-themes with
+   no further markup changes.  Engineering result colours (voltage/heatmap/
+   flow arrows) intentionally keep their professional hues. */
+:root[data-theme="light"] {
+  --bg: #eef2f7;
+  --bg2: #ffffff;
+  --bg3: #f1f5f9;
+  --paper: #ffffff;
+  --ink: #0f172a;
+  --ink2: #5b6472;
+  --accent: #2563eb;
+  --accent2: #0e7490;
+  --green: #16a34a;
+  --orange: #ea580c;
+  --red: #dc2626;
+  --purple: #7c3aed;
+  --yellow: #b45309;
+  --border: #d8dee9;
+  --border2: #c3ccd9;
+  --shadow: rgba(15,23,42,0.12);
+  --canvas-bg: #f6f8fb;
+  /* Toolbar / module-bar / sub-toolbar surfaces (separate variable set) */
+  --tb-bg: #ffffff;
+  --tb-bg-hover: #eef2f7;
+  --tb-border: #d8dee9;
+  --tb-border-hover: #2563eb;
+  --tb-text: #1f2937;
+  --tb-text-muted: #5b6472;
+  --tb-active-bg1: #3b82f6;
+  --tb-active-bg2: #2563eb;
+  --tb-active-border: #1d4ed8;
+  --tb-active-text: #ffffff;
+  --tb-run-bg: #e08a47;
+  --tb-run-bg-hover: #ec9a5c;
+  --tb-run-text: #ffffff;
+  --module-bar-bg: #e7edf4;
+  --module-bar-bg2: #f1f5f9;
+  --sub-bar-bg: #ffffff;
+  --sub-bar-text: #1f2937;
+  --sub-bar-border: #d8dee9;
+  --toolbar-grad-top: #ffffff;
+  --toolbar-grad-bottom: #eef2f7;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -215,7 +261,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   flex: 1;
   width: 100%;
   cursor: default;
-  background: #1e2127;
+  background: var(--canvas-bg);
 }
 #canvas .component { cursor: move; }
 #canvas .component:hover .comp-outline { stroke: var(--accent); stroke-width: 2; }
@@ -652,6 +698,9 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   --sub-bar-bg:      #21252b;
   --sub-bar-text:    #dcdfe4;
   --sub-bar-border:  #3e4451;
+  /* Top-toolbar surface gradient (themed) */
+  --toolbar-grad-top:    #21252b;
+  --toolbar-grad-bottom: #1c2026;
 }
 
 /* ===== Bar 1: Top Toolbar ===== */
@@ -660,7 +709,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   align-items: stretch;
   gap: 6px;
   padding: 6px 10px;
-  background: linear-gradient(180deg, #21252b 0%, #1c2026 100%);
+  background: linear-gradient(180deg, var(--toolbar-grad-top) 0%, var(--toolbar-grad-bottom) 100%);
   border-bottom: 1px solid var(--tb-border);
   box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 2px 4px rgba(0,0,0,0.25);
   flex-shrink: 0;
@@ -730,6 +779,21 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 
 .toolbar-spacer { flex: 1; min-width: 8px; }
+.toolbar-select {
+  align-self: center;
+  height: 34px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--tb-text);
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toolbar-select:hover { border-color: var(--tb-border-hover); }
+.toolbar-select:focus { outline: none; border-color: var(--tb-active-border); }
 .toolbar-aux {
   display: flex;
   align-items: center;
@@ -819,7 +883,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   font: inherit;
   font-size: 12px;
   color: var(--tb-text);
-  background: #2c313a;
+  background: var(--tb-bg);
   border: 1px solid var(--tb-border);
   border-radius: 3px;
   cursor: pointer;

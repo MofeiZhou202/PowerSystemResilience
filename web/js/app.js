@@ -2066,7 +2066,38 @@ const App = (() => {
   }
 
   // ========== Init ==========
+  // ---- Theme (light / dark background) ----
+  // Keeps the dark palette as the default so existing users see no change until
+  // they toggle.  The choice persists in localStorage across reloads.
+  function setThemeMode(mode) {
+    const finalMode = mode === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', finalMode);
+    try { localStorage.setItem('themeMode', finalMode); } catch (e) { /* ignore */ }
+    const btn = document.getElementById('btnToggleTheme');
+    if (btn) btn.title = finalMode === 'light' ? '切换到深色背景' : '切换到浅色背景';
+  }
+
+  function toggleThemeMode() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    setThemeMode(current === 'light' ? 'dark' : 'light');
+  }
+
+  function initThemeMode() {
+    let saved = 'dark';
+    try { saved = localStorage.getItem('themeMode') || 'dark'; } catch (e) { /* ignore */ }
+    setThemeMode(saved);
+    document.getElementById('btnToggleTheme')?.addEventListener('click', toggleThemeMode);
+  }
+
+  // Current auto-layout direction chosen in the toolbar (TB/LR/RADIAL/COMPACT).
+  function layoutDirection() {
+    return document.getElementById('layoutDirSelect')?.value || 'TB';
+  }
+
   function init() {
+    // Apply the saved light/dark theme before anything renders.
+    initThemeMode();
+
     // Initialize canvas
     Canvas.init();
 
@@ -3892,7 +3923,8 @@ const App = (() => {
     document.getElementById('btnZoomIn').addEventListener('click', () => Canvas.zoomIn());
     document.getElementById('btnZoomOut').addEventListener('click', () => Canvas.zoomOut());
     document.getElementById('btnZoomFit').addEventListener('click', () => Canvas.zoomFit());
-    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout());
+    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    document.getElementById('layoutDirSelect')?.addEventListener('change', () => Canvas.autoLayout({ direction: layoutDirection() }));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
 
