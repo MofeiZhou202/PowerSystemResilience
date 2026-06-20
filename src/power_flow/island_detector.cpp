@@ -27,15 +27,35 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     adj[static_cast<size_t>(v)].push_back(u);
   };
 
+  // Bus IDs are NOT guaranteed to be a contiguous 1..N sequence (e.g. multiple
+  // feeders numbered 1-5, 10-14, 20-21).  Map each real bus index to its array
+  // position so connectivity follows the actual topology rather than the raw
+  // ``index - 1`` offset.  ``ac_node`` / ``dc_node`` return the graph node for
+  // a given bus ID (or -1 when the ID is unknown); ``add_edge`` ignores -1.
+  std::unordered_map<int, int> ac_id_to_pos;
+  std::unordered_map<int, int> dc_id_to_pos;
+  ac_id_to_pos.reserve(static_cast<size_t>(nac));
+  dc_id_to_pos.reserve(static_cast<size_t>(ndc));
+  for (int i = 0; i < nac; ++i) {
+    ac_id_to_pos[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+  }
+  for (int i = 0; i < ndc; ++i) {
+    dc_id_to_pos[sys.dc.buses[static_cast<size_t>(i)].index] = i;
+  }
+  auto ac_node = [&](int bus_id) -> int {
+    const auto it = ac_id_to_pos.find(bus_id);
+    return (it == ac_id_to_pos.end()) ? -1 : it->second;
+  };
+  auto dc_node = [&](int bus_id) -> int {
+    const auto it = dc_id_to_pos.find(bus_id);
+    return (it == dc_id_to_pos.end()) ? -1 : (nac + it->second);
+  };
+
   for (const auto& br : sys.ac.branches) {
     if (!br.in_service) {
       continue;
     }
-    const int u = br.from_bus - 1;
-    const int v = br.to_bus - 1;
-    if (u >= 0 && v >= 0 && u < nac && v < nac) {
-      add_edge(u, v);
-    }
+    add_edge(ac_node(br.from_bus), ac_node(br.to_bus));
   }
 
   // Closed AC switches connect their two buses (zero/near-zero impedance link).
@@ -45,21 +65,13 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
   // the adaptive solver and leave most buses with vm = 0.
   for (const auto& sw : sys.ac.switches) {
     if (!sw.in_service || !sw.closed) continue;
-    const int u = sw.bus_from - 1;
-    const int v = sw.bus_to - 1;
-    if (u >= 0 && v >= 0 && u < nac && v < nac) {
-      add_edge(u, v);
-    }
+    add_edge(ac_node(sw.bus_from), ac_node(sw.bus_to));
   }
 
   // Closed AC circuit breakers also act as zero-impedance connections.
   for (const auto& cb : sys.ac.circuit_breakers) {
     if (!cb.in_service || !cb.closed) continue;
-    const int u = cb.bus_from - 1;
-    const int v = cb.bus_to - 1;
-    if (u >= 0 && v >= 0 && u < nac && v < nac) {
-      add_edge(u, v);
-    }
+    add_edge(ac_node(cb.bus_from), ac_node(cb.bus_to));
   }
 
   // 2W and 3W transformers connect AC buses (in-service ones contribute
@@ -68,63 +80,43 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
   // into many spurious singleton islands.
   for (const auto& tr : sys.ac.transformers_2w) {
     if (!tr.in_service) continue;
-    const int u = tr.hv_bus - 1;
-    const int v = tr.lv_bus - 1;
-    if (u >= 0 && v >= 0 && u < nac && v < nac) {
-      add_edge(u, v);
-    }
+    add_edge(ac_node(tr.hv_bus), ac_node(tr.lv_bus));
   }
   for (const auto& tr : sys.ac.transformers_3w) {
     if (!tr.in_service) continue;
-    const int h = tr.hv_bus - 1;
-    const int m = tr.mv_bus - 1;
-    const int l = tr.lv_bus - 1;
-    if (h >= 0 && m >= 0 && h < nac && m < nac) add_edge(h, m);
-    if (h >= 0 && l >= 0 && h < nac && l < nac) add_edge(h, l);
-    if (m >= 0 && l >= 0 && m < nac && l < nac) add_edge(m, l);
+    const int h = ac_node(tr.hv_bus);
+    const int m = ac_node(tr.mv_bus);
+    const int l = ac_node(tr.lv_bus);
+    add_edge(h, m);
+    add_edge(h, l);
+    add_edge(m, l);
   }
 
   for (const auto& br : sys.dc.branches) {
     if (!br.in_service) {
       continue;
     }
-    const int u = nac + br.from_bus - 1;
-    const int v = nac + br.to_bus - 1;
-    if (u >= nac && v >= nac && u < n_total && v < n_total) {
-      add_edge(u, v);
-    }
+    add_edge(dc_node(br.from_bus), dc_node(br.to_bus));
   }
 
   // Closed DC circuit breakers connect their two DC buses.
   for (const auto& cb : sys.dc.dc_circuit_breakers) {
     if (!cb.in_service || !cb.closed) continue;
-    const int u = nac + cb.bus_from - 1;
-    const int v = nac + cb.bus_to - 1;
-    if (u >= nac && v >= nac && u < n_total && v < n_total) {
-      add_edge(u, v);
-    }
+    add_edge(dc_node(cb.bus_from), dc_node(cb.bus_to));
   }
 
   for (const auto& conv : sys.vsc_converters) {
     if (!conv.in_service) {
       continue;
     }
-    const int u = conv.bus_ac - 1;
-    const int v = nac + conv.bus_dc - 1;
-    if (u >= 0 && u < nac && v >= nac && v < n_total) {
-      add_edge(u, v);
-    }
+    add_edge(ac_node(conv.bus_ac), dc_node(conv.bus_dc));
   }
 
   for (const auto& dcdc : sys.dc.dcdc_converters) {
     if (!dcdc.in_service) {
       continue;
     }
-    const int u = nac + dcdc.bus_in - 1;
-    const int v = nac + dcdc.bus_out - 1;
-    if (u >= nac && v >= nac && u < n_total && v < n_total) {
-      add_edge(u, v);
-    }
+    add_edge(dc_node(dcdc.bus_in), dc_node(dcdc.bus_out));
   }
 
   // Energy Routers: before expansion, their ports bridge AC buses
@@ -136,10 +128,13 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     }
     int prev = -1;
     for (const auto& port : er.ports) {
-      if (!port.in_service || port.bus <= 0 || port.bus > nac) {
+      if (!port.in_service) {
         continue;
       }
-      const int u = port.bus - 1;
+      const int u = ac_node(port.bus);
+      if (u < 0) {
+        continue;
+      }
       if (prev >= 0) {
         add_edge(prev, u);
       }
@@ -179,9 +174,9 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     dc_buses.reserve(component.size());
     for (int node : component) {
       if (node < nac) {
-        ac_buses.push_back(node + 1);
+        ac_buses.push_back(sys.ac.buses[static_cast<size_t>(node)].index);
       } else {
-        dc_buses.push_back(node - nac + 1);
+        dc_buses.push_back(sys.dc.buses[static_cast<size_t>(node - nac)].index);
       }
     }
 
@@ -279,7 +274,9 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     bool has_ac_slack = false;
     int ac_slack_bus = 0;
     for (int bus : ac_buses) {
-      if (sys.ac.buses[static_cast<size_t>(bus - 1)].bus_type == BusType::SLACK) {
+      const auto it = ac_id_to_pos.find(bus);
+      if (it != ac_id_to_pos.end() &&
+          sys.ac.buses[static_cast<size_t>(it->second)].bus_type == BusType::SLACK) {
         has_ac_slack = true;
         ac_slack_bus = bus;
         break;
@@ -304,7 +301,11 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
       // fallback anchor when the island contains nothing else.
       int first_non_isolated = -1;
       for (int bus : dc_buses) {
-        const auto bt = sys.dc.buses[static_cast<size_t>(bus - 1)].bus_type;
+        const auto it = dc_id_to_pos.find(bus);
+        if (it == dc_id_to_pos.end()) {
+          continue;
+        }
+        const auto bt = sys.dc.buses[static_cast<size_t>(it->second)].bus_type;
         if (bt == DCBusType::DC_V) {
           dc_slack_bus = bus;
           first_non_isolated = bus;
@@ -349,6 +350,20 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
   std::sort(ac_sorted.begin(), ac_sorted.end());
   std::sort(dc_sorted.begin(), dc_sorted.end());
 
+  // ``island.ac_buses`` / ``dc_buses`` hold real bus indices, which need not be
+  // a contiguous 1..N sequence.  Map each real index to its array position so
+  // the original bus records can be located regardless of numbering gaps.
+  std::unordered_map<int, int> ac_id_to_pos;
+  std::unordered_map<int, int> dc_id_to_pos;
+  ac_id_to_pos.reserve(sys.ac.buses.size());
+  dc_id_to_pos.reserve(sys.dc.buses.size());
+  for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+    ac_id_to_pos[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+  }
+  for (int i = 0; i < static_cast<int>(sys.dc.buses.size()); ++i) {
+    dc_id_to_pos[sys.dc.buses[static_cast<size_t>(i)].index] = i;
+  }
+
   std::unordered_map<int, int> ac_map;
   std::unordered_map<int, int> dc_map;
   ac_map.reserve(ac_sorted.size());
@@ -371,11 +386,12 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
 
   for (int i = 0; i < static_cast<int>(ac_sorted.size()); ++i) {
     const int orig = ac_sorted[static_cast<size_t>(i)];
-    if (orig < 1 || orig > static_cast<int>(sys.ac.buses.size())) {
+    const auto pit = ac_id_to_pos.find(orig);
+    if (pit == ac_id_to_pos.end()) {
       continue;
     }
     ac_map.emplace(orig, i + 1);
-    ACBus bus = sys.ac.buses[static_cast<size_t>(orig - 1)];
+    ACBus bus = sys.ac.buses[static_cast<size_t>(pit->second)];
     bus.index = i + 1;
     if (orig == slack_bus_override) {
       bus.bus_type = BusType::SLACK;
@@ -470,11 +486,12 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
 
   for (int i = 0; i < static_cast<int>(dc_sorted.size()); ++i) {
     const int orig = dc_sorted[static_cast<size_t>(i)];
-    if (orig < 1 || orig > static_cast<int>(sys.dc.buses.size())) {
+    const auto pit = dc_id_to_pos.find(orig);
+    if (pit == dc_id_to_pos.end()) {
       continue;
     }
     dc_map.emplace(orig, i + 1);
-    DCBus bus = sys.dc.buses[static_cast<size_t>(orig - 1)];
+    DCBus bus = sys.dc.buses[static_cast<size_t>(pit->second)];
     bus.index = i + 1;
     sub.dc.buses.push_back(std::move(bus));
   }

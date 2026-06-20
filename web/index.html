@@ -637,8 +637,12 @@
 <div id="scDialog" class="modal" style="display:none">
   <div class="modal-content">
     <h3>故障点位设置</h3>
-    <p style="opacity:.7;font-size:12px;margin:6px 0 12px">短路类型与电压调节系数请在功能栏中设置。</p>
-    <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0"/></label>
+    <p style="opacity:.7;font-size:12px;margin:6px 0 10px">短路类型与电压调节系数请在功能栏中设置。</p>
+    <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0" step="1"/></label>
+    <p style="opacity:.65;font-size:12px;margin:8px 0 0;line-height:1.5">
+      请输入母线的<strong>真实编号</strong>（与结果表 / 画布中显示的 <code>Bus</code> 编号一致）。<br>
+      不存在的编号会被拒绝并给出提示；<strong>留空</strong>则计算全部母线。
+    </p>
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
     <div class="modal-actions">
