@@ -25,10 +25,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/api/hacdcpf.hpp"
+#include "hacdcpf/power_flow/three_phase.hpp"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -658,6 +660,398 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
 HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
                                     const HPFOptions& opt) {
   return solve_harmonic_power_flow(sys, HarmonicStudyInputs{}, opt);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Three-phase (abc-domain) harmonic power flow
+// ═══════════════════════════════════════════════════════════════════════════
+namespace {
+
+using Mat3 = Eigen::Matrix3cd;
+
+// Symmetrical-component -> phase impedance matrix:  Z_abc = A·diag(z0,z1,z2)·A⁻¹.
+// Matches build_sequence_zabc() in src/power_flow/three_phase_nr.cpp.
+Mat3 seq_to_phase_zabc(Cx z0, Cx z1, Cx z2) {
+  const Cx a = std::polar(1.0, 2.0 * M_PI / 3.0);
+  const Cx a2 = std::polar(1.0, 4.0 * M_PI / 3.0);
+  Mat3 A;
+  A << Cx(1, 0), Cx(1, 0), Cx(1, 0),
+       Cx(1, 0), a2, a,
+       Cx(1, 0), a, a2;
+  Mat3 zs = Mat3::Zero();
+  zs(0, 0) = z0;
+  zs(1, 1) = z1;
+  zs(2, 2) = z2;
+  return A * zs * A.inverse();
+}
+
+// Rotate a balanced A-phase phasor into the (b, c) phases for a given sequence.
+//   seq 1 (positive): b = a²·a_ph, c = a·a_ph
+//   seq 2 (negative): b = a·a_ph,  c = a²·a_ph
+//   seq 0 (zero)    : b = c = a_ph
+void balanced_phase_set(Cx a_ph, int seq, Cx& b_ph, Cx& c_ph) {
+  const Cx a = std::polar(1.0, 2.0 * M_PI / 3.0);   // e^{+j120}
+  const Cx a2 = std::polar(1.0, 4.0 * M_PI / 3.0);  // e^{-j120}
+  if (seq == 1) {        // positive
+    b_ph = a2 * a_ph;
+    c_ph = a * a_ph;
+  } else if (seq == 2) {  // negative
+    b_ph = a * a_ph;
+    c_ph = a2 * a_ph;
+  } else {                // zero
+    b_ph = a_ph;
+    c_ph = a_ph;
+  }
+}
+
+}  // namespace
+
+int harmonic_sequence_of_order(int h) {
+  int m = ((h % 3) + 3) % 3;  // 0,1,2
+  return m;                   // 1 = positive, 2 = negative, 0 = zero
+}
+
+std::string HPF3phResult::summary() const {
+  std::ostringstream os;
+  os << "Three-phase harmonic power flow: " << (ok ? "OK" : "FAILED");
+  if (!message.empty()) os << " (" << message << ")";
+  os << "\n  AC orders solved: " << ac_orders.size();
+  os << "\n  Max phase-voltage THD: " << max_thd_pct << " % at bus " << max_thd_bus;
+  return os.str();
+}
+
+HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
+                                           const ThreePhaseHarmonicInputs& inputs,
+                                           const HPFOptions& opt) {
+  HPF3phResult res;
+  const int n = static_cast<int>(sys.buses.size());
+  const double base = sys.base_mva > 0 ? sys.base_mva : 100.0;
+  if (n == 0) {
+    res.message = "system has no buses";
+    return res;
+  }
+
+  std::unordered_map<int, int> id2pos;
+  id2pos.reserve(n);
+  for (int i = 0; i < n; ++i) id2pos[sys.buses[i].index] = i;
+  auto pos = [&](int id) -> int {
+    auto it = id2pos.find(id);
+    return it == id2pos.end() ? -1 : it->second;
+  };
+  auto node = [](int p, int ph) { return p * 3 + ph; };
+
+  // ── Operating point: per-phase fundamental phasors ──
+  std::vector<std::array<Cx, 3>> vph1(n);
+  powerflow::ThreePhaseFlowResult tp;
+  bool have_pf = false;
+  if (opt.run_base_power_flow) {
+    try {
+      tp = powerflow::solve_three_phase(sys, {});
+      have_pf = tp.converged;
+    } catch (...) {
+      have_pf = false;
+    }
+  }
+  res.base_pf_converged = have_pf;
+  std::unordered_map<int, int> pfpos;
+  if (have_pf)
+    for (int i = 0; i < (int)tp.bus_results.size(); ++i)
+      pfpos[tp.bus_results[i].bus_id] = i;
+
+  for (int i = 0; i < n; ++i) {
+    const auto& b = sys.buses[i];
+    double vma = b.vm_a_pu, vaa = b.va_a_deg;
+    double vmb = b.vm_b_pu, vab = b.va_b_deg;
+    double vmc = b.vm_c_pu, vac = b.va_c_deg;
+    if (have_pf) {
+      auto it = pfpos.find(b.index);
+      if (it != pfpos.end()) {
+        const auto& r = tp.bus_results[it->second];
+        if (r.vm_a_pu > 1e-9) { vma = r.vm_a_pu; vaa = r.va_a_deg; }
+        if (r.vm_b_pu > 1e-9) { vmb = r.vm_b_pu; vab = r.va_b_deg; }
+        if (r.vm_c_pu > 1e-9) { vmc = r.vm_c_pu; vac = r.va_c_deg; }
+      }
+    }
+    if (vma <= 1e-9) vma = 1.0;
+    if (vmb <= 1e-9) vmb = 1.0;
+    if (vmc <= 1e-9) vmc = 1.0;
+    vph1[i] = {std::polar(vma, vaa * kDeg2Rad), std::polar(vmb, vab * kDeg2Rad),
+               std::polar(vmc, vac * kDeg2Rad)};
+  }
+
+  // ── Effective NIC list (explicit + auto from converters is not available for
+  //    a bare ThreePhaseACSystem, so only explicit NICs are used) ──
+  std::vector<ThreePhaseHarmonicNIC> nics = inputs.nics;
+
+  // Per-bus result accumulators.
+  std::vector<ThreePhaseHarmonicBusResult> bus_res(n);
+  for (int i = 0; i < n; ++i) {
+    bus_res[i].bus = sys.buses[i].index;
+    bus_res[i].phase_mask = sys.buses[i].phase_mask;
+    bus_res[i].v_fund_pu_a = std::abs(vph1[i][0]);
+    bus_res[i].v_fund_pu_b = std::abs(vph1[i][1]);
+    bus_res[i].v_fund_pu_c = std::abs(vph1[i][2]);
+    bus_res[i].v_by_order_a[1] = vph1[i][0];
+    bus_res[i].v_by_order_b[1] = vph1[i][1];
+    bus_res[i].v_by_order_c[1] = vph1[i][2];
+  }
+
+  // ── Build the 3N×3N harmonic admittance matrix at order h ──
+  auto build_ybus = [&](int h) -> SpMat {
+    std::vector<Trip> trips;
+    trips.reserve(sys.lines.size() * 36 + n * 6);
+    const double hh = static_cast<double>(h);
+
+    auto stamp_block = [&](int pf, int pt, const Mat3& yser, const Mat3& yshh,
+                           PhaseMask mf, PhaseMask mt, PhaseMask ml) {
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+          if (!ml.has(r) || !ml.has(c)) continue;
+          // From-from / to-to diagonal blocks (series + half shunt).
+          if (mf.has(r) && mf.has(c))
+            trips.emplace_back(node(pf, r), node(pf, c), yser(r, c) + yshh(r, c));
+          if (mt.has(r) && mt.has(c))
+            trips.emplace_back(node(pt, r), node(pt, c), yser(r, c) + yshh(r, c));
+          // Off-diagonal coupling blocks (−series).
+          if (mf.has(r) && mt.has(c))
+            trips.emplace_back(node(pf, r), node(pt, c), -yser(r, c));
+          if (mt.has(r) && mf.has(c))
+            trips.emplace_back(node(pt, r), node(pf, c), -yser(r, c));
+        }
+      }
+    };
+
+    // Lines.
+    for (const auto& ln : sys.lines) {
+      if (!ln.in_service) continue;
+      int pf = pos(ln.from_bus), pt = pos(ln.to_bus);
+      if (pf < 0 || pt < 0) continue;
+      Mat3 zabc, yshh;
+      if (ln.use_phase_matrix) {
+        Mat3 z = Mat3::Zero();
+        for (int r = 0; r < 3; ++r)
+          for (int c = 0; c < 3; ++c)
+            z(r, c) = Cx(phase_matrix_get(ln.r_matrix_pu, r, c),
+                         hh * phase_matrix_get(ln.x_matrix_pu, r, c));
+        zabc = z;
+        yshh = Mat3::Zero();
+        for (int r = 0; r < 3; ++r)
+          for (int c = 0; c < 3; ++c)
+            yshh(r, c) = Cx(0.0, hh * phase_matrix_get(ln.b_matrix_pu, r, c) / 2.0);
+      } else {
+        Cx z1(ln.r1_pu, hh * ln.x1_pu);
+        Cx z0(ln.r0_pu, hh * ln.x0_pu);
+        if (std::abs(z0) < 1e-20) z0 = z1;
+        zabc = seq_to_phase_zabc(z0, z1, z1);
+        yshh = Mat3::Zero();
+        for (int ph = 0; ph < 3; ++ph) yshh(ph, ph) = Cx(0.0, hh * ln.b1_pu / 2.0);
+      }
+      Mat3 yser = zabc.inverse();
+      stamp_block(pf, pt, yser, yshh, sys.buses[pf].phase_mask,
+                  sys.buses[pt].phase_mask, ln.phase_mask);
+    }
+
+    // Transformers (balanced series impedance; vector-group shift ignored in v1).
+    for (const auto& tf : sys.transformers) {
+      if (!tf.in_service || tf.sn_mva <= 0) continue;
+      int pf = pos(tf.hv_bus), pt = pos(tf.lv_bus);
+      if (pf < 0 || pt < 0) continue;
+      double zpu = (tf.vk_percent / 100.0) * (base / tf.sn_mva);
+      double rpu = (tf.vkr_percent / 100.0) * (base / tf.sn_mva);
+      double xpu = std::sqrt(std::max(zpu * zpu - rpu * rpu, 0.0));
+      Cx y = Cx(1.0, 0.0) / Cx(rpu, hh * xpu);
+      Mat3 yser = Mat3::Zero();
+      for (int ph = 0; ph < 3; ++ph) yser(ph, ph) = y;
+      stamp_block(pf, pt, yser, Mat3::Zero(), tf.hv_phase_mask, tf.lv_phase_mask,
+                  tf.hv_phase_mask);
+    }
+
+    // Per-phase grounding (sources), loads, shunts, conditioning.
+    std::vector<std::array<Cx, 3>> diag(n, {Cx(0, 0), Cx(0, 0), Cx(0, 0)});
+    auto add_source = [&](int p, double r, double xpp) {
+      if (p < 0) return;
+      double x = (xpp > 1e-9) ? xpp : opt.default_source_xpp_pu;
+      Cx z(r, hh * x);
+      if (std::abs(z) > 1e-12) {
+        Cx y = Cx(1.0, 0.0) / z;
+        for (int ph = 0; ph < 3; ++ph)
+          if (sys.buses[p].phase_mask.has(ph)) diag[p][ph] += y;
+      }
+    };
+    for (const auto& g : sys.generators)
+      if (g.in_service) add_source(pos(g.bus), 0.0, g.xdpp_pu);
+    for (const auto& eg : sys.external_grids) {
+      if (!eg.in_service) continue;
+      int p = pos(eg.bus);
+      if (p < 0) continue;
+      double r = eg.r1_pu, x = eg.x1_pu;
+      if (x <= 1e-9 && eg.s_sc_max_mva > 0) {
+        double zsc = base / eg.s_sc_max_mva;
+        double xr = eg.rx_max > 0 ? (1.0 / eg.rx_max) : 10.0;
+        x = zsc / std::sqrt(1.0 + 1.0 / (xr * xr));
+        r = x / xr;
+      }
+      add_source(p, r, x);
+    }
+    for (int i = 0; i < n; ++i) {
+      const auto& b = sys.buses[i];
+      bool is_src = false;
+      for (const auto& g : sys.generators)
+        if (g.in_service && g.bus == b.index) is_src = true;
+      for (const auto& eg : sys.external_grids)
+        if (eg.in_service && eg.bus == b.index) is_src = true;
+      if ((b.bus_type == BusType::SLACK || b.bus_type == BusType::PV) && !is_src)
+        add_source(i, 0.0, opt.default_source_xpp_pu);
+    }
+
+    // Loads as per-phase parallel R // jX impedance.
+    if (opt.include_load_impedance) {
+      auto stamp_load = [&](int p, int ph, double pmw, double qmvar) {
+        if (p < 0 || !sys.buses[p].phase_mask.has(ph)) return;
+        double pp = pmw / base, qq = qmvar / base;
+        double vm = std::abs(vph1[p][ph]);
+        if (vm < 1e-6) vm = 1.0;
+        double v2 = vm * vm;
+        Cx yl(pp / v2, 0.0);
+        if (std::abs(qq) > 1e-12) yl += Cx(0.0, -qq / (hh * v2));
+        diag[p][ph] += yl;
+      };
+      for (const auto& ld : sys.loads) {
+        if (!ld.in_service) continue;
+        int p = pos(ld.bus);
+        stamp_load(p, 0, ld.p_a_mw, ld.q_a_mvar);
+        stamp_load(p, 1, ld.p_b_mw, ld.q_b_mvar);
+        stamp_load(p, 2, ld.p_c_mw, ld.q_c_mvar);
+      }
+    }
+    for (int i = 0; i < n; ++i) {
+      const auto& b = sys.buses[i];
+      const double gs[3] = {b.gs_a_mw, b.gs_b_mw, b.gs_c_mw};
+      const double bs[3] = {b.bs_a_mvar, b.bs_b_mvar, b.bs_c_mvar};
+      for (int ph = 0; ph < 3; ++ph) {
+        if (gs[ph] != 0.0 || bs[ph] != 0.0)
+          diag[i][ph] += Cx(gs[ph] / base, hh * bs[ph] / base);
+      }
+    }
+
+    for (int i = 0; i < n; ++i) {
+      const auto& b = sys.buses[i];
+      for (int ph = 0; ph < 3; ++ph) {
+        if (!b.in_service || b.bus_type == BusType::ISOLATED ||
+            !b.phase_mask.has(ph))
+          diag[i][ph] += Cx(1.0 / std::max(opt.min_shunt_pu, 1e-12), 0.0);
+        diag[i][ph] += Cx(opt.min_shunt_pu, 0.0);
+        trips.emplace_back(node(i, ph), node(i, ph), diag[i][ph]);
+      }
+    }
+
+    SpMat Y(3 * n, 3 * n);
+    Y.setFromTriplets(trips.begin(), trips.end());
+    Y.makeCompressed();
+    return Y;
+  };
+
+  // ── Injection vector at order h ──
+  auto build_inj = [&](int h) -> Eigen::VectorXcd {
+    Eigen::VectorXcd I = Eigen::VectorXcd::Zero(3 * n);
+    const int seq = harmonic_sequence_of_order(h);
+
+    for (const auto& src : inputs.sources) {
+      int p = pos(src.bus);
+      if (p < 0) continue;
+      for (const auto& line : src.spectrum) {
+        if (line.order != h) continue;
+        if (src.balanced) {
+          double mag = (line.mag_percent / 100.0) * src.i_base_pu;
+          Cx ia = std::polar(mag, line.phase_deg * kDeg2Rad +
+                                       src.i_base_phase_deg * kDeg2Rad);
+          Cx ib, ic;
+          balanced_phase_set(ia, seq, ib, ic);
+          if (sys.buses[p].phase_mask.has(0)) I(node(p, 0)) += ia;
+          if (sys.buses[p].phase_mask.has(1)) I(node(p, 1)) += ib;
+          if (sys.buses[p].phase_mask.has(2)) I(node(p, 2)) += ic;
+        } else {
+          const double ib_[3] = {src.i_base_pu_a, src.i_base_pu_b, src.i_base_pu_c};
+          for (int ph = 0; ph < 3; ++ph) {
+            if (!sys.buses[p].phase_mask.has(ph)) continue;
+            double mag = (line.mag_percent / 100.0) * ib_[ph];
+            I(node(p, ph)) += std::polar(mag, line.phase_deg * kDeg2Rad);
+          }
+        }
+      }
+    }
+
+    // Three-phase NIC AC port: balanced injection scaled by per-phase |I_φ,1|.
+    for (const auto& nic : nics) {
+      int p = pos(nic.bus_ac);
+      if (p < 0) continue;
+      HarmonicSpectrum spec = nic.ac_spectrum.empty()
+                                  ? default_six_pulse_ac_spectrum()
+                                  : nic.ac_spectrum;
+      Cx sphi((nic.s_ac_p_mw / 3.0) / base, (nic.s_ac_q_mvar / 3.0) / base);
+      Cx va1 = vph1[p][0];
+      Cx ia1 = (std::abs(va1) > 1e-9) ? std::conj(sphi) / std::conj(va1) : Cx(0, 0);
+      double iref = std::abs(ia1);
+      double iph1 = std::arg(ia1);
+      for (const auto& line : spec) {
+        if (line.order != h) continue;
+        double mag = (line.mag_percent / 100.0) * iref;
+        Cx ia = std::polar(mag, line.phase_deg * kDeg2Rad + iph1);
+        Cx ib, ic;
+        balanced_phase_set(ia, seq, ib, ic);
+        if (sys.buses[p].phase_mask.has(0)) I(node(p, 0)) += ia;
+        if (sys.buses[p].phase_mask.has(1)) I(node(p, 1)) += ib;
+        if (sys.buses[p].phase_mask.has(2)) I(node(p, 2)) += ic;
+      }
+    }
+    return I;
+  };
+
+  // ── Solve each harmonic order ──
+  for (int h : opt.ac_orders) {
+    if (h <= 1) continue;
+    SpMat Y = build_ybus(h);
+    Eigen::VectorXcd I = build_inj(h);
+    Eigen::SparseLU<SpMat> lu;
+    lu.compute(Y);
+    bool okrow = (lu.info() == Eigen::Success);
+    Eigen::VectorXcd V;
+    if (okrow) {
+      V = lu.solve(I);
+      okrow = (lu.info() == Eigen::Success);
+    }
+    res.ac_order_solved[h] = okrow;
+    if (!okrow) continue;
+    res.ac_orders.push_back(h);
+    for (int i = 0; i < n; ++i) {
+      bus_res[i].v_by_order_a[h] = V(node(i, 0));
+      bus_res[i].v_by_order_b[h] = V(node(i, 1));
+      bus_res[i].v_by_order_c[h] = V(node(i, 2));
+    }
+  }
+
+  // ── THD post-processing (per phase) ──
+  for (auto& r : bus_res) {
+    r.thd_a_pct = thd_from_orders(r.v_by_order_a, 1, r.v_fund_pu_a);
+    r.thd_b_pct = thd_from_orders(r.v_by_order_b, 1, r.v_fund_pu_b);
+    r.thd_c_pct = thd_from_orders(r.v_by_order_c, 1, r.v_fund_pu_c);
+    double mx = std::max({r.thd_a_pct, r.thd_b_pct, r.thd_c_pct});
+    if (mx > res.max_thd_pct) {
+      res.max_thd_pct = mx;
+      res.max_thd_bus = r.bus;
+    }
+  }
+
+  res.bus_results = std::move(bus_res);
+  res.ok = true;
+  if (!res.base_pf_converged && opt.run_base_power_flow)
+    res.message = "base power flow did not converge; used stored/nominal voltages";
+  return res;
+}
+
+HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
+                                           const HPFOptions& opt) {
+  return solve_harmonic_power_flow_3ph(sys, ThreePhaseHarmonicInputs{}, opt);
 }
 
 }  // namespace hacdcpf::harmonics

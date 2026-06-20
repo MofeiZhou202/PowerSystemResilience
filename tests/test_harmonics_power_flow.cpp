@@ -423,3 +423,204 @@ TEST_CASE("HPF default spectra and result metadata", "[harmonics][meta]") {
   CHECK_THAT(r.ac_branch_flows[0].i_by_order.at(5), WithinAbs(1.0, 1e-5));
   CHECK_FALSE(r.summary().empty());
 }
+
+// ===========================================================================
+// Three-phase (abc-domain) harmonic power flow
+// ===========================================================================
+static ThreePhaseACBus tp_bus(int id, BusType t, double kv = 10.0) {
+  ThreePhaseACBus b;
+  b.index = id;
+  b.bus_type = t;
+  b.phase_mask = PhaseMask::abc();
+  b.vm_a_pu = 1.0; b.va_a_deg = 0.0;
+  b.vm_b_pu = 1.0; b.va_b_deg = -120.0;
+  b.vm_c_pu = 1.0; b.va_c_deg = 120.0;
+  b.base_kv = kv;
+  b.in_service = true;
+  return b;
+}
+
+static ThreePhaseACLine tp_line(int id, int f, int t, double x1, double x0) {
+  ThreePhaseACLine ln;
+  ln.index = id;
+  ln.from_bus = f;
+  ln.to_bus = t;
+  ln.phase_mask = PhaseMask::abc();
+  ln.r1_pu = 0.0; ln.x1_pu = x1; ln.b1_pu = 0.0;
+  ln.r0_pu = 0.0; ln.x0_pu = x0; ln.b0_pu = 0.0;
+  ln.in_service = true;
+  return ln;
+}
+
+static Cx vph(const HPF3phResult& r, int bus, int order, int phase) {
+  for (const auto& b : r.bus_results) {
+    if (b.bus != bus) continue;
+    const auto& m = (phase == 0) ? b.v_by_order_a
+                  : (phase == 1) ? b.v_by_order_b : b.v_by_order_c;
+    auto it = m.find(order);
+    if (it != m.end()) return it->second;
+  }
+  return Cx(0.0, 0.0);
+}
+
+static double angdiff_deg(Cx x, Cx y) {
+  double d = (std::arg(x) - std::arg(y)) * 180.0 / M_PI;
+  while (d > 180.0) d -= 360.0;
+  while (d < -180.0) d += 360.0;
+  return d;
+}
+
+TEST_CASE("HPF 3-phase harmonic sequence classification", "[harmonics][3ph]") {
+  CHECK(harmonic_sequence_of_order(1) == 1);   // positive
+  CHECK(harmonic_sequence_of_order(7) == 1);   // positive
+  CHECK(harmonic_sequence_of_order(13) == 1);  // positive
+  CHECK(harmonic_sequence_of_order(5) == 2);   // negative
+  CHECK(harmonic_sequence_of_order(11) == 2);  // negative
+  CHECK(harmonic_sequence_of_order(3) == 0);   // zero
+  CHECK(harmonic_sequence_of_order(9) == 0);   // zero
+}
+
+TEST_CASE("HPF 3-phase positive-sequence harmonic is balanced (+/-120)",
+          "[harmonics][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};  // x1=0.1, x0=0.3 (lossless)
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{7, 100.0, 0.0}};  // 7th: positive sequence
+
+  ThreePhaseHarmonicInputs in;
+  in.sources = {src};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {7};
+
+  HPF3phResult r = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.ac_order_solved.at(7));
+
+  // Positive sequence sees z1: |V2| = I*(x''*7 + x1*7) = 1*(1.4 + 0.7) = 2.1
+  const Cx va = vph(r, 2, 7, 0), vb = vph(r, 2, 7, 1), vc = vph(r, 2, 7, 2);
+  CHECK_THAT(std::abs(va), WithinAbs(2.1, 1e-4));
+  CHECK_THAT(std::abs(vb), WithinAbs(2.1, 1e-4));
+  CHECK_THAT(std::abs(vc), WithinAbs(2.1, 1e-4));
+  // Positive sequence: B lags A by 120, C leads A by 120.
+  CHECK_THAT(angdiff_deg(vb, va), WithinAbs(-120.0, 1e-3));
+  CHECK_THAT(angdiff_deg(vc, va), WithinAbs(120.0, 1e-3));
+}
+
+TEST_CASE("HPF 3-phase negative-sequence harmonic reverses rotation",
+          "[harmonics][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};  // 5th: negative sequence
+
+  ThreePhaseHarmonicInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+
+  HPF3phResult r = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // Negative sequence also sees z1: |V2| = 1*(1.0 + 0.5) = 1.5
+  const Cx va = vph(r, 2, 5, 0), vb = vph(r, 2, 5, 1), vc = vph(r, 2, 5, 2);
+  CHECK_THAT(std::abs(va), WithinAbs(1.5, 1e-4));
+  CHECK_THAT(std::abs(vb), WithinAbs(1.5, 1e-4));
+  CHECK_THAT(std::abs(vc), WithinAbs(1.5, 1e-4));
+  // Negative sequence: B leads A by 120, C lags A by 120 (reversed).
+  CHECK_THAT(angdiff_deg(vb, va), WithinAbs(120.0, 1e-3));
+  CHECK_THAT(angdiff_deg(vc, va), WithinAbs(-120.0, 1e-3));
+}
+
+TEST_CASE("HPF 3-phase zero-sequence (triplen) harmonic is in-phase and uses z0",
+          "[harmonics][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};  // x0=0.3 != x1=0.1
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{3, 100.0, 0.0}};  // 3rd: zero sequence
+
+  ThreePhaseHarmonicInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {3};
+
+  HPF3phResult r = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // Zero sequence sees z0: |V2| = I*(x''*3 + x0*3) = 1*(0.6 + 0.9) = 1.5
+  const Cx va = vph(r, 2, 3, 0), vb = vph(r, 2, 3, 1), vc = vph(r, 2, 3, 2);
+  CHECK_THAT(std::abs(va), WithinAbs(1.5, 1e-4));
+  // All three phases identical (equal magnitude AND angle).
+  CHECK_THAT(angdiff_deg(vb, va), WithinAbs(0.0, 1e-3));
+  CHECK_THAT(angdiff_deg(vc, va), WithinAbs(0.0, 1e-3));
+  CHECK_THAT(std::abs(vb), WithinAbs(1.5, 1e-4));
+  CHECK_THAT(std::abs(vc), WithinAbs(1.5, 1e-4));
+
+  // Cross-check: a POSITIVE-sequence harmonic at the same order/current would
+  // see z1 (= 0.1) instead of z0, giving a different magnitude. This confirms
+  // the zero-sequence path genuinely routed through x0.
+  CHECK(std::abs(va) > 1.0 * (3 * 0.2 + 3 * 0.1) - 1e-6);  // 1.5 > 0.9 (z1 result)
+}
+
+TEST_CASE("HPF 3-phase converter (NIC) balanced injection from operating point",
+          "[harmonics][3ph][nic]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};
+
+  ThreePhaseHarmonicNIC nic;
+  nic.bus_ac = 2;
+  nic.s_ac_p_mw = 100.0;   // 1.0 pu total; per-phase S = 1/3 pu
+  nic.s_ac_q_mvar = 0.0;
+  nic.ac_spectrum = {{5, 100.0, 0.0}};  // |I_a1| = 1/3 -> 5th injection = 1/3
+
+  ThreePhaseHarmonicInputs in{.sources = {}, .nics = {nic}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+
+  HPF3phResult r = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // |I_a1| = (1/3)/|V_a1| = 1/3 ; 5th injection = 1/3 ; z1(5) = j1.5
+  // |V2_a(5)| = (1/3) * 1.5 = 0.5
+  const Cx va = vph(r, 2, 5, 0), vb = vph(r, 2, 5, 1), vc = vph(r, 2, 5, 2);
+  CHECK_THAT(std::abs(va), WithinAbs(0.5, 1e-4));
+  CHECK_THAT(std::abs(vb), WithinAbs(0.5, 1e-4));
+  CHECK_THAT(std::abs(vc), WithinAbs(0.5, 1e-4));
+  // 5th is negative sequence.
+  CHECK_THAT(angdiff_deg(vb, va), WithinAbs(120.0, 1e-3));
+
+  // Balanced source -> equal per-phase THD.
+  double ta = 0, tb = 0, tc = 0;
+  for (const auto& b : r.bus_results)
+    if (b.bus == 2) { ta = b.thd_a_pct; tb = b.thd_b_pct; tc = b.thd_c_pct; }
+  CHECK_THAT(ta, WithinRel(tb, 1e-6));
+  CHECK_THAT(tb, WithinRel(tc, 1e-6));
+  CHECK(ta > 0.0);
+  CHECK_FALSE(r.summary().empty());
+}
+

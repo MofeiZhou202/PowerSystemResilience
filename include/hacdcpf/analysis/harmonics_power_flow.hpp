@@ -255,4 +255,110 @@ HarmonicSpectrum default_six_pulse_ac_spectrum();
 /// Default characteristic DC-side ripple spectrum (percent of DC current).
 HarmonicSpectrum default_dc_ripple_spectrum();
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Three-phase (phase-domain) harmonic power flow
+// ═══════════════════════════════════════════════════════════════════════════
+// Extends the single-phase / positive-sequence model above to an unbalanced
+// abc-domain network, per docs/harmonic_three_phase.md.  The AC network is
+// assembled on 3·N phase-nodes; line impedances become 3×3 phase matrices
+// Z_abc(h) = A·diag(z0(h), z1(h), z1(h))·A⁻¹ (or explicit phase matrices), and a
+// *balanced* harmonic current source automatically carries the correct phase
+// sequence for its order:
+//     h mod 3 == 1  -> positive sequence  (I_b = a²·I_a, I_c = a·I_a)
+//     h mod 3 == 2  -> negative sequence  (I_b = a·I_a,  I_c = a²·I_a)
+//     h mod 3 == 0  -> zero    sequence  (I_a = I_b = I_c)
+// with a = e^{j2π/3}.
+
+/// Returns the symmetrical-component sequence of a balanced harmonic of order h:
+/// 1 = positive, 2 = negative, 0 = zero.
+int harmonic_sequence_of_order(int h);
+
+// Phase-aware harmonic current source (nonlinear load / CIDER / converter AC port).
+struct ThreePhaseHarmonicSource {
+  int  bus{0};
+  std::string name;
+
+  /// When true the spectrum is applied as a balanced set with the natural phase
+  /// sequence for each order; only the A-phase reference (i_base_pu) is used.
+  bool balanced{true};
+
+  /// Reference current magnitude [pu] for the percentage spectrum.  In balanced
+  /// mode this is the A-phase reference; the other phases follow the sequence.
+  double i_base_pu{0.0};
+  double i_base_phase_deg{0.0};
+
+  /// Per-phase reference magnitudes used only when balanced == false.
+  double i_base_pu_a{0.0};
+  double i_base_pu_b{0.0};
+  double i_base_pu_c{0.0};
+
+  HarmonicSpectrum spectrum;  ///< orders and magnitudes (percent of reference)
+};
+
+// Three-phase NIC AC port modelled as a balanced harmonic current source whose
+// magnitude follows the converter through-power operating point.  (The DC-side
+// ripple coupling is handled by the single-phase DC path.)
+struct ThreePhaseHarmonicNIC {
+  int vsc_index{-1};
+  int bus_ac{0};
+  std::string name;
+
+  /// Total three-phase AC operating power; per-phase split is S/3 unless the
+  /// per-phase overrides are positive.
+  double s_ac_p_mw{0.0};
+  double s_ac_q_mvar{0.0};
+
+  HarmonicSpectrum ac_spectrum;  ///< empty -> default six-pulse spectrum
+};
+
+struct ThreePhaseHarmonicInputs {
+  std::vector<ThreePhaseHarmonicSource> sources;
+  std::vector<ThreePhaseHarmonicNIC>    nics;
+};
+
+struct ThreePhaseHarmonicBusResult {
+  int bus{0};
+  PhaseMask phase_mask{PhaseMask::abc()};
+
+  /// Fundamental phase voltage magnitudes [pu] (THD references).
+  double v_fund_pu_a{1.0};
+  double v_fund_pu_b{1.0};
+  double v_fund_pu_c{1.0};
+
+  /// Complex harmonic voltage phasor per order [pu], per phase (incl. order 1).
+  std::map<int, Complex> v_by_order_a;
+  std::map<int, Complex> v_by_order_b;
+  std::map<int, Complex> v_by_order_c;
+
+  /// Per-phase voltage THD [%].
+  double thd_a_pct{0.0};
+  double thd_b_pct{0.0};
+  double thd_c_pct{0.0};
+};
+
+struct HPF3phResult {
+  bool        ok{false};
+  std::string message;
+
+  std::vector<int> ac_orders;  ///< orders actually solved (excludes fundamental)
+  std::vector<ThreePhaseHarmonicBusResult> bus_results;
+
+  bool base_pf_converged{false};
+  std::map<int, bool> ac_order_solved;
+
+  double max_thd_pct{0.0};
+  int    max_thd_bus{-1};
+
+  std::string summary() const;
+};
+
+/// Solve the three-phase (abc-domain) harmonic power flow.
+HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
+                                           const ThreePhaseHarmonicInputs& inputs,
+                                           const HPFOptions& opt = {});
+
+/// Convenience overload: converters auto-modelled, no explicit sources.
+HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
+                                           const HPFOptions& opt = {});
+
 }  // namespace hacdcpf::harmonics
