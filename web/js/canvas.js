@@ -926,6 +926,38 @@ const Canvas = (() => {
   }
 
   // ========== Build JSON System ==========
+  // Assign 1-based bus indices to every bus component of the given type.
+  // An imported (or explicitly edited) bus keeps its own params.index when it
+  // is a positive integer and not already taken; the remaining buses receive
+  // the lowest free contiguous indices.  Drawn buses (no params.index) thus
+  // behave exactly as before (1..N), while imported NON-contiguous ids
+  // (e.g. 1-5, 10-14, 20-21) are preserved end-to-end so the canvas label, the
+  // backend bus id, the analysis results and the fault-bus input all agree.
+  // buildSystemJson() and getCompBusMap() MUST use this same mapping.
+  function assignBusIndices(busType) {
+    const map = {};
+    const used = new Set();
+    const pending = [];
+    state.components.forEach(comp => {
+      if (comp.type !== busType) return;
+      const raw = comp.params ? comp.params.index : undefined;
+      const idx = parseInt(raw, 10);
+      if (Number.isInteger(idx) && idx > 0 && !used.has(idx)) {
+        used.add(idx);
+        map[comp.id] = idx;
+      } else {
+        pending.push(comp.id);
+      }
+    });
+    let next = 1;
+    pending.forEach(id => {
+      while (used.has(next)) next++;
+      used.add(next);
+      map[id] = next;
+    });
+    return map;
+  }
+
   function buildSystemJson() {
     const sys = {
       name: 'Canvas System',
@@ -945,15 +977,17 @@ const Canvas = (() => {
       microgrids: []
     };
 
-    // Assign bus indices (1-based, matching MATPOWER/C++ convention)
-    let acBusIdx = 1, dcBusIdx = 1;
+    // Assign bus indices (1-based, matching MATPOWER/C++ convention).
+    // Imported buses keep their original (possibly non-contiguous) index.
+    const acBusIndexMap = assignBusIndices('ac_bus');
+    const dcBusIndexMap = assignBusIndices('dc_bus');
     const compBusMap = {}; // compId -> bus index (1-based)
 
     // First pass: create buses
     state.components.forEach(comp => {
       if (comp.type === 'ac_bus') {
         const p = comp.params;
-        const idx = acBusIdx++;
+        const idx = acBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
         sys.ac.buses.push({
           index: idx,
@@ -975,7 +1009,7 @@ const Canvas = (() => {
         });
       } else if (comp.type === 'dc_bus') {
         const p = comp.params;
-        const idx = dcBusIdx++;
+        const idx = dcBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
         sys.dc.buses.push({
           index: idx,
@@ -1773,6 +1807,7 @@ const Canvas = (() => {
           100 + Math.floor(i / 6) * 220,
           {
             ...COMP.defaults.ac_bus,
+            index: bus.index,
             name: `Bus ${bus.index}`,
             bus_type: bus.bus_type || 'PQ',
             base_kv: bus.base_kv || 110,
@@ -1803,6 +1838,7 @@ const Canvas = (() => {
           100 + ((jsonSys.ac?.buses?.length || 0) > 0 ? Math.ceil((jsonSys.ac.buses.length) / 6) : 0) * 220 + 200 + Math.floor(i / 4) * 180,
           {
             ...COMP.defaults.dc_bus,
+            index: bus.index,
             name: `DC Bus ${bus.index}`,
             bus_type: bus.bus_type || 'DC_P',
             base_kv: bus.base_kv || 320,
@@ -3687,10 +3723,11 @@ const Canvas = (() => {
       flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
       mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {} };
 
-    let acBusIdx = 1, dcBusIdx = 1;
+    const acBusIndexMap = assignBusIndices('ac_bus');
+    const dcBusIndexMap = assignBusIndices('dc_bus');
     state.components.forEach(comp => {
-      if (comp.type === 'ac_bus') maps.ac[acBusIdx++] = comp.id;
-      else if (comp.type === 'dc_bus') maps.dc[dcBusIdx++] = comp.id;
+      if (comp.type === 'ac_bus') maps.ac[acBusIndexMap[comp.id]] = comp.id;
+      else if (comp.type === 'dc_bus') maps.dc[dcBusIndexMap[comp.id]] = comp.id;
     });
 
     // Must match buildSystemJson iteration order for index consistency

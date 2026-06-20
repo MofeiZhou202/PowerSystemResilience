@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <future>
+#include <unordered_map>
 #include <vector>
 
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -27,13 +28,15 @@ double bus_generation_mw(const HybridPowerSystem& sys, int bus) {
   return pg;
 }
 
-int auto_select_swing_bus(const HybridPowerSystem& sys, const IslandInfo& island) {
+int auto_select_swing_bus(const HybridPowerSystem& sys, const IslandInfo& island,
+                          const std::unordered_map<int, int>& ac_id_to_pos) {
   if (island.ac_buses.empty()) {
     return 0;
   }
   for (int bus : island.ac_buses) {
-    if (bus >= 1 && bus <= static_cast<int>(sys.ac.buses.size()) &&
-        sys.ac.buses[static_cast<size_t>(bus - 1)].bus_type == BusType::SLACK) {
+    const auto it = ac_id_to_pos.find(bus);
+    if (it != ac_id_to_pos.end() &&
+        sys.ac.buses[static_cast<size_t>(it->second)].bus_type == BusType::SLACK) {
       return bus;
     }
   }
@@ -52,8 +55,9 @@ int auto_select_swing_bus(const HybridPowerSystem& sys, const IslandInfo& island
   }
 
   for (int bus : island.ac_buses) {
-    if (bus >= 1 && bus <= static_cast<int>(sys.ac.buses.size()) &&
-        sys.ac.buses[static_cast<size_t>(bus - 1)].bus_type == BusType::PV) {
+    const auto it = ac_id_to_pos.find(bus);
+    if (it != ac_id_to_pos.end() &&
+        sys.ac.buses[static_cast<size_t>(it->second)].bus_type == BusType::PV) {
       return bus;
     }
   }
@@ -63,6 +67,8 @@ int auto_select_swing_bus(const HybridPowerSystem& sys, const IslandInfo& island
 
 void map_island_result_back(const IslandInfo& island,
                             const PowerFlowResult& local,
+                            const std::unordered_map<int, int>& ac_id_to_pos,
+                            const std::unordered_map<int, int>& dc_id_to_pos,
                             AdaptiveSolveResult& global) {
   std::vector<int> ac_sorted = island.ac_buses;
   std::vector<int> dc_sorted = island.dc_buses;
@@ -70,30 +76,41 @@ void map_island_result_back(const IslandInfo& island,
   std::sort(dc_sorted.begin(), dc_sorted.end());
 
   for (int i = 0; i < static_cast<int>(ac_sorted.size()) && i < static_cast<int>(local.vm.size()); ++i) {
-    const int bus = ac_sorted[static_cast<size_t>(i)] - 1;
+    const auto it = ac_id_to_pos.find(ac_sorted[static_cast<size_t>(i)]);
+    if (it == ac_id_to_pos.end()) continue;
+    const int bus = it->second;
     if (bus >= 0 && bus < static_cast<int>(global.vm.size())) {
       global.vm[static_cast<size_t>(bus)] = local.vm[static_cast<size_t>(i)];
       global.va[static_cast<size_t>(bus)] = local.va[static_cast<size_t>(i)];
     }
   }
   for (int i = 0; i < static_cast<int>(dc_sorted.size()) && i < static_cast<int>(local.vdc.size()); ++i) {
-    const int bus = dc_sorted[static_cast<size_t>(i)] - 1;
+    const auto it = dc_id_to_pos.find(dc_sorted[static_cast<size_t>(i)]);
+    if (it == dc_id_to_pos.end()) continue;
+    const int bus = it->second;
     if (bus >= 0 && bus < static_cast<int>(global.vdc.size())) {
       global.vdc[static_cast<size_t>(bus)] = local.vdc[static_cast<size_t>(i)];
     }
   }
 }
 
-void set_dead_island_zero(const IslandInfo& island, AdaptiveSolveResult& result) {
+void set_dead_island_zero(const IslandInfo& island,
+                          const std::unordered_map<int, int>& ac_id_to_pos,
+                          const std::unordered_map<int, int>& dc_id_to_pos,
+                          AdaptiveSolveResult& result) {
   for (int bus : island.ac_buses) {
-    const int idx = bus - 1;
+    const auto it = ac_id_to_pos.find(bus);
+    if (it == ac_id_to_pos.end()) continue;
+    const int idx = it->second;
     if (idx >= 0 && idx < static_cast<int>(result.vm.size())) {
       result.vm[static_cast<size_t>(idx)] = 0.0;
       result.va[static_cast<size_t>(idx)] = 0.0;
     }
   }
   for (int bus : island.dc_buses) {
-    const int idx = bus - 1;
+    const auto it = dc_id_to_pos.find(bus);
+    if (it == dc_id_to_pos.end()) continue;
+    const int idx = it->second;
     if (idx >= 0 && idx < static_cast<int>(result.vdc.size())) {
       result.vdc[static_cast<size_t>(idx)] = 0.0;
     }
@@ -157,6 +174,20 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
 
   // --- Parallel multi-island solving ---
   // Identify solvable islands and handle dead ones immediately.
+  // Bus IDs may be non-contiguous, so map each real index to its array
+  // position once and reuse it when writing per-island results back into the
+  // global (position-indexed) voltage vectors.
+  std::unordered_map<int, int> ac_id_to_pos;
+  std::unordered_map<int, int> dc_id_to_pos;
+  ac_id_to_pos.reserve(static_cast<size_t>(nac));
+  dc_id_to_pos.reserve(static_cast<size_t>(ndc));
+  for (int i = 0; i < nac; ++i) {
+    ac_id_to_pos[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+  }
+  for (int i = 0; i < ndc; ++i) {
+    dc_id_to_pos[sys.dc.buses[static_cast<size_t>(i)].index] = i;
+  }
+
   struct IslandTask {
     size_t island_idx;
     int slack_override;
@@ -164,12 +195,12 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
   std::vector<IslandTask> tasks;
   for (size_t ii = 0; ii < out.islands.size(); ++ii) {
     if (!out.islands[ii].has_generators) {
-      set_dead_island_zero(out.islands[ii], out);
+      set_dead_island_zero(out.islands[ii], ac_id_to_pos, dc_id_to_pos, out);
       continue;
     }
     int slack_override = 0;
     if (opt.enable_auto_swing_selection && !out.islands[ii].has_ac_slack) {
-      slack_override = auto_select_swing_bus(sys, out.islands[ii]);
+      slack_override = auto_select_swing_bus(sys, out.islands[ii], ac_id_to_pos);
     }
     tasks.push_back({ii, slack_override});
   }
@@ -205,7 +236,7 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       if (!r.converged) out.converged = false;
       out.iterations += r.iterations;
       out.residual = std::max(out.residual, r.residual);
-      map_island_result_back(out.islands[task.island_idx], r, out);
+      map_island_result_back(out.islands[task.island_idx], r, ac_id_to_pos, dc_id_to_pos, out);
     }
   } else {
     // Multiple islands: solve concurrently via thread pool.
@@ -227,7 +258,7 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
       if (!r.converged) out.converged = false;
       out.iterations += r.iterations;
       out.residual = std::max(out.residual, r.residual);
-      map_island_result_back(out.islands[tasks[ti].island_idx], r, out);
+      map_island_result_back(out.islands[tasks[ti].island_idx], r, ac_id_to_pos, dc_id_to_pos, out);
     }
   }
 

@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <complex>
+#include <stdexcept>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
 #include "hacdcpf/io/case_builders.hpp"
@@ -217,6 +218,68 @@ TEST_CASE("SC: compute_fault_at_bus matches full solve", "[short_circuit][api]")
   CHECK(std::abs(single.i_fault_pu  - full.bus_results[2].i_fault_pu)  < 1e-12);
   CHECK(std::abs(single.sk_mva      - full.bus_results[2].sk_mva)      < 1e-6);
   CHECK(std::abs(single.ikpp_ka     - full.bus_results[2].ikpp_ka)     < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// Test 4b — non-contiguous bus IDs resolve to the correct physical bus
+//           (regression: canonical projection renumbers buses to 1..N, so the
+//           original external id must be translated through BusMergeMap rather
+//           than looked up verbatim against the renumbered index map)
+// ---------------------------------------------------------------------------
+TEST_CASE("SC: non-contiguous bus IDs resolve to the correct bus",
+          "[short_circuit][api][noncontiguous]") {
+  // Radial feeder with gaps in the numbering: 1 (slack) — 5 — 10.
+  const Cx Z15(0.20, 0.40);
+  const Cx Z5_10(0.30, 0.60);
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(5, BusType::PQ), make_bus(10, BusType::PQ)},
+      {make_branch(1, 1, 5,  Z15.real(),   Z15.imag()),
+       make_branch(2, 5, 10, Z5_10.real(), Z5_10.imag())},
+      100.0, 0.001);
+
+  SCOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.c_factor   = 1.0;
+
+  // 1) All-buses solve reports the ORIGINAL external ids, in order.
+  auto full = compute_short_circuit(sys, opt);
+  REQUIRE(full.bus_results.size() == 3);
+  CHECK(full.bus_results[0].bus_id == 1);
+  CHECK(full.bus_results[1].bus_id == 5);
+  CHECK(full.bus_results[2].bus_id == 10);
+
+  // Thévenin impedance grows with distance from the slack ⇒ Sk decreases.
+  CHECK(std::abs(full.bus_results[0].z_thevenin) < std::abs(full.bus_results[1].z_thevenin));
+  CHECK(std::abs(full.bus_results[1].z_thevenin) < std::abs(full.bus_results[2].z_thevenin));
+  CHECK(full.bus_results[0].sk_mva > full.bus_results[1].sk_mva);
+  CHECK(full.bus_results[1].sk_mva > full.bus_results[2].sk_mva);
+
+  // 2) Single-bus API faults the CORRECT physical bus for each external id.
+  for (int ext : {1, 5, 10}) {
+    const BusFaultResult* expected = &full.bus_results[0];
+    for (const auto& br : full.bus_results)
+      if (br.bus_id == ext) expected = &br;
+    auto single = compute_fault_at_bus(sys, ext, opt);
+    CHECK(single.bus_id == ext);
+    CHECK(std::abs(single.z_thevenin - expected->z_thevenin) < 1e-12);
+    CHECK(std::abs(single.sk_mva     - expected->sk_mva)     < 1e-6);
+  }
+
+  // 3) Detailed API accepts the original ids and reports them back.
+  SCDetailedOptions dopt;
+  dopt.fault_type = FaultType::ThreePhase;
+  auto det = run_short_circuit_detailed(sys, 10, dopt);
+  CHECK(det.solved);
+  CHECK(det.fault_bus_id == 10);
+  const SCDetailedBusResult* fault_row = nullptr;
+  for (const auto& br : det.bus_results)
+    if (br.bus_id == 10) fault_row = &br;
+  REQUIRE(fault_row != nullptr);
+  CHECK(fault_row->ikss_ka > 0.0);
+
+  // 4) A non-existent external id is rejected, not silently computed.
+  CHECK_THROWS_AS(run_short_circuit_detailed(sys, 999, dopt), std::invalid_argument);
+  CHECK_THROWS_AS(compute_fault_at_bus(sys, 999, opt), std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------

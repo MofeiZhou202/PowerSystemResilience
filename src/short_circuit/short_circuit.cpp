@@ -701,12 +701,14 @@ SCResult compute_short_circuit(const HybridPowerSystem& sys,
 
   result.bus_results.reserve(n);
   for (int k = 0; k < n; ++k) {
-    // When bus merging occurred, ac.buses[k].index is a post-merge sequential
-    // index (1..n_merged).  Use BusMergeMap to recover the original external
-    // bus index (representative of the merged group) so that result bus_ids
-    // align with the ids seen by callers who built the pre-projection system.
+    // Canonical projection reindexes buses to a 1..n_merged sequence (and may
+    // merge zero-impedance buses).  Whenever a BusMergeMap is present it records
+    // the original external bus index for each internal position, so use it to
+    // report ids that align with the pre-projection system the caller built.
+    // NOTE: gate on map presence, not has_merges() — pure reindexing (no
+    // merges) still renumbers non-contiguous ids and must be translated back.
     int bus_id = ac.buses[k].index;
-    if (projected.bus_merge_map && projected.bus_merge_map->has_merges()) {
+    if (projected.bus_merge_map) {
       const auto& mmap = *projected.bus_merge_map;
       if (k < static_cast<int>(mmap.int_to_ext.size())) {
         bus_id = mmap.int_to_ext[static_cast<size_t>(k)];
@@ -730,7 +732,19 @@ BusFaultResult compute_fault_at_bus(const HybridPowerSystem& sys,
   const int n = static_cast<int>(ac.buses.size());
 
   const auto id_map = build_id_map(ac.buses);
-  auto it = id_map.find(bus_id);
+
+  // Canonical projection reindexes buses to 1..N; translate the caller's
+  // original external bus id to the reindexed internal id via the merge map.
+  // Gate on map presence (pure reindexing has no "merges" but still needs
+  // translation), mirroring run_short_circuit_detailed.
+  int resolved_bus_id = bus_id;
+  if (projected.bus_merge_map) {
+    const auto& mmap = *projected.bus_merge_map;
+    auto it_m = mmap.ext_to_int.find(bus_id);
+    if (it_m != mmap.ext_to_int.end())
+      resolved_bus_id = static_cast<int>(it_m->second) + 1;  // 0-based pos → 1-based
+  }
+  auto it = id_map.find(resolved_bus_id);
   if (it == id_map.end())
     throw std::invalid_argument("compute_fault_at_bus: bus_id not found");
   int k = it->second;
@@ -814,9 +828,11 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   const double base_mva = ac.base_mva > 0.0 ? ac.base_mva : 100.0;
   const auto id_map = build_id_map(ac.buses);
 
-  // Helper: map post-merge internal 1-based sequential bus ID → original external bus ID
+  // Helper: map post-merge internal 1-based sequential bus ID → original
+  // external bus ID.  Gate on map presence (canonical projection reindexes
+  // even when nothing is merged), not has_merges().
   const auto ext_bus_id = [&](int internal_id) -> int {
-    if (projected.bus_merge_map && projected.bus_merge_map->has_merges()) {
+    if (projected.bus_merge_map) {
       const auto& mmap = *projected.bus_merge_map;
       auto pos = static_cast<size_t>(internal_id - 1);
       if (pos < mmap.int_to_ext.size()) return mmap.int_to_ext[pos];
@@ -824,9 +840,12 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     return internal_id;
   };
 
-  // Resolve fault_bus_id from original external ID → post-merge internal sequential ID
+  // Resolve fault_bus_id from original external ID → post-merge internal
+  // sequential ID.  Gate on map presence so non-contiguous ids (e.g. 1-5,
+  // 10-14, 20-21) are translated to the reindexed 1..N space rather than
+  // being looked up verbatim (which silently faulted the wrong bus or threw).
   int resolved_fault_bus_id = fault_bus_id;
-  if (projected.bus_merge_map && projected.bus_merge_map->has_merges()) {
+  if (projected.bus_merge_map) {
     const auto& mmap = *projected.bus_merge_map;
     auto it_m = mmap.ext_to_int.find(fault_bus_id);
     if (it_m != mmap.ext_to_int.end())

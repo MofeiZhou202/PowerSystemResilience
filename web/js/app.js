@@ -111,6 +111,31 @@ const App = (() => {
     }
   }
 
+  // Like apiPost but surfaces the backend error message instead of swallowing
+  // it.  Returns { ok, data, error } so callers can show a specific reason
+  // (e.g. an unknown fault bus id rejected by the server).
+  async function apiPostResult(path, body = {}) {
+    const url = `${API_BASE}${path}`;
+    log(`POST ${path}`, 'info');
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const error = (data && data.error) || res.statusText;
+        log(`Error: ${error}`, 'error');
+        return { ok: false, data: null, error };
+      }
+      return { ok: true, data, error: null };
+    } catch (e) {
+      log(`Network error: ${e.message}`, 'error');
+      return { ok: false, data: null, error: e.message };
+    }
+  }
+
   async function apiGet(path) {
     const url = `${API_BASE}${path}`;
     try {
@@ -464,27 +489,59 @@ const App = (() => {
       return;
     }
 
-    const faultBus = parseInt(document.getElementById('scFaultBus').value);
+    const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
     const faultType = document.getElementById('scFaultType').value;
     const cFactor = parseFloat(document.getElementById('scCFactor').value);
 
-    // Use the detail endpoint if a specific bus is provided, otherwise batch
-    const data = await apiPost('/api/session/sc', {
-      options: {
-        fault_type: faultType,
-        c_factor: cFactor,
-        compute_all_buses: true,
+    // Blank fault bus → short circuit at every bus (overview mode).
+    if (faultBusRaw === '') {
+      const data = await apiPost('/api/session/sc', {
+        options: {
+          fault_type: faultType,
+          c_factor: cFactor,
+          compute_all_buses: true,
+        }
+      });
+      if (data) {
+        log(`短路计算完成: ${data.bus_results?.length || 0} 个母线结果`, 'success');
+        setStatus('短路完成 (全部母线)');
+        showShortCircuitResults(data);
+        switchTab('results');
+      } else {
+        setStatus('计算失败', 'error');
       }
+      return;
+    }
+
+    // A specific fault location was set → run a validated single-bus fault.
+    // The server resolves the id against the real bus indices and returns
+    // HTTP 400 when the id does not exist, so a non-existent bus can no
+    // longer "still calculate".
+    const faultBus = parseInt(faultBusRaw, 10);
+    if (!Number.isInteger(faultBus)) {
+      setStatus(`故障母线 ID “${faultBusRaw}” 无效，请输入整数母线编号。`, 'error');
+      return;
+    }
+
+    const resp = await apiPostResult('/api/session/sc_detailed', {
+      fault_bus_ids: [faultBus],
+      fault_type: faultType,
+      c_factor: cFactor,
     });
 
-    if (data) {
-      log(`短路计算完成: ${data.bus_results?.length || 0} 个母线结果`, 'success');
-      setStatus('短路完成');
-      showShortCircuitResults(data);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
+    if (!resp.ok) {
+      const raw = resp.error || '';
+      const friendly = /not found/i.test(raw)
+        ? `故障母线 ID ${faultBus} 不存在，请输入系统中真实存在的母线编号（与结果表 / 画布中显示的 Bus 编号一致）。`
+        : (raw || '计算失败');
+      setStatus(friendly, 'error');
+      return;
     }
+
+    log(`短路计算完成: 故障母线 ${faultBus}`, 'success');
+    setStatus(`短路完成 (故障母线 ${faultBus})`);
+    showShortCircuitDetailedResults(resp.data, faultBus);
+    switchTab('results');
   }
 
   // ========== Topology Reconfiguration ==========
@@ -1287,6 +1344,84 @@ const App = (() => {
       html += '</tbody></table>';
       scDiv.innerHTML = html;
     }
+  }
+
+  // Render a single-bus (validated) fault from /api/session/sc_detailed.
+  // data = { fault_type, results:[ { fault_bus_id, solved, bus_results:[...] } ] }
+  function showShortCircuitDetailedResults(data, faultBus) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('shortCircuit');
+
+    const fmt = (x, d = 3) =>
+      (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    const results = data.results || [];
+    const r = results.find(x => x.fault_bus_id === faultBus) || results[0];
+    const summary = document.getElementById('resultsSummary');
+    const scDiv = document.getElementById('scResults');
+
+    if (!r) {
+      summary.innerHTML =
+        '<div class="result-item"><span class="result-label">短路</span>' +
+        '<span class="result-value result-failed">无结果</span></div>';
+      scDiv.innerHTML = '';
+      return;
+    }
+
+    const busRows = r.bus_results || [];
+    const fb = busRows.find(b => b.bus_id === r.fault_bus_id) || {};
+
+    summary.innerHTML = `
+      <div class="result-item"><span class="result-label">故障类型</span>
+        <span class="result-value">${data.fault_type || 'ThreePhase'}</span></div>
+      <div class="result-item"><span class="result-label">故障母线</span>
+        <span class="result-value">Bus ${r.fault_bus_id}</span></div>
+      <div class="result-item"><span class="result-label">Ik" 初始 (kA)</span>
+        <span class="result-value">${fmt(fb.ikss_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ip 峰值 (kA)</span>
+        <span class="result-value">${fmt(fb.ip_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ib 开断 (kA)</span>
+        <span class="result-value">${fmt(fb.ib_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ik 稳态 (kA)</span>
+        <span class="result-value">${fmt(fb.ik_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">Ith 热效 (kA)</span>
+        <span class="result-value">${fmt(fb.ith_ka, 3)}</span></div>
+    `;
+
+    const busMap = Canvas.getCompBusMap();
+    const contribs = [
+      ['发电机', fb.ikss_gen_contrib_ka],
+      ['电动机', fb.ikss_motor_contrib_ka],
+      ['外部电网', fb.ikss_extgrid_contrib_ka],
+      ['换流器', fb.ikss_converter_contrib_ka],
+      ['静止发电机', fb.ikss_sgen_contrib_ka],
+      ['负荷', fb.ikss_load_contrib_ka],
+    ].filter(([, v]) => v !== undefined && v !== null);
+
+    let html = '';
+    if (contribs.length) {
+      html += '<h4 style="margin:8px 0 4px">故障源贡献 (kA)</h4>';
+      html += '<table><thead><tr><th>来源</th><th>Ik" (kA)</th></tr></thead><tbody>';
+      contribs.forEach(([lbl, v]) => {
+        html += `<tr><td>${lbl}</td><td>${fmt(v, 4)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    html += '<h4 style="margin:12px 0 4px">故障期间各母线剩余电压 (p.u.)</h4>';
+    html += '<table><thead><tr><th>Bus</th><th>V<sub>remain</sub> (p.u.)</th></tr></thead><tbody>';
+    busRows.forEach(b => {
+      const compId = busMap.ac[b.bus_id];
+      const clickable = compId !== undefined
+        ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+      const isFault = b.bus_id === r.fault_bus_id;
+      const style = isFault ? ' style="font-weight:700;background:var(--primary-soft)"' : '';
+      html += `<tr${clickable}${style}><td>${b.bus_id}${isFault ? ' (故障点)' : ''}</td>` +
+              `<td>${fmt(b.v_remaining_pu, 4)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    scDiv.innerHTML = html;
   }
 
   function showTopologyResults(data) {

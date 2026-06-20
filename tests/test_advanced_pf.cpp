@@ -19,6 +19,7 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/power_flow/distributed_slack_solver.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
@@ -206,6 +207,59 @@ TEST_CASE("Island detection: branches 4-5 and 5-8 out → 3 islands",
         if (isl.has_generators) ++live;
     }
     REQUIRE(live == 3);
+}
+
+TEST_CASE("Island detection: non-contiguous bus IDs (case_2_1_backup) → 3 islands",
+          "[advanced_pf][island][detection][noncontiguous]") {
+    // Regression for the "lots of spurious islands" bug: a system whose bus
+    // indices are NOT a contiguous 1..N sequence (here 1-5, 10-14, 20-21)
+    // must still be partitioned by electrical connectivity, not by the raw
+    // ``index - 1`` array position.  The three feeders (tie lines out of
+    // service) each carry their own SLACK substation, so the detector must
+    // report exactly three islands — not one-per-bus.
+    const std::string path =
+        std::string(HACDCPF_PROJECT_ROOT) + "/tests/data/case_2_1_backup.json";
+    const HybridPowerSystem sys = hacdcpf::io::load_json(path);
+    REQUIRE(sys.ac.buses.size() == 12);
+
+    const auto islands = pf::detect_islands(sys);
+    REQUIRE(islands.size() == 3);
+
+    // Every island is energised by its own substation slack.
+    int live = 0;
+    for (const auto& isl : islands) {
+        REQUIRE(isl.has_ac_slack);
+        REQUIRE(isl.has_generators);
+        if (isl.has_generators) ++live;
+    }
+    REQUIRE(live == 3);
+
+    // Membership must follow real bus IDs, gaps included.
+    auto island_with = [&](int bus_id) {
+        return std::find_if(islands.begin(), islands.end(),
+            [&](const IslandInfo& isl) {
+                return std::find(isl.ac_buses.begin(), isl.ac_buses.end(), bus_id)
+                       != isl.ac_buses.end();
+            });
+    };
+    const auto feeder1 = island_with(1);
+    const auto feeder2 = island_with(10);
+    const auto feeder3 = island_with(20);
+    REQUIRE(feeder1 != islands.end());
+    REQUIRE(feeder2 != islands.end());
+    REQUIRE(feeder3 != islands.end());
+    REQUIRE(feeder1->ac_buses == std::vector<int>{1, 2, 3, 4, 5});
+    REQUIRE(feeder2->ac_buses == std::vector<int>{10, 11, 12, 13, 14});
+    REQUIRE(feeder3->ac_buses == std::vector<int>{20, 21});
+
+    // End-to-end: the adaptive solver must energise every bus (no spurious
+    // dead/zero-voltage buses from mis-detected singleton islands).
+    const auto adaptive = hacdcpf::solve_power_flow_adaptive(sys, hacdcpf::PowerFlowOptions{});
+    REQUIRE(adaptive.converged);
+    REQUIRE(adaptive.vm.size() == 12);
+    for (double v : adaptive.vm) {
+        REQUIRE(v > 0.8);
+    }
 }
 
 TEST_CASE("Island detection: case14 forms single connected island",
