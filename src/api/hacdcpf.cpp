@@ -814,7 +814,7 @@ SolverCapabilities get_solver_capabilities() noexcept {
 #ifdef HACDCPF_HAVE_ACCELERATE
   caps.has_accelerate = true;
 #endif
-#ifndef HACDCPF_NO_EXCEL
+#ifdef HACDCPF_ENABLE_ETAP
   caps.has_excel = true;
 #endif
 #ifndef HACDCPF_NO_OPENDSS

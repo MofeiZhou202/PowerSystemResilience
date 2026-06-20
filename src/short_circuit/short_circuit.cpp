@@ -393,6 +393,18 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
       Cx y_ext = Cx(1.0, 0.0) / z_ext;
       Ybus(ei, ei) += y_ext;
       Ybus2(ei, ei) += y_ext;
+    } else if (eg.s_sc_max_mva > 1e-6) {
+      // IEC 60909 grid-source impedance from the (maximum) 3-phase short-circuit
+      // MVA: Z_Q = c · S_base / S_kQ" (pu), split into R/X using the rx_max
+      // ratio.  Lets an imported ETAP utility specified only by fault MVA + R/X
+      // (the common case) still contribute a finite source impedance.
+      const double z_ext_pu = c * base_mva / eg.s_sc_max_mva;
+      const double rx = (eg.rx_max > 1e-9) ? eg.rx_max : 0.1;  // R/X ratio
+      const double x_ext = z_ext_pu / std::sqrt(1.0 + rx * rx);
+      const double r_ext = rx * x_ext;
+      Cx y_ext = Cx(1.0, 0.0) / Cx(r_ext, x_ext);
+      Ybus(ei, ei) += y_ext;
+      Ybus2(ei, ei) += y_ext;
     }
 
     // Zero-sequence external grid

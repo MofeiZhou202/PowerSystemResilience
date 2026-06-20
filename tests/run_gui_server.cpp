@@ -2,11 +2,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -24,6 +26,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/io/etap_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
@@ -569,7 +572,11 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
     <input type="file" id="jsonFileInput" accept=".json" title="Upload JSON system file"/>
     <button class="btn btn-secondary btn-sm" id="uploadJsonBtn">Upload JSON</button>
     <span class="sep"></span>
+    <input type="file" id="etapXmlInput" accept=".xml" title="Import a native ETAP project XML (Feeder.xml)"/>
+    <button class="btn btn-secondary btn-sm" id="loadEtapXmlBtn">Import ETAP XML</button>
+    <span class="sep"></span>
     <button class="btn btn-secondary btn-sm" id="exportJsonBtn">Export JSON</button>
+    <button class="btn btn-secondary btn-sm" id="exportEtapBtn">Export ETAP</button>
     <button class="btn btn-secondary btn-sm" id="newCaseBtn">New Empty Case</button>
   </div>
 
@@ -1395,12 +1402,28 @@ document.getElementById('uploadJsonBtn').onclick=()=>{
   reader.onload=()=>loadSystem('/api/session/load_json_string',{json_string:reader.result});
   reader.readAsText(fi.files[0]);
 };
+document.getElementById('loadEtapXmlBtn').onclick=()=>{
+  const fi=document.getElementById('etapXmlInput');
+  if(!fi.files.length){setStatus('Select an ETAP project .xml file first.',true);return;}
+  const reader=new FileReader();
+  reader.onload=()=>loadSystem('/api/session/load_etap_xml',{xml_string:reader.result});
+  reader.readAsText(fi.files[0]);
+};
 document.getElementById('exportJsonBtn').onclick=async()=>{
   try{const d=await api('/api/session/export_json',{},'POST');
   const blob=new Blob([d.json_string],{type:'application/json'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download=(SYS?SYS.name.replace(/[^a-zA-Z0-9_-]/g,'_'):'system')+'.json';a.click();
   setStatus('JSON exported.');}catch(e){setStatus(e.message,true);}
+};
+document.getElementById('exportEtapBtn').onclick=async()=>{
+  try{setStatus('Exporting ETAP workbook...');
+  const resp=await fetch('/api/session/export_etap',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  if(!resp.ok){let m='HTTP '+resp.status;try{const j=await resp.json();if(j&&j.error)m=j.error;}catch(e){}throw new Error(m);}
+  const blob=await resp.blob();let fn='system.xlsx';const cd=resp.headers.get('Content-Disposition');
+  if(cd){const mm=/filename="?([^"]+)"?/.exec(cd);if(mm&&mm[1])fn=mm[1];}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=fn;a.click();URL.revokeObjectURL(a.href);
+  setStatus('ETAP workbook exported: '+fn);}catch(e){setStatus(e.message,true);}
 };
 document.getElementById('newCaseBtn').onclick=()=>loadSystem('/api/session/new_empty',{});
 
@@ -3883,8 +3906,12 @@ int main(int argc, char** argv) {
 
   httplib::Server svr;
   svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
-  svr.set_read_timeout(600, 0);   // 10 min to read request (long-running analysis)
-  svr.set_write_timeout(600, 0);  // 10 min to write response
+  // Request *reading* timeout — bounds how long a worker thread waits for the
+  // request bytes (NOT the handler/computation, which runs unbounded after the
+  // request is read).  Kept modest so a slow or body-less POST (e.g. a POST
+  // with no Content-Length) cannot tie up a pool thread for many minutes.
+  svr.set_read_timeout(120, 0);   // 2 min to read the request
+  svr.set_write_timeout(600, 0);  // 10 min to write response (large exports)
   svr.set_keep_alive_max_count(100);
   svr.set_idle_interval(0, 500000); // 0.5 sec idle check
 
@@ -3911,15 +3938,21 @@ int main(int argc, char** argv) {
       auto c1 = fs::current_path() / p;
       if (fs::exists(c1)) return c1.string();
     }
-    // Search common locations relative to cwd and executable
-    const std::vector<fs::path> candidates = {
+    // Search common locations relative to cwd and the compile-time source root
+    // so the server works regardless of cwd (repo root, build/, build/tests/).
+    std::vector<fs::path> candidates = {
         fs::current_path() / ".." / "data",
         fs::current_path() / "data",
+        fs::current_path() / ".." / ".." / "data",
         fs::current_path() / ".." / "matpower" / "data",
         fs::current_path() / "matpower" / "data",
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "data");
+#endif
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return p.string();
   }();
@@ -3935,14 +3968,18 @@ int main(int argc, char** argv) {
       auto c1 = fs::current_path() / p;
       if (fs::exists(c1)) return fs::canonical(c1).string();
     }
-    const std::vector<fs::path> candidates = {
+    std::vector<fs::path> candidates = {
         fs::current_path() / "external_data" / "matpower",
         fs::current_path() / ".." / "external_data" / "matpower",
         fs::current_path() / ".." / ".." / "external_data" / "matpower",
-        fs::path(data_dir),  // legacy fallback: matpower files in data dir
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower");
+#endif
+    candidates.push_back(fs::path(data_dir));  // legacy fallback: matpower files in data dir
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return p.string();
   }();
@@ -4112,6 +4149,125 @@ int main(int argc, char** argv) {
       out["name"] = g_session.current_name;
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: export the current system as an ETAP-schema .xlsx workbook ----
+  // Returns the raw binary workbook (one sheet per ETAP element class) so the
+  // browser can download it directly.  save_etap() throws if ETAP support is not
+  // compiled in (HACDCPF_ENABLE_ETAP off), which surfaces here as a 400 error.
+  svr.Post("/api/session/export_etap",
+           [](const httplib::Request&, httplib::Response& res) {
+    std::string tmp;
+    try {
+      std::string name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        name = g_session.current_name;
+        // Write to a unique temp workbook, then read the bytes back out.
+        static std::atomic<int> export_counter{0};
+        tmp = (std::filesystem::temp_directory_path() /
+               ("hacdcpf_gui_export_" +
+                std::to_string(export_counter.fetch_add(1)) + ".xlsx"))
+                  .string();
+        hacdcpf::io::EtapIoReport rep;
+        hacdcpf::io::save_etap(*g_session.current_system, tmp, rep);
+      }
+      std::ifstream ifs(tmp, std::ios::binary);
+      if (!ifs) throw std::runtime_error("Failed to read generated ETAP workbook");
+      std::string bytes((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+      ifs.close();
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      // Sanitize the system name into a safe download filename.
+      std::string safe;
+      for (char ch : name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_header("Content-Disposition",
+                     "attachment; filename=\"" + safe + ".xlsx\"");
+      res.set_content(
+          bytes,
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    } catch (const std::exception& e) {
+      if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import a native ETAP project XML (e.g. Feeder.xml) ----
+  svr.Post("/api/session/load_etap_xml",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string xml = j.value("xml_string", "");
+      if (xml.empty()) throw std::runtime_error("Empty ETAP XML string");
+      const std::string tmp =
+          (std::filesystem::temp_directory_path() / "hacdcpf_gui_etap.xml").string();
+      { std::ofstream ofs(tmp, std::ios::binary); ofs << xml; }
+      hacdcpf::io::EtapIoReport rep;
+      auto sys = hacdcpf::io::load_etap_xml(
+          tmp, hacdcpf::io::EtapImportMode::Permissive, rep);
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name;
+      g_session.last_pf_result.reset();
+      g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_etap_warnings"] = rep.warnings;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: import an ETAP-schema .xlsx workbook (binary upload) ----
+  // The raw workbook bytes are sent as the request body (OpenXLSX needs a real
+  // file, so they are written to a temp file and load_etap() reads it back).
+  svr.Post("/api/session/load_etap_xlsx",
+           [](const httplib::Request& req, httplib::Response& res) {
+    std::string tmp;
+    try {
+      if (req.body.empty()) throw std::runtime_error("Empty ETAP workbook upload");
+      static std::atomic<int> import_counter{0};
+      tmp = (std::filesystem::temp_directory_path() /
+             ("hacdcpf_gui_import_" +
+              std::to_string(import_counter.fetch_add(1)) + ".xlsx"))
+                .string();
+      { std::ofstream ofs(tmp, std::ios::binary); ofs.write(req.body.data(),
+            static_cast<std::streamsize>(req.body.size())); }
+      hacdcpf::io::EtapIoReport rep;
+      auto sys = hacdcpf::io::load_etap(
+          tmp, hacdcpf::io::EtapImportMode::Permissive, rep);
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      std::lock_guard<std::mutex> lk(g_session.mu);
+      g_session.current_system = std::move(sys);
+      g_session.current_name = g_session.current_system->name.empty()
+                                   ? "ETAP workbook"
+                                   : g_session.current_system->name;
+      g_session.last_pf_result.reset();
+      g_session.last_pf_method.clear();
+      auto summary = system_summary(*g_session.current_system);
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
+      summary["_etap_warnings"] = rep.warnings;
+      res.set_content(summary.dump(), "application/json");
+    } catch (const std::exception& e) {
+      if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -7866,14 +8022,28 @@ int main(int argc, char** argv) {
     }
   });
 
-  // Serve static files for ETAP-like frontend from web/ directory
+  // Serve static files for the ETAP-style frontend from the web/ directory.
+  // The directory is located robustly so the canvas UI loads regardless of the
+  // working directory the binary is launched from (repo root, build/,
+  // build/tests/, an installed prefix, ...).  Previously only cwd/web and
+  // cwd/../web were tried, so launching the binary from its build location
+  // (build/tests/) silently skipped the mount and every /xjtu/ asset 404'd —
+  // i.e. the toolbars rendered but no JS loaded, so buttons and the canvas were
+  // dead.  HACDCPF_PROJECT_ROOT (a compile-time define for this target) is the
+  // authoritative fallback for an in-tree build.
   const auto web_dir = [&]() -> std::string {
-    const std::vector<fs::path> candidates = {
+    std::vector<fs::path> candidates = {
         fs::current_path() / "web",
         fs::current_path() / ".." / "web",
+        fs::current_path() / ".." / ".." / "web",
+        fs::current_path() / ".." / ".." / ".." / "web",
     };
+#ifdef HACDCPF_PROJECT_ROOT
+    candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "web");
+#endif
     for (const auto& c : candidates) {
-      if (fs::exists(c)) return fs::canonical(c).string();
+      std::error_code ec;
+      if (fs::exists(c, ec) && !ec) return fs::canonical(c).string();
     }
     return (fs::current_path() / "web").string();
   }();
@@ -7881,6 +8051,14 @@ int main(int argc, char** argv) {
     svr.set_mount_point("/xjtu", web_dir);
     std::cout << "XJTU frontend: http://" << args.host << ":" << args.port << "/xjtu/\n";
     std::cout << "  (serving from " << web_dir << ")\n";
+  } else {
+    std::cerr << "WARNING: web/ frontend directory not found.\n"
+              << "         Looked relative to cwd (" << fs::current_path().string() << ")"
+#ifdef HACDCPF_PROJECT_ROOT
+              << " and " << HACDCPF_PROJECT_ROOT
+#endif
+              << ".\n         The /xjtu/ canvas UI will be unavailable (404). "
+                 "Launch from the repo root or pass a correct working directory.\n";
   }
 
   // CORS headers for cross-origin access

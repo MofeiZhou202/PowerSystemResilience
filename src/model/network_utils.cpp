@@ -147,6 +147,18 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
   if (!tr.in_service) return;
   if (tr.hv_bus == 0 || tr.mv_bus == 0 || tr.lv_bus == 0) return;
 
+  // Off-nominal regulating-tap ratio.  In the delta of pairwise short-circuit
+  // impedances, a winding's OLTC scales only the two branches that touch that
+  // winding's terminal (not the opposite branch).  tap_side: 0=HV, 1=MV, 2=LV.
+  // When the regulated terminal is a branch's "to" end, the branch is flipped
+  // (safe — these equivalents carry no charging susceptance) so the ratio can
+  // be expressed as a standard from-side tap, with the phase shift negated.
+  const double ratio = tap_from_step(tr.tap_pos, 0, tr.tap_step_percent);
+  const bool has_tap = std::abs(ratio - 1.0) > 1e-12;
+  const int reg_bus = (tr.tap_side == 1) ? tr.mv_bus
+                    : (tr.tap_side == 2) ? tr.lv_bus
+                                         : tr.hv_bus;  // default (0) -> HV
+
   struct PairData {
     int from_bus;
     int to_bus;
@@ -154,12 +166,19 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     double vkr_percent;
     double sn_from;
     double sn_to;
+    double shift_deg;
     const char* suffix;
   };
   const PairData pairs[3] = {
-      {tr.hv_bus, tr.mv_bus, tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, tr.sn_hv_mva, tr.sn_mv_mva, "HV_MV"},
-      {tr.hv_bus, tr.lv_bus, tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, tr.sn_hv_mva, tr.sn_lv_mva, "HV_LV"},
-      {tr.mv_bus, tr.lv_bus, tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, tr.sn_mv_mva, tr.sn_lv_mva, "MV_LV"},
+      {tr.hv_bus, tr.mv_bus, tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, tr.sn_hv_mva, tr.sn_mv_mva, tr.shift_mv_deg, "HV_MV"},
+      {tr.hv_bus, tr.lv_bus, tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, tr.sn_hv_mva, tr.sn_lv_mva, tr.shift_lv_deg, "HV_LV"},
+      {tr.mv_bus, tr.lv_bus, tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, tr.sn_mv_mva, tr.sn_lv_mva, tr.shift_lv_deg - tr.shift_mv_deg, "MV_LV"},
+  };
+
+  auto kv_of = [&](int bus) {
+    return (bus == tr.hv_bus) ? tr.vn_hv_kv
+         : (bus == tr.mv_bus) ? tr.vn_mv_kv
+                              : tr.vn_lv_kv;
   };
 
   for (const auto& p : pairs) {
@@ -167,17 +186,27 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     auto [r_pu, x_pu] = rx_from_vk_vkr(p.vk_percent, p.vkr_percent, base_mva, sn_pair);
     if (r_pu == 0.0 && x_pu == 0.0) continue;
 
+    int from_bus = p.from_bus;
+    int to_bus = p.to_bus;
+    double shift = p.shift_deg;
+    double tap = 1.0;
+    if (has_tap && (from_bus == reg_bus || to_bus == reg_bus)) {
+      if (to_bus == reg_bus) {  // put the regulated terminal on the "from" side
+        std::swap(from_bus, to_bus);
+        shift = -shift;
+      }
+      tap = ratio;
+    }
+
     ACBranch br;
     br.index = next_idx++;
-    br.from_bus = p.from_bus;
-    br.to_bus = p.to_bus;
+    br.from_bus = from_bus;
+    br.to_bus = to_bus;
     br.r_pu = r_pu;
     br.x_pu = x_pu;
     br.b_pu = 0.0;
-    br.tap = tap_from_step(tr.tap_pos, 0, tr.tap_step_percent);
-    br.shift_deg = (p.from_bus == tr.hv_bus && p.to_bus == tr.mv_bus) ? tr.shift_mv_deg
-                  : (p.from_bus == tr.hv_bus && p.to_bus == tr.lv_bus) ? tr.shift_lv_deg
-                                                                        : (tr.shift_lv_deg - tr.shift_mv_deg);
+    br.tap = tap;
+    br.shift_deg = shift;
     br.rate_a_mva = sn_pair;
     br.in_service = true;
     br.name = tr.name.empty() ? ("Transformer3W_" + std::to_string(tr.index) + "_" + p.suffix)
@@ -185,8 +214,8 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     br.r0_pu = r_pu;
     br.x0_pu = x_pu;
     br.b0_pu = 0.0;
-    br.vn_hv_kv = tr.vn_hv_kv;
-    br.vn_lv_kv = (p.to_bus == tr.mv_bus) ? tr.vn_mv_kv : tr.vn_lv_kv;
+    br.vn_hv_kv = kv_of(from_bus);
+    br.vn_lv_kv = kv_of(to_bus);
     br.sn_mva = sn_pair;
     ac.branches.push_back(br);
   }

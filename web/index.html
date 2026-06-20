@@ -28,6 +28,7 @@
   <div class="toolbar-aux">
     <button id="btnNewSystem" class="btn btn-sm" title="新建空白系统">新建</button>
     <button id="btnExportJson" class="btn btn-sm" title="导出JSON">导出</button>
+    <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
     <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
@@ -128,7 +129,6 @@
     </label>
     <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
     <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
-    <button id="btnRunCarbonFlow"   class="toolbar-btn run-btn" title="碳流计算">碳流计算</button>
     <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
@@ -244,6 +244,14 @@
       </div>
       <div class="case-modal-row">
         <button id="btnImportJsonCase" class="case-modal-btn">导入Json文件</button>
+      </div>
+      <div class="case-modal-row">
+        <button id="btnImportEtapXlsxCase" class="case-modal-btn">导入ETAP工作簿 (.xlsx)</button>
+        <input type="file" id="fileImportEtapXlsx" accept=".xlsx" style="display:none"/>
+      </div>
+      <div class="case-modal-row">
+        <button id="btnImportEtapXmlCase" class="case-modal-btn">导入ETAP工程 (.xml)</button>
+        <input type="file" id="fileImportEtapXml" accept=".xml" style="display:none"/>
       </div>
     </div>
   </div>

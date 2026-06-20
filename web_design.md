@@ -58,6 +58,7 @@ DOM 容器：`<div id="topToolbar" class="top-toolbar">`
 | `btnAutoLayout` | 自动布局 | `Canvas.autoLayout()` |
 | `btnRotateCW` / `btnRotateCCW` | 顺/逆时针旋转 | `Canvas.rotateSelected(±90)` |
 | `btnNewSystem` / `btnExportJson` / `btnImportJson` | 新建/导出/导入 | `createNewSystem()` / `exportJson()` / `importJson(file)` |
+| `btnExportEtap` | 导出ETAP | `exportEtap()` —— `syncToBackend()` 后 `POST /api/session/export_etap`，把返回的二进制 `.xlsx` 触发浏览器下载 |
 | `canvasInfo` | （文本） | 实时显示 `N 元件 ｜ M 连接` |
 | `statusBadge` | （徽章） | 状态：就绪 / busy / error |
 
@@ -118,6 +119,8 @@ DOM 容器：`<div id="subToolbar" class="sub-toolbar">`，每个模块对应一
 | 内置算例：`btnImportLibraryCase` + `caseSelect` | `loadCaseList()` 在初始化时填充下拉框；点击按钮调用 `loadBuiltinCase(caseSelect.value)` → POST `/api/session/load_builtin` |
 | MATPOWER 文件：`btnImportMatpowerCase` + `matpowerSelect` | `loadMatpowerFileList()` 调用 `GET /api/matpower_files`（**指向 `external_data/matpower/`**，列出 85 个 MATPOWER 案例 `.m` 文件）；点击按钮调用 `loadMatpowerCase(filename)` → POST `/api/session/load_matpower` |
 | JSON 文件：`btnImportJsonCase` | 复用 `fileImportJson` 的 file picker → `importJson(file)`（前端解析后调用 `Canvas.loadFromSystemJson`） |
+| ETAP 工作簿：`btnImportEtapXlsxCase` + `fileImportEtapXlsx` | `loadEtapXlsx(file)` —— 读 `file.arrayBuffer()` 以 `application/octet-stream` 二进制 `POST /api/session/load_etap_xlsx`，后端 `load_etap()` 解析后回画布 |
+| ETAP 工程：`btnImportEtapXmlCase` + `fileImportEtapXml` | `loadEtapXml(file)` —— 读 `file.text()` 后 `POST /api/session/load_etap_xml {xml_string}`，后端 `load_etap_xml()` 解析后回画布 |
 
 模态关闭：`btnCaseModalClose` 或点击 `.modal-backdrop`，统一调用 `hideCaseLoadModal()`。
 
@@ -165,6 +168,7 @@ DOM 容器：`<div id="subToolbar" class="sub-toolbar">`，每个模块对应一
 | `rotateSelected(deg)` | 旋转选中元件 |
 | `removeSelected()` | 删除选中（单个或批量） |
 | `loadFromSystemJson(sys)` | 从后端 JSON 重建画布 |
+| `addComponent(type,x,y[,params,rotation])` / `addConnection(fromId,fromPort,toId,toPort)` | 编程式放置元件 / 连线（端到端测试与脚本化建模用） |
 | `serializeToSystemJson()` | 导出当前画布为 `HybridPowerSystem` JSON |
 | `showPowerFlowResults(data)` | 在线路上叠加潮流箭头/热力图 |
 | `setVisualizationMode('off'\|'flow'\|'heatmap'\|'both')` | 切换可视化模式 |
@@ -192,6 +196,9 @@ DOM 容器：`<div id="subToolbar" class="sub-toolbar">`，每个模块对应一
 | `POST /api/session/load_json_string` | `{json_string}` | 加载画布序列化的 JSON（伴随 `debug_json_dump_*.json` 落盘以便回放） |
 | `POST /api/session/new_empty` | — | 新建空白系统 |
 | `POST /api/session/export_json` | — | 导出当前会话为 JSON |
+| `POST /api/session/export_etap` | `{}`（须有请求体 / Content-Length） | 导出当前系统为 ETAP `.xlsx`，返回二进制工作簿（`Content-Disposition: attachment`） |
+| `POST /api/session/load_etap_xlsx` | 原始 `.xlsx` 字节（`application/octet-stream`） | 上传并导入 ETAP 工作簿 |
+| `POST /api/session/load_etap_xml` | `{xml_string}` | 导入原生 ETAP 工程 XML |
 | `POST /api/session/update_components` | `{components}` | 增量同步画布 |
 | `POST /api/session/pf` | `{method, options...}` | 潮流计算（9 种算法之一） |
 | `POST /api/session/sc` / `/sc_detailed` | 故障参数 | 短路计算 |

@@ -29,7 +29,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "hacdcpf/ev_power_traffic.hpp"
+#include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/model/ac_components.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 

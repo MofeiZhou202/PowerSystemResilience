@@ -23,6 +23,12 @@ hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 # I/O: JSON round-trip, MATPOWER parsing, safe try_ variants, OPF/PF result ser.
 hacdcpf_add_test(test_io_json             test_io_json.cpp)
 
+# I/O: ETAP Excel round-circle (excel in / excel out). Requires OpenXLSX, so it
+# is only registered when ETAP support is compiled into the core library.
+if(HACDCPF_ENABLE_ETAP)
+  hacdcpf_add_test(test_io_etap           test_io_etap.cpp)
+endif()
+
 # Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
 hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 
@@ -215,5 +221,20 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   # httplib needs Winsock2 on Windows (freeaddrinfo / WSACleanup / socket).
   if(WIN32)
     target_link_libraries(run_gui_server PRIVATE ws2_32)
+  endif()
+
+  # End-to-end GUI/HTTP smoke test: starts the server and drives the REST API
+  # (load case -> export ETAP .xlsx -> re-import -> import ETAP XML -> PF -> SC).
+  # Requires ETAP I/O (binary export/import) and a Python 3 interpreter.
+  if(HACDCPF_ENABLE_ETAP)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME gui_api_e2e
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/gui_api_e2e.py"
+                --server "$<TARGET_FILE:run_gui_server>"
+                --data-dir "${CMAKE_SOURCE_DIR}/data")
+      set_tests_properties(gui_api_e2e PROPERTIES LABELS "gui;e2e" TIMEOUT 120)
+    endif()
   endif()
 endif()

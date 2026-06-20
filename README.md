@@ -214,6 +214,79 @@ MATPOWER / JPC JSON / Excel / OpenDSS
 
 JPC JSON export should be treated as a schema-preserving operation: rich component arrays must either be written faithfully or explicitly diagnosed as unsupported, because silently writing empty arrays can lose engineering data.
 
+### 8.5 ETAP I/O（导入/导出）
+
+ETAP 互操作由 `include/hacdcpf/io/etap_io.hpp` / `src/io/etap_io.cpp` 提供，编译开关
+`-DHACDCPF_ENABLE_ETAP=ON`（依赖 OpenXLSX；默认 OFF）。
+
+支持三条输入路径，全部映射到同一 `HybridPowerSystem`：
+
+1. **规范 ETAP 工作簿**（`save_etap` 产生、可无损 round-trip 的 schema）。
+2. **原始 ETAP 工具箱导出**（`etap-main/etap_output.py` 的列名与单位：`OpVMag`/`VMag`
+   为百分比、`NominalkV`、`RPos`/`XPos` 为欧姆、`AnsiPosZ`/`PosR` 为变压器 %Z/%R、
+   `ZBaseMVA` 为 kVA、`LUMPEDLOAD` 用 `MVA`+`PF`）。导入器通过别名表同时识别两套列名。
+3. **原生 ETAP 工程 XML**（如 `Feeder.xml`）：`load_etap_xml()` 直接解析 `<COMPONENTS>`
+   元素属性，无需 Python 工具箱。
+
+主要 API：
+
+| 功能 | 入口 |
+|---|---|
+| Excel 导入 | `load_etap(path[, mode, report])` |
+| Excel 导出 | `save_etap(sys, path[, report])` |
+| 原生 XML 导入 | `load_etap_xml(path[, mode, report])` |
+| 严格度 | `EtapImportMode::{Strict, Permissive}`（Strict 对悬空母线引用抛错，Permissive 记 warning） |
+| 往返保真度报告 | `etap_fidelity_check(sys)` → `EtapFidelityReport`（逐字段 before→after 差异） |
+| 诊断 | `EtapIoReport`（每个 sheet 计数 + warnings） |
+
+无显式 `Type` 列时，母线类型由所连 utility（→SLACK）/generator（→PV）推导；标幺↔欧姆
+阻抗用 `Z_base = base_kV² / base_MVA`（取自支路 from 母线），保证往返精确。
+
+支持的元件 sheet：`BUS, XLINE, CABLE, XFORM2W, XFORM3W, UTIL, SYNGEN, MGSET(仅导入),
+PVARRAY, WIND, LUMPEDLOAD(ZIP), CAPACITOR, HVCB, INDMOTOR, DCBUS, DCIMPEDANCE,
+DCLUMPLOAD, DCCONVERTER, DCCB, INVERTER, CHARGER, BATTERY` 外加 `PROJECT`。
+
+**逐字段保真**：除拓扑与核心电气量外，往返还无损保留——2 绕组/3 绕组变压器分接头
+（`TapSide/TapPos/TapStepPct`，3W 含 `ShiftMV/LV`）、负荷 ZIP 模型与优先级、VSC 控制模式
+与设定点、电池 SoC/效率，以及**短路数据**：外部电网 `S_sc_max/min_MVA`、`RX_max/min`、
+零序 `R0/X0`；同步机次暂态/暂态/同步电抗 `Xdpp/Xdp/Xd`、`Ra`、零序 `R0/X0`；断路器额定/
+开断电流 `I_rated_kA`/`I_breaking_kA`；变压器零序 `Z0_percent`。原生 XML 同时识别 ETAP
+原始属性（`ZeroR/ZeroX`、断路器 `Rated`、`AnsiPosXR` 反推 %R 等）。
+
+**3 绕组变压器潮流**：投影时 3W 被展开为三条等效支路（成对短路阻抗构成的 Δ）。有载调压
+（OLTC）仅作用于与受调绕组端子相连的两条支路（`tap_side`：0=HV，1=MV，2=LV），不影响对边
+支路，物理上更准确。
+
+命令行工具 `etap_convert`（`-DHACDCPF_ENABLE_ETAP=ON` 时构建）：
+
+```text
+etap_convert etap2json  in.xlsx  out.json   [--strict]
+etap_convert xml2json   in.xml   out.json   [--strict]
+etap_convert json2etap  in.json  out.xlsx
+etap_convert etap2etap  in.xlsx  out.xlsx   [--strict]   # 规范化
+etap_convert fidelity   in.xlsx                          # 报告再导出会丢失的字段
+```
+
+Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列定义
+（`CANONICAL_COLUMNS`）、`write_canonical_workbook()` 与 `convert_raw_export()`，
+用于从工具箱直接产出规范工作簿。
+
+**Web GUI 集成**（`tests/run_gui_server.cpp`，`web/` 下的画布编辑器挂载于 `/xjtu/`）：
+
+| 操作 | 入口 |
+|---|---|
+| 导出当前系统为 ETAP `.xlsx` | `POST /api/session/export_etap`（二进制下载）；工具栏「导出ETAP」按钮 |
+| 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
+| 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
+
+往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
+case14 潮流一致性、逐字段保真度、原生 XML、3 绕组变压器分接头/潮流、短路数据），
+fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到端冒烟测试见
+`tools/gui_api_e2e.py`（启动服务并驱动 加载/导出ETAP/重新导入/XML导入/潮流/短路 全链路，
+已接入 ctest 目标 `gui_api_e2e`）。画布层浏览器端到端测试见 `tests/e2e/canvas_3w_e2e.mjs`
+（Playwright：在画布上放置并连线一台三绕组变压器+外网+负荷，同步后端并跑潮流；需
+`npm i -D playwright && npx playwright install chromium`）。
+
 ## 9. 实现地图
 
 | 主题 | 主要文件 |

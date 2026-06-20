@@ -213,6 +213,68 @@ const App = (() => {
     }
   }
 
+  // Render a freshly-loaded backend system onto the canvas (shared by the ETAP
+  // import paths); logs any permissive-import warnings.
+  function applyLoadedSystem(data, label) {
+    if (data._raw_json) {
+      try {
+        const sys = JSON.parse(data._raw_json);
+        Canvas.loadFromSystemJson(sys);
+        _canvasDirty = false;  // backend already has the correct system
+        log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+      } catch (e) {
+        log(`JSON解析失败: ${e.message}`, 'error');
+      }
+    }
+    const warns = data._etap_warnings;
+    if (Array.isArray(warns) && warns.length) {
+      log(`${label}：${warns.length} 条导入告警（宽松模式）`, 'warn');
+    }
+  }
+
+  // Import an ETAP-schema .xlsx workbook (raw binary upload -> load_etap).
+  async function loadEtapXlsx(file) {
+    if (!file) return;
+    setStatus('导入ETAP工作簿...', 'busy');
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await fetch(`${API_BASE}/api/session/load_etap_xlsx`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: buf,
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        log(`导入ETAP工作簿失败: ${data.error || res.statusText}`, 'error');
+        setStatus('加载失败', 'error');
+        return;
+      }
+      log(`已导入ETAP工作簿: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'ETAP工作簿');
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入ETAP工作簿失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
+  // Import a native ETAP project .xml (text upload -> load_etap_xml).
+  async function loadEtapXml(file) {
+    if (!file) return;
+    setStatus('导入ETAP工程...', 'busy');
+    try {
+      const xml = await file.text();
+      const data = await apiPost('/api/session/load_etap_xml', { xml_string: xml });
+      if (!data) { setStatus('加载失败', 'error'); return; }
+      log(`已导入ETAP工程: ${file.name}`, 'success');
+      applyLoadedSystem(data, 'ETAP工程');
+      setStatus('就绪');
+    } catch (e) {
+      log(`导入ETAP工程失败: ${e.message}`, 'error');
+      setStatus('加载失败', 'error');
+    }
+  }
+
   async function createNewSystem() {
     setStatus('创建中...', 'busy');
     const data = await apiPost('/api/session/new_empty');
@@ -239,6 +301,51 @@ const App = (() => {
     a.click();
     URL.revokeObjectURL(url);
     log('已导出系统JSON', 'success');
+  }
+
+  // Export the current system as an ETAP-schema .xlsx workbook (one sheet per
+  // ETAP element class).  The workbook is generated server-side by save_etap();
+  // here we push the latest canvas to the backend (if edited), then stream the
+  // binary response to a browser download.
+  async function exportEtap() {
+    setStatus('导出ETAP中...', 'busy');
+    try {
+      // Make sure the backend session reflects any unsaved canvas edits.  A
+      // non-forced sync is a no-op when the canvas is unchanged, preserving the
+      // full-fidelity system originally loaded into the backend.
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      // Send an explicit (empty JSON) body so the request always carries a
+      // Content-Length; a body-less POST can stall some HTTP servers.
+      const resp = await fetch('/api/session/export_etap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch (_) {}
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      let filename = 'system.xlsx';
+      const cd = resp.headers.get('Content-Disposition');
+      if (cd) {
+        const m = /filename="?([^"]+)"?/.exec(cd);
+        if (m && m[1]) filename = m[1];
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      log(`已导出ETAP工作簿: ${filename}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出ETAP失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
   }
 
   function importJson(file) {
@@ -1860,6 +1967,24 @@ const App = (() => {
     document.getElementById('btnImportJsonCase')?.addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
     });
+    // ETAP workbook (.xlsx) import from the case-load modal.
+    document.getElementById('btnImportEtapXlsxCase')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXlsx')?.click();
+    });
+    document.getElementById('fileImportEtapXlsx')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) { hideCaseLoadModal(); loadEtapXlsx(f); }
+    });
+    // Native ETAP project (.xml) import from the case-load modal.
+    document.getElementById('btnImportEtapXmlCase')?.addEventListener('click', () => {
+      document.getElementById('fileImportEtapXml')?.click();
+    });
+    document.getElementById('fileImportEtapXml')?.addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) { hideCaseLoadModal(); loadEtapXml(f); }
+    });
     document.getElementById('btnCaseModalClose')?.addEventListener('click', hideCaseLoadModal);
     document.querySelector('#caseLoadModal .modal-backdrop')?.addEventListener('click', hideCaseLoadModal);
 
@@ -1870,6 +1995,7 @@ const App = (() => {
       if (filename) loadMatpowerCase(filename);
     });
     document.getElementById('btnExportJson').addEventListener('click', exportJson);
+    document.getElementById('btnExportEtap')?.addEventListener('click', exportEtap);
     document.getElementById('btnImportJson').addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
     });
@@ -1914,10 +2040,6 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
-    document.getElementById('btnRunCarbonFlow')?.addEventListener('click', () => {
-      // TODO: hook up backend carbon-flow endpoint when available.
-      log('碳流计算：尚未对接后端接口（TODO）', 'warn');
-    });
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.
     document.getElementById('btnExportPfResults')?.addEventListener('click', () => {
@@ -2852,7 +2974,6 @@ const App = (() => {
         _importedGeneratedScenario = { family, case: caseJson };
         _lastImportedGeneratedScenarioKey = caseJson?._generated_scenario?.representative_id || caseJson?.name || '';
         _lastTspfData = null;
-        _lastCarbonData = null;
         const target = targetFamily || family;
         let restoredTs = false;
         const targetUsesScenarioTs = target === 'regular' || target === 'resilience';

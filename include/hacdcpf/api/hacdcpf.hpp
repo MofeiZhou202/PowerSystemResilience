@@ -4,7 +4,7 @@
 
 #include "hacdcpf/api/solver_capabilities.hpp"
 #include "hacdcpf/detail/internal_helpers.hpp"
-#include "hacdcpf/ev_power_traffic.hpp"
+#include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
