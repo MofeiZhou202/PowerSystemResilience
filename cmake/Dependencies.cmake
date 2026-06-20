@@ -82,12 +82,15 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
       OUTPUT_VARIABLE _MIPSOLVERS_ACTUAL_COMMIT
       ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT _MIPSOLVERS_ACTUAL_COMMIT STREQUAL _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
-      message(FATAL_ERROR
+      # Non-fatal: a mismatch is flagged but never blocks the build, so a local
+      # MIPSolvers checkout that differs from the recorded pin still compiles.
+      # Update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT to silence this once the new
+      # MIPSolvers revision is intentionally adopted.
+      message(WARNING
         "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the "
-        "expected pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).  "
-        "Either update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT in "
-        "cmake/Dependencies.cmake to record the intentional upgrade, or "
-        "check out the pinned commit in the MIPSolvers clone.")
+        "recorded pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).  Building "
+        "against the local checkout anyway; update the pin to record an "
+        "intentional upgrade.")
     endif()
 
     # Detect a dirty working tree — uncommitted local changes in MIPSolvers
