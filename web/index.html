@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css"/>
+<link rel="stylesheet" href="css/style.css?v=20260620-clickmap"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -564,6 +564,14 @@
           </tr></thead><tbody></tbody></table>
         </div>
       </div>
+      <div class="topo-section" id="dcPvSection" style="display:none">
+        <h4>DC光伏 (DC PV Array)</h4>
+        <div id="dcPvTable" class="topo-table-wrap">
+          <table id="dcPvTableInner"><thead><tr>
+            <th>Bus</th><th>P_set(MW)</th><th>辐照(W/m²)</th><th>温度(°C)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
       <div class="topo-section" id="vscSection" style="display:none">
         <h4>VSC换流器</h4>
         <div id="vscTable" class="topo-table-wrap">
@@ -858,8 +866,8 @@
   </div>
 </div>
 
-<script src="js/components.js"></script>
-<script src="js/canvas.js"></script>
-<script src="js/app.js"></script>
+<script src="js/components.js?v=20260620-clickmap"></script>
+<script src="js/canvas.js?v=20260620-clickmap"></script>
+<script src="js/app.js?v=20260620-clickmap"></script>
 </body>
 </html>

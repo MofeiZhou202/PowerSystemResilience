@@ -67,6 +67,29 @@ const App = (() => {
     if (rc) rc.dataset.activeGroup = name || '';
   }
 
+  // Build an inline attribute that makes a result row pan the canvas to a bus
+  // (by model bus id). Returns '' when the bus has no canvas component, so only
+  // mappable rows become clickable — mirroring the power-flow tables. Branch /
+  // converter rows pass one endpoint bus, since the canvas does not retain model
+  // branch ids (their result indices are non-positional model ids).
+  function busClickAttr(busId, busMap) {
+    const id = parseInt(busId, 10);
+    if (!Number.isInteger(id)) return '';
+    const m = busMap || (typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null);
+    if (!m) return '';
+    const compId = (m.ac && m.ac[id] != null) ? m.ac[id]
+                 : (m.dc && m.dc[id] != null) ? m.dc[id] : undefined;
+    return compId != null
+      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+  }
+
+  // Extract the first bus id from a component name like "F3-Line-20-21" → 20.
+  function busIdFromComponentName(name) {
+    if (!name) return null;
+    const m = String(name).match(/(\d+)\D+(\d+)\s*$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
   // Trigger a JSON file download in the browser.
   function downloadJsonFile(filename, obj) {
     try {
@@ -2044,6 +2067,10 @@ const App = (() => {
     fillTable('#dcLoadTableInner', 'dcLoadSection', sys.dc.loads, m.dcLoad, dl =>
       `<td>${dl.bus}</td><td>${dl.p_mw}</td><td>${dl.scaling}</td>`);
 
+    // DC PV Array
+    fillTable('#dcPvTableInner', 'dcPvSection', sys.dc.pv_arrays || [], m.dcPv, pv =>
+      `<td>${pv.bus}</td><td>${pv.p_set_mw ?? ''}</td><td>${pv.irradiance ?? ''}</td><td>${pv.temperature ?? ''}</td>`);
+
     // VSC Converter
     fillTable('#vscTableInner', 'vscSection', sys.vsc_converters, m.vsc, v =>
       `<td>${v.bus_ac}</td><td>${v.bus_dc}</td><td>${v.p_set_mw}</td><td>${v.control_mode}</td>`);
@@ -2658,19 +2685,27 @@ const App = (() => {
       if ((method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length) {
         html += '<h4 style="margin:10px 0 4px;">EENS 收敛过程</h4><div id="relConvChart" style="height:240px;"></div>';
       }
-      // Critical components (NSQ/SEQ)
+      // Critical components (NSQ/SEQ) — index is 0-based positional (generator
+      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
       if (Array.isArray(data.critical_components) && data.critical_components.length) {
         html += '<h4 style="margin:10px 0 4px;">薄弱元件 (Top)</h4><table><thead><tr><th>#</th><th>类型</th><th>索引</th><th>重要度</th></tr></thead><tbody>';
+        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.critical_components.slice(0, 15).forEach((c, i) => {
-          html += `<tr><td>${i + 1}</td><td>${c.is_generator ? '发电机' : '支路'}</td><td>${c.index ?? '—'}</td><td>${nf(c.importance, 4)}</td></tr>`;
+          const compId = ccBusMap ? (c.is_generator ? (ccBusMap.gen ? ccBusMap.gen[c.index] : undefined)
+                                                     : (ccBusMap.branch ? ccBusMap.branch[c.index] : undefined)) : undefined;
+          const clk = compId != null
+            ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+          html += `<tr${clk}><td>${i + 1}</td><td>${c.is_generator ? '发电机' : '支路'}</td><td>${c.index ?? '—'}</td><td>${nf(c.importance, 4)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
       // FMEA top contingencies
       if (method === 'fmea' && Array.isArray(data.contingencies) && data.contingencies.length) {
         html += '<h4 style="margin:10px 0 4px;">关键故障 (按 EENS 贡献)</h4><table><thead><tr><th>元件</th><th>类型</th><th>EENS贡献(MWh/yr)</th><th>切负荷(MW)</th></tr></thead><tbody>';
+        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.contingencies.slice(0, 15).forEach(c => {
-          html += `<tr><td>${c.component_name ?? '—'}</td><td>${c.component_type ?? '—'}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
+          const clk = busClickAttr(busIdFromComponentName(c.component_name), relBusMap);
+          html += `<tr${clk}><td>${c.component_name ?? '—'}</td><td>${c.component_type ?? '—'}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
@@ -2716,6 +2751,7 @@ const App = (() => {
       document.getElementById('resultsContent').style.display = 'block';
       setActiveResultGroup('carbonAnalysis');
       const nf = (v, d = 3) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+      const cbBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 
       // Method / source header
       let html = `<div style="margin-bottom:8px;">`
@@ -2745,7 +2781,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">负荷碳排放 (Top 20)</h4>';
         html += '<table><thead><tr><th>负荷</th><th>母线</th><th>需求(MW)</th><th>碳强度(tCO₂/MWh)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
         loads.slice(0, 20).forEach(l => {
-          html += `<tr><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
+          html += `<tr${busClickAttr(l.bus, cbBusMap)}><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
             + `<td>${nf(l.carbon_intensity_tco2_mwh, 4)}</td><td class="result-value">${nf(l.total_emissions_tco2)}</td></tr>`;
         });
         html += '</tbody></table>';
@@ -2757,7 +2793,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">母线碳强度 (AC, Top 20)</h4>';
         html += '<table><thead><tr><th>母线</th><th>碳强度(tCO₂/MWh)</th></tr></thead><tbody>';
         buses.slice(0, 20).forEach(b => {
-          html += `<tr><td>${b.bus_index ?? '—'}</td><td class="result-value">${nf(b.carbon_intensity_tco2_mwh, 4)}</td></tr>`;
+          html += `<tr${busClickAttr(b.bus_index, cbBusMap)}><td>${b.bus_index ?? '—'}</td><td class="result-value">${nf(b.carbon_intensity_tco2_mwh, 4)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
@@ -2768,7 +2804,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">支路网损碳排放 (Top 15)</h4>';
         html += '<table><thead><tr><th>支路</th><th>从→到</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
         branches.slice(0, 15).forEach(b => {
-          html += `<tr><td>${b.branch_index ?? '—'}</td><td>${b.from_bus}→${b.to_bus}</td>`
+          html += `<tr${busClickAttr(b.from_bus, cbBusMap)}><td>${b.branch_index ?? '—'}</td><td>${b.from_bus}→${b.to_bus}</td>`
             + `<td>${nf(b.loss_mw, 4)}</td><td class="result-value">${nf(b.total_emissions_tco2)}</td></tr>`;
         });
         html += '</tbody></table>';
@@ -2780,7 +2816,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">换流器 (VSC) 损耗碳排放</h4>';
         html += '<table><thead><tr><th>换流器</th><th>AC母线</th><th>DC母线</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
         vscs.forEach(v => {
-          html += `<tr><td>${v.converter_index ?? '—'}</td><td>${v.bus_ac ?? '—'}</td><td>${v.bus_dc ?? '—'}</td>`
+          html += `<tr${busClickAttr(v.bus_ac, cbBusMap)}><td>${v.converter_index ?? '—'}</td><td>${v.bus_ac ?? '—'}</td><td>${v.bus_dc ?? '—'}</td>`
             + `<td>${nf(v.loss_mw, 4)}</td><td class="result-value">${nf(v.total_emissions_tco2)}</td></tr>`;
         });
         html += '</tbody></table>';
@@ -2927,8 +2963,10 @@ const App = (() => {
 
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
         html += '<h4 style="margin:10px 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
+        const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.fault_sequence.slice(0, 20).forEach((f, i) => {
-          html += `<tr><td>${i + 1}</td><td>${f.branch_id ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
+          const clk = busClickAttr(busIdFromComponentName(f.name), resBusMap);
+          html += `<tr${clk}><td>${i + 1}</td><td>${f.name ?? f.branch_id ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
@@ -4283,6 +4321,25 @@ const App = (() => {
     // Tab switching
     document.querySelectorAll('.panel-tab').forEach(tab => {
       tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+    });
+
+    // Delegated click-to-canvas mapping for ALL result tables.
+    // This is the robust, scope-proof path: it closes over the `Canvas` binding
+    // directly instead of relying on inline onclick="" attributes resolving the
+    // global lexical `const Canvas` from an HTML event-handler scope. Every
+    // result renderer tags mappable rows with data-comp-id (exact component) or
+    // data-bus (a bus id); unmappable rows carry neither and stay inert.
+    document.getElementById('resultsContent')?.addEventListener('click', (ev) => {
+      const compEl = ev.target.closest('[data-comp-id]');
+      if (compEl && compEl.dataset.compId !== '') {
+        const cid = parseInt(compEl.dataset.compId, 10);
+        if (Number.isInteger(cid) && Canvas.panToComponent) { Canvas.panToComponent(cid); return; }
+      }
+      const busEl = ev.target.closest('[data-bus]');
+      if (busEl && busEl.dataset.bus !== '') {
+        const bid = parseInt(busEl.dataset.bus, 10);
+        if (Number.isInteger(bid) && Canvas.panToBusId) Canvas.panToBusId(bid);
+      }
     });
 
     // Console clear

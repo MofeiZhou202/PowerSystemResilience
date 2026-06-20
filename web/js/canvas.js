@@ -3031,8 +3031,12 @@ const Canvas = (() => {
       }, busCompMap);
     });
 
-    // DCDC converters
-    jsonSys.dcdc_converters?.forEach(dc => {
+    // DCDC converters — this repo's io::to_json nests them under sys.dc
+    // (the ported frontend originally read them top-level), so accept both.
+    const dcdcList = (jsonSys.dcdc_converters && jsonSys.dcdc_converters.length)
+      ? jsonSys.dcdc_converters
+      : ((jsonSys.dc && jsonSys.dc.dcdc_converters) || []);
+    dcdcList.forEach(dc => {
       const inCompId = dcBusCompMap[dc.bus_in];
       const outCompId = dcBusCompMap[dc.bus_out];
       const inComp = inCompId !== undefined ? getComponent(inCompId) : null;
@@ -4305,7 +4309,7 @@ const Canvas = (() => {
       extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, sw: {}, cb: {},
       motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
       flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
-      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {} };
+      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {} };
 
     const acBusIndexMap = assignBusIndices('ac_bus');
     const dcBusIndexMap = assignBusIndices('dc_bus');
@@ -4318,7 +4322,7 @@ const Canvas = (() => {
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
       ren: 0, sgen: 0, sw: 0, cb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
       shunt: 0, trafo3w: 0, flex: 0, asym: 0, charger: 0, cs: 0, ms: 0,
-      dcdc: 0, er: 0, vpp: 0, mg: 0 };
+      dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0 };
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
@@ -4332,6 +4336,7 @@ const Canvas = (() => {
         case 'external_grid': maps.extGrid[idx.eg++] = comp.id; break;
         case 'storage': maps.storage[idx.stor++] = comp.id; break;
         case 'pv_system': maps.pv[idx.pv++] = comp.id; break;
+        case 'dc_pv_array': maps.dcPv[idx.dcpv++] = comp.id; break;
         case 'renewable_gen': maps.renGen[idx.ren++] = comp.id; break;
         case 'static_generator': maps.sgen[idx.sgen++] = comp.id; break;
         case 'switch_comp': maps.sw[idx.sw++] = comp.id; break;
