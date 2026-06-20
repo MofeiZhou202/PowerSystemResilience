@@ -2009,6 +2009,11 @@ const App = (() => {
     document.getElementById('btnToggleTheme')?.addEventListener('click', toggleThemeMode);
   }
 
+  // Current auto-layout direction chosen in the toolbar (TB/LR/RADIAL/COMPACT).
+  function layoutDirection() {
+    return document.getElementById('layoutDirSelect')?.value || 'TB';
+  }
+
   function init() {
     // Apply the saved light/dark theme before anything renders.
     initThemeMode();
@@ -2630,7 +2635,8 @@ const App = (() => {
     document.getElementById('btnZoomIn').addEventListener('click', () => Canvas.zoomIn());
     document.getElementById('btnZoomOut').addEventListener('click', () => Canvas.zoomOut());
     document.getElementById('btnZoomFit').addEventListener('click', () => Canvas.zoomFit());
-    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout());
+    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    document.getElementById('layoutDirSelect')?.addEventListener('change', () => Canvas.autoLayout({ direction: layoutDirection() }));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
 

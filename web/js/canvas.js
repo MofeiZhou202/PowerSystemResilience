@@ -759,7 +759,7 @@ const Canvas = (() => {
   }
 
   // ========== Auto Layout ==========
-  function autoLayout() {
+  function autoLayout(options = {}) {
     const buses = state.components.filter(c => c.type === 'ac_bus' || c.type === 'dc_bus');
     const branchTypes = new Set(['ac_branch', 'transformer_2w', 'transformer_3w', 'dc_branch']);
     const branches = state.components.filter(c => branchTypes.has(c.type));
@@ -859,32 +859,85 @@ const Canvas = (() => {
       }
     });
 
-    // Assign coordinates (pre-order): allocate each sub-tree a contiguous band
-    // of leaf columns and centre the parent over its children's span.
-    const spacingX = 200, spacingY = 240;
+    // ---- Abstract tree positioning (depth + leaf coordinate) -------------
+    // placeSubtree assigns each bus a leaf coordinate (_pos); a parent is
+    // centred over its children.  It is re-runnable so the crossing-reduction
+    // sweeps below can reorder siblings and recompute coordinates.
     const placeSubtree = (id, leftLeaf) => {
       const bus = getComponent(id);
       const ch = children.get(id) || [];
-      if (bus) bus.y = busLayer.get(id) * spacingY;
-      if (ch.length === 0) {
-        if (bus) bus.x = leftLeaf * spacingX;
-        return;
-      }
+      if (ch.length === 0) { if (bus) bus._pos = leftLeaf; return; }
       let cursor = leftLeaf;
       ch.forEach(c => { placeSubtree(c, cursor); cursor += (subWidth.get(c) || 1); });
       const first = getComponent(ch[0]);
       const last = getComponent(ch[ch.length - 1]);
-      if (bus && first && last) bus.x = (first.x + last.x) / 2;
+      if (bus && first && last) bus._pos = (first._pos + last._pos) / 2;
     };
-    let rootLeaf = 0;
-    roots.forEach(r => { placeSubtree(r, rootLeaf); rootLeaf += (subWidth.get(r) || 1) + 1; });
+    const assignLeafPos = () => {
+      let leaf = 0;
+      roots.forEach(r => { placeSubtree(r, leaf); leaf += (subWidth.get(r) || 1) + 1; });
+    };
+    assignLeafPos();
 
-    // Centre the whole drawing horizontally around x = 0.
-    if (buses.length > 0) {
-      const xs = buses.map(b => b.x);
-      const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
-      buses.forEach(b => { b.x -= mid; });
+    // ---- Crossing reduction: barycenter sibling ordering -----------------
+    // A few sweeps reorder each parent's children toward the average position
+    // of their cross-links, reducing wire crossings in meshed feeders.  It is a
+    // no-op for pure radial trees (already crossing-free) so it never worsens
+    // the common case.
+    for (let sweep = 0; sweep < 4; sweep++) {
+      let changed = false;
+      buses.forEach(b => {
+        const ch = children.get(b.id);
+        if (!ch || ch.length < 2) return;
+        const bary = new Map();
+        ch.forEach(cid => {
+          let sum = 0, cnt = 0;
+          (adj.get(cid) || []).forEach(nb => {
+            const nc = getComponent(nb);
+            if (nc && nc._pos !== undefined && nb !== b.id) { sum += nc._pos; cnt++; }
+          });
+          bary.set(cid, cnt ? sum / cnt : (getComponent(cid)._pos || 0));
+        });
+        const before = ch.join(',');
+        ch.sort((x, y) => bary.get(x) - bary.get(y));
+        if (ch.join(',') !== before) changed = true;
+      });
+      assignLeafPos();
+      if (!changed) break;
     }
+
+    // ---- Map abstract (leaf, depth) → screen (x, y) by direction ---------
+    //   TB (default) top→bottom, LR left→right, RADIAL concentric, COMPACT = TB
+    //   with tighter gaps.
+    const dir = (options && options.direction) || 'TB';
+    const levelGap = (options && options.levelGap) || (dir === 'COMPACT' ? 170 : 240);
+    const nodeGap  = (options && options.nodeGap)  || (dir === 'COMPACT' ? 130 : 200);
+    const totalLeaves = buses.reduce((m, b) => Math.max(m, b._pos || 0), 0);
+    buses.forEach(b => {
+      const depth = busLayer.get(b.id) || 0;
+      const pos = b._pos || 0;
+      if (dir === 'LR') {
+        b.x = depth * levelGap;
+        b.y = pos * nodeGap;
+      } else if (dir === 'RADIAL') {
+        const ang = (pos / (totalLeaves + 1)) * 2 * Math.PI;
+        const rad = (depth + 1) * levelGap * 0.9;
+        b.x = Math.cos(ang) * rad;
+        b.y = Math.sin(ang) * rad;
+      } else {
+        b.x = pos * nodeGap;
+        b.y = depth * levelGap;
+      }
+    });
+
+    // Centre the whole drawing around the origin (both axes).
+    if (buses.length > 0) {
+      const xs = buses.map(b => b.x), ys = buses.map(b => b.y);
+      const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+      buses.forEach(b => { b.x -= midX; b.y -= midY; });
+    }
+    const spacingX = nodeGap, spacingY = levelGap;
 
     // Layer groups retained for orphan placement below.
     const layers = new Map();
@@ -902,7 +955,10 @@ const Canvas = (() => {
       bus.el.setAttribute('transform', `translate(${bus.x}, ${bus.y}) rotate(${bus.rotation || 0})`);
     });
 
-    // Place branch-type components at midpoint of their connected buses
+    // Place branch-type components at the midpoint of their two buses, pushed
+    // along the branch normal so the icon does not sit exactly on the wire
+    // (doc §8).  Transformers get a larger offset than plain lines.
+    const branchOffset = { ac_branch: 20, dc_branch: 20, transformer_2w: 30, transformer_3w: 40 };
     branches.forEach(br => {
       const linked = [];
       state.connections.forEach(c => {
@@ -911,8 +967,13 @@ const Canvas = (() => {
         if (other !== null && busIdSet.has(other)) linked.push(getComponent(other));
       });
       if (linked.length >= 2 && linked[0] && linked[1]) {
-        br.x = snapToGrid((linked[0].x + linked[1].x) / 2);
-        br.y = snapToGrid((linked[0].y + linked[1].y) / 2 - 30);
+        const a = linked[0], b = linked[1];
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const off = branchOffset[br.type] || 20;
+        br.x = snapToGrid(mx + (-dy / len) * off);
+        br.y = snapToGrid(my + (dx / len) * off);
       } else if (linked.length === 1 && linked[0]) {
         br.x = linked[0].x + 60;
         br.y = linked[0].y;
@@ -934,11 +995,13 @@ const Canvas = (() => {
     const placement = {
       external_grid:    { dir: 'up',    dx: 0,    dy: -110, sx: 70,  sy: 0 },
       generator:        { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
-      static_generator: { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
+      static_generator: { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
       pv_system:        { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
       renewable_gen:    { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      vpp:              { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
       storage:          { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
       mobile_storage:   { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      microgrid:        { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
       shunt:            { dir: 'dl',    dx: -95,  dy: 110,  sx: -70, sy: 0 },
     };
     const defaultPlace = { dir: 'down', dx: 0, dy: 110, sx: 80, sy: 70 };
@@ -1765,7 +1828,9 @@ const Canvas = (() => {
         compKey[comp.id] = t + '#' + typeCounter[t];
       });
       sys._canvas = {
-        version: 1,
+        version: 2,
+        themeMode: (typeof document !== 'undefined' &&
+                    document.documentElement.getAttribute('data-theme')) || 'dark',
         viewBox: { x: viewBox.x, y: viewBox.y, w: viewBox.w, h: viewBox.h },
         components: state.components.map(c => ({
           key: compKey[c.id],
@@ -1789,6 +1854,15 @@ const Canvas = (() => {
   // ========== Apply Canvas Layout (positions/connections/viewport) ==========
   function applyCanvasLayout(layout) {
     if (!layout || !Array.isArray(layout.components)) return;
+
+    // Restore the saved light/dark theme so a shared file keeps its appearance
+    // (doc §12).  Mirrors app.js setThemeMode (attribute + persisted choice).
+    if (layout.themeMode === 'light' || layout.themeMode === 'dark') {
+      try {
+        document.documentElement.setAttribute('data-theme', layout.themeMode);
+        localStorage.setItem('themeMode', layout.themeMode);
+      } catch (e) { /* ignore */ }
+    }
 
     // Rebuild key -> compId by walking the just-loaded components in the
     // same per-type order used when the layout was saved.

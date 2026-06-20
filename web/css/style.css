@@ -769,6 +769,21 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 
 .toolbar-spacer { flex: 1; min-width: 8px; }
+.toolbar-select {
+  align-self: center;
+  height: 34px;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--tb-text);
+  background: var(--tb-bg);
+  border: 1px solid var(--tb-border);
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.toolbar-select:hover { border-color: var(--tb-border-hover); }
+.toolbar-select:focus { outline: none; border-color: var(--tb-active-border); }
 .toolbar-aux {
   display: flex;
   align-items: center;
