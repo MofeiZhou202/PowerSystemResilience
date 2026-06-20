@@ -624,3 +624,160 @@ TEST_CASE("HPF 3-phase converter (NIC) balanced injection from operating point",
   CHECK_FALSE(r.summary().empty());
 }
 
+// ===========================================================================
+// Unbalanced three-phase source (per-phase magnitudes, decoupled line z0=z1)
+// ===========================================================================
+TEST_CASE("HPF 3-phase unbalanced source yields per-phase distortion",
+          "[harmonics][3ph][unbalanced]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.1)};  // z0 = z1 -> phases decouple
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = false;            // per-phase magnitudes, no sequence rotation
+  src.i_base_pu_a = 1.0;
+  src.i_base_pu_b = 0.5;
+  src.i_base_pu_c = 0.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+
+  ThreePhaseHarmonicInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+
+  HPF3phResult r = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r.ok);
+
+  // Decoupled phases: V_phi(5) = I_phi * (x''*5 + x1*5) = I_phi * 1.5
+  CHECK_THAT(std::abs(vph(r, 2, 5, 0)), WithinAbs(1.5, 1e-4));   // a: 1.0 * 1.5
+  CHECK_THAT(std::abs(vph(r, 2, 5, 1)), WithinAbs(0.75, 1e-4));  // b: 0.5 * 1.5
+  CHECK_THAT(std::abs(vph(r, 2, 5, 2)), WithinAbs(0.0, 1e-6));   // c: 0
+
+  double ta = 0, tb = 0, tc = 0;
+  for (const auto& b : r.bus_results)
+    if (b.bus == 2) { ta = b.thd_a_pct; tb = b.thd_b_pct; tc = b.thd_c_pct; }
+  CHECK(ta > tb);
+  CHECK(tb > tc);
+  CHECK_THAT(tc, WithinAbs(0.0, 1e-6));
+}
+
+// ===========================================================================
+// Standards compliance: IEEE 519-2014 / GB-T 14549-1993 limit checks
+// ===========================================================================
+TEST_CASE("Harmonic voltage limits per standard and voltage level",
+          "[harmonics][limits]") {
+  using HS = HarmonicStandard;
+  // IEEE 519-2014 Table 1: (individual, THD)
+  CHECK(harmonic_voltage_limits(HS::IEEE519_2014, 0.4, 5)   == std::pair(5.0, 8.0));
+  CHECK(harmonic_voltage_limits(HS::IEEE519_2014, 10.0, 5)  == std::pair(3.0, 5.0));
+  CHECK(harmonic_voltage_limits(HS::IEEE519_2014, 120.0, 5) == std::pair(1.5, 2.5));
+  CHECK(harmonic_voltage_limits(HS::IEEE519_2014, 230.0, 5) == std::pair(1.0, 1.5));
+  // GB/T 14549-1993: odd vs even individual limits differ.
+  CHECK(harmonic_voltage_limits(HS::GBT14549_1993, 0.38, 5) == std::pair(4.0, 5.0));
+  CHECK(harmonic_voltage_limits(HS::GBT14549_1993, 0.38, 2) == std::pair(2.0, 5.0));
+  CHECK(harmonic_voltage_limits(HS::GBT14549_1993, 10.0, 5) == std::pair(3.2, 4.0));
+  CHECK(harmonic_voltage_limits(HS::GBT14549_1993, 110.0, 5)== std::pair(1.6, 2.0));
+}
+
+// Build a one-bus HybridPowerSystem result by hand for controlled limit checks.
+static HybridPowerSystem one_ac_bus_sys(int bus_id, double base_kv) {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  ACBus b = ac_bus(bus_id, BusType::PQ, base_kv);
+  sys.ac.buses = {b};
+  return sys;
+}
+
+static HPFResult one_bus_result(int bus_id, std::map<int, Cx> spectrum,
+                                double v_fund = 1.0) {
+  HPFResult r;
+  r.ok = true;
+  HarmonicBusResult br;
+  br.bus = bus_id;
+  br.is_dc = false;
+  br.v_fund_pu = v_fund;
+  br.v_by_order = std::move(spectrum);
+  // THD = RSS(h>1) / v_fund
+  double acc = 0.0;
+  for (const auto& [o, v] : br.v_by_order)
+    if (o != 1) acc += std::norm(v);
+  br.thd_pct = std::sqrt(acc) / v_fund * 100.0;
+  r.ac_bus_results = {br};
+  return r;
+}
+
+TEST_CASE("Harmonic compliance flags individual and THD violations",
+          "[harmonics][limits]") {
+  using HS = HarmonicStandard;
+
+  // 10 kV bus, single 5th at 2% -> IHD 2% < 3%, THD 2% < 5% -> compliant.
+  {
+    auto sys = one_ac_bus_sys(7, 10.0);
+    auto r = one_bus_result(7, {{1, Cx(1, 0)}, {5, Cx(0.02, 0)}});
+    auto rep = check_harmonic_limits(r, sys, HS::IEEE519_2014);
+    CHECK(rep.all_compliant);
+    CHECK(rep.n_violations == 0);
+    CHECK(rep.checks.size() == 1);
+    CHECK(rep.checks[0].thd_ok);
+    CHECK(rep.checks[0].ihd_ok);
+  }
+
+  // 10 kV bus, single 5th at 4% -> IHD 4% > 3% (individual violation) but
+  // THD 4% < 5% (THD ok).  Overall non-compliant.
+  {
+    auto sys = one_ac_bus_sys(7, 10.0);
+    auto r = one_bus_result(7, {{1, Cx(1, 0)}, {5, Cx(0.04, 0)}});
+    auto rep = check_harmonic_limits(r, sys, HS::IEEE519_2014);
+    CHECK_FALSE(rep.all_compliant);
+    CHECK(rep.n_violations == 1);
+    CHECK(rep.checks[0].thd_ok);
+    CHECK_FALSE(rep.checks[0].ihd_ok);
+    CHECK(rep.checks[0].worst_ihd_order == 5);
+    CHECK_THAT(rep.checks[0].worst_ihd_pct, WithinAbs(4.0, 1e-6));
+  }
+
+  // Standard differentiator: 3rd harmonic at 3.1% on a 10 kV bus.
+  //   IEEE 519 individual limit = 3.0% -> violation.
+  //   GB/T 14549 odd limit      = 3.2% -> compliant.
+  {
+    auto sys = one_ac_bus_sys(7, 10.0);
+    auto r = one_bus_result(7, {{1, Cx(1, 0)}, {3, Cx(0.031, 0)}});
+    auto ieee = check_harmonic_limits(r, sys, HS::IEEE519_2014);
+    auto gbt = check_harmonic_limits(r, sys, HS::GBT14549_1993);
+    CHECK_FALSE(ieee.all_compliant);
+    CHECK(gbt.all_compliant);
+  }
+}
+
+TEST_CASE("Harmonic compliance end-to-end from the solver", "[harmonics][limits]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};  // 10 kV
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};  // huge 5th -> THD ~ 150 %
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  auto rep = check_harmonic_limits(r, sys, HarmonicStandard::IEEE519_2014);
+  CHECK_FALSE(rep.all_compliant);
+  CHECK(rep.n_violations >= 1);       // bus 2 (and bus 1) grossly exceed limits
+  CHECK(rep.worst_ratio > 1.0);
+  CHECK_FALSE(rep.summary().empty());
+}
+
+

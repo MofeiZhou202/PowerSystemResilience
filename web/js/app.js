@@ -566,6 +566,7 @@ const App = (() => {
     const loadImp = document.getElementById('hpfLoadImpedance')?.checked ?? true;
     const autoNic = document.getElementById('hpfAutoNic')?.checked ?? true;
     const xpp = parseFloat(document.getElementById('hpfSourceXpp')?.value || '0.2');
+    const standard = document.getElementById('hpfStandard')?.value || '';
 
     const data = await apiPost('/api/session/harmonics', {
       options: {
@@ -575,6 +576,7 @@ const App = (() => {
         auto_nic_from_vscs: autoNic,
         default_source_xpp_pu: Number.isFinite(xpp) ? xpp : 0.2,
         run_base_power_flow: true,
+        standard: standard,
       }
     });
     if (data && data.ok) {
@@ -1638,7 +1640,18 @@ const App = (() => {
       ${(data.dc_bus_results && data.dc_bus_results.length) ? `
       <div class="result-item"><span class="result-label">最大 DC 纹波 THD</span>
         <span class="result-value">${fmt(data.max_dc_thd_pct)}% @ Bus ${data.max_dc_thd_bus}</span></div>` : ''}
+      ${data.compliance ? `
+      <div class="result-item"><span class="result-label">畸变限值 (${data.compliance.standard})</span>
+        <span class="result-value ${data.compliance.all_compliant ? 'result-converged' : 'result-failed'}">
+          ${data.compliance.all_compliant ? '全部合格' : (data.compliance.n_violations + ' 处越限')}</span></div>` : ''}
     `;
+
+    // Per-bus compliance lookup for row highlighting.
+    const compByBus = {};
+    if (data.compliance && Array.isArray(data.compliance.checks)) {
+      data.compliance.checks.forEach(c => { compByBus[c.bus] = c; });
+    }
+    const hasComp = Object.keys(compByBus).length > 0;
 
     const busMap = Canvas.getCompBusMap();
     // Build a compact spectrum string (top contributing orders) for a bus row.
@@ -1656,14 +1669,27 @@ const App = (() => {
       .sort((a, b) => b.thd_pct - a.thd_pct);
     if (acRows.length) {
       let html = '<table><thead><tr><th>Bus</th><th>V<sub>1</sub>(p.u.)</th>' +
-                 '<th>THD<sub>V</sub>(%)</th><th>主要谐波</th></tr></thead><tbody>';
+                 '<th>THD<sub>V</sub>(%)</th><th>主要谐波</th>' +
+                 (hasComp ? '<th>限值校核</th>' : '') + '</tr></thead><tbody>';
       acRows.forEach(b => {
         const compId = busMap.ac ? busMap.ac[b.bus] : undefined;
         const attr = compId !== undefined
           ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const hot = b.thd_pct >= 5.0 ? ' style="color:var(--red);font-weight:600"' : '';
+        let compCell = '';
+        if (hasComp) {
+          const c = compByBus[b.bus];
+          if (c) {
+            const ok = c.compliant;
+            const label = ok ? '合格'
+              : (!c.thd_ok ? `THD>${fmt(c.thd_limit_pct, 1)}%` : `h${c.worst_ihd_order}>${fmt(c.ihd_limit_pct, 1)}%`);
+            compCell = `<td style="color:${ok ? 'var(--green)' : 'var(--red)'};font-weight:600">${label}</td>`;
+          } else {
+            compCell = '<td>—</td>';
+          }
+        }
         html += `<tr${attr}><td>${b.bus}</td><td>${fmt(b.v_fund_pu, 4)}</td>` +
-                `<td${hot}>${fmt(b.thd_pct)}</td><td>${specStr(b.harmonics, 1)}</td></tr>`;
+                `<td${hot}>${fmt(b.thd_pct)}</td><td>${specStr(b.harmonics, 1)}</td>${compCell}</tr>`;
       });
       html += '</tbody></table>';
       acDiv.innerHTML = html;

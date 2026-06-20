@@ -35,6 +35,7 @@
 #include <complex>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
@@ -360,5 +361,61 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
 /// Convenience overload: converters auto-modelled, no explicit sources.
 HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
                                            const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Harmonic distortion limit compliance (IEEE 519-2014 / GB-T 14549-1993)
+// ═══════════════════════════════════════════════════════════════════════════
+// Post-processes a harmonic power-flow result against a standard's voltage
+// distortion limits.  Limits depend on the bus nominal voltage level; GB-T also
+// distinguishes odd vs even individual-harmonic limits.
+
+enum class HarmonicStandard {
+  IEEE519_2014,    ///< IEEE 519-2014 Table 1 (voltage distortion limits)
+  GBT14549_1993,   ///< GB/T 14549-1993 public-grid voltage harmonic limits
+};
+
+struct HarmonicLimitCheck {
+  int    bus{0};
+  bool   is_dc{false};
+  int    phase{-1};        ///< -1 single-phase/aggregate; 0/1/2 = a/b/c
+  double base_kv{0.0};
+
+  double thd_pct{0.0};
+  double thd_limit_pct{0.0};
+  bool   thd_ok{true};
+
+  int    worst_ihd_order{0};   ///< order of the largest individual distortion
+  double worst_ihd_pct{0.0};   ///< |V_h|/|V_1| * 100 at that order
+  double ihd_limit_pct{0.0};   ///< limit applicable to that order
+  bool   ihd_ok{true};
+
+  bool   compliant{true};      ///< thd_ok && ihd_ok
+};
+
+struct HarmonicComplianceReport {
+  HarmonicStandard standard{HarmonicStandard::IEEE519_2014};
+  std::vector<HarmonicLimitCheck> checks;
+  bool all_compliant{true};
+  int  n_violations{0};
+  int  worst_bus{-1};          ///< bus with the largest THD/limit ratio
+  double worst_ratio{0.0};     ///< max over buses of thd_pct / thd_limit_pct
+  std::string summary() const;
+};
+
+/// Look up the (THD limit, individual-harmonic limit) [%] for a bus at the given
+/// nominal voltage and harmonic order under the chosen standard.
+std::pair<double, double> harmonic_voltage_limits(HarmonicStandard standard,
+                                                  double base_kv, int order);
+
+/// Check a single-phase / positive-sequence result against a standard.  The bus
+/// nominal voltages are taken from the system model (AC and DC buses).
+HarmonicComplianceReport check_harmonic_limits(const HPFResult& result,
+                                               const HybridPowerSystem& sys,
+                                               HarmonicStandard standard);
+
+/// Check a three-phase result against a standard (one entry per bus & phase).
+HarmonicComplianceReport check_harmonic_limits(const HPF3phResult& result,
+                                               const ThreePhaseACSystem& sys,
+                                               HarmonicStandard standard);
 
 }  // namespace hacdcpf::harmonics

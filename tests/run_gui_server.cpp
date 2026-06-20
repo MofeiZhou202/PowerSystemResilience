@@ -5528,6 +5528,34 @@ int main(int argc, char** argv) {
             {"to_bus", bf.to_bus}, {"thd_i_pct", bf.thd_i_pct}, {"harmonics", spec}});
       }
 
+      // Optional harmonic-distortion limit compliance (IEEE 519 / GB-T 14549).
+      std::string std_name;
+      if (j.contains("options")) std_name = j["options"].value("standard", std::string(""));
+      if (!std_name.empty() && r.ok) {
+        hacdcpf::harmonics::HarmonicStandard hs =
+            (std_name == "GBT14549" || std_name == "GBT14549_1993")
+                ? hacdcpf::harmonics::HarmonicStandard::GBT14549_1993
+                : hacdcpf::harmonics::HarmonicStandard::IEEE519_2014;
+        auto rep = hacdcpf::harmonics::check_harmonic_limits(r, sys, hs);
+        json comp;
+        comp["standard"] = (hs == hacdcpf::harmonics::HarmonicStandard::GBT14549_1993)
+                               ? "GB/T 14549-1993" : "IEEE 519-2014";
+        comp["all_compliant"] = rep.all_compliant;
+        comp["n_violations"] = rep.n_violations;
+        comp["worst_bus"] = rep.worst_bus;
+        comp["worst_ratio"] = rep.worst_ratio;
+        comp["checks"] = json::array();
+        for (const auto& c : rep.checks) {
+          comp["checks"].push_back(json{
+            {"bus", c.bus}, {"base_kv", c.base_kv}, {"thd_pct", c.thd_pct},
+            {"thd_limit_pct", c.thd_limit_pct}, {"thd_ok", c.thd_ok},
+            {"worst_ihd_order", c.worst_ihd_order}, {"worst_ihd_pct", c.worst_ihd_pct},
+            {"ihd_limit_pct", c.ihd_limit_pct}, {"ihd_ok", c.ihd_ok},
+            {"compliant", c.compliant}});
+        }
+        out["compliance"] = comp;
+      }
+
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {

@@ -138,6 +138,13 @@
     <label class="sub-label">源次暂态电抗 x''
       <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:70px"/>
     </label>
+    <label class="sub-label">畸变限值标准
+      <select id="hpfStandard" title="谐波电压畸变限值标准">
+        <option value="">不校核</option>
+        <option value="IEEE519">IEEE 519-2014</option>
+        <option value="GBT14549">GB/T 14549-1993</option>
+      </select>
+    </label>
     <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波潮流">运行谐波潮流</button>
   </div>
   <!-- Topology reconstruction -->

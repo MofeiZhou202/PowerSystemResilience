@@ -23,6 +23,7 @@
 #include <map>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -1052,6 +1053,144 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
 HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
                                            const HPFOptions& opt) {
   return solve_harmonic_power_flow_3ph(sys, ThreePhaseHarmonicInputs{}, opt);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Harmonic distortion limit compliance (IEEE 519-2014 / GB-T 14549-1993)
+// ═══════════════════════════════════════════════════════════════════════════
+std::pair<double, double> harmonic_voltage_limits(HarmonicStandard standard,
+                                                  double base_kv, int order) {
+  if (standard == HarmonicStandard::IEEE519_2014) {
+    // IEEE 519-2014 Table 1 — voltage distortion limits (individual, THD).
+    if (base_kv <= 1.0)   return {5.0, 8.0};
+    if (base_kv <= 69.0)  return {3.0, 5.0};
+    if (base_kv <= 161.0) return {1.5, 2.5};
+    return {1.0, 1.5};
+  }
+  // GB/T 14549-1993 — public-grid voltage harmonic limits.
+  // Returns the individual-harmonic limit for the order's parity (odd/even).
+  double thd, odd, even;
+  if (base_kv <= 1.0)        { thd = 5.0; odd = 4.0; even = 2.0; }
+  else if (base_kv <= 20.0)  { thd = 4.0; odd = 3.2; even = 1.6; }
+  else if (base_kv <= 66.0)  { thd = 3.0; odd = 2.4; even = 1.2; }
+  else if (base_kv <= 110.0) { thd = 2.0; odd = 1.6; even = 0.8; }
+  else                       { thd = 1.5; odd = 1.2; even = 0.6; }
+  const double ihd = (order % 2 == 0) ? even : odd;
+  return {ihd, thd};
+}
+
+namespace {
+
+// Evaluate one voltage spectrum against a standard.  fundamental = 1 (AC) or 0 (DC).
+HarmonicLimitCheck eval_limit_check(const std::map<int, Cx>& v_by_order,
+                                    int fundamental, double v_fund, double thd_pct,
+                                    int bus, bool is_dc, int phase, double base_kv,
+                                    HarmonicStandard standard) {
+  HarmonicLimitCheck c;
+  c.bus = bus;
+  c.is_dc = is_dc;
+  c.phase = phase;
+  c.base_kv = base_kv;
+  c.thd_pct = thd_pct;
+
+  // THD limit: order-independent component of the standard (use order 3 as a
+  // representative odd order to retrieve the THD column).
+  c.thd_limit_pct = harmonic_voltage_limits(standard, base_kv, 3).second;
+  c.thd_ok = thd_pct <= c.thd_limit_pct + 1e-9;
+
+  bool ihd_ok = true;
+  double worst = -1.0;
+  int worst_order = 0;
+  double worst_limit = 0.0;
+  if (v_fund > 1e-12) {
+    for (const auto& [ord, v] : v_by_order) {
+      if (ord == fundamental) continue;
+      const double ihd = std::abs(v) / v_fund * 100.0;
+      const double lim = harmonic_voltage_limits(standard, base_kv, ord).first;
+      if (ihd > lim + 1e-9) ihd_ok = false;
+      if (ihd > worst) { worst = ihd; worst_order = ord; worst_limit = lim; }
+    }
+  }
+  c.worst_ihd_order = worst_order;
+  c.worst_ihd_pct = (worst < 0.0) ? 0.0 : worst;
+  c.ihd_limit_pct = worst_limit;
+  c.ihd_ok = ihd_ok;
+  c.compliant = c.thd_ok && c.ihd_ok;
+  return c;
+}
+
+void finalize_report(HarmonicComplianceReport& rep) {
+  rep.all_compliant = true;
+  rep.n_violations = 0;
+  rep.worst_ratio = 0.0;
+  rep.worst_bus = -1;
+  for (const auto& c : rep.checks) {
+    if (!c.compliant) {
+      rep.all_compliant = false;
+      ++rep.n_violations;
+    }
+    if (c.thd_limit_pct > 1e-9) {
+      double ratio = c.thd_pct / c.thd_limit_pct;
+      if (ratio > rep.worst_ratio) {
+        rep.worst_ratio = ratio;
+        rep.worst_bus = c.bus;
+      }
+    }
+  }
+}
+
+}  // namespace
+
+std::string HarmonicComplianceReport::summary() const {
+  std::ostringstream os;
+  os << "Harmonic limits ("
+     << (standard == HarmonicStandard::IEEE519_2014 ? "IEEE 519-2014"
+                                                    : "GB/T 14549-1993")
+     << "): " << (all_compliant ? "COMPLIANT" : "VIOLATIONS")
+     << "\n  checks: " << checks.size() << ", violations: " << n_violations
+     << "\n  worst THD/limit ratio: " << worst_ratio << " at bus " << worst_bus;
+  return os.str();
+}
+
+HarmonicComplianceReport check_harmonic_limits(const HPFResult& result,
+                                               const HybridPowerSystem& sys,
+                                               HarmonicStandard standard) {
+  HarmonicComplianceReport rep;
+  rep.standard = standard;
+  std::unordered_map<int, double> ac_kv;
+  for (const auto& b : sys.ac.buses) ac_kv[b.index] = b.base_kv;
+  // Voltage distortion limits are defined for AC buses only.
+  for (const auto& br : result.ac_bus_results) {
+    double kv = ac_kv.count(br.bus) ? ac_kv.at(br.bus) : 0.0;
+    rep.checks.push_back(eval_limit_check(br.v_by_order, 1, br.v_fund_pu,
+                                          br.thd_pct, br.bus, false, -1, kv,
+                                          standard));
+  }
+  finalize_report(rep);
+  return rep;
+}
+
+HarmonicComplianceReport check_harmonic_limits(const HPF3phResult& result,
+                                               const ThreePhaseACSystem& sys,
+                                               HarmonicStandard standard) {
+  HarmonicComplianceReport rep;
+  rep.standard = standard;
+  std::unordered_map<int, double> kv;
+  for (const auto& b : sys.buses) kv[b.index] = b.base_kv;
+  for (const auto& br : result.bus_results) {
+    double bkv = kv.count(br.bus) ? kv.at(br.bus) : 0.0;
+    rep.checks.push_back(eval_limit_check(br.v_by_order_a, 1, br.v_fund_pu_a,
+                                          br.thd_a_pct, br.bus, false, 0, bkv,
+                                          standard));
+    rep.checks.push_back(eval_limit_check(br.v_by_order_b, 1, br.v_fund_pu_b,
+                                          br.thd_b_pct, br.bus, false, 1, bkv,
+                                          standard));
+    rep.checks.push_back(eval_limit_check(br.v_by_order_c, 1, br.v_fund_pu_c,
+                                          br.thd_c_pct, br.bus, false, 2, bkv,
+                                          standard));
+  }
+  finalize_report(rep);
+  return rep;
 }
 
 }  // namespace hacdcpf::harmonics
