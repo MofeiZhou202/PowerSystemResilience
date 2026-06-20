@@ -110,9 +110,32 @@ struct DistributionResilienceModelStats {
 
 // ── Fault / transport description ────────────────────────────────────────────
 
+/// @brief Distinguishes AC vs DC branch faults (used by typhoon scenario
+/// generation, which can place faults on either network).
+enum class ResilienceBranchKind {
+  AC,
+  DC,
+};
+
+const char* to_string(ResilienceBranchKind kind);
+ResilienceBranchKind resilience_branch_kind_from_string(const std::string& value);
+
 /// @brief Description of a single branch fault used to drive the resilience study.
 struct DistributionResilienceFault {
+  DistributionResilienceFault() = default;
+  DistributionResilienceFault(int ac_index, double start_hr, double repair_hr,
+                              std::string fault_name = {})
+      : ac_branch_index(ac_index),
+        branch_kind(ResilienceBranchKind::AC),
+        branch_index(ac_index),
+        outage_start_hr(start_hr),
+        repair_duration_hr(repair_hr),
+        name(std::move(fault_name)) {}
+
+  // Legacy field: when branch_index is not set, this is interpreted as an AC branch.
   int ac_branch_index{0};
+  ResilienceBranchKind branch_kind{ResilienceBranchKind::AC};
+  int branch_index{0};
   double outage_start_hr{0.0};
   double repair_duration_hr{6.0};
   std::string name;

@@ -43,6 +43,7 @@
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序潮流</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
+  <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
   <button id="moduleResilience"   class="module-btn" data-module="resilience">弹性评估</button>
 </div>
 
@@ -107,7 +108,13 @@
     <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
     <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
     <button id="btnImportGreenCert"   class="toolbar-btn" title="导入绿证数据 (JSON / Excel / CSV)">绿证数据<br>导入</button>
+    <button id="btnImportGeneratedRegularScenario" class="toolbar-btn" title="导入场景生成模块导出的常规场景 JSON">导入生成<br>场景</button>
+    <label class="sub-label sub-checkbox" title="勾选后运行时序潮流时使用导入生成场景中的时序数据；不勾选则沿用当前手动/默认时序配置">
+      <input id="regUseScenarioTimeSeries" type="checkbox"/>
+      <span>使用场景时序</span>
+    </label>
     <input type="file" id="fileImportGreenCert" accept=".json,.xlsx,.xls,.csv" style="display:none"/>
+    <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
     <label class="sub-label">仿真时间(小时)
       <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
     </label>
@@ -143,8 +150,38 @@
     <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
       <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
     </label>
+    <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+    <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
     <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
     <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>
+  </div>
+  <!-- Scenario generation -->
+  <div class="sub-section" data-sub="scenarioGeneration" hidden>
+    <label class="sub-label" title="默认模拟 SSP126/245/370/585 与 2050/2080 全部组合；输入 5 表示每个 SSP×年份组合聚 5 类，总计 5×4×2 类。">常规场景每个 SSP/年份聚类数
+      <input id="scenRegularClusters" type="number" value="8" min="1" max="100" step="1"/>
+    </label>
+    <label class="sub-label" title="按可靠性 FMEA 模块枚举 N-1：AC 发电机、AC 线路、DC 线路、VSC、AC 静态电源、AC 新能源、AC 储能、2/3 绕组变压器；候选数自动为聚类数×10。">可靠性场景聚类个数
+      <input id="scenReliabilityClusters" type="number" value="4" min="1" max="50" step="1"/>
+    </label>
+    <label class="sub-label" title="先按 1-12 月生成并分类台风样本，分类使用不含初始时刻的最大风速；每个台风等级单独聚类，候选数自动为聚类数×10。">弹性场景每个台风等级聚类数
+      <input id="scenResilienceClusters" type="number" value="5" min="1" max="50" step="1"/>
+    </label>
+    <label class="sub-label" title="hybrid 方法会保留风险尾部锚点，并与旧 k-medoids 做对比">场景约减方法
+      <select id="scenClusteringMethod">
+        <option value="hybrid_kmedoids_tail_5pct" selected>混合密度感知 k-medoids + 尾部锚点</option>
+        <option value="weighted_k_medoids">旧 weighted k-medoids</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用后返回 hybrid 与旧 k-medoids 的覆盖率/距离对比">
+      <input id="scenCompareBaseline" type="checkbox" checked/>
+      <span>对比旧 k-medoids</span>
+    </label>
+    <button id="btnGenerateScenarios" class="toolbar-btn run-btn" title="按聚类数自动生成候选并聚类">生成场景</button>
+    <button id="btnExportRegularScenarioJson" class="toolbar-btn" title="导出常规代表场景为可导入算例 JSON">导出常规<br>JSON</button>
+    <button id="btnExportReliabilityScenarioJson" class="toolbar-btn" title="导出可靠性代表场景为可导入算例 JSON">导出可靠<br>JSON</button>
+    <button id="btnExportResilienceScenarioJson" class="toolbar-btn" title="导出弹性代表场景为可导入算例 JSON">导出弹性<br>JSON</button>
+    <button id="btnExportScenarioResults" class="toolbar-btn" title="将完整场景生成结果导出为 JSON">完整结果<br>导出</button>
+    <button id="btnExportScenarioPlots" class="toolbar-btn" title="导出当前场景生成图表 PNG">导出图表</button>
   </div>
   <!-- Resilience -->
   <div class="sub-section" data-sub="resilience" hidden>
@@ -160,7 +197,23 @@
     <label class="sub-label" title="故障持续时长 (小时)">故障时长
       <input id="resFaultDuration" type="number" value="4" min="0" step="0.5"/>
     </label>
-    <button id="btnGenExtremeScenario" class="toolbar-btn" title="基于风险/极端天气生成故障场景">极端场景<br>生成</button>
+    <label class="sub-label" title="按 GB/T 19201-2006 热带气旋强度等级生成台风场景">台风强度
+      <select id="resTyphoonIntensity">
+        <option value="TD">热带低压 TD</option>
+        <option value="TS">热带风暴 TS</option>
+        <option value="STS">强热带风暴 STS</option>
+        <option value="TY" selected>台风 TY</option>
+        <option value="STY">强台风 STY</option>
+        <option value="SuperTY">超强台风 SuperTY</option>
+      </select>
+    </label>
+    <button id="btnGenExtremeScenario" class="toolbar-btn" title="按台风强度等级从样本库抽取轨迹，自动生成故障序列并填入故障输入框">台风场景<br>生成</button>
+    <button id="btnImportGeneratedResilienceScenario" class="toolbar-btn" title="导入场景生成模块导出的弹性场景 JSON">导入生成<br>场景</button>
+    <input type="file" id="fileImportGeneratedResilienceScenario" accept=".json" style="display:none"/>
+    <label class="sub-label sub-checkbox" title="勾选后优先使用导入场景中的 48h 时序配置和故障序列">
+      <input id="resUseScenarioTimeSeries" type="checkbox"/>
+      <span>使用场景时序</span>
+    </label>
     <label class="sub-label" title="故障元件修复时长 (小时)">修复时长
       <input id="resRepairDuration" type="number" value="6" min="0" step="0.5"/>
     </label>
@@ -602,6 +655,15 @@
             </div>
           </div>
         </div><!-- /result-group reliability -->
+        <div class="result-group" data-result-group="scenarioGeneration">
+          <div class="topo-section">
+            <h4>场景生成结果</h4>
+            <div id="scenarioGenerationCharts" class="scenario-generation-charts"></div>
+            <div id="scenarioGenerationResults" class="topo-table-wrap">
+              <p class="empty-hint">生成场景后查看常规、可靠性 N-1 和弹性台风聚类结果</p>
+            </div>
+          </div>
+        </div><!-- /result-group scenarioGeneration -->
         <div class="result-group" data-result-group="resilience">
           <div class="topo-section">
             <h4>弹性评估结果</h4>

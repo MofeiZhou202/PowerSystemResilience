@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -916,6 +917,22 @@ void assign_mess_movements(double hour,
 }
 
 }  // namespace
+
+const char* to_string(ResilienceBranchKind kind) {
+  switch (kind) {
+    case ResilienceBranchKind::AC: return "AC";
+    case ResilienceBranchKind::DC: return "DC";
+  }
+  return "AC";
+}
+
+ResilienceBranchKind resilience_branch_kind_from_string(const std::string& value) {
+  std::string v;
+  v.reserve(value.size());
+  for (char c : value) v.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+  if (v == "DC" || v == "DC_BRANCH" || v == "DCBRANCH") return ResilienceBranchKind::DC;
+  return ResilienceBranchKind::AC;
+}
 
 /// Build a PF snapshot for a single resilience step and solve it.
 void run_step_power_flow(const HybridPowerSystem& pf_template,

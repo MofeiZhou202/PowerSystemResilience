@@ -503,8 +503,18 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
 #resultsContent[data-active-group="timeSeries"]   .result-group[data-result-group="timeSeries"],
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
+#resultsContent[data-active-group="scenarioGeneration"] .result-group[data-result-group="scenarioGeneration"],
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"] {
   display: block;
+}
+.scenario-generation-charts {
+  width: 100%;
+  margin: 6px 0 10px;
+}
+.scenario-generation-charts h4 {
+  margin: 8px 0 6px;
+  font-size: 12px;
+  color: var(--accent);
 }
 
 /* ===== Bottom Console ===== */

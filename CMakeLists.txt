@@ -142,6 +142,8 @@ set(HACDCPF_SOURCES
   src/graph/result_recovery.cpp
   # ── analysis ────────────────────────────────────────────────────────
   src/analysis/short_circuit.cpp
+  src/analysis/typhoon_resilience.cpp
+  src/analysis/scenario_generation.cpp
   src/reliability/three_stage_reliability.cpp
   # ── analysis stubs ───────────────────────────────────────────────────
   src/carbon_analysis/carbon_analysis.cpp

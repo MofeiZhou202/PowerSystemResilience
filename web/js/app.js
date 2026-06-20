@@ -48,6 +48,11 @@ const App = (() => {
   let _lastTspfData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
+  let _lastScenarioGenerationData = null;
+  let _lastScenarioBaseSystemJson = null;
+  let _importedGeneratedScenario = null;
+  let _lastImportedGeneratedScenarioKey = '';
+  let _generatedScenarioTimeSeriesActive = false;
 
   // ========== Per-module result group switching ==========
   // Each calc display function calls setActiveResultGroup(name). CSS in
@@ -624,12 +629,86 @@ const App = (() => {
     return { num_steps: lines.length - 1, step_duration_hr: 1.0, profiles };
   }
 
+  // ===== Scenario generation: outer-scope helpers (import / apply scenario time-series) =====
+  function isUsableGeneratedScenarioTimeSeries(ts) {
+    if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
+    const numSteps = Number(ts.num_steps || ts.profiles[0]?.values?.length || 0);
+    return numSteps > 0 && ts.profiles.some(p => Array.isArray(p?.values) && p.values.length > 0);
+  }
+
+  function getImportedGeneratedScenarioCase(targetFamily = null) {
+    const caseJson = _importedGeneratedScenario?.case || null;
+    if (!caseJson) return null;
+    const family = caseJson?._generated_scenario?.family || _importedGeneratedScenario?.family || '';
+    if (targetFamily && family && family !== 'unknown' && family !== targetFamily) return null;
+    return caseJson;
+  }
+
+  function getImportedGeneratedScenarioTimeSeries(targetFamily = null) {
+    const caseJson = getImportedGeneratedScenarioCase(targetFamily);
+    const ts = caseJson?._time_series;
+    return isUsableGeneratedScenarioTimeSeries(ts) ? ts : null;
+  }
+
+  function hasUsableGeneratedScenarioTimeSeries(targetFamily = null) {
+    return !!getImportedGeneratedScenarioTimeSeries(targetFamily);
+  }
+
+  async function applyGeneratedScenarioTimeSeries(caseJson) {
+    const ts = caseJson?._time_series;
+    if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
+    if (_generatedScenarioTimeSeriesActive) return true;
+    const body = {
+      num_steps: ts.num_steps || ts.profiles[0]?.values?.length || 24,
+      step_duration_hr: ts.step_duration_hr || 1.0,
+      profiles: ts.profiles,
+      load_profile_map: ts.binding?.load_profile_map || [],
+      assign_all_loads_to: Number.isInteger(ts.binding?.assign_all_loads_to) ? ts.binding.assign_all_loads_to : -1,
+      assign_all_pv_to: Number.isInteger(ts.binding?.assign_all_pv_to) ? ts.binding.assign_all_pv_to : -1,
+    };
+    const r = await fetch('/api/session/set_ts_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'set_ts_config failed');
+    _generatedScenarioTimeSeriesActive = true;
+    const simHr = document.getElementById('simulationHours');
+    if (simHr) simHr.value = String(j.num_steps || body.num_steps);
+    log(`生成场景时序已恢复：${j.num_steps}步，profiles=${j.num_profiles}`, 'success');
+    return true;
+  }
+
+  async function resetGeneratedScenarioTimeSeriesIfActive(numSteps = null) {
+    if (!_generatedScenarioTimeSeriesActive) return false;
+    const simHours = Number.isFinite(numSteps) && numSteps > 0
+      ? numSteps
+      : (parseInt(document.getElementById('simulationHours')?.value, 10) || 24);
+    const r = await fetch('/api/session/set_ts_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ num_steps: simHours, step_duration_hr: 1.0 }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'set_ts_config reset failed');
+    _generatedScenarioTimeSeriesActive = false;
+    log(`已切回默认时序配置：${j.num_steps}步，profiles=${j.num_profiles}`, 'info');
+    return true;
+  }
+
   async function runTimeSeriesPF() {
     setStatus('时序潮流计算中...', 'busy');
 
     if (!await syncToBackend(true)) {
       setStatus('同步失败', 'error');
       return;
+    }
+
+    // If "使用场景时序" is enabled, bind imported regular-scenario profiles first.
+    if (document.getElementById('regUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('regular')) {
+      try { await applyGeneratedScenarioTimeSeries(getImportedGeneratedScenarioCase('regular')); }
+      catch (e) { log(`应用生成场景时序失败：${e.message || e}`, 'warn'); }
     }
 
     // Read parameters from the inline time-series sub-toolbar.
@@ -2018,13 +2097,47 @@ const App = (() => {
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
       };
     }
-    document.getElementById('btnGenExtremeScenario')?.addEventListener('click', () => {
-      const params = collectResilienceParams();
-      log(`极端场景生成：当前参数 ${JSON.stringify(params)}（TODO: 后端接口待对接）`, 'info');
+    document.getElementById('btnGenExtremeScenario')?.addEventListener('click', async () => {
+      const intensity = document.getElementById('resTyphoonIntensity')?.value || 'TY';
+      setStatus('正在按台风强度生成台风故障序列...', 'busy');
+      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+      const data = await apiPost('/api/session/generate_typhoon_faults', {
+        intensity_category: intensity,
+        horizon_hours: 48,
+        time_step_hr: 1.0,
+        catalog_samples_per_month: 100,
+      });
+      if (!data) { setStatus('台风故障生成失败', 'error'); return; }
+      // SIM's resilience engine acts on AC branches; map AC faults into the
+      // single-value resilience inputs (locations list + representative timing).
+      const typed = Array.isArray(data.fault_locations_typed) ? data.fault_locations_typed : [];
+      const acFromTyped = typed.filter(r => String(r.branch_type || 'AC').toUpperCase() === 'AC')
+                               .map(r => r.branch_index ?? r.branch_id);
+      const acLocations = acFromTyped.length ? acFromTyped
+                          : (Array.isArray(data.fault_locations) ? data.fault_locations : []);
+      const starts = Array.isArray(data.fault_start_hours) ? data.fault_start_hours.map(Number).filter(Number.isFinite) : [];
+      const repairs = Array.isArray(data.repair_durations) ? data.repair_durations.map(Number).filter(Number.isFinite) : [];
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+      setVal('resFaultLocations', acLocations.join(','));
+      setVal('resFaultCount', String(acLocations.length));
+      if (starts.length) setVal('resFaultStartHour', String(Math.min(...starts)));
+      if (repairs.length) setVal('resRepairDuration', String(Math.max(...repairs)));
+      const requestedLabel = data.requested_intensity_category_zh || data.requested_intensity_category || intensity;
+      const selectedLabel = data.selected_intensity_category_zh || data.selected_intensity_category || requestedLabel;
+      const vmax = Number(data.selected_track_max_vmax_ms);
+      const vmaxText = Number.isFinite(vmax) ? `，轨迹最大风速 ${vmax.toFixed(2)} m/s` : '';
+      const fallbackText = data.used_category_fallback ? `；请求等级 ${requestedLabel} 样本不足，已回退为 ${selectedLabel}` : '';
+      log(`${selectedLabel}台风场景已生成：${acLocations.length} 个 AC 故障已填入故障位置${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
+      setStatus('台风故障序列已填入');
     });
     async function runResilience() {
       setStatus('弹性评估中...', 'busy');
       if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+      // If "使用场景时序" is enabled, bind imported resilience-scenario 48h profiles first.
+      if (document.getElementById('resUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('resilience')) {
+        try { await applyGeneratedScenarioTimeSeries(getImportedGeneratedScenarioCase('resilience')); }
+        catch (e) { log(`应用生成场景时序失败：${e.message || e}`, 'warn'); }
+      }
       const p = collectResilienceParams();
       const params = {
         default_fault_count: p.fault_count,
@@ -2099,6 +2212,1070 @@ const App = (() => {
     }
 
     document.getElementById('btnRunResilience')?.addEventListener('click', runResilience);
+
+    // ===== Scenario generation module (场景生成) — inner-scope functions + listeners =====
+    function scenNum(id, dflt) {
+      const value = Number(document.getElementById(id)?.value);
+      return Number.isFinite(value) ? value : dflt;
+    }
+
+    function scenChecked(id, dflt = false) {
+      const el = document.getElementById(id);
+      return el ? el.checked === true : dflt;
+    }
+
+    function collectScenarioGenerationOptions() {
+      const regularClusters = Math.max(1, Math.round(scenNum('scenRegularClusters', 8)));
+      const reliabilityClusters = Math.max(1, Math.round(scenNum('scenReliabilityClusters', 4)));
+      const resilienceClusters = Math.max(1, Math.round(scenNum('scenResilienceClusters', 5)));
+      const intensityLevels = ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'];
+      const sspLevels = ['ssp126', 'ssp245', 'ssp370', 'ssp585'];
+      const years = [2050, 2080];
+      return {
+        regular: {
+          enabled: scenChecked('scenRegularEnabled', true),
+          candidate_count: regularClusters * 10 * sspLevels.length * years.length,
+          cluster_count: regularClusters,
+          num_steps: 8760,
+          ssp: 'all',
+          year: 0,
+          ssp_levels: sspLevels,
+          years,
+        },
+        reliability: {
+          enabled: scenChecked('scenReliabilityEnabled', true),
+          candidates_per_contingency: reliabilityClusters * 10,
+          cluster_count_per_contingency: reliabilityClusters,
+          num_steps: 1,
+          include_ac_branches: true,
+          include_dc_branches: true,
+          include_ac_buses: false,
+          include_dc_buses: false,
+          include_vsc_converters: true,
+          include_dcdc_converters: false,
+          include_generators: true,
+          include_loads: false,
+          include_storage: true,
+          include_vpps: false,
+          include_microgrids: false,
+          max_contingencies: 0,
+        },
+        resilience: {
+          enabled: scenChecked('scenResilienceEnabled', true),
+          intensity_levels: intensityLevels,
+          candidates_per_intensity: resilienceClusters * 10,
+          default_cluster_count: resilienceClusters,
+          cluster_count_by_intensity: Object.fromEntries(intensityLevels.map(level => [level, resilienceClusters])),
+          num_steps: 48,
+        },
+        perturbation: {
+          seed: 1,
+          load_sigma: 0.08,
+          renewable_sigma: 0.12,
+          load_min_multiplier: 0.75,
+          load_max_multiplier: 1.25,
+          renewable_min_multiplier: 0.0,
+          renewable_max_multiplier: 1.20,
+          enable_storage_soc_perturbation: true,
+          storage_soc_sigma: 0.10,
+          storage_soc_min_multiplier: 0.75,
+          storage_soc_max_multiplier: 1.25,
+          block_hours: 24,
+          enable_load_perturbation: true,
+          enable_renewable_perturbation: true,
+        },
+        typhoon_impact: {
+          pv_transition_hours: 3,
+          load_wind_start: 25.0,
+          load_wind_full: 50.0,
+          load_max_reduction: 0.4,
+        },
+        clustering: {
+          method: document.getElementById('scenClusteringMethod')?.value || 'hybrid_kmedoids_tail_5pct',
+          max_iterations: 50,
+          robust_scale: true,
+          continuous_weight: 1.0,
+          outage_hamming_weight: 1.0,
+          include_tail_anchors: true,
+          compare_baseline: scenChecked('scenCompareBaseline', true),
+          freeze_anchors: true,
+          tail_fraction: 0.05,
+          source_tail_quantile: 0.95,
+          coupling_quantile: 0.90,
+          boundary_fraction: 0.02,
+          regime_weight: 1.0,
+        },
+      };
+    }
+
+    function firstProfileSummary(cluster, profileName) {
+      const profiles = cluster?.representative?.time_series?.profiles || [];
+      const profile = profiles.find(p => p.name === profileName);
+      const values = Array.isArray(profile?.values) ? profile.values : [];
+      if (!values.length) return '-';
+      const sum = values.reduce((a, b) => a + Number(b || 0), 0);
+      const max = values.reduce((a, b) => Math.max(a, Number(b || 0)), -Infinity);
+      return `${sum.toFixed(2)} / 峰值 ${Number.isFinite(max) ? max.toFixed(2) : '-'}`;
+    }
+
+    function profileValuesFromCandidate(candidate, profileName) {
+      const profiles = candidate?.time_series?.profiles || [];
+      const profile = profiles.find(p => p.name === profileName);
+      return Array.isArray(profile?.values) ? profile.values.map(v => Number(v || 0)) : [];
+    }
+
+    function numericFeature(cluster, key) {
+      const value = cluster?.representative?.features?.[key];
+      return Number.isFinite(Number(value)) ? Number(value) : 0;
+    }
+
+    function eventMaxWind(event) {
+      const explicit = Number(event?.selected_track_max_vmax_ms);
+      if (Number.isFinite(explicit) && explicit > 0) return explicit;
+      const track = Array.isArray(event?.track) ? event.track : [];
+      const start = track.length > 1 ? 1 : 0;
+      let vmax = 0;
+      for (let i = start; i < track.length; i += 1) {
+        const v = Number(track[i]?.vmax_ms);
+        if (Number.isFinite(v)) vmax = Math.max(vmax, v);
+      }
+      return vmax;
+    }
+
+    function parseRegularId(id) {
+      const parts = String(id || '').split(':');
+      return { ssp: parts[1] || 'unknown', year: Number(parts[2]) || 0 };
+    }
+
+    function clamp01(value) {
+      const v = Number(value);
+      if (!Number.isFinite(v)) return 0;
+      return Math.max(0, Math.min(1, v));
+    }
+
+    function finiteNumber(value, fallback = NaN) {
+      const v = Number(value);
+      return Number.isFinite(v) ? v : fallback;
+    }
+
+    function coverageKey(value) {
+      if (value === undefined || value === null || value === '') return null;
+      return String(value);
+    }
+
+    function valueSetCoverage(selectedValues, universeValues, expectedValues = null) {
+      const universeSet = new Set((Array.isArray(expectedValues) ? expectedValues : universeValues)
+        .map(coverageKey)
+        .filter(v => v !== null));
+      const selectedSet = new Set(selectedValues
+        .map(coverageKey)
+        .filter(v => v !== null && universeSet.has(v)));
+      const total = universeSet.size;
+      return { value: total > 0 ? selectedSet.size / total : 0, selectedCount: selectedSet.size, universeCount: total };
+    }
+
+    function distinctCoverage(selectedItems, universeItems, keyFn, expectedValues = null) {
+      const selectedValues = (selectedItems || []).map(item => keyFn(item));
+      const universeValues = (universeItems || []).map(item => keyFn(item));
+      return valueSetCoverage(selectedValues, universeValues, expectedValues);
+    }
+
+    function quantile(sortedValues, q) {
+      if (!sortedValues.length) return NaN;
+      const pos = (sortedValues.length - 1) * q;
+      const lo = Math.floor(pos);
+      const hi = Math.ceil(pos);
+      if (lo === hi) return sortedValues[lo];
+      return sortedValues[lo] + (sortedValues[hi] - sortedValues[lo]) * (pos - lo);
+    }
+
+    function quantileBinCoverage(selectedValues, universeValues, binCount = 10) {
+      const universe = (universeValues || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+      const selected = (selectedValues || []).map(Number).filter(Number.isFinite);
+      if (!universe.length) return { value: 0, selectedBins: 0, universeBins: 0 };
+      const min = universe[0];
+      const max = universe[universe.length - 1];
+      if (Math.abs(max - min) < 1e-12) {
+        const covered = selected.some(v => Math.abs(v - min) < 1e-9);
+        return { value: covered ? 1 : 0, selectedBins: covered ? 1 : 0, universeBins: 1 };
+      }
+      const edgeCount = Math.max(2, Number(binCount) || 10);
+      const edges = [];
+      for (let i = 0; i <= edgeCount; i += 1) {
+        const edge = quantile(universe, i / edgeCount);
+        if (Number.isFinite(edge) && (!edges.length || Math.abs(edge - edges[edges.length - 1]) > 1e-12)) edges.push(edge);
+      }
+      if (edges.length < 2) {
+        const covered = selected.length > 0;
+        return { value: covered ? 1 : 0, selectedBins: covered ? 1 : 0, universeBins: 1 };
+      }
+      const toBin = (value) => {
+        if (value <= edges[0]) return 0;
+        for (let i = 0; i < edges.length - 1; i += 1) {
+          if (value <= edges[i + 1]) return i;
+        }
+        return edges.length - 2;
+      };
+      const universeBins = new Set(universe.map(toBin));
+      const selectedBins = new Set(selected.map(toBin).filter(bin => universeBins.has(bin)));
+      return { value: universeBins.size > 0 ? selectedBins.size / universeBins.size : 0, selectedBins: selectedBins.size, universeBins: universeBins.size };
+    }
+
+    function featureValue(candidate, keys, fallback = NaN) {
+      const list = Array.isArray(keys) ? keys : [keys];
+      for (const key of list) {
+        const v = finiteNumber(candidate?.features?.[key], NaN);
+        if (Number.isFinite(v)) return v;
+      }
+      return fallback;
+    }
+
+    function faultKey(fault) {
+      if (!fault) return null;
+      const idx = fault.branch_index ?? fault.index ?? fault.id;
+      if (idx === undefined || idx === null || idx === '') return null;
+      return `${fault.branch_type || 'AC'}:${idx}`;
+    }
+
+    function faultKeysFromEvent(event) {
+      return (Array.isArray(event?.faults) ? event.faults : []).map(faultKey).filter(Boolean);
+    }
+
+    function arrayImpactMagnitude(values) {
+      if (!Array.isArray(values)) return 0;
+      let maxImpact = 0;
+      values.forEach(value => {
+        const v = Number(value);
+        if (Number.isFinite(v)) maxImpact = Math.max(maxImpact, Math.abs(v - 1));
+      });
+      return maxImpact;
+    }
+
+    function coverageDetail(metric) {
+      if (!metric) return '无有效候选样本';
+      if (metric.universeBins !== undefined) return `覆盖 ${metric.selectedBins || 0}/${metric.universeBins || 0} 个候选分布箱`;
+      return `覆盖 ${metric.selectedCount || 0}/${metric.universeCount || 0} 个类别`;
+    }
+
+    function deepCloneJson(obj) {
+      return obj ? JSON.parse(JSON.stringify(obj)) : obj;
+    }
+
+    function normalizeGeneratedScenarioCarbonFields(systemJson) {
+      const inferStaticGeneratorEmissionFactor = (item) => {
+        const typ = String(item?.sgen_type || item?.type || item?.name || '').toLowerCase();
+        if (/diesel/.test(typ)) return 0.70;
+        if (/chp|gas|turbine/.test(typ)) return 0.45;
+        if (/fuel\s*cell|fuelcell/.test(typ)) return 0.35;
+        return 0.0;
+      };
+      const syncEmissionAlias = (items, inferMissing = null) => (items || []).forEach(item => {
+        if (!item) return;
+        let canonical = item.emission_factor_tco2_mwh;
+        let legacy = item.co2_emission_rate;
+        if (canonical === undefined && legacy !== undefined) canonical = legacy;
+        if ((canonical === undefined || Math.abs(Number(canonical) || 0) <= 1e-12) && inferMissing) {
+          const inferred = inferMissing(item);
+          if (inferred > 0) canonical = inferred;
+        }
+        if (canonical !== undefined) item.emission_factor_tco2_mwh = canonical;
+        if (item.co2_emission_rate === undefined && item.emission_factor_tco2_mwh !== undefined) {
+          item.co2_emission_rate = item.emission_factor_tco2_mwh;
+        }
+      });
+      syncEmissionAlias(systemJson?.ac?.generators);
+      syncEmissionAlias(systemJson?.ac?.static_generators, inferStaticGeneratorEmissionFactor);
+      syncEmissionAlias(systemJson?.dc?.static_generators, inferStaticGeneratorEmissionFactor);
+      syncEmissionAlias(systemJson?.dc?.dc_static_generators, inferStaticGeneratorEmissionFactor);
+    }
+
+    function sumComponentCapacity(items, keys, serviceKey = 'in_service') {
+      if (!Array.isArray(items)) return 0;
+      return items.reduce((sum, item) => {
+        if (item && item[serviceKey] === false) return sum;
+        for (const key of keys) {
+          const v = Number(item?.[key]);
+          if (Number.isFinite(v) && v > 0) return sum + v;
+        }
+        return sum;
+      }, 0);
+    }
+
+    function scenarioBaseTotals(systemJson) {
+      const ac = systemJson?.ac || {};
+      const dc = systemJson?.dc || {};
+      const acLoad = sumComponentCapacity(ac.loads, ['p_mw']) || sumComponentCapacity(ac.buses, ['pd_mw']);
+      const dcLoad = sumComponentCapacity(dc.loads, ['p_mw']) || sumComponentCapacity(dc.buses, ['pd_mw']);
+      const pv = sumComponentCapacity(ac.pv_systems, ['pmax_mw', 'p_mw', 'sn_mva'])
+        + sumComponentCapacity((ac.renewable_gens || []).filter(g => /solar|pv/i.test(String(g.type || g.name || ''))), ['p_rated_mw', 'p_mw'])
+        + sumComponentCapacity((ac.static_generators || []).filter(g => /pv|solar/i.test(String(g.sgen_type || g.type || g.name || ''))), ['p_rated_mw', 'pmax_mw', 'p_mw'])
+        + sumComponentCapacity(dc.pv_arrays, ['p_set_mw'])
+        + sumComponentCapacity((dc.dc_static_generators || []).filter(g => /pv|solar/i.test(String(g.type || g.name || ''))), ['p_set_mw']);
+      const wind = sumComponentCapacity((ac.renewable_gens || []).filter(g => /wind/i.test(String(g.type || g.name || ''))), ['p_rated_mw', 'p_mw'])
+        + sumComponentCapacity((ac.static_generators || []).filter(g => /wind/i.test(String(g.sgen_type || g.type || g.name || ''))), ['p_rated_mw', 'pmax_mw', 'p_mw'])
+        + sumComponentCapacity((dc.dc_static_generators || []).filter(g => /wind/i.test(String(g.type || g.name || ''))), ['p_set_mw']);
+      return { load: acLoad + dcLoad, pv, wind };
+    }
+
+    function makeScaleProfile(rawValues, base, fallbackWhenZero = 1.0) {
+      const values = Array.isArray(rawValues) ? rawValues.map(v => Number(v || 0)) : [];
+      if (Math.abs(Number(base) || 0) <= 1e-9) return values.map(() => fallbackWhenZero);
+      return values.map(v => v / base);
+    }
+
+    function profileJsonFromCandidate(candidate, profileName) {
+      const values = profileValuesFromCandidate(candidate, profileName);
+      return values.length ? { name: profileName, values } : null;
+    }
+
+    function buildScenarioTimeSeries(candidate, baseSystem, family) {
+      const profiles = candidate?.time_series?.profiles || [];
+      if (!Array.isArray(profiles) || profiles.length === 0) return null;
+      const rawProfiles = profiles.map((p, i) => ({
+        id: Number.isInteger(p.id) ? p.id : i,
+        name: p.name || `profile_${i}`,
+        values: Array.isArray(p.values) ? p.values.map(v => Number(v || 0)) : [],
+      }));
+      const load = profileValuesFromCandidate(candidate, 'total_load_mw');
+      const pv = profileValuesFromCandidate(candidate, 'pv_mw');
+      const wind = profileValuesFromCandidate(candidate, 'wind_mw');
+      const renewable = profileValuesFromCandidate(candidate, 'total_renewable_mw');
+      const totals = scenarioBaseTotals(baseSystem);
+      const calcProfiles = [];
+      const warnings = [];
+      if (load.length) {
+        calcProfiles.push({ id: 0, name: 'scenario_load_scale', values: makeScaleProfile(load, totals.load, 1.0) });
+        if (totals.load <= 1e-9) warnings.push('Base load is zero; load scale profile uses fallback values.');
+      }
+      if (wind.length) {
+        calcProfiles.push({ id: 1, name: 'scenario_wind_scale', values: makeScaleProfile(wind, totals.wind, 1.0) });
+        if (totals.wind <= 1e-9 && wind.some(v => Math.abs(v) > 1e-9)) warnings.push('Base wind capacity is zero; wind scale profile cannot exactly replay raw MW values.');
+      }
+      if (pv.length) {
+        calcProfiles.push({ id: 2, name: 'scenario_pv_scale', values: makeScaleProfile(pv, totals.pv, 1.0) });
+        if (totals.pv <= 1e-9 && pv.some(v => Math.abs(v) > 1e-9)) warnings.push('Base PV capacity is zero; PV scale profile cannot exactly replay raw MW values.');
+      }
+      if (renewable.length) {
+        calcProfiles.push({ id: 3, name: 'scenario_renewable_scale', values: makeScaleProfile(renewable, totals.pv + totals.wind, 1.0) });
+      }
+      if (calcProfiles.length === 0) return null;
+      return {
+        version: 1,
+        family,
+        num_steps: candidate?.time_series?.num_steps || calcProfiles[0].values.length,
+        step_duration_hr: candidate?.time_series?.step_duration_hr || 1.0,
+        profiles: calcProfiles,
+        raw_profiles: rawProfiles,
+        binding: {
+          assign_all_loads_to: load.length ? 0 : -1,
+          assign_all_pv_to: pv.length ? 2 : -1,
+          resilience_load_profile_id: load.length ? 0 : -1,
+          resilience_renewable_profile_id: renewable.length ? 3 : (pv.length ? 2 : (wind.length ? 1 : -1)),
+        },
+        normalization: {
+          base_load_mw: totals.load,
+          base_pv_mw: totals.pv,
+          base_wind_mw: totals.wind,
+          profile_semantics: 'profiles are dimensionless multipliers for /api/session/set_ts_config; raw_profiles preserve generated MW/SOC series',
+        },
+        warnings,
+      };
+    }
+
+    function applyScenarioInitialStorageState(systemJson, candidate) {
+      const soc = profileValuesFromCandidate(candidate, 'storage_soc')[0];
+      if (!Number.isFinite(soc)) return;
+      const update = (items) => (items || []).forEach(st => {
+        if (st && Number(st.e_rated_mwh || 0) > 0) st.soc_init = Math.max(0, Math.min(1, soc));
+      });
+      update(systemJson?.ac?.storage);
+      update(systemJson?.dc?.storage);
+      update(systemJson?.mobile_storage);
+    }
+
+    function markOutOfServiceByIndex(items, index) {
+      const list = Array.isArray(items) ? items : [];
+      const target = list.find(item => Number(item?.index) === Number(index)) || list[Number(index)] || list[Number(index) - 1];
+      if (target) target.in_service = false;
+      return !!target;
+    }
+
+    function applyReliabilityContingencyToSystem(systemJson, contingency) {
+      if (!systemJson || !contingency) return false;
+      const idx = contingency.component_index;
+      switch (String(contingency.type || '').toLowerCase()) {
+        case 'acbranch': return markOutOfServiceByIndex(systemJson.ac?.branches, idx);
+        case 'dcbranch': return markOutOfServiceByIndex(systemJson.dc?.branches, idx);
+        case 'vscconverter': return markOutOfServiceByIndex(systemJson.vsc_converters, idx);
+        case 'dcdcconverter': return markOutOfServiceByIndex(systemJson.dcdc_converters, idx) || markOutOfServiceByIndex(systemJson.dc?.dcdc_converters, idx);
+        case 'acgenerator': return markOutOfServiceByIndex(systemJson.ac?.generators, idx);
+        case 'acstaticgenerator': return markOutOfServiceByIndex(systemJson.ac?.static_generators, idx);
+        case 'acrenewable': return markOutOfServiceByIndex(systemJson.ac?.renewable_gens, idx);
+        case 'acpvsystem': return markOutOfServiceByIndex(systemJson.ac?.pv_systems, idx);
+        case 'dcstaticgenerator': return markOutOfServiceByIndex(systemJson.dc?.dc_static_generators, idx) || markOutOfServiceByIndex(systemJson.dc?.static_generators, idx);
+        case 'dcpvarray': return markOutOfServiceByIndex(systemJson.dc?.pv_arrays, idx);
+        case 'acload': return markOutOfServiceByIndex(systemJson.ac?.loads, idx);
+        case 'dcload': return markOutOfServiceByIndex(systemJson.dc?.loads, idx);
+        case 'acstorage': return markOutOfServiceByIndex(systemJson.ac?.storage, idx);
+        case 'dcstorage': return markOutOfServiceByIndex(systemJson.dc?.storage, idx);
+        case 'mobilestorage': return markOutOfServiceByIndex(systemJson.mobile_storage, idx);
+        case 'transformer2w': return markOutOfServiceByIndex(systemJson.ac?.transformers_2w, idx);
+        case 'transformer3w': return markOutOfServiceByIndex(systemJson.ac?.transformers_3w, idx);
+        default: return false;
+      }
+    }
+
+    function extractScenarioClustersByFamily(data, family) {
+      if (family === 'regular') return (data?.regular?.clusters || []).map(c => ({ cluster: c, group: null }));
+      if (family === 'reliability') {
+        return (data?.reliability?.contingencies || []).flatMap(group => (group.clusters || []).map(cluster => ({ cluster, group })));
+      }
+      if (family === 'resilience') {
+        return (data?.resilience?.intensities || []).flatMap(group => (group.clusters || []).map(cluster => ({ cluster, group })));
+      }
+      return [];
+    }
+
+    function isUsableScenarioTimeSeries(ts) {
+      if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
+      const numSteps = Number(ts.num_steps || ts.profiles[0]?.values?.length || 0);
+      return numSteps > 0 && ts.profiles.some(p => Array.isArray(p?.values) && p.values.length > 0);
+    }
+
+    function getImportedGeneratedScenarioCase(targetFamily = null) {
+      const caseJson = _importedGeneratedScenario?.case || null;
+      if (!caseJson) return null;
+      const family = caseJson?._generated_scenario?.family || _importedGeneratedScenario?.family || '';
+      if (targetFamily && family && family !== 'unknown' && family !== targetFamily) return null;
+      return caseJson;
+    }
+
+    function getImportedGeneratedScenarioTimeSeries(targetFamily = null) {
+      const caseJson = getImportedGeneratedScenarioCase(targetFamily);
+      const ts = caseJson?._time_series;
+      return isUsableScenarioTimeSeries(ts) ? ts : null;
+    }
+
+    function hasUsableGeneratedScenarioTimeSeries(targetFamily = null) {
+      return !!getImportedGeneratedScenarioTimeSeries(targetFamily);
+    }
+
+    function extractScenarioProfileValues(ts, profileIdOrName) {
+      if (profileIdOrName === undefined || profileIdOrName === null || profileIdOrName === '') return [];
+      const profiles = Array.isArray(ts?.profiles) ? ts.profiles : [];
+      const matched = profiles.find(profile => profile?.id === profileIdOrName || String(profile?.id) === String(profileIdOrName) || profile?.name === profileIdOrName);
+      return Array.isArray(matched?.values) ? matched.values : [];
+    }
+
+    function buildGeneratedScenarioCase(baseSystem, family, cluster, groupContext = null) {
+      const representative = cluster?.representative || {};
+      const caseJson = deepCloneJson(baseSystem || {});
+      normalizeGeneratedScenarioCarbonFields(caseJson);
+      const repId = cluster?.representative_id || representative.id || `${family}_scenario_${cluster?.cluster_id ?? 0}`;
+      caseJson.name = `${caseJson.name || 'Generated Scenario'} - ${repId}`;
+      applyScenarioInitialStorageState(caseJson, representative);
+      const metadata = {
+        version: 1,
+        family,
+        scenario_id: representative.id || repId,
+        representative_id: repId,
+        cluster_id: cluster?.cluster_id ?? 0,
+        probability: cluster?.probability ?? representative.probability ?? 0,
+        member_count: cluster?.member_count ?? 0,
+        member_ids: cluster?.member_ids || [],
+        features: representative.features || {},
+        anchor_reasons: cluster?.anchor_reasons || representative.anchor_reasons || [],
+        frozen_medoid: cluster?.frozen_medoid === true,
+        calculation_defaults: {
+          preferred_module: family === 'regular' ? 'timeSeries' : family,
+          use_time_series: false,
+          static_fallback: true,
+          run_opf: false,
+          run_power_flow: family === 'resilience',
+        },
+      };
+      if (family === 'reliability') {
+        metadata.contingency = representative.contingency || groupContext?.contingency || null;
+        metadata.applied_to_system = false;
+        metadata.contingency_application = 'metadata_only';
+      }
+      if (family === 'resilience') {
+        metadata.intensity = groupContext?.intensity || representative.resilience_event?.selected_intensity || null;
+        metadata.resilience_event = representative.resilience_event || null;
+      }
+      caseJson._generated_scenario = metadata;
+      const ts = family === 'reliability' ? null : buildScenarioTimeSeries(representative, caseJson, family);
+      if (ts) {
+        caseJson._time_series = ts;
+        metadata.calculation_defaults.use_time_series = family === 'regular' || family === 'resilience';
+      }
+      return caseJson;
+    }
+
+    function buildGeneratedScenarioBundle(family) {
+      if (!_lastScenarioGenerationData) throw new Error('暂无场景生成结果，请先生成场景');
+      const baseSystem = _lastScenarioBaseSystemJson || Canvas.buildSystemJson();
+      const entries = extractScenarioClustersByFamily(_lastScenarioGenerationData, family);
+      if (!entries.length) throw new Error(`暂无${family}代表场景可导出`);
+      const cases = entries.map(({ cluster, group }) => buildGeneratedScenarioCase(baseSystem, family, cluster, group));
+      return {
+        format: 'generated_scenario_case_bundle_v2',
+        schema_version: 2,
+        case_format: 'hacdcpf_system_json_with_generated_scenario_metadata_v1',
+        time_series_preserved: cases.some(c => isUsableScenarioTimeSeries(c?._time_series)),
+        family,
+        case_count: cases.length,
+        exported_at: new Date().toISOString(),
+        source_summary: _lastScenarioGenerationData.summary || {},
+        cases,
+      };
+    }
+
+    async function applyGeneratedScenarioTimeSeries(caseJson) {
+      const ts = caseJson?._time_series;
+      if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
+      const body = {
+        num_steps: ts.num_steps || ts.profiles[0]?.values?.length || 24,
+        step_duration_hr: ts.step_duration_hr || 1.0,
+        profiles: ts.profiles,
+        load_profile_map: ts.binding?.load_profile_map || [],
+        assign_all_loads_to: Number.isInteger(ts.binding?.assign_all_loads_to) ? ts.binding.assign_all_loads_to : -1,
+        assign_all_pv_to: Number.isInteger(ts.binding?.assign_all_pv_to) ? ts.binding.assign_all_pv_to : -1,
+      };
+      const r = await fetch('/api/session/set_ts_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'set_ts_config failed');
+      _generatedScenarioTimeSeriesActive = true;
+      const simHr = document.getElementById('simulationHours');
+      if (simHr) simHr.value = String(j.num_steps || body.num_steps);
+      log(`生成场景时序已恢复：${j.num_steps}步，profiles=${j.num_profiles}`, 'success');
+      return true;
+    }
+
+    function generatedScenarioCaseFaults(caseJson) {
+      const event = caseJson?._generated_scenario?.resilience_event;
+      return Array.isArray(event?.faults) ? event.faults : [];
+    }
+
+    function generatedScenarioCaseLabel(caseJson, index) {
+      const meta = caseJson?._generated_scenario || {};
+      const event = meta.resilience_event || {};
+      const faults = generatedScenarioCaseFaults(caseJson);
+      const family = meta.family || 'unknown';
+      const rep = meta.representative_id || meta.scenario_id || caseJson?.name || `case_${index + 1}`;
+      if (family === 'resilience') {
+        const starts = faults.map(f => Number(f.start_hr ?? f.outage_start_hr)).filter(Number.isFinite);
+        const startText = starts.length ? `，首故障 ${Math.min(...starts).toFixed(1)}h` : '';
+        const intensity = meta.intensity || event.selected_intensity || event.requested_intensity || '-';
+        return `${index + 1}. ${rep}｜强度 ${intensity}｜故障 ${faults.length} 个${startText}`;
+      }
+      if (family === 'reliability') {
+        const cont = meta.contingency || {};
+        return `${index + 1}. ${rep}｜${cont.type || 'N-1'} ${cont.display_name || cont.id || ''}`;
+      }
+      return `${index + 1}. ${rep}`;
+    }
+
+    function chooseGeneratedScenarioCase(cases, targetFamily) {
+      const matched = cases.filter(c => !targetFamily || c?._generated_scenario?.family === targetFamily);
+      const choices = matched.length ? matched : cases;
+      if (!choices.length) throw new Error('生成场景文件中没有可导入 case');
+      if (choices.length === 1) return choices[0];
+
+      const defaultIndex = targetFamily === 'resilience'
+        ? Math.max(0, choices.findIndex(c => generatedScenarioCaseFaults(c).length > 0))
+        : 0;
+      const listed = choices.slice(0, 40).map((caseJson, index) => generatedScenarioCaseLabel(caseJson, index)).join('\n');
+      const suffix = choices.length > 40 ? `\n... 另有 ${choices.length - 40} 个场景未列出，可直接输入编号选择` : '';
+      const promptText = `该文件包含 ${choices.length} 个${targetFamily || ''}生成场景，请输入要导入的编号：\n\n${listed}${suffix}`;
+      const input = window.prompt(promptText, String(defaultIndex + 1));
+      if (input === null) throw new Error('已取消导入生成场景');
+      const chosen = Number.parseInt(input, 10);
+      if (!Number.isInteger(chosen) || chosen < 1 || chosen > choices.length) {
+        throw new Error(`场景编号无效，请输入 1-${choices.length} 之间的整数`);
+      }
+      return choices[chosen - 1];
+    }
+
+    function firstCaseFromGeneratedScenarioJson(obj, targetFamily) {
+      const allowedBundleFormats = new Set(['generated_scenario_case_bundle_v1', 'generated_scenario_case_bundle_v2']);
+      if (allowedBundleFormats.has(obj?.format) && Array.isArray(obj.cases)) {
+        return chooseGeneratedScenarioCase(obj.cases, targetFamily);
+      }
+      if (obj && (obj.ac || obj.dc)) return obj;
+      throw new Error('不是有效的生成场景 JSON 或系统算例 JSON');
+    }
+
+    function fillResilienceInputsFromScenario(caseJson) {
+      const event = caseJson?._generated_scenario?.resilience_event;
+      const faults = generatedScenarioCaseFaults(caseJson);
+      if (!faults.length) {
+        document.getElementById('resFaultCount').value = '0';
+        document.getElementById('resAcFaultLocations').value = '';
+        document.getElementById('resDcFaultLocations').value = '';
+        document.getElementById('resAcFaultStartHour').value = '';
+        document.getElementById('resDcFaultStartHour').value = '';
+        document.getElementById('resAcRepairDuration').value = '';
+        document.getElementById('resDcRepairDuration').value = '';
+        return;
+      }
+      const ac = [], dc = [];
+      faults.forEach(f => {
+        const type = String(f.branch_type || f.branch_kind || 'AC').toUpperCase();
+        const entry = { id: f.branch_index ?? f.branch_id ?? f.branch, start: Number(f.start_hr ?? f.outage_start_hr ?? 0), repair: Number(f.repair_hr ?? f.repair_duration_hr ?? 6) };
+        if (type === 'DC') dc.push(entry); else ac.push(entry);
+      });
+      document.getElementById('resFaultCount').value = String(ac.length + dc.length);
+      document.getElementById('resAcFaultLocations').value = ac.map(f => f.id).join(',');
+      document.getElementById('resDcFaultLocations').value = dc.map(f => f.id).join(',');
+      document.getElementById('resAcFaultStartHour').value = ac.map(f => Number.isFinite(f.start) ? f.start : 0).join(',');
+      document.getElementById('resDcFaultStartHour').value = dc.map(f => Number.isFinite(f.start) ? f.start : 0).join(',');
+      document.getElementById('resAcRepairDuration').value = ac.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(',');
+      document.getElementById('resDcRepairDuration').value = dc.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(',');
+    }
+
+    async function importGeneratedScenarioForModule(file, targetFamily) {
+      try {
+        const text = await readFileAsText(file);
+        const parsed = JSON.parse(text);
+        const caseJson = deepCloneJson(firstCaseFromGeneratedScenarioJson(parsed, targetFamily));
+        normalizeGeneratedScenarioCarbonFields(caseJson);
+        const family = caseJson?._generated_scenario?.family || 'unknown';
+        const data = await apiPost('/api/session/load_json_string', { json_string: JSON.stringify(caseJson) });
+        if (!data) throw new Error('导入系统失败');
+        Canvas.loadFromSystemJson(caseJson);
+        _canvasDirty = false;
+        _importedGeneratedScenario = { family, case: caseJson };
+        _lastImportedGeneratedScenarioKey = caseJson?._generated_scenario?.representative_id || caseJson?.name || '';
+        _lastTspfData = null;
+        _lastCarbonData = null;
+        const target = targetFamily || family;
+        let restoredTs = false;
+        const targetUsesScenarioTs = target === 'regular' || target === 'resilience';
+        if (targetUsesScenarioTs) {
+          restoredTs = await applyGeneratedScenarioTimeSeries(caseJson);
+        }
+        if (!targetUsesScenarioTs) {
+          const regCb = document.getElementById('regUseScenarioTimeSeries');
+          const resCb = document.getElementById('resUseScenarioTimeSeries');
+          if (regCb) regCb.checked = false;
+          if (resCb) resCb.checked = false;
+        }
+        if (target === 'regular' || family === 'regular') {
+          const cb = document.getElementById('regUseScenarioTimeSeries');
+          if (cb) cb.checked = restoredTs;
+          if (!restoredTs) log('导入的常规生成场景不含可用时序，已保持“使用场景时序”未勾选', 'warn');
+        }
+        if (family === 'resilience' || targetFamily === 'resilience') {
+          fillResilienceInputsFromScenario(caseJson);
+          const cb = document.getElementById('resUseScenarioTimeSeries');
+          if (cb) cb.checked = restoredTs;
+          if (!restoredTs) log('导入的弹性生成场景不含可用时序，已保持“使用场景时序”未勾选', 'warn');
+        }
+        if (family === 'reliability' || targetFamily === 'reliability') {
+          const cont = caseJson?._generated_scenario?.contingency;
+          if (cont) log(`已导入可靠性代表场景（N-1 静态断面）：${cont.type || ''} ${cont.display_name || cont.id || ''}`, 'info');
+        }
+        log(`已导入生成场景：${caseJson?._generated_scenario?.representative_id || caseJson.name || file.name}${restoredTs ? '，并恢复时序配置' : ''}`, 'success');
+        setStatus('生成场景已导入');
+      } catch (err) {
+        log(`导入生成场景失败：${err.message || err}`, 'error');
+        setStatus('导入生成场景失败', 'error');
+      }
+    }
+
+    function renderScenarioGenerationCharts(data) {
+      const chartsDiv = document.getElementById('scenarioGenerationCharts');
+      if (!chartsDiv) return;
+      chartsDiv.innerHTML = `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:16px;">
+          <div id="scenarioChartRegular" class="tspf-chart" style="min-height:340px;"></div>
+          <div id="scenarioChartReliability" class="tspf-chart" style="min-height:340px;"></div>
+          <div id="scenarioChartResilience" class="tspf-chart" style="min-height:340px;"></div>
+          <div id="scenarioChartRegularCurves" class="tspf-chart" style="min-height:360px;"></div>
+          <div id="scenarioChartReliabilityBars" class="tspf-chart" style="min-height:360px;"></div>
+          <div id="scenarioChartResilienceCurves" class="tspf-chart" style="min-height:360px;"></div>
+          <div id="scenarioChartFaultSequence" class="tspf-chart" style="min-height:360px;"></div>
+        </div>`;
+      if (!window.Plotly) {
+        chartsDiv.insertAdjacentHTML('afterbegin', '<p class="empty-hint">Plotly 未加载，无法展示图表。</p>');
+        return;
+      }
+      const theme = {
+        paper_bgcolor: '#ffffff',
+        plot_bgcolor: '#ffffff',
+        font: { color: '#22272e', size: 11 },
+        margin: { l: 52, r: 28, t: 42, b: 58 },
+        legend: { orientation: 'h', y: -0.22 },
+        xaxis: { gridcolor: '#d0d7de' },
+        yaxis: { gridcolor: '#d0d7de', rangemode: 'tozero' },
+      };
+
+      const regularClusters = data.regular?.clusters || [];
+      const regularSamples = data.regular?.audit?.coverage_samples || [];
+      const regularSelected = [];
+      regularClusters.forEach(cluster => {
+        const selected = parseRegularId(cluster.representative_id);
+        regularSelected.push({
+          ...selected,
+          group: `${selected.ssp}-${selected.year}`,
+          cluster: cluster.cluster_id,
+          probability: cluster.probability || 0,
+          peakLoad: numericFeature(cluster, 'peak_load'),
+          renewable: numericFeature(cluster, 'renewable_sum'),
+          load: numericFeature(cluster, 'load_sum'),
+          features: cluster.representative?.features || {},
+        });
+      });
+      const regularAll = regularSamples.map(s => {
+        const parsed = parseRegularId(s.id);
+        return {
+          ...parsed,
+          group: `${parsed.ssp}-${parsed.year}`,
+          load: Number(s.features?.load_sum || 0),
+          renewable: Number(s.features?.renewable_sum || 0),
+          features: s.features || {},
+        };
+      });
+      Plotly.newPlot('scenarioChartRegular', [
+        {
+          x: regularAll.map(p => p.load),
+          y: regularAll.map(p => p.renewable),
+          mode: 'markers',
+          type: 'scatter',
+          name: '全部候选样本',
+          marker: { color: '#60a5fa', size: 6, opacity: 0.35, symbol: 'circle' },
+          text: regularAll.map(p => `${p.group}<br>负荷特征 ${p.load.toFixed(2)}<br>新能源特征 ${p.renewable.toFixed(2)}`),
+        },
+        {
+          x: regularSelected.map(p => p.load),
+          y: regularSelected.map(p => p.renewable),
+          mode: 'markers',
+          type: 'scatter',
+          name: '聚类选中代表',
+          text: regularSelected.map(p => `${p.group}<br>簇${p.cluster}<br>负荷特征 ${p.load.toFixed(2)}<br>新能源特征 ${p.renewable.toFixed(2)}`),
+          marker: { symbol: 'circle-open', color: '#dc2626', size: 13, line: { color: '#dc2626', width: 3 } },
+        },
+      ], { ...theme, title: '常规场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）', xaxis: { title: '负荷特征', autorange: true }, yaxis: { title: '新能源出力特征', autorange: true } }, { responsive: true });
+
+      const relGroups = data.reliability?.contingencies || [];
+      const relSamples = data.reliability?.audit?.coverage_samples || [];
+      const relSelected = [];
+      relGroups.forEach((g, index) => {
+        (g.clusters || []).forEach(c => {
+          relSelected.push({
+            type: g.contingency?.type || 'Unknown',
+            index: index + 1,
+            probability: c.probability || 0,
+            load: numericFeature(c, 'load_sum'),
+            renewable: numericFeature(c, 'renewable_sum'),
+            faultOrdinal: Number(c.representative?.features?.contingency_ordinal || index + 1),
+            name: g.contingency?.display_name || g.contingency?.id || '',
+            features: c.representative?.features || {},
+          });
+        });
+      });
+      const relAll = relSamples.map(s => ({
+        type: s.contingency?.type || 'Unknown',
+        faultOrdinal: Number(s.features?.contingency_ordinal || 0),
+        load: Number(s.features?.load_sum || 0),
+        renewable: Number(s.features?.renewable_sum || 0),
+        name: s.contingency?.display_name || s.contingency?.id || s.id || '',
+        features: s.features || {},
+      }));
+      Plotly.newPlot('scenarioChartReliability', [
+        {
+          x: relAll.map(p => p.load),
+          y: relAll.map(p => p.renewable),
+          mode: 'markers',
+          type: 'scatter',
+          name: '全部N-1候选样本',
+          text: relAll.map(p => `${p.name}<br>${p.type}<br>负荷 ${p.load.toFixed(3)} / 新能源 ${p.renewable.toFixed(3)}`),
+          marker: { color: '#64748b', size: 6, opacity: 0.30, symbol: 'circle' },
+        },
+        {
+          x: relSelected.map(p => p.load),
+          y: relSelected.map(p => p.renewable),
+          mode: 'markers',
+          type: 'scatter',
+          name: '聚类选中代表',
+          text: relSelected.map(p => `${p.name}<br>${p.type}<br>负荷 ${p.load.toFixed(3)} / 新能源 ${p.renewable.toFixed(3)}<br>簇概率 ${(p.probability * 100).toFixed(2)}%`),
+          marker: { symbol: 'circle-open', color: '#dc2626', size: 13, line: { color: '#dc2626', width: 3 } },
+        },
+      ], { ...theme, title: '可靠性场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）', xaxis: { title: '负荷特征', autorange: true }, yaxis: { title: '新能源出力特征', autorange: true } }, { responsive: true });
+
+      const resGroups = data.resilience?.intensities || [];
+      const resSamples = data.resilience?.audit?.coverage_samples || [];
+      const resAll = resSamples.map(s => {
+        const event = s.resilience_event || {};
+        return {
+          category: event.selected_intensity || '',
+          maxWind: eventMaxWind(event) || Number(s.features?.selected_track_max_vmax_ms || 0),
+          faultCount: Array.isArray(event.faults) ? event.faults.length : Number(s.features?.fault_count || 0),
+          peakFailure: Number(s.features?.peak_failure_probability || 0),
+          month: event.month || '-',
+          sampleId: event.selected_sample_id || s.id || '',
+          features: s.features || {},
+        };
+      });
+      const resSelected = [];
+      resGroups.forEach(g => {
+        (g.clusters || []).forEach(c => {
+          const event = c.representative?.resilience_event || {};
+          const faultCount = Array.isArray(event.faults) ? event.faults.length : 0;
+          resSelected.push({
+            category: event.selected_intensity || g.intensity,
+            maxWind: eventMaxWind(event),
+            sampleId: event.selected_sample_id || '',
+            month: event.month || '-',
+            faultCount,
+            probability: c.probability || 0,
+            peakFailure: numericFeature(c, 'peak_failure_probability'),
+            id: c.representative_id,
+            features: c.representative?.features || {},
+          });
+        });
+      });
+      Plotly.newPlot('scenarioChartResilience', [
+        {
+          x: resAll.map(p => p.maxWind),
+          y: resAll.map(p => p.faultCount),
+          mode: 'markers',
+          type: 'scatter',
+          name: '全部台风样本',
+          text: resAll.map(p => `划分后强度 ${p.category}<br>最大风速(不含t0) ${p.maxWind.toFixed(2)} m/s<br>月份 ${p.month}<br>样本 ${p.sampleId}<br>故障数 ${p.faultCount}<br>峰值失效概率 ${(p.peakFailure * 100).toFixed(2)}%`),
+          marker: { color: '#f59e0b', size: 6, opacity: 0.35, symbol: 'circle' },
+        },
+        {
+          x: resSelected.map(p => p.maxWind),
+          y: resSelected.map(p => p.faultCount),
+          mode: 'markers',
+          type: 'scatter',
+          name: '聚类选中代表',
+          text: resSelected.map(p => `${p.id}<br>划分后强度 ${p.category}<br>最大风速(不含t0) ${p.maxWind.toFixed(2)} m/s<br>月份 ${p.month}<br>样本 ${p.sampleId}<br>故障数 ${p.faultCount}<br>峰值失效概率 ${(p.peakFailure * 100).toFixed(2)}%<br>簇概率 ${(p.probability * 100).toFixed(2)}%`),
+          marker: { symbol: 'circle-open', color: '#dc2626', size: 13, line: { color: '#dc2626', width: 3 } },
+        },
+      ], { ...theme, title: '弹性场景二维覆盖：最大风速 × 故障数（小圈=全部样本，红圈=聚类代表）', xaxis: { title: '最大风速 / m/s（不含初始时刻）' }, yaxis: { title: '故障线路数', rangemode: 'tozero' } }, { responsive: true });
+
+      const regularRepresentatives = regularClusters.map(c => c.representative).filter(Boolean);
+      const relRepresentatives = relGroups.flatMap(g => (g.clusters || []).map(c => c.representative).filter(Boolean));
+      const firstRegular = regularClusters[0]?.representative;
+      if (firstRegular) {
+        const load = profileValuesFromCandidate(firstRegular, 'total_load_mw').slice(0, 168);
+        const pv = profileValuesFromCandidate(firstRegular, 'pv_mw').slice(0, 168);
+        const wind = profileValuesFromCandidate(firstRegular, 'wind_mw').slice(0, 168);
+        const x = load.map((_, i) => i);
+        const traces = [
+          { x, y: load, type: 'scatter', mode: 'lines', name: '负荷 MW', line: { color: '#2563eb' } },
+          { x, y: pv, type: 'scatter', mode: 'lines', name: '光伏 MW', line: { color: '#f59e0b' } },
+          { x, y: wind, type: 'scatter', mode: 'lines', name: '风电 MW', line: { color: '#16a34a' } },
+        ];
+        Plotly.newPlot('scenarioChartRegularCurves', traces,
+          { ...theme, title: '常规代表场景风/光/负荷曲线（前168小时）', xaxis: { title: '小时' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
+      }
+
+      const firstRel = relGroups.find(g => (g.clusters || []).length)?.clusters?.[0]?.representative;
+      if (firstRel) {
+        const names = ['负荷', '光伏', '风电'];
+        const values = ['total_load_mw', 'pv_mw', 'wind_mw'].map(name => profileValuesFromCandidate(firstRel, name)[0] || 0);
+        Plotly.newPlot('scenarioChartReliabilityBars', [{ x: names, y: values, type: 'bar', marker: { color: ['#2563eb', '#f59e0b', '#16a34a'] } }],
+          { ...theme, title: '可靠性代表场景风/光/负荷（N-1 单时段）', xaxis: { title: '变量' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
+      }
+
+      const allResClusters = resGroups.flatMap(g => g.clusters || []);
+      const firstFaultedResCluster = allResClusters.find(c => ((c.representative?.resilience_event || {}).faults || []).length > 0);
+      const firstRes = (firstFaultedResCluster || allResClusters[0])?.representative;
+      if (firstRes) {
+        const load = profileValuesFromCandidate(firstRes, 'total_load_mw');
+        const pv = profileValuesFromCandidate(firstRes, 'pv_mw');
+        const wind = profileValuesFromCandidate(firstRes, 'wind_mw');
+        const x = load.map((_, i) => i);
+        const traces = [
+          { x, y: load, type: 'scatter', mode: 'lines', name: '负荷 MW', line: { color: '#2563eb' } },
+          { x, y: pv, type: 'scatter', mode: 'lines', name: '光伏 MW', line: { color: '#f59e0b' } },
+          { x, y: wind, type: 'scatter', mode: 'lines', name: '风电 MW', line: { color: '#16a34a' } },
+        ];
+        Plotly.newPlot('scenarioChartResilienceCurves', traces,
+          { ...theme, title: '弹性代表场景风/光/负荷曲线（48小时）', xaxis: { title: '小时' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
+
+        const faults = (firstRes.resilience_event?.faults || [])
+          .map((f, idx) => {
+            const start = finiteNumber(f.start_hr, NaN);
+            return {
+              ...f,
+              seq: idx + 1,
+              start: Number.isFinite(start) ? start : 0,
+              label: `${f.branch_type || 'AC'}-${f.branch_index ?? '-'}`,
+            };
+          })
+          .sort((a, b) => (a.start - b.start) || (a.seq - b.seq));
+        if (faults.length) {
+          Plotly.newPlot('scenarioChartFaultSequence', [{
+            x: faults.map(f => f.start),
+            y: faults.map((_, idx) => idx + 1),
+            type: 'scatter',
+            mode: 'markers',
+            name: '故障发生时刻',
+            marker: { color: '#dc2626', size: 12, symbol: 'x' },
+            text: faults.map(f => `${f.label}<br>故障发生 ${f.start.toFixed(2)} h`),
+            hovertemplate: '%{text}<extra></extra>',
+          }], {
+            ...theme,
+            title: '弹性代表场景故障序列（只展示线路故障发生时刻；修复由弹性评估决策）',
+            xaxis: { title: '故障发生小时', range: [0, Math.max(48, ...faults.map(f => f.start))], rangemode: 'tozero' },
+            yaxis: { title: '故障序号（按开始时间排序）', dtick: 1, rangemode: 'tozero' },
+          }, { responsive: true });
+        } else {
+          Plotly.newPlot('scenarioChartFaultSequence', [], {
+            ...theme,
+            title: '弹性代表场景故障序列（该代表场景无线路故障）',
+            xaxis: { title: '小时', range: [0, 48] },
+            yaxis: { visible: false },
+            annotations: [{ text: '该弹性代表场景无故障线路', x: 0.5, y: 0.5, xref: 'paper', yref: 'paper', showarrow: false }],
+          }, { responsive: true });
+        }
+      }
+    }
+
+    function renderScenarioGenerationResults(data) {
+      const div = document.getElementById('scenarioGenerationResults');
+      const summaryDiv = document.getElementById('resultsSummary');
+      if (!div || !summaryDiv) return;
+      renderScenarioGenerationCharts(data);
+      const summary = data.summary || {};
+      const regularAudit = data.regular?.audit || {};
+      const regularPerGroup = regularAudit.requested_cluster_count_per_ssp_year ?? '-';
+      const regularGroups = regularAudit.group_count ?? '-';
+      summaryDiv.innerHTML = `
+        <div class="result-item"><span class="result-label">常规候选/总聚类</span><span class="result-value">${summary.regular_candidate_count ?? 0} / ${summary.regular_cluster_count ?? 0}</span></div>
+        <div class="result-item"><span class="result-label">常规每组×组数</span><span class="result-value">${regularPerGroup} × ${regularGroups}</span></div>
+        <div class="result-item"><span class="result-label">可靠性FMEA N-1/聚类</span><span class="result-value">${summary.reliability_contingency_count ?? 0} / ${summary.reliability_cluster_total ?? 0}</span></div>
+        <div class="result-item"><span class="result-label">台风划分集合/聚类</span><span class="result-value">${summary.resilience_intensity_count ?? 0} / ${summary.resilience_cluster_total ?? 0}</span></div>
+      `;
+      const warningHtml = Array.isArray(data.warnings) && data.warnings.length
+        ? `<div style="margin-bottom:10px;color:#b45309;"><strong>Warnings:</strong> ${data.warnings.map(escapeHtml).join('；')}</div>`
+        : '';
+      const regularRows = (data.regular?.clusters || []).map(c => `<tr>
+        <td>${c.cluster_id}</td><td>${escapeHtml(c.representative_id || '')}</td><td>${((c.probability || 0) * 100).toFixed(2)}%</td>
+        <td>${c.member_count ?? 0}</td><td>${firstProfileSummary(c, 'total_load_mw')}</td><td>${firstProfileSummary(c, 'total_renewable_mw')}</td>
+      </tr>`).join('');
+      const relGroups = data.reliability?.contingencies || [];
+      const relRows = relGroups.slice(0, 120).map(g => {
+        const best = (g.clusters || [])[0] || {};
+        const cont = g.contingency || {};
+        return `<tr><td>${escapeHtml(cont.id || '')}</td><td>${escapeHtml(cont.type || '')}</td><td>${escapeHtml(cont.display_name || '')}</td><td>${g.candidate_count ?? 0}</td><td>${g.cluster_count ?? 0}</td><td>${((best.probability || 0) * 100).toFixed(2)}%</td><td>${firstProfileSummary(best, 'total_load_mw')}</td><td>${firstProfileSummary(best, 'total_renewable_mw')}</td></tr>`;
+      }).join('');
+      const relMore = relGroups.length > 120 ? `<p class="empty-hint">仅展示前120个 N-1 分组；完整结果可导出 JSON。</p>` : '';
+      const resRows = (data.resilience?.intensities || []).flatMap(g => (g.clusters || []).map(top => {
+        const event = top.representative?.resilience_event || {};
+        const faultCount = Array.isArray(event.faults) ? event.faults.length : 0;
+        const maxWind = eventMaxWind(event);
+        const faultTimes = (Array.isArray(event.faults) ? event.faults : [])
+          .map(f => finiteNumber(f.start_hr, NaN))
+          .filter(Number.isFinite)
+          .sort((a, b) => a - b);
+        const firstFault = faultTimes.length ? faultTimes[0].toFixed(2) : '-';
+        const faultTimeText = faultTimes.length ? faultTimes.slice(0, 6).map(v => v.toFixed(1)).join(', ') + (faultTimes.length > 6 ? '...' : '') : '-';
+        return `<tr><td>${escapeHtml(g.intensity || '')}</td><td>${g.candidate_count ?? 0}</td><td>${g.cluster_count ?? 0}</td><td>${escapeHtml(top.representative_id || '')}</td><td>${escapeHtml(event.selected_intensity || '')}</td><td>${maxWind > 0 ? maxWind.toFixed(2) : '-'}</td><td>${escapeHtml(String(event.month || '-'))} / ${escapeHtml(event.selected_sample_id || '-')}</td><td>${faultCount}</td><td>${firstFault}</td><td>${escapeHtml(faultTimeText)}</td></tr>`;
+      })).join('');
+      div.innerHTML = `
+        ${warningHtml}
+        <p class="empty-hint">常规场景按 SSP×年份分别聚类；若当前算例含 AC renewable/PV/static PV/DC PV 等新能源资源，会同时扰动负荷与新能源出力。内置 dist33_microgrid_der、comprehensive_hybrid_acdc 均包含新能源/DER。</p>
+        <p class="empty-hint">若当前算例含储能，场景生成仍会在导出的 JSON 中保存场景开始时实际 SOC 与对应电量，但结果图和表格仅展示负荷、新能源与故障信息。</p>
+        <h4>常规全年代表场景（8760h）</h4>
+        <table><thead><tr><th>簇</th><th>代表场景</th><th>概率</th><th>成员数</th><th>负荷总量/峰值</th><th>新能源总量/峰值</th></tr></thead><tbody>${regularRows || '<tr><td colspan="6" style="color:#888">未生成常规场景</td></tr>'}</tbody></table>
+        <h4>可靠性 N-1 单断面场景</h4>
+        <p class="empty-hint">可靠性覆盖图采用二维映射：x=负荷特征，y=新能源出力特征。</p>
+        ${relMore}
+        <table><thead><tr><th>N-1 ID</th><th>类型</th><th>元件</th><th>候选</th><th>聚类</th><th>首簇概率</th><th>首簇负荷摘要</th><th>首簇新能源摘要</th></tr></thead><tbody>${relRows || '<tr><td colspan="8" style="color:#888">未生成可靠性场景</td></tr>'}</tbody></table>
+        <h4>弹性台风代表场景（48h，一次扰动+台风二次扰动）</h4>
+        <table><thead><tr><th>划分后强度集合</th><th>候选</th><th>聚类</th><th>代表场景</th><th>分类强度</th><th>最大风速(m/s，不含t0)</th><th>月份/sample</th><th>故障数</th><th>首故障(h)</th><th>故障时刻(h)</th></tr></thead><tbody>${resRows || '<tr><td colspan="10" style="color:#888">未生成弹性场景</td></tr>'}</tbody></table>
+      `;
+    }
+
+
+    document.getElementById('btnGenerateScenarios')?.addEventListener('click', async () => {
+      let payload;
+      try {
+        payload = collectScenarioGenerationOptions();
+      } catch (err) {
+        log(`场景参数错误：${err.message}`, 'warn');
+        setStatus('场景参数错误', 'error');
+        return;
+      }
+      setStatus('场景生成中...', 'busy');
+      _lastScenarioBaseSystemJson = Canvas.buildSystemJson();
+      if (!await syncToBackend()) { setStatus('同步失败', 'error'); return; }
+      const data = await apiPost('/api/session/generate_scenarios', payload);
+      if (!data) { setStatus('场景生成失败', 'error'); return; }
+      _lastScenarioGenerationData = data;
+      setActiveResultGroup('scenarioGeneration');
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      switchTab('results');
+      renderScenarioGenerationResults(data);
+      setTimeout(() => {
+        ['scenarioChartRegular', 'scenarioChartReliability', 'scenarioChartResilience', 'scenarioChartRegularCurves', 'scenarioChartReliabilityBars', 'scenarioChartResilienceCurves', 'scenarioChartFaultSequence'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el && window.Plotly) Plotly.Plots.resize(el);
+        });
+      }, 50);
+      log(`场景生成完成：常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇`, 'success');
+      setStatus('场景生成完成');
+    });
+
+    function exportGeneratedScenarioFamily(family, label) {
+      try {
+        const bundle = buildGeneratedScenarioBundle(family);
+        downloadJsonFile(`${family}_generated_scenarios_${tsTagForFilename()}.json`, bundle);
+        log(`${label}可导入场景已生成：${bundle.case_count} 个代表场景`, 'success');
+      } catch (err) {
+        log(`${label}场景导出失败：${err.message || err}`, 'warn');
+      }
+    }
+
+    document.getElementById('btnExportRegularScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('regular', '常规'));
+    document.getElementById('btnExportReliabilityScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('reliability', '可靠性'));
+    document.getElementById('btnExportResilienceScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('resilience', '弹性'));
+
+    document.getElementById('btnExportScenarioResults')?.addEventListener('click', () => {
+      if (!_lastScenarioGenerationData) {
+        log('暂无场景生成结果可导出，请先生成场景', 'warn');
+        return;
+      }
+      downloadJsonFile(`scenario_generation_${tsTagForFilename()}.json`, _lastScenarioGenerationData);
+    });
+
+    document.getElementById('btnExportScenarioPlots')?.addEventListener('click', async () => {
+      if (!window.Plotly) return;
+      const ids = ['scenarioChartRegular', 'scenarioChartReliability', 'scenarioChartResilience', 'scenarioChartRegularCurves', 'scenarioChartReliabilityBars', 'scenarioChartResilienceCurves', 'scenarioChartFaultSequence'];
+      const tag = tsTagForFilename();
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        await Plotly.downloadImage(el, { format: 'png', width: 1400, height: 900, filename: `${id}_${tag}` });
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    });
+
+    function bindGeneratedScenarioImport(buttonId, fileId, family) {
+      const btn = document.getElementById(buttonId);
+      const input = document.getElementById(fileId);
+      btn?.addEventListener('click', () => input?.click());
+      input?.addEventListener('change', () => {
+        const file = input.files && input.files[0];
+        if (file) importGeneratedScenarioForModule(file, family);
+        input.value = '';
+      });
+    }
+    bindGeneratedScenarioImport('btnImportGeneratedRegularScenario', 'fileImportGeneratedRegularScenario', 'regular');
+    bindGeneratedScenarioImport('btnImportGeneratedReliabilityScenario', 'fileImportGeneratedReliabilityScenario', 'reliability');
+    bindGeneratedScenarioImport('btnImportGeneratedResilienceScenario', 'fileImportGeneratedResilienceScenario', 'resilience');
+
     document.getElementById('btnExportResilienceResults')?.addEventListener('click', () => {
       if (!_lastResilienceData) {
         log('暂无弹性评估结果可导出，请先运行弹性评估', 'warn');

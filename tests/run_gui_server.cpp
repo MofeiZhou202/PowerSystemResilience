@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES  // M_PI on strict-conformance toolchains (MSYS2 UCRT, MSVC)
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <exception>
@@ -9,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -33,12 +35,150 @@
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/analysis/typhoon_resilience.hpp"
+#include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+
+unsigned int fresh_typhoon_seed() {
+  static std::random_device rd;
+  static std::mt19937 rng(rd());
+  static std::mutex mu;
+  std::lock_guard<std::mutex> lk(mu);
+  return rng();
+}
+
+constexpr std::array<hacdcpf::analysis::TyphoonIntensityCategory, 6> kTyphoonCategories{
+    hacdcpf::analysis::TyphoonIntensityCategory::TD,
+    hacdcpf::analysis::TyphoonIntensityCategory::TS,
+    hacdcpf::analysis::TyphoonIntensityCategory::STS,
+    hacdcpf::analysis::TyphoonIntensityCategory::TY,
+    hacdcpf::analysis::TyphoonIntensityCategory::STY,
+    hacdcpf::analysis::TyphoonIntensityCategory::SuperTY,
+};
+
+int typhoon_category_ordinal(hacdcpf::analysis::TyphoonIntensityCategory category) {
+  for (std::size_t i = 0; i < kTyphoonCategories.size(); ++i) {
+    if (kTyphoonCategories[i] == category) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+const hacdcpf::analysis::TyphoonTrackSample* sample_typhoon_category_with_fallback(
+    const hacdcpf::analysis::TyphoonCatalog& catalog,
+    hacdcpf::analysis::TyphoonIntensityCategory requested,
+    unsigned int selection_seed,
+    hacdcpf::analysis::TyphoonIntensityCategory& selected_category,
+    bool& used_fallback) {
+  selected_category = requested;
+  used_fallback = false;
+  if (const auto* sample = hacdcpf::analysis::sample_typhoon_catalog(catalog, requested, selection_seed)) return sample;
+  const int ord = typhoon_category_ordinal(requested);
+  if (ord >= 0) {
+    for (int distance = 1; distance < static_cast<int>(kTyphoonCategories.size()); ++distance) {
+      for (const int sign : {-1, 1}) {
+        const int candidate_ord = ord + sign * distance;
+        if (candidate_ord < 0 || candidate_ord >= static_cast<int>(kTyphoonCategories.size())) continue;
+        const auto candidate = kTyphoonCategories[static_cast<std::size_t>(candidate_ord)];
+        if (const auto* sample = hacdcpf::analysis::sample_typhoon_catalog(catalog, candidate, selection_seed + static_cast<unsigned int>(distance))) {
+          selected_category = candidate;
+          used_fallback = true;
+          return sample;
+        }
+      }
+    }
+  }
+  if (catalog.samples.empty()) return nullptr;
+  std::mt19937 rng(selection_seed);
+  std::uniform_int_distribution<std::size_t> pick(0, catalog.samples.size() - 1);
+  const auto* sample = &catalog.samples[pick(rng)];
+  selected_category = sample->category;
+  used_fallback = true;
+  return sample;
+}
+
+json typhoon_catalog_counts_json(const hacdcpf::analysis::TyphoonCatalog& catalog) {
+  json counts = json::object();
+  for (const auto category : kTyphoonCategories) {
+    auto it = catalog.category_counts.find(category);
+    counts[hacdcpf::analysis::to_string(category)] = it == catalog.category_counts.end() ? 0 : it->second;
+  }
+  return counts;
+}
+
+bool configure_typhoon_catalog_sample(const json& j,
+                                      hacdcpf::analysis::TyphoonScenarioOptions& typhoon_opts,
+                                      json* response_metadata = nullptr) {
+  if (!j.contains("intensity_category")) return false;
+  const auto requested = hacdcpf::analysis::typhoon_intensity_category_from_string(
+      j.value("intensity_category", std::string{"TY"}));
+  if (requested == hacdcpf::analysis::TyphoonIntensityCategory::Unknown) {
+    throw std::runtime_error("Unknown typhoon intensity_category: " + j.value("intensity_category", std::string{}));
+  }
+
+  hacdcpf::analysis::TyphoonCatalogOptions catalog_opts;
+  catalog_opts.samples_per_month = j.value("catalog_samples_per_month", catalog_opts.samples_per_month);
+  catalog_opts.first_month = j.value("catalog_first_month", catalog_opts.first_month);
+  catalog_opts.last_month = j.value("catalog_last_month", catalog_opts.last_month);
+  catalog_opts.base_seed = j.value("catalog_base_seed", catalog_opts.base_seed);
+  catalog_opts.horizon_hours = typhoon_opts.horizon_hours;
+  catalog_opts.time_step_hr = typhoon_opts.time_step_hr;
+  catalog_opts.stochastic = true;
+  catalog_opts.use_month_defaults = true;
+  catalog_opts.use_sst_resource = true;
+  catalog_opts.sst_resource_path = typhoon_opts.sst_resource_path;
+  catalog_opts.catalog_path = j.value("catalog_path", catalog_opts.catalog_path);
+  const auto& catalog = hacdcpf::analysis::get_or_build_typhoon_catalog(catalog_opts);
+
+  hacdcpf::analysis::TyphoonIntensityCategory selected = requested;
+  bool used_fallback = false;
+  const auto* sample = sample_typhoon_category_with_fallback(catalog, requested, typhoon_opts.seed, selected, used_fallback);
+  if (!sample) throw std::runtime_error("Typhoon catalog is empty; cannot sample intensity category");
+
+  typhoon_opts.use_precomputed_track = true;
+  typhoon_opts.precomputed_track = sample->track;
+  typhoon_opts.month = sample->month;
+  typhoon_opts.seed = sample->seed;
+  typhoon_opts.stochastic = sample->stochastic;
+  typhoon_opts.requested_category = requested;
+  typhoon_opts.selected_category = selected;
+  typhoon_opts.selected_track_max_vmax_ms = sample->max_vmax_ms;
+  typhoon_opts.selected_sample_id = sample->sample_id;
+  typhoon_opts.used_category_fallback = used_fallback;
+  typhoon_opts.sst_resource_path = sample->sst_resource_path;
+
+  if (response_metadata) {
+    (*response_metadata)["requested_intensity_category"] = hacdcpf::analysis::to_string(requested);
+    (*response_metadata)["requested_intensity_category_zh"] = hacdcpf::analysis::to_zh_name(requested);
+    (*response_metadata)["selected_intensity_category"] = hacdcpf::analysis::to_string(selected);
+    (*response_metadata)["selected_intensity_category_zh"] = hacdcpf::analysis::to_zh_name(selected);
+    (*response_metadata)["selected_track_max_vmax_ms"] = sample->max_vmax_ms;
+    (*response_metadata)["selected_sample_id"] = sample->sample_id;
+    (*response_metadata)["used_catalog_sample"] = true;
+    (*response_metadata)["used_category_fallback"] = used_fallback;
+    (*response_metadata)["catalog_counts"] = typhoon_catalog_counts_json(catalog);
+    (*response_metadata)["catalog_sample_count"] = catalog.samples.size();
+    (*response_metadata)["catalog_path"] = catalog.source_path;
+    (*response_metadata)["catalog_loaded_from_disk"] = catalog.loaded_from_disk;
+  }
+  return true;
+}
+
+void append_typhoon_result_metadata(json& target,
+                                    const hacdcpf::analysis::TyphoonFaultSequenceResult& result) {
+  target["requested_intensity_category"] = hacdcpf::analysis::to_string(result.requested_category);
+  target["requested_intensity_category_zh"] = hacdcpf::analysis::to_zh_name(result.requested_category);
+  target["selected_intensity_category"] = hacdcpf::analysis::to_string(result.selected_category);
+  target["selected_intensity_category_zh"] = hacdcpf::analysis::to_zh_name(result.selected_category);
+  target["selected_track_max_vmax_ms"] = result.selected_track_max_vmax_ms;
+  target["selected_sample_id"] = result.selected_sample_id;
+  target["used_catalog_sample"] = result.used_catalog_sample;
+  target["used_category_fallback"] = result.used_category_fallback;
+}
 
 struct Args {
   std::string host{"127.0.0.1"};
@@ -7232,6 +7372,138 @@ int main(int argc, char** argv) {
         g_session.busy.store(false);
       } catch (const std::exception& e) {
         g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Distribution Resilience Assessment (MESS) ----
+    svr.Post("/api/session/generate_scenarios",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        auto options = hacdcpf::analysis::scenario_generation_options_from_json(j);
+
+        options.regular.num_steps = 8760;
+        options.reliability.num_steps = 1;
+        options.resilience.num_steps = 48;
+        options.regular.candidate_count = std::clamp(options.regular.candidate_count, 1, 500);
+        options.regular.cluster_count = std::clamp(options.regular.cluster_count, 1, options.regular.candidate_count);
+        options.reliability.candidates_per_contingency = std::clamp(options.reliability.candidates_per_contingency, 1, 200);
+        options.reliability.cluster_count_per_contingency = std::clamp(options.reliability.cluster_count_per_contingency, 1, options.reliability.candidates_per_contingency);
+        options.resilience.candidates_per_intensity = std::clamp(options.resilience.candidates_per_intensity, 1, 200);
+        options.resilience.default_cluster_count = std::clamp(options.resilience.default_cluster_count, 1, options.resilience.candidates_per_intensity);
+        for (auto& [category, count] : options.resilience.cluster_count_by_intensity) {
+          count = std::clamp(count, 1, options.resilience.candidates_per_intensity);
+        }
+
+        const auto result = hacdcpf::analysis::generate_scenarios(sys, options);
+        res.set_content(hacdcpf::analysis::scenario_generation_result_to_json(result).dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Typhoon scenario preview: generate faults, let frontend fill manual fields. ----
+    svr.Post("/api/session/generate_typhoon_faults",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        hacdcpf::analysis::TyphoonScenarioOptions typhoon_opts;
+        typhoon_opts.horizon_hours = j.value("horizon_hours", 48);
+        typhoon_opts.time_step_hr = j.value("time_step_hr", 1.0);
+        typhoon_opts.seed = j.value("seed", fresh_typhoon_seed());
+        typhoon_opts.stochastic = j.value("stochastic", true);
+        typhoon_opts.month = j.value("month", 8);
+        typhoon_opts.use_month_defaults = true;
+        typhoon_opts.use_sst_resource = true;
+        typhoon_opts.sst_resource_path = j.value("sst_resource_path", typhoon_opts.sst_resource_path);
+        typhoon_opts.target_segment_length_km = j.value("target_segment_length_km", typhoon_opts.target_segment_length_km);
+        typhoon_opts.min_fault_probability = j.value("min_fault_probability", typhoon_opts.min_fault_probability);
+        typhoon_opts.staged_post_disaster_repair = j.value("staged_post_disaster_repair", typhoon_opts.staged_post_disaster_repair);
+        typhoon_opts.post_disaster_repair_delay_hr = j.value("post_disaster_repair_delay_hr", typhoon_opts.post_disaster_repair_delay_hr);
+        typhoon_opts.repair_crew_time_per_branch_hr = j.value("repair_crew_time_per_branch_hr", typhoon_opts.repair_crew_time_per_branch_hr);
+        typhoon_opts.apply_pv_wind_derating = j.value("apply_pv_wind_derating", typhoon_opts.apply_pv_wind_derating);
+        json catalog_metadata = json::object();
+        configure_typhoon_catalog_sample(j, typhoon_opts, &catalog_metadata);
+        const auto generated = hacdcpf::analysis::generate_typhoon_fault_sequence(sys, typhoon_opts);
+
+        json out;
+        out.update(catalog_metadata);
+        out["scenario_source"] = "typhoon";
+        append_typhoon_result_metadata(out, generated);
+        out["status"] = generated.status;
+        out["month"] = typhoon_opts.month;
+        out["seed"] = generated.seed;
+        out["stochastic"] = typhoon_opts.stochastic;
+        out["monthly_sst_c"] = generated.monthly_sst_c;
+        out["sst_resource_path"] = generated.sst_resource_path;
+        out["used_fallback_coordinates"] = generated.used_fallback_coordinates;
+        out["used_synthetic_segments"] = generated.used_synthetic_segments;
+        out["segment_count"] = generated.generated_segments.size();
+        out["fault_count"] = generated.faults.size();
+        json locations = json::array();
+        json typed_locations = json::array();
+        json starts = json::array();
+        json repairs = json::array();
+        json manual = json::array();
+        for (const auto& f : generated.faults) {
+          if (f.branch_kind == hacdcpf::analysis::ResilienceBranchKind::AC) {
+            locations.push_back(f.branch_index);
+          }
+          typed_locations.push_back(json{{"branch_type", hacdcpf::analysis::to_string(f.branch_kind)},
+                                         {"branch_index", f.branch_index}});
+          starts.push_back(f.outage_start_hr);
+          repairs.push_back(f.repair_duration_hr);
+          manual.push_back(json{{"branch_type", hacdcpf::analysis::to_string(f.branch_kind)},
+                                {"branch_id", f.branch_index},
+                                {"start_hr", f.outage_start_hr},
+                                {"repair_hr", f.repair_duration_hr},
+                                {"label", f.name}});
+        }
+        out["fault_locations"] = locations;
+        out["fault_locations_typed"] = typed_locations;
+        out["fault_start_hours"] = starts;
+        out["repair_durations"] = repairs;
+        out["manual_faults"] = manual;
+        json track = json::array();
+        for (const auto& p : generated.track) {
+          track.push_back(json{{"hour", p.hour}, {"lat", p.latitude}, {"lon", p.longitude},
+                               {"delta_p_hpa", p.delta_p_hpa}, {"rmw_km", p.rmw_km},
+                               {"vmax_ms", p.vmax_ms}, {"sst_c", p.sst_c}});
+        }
+        out["track"] = track;
+        json peaks = json::array();
+        for (const auto& risk : generated.branch_risks) {
+          peaks.push_back(json{{"branch_type", hacdcpf::analysis::to_string(risk.branch_kind)},
+                               {"branch_index", risk.branch_index},
+                               {"peak_wind_ms", risk.peak_wind_ms},
+                               {"peak_rain_mm_hr", risk.peak_rain_mm_hr},
+                               {"peak_failure_probability", risk.peak_failure_probability}});
+        }
+        out["branch_peak_wind"] = peaks;
+        res.set_content(out.dump(), "application/json");
+      } catch (const std::exception& e) {
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
