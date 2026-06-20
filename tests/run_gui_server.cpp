@@ -43,6 +43,7 @@
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
+#include "hacdcpf/graph/graph.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -5625,6 +5626,378 @@ int main(int argc, char** argv) {
       }
 
       add_dc_branch_flows();
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Session: topology analysis (graph structure) ----
+  // Read-only structural analysis of the network graph: island / connectivity
+  // detection, radiality, bridges (cut-edges), articulation points (cut-vertices)
+  // and per-island validity diagnostics.  Backed by hacdcpf::graph.
+  svr.Post("/api/session/topology",
+           [](const httplib::Request&, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      namespace gr = hacdcpf::graph;
+      const gr::PowerSystemGraph graph = gr::build_power_system_graph(sys);
+      const gr::TopologyReport report = gr::analyze_topology(graph);
+
+      // ── Enum → string helpers ──────────────────────────────────────
+      auto island_status_str = [](gr::IslandStatus s) -> const char* {
+        switch (s) {
+          case gr::IslandStatus::Valid:          return "Valid";
+          case gr::IslandStatus::NoSlack:        return "NoSlack";
+          case gr::IslandStatus::NoDCVoltageRef: return "NoDCVoltageRef";
+          case gr::IslandStatus::IsolatedLoad:   return "IsolatedLoad";
+          case gr::IslandStatus::Empty:          return "Empty";
+        }
+        return "Unknown";
+      };
+      auto edge_cat_str = [](gr::EdgeCategory c) -> const char* {
+        switch (c) {
+          case gr::EdgeCategory::AC_Line:        return "AC_Line";
+          case gr::EdgeCategory::AC_Transformer: return "AC_Transformer";
+          case gr::EdgeCategory::Switch:         return "Switch";
+          case gr::EdgeCategory::Breaker:        return "Breaker";
+          case gr::EdgeCategory::DC_Line:        return "DC_Line";
+          case gr::EdgeCategory::DC_Switch:      return "DC_Switch";
+          case gr::EdgeCategory::VSC_Coupling:   return "VSC_Coupling";
+          case gr::EdgeCategory::DCDC_Coupling:  return "DCDC_Coupling";
+        }
+        return "Unknown";
+      };
+
+      // ── model bus_id → canvas position index (matches frontend ordering:
+      //    AC buses in sys.ac.buses order, DC buses in sys.dc.buses order) ──
+      std::unordered_map<int,int> ac_id_to_pos, dc_id_to_pos;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i) ac_id_to_pos[sys.ac.buses[i].index] = static_cast<int>(i);
+      for (size_t i = 0; i < sys.dc.buses.size(); ++i) dc_id_to_pos[sys.dc.buses[i].index] = static_cast<int>(i);
+
+      json out;
+      out["is_connected"]      = report.is_connected;
+      out["is_radial"]         = report.is_radial;
+      out["cycle_count"]       = report.cycle_count;
+      out["n_ac_islands"]      = report.n_ac_islands;
+      out["n_dc_islands"]      = report.n_dc_islands;
+      out["all_islands_valid"] = report.all_islands_valid;
+      out["n_buses"]           = graph.node_count();
+      out["n_branches"]        = graph.edge_count();
+
+      // ── Islands (+ per-bus island id arrays keyed by canvas position) ──
+      json islands = json::array();
+      std::vector<int> ac_bus_island(sys.ac.buses.size(), -1);
+      std::vector<int> dc_bus_island(sys.dc.buses.size(), -1);
+      for (const auto& isl : report.islands) {
+        json ji;
+        ji["island_id"]          = isl.island_id;
+        ji["domain"]             = (isl.domain == gr::NodeDomain::DC) ? "DC" : "AC";
+        ji["status"]             = island_status_str(isl.status);
+        ji["has_ac_slack"]       = isl.has_ac_slack;
+        ji["has_dc_voltage_ref"] = isl.has_dc_voltage_ref;
+        ji["n_buses"]            = static_cast<int>(isl.ac_bus_ids.size() + isl.dc_bus_ids.size());
+        ji["ac_bus_ids"]         = isl.ac_bus_ids;
+        ji["dc_bus_ids"]         = isl.dc_bus_ids;
+        islands.push_back(ji);
+        for (int bid : isl.ac_bus_ids) {
+          auto it = ac_id_to_pos.find(bid);
+          if (it != ac_id_to_pos.end()) ac_bus_island[it->second] = isl.island_id;
+        }
+        for (int bid : isl.dc_bus_ids) {
+          auto it = dc_id_to_pos.find(bid);
+          if (it != dc_id_to_pos.end()) dc_bus_island[it->second] = isl.island_id;
+        }
+      }
+      out["islands"]       = islands;
+      out["ac_bus_island"] = ac_bus_island;
+      out["dc_bus_island"] = dc_bus_island;
+
+      // ── Cut vertices (articulation points) ──────────────────────────
+      out["cut_vertex_bus_ids"] = report.cut_vertex_bus_ids;
+      std::vector<bool> ac_cut(sys.ac.buses.size(), false);
+      std::vector<bool> dc_cut(sys.dc.buses.size(), false);
+      for (int bid : report.cut_vertex_bus_ids) {
+        auto a = ac_id_to_pos.find(bid);
+        if (a != ac_id_to_pos.end()) ac_cut[a->second] = true;
+        auto d = dc_id_to_pos.find(bid);
+        if (d != dc_id_to_pos.end()) dc_cut[d->second] = true;
+      }
+      out["ac_cut_vertex"] = ac_cut;
+      out["dc_cut_vertex"] = dc_cut;
+
+      // ── Bridges (cut-edges) ─────────────────────────────────────────
+      json bridges = json::array();
+      for (int eid : report.bridge_edge_ids) {
+        if (eid < 0 || eid >= graph.edge_count()) continue;
+        const auto& e = graph.edges[eid];
+        const bool dc_edge = (e.category == gr::EdgeCategory::DC_Line ||
+                              e.category == gr::EdgeCategory::DC_Switch);
+        json jb;
+        jb["from_bus"] = e.from_bus_id;
+        jb["to_bus"]   = e.to_bus_id;
+        jb["category"] = edge_cat_str(e.category);
+        jb["domain"]   = dc_edge ? "DC" : "AC";
+        // Canvas positions (-1 when the endpoint is not in the matching domain map)
+        auto& fmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
+        auto& tmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
+        auto fit = fmap.find(e.from_bus_id);
+        auto tit = tmap.find(e.to_bus_id);
+        jb["from_pos"] = (fit != fmap.end()) ? fit->second : -1;
+        jb["to_pos"]   = (tit != tmap.end()) ? tit->second : -1;
+        bridges.push_back(jb);
+      }
+      out["bridges"] = bridges;
+
+      // ── Diagnostics ─────────────────────────────────────────────────
+      json diags = json::array();
+      for (const auto& d : report.diagnostics) {
+        diags.push_back(json{
+          {"code", static_cast<int>(d.code)},
+          {"message", d.message},
+          {"related_buses", d.related_buses},
+          {"related_branches", d.related_branches},
+        });
+      }
+      out["diagnostics"] = diags;
+
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ──────────────────────────────────────────────────────────────────
+  // Network reduction (graph reduction pipeline — before/after view).
+  // Runs switch contraction → series reduction → (optional) pendant folding
+  // and reports, for every original bus, what it collapses into.  Kron-
+  // eligible passive nodes are identified (count only — Kron operates on the
+  // Y-bus, not the system model, so it is not collapsed in this view).
+  // ──────────────────────────────────────────────────────────────────
+  svr.Post("/api/session/network_reduction",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      json body = req.body.empty() ? json::object() : json::parse(req.body);
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      namespace gr = hacdcpf::graph;
+      const bool en_switch  = body.value("enable_switch_contraction", true);
+      const bool en_series  = body.value("enable_series_reduction",   true);
+      const bool en_pendant = body.value("enable_pendant_reduction",  false);
+      const bool en_kron    = body.value("enable_kron_reduction",     false);
+
+      auto dom_str = [](gr::NodeDomain d) -> const char* {
+        return d == gr::NodeDomain::DC ? "DC" : "AC";
+      };
+      // Reducers mark eliminated nodes/edges as in_service=false rather than
+      // erasing them, so count live (in-service) elements for honest before/after.
+      auto count_live = [](const gr::PowerSystemGraph& g, int& nb, int& ne) {
+        nb = 0; ne = 0;
+        for (const auto& n : g.nodes) if (n.in_service) ++nb;
+        for (const auto& e : g.edges) if (e.in_service) ++ne;
+      };
+
+      gr::GraphReductionOptions opts;
+      opts.enable_switch_contraction = en_switch;
+      opts.enable_series_reduction   = en_series;
+      opts.enable_pendant_reduction  = en_pendant;
+      opts.enable_kron_reduction     = en_kron;
+
+      // Original graph (BEFORE).
+      const gr::PowerSystemGraph graph0 = gr::build_power_system_graph(sys);
+      int before_buses = 0, before_branches = 0;
+      count_live(graph0, before_buses, before_branches);
+
+      // Composition state in ORIGINAL-bus-id space, domain-qualified.
+      // status: 0 retained, 1 merged (contraction), 2 series, 3 pendant.
+      std::unordered_map<int,int> ac_rep, dc_rep, ac_status, dc_status;
+      for (const auto& b : sys.ac.buses) { ac_rep[b.index] = b.index; ac_status[b.index] = 0; }
+      for (const auto& b : sys.dc.buses) { dc_rep[b.index] = b.index; dc_status[b.index] = 0; }
+
+      gr::PowerSystemGraph  work_graph = graph0;
+      hacdcpf::HybridPowerSystem work_sys = sys;
+
+      std::vector<gr::Diagnostic> all_diags;
+      json switch_groups = json::array();
+      int  n_buses_merged = 0;
+
+      // ── Stage 1: switch contraction (zero-impedance / closed switches) ──
+      if (en_switch) {
+        gr::ContractionOptions copt;
+        copt.zero_impedance_threshold = opts.zero_impedance_threshold;
+        copt.voltage_base_tolerance   = opts.voltage_base_tolerance;
+        gr::ContractionResult cr = gr::contract_zero_impedance_edges(work_graph, work_sys, copt);
+        auto record_groups = [&](const std::unordered_map<int,std::vector<int>>& super_to_buses,
+                                 gr::NodeDomain dom,
+                                 std::unordered_map<int,int>& rep,
+                                 std::unordered_map<int,int>& status) {
+          for (const auto& [super, buses] : super_to_buses) {
+            if (buses.size() <= 1) continue;
+            switch_groups.push_back(json{
+              {"super_bus_id", super}, {"domain", dom_str(dom)}, {"bus_ids", buses}});
+            for (int b : buses) {
+              rep[b] = super;
+              if (b != super) { status[b] = 1; ++n_buses_merged; }
+            }
+          }
+        };
+        record_groups(cr.ac_super_to_buses, gr::NodeDomain::AC, ac_rep, ac_status);
+        record_groups(cr.dc_super_to_buses, gr::NodeDomain::DC, dc_rep, dc_status);
+        for (const auto& d : cr.diagnostics) all_diags.push_back(d);
+        work_graph = cr.contracted_graph;
+        work_sys   = cr.contracted_system;
+      }
+
+      // ── Stage 2: series reduction (passive degree-2 elimination) ──
+      json series_records = json::array();
+      if (en_series) {
+        gr::ReductionCandidates cand = gr::classify_reduction_candidates(work_graph, work_sys, opts);
+        gr::ReductionPlan       plan = gr::make_reduction_plan(work_graph, cand, opts);
+        gr::SeriesReductionResult sr = gr::apply_series_reduction(work_graph, work_sys, plan, opts);
+        for (const auto& rec : sr.mapping.series_records) {
+          series_records.push_back(json{
+            {"eliminated_bus_id", rec.eliminated_bus_id},
+            {"from_bus_id", rec.from_bus_id}, {"to_bus_id", rec.to_bus_id},
+            {"domain", dom_str(rec.domain)}, {"r_eq", rec.r_eq}, {"x_eq", rec.x_eq}});
+          auto& rep    = (rec.domain == gr::NodeDomain::DC) ? dc_rep : ac_rep;
+          auto& status = (rec.domain == gr::NodeDomain::DC) ? dc_status : ac_status;
+          for (auto& [b, r] : rep)
+            if (r == rec.eliminated_bus_id) { status[b] = 2; r = rec.from_bus_id; }
+        }
+        for (const auto& d : sr.diagnostics) all_diags.push_back(d);
+        work_graph = sr.reduced_graph;
+        work_sys   = sr.reduced_system;
+      }
+
+      // ── Stage 3: pendant folding (leaf load nodes; approximate) ──
+      json pendant_records = json::array();
+      if (en_pendant) {
+        gr::ReductionCandidates cand = gr::classify_reduction_candidates(work_graph, work_sys, opts);
+        gr::ReductionPlan       plan = gr::make_reduction_plan(work_graph, cand, opts);
+        gr::PendantReductionResult pr = gr::apply_pendant_reduction(work_graph, work_sys, plan, opts);
+        for (const auto& rec : pr.mapping.pendant_records) {
+          pendant_records.push_back(json{
+            {"eliminated_bus_id", rec.eliminated_bus_id},
+            {"parent_bus_id", rec.parent_bus_id}, {"domain", dom_str(rec.domain)}});
+          auto& rep    = (rec.domain == gr::NodeDomain::DC) ? dc_rep : ac_rep;
+          auto& status = (rec.domain == gr::NodeDomain::DC) ? dc_status : ac_status;
+          for (auto& [b, r] : rep)
+            if (r == rec.eliminated_bus_id) { status[b] = 3; r = rec.parent_bus_id; }
+        }
+        for (const auto& d : pr.diagnostics) all_diags.push_back(d);
+        work_graph = pr.reduced_graph;
+        work_sys   = pr.reduced_system;
+      }
+
+      // Resolve representative chains (a series 'from' bus may be folded later).
+      auto resolve = [](std::unordered_map<int,int>& rep) {
+        for (auto& [b, r] : rep) {
+          int cur = r, guard = 0;
+          while (rep.count(cur) && rep[cur] != cur && guard++ < 100000) cur = rep[cur];
+          r = cur;
+        }
+      };
+      resolve(ac_rep);
+      resolve(dc_rep);
+
+      // ── Kron-eligible passive interior nodes (identify only) ──
+      int n_kron_candidates = 0;
+      {
+        gr::ReductionCandidates cand = gr::classify_reduction_candidates(work_graph, work_sys, opts);
+        for (const auto& c : cand.candidates)
+          if (c.type == gr::CandidateType::ZeroInjectionPassiveInterior ||
+              c.type == gr::CandidateType::KronPassiveNode) ++n_kron_candidates;
+      }
+
+      int after_buses = 0, after_branches = 0;
+      count_live(work_graph, after_buses, after_branches);
+
+      // bus_id → canvas position (AC buses then DC buses, matching frontend).
+      std::unordered_map<int,int> ac_id_to_pos, dc_id_to_pos;
+      for (size_t i = 0; i < sys.ac.buses.size(); ++i) ac_id_to_pos[sys.ac.buses[i].index] = static_cast<int>(i);
+      for (size_t i = 0; i < sys.dc.buses.size(); ++i) dc_id_to_pos[sys.dc.buses[i].index] = static_cast<int>(i);
+
+      auto status_str = [](int s) -> const char* {
+        switch (s) {
+          case 1: return "merged";
+          case 2: return "series_eliminated";
+          case 3: return "pendant_eliminated";
+          default: return "retained";
+        }
+      };
+      auto bus_reduction = [&](size_t n, bool dc_domain) {
+        auto& rep       = dc_domain ? dc_rep : ac_rep;
+        auto& status    = dc_domain ? dc_status : ac_status;
+        auto& id_to_pos = dc_domain ? dc_id_to_pos : ac_id_to_pos;
+        json arr = json::array();
+        for (size_t i = 0; i < n; ++i) {
+          int bid = dc_domain ? sys.dc.buses[i].index : sys.ac.buses[i].index;
+          int st  = status.count(bid) ? status[bid] : 0;
+          int rp  = rep.count(bid) ? rep[bid] : bid;
+          auto pit = id_to_pos.find(rp);
+          arr.push_back(json{
+            {"bus_id", bid}, {"pos", static_cast<int>(i)},
+            {"status", status_str(st)}, {"rep_bus_id", rp},
+            {"rep_pos", pit != id_to_pos.end() ? pit->second : -1}});
+        }
+        return arr;
+      };
+
+      json out;
+      out["before"] = json{{"n_buses", before_buses}, {"n_branches", before_branches}};
+      out["after"]  = json{{"n_buses", after_buses},  {"n_branches", after_branches}};
+      out["n_buses_eliminated"]    = before_buses - after_buses;
+      out["n_branches_eliminated"] = before_branches - after_branches;
+      out["reduction_pct_buses"]   = before_buses > 0
+        ? 100.0 * (before_buses - after_buses) / before_buses : 0.0;
+      out["stages"] = json{
+        {"switch_contraction", json{{"enabled", en_switch}, {"n_groups", switch_groups.size()},
+                                    {"n_buses_merged", n_buses_merged}}},
+        {"series_reduction",   json{{"enabled", en_series},  {"n_eliminated", series_records.size()}}},
+        {"pendant_reduction",  json{{"enabled", en_pendant}, {"n_eliminated", pendant_records.size()}}},
+        {"kron_identify",      json{{"enabled", en_kron},    {"n_candidates", n_kron_candidates}}},
+      };
+      out["switch_groups"]   = switch_groups;
+      out["series_records"]  = series_records;
+      out["pendant_records"] = pendant_records;
+      out["ac_bus_reduction"] = bus_reduction(sys.ac.buses.size(), false);
+      out["dc_bus_reduction"] = bus_reduction(sys.dc.buses.size(), true);
+
+      json diags = json::array();
+      for (const auto& d : all_diags)
+        diags.push_back(json{{"code", static_cast<int>(d.code)}, {"message", d.message},
+                             {"related_buses", d.related_buses}, {"related_branches", d.related_branches}});
+      out["diagnostics"] = diags;
+
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {

@@ -1,66 +1,3 @@
-  // ========== Topology Reconfiguration Results Overlay ==========
-  /**
-   * Visualize topology reconfiguration results on the main SVG diagram.
-   * Highlights open/closed branches after reconfiguration.
-   * @param {Object} data - Topology reconfiguration result data
-   */
-  function showTopologyReconfigResults(data) {
-    // Clear previous overlays
-    resultsLayer.querySelectorAll('.topo-reconfig-overlay').forEach(el => el.remove());
-
-    // Highlight open branches (red), closed branches (green)
-    if (data.branch_details && Array.isArray(data.branch_details)) {
-      state.connections.forEach(conn => {
-        // Find the branch component this connection belongs to
-        const fromComp = getComponent(conn.from.compId);
-        const toComp = getComponent(conn.to.compId);
-        if (!fromComp || !toComp) return;
-        // Only consider ac_branch and transformer_2w for now
-        let branchComp = null;
-        if (fromComp.type === 'ac_branch' || fromComp.type === 'transformer_2w') branchComp = fromComp;
-        else if (toComp.type === 'ac_branch' || toComp.type === 'transformer_2w') branchComp = toComp;
-        if (!branchComp) return;
-
-        // Find branch status by matching name or params
-        const branchName = branchComp.params?.name || '';
-        // Try to extract branch index from name (e.g., 'Line 5' or 'Trafo 2')
-        let branchIdx = null;
-        const m = branchName.match(/(Line|Trafo)\s*(\d+)/);
-        if (m) branchIdx = parseInt(m[2]);
-        // Fallback: try params.from_bus/to_bus
-        let branchDetail = null;
-        if (branchIdx !== null) {
-          branchDetail = data.branch_details.find(b => b.id == branchIdx);
-        }
-        if (!branchDetail && branchComp.params?.from_bus !== undefined && branchComp.params?.to_bus !== undefined) {
-          branchDetail = data.branch_details.find(b => b.from_bus == branchComp.params.from_bus && b.to_bus == branchComp.params.to_bus);
-        }
-        if (!branchDetail) return;
-
-        // Overlay highlight on the connection line
-        const overlayLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        const p1 = getPortWorldPos(conn.from.compId, conn.from.portId);
-        const p2 = getPortWorldPos(conn.to.compId, conn.to.portId);
-        if (!p1 || !p2) return;
-        overlayLine.setAttribute('x1', p1.x);
-        overlayLine.setAttribute('y1', p1.y);
-        overlayLine.setAttribute('x2', p2.x);
-        overlayLine.setAttribute('y2', p2.y);
-        overlayLine.setAttribute('stroke-width', '7');
-        overlayLine.setAttribute('stroke-linecap', 'round');
-        overlayLine.setAttribute('opacity', '0.45');
-        overlayLine.classList.add('topo-reconfig-overlay');
-        if (branchDetail.closed) {
-          overlayLine.setAttribute('stroke', '#27ae60'); // green for closed
-        } else {
-          overlayLine.setAttribute('stroke', '#e74c3c'); // red for open
-          overlayLine.setAttribute('stroke-dasharray', '18 10');
-        }
-        resultsLayer.appendChild(overlayLine);
-      });
-    }
-  }
-
 /**
  * canvas.js — SVG canvas for power system single-line diagram editing.
  * Handles: component placement, drag-and-drop, pan/zoom, connections, selection.
@@ -103,14 +40,24 @@ const Canvas = (() => {
     isDragging: false,
     dragTarget: null,
     dragOffset: null,
-      showTopologyReconfigResults,
     connectStart: null,   // {compId, portId, x, y}
     tempLine: null,
     isBoxSelecting: false,
     boxSelectStart: null,  // {x, y} in SVG coords
     boxSelectRect: null,   // SVG rect element
     baseMva: 100,          // system base MVA (preserved from loaded system)
+    connectionStyle: 'orthogonal', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
+    alignSnap: true,       // snap to neighbour x/y while dragging (doc §18 Phase 4)
   };
+
+  // Cached routing context (obstacle boxes + grid + parallel-offset groups) used
+  // by the §10.3 auto-avoidance router.  Rebuilt by buildRouteContext() before a
+  // full re-route; null means "route cheaply" (plain orthogonal) so live drag
+  // stays responsive.
+  let _routeCtx = null;
+
+  // Last auto-layout statistics ({buses, rings}) for the status bar.
+  let _layoutStats = null;
 
   let svg, componentsLayer, connectionsLayer, resultsLayer, tempLayer;
   let viewBox = { x: -200, y: -100, w: 1200, h: 700 };
@@ -135,6 +82,12 @@ const Canvas = (() => {
 
     // Keyboard
     document.addEventListener('keydown', onKeyDown);
+
+    // Restore the persisted connection style (doc §10.2/§10.3).
+    try {
+      const cs = localStorage.getItem('connectionStyle');
+      if (['straight', 'orthogonal', 'avoid'].includes(cs)) state.connectionStyle = cs;
+    } catch (e) { /* ignore */ }
   }
 
   // ========== View ==========
@@ -360,6 +313,365 @@ const Canvas = (() => {
     return { x: comp.x + rx, y: comp.y + ry };
   }
 
+  // ========== Connection routing (doc §10.2 orthogonal / §10.3 avoidance) ====
+  // A connection's geometry is a polyline (array of {x,y} world points).  The
+  // visible/​hit elements are <path>; flow-overlay code reads geometry via
+  // getConnGeom() instead of the DOM so straight/orthogonal/avoid all work.
+
+  // Infer the natural exit direction of a port from its (rotated) offset sign.
+  function portDirection(compId, portId) {
+    const comp = getComponent(compId);
+    if (!comp) return null;
+    const pd = (COMP.ports[comp.type] || []).find(p => p.id === portId);
+    if (!pd) return null;
+    const rad = (comp.rotation || 0) * Math.PI / 180;
+    const rx = pd.x * Math.cos(rad) - pd.y * Math.sin(rad);
+    const ry = pd.x * Math.sin(rad) + pd.y * Math.cos(rad);
+    if (Math.abs(rx) >= Math.abs(ry)) return rx >= 0 ? 'right' : 'left';
+    return ry >= 0 ? 'down' : 'up';
+  }
+
+  function makeStraightPoints(p1, p2) {
+    return [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }];
+  }
+
+  // §10.2 orthogonal (Manhattan) polyline.  Generalises the doc snippet to a
+  // points array and adds short port-exit stubs when the port directions are
+  // known so wires leave a symbol cleanly before turning.
+  function makeOrthogonalPoints(p1, p2, d1, d2, offset = 0) {
+    const dx = Math.abs(p2.x - p1.x), dy = Math.abs(p2.y - p1.y);
+    if (dx < 1 && dy < 1) return [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }];
+    const stub = 18;
+    const horiz = (d) => d === 'left' || d === 'right';
+    const vert = (d) => d === 'up' || d === 'down';
+    const s1 = d1 ? { x: p1.x + (d1 === 'right' ? stub : d1 === 'left' ? -stub : 0),
+                      y: p1.y + (d1 === 'down' ? stub : d1 === 'up' ? -stub : 0) } : null;
+    const s2 = d2 ? { x: p2.x + (d2 === 'right' ? stub : d2 === 'left' ? -stub : 0),
+                      y: p2.y + (d2 === 'down' ? stub : d2 === 'up' ? -stub : 0) } : null;
+    const a = s1 || p1, b = s2 || p2;
+    const ad = Math.abs(b.x - a.x), bd = Math.abs(b.y - a.y);
+    const pts = [{ x: p1.x, y: p1.y }];
+    if (s1) pts.push({ x: s1.x, y: s1.y });
+    // Choose the bend axis: follow the dominant port orientation, else the
+    // longer span (horizontal-first when wide, vertical-first when tall).
+    let horizFirst;
+    if (d1 && horiz(d1)) horizFirst = true;
+    else if (d1 && vert(d1)) horizFirst = false;
+    else horizFirst = ad >= bd;
+    if (horizFirst) {
+      const midX = (a.x + b.x) / 2 + offset; // offset spreads parallel wires
+      pts.push({ x: midX, y: a.y }, { x: midX, y: b.y });
+    } else {
+      const midY = (a.y + b.y) / 2 + offset;
+      pts.push({ x: a.x, y: midY }, { x: b.x, y: midY });
+    }
+    if (s2) pts.push({ x: s2.x, y: s2.y });
+    pts.push({ x: p2.x, y: p2.y });
+    return simplifyPoints(pts);
+  }
+
+  // Drop collinear / duplicate vertices so paths stay minimal.
+  function simplifyPoints(pts) {
+    if (!pts || pts.length <= 2) return pts;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length - 1; i++) {
+      const a = out[out.length - 1], b = pts[i], c = pts[i + 1];
+      if ((Math.abs(a.x - b.x) < 0.5 && Math.abs(b.x - c.x) < 0.5) ||
+          (Math.abs(a.y - b.y) < 0.5 && Math.abs(b.y - c.y) < 0.5)) continue; // collinear
+      if (Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5) continue;   // duplicate
+      out.push(b);
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+
+  function pointsToPath(points) {
+    if (!points || points.length === 0) return '';
+    return points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+  }
+
+  // Pick the polyline for a connection according to the active style.  `cheap`
+  // forces the fast orthogonal route (used during live drag) instead of A*.
+  function routeConnection(conn, opts = {}) {
+    const p1 = getPortWorldPos(conn.from.compId, conn.from.portId);
+    const p2 = getPortWorldPos(conn.to.compId, conn.to.portId);
+    if (!p1 || !p2) return null;
+    const style = state.connectionStyle || 'orthogonal';
+    if (style === 'straight') return makeStraightPoints(p1, p2);
+    const d1 = portDirection(conn.from.compId, conn.from.portId);
+    const d2 = portDirection(conn.to.compId, conn.to.portId);
+    if (style === 'avoid' && !opts.cheap && _routeCtx) {
+      const routed = routeAvoid(conn, p1, p2, d1, d2, _routeCtx);
+      if (routed) return routed;
+    }
+    const offset = _routeCtx ? (_routeCtx.offsetOf.get(conn.id) || 0) : 0;
+    return makeOrthogonalPoints(p1, p2, d1, d2, offset);
+  }
+
+  // Geometry accessor for overlay code: returns the polyline plus its
+  // arc-length midpoint and unit tangent (oriented from→to), and — when a
+  // component id is supplied — which endpoint is the component vs. the bus.
+  // Falls back to a straight 2-point polyline if conn.geom is missing/stale so
+  // overlays never break (doc §10.1 safety net).
+  function getConnGeom(conn, opts = {}) {
+    let pts = conn.geom && conn.geom.points;
+    if (!pts || pts.length < 2) {
+      const a = getPortWorldPos(conn.from.compId, conn.from.portId);
+      const b = getPortWorldPos(conn.to.compId, conn.to.portId);
+      if (!a || !b) return null;
+      pts = [a, b];
+    }
+    let total = 0;
+    const segs = [];
+    for (let i = 1; i < pts.length; i++) {
+      const ddx = pts[i].x - pts[i - 1].x, ddy = pts[i].y - pts[i - 1].y;
+      const len = Math.hypot(ddx, ddy);
+      segs.push({ len, dx: ddx, dy: ddy, x0: pts[i - 1].x, y0: pts[i - 1].y });
+      total += len;
+    }
+    let half = total / 2, mx = pts[0].x, my = pts[0].y, tdx = 1, tdy = 0;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      if (half <= s.len || i === segs.length - 1) {
+        const t = s.len ? half / s.len : 0;
+        mx = s.x0 + s.dx * t; my = s.y0 + s.dy * t;
+        const l = s.len || 1; tdx = s.dx / l; tdy = s.dy / l;
+        break;
+      }
+      half -= s.len;
+    }
+    const fromPt = pts[0], toPt = pts[pts.length - 1];
+    let compEnd = fromPt, busEnd = toPt, compIsFrom = true;
+    if (opts.fromCompId != null) {
+      compIsFrom = conn.from.compId === opts.fromCompId;
+      compEnd = compIsFrom ? fromPt : toPt;
+      busEnd = compIsFrom ? toPt : fromPt;
+    }
+    return { points: pts, fromPt, toPt, compEnd, busEnd, compIsFrom, mx, my, tdx, tdy };
+  }
+
+  // Arrow placement at the polyline midpoint, pointing toward `headPt` (which
+  // must be one of g.fromPt / g.toPt / g.compEnd / g.busEnd — these alias the
+  // same objects).  Returns the midpoint, rotation angle and a perpendicular
+  // label offset, matching the old straight-line overlay maths.
+  function flowArrow(g, headPt) {
+    let tx = g.tdx, ty = g.tdy;
+    if (headPt !== g.toPt) { tx = -tx; ty = -ty; }
+    return {
+      mx: g.mx, my: g.my,
+      angle: Math.atan2(ty, tx) * 180 / Math.PI,
+      offX: -ty * 14, offY: tx * 14,
+    };
+  }
+
+  // ---- §10.3 auto-avoidance routing ------------------------------------------
+  // Axis-aligned obstacle box for a component (buses are short & wide, devices
+  // are taller).  Inflated by `pad` so wires keep clear of the symbol.
+  function componentObstacleBox(comp, pad = 10) {
+    const isBus = comp.type === 'ac_bus' || comp.type === 'dc_bus';
+    const hw = isBus ? 44 : 45;
+    const top = isBus ? 12 : 35;
+    const h = isBus ? 24 : 80;
+    return { id: comp.id, x: comp.x - hw - pad, y: comp.y - top - pad,
+             w: 2 * hw + 2 * pad, h: h + 2 * pad };
+  }
+
+  function rectsOverlap(a, b) {
+    return a.x < b.x + b.width && a.x + a.width > b.x &&
+           a.y < b.y + b.height && a.y + a.height > b.y;
+  }
+
+  // Build (and cache) the routing context: obstacle boxes, a coarse blocked-cell
+  // grid for A*, the per-box cell ranges (so a wire may exit its own endpoints),
+  // and parallel-offset amounts for connections that share an endpoint pair.
+  function buildRouteContext() {
+    const comps = state.components;
+    if (!comps.length) { _routeCtx = null; return null; }
+    // Per-connection A* does not scale to very large diagrams; above this many
+    // connections we skip the grid so routing falls back to fast orthogonal.
+    if (state.connections.length > 800) { _routeCtx = null; return null; }
+    const boxes = comps.map(c => componentObstacleBox(c));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    boxes.forEach(b => {
+      minX = Math.min(minX, b.x); minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h);
+    });
+    const margin = 100; minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+    const cell = 20;
+    let cols = Math.ceil((maxX - minX) / cell);
+    let rows = Math.ceil((maxY - minY) / cell);
+    // Cap total cells so a huge canvas can't produce a pathological grid.
+    const MAX_CELLS = 250000;
+    if (cols * rows > MAX_CELLS) { _routeCtx = null; return null; }
+    cols = Math.max(1, cols); rows = Math.max(1, rows);
+    const blocked = new Uint8Array(cols * rows);
+    const boxCells = new Map();
+    boxes.forEach(b => {
+      const c0 = Math.max(0, Math.floor((b.x - minX) / cell));
+      const c1 = Math.min(cols - 1, Math.floor((b.x + b.w - minX) / cell));
+      const r0 = Math.max(0, Math.floor((b.y - minY) / cell));
+      const r1 = Math.min(rows - 1, Math.floor((b.y + b.h - minY) / cell));
+      boxCells.set(b.id, { c0, c1, r0, r1 });
+      for (let r = r0; r <= r1; r++)
+        for (let c = c0; c <= c1; c++) blocked[r * cols + c] = 1;
+    });
+    // Parallel offsets for multi-edges between the same component pair.
+    const groups = new Map();
+    state.connections.forEach(cn => {
+      const a = cn.from.compId, b = cn.to.compId;
+      const key = a < b ? a + '_' + b : b + '_' + a;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(cn.id);
+    });
+    const offsetOf = new Map();
+    groups.forEach(ids => {
+      const n = ids.length;
+      ids.forEach((id, i) => offsetOf.set(id, (i - (n - 1) / 2) * 9));
+    });
+    _routeCtx = { minX, minY, cell, cols, rows, blocked, boxCells, offsetOf };
+    return _routeCtx;
+  }
+
+  // 4-connected A* (Manhattan) with a turn penalty.  Returns a simplified world
+  // polyline avoiding obstacle cells, or null (caller falls back to orthogonal).
+  function routeAvoid(conn, p1, p2, d1, d2, ctx) {
+    if (!ctx) return null;
+    const { minX, minY, cell, cols, rows, blocked } = ctx;
+    const clamp = (v, hi) => Math.min(hi, Math.max(0, v));
+    const toCol = (x) => clamp(Math.floor((x - minX) / cell), cols - 1);
+    const toRow = (y) => clamp(Math.floor((y - minY) / cell), rows - 1);
+    const fromR = ctx.boxCells.get(conn.from.compId);
+    const toR = ctx.boxCells.get(conn.to.compId);
+    const inR = (c, r, R) => R && c >= R.c0 && c <= R.c1 && r >= R.r0 && r <= R.r1;
+    const idx = (c, r) => r * cols + c;
+    const free = (c, r) => {
+      if (c < 0 || r < 0 || c >= cols || r >= rows) return false;
+      if (!blocked[idx(c, r)]) return true;
+      return inR(c, r, fromR) || inR(c, r, toR); // may exit own endpoints
+    };
+    const sCol = toCol(p1.x), sRow = toRow(p1.y);
+    const gCol = toCol(p2.x), gRow = toRow(p2.y);
+    const H = (c, r) => Math.abs(c - gCol) + Math.abs(r - gRow);
+    const gScore = new Map(), came = new Map(), dirMap = new Map();
+    const sIdx = idx(sCol, sRow);
+    gScore.set(sIdx, 0);
+    const open = [{ f: H(sCol, sRow), c: sCol, r: sRow }];
+    const neigh = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    const MAX = 8000;
+    let expansions = 0, foundIdx = -1;
+    while (open.length && expansions < MAX) {
+      let bi = 0;
+      for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
+      const cur = open.splice(bi, 1)[0];
+      expansions++;
+      const ci = idx(cur.c, cur.r);
+      if (cur.c === gCol && cur.r === gRow) { foundIdx = ci; break; }
+      const cg = gScore.get(ci);
+      const pdir = dirMap.get(ci);
+      for (const [dx, dy] of neigh) {
+        const nc = cur.c + dx, nr = cur.r + dy;
+        if (!free(nc, nr)) continue;
+        const ni = idx(nc, nr);
+        const ndir = dx === 1 ? 0 : dx === -1 ? 2 : dy === 1 ? 1 : 3;
+        let step = 1;
+        if (pdir !== undefined && pdir !== ndir) step += 3; // discourage turns
+        const ng = cg + step;
+        if (ng < (gScore.has(ni) ? gScore.get(ni) : Infinity)) {
+          gScore.set(ni, ng); came.set(ni, ci); dirMap.set(ni, ndir);
+          open.push({ f: ng + H(nc, nr), c: nc, r: nr });
+        }
+      }
+    }
+    if (foundIdx < 0) return null;
+    const cells = [];
+    let ci = foundIdx;
+    while (ci !== undefined) { cells.push(ci); ci = came.get(ci); }
+    cells.reverse();
+    const cx = (c) => minX + c * cell + cell / 2;
+    const cy = (r) => minY + r * cell + cell / 2;
+    const pts = [{ x: p1.x, y: p1.y }];
+    cells.forEach(i => pts.push({ x: cx(i % cols), y: cy(Math.floor(i / cols)) }));
+    pts.push({ x: p2.x, y: p2.y });
+    return simplifyPoints(pts);
+  }
+
+  // Rebuild routing + re-render every connection (the 整理连线 button).  Drops
+  // any user waypoints so the auto-router fully takes over.
+  function rerouteConnections() {
+    _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
+    state.connections.forEach(conn => {
+      if (conn.geom) conn.geom.userPoints = null;
+      rerenderConnection(conn);
+    });
+    if (_vizMode !== 'off' && _lastPfResult) applyVisualizationOverlay();
+  }
+
+  function setConnectionStyle(style) {
+    if (!['straight', 'orthogonal', 'avoid'].includes(style)) style = 'orthogonal';
+    state.connectionStyle = style;
+    try { localStorage.setItem('connectionStyle', style); } catch (e) { /* ignore */ }
+    rerouteConnections();
+  }
+
+  function setAlignSnap(on) { state.alignSnap = !!on; }
+
+  // ---- Phase 4: drag alignment snapping (doc §18) ----------------------------
+  function clearAlignGuides() {
+    if (tempLayer) tempLayer.querySelectorAll('.align-guide').forEach(e => e.remove());
+  }
+
+  function drawAlignGuide(x, y) {
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.classList.add('align-guide');
+    if (x !== null) {
+      line.setAttribute('x1', x); line.setAttribute('x2', x);
+      line.setAttribute('y1', viewBox.y); line.setAttribute('y2', viewBox.y + viewBox.h);
+    } else {
+      line.setAttribute('y1', y); line.setAttribute('y2', y);
+      line.setAttribute('x1', viewBox.x); line.setAttribute('x2', viewBox.x + viewBox.w);
+    }
+    tempLayer.appendChild(line);
+  }
+
+  // Snap a dragged component's x/y onto the nearest neighbour within threshold
+  // and show alignment guides.  Mutates comp.x/comp.y in place.
+  function applyDragSnap(comp) {
+    clearAlignGuides();
+    const TH = 8;
+    let sx = null, sy = null;
+    for (const o of state.components) {
+      if (o.id === comp.id) continue;
+      if (sx === null && Math.abs(o.x - comp.x) <= TH) { comp.x = o.x; sx = o.x; }
+      if (sy === null && Math.abs(o.y - comp.y) <= TH) { comp.y = o.y; sy = o.y; }
+      if (sx !== null && sy !== null) break;
+    }
+    if (sx !== null) drawAlignGuide(sx, null);
+    if (sy !== null) drawAlignGuide(null, sy);
+  }
+
+  // ---- Phase 4: result-label collision avoidance (doc §18) -------------------
+  function deOverlapLabels(container) {
+    const labels = [...container.querySelectorAll('.flow-label, .heatmap-label')];
+    if (labels.length < 2) return;
+    const items = [];
+    labels.forEach(l => { try { items.push({ l, b: l.getBBox() }); } catch (e) { /* not rendered */ } });
+    for (let pass = 0; pass < 3; pass++) {
+      let moved = false;
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          if (rectsOverlap(items[i].b, items[j].b)) {
+            const t = items[j].l;
+            const shift = (items[i].b.y <= items[j].b.y ? 1 : -1) * 7;
+            t.setAttribute('y', parseFloat(t.getAttribute('y') || 0) + shift);
+            try { items[j].b = t.getBBox(); } catch (e) { /* ignore */ }
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
   // ========== Connections ==========
   function addConnection(fromCompId, fromPortId, toCompId, toPortId) {
     // Check if connection already exists
@@ -384,31 +696,37 @@ const Canvas = (() => {
     return conn;
   }
 
-  function renderConnection(conn) {
-    const p1 = getPortWorldPos(conn.from.compId, conn.from.portId);
-    const p2 = getPortWorldPos(conn.to.compId, conn.to.portId);
-    if (!p1 || !p2) return;
+  function renderConnection(conn, opts = {}) {
+    // Route the wire (straight / orthogonal / avoid) and cache its geometry so
+    // the flow-overlay code can read endpoints/midpoint without touching the DOM.
+    let points = conn.geom && conn.geom.userPoints
+      ? conn.geom.userPoints                       // user-edited waypoints win
+      : routeConnection(conn, opts);
+    if (!points || points.length < 2) return;
+    conn.geom = {
+      points,
+      p1: points[0],
+      p2: points[points.length - 1],
+      userPoints: conn.geom && conn.geom.userPoints || null,
+    };
+    const d = pointsToPath(points);
 
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.classList.add('connection');
     g.dataset.connId = conn.id;
 
     // Wide invisible hit area for easier clicking
-    const hitLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    hitLine.setAttribute('x1', p1.x);
-    hitLine.setAttribute('y1', p1.y);
-    hitLine.setAttribute('x2', p2.x);
-    hitLine.setAttribute('y2', p2.y);
-    hitLine.setAttribute('stroke', 'transparent');
-    hitLine.setAttribute('stroke-width', '10');
-    hitLine.style.cursor = 'pointer';
-    g.appendChild(hitLine);
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    hit.setAttribute('d', d);
+    hit.setAttribute('fill', 'none');
+    hit.setAttribute('stroke', 'transparent');
+    hit.setAttribute('stroke-width', '12');
+    hit.style.cursor = 'pointer';
+    g.appendChild(hit);
 
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-    line.setAttribute('x1', p1.x);
-    line.setAttribute('y1', p1.y);
-    line.setAttribute('x2', p2.x);
-    line.setAttribute('y2', p2.y);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.setAttribute('d', d);
+    line.setAttribute('fill', 'none');
     line.setAttribute('stroke', '#666');
     line.setAttribute('stroke-width', '2');
     line.classList.add('conn-line');
@@ -416,11 +734,12 @@ const Canvas = (() => {
 
     connectionsLayer.appendChild(g);
     conn.el = g;
+    if (conn.id === state.selectedConnectionId) g.classList.add('conn-selected');
   }
 
-  function rerenderConnection(conn) {
+  function rerenderConnection(conn, opts = {}) {
     conn.el?.remove();
-    renderConnection(conn);
+    renderConnection(conn, opts);
   }
 
   // ========== Event: Mouse ==========
@@ -522,11 +841,14 @@ const Canvas = (() => {
       const comp = state.dragTarget;
       comp.x = snapToGrid(pt.x - state.dragOffset.x);
       comp.y = snapToGrid(pt.y - state.dragOffset.y);
+      // Alignment snapping to nearby components (doc §18 Phase 4) — shows guides
+      if (state.alignSnap) applyDragSnap(comp);
       comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
-      // Update connections
+      // Update connections — cheap (orthogonal) routing keeps the drag smooth;
+      // a full avoid-route runs once on mouse-up.
       state.connections.forEach(conn => {
         if (conn.from.compId === comp.id || conn.to.compId === comp.id) {
-          rerenderConnection(conn);
+          rerenderConnection(conn, { cheap: true });
         }
       });
       // Update result overlays (voltage text + visualization)
@@ -616,9 +938,21 @@ const Canvas = (() => {
 
     // Stop dragging
     if (state.isDragging) {
+      const dragged = state.dragTarget;
       state.isDragging = false;
       state.dragTarget = null;
       state.dragOffset = null;
+      clearAlignGuides();
+      // Full (avoid-aware) re-route of the dragged component's wires now that
+      // the drag is over — live drag used the cheap orthogonal route.
+      if (dragged && state.connectionStyle === 'avoid') {
+        buildRouteContext();
+        state.connections.forEach(conn => {
+          if (conn.from.compId === dragged.id || conn.to.compId === dragged.id) {
+            rerenderConnection(conn);
+          }
+        });
+      }
       // Final refresh of visualization overlay after drag ends
       if (_vizMode !== 'off' && _lastPfResult) {
         applyVisualizationOverlay();
@@ -759,7 +1093,7 @@ const Canvas = (() => {
   }
 
   // ========== Auto Layout ==========
-  function autoLayout() {
+  function autoLayout(options = {}) {
     const buses = state.components.filter(c => c.type === 'ac_bus' || c.type === 'dc_bus');
     const branchTypes = new Set(['ac_branch', 'transformer_2w', 'transformer_3w', 'dc_branch']);
     const branches = state.components.filter(c => branchTypes.has(c.type));
@@ -802,64 +1136,260 @@ const Canvas = (() => {
       if (hasEG) { root = b.id; break; }
     }
 
-    // BFS
-    const queue = [root];
-    busLayer.set(root, 0);
-    while (queue.length > 0) {
-      const cur = queue.shift();
-      const layer = busLayer.get(cur);
-      for (const nb of adj.get(cur) || []) {
-        if (!busLayer.has(nb)) {
-          busLayer.set(nb, layer + 1);
-          queue.push(nb);
+    // Multi-root BFS: build a spanning tree (parent/children) per connected
+    // component so the layout can centre each parent over its sub-tree.  The
+    // primary root is the SLACK / external-grid bus chosen above; every other
+    // disconnected bus seeds its own tree.
+    const busParent = new Map();
+    const visited = new Set();
+    const roots = [];
+    const bfsFrom = (r) => {
+      roots.push(r);
+      const queue = [r];
+      busLayer.set(r, 0);
+      busParent.set(r, null);
+      visited.add(r);
+      while (queue.length > 0) {
+        const cur = queue.shift();
+        const layer = busLayer.get(cur);
+        for (const nb of adj.get(cur) || []) {
+          if (!visited.has(nb)) {
+            visited.add(nb);
+            busLayer.set(nb, layer + 1);
+            busParent.set(nb, cur);
+            queue.push(nb);
+          }
         }
       }
-    }
-    // Handle disconnected buses
-    buses.forEach(b => { if (!busLayer.has(b.id)) busLayer.set(b.id, 0); });
+    };
+    bfsFrom(root);
+    buses.forEach(b => { if (!visited.has(b.id)) bfsFrom(b.id); });
 
-    // Group buses by layer
-    const layers = new Map(); // layer -> [busComp]
+    // Children (spanning-tree edges only)
+    const children = new Map();
+    buses.forEach(b => children.set(b.id, []));
+    buses.forEach(b => {
+      const p = busParent.get(b.id);
+      if (p != null && children.has(p)) children.get(p).push(b.id);
+    });
+
+    // Sub-tree leaf width (post-order): a leaf spans 1 column; a parent spans
+    // the sum of its children's widths.  Iterative post-order avoids deep
+    // recursion blowing the stack on large radial feeders.
+    const subWidth = new Map();
+    roots.forEach(r => {
+      const order = [];
+      const stack = [r];
+      while (stack.length) {
+        const id = stack.pop();
+        order.push(id);
+        (children.get(id) || []).forEach(c => stack.push(c));
+      }
+      for (let i = order.length - 1; i >= 0; i--) {
+        const id = order[i];
+        const ch = children.get(id) || [];
+        if (ch.length === 0) subWidth.set(id, 1);
+        else subWidth.set(id, ch.reduce((s, c) => s + (subWidth.get(c) || 1), 0));
+      }
+    });
+
+    // ---- Abstract tree positioning (depth + leaf coordinate) -------------
+    // Assigns each bus a leaf coordinate (_pos); a parent is centred over its
+    // children.  Iterative DFS (explicit stack) so deep feeders with thousands
+    // of buses cannot overflow the call stack.  Re-runnable so the crossing
+    // sweeps below can reorder siblings and recompute coordinates.
+    // Multi-feeder grouping (doc §18): an extra gap is inserted between the
+    // primary root's direct sub-trees so distinct feeders read as separate.
+    const feederGap = 1;
+    const placeSubtree = (rootId, startLeaf) => {
+      const stack = [{ id: rootId, left: startLeaf, phase: 0 }];
+      while (stack.length) {
+        const f = stack[stack.length - 1];
+        const ch = children.get(f.id) || [];
+        if (ch.length === 0) { const bus = getComponent(f.id); if (bus) bus._pos = f.left; stack.pop(); continue; }
+        if (f.phase === 0) {
+          f.phase = 1;
+          const gap = (busParent.get(f.id) == null && ch.length > 1) ? feederGap : 0;
+          let cursor = f.left;
+          const lefts = [];
+          ch.forEach(c => { lefts.push(cursor); cursor += (subWidth.get(c) || 1) + gap; });
+          for (let k = ch.length - 1; k >= 0; k--) stack.push({ id: ch[k], left: lefts[k], phase: 0 });
+        } else {
+          const bus = getComponent(f.id);
+          const first = getComponent(ch[0]);
+          const last = getComponent(ch[ch.length - 1]);
+          if (bus && first && last) bus._pos = (first._pos + last._pos) / 2;
+          stack.pop();
+        }
+      }
+    };
+    const assignLeafPos = () => {
+      let leaf = 0;
+      roots.forEach(r => { placeSubtree(r, leaf); leaf += (subWidth.get(r) || 1) + 2; });
+    };
+    assignLeafPos();
+
+    // ---- Ring / loop detection (doc §18): edges not in the spanning tree mark
+    // a cycle.  Their branch components are flagged so 'avoid' routing can give
+    // them extra clearance; ringCount is surfaced for the status bar.
+    let ringCount = 0;
+    const ringBusPairs = new Set();
+    buses.forEach(b => {
+      (adj.get(b.id) || []).forEach(nb => {
+        if (nb <= b.id) return; // count each undirected edge once
+        const isTree = busParent.get(b.id) === nb || busParent.get(nb) === b.id;
+        if (!isTree) { ringCount++; ringBusPairs.add(b.id + '_' + nb); }
+      });
+    });
+    branches.forEach(br => {
+      const linked = [];
+      state.connections.forEach(c => {
+        const other = c.from.compId === br.id ? c.to.compId
+                    : c.to.compId === br.id ? c.from.compId : null;
+        if (other !== null && busIdSet.has(other)) linked.push(other);
+      });
+      br._isRing = linked.length >= 2 &&
+        ringBusPairs.has(Math.min(linked[0], linked[1]) + '_' + Math.max(linked[0], linked[1]));
+    });
+    _layoutStats = { buses: buses.length, rings: ringCount };
+
+    // ---- Crossing reduction: barycenter sibling ordering -----------------
+    // A few sweeps reorder each parent's children toward the average position
+    // of their cross-links, reducing wire crossings in meshed feeders.  It is a
+    // no-op for pure radial trees (already crossing-free) so it never worsens
+    // the common case.
+    for (let sweep = 0; sweep < 4; sweep++) {
+      let changed = false;
+      buses.forEach(b => {
+        const ch = children.get(b.id);
+        if (!ch || ch.length < 2) return;
+        const bary = new Map();
+        ch.forEach(cid => {
+          let sum = 0, cnt = 0;
+          (adj.get(cid) || []).forEach(nb => {
+            const nc = getComponent(nb);
+            if (nc && nc._pos !== undefined && nb !== b.id) { sum += nc._pos; cnt++; }
+          });
+          bary.set(cid, cnt ? sum / cnt : (getComponent(cid)._pos || 0));
+        });
+        const before = ch.join(',');
+        ch.sort((x, y) => bary.get(x) - bary.get(y));
+        if (ch.join(',') !== before) changed = true;
+      });
+      assignLeafPos();
+      if (!changed) break;
+    }
+
+    // ---- Crossing-count refinement (doc §18) -----------------------------
+    // For small/medium graphs, run extra alternating sweeps and keep whichever
+    // sibling ordering yields the fewest edge crossings.  Skipped for large
+    // graphs where the O(E²) count would be too costly (keeps thousands-of-node
+    // layouts fast).
+    const countCrossings = () => {
+      // Group adjacency edges by the (parent) layer of their lower endpoint.
+      const byLayer = new Map();
+      buses.forEach(u => {
+        (adj.get(u.id) || []).forEach(vId => {
+          if (vId <= u.id) return;
+          const lu = busLayer.get(u.id), lv = busLayer.get(vId);
+          if (lu === undefined || lv === undefined) return;
+          const L = Math.min(lu, lv);
+          if (!byLayer.has(L)) byLayer.set(L, []);
+          const top = lu <= lv ? u.id : vId, bot = lu <= lv ? vId : u.id;
+          byLayer.get(L).push([getComponent(top)._pos || 0, getComponent(bot)._pos || 0]);
+        });
+      });
+      let cross = 0;
+      byLayer.forEach(edges => {
+        for (let i = 0; i < edges.length; i++)
+          for (let j = i + 1; j < edges.length; j++) {
+            const a = edges[i], b = edges[j];
+            if ((a[0] - b[0]) * (a[1] - b[1]) < 0) cross++;
+          }
+      });
+      return cross;
+    };
+    if (buses.length <= 250) {
+      let best = countCrossings();
+      let bestOrder = new Map([...children].map(([k, v]) => [k, v.slice()]));
+      let bestPos = new Map(buses.map(b => [b.id, b._pos]));
+      for (let sweep = 0; sweep < 6 && best > 0; sweep++) {
+        // Median heuristic on the alternate parity for ordering diversity.
+        buses.forEach(b => {
+          const ch = children.get(b.id);
+          if (!ch || ch.length < 2) return;
+          const med = new Map();
+          ch.forEach(cid => {
+            const ps = [];
+            (adj.get(cid) || []).forEach(nb => {
+              const nc = getComponent(nb);
+              if (nc && nc._pos !== undefined && nb !== b.id) ps.push(nc._pos);
+            });
+            ps.sort((p, q) => p - q);
+            med.set(cid, ps.length ? ps[Math.floor(ps.length / 2)] : (getComponent(cid)._pos || 0));
+          });
+          ch.sort((x, y) => med.get(x) - med.get(y));
+        });
+        assignLeafPos();
+        const c = countCrossings();
+        if (c < best) {
+          best = c;
+          bestOrder = new Map([...children].map(([k, v]) => [k, v.slice()]));
+          bestPos = new Map(buses.map(b => [b.id, b._pos]));
+        }
+      }
+      // Restore the best ordering found.
+      bestOrder.forEach((v, k) => { if (children.has(k)) children.set(k, v); });
+      buses.forEach(b => { b._pos = bestPos.get(b.id); });
+      if (_layoutStats) _layoutStats.crossings = best;
+    }
+
+    // ---- Map abstract (leaf, depth) → screen (x, y) by direction ---------
+    //   TB (default) top→bottom, LR left→right, RADIAL concentric, COMPACT = TB
+    //   with tighter gaps.
+    const dir = (options && options.direction) || 'TB';
+    const levelGap = (options && options.levelGap) || (dir === 'COMPACT' ? 170 : 240);
+    const nodeGap  = (options && options.nodeGap)  || (dir === 'COMPACT' ? 130 : 200);
+    const totalLeaves = buses.reduce((m, b) => Math.max(m, b._pos || 0), 0);
+    buses.forEach(b => {
+      const depth = busLayer.get(b.id) || 0;
+      const pos = b._pos || 0;
+      if (dir === 'LR') {
+        b.x = depth * levelGap;
+        b.y = pos * nodeGap;
+      } else if (dir === 'RADIAL') {
+        const ang = (pos / (totalLeaves + 1)) * 2 * Math.PI;
+        const rad = (depth + 1) * levelGap * 0.9;
+        b.x = Math.cos(ang) * rad;
+        b.y = Math.sin(ang) * rad;
+      } else {
+        b.x = pos * nodeGap;
+        b.y = depth * levelGap;
+      }
+    });
+
+    // Centre the whole drawing around the origin (both axes).  Uses a running
+    // min/max loop rather than Math.min(...spread) — spreading a thousands-long
+    // array overflows the JS argument limit (RangeError) on large systems.
+    if (buses.length > 0) {
+      let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
+      buses.forEach(b => {
+        if (b.x < mnX) mnX = b.x; if (b.x > mxX) mxX = b.x;
+        if (b.y < mnY) mnY = b.y; if (b.y > mxY) mxY = b.y;
+      });
+      const midX = (mnX + mxX) / 2, midY = (mnY + mxY) / 2;
+      buses.forEach(b => { b.x -= midX; b.y -= midY; });
+    }
+    const spacingX = nodeGap, spacingY = levelGap;
+
+    // Layer groups retained for orphan placement below.
+    const layers = new Map();
     buses.forEach(b => {
       const L = busLayer.get(b.id);
       if (!layers.has(L)) layers.set(L, []);
       layers.get(L).push(b);
     });
-
-    // Position buses: layers top-to-bottom, buses left-to-right within layer
-    const spacingX = 200, spacingY = 240;
     const sortedLayers = [...layers.keys()].sort((a, b) => a - b);
-    sortedLayers.forEach(L => {
-      const layerBuses = layers.get(L);
-      const offsetX = -(layerBuses.length - 1) * spacingX / 2;
-      layerBuses.forEach((bus, i) => {
-        bus.x = offsetX + i * spacingX;
-        bus.y = L * spacingY;
-      });
-    });
-
-    // Force-directed refinement (only X within same layer) — 30 iterations
-    for (let iter = 0; iter < 30; iter++) {
-      buses.forEach(bus => {
-        let fx = 0;
-        const neighbors = adj.get(bus.id) || new Set();
-        neighbors.forEach(nbId => {
-          const nb = getComponent(nbId);
-          if (!nb) return;
-          const dx = nb.x - bus.x;
-          fx += dx * 0.1; // attraction
-        });
-        // Repulsion from same-layer buses
-        const layer = busLayer.get(bus.id);
-        (layers.get(layer) || []).forEach(other => {
-          if (other.id === bus.id) return;
-          const dx = bus.x - other.x;
-          const dist = Math.abs(dx) || 1;
-          if (dist < spacingX) fx += Math.sign(dx) * spacingX / dist * 2;
-        });
-        bus.x += fx * 0.3;
-      });
-    }
 
     // Snap buses to grid
     buses.forEach(bus => {
@@ -868,7 +1398,10 @@ const Canvas = (() => {
       bus.el.setAttribute('transform', `translate(${bus.x}, ${bus.y}) rotate(${bus.rotation || 0})`);
     });
 
-    // Place branch-type components at midpoint of their connected buses
+    // Place branch-type components at the midpoint of their two buses, pushed
+    // along the branch normal so the icon does not sit exactly on the wire
+    // (doc §8).  Transformers get a larger offset than plain lines.
+    const branchOffset = { ac_branch: 20, dc_branch: 20, transformer_2w: 30, transformer_3w: 40 };
     branches.forEach(br => {
       const linked = [];
       state.connections.forEach(c => {
@@ -877,8 +1410,13 @@ const Canvas = (() => {
         if (other !== null && busIdSet.has(other)) linked.push(getComponent(other));
       });
       if (linked.length >= 2 && linked[0] && linked[1]) {
-        br.x = snapToGrid((linked[0].x + linked[1].x) / 2);
-        br.y = snapToGrid((linked[0].y + linked[1].y) / 2 - 30);
+        const a = linked[0], b = linked[1];
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const off = branchOffset[br.type] || 20;
+        br.x = snapToGrid(mx + (-dy / len) * off);
+        br.y = snapToGrid(my + (dx / len) * off);
       } else if (linked.length === 1 && linked[0]) {
         br.x = linked[0].x + 60;
         br.y = linked[0].y;
@@ -886,8 +1424,30 @@ const Canvas = (() => {
       br.el.setAttribute('transform', `translate(${br.x}, ${br.y}) rotate(${br.rotation || 0})`);
     });
 
-    // Place device components around their connected buses
-    const busDeviceCount = new Map(); // busCompId -> count of devices placed
+    // Place device components around their connected bus BY TYPE so the
+    // single-line diagram reads like a professional schematic (doc §5.3 step 8):
+    //   external grid → above,  generator → left,  pv / renewable → right,
+    //   load / motor → below,  storage → lower-right,  shunt → lower-left.
+    const dirSlots = new Map(); // `${busId}|${dir}` -> count already placed
+    const slotOf = (busId, dir) => {
+      const key = busId + '|' + dir;
+      const n = dirSlots.get(key) || 0;
+      dirSlots.set(key, n + 1);
+      return n;
+    };
+    const placement = {
+      external_grid:    { dir: 'up',    dx: 0,    dy: -110, sx: 70,  sy: 0 },
+      generator:        { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
+      static_generator: { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      pv_system:        { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      renewable_gen:    { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      vpp:              { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      storage:          { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      mobile_storage:   { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      microgrid:        { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      shunt:            { dir: 'dl',    dx: -95,  dy: 110,  sx: -70, sy: 0 },
+    };
+    const defaultPlace = { dir: 'down', dx: 0, dy: 110, sx: 80, sy: 70 };
     let orphanIdx = 0;
     devices.forEach(comp => {
       const conn = state.connections.find(c =>
@@ -897,17 +1457,15 @@ const Canvas = (() => {
         const busId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
         const bus = getComponent(busId);
         if (bus) {
-          const n = busDeviceCount.get(busId) || 0;
-          busDeviceCount.set(busId, n + 1);
-          // Spread devices around the bus: above for grids, below for others
-          if (comp.type === 'external_grid') {
-            comp.x = bus.x + (n % 3 - 1) * 70;
-            comp.y = bus.y - 100;
+          const p = placement[comp.type] || defaultPlace;
+          const n = slotOf(busId, p.dir);
+          if (p.dir === 'down') {
+            const col = n % 4, row = Math.floor(n / 4);
+            comp.x = bus.x + (col - 1.5) * p.sx;
+            comp.y = bus.y + p.dy + row * 70;
           } else {
-            const col = n % 4;
-            const row = Math.floor(n / 4);
-            comp.x = bus.x + (col - 1.5) * 80;
-            comp.y = bus.y + 100 + row * 80;
+            comp.x = bus.x + p.dx + n * p.sx;
+            comp.y = bus.y + p.dy + n * p.sy;
           }
         }
       } else {
@@ -917,15 +1475,84 @@ const Canvas = (() => {
         comp.y = maxLayer * spacingY + 100 + Math.floor(orphanIdx / 5) * 100;
         orphanIdx++;
       }
+      comp.x = snapToGrid(comp.x);
+      comp.y = snapToGrid(comp.y);
       comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
     });
 
-    // Re-render connections
+    // Re-render connections — rebuild the avoidance context first so wires route
+    // around the freshly-placed components.
+    _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
     state.connections.forEach(rerenderConnection);
     zoomFit();
   }
 
+  // ---- Phase 4: local re-layout of the current selection (doc §18) -----------
+  // Re-runs the full topology layout but writes positions only for the selected
+  // buses (and their attached devices/branches), keeping the rest of the diagram
+  // anchored.  Falls back to a full autoLayout when nothing useful is selected.
+  function autoLayoutSelection(options = {}) {
+    const sel = new Set(state.selectedIds && state.selectedIds.size
+      ? state.selectedIds
+      : (state.selectedId != null ? [state.selectedId] : []));
+    if (sel.size === 0) { autoLayout(options); return; }
+
+    // Snapshot every component position, run a global layout, then revert all
+    // non-selected components so only the selection is re-flowed.  Simple and
+    // robust; the selection keeps the global structure but other nodes hold.
+    const saved = new Map(state.components.map(c => [c.id, { x: c.x, y: c.y, rot: c.rotation || 0 }]));
+    // Expand selection to include devices/branches attached to selected buses.
+    state.connections.forEach(cn => {
+      if (sel.has(cn.from.compId)) sel.add(cn.to.compId);
+      if (sel.has(cn.to.compId)) sel.add(cn.from.compId);
+    });
+    autoLayout(options);
+    state.components.forEach(c => {
+      if (!sel.has(c.id)) {
+        const s = saved.get(c.id);
+        if (s) { c.x = s.x; c.y = s.y; c.rotation = s.rot;
+          c.el.setAttribute('transform', `translate(${c.x}, ${c.y}) rotate(${c.rotation})`); }
+      }
+    });
+    _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
+    state.connections.forEach(rerenderConnection);
+    if (_vizMode !== 'off' && _lastPfResult) applyVisualizationOverlay();
+    updateInfo();
+  }
+
   // ========== Build JSON System ==========
+  // Assign 1-based bus indices to every bus component of the given type.
+  // An imported (or explicitly edited) bus keeps its own params.index when it
+  // is a positive integer and not already taken; the remaining buses receive
+  // the lowest free contiguous indices.  Drawn buses (no params.index) thus
+  // behave exactly as before (1..N), while imported NON-contiguous ids
+  // (e.g. 1-5, 10-14, 20-21) are preserved end-to-end so the canvas label, the
+  // backend bus id, the analysis results and the fault-bus input all agree.
+  // buildSystemJson() and getCompBusMap() MUST use this same mapping.
+  function assignBusIndices(busType) {
+    const map = {};
+    const used = new Set();
+    const pending = [];
+    state.components.forEach(comp => {
+      if (comp.type !== busType) return;
+      const raw = comp.params ? comp.params.index : undefined;
+      const idx = parseInt(raw, 10);
+      if (Number.isInteger(idx) && idx > 0 && !used.has(idx)) {
+        used.add(idx);
+        map[comp.id] = idx;
+      } else {
+        pending.push(comp.id);
+      }
+    });
+    let next = 1;
+    pending.forEach(id => {
+      while (used.has(next)) next++;
+      used.add(next);
+      map[id] = next;
+    });
+    return map;
+  }
+
   function buildSystemJson() {
     const sys = {
       name: 'Canvas System',
@@ -945,15 +1572,17 @@ const Canvas = (() => {
       microgrids: []
     };
 
-    // Assign bus indices (1-based, matching MATPOWER/C++ convention)
-    let acBusIdx = 1, dcBusIdx = 1;
+    // Assign bus indices (1-based, matching MATPOWER/C++ convention).
+    // Imported buses keep their original (possibly non-contiguous) index.
+    const acBusIndexMap = assignBusIndices('ac_bus');
+    const dcBusIndexMap = assignBusIndices('dc_bus');
     const compBusMap = {}; // compId -> bus index (1-based)
 
     // First pass: create buses
     state.components.forEach(comp => {
       if (comp.type === 'ac_bus') {
         const p = comp.params;
-        const idx = acBusIdx++;
+        const idx = acBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
         sys.ac.buses.push({
           index: idx,
@@ -975,7 +1604,7 @@ const Canvas = (() => {
         });
       } else if (comp.type === 'dc_bus') {
         const p = comp.params;
-        const idx = dcBusIdx++;
+        const idx = dcBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
         sys.dc.buses.push({
           index: idx,
@@ -1694,7 +2323,10 @@ const Canvas = (() => {
         compKey[comp.id] = t + '#' + typeCounter[t];
       });
       sys._canvas = {
-        version: 1,
+        version: 2,
+        themeMode: (typeof document !== 'undefined' &&
+                    document.documentElement.getAttribute('data-theme')) || 'dark',
+        connectionStyle: state.connectionStyle || 'orthogonal',
         viewBox: { x: viewBox.x, y: viewBox.y, w: viewBox.w, h: viewBox.h },
         components: state.components.map(c => ({
           key: compKey[c.id],
@@ -1707,6 +2339,9 @@ const Canvas = (() => {
           .map(cn => ({
             from: { key: compKey[cn.from.compId], port: cn.from.portId },
             to:   { key: compKey[cn.to.compId],   port: cn.to.portId   },
+            // Persist only user-edited waypoints; auto-routed wires recompute.
+            waypoints: cn.geom && cn.geom.userPoints
+              ? cn.geom.userPoints.map(p => ({ x: p.x, y: p.y })) : null,
           }))
           .filter(cn => cn.from.key && cn.to.key),
       };
@@ -1718,6 +2353,22 @@ const Canvas = (() => {
   // ========== Apply Canvas Layout (positions/connections/viewport) ==========
   function applyCanvasLayout(layout) {
     if (!layout || !Array.isArray(layout.components)) return;
+
+    // Restore the saved light/dark theme so a shared file keeps its appearance
+    // (doc §12).  Mirrors app.js setThemeMode (attribute + persisted choice).
+    if (layout.themeMode === 'light' || layout.themeMode === 'dark') {
+      try {
+        document.documentElement.setAttribute('data-theme', layout.themeMode);
+        localStorage.setItem('themeMode', layout.themeMode);
+      } catch (e) { /* ignore */ }
+    }
+
+    // Restore the saved connection style (doc §10.2/§10.3); unknown/absent keeps
+    // the current default so older files load fine.
+    if (['straight', 'orthogonal', 'avoid'].includes(layout.connectionStyle)) {
+      state.connectionStyle = layout.connectionStyle;
+      try { localStorage.setItem('connectionStyle', layout.connectionStyle); } catch (e) { /* ignore */ }
+    }
 
     // Rebuild key -> compId by walking the just-loaded components in the
     // same per-type order used when the layout was saved.
@@ -1753,7 +2404,11 @@ const Canvas = (() => {
         const fid = keyToCompId[cn.from.key];
         const tid = keyToCompId[cn.to.key];
         if (fid === undefined || tid === undefined) return;
-        addConnection(fid, cn.from.port, tid, cn.to.port);
+        const conn = addConnection(fid, cn.from.port, tid, cn.to.port);
+        if (conn && Array.isArray(cn.waypoints) && cn.waypoints.length >= 2) {
+          conn.geom = conn.geom || {};
+          conn.geom.userPoints = cn.waypoints.map(p => ({ x: p.x, y: p.y }));
+        }
       });
     }
 
@@ -1767,7 +2422,9 @@ const Canvas = (() => {
       updateViewBox();
     }
 
-    // Re-render all connections so endpoints follow the new positions.
+    // Re-render all connections so endpoints follow the new positions (build the
+    // avoidance context first when that style is active).
+    _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
     state.connections.forEach(rerenderConnection);
   }
 
@@ -1790,6 +2447,7 @@ const Canvas = (() => {
           100 + Math.floor(i / 6) * 220,
           {
             ...COMP.defaults.ac_bus,
+            index: bus.index,
             name: `Bus ${bus.index}`,
             bus_type: bus.bus_type || 'PQ',
             base_kv: bus.base_kv || 110,
@@ -1820,6 +2478,7 @@ const Canvas = (() => {
           100 + ((jsonSys.ac?.buses?.length || 0) > 0 ? Math.ceil((jsonSys.ac.buses.length) / 6) : 0) * 220 + 200 + Math.floor(i / 4) * 180,
           {
             ...COMP.defaults.dc_bus,
+            index: bus.index,
             name: `DC Bus ${bus.index}`,
             bus_type: bus.bus_type || 'DC_P',
             base_kv: bus.base_kv || 320,
@@ -2639,14 +3298,11 @@ const Canvas = (() => {
     // Reset connection line stroke if we changed them
     state.connections.forEach(conn => {
       if (conn.el) {
-        const line = conn.el.querySelector('line');
+        const line = conn.el.querySelector('.conn-line');
         if (line) {
           line.setAttribute('stroke', '#666');
           line.setAttribute('stroke-width', '2');
-          line.classList.remove('flow-arrow-line');
           line.style.animation = '';
-          line.removeAttribute('marker-mid');
-          line.removeAttribute('marker-end');
         }
       }
     });
@@ -2702,8 +3358,12 @@ const Canvas = (() => {
     const powers = branchData.map(bd => Math.abs(bd.pf_mw))
       .concat(dcBranchDataAll.map(bd => Math.abs(bd.pf_mw || 0)))
       .filter(v => v > 0.01);
-    const maxPower = powers.length ? Math.max(...powers) : 1;
-    const minPower = powers.length ? Math.min(...powers) : 0;
+    // Running min/max (avoid Math.min(...spread) — overflows on thousands of branches).
+    let maxPower = 1, minPower = 0;
+    if (powers.length) {
+      maxPower = -Infinity; minPower = Infinity;
+      for (const v of powers) { if (v > maxPower) maxPower = v; if (v < minPower) minPower = v; }
+    }
     const powerRange = maxPower - minPower || 1;
     // Check loading availability: per-branch coloring will use loading% when rate_mva > 0,
     // and power normalization otherwise. Legend reflects the dominant mode.
@@ -2813,13 +3473,8 @@ const Canvas = (() => {
         // Draw animated arrow along each connection segment
         connPairs.forEach(({ conn, busCompId }) => {
           if (!conn.el) return;
-          const line = conn.el.querySelector('line');
-          if (!line) return;
-
-          let x1 = parseFloat(line.getAttribute('x1'));
-          let y1 = parseFloat(line.getAttribute('y1'));
-          let x2 = parseFloat(line.getAttribute('x2'));
-          let y2 = parseFloat(line.getAttribute('y2'));
+          const g = getConnGeom(conn);
+          if (!g) return;
 
           // Determine arrow direction for this segment
           // If pf_mw > 0: flow goes from_bus → comp → to_bus
@@ -2837,16 +3492,10 @@ const Canvas = (() => {
           const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
           const segPower = isFromSide ? Math.abs(pf_mw) : Math.abs(pt_mw);
 
-          // (x1,y1) is the branch component end, (x2,y2) is the bus end
-          // for the connection. But we need to check the actual conn direction.
-          // conn.from is one end, conn.to is the other
-          if (!flowsTowardBus) {
-            [x1, y1, x2, y2] = [x2, y2, x1, y1]; // reverse arrow
-          }
-
-          const mx = (x1 + x2) / 2;
-          const my = (y1 + y2) / 2;
-          const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+          // Arrow at the polyline midpoint, pointing toward the bus when
+          // flowsTowardBus so it follows the orthogonal route (doc §10.2).
+          const fa = flowArrow(g, flowsTowardBus ? g.toPt : g.fromPt);
+          const mx = fa.mx, my = fa.my, angle = fa.angle;
 
           // Arrow triangle
           const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
@@ -2859,9 +3508,7 @@ const Canvas = (() => {
           resultsLayer.appendChild(arrow);
 
           // Power label next to the arrow (perpendicular offset)
-          const dx = x2 - x1, dy = y2 - y1;
-          const nl = Math.hypot(dx, dy) || 1;
-          const offX = -dy / nl * 14, offY = dx / nl * 14;
+          const offX = fa.offX, offY = fa.offY;
           const segLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
           segLabel.classList.add('viz-overlay', 'flow-label');
           segLabel.setAttribute('x', mx + offX);
@@ -2970,28 +3617,13 @@ const Canvas = (() => {
             const absPower = Math.abs(p);
             if (absPower < 0.01) return;
 
-            const line = bc.conn.el.querySelector('line');
-            if (!line) return;
+            const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+            if (!g) return;
 
-            let x1 = parseFloat(line.getAttribute('x1'));
-            let y1 = parseFloat(line.getAttribute('y1'));
-            let x2 = parseFloat(line.getAttribute('x2'));
-            let y2 = parseFloat(line.getAttribute('y2'));
-
-            // Determine which end is the component vs the bus
-            const fromIsComp = bc.conn.from.compId === comp.id;
-            const cx = fromIsComp ? x1 : x2, cy = fromIsComp ? y1 : y2;
-            const bx = fromIsComp ? x2 : x1, by = fromIsComp ? y2 : y1;
-
-            // p > 0 means power entering transformer from this bus → arrow from bus to comp
-            // p < 0 means power leaving transformer to this bus → arrow from comp to bus
-            let ax1, ay1, ax2, ay2;
-            if (p > 0) { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-            else { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-
-            const mx = (ax1 + ax2) / 2;
-            const my = (ay1 + ay2) / 2;
-            const angle = Math.atan2(ay2 - ay1, ax2 - ax1) * 180 / Math.PI;
+            // p > 0 means power entering transformer from this bus → arrow bus→comp
+            // p < 0 means power leaving transformer to this bus → arrow comp→bus
+            const fa = flowArrow(g, p > 0 ? g.compEnd : g.busEnd);
+            const mx = fa.mx, my = fa.my, angle = fa.angle;
 
             let colorPct;
             if (tf.rate_mva > 0) colorPct = tf.loading_pct;
@@ -3007,9 +3639,7 @@ const Canvas = (() => {
             resultsLayer.appendChild(arrow);
 
             // Winding power label
-            const dx = ax2 - ax1, dy = ay2 - ay1;
-            const nl = Math.hypot(dx, dy) || 1;
-            const offX = -dy / nl * 14, offY = dx / nl * 14;
+            const offX = fa.offX, offY = fa.offY;
             const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             label.classList.add('viz-overlay', 'flow-label');
             label.setAttribute('x', mx + offX);
@@ -3111,27 +3741,12 @@ const Canvas = (() => {
         else if (demandTypes.has(comp.type)) isSupply = false;
         else isSupply = powerMW > 0; // storage: positive = discharge
 
-        const line = conn.el.querySelector('line');
-        if (!line) return;
-
-        let x1 = parseFloat(line.getAttribute('x1'));
-        let y1 = parseFloat(line.getAttribute('y1'));
-        let x2 = parseFloat(line.getAttribute('x2'));
-        let y2 = parseFloat(line.getAttribute('y2'));
-
-        // Determine which end is the component and which is the bus
-        const fromIsComp = conn.from.compId === comp.id;
-        const cx = fromIsComp ? x1 : x2, cy = fromIsComp ? y1 : y2;
-        const bx = fromIsComp ? x2 : x1, by = fromIsComp ? y2 : y1;
+        const g = getConnGeom(conn, { fromCompId: comp.id });
+        if (!g) return;
 
         // Arrow direction: supply → component→bus, demand → bus→component
-        let ax1, ay1, ax2, ay2;
-        if (isSupply) { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-        else { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-
-        const mx = (ax1 + ax2) / 2;
-        const my = (ay1 + ay2) / 2;
-        const angle = Math.atan2(ay2 - ay1, ax2 - ax1) * 180 / Math.PI;
+        const fa = flowArrow(g, isSupply ? g.busEnd : g.compEnd);
+        const mx = fa.mx, my = fa.my, angle = fa.angle;
 
         // Color by power magnitude (same scale as branch arrows)
         const absPower = Math.abs(powerMW);
@@ -3149,9 +3764,7 @@ const Canvas = (() => {
         resultsLayer.appendChild(arrow);
 
         // Power label at offset from midpoint along the normal
-        const dx = ax2 - ax1, dy = ay2 - ay1;
-        const nl = Math.hypot(dx, dy) || 1;
-        const offX = -dy / nl * 14, offY = dx / nl * 14;
+        const offX = fa.offX, offY = fa.offY;
         const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         label.classList.add('viz-overlay', 'flow-label');
         label.setAttribute('x', mx + offX);
@@ -3216,12 +3829,8 @@ const Canvas = (() => {
 
           connPairs.forEach(({ conn, busCompId }) => {
             if (!conn.el) return;
-            const line = conn.el.querySelector('line');
-            if (!line) return;
-            let x1 = parseFloat(line.getAttribute('x1'));
-            let y1 = parseFloat(line.getAttribute('y1'));
-            let x2 = parseFloat(line.getAttribute('x2'));
-            let y2 = parseFloat(line.getAttribute('y2'));
+            const g = getConnGeom(conn);
+            if (!g) return;
             let flowsTowardBus;
             if (pf_mw_dc >= 0) flowsTowardBus = (busCompId === toBusCompId) === isForward;
             else flowsTowardBus = (busCompId === fromBusCompId) === isForward;
@@ -3230,9 +3839,8 @@ const Canvas = (() => {
             const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
             const segPower = isFromSide ? Math.abs(pf_mw_dc) : Math.abs(pt_mw_dc);
 
-            if (!flowsTowardBus) [x1, y1, x2, y2] = [x2, y2, x1, y1];
-            const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-            const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+            const fa = flowArrow(g, flowsTowardBus ? g.toPt : g.fromPt);
+            const mx = fa.mx, my = fa.my, angle = fa.angle;
             const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
             arrow.classList.add('viz-overlay', 'flow-arrow-dot');
             const sz = Math.max(5, Math.min(10, 5 + segPower / 100));
@@ -3243,9 +3851,7 @@ const Canvas = (() => {
             resultsLayer.appendChild(arrow);
 
             // Power label next to the arrow (perpendicular offset)
-            const dx = x2 - x1, dy = y2 - y1;
-            const nl = Math.hypot(dx, dy) || 1;
-            const offX = -dy / nl * 14, offY = dx / nl * 14;
+            const offX = fa.offX, offY = fa.offY;
             const segLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             segLabel.classList.add('viz-overlay', 'flow-label');
             segLabel.setAttribute('x', mx + offX);
@@ -3294,25 +3900,13 @@ const Canvas = (() => {
           const bc = busConns.find(bc => bc.busIdx === matchBus && bc.busType === expectedBusType);
           if (!bc || !bc.conn || !bc.conn.el) return;
 
-          const line = bc.conn.el.querySelector('line');
-          if (!line) return;
-          let x1 = parseFloat(line.getAttribute('x1'));
-          let y1 = parseFloat(line.getAttribute('y1'));
-          let x2 = parseFloat(line.getAttribute('x2'));
-          let y2 = parseFloat(line.getAttribute('y2'));
-
-          const fromIsComp = bc.conn.from.compId === comp.id;
-          const cx = fromIsComp ? x1 : x2, cy = fromIsComp ? y1 : y2;
-          const bx = fromIsComp ? x2 : x1, by = fromIsComp ? y2 : y1;
+          const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+          if (!g) return;
 
           // Bus-injection-positive: p > 0 means inject into bus → arrow comp→bus
           //                         p < 0 means draw from bus   → arrow bus→comp
-          let ax1, ay1, ax2, ay2;
-          if (p > 0) { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-          else { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-
-          const mx = (ax1 + ax2) / 2, my = (ay1 + ay2) / 2;
-          const angle = Math.atan2(ay2 - ay1, ax2 - ax1) * 180 / Math.PI;
+          const fa = flowArrow(g, p > 0 ? g.busEnd : g.compEnd);
+          const mx = fa.mx, my = fa.my, angle = fa.angle;
           const colorPct = 100 * (absPower - minPower) / powerRange;
 
           if (showFlow) {
@@ -3325,9 +3919,7 @@ const Canvas = (() => {
             arrow.setAttribute('opacity', '0.85');
             resultsLayer.appendChild(arrow);
 
-            const dx = ax2 - ax1, dy = ay2 - ay1;
-            const nl = Math.hypot(dx, dy) || 1;
-            const offX = -dy / nl * 14, offY = dx / nl * 14;
+            const offX = fa.offX, offY = fa.offY;
             const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             label.classList.add('viz-overlay', 'flow-label');
             label.setAttribute('x', mx + offX);
@@ -3390,30 +3982,16 @@ const Canvas = (() => {
           const bc = busConns.find(bc => bc.busIdx === matchBus);
           if (!bc || !bc.conn || !bc.conn.el) return;
 
-          const line = bc.conn.el.querySelector('line');
-          if (!line) return;
-          let x1 = parseFloat(line.getAttribute('x1'));
-          let y1 = parseFloat(line.getAttribute('y1'));
-          let x2 = parseFloat(line.getAttribute('x2'));
-          let y2 = parseFloat(line.getAttribute('y2'));
-
-          const fromIsComp = bc.conn.from.compId === comp.id;
-          const cx = fromIsComp ? x1 : x2, cy = fromIsComp ? y1 : y2;
-          const bx = fromIsComp ? x2 : x1, by = fromIsComp ? y2 : y1;
+          const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+          if (!g) return;
 
           // p_in > 0: power drawn from bus_in → arrow bus→comp
           // p_out > 0: power delivered to bus_out → arrow comp→bus
-          let ax1, ay1, ax2, ay2;
-          if (label === 'in') {
-            if (p > 0) { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-            else { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-          } else {
-            if (p > 0) { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-            else { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-          }
-
-          const mx = (ax1 + ax2) / 2, my = (ay1 + ay2) / 2;
-          const angle = Math.atan2(ay2 - ay1, ax2 - ax1) * 180 / Math.PI;
+          let headPt;
+          if (label === 'in') headPt = p > 0 ? g.compEnd : g.busEnd;
+          else headPt = p > 0 ? g.busEnd : g.compEnd;
+          const fa = flowArrow(g, headPt);
+          const mx = fa.mx, my = fa.my, angle = fa.angle;
           const colorPct = 100 * (absPower - minPower) / powerRange;
 
           if (showFlow) {
@@ -3426,9 +4004,7 @@ const Canvas = (() => {
             arrow.setAttribute('opacity', '0.85');
             resultsLayer.appendChild(arrow);
 
-            const dx = ax2 - ax1, dy = ay2 - ay1;
-            const nl = Math.hypot(dx, dy) || 1;
-            const offX = -dy / nl * 14, offY = dx / nl * 14;
+            const offX = fa.offX, offY = fa.offY;
             const label2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             label2.classList.add('viz-overlay', 'flow-label');
             label2.setAttribute('x', mx + offX);
@@ -3495,24 +4071,12 @@ const Canvas = (() => {
           const bc = busConns.find(bc => bc.busIdx === pt.bus && bc.busType === expectedBusType);
           if (!bc || !bc.conn || !bc.conn.el) return;
 
-          const line = bc.conn.el.querySelector('line');
-          if (!line) return;
-          let x1 = parseFloat(line.getAttribute('x1'));
-          let y1 = parseFloat(line.getAttribute('y1'));
-          let x2 = parseFloat(line.getAttribute('x2'));
-          let y2 = parseFloat(line.getAttribute('y2'));
-
-          const fromIsComp = bc.conn.from.compId === comp.id;
-          const cx = fromIsComp ? x1 : x2, cy = fromIsComp ? y1 : y2;
-          const bx = fromIsComp ? x2 : x1, by = fromIsComp ? y2 : y1;
+          const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+          if (!g) return;
 
           // Bus-injection positive: p > 0 → inject into bus → arrow comp→bus
-          let ax1, ay1, ax2, ay2;
-          if (pt.p_mw > 0) { ax1 = cx; ay1 = cy; ax2 = bx; ay2 = by; }
-          else { ax1 = bx; ay1 = by; ax2 = cx; ay2 = cy; }
-
-          const mx = (ax1 + ax2) / 2, my = (ay1 + ay2) / 2;
-          const angle = Math.atan2(ay2 - ay1, ax2 - ax1) * 180 / Math.PI;
+          const fa = flowArrow(g, pt.p_mw > 0 ? g.busEnd : g.compEnd);
+          const mx = fa.mx, my = fa.my, angle = fa.angle;
           const colorPct = 100 * (absPower - minPower) / powerRange;
 
           if (showFlow) {
@@ -3525,9 +4089,7 @@ const Canvas = (() => {
             arrow.setAttribute('opacity', '0.85');
             resultsLayer.appendChild(arrow);
 
-            const dx = ax2 - ax1, dy = ay2 - ay1;
-            const nl = Math.hypot(dx, dy) || 1;
-            const offX = -dy / nl * 14, offY = dx / nl * 14;
+            const offX = fa.offX, offY = fa.offY;
             const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
             label.classList.add('viz-overlay', 'flow-label');
             label.setAttribute('x', mx + offX);
@@ -3611,6 +4173,12 @@ const Canvas = (() => {
         resultsLayer.insertBefore(circ, resultsLayer.firstChild);
       });
     }
+
+    // Phase 4 (doc §18): nudge overlapping flow / heatmap labels apart.  Skipped
+    // for very large diagrams where the O(n²) pass would be too costly.
+    if (resultsLayer.querySelectorAll('.flow-label, .heatmap-label').length <= 400) {
+      deOverlapLabels(resultsLayer);
+    }
   }
 
   // Update result overlay positions when a component is dragged
@@ -3631,6 +4199,58 @@ const Canvas = (() => {
         applyVisualizationOverlay();
       });
     }
+  }
+
+  // ========== Topology Reconfiguration Results Overlay ==========
+  // Visualise reconfiguration results on the diagram: highlight each branch's
+  // connection polyline green (closed) or red-dashed (open).  Follows the routed
+  // path (doc §10.2) by drawing a <path> from the cached connection geometry.
+  function showTopologyReconfigResults(data) {
+    resultsLayer.querySelectorAll('.topo-reconfig-overlay').forEach(el => el.remove());
+    if (!data.branch_details || !Array.isArray(data.branch_details)) return;
+
+    state.connections.forEach(conn => {
+      const fromComp = getComponent(conn.from.compId);
+      const toComp = getComponent(conn.to.compId);
+      if (!fromComp || !toComp) return;
+      // Only consider ac_branch and transformer_2w for now
+      let branchComp = null;
+      if (fromComp.type === 'ac_branch' || fromComp.type === 'transformer_2w') branchComp = fromComp;
+      else if (toComp.type === 'ac_branch' || toComp.type === 'transformer_2w') branchComp = toComp;
+      if (!branchComp) return;
+
+      // Find branch status by matching name or params
+      const branchName = branchComp.params?.name || '';
+      let branchIdx = null;
+      const m = branchName.match(/(Line|Trafo)\s*(\d+)/);
+      if (m) branchIdx = parseInt(m[2]);
+      let branchDetail = null;
+      if (branchIdx !== null) branchDetail = data.branch_details.find(b => b.id == branchIdx);
+      if (!branchDetail && branchComp.params?.from_bus !== undefined && branchComp.params?.to_bus !== undefined) {
+        branchDetail = data.branch_details.find(b =>
+          b.from_bus == branchComp.params.from_bus && b.to_bus == branchComp.params.to_bus);
+      }
+      if (!branchDetail) return;
+
+      // Overlay highlight following the connection's routed polyline
+      const g = getConnGeom(conn);
+      if (!g) return;
+      const overlay = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      overlay.setAttribute('d', pointsToPath(g.points));
+      overlay.setAttribute('fill', 'none');
+      overlay.setAttribute('stroke-width', '7');
+      overlay.setAttribute('stroke-linecap', 'round');
+      overlay.setAttribute('stroke-linejoin', 'round');
+      overlay.setAttribute('opacity', '0.45');
+      overlay.classList.add('topo-reconfig-overlay');
+      if (branchDetail.closed) {
+        overlay.setAttribute('stroke', '#27ae60'); // green for closed
+      } else {
+        overlay.setAttribute('stroke', '#e74c3c'); // red for open
+        overlay.setAttribute('stroke-dasharray', '18 10');
+      }
+      resultsLayer.appendChild(overlay);
+    });
   }
 
   function clearResults() {
@@ -3772,10 +4392,11 @@ const Canvas = (() => {
       flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
       mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {} };
 
-    let acBusIdx = 1, dcBusIdx = 1;
+    const acBusIndexMap = assignBusIndices('ac_bus');
+    const dcBusIndexMap = assignBusIndices('dc_bus');
     state.components.forEach(comp => {
-      if (comp.type === 'ac_bus') maps.ac[acBusIdx++] = comp.id;
-      else if (comp.type === 'dc_bus') maps.dc[dcBusIdx++] = comp.id;
+      if (comp.type === 'ac_bus') maps.ac[acBusIndexMap[comp.id]] = comp.id;
+      else if (comp.type === 'dc_bus') maps.dc[dcBusIndexMap[comp.id]] = comp.id;
     });
 
     // Must match buildSystemJson iteration order for index consistency
@@ -3821,6 +4442,171 @@ const Canvas = (() => {
     return maps;
   }
 
+  // ========== Topology Analysis overlay ==========
+  // Draw island halos (color per electrical island), cut-vertex warning rings,
+  // and bridge-edge highlights onto the results layer.  Keyed by model bus id
+  // so it matches the result tables in app.js.
+  function showTopologyResults(data, opts) {
+    opts = opts || {};
+    const showIslands = opts.showIslands !== false;
+    const showBridges = opts.showBridges !== false;
+    const showCutVertices = opts.showCutVertices !== false;
+    const islandColor = typeof opts.islandColor === 'function' ? opts.islandColor : () => '#61afef';
+
+    resultsLayer.innerHTML = '';
+    if (!data) return;
+
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const busMap = getCompBusMap(); // busModelId -> compId, per domain
+    const acComp = (id) => (busMap.ac[id] != null ? getComponent(busMap.ac[id]) : null);
+    const dcComp = (id) => (busMap.dc[id] != null ? getComponent(busMap.dc[id]) : null);
+
+    // model bus id -> island id, domain-separated
+    const acIsl = {}, dcIsl = {};
+    (data.islands || []).forEach(isl => {
+      (isl.ac_bus_ids || []).forEach(id => { acIsl[id] = isl.island_id; });
+      (isl.dc_bus_ids || []).forEach(id => { dcIsl[id] = isl.island_id; });
+    });
+    const cutSet = new Set(data.cut_vertex_bus_ids || []);
+
+    const drawBusOverlay = (comp, islandId, isCut) => {
+      if (!comp) return;
+      if (showIslands && islandId !== undefined && islandId !== null && islandId >= 0) {
+        const halo = document.createElementNS(SVGNS, 'circle');
+        halo.setAttribute('class', 'topo-island-halo');
+        halo.setAttribute('cx', comp.x);
+        halo.setAttribute('cy', comp.y);
+        halo.setAttribute('r', 18);
+        halo.setAttribute('fill', islandColor(islandId));
+        halo.setAttribute('fill-opacity', '0.28');
+        halo.setAttribute('stroke', islandColor(islandId));
+        halo.setAttribute('stroke-opacity', '0.9');
+        halo.setAttribute('stroke-width', '2');
+        resultsLayer.appendChild(halo);
+      }
+      if (showCutVertices && isCut) {
+        const ring = document.createElementNS(SVGNS, 'circle');
+        ring.setAttribute('class', 'topo-cut-vertex-ring');
+        ring.setAttribute('cx', comp.x);
+        ring.setAttribute('cy', comp.y);
+        ring.setAttribute('r', 23);
+        resultsLayer.appendChild(ring);
+      }
+    };
+
+    Object.keys(acIsl).forEach(id => drawBusOverlay(acComp(+id), acIsl[id], cutSet.has(+id)));
+    Object.keys(dcIsl).forEach(id => drawBusOverlay(dcComp(+id), dcIsl[id], cutSet.has(+id)));
+    // Cut vertices not covered by an island map (rare) still get a ring.
+    if (showCutVertices) {
+      cutSet.forEach(id => {
+        if (acIsl[id] === undefined) drawBusOverlay(acComp(id), undefined, true);
+        if (dcIsl[id] === undefined) drawBusOverlay(dcComp(id), undefined, true);
+      });
+    }
+
+    // Bridge edges: dashed line between the two endpoint buses.
+    if (showBridges) {
+      (data.bridges || []).forEach(b => {
+        const dc = b.domain === 'DC';
+        const fromComp = dc ? dcComp(b.from_bus) : acComp(b.from_bus);
+        const toComp = dc ? dcComp(b.to_bus) : acComp(b.to_bus);
+        if (!fromComp || !toComp) return;
+        const line = document.createElementNS(SVGNS, 'line');
+        line.setAttribute('class', 'topo-bridge-edge');
+        line.setAttribute('x1', fromComp.x);
+        line.setAttribute('y1', fromComp.y);
+        line.setAttribute('x2', toComp.x);
+        line.setAttribute('y2', toComp.y);
+        resultsLayer.appendChild(line);
+      });
+    }
+  }
+
+  // ========== Network Reduction overlay ==========
+  // Visualize the graph reduction "before/after": every bus that collapses
+  // (merged / series-eliminated / pendant-folded) is drawn faded with a dashed
+  // connector to its representative (surviving) bus; the representative gets a
+  // colored "super-node" ring.  Keyed by canvas position (pos / rep_pos) which
+  // the backend computes to match this canvas's bus ordering.
+  function showNetworkReduction(data, colorFn) {
+    resultsLayer.innerHTML = '';
+    if (!data) return;
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const color = typeof colorFn === 'function' ? colorFn : () => '#56b6c2';
+
+    const busMap = getCompBusMap(); // busModelId -> compId, per domain
+    const compOf = (dc, busId) => {
+      const id = dc ? busMap.dc[busId] : busMap.ac[busId];
+      return id != null ? getComponent(id) : null;
+    };
+
+    // Count members per representative so single-bus "retained" groups stay plain.
+    const groupSize = {};
+    const tally = (arr) => (arr || []).forEach(r => {
+      const k = (r.domain === 'DC' ? 'd' : 'a') + r.rep_bus_id;
+      groupSize[k] = (groupSize[k] || 0) + 1;
+    });
+    tally(data.ac_bus_reduction);
+    tally(data.dc_bus_reduction);
+
+    const drawDomain = (arr, dc) => {
+      (arr || []).forEach(r => {
+        const comp = compOf(dc, r.bus_id);
+        if (!comp) return;
+        const repComp = compOf(dc, r.rep_bus_id);
+        const key = (dc ? 'd' : 'a') + r.rep_bus_id;
+        const inGroup = (groupSize[key] || 0) > 1;
+        const eliminated = r.status !== 'retained';
+        const col = color(r.rep_bus_id);
+
+        if (eliminated && repComp && repComp !== comp) {
+          // Dashed connector from the collapsed bus to its representative.
+          const line = document.createElementNS(SVGNS, 'line');
+          line.setAttribute('class', 'net-reduce-connector');
+          line.setAttribute('x1', comp.x); line.setAttribute('y1', comp.y);
+          line.setAttribute('x2', repComp.x); line.setAttribute('y2', repComp.y);
+          line.setAttribute('stroke', col);
+          resultsLayer.appendChild(line);
+        }
+
+        if (eliminated) {
+          // Faded marker on the bus being removed.
+          const m = document.createElementNS(SVGNS, 'circle');
+          m.setAttribute('class', 'net-reduce-eliminated');
+          m.setAttribute('cx', comp.x); m.setAttribute('cy', comp.y);
+          m.setAttribute('r', 13);
+          m.setAttribute('fill', col);
+          resultsLayer.appendChild(m);
+          const x = document.createElementNS(SVGNS, 'text');
+          x.setAttribute('class', 'net-reduce-x');
+          x.setAttribute('x', comp.x); x.setAttribute('y', comp.y);
+          x.setAttribute('text-anchor', 'middle');
+          x.setAttribute('dominant-baseline', 'central');
+          const tag = r.status === 'merged' ? '⊝' : (r.status === 'pendant_eliminated' ? '↘' : '×');
+          x.textContent = tag;
+          resultsLayer.appendChild(x);
+        } else if (inGroup) {
+          // Surviving representative that absorbs others → super-node ring.
+          const ring = document.createElementNS(SVGNS, 'circle');
+          ring.setAttribute('class', 'net-reduce-super');
+          ring.setAttribute('cx', comp.x); ring.setAttribute('cy', comp.y);
+          ring.setAttribute('r', 22);
+          ring.setAttribute('stroke', col);
+          resultsLayer.appendChild(ring);
+        }
+      });
+    };
+    drawDomain(data.ac_bus_reduction, false);
+    drawDomain(data.dc_bus_reduction, true);
+  }
+
+  // Pan/select the canvas to a bus by its model id (used by result-table clicks).
+  function panToBusId(busId) {
+    const busMap = getCompBusMap();
+    const compId = busMap.ac[busId] != null ? busMap.ac[busId] : busMap.dc[busId];
+    if (compId != null) panToComponent(compId);
+  }
+
   // ========== Public API ==========
   return {
     init,
@@ -3839,17 +4625,26 @@ const Canvas = (() => {
     zoomOut,
     zoomFit,
     autoLayout,
+    autoLayoutSelection,
+    setConnectionStyle,
+    rerouteConnections,
+    setAlignSnap,
+    get layoutStats() { return _layoutStats; },
     rotateSelected,
     buildSystemJson,
     loadFromSystemJson,
     showPowerFlowResults,
     showCarbonPotentialResults,
     clearCarbonPotentialResults,
+    showTopologyResults,
+    showNetworkReduction,
+    showTopologyReconfigResults,
     clearResults,
     setVisualizationMode,
     refreshVisualization: applyVisualizationOverlay,
     clearAll,
     panToComponent,
+    panToBusId,
     getCompBusMap,
     get state() { return state; },
   };

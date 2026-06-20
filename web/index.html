@@ -22,6 +22,20 @@
   <button id="btnZoomOut" class="toolbar-btn" title="缩小">缩小</button>
   <button id="btnZoomFit" class="toolbar-btn" title="适应画面">适应<br>画面</button>
   <button id="btnAutoLayout" class="toolbar-btn" title="自动布局">自动<br>布局</button>
+  <select id="layoutDirSelect" class="toolbar-select" title="自动布局方向">
+    <option value="TB">↧ 上下</option>
+    <option value="LR">↦ 左右</option>
+    <option value="RADIAL">◎ 径向</option>
+    <option value="COMPACT">▦ 紧凑</option>
+  </select>
+  <button id="btnRelayoutSel" class="toolbar-btn" title="只对选中元件重新布局">局部<br>布局</button>
+  <select id="connStyleSelect" class="toolbar-select" title="连线样式">
+    <option value="straight">直线</option>
+    <option value="orthogonal">正交</option>
+    <option value="avoid">避让</option>
+  </select>
+  <button id="btnReroute" class="toolbar-btn" title="重新整理所有连线">整理<br>连线</button>
+  <label class="toolbar-check" title="拖动时对齐相邻元件"><input type="checkbox" id="chkAlignSnap" checked/>吸附</label>
   <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
   <span class="toolbar-spacer"></span>
@@ -31,6 +45,7 @@
     <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
     <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
+    <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
     <span id="canvasInfo" class="canvas-info">0 元件 | 0 连接</span>
     <span id="statusBadge" class="badge">就绪</span>
   </div>
@@ -41,7 +56,8 @@
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
-  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序潮流</button>
+  <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
+  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
@@ -112,18 +128,48 @@
   <div class="sub-section" data-sub="topology" hidden>
     <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
   </div>
+  <!-- Topology analysis (graph structure) -->
+  <div class="sub-section" data-sub="topologyAnalysis" hidden>
+    <label class="sub-label sub-checkbox" title="在画布上按电气孤岛着色母线">
+      <input id="topoShowIslands" type="checkbox" checked/>
+      <span>孤岛着色</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="高亮桥支路（割边 / 单点故障支路）">
+      <input id="topoShowBridges" type="checkbox" checked/>
+      <span>桥支路高亮</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="标记割点母线（关节点）">
+      <input id="topoShowCutVertices" type="checkbox" checked/>
+      <span>割点标记</span>
+    </label>
+    <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
+    <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
+    <span class="sub-divider"></span>
+    <label class="sub-label sub-checkbox" title="合并闭合开关/零阻抗支路两端母线（超级节点）">
+      <input id="redEnableSwitch" type="checkbox" checked/>
+      <span>开关合并</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="消去无注入的二度母线（串联等效）">
+      <input id="redEnableSeries" type="checkbox" checked/>
+      <span>串联化简</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="折叠仅含负荷的叶子母线（近似）">
+      <input id="redEnablePendant" type="checkbox"/>
+      <span>悬挂折叠</span>
+    </label>
+    <button id="btnRunNetworkReduction" class="toolbar-btn run-btn" title="运行网络化简并显示化简前后对比">网络化简</button>
+    <button id="btnExportNetworkReduction" class="toolbar-btn" title="将网络化简结果导出为 JSON 文件">化简导出</button>
+  </div>
   <!-- Time-series PF -->
   <div class="sub-section" data-sub="timeSeries" hidden>
     <button id="btnImportIrradiance"  class="toolbar-btn" title="导入辐照强度时序数据 (JSON / Excel)">辐照强度<br>数据导入</button>
     <button id="btnImportPrice"       class="toolbar-btn" title="导入电价时序数据 (JSON / Excel)">电价<br>数据导入</button>
     <button id="btnImportLoadProfile" class="toolbar-btn" title="导入负荷波动时序数据 (JSON / Excel)">负荷波动<br>数据导入</button>
-    <button id="btnImportGreenCert"   class="toolbar-btn" title="导入绿证数据 (JSON / Excel / CSV)">绿证数据<br>导入</button>
     <button id="btnImportGeneratedRegularScenario" class="toolbar-btn" title="导入场景生成模块导出的常规场景 JSON">导入生成<br>场景</button>
     <label class="sub-label sub-checkbox" title="勾选后运行时序潮流时使用导入生成场景中的时序数据；不勾选则沿用当前手动/默认时序配置">
       <input id="regUseScenarioTimeSeries" type="checkbox"/>
       <span>使用场景时序</span>
     </label>
-    <input type="file" id="fileImportGreenCert" accept=".json,.xlsx,.xls,.csv" style="display:none"/>
     <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
     <label class="sub-label">仿真时间(小时)
       <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
@@ -231,6 +277,14 @@
     </label>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
+  </div>
+  <!-- Carbon Analysis -->
+  <div class="sub-section" data-sub="carbonAnalysis" hidden>
+    <label class="sub-label" title="碳排放分析基于当前潮流结果；若未运行潮流则自动求解一次交流潮流">潮流来源
+      <span class="sub-static" style="opacity:.8;">当前潮流 / 自动</span>
+    </label>
+    <button id="btnRunCarbon" class="toolbar-btn run-btn" title="基于当前系统与潮流结果进行碳排放溯源分析">运行碳排放分析</button>
+    <button id="btnExportCarbonResults" class="toolbar-btn" title="将碳排放分析结果导出为 JSON">结果导出</button>
   </div>
 </div>
 
@@ -663,6 +717,34 @@
           <div id="topoResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group topology -->
+        <div class="result-group" data-result-group="topologyAnalysis">
+        <div class="topo-section" id="topoAnalysisSection">
+          <h4>拓扑分析结果</h4>
+          <div id="topoAnalysisSummary" class="results-summary"></div>
+          <div id="topoAnalysisIslandLegend" class="topo-island-legend"></div>
+          <h5>电气孤岛</h5>
+          <div id="topoAnalysisIslands" class="topo-table-wrap"></div>
+          <h5>桥支路（割边 / 单点故障）</h5>
+          <div id="topoAnalysisBridges" class="topo-table-wrap"></div>
+          <h5>割点母线（关节点）</h5>
+          <div id="topoAnalysisCutVertices" class="topo-table-wrap"></div>
+          <h5>诊断信息</h5>
+          <div id="topoAnalysisDiagnostics" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="netReductionSection" style="display:none">
+          <h4>网络化简结果（化简前后对比）</h4>
+          <div id="redSummary" class="results-summary"></div>
+          <div id="redBeforeAfter" class="topo-table-wrap"></div>
+          <h5>开关合并组（超级节点）</h5>
+          <div id="redSwitchGroups" class="topo-table-wrap"></div>
+          <h5>串联化简（消去二度母线）</h5>
+          <div id="redSeriesRecords" class="topo-table-wrap"></div>
+          <h5>悬挂折叠（叶子负荷母线）</h5>
+          <div id="redPendantRecords" class="topo-table-wrap"></div>
+          <h5>诊断信息</h5>
+          <div id="redDiagnostics" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group topologyAnalysis -->
         <div class="result-group" data-result-group="hosting">
         <div class="topo-section" id="bearingCapSection" style="display:none">
           <h4>承载力评估结果 (DL/T 2041-2019)</h4>
@@ -717,6 +799,15 @@
             </div>
           </div>
         </div><!-- /result-group resilience -->
+        <div class="result-group" data-result-group="carbonAnalysis">
+          <div class="topo-section">
+            <h4>碳排放分析结果</h4>
+            <div id="carbonSankeyChart" class="tspf-chart" style="height:360px;"></div>
+            <div id="carbonResults" class="topo-table-wrap">
+              <p class="empty-hint">运行碳排放分析后查看发电/负荷/损耗碳排放与碳流溯源</p>
+            </div>
+          </div>
+        </div><!-- /result-group carbonAnalysis -->
       </div>
     </div>
   </aside>
@@ -735,8 +826,12 @@
 <div id="scDialog" class="modal" style="display:none">
   <div class="modal-content">
     <h3>故障点位设置</h3>
-    <p style="opacity:.7;font-size:12px;margin:6px 0 12px">短路类型与电压调节系数请在功能栏中设置。</p>
-    <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0"/></label>
+    <p style="opacity:.7;font-size:12px;margin:6px 0 10px">短路类型与电压调节系数请在功能栏中设置。</p>
+    <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0" step="1"/></label>
+    <p style="opacity:.65;font-size:12px;margin:8px 0 0;line-height:1.5">
+      请输入母线的<strong>真实编号</strong>（与结果表 / 画布中显示的 <code>Bus</code> 编号一致）。<br>
+      不存在的编号会被拒绝并给出提示；<strong>留空</strong>则计算全部母线。
+    </p>
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
     <div class="modal-actions">

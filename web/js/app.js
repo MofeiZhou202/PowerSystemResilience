@@ -51,6 +51,8 @@ const App = (() => {
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
   let _lastScenarioGenerationData = null;
+  let _lastTopoAnalysisData = null;
+  let _lastNetReductionData = null;
   let _lastScenarioBaseSystemJson = null;
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
@@ -117,6 +119,31 @@ const App = (() => {
     } catch (e) {
       log(`Network error: ${e.message}`, 'error');
       return null;
+    }
+  }
+
+  // Like apiPost but surfaces the backend error message instead of swallowing
+  // it.  Returns { ok, data, error } so callers can show a specific reason
+  // (e.g. an unknown fault bus id rejected by the server).
+  async function apiPostResult(path, body = {}) {
+    const url = `${API_BASE}${path}`;
+    log(`POST ${path}`, 'info');
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const error = (data && data.error) || res.statusText;
+        log(`Error: ${error}`, 'error');
+        return { ok: false, data: null, error };
+      }
+      return { ok: true, data, error: null };
+    } catch (e) {
+      log(`Network error: ${e.message}`, 'error');
+      return { ok: false, data: null, error: e.message };
     }
   }
 
@@ -1221,27 +1248,59 @@ const App = (() => {
       return;
     }
 
-    const faultBus = parseInt(document.getElementById('scFaultBus').value);
+    const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
     const faultType = document.getElementById('scFaultType').value;
     const cFactor = parseFloat(document.getElementById('scCFactor').value);
 
-    // Use the detail endpoint if a specific bus is provided, otherwise batch
-    const data = await apiPost('/api/session/sc', {
-      options: {
-        fault_type: faultType,
-        c_factor: cFactor,
-        compute_all_buses: true,
+    // Blank fault bus → short circuit at every bus (overview mode).
+    if (faultBusRaw === '') {
+      const data = await apiPost('/api/session/sc', {
+        options: {
+          fault_type: faultType,
+          c_factor: cFactor,
+          compute_all_buses: true,
+        }
+      });
+      if (data) {
+        log(`短路计算完成: ${data.bus_results?.length || 0} 个母线结果`, 'success');
+        setStatus('短路完成 (全部母线)');
+        showShortCircuitResults(data);
+        switchTab('results');
+      } else {
+        setStatus('计算失败', 'error');
       }
+      return;
+    }
+
+    // A specific fault location was set → run a validated single-bus fault.
+    // The server resolves the id against the real bus indices and returns
+    // HTTP 400 when the id does not exist, so a non-existent bus can no
+    // longer "still calculate".
+    const faultBus = parseInt(faultBusRaw, 10);
+    if (!Number.isInteger(faultBus)) {
+      setStatus(`故障母线 ID “${faultBusRaw}” 无效，请输入整数母线编号。`, 'error');
+      return;
+    }
+
+    const resp = await apiPostResult('/api/session/sc_detailed', {
+      fault_bus_ids: [faultBus],
+      fault_type: faultType,
+      c_factor: cFactor,
     });
 
-    if (data) {
-      log(`短路计算完成: ${data.bus_results?.length || 0} 个母线结果`, 'success');
-      setStatus('短路完成');
-      showShortCircuitResults(data);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
+    if (!resp.ok) {
+      const raw = resp.error || '';
+      const friendly = /not found/i.test(raw)
+        ? `故障母线 ID ${faultBus} 不存在，请输入系统中真实存在的母线编号（与结果表 / 画布中显示的 Bus 编号一致）。`
+        : (raw || '计算失败');
+      setStatus(friendly, 'error');
+      return;
     }
+
+    log(`短路计算完成: 故障母线 ${faultBus}`, 'success');
+    setStatus(`短路完成 (故障母线 ${faultBus})`);
+    showShortCircuitDetailedResults(resp.data, faultBus);
+    switchTab('results');
   }
 
   // ========== Topology Reconfiguration ==========
@@ -1280,6 +1339,313 @@ const App = (() => {
     } else {
       setStatus('计算失败', 'error');
     }
+  }
+
+  // ========== Topology Analysis (graph structure) ==========
+  // Palette for island coloring — shared between the legend, the result
+  // tables, and the canvas overlay so the same island is the same color.
+  const TOPO_ISLAND_COLORS = [
+    '#61afef', '#98c379', '#e5c07b', '#c678dd', '#56b6c2',
+    '#d19a66', '#e06c75', '#7f9f7f', '#b294bb', '#de935f',
+  ];
+  function topoIslandColor(islandId) {
+    if (islandId === undefined || islandId === null || islandId < 0) return '#888';
+    return TOPO_ISLAND_COLORS[islandId % TOPO_ISLAND_COLORS.length];
+  }
+  function topoOverlayOptions() {
+    return {
+      showIslands: document.getElementById('topoShowIslands')?.checked !== false,
+      showBridges: document.getElementById('topoShowBridges')?.checked !== false,
+      showCutVertices: document.getElementById('topoShowCutVertices')?.checked !== false,
+      islandColor: topoIslandColor,
+    };
+  }
+
+  async function runTopologyAnalysis() {
+    setStatus('拓扑分析中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const data = await apiPost('/api/session/topology', {});
+
+    if (data && !data.error) {
+      _lastTopoAnalysisData = data;
+      const nIsl = (data.n_ac_islands || 0) + (data.n_dc_islands || 0);
+      const radial = data.is_radial ? '辐射状' : `含${data.cycle_count || 0}个环`;
+      const conn = data.is_connected ? '连通' : '不连通';
+      const valid = data.all_islands_valid ? '全部有效' : '存在无效孤岛';
+      log(`拓扑分析完成: ${conn}, ${radial}, 孤岛${nIsl}个(${valid}), ` +
+          `桥支路${(data.bridges || []).length}条, 割点${(data.cut_vertex_bus_ids || []).length}个`,
+          data.all_islands_valid ? 'success' : 'warn');
+      setStatus('拓扑分析完成');
+      showTopologyAnalysisResults(data);
+      Canvas.showTopologyResults(data, topoOverlayOptions());
+      setActiveResultGroup('topologyAnalysis');
+      switchTab('results');
+    } else {
+      log(`拓扑分析失败: ${data?.error || '未知错误'}`, 'error');
+      setStatus('分析失败', 'error');
+    }
+  }
+
+  function showTopologyAnalysisResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('topologyAnalysis');
+    // Shares its result-group with 网络化简; show the structural-analysis panel
+    // and hide the reduction panel.
+    const ts = document.getElementById('topoAnalysisSection');
+    const ns = document.getElementById('netReductionSection');
+    if (ts) ts.style.display = 'block';
+    if (ns) ns.style.display = 'none';
+
+    const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+    // ── Summary ──
+    const summary = document.getElementById('topoAnalysisSummary');
+    if (summary) {
+      summary.innerHTML =
+        `<span>母线: <b>${data.n_buses ?? '?'}</b></span>` +
+        `<span>支路: <b>${data.n_branches ?? '?'}</b></span>` +
+        `<span>连通性: <b>${data.is_connected ? '连通' : '不连通'}</b></span>` +
+        `<span>辐射性: <b>${data.is_radial ? '辐射状' : '含环网'}</b></span>` +
+        `<span>环路数: <b>${data.cycle_count ?? 0}</b></span>` +
+        `<span>AC孤岛: <b>${data.n_ac_islands ?? 0}</b></span>` +
+        `<span>DC孤岛: <b>${data.n_dc_islands ?? 0}</b></span>` +
+        `<span>孤岛状态: <b>${data.all_islands_valid ? '全部有效' : '存在无效'}</b></span>`;
+    }
+
+    // ── Island legend (color chips, matches canvas) ──
+    const legend = document.getElementById('topoAnalysisIslandLegend');
+    if (legend) {
+      const islands = data.islands || [];
+      legend.innerHTML = islands.map(isl => {
+        const invalid = isl.status !== 'Valid';
+        return `<span class="legend-item${invalid ? ' invalid' : ''}">` +
+          `<span class="legend-swatch" style="background:${topoIslandColor(isl.island_id)}"></span>` +
+          `孤岛 ${isl.island_id} (${isl.domain}, ${isl.n_buses}母线)</span>`;
+      }).join('') || '<span class="empty-hint">无孤岛</span>';
+    }
+
+    // ── Islands table ──
+    const islStatusLabel = {
+      Valid: '✅ 有效', NoSlack: '⚠️ 无平衡节点', NoDCVoltageRef: '⚠️ 无DC电压参考',
+      IsolatedLoad: '⚠️ 孤立负荷', Empty: '空',
+    };
+    const islEl = document.getElementById('topoAnalysisIslands');
+    if (islEl) {
+      const rows = (data.islands || []).map(isl => {
+        const buses = [...(isl.ac_bus_ids || []), ...(isl.dc_bus_ids || [])];
+        const busList = buses.slice(0, 12).join(', ') + (buses.length > 12 ? ` … (+${buses.length - 12})` : '');
+        return `<tr><td><span class="legend-swatch" style="background:${topoIslandColor(isl.island_id)}"></span> ${isl.island_id}</td>` +
+          `<td>${isl.domain}</td><td>${isl.n_buses}</td>` +
+          `<td>${islStatusLabel[isl.status] || esc(isl.status)}</td>` +
+          `<td>${esc(busList)}</td></tr>`;
+      }).join('');
+      islEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>孤岛</th><th>域</th><th>母线数</th><th>状态</th><th>母线 ID</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无孤岛</p>';
+    }
+
+    // ── Bridges table ──
+    const brEl = document.getElementById('topoAnalysisBridges');
+    if (brEl) {
+      const rows = (data.bridges || []).map(b =>
+        `<tr><td class="topo-clickable" data-bus="${b.from_bus}">${b.from_bus}</td>` +
+        `<td class="topo-clickable" data-bus="${b.to_bus}">${b.to_bus}</td>` +
+        `<td>${esc(b.category || '')}</td><td>${b.domain || ''}</td></tr>`).join('');
+      brEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>起始母线</th><th>终止母线</th><th>类型</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无桥支路（无单点故障支路）</p>';
+    }
+
+    // ── Cut vertices table ──
+    const cvEl = document.getElementById('topoAnalysisCutVertices');
+    if (cvEl) {
+      const ids = data.cut_vertex_bus_ids || [];
+      cvEl.innerHTML = ids.length
+        ? '<div class="topo-cutvertex-chips">' + ids.map(id =>
+            `<span class="legend-item topo-clickable" data-bus="${id}">母线 ${id}</span>`).join(' ') + '</div>'
+        : '<p class="empty-hint">无割点</p>';
+    }
+
+    // ── Diagnostics table ──
+    const dgEl = document.getElementById('topoAnalysisDiagnostics');
+    if (dgEl) {
+      const rows = (data.diagnostics || []).map(d => {
+        const buses = (d.related_buses || []).join(', ');
+        return `<tr><td>${esc(d.message || '')}</td><td>${esc(buses)}</td></tr>`;
+      }).join('');
+      dgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>诊断</th><th>相关母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无诊断信息（拓扑健康）</p>';
+    }
+
+    // Click-to-pan: any element carrying data-bus pans the canvas to that bus.
+    document.querySelectorAll('#topoAnalysisBridges [data-bus], #topoAnalysisCutVertices [data-bus]').forEach(el => {
+      el.addEventListener('click', () => {
+        const busId = parseInt(el.dataset.bus, 10);
+        if (Number.isInteger(busId) && Canvas.panToBusId) Canvas.panToBusId(busId);
+      });
+    });
+  }
+
+  // ========== Network Reduction (graph reduction — before/after view) ==========
+  function netReductionOptions() {
+    return {
+      enable_switch_contraction: document.getElementById('redEnableSwitch')?.checked !== false,
+      enable_series_reduction:   document.getElementById('redEnableSeries')?.checked !== false,
+      enable_pendant_reduction:  document.getElementById('redEnablePendant')?.checked === true,
+    };
+  }
+
+  async function runNetworkReduction() {
+    setStatus('网络化简中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const data = await apiPost('/api/session/network_reduction', netReductionOptions());
+
+    if (data && !data.error) {
+      _lastNetReductionData = data;
+      const b = data.before || {}, a = data.after || {};
+      const pct = (data.reduction_pct_buses || 0).toFixed(1);
+      log(`网络化简完成: 母线 ${b.n_buses ?? '?'}→${a.n_buses ?? '?'} (-${data.n_buses_eliminated ?? 0}, ${pct}%), ` +
+          `支路 ${b.n_branches ?? '?'}→${a.n_branches ?? '?'}; ` +
+          `开关合并 ${(data.switch_groups || []).length} 组, 串联 ${(data.series_records || []).length}, ` +
+          `悬挂 ${(data.pendant_records || []).length}`, 'success');
+      setStatus('网络化简完成');
+      showNetworkReductionResults(data);
+      Canvas.showNetworkReduction(data, netReductionColors);
+      setActiveResultGroup('topologyAnalysis');
+      switchTab('results');
+    } else {
+      log(`网络化简失败: ${data?.error || '未知错误'}`, 'error');
+      setStatus('化简失败', 'error');
+    }
+  }
+
+  // Stable color per representative (surviving) bus, so a collapsed group and
+  // its representative share a tint on the canvas and in the tables.
+  const NET_REDUCTION_COLORS = [
+    '#56b6c2', '#98c379', '#e5c07b', '#c678dd', '#61afef',
+    '#d19a66', '#e06c75', '#7f9f7f', '#b294bb', '#de935f',
+  ];
+  function netReductionColors(repBusId) {
+    if (repBusId === undefined || repBusId === null || repBusId < 0) return '#888';
+    return NET_REDUCTION_COLORS[Math.abs(repBusId) % NET_REDUCTION_COLORS.length];
+  }
+
+  function showNetworkReductionResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('topologyAnalysis');
+    // This module shares its result-group with 拓扑分析; show the reduction
+    // panel and hide the structural-analysis panel (and vice versa).
+    const ts = document.getElementById('topoAnalysisSection');
+    const ns = document.getElementById('netReductionSection');
+    if (ts) ts.style.display = 'none';
+    if (ns) ns.style.display = 'block';
+
+    const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const b = data.before || {}, a = data.after || {};
+    const st = data.stages || {};
+
+    // ── Summary ──
+    const summary = document.getElementById('redSummary');
+    if (summary) {
+      const pct = (data.reduction_pct_buses || 0).toFixed(1);
+      summary.innerHTML =
+        `<span>母线: <b>${b.n_buses ?? '?'} → ${a.n_buses ?? '?'}</b></span>` +
+        `<span>支路: <b>${b.n_branches ?? '?'} → ${a.n_branches ?? '?'}</b></span>` +
+        `<span>消去母线: <b>${data.n_buses_eliminated ?? 0}</b> (${pct}%)</span>` +
+        `<span>消去支路: <b>${data.n_branches_eliminated ?? 0}</b></span>` +
+        `<span>Kron 可消去节点: <b>${st.kron_identify?.n_candidates ?? 0}</b></span>`;
+    }
+
+    // ── Before/after stage breakdown ──
+    const baEl = document.getElementById('redBeforeAfter');
+    if (baEl) {
+      const row = (label, enabled, detail) =>
+        `<tr><td>${label}</td><td>${enabled ? '✅ 启用' : '— 关闭'}</td><td>${detail}</td></tr>`;
+      baEl.innerHTML =
+        '<table class="topo-table"><thead><tr><th>化简阶段</th><th>状态</th><th>结果</th></tr></thead><tbody>' +
+        row('开关合并 (零阻抗/闭合开关)', st.switch_contraction?.enabled,
+            `${st.switch_contraction?.n_groups ?? 0} 个超级节点，合并 ${st.switch_contraction?.n_buses_merged ?? 0} 母线`) +
+        row('串联化简 (二度无注入节点)', st.series_reduction?.enabled,
+            `消去 ${st.series_reduction?.n_eliminated ?? 0} 母线`) +
+        row('悬挂折叠 (叶子负荷节点·近似)', st.pendant_reduction?.enabled,
+            `消去 ${st.pendant_reduction?.n_eliminated ?? 0} 母线`) +
+        row('Kron 消去 (被动内部节点·仅识别)', st.kron_identify?.enabled,
+            `识别 ${st.kron_identify?.n_candidates ?? 0} 个候选节点（本视图不折叠）`) +
+        '</tbody></table>';
+    }
+
+    // ── Switch contraction groups ──
+    const sgEl = document.getElementById('redSwitchGroups');
+    if (sgEl) {
+      const rows = (data.switch_groups || []).map(g => {
+        const buses = (g.bus_ids || []);
+        const list = buses.slice(0, 14).join(', ') + (buses.length > 14 ? ` … (+${buses.length - 14})` : '');
+        return `<tr><td><span class="legend-swatch" style="background:${netReductionColors(g.super_bus_id)}"></span> ` +
+          `<span class="topo-clickable" data-bus="${g.super_bus_id}">${g.super_bus_id}</span></td>` +
+          `<td>${g.domain || ''}</td><td>${buses.length}</td><td>${esc(list)}</td></tr>`;
+      }).join('');
+      sgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>超级节点</th><th>域</th><th>母线数</th><th>合并母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无开关合并组</p>';
+    }
+
+    // ── Series reduction records ──
+    const srEl = document.getElementById('redSeriesRecords');
+    if (srEl) {
+      const rows = (data.series_records || []).map(r =>
+        `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.from_bus_id}">${r.from_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.to_bus_id}">${r.to_bus_id}</td>` +
+        `<td>${r.domain || ''}</td><td>${(r.r_eq ?? 0).toFixed(5)}</td><td>${(r.x_eq ?? 0).toFixed(5)}</td></tr>`).join('');
+      srEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>端点 i</th><th>端点 k</th><th>域</th><th>R_eq(pu)</th><th>X_eq(pu)</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无串联化简</p>';
+    }
+
+    // ── Pendant reduction records ──
+    const prEl = document.getElementById('redPendantRecords');
+    if (prEl) {
+      const rows = (data.pendant_records || []).map(r =>
+        `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.parent_bus_id}">${r.parent_bus_id}</td>` +
+        `<td>${r.domain || ''}</td></tr>`).join('');
+      prEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>父母线</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无悬挂折叠（未启用或无候选）</p>';
+    }
+
+    // ── Diagnostics ──
+    const dgEl = document.getElementById('redDiagnostics');
+    if (dgEl) {
+      const rows = (data.diagnostics || []).map(d => {
+        const buses = (d.related_buses || []).join(', ');
+        return `<tr><td>${esc(d.message || '')}</td><td>${esc(buses)}</td></tr>`;
+      }).join('');
+      dgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>诊断</th><th>相关母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无诊断信息</p>';
+    }
+
+    // Click-to-pan on any bus id.
+    document.querySelectorAll('#netReductionSection [data-bus]').forEach(el => {
+      el.addEventListener('click', () => {
+        const busId = parseInt(el.dataset.bus, 10);
+        if (Number.isInteger(busId) && Canvas.panToBusId) Canvas.panToBusId(busId);
+      });
+    });
   }
 
   // ========== Bearing Capability Assessment (DL/T 2041-2019) ==========
@@ -2046,6 +2412,84 @@ const App = (() => {
     }
   }
 
+  // Render a single-bus (validated) fault from /api/session/sc_detailed.
+  // data = { fault_type, results:[ { fault_bus_id, solved, bus_results:[...] } ] }
+  function showShortCircuitDetailedResults(data, faultBus) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('shortCircuit');
+
+    const fmt = (x, d = 3) =>
+      (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    const results = data.results || [];
+    const r = results.find(x => x.fault_bus_id === faultBus) || results[0];
+    const summary = document.getElementById('resultsSummary');
+    const scDiv = document.getElementById('scResults');
+
+    if (!r) {
+      summary.innerHTML =
+        '<div class="result-item"><span class="result-label">短路</span>' +
+        '<span class="result-value result-failed">无结果</span></div>';
+      scDiv.innerHTML = '';
+      return;
+    }
+
+    const busRows = r.bus_results || [];
+    const fb = busRows.find(b => b.bus_id === r.fault_bus_id) || {};
+
+    summary.innerHTML = `
+      <div class="result-item"><span class="result-label">故障类型</span>
+        <span class="result-value">${data.fault_type || 'ThreePhase'}</span></div>
+      <div class="result-item"><span class="result-label">故障母线</span>
+        <span class="result-value">Bus ${r.fault_bus_id}</span></div>
+      <div class="result-item"><span class="result-label">Ik" 初始 (kA)</span>
+        <span class="result-value">${fmt(fb.ikss_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ip 峰值 (kA)</span>
+        <span class="result-value">${fmt(fb.ip_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ib 开断 (kA)</span>
+        <span class="result-value">${fmt(fb.ib_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">ik 稳态 (kA)</span>
+        <span class="result-value">${fmt(fb.ik_ka, 3)}</span></div>
+      <div class="result-item"><span class="result-label">Ith 热效 (kA)</span>
+        <span class="result-value">${fmt(fb.ith_ka, 3)}</span></div>
+    `;
+
+    const busMap = Canvas.getCompBusMap();
+    const contribs = [
+      ['发电机', fb.ikss_gen_contrib_ka],
+      ['电动机', fb.ikss_motor_contrib_ka],
+      ['外部电网', fb.ikss_extgrid_contrib_ka],
+      ['换流器', fb.ikss_converter_contrib_ka],
+      ['静止发电机', fb.ikss_sgen_contrib_ka],
+      ['负荷', fb.ikss_load_contrib_ka],
+    ].filter(([, v]) => v !== undefined && v !== null);
+
+    let html = '';
+    if (contribs.length) {
+      html += '<h4 style="margin:8px 0 4px">故障源贡献 (kA)</h4>';
+      html += '<table><thead><tr><th>来源</th><th>Ik" (kA)</th></tr></thead><tbody>';
+      contribs.forEach(([lbl, v]) => {
+        html += `<tr><td>${lbl}</td><td>${fmt(v, 4)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
+    html += '<h4 style="margin:12px 0 4px">故障期间各母线剩余电压 (p.u.)</h4>';
+    html += '<table><thead><tr><th>Bus</th><th>V<sub>remain</sub> (p.u.)</th></tr></thead><tbody>';
+    busRows.forEach(b => {
+      const compId = busMap.ac[b.bus_id];
+      const clickable = compId !== undefined
+        ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+      const isFault = b.bus_id === r.fault_bus_id;
+      const style = isFault ? ' style="font-weight:700;background:var(--primary-soft)"' : '';
+      html += `<tr${clickable}${style}><td>${b.bus_id}${isFault ? ' (故障点)' : ''}</td>` +
+              `<td>${fmt(b.v_remaining_pu, 4)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    scDiv.innerHTML = html;
+  }
+
   function showTopologyResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -2703,7 +3147,38 @@ const App = (() => {
   }
 
   // ========== Init ==========
+  // ---- Theme (light / dark background) ----
+  // Keeps the dark palette as the default so existing users see no change until
+  // they toggle.  The choice persists in localStorage across reloads.
+  function setThemeMode(mode) {
+    const finalMode = mode === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', finalMode);
+    try { localStorage.setItem('themeMode', finalMode); } catch (e) { /* ignore */ }
+    const btn = document.getElementById('btnToggleTheme');
+    if (btn) btn.title = finalMode === 'light' ? '切换到深色背景' : '切换到浅色背景';
+  }
+
+  function toggleThemeMode() {
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    setThemeMode(current === 'light' ? 'dark' : 'light');
+  }
+
+  function initThemeMode() {
+    let saved = 'dark';
+    try { saved = localStorage.getItem('themeMode') || 'dark'; } catch (e) { /* ignore */ }
+    setThemeMode(saved);
+    document.getElementById('btnToggleTheme')?.addEventListener('click', toggleThemeMode);
+  }
+
+  // Current auto-layout direction chosen in the toolbar (TB/LR/RADIAL/COMPACT).
+  function layoutDirection() {
+    return document.getElementById('layoutDirSelect')?.value || 'TB';
+  }
+
   function init() {
+    // Apply the saved light/dark theme before anything renders.
+    initThemeMode();
+
     // Initialize canvas
     Canvas.init();
 
@@ -2815,6 +3290,31 @@ const App = (() => {
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);
 
+    // Bar 3: topology analysis (graph structure)
+    document.getElementById('btnRunTopologyAnalysis')?.addEventListener('click', runTopologyAnalysis);
+    document.getElementById('btnExportTopologyAnalysis')?.addEventListener('click', () => {
+      if (!_lastTopoAnalysisData) {
+        setStatus('请先运行拓扑分析', 'warn');
+        return;
+      }
+      downloadJsonFile('topology_analysis.json', _lastTopoAnalysisData);
+    });
+    ['topoShowIslands', 'topoShowBridges', 'topoShowCutVertices'].forEach(id => {
+      document.getElementById(id)?.addEventListener('change', () => {
+        if (_lastTopoAnalysisData) Canvas.showTopologyResults(_lastTopoAnalysisData, topoOverlayOptions());
+      });
+    });
+
+    // Bar 3: network reduction (graph reduction — before/after view)
+    document.getElementById('btnRunNetworkReduction')?.addEventListener('click', runNetworkReduction);
+    document.getElementById('btnExportNetworkReduction')?.addEventListener('click', () => {
+      if (!_lastNetReductionData) {
+        setStatus('请先运行网络化简', 'warn');
+        return;
+      }
+      downloadJsonFile('network_reduction.json', _lastNetReductionData);
+    });
+
     // Bar 3: hosting capacity
     document.getElementById('btnRunBearingCap')?.addEventListener('click', showBcDialog);
     // Legacy bearing-capacity launcher (header button removed)
@@ -2877,16 +3377,6 @@ const App = (() => {
       const nbus = (d.bus_labels || []).length;
       const nbr  = (d.branch_labels || []).length;
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
-    });
-
-    // Bar 3: PF — Green-certificate data import (placeholder; backend TODO).
-    document.getElementById('btnImportGreenCert')?.addEventListener('click', () => {
-      document.getElementById('fileImportGreenCert')?.click();
-    });
-    document.getElementById('fileImportGreenCert')?.addEventListener('change', (e) => {
-      const f = e.target.files[0];
-      if (f) log(`已选择绿证数据文件: ${f.name}（TODO: 后端导入接口待对接）`, 'info');
-      e.target.value = '';
     });
 
     // Bar 3: Reliability — run (NSQ/SEQ/FMEA/F&D) + export. Backend live.
@@ -2983,6 +3473,131 @@ const App = (() => {
         return;
       }
       downloadJsonFile(`reliability_results_${tsTagForFilename()}.json`, _lastReliabilityData);
+    });
+
+    // ---- Carbon emission analysis ----
+    // Backend reuses the cached PF result if one exists, otherwise runs a fresh
+    // AC Newton power flow. Request body is empty; the server operates on the
+    // currently loaded system (synced from the canvas below).
+    async function runCarbonAnalysis() {
+      setStatus('碳排放分析中...', 'busy');
+      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+      const data = await apiPost('/api/session/run_carbon', {});
+      if (data && !data.error) {
+        _lastCarbonData = data;
+        showCarbonResults(data);
+        switchTab('results');
+        setStatus('碳排放分析完成');
+      } else {
+        setStatus('碳排放分析失败', 'error');
+      }
+    }
+
+    function showCarbonResults(data) {
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      setActiveResultGroup('carbonAnalysis');
+      const nf = (v, d = 3) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+
+      // Method / source header
+      let html = `<div style="margin-bottom:8px;">`
+        + `<b>潮流来源：</b>${data.pf_source || '—'} &nbsp; `
+        + `<b>矩阵法：</b>${data.matrix_solved ? '✓ 求解' : '✗ 未解'} &nbsp; `
+        + `<b>溯源校验：</b>${data.tracing_verified ? '✓ 通过' : '✗ 未通过'} &nbsp; `
+        + `<b>矩阵残差：</b>${nf(data.matrix_residual, 2)}</div>`;
+
+      // Emissions summary — proportional tracing vs matrix method
+      const ts = data.tracing_summary || {}, ms = data.matrix_summary || {};
+      html += '<h4 style="margin:6px 0 4px;">碳排放总量 (tCO₂)</h4>';
+      html += '<table><thead><tr><th>指标</th><th>比例溯源法</th><th>矩阵法</th></tr></thead><tbody>';
+      const rows = [
+        ['发电侧排放', 'total_generation_emissions_tco2'],
+        ['负荷侧排放', 'total_load_emissions_tco2'],
+        ['网损排放', 'total_loss_emissions_tco2'],
+        ['平衡误差 (%)', 'balance_error_pct'],
+      ];
+      for (const [label, key] of rows) {
+        html += `<tr><td>${label}</td><td class="result-value">${nf(ts[key])}</td><td class="result-value">${nf(ms[key])}</td></tr>`;
+      }
+      html += '</tbody></table>';
+
+      // Load carbon — sorted by total emissions, top 20
+      const loads = (data.load_carbon || []).slice().sort((a, b) => (b.total_emissions_tco2 || 0) - (a.total_emissions_tco2 || 0));
+      if (loads.length) {
+        html += '<h4 style="margin:10px 0 4px;">负荷碳排放 (Top 20)</h4>';
+        html += '<table><thead><tr><th>负荷</th><th>母线</th><th>需求(MW)</th><th>碳强度(tCO₂/MWh)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        loads.slice(0, 20).forEach(l => {
+          html += `<tr><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
+            + `<td>${nf(l.carbon_intensity_tco2_mwh, 4)}</td><td class="result-value">${nf(l.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // Bus carbon intensity — AC, sorted by intensity, top 20
+      const buses = (data.bus_carbon || []).slice().sort((a, b) => (b.carbon_intensity_tco2_mwh || 0) - (a.carbon_intensity_tco2_mwh || 0));
+      if (buses.length) {
+        html += '<h4 style="margin:10px 0 4px;">母线碳强度 (AC, Top 20)</h4>';
+        html += '<table><thead><tr><th>母线</th><th>碳强度(tCO₂/MWh)</th></tr></thead><tbody>';
+        buses.slice(0, 20).forEach(b => {
+          html += `<tr><td>${b.bus_index ?? '—'}</td><td class="result-value">${nf(b.carbon_intensity_tco2_mwh, 4)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // Branch loss carbon — sorted by emissions, top 15
+      const branches = (data.branch_carbon || []).slice().sort((a, b) => (b.total_emissions_tco2 || 0) - (a.total_emissions_tco2 || 0));
+      if (branches.length) {
+        html += '<h4 style="margin:10px 0 4px;">支路网损碳排放 (Top 15)</h4>';
+        html += '<table><thead><tr><th>支路</th><th>从→到</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        branches.slice(0, 15).forEach(b => {
+          html += `<tr><td>${b.branch_index ?? '—'}</td><td>${b.from_bus}→${b.to_bus}</td>`
+            + `<td>${nf(b.loss_mw, 4)}</td><td class="result-value">${nf(b.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+
+      // VSC converter carbon
+      const vscs = data.vsc_carbon || [];
+      if (vscs.length) {
+        html += '<h4 style="margin:10px 0 4px;">换流器 (VSC) 损耗碳排放</h4>';
+        html += '<table><thead><tr><th>换流器</th><th>AC母线</th><th>DC母线</th><th>损耗(MW)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
+        vscs.forEach(v => {
+          html += `<tr><td>${v.converter_index ?? '—'}</td><td>${v.bus_ac ?? '—'}</td><td>${v.bus_dc ?? '—'}</td>`
+            + `<td>${nf(v.loss_mw, 4)}</td><td class="result-value">${nf(v.total_emissions_tco2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      document.getElementById('carbonResults').innerHTML = html;
+
+      // Carbon flow Sankey: sources (generators/storage) → loads
+      const chartDiv = document.getElementById('carbonSankeyChart');
+      const labels = data.sankey_labels || [], srcs = data.sankey_sources || [],
+            tgts = data.sankey_targets || [], vals = data.sankey_values || [];
+      if (typeof Plotly !== 'undefined' && chartDiv && labels.length && srcs.length) {
+        Plotly.react(chartDiv, [{
+          type: 'sankey',
+          orientation: 'h',
+          node: { label: labels, pad: 12, thickness: 14,
+                  line: { color: '#3e4451', width: 0.5 },
+                  color: '#61afef' },
+          link: { source: srcs, target: tgts, value: vals,
+                  color: 'rgba(97,175,239,0.25)' },
+        }], {
+          paper_bgcolor: 'rgba(0,0,0,0)', font: { color: '#abb2bf', size: 11 },
+          margin: { l: 10, r: 10, t: 20, b: 10 }, title: '碳流溯源 (MW)',
+        }, { responsive: true });
+      } else if (chartDiv) {
+        chartDiv.innerHTML = '<p class="empty-hint">无碳流数据可视化</p>';
+      }
+    }
+
+    document.getElementById('btnRunCarbon')?.addEventListener('click', runCarbonAnalysis);
+    document.getElementById('btnExportCarbonResults')?.addEventListener('click', () => {
+      if (!_lastCarbonData) {
+        log('暂无碳排放分析结果可导出，请先运行碳排放分析', 'warn');
+        return;
+      }
+      downloadJsonFile(`carbon_results_${tsTagForFilename()}.json`, _lastCarbonData);
     });
 
     // Bar 3: Resilience — collect inline parameters into a payload (placeholder).
@@ -4424,7 +5039,18 @@ const App = (() => {
     document.getElementById('btnZoomIn').addEventListener('click', () => Canvas.zoomIn());
     document.getElementById('btnZoomOut').addEventListener('click', () => Canvas.zoomOut());
     document.getElementById('btnZoomFit').addEventListener('click', () => Canvas.zoomFit());
-    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout());
+    document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    document.getElementById('layoutDirSelect')?.addEventListener('change', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    // Local re-layout of the current selection (doc §18 Phase 4)
+    document.getElementById('btnRelayoutSel')?.addEventListener('click', () => Canvas.autoLayoutSelection?.({ direction: layoutDirection() }));
+    // Connection style (直线 / 正交 / 避让) — doc §10.2/§10.3
+    const connStyleSel = document.getElementById('connStyleSelect');
+    if (connStyleSel) {
+      try { connStyleSel.value = localStorage.getItem('connectionStyle') || 'orthogonal'; } catch (e) {}
+      connStyleSel.addEventListener('change', (e) => Canvas.setConnectionStyle?.(e.target.value));
+    }
+    document.getElementById('btnReroute')?.addEventListener('click', () => Canvas.rerouteConnections?.());
+    document.getElementById('chkAlignSnap')?.addEventListener('change', (e) => Canvas.setAlignSnap?.(e.target.checked));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
 
