@@ -1914,10 +1914,6 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
-    document.getElementById('btnRunCarbonFlow')?.addEventListener('click', () => {
-      // TODO: hook up backend carbon-flow endpoint when available.
-      log('碳流计算：尚未对接后端接口（TODO）', 'warn');
-    });
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.
     document.getElementById('btnExportPfResults')?.addEventListener('click', () => {
@@ -2852,7 +2848,6 @@ const App = (() => {
         _importedGeneratedScenario = { family, case: caseJson };
         _lastImportedGeneratedScenarioKey = caseJson?._generated_scenario?.representative_id || caseJson?.name || '';
         _lastTspfData = null;
-        _lastCarbonData = null;
         const target = targetFamily || family;
         let restoredTs = false;
         const targetUsesScenarioTs = target === 'regular' || target === 'resilience';
