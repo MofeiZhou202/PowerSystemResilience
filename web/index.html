@@ -57,7 +57,7 @@
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
-  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序潮流</button>
+  <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
   <button id="moduleHosting"      class="module-btn" data-module="hosting">承载力分析</button>
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
@@ -136,6 +136,21 @@
     </label>
     <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
     <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
+    <span class="sub-divider"></span>
+    <label class="sub-label sub-checkbox" title="合并闭合开关/零阻抗支路两端母线（超级节点）">
+      <input id="redEnableSwitch" type="checkbox" checked/>
+      <span>开关合并</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="消去无注入的二度母线（串联等效）">
+      <input id="redEnableSeries" type="checkbox" checked/>
+      <span>串联化简</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="折叠仅含负荷的叶子母线（近似）">
+      <input id="redEnablePendant" type="checkbox"/>
+      <span>悬挂折叠</span>
+    </label>
+    <button id="btnRunNetworkReduction" class="toolbar-btn run-btn" title="运行网络化简并显示化简前后对比">网络化简</button>
+    <button id="btnExportNetworkReduction" class="toolbar-btn" title="将网络化简结果导出为 JSON 文件">化简导出</button>
   </div>
   <!-- Time-series PF -->
   <div class="sub-section" data-sub="timeSeries" hidden>
@@ -667,7 +682,7 @@
         </div>
         </div><!-- /result-group topology -->
         <div class="result-group" data-result-group="topologyAnalysis">
-        <div class="topo-section">
+        <div class="topo-section" id="topoAnalysisSection">
           <h4>拓扑分析结果</h4>
           <div id="topoAnalysisSummary" class="results-summary"></div>
           <div id="topoAnalysisIslandLegend" class="topo-island-legend"></div>
@@ -679,6 +694,19 @@
           <div id="topoAnalysisCutVertices" class="topo-table-wrap"></div>
           <h5>诊断信息</h5>
           <div id="topoAnalysisDiagnostics" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="netReductionSection" style="display:none">
+          <h4>网络化简结果（化简前后对比）</h4>
+          <div id="redSummary" class="results-summary"></div>
+          <div id="redBeforeAfter" class="topo-table-wrap"></div>
+          <h5>开关合并组（超级节点）</h5>
+          <div id="redSwitchGroups" class="topo-table-wrap"></div>
+          <h5>串联化简（消去二度母线）</h5>
+          <div id="redSeriesRecords" class="topo-table-wrap"></div>
+          <h5>悬挂折叠（叶子负荷母线）</h5>
+          <div id="redPendantRecords" class="topo-table-wrap"></div>
+          <h5>诊断信息</h5>
+          <div id="redDiagnostics" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group topologyAnalysis -->
         <div class="result-group" data-result-group="hosting">

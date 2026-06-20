@@ -51,6 +51,7 @@ const App = (() => {
   let _lastCarbonData = null;
   let _lastScenarioGenerationData = null;
   let _lastTopoAnalysisData = null;
+  let _lastNetReductionData = null;
   let _lastScenarioBaseSystemJson = null;
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
@@ -637,6 +638,12 @@ const App = (() => {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('topologyAnalysis');
+    // Shares its result-group with 网络化简; show the structural-analysis panel
+    // and hide the reduction panel.
+    const ts = document.getElementById('topoAnalysisSection');
+    const ns = document.getElementById('netReductionSection');
+    if (ts) ts.style.display = 'block';
+    if (ns) ns.style.display = 'none';
 
     const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
@@ -722,6 +729,161 @@ const App = (() => {
 
     // Click-to-pan: any element carrying data-bus pans the canvas to that bus.
     document.querySelectorAll('#topoAnalysisBridges [data-bus], #topoAnalysisCutVertices [data-bus]').forEach(el => {
+      el.addEventListener('click', () => {
+        const busId = parseInt(el.dataset.bus, 10);
+        if (Number.isInteger(busId) && Canvas.panToBusId) Canvas.panToBusId(busId);
+      });
+    });
+  }
+
+  // ========== Network Reduction (graph reduction — before/after view) ==========
+  function netReductionOptions() {
+    return {
+      enable_switch_contraction: document.getElementById('redEnableSwitch')?.checked !== false,
+      enable_series_reduction:   document.getElementById('redEnableSeries')?.checked !== false,
+      enable_pendant_reduction:  document.getElementById('redEnablePendant')?.checked === true,
+    };
+  }
+
+  async function runNetworkReduction() {
+    setStatus('网络化简中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const data = await apiPost('/api/session/network_reduction', netReductionOptions());
+
+    if (data && !data.error) {
+      _lastNetReductionData = data;
+      const b = data.before || {}, a = data.after || {};
+      const pct = (data.reduction_pct_buses || 0).toFixed(1);
+      log(`网络化简完成: 母线 ${b.n_buses ?? '?'}→${a.n_buses ?? '?'} (-${data.n_buses_eliminated ?? 0}, ${pct}%), ` +
+          `支路 ${b.n_branches ?? '?'}→${a.n_branches ?? '?'}; ` +
+          `开关合并 ${(data.switch_groups || []).length} 组, 串联 ${(data.series_records || []).length}, ` +
+          `悬挂 ${(data.pendant_records || []).length}`, 'success');
+      setStatus('网络化简完成');
+      showNetworkReductionResults(data);
+      Canvas.showNetworkReduction(data, netReductionColors);
+      setActiveResultGroup('topologyAnalysis');
+      switchTab('results');
+    } else {
+      log(`网络化简失败: ${data?.error || '未知错误'}`, 'error');
+      setStatus('化简失败', 'error');
+    }
+  }
+
+  // Stable color per representative (surviving) bus, so a collapsed group and
+  // its representative share a tint on the canvas and in the tables.
+  const NET_REDUCTION_COLORS = [
+    '#56b6c2', '#98c379', '#e5c07b', '#c678dd', '#61afef',
+    '#d19a66', '#e06c75', '#7f9f7f', '#b294bb', '#de935f',
+  ];
+  function netReductionColors(repBusId) {
+    if (repBusId === undefined || repBusId === null || repBusId < 0) return '#888';
+    return NET_REDUCTION_COLORS[Math.abs(repBusId) % NET_REDUCTION_COLORS.length];
+  }
+
+  function showNetworkReductionResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('topologyAnalysis');
+    // This module shares its result-group with 拓扑分析; show the reduction
+    // panel and hide the structural-analysis panel (and vice versa).
+    const ts = document.getElementById('topoAnalysisSection');
+    const ns = document.getElementById('netReductionSection');
+    if (ts) ts.style.display = 'none';
+    if (ns) ns.style.display = 'block';
+
+    const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const b = data.before || {}, a = data.after || {};
+    const st = data.stages || {};
+
+    // ── Summary ──
+    const summary = document.getElementById('redSummary');
+    if (summary) {
+      const pct = (data.reduction_pct_buses || 0).toFixed(1);
+      summary.innerHTML =
+        `<span>母线: <b>${b.n_buses ?? '?'} → ${a.n_buses ?? '?'}</b></span>` +
+        `<span>支路: <b>${b.n_branches ?? '?'} → ${a.n_branches ?? '?'}</b></span>` +
+        `<span>消去母线: <b>${data.n_buses_eliminated ?? 0}</b> (${pct}%)</span>` +
+        `<span>消去支路: <b>${data.n_branches_eliminated ?? 0}</b></span>` +
+        `<span>Kron 可消去节点: <b>${st.kron_identify?.n_candidates ?? 0}</b></span>`;
+    }
+
+    // ── Before/after stage breakdown ──
+    const baEl = document.getElementById('redBeforeAfter');
+    if (baEl) {
+      const row = (label, enabled, detail) =>
+        `<tr><td>${label}</td><td>${enabled ? '✅ 启用' : '— 关闭'}</td><td>${detail}</td></tr>`;
+      baEl.innerHTML =
+        '<table class="topo-table"><thead><tr><th>化简阶段</th><th>状态</th><th>结果</th></tr></thead><tbody>' +
+        row('开关合并 (零阻抗/闭合开关)', st.switch_contraction?.enabled,
+            `${st.switch_contraction?.n_groups ?? 0} 个超级节点，合并 ${st.switch_contraction?.n_buses_merged ?? 0} 母线`) +
+        row('串联化简 (二度无注入节点)', st.series_reduction?.enabled,
+            `消去 ${st.series_reduction?.n_eliminated ?? 0} 母线`) +
+        row('悬挂折叠 (叶子负荷节点·近似)', st.pendant_reduction?.enabled,
+            `消去 ${st.pendant_reduction?.n_eliminated ?? 0} 母线`) +
+        row('Kron 消去 (被动内部节点·仅识别)', st.kron_identify?.enabled,
+            `识别 ${st.kron_identify?.n_candidates ?? 0} 个候选节点（本视图不折叠）`) +
+        '</tbody></table>';
+    }
+
+    // ── Switch contraction groups ──
+    const sgEl = document.getElementById('redSwitchGroups');
+    if (sgEl) {
+      const rows = (data.switch_groups || []).map(g => {
+        const buses = (g.bus_ids || []);
+        const list = buses.slice(0, 14).join(', ') + (buses.length > 14 ? ` … (+${buses.length - 14})` : '');
+        return `<tr><td><span class="legend-swatch" style="background:${netReductionColors(g.super_bus_id)}"></span> ` +
+          `<span class="topo-clickable" data-bus="${g.super_bus_id}">${g.super_bus_id}</span></td>` +
+          `<td>${g.domain || ''}</td><td>${buses.length}</td><td>${esc(list)}</td></tr>`;
+      }).join('');
+      sgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>超级节点</th><th>域</th><th>母线数</th><th>合并母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无开关合并组</p>';
+    }
+
+    // ── Series reduction records ──
+    const srEl = document.getElementById('redSeriesRecords');
+    if (srEl) {
+      const rows = (data.series_records || []).map(r =>
+        `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.from_bus_id}">${r.from_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.to_bus_id}">${r.to_bus_id}</td>` +
+        `<td>${r.domain || ''}</td><td>${(r.r_eq ?? 0).toFixed(5)}</td><td>${(r.x_eq ?? 0).toFixed(5)}</td></tr>`).join('');
+      srEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>端点 i</th><th>端点 k</th><th>域</th><th>R_eq(pu)</th><th>X_eq(pu)</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无串联化简</p>';
+    }
+
+    // ── Pendant reduction records ──
+    const prEl = document.getElementById('redPendantRecords');
+    if (prEl) {
+      const rows = (data.pendant_records || []).map(r =>
+        `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
+        `<td class="topo-clickable" data-bus="${r.parent_bus_id}">${r.parent_bus_id}</td>` +
+        `<td>${r.domain || ''}</td></tr>`).join('');
+      prEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>父母线</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无悬挂折叠（未启用或无候选）</p>';
+    }
+
+    // ── Diagnostics ──
+    const dgEl = document.getElementById('redDiagnostics');
+    if (dgEl) {
+      const rows = (data.diagnostics || []).map(d => {
+        const buses = (d.related_buses || []).join(', ');
+        return `<tr><td>${esc(d.message || '')}</td><td>${esc(buses)}</td></tr>`;
+      }).join('');
+      dgEl.innerHTML = rows
+        ? `<table class="topo-table"><thead><tr><th>诊断</th><th>相关母线</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="empty-hint">无诊断信息</p>';
+    }
+
+    // Click-to-pan on any bus id.
+    document.querySelectorAll('#netReductionSection [data-bus]').forEach(el => {
       el.addEventListener('click', () => {
         const busId = parseInt(el.dataset.bus, 10);
         if (Number.isInteger(busId) && Canvas.panToBusId) Canvas.panToBusId(busId);
@@ -2360,6 +2522,16 @@ const App = (() => {
       document.getElementById(id)?.addEventListener('change', () => {
         if (_lastTopoAnalysisData) Canvas.showTopologyResults(_lastTopoAnalysisData, topoOverlayOptions());
       });
+    });
+
+    // Bar 3: network reduction (graph reduction — before/after view)
+    document.getElementById('btnRunNetworkReduction')?.addEventListener('click', runNetworkReduction);
+    document.getElementById('btnExportNetworkReduction')?.addEventListener('click', () => {
+      if (!_lastNetReductionData) {
+        setStatus('请先运行网络化简', 'warn');
+        return;
+      }
+      downloadJsonFile('network_reduction.json', _lastNetReductionData);
     });
 
     // Bar 3: hosting capacity

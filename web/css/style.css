@@ -605,6 +605,44 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 .topo-clickable { cursor: pointer; }
 .topo-clickable:hover { text-decoration: underline; }
+
+/* Toolbar divider between 拓扑分析 and 网络化简 controls */
+.sub-divider {
+  display: inline-block;
+  width: 1px;
+  align-self: stretch;
+  min-height: 20px;
+  margin: 0 6px;
+  background: var(--border);
+}
+
+/* SVG overlay markers drawn by Canvas.showNetworkReduction() */
+.net-reduce-connector {
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  stroke-opacity: 0.85;
+  pointer-events: none;
+}
+.net-reduce-eliminated {
+  fill-opacity: 0.35;
+  stroke: #fff;
+  stroke-opacity: 0.7;
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+.net-reduce-x {
+  fill: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.net-reduce-super {
+  fill: none;
+  stroke-width: 3;
+  stroke-dasharray: 2 3;
+  pointer-events: none;
+}
+
 .scenario-generation-charts h4 {
   margin: 8px 0 6px;
   font-size: 12px;

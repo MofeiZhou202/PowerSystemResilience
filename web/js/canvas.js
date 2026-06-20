@@ -4437,6 +4437,84 @@ const Canvas = (() => {
     }
   }
 
+  // ========== Network Reduction overlay ==========
+  // Visualize the graph reduction "before/after": every bus that collapses
+  // (merged / series-eliminated / pendant-folded) is drawn faded with a dashed
+  // connector to its representative (surviving) bus; the representative gets a
+  // colored "super-node" ring.  Keyed by canvas position (pos / rep_pos) which
+  // the backend computes to match this canvas's bus ordering.
+  function showNetworkReduction(data, colorFn) {
+    resultsLayer.innerHTML = '';
+    if (!data) return;
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const color = typeof colorFn === 'function' ? colorFn : () => '#56b6c2';
+
+    const busMap = getCompBusMap(); // busModelId -> compId, per domain
+    const compOf = (dc, busId) => {
+      const id = dc ? busMap.dc[busId] : busMap.ac[busId];
+      return id != null ? getComponent(id) : null;
+    };
+
+    // Count members per representative so single-bus "retained" groups stay plain.
+    const groupSize = {};
+    const tally = (arr) => (arr || []).forEach(r => {
+      const k = (r.domain === 'DC' ? 'd' : 'a') + r.rep_bus_id;
+      groupSize[k] = (groupSize[k] || 0) + 1;
+    });
+    tally(data.ac_bus_reduction);
+    tally(data.dc_bus_reduction);
+
+    const drawDomain = (arr, dc) => {
+      (arr || []).forEach(r => {
+        const comp = compOf(dc, r.bus_id);
+        if (!comp) return;
+        const repComp = compOf(dc, r.rep_bus_id);
+        const key = (dc ? 'd' : 'a') + r.rep_bus_id;
+        const inGroup = (groupSize[key] || 0) > 1;
+        const eliminated = r.status !== 'retained';
+        const col = color(r.rep_bus_id);
+
+        if (eliminated && repComp && repComp !== comp) {
+          // Dashed connector from the collapsed bus to its representative.
+          const line = document.createElementNS(SVGNS, 'line');
+          line.setAttribute('class', 'net-reduce-connector');
+          line.setAttribute('x1', comp.x); line.setAttribute('y1', comp.y);
+          line.setAttribute('x2', repComp.x); line.setAttribute('y2', repComp.y);
+          line.setAttribute('stroke', col);
+          resultsLayer.appendChild(line);
+        }
+
+        if (eliminated) {
+          // Faded marker on the bus being removed.
+          const m = document.createElementNS(SVGNS, 'circle');
+          m.setAttribute('class', 'net-reduce-eliminated');
+          m.setAttribute('cx', comp.x); m.setAttribute('cy', comp.y);
+          m.setAttribute('r', 13);
+          m.setAttribute('fill', col);
+          resultsLayer.appendChild(m);
+          const x = document.createElementNS(SVGNS, 'text');
+          x.setAttribute('class', 'net-reduce-x');
+          x.setAttribute('x', comp.x); x.setAttribute('y', comp.y);
+          x.setAttribute('text-anchor', 'middle');
+          x.setAttribute('dominant-baseline', 'central');
+          const tag = r.status === 'merged' ? '⊝' : (r.status === 'pendant_eliminated' ? '↘' : '×');
+          x.textContent = tag;
+          resultsLayer.appendChild(x);
+        } else if (inGroup) {
+          // Surviving representative that absorbs others → super-node ring.
+          const ring = document.createElementNS(SVGNS, 'circle');
+          ring.setAttribute('class', 'net-reduce-super');
+          ring.setAttribute('cx', comp.x); ring.setAttribute('cy', comp.y);
+          ring.setAttribute('r', 22);
+          ring.setAttribute('stroke', col);
+          resultsLayer.appendChild(ring);
+        }
+      });
+    };
+    drawDomain(data.ac_bus_reduction, false);
+    drawDomain(data.dc_bus_reduction, true);
+  }
+
   // Pan/select the canvas to a bus by its model id (used by result-table clicks).
   function panToBusId(busId) {
     const busMap = getCompBusMap();
@@ -4472,6 +4550,7 @@ const Canvas = (() => {
     loadFromSystemJson,
     showPowerFlowResults,
     showTopologyResults,
+    showNetworkReduction,
     showTopologyReconfigResults,
     clearResults,
     setVisualizationMode,
