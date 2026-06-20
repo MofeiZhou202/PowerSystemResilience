@@ -62,7 +62,7 @@
   <button id="moduleReliability"  class="module-btn" data-module="reliability">可靠性分析</button>
   <button id="moduleScenarioGeneration" class="module-btn" data-module="scenarioGeneration">场景生成</button>
   <button id="moduleResilience"   class="module-btn" data-module="resilience">弹性评估</button>
-  <button id="moduleCarbonAnalysis" class="module-btn" data-module="carbonAnalysis">碳排放分析</button>
+  <button id="moduleCarbonFlow"   class="module-btn" data-module="carbonFlow">碳流分析</button>
 </div>
 
 <!-- ===== Bar 3: Sub-Toolbar (contextual) ===== -->
@@ -99,6 +99,14 @@
     </label>
     <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
     <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
+  </div>
+  <!-- Carbon flow -->
+  <div class="sub-section" data-sub="carbonFlow" hidden>
+    <button id="btnImportCarbonFactors" class="toolbar-btn" title="导入发电机、静态电源和外部电网碳排放因子 JSON">碳因子导入</button>
+    <button id="btnCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次潮流结果运行静态碳流分析">静态碳流分析</button>
+    <button id="btnDynamicCarbonFlow" class="toolbar-btn run-btn" title="基于最近一次时序潮流或时序OPF结果运行动态碳流分析">动态碳流分析</button>
+    <span id="carbonFlowHint" class="sub-hint">静态碳流需先运行潮流；动态碳流需先运行时序潮流/OPF。</span>
+    <input type="file" id="fileImportCarbonFactors" accept=".json,application/json" style="display:none"/>
   </div>
   <!-- Short circuit -->
   <div class="sub-section" data-sub="shortCircuit" hidden>
@@ -424,7 +432,7 @@
         <div id="genTable" class="topo-table-wrap">
           <table id="genTableInner"><thead><tr>
             <th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th><th>Vg(pu)</th>
-            <th>Pmax</th><th>Pmin</th><th>Slack</th>
+            <th>Pmax</th><th>Pmin</th><th>EF(kg/MWh)</th><th>Slack</th>
           </tr></thead><tbody></tbody></table>
         </div>
       </div>
@@ -448,7 +456,7 @@
         <h4>外部电网 (External Grid)</h4>
         <div id="extGridTable" class="topo-table-wrap">
           <table id="extGridTableInner"><thead><tr>
-            <th>Bus</th><th>Vm(pu)</th><th>Va(°)</th><th>Ssc_max(MVA)</th>
+            <th>Bus</th><th>Vm(pu)</th><th>Va(°)</th><th>Ssc_max(MVA)</th><th>EF(kg/MWh)</th>
           </tr></thead><tbody></tbody></table>
         </div>
       </div>
@@ -677,6 +685,34 @@
           <div id="pfTrafo3wResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group powerFlow -->
+        <div class="result-group" data-result-group="carbonFlow">
+        <div class="topo-section" id="carbonSummarySection">
+          <h4 id="carbonSummaryTitle">碳流分析结果 — 概览</h4>
+          <div id="carbonSummary" class="results-summary"></div>
+        </div>
+        <div class="topo-section" id="staticCarbonBusSection">
+          <h4>碳流分析结果 — 节点碳强度</h4>
+          <div id="carbonPotentialChart" class="carbon-chart"></div>
+          <div id="carbonBusResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="staticCarbonLoadSection">
+          <h4>碳流分析结果 — 负荷碳排放</h4>
+          <div id="carbonLoadResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="staticCarbonBranchSection">
+          <h4>碳流分析结果 — 支路损耗碳排放</h4>
+          <div id="carbonBranchResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="carbonStorageSection" style="display:none">
+          <h4>碳流分析结果 — 储能</h4>
+          <div id="carbonStorageResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="dynamicCarbonSection" style="display:none">
+          <h4>动态碳流分析结果 — 时序汇总</h4>
+          <div id="dynamicCarbonResults" class="topo-table-wrap"></div>
+          <div id="dynamicCarbonCharts" class="dynamic-carbon-results"></div>
+        </div>
+        </div><!-- /result-group carbonFlow -->
         <div class="result-group" data-result-group="shortCircuit">
         <div class="topo-section">
           <h4>短路结果</h4>

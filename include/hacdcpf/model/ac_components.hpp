@@ -204,6 +204,8 @@ struct ExternalGrid {
   double ikq_ka{0.0};
   double x_r{0.0};
   bool controllable{true};
+
+  double emission_factor_tco2_mwh{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

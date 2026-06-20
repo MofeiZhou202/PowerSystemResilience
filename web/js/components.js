@@ -275,7 +275,8 @@ const COMP = (() => {
       cost_c2: 0.02, cost_c1: 20, cost_c0: 0,
       startup_cost: 0, shutdown_cost: 0,
       ramp_up_mw_min: 0, ramp_dn_mw_min: 0,
-      fuel_type: 'Thermal'
+      fuel_type: 'Thermal',
+      emission_factor_tco2_mwh: 0
     },
     load: {
       name: 'Load', bus: 0, p_mw: 50, q_mvar: 20,
@@ -310,7 +311,8 @@ const COMP = (() => {
       s_sc_max_mva: 10000, s_sc_min_mva: 8000,
       rx_max: 0.1, rx_min: 0.1,
       r_pu: 0, x_pu: 0, r0_pu: 0, x0_pu: 0,
-      vn_kv: 0, controllable: false, in_service: true
+      vn_kv: 0, emission_factor_tco2_mwh: 0,
+      controllable: false, in_service: true
     },
     storage: {
       name: 'ESS', bus: 0, p_mw: 0, q_mvar: 0,
@@ -348,6 +350,7 @@ const COMP = (() => {
       sgen_type: 'PV', p_rated_mw: 0, sn_mva: 0,
       pmax_mw: 0, pmin_mw: 0, qmax_mvar: 0, qmin_mvar: 0,
       scaling: 1.0, controllable: false, v_ref_pu: 0,
+      emission_factor_tco2_mwh: 0,
       in_service: true
     },
     vsc_converter: {
@@ -561,6 +564,7 @@ const COMP = (() => {
     pmin_mw: '最小有功(MW)', qmax_mvar: '最大无功(MVar)', qmin_mvar: '最小无功(MVar)',
     mbase_mva: '容量基准(MVA)', is_slack: '平衡节点', cost_c2: '成本系数c2',
     cost_c1: '成本系数c1', cost_c0: '成本系数c0', fuel_type: '燃料类型',
+    emission_factor_tco2_mwh: '碳排放因子(kg/MWh)',
     p_mw: '有功(MW)', q_mvar: '无功(MVar)', scaling: '缩放因子',
     model: '负荷模型', priority: '优先级',
     hv_bus: '高压侧母线', lv_bus: '低压侧母线', sn_mva: '额定容量(MVA)',

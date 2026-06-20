@@ -25,6 +25,11 @@ namespace {
 
 constexpr double kTol = 1e-9;
 
+double carbon_intensity_at(const std::vector<double>& w, int node_loc) {
+  if (node_loc < 0 || node_loc >= static_cast<int>(w.size())) return 0.0;
+  return w[static_cast<size_t>(node_loc)];
+}
+
 enum class EdgeKind {
   ACBranch,
   DCBranch,
@@ -101,6 +106,24 @@ struct FlowEdge {
   double loss_mw{0.0};
 };
 
+double edge_loss_carbon_intensity(const FlowEdge& e,
+                                  const std::vector<double>& w,
+                                  double loss_allocation_alpha) {
+  if (e.loss_mw <= kTol) return 0.0;
+  const double alpha = std::clamp(loss_allocation_alpha, 0.0, 1.0);
+  return alpha * carbon_intensity_at(w, e.from_node_loc) +
+         (1.0 - alpha) * carbon_intensity_at(w, e.to_node_loc);
+}
+
+const FlowEdge* find_edge_by_component(const std::vector<FlowEdge>& edges,
+                                       EdgeKind kind,
+                                       int component_index) {
+  for (const auto& e : edges) {
+    if (e.kind == kind && e.component_index == component_index) return &e;
+  }
+  return nullptr;
+}
+
 struct SourceBuildResult {
   std::vector<Source> sources;
   int slack_source_pos{-1};
@@ -156,20 +179,32 @@ int global_bus_loc(const HybridIDMap& id, bool is_dc, int bus) {
 std::vector<UnifiedLoad> build_unified_ac_loads(const ACSystem& ac,
                                                 const HybridIDMap& id) {
   std::vector<UnifiedLoad> out;
-  std::unordered_set<int> buses_with_explicit_load;
 
   for (const auto& ld : ac.loads) {
-    if (!ld.in_service || ld.p_mw <= kTol) continue;
+    const double p_mw = ld.p_mw * std::max(ld.scaling, 0.0);
+    const double q_mvar = ld.q_mvar * std::max(ld.scaling, 0.0);
+    if (!ld.in_service || std::abs(p_mw) <= kTol) continue;
     const int node_loc = global_bus_loc(id, false, ld.bus);
     if (node_loc < 0) continue;
-    out.push_back({ld.index, ld.bus, false, node_loc, ld.p_mw, ld.q_mvar});
-    buses_with_explicit_load.insert(ld.bus);
+    out.push_back({ld.index, ld.bus, false, node_loc, p_mw, q_mvar});
+  }
+
+  int synthetic_load_id = -100000;
+  for (const auto& cs : ac.charging_stations) {
+    if (!cs.in_service || cs.p_total_kw <= kTol) continue;
+    const int node_loc = global_bus_loc(id, false, cs.bus);
+    if (node_loc < 0) continue;
+    out.push_back({synthetic_load_id--,
+                   cs.bus,
+                   false,
+                   node_loc,
+                   cs.p_total_kw / 1000.0,
+                   cs.q_total_kvar / 1000.0});
   }
 
   int syn_id = -1;
   for (const auto& b : ac.buses) {
     if (b.pd_mw <= kTol) continue;
-    if (buses_with_explicit_load.count(b.index) != 0) continue;
     const int node_loc = global_bus_loc(id, false, b.index);
     if (node_loc < 0) continue;
     out.push_back({syn_id--, b.index, false, node_loc, b.pd_mw, b.qd_mvar});
@@ -184,10 +219,11 @@ std::vector<UnifiedLoad> build_unified_dc_loads(const DCSystem& dc,
   std::unordered_set<int> buses_with_explicit_load;
 
   for (const auto& ld : dc.loads) {
-    if (!ld.in_service || ld.p_mw <= kTol) continue;
+    const double p_mw = ld.p_mw * std::max(ld.scaling, 0.0);
+    if (!ld.in_service || std::abs(p_mw) <= kTol) continue;
     const int node_loc = global_bus_loc(id, true, ld.bus);
     if (node_loc < 0) continue;
-    out.push_back({ld.index, ld.bus, true, node_loc, ld.p_mw, 0.0});
+    out.push_back({ld.index, ld.bus, true, node_loc, p_mw, 0.0});
     buses_with_explicit_load.insert(ld.bus);
   }
 
@@ -509,6 +545,7 @@ SourceBuildResult build_sources(const HybridPowerSystem& sys,
                                 const HybridIDMap& id) {
   SourceBuildResult out;
   out.sources.reserve(sys.ac.generators.size() + sys.ac.static_generators.size() +
+                      sys.ac.external_grids.size() +
                       sys.ac.renewable_gens.size() + sys.ac.pv_systems.size() +
                       sys.dc.static_generators.size() +
                       sys.ac.storage.size() + sys.dc.storage.size());
@@ -526,6 +563,17 @@ SourceBuildResult build_sources(const HybridPowerSystem& sys,
     }
     out.sources.push_back({src_id++, g.bus, false, node_loc, p_mw,
                            g.emission_factor_tco2_mwh});
+  }
+
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    const int node_loc = global_bus_loc(id, false, eg.bus);
+    if (node_loc < 0) continue;
+    out.sources.push_back({src_id++, eg.bus, false, node_loc, 0.0,
+                           eg.emission_factor_tco2_mwh});
+    if (out.slack_source_pos < 0) {
+      out.slack_source_pos = static_cast<int>(out.sources.size()) - 1;
+    }
   }
 
   for (const auto& sg : sys.ac.static_generators) {
@@ -635,7 +683,7 @@ void reconstruct_slack_output(SourceBuildResult& source_build,
   }
 
   double total_load = 0.0;
-  for (const auto& ld : all_loads) total_load += ld.p_mw;
+  for (const auto& ld : all_loads) total_load += std::max(ld.p_mw, 0.0);
   total_load += sum_ac_shunt_load(sys.ac);
 
   double total_loss = 0.0;
@@ -652,6 +700,89 @@ void reconstruct_slack_output(SourceBuildResult& source_build,
                          sum_aggregate_net_injection(sys);
   source_build.sources[static_cast<size_t>(source_build.slack_source_pos)].p_mw =
       std::max(slack_p, 0.0);
+}
+
+std::vector<double> compute_node_net_source_requirement(
+    const HybridPowerSystem& sys,
+    int node_count,
+    const std::vector<UnifiedLoad>& loads,
+    const std::vector<FlowEdge>& edges,
+    double loss_allocation_alpha) {
+  std::vector<double> requirement(static_cast<size_t>(node_count), 0.0);
+
+  for (const auto& ld : loads) {
+    if (ld.p_mw <= kTol || ld.node_loc < 0 || ld.node_loc >= node_count) continue;
+    requirement[static_cast<size_t>(ld.node_loc)] += ld.p_mw;
+  }
+  for (size_t i = 0; i < sys.ac.buses.size() && i < requirement.size(); ++i) {
+    requirement[i] += std::max(sys.ac.buses[i].gs_mw, 0.0);
+  }
+
+  const double alpha = std::clamp(loss_allocation_alpha, 0.0, 1.0);
+  for (const auto& e : edges) {
+    if (e.from_node_loc < 0 || e.to_node_loc < 0 ||
+        e.from_node_loc >= node_count || e.to_node_loc >= node_count) {
+      continue;
+    }
+    const double p_recv = std::max(e.send_mw - e.loss_mw, 0.0);
+    requirement[static_cast<size_t>(e.from_node_loc)] +=
+        std::max(e.send_mw + (2.0 * alpha - 1.0) * e.loss_mw, 0.0);
+    requirement[static_cast<size_t>(e.to_node_loc)] +=
+        std::max((1.0 - alpha) * e.loss_mw, 0.0);
+    requirement[static_cast<size_t>(e.to_node_loc)] -=
+        std::max(p_recv + alpha * e.loss_mw, 0.0);
+  }
+
+  for (double& p : requirement) {
+    if (std::abs(p) < 1e-7) p = 0.0;
+  }
+  return requirement;
+}
+
+void calibrate_sources_to_power_flow(SourceBuildResult& source_build,
+                                     const HybridPowerSystem& sys,
+                                     const std::vector<UnifiedLoad>& loads,
+                                     const std::vector<FlowEdge>& edges,
+                                     int node_count,
+                                     const CarbonAnalysisOptions& opt) {
+  const std::vector<double> requirement =
+      compute_node_net_source_requirement(sys, node_count, loads, edges,
+                                          opt.loss_allocation_alpha);
+
+  std::vector<std::vector<size_t>> source_pos_by_node(static_cast<size_t>(node_count));
+  for (size_t i = 0; i < source_build.sources.size(); ++i) {
+    const int loc = source_build.sources[i].node_loc;
+    if (loc < 0 || loc >= node_count) continue;
+    source_pos_by_node[static_cast<size_t>(loc)].push_back(i);
+  }
+
+  for (int loc = 0; loc < node_count; ++loc) {
+    const auto& positions = source_pos_by_node[static_cast<size_t>(loc)];
+    if (positions.empty()) continue;
+    const double required = std::max(requirement[static_cast<size_t>(loc)], 0.0);
+    if (required <= kTol) {
+      for (const size_t pos : positions) source_build.sources[pos].p_mw = 0.0;
+      continue;
+    }
+
+    double scheduled_total = 0.0;
+    for (const size_t pos : positions) {
+      scheduled_total += std::max(source_build.sources[pos].p_mw, 0.0);
+    }
+
+    if (scheduled_total > kTol) {
+      const double scale = required / scheduled_total;
+      for (const size_t pos : positions) {
+        source_build.sources[pos].p_mw =
+            std::max(source_build.sources[pos].p_mw, 0.0) * scale;
+      }
+    } else {
+      source_build.sources[positions.front()].p_mw = required;
+      for (size_t i = 1; i < positions.size(); ++i) {
+        source_build.sources[positions[i]].p_mw = 0.0;
+      }
+    }
+  }
 }
 
 TracingResult proportional_tracing(const std::vector<Source>& sources,
@@ -959,7 +1090,7 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     return res;
   }
 
-  const double alpha = opt.loss_allocation_alpha;
+  const double alpha = std::clamp(opt.loss_allocation_alpha, 0.0, 1.0);
   Eigen::VectorXd Pin = Eigen::VectorXd::Zero(node_count);
   Eigen::VectorXd Pout = Eigen::VectorXd::Zero(node_count);
 
@@ -972,9 +1103,11 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
         e.from_node_loc >= node_count || e.to_node_loc >= node_count) {
       continue;
     }
-    const double transported = std::max(e.send_mw - alpha * e.loss_mw, 0.0);
+    const double p_recv = std::max(e.send_mw - e.loss_mw, 0.0);
+    const double transported = std::max(p_recv + alpha * e.loss_mw, 0.0);
     Pin(e.to_node_loc) += transported;
-    Pout(e.from_node_loc) += e.send_mw;
+    Pout(e.from_node_loc) +=
+        std::max(e.send_mw + (2.0 * alpha - 1.0) * e.loss_mw, 0.0);
     Pout(e.to_node_loc) += (1.0 - alpha) * e.loss_mw;
     if (transported > kTol) {
       in_triplets.emplace_back(e.to_node_loc, e.from_node_loc, transported);
@@ -995,17 +1128,6 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     const int loc = static_cast<int>(i);
     if (loc >= 0 && loc < node_count) {
       Pout(loc) += sys.ac.buses[i].gs_mw;
-    }
-  }
-
-  // Fix for transit nodes with injection but negligible outflow edges:
-  // If Pout(i) << Pin(i), power balance is broken (uniform DC voltages).
-  // Use Pin as the effective Pout so carbon intensity propagates correctly.
-  constexpr double kBalanceTol = 0.1;
-  constexpr double kMinPower = 0.01;
-  for (int i = 0; i < node_count; ++i) {
-    if (Pin(i) > kMinPower && Pout(i) < kBalanceTol * Pin(i)) {
-      Pout(i) = Pin(i);
     }
   }
 
@@ -1071,9 +1193,12 @@ MatrixResult solve_carbon_matrix(const HybridPowerSystem& sys,
     }
   }
 
-  const Eigen::VectorXd w = A_dense.colPivHouseholderQr().solve(b);
+  Eigen::VectorXd w = A_dense.colPivHouseholderQr().solve(b);
   if (!w.allFinite()) {
     return res;
+  }
+  for (int i = 0; i < node_count; ++i) {
+    w(i) = std::max(w(i), 0.0);
   }
 
   const Eigen::SparseMatrix<double> A_sparse = A_dense.sparseView();
@@ -1101,13 +1226,16 @@ void update_emissions_from_matrix(
     std::vector<EnergyRouterCarbonResult>& energy_router_carbon,
     std::vector<StorageCarbonResult>& storage_carbon,
     const std::vector<double>& w,
-    const HybridIDMap& id) {
+    const HybridIDMap& id,
+    const std::vector<FlowEdge>& edges,
+    double loss_allocation_alpha) {
   for (auto& lc : load_carbon) {
     auto it = id.ac_loc.find(lc.bus);
     if (it != id.ac_loc.end() && it->second >= 0 &&
         it->second < static_cast<int>(w.size())) {
       lc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(it->second)];
-      lc.total_emissions_tco2 = lc.carbon_intensity_tco2_mwh * lc.demand_mw;
+      lc.total_emissions_tco2 =
+          lc.carbon_intensity_tco2_mwh * std::max(lc.demand_mw, 0.0);
     }
   }
 
@@ -1117,53 +1245,44 @@ void update_emissions_from_matrix(
       int node_loc = id.n_ac + it->second;
       if (node_loc >= 0 && node_loc < static_cast<int>(w.size())) {
         lc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(node_loc)];
-        lc.total_emissions_tco2 = lc.carbon_intensity_tco2_mwh * lc.demand_mw;
+        lc.total_emissions_tco2 =
+            lc.carbon_intensity_tco2_mwh * std::max(lc.demand_mw, 0.0);
       }
     }
   }
 
   for (auto& bc : branch_carbon) {
-    auto it = id.ac_loc.find(bc.from_bus);
-    if (it != id.ac_loc.end() && it->second >= 0 &&
-        it->second < static_cast<int>(w.size())) {
-      bc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(it->second)];
+    if (const FlowEdge* edge =
+            find_edge_by_component(edges, EdgeKind::ACBranch, bc.branch_index)) {
+      bc.carbon_intensity_tco2_mwh =
+          edge_loss_carbon_intensity(*edge, w, loss_allocation_alpha);
       bc.total_emissions_tco2 = bc.carbon_intensity_tco2_mwh * bc.loss_mw;
     }
   }
 
   for (auto& bc : dc_branch_carbon) {
-    auto it = id.dc_loc.find(bc.from_bus);
-    if (it != id.dc_loc.end()) {
-      int node_loc = id.n_ac + it->second;
-      if (node_loc >= 0 && node_loc < static_cast<int>(w.size())) {
-        bc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(node_loc)];
-        bc.total_emissions_tco2 = bc.carbon_intensity_tco2_mwh * bc.loss_mw;
-      }
+    if (const FlowEdge* edge =
+            find_edge_by_component(edges, EdgeKind::DCBranch, bc.branch_index)) {
+      bc.carbon_intensity_tco2_mwh =
+          edge_loss_carbon_intensity(*edge, w, loss_allocation_alpha);
+      bc.total_emissions_tco2 = bc.carbon_intensity_tco2_mwh * bc.loss_mw;
     }
   }
 
   for (auto& vc : vsc_carbon) {
-    int node_loc = -1;
-    if (vc.ac_to_dc) {
-      auto it = id.ac_loc.find(vc.bus_ac);
-      if (it != id.ac_loc.end()) node_loc = it->second;
-    } else {
-      auto it = id.dc_loc.find(vc.bus_dc);
-      if (it != id.dc_loc.end()) node_loc = id.n_ac + it->second;
-    }
-    if (node_loc >= 0 && node_loc < static_cast<int>(w.size())) {
-      vc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(node_loc)];
+    if (const FlowEdge* edge =
+            find_edge_by_component(edges, EdgeKind::VSC, vc.converter_index)) {
+      vc.carbon_intensity_tco2_mwh =
+          edge_loss_carbon_intensity(*edge, w, loss_allocation_alpha);
       vc.total_emissions_tco2 = vc.carbon_intensity_tco2_mwh * vc.loss_mw;
     }
   }
 
   for (auto& dc : dcdc_carbon) {
-    int node_loc = -1;
-    int source_bus = dc.input_to_output ? dc.bus_in : dc.bus_out;
-    auto it = id.dc_loc.find(source_bus);
-    if (it != id.dc_loc.end()) node_loc = id.n_ac + it->second;
-    if (node_loc >= 0 && node_loc < static_cast<int>(w.size())) {
-      dc.carbon_intensity_tco2_mwh = w[static_cast<size_t>(node_loc)];
+    if (const FlowEdge* edge =
+            find_edge_by_component(edges, EdgeKind::DCDC, dc.converter_index)) {
+      dc.carbon_intensity_tco2_mwh =
+          edge_loss_carbon_intensity(*edge, w, loss_allocation_alpha);
       dc.total_emissions_tco2 = dc.carbon_intensity_tco2_mwh * dc.loss_mw;
     }
   }
@@ -1171,8 +1290,21 @@ void update_emissions_from_matrix(
   for (auto& er : energy_router_carbon) {
     if (er.loss_mw <= kTol) {
       er.total_emissions_tco2 = 0.0;
+      er.carbon_intensity_tco2_mwh = 0.0;
+      continue;
     }
-    // Keep existing carbon_intensity from tracing; total_emissions updated above
+    double weighted_emissions = 0.0;
+    for (const auto& e : edges) {
+      if (e.kind != EdgeKind::EnergyRouter ||
+          e.component_index != er.router_index || e.loss_mw <= kTol) {
+        continue;
+      }
+      weighted_emissions +=
+          edge_loss_carbon_intensity(e, w, loss_allocation_alpha) * e.loss_mw;
+    }
+    er.total_emissions_tco2 = weighted_emissions;
+    er.carbon_intensity_tco2_mwh =
+        (er.loss_mw > kTol) ? (er.total_emissions_tco2 / er.loss_mw) : 0.0;
   }
 
   for (auto& sc : storage_carbon) {
@@ -1220,10 +1352,12 @@ EmissionsSummary compute_tracing_summary(
   return s;
 }
 
-EmissionsSummary compute_matrix_summary(const std::vector<Source>& sources,
+EmissionsSummary compute_matrix_summary(const HybridPowerSystem& sys,
+                                        const std::vector<Source>& sources,
                                         const std::vector<UnifiedLoad>& loads,
                                         const std::vector<FlowEdge>& edges,
-                                        const std::vector<double>& w) {
+                                        const std::vector<double>& w,
+                                        double loss_allocation_alpha) {
   EmissionsSummary s;
   for (const auto& src : sources) {
     s.total_generation_emissions_tco2 += src.ef * src.p_mw;
@@ -1231,15 +1365,19 @@ EmissionsSummary compute_matrix_summary(const std::vector<Source>& sources,
 
   for (const auto& ld : loads) {
     if (ld.node_loc < 0 || ld.node_loc >= static_cast<int>(w.size())) continue;
-    s.total_load_emissions_tco2 += w[static_cast<size_t>(ld.node_loc)] * ld.p_mw;
+    s.total_load_emissions_tco2 +=
+        w[static_cast<size_t>(ld.node_loc)] * std::max(ld.p_mw, 0.0);
+  }
+
+  for (size_t i = 0; i < sys.ac.buses.size() && i < w.size(); ++i) {
+    const double shunt_load_mw = std::max(sys.ac.buses[i].gs_mw, 0.0);
+    s.total_load_emissions_tco2 += w[i] * shunt_load_mw;
   }
 
   for (const auto& e : edges) {
-    if (e.loss_mw <= kTol || e.from_node_loc < 0 ||
-        e.from_node_loc >= static_cast<int>(w.size())) {
-      continue;
-    }
-    s.total_loss_emissions_tco2 += w[static_cast<size_t>(e.from_node_loc)] * e.loss_mw;
+    if (e.loss_mw <= kTol) continue;
+    s.total_loss_emissions_tco2 +=
+        edge_loss_carbon_intensity(e, w, loss_allocation_alpha) * e.loss_mw;
   }
 
   s.balance_error_tco2 = s.total_generation_emissions_tco2 -
@@ -1278,6 +1416,8 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
   const auto edges = build_directed_flows(projected, pf_result, id);
   auto source_build = build_sources(projected, id);
   reconstruct_slack_output(source_build, projected, all_loads, edges);
+  calibrate_sources_to_power_flow(source_build, projected, all_loads, edges,
+                                  node_count, opt);
   const auto& sources = source_build.sources;
 
   if (opt.verbose) {
@@ -1450,7 +1590,9 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
           {projected.dc.buses[i].index,
            mat.w[projected.ac.buses.size() + i]});
     }
-    result.matrix_summary = compute_matrix_summary(sources, all_loads, edges, mat.w);
+    result.matrix_summary = compute_matrix_summary(projected, sources, all_loads,
+                                                   edges, mat.w,
+                                                   opt.loss_allocation_alpha);
 
     // Update all carbon results to use matrix-solved intensities
     update_emissions_from_matrix(
@@ -1458,7 +1600,15 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
         result.branch_carbon, result.dc_branch_carbon,
         result.vsc_carbon, result.dcdc_carbon,
         result.energy_router_carbon, result.storage_carbon,
-        mat.w, id);
+        mat.w, id, edges, opt.loss_allocation_alpha);
+  }
+
+  for (const auto& sc : result.storage_carbon) {
+    if (sc.p_mw < -kTol) {
+      result.total_storage_charge_emissions_tco2 += sc.total_emissions_tco2;
+    } else if (sc.p_mw > kTol) {
+      result.total_storage_discharge_emissions_tco2 += sc.total_emissions_tco2;
+    }
   }
 
   // Combine AC and DC load carbon for tracing summary
@@ -1478,11 +1628,8 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
                                                    result.energy_router_carbon);
 
   // Include storage charging emissions in load total
-  for (const auto& sc : result.storage_carbon) {
-    if (sc.p_mw < -kTol) {
-      result.tracing_summary.total_load_emissions_tco2 += sc.total_emissions_tco2;
-    }
-  }
+  result.tracing_summary.total_load_emissions_tco2 +=
+      result.total_storage_charge_emissions_tco2;
 
   // Recompute balance error after including storage
   result.tracing_summary.balance_error_tco2 =
@@ -1524,4 +1671,3 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
 }
 
 }  // namespace hacdcpf::analysis
-

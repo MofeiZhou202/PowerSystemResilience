@@ -46,9 +46,10 @@ const App = (() => {
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
   let _lastTspfData = null;
+  let _lastCarbonData = null;
+  let _lastDynamicCarbonData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
-  let _lastCarbonData = null;
   let _lastScenarioGenerationData = null;
   let _lastTopoAnalysisData = null;
   let _lastNetReductionData = null;
@@ -56,6 +57,14 @@ const App = (() => {
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
+
+  function invalidateAnalysisResults(reason = '') {
+    _lastPfData = null;
+    _lastTspfData = null;
+    _lastCarbonData = null;
+    _lastDynamicCarbonData = null;
+    if (reason) log(reason, 'info');
+  }
 
   // ========== Per-module result group switching ==========
   // Each calc display function calls setActiveResultGroup(name). CSS in
@@ -226,6 +235,7 @@ const App = (() => {
           const sys = JSON.parse(data._raw_json);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
+          invalidateAnalysisResults();
           log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
         } catch (e) {
           log(`JSON解析失败: ${e.message}`, 'error');
@@ -253,6 +263,7 @@ const App = (() => {
           const sys = JSON.parse(data._raw_json);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
+          invalidateAnalysisResults('算例已变更，旧潮流和碳流结果已失效');
           log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
         } catch (e) {
           log(`JSON解析失败: ${e.message}`, 'error');
@@ -272,6 +283,7 @@ const App = (() => {
         const sys = JSON.parse(data._raw_json);
         Canvas.loadFromSystemJson(sys);
         _canvasDirty = false;  // backend already has the correct system
+        invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
         log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
       } catch (e) {
         log(`JSON解析失败: ${e.message}`, 'error');
@@ -332,6 +344,7 @@ const App = (() => {
     if (data) {
       Canvas.clearAll();
       _canvasDirty = false;  // backend already has the empty system
+      invalidateAnalysisResults('系统已清空，旧潮流和碳流结果已失效');
       log('已创建空白系统', 'success');
       setStatus('就绪');
     } else {
@@ -424,6 +437,7 @@ const App = (() => {
             Canvas.loadFromSystemJson(sys);
           }
           _canvasDirty = false;  // backend already has the imported system
+          invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
           log('已导入系统JSON', 'success');
         }
       } catch (err) {
@@ -454,7 +468,750 @@ const App = (() => {
       return false;
     }
     _canvasDirty = false;
+    invalidateAnalysisResults('网络已同步，旧潮流和碳流结果已失效');
     return true;
+  }
+
+  function emissionFactorFromInput(row, defaultValue = 0) {
+    if (!row || typeof row !== 'object') return defaultValue;
+    const value = row.emission_factor_tco2_mwh ?? row.co2_emission_rate ?? row.emission_factor;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : defaultValue;
+  }
+
+  function emissionFactorProfileFromInput(row, scale = 1.0) {
+    if (!row || typeof row !== 'object') return null;
+    const values = row.emission_factor_profile_tco2_mwh ??
+      row.emission_factor_tco2_mwh_profile ??
+      row.co2_emission_rate_profile ??
+      row.emission_factor_profile;
+    if (!Array.isArray(values)) return null;
+    const profile = values
+      .map(v => Number(v) * scale)
+      .filter(v => Number.isFinite(v));
+    return profile.length ? profile : null;
+  }
+
+  function carbonFactorScale(unit) {
+    const u = String(unit || 'kg/MWh').toLowerCase();
+    if (u.includes('kg') && u.includes('mwh')) return 0.001;
+    if (u.includes('kg') && u.includes('kwh')) return 1.0;
+    return 1.0;
+  }
+
+  function carbonFactorDisplay(value) {
+    return carbonIntensityDisplay(value);
+  }
+
+  function carbonFactorInputValue(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num / 1000 : 0;
+  }
+
+  function carbonIntensityUnit() {
+    return 'kg/MWh';
+  }
+
+  function carbonIntensityDisplay(value) {
+    // Backend stores tCO2/MWh; the UI displays kg/MWh.
+    const num = Number(value);
+    return Number.isFinite(num) ? num * 1000 : 0;
+  }
+
+  function setCarbonHint(message, level = 'info') {
+    const hint = document.getElementById('carbonFlowHint');
+    if (!hint) return;
+    hint.textContent = message;
+    hint.className = `sub-hint sub-hint-${level}`;
+  }
+
+  function carbonPotentialColor(value, maxValue) {
+    const t = Math.max(0, Math.min(1, Number(value) / Math.max(Number(maxValue) || 0, 1e-9)));
+    if (t <= 0.5) {
+      const k = t / 0.5;
+      const r = Math.round(46 + (241 - 46) * k);
+      const g = Math.round(204 + (196 - 204) * k);
+      const b = Math.round(113 + (15 - 113) * k);
+      return `rgb(${r},${g},${b})`;
+    }
+    const k = (t - 0.5) / 0.5;
+    const r = Math.round(241 + (231 - 241) * k);
+    const g = Math.round(196 + (76 - 196) * k);
+    const b = Math.round(15 + (60 - 15) * k);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function carbonPlotTheme(title = '') {
+    return {
+      title,
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#dcdfe4', size: 11 },
+      xaxis: { gridcolor: '#3e4451' },
+      yaxis: { gridcolor: '#3e4451' },
+      margin: { l: 55, r: 20, t: 38, b: 45 },
+      legend: { orientation: 'h', y: -0.25 },
+    };
+  }
+
+  function componentBusIndex(compId) {
+    const busMap = Canvas.getCompBusMap().ac || {};
+    for (const conn of Canvas.state.connections || []) {
+      let otherId = null;
+      if (conn.from.compId === compId) otherId = conn.to.compId;
+      if (conn.to.compId === compId) otherId = conn.from.compId;
+      if (otherId === null) continue;
+      for (const [bus, id] of Object.entries(busMap)) {
+        if (Number(id) === otherId) return Number(bus);
+      }
+    }
+    return null;
+  }
+
+  function normalizeCarbonFactorRows(input, key) {
+    const rows = input?.[key];
+    if (Array.isArray(rows)) return rows;
+    if (rows && typeof rows === 'object') {
+      return Object.entries(rows).map(([index, value]) => (
+        value && typeof value === 'object'
+          ? { index: Number(index), ...value }
+          : { index: Number(index), emission_factor: value }
+      ));
+    }
+    return [];
+  }
+
+  function carbonIndexBase(input) {
+    if (Number(input?.index_base) === 1) return 1;
+    const numbering = String(input?.numbering || '').toLowerCase();
+    return numbering.includes('one') || numbering.includes('1') ? 1 : 0;
+  }
+
+  function applyRowsToComponents(rows, type, scale, indexBase = 0) {
+    const components = Canvas.state.components.filter(c => c.type === type);
+    let updated = 0;
+    rows.forEach(row => {
+      if (!row || typeof row !== 'object') return;
+      const ef = emissionFactorFromInput(row, NaN) * scale;
+      if (!Number.isFinite(ef)) return;
+      const profile = emissionFactorProfileFromInput(row, scale);
+      components.forEach((comp, pos) => {
+        const p = comp.params || {};
+        const rowIndex = Number(row.index);
+        const normalizedIndex = Number.isFinite(rowIndex) ? rowIndex - indexBase : NaN;
+        const componentIndex = Number(p.index);
+        const rowBus = Number(row.bus);
+        const bus = componentBusIndex(comp.id);
+        const hasIndex = Number.isFinite(normalizedIndex);
+        const hasName = Boolean(row.name);
+        const hasBus = Number.isFinite(rowBus);
+        const indexMatches = hasIndex && (
+          normalizedIndex === pos ||
+          (Number.isFinite(componentIndex) && normalizedIndex === componentIndex) ||
+          (Number.isFinite(componentIndex) && rowIndex === componentIndex)
+        );
+        const nameMatches = hasName && p.name && String(row.name) === String(p.name);
+        const busMatches = hasBus && bus === rowBus;
+        if (!indexMatches && !nameMatches && !busMatches) return;
+        p.emission_factor_tco2_mwh = ef;
+        if (profile) p.emission_factor_profile_tco2_mwh = profile;
+        else delete p.emission_factor_profile_tco2_mwh;
+        if (type === 'static_generator') p.co2_emission_rate = ef;
+        updated++;
+      });
+    });
+    return updated;
+  }
+
+  function collectCarbonFactorsFromCanvas() {
+    const factors = { generators: [], static_generators: [], external_grids: [] };
+    const maps = Canvas.getCompBusMap();
+    Canvas.state.components.forEach((comp) => {
+      const p = comp.params || {};
+      if (comp.type === 'generator') {
+        const entries = Object.entries(maps.gen || {});
+        const pos = entries.findIndex(([, id]) => Number(id) === comp.id);
+        factors.generators.push({
+          index: pos >= 0 ? pos : factors.generators.length,
+          bus: componentBusIndex(comp.id) || Number(p.bus) || 0,
+          name: p.name || '',
+          emission_factor_tco2_mwh: Number(p.emission_factor_tco2_mwh || p.co2_emission_rate || 0),
+        });
+      } else if (comp.type === 'static_generator') {
+        const entries = Object.entries(maps.sgen || {});
+        const pos = entries.findIndex(([, id]) => Number(id) === comp.id);
+        factors.static_generators.push({
+          index: pos >= 0 ? pos : factors.static_generators.length,
+          bus: componentBusIndex(comp.id) || Number(p.bus) || 0,
+          name: p.name || '',
+          emission_factor_tco2_mwh: Number(p.emission_factor_tco2_mwh || p.co2_emission_rate || 0),
+        });
+      } else if (comp.type === 'external_grid') {
+        const entries = Object.entries(maps.extGrid || {});
+        const pos = entries.findIndex(([, id]) => Number(id) === comp.id);
+        factors.external_grids.push({
+          index: pos >= 0 ? pos : factors.external_grids.length,
+          bus: componentBusIndex(comp.id) || Number(p.bus) || 0,
+          name: p.name || '',
+          emission_factor_tco2_mwh: Number(p.emission_factor_tco2_mwh || p.co2_emission_rate || 0),
+        });
+        if (Array.isArray(p.emission_factor_profile_tco2_mwh)) {
+          factors.external_grids[factors.external_grids.length - 1].emission_factor_profile_tco2_mwh =
+            p.emission_factor_profile_tco2_mwh.map(Number).filter(Number.isFinite);
+        }
+      }
+    });
+    return factors;
+  }
+
+  async function syncCarbonFactorsOnly() {
+    const factors = collectCarbonFactorsFromCanvas();
+    const data = await apiPost('/api/session/update_carbon_factors', factors);
+    if (!data) return false;
+    log(`碳排放因子已同步：发电机 ${data.updated_generators || 0}，外部电网 ${data.updated_external_grids || 0}`, 'success');
+    return true;
+  }
+
+  async function importCarbonFactorsJson(file) {
+    try {
+      const wasDirty = _canvasDirty;
+      const text = await file.text();
+      const input = JSON.parse(text);
+      const scale = carbonFactorScale(input.unit || input.units);
+      const indexBase = carbonIndexBase(input);
+      const genRows = normalizeCarbonFactorRows(input, 'generators');
+      const sgenRows = normalizeCarbonFactorRows(input, 'static_generators');
+      const gridRows = normalizeCarbonFactorRows(input, 'external_grids');
+      const nGen = applyRowsToComponents(genRows, 'generator', scale, indexBase);
+      const nSgen = applyRowsToComponents(sgenRows, 'static_generator', scale, indexBase);
+      const nGrid = applyRowsToComponents(gridRows, 'external_grid', scale, indexBase);
+      if (nGen + nSgen + nGrid === 0) {
+        log('碳排放因子 JSON 未匹配到当前画布元件，请检查 index、bus 或 name', 'warn');
+        return;
+      }
+      _canvasDirty = wasDirty;
+      updateTopologyTables();
+      if (Canvas.state.selectedId !== null) onSelectionChanged(Canvas.state.selectedId);
+      await syncCarbonFactorsOnly();
+      log(`已导入碳排放因子 JSON：发电机 ${nGen}，静态电源 ${nSgen}，外部电网 ${nGrid}`, 'success');
+    } catch (e) {
+      log(`导入碳排放因子失败：${e.message || e}`, 'error');
+    }
+  }
+
+  function showCarbonResults(data, dynamic = false) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('carbonFlow');
+    document.getElementById('carbonSummaryTitle').textContent = '静态碳流分析结果 — 概览';
+    document.getElementById('staticCarbonBusSection').style.display = '';
+    document.getElementById('staticCarbonLoadSection').style.display = '';
+    document.getElementById('staticCarbonBranchSection').style.display = '';
+
+    const summary = data.matrix_summary || data.tracing_summary || {};
+    const balance = Number(summary.balance_error_pct || 0);
+    const balanceTco2 = Number(summary.balance_error_tco2 || (
+      (summary.total_generation_emissions_tco2 || 0) -
+      (summary.total_load_emissions_tco2 || 0) -
+      (summary.total_loss_emissions_tco2 || 0)
+    ));
+    document.getElementById('carbonSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">来源</span>
+        <span class="result-value">${escapeHtml(data.pf_source || (dynamic ? 'time_series_pf' : 'last_pf'))}</span></div>
+      <div class="result-item"><span class="result-label">矩阵法求解</span>
+        <span class="result-value ${data.matrix_solved === false ? 'result-failed' : 'result-converged'}">${data.matrix_solved === false ? '否' : '是'}</span></div>
+      <div class="result-item"><span class="result-label">源端碳排(tCO2)</span>
+        <span class="result-value">${Number(summary.total_generation_emissions_tco2 || 0).toFixed(4)}</span></div>
+      <div class="result-item"><span class="result-label">负荷碳排(tCO2)</span>
+        <span class="result-value">${Number(summary.total_load_emissions_tco2 || 0).toFixed(4)}</span></div>
+      <div class="result-item"><span class="result-label">损耗碳排(tCO2)</span>
+        <span class="result-value">${Number(summary.total_loss_emissions_tco2 || 0).toFixed(4)}</span></div>
+      <div class="result-item"><span class="result-label">守恒误差</span>
+        <span class="result-value ${Math.abs(balance) < 1e-3 ? 'result-converged' : 'result-failed'}">${balanceTco2.toExponential(3)} tCO2 / ${balance.toExponential(3)}%</span></div>
+    `;
+
+    const busRows = [
+      ...(data.bus_carbon || []).map(b => ({ ...b, is_dc: false })),
+      ...(data.dc_bus_carbon || []).map(b => ({ ...b, is_dc: true })),
+    ];
+    renderCarbonPotentialChart(busRows);
+    Canvas.clearCarbonPotentialResults?.();
+
+    let busHtml = `<table><thead><tr><th>类型</th><th>Bus</th><th>碳势/碳强度(${carbonIntensityUnit()})</th><th>有效消纳(MW)</th><th>状态</th></tr></thead><tbody>`;
+    busRows.forEach(b => {
+      const potentialValid = b.carbon_potential_valid !== false;
+      const hasSink = Number(b.sink_power_mw || 0) > 1e-9;
+      const status = !potentialValid
+        ? '碳势病态，图表排除'
+        : (hasSink ? '有本地消纳' : '无本地消纳/电源或过境节点');
+      const statusClass = potentialValid ? 'result-converged' : 'result-failed';
+      busHtml += `<tr><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.bus_index}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Number(b.sink_power_mw || 0).toFixed(6)}</td><td class="${statusClass}">${status}</td></tr>`;
+    });
+    busHtml += busRows.length ? '</tbody></table>' : '<tr><td colspan="5">暂无节点碳强度结果</td></tr></tbody></table>';
+    document.getElementById('carbonBusResults').innerHTML = busHtml;
+
+    const loadRows = [
+      ...(data.load_carbon || []).map(l => ({ ...l, is_dc: false })),
+      ...(data.dc_load_carbon || []).map(l => ({ ...l, is_dc: true })),
+    ];
+    let loadHtml = `<table><thead><tr><th>类型</th><th>Load</th><th>Bus</th><th>P(MW)</th><th>碳强度(${carbonIntensityUnit()})</th><th>碳排(tCO2)</th></tr></thead><tbody>`;
+    loadRows.forEach(l => {
+      const demand = Number(l.demand_mw || 0);
+      const emissions = Math.max(0, Number(l.total_emissions_tco2 || 0));
+      loadHtml += `<tr><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${l.load_index}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
+    });
+    loadHtml += loadRows.length ? '</tbody></table>' : '<tr><td colspan="6">暂无负荷碳排放结果</td></tr></tbody></table>';
+    document.getElementById('carbonLoadResults').innerHTML = loadHtml;
+
+    const branchRows = [
+      ...(data.branch_carbon || []).map(b => ({ ...b, is_dc: false })),
+      ...(data.dc_branch_carbon || []).map(b => ({ ...b, is_dc: true })),
+    ];
+    let branchHtml = `<table><thead><tr><th>类型</th><th>Branch</th><th>From</th><th>To</th><th>Loss(MW)</th><th>碳强度(${carbonIntensityUnit()})</th><th>碳排(tCO2)</th></tr></thead><tbody>`;
+    branchRows.forEach(b => {
+      branchHtml += `<tr><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.branch_index}</td><td>${b.from_bus}</td><td>${b.to_bus}</td><td>${Math.max(0, Number(b.loss_mw || 0)).toFixed(6)}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(b.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
+    });
+    branchHtml += branchRows.length ? '</tbody></table>' : '<tr><td colspan="7">暂无支路损耗碳排放结果</td></tr></tbody></table>';
+    document.getElementById('carbonBranchResults').innerHTML = branchHtml;
+
+    const storageSec = document.getElementById('carbonStorageSection');
+    const storageRows = data.storage_carbon || data.terminal_storage_states || [];
+    if (storageRows.length) {
+      storageSec.style.display = '';
+      let html = `<table><thead><tr><th>类型</th><th>Storage</th><th>Bus</th><th>P(MW)</th><th>SOC</th><th>库存碳强度(${carbonIntensityUnit()})</th><th>本时段碳排(tCO2)</th></tr></thead><tbody>`;
+      storageRows.forEach(s => {
+        html += `<tr><td>${s.is_dc ? 'DC' : 'AC'}</td><td>${s.storage_index}</td><td>${s.bus}</td><td>${Number(s.p_mw || 0).toFixed(4)}</td><td>${Number(s.soc || 0).toFixed(4)}</td><td>${carbonIntensityDisplay(s.soc_carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(s.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      document.getElementById('carbonStorageResults').innerHTML = html;
+    } else {
+      storageSec.style.display = 'none';
+      document.getElementById('carbonStorageResults').innerHTML = '';
+    }
+
+    document.getElementById('dynamicCarbonSection').style.display = 'none';
+    document.getElementById('dynamicCarbonResults').innerHTML = '';
+    switchTab('results');
+  }
+
+  function renderCarbonPotentialChart(busRows) {
+    const div = document.getElementById('carbonPotentialChart');
+    if (!div) return;
+    const validRows = (busRows || []).filter(b =>
+      b.carbon_potential_valid !== false &&
+      Number.isFinite(Number(b.carbon_intensity_tco2_mwh)));
+    if (!validRows.length || typeof Plotly === 'undefined') {
+      div.innerHTML = '<p class="empty-hint">暂无节点碳势图数据</p>';
+      return;
+    }
+    const rows = [...validRows].sort((a, b) =>
+      Number(b.carbon_intensity_tco2_mwh || 0) - Number(a.carbon_intensity_tco2_mwh || 0));
+    const values = rows.map(b => carbonIntensityDisplay(b.carbon_intensity_tco2_mwh));
+    const maxValue = values.reduce((mx, v) => Math.max(mx, v), 0);
+    Plotly.newPlot(div, [{
+      x: rows.map(b => `${b.is_dc ? 'DC' : 'AC'}-${b.bus_index}`),
+      y: values,
+      type: 'bar',
+      marker: {
+        color: values.map(v => carbonPotentialColor(v, maxValue)),
+      },
+      hovertemplate: `%{x}<br>碳势 %{y:.3f} ${carbonIntensityUnit()}<extra></extra>`,
+    }], {
+      title: '节点碳势图',
+      margin: { l: 55, r: 35, t: 35, b: 70 },
+      xaxis: { title: '节点', tickangle: -45 },
+      yaxis: { title: carbonIntensityUnit(), rangemode: 'tozero' },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#dcdfe4' },
+    }, { responsive: true, displaylogo: false });
+  }
+
+  async function runCarbonFlow() {
+    if (!_lastPfData) {
+      const msg = '请先运行潮流计算，并确保潮流收敛后再进行静态碳流分析。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('需先运行潮流', 'error');
+      return;
+    }
+    if (!_lastPfData.converged) {
+      const msg = '最近一次潮流计算未收敛，无法进行静态碳流分析。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('潮流未收敛', 'error');
+      return;
+    }
+    if (_canvasDirty) {
+      const msg = '当前网络已修改，最近一次潮流结果已失效。请重新运行潮流计算。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('需重跑潮流', 'error');
+      return;
+    }
+    setStatus('碳流分析中...', 'busy');
+    await syncCarbonFactorsOnly();
+    const data = await apiPost('/api/session/run_carbon', {});
+    if (!data) {
+      setStatus('碳流分析失败', 'error');
+      return;
+    }
+    _lastCarbonData = data;
+    showCarbonResults(data);
+    const summary = data.matrix_summary || data.tracing_summary || {};
+    log(`碳流分析完成：负荷 ${Number(summary.total_load_emissions_tco2 || 0).toFixed(4)} tCO2，损耗 ${Number(summary.total_loss_emissions_tco2 || 0).toFixed(4)} tCO2`, 'success');
+    setCarbonHint('静态碳流已基于最近一次收敛潮流结果完成。', 'ok');
+    setStatus('碳流分析完成');
+  }
+
+  async function runDynamicCarbonFlow() {
+    if (!_lastTspfData) {
+      const msg = '请先在“时序潮流”模块运行时序潮流或时序OPF，再进行动态碳流分析。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('需先运行时序潮流', 'error');
+      return;
+    }
+    if (Number(_lastTspfData.num_converged || 0) <= 0) {
+      const msg = '最近一次时序潮流没有收敛时段，无法进行动态碳流分析。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('时序潮流未收敛', 'error');
+      return;
+    }
+    if (_canvasDirty) {
+      const msg = '当前网络已修改，最近一次时序潮流结果已失效。请重新运行时序潮流/OPF。';
+      setCarbonHint(msg, 'warn');
+      log(msg, 'warn');
+      setStatus('需重跑时序潮流', 'error');
+      return;
+    }
+    setStatus('动态碳流分析中...', 'busy');
+    await syncCarbonFactorsOnly();
+    const data = await apiPost('/api/session/run_dynamic_carbon', {
+      use_last_tspf: true,
+    });
+    if (!data) {
+      setStatus('动态碳流分析失败', 'error');
+      return;
+    }
+    _lastDynamicCarbonData = data;
+    showDynamicCarbonResults(data);
+    log(`动态碳流分析完成：${data.num_pf_converged}/${data.num_steps} 时段收敛，总负荷碳排 ${Number(data.total_load_emissions_tco2 || 0).toFixed(4)} tCO2`, 'success');
+    setCarbonHint(`动态碳流已基于最近一次${data.run_opf ? '时序OPF' : '时序潮流'}结果完成。`, 'ok');
+    setStatus('动态碳流分析完成');
+  }
+
+  function buildDynamicBusRoleMap() {
+    const roleMap = new Map();
+    const add = (isDc, bus, role) => {
+      const key = `${isDc ? 'dc' : 'ac'}:${Number(bus)}`;
+      if (!Number.isFinite(Number(bus))) return;
+      if (!roleMap.has(key)) roleMap.set(key, new Set());
+      roleMap.get(key).add(role);
+    };
+
+    try {
+      const sys = Canvas.buildSystemJson();
+      (sys.ac?.generators || []).forEach(g => add(false, g.bus, '电源'));
+      (sys.ac?.static_generators || []).forEach(g => add(false, g.bus, '电源'));
+      (sys.ac?.renewable_gens || []).forEach(g => add(false, g.bus, '电源'));
+      (sys.ac?.pv_systems || []).forEach(g => add(false, g.bus, '电源'));
+      (sys.ac?.external_grids || []).forEach(g => add(false, g.bus, '外部电网'));
+      (sys.dc?.static_generators || []).forEach(g => add(true, g.bus, '电源'));
+      (sys.dc?.pv_arrays || []).forEach(g => add(true, g.bus, '电源'));
+
+      (sys.ac?.loads || []).forEach(l => add(false, l.bus, '负荷'));
+      (sys.ac?.flexible_loads || []).forEach(l => add(false, l.bus, '负荷'));
+      (sys.ac?.asymmetric_loads || []).forEach(l => add(false, l.bus, '负荷'));
+      (sys.ac?.chargers || []).forEach(l => add(false, l.bus, '负荷'));
+      (sys.ac?.charging_stations || []).forEach(l => add(false, l.bus, '负荷'));
+      (sys.dc?.loads || []).forEach(l => add(true, l.bus, '负荷'));
+
+      (sys.ac?.storage || []).forEach(s => add(false, s.bus, '储能'));
+      (sys.dc?.storage || []).forEach(s => add(true, s.bus, '储能'));
+      (sys.mobile_storage || []).forEach(s => add(false, s.bus, '移动储能'));
+    } catch (_) {
+      // Canvas data is only used for labeling. Dynamic result rendering can continue without it.
+    }
+    return roleMap;
+  }
+
+  function dynamicBusLabel(row, roleMap = buildDynamicBusRoleMap()) {
+    const isDc = !!row?.is_dc;
+    const bus = Number(row?.bus_index);
+    const roles = [...(roleMap.get(`${isDc ? 'dc' : 'ac'}:${bus}`) || new Set())];
+    if (!Number(row?.energy_mwh || 0)) roles.push('零消纳');
+    return `${isDc ? 'DC' : 'AC'}-${bus}${roles.length ? ` ${roles.join('/')}` : ' 节点'}`;
+  }
+
+  function numericSeries(values, scale = 1) {
+    return (values || []).map(v => {
+      const num = Number(v);
+      return Number.isFinite(num) ? num * scale : null;
+    });
+  }
+
+  function dynamicBalanceSummary(data) {
+    const gen = Number(data.total_generation_emissions_tco2 || 0);
+    const load = Number(data.total_load_emissions_tco2 || 0);
+    const loss = Number(data.total_loss_emissions_tco2 || 0);
+    const charge = Number(data.total_storage_charge_emissions_tco2 || 0);
+    const discharge = Number(data.total_storage_discharge_emissions_tco2 || 0);
+    const basic = gen - load - loss;
+    const storageAware = gen - load - loss - charge + discharge;
+    return {
+      gen,
+      load,
+      loss,
+      charge,
+      discharge,
+      basic,
+      storageDelta: charge - discharge,
+      storageAware,
+      basicPct: Math.abs(basic) / Math.max(Math.abs(gen), 1e-12) * 100,
+      storageAwarePct: Math.abs(storageAware) / Math.max(Math.abs(gen), 1e-12) * 100,
+    };
+  }
+
+  function storageDispatchSourceLabel(data) {
+    if (data.run_opf) return `OPF (${Number(data.num_opf_converged || 0)}/${Number(data.num_steps || 0)} 时段收敛)`;
+    if (data.skip_uc === false && data.uc_feasible === true) return `UC/SCUC (${data.uc_solver_name || 'solver'})`;
+    return '固定出力/简化策略（非OPF优化）';
+  }
+
+  function renderDynamicCarbonCharts(data) {
+    const root = document.getElementById('dynamicCarbonCharts');
+    if (!root) return;
+    if (typeof Plotly === 'undefined') {
+      root.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示动态图表。</p>';
+      return;
+    }
+
+    const steps = data.step_results || [];
+    const hrs = steps.map(s => Number(s.step));
+    const storageCharge = Number(data.total_storage_charge_emissions_tco2 || 0);
+    const loadTotal = Number(data.total_load_emissions_tco2 || 0);
+    const loadOnly = Math.max(loadTotal - storageCharge, 0);
+    const pieValues = [
+      Math.max(Number(data.total_generation_emissions_tco2 || 0), 0),
+      loadOnly,
+      storageCharge,
+      Math.max(Number(data.total_loss_emissions_tco2 || 0), 0),
+    ];
+
+    Plotly.newPlot('dynamicCarbonMixChart', [{
+      type: 'pie',
+      labels: ['源端供给', '负荷消纳', '储能充电', '网络损耗'],
+      values: pieValues,
+      hole: 0.42,
+      marker: { colors: ['#4c78a8', '#59a14f', '#f2cf5b', '#e15759'] },
+      textinfo: 'label+percent',
+      hovertemplate: '%{label}<br>%{value:.4f} tCO2<extra></extra>',
+    }], {
+      ...carbonPlotTheme('源荷储损耗碳排统计'),
+      showlegend: true,
+      margin: { l: 10, r: 10, t: 38, b: 10 },
+    }, { responsive: true, displaylogo: false });
+
+    const chargeSeries = numericSeries(steps.map(s => s.total_storage_charge_emissions_tco2));
+    const dischargeSeries = numericSeries(steps.map(s => s.total_storage_discharge_emissions_tco2));
+    Plotly.newPlot('dynamicCarbonTrendChart', [
+      {
+        x: hrs,
+        y: numericSeries(steps.map(s => s.total_generation_emissions_tco2)),
+        mode: 'lines+markers',
+        name: '源端',
+        line: { color: '#4c78a8', width: 2 },
+      },
+      {
+        x: hrs,
+        y: numericSeries(steps.map(s => Math.max(Number(s.total_load_emissions_tco2 || 0) - Number(s.total_storage_charge_emissions_tco2 || 0), 0))),
+        mode: 'lines+markers',
+        name: '负荷',
+        line: { color: '#59a14f', width: 2 },
+      },
+      {
+        x: hrs,
+        y: chargeSeries,
+        mode: 'lines+markers',
+        name: '储能充电',
+        line: { color: '#f2cf5b', width: 2 },
+      },
+      {
+        x: hrs,
+        y: dischargeSeries,
+        mode: 'lines+markers',
+        name: '储能放电',
+        line: { color: '#9c755f', width: 2, dash: 'dot' },
+      },
+      {
+        x: hrs,
+        y: numericSeries(steps.map(s => s.total_loss_emissions_tco2)),
+        mode: 'lines+markers',
+        name: '损耗',
+        line: { color: '#e15759', width: 2 },
+      },
+    ], {
+      ...carbonPlotTheme('动态碳排趋势'),
+      xaxis: { gridcolor: '#3e4451', title: '时段' },
+      yaxis: { gridcolor: '#3e4451', title: 'tCO2', rangemode: 'tozero' },
+    }, { responsive: true, displaylogo: false });
+
+    renderDynamicBusSelector(data);
+  }
+
+  function renderDynamicBusSelector(data) {
+    const selector = document.getElementById('dynamicCarbonBusSelector');
+    const addBtn = document.getElementById('btnAddDynamicCarbonBus');
+    const selectedDiv = document.getElementById('dynamicCarbonSelectedBuses');
+    if (!selector || !addBtn || !selectedDiv) return;
+
+    const roleMap = buildDynamicBusRoleMap();
+    const rows = data.bus_stats || [];
+    if (!rows.length || !(data.hourly_bus_intensity_tco2_mwh || []).length) {
+      selector.innerHTML = '';
+      selectedDiv.innerHTML = '<span class="empty-hint">暂无节点碳势时序数据。</span>';
+      return;
+    }
+
+    selector.innerHTML = rows.map((row, idx) =>
+      `<option value="${idx}">${escapeHtml(dynamicBusLabel(row, roleMap))}</option>`).join('');
+
+    const selected = new Set();
+    const redraw = () => {
+      const traces = [...selected].map(idx => {
+        const row = rows[idx];
+        const y = (data.hourly_bus_intensity_tco2_mwh || []).map(hourRow =>
+          carbonIntensityDisplay(Array.isArray(hourRow) ? hourRow[idx] : NaN));
+        return {
+          x: y.map((_, t) => t),
+          y,
+          mode: 'lines+markers',
+          name: dynamicBusLabel(row, roleMap),
+          line: { width: 2 },
+        };
+      });
+
+      if (!traces.length) {
+        Plotly.newPlot('dynamicCarbonBusTrendChart', [], {
+          ...carbonPlotTheme('节点碳势时段变化'),
+          xaxis: { gridcolor: '#3e4451', title: '时段' },
+          yaxis: { gridcolor: '#3e4451', title: carbonIntensityUnit(), rangemode: 'tozero' },
+          annotations: [{
+            text: '请选择节点后点击添加',
+            xref: 'paper',
+            yref: 'paper',
+            x: 0.5,
+            y: 0.5,
+            showarrow: false,
+            font: { color: '#abb2bf' },
+          }],
+        }, { responsive: true, displaylogo: false });
+      } else {
+        Plotly.newPlot('dynamicCarbonBusTrendChart', traces, {
+          ...carbonPlotTheme('节点碳势时段变化'),
+          xaxis: { gridcolor: '#3e4451', title: '时段' },
+          yaxis: { gridcolor: '#3e4451', title: carbonIntensityUnit(), rangemode: 'tozero' },
+        }, { responsive: true, displaylogo: false });
+      }
+
+      selectedDiv.innerHTML = [...selected].map(idx =>
+        `<button type="button" class="dynamic-carbon-chip" data-bus-idx="${idx}">${escapeHtml(dynamicBusLabel(rows[idx], roleMap))} ×</button>`
+      ).join('');
+      selectedDiv.querySelectorAll('[data-bus-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          selected.delete(Number(btn.dataset.busIdx));
+          redraw();
+        });
+      });
+    };
+
+    addBtn.onclick = () => {
+      const idx = Number(selector.value);
+      if (Number.isInteger(idx) && idx >= 0 && idx < rows.length) {
+        selected.add(idx);
+        redraw();
+      }
+    };
+
+    const defaultIdx = rows.findIndex(row => Number(row.energy_mwh || 0) > 1e-9);
+    if (rows.length) selected.add(defaultIdx >= 0 ? defaultIdx : 0);
+    redraw();
+  }
+
+  function showDynamicCarbonResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('carbonFlow');
+    switchTab('results');
+    document.getElementById('carbonSummaryTitle').textContent = '动态碳流分析结果 — 概览';
+    document.getElementById('staticCarbonBusSection').style.display = 'none';
+    document.getElementById('staticCarbonLoadSection').style.display = 'none';
+    document.getElementById('staticCarbonBranchSection').style.display = 'none';
+
+    const balance = dynamicBalanceSummary(data);
+    const totalHours = Number(data.num_steps || 0) * Number(data.step_duration_hr || 1);
+    const sourceLabel = data.result_source === 'last_tspf'
+      ? (data.run_opf ? '最近一次时序OPF结果' : '最近一次时序潮流结果')
+      : '动态碳流内部重新计算结果';
+    const profileMsg = Number(data.external_grid_carbon_profiles || 0) > 0
+      ? `${Number(data.external_grid_carbon_profile_applications || 0)} 次应用`
+      : '未使用分时外部电网碳因子';
+
+    document.getElementById('carbonSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">数据来源</span>
+        <span class="result-value">${escapeHtml(sourceLabel)}</span></div>
+      <div class="result-item"><span class="result-label">时段/步长</span>
+        <span class="result-value">${Number(data.num_steps || 0)} × ${Number(data.step_duration_hr || 1).toFixed(2)} h = ${totalHours.toFixed(2)} h</span></div>
+      <div class="result-item"><span class="result-label">潮流收敛</span>
+        <span class="result-value ${Number(data.num_pf_converged || 0) === Number(data.num_steps || 0) ? 'result-converged' : 'result-failed'}">${Number(data.num_pf_converged || 0)}/${Number(data.num_steps || 0)}</span></div>
+      <div class="result-item"><span class="result-label">OPF收敛</span>
+        <span class="result-value">${Number(data.num_opf_converged || 0)}/${Number(data.num_steps || 0)}</span></div>
+      <div class="result-item"><span class="result-label">储能调度来源</span>
+        <span class="result-value">${escapeHtml(storageDispatchSourceLabel(data))}</span></div>
+      <div class="result-item"><span class="result-label">外部电网分时因子</span>
+        <span class="result-value">${escapeHtml(profileMsg)}</span></div>
+      <div class="result-item"><span class="result-label">累计碳平衡残差</span>
+        <span class="result-value ${Math.abs(balance.basicPct) < 1e-3 ? 'result-converged' : 'result-failed'}">${balance.basic.toExponential(3)} t / ${balance.basicPct.toExponential(3)}%</span></div>
+      <div class="result-item"><span class="result-label">储能库存净变化</span>
+        <span class="result-value">${balance.storageDelta.toFixed(6)} t</span></div>
+    `;
+    document.getElementById('carbonBusResults').innerHTML = '';
+    document.getElementById('carbonLoadResults').innerHTML = '';
+    document.getElementById('carbonBranchResults').innerHTML = '';
+    document.getElementById('carbonStorageSection').style.display = 'none';
+    document.getElementById('carbonStorageResults').innerHTML = '';
+
+    const sec = document.getElementById('dynamicCarbonSection');
+    sec.style.display = '';
+    const charts = document.getElementById('dynamicCarbonCharts');
+    if (charts) {
+      charts.innerHTML = `
+        <div class="dynamic-carbon-grid">
+          <div id="dynamicCarbonMixChart" class="dynamic-carbon-chart"></div>
+          <div id="dynamicCarbonTrendChart" class="dynamic-carbon-chart"></div>
+        </div>
+        <div class="dynamic-carbon-controls">
+          <select id="dynamicCarbonBusSelector" class="dynamic-carbon-select"></select>
+          <button type="button" id="btnAddDynamicCarbonBus" class="btn btn-sm">添加节点</button>
+        </div>
+        <div id="dynamicCarbonSelectedBuses" class="dynamic-carbon-selected"></div>
+        <div id="dynamicCarbonBusTrendChart" class="dynamic-carbon-chart dynamic-carbon-wide"></div>
+      `;
+    }
+    let html = '<table><thead><tr><th>时段</th><th>潮流收敛</th><th>OPF收敛</th><th>源端(t)</th><th>负荷(t)</th><th>储能充电(t)</th><th>储能放电(t)</th><th>损耗(t)</th><th>碳平衡残差(t)</th></tr></thead><tbody>';
+    (data.step_results || []).forEach(s => {
+      const stepBalance = Number(s.balance_error_tco2 ?? (
+        Number(s.total_generation_emissions_tco2 || 0) -
+        Number(s.total_load_emissions_tco2 || 0) -
+        Number(s.total_loss_emissions_tco2 || 0)
+      ));
+      html += `<tr><td>${s.step}</td><td>${s.pf_converged ? '是' : '否'}</td><td>${s.opf_converged == null ? '—' : (s.opf_converged ? '是' : '否')}</td><td>${Number(s.total_generation_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_load_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_charge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_storage_discharge_emissions_tco2 || 0).toFixed(6)}</td><td>${Number(s.total_loss_emissions_tco2 || 0).toFixed(6)}</td><td>${stepBalance.toExponential(3)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    document.getElementById('dynamicCarbonResults').innerHTML = html;
+    renderDynamicCarbonCharts(data);
   }
 
   // ========== Power Flow ==========
@@ -1996,6 +2753,7 @@ const App = (() => {
       `<td>${gen.bus}</td><td>${gen.pg_mw}</td>
         <td>${gen.qg_mvar}</td><td>${gen.vg_pu}</td>
         <td>${gen.pmax_mw}</td><td>${gen.pmin_mw}</td>
+        <td>${carbonFactorDisplay(gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0).toFixed(1)}</td>
         <td>${gen.is_slack ? '✓' : ''}</td>`);
 
     // Load table
@@ -2009,7 +2767,8 @@ const App = (() => {
 
     // External Grid
     fillTable('#extGridTableInner', 'extGridSection', sys.ac.external_grids, m.extGrid, eg =>
-      `<td>${eg.bus}</td><td>${eg.vm_pu}</td><td>${eg.va_deg}</td><td>${eg.s_sc_max_mva}</td>`);
+      `<td>${eg.bus}</td><td>${eg.vm_pu}</td><td>${eg.va_deg}</td><td>${eg.s_sc_max_mva}</td>
+        <td>${carbonFactorDisplay(eg.emission_factor_tco2_mwh || eg.co2_emission_rate || 0).toFixed(1)}</td>`);
 
     // Storage
     fillTable('#storageTableInner', 'storageSection', sys.ac.storage, m.storage, s =>
@@ -2129,7 +2888,10 @@ const App = (() => {
 
     const defaults = COMP.defaults[comp.type] || {};
     Object.keys(defaults).forEach(key => {
-      const val = comp.params[key] !== undefined ? comp.params[key] : defaults[key];
+      const rawVal = comp.params[key] !== undefined ? comp.params[key] : defaults[key];
+      const val = key === 'emission_factor_tco2_mwh'
+        ? carbonFactorDisplay(rawVal)
+        : rawVal;
       const label = COMP.fieldLabels[key] || key;
 
       const div = document.createElement('div');
@@ -2227,7 +2989,11 @@ const App = (() => {
       if (val === 'true') val = true;
       else if (val === 'false') val = false;
       else if (el.type === 'number' && val !== '') val = parseFloat(val);
-      if (comp.params[key] !== val) changedKeys.add(key);
+      if (key === 'emission_factor_tco2_mwh') val = carbonFactorInputValue(val);
+      const oldVal = comp.params[key];
+      const sameNumber = typeof oldVal === 'number' && typeof val === 'number' &&
+        Math.abs(oldVal - val) < 1e-12;
+      if (!sameNumber && oldVal !== val) changedKeys.add(key);
       comp.params[key] = val;
     });
 
@@ -2239,10 +3005,16 @@ const App = (() => {
     // Re-render component with new params
     Canvas.rerenderComponent(comp);
     // Only mark dirty if something actually changed
-    if (changedKeys.size > 0) {
+    const onlyCarbonFactorChanged =
+      changedKeys.size === 1 && changedKeys.has('emission_factor_tco2_mwh') &&
+      (comp.type === 'generator' || comp.type === 'external_grid' || comp.type === 'static_generator');
+    if (changedKeys.size > 0 && !onlyCarbonFactorChanged) {
       _canvasDirty = true;
     }
     updateTopologyTables();
+    if (onlyCarbonFactorChanged) {
+      syncCarbonFactorsOnly();
+    }
     // Refresh property panel to show synced values
     if (changedKeys.size > 0 && comp.type === 'ac_branch') {
       onSelectionChanged(compId);
@@ -2509,6 +3281,15 @@ const App = (() => {
 
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
+    document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
+    document.getElementById('btnImportCarbonFactors')?.addEventListener('click', () => {
+      document.getElementById('fileImportCarbonFactors')?.click();
+    });
+    document.getElementById('fileImportCarbonFactors')?.addEventListener('change', async (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (f) await importCarbonFactorsJson(f);
+    });
     // Legacy header buttons removed — guard:
     document.getElementById('btnShortCircuit')?.addEventListener('click', showScDialog);
     document.getElementById('btnTopology')?.addEventListener('click', runTopologyReconfig);
@@ -2568,6 +3349,7 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
+    document.getElementById('btnDynamicCarbonFlow')?.addEventListener('click', runDynamicCarbonFlow);
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.
     document.getElementById('btnExportPfResults')?.addEventListener('click', () => {

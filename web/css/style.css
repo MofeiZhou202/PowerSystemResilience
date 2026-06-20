@@ -544,11 +544,84 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 .results-summary .result-value { font-weight: 600; font-family: "IBM Plex Mono", monospace; }
 .result-converged { color: var(--green); }
 .result-failed { color: var(--red); }
+.carbon-chart {
+  height: 240px;
+  margin: 4px 0 10px;
+}
+.dynamic-carbon-results {
+  margin-top: 10px;
+}
+.dynamic-carbon-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+  gap: 8px;
+}
+.dynamic-carbon-chart {
+  width: 100%;
+  height: 260px;
+  background: rgba(33, 37, 43, 0.45);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.dynamic-carbon-wide {
+  height: 300px;
+  margin-top: 8px;
+}
+.dynamic-carbon-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.dynamic-carbon-select {
+  min-width: 220px;
+  max-width: 420px;
+  height: 28px;
+  background: var(--bg3);
+  color: var(--ink);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 3px 8px;
+}
+.dynamic-carbon-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  margin-top: 8px;
+}
+.dynamic-carbon-chip {
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  color: var(--ink);
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dynamic-carbon-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+@media (max-width: 900px) {
+  .dynamic-carbon-grid {
+    grid-template-columns: 1fr;
+  }
+  .dynamic-carbon-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .dynamic-carbon-select {
+    max-width: none;
+    width: 100%;
+  }
+}
 
 /* Per-module result groups: only the active group is shown.
    `data-active-group` is set on #resultsContent by setActiveResultGroup() in app.js. */
 .result-group { display: none; }
 #resultsContent[data-active-group="powerFlow"]    .result-group[data-result-group="powerFlow"],
+#resultsContent[data-active-group="carbonFlow"]   .result-group[data-result-group="carbonFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
@@ -1010,6 +1083,13 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   color: var(--tb-text-muted);
   font-style: italic;
 }
+.sub-hint {
+  font-size: 12px;
+  color: var(--tb-text-muted);
+  white-space: nowrap;
+}
+.sub-hint-warn { color: #d19a66; }
+.sub-hint-ok { color: var(--green); }
 
 /* ===== Case-load Modal ===== */
 .case-modal .modal-backdrop {
@@ -1088,5 +1168,3 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   outline: none;
   border-color: var(--tb-border-hover);
 }
-
-

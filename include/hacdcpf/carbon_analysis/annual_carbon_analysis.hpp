@@ -30,6 +30,8 @@ struct AnnualCarbonStepResult {
   double total_generation_emissions_tco2{0.0};
   double total_load_emissions_tco2{0.0};
   double total_loss_emissions_tco2{0.0};
+  double total_storage_charge_emissions_tco2{0.0};
+  double total_storage_discharge_emissions_tco2{0.0};
 };
 
 struct AnnualBusCarbonStats {
@@ -53,6 +55,15 @@ struct AnnualLoadCarbonStats {
   double average_intensity_tco2_mwh{0.0};
 };
 
+struct AnnualStorageCarbonState {
+  int storage_index{0};
+  int bus{0};
+  bool is_dc{false};
+  double soc{0.0};
+  double stored_energy_mwh{0.0};
+  double soc_carbon_intensity_tco2_mwh{0.0};
+};
+
 struct AnnualCarbonAnalysisResult {
   int num_steps{0};
   double step_duration_hr{1.0};
@@ -61,10 +72,13 @@ struct AnnualCarbonAnalysisResult {
   double total_generation_emissions_tco2{0.0};
   double total_load_emissions_tco2{0.0};
   double total_loss_emissions_tco2{0.0};
+  double total_storage_charge_emissions_tco2{0.0};
+  double total_storage_discharge_emissions_tco2{0.0};
 
   std::vector<AnnualCarbonStepResult> step_results;
   std::vector<AnnualBusCarbonStats> bus_stats;
   std::vector<AnnualLoadCarbonStats> load_stats;
+  std::vector<AnnualStorageCarbonState> terminal_storage_states;
 
   // Matrix shape: row = time step, column = bus_stats order.
   // Non-converged steps are filled with NaN.
