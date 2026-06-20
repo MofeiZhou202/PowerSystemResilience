@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+  add_compile_options(/utf-8 /bigobj /FS)
+endif()
+
 # Embedded dependencies (SCIP / HiGHS) declare cmake_minimum_required below the
 # floor that CMake >= 4.0 accepts. Pin a compatibility policy version so they
 # configure without each developer having to pass it on the command line
@@ -40,9 +44,11 @@ option(HACDCPF_ENABLE_EXCEL   "Build Excel I/O   (requires OpenXLSX)"      OFF)
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
 # Embedded SCIP uses POSIX sigaction(), which the Windows/UCRT CRT does not
 # provide. Define SCIP_NO_SIGACTION so SCIP falls back to signal() there.
+# SCIP also calls POSIX strtok_r(); MSVC provides the compatible strtok_s().
 # Applied before the dependency add_subdirectory so it propagates to SCIP.
 if(WIN32)
   add_compile_definitions(SCIP_NO_SIGACTION)
+  add_compile_definitions(strtok_r=strtok_s)
 endif()
 include(cmake/Dependencies.cmake)
 

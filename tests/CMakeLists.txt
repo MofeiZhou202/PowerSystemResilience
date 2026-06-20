@@ -78,6 +78,9 @@ hacdcpf_add_test(test_topology_crossval test_topology_crossval.cpp)
 #   A+B: IEEE 14-bus — PF/OPF consistency + carbon balance (tests A1–A6, B1–B4)
 #   C+D: IEEE 33-bus BW — ONR loss improvement + carbon balance (tests C1–C4, D1–D3)
 hacdcpf_add_test(test_crossmodule_integration test_crossmodule_integration.cpp)
+hacdcpf_add_test(test_carbonflow_dynamic_storage test_carbonflow_dynamic_storage.cpp)
+hacdcpf_add_test(test_carbonflow_tracing test_carbonflow_tracing.cpp)
+hacdcpf_add_test(test_carbonflow_case_validation test_carbonflow_case_validation.cpp)
 
 # Short-circuit analysis: Z-bus Thévenin cross-validation + IEC 60909 checks.
 #   1. 2-bus analytical: Z_Thev = Z_line

@@ -50,6 +50,7 @@ struct UCSchedule {
   // - dc_ess_dispatch: UC-optimized when UC is enabled; otherwise fixed replay
   std::vector<std::vector<double>> dc_pv_dispatch;     // [k][t] MW
   std::vector<std::vector<double>> dc_ess_dispatch;    // [k][t] MW
+  std::vector<std::vector<double>> dc_ess_soc;         // [k][t] SOC [0,1]
   std::vector<std::vector<double>> dc_sgen_dispatch;   // [k][t] MW
   std::vector<std::vector<double>> dc_load_demand;     // [k][t] MW
 
@@ -112,6 +113,7 @@ struct TimeSeriesPFOptions {
   bool enforce_non_slack_strict_tracking{true};
   double non_slack_tracking_rel{0.02};
   double non_slack_tracking_abs_mw{1.0};
+  bool keep_system_snapshots{false};
   bool verbose{false};
 };
 
@@ -128,6 +130,9 @@ struct TimeSeriesPFResult {
   // PF validation results per timestep
   std::vector<PowerFlowResult> pf_results;
   int num_converged{0};
+
+  // Actual system states used for PF validation when keep_system_snapshots is true.
+  std::vector<HybridPowerSystem> pf_system_snapshots;
 
   // Cross-validation metrics (OPF vs PF, one per timestep)
   std::vector<CrossValStep> crossval;
@@ -147,6 +152,13 @@ struct TimeSeriesPFResult {
 UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                                  const TimeSeriesData& ts_data,
                                  const TimeSeriesPFOptions& opts = {});
+
+HybridPowerSystem build_time_series_system_snapshot(
+    const HybridPowerSystem& base_sys,
+    const TimeSeriesData& ts_data,
+    const UCSchedule& schedule,
+    int step,
+    const TimeSeriesPFOptions& opts = {});
 
 /// Full pipeline: UC → OPF (per step) → PF validation (per step).
 /// When run_opf=false, behaves as before: UC → PF directly.

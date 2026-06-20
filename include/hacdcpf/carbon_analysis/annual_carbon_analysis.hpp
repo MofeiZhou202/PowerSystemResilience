@@ -192,10 +192,20 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     double step_duration_hr,
     const AnnualCarbonAnalysisOptions& options = {});
 
-/// Static-system convenience overload for an existing time-series PF result.
-/// This intentionally uses the supplied sys for every timestep.
+/// Convenience overload for an existing time-series PF result. If
+/// TimeSeriesPFOptions::keep_system_snapshots was enabled, uses those per-step
+/// system states for dynamic storage carbon tracking; otherwise falls back to
+/// the supplied static sys for every timestep.
 AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     const HybridPowerSystem& sys,
+    const TimeSeriesPFResult& ts_result,
+    double step_duration_hr,
+    const AnnualCarbonAnalysisOptions& options = {});
+
+/// Dynamic time-series convenience overload. Requires
+/// ts_result.pf_system_snapshots to contain the actual PF input system for
+/// every pf_results timestep.
+AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     const TimeSeriesPFResult& ts_result,
     double step_duration_hr,
     const AnnualCarbonAnalysisOptions& options = {});

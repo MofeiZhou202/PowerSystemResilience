@@ -1524,6 +1524,7 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
   sched.ess_dispatch.resize(static_cast<size_t>(S), std::vector<double>(static_cast<size_t>(T)));
   sched.ess_soc.resize(static_cast<size_t>(S), std::vector<double>(static_cast<size_t>(T)));
   sched.dc_ess_dispatch.resize(static_cast<size_t>(Sd), std::vector<double>(static_cast<size_t>(T)));
+  sched.dc_ess_soc.resize(static_cast<size_t>(Sd), std::vector<double>(static_cast<size_t>(T)));
   sched.renewable_dispatch.resize(static_cast<size_t>(R), std::vector<double>(static_cast<size_t>(T)));
 
   for (int gi = 0; gi < G; ++gi) {
@@ -1541,7 +1542,7 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
   for (int si = 0; si < Sd; ++si) {
     for (int t = 0; t < T; ++t) {
       sched.dc_ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(t)] = x[dcess_idx(si, t)];
-      (void)x[dcsoc_idx(si, t)];
+      sched.dc_ess_soc[static_cast<size_t>(si)][static_cast<size_t>(t)] = x[dcsoc_idx(si, t)];
     }
   }
   for (int ri = 0; ri < R; ++ri) {
@@ -1719,6 +1720,204 @@ Eigen::VectorXd priority_list_uc_heuristic(
 // ═══════════════════════════════════════════════════════════════════════
 // Phase II: Solve Unit Commitment
 // ═══════════════════════════════════════════════════════════════════════
+HybridPowerSystem build_time_series_system_snapshot(
+    const HybridPowerSystem& base_sys,
+    const TimeSeriesData& ts_data,
+    const UCSchedule& schedule,
+    int step,
+    const TimeSeriesPFOptions& opts) {
+  if (step < 0 || step >= ts_data.num_steps) {
+    throw std::out_of_range("time-series step is outside ts_data range");
+  }
+
+  HybridPowerSystem sys_t = base_sys;
+  const auto profile_map = build_profile_map(ts_data);
+
+  std::vector<int> gen_active_idx;
+  for (int i = 0; i < static_cast<int>(base_sys.ac.generators.size()); ++i) {
+    if (base_sys.ac.generators[static_cast<size_t>(i)].in_service) {
+      gen_active_idx.push_back(i);
+    }
+  }
+
+  std::vector<int> ess_active_idx;
+  for (int i = 0; i < static_cast<int>(base_sys.ac.storage.size()); ++i) {
+    if (base_sys.ac.storage[static_cast<size_t>(i)].in_service) {
+      ess_active_idx.push_back(i);
+    }
+  }
+
+  std::vector<int> dc_ess_active_idx;
+  for (int i = 0; i < static_cast<int>(base_sys.dc.storage.size()); ++i) {
+    if (base_sys.dc.storage[static_cast<size_t>(i)].in_service) {
+      dc_ess_active_idx.push_back(i);
+    }
+  }
+
+  std::vector<int> ren_active_idx;
+  for (int i = 0; i < static_cast<int>(base_sys.ac.renewable_gens.size()); ++i) {
+    if (base_sys.ac.renewable_gens[static_cast<size_t>(i)].in_service) {
+      ren_active_idx.push_back(i);
+    }
+  }
+
+  std::unordered_map<int, BusType> ac_bus_type_by_index;
+  ac_bus_type_by_index.reserve(base_sys.ac.buses.size());
+  for (const auto& bus : base_sys.ac.buses) {
+    ac_bus_type_by_index[bus.index] = bus.bus_type;
+  }
+
+  if (!opts.skip_uc && schedule.feasible) {
+    for (int gi = 0; gi < static_cast<int>(gen_active_idx.size()); ++gi) {
+      const int idx = gen_active_idx[static_cast<size_t>(gi)];
+      auto& gen = sys_t.ac.generators[static_cast<size_t>(idx)];
+      if (gi >= static_cast<int>(schedule.gen_dispatch.size()) ||
+          step >= static_cast<int>(schedule.gen_dispatch[static_cast<size_t>(gi)].size())) {
+        continue;
+      }
+
+      gen.pg_mw = schedule.gen_dispatch[static_cast<size_t>(gi)][static_cast<size_t>(step)];
+      if (gi < static_cast<int>(schedule.gen_commit.size()) &&
+          step < static_cast<int>(schedule.gen_commit[static_cast<size_t>(gi)].size())) {
+        gen.in_service =
+            schedule.gen_commit[static_cast<size_t>(gi)][static_cast<size_t>(step)] != 0;
+      }
+
+      if (!gen.in_service) {
+        gen.pg_mw = 0.0;
+        gen.qg_mvar = 0.0;
+        gen.pmin_mw = 0.0;
+        gen.pmax_mw = 0.0;
+      } else if (opts.enable_uc_opf_tracking_band) {
+        const double p_uc = gen.pg_mw;
+        bool is_slack_gen = gen.is_slack;
+        auto bus_it = ac_bus_type_by_index.find(gen.bus);
+        if (bus_it != ac_bus_type_by_index.end() && bus_it->second == BusType::SLACK) {
+          is_slack_gen = true;
+        }
+
+        double rel = std::max(opts.uc_opf_tracking_rel, 0.0);
+        double abs_mw = std::max(opts.uc_opf_tracking_abs_mw, 0.0);
+        if (opts.enforce_non_slack_strict_tracking && !is_slack_gen) {
+          rel = std::max(opts.non_slack_tracking_rel, 0.0);
+          abs_mw = std::max(opts.non_slack_tracking_abs_mw, 0.0);
+        }
+        const double band = std::max(abs_mw, rel * std::max(std::abs(p_uc), 1.0));
+        double pmin = std::max(gen.pmin_mw, p_uc - band);
+        double pmax = std::min(gen.pmax_mw, p_uc + band);
+        if (pmax < pmin) {
+          const double pfix = std::clamp(p_uc, gen.pmin_mw, gen.pmax_mw);
+          pmin = pfix;
+          pmax = pfix;
+        }
+        gen.pmin_mw = pmin;
+        gen.pmax_mw = pmax;
+      }
+    }
+  }
+
+  for (int si = 0; si < static_cast<int>(ess_active_idx.size()); ++si) {
+    const int idx = ess_active_idx[static_cast<size_t>(si)];
+    auto& ess = sys_t.ac.storage[static_cast<size_t>(idx)];
+    if (si < static_cast<int>(schedule.ess_dispatch.size()) &&
+        step < static_cast<int>(schedule.ess_dispatch[static_cast<size_t>(si)].size())) {
+      ess.p_mw = schedule.ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(step)];
+    }
+    if (si < static_cast<int>(schedule.ess_soc.size()) &&
+        step < static_cast<int>(schedule.ess_soc[static_cast<size_t>(si)].size())) {
+      ess.soc_init = schedule.ess_soc[static_cast<size_t>(si)][static_cast<size_t>(step)];
+      ess.e_mwh = ess.soc_init * std::max(ess.e_rated_mwh, 0.0);
+    }
+  }
+
+  for (int si = 0; si < static_cast<int>(dc_ess_active_idx.size()); ++si) {
+    const int idx = dc_ess_active_idx[static_cast<size_t>(si)];
+    auto& ess = sys_t.dc.storage[static_cast<size_t>(idx)];
+    if (si < static_cast<int>(schedule.dc_ess_dispatch.size()) &&
+        step < static_cast<int>(schedule.dc_ess_dispatch[static_cast<size_t>(si)].size())) {
+      ess.p_mw = schedule.dc_ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(step)];
+    }
+    if (si < static_cast<int>(schedule.dc_ess_soc.size()) &&
+        step < static_cast<int>(schedule.dc_ess_soc[static_cast<size_t>(si)].size())) {
+      ess.soc_init = schedule.dc_ess_soc[static_cast<size_t>(si)][static_cast<size_t>(step)];
+      ess.e_mwh = ess.soc_init * std::max(ess.e_rated_mwh, 0.0);
+    }
+  }
+
+  if (!opts.skip_uc && schedule.feasible) {
+    for (int ri = 0; ri < static_cast<int>(ren_active_idx.size()); ++ri) {
+      const int idx = ren_active_idx[static_cast<size_t>(ri)];
+      auto& ren = sys_t.ac.renewable_gens[static_cast<size_t>(idx)];
+      if (ri < static_cast<int>(schedule.renewable_dispatch.size()) &&
+          step < static_cast<int>(schedule.renewable_dispatch[static_cast<size_t>(ri)].size())) {
+        ren.p_mw = schedule.renewable_dispatch[static_cast<size_t>(ri)][static_cast<size_t>(step)];
+      }
+    }
+  } else {
+    for (auto& ren : sys_t.ac.renewable_gens) {
+      if (!ren.in_service) continue;
+      const auto* prof = find_profile(profile_map, ren.profile_id);
+      ren.p_mw *= profile_value(prof, step, 1.0);
+    }
+  }
+
+  if (!sys_t.ac.loads.empty() || !sys_t.ac.charging_stations.empty()) {
+    for (auto& load : sys_t.ac.loads) {
+      if (!load.in_service) continue;
+      const auto* prof = find_profile(profile_map, load.profile_id);
+      const double scale = profile_value(prof, step, 1.0);
+      load.p_mw *= scale * load.scaling;
+      load.q_mvar *= scale * load.scaling;
+      load.scaling = 1.0;
+    }
+  } else {
+    const auto* default_load = find_profile(profile_map, 0);
+    const double scale = profile_value(default_load, step, 1.0);
+    for (auto& bus : sys_t.ac.buses) {
+      if (!bus.in_service) continue;
+      bus.pd_mw *= scale;
+      bus.qd_mvar *= scale;
+    }
+  }
+
+  for (auto& pvsys : sys_t.ac.pv_systems) {
+    if (!pvsys.in_service) continue;
+    const auto* prof = find_profile(profile_map, pvsys.profile_id);
+    if (prof == nullptr) continue;
+    const double scale = profile_value(prof, step, 1.0);
+    pvsys.irradiance = scale * 1000.0;
+    if (pvsys.voc <= 0.0 || pvsys.isc <= 0.0 || pvsys.vmpp <= 0.0) {
+      pvsys.p_mw *= scale;
+    }
+  }
+
+  for (auto& pv : sys_t.dc.pv_arrays) {
+    if (!pv.in_service) continue;
+    const auto* prof = find_profile(profile_map, pv.profile_id);
+    const double scale = profile_value(prof, step, 1.0);
+    pv.p_set_mw *= scale;
+    pv.irradiance = 1000.0 * scale;
+  }
+
+  for (auto& sg : sys_t.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    const auto* prof = find_profile(profile_map, sg.profile_id);
+    const double scale = profile_value(prof, step, 1.0);
+    sg.p_set_mw *= sg.scaling * scale;
+    sg.scaling = 1.0;
+  }
+
+  for (auto& load : sys_t.dc.loads) {
+    if (!load.in_service) continue;
+    const auto* prof = find_profile(profile_map, load.profile_id);
+    const double scale = profile_value(prof, step, 1.0);
+    load.p_mw *= scale * load.scaling;
+    load.scaling = 1.0;
+  }
+
+  return sys_t;
+}
+
 UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                                  const TimeSeriesData& ts_data,
                                  const TimeSeriesPFOptions& opts) {
@@ -2059,163 +2258,8 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
     if (sys.ac.generators[static_cast<size_t>(i)].in_service)
       gen_active_idx.push_back(i);
   }
-  std::vector<int> ess_active_idx;
-  for (int i = 0; i < static_cast<int>(sys.ac.storage.size()); ++i) {
-    if (sys.ac.storage[static_cast<size_t>(i)].in_service)
-      ess_active_idx.push_back(i);
-  }
-  std::vector<int> ren_active_idx;
-  for (int i = 0; i < static_cast<int>(sys.ac.renewable_gens.size()); ++i) {
-    if (sys.ac.renewable_gens[static_cast<size_t>(i)].in_service)
-      ren_active_idx.push_back(i);
-  }
-  std::unordered_map<int, BusType> ac_bus_type_by_index;
-  ac_bus_type_by_index.reserve(sys.ac.buses.size());
-  for (const auto& b : sys.ac.buses) {
-    ac_bus_type_by_index[b.index] = b.bus_type;
-  }
-
-  // Helper: apply UC schedule + load profiles to a system copy at time step t
   auto prepare_system = [&](int t) -> HybridPowerSystem {
-    HybridPowerSystem sys_t = sys;
-
-    // Apply UC schedule to generators
-    if (!opts.skip_uc && schedule.feasible) {
-      for (int gi = 0; gi < static_cast<int>(gen_active_idx.size()); ++gi) {
-        int idx = gen_active_idx[static_cast<size_t>(gi)];
-        auto& gen = sys_t.ac.generators[static_cast<size_t>(idx)];
-        if (gi < static_cast<int>(schedule.gen_dispatch.size())) {
-          gen.pg_mw = schedule.gen_dispatch[static_cast<size_t>(gi)][static_cast<size_t>(t)];
-          gen.in_service = (schedule.gen_commit[static_cast<size_t>(gi)][static_cast<size_t>(t)] != 0);
-          if (!gen.in_service) {
-            gen.pg_mw = 0.0;
-            gen.qg_mvar = 0.0;
-            gen.pmin_mw = 0.0;
-            gen.pmax_mw = 0.0;
-          } else if (opts.enable_uc_opf_tracking_band) {
-            // Keep OPF near UC dispatch to avoid unrealistic re-dispatch drift.
-            const double p_uc = gen.pg_mw;
-            bool is_slack_gen = gen.is_slack;
-            auto bus_it = ac_bus_type_by_index.find(gen.bus);
-            if (bus_it != ac_bus_type_by_index.end() &&
-                bus_it->second == BusType::SLACK) {
-              is_slack_gen = true;
-            }
-
-            double rel = std::max(opts.uc_opf_tracking_rel, 0.0);
-            double abs_mw = std::max(opts.uc_opf_tracking_abs_mw, 0.0);
-            if (opts.enforce_non_slack_strict_tracking && !is_slack_gen) {
-              rel = std::max(opts.non_slack_tracking_rel, 0.0);
-              abs_mw = std::max(opts.non_slack_tracking_abs_mw, 0.0);
-            }
-            const double band = std::max(abs_mw, rel * std::max(std::abs(p_uc), 1.0));
-            double pmin = std::max(gen.pmin_mw, p_uc - band);
-            double pmax = std::min(gen.pmax_mw, p_uc + band);
-            if (pmax < pmin) {
-              const double pfix = std::clamp(p_uc, gen.pmin_mw, gen.pmax_mw);
-              pmin = pfix;
-              pmax = pfix;
-            }
-            gen.pmin_mw = pmin;
-            gen.pmax_mw = pmax;
-          }
-        }
-      }
-    }
-
-    // Apply UC schedule to ESS (always apply if dispatch arrays are populated)
-    for (int si = 0; si < static_cast<int>(ess_active_idx.size()); ++si) {
-      int idx = ess_active_idx[static_cast<size_t>(si)];
-      auto& ess = sys_t.ac.storage[static_cast<size_t>(idx)];
-      if (si < static_cast<int>(schedule.ess_dispatch.size()) &&
-          t < static_cast<int>(schedule.ess_dispatch[static_cast<size_t>(si)].size())) {
-        ess.p_mw = schedule.ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(t)];
-      }
-    }
-    for (int si = 0; si < static_cast<int>(sys_t.dc.storage.size()); ++si) {
-      if (si < static_cast<int>(schedule.dc_ess_dispatch.size()) &&
-          t < static_cast<int>(schedule.dc_ess_dispatch[static_cast<size_t>(si)].size())) {
-        sys_t.dc.storage[static_cast<size_t>(si)].p_mw =
-            schedule.dc_ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(t)];
-      }
-    }
-
-    // Apply UC schedule to renewables
-    if (!opts.skip_uc && schedule.feasible) {
-      for (int ri = 0; ri < static_cast<int>(ren_active_idx.size()); ++ri) {
-        int idx = ren_active_idx[static_cast<size_t>(ri)];
-        auto& ren = sys_t.ac.renewable_gens[static_cast<size_t>(idx)];
-        if (ri < static_cast<int>(schedule.renewable_dispatch.size())) {
-          ren.p_mw = schedule.renewable_dispatch[static_cast<size_t>(ri)][static_cast<size_t>(t)];
-        }
-      }
-    }
-
-    // Apply time-series profiles to AC demand side.
-    if (!sys_t.ac.loads.empty() || !sys_t.ac.charging_stations.empty()) {
-      for (auto& load : sys_t.ac.loads) {
-        if (!load.in_service) continue;
-        const auto* pv = find_profile(profile_map, load.profile_id);
-        if (pv) {
-          double scale = profile_value(pv, t, 1.0);
-          load.p_mw *= scale;
-          load.q_mvar *= scale;
-        }
-      }
-    } else {
-      // Bus-level load fallback for MATPOWER-style cases.
-      const auto* default_load = find_profile(profile_map, 0);
-      const double scale = profile_value(default_load, t, 1.0);
-      for (auto& bus : sys_t.ac.buses) {
-        if (!bus.in_service) continue;
-        bus.pd_mw *= scale;
-        bus.qd_mvar *= scale;
-      }
-    }
-
-    // Apply time-series profiles to PV systems
-    for (auto& pvsys : sys_t.ac.pv_systems) {
-      if (!pvsys.in_service) continue;
-      const auto* pv = find_profile(profile_map, pvsys.profile_id);
-      if (pv) {
-        const double scale = profile_value(pv, t, 1.0);
-        pvsys.irradiance = scale * 1000.0;
-        // Also scale p_mw for fallback path (when voc/isc/vmpp are not set,
-        // compute_pv_power_mw returns p_mw directly, ignoring irradiance).
-        if (pvsys.voc <= 0.0 || pvsys.isc <= 0.0 || pvsys.vmpp <= 0.0) {
-          pvsys.p_mw *= scale;
-        }
-      }
-    }
-
-    // Apply time-series profiles to DC PV arrays
-    for (auto& pv : sys_t.dc.pv_arrays) {
-      if (!pv.in_service) continue;
-      const auto* prof = find_profile(profile_map, pv.profile_id);
-      const double scale = profile_value(prof, t, 1.0);
-      pv.p_set_mw *= scale;
-      pv.irradiance = 1000.0 * scale;
-    }
-
-    // Apply time-series profiles to DC static generators
-    for (auto& sg : sys_t.dc.dc_static_generators) {
-      if (!sg.in_service) continue;
-      const auto* prof = find_profile(profile_map, sg.profile_id);
-      const double scale = profile_value(prof, t, 1.0);
-      sg.p_set_mw *= scale;
-    }
-
-    // Apply time-series profiles to DC loads
-    for (auto& load : sys_t.dc.loads) {
-      if (!load.in_service) continue;
-      const auto* pv = find_profile(profile_map, load.profile_id);
-      if (pv) {
-        double scale = profile_value(pv, t, 1.0);
-        load.p_mw *= scale;
-      }
-    }
-
-    return sys_t;
+    return build_time_series_system_snapshot(sys, ts_data, schedule, t, opts);
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -2268,6 +2312,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
     result.opf_results.resize(static_cast<size_t>(T));
     result.crossval.resize(static_cast<size_t>(T));
     result.pf_results.resize(static_cast<size_t>(T));
+    if (opts.keep_system_snapshots) {
+      result.pf_system_snapshots.resize(static_cast<size_t>(T));
+    }
 
     // Create SolverHandle for PF validation solves
     SolverHandle* handle = create_solver_handle(sys, opts.pf_options.loss_model);
@@ -2298,6 +2345,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
 
       if (!opf_res.converged) {
         // OPF failed — fall back to PF with UC dispatch directly
+        if (opts.keep_system_snapshots) {
+          result.pf_system_snapshots[static_cast<size_t>(t)] = sys_t;
+        }
         reset_solver_handle(handle, sys_t, opts.pf_options.loss_model);
         result.pf_results[static_cast<size_t>(t)] = solve_handle(handle, opts.pf_options);
         cv.pf_converged = result.pf_results[static_cast<size_t>(t)].converged;
@@ -2399,6 +2449,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
           sys_pf, opf_res, opts.pf_options.loss_model);
 
       // ── Run PF validation ──
+      if (opts.keep_system_snapshots) {
+        result.pf_system_snapshots[static_cast<size_t>(t)] = sys_pf;
+      }
       reset_solver_handle(handle, sys_pf, opts.pf_options.loss_model);
       auto& pf_res = result.pf_results[static_cast<size_t>(t)];
       pf_res = solve_handle(handle, opts.pf_options);
@@ -2480,6 +2533,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
     // ═══════════════════════════════════════════════════════════════
     SolverHandle* handle = create_solver_handle(sys, opts.pf_options.loss_model);
     result.pf_results.resize(static_cast<size_t>(T));
+    if (opts.keep_system_snapshots) {
+      result.pf_system_snapshots.resize(static_cast<size_t>(T));
+    }
     result.total_generation_cost = 0.0;
 
     for (int t = 0; t < T; ++t) {
@@ -2496,6 +2552,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
         }
       }
 
+      if (opts.keep_system_snapshots) {
+        result.pf_system_snapshots[static_cast<size_t>(t)] = sys_t;
+      }
       reset_solver_handle(handle, sys_t, opts.pf_options.loss_model);
       result.pf_results[static_cast<size_t>(t)] = solve_handle(handle, opts.pf_options);
 

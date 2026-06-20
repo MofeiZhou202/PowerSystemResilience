@@ -537,6 +537,37 @@ void carry_storage_carbon_state(const StorageCarbonResult& carbon,
       std::max(0.0, finite_or_zero(next_intensity));
 }
 
+void carry_storage_carbon_state_from_terminal_snapshot(
+    const StorageCarbonResult& carbon,
+    const Storage& current,
+    Storage& next,
+    double step_duration_hr,
+    const Storage* previous_terminal) {
+  double next_intensity = current.soc_carbon_intensity_tco2_mwh;
+  if (current.p_mw < -kTol) {
+    const double e_end = stored_energy_mwh(current);
+    double e_start = 0.0;
+    if (previous_terminal != nullptr) {
+      e_start = stored_energy_mwh(*previous_terminal);
+    } else {
+      const double eta_charge = (current.eta_charge > 0.0) ? current.eta_charge : 1.0;
+      const double charged_energy =
+          std::max(0.0, -current.p_mw * step_duration_hr * eta_charge);
+      e_start = std::max(0.0, e_end - charged_energy);
+    }
+    const double d_e_stored = std::max(e_end - e_start, 0.0);
+    const double bus_intensity =
+        std::max(0.0, finite_or_zero(carbon.carbon_intensity_tco2_mwh));
+    const double c_next =
+        e_start * std::max(0.0, finite_or_zero(current.soc_carbon_intensity_tco2_mwh)) +
+        d_e_stored * bus_intensity;
+    next_intensity = (e_end > kTol) ? (c_next / e_end) : 0.0;
+  }
+
+  next.soc_carbon_intensity_tco2_mwh =
+      std::max(0.0, finite_or_zero(next_intensity));
+}
+
 void update_storage_carbon_state(const HybridPowerSystem& current,
                                  HybridPowerSystem& next,
                                  const CarbonAnalysisResult& ca) {
@@ -554,6 +585,41 @@ void update_storage_carbon_state(const HybridPowerSystem& current,
       Storage* next_storage = find_storage_by_index(next.ac.storage, carbon.storage_index);
       if (current_storage != nullptr && next_storage != nullptr) {
         carry_storage_carbon_state(carbon, *current_storage, *next_storage);
+      }
+    }
+  }
+}
+
+void update_storage_carbon_state_from_terminal_snapshot(
+    const HybridPowerSystem& current,
+    const HybridPowerSystem* previous_terminal,
+    HybridPowerSystem& next,
+    const CarbonAnalysisResult& ca,
+    double step_duration_hr) {
+  for (const auto& carbon : ca.storage_carbon) {
+    if (carbon.is_dc) {
+      const Storage* current_storage =
+          find_storage_by_index(current.dc.storage, carbon.storage_index);
+      const Storage* previous_storage =
+          (previous_terminal != nullptr)
+              ? find_storage_by_index(previous_terminal->dc.storage, carbon.storage_index)
+              : nullptr;
+      Storage* next_storage = find_storage_by_index(next.dc.storage, carbon.storage_index);
+      if (current_storage != nullptr && next_storage != nullptr) {
+        carry_storage_carbon_state_from_terminal_snapshot(
+            carbon, *current_storage, *next_storage, step_duration_hr, previous_storage);
+      }
+    } else {
+      const Storage* current_storage =
+          find_storage_by_index(current.ac.storage, carbon.storage_index);
+      const Storage* previous_storage =
+          (previous_terminal != nullptr)
+              ? find_storage_by_index(previous_terminal->ac.storage, carbon.storage_index)
+              : nullptr;
+      Storage* next_storage = find_storage_by_index(next.ac.storage, carbon.storage_index);
+      if (current_storage != nullptr && next_storage != nullptr) {
+        carry_storage_carbon_state_from_terminal_snapshot(
+            carbon, *current_storage, *next_storage, step_duration_hr, previous_storage);
       }
     }
   }
@@ -738,7 +804,38 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     const TimeSeriesPFResult& ts_result,
     double step_duration_hr,
     const AnnualCarbonAnalysisOptions& options) {
+  if (ts_result.pf_system_snapshots.size() == ts_result.pf_results.size()) {
+    return compute_annual_carbon_analysis(ts_result, step_duration_hr, options);
+  }
   return compute_annual_carbon_analysis(sys, ts_result.pf_results, step_duration_hr, options);
+}
+
+AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
+    const TimeSeriesPFResult& ts_result,
+    double step_duration_hr,
+    const AnnualCarbonAnalysisOptions& options) {
+  if (ts_result.pf_system_snapshots.size() != ts_result.pf_results.size()) {
+    throw std::invalid_argument(
+        "ts_result.pf_system_snapshots.size() must equal ts_result.pf_results.size()");
+  }
+  std::vector<HybridPowerSystem> mutable_systems = ts_result.pf_system_snapshots;
+  return compute_annual_carbon_analysis_impl(
+      [&](size_t t) -> const HybridPowerSystem& { return mutable_systems[t]; },
+      ts_result.pf_results,
+      step_duration_hr,
+      options,
+      [&](size_t t, const CarbonAnalysisResult& ca) {
+        if (t + 1 < mutable_systems.size()) {
+          const HybridPowerSystem* previous_terminal =
+              (t > 0) ? &mutable_systems[t - 1] : nullptr;
+          update_storage_carbon_state_from_terminal_snapshot(
+              mutable_systems[t],
+              previous_terminal,
+              mutable_systems[t + 1],
+              ca,
+              step_duration_hr);
+        }
+      });
 }
 
 AnnualUserGECResult compute_annual_user_gec_accounting(
