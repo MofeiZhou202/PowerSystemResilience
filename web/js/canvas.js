@@ -802,64 +802,98 @@ const Canvas = (() => {
       if (hasEG) { root = b.id; break; }
     }
 
-    // BFS
-    const queue = [root];
-    busLayer.set(root, 0);
-    while (queue.length > 0) {
-      const cur = queue.shift();
-      const layer = busLayer.get(cur);
-      for (const nb of adj.get(cur) || []) {
-        if (!busLayer.has(nb)) {
-          busLayer.set(nb, layer + 1);
-          queue.push(nb);
+    // Multi-root BFS: build a spanning tree (parent/children) per connected
+    // component so the layout can centre each parent over its sub-tree.  The
+    // primary root is the SLACK / external-grid bus chosen above; every other
+    // disconnected bus seeds its own tree.
+    const busParent = new Map();
+    const visited = new Set();
+    const roots = [];
+    const bfsFrom = (r) => {
+      roots.push(r);
+      const queue = [r];
+      busLayer.set(r, 0);
+      busParent.set(r, null);
+      visited.add(r);
+      while (queue.length > 0) {
+        const cur = queue.shift();
+        const layer = busLayer.get(cur);
+        for (const nb of adj.get(cur) || []) {
+          if (!visited.has(nb)) {
+            visited.add(nb);
+            busLayer.set(nb, layer + 1);
+            busParent.set(nb, cur);
+            queue.push(nb);
+          }
         }
       }
-    }
-    // Handle disconnected buses
-    buses.forEach(b => { if (!busLayer.has(b.id)) busLayer.set(b.id, 0); });
+    };
+    bfsFrom(root);
+    buses.forEach(b => { if (!visited.has(b.id)) bfsFrom(b.id); });
 
-    // Group buses by layer
-    const layers = new Map(); // layer -> [busComp]
+    // Children (spanning-tree edges only)
+    const children = new Map();
+    buses.forEach(b => children.set(b.id, []));
+    buses.forEach(b => {
+      const p = busParent.get(b.id);
+      if (p != null && children.has(p)) children.get(p).push(b.id);
+    });
+
+    // Sub-tree leaf width (post-order): a leaf spans 1 column; a parent spans
+    // the sum of its children's widths.  Iterative post-order avoids deep
+    // recursion blowing the stack on large radial feeders.
+    const subWidth = new Map();
+    roots.forEach(r => {
+      const order = [];
+      const stack = [r];
+      while (stack.length) {
+        const id = stack.pop();
+        order.push(id);
+        (children.get(id) || []).forEach(c => stack.push(c));
+      }
+      for (let i = order.length - 1; i >= 0; i--) {
+        const id = order[i];
+        const ch = children.get(id) || [];
+        if (ch.length === 0) subWidth.set(id, 1);
+        else subWidth.set(id, ch.reduce((s, c) => s + (subWidth.get(c) || 1), 0));
+      }
+    });
+
+    // Assign coordinates (pre-order): allocate each sub-tree a contiguous band
+    // of leaf columns and centre the parent over its children's span.
+    const spacingX = 200, spacingY = 240;
+    const placeSubtree = (id, leftLeaf) => {
+      const bus = getComponent(id);
+      const ch = children.get(id) || [];
+      if (bus) bus.y = busLayer.get(id) * spacingY;
+      if (ch.length === 0) {
+        if (bus) bus.x = leftLeaf * spacingX;
+        return;
+      }
+      let cursor = leftLeaf;
+      ch.forEach(c => { placeSubtree(c, cursor); cursor += (subWidth.get(c) || 1); });
+      const first = getComponent(ch[0]);
+      const last = getComponent(ch[ch.length - 1]);
+      if (bus && first && last) bus.x = (first.x + last.x) / 2;
+    };
+    let rootLeaf = 0;
+    roots.forEach(r => { placeSubtree(r, rootLeaf); rootLeaf += (subWidth.get(r) || 1) + 1; });
+
+    // Centre the whole drawing horizontally around x = 0.
+    if (buses.length > 0) {
+      const xs = buses.map(b => b.x);
+      const mid = (Math.min(...xs) + Math.max(...xs)) / 2;
+      buses.forEach(b => { b.x -= mid; });
+    }
+
+    // Layer groups retained for orphan placement below.
+    const layers = new Map();
     buses.forEach(b => {
       const L = busLayer.get(b.id);
       if (!layers.has(L)) layers.set(L, []);
       layers.get(L).push(b);
     });
-
-    // Position buses: layers top-to-bottom, buses left-to-right within layer
-    const spacingX = 200, spacingY = 240;
     const sortedLayers = [...layers.keys()].sort((a, b) => a - b);
-    sortedLayers.forEach(L => {
-      const layerBuses = layers.get(L);
-      const offsetX = -(layerBuses.length - 1) * spacingX / 2;
-      layerBuses.forEach((bus, i) => {
-        bus.x = offsetX + i * spacingX;
-        bus.y = L * spacingY;
-      });
-    });
-
-    // Force-directed refinement (only X within same layer) — 30 iterations
-    for (let iter = 0; iter < 30; iter++) {
-      buses.forEach(bus => {
-        let fx = 0;
-        const neighbors = adj.get(bus.id) || new Set();
-        neighbors.forEach(nbId => {
-          const nb = getComponent(nbId);
-          if (!nb) return;
-          const dx = nb.x - bus.x;
-          fx += dx * 0.1; // attraction
-        });
-        // Repulsion from same-layer buses
-        const layer = busLayer.get(bus.id);
-        (layers.get(layer) || []).forEach(other => {
-          if (other.id === bus.id) return;
-          const dx = bus.x - other.x;
-          const dist = Math.abs(dx) || 1;
-          if (dist < spacingX) fx += Math.sign(dx) * spacingX / dist * 2;
-        });
-        bus.x += fx * 0.3;
-      });
-    }
 
     // Snap buses to grid
     buses.forEach(bus => {
@@ -886,8 +920,28 @@ const Canvas = (() => {
       br.el.setAttribute('transform', `translate(${br.x}, ${br.y}) rotate(${br.rotation || 0})`);
     });
 
-    // Place device components around their connected buses
-    const busDeviceCount = new Map(); // busCompId -> count of devices placed
+    // Place device components around their connected bus BY TYPE so the
+    // single-line diagram reads like a professional schematic (doc §5.3 step 8):
+    //   external grid → above,  generator → left,  pv / renewable → right,
+    //   load / motor → below,  storage → lower-right,  shunt → lower-left.
+    const dirSlots = new Map(); // `${busId}|${dir}` -> count already placed
+    const slotOf = (busId, dir) => {
+      const key = busId + '|' + dir;
+      const n = dirSlots.get(key) || 0;
+      dirSlots.set(key, n + 1);
+      return n;
+    };
+    const placement = {
+      external_grid:    { dir: 'up',    dx: 0,    dy: -110, sx: 70,  sy: 0 },
+      generator:        { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
+      static_generator: { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
+      pv_system:        { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      renewable_gen:    { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
+      storage:          { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      mobile_storage:   { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
+      shunt:            { dir: 'dl',    dx: -95,  dy: 110,  sx: -70, sy: 0 },
+    };
+    const defaultPlace = { dir: 'down', dx: 0, dy: 110, sx: 80, sy: 70 };
     let orphanIdx = 0;
     devices.forEach(comp => {
       const conn = state.connections.find(c =>
@@ -897,17 +951,15 @@ const Canvas = (() => {
         const busId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
         const bus = getComponent(busId);
         if (bus) {
-          const n = busDeviceCount.get(busId) || 0;
-          busDeviceCount.set(busId, n + 1);
-          // Spread devices around the bus: above for grids, below for others
-          if (comp.type === 'external_grid') {
-            comp.x = bus.x + (n % 3 - 1) * 70;
-            comp.y = bus.y - 100;
+          const p = placement[comp.type] || defaultPlace;
+          const n = slotOf(busId, p.dir);
+          if (p.dir === 'down') {
+            const col = n % 4, row = Math.floor(n / 4);
+            comp.x = bus.x + (col - 1.5) * p.sx;
+            comp.y = bus.y + p.dy + row * 70;
           } else {
-            const col = n % 4;
-            const row = Math.floor(n / 4);
-            comp.x = bus.x + (col - 1.5) * 80;
-            comp.y = bus.y + 100 + row * 80;
+            comp.x = bus.x + p.dx + n * p.sx;
+            comp.y = bus.y + p.dy + n * p.sy;
           }
         }
       } else {
@@ -917,6 +969,8 @@ const Canvas = (() => {
         comp.y = maxLayer * spacingY + 100 + Math.floor(orphanIdx / 5) * 100;
         orphanIdx++;
       }
+      comp.x = snapToGrid(comp.x);
+      comp.y = snapToGrid(comp.y);
       comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
     });
 
