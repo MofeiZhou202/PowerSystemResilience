@@ -34,6 +34,7 @@
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/system.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 // ---------------------------------------------------------------------------
@@ -423,6 +424,65 @@ TEST_CASE("Topology reconfiguration reports no-source networks as infeasible",
     CHECK(std::find(result.open_branch_ids.begin(), result.open_branch_ids.end(), 4) !=
       result.open_branch_ids.end());
   }
+
+TEST_CASE("ONR wrapper preserves real branch ids across switch expansion",
+          "[topology][reconfiguration][noncontiguous]") {
+  using namespace hacdcpf;
+
+  // 4-bus radial path with NON-contiguous real branch ids (3,5,7) plus a
+  // normally-open tie (id 9).  An in-service Switch with non-zero contact
+  // impedance is added so canonical projection EXPANDS it into a brand-new
+  // ACBranch (populating branch_expand_map).  The expansion appends indices
+  // after the existing ones, so the real branch ids (incl. the switchable
+  // tie 9) must survive — i.e. ONROptions::switchable_branch_ids stays valid.
+  ACSystem ac;
+  ac.base_mva = 10.0;
+  ac.buses = {
+      make_bus(1, BusType::SLACK, 0.0, 0.0),
+      make_bus(2, BusType::PQ,    0.4, 0.0),
+      make_bus(3, BusType::PQ,    0.4, 0.0),
+      make_bus(4, BusType::PQ,    0.4, 0.0),
+  };
+  ac.branches = {
+      make_branch(3, 1, 2, 0.02, 0.02, true),
+      make_branch(5, 2, 3, 0.02, 0.02, true),
+      make_branch(7, 3, 4, 0.02, 0.02, true),
+      make_branch(9, 1, 4, 0.05, 0.05, false),  // normally-open tie (switchable)
+  };
+  Generator g;
+  g.index = 1; g.bus = 1; g.in_service = true; g.is_slack = true;
+  g.pmax_mw = 10.0; g.pmin_mw = 0.0; g.qmax_mvar = 10.0; g.qmin_mvar = -10.0;
+  ac.generators = {g};
+
+  Switch sw;
+  sw.index = 1; sw.bus_from = 2; sw.bus_to = 4;
+  sw.in_service = true; sw.closed = false;
+  sw.r_contact_ohm = 0.5;  // non-zero ⇒ NOT collapsed by zero-impedance merge
+  ac.switches = {sw};
+
+  HybridPowerSystem sys;
+  sys.ac = ac;
+
+  // Projection expands the switch (branch_expand_map present) yet keeps the
+  // original real branch ids intact.
+  const auto proj = project_to_canonical_models(sys);
+  REQUIRE(proj.branch_expand_map.has_value());
+  REQUIRE(!proj.branch_expand_map->empty());
+  for (int id : {3, 5, 7, 9}) {
+    const bool present = std::any_of(
+        proj.ac.branches.begin(), proj.ac.branches.end(),
+        [&](const ACBranch& b) { return b.index == id; });
+    INFO("real branch id " << id << " must survive projection");
+    CHECK(present);
+  }
+
+  // The wrapper must accept the switchable real branch id (9) without throwing.
+  analysis::ONROptions opt;
+  opt.switchable_branch_ids = {9};
+  opt.max_time_s = 20;
+  opt.verbose = false;
+  REQUIRE_NOTHROW(analysis::solve_optimal_reconfiguration(sys, opt));
+}
 
 TEST_CASE("Topology reconfiguration verbose false emits no solver diagnostics",
           "[topology][reconfiguration][regression]") {
