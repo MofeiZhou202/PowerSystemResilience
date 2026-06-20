@@ -997,6 +997,7 @@ static json external_grid_to_json(const ExternalGrid& e) {
   j["x0_pu"] = e.x0_pu;
   j["vn_kv"] = e.vn_kv;
   j["controllable"] = e.controllable;
+  j["emission_factor_tco2_mwh"] = e.emission_factor_tco2_mwh;
   return j;
 }
 
@@ -1018,6 +1019,8 @@ static ExternalGrid external_grid_from_json(const json& j) {
   e.x0_pu = jget(j, "x0_pu", 0.0);
   e.vn_kv = jget(j, "vn_kv", 0.0);
   e.controllable = jget(j, "controllable", true);
+  e.emission_factor_tco2_mwh =
+      jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
   return e;
 }
 

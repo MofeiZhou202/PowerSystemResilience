@@ -625,6 +625,22 @@ void update_storage_carbon_state_from_terminal_snapshot(
   }
 }
 
+void set_terminal_storage_states(const HybridPowerSystem& sys,
+                                 AnnualCarbonAnalysisResult& result) {
+  result.terminal_storage_states.clear();
+  result.terminal_storage_states.reserve(sys.ac.storage.size() + sys.dc.storage.size());
+  for (const auto& st : sys.ac.storage) {
+    result.terminal_storage_states.push_back(
+        {st.index, st.bus, false, st.soc_init, stored_energy_mwh(st),
+         st.soc_carbon_intensity_tco2_mwh});
+  }
+  for (const auto& st : sys.dc.storage) {
+    result.terminal_storage_states.push_back(
+        {st.index, st.bus, true, st.soc_init, stored_energy_mwh(st),
+         st.soc_carbon_intensity_tco2_mwh});
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Core implementation (shared across all compute_annual_carbon_analysis overloads)
 // ---------------------------------------------------------------------------
@@ -676,10 +692,19 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
         std::max(0.0, finite_or_zero(step_load_emissions(ca))) * step_duration_hr;
     step.total_loss_emissions_tco2 =
         std::max(0.0, finite_or_zero(step_loss_emissions(ca))) * step_duration_hr;
+    step.total_storage_charge_emissions_tco2 =
+        std::max(0.0, finite_or_zero(ca.total_storage_charge_emissions_tco2)) *
+        step_duration_hr;
+    step.total_storage_discharge_emissions_tco2 =
+        std::max(0.0, finite_or_zero(ca.total_storage_discharge_emissions_tco2)) *
+        step_duration_hr;
 
     result.total_generation_emissions_tco2 += step.total_generation_emissions_tco2;
     result.total_load_emissions_tco2 += step.total_load_emissions_tco2;
     result.total_loss_emissions_tco2 += step.total_loss_emissions_tco2;
+    result.total_storage_charge_emissions_tco2 += step.total_storage_charge_emissions_tco2;
+    result.total_storage_discharge_emissions_tco2 +=
+        step.total_storage_discharge_emissions_tco2;
 
     std::vector<double>* hourly_bus = nullptr;
     if (options.keep_hourly_bus_intensity) {
@@ -769,11 +794,13 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     const std::vector<PowerFlowResult>& pf_results,
     double step_duration_hr,
     const AnnualCarbonAnalysisOptions& options) {
-  return compute_annual_carbon_analysis_impl(
+  auto result = compute_annual_carbon_analysis_impl(
       [&](size_t) -> const HybridPowerSystem& { return sys; },
       pf_results,
       step_duration_hr,
       options);
+  set_terminal_storage_states(sys, result);
+  return result;
 }
 
 AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
@@ -785,7 +812,7 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
     throw std::invalid_argument("systems.size() must equal pf_results.size()");
   }
   std::vector<HybridPowerSystem> mutable_systems = systems;
-  return compute_annual_carbon_analysis_impl(
+  auto result = compute_annual_carbon_analysis_impl(
       [&](size_t t) -> const HybridPowerSystem& { return mutable_systems[t]; },
       pf_results,
       step_duration_hr,
@@ -797,6 +824,10 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
                                       ca);
         }
       });
+  if (!mutable_systems.empty()) {
+    set_terminal_storage_states(mutable_systems.back(), result);
+  }
+  return result;
 }
 
 AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
@@ -819,7 +850,7 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
         "ts_result.pf_system_snapshots.size() must equal ts_result.pf_results.size()");
   }
   std::vector<HybridPowerSystem> mutable_systems = ts_result.pf_system_snapshots;
-  return compute_annual_carbon_analysis_impl(
+  auto result = compute_annual_carbon_analysis_impl(
       [&](size_t t) -> const HybridPowerSystem& { return mutable_systems[t]; },
       ts_result.pf_results,
       step_duration_hr,
@@ -836,6 +867,10 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
               step_duration_hr);
         }
       });
+  if (!mutable_systems.empty()) {
+    set_terminal_storage_states(mutable_systems.back(), result);
+  }
+  return result;
 }
 
 AnnualUserGECResult compute_annual_user_gec_accounting(

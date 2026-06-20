@@ -36,8 +36,8 @@ struct CarbonAnalysisOptions {
   /// Maximum BFS tracing depth (0 = unlimited).
   int max_tracing_depth{0};
 
-  /// Fraction of branch loss "charged" to the outgoing (to-bus) side for the
-  /// matrix method.  0.5 = equal split, 0.0 = all on from-side.
+  /// Fraction of branch loss charged to the sending/from-bus side for the
+  /// matrix method. 0.5 = equal split, 1.0 = all on from-side.
   double loss_allocation_alpha{0.5};
 
   /// Regularisation for near-singular system matrix (matrix method).
@@ -165,6 +165,11 @@ struct CarbonAnalysisResult {
   EmissionsSummary tracing_summary;
   /// System-level summary from matrix method.
   EmissionsSummary matrix_summary;
+
+  /// Storage charging emissions (storage acts as a carbon sink), in tCO2.
+  double total_storage_charge_emissions_tco2{0.0};
+  /// Storage discharge emissions (storage acts as a carbon source), in tCO2.
+  double total_storage_discharge_emissions_tco2{0.0};
 
   bool tracing_verified{false};
   bool matrix_solved{false};

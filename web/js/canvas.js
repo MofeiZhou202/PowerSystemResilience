@@ -1029,7 +1029,9 @@ const Canvas = (() => {
         case 'generator': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.generators.push({
-            index: genIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : genIdx,
+            name: p.name || `Gen ${genIdx}`,
+            bus: busIdx,
             pg_mw: numOr(p.pg_mw, 0),
             qg_mvar: numOr(p.qg_mvar, 0),
             vg_pu: numOr(p.vg_pu, 1.0),
@@ -1043,11 +1045,13 @@ const Canvas = (() => {
             cost_c2: numOr(p.cost_c2, 0),
             cost_c1: numOr(p.cost_c1, 20),
             cost_c0: numOr(p.cost_c0, 0),
+            emission_factor_tco2_mwh: numOr(p.emission_factor_tco2_mwh, 0),
             startup_cost: numOr(p.startup_cost, 0),
             shutdown_cost: numOr(p.shutdown_cost, 0),
             ramp_up_mw_min: numOr(p.ramp_up_mw_min, 0),
             ramp_dn_mw_min: numOr(p.ramp_dn_mw_min, 0),
           });
+          genIdx++;
           // Update bus type to PV or SLACK
           const bus = sys.ac.buses.find(b => b.index === busIdx);
           if (bus) {
@@ -1143,8 +1147,10 @@ const Canvas = (() => {
         }
         case 'external_grid': {
           const busIdx = findBusIndex(comp.id);
-          sys.ac.external_grids.push({
-            index: egIdx++, bus: busIdx,
+          const eg = {
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : egIdx,
+            name: p.name || `Grid ${egIdx}`,
+            bus: busIdx,
             vm_pu: numOr(p.vm_pu, 1.05),
             va_deg: numOr(p.va_deg, 0),
             s_sc_max_mva: numOr(p.s_sc_max_mva, 10000),
@@ -1156,9 +1162,16 @@ const Canvas = (() => {
             r0_pu: numOr(p.r0_pu, 0),
             x0_pu: numOr(p.x0_pu, 0),
             vn_kv: numOr(p.vn_kv, 0),
+            emission_factor_tco2_mwh: numOr(p.emission_factor_tco2_mwh, 0),
             controllable: p.controllable === true || p.controllable === 'true',
             in_service: p.in_service !== false,
-          });
+          };
+          if (Array.isArray(p.emission_factor_profile_tco2_mwh)) {
+            eg.emission_factor_profile_tco2_mwh =
+              p.emission_factor_profile_tco2_mwh.map(Number).filter(Number.isFinite);
+          }
+          sys.ac.external_grids.push(eg);
+          egIdx++;
           // Set bus as SLACK
           const bus = sys.ac.buses.find(b => b.index === busIdx);
           if (bus) bus.bus_type = 'SLACK';
@@ -1243,7 +1256,9 @@ const Canvas = (() => {
         case 'static_generator': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.static_generators.push({
-            index: sgenIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sgenIdx,
+            name: p.name || `SGen ${sgenIdx}`,
+            bus: busIdx,
             p_mw: numOr(p.p_mw, 5),
             q_mvar: numOr(p.q_mvar, 0),
             sgen_type: p.sgen_type || 'PV',
@@ -1256,8 +1271,10 @@ const Canvas = (() => {
             scaling: numOr(p.scaling, 1.0),
             controllable: p.controllable === true || p.controllable === 'true',
             v_ref_pu: numOr(p.v_ref_pu, 0),
+            co2_emission_rate: numOr(p.emission_factor_tco2_mwh ?? p.co2_emission_rate, 0),
             in_service: p.in_service !== false,
           });
+          sgenIdx++;
           break;
         }
         case 'vsc_converter': {
@@ -1840,7 +1857,8 @@ const Canvas = (() => {
     jsonSys.ac?.generators?.forEach(gen => {
       addDeviceAtBus('generator', gen.bus, {
         ...COMP.defaults.generator,
-        name: `Gen ${gen.index !== undefined ? gen.index : ''}`,
+        index: gen.index,
+        name: gen.name || `Gen ${gen.index !== undefined ? gen.index : ''}`,
         pg_mw: gen.pg_mw, qg_mvar: gen.qg_mvar,
         vg_pu: gen.vg_pu || 1.0,
         pmax_mw: gen.pmax_mw, pmin_mw: gen.pmin_mw,
@@ -1849,6 +1867,7 @@ const Canvas = (() => {
         is_slack: gen.is_slack || false,
         in_service: gen.in_service !== false,
         cost_c2: gen.cost_c2, cost_c1: gen.cost_c1, cost_c0: gen.cost_c0,
+        emission_factor_tco2_mwh: gen.emission_factor_tco2_mwh || gen.co2_emission_rate || 0,
         startup_cost: gen.startup_cost, shutdown_cost: gen.shutdown_cost,
         ramp_up_mw_min: gen.ramp_up_mw_min, ramp_dn_mw_min: gen.ramp_dn_mw_min,
       }, busCompMap);
@@ -1894,7 +1913,8 @@ const Canvas = (() => {
     jsonSys.ac?.external_grids?.forEach(eg => {
       addDeviceAtBus('external_grid', eg.bus, {
         ...COMP.defaults.external_grid,
-        name: 'Grid',
+        index: eg.index,
+        name: eg.name || 'Grid',
         vm_pu: eg.vm_pu, va_deg: eg.va_deg,
         s_sc_max_mva: eg.s_sc_max_mva,
         s_sc_min_mva: eg.s_sc_min_mva,
@@ -1902,6 +1922,10 @@ const Canvas = (() => {
         r_pu: eg.r_pu, x_pu: eg.x_pu,
         r0_pu: eg.r0_pu, x0_pu: eg.x0_pu,
         vn_kv: eg.vn_kv,
+        emission_factor_tco2_mwh: eg.emission_factor_tco2_mwh || eg.co2_emission_rate || 0,
+        emission_factor_profile_tco2_mwh: Array.isArray(eg.emission_factor_profile_tco2_mwh)
+          ? eg.emission_factor_profile_tco2_mwh
+          : undefined,
         controllable: eg.controllable || false,
         in_service: eg.in_service !== false,
       }, busCompMap, -80);
@@ -2175,7 +2199,8 @@ const Canvas = (() => {
     jsonSys.ac?.static_generators?.forEach(sg => {
       addDeviceAtBus('static_generator', sg.bus, {
         ...COMP.defaults.static_generator,
-        name: 'SGen',
+        index: sg.index,
+        name: sg.name || 'SGen',
         p_mw: sg.p_mw, q_mvar: sg.q_mvar,
         sgen_type: sg.sgen_type || 'PV',
         p_rated_mw: sg.p_rated_mw, sn_mva: sg.sn_mva,
@@ -2184,6 +2209,7 @@ const Canvas = (() => {
         scaling: sg.scaling,
         controllable: sg.controllable || false,
         v_ref_pu: sg.v_ref_pu,
+        emission_factor_tco2_mwh: sg.emission_factor_tco2_mwh || sg.co2_emission_rate || 0,
         in_service: sg.in_service !== false,
       }, busCompMap);
     });
@@ -3616,6 +3642,65 @@ const Canvas = (() => {
     if (defsEl) defsEl.remove();
   }
 
+  function carbonColor(value, maxValue) {
+    const t = Math.max(0, Math.min(1, value / Math.max(maxValue, 1e-9)));
+    const r = Math.round(46 + (224 - 46) * t);
+    const g = Math.round(204 + (78 - 204) * t);
+    const b = Math.round(113 + (71 - 113) * t);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function showCarbonPotentialResults(data) {
+    if (!resultsLayer || !data) return;
+    resultsLayer.querySelectorAll('.carbon-potential-overlay').forEach(el => el.remove());
+
+    const busMap = getCompBusMap();
+    const rows = [
+      ...(data.bus_carbon || []).map(b => ({ ...b, is_dc: false })),
+      ...(data.dc_bus_carbon || []).map(b => ({ ...b, is_dc: true })),
+    ];
+    const maxIntensity = rows.reduce(
+      (mx, b) => Math.max(mx, Number(b.carbon_intensity_tco2_mwh || 0)),
+      0,
+    );
+
+    rows.forEach(row => {
+      const busIndex = Number(row.bus_index);
+      const compId = row.is_dc ? busMap.dc[busIndex] : busMap.ac[busIndex];
+      const comp = getComponent(compId);
+      if (!comp) return;
+      const intensity = Number(row.carbon_intensity_tco2_mwh || 0);
+      const color = carbonColor(intensity, maxIntensity);
+
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.classList.add('carbon-potential-overlay');
+      ring.setAttribute('cx', comp.x);
+      ring.setAttribute('cy', comp.y);
+      ring.setAttribute('r', row.is_dc ? '22' : '20');
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', color);
+      ring.setAttribute('stroke-width', '5');
+      ring.setAttribute('opacity', '0.9');
+      ring.setAttribute('data-comp-id', comp.id);
+      ring.style.pointerEvents = 'none';
+      resultsLayer.appendChild(ring);
+
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      label.classList.add('carbon-potential-overlay', 'result-voltage');
+      label.setAttribute('x', comp.x);
+      label.setAttribute('y', comp.y + 34);
+      label.setAttribute('fill', color);
+      label.setAttribute('data-comp-id', comp.id);
+      label.textContent = `${(intensity * 1000).toFixed(1)} kg/MWh`;
+      resultsLayer.appendChild(label);
+    });
+  }
+
+  function clearCarbonPotentialResults() {
+    if (!resultsLayer) return;
+    resultsLayer.querySelectorAll('.carbon-potential-overlay').forEach(el => el.remove());
+  }
+
   function compToBusIndex(compId) {
     // Reconstruct bus index from component position in list
     let idx = 0;
@@ -3758,6 +3843,8 @@ const Canvas = (() => {
     buildSystemJson,
     loadFromSystemJson,
     showPowerFlowResults,
+    showCarbonPotentialResults,
+    clearCarbonPotentialResults,
     clearResults,
     setVisualizationMode,
     refreshVisualization: applyVisualizationOverlay,
