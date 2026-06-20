@@ -28,6 +28,14 @@
     <option value="RADIAL">◎ 径向</option>
     <option value="COMPACT">▦ 紧凑</option>
   </select>
+  <button id="btnRelayoutSel" class="toolbar-btn" title="只对选中元件重新布局">局部<br>布局</button>
+  <select id="connStyleSelect" class="toolbar-select" title="连线样式">
+    <option value="straight">直线</option>
+    <option value="orthogonal">正交</option>
+    <option value="avoid">避让</option>
+  </select>
+  <button id="btnReroute" class="toolbar-btn" title="重新整理所有连线">整理<br>连线</button>
+  <label class="toolbar-check" title="拖动时对齐相邻元件"><input type="checkbox" id="chkAlignSnap" checked/>吸附</label>
   <button id="btnRotateCW" class="toolbar-btn" title="顺时针旋转90° (R)">顺时针<br>旋转</button>
   <button id="btnRotateCCW" class="toolbar-btn" title="逆时针旋转90° (Shift+R)">逆时针<br>旋转</button>
   <span class="toolbar-spacer"></span>

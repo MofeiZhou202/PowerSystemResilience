@@ -3925,6 +3925,16 @@ const App = (() => {
     document.getElementById('btnZoomFit').addEventListener('click', () => Canvas.zoomFit());
     document.getElementById('btnAutoLayout').addEventListener('click', () => Canvas.autoLayout({ direction: layoutDirection() }));
     document.getElementById('layoutDirSelect')?.addEventListener('change', () => Canvas.autoLayout({ direction: layoutDirection() }));
+    // Local re-layout of the current selection (doc §18 Phase 4)
+    document.getElementById('btnRelayoutSel')?.addEventListener('click', () => Canvas.autoLayoutSelection?.({ direction: layoutDirection() }));
+    // Connection style (直线 / 正交 / 避让) — doc §10.2/§10.3
+    const connStyleSel = document.getElementById('connStyleSelect');
+    if (connStyleSel) {
+      try { connStyleSel.value = localStorage.getItem('connectionStyle') || 'orthogonal'; } catch (e) {}
+      connStyleSel.addEventListener('change', (e) => Canvas.setConnectionStyle?.(e.target.value));
+    }
+    document.getElementById('btnReroute')?.addEventListener('click', () => Canvas.rerouteConnections?.());
+    document.getElementById('chkAlignSnap')?.addEventListener('change', (e) => Canvas.setAlignSnap?.(e.target.checked));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
 
