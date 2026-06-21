@@ -59,6 +59,118 @@ unsigned int fresh_typhoon_seed() {
   return rng();
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Harmonic power-flow REST helpers (shared by every /api/session/harmonics* route)
+// ───────────────────────────────────────────────────────────────────────────
+namespace hpf_api {
+namespace H = hacdcpf::harmonics;
+
+// Parse the common HPFOptions block (used by all harmonic endpoints).
+inline void parse_options(const json& o, H::HPFOptions& opt) {
+  if (o.contains("ac_orders") && o["ac_orders"].is_array())
+    opt.ac_orders = o["ac_orders"].get<std::vector<int>>();
+  if (o.contains("dc_orders") && o["dc_orders"].is_array())
+    opt.dc_orders = o["dc_orders"].get<std::vector<int>>();
+  if (o.contains("include_load_impedance"))
+    opt.include_load_impedance = o["include_load_impedance"].get<bool>();
+  if (o.contains("run_base_power_flow"))
+    opt.run_base_power_flow = o["run_base_power_flow"].get<bool>();
+  if (o.contains("default_source_xpp_pu"))
+    opt.default_source_xpp_pu = o["default_source_xpp_pu"].get<double>();
+  if (o.contains("dc_source_impedance_pu"))
+    opt.dc_source_impedance_pu = o["dc_source_impedance_pu"].get<double>();
+  if (o.contains("auto_nic_from_vscs"))
+    opt.auto_nic_from_vscs = o["auto_nic_from_vscs"].get<bool>();
+  if (o.contains("compute_branch_flows"))
+    opt.compute_branch_flows = o["compute_branch_flows"].get<bool>();
+  if (o.contains("skin_effect")) {
+    const std::string s = o["skin_effect"].get<std::string>();
+    opt.skin_effect = (s == "sqrt" || s == "SqrtOrder") ? H::SkinEffectModel::SqrtOrder
+                    : (s == "prop" || s == "ProportionalSqrt")
+                          ? H::SkinEffectModel::ProportionalSqrt
+                          : H::SkinEffectModel::None;
+  }
+  if (o.contains("skin_coefficient"))
+    opt.skin_coefficient = o["skin_coefficient"].get<double>();
+  // Optional frequency-dependent DC ripple network refinement.
+  if (o.contains("dc_ripple_branch_x") && o["dc_ripple_branch_x"].is_array())
+    for (const auto& e : o["dc_ripple_branch_x"])
+      opt.dc_ripple_model.branch_x_pu[e.value("index", 0)] = e.value("x_pu", 0.0);
+  if (o.contains("dc_ripple_bus_b") && o["dc_ripple_bus_b"].is_array())
+    for (const auto& e : o["dc_ripple_bus_b"])
+      opt.dc_ripple_model.bus_b_pu[e.value("index", 0)] = e.value("b_pu", 0.0);
+}
+
+inline H::HarmonicSpectrum parse_spectrum(const json& arr) {
+  H::HarmonicSpectrum spec;
+  if (arr.is_array())
+    for (const auto& l : arr)
+      spec.push_back({l.value("order", 0), l.value("mag_percent", 0.0),
+                      l.value("phase_deg", 0.0)});
+  return spec;
+}
+
+// Parse user harmonic current sources and explicit NIC overrides into `inputs`.
+inline void parse_inputs(const json& j, H::HarmonicStudyInputs& inputs) {
+  if (j.contains("sources") && j["sources"].is_array()) {
+    for (const auto& s : j["sources"]) {
+      H::HarmonicCurrentSource src;
+      src.bus = s.value("bus", 0);
+      src.is_dc = s.value("is_dc", false);
+      src.i_base_pu = s.value("i_base_pu", 0.0);
+      src.i_base_phase_deg = s.value("i_base_phase_deg", 0.0);
+      src.name = s.value("name", std::string());
+      if (s.contains("spectrum")) src.spectrum = parse_spectrum(s["spectrum"]);
+      inputs.sources.push_back(std::move(src));
+    }
+  }
+  if (j.contains("nics") && j["nics"].is_array()) {
+    for (const auto& n : j["nics"]) {
+      H::HarmonicNIC nic;
+      nic.vsc_index = n.value("vsc_index", -1);
+      nic.bus_ac = n.value("bus_ac", 0);
+      nic.bus_dc = n.value("bus_dc", 0);
+      nic.name = n.value("name", std::string());
+      nic.s_ac_p_mw = n.value("s_ac_p_mw", 0.0);
+      nic.s_ac_q_mvar = n.value("s_ac_q_mvar", 0.0);
+      nic.p_dc_mw = n.value("p_dc_mw", 0.0);
+      if (n.contains("ac_spectrum")) nic.ac_spectrum = parse_spectrum(n["ac_spectrum"]);
+      if (n.contains("dc_spectrum")) nic.dc_spectrum = parse_spectrum(n["dc_spectrum"]);
+      if (n.contains("y_out_ac_g") || n.contains("y_out_ac_b"))
+        nic.y_out_ac = H::Complex(n.value("y_out_ac_g", 0.0), n.value("y_out_ac_b", 0.0));
+      inputs.nics.push_back(std::move(nic));
+    }
+  }
+}
+
+// Serialize a single-phase / DC bus harmonic result (incl. the per-order spectrum).
+inline json bus_json(const H::HarmonicBusResult& b) {
+  json jb;
+  jb["bus"] = b.bus;
+  jb["is_dc"] = b.is_dc;
+  jb["v_fund_pu"] = b.v_fund_pu;
+  jb["thd_pct"] = b.thd_pct;
+  json spec = json::array();
+  for (const auto& [ord, v] : b.v_by_order)
+    spec.push_back(json{{"order", ord}, {"mag_pu", std::abs(v)},
+                        {"phase_deg", std::arg(v) * 180.0 / M_PI}});
+  jb["harmonics"] = spec;
+  return jb;
+}
+
+// Parse a {order: [re, im]} or {order: {re, im}} map of complex per-order values.
+inline std::map<int, H::Complex> parse_order_complex(const json& m) {
+  std::map<int, H::Complex> out;
+  if (!m.is_array()) return out;
+  for (const auto& e : m) {
+    int ord = e.value("order", 0);
+    out[ord] = H::Complex(e.value("re", 0.0), e.value("im", 0.0));
+  }
+  return out;
+}
+
+}  // namespace hpf_api
+
 constexpr std::array<hacdcpf::analysis::TyphoonIntensityCategory, 6> kTyphoonCategories{
     hacdcpf::analysis::TyphoonIntensityCategory::TD,
     hacdcpf::analysis::TyphoonIntensityCategory::TS,
@@ -6272,39 +6384,9 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       hacdcpf::harmonics::HPFOptions opt;
       hacdcpf::harmonics::HarmonicStudyInputs inputs;
-      if (j.contains("options")) {
-        const auto& o = j["options"];
-        if (o.contains("ac_orders") && o["ac_orders"].is_array())
-          opt.ac_orders = o["ac_orders"].get<std::vector<int>>();
-        if (o.contains("dc_orders") && o["dc_orders"].is_array())
-          opt.dc_orders = o["dc_orders"].get<std::vector<int>>();
-        if (o.contains("include_load_impedance"))
-          opt.include_load_impedance = o["include_load_impedance"].get<bool>();
-        if (o.contains("run_base_power_flow"))
-          opt.run_base_power_flow = o["run_base_power_flow"].get<bool>();
-        if (o.contains("default_source_xpp_pu"))
-          opt.default_source_xpp_pu = o["default_source_xpp_pu"].get<double>();
-        if (o.contains("dc_source_impedance_pu"))
-          opt.dc_source_impedance_pu = o["dc_source_impedance_pu"].get<double>();
-        if (o.contains("auto_nic_from_vscs"))
-          opt.auto_nic_from_vscs = o["auto_nic_from_vscs"].get<bool>();
-      }
-      // Optional user-defined harmonic current sources (nonlinear loads / CIDERs).
-      if (j.contains("sources") && j["sources"].is_array()) {
-        for (const auto& s : j["sources"]) {
-          hacdcpf::harmonics::HarmonicCurrentSource src;
-          src.bus = s.value("bus", 0);
-          src.is_dc = s.value("is_dc", false);
-          src.i_base_pu = s.value("i_base_pu", 0.0);
-          src.i_base_phase_deg = s.value("i_base_phase_deg", 0.0);
-          if (s.contains("spectrum") && s["spectrum"].is_array()) {
-            for (const auto& l : s["spectrum"])
-              src.spectrum.push_back({l.value("order", 0), l.value("mag_percent", 0.0),
-                                      l.value("phase_deg", 0.0)});
-          }
-          inputs.sources.push_back(std::move(src));
-        }
-      }
+      if (j.contains("options")) hpf_api::parse_options(j["options"], opt);
+      // User harmonic current sources (nonlinear loads / CIDERs) + explicit NICs.
+      hpf_api::parse_inputs(j, inputs);
 
       auto r = hacdcpf::harmonics::solve_harmonic_power_flow(sys, inputs, opt);
 
@@ -6382,6 +6464,295 @@ int main(int argc, char** argv) {
         out["compliance"] = comp;
       }
 
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Harmonic frequency scan / resonance analysis ----
+  svr.Post("/api/session/harmonics_freqscan",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HPFOptions opt;
+      if (j.contains("options")) hpf_api::parse_options(j["options"], opt);
+
+      hacdcpf::harmonics::FrequencyScanOptions sopt;
+      const auto& o = j.contains("scan") ? j["scan"] : j;
+      sopt.f_start = o.value("f_start", 1.0);
+      sopt.f_end = o.value("f_end", 25.0);
+      sopt.f_step = o.value("f_step", 0.1);
+      sopt.resonance_min_pu = o.value("resonance_min_pu", 0.0);
+      sopt.detect_resonances = o.value("detect_resonances", true);
+      if (o.contains("buses") && o["buses"].is_array())
+        sopt.buses = o["buses"].get<std::vector<int>>();
+
+      json out;
+      const bool sequence = o.value("sequence", false);
+      if (sequence) {
+        if (!sys.three_phase_ac)
+          throw std::runtime_error("Per-sequence scan requires a three-phase model");
+        int bus = o.value("bus", sopt.buses.empty() ? 0 : sopt.buses.front());
+        auto r = hacdcpf::harmonics::sequence_frequency_scan(*sys.three_phase_ac, bus, sopt, opt);
+        out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = true;
+        out["bus"] = r.bus; out["freqs"] = r.freqs;
+        out["z1_mag"] = r.z1_mag; out["z2_mag"] = r.z2_mag; out["z0_mag"] = r.z0_mag;
+        out["resonances"] = json::array();
+        for (const auto& rz : r.resonances)
+          out["resonances"].push_back(json{{"bus", rz.bus}, {"freq_order", rz.freq_order},
+              {"z_mag", rz.z_mag}, {"parallel", rz.parallel}, {"sequence", rz.sequence}});
+      } else {
+        auto r = hacdcpf::harmonics::frequency_scan(sys, sopt, opt);
+        out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = false;
+        out["freqs"] = r.freqs;
+        out["buses"] = json::array();
+        for (const auto& [bus, zm] : r.z_mag) {
+          json jb; jb["bus"] = bus; jb["z_mag"] = zm;
+          auto ait = r.z_ang_deg.find(bus);
+          if (ait != r.z_ang_deg.end()) jb["z_ang_deg"] = ait->second;
+          out["buses"].push_back(jb);
+        }
+        out["resonances"] = json::array();
+        for (const auto& rz : r.resonances)
+          out["resonances"].push_back(json{{"bus", rz.bus}, {"freq_order", rz.freq_order},
+              {"z_mag", rz.z_mag}, {"parallel", rz.parallel}});
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Three-phase (abc-domain) harmonic power flow ----
+  svr.Post("/api/session/harmonics_3ph",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (!sys.three_phase_ac) {
+        res.status = 400;
+        res.set_content(json{{"error","This case has no three-phase (abc) model; "
+            "three-phase harmonic power flow is unavailable."}}.dump(), "application/json");
+        return;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HPFOptions opt;
+      if (j.contains("options")) hpf_api::parse_options(j["options"], opt);
+
+      hacdcpf::harmonics::ThreePhaseHarmonicInputs in;
+      if (j.contains("sources") && j["sources"].is_array()) {
+        for (const auto& s : j["sources"]) {
+          hacdcpf::harmonics::ThreePhaseHarmonicSource src;
+          src.bus = s.value("bus", 0);
+          src.balanced = s.value("balanced", true);
+          src.i_base_pu = s.value("i_base_pu", 0.0);
+          src.i_base_phase_deg = s.value("i_base_phase_deg", 0.0);
+          src.i_base_pu_a = s.value("i_base_pu_a", 0.0);
+          src.i_base_pu_b = s.value("i_base_pu_b", 0.0);
+          src.i_base_pu_c = s.value("i_base_pu_c", 0.0);
+          if (s.contains("spectrum")) src.spectrum = hpf_api::parse_spectrum(s["spectrum"]);
+          in.sources.push_back(std::move(src));
+        }
+      }
+      auto r = hacdcpf::harmonics::solve_harmonic_power_flow_3ph(*sys.three_phase_ac, in, opt);
+
+      json out;
+      out["ok"] = r.ok; out["message"] = r.message;
+      out["base_pf_converged"] = r.base_pf_converged;
+      out["ac_orders"] = r.ac_orders;
+      out["max_thd_pct"] = r.max_thd_pct; out["max_thd_bus"] = r.max_thd_bus;
+      auto phase_spec = [](const std::map<int, hacdcpf::harmonics::Complex>& m) {
+        json s = json::array();
+        for (const auto& [ord, v] : m)
+          s.push_back(json{{"order", ord}, {"mag_pu", std::abs(v)},
+                           {"phase_deg", std::arg(v) * 180.0 / M_PI}});
+        return s;
+      };
+      out["bus_results"] = json::array();
+      for (const auto& b : r.bus_results) {
+        out["bus_results"].push_back(json{
+          {"bus", b.bus},
+          {"v_fund_pu_a", b.v_fund_pu_a}, {"v_fund_pu_b", b.v_fund_pu_b},
+          {"v_fund_pu_c", b.v_fund_pu_c},
+          {"thd_a_pct", b.thd_a_pct}, {"thd_b_pct", b.thd_b_pct}, {"thd_c_pct", b.thd_c_pct},
+          {"harmonics_a", phase_spec(b.v_by_order_a)},
+          {"harmonics_b", phase_spec(b.v_by_order_b)},
+          {"harmonics_c", phase_spec(b.v_by_order_c)}});
+      }
+      // Optional per-phase compliance.
+      std::string std_name = j.contains("options")
+          ? j["options"].value("standard", std::string("")) : std::string();
+      if (!std_name.empty() && r.ok) {
+        auto hs = (std_name == "GBT14549" || std_name == "GBT14549_1993")
+                      ? hacdcpf::harmonics::HarmonicStandard::GBT14549_1993
+                      : hacdcpf::harmonics::HarmonicStandard::IEEE519_2014;
+        auto rep = hacdcpf::harmonics::check_harmonic_limits(r, *sys.three_phase_ac, hs);
+        json comp;
+        comp["standard"] = (hs == hacdcpf::harmonics::HarmonicStandard::GBT14549_1993)
+                               ? "GB/T 14549-1993" : "IEEE 519-2014";
+        comp["all_compliant"] = rep.all_compliant;
+        comp["n_violations"] = rep.n_violations;
+        comp["checks"] = json::array();
+        for (const auto& c : rep.checks)
+          comp["checks"].push_back(json{{"bus", c.bus}, {"phase", c.phase},
+            {"base_kv", c.base_kv}, {"thd_pct", c.thd_pct},
+            {"thd_limit_pct", c.thd_limit_pct}, {"compliant", c.compliant}});
+        out["compliance"] = comp;
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Harmonic metrics: losses, K-factor, current THD / TDD ----
+  svr.Post("/api/session/harmonics_metrics",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HPFOptions opt;
+      hacdcpf::harmonics::HarmonicStudyInputs inputs;
+      if (j.contains("options")) hpf_api::parse_options(j["options"], opt);
+      hpf_api::parse_inputs(j, inputs);
+      opt.compute_branch_flows = true;
+
+      auto r = hacdcpf::harmonics::solve_harmonic_power_flow(sys, inputs, opt);
+      hacdcpf::harmonics::HarmonicMetricsOptions mopt;
+      mopt.i_demand_pu = j.value("i_demand_pu", 0.0);
+      auto m = hacdcpf::harmonics::harmonic_metrics(sys, r, mopt, opt);
+
+      json out;
+      out["ok"] = r.ok; out["message"] = r.message;
+      out["total_loss_pu"] = m.total_loss_pu;
+      out["total_harmonic_loss_pu"] = m.total_harmonic_loss_pu;
+      out["harmonic_loss_fraction"] = m.harmonic_loss_fraction;
+      out["max_k_factor"] = m.max_k_factor;
+      out["max_k_factor_branch"] = m.max_k_factor_branch;
+      out["max_thd_i_pct"] = m.max_thd_i_pct;
+      out["max_tdd_pct"] = m.max_tdd_pct;
+      out["branches"] = json::array();
+      for (const auto& b : m.ac_branches)
+        out["branches"].push_back(json{
+          {"from_bus", b.from_bus}, {"to_bus", b.to_bus},
+          {"i_fund_pu", b.i_fund_pu}, {"i_rms_pu", b.i_rms_pu},
+          {"thd_i_pct", b.thd_i_pct}, {"tdd_pct", b.tdd_pct},
+          {"k_factor", b.k_factor}, {"p_loss_pu", b.p_loss_pu},
+          {"p_loss_harmonic_pu", b.p_loss_harmonic_pu}});
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Newton-Raphson harmonic power flow (nonlinear resources) ----
+  svr.Post("/api/session/harmonics_newton",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HPFOptions opt;
+      hacdcpf::harmonics::HarmonicStudyInputs inputs;
+      if (j.contains("options")) hpf_api::parse_options(j["options"], opt);
+      hpf_api::parse_inputs(j, inputs);
+      opt.newton_max_iter = j.value("max_iter", opt.newton_max_iter);
+      opt.newton_tol = j.value("tol", opt.newton_tol);
+
+      const std::string mode = j.value("mode", std::string("constant_power"));
+      hacdcpf::harmonics::HPFNewtonResult r;
+      if (mode == "holomorphic") {
+        std::vector<hacdcpf::harmonics::HarmonicNonlinearSource> nl;
+        if (j.contains("resources") && j["resources"].is_array())
+          for (const auto& s : j["resources"]) {
+            hacdcpf::harmonics::HarmonicNonlinearSource n;
+            n.bus = s.value("bus", 0); n.name = s.value("name", std::string());
+            if (s.contains("i_src")) n.i_src = hpf_api::parse_order_complex(s["i_src"]);
+            if (s.contains("y_out")) n.y_out = hpf_api::parse_order_complex(s["y_out"]);
+            if (s.contains("g2")) n.g2 = hpf_api::parse_order_complex(s["g2"]);
+            nl.push_back(std::move(n));
+          }
+        r = hacdcpf::harmonics::solve_harmonic_power_flow_newton(sys, nl, inputs, opt);
+      } else {  // constant_power (non-holomorphic, real/imag 2N Newton)
+        std::vector<hacdcpf::harmonics::ConstantPowerHarmonicLoad> cp;
+        if (j.contains("resources") && j["resources"].is_array())
+          for (const auto& s : j["resources"]) {
+            hacdcpf::harmonics::ConstantPowerHarmonicLoad c;
+            c.bus = s.value("bus", 0); c.name = s.value("name", std::string());
+            if (s.contains("s_set")) c.s_set = hpf_api::parse_order_complex(s["s_set"]);
+            cp.push_back(std::move(c));
+          }
+        r = hacdcpf::harmonics::solve_harmonic_power_flow_newton_real(sys, cp, inputs, opt);
+      }
+
+      json out;
+      out["ok"] = r.ok; out["message"] = r.message; out["mode"] = mode;
+      out["converged"] = r.converged;
+      out["max_iterations_used"] = r.max_iterations_used;
+      out["max_ac_thd_pct"] = r.max_ac_thd_pct; out["max_ac_thd_bus"] = r.max_ac_thd_bus;
+      out["ac_orders"] = r.ac_orders;
+      out["iterations"] = json::object();
+      for (const auto& [ord, it] : r.iterations) out["iterations"][std::to_string(ord)] = it;
+      out["final_residual"] = json::object();
+      for (const auto& [ord, rr] : r.final_residual) out["final_residual"][std::to_string(ord)] = rr;
+      out["ac_bus_results"] = json::array();
+      for (const auto& b : r.ac_bus_results) out["ac_bus_results"].push_back(hpf_api::bus_json(b));
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {

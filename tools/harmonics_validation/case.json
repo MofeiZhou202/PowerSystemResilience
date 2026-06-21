@@ -1,0 +1,20 @@
+{
+  "_comment": "Canonical AC harmonic test case shared by the C++ solver, the independent numpy reference, and the OpenDSS cross-check. One source of truth so all three solve the IDENTICAL network. Two-bus radial feeder: SLACK source (sub-transient reactance x'') -- series line -- nonlinear load modelled as a Norton harmonic current source (no shunt-impedance load model, so the load is a pure current injector that maps cleanly onto OpenDSS).",
+  "base_mva": 100.0,
+  "base_kv": 10.0,
+  "source_xpp_pu": 0.2,
+  "line": { "r_pu": 0.01, "x_pu": 0.1, "b_pu": 0.0 },
+  "load_bus": 2,
+  "i_base_pu": 0.3,
+  "i_base_phase_deg": 0.0,
+  "spectrum": [
+    { "order": 5,  "mag_percent": 20.0, "phase_deg": 0.0 },
+    { "order": 7,  "mag_percent": 14.0, "phase_deg": 0.0 },
+    { "order": 11, "mag_percent": 9.0,  "phase_deg": 0.0 },
+    { "order": 13, "mag_percent": 7.0,  "phase_deg": 0.0 }
+  ],
+  "ac_orders": [5, 7, 11, 13],
+  "f1_hz": 60.0,
+  "tol_numpy_abs": 1e-7,
+  "tol_opendss_pct": 2.0
+}
