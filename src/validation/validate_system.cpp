@@ -276,6 +276,15 @@ ValidationReport validate(const HybridPowerSystem& sys) {
         require_unit_interval("DCStorage", st.index, "soc_init", st.soc_init);
         require_order("DCStorage", st.index, "soc_min", "soc_max", st.soc_min, st.soc_max);
     }
+    for (const auto& st : sys.dc.dc_storage) {
+        require_dc_bus("DCStorageUnit", st.index, "bus", st.bus);
+        require_order("DCStorageUnit", st.index, "pmin_mw", "pmax_mw", st.pmin_mw, st.pmax_mw);
+        require_nonnegative("DCStorageUnit", st.index, "e_rated_mwh", st.e_rated_mwh);
+        require_unit_interval("DCStorageUnit", st.index, "soc_min", st.soc_min);
+        require_unit_interval("DCStorageUnit", st.index, "soc_max", st.soc_max);
+        require_unit_interval("DCStorageUnit", st.index, "soc_init", st.soc_init);
+        require_order("DCStorageUnit", st.index, "soc_min", "soc_max", st.soc_min, st.soc_max);
+    }
     for (const auto& sg : sys.dc.static_generators) {
         require_dc_bus("DCStaticGenerator", sg.index, "bus", sg.bus);
         require_order("DCStaticGenerator", sg.index, "pmin_mw", "pmax_mw", sg.pmin_mw, sg.pmax_mw);

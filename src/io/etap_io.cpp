@@ -12,6 +12,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2032,6 +2033,50 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     return 0;
   };
 
+  // Resolve BOTH terminals of a two-terminal device (line, 2W transformer,
+  // breaker, switch, DC branch, DC converter) at once.  Resolving each end with
+  // resolve_endpoint() independently is wrong: real ETAP exports leave the
+  // device's own FromBus/ToBus empty and carry connectivity only in CONNECT
+  // records whose device-side pin numbers often do NOT follow the expected 0/1
+  // convention.  When the pins fail to match, both ends fall back to "first
+  // resolvable" and collapse onto the SAME bus.  This resolver assigns the two
+  // CONNECT endpoints positionally so the ends always land on different buses.
+  auto resolve_pair = [&](const NameIndex& nidx, const XmlAttrs& a,
+                          std::initializer_list<const char*> from_keys,
+                          std::initializer_list<const char*> to_keys,
+                          int from_pin, int to_pin) -> std::pair<int, int> {
+    int from = 0, to = 0;
+    // 1) Explicit attribute bus ids win when present.
+    { const std::string ex = xget(a, from_keys); if (!ex.empty()) from = resolve(nidx, ex); }
+    { const std::string ex = xget(a, to_keys);   if (!ex.empty()) to   = resolve(nidx, ex); }
+
+    // Gather this device's resolvable CONNECT endpoints (pin, bus index), in
+    // document order.
+    std::vector<std::pair<int, int>> eps;
+    auto iit = a.find("IID");
+    if (iit != a.end()) {
+      auto cit = conn.find(iit->second);
+      if (cit != conn.end())
+        for (const auto& ep : cit->second) {
+          const int r = resolve(nidx, ep.bus_id);
+          if (r) eps.push_back({ep.pin, r});
+        }
+    }
+    // 2) Pin-matched assignment for ends still unresolved (the to end must not
+    //    reuse the bus already taken by the from end).
+    if (!from)
+      for (const auto& e : eps) if (e.first == from_pin) { from = e.second; break; }
+    if (!to)
+      for (const auto& e : eps) if (e.first == to_pin && e.second != from) { to = e.second; break; }
+    // 3) Pins didn't distinguish the ends: assign distinct endpoints by order so
+    //    the two terminals never collapse onto the same bus.
+    if (!from)
+      for (const auto& e : eps) if (e.second != to) { from = e.second; break; }
+    if (!to)
+      for (const auto& e : eps) if (e.second != from) { to = e.second; break; }
+    return {from, to};
+  };
+
   // ---- Infer base_kV for junction nodes (BUS_CNODE_JCT_*, NominalkV=0) ----
   // BFS from sized buses through NON-transformer series elements only.
   {
@@ -2074,6 +2119,14 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
                                 std::to_string(inferred) + " junction bus(es)");
   }
 
+  // ETAP length-unit code -> kilometres. 0=feet, 1=miles, 2=metres, 3=km (default).
+  auto etap_len_to_km = [](const std::string& unit, double value) -> double {
+    if (unit == "0") return value * 0.0003048;  // feet   -> km
+    if (unit == "1") return value * 1.60934;    // miles  -> km
+    if (unit == "2") return value * 0.001;      // metres -> km
+    return value;                               // "3"/blank: already km
+  };
+
   auto add_lines = [&](const char* tag) {
     int li = static_cast<int>(sys.ac.branches.size());
     for (const auto& a : elems[to_upper(tag)]) {
@@ -2082,29 +2135,35 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       ACBranch br;
       br.index = ++li;
       br.name = id;
-      br.from_bus = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
-      br.to_bus = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      std::tie(br.from_bus, br.to_bus) =
+          resolve_pair(ac2idx, a, {"FromBus"}, {"ToBus"}, 0, 1);
       const double zb = z_base(ac_bus_base_kv(sys, br.from_bus), sys.base_mva);
-      // ETAP cable/line impedances are per-unit-length: ohm = value*Length/OhmsPerLength.
-      const double opl = dbl_from_str(xget(a, {"OhmsPerLengthValue"}));
-      const double len = dbl_from_str(xget(a, {"LengthValue", "Length"}));
-      const double scale = (opl > 0.0 && len > 0.0) ? (len / opl) : 1.0;
-      const double r_ohm = dbl_from_str(xget(a, {"R_ohm", "RPos", "RPosValue"})) * scale;
-      const double x_ohm = dbl_from_str(xget(a, {"X_ohm", "XPos", "XPosValue"})) * scale;
-      const double b_s = dbl_from_str(xget(a, {"B_S", "YPos", "YPosValue"})) * scale;
+      // ETAP stores positive/zero-sequence impedance as ohms over a *base length*
+      // (CABLE: OhmsPerLengthValue/OhmsPerLengthUnit, XLINE: PerLength/PerLengthUnit)
+      // and a separate total run length (CABLE: LengthValue/CableLengthUnit,
+      // XLINE: Length/LengthUnit). Each length carries its OWN unit code, so convert
+      // both to km independently, then total_ohm = (Rvalue / base_km) * length_km.
+      const double length_km = etap_len_to_km(xget(a, {"CableLengthUnit", "LengthUnit"}),
+                                              dbl_from_str(xget(a, {"LengthValue", "Length"})));
+      const double base_km = etap_len_to_km(xget(a, {"OhmsPerLengthUnit", "PerLengthUnit"}),
+                                            dbl_from_str(xget(a, {"OhmsPerLengthValue", "PerLength"})));
+      // When both lengths are known, scale per-base ohms by length/base; otherwise the
+      // raw R/X values are treated as total ohms (synthetic exports use base=len=1).
+      const double scale = (base_km > 0.0 && length_km > 0.0) ? (length_km / base_km) : 1.0;
+      const double r_ohm = dbl_from_str(xget(a, {"R_ohm", "RPosValue", "RPos"})) * scale;
+      const double x_ohm = dbl_from_str(xget(a, {"X_ohm", "XPosValue", "XPos"})) * scale;
+      const double b_s = dbl_from_str(xget(a, {"B_S", "YPosValue", "YPos"})) * scale;
       br.r_pu = r_ohm / zb;
       br.x_pu = x_ohm / zb;
       br.b_pu = b_s * zb;
-      br.r0_pu = dbl_from_str(xget(a, {"R0_ohm", "RZeroValue"})) * scale / zb;
-      br.x0_pu = dbl_from_str(xget(a, {"X0_ohm", "XZeroValue"})) * scale / zb;
+      br.r0_pu = dbl_from_str(xget(a, {"R0_ohm", "RZeroValue", "RZero"})) * scale / zb;
+      br.x0_pu = dbl_from_str(xget(a, {"X0_ohm", "XZeroValue", "XZero"})) * scale / zb;
       br.tap = dbl_from_str(xget(a, {"Tap"}), 1.0);
       br.shift_deg = dbl_from_str(xget(a, {"ShiftDeg"}));
       br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA", "RatedA"}));
-      // Length stored as metadata (assume metres when an OhmsPerLength scale is present).
       {
         const std::string lkm = xget(a, {"Length_km"});
-        br.length_km = !lkm.empty() ? dbl_from_str(lkm)
-                                    : (opl > 0.0 ? len / 1000.0 : len);
+        br.length_km = !lkm.empty() ? dbl_from_str(lkm) : length_km;
       }
       br.failure_rate = dbl_from_str(xget(a, {"FailureRate", "OutageRate"}), br.failure_rate);
       br.mttr_hr = dbl_from_str(xget(a, {"MTTR_hr"}), br.mttr_hr);
@@ -2124,8 +2183,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Transformer2W t;
     t.index = ++idx;
     t.name = id;
-    t.hv_bus = resolve_endpoint(ac2idx, a, {"FromBus", "PrimaryBus", "HVBus"}, 0);
-    t.lv_bus = resolve_endpoint(ac2idx, a, {"ToBus", "SecondaryBus", "LVBus"}, 1);
+    std::tie(t.hv_bus, t.lv_bus) = resolve_pair(
+        ac2idx, a, {"FromBus", "PrimaryBus", "HVBus"}, {"ToBus", "SecondaryBus", "LVBus"}, 0, 1);
     t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV", "PrimKV"}));
     t.vn_lv_kv = dbl_from_str(xget(a, {"SeckV", "SecKV"}));
     {
@@ -2354,8 +2413,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       cb.index = static_cast<int>(sys.ac.circuit_breakers.size()) + 1;
       cb.name = id;
       cb.breaker_type = bt;
-      cb.bus_from = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
-      cb.bus_to = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      std::tie(cb.bus_from, cb.bus_to) =
+          resolve_pair(ac2idx, a, {"FromBus"}, {"ToBus"}, 0, 1);
       cb.closed = bool_from_str(xget(a, {"Closed"}), true);
       cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV", "MaxkV"}));
       cb.i_rated_ka = dbl_from_str(xget(a, {"I_rated_kA", "RatedAmp"}), cb.i_rated_ka);
@@ -2378,8 +2437,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       Switch sw;
       sw.index = static_cast<int>(sys.ac.switches.size()) + 1;
       sw.name = id;
-      sw.bus_from = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
-      sw.bus_to = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      std::tie(sw.bus_from, sw.bus_to) =
+          resolve_pair(ac2idx, a, {"FromBus"}, {"ToBus"}, 0, 1);
       sw.closed = bool_from_str(xget(a, {"Closed"}), true);
       sw.in_service = bool_from_str(xget(a, {"InService"}), true);
       sys.ac.switches.push_back(std::move(sw));
@@ -2418,8 +2477,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCBranch br;
     br.index = ++idx;
     br.name = id;
-    br.from_bus = resolve_endpoint(dc2idx, a, {"FromBus"}, 0);
-    br.to_bus = resolve_endpoint(dc2idx, a, {"ToBus"}, 1);
+    std::tie(br.from_bus, br.to_bus) =
+        resolve_pair(dc2idx, a, {"FromBus"}, {"ToBus"}, 0, 1);
     const double zb = z_base(dc_bus_base_kv(sys, br.from_bus), sys.base_mva);
     br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RValue", "RPosValue"})) / zb;
     br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA"}));
@@ -2451,8 +2510,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCDCConverter c;
     c.index = ++idx;
     c.name = id;
-    c.bus_in = resolve_endpoint(dc2idx, a, {"InputBus"}, 0);
-    c.bus_out = resolve_endpoint(dc2idx, a, {"OutputBus"}, 1);
+    std::tie(c.bus_in, c.bus_out) =
+        resolve_pair(dc2idx, a, {"InputBus"}, {"OutputBus"}, 0, 1);
     c.p_ref_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;  // kW -> MW
     c.eta = dbl_from_str(xget(a, {"PercentEFF", "DcPercentEFF"}), 98.0) / 100.0;
     {
@@ -2477,8 +2536,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCCircuitBreaker cb;
     cb.index = ++idx;
     cb.name = id;
-    cb.bus_from = resolve_endpoint(dc2idx, a, {"FromBus"}, 0);
-    cb.bus_to = resolve_endpoint(dc2idx, a, {"ToBus"}, 1);
+    std::tie(cb.bus_from, cb.bus_to) =
+        resolve_pair(dc2idx, a, {"FromBus"}, {"ToBus"}, 0, 1);
     cb.closed = bool_from_str(xget(a, {"Closed"}), true);
     cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV"}));
     cb.i_breaking_ka = dbl_from_str(xget(a, {"I_breaking_kA", "Rated"}), cb.i_breaking_ka);

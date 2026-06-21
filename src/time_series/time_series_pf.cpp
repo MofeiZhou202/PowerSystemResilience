@@ -2027,7 +2027,7 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
 // ═══════════════════════════════════════════════════════════════════════
 // Full pipeline: UC → OPF (per step) → PF validation (per step)
 // ═══════════════════════════════════════════════════════════════════════
-TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
+TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
                                          const TimeSeriesData& ts_data,
                                          const TimeSeriesPFOptions& opts) {
   TimeSeriesPFResult result;
@@ -2037,6 +2037,12 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
   if (T <= 0) {
     return result;
   }
+
+  // Fold DC-side `DCStorage` into the engine's existing `Storage`-typed
+  // dc.storage path so it participates in the UC MILP, SOC dynamics, dispatch,
+  // and every per-step snapshot exactly like AC / legacy DC storage.
+  HybridPowerSystem sys = sys_in;
+  materialize_dc_storage(sys);
 
   auto profile_map = build_profile_map(ts_data);
 

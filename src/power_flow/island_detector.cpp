@@ -639,6 +639,15 @@ HybridPowerSystem extract_island_subsystem(const HybridPowerSystem& sys,
     copy.bus = it->second;
     sub.dc.storage.push_back(std::move(copy));
   }
+  for (const auto& st : sys.dc.dc_storage) {
+    if (!st.in_service) continue;
+    const auto it = dc_map.find(st.bus);
+    if (it == dc_map.end()) continue;
+    DCStorage copy = st;
+    copy.index = static_cast<int>(sub.dc.dc_storage.size()) + 1;
+    copy.bus = it->second;
+    sub.dc.dc_storage.push_back(std::move(copy));
+  }
   for (const auto& sg : sys.dc.static_generators) {
     if (!sg.in_service) continue;
     const auto it = dc_map.find(sg.bus);

@@ -145,6 +145,7 @@ struct DCSystem {
   std::vector<DCBranch> branches;
   std::vector<DCLoad> loads;
   std::vector<Storage> storage;
+  std::vector<DCStorage> dc_storage;
   std::vector<StaticGenerator> static_generators;
   std::vector<StaticGeneratorDC> dc_static_generators;
   std::vector<PVArrayDC> pv_arrays;
@@ -173,5 +174,58 @@ struct HybridPowerSystem {
   std::optional<BusMergeMap> bus_merge_map;
   std::optional<BranchExpandMap> branch_expand_map;
 };
+
+// ═══════════════════════════════════════════════════════════════════════
+// DC storage materialization
+// ═══════════════════════════════════════════════════════════════════════
+// The DC-side `DCStorage` entries are the persistent / IO / web representation
+// (active power only). Every solver — snapshot power flow, the time-series unit
+// commitment MILP, SOC dynamics — already consumes the AC `Storage`-typed
+// `dc.storage` vector. This helper bridges the two: it appends each DCStorage
+// (reactive power = 0) onto `dc.storage` and clears `dc_storage`, so all those
+// engines pick the DC storage up with no further changes. It is idempotent
+// (an empty `dc_storage` is a no-op), so it is safe to call at multiple solver
+// entry points.
+inline void materialize_dc_storage(HybridPowerSystem& sys) {
+  if (sys.dc.dc_storage.empty()) return;
+  sys.dc.storage.reserve(sys.dc.storage.size() + sys.dc.dc_storage.size());
+  for (const auto& d : sys.dc.dc_storage) {
+    Storage st;
+    st.index = d.index;
+    st.bus = d.bus;
+    st.in_service = d.in_service;
+    st.name = d.name;
+    st.type = d.type;
+    st.p_mw = d.p_mw;
+    st.q_mvar = 0.0;
+    st.p_rated_mw = d.p_rated_mw;
+    st.pmax_mw = d.pmax_mw;
+    st.pmin_mw = d.pmin_mw;
+    st.qmax_mvar = 0.0;
+    st.qmin_mvar = 0.0;
+    st.e_rated_mwh = d.e_rated_mwh;
+    st.soc_init = d.soc_init;
+    st.soc_min = d.soc_min;
+    st.soc_max = d.soc_max;
+    st.soc_carbon_intensity_tco2_mwh = d.soc_carbon_intensity_tco2_mwh;
+    st.eta_charge = d.eta_charge;
+    st.eta_discharge = d.eta_discharge;
+    st.self_discharge_pct = d.self_discharge_pct;
+    st.max_cycles = d.max_cycles;
+    st.current_cycles = d.current_cycles;
+    st.soh = d.soh;
+    st.l_calendar_yr = d.l_calendar_yr;
+    st.eol_percent = d.eol_percent;
+    st.replacement_cost = d.replacement_cost;
+    st.e_mwh = d.e_mwh;
+    st.profile_id = d.profile_id;
+    st.controllable = d.controllable;
+    st.forced_outage_rate = d.forced_outage_rate;
+    st.mttr_hr = d.mttr_hr;
+    st.t_scheduled_hr = d.t_scheduled_hr;
+    sys.dc.storage.push_back(std::move(st));
+  }
+  sys.dc.dc_storage.clear();
+}
 
 }  // namespace hacdcpf

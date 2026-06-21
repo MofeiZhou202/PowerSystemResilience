@@ -18,7 +18,7 @@
         "rate_c_mva": 0.0,
         "shift_deg": 0.0,
         "tap": 1.0,
-        "to_bus": 3,
+        "to_bus": 0,
         "x_pu": 0.263000011
       },
       {
@@ -8298,7 +8298,7 @@
       {
         "breaker_type": "CB",
         "bus_from": 1,
-        "bus_to": 1,
+        "bus_to": 0,
         "closed": true,
         "element_id": 0,
         "element_type": "",
@@ -8312,7 +8312,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 1,
+        "bus_from": 0,
         "bus_to": 1,
         "closed": true,
         "element_id": 0,
@@ -8327,7 +8327,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 1,
+        "bus_from": 0,
         "bus_to": 1,
         "closed": true,
         "element_id": 0,
@@ -8357,7 +8357,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 4,
+        "bus_from": 0,
         "bus_to": 4,
         "closed": true,
         "element_id": 0,
@@ -8477,7 +8477,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 20,
+        "bus_from": 0,
         "bus_to": 20,
         "closed": true,
         "element_id": 0,
@@ -8837,7 +8837,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 68,
+        "bus_from": 0,
         "bus_to": 68,
         "closed": true,
         "element_id": 0,
@@ -9077,7 +9077,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 116,
+        "bus_from": 0,
         "bus_to": 116,
         "closed": true,
         "element_id": 0,
@@ -9092,7 +9092,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 116,
+        "bus_from": 0,
         "bus_to": 116,
         "closed": true,
         "element_id": 0,
@@ -9107,7 +9107,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 116,
+        "bus_from": 0,
         "bus_to": 116,
         "closed": true,
         "element_id": 0,
@@ -9408,7 +9408,7 @@
       {
         "breaker_type": "CB",
         "bus_from": 146,
-        "bus_to": 146,
+        "bus_to": 0,
         "closed": true,
         "element_id": 0,
         "element_type": "",
@@ -9438,7 +9438,7 @@
       {
         "breaker_type": "CB",
         "bus_from": 151,
-        "bus_to": 151,
+        "bus_to": 0,
         "closed": true,
         "element_id": 0,
         "element_type": "",
@@ -9468,7 +9468,7 @@
       {
         "breaker_type": "CB",
         "bus_from": 152,
-        "bus_to": 152,
+        "bus_to": 0,
         "closed": true,
         "element_id": 0,
         "element_type": "",
@@ -9497,7 +9497,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 162,
+        "bus_from": 0,
         "bus_to": 162,
         "closed": true,
         "element_id": 0,
@@ -9512,7 +9512,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 162,
+        "bus_from": 0,
         "bus_to": 162,
         "closed": true,
         "element_id": 0,
@@ -9632,7 +9632,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 178,
+        "bus_from": 0,
         "bus_to": 178,
         "closed": true,
         "element_id": 0,
@@ -9662,7 +9662,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 179,
+        "bus_from": 0,
         "bus_to": 179,
         "closed": true,
         "element_id": 0,
@@ -9752,7 +9752,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9767,7 +9767,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9782,7 +9782,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9797,7 +9797,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9812,7 +9812,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9827,7 +9827,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -9842,7 +9842,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 187,
+        "bus_from": 0,
         "bus_to": 187,
         "closed": true,
         "element_id": 0,
@@ -10037,7 +10037,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 185,
+        "bus_from": 0,
         "bus_to": 185,
         "closed": true,
         "element_id": 0,
@@ -10067,7 +10067,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 217,
+        "bus_from": 0,
         "bus_to": 217,
         "closed": true,
         "element_id": 0,
@@ -10082,7 +10082,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 217,
+        "bus_from": 0,
         "bus_to": 217,
         "closed": true,
         "element_id": 0,
@@ -10187,7 +10187,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 237,
+        "bus_from": 0,
         "bus_to": 237,
         "closed": true,
         "element_id": 0,
@@ -10217,7 +10217,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 238,
+        "bus_from": 0,
         "bus_to": 238,
         "closed": true,
         "element_id": 0,
@@ -10247,7 +10247,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 239,
+        "bus_from": 0,
         "bus_to": 239,
         "closed": true,
         "element_id": 0,
@@ -10277,7 +10277,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 240,
+        "bus_from": 0,
         "bus_to": 240,
         "closed": true,
         "element_id": 0,
@@ -10307,7 +10307,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 241,
+        "bus_from": 0,
         "bus_to": 241,
         "closed": true,
         "element_id": 0,
@@ -10367,7 +10367,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 254,
+        "bus_from": 0,
         "bus_to": 254,
         "closed": true,
         "element_id": 0,
@@ -10457,7 +10457,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 266,
+        "bus_from": 0,
         "bus_to": 266,
         "closed": true,
         "element_id": 0,
@@ -10472,7 +10472,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 266,
+        "bus_from": 0,
         "bus_to": 266,
         "closed": true,
         "element_id": 0,
@@ -10487,7 +10487,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 266,
+        "bus_from": 0,
         "bus_to": 266,
         "closed": true,
         "element_id": 0,
@@ -10532,7 +10532,7 @@
       },
       {
         "breaker_type": "CB",
-        "bus_from": 271,
+        "bus_from": 0,
         "bus_to": 271,
         "closed": true,
         "element_id": 0,

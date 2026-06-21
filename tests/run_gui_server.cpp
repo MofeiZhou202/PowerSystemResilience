@@ -7439,6 +7439,11 @@ int main(int argc, char** argv) {
         // loads + profile_id assignments and silently fall back to a
         // constant-load solve.
         int n_remat = materialize_loads_and_apply_binding(sys_ts, spec);
+        // Fold DC-side storage into the engine's Storage-typed dc.storage path
+        // so it participates in the time-series solve AND appears in the
+        // dc_ess_* name/dispatch result arrays built below. solve_time_series_pf
+        // also materializes internally; this is idempotent.
+        hacdcpf::materialize_dc_storage(sys_ts);
         if (g_session.busy.exchange(true)) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
