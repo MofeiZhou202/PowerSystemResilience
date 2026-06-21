@@ -2,7 +2,14 @@ build/
 data/
 
 build/
+build-*/
+cmake-build-*/
 build_rel/
+third_party/*.zip
+third_party/dss_capi/**/*.pdb
+third_party/dss_capi/**/*d.dll
+third_party/dss_capi/**/*d.dll.a
+third_party/dss_capi/**/*d.lib
 
 # Web GUI server runtime artifacts (written by run_gui_server on load_json_string)
 debug_json_dump_*.json

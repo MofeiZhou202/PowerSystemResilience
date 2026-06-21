@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "dss_capi_ctx.h"
+#include "hacdcpf/io/dss_capi_adapter.hpp"
 
 namespace hacdcpf::io {
 
@@ -193,7 +193,7 @@ template <typename ElementResult>
 void populate_pd_element_snapshot(const DSSContext& api,
                                   ElementResult& element_result) {
   element_result.terminal_bus_names =
-      get_string_array(api, ctx_CktElement_Get_BusNames);
+      get_string_array(api, ctx_CktElement_Get_BusNames, uint16_t{0});
   for (auto& name : element_result.terminal_bus_names) {
     name = ascii_lower(name);
   }
