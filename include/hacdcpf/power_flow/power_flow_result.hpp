@@ -68,6 +68,10 @@ struct SolverDiagnostics {
 
   std::vector<IterationLogEntry> iteration_log;
   std::vector<std::string>       warnings;
+
+  // VSC converters auto-promoted from PQ to a Vdc-regulating mode because their
+  // DC island had no voltage reference (indices into the solver's converter list).
+  std::vector<int>               promoted_vsc_indices;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

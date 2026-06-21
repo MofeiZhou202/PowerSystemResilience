@@ -52,20 +52,21 @@ int first_slack_or_default(const std::vector<ACBus>& ac_buses) {
 }
 
 /**
- * @brief Detect DC islands (connected components) and assign one slack bus per island.
- * 
- * For each DC connected component, we need at least one voltage reference (DC_V bus).
- * If an island has no DC_V bus, we select the first bus in that island as slack.
- * Without this, the DC Jacobian becomes singular for islands without voltage anchors.
- * 
- * @param data Solver data containing DC buses and branches
- * @return Vector of DC bus indices that serve as slack buses (one per island)
+ * @brief Detect DC islands (connected components) of the DC network.
+ *
+ * Adjacency comes from in-service DC branches and DCDC converters.  VSC
+ * converters are intentionally NOT treated as DC-bus links: each VSC touches
+ * exactly one DC bus, so it can never merge two DC buses into one island.
+ *
+ * @param data            Solver data containing DC buses/branches.
+ * @param num_components  [out] number of connected components found.
+ * @return component id (0-based) for each DC bus index (empty if no DC buses).
  */
-std::vector<int> find_dc_island_slacks(const SolverData& data) {
+std::vector<int> compute_dc_components(const SolverData& data, int& num_components) {
   const int ndc = static_cast<int>(data.dc_buses.size());
+  num_components = 0;
   if (ndc == 0) return {};
 
-  // Build adjacency list from DC branches
   std::vector<std::vector<int>> adj(static_cast<size_t>(ndc));
   for (const auto& br : data.dc_branches) {
     if (!br.in_service) continue;
@@ -76,8 +77,6 @@ std::vector<int> find_dc_island_slacks(const SolverData& data) {
       adj[static_cast<size_t>(t)].push_back(f);
     }
   }
-
-  // Also consider DCDC converters as connections between DC buses
   for (const auto& dcdc : data.dcdc_converters) {
     if (!dcdc.in_service) continue;
     const int f = dcdc.bus_in - 1;
@@ -88,12 +87,9 @@ std::vector<int> find_dc_island_slacks(const SolverData& data) {
     }
   }
 
-  // Find connected components using BFS
   std::vector<int> component(static_cast<size_t>(ndc), -1);
-  int num_components = 0;
   for (int start = 0; start < ndc; ++start) {
     if (component[static_cast<size_t>(start)] >= 0) continue;
-    // BFS from this node
     std::vector<int> queue;
     queue.push_back(start);
     component[static_cast<size_t>(start)] = num_components;
@@ -109,35 +105,131 @@ std::vector<int> find_dc_island_slacks(const SolverData& data) {
     }
     ++num_components;
   }
+  return component;
+}
 
-  // For each component, find the best slack bus.  Preference order:
-  //   DC_V (voltage reference) > first non-isolated bus > first bus.
-  // DC_ISOLATED buses are de-energized and are only used as an anchor for a
-  // degenerate all-isolated component (where no other bus exists).
-  std::vector<int> dc_slacks;
-  dc_slacks.reserve(static_cast<size_t>(num_components));
+/// Result of DC island voltage-reference planning.
+struct DcSlackPlan {
+  std::vector<int> dc_slacks;               ///< DC bus indices to pin as fixed-voltage slack.
+  std::vector<int> promoted_converter_idx;  ///< indices into `converters` promoted PQ->VDC_Q.
+  std::vector<std::string> warnings;        ///< human-readable diagnostics.
+};
+
+/**
+ * @brief Assign a voltage reference to every DC island, promoting a PQ converter
+ *        to Vdc-regulating mode when an island would otherwise have none.
+ *
+ * Per island the reference is chosen in this order:
+ *   1. a DC_V bus                            -> pin that bus (fixed Vdc), as before;
+ *   2. a converter already in VDC_Q/VDC_VAC  -> pin no bus, the droop holds Vdc;
+ *   3. no reference, an in-service PQ VSC     -> promote the largest one to VDC_Q so
+ *      it regulates Vdc via droop; pin no bus.  A flat droop (k_vdc ~ 0) cannot
+ *      regulate, so fall back to pinning a bus and warn;
+ *   4. no reference and no VSC                -> pin the first non-isolated bus
+ *      (legacy fallback) and warn that the reference is non-physical.
+ *
+ * Without this, a PQ converter feeding surplus DC generation has no element to
+ * balance the DC island, and pinning an arbitrary bus silently absorbs the
+ * imbalance into a non-physical reference.
+ *
+ * @param data        Solver data (const).
+ * @param converters  The solver's mutable converter copy; promotions mutate it.
+ */
+DcSlackPlan plan_dc_island_references(const SolverData& data,
+                                      std::vector<VSCConverter>& converters) {
+  DcSlackPlan plan;
+  int num_components = 0;
+  const std::vector<int> component = compute_dc_components(data, num_components);
+  const int ndc = static_cast<int>(data.dc_buses.size());
+  if (ndc == 0) return plan;
+
   for (int c = 0; c < num_components; ++c) {
-    int slack_bus = -1;
+    int dc_v_bus = -1;
     int first_non_isolated = -1;
     int first_bus_in_component = -1;
     for (int i = 0; i < ndc; ++i) {
       if (component[static_cast<size_t>(i)] != c) continue;
       if (first_bus_in_component < 0) first_bus_in_component = i;
       const auto bt = data.dc_buses[static_cast<size_t>(i)].bus_type;
-      if (bt == DCBusType::DC_V) {
-        slack_bus = i;
-        break;  // Found DC_V bus, use it
-      }
-      if (first_non_isolated < 0 && bt != DCBusType::DC_ISOLATED) {
-        first_non_isolated = i;
+      if (bt == DCBusType::DC_V && dc_v_bus < 0) dc_v_bus = i;
+      if (first_non_isolated < 0 && bt != DCBusType::DC_ISOLATED) first_non_isolated = i;
+    }
+
+    // Does a converter already regulate Vdc on a bus in this island?
+    bool converter_regulates = false;
+    for (const auto& conv : converters) {
+      if (!conv.in_service) continue;
+      const int db = conv.bus_dc - 1;
+      if (db < 0 || db >= ndc || component[static_cast<size_t>(db)] != c) continue;
+      if (conv.control_mode == ConverterMode::VDC_Q ||
+          conv.control_mode == ConverterMode::VDC_VAC) {
+        converter_regulates = true;
+        break;
       }
     }
-    if (slack_bus < 0) slack_bus = first_non_isolated;
-    if (slack_bus < 0) slack_bus = first_bus_in_component;
-    if (slack_bus >= 0) dc_slacks.push_back(slack_bus);
+
+    // 1. DC_V bus present -> pin it.
+    if (dc_v_bus >= 0) {
+      plan.dc_slacks.push_back(dc_v_bus);
+      continue;
+    }
+    // 2. A converter already holds Vdc via droop -> no bus pin needed.
+    if (converter_regulates) continue;
+
+    // 3. No reference: try to promote the largest in-service PQ converter.
+    int best_idx = -1;
+    double best_prated = -1.0;
+    for (int gi = 0; gi < static_cast<int>(converters.size()); ++gi) {
+      const auto& conv = converters[static_cast<size_t>(gi)];
+      if (!conv.in_service || conv.control_mode != ConverterMode::PQ_MODE) continue;
+      const int db = conv.bus_dc - 1;
+      if (db < 0 || db >= ndc || component[static_cast<size_t>(db)] != c) continue;
+      if (conv.p_rated_mw > best_prated) {
+        best_prated = conv.p_rated_mw;
+        best_idx = gi;
+      }
+    }
+
+    const int anchor = (first_non_isolated >= 0) ? first_non_isolated : first_bus_in_component;
+    const int anchor_bus_index =
+        (anchor >= 0) ? data.dc_buses[static_cast<size_t>(anchor)].index : -1;
+
+    if (best_idx >= 0) {
+      auto& conv = converters[static_cast<size_t>(best_idx)];
+      if (std::abs(conv.k_vdc) < 1e-6) {
+        // Flat droop cannot regulate Vdc -> pin a bus instead and warn.
+        if (anchor >= 0) plan.dc_slacks.push_back(anchor);
+        plan.warnings.push_back(
+            "DC island has no voltage reference and converter " + std::to_string(conv.index) +
+            " has k_vdc=0 (flat droop, cannot regulate Vdc); pinning DC bus " +
+            std::to_string(anchor_bus_index) + " as a fixed-voltage slack instead.");
+      } else {
+        conv.control_mode = ConverterMode::VDC_Q;
+        plan.promoted_converter_idx.push_back(best_idx);
+        plan.warnings.push_back(
+            "DC island has no voltage reference; auto-promoted PQ converter " +
+            std::to_string(conv.index) + " (bus_dc=" + std::to_string(conv.bus_dc) +
+            ", p_rated=" + std::to_string(conv.p_rated_mw) +
+            " MW) to VDC_Q to regulate Vdc via droop (k_vdc=" + std::to_string(conv.k_vdc) +
+            ", v_dc_set=" + std::to_string(conv.v_dc_set_pu) + " pu).");
+        // No bus pinned: Vdc is a solved variable held by the converter droop.
+      }
+      continue;
+    }
+
+    // 4. No reference and no VSC -> legacy fallback pin (warn unless de-energized).
+    if (anchor >= 0) {
+      plan.dc_slacks.push_back(anchor);
+      if (data.dc_buses[static_cast<size_t>(anchor)].bus_type != DCBusType::DC_ISOLATED) {
+        plan.warnings.push_back(
+            "DC island has no voltage reference and no VSC converter; pinning DC bus " +
+            std::to_string(anchor_bus_index) +
+            " as a fixed-voltage slack (non-physical reference).");
+      }
+    }
   }
 
-  return dc_slacks;
+  return plan;
 }
 
 void enforce_vac_setpoints(const std::vector<VSCConverter>& converters, Eigen::VectorXd& vm) {
@@ -496,7 +588,8 @@ bool apply_converter_mode_switching(std::vector<VSCConverter>& converters,
                                     const PowerFlowOptions& opt,
                                     std::vector<int>& high_count,
                                     std::vector<int>& low_count,
-                                    SolverProfiling& profiling) {
+                                    SolverProfiling& profiling,
+                                    const std::vector<char>& promotion_lock) {
   bool changed = false;
   if (static_cast<int>(high_count.size()) != static_cast<int>(converters.size())) {
     high_count.assign(converters.size(), 0);
@@ -533,7 +626,10 @@ bool apply_converter_mode_switching(std::vector<VSCConverter>& converters,
         profiling.converter_mode_switches += 1;
       }
     } else if (conv.control_mode == ConverterMode::VDC_Q) {
-      if (err < low) {
+      // A converter promoted to hold an otherwise-reference-less DC island must
+      // not be demoted back to PQ — doing so would leave the island singular.
+      const bool locked = idx < promotion_lock.size() && promotion_lock[idx] != 0;
+      if (err < low && !locked) {
         low_count[idx] += 1;
       } else {
         low_count[idx] = 0;
@@ -611,7 +707,17 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   powerflow::load_dc_initial_state(init, data.dc_buses, vdc);
 
   const int slack = first_slack_or_default(ac_buses);
-  const std::vector<int> dc_slacks = find_dc_island_slacks(data);
+  // Plan DC island voltage references.  This may promote a PQ converter to VDC_Q
+  // (mutating the local `converters` copy) so a reference-less island can balance;
+  // such converters are locked against the adaptive switch demoting them back.
+  DcSlackPlan dc_plan = plan_dc_island_references(data, converters);
+  const std::vector<int>& dc_slacks = dc_plan.dc_slacks;
+  std::vector<char> promotion_lock(converters.size(), 0);
+  for (int idx : dc_plan.promoted_converter_idx) {
+    if (idx >= 0 && idx < static_cast<int>(promotion_lock.size())) promotion_lock[idx] = 1;
+  }
+  out.diagnostics.promoted_vsc_indices = dc_plan.promoted_converter_idx;
+  for (auto& w : dc_plan.warnings) out.diagnostics.warnings.push_back(std::move(w));
   JacobianContext jac_ctx = build_jacobian_context(ac_buses, ndc, slack, dc_slacks, &data, &converters);
   jac_ctx.min_vm_pu = opt.robust_nonlinear.min_vm_pu;
   if (jac_ctx.nvar == 0) {
@@ -1075,7 +1181,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
                                          opt,
                                          converter_high_count,
                                          converter_low_count,
-                                         out.profiling)) {
+                                         out.profiling,
+                                         promotion_lock)) {
         if (!skip_vac_enforcement) enforce_vac_setpoints(converters, vm);
         continue;
       }
@@ -1461,6 +1568,26 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
   }
   for (int i = 0; i < ndc; ++i) {
     out.vdc[static_cast<size_t>(i)] = vdc[i];
+  }
+
+  // Post-solve DC voltage-limit check.  A weak converter droop (small k_vdc) can
+  // force Vdc far from setpoint to balance an island, exceeding the bus limits;
+  // warn so the user can stiffen the droop or add a true DC_V reference.
+  for (int i = 0; i < ndc; ++i) {
+    const auto& b = data.dc_buses[static_cast<size_t>(i)];
+    if (b.bus_type == DCBusType::DC_ISOLATED) continue;
+    const double v = out.vdc[static_cast<size_t>(i)];
+    if (v > b.vmax_pu + 1e-6) {
+      out.diagnostics.warnings.push_back(
+          "DC bus " + std::to_string(b.index) + " Vdc=" + std::to_string(v) +
+          " pu exceeds vmax=" + std::to_string(b.vmax_pu) +
+          " pu (weak converter droop; consider a larger k_vdc or a DC_V reference).");
+    } else if (v < b.vmin_pu - 1e-6) {
+      out.diagnostics.warnings.push_back(
+          "DC bus " + std::to_string(b.index) + " Vdc=" + std::to_string(v) +
+          " pu is below vmin=" + std::to_string(b.vmin_pu) +
+          " pu (weak converter droop; consider a larger k_vdc or a DC_V reference).");
+    }
   }
 
   return out;

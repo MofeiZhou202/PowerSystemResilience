@@ -49,6 +49,10 @@ hacdcpf_add_test(test_solver_capabilities test_solver_capabilities.cpp)
 # HybridACDCPowerSystemsPlanning.
 hacdcpf_add_test(test_advanced_pf         test_advanced_pf.cpp)
 
+# DC island voltage-reference planning: a PQ VSC converter feeding a
+# reference-less DC island is auto-promoted to regulate Vdc (regulate + warn).
+hacdcpf_add_test(test_dc_island_reference test_dc_island_reference.cpp)
+
 # Three-phase power flow: data model, projection-based solve, meshed/multi-source
 # topologies, transformer, distribution PF stub, and JSON round-trip.
 hacdcpf_add_test(test_three_phase_pf      test_three_phase_pf.cpp)

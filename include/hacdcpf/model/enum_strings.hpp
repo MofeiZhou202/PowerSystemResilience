@@ -38,6 +38,11 @@ inline std::string dc_bus_type_str(DCBusType t) {
 inline DCBusType dc_bus_type_from_str(const std::string& s) {
   if (s == "DC_V") return DCBusType::DC_V;
   if (s == "DC_ISOLATED") return DCBusType::DC_ISOLATED;
+  // Legacy/GUI-authored files may store AC-style "SLACK" for a DC bus.  DC buses
+  // have no SLACK type — a DC bus is only a true voltage reference (DC_V) when a
+  // real element holds its voltage.  Map the legacy alias to DC_P so DC-side
+  // voltage regulation is decided by converter/island analysis, not the label.
+  if (s == "SLACK" || s == "DC_SLACK") return DCBusType::DC_P;
   return DCBusType::DC_P;
 }
 

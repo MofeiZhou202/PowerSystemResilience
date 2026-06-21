@@ -5264,8 +5264,32 @@ int main(int argc, char** argv) {
               }
             }
             if (slack_gi >= 0) {
+              // One generator is the designated slack unit: it absorbs the bus
+              // balance, the rest stay at their scheduled setpoints.
               gen_pg_solved[slack_gi] = total_pg_solved - non_slack_pg;
               gen_qg_solved[slack_gi] = total_qg_solved - non_slack_qg;
+            } else if (!gen_list.empty()) {
+              // No generator flagged is_slack: distribute the full bus generation
+              // across all units on the bus, by rated capacity (even split if the
+              // rating sum is ~0). Without this, every unit shows its 0 setpoint.
+              double pmax_sum = 0.0, qrange_sum = 0.0;
+              for (size_t gi : gen_list) {
+                pmax_sum += std::max(sys.ac.generators[gi].pmax_mw, 0.0);
+                qrange_sum += std::max(sys.ac.generators[gi].qmax_mvar -
+                                       sys.ac.generators[gi].qmin_mvar, 0.0);
+              }
+              const double n = static_cast<double>(gen_list.size());
+              for (size_t gi : gen_list) {
+                const double p_w = pmax_sum > 1e-9
+                    ? std::max(sys.ac.generators[gi].pmax_mw, 0.0) / pmax_sum
+                    : 1.0 / n;
+                const double q_w = qrange_sum > 1e-9
+                    ? std::max(sys.ac.generators[gi].qmax_mvar -
+                               sys.ac.generators[gi].qmin_mvar, 0.0) / qrange_sum
+                    : 1.0 / n;
+                gen_pg_solved[gi] = total_pg_solved * p_w;
+                gen_qg_solved[gi] = total_qg_solved * q_w;
+              }
             }
           } else if (b.bus_type == hacdcpf::BusType::PV) {
             if (gen_list.size() == 1) {
@@ -5780,6 +5804,17 @@ int main(int argc, char** argv) {
       }
 
       add_dc_branch_flows();
+      // Surface solver diagnostics (e.g. auto-promoted converters, Vdc-limit
+      // warnings) so the GUI can show why a DC island balanced the way it did.
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (g_session.last_pf_result) {
+          json warns = json::array();
+          for (const auto& w : g_session.last_pf_result->diagnostics.warnings) warns.push_back(w);
+          out["warnings"] = warns;
+          out["promoted_vsc_indices"] = g_session.last_pf_result->diagnostics.promoted_vsc_indices;
+        }
+      }
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {

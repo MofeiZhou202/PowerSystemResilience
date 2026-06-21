@@ -1,6 +1,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -456,9 +457,21 @@ void populate_derived_results(const powerflow::SolverData& data,
   for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
   for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
 
+  // Converters the solver auto-promoted from PQ to VDC_Q (because their DC island
+  // had no voltage reference) must report transfers using the regulating mode,
+  // not their stored PQ setpoint — otherwise the reported AC/DC powers are wrong.
+  const auto& promoted = result.diagnostics.promoted_vsc_indices;
+  auto is_promoted = [&promoted](int ci) {
+    return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
+  };
+
   result.vsc_transfers.reserve(data.converters.size());
-  for (const auto& conv : data.converters) {
+  for (int ci = 0; ci < static_cast<int>(data.converters.size()); ++ci) {
+    VSCConverter conv = data.converters[static_cast<size_t>(ci)];
     if (!conv.in_service) continue;
+    if (conv.control_mode == ConverterMode::PQ_MODE && is_promoted(ci)) {
+      conv.control_mode = ConverterMode::VDC_Q;
+    }
     const auto [p_ac_pu, q_ac_pu] =
         powerflow::converter_ac_injection(conv, vm, va, vdc, data.base_mva, loss_model);
     const double p_dc_pu =

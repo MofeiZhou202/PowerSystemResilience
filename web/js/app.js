@@ -3457,7 +3457,11 @@ const App = (() => {
       } else if (key === 'bus_type') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
-        ['PQ', 'PV', 'SLACK', 'ISOLATED'].forEach(t => {
+        // DC buses have their own type set (DC_P / DC_V); AC buses use PQ/PV/SLACK/ISOLATED.
+        const busTypeOptions = comp.type === 'dc_bus'
+          ? ['DC_P', 'DC_V']
+          : ['PQ', 'PV', 'SLACK', 'ISOLATED'];
+        busTypeOptions.forEach(t => {
           sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
         });
         div.appendChild(sel);
