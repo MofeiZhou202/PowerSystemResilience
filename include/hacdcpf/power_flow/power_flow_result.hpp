@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hacdcpf/model/ac_components.hpp"  // IslandInfo
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 
 namespace hacdcpf {
 
@@ -68,6 +69,7 @@ struct SolverDiagnostics {
 
   std::vector<IterationLogEntry> iteration_log;
   std::vector<std::string>       warnings;
+  powerflow::ConverterCoordinationReport converter_coordination;
 
   // VSC converters auto-promoted from PQ to a Vdc-regulating mode because their
   // DC island had no voltage reference (indices into the solver's converter list).

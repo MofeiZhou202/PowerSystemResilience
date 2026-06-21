@@ -14,6 +14,7 @@
 #include "hacdcpf/detail/internal_helpers.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using json = nlohmann::json;
@@ -2360,6 +2361,55 @@ std::string power_flow_result_to_json(const HybridPowerSystem& sys,
   root["converged"] = result.converged;
   root["iterations"] = result.iterations;
   root["residual"] = result.residual;
+  root["warnings"] = result.diagnostics.warnings;
+  root["termination_reason"] = result.diagnostics.termination_reason;
+
+  const auto& coord = result.diagnostics.converter_coordination;
+  json coord_json;
+  coord_json["enabled"] = coord.enabled;
+  coord_json["feasible"] = coord.feasible;
+  coord_json["blocking_count"] = coord.blocking_count();
+  coord_json["fatal_count"] = coord.fatal_count();
+  coord_json["error_count"] = coord.error_count();
+  coord_json["warning_count"] = coord.warning_count();
+  coord_json["issues"] = json::array();
+  for (const auto& issue : coord.issues) {
+    coord_json["issues"].push_back({
+        {"severity", powerflow::coordination_severity_str(issue.severity)},
+        {"rule_id", issue.rule_id},
+        {"component_type", issue.component_type},
+        {"component_index", issue.component_index},
+        {"island_index", issue.island_index},
+        {"message", issue.message},
+    });
+  }
+  coord_json["dc_islands"] = json::array();
+  for (const auto& island : coord.dc_islands) {
+    coord_json["dc_islands"].push_back({
+        {"island_index", island.island_index},
+        {"dc_buses", island.dc_buses},
+        {"declared_v_buses", island.declared_v_buses},
+        {"hard_vdc_sources", island.hard_vdc_sources},
+        {"droop_sources", island.droop_sources},
+        {"fixed_power_devices", island.fixed_power_devices},
+        {"fixed_power_mw", island.fixed_power_mw},
+        {"flexible_up_mw", island.flexible_up_mw},
+        {"flexible_down_mw", island.flexible_down_mw},
+    });
+    auto& island_json = coord_json["dc_islands"].back();
+    island_json["voltage_sources"] = json::array();
+    for (const auto& source : island.voltage_sources) {
+      island_json["voltage_sources"].push_back({
+          {"component_type", source.component_type},
+          {"component_index", source.component_index},
+          {"bus", source.bus},
+          {"v_set_pu", source.v_set_pu},
+          {"has_v_set", source.has_v_set},
+          {"droop", source.droop},
+      });
+    }
+  }
+  root["converter_coordination"] = std::move(coord_json);
 
   json ac_buses = json::array();
   for (size_t i = 0; i < sys.ac.buses.size(); ++i) {

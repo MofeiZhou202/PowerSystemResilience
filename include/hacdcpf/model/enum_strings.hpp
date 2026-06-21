@@ -56,6 +56,7 @@ inline std::string converter_mode_str(ConverterMode m) {
   return "PQ";
 }
 inline ConverterMode converter_mode_from_str(const std::string& s) {
+  if (s == "PQ" || s == "PQ_MODE" || s == "AC_PQ") return ConverterMode::PQ_MODE;
   if (s == "VDC_Q") return ConverterMode::VDC_Q;
   if (s == "VDC_VAC") return ConverterMode::VDC_VAC;
   return ConverterMode::PQ_MODE;

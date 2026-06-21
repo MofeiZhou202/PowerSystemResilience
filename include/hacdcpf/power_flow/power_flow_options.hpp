@@ -78,6 +78,7 @@ struct ConverterModeOptions {
   double          converter_vdc_switch_low_pu{0.01};
   int             mode_hysteresis_iters{2};
   bool            enable_converter_mode_switching{true};
+  bool            enable_converter_coordination_check{false};
   LossModelType   loss_model{LossModelType::Linear};
 };
 
@@ -123,6 +124,7 @@ struct PowerFlowOptions {
   bool enable_pv_pq_conversion{true};
   bool enable_auto_swing_selection{true};
   bool enable_converter_mode_switching{true};
+  bool enable_converter_coordination_check{false};
   bool verbose{false};
   LossModelType loss_model{LossModelType::Linear};
 

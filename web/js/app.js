@@ -1265,7 +1265,12 @@ const App = (() => {
 
     const data = await apiPost('/api/session/pf', {
       method: method,
-      options: { max_iter: 100, tol: 1e-8, verbose: false }
+      options: {
+        max_iter: 100,
+        tol: 1e-8,
+        verbose: false,
+        enable_converter_coordination_check: !!document.getElementById('pfCoordCheck')?.checked
+      }
     });
 
     if (data) {
@@ -2394,6 +2399,697 @@ const App = (() => {
   }
 
   // ========== Results Display ==========
+  function componentTypeLabel(type) {
+    if (typeof COMP !== 'undefined' && COMP.categories) {
+      for (const items of Object.values(COMP.categories)) {
+        const item = (items || []).find(x => x.type === type);
+        if (item && item.label) return item.label;
+      }
+    }
+    return type || '';
+  }
+
+  function renderAllPowerFlowComponentStatus(data, busMap) {
+    const section = document.getElementById('pfAllComponentsSection');
+    const div = document.getElementById('pfAllComponentsResults');
+    if (!section || !div) return;
+
+    const components = (typeof Canvas !== 'undefined' && Canvas.state && Array.isArray(Canvas.state.components))
+      ? Canvas.state.components : [];
+    if (!components.length) {
+      section.style.display = 'none';
+      div.innerHTML = '';
+      return;
+    }
+    section.style.display = '';
+
+    const maps = busMap || (Canvas.getCompBusMap ? Canvas.getCompBusMap() : {});
+    const toNum = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const fmt = (v, d = 3) => {
+      const n = toNum(v);
+      return n === null ? '-' : n.toFixed(d);
+    };
+    const fmtP = (v, d = 3) => {
+      const n = toNum(v);
+      return n === null ? '-' : `${pFmt(n, d)} ${pUnit()}`;
+    };
+    const fmtQ = (v, d = 3) => {
+      const n = toNum(v);
+      return n === null ? '-' : `${pFmt(n, d)} ${qUnit()}`;
+    };
+    const pct = (v, d = 1) => {
+      const n = toNum(v);
+      return n === null ? '-' : `${n.toFixed(d)}%`;
+    };
+    const lineHtml = (items) => items
+      .filter(x => x !== undefined && x !== null && String(x) !== '')
+      .map(x => escapeHtml(String(x)))
+      .join('<br>');
+    const compName = (comp) => {
+      const p = comp.params || {};
+      return p.name || (COMP.defaults && COMP.defaults[comp.type] && COMP.defaults[comp.type].name) || comp.type || '';
+    };
+
+    const compToBus = {};
+    Object.entries(maps.ac || {}).forEach(([idx, cid]) => { compToBus[Number(cid)] = { domain: 'ac', index: Number(idx) }; });
+    Object.entries(maps.dc || {}).forEach(([idx, cid]) => { compToBus[Number(cid)] = { domain: 'dc', index: Number(idx) }; });
+
+    const resultConnectedBuses = (compId) => {
+      const out = [];
+      for (const conn of Canvas.state.connections || []) {
+        let otherId = null, portId = '';
+        if (Number(conn.from.compId) === Number(compId)) {
+          otherId = conn.to.compId;
+          portId = conn.from.portId || '';
+        } else if (Number(conn.to.compId) === Number(compId)) {
+          otherId = conn.from.compId;
+          portId = conn.to.portId || '';
+        }
+        if (otherId === null) continue;
+        const b = compToBus[Number(otherId)];
+        if (b) out.push({ ...b, portId, compId: otherId });
+      }
+      return out;
+    };
+
+    const backendRows = Array.isArray(data.component_results) ? data.component_results : [];
+    if (backendRows.length) {
+      const domainOf = (comp) => {
+        if (comp.type === 'ac_bus' || comp.type === 'external_grid' || comp.type === 'generator' ||
+            comp.type === 'pv_system' || comp.type === 'renewable_gen' || comp.type === 'load' ||
+            comp.type === 'flexible_load' || comp.type === 'asymmetric_load' || comp.type === 'shunt' ||
+            comp.type === 'motor' || comp.type === 'charger' || comp.type === 'charging_station' ||
+            comp.type === 'vpp' || comp.type === 'microgrid') return 'AC';
+        if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
+            comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
+        if (comp.type === 'vsc_converter' || comp.type === 'energy_router') return 'ACDC';
+        const buses = resultConnectedBuses(comp.id);
+        const hasAc = buses.some(b => b.domain === 'ac');
+        const hasDc = buses.some(b => b.domain === 'dc');
+        if (hasAc && hasDc) return 'ACDC';
+        if (hasDc) return 'DC';
+        return 'AC';
+      };
+      const rowTypeOf = (comp) => (comp.type === 'transformer_2w' && (comp.params || {})._from_branch)
+        ? 'ac_branch'
+        : comp.type;
+      const orderByTypeDomain = {};
+      components.forEach(comp => {
+        const key = `${rowTypeOf(comp)}|${domainOf(comp)}`;
+        if (!orderByTypeDomain[key]) orderByTypeDomain[key] = [];
+        orderByTypeDomain[key].push(comp.id);
+      });
+      const positionOf = (comp) => {
+        const key = `${rowTypeOf(comp)}|${domainOf(comp)}`;
+        return (orderByTypeDomain[key] || []).findIndex(id => Number(id) === Number(comp.id));
+      };
+      const usedRows = new Set();
+      const rowDomainMatches = (rowDomain, compDomain) => {
+        const rd = String(rowDomain || '').toUpperCase();
+        if (!rd || rd === compDomain) return true;
+        return compDomain === 'ACDC' && (rd === 'AC' || rd === 'DC');
+      };
+      const takeBackendRow = (comp) => {
+        const t = rowTypeOf(comp);
+        const d = domainOf(comp);
+        const pos = positionOf(comp);
+        const idx = Number((comp.params || {}).index);
+        const candidates = backendRows
+          .map((row, rowIndex) => ({ row, rowIndex }))
+          .filter(x => !usedRows.has(x.rowIndex) &&
+            String(x.row.canvas_type || '') === t &&
+            rowDomainMatches(x.row.domain, d));
+        let hit = null;
+        if (Number.isFinite(idx)) {
+          hit = candidates.find(x => Number(x.row.index) === idx) || null;
+        }
+        if (!hit && pos >= 0) {
+          hit = candidates.find(x => Number(x.row.position) === pos) || null;
+        }
+        if (!hit) hit = candidates[0] || null;
+        if (hit) usedRows.add(hit.rowIndex);
+        return hit ? hit.row : null;
+      };
+      const fmtMetric = (m) => {
+        if (!m) return '';
+        const label = m.label || '';
+        if (m.quantity === 'text') return `${label}=${m.value ?? '-'}`;
+        const n = toNum(m.value);
+        if (n === null) return `${label}=-`;
+        const precision = Number.isFinite(Number(m.precision)) ? Number(m.precision) : 3;
+        const quantity = String(m.quantity || '').toLowerCase();
+        const unit = String(m.unit || '');
+        if (quantity === 'p') return `${label}=${pFmt(n, precision)} ${pUnit()}`;
+        if (quantity === 'q') return `${label}=${pFmt(n, precision)} ${qUnit()}`;
+        const suffix = unit ? ` ${unit}` : '';
+        return `${label}=${n.toFixed(precision)}${suffix}`;
+      };
+      let html = '<table><thead><tr><th>ID</th><th>类型</th><th>名称</th><th>状态</th><th>连接</th><th>潮流/电压/功率</th><th>备注</th></tr></thead><tbody>';
+      components.forEach(comp => {
+        const row = takeBackendRow(comp);
+        const detail = row && Array.isArray(row.metrics) ? row.metrics.map(fmtMetric) : [];
+        const notes = row && Array.isArray(row.notes) ? row.notes : [];
+        const buses = resultConnectedBuses(comp.id);
+        const fallbackConnection = buses.length
+          ? buses.map(b => `${b.portId ? b.portId + ':' : ''}${b.domain === 'dc' ? 'DC' : 'AC'} Bus ${b.index}`).join('; ')
+          : '-';
+        html += `<tr data-comp-id="${comp.id}">`;
+        html += `<td>${comp.id}</td>`;
+        html += `<td>${escapeHtml(row?.type_label || componentTypeLabel(comp.type))}</td>`;
+        html += `<td>${escapeHtml(row?.name || compName(comp))}</td>`;
+        html += `<td>${escapeHtml(row?.status || (data.converged ? '无分项结果' : '未收敛'))}</td>`;
+        html += `<td>${escapeHtml(row?.connection || fallbackConnection)}</td>`;
+        html += `<td>${lineHtml(detail.length ? detail : ['-'])}</td>`;
+        html += `<td>${lineHtml(row ? notes : ['缺少潮流后元件行'])}</td>`;
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      div.innerHTML = html;
+      return;
+    }
+
+    const orders = {};
+    const addOrder = (key, comp) => {
+      if (!orders[key]) orders[key] = [];
+      orders[key].push(comp.id);
+    };
+    components.forEach(comp => {
+      const p = comp.params || {};
+      switch (comp.type) {
+        case 'ac_bus': addOrder('ac', comp); break;
+        case 'dc_bus': addOrder('dc', comp); break;
+        case 'ac_branch': addOrder('branch', comp); break;
+        case 'transformer_2w':
+          if (p._from_branch) addOrder('branch', comp);
+          else addOrder('trafo', comp);
+          break;
+        case 'generator': addOrder('gen', comp); break;
+        case 'load': addOrder('load', comp); break;
+        case 'external_grid': addOrder('extGrid', comp); break;
+        case 'storage': addOrder('storage', comp); break;
+        case 'pv_system': addOrder('pv', comp); break;
+        case 'renewable_gen': addOrder('renGen', comp); break;
+        case 'static_generator': addOrder('sgen', comp); break;
+        case 'switch_comp': addOrder('sw', comp); break;
+        case 'circuit_breaker': addOrder('cb', comp); break;
+        case 'motor': addOrder('motor', comp); break;
+        case 'dc_branch': addOrder('dcBranch', comp); break;
+        case 'dc_load': addOrder('dcLoad', comp); break;
+        case 'dc_pv_array': addOrder('dcPv', comp); break;
+        case 'vsc_converter': addOrder('vsc', comp); break;
+        case 'dcdc_converter': addOrder('dcdcConverter', comp); break;
+        case 'energy_router': addOrder('energyRouter', comp); break;
+        case 'shunt': addOrder('shunt', comp); break;
+        case 'transformer_3w': addOrder('trafo3w', comp); break;
+        case 'flexible_load': addOrder('flexLoad', comp); break;
+        case 'asymmetric_load': addOrder('asymLoad', comp); break;
+        case 'charger': addOrder('charger', comp); break;
+        case 'charging_station': addOrder('chargingStation', comp); break;
+        case 'mobile_storage': addOrder('mobileStorage', comp); break;
+        case 'vpp': addOrder('vpp', comp); break;
+        case 'microgrid': addOrder('microgrid', comp); break;
+        default: addOrder(comp.type, comp); break;
+      }
+    });
+
+    const posOf = (key, compId) => {
+      const arr = orders[key] || [];
+      return arr.findIndex(id => Number(id) === Number(compId));
+    };
+    const mapKeyOf = (key, compId) => {
+      const obj = maps[key] || {};
+      for (const [idx, cid] of Object.entries(obj)) {
+        if (Number(cid) === Number(compId)) {
+          const n = Number(idx);
+          return Number.isFinite(n) ? n : idx;
+        }
+      }
+      return null;
+    };
+    const rowByIndexOrPos = (arr, key, compId) => {
+      const rows = Array.isArray(arr) ? arr : [];
+      const k = mapKeyOf(key, compId);
+      if (k !== null) {
+        const hit = rows.find(r =>
+          Number(r.index) === Number(k) ||
+          Number(r.id) === Number(k) ||
+          Number(r.router_index) === Number(k)
+        );
+        if (hit) return hit;
+      }
+      const pos = posOf(key, compId);
+      return pos >= 0 && pos < rows.length ? rows[pos] : null;
+    };
+
+    const geoBus = (domain, idx) => (data.geo_buses || []).find(b =>
+      String(b.type || '').toLowerCase() === (domain === 'dc' ? 'dc' : 'ac') &&
+      Number(b.id) === Number(idx)
+    );
+    const busFlowBalance = { ac: {}, dc: {} };
+    const addBal = (domain, bus, p, q = 0) => {
+      const idx = Number(bus);
+      if (!Number.isFinite(idx)) return;
+      if (!busFlowBalance[domain][idx]) busFlowBalance[domain][idx] = { p: 0, q: 0 };
+      busFlowBalance[domain][idx].p += Number(p) || 0;
+      busFlowBalance[domain][idx].q += Number(q) || 0;
+    };
+    (data.geo_ac_branches || []).forEach(br => {
+      addBal('ac', br.from, br.pf_mw, br.qf_mvar);
+      addBal('ac', br.to, br.pt_mw, br.qt_mvar);
+    });
+    (data.geo_dc_branches || data.dc_branch_flows || []).forEach(br => {
+      addBal('dc', br.from ?? br.from_bus, br.pf_mw, 0);
+      addBal('dc', br.to ?? br.to_bus, br.pt_mw, 0);
+    });
+    (data.geo_trafo3w || []).forEach(tf => {
+      addBal('ac', tf.hv_bus, tf.p_hv_mw, tf.q_hv_mvar);
+      addBal('ac', tf.mv_bus, tf.p_mv_mw, tf.q_mv_mvar);
+      addBal('ac', tf.lv_bus, tf.p_lv_mw, tf.q_lv_mvar);
+    });
+    (data.vsc_transfers || data.geo_vsc || []).forEach(v => {
+      addBal('ac', v.bus_ac, -(v.p_ac_mw || 0), -(v.q_ac_mvar || 0));
+      addBal('dc', v.bus_dc, -(v.p_dc_mw || 0), 0);
+    });
+    (data.dcdc_transfers || data.geo_dcdc || []).forEach(d => {
+      addBal('dc', d.bus_in, d.p_in_mw, 0);
+      addBal('dc', d.bus_out, -(d.p_out_mw || 0), 0);
+    });
+
+    const componentInjection = (comp) => {
+      const p = comp.params || {};
+      const scale = toNum(p.scaling) ?? 1;
+      switch (comp.type) {
+        case 'load':
+        case 'flexible_load':
+          return { p: -((toNum(p.p_mw) ?? 0) * scale), q: -((toNum(p.q_mvar) ?? 0) * scale) };
+        case 'asymmetric_load':
+          return {
+            p: -(((toNum(p.pa_mw) ?? 0) + (toNum(p.pb_mw) ?? 0) + (toNum(p.pc_mw) ?? 0)) * scale),
+            q: -(((toNum(p.qa_mvar) ?? 0) + (toNum(p.qb_mvar) ?? 0) + (toNum(p.qc_mvar) ?? 0)) * scale),
+          };
+        case 'dc_load':
+          return { p: -((toNum(p.p_mw) ?? 0) * scale), q: 0 };
+        case 'storage':
+        case 'mobile_storage':
+          return { p: toNum(p.p_mw) ?? 0, q: toNum(p.q_mvar) ?? 0 };
+        case 'pv_system':
+        case 'renewable_gen':
+        case 'static_generator':
+          return { p: (toNum(p.p_mw) ?? 0) * scale, q: (toNum(p.q_mvar) ?? 0) * scale };
+        case 'dc_pv_array':
+          return { p: toNum(p.p_set_mw) ?? 0, q: 0 };
+        case 'shunt':
+          return { p: toNum(p.gs_mw) ?? 0, q: toNum(p.bs_mvar) ?? 0 };
+        case 'charging_station': {
+          const pKw = toNum(p.p_total_kw);
+          const qKvar = toNum(p.q_total_kvar);
+          const pMw = pKw !== null ? pKw / 1000 : ((toNum(p.max_power_kw) ?? 0) * (toNum(p.utilization_rate) ?? 0) * (toNum(p.simultaneity_factor) ?? 1) / 1000);
+          return { p: -pMw, q: -(qKvar !== null ? qKvar / 1000 : 0) };
+        }
+        case 'vpp':
+          return { p: toNum(p.p_output_mw) ?? 0, q: toNum(p.q_output_mvar) ?? 0 };
+        case 'microgrid':
+          return { p: -(toNum(p.p_exchange_mw) ?? 0), q: 0 };
+        default:
+          return { p: 0, q: 0 };
+      }
+    };
+    const componentsAtBus = (domain, busIdx, typeFilter = null) => components.filter(c => {
+      if (typeFilter && !typeFilter.has(c.type)) return false;
+      const buses = resultConnectedBuses(c.id);
+      return buses.some(b => b.domain === domain && Number(b.index) === Number(busIdx));
+    });
+    const solvedExternalGridInjection = (comp) => {
+      const buses = resultConnectedBuses(comp.id);
+      const ac = buses.find(b => b.domain === 'ac') || ((comp.params || {}).bus ? { domain: 'ac', index: (comp.params || {}).bus } : null);
+      if (!ac) return null;
+      const idx = Number(ac.index);
+      const bal = busFlowBalance.ac[idx] || { p: 0, q: 0 };
+      let nonGridP = 0, nonGridQ = 0;
+      componentsAtBus('ac', idx).forEach(c => {
+        if (c.id === comp.id || c.type === 'external_grid' || (c.params || {}).in_service === false) return;
+        const inj = componentInjection(c);
+        nonGridP += inj.p;
+        nonGridQ += inj.q;
+      });
+      return { p: bal.p - nonGridP, q: bal.q - nonGridQ, bus: idx };
+    };
+    const voltageText = (domain, idx) => {
+      const gb = geoBus(domain, idx);
+      if (domain === 'dc') {
+        const v = gb ? gb.vm_pu : (data.vdc || [])[posOf('dc', maps.dc ? maps.dc[idx] : null)];
+        return toNum(v) === null ? '' : `Vdc=${fmt(v, 6)} pu`;
+      }
+      const acCompId = maps.ac ? maps.ac[idx] : null;
+      const pos = posOf('ac', acCompId);
+      const vm = gb ? gb.vm_pu : (data.vm || [])[pos];
+      const va = gb ? gb.va_rad : (data.va || [])[pos];
+      const parts = [];
+      if (toNum(vm) !== null) parts.push(`Vm=${fmt(vm, 6)} pu`);
+      if (toNum(va) !== null) parts.push(`Va=${fmt(Number(va) * 180 / Math.PI, 4)} deg`);
+      return parts.join(', ');
+    };
+    const busLabel = (domain, idx) => `${domain === 'dc' ? 'DC' : 'AC'} Bus ${idx}`;
+
+    const attachedObjects = (compId) => {
+      const out = [];
+      for (const conn of Canvas.state.connections || []) {
+        let otherId = null;
+        if (Number(conn.from.compId) === Number(compId)) otherId = conn.to.compId;
+        else if (Number(conn.to.compId) === Number(compId)) otherId = conn.from.compId;
+        if (otherId === null) continue;
+        const other = components.find(c => Number(c.id) === Number(otherId));
+        if (other) out.push(`${componentTypeLabel(other.type)}#${other.id}`);
+      }
+      return out;
+    };
+    const connectionText = (comp) => {
+      const directBus = compToBus[Number(comp.id)];
+      if (directBus) {
+        const attached = attachedObjects(comp.id).filter(x => !x.includes('母线'));
+        const suffix = attached.length
+          ? `；连接${attached.length}个元件: ${attached.slice(0, 5).join(', ')}${attached.length > 5 ? '...' : ''}`
+          : '';
+        return `${busLabel(directBus.domain, directBus.index)}${suffix}`;
+      }
+      const buses = resultConnectedBuses(comp.id);
+      if (buses.length) {
+        return buses.map(b => `${b.portId ? b.portId + ':' : ''}${busLabel(b.domain, b.index)}`).join('; ');
+      }
+      const p = comp.params || {};
+      switch (comp.type) {
+        case 'vsc_converter': return `AC Bus ${p.bus_ac || '-'}; DC Bus ${p.bus_dc || '-'}`;
+        case 'dcdc_converter': return `DC Bus in ${p.bus_in || '-'}; DC Bus out ${p.bus_out || '-'}`;
+        case 'dc_branch': return `DC Bus ${p.from_bus || '-'} -> ${p.to_bus || '-'}`;
+        case 'ac_branch': return `AC Bus ${p.from_bus || '-'} -> ${p.to_bus || '-'}`;
+        case 'transformer_2w': return `HV ${p.hv_bus || '-'}; LV ${p.lv_bus || '-'}`;
+        case 'transformer_3w': return `HV ${p.hv_bus || '-'}; MV ${p.mv_bus || '-'}; LV ${p.lv_bus || '-'}`;
+        case 'switch_comp':
+        case 'circuit_breaker': return `Bus ${p.from_bus || p.bus_from || '-'} -> ${p.to_bus || p.bus_to || '-'}`;
+        case 'dc_load':
+        case 'dc_pv_array': return `DC Bus ${p.bus || '-'}`;
+        default:
+          if (p.bus !== undefined) return `Bus ${p.bus || '-'}`;
+          if (p.pcc_bus !== undefined) return `PCC Bus ${p.pcc_bus || '-'}`;
+          return '-';
+      }
+    };
+
+    const describe = (comp) => {
+      const p = comp.params || {};
+      const note = [];
+      let solved = false;
+      let detail = [];
+
+      switch (comp.type) {
+        case 'ac_bus': {
+          const bus = compToBus[Number(comp.id)];
+          const gb = bus ? geoBus('ac', bus.index) : null;
+          const pos = posOf('ac', comp.id);
+          const vm = gb ? gb.vm_pu : (data.vm || [])[pos];
+          const va = gb ? gb.va_rad : (data.va || [])[pos];
+          solved = toNum(vm) !== null;
+          detail = [
+            `类型=${gb?.bus_type || p.bus_type || '-'}`,
+            `Vm=${fmt(vm, 6)} pu`,
+            `Va=${toNum(va) === null ? '-' : fmt(Number(va) * 180 / Math.PI, 4)} deg`,
+            `Pd=${fmtP(gb?.pd_mw ?? p.pd_mw ?? 0, 3)}`,
+            `Qd=${fmtQ(gb?.qd_mvar ?? p.qd_mvar ?? 0, 3)}`,
+          ];
+          break;
+        }
+        case 'dc_bus': {
+          const bus = compToBus[Number(comp.id)];
+          const gb = bus ? geoBus('dc', bus.index) : null;
+          const pos = posOf('dc', comp.id);
+          const vdc = gb ? gb.vm_pu : (data.vdc || [])[pos];
+          solved = toNum(vdc) !== null;
+          detail = [
+            `类型=${gb?.bus_type || p.bus_type || '-'}`,
+            `Vdc=${fmt(vdc, 6)} pu`,
+            `Pd=${fmtP(gb?.pd_mw ?? p.pd_mw ?? 0, 3)}`,
+          ];
+          break;
+        }
+        case 'generator': {
+          const g = rowByIndexOrPos(data.geo_gen, 'gen', comp.id);
+          solved = !!g || data.converged;
+          detail = [
+            `Pg=${fmtP(g?.pg_mw ?? p.pg_mw, 3)}`,
+            `Qg=${fmtQ(g?.qg_mvar ?? p.qg_mvar, 3)}`,
+            `Vg=${fmt(g?.vg_pu ?? p.vg_pu, 4)} pu`,
+            `Slack=${(g?.is_slack ?? p.is_slack) ? '是' : '否'}`,
+          ];
+          if (!g) note.push('本次潮流按发电机给定注入参与计算');
+          break;
+        }
+        case 'external_grid': {
+          const buses = connectedBuses(comp.id);
+          const ac = buses.find(b => b.domain === 'ac') || (p.bus ? { domain: 'ac', index: p.bus } : null);
+          const eg = solvedExternalGridInjection(comp);
+          detail = [
+            `P平衡=${fmtP(eg?.p, 3)}`,
+            `Q平衡=${fmtQ(eg?.q, 3)}`,
+            ac ? voltageText('ac', ac.index) : '',
+            `V控制=${fmt(p.vm_pu, 4)} pu`,
+            `角度=${fmt(p.va_deg, 3)} deg`,
+          ];
+          solved = !!eg || !!(ac && voltageText('ac', ac.index));
+          note.push('P/Q为根据潮流后母线功率平衡反算的外部电网结果');
+          break;
+        }
+        case 'load':
+        case 'flexible_load': {
+          const scale = toNum(p.scaling) ?? 1;
+          detail = [
+            `P=${fmtP((toNum(p.p_mw) ?? 0) * scale, 3)}`,
+            `Q=${fmtQ((toNum(p.q_mvar) ?? 0) * scale, 3)}`,
+            comp.type === 'flexible_load' ? `上调=${fmtP(p.flex_up_mw, 3)}` : '',
+            comp.type === 'flexible_load' ? `下调=${fmtP(p.flex_down_mw, 3)}` : '',
+          ];
+          solved = data.converged;
+          note.push('本次潮流计算采用的负荷消耗');
+          break;
+        }
+        case 'asymmetric_load': {
+          const scale = toNum(p.scaling) ?? 1;
+          const pa = (toNum(p.pa_mw) ?? 0) * scale;
+          const pb = (toNum(p.pb_mw) ?? 0) * scale;
+          const pc = (toNum(p.pc_mw) ?? 0) * scale;
+          detail = [`Pa=${fmtP(pa, 3)}`, `Pb=${fmtP(pb, 3)}`, `Pc=${fmtP(pc, 3)}`, `Psum=${fmtP(pa + pb + pc, 3)}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的相别负荷消耗');
+          break;
+        }
+        case 'storage':
+        case 'mobile_storage': {
+          detail = [
+            `P计算=${fmtP(p.p_mw, 3)}`,
+            `Q计算=${fmtQ(p.q_mvar, 3)}`,
+            `P额定=${fmtP(p.p_rated_mw, 3)}`,
+            `E额定=${fmt(p.e_rated_mwh, 3)} MWh`,
+            `SOC=${fmt(p.soc_init, 4)}`,
+            comp.type === 'mobile_storage' ? `移动状态=${p.status || '-'}` : '',
+            comp.type === 'mobile_storage' ? `目标母线=${p.target_bus || '-'}` : '',
+          ];
+          solved = data.converged;
+          note.push('本次潮流计算采用的储能注入；正值放电，负值充电');
+          break;
+        }
+        case 'pv_system':
+        case 'renewable_gen':
+        case 'static_generator': {
+          detail = [
+            `P=${fmtP(p.p_mw, 3)}`,
+            `Q=${fmtQ(p.q_mvar, 3)}`,
+            `额定=${fmtP(p.p_rated_mw ?? p.sn_mva, 3)}`,
+            p.control_mode ? `控制=${p.control_mode}` : '',
+            p.sgen_type ? `类型=${p.sgen_type}` : '',
+          ];
+          solved = data.converged;
+          note.push('本次潮流计算采用的电源注入');
+          break;
+        }
+        case 'dc_load': {
+          const scale = toNum(p.scaling) ?? 1;
+          detail = [`P=${fmtP((toNum(p.p_mw) ?? 0) * scale, 3)}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的DC负荷消耗');
+          break;
+        }
+        case 'dc_pv_array': {
+          detail = [`P计算=${fmtP(p.p_set_mw, 3)}`, `辐照度=${fmt(p.irradiance, 1)} W/m2`, `温度=${fmt(p.temperature, 1)} degC`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的DC光伏注入');
+          break;
+        }
+        case 'ac_branch':
+        case 'transformer_2w': {
+          const br = rowByIndexOrPos(data.geo_ac_branches, 'branch', comp.id);
+          if (br) {
+            solved = true;
+            detail = [
+              `${br.from ?? p.from_bus ?? p.hv_bus ?? '-'} -> ${br.to ?? p.to_bus ?? p.lv_bus ?? '-'}`,
+              `Pf=${fmtP(br.pf_mw, 3)}`,
+              `Pt=${fmtP(br.pt_mw, 3)}`,
+              `Qf=${fmtQ(br.qf_mvar, 3)}`,
+              `Qt=${fmtQ(br.qt_mvar, 3)}`,
+              `Loss=${fmtP(br.loss_mw ?? ((br.pf_mw || 0) + (br.pt_mw || 0)), 3)}`,
+              `Loading=${pct(br.loading_pct, 1)}`,
+            ];
+          } else if (comp.type === 'transformer_2w') {
+            detail = [`HV=${p.hv_bus || '-'}`, `LV=${p.lv_bus || '-'}`, `Sn=${fmt(p.sn_mva, 3)} MVA`, `Tap=${fmt(p.tap_pos, 3)}`];
+            note.push('本次潮流无该双绕组变压器分项返回');
+          } else {
+            detail = [`${p.from_bus || '-'} -> ${p.to_bus || '-'}`, `R=${fmt(p.r_pu, 6)} pu`, `X=${fmt(p.x_pu, 6)} pu`, `Rate=${fmt(p.rate_a_mva, 3)} MVA`];
+            note.push('本次潮流无该支路分项返回');
+          }
+          break;
+        }
+        case 'dc_branch': {
+          const br = rowByIndexOrPos(data.geo_dc_branches || data.dc_branch_flows, 'dcBranch', comp.id);
+          solved = !!br;
+          detail = [
+            `${br?.from ?? br?.from_bus ?? p.from_bus ?? '-'} -> ${br?.to ?? br?.to_bus ?? p.to_bus ?? '-'}`,
+            `Pf=${fmtP(br?.pf_mw, 3)}`,
+            `Pt=${fmtP(br?.pt_mw, 3)}`,
+            `Loss=${fmtP(br?.loss_mw ?? ((br?.pf_mw || 0) + (br?.pt_mw || 0)), 3)}`,
+            br?.loading_pct !== undefined ? `Loading=${pct(br.loading_pct, 1)}` : '',
+          ];
+          if (!br) note.push('本次潮流无该DC支路分项返回');
+          break;
+        }
+        case 'vsc_converter': {
+          const v = rowByIndexOrPos(data.vsc_transfers || data.geo_vsc, 'vsc', comp.id);
+          solved = !!v;
+          detail = [
+            `模式=${p.control_mode || '-'}`,
+            `Pac=${fmtP(v?.p_ac_mw, 3)}`,
+            `Qac=${fmtQ(v?.q_ac_mvar, 3)}`,
+            `Pdc=${fmtP(v?.p_dc_mw, 3)}`,
+            `Loss=${fmtP(v?.loss_mw, 3)}`,
+            !v ? `P计算=${fmtP(p.p_set_mw, 3)}` : '',
+            !v ? `Q计算=${fmtQ(p.q_set_mvar, 3)}` : '',
+          ];
+          if (!v) note.push('本次潮流无该VSC分项返回');
+          break;
+        }
+        case 'dcdc_converter': {
+          const d = rowByIndexOrPos(data.dcdc_transfers || data.geo_dcdc, 'dcdcConverter', comp.id);
+          solved = !!d;
+          detail = [
+            `模式=${p.control_mode || '-'}`,
+            `Pin=${fmtP(d?.p_in_mw, 3)}`,
+            `Pout=${fmtP(d?.p_out_mw, 3)}`,
+            `Loss=${fmtP(d?.loss_mw, 3)}`,
+            !d ? `P计算=${fmtP(p.p_ref_mw, 3)}` : '',
+            `Vref=${fmt(p.v_ref_pu, 4)} pu`,
+          ];
+          if (!d) note.push('本次潮流无该DC/DC分项返回');
+          break;
+        }
+        case 'transformer_3w': {
+          const tf = rowByIndexOrPos(data.geo_trafo3w, 'trafo3w', comp.id);
+          solved = !!tf;
+          detail = tf ? [
+            `HV=${tf.hv_bus} P=${fmtP(tf.p_hv_mw, 3)}`,
+            `MV=${tf.mv_bus} P=${fmtP(tf.p_mv_mw, 3)}`,
+            `LV=${tf.lv_bus} P=${fmtP(tf.p_lv_mw, 3)}`,
+            `Loss=${fmtP(tf.loss_mw, 3)}`,
+            `Loading=${pct(tf.loading_pct, 1)}`,
+          ] : [`HV=${p.hv_bus || '-'}`, `MV=${p.mv_bus || '-'}`, `LV=${p.lv_bus || '-'}`, `SnHV=${fmt(p.sn_hv_mva, 3)} MVA`];
+          if (!tf) note.push('本次潮流无该三绕组变压器分项返回');
+          break;
+        }
+        case 'switch_comp':
+        case 'circuit_breaker': {
+          detail = [`状态=${p.closed !== false ? '合闸' : '分闸'}`, `From=${p.from_bus ?? p.bus_from ?? '-'}`, `To=${p.to_bus ?? p.bus_to ?? '-'}`];
+          if (comp.type === 'circuit_breaker') detail.push(`额定电流=${fmt(p.rated_current_ka ?? p.i_rated_ka, 3)} kA`);
+          break;
+        }
+        case 'shunt': {
+          detail = [`Gs=${fmtP(p.gs_mw, 3)}`, `Bs=${fmtQ(p.bs_mvar, 3)}`, `投切=${p.switchable ? '可投切' : '固定'}`, `步=${p.current_step || 1}/${p.n_steps || 1}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的并联补偿注入');
+          break;
+        }
+        case 'motor': {
+          detail = [`Sn=${fmt(p.sn_mva, 3)} MVA`, `cosPhi=${fmt(p.cos_phi, 3)}`, `效率=${fmt(p.efficiency, 4)}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的电动机负荷模型');
+          break;
+        }
+        case 'charger': {
+          detail = [`类型=${p.charger_type || '-'}`, `额定=${fmt(p.p_rated_kw, 3)} kW`, `最大充电=${fmt(p.p_ch_max_kw, 3)} kW`, `V2G=${p.v2g_capable ? '是' : '否'}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的充电桩模型');
+          break;
+        }
+        case 'charging_station': {
+          detail = [`快充=${p.n_fast || 0}`, `慢充=${p.n_slow || 0}`, `最大=${fmt(p.max_power_kw, 3)} kW`, `同时率=${fmt(p.simultaneity_factor, 3)}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的充电站负荷模型');
+          break;
+        }
+        case 'energy_router': {
+          const er = rowByIndexOrPos(data.geo_er, 'energyRouter', comp.id);
+          solved = !!er;
+          if (er && Array.isArray(er.ports)) {
+            detail = er.ports.map(pt => `P${pt.port_index}@${pt.is_ac ? 'AC' : 'DC'} Bus ${pt.bus}: P=${fmtP(pt.p_mw, 3)}, V=${fmt(pt.v_pu, 4)} pu`);
+            detail.push(`Loss=${fmtP(er.loss_mw, 3)}`);
+          } else {
+            detail = [`类型=${p.router_type || '-'}`, `端口=${p.num_ports || 0}`, `额定=${fmtP(p.p_rated_mw, 3)}`];
+            note.push('本次潮流无该能量路由器端口分项返回');
+          }
+          break;
+        }
+        case 'vpp': {
+          detail = [`P输出=${fmtP(p.p_output_mw, 3)}`, `Q输出=${fmtQ(p.q_output_mvar, 3)}`, `上调=${fmtP(p.p_regulation_up_mw, 3)}`, `下调=${fmtP(p.p_regulation_down_mw, 3)}`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的虚拟电厂聚合注入');
+          break;
+        }
+        case 'microgrid': {
+          detail = [`模式=${p.operating_mode || '-'}`, `交换P=${fmtP(p.p_exchange_mw, 3)}`, `容量=${fmtP(p.capacity_mw, 3)}`, `Vset=${fmt(p.v_set_pu, 4)} pu`];
+          solved = data.converged;
+          note.push('本次潮流计算采用的微电网交换功率');
+          break;
+        }
+        default:
+          detail = Object.entries(p).slice(0, 6).map(([k, v]) => `${k}=${v}`);
+          note.push('本次潮流结果中的元件参数摘要');
+      }
+
+      return { solved, detail, note };
+    };
+
+    const globalBlocked = data.converter_coordination && data.converter_coordination.enabled && data.converter_coordination.feasible === false;
+    const statusFor = (comp, desc) => {
+      const p = comp.params || {};
+      if (p.in_service === false) return '停运';
+      if (comp.type === 'switch_comp' || comp.type === 'circuit_breaker') return p.closed !== false ? '合闸' : '分闸';
+      if (data.converged && desc.solved) return '已求解';
+      if (desc.solved) return '有返回值/未收敛';
+      if (data.converged) return '已参与计算';
+      return globalBlocked ? '校核阻断' : '未收敛';
+    };
+
+    let html = '<table><thead><tr><th>ID</th><th>类型</th><th>名称</th><th>状态</th><th>连接</th><th>潮流/电压/功率</th><th>备注</th></tr></thead><tbody>';
+    components.forEach(comp => {
+      const desc = describe(comp);
+      const status = statusFor(comp, desc);
+      html += `<tr data-comp-id="${comp.id}">`;
+      html += `<td>${comp.id}</td><td>${escapeHtml(componentTypeLabel(comp.type))}</td><td>${escapeHtml(compName(comp))}</td>`;
+      html += `<td>${escapeHtml(status)}</td><td>${escapeHtml(connectionText(comp))}</td>`;
+      html += `<td>${lineHtml(desc.detail)}</td><td>${lineHtml(desc.note)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    div.innerHTML = html;
+  }
+
   function showPowerFlowResultsTables(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -2414,6 +3110,47 @@ const App = (() => {
     `;
 
     const busMap = Canvas.getCompBusMap();
+
+    const coordSec = document.getElementById('pfCoordSection');
+    const coordDiv = document.getElementById('pfCoordResults');
+    const coord = data.converter_coordination;
+    if (coordSec && coordDiv && coord && coord.enabled) {
+      coordSec.style.display = '';
+      const issues = Array.isArray(coord.issues) ? coord.issues : [];
+      const islands = Array.isArray(coord.dc_islands) ? coord.dc_islands : [];
+      const status = coord.feasible ? '通过' : '不可行';
+      const blockingCount = coord.blocking_count ?? ((coord.fatal_count || 0) + (coord.error_count || 0));
+      let html = `<div style="margin-bottom:8px;color:${coord.feasible ? '#15803d' : '#b91c1c'};"><strong>状态：</strong>${status}；阻断项: ${blockingCount || 0}；Fatal: ${coord.fatal_count || 0}；Error: ${coord.error_count || 0}；Warning: ${coord.warning_count || 0}</div>`;
+      if (issues.length) {
+        html += '<table><thead><tr><th>等级</th><th>规则</th><th>对象</th><th>岛</th><th>说明</th></tr></thead><tbody>';
+        issues.forEach(issue => {
+          const sev = issue.severity || '';
+          const color = sev === 'fatal' || sev === 'error' ? '#b91c1c' : (sev === 'warning' ? '#b45309' : '#475569');
+          const comp = `${issue.component_type || ''}${issue.component_index != null && issue.component_index >= 0 ? '#' + issue.component_index : ''}`;
+          html += `<tr><td style="color:${color};font-weight:600">${escapeHtml(sev)}</td><td>${escapeHtml(issue.rule_id || '')}</td><td>${escapeHtml(comp)}</td><td>${issue.island_index ?? '-'}</td><td>${escapeHtml(issue.message || '')}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      if (islands.length) {
+        html += '<table style="margin-top:8px"><thead><tr><th>DC岛</th><th>DC母线</th><th>声明DC_V母线</th><th>电压源</th><th>硬Vdc源</th><th>下垂源</th><th>固定功率设备</th><th>固定净注入(MW)</th><th>上调(MW)</th><th>下调(MW)</th></tr></thead><tbody>';
+        islands.forEach(isle => {
+          const sources = Array.isArray(isle.voltage_sources) ? isle.voltage_sources : [];
+          const sourceText = sources.map(src => {
+            const mode = src.droop ? 'droop' : 'rigid';
+            const vset = src.has_v_set ? `@${Number(src.v_set_pu || 0).toFixed(4)}pu` : '';
+            return `${src.component_type || ''}#${src.component_index ?? '-'}:${mode}${vset}`;
+          }).join('; ');
+          html += `<tr><td>${isle.island_index ?? '-'}</td><td>${escapeHtml((isle.dc_buses || []).join(','))}</td><td>${escapeHtml((isle.declared_v_buses || []).join(','))}</td><td>${escapeHtml(sourceText)}</td><td>${isle.hard_vdc_sources || 0}</td><td>${isle.droop_sources || 0}</td><td>${isle.fixed_power_devices || 0}</td><td>${Number(isle.fixed_power_mw || 0).toFixed(4)}</td><td>${Number(isle.flexible_up_mw || 0).toFixed(4)}</td><td>${Number(isle.flexible_down_mw || 0).toFixed(4)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      coordDiv.innerHTML = html;
+    } else if (coordSec && coordDiv) {
+      coordSec.style.display = 'none';
+      coordDiv.innerHTML = '';
+    }
+
+    renderAllPowerFlowComponentStatus(data, busMap);
 
     // AC Bus voltage table
     const busDiv = document.getElementById('pfBusResults');
@@ -3513,17 +4250,14 @@ const App = (() => {
         } else if (comp.type === 'dcdc_converter') {
           modeOptions = [
             {v:'Voltage', l:'Voltage'},
-            {v:'Current', l:'Current'},
             {v:'Power',   l:'Power'},
-            {v:'MPPT',    l:'MPPT'},
+            {v:'Droop',   l:'Droop'},
           ];
         } else {
           modeOptions = [
             {v:'PQ_MODE', l:'PQ_MODE'},
             {v:'VDC_Q',   l:'VDC_Q'},
-            {v:'VDC_P',   l:'VDC_P'},
-            {v:'AC_PQ',   l:'AC_PQ'},
-            {v:'DROOP',   l:'DROOP'},
+            {v:'VDC_VAC', l:'VDC_VAC'},
           ];
         }
         modeOptions.forEach(o => {

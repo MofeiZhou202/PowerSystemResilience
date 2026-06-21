@@ -12,6 +12,7 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/branch_flow.hpp"
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/dc_solver.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
@@ -563,6 +564,19 @@ Result<PowerFlowResult> safe_solve_power_flow(
 }
 
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  const powerflow::ConverterCoordinationReport coordination =
+      powerflow::evaluate_converter_coordination(sys, opt.enable_converter_coordination_check);
+  if (coordination.enabled && coordination.has_blocking_issue()) {
+    PowerFlowResult result;
+    result.converged = false;
+    result.diagnostics.converter_coordination = coordination;
+    result.diagnostics.termination_reason = "Converter coordination feasibility check failed";
+    for (const auto& issue : coordination.issues) {
+      result.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+    }
+    return result;
+  }
+
   // ── Graph topology pre-check ──────────────────────────────────────────────
   // Return immediately (before Y-bus assembly) if no island has a slack bus.
   if (!sys.ac.buses.empty()) {
@@ -586,6 +600,15 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   static thread_local powerflow::NewtonSolver solver;
   const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
   PowerFlowResult result = solver.solve(data, opt, init_ptr);
+  result.diagnostics.converter_coordination = coordination;
+  if (coordination.enabled) {
+    for (const auto& issue : coordination.issues) {
+      if (issue.severity == powerflow::CoordinationSeverity::Warning ||
+          issue.severity == powerflow::CoordinationSeverity::Info) {
+        result.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+      }
+    }
+  }
   populate_derived_results(data, result, opt.loss_model);
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
   return result;
@@ -769,6 +792,7 @@ PowerFlowOptions PowerFlowOptions::from_parts(
   o.converter_vdc_switch_low_pu     = converter.converter_vdc_switch_low_pu;
   o.mode_hysteresis_iters           = converter.mode_hysteresis_iters;
   o.enable_converter_mode_switching = converter.enable_converter_mode_switching;
+  o.enable_converter_coordination_check = converter.enable_converter_coordination_check;
   o.loss_model                      = converter.loss_model;
 
   // ZIP
