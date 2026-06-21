@@ -32,6 +32,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::harmonics;
@@ -1973,6 +1974,217 @@ TEST_CASE("Hybrid AC/DC Newton: mutual cross-domain coupling residual",
   CHECK_THAT(std::abs(A7 * V7 - Cx(1.0, 0.0)), WithinAbs(0.0, 1e-6));
   CHECK_THAT(std::abs(Adc * Vdc6 + g * V5 * V7), WithinAbs(0.0, 1e-6));
   CHECK_FALSE(r.summary().empty());
+}
+
+// ===========================================================================
+// Coverage backfill: paths that were previously untested
+// ===========================================================================
+
+// Helper: look up a DC branch-flow current magnitude at a given order.
+static double dc_branch_i(const HPFResult& r, int from, int to, int order) {
+  for (const auto& bf : r.dc_branch_flows)
+    if (bf.from_bus == from && bf.to_bus == to) {
+      auto it = bf.i_by_order.find(order);
+      if (it != bf.i_by_order.end()) return it->second;
+    }
+  return -1.0;
+}
+
+// Pins the DC branch-flow ripple-inductance fix: the reported branch current must
+// use the SAME order-dependent impedance Z(r)=r+j*r*x_pu as the network solve.
+// In a radial DC feeder all the injected ripple current returns through the single
+// branch, so KCL fixes |I_branch(6)| = |I_inj(6)| = 1.0 EXACTLY — regardless of
+// the branch reactance.  The pre-fix (resistance-only) formula gives 2.6 here.
+TEST_CASE("HPF DC branch flow respects ripple inductance (radial KCL)",
+          "[harmonics][dc][branchflow]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_V), dc_bus(2, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 1, 2, 0.05)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2; src.is_dc = true; src.i_base_pu = 1.0;
+  src.spectrum = {{6, 100.0, 0.0}};
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.ac_orders = {};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+  opt.dc_ripple_model.branch_x_pu[1] = 0.02;   // Z(6) = 0.05 + j*6*0.02
+  opt.compute_branch_flows = true;
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.dc_order_solved.at(6));
+  // Radial branch carries the full injected ripple current: exactly 1.0 pu.
+  CHECK_THAT(dc_branch_i(r, 1, 2, 6), WithinAbs(1.0, 1e-6));
+}
+
+// Exercises the three-phase load-as-shunt-impedance path (build_3ph_ac_ybus
+// stamp_load), which no prior 3-phase test enabled.  For a balanced positive-
+// sequence excitation the phase-domain solution is a pure positive-sequence set,
+// so the A-phase voltage matches a two-node positive-sequence hand solution, and
+// adding the load shunt strictly attenuates the bus harmonic voltage.
+TEST_CASE("HPF 3-phase load impedance attenuates harmonic voltage (analytic)",
+          "[harmonics][3ph][load]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};   // x1 = 0.1 (lossless)
+
+  ThreePhaseLoad ld;
+  ld.index = 1; ld.bus = 2; ld.in_service = true;
+  ld.phase_mask = PhaseMask::abc();
+  ld.p_a_mw = 20.0; ld.p_b_mw = 20.0; ld.p_c_mw = 20.0;  // 0.2 pu/phase, q = 0
+  sys.loads = {ld};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2; src.balanced = true; src.i_base_pu = 1.0;
+  src.spectrum = {{7, 100.0, 0.0}};            // 7th: positive sequence
+  ThreePhaseHarmonicInputs in;
+  in.sources = {src};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.ac_orders = {7};
+
+  opt.include_load_impedance = false;
+  HPF3phResult r_off = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r_off.ok);
+  REQUIRE(r_off.ac_order_solved.at(7));
+
+  opt.include_load_impedance = true;
+  HPF3phResult r_on = solve_harmonic_power_flow_3ph(sys, in, opt);
+  REQUIRE(r_on.ok);
+  REQUIRE(r_on.ac_order_solved.at(7));
+
+  // Two-node positive-sequence closed form with the load shunt at bus 2:
+  //   y_src = 1/(j*7*0.2), y_line = 1/(j*7*0.1), y_load = 0.2 (q = 0).
+  const Cx I(1.0, 0.0);
+  const Cx ysrc  = I / Cx(0.0, 7.0 * 0.2);
+  const Cx yline = I / Cx(0.0, 7.0 * 0.1);
+  const Cx yload(0.2, 0.0);
+  const Cx Y11 = ysrc + yline, Y22 = yline + yload, Y12 = -yline;
+  const Cx det = Y11 * Y22 - Y12 * Y12;
+  const Cx v2_expected = I * Y11 / det;
+
+  // Balanced across phases (positive-sequence: B lags, C leads by 120 deg).
+  const Cx va = vph(r_on, 2, 7, 0), vb = vph(r_on, 2, 7, 1), vc = vph(r_on, 2, 7, 2);
+  CHECK_THAT(std::abs(vb), WithinRel(std::abs(va), 1e-6));
+  CHECK_THAT(std::abs(vc), WithinRel(std::abs(va), 1e-6));
+  CHECK_THAT(angdiff_deg(vb, va), WithinAbs(-120.0, 1e-3));
+  CHECK_THAT(angdiff_deg(vc, va), WithinAbs(120.0, 1e-3));
+  // A-phase magnitude matches the positive-sequence hand solution.
+  CHECK_THAT(std::abs(va), WithinRel(std::abs(v2_expected), 1e-4));
+  // The load shunt provides an extra path to ground -> strictly lower voltage.
+  CHECK(std::abs(vph(r_on, 2, 7, 0)) < std::abs(vph(r_off, 2, 7, 0)));
+}
+
+// Drives the NIC operating point from a REAL base power flow (the vsc_transfers
+// extraction path), which every other NIC test bypasses with run_base_power_flow
+// = false and hand-fed setpoints.  A converged base PF supplies the converter's
+// P_dc, so the lossless guess must NOT be used and the auto-NIC must inject
+// characteristic harmonics that raise the AC voltage THD above zero.
+TEST_CASE("HPF NIC operating point derived from a converged base power flow",
+          "[harmonics][nic][basepf]") {
+  HybridPowerSystem sys = io::build_ieee14_acdc();
+  REQUIRE_FALSE(sys.vsc_converters.empty());   // auto-NIC needs converters
+
+  HPFOptions opt;                  // defaults: run_base_power_flow + auto_nic_from_vscs
+  HPFResult r = solve_harmonic_power_flow(sys, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.base_pf_converged);
+  REQUIRE_FALSE(r.ac_bus_results.empty());
+  // Base PF provided the converter transfer, so no lossless fallback was taken.
+  CHECK(r.message.find("lossless") == std::string::npos);
+  // Converters inject characteristic harmonics -> non-zero AC voltage distortion.
+  CHECK(r.max_ac_thd_pct > 0.0);
+}
+
+// Exercises the single-phase NIC Norton output admittance (y_out_ac) stamping,
+// which the existing NIC test leaves at zero.  A pure conductance g = 0.5 at the
+// AC port turns the radial node into a loaded node; the closed-form two-node
+// solution gives |V_ac(5)| = 1.2 pu (vs 1.5 with an ideal current source).
+TEST_CASE("HPF NIC Norton output admittance loads the AC port",
+          "[harmonics][nic][yout]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};   // x = 0.1
+  sys.dc.buses = {dc_bus(10, DCBusType::DC_V), dc_bus(11, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 10, 11, 0.05)};
+
+  VSCConverter v;
+  v.index = 0; v.bus_ac = 2; v.bus_dc = 11;
+  v.control_mode = ConverterMode::PQ_MODE; v.in_service = true;
+  sys.vsc_converters = {v};
+
+  auto run = [&](Cx y_out) {
+    HarmonicNIC nic;
+    nic.vsc_index = 0;
+    nic.ac_port = PortBehavior::GridFollowing;
+    nic.dc_port = PortBehavior::GridFollowing;
+    nic.ac_spectrum = {{5, 100.0, 0.0}};
+    nic.s_ac_p_mw = 100.0;            // -> |I_ac1| = 1.0 at V_ac1 = 1.0
+    nic.s_ac_q_mvar = 0.0;
+    nic.p_dc_mw = -100.0;
+    nic.y_out_ac = y_out;
+    HarmonicStudyInputs in{.sources = {}, .nics = {nic}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {5};
+    opt.dc_orders = {};
+    opt.auto_nic_from_vscs = false;  // only the explicit NIC
+    return solve_harmonic_power_flow(sys, in, opt);
+  };
+
+  HPFResult r_ideal = run(Cx(0.0, 0.0));
+  REQUIRE(r_ideal.ok);
+  CHECK_THAT(std::abs(vbus(r_ideal, 2, 5)), WithinAbs(1.5, 1e-5));  // radial sum
+
+  HPFResult r_yout = run(Cx(0.5, 0.0));  // g = 0.5 (b = 0 -> no order scaling)
+  REQUIRE(r_yout.ok);
+  CHECK_THAT(std::abs(vbus(r_yout, 2, 5)), WithinAbs(1.2, 1e-5));
+  CHECK(std::abs(vbus(r_yout, 2, 5)) < std::abs(vbus(r_ideal, 2, 5)));
+}
+
+// THD is referenced to the fundamental magnitude, so a depressed fundamental
+// voltage inflates THD proportionally.  With run_base_power_flow = false the
+// stored bus voltage IS the fundamental reference, so halving it doubles THD.
+TEST_CASE("HPF THD scales inversely with a depressed fundamental voltage",
+          "[harmonics][thd]") {
+  auto run = [&](double v2_fund) {
+    HybridPowerSystem sys;
+    sys.base_mva = 100.0;
+    sys.ac.base_mva = 100.0;
+    sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+    sys.ac.buses[1].vm_pu = v2_fund;   // stored fundamental at bus 2
+    sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};  // x = 0.1
+    HarmonicCurrentSource src;
+    src.bus = 2; src.i_base_pu = 1.0; src.spectrum = {{5, 100.0, 0.0}};
+    HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {5};
+    opt.dc_orders = {};
+    return solve_harmonic_power_flow(sys, in, opt);
+  };
+
+  // |V5| = I*(z_src + z_line) = 1.0*(j1.0 + j0.5) = 1.5 pu, independent of V_fund.
+  HPFResult r1 = run(1.0);
+  REQUIRE(r1.ok);
+  CHECK_THAT(thd_at(r1, 2), WithinAbs(150.0, 1e-3));   // 1.5 / 1.0
+  HPFResult rhalf = run(0.5);
+  REQUIRE(rhalf.ok);
+  CHECK_THAT(thd_at(rhalf, 2), WithinAbs(300.0, 1e-3)); // 1.5 / 0.5
+  CHECK(std::isfinite(thd_at(rhalf, 2)));
 }
 
 
