@@ -40,6 +40,10 @@ using Cx = std::complex<double>;
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 
+namespace {
+constexpr double kPi = 3.141592653589793238462643383279502884;
+}
+
 // ---------------------------------------------------------------------------
 // Builders
 // ---------------------------------------------------------------------------
@@ -543,7 +547,7 @@ static Cx vph(const HPF3phResult& r, int bus, int order, int phase) {
 }
 
 static double angdiff_deg(Cx x, Cx y) {
-  double d = (std::arg(x) - std::arg(y)) * 180.0 / M_PI;
+  double d = (std::arg(x) - std::arg(y)) * 180.0 / kPi;
   while (d > 180.0) d -= 360.0;
   while (d < -180.0) d += 360.0;
   return d;
@@ -1621,8 +1625,8 @@ TEST_CASE("Per-sequence frequency scan separates positive and zero sequence",
 // ===========================================================================
 // Balanced sequence rotation factor for phase (0/1/2) at a given sequence.
 static Cx seq_rot(int seq, int phase) {
-  const Cx a = std::polar(1.0, 2.0 * M_PI / 3.0);
-  const Cx a2 = std::polar(1.0, 4.0 * M_PI / 3.0);
+  const Cx a = std::polar(1.0, 2.0 * kPi / 3.0);
+  const Cx a2 = std::polar(1.0, 4.0 * kPi / 3.0);
   if (phase == 0) return Cx(1, 0);
   if (seq == 1) return (phase == 1) ? a2 : a;   // positive: b=a², c=a
   if (seq == 2) return (phase == 1) ? a : a2;   // negative: b=a, c=a²
@@ -2186,7 +2190,6 @@ TEST_CASE("HPF THD scales inversely with a depressed fundamental voltage",
   CHECK_THAT(thd_at(rhalf, 2), WithinAbs(300.0, 1e-3)); // 1.5 / 0.5
   CHECK(std::isfinite(thd_at(rhalf, 2)));
 }
-
 
 
 

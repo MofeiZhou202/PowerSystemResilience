@@ -7,6 +7,7 @@ function(hacdcpf_add_test target)
     HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
     HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
   )
+  hacdcpf_copy_opendss_runtime(${target})
   catch_discover_tests(${target})
 endfunction()
 
@@ -74,6 +75,7 @@ target_compile_options(test_powerflow_performance PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
   $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>
 )
+hacdcpf_copy_opendss_runtime(test_powerflow_performance)
 catch_discover_tests(test_powerflow_performance
   TEST_SUFFIX " [perf]"
   PROPERTIES LABELS "performance;slow"
@@ -118,6 +120,30 @@ hacdcpf_add_test(test_harmonics_power_flow test_harmonics_power_flow.cpp)
 # meshed topology, multi-source PV, HybridPowerSystem overload, VUF, losses,
 # zero-load no-load, and 2-bus analytical cross-validation.
 hacdcpf_add_test(test_three_phase_nr test_three_phase_nr.cpp)
+hacdcpf_add_test(test_three_phase_nr_phase_indexing test_three_phase_nr_phase_indexing.cpp)
+hacdcpf_add_test(test_three_phase_nr_load_models test_three_phase_nr_load_models.cpp)
+hacdcpf_add_test(test_three_phase_nr_transformer_source test_three_phase_nr_transformer_source.cpp)
+hacdcpf_add_test(test_three_phase_nr_regulator test_three_phase_nr_regulator.cpp)
+
+set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
+  "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")
+if(HACDCPF_HAVE_OPENDSS AND EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}")
+  hacdcpf_add_test(test_phase_domain_multi_case_compact
+    test_phase_domain_multi_case_compact.cpp)
+  hacdcpf_add_test(test_phase_domain_multi_case_compact_julia
+    test_phase_domain_multi_case_compact_julia.cpp)
+
+  if(EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}/IEEE123_Fixed/IEEE123Master_Fixed.dss")
+    hacdcpf_add_test(test_phase_domain_ieee123 test_phase_domain_ieee123.cpp)
+    hacdcpf_add_test(test_phase_domain_ieee123_generic_solver
+      test_phase_domain_ieee123_generic_solver.cpp)
+  endif()
+endif()
+
+if(HACDCPF_HAVE_OPENDSS_COMPARE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_opendss_pf_compare.cpp")
+  hacdcpf_add_test(test_opendss_pf_compare test_opendss_pf_compare.cpp)
+  target_include_directories(test_opendss_pf_compare PRIVATE "${CMAKE_SOURCE_DIR}/tools")
+endif()
 
 # Distribution resilience assessment: empty/invalid rejection, no-fault zero-shed,
 # single-fault shedding, fault repair restoration, tie-switch reconfiguration,

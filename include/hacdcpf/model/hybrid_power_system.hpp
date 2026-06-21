@@ -126,6 +126,7 @@ struct ACSystem {
   std::vector<ExternalGrid> external_grids;
   std::vector<Transformer2W> transformers_2w;
   std::vector<Transformer3W> transformers_3w;
+  std::vector<RegulatorControl> regulator_controls;
   std::vector<Switch> switches;
   std::vector<CircuitBreaker> circuit_breakers;
   std::vector<ChargingStation> charging_stations;

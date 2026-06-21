@@ -761,6 +761,20 @@ const App = (() => {
     renderCarbonPotentialChart(busRows);
     Canvas.clearCarbonPotentialResults?.();
 
+    // Make result rows pan/select the related bus component on the canvas
+    // (mirroring the power-flow tables). DC-aware: DC rows prefer the DC bus map.
+    const cbMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+    const cbClick = (busId, isDc) => {
+      const id = parseInt(busId, 10);
+      if (!Number.isInteger(id) || !cbMap) return '';
+      const prim = isDc ? cbMap.dc : cbMap.ac;
+      const alt = isDc ? cbMap.ac : cbMap.dc;
+      const compId = (prim && prim[id] != null) ? prim[id]
+                   : (alt && alt[id] != null) ? alt[id] : undefined;
+      return compId != null
+        ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+    };
+
     let busHtml = `<table><thead><tr><th>类型</th><th>Bus</th><th>碳势/碳强度(${carbonIntensityUnit()})</th><th>有效消纳(MW)</th><th>状态</th></tr></thead><tbody>`;
     busRows.forEach(b => {
       const potentialValid = b.carbon_potential_valid !== false;
@@ -769,7 +783,7 @@ const App = (() => {
         ? '碳势病态，图表排除'
         : (hasSink ? '有本地消纳' : '无本地消纳/电源或过境节点');
       const statusClass = potentialValid ? 'result-converged' : 'result-failed';
-      busHtml += `<tr><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.bus_index}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Number(b.sink_power_mw || 0).toFixed(6)}</td><td class="${statusClass}">${status}</td></tr>`;
+      busHtml += `<tr${cbClick(b.bus_index, b.is_dc)}><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.bus_index}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Number(b.sink_power_mw || 0).toFixed(6)}</td><td class="${statusClass}">${status}</td></tr>`;
     });
     busHtml += busRows.length ? '</tbody></table>' : '<tr><td colspan="5">暂无节点碳强度结果</td></tr></tbody></table>';
     document.getElementById('carbonBusResults').innerHTML = busHtml;
@@ -782,7 +796,7 @@ const App = (() => {
     loadRows.forEach(l => {
       const demand = Number(l.demand_mw || 0);
       const emissions = Math.max(0, Number(l.total_emissions_tco2 || 0));
-      loadHtml += `<tr><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${l.load_index}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
+      loadHtml += `<tr${cbClick(l.bus, l.is_dc)}><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${l.load_index}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
     });
     loadHtml += loadRows.length ? '</tbody></table>' : '<tr><td colspan="6">暂无负荷碳排放结果</td></tr></tbody></table>';
     document.getElementById('carbonLoadResults').innerHTML = loadHtml;
@@ -793,7 +807,7 @@ const App = (() => {
     ];
     let branchHtml = `<table><thead><tr><th>类型</th><th>Branch</th><th>From</th><th>To</th><th>Loss(MW)</th><th>碳强度(${carbonIntensityUnit()})</th><th>碳排(tCO2)</th></tr></thead><tbody>`;
     branchRows.forEach(b => {
-      branchHtml += `<tr><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.branch_index}</td><td>${b.from_bus}</td><td>${b.to_bus}</td><td>${Math.max(0, Number(b.loss_mw || 0)).toFixed(6)}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(b.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
+      branchHtml += `<tr${cbClick(b.from_bus, b.is_dc)}><td>${b.is_dc ? 'DC' : 'AC'}</td><td>${b.branch_index}</td><td>${b.from_bus}</td><td>${b.to_bus}</td><td>${Math.max(0, Number(b.loss_mw || 0)).toFixed(6)}</td><td>${carbonIntensityDisplay(b.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(b.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
     });
     branchHtml += branchRows.length ? '</tbody></table>' : '<tr><td colspan="7">暂无支路损耗碳排放结果</td></tr></tbody></table>';
     document.getElementById('carbonBranchResults').innerHTML = branchHtml;
@@ -3243,7 +3257,13 @@ const App = (() => {
   // ========== Topology Tables ==========
   function onTopologyChanged() {
     _canvasDirty = true;
+    // Rewiring changes which buses a device connects to — re-derive those
+    // connection params so the property panel and exports stay in sync.
+    if (Canvas.syncConnectivity) Canvas.syncConnectivity();
     updateTopologyTables();
+    // Reflect the updated connection info in the open property panel immediately.
+    const sel = Canvas.state.selectedId;
+    if (sel !== null && sel !== undefined) onSelectionChanged(sel);
   }
 
   function updateTopologyTables() {

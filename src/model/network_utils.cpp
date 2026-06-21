@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <map>
 #include <queue>
@@ -118,14 +119,24 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
     x_pu = 1e-4;
   }
 
+  // Canonical ACBranch stores off-nominal tap on the from side. For an LV-side
+  // physical tap, invert the tap and scale leakage impedance by tap^2.
+  const double raw_tap =
+      tap_from_step(tr.tap_pos, tr.tap_neutral, tr.tap_step_percent);
+  const double clamped_tap = std::max(1e-6, raw_tap);
+  const double canonical_tap =
+      (tr.tap_side == 1) ? (1.0 / clamped_tap) : clamped_tap;
+  const double impedance_scale =
+      (tr.tap_side == 1) ? (clamped_tap * clamped_tap) : 1.0;
+
   ACBranch br;
   br.index = next_idx++;
   br.from_bus = tr.hv_bus;
   br.to_bus = tr.lv_bus;
-  br.r_pu = r_pu;
-  br.x_pu = x_pu;
+  br.r_pu = r_pu * impedance_scale;
+  br.x_pu = x_pu * impedance_scale;
   br.b_pu = 0.0;
-  br.tap = tap_from_step(tr.tap_pos, tr.tap_neutral, tr.tap_step_percent);
+  br.tap = canonical_tap;
   br.shift_deg = tr.shift_deg;
   br.rate_a_mva = tr.sn_mva;
   br.in_service = true;
@@ -147,66 +158,115 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
   if (!tr.in_service) return;
   if (tr.hv_bus == 0 || tr.mv_bus == 0 || tr.lv_bus == 0) return;
 
-  // Off-nominal regulating-tap ratio.  In the delta of pairwise short-circuit
-  // impedances, a winding's OLTC scales only the two branches that touch that
-  // winding's terminal (not the opposite branch).  tap_side: 0=HV, 1=MV, 2=LV.
-  // When the regulated terminal is a branch's "to" end, the branch is flipped
-  // (safe — these equivalents carry no charging susceptance) so the ratio can
-  // be expressed as a standard from-side tap, with the phase shift negated.
-  const double ratio = tap_from_step(tr.tap_pos, 0, tr.tap_step_percent);
-  const bool has_tap = std::abs(ratio - 1.0) > 1e-12;
-  const int reg_bus = (tr.tap_side == 1) ? tr.mv_bus
-                    : (tr.tap_side == 2) ? tr.lv_bus
-                                         : tr.hv_bus;  // default (0) -> HV
+  using Complex = std::complex<double>;
+
+  const double winding_tap_pu =
+      std::max(1e-6, tap_from_step(tr.tap_pos, 0, tr.tap_step_percent));
+  const double t = winding_tap_pu;
+  const double inv_t = 1.0 / t;
+
+  double tap_by_pair[3];
+  double tau_winding[3] = {1.0, 1.0, 1.0};
+  if (tr.tap_side == 0) {
+    tap_by_pair[0] = t;
+    tap_by_pair[1] = t;
+    tap_by_pair[2] = 1.0;
+    tau_winding[0] = t;
+  } else if (tr.tap_side == 1) {
+    tap_by_pair[0] = inv_t;
+    tap_by_pair[1] = 1.0;
+    tap_by_pair[2] = t;
+    tau_winding[1] = t;
+  } else {
+    tap_by_pair[0] = 1.0;
+    tap_by_pair[1] = inv_t;
+    tap_by_pair[2] = inv_t;
+    tau_winding[2] = t;
+  }
+
+  const double sn_hv_mv = std::max(1e-9, std::min(tr.sn_hv_mva, tr.sn_mv_mva));
+  const double sn_hv_lv = std::max(1e-9, std::min(tr.sn_hv_mva, tr.sn_lv_mva));
+  const double sn_mv_lv = std::max(1e-9, std::min(tr.sn_mv_mva, tr.sn_lv_mva));
+
+  auto [r_hm, x_hm] =
+      rx_from_vk_vkr(tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, base_mva, sn_hv_mv);
+  auto [r_hl, x_hl] =
+      rx_from_vk_vkr(tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, base_mva, sn_hv_lv);
+  auto [r_ml, x_ml] =
+      rx_from_vk_vkr(tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, base_mva, sn_mv_lv);
+
+  const Complex z_hm(r_hm, x_hm);
+  const Complex z_hl(r_hl, x_hl);
+  const Complex z_ml(r_ml, x_ml);
+
+  const Complex z_h = 0.5 * (z_hm + z_hl - z_ml);
+  const Complex z_m = 0.5 * (z_hm + z_ml - z_hl);
+  const Complex z_l = 0.5 * (z_hl + z_ml - z_hm);
+
+  const double z_min = 1e-12;
+  const Complex y_h =
+      (std::abs(z_h) > z_min) ? (Complex{1.0, 0.0} / z_h)
+                              : Complex{1.0 / z_min, 0.0};
+  const Complex y_m =
+      (std::abs(z_m) > z_min) ? (Complex{1.0, 0.0} / z_m)
+                              : Complex{1.0 / z_min, 0.0};
+  const Complex y_l =
+      (std::abs(z_l) > z_min) ? (Complex{1.0, 0.0} / z_l)
+                              : Complex{1.0 / z_min, 0.0};
+
+  const Complex y_ss = y_h + y_m + y_l;
+  const Complex y_winding[3] = {y_h, y_m, y_l};
+  const int pair_from_winding[3] = {0, 0, 1};
+  const int pair_to_winding[3] = {1, 2, 2};
 
   struct PairData {
     int from_bus;
     int to_bus;
-    double vk_percent;
-    double vkr_percent;
     double sn_from;
     double sn_to;
-    double shift_deg;
     const char* suffix;
   };
+
   const PairData pairs[3] = {
-      {tr.hv_bus, tr.mv_bus, tr.vk_hv_mv_percent, tr.vkr_hv_mv_percent, tr.sn_hv_mva, tr.sn_mv_mva, tr.shift_mv_deg, "HV_MV"},
-      {tr.hv_bus, tr.lv_bus, tr.vk_hv_lv_percent, tr.vkr_hv_lv_percent, tr.sn_hv_mva, tr.sn_lv_mva, tr.shift_lv_deg, "HV_LV"},
-      {tr.mv_bus, tr.lv_bus, tr.vk_mv_lv_percent, tr.vkr_mv_lv_percent, tr.sn_mv_mva, tr.sn_lv_mva, tr.shift_lv_deg - tr.shift_mv_deg, "MV_LV"},
+      {tr.hv_bus, tr.mv_bus, tr.sn_hv_mva, tr.sn_mv_mva, "HV_MV"},
+      {tr.hv_bus, tr.lv_bus, tr.sn_hv_mva, tr.sn_lv_mva, "HV_LV"},
+      {tr.mv_bus, tr.lv_bus, tr.sn_mv_mva, tr.sn_lv_mva, "MV_LV"},
   };
 
-  auto kv_of = [&](int bus) {
-    return (bus == tr.hv_bus) ? tr.vn_hv_kv
-         : (bus == tr.mv_bus) ? tr.vn_mv_kv
-                              : tr.vn_lv_kv;
-  };
+  for (int pair_idx = 0; pair_idx < 3; ++pair_idx) {
+    const auto& p = pairs[pair_idx];
+    const int fw = pair_from_winding[pair_idx];
+    const int tw = pair_to_winding[pair_idx];
+    const double tau_from = tau_winding[fw];
+    const double tau_to = tau_winding[tw];
+    const double tau_pair = tap_by_pair[pair_idx];
 
-  for (const auto& p : pairs) {
-    const double sn_pair = std::max(1e-9, std::min(p.sn_from, p.sn_to));
-    auto [r_pu, x_pu] = rx_from_vk_vkr(p.vk_percent, p.vkr_percent, base_mva, sn_pair);
+    const Complex y_numerator =
+        y_winding[fw] * y_winding[tw] * Complex{tau_pair, 0.0};
+    const Complex z_denominator = Complex{tau_from * tau_to, 0.0} * y_ss;
+    if (std::abs(y_numerator) < 1e-30) continue;
+
+    const Complex z_branch = z_denominator / y_numerator;
+    const double r_pu = z_branch.real();
+    const double x_pu = z_branch.imag();
     if (r_pu == 0.0 && x_pu == 0.0) continue;
 
-    int from_bus = p.from_bus;
-    int to_bus = p.to_bus;
-    double shift = p.shift_deg;
-    double tap = 1.0;
-    if (has_tap && (from_bus == reg_bus || to_bus == reg_bus)) {
-      if (to_bus == reg_bus) {  // put the regulated terminal on the "from" side
-        std::swap(from_bus, to_bus);
-        shift = -shift;
-      }
-      tap = ratio;
-    }
+    const double sn_pair = std::max(1e-9, std::min(p.sn_from, p.sn_to));
 
     ACBranch br;
     br.index = next_idx++;
-    br.from_bus = from_bus;
-    br.to_bus = to_bus;
+    br.from_bus = p.from_bus;
+    br.to_bus = p.to_bus;
     br.r_pu = r_pu;
     br.x_pu = x_pu;
     br.b_pu = 0.0;
-    br.tap = tap;
-    br.shift_deg = shift;
+    br.tap = tap_by_pair[pair_idx];
+    br.shift_deg =
+        (p.from_bus == tr.hv_bus && p.to_bus == tr.mv_bus)
+            ? tr.shift_mv_deg
+            : (p.from_bus == tr.hv_bus && p.to_bus == tr.lv_bus)
+                  ? tr.shift_lv_deg
+                  : (tr.shift_lv_deg - tr.shift_mv_deg);
     br.rate_a_mva = sn_pair;
     br.in_service = true;
     br.name = tr.name.empty() ? ("Transformer3W_" + std::to_string(tr.index) + "_" + p.suffix)
@@ -214,8 +274,8 @@ void add_equivalent_branches_from_transformer3w(const Transformer3W& tr,
     br.r0_pu = r_pu;
     br.x0_pu = x_pu;
     br.b0_pu = 0.0;
-    br.vn_hv_kv = kv_of(from_bus);
-    br.vn_lv_kv = kv_of(to_bus);
+    br.vn_hv_kv = tr.vn_hv_kv;
+    br.vn_lv_kv = (p.to_bus == tr.mv_bus) ? tr.vn_mv_kv : tr.vn_lv_kv;
     br.sn_mva = sn_pair;
     ac.branches.push_back(br);
   }

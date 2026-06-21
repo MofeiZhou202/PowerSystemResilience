@@ -936,6 +936,29 @@ struct ThreePhaseTransformer {
 // ═══════════════════════════════════════════════════════════════════════
 // Three-Phase Regulator control (DSS-aligned control object)
 // ═══════════════════════════════════════════════════════════════════════
+struct RegulatorControl {
+  int index{0};
+  std::string name;
+
+  int transformer_index{0};
+  std::string transformer_name;
+
+  int winding{0};
+  int tap_winding{0};
+  int monitored_bus{0};
+  int monitored_node{1};
+  double vreg_volts{0.0};
+  double band_volts{0.0};
+  double ptratio{0.0};
+  double remote_ptratio{0.0};
+  double ct_primary_amps{0.0};
+  double r_volts{0.0};
+  double x_volts{0.0};
+  int max_tap_change{1};
+  bool reversible{false};
+  bool enabled{true};
+};
+
 struct ThreePhaseRegulatorControl {
   int index{0};
   std::string name;
