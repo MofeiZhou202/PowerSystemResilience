@@ -656,6 +656,67 @@ static Storage storage_from_json(const json& j) {
   return st;
 }
 
+// DC-side storage: active-power only (no reactive fields).
+static json dc_storage_to_json(const DCStorage& st) {
+  json j;
+  j["index"] = st.index;
+  j["bus"] = st.bus;
+  j["in_service"] = st.in_service;
+  j["name"] = st.name;
+  j["type"] = st.type;
+  j["p_mw"] = st.p_mw;
+  j["p_rated_mw"] = st.p_rated_mw;
+  j["pmax_mw"] = st.pmax_mw;
+  j["pmin_mw"] = st.pmin_mw;
+  j["e_rated_mwh"] = st.e_rated_mwh;
+  j["soc_init"] = st.soc_init;
+  j["soc_min"] = st.soc_min;
+  j["soc_max"] = st.soc_max;
+  j["soc_carbon_intensity_tco2_mwh"] = st.soc_carbon_intensity_tco2_mwh;
+  j["eta_charge"] = st.eta_charge;
+  j["eta_discharge"] = st.eta_discharge;
+  j["self_discharge_pct"] = st.self_discharge_pct;
+  j["max_cycles"] = st.max_cycles;
+  j["current_cycles"] = st.current_cycles;
+  j["soh"] = st.soh;
+  j["replacement_cost"] = st.replacement_cost;
+  j["profile_id"] = st.profile_id;
+  j["controllable"] = st.controllable;
+  j["forced_outage_rate"] = st.forced_outage_rate;
+  j["mttr_hr"] = st.mttr_hr;
+  return j;
+}
+
+static DCStorage dc_storage_from_json(const json& j) {
+  DCStorage st;
+  st.index = j.at("index").get<int>();
+  st.bus = j.at("bus").get<int>();
+  st.in_service = jget(j, "in_service", true);
+  st.name = jget<std::string>(j, "name", "");
+  st.type = jget<std::string>(j, "type", "");
+  st.p_mw = jget(j, "p_mw", 0.0);
+  st.p_rated_mw = jget(j, "p_rated_mw", 0.0);
+  st.pmax_mw = jget(j, "pmax_mw", 0.0);
+  st.pmin_mw = jget(j, "pmin_mw", 0.0);
+  st.e_rated_mwh = jget(j, "e_rated_mwh", 0.0);
+  st.soc_init = jget(j, "soc_init", 0.5);
+  st.soc_min = jget(j, "soc_min", 0.1);
+  st.soc_max = jget(j, "soc_max", 0.9);
+  st.soc_carbon_intensity_tco2_mwh = jget(j, "soc_carbon_intensity_tco2_mwh", 0.0);
+  st.eta_charge = jget(j, "eta_charge", 0.95);
+  st.eta_discharge = jget(j, "eta_discharge", 0.95);
+  st.self_discharge_pct = jget(j, "self_discharge_pct", 0.0);
+  st.max_cycles = jget(j, "max_cycles", 5000);
+  st.current_cycles = jget(j, "current_cycles", 0);
+  st.soh = jget(j, "soh", 1.0);
+  st.replacement_cost = jget(j, "replacement_cost", 0.0);
+  st.profile_id = jget(j, "profile_id", -1);
+  st.controllable = jget(j, "controllable", true);
+  st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
+  st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  return st;
+}
+
 static json renewable_gen_to_json(const RenewableGen& r) {
   json j;
   j["index"] = r.index;
@@ -2161,6 +2222,9 @@ std::string to_json(const HybridPowerSystem& sys, int indent) {
   dc["storage"] = json::array();
   for (const auto& s : sys.dc.storage) dc["storage"].push_back(storage_to_json(s));
 
+  dc["dc_storage"] = json::array();
+  for (const auto& s : sys.dc.dc_storage) dc["dc_storage"].push_back(dc_storage_to_json(s));
+
   dc["static_generators"] = json::array();
   for (const auto& g : sys.dc.static_generators) dc["static_generators"].push_back(static_generator_to_json(g));
 
@@ -2275,6 +2339,8 @@ HybridPowerSystem from_json(const std::string& json_str) {
       for (const auto& j : dc["loads"]) sys.dc.loads.push_back(dc_load_from_json(j));
     if (dc.contains("storage"))
       for (const auto& j : dc["storage"]) sys.dc.storage.push_back(storage_from_json(j));
+    if (dc.contains("dc_storage"))
+      for (const auto& j : dc["dc_storage"]) sys.dc.dc_storage.push_back(dc_storage_from_json(j));
     if (dc.contains("static_generators"))
       for (const auto& j : dc["static_generators"]) sys.dc.static_generators.push_back(static_generator_from_json(j));
     if (dc.contains("dc_static_generators"))

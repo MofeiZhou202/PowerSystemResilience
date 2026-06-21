@@ -700,6 +700,27 @@ const Canvas = (() => {
   }
 
   // ========== Connections ==========
+  // Electrical domain of a component: 'converter' bridges AC and DC and may
+  // connect to either side; 'dc' for DC buses/devices; 'ac' otherwise.
+  function componentDomain(comp) {
+    if (!comp) return null;
+    const t = comp.type;
+    if (t === 'vsc_converter' || t === 'dcdc_converter' || t === 'energy_router') return 'converter';
+    if (t.startsWith('dc_')) return 'dc';
+    return 'ac';
+  }
+
+  // An AC component must not wire DIRECTLY to a DC component — power must pass
+  // through a converter (VSC / DC-DC). Returns true when the connection is
+  // illegal (opposite pure domains, neither side a converter).
+  function isCrossDomainConnection(fromCompId, toCompId) {
+    const a = componentDomain(getComponent(fromCompId));
+    const b = componentDomain(getComponent(toCompId));
+    if (!a || !b) return false;
+    if (a === 'converter' || b === 'converter') return false;
+    return a !== b;  // 'ac' vs 'dc'
+  }
+
   function addConnection(fromCompId, fromPortId, toCompId, toPortId) {
     fromPortId = normalizePortId(fromCompId, fromPortId);
     toPortId = normalizePortId(toCompId, toPortId);
@@ -956,9 +977,16 @@ const Canvas = (() => {
         const toCompId = parseInt(portEl.dataset.compId);
         const toPortId = portEl.dataset.portId;
         if (toCompId !== state.connectStart.compId) {
-          addConnection(state.connectStart.compId, state.connectStart.portId,
-                        toCompId, toPortId);
-          if (typeof App !== 'undefined') App.onTopologyChanged();
+          if (isCrossDomainConnection(state.connectStart.compId, toCompId)) {
+            // AC↔DC must go through a converter — block the wire and warn.
+            const msg = 'AC 元件不能直接连接 DC 元件，请通过换流器 (VSC / DC-DC) 连接';
+            if (typeof App !== 'undefined' && App.log) App.log(msg, 'warn');
+            if (typeof App !== 'undefined' && App.setStatus) App.setStatus('非法连接：AC↔DC', 'error');
+          } else {
+            addConnection(state.connectStart.compId, state.connectStart.portId,
+                          toCompId, toPortId);
+            if (typeof App !== 'undefined') App.onTopologyChanged();
+          }
         }
       }
       state.tempLine.remove();
@@ -1634,7 +1662,7 @@ const Canvas = (() => {
             switches: [], circuit_breakers: [], motors: [],
             flexible_loads: [], asymmetric_loads: [], shunts: [],
             transformers_3w: [], chargers: [], charging_stations: [] },
-      dc: { buses: [], branches: [], loads: [], static_generators: [], pv_arrays: [] },
+      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [] },
       vsc_converters: [],
       dcdc_converters: [],
       energy_routers: [],
@@ -1722,7 +1750,7 @@ const Canvas = (() => {
     // Second pass: create devices
     let genIdx = 0, brIdx = 0, vscIdx = 0, loadIdx = 0, trafoIdx = 0, egIdx = 0,
         storIdx = 0, pvIdx = 0, renIdx = 0, sgenIdx = 0, dcLoadIdx = 0, dcBrIdx = 0,
-        swIdx = 0, cbIdx = 0, motorIdx = 0, dcPvIdx = 0;
+        swIdx = 0, cbIdx = 0, motorIdx = 0, dcPvIdx = 0, dcStorIdx = 0;
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
@@ -1914,6 +1942,29 @@ const Canvas = (() => {
             in_service: p.in_service !== false,
           });
           storIdx++;
+          break;
+        }
+        case 'dc_storage': {
+          const busIdx = findBusIndex(comp.id);
+          sys.dc.dc_storage.push({
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcStorIdx,
+            name: p.name || `DC ESS ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcStorIdx}`,
+            bus: busIdx,
+            p_mw: numOr(p.p_mw, 0),
+            p_rated_mw: numOr(p.p_rated_mw, 10),
+            e_rated_mwh: numOr(p.e_rated_mwh, 40),
+            soc_init: numOr(p.soc_init, 0.5),
+            soc_min: numOr(p.soc_min, 0.1),
+            soc_max: numOr(p.soc_max, 0.9),
+            eta_charge: numOr(p.eta_charge, 0.95),
+            eta_discharge: numOr(p.eta_discharge, 0.95),
+            pmax_mw: numOr(p.pmax_mw, 10),
+            pmin_mw: numOr(p.pmin_mw, -10),
+            self_discharge_pct: numOr(p.self_discharge_pct, 0),
+            profile_id: numOr(p.profile_id, -1),
+            in_service: p.in_service !== false,
+          });
+          dcStorIdx++;
           break;
         }
         case 'pv_system': {
@@ -2956,22 +3007,25 @@ const Canvas = (() => {
       }, dcBusCompMap);
     });
 
-    // DC storage
-    jsonSys.dc?.storage?.forEach(s => {
-      addDeviceAtBus('storage', s.bus, {
-        ...COMP.defaults.storage,
-        name: 'DC ESS',
-        p_mw: s.p_mw, q_mvar: s.q_mvar,
+    // DC storage — both the dedicated dc_storage vector and the legacy
+    // dc.storage (AC Storage reused on DC) are imported as dc_storage components
+    // so they render on the DC bus and round-trip back to sys.dc.dc_storage.
+    const importDcStorage = (s) => {
+      addDeviceAtBus('dc_storage', s.bus, {
+        ...COMP.defaults.dc_storage,
+        name: s.name || 'DC ESS',
+        p_mw: s.p_mw,
         p_rated_mw: s.p_rated_mw, e_rated_mwh: s.e_rated_mwh,
         soc_init: s.soc_init, soc_min: s.soc_min, soc_max: s.soc_max,
         eta_charge: s.eta_charge, eta_discharge: s.eta_discharge,
         pmax_mw: s.pmax_mw, pmin_mw: s.pmin_mw,
-        qmax_mvar: s.qmax_mvar, qmin_mvar: s.qmin_mvar,
         self_discharge_pct: s.self_discharge_pct,
         profile_id: s.profile_id,
         in_service: s.in_service !== false,
       }, dcBusCompMap);
-    });
+    };
+    jsonSys.dc?.dc_storage?.forEach(importDcStorage);
+    jsonSys.dc?.storage?.forEach(importDcStorage);
 
     // DC PV arrays
     jsonSys.dc?.pv_arrays?.forEach(pv => {
@@ -4537,7 +4591,7 @@ const Canvas = (() => {
       extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, sw: {}, cb: {},
       motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
       flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
-      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {} };
+      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {}, dcStorage: {} };
 
     const acBusIndexMap = assignBusIndices('ac_bus');
     const dcBusIndexMap = assignBusIndices('dc_bus');
@@ -4555,7 +4609,7 @@ const Canvas = (() => {
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
       ren: 0, sgen: 0, sw: 0, cb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
       shunt: 0, trafo3w: 0, flex: 0, asym: 0, charger: 0, cs: 0, ms: 0,
-      dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0 };
+      dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0, dcStor: 0 };
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
@@ -4576,6 +4630,7 @@ const Canvas = (() => {
         case 'circuit_breaker': putIndexed(maps.cb, comp, idx.cb++); break;
         case 'motor': putIndexed(maps.motor, comp, idx.motor++); break;
         case 'dc_load': putIndexed(maps.dcLoad, comp, idx.dcLoad++); break;
+        case 'dc_storage': putIndexed(maps.dcStorage, comp, idx.dcStor++); break;
         case 'dc_branch': putIndexed(maps.dcBranch, comp, idx.dcBr++); break;
         case 'vsc_converter': putIndexed(maps.vsc, comp, idx.vsc++); break;
         case 'shunt': putIndexed(maps.shunt, comp, idx.shunt++); break;

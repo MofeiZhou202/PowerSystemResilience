@@ -222,6 +222,10 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
 
   HybridPowerSystem projected = project_to_canonical_models(sys);
 
+  // Fold DC-side `DCStorage` (active-power-only) into the engine's existing
+  // `Storage`-typed dc.storage path so it injects into the DC power flow.
+  materialize_dc_storage(projected);
+
   SolverData data;
   data.ac_buses = std::move(projected.ac.buses);
   data.ac_branches = std::move(projected.ac.branches);
@@ -294,6 +298,10 @@ SolverData make_solver_data(HybridPowerSystem&& sys, LossModelType loss_model) {
 
 SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelType loss_model) {
   static std::atomic<std::uint64_t> next_build_id{1};
+
+  // Fold DC-side `DCStorage` (active-power-only) into the engine's existing
+  // `Storage`-typed dc.storage path so it injects into the DC power flow.
+  materialize_dc_storage(projected);
 
   SolverData data;
   data.ac_buses = std::move(projected.ac.buses);

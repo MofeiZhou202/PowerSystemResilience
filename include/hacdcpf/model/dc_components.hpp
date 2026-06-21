@@ -143,6 +143,53 @@ struct DCLoad {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// DC Energy Storage (battery, etc.) — DC-side, no reactive power
+// ═══════════════════════════════════════════════════════════════════════
+// Mirrors the AC `Storage` struct but omits all reactive-power fields, since a
+// DC bus has no reactive power. Participates in the DC power flow as an active
+// power injection (positive p_mw = discharge = generation at its DC bus) and in
+// time-series power flow with the same SOC dynamics as AC storage.
+struct DCStorage {
+  int index{0};
+  int bus{0};
+  bool in_service{true};
+  std::string name;
+  std::string type;
+
+  double p_mw{0.0};
+  double p_rated_mw{0.0};
+  double pmax_mw{0.0};
+  double pmin_mw{0.0};
+
+  double e_rated_mwh{0.0};
+  double soc_init{0.5};
+  double soc_min{0.1};
+  double soc_max{0.9};
+  double soc_carbon_intensity_tco2_mwh{0.0};
+
+  double eta_charge{0.95};
+  double eta_discharge{0.95};
+  double self_discharge_pct{0.0};
+
+  int max_cycles{5000};
+  int current_cycles{0};
+  double soh{1.0};
+  double l_calendar_yr{15.0};
+  double eol_percent{0.8};
+  double replacement_cost{0.0};
+
+  double e_mwh{0.0};
+
+  int profile_id{-1};
+
+  bool controllable{true};
+
+  double forced_outage_rate{0.0};
+  double mttr_hr{0.0};
+  double t_scheduled_hr{0.0};
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 // DC Circuit Breaker
 // ═══════════════════════════════════════════════════════════════════════
 struct DCCircuitBreaker {

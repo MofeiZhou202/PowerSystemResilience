@@ -5752,6 +5752,7 @@ const App = (() => {
   return {
     init,
     log,
+    setStatus,
     onSelectionChanged,
     onTopologyChanged,
     switchTab,

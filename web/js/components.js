@@ -57,6 +57,15 @@ const COMP = (() => {
               <text class="comp-label" x="0" y="20">${p.name||'ESS'}</text>
               <text class="comp-value" x="0" y="32">${p.e_rated_mwh||0}MWh</text>`;
     },
+    dc_storage(p) {
+      return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#56b6c2" stroke-width="2" stroke-dasharray="4 2"/>
+              <rect x="-14" y="-14" width="28" height="22" rx="2" class="symbol" fill="none" stroke="#56b6c2" stroke-width="2"/>
+              <line x1="-8" y1="-9" x2="8" y2="-9" stroke="#56b6c2" stroke-width="2"/>
+              <line x1="-8" y1="-1" x2="8" y2="-1" stroke="#56b6c2" stroke-width="1.5"/>
+              <text x="0" y="6" text-anchor="middle" fill="#56b6c2" font-size="7" font-weight="700">DC</text>
+              <text class="comp-label" x="0" y="20">${p.name||'DC ESS'}</text>
+              <text class="comp-value" x="0" y="32">${p.e_rated_mwh||0}MWh</text>`;
+    },
     pv_system(p) {
       return `<line x1="0" y1="-30" x2="0" y2="-14" stroke="#e5c07b" stroke-width="2"/>
               <polygon points="-16,-14 16,-14 12,10 -12,10" class="symbol" fill="none" stroke="#e5c07b" stroke-width="2"/>
@@ -244,6 +253,7 @@ const COMP = (() => {
     circuit_breaker:  [{id:'left',  x:-20, y:0}, {id:'right', x:20, y:0}],
     dc_load:          [{id:'top',   x:0, y:-30}],
     dc_pv_array:      [{id:'top',   x:0, y:-30}],
+    dc_storage:       [{id:'top',   x:0, y:-30}],
     motor:            [{id:'top',   x:0, y:-30}],
     flexible_load:    [{id:'top',   x:0, y:-30}],
     asymmetric_load:  [{id:'top',   x:0, y:-30}],
@@ -394,6 +404,15 @@ const COMP = (() => {
       p_min_mw: 0, cost_mw: 0, profile_id: -1,
       in_service: true
     },
+    dc_storage: {
+      name: 'DC ESS', bus: 0, p_mw: 0,
+      p_rated_mw: 10,
+      e_rated_mwh: 40, soc_init: 0.5, soc_min: 0.1, soc_max: 0.9,
+      eta_charge: 0.95, eta_discharge: 0.95,
+      pmax_mw: 10, pmin_mw: -10,
+      self_discharge_pct: 0, profile_id: -1,
+      in_service: true
+    },
     dc_pv_array: {
       name: 'DC PV', bus: 0, p_set_mw: 5,
       irradiance: 1000, temperature: 25,
@@ -530,6 +549,7 @@ const COMP = (() => {
       { type: 'dc_branch',    label: 'DC线路' },
       { type: 'dc_load',      label: 'DC负荷' },
       { type: 'dc_pv_array',  label: 'DC光伏' },
+      { type: 'dc_storage',   label: 'DC储能' },
     ],
     converterComponents: [
       { type: 'vsc_converter',    label: 'VSC换流器' },
@@ -672,6 +692,7 @@ const COMP = (() => {
     dc_bus:           { collection: 'dc.buses',             idField: 'index' },
     dc_branch:        { collection: 'dc.branches',          idField: null },
     dc_load:          { collection: 'dc.loads',             idField: null },
+    dc_storage:       { collection: 'dc.dc_storage',        idField: null },
     dc_pv_array:      { collection: 'dc.pv_arrays',          idField: null },
     switch_comp:      { collection: 'ac.switches',          idField: null },
     circuit_breaker:  { collection: 'ac.circuit_breakers',  idField: null },
