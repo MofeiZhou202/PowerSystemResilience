@@ -304,7 +304,8 @@ const COMP = (() => {
       r_ohm_per_km: 0, x_ohm_per_km: 0, b_us_per_km: 0, c_nf_per_km: 0,
       rate_a_mva: 100, rate_b_mva: 0, rate_c_mva: 0,
       length_km: 0,
-      tap: 1.0, shift_deg: 0, in_service: true, n_parallel: 1
+      tap: 1.0, shift_deg: 0, in_service: true, n_parallel: 1,
+      failure_rate: 0, mttr_hr: 0
     },
     external_grid: {
       name: 'Grid', bus: 0, vm_pu: 1.05, va_deg: 0,
@@ -578,6 +579,8 @@ const COMP = (() => {
     r_ohm_per_km: '电阻(Ω/km)', x_ohm_per_km: '电抗(Ω/km)',
     b_us_per_km: '电纳(μS/km)', c_nf_per_km: '电容(nF/km)',
     rate_a_mva: '额定容量(MVA)', length_km: '长度(km)',
+    failure_rate: '故障率(次/年)', mttr_hr: '平均修复时间(h)',
+    mtbf_hr: '平均无故障时间(h)', t_scheduled_hr: '计划检修时间(h)',
     tap: '变比', n_parallel: '并联数', s_sc_max_mva: '最大短路容量(MVA)',
     s_sc_min_mva: '最小短路容量(MVA)', rx_max: 'R/X(max)', rx_min: 'R/X(min)',
     p_rated_mw: '额定功率(MW)', e_rated_mwh: '额定能量(MWh)',

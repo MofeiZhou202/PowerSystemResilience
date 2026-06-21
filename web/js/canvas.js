@@ -1553,6 +1553,47 @@ const Canvas = (() => {
     return map;
   }
 
+  // Re-derive each device's connected-bus parameters (from_bus/to_bus, hv_bus/
+  // lv_bus, bus, bus_ac/bus_dc) from the LIVE wiring on the canvas. Called after
+  // the user rewires connections so the property panel and exports reflect the
+  // new topology instead of the stale values captured at import time. Uses the
+  // same bus-index assignment as buildSystemJson()/getCompBusMap() for consistency.
+  function syncConnectivity() {
+    const acMap = assignBusIndices('ac_bus');
+    const dcMap = assignBusIndices('dc_bus');
+    const busesOf = (compId) => {
+      const out = [];
+      for (const conn of state.connections) {
+        let other = null;
+        if (conn.from.compId === compId) other = conn.to.compId;
+        else if (conn.to.compId === compId) other = conn.from.compId;
+        if (other === null) continue;
+        if (acMap[other] != null) out.push({ domain: 'ac', index: acMap[other] });
+        else if (dcMap[other] != null) out.push({ domain: 'dc', index: dcMap[other] });
+      }
+      return out;
+    };
+    state.components.forEach(comp => {
+      const p = comp.params;
+      if (!p || comp.type === 'ac_bus' || comp.type === 'dc_bus') return;
+      const buses = busesOf(comp.id);
+      if ('bus_ac' in p || 'bus_dc' in p) {
+        const ac = buses.find(b => b.domain === 'ac');
+        const dc = buses.find(b => b.domain === 'dc');
+        if ('bus_ac' in p && ac) p.bus_ac = ac.index;
+        if ('bus_dc' in p && dc) p.bus_dc = dc.index;
+      } else if ('hv_bus' in p || 'lv_bus' in p) {
+        if (buses.length >= 1 && 'hv_bus' in p) p.hv_bus = buses[0].index;
+        if (buses.length >= 2 && 'lv_bus' in p) p.lv_bus = buses[1].index;
+      } else if ('from_bus' in p || 'to_bus' in p) {
+        if (buses.length >= 1 && 'from_bus' in p) p.from_bus = buses[0].index;
+        if (buses.length >= 2 && 'to_bus' in p) p.to_bus = buses[1].index;
+      } else if ('bus' in p) {
+        if (buses.length >= 1) p.bus = buses[0].index;
+      }
+    });
+  }
+
   function buildSystemJson() {
     const sys = {
       name: 'Canvas System',
@@ -1728,6 +1769,8 @@ const Canvas = (() => {
             shift_deg: numOr(p.shift_deg, 0),
             in_service: p.in_service !== false,
             n_parallel: parseInt(p.n_parallel) || 1,
+            failure_rate: numOr(p.failure_rate, 0),
+            mttr_hr: numOr(p.mttr_hr, 0),
           });
           break;
         }
@@ -2694,6 +2737,7 @@ const Canvas = (() => {
           length_km: br.length_km,
           tap: tapVal, shift_deg: shiftVal,
           n_parallel: br.n_parallel,
+          failure_rate: br.failure_rate, mttr_hr: br.mttr_hr,
           in_service: br.in_service !== false,
         });
         addConnection(comp.id, 'left', fromCompId, 'right');
@@ -4637,6 +4681,7 @@ const Canvas = (() => {
     get layoutStats() { return _layoutStats; },
     rotateSelected,
     buildSystemJson,
+    syncConnectivity,
     loadFromSystemJson,
     showPowerFlowResults,
     showCarbonPotentialResults,

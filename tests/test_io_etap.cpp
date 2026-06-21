@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <cmath>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -798,6 +799,150 @@ TEST_CASE("ETAP native XML import (Feeder.xml)", "[io][etap][xml][ingest]") {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Real ETAP 22.5 PDE export (etap_test.xml): connectivity comes from <CONNECT>
+// records, junction nodes (NominalkV=0) need base-kV inference, and cable
+// impedances are per-unit-length.  This is the regression for the rewrite that
+// (a) no longer hangs/OOMs on a multi-MB file and (b) wires the topology.
+TEST_CASE("ETAP native XML import (real PDE export)", "[io][etap][xml][real]") {
+  const std::string path =
+      std::string(HACDCPF_TEST_DATA_DIR) + "/etap_test.xml";
+  if (!fs::exists(path)) {
+    WARN("ETAP XML fixture missing at " << path << "; skipping");
+    return;
+  }
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path, EtapImportMode::Permissive, rep));
+
+  CHECK(sys.ac.buses.size() >= 280);              // 284 BUS
+  CHECK(sys.ac.branches.size() >= 120);           // 70 CABLE + 59 XLINE
+  CHECK(sys.ac.transformers_2w.size() >= 36);
+  CHECK(sys.ac.transformers_3w.size() >= 1);
+  CHECK(sys.ac.circuit_breakers.size() >= 150);   // 154 HVCB (+LVCB)
+  CHECK(sys.ac.external_grids.size() == 1);
+  CHECK(sys.ac.generators.size() == 1);
+
+  // (1) Junction base kV was inferred — no live bus left at 0 kV.
+  for (const auto& b : sys.ac.buses)
+    CHECK(b.base_kv > 0.0);
+
+  // (2) Every impedance is finite and sane (no z_base=0 blow-ups).
+  for (const auto& br : sys.ac.branches) {
+    CHECK(std::isfinite(br.r_pu));
+    CHECK(std::isfinite(br.x_pu));
+    CHECK(std::abs(br.r_pu) < 1e6);
+  }
+
+  // (3) Topology is wired: the vast majority of AC lines resolve both endpoints
+  // (a few genuinely-dangling DUMPSTERS/DC-island elements are expected).  Each
+  // resolved branch must connect TWO DISTINCT buses — a self-loop means the two
+  // terminals collapsed onto the same bus (the CONNECT pin-fallback bug, where
+  // both ends fell back to the same "first resolvable" endpoint).
+  int resolved = 0;
+  for (const auto& br : sys.ac.branches) {
+    if (br.from_bus != 0 && br.to_bus != 0) ++resolved;
+    if (br.from_bus != 0) CHECK(br.from_bus != br.to_bus);  // no non-zero self-loop
+  }
+  CHECK(resolved >= static_cast<int>(sys.ac.branches.size()) * 95 / 100);
+
+  // Two-winding transformers likewise must straddle two distinct buses.
+  for (const auto& t : sys.ac.transformers_2w)
+    if (t.hv_bus != 0 && t.lv_bus != 0) CHECK(t.hv_bus != t.lv_bus);
+
+  // (4) CJK bus names survive as raw UTF-8 bytes.
+  bool any_cjk = false;
+  for (const auto& b : sys.ac.buses)
+    for (unsigned char c : b.name)
+      if (c >= 0x80) { any_cjk = true; break; }
+  CHECK(any_cjk);
+}
+
+// ETAP gives line impedance as ohms over a *base length* (OhmsPerLengthValue +
+// OhmsPerLengthUnit) and a separate run length (LengthValue + CableLengthUnit) —
+// each with its OWN unit code (0=ft,1=mi,2=m,3=km).  The importer must convert
+// both to km independently: total_ohm = (Rvalue / base_km) * run_km.  Regression
+// for the bug where the unit codes were ignored, so a km-long cable whose
+// impedance base was in metres came out 1000x too small (and length 1000x short).
+TEST_CASE("ETAP native XML import scales line impedance by unit codes",
+          "[io][etap][xml][units]") {
+  const fs::path path = fs::temp_directory_path() / "hacdcpf_etap_units.xml";
+  {
+    std::ofstream f(path, std::ios::binary);
+    f << "<?xml version=\"1.0\"?>\n<PDE>\n"
+      << "  <BUS ID=\"B1\" NominalkV=\"10\"/>\n"
+      << "  <BUS ID=\"B2\" NominalkV=\"10\"/>\n"
+      // 2 km run; impedance given per 1000 m (=1 km): 0.02 ohm/km * 2 km = 0.04 ohm.
+      << "  <CABLE ID=\"C1\" FromBus=\"B1\" ToBus=\"B2\""
+         " CableLengthUnit=\"3\" LengthValue=\"2\""
+         " OhmsPerLengthUnit=\"2\" OhmsPerLengthValue=\"1000\""
+         " RPosValue=\"0.02\" XPosValue=\"0.06\"/>\n"
+      << "</PDE>\n";
+  }
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path.string(), EtapImportMode::Permissive, rep));
+  fs::remove(path);
+
+  REQUIRE(sys.ac.branches.size() == 1);
+  const auto& br = sys.ac.branches.front();
+  CHECK(br.from_bus != br.to_bus);
+  CHECK_THAT(br.length_km, WithinAbs(2.0, 1e-6));   // km unit, not metres (was 0.002)
+
+  // Reconstruct the ohmic values: r_pu * z_base, z_base = kV^2 / base_MVA.
+  const double zb = (10.0 * 10.0) / sys.base_mva;
+  CHECK_THAT(br.r_pu * zb, WithinAbs(0.04, 1e-6));   // 0.02/km * 2 km (was 4e-5)
+  CHECK_THAT(br.x_pu * zb, WithinAbs(0.12, 1e-6));   // 0.06/km * 2 km
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// save_etap_xml -> load_etap_xml is a lossless round-trip for the mapped fields.
+TEST_CASE("ETAP XML save/load round-trip", "[io][etap][xml][roundtrip]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  ACBus b1; b1.index = 1; b1.name = "B1"; b1.base_kv = 10.0; b1.bus_type = BusType::SLACK;
+  ACBus b2; b2.index = 2; b2.name = "母线2"; b2.base_kv = 10.0;
+  sys.ac.buses = {b1, b2};
+
+  ACBranch br; br.index = 1; br.name = "L1"; br.from_bus = 1; br.to_bus = 2;
+  br.r_pu = 0.012; br.x_pu = 0.034; br.rate_a_mva = 5.0;
+  sys.ac.branches = {br};
+
+  Transformer2W t; t.index = 1; t.name = "T1"; t.hv_bus = 1; t.lv_bus = 2;
+  t.vn_hv_kv = 10.0; t.vn_lv_kv = 0.4; t.sn_mva = 2.0; t.vk_percent = 6.0; t.vkr_percent = 1.2;
+  sys.ac.transformers_2w = {t};
+
+  ExternalGrid g; g.index = 1; g.name = "Util"; g.bus = 1; g.vn_kv = 10.0; g.s_sc_max_mva = 500.0;
+  sys.ac.external_grids = {g};
+
+  Load ld; ld.index = 1; ld.name = "Ld1"; ld.bus = 2; ld.p_mw = 1.6; ld.q_mvar = 0.8;
+  sys.ac.loads = {ld};
+
+  const std::string tmp =
+      (fs::temp_directory_path() / "hacdcpf_etap_xml_rt.xml").string();
+  REQUIRE_NOTHROW(save_etap_xml(sys, tmp));
+
+  EtapIoReport rep;
+  HybridPowerSystem out;
+  REQUIRE_NOTHROW(out = load_etap_xml(tmp, EtapImportMode::Permissive, rep));
+  std::error_code ec; fs::remove(tmp, ec);
+
+  REQUIRE(out.ac.buses.size() == 2);
+  REQUIRE(out.ac.branches.size() == 1);
+  REQUIRE(out.ac.transformers_2w.size() == 1);
+  REQUIRE(out.ac.external_grids.size() == 1);
+  REQUIRE(out.ac.loads.size() == 1);
+
+  using Catch::Matchers::WithinAbs;
+  CHECK_THAT(out.ac.branches[0].r_pu, WithinAbs(0.012, 1e-6));
+  CHECK_THAT(out.ac.branches[0].x_pu, WithinAbs(0.034, 1e-6));
+  CHECK_THAT(out.ac.transformers_2w[0].sn_mva, WithinAbs(2.0, 1e-6));
+  CHECK_THAT(out.ac.transformers_2w[0].vk_percent, WithinAbs(6.0, 1e-6));
+  CHECK_THAT(out.ac.loads[0].p_mw, WithinAbs(1.6, 1e-4));
+  CHECK_THAT(out.ac.loads[0].q_mvar, WithinAbs(0.8, 1e-4));
+  CHECK(out.ac.buses[1].name == "母线2");  // CJK preserved
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // 3-winding transformer with NO standard tap changer.
 //
 // ETAP's XFORM3W schema carries the three winding ratings (MVA), nominal
@@ -984,6 +1129,43 @@ TEST_CASE("ETAP native XML imports a 3-winding transformer (no tap changer)",
   CHECK(t.std_type.empty());
   CHECK(t.tap_pos == 0);
   CHECK_THAT(t.tap_step_percent, WithinAbs(0.0, kTol));
+}
+
+TEST_CASE("ETAP native XML resolves both line terminals from CONNECT pins",
+          "[io][etap][xml][connect]") {
+  // A line whose own FromBus/ToBus attributes are empty: both terminals come
+  // only from CONNECT records (pin 0 -> B1, pin 1 -> B2).  The importer must
+  // resolve BOTH ends to the two distinct buses — not collapse onto one bus,
+  // which leaves a terminal floating and drops the line from the calculation.
+  const std::string xml = R"(<?xml version="1.0"?>
+<PROJECT>
+ <COMPONENTS>
+  <BUS ID="B1" NominalkV="10" InService="true"/>
+  <BUS ID="B2" NominalkV="10" InService="true"/>
+  <XLINE ID="L1" IID="100" RPos="0.1" XPos="0.3" Length="1" InService="true"/>
+  <CONNECT FromElement="XLINE" FromIID="100" FromPin="0" ToElement="BUS" ToID="B1" ToIID="1" ToPin="0"/>
+  <CONNECT FromElement="XLINE" FromIID="100" FromPin="1" ToElement="BUS" ToID="B2" ToIID="2" ToPin="0"/>
+ </COMPONENTS>
+</PROJECT>)";
+
+  const fs::path path = fs::temp_directory_path() / "hacdcpf_etap_connpins.xml";
+  { std::ofstream ofs(path); ofs << xml; }
+
+  EtapIoReport rep;
+  HybridPowerSystem sys;
+  REQUIRE_NOTHROW(sys = load_etap_xml(path.string(), EtapImportMode::Permissive, rep));
+  std::error_code ec;
+  fs::remove(path, ec);
+
+  REQUIRE(sys.ac.buses.size() == 2);
+  REQUIRE(sys.ac.branches.size() == 1);
+  const auto& br = sys.ac.branches[0];
+  CHECK(br.from_bus != 0);
+  CHECK(br.to_bus != 0);
+  CHECK(br.from_bus != br.to_bus);
+  const std::string fromName = sys.ac.buses.at(static_cast<size_t>(br.from_bus - 1)).name;
+  const std::string toName = sys.ac.buses.at(static_cast<size_t>(br.to_bus - 1)).name;
+  CHECK(((fromName == "B1" && toName == "B2") || (fromName == "B2" && toName == "B1")));
 }
 
 TEST_CASE("ETAP 3-winding transformer WITH a tap changer round-trips",
