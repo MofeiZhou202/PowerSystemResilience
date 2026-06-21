@@ -1791,8 +1791,9 @@ const Canvas = (() => {
             });
             brIdx++;
           } else {
+            const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
             sys.ac.transformers_2w.push({
-              index: trafoIdx++, hv_bus: hv, lv_bus: lv,
+              index: trafoIndex, hv_bus: hv, lv_bus: lv,
               sn_mva: numOr(p.sn_mva, 100),
               vn_hv_kv: numOr(p.vn_hv_kv, 220),
               vn_lv_kv: numOr(p.vn_lv_kv, 110),
@@ -1810,6 +1811,7 @@ const Canvas = (() => {
               vector_group: p.vector_group || '',
               in_service: p.in_service !== false,
             });
+            trafoIdx++;
           }
           break;
         }
@@ -2798,6 +2800,7 @@ const Canvas = (() => {
       const my = (hvComp.y + lvComp.y) / 2;
       const comp = addComponent('transformer_2w', mx + 60, my, {
         ...COMP.defaults.transformer_2w,
+        index: tr.index,
         name: 'Trafo',
         hv_bus: tr.hv_bus, lv_bus: tr.lv_bus,
         sn_mva: tr.sn_mva,
@@ -4499,6 +4502,11 @@ const Canvas = (() => {
       else if (comp.type === 'dc_bus') maps.dc[dcBusIndexMap[comp.id]] = comp.id;
     });
 
+    const putIndexed = (bucket, comp, fallback) => {
+      const idx = Number(comp.params?.index);
+      bucket[Number.isFinite(idx) ? idx : fallback] = comp.id;
+    };
+
     // Must match buildSystemJson iteration order for index consistency
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
       ren: 0, sgen: 0, sw: 0, cb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
@@ -4507,36 +4515,36 @@ const Canvas = (() => {
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
-        case 'ac_branch': maps.branch[idx.br++] = comp.id; break;
-        case 'generator': maps.gen[idx.gen++] = comp.id; break;
-        case 'load': maps.load[idx.load++] = comp.id; break;
+        case 'ac_branch': putIndexed(maps.branch, comp, idx.br++); break;
+        case 'generator': putIndexed(maps.gen, comp, idx.gen++); break;
+        case 'load': putIndexed(maps.load, comp, idx.load++); break;
         case 'transformer_2w':
-          if (p._from_branch) maps.branch[idx.br++] = comp.id;
-          else maps.trafo[idx.trafo++] = comp.id;
+          if (p._from_branch) putIndexed(maps.branch, comp, idx.br++);
+          else putIndexed(maps.trafo, comp, idx.trafo++);
           break;
-        case 'external_grid': maps.extGrid[idx.eg++] = comp.id; break;
-        case 'storage': maps.storage[idx.stor++] = comp.id; break;
-        case 'pv_system': maps.pv[idx.pv++] = comp.id; break;
-        case 'dc_pv_array': maps.dcPv[idx.dcpv++] = comp.id; break;
-        case 'renewable_gen': maps.renGen[idx.ren++] = comp.id; break;
-        case 'static_generator': maps.sgen[idx.sgen++] = comp.id; break;
-        case 'switch_comp': maps.sw[idx.sw++] = comp.id; break;
-        case 'circuit_breaker': maps.cb[idx.cb++] = comp.id; break;
-        case 'motor': maps.motor[idx.motor++] = comp.id; break;
-        case 'dc_load': maps.dcLoad[idx.dcLoad++] = comp.id; break;
-        case 'dc_branch': maps.dcBranch[idx.dcBr++] = comp.id; break;
-        case 'vsc_converter': maps.vsc[idx.vsc++] = comp.id; break;
-        case 'shunt': maps.shunt[idx.shunt++] = comp.id; break;
-        case 'transformer_3w': maps.trafo3w[idx.trafo3w++] = comp.id; break;
-        case 'flexible_load': maps.flexLoad[idx.flex++] = comp.id; break;
-        case 'asymmetric_load': maps.asymLoad[idx.asym++] = comp.id; break;
-        case 'charger': maps.charger[idx.charger++] = comp.id; break;
-        case 'charging_station': maps.chargingStation[idx.cs++] = comp.id; break;
-        case 'mobile_storage': maps.mobileStorage[idx.ms++] = comp.id; break;
-        case 'dcdc_converter': maps.dcdcConverter[idx.dcdc++] = comp.id; break;
-        case 'energy_router': maps.energyRouter[idx.er++] = comp.id; break;
-        case 'vpp': maps.vpp[idx.vpp++] = comp.id; break;
-        case 'microgrid': maps.microgrid[idx.mg++] = comp.id; break;
+        case 'external_grid': putIndexed(maps.extGrid, comp, idx.eg++); break;
+        case 'storage': putIndexed(maps.storage, comp, idx.stor++); break;
+        case 'pv_system': putIndexed(maps.pv, comp, idx.pv++); break;
+        case 'dc_pv_array': putIndexed(maps.dcPv, comp, idx.dcpv++); break;
+        case 'renewable_gen': putIndexed(maps.renGen, comp, idx.ren++); break;
+        case 'static_generator': putIndexed(maps.sgen, comp, idx.sgen++); break;
+        case 'switch_comp': putIndexed(maps.sw, comp, idx.sw++); break;
+        case 'circuit_breaker': putIndexed(maps.cb, comp, idx.cb++); break;
+        case 'motor': putIndexed(maps.motor, comp, idx.motor++); break;
+        case 'dc_load': putIndexed(maps.dcLoad, comp, idx.dcLoad++); break;
+        case 'dc_branch': putIndexed(maps.dcBranch, comp, idx.dcBr++); break;
+        case 'vsc_converter': putIndexed(maps.vsc, comp, idx.vsc++); break;
+        case 'shunt': putIndexed(maps.shunt, comp, idx.shunt++); break;
+        case 'transformer_3w': putIndexed(maps.trafo3w, comp, idx.trafo3w++); break;
+        case 'flexible_load': putIndexed(maps.flexLoad, comp, idx.flex++); break;
+        case 'asymmetric_load': putIndexed(maps.asymLoad, comp, idx.asym++); break;
+        case 'charger': putIndexed(maps.charger, comp, idx.charger++); break;
+        case 'charging_station': putIndexed(maps.chargingStation, comp, idx.cs++); break;
+        case 'mobile_storage': putIndexed(maps.mobileStorage, comp, idx.ms++); break;
+        case 'dcdc_converter': putIndexed(maps.dcdcConverter, comp, idx.dcdc++); break;
+        case 'energy_router': putIndexed(maps.energyRouter, comp, idx.er++); break;
+        case 'vpp': putIndexed(maps.vpp, comp, idx.vpp++); break;
+        case 'microgrid': putIndexed(maps.microgrid, comp, idx.mg++); break;
       }
     });
 
