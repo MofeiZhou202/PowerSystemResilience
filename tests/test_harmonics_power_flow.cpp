@@ -780,4 +780,994 @@ TEST_CASE("Harmonic compliance end-to-end from the solver", "[harmonics][limits]
   CHECK_FALSE(rep.summary().empty());
 }
 
+// ===========================================================================
+// Coupled three-phase AC + DC harmonic power flow (full NIC bridge)
+// ===========================================================================
+// Shared 2-bus AC (slack -- line -- VSC AC port) + 2-bus DC (DC_V -- line -- VSC
+// DC port) test bed.  z0 = z1 on the AC line so phases decouple for clean
+// per-phase analytics; z_dc(port->ground) = 0.01 + 0.05 = 0.06.
+namespace {
+struct HybridBed {
+  ThreePhaseACSystem ac;
+  DCSystem dc;
+};
+HybridBed make_hybrid_bed() {
+  HybridBed b;
+  b.ac.base_mva = 100.0;
+  b.ac.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  b.ac.lines = {tp_line(1, 1, 2, 0.1, 0.1)};
+  b.dc.base_mva = 100.0;
+  b.dc.buses = {dc_bus(10, DCBusType::DC_V), dc_bus(11, DCBusType::DC_P)};
+  b.dc.branches = {dc_line(1, 10, 11, 0.05)};
+  return b;
+}
+Cx vac_hyb(const HPFHybrid3phResult& r, int bus, int order, int phase) {
+  for (const auto& b : r.ac_bus_results) {
+    if (b.bus != bus) continue;
+    const auto& m = (phase == 0) ? b.v_by_order_a
+                  : (phase == 1) ? b.v_by_order_b : b.v_by_order_c;
+    auto it = m.find(order);
+    if (it != m.end()) return it->second;
+  }
+  return Cx(0, 0);
+}
+Cx vdc_hyb(const HPFHybrid3phResult& r, int bus, int order) {
+  for (const auto& b : r.dc_bus_results)
+    if (b.bus == bus) { auto it = b.v_by_order.find(order); if (it != b.v_by_order.end()) return it->second; }
+  return Cx(0, 0);
+}
+}  // namespace
+
+TEST_CASE("HPF hybrid coupled solve reduces to decoupled when gains are zero",
+          "[harmonics][hybrid][coupling]") {
+  auto bed = make_hybrid_bed();
+  ThreePhaseHybridNIC nic;
+  nic.bus_ac = 2;
+  nic.bus_dc = 11;
+  nic.dc_port = PortBehavior::GridFollowing;  // bus 10 (DC_V) provides the ground
+  nic.s_ac_p_mw = 100.0;       // |I_a1| = 1/3
+  nic.p_dc_mw = -100.0;        // |I_dc0| = 1
+  nic.ac_spectrum = {{5, 100.0, 0.0}};
+  nic.dc_spectrum = {{6, 100.0, 0.0}};
+  nic.k_ad = {0.0, 0.0};
+  nic.k_da = {0.0, 0.0};
+
+  ThreePhaseHybridInputs in;
+  in.nics = {nic};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+
+  HPFHybrid3phResult r = solve_harmonic_power_flow_3ph_hybrid(bed.ac, bed.dc, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.combined_solved);
+  // AC 5th: (1/3) * (x''*5 + x1*5) = (1/3) * 1.5 = 0.5
+  CHECK_THAT(std::abs(vac_hyb(r, 2, 5, 0)), WithinAbs(0.5, 1e-4));
+  // DC 6th: 1.0 * (0.01 + 0.05) = 0.06
+  CHECK_THAT(std::abs(vdc_hyb(r, 11, 6)), WithinAbs(0.06, 1e-4));
+  CHECK_FALSE(r.summary().empty());
+}
+
+TEST_CASE("HPF hybrid AC->DC coupling: AC harmonic drives DC ripple via k_da",
+          "[harmonics][hybrid][coupling]") {
+  auto bed = make_hybrid_bed();
+  ThreePhaseHybridNIC nic;
+  nic.bus_ac = 2;
+  nic.bus_dc = 11;
+  nic.dc_port = PortBehavior::GridFollowing;
+  nic.s_ac_p_mw = 0.0;   // no NIC self-injection
+  nic.p_dc_mw = 0.0;
+  nic.k_ad = {0.0, 0.0};
+  nic.k_da = {2.0, 0.0};  // DC current per AC voltage
+
+  // External AC source drives a known 5th-harmonic port voltage.
+  ThreePhaseHarmonicSource ac_src;
+  ac_src.bus = 2;
+  ac_src.balanced = true;
+  ac_src.i_base_pu = 1.0;
+  ac_src.spectrum = {{5, 100.0, 0.0}};
+
+  ThreePhaseHybridInputs in;
+  in.ac_sources = {ac_src};
+  in.nics = {nic};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+
+  HPFHybrid3phResult r = solve_harmonic_power_flow_3ph_hybrid(bed.ac, bed.dc, in, opt);
+  REQUIRE(r.ok);
+  // AC port 5th: 1.0 * 1.5 = 1.5 (independent of DC since k_ad = 0)
+  const Cx vac5 = vac_hyb(r, 2, 5, 0);
+  CHECK_THAT(std::abs(vac5), WithinAbs(1.5, 1e-4));
+  // DC 6th = z_dc * (k_da * V_ac,a(5)) = 0.06 * 2.0 * 1.5 = 0.18
+  CHECK_THAT(std::abs(vdc_hyb(r, 11, 6)), WithinAbs(0.18, 1e-3));
+
+  // With k_da = 0 the DC ripple vanishes.
+  in.nics[0].k_da = {0.0, 0.0};
+  HPFHybrid3phResult r0 = solve_harmonic_power_flow_3ph_hybrid(bed.ac, bed.dc, in, opt);
+  CHECK(std::abs(vdc_hyb(r0, 11, 6)) < 1e-6);
+}
+
+TEST_CASE("HPF hybrid DC->AC coupling: DC ripple drives AC 5th & 7th via k_ad",
+          "[harmonics][hybrid][coupling]") {
+  auto bed = make_hybrid_bed();
+  ThreePhaseHybridNIC nic;
+  nic.bus_ac = 2;
+  nic.bus_dc = 11;
+  nic.dc_port = PortBehavior::GridFollowing;
+  nic.s_ac_p_mw = 0.0;
+  nic.p_dc_mw = 0.0;
+  nic.k_ad = {0.5, 0.0};  // AC current per DC voltage
+  nic.k_da = {0.0, 0.0};
+
+  // External DC ripple source drives a known 6th-order DC voltage.
+  HarmonicCurrentSource dc_src;
+  dc_src.bus = 11;
+  dc_src.is_dc = true;
+  dc_src.i_base_pu = 1.0;
+  dc_src.spectrum = {{6, 100.0, 0.0}};
+
+  ThreePhaseHybridInputs in;
+  in.dc_sources = {dc_src};
+  in.nics = {nic};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};   // both couple to DC 6 (|5-6|=1, |7-6|=1)
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+
+  HPFHybrid3phResult r = solve_harmonic_power_flow_3ph_hybrid(bed.ac, bed.dc, in, opt);
+  REQUIRE(r.ok);
+  // DC 6th = 1.0 * 0.06 = 0.06 (independent of AC since k_da = 0)
+  CHECK_THAT(std::abs(vdc_hyb(r, 11, 6)), WithinAbs(0.06, 1e-4));
+  // AC 5th injection = k_ad * V_dc(6) = 0.5 * 0.06 = 0.03 ; z_ac(5) = 1.5
+  //   |V_ac,a(5)| = 0.03 * 1.5 = 0.045
+  CHECK_THAT(std::abs(vac_hyb(r, 2, 5, 0)), WithinAbs(0.045, 1e-4));
+  // AC 7th injection = 0.03 ; z_ac(7) = (x''+x1)*7 = 0.3*7 = 2.1
+  //   |V_ac,a(7)| = 0.03 * 2.1 = 0.063
+  CHECK_THAT(std::abs(vac_hyb(r, 2, 7, 0)), WithinAbs(0.063, 1e-4));
+
+  // With k_ad = 0 the AC harmonics vanish (no DC->AC path).
+  in.nics[0].k_ad = {0.0, 0.0};
+  HPFHybrid3phResult r0 = solve_harmonic_power_flow_3ph_hybrid(bed.ac, bed.dc, in, opt);
+  CHECK(std::abs(vac_hyb(r0, 2, 5, 0)) < 1e-6);
+  CHECK(std::abs(vac_hyb(r0, 2, 7, 0)) < 1e-6);
+}
+
+// ===========================================================================
+// Skin effect: frequency-dependent series resistance R(h)
+// ===========================================================================
+TEST_CASE("HPF skin effect scales series resistance with sqrt(h)", "[harmonics][skin]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.1, 0.1)};  // r1 = 0.1, x1 = 0.1
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+
+  auto run = [&](SkinEffectModel m, double k) {
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {5};
+    opt.dc_orders = {};
+    opt.skin_effect = m;
+    opt.skin_coefficient = k;
+    return solve_harmonic_power_flow(sys, in, opt);
+  };
+
+  // V2(5) = I*(z_src + z_line) = (R_line) + j*(5*0.2 + 5*0.1) = R_line + j1.5
+  // Re(V2) is exactly the line resistance at order 5; Im(V2) = 1.5 always.
+  const Cx v_none = vbus(run(SkinEffectModel::None, 0.0), 2, 5);
+  const Cx v_sqrt = vbus(run(SkinEffectModel::SqrtOrder, 0.0), 2, 5);
+  const Cx v_prop = vbus(run(SkinEffectModel::ProportionalSqrt, 1.0), 2, 5);
+
+  CHECK_THAT(v_none.real(), WithinAbs(0.1, 1e-5));
+  CHECK_THAT(v_none.imag(), WithinAbs(1.5, 1e-5));
+  // SqrtOrder: R(5) = 0.1 * sqrt(5)
+  CHECK_THAT(v_sqrt.real(), WithinAbs(0.1 * std::sqrt(5.0), 1e-5));
+  CHECK_THAT(v_sqrt.imag(), WithinAbs(1.5, 1e-5));
+  // ProportionalSqrt (k=1): R(5) = 0.1 * (1 + sqrt(5))
+  CHECK_THAT(v_prop.real(), WithinAbs(0.1 * (1.0 + std::sqrt(5.0)), 1e-5));
+}
+
+// ===========================================================================
+// Transformer vector groups: zero-sequence blocking and ±30° shift
+// ===========================================================================
+static ThreePhaseTransformer tp_xfmr(int id, int hv, int lv, const std::string& vg) {
+  ThreePhaseTransformer t;
+  t.index = id;
+  t.hv_bus = hv;
+  t.lv_bus = lv;
+  t.in_service = true;
+  t.hv_phase_mask = PhaseMask::abc();
+  t.lv_phase_mask = PhaseMask::abc();
+  t.sn_mva = 100.0;
+  t.vk_percent = 10.0;
+  t.vkr_percent = 1.0;
+  t.vector_group = vg;
+  return t;
+}
+
+TEST_CASE("HPF transformer delta winding blocks triplen (zero-seq) harmonics",
+          "[harmonics][3ph][transformer]") {
+  auto build = [&](const std::string& vg) {
+    ThreePhaseACSystem sys;
+    sys.base_mva = 100.0;
+    sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+    sys.transformers = {tp_xfmr(1, 1, 2, vg)};
+    return sys;
+  };
+  auto run = [&](const std::string& vg, int order) {
+    ThreePhaseACSystem sys = build(vg);
+    ThreePhaseHarmonicSource src;
+    src.bus = 2;
+    src.balanced = true;
+    src.i_base_pu = 1.0;
+    src.spectrum = {{order, 100.0, 0.0}};
+    ThreePhaseHarmonicInputs in{.sources = {src}, .nics = {}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {order};
+    return solve_harmonic_power_flow_3ph(sys, in, opt);
+  };
+
+  // 3rd harmonic = zero sequence.
+  const double v3_ygyg = std::abs(vph(run("YNyn0", 3), 2, 3, 0));
+  const double v3_ynd  = std::abs(vph(run("YNd11", 3), 2, 3, 0));
+  // Yg-Yg passes the 3rd (finite, O(1)); Yg-D blocks it (near-open -> huge).
+  CHECK(v3_ygyg < 10.0);
+  CHECK(v3_ynd > 1.0e6 * v3_ygyg);
+
+  // 7th harmonic = positive sequence: passes through BOTH connections similarly.
+  const double v7_ygyg = std::abs(vph(run("YNyn0", 7), 2, 7, 0));
+  const double v7_ynd  = std::abs(vph(run("YNd11", 7), 2, 7, 0));
+  CHECK(v7_ygyg < 10.0);
+  CHECK(v7_ynd < 10.0);
+  CHECK_THAT(v7_ynd, WithinRel(v7_ygyg, 0.5));  // same order of magnitude
+}
+
+TEST_CASE("HPF transformer vector group introduces a 30-degree phase shift",
+          "[harmonics][3ph][transformer]") {
+  auto run = [&](const std::string& vg) {
+    ThreePhaseACSystem sys;
+    sys.base_mva = 100.0;
+    sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+    sys.transformers = {tp_xfmr(1, 1, 2, vg)};
+    ThreePhaseHarmonicSource src;
+    src.bus = 2;
+    src.balanced = true;
+    src.i_base_pu = 1.0;
+    src.spectrum = {{7, 100.0, 0.0}};  // positive sequence
+    ThreePhaseHarmonicInputs in{.sources = {src}, .nics = {}};
+    HPFOptions opt;
+    opt.run_base_power_flow = false;
+    opt.include_load_impedance = false;
+    opt.ac_orders = {7};
+    return solve_harmonic_power_flow_3ph(sys, in, opt);
+  };
+
+  // Voltage transferred to the HV (wye) side for clock 1 vs clock 11.
+  const Cx v1_c1 = vph(run("YNd1"), 1, 7, 0);
+  const Cx v1_c11 = vph(run("YNd11"), 1, 7, 0);
+  // Same magnitude, phase differs by 2*30 = 60 degrees (YIII vs YIII^T).
+  CHECK_THAT(std::abs(v1_c11), WithinRel(std::abs(v1_c1), 1e-6));
+  CHECK_THAT(std::abs(angdiff_deg(v1_c11, v1_c1)), WithinAbs(60.0, 1e-2));
+}
+
+// ===========================================================================
+// Newton-Raphson HPF with nonlinear (voltage-dependent) resources
+// ===========================================================================
+static Cx vnewton(const HPFNewtonResult& r, int bus, int order) {
+  for (const auto& b : r.ac_bus_results)
+    if (b.bus == bus) { auto it = b.v_by_order.find(order); if (it != b.v_by_order.end()) return it->second; }
+  return Cx(0, 0);
+}
+
+TEST_CASE("Newton HPF reduces to the linear solve with no nonlinear resource",
+          "[harmonics][newton]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  HarmonicStudyInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+
+  // Linear reference.
+  HPFResult lin_res = solve_harmonic_power_flow(sys, lin, opt);
+  // Newton with no nonlinear resources.
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.iterations.at(5) <= 1);          // already at the solution
+  const Cx vn = vnewton(nr, 2, 5);
+  const Cx vl = vbus(lin_res, 2, 5);
+  CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+  CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+  CHECK_THAT(vn.imag(), WithinAbs(1.5, 1e-6));  // V2(5) = 1.0 * j1.5
+}
+
+TEST_CASE("Newton HPF converges to the analytic nonlinear fixed point",
+          "[harmonics][newton]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};  // lossless
+
+  // Nonlinear resource at bus 2:  I = i_src - g2 * V^2  with i_src = 1, g2 = 0.1.
+  HarmonicNonlinearSource nl;
+  nl.bus = 2;
+  nl.i_src[5] = Cx(1.0, 0.0);
+  nl.g2[5] = Cx(0.1, 0.0);
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+  opt.newton_tol = 1e-12;
+
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton(sys, {nl}, {}, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.iterations.at(5) >= 1);     // genuine iteration
+  CHECK(nr.iterations.at(5) < 10);
+  CHECK(nr.final_residual.at(5) < 1e-10);
+
+  // Reduced equation at bus 2:  g2*V^2 + A*V - i_src = 0,
+  //   A = 1/Z_th,  Z_th = z_src(5) + z_line(5) = j1.0 + j0.5 = j1.5.
+  const Cx A = Cx(1.0, 0.0) / Cx(0.0, 1.5);
+  const Cx V2 = vnewton(nr, 2, 5);
+  const Cx residual = Cx(0.1, 0.0) * V2 * V2 + A * V2 - Cx(1.0, 0.0);
+  CHECK_THAT(std::abs(residual), WithinAbs(0.0, 1e-6));
+
+  // The nonlinearity genuinely changes the answer vs the linear case (V=j1.5).
+  CHECK(std::abs(std::abs(V2) - 1.5) > 0.1);
+
+  // Cross-check against the closed-form quadratic root nearest the linear seed.
+  const Cx disc = std::sqrt(A * A + Cx(0.4, 0.0));  // A^2 + 4*g2*i_src
+  const Cx root1 = (-A + disc) / Cx(0.2, 0.0);
+  const Cx root2 = (-A - disc) / Cx(0.2, 0.0);
+  const Cx seed = Cx(1.0, 0.0) / A;  // linear solution
+  const Cx expected = (std::abs(root1 - seed) < std::abs(root2 - seed)) ? root1 : root2;
+  CHECK_THAT(V2.real(), WithinAbs(expected.real(), 1e-6));
+  CHECK_THAT(V2.imag(), WithinAbs(expected.imag(), 1e-6));
+  CHECK_FALSE(nr.summary().empty());
+}
+
+// ===========================================================================
+// Three-phase Newton-Raphson HPF (per-phase nonlinear resources)
+// ===========================================================================
+TEST_CASE("Newton 3-phase reduces to the linear 3-phase solve", "[harmonics][newton][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{7, 100.0, 0.0}};
+  ThreePhaseHarmonicInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {7};
+
+  HPF3phResult linres = solve_harmonic_power_flow_3ph(sys, lin, opt);
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+  CHECK(nr.newton_iterations.at(7) <= 1);
+  for (int ph = 0; ph < 3; ++ph) {
+    const Cx vn = vph(nr, 2, 7, ph);
+    const Cx vl = vph(linres, 2, 7, ph);
+    CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+    CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+  }
+}
+
+TEST_CASE("Newton 3-phase converges to per-phase analytic nonlinear roots",
+          "[harmonics][newton][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.1)};  // z0 = z1 -> phases decouple
+
+  // Per-phase nonlinear resource:  I_phi = i_src_phi - 0.1 * V_phi^2
+  ThreePhaseNonlinearSource nl;
+  nl.bus = 2;
+  nl.i_src[5] = {Cx(1.0, 0.0), Cx(0.5, 0.0), Cx(0.0, 0.0)};
+  nl.g2[5] = {Cx(0.1, 0.0), Cx(0.1, 0.0), Cx(0.1, 0.0)};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.newton_tol = 1e-12;
+
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton(sys, {nl}, {}, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+  CHECK(nr.newton_residual.at(5) < 1e-10);
+
+  // Each phase is an independent quadratic g2*V^2 + A*V - i_src = 0,
+  //   A = 1/Z_th = 1/(j1.5) (z_src(5)=j1.0, z_line(5)=j0.5; decoupled line).
+  const Cx A = Cx(1.0, 0.0) / Cx(0.0, 1.5);
+  const Cx g2 = Cx(0.1, 0.0);
+  auto qroot = [&](Cx c) {
+    const Cx disc = std::sqrt(A * A + 4.0 * g2 * c);
+    const Cx r1 = (-A + disc) / (2.0 * g2), r2 = (-A - disc) / (2.0 * g2);
+    const Cx seed = (std::abs(c) > 1e-15) ? c / A : Cx(0.0, 0.0);
+    return (std::abs(r1 - seed) < std::abs(r2 - seed)) ? r1 : r2;
+  };
+
+  const Cx ea = qroot(Cx(1.0, 0.0)), eb = qroot(Cx(0.5, 0.0));
+  const Cx va = vph(nr, 2, 5, 0), vb = vph(nr, 2, 5, 1), vc = vph(nr, 2, 5, 2);
+  CHECK_THAT(va.real(), WithinAbs(ea.real(), 1e-6));
+  CHECK_THAT(va.imag(), WithinAbs(ea.imag(), 1e-6));
+  CHECK_THAT(vb.real(), WithinAbs(eb.real(), 1e-6));
+  CHECK_THAT(vb.imag(), WithinAbs(eb.imag(), 1e-6));
+  CHECK_THAT(std::abs(vc), WithinAbs(0.0, 1e-9));  // zero excitation -> zero
+  // Phase a is more heavily loaded -> larger distortion than phase b.
+  CHECK(std::abs(va) > std::abs(vb));
+}
+
+// ===========================================================================
+// Real/imaginary (2N) Newton: non-holomorphic constant-power harmonic loads
+// ===========================================================================
+TEST_CASE("Newton real-form reduces to the linear solve without CP loads",
+          "[harmonics][newton][real]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  HarmonicStudyInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+
+  HPFResult linres = solve_harmonic_power_flow(sys, lin, opt);
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton_real(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.iterations.at(5) <= 1);
+  const Cx vn = vnewton(nr, 2, 5), vl = vbus(linres, 2, 5);
+  CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+  CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+}
+
+TEST_CASE("Newton real-form converges to the constant-power analytic fixed point",
+          "[harmonics][newton][real]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};  // lossless -> A = 1/(j1.5)
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};  // I_src = 1.0
+  HarmonicStudyInputs lin{.sources = {src}, .nics = {}};
+
+  ConstantPowerHarmonicLoad cp;     // draws S = 0.2 at the 5th
+  cp.bus = 2;
+  cp.s_set[5] = Cx(0.2, 0.0);
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {};
+  opt.newton_tol = 1e-12;
+
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton_real(sys, {cp}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.iterations.at(5) >= 1);
+  CHECK(nr.final_residual.at(5) < 1e-10);
+
+  // Analytic fixed point: |A|^2 m^2 + (2 Re(A S) - |I_src|^2) m + |S|^2 = 0,
+  //   m = |V|^2 ; then V = conj((A m + conj(S)) / I_src).
+  const Cx A = Cx(1.0, 0.0) / Cx(0.0, 1.5);
+  const Cx S(0.2, 0.0), Isrc(1.0, 0.0);
+  const double aa = std::norm(A);
+  const double bb = 2.0 * std::real(A * S) - std::norm(Isrc);
+  const double cc = std::norm(S);
+  const double disc = std::sqrt(bb * bb - 4.0 * aa * cc);
+  const double m1 = (-bb + disc) / (2.0 * aa), m2 = (-bb - disc) / (2.0 * aa);
+  const double mlin = std::norm(Isrc / A);
+  const double m = (std::abs(m1 - mlin) < std::abs(m2 - mlin)) ? m1 : m2;
+  const Cx V2exp = std::conj((A * m + std::conj(S)) / Isrc);
+
+  const Cx V2 = vnewton(nr, 2, 5);
+  CHECK_THAT(V2.real(), WithinAbs(V2exp.real(), 1e-6));
+  CHECK_THAT(V2.imag(), WithinAbs(V2exp.imag(), 1e-6));
+  // Drawing real power makes a real component appear (linear answer was pure j1.5).
+  CHECK(std::abs(V2.real()) > 0.1);
+  CHECK_FALSE(nr.summary().empty());
+}
+
+// ===========================================================================
+// Stacked all-orders Newton: cross-order (frequency-mixing) nonlinear resources
+// ===========================================================================
+TEST_CASE("Newton coupled reduces to per-order linear solves without mixing",
+          "[harmonics][newton][crossorder]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+  HarmonicStudyInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+
+  HPFResult linres = solve_harmonic_power_flow(sys, lin, opt);
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton_coupled(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.iterations.at(0) <= 1);
+  for (int h : {5, 7}) {
+    const Cx vn = vnewton(nr, 2, h), vl = vbus(linres, 2, h);
+    CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+    CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+  }
+}
+
+TEST_CASE("Newton coupled solves one-way frequency mixing (7th^2 -> 5th)",
+          "[harmonics][newton][crossorder]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  CrossOrderNonlinearSource r;
+  r.bus = 2;
+  r.i_src[5] = Cx(1.0, 0.0);
+  r.i_src[7] = Cx(1.0, 0.0);
+  r.mixing.push_back({5, 7, 7, Cx(0.05, 0.0)});  // I_5 -= 0.05 * V_7 * V_7
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+  opt.newton_tol = 1e-12;
+
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton_coupled(sys, {r}, {}, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+  CHECK(nr.final_residual.at(0) < 1e-10);
+
+  // Z_th(h) = j*h*0.3.  V7 = i_src7 * Zth7 (unaffected) ; V5 = (i_src5 - k V7^2) Zth5.
+  const Cx Zth5(0.0, 1.5), Zth7(0.0, 2.1);
+  const Cx V7exp = Cx(1.0, 0.0) * Zth7;
+  const Cx V5exp = (Cx(1.0, 0.0) - Cx(0.05, 0.0) * V7exp * V7exp) * Zth5;
+  const Cx V5 = vnewton(nr, 2, 5), V7 = vnewton(nr, 2, 7);
+  CHECK_THAT(V7.real(), WithinAbs(V7exp.real(), 1e-6));
+  CHECK_THAT(V7.imag(), WithinAbs(V7exp.imag(), 1e-6));
+  CHECK_THAT(V5.real(), WithinAbs(V5exp.real(), 1e-6));
+  CHECK_THAT(V5.imag(), WithinAbs(V5exp.imag(), 1e-6));
+  // Cross-order coupling shifted the 5th away from its decoupled value j1.5.
+  CHECK(std::abs(V5 - Cx(0.0, 1.5)) > 0.1);
+}
+
+TEST_CASE("Newton coupled solves mutual frequency mixing (V5*V7 in both)",
+          "[harmonics][newton][crossorder]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  CrossOrderNonlinearSource r;
+  r.bus = 2;
+  r.i_src[5] = Cx(1.0, 0.0);
+  r.i_src[7] = Cx(1.0, 0.0);
+  const Cx k(0.05, 0.0);
+  r.mixing.push_back({5, 5, 7, k});  // I_5 -= k V_5 V_7
+  r.mixing.push_back({7, 5, 7, k});  // I_7 -= k V_5 V_7
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+  opt.newton_tol = 1e-12;
+
+  HPFNewtonResult nr = solve_harmonic_power_flow_newton_coupled(sys, {r}, {}, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.converged);
+
+  // Plug back into the reduced equations:  A_h V_h - i_src + k V_5 V_7 = 0.
+  const Cx A5 = Cx(1.0, 0.0) / Cx(0.0, 1.5), A7 = Cx(1.0, 0.0) / Cx(0.0, 2.1);
+  const Cx V5 = vnewton(nr, 2, 5), V7 = vnewton(nr, 2, 7);
+  const Cx r5 = A5 * V5 - Cx(1.0, 0.0) + k * V5 * V7;
+  const Cx r7 = A7 * V7 - Cx(1.0, 0.0) + k * V5 * V7;
+  CHECK_THAT(std::abs(r5), WithinAbs(0.0, 1e-6));
+  CHECK_THAT(std::abs(r7), WithinAbs(0.0, 1e-6));
+  // Both orders shifted from their decoupled values by the mutual coupling.
+  CHECK(std::abs(V5 - Cx(0.0, 1.5)) > 0.05);
+  CHECK(std::abs(V7 - Cx(0.0, 2.1)) > 0.05);
+}
+
+// ===========================================================================
+// Frequency scan / resonance analysis
+// ===========================================================================
+static int freq_idx(const std::vector<double>& freqs, double target) {
+  for (size_t i = 0; i < freqs.size(); ++i)
+    if (std::abs(freqs[i] - target) < 1e-6) return static_cast<int>(i);
+  return -1;
+}
+
+TEST_CASE("Frequency scan reproduces the analytic driving-point impedance",
+          "[harmonics][scan]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  FrequencyScanOptions sopt;
+  sopt.f_start = 1.0;
+  sopt.f_end = 15.0;
+  sopt.f_step = 1.0;
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+
+  FrequencyScanResult r = frequency_scan(sys, sopt, opt);
+  REQUIRE(r.ok);
+  const int i5 = freq_idx(r.freqs, 5.0), i7 = freq_idx(r.freqs, 7.0);
+  REQUIRE(i5 >= 0);
+  REQUIRE(i7 >= 0);
+  // Z_dp(bus2) = z_line + z_src = j*h*(0.1 + 0.2) = j*h*0.3 -> |Z(5)| = 1.5
+  CHECK_THAT(r.z_mag.at(2)[i5], WithinAbs(1.5, 1e-3));
+  // Z_dp(bus1) ~ z_src = j*h*0.2 -> |Z(5)| = 1.0
+  CHECK_THAT(r.z_mag.at(1)[i5], WithinAbs(1.0, 1e-3));
+  // Impedance scales linearly with frequency: |Z(7)|/|Z(5)| = 7/5.
+  CHECK_THAT(r.z_mag.at(2)[i7] / r.z_mag.at(2)[i5], WithinRel(7.0 / 5.0, 1e-4));
+}
+
+TEST_CASE("Frequency scan detects a parallel resonance from a shunt capacitor",
+          "[harmonics][scan][resonance]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  ACBus b1 = ac_bus(1, BusType::SLACK), b2 = ac_bus(2, BusType::PQ);
+  b2.bs_mvar = 6.8;  // shunt capacitor -> b_cap = 0.068 pu
+  sys.ac.buses = {b1, b2};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};  // small R -> finite peak
+
+  FrequencyScanOptions sopt;
+  sopt.f_start = 1.0;
+  sopt.f_end = 15.0;
+  sopt.f_step = 0.05;
+  sopt.buses = {2};
+  sopt.resonance_min_pu = 2.0;  // ignore small ripples
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+
+  FrequencyScanResult r = frequency_scan(sys, sopt, opt);
+  REQUIRE(r.ok);
+  // Expected parallel resonance: h_res = 1/sqrt(X_tot * b_cap) = 1/sqrt(0.3*0.068) = 7.0
+  const HarmonicResonance* peak = nullptr;
+  for (const auto& res : r.resonances)
+    if (res.parallel && (!peak || res.z_mag > peak->z_mag)) peak = &res;
+  REQUIRE(peak != nullptr);
+  CHECK_THAT(peak->freq_order, WithinAbs(7.0, 0.3));
+  // The resonant impedance dwarfs a non-resonant point (e.g. h = 3).
+  const int i3 = freq_idx(r.freqs, 3.0);
+  REQUIRE(i3 >= 0);
+  CHECK(peak->z_mag > 10.0 * r.z_mag.at(2)[i3]);
+}
+
+TEST_CASE("Per-sequence frequency scan separates positive and zero sequence",
+          "[harmonics][scan][3ph]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};  // x1 = 0.1, x0 = 0.3
+
+  FrequencyScanOptions sopt;
+  sopt.f_start = 1.0;
+  sopt.f_end = 13.0;
+  sopt.f_step = 1.0;
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+
+  SequenceScanResult r = sequence_frequency_scan(sys, 2, sopt, opt);
+  REQUIRE(r.ok);
+  const int i5 = freq_idx(r.freqs, 5.0);
+  REQUIRE(i5 >= 0);
+  // Z1_dp = z_src + z1_line = j*h*(0.2 + 0.1) -> |Z1(5)| = 1.5  (= Z2)
+  // Z0_dp = z_src + z0_line = j*h*(0.2 + 0.3) -> |Z0(5)| = 2.5
+  CHECK_THAT(r.z1_mag[i5], WithinAbs(1.5, 1e-3));
+  CHECK_THAT(r.z2_mag[i5], WithinAbs(1.5, 1e-3));
+  CHECK_THAT(r.z0_mag[i5], WithinAbs(2.5, 1e-3));
+  CHECK_FALSE(r.summary().empty());
+}
+
+// ===========================================================================
+// Three-phase Newton variants: non-holomorphic + cross-order
+// ===========================================================================
+// Balanced sequence rotation factor for phase (0/1/2) at a given sequence.
+static Cx seq_rot(int seq, int phase) {
+  const Cx a = std::polar(1.0, 2.0 * M_PI / 3.0);
+  const Cx a2 = std::polar(1.0, 4.0 * M_PI / 3.0);
+  if (phase == 0) return Cx(1, 0);
+  if (seq == 1) return (phase == 1) ? a2 : a;   // positive: b=a², c=a
+  if (seq == 2) return (phase == 1) ? a : a2;   // negative: b=a, c=a²
+  return Cx(1, 0);                              // zero
+}
+
+TEST_CASE("Newton 3-phase real-form reduces to linear without CP loads",
+          "[harmonics][newton][3ph][real]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  ThreePhaseHarmonicInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+
+  HPF3phResult linres = solve_harmonic_power_flow_3ph(sys, lin, opt);
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton_real(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+  CHECK(nr.newton_iterations.at(5) <= 1);
+  for (int ph = 0; ph < 3; ++ph) {
+    const Cx vn = vph(nr, 2, 5, ph), vl = vph(linres, 2, 5, ph);
+    CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+    CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+  }
+}
+
+TEST_CASE("Newton 3-phase real-form converges to per-phase constant-power roots",
+          "[harmonics][newton][3ph][real]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.1)};  // z0 = z1 -> phases decouple
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}};
+  ThreePhaseHarmonicInputs lin{.sources = {src}, .nics = {}};
+
+  ThreePhaseConstantPowerLoad cp;
+  cp.bus = 2;
+  cp.s_set[5] = {Cx(0.2, 0.0), Cx(0.1, 0.0), Cx(0.0, 0.0)};  // per-phase power
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.newton_tol = 1e-12;
+
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton_real(sys, {cp}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+
+  const Cx A = Cx(1.0, 0.0) / Cx(0.0, 1.5);  // Z_th(5) = j1.5 per phase
+  auto cp_root = [&](Cx S, Cx Isrc) {
+    if (std::abs(Isrc) < 1e-15) return Cx(0.0, 0.0);
+    double aa = std::norm(A), bb = 2.0 * std::real(A * S) - std::norm(Isrc), cc = std::norm(S);
+    double disc = std::sqrt(std::max(bb * bb - 4.0 * aa * cc, 0.0));
+    double m1 = (-bb + disc) / (2.0 * aa), m2 = (-bb - disc) / (2.0 * aa);
+    double mlin = std::norm(Isrc / A);
+    double m = (std::abs(m1 - mlin) < std::abs(m2 - mlin)) ? m1 : m2;
+    return std::conj((A * m + std::conj(S)) / Isrc);
+  };
+  const double s_ph[3] = {0.2, 0.1, 0.0};
+  for (int ph = 0; ph < 3; ++ph) {
+    const Cx Isrc = seq_rot(2, ph);  // 5th = negative sequence
+    const Cx exp = cp_root(Cx(s_ph[ph], 0.0), Isrc);
+    const Cx vn = vph(nr, 2, 5, ph);
+    CHECK_THAT(vn.real(), WithinAbs(exp.real(), 1e-6));
+    CHECK_THAT(vn.imag(), WithinAbs(exp.imag(), 1e-6));
+  }
+}
+
+TEST_CASE("Newton 3-phase coupled reduces to linear without mixing",
+          "[harmonics][newton][3ph][crossorder]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.3)};
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+  ThreePhaseHarmonicInputs lin{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+
+  HPF3phResult linres = solve_harmonic_power_flow_3ph(sys, lin, opt);
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton_coupled(sys, {}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+  for (int h : {5, 7})
+    for (int ph = 0; ph < 3; ++ph) {
+      const Cx vn = vph(nr, 2, h, ph), vl = vph(linres, 2, h, ph);
+      CHECK_THAT(vn.real(), WithinAbs(vl.real(), 1e-9));
+      CHECK_THAT(vn.imag(), WithinAbs(vl.imag(), 1e-9));
+    }
+}
+
+TEST_CASE("Newton 3-phase coupled solves per-phase frequency mixing (7th^2 -> 5th)",
+          "[harmonics][newton][3ph][crossorder]") {
+  ThreePhaseACSystem sys;
+  sys.base_mva = 100.0;
+  sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+  sys.lines = {tp_line(1, 1, 2, 0.1, 0.1)};  // z0 = z1 -> phases decouple
+
+  ThreePhaseHarmonicSource src;
+  src.bus = 2;
+  src.balanced = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+  ThreePhaseHarmonicInputs lin{.sources = {src}, .nics = {}};
+
+  ThreePhaseCrossOrderSource r;
+  r.bus = 2;
+  const Cx k(0.05, 0.0);
+  r.mixing.push_back({5, 7, 7, -1, k});  // all phases: I_5 -= k V_7^2
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.newton_tol = 1e-12;
+
+  HPF3phResult nr = solve_harmonic_power_flow_3ph_newton_coupled(sys, {r}, lin, opt);
+  REQUIRE(nr.ok);
+  REQUIRE(nr.newton_converged);
+
+  const Cx Zth5(0.0, 1.5), Zth7(0.0, 2.1);
+  for (int ph = 0; ph < 3; ++ph) {
+    const Cx Isrc5 = seq_rot(2, ph), Isrc7 = seq_rot(1, ph);  // 5th neg, 7th pos
+    const Cx V7exp = Isrc7 * Zth7;
+    const Cx V5exp = (Isrc5 - k * V7exp * V7exp) * Zth5;
+    const Cx V5 = vph(nr, 2, 5, ph), V7 = vph(nr, 2, 7, ph);
+    CHECK_THAT(V7.real(), WithinAbs(V7exp.real(), 1e-6));
+    CHECK_THAT(V7.imag(), WithinAbs(V7exp.imag(), 1e-6));
+    CHECK_THAT(V5.real(), WithinAbs(V5exp.real(), 1e-6));
+    CHECK_THAT(V5.imag(), WithinAbs(V5exp.imag(), 1e-6));
+  }
+}
+
+// ===========================================================================
+// Harmonic metrics: losses, K-factor, current THD / TDD
+// ===========================================================================
+TEST_CASE("Harmonic metrics compute K-factor, THD/TDD and losses", "[harmonics][metrics]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  ACBus b1 = ac_bus(1, BusType::SLACK);
+  ACBus b2 = ac_bus(2, BusType::PQ);
+  b2.vm_pu = 0.9;  // fundamental drop -> branch carries I_1 = 1.0 pu (ys = 10)
+  sys.ac.buses = {b1, b2};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.1, 0.0)};  // purely resistive, ys = 10 at all orders
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{5, 20.0, 0.0}, {7, 10.0, 0.0}};  // I_5 = 0.2, I_7 = 0.1
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {};
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+
+  HarmonicMetricsOptions mopt;
+  mopt.i_demand_pu = 2.0;
+  HarmonicMetricsResult m = harmonic_metrics(sys, r, mopt, opt);
+  REQUIRE(m.ac_branches.size() == 1);
+  const auto& bm = m.ac_branches[0];
+
+  // I_1 = 1.0, I_5 = 0.2, I_7 = 0.1
+  CHECK_THAT(bm.i_fund_pu, WithinAbs(1.0, 1e-3));
+  // K = (1·1 + 25·0.04 + 49·0.01)/(1+0.04+0.01) = 2.49/1.05 = 2.3714
+  CHECK_THAT(bm.k_factor, WithinAbs(2.3714, 1e-2));
+  // THD_I = sqrt(0.05)/1 = 22.36 %
+  CHECK_THAT(bm.thd_i_pct, WithinAbs(22.36, 0.1));
+  // TDD (I_L = 2.0) = sqrt(0.05)/2 = 11.18 %
+  CHECK_THAT(bm.tdd_pct, WithinAbs(11.18, 0.1));
+  // Loss = (1 + 0.04 + 0.01)·R, R = 0.1 -> 0.105 ; harmonic part = 0.05·0.1 = 0.005
+  CHECK_THAT(bm.p_loss_pu, WithinAbs(0.105, 2e-3));
+  CHECK_THAT(bm.p_loss_harmonic_pu, WithinAbs(0.005, 2e-3));
+  CHECK(bm.p_loss_harmonic_pu < bm.p_loss_pu);
+  CHECK_THAT(m.total_loss_pu, WithinAbs(0.105, 2e-3));
+  CHECK(m.max_k_factor > 2.0);
+  CHECK_FALSE(m.summary().empty());
+
+  // Skin effect raises the harmonic I²R losses (current-based K-factor unchanged).
+  HPFOptions opt_skin = opt;
+  opt_skin.skin_effect = SkinEffectModel::SqrtOrder;
+  HPFResult r2 = solve_harmonic_power_flow(sys, in, opt_skin);
+  HarmonicMetricsResult m2 = harmonic_metrics(sys, r2, mopt, opt_skin);
+  CHECK(m2.ac_branches[0].p_loss_harmonic_pu > bm.p_loss_harmonic_pu);
+  CHECK_THAT(m2.ac_branches[0].k_factor, WithinAbs(bm.k_factor, 1e-2));
+}
+
+
+
+
+
+
+
+
+
+
 

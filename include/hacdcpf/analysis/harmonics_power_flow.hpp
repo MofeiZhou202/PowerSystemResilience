@@ -32,6 +32,7 @@
 /// The model is linear at each harmonic order, so the solve is a single complex
 /// sparse factorisation per order — fast and numerically reproducible.
 
+#include <array>
 #include <complex>
 #include <map>
 #include <string>
@@ -129,6 +130,16 @@ struct HarmonicNIC {
 // ───────────────────────────────────────────────────────────────────────────
 // Options
 // ───────────────────────────────────────────────────────────────────────────
+// Frequency-dependent conductor resistance (skin effect) model.
+//   None             R(h) = R₁
+//   SqrtOrder        R(h) = R₁·√h                  (docs/harmonic_three_phase.md §2.3)
+//   ProportionalSqrt R(h) = R₁·(1 + k·√h)          (k = skin_coefficient)
+enum class SkinEffectModel {
+  None,
+  SqrtOrder,
+  ProportionalSqrt,
+};
+
 struct HPFOptions {
   /// AC harmonic orders to study (the fundamental, 1, is always handled
   /// separately as the operating-point reference and need not be listed).
@@ -165,6 +176,15 @@ struct HPFOptions {
 
   /// Emit per-branch harmonic current flows in the result.
   bool compute_branch_flows{true};
+
+  /// Frequency-dependent conductor resistance (skin effect) applied to AC line /
+  /// transformer series resistance.  Default: off (R independent of order).
+  SkinEffectModel skin_effect{SkinEffectModel::None};
+  double skin_coefficient{0.0};  ///< k for ProportionalSqrt
+
+  /// Newton-Raphson outer loop (used by solve_harmonic_power_flow_newton).
+  int    newton_max_iter{30};
+  double newton_tol{1e-10};
 
   PowerFlowOptions base_pf_options{};  ///< options forwarded to the base PF
 };
@@ -350,6 +370,12 @@ struct HPF3phResult {
   double max_thd_pct{0.0};
   int    max_thd_bus{-1};
 
+  // Populated only by the three-phase Newton solver (defaults for the linear path).
+  bool newton_converged{true};
+  std::map<int, int>    newton_iterations;
+  std::map<int, double> newton_residual;
+  int max_newton_iterations{0};
+
   std::string summary() const;
 };
 
@@ -417,5 +443,353 @@ HarmonicComplianceReport check_harmonic_limits(const HPFResult& result,
 HarmonicComplianceReport check_harmonic_limits(const HPF3phResult& result,
                                                const ThreePhaseACSystem& sys,
                                                HarmonicStandard standard);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Coupled three-phase AC + DC harmonic power flow (full NIC bridge)
+// ═══════════════════════════════════════════════════════════════════════════
+// A single Network-Interfacing Converter bridges the three-phase (abc-domain) AC
+// sub-system and the DC ripple sub-system.  Both networks are assembled into ONE
+// linear system spanning all AC phase-nodes × AC orders and all DC nodes × DC
+// orders, with the NIC supplying the bidirectional cross-coupling at the
+// characteristic six-pulse order pairs (an AC order h couples to a DC order r
+// whenever |h − r| = 1, e.g. AC 5th & 7th ↔ DC 6th, AC 11th & 13th ↔ DC 12th).
+//
+// Level-1 cross-coupling (docs/harmonic_general.md §10.1, docs/harmonic_three_phase.md):
+//   ΔI_ac,abc(h)  += k_ad · V_dc(r)          (DC ripple voltage drives AC current)
+//   ΔI_dc(r)      += k_da · V_ac,a(h)         (AC harmonic voltage drives DC current)
+// With k_ad = k_da = 0 the solve reduces to the decoupled spectrum-injection model.
+
+struct ThreePhaseHybridNIC {
+  int vsc_index{-1};
+  int bus_ac{0};           ///< bus index in the ThreePhaseACSystem (AC port)
+  int bus_dc{0};           ///< bus index in the DCSystem (DC port)
+  std::string name;
+
+  PortBehavior ac_port{PortBehavior::GridFollowing};
+  PortBehavior dc_port{PortBehavior::GridForming};
+
+  /// Fundamental operating point (total three-phase AC power and DC power).
+  double s_ac_p_mw{0.0};
+  double s_ac_q_mvar{0.0};
+  double p_dc_mw{0.0};
+
+  /// AC-side balanced current spectrum (% of the per-phase fundamental current).
+  /// Empty -> default six-pulse spectrum.
+  HarmonicSpectrum ac_spectrum;
+  /// DC-side ripple-current spectrum (% of the DC operating current).
+  /// Empty -> default ripple spectrum.
+  HarmonicSpectrum dc_spectrum;
+
+  /// Bidirectional Level-1 coupling gains [pu].  Zero -> spectrum-only coupling.
+  Complex k_ad{0.0, 0.0};  ///< AC current per unit DC ripple voltage
+  Complex k_da{0.0, 0.0};  ///< DC current per unit AC harmonic voltage
+
+  /// Optional Norton output immittances stamped at the ports.
+  Complex y_out_ac{0.0, 0.0};   ///< AC-side output admittance (g + j·h·b)
+  Complex y_out_dc{0.0, 0.0};   ///< DC-side output admittance (real)
+};
+
+struct ThreePhaseHybridInputs {
+  std::vector<ThreePhaseHarmonicSource> ac_sources;  ///< AC nonlinear loads/CIDERs
+  std::vector<HarmonicCurrentSource>    dc_sources;  ///< DC ripple sources (is_dc)
+  std::vector<ThreePhaseHybridNIC>      nics;        ///< bridging converters
+};
+
+struct HPFHybrid3phResult {
+  bool        ok{false};
+  std::string message;
+
+  std::vector<int> ac_orders;
+  std::vector<int> dc_orders;
+
+  std::vector<ThreePhaseHarmonicBusResult> ac_bus_results;
+  std::vector<HarmonicBusResult>           dc_bus_results;
+
+  bool combined_solved{false};
+
+  double max_ac_thd_pct{0.0};
+  int    max_ac_thd_bus{-1};
+  double max_dc_thd_pct{0.0};
+  int    max_dc_thd_bus{-1};
+
+  std::string summary() const;
+};
+
+/// Solve the coupled three-phase AC + DC harmonic power flow.  The AC and DC
+/// networks are factorised together so a single converter genuinely drives both.
+HPFHybrid3phResult solve_harmonic_power_flow_3ph_hybrid(
+    const ThreePhaseACSystem& ac, const DCSystem& dc,
+    const ThreePhaseHybridInputs& inputs, const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Newton-Raphson harmonic power flow (nonlinear resources)
+// ═══════════════════════════════════════════════════════════════════════════
+// The linear "penetration" solvers above treat resources as fixed Norton current
+// sources, so each frequency is a single linear solve.  When a resource current
+// depends nonlinearly on its own terminal voltage (saturating devices, control
+// loops, constant-harmonic-power loads, ...), the mismatch must be driven to
+// zero with a Newton iteration:
+//     r(V̂) = Ŷ·V̂ − Î_res(V̂) = 0 ,   Ĵ = Ŷ − ∂Î_res/∂V̂ = Ĵ_GRD − Ĵ_RSC
+//     V̂ ← V̂ − Ĵ⁻¹·r(V̂)
+// (the paper's Ĵ = Ĵ_RSC − Ĵ_GRD form, up to overall sign).  With no nonlinear
+// resource the Jacobian is constant and Newton converges in a single step,
+// reproducing the linear solver exactly.
+
+// A single-port nonlinear harmonic resource.  Its injected current at order h is
+//     Î_h = i_src(h) − y_out(h)·V_h − g2(h)·V_h²
+// where the holomorphic quadratic term g2 provides the voltage dependence that
+// makes the problem nonlinear (a second-order Taylor model of a saturating
+// device / converter characteristic).  Linear terms are folded into the network.
+struct HarmonicNonlinearSource {
+  int  bus{0};
+  std::string name;
+  std::map<int, Complex> i_src;   ///< constant source current per order [pu]
+  std::map<int, Complex> y_out;   ///< linear Norton output admittance per order
+  std::map<int, Complex> g2;      ///< quadratic voltage coefficient per order
+};
+
+struct HPFNewtonResult {
+  bool        ok{false};
+  std::string message;
+
+  std::vector<int> ac_orders;
+  std::vector<HarmonicBusResult> ac_bus_results;
+
+  bool converged{true};
+  std::map<int, int>    iterations;      ///< Newton iterations per order
+  std::map<int, double> final_residual;  ///< ‖r‖∞ per order
+  int max_iterations_used{0};
+
+  double max_ac_thd_pct{0.0};
+  int    max_ac_thd_bus{-1};
+
+  std::string summary() const;
+};
+
+/// Solve the (single-phase / positive-sequence) harmonic power flow with a
+/// Newton-Raphson outer loop over nonlinear resources.  `linear_inputs` supplies
+/// the usual linear current sources / NICs; `nonlinear` supplies the
+/// voltage-dependent resources that drive the iteration.
+HPFNewtonResult solve_harmonic_power_flow_newton(
+    const HybridPowerSystem& sys,
+    const std::vector<HarmonicNonlinearSource>& nonlinear,
+    const HarmonicStudyInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// A three-phase (abc-domain) single-port nonlinear harmonic resource.  Each
+// per-order entry holds the {a, b, c} phase values of the constant source
+// current, linear Norton output admittance, and the holomorphic quadratic
+// voltage coefficient:  Î_φ = i_src_φ − y_out_φ·V_φ − g2_φ·V_φ².
+struct ThreePhaseNonlinearSource {
+  int  bus{0};
+  std::string name;
+  std::map<int, std::array<Complex, 3>> i_src;
+  std::map<int, std::array<Complex, 3>> y_out;
+  std::map<int, std::array<Complex, 3>> g2;
+};
+
+/// Solve the three-phase (abc-domain) harmonic power flow with a Newton-Raphson
+/// outer loop over per-phase nonlinear resources.  Reduces to the linear
+/// three-phase solver when no quadratic coefficient is supplied.
+HPF3phResult solve_harmonic_power_flow_3ph_newton(
+    const ThreePhaseACSystem& sys,
+    const std::vector<ThreePhaseNonlinearSource>& nonlinear,
+    const ThreePhaseHarmonicInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// A constant-harmonic-power load.  At order h it draws a constant complex power
+// S_h, so its injected current is  Î_h = −conj(S_h)/conj(V_h).  The conjugation
+// makes this NON-holomorphic in V_h, so it is solved with the real/imaginary
+// (2N) Newton formulation in solve_harmonic_power_flow_newton_real().
+struct ConstantPowerHarmonicLoad {
+  int  bus{0};
+  std::string name;
+  std::map<int, Complex> s_set;  ///< per-order complex power drawn [pu]
+};
+
+/// Newton-Raphson harmonic power flow using the real/imaginary (2N) formulation,
+/// which handles non-holomorphic resources such as constant-harmonic-power loads.
+/// `linear_inputs` provide the harmonic excitation; reduces to the linear solve
+/// when no constant-power load is supplied.
+HPFNewtonResult solve_harmonic_power_flow_newton_real(
+    const HybridPowerSystem& sys,
+    const std::vector<ConstantPowerHarmonicLoad>& cp_loads,
+    const HarmonicStudyInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// A bilinear frequency-mixing term:  Î_{out} −= coeff · V_p · V_q .  A quadratic
+// time-domain nonlinearity i = g·v² generates exactly such products (harmonic
+// convolution), coupling different orders so they must be solved together.
+struct HarmonicMixingTerm {
+  int     out_order{0};   ///< h: order whose injected current is affected
+  int     p_order{0};     ///< p
+  int     q_order{0};     ///< q
+  Complex coeff{0.0, 0.0};///< k
+};
+
+// A cross-order nonlinear resource: a linear source spectrum plus bilinear
+// frequency-mixing terms that couple the harmonic orders.
+struct CrossOrderNonlinearSource {
+  int  bus{0};
+  std::string name;
+  std::map<int, Complex>          i_src;   ///< linear source current per order
+  std::vector<HarmonicMixingTerm> mixing;  ///< bilinear cross-order coupling terms
+};
+
+/// Newton-Raphson harmonic power flow that solves ALL harmonic orders
+/// simultaneously (the stacked state), so cross-order (frequency-mixing)
+/// nonlinear resources are handled.  Reduces to independent per-order linear
+/// solves when no mixing term is supplied.
+HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
+    const HybridPowerSystem& sys,
+    const std::vector<CrossOrderNonlinearSource>& resources,
+    const HarmonicStudyInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Frequency scan / resonance analysis
+// ═══════════════════════════════════════════════════════════════════════════
+// Sweeps the driving-point (Thévenin) impedance  Z_dp(f) = (Ŷ(f)⁻¹)_kk  at one
+// or more buses over a continuous frequency range and flags resonances:
+//   * a |Z| PEAK is a parallel resonance (harmonic currents excite high voltage),
+//   * a |Z| DIP  is a series   resonance.
+struct FrequencyScanOptions {
+  double f_start{1.0};   ///< start frequency (multiple of the fundamental)
+  double f_end{25.0};    ///< end frequency
+  double f_step{0.1};    ///< step
+  std::vector<int> buses;       ///< probed buses (empty -> all in-service)
+  bool   detect_resonances{true};
+  double resonance_min_pu{0.0}; ///< ignore peaks with |Z| below this
+};
+
+struct HarmonicResonance {
+  int    bus{0};
+  double freq_order{0.0};
+  double z_mag{0.0};
+  bool   parallel{true};  ///< true = parallel (peak), false = series (dip)
+  int    sequence{-1};    ///< -1 single-phase; 0/1/2 = zero/positive/negative
+};
+
+struct FrequencyScanResult {
+  bool        ok{false};
+  std::string message;
+  std::vector<double> freqs;
+  std::map<int, std::vector<double>> z_mag;      ///< bus -> |Z_dp| per frequency
+  std::map<int, std::vector<double>> z_ang_deg;  ///< bus -> angle(Z_dp) per freq
+  std::vector<HarmonicResonance> resonances;
+  std::string summary() const;
+};
+
+/// Single-phase / positive-sequence driving-point impedance frequency scan.
+FrequencyScanResult frequency_scan(const HybridPowerSystem& sys,
+                                   const FrequencyScanOptions& sopt,
+                                   const HPFOptions& opt = {});
+
+struct SequenceScanResult {
+  bool        ok{false};
+  std::string message;
+  int         bus{0};
+  std::vector<double> freqs;
+  std::vector<double> z1_mag;  ///< positive-sequence |Z_dp| per frequency
+  std::vector<double> z2_mag;  ///< negative-sequence
+  std::vector<double> z0_mag;  ///< zero-sequence
+  std::vector<HarmonicResonance> resonances;  ///< tagged by sequence
+  std::string summary() const;
+};
+
+/// Per-sequence (positive / negative / zero) driving-point impedance scan at a
+/// bus of a three-phase (abc-domain) network.
+SequenceScanResult sequence_frequency_scan(const ThreePhaseACSystem& sys, int bus,
+                                           const FrequencyScanOptions& sopt,
+                                           const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Three-phase Newton variants: non-holomorphic and cross-order
+// ═══════════════════════════════════════════════════════════════════════════
+
+// A three-phase constant-harmonic-power load: per order, the {a,b,c} complex
+// power drawn.  Î_φ = −conj(S_φ)/conj(V_φ) (non-holomorphic; real/imag 2N Newton).
+struct ThreePhaseConstantPowerLoad {
+  int  bus{0};
+  std::string name;
+  std::map<int, std::array<Complex, 3>> s_set;
+};
+
+/// Three-phase real/imaginary (2N) Newton for non-holomorphic constant-power
+/// loads in the abc-domain.  Reduces to the linear three-phase solve otherwise.
+HPF3phResult solve_harmonic_power_flow_3ph_newton_real(
+    const ThreePhaseACSystem& sys,
+    const std::vector<ThreePhaseConstantPowerLoad>& cp_loads,
+    const ThreePhaseHarmonicInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// A per-phase bilinear frequency-mixing term:  Î_{φ,out} −= coeff·V_{φ,p}·V_{φ,q}.
+// `phase` selects a single phase (0/1/2) or all three when -1.
+struct ThreePhaseMixingTerm {
+  int     out_order{0};
+  int     p_order{0};
+  int     q_order{0};
+  int     phase{-1};
+  Complex coeff{0.0, 0.0};
+};
+
+struct ThreePhaseCrossOrderSource {
+  int  bus{0};
+  std::string name;
+  std::map<int, std::array<Complex, 3>> i_src;
+  std::vector<ThreePhaseMixingTerm>     mixing;
+};
+
+/// Three-phase stacked Newton that solves all orders together so cross-order
+/// (frequency-mixing) nonlinear resources are handled in the abc-domain.
+HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
+    const ThreePhaseACSystem& sys,
+    const std::vector<ThreePhaseCrossOrderSource>& resources,
+    const ThreePhaseHarmonicInputs& linear_inputs = {},
+    const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Harmonic metrics: losses, K-factor, THD / TDD of current
+// ═══════════════════════════════════════════════════════════════════════════
+// Post-processes a single-phase / positive-sequence harmonic result into the
+// standard reporting quantities (branch currents are recomputed from the bus
+// voltage spectra so the same series resistance — including skin effect — is
+// used for the I²R losses).
+struct HarmonicMetricsOptions {
+  /// Maximum demand load current I_L [pu] used for TDD (IEEE 519).  When <= 0,
+  /// the branch fundamental current is used (then TDD == THD).
+  double i_demand_pu{0.0};
+};
+
+struct BranchHarmonicMetrics {
+  int    from_bus{0};
+  int    to_bus{0};
+  double i_fund_pu{0.0};         ///< |I_1|
+  double i_rms_pu{0.0};          ///< sqrt(Σ_h |I_h|²)
+  double thd_i_pct{0.0};         ///< sqrt(Σ_{h>1}|I_h|²)/|I_1|·100
+  double tdd_pct{0.0};           ///< sqrt(Σ_{h>1}|I_h|²)/I_L·100
+  double k_factor{1.0};          ///< Σ h²|I_h|² / Σ |I_h|²  (UL 1561)
+  double p_loss_pu{0.0};         ///< Σ_h |I_h|²·R(h)
+  double p_loss_harmonic_pu{0.0};///< Σ_{h>1} |I_h|²·R(h)
+};
+
+struct HarmonicMetricsResult {
+  std::vector<BranchHarmonicMetrics> ac_branches;
+  double total_loss_pu{0.0};
+  double total_harmonic_loss_pu{0.0};
+  double harmonic_loss_fraction{0.0};  ///< harmonic / total loss
+  double max_k_factor{1.0};
+  int    max_k_factor_branch{-1};
+  double max_thd_i_pct{0.0};
+  double max_tdd_pct{0.0};
+  std::string summary() const;
+};
+
+/// Compute branch harmonic metrics (losses, K-factor, current THD / TDD) from a
+/// harmonic power-flow result.
+HarmonicMetricsResult harmonic_metrics(const HybridPowerSystem& sys,
+                                       const HPFResult& result,
+                                       const HarmonicMetricsOptions& mopt = {},
+                                       const HPFOptions& opt = {});
 
 }  // namespace hacdcpf::harmonics
