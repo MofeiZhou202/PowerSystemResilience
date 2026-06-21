@@ -176,6 +176,10 @@ struct HPFOptions {
   /// grid-forming NIC DC ports).  Grounds the DC ripple network; smaller = stiffer.
   double dc_source_impedance_pu{0.01};
 
+  /// Optional frequency-dependent DC ripple network refinement:
+  ///   Z_branch(r) = r_pu + j·r·x_pu,  Y_bus_cap(r) = j·r·b_pu.
+  DCRippleModel dc_ripple_model{};
+
   /// Lower bound applied to |Z_ss| diagonal / shunt magnitudes to keep the
   /// per-order matrix well-conditioned.
   double min_shunt_pu{1e-9};

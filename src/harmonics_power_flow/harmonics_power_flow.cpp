@@ -267,11 +267,13 @@ SpMat build_ac_ybus(const HybridPowerSystem& sys, const OperatingPoint& op,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// DC ripple admittance matrix at order r (resistive DC branches only).
+// DC ripple admittance matrix at order r.
+//   Branch: Z(r) = r_pu + j*r*x_pu (x from opt.dc_ripple_model.branch_x_pu)
+//   Bus cap: Y(r) = j*r*b_pu       (b from opt.dc_ripple_model.bus_b_pu)
 // ───────────────────────────────────────────────────────────────────────────
 SpMat build_dc_ybus(const DCSystem& dc,
                     const std::unordered_map<int, int>& id2pos,
-                    const std::vector<int>& nic_dc_pos, int /*order*/,
+                    const std::vector<int>& nic_dc_pos, int order,
                     const HPFOptions& opt) {
   const int n = static_cast<int>(dc.buses.size());
   std::vector<Trip> trips;
@@ -285,8 +287,12 @@ SpMat build_dc_ybus(const DCSystem& dc,
     if (!br.in_service) continue;
     int f = pos(br.from_bus), t = pos(br.to_bus);
     if (f < 0 || t < 0) continue;
-    double r = std::max(br.r_pu, 1e-6);
-    Cx y(1.0 / r, 0.0);
+    double x_pu = 0.0;
+    auto xit = opt.dc_ripple_model.branch_x_pu.find(br.index);
+    if (xit != opt.dc_ripple_model.branch_x_pu.end()) x_pu = xit->second;
+    Cx z(br.r_pu, static_cast<double>(order) * x_pu);
+    if (std::abs(z) < 1e-12) z = Cx(1e-6, 0.0);
+    Cx y = Cx(1.0, 0.0) / z;
     trips.emplace_back(f, f, y);
     trips.emplace_back(f, t, -y);
     trips.emplace_back(t, f, -y);
@@ -304,6 +310,9 @@ SpMat build_dc_ybus(const DCSystem& dc,
     if (p >= 0 && p < n) gy[p] += Cx(1.0 / zsrc, 0.0);
 
   for (int i = 0; i < n; ++i) {
+    auto bit = opt.dc_ripple_model.bus_b_pu.find(dc.buses[i].index);
+    if (bit != opt.dc_ripple_model.bus_b_pu.end())
+      gy[i] += Cx(0.0, static_cast<double>(order) * bit->second);
     if (!dc.buses[i].in_service ||
         dc.buses[i].bus_type == DCBusType::DC_ISOLATED)
       gy[i] += Cx(1.0 / std::max(opt.min_shunt_pu, 1e-12), 0.0);

@@ -11,7 +11,7 @@
 //   z_src,AC(h) = r + j*h*x''           (default x'' = 0.2 pu on a slack node)
 //   z_line(h)   = r + j*h*x
 //   z_src,DC    = dc_source_impedance_pu (default 0.01 pu, resistive)
-//   z_branch,DC = r                      (DC branches carry no inductance)
+//   z_branch,DC = r + j*ripple_order*x   (when configured in dc_ripple_model)
 //
 // Tests:
 //   1. AC 2-bus: V2(h) = I*(z_src+z_line), V1(h) = I*z_src, THD = |Vh|/|V1|
@@ -19,9 +19,11 @@
 //   3. AC linearity / superposition: 2*I -> 2*V
 //   4. AC radial feeder: monotone harmonic voltage, exact per-bus values
 //   5. DC 2-bus ripple: V2(r) = I*(z_src,DC + r_branch)
-//   6. NIC hybrid coupling: I_ac1 = conj(S)/conj(V), AC & DC ripple, P-scaling
-//   7. Multi-harmonic THD formula
-//   8. Default spectra, summary(), branch-flow output sanity
+//   6. DC ripple branch inductance (order-dependent) analytical check
+//   7. DC ripple bus shunt capacitance attenuation analytical check
+//   8. NIC hybrid coupling: I_ac1 = conj(S)/conj(V), AC & DC ripple, P-scaling
+//   9. Multi-harmonic THD formula
+//  10. Default spectra, summary(), branch-flow output sanity
 
 #include <cmath>
 #include <complex>
@@ -285,6 +287,82 @@ TEST_CASE("HPF DC 2-bus ripple analytical voltage", "[harmonics][dc]") {
   CHECK_THAT(std::abs(vbus(r, 1, 6, true)), WithinAbs(0.01, 1e-6));
   // DC THD at bus 2 = 0.06 / 1.0 = 6 %
   CHECK_THAT(thd_at(r, 2, true), WithinAbs(6.0, 1e-3));
+}
+
+TEST_CASE("HPF DC ripple branch inductance is order-dependent", "[harmonics][dc]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_V), dc_bus(2, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 1, 2, 0.05)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.is_dc = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{6, 100.0, 0.0}};
+
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.ac_orders = {};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+  opt.dc_ripple_model.branch_x_pu[1] = 0.02;
+
+  HPFResult r = solve_harmonic_power_flow(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.dc_order_solved.at(6));
+
+  // Z_tot(6) = z_src + z_branch = 0.01 + (0.05 + j*6*0.02) = 0.06 + j0.12.
+  Cx v2 = vbus(r, 2, 6, true);
+  CHECK_THAT(v2.real(), WithinAbs(0.06, 1e-6));
+  CHECK_THAT(v2.imag(), WithinAbs(0.12, 1e-6));
+  CHECK_THAT(std::abs(v2), WithinAbs(std::sqrt(0.06 * 0.06 + 0.12 * 0.12), 1e-6));
+}
+
+TEST_CASE("HPF DC ripple shunt capacitance attenuates bus ripple", "[harmonics][dc]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_V), dc_bus(2, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 1, 2, 0.05)};
+
+  HarmonicCurrentSource src;
+  src.bus = 2;
+  src.is_dc = true;
+  src.i_base_pu = 1.0;
+  src.spectrum = {{6, 100.0, 0.0}};
+  HarmonicStudyInputs in{.sources = {src}, .nics = {}};
+
+  HPFOptions opt_no_cap;
+  opt_no_cap.run_base_power_flow = false;
+  opt_no_cap.ac_orders = {};
+  opt_no_cap.dc_orders = {6};
+  opt_no_cap.dc_source_impedance_pu = 0.01;
+  HPFResult r_no_cap = solve_harmonic_power_flow(sys, in, opt_no_cap);
+  REQUIRE(r_no_cap.ok);
+
+  HPFOptions opt_cap = opt_no_cap;
+  opt_cap.dc_ripple_model.bus_b_pu[2] = 0.2;
+  HPFResult r_cap = solve_harmonic_power_flow(sys, in, opt_cap);
+  REQUIRE(r_cap.ok);
+
+  // Two-node closed form with current source injected at bus 2:
+  // V2 = I * Y11 / (Y11*Y22 - Y12*Y21).
+  const Cx zsrc(0.01, 0.0);
+  const Cx zbr(0.05, 0.0);
+  const Cx ysrc = Cx(1.0, 0.0) / zsrc;
+  const Cx ybr = Cx(1.0, 0.0) / zbr;
+  const Cx ycap(0.0, 6.0 * 0.2);
+  const Cx y11 = ysrc + ybr;
+  const Cx y22 = ybr + ycap;
+  const Cx y12 = -ybr;
+  const Cx det = y11 * y22 - y12 * y12;
+  const Cx v2_expected = y11 / det;
+
+  CHECK_THAT(std::abs(vbus(r_cap, 2, 6, true)), WithinRel(std::abs(v2_expected), 1e-6));
+  CHECK(std::abs(vbus(r_cap, 2, 6, true)) < std::abs(vbus(r_no_cap, 2, 6, true)));
 }
 
 // ===========================================================================
