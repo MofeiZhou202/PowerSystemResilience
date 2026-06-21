@@ -135,6 +135,18 @@ void save_etap(const HybridPowerSystem& sys, const std::string& path);
 void save_etap(const HybridPowerSystem& sys, const std::string& path,
                EtapIoReport& report);
 
+/// Export a HybridPowerSystem to a native ETAP project XML (PDE document) that
+/// ETAP can re-import.  Emits a `<LAYOUT>` of electrical elements plus a
+/// `<CONNECTIONS>` block wiring each device to its bus(es) (pin 0 = from /
+/// primary / input, pin 1 = to / secondary / output, pin 2 = tertiary).  Only
+/// the electrically-meaningful attribute subset is written (ETAP fills the rest
+/// with defaults and auto-generates the one-line layout).
+void save_etap_xml(const HybridPowerSystem& sys, const std::string& path);
+
+/// Export to ETAP XML, also returning per-element diagnostics.
+void save_etap_xml(const HybridPowerSystem& sys, const std::string& path,
+                   EtapIoReport& report);
+
 #else
 
 inline HybridPowerSystem load_etap(const std::string&) {
@@ -179,6 +191,17 @@ inline void save_etap(const HybridPowerSystem&, const std::string&,
                       EtapIoReport&) {
   throw std::runtime_error(
       "ETAP Excel I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
+}
+
+inline void save_etap_xml(const HybridPowerSystem&, const std::string&) {
+  throw std::runtime_error(
+      "ETAP XML I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
+}
+
+inline void save_etap_xml(const HybridPowerSystem&, const std::string&,
+                          EtapIoReport&) {
+  throw std::runtime_error(
+      "ETAP XML I/O not compiled (HACDCPF_ENABLE_ETAP not set)");
 }
 
 #endif  // HACDCPF_ENABLE_ETAP

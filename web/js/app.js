@@ -412,6 +412,30 @@ const App = (() => {
     }
   }
 
+  // Export the current system as a native ETAP project .xml (PDE document) that
+  // ETAP can re-import. The XML is generated server-side by save_etap_xml().
+  async function exportEtapXml() {
+    setStatus('导出ETAP XML中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_etap_xml', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const blob = new Blob([data.xml_string], { type: 'application/xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${data.name || 'system'}.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      log(`已导出ETAP XML: ${a.download}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出ETAP XML失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
   function importJson(file) {
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -3420,6 +3444,7 @@ const App = (() => {
     });
     document.getElementById('btnExportJson').addEventListener('click', exportJson);
     document.getElementById('btnExportEtap')?.addEventListener('click', exportEtap);
+    document.getElementById('btnExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnImportJson').addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
     });

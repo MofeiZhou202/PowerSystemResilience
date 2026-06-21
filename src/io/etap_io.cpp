@@ -8,10 +8,12 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <queue>
 #include <regex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1363,6 +1365,109 @@ void read_battery(const XLWorksheet& ws, HybridPowerSystem& sys,
   add_count(rep, "BATTERY", n);
 }
 
+// ── native ETAP XML: safe tokenizer + connectivity helpers ─────────────────
+//
+// A single forward pass over the document, O(n), with no regular-expression
+// backtracking (the previous std::regex scan hung on real 400 KB exports).
+// Every open/self-closing element is captured by its UPPER-CASED tag name with
+// its attributes (keys upper-cased, values copied raw so UTF-8 / CJK bytes pass
+// through untouched).  Closing tags, the XML prolog, comments, CDATA and
+// DOCTYPE are skipped.  ETAP attribute values never contain a raw '<' or '>',
+// but the scanner tolerates them inside a quoted value anyway.
+struct XmlElement {
+  std::string tag;                                       // UPPER-CASED
+  std::unordered_map<std::string, std::string> attrs;    // UPPER-CASED key
+};
+
+std::vector<XmlElement> tokenize_xml(const std::string& xml) {
+  std::vector<XmlElement> out;
+  const size_t n = xml.size();
+  size_t i = 0;
+  auto is_name = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' ||
+           c == ':' || c == '.';
+  };
+  while (i < n) {
+    // Advance to the next '<'.
+    if (xml[i] != '<') { ++i; continue; }
+    if (i + 1 >= n) break;
+    const char c1 = xml[i + 1];
+    if (c1 == '?') {                                   // <? ... ?>
+      const size_t e = xml.find("?>", i + 2);
+      i = (e == std::string::npos) ? n : e + 2;
+      continue;
+    }
+    if (c1 == '!') {                                   // <!-- --> , <![CDATA[ ]]>, <!DOCTYPE>
+      if (xml.compare(i, 4, "<!--") == 0) {
+        const size_t e = xml.find("-->", i + 4);
+        i = (e == std::string::npos) ? n : e + 3;
+      } else if (xml.compare(i, 9, "<![CDATA[") == 0) {
+        const size_t e = xml.find("]]>", i + 9);
+        i = (e == std::string::npos) ? n : e + 3;
+      } else {
+        const size_t e = xml.find('>', i + 2);
+        i = (e == std::string::npos) ? n : e + 1;
+      }
+      continue;
+    }
+    if (c1 == '/') {                                   // closing tag </tag>
+      const size_t e = xml.find('>', i + 2);
+      i = (e == std::string::npos) ? n : e + 1;
+      continue;
+    }
+    // Opening / self-closing element: read the tag name.
+    size_t j = i + 1;
+    const size_t name_beg = j;
+    while (j < n && is_name(xml[j])) ++j;
+    if (j == name_beg) { ++i; continue; }              // not a real tag
+    XmlElement el;
+    el.tag = to_upper(xml.substr(name_beg, j - name_beg));
+    // Parse attributes until '>' or '/>'.
+    while (j < n) {
+      while (j < n && std::isspace(static_cast<unsigned char>(xml[j]))) ++j;
+      if (j >= n) break;
+      if (xml[j] == '>') { ++j; break; }
+      if (xml[j] == '/') { ++j; continue; }            // self-close slash
+      const size_t kbeg = j;
+      while (j < n && is_name(xml[j])) ++j;
+      if (j == kbeg) { ++j; continue; }                // stray char
+      std::string key = to_upper(xml.substr(kbeg, j - kbeg));
+      while (j < n && std::isspace(static_cast<unsigned char>(xml[j]))) ++j;
+      std::string val;
+      if (j < n && xml[j] == '=') {
+        ++j;
+        while (j < n && std::isspace(static_cast<unsigned char>(xml[j]))) ++j;
+        if (j < n && (xml[j] == '"' || xml[j] == '\'')) {
+          const char q = xml[j++];
+          const size_t vbeg = j;
+          while (j < n && xml[j] != q) ++j;
+          val = xml.substr(vbeg, j - vbeg);
+          if (j < n) ++j;                              // skip closing quote
+        } else {                                        // unquoted value
+          const size_t vbeg = j;
+          while (j < n && !std::isspace(static_cast<unsigned char>(xml[j])) &&
+                 xml[j] != '>' && xml[j] != '/')
+            ++j;
+          val = xml.substr(vbeg, j - vbeg);
+        }
+      }
+      el.attrs.emplace(std::move(key), std::move(val));  // first occurrence wins
+    }
+    out.push_back(std::move(el));
+    i = j;  // advance past this element (otherwise the outer loop re-parses it)
+  }
+  return out;
+}
+
+// One resolved device endpoint discovered from a <CONNECT> record: the bus the
+// device pin attaches to, the device-side pin (0 = from/primary/input,
+// 1 = to/secondary/output, 2 = tertiary), and whether the bus is on the DC side.
+struct EtapEndpoint {
+  std::string bus_id;
+  int pin{0};
+  bool is_dc{false};
+};
+
 }  // namespace
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -1795,19 +1900,25 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
   const std::string xml = ss.str();
 
   using XmlAttrs = std::unordered_map<std::string, std::string>;
+  // Safe, non-backtracking tokenizer (the old std::regex scan hung on real
+  // 400 KB exports). Collect every element by UPPER-CASED tag; dedupe by IID so
+  // an element that appears in both <LAYOUT> and <DUMPSTERS> is imported once.
   std::unordered_map<std::string, std::vector<XmlAttrs>> elems;
-  const std::regex tag_re(R"(<([A-Za-z][A-Za-z0-9_]*)\b([^>]*?)/?>)");
-  const std::regex attr_re(R"(([A-Za-z0-9_]+)\s*=\s*\"([^\"]*)\")");
-  for (auto it = std::sregex_iterator(xml.begin(), xml.end(), tag_re);
-       it != std::sregex_iterator(); ++it) {
-    const std::string tag = to_upper((*it)[1].str());
-    const std::string attrs = (*it)[2].str();
-    XmlAttrs a;
-    for (auto ai = std::sregex_iterator(attrs.begin(), attrs.end(), attr_re);
-         ai != std::sregex_iterator(); ++ai) {
-      a[to_upper((*ai)[1].str())] = (*ai)[2].str();
+  {
+    std::vector<XmlElement> tokens = tokenize_xml(xml);
+    std::unordered_map<std::string, std::unordered_set<std::string>> seen_iid;
+    int dumpster_note = 0;
+    for (auto& el : tokens) {
+      if (el.attrs.empty()) continue;
+      auto iit = el.attrs.find("IID");
+      if (iit != el.attrs.end() && !trim(iit->second).empty()) {
+        if (!seen_iid[el.tag].insert(iit->second).second) { ++dumpster_note; continue; }
+      }
+      elems[el.tag].push_back(std::move(el.attrs));
     }
-    if (!a.empty()) elems[tag].push_back(std::move(a));
+    if (dumpster_note > 0)
+      report.warnings.push_back("ETAP XML: skipped " + std::to_string(dumpster_note) +
+                                " duplicate element(s) (same IID in LAYOUT/DUMPSTERS)");
   }
 
   auto xget = [](const XmlAttrs& a,
@@ -1863,6 +1974,106 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     sys.dc.buses.push_back(std::move(b));
   }
 
+  // ---- Connectivity from <CONNECT> records ----
+  // ETAP wires devices to buses through separate CONNECT records (the device's
+  // own FromBus/ToBus/Bus attributes are often empty — always so for breakers).
+  // device IID -> [{bus id, device-side pin, dc?}].
+  std::unordered_map<std::string, std::vector<EtapEndpoint>> conn;
+  // IID -> element tag, used to skip transformers during base-kV propagation.
+  std::unordered_map<std::string, std::string> iid2tag;
+  for (const auto& kv : elems)
+    for (const auto& a : kv.second) {
+      auto it = a.find("IID");
+      if (it != a.end() && !trim(it->second).empty()) iid2tag[it->second] = kv.first;
+    }
+  {
+    auto cget = [](const XmlAttrs& a, const char* k) -> std::string {
+      auto it = a.find(k);
+      return it == a.end() ? std::string() : it->second;
+    };
+    auto is_bus = [](const std::string& e) { return e == "BUS" || e == "DCBUS"; };
+    for (const auto& c : elems["CONNECT"]) {
+      const std::string fe = to_upper(cget(c, "FROMELEMENT"));
+      const std::string te = to_upper(cget(c, "TOELEMENT"));
+      if (is_bus(fe) && !is_bus(te))
+        conn[cget(c, "TOIID")].push_back(
+            {cget(c, "FROMID"), int_from_str(cget(c, "TOPIN")), fe == "DCBUS"});
+      else if (is_bus(te) && !is_bus(fe))
+        conn[cget(c, "FROMIID")].push_back(
+            {cget(c, "TOID"), int_from_str(cget(c, "FROMPIN")), te == "DCBUS"});
+    }
+  }
+
+  // Resolve a device endpoint: prefer an explicit attribute bus id, else fall
+  // back to the device's CONNECT records at the requested pin (-1 = any).
+  auto resolve_endpoint = [&](const NameIndex& nidx, const XmlAttrs& a,
+                              std::initializer_list<const char*> keys,
+                              int wanted_pin) -> int {
+    const std::string ex = xget(a, keys);
+    if (!ex.empty()) {
+      const int r = resolve(nidx, ex);
+      if (r) return r;
+    }
+    auto iit = a.find("IID");
+    if (iit != a.end()) {
+      auto cit = conn.find(iit->second);
+      if (cit != conn.end()) {
+        for (const auto& ep : cit->second)
+          if (wanted_pin < 0 || ep.pin == wanted_pin) {
+            const int r = resolve(nidx, ep.bus_id);
+            if (r) return r;
+          }
+        for (const auto& ep : cit->second) {  // pin not matched -> first resolvable
+          const int r = resolve(nidx, ep.bus_id);
+          if (r) return r;
+        }
+      }
+    }
+    return 0;
+  };
+
+  // ---- Infer base_kV for junction nodes (BUS_CNODE_JCT_*, NominalkV=0) ----
+  // BFS from sized buses through NON-transformer series elements only.
+  {
+    const size_t nb = sys.ac.buses.size();
+    std::vector<std::vector<int>> adj(nb + 1);
+    auto add_edge = [&](int u, int v) {
+      if (u > 0 && v > 0 && u != v) { adj[u].push_back(v); adj[v].push_back(u); }
+    };
+    for (const auto& kv : conn) {
+      const auto tit = iid2tag.find(kv.first);
+      const std::string tg = tit == iid2tag.end() ? std::string() : tit->second;
+      if (tg == "XFORM2W" || tg == "XFORM3W") continue;  // voltage transforms
+      std::vector<int> bs;
+      for (const auto& ep : kv.second)
+        if (!ep.is_dc) { const int r = resolve(ac2idx, ep.bus_id); if (r) bs.push_back(r); }
+      for (size_t k = 1; k < bs.size(); ++k) add_edge(bs[0], bs[k]);
+    }
+    for (const char* tag : {"CABLE", "XLINE"})
+      for (const auto& a : elems[to_upper(tag)])
+        add_edge(resolve(ac2idx, xget(a, {"FromBus"})),
+                 resolve(ac2idx, xget(a, {"ToBus"})));
+    std::vector<double> kvv(nb + 1, 0.0);
+    std::queue<int> q;
+    for (const auto& b : sys.ac.buses)
+      if (b.base_kv > 0.0) { kvv[b.index] = b.base_kv; q.push(b.index); }
+    while (!q.empty()) {
+      const int u = q.front(); q.pop();
+      for (const int v : adj[u])
+        if (kvv[v] == 0.0) { kvv[v] = kvv[u]; q.push(v); }
+    }
+    int inferred = 0;
+    for (auto& b : sys.ac.buses)
+      if (b.base_kv == 0.0 && kvv[b.index] > 0.0) {
+        b.base_kv = kvv[b.index];
+        ac2kv[to_upper(b.name)] = b.base_kv;
+        ++inferred;
+      }
+    if (inferred > 0)
+      report.warnings.push_back("ETAP XML: inferred base kV for " +
+                                std::to_string(inferred) + " junction bus(es)");
+  }
+
   auto add_lines = [&](const char* tag) {
     int li = static_cast<int>(sys.ac.branches.size());
     for (const auto& a : elems[to_upper(tag)]) {
@@ -1871,17 +2082,30 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       ACBranch br;
       br.index = ++li;
       br.name = id;
-      const std::string fb = xget(a, {"FromBus"});
-      br.from_bus = resolve(ac2idx, fb);
-      br.to_bus = resolve(ac2idx, xget(a, {"ToBus"}));
-      const double zb = z_base(resolve_kv(ac2kv, fb), sys.base_mva);
-      br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RPos", "RPosValue"})) / zb;
-      br.x_pu = dbl_from_str(xget(a, {"X_ohm", "XPos", "XPosValue"})) / zb;
-      br.b_pu = dbl_from_str(xget(a, {"B_S", "YPos", "YPosValue"})) * zb;
+      br.from_bus = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
+      br.to_bus = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      const double zb = z_base(ac_bus_base_kv(sys, br.from_bus), sys.base_mva);
+      // ETAP cable/line impedances are per-unit-length: ohm = value*Length/OhmsPerLength.
+      const double opl = dbl_from_str(xget(a, {"OhmsPerLengthValue"}));
+      const double len = dbl_from_str(xget(a, {"LengthValue", "Length"}));
+      const double scale = (opl > 0.0 && len > 0.0) ? (len / opl) : 1.0;
+      const double r_ohm = dbl_from_str(xget(a, {"R_ohm", "RPos", "RPosValue"})) * scale;
+      const double x_ohm = dbl_from_str(xget(a, {"X_ohm", "XPos", "XPosValue"})) * scale;
+      const double b_s = dbl_from_str(xget(a, {"B_S", "YPos", "YPosValue"})) * scale;
+      br.r_pu = r_ohm / zb;
+      br.x_pu = x_ohm / zb;
+      br.b_pu = b_s * zb;
+      br.r0_pu = dbl_from_str(xget(a, {"R0_ohm", "RZeroValue"})) * scale / zb;
+      br.x0_pu = dbl_from_str(xget(a, {"X0_ohm", "XZeroValue"})) * scale / zb;
       br.tap = dbl_from_str(xget(a, {"Tap"}), 1.0);
       br.shift_deg = dbl_from_str(xget(a, {"ShiftDeg"}));
       br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA", "RatedA"}));
-      br.length_km = dbl_from_str(xget(a, {"Length_km", "Length", "LengthValue"}));
+      // Length stored as metadata (assume metres when an OhmsPerLength scale is present).
+      {
+        const std::string lkm = xget(a, {"Length_km"});
+        br.length_km = !lkm.empty() ? dbl_from_str(lkm)
+                                    : (opl > 0.0 ? len / 1000.0 : len);
+      }
       br.failure_rate = dbl_from_str(xget(a, {"FailureRate", "OutageRate"}), br.failure_rate);
       br.mttr_hr = dbl_from_str(xget(a, {"MTTR_hr"}), br.mttr_hr);
       br.n_parallel = int_from_str(xget(a, {"N_parallel"}), br.n_parallel);
@@ -1900,14 +2124,16 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Transformer2W t;
     t.index = ++idx;
     t.name = id;
-    t.hv_bus = resolve(ac2idx, xget(a, {"FromBus", "PrimaryBus", "HVBus"}));
-    t.lv_bus = resolve(ac2idx, xget(a, {"ToBus", "SecondaryBus", "LVBus"}));
+    t.hv_bus = resolve_endpoint(ac2idx, a, {"FromBus", "PrimaryBus", "HVBus"}, 0);
+    t.lv_bus = resolve_endpoint(ac2idx, a, {"ToBus", "SecondaryBus", "LVBus"}, 1);
     t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV", "PrimKV"}));
     t.vn_lv_kv = dbl_from_str(xget(a, {"SeckV", "SecKV"}));
     {
       const std::string sn = xget(a, {"Sn_MVA"});
-      t.sn_mva = !sn.empty() ? dbl_from_str(sn)
-                             : dbl_from_str(xget(a, {"ZBaseMVA", "AnsiMVA"})) / 1000.0;
+      const std::string am = xget(a, {"AnsiMVA"});
+      if (!sn.empty()) t.sn_mva = dbl_from_str(sn);
+      else if (!am.empty()) t.sn_mva = dbl_from_str(am);            // ETAP XML: MVA
+      else t.sn_mva = dbl_from_str(xget(a, {"ZBaseMVA"})) / 1000.0;  // Excel schema: kVA
     }
     t.vk_percent = dbl_from_str(xget(a, {"Z_percent", "AnsiPosZ"}));
     // %R: use an explicit value if present, else derive from %Z and the X/R ratio.
@@ -1945,10 +2171,10 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Transformer3W t;
     t.index = ++idx;
     t.name = id;
-    t.hv_bus = resolve(ac2idx, xget(a, {"HVBus", "PrimaryBus", "FromBus", "PrimBus"}));
-    t.mv_bus = resolve(ac2idx, xget(a, {"MVBus", "SecondaryBus", "SecBus"}));
+    t.hv_bus = resolve_endpoint(ac2idx, a, {"HVBus", "PrimaryBus", "FromBus", "PrimBus"}, 0);
+    t.mv_bus = resolve_endpoint(ac2idx, a, {"MVBus", "SecondaryBus", "SecBus"}, 1);
     t.lv_bus =
-        resolve(ac2idx, xget(a, {"LVBus", "TertiaryBus", "TeritiaryBus", "TerBus"}));
+        resolve_endpoint(ac2idx, a, {"LVBus", "TertiaryBus", "TeritiaryBus", "TerBus"}, 2);
     t.vn_hv_kv = dbl_from_str(xget(a, {"PrimkV", "PrimKV"}));
     t.vn_mv_kv = dbl_from_str(xget(a, {"SeckV", "SecKV"}));
     t.vn_lv_kv = dbl_from_str(xget(a, {"TerkV", "TerKV"}));
@@ -1981,7 +2207,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     ExternalGrid g;
     g.index = ++idx;
     g.name = id;
-    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.bus = resolve_endpoint(ac2idx, a, {"Bus", "BusID"}, -1);
     g.vn_kv = dbl_from_str(xget(a, {"KV"}));
     g.vm_pu = volt_pu(xget(a, {"Vm_pu", "VoltageMagnitude", "OpVMag"}), 1.0);
     g.va_deg = dbl_from_str(xget(a, {"Va_deg", "VoltageAngle", "OpVAng"}));
@@ -2001,7 +2227,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Generator g;
     g.index = ++idx;
     g.name = id;
-    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     g.vn_kv = dbl_from_str(xget(a, {"KV"}));
     g.pg_mw = dbl_from_str(xget(a, {"PG_MW", "PG", "MW"}));
     g.qg_mvar = dbl_from_str(xget(a, {"QG_Mvar"}));
@@ -2036,7 +2262,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     PVSystem p;
     p.index = ++idx;
     p.name = id;
-    p.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    p.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     {
       const std::string pmw = xget(a, {"P_MW"});
       p.p_mw = !pmw.empty() ? dbl_from_str(pmw)
@@ -2060,7 +2286,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     RenewableGen g;
     g.index = ++idx;
     g.name = id;
-    g.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    g.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     g.type = renewable_type_from_str(xget(a, {"Type"}));
     g.p_mw = dbl_from_str(xget(a, {"P_MW"}));
     g.q_mvar = dbl_from_str(xget(a, {"Q_Mvar"}));
@@ -2082,17 +2308,19 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Load l;
     l.index = ++idx;
     l.name = id;
-    l.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    l.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     l.p_mw = dbl_from_str(xget(a, {"P_MW", "OpMW"}));
     l.q_mvar = dbl_from_str(xget(a, {"Q_Mvar", "OpMvar"}));
+    const double mva = dbl_from_str(xget(a, {"MVA"}));
     if (std::abs(l.p_mw) < 1e-12 && std::abs(l.q_mvar) < 1e-12) {
-      const double mva = dbl_from_str(xget(a, {"MVA"}));
       if (mva > 0.0) {
-        const double pf = pf_fraction(dbl_from_str(xget(a, {"PF"}), 100.0));
+        const double pf = pf_fraction(dbl_from_str(xget(a, {"PF", "PowerFactor"}), 100.0));
         l.p_mw = mva * pf;
         l.q_mvar = mva * std::sqrt(std::max(0.0, 1.0 - pf * pf));
       }
     }
+    l.sn_mva = mva;  // nameplate
+    l.motor_percent = dbl_from_str(xget(a, {"MotorLoadPercent"}), l.motor_percent);
     l.scaling = dbl_from_str(xget(a, {"Scaling"}), 1.0);
     l.model = load_model_from_str(xget(a, {"Model", "ModelType"}));
     l.priority = load_priority_from_str(xget(a, {"Priority"}));
@@ -2108,30 +2336,62 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Shunt sh;
     sh.index = ++idx;
     sh.name = id;
-    sh.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    sh.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     sh.gs_mw = dbl_from_str(xget(a, {"Gs_MW"}));
     sh.bs_mvar = dbl_from_str(xget(a, {"Bs_Mvar", "Mvar", "Kvar"}));
     sh.in_service = bool_from_str(xget(a, {"InService"}), true);
     sys.ac.shunts.push_back(std::move(sh));
   }
 
-  // ---- AC circuit breakers (HVCB) ----
-  idx = 0;
-  for (const auto& a : elems["HVCB"]) {
-    const std::string id = xget(a, {"ID"});
-    if (id.empty()) continue;
-    CircuitBreaker cb;
-    cb.index = ++idx;
-    cb.name = id;
-    cb.bus_from = resolve(ac2idx, xget(a, {"FromBus"}));
-    cb.bus_to = resolve(ac2idx, xget(a, {"ToBus"}));
-    cb.closed = bool_from_str(xget(a, {"Closed"}), true);
-    cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV", "MaxkV"}));
-    cb.i_rated_ka = dbl_from_str(xget(a, {"I_rated_kA", "RatedAmp"}), cb.i_rated_ka);
-    cb.i_breaking_ka = dbl_from_str(xget(a, {"I_breaking_kA", "Rated", "Interrupting"}), cb.i_breaking_ka);
-    cb.in_service = bool_from_str(xget(a, {"InService"}), true);
-    sys.ac.circuit_breakers.push_back(std::move(cb));
-  }
+  // ---- AC circuit breakers (HVCB, LVCB) ----
+  // ETAP wires breakers only through CONNECT records (no FromBus/ToBus attrs);
+  // pin 0 = from side, pin 1 = to side. Junction nodes between are preserved.
+  auto add_breakers = [&](const char* tag, BreakerType bt) {
+    for (const auto& a : elems[to_upper(tag)]) {
+      const std::string id = xget(a, {"ID"});
+      if (id.empty()) continue;
+      CircuitBreaker cb;
+      cb.index = static_cast<int>(sys.ac.circuit_breakers.size()) + 1;
+      cb.name = id;
+      cb.breaker_type = bt;
+      cb.bus_from = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
+      cb.bus_to = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      cb.closed = bool_from_str(xget(a, {"Closed"}), true);
+      cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV", "MaxkV"}));
+      cb.i_rated_ka = dbl_from_str(xget(a, {"I_rated_kA", "RatedAmp"}), cb.i_rated_ka);
+      cb.i_breaking_ka =
+          dbl_from_str(xget(a, {"I_breaking_kA", "Rated", "Interrupting"}), cb.i_breaking_ka);
+      cb.in_service = bool_from_str(xget(a, {"InService"}), true);
+      sys.ac.circuit_breakers.push_back(std::move(cb));
+    }
+  };
+  add_breakers("HVCB", BreakerType::CB);
+  add_breakers("LVCB", BreakerType::LS);
+
+  // ---- AC switches (SINGLESWITCH / DOUBLESWITCH / GroundSwitch) ----
+  // Mapped best-effort to two-terminal switches; endpoints come from CONNECT.
+  auto add_switches = [&](const char* tag) {
+    int n = 0;
+    for (const auto& a : elems[to_upper(tag)]) {
+      const std::string id = xget(a, {"ID"});
+      if (id.empty()) continue;
+      Switch sw;
+      sw.index = static_cast<int>(sys.ac.switches.size()) + 1;
+      sw.name = id;
+      sw.bus_from = resolve_endpoint(ac2idx, a, {"FromBus"}, 0);
+      sw.bus_to = resolve_endpoint(ac2idx, a, {"ToBus"}, 1);
+      sw.closed = bool_from_str(xget(a, {"Closed"}), true);
+      sw.in_service = bool_from_str(xget(a, {"InService"}), true);
+      sys.ac.switches.push_back(std::move(sw));
+      ++n;
+    }
+    if (n > 0)
+      report.warnings.push_back(std::string("ETAP XML: imported ") + std::to_string(n) +
+                                " " + tag + " as two-terminal switch(es) (best-effort)");
+  };
+  add_switches("SINGLESWITCH");
+  add_switches("DOUBLESWITCH");
+  add_switches("GROUNDSWITCH");
 
   // ---- Induction motors (INDMOTOR) ----
   idx = 0;
@@ -2141,7 +2401,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     AsynchronousMotor m;
     m.index = ++idx;
     m.name = id;
-    m.bus = resolve(ac2idx, xget(a, {"Bus"}));
+    m.bus = resolve_endpoint(ac2idx, a, {"Bus"}, -1);
     m.vn_kv = dbl_from_str(xget(a, {"KV"}));
     m.sn_mva = dbl_from_str(xget(a, {"MVA"}));
     m.r_pu = dbl_from_str(xget(a, {"R_pu"}));
@@ -2158,11 +2418,10 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCBranch br;
     br.index = ++idx;
     br.name = id;
-    const std::string fb = xget(a, {"FromBus"});
-    br.from_bus = resolve(dc2idx, fb);
-    br.to_bus = resolve(dc2idx, xget(a, {"ToBus"}));
-    const double zb = z_base(resolve_kv(dc2kv, fb), sys.base_mva);
-    br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RValue"})) / zb;
+    br.from_bus = resolve_endpoint(dc2idx, a, {"FromBus"}, 0);
+    br.to_bus = resolve_endpoint(dc2idx, a, {"ToBus"}, 1);
+    const double zb = z_base(dc_bus_base_kv(sys, br.from_bus), sys.base_mva);
+    br.r_pu = dbl_from_str(xget(a, {"R_ohm", "RValue", "RPosValue"})) / zb;
     br.rate_a_mva = dbl_from_str(xget(a, {"Rate_MVA"}));
     br.length_km = dbl_from_str(xget(a, {"Length_km", "LengthValue"}));
     br.in_service = bool_from_str(xget(a, {"InService"}), true);
@@ -2177,7 +2436,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCLoad l;
     l.index = ++idx;
     l.name = id;
-    l.bus = resolve(dc2idx, xget(a, {"Bus"}));
+    l.bus = resolve_endpoint(dc2idx, a, {"Bus"}, -1);
     l.p_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;
     l.scaling = dbl_from_str(xget(a, {"Scaling"}), 1.0);
     l.in_service = bool_from_str(xget(a, {"InService"}), true);
@@ -2192,8 +2451,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCDCConverter c;
     c.index = ++idx;
     c.name = id;
-    c.bus_in = resolve(dc2idx, xget(a, {"InputBus"}));
-    c.bus_out = resolve(dc2idx, xget(a, {"OutputBus"}));
+    c.bus_in = resolve_endpoint(dc2idx, a, {"InputBus"}, 0);
+    c.bus_out = resolve_endpoint(dc2idx, a, {"OutputBus"}, 1);
     c.p_ref_mw = dbl_from_str(xget(a, {"KW"})) / 1000.0;  // kW -> MW
     c.eta = dbl_from_str(xget(a, {"PercentEFF", "DcPercentEFF"}), 98.0) / 100.0;
     {
@@ -2218,8 +2477,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     DCCircuitBreaker cb;
     cb.index = ++idx;
     cb.name = id;
-    cb.bus_from = resolve(dc2idx, xget(a, {"FromBus"}));
-    cb.bus_to = resolve(dc2idx, xget(a, {"ToBus"}));
+    cb.bus_from = resolve_endpoint(dc2idx, a, {"FromBus"}, 0);
+    cb.bus_to = resolve_endpoint(dc2idx, a, {"ToBus"}, 1);
     cb.closed = bool_from_str(xget(a, {"Closed"}), true);
     cb.rated_voltage_kv = dbl_from_str(xget(a, {"RatedKV"}));
     cb.i_breaking_ka = dbl_from_str(xget(a, {"I_breaking_kA", "Rated"}), cb.i_breaking_ka);
@@ -2239,8 +2498,8 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
       v.index = ++vi;
       v.name = id;
       v.type = type_tag;
-      v.bus_ac = resolve(ac2idx, xget(a, {"ACBus", "BusID", "Bus"}));
-      v.bus_dc = resolve(dc2idx, xget(a, {"DCBus", "DcBusID", "OutputBus"}));
+      v.bus_ac = resolve_endpoint(ac2idx, a, {"ACBus", "BusID", "Bus"}, -1);
+      v.bus_dc = resolve_endpoint(dc2idx, a, {"DCBus", "DcBusID", "OutputBus"}, -1);
       v.control_mode = converter_mode_from_str(xget(a, {"Mode"}));
       {
         const std::string pac = xget(a, {"P_MW"});
@@ -2272,7 +2531,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
     Storage s;
     s.index = ++idx;
     s.name = id;
-    s.bus = resolve(dc2idx, xget(a, {"Bus"}));
+    s.bus = resolve_endpoint(dc2idx, a, {"Bus"}, -1);
     s.p_mw = dbl_from_str(xget(a, {"P_MW", "OpGenDisChargeMW"}));
     s.pmax_mw = dbl_from_str(xget(a, {"Pmax_MW", "Rated"}));
     s.pmin_mw = dbl_from_str(xget(a, {"Pmin_MW"}));
@@ -2305,6 +2564,7 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
   add_count(report, "DCCB", static_cast<int>(sys.dc.dc_circuit_breakers.size()));
   add_count(report, "VSC", static_cast<int>(sys.vsc_converters.size()));
   add_count(report, "BATTERY", static_cast<int>(sys.dc.storage.size()));
+  add_count(report, "SWITCH", static_cast<int>(sys.ac.switches.size()));
 
   derive_bus_types(sys);
   validate_refs(sys, mode, report);
@@ -2314,6 +2574,315 @@ HybridPowerSystem load_etap_xml(const std::string& path, EtapImportMode mode,
 HybridPowerSystem load_etap_xml(const std::string& path) {
   EtapIoReport report;
   return load_etap_xml(path, EtapImportMode::Permissive, report);
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Native ETAP project XML exporter (PDE document).
+// ═════════════════════════════════════════════════════════════════════════
+void save_etap_xml(const HybridPowerSystem& sys, const std::string& path,
+                   EtapIoReport& report) {
+  std::ofstream os(path, std::ios::binary);
+  if (!os) throw std::runtime_error("ETAP XML: cannot open for write " + path);
+
+  auto esc = [](const std::string& s) {
+    std::string o;
+    o.reserve(s.size());
+    for (char c : s) {
+      switch (c) {
+        case '&': o += "&amp;"; break;
+        case '<': o += "&lt;"; break;
+        case '>': o += "&gt;"; break;
+        case '"': o += "&quot;"; break;
+        case '\'': o += "&apos;"; break;
+        default: o += c;
+      }
+    }
+    return o;
+  };
+  auto num = [](double v) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    return std::string(buf);
+  };
+  auto yn = [](bool b) { return b ? "true" : "false"; };
+
+  int iid = 1000;
+  std::unordered_map<int, std::pair<std::string, std::string>> ac_bus, dc_bus;  // idx -> (ID,IID)
+  std::ostringstream conns;
+  int unresolved = 0;
+
+  auto bus_ac = [&](int i) {
+    auto it = ac_bus.find(i);
+    return it == ac_bus.end() ? std::pair<std::string, std::string>{"", ""} : it->second;
+  };
+  auto bus_dc = [&](int i) {
+    auto it = dc_bus.find(i);
+    return it == dc_bus.end() ? std::pair<std::string, std::string>{"", ""} : it->second;
+  };
+  // Emit a CONNECT record wiring device pin `pin` to bus `bus_idx`.
+  auto connect = [&](const char* dev_tag, const std::string& dev_id,
+                     const std::string& dev_iid, int pin, bool dc, int bus_idx) {
+    const auto bp = dc ? bus_dc(bus_idx) : bus_ac(bus_idx);
+    if (bp.second.empty()) { ++unresolved; return; }
+    conns << "    <CONNECT FromElement=\"" << dev_tag << "\" FromID=\"" << esc(dev_id)
+          << "\" FromIID=\"" << dev_iid << "\" FromPin=\"" << pin
+          << "\" ToElement=\"" << (dc ? "DCBUS" : "BUS") << "\" ToID=\"" << esc(bp.first)
+          << "\" ToIID=\"" << bp.second << "\" ToPin=\"0\"/>\n";
+  };
+
+  os << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  os << "<PDE ProjectName=\"" << esc(sys.name.empty() ? "export" : sys.name)
+     << "\" AppVersion=\"hacdcpf\">\n";
+  os << "  <PROJECTINFO Frequency=\"" << num(sys.ac.freq_hz)
+     << "\" UnitSystem=\"1\" Standard=\"0\" Config=\"Normal\"/>\n";
+  os << "  <COMPONENTS/>\n";
+  os << "  <LAYOUT>\n";
+
+  // ---- Buses ----
+  for (const auto& b : sys.ac.buses) {
+    const std::string id = b.name.empty() ? ("BUS" + std::to_string(b.index)) : b.name;
+    const std::string ii = std::to_string(iid++);
+    ac_bus[b.index] = {id, ii};
+    os << "    <BUS ID=\"" << esc(id) << "\" IID=\"" << ii << "\" NominalkV=\""
+       << num(b.base_kv) << "\" VMag=\"" << num(b.vm_pu * 100.0) << "\" VAng=\""
+       << num(b.va_deg) << "\" VMaxLimit=\"" << num(b.vmax_pu * 100.0)
+       << "\" VMinLimit=\"" << num(b.vmin_pu * 100.0) << "\" Area=\"" << b.area
+       << "\" Zone=\"" << b.zone << "\" InService=\"" << yn(b.in_service) << "\"/>\n";
+  }
+  for (const auto& b : sys.dc.buses) {
+    const std::string id = b.name.empty() ? ("DCBUS" + std::to_string(b.index)) : b.name;
+    const std::string ii = std::to_string(iid++);
+    dc_bus[b.index] = {id, ii};
+    os << "    <DCBUS ID=\"" << esc(id) << "\" IID=\"" << ii << "\" NominalV=\""
+       << num(b.base_kv * 1000.0) << "\" InService=\"" << yn(b.in_service) << "\"/>\n";
+  }
+
+  // ---- AC lines (XLINE) — total ohms (OhmsPerLength=Length=1 -> importer scale 1) ----
+  for (const auto& br : sys.ac.branches) {
+    const std::string id = br.name.empty() ? ("XLINE" + std::to_string(br.index)) : br.name;
+    const std::string ii = std::to_string(iid++);
+    const double zb = z_base(ac_bus_base_kv(sys, br.from_bus), sys.base_mva);
+    os << "    <XLINE ID=\"" << esc(id) << "\" IID=\"" << ii
+       << "\" OhmsPerLengthValue=\"1\" LengthValue=\"1\" RPosValue=\"" << num(br.r_pu * zb)
+       << "\" XPosValue=\"" << num(br.x_pu * zb) << "\" YPosValue=\"" << num(br.b_pu / zb)
+       << "\" RZeroValue=\"" << num(br.r0_pu * zb) << "\" XZeroValue=\"" << num(br.x0_pu * zb)
+       << "\" Rate_MVA=\"" << num(br.rate_a_mva) << "\" FromBus=\"" << esc(bus_ac(br.from_bus).first)
+       << "\" ToBus=\"" << esc(bus_ac(br.to_bus).first) << "\" InService=\"" << yn(br.in_service)
+       << "\"/>\n";
+    connect("XLINE", id, ii, 0, false, br.from_bus);
+    connect("XLINE", id, ii, 1, false, br.to_bus);
+  }
+
+  // ---- 2-winding transformers ----
+  for (const auto& t : sys.ac.transformers_2w) {
+    const std::string id = t.name.empty() ? ("XFORM2W" + std::to_string(t.index)) : t.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <XFORM2W ID=\"" << esc(id) << "\" IID=\"" << ii << "\" PrimkV=\""
+       << num(t.vn_hv_kv) << "\" SeckV=\"" << num(t.vn_lv_kv) << "\" AnsiMVA=\""
+       << num(t.sn_mva) << "\" ZBaseMVA=\"" << num(t.sn_mva) << "\" AnsiPosZ=\""
+       << num(t.vk_percent) << "\" PosR=\"" << num(t.vkr_percent) << "\" AnsiZeroZ=\""
+       << num(t.z0_percent) << "\" PrimaryStepPercentTap=\"" << num(t.tap_step_percent)
+       << "\" FromBus=\"" << esc(bus_ac(t.hv_bus).first) << "\" ToBus=\""
+       << esc(bus_ac(t.lv_bus).first) << "\" InService=\"" << yn(t.in_service) << "\"/>\n";
+    connect("XFORM2W", id, ii, 0, false, t.hv_bus);
+    connect("XFORM2W", id, ii, 1, false, t.lv_bus);
+  }
+
+  // ---- 3-winding transformers ----
+  for (const auto& t : sys.ac.transformers_3w) {
+    const std::string id = t.name.empty() ? ("XFORM3W" + std::to_string(t.index)) : t.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <XFORM3W ID=\"" << esc(id) << "\" IID=\"" << ii << "\" PrimkV=\""
+       << num(t.vn_hv_kv) << "\" SeckV=\"" << num(t.vn_mv_kv) << "\" TerkV=\""
+       << num(t.vn_lv_kv) << "\" AnsiMVA=\"" << num(t.sn_hv_mva) << "\" PSPosZ=\""
+       << num(t.vk_hv_mv_percent) << "\" PTPosZ=\"" << num(t.vk_hv_lv_percent)
+       << "\" STPosZ=\"" << num(t.vk_mv_lv_percent) << "\" PrimaryBus=\""
+       << esc(bus_ac(t.hv_bus).first) << "\" SecondaryBus=\"" << esc(bus_ac(t.mv_bus).first)
+       << "\" TeritiaryBus=\"" << esc(bus_ac(t.lv_bus).first) << "\" InService=\""
+       << yn(t.in_service) << "\"/>\n";
+    connect("XFORM3W", id, ii, 0, false, t.hv_bus);
+    connect("XFORM3W", id, ii, 1, false, t.mv_bus);
+    connect("XFORM3W", id, ii, 2, false, t.lv_bus);
+  }
+
+  // ---- External grids (UTIL) ----
+  for (const auto& g : sys.ac.external_grids) {
+    const std::string id = g.name.empty() ? ("UTIL" + std::to_string(g.index)) : g.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <UTIL ID=\"" << esc(id) << "\" IID=\"" << ii << "\" KV=\"" << num(g.vn_kv)
+       << "\" OpVMag=\"" << num(g.vm_pu * 100.0) << "\" OpVAng=\"" << num(g.va_deg)
+       << "\" PosR=\"" << num(g.r_pu) << "\" PosX=\"" << num(g.x_pu) << "\" MVAsc=\""
+       << num(g.s_sc_max_mva) << "\" Bus=\"" << esc(bus_ac(g.bus).first) << "\" InService=\""
+       << yn(g.in_service) << "\"/>\n";
+    connect("UTIL", id, ii, 0, false, g.bus);
+  }
+
+  // ---- Synchronous generators ----
+  for (const auto& g : sys.ac.generators) {
+    const std::string id = g.name.empty() ? ("SYNGEN" + std::to_string(g.index)) : g.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <SYNGEN ID=\"" << esc(id) << "\" IID=\"" << ii << "\" KV=\"" << num(g.vn_kv)
+       << "\" MW=\"" << num(g.pg_mw) << "\" Mvar=\"" << num(g.qg_mvar) << "\" MVA=\""
+       << num(g.mbase_mva) << "\" Pmax_MW=\"" << num(g.pmax_mw) << "\" Pmin_MW=\""
+       << num(g.pmin_mw) << "\" Bus=\"" << esc(bus_ac(g.bus).first) << "\" InService=\""
+       << yn(g.in_service) << "\"/>\n";
+    connect("SYNGEN", id, ii, 0, false, g.bus);
+  }
+
+  // ---- PV arrays ----
+  for (const auto& p : sys.ac.pv_systems) {
+    const std::string id = p.name.empty() ? ("PVA" + std::to_string(p.index)) : p.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <PVArray ID=\"" << esc(id) << "\" IID=\"" << ii << "\" PVAPower=\""
+       << num(p.p_mw * 1000.0) << "\" Q_Mvar=\"" << num(p.q_mvar) << "\" Bus=\""
+       << esc(bus_ac(p.bus).first) << "\" InService=\"" << yn(p.in_service) << "\"/>\n";
+    connect("PVArray", id, ii, 0, false, p.bus);
+  }
+
+  // ---- Lumped loads ----
+  for (const auto& l : sys.ac.loads) {
+    const std::string id = l.name.empty() ? ("LOAD" + std::to_string(l.index)) : l.name;
+    const std::string ii = std::to_string(iid++);
+    const double mva = (l.sn_mva > 0.0) ? l.sn_mva : std::hypot(l.p_mw, l.q_mvar);
+    const double pf = (mva > 0.0) ? (l.p_mw / mva) * 100.0 : 100.0;
+    os << "    <LUMPEDLOAD ID=\"" << esc(id) << "\" IID=\"" << ii << "\" MVA=\"" << num(mva)
+       << "\" PF=\"" << num(pf) << "\" MotorLoadPercent=\"" << num(l.motor_percent)
+       << "\" Bus=\"" << esc(bus_ac(l.bus).first) << "\" InService=\"" << yn(l.in_service)
+       << "\"/>\n";
+    connect("LUMPEDLOAD", id, ii, 0, false, l.bus);
+  }
+
+  // ---- Shunt capacitors ----
+  for (const auto& sh : sys.ac.shunts) {
+    const std::string id = sh.name.empty() ? ("CAP" + std::to_string(sh.index)) : sh.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <CAPACITOR ID=\"" << esc(id) << "\" IID=\"" << ii << "\" Mvar=\""
+       << num(sh.bs_mvar) << "\" Bus=\"" << esc(bus_ac(sh.bus).first) << "\" InService=\""
+       << yn(sh.in_service) << "\"/>\n";
+    connect("CAPACITOR", id, ii, 0, false, sh.bus);
+  }
+
+  // ---- Induction motors ----
+  for (const auto& m : sys.ac.motors) {
+    const std::string id = m.name.empty() ? ("MTR" + std::to_string(m.index)) : m.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <INDMOTOR ID=\"" << esc(id) << "\" IID=\"" << ii << "\" KV=\"" << num(m.vn_kv)
+       << "\" MVA=\"" << num(m.sn_mva) << "\" R_pu=\"" << num(m.r_pu) << "\" X_pu=\""
+       << num(m.x_pu) << "\" Bus=\"" << esc(bus_ac(m.bus).first) << "\" InService=\""
+       << yn(m.in_service) << "\"/>\n";
+    connect("INDMOTOR", id, ii, 0, false, m.bus);
+  }
+
+  // ---- AC breakers / switches ----
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    const char* tag = (cb.breaker_type == BreakerType::CB) ? "HVCB" : "LVCB";
+    const std::string id = cb.name.empty() ? (std::string(tag) + std::to_string(cb.index)) : cb.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <" << tag << " ID=\"" << esc(id) << "\" IID=\"" << ii << "\" Closed=\""
+       << yn(cb.closed) << "\" RatedKV=\"" << num(cb.rated_voltage_kv) << "\" InService=\""
+       << yn(cb.in_service) << "\"/>\n";
+    connect(tag, id, ii, 0, false, cb.bus_from);
+    connect(tag, id, ii, 1, false, cb.bus_to);
+  }
+  for (const auto& sw : sys.ac.switches) {
+    const std::string id = sw.name.empty() ? ("SW" + std::to_string(sw.index)) : sw.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <SINGLESWITCH ID=\"" << esc(id) << "\" IID=\"" << ii << "\" Closed=\""
+       << yn(sw.closed) << "\" InService=\"" << yn(sw.in_service) << "\"/>\n";
+    connect("SINGLESWITCH", id, ii, 0, false, sw.bus_from);
+    connect("SINGLESWITCH", id, ii, 1, false, sw.bus_to);
+  }
+
+  // ---- VSC converters (INVERTER / CHARGER) ----
+  for (const auto& v : sys.vsc_converters) {
+    const std::string tag = v.type.empty() ? "INVERTER" : to_upper(v.type);
+    const std::string id = v.name.empty() ? (tag + std::to_string(v.index)) : v.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <" << tag << " ID=\"" << esc(id) << "\" IID=\"" << ii << "\" P_MW=\""
+       << num(v.p_set_mw) << "\" Q_Mvar=\"" << num(v.q_set_mvar) << "\" PercentEFF=\""
+       << num(v.eta * 100.0) << "\" BusID=\"" << esc(bus_ac(v.bus_ac).first)
+       << "\" InService=\"" << yn(v.in_service) << "\"/>\n";
+    connect(tag.c_str(), id, ii, 0, false, v.bus_ac);
+    connect(tag.c_str(), id, ii, 1, true, v.bus_dc);
+  }
+
+  // ---- DC loads ----
+  for (const auto& l : sys.dc.loads) {
+    const std::string id = l.name.empty() ? ("DCLOAD" + std::to_string(l.index)) : l.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <DCLUMPLOAD ID=\"" << esc(id) << "\" IID=\"" << ii << "\" KW=\""
+       << num(l.p_mw * 1000.0) << "\" Bus=\"" << esc(bus_dc(l.bus).first) << "\" InService=\""
+       << yn(l.in_service) << "\"/>\n";
+    connect("DCLUMPLOAD", id, ii, 0, true, l.bus);
+  }
+
+  // ---- DC/DC converters ----
+  for (const auto& c : sys.dc.dcdc_converters) {
+    const std::string id = c.name.empty() ? ("DCCONV" + std::to_string(c.index)) : c.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <DCCONVERTER ID=\"" << esc(id) << "\" IID=\"" << ii << "\" KW=\""
+       << num(c.p_ref_mw * 1000.0) << "\" PercentEFF=\"" << num(c.eta * 100.0)
+       << "\" InputV=\"" << num(c.vn_in_kv * 1000.0) << "\" OutputV=\""
+       << num(c.vn_out_kv * 1000.0) << "\" InputBus=\"" << esc(bus_dc(c.bus_in).first)
+       << "\" OutputBus=\"" << esc(bus_dc(c.bus_out).first) << "\" InService=\""
+       << yn(c.in_service) << "\"/>\n";
+    connect("DCCONVERTER", id, ii, 0, true, c.bus_in);
+    connect("DCCONVERTER", id, ii, 1, true, c.bus_out);
+  }
+
+  // ---- Batteries ----
+  for (const auto& s : sys.dc.storage) {
+    const std::string id = s.name.empty() ? ("BATT" + std::to_string(s.index)) : s.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <BATTERY ID=\"" << esc(id) << "\" IID=\"" << ii << "\" Rated=\""
+       << num(s.pmax_mw) << "\" SoC=\"" << num(s.soc_init) << "\" Bus=\""
+       << esc(bus_dc(s.bus).first) << "\" InService=\"" << yn(s.in_service) << "\"/>\n";
+    connect("BATTERY", id, ii, 0, true, s.bus);
+  }
+
+  // ---- DC breakers ----
+  for (const auto& cb : sys.dc.dc_circuit_breakers) {
+    const std::string id = cb.name.empty() ? ("DCCB" + std::to_string(cb.index)) : cb.name;
+    const std::string ii = std::to_string(iid++);
+    os << "    <DCCB ID=\"" << esc(id) << "\" IID=\"" << ii << "\" Closed=\""
+       << yn(cb.closed) << "\" RatedKV=\"" << num(cb.rated_voltage_kv) << "\" InService=\""
+       << yn(cb.in_service) << "\"/>\n";
+    connect("DCCB", id, ii, 0, true, cb.bus_from);
+    connect("DCCB", id, ii, 1, true, cb.bus_to);
+  }
+
+  os << "  </LAYOUT>\n";
+  os << "  <CONNECTIONS>\n" << conns.str() << "  </CONNECTIONS>\n";
+  os << "</PDE>\n";
+  os.flush();
+  if (!os) throw std::runtime_error("ETAP XML: write failed for " + path);
+
+  add_count(report, "BUS", static_cast<int>(sys.ac.buses.size()));
+  add_count(report, "DCBUS", static_cast<int>(sys.dc.buses.size()));
+  add_count(report, "XLINE", static_cast<int>(sys.ac.branches.size()));
+  add_count(report, "XFORM2W", static_cast<int>(sys.ac.transformers_2w.size()));
+  add_count(report, "XFORM3W", static_cast<int>(sys.ac.transformers_3w.size()));
+  add_count(report, "UTIL", static_cast<int>(sys.ac.external_grids.size()));
+  add_count(report, "SYNGEN", static_cast<int>(sys.ac.generators.size()));
+  add_count(report, "PVARRAY", static_cast<int>(sys.ac.pv_systems.size()));
+  add_count(report, "LUMPEDLOAD", static_cast<int>(sys.ac.loads.size()));
+  add_count(report, "CAPACITOR", static_cast<int>(sys.ac.shunts.size()));
+  add_count(report, "INDMOTOR", static_cast<int>(sys.ac.motors.size()));
+  add_count(report, "HVCB", static_cast<int>(sys.ac.circuit_breakers.size()));
+  add_count(report, "SWITCH", static_cast<int>(sys.ac.switches.size()));
+  add_count(report, "VSC", static_cast<int>(sys.vsc_converters.size()));
+  add_count(report, "DCLUMPLOAD", static_cast<int>(sys.dc.loads.size()));
+  add_count(report, "DCCONVERTER", static_cast<int>(sys.dc.dcdc_converters.size()));
+  add_count(report, "BATTERY", static_cast<int>(sys.dc.storage.size()));
+  add_count(report, "DCCB", static_cast<int>(sys.dc.dc_circuit_breakers.size()));
+  if (unresolved > 0)
+    report.warnings.push_back("ETAP XML export: " + std::to_string(unresolved) +
+                              " device endpoint(s) had no bus and were left unconnected");
+}
+
+void save_etap_xml(const HybridPowerSystem& sys, const std::string& path) {
+  EtapIoReport report;
+  save_etap_xml(sys, path, report);
 }
 
 }  // namespace hacdcpf::io

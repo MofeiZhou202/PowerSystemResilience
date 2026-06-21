@@ -4676,6 +4676,47 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Session: export the current system to native ETAP XML (PDE) ----
+  svr.Post("/api/session/export_etap_xml",
+           [](const httplib::Request&, httplib::Response& res) {
+    std::string tmp;
+    try {
+      std::string name;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        name = g_session.current_name;
+        static std::atomic<int> xml_export_counter{0};
+        tmp = (std::filesystem::temp_directory_path() /
+               ("hacdcpf_gui_export_" +
+                std::to_string(xml_export_counter.fetch_add(1)) + ".xml"))
+                  .string();
+        hacdcpf::io::EtapIoReport rep;
+        hacdcpf::io::save_etap_xml(*g_session.current_system, tmp, rep);
+      }
+      std::ifstream ifs(tmp, std::ios::binary);
+      if (!ifs) throw std::runtime_error("Failed to read generated ETAP XML");
+      std::string bytes((std::istreambuf_iterator<char>(ifs)),
+                        std::istreambuf_iterator<char>());
+      ifs.close();
+      std::error_code ec;
+      std::filesystem::remove(tmp, ec);
+
+      std::string safe;
+      for (char ch : name) {
+        safe += (std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')
+                    ? ch : '_';
+      }
+      if (safe.empty()) safe = "system";
+      res.set_content(json{{"xml_string", bytes}, {"name", safe}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Session: import a native ETAP project XML (e.g. Feeder.xml) ----
   svr.Post("/api/session/load_etap_xml",
            [](const httplib::Request& req, httplib::Response& res) {
