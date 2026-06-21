@@ -100,6 +100,18 @@ hacdcpf_add_test(test_carbonflow_case_validation test_carbonflow_case_validation
 #   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
 hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
 
+# Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
+# NIC AC/DC coupling, validated against closed-form analytical voltages.
+#   1. AC 2-bus analytical V(h) + THD
+#   2. impedance frequency scaling (|V(7)|/|V(5)| = 7/5)
+#   3. linearity / superposition
+#   4. radial feeder monotone harmonic-voltage accumulation
+#   5. DC 2-bus ripple analytical
+#   6. NIC hybrid AC/DC coupling through one operating point + P-scaling
+#   7. multi-harmonic THD (RSS) formula
+#   8. default spectra, branch-flow output, summary()
+hacdcpf_add_test(test_harmonics_power_flow test_harmonics_power_flow.cpp)
+
 # Three-phase Newton-Raphson: phase-node indexer, balanced/unbalanced radial,
 # meshed topology, multi-source PV, HybridPowerSystem overload, VUF, losses,
 # zero-load no-load, and 2-bus analytical cross-validation.

@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
+#include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
@@ -6201,6 +6202,145 @@ int main(int argc, char** argv) {
           });
         }
       }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Harmonic Power Flow (hybrid AC/DC, frequency-domain penetration) ----
+  svr.Post("/api/session/harmonics",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HPFOptions opt;
+      hacdcpf::harmonics::HarmonicStudyInputs inputs;
+      if (j.contains("options")) {
+        const auto& o = j["options"];
+        if (o.contains("ac_orders") && o["ac_orders"].is_array())
+          opt.ac_orders = o["ac_orders"].get<std::vector<int>>();
+        if (o.contains("dc_orders") && o["dc_orders"].is_array())
+          opt.dc_orders = o["dc_orders"].get<std::vector<int>>();
+        if (o.contains("include_load_impedance"))
+          opt.include_load_impedance = o["include_load_impedance"].get<bool>();
+        if (o.contains("run_base_power_flow"))
+          opt.run_base_power_flow = o["run_base_power_flow"].get<bool>();
+        if (o.contains("default_source_xpp_pu"))
+          opt.default_source_xpp_pu = o["default_source_xpp_pu"].get<double>();
+        if (o.contains("dc_source_impedance_pu"))
+          opt.dc_source_impedance_pu = o["dc_source_impedance_pu"].get<double>();
+        if (o.contains("auto_nic_from_vscs"))
+          opt.auto_nic_from_vscs = o["auto_nic_from_vscs"].get<bool>();
+      }
+      // Optional user-defined harmonic current sources (nonlinear loads / CIDERs).
+      if (j.contains("sources") && j["sources"].is_array()) {
+        for (const auto& s : j["sources"]) {
+          hacdcpf::harmonics::HarmonicCurrentSource src;
+          src.bus = s.value("bus", 0);
+          src.is_dc = s.value("is_dc", false);
+          src.i_base_pu = s.value("i_base_pu", 0.0);
+          src.i_base_phase_deg = s.value("i_base_phase_deg", 0.0);
+          if (s.contains("spectrum") && s["spectrum"].is_array()) {
+            for (const auto& l : s["spectrum"])
+              src.spectrum.push_back({l.value("order", 0), l.value("mag_percent", 0.0),
+                                      l.value("phase_deg", 0.0)});
+          }
+          inputs.sources.push_back(std::move(src));
+        }
+      }
+
+      auto r = hacdcpf::harmonics::solve_harmonic_power_flow(sys, inputs, opt);
+
+      json out;
+      out["ok"] = r.ok;
+      out["message"] = r.message;
+      out["base_pf_converged"] = r.base_pf_converged;
+      out["ac_orders"] = r.ac_orders;
+      out["dc_orders"] = r.dc_orders;
+      out["max_ac_thd_pct"] = r.max_ac_thd_pct;
+      out["max_ac_thd_bus"] = r.max_ac_thd_bus;
+      out["max_dc_thd_pct"] = r.max_dc_thd_pct;
+      out["max_dc_thd_bus"] = r.max_dc_thd_bus;
+
+      auto bus_json = [](const hacdcpf::harmonics::HarmonicBusResult& b) {
+        json jb;
+        jb["bus"] = b.bus;
+        jb["is_dc"] = b.is_dc;
+        jb["v_fund_pu"] = b.v_fund_pu;
+        jb["thd_pct"] = b.thd_pct;
+        json spec = json::array();
+        for (const auto& [ord, v] : b.v_by_order)
+          spec.push_back(json{{"order", ord}, {"mag_pu", std::abs(v)},
+                              {"phase_deg", std::arg(v) * 180.0 / M_PI}});
+        jb["harmonics"] = spec;
+        return jb;
+      };
+      out["ac_bus_results"] = json::array();
+      for (const auto& b : r.ac_bus_results) out["ac_bus_results"].push_back(bus_json(b));
+      out["dc_bus_results"] = json::array();
+      for (const auto& b : r.dc_bus_results) out["dc_bus_results"].push_back(bus_json(b));
+
+      out["ac_branch_flows"] = json::array();
+      for (const auto& bf : r.ac_branch_flows) {
+        json spec = json::array();
+        for (const auto& [ord, m] : bf.i_by_order)
+          spec.push_back(json{{"order", ord}, {"i_pu", m}});
+        out["ac_branch_flows"].push_back(json{{"from_bus", bf.from_bus},
+            {"to_bus", bf.to_bus}, {"thd_i_pct", bf.thd_i_pct}, {"harmonics", spec}});
+      }
+      out["dc_branch_flows"] = json::array();
+      for (const auto& bf : r.dc_branch_flows) {
+        json spec = json::array();
+        for (const auto& [ord, m] : bf.i_by_order)
+          spec.push_back(json{{"order", ord}, {"i_pu", m}});
+        out["dc_branch_flows"].push_back(json{{"from_bus", bf.from_bus},
+            {"to_bus", bf.to_bus}, {"thd_i_pct", bf.thd_i_pct}, {"harmonics", spec}});
+      }
+
+      // Optional harmonic-distortion limit compliance (IEEE 519 / GB-T 14549).
+      std::string std_name;
+      if (j.contains("options")) std_name = j["options"].value("standard", std::string(""));
+      if (!std_name.empty() && r.ok) {
+        hacdcpf::harmonics::HarmonicStandard hs =
+            (std_name == "GBT14549" || std_name == "GBT14549_1993")
+                ? hacdcpf::harmonics::HarmonicStandard::GBT14549_1993
+                : hacdcpf::harmonics::HarmonicStandard::IEEE519_2014;
+        auto rep = hacdcpf::harmonics::check_harmonic_limits(r, sys, hs);
+        json comp;
+        comp["standard"] = (hs == hacdcpf::harmonics::HarmonicStandard::GBT14549_1993)
+                               ? "GB/T 14549-1993" : "IEEE 519-2014";
+        comp["all_compliant"] = rep.all_compliant;
+        comp["n_violations"] = rep.n_violations;
+        comp["worst_bus"] = rep.worst_bus;
+        comp["worst_ratio"] = rep.worst_ratio;
+        comp["checks"] = json::array();
+        for (const auto& c : rep.checks) {
+          comp["checks"].push_back(json{
+            {"bus", c.bus}, {"base_kv", c.base_kv}, {"thd_pct", c.thd_pct},
+            {"thd_limit_pct", c.thd_limit_pct}, {"thd_ok", c.thd_ok},
+            {"worst_ihd_order", c.worst_ihd_order}, {"worst_ihd_pct", c.worst_ihd_pct},
+            {"ihd_limit_pct", c.ihd_limit_pct}, {"ihd_ok", c.ihd_ok},
+            {"compliant", c.compliant}});
+        }
+        out["compliance"] = comp;
+      }
+
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
     } catch (const std::exception& e) {

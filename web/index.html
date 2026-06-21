@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css"/>
+<link rel="stylesheet" href="css/style.css?v=20260620-clickmap"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -55,6 +55,7 @@
 <div id="moduleBar" class="module-bar">
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
+  <button id="moduleHarmonics"    class="module-btn" data-module="harmonics">谐波潮流</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
@@ -123,6 +124,36 @@
       <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
     </label>
     <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
+  </div>
+  <!-- Harmonic power flow (hybrid AC/DC) -->
+  <div class="sub-section" data-sub="harmonics" hidden>
+    <label class="sub-label">AC 谐波次数
+      <input id="hpfAcOrders" type="text" value="5,7,11,13,17,19,23,25"
+             title="逗号分隔的 AC 谐波次数" style="width:160px"/>
+    </label>
+    <label class="sub-label">DC 纹波次数
+      <input id="hpfDcOrders" type="text" value="2,6,12,18,24"
+             title="逗号分隔的 DC 纹波次数" style="width:110px"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="将负荷建模为谐波阻抗 (CIGRE 并联 R // jX)">
+      <input id="hpfLoadImpedance" type="checkbox" checked/>
+      <span>负荷阻抗</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="对在运 VSC 自动施加六脉波特征谐波频谱">
+      <input id="hpfAutoNic" type="checkbox" checked/>
+      <span>换流器自动谐波源</span>
+    </label>
+    <label class="sub-label">源次暂态电抗 x''
+      <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:70px"/>
+    </label>
+    <label class="sub-label">畸变限值标准
+      <select id="hpfStandard" title="谐波电压畸变限值标准">
+        <option value="">不校核</option>
+        <option value="IEEE519">IEEE 519-2014</option>
+        <option value="GBT14549">GB/T 14549-1993</option>
+      </select>
+    </label>
+    <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波潮流">运行谐波潮流</button>
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
@@ -572,6 +603,14 @@
           </tr></thead><tbody></tbody></table>
         </div>
       </div>
+      <div class="topo-section" id="dcPvSection" style="display:none">
+        <h4>DC光伏 (DC PV Array)</h4>
+        <div id="dcPvTable" class="topo-table-wrap">
+          <table id="dcPvTableInner"><thead><tr>
+            <th>Bus</th><th>P_set(MW)</th><th>辐照(W/m²)</th><th>温度(°C)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
       <div class="topo-section" id="vscSection" style="display:none">
         <h4>VSC换流器</h4>
         <div id="vscTable" class="topo-table-wrap">
@@ -711,6 +750,16 @@
           <div id="scResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group shortCircuit -->
+        <div class="result-group" data-result-group="harmonics">
+        <div class="topo-section">
+          <h4>谐波潮流结果 — AC 母线电压畸变</h4>
+          <div id="hpfAcResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="hpfDcSection" style="display:none">
+          <h4>谐波潮流结果 — DC 母线纹波畸变</h4>
+          <div id="hpfDcResults" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group harmonics -->
         <div class="result-group" data-result-group="topology">
         <div class="topo-section">
           <h4>拓扑重构结果</h4>
@@ -894,8 +943,8 @@
   </div>
 </div>
 
-<script src="js/components.js"></script>
-<script src="js/canvas.js"></script>
-<script src="js/app.js"></script>
+<script src="js/components.js?v=20260620-clickmap"></script>
+<script src="js/canvas.js?v=20260620-clickmap"></script>
+<script src="js/app.js?v=20260620-clickmap"></script>
 </body>
 </html>

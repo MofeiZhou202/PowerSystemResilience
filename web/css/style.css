@@ -623,6 +623,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #resultsContent[data-active-group="powerFlow"]    .result-group[data-result-group="powerFlow"],
 #resultsContent[data-active-group="carbonFlow"]   .result-group[data-result-group="carbonFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
+#resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
