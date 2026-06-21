@@ -67,8 +67,11 @@ def solve_opendss(case):
     cmd("clear")
     cmd("new circuit.xref basekv=1.0 phases=1 bus1=1 "
         f"pu=0.0 R1={0.0} X1={xpp} R0={0.0} X0={xpp}")
-    cmd(f"new line.l12 phases=1 bus1=1 bus2=2 r1={r_line} x1={x_line} "
-        f"r0={r_line} x0={x_line} c1=0 c0=0 length=1 units=none")
+    # Series branch as a Reactor (R constant, X = ω·L scales linearly with order),
+    # NOT a Line: OpenDSS lines carry a default frequency-dependent / earth-return
+    # impedance model, whereas this solver (and the docs) use plain Z(h)=r+j·h·x.
+    # A reactor reproduces exactly that, keeping the comparison apples-to-apples.
+    cmd(f"new reactor.r12 phases=1 bus1=1 bus2=2 R={r_line} X={x_line}")
     # Ideal harmonic current source at the load bus (Norton resource).
     cmd(f"new isource.hload bus1={load_bus} phases=1 amps=0 angle=0 frequency={f1}")
     cmd(f"set frequency={f1}")
