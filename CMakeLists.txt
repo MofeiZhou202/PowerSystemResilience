@@ -38,7 +38,14 @@ option(HACDCPF_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                     OFF)
 # IO optional features: OpenDSS and Excel require external libs not bundled here
 option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
+option(HACDCPF_ENABLE_OPENDSS_COMPARE
+       "Build OpenDSS comparison tools and tests (requires dss_capi)"       OFF)
 option(HACDCPF_ENABLE_ETAP    "Build ETAP Excel import/export (requires OpenXLSX)" OFF)
+set(HACDCPF_DSS_CAPI_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/dss_capi/dss_capi"
+    CACHE PATH "Vendored DSS C-API root used when HACDCPF_ENABLE_OPENDSS=ON")
+set(HACDCPF_DSS_CAPI_PLATFORM "win_x64" CACHE STRING
+    "Vendored DSS C-API platform directory under lib/")
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
@@ -51,6 +58,82 @@ if(WIN32)
   add_compile_definitions(strtok_r=strtok_s)
 endif()
 include(cmake/Dependencies.cmake)
+
+set(HACDCPF_HAVE_OPENDSS OFF)
+set(HACDCPF_DSS_CAPI_RUNTIME_DLLS)
+if(HACDCPF_ENABLE_OPENDSS OR HACDCPF_ENABLE_OPENDSS_COMPARE)
+  if(NOT WIN32)
+    message(FATAL_ERROR
+      "The vendored DSS C-API bundle is currently Windows x64 only. "
+      "Add a platform-specific bundle before enabling OpenDSS here.")
+  endif()
+
+  set(_hacdcpf_dss_capi_include "${HACDCPF_DSS_CAPI_ROOT}/include")
+  set(_hacdcpf_dss_capi_lib_dir
+      "${HACDCPF_DSS_CAPI_ROOT}/lib/${HACDCPF_DSS_CAPI_PLATFORM}")
+
+  if(NOT EXISTS "${_hacdcpf_dss_capi_include}/altdss/capi/dss_ctx.h" AND
+     NOT EXISTS "${_hacdcpf_dss_capi_include}/dss_capi_ctx.h")
+    message(FATAL_ERROR
+      "OpenDSS is enabled, but the vendored DSS C-API header was not found. "
+      "Expected ${HACDCPF_DSS_CAPI_ROOT}/include/altdss/capi/dss_ctx.h "
+      "or ${HACDCPF_DSS_CAPI_ROOT}/include/dss_capi_ctx.h.")
+  endif()
+
+  find_library(_hacdcpf_dss_capi_implib
+    NAMES altdss_capi dss_capi
+    PATHS "${_hacdcpf_dss_capi_lib_dir}" "${HACDCPF_DSS_CAPI_ROOT}/lib"
+    NO_DEFAULT_PATH)
+  find_file(_hacdcpf_dss_capi_runtime
+    NAMES altdss_capi.dll dss_capi.dll
+    PATHS "${_hacdcpf_dss_capi_lib_dir}" "${HACDCPF_DSS_CAPI_ROOT}/bin"
+    NO_DEFAULT_PATH)
+
+  if(NOT _hacdcpf_dss_capi_implib OR NOT _hacdcpf_dss_capi_runtime)
+    message(FATAL_ERROR
+      "OpenDSS is enabled, but the vendored DSS C-API library/runtime was not "
+      "found under ${HACDCPF_DSS_CAPI_ROOT}. Expected altdss_capi.lib/.dll.")
+  endif()
+
+  add_library(dss_capi::dss_capi SHARED IMPORTED GLOBAL)
+  set_target_properties(dss_capi::dss_capi PROPERTIES
+    IMPORTED_IMPLIB "${_hacdcpf_dss_capi_implib}"
+    IMPORTED_LOCATION "${_hacdcpf_dss_capi_runtime}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_hacdcpf_dss_capi_include}")
+
+  get_filename_component(_hacdcpf_dss_capi_runtime_dir
+    "${_hacdcpf_dss_capi_runtime}" DIRECTORY)
+  file(GLOB _hacdcpf_dss_capi_all_dlls
+    "${_hacdcpf_dss_capi_runtime_dir}/*.dll")
+  foreach(_hacdcpf_dss_capi_dll IN LISTS _hacdcpf_dss_capi_all_dlls)
+    get_filename_component(_hacdcpf_dss_capi_dll_name
+      "${_hacdcpf_dss_capi_dll}" NAME)
+    if(NOT _hacdcpf_dss_capi_dll_name MATCHES "d\\.dll$")
+      list(APPEND HACDCPF_DSS_CAPI_RUNTIME_DLLS
+        "${_hacdcpf_dss_capi_dll}")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES HACDCPF_DSS_CAPI_RUNTIME_DLLS)
+
+  set(HACDCPF_HAVE_OPENDSS ON)
+  message(STATUS "Using vendored DSS C-API: ${HACDCPF_DSS_CAPI_ROOT}")
+endif()
+
+function(hacdcpf_copy_opendss_runtime target)
+  if(HACDCPF_HAVE_OPENDSS AND HACDCPF_DSS_CAPI_RUNTIME_DLLS)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${HACDCPF_DSS_CAPI_RUNTIME_DLLS}
+              $<TARGET_FILE_DIR:${target}>
+      COMMENT "Copying DSS C-API runtime DLLs for ${target}"
+      VERBATIM)
+  endif()
+endfunction()
+
+set(HACDCPF_HAVE_OPENDSS_COMPARE OFF)
+if(HACDCPF_ENABLE_OPENDSS_COMPARE AND HACDCPF_HAVE_OPENDSS)
+  set(HACDCPF_HAVE_OPENDSS_COMPARE ON)
+endif()
 
 # ── Core library ──────────────────────────────────────────────────────────────
 #
@@ -108,6 +191,7 @@ set(HACDCPF_SOURCES
   src/power_flow/newton_solver.cpp
   src/power_flow/jacobian_check.cpp
   src/power_flow/jacobian_check.cpp
+  src/power_flow/distribution_power_flow.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
   src/optimal_power_flow/ac_opf.cpp
   src/optimal_power_flow/dc_opf.cpp
@@ -175,7 +259,7 @@ set(HACDCPF_SOURCES
 if(HACDCPF_ENABLE_ETAP)
   list(APPEND HACDCPF_SOURCES src/io/etap_io.cpp)
 endif()
-if(HACDCPF_ENABLE_OPENDSS)
+if(HACDCPF_HAVE_OPENDSS)
   list(APPEND HACDCPF_SOURCES src/io/opendss_bridge.cpp)
 endif()
 
@@ -199,7 +283,9 @@ target_compile_definitions(hacdcpf PRIVATE
 if(HACDCPF_ENABLE_ETAP)
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_ENABLE_ETAP)
 endif()
-if(NOT HACDCPF_ENABLE_OPENDSS)
+if(HACDCPF_HAVE_OPENDSS)
+  target_compile_definitions(hacdcpf PUBLIC HACDCPF_HAVE_OPENDSS=1)
+else()
   target_compile_definitions(hacdcpf PUBLIC HACDCPF_NO_OPENDSS)
 endif()
 
@@ -209,6 +295,26 @@ target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 # ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────
 if(HACDCPF_ENABLE_ETAP AND TARGET OpenXLSX::OpenXLSX)
   target_link_libraries(hacdcpf PUBLIC OpenXLSX::OpenXLSX)
+endif()
+if(HACDCPF_HAVE_OPENDSS)
+  target_link_libraries(hacdcpf PUBLIC dss_capi::dss_capi)
+endif()
+if(HACDCPF_HAVE_OPENDSS_COMPARE)
+  target_compile_definitions(hacdcpf PUBLIC HACDCPF_HAVE_OPENDSS_COMPARE=1)
+
+  add_executable(opendss_snapshot_adapter tools/opendss_snapshot_adapter.cpp)
+  target_link_libraries(opendss_snapshot_adapter PRIVATE hacdcpf::hacdcpf)
+  target_include_directories(opendss_snapshot_adapter PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+  target_compile_definitions(opendss_snapshot_adapter PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(opendss_snapshot_adapter)
+
+  add_executable(opendss_pf_compare tools/opendss_pf_compare.cpp)
+  target_link_libraries(opendss_pf_compare PRIVATE hacdcpf::hacdcpf)
+  target_include_directories(opendss_pf_compare PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+  target_compile_definitions(opendss_pf_compare PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+  hacdcpf_copy_opendss_runtime(opendss_pf_compare)
 endif()
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
@@ -227,6 +333,7 @@ endif()
 if(HACDCPF_ENABLE_ETAP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/etap_convert.cpp")
   add_executable(etap_convert tools/etap_convert.cpp)
   target_link_libraries(etap_convert PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(etap_convert)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
