@@ -2673,4 +2673,168 @@ HarmonicMetricsResult harmonic_metrics(const HybridPowerSystem& sys,
   return res;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Hybrid AC + DC Newton with bilinear NIC cross-domain coupling
+// ═══════════════════════════════════════════════════════════════════════════
+std::string HPFHybridNewtonResult::summary() const {
+  std::ostringstream os;
+  os << "Hybrid AC/DC Newton: " << (ok ? "OK" : "FAILED");
+  if (!converged) os << " (not converged)";
+  if (!message.empty()) os << " (" << message << ")";
+  os << "\n  AC orders " << ac_orders.size() << ", DC orders " << dc_orders.size()
+     << ", iterations " << iterations << ", residual " << final_residual;
+  os << "\n  Max AC THD " << max_ac_thd_pct << " %, max DC THD " << max_dc_thd_pct << " %";
+  return os.str();
+}
+
+HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
+    const HybridPowerSystem& sys, const HybridNewtonInputs& inputs,
+    const HPFOptions& opt) {
+  HPFHybridNewtonResult res;
+  const int nac = static_cast<int>(sys.ac.buses.size());
+  const int ndc = static_cast<int>(sys.dc.buses.size());
+  if (nac == 0 && ndc == 0) { res.message = "system has no buses"; return res; }
+
+  const auto ac_id2pos = build_id_map(sys.ac.buses);
+  std::unordered_map<int, int> dc_id2pos;
+  for (int k = 0; k < ndc; ++k) dc_id2pos[sys.dc.buses[k].index] = k;
+  auto ac_pos = [&](int id) { auto it = ac_id2pos.find(id); return it == ac_id2pos.end() ? -1 : it->second; };
+  auto dc_pos = [&](int id) { auto it = dc_id2pos.find(id); return it == dc_id2pos.end() ? -1 : it->second; };
+
+  OperatingPoint op = extract_operating_point(sys, opt);
+  std::vector<double> vdc0(ndc, 1.0);
+  for (int k = 0; k < ndc; ++k)
+    vdc0[k] = (std::abs(sys.dc.buses[k].vm_pu) > 1e-9) ? sys.dc.buses[k].vm_pu : 1.0;
+
+  std::vector<int> hac, rdc;
+  for (int h : opt.ac_orders) if (h > 1) hac.push_back(h);
+  for (int r : opt.dc_orders) if (r > 0) rdc.push_back(r);
+  const int nh = static_cast<int>(hac.size()), nr = static_cast<int>(rdc.size());
+  std::unordered_map<int, int> ac_oidx, dc_oidx;
+  for (int i = 0; i < nh; ++i) ac_oidx[hac[i]] = i;
+  for (int i = 0; i < nr; ++i) dc_oidx[rdc[i]] = i;
+  const int dc_off = nh * nac;
+  const int M = nh * nac + nr * ndc;
+
+  // Per-bus result accumulators (fundamental / steady reference).
+  res.ac_bus_results.resize(nac);
+  for (int i = 0; i < nac; ++i) {
+    res.ac_bus_results[i].bus = sys.ac.buses[i].index;
+    res.ac_bus_results[i].is_dc = false;
+    res.ac_bus_results[i].v_fund_pu = std::abs(op.vac1[i]);
+    res.ac_bus_results[i].v_by_order[1] = op.vac1[i];
+  }
+  res.dc_bus_results.resize(ndc);
+  for (int k = 0; k < ndc; ++k) {
+    res.dc_bus_results[k].bus = sys.dc.buses[k].index;
+    res.dc_bus_results[k].is_dc = true;
+    res.dc_bus_results[k].v_fund_pu = std::abs(vdc0[k]);
+    res.dc_bus_results[k].v_by_order[0] = Cx(vdc0[k], 0.0);
+  }
+  if (M == 0) { res.ok = true; res.converged = true; return res; }
+
+  auto gid = [&](bool is_dc, int order, int bus) -> int {
+    if (is_dc) {
+      auto o = dc_oidx.find(order);
+      int p = dc_pos(bus);
+      if (o == dc_oidx.end() || p < 0) return -1;
+      return dc_off + o->second * ndc + p;
+    }
+    auto o = ac_oidx.find(order);
+    int p = ac_pos(bus);
+    if (o == ac_oidx.end() || p < 0) return -1;
+    return o->second * nac + p;
+  };
+
+  // Block-diagonal stacked admittance + linear source vector.
+  std::vector<Trip> baseT;
+  Eigen::VectorXcd Isrc = Eigen::VectorXcd::Zero(M);
+  for (int oi = 0; oi < nh; ++oi) {
+    const int h = hac[oi];
+    SpMat Y = build_ac_ybus(sys, op, ac_id2pos, h, opt);
+    for (int k = 0; k < Y.outerSize(); ++k)
+      for (SpMat::InnerIterator it(Y, k); it; ++it)
+        baseT.emplace_back(oi * nac + (int)it.row(), oi * nac + (int)it.col(), it.value());
+  }
+  std::vector<int> dc_forming;  // grounding via DC_V buses inside build_dc_ybus
+  for (int oi = 0; oi < nr; ++oi) {
+    const int r = rdc[oi];
+    SpMat Y = build_dc_ybus(sys.dc, dc_id2pos, dc_forming, r, opt);
+    for (int k = 0; k < Y.outerSize(); ++k)
+      for (SpMat::InnerIterator it(Y, k); it; ++it)
+        baseT.emplace_back(dc_off + oi * ndc + (int)it.row(),
+                           dc_off + oi * ndc + (int)it.col(), it.value());
+  }
+  for (const auto& src : inputs.sources) {
+    for (const auto& line : src.spectrum) {
+      int g = gid(src.is_dc, line.order, src.bus);
+      if (g < 0) continue;
+      Isrc(g) += std::polar((line.mag_percent / 100.0) * src.i_base_pu,
+                            line.phase_deg * kDeg2Rad + src.i_base_phase_deg * kDeg2Rad);
+    }
+  }
+
+  SpMat Ybase(M, M);
+  Ybase.setFromTriplets(baseT.begin(), baseT.end());
+  Ybase.makeCompressed();
+  Eigen::SparseLU<SpMat> lu0;
+  lu0.compute(Ybase);
+  if (lu0.info() != Eigen::Success) { res.message = "stacked factorisation failed"; return res; }
+  Eigen::VectorXcd V = lu0.solve(Isrc);
+
+  // Resolve bilinear terms to global indices.
+  struct BT { int out_g, a_g, b_g; Cx k; };
+  std::vector<BT> bts;
+  for (const auto& t : inputs.bilinear) {
+    int og = gid(t.out_is_dc, t.out_order, t.out_bus);
+    int ag = gid(t.a_is_dc, t.a_order, t.a_bus);
+    int bg = gid(t.b_is_dc, t.b_order, t.b_bus);
+    if (og < 0 || ag < 0 || bg < 0) continue;
+    bts.push_back({og, ag, bg, t.coeff});
+  }
+
+  int iter = 0;
+  double rn = 0.0;
+  bool ok = true;
+  for (; iter < opt.newton_max_iter; ++iter) {
+    Eigen::VectorXcd D = Ybase * V - Isrc;
+    for (const auto& t : bts) D(t.out_g) += t.k * V(t.a_g) * V(t.b_g);
+    rn = 0.0;
+    for (int i = 0; i < M; ++i) rn = std::max(rn, std::abs(D(i)));
+    if (rn < opt.newton_tol) break;
+    std::vector<Trip> T = baseT;
+    for (const auto& t : bts) {
+      T.emplace_back(t.out_g, t.a_g, t.k * V(t.b_g));
+      T.emplace_back(t.out_g, t.b_g, t.k * V(t.a_g));
+    }
+    SpMat J(M, M);
+    J.setFromTriplets(T.begin(), T.end());
+    J.makeCompressed();
+    Eigen::SparseLU<SpMat> lu;
+    lu.compute(J);
+    if (lu.info() != Eigen::Success) { ok = false; break; }
+    V += lu.solve(-D);
+  }
+  res.iterations = iter;
+  res.final_residual = rn;
+  res.converged = ok && rn < opt.newton_tol;
+
+  res.ac_orders = hac;
+  res.dc_orders = rdc;
+  for (int oi = 0; oi < nh; ++oi)
+    for (int i = 0; i < nac; ++i) res.ac_bus_results[i].v_by_order[hac[oi]] = V(oi * nac + i);
+  for (int oi = 0; oi < nr; ++oi)
+    for (int k = 0; k < ndc; ++k) res.dc_bus_results[k].v_by_order[rdc[oi]] = V(dc_off + oi * ndc + k);
+  for (auto& r : res.ac_bus_results) {
+    r.thd_pct = thd_from_orders(r.v_by_order, 1, r.v_fund_pu);
+    if (r.thd_pct > res.max_ac_thd_pct) { res.max_ac_thd_pct = r.thd_pct; res.max_ac_thd_bus = r.bus; }
+  }
+  for (auto& r : res.dc_bus_results) {
+    r.thd_pct = thd_from_orders(r.v_by_order, 0, r.v_fund_pu);
+    if (r.thd_pct > res.max_dc_thd_pct) { res.max_dc_thd_pct = r.thd_pct; res.max_dc_thd_bus = r.bus; }
+  }
+  res.ok = true;
+  return res;
+}
+
 }  // namespace hacdcpf::harmonics

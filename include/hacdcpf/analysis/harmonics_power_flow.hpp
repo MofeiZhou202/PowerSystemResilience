@@ -140,6 +140,16 @@ enum class SkinEffectModel {
   ProportionalSqrt,
 };
 
+// Frequency-dependent DC ripple network parameters.  By default the DC ripple
+// network is purely resistive (DCBranch carries only r_pu).  These optional
+// overrides add series inductance to DC branches and shunt capacitance (DC-link
+// smoothing) to DC buses, so the DC ripple impedance becomes frequency-dependent:
+//     Z_branch(r) = r_pu + j·r·x_pu ,   Y_bus_cap(r) = j·r·b_pu .
+struct DCRippleModel {
+  std::map<int, double> branch_x_pu;  ///< DCBranch::index -> fundamental-freq reactance
+  std::map<int, double> bus_b_pu;     ///< DCBus::index   -> fundamental-freq susceptance
+};
+
 struct HPFOptions {
   /// AC harmonic orders to study (the fundamental, 1, is always handled
   /// separately as the operating-point reference and need not be listed).
@@ -791,5 +801,51 @@ HarmonicMetricsResult harmonic_metrics(const HybridPowerSystem& sys,
                                        const HPFResult& result,
                                        const HarmonicMetricsOptions& mopt = {},
                                        const HPFOptions& opt = {});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hybrid AC + DC Newton with bilinear NIC cross-domain coupling
+// ═══════════════════════════════════════════════════════════════════════════
+// Solves the AC and DC harmonic networks TOGETHER (one stacked Newton state)
+// when the network-interfacing converter introduces a *nonlinear* coupling: the
+// switching action mixes AC and DC frequency components multiplicatively, so an
+// injected current is a product of two state voltages.  A bilinear term means
+//     Î_out −= coeff · V_a · V_b ,
+// where each of {out, a, b} names an AC or DC bus at a particular order.  Such
+// products make the combined system nonlinear, requiring the Newton iteration
+// (linear k_ad/k_da coupling is the special case handled by the linear hybrid
+// solver).  Reduces to independent AC/DC linear solves when no bilinear term.
+struct HybridBilinearTerm {
+  bool out_is_dc{false};  int out_order{0};  int out_bus{0};
+  bool a_is_dc{false};    int a_order{0};    int a_bus{0};
+  bool b_is_dc{false};    int b_order{0};    int b_bus{0};
+  Complex coeff{0.0, 0.0};
+};
+
+struct HybridNewtonInputs {
+  std::vector<HarmonicCurrentSource> sources;   ///< AC (is_dc=false) and DC sources
+  std::vector<HybridBilinearTerm>    bilinear;  ///< nonlinear cross-domain coupling
+};
+
+struct HPFHybridNewtonResult {
+  bool        ok{false};
+  std::string message;
+  std::vector<int> ac_orders;
+  std::vector<int> dc_orders;
+  std::vector<HarmonicBusResult> ac_bus_results;
+  std::vector<HarmonicBusResult> dc_bus_results;
+  bool   converged{false};
+  int    iterations{0};
+  double final_residual{0.0};
+  double max_ac_thd_pct{0.0};
+  int    max_ac_thd_bus{-1};
+  double max_dc_thd_pct{0.0};
+  int    max_dc_thd_bus{-1};
+  std::string summary() const;
+};
+
+/// Hybrid AC + DC Newton solve with bilinear NIC cross-domain coupling.
+HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
+    const HybridPowerSystem& sys, const HybridNewtonInputs& inputs,
+    const HPFOptions& opt = {});
 
 }  // namespace hacdcpf::harmonics

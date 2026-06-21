@@ -1761,6 +1761,143 @@ TEST_CASE("Harmonic metrics compute K-factor, THD/TDD and losses", "[harmonics][
   CHECK_THAT(m2.ac_branches[0].k_factor, WithinAbs(bm.k_factor, 1e-2));
 }
 
+// ===========================================================================
+// Hybrid AC + DC Newton with bilinear NIC cross-domain coupling
+// ===========================================================================
+namespace {
+HybridPowerSystem make_hybrid_newton_bed() {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.dc.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+  sys.dc.buses = {dc_bus(10, DCBusType::DC_V), dc_bus(11, DCBusType::DC_P)};
+  sys.dc.branches = {dc_line(1, 10, 11, 0.05)};
+  return sys;
+}
+Cx vac_hn(const HPFHybridNewtonResult& r, int bus, int order) {
+  for (const auto& b : r.ac_bus_results)
+    if (b.bus == bus) { auto it = b.v_by_order.find(order); if (it != b.v_by_order.end()) return it->second; }
+  return Cx(0, 0);
+}
+Cx vdc_hn(const HPFHybridNewtonResult& r, int bus, int order) {
+  for (const auto& b : r.dc_bus_results)
+    if (b.bus == bus) { auto it = b.v_by_order.find(order); if (it != b.v_by_order.end()) return it->second; }
+  return Cx(0, 0);
+}
+}  // namespace
+
+TEST_CASE("Hybrid AC/DC Newton reduces to independent linear solves",
+          "[harmonics][newton][hybrid]") {
+  HybridPowerSystem sys = make_hybrid_newton_bed();
+  HybridNewtonInputs in;
+  HarmonicCurrentSource acs;
+  acs.bus = 2; acs.i_base_pu = 1.0; acs.spectrum = {{5, 100.0, 0.0}};
+  HarmonicCurrentSource dcs;
+  dcs.bus = 11; dcs.is_dc = true; dcs.i_base_pu = 1.0; dcs.spectrum = {{6, 100.0, 0.0}};
+  in.sources = {acs, dcs};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+
+  HPFHybridNewtonResult r = solve_harmonic_power_flow_hybrid_newton(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.converged);
+  CHECK(r.iterations <= 1);
+  CHECK_THAT(std::abs(vac_hn(r, 2, 5)), WithinAbs(1.5, 1e-4));   // j1.5
+  CHECK_THAT(std::abs(vdc_hn(r, 11, 6)), WithinAbs(0.06, 1e-4));  // 1.0 * 0.06
+}
+
+TEST_CASE("Hybrid AC/DC Newton: bilinear converter mixing drives DC ripple",
+          "[harmonics][newton][hybrid]") {
+  HybridPowerSystem sys = make_hybrid_newton_bed();
+  HybridNewtonInputs in;
+  HarmonicCurrentSource acs;
+  acs.bus = 2; acs.i_base_pu = 1.0; acs.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+  in.sources = {acs};
+  // I_dc(6,bus11) -= 0.1 * V_ac(5,bus2) * V_ac(7,bus2)  (converter mixes 5th & 7th)
+  HybridBilinearTerm t;
+  t.out_is_dc = true; t.out_order = 6; t.out_bus = 11;
+  t.a_is_dc = false; t.a_order = 5; t.a_bus = 2;
+  t.b_is_dc = false; t.b_order = 7; t.b_bus = 2;
+  t.coeff = Cx(0.1, 0.0);
+  in.bilinear = {t};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+  opt.newton_tol = 1e-12;
+
+  HPFHybridNewtonResult r = solve_harmonic_power_flow_hybrid_newton(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.converged);
+  // AC unaffected (no DC->AC feedback): V_ac5 = j1.5, V_ac7 = j2.1
+  const Cx V5 = vac_hn(r, 2, 5), V7 = vac_hn(r, 2, 7);
+  CHECK_THAT(std::abs(V5), WithinAbs(1.5, 1e-4));
+  CHECK_THAT(std::abs(V7), WithinAbs(2.1, 1e-4));
+  // V_dc(6) = -coeff * V5 * V7 * Z_dc = -0.1*(j1.5)(j2.1)*0.06 = 0.0189 (real)
+  const Cx Vdc6 = vdc_hn(r, 11, 6);
+  CHECK_THAT(Vdc6.real(), WithinAbs(0.0189, 1e-5));
+  CHECK_THAT(Vdc6.imag(), WithinAbs(0.0, 1e-5));
+
+  // With coeff = 0 the DC ripple vanishes.
+  in.bilinear[0].coeff = Cx(0.0, 0.0);
+  HPFHybridNewtonResult r0 = solve_harmonic_power_flow_hybrid_newton(sys, in, opt);
+  CHECK(std::abs(vdc_hn(r0, 11, 6)) < 1e-6);
+}
+
+TEST_CASE("Hybrid AC/DC Newton: mutual cross-domain coupling residual",
+          "[harmonics][newton][hybrid]") {
+  HybridPowerSystem sys = make_hybrid_newton_bed();
+  HybridNewtonInputs in;
+  HarmonicCurrentSource acs;
+  acs.bus = 2; acs.i_base_pu = 1.0; acs.spectrum = {{5, 100.0, 0.0}, {7, 100.0, 0.0}};
+  in.sources = {acs};
+  const Cx g(0.1, 0.0), g2(0.3, 0.0);
+  HybridBilinearTerm t1;  // I_dc(6) -= g * V_ac5 * V_ac7
+  t1.out_is_dc = true; t1.out_order = 6; t1.out_bus = 11;
+  t1.a_is_dc = false; t1.a_order = 5; t1.a_bus = 2;
+  t1.b_is_dc = false; t1.b_order = 7; t1.b_bus = 2;
+  t1.coeff = g;
+  HybridBilinearTerm t2;  // I_ac(5) -= g2 * V_ac7 * V_dc6  (DC ripple modulates AC 5th)
+  t2.out_is_dc = false; t2.out_order = 5; t2.out_bus = 2;
+  t2.a_is_dc = false; t2.a_order = 7; t2.a_bus = 2;
+  t2.b_is_dc = true; t2.b_order = 6; t2.b_bus = 11;
+  t2.coeff = g2;
+  in.bilinear = {t1, t2};
+
+  HPFOptions opt;
+  opt.run_base_power_flow = false;
+  opt.include_load_impedance = false;
+  opt.ac_orders = {5, 7};
+  opt.dc_orders = {6};
+  opt.dc_source_impedance_pu = 0.01;
+  opt.newton_tol = 1e-12;
+
+  HPFHybridNewtonResult r = solve_harmonic_power_flow_hybrid_newton(sys, in, opt);
+  REQUIRE(r.ok);
+  REQUIRE(r.converged);
+
+  // Reduced equations:  A5 V5 - I5 + g2 V7 Vdc6 = 0 ; A7 V7 - I7 = 0 ;
+  //                     Adc Vdc6 + g V5 V7 = 0.
+  const Cx A5 = Cx(1.0, 0.0) / Cx(0.0, 1.5), A7 = Cx(1.0, 0.0) / Cx(0.0, 2.1);
+  const Cx Adc = Cx(1.0, 0.0) / Cx(0.06, 0.0);
+  const Cx V5 = vac_hn(r, 2, 5), V7 = vac_hn(r, 2, 7), Vdc6 = vdc_hn(r, 11, 6);
+  CHECK_THAT(std::abs(A5 * V5 - Cx(1.0, 0.0) + g2 * V7 * Vdc6), WithinAbs(0.0, 1e-6));
+  CHECK_THAT(std::abs(A7 * V7 - Cx(1.0, 0.0)), WithinAbs(0.0, 1e-6));
+  CHECK_THAT(std::abs(Adc * Vdc6 + g * V5 * V7), WithinAbs(0.0, 1e-6));
+  CHECK_FALSE(r.summary().empty());
+}
+
+
 
 
 
