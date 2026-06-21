@@ -301,10 +301,36 @@ const Canvas = (() => {
     });
   }
 
+  function normalizePortId(compId, portId) {
+    const comp = getComponent(compId);
+    if (!comp) return portId;
+    const ports = COMP.ports[comp.type] || [];
+    if (!ports.length) return portId;
+    const requested = String(portId || '');
+    if (ports.some(p => p.id === requested)) return requested;
+    if (ports.length === 1) return ports[0].id;
+
+    // Legacy saved layouts may carry generic side ports (left/right/top/bottom)
+    // for symbols that now expose semantic ports (ac/dc, hv/lv, pcc, ...).
+    const pickByCoord = (axis, dir) => {
+      let best = ports[0];
+      ports.forEach(p => {
+        if (dir < 0 ? p[axis] < best[axis] : p[axis] > best[axis]) best = p;
+      });
+      return best.id;
+    };
+    if (requested === 'left') return pickByCoord('x', -1);
+    if (requested === 'right') return pickByCoord('x', 1);
+    if (requested === 'top') return pickByCoord('y', -1);
+    if (requested === 'bottom') return pickByCoord('y', 1);
+    return ports[0].id;
+  }
+
   function getPortWorldPos(compId, portId) {
     const comp = getComponent(compId);
     if (!comp) return null;
-    const portDef = (COMP.ports[comp.type] || []).find(p => p.id === portId);
+    const actualPortId = normalizePortId(compId, portId);
+    const portDef = (COMP.ports[comp.type] || []).find(p => p.id === actualPortId);
     if (!portDef) return null;
     // Apply rotation to port position
     const rad = (comp.rotation || 0) * Math.PI / 180;
@@ -322,7 +348,8 @@ const Canvas = (() => {
   function portDirection(compId, portId) {
     const comp = getComponent(compId);
     if (!comp) return null;
-    const pd = (COMP.ports[comp.type] || []).find(p => p.id === portId);
+    const actualPortId = normalizePortId(compId, portId);
+    const pd = (COMP.ports[comp.type] || []).find(p => p.id === actualPortId);
     if (!pd) return null;
     const rad = (comp.rotation || 0) * Math.PI / 180;
     const rx = pd.x * Math.cos(rad) - pd.y * Math.sin(rad);
@@ -674,6 +701,9 @@ const Canvas = (() => {
 
   // ========== Connections ==========
   function addConnection(fromCompId, fromPortId, toCompId, toPortId) {
+    fromPortId = normalizePortId(fromCompId, fromPortId);
+    toPortId = normalizePortId(toCompId, toPortId);
+
     // Check if connection already exists
     const exists = state.connections.some(c =>
       (c.from.compId === fromCompId && c.from.portId === fromPortId &&
@@ -1692,7 +1722,9 @@ const Canvas = (() => {
         case 'load': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.loads.push({
-            index: loadIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : loadIdx,
+            name: p.name || `Load ${Number.isFinite(Number(p.index)) ? Number(p.index) : loadIdx}`,
+            bus: busIdx,
             p_mw: numOr(p.p_mw, 0),
             q_mvar: numOr(p.q_mvar, 0),
             scaling: numOr(p.scaling, 1.0),
@@ -1711,12 +1743,15 @@ const Canvas = (() => {
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
           });
+          loadIdx++;
           break;
         }
         case 'ac_branch': {
           const [from, to] = findTwoBusIndices(comp.id);
           sys.ac.branches.push({
-            index: brIdx++, from_bus: from, to_bus: to,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx,
+            name: p.name || `Line ${Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx}`,
+            from_bus: from, to_bus: to,
             r_pu: numOr(p.r_pu, 0.01),
             x_pu: numOr(p.x_pu, 0.1),
             b_pu: numOr(p.b_pu, 0.02),
@@ -1729,6 +1764,7 @@ const Canvas = (() => {
             in_service: p.in_service !== false,
             n_parallel: parseInt(p.n_parallel) || 1,
           });
+          brIdx++;
           break;
         }
         case 'transformer_2w': {
@@ -1738,7 +1774,9 @@ const Canvas = (() => {
           // with the correct branch-model parameters.
           if (p._from_branch) {
             sys.ac.branches.push({
-              index: brIdx++, from_bus: hv, to_bus: lv,
+              index: Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx,
+              name: p.name || `Line ${Number.isFinite(Number(p.index)) ? Number(p.index) : brIdx}`,
+              from_bus: hv, to_bus: lv,
               r_pu: numOr(p.r_pu, 0.01),
               x_pu: numOr(p.x_pu, 0.1),
               b_pu: numOr(p.b_pu, 0),
@@ -1751,6 +1789,7 @@ const Canvas = (() => {
               in_service: p.in_service !== false,
               n_parallel: 1,
             });
+            brIdx++;
           } else {
             sys.ac.transformers_2w.push({
               index: trafoIdx++, hv_bus: hv, lv_bus: lv,
@@ -1809,7 +1848,9 @@ const Canvas = (() => {
         case 'storage': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.storage.push({
-            index: storIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : storIdx,
+            name: p.name || `ESS ${Number.isFinite(Number(p.index)) ? Number(p.index) : storIdx}`,
+            bus: busIdx,
             p_mw: numOr(p.p_mw, 0),
             q_mvar: numOr(p.q_mvar, 0),
             p_rated_mw: numOr(p.p_rated_mw, 10),
@@ -1827,6 +1868,7 @@ const Canvas = (() => {
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
           });
+          storIdx++;
           break;
         }
         case 'pv_system': {
@@ -1835,7 +1877,9 @@ const Canvas = (() => {
           const pvControllable = pvMode === 'Curtailed' ? true
             : (p.controllable === true || p.controllable === 'true');
           sys.ac.pv_systems.push({
-            index: pvIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : pvIdx,
+            name: p.name || `PV ${Number.isFinite(Number(p.index)) ? Number(p.index) : pvIdx}`,
+            bus: busIdx,
             p_mw: numOr(p.p_mw, 5),
             q_mvar: numOr(p.q_mvar, 0),
             sn_mva: numOr(p.sn_mva, 6),
@@ -1862,6 +1906,7 @@ const Canvas = (() => {
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
           });
+          pvIdx++;
           break;
         }
         case 'renewable_gen': {
@@ -1908,7 +1953,8 @@ const Canvas = (() => {
         }
         case 'vsc_converter': {
           sys.vsc_converters.push({
-            index: vscIdx++,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx,
+            name: p.name || `VSC ${Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx}`,
             bus_ac: parseInt(p.bus_ac) || 0,
             bus_dc: parseInt(p.bus_dc) || 0,
             control_mode: p.control_mode || 'PQ_MODE',
@@ -1928,12 +1974,15 @@ const Canvas = (() => {
             p_rated_mw: numOr(p.p_rated_mw, 0),
             in_service: p.in_service !== false,
           });
+          vscIdx++;
           break;
         }
         case 'dc_load': {
           const busIdx = findBusIndex(comp.id);
           sys.dc.loads.push({
-            index: dcLoadIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcLoadIdx,
+            name: p.name || `DC Load ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcLoadIdx}`,
+            bus: busIdx,
             p_mw: numOr(p.p_mw, 0),
             scaling: numOr(p.scaling, 1.0),
             controllable: p.controllable === true || p.controllable === 'true',
@@ -1942,17 +1991,21 @@ const Canvas = (() => {
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
           });
+          dcLoadIdx++;
           break;
         }
         case 'dc_branch': {
           const [from, to] = findTwoBusIndices(comp.id);
           sys.dc.branches.push({
-            index: dcBrIdx++, from_bus: from, to_bus: to,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcBrIdx,
+            name: p.name || `DC Line ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcBrIdx}`,
+            from_bus: from, to_bus: to,
             r_pu: numOr(p.r_pu, 0.01),
             rate_a_mva: numOr(p.rate_a_mva, 200),
             length_km: numOr(p.length_km, 100),
             in_service: p.in_service !== false,
           });
+          dcBrIdx++;
           break;
         }
         case 'dc_pv_array': {
@@ -1979,7 +2032,8 @@ const Canvas = (() => {
         case 'switch_comp': {
           const [from, to] = findTwoBusIndices(comp.id);
           sys.ac.switches.push({
-            index: swIdx++, bus_from: from, bus_to: to,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : swIdx,
+            bus_from: from, bus_to: to,
             switch_type: p.switch_type || '',
             closed: p.closed !== false,
             r_contact_ohm: numOr(p.r_contact_ohm, 0),
@@ -1988,12 +2042,14 @@ const Canvas = (() => {
             i_breaking_ka: numOr(p.i_breaking_ka, 0),
             in_service: p.in_service !== false,
           });
+          swIdx++;
           break;
         }
         case 'circuit_breaker': {
           const [from, to] = findTwoBusIndices(comp.id);
           sys.ac.circuit_breakers.push({
-            index: cbIdx++, bus_from: from, bus_to: to,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : cbIdx,
+            bus_from: from, bus_to: to,
             breaker_type: p.breaker_type || '',
             closed: p.closed !== false,
             z_ohm: numOr(p.z_ohm, 0),
@@ -2003,6 +2059,7 @@ const Canvas = (() => {
             rated_current_ka: numOr(p.rated_current_ka, 2.0),
             in_service: p.in_service !== false,
           });
+          cbIdx++;
           break;
         }
         case 'motor': {
@@ -2174,7 +2231,8 @@ const Canvas = (() => {
         }
         case 'dcdc_converter': {
           sys.dcdc_converters.push({
-            index: sys.dcdc_converters.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length,
+            name: p.name || `DCDC ${Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length}`,
             bus_in: parseInt(p.bus_in) || 0,
             bus_out: parseInt(p.bus_out) || 0,
             control_mode: p.control_mode || 'Voltage',
@@ -2274,7 +2332,7 @@ const Canvas = (() => {
         case 'microgrid': {
           const busIdx = findBusIndex(comp.id);
           sys.microgrids.push({
-            index: sys.microgrids.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.microgrids.length,
             name: p.name || 'MicroGrid',
             description: p.description || '',
             pcc_bus: busIdx || parseInt(p.pcc_bus) || 0,
@@ -2310,17 +2368,23 @@ const Canvas = (() => {
 
     // ----- Canvas layout (positions/rotation/connections/viewport) -----
     // Persist GUI placement so that round-tripping through export/import
-    // does not destroy the user's layout.  The block is keyed by
-    // "<type>#<n>" with n = per-type sequence number in state.components
-    // iteration order, which matches the order loadFromSystemJson will
-    // recreate components in.  The backend ignores unknown fields.
+    // does not destroy the user's layout.  Prefer stable model indices for
+    // non-contiguous ids (e.g. load#1001), and fall back to per-type ordinals
+    // when an index key would be ambiguous.  The backend ignores unknown fields.
     {
       const compKey = {};
       const typeCounter = {};
+      const typeTotals = {};
+      state.components.forEach(comp => {
+        typeTotals[comp.type] = (typeTotals[comp.type] || 0) + 1;
+      });
       state.components.forEach(comp => {
         const t = comp.type;
         typeCounter[t] = (typeCounter[t] || 0) + 1;
-        compKey[comp.id] = t + '#' + typeCounter[t];
+        const ordinal = typeCounter[t];
+        const idx = Number(comp.params?.index);
+        const canUseIndexKey = Number.isFinite(idx) && (idx === ordinal || idx > typeTotals[t] || idx < 1);
+        compKey[comp.id] = t + '#' + (canUseIndexKey ? idx : ordinal);
       });
       sys._canvas = {
         version: 2,
@@ -2371,19 +2435,27 @@ const Canvas = (() => {
     }
 
     // Rebuild key -> compId by walking the just-loaded components in the
-    // same per-type order used when the layout was saved.
+    // same per-type order used when the layout was saved.  Some historical
+    // cases use model indices in layout keys (e.g. load#1001) instead of
+    // per-type ordinals, so keep an index-key fallback as well.
     const keyToCompId = {};
+    const indexKeyToCompId = {};
     const typeCounter = {};
     state.components.forEach(comp => {
       const t = comp.type;
       typeCounter[t] = (typeCounter[t] || 0) + 1;
       keyToCompId[t + '#' + typeCounter[t]] = comp.id;
+      const idx = Number(comp.params?.index);
+      if (Number.isFinite(idx)) {
+        indexKeyToCompId[t + '#' + idx] = comp.id;
+      }
     });
+    const resolveLayoutCompId = key => keyToCompId[key] ?? indexKeyToCompId[key];
 
     // Restore position and rotation.
     layout.components.forEach(item => {
       if (!item || !item.key) return;
-      const cid = keyToCompId[item.key];
+      const cid = resolveLayoutCompId(item.key);
       if (cid === undefined) return;
       const comp = getComponent(cid);
       if (!comp) return;
@@ -2401,8 +2473,8 @@ const Canvas = (() => {
       [...state.connections].forEach(cn => removeConnection(cn.id));
       layout.connections.forEach(cn => {
         if (!cn || !cn.from || !cn.to) return;
-        const fid = keyToCompId[cn.from.key];
-        const tid = keyToCompId[cn.to.key];
+        const fid = resolveLayoutCompId(cn.from.key);
+        const tid = resolveLayoutCompId(cn.to.key);
         if (fid === undefined || tid === undefined) return;
         const conn = addConnection(fid, cn.from.port, tid, cn.to.port);
         if (conn && Array.isArray(cn.waypoints) && cn.waypoints.length >= 2) {
@@ -2536,7 +2608,9 @@ const Canvas = (() => {
     jsonSys.ac?.loads?.forEach(load => {
       addDeviceAtBus('load', load.bus, {
         ...COMP.defaults.load,
-        name: `Load`,
+        index: load.index,
+        name: load.name || `Load ${load.index !== undefined ? load.index : ''}`,
+        bus: load.bus,
         p_mw: load.p_mw, q_mvar: load.q_mvar,
         scaling: load.scaling || 1.0,
         model: load.model || 'ConstantPower',
@@ -2559,7 +2633,9 @@ const Canvas = (() => {
         if ((bus.pd_mw && bus.pd_mw !== 0) || (bus.qd_mvar && bus.qd_mvar !== 0)) {
           addDeviceAtBus('load', bus.index, {
             ...COMP.defaults.load,
-            name: `Load`,
+            index: bus.index,
+            name: `Load ${bus.index !== undefined ? bus.index : ''}`,
+            bus: bus.index,
             p_mw: bus.pd_mw || 0,
             q_mvar: bus.qd_mvar || 0,
             scaling: 1.0,
@@ -2594,7 +2670,9 @@ const Canvas = (() => {
     jsonSys.ac?.storage?.forEach(s => {
       addDeviceAtBus('storage', s.bus, {
         ...COMP.defaults.storage,
-        name: 'ESS',
+        index: s.index,
+        name: s.name || `ESS ${s.index !== undefined ? s.index : ''}`,
+        bus: s.bus,
         p_mw: s.p_mw, q_mvar: s.q_mvar,
         p_rated_mw: s.p_rated_mw, e_rated_mwh: s.e_rated_mwh,
         soc_init: s.soc_init, soc_min: s.soc_min, soc_max: s.soc_max,
@@ -2611,7 +2689,9 @@ const Canvas = (() => {
     jsonSys.ac?.pv_systems?.forEach(pv => {
       addDeviceAtBus('pv_system', pv.bus, {
         ...COMP.defaults.pv_system,
-        name: 'PV',
+        index: pv.index,
+        name: pv.name || `PV ${pv.index !== undefined ? pv.index : ''}`,
+        bus: pv.bus,
         p_mw: pv.p_mw, q_mvar: pv.q_mvar,
         sn_mva: pv.sn_mva,
         pmax_mw: pv.pmax_mw, pmin_mw: pv.pmin_mw,
@@ -2669,7 +2749,8 @@ const Canvas = (() => {
       if (isTrafo) {
         const comp = addComponent('transformer_2w', mx + 60, my, {
           ...COMP.defaults.transformer_2w,
-          name: `Trafo ${br.index !== undefined ? br.index : ''}`,
+          index: br.index,
+          name: br.name || `Trafo ${br.index !== undefined ? br.index : ''}`,
           hv_bus: br.from_bus, lv_bus: br.to_bus,
           // Store branch-model parameters so roundtrip is consistent
           _from_branch: true,
@@ -2685,7 +2766,8 @@ const Canvas = (() => {
       } else {
         const comp = addComponent('ac_branch', mx, my - 40, {
           ...COMP.defaults.ac_branch,
-          name: `Line ${br.index !== undefined ? br.index : ''}`,
+          index: br.index,
+          name: br.name || `Line ${br.index !== undefined ? br.index : ''}`,
           from_bus: br.from_bus, to_bus: br.to_bus,
           r_pu: br.r_pu, x_pu: br.x_pu, b_pu: br.b_pu,
           rate_a_mva: br.rate_a_mva,
@@ -2749,7 +2831,8 @@ const Canvas = (() => {
       const y = acComp ? acComp.y : (dcComp ? dcComp.y : 300);
       const comp = addComponent('vsc_converter', x, y, {
         ...COMP.defaults.vsc_converter,
-        name: `VSC ${vsc.index !== undefined ? vsc.index : ''}`,
+        index: vsc.index,
+        name: vsc.name || `VSC ${vsc.index !== undefined ? vsc.index : ''}`,
         bus_ac: vsc.bus_ac, bus_dc: vsc.bus_dc,
         p_set_mw: vsc.p_set_mw, q_set_mvar: vsc.q_set_mvar,
         // Normalize control_mode: C++ uses "PQ"/"VDC_Q"/"VDC_VAC" but UI uses "PQ_MODE"
@@ -2781,7 +2864,10 @@ const Canvas = (() => {
       const my = (fromComp.y + toComp.y) / 2;
       const comp = addComponent('dc_branch', mx, my - 40, {
         ...COMP.defaults.dc_branch,
-        name: `DC Line ${br.index !== undefined ? br.index : ''}`,
+        index: br.index,
+        name: br.name || `DC Line ${br.index !== undefined ? br.index : ''}`,
+        from_bus: br.from_bus,
+        to_bus: br.to_bus,
         r_pu: br.r_pu, rate_a_mva: br.rate_a_mva,
         length_km: br.length_km,
         in_service: br.in_service !== false,
@@ -2794,7 +2880,9 @@ const Canvas = (() => {
     jsonSys.dc?.loads?.forEach(ld => {
       addDeviceAtBus('dc_load', ld.bus, {
         ...COMP.defaults.dc_load,
-        name: 'DC Load',
+        index: ld.index,
+        name: ld.name || `DC Load ${ld.index !== undefined ? ld.index : ''}`,
+        bus: ld.bus,
         p_mw: ld.p_mw, scaling: ld.scaling,
         controllable: ld.controllable || false,
         p_min_mw: ld.p_min_mw,
@@ -2885,6 +2973,7 @@ const Canvas = (() => {
       const my = (fromComp.y + toComp.y) / 2;
       const comp = addComponent('switch_comp', mx, my, {
         ...COMP.defaults.switch_comp,
+        index: sw.index,
         switch_type: sw.switch_type || '',
         closed: sw.closed !== false,
         r_contact_ohm: sw.r_contact_ohm,
@@ -2909,6 +2998,7 @@ const Canvas = (() => {
       const my = (fromComp.y + toComp.y) / 2;
       const comp = addComponent('circuit_breaker', mx, my, {
         ...COMP.defaults.circuit_breaker,
+        index: cb.index,
         breaker_type: cb.breaker_type || '',
         closed: cb.closed !== false,
         z_ohm: cb.z_ohm,
@@ -3071,7 +3161,8 @@ const Canvas = (() => {
       const y = inComp ? inComp.y : (outComp ? outComp.y : 400);
       const comp = addComponent('dcdc_converter', x, y, {
         ...COMP.defaults.dcdc_converter,
-        name: `DCDC ${dc.index !== undefined ? dc.index : ''}`,
+        index: dc.index,
+        name: dc.name || `DCDC ${dc.index !== undefined ? dc.index : ''}`,
         bus_in: dc.bus_in, bus_out: dc.bus_out,
         control_mode: dc.control_mode || 'Voltage',
         p_ref_mw: dc.p_ref_mw, v_ref_pu: dc.v_ref_pu,
@@ -3105,6 +3196,7 @@ const Canvas = (() => {
       }
       const comp = addComponent('energy_router', 500, 400, {
         ...COMP.defaults.energy_router,
+        index: er.index,
         name: er.name || 'ERouter',
         router_type: er.router_type, num_ports: er.num_ports,
         p_rated_mw: er.p_rated_mw,
@@ -3137,7 +3229,9 @@ const Canvas = (() => {
     jsonSys.mobile_storage?.forEach(ms => {
       addDeviceAtBus('mobile_storage', ms.bus, {
         ...COMP.defaults.mobile_storage,
-        name: 'Mobile ESS',
+        index: ms.index,
+        name: ms.name || 'Mobile ESS',
+        bus: ms.bus,
         p_mw: ms.p_mw, q_mvar: ms.q_mvar,
         p_rated_mw: ms.p_rated_mw, e_rated_mwh: ms.e_rated_mwh,
         pmax_mw: ms.pmax_mw, pmin_mw: ms.pmin_mw,
@@ -3156,6 +3250,7 @@ const Canvas = (() => {
       const pccBus = (v.pcc_bus !== undefined ? v.pcc_bus : v.aggregation_bus) || 0;
       addDeviceAtBus('vpp', pccBus, {
         ...COMP.defaults.vpp,
+        index: v.index,
         name: v.name || 'VPP',
         description: v.description || '',
         pcc_bus: pccBus,
@@ -3183,6 +3278,7 @@ const Canvas = (() => {
     jsonSys.microgrids?.forEach(mg => {
       addDeviceAtBus('microgrid', mg.pcc_bus, {
         ...COMP.defaults.microgrid,
+        index: mg.index,
         name: mg.name || 'MicroGrid',
         description: mg.description || '',
         pcc_bus: mg.pcc_bus,
