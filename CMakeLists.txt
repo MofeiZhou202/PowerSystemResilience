@@ -148,6 +148,8 @@ set(HACDCPF_SOURCES
   src/graph/result_recovery.cpp
   # ── short circuit analysis ───────────────────────────────────────────────
   src/short_circuit/short_circuit.cpp
+  # ── harmonic power flow (hybrid AC/DC) ───────────────────────────────────
+  src/harmonics_power_flow/harmonics_power_flow.cpp
   # ── scenario generation ───────────────────────────────────────────────────────
   src/scenario_generation/scenario_generation.cpp
 
