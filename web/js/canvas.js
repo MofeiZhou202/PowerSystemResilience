@@ -494,6 +494,46 @@ const Canvas = (() => {
   // ---- §10.3 auto-avoidance routing ------------------------------------------
   // Axis-aligned obstacle box for a component (buses are short & wide, devices
   // are taller).  Inflated by `pad` so wires keep clear of the symbol.
+  const FLOW_ARROW_EPS_MW = 1e-9;
+
+  function normalizedPowerPct(absPower, minPower, powerRange) {
+    const p = Number(absPower);
+    return Number.isFinite(p) ? 100 * (p - minPower) / powerRange : 0;
+  }
+
+  function addFlowLabel(x, y, powerMW, color) {
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.classList.add('viz-overlay', 'flow-label');
+    label.setAttribute('x', x);
+    label.setAttribute('y', y);
+    label.setAttribute('fill', color);
+    label.textContent = `${pFmt(Math.abs(numOr(powerMW, 0)))} ${pUnit()}`;
+    resultsLayer.appendChild(label);
+    return label;
+  }
+
+  function addFlowArrow(fa, absPowerMW, color) {
+    const absPower = Math.abs(numOr(absPowerMW, 0));
+    if (absPower <= FLOW_ARROW_EPS_MW) return null;
+    const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    arrow.classList.add('viz-overlay', 'flow-arrow-dot');
+    const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
+    arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
+    arrow.setAttribute('transform', `translate(${fa.mx},${fa.my}) rotate(${fa.angle})`);
+    arrow.setAttribute('fill', color);
+    arrow.setAttribute('opacity', '0.85');
+    resultsLayer.appendChild(arrow);
+    return arrow;
+  }
+
+  function addFlowMarker(g, headPt, powerMW, color) {
+    const fa = flowArrow(g, headPt);
+    const absPower = Math.abs(numOr(powerMW, 0));
+    addFlowArrow(fa, absPower, color);
+    addFlowLabel(fa.mx + fa.offX, fa.my + fa.offY, absPower, color);
+    return fa;
+  }
+
   function componentObstacleBox(comp, pad = 10) {
     const isBus = comp.type === 'ac_bus' || comp.type === 'dc_bus';
     const hw = isBus ? 44 : 45;
@@ -3427,10 +3467,10 @@ const Canvas = (() => {
       _lastPfResult.geo_ac_branches.forEach(br => {
         branchData.push({
           from: br.from, to: br.to,
-          pf_mw: br.pf_mw || 0,
-          pt_mw: br.pt_mw || 0,
-          loading_pct: br.loading_pct || 0,
-          rate_mva: br.rate_mva || 0,
+          pf_mw: numOr(br.pf_mw, 0),
+          pt_mw: numOr(br.pt_mw, 0),
+          loading_pct: numOr(br.loading_pct, 0),
+          rate_mva: numOr(br.rate_mva, 0),
         });
       });
     } else if (_lastPfResult.branch_abs) {
@@ -3447,7 +3487,281 @@ const Canvas = (() => {
     for (const [idx, cid] of Object.entries(busMap.ac)) compToBus[cid] = parseInt(idx);
     for (const [idx, cid] of Object.entries(busMap.dc)) compToBus[cid] = parseInt(idx);
 
+    const supplyTypes = new Set(['generator', 'pv_system', 'renewable_gen', 'static_generator', 'external_grid', 'dc_pv_array', 'vpp', 'microgrid']);
+    const demandTypes = new Set(['load', 'dc_load', 'flexible_load', 'asymmetric_load', 'motor', 'charging_station', 'charger']);
+    const bidirTypes = new Set(['storage', 'mobile_storage']);
+
+    function getComponentBusConnections(comp, allowedBusTypes) {
+      const busConns = [];
+      const allowed = allowedBusTypes || new Set(['ac_bus', 'dc_bus']);
+      for (const conn of state.connections) {
+        let busCompId = null, portOfComp = null;
+        if (conn.from.compId === comp.id) {
+          busCompId = conn.to.compId;
+          portOfComp = conn.from.portId;
+        } else if (conn.to.compId === comp.id) {
+          busCompId = conn.from.compId;
+          portOfComp = conn.to.portId;
+        }
+        if (busCompId === null) continue;
+        const busComp = getComponent(busCompId);
+        if (!busComp || !allowed.has(busComp.type)) continue;
+        busConns.push({
+          conn,
+          busCompId,
+          busIdx: compToBus[busCompId],
+          busType: busComp.type,
+          portOfComp,
+        });
+      }
+      return busConns;
+    }
+
+    function firstBusConnection(comp) {
+      const conns = getComponentBusConnections(comp);
+      return conns.length ? conns[0] : null;
+    }
+
+    function readOperatingPowerMW(comp, busCompId) {
+      const p = comp.params || {};
+      if (p.in_service === false || p.in_service === 'false') return 0;
+      if (comp.type === 'generator') {
+        const genData = (_lastPfResult.geo_gen || []);
+        const compIndex = Number(p.index);
+        const busIdx = compToBus[busCompId];
+        let gd = Number.isFinite(compIndex)
+          ? genData.find(g => Number(g.index) === compIndex)
+          : null;
+        if (!gd && busIdx !== undefined) gd = genData.find(g => g.bus === busIdx);
+        return gd ? numOr(gd.pg_mw, 0) : numOr(p.pg_mw, 0);
+      }
+      if (comp.type === 'asymmetric_load') {
+        return numOr(p.pa_mw, 0) + numOr(p.pb_mw, 0) + numOr(p.pc_mw, 0);
+      }
+      const currentPowerFields = {
+        vpp: ['p_output_mw', 'p_mw'],
+        microgrid: ['p_exchange_mw'],
+        charging_station: ['p_total_kw'],
+        charger: ['p_ch_kw'],
+      };
+      const fields = currentPowerFields[comp.type] || ['p_mw', 'p_set_mw'];
+      for (const field of fields) {
+        if (p[field] === undefined || p[field] === null || p[field] === '') continue;
+        const value = Number(p[field]);
+        if (!Number.isFinite(value)) continue;
+        return field.endsWith('_kw') ? value / 1000 : value;
+      }
+      return 0;
+    }
+
+    // Positive value means active power leaving the bus into the attached element.
+    function componentOutflowFromBusMW(comp, busCompId) {
+      const powerMW = readOperatingPowerMW(comp, busCompId);
+      if (supplyTypes.has(comp.type)) return -powerMW;
+      if (demandTypes.has(comp.type)) return powerMW;
+      if (bidirTypes.has(comp.type)) return -powerMW;
+      return 0;
+    }
+
+    const knownBusOutflowMW = {};
+    function addKnownBusOutflow(busCompId, powerMW) {
+      if (busCompId === undefined || busCompId === null) return;
+      knownBusOutflowMW[busCompId] = numOr(knownBusOutflowMW[busCompId], 0) + numOr(powerMW, 0);
+    }
+
+    state.components.forEach(comp => {
+      if (!supplyTypes.has(comp.type) && !demandTypes.has(comp.type) && !bidirTypes.has(comp.type)) return;
+      if (comp.type === 'external_grid') return;
+      const bc = firstBusConnection(comp);
+      if (!bc) return;
+      addKnownBusOutflow(bc.busCompId, componentOutflowFromBusMW(comp, bc.busCompId));
+    });
+
+    (_lastPfResult.geo_ac_branches || []).forEach(br => {
+      addKnownBusOutflow(busMap.ac[br.from], numOr(br.pf_mw, 0));
+      addKnownBusOutflow(busMap.ac[br.to], numOr(br.pt_mw, 0));
+    });
+    (_lastPfResult.geo_dc_branches || []).forEach(br => {
+      addKnownBusOutflow(busMap.dc[br.from], numOr(br.pf_mw, 0));
+      addKnownBusOutflow(busMap.dc[br.to], numOr(br.pt_mw, 0));
+    });
+    const solvedVscTransfers = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
+      ? _lastPfResult.geo_vsc
+      : (_lastPfResult.vsc_transfers || []);
+    solvedVscTransfers.forEach(vsc => {
+      addKnownBusOutflow(busMap.ac[vsc.bus_ac], -numOr(vsc.p_ac_mw, 0));
+      addKnownBusOutflow(busMap.dc[vsc.bus_dc], -numOr(vsc.p_dc_mw, 0));
+    });
+    const solvedDcdcTransfers = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
+      ? _lastPfResult.geo_dcdc
+      : (_lastPfResult.dcdc_transfers || []);
+    solvedDcdcTransfers.forEach(dcdc => {
+      addKnownBusOutflow(busMap.dc[dcdc.bus_in], numOr(dcdc.p_in_mw, 0));
+      addKnownBusOutflow(busMap.dc[dcdc.bus_out], -numOr(dcdc.p_out_mw, 0));
+    });
+    (_lastPfResult.geo_trafo3w || []).forEach(tf => {
+      addKnownBusOutflow(busMap.ac[tf.hv_bus], numOr(tf.p_hv_mw, 0));
+      addKnownBusOutflow(busMap.ac[tf.mv_bus], numOr(tf.p_mv_mw, 0));
+      addKnownBusOutflow(busMap.ac[tf.lv_bus], numOr(tf.p_lv_mw, 0));
+    });
+    (_lastPfResult.geo_er || []).forEach(er => {
+      (er.ports || []).forEach(pt => {
+        const busCompId = pt.is_ac ? busMap.ac[pt.bus] : busMap.dc[pt.bus];
+        addKnownBusOutflow(busCompId, -numOr(pt.p_mw, 0));
+      });
+    });
+
+    const unresolvedTrafo2wByBus = {};
+    state.components.forEach(comp => {
+      if (comp.type !== 'transformer_2w' || comp.params?._from_branch) return;
+      getComponentBusConnections(comp, new Set(['ac_bus'])).forEach(bc => {
+        unresolvedTrafo2wByBus[bc.busCompId] = (unresolvedTrafo2wByBus[bc.busCompId] || 0) + 1;
+      });
+    });
+
     // Build branchKey → branchData index lookup
+    function estimateTrafo2wSidePowerMW(busCompId) {
+      const nUnknown = unresolvedTrafo2wByBus[busCompId] || 0;
+      if (nUnknown <= 0) return 0;
+      return -numOr(knownBusOutflowMW[busCompId], 0) / nUnknown;
+    }
+
+    function complex(re, im = 0) {
+      return { re, im };
+    }
+    function cAdd(a, b) {
+      return complex(a.re + b.re, a.im + b.im);
+    }
+    function cSub(a, b) {
+      return complex(a.re - b.re, a.im - b.im);
+    }
+    function cMul(a, b) {
+      return complex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+    }
+    function cDiv(a, b) {
+      const den = b.re * b.re + b.im * b.im;
+      if (den <= 0) return complex(0, 0);
+      return complex((a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den);
+    }
+    function cConj(a) {
+      return complex(a.re, -a.im);
+    }
+    function cNeg(a) {
+      return complex(-a.re, -a.im);
+    }
+
+    function voltagePhasor(busCompId) {
+      const pos = compToBusIndex(busCompId);
+      if (pos === null || !_lastPfResult.vm || !_lastPfResult.va) return null;
+      const vm = Number(_lastPfResult.vm[pos]);
+      const va = Number(_lastPfResult.va[pos]);
+      if (!Number.isFinite(vm) || !Number.isFinite(va)) return null;
+      return complex(vm * Math.cos(va), vm * Math.sin(va));
+    }
+
+    function computeTrafo2wSidesFromVoltage(comp, busConns) {
+      if (!busConns || busConns.length < 2) return null;
+      const p = comp.params || {};
+      const hvBus = Number(p.hv_bus);
+      const lvBus = Number(p.lv_bus);
+      const hvSide = busConns.find(bc => bc.portOfComp === 'hv')
+        || busConns.find(bc => Number.isFinite(hvBus) && bc.busIdx === hvBus)
+        || busConns[0];
+      const lvSide = busConns.find(bc => bc.portOfComp === 'lv')
+        || busConns.find(bc => Number.isFinite(lvBus) && bc.busIdx === lvBus)
+        || busConns.find(bc => bc !== hvSide);
+      if (!hvSide || !lvSide || hvSide === lvSide) return null;
+
+      const vh = voltagePhasor(hvSide.busCompId);
+      const vl = voltagePhasor(lvSide.busCompId);
+      if (!vh || !vl) return null;
+
+      const baseMva = numOr(state.baseMva, 100);
+      const snMva = numOr(p.sn_mva, 0);
+      if (baseMva <= 1e-9 || snMva <= 1e-9) return null;
+      const scale = baseMva / snMva;
+      const zMag = Math.max(0, numOr(p.vk_percent, 0) / 100) * scale;
+      let rPu = Math.max(0, numOr(p.vkr_percent, 0) / 100) * scale;
+      let xPu = Math.sqrt(Math.max(0, zMag * zMag - rPu * rPu));
+      if (rPu === 0 && xPu === 0) xPu = 1e-4;
+
+      const rawTap = Math.max(1e-6, 1 + (numOr(p.tap_pos, 0) - numOr(p.tap_neutral, 0)) * numOr(p.tap_step_percent, 0) / 100);
+      const tapSide = Number(p.tap_side);
+      const impedanceScale = tapSide === 1 ? rawTap * rawTap : 1;
+      rPu *= impedanceScale;
+      xPu *= impedanceScale;
+      const z = complex(rPu, xPu);
+      const zDen = z.re * z.re + z.im * z.im;
+      if (zDen <= 0) return null;
+      const ys = cDiv(complex(1, 0), z);
+      const ytt = ys; // Transformer2W equivalent branch has b_pu = 0.
+      const tapMag = tapSide === 1 ? 1 / rawTap : rawTap;
+      const shift = numOr(p.shift_deg, 0) * Math.PI / 180;
+      const tap = complex(tapMag * Math.cos(shift), tapMag * Math.sin(shift));
+      const tapAbs2 = tap.re * tap.re + tap.im * tap.im;
+      if (tapAbs2 <= 0) return null;
+
+      const yff = complex(ytt.re / tapAbs2, ytt.im / tapAbs2);
+      const yft = cNeg(cDiv(ys, cConj(tap)));
+      const ytf = cNeg(cDiv(ys, tap));
+      const ih = cAdd(cMul(yff, vh), cMul(yft, vl));
+      const il = cAdd(cMul(ytf, vh), cMul(ytt, vl));
+      const sh = cMul(vh, cConj(ih));
+      const sl = cMul(vl, cConj(il));
+
+      return busConns.slice(0, 2).map(bc => {
+        if (bc === hvSide) return { ...bc, p_mw: sh.re * baseMva };
+        if (bc === lvSide) return { ...bc, p_mw: sl.re * baseMva };
+        return { ...bc, p_mw: estimateTrafo2wSidePowerMW(bc.busCompId) };
+      });
+    }
+
+    const estimatedTrafo2wFlows = [];
+    state.components.forEach(comp => {
+      if (comp.type !== 'transformer_2w' || comp.params?._from_branch) return;
+      const busConns = getComponentBusConnections(comp, new Set(['ac_bus']));
+      if (busConns.length < 2) return;
+      const solvedSides = computeTrafo2wSidesFromVoltage(comp, busConns);
+      const sides = solvedSides || busConns.slice(0, 2).map(bc => ({
+        ...bc,
+        p_mw: estimateTrafo2wSidePowerMW(bc.busCompId),
+      }));
+      if (!solvedSides && sides.length === 2) {
+        const p0 = numOr(sides[0].p_mw, 0);
+        const p1 = numOr(sides[1].p_mw, 0);
+        if (Math.abs(p0) > FLOW_ARROW_EPS_MW && Math.abs(p1) <= FLOW_ARROW_EPS_MW) sides[1].p_mw = -p0;
+        else if (Math.abs(p1) > FLOW_ARROW_EPS_MW && Math.abs(p0) <= FLOW_ARROW_EPS_MW) sides[0].p_mw = -p1;
+      }
+      const absPower = Math.max(...sides.map(s => Math.abs(numOr(s.p_mw, 0))), 0);
+      const rateMva = numOr(comp.params?.sn_mva ?? comp.params?.rate_a_mva, 0);
+      estimatedTrafo2wFlows.push({
+        comp,
+        sides,
+        absPower,
+        rate_mva: rateMva,
+        loading_pct: rateMva > 0 ? 100 * absPower / rateMva : 0,
+      });
+    });
+
+    const visualAcBranchCount = state.components.filter(comp =>
+      comp.type === 'ac_branch' || (comp.type === 'transformer_2w' && comp.params?._from_branch)
+    ).length;
+    const trafo3wExpandedBranchCount = state.components.reduce((sum, comp) => {
+      if (comp.type !== 'transformer_3w' || comp.params?.in_service === false) return sum;
+      return sum + (getComponentBusConnections(comp, new Set(['ac_bus'])).length >= 3 ? 3 : 0);
+    }, 0);
+    const expandedSwitchFlows = [];
+    if (Array.isArray(_lastPfResult.branch_abs)) {
+      let absIdx = visualAcBranchCount + estimatedTrafo2wFlows.length + trafo3wExpandedBranchCount;
+      ['switch_comp', 'circuit_breaker'].forEach(type => {
+        state.components.forEach(comp => {
+          if (comp.type !== type) return;
+          const powerMW = numOr(_lastPfResult.branch_abs[absIdx++], 0);
+          expandedSwitchFlows.push({ comp, powerMW: Math.abs(powerMW) });
+        });
+      });
+    }
+
     const branchByKey = {};
     branchData.forEach((bd, i) => {
       if (bd.from && bd.to) {
@@ -3459,7 +3773,9 @@ const Canvas = (() => {
     // Compute power range for relative color normalization (include DC branches)
     const dcBranchDataAll = _lastPfResult.geo_dc_branches || [];
     const powers = branchData.map(bd => Math.abs(bd.pf_mw))
-      .concat(dcBranchDataAll.map(bd => Math.abs(bd.pf_mw || 0)))
+      .concat(dcBranchDataAll.map(bd => Math.abs(numOr(bd.pf_mw, 0))))
+      .concat(estimatedTrafo2wFlows.map(tf => Math.abs(numOr(tf.absPower, 0))))
+      .concat(expandedSwitchFlows.map(sw => Math.abs(numOr(sw.powerMW, 0))))
       .filter(v => v > 0.01);
     // Running min/max (avoid Math.min(...spread) — overflows on thousands of branches).
     let maxPower = 1, minPower = 0;
@@ -3471,9 +3787,10 @@ const Canvas = (() => {
     // Check loading availability: per-branch coloring will use loading% when rate_mva > 0,
     // and power normalization otherwise. Legend reflects the dominant mode.
     const branchesWithRate = branchData.filter(bd => bd.rate_mva > 0).length +
-      dcBranchDataAll.filter(bd => (bd.rate_mva || 0) > 0).length;
+      dcBranchDataAll.filter(bd => numOr(bd.rate_mva, 0) > 0).length;
     const totalBranches = branchData.length + dcBranchDataAll.length;
     const allHaveLoading = totalBranches > 0 && branchesWithRate === totalBranches;
+    const labeledFlowConnections = new Set();
 
     // For each connection that links a branch/transformer to buses, find the branch data
     // We need: connection → branch comp → two bus connections → bus indices → branch data
@@ -3546,7 +3863,7 @@ const Canvas = (() => {
         colorPct = loading; // use actual loading % when this branch has valid rate
       } else {
         // Relative normalization based on power flow range
-        colorPct = 100 * (absPower - minPower) / powerRange;
+        colorPct = normalizedPowerPct(absPower, minPower, powerRange);
       }
 
       // Determine endpoints: the branch component is between its two buses
@@ -3572,12 +3889,13 @@ const Canvas = (() => {
       }
 
       // Add flow direction arrows
-      if (showFlow && absPower > 0.01) {
+      if (showFlow) {
         // Draw animated arrow along each connection segment
         connPairs.forEach(({ conn, busCompId }) => {
           if (!conn.el) return;
           const g = getConnGeom(conn);
           if (!g) return;
+          labeledFlowConnections.add(conn.id);
 
           // Determine arrow direction for this segment
           // If pf_mw > 0: flow goes from_bus → comp → to_bus
@@ -3597,28 +3915,7 @@ const Canvas = (() => {
 
           // Arrow at the polyline midpoint, pointing toward the bus when
           // flowsTowardBus so it follows the orthogonal route (doc §10.2).
-          const fa = flowArrow(g, flowsTowardBus ? g.toPt : g.fromPt);
-          const mx = fa.mx, my = fa.my, angle = fa.angle;
-
-          // Arrow triangle
-          const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-          arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-          const sz = Math.max(5, Math.min(10, 5 + segPower / 100));
-          arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-          arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-          arrow.setAttribute('fill', showHeat ? loadingColor(colorPct) : '#1976D2');
-          arrow.setAttribute('opacity', '0.85');
-          resultsLayer.appendChild(arrow);
-
-          // Power label next to the arrow (perpendicular offset)
-          const offX = fa.offX, offY = fa.offY;
-          const segLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          segLabel.classList.add('viz-overlay', 'flow-label');
-          segLabel.setAttribute('x', mx + offX);
-          segLabel.setAttribute('y', my + offY);
-          segLabel.setAttribute('fill', showHeat ? loadingColor(colorPct) : '#1976D2');
-          segLabel.textContent = `${pFmt(segPower)} ${pUnit()}`;
-          resultsLayer.appendChild(segLabel);
+          addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, showHeat ? loadingColor(colorPct) : '#1976D2');
         });
       }
 
@@ -3641,6 +3938,82 @@ const Canvas = (() => {
     // ── 3W Transformer arrows & heatmap ──
     // Each 3W transformer has 3 winding connections (HV, MV, LV).
     // Match connections to windings via bus indices from geo_trafo3w.
+    // Estimated 2W transformer flows: use local bus KCL because
+    // sys.ac.transformers_2w are not exposed in geo_ac_branches.
+    estimatedTrafo2wFlows.forEach(tf => {
+      const colorPct = tf.rate_mva > 0
+        ? tf.loading_pct
+        : normalizedPowerPct(tf.absPower, minPower, powerRange);
+
+      if (showHeat) {
+        heatItems.push({
+          comp: tf.comp,
+          colorPct,
+          absPower: tf.absPower,
+          maxPower,
+          bd: { rate_mva: tf.rate_mva },
+          hasLoading: tf.rate_mva > 0,
+          loading: tf.loading_pct,
+        });
+
+        if (tf.absPower > 0.01) {
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.classList.add('viz-overlay', 'heatmap-label');
+          label.setAttribute('x', tf.comp.x);
+          label.setAttribute('y', tf.comp.y + 55);
+          label.setAttribute('fill', loadingColor(colorPct));
+          label.textContent = tf.rate_mva > 0
+            ? `${tf.loading_pct.toFixed(1)}%`
+            : `${pFmt(tf.absPower)} ${pUnit()}`;
+          resultsLayer.appendChild(label);
+        }
+      }
+
+      if (showFlow) {
+        tf.sides.forEach(side => {
+          if (!side.conn || !side.conn.el) return;
+          const g = getConnGeom(side.conn, { fromCompId: tf.comp.id });
+          if (!g) return;
+          labeledFlowConnections.add(side.conn.id);
+          const powerMW = numOr(side.p_mw, 0);
+          const absPower = Math.abs(powerMW);
+          const color = showHeat ? loadingColor(colorPct) : '#1976D2';
+          addFlowMarker(g, powerMW > 0 ? g.compEnd : g.busEnd, absPower, color);
+        });
+      }
+    });
+
+    expandedSwitchFlows.forEach(sw => {
+      const comp = sw.comp;
+      const busConns = getComponentBusConnections(comp, new Set(['ac_bus']));
+      if (busConns.length < 2) return;
+      const absPower = Math.abs(numOr(sw.powerMW, 0));
+      const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
+      const color = showHeat ? loadingColor(colorPct) : '#1976D2';
+
+      if (showHeat && absPower > 0.01) {
+        heatItems.push({
+          comp,
+          colorPct,
+          absPower,
+          maxPower,
+          bd: { rate_mva: 0 },
+          hasLoading: false,
+          loading: 0,
+        });
+      }
+
+      if (showFlow) {
+        busConns.slice(0, 2).forEach(bc => {
+          if (!bc.conn || !bc.conn.el) return;
+          const g = getConnGeom(bc.conn, { fromCompId: comp.id });
+          if (!g) return;
+          labeledFlowConnections.add(bc.conn.id);
+          addFlowMarker(g, g.compEnd, absPower, color);
+        });
+      }
+    });
+
     const trafo3wData = _lastPfResult.geo_trafo3w || [];
     if (trafo3wData.length > 0) {
       // Build lookup: sequential trafo3w index → geo_trafo3w entry
@@ -3693,7 +4066,7 @@ const Canvas = (() => {
           if (tf.rate_mva > 0) {
             colorPct = tf.loading_pct;
           } else {
-            colorPct = 100 * (smax - minPower) / powerRange;
+            colorPct = normalizedPowerPct(smax, minPower, powerRange);
           }
           heatItems.push({ comp, colorPct, absPower: smax, maxPower, bd: { rate_mva: tf.rate_mva }, hasLoading: tf.rate_mva > 0, loading: tf.loading_pct });
 
@@ -3717,8 +4090,9 @@ const Canvas = (() => {
         if (showFlow) {
           windingPowers.forEach(({ key, p, q, bc }) => {
             if (!bc || !bc.conn || !bc.conn.el) return;
-            const absPower = Math.abs(p);
-            if (absPower < 0.01) return;
+            labeledFlowConnections.add(bc.conn.id);
+            const powerMW = numOr(p, 0);
+            const absPower = Math.abs(powerMW);
 
             const g = getConnGeom(bc.conn, { fromCompId: comp.id });
             if (!g) return;
@@ -3730,25 +4104,11 @@ const Canvas = (() => {
 
             let colorPct;
             if (tf.rate_mva > 0) colorPct = tf.loading_pct;
-            else colorPct = 100 * (absPower - minPower) / powerRange;
+            else colorPct = normalizedPowerPct(absPower, minPower, powerRange);
 
-            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-            const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
-            arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-            arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-            arrow.setAttribute('fill', showHeat ? loadingColor(colorPct) : '#1976D2');
-            arrow.setAttribute('opacity', '0.85');
-            resultsLayer.appendChild(arrow);
-
-            // Winding power label
-            const offX = fa.offX, offY = fa.offY;
-            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            label.classList.add('viz-overlay', 'flow-label');
-            label.setAttribute('x', mx + offX);
-            label.setAttribute('y', my + offY);
-            label.textContent = `${pFmt(absPower)} ${pUnit()}`;
-            resultsLayer.appendChild(label);
+            const color = showHeat ? loadingColor(colorPct) : '#1976D2';
+            addFlowArrow(fa, absPower, color);
+            addFlowLabel(mx + fa.offX, my + fa.offY, absPower, color);
           });
         }
       });
@@ -3761,32 +4121,29 @@ const Canvas = (() => {
       const deadBusSet = new Set();
       (_lastPfResult.geo_buses || []).forEach(gb => { if (gb.bus_type === 'DEAD') deadBusSet.add(gb.id); });
 
-      const supplyTypes = new Set(['generator', 'pv_system', 'renewable_gen', 'static_generator', 'external_grid', 'dc_pv_array', 'vpp']);
-      const demandTypes = new Set(['load', 'dc_load', 'flexible_load', 'asymmetric_load', 'motor', 'charging_station', 'charger']);
-      const bidirTypes = new Set(['storage', 'mobile_storage']);
-      const skipTypes = new Set(['ac_bus', 'dc_bus', 'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w', 'switch_comp', 'circuit_breaker', 'shunt', 'microgrid', 'vsc_converter', 'dcdc_converter', 'energy_router']);
+      const skipTypes = new Set(['ac_bus', 'dc_bus', 'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w', 'switch_comp', 'circuit_breaker', 'shunt', 'vsc_converter', 'dcdc_converter', 'energy_router']);
 
       // Compute bus net injection from branch flows for external_grid power estimation
       const busInject = {};
       ((_lastPfResult.geo_ac_branches || []).concat(_lastPfResult.geo_dc_branches || [])).forEach(br => {
         if (br.pf_mw !== undefined) {
-          busInject[br.from] = (busInject[br.from] || 0) - br.pf_mw;
-          busInject[br.to] = (busInject[br.to] || 0) - (br.pt_mw || 0);
+          busInject[br.from] = numOr(busInject[br.from], 0) - numOr(br.pf_mw, 0);
+          busInject[br.to] = numOr(busInject[br.to], 0) - numOr(br.pt_mw, 0);
         }
       });
 
       // VSC transfer power at AC-side buses
       (_lastPfResult.geo_vsc || []).forEach(vsc => {
         if (vsc.p_ac_mw !== undefined) {
-          busInject[vsc.bus_ac] = (busInject[vsc.bus_ac] || 0) - vsc.p_ac_mw;
+          busInject[vsc.bus_ac] = numOr(busInject[vsc.bus_ac], 0) - numOr(vsc.p_ac_mw, 0);
         }
       });
 
       // 3W transformer winding flows contribute to bus injection
       (_lastPfResult.geo_trafo3w || []).forEach(tf => {
-        busInject[tf.hv_bus] = (busInject[tf.hv_bus] || 0) - tf.p_hv_mw;
-        busInject[tf.mv_bus] = (busInject[tf.mv_bus] || 0) - tf.p_mv_mw;
-        busInject[tf.lv_bus] = (busInject[tf.lv_bus] || 0) - tf.p_lv_mw;
+        busInject[tf.hv_bus] = numOr(busInject[tf.hv_bus], 0) - numOr(tf.p_hv_mw, 0);
+        busInject[tf.mv_bus] = numOr(busInject[tf.mv_bus], 0) - numOr(tf.p_mv_mw, 0);
+        busInject[tf.lv_bus] = numOr(busInject[tf.lv_bus], 0) - numOr(tf.p_lv_mw, 0);
       });
 
       state.components.forEach(comp => {
@@ -3814,38 +4171,29 @@ const Canvas = (() => {
         const attachedBusIdx = compToBus[busCompId];
         if (attachedBusIdx !== undefined && deadBusSet.has(attachedBusIdx)) return;
 
-        const p = comp.params;
         let powerMW = 0;
-        if (comp.type === 'generator') {
-          // Use actual PF result from geo_gen if available
-          const genData = (_lastPfResult.geo_gen || []);
-          const busIdx = compToBus[busCompId];
-          const gd = genData.find(g => g.bus === busIdx);
-          powerMW = gd ? gd.pg_mw : (p.pg_mw || 0);
-        }
-        else if (comp.type === 'asymmetric_load') powerMW = (p.pa_mw||0) + (p.pb_mw||0) + (p.pc_mw||0);
-        else if (comp.type === 'external_grid') {
+        if (comp.type === 'external_grid') {
           // Estimate slack power from bus net injection
           const busIdx = compToBus[busCompId];
           if (busIdx !== undefined && busInject[busIdx] !== undefined) {
             powerMW = busInject[busIdx]; // net injection at bus (gen positive)
             // Add back loads at this bus
             const loadAtBus = (_lastPfResult.geo_buses || []).find(gb => gb.id === busIdx);
-            if (loadAtBus) powerMW += (loadAtBus.pd_mw || 0);
+            if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
           }
         }
-        else powerMW = p.p_mw || p.p_set_mw || p.p_rated_mw || 0;
-
-        if (Math.abs(powerMW) < 0.001) return;
+        else powerMW = readOperatingPowerMW(comp, busCompId);
 
         // Determine direction
         let isSupply;
-        if (supplyTypes.has(comp.type)) isSupply = true;
+        if (comp.type === 'storage' || comp.type === 'mobile_storage' || comp.type === 'microgrid' || comp.type === 'vpp') isSupply = powerMW >= 0;
+        else if (supplyTypes.has(comp.type)) isSupply = true;
         else if (demandTypes.has(comp.type)) isSupply = false;
         else isSupply = powerMW > 0; // storage: positive = discharge
 
         const g = getConnGeom(conn, { fromCompId: comp.id });
         if (!g) return;
+        labeledFlowConnections.add(conn.id);
 
         // Arrow direction: supply → component→bus, demand → bus→component
         const fa = flowArrow(g, isSupply ? g.busEnd : g.compEnd);
@@ -3853,28 +4201,11 @@ const Canvas = (() => {
 
         // Color by power magnitude (same scale as branch arrows)
         const absPower = Math.abs(powerMW);
-        const colorPct = 100 * (absPower - minPower) / powerRange;
+        const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
         const arrowColor = showHeat ? loadingColor(colorPct) : loadingColor(colorPct);
 
-        // Arrow triangle
-        const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-        arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-        const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
-        arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-        arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-        arrow.setAttribute('fill', arrowColor);
-        arrow.setAttribute('opacity', '0.85');
-        resultsLayer.appendChild(arrow);
-
-        // Power label at offset from midpoint along the normal
-        const offX = fa.offX, offY = fa.offY;
-        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        label.classList.add('viz-overlay', 'flow-label');
-        label.setAttribute('x', mx + offX);
-        label.setAttribute('y', my + offY);
-        label.setAttribute('fill', arrowColor);
-        label.textContent = `${pFmt(absPower)} ${pUnit()}`;
-        resultsLayer.appendChild(label);
+        addFlowArrow(fa, absPower, arrowColor);
+        addFlowLabel(mx + fa.offX, my + fa.offY, absPower, arrowColor);
       });
     }
 
@@ -3886,10 +4217,9 @@ const Canvas = (() => {
         if (comp.type !== 'dc_branch') return;
         const bd = dcBranchData[dcBrIdx++];
         if (!bd) return;
-        const pf_mw_dc = bd.pf_mw || 0;
-        const pt_mw_dc = bd.pt_mw || 0;
+        const pf_mw_dc = numOr(bd.pf_mw, 0);
+        const pt_mw_dc = numOr(bd.pt_mw, 0);
         const absPower = Math.max(Math.abs(pf_mw_dc), Math.abs(pt_mw_dc));
-        if (absPower < 0.01) return;
 
         // Find two connected DC buses
         let fromBusCompId = null, toBusCompId = null;
@@ -3910,13 +4240,15 @@ const Canvas = (() => {
         const fromBusIdx = compToBus[fromBusCompId];
         const toBusIdx = compToBus[toBusCompId];
         const isForward = (fromBusIdx === bd.from);
-        const colorPct = (bd.rate_mva > 0 && bd.loading_pct > 0)
-          ? bd.loading_pct
-          : 100 * (absPower - minPower) / powerRange;
+        const rateMva = numOr(bd.rate_mva, 0);
+        const loadingPct = numOr(bd.loading_pct, 0);
+        const colorPct = (rateMva > 0 && loadingPct > 0)
+          ? loadingPct
+          : normalizedPowerPct(absPower, minPower, powerRange);
 
         // Heatmap glow for DC branch
         if (showHeat) {
-          heatItems.push({ comp, colorPct, absPower, maxPower, bd: { rate_mva: bd.rate_mva || 0 }, hasLoading: (bd.rate_mva || 0) > 0, loading: bd.loading_pct || 0 });
+          heatItems.push({ comp, colorPct, absPower, maxPower, bd: { rate_mva: rateMva }, hasLoading: rateMva > 0, loading: loadingPct });
         }
 
         if (showFlow) {
@@ -3934,6 +4266,7 @@ const Canvas = (() => {
             if (!conn.el) return;
             const g = getConnGeom(conn);
             if (!g) return;
+            labeledFlowConnections.add(conn.id);
             let flowsTowardBus;
             if (pf_mw_dc >= 0) flowsTowardBus = (busCompId === toBusCompId) === isForward;
             else flowsTowardBus = (busCompId === fromBusCompId) === isForward;
@@ -3942,26 +4275,7 @@ const Canvas = (() => {
             const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
             const segPower = isFromSide ? Math.abs(pf_mw_dc) : Math.abs(pt_mw_dc);
 
-            const fa = flowArrow(g, flowsTowardBus ? g.toPt : g.fromPt);
-            const mx = fa.mx, my = fa.my, angle = fa.angle;
-            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-            const sz = Math.max(5, Math.min(10, 5 + segPower / 100));
-            arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-            arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-            arrow.setAttribute('fill', loadingColor(colorPct));
-            arrow.setAttribute('opacity', '0.85');
-            resultsLayer.appendChild(arrow);
-
-            // Power label next to the arrow (perpendicular offset)
-            const offX = fa.offX, offY = fa.offY;
-            const segLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            segLabel.classList.add('viz-overlay', 'flow-label');
-            segLabel.setAttribute('x', mx + offX);
-            segLabel.setAttribute('y', my + offY);
-            segLabel.setAttribute('fill', loadingColor(colorPct));
-            segLabel.textContent = `${pFmt(segPower)} ${pUnit()}`;
-            resultsLayer.appendChild(segLabel);
+            addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, loadingColor(colorPct));
           });
         }
       });
@@ -3997,45 +4311,33 @@ const Canvas = (() => {
         ];
 
         sides.forEach(({ p, q, matchBus, sideLabel, expectedBusType }) => {
-          const absPower = Math.abs(p);
-          if (absPower < 0.01) return;
+          const powerMW = numOr(p, 0);
+          const absPower = Math.abs(powerMW);
           // Match by both bus index AND bus type to avoid AC/DC index collision
           const bc = busConns.find(bc => bc.busIdx === matchBus && bc.busType === expectedBusType);
           if (!bc || !bc.conn || !bc.conn.el) return;
+          labeledFlowConnections.add(bc.conn.id);
 
           const g = getConnGeom(bc.conn, { fromCompId: comp.id });
           if (!g) return;
 
           // Bus-injection-positive: p > 0 means inject into bus → arrow comp→bus
           //                         p < 0 means draw from bus   → arrow bus→comp
-          const fa = flowArrow(g, p > 0 ? g.busEnd : g.compEnd);
+          const fa = flowArrow(g, powerMW > 0 ? g.busEnd : g.compEnd);
           const mx = fa.mx, my = fa.my, angle = fa.angle;
-          const colorPct = 100 * (absPower - minPower) / powerRange;
+          const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
 
           if (showFlow) {
-            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-            const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
-            arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-            arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-            arrow.setAttribute('fill', loadingColor(colorPct));
-            arrow.setAttribute('opacity', '0.85');
-            resultsLayer.appendChild(arrow);
-
-            const offX = fa.offX, offY = fa.offY;
-            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            label.classList.add('viz-overlay', 'flow-label');
-            label.setAttribute('x', mx + offX);
-            label.setAttribute('y', my + offY);
-            label.textContent = `${pFmt(absPower)} ${pUnit()}`;
-            resultsLayer.appendChild(label);
+            const color = loadingColor(colorPct);
+            addFlowArrow(fa, absPower, color);
+            addFlowLabel(mx + fa.offX, my + fa.offY, absPower, color);
           }
         });
 
         // Heatmap glow for VSC
         if (showHeat) {
-          const sMax = Math.max(Math.abs(vd.p_ac_mw), Math.abs(vd.p_dc_mw));
-          const colorPct = 100 * (sMax - minPower) / powerRange;
+          const sMax = Math.max(Math.abs(numOr(vd.p_ac_mw, 0)), Math.abs(numOr(vd.p_dc_mw, 0)));
+          const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
         }
 
@@ -4080,10 +4382,11 @@ const Canvas = (() => {
         ];
 
         sides.forEach(({ p, matchBus, label }) => {
-          const absPower = Math.abs(p);
-          if (absPower < 0.01) return;
+          const powerMW = numOr(p, 0);
+          const absPower = Math.abs(powerMW);
           const bc = busConns.find(bc => bc.busIdx === matchBus);
           if (!bc || !bc.conn || !bc.conn.el) return;
+          labeledFlowConnections.add(bc.conn.id);
 
           const g = getConnGeom(bc.conn, { fromCompId: comp.id });
           if (!g) return;
@@ -4091,36 +4394,23 @@ const Canvas = (() => {
           // p_in > 0: power drawn from bus_in → arrow bus→comp
           // p_out > 0: power delivered to bus_out → arrow comp→bus
           let headPt;
-          if (label === 'in') headPt = p > 0 ? g.compEnd : g.busEnd;
-          else headPt = p > 0 ? g.busEnd : g.compEnd;
+          if (label === 'in') headPt = powerMW > 0 ? g.compEnd : g.busEnd;
+          else headPt = powerMW > 0 ? g.busEnd : g.compEnd;
           const fa = flowArrow(g, headPt);
           const mx = fa.mx, my = fa.my, angle = fa.angle;
-          const colorPct = 100 * (absPower - minPower) / powerRange;
+          const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
 
           if (showFlow) {
-            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-            const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
-            arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-            arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-            arrow.setAttribute('fill', loadingColor(colorPct));
-            arrow.setAttribute('opacity', '0.85');
-            resultsLayer.appendChild(arrow);
-
-            const offX = fa.offX, offY = fa.offY;
-            const label2 = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            label2.classList.add('viz-overlay', 'flow-label');
-            label2.setAttribute('x', mx + offX);
-            label2.setAttribute('y', my + offY);
-            label2.textContent = `${pFmt(absPower)} ${pUnit()}`;
-            resultsLayer.appendChild(label2);
+            const color = loadingColor(colorPct);
+            addFlowArrow(fa, absPower, color);
+            addFlowLabel(mx + fa.offX, my + fa.offY, absPower, color);
           }
         });
 
         // Heatmap glow for DCDC
         if (showHeat) {
-          const sMax = Math.max(Math.abs(dd.p_in_mw), Math.abs(dd.p_out_mw));
-          const colorPct = 100 * (sMax - minPower) / powerRange;
+          const sMax = Math.max(Math.abs(numOr(dd.p_in_mw, 0)), Math.abs(numOr(dd.p_out_mw, 0)));
+          const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
         }
 
@@ -4168,45 +4458,32 @@ const Canvas = (() => {
 
         // Draw arrows on each port connection
         erd.ports.forEach(pt => {
-          const absPower = Math.abs(pt.p_mw);
-          if (absPower < 0.01) return;
+          const powerMW = numOr(pt.p_mw, 0);
+          const absPower = Math.abs(powerMW);
           const expectedBusType = pt.is_ac ? 'ac_bus' : 'dc_bus';
           const bc = busConns.find(bc => bc.busIdx === pt.bus && bc.busType === expectedBusType);
           if (!bc || !bc.conn || !bc.conn.el) return;
+          labeledFlowConnections.add(bc.conn.id);
 
           const g = getConnGeom(bc.conn, { fromCompId: comp.id });
           if (!g) return;
 
           // Bus-injection positive: p > 0 → inject into bus → arrow comp→bus
-          const fa = flowArrow(g, pt.p_mw > 0 ? g.busEnd : g.compEnd);
+          const fa = flowArrow(g, powerMW > 0 ? g.busEnd : g.compEnd);
           const mx = fa.mx, my = fa.my, angle = fa.angle;
-          const colorPct = 100 * (absPower - minPower) / powerRange;
+          const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
 
           if (showFlow) {
-            const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-            arrow.classList.add('viz-overlay', 'flow-arrow-dot');
-            const sz = Math.max(5, Math.min(10, 5 + absPower / 100));
-            arrow.setAttribute('points', `${-sz},-${sz/2} ${sz},0 ${-sz},${sz/2}`);
-            arrow.setAttribute('transform', `translate(${mx},${my}) rotate(${angle})`);
-            arrow.setAttribute('fill', loadingColor(colorPct));
-            arrow.setAttribute('opacity', '0.85');
-            resultsLayer.appendChild(arrow);
-
-            const offX = fa.offX, offY = fa.offY;
-            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-            label.classList.add('viz-overlay', 'flow-label');
-            label.setAttribute('x', mx + offX);
-            label.setAttribute('y', my + offY);
-            label.setAttribute('fill', loadingColor(colorPct));
-            label.textContent = `${pFmt(absPower)} ${pUnit()}`;
-            resultsLayer.appendChild(label);
+            const color = loadingColor(colorPct);
+            addFlowArrow(fa, absPower, color);
+            addFlowLabel(mx + fa.offX, my + fa.offY, absPower, color);
           }
         });
 
         // Heatmap glow for Energy Router
         if (showHeat) {
-          const sMax = Math.max(...erd.ports.map(pt => Math.abs(pt.p_mw)), 0);
-          const colorPct = 100 * (sMax - minPower) / powerRange;
+          const sMax = Math.max(...erd.ports.map(pt => Math.abs(numOr(pt.p_mw, 0))), 0);
+          const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
         }
 
@@ -4279,6 +4556,18 @@ const Canvas = (() => {
 
     // Phase 4 (doc §18): nudge overlapping flow / heatmap labels apart.  Skipped
     // for very large diagrams where the O(n²) pass would be too costly.
+    // Every visible connection should carry a flow label in flow mode. If no
+    // solver-backed value was matched above, show explicit zero.
+    if (showFlow) {
+      state.connections.forEach(conn => {
+        if (!conn.el || labeledFlowConnections.has(conn.id)) return;
+        const g = getConnGeom(conn);
+        if (!g) return;
+        addFlowLabel(g.mx - g.tdy * 14, g.my + g.tdx * 14, 0, '#777');
+        labeledFlowConnections.add(conn.id);
+      });
+    }
+
     if (resultsLayer.querySelectorAll('.flow-label, .heatmap-label').length <= 400) {
       deOverlapLabels(resultsLayer);
     }
