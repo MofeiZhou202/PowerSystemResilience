@@ -276,3 +276,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     endif()
   endif()
 endif()
+
+# Harmonic power-flow external cross-validation driver.  Emits the C++ solver's
+# result for tools/harmonics_validation/case.json as JSON, which the independent
+# numpy reference / OpenDSS cross-check (tools/harmonics_validation/compare.py)
+# compares against.  nlohmann_json arrives transitively via hacdcpf.
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xref.cpp")
+  add_executable(validate_harmonics_xref
+    "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/validate_harmonics_xref.cpp")
+  target_link_libraries(validate_harmonics_xref PRIVATE hacdcpf::hacdcpf)
+endif()

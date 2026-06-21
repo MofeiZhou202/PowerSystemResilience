@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260620-clickmap"/>
+<link rel="stylesheet" href="css/style.css?v=20260621-harmonics"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -43,6 +43,7 @@
     <button id="btnNewSystem" class="btn btn-sm" title="新建空白系统">新建</button>
     <button id="btnExportJson" class="btn btn-sm" title="导出JSON">导出</button>
     <button id="btnExportEtap" class="btn btn-sm" title="导出为 ETAP 工作簿 (.xlsx)">导出ETAP</button>
+    <button id="btnExportEtapXml" class="btn btn-sm" title="导出为 ETAP 工程 XML (.xml)">导出ETAP XML</button>
     <button id="btnImportJson" class="btn btn-sm" title="导入JSON">导入</button>
     <input type="file" id="fileImportJson" accept=".json" style="display:none"/>
     <button id="btnToggleTheme" class="btn btn-sm" title="切换浅色 / 深色背景主题">🌓 主题</button>
@@ -127,33 +128,86 @@
   </div>
   <!-- Harmonic power flow (hybrid AC/DC) -->
   <div class="sub-section" data-sub="harmonics" hidden>
-    <label class="sub-label">AC 谐波次数
+    <label class="sub-label">分析模式
+      <select id="hpfMode" title="谐波分析模式">
+        <option value="penetration">谐波潮流 (穿透)</option>
+        <option value="freqscan">频率扫描 / 谐振</option>
+        <option value="threephase">三相 (abc) 谐波</option>
+        <option value="metrics">谐波指标 (K系数/损耗)</option>
+        <option value="newton">牛顿 (非线性)</option>
+      </select>
+    </label>
+
+    <!-- Common: harmonic orders -->
+    <label class="sub-label hpf-ctl" data-modes="penetration threephase metrics newton">AC 谐波次数
       <input id="hpfAcOrders" type="text" value="5,7,11,13,17,19,23,25"
-             title="逗号分隔的 AC 谐波次数" style="width:160px"/>
+             title="逗号分隔的 AC 谐波次数" style="width:150px"/>
     </label>
-    <label class="sub-label">DC 纹波次数
+    <label class="sub-label hpf-ctl" data-modes="penetration metrics">DC 纹波次数
       <input id="hpfDcOrders" type="text" value="2,6,12,18,24"
-             title="逗号分隔的 DC 纹波次数" style="width:110px"/>
+             title="逗号分隔的 DC 纹波次数" style="width:100px"/>
     </label>
-    <label class="sub-label sub-checkbox" title="将负荷建模为谐波阻抗 (CIGRE 并联 R // jX)">
-      <input id="hpfLoadImpedance" type="checkbox" checked/>
-      <span>负荷阻抗</span>
+    <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration threephase metrics newton"
+           title="将负荷建模为谐波阻抗 (CIGRE 并联 R // jX)">
+      <input id="hpfLoadImpedance" type="checkbox" checked/><span>负荷阻抗</span>
     </label>
-    <label class="sub-label sub-checkbox" title="对在运 VSC 自动施加六脉波特征谐波频谱">
-      <input id="hpfAutoNic" type="checkbox" checked/>
-      <span>换流器自动谐波源</span>
+    <label class="sub-label sub-checkbox hpf-ctl" data-modes="penetration metrics"
+           title="对在运 VSC 自动施加六脉波特征谐波频谱">
+      <input id="hpfAutoNic" type="checkbox" checked/><span>换流器自动谐波源</span>
     </label>
-    <label class="sub-label">源次暂态电抗 x''
-      <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:70px"/>
+    <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">源 x''
+      <input id="hpfSourceXpp" type="number" value="0.2" step="0.05" min="0.01" style="width:64px"/>
     </label>
-    <label class="sub-label">畸变限值标准
+    <label class="sub-label hpf-ctl" data-modes="penetration freqscan threephase metrics newton">趋肤效应
+      <select id="hpfSkin" title="导体电阻频变 (趋肤效应) 模型">
+        <option value="none">无</option>
+        <option value="sqrt">R·√h</option>
+        <option value="prop">R·(1+k√h)</option>
+      </select>
+    </label>
+    <label class="sub-label hpf-ctl" data-modes="penetration threephase">畸变限值标准
       <select id="hpfStandard" title="谐波电压畸变限值标准">
         <option value="">不校核</option>
         <option value="IEEE519">IEEE 519-2014</option>
         <option value="GBT14549">GB/T 14549-1993</option>
       </select>
     </label>
-    <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波潮流">运行谐波潮流</button>
+
+    <!-- Frequency scan controls -->
+    <label class="sub-label hpf-ctl" data-modes="freqscan">扫描范围(次)
+      <input id="hpfFsStart" type="number" value="1" step="0.5" min="0.5" style="width:50px"/>
+      <span>–</span>
+      <input id="hpfFsEnd" type="number" value="25" step="1" min="2" style="width:50px"/>
+      <span>步</span>
+      <input id="hpfFsStep" type="number" value="0.1" step="0.05" min="0.02" style="width:56px"/>
+    </label>
+    <label class="sub-label hpf-ctl" data-modes="freqscan">母线(空=全部)
+      <input id="hpfFsBuses" type="text" placeholder="如 4,7" style="width:80px"/>
+    </label>
+    <label class="sub-label sub-checkbox hpf-ctl" data-modes="freqscan"
+           title="按正/负/零序分别扫描 (需三相模型)">
+      <input id="hpfFsSequence" type="checkbox"/><span>序分量扫描</span>
+    </label>
+
+    <!-- Metrics controls -->
+    <label class="sub-label hpf-ctl" data-modes="metrics" title="IEEE 519 TDD 的最大需量电流 I_L (pu)；≤0 时用基波电流">最大需量 I_L
+      <input id="hpfIDemand" type="number" value="0" step="0.1" min="0" style="width:64px"/>
+    </label>
+
+    <!-- Newton controls -->
+    <label class="sub-label hpf-ctl" data-modes="newton">牛顿类型
+      <select id="hpfNewtonMode" title="非线性谐振资源类型">
+        <option value="holomorphic">二次电压相关 (g2)</option>
+        <option value="constant_power">恒功率谐波负荷</option>
+      </select>
+    </label>
+    <label class="sub-label hpf-ctl" data-modes="newton" title="非线性资源 (JSON 数组)。留空则退化为线性解。g2 例(默认): [{&quot;bus&quot;:4,&quot;i_src&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.05,&quot;im&quot;:0}],&quot;g2&quot;:[{&quot;order&quot;:5,&quot;re&quot;:0.1,&quot;im&quot;:0}]}]。恒功率需在该次/母线有较强谐波激励才收敛。">资源 (JSON)
+      <input id="hpfNewtonResources" type="text"
+             value='[{"bus":4,"i_src":[{"order":5,"re":0.05,"im":0.0}],"g2":[{"order":5,"re":0.1,"im":0.0}]}]'
+             placeholder="[] 退化为线性" style="width:320px"/>
+    </label>
+
+    <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波分析">运行</button>
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
@@ -751,13 +805,47 @@
         </div>
         </div><!-- /result-group shortCircuit -->
         <div class="result-group" data-result-group="harmonics">
-        <div class="topo-section">
+        <!-- Penetration: AC / DC bus voltage distortion -->
+        <div class="topo-section" id="hpfAcSection">
           <h4>谐波潮流结果 — AC 母线电压畸变</h4>
           <div id="hpfAcResults" class="topo-table-wrap"></div>
         </div>
         <div class="topo-section" id="hpfDcSection" style="display:none">
           <h4>谐波潮流结果 — DC 母线纹波畸变</h4>
           <div id="hpfDcResults" class="topo-table-wrap"></div>
+        </div>
+        <!-- Per-bus voltage spectrum bar chart -->
+        <div class="topo-section" id="hpfSpectrumSection" style="display:none">
+          <h4>母线电压谐波频谱</h4>
+          <div id="hpfSpectrumChart" class="tspf-chart" style="height:300px"></div>
+        </div>
+        <!-- Branch harmonic current flows -->
+        <div class="topo-section" id="hpfBranchSection" style="display:none">
+          <h4>支路谐波电流 (THD<sub>I</sub>)</h4>
+          <div id="hpfBranchResults" class="topo-table-wrap"></div>
+        </div>
+        <!-- Frequency scan / resonance -->
+        <div class="topo-section" id="hpfFreqScanSection" style="display:none">
+          <h4>驱动点阻抗频率扫描 |Z(f)|</h4>
+          <div id="hpfFreqScanChart" class="tspf-chart" style="height:320px"></div>
+          <div id="hpfResonanceResults" class="topo-table-wrap"></div>
+        </div>
+        <!-- Three-phase per-phase distortion -->
+        <div class="topo-section" id="hpf3phSection" style="display:none">
+          <h4>三相 (abc) 谐波 — 各相电压畸变</h4>
+          <div id="hpf3phResults" class="topo-table-wrap"></div>
+          <div id="hpf3phChart" class="tspf-chart" style="height:300px"></div>
+        </div>
+        <!-- Harmonic metrics: losses, K-factor, TDD -->
+        <div class="topo-section" id="hpfMetricsSection" style="display:none">
+          <h4>谐波指标 — K 系数 / TDD / 谐波损耗</h4>
+          <div id="hpfMetricsResults" class="topo-table-wrap"></div>
+          <div id="hpfMetricsChart" class="tspf-chart" style="height:300px"></div>
+        </div>
+        <!-- Newton nonlinear convergence + spectra -->
+        <div class="topo-section" id="hpfNewtonSection" style="display:none">
+          <h4>牛顿非线性谐波潮流</h4>
+          <div id="hpfNewtonResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group harmonics -->
         <div class="result-group" data-result-group="topology">
@@ -943,8 +1031,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260620-clickmap"></script>
-<script src="js/canvas.js?v=20260620-clickmap"></script>
-<script src="js/app.js?v=20260620-clickmap"></script>
+<script src="js/components.js?v=20260621-harmonics"></script>
+<script src="js/canvas.js?v=20260621-harmonics"></script>
+<script src="js/app.js?v=20260621-harmonics"></script>
 </body>
 </html>

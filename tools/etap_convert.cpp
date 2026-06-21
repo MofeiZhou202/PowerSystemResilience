@@ -27,6 +27,8 @@ int usage(const char* prog) {
       << "    etap2json   ETAP .xlsx  -> hacdcpf .json\n"
       << "    xml2json    ETAP project .xml (Feeder.xml) -> hacdcpf .json\n"
       << "    json2etap   hacdcpf .json -> ETAP .xlsx\n"
+      << "    json2xml    hacdcpf .json -> ETAP project .xml\n"
+      << "    xml2xml     ETAP .xml   -> ETAP .xml   (normalise)\n"
       << "    etap2etap   ETAP .xlsx  -> ETAP .xlsx   (normalise)\n"
       << "    fidelity    ETAP .xlsx  (report fields lost on re-export)\n";
   return 2;
@@ -72,6 +74,12 @@ int main(int argc, char** argv) {
     } else if (mode == "json2etap") {
       const HybridPowerSystem sys = load_json(in);
       save_etap(sys, out, rep);
+    } else if (mode == "json2xml") {
+      const HybridPowerSystem sys = load_json(in);
+      save_etap_xml(sys, out, rep);
+    } else if (mode == "xml2xml") {
+      const HybridPowerSystem sys = load_etap_xml(in, imode, rep);
+      save_etap_xml(sys, out, rep);
     } else if (mode == "etap2etap") {
       const HybridPowerSystem sys = load_etap(in, imode, rep);
       save_etap(sys, out, rep);

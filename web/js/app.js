@@ -412,6 +412,30 @@ const App = (() => {
     }
   }
 
+  // Export the current system as a native ETAP project .xml (PDE document) that
+  // ETAP can re-import. The XML is generated server-side by save_etap_xml().
+  async function exportEtapXml() {
+    setStatus('导出ETAP XML中...', 'busy');
+    try {
+      const ok = await syncToBackend();
+      if (!ok) { setStatus('导出失败', 'error'); return; }
+      const data = await apiPost('/api/session/export_etap_xml', {});
+      if (!data || data.error) throw new Error((data && data.error) || '导出失败');
+      const blob = new Blob([data.xml_string], { type: 'application/xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${data.name || 'system'}.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      log(`已导出ETAP XML: ${a.download}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`导出ETAP XML失败: ${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
   function importJson(file) {
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -1334,39 +1358,138 @@ const App = (() => {
     return list.length ? list : fallback;
   }
 
-  async function runHarmonics() {
-    setStatus('谐波潮流计算中...', 'busy');
-    if (!await syncToBackend(true)) {
-      setStatus('同步失败', 'error');
-      return;
-    }
+  // Read the shared HPFOptions block from the toolbar.
+  function hpfReadOptions() {
     const acOrders = parseOrderList(document.getElementById('hpfAcOrders')?.value,
                                     [5, 7, 11, 13, 17, 19, 23, 25]);
     const dcOrders = parseOrderList(document.getElementById('hpfDcOrders')?.value,
                                     [2, 6, 12, 18, 24]);
-    const loadImp = document.getElementById('hpfLoadImpedance')?.checked ?? true;
-    const autoNic = document.getElementById('hpfAutoNic')?.checked ?? true;
     const xpp = parseFloat(document.getElementById('hpfSourceXpp')?.value || '0.2');
-    const standard = document.getElementById('hpfStandard')?.value || '';
+    return {
+      ac_orders: acOrders,
+      dc_orders: dcOrders,
+      include_load_impedance: document.getElementById('hpfLoadImpedance')?.checked ?? true,
+      auto_nic_from_vscs: document.getElementById('hpfAutoNic')?.checked ?? true,
+      default_source_xpp_pu: Number.isFinite(xpp) ? xpp : 0.2,
+      skin_effect: document.getElementById('hpfSkin')?.value || 'none',
+      standard: document.getElementById('hpfStandard')?.value || '',
+      run_base_power_flow: true,
+    };
+  }
 
-    const data = await apiPost('/api/session/harmonics', {
-      options: {
-        ac_orders: acOrders,
-        dc_orders: dcOrders,
-        include_load_impedance: loadImp,
-        auto_nic_from_vscs: autoNic,
-        default_source_xpp_pu: Number.isFinite(xpp) ? xpp : 0.2,
-        run_base_power_flow: true,
-        standard: standard,
-      }
+  // Show only the listed harmonics result sections, hide the rest.
+  function hpfShowSections(ids) {
+    const all = ['hpfAcSection', 'hpfDcSection', 'hpfSpectrumSection', 'hpfBranchSection',
+                 'hpfFreqScanSection', 'hpf3phSection', 'hpfMetricsSection', 'hpfNewtonSection'];
+    all.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = ids.includes(id) ? 'block' : 'none';
     });
+  }
+
+  // Toggle toolbar controls so only those relevant to the active mode are shown.
+  function hpfUpdateModeControls() {
+    const mode = document.getElementById('hpfMode')?.value || 'penetration';
+    document.querySelectorAll('.hpf-ctl').forEach(el => {
+      const modes = (el.getAttribute('data-modes') || '').split(/\s+/);
+      el.style.display = modes.includes(mode) ? '' : 'none';
+    });
+  }
+
+  // Dispatch the harmonics run by the selected analysis mode.
+  async function runHarmonics() {
+    const mode = document.getElementById('hpfMode')?.value || 'penetration';
+    setStatus('谐波分析计算中...', 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    try {
+      if (mode === 'freqscan') return await runHarmonicsFreqScan();
+      if (mode === 'threephase') return await runHarmonics3ph();
+      if (mode === 'metrics') return await runHarmonicsMetrics();
+      if (mode === 'newton') return await runHarmonicsNewton();
+      return await runHarmonicsPenetration();
+    } catch (e) {
+      setStatus((e && e.message) || '谐波分析失败', 'error');
+    }
+  }
+
+  async function runHarmonicsPenetration() {
+    const data = await apiPost('/api/session/harmonics', { options: hpfReadOptions() });
     if (data && data.ok) {
       log(`谐波潮流完成: 最大 AC THD ${(data.max_ac_thd_pct || 0).toFixed(2)}% @ 母线 ${data.max_ac_thd_bus}`, 'success');
       setStatus('谐波潮流完成');
       showHarmonicsResults(data);
       switchTab('results');
     } else {
-      setStatus((data && data.message) || '谐波潮流失败', 'error');
+      setStatus((data && (data.message || data.error)) || '谐波潮流失败', 'error');
+    }
+  }
+
+  async function runHarmonicsFreqScan() {
+    const seq = document.getElementById('hpfFsSequence')?.checked ?? false;
+    const buses = parseOrderList(document.getElementById('hpfFsBuses')?.value, []);
+    const scan = {
+      f_start: parseFloat(document.getElementById('hpfFsStart')?.value || '1'),
+      f_end: parseFloat(document.getElementById('hpfFsEnd')?.value || '25'),
+      f_step: parseFloat(document.getElementById('hpfFsStep')?.value || '0.1'),
+      buses, sequence: seq,
+    };
+    if (seq && buses.length) scan.bus = buses[0];
+    const data = await apiPost('/api/session/harmonics_freqscan',
+                               { options: hpfReadOptions(), scan });
+    if (data && data.ok) {
+      log(`频率扫描完成: ${(data.resonances || []).length} 处谐振`, 'success');
+      setStatus('频率扫描完成');
+      showHarmonicsFreqScan(data);
+      switchTab('results');
+    } else {
+      setStatus((data && (data.message || data.error)) || '频率扫描失败', 'error');
+    }
+  }
+
+  async function runHarmonics3ph() {
+    const data = await apiPost('/api/session/harmonics_3ph', { options: hpfReadOptions() });
+    if (data && data.ok) {
+      log(`三相谐波完成: 最大 THD ${(data.max_thd_pct || 0).toFixed(2)}% @ 母线 ${data.max_thd_bus}`, 'success');
+      setStatus('三相谐波完成');
+      showHarmonics3ph(data);
+      switchTab('results');
+    } else {
+      setStatus((data && (data.message || data.error)) || '三相谐波失败 (本算例可能无三相模型)', 'error');
+    }
+  }
+
+  async function runHarmonicsMetrics() {
+    const iL = parseFloat(document.getElementById('hpfIDemand')?.value || '0');
+    const data = await apiPost('/api/session/harmonics_metrics',
+                               { options: hpfReadOptions(), i_demand_pu: Number.isFinite(iL) ? iL : 0 });
+    if (data && data.ok) {
+      log(`谐波指标完成: 最大 K=${(data.max_k_factor || 1).toFixed(2)}, 谐波损耗占比 ${((data.harmonic_loss_fraction || 0) * 100).toFixed(2)}%`, 'success');
+      setStatus('谐波指标完成');
+      showHarmonicsMetrics(data);
+      switchTab('results');
+    } else {
+      setStatus((data && (data.message || data.error)) || '谐波指标失败', 'error');
+    }
+  }
+
+  async function runHarmonicsNewton() {
+    const nmode = document.getElementById('hpfNewtonMode')?.value || 'constant_power';
+    let resources = [];
+    const raw = (document.getElementById('hpfNewtonResources')?.value || '').trim();
+    if (raw) {
+      try { resources = JSON.parse(raw); }
+      catch (e) { setStatus('牛顿资源 JSON 解析失败: ' + e.message, 'error'); return; }
+    }
+    const data = await apiPost('/api/session/harmonics_newton',
+                               { options: hpfReadOptions(), mode: nmode, resources });
+    if (data && data.ok) {
+      log(`牛顿谐波完成: ${data.converged ? '收敛' : '未收敛'} (${data.max_iterations_used} 次)`,
+          data.converged ? 'success' : 'warn');
+      setStatus('牛顿谐波完成');
+      showHarmonicsNewton(data);
+      switchTab('results');
+    } else {
+      setStatus((data && (data.message || data.error)) || '牛顿谐波失败', 'error');
     }
   }
 
@@ -2562,6 +2685,7 @@ const App = (() => {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('harmonics');
+    hpfShowSections(['hpfAcSection', 'hpfSpectrumSection', 'hpfBranchSection']);
 
     const fmt = (x, d = 2) =>
       (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
@@ -2660,6 +2784,280 @@ const App = (() => {
       dcSection.style.display = 'none';
       dcDiv.innerHTML = '';
     }
+
+    // Voltage spectrum bar chart (top distorted buses) + branch current flows.
+    renderSpectrumChart('hpfSpectrumChart',
+      (data.ac_bus_results || []).concat(data.dc_bus_results || []),
+      '母线电压谐波频谱 (|V_h| / |V_1| %)');
+    renderHpfBranchTable(data);
+  }
+
+  // Grouped bar chart of per-order voltage distortion (|V_h|/|V_1|·100) for the
+  // most-distorted buses.  `rows` are HarmonicBusResult-like objects.
+  function renderSpectrumChart(divId, rows, title) {
+    const div = document.getElementById(divId);
+    if (!div) return;
+    if (typeof Plotly === 'undefined' || !(rows || []).length) {
+      div.innerHTML = '<p class="muted">无频谱数据</p>';
+      return;
+    }
+    const top = rows.slice()
+      .sort((a, b) => (b.thd_pct || 0) - (a.thd_pct || 0))
+      .slice(0, 6);
+    const orderSet = new Set();
+    top.forEach(b => (b.harmonics || []).forEach(h => {
+      if (h.order > 1 && h.mag_pu > 1e-9) orderSet.add(h.order);
+    }));
+    const orders = [...orderSet].sort((a, b) => a - b);
+    if (!orders.length) { div.innerHTML = '<p class="muted">无显著谐波分量</p>'; return; }
+    const traces = top.map(b => {
+      const v1 = b.v_fund_pu || 1.0;
+      const byOrder = {};
+      (b.harmonics || []).forEach(h => { byOrder[h.order] = h.mag_pu; });
+      return {
+        x: orders.map(o => 'h' + o),
+        y: orders.map(o => (byOrder[o] || 0) / (v1 || 1) * 100),
+        name: `${b.is_dc ? 'DC' : 'AC'}-${b.bus}`,
+        type: 'bar',
+      };
+    });
+    Plotly.newPlot(div, traces, {
+      ...carbonPlotTheme(title),
+      barmode: 'group',
+      xaxis: { title: '谐波次数', gridcolor: '#3e4451' },
+      yaxis: { title: '幅值 (% of V₁)', gridcolor: '#3e4451', rangemode: 'tozero' },
+    }, { responsive: true, displaylogo: false });
+  }
+
+  function renderHpfBranchTable(data) {
+    const div = document.getElementById('hpfBranchResults');
+    if (!div) return;
+    const flows = (data.ac_branch_flows || []).concat(data.dc_branch_flows || []);
+    const rows = flows.filter(f => (f.thd_i_pct || 0) > 1e-6)
+      .sort((a, b) => (b.thd_i_pct || 0) - (a.thd_i_pct || 0)).slice(0, 30);
+    if (!rows.length) { div.innerHTML = '<p class="muted">无支路谐波电流数据</p>'; return; }
+    const fmt = (x, d = 3) => (x == null || isNaN(x)) ? '—' : Number(x).toFixed(d);
+    const topSpec = (hs, fund) => (hs || [])
+      .filter(h => h.order !== fund && (h.i_pu || 0) > 1e-9)
+      .sort((a, b) => b.i_pu - a.i_pu).slice(0, 3)
+      .map(h => `h${h.order}:${fmt(h.i_pu, 4)}`).join('  ') || '—';
+    let html = '<table><thead><tr><th>支路</th><th>类型</th><th>THD<sub>I</sub>(%)</th>'
+             + '<th>主要分量 (pu)</th></tr></thead><tbody>';
+    rows.forEach(f => {
+      html += `<tr><td>${f.from_bus}→${f.to_bus}</td><td>${f.is_dc ? 'DC' : 'AC'}</td>`
+            + `<td>${fmt(f.thd_i_pct, 2)}</td><td>${topSpec(f.harmonics, f.is_dc ? 0 : 1)}</td></tr>`;
+    });
+    div.innerHTML = html + '</tbody></table>';
+  }
+
+  // ── Frequency scan / resonance ──
+  function showHarmonicsFreqScan(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('harmonics');
+    hpfShowSections(['hpfFreqScanSection']);
+    const fmt = (x, d = 3) => (x == null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    const reson = data.resonances || [];
+    const parallelN = reson.filter(r => r.parallel).length;
+    document.getElementById('resultsSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">模式</span>
+        <span class="result-value">${data.sequence ? '序分量扫描' : '驱动点阻抗扫描'}</span></div>
+      <div class="result-item"><span class="result-label">频点数</span>
+        <span class="result-value">${(data.freqs || []).length}</span></div>
+      <div class="result-item"><span class="result-label">谐振点</span>
+        <span class="result-value">${reson.length} (并联 ${parallelN} / 串联 ${reson.length - parallelN})</span></div>`;
+
+    const chart = document.getElementById('hpfFreqScanChart');
+    if (typeof Plotly !== 'undefined' && (data.freqs || []).length) {
+      let traces = [];
+      if (data.sequence) {
+        traces = [
+          { x: data.freqs, y: data.z1_mag, name: '正序 Z₁', type: 'scatter', mode: 'lines' },
+          { x: data.freqs, y: data.z2_mag, name: '负序 Z₂', type: 'scatter', mode: 'lines' },
+          { x: data.freqs, y: data.z0_mag, name: '零序 Z₀', type: 'scatter', mode: 'lines' },
+        ];
+      } else {
+        traces = (data.buses || []).map(b => ({
+          x: data.freqs, y: b.z_mag, name: 'Bus ' + b.bus, type: 'scatter', mode: 'lines',
+        }));
+      }
+      // Resonance markers.
+      if (reson.length) {
+        traces.push({
+          x: reson.map(r => r.freq_order), y: reson.map(r => r.z_mag),
+          name: '谐振', mode: 'markers',
+          marker: { size: 9, symbol: reson.map(r => r.parallel ? 'triangle-up' : 'triangle-down'),
+                    color: reson.map(r => r.parallel ? '#e06c75' : '#61afef') },
+        });
+      }
+      Plotly.newPlot(chart, traces, {
+        ...carbonPlotTheme('驱动点阻抗 |Z(f)|'),
+        xaxis: { title: '谐波次数 (f / f₁)', gridcolor: '#3e4451' },
+        yaxis: { title: '|Z| (p.u.)', gridcolor: '#3e4451', rangemode: 'tozero' },
+      }, { responsive: true, displaylogo: false });
+    } else {
+      chart.innerHTML = '<p class="muted">无扫描数据</p>';
+    }
+
+    const tbl = document.getElementById('hpfResonanceResults');
+    if (reson.length) {
+      let html = '<table><thead><tr><th>母线</th><th>次数</th><th>|Z|(p.u.)</th>'
+               + '<th>类型</th>' + (data.sequence ? '<th>序</th>' : '') + '</tr></thead><tbody>';
+      reson.slice().sort((a, b) => b.z_mag - a.z_mag).forEach(r => {
+        const seqName = ['零序', '正序', '负序'][r.sequence] || '—';
+        html += `<tr><td>${r.bus}</td><td>${fmt(r.freq_order, 2)}</td><td>${fmt(r.z_mag, 3)}</td>`
+              + `<td style="color:${r.parallel ? 'var(--red)' : 'var(--blue,#61afef)'}">`
+              + `${r.parallel ? '并联(峰)' : '串联(谷)'}</td>`
+              + (data.sequence ? `<td>${seqName}</td>` : '') + '</tr>';
+      });
+      tbl.innerHTML = html + '</tbody></table>';
+    } else {
+      tbl.innerHTML = '<p class="muted">未检出谐振点</p>';
+    }
+  }
+
+  // ── Three-phase (abc) harmonic distortion ──
+  function showHarmonics3ph(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('harmonics');
+    hpfShowSections(['hpf3phSection']);
+    const fmt = (x, d = 2) => (x == null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    document.getElementById('resultsSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">状态</span>
+        <span class="result-value ${data.ok ? 'result-converged' : 'result-failed'}">${data.ok ? '完成' : '失败'}</span></div>
+      <div class="result-item"><span class="result-label">AC 谐波次数</span>
+        <span class="result-value">${(data.ac_orders || []).join(', ') || '—'}</span></div>
+      <div class="result-item"><span class="result-label">最大相 THD</span>
+        <span class="result-value">${fmt(data.max_thd_pct)}% @ Bus ${data.max_thd_bus}</span></div>`;
+
+    const rows = (data.bus_results || []).slice().sort((a, b) =>
+      Math.max(b.thd_a_pct, b.thd_b_pct, b.thd_c_pct) - Math.max(a.thd_a_pct, a.thd_b_pct, a.thd_c_pct));
+    const div = document.getElementById('hpf3phResults');
+    if (rows.length) {
+      let html = '<table><thead><tr><th>Bus</th><th>THD<sub>A</sub>(%)</th>'
+               + '<th>THD<sub>B</sub>(%)</th><th>THD<sub>C</sub>(%)</th></tr></thead><tbody>';
+      rows.forEach(b => {
+        const hot = v => v >= 5.0 ? ' style="color:var(--red);font-weight:600"' : '';
+        html += `<tr><td>${b.bus}</td><td${hot(b.thd_a_pct)}>${fmt(b.thd_a_pct)}</td>`
+              + `<td${hot(b.thd_b_pct)}>${fmt(b.thd_b_pct)}</td>`
+              + `<td${hot(b.thd_c_pct)}>${fmt(b.thd_c_pct)}</td></tr>`;
+      });
+      div.innerHTML = html + '</tbody></table>';
+    } else {
+      div.innerHTML = '<p class="muted">无三相母线结果</p>';
+    }
+
+    const chart = document.getElementById('hpf3phChart');
+    if (typeof Plotly !== 'undefined' && rows.length) {
+      const top = rows.slice(0, 8);
+      const mk = (key, name) => ({
+        x: top.map(b => 'Bus ' + b.bus), y: top.map(b => b[key]), name, type: 'bar',
+      });
+      Plotly.newPlot(chart, [mk('thd_a_pct', 'A 相'), mk('thd_b_pct', 'B 相'), mk('thd_c_pct', 'C 相')], {
+        ...carbonPlotTheme('各相电压 THD'),
+        barmode: 'group',
+        xaxis: { title: '母线', gridcolor: '#3e4451' },
+        yaxis: { title: 'THD (%)', gridcolor: '#3e4451', rangemode: 'tozero' },
+      }, { responsive: true, displaylogo: false });
+    } else {
+      chart.innerHTML = '';
+    }
+  }
+
+  // ── Harmonic metrics: K-factor, TDD, losses ──
+  function showHarmonicsMetrics(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('harmonics');
+    hpfShowSections(['hpfMetricsSection']);
+    const fmt = (x, d = 3) => (x == null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    document.getElementById('resultsSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">最大 K 系数</span>
+        <span class="result-value">${fmt(data.max_k_factor, 2)} @ 支路 ${data.max_k_factor_branch}</span></div>
+      <div class="result-item"><span class="result-label">最大电流 THD</span>
+        <span class="result-value">${fmt(data.max_thd_i_pct, 2)}%</span></div>
+      <div class="result-item"><span class="result-label">最大 TDD</span>
+        <span class="result-value">${fmt(data.max_tdd_pct, 2)}%</span></div>
+      <div class="result-item"><span class="result-label">谐波损耗占比</span>
+        <span class="result-value">${fmt((data.harmonic_loss_fraction || 0) * 100, 3)}%</span></div>
+      <div class="result-item"><span class="result-label">总损耗 (p.u.)</span>
+        <span class="result-value">${fmt(data.total_loss_pu, 5)}</span></div>`;
+
+    const rows = (data.branches || []).slice().sort((a, b) => b.k_factor - a.k_factor);
+    const div = document.getElementById('hpfMetricsResults');
+    if (rows.length) {
+      let html = '<table><thead><tr><th>支路</th><th>K 系数</th><th>THD<sub>I</sub>(%)</th>'
+               + '<th>TDD(%)</th><th>I<sub>rms</sub>(pu)</th><th>谐波损耗(pu)</th></tr></thead><tbody>';
+      rows.slice(0, 40).forEach(b => {
+        const hotK = b.k_factor >= 4 ? ' style="color:var(--red);font-weight:600"' : '';
+        html += `<tr><td>${b.from_bus}→${b.to_bus}</td><td${hotK}>${fmt(b.k_factor, 2)}</td>`
+              + `<td>${fmt(b.thd_i_pct, 2)}</td><td>${fmt(b.tdd_pct, 2)}</td>`
+              + `<td>${fmt(b.i_rms_pu, 4)}</td><td>${fmt(b.p_loss_harmonic_pu, 6)}</td></tr>`;
+      });
+      div.innerHTML = html + '</tbody></table>';
+    } else {
+      div.innerHTML = '<p class="muted">无支路指标</p>';
+    }
+
+    const chart = document.getElementById('hpfMetricsChart');
+    if (typeof Plotly !== 'undefined' && rows.length) {
+      const top = rows.slice(0, 12);
+      Plotly.newPlot(chart, [{
+        x: top.map(b => `${b.from_bus}→${b.to_bus}`), y: top.map(b => b.k_factor),
+        type: 'bar', name: 'K 系数', marker: { color: '#e5c07b' },
+      }], {
+        ...carbonPlotTheme('支路 K 系数'),
+        xaxis: { title: '支路', tickangle: -40, gridcolor: '#3e4451' },
+        yaxis: { title: 'K 系数', gridcolor: '#3e4451', rangemode: 'tozero' },
+      }, { responsive: true, displaylogo: false });
+    } else {
+      chart.innerHTML = '';
+    }
+  }
+
+  // ── Newton (nonlinear) harmonic power flow ──
+  function showHarmonicsNewton(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('harmonics');
+    hpfShowSections(['hpfNewtonSection', 'hpfSpectrumSection']);
+    const fmt = (x, d = 2) => (x == null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+
+    document.getElementById('resultsSummary').innerHTML = `
+      <div class="result-item"><span class="result-label">类型</span>
+        <span class="result-value">${data.mode === 'holomorphic' ? '二次电压相关' : '恒功率谐波负荷'}</span></div>
+      <div class="result-item"><span class="result-label">收敛</span>
+        <span class="result-value ${data.converged ? 'result-converged' : 'result-failed'}">
+          ${data.converged ? '是' : '否'} (${data.max_iterations_used} 次)</span></div>
+      <div class="result-item"><span class="result-label">最大 AC THD</span>
+        <span class="result-value">${fmt(data.max_ac_thd_pct)}% @ Bus ${data.max_ac_thd_bus}</span></div>`;
+
+    const div = document.getElementById('hpfNewtonResults');
+    const iters = data.iterations || {}, resid = data.final_residual || {};
+    const orders = Object.keys(iters).sort((a, b) => a - b);
+    let html = '';
+    if (orders.length) {
+      html += '<table><thead><tr><th>次数</th><th>牛顿迭代</th><th>残差 ‖r‖∞</th></tr></thead><tbody>';
+      orders.forEach(o => {
+        html += `<tr><td>h${o}</td><td>${iters[o]}</td><td>${(resid[o] ?? 0).toExponential(2)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+    const rows = (data.ac_bus_results || []).slice().sort((a, b) => b.thd_pct - a.thd_pct).slice(0, 20);
+    if (rows.length) {
+      html += '<table style="margin-top:8px"><thead><tr><th>Bus</th><th>V<sub>1</sub>(p.u.)</th>'
+            + '<th>THD<sub>V</sub>(%)</th></tr></thead><tbody>';
+      rows.forEach(b => {
+        html += `<tr><td>${b.bus}</td><td>${fmt(b.v_fund_pu, 4)}</td><td>${fmt(b.thd_pct)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+    div.innerHTML = html || '<p class="muted">无结果</p>';
+    renderSpectrumChart('hpfSpectrumChart', data.ac_bus_results || [], '母线电压谐波频谱');
   }
 
   function showTopologyResults(data) {
@@ -3420,6 +3818,7 @@ const App = (() => {
     });
     document.getElementById('btnExportJson').addEventListener('click', exportJson);
     document.getElementById('btnExportEtap')?.addEventListener('click', exportEtap);
+    document.getElementById('btnExportEtapXml')?.addEventListener('click', exportEtapXml);
     document.getElementById('btnImportJson').addEventListener('click', () => {
       document.getElementById('fileImportJson').click();
     });
@@ -3465,6 +3864,8 @@ const App = (() => {
 
     // Bar 3: harmonic power flow
     document.getElementById('btnRunHarmonics')?.addEventListener('click', runHarmonics);
+    document.getElementById('hpfMode')?.addEventListener('change', hpfUpdateModeControls);
+    hpfUpdateModeControls();
 
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);

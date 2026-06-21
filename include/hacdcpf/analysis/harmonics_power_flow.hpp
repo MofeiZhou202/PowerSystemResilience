@@ -164,7 +164,11 @@ struct HPFOptions {
   bool run_base_power_flow{true};
 
   /// Model in-service loads as shunt impedances in the harmonic network
-  /// (CIGRE/IEC parallel R // jX derived from the fundamental P, Q).
+  /// (CIGRE/IEC parallel R // jX derived from the fundamental P, Q):
+  ///   Y_load(h) = P/V² + 1/(j·h·X),  X = V²/Q.
+  /// Simplification: the resistive part P/V² is frequency-independent — it is NOT
+  /// scaled by `skin_effect` even when that is enabled (only line / transformer /
+  /// source series resistance is). Only the inductive part carries the j·h factor.
   bool include_load_impedance{true};
 
   /// Default sub-transient reactance [pu] for AC voltage sources (slack / PV /
@@ -175,6 +179,10 @@ struct HPFOptions {
   /// Internal (output) impedance [pu] of DC voltage-forming nodes (DC_V buses and
   /// grid-forming NIC DC ports).  Grounds the DC ripple network; smaller = stiffer.
   double dc_source_impedance_pu{0.01};
+
+  /// Optional frequency-dependent DC ripple network refinement:
+  ///   Z_branch(r) = r_pu + j·r·x_pu,  Y_bus_cap(r) = j·r·b_pu.
+  DCRippleModel dc_ripple_model{};
 
   /// Lower bound applied to |Z_ss| diagonal / shunt magnitudes to keep the
   /// per-order matrix well-conditioned.
@@ -390,6 +398,11 @@ struct HPF3phResult {
 };
 
 /// Solve the three-phase (abc-domain) harmonic power flow.
+/// Simplifications relative to the single-phase entry point:
+///   * The DC sub-system is NOT modelled here — this solver covers the AC network
+///     only.  Use solve_harmonic_power_flow_3ph_hybrid() for a full NIC AC/DC bridge.
+///   * `auto_nic_from_vscs` is ignored: only the NICs given in `inputs.nics` are
+///     injected; a bare ThreePhaseACSystem carries no converter harmonics.
 HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
                                            const ThreePhaseHarmonicInputs& inputs,
                                            const HPFOptions& opt = {});

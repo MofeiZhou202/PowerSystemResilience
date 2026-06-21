@@ -267,11 +267,13 @@ SpMat build_ac_ybus(const HybridPowerSystem& sys, const OperatingPoint& op,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// DC ripple admittance matrix at order r (resistive DC branches only).
+// DC ripple admittance matrix at order r.
+//   Branch: Z(r) = r_pu + j*r*x_pu (x from opt.dc_ripple_model.branch_x_pu)
+//   Bus cap: Y(r) = j*r*b_pu       (b from opt.dc_ripple_model.bus_b_pu)
 // ───────────────────────────────────────────────────────────────────────────
 SpMat build_dc_ybus(const DCSystem& dc,
                     const std::unordered_map<int, int>& id2pos,
-                    const std::vector<int>& nic_dc_pos, int /*order*/,
+                    const std::vector<int>& nic_dc_pos, int order,
                     const HPFOptions& opt) {
   const int n = static_cast<int>(dc.buses.size());
   std::vector<Trip> trips;
@@ -285,8 +287,12 @@ SpMat build_dc_ybus(const DCSystem& dc,
     if (!br.in_service) continue;
     int f = pos(br.from_bus), t = pos(br.to_bus);
     if (f < 0 || t < 0) continue;
-    double r = std::max(br.r_pu, 1e-6);
-    Cx y(1.0 / r, 0.0);
+    double x_pu = 0.0;
+    auto xit = opt.dc_ripple_model.branch_x_pu.find(br.index);
+    if (xit != opt.dc_ripple_model.branch_x_pu.end()) x_pu = xit->second;
+    Cx z(br.r_pu, static_cast<double>(order) * x_pu);
+    if (std::abs(z) < 1e-12) z = Cx(1e-6, 0.0);
+    Cx y = Cx(1.0, 0.0) / z;
     trips.emplace_back(f, f, y);
     trips.emplace_back(f, t, -y);
     trips.emplace_back(t, f, -y);
@@ -304,6 +310,9 @@ SpMat build_dc_ybus(const DCSystem& dc,
     if (p >= 0 && p < n) gy[p] += Cx(1.0 / zsrc, 0.0);
 
   for (int i = 0; i < n; ++i) {
+    auto bit = opt.dc_ripple_model.bus_b_pu.find(dc.buses[i].index);
+    if (bit != opt.dc_ripple_model.bus_b_pu.end())
+      gy[i] += Cx(0.0, static_cast<double>(order) * bit->second);
     if (!dc.buses[i].in_service ||
         dc.buses[i].bus_type == DCBusType::DC_ISOLATED)
       gy[i] += Cx(1.0 / std::max(opt.min_shunt_pu, 1e-12), 0.0);
@@ -426,6 +435,7 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
   };
   std::vector<NICOp> nic_ops;
   std::vector<int> nic_dc_positions;
+  bool used_lossless_nic_guess = false;  // P_dc = -P_ac assumed (no converter loss)
   for (auto& nic : nics) {
     NICOp no;
     no.cfg = nic;
@@ -455,7 +465,7 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
         if (v.index == no.cfg.vsc_index) {
           if (p_ac == 0.0) p_ac = v.p_set_mw;
           if (q_ac == 0.0) q_ac = v.q_set_mvar;
-          if (p_dc == 0.0) p_dc = -v.p_set_mw;  // lossless guess
+          if (p_dc == 0.0) { p_dc = -v.p_set_mw; used_lossless_nic_guess = true; }  // lossless guess
           break;
         }
       }
@@ -645,6 +655,11 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
       bf.to_bus = br.to_bus;
       bf.is_dc = true;
       double r = std::max(br.r_pu, 1e-6);
+      // Ripple reactance (if configured) so the reported branch current uses the
+      // SAME order-dependent impedance Z(r)=r_pu + j*r*x_pu as build_dc_ybus().
+      double x_pu = 0.0;
+      auto xit = opt.dc_ripple_model.branch_x_pu.find(br.index);
+      if (xit != opt.dc_ripple_model.branch_x_pu.end()) x_pu = xit->second;
       double i_fund = 0.0, acc = 0.0;
       std::vector<int> orders{0};
       for (int o : res.dc_orders) orders.push_back(o);
@@ -653,7 +668,9 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
         auto itt = dc_res[t].v_by_order.find(o);
         if (itf == dc_res[f].v_by_order.end() || itt == dc_res[t].v_by_order.end())
           continue;
-        double im = std::abs((itf->second - itt->second) / r);
+        Cx z(r, static_cast<double>(o) * x_pu);
+        Cx ys = (std::abs(z) > 1e-12) ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
+        double im = std::abs(ys * (itf->second - itt->second));
         bf.i_by_order[o] = im;
         if (o == 0) i_fund = im; else acc += im * im;
       }
@@ -667,6 +684,11 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
   res.ok = true;
   if (!res.base_pf_converged && opt.run_base_power_flow)
     res.message = "base power flow did not converge; used stored/nominal voltages";
+  if (used_lossless_nic_guess) {
+    if (!res.message.empty()) res.message += "; ";
+    res.message += "NIC DC operating point assumed lossless (P_dc = -P_ac); "
+                   "supply p_dc_mw or run a base power flow for converter losses";
+  }
   return res;
 }
 
