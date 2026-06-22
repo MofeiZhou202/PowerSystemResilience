@@ -746,3 +746,84 @@ TEST_CASE("Hybrid AC-OPF enforces the converter modulation limit (parity KKT)",
     CHECK(modulation(tight) <= sys.vsc_converters[0].m_max + 5e-3);
   }
 }
+
+namespace {
+// Hybrid AC/DC OPF fixture exercising the DC/DC duty-ratio rows: the AC slack
+// feeds DC bus 1 through a VDC-controlled VSC, and a Buck DC/DC steps DC bus 1
+// down to DC bus 2, which now carries the DC load.
+hacdcpf::HybridPowerSystem build_dcdc_opf_case() {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  sys.vsc_converters[0].control_mode = ConverterMode::VDC_Q;
+  sys.vsc_converters[0].v_dc_set_pu = 1.0;
+  sys.dc.buses[0].vmin_pu = 0.5;
+  sys.dc.buses[0].vmax_pu = 1.2;
+
+  DCBus d2;
+  d2.index = 2;
+  d2.bus_type = DCBusType::DC_P;
+  d2.vm_pu = 0.8;
+  d2.vmin_pu = 0.5;
+  d2.vmax_pu = 1.2;
+  d2.in_service = true;
+  sys.dc.buses.push_back(d2);
+  sys.dc.loads[0].bus = 2;  // served through the DC/DC
+
+  DCDCConverter dc;
+  dc.index = 0;
+  dc.bus_in = 1;
+  dc.bus_out = 2;
+  dc.in_service = true;
+  dc.control_mode = DCDCControlMode::Voltage;
+  dc.v_ref_pu = 0.8;
+  dc.sn_mva = 10.0;
+  dc.eta = 1.0;
+  dc.pmax_mw = 10.0;
+  dc.pmin_mw = -10.0;
+  dc.topology = DCDCTopology::Buck;  // Vout = D·Vin
+  dc.d_min = 0.05;
+  dc.d_max = 0.95;
+  dc.n_ratio = 1.0;
+  sys.dc.dcdc_converters = {dc};
+  return sys;
+}
+
+// Buck duty backed out from the solved DC port voltages (D = Vout / Vin).
+double dcdc_buck_duty(const hacdcpf::opf::ACOPFResult& r) {
+  if (r.vdc.size() < 2 || r.vdc[0] < 1e-6) return 0.0;
+  return r.vdc[1] / r.vdc[0];
+}
+}  // namespace
+
+TEST_CASE("Hybrid AC-OPF enforces the DC/DC duty-ratio limit (parity KKT)",
+          "[converter][opf][limits][dcdc]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_dcdc_opf_case();
+
+  opf::ACOPFOptions opt;
+  opt.verbose = false;
+
+  const opf::ACOPFResult base = opf::solve_ac_opf(sys, opt);
+  REQUIRE(base.converged);
+  // The hybrid (parity-IPM) path declares it enforces DC/DC duty feasibility.
+  CHECK(base.converter_model_scope.validity.dcdc_duty_ratio_enforced);
+  REQUIRE(base.vdc.size() >= 2);
+  const double d0 = dcdc_buck_duty(base);
+  // The solved duty must lie inside the declared [d_min, d_max] window.
+  CHECK(d0 >= sys.dc.dcdc_converters[0].d_min - 1e-3);
+  CHECK(d0 <= sys.dc.dcdc_converters[0].d_max + 1e-3);
+
+  // Disabling modulation enforcement clears the DC/DC duty scope flag.
+  opt.enforce_converter_modulation_limits = false;
+  const opf::ACOPFResult off = opf::solve_ac_opf(sys, opt);
+  CHECK_FALSE(off.converter_model_scope.validity.dcdc_duty_ratio_enforced);
+
+  // A tight upper duty bound below the natural value must not yield a converged
+  // point that violates it (respect-or-infeasible guarantee, as for VSC limits).
+  opt.enforce_converter_modulation_limits = true;
+  sys.dc.dcdc_converters[0].d_max = std::min(0.9, d0 * 0.9);
+  const opf::ACOPFResult tight = opf::solve_ac_opf(sys, opt);
+  if (tight.converged && tight.vdc.size() >= 2) {
+    CHECK(dcdc_buck_duty(tight) <= sys.dc.dcdc_converters[0].d_max + 5e-3);
+  }
+}

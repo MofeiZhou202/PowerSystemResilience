@@ -60,6 +60,7 @@ struct ConstraintIndex {
   int n_iac{0};   ///< AC current limits  Iac² ≤ i_ac_max²
   int n_mmax{0};  ///< modulation upper limits  m ≤ m_max
   int n_mmin{0};  ///< modulation lower limits  m ≥ m_min
+  int n_dcdc_duty{0};  ///< DC/DC duty-ratio limits (2 linear rows per converter)
   int n_ineq_nonlin{0};
 };
 
@@ -79,6 +80,10 @@ struct Problem {
   std::vector<int> conv_iac_limited;
   std::vector<int> conv_mmax_limited;
   std::vector<int> conv_mmin_limited;
+  // DC/DC converter var indices (into the dcdc_* arrays) with a non-Generic
+  // topology and a valid [d_min, d_max] window → two linear duty-ratio rows each
+  // (multi-converter model §3.2).
+  std::vector<int> dcdc_duty_limited;
 
   std::vector<int> gen_bus;
   std::vector<int> conv_ac_bus;

@@ -22,7 +22,7 @@ playwright-report/
 
 # Bundled MATPOWER case library + time-series profiles (~83 MB, copied from
 # HybridACDCPowerSystemsPlanning). Tracked out-of-band, not in git.
-external_data/
+# external_data/
 
 # LaTeX build artifacts
 docs/**/*.aux
@@ -44,7 +44,11 @@ docs/**/*.snm
 docs/**/*.vrb
 docs/**/_minted-*
 
+# Generated Doxygen API notebook
+docs/generated/
+
 
 outputs/
 etap-main/
 .github/
+.claude/

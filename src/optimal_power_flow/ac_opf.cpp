@@ -1798,11 +1798,21 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   // voltage equality and the converter capacity circle / quadratic loss.
   {
     auto& sc = out.converter_model_scope;
-    sc.model_scope = "ac-opf-parity-ipm:vsc-free-pq+capacity-circle+vdc-equality+iac+modulation";
+    // Build the scope tag from the features actually enforced for this run so it
+    // stays consistent with the per-feature validity flags below (a constraint
+    // family the caller disabled must not appear in the tag).
+    std::string tag = "ac-opf-parity-ipm:vsc-free-pq";
+    if (opt.enforce_converter_capacity) tag += "+capacity-circle";
+    tag += "+vdc-equality";  // always enforced by the parity formulation
+    if (opt.enforce_converter_current_limits) tag += "+iac";
+    if (opt.enforce_converter_modulation_limits) tag += "+modulation+dcdc-duty";
+    if (opt.enforce_branch_limits) tag += "+branch-limits";
+    sc.model_scope = tag;
     sc.validity.vsc_loss_modelled = true;
     sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_capacity;
     sc.validity.vsc_current_limits_enforced = opt.enforce_converter_current_limits;
     sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_modulation_limits;
+    sc.validity.dcdc_duty_ratio_enforced = opt.enforce_converter_modulation_limits;
     sc.validity.vsc_vdc_control_modelled = true;
   }
 

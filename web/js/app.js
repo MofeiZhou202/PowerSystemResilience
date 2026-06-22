@@ -1386,6 +1386,7 @@ const App = (() => {
           <tr><td>换流器容量圆 (P²+Q²≤S²)</td><td>${yn(scope.capacity)}</td></tr>
           <tr><td>换流器电流限值 (i_ac/i_dc)</td><td>${yn(scope.current)}</td></tr>
           <tr><td>换流器调制限值 (m_min/m_max)</td><td>${yn(scope.modulation)}</td></tr>
+          <tr><td>DC/DC占空比限值 (d_min/d_max)</td><td>${yn(scope.dcdc_duty)}</td></tr>
           <tr><td>直流电压控制</td><td>${escapeHtml(scope.vdc_control || '-')}</td></tr>
         </tbody></table>`;
     }

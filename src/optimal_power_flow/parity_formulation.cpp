@@ -232,6 +232,7 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   prob.dcdc_var_to_data.clear();
   prob.dcdc_bus_in.clear();
   prob.dcdc_bus_out.clear();
+  prob.dcdc_duty_limited.clear();
   for (size_t di = 0; di < prob.data.dcdc_converters.size(); ++di) {
     const auto& dc = prob.data.dcdc_converters[di];
     if (!dc.in_service) continue;
@@ -346,8 +347,23 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_iac = static_cast<int>(prob.conv_iac_limited.size());
   cidx.n_mmax = static_cast<int>(prob.conv_mmax_limited.size());
   cidx.n_mmin = static_cast<int>(prob.conv_mmin_limited.size());
+  // Optional DC/DC duty-ratio feasibility (multi-converter model §3.2): a
+  // non-Generic topology with a valid [d_min, d_max] window contributes two
+  // linear rows (D ≤ d_max and D ≥ d_min) in the solved DC port voltages.  The
+  // existing converter-modulation toggle gates both VSC and DC/DC modulation.
+  for (int k = 0; k < vidx.n_pdcdc; ++k) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    if (opt.enforce_converter_modulation_limits &&
+        dc.topology != DCDCTopology::Generic &&
+        dc.d_max > 0.0 && dc.d_max < 1.0 + 1e-12 &&
+        dc.d_min >= 0.0 && dc.d_min < dc.d_max) {
+      prob.dcdc_duty_limited.push_back(k);
+    }
+  }
+  cidx.n_dcdc_duty = 2 * static_cast<int>(prob.dcdc_duty_limited.size());
   cidx.n_ineq_nonlin = cidx.n_sf + cidx.n_st + cidx.n_sconv + cidx.n_sdc +
-                       cidx.n_iac + cidx.n_mmax + cidx.n_mmin;
+                       cidx.n_iac + cidx.n_mmax + cidx.n_mmin + cidx.n_dcdc_duty;
   prob.cidx = cidx;
 
   double max_pd = 1.0;
@@ -1385,6 +1401,33 @@ void equality_jacobian(const Problem& prob,
   jg.makeCompressed();
 }
 
+// Linear duty-ratio feasibility coefficients for a DC/DC converter (multi-
+// converter model §3.2).  Each constrained converter yields two rows of the
+// form h = a_in·Vdc_in + a_out·Vdc_out ≤ 0: the upper row enforces D ≤ d_max and
+// the lower row D ≥ d_min, where the ideal CCM voltage-conversion law of the
+// topology makes the duty ratio a linear relation between the DC port voltages.
+struct DcdcDutyRows {
+  double in_max{0.0}, out_max{0.0};  // D ≤ d_max  row
+  double in_min{0.0}, out_min{0.0};  // D ≥ d_min  row
+};
+static DcdcDutyRows dcdc_duty_rows(const DCDCConverter& dc) {
+  const double dmin = dc.d_min;
+  const double dmax = dc.d_max;
+  const double n = (dc.n_ratio > 0.0) ? dc.n_ratio : 1.0;
+  switch (dc.topology) {
+    case DCDCTopology::Buck:       // Vout = D·Vin
+      return {-dmax, 1.0, dmin, -1.0};
+    case DCDCTopology::Boost:      // Vout = Vin/(1-D)
+      return {-1.0, 1.0 - dmax, 1.0, -(1.0 - dmin)};
+    case DCDCTopology::BuckBoost:  // Vout = D/(1-D)·Vin
+      return {-dmax, 1.0 - dmax, dmin, -(1.0 - dmin)};
+    case DCDCTopology::Isolated:   // M = Vout/(n·Vin)
+      return {-dmax * n, 1.0, dmin * n, -1.0};
+    default:
+      return {};
+  }
+}
+
 void nonlinear_inequality_constraints(const Problem& prob,
                                       const Eigen::VectorXd& x,
                                       Eigen::VectorXd& h) {
@@ -1469,6 +1512,18 @@ void nonlinear_inequality_constraints(const Problem& prob,
     const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
     h[off++] = conv.m_min * conv.k_m_modulation * conv.vn_dc_kv * vdc[dc] -
                vm[ac] * conv.vn_ac_kv;
+  }
+  // ── DC/DC converter duty-ratio limits (multi-converter model §3.2) ──
+  //   d_min ≤ D ≤ d_max with D backed out from the ideal CCM voltage law; both
+  //   bounds are linear in the DC port voltages (Vdc_in, Vdc_out).
+  for (int k : prob.dcdc_duty_limited) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
+    const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
+    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    h[off++] = r.in_max * vdc[bin] + r.out_max * vdc[bout];  // D ≤ d_max
+    h[off++] = r.in_min * vdc[bin] + r.out_min * vdc[bout];  // D ≥ d_min
   }
 }
 
@@ -1591,6 +1646,21 @@ void nonlinear_inequality_jacobian(const Problem& prob,
     t.emplace_back(off, idx.i_vm + ac, -conv.vn_ac_kv);
     t.emplace_back(off, idx.i_vdc + dc,
                    conv.m_min * conv.k_m_modulation * conv.vn_dc_kv);
+    ++off;
+  }
+  // DC/DC duty-ratio Jacobians (linear, constant coefficients in the DC port
+  // voltages).
+  for (int k : prob.dcdc_duty_limited) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
+    const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
+    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    t.emplace_back(off, idx.i_vdc + bin, r.in_max);
+    t.emplace_back(off, idx.i_vdc + bout, r.out_max);
+    ++off;
+    t.emplace_back(off, idx.i_vdc + bin, r.in_min);
+    t.emplace_back(off, idx.i_vdc + bout, r.out_min);
     ++off;
   }
 
@@ -2072,6 +2142,8 @@ void lagrangian_hessian(const Problem& prob,
     // keep alignment with the value/Jacobian inequality order.
     off += static_cast<int>(prob.conv_mmax_limited.size());
     off += static_cast<int>(prob.conv_mmin_limited.size());
+    // DC/DC duty-ratio limits are also linear ⇒ zero Hessian (two rows each).
+    off += 2 * static_cast<int>(prob.dcdc_duty_limited.size());
   }
 
   // Assemble sparse matrix from triplets (duplicate entries are summed)

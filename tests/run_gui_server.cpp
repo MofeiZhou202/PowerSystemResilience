@@ -7016,6 +7016,7 @@ int main(int argc, char** argv) {
                         {"capacity", v.vsc_capacity_circle_enforced},
                         {"current", v.vsc_current_limits_enforced},
                         {"modulation", v.vsc_modulation_limits_enforced},
+                        {"dcdc_duty", v.dcdc_duty_ratio_enforced},
                         {"vdc_control", v.vsc_vdc_control_modelled}};
         if (r.converged) {
           for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i) {
