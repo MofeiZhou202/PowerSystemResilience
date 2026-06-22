@@ -1358,6 +1358,19 @@ const App = (() => {
 
     const fmt = (x, d = 4) => (x == null || Number.isNaN(Number(x))) ? '-' : Number(x).toFixed(d);
     const req = data._constraints || {};
+    // Bus/component map so OPF result rows pan to the matching canvas component
+    // when clicked, exactly like the power-flow and carbon-flow result tables.
+    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
+    const panAttr = (compId) => compId !== undefined
+      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+    // Generator / converter maps are keyed by component index, which is 1-based
+    // for imported cases (MATPOWER) but 0-based for components drawn from
+    // scratch. Detect the base once so position-ordered OPF result rows resolve
+    // to the right component either way.
+    const keyBase = (m) => (m && m[0] !== undefined) ? 0 : 1;
+    const genBase = keyBase(busMap.gen);
+    const vscBase = keyBase(busMap.vsc);
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
@@ -1402,7 +1415,10 @@ const App = (() => {
       const qg = data.qg_mvar || [];
       if (pg.length) {
         let html = '<table><thead><tr><th>#</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
-        pg.forEach((p, i) => { html += `<tr><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qg[i])}</td></tr>`; });
+        pg.forEach((p, i) => {
+          const attr = panAttr(busMap.gen ? busMap.gen[i + genBase] : undefined);
+          html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qg[i])}</td></tr>`;
+        });
         html += '</tbody></table>';
         genDiv.innerHTML = html;
       } else {
@@ -1418,7 +1434,10 @@ const App = (() => {
     if (convSec && convDiv && pac.length) {
       convSec.style.display = '';
       let html = '<table><thead><tr><th>VSC#</th><th>Pac(MW)</th><th>Qac(MVar)</th></tr></thead><tbody>';
-      pac.forEach((p, i) => { html += `<tr><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qac[i])}</td></tr>`; });
+      pac.forEach((p, i) => {
+        const attr = panAttr(busMap.vsc ? busMap.vsc[i + vscBase] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qac[i])}</td></tr>`;
+      });
       html += '</tbody></table>';
       convDiv.innerHTML = html;
     } else if (convSec) {
@@ -1432,7 +1451,10 @@ const App = (() => {
     if (dcSec && dcDiv && vdc.length) {
       dcSec.style.display = '';
       let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
-      vdc.forEach((v, i) => { html += `<tr><td>${i + 1}</td><td>${fmt(v, 6)}</td></tr>`; });
+      vdc.forEach((v, i) => {
+        const attr = panAttr(busMap.dc ? busMap.dc[i + 1] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(v, 6)}</td></tr>`;
+      });
       html += '</tbody></table>';
       dcDiv.innerHTML = html;
     } else if (dcSec) {
@@ -1451,7 +1473,8 @@ const App = (() => {
       vm.forEach((v, i) => {
         const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-        html += `<tr><td>${i + 1}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
+        const attr = panAttr(busMap.ac ? busMap.ac[i + 1] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -3359,7 +3382,7 @@ const App = (() => {
       genSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus</th><th>Name</th><th>Pg(${pUnit()})</th><th>Qg(${qUnit()})</th><th>Vg(pu)</th><th>Slack</th></tr></thead><tbody>`;
       data.geo_gen.forEach((g, i) => {
-        const compId = busMap.gen ? busMap.gen[i] : undefined;
+        const compId = busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${g.index ?? i}</td><td>${g.bus}</td><td>${g.name || ''}</td>`;
         html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${pFmt(g.qg_mvar, 4)}</td>`;
@@ -3471,7 +3494,7 @@ const App = (() => {
       vscSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       data.vsc_transfers.forEach((v, i) => {
-        const compId = busMap.vsc[i];
+        const compId = busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
                  <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? pFmt(v.q_ac_mvar, 3) : '0'}</td>
