@@ -3400,7 +3400,11 @@ const App = (() => {
     if (data.geo_ac_branches && data.geo_ac_branches.length > 0) {
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_ac_branches.forEach((br, i) => {
-        const compId = busMap.branch[i];
+        // Branches have no positional canvas id in the result, so link the row
+        // to one endpoint bus (the from-bus), which maps reliably via busMap.ac.
+        const compId = (busMap.branch && busMap.branch[br.index] !== undefined)
+          ? busMap.branch[br.index]
+          : (busMap.ac ? busMap.ac[br.from] : undefined);
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const loss = (br.loss_mw != null) ? br.loss_mw : ((br.pf_mw || 0) + (br.pt_mw || 0));
         const ldg = br.loading_pct != null ? br.loading_pct.toFixed(1) + '%' : '-';
@@ -4671,6 +4675,8 @@ const App = (() => {
     });
   }
   function setActiveModule(moduleName) {
+    const prev = document.querySelector('.module-btn.active');
+    const changed = !prev || prev.dataset.module !== moduleName;
     document.querySelectorAll('.module-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.module === moduleName);
     });
@@ -4679,6 +4685,14 @@ const App = (() => {
     // results group (if any), so the 结果 tab only shows the active
     // module's outputs / placeholder. CSS in style.css drives visibility.
     setActiveResultGroup(moduleName);
+    // The shared summary banner is written by power-flow / short-circuit /
+    // harmonics. Clear it when actually switching modules so a previous
+    // module's summary does not linger over the new module's result view (each
+    // module repopulates it, or uses its own in-group summary, when it runs).
+    if (changed) {
+      const shared = document.getElementById('resultsSummary');
+      if (shared) shared.innerHTML = '';
+    }
   }
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
