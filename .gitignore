@@ -5,6 +5,7 @@ build/
 build-*/
 cmake-build-*/
 build_rel/
+build_gui/
 third_party/*.zip
 third_party/dss_capi/**/*.pdb
 third_party/dss_capi/**/*d.dll

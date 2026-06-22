@@ -997,7 +997,7 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
 
   auto built = build_mip_skeleton(sys, opts);
   result.model_stats = built.stats;
-  for (const auto& f : built.faults) result.fault_sequence.push_back({f.branch_index, f.start_hr, f.repair_hr, f.name});
+  for (const auto& f : built.faults) result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
 
   solver::BCOptions bc_opts;
   bc_opts.time_limit_sec = static_cast<double>(opts.mip.max_time_s);

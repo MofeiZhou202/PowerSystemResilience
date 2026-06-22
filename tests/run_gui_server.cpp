@@ -8,6 +8,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -9238,19 +9239,85 @@ int main(int argc, char** argv) {
         opts.auto_fault_stagger_hr = j.value("auto_fault_stagger_hr", 0.0);
         opts.auto_fault_start_hr = j.value("auto_fault_start_hr", 0.0);
         opts.run_power_flow = j.value("run_power_flow", false);
-        // Manual faults with per-fault timing (takes priority over fault_branch_ids).
+
+        const bool consider_switches = j.value("consider_switches", false);
+        opts.enable_disaster_stages = j.value("enable_disaster_stages", consider_switches);
+        opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", consider_switches);
+        opts.post_fault_reconfig_window_hr = j.value("post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
+        opts.disaster_post_fault_reconfig_window_hr = j.value(
+            "disaster_post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
+        opts.use_switch_based_fault_isolation = j.value("use_switch_based_fault_isolation", true);
+        opts.allow_stage1_open_switches = j.value("allow_stage1_open_switches", true);
+        opts.allow_stage2_close_ties = j.value("allow_stage2_close_ties", true);
+        opts.require_switch_for_nonfault_branch_operation =
+            j.value("require_switch_for_nonfault_branch_operation", consider_switches);
+        opts.allow_branch_operation_without_switch =
+            j.value("allow_branch_operation_without_switch", !consider_switches);
+        opts.use_remote_switch_only = j.value("use_remote_switch_only", false);
+        if (consider_switches || opts.enable_disaster_stages || opts.use_ra_style_stage_milp) {
+          opts.model = hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
+          opts.enable_disaster_stages = true;
+          opts.use_ra_style_stage_milp = true;
+          opts.use_switch_based_fault_isolation = true;
+          opts.allow_stage1_open_switches = true;
+          opts.allow_stage2_close_ties = true;
+          opts.require_switch_for_nonfault_branch_operation = true;
+          opts.allow_branch_operation_without_switch = false;
+        }
+
+        auto value_int_any = [](const json& obj, std::initializer_list<const char*> keys, int dflt = 0) {
+          for (const auto* key : keys) if (obj.contains(key) && !obj[key].is_null()) return obj[key].get<int>();
+          return dflt;
+        };
+        auto value_double_any = [](const json& obj, std::initializer_list<const char*> keys, double dflt = 0.0) {
+          for (const auto* key : keys) if (obj.contains(key) && !obj[key].is_null()) return obj[key].get<double>();
+          return dflt;
+        };
+        auto value_string_any = [](const json& obj, std::initializer_list<const char*> keys, std::string dflt = {}) {
+          for (const auto* key : keys) if (obj.contains(key) && obj[key].is_string()) return obj[key].get<std::string>();
+          return dflt;
+        };
+        auto add_fault = [&](hacdcpf::analysis::ResilienceBranchKind kind, int bid,
+                             double start_hr, double repair_hr, std::string label) {
+          if (bid <= 0) return;
+          hacdcpf::analysis::DistributionResilienceFault f;
+          f.branch_kind = kind;
+          f.branch_index = bid;
+          f.ac_branch_index = kind == hacdcpf::analysis::ResilienceBranchKind::AC ? bid : 0;
+          f.outage_start_hr = start_hr;
+          f.repair_duration_hr = repair_hr;
+          f.name = std::move(label);
+          opts.faults.push_back(std::move(f));
+        };
+
+        // Manual faults with per-fault timing and branch type take priority.
         if (j.contains("manual_faults") && j["manual_faults"].is_array() && !j["manual_faults"].empty()) {
           for (const auto& mf : j["manual_faults"]) {
-            const int bid = mf.value("branch_id", 0);
-            if (bid <= 0) continue;
-            opts.faults.push_back({bid,
-                                   mf.value("start_hr", 0.0),
-                                   mf.value("repair_hr", opts.default_repair_time_hr),
-                                   mf.value("label", std::string{})});
+            const int bid = value_int_any(mf, {"branch_id", "branch_index", "branch"}, 0);
+            const auto kind = hacdcpf::analysis::resilience_branch_kind_from_string(
+                value_string_any(mf, {"branch_type", "branch_kind", "type"}, "AC"));
+            add_fault(kind, bid,
+                      value_double_any(mf, {"start_hr", "outage_start_hr"}, 0.0),
+                      value_double_any(mf, {"repair_hr", "repair_duration_hr", "repair_time_hr"}, opts.default_repair_time_hr),
+                      value_string_any(mf, {"label", "name"}, std::string{}));
           }
         } else {
-          for (const auto& id : j.value("fault_branch_ids", std::vector<int>{})) {
-            opts.faults.push_back({id, 0.0, opts.default_repair_time_hr, std::string{}});
+          const double ac_start = j.value("ac_fault_start_hr", j.value("auto_fault_start_hr", 0.0));
+          const double dc_start = j.value("dc_fault_start_hr", j.value("auto_fault_start_hr", 0.0));
+          const double ac_repair = j.value("ac_repair_time_hr", opts.default_repair_time_hr);
+          const double dc_repair = j.value("dc_repair_time_hr", opts.default_repair_time_hr);
+          for (const auto& id : j.value("ac_fault_branch_ids", std::vector<int>{})) {
+            add_fault(hacdcpf::analysis::ResilienceBranchKind::AC, id, ac_start, ac_repair, std::string{});
+          }
+          for (const auto& id : j.value("dc_fault_branch_ids", std::vector<int>{})) {
+            add_fault(hacdcpf::analysis::ResilienceBranchKind::DC, id, dc_start, dc_repair, std::string{});
+          }
+          // Legacy API: untyped fault_branch_ids are AC branch IDs.
+          if (opts.faults.empty()) {
+            for (const auto& id : j.value("fault_branch_ids", std::vector<int>{})) {
+              add_fault(hacdcpf::analysis::ResilienceBranchKind::AC, id, 0.0,
+                        opts.default_repair_time_hr, std::string{});
+            }
           }
         }
         opts.progress_callback = [](int step, double ratio, double shed) {
@@ -9279,7 +9346,10 @@ int main(int argc, char** argv) {
         {
           json fs_arr = json::array();
           for (const auto& f : result.fault_sequence) {
-            fs_arr.push_back(json{{"branch_index", f.branch_index},
+            fs_arr.push_back(json{{"branch_type", hacdcpf::analysis::to_string(f.branch_kind)},
+                                  {"branch_kind", hacdcpf::analysis::to_string(f.branch_kind)},
+                                  {"branch_index", f.branch_index},
+                                  {"branch_id", f.branch_index},
                                   {"start_hr", f.start_hr},
                                   {"repair_hr", f.repair_hr},
                                   {"name", f.name}});
@@ -9299,6 +9369,16 @@ int main(int argc, char** argv) {
         json load_multipliers = json::array();
         json res_multipliers = json::array();
         json res_mw_arr = json::array();
+        json disaster_stages = json::array();
+        json open_ac_branch_ids = json::array();
+        json open_dc_branch_ids = json::array();
+        json closed_tie_branch_ids = json::array();
+        json closed_dc_tie_branch_ids = json::array();
+        json open_switch_ids = json::array();
+        json closed_switch_ids = json::array();
+        json switched_open_ids = json::array();
+        json switched_closed_ids = json::array();
+        json hourly = json::array();
         json shed_critical = json::array();
         json shed_high = json::array();
         json shed_medium = json::array();
@@ -9325,6 +9405,41 @@ int main(int argc, char** argv) {
           load_multipliers.push_back(step.load_multiplier);
           res_multipliers.push_back(step.res_multiplier);
           res_mw_arr.push_back(step.total_res_mw);
+          disaster_stages.push_back(step.disaster_stage);
+          open_ac_branch_ids.push_back(step.open_ac_branch_ids);
+          open_dc_branch_ids.push_back(step.open_dc_branch_ids);
+          closed_tie_branch_ids.push_back(step.closed_tie_branch_ids);
+          closed_dc_tie_branch_ids.push_back(step.closed_dc_tie_branch_ids);
+          open_switch_ids.push_back(step.open_switch_ids);
+          closed_switch_ids.push_back(step.closed_switch_ids);
+          switched_open_ids.push_back(step.switched_open_ids);
+          switched_closed_ids.push_back(step.switched_closed_ids);
+          hourly.push_back(json{{"step_index", step.step_index},
+                                {"hour", step.hour},
+                                {"disaster_stage", step.disaster_stage},
+                                {"demand_mw", step.total_demand_mw},
+                                {"served_mw", step.served_mw},
+                                {"shed_mw", step.shed_mw},
+                                {"restoration_ratio", step.restoration_ratio},
+                                {"load_multiplier", step.load_multiplier},
+                                {"res_multiplier", step.res_multiplier},
+                                {"active_faults", step.active_faults},
+                                {"repaired_faults", step.repaired_faults},
+                                {"switch_actions", step.switch_actions},
+                                {"island_count", step.island_count},
+                                {"open_ac_branch_ids", step.open_ac_branch_ids},
+                                {"open_dc_branch_ids", step.open_dc_branch_ids},
+                                {"closed_tie_branch_ids", step.closed_tie_branch_ids},
+                                {"closed_dc_tie_branch_ids", step.closed_dc_tie_branch_ids},
+                                {"open_switch_ids", step.open_switch_ids},
+                                {"closed_switch_ids", step.closed_switch_ids},
+                                {"switched_open_ids", step.switched_open_ids},
+                                {"switched_closed_ids", step.switched_closed_ids},
+                                {"isolation_switch_actions", step.isolation_switch_actions},
+                                {"reconfiguration_switch_actions", step.reconfiguration_switch_actions},
+                                {"fault_zone_ac_bus_ids", step.fault_zone_ac_bus_ids},
+                                {"fault_zone_dc_bus_ids", step.fault_zone_dc_bus_ids},
+                                {"shed_by_priority", step.shed_by_priority}});
           shed_critical.push_back(step.shed_by_priority.size() > 0 ? step.shed_by_priority[0] : 0.0);
           shed_high.push_back(step.shed_by_priority.size() > 1 ? step.shed_by_priority[1] : 0.0);
           shed_medium.push_back(step.shed_by_priority.size() > 2 ? step.shed_by_priority[2] : 0.0);
@@ -9386,6 +9501,33 @@ int main(int argc, char** argv) {
         out["load_multipliers"] = load_multipliers;
         out["res_multipliers"] = res_multipliers;
         out["res_mw"] = res_mw_arr;
+        out["disaster_stages"] = disaster_stages;
+        out["open_ac_branch_ids"] = open_ac_branch_ids;
+        out["open_dc_branch_ids"] = open_dc_branch_ids;
+        out["closed_tie_branch_ids"] = closed_tie_branch_ids;
+        out["closed_dc_tie_branch_ids"] = closed_dc_tie_branch_ids;
+        out["open_switch_ids"] = open_switch_ids;
+        out["closed_switch_ids"] = closed_switch_ids;
+        out["switched_open_ids"] = switched_open_ids;
+        out["switched_closed_ids"] = switched_closed_ids;
+        out["hourly"] = hourly;
+        out["model"] = result.model == hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP
+                           ? "RAStyleStageMILP"
+                           : (result.model == hacdcpf::analysis::DistributionResilienceModel::MultiPeriodMIPLinDistFlow
+                                  ? "MultiPeriodMIPLinDistFlow"
+                                  : "HeuristicSequential");
+        out["model_stats"] = json{{"solver_name", result.model_stats.solver_name},
+                                   {"solver_status", result.model_stats.solver_status},
+                                   {"model_scope", result.model_stats.model_scope},
+                                   {"model_built", result.model_stats.model_built},
+                                   {"model_solved", result.model_stats.model_solved},
+                                   {"num_variables", result.model_stats.num_variables},
+                                   {"num_binary_variables", result.model_stats.num_binary_variables},
+                                   {"num_eq_constraints", result.model_stats.num_eq_constraints},
+                                   {"num_ineq_constraints", result.model_stats.num_ineq_constraints},
+                                   {"objective_value", result.model_stats.objective_value},
+                                   {"mip_gap", result.model_stats.mip_gap},
+                                   {"runtime_sec", result.model_stats.runtime_sec}};
         out["shed_critical"] = shed_critical;
         out["shed_high"] = shed_high;
         out["shed_medium"] = shed_medium;

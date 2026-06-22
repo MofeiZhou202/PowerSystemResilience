@@ -235,6 +235,7 @@ const App = (() => {
           const sys = JSON.parse(data._raw_json);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
+          updateResilienceSwitchDefault();
           invalidateAnalysisResults();
           log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
         } catch (e) {
@@ -263,6 +264,7 @@ const App = (() => {
           const sys = JSON.parse(data._raw_json);
           Canvas.loadFromSystemJson(sys);
           _canvasDirty = false;  // backend already has the correct system
+          updateResilienceSwitchDefault();
           invalidateAnalysisResults('算例已变更，旧潮流和碳流结果已失效');
           log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
         } catch (e) {
@@ -283,6 +285,7 @@ const App = (() => {
         const sys = JSON.parse(data._raw_json);
         Canvas.loadFromSystemJson(sys);
         _canvasDirty = false;  // backend already has the correct system
+        updateResilienceSwitchDefault();
         invalidateAnalysisResults('系统已变更，旧潮流和碳流结果已失效');
         log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
       } catch (e) {
@@ -293,6 +296,26 @@ const App = (() => {
     if (Array.isArray(warns) && warns.length) {
       log(`${label}：${warns.length} 条导入告警（宽松模式）`, 'warn');
     }
+  }
+
+  function currentCaseHasSwitches() {
+    try {
+      const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : null;
+      return Boolean(
+        (sys?.ac?.switches || []).length ||
+        (sys?.ac?.circuit_breakers || []).length ||
+        (sys?.dc?.dc_circuit_breakers || []).length
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function updateResilienceSwitchDefault(force = false) {
+    const cb = document.getElementById('resConsiderSwitches');
+    if (!cb) return;
+    if (!force && cb.dataset.userTouched === '1') return;
+    cb.checked = currentCaseHasSwitches();
   }
 
   // Import an ETAP-schema .xlsx workbook (raw binary upload -> load_etap).
@@ -344,6 +367,7 @@ const App = (() => {
     if (data) {
       Canvas.clearAll();
       _canvasDirty = false;  // backend already has the empty system
+      updateResilienceSwitchDefault(true);
       invalidateAnalysisResults('系统已清空，旧潮流和碳流结果已失效');
       log('已创建空白系统', 'success');
       setStatus('就绪');
@@ -461,6 +485,7 @@ const App = (() => {
             Canvas.loadFromSystemJson(sys);
           }
           _canvasDirty = false;  // backend already has the imported system
+          updateResilienceSwitchDefault();
           invalidateAnalysisResults('系统已导入，旧潮流和碳流结果已失效');
           log('已导入系统JSON', 'success');
         }
@@ -4449,21 +4474,40 @@ const App = (() => {
       downloadJsonFile(`carbon_results_${tsTagForFilename()}.json`, _lastCarbonData);
     });
 
-    // Bar 3: Resilience — collect inline parameters into a payload (placeholder).
+    // Bar 3: Resilience — collect AC/DC inline parameters into a typed payload.
     function collectResilienceParams() {
       const num = (id, dflt) => {
         const v = parseFloat(document.getElementById(id)?.value);
         return Number.isFinite(v) ? v : dflt;
       };
-      const locStr = (document.getElementById('resFaultLocations')?.value || '').trim();
-      const locations = locStr ? locStr.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n)) : [];
+      const parseIntList = (id) => {
+        const raw = (document.getElementById(id)?.value || '').trim();
+        return raw ? raw.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n) && n > 0) : [];
+      };
+      const parseNumList = (id) => {
+        const raw = (document.getElementById(id)?.value || '').trim();
+        return raw ? raw.split(/[,，\s]+/).map(s => Number(s)).filter(Number.isFinite) : [];
+      };
+      const atOr = (arr, idx, dflt) => arr.length ? (Number.isFinite(arr[Math.min(idx, arr.length - 1)]) ? arr[Math.min(idx, arr.length - 1)] : dflt) : dflt;
+      const acIds = parseIntList('resAcFaultLocations');
+      const dcIds = parseIntList('resDcFaultLocations');
+      const acStarts = parseNumList('resAcFaultStartHour');
+      const dcStarts = parseNumList('resDcFaultStartHour');
+      const acRepairs = parseNumList('resAcRepairDuration');
+      const dcRepairs = parseNumList('resDcRepairDuration');
+      const manual_faults = [];
+      acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
+      dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
+      const latestEnd = manual_faults.reduce((m, f) => Math.max(m, Number(f.start_hr || 0) + Number(f.repair_hr || 0)), 0);
+      const useScenarioTs = document.getElementById('resUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('resilience');
       return {
-        fault_count:     num('resFaultCount', 1),
-        fault_locations: locations,
-        fault_start_hr:  num('resFaultStartHour', 0),
-        fault_duration_hr: num('resFaultDuration', 4),
-        repair_duration_hr: num('resRepairDuration', 6),
+        fault_count:     num('resFaultCount', manual_faults.length || 1),
+        ac_fault_branch_ids: acIds,
+        dc_fault_branch_ids: dcIds,
+        manual_faults,
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
+        consider_switches: document.getElementById('resConsiderSwitches')?.checked === true,
+        horizon_hours: Math.max(useScenarioTs ? 48 : 24, Math.ceil(latestEnd + 4)),
       };
     }
     document.getElementById('btnGenExtremeScenario')?.addEventListener('click', async () => {
@@ -4477,26 +4521,33 @@ const App = (() => {
         catalog_samples_per_month: 100,
       });
       if (!data) { setStatus('台风故障生成失败', 'error'); return; }
-      // SIM's resilience engine acts on AC branches; map AC faults into the
-      // single-value resilience inputs (locations list + representative timing).
-      const typed = Array.isArray(data.fault_locations_typed) ? data.fault_locations_typed : [];
-      const acFromTyped = typed.filter(r => String(r.branch_type || 'AC').toUpperCase() === 'AC')
-                               .map(r => r.branch_index ?? r.branch_id);
-      const acLocations = acFromTyped.length ? acFromTyped
-                          : (Array.isArray(data.fault_locations) ? data.fault_locations : []);
-      const starts = Array.isArray(data.fault_start_hours) ? data.fault_start_hours.map(Number).filter(Number.isFinite) : [];
-      const repairs = Array.isArray(data.repair_durations) ? data.repair_durations.map(Number).filter(Number.isFinite) : [];
+      const rawFaults = Array.isArray(data.manual_faults) && data.manual_faults.length
+        ? data.manual_faults
+        : (Array.isArray(data.fault_locations_typed) ? data.fault_locations_typed : []);
+      const acFaults = [], dcFaults = [];
+      rawFaults.forEach(f => {
+        const type = String(f.branch_type || f.branch_kind || 'AC').toUpperCase();
+        const entry = { id: f.branch_index ?? f.branch_id ?? f.branch, start: Number(f.start_hr ?? f.outage_start_hr ?? 0), repair: Number(f.repair_hr ?? f.repair_duration_hr ?? 6) };
+        if (!Number.isFinite(Number(entry.id))) return;
+        if (type === 'DC') dcFaults.push(entry); else acFaults.push(entry);
+      });
+      if (!acFaults.length && Array.isArray(data.fault_locations)) {
+        data.fault_locations.forEach(id => acFaults.push({ id, start: 0, repair: 6 }));
+      }
       const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
-      setVal('resFaultLocations', acLocations.join(','));
-      setVal('resFaultCount', String(acLocations.length));
-      if (starts.length) setVal('resFaultStartHour', String(Math.min(...starts)));
-      if (repairs.length) setVal('resRepairDuration', String(Math.max(...repairs)));
+      setVal('resAcFaultLocations', acFaults.map(f => f.id).join(','));
+      setVal('resDcFaultLocations', dcFaults.map(f => f.id).join(','));
+      setVal('resFaultCount', String(acFaults.length + dcFaults.length));
+      setVal('resAcFaultStartHour', acFaults.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
+      setVal('resDcFaultStartHour', dcFaults.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
+      setVal('resAcRepairDuration', acFaults.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(','));
+      setVal('resDcRepairDuration', dcFaults.map(f => Number.isFinite(f.repair) ? f.repair : 8).join(','));
       const requestedLabel = data.requested_intensity_category_zh || data.requested_intensity_category || intensity;
       const selectedLabel = data.selected_intensity_category_zh || data.selected_intensity_category || requestedLabel;
       const vmax = Number(data.selected_track_max_vmax_ms);
       const vmaxText = Number.isFinite(vmax) ? `，轨迹最大风速 ${vmax.toFixed(2)} m/s` : '';
       const fallbackText = data.used_category_fallback ? `；请求等级 ${requestedLabel} 样本不足，已回退为 ${selectedLabel}` : '';
-      log(`${selectedLabel}台风场景已生成：${acLocations.length} 个 AC 故障已填入故障位置${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
+      log(`${selectedLabel}台风场景已生成：AC 故障 ${acFaults.length} 个，DC 故障 ${dcFaults.length} 个，已填入弹性评估输入${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
       setStatus('台风故障序列已填入');
     });
     async function runResilience() {
@@ -4510,16 +4561,19 @@ const App = (() => {
       const p = collectResilienceParams();
       const params = {
         default_fault_count: p.fault_count,
-        fault_branch_ids: p.fault_locations,
-        auto_fault_start_hr: p.fault_start_hr,
-        fault_duration_hr: p.fault_duration_hr,
-        repair_time_hr: p.repair_duration_hr,
+        manual_faults: p.manual_faults,
+        ac_fault_branch_ids: p.ac_fault_branch_ids,
+        dc_fault_branch_ids: p.dc_fault_branch_ids,
         mess_travel_speed_kmph: p.mobile_storage_speed_kmh,
-        horizon_hours: Math.max(24, Math.ceil(p.fault_start_hr + p.fault_duration_hr + p.repair_duration_hr + 4)),
+        horizon_hours: p.horizon_hours,
         time_step_hr: 1.0,
-        allow_reconfiguration: true,
+        allow_reconfiguration: !p.consider_switches,
         allow_mess_dispatch: true,
         run_power_flow: false,
+        consider_switches: p.consider_switches,
+        enable_disaster_stages: p.consider_switches,
+        use_ra_style_stage_milp: p.consider_switches,
+        post_fault_reconfig_window_hr: 2.0,
       };
       const data = await apiPost('/api/session/run_distribution_resilience', params);
       if (data && !data.error) {
@@ -4530,6 +4584,76 @@ const App = (() => {
       } else {
         setStatus('计算失败', 'error');
       }
+    }
+
+    function plotThemeRes(title, yTitle = '') {
+      return {
+        title,
+        margin: { l: 55, r: 15, t: 35, b: 45 },
+        xaxis: { title: '时间 (h)', gridcolor: '#3e4451' },
+        yaxis: { title: yTitle, gridcolor: '#3e4451', rangemode: 'tozero' },
+        legend: { orientation: 'h', y: -0.25 },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#dcdfe4', size: 11 },
+      };
+    }
+
+    function arrayCounts(series) {
+      return Array.isArray(series) ? series.map(v => Array.isArray(v) ? v.length : 0) : [];
+    }
+
+    function renderResilienceCharts(data) {
+      if (typeof Plotly === 'undefined' || !Array.isArray(data.hours) || !data.hours.length) return;
+      const x = data.hours;
+      const cfg = { responsive: true, displaylogo: false };
+      const asArray = (v) => Array.isArray(v) ? v : [];
+
+      Plotly.newPlot('resTimeChart', [
+        ...(Array.isArray(data.demand_mw) ? [{ x, y: data.demand_mw, mode: 'lines+markers', name: '需求', line: { color: '#61afef' } }] : []),
+        ...(Array.isArray(data.served_mw) ? [{ x, y: data.served_mw, mode: 'lines+markers', name: '供电', line: { color: '#98c379' } }] : []),
+        ...(Array.isArray(data.shed_mw) ? [{ x, y: data.shed_mw, mode: 'lines+markers', name: '切负荷', line: { color: '#e06c75' } }] : []),
+      ], plotThemeRes('恢复过程：需求/供电/切负荷', 'MW'), cfg);
+
+      Plotly.newPlot('resRestorationChart', [
+        { x, y: asArray(data.restoration_ratio).map(v => Number(v) * 100), mode: 'lines+markers', name: '恢复率', line: { color: '#0f766e', width: 2 } },
+        { x, y: asArray(data.res_multipliers).map(v => Number(v) * 100), mode: 'lines', name: 'RES可用率', line: { color: '#e5c07b', dash: 'dot' } },
+      ], { ...plotThemeRes('恢复率 / RES 时序', '%'), yaxis: { title: '%', gridcolor: '#3e4451', range: [0, 105] } }, cfg);
+
+      Plotly.newPlot('resFaultSwitchChart', [
+        { x, y: asArray(data.active_faults), type: 'bar', name: '活动故障', marker: { color: '#f59e0b' } },
+        { x, y: asArray(data.repaired_faults_arr), type: 'bar', name: '已修复', marker: { color: '#22c55e' } },
+        { x, y: asArray(data.switch_actions), mode: 'lines+markers', name: '开关动作', yaxis: 'y2', line: { color: '#a78bfa' } },
+      ], { ...plotThemeRes('故障 / 修复 / 开关动作', '数量'), barmode: 'group', yaxis2: { title: '动作数', overlaying: 'y', side: 'right', gridcolor: '#3e4451' } }, cfg);
+
+      Plotly.newPlot('resPriorityChart', [
+        { x, y: asArray(data.shed_critical), type: 'bar', name: '关键', marker: { color: '#dc2626' } },
+        { x, y: asArray(data.shed_high), type: 'bar', name: '高', marker: { color: '#f59e0b' } },
+        { x, y: asArray(data.shed_medium), type: 'bar', name: '中', marker: { color: '#3b82f6' } },
+        { x, y: asArray(data.shed_low), type: 'bar', name: '低', marker: { color: '#94a3b8' } },
+      ], { ...plotThemeRes('分优先级切负荷', 'MW'), barmode: 'stack' }, cfg);
+
+      const stages = asArray(data.disaster_stages);
+      const stageMap = { Normal: 0, DisasterIsolation: 1, DisasterPostFaultReconfig: 2, PostDisasterRepair: 3 };
+      Plotly.newPlot('resStageChart', [
+        { x, y: stages.map(s => stageMap[s] ?? 0), mode: 'lines+markers', name: '灾害阶段', line: { color: '#56b6c2', shape: 'hv' } },
+      ], { ...plotThemeRes('灾害阶段时间线', '阶段'), yaxis: { title: '阶段', gridcolor: '#3e4451', tickmode: 'array', tickvals: [0,1,2,3], ticktext: ['Normal','Isolation','Reconfig','Repair'] } }, cfg);
+
+      const mess = asArray(data.mess_traces);
+      const messTraces = [];
+      mess.forEach((tr, idx) => {
+        const name = tr.name || `MESS ${tr.storage_index ?? idx + 1}`;
+        if (Array.isArray(tr.dispatch_mw)) messTraces.push({ x, y: tr.dispatch_mw, mode: 'lines', name: `${name} 出力` });
+        if (Array.isArray(tr.energy_mwh)) messTraces.push({ x, y: tr.energy_mwh, mode: 'lines', name: `${name} 电量`, line: { dash: 'dot' } });
+      });
+      Plotly.newPlot('resMessChart', messTraces.length ? messTraces : [{ x, y: asArray(data.switch_actions), mode: 'lines+markers', name: '开关动作' }], plotThemeRes('移动储能 / 操作过程', 'MW / MWh'), cfg);
+
+      Plotly.newPlot('resOpenBranchChart', [
+        { x, y: arrayCounts(data.open_ac_branch_ids), type: 'bar', name: 'AC断开支路', marker: { color: '#e06c75' } },
+        { x, y: arrayCounts(data.open_dc_branch_ids), type: 'bar', name: 'DC断开支路', marker: { color: '#c678dd' } },
+        { x, y: arrayCounts(data.closed_tie_branch_ids), type: 'bar', name: 'AC闭合联络', marker: { color: '#98c379' } },
+        { x, y: arrayCounts(data.closed_dc_tie_branch_ids), type: 'bar', name: 'DC闭合联络', marker: { color: '#56b6c2' } },
+      ], { ...plotThemeRes('AC/DC 拓扑动作统计', '数量'), barmode: 'group' }, cfg);
     }
 
     function showResilienceResults(data) {
@@ -4557,31 +4681,37 @@ const App = (() => {
       html += '</tbody></table>';
 
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
-        html += '<h4 style="margin:10px 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
+        html += '<h4 style="margin:10px 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
         const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.fault_sequence.slice(0, 20).forEach((f, i) => {
           const clk = busClickAttr(busIdFromComponentName(f.name), resBusMap);
-          html += `<tr${clk}><td>${i + 1}</td><td>${f.name ?? f.branch_id ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
+          html += `<tr${clk}><td>${i + 1}</td><td>${f.branch_type || f.branch_kind || 'AC'}</td><td>${f.name ?? f.branch_id ?? f.branch_index ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
+      if (Array.isArray(data.disaster_stages) && data.disaster_stages.length) {
+        const distinctStages = [...new Set(data.disaster_stages.filter(Boolean))].join(' / ');
+        html += `<h4 style="margin:10px 0 4px;">灾害阶段 / 开关动作</h4><p class="empty-hint">阶段：${distinctStages || '—'}；模型：${data.model || '—'}</p>`;
+      }
       if (Array.isArray(data.hours) && data.hours.length) {
-        html += '<h4 style="margin:10px 0 4px;">恢复过程 (供电 vs 切负荷)</h4><div id="resTimeChart" style="height:260px;"></div>';
+        html += `
+          <h4 style="margin:10px 0 4px;">弹性评估图表</h4>
+          <div id="resChartsGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;">
+            <div id="resTimeChart" style="height:280px;"></div>
+            <div id="resRestorationChart" style="height:280px;"></div>
+            <div id="resFaultSwitchChart" style="height:280px;"></div>
+            <div id="resPriorityChart" style="height:280px;"></div>
+            <div id="resStageChart" style="height:280px;"></div>
+            <div id="resMessChart" style="height:280px;"></div>
+            <div id="resOpenBranchChart" style="height:280px;"></div>
+          </div>`;
       }
       document.getElementById('resilienceResults').innerHTML = html;
 
-      if (typeof Plotly !== 'undefined' && Array.isArray(data.hours) && data.hours.length) {
-        const traces = [];
-        if (Array.isArray(data.served_mw)) traces.push({ x: data.hours, y: data.served_mw, mode: 'lines', name: '供电 (MW)', line: { color: '#98c379' } });
-        if (Array.isArray(data.shed_mw)) traces.push({ x: data.hours, y: data.shed_mw, mode: 'lines', name: '切负荷 (MW)', line: { color: '#e06c75' } });
-        if (Array.isArray(data.demand_mw)) traces.push({ x: data.hours, y: data.demand_mw, mode: 'lines', name: '需求 (MW)', line: { color: '#61afef', dash: 'dot' } });
-        Plotly.newPlot('resTimeChart', traces,
-          { margin: { l: 55, r: 10, t: 10, b: 35 }, xaxis: { title: '时间 (h)' }, yaxis: { title: 'MW' },
-            legend: { orientation: 'h', y: -0.2 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#dcdfe4' } },
-          { responsive: true });
-      }
+      renderResilienceCharts(data);
     }
 
+    document.getElementById('resConsiderSwitches')?.addEventListener('change', e => { e.currentTarget.dataset.userTouched = '1'; });
     document.getElementById('btnRunResilience')?.addEventListener('click', runResilience);
 
     // ===== Scenario generation module (场景生成) — inner-scope functions + listeners =====
@@ -5128,8 +5258,10 @@ const App = (() => {
     }
 
     function generatedScenarioCaseFaults(caseJson) {
-      const event = caseJson?._generated_scenario?.resilience_event;
-      return Array.isArray(event?.faults) ? event.faults : [];
+      const event = caseJson?._generated_scenario?.resilience_event || caseJson?.resilience_event || {};
+      const candidates = [event.faults, event.generated_faults, event.manual_faults, caseJson?.generated_faults, caseJson?.manual_faults];
+      for (const arr of candidates) if (Array.isArray(arr) && arr.length) return arr;
+      return [];
     }
 
     function generatedScenarioCaseLabel(caseJson, index) {
@@ -5182,31 +5314,33 @@ const App = (() => {
     }
 
     function fillResilienceInputsFromScenario(caseJson) {
-      const event = caseJson?._generated_scenario?.resilience_event;
+      const setVal = (id, value) => { const el = document.getElementById(id); if (el) el.value = value; };
       const faults = generatedScenarioCaseFaults(caseJson);
       if (!faults.length) {
-        document.getElementById('resFaultCount').value = '0';
-        document.getElementById('resAcFaultLocations').value = '';
-        document.getElementById('resDcFaultLocations').value = '';
-        document.getElementById('resAcFaultStartHour').value = '';
-        document.getElementById('resDcFaultStartHour').value = '';
-        document.getElementById('resAcRepairDuration').value = '';
-        document.getElementById('resDcRepairDuration').value = '';
+        setVal('resFaultCount', '0');
+        setVal('resAcFaultLocations', '');
+        setVal('resDcFaultLocations', '');
+        setVal('resAcFaultStartHour', '');
+        setVal('resDcFaultStartHour', '');
+        setVal('resAcRepairDuration', '');
+        setVal('resDcRepairDuration', '');
         return;
       }
       const ac = [], dc = [];
       faults.forEach(f => {
-        const type = String(f.branch_type || f.branch_kind || 'AC').toUpperCase();
-        const entry = { id: f.branch_index ?? f.branch_id ?? f.branch, start: Number(f.start_hr ?? f.outage_start_hr ?? 0), repair: Number(f.repair_hr ?? f.repair_duration_hr ?? 6) };
+        const type = String(f.branch_type || f.branch_kind || f.type || 'AC').toUpperCase();
+        const id = f.branch_index ?? f.branch_id ?? f.branch;
+        if (!Number.isFinite(Number(id))) return;
+        const entry = { id, start: Number(f.start_hr ?? f.outage_start_hr ?? 0), repair: Number(f.repair_hr ?? f.repair_duration_hr ?? f.repair_time_hr ?? 6) };
         if (type === 'DC') dc.push(entry); else ac.push(entry);
       });
-      document.getElementById('resFaultCount').value = String(ac.length + dc.length);
-      document.getElementById('resAcFaultLocations').value = ac.map(f => f.id).join(',');
-      document.getElementById('resDcFaultLocations').value = dc.map(f => f.id).join(',');
-      document.getElementById('resAcFaultStartHour').value = ac.map(f => Number.isFinite(f.start) ? f.start : 0).join(',');
-      document.getElementById('resDcFaultStartHour').value = dc.map(f => Number.isFinite(f.start) ? f.start : 0).join(',');
-      document.getElementById('resAcRepairDuration').value = ac.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(',');
-      document.getElementById('resDcRepairDuration').value = dc.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(',');
+      setVal('resFaultCount', String(ac.length + dc.length));
+      setVal('resAcFaultLocations', ac.map(f => f.id).join(','));
+      setVal('resDcFaultLocations', dc.map(f => f.id).join(','));
+      setVal('resAcFaultStartHour', ac.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
+      setVal('resDcFaultStartHour', dc.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
+      setVal('resAcRepairDuration', ac.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(','));
+      setVal('resDcRepairDuration', dc.map(f => Number.isFinite(f.repair) ? f.repair : 8).join(','));
     }
 
     async function importGeneratedScenarioForModule(file, targetFamily) {
@@ -5220,6 +5354,7 @@ const App = (() => {
         if (!data) throw new Error('导入系统失败');
         Canvas.loadFromSystemJson(caseJson);
         _canvasDirty = false;
+        updateResilienceSwitchDefault();
         _importedGeneratedScenario = { family, case: caseJson };
         _lastImportedGeneratedScenarioKey = caseJson?._generated_scenario?.representative_id || caseJson?.name || '';
         _lastTspfData = null;

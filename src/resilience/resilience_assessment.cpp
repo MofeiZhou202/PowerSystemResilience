@@ -926,6 +926,16 @@ const char* to_string(ResilienceBranchKind kind) {
   return "AC";
 }
 
+const char* to_string(DistributionDisasterStage stage) {
+  switch (stage) {
+    case DistributionDisasterStage::Normal: return "Normal";
+    case DistributionDisasterStage::DisasterIsolation: return "DisasterIsolation";
+    case DistributionDisasterStage::DisasterPostFaultReconfig: return "DisasterPostFaultReconfig";
+    case DistributionDisasterStage::PostDisasterRepair: return "PostDisasterRepair";
+  }
+  return "Normal";
+}
+
 ResilienceBranchKind resilience_branch_kind_from_string(const std::string& value) {
   std::string v;
   v.reserve(value.size());
@@ -1144,6 +1154,14 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys) {
 DistributionResilienceResult run_distribution_resilience_assessment(
     const HybridPowerSystem& input_sys,
     const DistributionResilienceOptions& opts) {
+  // Dispatch to the switch-aware staged restoration model when requested.
+  // This ports the standalone RA-style disaster isolation / post-fault
+  // reconfiguration path without changing solver internals.
+  if (opts.model == DistributionResilienceModel::RAStyleStageMILP ||
+      opts.use_ra_style_stage_milp || opts.enable_disaster_stages) {
+    return run_distribution_resilience_stage_milp_assessment(input_sys, opts);
+  }
+
   // Dispatch to the strict multi-period MIP when requested.
   // run_distribution_resilience_mip_assessment() is the canonical entry
   // point for MultiPeriodMIPLinDistFlow; callers that set opts.model to that
@@ -1176,7 +1194,7 @@ DistributionResilienceResult run_distribution_resilience_assessment(
   const auto transport_graph = build_transport_graph(sys, opts, bus_pos);
 
   for (const auto& f : faults) {
-    result.fault_sequence.push_back({f.branch_index, f.start_hr, f.repair_hr, f.name});
+    result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
   }
 
   const auto& load_prof = opts.load_profile.empty() ? kDefaultLoadProfile : opts.load_profile;

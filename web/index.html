@@ -325,18 +325,6 @@
   </div>
   <!-- Resilience -->
   <div class="sub-section" data-sub="resilience" hidden>
-    <label class="sub-label" title="模拟故障数量">故障数量
-      <input id="resFaultCount" type="number" value="1" min="1" step="1"/>
-    </label>
-    <label class="sub-label" title="模拟故障位置 (元件ID或母线ID, 逗号分隔)">故障位置
-      <input id="resFaultLocations" type="text" placeholder="例: 5,12,18"/>
-    </label>
-    <label class="sub-label" title="故障开始时间 (小时)">故障时间
-      <input id="resFaultStartHour" type="number" value="0" min="0" step="1"/>
-    </label>
-    <label class="sub-label" title="故障持续时长 (小时)">故障时长
-      <input id="resFaultDuration" type="number" value="4" min="0" step="0.5"/>
-    </label>
     <label class="sub-label" title="按 GB/T 19201-2006 热带气旋强度等级生成台风场景">台风强度
       <select id="resTyphoonIntensity">
         <option value="TD">热带低压 TD</option>
@@ -347,18 +335,40 @@
         <option value="SuperTY">超强台风 SuperTY</option>
       </select>
     </label>
-    <button id="btnGenExtremeScenario" class="toolbar-btn" title="按台风强度等级从样本库抽取轨迹，自动生成故障序列并填入故障输入框">台风场景<br>生成</button>
+    <button id="btnGenExtremeScenario" class="toolbar-btn" title="按台风强度等级从样本库抽取轨迹，自动生成 AC/DC 故障序列并填入故障输入框">台风场景<br>生成</button>
     <button id="btnImportGeneratedResilienceScenario" class="toolbar-btn" title="导入场景生成模块导出的弹性场景 JSON">导入生成<br>场景</button>
     <input type="file" id="fileImportGeneratedResilienceScenario" accept=".json" style="display:none"/>
     <label class="sub-label sub-checkbox" title="勾选后优先使用导入场景中的 48h 时序配置和故障序列">
       <input id="resUseScenarioTimeSeries" type="checkbox"/>
       <span>使用场景时序</span>
     </label>
-    <label class="sub-label" title="故障元件修复时长 (小时)">修复时长
-      <input id="resRepairDuration" type="number" value="6" min="0" step="0.5"/>
+    <label class="sub-label" title="模拟故障总数量（台风生成/场景导入时自动更新）">故障数量
+      <input id="resFaultCount" type="number" value="1" min="0" step="1"/>
+    </label>
+    <label class="sub-label" title="AC 故障支路 ID，逗号分隔">AC故障支路
+      <input id="resAcFaultLocations" type="text" placeholder="6,27,19"/>
+    </label>
+    <label class="sub-label" title="DC 故障支路 ID，逗号分隔">DC故障支路
+      <input id="resDcFaultLocations" type="text" placeholder="1,2"/>
+    </label>
+    <label class="sub-label" title="AC 故障开始时间（小时），单值或逗号列表">AC故障时间
+      <input id="resAcFaultStartHour" type="text" value="13" placeholder="13,13,14"/>
+    </label>
+    <label class="sub-label" title="DC 故障开始时间（小时），单值或逗号列表">DC故障时间
+      <input id="resDcFaultStartHour" type="text" value="0" placeholder="0,6"/>
+    </label>
+    <label class="sub-label" title="AC 修复时长（小时），单值或逗号列表">AC修复时长
+      <input id="resAcRepairDuration" type="text" value="5" placeholder="5,3,3"/>
+    </label>
+    <label class="sub-label" title="DC 修复时长（小时），单值或逗号列表">DC修复时长
+      <input id="resDcRepairDuration" type="text" value="8" placeholder="8,8"/>
     </label>
     <label class="sub-label" title="移动储能行驶速度 (km/h)">移储速度
       <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="有开关/断路器的算例默认勾选；无开关算例默认不勾选">
+      <input id="resConsiderSwitches" type="checkbox"/>
+      <span>考虑开关</span>
     </label>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
@@ -1035,8 +1045,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260621-harmonics"></script>
-<script src="js/canvas.js?v=20260621-harmonics"></script>
-<script src="js/app.js?v=20260621-harmonics"></script>
+<script src="js/components.js?v=20260622-resilience-charts"></script>
+<script src="js/canvas.js?v=20260622-resilience-charts"></script>
+<script src="js/app.js?v=20260622-resilience-charts"></script>
 </body>
 </html>
