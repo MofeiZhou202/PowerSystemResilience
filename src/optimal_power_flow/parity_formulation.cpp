@@ -71,6 +71,9 @@ double converter_smax_pu(const Problem& prob, int conv_data_idx) {
 
 }  // namespace
 
+// Build the reviewable full-space NLP.  This is the only place that decides
+// which physical components receive primal variables and which row families are
+// present, so keep map/count changes synchronized with formulation.hpp.
 Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   Problem prob;
   prob.data = core::make_solver_data(sys, LossModelType::Linear);
@@ -934,6 +937,9 @@ void build_initial_point(const Problem& prob,
   }
 }
 
+// Economic objective in engineering units.  Decision variables are stored in
+// p.u., so each MW/MVAr cost term converts through base_mva before evaluating
+// generator cost, VOLL, or curtailment penalties.
 double objective(const Problem& prob, const Eigen::VectorXd& x) {
   const auto& idx = prob.vidx;
   double f = 0.0;
@@ -996,6 +1002,10 @@ void objective_gradient_hessian_diag(const Problem& prob,
   }
 }
 
+// Evaluate g(x)=0 in the row order defined by ConstraintIndex.  Residuals use a
+// "network injection plus demand minus controllable supply" sign convention for
+// AC rows, and a "load plus conductance flow minus injection" convention for DC
+// rows.  The same convention is used by equality_jacobian().
 void equality_constraints(const Problem& prob,
                           const Eigen::VectorXd& x,
                           EvalWorkspace& ws,
@@ -1428,6 +1438,10 @@ static DcdcDutyRows dcdc_duty_rows(const DCDCConverter& dc) {
   }
 }
 
+// Evaluate h(x)<=0.  Apparent-power, converter-current, and DC-flow limits are
+// represented as squared magnitudes minus squared limits; modulation and duty
+// constraints are linear rows kept in this vector so the IPM sees one
+// inequality interface.
 void nonlinear_inequality_constraints(const Problem& prob,
                                       const Eigen::VectorXd& x,
                                       Eigen::VectorXd& h) {
@@ -1680,6 +1694,9 @@ void lagrangian_hessian_dense(const Problem& prob,
   hess = Eigen::MatrixXd(hsp);
 }
 
+// Assemble ∇²L = ∇²f + Σλᵢ∇²gᵢ + Σνⱼ∇²hⱼ.  The implementation emits sparse
+// triplets for the nonlinear AC, DC, converter, and branch-limit curvature; the
+// final matrix is symmetrized before returning.
 void lagrangian_hessian(const Problem& prob,
                         const Eigen::VectorXd& x,
                         const Eigen::VectorXd& lambda_eq,

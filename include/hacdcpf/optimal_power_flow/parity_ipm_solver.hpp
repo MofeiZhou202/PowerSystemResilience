@@ -14,7 +14,18 @@
 
 namespace hacdcpf::opf::parity {
 
-/// Solve AC OPF via the parity full-space IPM path.
+/// Assemble and solve AC OPF through the parity full-space IPM path.
+///
+/// This high-level driver calls `build_problem`, `build_variable_bounds`,
+/// `build_initial_point`, and `solve_primal_dual_ipm`, then maps the solved
+/// vector back into `ACOPFResult`.  It is the preferred path for code review of
+/// the unified hybrid formulation because all variables and constraint rows are
+/// explicit in `Problem::vidx` and `Problem::cidx`.
+///
+/// @param sys Rich hybrid power-system input.
+/// @param opts AC OPF tolerances and converter constraint-family toggles.
+/// @return OPF result with `solver_path == OPFSolverPath::ParityIPM` when this
+/// path is used successfully.
 ACOPFResult solve_ac_opf_parity(const HybridPowerSystem& sys,
                                  const ACOPFOptions& opts = {});
 

@@ -11,6 +11,7 @@ implementation files, and the relations between functions/classes.
 - [Namespace index](namespaces.html)
 - [Data structures](classes.html)
 - [Member list](functions.html)
+- [Commenting guide](@ref commenting_guide)
 
 ## Core Review Path
 
