@@ -4358,7 +4358,7 @@ const App = (() => {
     // Optional section dividers: when a field key matches, a header row is
     // inserted before it to group the OPF constraint-limit fields visually.
     const sectionHeaders = {
-      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)' },
+      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调' },
       dcdc_converter: { topology: '占空比约束 (OPF)' },
     };
     const secMap = sectionHeaders[comp.type] || null;

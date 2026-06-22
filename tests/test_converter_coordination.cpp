@@ -827,3 +827,71 @@ TEST_CASE("Hybrid AC-OPF enforces the DC/DC duty-ratio limit (parity KKT)",
     CHECK(dcdc_buck_duty(tight) <= sys.dc.dcdc_converters[0].d_max + 5e-3);
   }
 }
+
+TEST_CASE("AC island without an angle reference is flagged (ACISLAND-REF-01)",
+          "[converter][coordination][acisland]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  // Two AC buses joined by a branch, carrying load but with NO slack bus,
+  // external grid, or AC grid-forming converter → no AC angle reference.
+  ACBus b1;
+  b1.index = 1;
+  b1.bus_type = BusType::PQ;
+  b1.pd_mw = 5.0;
+  b1.in_service = true;
+  ACBus b2;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  b2.pd_mw = 3.0;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.x_pu = 0.1;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  const auto report = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(report, "ACISLAND-REF-01"));
+  // ACISLAND-REF-01 is diagnostic only and must not block the solve.
+  CHECK(report.feasible);
+
+  // Promoting one bus to SLACK provides the angle reference → no warning.
+  sys.ac.buses[0].bus_type = BusType::SLACK;
+  const auto report2 = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(report2, "ACISLAND-REF-01"));
+}
+
+TEST_CASE("AC/DC converter cannot grid-form on both sides (ACDC-GFM-03)",
+          "[converter][coordination][acgfm]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  // DC-side grid-forming (VDC control with droop) AND AC-side grid-forming.
+  sys.vsc_converters[0].control_mode = ConverterMode::VDC_VAC;
+  sys.vsc_converters[0].k_vdc = 0.1;
+  sys.vsc_converters[0].ac_grid_forming = true;
+
+  const auto report = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(report, "ACDC-GFM-03"));
+  CHECK_FALSE(report.feasible);
+
+  // The advanced dual-side case is allowed only with an explicit energy buffer.
+  sys.vsc_converters[0].allow_dual_side_grid_forming = true;
+  sys.vsc_converters[0].has_energy_buffer = true;
+  const auto report2 = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(report2, "ACDC-GFM-03"));
+}
+
+TEST_CASE("AC grid-forming converter cannot hard-pin active power (ACDC-GFM-04)",
+          "[converter][coordination][acgfm]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  sys.vsc_converters[0].control_mode = ConverterMode::PQ_MODE;  // not DC grid-forming
+  sys.vsc_converters[0].ac_grid_forming = true;
+  sys.vsc_converters[0].p_is_hard_constraint = true;
+
+  const auto report = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(report, "ACDC-GFM-04"));
+}

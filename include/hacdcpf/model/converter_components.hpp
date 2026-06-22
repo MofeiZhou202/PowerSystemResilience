@@ -91,6 +91,16 @@ struct VSCConverter {
   double i_max_pu{1.0};
   bool grid_forming{false};
 
+  // AC-side grid-forming (multi-converter model r1 §2, VSC Mode 1): the
+  // converter forms the AC voltage reference (angle + magnitude) at its AC
+  // terminal.  This is distinct from grid_forming, which denotes DC-side voltage
+  // forming.  An ordinary two-port converter cannot grid-form on both sides at
+  // once; the advanced dual-side case is only valid with an explicit energy
+  // buffer (allow_dual_side_grid_forming && has_energy_buffer gate ACDC-GFM-03).
+  bool ac_grid_forming{false};
+  bool allow_dual_side_grid_forming{false};
+  bool has_energy_buffer{false};
+
   // Multi-source DC voltage coordination (multi-converter model §6.5–6.7).
   // Converters that share one DC island's voltage form a coordination group:
   //   * coordination_group_id — groups co-operating Vdc formers (empty = ungrouped).

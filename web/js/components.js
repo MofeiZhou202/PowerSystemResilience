@@ -367,6 +367,8 @@ const COMP = (() => {
       i_ac_max_pu: 0, i_dc_max_pu: 0,
       k_m_modulation: 0, m_min: 0, m_max: 0,
       vn_ac_kv: 0, vn_dc_kv: 0,
+      grid_forming: false, ac_grid_forming: false,
+      allow_dual_side_grid_forming: false, has_energy_buffer: false,
       in_service: true
     },
     dc_bus: {
@@ -601,6 +603,8 @@ const COMP = (() => {
     i_ac_max_pu: 'AC电流上限(pu)', i_dc_max_pu: 'DC电流上限(pu)',
     k_m_modulation: '调制系数 k_m', m_min: '调制比下限 m_min', m_max: '调制比上限 m_max',
     vn_ac_kv: 'AC额定电压(kV)', vn_dc_kv: 'DC额定电压(kV)',
+    grid_forming: 'DC侧构网', ac_grid_forming: 'AC侧构网',
+    allow_dual_side_grid_forming: '允许双侧构网', has_energy_buffer: '含储能缓冲',
     topology: 'DC/DC拓扑', d_min: '占空比下限 d_min', d_max: '占空比上限 d_max', n_ratio: '变压比 n',
     irradiance: '辐照度(W/m²)', temperature: '温度(℃)',
     num_series: '串联数', num_parallel: '并联数',

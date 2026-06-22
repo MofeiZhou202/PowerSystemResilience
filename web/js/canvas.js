@@ -2117,6 +2117,10 @@ const Canvas = (() => {
             x_sc_pu: numOr(p.x_sc_pu, 0),
             vn_ac_kv: numOr(p.vn_ac_kv, 0),
             vn_dc_kv: numOr(p.vn_dc_kv, 0),
+            grid_forming: p.grid_forming === true || p.grid_forming === 'true',
+            ac_grid_forming: p.ac_grid_forming === true || p.ac_grid_forming === 'true',
+            allow_dual_side_grid_forming: p.allow_dual_side_grid_forming === true || p.allow_dual_side_grid_forming === 'true',
+            has_energy_buffer: p.has_energy_buffer === true || p.has_energy_buffer === 'true',
             in_service: p.in_service !== false,
           });
           vscIdx++;
@@ -3006,6 +3010,10 @@ const Canvas = (() => {
         m_max: vsc.m_max ?? 0,
         vn_ac_kv: vsc.vn_ac_kv ?? 0,
         vn_dc_kv: vsc.vn_dc_kv ?? 0,
+        grid_forming: vsc.grid_forming === true,
+        ac_grid_forming: vsc.ac_grid_forming === true,
+        allow_dual_side_grid_forming: vsc.allow_dual_side_grid_forming === true,
+        has_energy_buffer: vsc.has_energy_buffer === true,
         in_service: vsc.in_service !== false,
       });
       if (acCompId !== undefined) addConnection(comp.id, 'ac', acCompId, 'right');

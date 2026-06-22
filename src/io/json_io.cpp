@@ -730,6 +730,9 @@ static json vsc_to_json(const VSCConverter& c) {
   j["forced_outage_rate"] = c.forced_outage_rate;
   j["mttr_hr"] = c.mttr_hr;
   j["grid_forming"] = c.grid_forming;
+  j["ac_grid_forming"] = c.ac_grid_forming;
+  j["allow_dual_side_grid_forming"] = c.allow_dual_side_grid_forming;
+  j["has_energy_buffer"] = c.has_energy_buffer;
   j["coordination_group_id"] = c.coordination_group_id;
   j["is_master"] = c.is_master;
   j["participation_factor"] = c.participation_factor;
@@ -770,6 +773,9 @@ static VSCConverter vsc_from_json(const json& j) {
   c.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   c.grid_forming = jget(j, "grid_forming", false);
+  c.ac_grid_forming = jget(j, "ac_grid_forming", false);
+  c.allow_dual_side_grid_forming = jget(j, "allow_dual_side_grid_forming", false);
+  c.has_energy_buffer = jget(j, "has_energy_buffer", false);
   c.coordination_group_id = jget<std::string>(j, "coordination_group_id", "");
   c.is_master = jget(j, "is_master", false);
   c.participation_factor = jget(j, "participation_factor", 0.0);
