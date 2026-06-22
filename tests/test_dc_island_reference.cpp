@@ -8,6 +8,7 @@
 // the converter to VDC_Q, balance the island, and warn.
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
@@ -46,9 +47,12 @@ TEST_CASE("DC island with PQ converter auto-promotes to regulate Vdc and warns",
   SECTION("solve converges by letting the converter regulate Vdc") {
     REQUIRE(pf.converged);
     REQUIRE_FALSE(pf.vdc.empty());
-    // With no voltage reference the converter is promoted; the weak droop
-    // (k_vdc=0.1) lets Vdc rise well above nominal to absorb the PV surplus.
-    REQUIRE(pf.vdc.front() > 1.05);
+    // The promoted converter forms the Vdc reference with a stiff gain, so it
+    // holds Vdc close to its setpoint and well inside the bus limits instead of
+    // letting it drift up to absorb the PV surplus.
+    REQUIRE(pf.vdc.front() >= sys.dc.buses.front().vmin_pu - 1e-6);
+    REQUIRE(pf.vdc.front() <= sys.dc.buses.front().vmax_pu + 1e-6);
+    REQUIRE(std::abs(pf.vdc.front() - 1.0) < 0.05);
   }
 
   SECTION("the promotion is recorded and warned") {
@@ -57,11 +61,11 @@ TEST_CASE("DC island with PQ converter auto-promotes to regulate Vdc and warns",
     REQUIRE(any_warning_contains(pf, "auto-promoted"));
   }
 
-  SECTION("Vdc-limit excursion is warned") {
-    // k_vdc=0.1 drives Vdc above the bus vmax (1.1 pu) -> warn.
-    if (pf.vdc.front() > sys.dc.buses.front().vmax_pu + 1e-6) {
-      REQUIRE(any_warning_contains(pf, "exceeds vmax"));
-    }
+  SECTION("the stiff auto-promotion keeps Vdc within limits") {
+    // Unlike the old weak-droop behavior, the promoted converter no longer
+    // drives Vdc above the bus vmax, so no excursion warning is expected.
+    REQUIRE(pf.vdc.front() <= sys.dc.buses.front().vmax_pu + 1e-6);
+    REQUIRE_FALSE(any_warning_contains(pf, "exceeds vmax"));
   }
 }
 

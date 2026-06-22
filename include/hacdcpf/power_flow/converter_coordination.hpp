@@ -39,6 +39,15 @@ struct DCIslandCoordinationSummary {
   std::vector<DCVoltageControlSource> voltage_sources;
   int hard_vdc_sources{0};
   int droop_sources{0};
+  // In-service VSC converters in PQ mode that the unified solver can
+  // auto-promote to VDC_Q to form the DC-island voltage reference (mirrors
+  // plan_dc_island_references in the Newton solver).  Their presence means the
+  // island is solvable even without an explicitly declared voltage source.
+  int promotable_vsc_sources{0};
+  // True when the island contains at least one DC_V-typed bus.  The solver pins
+  // such a bus as a fixed-voltage slack, so the island has a (declared,
+  // possibly non-physical) reference even with no voltage-forming device.
+  bool has_declared_v_bus{false};
   int fixed_power_devices{0};
   double fixed_power_mw{0.0};
   double flexible_up_mw{0.0};

@@ -384,6 +384,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     summary.dc_buses.push_back(bus.index);
     if (bus.bus_type == DCBusType::DC_V) {
       summary.declared_v_buses.push_back(bus.index);
+      summary.has_declared_v_bus = true;
       add_issue(report,
                 CoordinationSeverity::Warning,
                 "DCBUS-01",
@@ -391,10 +392,10 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                 bus.index,
                 c,
                 "DC bus " + std::to_string(bus.index) +
-                    " is typed as DC_V. The coordination check treats this only "
-                    "as a declared bus type, not as a physical voltage-forming "
-                    "device; a real VSC/ESS/ER/DC source must provide the Vdc "
-                    "control freedom.");
+                    " is typed as DC_V. This is treated only as a declared bus "
+                    "type, not as a physical voltage-forming device; a real "
+                    "VSC/ESS/ER/DC source must provide the Vdc control freedom, "
+                    "otherwise the island is reported as having no reference.");
     }
     if (std::abs(bus.pd_mw) > kTol) {
       summary.fixed_power_devices += 1;
@@ -417,9 +418,17 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     if (island < 0) continue;
     auto& summary = report.dc_islands[static_cast<size_t>(island)];
     if (conv.control_mode == ConverterMode::PQ_MODE) {
+      // A PQ VSC currently transfers its scheduled power, but the unified solver
+      // auto-promotes the largest in-service PQ VSC of an otherwise
+      // reference-less island to VDC_Q so it forms the DC voltage (see
+      // plan_dc_island_references).  Record it both as the present fixed-power
+      // injection and as a promotable voltage-forming candidate; the island
+      // check decides which role applies and adds the regulating flexibility.
       const double pdc = vsc_dc_injection_from_ac_setpoint_mw(conv);
       summary.fixed_power_devices += 1;
       summary.fixed_power_mw += pdc;
+      summary.promotable_vsc_sources += 1;
+      add_vsc_vdc_flexibility(conv, summary);
     } else if (conv.control_mode == ConverterMode::VDC_Q ||
                conv.control_mode == ConverterMode::VDC_VAC) {
       if (std::abs(conv.k_vdc) > 1e-9) {
@@ -566,8 +575,24 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
   }
 
   for (const auto& summary : report.dc_islands) {
-    const bool has_reference = summary.hard_vdc_sources > 0 || summary.droop_sources > 0;
+    // An island is solvable when it has an *explicit* voltage-forming source
+    // (rigid/droop VSC, ESS, ER, DC source) OR an in-service PQ VSC the solver
+    // can auto-promote to VDC_Q.  A DC_V-typed bus is deliberately NOT counted:
+    // per the multi-converter model a bus type is only a declaration, not a
+    // physical voltage-forming device, so a DC_V bus with no real source/
+    // converter behind it is rejected (the solver could pin it, but that is a
+    // non-physical reference and is treated as a modeling error here).
+    const bool explicit_reference =
+        summary.hard_vdc_sources > 0 || summary.droop_sources > 0;
+    const bool has_reference =
+        explicit_reference || summary.promotable_vsc_sources > 0;
+
     if (!has_reference) {
+      const std::string dcv_hint =
+          summary.has_declared_v_bus
+              ? " The DC_V bus type alone is only a declaration, not a physical "
+                "voltage-forming device; attach a VSC/ESS/ER/DC source."
+              : "";
       add_issue(report,
                 CoordinationSeverity::Fatal,
                 "DCISLAND-01",
@@ -576,8 +601,22 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                 summary.island_index,
                 "DC island " + std::to_string(summary.island_index) + " (buses " +
                     join_ints(summary.dc_buses) +
-                    ") has no DC voltage-forming device. Fixed-P converters, loads, PV, "
-                    "and power-mode DC/DC converters cannot provide the voltage reference.");
+                    ") has no DC voltage-forming device and no PQ VSC that can be "
+                    "auto-promoted to regulate Vdc. Fixed-P converters, loads, PV, "
+                    "and power-mode DC/DC converters cannot provide the voltage "
+                    "reference." + dcv_hint);
+    } else if (!explicit_reference && summary.promotable_vsc_sources > 0) {
+      add_issue(report,
+                CoordinationSeverity::Info,
+                "DCISLAND-PROMOTE-01",
+                "dc_island",
+                -1,
+                summary.island_index,
+                "DC island " + std::to_string(summary.island_index) + " (buses " +
+                    join_ints(summary.dc_buses) +
+                    ") has no explicitly declared DC voltage source; the solver "
+                    "will auto-promote an in-service PQ VSC to VDC_Q to form the "
+                    "Vdc reference and balance the island.");
     }
 
     std::vector<DCVoltageControlSource> setpoint_sources;

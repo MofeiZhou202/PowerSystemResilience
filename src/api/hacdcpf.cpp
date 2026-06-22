@@ -461,14 +461,22 @@ void populate_derived_results(const powerflow::SolverData& data,
   // Converters the solver auto-promoted from PQ to VDC_Q (because their DC island
   // had no voltage reference) must report transfers using the regulating mode,
   // not their stored PQ setpoint — otherwise the reported AC/DC powers are wrong.
+  // The solver also stiffens the promoted converter's Vdc gain and may switch
+  // modes mid-iteration, so prefer its final `effective_converters` list (which
+  // already reflects all of that) and only fall back to the input converters +
+  // promotion-index flip when it is unavailable.
+  const std::vector<VSCConverter>& eff_converters =
+      !result.diagnostics.effective_converters.empty()
+          ? result.diagnostics.effective_converters
+          : data.converters;
   const auto& promoted = result.diagnostics.promoted_vsc_indices;
   auto is_promoted = [&promoted](int ci) {
     return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
   };
 
-  result.vsc_transfers.reserve(data.converters.size());
-  for (int ci = 0; ci < static_cast<int>(data.converters.size()); ++ci) {
-    VSCConverter conv = data.converters[static_cast<size_t>(ci)];
+  result.vsc_transfers.reserve(eff_converters.size());
+  for (int ci = 0; ci < static_cast<int>(eff_converters.size()); ++ci) {
+    VSCConverter conv = eff_converters[static_cast<size_t>(ci)];
     if (!conv.in_service) continue;
     if (conv.control_mode == ConverterMode::PQ_MODE && is_promoted(ci)) {
       conv.control_mode = ConverterMode::VDC_Q;

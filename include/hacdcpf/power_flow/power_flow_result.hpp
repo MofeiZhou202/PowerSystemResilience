@@ -74,6 +74,13 @@ struct SolverDiagnostics {
   // VSC converters auto-promoted from PQ to a Vdc-regulating mode because their
   // DC island had no voltage reference (indices into the solver's converter list).
   std::vector<int>               promoted_vsc_indices;
+
+  // The solver's final converter list after auto-promotion, stiff-gain Vdc
+  // forming and any in-iteration mode switching.  Post-solve result
+  // reconstruction (AC/DC transfers, losses) must use these — not the input
+  // converters — so the reported converter powers match the solved network
+  // state.  Empty when no Newton solve populated it.
+  std::vector<VSCConverter>      effective_converters;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

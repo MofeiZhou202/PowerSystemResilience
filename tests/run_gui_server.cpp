@@ -5688,16 +5688,13 @@ int main(int argc, char** argv) {
         auto ac_conn = [](int bus) { return "AC Bus " + std::to_string(bus); };
         auto dc_conn = [](int bus) { return "DC Bus " + std::to_string(bus); };
 
-        // Reconstruct per-bus PF balance using the same signed conventions used
-        // by geo_* branch/converter results.  External-grid P/Q is the residual
+        // Reconstruct per-bus AC flow using the same signed conventions used by
+        // the geo_* branch/converter results.  External-grid P/Q is the residual
         // injection needed at its bus after all non-grid devices are accounted.
-        std::unordered_map<int, double> ac_flow_p, ac_flow_q, dc_flow_p;
+        std::unordered_map<int, double> ac_flow_p, ac_flow_q;
         auto add_ac_flow = [&](int bus, double p, double q) {
           ac_flow_p[bus] += p;
           ac_flow_q[bus] += q;
-        };
-        auto add_dc_flow = [&](int bus, double p) {
-          dc_flow_p[bus] += p;
         };
         for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
           const auto& br = sys.ac.branches[i];
@@ -5712,15 +5709,6 @@ int main(int argc, char** argv) {
         }
         for (const auto& v : pf.vsc_transfers) {
           add_ac_flow(v.bus_ac, -v.p_ac_mw, -v.q_ac_mvar);
-          add_dc_flow(v.bus_dc, -v.p_dc_mw);
-        }
-        for (const auto& d : pf.dcdc_transfers) {
-          add_dc_flow(d.bus_in, d.p_in_mw);
-          add_dc_flow(d.bus_out, -d.p_out_mw);
-        }
-        for (const auto& brj : geo_dc_branches) {
-          add_dc_flow(brj.value("from", 0), brj.value("pf_mw", 0.0));
-          add_dc_flow(brj.value("to", 0), brj.value("pt_mw", 0.0));
         }
 
         std::unordered_map<int, double> ac_non_grid_p, ac_non_grid_q;
@@ -5778,9 +5766,56 @@ int main(int argc, char** argv) {
         for (const auto& mg : sys.microgrids)
           if (mg.in_service) add_ac_injection(mg.pcc_bus, -mg.p_exchange_mw, 0.0);
 
+        // Net non-converter DC device injection per bus (bus-injection positive:
+        // PV / static-gen / discharging-storage +, DC load / bus demand -).  The
+        // old per-DC-bus "balance" summed only branch + converter port flows and
+        // omitted every DC source/load, so it never reflected the bus's real net
+        // power.  Combined with the converter port injections below this gives
+        // the true per-bus net injection.
+        std::unordered_map<int, double> dc_dev_inj_p;
+        auto add_dc_dev_inj = [&](int bus, double p) { dc_dev_inj_p[bus] += p; };
+        for (const auto& b : sys.dc.buses)
+          if (b.in_service) add_dc_dev_inj(b.index, -b.pd_mw);
+        for (const auto& ld : sys.dc.loads)
+          if (ld.in_service) add_dc_dev_inj(ld.bus, -ld.p_mw * ld.scaling);
+        for (const auto& pv : sys.dc.pv_arrays)
+          if (pv.in_service) add_dc_dev_inj(pv.bus, pv.p_set_mw);
+        for (const auto& sg : sys.dc.static_generators)
+          if (sg.in_service) add_dc_dev_inj(sg.bus, sg.p_mw * sg.scaling);
+        for (const auto& sg : sys.dc.dc_static_generators)
+          if (sg.in_service) add_dc_dev_inj(sg.bus, sg.p_set_mw * sg.scaling);
+        for (const auto& st : sys.dc.storage)
+          if (st.in_service) add_dc_dev_inj(st.bus, st.p_mw);
+
         std::unordered_map<int, int> ext_count_by_bus;
         for (const auto& eg : sys.ac.external_grids)
           if (eg.in_service) ++ext_count_by_bus[eg.bus];
+
+        // Solved external-grid injection per bus (the same reverse-calculated
+        // residual used for the external-grid rows), so the AC bus net-injection
+        // total includes the grid contribution.
+        std::unordered_map<int, double> ac_grid_inj_p, ac_grid_inj_q;
+        for (const auto& kv : ext_count_by_bus) {
+          const int bus = kv.first;
+          ac_grid_inj_p[bus] = ac_flow_p[bus] - ac_non_grid_p[bus];
+          ac_grid_inj_q[bus] = ac_flow_q[bus] - ac_non_grid_q[bus];
+        }
+
+        // Converter port injections per bus (bus-injection positive).  A VSC
+        // injects p_ac at its AC bus and p_dc at its DC bus; a DC/DC withdraws
+        // p_in at bus_in (negative injection) and injects p_out at bus_out.
+        // These complete the per-bus net injection so it equals the net power
+        // the bus exports to the rest of the network (= Σ branch outflow by KCL).
+        std::unordered_map<int, double> vsc_inj_ac_p, vsc_inj_ac_q, conv_inj_dc_p;
+        for (const auto& v : pf.vsc_transfers) {
+          vsc_inj_ac_p[v.bus_ac] += v.p_ac_mw;
+          vsc_inj_ac_q[v.bus_ac] += v.q_ac_mvar;
+          conv_inj_dc_p[v.bus_dc] += v.p_dc_mw;
+        }
+        for (const auto& d : pf.dcdc_transfers) {
+          conv_inj_dc_p[d.bus_in] += -d.p_in_mw;
+          conv_inj_dc_p[d.bus_out] += d.p_out_mw;
+        }
 
         // AC/DC bus rows.
         for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
@@ -5791,8 +5826,17 @@ int main(int argc, char** argv) {
           add_text_metric(row, "类型", bus_type_str(b.bus_type));
           add_metric(row, "Vm", ac_vm_by_bus[b.index], "pu", "scalar", 6);
           add_metric(row, "Va", ac_va_by_bus[b.index] * 180.0 / M_PI, "deg", "scalar", 4);
-          add_metric(row, "P净平衡", ac_flow_p[b.index], "MW", "p", 4);
-          add_metric(row, "Q净平衡", ac_flow_q[b.index], "MVar", "q", 4);
+          // Net nodal injection = Σ(all device injections at the bus: generation/
+          // grid/converter +, load −).  Equals the net power the bus exports to
+          // the network (Σ branch outflow) by KCL.  (The old value summed only
+          // branch/converter port flows and ignored local loads/sources.)
+          const double ac_net_p =
+              ac_non_grid_p[b.index] + ac_grid_inj_p[b.index] + vsc_inj_ac_p[b.index];
+          const double ac_net_q =
+              ac_non_grid_q[b.index] + ac_grid_inj_q[b.index] + vsc_inj_ac_q[b.index];
+          add_metric(row, "P净注入", ac_net_p, "MW", "p", 4);
+          add_metric(row, "Q净注入", ac_net_q, "MVar", "q", 4);
+          add_note(row, "净注入=该母线所有设备净注入(电源/外网/变换器为正，负荷为负)，等于经支路外送的净有功/无功");
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
@@ -5802,7 +5846,10 @@ int main(int argc, char** argv) {
                               is_solved(b.in_service), dc_conn(b.index));
           add_text_metric(row, "类型", dc_bus_type_str(b.bus_type));
           add_metric(row, "Vdc", dc_vm_by_bus[b.index], "pu", "scalar", 6);
-          add_metric(row, "P净平衡", dc_flow_p[b.index], "MW", "p", 4);
+          // Net nodal injection = Σ(DC source/load/converter injections).
+          const double dc_net_p = dc_dev_inj_p[b.index] + conv_inj_dc_p[b.index];
+          add_metric(row, "P净注入", dc_net_p, "MW", "p", 4);
+          add_note(row, "净注入=该母线所有设备净注入(直流源为正、负荷为负、变换器按端口方向)，等于经支路外送的净有功");
           component_results.push_back(std::move(row));
         }
 
@@ -6097,6 +6144,18 @@ int main(int argc, char** argv) {
         }
 
         // Converter and higher-level coupling rows.
+        // A PQ converter the solver auto-promoted to form its DC island's Vdc
+        // reference reports its transfers in VDC_Q mode; surface that so the row
+        // mode matches the computed powers instead of the stored PQ setpoint.
+        auto vsc_auto_promoted = [&](int conv_index) {
+          for (int ci : pf.diagnostics.promoted_vsc_indices) {
+            if (ci >= 0 && ci < static_cast<int>(pf.diagnostics.effective_converters.size()) &&
+                pf.diagnostics.effective_converters[static_cast<size_t>(ci)].index == conv_index) {
+              return true;
+            }
+          }
+          return false;
+        };
         for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
           const auto& c = sys.vsc_converters[i];
           const auto vit = std::find_if(pf.vsc_transfers.begin(), pf.vsc_transfers.end(),
@@ -6106,11 +6165,17 @@ int main(int argc, char** argv) {
                               "AC/DC变换器", c.name.empty() ? ("VSC " + std::to_string(c.index)) : c.name,
                               c.in_service ? (v ? "已求解" : (pf.converged ? "已参与计算" : "未收敛")) : "停运",
                               ac_conn(c.bus_ac) + " <-> " + dc_conn(c.bus_dc));
-          add_text_metric(row, "模式", converter_mode_str(c.control_mode));
+          const bool promoted = c.in_service && vsc_auto_promoted(c.index);
+          add_text_metric(row, "模式",
+                          promoted ? (std::string(converter_mode_str(c.control_mode)) + "→VDC_Q(自动构网)")
+                                   : std::string(converter_mode_str(c.control_mode)));
           add_metric(row, "Pac", v ? v->p_ac_mw : 0.0, "MW", "p", 4);
           add_metric(row, "Qac", v ? v->q_ac_mvar : 0.0, "MVar", "q", 4);
           add_metric(row, "Pdc", v ? v->p_dc_mw : 0.0, "MW", "p", 4);
           add_metric(row, "Loss", v ? v->loss_mw : 0.0, "MW", "p", 4);
+          if (promoted) {
+            add_note(row, "所在直流岛无电压参考，求解器已将其自动升压为VDC_Q并以大增益构造Vdc(释放有功设定，仅作调度/初值)");
+          }
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {

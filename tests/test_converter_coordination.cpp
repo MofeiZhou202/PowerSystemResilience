@@ -92,7 +92,7 @@ hacdcpf::VSCConverter vdc_vsc(int index, int dc_bus, double v_set_pu) {
 
 }  // namespace
 
-TEST_CASE("Converter coordination check blocks a reference-less fixed-P DC island",
+TEST_CASE("A reference-less fixed-P DC island is solved by auto-promoting the PQ VSC",
           "[converter][coordination]") {
   const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/simple_case.json";
   hacdcpf::HybridPowerSystem sys = hacdcpf::io::load_json(path);
@@ -106,11 +106,20 @@ TEST_CASE("Converter coordination check blocks a reference-less fixed-P DC islan
   opt.enable_converter_coordination_check = true;
   const hacdcpf::PowerFlowResult pf = hacdcpf::solve_power_flow(sys, opt);
 
-  CHECK_FALSE(pf.converged);
+  // The unified solver auto-promotes the in-service PQ VSC to VDC_Q so it forms
+  // the DC voltage reference.  The coordination check must mirror that and treat
+  // the island as feasible (an informational note, not a blocking Fatal),
+  // otherwise it would reject a system the solver can actually solve.
+  CHECK(pf.converged);
   CHECK(pf.diagnostics.converter_coordination.enabled);
-  CHECK_FALSE(pf.diagnostics.converter_coordination.feasible);
-  CHECK(has_rule(pf, "DCISLAND-01"));
-  CHECK(pf.diagnostics.termination_reason == "Converter coordination feasibility check failed");
+  CHECK(pf.diagnostics.converter_coordination.feasible);
+  CHECK_FALSE(pf.diagnostics.converter_coordination.has_blocking_issue());
+  CHECK_FALSE(has_rule(pf, "DCISLAND-01"));
+  CHECK(has_rule(pf, "DCISLAND-PROMOTE-01"));
+  // Stiff auto-promotion keeps Vdc within the bus voltage limits.
+  REQUIRE_FALSE(pf.vdc.empty());
+  CHECK(pf.vdc.front() >= sys.dc.buses.front().vmin_pu - 1e-6);
+  CHECK(pf.vdc.front() <= sys.dc.buses.front().vmax_pu + 1e-6);
 }
 
 TEST_CASE("Converter coordination check is opt-in for backward compatibility",
@@ -177,7 +186,7 @@ TEST_CASE("Closed metallic DC paths merge voltage islands but DC/DC does not",
   CHECK(report.dc_islands[1].dc_buses == std::vector<int>({3}));
 }
 
-TEST_CASE("DC_V bus type is not accepted as a physical voltage source",
+TEST_CASE("DC_V bus type alone is not accepted as a physical voltage source",
           "[converter][coordination][dc-bus]") {
   hacdcpf::HybridPowerSystem sys;
   sys.dc.buses = {dc_bus(1, hacdcpf::DCBusType::DC_V)};
@@ -192,7 +201,12 @@ TEST_CASE("DC_V bus type is not accepted as a physical voltage source",
 
   REQUIRE(report.dc_islands.size() == 1);
   CHECK(report.dc_islands.front().declared_v_buses == std::vector<int>{1});
+  CHECK(report.dc_islands.front().has_declared_v_bus);
+  // A DC_V bus type is only a declaration, not a physical voltage-forming
+  // device.  With no real VSC/ESS/source behind it the island is rejected as
+  // reference-less (a bus pin would be a non-physical reference).
   CHECK(report.dc_islands.front().hard_vdc_sources == 0);
+  CHECK(report.dc_islands.front().promotable_vsc_sources == 0);
   CHECK(report_has_rule(report, "DCBUS-01"));
   CHECK(report_has_rule(report, "DCISLAND-01"));
   CHECK_FALSE(report.feasible);

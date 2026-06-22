@@ -196,24 +196,33 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
 
     if (best_idx >= 0) {
       auto& conv = converters[static_cast<size_t>(best_idx)];
-      if (std::abs(conv.k_vdc) < 1e-6) {
-        // Flat droop cannot regulate Vdc -> pin a bus instead and warn.
-        if (anchor >= 0) plan.dc_slacks.push_back(anchor);
-        plan.warnings.push_back(
-            "DC island has no voltage reference and converter " + std::to_string(conv.index) +
-            " has k_vdc=0 (flat droop, cannot regulate Vdc); pinning DC bus " +
-            std::to_string(anchor_bus_index) + " as a fixed-voltage slack instead.");
-      } else {
-        conv.control_mode = ConverterMode::VDC_Q;
-        plan.promoted_converter_idx.push_back(best_idx);
-        plan.warnings.push_back(
-            "DC island has no voltage reference; auto-promoted PQ converter " +
-            std::to_string(conv.index) + " (bus_dc=" + std::to_string(conv.bus_dc) +
-            ", p_rated=" + std::to_string(conv.p_rated_mw) +
-            " MW) to VDC_Q to regulate Vdc via droop (k_vdc=" + std::to_string(conv.k_vdc) +
-            ", v_dc_set=" + std::to_string(conv.v_dc_set_pu) + " pu).");
-        // No bus pinned: Vdc is a solved variable held by the converter droop.
-      }
+      // A solely auto-promoted converter is the island's de-facto Vdc slack.  A
+      // single voltage former should hold Vdc ~rigidly (multi-converter model
+      // §6.3), not float on whatever droop gain happened to be configured: a
+      // weak k_vdc lets Vdc drift far outside limits to pass the PV/load surplus
+      // (e.g. Vdc=1.22 pu for k_vdc=0.1).  Override it with a stiff gain (the
+      // same stiffness the energy-router expansion uses) so Vdc stays close to
+      // v_dc_set.  This lets a default-drawn VSC feeding a DC island solve
+      // cleanly, and removes the old non-physical "pin a bus" fallback for flat
+      // droop.
+      conv.control_mode = ConverterMode::VDC_Q;
+      if (!(conv.v_dc_set_pu > 0.1)) conv.v_dc_set_pu = 1.0;
+      const double base = (data.base_mva > 0.0) ? data.base_mva : 100.0;
+      const double p_rated_pu =
+          ((conv.p_rated_mw > 0.0) ? conv.p_rated_mw : std::abs(conv.p_set_mw)) / base;
+      const double k_vdc_stiff = std::max(p_rated_pu * 100.0, 25.0);
+      const double k_vdc_orig = conv.k_vdc;
+      conv.k_vdc = std::max(std::abs(conv.k_vdc), k_vdc_stiff);
+      plan.promoted_converter_idx.push_back(best_idx);
+      plan.warnings.push_back(
+          "DC island has no voltage reference; auto-promoted PQ converter " +
+          std::to_string(conv.index) + " (bus_dc=" + std::to_string(conv.bus_dc) +
+          ", p_rated=" + std::to_string(conv.p_rated_mw) +
+          " MW) to VDC_Q to form the Vdc reference (k_vdc " +
+          std::to_string(k_vdc_orig) + " -> " + std::to_string(conv.k_vdc) +
+          " for ~rigid voltage forming, v_dc_set=" + std::to_string(conv.v_dc_set_pu) +
+          " pu).");
+      // No bus pinned: Vdc is a solved variable held by the converter.
       continue;
     }
 
@@ -729,6 +738,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
     for (int i = 0; i < ndc; ++i) {
       out.vdc[static_cast<size_t>(i)] = vdc[i];
     }
+    out.diagnostics.effective_converters = converters;
     return out;
   }
 
@@ -1589,6 +1599,11 @@ PowerFlowResult NewtonSolver::solve(const SolverData& data,
           " pu (weak converter droop; consider a larger k_vdc or a DC_V reference).");
     }
   }
+
+  // Surface the final converter list (post auto-promotion / stiff Vdc forming /
+  // in-iteration mode switching) so result reconstruction reports converter
+  // powers consistent with the solved network state.
+  out.diagnostics.effective_converters = converters;
 
   return out;
 }
