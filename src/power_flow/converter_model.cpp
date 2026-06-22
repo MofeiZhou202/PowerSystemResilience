@@ -63,7 +63,13 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
+    // AC_PV holds Pac = pset; its AC voltage magnitude is held by marking the
+    // converter's AC bus as a voltage-controlled (PV) bus in the solver data,
+    // and its reactive power is the free balancing injection of that PV bus
+    // (multi-converter model r1 §1.4). The returned qset is only an initial /
+    // placeholder value because the PV bus drops the reactive balance row.
     return {pset, qset};
   }
 
@@ -91,7 +97,8 @@ double converter_dc_injection(const VSCConverter& conv,
 
   double pdc_base = 0.0;
   double pac = 0.0;  // AC-side injection used by the conduction-loss coupling below.
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     const double ploss = converter_loss(conv, pset, vdc_bus, base_mva, loss_model);
     pdc_base = -(pset + ploss);
     pac = pset;
@@ -132,7 +139,8 @@ ConverterJacobianAC converter_ac_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     // AC injection is constant (pset, qset) — no Vdc dependence.
     return jac;
   }
@@ -166,7 +174,8 @@ ConverterJacobianDC converter_dc_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     // pdc = -(pset + loss(pset, Vdc))  →  dpdc/dVdc = -dploss/dVdc
     const double pset = conv.p_set_mw / base_mva;
     const auto [dploss_dp, dploss_dvdc] =

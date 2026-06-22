@@ -217,6 +217,24 @@ void rebuild_matrices(SolverData& data) {
   data.gdc = build_dc_conductance(data);
 }
 
+// AC-side PV converters (multi-converter model r1 §1): a converter that holds its
+// AC terminal voltage magnitude makes its AC bus voltage-controlled. Mark that
+// bus PV at v_ac_set_pu so the Newton solver fixes Vm there and releases the bus
+// reactive balance — i.e. the converter's reactive power becomes the free
+// balancing device unknown. A SLACK bus already fixes Vm and angle, so it is
+// left untouched.
+static void apply_acpv_voltage_control(SolverData& data) {
+  for (const auto& conv : data.converters) {
+    if (!conv.in_service || conv.control_mode != ConverterMode::AC_PV) continue;
+    const int idx = conv.bus_ac - 1;
+    if (idx < 0 || idx >= static_cast<int>(data.ac_buses.size())) continue;
+    auto& bus = data.ac_buses[static_cast<size_t>(idx)];
+    if (bus.bus_type == BusType::SLACK) continue;
+    bus.bus_type = BusType::PV;
+    if (conv.v_ac_set_pu > 0.0) bus.vm_pu = conv.v_ac_set_pu;
+  }
+}
+
 SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_model) {
   static std::atomic<std::uint64_t> next_build_id{1};
 
@@ -283,6 +301,7 @@ SolverData make_solver_data(const HybridPowerSystem& sys, LossModelType loss_mod
     }
   }
 
+  apply_acpv_voltage_control(data);
   rebuild_matrices(data);
   return data;
 }
@@ -351,6 +370,7 @@ SolverData make_solver_data_projected(HybridPowerSystem&& projected, LossModelTy
     }
   }
 
+  apply_acpv_voltage_control(data);
   rebuild_matrices(data);
   return data;
 }

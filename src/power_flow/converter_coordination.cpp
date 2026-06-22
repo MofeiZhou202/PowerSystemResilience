@@ -277,6 +277,36 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
                     "cannot form a DC voltage reference.");
     }
 
+    // AC-side PV control rules (multi-converter model r1 §1.5).  AC_PV holds Pac
+    // and Vac and releases Qac; it never forms the AC angle reference (handled by
+    // ACISLAND-REF-01).
+    if (conv.control_mode == ConverterMode::AC_PV) {
+      if (!(conv.v_ac_set_pu > 0.0)) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "ACDC-CTRL-03",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is in AC_PV mode but has no valid AC voltage setpoint "
+                      "(v_ac_set_pu must be > 0). AC_PV holds the AC active power and "
+                      "AC voltage magnitude, so a positive voltage setpoint is required.");
+      }
+      if (std::abs(conv.q_set_mvar) > 1e-6) {
+        add_issue(report,
+                  CoordinationSeverity::Warning,
+                  "ACDC-CTRL-04",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is in AC_PV mode; q_set_mvar=" + std::to_string(conv.q_set_mvar) +
+                      " is ignored because AC reactive power is released as the free "
+                      "balancing injection that holds the AC voltage.");
+      }
+    }
+
     // AC-side grid-forming rules (multi-converter model r1 §2/§11.2).  These only
     // fire when the converter opts into AC grid-forming, so ordinary converters
     // are unaffected.

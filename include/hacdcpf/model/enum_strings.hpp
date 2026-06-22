@@ -52,6 +52,7 @@ inline std::string converter_mode_str(ConverterMode m) {
     case ConverterMode::PQ_MODE: return "PQ";
     case ConverterMode::VDC_Q: return "VDC_Q";
     case ConverterMode::VDC_VAC: return "VDC_VAC";
+    case ConverterMode::AC_PV: return "AC_PV";
   }
   return "PQ";
 }
@@ -59,6 +60,7 @@ inline ConverterMode converter_mode_from_str(const std::string& s) {
   if (s == "PQ" || s == "PQ_MODE" || s == "AC_PQ") return ConverterMode::PQ_MODE;
   if (s == "VDC_Q") return ConverterMode::VDC_Q;
   if (s == "VDC_VAC") return ConverterMode::VDC_VAC;
+  if (s == "AC_PV") return ConverterMode::AC_PV;
   return ConverterMode::PQ_MODE;
 }
 

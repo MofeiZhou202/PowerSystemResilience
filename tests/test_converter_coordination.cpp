@@ -895,3 +895,118 @@ TEST_CASE("AC grid-forming converter cannot hard-pin active power (ACDC-GFM-04)"
   const auto report = powerflow::evaluate_converter_coordination(sys, true);
   CHECK(report_has_rule(report, "ACDC-GFM-04"));
 }
+
+TEST_CASE("AC_PV converter holds its AC terminal voltage (power flow)",
+          "[converter][acpv][powerflow]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  ACBus b1;
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  b1.vm_pu = 1.0;
+  b1.in_service = true;
+  ACBus b2;
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  b2.pd_mw = 5.0;
+  b2.qd_mvar = 1.0;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.is_slack = true;
+  g.vg_pu = 1.0;
+  g.pmax_mw = 500.0;
+  g.pmin_mw = 0.0;
+  g.qmax_mvar = 500.0;
+  g.qmin_mvar = -500.0;
+  g.in_service = true;
+  sys.ac.generators = {g};
+
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.r_pu = 0.01;
+  br.x_pu = 0.05;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  DCBus d;
+  d.index = 1;
+  d.bus_type = DCBusType::DC_P;
+  d.vm_pu = 1.0;
+  d.vmin_pu = 0.8;
+  d.vmax_pu = 1.2;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  // VSC A forms the DC voltage on DC bus 1 (VDC droop).
+  VSCConverter vA;
+  vA.index = 0;
+  vA.bus_ac = 1;
+  vA.bus_dc = 1;
+  vA.control_mode = ConverterMode::VDC_VAC;
+  vA.k_vdc = 0.5;
+  vA.v_dc_set_pu = 1.0;
+  vA.pmax_mw = 100.0;
+  vA.pmin_mw = -100.0;
+  vA.p_rated_mw = 100.0;
+  vA.eta = 0.99;
+  vA.in_service = true;
+
+  // VSC B is AC_PV: it holds Vac at bus 2 = 1.03 pu and injects Pac = 8 MW,
+  // releasing its reactive power as the free balancing injection of that PV bus.
+  VSCConverter vB;
+  vB.index = 1;
+  vB.bus_ac = 2;
+  vB.bus_dc = 1;
+  vB.control_mode = ConverterMode::AC_PV;
+  vB.p_set_mw = 8.0;
+  vB.v_ac_set_pu = 1.03;
+  vB.pmax_mw = 100.0;
+  vB.pmin_mw = -100.0;
+  vB.p_rated_mw = 100.0;
+  vB.eta = 0.99;
+  vB.in_service = true;
+  sys.vsc_converters = {vA, vB};
+
+  PowerFlowOptions opt;
+  const PowerFlowResult r = solve_power_flow(sys, opt);
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() >= 2);
+  // The AC_PV converter must hold its AC terminal (bus 2 → index 1) at its
+  // voltage setpoint, with reactive power free.
+  CHECK(std::abs(r.vm[1] - 1.03) < 2e-3);
+}
+
+TEST_CASE("AC_PV mode coordination rules (ACDC-CTRL-03/04)",
+          "[converter][coordination][acpv]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  auto& conv = sys.vsc_converters[0];
+  conv.control_mode = ConverterMode::AC_PV;
+  conv.v_ac_set_pu = 1.02;
+  conv.q_set_mvar = 0.0;
+
+  // Valid AC_PV: a positive voltage setpoint, no imposed reactive power.
+  const auto ok = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(ok, "ACDC-CTRL-03"));
+  CHECK_FALSE(report_has_rule(ok, "ACDC-CTRL-04"));
+
+  // Missing voltage setpoint → ACDC-CTRL-03.
+  conv.v_ac_set_pu = 0.0;
+  const auto noV = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(noV, "ACDC-CTRL-03"));
+
+  // Imposed reactive power in AC_PV → ACDC-CTRL-04 (released / ignored).
+  conv.v_ac_set_pu = 1.02;
+  conv.q_set_mvar = 5.0;
+  const auto withQ = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(withQ, "ACDC-CTRL-04"));
+}

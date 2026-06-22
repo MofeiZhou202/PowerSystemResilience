@@ -4476,6 +4476,7 @@ const App = (() => {
             {v:'PQ_MODE', l:'PQ_MODE'},
             {v:'VDC_Q',   l:'VDC_Q'},
             {v:'VDC_VAC', l:'VDC_VAC'},
+            {v:'AC_PV',   l:'AC_PV (AC定有功+定电压)'},
           ];
         }
         modeOptions.forEach(o => {
