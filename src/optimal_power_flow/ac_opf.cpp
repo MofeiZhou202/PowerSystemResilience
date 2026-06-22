@@ -1800,9 +1800,9 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     auto& sc = out.converter_model_scope;
     sc.model_scope = "ac-opf-parity-ipm:vsc-free-pq+capacity-circle+vdc-equality+iac+modulation";
     sc.validity.vsc_loss_modelled = true;
-    sc.validity.vsc_capacity_circle_enforced = true;
-    sc.validity.vsc_current_limits_enforced = true;       // i_ac_max_pu (parity KKT)
-    sc.validity.vsc_modulation_limits_enforced = true;    // m_min/m_max (parity KKT)
+    sc.validity.vsc_capacity_circle_enforced = opt.enforce_converter_capacity;
+    sc.validity.vsc_current_limits_enforced = opt.enforce_converter_current_limits;
+    sc.validity.vsc_modulation_limits_enforced = opt.enforce_converter_modulation_limits;
     sc.validity.vsc_vdc_control_modelled = true;
   }
 
@@ -1810,6 +1810,10 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   form_opt.load_shedding = true;
   form_opt.voll = 0.0;
   form_opt.eps_iac = 1e-6;
+  form_opt.enforce_branch_limits = opt.enforce_branch_limits;
+  form_opt.enforce_converter_capacity = opt.enforce_converter_capacity;
+  form_opt.enforce_converter_current_limits = opt.enforce_converter_current_limits;
+  form_opt.enforce_converter_modulation_limits = opt.enforce_converter_modulation_limits;
   const parity::Problem prob = parity::build_problem(sys, form_opt);
   const auto& vidx = prob.vidx;
   const auto& cidx = prob.cidx;

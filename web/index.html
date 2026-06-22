@@ -25,6 +25,7 @@
   <select id="layoutDirSelect" class="toolbar-select" title="自动布局方向">
     <option value="TB">↧ 上下</option>
     <option value="LR">↦ 左右</option>
+    <option value="BUSBAR">⊟ 母线(横母线/竖线路)</option>
     <option value="RADIAL">◎ 径向</option>
     <option value="COMPACT">▦ 紧凑</option>
   </select>
@@ -55,6 +56,7 @@
 <!-- ===== Bar 2: Function Modules ===== -->
 <div id="moduleBar" class="module-bar">
   <button id="modulePowerFlow"    class="module-btn" data-module="powerFlow">潮流计算</button>
+  <button id="moduleOpf"          class="module-btn" data-module="opf">最优潮流</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleHarmonics"    class="module-btn" data-module="harmonics">谐波潮流</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
@@ -105,6 +107,30 @@
       <input id="pfCoordCheck" type="checkbox" checked/>
       <span>多变换器校核</span>
     </label>
+  </div>
+  <!-- Optimal power flow -->
+  <div class="sub-section" data-sub="opf" hidden>
+    <label class="sub-label">求解器
+      <select id="opfSolver" title="最优潮流求解器">
+        <option value="parity">混合AC/DC (Parity-IPM)</option>
+        <option value="ac">交流OPF</option>
+        <option value="dc">直流OPF</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="支路热稳定限值 (rate_a)">
+      <input id="opfBranchLimits" type="checkbox" checked/><span>支路限值</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="换流器容量圆约束 P²+Q²≤S²">
+      <input id="opfConvCapacity" type="checkbox" checked/><span>换流器容量</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="换流器交/直流电流限值 (i_ac_max_pu / i_dc_max_pu)">
+      <input id="opfConvCurrent" type="checkbox" checked/><span>换流器电流</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
+      <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
+    </label>
+    <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
+    <span id="opfHint" class="sub-hint">勾选需要施加的约束族；调制/电流/容量限值取自各换流器参数。</span>
   </div>
   <!-- Carbon flow -->
   <div class="sub-section" data-sub="carbonFlow" hidden>
@@ -782,6 +808,32 @@
           <div id="pfTrafo3wResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group powerFlow -->
+        <div class="result-group" data-result-group="opf">
+        <div class="topo-section">
+          <h4>最优潮流 — 概要</h4>
+          <div id="opfSummary" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section">
+          <h4>最优潮流 — 约束启用情况</h4>
+          <div id="opfScope" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section">
+          <h4>最优潮流 — 发电机出力</h4>
+          <div id="opfGenResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="opfConvSection" style="display:none">
+          <h4>最优潮流 — 换流器出力</h4>
+          <div id="opfConvResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="opfDcBusSection" style="display:none">
+          <h4>最优潮流 — DC节点电压</h4>
+          <div id="opfDcBusResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section">
+          <h4>最优潮流 — AC节点电压/电价</h4>
+          <div id="opfBusResults" class="topo-table-wrap"></div>
+        </div>
+        </div><!-- /result-group opf -->
         <div class="result-group" data-result-group="carbonFlow">
         <div class="topo-section" id="carbonSummarySection">
           <h4 id="carbonSummaryTitle">碳流分析结果 — 概览</h4>

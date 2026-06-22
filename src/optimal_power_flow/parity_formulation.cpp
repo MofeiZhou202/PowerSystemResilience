@@ -52,6 +52,11 @@ double resolve_voll_auto(const Problem& prob) {
 }
 
 double converter_smax_pu(const Problem& prob, int conv_data_idx) {
+  // Capacity-circle enforcement is opt-out: when disabled, return a huge bound so
+  // the inequality Pac^2+Qac^2 <= smax^2 is always inactive.
+  if (!prob.options.enforce_converter_capacity) {
+    return 1.0e12;
+  }
   const auto& conv = prob.data.converters[static_cast<size_t>(conv_data_idx)];
   double smax = conv.p_rated_mw;
   if (!(smax > 0.0) || !std::isfinite(smax)) {
@@ -156,19 +161,23 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
 
   prob.branch_limited.clear();
   prob.branch_limited.reserve(prob.data.ac_branches.size());
-  for (size_t bi = 0; bi < prob.data.ac_branches.size(); ++bi) {
-    const auto& br = prob.data.ac_branches[bi];
-    if (br.in_service && br.rate_a_mva > 0.0) {
-      prob.branch_limited.push_back(static_cast<int>(bi));
+  if (opt.enforce_branch_limits) {
+    for (size_t bi = 0; bi < prob.data.ac_branches.size(); ++bi) {
+      const auto& br = prob.data.ac_branches[bi];
+      if (br.in_service && br.rate_a_mva > 0.0) {
+        prob.branch_limited.push_back(static_cast<int>(bi));
+      }
     }
   }
 
   prob.dc_branch_limited.clear();
   prob.dc_branch_limited.reserve(prob.data.dc_branches.size());
-  for (size_t bi = 0; bi < prob.data.dc_branches.size(); ++bi) {
-    const auto& br = prob.data.dc_branches[bi];
-    if (br.in_service && br.rate_a_mva > 0.0) {
-      prob.dc_branch_limited.push_back(static_cast<int>(bi));
+  if (opt.enforce_branch_limits) {
+    for (size_t bi = 0; bi < prob.data.dc_branches.size(); ++bi) {
+      const auto& br = prob.data.dc_branches[bi];
+      if (br.in_service && br.rate_a_mva > 0.0) {
+        prob.dc_branch_limited.push_back(static_cast<int>(bi));
+      }
     }
   }
 
@@ -325,10 +334,11 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   for (int k = 0; k < vidx.n_pac; ++k) {
     const auto& conv =
         prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
-    if (std::isfinite(conv.i_ac_max_pu) && conv.i_ac_max_pu > 0.0) {
+    if (opt.enforce_converter_current_limits &&
+        std::isfinite(conv.i_ac_max_pu) && conv.i_ac_max_pu > 0.0) {
       prob.conv_iac_limited.push_back(k);
     }
-    const bool mod_ok =
+    const bool mod_ok = opt.enforce_converter_modulation_limits &&
         conv.k_m_modulation > 0.0 && conv.vn_ac_kv > 0.0 && conv.vn_dc_kv > 0.0;
     if (mod_ok && conv.m_max > 0.0) prob.conv_mmax_limited.push_back(k);
     if (mod_ok && conv.m_min > 0.0) prob.conv_mmin_limited.push_back(k);

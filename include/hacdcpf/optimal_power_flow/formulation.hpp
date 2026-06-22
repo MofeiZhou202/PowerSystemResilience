@@ -20,6 +20,12 @@ struct ParityOptions {
   bool load_shedding{true};
   double voll{0.0};     ///< 0.0 => auto-compute from max gen cost
   double eps_iac{1e-6}; ///< Smoothing in |Iac|
+  // Constraint-family toggles (multi-converter model §3.1).  Default true keeps
+  // the always-enforce behavior; the GUI/OPF options can disable a family.
+  bool enforce_branch_limits{true};
+  bool enforce_converter_capacity{true};
+  bool enforce_converter_current_limits{true};
+  bool enforce_converter_modulation_limits{true};
 };
 
 struct VarIndex {

@@ -1131,18 +1131,37 @@ const Canvas = (() => {
 
     if (buses.length === 0) { zoomFit(); return; }
 
-    // Build adjacency between buses via branch-type components
+    // Build adjacency between buses via branch-type components.
     const busIdSet = new Set(buses.map(b => b.id));
+
+    // ---- Connection indices (built ONCE, O(connections)) -----------------
+    // Large systems (>10k buses) used to be O(branches × connections) because
+    // every branch re-scanned the full connection list three separate times
+    // (adjacency, ring detection, branch placement) and every device scanned it
+    // again. Precompute, per non-bus component, the bus ids it touches, plus a
+    // generic first-neighbour map for device placement, so each later pass is
+    // O(n) over its own list instead of O(n × connections).
+    const busNeighborsByComp = new Map(); // non-bus compId -> [busCompId,...]
+    const firstNeighbor = new Map();      // compId -> first connected compId
+    state.connections.forEach(c => {
+      const a = c.from.compId, b = c.to.compId;
+      if (!firstNeighbor.has(a)) firstNeighbor.set(a, b);
+      if (!firstNeighbor.has(b)) firstNeighbor.set(b, a);
+      const aBus = busIdSet.has(a), bBus = busIdSet.has(b);
+      if (aBus !== bBus) { // exactly one endpoint is a bus
+        const busId = aBus ? a : b;
+        const compId = aBus ? b : a;
+        let arr = busNeighborsByComp.get(compId);
+        if (!arr) { arr = []; busNeighborsByComp.set(compId, arr); }
+        arr.push(busId);
+      }
+    });
+    const busesOfBranch = (brId) => busNeighborsByComp.get(brId) || [];
+
     const adj = new Map(); // busCompId -> Set<busCompId>
     buses.forEach(b => adj.set(b.id, new Set()));
-
     branches.forEach(br => {
-      const linked = [];
-      state.connections.forEach(c => {
-        const other = c.from.compId === br.id ? c.to.compId
-                    : c.to.compId === br.id ? c.from.compId : null;
-        if (other !== null && busIdSet.has(other)) linked.push(other);
-      });
+      const linked = busesOfBranch(br.id);
       for (let i = 0; i < linked.length; i++)
         for (let j = i + 1; j < linked.length; j++) {
           adj.get(linked[i]).add(linked[j]);
@@ -1153,17 +1172,16 @@ const Canvas = (() => {
     // BFS layering from a root bus (prefer SLACK / external-grid-connected bus)
     const busLayer = new Map();
     let root = buses[0].id;
-    // Prefer bus connected to external_grid or SLACK
+    // Buses backed by an external grid (precomputed once, O(devices)).
+    const egBusIds = new Set();
+    devices.forEach(d => {
+      if (d.type === 'external_grid')
+        (busNeighborsByComp.get(d.id) || []).forEach(bid => egBusIds.add(bid));
+    });
+    // Prefer a SLACK bus, else an external-grid-backed bus, as the layout root.
     for (const b of buses) {
       if (b.params.bus_type === 'SLACK' || b.params.bus_type === 'Slack') { root = b.id; break; }
-      const hasEG = state.connections.some(c => {
-        const otherId = c.from.compId === b.id ? c.to.compId
-                      : c.to.compId === b.id ? c.from.compId : null;
-        if (otherId === null) return false;
-        const o = getComponent(otherId);
-        return o && o.type === 'external_grid';
-      });
-      if (hasEG) { root = b.id; break; }
+      if (egBusIds.has(b.id)) { root = b.id; break; }
     }
 
     // Multi-root BFS: build a spanning tree (parent/children) per connected
@@ -1272,12 +1290,7 @@ const Canvas = (() => {
       });
     });
     branches.forEach(br => {
-      const linked = [];
-      state.connections.forEach(c => {
-        const other = c.from.compId === br.id ? c.to.compId
-                    : c.to.compId === br.id ? c.from.compId : null;
-        if (other !== null && busIdSet.has(other)) linked.push(other);
-      });
+      const linked = busesOfBranch(br.id);
       br._isRing = linked.length >= 2 &&
         ringBusPairs.has(Math.min(linked[0], linked[1]) + '_' + Math.max(linked[0], linked[1]));
     });
@@ -1376,10 +1389,11 @@ const Canvas = (() => {
 
     // ---- Map abstract (leaf, depth) → screen (x, y) by direction ---------
     //   TB (default) top→bottom, LR left→right, RADIAL concentric, COMPACT = TB
-    //   with tighter gaps.
+    //   with tighter gaps, BUSBAR = stacked horizontal busbars (depth→y) joined
+    //   by vertical lines/cables/transformers (pos→x, wider node gap).
     const dir = (options && options.direction) || 'TB';
-    const levelGap = (options && options.levelGap) || (dir === 'COMPACT' ? 170 : 240);
-    const nodeGap  = (options && options.nodeGap)  || (dir === 'COMPACT' ? 130 : 200);
+    const levelGap = (options && options.levelGap) || (dir === 'COMPACT' ? 170 : dir === 'BUSBAR' ? 200 : 240);
+    const nodeGap  = (options && options.nodeGap)  || (dir === 'COMPACT' ? 130 : dir === 'BUSBAR' ? 240 : 200);
     const totalLeaves = buses.reduce((m, b) => Math.max(m, b._pos || 0), 0);
     buses.forEach(b => {
       const depth = busLayer.get(b.id) || 0;
@@ -1423,6 +1437,7 @@ const Canvas = (() => {
 
     // Snap buses to grid
     buses.forEach(bus => {
+      if (dir === 'BUSBAR') bus.rotation = 0; // busbars are drawn horizontal
       bus.x = snapToGrid(bus.x);
       bus.y = snapToGrid(bus.y);
       bus.el.setAttribute('transform', `translate(${bus.x}, ${bus.y}) rotate(${bus.rotation || 0})`);
@@ -1432,24 +1447,35 @@ const Canvas = (() => {
     // along the branch normal so the icon does not sit exactly on the wire
     // (doc §8).  Transformers get a larger offset than plain lines.
     const branchOffset = { ac_branch: 20, dc_branch: 20, transformer_2w: 30, transformer_3w: 40 };
+    const isLineType = (t) => t === 'ac_branch' || t === 'dc_branch';
     branches.forEach(br => {
-      const linked = [];
-      state.connections.forEach(c => {
-        const other = c.from.compId === br.id ? c.to.compId
-                    : c.to.compId === br.id ? c.from.compId : null;
-        if (other !== null && busIdSet.has(other)) linked.push(getComponent(other));
-      });
+      const linked = busesOfBranch(br.id).map(getComponent).filter(Boolean);
       if (linked.length >= 2 && linked[0] && linked[1]) {
         const a = linked[0], b = linked[1];
         const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const len = Math.hypot(dx, dy) || 1;
-        const off = branchOffset[br.type] || 20;
-        br.x = snapToGrid(mx + (-dy / len) * off);
-        br.y = snapToGrid(my + (dx / len) * off);
+        if (dir === 'BUSBAR') {
+          // Vertical connector sits on the line between the two stacked busbars.
+          br.x = snapToGrid(mx);
+          br.y = snapToGrid(my);
+        } else {
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const off = branchOffset[br.type] || 20;
+          br.x = snapToGrid(mx + (-dy / len) * off);
+          br.y = snapToGrid(my + (dx / len) * off);
+        }
       } else if (linked.length === 1 && linked[0]) {
         br.x = linked[0].x + 60;
         br.y = linked[0].y;
+      }
+      // Orientation: BUSBAR draws lines/cables vertically (rotate 90°) between
+      // horizontal busbars; transformers keep their inherently vertical symbol.
+      // Other directions restore the canonical horizontal line orientation.
+      if (dir === 'BUSBAR') {
+        if (isLineType(br.type)) br.rotation = 90;
+        else if (br.type === 'transformer_2w' || br.type === 'transformer_3w') br.rotation = 0;
+      } else if (isLineType(br.type)) {
+        br.rotation = 0;
       }
       br.el.setAttribute('transform', `translate(${br.x}, ${br.y}) rotate(${br.rotation || 0})`);
     });
@@ -1480,11 +1506,8 @@ const Canvas = (() => {
     const defaultPlace = { dir: 'down', dx: 0, dy: 110, sx: 80, sy: 70 };
     let orphanIdx = 0;
     devices.forEach(comp => {
-      const conn = state.connections.find(c =>
-        c.from.compId === comp.id || c.to.compId === comp.id
-      );
-      if (conn) {
-        const busId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
+      const busId = firstNeighbor.get(comp.id);
+      if (busId !== undefined) {
         const bus = getComponent(busId);
         if (bus) {
           const p = placement[comp.type] || defaultPlace;
@@ -2017,6 +2040,15 @@ const Canvas = (() => {
             v_ac_set_pu: numOr(p.v_ac_set_pu, 1.0),
             k_vdc: numOr(p.k_vdc, 0.1),
             p_rated_mw: numOr(p.p_rated_mw, 0),
+            r_conv_ac_pu: numOr(p.r_conv_ac_pu, 0),
+            i_ac_max_pu: numOr(p.i_ac_max_pu, 0),
+            i_dc_max_pu: numOr(p.i_dc_max_pu, 0),
+            k_m_modulation: numOr(p.k_m_modulation, 0),
+            m_min: numOr(p.m_min, 0),
+            m_max: numOr(p.m_max, 0),
+            x_sc_pu: numOr(p.x_sc_pu, 0),
+            vn_ac_kv: numOr(p.vn_ac_kv, 0),
+            vn_dc_kv: numOr(p.vn_dc_kv, 0),
             in_service: p.in_service !== false,
           });
           vscIdx++;
@@ -2893,6 +2925,15 @@ const Canvas = (() => {
         pmax_mw: vsc.pmax_mw, pmin_mw: vsc.pmin_mw,
         qmax_mvar: vsc.qmax_mvar, qmin_mvar: vsc.qmin_mvar,
         p_rated_mw: vsc.p_rated_mw,
+        r_conv_ac_pu: vsc.r_conv_ac_pu ?? 0,
+        x_sc_pu: vsc.x_sc_pu ?? 0,
+        i_ac_max_pu: vsc.i_ac_max_pu ?? 0,
+        i_dc_max_pu: vsc.i_dc_max_pu ?? 0,
+        k_m_modulation: vsc.k_m_modulation ?? 0,
+        m_min: vsc.m_min ?? 0,
+        m_max: vsc.m_max ?? 0,
+        vn_ac_kv: vsc.vn_ac_kv ?? 0,
+        vn_dc_kv: vsc.vn_dc_kv ?? 0,
         in_service: vsc.in_service !== false,
       });
       if (acCompId !== undefined) addConnection(comp.id, 'ac', acCompId, 'right');

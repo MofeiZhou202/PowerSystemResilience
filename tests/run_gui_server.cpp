@@ -6952,6 +6952,90 @@ int main(int argc, char** argv) {
     }
   });
 
+  // Unified OPF endpoint: choose solver (ac/parity/dc) and which constraint
+  // families to enforce (branch / converter capacity / current / modulation).
+  // Used by the XJTU GUI OPF module.
+  svr.Post("/api/session/opf",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      const std::string solver = j.value("solver", std::string("parity"));
+      const json cons = j.contains("constraints") ? j["constraints"] : json::object();
+      const bool en_branch = cons.value("branch_limits", true);
+      const bool en_cap    = cons.value("converter_capacity", true);
+      const bool en_iac    = cons.value("converter_current", true);
+      const bool en_mod    = cons.value("converter_modulation", true);
+
+      json out;
+      out["solver"] = solver;
+      out["constraints"] = {{"branch_limits", en_branch},
+                            {"converter_capacity", en_cap},
+                            {"converter_current", en_iac},
+                            {"converter_modulation", en_mod}};
+
+      if (solver == "dc") {
+        hacdcpf::opf::DCOPFOptions opt;
+        opt.include_branch_limits = en_branch;
+        auto r = hacdcpf::solve_dc_opf(sys, opt);
+        out["converged"]=r.converged; out["iterations"]=r.iterations;
+        out["objective"]=r.objective; out["status"]=r.status;
+        out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
+        out["total_load_shedding_mw"]=r.total_load_shedding_mw;
+      } else {
+        hacdcpf::opf::ACOPFOptions opt;
+        opt.use_parity_ipm = (solver == "parity");
+        opt.allow_fallback = (solver != "parity");
+        opt.max_inner_iterations = (solver == "parity") ? 400 : 120;
+        opt.enforce_branch_limits = en_branch;
+        opt.enforce_converter_capacity = en_cap;
+        opt.enforce_converter_current_limits = en_iac;
+        opt.enforce_converter_modulation_limits = en_mod;
+        auto r = hacdcpf::solve_ac_opf(sys, opt);
+        out["converged"]=r.converged; out["iterations"]=r.iterations;
+        out["objective"]=r.objective; out["status"]=r.status;
+        out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+        out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
+        out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
+        out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
+        if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
+        if (!r.lmp_q.empty()) out["lmp_q"]=r.lmp_q;
+        const auto& v = r.converter_model_scope.validity;
+        out["scope"] = {{"model_scope", r.converter_model_scope.model_scope},
+                        {"capacity", v.vsc_capacity_circle_enforced},
+                        {"current", v.vsc_current_limits_enforced},
+                        {"modulation", v.vsc_modulation_limits_enforced},
+                        {"vdc_control", v.vsc_vdc_control_modelled}};
+        if (r.converged) {
+          for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i) {
+            sys.ac.generators[i].pg_mw = r.pg_mw[i];
+            if (i < r.qg_mvar.size()) sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+          }
+          if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
+          auto ac_pf = hacdcpf::solve_power_flow(sys);
+          if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
+        }
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/opf_ac",
            [](const httplib::Request&, httplib::Response& res) {
     try {

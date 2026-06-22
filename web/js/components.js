@@ -362,7 +362,12 @@ const COMP = (() => {
       qmax_mvar: 100, qmin_mvar: -100,
       eta: 0.98, loss_percent: 1.0, loss_mw: 0,
       v_dc_set_pu: 1.0, v_ac_set_pu: 1.0,
-      k_vdc: 0.1, p_rated_mw: 0, in_service: true
+      k_vdc: 0.1, p_rated_mw: 0,
+      r_conv_ac_pu: 0, x_sc_pu: 0,
+      i_ac_max_pu: 0, i_dc_max_pu: 0,
+      k_m_modulation: 0, m_min: 0, m_max: 0,
+      vn_ac_kv: 0, vn_dc_kv: 0,
+      in_service: true
     },
     dc_bus: {
       name: 'DC Bus', bus_type: 'DC_P', base_kv: 320,
@@ -590,6 +595,10 @@ const COMP = (() => {
     sgen_type: '类型', controllable: '可控',
     bus_ac: 'AC侧母线', bus_dc: 'DC侧母线', control_mode: '控制模式',
     p_set_mw: '有功设定(MW)', q_set_mvar: '无功设定(MVar)',
+    r_conv_ac_pu: 'AC侧等效电阻(pu)', x_sc_pu: '换流电抗(pu)',
+    i_ac_max_pu: 'AC电流上限(pu)', i_dc_max_pu: 'DC电流上限(pu)',
+    k_m_modulation: '调制系数 k_m', m_min: '调制比下限 m_min', m_max: '调制比上限 m_max',
+    vn_ac_kv: 'AC额定电压(kV)', vn_dc_kv: 'DC额定电压(kV)',
     irradiance: '辐照度(W/m²)', temperature: '温度(℃)',
     num_series: '串联数', num_parallel: '并联数',
     vmpp: 'MPP电压(V)', impp: 'MPP电流(A)',
