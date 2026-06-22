@@ -3477,8 +3477,21 @@ const App = (() => {
       } else if (key === 'bus_type') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
-        ['PQ', 'PV', 'SLACK', 'ISOLATED'].forEach(t => {
-          sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
+        // DC buses use DCBusType (DC_P / DC_V / DC_ISOLATED); AC buses use BusType.
+        const busTypeOptions = comp.type === 'dc_bus'
+          ? [
+              {v:'DC_P',        l:'DC_P (定功率)'},
+              {v:'DC_V',        l:'DC_V (定电压/参考)'},
+              {v:'DC_ISOLATED', l:'DC_ISOLATED (隔离)'},
+            ]
+          : [
+              {v:'PQ',       l:'PQ'},
+              {v:'PV',       l:'PV'},
+              {v:'SLACK',    l:'SLACK'},
+              {v:'ISOLATED', l:'ISOLATED'},
+            ];
+        busTypeOptions.forEach(o => {
+          sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
         });
         div.appendChild(sel);
       } else if (key === 'fuel_type') {
