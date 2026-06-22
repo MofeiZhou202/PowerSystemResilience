@@ -62,6 +62,16 @@ const Canvas = (() => {
   let svg, componentsLayer, connectionsLayer, resultsLayer, tempLayer;
   let viewBox = { x: -200, y: -100, w: 1200, h: 700 };
 
+  // Viewport culling (virtualized rendering) for large systems: when the
+  // component count exceeds this threshold, component glyphs whose anchor falls
+  // outside the visible viewBox (plus a margin) are display:none'd so the
+  // browser skips their layout/paint while panning and zooming.  Connection
+  // wires are left intact (cheap single elements).  Below the threshold every
+  // component is rendered, so small cases are unaffected.
+  const CULL_THRESHOLD = 1500;
+  let _cullActive = false;
+  let _cullPending = false;
+
   // ========== Init ==========
   function init() {
     svg = document.getElementById('canvas');
@@ -93,6 +103,39 @@ const Canvas = (() => {
   // ========== View ==========
   function updateViewBox() {
     svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+    scheduleViewportCulling();
+  }
+
+  // Hide component glyphs outside the visible viewBox (+margin) for large
+  // systems.  O(n) over components, coalesced to one run per animation frame so
+  // rapid pan/zoom stays smooth.  Reversible: dropping below the threshold (or a
+  // fit-all view) re-shows everything.
+  function updateViewportCulling() {
+    const comps = state.components;
+    if (comps.length < CULL_THRESHOLD) {
+      if (_cullActive) {
+        comps.forEach(c => { if (c.el && c.el.style.display === 'none') c.el.style.display = ''; });
+        _cullActive = false;
+      }
+      return;
+    }
+    _cullActive = true;
+    const mx = viewBox.w * 0.2, my = viewBox.h * 0.2;
+    const x0 = viewBox.x - mx, x1 = viewBox.x + viewBox.w + mx;
+    const y0 = viewBox.y - my, y1 = viewBox.y + viewBox.h + my;
+    for (let i = 0; i < comps.length; i++) {
+      const c = comps[i];
+      if (!c.el) continue;
+      const visible = c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1;
+      const want = visible ? '' : 'none';
+      if (c.el.style.display !== want) c.el.style.display = want;
+    }
+  }
+
+  function scheduleViewportCulling() {
+    if (_cullPending) return;
+    _cullPending = true;
+    requestAnimationFrame(() => { _cullPending = false; updateViewportCulling(); });
   }
 
   function screenToSvg(clientX, clientY) {
