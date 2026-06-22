@@ -325,3 +325,84 @@ TEST_CASE("DC/DC Buck duty ratio feasibility is backed out from port voltages",
   CHECK_FALSE(generic.defined);
   CHECK(generic.feasible);
 }
+
+TEST_CASE("Master-slave DC voltage group requires exactly one master (DCISLAND-MS-01)",
+          "[converter][coordination][multisource]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};  // one metallic island
+  auto m1 = vdc_vsc(1, 1, 1.0);
+  m1.coordination_group_id = "grp";
+  m1.is_master = true;
+  auto m2 = vdc_vsc(2, 2, 1.0);
+  m2.coordination_group_id = "grp";
+  m2.is_master = true;  // two masters in one group -> illegal
+  sys.vsc_converters = {m1, m2};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCISLAND-MS-01"));
+  CHECK_FALSE(report.feasible);
+}
+
+TEST_CASE("Participation factors in a DC voltage group must sum to one (DCISLAND-PARTICIPATION-01)",
+          "[converter][coordination][multisource]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};
+  auto p1 = vdc_vsc(1, 1, 1.0);
+  p1.coordination_group_id = "grp";
+  p1.participation_factor = 0.3;
+  auto p2 = vdc_vsc(2, 2, 1.0);
+  p2.coordination_group_id = "grp";
+  p2.participation_factor = 0.3;  // 0.3 + 0.3 = 0.6 != 1
+  sys.vsc_converters = {p1, p2};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCISLAND-PARTICIPATION-01"));
+  CHECK_FALSE(report.feasible);
+}
+
+TEST_CASE("A rigid Vdc source plus participation sharing is over-constrained (DCISLAND-PARTICIPATION-02)",
+          "[converter][coordination][multisource]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};
+  hacdcpf::Storage st;
+  st.index = 1;
+  st.bus = 1;
+  st.in_service = true;
+  st.control_mode = "DC_V";  // rigid DC voltage source
+  sys.dc.storage = {st};
+  auto p1 = vdc_vsc(2, 2, 1.0);
+  p1.participation_factor = 1.0;  // participation sharing alongside a rigid source
+  sys.vsc_converters = {p1};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCISLAND-PARTICIPATION-02"));
+  CHECK_FALSE(report.feasible);
+}
+
+TEST_CASE("A balanced participation group with one master is accepted",
+          "[converter][coordination][multisource]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};
+  auto p1 = vdc_vsc(1, 1, 1.0);
+  p1.coordination_group_id = "grp";
+  p1.is_master = true;
+  p1.participation_factor = 0.6;
+  auto p2 = vdc_vsc(2, 2, 1.0);
+  p2.coordination_group_id = "grp";
+  p2.participation_factor = 0.4;  // exactly one master, factors sum to 1.0
+  sys.vsc_converters = {p1, p2};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK_FALSE(report_has_rule(report, "DCISLAND-MS-01"));
+  CHECK_FALSE(report_has_rule(report, "DCISLAND-PARTICIPATION-01"));
+  CHECK_FALSE(report_has_rule(report, "DCISLAND-PARTICIPATION-02"));
+  CHECK(report.feasible);
+}

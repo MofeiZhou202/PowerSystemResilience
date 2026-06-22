@@ -79,6 +79,16 @@ struct VSCConverter {
   double i_max_pu{1.0};
   bool grid_forming{false};
 
+  // Multi-source DC voltage coordination (multi-converter model §6.5–6.7).
+  // Converters that share one DC island's voltage form a coordination group:
+  //   * coordination_group_id — groups co-operating Vdc formers (empty = ungrouped).
+  //   * is_master — master-slave designation; exactly one master per declared group.
+  //   * participation_factor — share of the island power imbalance this source
+  //     takes under participation-factor control; per group these must sum to 1.
+  std::string coordination_group_id;
+  bool is_master{false};
+  double participation_factor{0.0};
+
   std::string name;
 
   double forced_outage_rate{0.0};

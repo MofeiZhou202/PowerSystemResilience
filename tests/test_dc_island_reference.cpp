@@ -88,3 +88,46 @@ TEST_CASE("A genuine DC_V reference is pinned and the converter is not promoted"
   // Pinned DC_V bus holds its nominal voltage.
   REQUIRE(std::abs(pf.vdc.front() - 1.0) < 1e-3);
 }
+
+TEST_CASE("Opt-in rigid Vdc former pins the DC bus exactly at the setpoint",
+          "[hybrid][converter][dc_island][rigid]") {
+  const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/simple_case.json";
+  hacdcpf::HybridPowerSystem sys = hacdcpf::io::load_json(path);
+  REQUIRE_FALSE(sys.dc.buses.empty());
+  REQUIRE_FALSE(sys.vsc_converters.empty());
+  REQUIRE(sys.dc.buses.front().bus_type == hacdcpf::DCBusType::DC_P);
+  REQUIRE(sys.vsc_converters.front().control_mode == hacdcpf::ConverterMode::PQ_MODE);
+
+  const double v_set = (sys.vsc_converters.front().v_dc_set_pu > 0.1)
+                           ? sys.vsc_converters.front().v_dc_set_pu
+                           : 1.0;
+
+  hacdcpf::PowerFlowOptions opt;
+  opt.enable_rigid_vdc_former = true;
+  const hacdcpf::PowerFlowResult pf = hacdcpf::solve_power_flow(sys, opt);
+
+  REQUIRE(pf.converged);
+  REQUIRE_FALSE(pf.vdc.empty());
+  // The single-bus sole-former converter holds Vdc exactly at its setpoint,
+  // unlike the ~0.1%-off stiff-droop default.
+  REQUIRE(std::abs(pf.vdc.front() - v_set) < 1e-9);
+  // It forms Vdc as a rigid DC slack, not a VDC_Q droop promotion.
+  REQUIRE(pf.diagnostics.promoted_vsc_indices.empty());
+  REQUIRE(any_warning_contains(pf, "rigidly forms Vdc"));
+  // The converter exactly absorbs the 0.05 MW DC PV surplus (pdc = -0.05 MW).
+  REQUIRE_FALSE(pf.vsc_transfers.empty());
+  REQUIRE(std::abs(pf.vsc_transfers.front().p_dc_mw + 0.05) < 1e-6);
+}
+
+TEST_CASE("Rigid Vdc forming is opt-in: the default still uses droop promotion",
+          "[hybrid][converter][dc_island][rigid]") {
+  const std::string path = std::string(HACDCPF_TEST_DATA_DIR) + "/simple_case.json";
+  hacdcpf::HybridPowerSystem sys = hacdcpf::io::load_json(path);
+
+  const hacdcpf::PowerFlowResult pf = hacdcpf::solve_power_flow(sys);  // default opt
+
+  REQUIRE(pf.converged);
+  // Default behavior: the PQ converter is promoted to VDC_Q droop forming.
+  REQUIRE(pf.diagnostics.promoted_vsc_indices.size() == 1);
+  REQUIRE(any_warning_contains(pf, "auto-promoted"));
+}

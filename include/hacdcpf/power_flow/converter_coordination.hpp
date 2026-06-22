@@ -30,6 +30,11 @@ struct DCVoltageControlSource {
   double v_set_pu{0.0};
   bool has_v_set{false};
   bool droop{false};
+  // Multi-source coordination metadata (§6.5–6.7).
+  std::string group_id;
+  bool is_master{false};
+  double participation_factor{0.0};
+  double droop_gain{0.0};
 };
 
 struct DCIslandCoordinationSummary {
@@ -39,6 +44,9 @@ struct DCIslandCoordinationSummary {
   std::vector<DCVoltageControlSource> voltage_sources;
   int hard_vdc_sources{0};
   int droop_sources{0};
+  // Sum of droop gains of the island's droop voltage sources (§6.5): the island
+  // droop control is only effective when this total is strictly positive.
+  double total_droop_gain{0.0};
   // In-service VSC converters in PQ mode that the unified solver can
   // auto-promote to VDC_Q to form the DC-island voltage reference (mirrors
   // plan_dc_island_references in the Newton solver).  Their presence means the

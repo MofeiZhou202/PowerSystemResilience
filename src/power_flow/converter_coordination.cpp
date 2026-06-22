@@ -112,15 +112,21 @@ void add_voltage_source(DCIslandCoordinationSummary& summary,
                         int bus,
                         double v_set_pu,
                         bool has_v_set,
-                        bool droop) {
-  summary.voltage_sources.push_back(DCVoltageControlSource{std::move(component_type),
-                                                           component_index,
-                                                           bus,
-                                                           v_set_pu,
-                                                           has_v_set,
-                                                           droop});
+                        bool droop,
+                        const std::string& group_id = "",
+                        bool is_master = false,
+                        double participation_factor = 0.0,
+                        double droop_gain = 0.0) {
+  DCVoltageControlSource src{std::move(component_type), component_index, bus,
+                             v_set_pu, has_v_set, droop};
+  src.group_id = group_id;
+  src.is_master = is_master;
+  src.participation_factor = participation_factor;
+  src.droop_gain = droop_gain;
+  summary.voltage_sources.push_back(std::move(src));
   if (droop) {
     summary.droop_sources += 1;
+    summary.total_droop_gain += std::abs(droop_gain);
   } else {
     summary.hard_vdc_sources += 1;
   }
@@ -464,7 +470,11 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                            conv.bus_dc,
                            conv.v_dc_set_pu,
                            true,
-                           true);
+                           true,
+                           conv.coordination_group_id,
+                           conv.is_master,
+                           conv.participation_factor,
+                           conv.k_vdc);
         add_vsc_vdc_flexibility(conv, summary);
       }
     }
@@ -495,7 +505,11 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                            dcdc.bus_out,
                            dcdc.v_ref_pu,
                            true,
-                           true);
+                           true,
+                           /*group_id=*/"",
+                           /*is_master=*/false,
+                           /*participation_factor=*/0.0,
+                           /*droop_gain=*/dcdc.k_droop);
       }
       if (island_in >= 0) {
         report.dc_islands[static_cast<size_t>(island_in)].fixed_power_devices += 1;
@@ -579,7 +593,9 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     if (mode == "DC_V" || mode == "VDC" || mode == "Voltage") {
       add_voltage_source(summary, "dc_storage", st.index, st.bus, 0.0, false, false);
     } else if (mode == "Droop" || mode == "DC_DROOP") {
-      add_voltage_source(summary, "dc_storage", st.index, st.bus, 0.0, false, true);
+      add_voltage_source(summary, "dc_storage", st.index, st.bus, 0.0, false, true,
+                         /*group_id=*/"", /*is_master=*/false,
+                         /*participation_factor=*/0.0, /*droop_gain=*/1.0);
     }
   }
   for (const auto& er : sys.energy_routers) {
@@ -592,7 +608,9 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
       if (p.control_mode == ERControlMode::VF) {
         add_voltage_source(summary, "energy_router_port", p.index, p.bus, p.v_set_pu, true, false);
       } else if (p.control_mode == ERControlMode::Droop) {
-        add_voltage_source(summary, "energy_router_port", p.index, p.bus, p.v_set_pu, true, true);
+        add_voltage_source(summary, "energy_router_port", p.index, p.bus, p.v_set_pu, true, true,
+                           /*group_id=*/"", /*is_master=*/false,
+                           /*participation_factor=*/0.0, /*droop_gain=*/1.0);
       } else {
         summary.fixed_power_devices += 1;
         summary.fixed_power_mw += p.p_mw;
@@ -696,6 +714,86 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                       " rigid DC voltage sources and no droop/participation rule; active-power "
                       "sharing is over-constrained or non-unique.");
       }
+    }
+
+    // ── Multi-source DC voltage coordination (§6.5–6.7) ──────────────────────
+    // DCISLAND-DROOP-01: droop sources exist but their total gain is zero, so
+    // they cannot regulate Vdc or share the island imbalance.
+    if (summary.droop_sources > 0 && summary.total_droop_gain < 1e-9) {
+      add_issue(report,
+                CoordinationSeverity::Error,
+                "DCISLAND-DROOP-01",
+                "dc_island",
+                -1,
+                summary.island_index,
+                "DC island " + std::to_string(summary.island_index) + " (buses " +
+                    join_ints(summary.dc_buses) +
+                    ") has droop DC voltage sources but their total droop gain is zero; "
+                    "they cannot regulate Vdc or share the island power imbalance.");
+    }
+
+    // Group the island's voltage sources by coordination_group_id to validate
+    // master-slave and participation-factor declarations.
+    std::unordered_map<std::string, int> group_master_count;
+    std::unordered_map<std::string, double> group_participation_sum;
+    bool island_has_participation = false;
+    for (const auto& s : summary.voltage_sources) {
+      if (!s.group_id.empty() && s.is_master) {
+        group_master_count[s.group_id] += 1;
+      } else if (!s.group_id.empty()) {
+        group_master_count.try_emplace(s.group_id, 0);
+      }
+      if (std::abs(s.participation_factor) > 1e-9) {
+        island_has_participation = true;
+        if (!s.group_id.empty()) {
+          group_participation_sum[s.group_id] += s.participation_factor;
+        }
+      }
+    }
+    // DCISLAND-MS-01: a declared master-slave group needs exactly one master.
+    for (const auto& [gid, masters] : group_master_count) {
+      if (masters >= 2) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "DCISLAND-MS-01",
+                  "dc_island",
+                  -1,
+                  summary.island_index,
+                  "Master-slave DC voltage group '" + gid + "' in island " +
+                      std::to_string(summary.island_index) + " declares " +
+                      std::to_string(masters) +
+                      " masters; exactly one master is required (the other sources "
+                      "must follow via power/droop/participation, not as masters).");
+      }
+    }
+    // DCISLAND-PARTICIPATION-01: participation factors per group must sum to 1.
+    for (const auto& [gid, sum] : group_participation_sum) {
+      if (std::abs(sum - 1.0) > 1e-3) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "DCISLAND-PARTICIPATION-01",
+                  "dc_island",
+                  -1,
+                  summary.island_index,
+                  "Participation factors in DC voltage group '" + gid + "' (island " +
+                      std::to_string(summary.island_index) + ") sum to " +
+                      std::to_string(sum) + "; they must sum to 1.");
+      }
+    }
+    // DCISLAND-PARTICIPATION-02: rigid Vdc control plus participation-factor
+    // sharing in the same island over-constrains the active-power balance.
+    if (island_has_participation && summary.hard_vdc_sources > 0) {
+      add_issue(report,
+                CoordinationSeverity::Error,
+                "DCISLAND-PARTICIPATION-02",
+                "dc_island",
+                -1,
+                summary.island_index,
+                "DC island " + std::to_string(summary.island_index) +
+                    " combines a rigid Vdc source with participation-factor sharing; "
+                    "the rigid source already fixes Vdc and absorbs the imbalance, so "
+                    "participation factors over-constrain the balance. Use rigid control "
+                    "or participation, not both.");
     }
 
     if (!has_reference && summary.fixed_power_devices > 0 &&
