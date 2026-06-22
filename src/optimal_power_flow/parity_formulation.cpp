@@ -319,7 +319,25 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_st = cidx.n_sf;
   cidx.n_sconv = vidx.n_pac;
   cidx.n_sdc = static_cast<int>(prob.dc_branch_limited.size());
-  cidx.n_ineq_nonlin = cidx.n_sf + cidx.n_st + cidx.n_sconv + cidx.n_sdc;
+  // Optional converter physical limits (multi-converter model §3.1.4/3.1.5):
+  // collect the converter var indices that declare each limit so unconstrained
+  // converters add no inequality rows.
+  for (int k = 0; k < vidx.n_pac; ++k) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    if (std::isfinite(conv.i_ac_max_pu) && conv.i_ac_max_pu > 0.0) {
+      prob.conv_iac_limited.push_back(k);
+    }
+    const bool mod_ok =
+        conv.k_m_modulation > 0.0 && conv.vn_ac_kv > 0.0 && conv.vn_dc_kv > 0.0;
+    if (mod_ok && conv.m_max > 0.0) prob.conv_mmax_limited.push_back(k);
+    if (mod_ok && conv.m_min > 0.0) prob.conv_mmin_limited.push_back(k);
+  }
+  cidx.n_iac = static_cast<int>(prob.conv_iac_limited.size());
+  cidx.n_mmax = static_cast<int>(prob.conv_mmax_limited.size());
+  cidx.n_mmin = static_cast<int>(prob.conv_mmin_limited.size());
+  cidx.n_ineq_nonlin = cidx.n_sf + cidx.n_st + cidx.n_sconv + cidx.n_sdc +
+                       cidx.n_iac + cidx.n_mmax + cidx.n_mmin;
   prob.cidx = cidx;
 
   double max_pd = 1.0;
@@ -1413,6 +1431,35 @@ void nonlinear_inequality_constraints(const Problem& prob,
     const double pflow = gkm * vdc[k] * (vdc[k] - vdc[m]);
     h[off++] = pflow * pflow - pmax * pmax;
   }
+
+  // ── Converter AC current limits (multi-converter model §3.1.5) ──
+  //   Iac = sqrt(Pac²+Qac²)/Vm ≤ i_ac_max  ⇔  h = Pac²+Qac² − i_ac_max²·Vm² ≤ 0.
+  for (int k : prob.conv_iac_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+    const double vmc = vm[ac];
+    h[off++] = pac[k] * pac[k] + qac[k] * qac[k] - im2 * vmc * vmc;
+  }
+  // ── Converter modulation limits (multi-converter model §3.1.4) ──
+  //   m = Vm·Vn_ac / (Km·Vdc·Vn_dc).  Both bounds are linear in (Vm, Vdc).
+  for (int k : prob.conv_mmax_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    h[off++] = vm[ac] * conv.vn_ac_kv -
+               conv.m_max * conv.k_m_modulation * conv.vn_dc_kv * vdc[dc];
+  }
+  for (int k : prob.conv_mmin_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    h[off++] = conv.m_min * conv.k_m_modulation * conv.vn_dc_kv * vdc[dc] -
+               vm[ac] * conv.vn_ac_kv;
+  }
 }
 
 void nonlinear_inequality_jacobian(const Problem& prob,
@@ -1500,6 +1547,40 @@ void nonlinear_inequality_jacobian(const Problem& prob,
     // dh/dVk = 2*P*dP/dVk,  dh/dVm = 2*P*dP/dVm
     t.emplace_back(off, idx.i_vdc + k, 2.0 * pflow * dp_dvk);
     t.emplace_back(off, idx.i_vdc + m, 2.0 * pflow * dp_dvm);
+    ++off;
+  }
+
+  // Converter AC current limit Jacobian: ∂h/∂Pac=2Pac, ∂h/∂Qac=2Qac,
+  //   ∂h/∂Vm = −2·i_ac_max²·Vm.
+  for (int k : prob.conv_iac_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+    t.emplace_back(off, idx.i_pac + k, 2.0 * pac[k]);
+    t.emplace_back(off, idx.i_qac + k, 2.0 * qac[k]);
+    t.emplace_back(off, idx.i_vm + ac, -2.0 * im2 * vm[ac]);
+    ++off;
+  }
+  // Converter modulation Jacobians (linear, constant coefficients).
+  for (int k : prob.conv_mmax_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    t.emplace_back(off, idx.i_vm + ac, conv.vn_ac_kv);
+    t.emplace_back(off, idx.i_vdc + dc,
+                   -conv.m_max * conv.k_m_modulation * conv.vn_dc_kv);
+    ++off;
+  }
+  for (int k : prob.conv_mmin_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    t.emplace_back(off, idx.i_vm + ac, -conv.vn_ac_kv);
+    t.emplace_back(off, idx.i_vdc + dc,
+                   conv.m_min * conv.k_m_modulation * conv.vn_dc_kv);
     ++off;
   }
 
@@ -1963,6 +2044,24 @@ void lagrangian_hessian(const Problem& prob,
       add_sym_trip(idx.i_vdc + k, idx.i_vdc + m,
           2.0 * nu_dc * (dp_dvk * dp_dvm + pflow * (-gkm)));
     }
+
+    // Converter AC current limit Hessian: h = Pac²+Qac² − i_ac_max²·Vm².
+    //   ∂²h/∂Pac²=2, ∂²h/∂Qac²=2, ∂²h/∂Vm²=−2·i_ac_max² (no cross terms).
+    for (int k : prob.conv_iac_limited) {
+      const double nu_i = nu[off++];
+      if (std::abs(nu_i) < 1e-14) continue;
+      const auto& conv =
+          prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+      const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+      const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+      add(idx.i_pac + k, idx.i_pac + k, 2.0 * nu_i);
+      add(idx.i_qac + k, idx.i_qac + k, 2.0 * nu_i);
+      add(idx.i_vm + ac, idx.i_vm + ac, -2.0 * nu_i * im2);
+    }
+    // Modulation limits are linear ⇒ zero Hessian; advance the dual cursor to
+    // keep alignment with the value/Jacobian inequality order.
+    off += static_cast<int>(prob.conv_mmax_limited.size());
+    off += static_cast<int>(prob.conv_mmin_limited.size());
   }
 
   // Assemble sparse matrix from triplets (duplicate entries are summed)

@@ -48,6 +48,12 @@ struct ConstraintIndex {
   int i_conv_bal{0}, i_dcdc_bal{0}, i_er_bal{0};
 
   int n_sf{0}, n_st{0}, n_sconv{0}, n_sdc{0};
+  // Converter physical limits (multi-converter model §3.1.5/3.1.4), appended
+  // after the sdc block.  Each counts only the converters that declare the
+  // corresponding limit, so unconstrained converters add no rows.
+  int n_iac{0};   ///< AC current limits  Iac² ≤ i_ac_max²
+  int n_mmax{0};  ///< modulation upper limits  m ≤ m_max
+  int n_mmin{0};  ///< modulation lower limits  m ≥ m_min
   int n_ineq_nonlin{0};
 };
 
@@ -61,6 +67,12 @@ struct Problem {
   std::vector<int> conv_var_to_data;
   std::vector<int> branch_limited;
   std::vector<int> dc_branch_limited;
+
+  // Converter var indices (into the pac/qac arrays) that declare each optional
+  // physical limit (multi-converter model §3.1.4/3.1.5).
+  std::vector<int> conv_iac_limited;
+  std::vector<int> conv_mmax_limited;
+  std::vector<int> conv_mmin_limited;
 
   std::vector<int> gen_bus;
   std::vector<int> conv_ac_bus;

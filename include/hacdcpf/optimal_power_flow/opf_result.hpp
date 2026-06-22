@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "hacdcpf/model/converter_model_scope.hpp"
+
 namespace hacdcpf::opf {
 
 // ═══════════════════════════════════════════════════════════════════════// OPF Feasibility Audit
@@ -104,6 +106,9 @@ struct ACOPFResult {
   /// Independent post-solve feasibility audit.
   /// Populated by verify_opf_result(sys, result).
   OpfAudit audit;
+
+  /// Declares which parts of the unified converter model this OPF honored.
+  ConverterModelScope converter_model_scope{};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -155,6 +160,10 @@ struct DCOPFResult {
   ///         "LP" (linearised piecewise / linear costs).
   /// Disambiguates QP-vs-LP semantics across fallback paths.
   std::string objective_model;
+
+  /// Declares converter-model fidelity.  DC-OPF models no converter physics,
+  /// so all converter flags here stay false.
+  ConverterModelScope converter_model_scope{};
 };
 
 }  // namespace hacdcpf::opf

@@ -1794,6 +1794,17 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
 
 ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptions& opt) {
   ACOPFResult out;
+  // Parity-IPM uses the AML hybrid OPF builder, which enforces the VDC_Q DC-bus
+  // voltage equality and the converter capacity circle / quadratic loss.
+  {
+    auto& sc = out.converter_model_scope;
+    sc.model_scope = "ac-opf-parity-ipm:vsc-free-pq+capacity-circle+vdc-equality+iac+modulation";
+    sc.validity.vsc_loss_modelled = true;
+    sc.validity.vsc_capacity_circle_enforced = true;
+    sc.validity.vsc_current_limits_enforced = true;       // i_ac_max_pu (parity KKT)
+    sc.validity.vsc_modulation_limits_enforced = true;    // m_min/m_max (parity KKT)
+    sc.validity.vsc_vdc_control_modelled = true;
+  }
 
   parity::ParityOptions form_opt;
   form_opt.load_shedding = true;
@@ -2021,6 +2032,16 @@ bool contains_hybrid_acdc_components(const HybridPowerSystem& sys) {
 ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_in) {
   ACOPFResult out;
   ACOPFOptions opt = opt_in;
+  // Native AC-OPF models converters as free P_ac/Q_ac/P_dc box-bounded variables
+  // with the capacity circle and quadratic loss, but is control-mode-agnostic:
+  // it does NOT pin VDC_Q DC-bus voltages (unlike the parity-IPM / AML path).
+  {
+    auto& sc = out.converter_model_scope;
+    sc.model_scope = "ac-opf-native:vsc-free-pq+capacity-circle";
+    sc.validity.vsc_loss_modelled = true;
+    sc.validity.vsc_capacity_circle_enforced = true;
+    sc.validity.vsc_vdc_control_modelled = false;
+  }
 
   if (opt.max_inner_iterations <= 0) {
     opt.max_inner_iterations = 80;
