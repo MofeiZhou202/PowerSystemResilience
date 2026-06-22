@@ -101,6 +101,10 @@
     </label>
     <button id="btnPowerFlow" class="toolbar-btn run-btn" title="运行潮流计算">运行潮流计算</button>
     <button id="btnExportPfResults" class="toolbar-btn" title="将潮流计算结果导出为 JSON 文件">结果导出</button>
+    <label class="sub-label sub-checkbox" title="按多变换器控制模式理论，在潮流求解前校核 DC 岛电压形成、定功率冲突与功率平衡可行性">
+      <input id="pfCoordCheck" type="checkbox" checked/>
+      <span>多变换器校核</span>
+    </label>
   </div>
   <!-- Carbon flow -->
   <div class="sub-section" data-sub="carbonFlow" hidden>
@@ -737,9 +741,13 @@
       <div id="resultsContent" style="display:none">
         <div id="resultsSummary" class="results-summary"></div>
         <div class="result-group" data-result-group="powerFlow">
-        <div class="topo-section" id="pfBalanceSection" style="display:none">
-          <h4>潮流结果 — 节点功率平衡诊断</h4>
-          <div id="pfBalanceResults" class="topo-table-wrap"></div>
+        <div class="topo-section" id="pfCoordSection" style="display:none">
+          <h4>多变换器协调校核</h4>
+          <div id="pfCoordResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="pfAllComponentsSection">
+          <h4>潮流结果 — 全部元件计算结果</h4>
+          <div id="pfAllComponentsResults" class="topo-table-wrap"></div>
         </div>
         <div class="topo-section">
           <h4>潮流结果 — AC节点电压</h4>

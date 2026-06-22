@@ -38,6 +38,11 @@ inline std::string dc_bus_type_str(DCBusType t) {
 inline DCBusType dc_bus_type_from_str(const std::string& s) {
   if (s == "DC_V") return DCBusType::DC_V;
   if (s == "DC_ISOLATED") return DCBusType::DC_ISOLATED;
+  // Legacy/GUI-authored files may store AC-style "SLACK" for a DC bus.  DC buses
+  // have no SLACK type — a DC bus is only a true voltage reference (DC_V) when a
+  // real element holds its voltage.  Map the legacy alias to DC_P so DC-side
+  // voltage regulation is decided by converter/island analysis, not the label.
+  if (s == "SLACK" || s == "DC_SLACK") return DCBusType::DC_P;
   return DCBusType::DC_P;
 }
 
@@ -51,6 +56,7 @@ inline std::string converter_mode_str(ConverterMode m) {
   return "PQ";
 }
 inline ConverterMode converter_mode_from_str(const std::string& s) {
+  if (s == "PQ" || s == "PQ_MODE" || s == "AC_PQ") return ConverterMode::PQ_MODE;
   if (s == "VDC_Q") return ConverterMode::VDC_Q;
   if (s == "VDC_VAC") return ConverterMode::VDC_VAC;
   return ConverterMode::PQ_MODE;
@@ -162,6 +168,24 @@ inline DCDCControlMode dcdc_control_from_str(const std::string& s) {
   if (s == "Power") return DCDCControlMode::Power;
   if (s == "Droop") return DCDCControlMode::Droop;
   return DCDCControlMode::Voltage;
+}
+
+// ── DCDCTopology ────────────────────────────────────────────────────────
+inline std::string dcdc_topology_str(DCDCTopology t) {
+  switch (t) {
+    case DCDCTopology::Buck: return "Buck";
+    case DCDCTopology::Boost: return "Boost";
+    case DCDCTopology::BuckBoost: return "BuckBoost";
+    case DCDCTopology::Isolated: return "Isolated";
+    default: return "Generic";
+  }
+}
+inline DCDCTopology dcdc_topology_from_str(const std::string& s) {
+  if (s == "Buck") return DCDCTopology::Buck;
+  if (s == "Boost") return DCDCTopology::Boost;
+  if (s == "BuckBoost") return DCDCTopology::BuckBoost;
+  if (s == "Isolated") return DCDCTopology::Isolated;
+  return DCDCTopology::Generic;
 }
 
 // ── ERPortType ──────────────────────────────────────────────────────────

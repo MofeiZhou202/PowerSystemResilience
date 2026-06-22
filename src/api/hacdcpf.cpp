@@ -1,6 +1,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/power_flow/ac_linearized_pf.hpp"
 #include "hacdcpf/power_flow/branch_flow.hpp"
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/dc_solver.hpp"
 #include "hacdcpf/power_flow/fdpf_solver.hpp"
@@ -456,9 +458,29 @@ void populate_derived_results(const powerflow::SolverData& data,
   for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
   for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
 
-  result.vsc_transfers.reserve(data.converters.size());
-  for (const auto& conv : data.converters) {
+  // Converters the solver auto-promoted from PQ to VDC_Q (because their DC island
+  // had no voltage reference) must report transfers using the regulating mode,
+  // not their stored PQ setpoint — otherwise the reported AC/DC powers are wrong.
+  // The solver also stiffens the promoted converter's Vdc gain and may switch
+  // modes mid-iteration, so prefer its final `effective_converters` list (which
+  // already reflects all of that) and only fall back to the input converters +
+  // promotion-index flip when it is unavailable.
+  const std::vector<VSCConverter>& eff_converters =
+      !result.diagnostics.effective_converters.empty()
+          ? result.diagnostics.effective_converters
+          : data.converters;
+  const auto& promoted = result.diagnostics.promoted_vsc_indices;
+  auto is_promoted = [&promoted](int ci) {
+    return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
+  };
+
+  result.vsc_transfers.reserve(eff_converters.size());
+  for (int ci = 0; ci < static_cast<int>(eff_converters.size()); ++ci) {
+    VSCConverter conv = eff_converters[static_cast<size_t>(ci)];
     if (!conv.in_service) continue;
+    if (conv.control_mode == ConverterMode::PQ_MODE && is_promoted(ci)) {
+      conv.control_mode = ConverterMode::VDC_Q;
+    }
     const auto [p_ac_pu, q_ac_pu] =
         powerflow::converter_ac_injection(conv, vm, va, vdc, data.base_mva, loss_model);
     const double p_dc_pu =
@@ -488,6 +510,16 @@ void populate_derived_results(const powerflow::SolverData& data,
     tr.p_in_mw = p_in_mw;
     tr.p_out_mw = p_out_mw;
     tr.loss_mw = p_in_mw - p_out_mw;
+    // Duty-ratio feasibility from the solved port voltages (multi-converter §3.2).
+    const int bi = c.bus_in - 1;
+    const int bo = c.bus_out - 1;
+    const double v_in = (bi >= 0 && bi < vdc.size()) ? vdc[bi] : 1.0;
+    const double v_out = (bo >= 0 && bo < vdc.size()) ? vdc[bo] : 1.0;
+    const auto duty = powerflow::dcdc_duty_ratio(c, v_in, v_out);
+    tr.duty = duty.duty;
+    tr.voltage_ratio = duty.voltage_ratio;
+    tr.duty_defined = duty.defined;
+    tr.duty_feasible = duty.feasible;
     result.dcdc_transfers.push_back(tr);
   }
 
@@ -550,6 +582,19 @@ Result<PowerFlowResult> safe_solve_power_flow(
 }
 
 PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOptions& opt) {
+  const powerflow::ConverterCoordinationReport coordination =
+      powerflow::evaluate_converter_coordination(sys, opt.enable_converter_coordination_check);
+  if (coordination.enabled && coordination.has_blocking_issue()) {
+    PowerFlowResult result;
+    result.converged = false;
+    result.diagnostics.converter_coordination = coordination;
+    result.diagnostics.termination_reason = "Converter coordination feasibility check failed";
+    for (const auto& issue : coordination.issues) {
+      result.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+    }
+    return result;
+  }
+
   // ── Graph topology pre-check ──────────────────────────────────────────────
   // Return immediately (before Y-bus assembly) if no island has a slack bus.
   if (!sys.ac.buses.empty()) {
@@ -573,7 +618,30 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
   static thread_local powerflow::NewtonSolver solver;
   const InitialState* init_ptr = opt.initial_state ? &*opt.initial_state : nullptr;
   PowerFlowResult result = solver.solve(data, opt, init_ptr);
+  result.diagnostics.converter_coordination = coordination;
+  if (coordination.enabled) {
+    for (const auto& issue : coordination.issues) {
+      if (issue.severity == powerflow::CoordinationSeverity::Warning ||
+          issue.severity == powerflow::CoordinationSeverity::Info) {
+        result.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+      }
+    }
+  }
   populate_derived_results(data, result, opt.loss_model);
+  // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
+  // solution can still demand an infeasible voltage conversion for the declared
+  // power-stage topology.
+  if (result.converged) {
+    for (const auto& tr : result.dcdc_transfers) {
+      if (tr.duty_defined && !tr.duty_feasible) {
+        result.diagnostics.warnings.push_back(
+            "[DCDC-PHYS-01] DC/DC converter " + std::to_string(tr.index) +
+            " duty ratio " + std::to_string(tr.duty) +
+            " is outside its feasible window (Vout/Vin=" + std::to_string(tr.voltage_ratio) +
+            "); the requested voltage conversion is infeasible for the declared topology.");
+      }
+    }
+  }
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
   return result;
 }
@@ -756,6 +824,7 @@ PowerFlowOptions PowerFlowOptions::from_parts(
   o.converter_vdc_switch_low_pu     = converter.converter_vdc_switch_low_pu;
   o.mode_hysteresis_iters           = converter.mode_hysteresis_iters;
   o.enable_converter_mode_switching = converter.enable_converter_mode_switching;
+  o.enable_converter_coordination_check = converter.enable_converter_coordination_check;
   o.loss_model                      = converter.loss_model;
 
   // ZIP

@@ -4280,7 +4280,17 @@ const Canvas = (() => {
             if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
           }
         }
-        else powerMW = readOperatingPowerMW(comp, busCompId);
+        else if (comp.type === 'storage' || comp.type === 'mobile_storage') {
+          // Storage dispatch must use its signed setpoint. A zero setpoint is a
+          // real operating state; falling back to rated power draws a false flow.
+          powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0;
+        }
+        else if (comp.type === 'dc_pv_array') powerMW = Number.isFinite(Number(p.p_set_mw)) ? Number(p.p_set_mw) : 0;
+        else powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw)
+                    : (Number.isFinite(Number(p.p_set_mw)) ? Number(p.p_set_mw)
+                    : (Number.isFinite(Number(p.p_rated_mw)) ? Number(p.p_rated_mw) : 0));
+
+        if (Math.abs(powerMW) < 0.001) return;
 
         // Determine direction
         let isSupply;

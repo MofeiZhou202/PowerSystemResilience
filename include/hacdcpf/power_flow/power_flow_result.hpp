@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hacdcpf/model/ac_components.hpp"  // IslandInfo
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 
 namespace hacdcpf {
 
@@ -68,6 +69,18 @@ struct SolverDiagnostics {
 
   std::vector<IterationLogEntry> iteration_log;
   std::vector<std::string>       warnings;
+  powerflow::ConverterCoordinationReport converter_coordination;
+
+  // VSC converters auto-promoted from PQ to a Vdc-regulating mode because their
+  // DC island had no voltage reference (indices into the solver's converter list).
+  std::vector<int>               promoted_vsc_indices;
+
+  // The solver's final converter list after auto-promotion, stiff-gain Vdc
+  // forming and any in-iteration mode switching.  Post-solve result
+  // reconstruction (AC/DC transfers, losses) must use these — not the input
+  // converters — so the reported converter powers match the solved network
+  // state.  Empty when no Newton solve populated it.
+  std::vector<VSCConverter>      effective_converters;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -129,6 +142,13 @@ struct DCDCTransfer {
   double p_in_mw{0.0};
   double p_out_mw{0.0};
   double loss_mw{0.0};
+  // Ideal CCM duty ratio backed out from the solved port voltages (or modulation
+  // gain for the Isolated topology), and whether it lies in the converter's
+  // [d_min, d_max] window.  duty_defined is false for the Generic topology.
+  double duty{0.0};
+  double voltage_ratio{0.0};
+  bool duty_defined{false};
+  bool duty_feasible{true};
 };
 
 struct Trafo3WFlow {
