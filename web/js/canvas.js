@@ -1443,6 +1443,31 @@ const Canvas = (() => {
       bus.el.setAttribute('transform', `translate(${bus.x}, ${bus.y}) rotate(${bus.rotation || 0})`);
     });
 
+    // Busbar widening: in BUSBAR mode stretch each horizontal bus bar so it spans
+    // the horizontal extent of the feeders that tap it (its spanning-tree
+    // children), giving a substation single-line look.  Other directions restore
+    // the native ±40 bar so switching layouts stays clean.  The bar is the first
+    // <line> in the bus glyph; editing x1/x2 leaves the centred label untouched.
+    const BAR_HALF = 40, BAR_MARGIN = 26, BAR_HALF_MAX = nodeGap * 3;
+    buses.forEach(bus => {
+      const line = bus.el.querySelector('line');
+      if (!line) return;
+      if (dir === 'BUSBAR') {
+        let minDx = -BAR_HALF, maxDx = BAR_HALF;
+        (children.get(bus.id) || []).forEach(cid => {
+          const c = getComponent(cid);
+          if (c) { const dx = c.x - bus.x; if (dx < minDx) minDx = dx; if (dx > maxDx) maxDx = dx; }
+        });
+        const x1 = Math.max(minDx - BAR_MARGIN, -BAR_HALF_MAX);
+        const x2 = Math.min(maxDx + BAR_MARGIN, BAR_HALF_MAX);
+        line.setAttribute('x1', x1.toFixed(1));
+        line.setAttribute('x2', x2.toFixed(1));
+      } else {
+        line.setAttribute('x1', String(-BAR_HALF));
+        line.setAttribute('x2', String(BAR_HALF));
+      }
+    });
+
     // Place branch-type components at the midpoint of their two buses, pushed
     // along the branch normal so the icon does not sit exactly on the wire
     // (doc §8).  Transformers get a larger offset than plain lines.
@@ -2323,6 +2348,10 @@ const Canvas = (() => {
             pmax_mw: numOr(p.pmax_mw, 0),
             pmin_mw: numOr(p.pmin_mw, 0),
             k_droop: numOr(p.k_droop, 0),
+            topology: p.topology || 'Generic',
+            d_min: numOr(p.d_min, 0.05),
+            d_max: numOr(p.d_max, 0.95),
+            n_ratio: numOr(p.n_ratio, 1.0),
             in_service: p.in_service !== false,
           });
           break;
@@ -3260,6 +3289,10 @@ const Canvas = (() => {
         r_eq_pu: dc.r_eq_pu,
         pmax_mw: dc.pmax_mw, pmin_mw: dc.pmin_mw,
         k_droop: dc.k_droop,
+        topology: dc.topology || 'Generic',
+        d_min: dc.d_min ?? 0.05,
+        d_max: dc.d_max ?? 0.95,
+        n_ratio: dc.n_ratio ?? 1.0,
         in_service: dc.in_service !== false,
       });
       if (inCompId !== undefined) addConnection(comp.id, 'in', inCompId, 'right');

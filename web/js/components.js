@@ -471,7 +471,9 @@ const COMP = (() => {
       control_mode: 'Voltage', p_ref_mw: 0, v_ref_pu: 1.0,
       sn_mva: 50, vn_in_kv: 320, vn_out_kv: 160,
       eta: 0.98, r_eq_pu: 0.01, pmax_mw: 50, pmin_mw: -50,
-      k_droop: 0.05, in_service: true
+      k_droop: 0.05,
+      topology: 'Generic', d_min: 0.05, d_max: 0.95, n_ratio: 1.0,
+      in_service: true
     },
     energy_router: {
       name: 'ERouter', router_type: 'hybrid', num_ports: 4,
@@ -599,6 +601,7 @@ const COMP = (() => {
     i_ac_max_pu: 'AC电流上限(pu)', i_dc_max_pu: 'DC电流上限(pu)',
     k_m_modulation: '调制系数 k_m', m_min: '调制比下限 m_min', m_max: '调制比上限 m_max',
     vn_ac_kv: 'AC额定电压(kV)', vn_dc_kv: 'DC额定电压(kV)',
+    topology: 'DC/DC拓扑', d_min: '占空比下限 d_min', d_max: '占空比上限 d_max', n_ratio: '变压比 n',
     irradiance: '辐照度(W/m²)', temperature: '温度(℃)',
     num_series: '串联数', num_parallel: '并联数',
     vmpp: 'MPP电压(V)', impp: 'MPP电流(A)',

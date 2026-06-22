@@ -5,7 +5,7 @@ implementation files, and the relations between functions/classes.
 
 ## Start Here
 
-- [Main project overview](md_README.html)
+- [Main project overview](README.md)
 - [Class index](annotated.html)
 - [File index](files.html)
 - [Namespace index](namespaces.html)

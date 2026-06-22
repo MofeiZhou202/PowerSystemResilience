@@ -1332,6 +1332,10 @@ const App = (() => {
         setStatus('未收敛', 'error');
       }
       _lastOpfData = data;
+      // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
+      // the power-flow voltage overlay. Flow/heat-map viz needs geo branch data
+      // the OPF endpoint does not emit, so it degrades to voltage labels only.
+      if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
       showOpfResults(data);
       switchTab('results');
     } else {
@@ -4351,7 +4355,20 @@ const App = (() => {
     fieldsDiv.innerHTML = '';
 
     const defaults = COMP.defaults[comp.type] || {};
+    // Optional section dividers: when a field key matches, a header row is
+    // inserted before it to group the OPF constraint-limit fields visually.
+    const sectionHeaders = {
+      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)' },
+      dcdc_converter: { topology: '占空比约束 (OPF)' },
+    };
+    const secMap = sectionHeaders[comp.type] || null;
     Object.keys(defaults).forEach(key => {
+      if (secMap && secMap[key]) {
+        const hd = document.createElement('div');
+        hd.className = 'prop-section-header';
+        hd.textContent = secMap[key];
+        fieldsDiv.appendChild(hd);
+      }
       const rawVal = comp.params[key] !== undefined ? comp.params[key] : defaults[key];
       const val = key === 'emission_factor_tco2_mwh'
         ? carbonFactorDisplay(rawVal)
@@ -4394,6 +4411,20 @@ const App = (() => {
         sel.dataset.field = key;
         ['ConstantPower', 'ConstantImpedance', 'ZIP'].forEach(t => {
           sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
+        });
+        div.appendChild(sel);
+      } else if (key === 'topology') {
+        // DC/DC power-stage topology selects the duty-ratio feasibility model.
+        const sel = document.createElement('select');
+        sel.dataset.field = key;
+        [
+          {v:'Generic',   l:'Generic (无占空比约束)'},
+          {v:'Buck',      l:'Buck (降压)'},
+          {v:'Boost',     l:'Boost (升压)'},
+          {v:'BuckBoost', l:'Buck-Boost (升降压)'},
+          {v:'Isolated',  l:'Isolated (隔离/DAB)'},
+        ].forEach(o => {
+          sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
         });
         div.appendChild(sel);
       } else if (key === 'control_mode') {
