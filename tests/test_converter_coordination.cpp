@@ -983,6 +983,15 @@ TEST_CASE("AC_PV converter holds its AC terminal voltage (power flow)",
   // The AC_PV converter must hold its AC terminal (bus 2 → index 1) at its
   // voltage setpoint, with reactive power free.
   CHECK(std::abs(r.vm[1] - 1.03) < 2e-3);
+
+  // It releases reactive power: the reported Qac is the bus's balancing reactive
+  // (non-zero, since holding 1.03 pu against the load/branch needs reactive
+  // support), not the placeholder q_set_mvar (0).
+  const auto it = std::find_if(r.vsc_transfers.begin(), r.vsc_transfers.end(),
+                               [](const VSCTransfer& t) { return t.index == 1; });
+  REQUIRE(it != r.vsc_transfers.end());
+  CHECK(std::isfinite(it->q_ac_mvar));
+  CHECK(std::abs(it->q_ac_mvar) > 1e-3);
 }
 
 TEST_CASE("AC_PV mode coordination rules (ACDC-CTRL-03/04)",

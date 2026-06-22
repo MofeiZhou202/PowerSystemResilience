@@ -483,6 +483,24 @@ void populate_derived_results(const powerflow::SolverData& data,
     return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
   };
 
+  // AC_PV reactive attribution: an AC_PV converter's AC bus is voltage-controlled
+  // (PV), so the converter supplies the bus's reactive generation = network
+  // reactive injection + local reactive demand.  Compute the network current
+  // I = Ybus·V once, only when an AC_PV converter is present.  This credits the
+  // bus's reactive balance to the converter; with several reactive devices on
+  // one bus the attribution is shared (multi-converter model r1 §1.3) and this
+  // single-source convention over-credits one converter.
+  const bool has_ac_pv = std::any_of(
+      eff_converters.begin(), eff_converters.end(), [](const VSCConverter& c) {
+        return c.in_service && c.control_mode == ConverterMode::AC_PV;
+      });
+  Eigen::VectorXcd ybus_current;
+  if (has_ac_pv && data.ybus.rows() == vm.size() && data.ybus.cols() == vm.size()) {
+    Eigen::VectorXcd vbus(vm.size());
+    for (Eigen::Index i = 0; i < vm.size(); ++i) vbus[i] = std::polar(vm[i], va[i]);
+    ybus_current = data.ybus * vbus;
+  }
+
   result.vsc_transfers.reserve(eff_converters.size());
   for (int ci = 0; ci < static_cast<int>(eff_converters.size()); ++ci) {
     VSCConverter conv = eff_converters[static_cast<size_t>(ci)];
@@ -495,12 +513,29 @@ void populate_derived_results(const powerflow::SolverData& data,
     const double p_dc_pu =
         powerflow::converter_dc_injection(conv, vm, va, vdc, data.base_mva, loss_model);
 
+    // AC_PV releases reactive power: report the bus's reactive generation (the
+    // free balancing injection) instead of the placeholder q_set_mvar.
+    double q_ac_pu_out = q_ac_pu;
+    if (conv.control_mode == ConverterMode::AC_PV &&
+        ybus_current.size() == vm.size()) {
+      const int aci = conv.bus_ac - 1;
+      if (aci >= 0 && aci < static_cast<int>(vm.size())) {
+        const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
+        const double q_net_inj =
+            (v_i * std::conj(ybus_current[static_cast<Eigen::Index>(aci)])).imag();
+        const double qd_i = (aci < static_cast<int>(data.qd_pu.size()))
+                                ? data.qd_pu[static_cast<size_t>(aci)]
+                                : 0.0;
+        q_ac_pu_out = q_net_inj + qd_i;
+      }
+    }
+
     VSCTransfer tr;
     tr.index = conv.index;
     tr.bus_ac = conv.bus_ac;
     tr.bus_dc = conv.bus_dc;
     tr.p_ac_mw = p_ac_pu * data.base_mva;
-    tr.q_ac_mvar = q_ac_pu * data.base_mva;
+    tr.q_ac_mvar = q_ac_pu_out * data.base_mva;
     tr.p_dc_mw = p_dc_pu * data.base_mva;
     tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
     result.vsc_transfers.push_back(tr);
