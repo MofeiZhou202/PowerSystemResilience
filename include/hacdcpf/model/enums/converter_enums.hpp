@@ -22,6 +22,17 @@ enum class DCDCControlMode {
   Droop = 2,
 };
 
+// DC-DC converter power-stage topology (sets the duty-ratio feasibility model,
+// multi-converter model §3.2).  Generic keeps the legacy behavior with no
+// duty-ratio constraint.
+enum class DCDCTopology {
+  Generic = 0,
+  Buck = 1,
+  Boost = 2,
+  BuckBoost = 3,
+  Isolated = 4,
+};
+
 // Energy router port type
 enum class ERPortType {
   AC = 0,

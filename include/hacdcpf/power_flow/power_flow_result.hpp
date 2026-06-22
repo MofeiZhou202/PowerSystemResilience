@@ -142,6 +142,13 @@ struct DCDCTransfer {
   double p_in_mw{0.0};
   double p_out_mw{0.0};
   double loss_mw{0.0};
+  // Ideal CCM duty ratio backed out from the solved port voltages (or modulation
+  // gain for the Isolated topology), and whether it lies in the converter's
+  // [d_min, d_max] window.  duty_defined is false for the Generic topology.
+  double duty{0.0};
+  double voltage_ratio{0.0};
+  bool duty_defined{false};
+  bool duty_feasible{true};
 };
 
 struct Trafo3WFlow {

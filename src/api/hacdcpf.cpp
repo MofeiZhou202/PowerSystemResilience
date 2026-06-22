@@ -510,6 +510,16 @@ void populate_derived_results(const powerflow::SolverData& data,
     tr.p_in_mw = p_in_mw;
     tr.p_out_mw = p_out_mw;
     tr.loss_mw = p_in_mw - p_out_mw;
+    // Duty-ratio feasibility from the solved port voltages (multi-converter §3.2).
+    const int bi = c.bus_in - 1;
+    const int bo = c.bus_out - 1;
+    const double v_in = (bi >= 0 && bi < vdc.size()) ? vdc[bi] : 1.0;
+    const double v_out = (bo >= 0 && bo < vdc.size()) ? vdc[bo] : 1.0;
+    const auto duty = powerflow::dcdc_duty_ratio(c, v_in, v_out);
+    tr.duty = duty.duty;
+    tr.voltage_ratio = duty.voltage_ratio;
+    tr.duty_defined = duty.defined;
+    tr.duty_feasible = duty.feasible;
     result.dcdc_transfers.push_back(tr);
   }
 
@@ -618,6 +628,20 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   populate_derived_results(data, result, opt.loss_model);
+  // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
+  // solution can still demand an infeasible voltage conversion for the declared
+  // power-stage topology.
+  if (result.converged) {
+    for (const auto& tr : result.dcdc_transfers) {
+      if (tr.duty_defined && !tr.duty_feasible) {
+        result.diagnostics.warnings.push_back(
+            "[DCDC-PHYS-01] DC/DC converter " + std::to_string(tr.index) +
+            " duty ratio " + std::to_string(tr.duty) +
+            " is outside its feasible window (Vout/Vin=" + std::to_string(tr.voltage_ratio) +
+            "); the requested voltage conversion is infeasible for the declared topology.");
+      }
+    }
+  }
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
   return result;
 }

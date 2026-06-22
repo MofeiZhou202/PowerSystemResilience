@@ -77,6 +77,23 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
                                       const Eigen::VectorXd& vdc,
                                       double base_mva);
 
+// Ideal CCM duty-ratio feasibility result for a DC/DC converter (multi-converter
+// model §3.2).  `duty` is the duty ratio D backed out from the port voltages for
+// Buck/Boost/Buck-Boost, or the modulation gain M = Vout/(n·Vin) for Isolated.
+// `defined` is false for the Generic topology or non-positive voltages.
+struct DCDCDutyResult {
+  double duty{0.0};
+  double voltage_ratio{0.0};
+  bool defined{false};
+  bool feasible{true};
+};
+
+// Back out the duty ratio from solved per-unit port voltages and test it against
+// the converter's [d_min, d_max] window.  Generic topology returns defined=false.
+DCDCDutyResult dcdc_duty_ratio(const DCDCConverter& dcdc,
+                               double v_in_pu,
+                               double v_out_pu);
+
 double converter_loss(const VSCConverter& conv,
                       double p,
                       double vdc,

@@ -705,6 +705,9 @@ static json vsc_to_json(const VSCConverter& c) {
   j["in_service"] = c.in_service;
   j["control_mode"] = converter_mode_str(c.control_mode);
   j["p_set_mw"] = c.p_set_mw;
+  j["p_is_hard_constraint"] = c.p_is_hard_constraint;
+  j["p_schedule_mw"] = c.p_schedule_mw;
+  j["p_initial_mw"] = c.p_initial_mw;
   j["q_set_mvar"] = c.q_set_mvar;
   j["v_dc_set_pu"] = c.v_dc_set_pu;
   j["v_ac_set_pu"] = c.v_ac_set_pu;
@@ -733,6 +736,9 @@ static VSCConverter vsc_from_json(const json& j) {
   c.control_mode = converter_mode_from_str(
       jget<std::string>(j, "control_mode", "PQ"));
   c.p_set_mw = jget(j, "p_set_mw", 0.0);
+  c.p_is_hard_constraint = jget(j, "p_is_hard_constraint", false);
+  c.p_schedule_mw = jget(j, "p_schedule_mw", 0.0);
+  c.p_initial_mw = jget(j, "p_initial_mw", 0.0);
   c.q_set_mvar = jget(j, "q_set_mvar", 0.0);
   c.v_dc_set_pu = jget(j, "v_dc_set_pu", 1.0);
   c.v_ac_set_pu = jget(j, "v_ac_set_pu", 1.0);
@@ -1777,6 +1783,10 @@ static json dcdc_to_json(const DCDCConverter& c) {
   j["pmax_mw"] = c.pmax_mw;
   j["pmin_mw"] = c.pmin_mw;
   j["k_droop"] = c.k_droop;
+  j["topology"] = dcdc_topology_str(c.topology);
+  j["d_min"] = c.d_min;
+  j["d_max"] = c.d_max;
+  j["n_ratio"] = c.n_ratio;
   j["mtbf_hours"] = c.mtbf_hours;
   j["mttr_hours"] = c.mttr_hours;
   return j;
@@ -1800,6 +1810,10 @@ static DCDCConverter dcdc_from_json(const json& j) {
   c.pmax_mw = jget(j, "pmax_mw", 0.0);
   c.pmin_mw = jget(j, "pmin_mw", 0.0);
   c.k_droop = jget(j, "k_droop", 0.0);
+  c.topology = dcdc_topology_from_str(jget<std::string>(j, "topology", "Generic"));
+  c.d_min = jget(j, "d_min", 0.05);
+  c.d_max = jget(j, "d_max", 0.95);
+  c.n_ratio = jget(j, "n_ratio", 1.0);
   c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return c;

@@ -6169,6 +6169,25 @@ int main(int argc, char** argv) {
           add_text_metric(row, "模式",
                           promoted ? (std::string(converter_mode_str(c.control_mode)) + "→VDC_Q(自动构网)")
                                    : std::string(converter_mode_str(c.control_mode)));
+          // Active-power setpoint semantics (multi-converter model §16.3): make
+          // explicit whether P is a hard constraint or only a dispatch schedule /
+          // initial guess that the DC voltage control releases.
+          {
+            const bool forms_vdc = promoted ||
+                ((c.control_mode == hacdcpf::ConverterMode::VDC_Q ||
+                  c.control_mode == hacdcpf::ConverterMode::VDC_VAC) &&
+                 std::abs(c.k_vdc) > 1e-9) || c.grid_forming;
+            const double p_sched = std::abs(c.p_schedule_mw) > 1e-12 ? c.p_schedule_mw : c.p_set_mw;
+            const double p_init = std::abs(c.p_initial_mw) > 1e-12 ? c.p_initial_mw : c.p_set_mw;
+            if (c.p_is_hard_constraint && !forms_vdc) {
+              add_text_metric(row, "有功语义", "硬约束 P_set");
+              add_metric(row, "P设定", c.p_set_mw, "MW", "p", 4);
+            } else if (forms_vdc) {
+              add_text_metric(row, "有功语义", "构网释放(P自由)");
+              add_metric(row, "P调度", p_sched, "MW", "p", 4);
+              add_metric(row, "P初值", p_init, "MW", "p", 4);
+            }
+          }
           add_metric(row, "Pac", v ? v->p_ac_mw : 0.0, "MW", "p", 4);
           add_metric(row, "Qac", v ? v->q_ac_mvar : 0.0, "MVar", "q", 4);
           add_metric(row, "Pdc", v ? v->p_dc_mw : 0.0, "MW", "p", 4);
@@ -6192,6 +6211,19 @@ int main(int argc, char** argv) {
           add_metric(row, "Pout", d ? d->p_out_mw : 0.0, "MW", "p", 4);
           add_metric(row, "Loss", d ? d->loss_mw : 0.0, "MW", "p", 4);
           add_metric(row, "Vref", c.v_ref_pu, "pu", "scalar", 4);
+          // Power-stage topology + duty-ratio feasibility (multi-converter §3.2).
+          if (c.topology != hacdcpf::DCDCTopology::Generic) {
+            add_text_metric(row, "拓扑", dcdc_topology_str(c.topology));
+            if (d && d->duty_defined) {
+              add_metric(row, c.topology == hacdcpf::DCDCTopology::Isolated ? "调制增益M" : "占空比D",
+                         d->duty, "", "scalar", 4);
+              add_metric(row, "电压比", d->voltage_ratio, "", "scalar", 4);
+              if (!d->duty_feasible) {
+                add_note(row, "占空比/增益超出[" + std::to_string(c.d_min) + ", " +
+                                  std::to_string(c.d_max) + "]可行域，该电压变换不可行(DCDC-PHYS-01)");
+              }
+            }
+          }
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < er_snapshot.size(); ++i) {

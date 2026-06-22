@@ -8,6 +8,7 @@
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
+#include "hacdcpf/power_flow/converter_model.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../../data"
@@ -238,4 +239,89 @@ TEST_CASE("DC/DC Voltage mode is blocked until the PF model enforces v_ref",
   CHECK(report_has_rule(report, "DCDC-CTRL-01"));
   CHECK_FALSE(report.feasible);
   CHECK(report.blocking_count() > 0);
+}
+
+TEST_CASE("A DC grid-forming converter cannot hard-constrain AC active power (ACDC-GFM-01)",
+          "[converter][coordination][gfm]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1)};
+  hacdcpf::VSCConverter conv = vdc_vsc(1, 1, 1.0);  // VDC_Q, k_vdc=0.1 -> forms Vdc
+  conv.p_set_mw = 3.0;
+  conv.p_is_hard_constraint = true;  // contradictory: forms Vdc yet pins AC P
+  sys.vsc_converters = {conv};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "ACDC-GFM-01"));
+  CHECK_FALSE(report_has_rule(report, "ACDC-03"));
+  CHECK_FALSE(report.feasible);  // an Error blocks the solve
+}
+
+TEST_CASE("A DC grid-forming converter with a soft P schedule only warns (ACDC-03)",
+          "[converter][coordination][gfm]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1)};
+  hacdcpf::VSCConverter conv = vdc_vsc(1, 1, 1.0);
+  conv.p_set_mw = 3.0;
+  conv.p_is_hard_constraint = false;  // p_set_mw is only a schedule/initial value
+  sys.vsc_converters = {conv};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "ACDC-03"));
+  CHECK_FALSE(report_has_rule(report, "ACDC-GFM-01"));
+  CHECK(report.feasible);  // a warning does not block; the VDC converter forms Vdc
+}
+
+TEST_CASE("Power-controlled DC/DC needs a voltage reference on both sides (DCDC-CTRL-05)",
+          "[converter][coordination][dcdc]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Input bus 1 has a VDC VSC reference; output bus 2 has no reference.
+  sys.vsc_converters = {vdc_vsc(5, 1, 1.0)};
+  sys.dc.dcdc_converters = {dcdc_converter(1, 1, 2, hacdcpf::DCDCControlMode::Power)};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCDC-CTRL-05"));
+  CHECK_FALSE(report.feasible);
+}
+
+TEST_CASE("Output-droop DC/DC needs an input-side voltage reference (DCDC-CTRL-03)",
+          "[converter][coordination][dcdc]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Droop DC/DC forms the output (bus 2) voltage, but the input island (bus 1)
+  // has no source to supply the regulated output.
+  sys.dc.dcdc_converters = {dcdc_converter(1, 1, 2, hacdcpf::DCDCControlMode::Droop)};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCDC-CTRL-03"));
+  CHECK_FALSE(report.feasible);
+}
+
+TEST_CASE("DC/DC Buck duty ratio feasibility is backed out from port voltages",
+          "[converter][dcdc][duty]") {
+  hacdcpf::DCDCConverter c;
+  c.topology = hacdcpf::DCDCTopology::Buck;
+  c.d_min = 0.05;
+  c.d_max = 0.95;
+
+  // Buck steps down: Vout < Vin -> D = Vout/Vin in (0,1), feasible.
+  const auto step_down = hacdcpf::powerflow::dcdc_duty_ratio(c, 1.0, 0.5);
+  CHECK(step_down.defined);
+  CHECK(step_down.feasible);
+  CHECK(std::abs(step_down.duty - 0.5) < 1e-9);
+
+  // A Buck cannot step up: Vout > Vin -> D > 1, outside [d_min, d_max].
+  const auto step_up = hacdcpf::powerflow::dcdc_duty_ratio(c, 1.0, 1.5);
+  CHECK(step_up.defined);
+  CHECK_FALSE(step_up.feasible);
+
+  // Generic topology imposes no duty law.
+  c.topology = hacdcpf::DCDCTopology::Generic;
+  const auto generic = hacdcpf::powerflow::dcdc_duty_ratio(c, 1.0, 1.5);
+  CHECK_FALSE(generic.defined);
+  CHECK(generic.feasible);
 }

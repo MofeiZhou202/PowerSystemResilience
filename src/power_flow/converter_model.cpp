@@ -213,6 +213,41 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
   return out;
 }
 
+DCDCDutyResult dcdc_duty_ratio(const DCDCConverter& dcdc, double v_in, double v_out) {
+  DCDCDutyResult r;
+  // Generic topology imposes no duty-ratio law -> nothing to evaluate.
+  if (dcdc.topology == DCDCTopology::Generic) return r;
+  if (!(v_in > 1e-9) || !(v_out > 1e-9)) return r;  // undefined for non-positive Vdc
+  r.voltage_ratio = v_out / v_in;
+  r.defined = true;
+  switch (dcdc.topology) {
+    case DCDCTopology::Buck:
+      // Ideal CCM Buck: Vout = D·Vin (step-down, D in (0,1]).
+      r.duty = v_out / v_in;
+      break;
+    case DCDCTopology::Boost:
+      // Ideal CCM Boost: Vout = Vin/(1-D) (step-up).
+      r.duty = 1.0 - v_in / v_out;
+      break;
+    case DCDCTopology::BuckBoost:
+      // Non-inverting Buck-Boost: Vout/Vin = D/(1-D).
+      r.duty = v_out / (v_in + v_out);
+      break;
+    case DCDCTopology::Isolated: {
+      // Isolated: Vout = n·M(D)·Vin -> report the modulation gain M.
+      const double n = (std::abs(dcdc.n_ratio) > 1e-9) ? dcdc.n_ratio : 1.0;
+      r.duty = v_out / (n * v_in);
+      break;
+    }
+    default:
+      r.defined = false;
+      return r;
+  }
+  r.feasible = std::isfinite(r.duty) && r.duty >= dcdc.d_min - 1e-9 &&
+               r.duty <= dcdc.d_max + 1e-9;
+  return r;
+}
+
 ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
                                                      const Eigen::VectorXd& vm,
                                                      double pac0,

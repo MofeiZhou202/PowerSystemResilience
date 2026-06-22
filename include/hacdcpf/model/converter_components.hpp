@@ -24,6 +24,21 @@ struct VSCConverter {
   std::string type;
 
   double p_set_mw{0.0};
+  // Active-power setpoint semantics (multi-converter model §16.3).  Historically
+  // p_set_mw carried three meanings at once (hard constraint, dispatch schedule,
+  // and initial guess), which is the root of the "grid-forming converter still
+  // pins AC P" foot-gun.  These fields disambiguate it:
+  //   * p_is_hard_constraint — when true, p_set_mw is a *binding* AC active-power
+  //     constraint (typical AC_PQ converter).  A DC voltage-forming converter
+  //     must release AC P, so combining this with DC grid-forming is rejected
+  //     (rule ACDC-GFM-01).
+  //   * p_schedule_mw — non-binding dispatch/schedule reference used when AC P is
+  //     free (falls back to p_set_mw when left at 0).
+  //   * p_initial_mw — solver warm-start hint for the released AC active power
+  //     (falls back to p_set_mw when left at 0).
+  bool p_is_hard_constraint{false};
+  double p_schedule_mw{0.0};
+  double p_initial_mw{0.0};
   double q_set_mvar{0.0};
   double v_dc_set_pu{1.0};
   double v_ac_set_pu{1.0};
@@ -97,6 +112,16 @@ struct DCDCConverter {
   double pmin_mw{0.0};
 
   double k_droop{0.0};
+
+  // Power-stage topology and duty-ratio feasibility window (multi-converter
+  // model §3.2).  topology selects the ideal CCM voltage-conversion law used to
+  // back out the duty ratio D from the solved port voltages; D must stay within
+  // [d_min, d_max].  n_ratio is the transformer turns ratio for the Isolated
+  // topology.  Generic topology imposes no duty constraint (legacy behavior).
+  DCDCTopology topology{DCDCTopology::Generic};
+  double d_min{0.05};
+  double d_max{0.95};
+  double n_ratio{1.0};
 
   bool controllable{true};
   double f_switching_hz{0.0};

@@ -170,6 +170,24 @@ inline DCDCControlMode dcdc_control_from_str(const std::string& s) {
   return DCDCControlMode::Voltage;
 }
 
+// ── DCDCTopology ────────────────────────────────────────────────────────
+inline std::string dcdc_topology_str(DCDCTopology t) {
+  switch (t) {
+    case DCDCTopology::Buck: return "Buck";
+    case DCDCTopology::Boost: return "Boost";
+    case DCDCTopology::BuckBoost: return "BuckBoost";
+    case DCDCTopology::Isolated: return "Isolated";
+    default: return "Generic";
+  }
+}
+inline DCDCTopology dcdc_topology_from_str(const std::string& s) {
+  if (s == "Buck") return DCDCTopology::Buck;
+  if (s == "Boost") return DCDCTopology::Boost;
+  if (s == "BuckBoost") return DCDCTopology::BuckBoost;
+  if (s == "Isolated") return DCDCTopology::Isolated;
+  return DCDCTopology::Generic;
+}
+
 // ── ERPortType ──────────────────────────────────────────────────────────
 inline std::string er_port_type_str(ERPortType t) {
   return (t == ERPortType::DC) ? "DC" : "AC";

@@ -213,9 +213,34 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
       continue;
     }
 
-    if ((conv.control_mode == ConverterMode::VDC_Q ||
-         conv.control_mode == ConverterMode::VDC_VAC) &&
-        std::abs(conv.p_set_mw) > 1e-6) {
+    // A converter "forms the DC voltage" when it actively regulates Vdc
+    // (VDC_Q / VDC_VAC with a non-zero droop) or is declared grid-forming.  Such
+    // a converter must release its AC active power to balance the DC island, so
+    // an explicit hard AC-P constraint is contradictory (multi-converter model
+    // §4.1.3 / §16.3).
+    const bool forms_dc_voltage =
+        ((conv.control_mode == ConverterMode::VDC_Q ||
+          conv.control_mode == ConverterMode::VDC_VAC) &&
+         std::abs(conv.k_vdc) > 1e-9) ||
+        conv.grid_forming;
+
+    if (forms_dc_voltage && conv.p_is_hard_constraint) {
+      add_issue(report,
+                CoordinationSeverity::Error,
+                "ACDC-GFM-01",
+                "vsc_converter",
+                conv.index,
+                island,
+                "VSC converter " + std::to_string(conv.index) +
+                    " forms the DC voltage (" + converter_mode_str(conv.control_mode) +
+                    ") but also declares p_is_hard_constraint=true. A DC grid-forming "
+                    "converter must release its AC active power to balance the DC island "
+                    "and cannot hold AC P as a hard constraint at the same time. Set "
+                    "p_is_hard_constraint=false and use p_schedule_mw / p_initial_mw for "
+                    "the dispatch reference and initial guess.");
+    } else if ((conv.control_mode == ConverterMode::VDC_Q ||
+                conv.control_mode == ConverterMode::VDC_VAC) &&
+               std::abs(conv.p_set_mw) > 1e-6) {
       add_issue(report,
                 CoordinationSeverity::Warning,
                 "ACDC-03",
@@ -226,7 +251,8 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
                     converter_mode_str(conv.control_mode) +
                     " mode; p_set_mw=" + std::to_string(conv.p_set_mw) +
                     " MW is treated only as a schedule/initial value because DC voltage "
-                    "control must release AC active power.");
+                    "control must release AC active power. Set p_schedule_mw / p_initial_mw "
+                    "to declare this explicitly.");
     }
 
     if ((conv.control_mode == ConverterMode::VDC_Q ||
@@ -712,6 +738,58 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                       " has fixed net load " + std::to_string(-summary.fixed_power_mw) +
                       " MW, but only " + std::to_string(summary.flexible_up_mw) +
                       " MW upward/supplying flexibility is declared. Check VSC/ESS limits.");
+      }
+    }
+  }
+
+  // ── DC/DC control-direction reference requirements (multi-converter §4.2) ──
+  // A DC/DC is a power-electronic interface, not a source: it can only hold a
+  // port voltage or push a scheduled power if the partner DC island has a real
+  // voltage-forming source to draw from / absorb into.
+  auto island_has_ref = [&](int island_idx) -> bool {
+    if (island_idx < 0 || island_idx >= static_cast<int>(report.dc_islands.size())) {
+      return false;
+    }
+    const auto& s = report.dc_islands[static_cast<size_t>(island_idx)];
+    return s.hard_vdc_sources > 0 || s.droop_sources > 0 || s.promotable_vsc_sources > 0;
+  };
+  for (const auto& dcdc : sys.dc.dcdc_converters) {
+    if (!dcdc.in_service) continue;
+    const int in_isl = island_for_bus(dcdc.bus_in);
+    const int out_isl = island_for_bus(dcdc.bus_out);
+    const bool in_ref = island_has_ref(in_isl);
+    const bool out_ref = island_has_ref(out_isl);
+    if (dcdc.control_mode == DCDCControlMode::Droop) {
+      // Output-droop voltage forming: the regulated output power must be drawn
+      // from the input side, which therefore needs a voltage-forming source.
+      if (!in_ref) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "DCDC-CTRL-03",
+                  "dcdc_converter",
+                  dcdc.index,
+                  in_isl,
+                  "DC/DC converter " + std::to_string(dcdc.index) + " forms its output "
+                  "voltage by droop, but its input-side DC island has no voltage-forming "
+                  "source to supply the regulated output. Add a VSC/ESS/DC source on the "
+                  "input side.");
+      }
+    } else if (dcdc.control_mode == DCDCControlMode::Power) {
+      // Power-controlled DC/DC: the scheduled transfer must be both sourced and
+      // absorbed, so both DC islands need a voltage reference.
+      if (!in_ref || !out_ref) {
+        const std::string missing =
+            (!in_ref && !out_ref) ? "input and output" : (!in_ref ? "input" : "output");
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "DCDC-CTRL-05",
+                  "dcdc_converter",
+                  dcdc.index,
+                  (!in_ref ? in_isl : out_isl),
+                  "Power-controlled DC/DC converter " + std::to_string(dcdc.index) +
+                      " requires a voltage reference on both DC sides so the scheduled "
+                      "transfer can be sourced and absorbed; missing on the " + missing +
+                      " side.");
       }
     }
   }
