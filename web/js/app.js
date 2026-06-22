@@ -1708,6 +1708,9 @@ const App = (() => {
       enable_switch_contraction: document.getElementById('redEnableSwitch')?.checked !== false,
       enable_series_reduction:   document.getElementById('redEnableSeries')?.checked !== false,
       enable_pendant_reduction:  document.getElementById('redEnablePendant')?.checked === true,
+      // Off by default: zero-impedance lines (e.g. a DC line left at r=0) must
+      // not merge their two buses unless the user explicitly asks for it.
+      contract_zero_impedance_lines: document.getElementById('redEnableZeroZLines')?.checked === true,
     };
   }
 

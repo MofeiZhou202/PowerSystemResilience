@@ -6759,6 +6759,13 @@ int main(int argc, char** argv) {
       const bool en_series  = body.value("enable_series_reduction",   true);
       const bool en_pendant = body.value("enable_pendant_reduction",  false);
       const bool en_kron    = body.value("enable_kron_reduction",     false);
+      // Whether the switch-contraction stage should also merge zero-impedance
+      // LINES (not just closed switches/breakers).  Default OFF: a plain line
+      // with ~zero impedance — e.g. a DC line the user left at r=0 — must NOT
+      // silently collapse its two buses when the system contains no switch or
+      // breaker.  Opt in via the "合并零阻抗线路" checkbox to recover the old
+      // behaviour (needed only to de-singularise genuinely zero-impedance ties).
+      const bool en_zeroz_lines = body.value("contract_zero_impedance_lines", false);
 
       auto dom_str = [](gr::NodeDomain d) -> const char* {
         return d == gr::NodeDomain::DC ? "DC" : "AC";
@@ -6800,6 +6807,9 @@ int main(int argc, char** argv) {
         gr::ContractionOptions copt;
         copt.zero_impedance_threshold = opts.zero_impedance_threshold;
         copt.voltage_base_tolerance   = opts.voltage_base_tolerance;
+        // Closed switches/breakers always contract (that is what this stage is
+        // named for); zero-impedance LINES only when the caller opts in.
+        copt.contract_zero_impedance_lines = en_zeroz_lines;
         gr::ContractionResult cr = gr::contract_zero_impedance_edges(work_graph, work_sys, copt);
         auto record_groups = [&](const std::unordered_map<int,std::vector<int>>& super_to_buses,
                                  gr::NodeDomain dom,

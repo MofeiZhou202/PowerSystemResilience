@@ -234,9 +234,13 @@
     <button id="btnRunTopologyAnalysis" class="toolbar-btn run-btn" title="运行拓扑分析">运行拓扑分析</button>
     <button id="btnExportTopologyAnalysis" class="toolbar-btn" title="将拓扑分析结果导出为 JSON 文件">结果导出</button>
     <span class="sub-divider"></span>
-    <label class="sub-label sub-checkbox" title="合并闭合开关/零阻抗支路两端母线（超级节点）">
+    <label class="sub-label sub-checkbox" title="合并闭合开关/断路器两端母线（超级节点）；不影响普通线路">
       <input id="redEnableSwitch" type="checkbox" checked/>
       <span>开关合并</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="将零阻抗线路（如 r=0 的直流线）两端母线也合并为超级节点；默认关闭，避免无开关时母线被意外合并">
+      <input id="redEnableZeroZLines" type="checkbox"/>
+      <span>零阻抗线路合并</span>
     </label>
     <label class="sub-label sub-checkbox" title="消去无注入的二度母线（串联等效）">
       <input id="redEnableSeries" type="checkbox" checked/>
