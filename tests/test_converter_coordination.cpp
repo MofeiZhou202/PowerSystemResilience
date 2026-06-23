@@ -7,6 +7,8 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
+#include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
@@ -1018,4 +1020,357 @@ TEST_CASE("AC_PV mode coordination rules (ACDC-CTRL-03/04)",
   conv.q_set_mvar = 5.0;
   const auto withQ = powerflow::evaluate_converter_coordination(sys, true);
   CHECK(report_has_rule(withQ, "ACDC-CTRL-04"));
+}
+
+// ── Seven-mode taxonomy: DeviceControlRole resolution ────────────────────────
+TEST_CASE("resolve_device_control_role maps the seven VSC control modes",
+          "[converter][role][sevenmode]") {
+  using namespace hacdcpf;
+
+  auto role_of = [](ConverterMode m) {
+    VSCConverter c;
+    c.control_mode = m;
+    c.k_vdc = 0.1;  // active droop so DC-forming modes register
+    return resolve_device_control_role(c);
+  };
+
+  // Mode 3 (AC_PQ): holds AC P and Q.
+  const auto pq = role_of(ConverterMode::PQ_MODE);
+  CHECK(pq.acdc_mode == ACDCControlMode::AC_PQ);
+  CHECK(pq.controls_ac_p);
+  CHECK(pq.controls_ac_q);
+  CHECK_FALSE(pq.controls_ac_v);
+
+  // Mode 2 (AC_PV): holds AC P and V, releases Q, provides a voltage reference.
+  const auto pv = role_of(ConverterMode::AC_PV);
+  CHECK(pv.acdc_mode == ACDCControlMode::AC_PV);
+  CHECK(pv.controls_ac_p);
+  CHECK(pv.controls_ac_v);
+  CHECK(pv.ac_q_is_free);
+  CHECK(pv.provides_ac_voltage_reference);
+  CHECK_FALSE(pv.controls_ac_angle);
+
+  // Mode 7 (DC_V_DROOP_AC_Q via VDC_Q): droop Udc + Q, releases AC P.
+  const auto vdcq = role_of(ConverterMode::VDC_Q);
+  CHECK(vdcq.acdc_mode == ACDCControlMode::DC_V_DROOP_AC_Q);
+  CHECK(vdcq.controls_dc_v_droop);
+  CHECK(vdcq.controls_ac_q);
+  CHECK(vdcq.ac_p_is_free);
+  CHECK(vdcq.is_dc_grid_forming);
+
+  // Mode 6 (DC_V_DROOP_AC_V): droop Udc + Vs, releases AC P and Q, provides both
+  // a DC voltage reference and an AC voltage reference.
+  const auto m6 = role_of(ConverterMode::DC_V_DROOP_AC_V);
+  CHECK(m6.acdc_mode == ACDCControlMode::DC_V_DROOP_AC_V);
+  CHECK(m6.controls_dc_v_droop);
+  CHECK(m6.controls_ac_v);
+  CHECK(m6.ac_p_is_free);
+  CHECK(m6.ac_q_is_free);
+  CHECK(m6.provides_dc_v_reference);
+  CHECK(m6.provides_ac_voltage_reference);
+  CHECK(m6.is_dc_grid_forming);
+
+  // Mode 1 (AC_GRID_FORMING): forms the AC reference (angle + magnitude).
+  const auto m1 = role_of(ConverterMode::AC_GRID_FORMING);
+  CHECK(m1.acdc_mode == ACDCControlMode::AC_GRID_FORMING);
+  CHECK(m1.controls_ac_angle);
+  CHECK(m1.controls_ac_v);
+  CHECK(m1.is_ac_grid_forming);
+  CHECK(m1.provides_ac_angle_reference);
+  CHECK(m1.provides_ac_voltage_reference);
+  CHECK(m1.ac_p_is_free);
+
+  // String round-trip for the two new ConverterMode values.
+  CHECK(converter_mode_from_str("AC_GRID_FORMING") == ConverterMode::AC_GRID_FORMING);
+  CHECK(converter_mode_from_str("DC_V_DROOP_AC_V") == ConverterMode::DC_V_DROOP_AC_V);
+  CHECK(converter_mode_str(ConverterMode::AC_GRID_FORMING) == "AC_GRID_FORMING");
+  CHECK(converter_mode_str(ConverterMode::DC_V_DROOP_AC_V) == "DC_V_DROOP_AC_V");
+}
+
+// ── Mode 6: droop Udc + AC voltage hold (genuine power flow) ──────────────────
+TEST_CASE("DC_V_DROOP_AC_V converter forms Vdc by droop and holds its AC voltage",
+          "[converter][mode6][powerflow]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  ACBus b1;  // main AC grid slack
+  b1.index = 1;
+  b1.bus_type = BusType::SLACK;
+  b1.vm_pu = 1.0;
+  b1.in_service = true;
+  ACBus b2;  // converter AC terminal + load
+  b2.index = 2;
+  b2.bus_type = BusType::PQ;
+  b2.pd_mw = 5.0;
+  b2.qd_mvar = 1.0;
+  b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.is_slack = true;
+  g.vg_pu = 1.0;
+  g.pmax_mw = 500.0;
+  g.pmin_mw = 0.0;
+  g.qmax_mvar = 500.0;
+  g.qmin_mvar = -500.0;
+  g.in_service = true;
+  sys.ac.generators = {g};
+
+  ACBranch br;
+  br.index = 1;
+  br.from_bus = 1;
+  br.to_bus = 2;
+  br.r_pu = 0.01;
+  br.x_pu = 0.05;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  DCBus d;
+  d.index = 1;
+  d.bus_type = DCBusType::DC_P;
+  d.vm_pu = 1.0;
+  d.vmin_pu = 0.8;
+  d.vmax_pu = 1.2;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  DCLoad dl;
+  dl.index = 0;
+  dl.bus = 1;
+  dl.p_mw = 3.0;  // served by the converter from the AC side
+  dl.in_service = true;
+  sys.dc.loads = {dl};
+
+  // A single converter that forms Vdc by droop AND holds its AC terminal voltage
+  // (Mode 6).  It draws active power from the AC grid (slack at bus 1) to supply
+  // the DC load, while holding Vac at bus 2 with free reactive power.
+  VSCConverter v;
+  v.index = 0;
+  v.bus_ac = 2;
+  v.bus_dc = 1;
+  v.control_mode = ConverterMode::DC_V_DROOP_AC_V;
+  v.k_vdc = 0.5;
+  v.v_dc_set_pu = 1.0;
+  v.v_ac_set_pu = 1.04;
+  v.pmax_mw = 100.0;
+  v.pmin_mw = -100.0;
+  v.p_rated_mw = 100.0;
+  v.eta = 0.99;
+  v.in_service = true;
+  sys.vsc_converters = {v};
+
+  PowerFlowOptions opt;
+  const PowerFlowResult r = solve_power_flow(sys, opt);
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() >= 2);
+  // Mode 6 holds the AC terminal voltage magnitude (bus 2 → index 1).
+  CHECK(std::abs(r.vm[1] - 1.04) < 2e-3);
+  // The DC voltage stays in a sensible band around its droop setpoint.
+  REQUIRE(!r.vdc.empty());
+  CHECK(r.vdc[0] > 0.8);
+  CHECK(r.vdc[0] < 1.2);
+  // Reactive power is released as the free balancing injection of the PV bus.
+  const auto it = std::find_if(r.vsc_transfers.begin(), r.vsc_transfers.end(),
+                               [](const VSCTransfer& t) { return t.index == 0; });
+  REQUIRE(it != r.vsc_transfers.end());
+  CHECK(std::isfinite(it->q_ac_mvar));
+}
+
+// ── Mode 1: AC grid-forming (genuine AC reference in the power flow) ──────────
+TEST_CASE("AC_GRID_FORMING converter forms the islanded AC voltage and angle reference",
+          "[converter][mode1][powerflow]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  // Two AC areas linked only through a DC tie: the main grid (bus 1 slack, bus 2
+  // = VSC A AC terminal) and an islanded microgrid (bus 3 = VSC B AC terminal,
+  // bus 4 = microgrid load).  VSC B forms the microgrid's AC reference, so the
+  // solver treats bus 3 as a secondary slack for that island.
+  ACBus b1, b2, b3, b4;
+  b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.0; b1.in_service = true;
+  b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true;
+  b3.index = 3; b3.bus_type = BusType::PQ; b3.in_service = true;
+  b4.index = 4; b4.bus_type = BusType::PQ; b4.pd_mw = 6.0; b4.qd_mvar = 2.0;
+  b4.in_service = true;
+  sys.ac.buses = {b1, b2, b3, b4};
+
+  Generator g;
+  g.index = 1; g.bus = 1; g.is_slack = true; g.vg_pu = 1.0;
+  g.pmax_mw = 500.0; g.pmin_mw = 0.0; g.qmax_mvar = 500.0; g.qmin_mvar = -500.0;
+  g.in_service = true;
+  sys.ac.generators = {g};
+
+  ACBranch br12, br34;
+  br12.index = 1; br12.from_bus = 1; br12.to_bus = 2; br12.r_pu = 0.01; br12.x_pu = 0.05;
+  br12.in_service = true;
+  br34.index = 2; br34.from_bus = 3; br34.to_bus = 4; br34.r_pu = 0.01; br34.x_pu = 0.05;
+  br34.in_service = true;
+  sys.ac.branches = {br12, br34};
+
+  DCBus d1, d2;
+  d1.index = 1; d1.bus_type = DCBusType::DC_P; d1.vm_pu = 1.0;
+  d1.vmin_pu = 0.7; d1.vmax_pu = 1.3; d1.in_service = true;
+  d2.index = 2; d2.bus_type = DCBusType::DC_P; d2.vm_pu = 1.0;
+  d2.vmin_pu = 0.7; d2.vmax_pu = 1.3; d2.in_service = true;
+  sys.dc.buses = {d1, d2};
+
+  DCBranch dbr;
+  dbr.index = 1; dbr.from_bus = 1; dbr.to_bus = 2; dbr.r_pu = 0.01; dbr.in_service = true;
+  sys.dc.branches = {dbr};
+
+  // VSC A rectifies the main grid into the DC tie and forms the DC voltage.
+  VSCConverter vA;
+  vA.index = 0; vA.bus_ac = 2; vA.bus_dc = 1;
+  vA.control_mode = ConverterMode::VDC_Q;
+  vA.k_vdc = 0.6; vA.v_dc_set_pu = 1.0;
+  vA.pmax_mw = 200.0; vA.pmin_mw = -200.0; vA.p_rated_mw = 200.0; vA.eta = 0.99;
+  vA.in_service = true;
+
+  // VSC B inverts the DC tie into the islanded microgrid, forming its AC voltage
+  // and angle reference (Mode 1).  Its DC island has VSC A as the Vdc reference,
+  // satisfying ACDC-GFM-05.  p_set_mw is deliberately set far from the true
+  // delivered power (the ~6 MW microgrid load) to prove the energy-conduit
+  // coupling: the converter draws its ACTUAL AC slack power from the DC side, not
+  // the (wrong) schedule.
+  VSCConverter vB;
+  vB.index = 1; vB.bus_ac = 3; vB.bus_dc = 2;
+  vB.control_mode = ConverterMode::AC_GRID_FORMING;
+  vB.v_ac_set_pu = 1.03;
+  vB.v_ac_angle_set_deg = 3.0;
+  vB.p_set_mw = 1.0;  // deliberately wrong (true draw ≈ 6 MW) — coupling overrides it
+  vB.pmax_mw = 200.0; vB.pmin_mw = -200.0; vB.p_rated_mw = 200.0; vB.eta = 0.99;
+  vB.in_service = true;
+  sys.vsc_converters = {vA, vB};
+
+  PowerFlowOptions opt;
+  const PowerFlowResult r = solve_power_flow(sys, opt);
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() >= 4);
+  // Bus 3 (index 2) is the AC grid-forming terminal: it holds both the voltage
+  // magnitude and the reference angle (3 deg → radians in the result).
+  CHECK(std::abs(r.vm[2] - 1.03) < 3e-3);
+  CHECK(std::abs(r.va[2] - 3.0 * 3.14159265358979 / 180.0) < 5e-3);
+  // The microgrid load bus stays within a sensible band, energized by the former.
+  CHECK(r.vm[3] > 0.9);
+
+  // Energy-conduit coupling: the AC grid-forming converter injects ~+6 MW into
+  // the microgrid (the load) and draws ~−6 MW from the DC side — tracking its
+  // ACTUAL AC slack power, NOT the deliberately-wrong 1 MW schedule.
+  const auto itB = std::find_if(r.vsc_transfers.begin(), r.vsc_transfers.end(),
+                                [](const VSCTransfer& t) { return t.index == 1; });
+  REQUIRE(itB != r.vsc_transfers.end());
+  CHECK(itB->p_ac_mw > 5.9);   // supplies the 6 MW microgrid load (+ losses)
+  CHECK(itB->p_dc_mw < -5.9);  // draws it from the DC link, not the 1 MW schedule
+  // Per-converter energy balance holds: P_ac + P_dc + loss = 0.
+  CHECK(std::abs(itB->p_ac_mw + itB->p_dc_mw + itB->loss_mw) < 1e-6);
+
+  // Coordination: no GFM-05 (DC support present) and no blocking issues.
+  const auto report = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(report, "ACDC-GFM-05"));
+  CHECK_FALSE(report.has_blocking_issue());
+}
+
+// ── ACDC-GFM-05: AC grid-forming needs DC-side support ───────────────────────
+TEST_CASE("AC grid-forming converter without DC-side support raises ACDC-GFM-05",
+          "[converter][coordination][gfm05]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys = build_hybrid_opf_case();
+  // The lone converter forms the AC reference but its DC island (a single DC_P
+  // bus with a fixed DC load) has no voltage reference, DC source, or buffer.
+  auto& conv = sys.vsc_converters[0];
+  conv.control_mode = ConverterMode::AC_GRID_FORMING;
+  conv.v_ac_set_pu = 1.02;
+  conv.has_energy_buffer = false;
+
+  const auto bad = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(bad, "ACDC-GFM-05"));
+
+  // Declaring an energy buffer on the converter satisfies the DC-side support
+  // requirement and clears the rule.
+  conv.has_energy_buffer = true;
+  const auto ok = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(ok, "ACDC-GFM-05"));
+}
+
+// ── ACDC-GFM-06: DC grid-forming needs AC-side support ───────────────────────
+TEST_CASE("DC grid-forming converter without AC-side support raises ACDC-GFM-06",
+          "[converter][coordination][gfm06]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  // An AC island with only a load (no slack, generator, or external grid) cannot
+  // supply the active power a DC-forming converter must exchange to hold Vdc.
+  ACBus a;
+  a.index = 1; a.bus_type = BusType::PQ; a.pd_mw = 4.0; a.in_service = true;
+  sys.ac.buses = {a};
+
+  DCBus d;
+  d.index = 1; d.bus_type = DCBusType::DC_P; d.vm_pu = 1.0;
+  d.vmin_pu = 0.8; d.vmax_pu = 1.2; d.in_service = true;
+  sys.dc.buses = {d};
+
+  VSCConverter v;
+  v.index = 0; v.bus_ac = 1; v.bus_dc = 1;
+  v.control_mode = ConverterMode::VDC_Q;  // DC voltage forming via droop
+  v.k_vdc = 0.5; v.v_dc_set_pu = 1.0;
+  v.pmax_mw = 100.0; v.pmin_mw = -100.0; v.p_rated_mw = 100.0;
+  v.in_service = true;
+  sys.vsc_converters = {v};
+
+  const auto bad = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(bad, "ACDC-GFM-06"));
+
+  // Adding an AC slack generator gives the island an active-power source.
+  Generator g;
+  g.index = 1; g.bus = 1; g.is_slack = true; g.vg_pu = 1.0;
+  g.pmax_mw = 100.0; g.pmin_mw = 0.0; g.qmax_mvar = 100.0; g.qmin_mvar = -100.0;
+  g.in_service = true;
+  sys.ac.buses[0].bus_type = BusType::SLACK;
+  sys.ac.generators = {g};
+
+  const auto ok = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(ok, "ACDC-GFM-06"));
+}
+
+// ── ACISLAND-BALANCE-01: energized AC island needs an active-power source ────
+TEST_CASE("Energized AC island with no active-power source raises ACISLAND-BALANCE-01",
+          "[converter][coordination][acisland][balance]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  // Two AC buses with a load but no slack, generator, external grid, or
+  // converter — the island is energized yet cannot balance active power.
+  ACBus a, b;
+  a.index = 1; a.bus_type = BusType::PQ; a.pd_mw = 3.0; a.in_service = true;
+  b.index = 2; b.bus_type = BusType::PQ; b.in_service = true;
+  sys.ac.buses = {a, b};
+
+  ACBranch br;
+  br.index = 1; br.from_bus = 1; br.to_bus = 2; br.r_pu = 0.01; br.x_pu = 0.05;
+  br.in_service = true;
+  sys.ac.branches = {br};
+
+  const auto bad = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK(report_has_rule(bad, "ACISLAND-BALANCE-01"));
+
+  // A generator gives the island an active-power balancing source.
+  Generator g;
+  g.index = 1; g.bus = 1; g.is_slack = true; g.vg_pu = 1.0;
+  g.pmax_mw = 100.0; g.pmin_mw = 0.0; g.qmax_mvar = 100.0; g.qmin_mvar = -100.0;
+  g.in_service = true;
+  sys.ac.buses[0].bus_type = BusType::SLACK;
+  sys.ac.generators = {g};
+
+  const auto ok = powerflow::evaluate_converter_coordination(sys, true);
+  CHECK_FALSE(report_has_rule(ok, "ACISLAND-BALANCE-01"));
 }

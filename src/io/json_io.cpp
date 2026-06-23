@@ -772,6 +772,7 @@ static json vsc_to_json(const VSCConverter& c) {
   j["q_set_mvar"] = c.q_set_mvar;
   j["v_dc_set_pu"] = c.v_dc_set_pu;
   j["v_ac_set_pu"] = c.v_ac_set_pu;
+  j["v_ac_angle_set_deg"] = c.v_ac_angle_set_deg;
   j["eta"] = c.eta;
   j["loss_percent"] = c.loss_percent;
   j["loss_mw"] = c.loss_mw;
@@ -815,6 +816,7 @@ static VSCConverter vsc_from_json(const json& j) {
   c.q_set_mvar = jget(j, "q_set_mvar", 0.0);
   c.v_dc_set_pu = jget(j, "v_dc_set_pu", 1.0);
   c.v_ac_set_pu = jget(j, "v_ac_set_pu", 1.0);
+  c.v_ac_angle_set_deg = jget(j, "v_ac_angle_set_deg", 0.0);
   c.eta = jget(j, "eta", 0.99);
   c.loss_percent = jget(j, "loss_percent", 0.0);
   c.loss_mw = normalize_loss_mw_from_json(j);

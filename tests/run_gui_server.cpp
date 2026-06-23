@@ -7035,7 +7035,41 @@ int main(int argc, char** argv) {
           }
           if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
           auto ac_pf = hacdcpf::solve_power_flow(sys);
-          if (ac_pf.converged) { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
+          if (ac_pf.converged) {
+            { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
+            // Post-OPF power-flow view: the actual branch flows + converter
+            // transfers at the OPF dispatch, so the GUI can show 潮流 (and drive a
+            // branch-flow heat-map) for the optimized operating point.
+            json post_pf;
+            post_pf["converged"] = true;
+            json brf = json::array();
+            for (size_t i = 0; i < sys.ac.branches.size() && i < ac_pf.branch_flows.size(); ++i) {
+              const auto& br = sys.ac.branches[i];
+              const auto& f = ac_pf.branch_flows[i];
+              const double rate = br.rate_a_mva;
+              const double s_from = std::hypot(f.pf_mw, f.qf_mvar);
+              const double s_to = std::hypot(f.pt_mw, f.qt_mvar);
+              const double loading = (rate > 1e-9) ? (std::max(s_from, s_to) / rate * 100.0) : 0.0;
+              brf.push_back(json{{"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+                {"pf_mw", f.pf_mw}, {"qf_mvar", f.qf_mvar}, {"pt_mw", f.pt_mw}, {"qt_mvar", f.qt_mvar},
+                {"loading_pct", loading}});
+            }
+            post_pf["branch_flows"] = brf;
+            json vtr = json::array();
+            for (const auto& v : ac_pf.vsc_transfers)
+              vtr.push_back(json{{"index",v.index},{"bus_ac",v.bus_ac},{"bus_dc",v.bus_dc},
+                {"p_ac_mw",v.p_ac_mw},{"q_ac_mvar",v.q_ac_mvar},{"p_dc_mw",v.p_dc_mw},{"loss_mw",v.loss_mw}});
+            post_pf["vsc_transfers"] = vtr;
+            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
+            out["post_pf"] = post_pf;
+            // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
+            // dispatch (same engine as /api/session/run_carbon, fed the OPF PF).
+            try {
+              hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
+              auto carbon = hacdcpf::analysis::compute_carbon_analysis(sys, ac_pf, ca_opt);
+              out["post_carbon"] = carbon_analysis_to_json(sys, carbon);
+            } catch (const std::exception&) { /* carbon view is best-effort */ }
+          }
         }
       }
       res.set_content(out.dump(), "application/json");

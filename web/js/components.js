@@ -371,7 +371,7 @@ const COMP = (() => {
       pmax_mw: 200, pmin_mw: -200,
       qmax_mvar: 100, qmin_mvar: -100,
       eta: 0.98, loss_percent: 1.0, loss_mw: 0,
-      v_dc_set_pu: 1.0, v_ac_set_pu: 1.0,
+      v_dc_set_pu: 1.0, v_ac_set_pu: 1.0, v_ac_angle_set_deg: 0,
       k_vdc: 0.1, p_rated_mw: 0,
       r_conv_ac_pu: 0, x_sc_pu: 0,
       i_ac_max_pu: 0, i_dc_max_pu: 0,
@@ -634,6 +634,7 @@ const COMP = (() => {
     pmax_mw: '最大有功(MW)', pmin_mw: '最小有功(MW)',
     eta: '效率', loss_percent: '损耗(%)',
     v_dc_set_pu: 'DC电压设定(pu)', v_ac_set_pu: 'AC电压设定(pu)',
+    v_ac_angle_set_deg: 'AC构网角度设定(°)',
     closed: '合闸状态', rated_current_ka: '额定电流(kA)',
     vn_kv: '额定电压(kV)', cos_phi: '功率因数', efficiency: '效率',
     // Flexible Load

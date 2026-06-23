@@ -1333,8 +1333,16 @@ const App = (() => {
       }
       _lastOpfData = data;
       // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
-      // the power-flow voltage overlay. Flow/heat-map viz needs geo branch data
-      // the OPF endpoint does not emit, so it degrades to voltage labels only.
+      // the power-flow voltage overlay. The OPF endpoint now also emits the
+      // post-OPF branch flows, so wire them into geo_ac_branches to enable the
+      // flow / heat-map visualization at the OPF operating point.
+      if (data.post_pf && Array.isArray(data.post_pf.branch_flows)) {
+        data.geo_ac_branches = data.post_pf.branch_flows.map(b => ({
+          from: b.from_bus, to: b.to_bus,
+          pf_mw: b.pf_mw, pt_mw: b.pt_mw,
+          loading_pct: b.loading_pct || 0, rate_mva: 0,
+        }));
+      }
       if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
       showOpfResults(data);
       switchTab('results');
@@ -1480,6 +1488,63 @@ const App = (() => {
       busDiv.innerHTML = html;
     } else if (busDiv) {
       busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
+    }
+
+    // ── Post-OPF power flow (潮流) at the OPF dispatch ──
+    const postPfSec = document.getElementById('opfPostPfSection');
+    const postPfDiv = document.getElementById('opfPostPfResults');
+    const postPf = data.post_pf;
+    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
+      postPfSec.style.display = '';
+      const busMapAc = busMap.ac || {};
+      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
+      postPf.branch_flows.forEach(b => {
+        const ld = b.loading_pct || 0;
+        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
+        const attr = panAttr(busMapAc[b.from_bus]);
+        html += `<tr${attr}><td>${b.from_bus}→${b.to_bus}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
+      postPfDiv.innerHTML = html;
+    } else if (postPfSec) {
+      postPfSec.style.display = 'none';
+    }
+
+    // ── Post-OPF carbon flow (碳流) at the OPF dispatch ──
+    const postCbSec = document.getElementById('opfPostCarbonSection');
+    const postCbDiv = document.getElementById('opfPostCarbonResults');
+    const carbon = data.post_carbon;
+    if (postCbSec && postCbDiv && carbon) {
+      postCbSec.style.display = '';
+      const summary = carbon.tracing_summary || carbon.matrix_summary || {};
+      const totalGen = summary.total_generation_emissions_tco2 ?? null;
+      const totalLoad = summary.total_load_emissions_tco2 ?? null;
+      const buses = Array.isArray(carbon.bus_carbon) ? carbon.bus_carbon.slice() : [];
+      // Top carbon-intensity nodes (descending). Show the actual computed values
+      // (only guard against NaN/negative); some datasets use unrealistic emission
+      // factors, which the table then surfaces transparently.
+      const topNodes = buses
+        .filter(b => Number.isFinite(b.carbon_intensity_tco2_mwh) && b.carbon_intensity_tco2_mwh >= 0)
+        .sort((a, b) => b.carbon_intensity_tco2_mwh - a.carbon_intensity_tco2_mwh)
+        .slice(0, 10);
+      let html = '<div class="result-summary-grid" style="margin-bottom:8px">';
+      if (totalGen != null) html += `<div class="result-item"><span class="result-label">发电排放(tCO₂)</span><span class="result-value">${fmt(totalGen, 4)}</span></div>`;
+      if (totalLoad != null) html += `<div class="result-item"><span class="result-label">负荷排放(tCO₂)</span><span class="result-value">${fmt(totalLoad, 4)}</span></div>`;
+      html += `<div class="result-item"><span class="result-label">碳流求解</span><span class="result-value">${carbon.matrix_solved ? '✓' : '—'}</span></div>`;
+      html += `<div class="result-item"><span class="result-label">来源</span><span class="result-value">OPF调度</span></div></div>`;
+      if (topNodes.length) {
+        const busMapAc = busMap.ac || {};
+        html += '<table><thead><tr><th>节点</th><th>碳势(tCO₂/MWh)</th></tr></thead><tbody>';
+        topNodes.forEach(b => {
+          const attr = panAttr(busMapAc[b.bus_index]);
+          html += `<tr${attr}><td>${b.bus_index ?? '-'}</td><td>${fmt(b.carbon_intensity_tco2_mwh, 4)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      postCbDiv.innerHTML = html;
+    } else if (postCbSec) {
+      postCbSec.style.display = 'none';
     }
   }
 
@@ -4703,10 +4768,12 @@ const App = (() => {
           ];
         } else {
           modeOptions = [
-            {v:'PQ_MODE', l:'PQ_MODE'},
-            {v:'VDC_Q',   l:'VDC_Q'},
-            {v:'VDC_VAC', l:'VDC_VAC'},
-            {v:'AC_PV',   l:'AC_PV (AC定有功+定电压)'},
+            {v:'PQ_MODE',         l:'PQ_MODE (模式3 · AC定P+定Q)'},
+            {v:'AC_PV',           l:'AC_PV (模式2 · AC定P+定电压)'},
+            {v:'VDC_Q',           l:'VDC_Q (模式4/7 · 定/下垂Udc+定Q)'},
+            {v:'VDC_VAC',         l:'VDC_VAC (模式5 · 定Udc+定电压)'},
+            {v:'DC_V_DROOP_AC_V', l:'DC_V_DROOP_AC_V (模式6 · 下垂Udc+定电压)'},
+            {v:'AC_GRID_FORMING', l:'AC_GRID_FORMING (模式1 · AC构网 δs+Vs)'},
           ];
         }
         modeOptions.forEach(o => {

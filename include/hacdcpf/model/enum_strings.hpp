@@ -53,6 +53,8 @@ inline std::string converter_mode_str(ConverterMode m) {
     case ConverterMode::VDC_Q: return "VDC_Q";
     case ConverterMode::VDC_VAC: return "VDC_VAC";
     case ConverterMode::AC_PV: return "AC_PV";
+    case ConverterMode::AC_GRID_FORMING: return "AC_GRID_FORMING";
+    case ConverterMode::DC_V_DROOP_AC_V: return "DC_V_DROOP_AC_V";
   }
   return "PQ";
 }
@@ -61,7 +63,38 @@ inline ConverterMode converter_mode_from_str(const std::string& s) {
   if (s == "VDC_Q") return ConverterMode::VDC_Q;
   if (s == "VDC_VAC") return ConverterMode::VDC_VAC;
   if (s == "AC_PV") return ConverterMode::AC_PV;
+  if (s == "AC_GRID_FORMING" || s == "AC_GFM") return ConverterMode::AC_GRID_FORMING;
+  if (s == "DC_V_DROOP_AC_V") return ConverterMode::DC_V_DROOP_AC_V;
   return ConverterMode::PQ_MODE;
+}
+
+// Seven-mode VSC control taxonomy (multi-converter model r1 §6.1).
+inline std::string acdc_control_mode_str(ACDCControlMode m) {
+  switch (m) {
+    case ACDCControlMode::AC_PQ: return "AC_PQ";
+    case ACDCControlMode::AC_PV: return "AC_PV";
+    case ACDCControlMode::DC_V_AC_Q: return "DC_V_AC_Q";
+    case ACDCControlMode::DC_V_AC_V: return "DC_V_AC_V";
+    case ACDCControlMode::DC_V_DROOP_AC_Q: return "DC_V_DROOP_AC_Q";
+    case ACDCControlMode::DC_V_DROOP_AC_V: return "DC_V_DROOP_AC_V";
+    case ACDCControlMode::AC_GRID_FORMING: return "AC_GRID_FORMING";
+  }
+  return "AC_PQ";
+}
+
+// Map an internal ConverterMode to the human-facing seven-mode taxonomy.  The
+// rigid-vs-droop Vdc distinction (Mode 4/5 vs 6/7) is resolved at solve time by
+// the DC-island reference logic, so VDC_Q/VDC_VAC report as the droop variants.
+inline ACDCControlMode to_acdc_control_mode(ConverterMode m) {
+  switch (m) {
+    case ConverterMode::PQ_MODE: return ACDCControlMode::AC_PQ;
+    case ConverterMode::AC_PV: return ACDCControlMode::AC_PV;
+    case ConverterMode::VDC_Q: return ACDCControlMode::DC_V_DROOP_AC_Q;
+    case ConverterMode::VDC_VAC: return ACDCControlMode::DC_V_AC_V;
+    case ConverterMode::DC_V_DROOP_AC_V: return ACDCControlMode::DC_V_DROOP_AC_V;
+    case ConverterMode::AC_GRID_FORMING: return ACDCControlMode::AC_GRID_FORMING;
+  }
+  return ACDCControlMode::AC_PQ;
 }
 
 // ── FuelType ────────────────────────────────────────────────────────────
