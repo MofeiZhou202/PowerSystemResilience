@@ -612,7 +612,10 @@ DCOPFResult extract_dc_opf_result(const DCOPFFormulation& form,
   DCOPFResult result;
   const auto& branches = sys.ac.branches;
   const double base_mva = std::max(sys.ac.base_mva, 1.0);
-  
+
+  // DC-OPF is a linearised AC+DC LP with no converter physics modelled.
+  result.converter_model_scope.model_scope = "dc-opf:linear-no-converter-model";
+
   result.runtime_sec = runtime_sec;
   result.converged = sol.stats.success;
   result.iterations = sol.stats.iterations;

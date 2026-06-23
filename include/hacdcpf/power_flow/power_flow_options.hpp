@@ -78,6 +78,7 @@ struct ConverterModeOptions {
   double          converter_vdc_switch_low_pu{0.01};
   int             mode_hysteresis_iters{2};
   bool            enable_converter_mode_switching{true};
+  bool            enable_converter_coordination_check{false};
   LossModelType   loss_model{LossModelType::Linear};
 };
 
@@ -123,6 +124,13 @@ struct PowerFlowOptions {
   bool enable_pv_pq_conversion{true};
   bool enable_auto_swing_selection{true};
   bool enable_converter_mode_switching{true};
+  bool enable_converter_coordination_check{false};
+  // When true, a converter that is the *sole* voltage former of a single-DC-bus
+  // island holds its DC bus voltage rigidly at the setpoint (DC-slack converter
+  // mode, multi-converter model §6.3) instead of forming it through a stiff
+  // droop.  Off by default: the droop promotion keeps Vdc within ~0.1% and is
+  // the established behavior.
+  bool enable_rigid_vdc_former{false};
   bool verbose{false};
   LossModelType loss_model{LossModelType::Linear};
 

@@ -167,6 +167,7 @@ set(HACDCPF_SOURCES
   src/power_flow/adaptive_solver.cpp
   src/power_flow/admittance_builder.cpp
   src/power_flow/branch_flow.cpp
+  src/power_flow/converter_coordination.cpp
   src/power_flow/converter_model.cpp
   src/power_flow/dc.cpp
   src/power_flow/dc_solver.cpp

@@ -556,8 +556,13 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{k\_vdc} & \texttt{none} & default \texttt{0.1} & JSON-only DC-voltage droop coefficient \\
 \texttt{pmax\_mw}, \texttt{pmin\_mw}, \texttt{qmax\_mvar}, \texttt{qmin\_mvar} & same columns & default \texttt{0.0} & operating capability limits \\
 \texttt{p\_rated\_mw} & \texttt{VSCConverter.p\_rated\_mw} & default \texttt{0.0} & converter rating \\
+\texttt{r\_conv\_ac\_pu} & \texttt{none} & default \texttt{0.0} & AC-side conduction resistance (p.u.); when \(>0\) the DC bus supplies \(r\,P_{ac}^2/v_{ac}^2\) (multi-converter \S2.3) \\
+\texttt{i\_ac\_max\_pu}, \texttt{i\_dc\_max\_pu} & \texttt{none} & default \texttt{0.0} & AC / DC current limits (p.u.); \(0\) disables the post-solve \texttt{ACDC-PHYS-02/03} check \\
+\texttt{k\_m\_modulation}, \texttt{m\_min}, \texttt{m\_max} & \texttt{none} & default \texttt{0.0} & modulation gain \(K_m\) and index window for the \texttt{ACDC-PHYS-01/05} check (\(V_{ac}=K_m m V_{dc}\)) \\
+\texttt{p\_is\_hard\_constraint}, \texttt{p\_schedule\_mw}, \texttt{p\_initial\_mw} & \texttt{none} & defaults \texttt{false}/\texttt{0.0}/\texttt{0.0} & active-power setpoint semantics: binding constraint vs.\ dispatch schedule vs.\ warm-start (multi-converter \S16.3) \\
+\texttt{grid\_forming}, \texttt{coordination\_group\_id}, \texttt{is\_master}, \texttt{participation\_factor} & \texttt{none} & defaults \texttt{false}/empty/\texttt{false}/\texttt{0.0} & multi-source DC-voltage coordination metadata validated by the coordination checker \\
 \texttt{forced\_outage\_rate}, \texttt{mttr\_hr} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
-\texttt{type}, \texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv}, \texttt{k\_p}, \texttt{k\_q}, \texttt{v\_ref\_pu}, \texttt{f\_ref\_hz}, \texttt{controllable}, grid-forming / SC fields, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & newer C++ struct fields that are not preserved by either serializer \\
+\texttt{type}, \texttt{vn\_ac\_kv}, \texttt{vn\_dc\_kv}, \texttt{k\_p}, \texttt{k\_q}, \texttt{v\_ref\_pu}, \texttt{f\_ref\_hz}, \texttt{controllable}, SC fields, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of the canonical JSON contract & C++ struct fields not round-tripped by the canonical serializer (some appear in the JPC matrix export) \\
 \bottomrule
 \end{longtable}
 
@@ -580,6 +585,9 @@ Field & Excel sheet / column & JSON default / import rule & Meaning / preservati
 \texttt{r\_eq\_pu} & \texttt{none} & default \texttt{0.0} & JSON-only equivalent resistance \\
 \texttt{pmax\_mw}, \texttt{pmin\_mw} & same columns & default \texttt{0.0} & power limits \\
 \texttt{k\_droop} & \texttt{none} & default \texttt{0.0} & JSON-only droop coefficient \\
+\texttt{topology} & \texttt{DCDCConverter.topology} & default \texttt{Generic} & power-stage law \texttt{Generic}/\texttt{Buck}/\texttt{Boost}/\texttt{BuckBoost}/\texttt{Isolated} (duty-ratio model, multi-converter \S3.2) \\
+\texttt{d\_min}, \texttt{d\_max} & same columns & defaults \texttt{0.05}/\texttt{0.95} & duty-ratio feasibility window; violation raises \texttt{DCDC-PHYS-01} \\
+\texttt{n\_ratio} & \texttt{DCDCConverter.n\_ratio} & default \texttt{1.0} & transformer turns ratio for the \texttt{Isolated} topology \\
 \texttt{mtbf\_hours}, \texttt{mttr\_hours} & \texttt{none} & default \texttt{0.0} & JSON-only reliability metadata \\
 \texttt{controllable}, \texttt{f\_switching\_hz}, \texttt{t\_scheduled\_hr} & \texttt{none} & not part of current JSON / Excel contract & C++ struct fields that are not preserved by either serializer \\
 \bottomrule

@@ -63,7 +63,22 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // Mode 1 (δs+Vs): the converter forms the AC reference, so its AC bus is a
+    // SLACK bus (see apply_acpv_voltage_control). Both the active and reactive
+    // injection rows are dropped from the mismatch — the converter's AC power is
+    // the free balancing unknown — so the spec value here is unused. Return zero
+    // to avoid leaking a spurious droop term into the (dropped) slack rows.
+    return {0.0, 0.0};
+  }
+
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
+    // AC_PV holds Pac = pset; its AC voltage magnitude is held by marking the
+    // converter's AC bus as a voltage-controlled (PV) bus in the solver data,
+    // and its reactive power is the free balancing injection of that PV bus
+    // (multi-converter model r1 §1.4). The returned qset is only an initial /
+    // placeholder value because the PV bus drops the reactive balance row.
     return {pset, qset};
   }
 
@@ -74,6 +89,10 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   if (conv.control_mode == ConverterMode::VDC_Q) {
     return {pac, qset};
   }
+  // VDC_VAC (Mode 5) and DC_V_DROOP_AC_V (Mode 6): the active injection follows
+  // the Vdc droop. For DC_V_DROOP_AC_V the AC bus is marked PV so its reactive
+  // power is the free balancing unknown (the placeholder 0 is dropped); for the
+  // legacy VDC_VAC realization the reactive injection is held at zero.
   return {pac, 0.0};
 }
 
@@ -90,11 +109,37 @@ double converter_dc_injection(const VSCConverter& conv,
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
   double pdc_base = 0.0;
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  double pac = 0.0;  // AC-side injection used by the conduction-loss coupling below.
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // PQ / AC_PV / AC_GRID_FORMING draw their scheduled DC power exchange. For
+    // AC_GRID_FORMING (Mode 1) the AC terminal is a slack bus whose active power
+    // is free; the converter draws pset from the DC side and reconciles the
+    // difference (P_ac_slack − pset − loss) through its energy buffer. The
+    // structural requirement that this buffer / a DC-side source exists is
+    // enforced by ACDC-GFM-05.
     const double ploss = converter_loss(conv, pset, vdc_bus, base_mva, loss_model);
     pdc_base = -(pset + ploss);
+    pac = pset;
   } else {
-    pdc_base = -conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
+    const double p_transfer =
+        conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
+    pdc_base = -p_transfer;
+    const double ploss = converter_loss(conv, p_transfer, vdc_bus, base_mva, loss_model);
+    pac = p_transfer - ploss;
+  }
+
+  // AC-side conduction loss supplied by the DC bus (multi-converter model §2.3/3.1.2):
+  //   ploss_AC = r_conv_ac_pu · pac² / Vm_AC²
+  // The converter draws this extra power from the DC side, so its DC-bus injection
+  // becomes more negative.  Opt-in: r_conv_ac_pu = 0 (default) leaves legacy behaviour
+  // unchanged and keeps this term out of the residual/Jacobian.
+  if (conv.r_conv_ac_pu > 0.0) {
+    const int ac_idx = conv.bus_ac - 1;
+    const double vm_ac =
+        (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.1) : 1.0;
+    pdc_base -= conv.r_conv_ac_pu * pac * pac / (vm_ac * vm_ac);
   }
 
   return pdc_base;
@@ -114,8 +159,10 @@ ConverterJacobianAC converter_ac_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
-    // AC injection is constant (pset, qset) — no Vdc dependence.
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // AC injection is constant (pset/qset) or a dropped slack row — no Vdc dependence.
     return jac;
   }
 
@@ -148,7 +195,9 @@ ConverterJacobianDC converter_dc_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
     // pdc = -(pset + loss(pset, Vdc))  →  dpdc/dVdc = -dploss/dVdc
     const double pset = conv.p_set_mw / base_mva;
     const auto [dploss_dp, dploss_dvdc] =
@@ -213,13 +262,54 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
   return out;
 }
 
+DCDCDutyResult dcdc_duty_ratio(const DCDCConverter& dcdc, double v_in, double v_out) {
+  DCDCDutyResult r;
+  // Generic topology imposes no duty-ratio law -> nothing to evaluate.
+  if (dcdc.topology == DCDCTopology::Generic) return r;
+  if (!(v_in > 1e-9) || !(v_out > 1e-9)) return r;  // undefined for non-positive Vdc
+  r.voltage_ratio = v_out / v_in;
+  r.defined = true;
+  switch (dcdc.topology) {
+    case DCDCTopology::Buck:
+      // Ideal CCM Buck: Vout = D·Vin (step-down, D in (0,1]).
+      r.duty = v_out / v_in;
+      break;
+    case DCDCTopology::Boost:
+      // Ideal CCM Boost: Vout = Vin/(1-D) (step-up).
+      r.duty = 1.0 - v_in / v_out;
+      break;
+    case DCDCTopology::BuckBoost:
+      // Non-inverting Buck-Boost: Vout/Vin = D/(1-D).
+      r.duty = v_out / (v_in + v_out);
+      break;
+    case DCDCTopology::Isolated: {
+      // Isolated: Vout = n·M(D)·Vin -> report the modulation gain M.
+      const double n = (std::abs(dcdc.n_ratio) > 1e-9) ? dcdc.n_ratio : 1.0;
+      r.duty = v_out / (n * v_in);
+      break;
+    }
+    default:
+      r.defined = false;
+      return r;
+  }
+  r.feasible = std::isfinite(r.duty) && r.duty >= dcdc.d_min - 1e-9 &&
+               r.duty <= dcdc.d_max + 1e-9;
+  return r;
+}
+
 ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
                                                      const Eigen::VectorXd& vm,
                                                      double pac0,
                                                      double /*base_mva*/) {
   ConverterJacobianDCVmAC jac;
-  (void)conv; (void)vm; (void)pac0;
-  // r_conv_ac_pu removed from VSCConverter; this Jacobian entry is always zero.
+  if (!conv.in_service || conv.r_conv_ac_pu <= 0.0) return jac;
+  // DC injection carries the AC conduction loss: pdc -= r·pac²/Vm_AC².
+  // Hence ∂pdc/∂Vm_AC = +2·r·pac² / Vm_AC³ (loss falls as the AC voltage rises).
+  const int ac_idx = conv.bus_ac - 1;
+  const double vm_ac =
+      (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.1) : 1.0;
+  jac.dpdc_dvm_ac =
+      2.0 * conv.r_conv_ac_pu * pac0 * pac0 / (vm_ac * vm_ac * vm_ac);
   return jac;
 }
 

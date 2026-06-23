@@ -1,0 +1,109 @@
+# Doxygen configuration for the project API/notebook HTML.
+# Run with: doxygen Doxyfile
+
+PROJECT_NAME           = "Hybrid AC/DC Distribution Systems Simulation"
+PROJECT_BRIEF          = "C++ API and implementation notebook"
+PROJECT_NUMBER         = 0.1.0
+OUTPUT_DIRECTORY       = docs/generated
+
+INPUT                  = docs/api_notebook.md \
+                         docs/commenting_guide.md \
+                         README.md \
+                         include \
+                         src
+USE_MDFILE_AS_MAINPAGE = docs/api_notebook.md
+FILE_PATTERNS          = *.h \
+                         *.hpp \
+                         *.hh \
+                         *.hxx \
+                         *.c \
+                         *.cc \
+                         *.cpp \
+                         *.cxx \
+                         *.md
+RECURSIVE              = YES
+EXCLUDE                = build \
+                         build-* \
+                         build_rel \
+                         cmake-build-* \
+                         docs/generated \
+                         external_data \
+                         node_modules \
+                         outputs \
+                         Testing \
+                         third_party
+EXCLUDE_PATTERNS       = */.DS_Store \
+                         *.bak
+
+OUTPUT_LANGUAGE        = English
+MARKDOWN_SUPPORT       = YES
+TOC_INCLUDE_HEADINGS   = 5
+AUTOLINK_SUPPORT       = YES
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_ANON_NSPACES   = YES
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+SHOW_USED_FILES        = YES
+SHOW_FILES             = YES
+SHOW_NAMESPACES        = YES
+
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = YES
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+REFERENCES_LINK_SOURCE = YES
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = api
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO
+<<<<<<< HEAD
+=======
+USE_MATHJAX            = YES
+MATHJAX_VERSION        = MathJax_3
+MATHJAX_EXTENSIONS     = ams
+>>>>>>> origin/main
+
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = YES
+
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = NO
+SKIP_FUNCTION_MACROS   = YES
+PREDEFINED             = HACDCPF_HAVE_OPENDSS=0 \
+                         HACDCPF_HAVE_OPENDSS_COMPARE=0
+
+HAVE_DOT               = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+GROUP_GRAPHS           = YES
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+DOT_GRAPH_MAX_NODES    = 80
+MAX_DOT_GRAPH_DEPTH    = 2
+
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+<<<<<<< HEAD
+=======
+WARN_LOGFILE           = docs/generated/doxygen-warnings.log
+>>>>>>> origin/main
+QUIET                  = YES

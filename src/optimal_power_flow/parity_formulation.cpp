@@ -52,6 +52,11 @@ double resolve_voll_auto(const Problem& prob) {
 }
 
 double converter_smax_pu(const Problem& prob, int conv_data_idx) {
+  // Capacity-circle enforcement is opt-out: when disabled, return a huge bound so
+  // the inequality Pac^2+Qac^2 <= smax^2 is always inactive.
+  if (!prob.options.enforce_converter_capacity) {
+    return 1.0e12;
+  }
   const auto& conv = prob.data.converters[static_cast<size_t>(conv_data_idx)];
   double smax = conv.p_rated_mw;
   if (!(smax > 0.0) || !std::isfinite(smax)) {
@@ -66,6 +71,9 @@ double converter_smax_pu(const Problem& prob, int conv_data_idx) {
 
 }  // namespace
 
+// Build the reviewable full-space NLP.  This is the only place that decides
+// which physical components receive primal variables and which row families are
+// present, so keep map/count changes synchronized with formulation.hpp.
 Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   Problem prob;
   prob.data = core::make_solver_data(sys, LossModelType::Linear);
@@ -156,19 +164,23 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
 
   prob.branch_limited.clear();
   prob.branch_limited.reserve(prob.data.ac_branches.size());
-  for (size_t bi = 0; bi < prob.data.ac_branches.size(); ++bi) {
-    const auto& br = prob.data.ac_branches[bi];
-    if (br.in_service && br.rate_a_mva > 0.0) {
-      prob.branch_limited.push_back(static_cast<int>(bi));
+  if (opt.enforce_branch_limits) {
+    for (size_t bi = 0; bi < prob.data.ac_branches.size(); ++bi) {
+      const auto& br = prob.data.ac_branches[bi];
+      if (br.in_service && br.rate_a_mva > 0.0) {
+        prob.branch_limited.push_back(static_cast<int>(bi));
+      }
     }
   }
 
   prob.dc_branch_limited.clear();
   prob.dc_branch_limited.reserve(prob.data.dc_branches.size());
-  for (size_t bi = 0; bi < prob.data.dc_branches.size(); ++bi) {
-    const auto& br = prob.data.dc_branches[bi];
-    if (br.in_service && br.rate_a_mva > 0.0) {
-      prob.dc_branch_limited.push_back(static_cast<int>(bi));
+  if (opt.enforce_branch_limits) {
+    for (size_t bi = 0; bi < prob.data.dc_branches.size(); ++bi) {
+      const auto& br = prob.data.dc_branches[bi];
+      if (br.in_service && br.rate_a_mva > 0.0) {
+        prob.dc_branch_limited.push_back(static_cast<int>(bi));
+      }
     }
   }
 
@@ -223,6 +235,7 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   prob.dcdc_var_to_data.clear();
   prob.dcdc_bus_in.clear();
   prob.dcdc_bus_out.clear();
+  prob.dcdc_duty_limited.clear();
   for (size_t di = 0; di < prob.data.dcdc_converters.size(); ++di) {
     const auto& dc = prob.data.dcdc_converters[di];
     if (!dc.in_service) continue;
@@ -319,7 +332,41 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_st = cidx.n_sf;
   cidx.n_sconv = vidx.n_pac;
   cidx.n_sdc = static_cast<int>(prob.dc_branch_limited.size());
-  cidx.n_ineq_nonlin = cidx.n_sf + cidx.n_st + cidx.n_sconv + cidx.n_sdc;
+  // Optional converter physical limits (multi-converter model §3.1.4/3.1.5):
+  // collect the converter var indices that declare each limit so unconstrained
+  // converters add no inequality rows.
+  for (int k = 0; k < vidx.n_pac; ++k) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    if (opt.enforce_converter_current_limits &&
+        std::isfinite(conv.i_ac_max_pu) && conv.i_ac_max_pu > 0.0) {
+      prob.conv_iac_limited.push_back(k);
+    }
+    const bool mod_ok = opt.enforce_converter_modulation_limits &&
+        conv.k_m_modulation > 0.0 && conv.vn_ac_kv > 0.0 && conv.vn_dc_kv > 0.0;
+    if (mod_ok && conv.m_max > 0.0) prob.conv_mmax_limited.push_back(k);
+    if (mod_ok && conv.m_min > 0.0) prob.conv_mmin_limited.push_back(k);
+  }
+  cidx.n_iac = static_cast<int>(prob.conv_iac_limited.size());
+  cidx.n_mmax = static_cast<int>(prob.conv_mmax_limited.size());
+  cidx.n_mmin = static_cast<int>(prob.conv_mmin_limited.size());
+  // Optional DC/DC duty-ratio feasibility (multi-converter model §3.2): a
+  // non-Generic topology with a valid [d_min, d_max] window contributes two
+  // linear rows (D ≤ d_max and D ≥ d_min) in the solved DC port voltages.  The
+  // existing converter-modulation toggle gates both VSC and DC/DC modulation.
+  for (int k = 0; k < vidx.n_pdcdc; ++k) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    if (opt.enforce_converter_modulation_limits &&
+        dc.topology != DCDCTopology::Generic &&
+        dc.d_max > 0.0 && dc.d_max < 1.0 + 1e-12 &&
+        dc.d_min >= 0.0 && dc.d_min < dc.d_max) {
+      prob.dcdc_duty_limited.push_back(k);
+    }
+  }
+  cidx.n_dcdc_duty = 2 * static_cast<int>(prob.dcdc_duty_limited.size());
+  cidx.n_ineq_nonlin = cidx.n_sf + cidx.n_st + cidx.n_sconv + cidx.n_sdc +
+                       cidx.n_iac + cidx.n_mmax + cidx.n_mmin + cidx.n_dcdc_duty;
   prob.cidx = cidx;
 
   double max_pd = 1.0;
@@ -890,6 +937,9 @@ void build_initial_point(const Problem& prob,
   }
 }
 
+// Economic objective in engineering units.  Decision variables are stored in
+// p.u., so each MW/MVAr cost term converts through base_mva before evaluating
+// generator cost, VOLL, or curtailment penalties.
 double objective(const Problem& prob, const Eigen::VectorXd& x) {
   const auto& idx = prob.vidx;
   double f = 0.0;
@@ -952,6 +1002,10 @@ void objective_gradient_hessian_diag(const Problem& prob,
   }
 }
 
+// Evaluate g(x)=0 in the row order defined by ConstraintIndex.  Residuals use a
+// "network injection plus demand minus controllable supply" sign convention for
+// AC rows, and a "load plus conductance flow minus injection" convention for DC
+// rows.  The same convention is used by equality_jacobian().
 void equality_constraints(const Problem& prob,
                           const Eigen::VectorXd& x,
                           EvalWorkspace& ws,
@@ -1357,6 +1411,37 @@ void equality_jacobian(const Problem& prob,
   jg.makeCompressed();
 }
 
+// Linear duty-ratio feasibility coefficients for a DC/DC converter (multi-
+// converter model §3.2).  Each constrained converter yields two rows of the
+// form h = a_in·Vdc_in + a_out·Vdc_out ≤ 0: the upper row enforces D ≤ d_max and
+// the lower row D ≥ d_min, where the ideal CCM voltage-conversion law of the
+// topology makes the duty ratio a linear relation between the DC port voltages.
+struct DcdcDutyRows {
+  double in_max{0.0}, out_max{0.0};  // D ≤ d_max  row
+  double in_min{0.0}, out_min{0.0};  // D ≥ d_min  row
+};
+static DcdcDutyRows dcdc_duty_rows(const DCDCConverter& dc) {
+  const double dmin = dc.d_min;
+  const double dmax = dc.d_max;
+  const double n = (dc.n_ratio > 0.0) ? dc.n_ratio : 1.0;
+  switch (dc.topology) {
+    case DCDCTopology::Buck:       // Vout = D·Vin
+      return {-dmax, 1.0, dmin, -1.0};
+    case DCDCTopology::Boost:      // Vout = Vin/(1-D)
+      return {-1.0, 1.0 - dmax, 1.0, -(1.0 - dmin)};
+    case DCDCTopology::BuckBoost:  // Vout = D/(1-D)·Vin
+      return {-dmax, 1.0 - dmax, dmin, -(1.0 - dmin)};
+    case DCDCTopology::Isolated:   // M = Vout/(n·Vin)
+      return {-dmax * n, 1.0, dmin * n, -1.0};
+    default:
+      return {};
+  }
+}
+
+// Evaluate h(x)<=0.  Apparent-power, converter-current, and DC-flow limits are
+// represented as squared magnitudes minus squared limits; modulation and duty
+// constraints are linear rows kept in this vector so the IPM sees one
+// inequality interface.
 void nonlinear_inequality_constraints(const Problem& prob,
                                       const Eigen::VectorXd& x,
                                       Eigen::VectorXd& h) {
@@ -1412,6 +1497,47 @@ void nonlinear_inequality_constraints(const Problem& prob,
     const double pmax = br.rate_a_mva / prob.data.base_mva;
     const double pflow = gkm * vdc[k] * (vdc[k] - vdc[m]);
     h[off++] = pflow * pflow - pmax * pmax;
+  }
+
+  // ── Converter AC current limits (multi-converter model §3.1.5) ──
+  //   Iac = sqrt(Pac²+Qac²)/Vm ≤ i_ac_max  ⇔  h = Pac²+Qac² − i_ac_max²·Vm² ≤ 0.
+  for (int k : prob.conv_iac_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+    const double vmc = vm[ac];
+    h[off++] = pac[k] * pac[k] + qac[k] * qac[k] - im2 * vmc * vmc;
+  }
+  // ── Converter modulation limits (multi-converter model §3.1.4) ──
+  //   m = Vm·Vn_ac / (Km·Vdc·Vn_dc).  Both bounds are linear in (Vm, Vdc).
+  for (int k : prob.conv_mmax_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    h[off++] = vm[ac] * conv.vn_ac_kv -
+               conv.m_max * conv.k_m_modulation * conv.vn_dc_kv * vdc[dc];
+  }
+  for (int k : prob.conv_mmin_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    h[off++] = conv.m_min * conv.k_m_modulation * conv.vn_dc_kv * vdc[dc] -
+               vm[ac] * conv.vn_ac_kv;
+  }
+  // ── DC/DC converter duty-ratio limits (multi-converter model §3.2) ──
+  //   d_min ≤ D ≤ d_max with D backed out from the ideal CCM voltage law; both
+  //   bounds are linear in the DC port voltages (Vdc_in, Vdc_out).
+  for (int k : prob.dcdc_duty_limited) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
+    const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
+    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    h[off++] = r.in_max * vdc[bin] + r.out_max * vdc[bout];  // D ≤ d_max
+    h[off++] = r.in_min * vdc[bin] + r.out_min * vdc[bout];  // D ≥ d_min
   }
 }
 
@@ -1503,6 +1629,55 @@ void nonlinear_inequality_jacobian(const Problem& prob,
     ++off;
   }
 
+  // Converter AC current limit Jacobian: ∂h/∂Pac=2Pac, ∂h/∂Qac=2Qac,
+  //   ∂h/∂Vm = −2·i_ac_max²·Vm.
+  for (int k : prob.conv_iac_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+    t.emplace_back(off, idx.i_pac + k, 2.0 * pac[k]);
+    t.emplace_back(off, idx.i_qac + k, 2.0 * qac[k]);
+    t.emplace_back(off, idx.i_vm + ac, -2.0 * im2 * vm[ac]);
+    ++off;
+  }
+  // Converter modulation Jacobians (linear, constant coefficients).
+  for (int k : prob.conv_mmax_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    t.emplace_back(off, idx.i_vm + ac, conv.vn_ac_kv);
+    t.emplace_back(off, idx.i_vdc + dc,
+                   -conv.m_max * conv.k_m_modulation * conv.vn_dc_kv);
+    ++off;
+  }
+  for (int k : prob.conv_mmin_limited) {
+    const auto& conv =
+        prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+    const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+    const int dc = prob.conv_dc_bus[static_cast<size_t>(k)];
+    t.emplace_back(off, idx.i_vm + ac, -conv.vn_ac_kv);
+    t.emplace_back(off, idx.i_vdc + dc,
+                   conv.m_min * conv.k_m_modulation * conv.vn_dc_kv);
+    ++off;
+  }
+  // DC/DC duty-ratio Jacobians (linear, constant coefficients in the DC port
+  // voltages).
+  for (int k : prob.dcdc_duty_limited) {
+    const auto& dc =
+        prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
+    const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
+    const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
+    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    t.emplace_back(off, idx.i_vdc + bin, r.in_max);
+    t.emplace_back(off, idx.i_vdc + bout, r.out_max);
+    ++off;
+    t.emplace_back(off, idx.i_vdc + bin, r.in_min);
+    t.emplace_back(off, idx.i_vdc + bout, r.out_min);
+    ++off;
+  }
+
   jh.resize(cidx.n_ineq_nonlin, idx.n_total);
   jh.setFromTriplets(t.begin(), t.end());
   jh.makeCompressed();
@@ -1519,6 +1694,9 @@ void lagrangian_hessian_dense(const Problem& prob,
   hess = Eigen::MatrixXd(hsp);
 }
 
+// Assemble ∇²L = ∇²f + Σλᵢ∇²gᵢ + Σνⱼ∇²hⱼ.  The implementation emits sparse
+// triplets for the nonlinear AC, DC, converter, and branch-limit curvature; the
+// final matrix is symmetrized before returning.
 void lagrangian_hessian(const Problem& prob,
                         const Eigen::VectorXd& x,
                         const Eigen::VectorXd& lambda_eq,
@@ -1963,6 +2141,26 @@ void lagrangian_hessian(const Problem& prob,
       add_sym_trip(idx.i_vdc + k, idx.i_vdc + m,
           2.0 * nu_dc * (dp_dvk * dp_dvm + pflow * (-gkm)));
     }
+
+    // Converter AC current limit Hessian: h = Pac²+Qac² − i_ac_max²·Vm².
+    //   ∂²h/∂Pac²=2, ∂²h/∂Qac²=2, ∂²h/∂Vm²=−2·i_ac_max² (no cross terms).
+    for (int k : prob.conv_iac_limited) {
+      const double nu_i = nu[off++];
+      if (std::abs(nu_i) < 1e-14) continue;
+      const auto& conv =
+          prob.data.converters[static_cast<size_t>(prob.conv_var_to_data[static_cast<size_t>(k)])];
+      const int ac = prob.conv_ac_bus[static_cast<size_t>(k)];
+      const double im2 = conv.i_ac_max_pu * conv.i_ac_max_pu;
+      add(idx.i_pac + k, idx.i_pac + k, 2.0 * nu_i);
+      add(idx.i_qac + k, idx.i_qac + k, 2.0 * nu_i);
+      add(idx.i_vm + ac, idx.i_vm + ac, -2.0 * nu_i * im2);
+    }
+    // Modulation limits are linear ⇒ zero Hessian; advance the dual cursor to
+    // keep alignment with the value/Jacobian inequality order.
+    off += static_cast<int>(prob.conv_mmax_limited.size());
+    off += static_cast<int>(prob.conv_mmin_limited.size());
+    // DC/DC duty-ratio limits are also linear ⇒ zero Hessian (two rows each).
+    off += 2 * static_cast<int>(prob.dcdc_duty_limited.size());
   }
 
   // Assemble sparse matrix from triplets (duplicate entries are summed)

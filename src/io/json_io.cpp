@@ -14,6 +14,7 @@
 #include "hacdcpf/detail/internal_helpers.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using json = nlohmann::json;
@@ -765,9 +766,13 @@ static json vsc_to_json(const VSCConverter& c) {
   j["in_service"] = c.in_service;
   j["control_mode"] = converter_mode_str(c.control_mode);
   j["p_set_mw"] = c.p_set_mw;
+  j["p_is_hard_constraint"] = c.p_is_hard_constraint;
+  j["p_schedule_mw"] = c.p_schedule_mw;
+  j["p_initial_mw"] = c.p_initial_mw;
   j["q_set_mvar"] = c.q_set_mvar;
   j["v_dc_set_pu"] = c.v_dc_set_pu;
   j["v_ac_set_pu"] = c.v_ac_set_pu;
+  j["v_ac_angle_set_deg"] = c.v_ac_angle_set_deg;
   j["eta"] = c.eta;
   j["loss_percent"] = c.loss_percent;
   j["loss_mw"] = c.loss_mw;
@@ -777,10 +782,22 @@ static json vsc_to_json(const VSCConverter& c) {
   j["qmax_mvar"] = c.qmax_mvar;
   j["qmin_mvar"] = c.qmin_mvar;
   j["p_rated_mw"] = c.p_rated_mw;
+  j["r_conv_ac_pu"] = c.r_conv_ac_pu;
+  j["i_ac_max_pu"] = c.i_ac_max_pu;
+  j["i_dc_max_pu"] = c.i_dc_max_pu;
+  j["k_m_modulation"] = c.k_m_modulation;
+  j["m_min"] = c.m_min;
+  j["m_max"] = c.m_max;
   j["name"] = c.name;
   j["forced_outage_rate"] = c.forced_outage_rate;
   j["mttr_hr"] = c.mttr_hr;
   j["grid_forming"] = c.grid_forming;
+  j["ac_grid_forming"] = c.ac_grid_forming;
+  j["allow_dual_side_grid_forming"] = c.allow_dual_side_grid_forming;
+  j["has_energy_buffer"] = c.has_energy_buffer;
+  j["coordination_group_id"] = c.coordination_group_id;
+  j["is_master"] = c.is_master;
+  j["participation_factor"] = c.participation_factor;
   return j;
 }
 
@@ -793,9 +810,13 @@ static VSCConverter vsc_from_json(const json& j) {
   c.control_mode = converter_mode_from_str(
       jget<std::string>(j, "control_mode", "PQ"));
   c.p_set_mw = jget(j, "p_set_mw", 0.0);
+  c.p_is_hard_constraint = jget(j, "p_is_hard_constraint", false);
+  c.p_schedule_mw = jget(j, "p_schedule_mw", 0.0);
+  c.p_initial_mw = jget(j, "p_initial_mw", 0.0);
   c.q_set_mvar = jget(j, "q_set_mvar", 0.0);
   c.v_dc_set_pu = jget(j, "v_dc_set_pu", 1.0);
   c.v_ac_set_pu = jget(j, "v_ac_set_pu", 1.0);
+  c.v_ac_angle_set_deg = jget(j, "v_ac_angle_set_deg", 0.0);
   c.eta = jget(j, "eta", 0.99);
   c.loss_percent = jget(j, "loss_percent", 0.0);
   c.loss_mw = normalize_loss_mw_from_json(j);
@@ -805,10 +826,22 @@ static VSCConverter vsc_from_json(const json& j) {
   c.qmax_mvar = jget(j, "qmax_mvar", 0.0);
   c.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   c.p_rated_mw = jget(j, "p_rated_mw", 0.0);
+  c.r_conv_ac_pu = jget(j, "r_conv_ac_pu", 0.0);
+  c.i_ac_max_pu = jget(j, "i_ac_max_pu", 0.0);
+  c.i_dc_max_pu = jget(j, "i_dc_max_pu", 0.0);
+  c.k_m_modulation = jget(j, "k_m_modulation", 0.0);
+  c.m_min = jget(j, "m_min", 0.0);
+  c.m_max = jget(j, "m_max", 0.0);
   c.name = jget<std::string>(j, "name", "");
   c.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   c.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   c.grid_forming = jget(j, "grid_forming", false);
+  c.ac_grid_forming = jget(j, "ac_grid_forming", false);
+  c.allow_dual_side_grid_forming = jget(j, "allow_dual_side_grid_forming", false);
+  c.has_energy_buffer = jget(j, "has_energy_buffer", false);
+  c.coordination_group_id = jget<std::string>(j, "coordination_group_id", "");
+  c.is_master = jget(j, "is_master", false);
+  c.participation_factor = jget(j, "participation_factor", 0.0);
   return c;
 }
 
@@ -1837,6 +1870,10 @@ static json dcdc_to_json(const DCDCConverter& c) {
   j["pmax_mw"] = c.pmax_mw;
   j["pmin_mw"] = c.pmin_mw;
   j["k_droop"] = c.k_droop;
+  j["topology"] = dcdc_topology_str(c.topology);
+  j["d_min"] = c.d_min;
+  j["d_max"] = c.d_max;
+  j["n_ratio"] = c.n_ratio;
   j["mtbf_hours"] = c.mtbf_hours;
   j["mttr_hours"] = c.mttr_hours;
   return j;
@@ -1860,6 +1897,10 @@ static DCDCConverter dcdc_from_json(const json& j) {
   c.pmax_mw = jget(j, "pmax_mw", 0.0);
   c.pmin_mw = jget(j, "pmin_mw", 0.0);
   c.k_droop = jget(j, "k_droop", 0.0);
+  c.topology = dcdc_topology_from_str(jget<std::string>(j, "topology", "Generic"));
+  c.d_min = jget(j, "d_min", 0.05);
+  c.d_max = jget(j, "d_max", 0.95);
+  c.n_ratio = jget(j, "n_ratio", 1.0);
   c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return c;
@@ -2426,6 +2467,55 @@ std::string power_flow_result_to_json(const HybridPowerSystem& sys,
   root["converged"] = result.converged;
   root["iterations"] = result.iterations;
   root["residual"] = result.residual;
+  root["warnings"] = result.diagnostics.warnings;
+  root["termination_reason"] = result.diagnostics.termination_reason;
+
+  const auto& coord = result.diagnostics.converter_coordination;
+  json coord_json;
+  coord_json["enabled"] = coord.enabled;
+  coord_json["feasible"] = coord.feasible;
+  coord_json["blocking_count"] = coord.blocking_count();
+  coord_json["fatal_count"] = coord.fatal_count();
+  coord_json["error_count"] = coord.error_count();
+  coord_json["warning_count"] = coord.warning_count();
+  coord_json["issues"] = json::array();
+  for (const auto& issue : coord.issues) {
+    coord_json["issues"].push_back({
+        {"severity", powerflow::coordination_severity_str(issue.severity)},
+        {"rule_id", issue.rule_id},
+        {"component_type", issue.component_type},
+        {"component_index", issue.component_index},
+        {"island_index", issue.island_index},
+        {"message", issue.message},
+    });
+  }
+  coord_json["dc_islands"] = json::array();
+  for (const auto& island : coord.dc_islands) {
+    coord_json["dc_islands"].push_back({
+        {"island_index", island.island_index},
+        {"dc_buses", island.dc_buses},
+        {"declared_v_buses", island.declared_v_buses},
+        {"hard_vdc_sources", island.hard_vdc_sources},
+        {"droop_sources", island.droop_sources},
+        {"fixed_power_devices", island.fixed_power_devices},
+        {"fixed_power_mw", island.fixed_power_mw},
+        {"flexible_up_mw", island.flexible_up_mw},
+        {"flexible_down_mw", island.flexible_down_mw},
+    });
+    auto& island_json = coord_json["dc_islands"].back();
+    island_json["voltage_sources"] = json::array();
+    for (const auto& source : island.voltage_sources) {
+      island_json["voltage_sources"].push_back({
+          {"component_type", source.component_type},
+          {"component_index", source.component_index},
+          {"bus", source.bus},
+          {"v_set_pu", source.v_set_pu},
+          {"has_v_set", source.has_v_set},
+          {"droop", source.droop},
+      });
+    }
+  }
+  root["converter_coordination"] = std::move(coord_json);
 
   json ac_buses = json::array();
   for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
@@ -3539,6 +3629,11 @@ std::string to_jpc_json(const HybridPowerSystem& sys, int indent) {
       obj["mtbf_hr"]            = c.mtbf_hr;
       obj["t_scheduled_hr"]     = c.t_scheduled_hr;
       obj["r_conv_ac_pu"]       = c.r_conv_ac_pu;
+      obj["i_ac_max_pu"]        = c.i_ac_max_pu;
+      obj["i_dc_max_pu"]        = c.i_dc_max_pu;
+      obj["k_m_modulation"]     = c.k_m_modulation;
+      obj["m_min"]              = c.m_min;
+      obj["m_max"]              = c.m_max;
       obj["x_sc_pu"]            = c.x_sc_pu;
       obj["vn_ac_kv"]           = c.vn_ac_kv;
       obj["vn_dc_kv"]           = c.vn_dc_kv;
@@ -3908,6 +4003,11 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
       c.mtbf_hr            = jget<double>(j, "mtbf_hr", c.mtbf_hr);
       c.t_scheduled_hr     = jget<double>(j, "t_scheduled_hr", c.t_scheduled_hr);
       c.r_conv_ac_pu       = jget<double>(j, "r_conv_ac_pu", c.r_conv_ac_pu);
+      c.i_ac_max_pu        = jget<double>(j, "i_ac_max_pu", c.i_ac_max_pu);
+      c.i_dc_max_pu        = jget<double>(j, "i_dc_max_pu", c.i_dc_max_pu);
+      c.k_m_modulation     = jget<double>(j, "k_m_modulation", c.k_m_modulation);
+      c.m_min              = jget<double>(j, "m_min", c.m_min);
+      c.m_max              = jget<double>(j, "m_max", c.m_max);
       c.x_sc_pu            = jget<double>(j, "x_sc_pu", c.x_sc_pu);
       c.vn_ac_kv           = jget<double>(j, "vn_ac_kv", c.vn_ac_kv);
       c.vn_dc_kv           = jget<double>(j, "vn_dc_kv", c.vn_dc_kv);

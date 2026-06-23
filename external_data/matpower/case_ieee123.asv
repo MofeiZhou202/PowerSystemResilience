@@ -1,0 +1,203 @@
+function mpc = case_ieee123
+%CASE_IEEE123_FLUCTUATED  IEEE 123-bus test case with randomized light loads.
+%   
+%   FEATURES:
+%   1. LOADS: Randomized around 5 kW / 2 kVar per node.
+%      - P range: [0.002, 0.008] MW
+%      - Q range: [0.001, 0.003] MVar
+%   2. IMPEDANCE: Optimized line parameters (Short/Medium/Long) + Low Z Switches.
+
+%% MATPOWER Case Format : Version 2
+mpc.version = '2';
+mpc.baseMVA = 1.0;
+
+%% Bus Data Generation (Programmatic approach for randomized loads)
+n_bus = 129;
+mpc.bus = zeros(n_bus, 13);
+
+% --- 1. Basic Initialization ---
+mpc.bus(:,1) = 1:n_bus;      % Bus ID (1 to 130)
+mpc.bus(:,2) = 1;            % Type: PQ (Load)
+mpc.bus(1,2) = 3;            % Type: Slack (Source) for Bus 1
+mpc.bus(:,7) = 1;            % Area
+mpc.bus(:,8) = 1;            % Vm (Voltage Magnitude initial guess)
+mpc.bus(1,8) = 1.0;         % Source Voltage set to 1.05 p.u.
+mpc.bus(:,9) = 0;            % Va (Voltage Angle)
+mpc.bus(:,10) = 4.16;        % BaseKV (Most buses are 4.16 kV)
+mpc.bus(:,11) = 1;           % Zone
+mpc.bus(:,12) = 1.1;         % Max V
+mpc.bus(:,13) = 0.9;         % Min V
+
+% --- 2. Load Fluctuation Logic ---
+% Set seed for reproducibility (so you get the same "random" values every time)
+rng(1); 
+
+% Define Base Load and Fluctuation Range
+P_base = 0.005; % 5 kW
+P_var  = 0.003; % +/- 3 kW
+Q_base = 0.002; % 2 kVar
+Q_var  = 0.003; % +/- 1 kVar
+
+% Generate Random Loads
+% P = Base + (Random - 0.5) * 2 * Variation
+mpc.bus(:,3) = P_base + (rand(n_bus, 1) - 0.5) * 2 * P_var; 
+mpc.bus(:,4) = Q_base + (rand(n_bus, 1) - 0.5) * 2 * Q_var;
+
+% Ensure Source Bus (Bus 1) has 0 load
+mpc.bus(1, 3) = 0;
+mpc.bus(1, 4) = 0;
+
+% Optional: Ensure loads are strictly positive (though the math above guarantees it)
+mpc.bus(:,3) = max(mpc.bus(:,3), 0.001); 
+mpc.bus(:,4) = max(mpc.bus(:,4), 0.0005);
+
+
+%% Generator Data
+mpc.gen = [
+	1	0	0	999	-999	1.00	100	1	999	-999	0	0	0	0	0	0	0	0	0	0	0;
+];
+
+%% Branch Data
+% Impedance Definitions (p.u. on 1 MVA, 4.16 kV base)
+% Short:  0.2+j0.1 Ohm   -> 0.0116 + j0.0058
+r_s = 0.0116; x_s = 0.0058; b_s = 0.001;
+% Medium: 1.0+j1.2 Ohm   -> 0.0578 + j0.0693
+r_m = 0.0578; x_m = 0.0693; b_m = 0.003;
+% Long:   1.9+j2.1 Ohm   -> 0.1098 + j0.1214
+r_l = 0.1098; x_l = 0.1214; b_l = 0.005
+
+mpc.branch = [
+    % Fbus Tbus  R       X       B  RateA RateB RateC Ratio Angle Status ...
+	120	2	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	2	3	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	2	4	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	2	8	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	4	5	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	4	6	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	6	7	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	8	9	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	9	13	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	9	10	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	9	14	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	121	15	r_l	x_l	b_l	0	0	0	0	0	1	-360	360;
+	14	35	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	14	19	r_l	x_l	b_l	0	0	0	0	0	1	-360	360;
+	15	12	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	15	11	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	16	17	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	16	18	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	19	20	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	19	22	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	20	21	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	22	23	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	22	24	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	24	25	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	24	26	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	122	27	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	26	29	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	27	28	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	27	32	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	28	34	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	29	30	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	30	31	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	31	123	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	32	33	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	35	16	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	36	37	r_l	x_l	b_l	0	0	0	0	0	1	-360	360;
+	36	41	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	37	38	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	37	39	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	39	40	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	41	42	r_m	x_m	b_m	0	0	0	0	0	1	-360	360;
+	41	43	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	43	44	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	43	45	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	45	46	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	45	48	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	46	47	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	48	49	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	48	50	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	50	51	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	51	52	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	52	124	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	53	54	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	54	55	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	55	56	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	55	58	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	56	57	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	58	59	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	58	61	r_l	x_l	0.002	0	0	0	0	0	1	-360	360;
+	59	60	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	61	62	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	61	63	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	63	64	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	64	65	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	65	66	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	66	67	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	68	69	r_s	x_s	b_s 	0	0	0	0	0	1	-360	360;
+	68	73	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	68	98	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	69	70	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	70	71	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	71	72	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	73	74	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	73	77	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	74	75	r_m	x_m	0	0	0	0	0	0	1	-360	360;
+	75	76	r_m	x_m	0	0	0	0	0	0	1	-360	360;
+	77	78	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	77	87	r_l	x_l	0.002	0	0	0	0	0	1	-360	360;
+	78	79	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	79	80	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	79	81	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	81	82	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	82	83	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	82	85	r_l	x_l	0.002	0	0	0	0	0	1	-360	360;
+	83	84	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	85	86	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	87	88	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	88	89	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	88	90	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	90	91	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	90	92	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	92	93	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	92	94	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	94	95	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	94	96	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	96	97	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	98	99	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	99	100	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	100	101	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	101	126	r_l	x_l	0.002	0	0	0	0	0	1	-360	360;
+	127	102	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	102	103	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	102	106	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	103	104	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	104	105	r_l	x_l	0.004	0	0	0	0	0	1	-360	360;
+	106	107	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	106	109	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	107	108	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	109	110	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	109	125	r_l	x_l	0.004	0	0	0	0	0	1	-360	360;
+	110	111	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	111	112	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	111	113	r_s	x_s	b_s	0	0	0	0	0	1	-360	360;
+	113	114	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	114	115	r_m	x_m	0.004	0	0	0	0	0	1	-360	360;
+	116	36	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	117	53	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	118	68	r_m	x_m	0.002	0	0	0	0	0	1	-360	360;
+	119	120	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	14	117	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	19	116	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	61	128	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	98	127	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	62	129	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	124	125	r_s	x_s	0	0	0	0	0	0	0	-360	360;%开关
+	55	95	r_s	x_s	0	0	0	0	0	0	0	-360	360;%开关
+	1	119	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+	9	121	r_s	x_s	0	0	0	0	0	0	1	-360	360;
+	25	122	r_s	x_s	0	0	0	0	0	0	1	-360	360;
+	128	118	r_s	x_s	0	0	0	0	0	0	1	-360	360;%开关
+];
+
+end
