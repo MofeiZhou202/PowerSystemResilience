@@ -3280,6 +3280,232 @@ const App = (() => {
     div.innerHTML = html;
   }
 
+  function showPowerFlowBalanceDiagnostics(data, busMap) {
+    const section = document.getElementById('pfBalanceSection');
+    const div = document.getElementById('pfBalanceResults');
+    if (!section || !div) return;
+
+    const sys = (typeof Canvas !== 'undefined' && Canvas.buildSystemJson)
+      ? Canvas.buildSystemJson() : null;
+    if (!sys) {
+      section.style.display = 'none';
+      div.innerHTML = '';
+      return;
+    }
+
+    const num = (v, d = 0) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : d;
+    };
+    const isOn = (x) => !(x && (x.in_service === false || x.in_service === 'false'));
+    const ac = new Map();
+    const dc = new Map();
+    const add = (map, key, value, label) => {
+      if (key === undefined || key === null || key === 0) return;
+      const id = Number(key);
+      const row = map.get(id) || { mw: 0, items: [] };
+      const mw = num(value, 0);
+      row.mw += mw;
+      if (Math.abs(mw) > 1e-9 && label) row.items.push({ mw, label });
+      map.set(id, row);
+    };
+    const busName = (kind, id) => {
+      const arr = kind === 'AC' ? (sys.ac?.buses || []) : (sys.dc?.buses || []);
+      const b = arr.find(x => Number(x.index) === Number(id));
+      return b ? (b.name || '') : '';
+    };
+    const busType = (kind, id) => {
+      const arr = kind === 'AC' ? (sys.ac?.buses || []) : (sys.dc?.buses || []);
+      const b = arr.find(x => Number(x.index) === Number(id));
+      return b ? (b.bus_type || '') : '';
+    };
+
+    (data.geo_ac_branches || []).forEach(br => {
+      add(ac, br.from, br.pf_mw, `AC支路 ${br.from}->${br.to} Pf`);
+      add(ac, br.to, br.pt_mw, `AC支路 ${br.from}->${br.to} Pt`);
+    });
+    const dcBranches = data.geo_dc_branches || data.dc_branch_flows || [];
+    dcBranches.forEach(br => {
+      const from = br.from ?? br.from_bus;
+      const to = br.to ?? br.to_bus;
+      add(dc, from, br.pf_mw, `DC支路 ${from}->${to} Pf`);
+      add(dc, to, br.pt_mw, `DC支路 ${from}->${to} Pt`);
+    });
+    const vscRows = data.geo_vsc && data.geo_vsc.length ? data.geo_vsc : (data.vsc_transfers || []);
+    vscRows.forEach(v => {
+      add(ac, v.bus_ac, -num(v.p_ac_mw), `VSC ${v.index ?? ''} AC侧`);
+      add(dc, v.bus_dc, -num(v.p_dc_mw), `VSC ${v.index ?? ''} DC侧`);
+    });
+    const dcdcRows = data.geo_dcdc && data.geo_dcdc.length ? data.geo_dcdc : (data.dcdc_transfers || []);
+    dcdcRows.forEach(d => {
+      add(dc, d.bus_in, num(d.p_in_mw), `DCDC ${d.index ?? ''} 输入侧`);
+      add(dc, d.bus_out, -num(d.p_out_mw), `DCDC ${d.index ?? ''} 输出侧`);
+    });
+    (data.geo_trafo3w || []).forEach(tf => {
+      add(ac, tf.hv_bus, tf.p_hv_mw, `三绕组变压器 ${tf.index ?? ''} HV`);
+      add(ac, tf.mv_bus, tf.p_mv_mw, `三绕组变压器 ${tf.index ?? ''} MV`);
+      add(ac, tf.lv_bus, tf.p_lv_mw, `三绕组变压器 ${tf.index ?? ''} LV`);
+    });
+
+    function complex(re, im = 0) { return { re, im }; }
+    function cAdd(a, b) { return complex(a.re + b.re, a.im + b.im); }
+    function cMul(a, b) { return complex(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re); }
+    function cDiv(a, b) {
+      const den = b.re * b.re + b.im * b.im;
+      return den > 0 ? complex((a.re * b.re + a.im * b.im) / den, (a.im * b.re - a.re * b.im) / den) : complex(0, 0);
+    }
+    function cConj(a) { return complex(a.re, -a.im); }
+    function cNeg(a) { return complex(-a.re, -a.im); }
+    function vphasor(busId) {
+      const idx = Number(busId) - 1;
+      const vm = Number(data.vm?.[idx]);
+      const va = Number(data.va?.[idx]);
+      if (!Number.isFinite(vm) || !Number.isFinite(va)) return null;
+      return complex(vm * Math.cos(va), vm * Math.sin(va));
+    }
+    (sys.ac?.transformers_2w || []).forEach(tf => {
+      if (!isOn(tf) || tf.source_branch_idx > 0) return;
+      const vh = vphasor(tf.hv_bus);
+      const vl = vphasor(tf.lv_bus);
+      const baseMva = num(sys.base_mva ?? sys.ac?.base_mva, 100);
+      const snMva = num(tf.sn_mva);
+      if (!vh || !vl || baseMva <= 1e-9 || snMva <= 1e-9) return;
+      const scale = baseMva / snMva;
+      const zMag = Math.max(0, num(tf.vk_percent) / 100) * scale;
+      let rPu = Math.max(0, num(tf.vkr_percent) / 100) * scale;
+      let xPu = Math.sqrt(Math.max(0, zMag * zMag - rPu * rPu));
+      if (rPu === 0 && xPu === 0) xPu = 1e-4;
+      const rawTap = Math.max(1e-6, 1 + (num(tf.tap_pos) - num(tf.tap_neutral)) * num(tf.tap_step_percent) / 100);
+      if (Number(tf.tap_side) === 1) {
+        rPu *= rawTap * rawTap;
+        xPu *= rawTap * rawTap;
+      }
+      const ys = cDiv(complex(1, 0), complex(rPu, xPu));
+      const tapMag = Number(tf.tap_side) === 1 ? 1 / rawTap : rawTap;
+      const shift = num(tf.shift_deg) * Math.PI / 180;
+      const tap = complex(tapMag * Math.cos(shift), tapMag * Math.sin(shift));
+      const tapAbs2 = tap.re * tap.re + tap.im * tap.im;
+      if (tapAbs2 <= 0) return;
+      const yff = complex(ys.re / tapAbs2, ys.im / tapAbs2);
+      const yft = cNeg(cDiv(ys, cConj(tap)));
+      const ytf = cNeg(cDiv(ys, tap));
+      const ih = cAdd(cMul(yff, vh), cMul(yft, vl));
+      const il = cAdd(cMul(ytf, vh), cMul(ys, vl));
+      add(ac, tf.hv_bus, cMul(vh, cConj(ih)).re * baseMva, `二绕组变压器 ${tf.index ?? ''} HV`);
+      add(ac, tf.lv_bus, cMul(vl, cConj(il)).re * baseMva, `二绕组变压器 ${tf.index ?? ''} LV`);
+    });
+
+    (sys.ac?.loads || []).forEach(x => { if (isOn(x)) add(ac, x.bus, num(x.p_mw) * num(x.scaling, 1), `负荷 ${x.index ?? ''}`); });
+    (sys.ac?.charging_stations || []).forEach(x => { if (isOn(x)) add(ac, x.bus, num(x.p_total_kw) / 1000, `充电站 ${x.index ?? ''}`); });
+    (sys.ac?.chargers || []).forEach(x => { if (isOn(x)) add(ac, x.bus, num(x.p_ch_kw) / 1000, `充电桩 ${x.index ?? ''}`); });
+    (sys.ac?.generators || []).forEach(x => { if (isOn(x)) add(ac, x.bus, -num(x.pg_mw ?? x.p_mw), `发电机 ${x.index ?? ''}`); });
+    (sys.ac?.pv_systems || []).forEach(x => { if (isOn(x)) add(ac, x.bus, -num(x.p_mw), `光伏 ${x.index ?? ''}`); });
+    (sys.ac?.renewable_gens || []).forEach(x => { if (isOn(x)) add(ac, x.bus, -num(x.p_mw), `新能源 ${x.index ?? ''}`); });
+    (sys.ac?.static_generators || []).forEach(x => { if (isOn(x)) add(ac, x.bus, -num(x.p_mw ?? x.p_set_mw), `静态电源 ${x.index ?? ''}`); });
+    (sys.ac?.storage || []).forEach(x => { if (isOn(x)) add(ac, x.bus, -num(x.p_mw), `储能 ${x.index ?? ''}`); });
+    (sys.vpps || []).forEach(x => { if (isOn(x)) add(ac, x.pcc_bus ?? x.bus, -num(x.p_output_mw ?? x.p_mw), `虚拟电厂 ${x.index ?? ''}`); });
+    (sys.microgrids || []).forEach(x => { if (isOn(x) && x.operating_mode !== 'Islanded') add(ac, x.pcc_bus, -num(x.p_exchange_mw), `微网 ${x.index ?? ''}`); });
+    (sys.dc?.loads || []).forEach(x => { if (isOn(x)) add(dc, x.bus, num(x.p_mw) * num(x.scaling, 1), `DC负荷 ${x.index ?? ''}`); });
+    (sys.dc?.pv_arrays || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC光伏 ${x.index ?? ''}`); });
+    (sys.dc?.static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
+    (sys.dc?.dc_static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
+    (sys.dc?.storage || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw), `DC储能 ${x.index ?? ''}`); });
+
+    function dcSlackSet() {
+      const buses = (sys.dc?.buses || []).filter(isOn);
+      const byId = new Map(buses.map(b => [Number(b.index), b]));
+      const adj = new Map(buses.map(b => [Number(b.index), []]));
+      (sys.dc?.branches || []).forEach(br => {
+        if (!isOn(br)) return;
+        const f = Number(br.from_bus), t = Number(br.to_bus);
+        if (!adj.has(f) || !adj.has(t)) return;
+        adj.get(f).push(t);
+        adj.get(t).push(f);
+      });
+      (sys.dc?.dcdc_converters || []).forEach(d => {
+        if (!isOn(d)) return;
+        const f = Number(d.bus_in), t = Number(d.bus_out);
+        if (!adj.has(f) || !adj.has(t)) return;
+        adj.get(f).push(t);
+        adj.get(t).push(f);
+      });
+      const visited = new Set();
+      const slacks = new Set();
+      const implicit = new Set();
+      for (const start of adj.keys()) {
+        if (visited.has(start)) continue;
+        const q = [start];
+        const comp = [];
+        visited.add(start);
+        for (let head = 0; head < q.length; head++) {
+          const u = q[head];
+          comp.push(u);
+          (adj.get(u) || []).forEach(v => {
+            if (!visited.has(v)) {
+              visited.add(v);
+              q.push(v);
+            }
+          });
+        }
+        let chosen = comp.find(id => String(byId.get(id)?.bus_type || '').toUpperCase() === 'DC_V');
+        if (chosen === undefined) {
+          chosen = comp.find(id => String(byId.get(id)?.bus_type || '').toUpperCase() !== 'DC_ISOLATED');
+          if (chosen === undefined) chosen = comp[0];
+          implicit.add(chosen);
+        }
+        if (chosen !== undefined) slacks.add(chosen);
+      }
+      return { slacks, implicit };
+    }
+
+    const acSlack = new Set((sys.ac?.external_grids || []).filter(isOn).map(x => Number(x.bus)));
+    (sys.ac?.buses || []).forEach(b => {
+      if (String(b.bus_type || '').toUpperCase() === 'SLACK') acSlack.add(Number(b.index));
+    });
+    const dcSlack = dcSlackSet();
+    const tolKw = 1.0;
+    const rows = [];
+    const collect = (kind, map, buses, slackSet, implicitSet = new Set()) => {
+      (buses || []).forEach(b => {
+        if (!isOn(b)) return;
+        const id = Number(b.index);
+        const rec = map.get(id) || { mw: 0, items: [] };
+        const kw = rec.mw * 1000;
+        const isSlack = slackSet.has(id);
+        const isImplicit = implicitSet.has(id);
+        if (!isSlack && Math.abs(kw) <= tolKw) return;
+        rows.push({
+          kind, id, kw, isSlack, isImplicit,
+          type: b.bus_type || '',
+          name: busName(kind, id),
+          details: rec.items.sort((a, b) => Math.abs(b.mw) - Math.abs(a.mw)).slice(0, 4),
+        });
+      });
+    };
+    collect('AC', ac, sys.ac?.buses || [], acSlack);
+    collect('DC', dc, sys.dc?.buses || [], dcSlack.slacks, dcSlack.implicit);
+
+    const bad = rows.filter(r => !r.isSlack && Math.abs(r.kw) > tolKw);
+    const sources = rows.filter(r => r.isSlack && Math.abs(r.kw) > tolKw);
+    section.style.display = '';
+    const status = bad.length
+      ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个非平衡节点超过 ${tolKw} kW，请检查连接或设备功率。</p>`
+      : `<p class="empty-hint">普通节点有功平衡通过：未发现超过 ${tolKw} kW 的非平衡节点。</p>`;
+    const sourceHint = sources.length
+      ? `<p class="empty-hint">下表中的 Slack/平衡源残差表示其承担的系统平衡功率；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
+      : '';
+    const tableRows = rows.sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw)).map(r => {
+      const compId = r.kind === 'AC' ? busMap.ac?.[r.id] : busMap.dc?.[r.id];
+      const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+      const role = r.isImplicit ? '隐式DC平衡' : (r.isSlack ? 'Slack/平衡源' : '未平衡');
+      const detail = r.details.map(x => `${x.label}: ${pFmt(x.mw, 3)} ${pUnit()}`).join('<br>');
+      return `<tr${attr}><td>${r.kind}</td><td>${r.id}</td><td>${escapeHtml(r.type)}</td><td>${role}</td><td>${pFmt(r.kw / 1000, 3)}</td><td>${escapeHtml(r.name)}</td><td>${detail}</td></tr>`;
+    }).join('');
+    div.innerHTML = status + sourceHint + (tableRows
+      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>角色</th><th>残差/平衡功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${tableRows}</tbody></table>`
+      : '');
+  }
+
   function showPowerFlowResultsTables(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
