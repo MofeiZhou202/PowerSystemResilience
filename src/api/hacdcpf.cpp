@@ -124,6 +124,15 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, hash_double(c.qmax_mvar));
     h = hash_combine(h, hash_double(c.qmin_mvar));
     h = hash_combine(h, hash_double(c.p_rated_mw));
+    // Steady-state coupling / feasibility fields (multi-converter model): these
+    // affect the DC injection (r_conv_ac_pu) or post-solve feasibility checks,
+    // so they must invalidate the cached SolverData when changed.
+    h = hash_combine(h, hash_double(c.r_conv_ac_pu));
+    h = hash_combine(h, hash_double(c.i_ac_max_pu));
+    h = hash_combine(h, hash_double(c.i_dc_max_pu));
+    h = hash_combine(h, hash_double(c.k_m_modulation));
+    h = hash_combine(h, hash_double(c.m_min));
+    h = hash_combine(h, hash_double(c.m_max));
   }
   for (const auto& c : sys.dc.dcdc_converters) {
     h = hash_combine(h, static_cast<std::uint64_t>(c.bus_in));
@@ -474,6 +483,24 @@ void populate_derived_results(const powerflow::SolverData& data,
     return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
   };
 
+  // AC_PV reactive attribution: an AC_PV converter's AC bus is voltage-controlled
+  // (PV), so the converter supplies the bus's reactive generation = network
+  // reactive injection + local reactive demand.  Compute the network current
+  // I = Ybus·V once, only when an AC_PV converter is present.  This credits the
+  // bus's reactive balance to the converter; with several reactive devices on
+  // one bus the attribution is shared (multi-converter model r1 §1.3) and this
+  // single-source convention over-credits one converter.
+  const bool has_ac_pv = std::any_of(
+      eff_converters.begin(), eff_converters.end(), [](const VSCConverter& c) {
+        return c.in_service && c.control_mode == ConverterMode::AC_PV;
+      });
+  Eigen::VectorXcd ybus_current;
+  if (has_ac_pv && data.ybus.rows() == vm.size() && data.ybus.cols() == vm.size()) {
+    Eigen::VectorXcd vbus(vm.size());
+    for (Eigen::Index i = 0; i < vm.size(); ++i) vbus[i] = std::polar(vm[i], va[i]);
+    ybus_current = data.ybus * vbus;
+  }
+
   result.vsc_transfers.reserve(eff_converters.size());
   for (int ci = 0; ci < static_cast<int>(eff_converters.size()); ++ci) {
     VSCConverter conv = eff_converters[static_cast<size_t>(ci)];
@@ -486,15 +513,87 @@ void populate_derived_results(const powerflow::SolverData& data,
     const double p_dc_pu =
         powerflow::converter_dc_injection(conv, vm, va, vdc, data.base_mva, loss_model);
 
+    // AC_PV releases reactive power: report the bus's reactive generation (the
+    // free balancing injection) instead of the placeholder q_set_mvar.
+    double q_ac_pu_out = q_ac_pu;
+    if (conv.control_mode == ConverterMode::AC_PV &&
+        ybus_current.size() == vm.size()) {
+      const int aci = conv.bus_ac - 1;
+      if (aci >= 0 && aci < static_cast<int>(vm.size())) {
+        const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
+        const double q_net_inj =
+            (v_i * std::conj(ybus_current[static_cast<Eigen::Index>(aci)])).imag();
+        const double qd_i = (aci < static_cast<int>(data.qd_pu.size()))
+                                ? data.qd_pu[static_cast<size_t>(aci)]
+                                : 0.0;
+        q_ac_pu_out = q_net_inj + qd_i;
+      }
+    }
+
     VSCTransfer tr;
     tr.index = conv.index;
     tr.bus_ac = conv.bus_ac;
     tr.bus_dc = conv.bus_dc;
     tr.p_ac_mw = p_ac_pu * data.base_mva;
-    tr.q_ac_mvar = q_ac_pu * data.base_mva;
+    tr.q_ac_mvar = q_ac_pu_out * data.base_mva;
     tr.p_dc_mw = p_dc_pu * data.base_mva;
     tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
     result.vsc_transfers.push_back(tr);
+
+    // ── Post-solve converter physical-limit feasibility (multi-converter model
+    // §3.1.4–3.1.7).  Each check is opt-in — it only fires when the relevant
+    // limit field is set (>0), so default systems are unaffected.  These are
+    // diagnostics (warnings), not hard constraints in this determined solve.
+    const int ac_pos = conv.bus_ac - 1;
+    const int dc_pos = conv.bus_dc - 1;
+    const double vm_ac =
+        (ac_pos >= 0 && ac_pos < static_cast<int>(vm.size())) ? std::max(vm[ac_pos], 1e-3) : 1.0;
+    const double vdc_b =
+        (dc_pos >= 0 && dc_pos < static_cast<int>(vdc.size())) ? std::max(vdc[dc_pos], 1e-3) : 1.0;
+    const double s_ac_pu = std::hypot(p_ac_pu, q_ac_pu);
+    const double s_rated_pu = conv.p_rated_mw / data.base_mva;
+    if (s_rated_pu > 0.0 && s_ac_pu > s_rated_pu * (1.0 + 1e-6)) {
+      result.diagnostics.warnings.push_back(
+          "[ACDC-PHYS-04] VSC converter " + std::to_string(conv.index) +
+          " apparent power " + std::to_string(s_ac_pu * data.base_mva) +
+          " MVA exceeds its rating " + std::to_string(conv.p_rated_mw) + " MVA.");
+    }
+    if (conv.i_ac_max_pu > 0.0) {
+      const double i_ac_pu = s_ac_pu / vm_ac;
+      if (i_ac_pu > conv.i_ac_max_pu * (1.0 + 1e-6)) {
+        result.diagnostics.warnings.push_back(
+            "[ACDC-PHYS-02] VSC converter " + std::to_string(conv.index) +
+            " AC current " + std::to_string(i_ac_pu) + " pu exceeds limit " +
+            std::to_string(conv.i_ac_max_pu) + " pu.");
+      }
+    }
+    if (conv.i_dc_max_pu > 0.0) {
+      const double i_dc_pu = std::abs(p_dc_pu) / vdc_b;
+      if (i_dc_pu > conv.i_dc_max_pu * (1.0 + 1e-6)) {
+        result.diagnostics.warnings.push_back(
+            "[ACDC-PHYS-03] VSC converter " + std::to_string(conv.index) +
+            " DC current " + std::to_string(i_dc_pu) + " pu exceeds limit " +
+            std::to_string(conv.i_dc_max_pu) + " pu.");
+      }
+    }
+    if (conv.k_m_modulation > 0.0 && conv.m_max > 0.0 && conv.vn_ac_kv > 0.0 &&
+        conv.vn_dc_kv > 0.0) {
+      const double v_ac_model = vm_ac * conv.vn_ac_kv;  // kV
+      const double v_dc_model = vdc_b * conv.vn_dc_kv;   // kV
+      const double m = v_ac_model / (conv.k_m_modulation * v_dc_model);
+      if (m > conv.m_max * (1.0 + 1e-6)) {
+        result.diagnostics.warnings.push_back(
+            "[ACDC-PHYS-05] VSC converter " + std::to_string(conv.index) +
+            " requires modulation index " + std::to_string(m) + " > m_max " +
+            std::to_string(conv.m_max) +
+            "; DC voltage is insufficient for the requested AC voltage.");
+      } else if (conv.m_min > 0.0 && m < conv.m_min * (1.0 - 1e-6)) {
+        result.diagnostics.warnings.push_back(
+            "[ACDC-PHYS-01] VSC converter " + std::to_string(conv.index) +
+            " modulation index " + std::to_string(m) + " is below m_min " +
+            std::to_string(conv.m_min) + ".");
+      }
+    }
   }
 
   result.dcdc_transfers.reserve(data.dcdc_converters.size());
@@ -643,6 +742,24 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
+
+  // Declare which parts of the unified converter model this snapshot Newton
+  // solve honored (multi-converter model, docs/multiple_converter.md).
+  {
+    auto& sc = result.converter_model_scope;
+    sc.model_scope = "steady-state-newton:vsc-3mode+dcdc-power-transfer";
+    sc.validity.vsc_loss_modelled = true;
+    sc.validity.vsc_ac_conduction_loss_modelled = true;  // r_conv_ac_pu coupling (opt-in)
+    sc.validity.vsc_vdc_control_modelled = true;          // VDC_Q/VDC_VAC + stiff droop forming
+    sc.validity.dcdc_loss_modelled = true;
+    // Not yet enforced inside the Newton solve (post-hoc checks only):
+    sc.validity.vsc_capacity_circle_enforced = false;
+    sc.validity.vsc_current_limits_enforced = false;
+    sc.validity.vsc_modulation_limits_enforced = false;
+    sc.validity.dc_multisource_coordination_modelled = true;  // is_master + participation in solve
+    sc.validity.dcdc_duty_ratio_enforced = false;  // computed post-solve, reported as warning
+    sc.validity.equation_closure_checked = result.diagnostics.equation_closure_checked;
+  }
   return result;
 }
 

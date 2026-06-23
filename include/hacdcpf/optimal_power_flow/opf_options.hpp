@@ -34,6 +34,14 @@ struct ACOPFOptions {
   bool use_parity_ipm{false};
   bool allow_fallback{true};
   bool verbose{false};
+
+  // Constraint-family toggles for the hybrid parity-IPM formulation
+  // (multi-converter model §3.1).  Default true keeps the always-enforce
+  // behavior; a GUI/caller can disable a family to relax the problem.
+  bool enforce_branch_limits{true};
+  bool enforce_converter_capacity{true};
+  bool enforce_converter_current_limits{true};
+  bool enforce_converter_modulation_limits{true};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

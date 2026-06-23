@@ -45,6 +45,7 @@ const App = (() => {
 
   // Cache for re-rendering on unit change without re-running solver
   let _lastPfData = null;
+  let _lastOpfData = null;
   let _lastTspfData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
@@ -60,6 +61,7 @@ const App = (() => {
 
   function invalidateAnalysisResults(reason = '') {
     _lastPfData = null;
+    _lastOpfData = null;
     _lastTspfData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
@@ -1293,6 +1295,191 @@ const App = (() => {
       switchTab('results');
     } else {
       setStatus('计算失败', 'error');
+    }
+  }
+
+  // ========== Optimal Power Flow ==========
+  // Reads the OPF sub-toolbar (solver + 4 constraint families) and posts to the
+  // unified /api/session/opf endpoint, which routes to the parity-IPM hybrid
+  // AC/DC formulation (default), the AC OPF, or the DC OPF. The constraint
+  // checkboxes gate branch thermal limits, converter capacity circles,
+  // converter AC/DC current limits, and converter modulation-ratio limits, all
+  // of which are honoured by the parity manual-KKT formulation.
+  async function runOpf() {
+    setStatus('最优潮流计算中...', 'busy');
+    const solver = document.getElementById('opfSolver')?.value || 'parity';
+    const constraints = {
+      branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
+      converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
+      converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
+      converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
+    };
+
+    // Sync canvas to backend first so the OPF runs against the current edits.
+    if (!await syncToBackend()) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const data = await apiPost('/api/session/opf', { solver, constraints });
+    if (data) {
+      data._constraints = constraints;
+      if (data.converged) {
+        log(`最优潮流收敛 [${solver}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
+        setStatus('最优潮流收敛', '');
+      } else {
+        log(`最优潮流未收敛 [${solver}]: ${data.status || ''}`, 'warn');
+        setStatus('未收敛', 'error');
+      }
+      _lastOpfData = data;
+      // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
+      // the power-flow voltage overlay. Flow/heat-map viz needs geo branch data
+      // the OPF endpoint does not emit, so it degrades to voltage labels only.
+      if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
+      showOpfResults(data);
+      switchTab('results');
+    } else {
+      setStatus('计算失败', 'error');
+    }
+  }
+
+  // Render the optimal-power-flow result tables: summary, the enforced
+  // constraint scope returned by the server, generator / converter dispatch,
+  // and AC/DC bus voltages with locational marginal prices.
+  function showOpfResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('opf');
+
+    // The shared summary banner is owned by the power-flow view; clear it so the
+    // OPF view shows only its own self-contained summary block.
+    const sharedSummary = document.getElementById('resultsSummary');
+    if (sharedSummary) sharedSummary.innerHTML = '';
+
+    const fmt = (x, d = 4) => (x == null || Number.isNaN(Number(x))) ? '-' : Number(x).toFixed(d);
+    const req = data._constraints || {};
+    // Bus/component map so OPF result rows pan to the matching canvas component
+    // when clicked, exactly like the power-flow and carbon-flow result tables.
+    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
+    const panAttr = (compId) => compId !== undefined
+      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+    // Generator / converter maps are keyed by component index, which is 1-based
+    // for imported cases (MATPOWER) but 0-based for components drawn from
+    // scratch. Detect the base once so position-ordered OPF result rows resolve
+    // to the right component either way.
+    const keyBase = (m) => (m && m[0] !== undefined) ? 0 : 1;
+    const genBase = keyBase(busMap.gen);
+    const vscBase = keyBase(busMap.vsc);
+
+    // Summary
+    const sumDiv = document.getElementById('opfSummary');
+    if (sumDiv) {
+      sumDiv.innerHTML = `
+        <div class="result-item"><span class="result-label">求解器</span>
+          <span class="result-value">${escapeHtml(data.solver || '')}</span></div>
+        <div class="result-item"><span class="result-label">收敛</span>
+          <span class="result-value ${data.converged ? 'result-converged' : 'result-failed'}">
+            ${data.converged ? '✓ 是' : '✗ 否'}</span></div>
+        <div class="result-item"><span class="result-label">迭代次数</span>
+          <span class="result-value">${data.iterations || 0}</span></div>
+        <div class="result-item"><span class="result-label">目标值</span>
+          <span class="result-value">${fmt(data.objective)}</span></div>
+        <div class="result-item"><span class="result-label">状态</span>
+          <span class="result-value">${escapeHtml(data.status || '')}</span></div>
+      `;
+    }
+
+    // Enforced constraint scope (server echoes what was actually applied).
+    const scopeDiv = document.getElementById('opfScope');
+    const scope = data.scope || {};
+    if (scopeDiv) {
+      const yn = (v) => v ? '<span style="color:#15803d">启用</span>' : '<span style="color:#94a3b8">关闭</span>';
+      const branchOn = scope.branch_limits != null ? scope.branch_limits : req.branch_limits;
+      scopeDiv.innerHTML = `
+        <table><thead><tr><th>约束族</th><th>状态</th></tr></thead><tbody>
+          <tr><td>换流器模型范围</td><td>${escapeHtml(scope.model_scope || '-')}</td></tr>
+          <tr><td>支路热稳定限值</td><td>${yn(branchOn)}</td></tr>
+          <tr><td>换流器容量圆 (P²+Q²≤S²)</td><td>${yn(scope.capacity)}</td></tr>
+          <tr><td>换流器电流限值 (i_ac/i_dc)</td><td>${yn(scope.current)}</td></tr>
+          <tr><td>换流器调制限值 (m_min/m_max)</td><td>${yn(scope.modulation)}</td></tr>
+          <tr><td>DC/DC占空比限值 (d_min/d_max)</td><td>${yn(scope.dcdc_duty)}</td></tr>
+          <tr><td>直流电压控制</td><td>${escapeHtml(scope.vdc_control || '-')}</td></tr>
+        </tbody></table>`;
+    }
+
+    // Generator dispatch
+    const genDiv = document.getElementById('opfGenResults');
+    if (genDiv) {
+      const pg = data.pg_mw || [];
+      const qg = data.qg_mvar || [];
+      if (pg.length) {
+        let html = '<table><thead><tr><th>#</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
+        pg.forEach((p, i) => {
+          const attr = panAttr(busMap.gen ? busMap.gen[i + genBase] : undefined);
+          html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qg[i])}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        genDiv.innerHTML = html;
+      } else {
+        genDiv.innerHTML = '<p class="empty-hint">无发电机出力数据</p>';
+      }
+    }
+
+    // Converter (VSC) dispatch — only shown for hybrid AC/DC cases.
+    const convSec = document.getElementById('opfConvSection');
+    const convDiv = document.getElementById('opfConvResults');
+    const pac = data.pac_mw || [];
+    const qac = data.qac_mvar || [];
+    if (convSec && convDiv && pac.length) {
+      convSec.style.display = '';
+      let html = '<table><thead><tr><th>VSC#</th><th>Pac(MW)</th><th>Qac(MVar)</th></tr></thead><tbody>';
+      pac.forEach((p, i) => {
+        const attr = panAttr(busMap.vsc ? busMap.vsc[i + vscBase] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qac[i])}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      convDiv.innerHTML = html;
+    } else if (convSec) {
+      convSec.style.display = 'none';
+    }
+
+    // DC bus voltages — only for hybrid AC/DC cases.
+    const dcSec = document.getElementById('opfDcBusSection');
+    const dcDiv = document.getElementById('opfDcBusResults');
+    const vdc = data.vdc || [];
+    if (dcSec && dcDiv && vdc.length) {
+      dcSec.style.display = '';
+      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
+      vdc.forEach((v, i) => {
+        const attr = panAttr(busMap.dc ? busMap.dc[i + 1] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(v, 6)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      dcDiv.innerHTML = html;
+    } else if (dcSec) {
+      dcSec.style.display = 'none';
+    }
+
+    // AC bus voltages and locational marginal prices.
+    const busDiv = document.getElementById('opfBusResults');
+    const vm = data.vm || [];
+    if (busDiv && vm.length) {
+      const va = data.va || [];
+      const lmpP = data.lmp_p || [];
+      const lmpQ = data.lmp_q || [];
+      const hasLmp = lmpP.length > 0;
+      let html = `<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
+      vm.forEach((v, i) => {
+        const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
+        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
+        const attr = panAttr(busMap.ac ? busMap.ac[i + 1] : undefined);
+        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
+      });
+      html += '</tbody></table>';
+      busDiv.innerHTML = html;
+    } else if (busDiv) {
+      busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
     }
   }
 
@@ -3199,7 +3386,7 @@ const App = (() => {
       genSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus</th><th>Name</th><th>Pg(${pUnit()})</th><th>Qg(${qUnit()})</th><th>Vg(pu)</th><th>Slack</th></tr></thead><tbody>`;
       data.geo_gen.forEach((g, i) => {
-        const compId = busMap.gen ? busMap.gen[i] : undefined;
+        const compId = busMap.gen ? (busMap.gen[g.index] ?? busMap.gen[i]) : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${g.index ?? i}</td><td>${g.bus}</td><td>${g.name || ''}</td>`;
         html += `<td>${pFmt(g.pg_mw, 4)}</td><td>${pFmt(g.qg_mvar, 4)}</td>`;
@@ -3217,7 +3404,11 @@ const App = (() => {
     if (data.geo_ac_branches && data.geo_ac_branches.length > 0) {
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Qf(${qUnit()})</th><th>Qt(${qUnit()})</th><th>Loss(${pUnit()})</th><th>Loading%</th></tr></thead><tbody>`;
       data.geo_ac_branches.forEach((br, i) => {
-        const compId = busMap.branch[i];
+        // Branches have no positional canvas id in the result, so link the row
+        // to one endpoint bus (the from-bus), which maps reliably via busMap.ac.
+        const compId = (busMap.branch && busMap.branch[br.index] !== undefined)
+          ? busMap.branch[br.index]
+          : (busMap.ac ? busMap.ac[br.from] : undefined);
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const loss = (br.loss_mw != null) ? br.loss_mw : ((br.pf_mw || 0) + (br.pt_mw || 0));
         const ldg = br.loading_pct != null ? br.loading_pct.toFixed(1) + '%' : '-';
@@ -3311,7 +3502,7 @@ const App = (() => {
       vscSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       data.vsc_transfers.forEach((v, i) => {
-        const compId = busMap.vsc[i];
+        const compId = busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
                  <td>${v.p_ac_mw != null ? pFmt(v.p_ac_mw, 3) : '0'}</td><td>${v.q_ac_mvar != null ? pFmt(v.q_ac_mvar, 3) : '0'}</td>
@@ -4195,7 +4386,20 @@ const App = (() => {
     fieldsDiv.innerHTML = '';
 
     const defaults = COMP.defaults[comp.type] || {};
+    // Optional section dividers: when a field key matches, a header row is
+    // inserted before it to group the OPF constraint-limit fields visually.
+    const sectionHeaders = {
+      vsc_converter:  { r_conv_ac_pu: '约束限值 (OPF)', grid_forming: '构网与协调' },
+      dcdc_converter: { topology: '占空比约束 (OPF)' },
+    };
+    const secMap = sectionHeaders[comp.type] || null;
     Object.keys(defaults).forEach(key => {
+      if (secMap && secMap[key]) {
+        const hd = document.createElement('div');
+        hd.className = 'prop-section-header';
+        hd.textContent = secMap[key];
+        fieldsDiv.appendChild(hd);
+      }
       const rawVal = comp.params[key] !== undefined ? comp.params[key] : defaults[key];
       const val = key === 'emission_factor_tco2_mwh'
         ? carbonFactorDisplay(rawVal)
@@ -4240,6 +4444,20 @@ const App = (() => {
           sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
         });
         div.appendChild(sel);
+      } else if (key === 'topology') {
+        // DC/DC power-stage topology selects the duty-ratio feasibility model.
+        const sel = document.createElement('select');
+        sel.dataset.field = key;
+        [
+          {v:'Generic',   l:'Generic (无占空比约束)'},
+          {v:'Buck',      l:'Buck (降压)'},
+          {v:'Boost',     l:'Boost (升压)'},
+          {v:'BuckBoost', l:'Buck-Boost (升降压)'},
+          {v:'Isolated',  l:'Isolated (隔离/DAB)'},
+        ].forEach(o => {
+          sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
+        });
+        div.appendChild(sel);
       } else if (key === 'control_mode') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
@@ -4262,6 +4480,7 @@ const App = (() => {
             {v:'PQ_MODE', l:'PQ_MODE'},
             {v:'VDC_Q',   l:'VDC_Q'},
             {v:'VDC_VAC', l:'VDC_VAC'},
+            {v:'AC_PV',   l:'AC_PV (AC定有功+定电压)'},
           ];
         }
         modeOptions.forEach(o => {
@@ -4461,6 +4680,8 @@ const App = (() => {
     });
   }
   function setActiveModule(moduleName) {
+    const prev = document.querySelector('.module-btn.active');
+    const changed = !prev || prev.dataset.module !== moduleName;
     document.querySelectorAll('.module-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.module === moduleName);
     });
@@ -4469,6 +4690,14 @@ const App = (() => {
     // results group (if any), so the 结果 tab only shows the active
     // module's outputs / placeholder. CSS in style.css drives visibility.
     setActiveResultGroup(moduleName);
+    // The shared summary banner is written by power-flow / short-circuit /
+    // harmonics. Clear it when actually switching modules so a previous
+    // module's summary does not linger over the new module's result view (each
+    // module repopulates it, or uses its own in-group summary, when it runs).
+    if (changed) {
+      const shared = document.getElementById('resultsSummary');
+      if (shared) shared.innerHTML = '';
+    }
   }
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
@@ -4591,6 +4820,7 @@ const App = (() => {
 
     // Calculation buttons (Bar 3 "运行..." buttons reuse original IDs where possible)
     document.getElementById('btnPowerFlow').addEventListener('click', runPowerFlow);
+    document.getElementById('btnRunOpf')?.addEventListener('click', runOpf);
     document.getElementById('btnCarbonFlow')?.addEventListener('click', runCarbonFlow);
     document.getElementById('btnImportCarbonFactors')?.addEventListener('click', () => {
       document.getElementById('fileImportCarbonFactors')?.click();

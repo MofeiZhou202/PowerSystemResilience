@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hacdcpf/model/ac_components.hpp"  // IslandInfo
+#include "hacdcpf/model/converter_model_scope.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 
 namespace hacdcpf {
@@ -64,6 +65,18 @@ struct SolverDiagnostics {
   double max_q_mismatch_pu{0.0};
   double max_i_violation_pu{0.0};
   double condition_estimate{0.0};
+
+  // Pre-solve structural closure check (multi-converter model §7.4).
+  // The hybrid Newton system is square by construction (n_equations ==
+  // n_variables); equation_closure_ok additionally confirms the assembled
+  // Jacobian pattern has no all-zero row or column (a necessary condition for
+  // full structural rank).  equation_closure_checked records that the scan ran.
+  bool   equation_closure_checked{false};
+  bool   equation_closure_ok{true};
+  int    n_equations{0};
+  int    n_variables{0};
+  int    empty_jacobian_rows{0};
+  int    empty_jacobian_cols{0};
 
   ResidualBreakdown final_breakdown;
 
@@ -189,6 +202,9 @@ struct PowerFlowResult {
   std::vector<DCDCTransfer> dcdc_transfers;
   std::vector<Trafo3WFlow> trafo3w_flows;
   std::vector<ERPortTransfer> er_port_transfers;
+
+  /// Declares which parts of the unified converter model this solve honored.
+  ConverterModelScope converter_model_scope{};
 };
 
 struct DCPowerFlowResult {

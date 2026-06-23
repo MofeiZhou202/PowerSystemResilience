@@ -271,6 +271,17 @@ double evaluate_residual_impl(const SolverData& data,
         // AC rows ↔ DC column: P/Q-row(ac_bus) → Vdc-col(dc_bus).
         if (ce.p_vdc_nz >= 0) values[ce.p_vdc_nz] -= ac_jac.dpac_dvdc;
         if (ce.q_vdc_nz >= 0) values[ce.q_vdc_nz] -= ac_jac.dqac_dvdc;
+        // DC row ↔ AC-Vm column: DC-row(dc_bus) → Vm-col(ac_bus).
+        // Arises from the AC-conduction-loss coupling (r_conv_ac_pu): the DC bus
+        // supplies ploss_AC = r·pac²/Vm_AC², so ∂(pdc_calc−pdc_spec)/∂Vm_AC = −dpdc/dVm.
+        if (ce.dc_vm_nz >= 0 && conv.r_conv_ac_pu > 0.0) {
+          const auto [pac0, qac0] =
+              converter_ac_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
+          (void)qac0;
+          const auto dcvm_jac =
+              converter_dc_jacobian_vm_ac(conv, vm, pac0, data.base_mva);
+          values[ce.dc_vm_nz] -= dcvm_jac.dpdc_dvm_ac;
+        }
         // NOTE: dc_vdc_nz (within-DC-block diagonal) is intentionally NOT applied here.
         // It is now handled unconditionally in the "always-on DC self-consistency" block
         // below, so that the DC Newton equations have exact Jacobians regardless of

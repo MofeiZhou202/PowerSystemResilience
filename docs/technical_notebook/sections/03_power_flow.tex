@@ -178,6 +178,22 @@ the trial AC voltage after updates.  If \texttt{SolverData::enable\_augmented\_e
 is enabled, that clamp is skipped and the VDC/VAC bus is instead handled by
 the augmented-equation path in \texttt{newton\_solver.cpp}.
 
+\paragraph{AC-side conduction loss (\texttt{r\_conv\_ac\_pu}).}
+In addition to the switching/transfer loss above, an optional AC-side conduction
+loss is drawn from the DC bus (multi-converter model \S2.3/\S3.1.2):
+\[
+P^{\qual{loss,ac}} = r^{\qual{conv,ac}}_{\text{pu}}\,
+\frac{(P^{\qual{conv,ac}})^2}{(v^{\qual{ac}})^2},
+\qquad
+P^{\qual{conv,dc}} \mathrel{-}= P^{\qual{loss,ac}}.
+\]
+This couples the DC power balance to the AC terminal voltage; the resulting
+cross-block Jacobian entry
+\(\partial P^{\qual{conv,dc}}/\partial v^{\qual{ac}}
+= 2\,r^{\qual{conv,ac}} (P^{\qual{conv,ac}})^2/(v^{\qual{ac}})^3\)
+is described in the Jacobian section.  It is opt-in
+(\(r^{\qual{conv,ac}}=0\) by default leaves the DC injection unchanged).
+
 % ------------------------------------------------------------
 \subsection{DCDC Converter Model}
 % ------------------------------------------------------------
@@ -193,6 +209,111 @@ P^{\qual{ref}}\cdot\eta, & P^{\qual{ref}}<0,
 \qquad
 P^{\qual{out}} = P^{\qual{ref}} - r_{eq}\frac{(P^{\qual{in}})^2}{(v^{\qual{dc,in}})^2}.
 \end{align}
+
+\paragraph{Power-stage topology and duty ratio.}
+The optional \texttt{topology} field selects an ideal CCM voltage-conversion law
+used to back out the duty ratio \(D\) from the solved port voltages
+(multi-converter model \S3.2):
+\begin{align}
+\text{Buck:}\;& V^{\qual{out}}=D\,V^{\qual{in}}, &
+\text{Boost:}\;& V^{\qual{out}}=\tfrac{V^{\qual{in}}}{1-D}, \\
+\text{Buck-Boost:}\;& \tfrac{V^{\qual{out}}}{V^{\qual{in}}}=\tfrac{D}{1-D}, &
+\text{Isolated:}\;& V^{\qual{out}}=n\,M(D)\,V^{\qual{in}}.
+\end{align}
+After convergence the duty ratio is tested against \([d_{\min},d_{\max}]\); an
+infeasible value raises the \texttt{DCDC-PHYS-01} diagnostic.  The
+\texttt{Generic} topology imposes no duty constraint (legacy behaviour).  A DCDC
+converter is a power-coupling interface: it injects power at each port but is
+\emph{not} treated as a conductive edge of the DC voltage network in the
+coordination checker (multi-converter model \S5.2).
+
+% ------------------------------------------------------------
+\subsection{Converter Feasibility Checks and Model Scope}
+\label{sec:pf-converter-feasibility}
+% ------------------------------------------------------------
+
+After a converged solve the VSC operating point is screened against optional
+steady-state limits (multi-converter model \S3.1.4--3.1.7).  Each check is
+opt-in --- it fires only when the corresponding field is set:
+\begin{itemize}
+  \item \textbf{Capacity} (\texttt{ACDC-PHYS-04}):
+    \(\sqrt{(P^{\qual{ac}})^2+(Q^{\qual{ac}})^2}\le S_{\qual{rated}}\)
+    using \texttt{p\_rated\_mw}.
+  \item \textbf{AC current} (\texttt{ACDC-PHYS-02}):
+    \(I^{\qual{ac}}=S^{\qual{ac}}/v^{\qual{ac}}\le \texttt{i\_ac\_max\_pu}\).
+  \item \textbf{DC current} (\texttt{ACDC-PHYS-03}):
+    \(I^{\qual{dc}}=|P^{\qual{dc}}|/v^{\qual{dc}}\le \texttt{i\_dc\_max\_pu}\).
+  \item \textbf{Modulation index} (\texttt{ACDC-PHYS-01}/\texttt{05}):
+    \(m = v^{\qual{ac}}V^{\qual{n,ac}}/(K_m\,v^{\qual{dc}}V^{\qual{n,dc}})\)
+    tested against \([\texttt{m\_min},\texttt{m\_max}]\).
+\end{itemize}
+These are reported as diagnostics (warnings), not enforced as hard constraints
+in the determined power-flow solve.  Every \texttt{PowerFlowResult} and OPF
+result carries a \texttt{ConverterModelScope} record (a \texttt{model\_scope}
+tag plus per-feature \texttt{ValidityFlags}) declaring which parts of the
+converter model that engine actually honored --- e.g.\ snapshot PF models VSC
+losses, \(v^{\qual{dc}}\) forming, and multi-source coordination
+(\S\ref{sec:pf-dc-coordination}) but not modulation/current limits as hard
+constraints; native AC-OPF leaves \(v^{\qual{dc}}\) free while the
+parity-IPM/AML path enforces the \texttt{VDC\_Q} equality; DC-OPF models no
+converter physics.  Downstream code should branch on these flags rather than
+assume the full model.
+
+% ------------------------------------------------------------
+\subsection{DC Multi-Source Voltage Coordination}
+\label{sec:pf-dc-coordination}
+% ------------------------------------------------------------
+
+A DC \emph{conductive} island is the set of DC buses joined by in-service DC
+branches (closed DC breakers are folded into branches by the canonical
+projection).  DC/DC converters are power-coupling interfaces and do \emph{not}
+merge conductive islands (multi-converter model \S5.2); the Newton solver and
+the coordination checker now share this definition.  Each conductive island
+needs at least one voltage-forming source; the solver assigns references per
+island in priority order:
+\begin{enumerate}
+  \item a \texttt{DC\_V} bus (pinned at its setpoint);
+  \item a converter already regulating \(v^{\qual{dc}}\) (\texttt{VDC\_Q}/\texttt{VDC\_VAC});
+  \item a droop DC/DC whose \emph{output} bus lies in the island --- its
+    injection depends on \(v^{\qual{dc}}_{\qual{out}}\) via the droop term, so it
+    forms a local reference;
+  \item otherwise a PQ VSC promoted to \texttt{VDC\_Q}, preferring a converter
+    flagged \texttt{is\_master} (master--slave, \S6.6) over the largest-rated one;
+  \item a last-resort non-physical pin (reported as a warning).
+\end{enumerate}
+
+\paragraph{Droop and participation sharing.}
+Multiple \(v^{\qual{dc}}\)-forming converters share the island imbalance through
+their droop gains: \(\Delta P_e \propto k^{\qual{vdc}}_e\).  When a coordination
+group declares participation factors \(\alpha_e\) (with \(\sum_e \alpha_e = 1\),
+\(\alpha_e \ge 0\)), the solver redistributes the group's total stiffness as
+\(k^{\qual{vdc}}_e = \alpha_e \sum_j k^{\qual{vdc}}_j\), so the imbalance is
+shared per the declared factors (multi-converter model \S6.7).
+
+\paragraph{Coordination rule catalog.}
+The pre-solve checker \texttt{evaluate\_converter\_coordination} classifies
+issues by severity (Fatal / Error / Warning / Info) using the rule families
+below; the structural screen of \S\ref{sec:pf-converter-feasibility} adds
+\texttt{PF-JAC-STRUCT-01}.
+\begin{center}
+\small
+\begin{tabular}{l p{0.60\linewidth}}
+\toprule
+Rule family & Meaning \\
+\midrule
+\texttt{ACISLAND-REF-*} & AC island angle / voltage reference present \\
+\texttt{DCISLAND-REF-01} & DC island has a voltage-forming source \\
+\texttt{DCISLAND-MS-01} & exactly one master per master--slave group \\
+\texttt{DCISLAND-PARTICIPATION-01/02} & factors sum to one; no rigid+participation conflict \\
+\texttt{DCISLAND-DROOP-01} & droop gain valid (nonzero) \\
+\texttt{ACDC-GFM-01} & DC grid-forming releases hard AC/DC active power \\
+\texttt{ACDC-PHYS-01..05} & modulation, AC/DC current, capacity, DC-voltage feasibility \\
+\texttt{DCDC-CTRL-01/03/05} & DC/DC control-direction and reference requirements \\
+\texttt{DCDC-PHYS-01} & DC/DC duty ratio within \([d_{\min},d_{\max}]\) \\
+\texttt{PF-JAC-STRUCT-01} & assembled Jacobian is structurally full rank \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 % ------------------------------------------------------------
 \subsection{Jacobian Structure}
@@ -240,10 +361,15 @@ When \texttt{enable\_coupled\_jacobian} is set, the converter Jacobian blocks
 \(\partial P^{\qual{vsc}}/\partial v^{\qual{dc}}\),
 \(\partial Q^{\qual{vsc}}/\partial v^{\qual{dc}}\), and
 \(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) have pattern slots.  The
-current \texttt{converter\_dc\_jacobian\_vm\_ac} implementation returns zero
-because the old AC-side converter resistance term was removed, so the
-\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) block is structurally present
-but numerically zero today.  The coupling entries are pre-registered as
+\(\partial P^{\qual{dc}}/\partial v^{\qual{ac}}\) block carries the AC-side
+conduction-loss coupling (multi-converter model \S2.3): when
+\(r^{\qual{conv,ac}}_{\text{pu}}>0\), \texttt{converter\_dc\_jacobian\_vm\_ac}
+returns
+\(\partial P^{\qual{conv,dc}}/\partial v^{\qual{ac}}
+= 2\,r^{\qual{conv,ac}} (P^{\qual{conv,ac}})^2/(v^{\qual{ac}})^3\),
+and the builder fills the previously-reserved \texttt{dc\_vm\_nz} slot.  The
+default \(r^{\qual{conv,ac}}=0\) leaves this block numerically zero, so the
+coupling is opt-in.  The coupling entries are pre-registered as
 \texttt{CouplingEntry} records in \texttt{JacobianPattern} and updated in-place
 each iteration without re-analyzing the pattern.
 

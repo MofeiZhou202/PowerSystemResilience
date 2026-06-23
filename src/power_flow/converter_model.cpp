@@ -63,7 +63,13 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
+    // AC_PV holds Pac = pset; its AC voltage magnitude is held by marking the
+    // converter's AC bus as a voltage-controlled (PV) bus in the solver data,
+    // and its reactive power is the free balancing injection of that PV bus
+    // (multi-converter model r1 §1.4). The returned qset is only an initial /
+    // placeholder value because the PV bus drops the reactive balance row.
     return {pset, qset};
   }
 
@@ -90,11 +96,30 @@ double converter_dc_injection(const VSCConverter& conv,
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
   double pdc_base = 0.0;
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  double pac = 0.0;  // AC-side injection used by the conduction-loss coupling below.
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     const double ploss = converter_loss(conv, pset, vdc_bus, base_mva, loss_model);
     pdc_base = -(pset + ploss);
+    pac = pset;
   } else {
-    pdc_base = -conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
+    const double p_transfer =
+        conv.k_vdc * (vdc_bus * vdc_bus - conv.v_dc_set_pu * conv.v_dc_set_pu);
+    pdc_base = -p_transfer;
+    const double ploss = converter_loss(conv, p_transfer, vdc_bus, base_mva, loss_model);
+    pac = p_transfer - ploss;
+  }
+
+  // AC-side conduction loss supplied by the DC bus (multi-converter model §2.3/3.1.2):
+  //   ploss_AC = r_conv_ac_pu · pac² / Vm_AC²
+  // The converter draws this extra power from the DC side, so its DC-bus injection
+  // becomes more negative.  Opt-in: r_conv_ac_pu = 0 (default) leaves legacy behaviour
+  // unchanged and keeps this term out of the residual/Jacobian.
+  if (conv.r_conv_ac_pu > 0.0) {
+    const int ac_idx = conv.bus_ac - 1;
+    const double vm_ac =
+        (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.1) : 1.0;
+    pdc_base -= conv.r_conv_ac_pu * pac * pac / (vm_ac * vm_ac);
   }
 
   return pdc_base;
@@ -114,7 +139,8 @@ ConverterJacobianAC converter_ac_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     // AC injection is constant (pset, qset) — no Vdc dependence.
     return jac;
   }
@@ -148,7 +174,8 @@ ConverterJacobianDC converter_dc_jacobian_vdc(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
-  if (conv.control_mode == ConverterMode::PQ_MODE) {
+  if (conv.control_mode == ConverterMode::PQ_MODE ||
+      conv.control_mode == ConverterMode::AC_PV) {
     // pdc = -(pset + loss(pset, Vdc))  →  dpdc/dVdc = -dploss/dVdc
     const double pset = conv.p_set_mw / base_mva;
     const auto [dploss_dp, dploss_dvdc] =
@@ -253,8 +280,14 @@ ConverterJacobianDCVmAC converter_dc_jacobian_vm_ac(const VSCConverter& conv,
                                                      double pac0,
                                                      double /*base_mva*/) {
   ConverterJacobianDCVmAC jac;
-  (void)conv; (void)vm; (void)pac0;
-  // r_conv_ac_pu removed from VSCConverter; this Jacobian entry is always zero.
+  if (!conv.in_service || conv.r_conv_ac_pu <= 0.0) return jac;
+  // DC injection carries the AC conduction loss: pdc -= r·pac²/Vm_AC².
+  // Hence ∂pdc/∂Vm_AC = +2·r·pac² / Vm_AC³ (loss falls as the AC voltage rises).
+  const int ac_idx = conv.bus_ac - 1;
+  const double vm_ac =
+      (ac_idx >= 0 && ac_idx < vm.size()) ? std::max(vm[ac_idx], 0.1) : 1.0;
+  jac.dpdc_dvm_ac =
+      2.0 * conv.r_conv_ac_pu * pac0 * pac0 / (vm_ac * vm_ac * vm_ac);
   return jac;
 }
 

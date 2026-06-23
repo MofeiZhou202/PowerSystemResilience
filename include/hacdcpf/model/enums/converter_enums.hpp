@@ -7,6 +7,11 @@ enum class ConverterMode {
   PQ_MODE,
   VDC_Q,
   VDC_VAC,
+  // AC-side PV control (multi-converter model r1 §1, VSC Mode 2): the converter
+  // holds its AC terminal active power and AC voltage magnitude, releasing AC
+  // reactive power as a free device unknown. It does NOT form the AC angle
+  // reference. Appended last to keep the existing enum values stable.
+  AC_PV,
 };
 
 // Converter loss model

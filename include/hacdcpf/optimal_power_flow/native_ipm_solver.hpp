@@ -37,6 +37,35 @@ struct IPMResult {
   Eigen::VectorXd z;
 };
 
+/// Solve a parity OPF nonlinear program with a primal-dual interior-point method.
+///
+/// The problem has the form
+///
+/// @htmlonly
+/// <div>\[
+///   \min_x f(x) \quad
+///   \text{s.t.}\quad g(x)=0,\quad h(x)\le 0,\quad x_{min}\le x\le x_{max}.
+/// \]</div>
+/// @endhtmlonly
+///
+/// Inequalities and bounds are converted to slacks, then Newton steps are
+/// computed from the perturbed KKT conditions
+///
+/// @htmlonly
+/// <div>\[
+///   \nabla f(x) + J_g(x)^T\lambda + J_h(x)^T\mu + z^+ - z^- = 0,
+/// \]</div>
+/// <div>\[
+///   g(x)=0,\qquad h(x)+s=0,\qquad S\mu=\tau e,
+/// \]</div>
+/// @endhtmlonly
+///
+/// with fraction-to-boundary step control.  The returned dual vectors use the
+/// row order defined by `Problem::cidx`.
+///
+/// @param prob Fully assembled parity formulation.
+/// @param opt Iteration limits, convergence tolerances, and regularization.
+/// @return Primal/dual solution, KKT residual metrics, and convergence status.
 IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt = {});
 
 }  // namespace hacdcpf::opf::parity

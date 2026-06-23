@@ -10,8 +10,11 @@ if ! command -v doxygen >/dev/null 2>&1; then
   exit 127
 fi
 
+mkdir -p docs/generated
 doxygen Doxyfile
 
 echo
 echo "Generated HTML notebook:"
 echo "  $repo_root/docs/generated/api/index.html"
+echo "Doxygen warnings, if any:"
+echo "  $repo_root/docs/generated/doxygen-warnings.log"

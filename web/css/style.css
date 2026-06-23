@@ -468,6 +468,15 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   font-size: 12px;
 }
 .prop-field input:focus { border-color: var(--accent); outline: none; }
+.prop-section-header {
+  margin: 8px 0 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
 .empty-hint {
   padding: 20px;
   text-align: center;
@@ -621,6 +630,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
    `data-active-group` is set on #resultsContent by setActiveResultGroup() in app.js. */
 .result-group { display: none; }
 #resultsContent[data-active-group="powerFlow"]    .result-group[data-result-group="powerFlow"],
+#resultsContent[data-active-group="opf"]          .result-group[data-result-group="opf"],
 #resultsContent[data-active-group="carbonFlow"]   .result-group[data-result-group="carbonFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],

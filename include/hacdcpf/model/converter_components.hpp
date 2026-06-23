@@ -56,6 +56,18 @@ struct VSCConverter {
   double vn_ac_kv{0.0};
   double vn_dc_kv{0.0};
 
+  // Steady-state physical feasibility limits (multi-converter model §3.1.4–3.1.7).
+  // All are opt-in: a value of 0 disables the corresponding post-solve check.
+  //   * i_ac_max_pu / i_dc_max_pu — AC/DC current limits (pu on system base).
+  //   * k_m_modulation — modulation gain K_m in V_ac^model = K_m·m·V_dc.
+  //   * m_min / m_max  — modulation-index feasibility window.
+  // These are distinct from the IEC 60909 short-circuit i_max_pu below.
+  double i_ac_max_pu{0.0};
+  double i_dc_max_pu{0.0};
+  double k_m_modulation{0.0};
+  double m_min{0.0};
+  double m_max{0.0};
+
   double k_p{0.0};
   double k_q{0.0};
   double v_ref_pu{1.0};
@@ -78,6 +90,16 @@ struct VSCConverter {
   double x2_sc_pu{0.0};
   double i_max_pu{1.0};
   bool grid_forming{false};
+
+  // AC-side grid-forming (multi-converter model r1 §2, VSC Mode 1): the
+  // converter forms the AC voltage reference (angle + magnitude) at its AC
+  // terminal.  This is distinct from grid_forming, which denotes DC-side voltage
+  // forming.  An ordinary two-port converter cannot grid-form on both sides at
+  // once; the advanced dual-side case is only valid with an explicit energy
+  // buffer (allow_dual_side_grid_forming && has_energy_buffer gate ACDC-GFM-03).
+  bool ac_grid_forming{false};
+  bool allow_dual_side_grid_forming{false};
+  bool has_energy_buffer{false};
 
   // Multi-source DC voltage coordination (multi-converter model §6.5–6.7).
   // Converters that share one DC island's voltage form a coordination group:

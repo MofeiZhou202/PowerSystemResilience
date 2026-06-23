@@ -276,6 +276,77 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
                     "droop stiffness. k_vdc=0 releases no active-power freedom and "
                     "cannot form a DC voltage reference.");
     }
+
+    // AC-side PV control rules (multi-converter model r1 §1.5).  AC_PV holds Pac
+    // and Vac and releases Qac; it never forms the AC angle reference (handled by
+    // ACISLAND-REF-01).
+    if (conv.control_mode == ConverterMode::AC_PV) {
+      if (!(conv.v_ac_set_pu > 0.0)) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "ACDC-CTRL-03",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is in AC_PV mode but has no valid AC voltage setpoint "
+                      "(v_ac_set_pu must be > 0). AC_PV holds the AC active power and "
+                      "AC voltage magnitude, so a positive voltage setpoint is required.");
+      }
+      if (std::abs(conv.q_set_mvar) > 1e-6) {
+        add_issue(report,
+                  CoordinationSeverity::Warning,
+                  "ACDC-CTRL-04",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is in AC_PV mode; q_set_mvar=" + std::to_string(conv.q_set_mvar) +
+                      " is ignored because AC reactive power is released as the free "
+                      "balancing injection that holds the AC voltage.");
+      }
+    }
+
+    // AC-side grid-forming rules (multi-converter model r1 §2/§11.2).  These only
+    // fire when the converter opts into AC grid-forming, so ordinary converters
+    // are unaffected.
+    if (conv.ac_grid_forming) {
+      // ACDC-GFM-03: an ordinary two-port converter cannot grid-form on both the
+      // AC and DC sides at once; the dual-side case needs an explicit energy
+      // buffer to decouple the two power balances.
+      if (forms_dc_voltage &&
+          !(conv.allow_dual_side_grid_forming && conv.has_energy_buffer)) {
+        add_issue(report,
+                  CoordinationSeverity::Fatal,
+                  "ACDC-GFM-03",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is declared grid-forming on both the AC side (ac_grid_forming) "
+                      "and the DC side (" + converter_mode_str(conv.control_mode) +
+                      "/grid_forming). An ordinary AC/DC converter cannot form both "
+                      "voltage references simultaneously without an explicit energy "
+                      "buffer (set allow_dual_side_grid_forming and has_energy_buffer "
+                      "only for a buffered dual-side device).");
+      }
+      // ACDC-GFM-04: an AC grid-forming converter releases active power to hold
+      // its AC reference and cannot also pin AC/DC active power as a hard
+      // constraint.
+      if (conv.p_is_hard_constraint) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "ACDC-GFM-04",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is AC grid-forming but also declares p_is_hard_constraint=true. "
+                      "An AC grid-forming converter must release its active power to "
+                      "balance the AC island and cannot hold AC/DC active power as a "
+                      "hard constraint. Use p_schedule_mw / p_initial_mw instead.");
+      }
+    }
   }
 }
 
@@ -330,6 +401,154 @@ void evaluate_dcdc_device_rules(const HybridPowerSystem& sys,
                     "does not enforce v_ref_pu as an output-voltage equation. It is "
                     "therefore assessed as a fixed p_ref_mw transfer, not as a DC "
                     "voltage-forming source.");
+    }
+  }
+}
+
+// AC connectivity islands: in-service AC buses joined by in-service branches,
+// transformers and closed switches/breakers.  Mirrors compute_dc_voltage_islands.
+std::vector<int> compute_ac_islands(const HybridPowerSystem& sys,
+                                    const std::unordered_map<int, int>& pos_by_index,
+                                    int& component_count) {
+  const int n = static_cast<int>(sys.ac.buses.size());
+  component_count = 0;
+  std::vector<int> component(static_cast<size_t>(n), -1);
+  if (n == 0) return component;
+
+  std::vector<std::vector<int>> adj(static_cast<size_t>(n));
+  const auto link = [&](int a_index, int b_index) {
+    const int a = bus_position(pos_by_index, a_index);
+    const int b = bus_position(pos_by_index, b_index);
+    if (a >= 0 && b >= 0) {
+      adj[static_cast<size_t>(a)].push_back(b);
+      adj[static_cast<size_t>(b)].push_back(a);
+    }
+  };
+  for (const auto& br : sys.ac.branches)
+    if (br.in_service) link(br.from_bus, br.to_bus);
+  for (const auto& t : sys.ac.transformers_2w)
+    if (t.in_service) link(t.hv_bus, t.lv_bus);
+  for (const auto& t : sys.ac.transformers_3w)
+    if (t.in_service) { link(t.hv_bus, t.mv_bus); link(t.hv_bus, t.lv_bus); }
+  for (const auto& sw : sys.ac.switches)
+    if (sw.in_service && sw.closed) link(sw.bus_from, sw.bus_to);
+  for (const auto& cb : sys.ac.circuit_breakers)
+    if (cb.in_service && cb.closed) link(cb.bus_from, cb.bus_to);
+
+  for (int start = 0; start < n; ++start) {
+    if (component[static_cast<size_t>(start)] >= 0) continue;
+    if (!sys.ac.buses[static_cast<size_t>(start)].in_service) {
+      component[static_cast<size_t>(start)] = -2;
+      continue;
+    }
+    std::vector<int> queue{start};
+    component[static_cast<size_t>(start)] = component_count;
+    size_t head = 0;
+    while (head < queue.size()) {
+      const int u = queue[head++];
+      for (int v : adj[static_cast<size_t>(u)]) {
+        if (component[static_cast<size_t>(v)] >= 0) continue;
+        if (!sys.ac.buses[static_cast<size_t>(v)].in_service) continue;
+        component[static_cast<size_t>(v)] = component_count;
+        queue.push_back(v);
+      }
+    }
+    ++component_count;
+  }
+  return component;
+}
+
+// AC island reference rules (multi-converter model r1 §10.1/§10.2).  An energized
+// AC island needs exactly one angle reference; zero references is unsolvable
+// (ACISLAND-REF-01) and more than one rigid reference over-determines the angle
+// (ACISLAND-REF-02).  Both are reported as warnings so they stay diagnostic and
+// never block a solve.  External grids count as a reference for REF-01 but are
+// not added to the rigid count for REF-02 (they are commonly co-located with the
+// slack bus, which would otherwise double-count).
+void evaluate_ac_island_rules(const HybridPowerSystem& sys,
+                              const std::unordered_map<int, int>& ac_pos_by_index,
+                              ConverterCoordinationReport& report) {
+  int n_islands = 0;
+  const std::vector<int> comp = compute_ac_islands(sys, ac_pos_by_index, n_islands);
+  if (n_islands == 0) return;
+
+  struct ACIslandRef {
+    int slack_count{0};
+    int ac_gfm_count{0};
+    bool has_external_grid{false};
+    bool energized{false};
+  };
+  std::vector<ACIslandRef> islands(static_cast<size_t>(n_islands));
+
+  const auto island_of = [&](int bus_index) -> int {
+    const int p = bus_position(ac_pos_by_index, bus_index);
+    if (p < 0 || p >= static_cast<int>(comp.size())) return -1;
+    return comp[static_cast<size_t>(p)];
+  };
+
+  for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+    const int c = comp[static_cast<size_t>(i)];
+    if (c < 0) continue;
+    const auto& b = sys.ac.buses[static_cast<size_t>(i)];
+    if (b.bus_type == BusType::SLACK) islands[static_cast<size_t>(c)].slack_count += 1;
+    if (std::abs(b.pd_mw) > kTol || std::abs(b.qd_mvar) > kTol)
+      islands[static_cast<size_t>(c)].energized = true;
+  }
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    const int c = island_of(eg.bus);
+    if (c >= 0) {
+      islands[static_cast<size_t>(c)].has_external_grid = true;
+      islands[static_cast<size_t>(c)].energized = true;
+    }
+  }
+  for (const auto& g : sys.ac.generators) {
+    if (!g.in_service) continue;
+    const int c = island_of(g.bus);
+    if (c >= 0) islands[static_cast<size_t>(c)].energized = true;
+  }
+  for (const auto& ld : sys.ac.loads) {
+    if (!ld.in_service) continue;
+    const int c = island_of(ld.bus);
+    if (c >= 0) islands[static_cast<size_t>(c)].energized = true;
+  }
+  for (const auto& conv : sys.vsc_converters) {
+    if (!conv.in_service) continue;
+    const int c = island_of(conv.bus_ac);
+    if (c < 0) continue;
+    islands[static_cast<size_t>(c)].energized = true;
+    if (conv.ac_grid_forming) islands[static_cast<size_t>(c)].ac_gfm_count += 1;
+  }
+
+  for (int c = 0; c < n_islands; ++c) {
+    const auto& s = islands[static_cast<size_t>(c)];
+    if (!s.energized) continue;
+    const int rigid = s.slack_count + s.ac_gfm_count;
+    const bool has_reference = rigid > 0 || s.has_external_grid;
+    if (!has_reference) {
+      add_issue(report,
+                CoordinationSeverity::Warning,
+                "ACISLAND-REF-01",
+                "ac_island",
+                c,
+                c,
+                "AC island " + std::to_string(c) +
+                    " is energized but has no AC angle reference (no slack bus, "
+                    "external grid, or AC grid-forming converter). A device must "
+                    "provide the AC angle reference, otherwise the island is "
+                    "unsolvable.");
+    } else if (rigid > 1) {
+      add_issue(report,
+                CoordinationSeverity::Warning,
+                "ACISLAND-REF-02",
+                "ac_island",
+                c,
+                c,
+                "AC island " + std::to_string(c) + " has " + std::to_string(rigid) +
+                    " rigid AC angle references (slack buses and/or AC grid-forming "
+                    "converters). Without an explicit coordination (P-f droop or "
+                    "virtual synchronous control) they over-determine the angle "
+                    "reference.");
     }
   }
 }
@@ -437,6 +656,16 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
 
   evaluate_vsc_device_rules(sys, dc_pos_by_index, component, report);
   evaluate_dcdc_device_rules(sys, dc_pos_by_index, component, report);
+
+  // AC-side island reference rules (multi-converter model r1 §10).  Built from a
+  // fresh AC-bus-index map so AC connectivity is independent of the DC islands.
+  {
+    std::unordered_map<int, int> ac_pos_by_index;
+    for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+      ac_pos_by_index[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+    }
+    evaluate_ac_island_rules(sys, ac_pos_by_index, report);
+  }
 
   auto island_for_bus = [&](int bus_index) {
     const int pos = bus_position(dc_pos_by_index, bus_index);
