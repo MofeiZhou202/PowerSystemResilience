@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -184,9 +185,24 @@ struct DistributionResilienceOptions {
   /// If empty, a built-in 24-h residential curve is used.
   std::vector<double> load_profile;
 
-  /// Normalized hourly RES (PV/wind) availability multipliers.
+  /// Normalized hourly aggregate RES availability multipliers.
   /// If empty, a built-in daytime PV curve is used.
   std::vector<double> renewable_profile;
+  /// Optional type-specific PV availability multipliers. Falls back to
+  /// renewable_profile when empty.
+  std::vector<double> pv_profile;
+  /// Optional type-specific wind availability multipliers. Falls back to
+  /// renewable_profile when empty.
+  std::vector<double> wind_profile;
+
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_position;
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_index;
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_position;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_index;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> ac_bus_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> dc_bus_load_profiles_by_bus;
 
   std::vector<DistributionResilienceFault> faults;
   std::vector<TransportEdge> transport_edges;
@@ -263,6 +279,8 @@ struct DistributionResilienceStepResult {
   double hour{0.0};
   double load_multiplier{1.0};
   double res_multiplier{0.0};
+  double pv_multiplier{0.0};
+  double wind_multiplier{0.0};
   double total_demand_mw{0.0};
   double served_mw{0.0};
   double shed_mw{0.0};
@@ -297,6 +315,15 @@ struct DistributionResilienceStepResult {
 
   /// Shed MW broken down by priority tier [Critical, High, Medium, Low].
   std::vector<double> shed_by_priority;
+
+  /// Per-bus demand/supply details for GUI component-level resilience curves.
+  std::vector<std::string> bus_supply_kind;
+  std::vector<int> bus_supply_index;
+  std::vector<double> bus_supply_demand_mw;
+  std::vector<double> bus_supply_served_mw;
+  std::vector<double> bus_supply_shed_mw;
+  std::vector<int> bus_supply_priority_tier;
+  std::vector<double> bus_supply_importance;
 
   // Power flow validation results (populated when run_power_flow == true).
   bool pf_converged{false};

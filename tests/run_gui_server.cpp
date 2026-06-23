@@ -7528,7 +7528,29 @@ int main(int argc, char** argv) {
         out["gen_commit"] = uc.gen_commit;
         out["ess_dispatch"] = uc.ess_dispatch;
         out["ess_soc"] = uc.ess_soc;
-        out["renewable_dispatch"] = uc.renewable_dispatch;
+        json renewable_dispatch = uc.renewable_dispatch;
+        int n_ren_active = 0;
+        for (const auto& ren : sys_ts.ac.renewable_gens)
+          if (ren.in_service) ++n_ren_active;
+        if (!renewable_dispatch.is_array() || static_cast<int>(renewable_dispatch.size()) != n_ren_active) {
+          std::unordered_map<int, const hacdcpf::TimeSeriesProfile*> pmap;
+          for (const auto& p : ts_data.profiles) pmap[p.id] = &p;
+          renewable_dispatch = json::array();
+          for (const auto& ren : sys_ts.ac.renewable_gens) {
+            if (!ren.in_service) continue;
+            double cap = ren.p_rated_mw > 1e-9 ? ren.p_rated_mw : ren.p_mw;
+            json row = json::array();
+            const auto it = pmap.find(ren.profile_id);
+            for (int t = 0; t < result.num_steps; ++t) {
+              double scale = 1.0;
+              if (it != pmap.end() && t < static_cast<int>(it->second->values.size()))
+                scale = it->second->values[static_cast<size_t>(t)];
+              row.push_back(std::max(0.0, cap * scale));
+            }
+            renewable_dispatch.push_back(row);
+          }
+        }
+        out["renewable_dispatch"] = renewable_dispatch;
         // DC-side dispatch
         out["dc_pv_dispatch"] = uc.dc_pv_dispatch;
         out["dc_ess_dispatch"] = uc.dc_ess_dispatch;
@@ -7688,6 +7710,31 @@ int main(int argc, char** argv) {
             return it->second->values[t];
           };
           json total_load = json::array();
+          json load_demand = json::array();
+          json load_names = json::array();
+          json load_bus_indices = json::array();
+          if (!sys_ts.ac.loads.empty()) {
+            for (size_t li = 0; li < sys_ts.ac.loads.size(); ++li) {
+              const auto& ld = sys_ts.ac.loads[li];
+              json row = json::array();
+              for (int t = 0; t < result.num_steps; ++t) {
+                row.push_back(ld.in_service ? ld.p_mw * ld.scaling * get_scale(ld.profile_id, t) : 0.0);
+              }
+              load_demand.push_back(row);
+              load_names.push_back(ld.name.empty() ? ("Load" + std::to_string(ld.index ? ld.index : (int)li)) : ld.name);
+              load_bus_indices.push_back(ld.bus);
+            }
+          } else {
+            for (size_t bi = 0; bi < sys_ts.ac.buses.size(); ++bi) {
+              const auto& b = sys_ts.ac.buses[bi];
+              if (!b.in_service || std::max(0.0, b.pd_mw) <= 1e-12) continue;
+              json row = json::array();
+              for (int t = 0; t < result.num_steps; ++t) row.push_back(std::max(0.0, b.pd_mw) * get_scale(0, t));
+              load_demand.push_back(row);
+              load_names.push_back(b.name.empty() ? ("BusLoad" + std::to_string(b.index)) : (b.name + " Load"));
+              load_bus_indices.push_back(b.index);
+            }
+          }
           for (int t = 0; t < result.num_steps; ++t) {
             double tl = 0.0;
             if (!sys_ts.ac.loads.empty()) {
@@ -7708,6 +7755,9 @@ int main(int argc, char** argv) {
             }
             total_load.push_back(tl);
           }
+          out["load_demand"] = load_demand;
+          out["load_names"] = load_names;
+          out["load_bus_indices"] = load_bus_indices;
           out["total_load"] = total_load;
         }
         res.set_content(out.dump(), "application/json");
@@ -9239,10 +9289,74 @@ int main(int argc, char** argv) {
         opts.auto_fault_stagger_hr = j.value("auto_fault_stagger_hr", 0.0);
         opts.auto_fault_start_hr = j.value("auto_fault_start_hr", 0.0);
         opts.run_power_flow = j.value("run_power_flow", false);
+        auto parse_profile = [&](const char* key) {
+          std::vector<double> profile;
+          if (!j.contains(key) || !j[key].is_array()) return profile;
+          for (const auto& v : j[key]) {
+            if (!v.is_number()) continue;
+            const double x = v.get<double>();
+            if (std::isfinite(x)) profile.push_back(std::max(0.0, x));
+          }
+          return profile;
+        };
+        if (auto profile = parse_profile("load_profile"); !profile.empty()) {
+          opts.load_profile = std::move(profile);
+        }
+        if (auto profile = parse_profile("renewable_profile"); !profile.empty()) {
+          opts.renewable_profile = std::move(profile);
+        }
+        if (auto profile = parse_profile("pv_profile"); !profile.empty()) {
+          opts.pv_profile = std::move(profile);
+        }
+        if (auto profile = parse_profile("wind_profile"); !profile.empty()) {
+          opts.wind_profile = std::move(profile);
+        }
+        std::map<int, std::vector<double>> scenario_profiles_by_id;
+        if (j.contains("scenario_profiles") && j["scenario_profiles"].is_array()) {
+          for (const auto& p : j["scenario_profiles"]) {
+            if (!p.is_object() || !p.contains("values") || !p["values"].is_array()) continue;
+            const int id = p.value("id", -1);
+            if (id < 0) continue;
+            std::vector<double> values;
+            for (const auto& v : p["values"]) {
+              if (!v.is_number()) continue;
+              const double x = v.get<double>();
+              if (std::isfinite(x)) values.push_back(std::max(0.0, x));
+            }
+            if (!values.empty()) scenario_profiles_by_id[id] = std::move(values);
+          }
+        }
+        if (j.contains("load_profile_map") && j["load_profile_map"].is_array()) {
+          for (const auto& row : j["load_profile_map"]) {
+            if (!row.is_object()) continue;
+            const int profile_id = row.value("profile_id", -1);
+            const auto profile_it = scenario_profiles_by_id.find(profile_id);
+            if (profile_it == scenario_profiles_by_id.end()) continue;
+            const auto& values = profile_it->second;
+            std::string kind = row.value("kind", std::string{"AC_LOAD"});
+            std::transform(kind.begin(), kind.end(), kind.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            const int position = row.value("load_position", row.value("position", -1));
+            const int load_index = row.value("load_index", -1);
+            const int bus = row.value("bus", -1);
+            if (kind == "DC_LOAD") {
+              if (position >= 0) opts.dc_load_profiles_by_position[position] = values;
+              if (load_index >= 0) opts.dc_load_profiles_by_index[load_index] = values;
+              if (bus >= 0) opts.dc_load_profiles_by_bus[bus] = values;
+            } else if (kind == "AC_BUS") {
+              if (bus >= 0) opts.ac_bus_load_profiles_by_bus[bus] = values;
+            } else if (kind == "DC_BUS") {
+              if (bus >= 0) opts.dc_bus_load_profiles_by_bus[bus] = values;
+            } else {
+              if (position >= 0) opts.ac_load_profiles_by_position[position] = values;
+              if (load_index >= 0) opts.ac_load_profiles_by_index[load_index] = values;
+              if (bus >= 0) opts.ac_load_profiles_by_bus[bus] = values;
+            }
+          }
+        }
 
-        const bool consider_switches = j.value("consider_switches", false);
-        opts.enable_disaster_stages = j.value("enable_disaster_stages", consider_switches);
-        opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", consider_switches);
+        const bool consider_switches = j.value("consider_switches", true);
+        opts.enable_disaster_stages = j.value("enable_disaster_stages", true);
+        opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", true);
         opts.post_fault_reconfig_window_hr = j.value("post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
         opts.disaster_post_fault_reconfig_window_hr = j.value(
             "disaster_post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
@@ -9254,16 +9368,15 @@ int main(int argc, char** argv) {
         opts.allow_branch_operation_without_switch =
             j.value("allow_branch_operation_without_switch", !consider_switches);
         opts.use_remote_switch_only = j.value("use_remote_switch_only", false);
-        if (consider_switches || opts.enable_disaster_stages || opts.use_ra_style_stage_milp) {
-          opts.model = hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
-          opts.enable_disaster_stages = true;
-          opts.use_ra_style_stage_milp = true;
-          opts.use_switch_based_fault_isolation = true;
-          opts.allow_stage1_open_switches = true;
-          opts.allow_stage2_close_ties = true;
-          opts.require_switch_for_nonfault_branch_operation = true;
-          opts.allow_branch_operation_without_switch = false;
-        }
+        opts.model = hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
+        opts.enable_disaster_stages = true;
+        opts.use_ra_style_stage_milp = true;
+        opts.use_switch_based_fault_isolation = true;
+        opts.allow_stage1_open_switches = true;
+        opts.allow_stage2_close_ties = true;
+        opts.require_switch_for_nonfault_branch_operation = true;
+        opts.allow_branch_operation_without_switch = false;
+        (void)consider_switches;
 
         auto value_int_any = [](const json& obj, std::initializer_list<const char*> keys, int dflt = 0) {
           for (const auto* key : keys) if (obj.contains(key) && !obj[key].is_null()) return obj[key].get<int>();
@@ -9368,6 +9481,8 @@ int main(int argc, char** argv) {
         json repaired_faults_arr = json::array();
         json load_multipliers = json::array();
         json res_multipliers = json::array();
+        json pv_multipliers = json::array();
+        json wind_multipliers = json::array();
         json res_mw_arr = json::array();
         json disaster_stages = json::array();
         json open_ac_branch_ids = json::array();
@@ -9383,6 +9498,13 @@ int main(int argc, char** argv) {
         json shed_high = json::array();
         json shed_medium = json::array();
         json shed_low = json::array();
+        json bus_supply_kind = json::array();
+        json bus_supply_index = json::array();
+        json bus_supply_demand_mw = json::array();
+        json bus_supply_served_mw = json::array();
+        json bus_supply_shed_mw = json::array();
+        json bus_supply_priority_tier = json::array();
+        json bus_supply_importance = json::array();
         std::map<int, json> mess_traces;
         std::map<int, std::string> mess_names;
         // PF time-series accumulators (only populated when run_power_flow is on).
@@ -9404,6 +9526,8 @@ int main(int argc, char** argv) {
           repaired_faults_arr.push_back(step.repaired_faults);
           load_multipliers.push_back(step.load_multiplier);
           res_multipliers.push_back(step.res_multiplier);
+          pv_multipliers.push_back(step.pv_multiplier);
+          wind_multipliers.push_back(step.wind_multiplier);
           res_mw_arr.push_back(step.total_res_mw);
           disaster_stages.push_back(step.disaster_stage);
           open_ac_branch_ids.push_back(step.open_ac_branch_ids);
@@ -9423,6 +9547,8 @@ int main(int argc, char** argv) {
                                 {"restoration_ratio", step.restoration_ratio},
                                 {"load_multiplier", step.load_multiplier},
                                 {"res_multiplier", step.res_multiplier},
+                                {"pv_multiplier", step.pv_multiplier},
+                                {"wind_multiplier", step.wind_multiplier},
                                 {"active_faults", step.active_faults},
                                 {"repaired_faults", step.repaired_faults},
                                 {"switch_actions", step.switch_actions},
@@ -9444,6 +9570,13 @@ int main(int argc, char** argv) {
           shed_high.push_back(step.shed_by_priority.size() > 1 ? step.shed_by_priority[1] : 0.0);
           shed_medium.push_back(step.shed_by_priority.size() > 2 ? step.shed_by_priority[2] : 0.0);
           shed_low.push_back(step.shed_by_priority.size() > 3 ? step.shed_by_priority[3] : 0.0);
+          bus_supply_kind.push_back(step.bus_supply_kind);
+          bus_supply_index.push_back(step.bus_supply_index);
+          bus_supply_demand_mw.push_back(step.bus_supply_demand_mw);
+          bus_supply_served_mw.push_back(step.bus_supply_served_mw);
+          bus_supply_shed_mw.push_back(step.bus_supply_shed_mw);
+          bus_supply_priority_tier.push_back(step.bus_supply_priority_tier);
+          bus_supply_importance.push_back(step.bus_supply_importance);
           for (const auto& ms : step.mess_states) {
             if (!mess_traces.count(ms.storage_index)) {
               mess_traces[ms.storage_index] = json{{"storage_index", ms.storage_index},
@@ -9500,6 +9633,8 @@ int main(int argc, char** argv) {
         out["repaired_faults_arr"] = repaired_faults_arr;
         out["load_multipliers"] = load_multipliers;
         out["res_multipliers"] = res_multipliers;
+        out["pv_multipliers"] = pv_multipliers;
+        out["wind_multipliers"] = wind_multipliers;
         out["res_mw"] = res_mw_arr;
         out["disaster_stages"] = disaster_stages;
         out["open_ac_branch_ids"] = open_ac_branch_ids;
@@ -9527,11 +9662,19 @@ int main(int argc, char** argv) {
                                    {"num_ineq_constraints", result.model_stats.num_ineq_constraints},
                                    {"objective_value", result.model_stats.objective_value},
                                    {"mip_gap", result.model_stats.mip_gap},
-                                   {"runtime_sec", result.model_stats.runtime_sec}};
+                                   {"runtime_sec", result.model_stats.runtime_sec},
+                                   {"formulation_notes", result.model_stats.formulation_notes}};
         out["shed_critical"] = shed_critical;
         out["shed_high"] = shed_high;
         out["shed_medium"] = shed_medium;
         out["shed_low"] = shed_low;
+        out["bus_supply_kind"] = bus_supply_kind;
+        out["bus_supply_index"] = bus_supply_index;
+        out["bus_supply_demand_mw"] = bus_supply_demand_mw;
+        out["bus_supply_served_mw"] = bus_supply_served_mw;
+        out["bus_supply_shed_mw"] = bus_supply_shed_mw;
+        out["bus_supply_priority_tier"] = bus_supply_priority_tier;
+        out["bus_supply_importance"] = bus_supply_importance;
         json mess_arr = json::array();
         for (auto& [storage_index, trace] : mess_traces) {
           trace["name"] = mess_names[storage_index];

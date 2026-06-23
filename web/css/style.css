@@ -269,6 +269,12 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #canvas .component.highlighted .comp-outline {
   animation: highlight-pulse 1.2s ease-out;
 }
+#canvas .component.fault-highlighted .comp-outline {
+  stroke: #e06c75 !important;
+  stroke-width: 4 !important;
+  stroke-dasharray: 8 4 !important;
+  filter: drop-shadow(0 0 6px rgba(224,108,117,0.9));
+}
 @keyframes highlight-pulse {
   0%   { stroke: #ffcc00; stroke-width: 5; filter: drop-shadow(0 0 8px #ffcc00); }
   50%  { stroke: #ffcc00; stroke-width: 3; filter: drop-shadow(0 0 4px #ffcc00); }
@@ -488,6 +494,10 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   max-height: 200px;
   overflow: auto;
 }
+#resilienceResults.topo-table-wrap {
+  max-height: none;
+  overflow: visible;
+}
 .topo-table-wrap table {
   width: 100%;
   border-collapse: collapse;
@@ -527,6 +537,104 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   padding: 0 2px;
 }
 .clickable-branch:hover { color: #ffcc00; }
+
+
+.selected-curve-panel {
+  margin: 8px 0 12px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.selected-curve-panel h5 { margin: 0 0 6px; color: var(--accent); font-size: 12px; }
+.scenario-curve-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+  margin: 4px 0 8px;
+  color: var(--ink2);
+  font-size: 11px;
+}
+.scenario-curve-controls select {
+  width: 100%;
+  margin-top: 2px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: #dcdfe4;
+}
+.scenario-curve-controls select option {
+  background: var(--bg3);
+  color: #dcdfe4;
+}
+.component-curve-targets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.component-curve-target {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg1);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+.component-curve-target:hover { border-color: var(--accent); color: var(--accent); }
+.selected-component-chart { min-height: 260px; }
+#resilienceSelectedComponentCurve {
+  background: #ffffff;
+  color: #111827;
+  border-radius: 6px;
+}
+
+.resilience-result-layout {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: calc(100vh - 250px);
+}
+.resilience-chart-pane,
+.resilience-detail-pane {
+  min-width: 0;
+}
+.resilience-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  grid-auto-rows: minmax(240px, 1fr);
+  gap: 10px;
+  min-height: calc(100vh - 430px);
+}
+.resilience-chart {
+  min-height: 240px;
+  height: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #111827;
+}
+.resilience-chart.wide { grid-column: 1 / -1; }
+.resilience-detail-pane {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.resilience-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.compact-hint {
+  padding: 6px 8px;
+  text-align: left;
+}
+@media (max-width: 900px) {
+  .resilience-charts-grid { grid-template-columns: 1fr; }
+  .resilience-chart.wide { grid-column: auto; }
+}
 
 /* Results */
 .results-summary {

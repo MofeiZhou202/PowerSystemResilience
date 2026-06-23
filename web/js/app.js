@@ -54,6 +54,7 @@ const App = (() => {
   let _lastTopoAnalysisData = null;
   let _lastNetReductionData = null;
   let _lastScenarioBaseSystemJson = null;
+  let _scenarioCurveEntries = [];
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
@@ -92,6 +93,441 @@ const App = (() => {
       ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
   }
 
+  function numberOr(value, fallback = 0) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function parsePositiveIntText(raw) {
+    return String(raw || '').trim()
+      ? String(raw || '').split(/[,，\s]+/).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v > 0)
+      : [];
+  }
+
+  function parseFaultInputIds(kind) {
+    const id = kind === 'DC' ? 'resDcFaultLocations' : 'resAcFaultLocations';
+    return parsePositiveIntText(document.getElementById(id)?.value || '');
+  }
+
+  function setFaultInputIds(kind, ids) {
+    const id = kind === 'DC' ? 'resDcFaultLocations' : 'resAcFaultLocations';
+    const el = document.getElementById(id);
+    if (el) el.value = Array.from(new Set((ids || []).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v > 0))).join(',');
+  }
+
+  function mappedCompId(mapObj, item, rowIndex) {
+    if (!mapObj) return undefined;
+    const explicit = Number(item?.index);
+    if (Number.isFinite(explicit) && mapObj[explicit] != null) return mapObj[explicit];
+    if (mapObj[rowIndex] != null) return mapObj[rowIndex];
+    if (mapObj[rowIndex + 1] != null) return mapObj[rowIndex + 1];
+    return undefined;
+  }
+
+  function modelRowForComp(items, mapObj, compId) {
+    const cid = Number(compId);
+    const arr = Array.isArray(items) ? items : [];
+    for (let i = 0; i < arr.length; i += 1) {
+      const item = arr[i] || {};
+      if (Number(mappedCompId(mapObj, item, i)) === cid) return { item, index: i, key: item.index ?? i };
+    }
+    return { item: null, index: -1, key: null };
+  }
+
+  function componentCurveTargets() {
+    const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+    const m = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    const rows = [];
+    const add = (kind, type, item, compId, idx) => {
+      if (compId == null) return;
+      const name = item?.name || `${kind}${idx + 1}`;
+      const bus = item?.bus ?? item?.pcc_bus ?? item?.aggregation_bus ?? '';
+      const rating = positivePower(item?.p_rated_mw, item?.p_mw, item?.p_set_mw, item?.pg_mw);
+      rows.push({ kind, type, item, compId, idx, name, bus, rating });
+    };
+    (sys.ac?.loads || []).forEach((x, i) => add('负荷', 'load', x, mappedCompId(m.load, x, i), i));
+    (sys.dc?.loads || []).forEach((x, i) => add('DC负荷', 'dc_load', x, mappedCompId(m.dcLoad, x, i), i));
+    (sys.ac?.renewable_gens || []).forEach((x, i) => {
+      if (x?.in_service === false || positivePower(x?.p_rated_mw, x?.p_mw) <= 1e-9) return;
+      add(String(x.type || '').toLowerCase().includes('wind') ? '风电' : '新能源', 'renewable_gen', x, mappedCompId(m.renGen, x, i), i);
+    });
+    (sys.ac?.pv_systems || []).forEach((x, i) => {
+      if (x?.in_service === false || positivePower(x?.pmax_mw, x?.p_mw, x?.p_rated_mw) <= 1e-9) return;
+      add('光伏', 'pv_system', x, mappedCompId(m.pv, x, i), i);
+    });
+    (sys.dc?.pv_arrays || []).forEach((x, i) => {
+      if (x?.in_service === false || positivePower(x?.p_set_mw, x?.p_rated_mw) <= 1e-9) return;
+      add('DC光伏', 'dc_pv_array', x, mappedCompId(m.dcPv, x, i), i);
+    });
+    return rows;
+  }
+
+  function renderComponentCurveTargets(context) {
+    const divId = context === 'scenario' ? 'scenarioComponentCurveTargets'
+      : (context === 'resilience' ? 'resilienceComponentCurveTargets' : 'tspfComponentCurveTargets');
+    const div = document.getElementById(divId);
+    if (!div) return;
+    const rows = componentCurveTargets();
+    if (!rows.length) {
+      div.innerHTML = '<p class="empty-hint">当前拓扑中没有可展示曲线的负荷/新能源元件。</p>';
+      return;
+    }
+    div.innerHTML = rows.map(r => `<button type="button" class="component-curve-target" data-comp-id="${r.compId}" data-curve-context="${context}">
+        ${escapeHtml(r.kind)} #${escapeHtml(String(r.item?.index ?? r.idx + 1))} ${escapeHtml(r.name)}${r.bus !== '' ? ` / Bus ${escapeHtml(String(r.bus))}` : ''}
+      </button>`).join('');
+    div.querySelectorAll('.component-curve-target').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const cid = parseInt(btn.dataset.compId, 10);
+        const curveContext = btn.dataset.curveContext || context;
+        if (Number.isInteger(cid)) {
+          if (Canvas.panToComponent) Canvas.panToComponent(cid);
+          renderSelectedComponentCurve(cid, curveContext);
+        }
+      });
+    });
+  }
+
+  function scenarioCurveEntryOptions(data) {
+    const entries = [];
+    (data?.regular?.clusters || []).forEach((c, i) => entries.push({ family: 'regular', label: `常规 #${c.cluster_id ?? i + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative }));
+    (data?.reliability?.contingencies || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => entries.push({ family: 'reliability', label: `可靠性 ${g.contingency?.display_name || g.contingency?.id || gi + 1} / 簇${c.cluster_id ?? ci + 1}`, cluster: c, representative: c.representative })));
+    (data?.resilience?.intensities || []).forEach((g, gi) => (g.clusters || []).forEach((c, ci) => entries.push({ family: 'resilience', label: `弹性 ${g.intensity || gi + 1} / 簇${c.cluster_id ?? ci + 1} ${c.representative_id || ''}`, cluster: c, representative: c.representative })));
+    return entries.filter(e => e.representative);
+  }
+
+  function selectedScenarioCurveEntry() {
+    const family = document.getElementById('scenarioCurveFamily')?.value || '';
+    const index = parseInt(document.getElementById('scenarioCurveRepresentative')?.value || '0', 10);
+    const filtered = _scenarioCurveEntries.filter(e => !family || e.family === family);
+    return filtered[Math.max(0, Math.min(Number.isFinite(index) ? index : 0, filtered.length - 1))] || _scenarioCurveEntries[0] || null;
+  }
+
+  function representativeForScenarioCurve(data) {
+    if (!_scenarioCurveEntries.length) _scenarioCurveEntries = scenarioCurveEntryOptions(data);
+    return selectedScenarioCurveEntry()?.representative || null;
+  }
+
+  function renderScenarioCurveSelectors(data) {
+    _scenarioCurveEntries = scenarioCurveEntryOptions(data);
+    const familySel = document.getElementById('scenarioCurveFamily');
+    const repSel = document.getElementById('scenarioCurveRepresentative');
+    if (!familySel || !repSel) return;
+    const families = [
+      ['regular', '常规场景'],
+      ['reliability', '可靠性 N-1'],
+      ['resilience', '弹性台风'],
+    ].filter(([key]) => _scenarioCurveEntries.some(e => e.family === key));
+    familySel.innerHTML = families.map(([key, label]) => `<option value="${key}">${label}</option>`).join('');
+    const refreshReps = () => {
+      const filtered = _scenarioCurveEntries.filter(e => e.family === familySel.value);
+      repSel.innerHTML = filtered.map((e, i) => `<option value="${i}">${escapeHtml(e.label)}</option>`).join('');
+      const chart = document.getElementById('scenarioSelectedComponentCurve');
+      if (chart) chart.innerHTML = '<p class="empty-hint">请选择元件查看该聚类代表下的曲线。</p>';
+    };
+    familySel.onchange = refreshReps;
+    repSel.onchange = () => {
+      const chart = document.getElementById('scenarioSelectedComponentCurve');
+      if (chart) chart.innerHTML = '<p class="empty-hint">已切换聚类代表，请点击元件重新绘制曲线。</p>';
+    };
+    refreshReps();
+  }
+
+  function scenarioCandidateProfileValues(candidate, profileName) {
+    const profiles = candidate?.time_series?.profiles || [];
+    const profile = profiles.find(p => p.name === profileName);
+    return Array.isArray(profile?.values) ? profile.values.map(v => Number(v || 0)) : [];
+  }
+
+  function positivePower(...values) {
+    for (const value of values) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 1e-9) return n;
+    }
+    return 0;
+  }
+
+  function variedPositiveField(items, key) {
+    const vals = (items || []).map(x => Number(x?.[key])).filter(v => Number.isFinite(v) && v > 1e-9);
+    if (vals.length < 2) return false;
+    return Math.max(...vals) - Math.min(...vals) > 1e-6;
+  }
+
+  function renewableCurveCapacity(item, params = {}, peers = []) {
+    // In this UI users often edit either p_mw or p_rated_mw as the “capacity”.
+    // Prefer the field that actually varies across same-type renewable units;
+    // otherwise fall back to the first positive value. This avoids all wind units
+    // plotting identically when one capacity field remains at its default.
+    if (variedPositiveField(peers, 'p_rated_mw')) return positivePower(item?.p_rated_mw, params?.p_rated_mw, item?.p_mw, params?.p_mw);
+    if (variedPositiveField(peers, 'p_mw')) return positivePower(item?.p_mw, params?.p_mw, item?.p_rated_mw, params?.p_rated_mw);
+    return positivePower(item?.p_rated_mw, params?.p_rated_mw, item?.p_mw, params?.p_mw);
+  }
+
+  function scaledCurve(base, numerator, denominator) {
+    const den = Number(denominator);
+    const ratio = den > 1e-9 ? Number(numerator || 0) / den : 0;
+    return (base || []).map(v => Number(v || 0) * ratio);
+  }
+
+  function capacityScaledShape(base, capacity) {
+    const arr = (base || []).map(v => Math.max(0, Number(v || 0)));
+    const cap = Number(capacity || 0);
+    const mx = arr.length ? Math.max(...arr) : 0;
+    if (!(cap > 1e-9) || !(mx > 1e-9)) return arr;
+    return arr.map(v => v / mx * cap);
+  }
+
+  function curveRangePad(vals) {
+    const arr = (vals || []).flat().map(Number).filter(Number.isFinite);
+    if (!arr.length) return null;
+    const mn = Math.min(...arr), mx = Math.max(...arr);
+    const pad = Math.max((mx - mn) * 0.15, Math.max(Math.abs(mx), 1) * 0.03);
+    return [Math.min(0, mn - pad), mx + pad];
+  }
+
+  function resolveSelectedComponentCurve(compId, context) {
+    const comp = Canvas.getComponent ? Canvas.getComponent(Number(compId)) : null;
+    if (!comp) return { error: '未找到画布元件' };
+    const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+    const maps = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    const type = comp.type;
+    const label = comp.params?.name || `${type} ${compId}`;
+    const make = (y, title, note = '', name = label) => {
+      const arr = (y || []).map(v => Number(v || 0));
+      return arr.length ? { title, note, traces: [{ x: arr.map((_, i) => i), y: arr, mode: 'lines+markers', name, line: { width: 2 } }] } : { error: '当前结果没有该元件可用曲线' };
+    };
+
+    if (context === 'resilience') {
+      const d = _lastResilienceData || {};
+      const hrs = Array.isArray(d.hours) ? d.hours : [];
+      const makeXY = (traces, title, note = '') => traces.length ? { title, note, traces } : { error: '当前弹性评估结果没有该元件可用曲线' };
+      const priorityNames = ['关键', '高', '中', '低'];
+      const findBusSeries = (kind, busId) => {
+        const demand = [], served = [], shed = [];
+        let tier = null, importance = null;
+        hrs.forEach((_, t) => {
+          const kinds = d.bus_supply_kind?.[t] || [];
+          const indices = d.bus_supply_index?.[t] || [];
+          let pos = -1;
+          for (let i = 0; i < indices.length; i += 1) {
+            if (String(kinds[i] || 'AC').toUpperCase() === kind && Number(indices[i]) === Number(busId)) { pos = i; break; }
+          }
+          demand.push(pos >= 0 ? Number(d.bus_supply_demand_mw?.[t]?.[pos] || 0) : 0);
+          served.push(pos >= 0 ? Number(d.bus_supply_served_mw?.[t]?.[pos] || 0) : 0);
+          shed.push(pos >= 0 ? Number(d.bus_supply_shed_mw?.[t]?.[pos] || 0) : 0);
+          if (pos >= 0 && tier === null) tier = Number(d.bus_supply_priority_tier?.[t]?.[pos]);
+          if (pos >= 0 && importance === null) importance = Number(d.bus_supply_importance?.[t]?.[pos]);
+        });
+        return { demand, served, shed, tier, importance };
+      };
+      if (type === 'load' || type === 'dc_load') {
+        const isDc = type === 'dc_load';
+        const row = modelRowForComp(isDc ? (sys.dc?.loads || []) : (sys.ac?.loads || []), isDc ? maps.dcLoad : maps.load, compId);
+        const bus = row.item?.bus ?? comp.params?.bus;
+        const s = findBusSeries(isDc ? 'DC' : 'AC', bus);
+        const pr = Number.isInteger(s.tier) ? priorityNames[Math.max(0, Math.min(3, s.tier))] : '—';
+        const note = `负荷优先级：${pr}${Number.isFinite(s.importance) ? `（重要度 ${s.importance.toFixed(1)}）` : ''}`;
+        return makeXY([
+          { x: hrs, y: s.demand, mode: 'lines+markers', name: '负荷需求', line: { color: '#61afef', width: 2 } },
+          { x: hrs, y: s.served, mode: 'lines+markers', name: '实际供电', line: { color: '#98c379', width: 2 } },
+          { x: hrs, y: s.shed, mode: 'lines', name: '切负荷', line: { color: '#e06c75', dash: 'dot' } },
+        ], `弹性负荷曲线：${label}`, note);
+      }
+      if (type === 'renewable_gen') {
+        const row = modelRowForComp(sys.ac?.renewable_gens || [], maps.renGen, compId);
+        const isWind = String(row.item?.type || comp.params?.type || '').toLowerCase().includes('wind');
+        const peers = (sys.ac?.renewable_gens || []).filter(x => String(x.type || '').toLowerCase().includes('wind') === isWind);
+        const cap = renewableCurveCapacity(row.item, comp.params, peers);
+        const isSolar = /solar|pv/i.test(String(row.item?.type || comp.params?.type || row.item?.name || ''));
+        const sourceMult = isWind ? d.wind_multipliers : (isSolar ? d.pv_multipliers : d.res_multipliers);
+        const mult = Array.isArray(sourceMult) ? sourceMult.map(Number) : (Array.isArray(d.res_multipliers) ? d.res_multipliers.map(Number) : hrs.map(() => 1));
+        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: isWind ? '风电出力' : (isSolar ? '光伏出力' : '新能源出力'), line: { color: isSolar ? '#f59e0b' : '#16a34a', width: 2 } }], `弹性${isWind ? '风电' : (isSolar ? '光伏' : '新能源')}曲线：${label}`, '按弹性评估对应类型可用率和该元件容量估算 48h 出力。');
+      }
+      if (type === 'pv_system' || type === 'dc_pv_array') {
+        const isDc = type === 'dc_pv_array';
+        const row = modelRowForComp(isDc ? (sys.dc?.pv_arrays || []) : (sys.ac?.pv_systems || []), isDc ? maps.dcPv : maps.pv, compId);
+        const cap = isDc ? positivePower(row.item?.p_set_mw, comp.params?.p_set_mw) : positivePower(row.item?.p_mw, row.item?.p_rated_mw, comp.params?.p_mw, comp.params?.p_rated_mw);
+        const mult = Array.isArray(d.pv_multipliers) ? d.pv_multipliers.map(Number) : (Array.isArray(d.res_multipliers) ? d.res_multipliers.map(Number) : hrs.map(() => 1));
+        return makeXY([{ x: hrs, y: mult.map(v => Math.max(0, Number(v || 0)) * cap), mode: 'lines+markers', name: '光伏出力', line: { color: '#f59e0b', width: 2 } }], `弹性光伏曲线：${label}`, '按弹性评估光伏可用率和该元件容量估算 48h 出力。');
+      }
+      return { error: '该元件暂不支持弹性曲线展示' };
+    }
+
+    if (context === 'timeSeries') {
+      const d = _lastTspfData || {};
+      if (type === 'load') {
+        const row = modelRowForComp(sys.ac?.loads || [], maps.load, compId);
+        const y = d.load_demand?.[row.index];
+        if (y) return make(y, `AC负荷曲线：${label}`);
+        const denom = (sys.ac?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0), 0);
+        return make(scaledCurve(d.total_load || [], row.item?.p_mw || comp.params?.p_mw || 0, denom), `AC负荷估算曲线：${label}`, '后端未返回精确 AC 负荷曲线，按额定负荷占比由系统总负荷估算。');
+      }
+      if (type === 'dc_load') {
+        const row = modelRowForComp(sys.dc?.loads || [], maps.dcLoad, compId);
+        const y = d.dc_load_demand?.[row.index];
+        const denom = (sys.dc?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0), 0);
+        return y ? make(y, `DC负荷曲线：${label}`) : make(scaledCurve(d.total_load || [], row.item?.p_mw || comp.params?.p_mw || 0, denom), `DC负荷估算曲线：${label}`, '按 DC 负荷额定占比估算。');
+      }
+      if (type === 'renewable_gen') {
+        const row = modelRowForComp(sys.ac?.renewable_gens || [], maps.renGen, compId);
+        const isWind = String(row.item?.type || comp.params?.type || '').toLowerCase().includes('wind');
+        const peers = (sys.ac?.renewable_gens || []).filter(x => String(x.type || '').toLowerCase().includes('wind') === isWind);
+        const cap = renewableCurveCapacity(row.item, comp.params, peers);
+        const titleName = isWind ? '风电出力曲线' : '新能源出力曲线';
+        const rows = Array.isArray(d.renewable_dispatch) ? d.renewable_dispatch : [];
+        const raw = rows[row.index] || rows[row.key] || rows.find((_, i) => i === row.index || i === row.key) || [];
+        const profileName = isWind ? 'scenario_wind_scale' : (/solar|pv/i.test(String(row.item?.type || comp.params?.type || row.item?.name || '')) ? 'scenario_pv_scale' : 'scenario_renewable_scale');
+        const tsProfile = extractGeneratedScenarioProfileValues(getImportedGeneratedScenarioTimeSeries('regular'), profileName);
+        const fallback = tsProfile.length ? tsProfile.map(v => Math.max(0, Number(v || 0)) * cap) : [];
+        const y = raw.length ? capacityScaledShape(raw, cap) : fallback;
+        return make(y, `${titleName}：${label}`, raw.length ? '按该元件容量将出力曲线归一化到 MW，确保不同容量风电峰值不同。' : '后端结果未返回该新能源调度曲线，按导入场景时序和该元件容量估算。');
+      }
+      if (type === 'pv_system') {
+        const row = modelRowForComp(sys.ac?.pv_systems || [], maps.pv, compId);
+        return make(d.ac_pv_dispatch?.[row.index], `光伏出力曲线：${label}`);
+      }
+      if (type === 'dc_pv_array') {
+        const row = modelRowForComp(sys.dc?.pv_arrays || [], maps.dcPv, compId);
+        return make(d.dc_pv_dispatch?.[row.index], `DC光伏出力曲线：${label}`);
+      }
+      if (type === 'generator') {
+        const row = modelRowForComp(sys.ac?.generators || [], maps.gen, compId);
+        return make(d.gen_dispatch?.[row.index], `发电机出力曲线：${label}`);
+      }
+      return { error: '该元件暂不支持曲线展示' };
+    }
+
+    const candidate = representativeForScenarioCurve(_lastScenarioGenerationData);
+    if (!candidate) return { error: '暂无代表场景曲线，请先运行场景生成' };
+    const load = scenarioCandidateProfileValues(candidate, 'total_load_mw');
+    const pv = scenarioCandidateProfileValues(candidate, 'pv_mw');
+    const wind = scenarioCandidateProfileValues(candidate, 'wind_mw');
+    const ren = scenarioCandidateProfileValues(candidate, 'total_renewable_mw');
+    if (type === 'load' || type === 'dc_load') {
+      const isDc = type === 'dc_load';
+      const row = modelRowForComp(isDc ? (sys.dc?.loads || []) : (sys.ac?.loads || []), isDc ? maps.dcLoad : maps.load, compId);
+      const total = (sys.ac?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0) + (sys.dc?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0);
+      const base = scaledCurve(load, numberOr(row.item?.p_mw ?? comp.params?.p_mw, 0) * numberOr(row.item?.scaling ?? comp.params?.scaling, 1), total);
+      const profile = baseDeterministicProfile(base.length, Number(row.item?.index ?? row.index ?? compId));
+      const y = base.map((v, i) => v * profile[i]);
+      return make(y, `场景${isDc ? 'DC' : 'AC'}负荷估算曲线：${label}`, '按该负荷容量占比叠加确定性随机波动，避免所有负荷共用完全相同形状。');
+    }
+    if (type === 'pv_system' || type === 'dc_pv_array') {
+      const isDc = type === 'dc_pv_array';
+      const row = modelRowForComp(isDc ? (sys.dc?.pv_arrays || []) : (sys.ac?.pv_systems || []), isDc ? maps.dcPv : maps.pv, compId);
+      const total = (sys.ac?.pv_systems || []).reduce((a, x) => a + numberOr(x.p_mw ?? x.p_rated_mw, 0), 0) + (sys.dc?.pv_arrays || []).reduce((a, x) => a + numberOr(x.p_set_mw, 0), 0);
+      const cap = isDc ? numberOr(row.item?.p_set_mw ?? comp.params?.p_set_mw, 0) : numberOr(row.item?.p_mw ?? row.item?.p_rated_mw ?? comp.params?.p_mw, 0);
+      return make(scaledCurve(pv, cap, total), `场景${isDc ? 'DC' : ''}光伏估算曲线：${label}`, '按光伏容量占比由代表场景光伏总出力估算。');
+    }
+    if (type === 'renewable_gen') {
+      const row = modelRowForComp(sys.ac?.renewable_gens || [], maps.renGen, compId);
+      const isWind = String(row.item?.type || comp.params?.type || '').toLowerCase().includes('wind');
+      const isSolar = /solar|pv/i.test(String(row.item?.type || comp.params?.type || row.item?.name || ''));
+      const source = isWind ? wind : (isSolar ? pv : ren);
+      const sameType = (sys.ac?.renewable_gens || []).filter(x => {
+        const t = String(x.type || x.name || '').toLowerCase();
+        return isWind ? t.includes('wind') : (isSolar ? /solar|pv/.test(t) : (!t.includes('wind') && !/solar|pv/.test(t)));
+      });
+      const cap = renewableCurveCapacity(row.item, comp.params, sameType);
+      const kindName = isWind ? '风电' : (isSolar ? '光伏' : '新能源');
+      return make(capacityScaledShape(source, cap), `场景${kindName}估算曲线：${label}`, `按该${kindName}元件容量将代表场景曲线归一化到 MW。`);
+    }
+    return { error: '该元件暂不支持场景曲线展示' };
+  }
+
+  function baseDeterministicProfile(length, seed) {
+    // Scenario generation only returns system-level load. For per-load display,
+    // add a deterministic component-specific shape: different phase, amplitude,
+    // low-frequency drift and short-term jitter. This keeps curves reproducible
+    // while making individual loads visibly different.
+    let x = (Number(seed) || 1) * 1103515245 + 12345;
+    const s = Number(seed) || 1;
+    const phase = (s * 5) % 24;
+    const dailyAmp = 0.22 + ((s * 37) % 11) / 100;      // 0.22–0.32
+    const driftAmp = 0.08 + ((s * 19) % 7) / 100;       // 0.08–0.14
+    const jitterAmp = 0.18 + ((s * 13) % 7) / 100;      // 0.18–0.24
+    let smoothNoise = 0;
+    return Array.from({ length }, (_, i) => {
+      x = (x * 1664525 + 1013904223) >>> 0;
+      const raw = (x / 4294967295) - 0.5;
+      smoothNoise = 0.72 * smoothNoise + 0.28 * raw;
+      const daily = Math.sin((2 * Math.PI * ((i + phase) % 24)) / 24 - Math.PI / 2);
+      const drift = Math.sin((2 * Math.PI * (i + s * 3)) / Math.max(24, Math.min(length || 48, 168)));
+      return Math.max(0.10, 1 + dailyAmp * daily + driftAmp * drift + jitterAmp * smoothNoise);
+    });
+  }
+
+  function renderSelectedComponentCurve(compId, context) {
+    const chartId = context === 'scenario' ? 'scenarioSelectedComponentCurve'
+      : (context === 'resilience' ? 'resilienceSelectedComponentCurve' : 'tspfSelectedComponentCurve');
+    const chart = document.getElementById(chartId);
+    if (!chart) return;
+    const info = resolveSelectedComponentCurve(compId, context);
+    if (info.error) {
+      chart.innerHTML = `<p class="empty-hint">${escapeHtml(info.error)}</p>`;
+      return;
+    }
+    const range = curveRangePad(info.traces.map(t => t.y));
+    const whiteChart = context === 'resilience';
+    const axisTheme = whiteChart ? { gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' } : { gridcolor: '#3e4451' };
+    const layout = {
+      paper_bgcolor: whiteChart ? '#ffffff' : 'rgba(0,0,0,0)',
+      plot_bgcolor: whiteChart ? '#ffffff' : 'rgba(0,0,0,0)',
+      font: { color: whiteChart ? '#111827' : '#abb2bf', size: 11 }, margin: { l: 55, r: 15, t: 42, b: info.note ? 68 : 40 },
+      xaxis: { ...axisTheme, title: context === 'resilience' ? '小时' : '时间步' },
+      yaxis: { ...axisTheme, title: 'MW', ...(range ? { range } : {}) },
+      title: info.title,
+      annotations: info.note ? [{ text: info.note, x: 0, y: -0.28, xref: 'paper', yref: 'paper', showarrow: false, align: 'left', font: { size: 10, color: whiteChart ? '#92400e' : '#d19a66' } }] : [],
+    };
+    if (window.Plotly) Plotly.newPlot(chart, info.traces, layout, { responsive: true });
+    else chart.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示曲线。</p>';
+  }
+
+  function listFaultableBranches() {
+    const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
+    const m = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    const normalize = (kind, br, i) => {
+      const idx = Number(br.index ?? i + 1);
+      const compId = kind === 'DC' ? (m.dcBranch?.[idx] ?? m.dcBranch?.[i]) : (m.branch?.[idx] ?? m.branch?.[i]);
+      const name = br.name || `${kind} branch ${idx}`;
+      const label = `${kind} #${idx} | ${name} | ${br.from_bus ?? '-'} → ${br.to_bus ?? '-'}`;
+      return { kind, index: idx, name, from: br.from_bus, to: br.to_bus, compId, label };
+    };
+    return {
+      AC: (sys.ac?.branches || []).map((br, i) => normalize('AC', br, i)).filter(x => Number.isFinite(x.index)),
+      DC: (sys.dc?.branches || []).map((br, i) => normalize('DC', br, i)).filter(x => Number.isFinite(x.index)),
+    };
+  }
+
+  function validateFaultBranchIds() {
+    const branches = listFaultableBranches();
+    const acSet = new Set((branches.AC || []).map(x => x.index));
+    const dcSet = new Set((branches.DC || []).map(x => x.index));
+    const badAc = parseFaultInputIds('AC').filter(id => !acSet.has(id));
+    const badDc = parseFaultInputIds('DC').filter(id => !dcSet.has(id));
+    if (badAc.length || badDc.length) {
+      const msg = `故障支路不存在：${badAc.length ? `AC ${badAc.join(',')}` : ''}${badAc.length && badDc.length ? '；' : ''}${badDc.length ? `DC ${badDc.join(',')}` : ''}。请检查拓扑支路表中的 ID 后重新输入。`;
+      log(msg, 'warn');
+      setStatus('故障支路 ID 无效', 'error');
+      return false;
+    }
+    return true;
+  }
+
+  function markResilienceFaultBranches() {
+    if (!Canvas.state?.components) return;
+    Canvas.state.components.forEach(c => c.el?.classList?.remove('fault-highlighted'));
+    const maps = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
+    const mark = (kind, id) => {
+      const compId = kind === 'DC' ? maps.dcBranch?.[id] : maps.branch?.[id];
+      const comp = compId != null && Canvas.getComponent ? Canvas.getComponent(compId) : null;
+      if (comp?.el) comp.el.classList.add('fault-highlighted');
+    };
+    parseFaultInputIds('AC').forEach(id => mark('AC', id));
+    parseFaultInputIds('DC').forEach(id => mark('DC', id));
+  }
+
   // Extract the first bus id from a component name like "F3-Line-20-21" → 20.
   function busIdFromComponentName(name) {
     if (!name) return null;
@@ -100,9 +536,15 @@ const App = (() => {
   }
 
   // Trigger a JSON file download in the browser.
-  function downloadJsonFile(filename, obj) {
+  function downloadJsonFile(filename, obj, options = {}) {
     try {
-      const text = JSON.stringify(obj, null, 2);
+      let text;
+      try {
+        text = JSON.stringify(obj, null, options.compact ? 0 : 2);
+      } catch (prettyErr) {
+        if (options.compact) throw prettyErr;
+        text = JSON.stringify(obj);
+      }
       const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -112,8 +554,10 @@ const App = (() => {
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       log(`已导出: ${filename}`, 'success');
+      return true;
     } catch (e) {
       log(`导出失败: ${e.message || e}`, 'error');
+      return false;
     }
   }
 
@@ -2114,6 +2558,13 @@ const App = (() => {
     return !!getImportedGeneratedScenarioTimeSeries(targetFamily);
   }
 
+  function extractGeneratedScenarioProfileValues(ts, profileIdOrName) {
+    if (profileIdOrName === undefined || profileIdOrName === null || profileIdOrName === '') return [];
+    const profiles = Array.isArray(ts?.profiles) ? ts.profiles : [];
+    const matched = profiles.find(profile => profile?.id === profileIdOrName || String(profile?.id) === String(profileIdOrName) || profile?.name === profileIdOrName);
+    return Array.isArray(matched?.values) ? matched.values.map(v => Number(v || 0)) : [];
+  }
+
   async function applyGeneratedScenarioTimeSeries(caseJson) {
     const ts = caseJson?._time_series;
     if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
@@ -2199,6 +2650,7 @@ const App = (() => {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('timeSeries');
+    renderComponentCurveTargets('timeSeries');
 
     const section = document.getElementById('tspfResultsSection');
     section.style.display = 'block';
@@ -3521,6 +3973,10 @@ const App = (() => {
   function updateTopologyTables() {
     const sys = Canvas.buildSystemJson();
     const m = Canvas.getCompBusMap();
+    markResilienceFaultBranches();
+    renderComponentCurveTargets('timeSeries');
+    renderComponentCurveTargets('scenario');
+    renderComponentCurveTargets('resilience');
 
     // Helper: populate a table and toggle its section visibility
     function fillTable(bodyId, sectionId, items, mapObj, rowFn) {
@@ -3562,9 +4018,9 @@ const App = (() => {
 
     // Branch table (always shown, includes _from_branch transformers)
     fillTable('#branchTableInner', null, sys.ac.branches, m.branch, br =>
-      `<td>${br.from_bus}</td><td>${br.to_bus}</td>
-        <td>${br.r_pu.toFixed(6)}</td><td>${br.x_pu.toFixed(6)}</td>
-        <td>${br.b_pu.toFixed(6)}</td><td>${br.rate_a_mva}</td>
+      `<td>${br.index ?? ''}</td><td>${escapeHtml(br.name || '')}</td><td>${br.from_bus}</td><td>${br.to_bus}</td>
+        <td>${Number(br.r_pu || 0).toFixed(6)}</td><td>${Number(br.x_pu || 0).toFixed(6)}</td>
+        <td>${Number(br.b_pu || 0).toFixed(6)}</td><td>${br.rate_a_mva}</td>
         <td>${(br.tap || 1).toFixed(4)}</td><td>${(br.shift_deg || 0).toFixed(2)}</td>`);
 
     // Generator table (always shown)
@@ -3639,7 +4095,7 @@ const App = (() => {
 
     // DC Branch
     fillTable('#dcBranchTableInner', 'dcBranchSection', sys.dc.branches, m.dcBranch, db =>
-      `<td>${db.from_bus}</td><td>${db.to_bus}</td><td>${db.r_pu}</td><td>${db.rate_a_mva}</td>`);
+      `<td>${db.index ?? ''}</td><td>${escapeHtml(db.name || '')}</td><td>${db.from_bus}</td><td>${db.to_bus}</td><td>${db.r_pu}</td><td>${db.rate_a_mva}</td>`);
 
     // DC Load
     fillTable('#dcLoadTableInner', 'dcLoadSection', sys.dc.loads, m.dcLoad, dl =>
@@ -4003,6 +4459,7 @@ const App = (() => {
       if (match) anyVisible = true;
     });
     bar.classList.toggle('hidden', !anyVisible);
+    if (moduleName === 'resilience') markResilienceFaultBranches();
   }
 
   // ========== Init ==========
@@ -4051,6 +4508,8 @@ const App = (() => {
     // ---- Toolbar Events ----
     // Bar 1: 加载算例 -> open case-load modal
     document.getElementById('btnLoadCase').addEventListener('click', showCaseLoadModal);
+    document.getElementById('resAcFaultLocations')?.addEventListener('input', markResilienceFaultBranches);
+    document.getElementById('resDcFaultLocations')?.addEventListener('input', markResilienceFaultBranches);
 
     // Case-load modal: three import paths
     document.getElementById('btnImportLibraryCase')?.addEventListener('click', () => {
@@ -4499,15 +4958,14 @@ const App = (() => {
       acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
       dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
       const latestEnd = manual_faults.reduce((m, f) => Math.max(m, Number(f.start_hr || 0) + Number(f.repair_hr || 0)), 0);
-      const useScenarioTs = document.getElementById('resUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('resilience');
       return {
         fault_count:     num('resFaultCount', manual_faults.length || 1),
         ac_fault_branch_ids: acIds,
         dc_fault_branch_ids: dcIds,
         manual_faults,
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
-        consider_switches: document.getElementById('resConsiderSwitches')?.checked === true,
-        horizon_hours: Math.max(useScenarioTs ? 48 : 24, Math.ceil(latestEnd + 4)),
+        consider_switches: true,
+        horizon_hours: Math.max(48, Math.ceil(latestEnd + 4)),
       };
     }
     document.getElementById('btnGenExtremeScenario')?.addEventListener('click', async () => {
@@ -4538,6 +4996,7 @@ const App = (() => {
       setVal('resAcFaultLocations', acFaults.map(f => f.id).join(','));
       setVal('resDcFaultLocations', dcFaults.map(f => f.id).join(','));
       setVal('resFaultCount', String(acFaults.length + dcFaults.length));
+      markResilienceFaultBranches();
       setVal('resAcFaultStartHour', acFaults.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
       setVal('resDcFaultStartHour', dcFaults.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
       setVal('resAcRepairDuration', acFaults.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(','));
@@ -4553,12 +5012,16 @@ const App = (() => {
     async function runResilience() {
       setStatus('弹性评估中...', 'busy');
       if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-      // If "使用场景时序" is enabled, bind imported resilience-scenario 48h profiles first.
-      if (document.getElementById('resUseScenarioTimeSeries')?.checked && hasUsableGeneratedScenarioTimeSeries('resilience')) {
-        try { await applyGeneratedScenarioTimeSeries(getImportedGeneratedScenarioCase('resilience')); }
+      // Resilience assessment always uses imported scenario 48h profiles when available.
+      const resScenarioCase = getImportedGeneratedScenarioCase('resilience');
+      if (hasUsableGeneratedScenarioTimeSeries('resilience')) {
+        try { await applyGeneratedScenarioTimeSeries(resScenarioCase); }
         catch (e) { log(`应用生成场景时序失败：${e.message || e}`, 'warn'); }
       }
+      if (!validateFaultBranchIds()) return;
+      markResilienceFaultBranches();
       const p = collectResilienceParams();
+      const scenarioProfiles = getResilienceScenarioProfiles();
       const params = {
         default_fault_count: p.fault_count,
         manual_faults: p.manual_faults,
@@ -4567,17 +5030,40 @@ const App = (() => {
         mess_travel_speed_kmph: p.mobile_storage_speed_kmh,
         horizon_hours: p.horizon_hours,
         time_step_hr: 1.0,
-        allow_reconfiguration: !p.consider_switches,
+        allow_reconfiguration: true,
         allow_mess_dispatch: true,
         run_power_flow: false,
-        consider_switches: p.consider_switches,
-        enable_disaster_stages: p.consider_switches,
-        use_ra_style_stage_milp: p.consider_switches,
+        consider_switches: true,
+        enable_disaster_stages: true,
+        use_ra_style_stage_milp: true,
+        allow_stage1_open_switches: true,
+        allow_stage2_close_ties: true,
+        require_switch_for_nonfault_branch_operation: true,
+        allow_branch_operation_without_switch: false,
         post_fault_reconfig_window_hr: 2.0,
       };
+      if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) {
+        params.load_profile = scenarioProfiles.loadProfile;
+      }
+      if (Array.isArray(scenarioProfiles.tsProfiles) && scenarioProfiles.tsProfiles.length) {
+        params.scenario_profiles = scenarioProfiles.tsProfiles;
+      }
+      if (Array.isArray(scenarioProfiles.loadProfileMap) && scenarioProfiles.loadProfileMap.length) {
+        params.load_profile_map = scenarioProfiles.loadProfileMap;
+      }
+      if (Array.isArray(scenarioProfiles.renewableProfile) && scenarioProfiles.renewableProfile.length) {
+        params.renewable_profile = scenarioProfiles.renewableProfile;
+      }
+      if (Array.isArray(scenarioProfiles.pvProfile) && scenarioProfiles.pvProfile.length) {
+        params.pv_profile = scenarioProfiles.pvProfile;
+      }
+      if (Array.isArray(scenarioProfiles.windProfile) && scenarioProfiles.windProfile.length) {
+        params.wind_profile = scenarioProfiles.windProfile;
+      }
       const data = await apiPost('/api/session/run_distribution_resilience', params);
       if (data && !data.error) {
         _lastResilienceData = data;
+        renderComponentCurveTargets('resilience');
         showResilienceResults(data);
         switchTab('results');
         setStatus('弹性评估完成');
@@ -4587,15 +5073,16 @@ const App = (() => {
     }
 
     function plotThemeRes(title, yTitle = '') {
+      const axisTheme = { gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' };
       return {
         title,
         margin: { l: 55, r: 15, t: 35, b: 45 },
-        xaxis: { title: '时间 (h)', gridcolor: '#3e4451' },
-        yaxis: { title: yTitle, gridcolor: '#3e4451', rangemode: 'tozero' },
+        xaxis: { title: '时间 (h)', ...axisTheme },
+        yaxis: { title: yTitle, ...axisTheme, rangemode: 'tozero' },
         legend: { orientation: 'h', y: -0.25 },
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(0,0,0,0)',
-        font: { color: '#dcdfe4', size: 11 },
+        paper_bgcolor: '#ffffff',
+        plot_bgcolor: '#ffffff',
+        font: { color: '#111827', size: 11 },
       };
     }
 
@@ -4608,52 +5095,80 @@ const App = (() => {
       const x = data.hours;
       const cfg = { responsive: true, displaylogo: false };
       const asArray = (v) => Array.isArray(v) ? v : [];
+      const seriesAtLength = (series, fill = 0) => x.map((_, i) => {
+        const v = Array.isArray(series) ? series[i] : undefined;
+        return v === undefined || v === null ? fill : v;
+      });
+      const numberSeries = (series, fill = 0) => seriesAtLength(series, fill).map(v => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fill;
+      });
+      const stagesRaw = asArray(data.disaster_stages);
+      const stageSeries = x.map((_, i) => stagesRaw[i] || 'Normal');
+      const branchStateCounts = (series) => {
+        const arr = asArray(series);
+        return x.map((_, i) => Array.isArray(arr[i]) ? arr[i].length : 0);
+      };
+      const chartLayout = (title, yTitle = '') => ({
+        ...plotThemeRes(title, yTitle),
+        autosize: true,
+        margin: { l: 55, r: 15, t: 32, b: 38 },
+        legend: { orientation: 'h', y: -0.18 },
+      });
 
       Plotly.newPlot('resTimeChart', [
-        ...(Array.isArray(data.demand_mw) ? [{ x, y: data.demand_mw, mode: 'lines+markers', name: '需求', line: { color: '#61afef' } }] : []),
-        ...(Array.isArray(data.served_mw) ? [{ x, y: data.served_mw, mode: 'lines+markers', name: '供电', line: { color: '#98c379' } }] : []),
-        ...(Array.isArray(data.shed_mw) ? [{ x, y: data.shed_mw, mode: 'lines+markers', name: '切负荷', line: { color: '#e06c75' } }] : []),
-      ], plotThemeRes('恢复过程：需求/供电/切负荷', 'MW'), cfg);
+        ...(Array.isArray(data.demand_mw) ? [{ x, y: numberSeries(data.demand_mw), mode: 'lines+markers', name: '需求', line: { color: '#61afef' } }] : []),
+        ...(Array.isArray(data.served_mw) ? [{ x, y: numberSeries(data.served_mw), mode: 'lines+markers', name: '供电', line: { color: '#98c379' } }] : []),
+        ...(Array.isArray(data.shed_mw) ? [{ x, y: numberSeries(data.shed_mw), mode: 'lines+markers', name: '切负荷', line: { color: '#e06c75' } }] : []),
+      ], chartLayout('恢复过程：需求/供电/切负荷', 'MW'), cfg);
 
       Plotly.newPlot('resRestorationChart', [
-        { x, y: asArray(data.restoration_ratio).map(v => Number(v) * 100), mode: 'lines+markers', name: '恢复率', line: { color: '#0f766e', width: 2 } },
-        { x, y: asArray(data.res_multipliers).map(v => Number(v) * 100), mode: 'lines', name: 'RES可用率', line: { color: '#e5c07b', dash: 'dot' } },
-      ], { ...plotThemeRes('恢复率 / RES 时序', '%'), yaxis: { title: '%', gridcolor: '#3e4451', range: [0, 105] } }, cfg);
+        { x, y: numberSeries(data.restoration_ratio).map(v => v * 100), mode: 'lines+markers', name: '供电率', line: { color: '#0f766e', width: 2 } },
+      ], { ...chartLayout('供电率时序', '%'), yaxis: { title: '%', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', range: [0, 105] } }, cfg);
 
       Plotly.newPlot('resFaultSwitchChart', [
-        { x, y: asArray(data.active_faults), type: 'bar', name: '活动故障', marker: { color: '#f59e0b' } },
-        { x, y: asArray(data.repaired_faults_arr), type: 'bar', name: '已修复', marker: { color: '#22c55e' } },
-        { x, y: asArray(data.switch_actions), mode: 'lines+markers', name: '开关动作', yaxis: 'y2', line: { color: '#a78bfa' } },
-      ], { ...plotThemeRes('故障 / 修复 / 开关动作', '数量'), barmode: 'group', yaxis2: { title: '动作数', overlaying: 'y', side: 'right', gridcolor: '#3e4451' } }, cfg);
+        { x, y: numberSeries(data.active_faults), type: 'bar', name: '活动故障', marker: { color: '#f59e0b' } },
+        { x, y: numberSeries(data.repaired_faults_arr), type: 'bar', name: '已修复', marker: { color: '#22c55e' } },
+        { x, y: numberSeries(data.switch_actions), mode: 'lines+markers', name: '开关动作', yaxis: 'y2', line: { color: '#a78bfa' } },
+      ], { ...chartLayout('故障 / 修复 / 开关动作', '数量'), barmode: 'group', yaxis2: { title: '动作数', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' } }, cfg);
 
       Plotly.newPlot('resPriorityChart', [
-        { x, y: asArray(data.shed_critical), type: 'bar', name: '关键', marker: { color: '#dc2626' } },
-        { x, y: asArray(data.shed_high), type: 'bar', name: '高', marker: { color: '#f59e0b' } },
-        { x, y: asArray(data.shed_medium), type: 'bar', name: '中', marker: { color: '#3b82f6' } },
-        { x, y: asArray(data.shed_low), type: 'bar', name: '低', marker: { color: '#94a3b8' } },
-      ], { ...plotThemeRes('分优先级切负荷', 'MW'), barmode: 'stack' }, cfg);
+        { x, y: numberSeries(data.shed_critical), type: 'bar', name: '关键', marker: { color: '#dc2626' } },
+        { x, y: numberSeries(data.shed_high), type: 'bar', name: '高', marker: { color: '#f59e0b' } },
+        { x, y: numberSeries(data.shed_medium), type: 'bar', name: '中', marker: { color: '#3b82f6' } },
+        { x, y: numberSeries(data.shed_low), type: 'bar', name: '低', marker: { color: '#94a3b8' } },
+      ], { ...chartLayout('分优先级切负荷', 'MW'), barmode: 'stack' }, cfg);
 
-      const stages = asArray(data.disaster_stages);
       const stageMap = { Normal: 0, DisasterIsolation: 1, DisasterPostFaultReconfig: 2, PostDisasterRepair: 3 };
+      const stageNames = ['预先准备', '抵御与吸收', '响应与适应', '快速恢复'];
       Plotly.newPlot('resStageChart', [
-        { x, y: stages.map(s => stageMap[s] ?? 0), mode: 'lines+markers', name: '灾害阶段', line: { color: '#56b6c2', shape: 'hv' } },
-      ], { ...plotThemeRes('灾害阶段时间线', '阶段'), yaxis: { title: '阶段', gridcolor: '#3e4451', tickmode: 'array', tickvals: [0,1,2,3], ticktext: ['Normal','Isolation','Reconfig','Repair'] } }, cfg);
+        { x, y: stageSeries.map(s => stageMap[s] ?? 0), mode: 'lines+markers', name: '灾害阶段', line: { color: '#56b6c2', shape: 'hv' }, text: stageSeries.map(s => stageNames[stageMap[s] ?? 0]), hovertemplate: '%{x} h<br>%{text}<extra></extra>' },
+      ], { ...chartLayout('灾害阶段时间线', '阶段'), yaxis: { title: '阶段', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', tickmode: 'array', tickvals: [0,1,2,3], ticktext: stageNames } }, cfg);
 
       const mess = asArray(data.mess_traces);
       const messTraces = [];
       mess.forEach((tr, idx) => {
         const name = tr.name || `MESS ${tr.storage_index ?? idx + 1}`;
-        if (Array.isArray(tr.dispatch_mw)) messTraces.push({ x, y: tr.dispatch_mw, mode: 'lines', name: `${name} 出力` });
-        if (Array.isArray(tr.energy_mwh)) messTraces.push({ x, y: tr.energy_mwh, mode: 'lines', name: `${name} 电量`, line: { dash: 'dot' } });
+        if (Array.isArray(tr.dispatch_mw)) {
+          messTraces.push({ x, y: tr.dispatch_mw, mode: 'lines+markers', name: `${name} 充放电功率`, yaxis: 'y' });
+        }
+        if (Array.isArray(tr.energy_mwh)) {
+          messTraces.push({ x, y: tr.energy_mwh, mode: 'lines+markers', name: `${name} 剩余电量`, yaxis: 'y2', line: { dash: 'dot' } });
+        }
       });
-      Plotly.newPlot('resMessChart', messTraces.length ? messTraces : [{ x, y: asArray(data.switch_actions), mode: 'lines+markers', name: '开关动作' }], plotThemeRes('移动储能 / 操作过程', 'MW / MWh'), cfg);
+      const messLayout = {
+        ...chartLayout('移动储能：充放电功率 / 剩余电量', '功率 (MW)'),
+        yaxis2: { title: '剩余电量 (MWh)', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', rangemode: 'tozero' },
+        annotations: messTraces.length ? [] : [{ text: '无移动储能出力/电量数据', xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, showarrow: false, font: { color: '#111827' } }],
+      };
+      Plotly.newPlot('resMessChart', messTraces, messLayout, cfg);
 
       Plotly.newPlot('resOpenBranchChart', [
-        { x, y: arrayCounts(data.open_ac_branch_ids), type: 'bar', name: 'AC断开支路', marker: { color: '#e06c75' } },
-        { x, y: arrayCounts(data.open_dc_branch_ids), type: 'bar', name: 'DC断开支路', marker: { color: '#c678dd' } },
-        { x, y: arrayCounts(data.closed_tie_branch_ids), type: 'bar', name: 'AC闭合联络', marker: { color: '#98c379' } },
-        { x, y: arrayCounts(data.closed_dc_tie_branch_ids), type: 'bar', name: 'DC闭合联络', marker: { color: '#56b6c2' } },
-      ], { ...plotThemeRes('AC/DC 拓扑动作统计', '数量'), barmode: 'group' }, cfg);
+        { x, y: branchStateCounts(data.open_ac_branch_ids), type: 'bar', name: 'AC当前断开支路', marker: { color: '#e06c75' } },
+        { x, y: branchStateCounts(data.open_dc_branch_ids), type: 'bar', name: 'DC当前断开支路', marker: { color: '#c678dd' } },
+        { x, y: branchStateCounts(data.closed_tie_branch_ids), type: 'bar', name: 'AC闭合联络', marker: { color: '#98c379' } },
+        { x, y: branchStateCounts(data.closed_dc_tie_branch_ids), type: 'bar', name: 'DC闭合联络', marker: { color: '#56b6c2' } },
+      ], { ...chartLayout('AC/DC 拓扑状态统计', '数量'), barmode: 'group' }, cfg);
     }
 
     function showResilienceResults(data) {
@@ -4661,52 +5176,62 @@ const App = (() => {
       document.getElementById('resultsContent').style.display = 'block';
       setActiveResultGroup('resilience');
       const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+      const resilienceIndexTip = '弹性指数 = 评估时段内总供电电量 / 总需求电量，取值 0–1；越接近 1 表示灾害期间整体供电保持得越好。它是全时段能量积分指标；最低供电率是单个最差时刻指标。';
+      const supplyRatios = Array.isArray(data.restoration_ratio) ? data.restoration_ratio.map(Number).filter(Number.isFinite) : [];
+      const minSupplyRatio = supplyRatios.length ? Math.min(...supplyRatios) : (data.avg_restoration_ratio ?? 0);
       const kpis = [
         ['可行', data.feasible === false ? '✗ 否' : '✓ 是'],
         ['状态', data.status ?? '—'],
-        ['弹性指数', nf(data.resilience_index, 4)],
+        ['弹性指数', nf(data.resilience_index, 4), resilienceIndexTip],
         ['总需求 (MWh)', nf(data.total_demand_mwh, 2)],
         ['总切负荷 (MWh)', nf(data.total_shed_mwh, 2)],
         ['加权未供 (MWh)', nf(data.weighted_unserved_mwh, 2)],
         ['峰值切负荷 (MW)', nf(data.peak_shed_mw, 2)],
-        ['最终恢复率 (%)', nf((data.final_restoration_ratio ?? 0) * 100, 2)],
-        ['平均恢复率 (%)', nf((data.avg_restoration_ratio ?? 0) * 100, 2)],
+        ['最终供电率 (%)', nf((data.final_restoration_ratio ?? 0) * 100, 2)],
+        ['最低供电率 (%)', nf(minSupplyRatio * 100, 2)],
         ['移储供能 (MWh)', nf(data.mess_energy_delivered_mwh, 2)],
         ['移储行程 (km)', nf(data.mess_travel_distance_km, 1)],
         ['开关操作次数', data.total_switch_actions ?? '—'],
         ['修复故障数', data.total_repaired_faults ?? '—'],
       ];
-      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
-      for (const [k, v] of kpis) html += `<tr><td>${k}</td><td class="result-value">${v}</td></tr>`;
-      html += '</tbody></table>';
+      let summaryHtml = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
+      for (const [k, v, tip] of kpis) summaryHtml += `<tr><td${tip ? ` title="${escapeHtml(tip)}" class="metric-help"` : ''}>${k}</td><td class="result-value">${v}</td></tr>`;
+      summaryHtml += '</tbody></table>';
 
+      let detailHtml = '';
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
-        html += '<h4 style="margin:10px 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
+        detailHtml += '<h4 style="margin:0 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
         const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.fault_sequence.slice(0, 20).forEach((f, i) => {
           const clk = busClickAttr(busIdFromComponentName(f.name), resBusMap);
-          html += `<tr${clk}><td>${i + 1}</td><td>${f.branch_type || f.branch_kind || 'AC'}</td><td>${f.name ?? f.branch_id ?? f.branch_index ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
+          detailHtml += `<tr${clk}><td>${i + 1}</td><td>${f.branch_type || f.branch_kind || 'AC'}</td><td>${f.name ?? f.branch_id ?? f.branch_index ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
         });
-        html += '</tbody></table>';
+        detailHtml += '</tbody></table>';
       }
-      if (Array.isArray(data.disaster_stages) && data.disaster_stages.length) {
-        const distinctStages = [...new Set(data.disaster_stages.filter(Boolean))].join(' / ');
-        html += `<h4 style="margin:10px 0 4px;">灾害阶段 / 开关动作</h4><p class="empty-hint">阶段：${distinctStages || '—'}；模型：${data.model || '—'}</p>`;
-      }
+      let chartsHtml = '';
       if (Array.isArray(data.hours) && data.hours.length) {
-        html += `
-          <h4 style="margin:10px 0 4px;">弹性评估图表</h4>
-          <div id="resChartsGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;">
-            <div id="resTimeChart" style="height:280px;"></div>
-            <div id="resRestorationChart" style="height:280px;"></div>
-            <div id="resFaultSwitchChart" style="height:280px;"></div>
-            <div id="resPriorityChart" style="height:280px;"></div>
-            <div id="resStageChart" style="height:280px;"></div>
-            <div id="resMessChart" style="height:280px;"></div>
-            <div id="resOpenBranchChart" style="height:280px;"></div>
+        chartsHtml = `
+          <div id="resChartsGrid" class="resilience-charts-grid">
+            <div id="resTimeChart" class="resilience-chart wide"></div>
+            <div id="resRestorationChart" class="resilience-chart"></div>
+            <div id="resFaultSwitchChart" class="resilience-chart"></div>
+            <div id="resPriorityChart" class="resilience-chart"></div>
+            <div id="resStageChart" class="resilience-chart"></div>
+            <div id="resMessChart" class="resilience-chart"></div>
+            <div id="resOpenBranchChart" class="resilience-chart"></div>
           </div>`;
       }
-      document.getElementById('resilienceResults').innerHTML = html;
+      document.getElementById('resilienceResults').innerHTML = `
+        <div class="resilience-result-layout">
+          <div class="resilience-chart-pane">${chartsHtml || '<p class="empty-hint">暂无时序图表</p>'}</div>
+          <div class="resilience-detail-pane">
+            <h4 style="margin:0 0 4px;">评估指标</h4>
+            <div class="resilience-detail-grid">
+              <div>${summaryHtml}</div>
+              <div>${detailHtml || '<p class="empty-hint compact-hint">暂无故障序列明细</p>'}</div>
+            </div>
+          </div>
+        </div>`;
 
       renderResilienceCharts(data);
     }
@@ -4819,7 +5344,7 @@ const App = (() => {
       return `${sum.toFixed(2)} / 峰值 ${Number.isFinite(max) ? max.toFixed(2) : '-'}`;
     }
 
-    function profileValuesFromCandidate(candidate, profileName) {
+    function scenarioCandidateProfileValues(candidate, profileName) {
       const profiles = candidate?.time_series?.profiles || [];
       const profile = profiles.find(p => p.name === profileName);
       return Array.isArray(profile?.values) ? profile.values.map(v => Number(v || 0)) : [];
@@ -5025,36 +5550,84 @@ const App = (() => {
     }
 
     function profileJsonFromCandidate(candidate, profileName) {
-      const values = profileValuesFromCandidate(candidate, profileName);
+      const values = scenarioCandidateProfileValues(candidate, profileName);
       return values.length ? { name: profileName, values } : null;
+    }
+
+    function buildComponentLoadProfiles(loadSeries, baseSystem, firstProfileId = 10) {
+      const ac = baseSystem?.ac || {};
+      const dc = baseSystem?.dc || {};
+      const entries = [];
+      const add = (kind, item, position, base, seed) => {
+        if (!item || item.in_service === false || !(base > 1e-9)) return;
+        entries.push({ kind, item, position, base, seed });
+      };
+      if (Array.isArray(ac.loads) && ac.loads.length) {
+        ac.loads.forEach((ld, i) => add('AC_LOAD', ld, i, numberOr(ld.p_mw, 0) * numberOr(ld.scaling, 1), numberOr(ld.index, i + 1)));
+      } else {
+        (ac.buses || []).forEach((bus, i) => add('AC_BUS', bus, i, numberOr(bus.pd_mw, 0), numberOr(bus.index, i + 1)));
+      }
+      if (Array.isArray(dc.loads) && dc.loads.length) {
+        dc.loads.forEach((ld, i) => add('DC_LOAD', ld, i, positivePower(ld.p_mw, ld.p_rated_mw) * numberOr(ld.scaling, 1), 1000 + numberOr(ld.index, i + 1)));
+      } else {
+        (dc.buses || []).forEach((bus, i) => add('DC_BUS', bus, i, numberOr(bus.pd_mw, 0), 2000 + numberOr(bus.index, i + 1)));
+      }
+      if (!entries.length || !Array.isArray(loadSeries) || !loadSeries.length) return { profiles: [], map: [] };
+      const shapes = entries.map(e => baseDeterministicProfile(loadSeries.length, e.seed));
+      const componentMw = entries.map(() => loadSeries.map(() => 0));
+      loadSeries.forEach((raw, t) => {
+        const denom = entries.reduce((sum, e, i) => sum + e.base * Math.max(0.01, Number(shapes[i]?.[t] || 1)), 0);
+        entries.forEach((e, i) => {
+          componentMw[i][t] = denom > 1e-9 ? Math.max(0, Number(raw || 0)) * e.base * Math.max(0.01, Number(shapes[i]?.[t] || 1)) / denom : 0;
+        });
+      });
+      const profiles = [];
+      const map = [];
+      entries.forEach((e, i) => {
+        const profileId = firstProfileId + i;
+        profiles.push({ id: profileId, name: `scenario_${e.kind.toLowerCase()}_${e.item?.index ?? e.item?.bus ?? e.position + 1}_scale`, values: componentMw[i].map(v => v / e.base) });
+        const row = { kind: e.kind, profile_id: profileId };
+        if (e.kind.endsWith('LOAD')) {
+          row.load_position = e.position;
+          row.load_index = Number(e.item?.index);
+          row.bus = Number(e.item?.bus);
+        } else {
+          row.bus = Number(e.item?.index);
+        }
+        map.push(row);
+      });
+      return { profiles, map };
     }
 
     function buildScenarioTimeSeries(candidate, baseSystem, family) {
       const profiles = candidate?.time_series?.profiles || [];
       if (!Array.isArray(profiles) || profiles.length === 0) return null;
-      const rawProfiles = profiles.map((p, i) => ({
-        id: Number.isInteger(p.id) ? p.id : i,
-        name: p.name || `profile_${i}`,
-        values: Array.isArray(p.values) ? p.values.map(v => Number(v || 0)) : [],
-      }));
-      const load = profileValuesFromCandidate(candidate, 'total_load_mw');
-      const pv = profileValuesFromCandidate(candidate, 'pv_mw');
-      const wind = profileValuesFromCandidate(candidate, 'wind_mw');
-      const renewable = profileValuesFromCandidate(candidate, 'total_renewable_mw');
+      const load = scenarioCandidateProfileValues(candidate, 'total_load_mw');
+      const pv = scenarioCandidateProfileValues(candidate, 'pv_mw');
+      const wind = scenarioCandidateProfileValues(candidate, 'wind_mw');
+      const renewable = scenarioCandidateProfileValues(candidate, 'total_renewable_mw');
       const totals = scenarioBaseTotals(baseSystem);
       const calcProfiles = [];
       const warnings = [];
+      const componentLoadProfiles = (family === 'resilience' && load.length)
+        ? buildComponentLoadProfiles(load, baseSystem, 10)
+        : { profiles: [], map: [] };
       if (load.length) {
         calcProfiles.push({ id: 0, name: 'scenario_load_scale', values: makeScaleProfile(load, totals.load, 1.0) });
+        calcProfiles.push(...componentLoadProfiles.profiles);
         if (totals.load <= 1e-9) warnings.push('Base load is zero; load scale profile uses fallback values.');
       }
-      if (wind.length) {
+      const hasWindCapacity = totals.wind > 1e-9;
+      const hasPvCapacity = totals.pv > 1e-9;
+      if (wind.length && hasWindCapacity) {
         calcProfiles.push({ id: 1, name: 'scenario_wind_scale', values: makeScaleProfile(wind, totals.wind, 1.0) });
-        if (totals.wind <= 1e-9 && wind.some(v => Math.abs(v) > 1e-9)) warnings.push('Base wind capacity is zero; wind scale profile cannot exactly replay raw MW values.');
+      } else if (wind.length && wind.some(v => Math.abs(v) > 1e-9)) {
+        warnings.push('Base wind capacity is zero; wind scale profile is omitted.');
       }
-      if (pv.length) {
+      if (pv.length && hasPvCapacity) {
         calcProfiles.push({ id: 2, name: 'scenario_pv_scale', values: makeScaleProfile(pv, totals.pv, 1.0) });
-        if (totals.pv <= 1e-9 && pv.some(v => Math.abs(v) > 1e-9)) warnings.push('Base PV capacity is zero; PV scale profile cannot exactly replay raw MW values.');
+      } else if (pv.length && pv.some(v => Math.abs(v) > 1e-9)) {
+        warnings.push('Base PV capacity is zero; PV scale profile is omitted.');
       }
       if (renewable.length) {
         calcProfiles.push({ id: 3, name: 'scenario_renewable_scale', values: makeScaleProfile(renewable, totals.pv + totals.wind, 1.0) });
@@ -5066,25 +5639,27 @@ const App = (() => {
         num_steps: candidate?.time_series?.num_steps || calcProfiles[0].values.length,
         step_duration_hr: candidate?.time_series?.step_duration_hr || 1.0,
         profiles: calcProfiles,
-        raw_profiles: rawProfiles,
         binding: {
-          assign_all_loads_to: load.length ? 0 : -1,
-          assign_all_pv_to: pv.length ? 2 : -1,
+          assign_all_loads_to: componentLoadProfiles.map.length ? -1 : (load.length ? 0 : -1),
+          assign_all_pv_to: pv.length && hasPvCapacity ? 2 : -1,
+          load_profile_map: componentLoadProfiles.map,
           resilience_load_profile_id: load.length ? 0 : -1,
-          resilience_renewable_profile_id: renewable.length ? 3 : (pv.length ? 2 : (wind.length ? 1 : -1)),
+          resilience_wind_profile_id: wind.length && hasWindCapacity ? 1 : -1,
+          resilience_pv_profile_id: pv.length && hasPvCapacity ? 2 : -1,
+          resilience_renewable_profile_id: renewable.length ? 3 : (pv.length && hasPvCapacity ? 2 : (wind.length && hasWindCapacity ? 1 : -1)),
         },
         normalization: {
           base_load_mw: totals.load,
           base_pv_mw: totals.pv,
           base_wind_mw: totals.wind,
-          profile_semantics: 'profiles are dimensionless multipliers for /api/session/set_ts_config; raw_profiles preserve generated MW/SOC series',
+          profile_semantics: 'profiles are dimensionless multipliers for /api/session/set_ts_config',
         },
         warnings,
       };
     }
 
     function applyScenarioInitialStorageState(systemJson, candidate) {
-      const soc = profileValuesFromCandidate(candidate, 'storage_soc')[0];
+      const soc = scenarioCandidateProfileValues(candidate, 'storage_soc')[0];
       if (!Number.isFinite(soc)) return;
       const update = (items) => (items || []).forEach(st => {
         if (st && Number(st.e_rated_mwh || 0) > 0) st.soc_init = Math.max(0, Math.min(1, soc));
@@ -5162,10 +5737,27 @@ const App = (() => {
     }
 
     function extractScenarioProfileValues(ts, profileIdOrName) {
-      if (profileIdOrName === undefined || profileIdOrName === null || profileIdOrName === '') return [];
-      const profiles = Array.isArray(ts?.profiles) ? ts.profiles : [];
-      const matched = profiles.find(profile => profile?.id === profileIdOrName || String(profile?.id) === String(profileIdOrName) || profile?.name === profileIdOrName);
-      return Array.isArray(matched?.values) ? matched.values : [];
+      return extractGeneratedScenarioProfileValues(ts, profileIdOrName);
+    }
+
+    function getResilienceScenarioProfiles() {
+      const ts = getImportedGeneratedScenarioTimeSeries('resilience');
+      if (!ts) return {};
+      const finiteProfile = (values) => Array.isArray(values)
+        ? values.map(Number).filter(Number.isFinite).map(v => Math.max(0, v))
+        : [];
+      const loadProfileMap = Array.isArray(ts.binding?.load_profile_map) ? ts.binding.load_profile_map : [];
+      let loadProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_load_profile_id));
+      if (!loadProfile.length) loadProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_load_scale'));
+      let renewableProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_renewable_profile_id));
+      if (!renewableProfile.length) renewableProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_renewable_scale'));
+      let pvProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_pv_profile_id));
+      if (!pvProfile.length) pvProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_pv_scale'));
+      if (!pvProfile.length) pvProfile = renewableProfile;
+      let windProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_wind_profile_id));
+      if (!windProfile.length) windProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_wind_scale'));
+      if (!windProfile.length) windProfile = renewableProfile;
+      return { loadProfile, renewableProfile, pvProfile, windProfile, loadProfileMap, tsProfiles: ts.profiles || [] };
     }
 
     function buildGeneratedScenarioCase(baseSystem, family, cluster, groupContext = null) {
@@ -5341,6 +5933,7 @@ const App = (() => {
       setVal('resDcFaultStartHour', dc.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
       setVal('resAcRepairDuration', ac.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(','));
       setVal('resDcRepairDuration', dc.map(f => Number.isFinite(f.repair) ? f.repair : 8).join(','));
+      markResilienceFaultBranches();
     }
 
     async function importGeneratedScenarioForModule(file, targetFamily) {
@@ -5366,9 +5959,7 @@ const App = (() => {
         }
         if (!targetUsesScenarioTs) {
           const regCb = document.getElementById('regUseScenarioTimeSeries');
-          const resCb = document.getElementById('resUseScenarioTimeSeries');
           if (regCb) regCb.checked = false;
-          if (resCb) resCb.checked = false;
         }
         if (target === 'regular' || family === 'regular') {
           const cb = document.getElementById('regUseScenarioTimeSeries');
@@ -5378,8 +5969,8 @@ const App = (() => {
         if (family === 'resilience' || targetFamily === 'resilience') {
           fillResilienceInputsFromScenario(caseJson);
           const cb = document.getElementById('resUseScenarioTimeSeries');
-          if (cb) cb.checked = restoredTs;
-          if (!restoredTs) log('导入的弹性生成场景不含可用时序，已保持“使用场景时序”未勾选', 'warn');
+          if (cb) cb.checked = true;
+          if (!restoredTs) log('导入的弹性生成场景不含可用时序；弹性评估仍将按 48h 默认时域运行', 'warn');
         }
         if (family === 'reliability' || targetFamily === 'reliability') {
           const cont = caseJson?._generated_scenario?.contingency;
@@ -5420,6 +6011,44 @@ const App = (() => {
         yaxis: { gridcolor: '#d0d7de', rangemode: 'tozero' },
       };
 
+      const featureNumber = (features, key) => {
+        const v = Number(features?.[key]);
+        return Number.isFinite(v) ? v : 0;
+      };
+      const hasRenewableFeature = (points) => {
+        const warnedNoRen = (data.warnings || []).some(w => /no renewable|zero renewable/i.test(String(w || '')));
+        if (warnedNoRen) return false;
+        return (points || []).some(p => Math.abs(Number(p.renewable || 0)) > 1e-6
+          || Math.abs(featureNumber(p.features, 'pv_sum')) > 1e-6
+          || Math.abs(featureNumber(p.features, 'wind_sum')) > 1e-6
+          || Math.abs(featureNumber(p.features, 'other_renewable_sum')) > 1e-6);
+      };
+      const plotCoverage = (divId, allPoints, selectedPoints, labels) => {
+        const all = allPoints || [];
+        const selected = selectedPoints || [];
+        const hasRen = hasRenewableFeature(all.concat(selected));
+        const xKey = 'load';
+        const yKey = hasRen ? 'renewable' : 'peakLoad';
+        const xTitle = '负荷特征';
+        const yTitle = hasRen ? '新能源出力特征' : '峰值负荷';
+        const title = hasRen ? labels.renewableTitle : labels.loadOnlyTitle;
+        const hover = (p, picked) => `${escapeHtml(p.group || p.name || p.id || '')}<br>${picked ? `簇${p.cluster ?? ''}<br>` : ''}负荷总量 ${Number(p.load || 0).toFixed(2)}<br>峰值负荷 ${Number(p.peakLoad || 0).toFixed(2)}<br>最大爬坡 ${Number(p.maxRamp || 0).toFixed(2)}${hasRen ? `<br>新能源 ${Number(p.renewable || 0).toFixed(2)}` : '<br>当前算例无新能源，自动改用峰值负荷作纵轴'}${p.probability ? `<br>簇概率 ${(p.probability * 100).toFixed(2)}%` : ''}`;
+        Plotly.newPlot(divId, [
+          {
+            x: all.map(p => p[xKey]), y: all.map(p => p[yKey]), mode: 'markers', type: 'scatter',
+            name: labels.allName,
+            text: all.map(p => hover(p, false)), hovertemplate: '%{text}<extra></extra>',
+            marker: { color: '#60a5fa', size: 7, opacity: 0.38, symbol: 'circle' },
+          },
+          {
+            x: selected.map(p => p[xKey]), y: selected.map(p => p[yKey]), mode: 'markers', type: 'scatter',
+            name: '聚类选中代表',
+            text: selected.map(p => hover(p, true)), hovertemplate: '%{text}<extra></extra>',
+            marker: { symbol: 'circle-open', color: '#dc2626', size: 14, line: { color: '#dc2626', width: 3 } },
+          },
+        ], { ...theme, title, xaxis: { title: xTitle, autorange: true }, yaxis: { title: yTitle, autorange: true, rangemode: hasRen ? undefined : 'tozero' } }, { responsive: true });
+      };
+
       const regularClusters = data.regular?.clusters || [];
       const regularSamples = data.regular?.audit?.coverage_samples || [];
       const regularSelected = [];
@@ -5431,6 +6060,7 @@ const App = (() => {
           cluster: cluster.cluster_id,
           probability: cluster.probability || 0,
           peakLoad: numericFeature(cluster, 'peak_load'),
+          maxRamp: numericFeature(cluster, 'max_net_ramp'),
           renewable: numericFeature(cluster, 'renewable_sum'),
           load: numericFeature(cluster, 'load_sum'),
           features: cluster.representative?.features || {},
@@ -5442,30 +6072,17 @@ const App = (() => {
           ...parsed,
           group: `${parsed.ssp}-${parsed.year}`,
           load: Number(s.features?.load_sum || 0),
+          peakLoad: Number(s.features?.peak_load || 0),
+          maxRamp: Number(s.features?.max_net_ramp || 0),
           renewable: Number(s.features?.renewable_sum || 0),
           features: s.features || {},
         };
       });
-      Plotly.newPlot('scenarioChartRegular', [
-        {
-          x: regularAll.map(p => p.load),
-          y: regularAll.map(p => p.renewable),
-          mode: 'markers',
-          type: 'scatter',
-          name: '全部候选样本',
-          marker: { color: '#60a5fa', size: 6, opacity: 0.35, symbol: 'circle' },
-          text: regularAll.map(p => `${p.group}<br>负荷特征 ${p.load.toFixed(2)}<br>新能源特征 ${p.renewable.toFixed(2)}`),
-        },
-        {
-          x: regularSelected.map(p => p.load),
-          y: regularSelected.map(p => p.renewable),
-          mode: 'markers',
-          type: 'scatter',
-          name: '聚类选中代表',
-          text: regularSelected.map(p => `${p.group}<br>簇${p.cluster}<br>负荷特征 ${p.load.toFixed(2)}<br>新能源特征 ${p.renewable.toFixed(2)}`),
-          marker: { symbol: 'circle-open', color: '#dc2626', size: 13, line: { color: '#dc2626', width: 3 } },
-        },
-      ], { ...theme, title: '常规场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）', xaxis: { title: '负荷特征', autorange: true }, yaxis: { title: '新能源出力特征', autorange: true } }, { responsive: true });
+      plotCoverage('scenarioChartRegular', regularAll, regularSelected, {
+        allName: '全部候选样本',
+        renewableTitle: '常规场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
+        loadOnlyTitle: '常规场景负荷聚类覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
+      });
 
       const relGroups = data.reliability?.contingencies || [];
       const relSamples = data.reliability?.audit?.coverage_samples || [];
@@ -5477,6 +6094,8 @@ const App = (() => {
             index: index + 1,
             probability: c.probability || 0,
             load: numericFeature(c, 'load_sum'),
+            peakLoad: numericFeature(c, 'peak_load') || numericFeature(c, 'load_mw'),
+            maxRamp: numericFeature(c, 'max_net_ramp'),
             renewable: numericFeature(c, 'renewable_sum'),
             faultOrdinal: Number(c.representative?.features?.contingency_ordinal || index + 1),
             name: g.contingency?.display_name || g.contingency?.id || '',
@@ -5487,31 +6106,18 @@ const App = (() => {
       const relAll = relSamples.map(s => ({
         type: s.contingency?.type || 'Unknown',
         faultOrdinal: Number(s.features?.contingency_ordinal || 0),
-        load: Number(s.features?.load_sum || 0),
-        renewable: Number(s.features?.renewable_sum || 0),
+        load: Number(s.features?.load_sum || s.features?.load_mw || 0),
+        peakLoad: Number(s.features?.peak_load || s.features?.load_mw || 0),
+        maxRamp: Number(s.features?.max_net_ramp || 0),
+        renewable: Number(s.features?.renewable_sum || s.features?.renewable_mw || 0),
         name: s.contingency?.display_name || s.contingency?.id || s.id || '',
         features: s.features || {},
       }));
-      Plotly.newPlot('scenarioChartReliability', [
-        {
-          x: relAll.map(p => p.load),
-          y: relAll.map(p => p.renewable),
-          mode: 'markers',
-          type: 'scatter',
-          name: '全部N-1候选样本',
-          text: relAll.map(p => `${p.name}<br>${p.type}<br>负荷 ${p.load.toFixed(3)} / 新能源 ${p.renewable.toFixed(3)}`),
-          marker: { color: '#64748b', size: 6, opacity: 0.30, symbol: 'circle' },
-        },
-        {
-          x: relSelected.map(p => p.load),
-          y: relSelected.map(p => p.renewable),
-          mode: 'markers',
-          type: 'scatter',
-          name: '聚类选中代表',
-          text: relSelected.map(p => `${p.name}<br>${p.type}<br>负荷 ${p.load.toFixed(3)} / 新能源 ${p.renewable.toFixed(3)}<br>簇概率 ${(p.probability * 100).toFixed(2)}%`),
-          marker: { symbol: 'circle-open', color: '#dc2626', size: 13, line: { color: '#dc2626', width: 3 } },
-        },
-      ], { ...theme, title: '可靠性场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）', xaxis: { title: '负荷特征', autorange: true }, yaxis: { title: '新能源出力特征', autorange: true } }, { responsive: true });
+      plotCoverage('scenarioChartReliability', relAll, relSelected, {
+        allName: '全部N-1候选样本',
+        renewableTitle: '可靠性场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
+        loadOnlyTitle: '可靠性场景负荷扰动覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
+      });
 
       const resGroups = data.resilience?.intensities || [];
       const resSamples = data.resilience?.audit?.coverage_samples || [];
@@ -5570,23 +6176,24 @@ const App = (() => {
       const relRepresentatives = relGroups.flatMap(g => (g.clusters || []).map(c => c.representative).filter(Boolean));
       const firstRegular = regularClusters[0]?.representative;
       if (firstRegular) {
-        const load = profileValuesFromCandidate(firstRegular, 'total_load_mw').slice(0, 168);
-        const pv = profileValuesFromCandidate(firstRegular, 'pv_mw').slice(0, 168);
-        const wind = profileValuesFromCandidate(firstRegular, 'wind_mw').slice(0, 168);
+        const load = scenarioCandidateProfileValues(firstRegular, 'total_load_mw').slice(0, 168);
+        const pv = scenarioCandidateProfileValues(firstRegular, 'pv_mw').slice(0, 168);
+        const wind = scenarioCandidateProfileValues(firstRegular, 'wind_mw').slice(0, 168);
         const x = load.map((_, i) => i);
-        const traces = [
-          { x, y: load, type: 'scatter', mode: 'lines', name: '负荷 MW', line: { color: '#2563eb' } },
-          { x, y: pv, type: 'scatter', mode: 'lines', name: '光伏 MW', line: { color: '#f59e0b' } },
-          { x, y: wind, type: 'scatter', mode: 'lines', name: '风电 MW', line: { color: '#16a34a' } },
-        ];
+        const hasRenCurve = pv.some(v => Math.abs(v) > 1e-6) || wind.some(v => Math.abs(v) > 1e-6);
+        const traces = [{ x, y: load, type: 'scatter', mode: 'lines', name: '负荷 MW', line: { color: '#2563eb', width: 2 } }];
+        if (hasRenCurve) {
+          traces.push({ x, y: pv, type: 'scatter', mode: 'lines', name: '光伏 MW', line: { color: '#f59e0b' } });
+          traces.push({ x, y: wind, type: 'scatter', mode: 'lines', name: '风电 MW', line: { color: '#16a34a' } });
+        }
         Plotly.newPlot('scenarioChartRegularCurves', traces,
-          { ...theme, title: '常规代表场景风/光/负荷曲线（前168小时）', xaxis: { title: '小时' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
+          { ...theme, title: hasRenCurve ? '常规代表场景风/光/负荷曲线（前168小时）' : '常规代表场景负荷曲线（前168小时，当前算例无新能源）', xaxis: { title: '小时' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
       }
 
       const firstRel = relGroups.find(g => (g.clusters || []).length)?.clusters?.[0]?.representative;
       if (firstRel) {
         const names = ['负荷', '光伏', '风电'];
-        const values = ['total_load_mw', 'pv_mw', 'wind_mw'].map(name => profileValuesFromCandidate(firstRel, name)[0] || 0);
+        const values = ['total_load_mw', 'pv_mw', 'wind_mw'].map(name => scenarioCandidateProfileValues(firstRel, name)[0] || 0);
         Plotly.newPlot('scenarioChartReliabilityBars', [{ x: names, y: values, type: 'bar', marker: { color: ['#2563eb', '#f59e0b', '#16a34a'] } }],
           { ...theme, title: '可靠性代表场景风/光/负荷（N-1 单时段）', xaxis: { title: '变量' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
       }
@@ -5595,9 +6202,9 @@ const App = (() => {
       const firstFaultedResCluster = allResClusters.find(c => ((c.representative?.resilience_event || {}).faults || []).length > 0);
       const firstRes = (firstFaultedResCluster || allResClusters[0])?.representative;
       if (firstRes) {
-        const load = profileValuesFromCandidate(firstRes, 'total_load_mw');
-        const pv = profileValuesFromCandidate(firstRes, 'pv_mw');
-        const wind = profileValuesFromCandidate(firstRes, 'wind_mw');
+        const load = scenarioCandidateProfileValues(firstRes, 'total_load_mw');
+        const pv = scenarioCandidateProfileValues(firstRes, 'pv_mw');
+        const wind = scenarioCandidateProfileValues(firstRes, 'wind_mw');
         const x = load.map((_, i) => i);
         const traces = [
           { x, y: load, type: 'scatter', mode: 'lines', name: '负荷 MW', line: { color: '#2563eb' } },
@@ -5651,6 +6258,8 @@ const App = (() => {
       const summaryDiv = document.getElementById('resultsSummary');
       if (!div || !summaryDiv) return;
       renderScenarioGenerationCharts(data);
+      renderScenarioCurveSelectors(data);
+      renderComponentCurveTargets('scenario');
       const summary = data.summary || {};
       const regularAudit = data.regular?.audit || {};
       const regularPerGroup = regularAudit.requested_cluster_count_per_ssp_year ?? '-';
@@ -5689,8 +6298,6 @@ const App = (() => {
       })).join('');
       div.innerHTML = `
         ${warningHtml}
-        <p class="empty-hint">常规场景按 SSP×年份分别聚类；若当前算例含 AC renewable/PV/static PV/DC PV 等新能源资源，会同时扰动负荷与新能源出力。内置 dist33_microgrid_der、comprehensive_hybrid_acdc 均包含新能源/DER。</p>
-        <p class="empty-hint">若当前算例含储能，场景生成仍会在导出的 JSON 中保存场景开始时实际 SOC 与对应电量，但结果图和表格仅展示负荷、新能源与故障信息。</p>
         <h4>常规全年代表场景（8760h）</h4>
         <table><thead><tr><th>簇</th><th>代表场景</th><th>概率</th><th>成员数</th><th>负荷总量/峰值</th><th>新能源总量/峰值</th></tr></thead><tbody>${regularRows || '<tr><td colspan="6" style="color:#888">未生成常规场景</td></tr>'}</tbody></table>
         <h4>可靠性 N-1 单断面场景</h4>
@@ -5718,6 +6325,7 @@ const App = (() => {
       const data = await apiPost('/api/session/generate_scenarios', payload);
       if (!data) { setStatus('场景生成失败', 'error'); return; }
       _lastScenarioGenerationData = data;
+      renderComponentCurveTargets('scenario');
       setActiveResultGroup('scenarioGeneration');
       document.getElementById('resultsEmpty').style.display = 'none';
       document.getElementById('resultsContent').style.display = 'block';
@@ -5736,8 +6344,8 @@ const App = (() => {
     function exportGeneratedScenarioFamily(family, label) {
       try {
         const bundle = buildGeneratedScenarioBundle(family);
-        downloadJsonFile(`${family}_generated_scenarios_${tsTagForFilename()}.json`, bundle);
-        log(`${label}可导入场景已生成：${bundle.case_count} 个代表场景`, 'success');
+        const ok = downloadJsonFile(`${family}_generated_scenarios_${tsTagForFilename()}.json`, bundle, { compact: family === 'regular' });
+        if (ok) log(`${label}可导入场景已生成：${bundle.case_count} 个代表场景`, 'success');
       } catch (err) {
         log(`${label}场景导出失败：${err.message || err}`, 'warn');
       }
@@ -6063,7 +6671,16 @@ const App = (() => {
       const compEl = ev.target.closest('[data-comp-id]');
       if (compEl && compEl.dataset.compId !== '') {
         const cid = parseInt(compEl.dataset.compId, 10);
-        if (Number.isInteger(cid) && Canvas.panToComponent) { Canvas.panToComponent(cid); return; }
+        if (Number.isInteger(cid) && Canvas.panToComponent) {
+          Canvas.panToComponent(cid);
+          const activeGroup = document.getElementById('resultsContent')?.dataset.activeGroup || '';
+          const explicitContext = compEl.dataset.curveContext;
+          if (explicitContext || activeGroup === 'timeSeries' || activeGroup === 'scenarioGeneration' || activeGroup === 'resilience') {
+            const context = explicitContext || (activeGroup === 'timeSeries' ? 'timeSeries' : (activeGroup === 'resilience' ? 'resilience' : 'scenario'));
+            renderSelectedComponentCurve(cid, context);
+            return;
+          }
+        }
       }
       const busEl = ev.target.closest('[data-bus]');
       if (busEl && busEl.dataset.bus !== '') {

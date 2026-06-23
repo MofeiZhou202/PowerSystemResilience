@@ -361,7 +361,14 @@ std::vector<double> synthesize_base_wind(double base, int steps) {
     const double diurnal = 0.95 + 0.05 * std::sin((static_cast<double>(hour) - 2.0) / 24.0 * 2.0 * kPi);
     const double synoptic = 1.0 + 0.12 * std::sin((static_cast<double>(day) + 20.0) / 9.0 * 2.0 * kPi);
     const double season = steps >= 8760 ? 0.82 + 0.18 * std::cos((static_cast<double>(day) - 25.0) / 365.0 * 2.0 * kPi) : 1.0;
-    values[static_cast<std::size_t>(t)] = base * clamp_value(diurnal * synoptic * season, 0.05, 1.20);
+    const double calm_weather = steps >= 8760
+        ? clamp_value(0.55
+                          + 0.35 * std::sin((static_cast<double>(day) + 3.0) / 6.5 * 2.0 * kPi)
+                          + 0.25 * std::sin((static_cast<double>(day) + 11.0) / 21.0 * 2.0 * kPi),
+                      0.0, 1.25)
+        : 1.0;
+    const double availability = diurnal * synoptic * season * calm_weather;
+    values[static_cast<std::size_t>(t)] = availability < 0.08 ? 0.0 : base * clamp_value(availability, 0.0, 1.20);
   }
   return values;
 }

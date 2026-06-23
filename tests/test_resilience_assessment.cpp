@@ -19,6 +19,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -26,7 +27,30 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
+
+#ifndef STDOUT_FILENO
+#define STDOUT_FILENO 1
+#endif
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+
+#ifdef _WIN32
+#define HACDCPF_DUP _dup
+#define HACDCPF_DUP2 _dup2
+#define HACDCPF_CLOSE _close
+#define HACDCPF_FILENO _fileno
+#else
+#define HACDCPF_DUP dup
+#define HACDCPF_DUP2 dup2
+#define HACDCPF_CLOSE close
+#define HACDCPF_FILENO fileno
+#endif
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
@@ -46,13 +70,13 @@ public:
       throw std::runtime_error("failed to create temporary stream capture files");
     }
     flush_all();
-    stdout_saved_ = ::dup(STDOUT_FILENO);
-    stderr_saved_ = ::dup(STDERR_FILENO);
+    stdout_saved_ = HACDCPF_DUP(STDOUT_FILENO);
+    stderr_saved_ = HACDCPF_DUP(STDERR_FILENO);
     if (stdout_saved_ < 0 || stderr_saved_ < 0) {
       throw std::runtime_error("failed to duplicate stdout/stderr");
     }
-    if (::dup2(::fileno(stdout_file_), STDOUT_FILENO) < 0 ||
-        ::dup2(::fileno(stderr_file_), STDERR_FILENO) < 0) {
+    if (HACDCPF_DUP2(HACDCPF_FILENO(stdout_file_), STDOUT_FILENO) < 0 ||
+        HACDCPF_DUP2(HACDCPF_FILENO(stderr_file_), STDERR_FILENO) < 0) {
       throw std::runtime_error("failed to redirect stdout/stderr");
     }
     active_ = true;
@@ -70,10 +94,10 @@ public:
   void restore() {
     if (!active_) return;
     flush_all();
-    ::dup2(stdout_saved_, STDOUT_FILENO);
-    ::dup2(stderr_saved_, STDERR_FILENO);
-    ::close(stdout_saved_);
-    ::close(stderr_saved_);
+    HACDCPF_DUP2(stdout_saved_, STDOUT_FILENO);
+    HACDCPF_DUP2(stderr_saved_, STDERR_FILENO);
+    HACDCPF_CLOSE(stdout_saved_);
+    HACDCPF_CLOSE(stderr_saved_);
     stdout_saved_ = -1;
     stderr_saved_ = -1;
     active_ = false;
@@ -184,6 +208,36 @@ static HybridPowerSystem make_single_bus_shortage() {
   return sys;
 }
 
+static HybridPowerSystem make_hybrid_no_switch_bus_load_case() {
+  HybridPowerSystem sys;
+
+  ACBus ac1, ac2, ac3;
+  ac1.index = 1; ac1.bus_type = BusType::SLACK; ac1.vm_pu = 1.0; ac1.in_service = true;
+  ac2.index = 2; ac2.bus_type = BusType::PQ; ac2.pd_mw = 1.2; ac2.in_service = true;
+  ac3.index = 3; ac3.bus_type = BusType::PQ; ac3.pd_mw = 0.8; ac3.in_service = true;
+  sys.ac.buses = {ac1, ac2, ac3};
+
+  ACBranch acb1, acb2;
+  acb1.index = 1; acb1.from_bus = 1; acb1.to_bus = 2; acb1.in_service = true; acb1.rate_a_mva = 10.0; acb1.mttr_hr = 6.0;
+  acb2.index = 2; acb2.from_bus = 2; acb2.to_bus = 3; acb2.in_service = true; acb2.rate_a_mva = 10.0; acb2.mttr_hr = 6.0;
+  sys.ac.branches = {acb1, acb2};
+
+  DCBus dc1, dc2;
+  dc1.index = 1; dc1.bus_type = DCBusType::DC_P; dc1.in_service = true;
+  dc2.index = 2; dc2.bus_type = DCBusType::DC_P; dc2.pd_mw = 0.4; dc2.in_service = true;
+  sys.dc.buses = {dc1, dc2};
+
+  DCBranch dcb;
+  dcb.index = 1; dcb.from_bus = 1; dcb.to_bus = 2; dcb.in_service = true; dcb.rate_a_mva = 5.0; dcb.mttr_hours = 6.0;
+  sys.dc.branches = {dcb};
+
+  VSCConverter vsc;
+  vsc.index = 1; vsc.bus_ac = 2; vsc.bus_dc = 1; vsc.in_service = true; vsc.pmax_mw = 5.0;
+  sys.vsc_converters = {vsc};
+
+  return sys;
+}
+
 // ── Test cases ────────────────────────────────────────────────────────────────
 
 TEST_CASE("Resilience: empty system returns error", "[resilience]") {
@@ -273,6 +327,173 @@ TEST_CASE("Resilience: fault repair with reconfiguration restores load", "[resil
   }
 }
 
+TEST_CASE("Resilience stage MILP: no-switch bus-load case uses virtual branch breakers", "[resilience]") {
+  auto sys = make_hybrid_no_switch_bus_load_case();
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = false;
+  opts.default_fault_count = 0;
+  opts.require_switch_for_nonfault_branch_operation = true;
+  opts.allow_branch_operation_without_switch = false;
+
+  DistributionResilienceFault f;
+  f.branch_kind = ResilienceBranchKind::AC;
+  f.branch_index = 1;
+  f.ac_branch_index = 1;
+  f.outage_start_hr = 1.0;
+  f.repair_duration_hr = 2.0;
+  opts.faults = {f};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  CHECK(r.model == DistributionResilienceModel::RAStyleStageMILP);
+  REQUIRE(r.steps.size() >= 2);
+  CHECK(r.model_stats.formulation_notes.find("virtual operable AC/DC branch breakers") != std::string::npos);
+
+  for (const auto& step : r.steps) {
+    REQUIRE_FALSE(step.bus_supply_index.empty());
+    REQUIRE(step.bus_supply_demand_mw.size() == step.bus_supply_index.size());
+    CHECK(std::any_of(step.bus_supply_demand_mw.begin(), step.bus_supply_demand_mw.end(),
+                      [](double demand) { return demand > 1e-9; }));
+  }
+  const auto& isolation_step = r.steps[1];
+  REQUIRE(isolation_step.disaster_stage == "DisasterIsolation");
+  CHECK(isolation_step.active_faults == 1);
+  CHECK(isolation_step.switch_actions == 1);
+  CHECK(isolation_step.isolation_switch_actions == 1);
+  CHECK(isolation_step.open_ac_branch_ids == std::vector<int>{1});
+  CHECK(isolation_step.open_switch_ids == std::vector<int>{-100001});
+}
+
+TEST_CASE("Resilience stage MILP: greedy repair restores repaired line", "[resilience]") {
+  auto sys = make_radial_3bus();
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 6;
+  opts.time_step_hr = 1.0;
+  opts.allow_reconfiguration = true;
+  opts.allow_mess_dispatch = false;
+  opts.default_fault_count = 0;
+
+  DistributionResilienceFault f;
+  f.ac_branch_index = 1;
+  f.outage_start_hr = 0.0;
+  f.repair_duration_hr = 3.0;
+  opts.faults = {f};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  REQUIRE(r.steps.size() == 6);
+  REQUIRE(r.fault_sequence.size() == 1);
+
+  CHECK(r.fault_sequence[0].repair_hr == Approx(3.0).margin(1e-6));
+  CHECK(r.steps[0].restoration_ratio < 1.0);
+  CHECK(r.steps[3].active_faults == 0);
+  CHECK(r.steps[3].repaired_faults == 1);
+  for (int i = 3; i < 6; ++i) {
+    CHECK(r.steps[static_cast<size_t>(i)].disaster_stage == "Normal");
+    CHECK(r.steps[static_cast<size_t>(i)].restoration_ratio == Approx(1.0).margin(1e-6));
+  }
+}
+
+TEST_CASE("Resilience stage MILP: custom scenario profiles are sampled", "[resilience]") {
+  auto sys = make_radial_3bus();
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 4;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.allow_mess_dispatch = false;
+  opts.load_profile = {0.25, 0.50, 0.75, 1.00};
+  opts.renewable_profile = {0.10, 0.20, 0.30, 0.40};
+  opts.pv_profile = {0.90, 0.80, 0.70, 0.60};
+  opts.wind_profile = {0.40, 0.50, 0.60, 0.70};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  REQUIRE(r.steps.size() == 4);
+  for (size_t i = 0; i < r.steps.size(); ++i) {
+    CHECK(r.steps[i].load_multiplier == Approx(opts.load_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].res_multiplier == Approx(opts.renewable_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].pv_multiplier == Approx(opts.pv_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].wind_multiplier == Approx(opts.wind_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].pv_multiplier != Approx(r.steps[i].wind_multiplier).margin(1e-9));
+  }
+}
+
+TEST_CASE("Resilience stage MILP: split profiles fall back to aggregate renewable profile", "[resilience]") {
+  auto sys = make_radial_3bus();
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 3;
+  opts.time_step_hr = 1.0;
+  opts.default_fault_count = 0;
+  opts.allow_mess_dispatch = false;
+  opts.renewable_profile = {0.15, 0.25, 0.35};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  REQUIRE(r.steps.size() == 3);
+  for (size_t i = 0; i < r.steps.size(); ++i) {
+    CHECK(r.steps[i].res_multiplier == Approx(opts.renewable_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].pv_multiplier == Approx(opts.renewable_profile[i]).margin(1e-9));
+    CHECK(r.steps[i].wind_multiplier == Approx(opts.renewable_profile[i]).margin(1e-9));
+  }
+}
+
+TEST_CASE("Resilience stage MILP: final repair restores initial AC tie state", "[resilience]") {
+  auto sys = make_ring_4bus();
+  Switch sw;
+  sw.index = 1;
+  sw.name = "Tie 4";
+  sw.bus_from = 4;
+  sw.bus_to = 1;
+  sw.in_service = true;
+  sw.closed = false;
+  sw.is_remote = true;
+  sys.ac.switches = {sw};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 5;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = false;
+  opts.default_fault_count = 0;
+  opts.require_switch_for_nonfault_branch_operation = true;
+  opts.allow_branch_operation_without_switch = false;
+  opts.allow_stage2_close_ties = true;
+
+  DistributionResilienceFault f;
+  f.ac_branch_index = 1;
+  f.outage_start_hr = 0.0;
+  f.repair_duration_hr = 3.0;
+  opts.faults = {f};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  CHECK(r.model_stats.formulation_notes.find("virtual operable AC/DC branch breakers") == std::string::npos);
+  REQUIRE(r.steps.size() == 5);
+  REQUIRE(r.steps[3].disaster_stage == "Normal");
+  CHECK(r.steps[3].active_faults == 0);
+  CHECK(r.steps[3].repaired_faults == 1);
+  CHECK(r.steps[3].closed_tie_branch_ids.empty());
+  CHECK(std::find(r.steps[3].open_ac_branch_ids.begin(), r.steps[3].open_ac_branch_ids.end(), 4) != r.steps[3].open_ac_branch_ids.end());
+  CHECK(std::find(r.steps[3].open_switch_ids.begin(), r.steps[3].open_switch_ids.end(), 1) != r.steps[3].open_switch_ids.end());
+  CHECK(r.steps[3].restoration_ratio == Approx(1.0).margin(1e-6));
+}
+
 TEST_CASE("Resilience: reconfiguration closes tie switch to restore island", "[resilience]") {
   auto sys = make_ring_4bus();
   DistributionResilienceOptions opts;
@@ -338,6 +559,55 @@ TEST_CASE("Resilience: MESS dispatch reduces shedding on isolated island", "[res
   REQUIRE(r_mess.feasible);
   // MESS should reduce total shedding (or at worst equal it).
   CHECK(r_mess.total_shed_mwh <= r_no_mess.total_shed_mwh + 1e-6);
+}
+
+TEST_CASE("Resilience stage MILP: MESS dispatch emits traces and energy", "[resilience]") {
+  auto sys = make_radial_3bus();
+
+  MobileStorage mess;
+  mess.index = 1;
+  mess.name = "MESS-1";
+  mess.bus = 2;
+  mess.in_service = true;
+  mess.status = MobileStorageStatus::Stationary;
+  mess.pmax_mw = 1.0;
+  mess.p_rated_mw = 1.0;
+  mess.e_rated_mwh = 4.0;
+  mess.soc_init = 1.0;
+  mess.soc_min = 0.1;
+  mess.soc_max = 1.0;
+  mess.e_mwh = 4.0;
+  mess.eta_discharge = 1.0;
+  sys.mobile_storage = {mess};
+
+  DistributionResilienceOptions opts;
+  opts.model = DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp = true;
+  opts.enable_disaster_stages = true;
+  opts.horizon_hours = 3;
+  opts.time_step_hr = 1.0;
+  opts.allow_mess_dispatch = true;
+  opts.default_fault_count = 0;
+
+  DistributionResilienceFault f;
+  f.ac_branch_index = 1;
+  f.outage_start_hr = 0.0;
+  f.repair_duration_hr = 24.0;
+  opts.faults = {f};
+
+  auto r = run_distribution_resilience_assessment(sys, opts);
+  REQUIRE(r.feasible);
+  REQUIRE_FALSE(r.steps.empty());
+  CHECK(r.mess_energy_delivered_mwh > 0.0);
+  bool saw_dispatch = false;
+  bool saw_energy_drop = false;
+  for (const auto& step : r.steps) {
+    REQUIRE_FALSE(step.mess_states.empty());
+    if (step.mess_states[0].dispatch_mw > 0.0) saw_dispatch = true;
+    if (step.mess_states[0].energy_mwh < mess.e_mwh - 1e-9) saw_energy_drop = true;
+  }
+  CHECK(saw_dispatch);
+  CHECK(saw_energy_drop);
 }
 
 TEST_CASE("Resilience: demo data injection runs without crash", "[resilience]") {
