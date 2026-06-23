@@ -146,6 +146,7 @@ endif()
 # MESS dispatch, demo data, summary(), progress callback, custom profiles,
 # resilience index bounds, fault sequence, legacy field sync, step count, MIP stub.
 hacdcpf_add_test(test_resilience_assessment test_resilience_assessment.cpp)
+hacdcpf_add_test(test_scenario_generation test_scenario_generation.cpp)
 
 # ── Graph analysis & reduction ──────────────────────────────────────────────
 

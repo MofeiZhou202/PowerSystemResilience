@@ -98,6 +98,11 @@ struct PerturbationOptions {
   double storage_soc_sigma{0.10};
   double storage_soc_min_multiplier{0.75};
   double storage_soc_max_multiplier{1.25};
+  bool enable_climate_perturbation{true};
+  unsigned int climate_seed{2030};
+  double climate_temp_sigma_c{0.7};
+  double climate_ghi_sigma_pct{8.0};
+  double climate_load_sigma_pct{3.0};
   int block_hours{24};
   double temporal_correlation{0.75};
   double load_renewable_correlation{-0.25};

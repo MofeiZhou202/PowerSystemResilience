@@ -1,23 +1,35 @@
 #include "hacdcpf/analysis/scenario_generation.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_map>
 
 namespace hacdcpf::analysis {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kEarthRadiusKm = 6371.0;
+constexpr double kGStcWm2 = 1000.0;
+constexpr double kTStcC = 25.0;
+constexpr double kPvTempCoeff = -0.004;
+constexpr double kPvLossFactor = 0.85;
+constexpr double kLoadTempBeta = 0.03;
+constexpr std::array<int, 12> kMonthHours{744, 672, 744, 720, 744, 720, 744, 744, 720, 744, 720, 744};
+namespace fs = std::filesystem;
 
 std::string lower_copy(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
@@ -407,6 +419,254 @@ std::vector<double> smooth_noise_factors(int steps, double sigma, double min_val
   return factors;
 }
 
+struct ClimateMorphFactors {
+  std::array<double, 12> delta_t_c{};
+  std::array<double, 12> delta_ghi_w_m2{};
+  bool data_found{false};
+  bool from_csv{false};
+  std::string source;
+};
+
+std::string trim_copy(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+std::vector<std::string> split_csv_line(const std::string& line) {
+  std::vector<std::string> fields;
+  std::string field;
+  bool quoted = false;
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    const char ch = line[i];
+    if (ch == '"') {
+      if (quoted && i + 1 < line.size() && line[i + 1] == '"') {
+        field.push_back('"');
+        ++i;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (ch == ',' && !quoted) {
+      fields.push_back(trim_copy(field));
+      field.clear();
+    } else {
+      field.push_back(ch);
+    }
+  }
+  fields.push_back(trim_copy(field));
+  return fields;
+}
+
+std::optional<ClimateMorphFactors> parse_climate_grid_csv(const fs::path& path) {
+  std::ifstream input(path);
+  if (!input) return std::nullopt;
+  std::unordered_map<std::string, std::array<double, 12>> rows;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const auto row = split_csv_line(line);
+    if (row.empty() || row[0].rfind("#", 0) == 0 || row[0] == "Variable" || row.size() < 26) continue;
+    const std::string abbr = row[1];
+    if (abbr.empty()) continue;
+    std::array<double, 12> values{};
+    bool ok = true;
+    for (int month = 0; month < 12; ++month) {
+      try {
+        values[static_cast<std::size_t>(month)] = std::stod(row[static_cast<std::size_t>(3 + 2 * month)]);
+      } catch (const std::exception&) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) rows[abbr] = values;
+  }
+  const auto tas_it = rows.find("tas");
+  const auto rsds_it = rows.find("rsds");
+  if (tas_it == rows.end() || rsds_it == rows.end()) return std::nullopt;
+  ClimateMorphFactors factors;
+  factors.delta_t_c = tas_it->second;
+  factors.delta_ghi_w_m2 = rsds_it->second;
+  factors.data_found = true;
+  factors.from_csv = true;
+  factors.source = path.string();
+  return factors;
+}
+
+std::vector<fs::path> climate_data_dir_candidates() {
+  std::vector<fs::path> candidates;
+#ifdef HACDCPF_PROJECT_ROOT
+  candidates.push_back(fs::path(HACDCPF_PROJECT_ROOT) / "SenarioGeneration" / "offline_scenario_copilot" / "backend" / "data" / "climate_scenarios");
+#endif
+  const auto cwd = fs::current_path();
+  candidates.push_back(cwd / "SenarioGeneration" / "offline_scenario_copilot" / "backend" / "data" / "climate_scenarios");
+  candidates.push_back(cwd / "HybridACDCDistribtutionSystemsSimulation" / "SenarioGeneration" / "offline_scenario_copilot" / "backend" / "data" / "climate_scenarios");
+  candidates.push_back(cwd.parent_path() / "SenarioGeneration" / "offline_scenario_copilot" / "backend" / "data" / "climate_scenarios");
+  return candidates;
+}
+
+std::optional<ClimateMorphFactors> fallback_climate_morph_factors(const std::string& ssp, int year) {
+  ClimateMorphFactors factors;
+  factors.data_found = true;
+  factors.from_csv = false;
+  factors.source = "embedded_fallback:" + ssp + ":" + std::to_string(year);
+  const auto set = [&](std::array<double, 12> dt, std::array<double, 12> dg) {
+    factors.delta_t_c = dt;
+    factors.delta_ghi_w_m2 = dg;
+    return factors;
+  };
+  if (ssp == "ssp126" && year == 2050) return set({2.25, 2.95, 2.21, 2.07, 1.48, 1.38, 1.19, 1.13, 1.47, 1.85, 2.14, 2.30}, {15.77, 21.61, 17.78, 22.94, 13.52, 6.83, 9.97, 7.65, 14.06, 15.37, 15.92, 15.03});
+  if (ssp == "ssp126" && year == 2080) return set({2.34, 3.22, 2.15, 2.59, 2.13, 1.74, 1.19, 1.39, 1.57, 2.37, 2.31, 1.96}, {16.45, 26.66, 20.55, 30.96, 22.78, 16.11, 12.12, 18.11, 12.80, 21.84, 21.79, 16.32});
+  if (ssp == "ssp245" && year == 2050) return set({2.22, 2.60, 2.12, 1.82, 1.82, 1.59, 1.18, 1.22, 1.36, 1.85, 2.47, 2.43}, {2.38, 11.16, 11.35, 12.69, 11.63, 3.57, 2.35, 0.42, 1.10, 11.40, 14.58, 4.31});
+  if (ssp == "ssp245" && year == 2080) return set({3.31, 3.56, 3.11, 2.98, 2.50, 2.31, 1.88, 2.09, 2.29, 3.08, 3.28, 2.97}, {2.19, 18.13, 20.54, 19.01, 12.68, 10.00, 7.86, 11.69, 12.43, 15.89, 20.91, 14.53});
+  if (ssp == "ssp370" && year == 2050) return set({1.88, 2.36, 2.28, 2.11, 2.18, 1.96, 1.48, 1.55, 1.34, 1.24, 1.95, 1.43}, {-4.70, 1.28, -4.55, -1.11, -3.31, -2.37, -8.69, -4.99, -15.92, -2.42, -3.74, -4.59});
+  if (ssp == "ssp370" && year == 2080) return set({3.70, 2.68, 3.10, 3.53, 3.36, 3.21, 2.80, 3.10, 2.79, 2.91, 3.70, 2.75}, {-5.02, 0.09, 2.62, 7.27, 0.29, -7.48, -7.43, -3.89, -16.04, -0.16, 3.76, -5.33});
+  if (ssp == "ssp585" && year == 2050) return set({2.90, 3.88, 2.87, 2.28, 2.00, 2.05, 1.63, 1.60, 1.95, 2.09, 3.57, 2.65}, {5.37, 8.75, 13.32, 9.43, 6.55, 4.68, 0.24, 0.36, -1.86, 10.58, 11.27, 9.58});
+  if (ssp == "ssp585" && year == 2080) return set({4.20, 5.41, 4.21, 4.58, 4.22, 3.69, 3.35, 3.63, 3.70, 4.58, 5.29, 4.50}, {11.31, 28.52, 16.37, 21.73, 16.82, -5.30, -0.28, 4.46, 2.63, 18.07, 18.14, 7.64});
+  return std::nullopt;
+}
+
+ClimateMorphFactors load_climate_morph_factors(const std::string& ssp, int year, std::vector<std::string>* warnings) {
+  const std::string filename = "CHN_-_GUANGZHOU_EC_Earth3_" + ssp + "_" + std::to_string(year) + "_GridPointVariables.csv";
+  for (const auto& dir : climate_data_dir_candidates()) {
+    const auto path = dir / filename;
+    if (auto parsed = parse_climate_grid_csv(path)) return *parsed;
+  }
+  if (auto fallback = fallback_climate_morph_factors(ssp, year)) {
+    if (warnings) warnings->push_back("Climate CSV for " + ssp + ":" + std::to_string(year) + " not found; using embedded monthly climate deltas.");
+    return *fallback;
+  }
+  ClimateMorphFactors zeros;
+  zeros.source = "zero_delta_missing:" + ssp + ":" + std::to_string(year);
+  if (warnings) warnings->push_back("No climate morphing data found for " + ssp + ":" + std::to_string(year) + "; regular scenarios use zero climate deltas for this group.");
+  return zeros;
+}
+
+int month_index_for_hour(int hour, int steps) {
+  const int safe_steps = std::max(1, steps);
+  const int annual_hour = std::clamp(static_cast<int>((static_cast<long long>(std::max(0, hour)) * 8760LL) / safe_steps), 0, 8759);
+  int start = 0;
+  for (int month = 0; month < 12; ++month) {
+    start += kMonthHours[static_cast<std::size_t>(month)];
+    if (annual_hour < start) return month;
+  }
+  return 11;
+}
+
+std::vector<double> synthesize_base_temperature_c(int steps) {
+  std::vector<double> values(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  for (int t = 0; t < static_cast<int>(values.size()); ++t) {
+    const int hour = t % 24;
+    const int day = t / 24;
+    const double season = 23.5 + 7.0 * std::cos((static_cast<double>(day) - 205.0) / 365.0 * 2.0 * kPi);
+    const double diurnal = 2.8 * std::sin((static_cast<double>(hour) - 8.0) / 24.0 * 2.0 * kPi);
+    values[static_cast<std::size_t>(t)] = season + diurnal;
+  }
+  return values;
+}
+
+std::vector<double> synthesize_base_ghi_w_m2(int steps) {
+  std::vector<double> values(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  for (int t = 0; t < static_cast<int>(values.size()); ++t) {
+    const int hour = t % 24;
+    const int day = t / 24;
+    const double sun = std::max(0.0, std::sin((static_cast<double>(hour) - 6.0) / 12.0 * kPi));
+    const double season = steps >= 8760 ? 0.90 + 0.18 * std::sin((static_cast<double>(day) - 80.0) / 365.0 * 2.0 * kPi) : 1.0;
+    values[static_cast<std::size_t>(t)] = 850.0 * sun * std::max(0.15, season);
+  }
+  return values;
+}
+
+std::array<double, 12> smooth_monthly_noise(double sigma, std::mt19937& rng) {
+  std::array<double, 12> raw{};
+  std::array<double, 12> smoothed{};
+  if (sigma <= 0.0) return smoothed;
+  std::normal_distribution<double> normal(0.0, sigma);
+  for (double& value : raw) value = normal(rng);
+  for (int month = 0; month < 12; ++month) {
+    const int prev = (month + 11) % 12;
+    const int next = (month + 1) % 12;
+    smoothed[static_cast<std::size_t>(month)] = 0.25 * raw[static_cast<std::size_t>(prev)] + 0.5 * raw[static_cast<std::size_t>(month)] + 0.25 * raw[static_cast<std::size_t>(next)];
+  }
+  return smoothed;
+}
+
+std::vector<double> smooth_block_percent_factors(int steps, double sigma_pct, int block_hours, std::mt19937& rng) {
+  std::vector<double> factors(static_cast<std::size_t>(std::max(1, steps)), 1.0);
+  if (sigma_pct <= 0.0) return factors;
+  const int block = std::max(1, block_hours);
+  const int block_count = std::max(1, (static_cast<int>(factors.size()) + block - 1) / block);
+  std::vector<double> raw(static_cast<std::size_t>(block_count), 0.0);
+  std::normal_distribution<double> normal(0.0, sigma_pct / 100.0);
+  for (double& value : raw) value = normal(rng);
+  std::vector<double> smoothed(raw.size(), 0.0);
+  for (int b = 0; b < block_count; ++b) {
+    const int prev = std::max(0, b - 1);
+    const int next = std::min(block_count - 1, b + 1);
+    smoothed[static_cast<std::size_t>(b)] = 0.25 * raw[static_cast<std::size_t>(prev)] + 0.5 * raw[static_cast<std::size_t>(b)] + 0.25 * raw[static_cast<std::size_t>(next)];
+  }
+  for (int t = 0; t < static_cast<int>(factors.size()); ++t) {
+    factors[static_cast<std::size_t>(t)] = std::max(0.0, 1.0 + smoothed[static_cast<std::size_t>(t / block)]);
+  }
+  return factors;
+}
+
+unsigned int stable_label_seed(const std::string& text) {
+  unsigned int hash = 2166136261U;
+  for (const unsigned char ch : text) {
+    hash ^= ch;
+    hash *= 16777619U;
+  }
+  return hash;
+}
+
+double pv_reference_pu(double air_temp_c, double ghi_w_m2) {
+  const double ghi = std::max(0.0, ghi_w_m2);
+  const double cell_temp = air_temp_c + 0.025 * ghi;
+  const double efficiency = std::max(0.0, 1.0 + kPvTempCoeff * (cell_temp - kTStcC));
+  return clamp_value((ghi / kGStcWm2) * efficiency * kPvLossFactor, 0.0, 1.0);
+}
+
+std::pair<std::vector<double>, std::vector<double>> morph_regular_load_pv(
+    const std::vector<double>& base_load,
+    const std::vector<double>& base_pv,
+    const std::vector<double>& base_temp_c,
+    const std::vector<double>& base_ghi_w_m2,
+    const std::array<double, 12>& delta_t_c,
+    const std::array<double, 12>& delta_ghi_w_m2,
+    const std::vector<double>& load_hourly_factor,
+    const std::vector<double>& ghi_hourly_factor) {
+  const int steps = static_cast<int>(std::max(base_load.size(), base_pv.size()));
+  std::vector<double> load = base_load;
+  std::vector<double> pv = base_pv;
+  load.resize(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  pv.resize(static_cast<std::size_t>(std::max(1, steps)), 0.0);
+  const auto value_or = [](const std::vector<double>& values, int index, double fallback) {
+    return index >= 0 && index < static_cast<int>(values.size()) ? values[static_cast<std::size_t>(index)] : fallback;
+  };
+  for (int t = 0; t < static_cast<int>(load.size()); ++t) {
+    const int month = month_index_for_hour(t, static_cast<int>(load.size()));
+    const double load_factor = 1.0 + kLoadTempBeta * delta_t_c[static_cast<std::size_t>(month)];
+    load[static_cast<std::size_t>(t)] = std::max(0.0, load[static_cast<std::size_t>(t)] * load_factor * value_or(load_hourly_factor, t, 1.0));
+  }
+  for (int t = 0; t < static_cast<int>(pv.size()); ++t) {
+    const int month = month_index_for_hour(t, static_cast<int>(pv.size()));
+    const double base_temp = value_or(base_temp_c, t, 25.0);
+    const double base_ghi = value_or(base_ghi_w_m2, t, 0.0);
+    const double future_temp = base_temp + delta_t_c[static_cast<std::size_t>(month)];
+    const double future_ghi = std::max(0.0, base_ghi + delta_ghi_w_m2[static_cast<std::size_t>(month)]) * value_or(ghi_hourly_factor, t, 1.0);
+    const double base_pu = pv_reference_pu(base_temp, base_ghi);
+    const double future_pu = pv_reference_pu(future_temp, future_ghi);
+    const double scale = base_pu > 1e-5 ? clamp_value(future_pu / base_pu, 0.0, 2.0) : 0.0;
+    pv[static_cast<std::size_t>(t)] = std::max(0.0, pv[static_cast<std::size_t>(t)] * scale);
+  }
+  return {std::move(load), std::move(pv)};
+}
+
+double average_monthly(const std::array<double, 12>& values) {
+  return std::accumulate(values.begin(), values.end(), 0.0) / 12.0;
+}
+
 std::vector<double> pv_transition_profile(int steps, std::optional<int> stage1_start, std::optional<int> stage1_end,
                                           int transition_hours) {
   std::vector<double> profile(std::max(1, steps), 1.0);
@@ -753,7 +1013,7 @@ bool hybrid_method(const std::string& method) {
 }
 
 bool is_discrete_feature_key(const std::string& key) {
-  return key == "regular_group" || key == "ssp_code" || key == "year" ||
+  return key == "regular_group" || key == "ssp_code" || key == "year" || key == "climate_data_found" ||
          key == "contingency_component_index" || key == "contingency_ordinal" || key == "typhoon_month";
 }
 
@@ -1292,6 +1552,8 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
   const auto base_pv = synthesize_base_pv(renewable0.pv_mw, steps);
   const auto base_wind = synthesize_base_wind(renewable0.wind_mw, steps);
   const auto base_other = synthesize_base_other_renewable(renewable0.other_mw, steps);
+  const auto base_temp = synthesize_base_temperature_c(steps);
+  const auto base_ghi = synthesize_base_ghi_w_m2(steps);
   const auto storage_baseline = storage_soc_baseline(sys);
   if (warnings && perturbation.enable_storage_soc_perturbation && storage_baseline.empty()) {
     warnings->push_back("Storage SOC perturbation enabled but no in-service storage with positive e_rated_mwh was found.");
@@ -1311,22 +1573,57 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
   nlohmann::json clustering_audits = nlohmann::json::array();
   for (const auto& ssp : ssps) {
     for (const int year : years) {
+      const auto climate = load_climate_morph_factors(ssp, year, warnings);
       std::vector<ScenarioCandidate> candidates;
       candidates.reserve(static_cast<std::size_t>(per_group_candidates));
       for (int i = 0; i < per_group_candidates; ++i) {
+        std::array<double, 12> sampled_delta_t = climate.delta_t_c;
+        std::array<double, 12> sampled_delta_ghi = climate.delta_ghi_w_m2;
+        std::vector<double> climate_load_factor(static_cast<std::size_t>(steps), 1.0);
+        std::vector<double> climate_ghi_factor(static_cast<std::size_t>(steps), 1.0);
+        if (perturbation.enable_climate_perturbation) {
+          const std::string label = ssp + ":" + std::to_string(year);
+          const unsigned int climate_seed = perturbation.climate_seed + stable_label_seed(label) * 1009U + static_cast<unsigned int>((i + 1) * 9176U);
+          std::mt19937 climate_rng(climate_seed);
+          const auto temp_noise = smooth_monthly_noise(std::max(0.0, perturbation.climate_temp_sigma_c), climate_rng);
+          const auto ghi_noise_pct = smooth_monthly_noise(std::max(0.0, perturbation.climate_ghi_sigma_pct), climate_rng);
+          for (int month = 0; month < 12; ++month) {
+            sampled_delta_t[static_cast<std::size_t>(month)] += temp_noise[static_cast<std::size_t>(month)];
+            sampled_delta_ghi[static_cast<std::size_t>(month)] *= 1.0 + ghi_noise_pct[static_cast<std::size_t>(month)] / 100.0;
+          }
+          climate_ghi_factor = smooth_block_percent_factors(steps, std::max(0.0, perturbation.climate_ghi_sigma_pct), perturbation.block_hours, climate_rng);
+          climate_load_factor = smooth_block_percent_factors(steps, std::max(0.0, perturbation.climate_load_sigma_pct), perturbation.block_hours, climate_rng);
+        }
+        auto [regular_load, regular_pv] = morph_regular_load_pv(base_load, base_pv, base_temp, base_ghi,
+                                                                sampled_delta_t, sampled_delta_ghi,
+                                                                climate_load_factor, climate_ghi_factor);
         const unsigned int seed = perturbation.seed + static_cast<unsigned int>(group_index * 100003 + i * 7919 + 17);
         std::mt19937 rng(seed);
         auto c = make_candidate("regular:" + ssp + ":" + std::to_string(year) + ":" + std::to_string(i + 1), ScenarioFamily::Regular,
-                                base_load, base_pv, base_wind, base_other, storage_baseline, perturbation, rng);
+                                regular_load, regular_pv, base_wind, base_other, storage_baseline, perturbation, rng);
         c.features["ssp_code"] = ssp == "ssp126" ? 126.0 : ssp == "ssp245" ? 245.0 : ssp == "ssp370" ? 370.0 : ssp == "ssp585" ? 585.0 : 0.0;
         c.features["year"] = static_cast<double>(year);
         c.features["regular_group"] = static_cast<double>(group_index);
+        c.features["climate_annual_delta_T"] = average_monthly(sampled_delta_t);
+        c.features["climate_annual_delta_GHI"] = average_monthly(sampled_delta_ghi);
+        c.features["climate_data_found"] = climate.data_found ? 1.0 : 0.0;
+        for (int month = 0; month < 12; ++month) {
+          c.features["climate_month_delta_T_" + std::to_string(month + 1)] = sampled_delta_t[static_cast<std::size_t>(month)];
+          c.features["climate_month_delta_GHI_" + std::to_string(month + 1)] = sampled_delta_ghi[static_cast<std::size_t>(month)];
+        }
         c.probability = 1.0 / static_cast<double>(per_group_candidates);
         coverage_samples.push_back(candidate_coverage_point(c));
         candidates.push_back(std::move(c));
       }
       nlohmann::json cluster_audit = nlohmann::json::object();
       cluster_audit["group"] = ssp + ":" + std::to_string(year);
+      cluster_audit["climate_data_found"] = climate.data_found;
+      cluster_audit["climate_data_source"] = climate.source;
+      cluster_audit["climate_data_from_csv"] = climate.from_csv;
+      cluster_audit["climate_month_delta_T"] = climate.delta_t_c;
+      cluster_audit["climate_month_delta_GHI"] = climate.delta_ghi_w_m2;
+      cluster_audit["climate_annual_delta_T"] = average_monthly(climate.delta_t_c);
+      cluster_audit["climate_annual_delta_GHI"] = average_monthly(climate.delta_ghi_w_m2);
       auto grouped = cluster_candidates(std::move(candidates), options.cluster_count, clustering, &cluster_audit);
       clustering_audits.push_back(cluster_audit);
       for (auto& cluster : grouped) {
@@ -1357,6 +1654,13 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
                   {"storage_soc_sigma", perturbation.storage_soc_sigma},
                   {"storage_soc_min_multiplier", perturbation.storage_soc_min_multiplier},
                   {"storage_soc_max_multiplier", perturbation.storage_soc_max_multiplier},
+                  {"climate_morphing_enabled", true},
+                  {"climate_formula", "tas_rsds_temperature_load_and_pv_reference_ratio"},
+                  {"climate_perturbation_enabled", perturbation.enable_climate_perturbation},
+                  {"climate_seed", perturbation.climate_seed},
+                  {"climate_temp_sigma_c", perturbation.climate_temp_sigma_c},
+                  {"climate_ghi_sigma_pct", perturbation.climate_ghi_sigma_pct},
+                  {"climate_load_sigma_pct", perturbation.climate_load_sigma_pct},
                   {"clustering_audits", std::move(clustering_audits)},
                   {"coverage_samples", std::move(coverage_samples)}};
   return result;
@@ -1709,6 +2013,11 @@ ScenarioGenerationOptions scenario_generation_options_from_json(const nlohmann::
     if (opt.perturbation.storage_soc_max_multiplier < opt.perturbation.storage_soc_min_multiplier) {
       std::swap(opt.perturbation.storage_soc_min_multiplier, opt.perturbation.storage_soc_max_multiplier);
     }
+    opt.perturbation.enable_climate_perturbation = p.value("enable_climate_perturbation", opt.perturbation.enable_climate_perturbation);
+    opt.perturbation.climate_seed = p.value("climate_seed", opt.perturbation.climate_seed);
+    opt.perturbation.climate_temp_sigma_c = std::max(0.0, p.value("climate_temp_sigma_c", opt.perturbation.climate_temp_sigma_c));
+    opt.perturbation.climate_ghi_sigma_pct = std::max(0.0, p.value("climate_ghi_sigma_pct", opt.perturbation.climate_ghi_sigma_pct));
+    opt.perturbation.climate_load_sigma_pct = std::max(0.0, p.value("climate_load_sigma_pct", opt.perturbation.climate_load_sigma_pct));
     opt.perturbation.block_hours = p.value("block_hours", opt.perturbation.block_hours);
   }
   if (j.contains("typhoon_impact")) {

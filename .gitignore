@@ -23,7 +23,9 @@ playwright-report/
 
 # Bundled MATPOWER case library + time-series profiles (~83 MB, copied from
 # HybridACDCPowerSystemsPlanning). Tracked out-of-band, not in git.
-external_data/
+external_data/*
+!external_data/typhoon/
+!external_data/typhoon/**
 
 # LaTeX build artifacts
 docs/**/*.aux
