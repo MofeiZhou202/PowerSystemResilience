@@ -42,6 +42,10 @@ struct VSCConverter {
   double q_set_mvar{0.0};
   double v_dc_set_pu{1.0};
   double v_ac_set_pu{1.0};
+  // AC terminal angle reference (degrees) used when the converter forms the AC
+  // voltage reference (AC_GRID_FORMING / Mode 1).  Defines the slack angle of
+  // the AC island it energizes; ignored by every other control mode.
+  double v_ac_angle_set_deg{0.0};
 
   double eta{0.99};
   double loss_percent{0.0};

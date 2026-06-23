@@ -217,18 +217,41 @@ void rebuild_matrices(SolverData& data) {
   data.gdc = build_dc_conductance(data);
 }
 
-// AC-side PV converters (multi-converter model r1 §1): a converter that holds its
-// AC terminal voltage magnitude makes its AC bus voltage-controlled. Mark that
-// bus PV at v_ac_set_pu so the Newton solver fixes Vm there and releases the bus
-// reactive balance — i.e. the converter's reactive power becomes the free
-// balancing device unknown. A SLACK bus already fixes Vm and angle, so it is
-// left untouched.
+// AC-side voltage-forming converters (multi-converter model r1 §1/§2/§4.2/§4.7).
+// Three control modes pin the AC terminal voltage of their bus:
+//   * AC_PV (Mode 2) and DC_V_DROOP_AC_V (Mode 6) hold the AC voltage magnitude,
+//     so their AC bus becomes a PV bus at v_ac_set_pu — the Newton solver fixes
+//     Vm there and releases the bus reactive balance (the converter's reactive
+//     power becomes the free balancing device unknown).
+//   * AC_GRID_FORMING (Mode 1) forms the full AC reference (angle + magnitude),
+//     so its AC bus becomes a SLACK bus at v_ac_set_pu / va_set_deg — the
+//     converter both fixes the angle reference and balances the AC island's
+//     active and reactive power.
+// A bus that is already SLACK is left untouched (an existing rigid reference
+// wins); a grid-forming converter promotes a PQ/PV bus to SLACK.
 static void apply_acpv_voltage_control(SolverData& data) {
   for (const auto& conv : data.converters) {
-    if (!conv.in_service || conv.control_mode != ConverterMode::AC_PV) continue;
+    if (!conv.in_service) continue;
+    const bool holds_vmag = (conv.control_mode == ConverterMode::AC_PV ||
+                             conv.control_mode == ConverterMode::DC_V_DROOP_AC_V);
+    const bool forms_ac = (conv.control_mode == ConverterMode::AC_GRID_FORMING);
+    if (!holds_vmag && !forms_ac) continue;
     const int idx = conv.bus_ac - 1;
     if (idx < 0 || idx >= static_cast<int>(data.ac_buses.size())) continue;
     auto& bus = data.ac_buses[static_cast<size_t>(idx)];
+
+    if (forms_ac) {
+      // Grid-forming: promote to SLACK and pin the reference angle + magnitude.
+      if (bus.bus_type != BusType::SLACK) {
+        bus.bus_type = BusType::SLACK;
+        bus.va_deg = conv.v_ac_angle_set_deg;
+      }
+      if (conv.v_ac_set_pu > 0.0) bus.vm_pu = conv.v_ac_set_pu;
+      continue;
+    }
+
+    // Voltage-magnitude hold (AC_PV / Mode 6): promote PQ/PV to PV, never demote
+    // an existing SLACK reference.
     if (bus.bus_type == BusType::SLACK) continue;
     bus.bus_type = BusType::PV;
     if (conv.v_ac_set_pu > 0.0) bus.vm_pu = conv.v_ac_set_pu;

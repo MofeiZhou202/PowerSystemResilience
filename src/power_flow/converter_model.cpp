@@ -63,6 +63,15 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   const int dc_idx = conv.bus_dc - 1;
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
+  if (conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // Mode 1 (δs+Vs): the converter forms the AC reference, so its AC bus is a
+    // SLACK bus (see apply_acpv_voltage_control). Both the active and reactive
+    // injection rows are dropped from the mismatch — the converter's AC power is
+    // the free balancing unknown — so the spec value here is unused. Return zero
+    // to avoid leaking a spurious droop term into the (dropped) slack rows.
+    return {0.0, 0.0};
+  }
+
   if (conv.control_mode == ConverterMode::PQ_MODE ||
       conv.control_mode == ConverterMode::AC_PV) {
     // AC_PV holds Pac = pset; its AC voltage magnitude is held by marking the
@@ -80,6 +89,10 @@ std::pair<double, double> converter_ac_injection(const VSCConverter& conv,
   if (conv.control_mode == ConverterMode::VDC_Q) {
     return {pac, qset};
   }
+  // VDC_VAC (Mode 5) and DC_V_DROOP_AC_V (Mode 6): the active injection follows
+  // the Vdc droop. For DC_V_DROOP_AC_V the AC bus is marked PV so its reactive
+  // power is the free balancing unknown (the placeholder 0 is dropped); for the
+  // legacy VDC_VAC realization the reactive injection is held at zero.
   return {pac, 0.0};
 }
 
@@ -98,7 +111,14 @@ double converter_dc_injection(const VSCConverter& conv,
   double pdc_base = 0.0;
   double pac = 0.0;  // AC-side injection used by the conduction-loss coupling below.
   if (conv.control_mode == ConverterMode::PQ_MODE ||
-      conv.control_mode == ConverterMode::AC_PV) {
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // PQ / AC_PV / AC_GRID_FORMING draw their scheduled DC power exchange. For
+    // AC_GRID_FORMING (Mode 1) the AC terminal is a slack bus whose active power
+    // is free; the converter draws pset from the DC side and reconciles the
+    // difference (P_ac_slack − pset − loss) through its energy buffer. The
+    // structural requirement that this buffer / a DC-side source exists is
+    // enforced by ACDC-GFM-05.
     const double ploss = converter_loss(conv, pset, vdc_bus, base_mva, loss_model);
     pdc_base = -(pset + ploss);
     pac = pset;
@@ -140,8 +160,9 @@ ConverterJacobianAC converter_ac_jacobian_vdc(const VSCConverter& conv,
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
   if (conv.control_mode == ConverterMode::PQ_MODE ||
-      conv.control_mode == ConverterMode::AC_PV) {
-    // AC injection is constant (pset, qset) — no Vdc dependence.
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
+    // AC injection is constant (pset/qset) or a dropped slack row — no Vdc dependence.
     return jac;
   }
 
@@ -175,7 +196,8 @@ ConverterJacobianDC converter_dc_jacobian_vdc(const VSCConverter& conv,
   const double vdc_bus = (dc_idx >= 0 && dc_idx < vdc.size()) ? vdc[dc_idx] : 1.0;
 
   if (conv.control_mode == ConverterMode::PQ_MODE ||
-      conv.control_mode == ConverterMode::AC_PV) {
+      conv.control_mode == ConverterMode::AC_PV ||
+      conv.control_mode == ConverterMode::AC_GRID_FORMING) {
     // pdc = -(pset + loss(pset, Vdc))  →  dpdc/dVdc = -dploss/dVdc
     const double pset = conv.p_set_mw / base_mva;
     const auto [dploss_dp, dploss_dvdc] =

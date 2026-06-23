@@ -196,10 +196,106 @@ std::string source_label(const DCVoltageControlSource& source) {
          "@bus" + std::to_string(source.bus);
 }
 
+// Forward declaration: AC connectivity islands (defined below) are needed by the
+// device-rule evaluator for the AC-side support check (ACDC-GFM-06).
+std::vector<int> compute_ac_islands(const HybridPowerSystem& sys,
+                                    const std::unordered_map<int, int>& ac_pos_by_index,
+                                    int& n_islands);
+
+// Does the DC voltage island `dc_island` provide an energy source or a
+// voltage/power-balancing mechanism (multi-converter model ACDC-GFM-05)?  True
+// when a DC bus on the island is a rigid DC_V reference, another in-service VSC
+// on the island forms Vdc, or the island hosts a DC energy source (storage /
+// static generator / PV array).  Used to validate that an AC-side grid-forming
+// converter has the DC-side support it needs to balance its active power.
+bool dc_island_has_support(const HybridPowerSystem& sys,
+                           const std::unordered_map<int, int>& dc_pos_by_index,
+                           const std::vector<int>& component,
+                           int dc_island,
+                           int exclude_conv_index) {
+  if (dc_island < 0) return false;
+  const auto island_of = [&](int bus_index) -> int {
+    const int pos = bus_position(dc_pos_by_index, bus_index);
+    return (pos >= 0 && pos < static_cast<int>(component.size()))
+               ? component[static_cast<size_t>(pos)]
+               : -1;
+  };
+  for (size_t i = 0; i < sys.dc.buses.size() && i < component.size(); ++i) {
+    if (component[i] == dc_island && sys.dc.buses[i].in_service &&
+        sys.dc.buses[i].bus_type == DCBusType::DC_V) {
+      return true;
+    }
+  }
+  for (const auto& c : sys.vsc_converters) {
+    if (!c.in_service || c.index == exclude_conv_index) continue;
+    if (island_of(c.bus_dc) != dc_island) continue;
+    const bool forms = ((c.control_mode == ConverterMode::VDC_Q ||
+                         c.control_mode == ConverterMode::VDC_VAC ||
+                         c.control_mode == ConverterMode::DC_V_DROOP_AC_V) &&
+                        std::abs(c.k_vdc) > 1e-9) ||
+                       c.grid_forming;
+    if (forms) return true;
+  }
+  for (const auto& s : sys.dc.storage)
+    if (s.in_service && island_of(s.bus) == dc_island) return true;
+  for (const auto& g : sys.dc.static_generators)
+    if (g.in_service && island_of(g.bus) == dc_island) return true;
+  for (const auto& g : sys.dc.dc_static_generators)
+    if (g.in_service && island_of(g.bus) == dc_island) return true;
+  for (const auto& pv : sys.dc.pv_arrays)
+    if (pv.in_service && island_of(pv.bus) == dc_island) return true;
+  return false;
+}
+
+// Does the AC connectivity island containing `ac_bus_index` provide an
+// active-power balancing source (multi-converter model ACDC-GFM-06): a slack
+// generator, an external grid, an in-service generator, or another converter
+// that injects AC active power (AC_PQ / AC_PV / DC-forming) on the island?
+bool ac_island_has_active_support(const HybridPowerSystem& sys,
+                                  const std::unordered_map<int, int>& ac_pos_by_index,
+                                  const std::vector<int>& ac_component,
+                                  int ac_bus_index,
+                                  int exclude_conv_index) {
+  const auto island_of = [&](int bus_index) -> int {
+    const int pos = bus_position(ac_pos_by_index, bus_index);
+    return (pos >= 0 && pos < static_cast<int>(ac_component.size()))
+               ? ac_component[static_cast<size_t>(pos)]
+               : -1;
+  };
+  const int target = island_of(ac_bus_index);
+  // If the converter's AC bus is not part of any modeled, in-service AC island
+  // (e.g. a DC-focused model that omits the AC network), the AC-side support
+  // cannot be assessed — do not flag it.
+  if (target < 0) return true;
+  for (const auto& eg : sys.ac.external_grids)
+    if (eg.in_service && island_of(eg.bus) == target) return true;
+  for (const auto& g : sys.ac.generators)
+    if (g.in_service && island_of(g.bus) == target) return true;
+  for (const auto& sg : sys.ac.static_generators)
+    if (sg.in_service && island_of(sg.bus) == target) return true;
+  for (const auto& c : sys.vsc_converters) {
+    if (!c.in_service || c.index == exclude_conv_index) continue;
+    if (island_of(c.bus_ac) != target) continue;
+    // A converter that does not itself DC-grid-form injects/withdraws AC active
+    // power and can balance the AC island (AC_PQ, AC_PV, or another AC former).
+    if (c.control_mode != ConverterMode::AC_GRID_FORMING) return true;
+  }
+  return false;
+}
+
 void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
                                const std::unordered_map<int, int>& dc_pos_by_index,
                                const std::vector<int>& component,
                                ConverterCoordinationReport& report) {
+  // AC connectivity islands, built once for the AC-side support check (GFM-06).
+  std::unordered_map<int, int> ac_pos_by_index;
+  for (int i = 0; i < static_cast<int>(sys.ac.buses.size()); ++i) {
+    ac_pos_by_index[sys.ac.buses[static_cast<size_t>(i)].index] = i;
+  }
+  int n_ac_islands = 0;
+  const std::vector<int> ac_component =
+      compute_ac_islands(sys, ac_pos_by_index, n_ac_islands);
+
   for (const auto& conv : sys.vsc_converters) {
     if (!conv.in_service) continue;
     const int dc_pos = bus_position(dc_pos_by_index, conv.bus_dc);
@@ -220,15 +316,22 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
     }
 
     // A converter "forms the DC voltage" when it actively regulates Vdc
-    // (VDC_Q / VDC_VAC with a non-zero droop) or is declared grid-forming.  Such
-    // a converter must release its AC active power to balance the DC island, so
-    // an explicit hard AC-P constraint is contradictory (multi-converter model
-    // §4.1.3 / §16.3).
+    // (VDC_Q / VDC_VAC / DC_V_DROOP_AC_V with a non-zero droop) or is declared
+    // grid-forming.  Such a converter must release its AC active power to balance
+    // the DC island, so an explicit hard AC-P constraint is contradictory
+    // (multi-converter model §4.1.3 / §16.3).
     const bool forms_dc_voltage =
         ((conv.control_mode == ConverterMode::VDC_Q ||
-          conv.control_mode == ConverterMode::VDC_VAC) &&
+          conv.control_mode == ConverterMode::VDC_VAC ||
+          conv.control_mode == ConverterMode::DC_V_DROOP_AC_V) &&
          std::abs(conv.k_vdc) > 1e-9) ||
         conv.grid_forming;
+
+    // A converter forms the AC reference when it opts into AC grid-forming via
+    // the explicit flag or selects the AC_GRID_FORMING (Mode 1) control mode.
+    const bool ac_is_grid_forming =
+        conv.ac_grid_forming ||
+        conv.control_mode == ConverterMode::AC_GRID_FORMING;
 
     if (forms_dc_voltage && conv.p_is_hard_constraint) {
       add_issue(report,
@@ -308,9 +411,9 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
     }
 
     // AC-side grid-forming rules (multi-converter model r1 §2/§11.2).  These only
-    // fire when the converter opts into AC grid-forming, so ordinary converters
-    // are unaffected.
-    if (conv.ac_grid_forming) {
+    // fire when the converter opts into AC grid-forming (explicit flag or the
+    // AC_GRID_FORMING control mode), so ordinary converters are unaffected.
+    if (ac_is_grid_forming) {
       // ACDC-GFM-03: an ordinary two-port converter cannot grid-form on both the
       // AC and DC sides at once; the dual-side case needs an explicit energy
       // buffer to decouple the two power balances.
@@ -345,6 +448,52 @@ void evaluate_vsc_device_rules(const HybridPowerSystem& sys,
                       "An AC grid-forming converter must release its active power to "
                       "balance the AC island and cannot hold AC/DC active power as a "
                       "hard constraint. Use p_schedule_mw / p_initial_mw instead.");
+      }
+      // ACDC-GFM-05: an AC-side grid-forming converter sources its (free) AC slack
+      // power from the DC side, so its DC island must provide an energy source or
+      // a voltage/power-balancing mechanism — another Vdc former, a rigid DC_V
+      // bus, a DC energy source, or the converter's own energy buffer.
+      const bool dc_support =
+          conv.has_energy_buffer ||
+          dc_island_has_support(sys, dc_pos_by_index, component, island, conv.index);
+      if (!dc_support) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "ACDC-GFM-05",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " is AC grid-forming but its DC island " + std::to_string(island) +
+                      " has no energy source or voltage/power-balancing mechanism (no "
+                      "other Vdc-forming converter, no rigid DC_V bus, no DC source, and "
+                      "the converter declares no energy buffer). The AC slack power it "
+                      "injects cannot be sourced. Add a DC-side reference/source or set "
+                      "has_energy_buffer=true for a buffered device.");
+      }
+    }
+
+    // ACDC-GFM-06: a DC-side grid-forming converter regulates Vdc by exchanging
+    // active power with its AC terminal, so its AC island must provide an
+    // active-power balancing source (slack, external grid, generator, or another
+    // AC-injecting converter).  Skip when the converter also forms the AC side
+    // (covered by the AC-island reference rules instead).
+    if (forms_dc_voltage && !ac_is_grid_forming) {
+      const bool ac_support = ac_island_has_active_support(
+          sys, ac_pos_by_index, ac_component, conv.bus_ac, conv.index);
+      if (!ac_support) {
+        add_issue(report,
+                  CoordinationSeverity::Error,
+                  "ACDC-GFM-06",
+                  "vsc_converter",
+                  conv.index,
+                  island,
+                  "VSC converter " + std::to_string(conv.index) +
+                      " forms the DC voltage (" + converter_mode_str(conv.control_mode) +
+                      ") but its AC island has no active-power balancing source (no slack "
+                      "bus, external grid, generator, or AC-injecting converter). The "
+                      "active power it must exchange to hold Vdc cannot be sourced on the "
+                      "AC side. Add an AC slack/source on the converter's AC island.");
       }
     }
   }
@@ -476,6 +625,7 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
     int slack_count{0};
     int ac_gfm_count{0};
     bool has_external_grid{false};
+    bool has_active_source{false};
     bool energized{false};
   };
   std::vector<ACIslandRef> islands(static_cast<size_t>(n_islands));
@@ -490,7 +640,10 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
     const int c = comp[static_cast<size_t>(i)];
     if (c < 0) continue;
     const auto& b = sys.ac.buses[static_cast<size_t>(i)];
-    if (b.bus_type == BusType::SLACK) islands[static_cast<size_t>(c)].slack_count += 1;
+    if (b.bus_type == BusType::SLACK) {
+      islands[static_cast<size_t>(c)].slack_count += 1;
+      islands[static_cast<size_t>(c)].has_active_source = true;
+    }
     if (std::abs(b.pd_mw) > kTol || std::abs(b.qd_mvar) > kTol)
       islands[static_cast<size_t>(c)].energized = true;
   }
@@ -499,13 +652,22 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
     const int c = island_of(eg.bus);
     if (c >= 0) {
       islands[static_cast<size_t>(c)].has_external_grid = true;
+      islands[static_cast<size_t>(c)].has_active_source = true;
       islands[static_cast<size_t>(c)].energized = true;
     }
   }
   for (const auto& g : sys.ac.generators) {
     if (!g.in_service) continue;
     const int c = island_of(g.bus);
-    if (c >= 0) islands[static_cast<size_t>(c)].energized = true;
+    if (c >= 0) {
+      islands[static_cast<size_t>(c)].energized = true;
+      islands[static_cast<size_t>(c)].has_active_source = true;
+    }
+  }
+  for (const auto& sg : sys.ac.static_generators) {
+    if (!sg.in_service) continue;
+    const int c = island_of(sg.bus);
+    if (c >= 0) islands[static_cast<size_t>(c)].has_active_source = true;
   }
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service) continue;
@@ -517,7 +679,15 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
     const int c = island_of(conv.bus_ac);
     if (c < 0) continue;
     islands[static_cast<size_t>(c)].energized = true;
-    if (conv.ac_grid_forming) islands[static_cast<size_t>(c)].ac_gfm_count += 1;
+    // A converter that does not DC-grid-form injects AC active power and can help
+    // balance the island; an AC grid-forming converter additionally forms the
+    // reference.
+    const bool ac_gfm = conv.ac_grid_forming ||
+                        conv.control_mode == ConverterMode::AC_GRID_FORMING;
+    if (ac_gfm) {
+      islands[static_cast<size_t>(c)].ac_gfm_count += 1;
+      islands[static_cast<size_t>(c)].has_active_source = true;
+    }
   }
 
   for (int c = 0; c < n_islands; ++c) {
@@ -549,6 +719,26 @@ void evaluate_ac_island_rules(const HybridPowerSystem& sys,
                     "converters). Without an explicit coordination (P-f droop or "
                     "virtual synchronous control) they over-determine the angle "
                     "reference.");
+    }
+
+    // ACISLAND-BALANCE-01 (multi-converter model r1 §10, step 19): an energized
+    // AC island must have at least one active-power balancing source — a slack
+    // bus, external grid, generator, static generator, or AC grid-forming
+    // converter.  This is distinct from the angle-reference check: a generator-
+    // only island has a power source (silent here) yet still lacks an angle
+    // reference (ACISLAND-REF-01); a pure load island fails both.
+    if (!s.has_active_source) {
+      add_issue(report,
+                CoordinationSeverity::Warning,
+                "ACISLAND-BALANCE-01",
+                "ac_island",
+                c,
+                c,
+                "AC island " + std::to_string(c) +
+                    " is energized but has no active-power balancing source (no slack "
+                    "bus, external grid, generator, or AC-injecting converter). Its net "
+                    "active power cannot be balanced; add a generator, external grid, or "
+                    "grid-forming converter on the island.");
     }
   }
 }

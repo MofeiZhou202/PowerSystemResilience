@@ -154,7 +154,9 @@ void apply_participation_factor_sharing(std::vector<VSCConverter>& converters) {
   for (int i = 0; i < static_cast<int>(converters.size()); ++i) {
     const auto& c = converters[static_cast<size_t>(i)];
     if (!c.in_service || c.coordination_group_id.empty()) continue;
-    if (c.control_mode != ConverterMode::VDC_Q && c.control_mode != ConverterMode::VDC_VAC) {
+    if (c.control_mode != ConverterMode::VDC_Q &&
+        c.control_mode != ConverterMode::VDC_VAC &&
+        c.control_mode != ConverterMode::DC_V_DROOP_AC_V) {
       continue;
     }
     groups[c.coordination_group_id].push_back(i);
@@ -264,7 +266,8 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
       const int db = conv.bus_dc - 1;
       if (db < 0 || db >= ndc || component[static_cast<size_t>(db)] != c) continue;
       if (conv.control_mode == ConverterMode::VDC_Q ||
-          conv.control_mode == ConverterMode::VDC_VAC) {
+          conv.control_mode == ConverterMode::VDC_VAC ||
+          conv.control_mode == ConverterMode::DC_V_DROOP_AC_V) {
         converter_regulates = true;
         break;
       }

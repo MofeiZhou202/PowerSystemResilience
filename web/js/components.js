@@ -361,7 +361,7 @@ const COMP = (() => {
       pmax_mw: 200, pmin_mw: -200,
       qmax_mvar: 100, qmin_mvar: -100,
       eta: 0.98, loss_percent: 1.0, loss_mw: 0,
-      v_dc_set_pu: 1.0, v_ac_set_pu: 1.0,
+      v_dc_set_pu: 1.0, v_ac_set_pu: 1.0, v_ac_angle_set_deg: 0,
       k_vdc: 0.1, p_rated_mw: 0,
       r_conv_ac_pu: 0, x_sc_pu: 0,
       i_ac_max_pu: 0, i_dc_max_pu: 0,

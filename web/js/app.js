@@ -4473,10 +4473,12 @@ const App = (() => {
           ];
         } else {
           modeOptions = [
-            {v:'PQ_MODE', l:'PQ_MODE'},
-            {v:'VDC_Q',   l:'VDC_Q'},
-            {v:'VDC_VAC', l:'VDC_VAC'},
-            {v:'AC_PV',   l:'AC_PV (AC定有功+定电压)'},
+            {v:'PQ_MODE',         l:'PQ_MODE (模式3 · AC定P+定Q)'},
+            {v:'AC_PV',           l:'AC_PV (模式2 · AC定P+定电压)'},
+            {v:'VDC_Q',           l:'VDC_Q (模式4/7 · 定/下垂Udc+定Q)'},
+            {v:'VDC_VAC',         l:'VDC_VAC (模式5 · 定Udc+定电压)'},
+            {v:'DC_V_DROOP_AC_V', l:'DC_V_DROOP_AC_V (模式6 · 下垂Udc+定电压)'},
+            {v:'AC_GRID_FORMING', l:'AC_GRID_FORMING (模式1 · AC构网 δs+Vs)'},
           ];
         }
         modeOptions.forEach(o => {
