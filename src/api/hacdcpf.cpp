@@ -483,19 +483,21 @@ void populate_derived_results(const powerflow::SolverData& data,
     return std::find(promoted.begin(), promoted.end(), ci) != promoted.end();
   };
 
-  // AC_PV reactive attribution: an AC_PV converter's AC bus is voltage-controlled
-  // (PV), so the converter supplies the bus's reactive generation = network
-  // reactive injection + local reactive demand.  Compute the network current
-  // I = Ybus·V once, only when an AC_PV converter is present.  This credits the
-  // bus's reactive balance to the converter; with several reactive devices on
-  // one bus the attribution is shared (multi-converter model r1 §1.3) and this
-  // single-source convention over-credits one converter.
-  const bool has_ac_pv = std::any_of(
+  // AC bus-attribution converters: an AC_PV converter's AC bus is voltage-
+  // controlled (PV) and an AC_GRID_FORMING converter's AC bus is a slack, so in
+  // both cases the converter's released power equals the bus's net injection.
+  // Compute the network current I = Ybus·V once when any such converter is
+  // present.  This credits the bus's balance to the converter; with several
+  // devices on one bus the attribution is shared (multi-converter model r1 §1.3)
+  // and this single-source convention over-credits one converter.
+  const bool has_bus_attribution = std::any_of(
       eff_converters.begin(), eff_converters.end(), [](const VSCConverter& c) {
-        return c.in_service && c.control_mode == ConverterMode::AC_PV;
+        return c.in_service && (c.control_mode == ConverterMode::AC_PV ||
+                                c.control_mode == ConverterMode::AC_GRID_FORMING);
       });
   Eigen::VectorXcd ybus_current;
-  if (has_ac_pv && data.ybus.rows() == vm.size() && data.ybus.cols() == vm.size()) {
+  if (has_bus_attribution && data.ybus.rows() == vm.size() &&
+      data.ybus.cols() == vm.size()) {
     Eigen::VectorXcd vbus(vm.size());
     for (Eigen::Index i = 0; i < vm.size(); ++i) vbus[i] = std::polar(vm[i], va[i]);
     ybus_current = data.ybus * vbus;
@@ -515,7 +517,9 @@ void populate_derived_results(const powerflow::SolverData& data,
 
     // AC_PV releases reactive power: report the bus's reactive generation (the
     // free balancing injection) instead of the placeholder q_set_mvar.
+    double p_ac_pu_out = p_ac_pu;
     double q_ac_pu_out = q_ac_pu;
+    double p_dc_pu_out = p_dc_pu;
     if (conv.control_mode == ConverterMode::AC_PV &&
         ybus_current.size() == vm.size()) {
       const int aci = conv.bus_ac - 1;
@@ -528,15 +532,42 @@ void populate_derived_results(const powerflow::SolverData& data,
                                 : 0.0;
         q_ac_pu_out = q_net_inj + qd_i;
       }
+    } else if (conv.control_mode == ConverterMode::AC_GRID_FORMING &&
+               ybus_current.size() == vm.size()) {
+      // AC_GRID_FORMING releases BOTH active and reactive power (its AC bus is a
+      // slack). Report the bus's net active/reactive generation, and report the
+      // DC injection as the energy-conduit value −(P_ac + loss) so the converter's
+      // reported powers are energy-consistent (matching the solved DC balance).
+      const int aci = conv.bus_ac - 1;
+      if (aci >= 0 && aci < static_cast<int>(vm.size())) {
+        const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
+        const std::complex<double> s_net =
+            v_i * std::conj(ybus_current[static_cast<Eigen::Index>(aci)]);
+        const double pd_i = (aci < static_cast<int>(data.pd_pu.size()))
+                                ? data.pd_pu[static_cast<size_t>(aci)]
+                                : 0.0;
+        const double qd_i = (aci < static_cast<int>(data.qd_pu.size()))
+                                ? data.qd_pu[static_cast<size_t>(aci)]
+                                : 0.0;
+        p_ac_pu_out = s_net.real() + pd_i;
+        q_ac_pu_out = s_net.imag() + qd_i;
+        const int dci = conv.bus_dc - 1;
+        const double vdc_b = (dci >= 0 && dci < static_cast<int>(vdc.size()))
+                                 ? vdc[static_cast<size_t>(dci)]
+                                 : 1.0;
+        const double ploss = powerflow::converter_loss(
+            conv, p_ac_pu_out, vdc_b, data.base_mva, loss_model);
+        p_dc_pu_out = -(p_ac_pu_out + ploss);
+      }
     }
 
     VSCTransfer tr;
     tr.index = conv.index;
     tr.bus_ac = conv.bus_ac;
     tr.bus_dc = conv.bus_dc;
-    tr.p_ac_mw = p_ac_pu * data.base_mva;
+    tr.p_ac_mw = p_ac_pu_out * data.base_mva;
     tr.q_ac_mvar = q_ac_pu_out * data.base_mva;
-    tr.p_dc_mw = p_dc_pu * data.base_mva;
+    tr.p_dc_mw = p_dc_pu_out * data.base_mva;
     tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
     result.vsc_transfers.push_back(tr);
 
@@ -550,7 +581,7 @@ void populate_derived_results(const powerflow::SolverData& data,
         (ac_pos >= 0 && ac_pos < static_cast<int>(vm.size())) ? std::max(vm[ac_pos], 1e-3) : 1.0;
     const double vdc_b =
         (dc_pos >= 0 && dc_pos < static_cast<int>(vdc.size())) ? std::max(vdc[dc_pos], 1e-3) : 1.0;
-    const double s_ac_pu = std::hypot(p_ac_pu, q_ac_pu);
+    const double s_ac_pu = std::hypot(p_ac_pu_out, q_ac_pu_out);
     const double s_rated_pu = conv.p_rated_mw / data.base_mva;
     if (s_rated_pu > 0.0 && s_ac_pu > s_rated_pu * (1.0 + 1e-6)) {
       result.diagnostics.warnings.push_back(
@@ -568,7 +599,7 @@ void populate_derived_results(const powerflow::SolverData& data,
       }
     }
     if (conv.i_dc_max_pu > 0.0) {
-      const double i_dc_pu = std::abs(p_dc_pu) / vdc_b;
+      const double i_dc_pu = std::abs(p_dc_pu_out) / vdc_b;
       if (i_dc_pu > conv.i_dc_max_pu * (1.0 + 1e-6)) {
         result.diagnostics.warnings.push_back(
             "[ACDC-PHYS-03] VSC converter " + std::to_string(conv.index) +

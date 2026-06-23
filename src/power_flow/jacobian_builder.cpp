@@ -29,6 +29,7 @@ void build_power_spec(const SolverData& data,
                       const Eigen::VectorXd& vm,
                       const Eigen::VectorXd& va,
                       const Eigen::VectorXd& vdc,
+                      const Eigen::VectorXd& pcalc,
                       Eigen::VectorXd& p_spec,
                       Eigen::VectorXd& q_spec,
                       Eigen::VectorXd& pdc_spec) {
@@ -142,8 +143,33 @@ void build_power_spec(const SolverData& data,
       q_spec[ac_bus] += qac;
     }
     if (dc_bus >= 0 && dc_bus < ndc) {
-      pdc_spec[dc_bus] +=
-          converter_dc_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
+      if (conv.control_mode == ConverterMode::AC_GRID_FORMING && ac_bus >= 0 &&
+          ac_bus < n && pcalc.size() == n) {
+        // Energy-conduit coupling (multi-converter model r1 §4.2, F_loss): an AC
+        // grid-forming converter's AC bus is a slack whose active power is free,
+        // so to conserve energy the converter must draw exactly that AC power
+        // (plus losses) from the DC side.  Its AC output is the slack injection
+        //   P_ac = pcalc[ac] − p_spec[ac]
+        // (network injection minus the co-located generation/load already in
+        // p_spec; the converter itself contributes 0 to p_spec in this mode), and
+        // its DC injection tracks it: P_dc = −(P_ac + loss(P_ac)).  This makes the
+        // DC-bus balance reflect the true AC power instead of the scheduled p_set,
+        // so the converter is energy-consistent regardless of the schedule.
+        const double p_ac = pcalc[ac_bus] - p_spec[ac_bus];
+        const double vdc_bus =
+            (dc_bus >= 0 && dc_bus < ndc) ? vdc[dc_bus] : 1.0;
+        const double ploss =
+            converter_loss(conv, p_ac, vdc_bus, data.base_mva, data.loss_model);
+        double pdc = -(p_ac + ploss);
+        if (conv.r_conv_ac_pu > 0.0) {
+          const double vm_ac = std::max(vm[ac_bus], 0.1);
+          pdc -= conv.r_conv_ac_pu * p_ac * p_ac / (vm_ac * vm_ac);
+        }
+        pdc_spec[dc_bus] += pdc;
+      } else {
+        pdc_spec[dc_bus] +=
+            converter_dc_injection(conv, vm, va, vdc, data.base_mva, data.loss_model);
+      }
     }
   }
 }
@@ -250,7 +276,7 @@ double evaluate_residual_impl(const SolverData& data,
     }
   }
 
-  build_power_spec(data, ac_buses, converters, pg, qg, vm, va, vdc, p_spec, q_spec, pdc_spec);
+  build_power_spec(data, ac_buses, converters, pg, qg, vm, va, vdc, pcalc, p_spec, q_spec, pdc_spec);
 
   pdc_linear = data.gdc * vdc;
   pdc_calc = vdc.array() * pdc_linear.array();

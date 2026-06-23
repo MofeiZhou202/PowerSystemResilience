@@ -1234,13 +1234,16 @@ TEST_CASE("AC_GRID_FORMING converter forms the islanded AC voltage and angle ref
 
   // VSC B inverts the DC tie into the islanded microgrid, forming its AC voltage
   // and angle reference (Mode 1).  Its DC island has VSC A as the Vdc reference,
-  // satisfying ACDC-GFM-05.
+  // satisfying ACDC-GFM-05.  p_set_mw is deliberately set far from the true
+  // delivered power (the ~6 MW microgrid load) to prove the energy-conduit
+  // coupling: the converter draws its ACTUAL AC slack power from the DC side, not
+  // the (wrong) schedule.
   VSCConverter vB;
   vB.index = 1; vB.bus_ac = 3; vB.bus_dc = 2;
   vB.control_mode = ConverterMode::AC_GRID_FORMING;
   vB.v_ac_set_pu = 1.03;
   vB.v_ac_angle_set_deg = 3.0;
-  vB.p_set_mw = 6.0;  // scheduled DC draw ≈ microgrid load
+  vB.p_set_mw = 1.0;  // deliberately wrong (true draw ≈ 6 MW) — coupling overrides it
   vB.pmax_mw = 200.0; vB.pmin_mw = -200.0; vB.p_rated_mw = 200.0; vB.eta = 0.99;
   vB.in_service = true;
   sys.vsc_converters = {vA, vB};
@@ -1255,6 +1258,17 @@ TEST_CASE("AC_GRID_FORMING converter forms the islanded AC voltage and angle ref
   CHECK(std::abs(r.va[2] - 3.0 * 3.14159265358979 / 180.0) < 5e-3);
   // The microgrid load bus stays within a sensible band, energized by the former.
   CHECK(r.vm[3] > 0.9);
+
+  // Energy-conduit coupling: the AC grid-forming converter injects ~+6 MW into
+  // the microgrid (the load) and draws ~−6 MW from the DC side — tracking its
+  // ACTUAL AC slack power, NOT the deliberately-wrong 1 MW schedule.
+  const auto itB = std::find_if(r.vsc_transfers.begin(), r.vsc_transfers.end(),
+                                [](const VSCTransfer& t) { return t.index == 1; });
+  REQUIRE(itB != r.vsc_transfers.end());
+  CHECK(itB->p_ac_mw > 5.9);   // supplies the 6 MW microgrid load (+ losses)
+  CHECK(itB->p_dc_mw < -5.9);  // draws it from the DC link, not the 1 MW schedule
+  // Per-converter energy balance holds: P_ac + P_dc + loss = 0.
+  CHECK(std::abs(itB->p_ac_mw + itB->p_dc_mw + itB->loss_mw) < 1e-6);
 
   // Coordination: no GFM-05 (DC support present) and no blocking issues.
   const auto report = powerflow::evaluate_converter_coordination(sys, true);

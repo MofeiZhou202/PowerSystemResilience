@@ -614,6 +614,7 @@ const COMP = (() => {
     pmax_mw: '最大有功(MW)', pmin_mw: '最小有功(MW)',
     eta: '效率', loss_percent: '损耗(%)',
     v_dc_set_pu: 'DC电压设定(pu)', v_ac_set_pu: 'AC电压设定(pu)',
+    v_ac_angle_set_deg: 'AC构网角度设定(°)',
     closed: '合闸状态', rated_current_ka: '额定电流(kA)',
     vn_kv: '额定电压(kV)', cos_phi: '功率因数', efficiency: '效率',
     // Flexible Load
