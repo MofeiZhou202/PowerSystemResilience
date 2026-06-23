@@ -1,0 +1,78 @@
+{
+  "data_root": "external_data/opendss_ieee_pes",
+  "download_date": "2026-04-03",
+  "sources": [
+    {
+      "source_id": "ieee_pes_feeder13_zip",
+      "source_url": "https://cmte.ieee.org/pes-testfeeders/resources/feeder13.zip",
+      "download_date": "2026-04-03",
+      "sha256": "aa61a0d14ab1d91ee05ad9f4e7673852094cfcadfa37cc1e939963089fb054c4",
+      "provenance": "IEEE PES Test Feeders official public resource bundle",
+      "license_or_terms": "official_public_benchmark_resource",
+      "local_path": "external_data/opendss_ieee_pes/raw/feeder13.zip",
+      "extracted_to": "external_data/opendss_ieee_pes/extracted/13_node"
+    },
+    {
+      "source_id": "ieee_pes_feeder34_zip",
+      "source_url": "https://cmte.ieee.org/pes-testfeeders/resources/feeder34.zip",
+      "download_date": "2026-04-03",
+      "sha256": "90787963653b20d96ec9dc46d06d4452d467dbf5278a0ec6dd061a58e142a9d5",
+      "provenance": "IEEE PES Test Feeders official public resource bundle",
+      "license_or_terms": "official_public_benchmark_resource",
+      "local_path": "external_data/opendss_ieee_pes/raw/feeder34.zip",
+      "extracted_to": "external_data/opendss_ieee_pes/extracted/34_node"
+    },
+    {
+      "source_id": "ieee_pes_feeder123_zip",
+      "source_url": "https://cmte.ieee.org/pes-testfeeders/resources/feeder123.zip",
+      "download_date": "2026-04-03",
+      "sha256": "7aaddc0ccf3f282a340fdcbc3638a50f9654aab52b3dac026079b1da5b452d9b",
+      "provenance": "IEEE PES Test Feeders official public resource bundle",
+      "license_or_terms": "official_public_benchmark_resource",
+      "local_path": "external_data/opendss_ieee_pes/raw/feeder123.zip",
+      "extracted_to": "external_data/opendss_ieee_pes/extracted/123_node"
+    },
+    {
+      "source_id": "opendss_reference_13_node_master",
+      "source_url": "https://sourceforge.net/p/electricdss/code/HEAD/tree/trunk/Version8/Distrib/IEEETestCases/13Bus/IEEE13Nodeckt.dss?format=raw",
+      "download_date": "2026-04-03",
+      "sha256": "de0fa4651c5284f5ce72610c6be2ad20f4c7dd7ec93c3cb1549765d5b7e9f859",
+      "provenance": "OpenDSS official SourceForge Version8 IEEETestCases/13Bus raw script",
+      "license_or_terms": "OpenDSS_official_reference_data",
+      "local_path": "external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Nodeckt.dss"
+    },
+    {
+      "source_id": "opendss_reference_13_node_linecodes",
+      "source_url": "https://sourceforge.net/p/electricdss/code/HEAD/tree/trunk/Version8/Distrib/IEEETestCases/13Bus/IEEELineCodes.DSS?format=raw",
+      "download_date": "2026-04-03",
+      "sha256": "855910b3757efb1084c8310747a3459881cc135bd773665cdd6db16ff9b50ae1",
+      "provenance": "OpenDSS official SourceForge Version8 IEEETestCases/13Bus raw script",
+      "license_or_terms": "OpenDSS_official_reference_data",
+      "local_path": "external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEELineCodes.DSS"
+    },
+    {
+      "source_id": "opendss_reference_13_node_busxy",
+      "source_url": "https://sourceforge.net/p/electricdss/code/HEAD/tree/trunk/Version8/Distrib/IEEETestCases/13Bus/IEEE13Node_BusXY.csv?format=raw",
+      "download_date": "2026-04-03",
+      "sha256": "f8dd1528c72f339ebf41bf1355ed64ef12fbe30864fcc839ed5e5e9dc527846e",
+      "provenance": "OpenDSS official SourceForge Version8 IEEETestCases/13Bus raw coordinate file",
+      "license_or_terms": "OpenDSS_official_reference_data",
+      "local_path": "external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Node_BusXY.csv"
+    }
+  ],
+  "derivations": [
+    {
+      "derivation_id": "linux_case_sensitive_redirect_compat",
+      "derived_path": "external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEELineCodes.dss",
+      "operation": "added lowercase symlink for case-sensitive redirect compatibility on Linux while preserving the original upstream file",
+      "source_ids": [
+        "opendss_reference_13_node_linecodes"
+      ]
+    }
+  ],
+  "notes": [
+    "IEEE PES feeder zip bundles are kept only under external_data/opendss_ieee_pes/raw and extracted/.",
+    "OpenDSS reference scripts are kept only under external_data/opendss_ieee_pes/opendss_reference.",
+    "Formal compare artifacts remain under reports/opendss_pf_compare; raw feeder data is not copied into tests/data or reports."
+  ]
+}
