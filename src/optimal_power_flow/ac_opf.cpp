@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -24,6 +25,10 @@
 #include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/optimal_power_flow/formulation.hpp"
 #include "hacdcpf/optimal_power_flow/native_ipm_solver.hpp"
+
+#ifdef HACDCPF_HAVE_IPOPT
+#include "hacdcpf/engine/engine.hpp"  // hacdcpf::engine::NLPModel, IpoptAdapter
+#endif
 
 namespace hacdcpf::opf {
 
@@ -1792,7 +1797,118 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
   return false;
 }
 
-ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptions& opt) {
+// Inner nonlinear solver used by the shared parity full-space formulation.
+//   Auto      : native parity primal-dual IPM first, Ipopt as a fallback
+//   NativeIPM : self-developed parity primal-dual IPM only
+//   Ipopt     : embedded Ipopt (filter line-search) only
+enum class ParityInnerSolver { Auto, NativeIPM, Ipopt };
+
+// Solve the assembled parity OPF nonlinear program with the embedded Ipopt
+// filter line-search NLP solver.  The parity `Problem` already exposes every
+// callback Ipopt needs (objective, gradient, equality/inequality residuals and
+// Jacobians, and the Lagrangian Hessian), so the model maps 1:1 onto
+// engine::NLPModel.  Box bounds are passed as variable bounds; only the
+// nonlinear inequalities (`h(x) <= 0`) become general constraints.
+//
+// `available` is set false when Ipopt is not compiled in; callers then keep the
+// native-IPM result.  Ipopt does not return constraint multipliers through this
+// adapter, so `lambda_eq` is left empty (LMP extraction is skipped downstream).
+parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
+                                          const parity::IPMOptions& ipm_opt,
+                                          bool& available) {
+  parity::IPMResult res;
+#ifdef HACDCPF_HAVE_IPOPT
+  // The embedded Ipopt is statically linked against MUMPS 5.7.3, whose
+  // InitializeStructure currently corrupts the heap on this toolchain
+  // (___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED),
+  // aborting the whole process at the first factorization.  An abort cannot be
+  // caught, so the Ipopt OPF path is gated behind an explicit opt-in: set
+  // HACDCPF_ENABLE_IPOPT_OPF=1 only when linking against a working Ipopt/linear
+  // solver build.  When disabled, callers transparently keep the native result.
+  if (std::getenv("HACDCPF_ENABLE_IPOPT_OPF") == nullptr) {
+    available = false;
+    res.converged = false;
+    res.status =
+        "Ipopt disabled (embedded MUMPS unstable; set HACDCPF_ENABLE_IPOPT_OPF=1 to attempt)";
+    return res;
+  }
+  available = true;
+
+  Eigen::VectorXd xmin;
+  Eigen::VectorXd xmax;
+  Eigen::VectorXd x0;
+  parity::build_variable_bounds(prob, xmin, xmax);
+  parity::build_initial_point(prob, xmin, xmax, x0);
+
+  const int n = prob.vidx.n_total;
+
+  engine::NLPModel nlp;
+  nlp.sense = engine::Sense::Minimize;
+  nlp.vars.resize(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    engine::VariableMeta vm;
+    vm.type = engine::VarType::Continuous;
+    vm.lb = std::isfinite(xmin[i]) ? xmin[i] : -1e20;
+    vm.ub = std::isfinite(xmax[i]) ? xmax[i] : 1e20;
+    nlp.vars[static_cast<size_t>(i)] = vm;
+  }
+  nlp.x0 = x0;
+
+  nlp.f = [&prob](const Eigen::VectorXd& x) -> double {
+    return parity::objective(prob, x);
+  };
+  nlp.grad = [&prob](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    Eigen::VectorXd hdiag;
+    parity::objective_gradient_hessian_diag(prob, x, g, hdiag);
+  };
+  nlp.g = [&prob](const Eigen::VectorXd& x, Eigen::VectorXd& g) {
+    parity::EvalWorkspace ws;
+    parity::equality_constraints(prob, x, ws, g);
+  };
+  nlp.jac_g = [&prob](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& J) {
+    // equality_jacobian reads intermediate quantities (p_calc/q_calc, ...) that
+    // equality_constraints populates in the shared workspace, so it must run
+    // first on the same workspace and point.
+    parity::EvalWorkspace ws;
+    Eigen::VectorXd g_tmp;
+    parity::equality_constraints(prob, x, ws, g_tmp);
+    parity::equality_jacobian(prob, x, ws, J);
+  };
+  nlp.h = [&prob](const Eigen::VectorXd& x, Eigen::VectorXd& h) {
+    parity::nonlinear_inequality_constraints(prob, x, h);
+  };
+  nlp.jac_h = [&prob](const Eigen::VectorXd& x, Eigen::SparseMatrix<double>& J) {
+    parity::nonlinear_inequality_jacobian(prob, x, J);
+  };
+  nlp.lagrangian_hess = [&prob](const Eigen::VectorXd& x,
+                                const Eigen::VectorXd& lambda,
+                                const Eigen::VectorXd* nu,
+                                Eigen::SparseMatrix<double>& H) {
+    parity::lagrangian_hessian(prob, x, lambda, nu, H, 0.0);
+  };
+
+  engine::IpoptAdapter ipopt;
+  const engine::SolveResult sol = ipopt.solve_nlp(nlp);
+
+  res.x = (sol.x.size() == n) ? sol.x : x0;
+  res.converged = sol.stats.success;
+  res.iterations = sol.stats.iterations;
+  res.primal_inf = sol.stats.primal_feas;
+  res.dual_inf = sol.stats.dual_feas;
+  res.complementarity = sol.stats.complementarity;
+  res.status = std::string("Ipopt: ") + sol.stats.status;
+#else
+  (void)prob;
+  (void)ipm_opt;
+  available = false;
+  res.converged = false;
+  res.status = "Ipopt not compiled in";
+#endif
+  return res;
+}
+
+ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptions& opt,
+                                  ParityInnerSolver inner = ParityInnerSolver::Auto) {
   ACOPFResult out;
   // Parity-IPM uses the AML hybrid OPF builder, which enforces the VDC_Q DC-bus
   // voltage equality and the converter capacity circle / quadratic loss.
@@ -1837,12 +1953,42 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   ipm_opt.alpha_max = std::clamp(opt.interior_fraction, 0.5, 0.9999);
   ipm_opt.verbose = opt.verbose;
 
-  const parity::IPMResult ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
+  // ── Inner nonlinear solver selection ──────────────────────────────────────
+  // Auto: native parity IPM first; if it does not converge, retry the SAME
+  // assembled problem with Ipopt (filter line-search) when available.
+  parity::IPMResult ipm_res;
+  std::string backend_label;
+  if (inner == ParityInnerSolver::Ipopt) {
+    bool ipopt_ok = false;
+    ipm_res = solve_parity_with_ipopt(prob, ipm_opt, ipopt_ok);
+    backend_label = "ipopt_filter_linesearch";
+    if (!ipopt_ok) {
+      // Ipopt explicitly requested but not compiled in — fall back to native.
+      ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
+      backend_label = "parity_ipm_dense_full_kkt (ipopt unavailable)";
+    }
+  } else if (inner == ParityInnerSolver::NativeIPM) {
+    ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
+    backend_label = "parity_ipm_dense_full_kkt";
+  } else {  // Auto: native parity IPM, then Ipopt fallback on non-convergence
+    ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
+    backend_label = "parity_ipm_dense_full_kkt";
+    if (!ipm_res.converged && opt.allow_fallback) {
+      bool ipopt_ok = false;
+      const parity::IPMResult ipopt_res =
+          solve_parity_with_ipopt(prob, ipm_opt, ipopt_ok);
+      if (ipopt_ok && ipopt_res.converged) {
+        ipm_res = ipopt_res;
+        backend_label = "ipopt_filter_linesearch (auto-fallback)";
+      }
+    }
+  }
+
   out.converged = ipm_res.converged;
   out.iterations = std::max(0, ipm_res.iterations + 1);
   out.outer_iterations = 1;
   out.max_stationarity = ipm_res.dual_inf;
-  out.profiling.linear_solver_backend = "parity_ipm_dense_full_kkt";
+  out.profiling.linear_solver_backend = backend_label;
   out.solver_path = OPFSolverPath::ParityIPM;
   out.profiling.total_iterations = out.iterations;
   out.profiling.accepted_steps = out.iterations;
@@ -2010,7 +2156,7 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
   }
 
   if (out.converged) {
-    out.status = "converged (parity primal-dual IPM)";
+    out.status = "converged (" + backend_label + ")";
   } else {
     out.status = "not converged: " + ipm_res.status;
   }
@@ -2144,25 +2290,46 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     }
   }
 
-  // Auto-enable a hybrid-capable primal-dual path when any DC/VSC subsystem is present.
-  if (has_hybrid_acdc && !opt.enable_primal_dual) {
+  // ── High-level solver-backend selection ───────────────────────────────────
+  // Translate ACOPFOptions::ac_solver_backend into the legacy primal-dual flags
+  // and the inner nonlinear solver.  The parity full-space formulation is shared
+  // by the native IPM and Ipopt; only the inner Newton engine differs.
+  ParityInnerSolver inner = ParityInnerSolver::Auto;
+  switch (opt.ac_solver_backend) {
+    case ACOPFSolverBackend::ParityIPM:
+      opt.enable_primal_dual = true;
+      opt.use_parity_ipm = true;
+      inner = ParityInnerSolver::NativeIPM;
+      break;
+    case ACOPFSolverBackend::Ipopt:
+      opt.enable_primal_dual = true;
+      opt.use_parity_ipm = true;
+      inner = ParityInnerSolver::Ipopt;
+      break;
+    case ACOPFSolverBackend::EconomicDispatch:
+      // Force the fast economic-dispatch + AC PF path (pure-AC only).
+      opt.enable_primal_dual = false;
+      opt.use_parity_ipm = false;
+      break;
+    case ACOPFSolverBackend::Auto:
+    default:
+      inner = ParityInnerSolver::Auto;
+      break;
+  }
+
+  // Auto-enable a hybrid-capable primal-dual path when any DC/VSC subsystem is
+  // present (unless the caller explicitly chose the economic-dispatch backend).
+  if (has_hybrid_acdc && !opt.enable_primal_dual &&
+      opt.ac_solver_backend != ACOPFSolverBackend::EconomicDispatch) {
     opt.enable_primal_dual = true;
     opt.use_parity_ipm = true;
   }
 
   if (opt.enable_primal_dual && opt.use_parity_ipm) {
-    ACOPFResult parity_out = solve_with_parity_ipm(sys, opt);
-    if (!parity_out.converged && opt.allow_fallback) {
-      ACOPFOptions fallback_opt = opt;
-      fallback_opt.use_parity_ipm = false;
-      ACOPFResult fallback = solve_ac_opf(sys, fallback_opt);
-      if (fallback.converged) {
-        fallback.status =
-            "converged (fallback after parity IPM failure: " + parity_out.status + ")";
-      }
-      return fallback;
-    }
-    return parity_out;
+    // The parity path internally applies the Ipopt fallback when inner == Auto
+    // and opt.allow_fallback is set, so no separate recursive economic-dispatch
+    // fallback is needed here.
+    return solve_with_parity_ipm(sys, opt, inner);
   }
 
   HybridPowerSystem ac_only = sys;

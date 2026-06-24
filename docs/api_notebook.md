@@ -26,18 +26,23 @@ data to numerical results.
    `include/hacdcpf/validation/validate_system.hpp`,
    `include/hacdcpf/projection/project_to_canonical.hpp`, and
    `src/model/network_utils.cpp`.
-3. Solver assembly:
+3. Converter control and model-scope declarations:
+   `include/hacdcpf/model/device_control_role.hpp`,
+   `include/hacdcpf/model/converter_model_scope.hpp`,
+   `include/hacdcpf/power_flow/converter_coordination.hpp`, and
+   `src/power_flow/converter_coordination.cpp`.
+4. Solver assembly:
    `include/hacdcpf/assembly/solver_data.hpp`,
    `include/hacdcpf/assembly/index_map.hpp`, and
    `src/power_flow/solver_data.cpp`.
-4. Power flow:
+5. Power flow:
    `include/hacdcpf/power_flow/*.hpp` and `src/power_flow/*.cpp`.
-5. Optimal power flow:
+6. Optimal power flow:
    `include/hacdcpf/optimal_power_flow/*.hpp` and
    `src/optimal_power_flow/*.cpp`.
-6. Graph and topology tools:
+7. Graph and topology tools:
    `include/hacdcpf/graph/*.hpp` and `src/graph/*.cpp`.
-7. I/O and application API:
+8. I/O and application API:
    `include/hacdcpf/io/*.hpp`, `src/io/*.cpp`,
    `include/hacdcpf/api/hacdcpf.hpp`, and `src/api/hacdcpf.cpp`.
 
@@ -48,13 +53,37 @@ Use the search box in the generated HTML for these review terms:
 - `HybridPowerSystem`
 - `SolverData`
 - `PowerFlowResult`
+- `SolverDiagnostics`
+- `ConverterCoordinationReport`
+- `ConverterModelScope`
+- `DeviceControlRole`
 - `OPFProblem`
+- `ACOPFResult`
+- `DCOPFResult`
 - `Formulation`
 - `project_to_canonical_models`
 - `make_solver_data`
 - `solve_power_flow`
 - `solve_ac_opf`
 - `build_power_system_graph`
+
+## Current Result Metadata
+
+The current public result objects deliberately expose model fidelity rather than
+requiring callers to infer it from the solver name.
+
+- `PowerFlowResult::converter_model_scope` reports the converter physics honored
+  by the snapshot Newton solve. `PowerFlowResult::diagnostics` also contains
+  `converter_coordination`, equation-closure scan fields, `promoted_vsc_indices`,
+  and `effective_converters`.
+- `DCDCTransfer` reports the solved duty ratio, voltage ratio, and whether the
+  duty ratio is defined/feasible for the declared topology.
+- `ACOPFResult` carries `solver_path`, `profiling`, `infeasibility_hints`,
+  `audit`, and `converter_model_scope`. The parity path reflects enabled
+  converter capacity/current/modulation/DC-DC-duty constraint families in the
+  scope tag and validity flags.
+- `DCOPFResult` carries `solver_chain`, `objective_model`,
+  `load_shedding_mw`, `branch_mu_valid`, and `converter_model_scope`.
 
 ## Adding Better Function Notes
 

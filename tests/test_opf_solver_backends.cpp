@@ -1,0 +1,135 @@
+// tests/test_opf_solver_backends.cpp
+// =====================================================================
+// Coverage for the AC OPF solver-backend selector (ACOPFSolverBackend),
+// the gradient-based objective-scaling robustness improvement, and
+// convergence on the internal hybrid AC/DC cases (case300_acdc /
+// case2000_acdc).  See src/optimal_power_flow/ac_opf.cpp and
+// src/optimal_power_flow/parity_ipm.cpp.
+// =====================================================================
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <string>
+
+#include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
+#include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/optimal_power_flow/opf_result.hpp"
+
+using namespace hacdcpf;
+
+namespace {
+std::string data_path(const std::string& f) {
+  return std::string(HACDCPF_TEST_DATA_DIR) + "/" + f;
+}
+}  // namespace
+
+// ── Internal hybrid AC/DC cases ──────────────────────────────────────────────
+
+TEST_CASE("AC OPF converges on internal hybrid case300_acdc", "[opf][acdc]") {
+  HybridPowerSystem sys = io::build_case300_acdc();
+  REQUIRE_FALSE(sys.ac.buses.empty());
+  REQUIRE_FALSE(sys.dc.buses.empty());  // genuinely hybrid
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 200;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK(r.converged);
+  CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
+  CHECK(r.objective > 0.0);
+  CHECK_FALSE(r.vm.empty());
+}
+
+TEST_CASE("AC OPF converges on internal hybrid case2000_acdc", "[opf][acdc]") {
+  HybridPowerSystem sys = io::build_case2000_acdc();
+  REQUIRE(sys.ac.buses.size() > 1000);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 400;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  // Gradient-based objective scaling is what lets a ~2000-bus hybrid system
+  // converge in the native IPM (it stalled before the scaling fix).
+  CHECK(r.converged);
+  CHECK(r.objective > 0.0);
+}
+
+// ── Objective-scaling regression guard ───────────────────────────────────────
+
+TEST_CASE("Objective scaling lets the parity IPM converge on case2383wp", "[opf][scaling]") {
+  // case2383wp (Polish winter peak) diverged badly before gradient-based
+  // objective scaling (max stationarity ~0.45 at the iteration cap); it now
+  // converges.  This is the regression guard for that scaling.
+  HybridPowerSystem sys = io::parse_matpower(data_path("case2383wp.m"));
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 400;
+  opt.max_outer_iterations = 1;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK(r.converged);
+}
+
+// ── Backend selector semantics ───────────────────────────────────────────────
+
+TEST_CASE("ACOPFSolverBackend selection on case30", "[opf][backend]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case30.m"));
+
+  double dispatch_cost = 0.0;
+  double opf_cost = 0.0;
+
+  SECTION("EconomicDispatch backend uses the fast merit-order + PF path") {
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::EconomicDispatch;
+    const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+    CHECK(r.converged);
+    CHECK(r.status.find("economic-dispatch") != std::string::npos);
+    dispatch_cost = r.objective;
+  }
+
+  SECTION("ParityIPM backend runs the full-space nonlinear OPF") {
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+    const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+    CHECK(r.converged);
+    CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
+    opf_cost = r.objective;
+    CHECK(opf_cost > 0.0);
+  }
+
+  SECTION("Ipopt backend degrades gracefully when embedded Ipopt is unavailable") {
+    // The embedded Ipopt/MUMPS is gated off by default; the Ipopt backend must
+    // therefore fall back to the native parity IPM rather than abort.
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+    const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+    CHECK(r.converged);
+    CHECK(r.solver_path == opf::OPFSolverPath::ParityIPM);
+  }
+
+  (void)dispatch_cost;
+  (void)opf_cost;
+}
+
+TEST_CASE("Real AC OPF beats economic-dispatch cost on case30", "[opf][backend]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case30.m"));
+
+  opf::ACOPFOptions ed;
+  ed.ac_solver_backend = opf::ACOPFSolverBackend::EconomicDispatch;
+  const opf::ACOPFResult r_ed = opf::solve_ac_opf(sys, ed);
+
+  opf::ACOPFOptions pi;
+  pi.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  const opf::ACOPFResult r_pi = opf::solve_ac_opf(sys, pi);
+
+  REQUIRE(r_ed.converged);
+  REQUIRE(r_pi.converged);
+  // The full nonlinear OPF should not cost more than the suboptimal
+  // economic-dispatch + PF shortcut (small tolerance for model differences).
+  CHECK(r_pi.objective <= r_ed.objective * 1.001 + 1.0);
+}

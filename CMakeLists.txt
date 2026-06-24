@@ -339,6 +339,16 @@ if(HACDCPF_ENABLE_ETAP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/etap_conver
   hacdcpf_copy_opendss_runtime(etap_convert)
 endif()
 
+# ── AC OPF numerical-performance benchmark (diagnostic CLI) ────────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opf_numerical_benchmark.cpp")
+  add_executable(opf_numerical_benchmark tools/opf_numerical_benchmark.cpp)
+  target_link_libraries(opf_numerical_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_options(opf_numerical_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(opf_numerical_benchmark)
+endif()
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 if(HACDCPF_BUILD_TESTS)
   include(CTest)

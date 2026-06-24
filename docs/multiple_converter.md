@@ -26,6 +26,20 @@
 
 ---
 
+## 0.1 当前代码实现边界
+
+本文档描述完整目标模型。当前代码已经实现了其中一部分稳态框架，使用时应以 result 中的 scope/diagnostics 为准：
+
+- VSC 数据结构已包含 AC/DC 构网标志、AC_PV/AC_GRID_FORMING/DC droop 相关设定、`p_is_hard_constraint` 与 schedule/initial 分离、AC 侧导通损耗、容量/电流/调制可行性字段，以及 DC 岛主从/参与因子协调字段。
+- DC/DC 数据结构已包含拓扑、占空比上下限和变比，潮流结果会报告 duty、voltage ratio、duty 是否定义和是否可行。
+- `resolve_device_control_role()` 负责把 VSC 控制模式解析为受控量、自由量和岛参考能力；`evaluate_converter_coordination()` 负责 AC_PV、AC/DC 构网互斥、DC 岛多源协调等规则检查。
+- Newton 潮流返回 `PowerFlowResult::converter_model_scope`，当前 scope 为 `steady-state-newton:vsc-3mode+dcdc-power-transfer`，并显式声明哪些 VSC/DC-DC 物理项被模型化、哪些只做 post-solve 诊断。
+- OPF 返回 `ACOPFResult::converter_model_scope` / `DCOPFResult::converter_model_scope`。Parity IPM 路径会按调用方启用的约束族标记容量圆、电流限值、调制限值、DC/DC duty 和支路限值；native AC OPF 主要是 AC OPF + VSC free P/Q/capacity-circle 范围。
+
+因此，本文中“应加入/推荐实现”的完整 active-set 和动态方程生成内容，不应被理解为所有分析引擎都已经完整强制。调用方需要读取 `converter_model_scope.validity` 和 `SolverDiagnostics` 后再解释结果。
+
+---
+
 # 1. 总体建模原则
 
 ## 1.1 分层架构

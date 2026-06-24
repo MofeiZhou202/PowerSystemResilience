@@ -14,6 +14,26 @@ the Norton current-injection convention, branch-flow recovery, and the THD/IHD
 formulas now agree with both an independent numpy reference and the OpenDSS engine
 to ~1e-13 pu.**
 
+## Current API scope
+
+The current public harmonic API is wider than the original Level-1 linear
+penetration solver:
+
+* Single-phase / positive-sequence hybrid AC/DC HPF with automatic VSC-to-NIC
+  spectra, optional Norton output admittance, frequency-dependent AC resistance,
+  and optional DC ripple branch/shunt frequency dependence.
+* Three-phase abc-domain HPF with positive/negative/zero-sequence routing,
+  transformer zero-sequence/vector-group effects, unbalanced per-phase sources,
+  and per-phase THD reporting.
+* Coupled three-phase AC + DC HPF for a full NIC bridge, including linear
+  AC-to-DC and DC-to-AC ripple/harmonic coupling gains.
+* Newton families for nonlinear harmonic resources: single-phase, real/imaginary
+  constant-power, cross-order frequency mixing, three-phase variants, and a
+  stacked hybrid AC/DC Newton solve with bilinear NIC cross-domain coupling.
+* Post-processing helpers for IEEE 519-2014 / GB/T 14549-1993 voltage distortion
+  checks, driving-point and sequence frequency scans, resonance detection,
+  branch current THD/TDD, K-factor, and harmonic-loss metrics.
+
 ## 1. Code review findings
 
 A line-by-line review of the implementation against the documented equations found

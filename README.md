@@ -37,8 +37,8 @@ Rich HybridPowerSystem
 | AC 设备 | `Transformer2W`, `Transformer3W`, `Switch`, `CircuitBreaker`, `Shunt` | 变压器、开关、断路器、并联补偿 | 变压器/开关可展开为等效 `ACBranch`；保留 provenance 映射 |
 | 充电设施 | `ChargingStation`, `Charger` | 站级或桩级 EV 负荷 | 桩级可投影到站级；作为恒功率负荷进入组装 |
 | DC 网络 | `DCBus`, `DCBranch`, `DCLoad` | DC 母线（`DC_P` 有功母线 / `DC_V` 电压参考母线 / `DC_ISOLATED` 停电隔离母线）、线路、负荷 | 进入 DC 电导矩阵和混合潮流/优化模型；`DC_ISOLATED` 母线在图/孤岛分析中按停电处理，不作为电压参考，且在潮流方程组中以固定电压剔除，避免雅可比奇异 |
-| DC 电源/设备 | `StaticGeneratorDC`, `PVArrayDC`, `DCDCConverter`, `DCCircuitBreaker`, DC storage | DC 电源、PV 阵列、DC/DC、DC 开断设备 | 投影到 DC 注入、DC 边或耦合设备 |
-| AC/DC 耦合 | `VSCConverter`, `EnergyRouter` | 换流器、能量路由器、多端口耦合 | VSC 保留为耦合元件；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
+| DC 电源/设备 | `StaticGeneratorDC`, `PVArrayDC`, `DCDCConverter`, `DCCircuitBreaker`, DC storage | DC 电源、PV 阵列、DC/DC、DC 开断设备 | 投影到 DC 注入、DC 边或耦合设备；DC/DC 保留拓扑和占空比可行性字段 |
+| AC/DC 耦合 | `VSCConverter`, `EnergyRouter` | 换流器、能量路由器、多端口耦合 | VSC 保留为带控制角色的耦合元件；EnergyRouter 展开为内部 DC 母线、VSC 和 DC/DC |
 | 聚合资源 | `VirtualPowerPlant`, `Microgrid`, `MobileStorage` | VPP、微电网、移动储能 | VPP/Microgrid 可转换为 PCC 注入；移动储能按位置和状态注入 |
 | 三相系统 | `ThreePhaseACSystem` | abc 三相馈线和设备 | 可投影或单独由三相 NR 分析处理 |
 
@@ -92,6 +92,7 @@ Canonical projection 的入口是 `project_to_canonical_models`，定义在 `inc
 - `FlexibleLoad`、`AsymmetricLoad`、`AsynchronousMotor` 转换为等效 `Load`。
 - `Transformer2W`、`Transformer3W`、`Switch`、`CircuitBreaker` 转换为等效 branch，并通过 `BranchExpandMap` 记录来源。
 - `EnergyRouter` 展开为内部 DC 母线、VSC 和 DC/DC 耦合。
+- VSC 控制模式不直接等同于 bus type；潮流/协调检查阶段通过 `resolve_device_control_role` 解析 PQ、AC_PV、VDC_Q、VDC_VAC、AC_GRID_FORMING、DC_V_DROOP_AC_V 等模式的受控量、自由量和岛参考能力。
 - `VirtualPowerPlant`、`Microgrid`、`MobileStorage` 投影为 PCC 注入或储能等规范设备。
 - 执行零阻抗母线合并，生成 `BusMergeMap`，并剔除无供电路径的 dead islands。
 - 生成 `ComponentMapping` / `ProjectionReport` 能力，用于诊断和结果归因。
@@ -102,9 +103,9 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 
 | 模块 | 入口/路径 | 使用模型 | 输出 |
 |---|---|---|---|
-| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow` | canonical AC/DC network + converter coupling | 电压、相角、潮流、收敛状态 |
+| AC/DC Power Flow | `solve_power_flow`, `solve_dc_power_flow`, `solve_power_flow_fdpf`, `solve_ac_dc_power_flow` | canonical AC/DC network + converter coupling | 电压、相角、支路/VSC/DC-DC/ER 潮流、收敛状态、converter coordination 诊断、`converter_model_scope` |
 | 三相潮流 | `analysis::solve_three_phase_nr` | `ThreePhaseACSystem` | abc 相电压、电流和三相收敛信息 |
-| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型 | 调度、目标值、节点 LMP、约束诊断；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
+| OPF | `solve_ac_opf`, `solve_dc_opf`, `solve_rpo` | AC/IPM、DC LP/QP、无功优化模型 | 调度、目标值、节点 LMP、约束诊断、solver path、audit/infeasibility hints、`converter_model_scope`；DCOPF branch congestion dual 仅在 `branch_mu_valid=true` 时可作工程解释 |
 | 网络重构 | `solve_optimal_reconfiguration`, `run_topology_reconfiguration` | LinDistFlow MILP + graph connectivity | 开/合支路集合、损耗 proxy、PF 校验 |
 | 图分析/降阶 | `build_power_system_graph`, `contract_zero_impedance_edges`, Kron/series/pendant recovery | graph abstraction | 连通性、径向性、super-node、恢复映射 |
 | 可靠性 MC | `run_nonsequential_mc`, `run_sequential_mc` | component outage sampling + DC OPF state evaluation | EENS、LOLE、LOLF、CoV、关键元件 |
@@ -129,7 +130,7 @@ Validation 是从 rich component 到 canonical model 的安全门。主要入口
 
 - AC/DC bus ID 重复、branch/converter 引用不存在、孤岛、slack 缺失或多 slack。
 - 电压上下限、机组 P/Q 限值、branch 阻抗、transformer tap、base MVA 不一致。
-- VSC、DC branch、DC converter 引用错误。
+- VSC、DC branch、DC converter 引用错误，以及 VSC 控制角色/构网互斥/AC_PV 自由度/DC 岛电压源协调问题。
 - 零阻抗和死岛等会影响数值稳定性的拓扑问题。
 
 建议的工程流程是：
@@ -144,6 +145,8 @@ import/load system
 ```
 
 对于可靠性、弹性和网络重构这类组合优化任务，还应把求解器状态、MIP gap、time limit、模型规模和 fallback 状态写入结果对象，避免把启发式、近似可行和最优解混为一谈。
+
+潮流结果的 `SolverDiagnostics` 还会携带 `converter_coordination`、结构闭合扫描、自动提升的 VSC 索引和 `effective_converters`。下游报告应优先解释这些最终生效的换流器状态，而不是只看输入 JSON 中的原始控制模式。
 
 ## 7. Projection Back 与结果归因
 
@@ -279,6 +282,8 @@ Python 侧 `etap-main/src/canonical_schema.py` 提供与 C++ 完全一致的列�
 | 导入 ETAP `.xlsx`（二进制上传） | `POST /api/session/load_etap_xlsx`；「加载算例」对话框「导入ETAP工作簿 (.xlsx)」 |
 | 导入原生 ETAP `.xml` | `POST /api/session/load_etap_xml`；「加载算例」对话框「导入ETAP工程 (.xml)」 |
 
+GUI 的 OPF 入口 `POST /api/session/opf` 支持 parity/native/dc 求解路径，并把实际约束范围以 `scope.model_scope` 与布尔 flags 返回。AC/parity OPF 收敛后，后端会在 OPF 调度点再跑一次 PF，并返回 `post_pf` 支路潮流/VSC 转移以及 best-effort `post_carbon` 碳流结果；前端将 `post_pf.branch_flows` 用于 OPF 解上的潮流/负载率热力图叠加。
+
 往返与摄入由 `tests/test_io_etap.cpp` 覆盖（Excel round-circle、真实导出摄入、
 case14 潮流一致性、逐字段保真度、原生 XML、3 绕组变压器分接头/潮流、短路数据），
 fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到端冒烟测试见
@@ -293,6 +298,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 |---|---|
 | 顶层模型 | `include/hacdcpf/model/hybrid_power_system.hpp` |
 | AC/DC/rich components | `include/hacdcpf/model/ac_components.hpp`, `include/hacdcpf/model/dc_components.hpp`, `include/hacdcpf/model/converter_components.hpp` |
+| Converter control/scope | `include/hacdcpf/model/device_control_role.hpp`, `include/hacdcpf/model/converter_model_scope.hpp`, `include/hacdcpf/power_flow/converter_coordination.hpp`, `src/power_flow/converter_coordination.cpp` |
 | Canonical projection | `include/hacdcpf/projection/project_to_canonical.hpp`, `src/model/network_utils.cpp` |
 | Projection mapping | `include/hacdcpf/projection/canonical_network.hpp` |
 | Solver data assembly | `include/hacdcpf/assembly/solver_data.hpp`, `src/power_flow/solver_data.cpp` |
@@ -304,6 +310,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 可靠性 | `include/hacdcpf/reliability/`, `include/hacdcpf/analysis/three_stage_reliability.hpp`, `src/reliability/` |
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |
 | I/O | `include/hacdcpf/io/`, `src/io/` |
+| Diagnostics/benchmarks | `tools/opendss_pf_compare.cpp` |
 | 技术笔记 | `docs/technical_notebook/` |
 
 ## 10. 维护原则

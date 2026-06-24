@@ -322,11 +322,44 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   Eigen::VectorXd rg;
   Eigen::SparseMatrix<double> jg;
   objective_gradient_hessian_diag(prob, x, grad, hdiag);
+
+  // ── Gradient-based objective scaling (à la Ipopt nlp_scaling_method) ────────
+  // The economic objective is expressed in engineering units ($/MWh · MW), so
+  // ‖∇f‖ can reach 1e4–1e6 while the AC/DC balance rows are O(1).  This unscaled
+  // KKT system makes the stationarity residual dominated by the cost gradient,
+  // stalling the IPM on large/ill-conditioned grids (RTE, Polish).  Damping the
+  // objective by obj_scale = min(1, gmax_ref/‖∇f‖∞) brings the Lagrangian
+  // gradient and the optimal multipliers back to O(1).  It is a no-op when the
+  // objective gradient is already well-scaled (obj_scale == 1).
+  double obj_scale = 1.0;
+  {
+    const double gmax = inf_norm(grad);
+    constexpr double kObjGradRef = 100.0;
+    if (gmax > kObjGradRef) {
+      obj_scale = kObjGradRef / gmax;
+    }
+  }
+  // Add the (obj_scale-1)·∇²f correction to a Lagrangian Hessian computed with
+  // unit objective weight.  ∇²f is diagonal (separable generator costs), so only
+  // structurally present diagonal entries are touched.
+  auto apply_obj_scale_hessian = [&](Eigen::SparseMatrix<double>& H,
+                                     const Eigen::VectorXd& hd) {
+    if (obj_scale == 1.0) {
+      return;
+    }
+    for (Eigen::Index i = 0; i < hd.size(); ++i) {
+      if (hd[i] != 0.0) {
+        H.coeffRef(static_cast<int>(i), static_cast<int>(i)) +=
+            (obj_scale - 1.0) * hd[i];
+      }
+    }
+  };
+
   equality_constraints(prob, x, eq_ws, rg);
   equality_jacobian(prob, x, eq_ws, jg);
 
-  // Lagrangian gradient: Lx = ∇f + Jg'·λ + Jh'·μ
-  Eigen::VectorXd Lx = grad + jg.transpose() * lambda + dh.transpose() * mu;
+  // Lagrangian gradient: Lx = obj_scale·∇f + Jg'·λ + Jh'·μ
+  Eigen::VectorXd Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
 
   // Lagrangian Hessian
   const int m_nonlin = prob.cidx.n_ineq_nonlin;
@@ -341,9 +374,10 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
   Eigen::SparseMatrix<double> Lxx;
   lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
+  apply_obj_scale_hessian(Lxx, hdiag);
 
   // Convergence measures (normalized, matching Julia)
-  double obj = objective(prob, x);
+  double obj = obj_scale * objective(prob, x);
   const double obj0 = obj;  // reference for cost condition (NOT updated each iter)
 
   auto compute_convergence = [&](const Eigen::VectorXd& x_v, const Eigen::VectorXd& z_v,
@@ -612,13 +646,14 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // Re-evaluate functions and derivatives
-    obj = objective(prob, x);
+    obj = obj_scale * objective(prob, x);
     equality_constraints(prob, x, eq_ws, rg);
     equality_jacobian(prob, x, eq_ws, jg);
     assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
     objective_gradient_hessian_diag(prob, x, grad, hdiag);
-    Lx = grad + jg.transpose() * lambda + dh.transpose() * mu;
+    Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
     lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
+    apply_obj_scale_hessian(Lxx, hdiag);
 
     std::tie(feascond, gradcond, compcond, costcond) =
         compute_convergence(x, z, lambda, mu, rg, rh, Lx, obj);

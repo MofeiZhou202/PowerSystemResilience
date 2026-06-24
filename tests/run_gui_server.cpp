@@ -1266,6 +1266,13 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
       <!-- ========================== OPF TAB ============================== -->
       <section id="opfPane" class="tabpane">
         <div class="btn-group">
+          <label style="align-self:center;font-size:13px;color:#555;">AC Solver</label>
+          <select id="opfSolver" title="AC OPF solver backend">
+            <option value="auto" selected>Auto (Parity IPM &rarr; Ipopt)</option>
+            <option value="parity">Parity IPM (native)</option>
+            <option value="ipopt">Ipopt (filter line-search)</option>
+            <option value="dispatch">Economic Dispatch (fast)</option>
+          </select>
           <button class="btn btn-primary" id="runAcOpfBtn">Run AC OPF</button>
           <button class="btn btn-accent" id="runDcOpfBtn">Run DC OPF</button>
           <button class="btn" id="runParityOpfBtn" style="background:#6a0dad;color:#fff;">Run Parity OPF</button>
@@ -2593,15 +2600,16 @@ function renderOpfDcResults(body){
 }
 document.getElementById('runAcOpfBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
-  try{setStatus('Running AC OPF...');const body=await api('/api/session/opf_ac',{});
-  document.getElementById('opfType').textContent='AC';
+  const solver=document.getElementById('opfSolver').value;
+  try{setStatus('Running AC OPF ('+solver+')...');const body=await api('/api/session/opf_ac',{solver});
+  document.getElementById('opfType').textContent=body.solver_backend?body.solver_backend:('AC ('+solver+')');
   document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
   document.getElementById('opfObj').textContent=fmt(body.objective,2);
   document.getElementById('opfIter').textContent=body.iterations;
   Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   renderOpfDcResults(body);
-  setStatus('AC OPF completed.');}catch(e){setStatus(e.message,true);}
+  setStatus(body.converged?('AC OPF completed ('+(body.solver_backend||solver)+').'):('AC OPF did not converge: '+(body.status||'')) ,!body.converged);}catch(e){setStatus(e.message,true);}
 };
 
 document.getElementById('runDcOpfBtn').onclick=async()=>{
@@ -7082,7 +7090,7 @@ int main(int argc, char** argv) {
   });
 
   svr.Post("/api/session/opf_ac",
-           [](const httplib::Request&, httplib::Response& res) {
+           [](const httplib::Request& req, httplib::Response& res) {
     try {
       hacdcpf::HybridPowerSystem sys;
       {
@@ -7098,10 +7106,30 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       hacdcpf::opf::ACOPFOptions opt;
       opt.allow_fallback = true; opt.max_inner_iterations = 120;
+      // Solver backend selection from the GUI dropdown.  "auto"/"parity"/"ipopt"
+      // all run a genuine nonlinear OPF (fixing the historical behaviour where
+      // "Run AC OPF" silently fell back to economic dispatch on pure-AC cases);
+      // "dispatch" keeps the fast merit-order + AC PF path.
+      std::string solver = "auto";
+      try {
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        if (j.contains("solver") && j["solver"].is_string()) solver = j["solver"].get<std::string>();
+      } catch (...) {}
+      if (solver == "parity") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
+      } else if (solver == "ipopt") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::Ipopt;
+      } else if (solver == "dispatch") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::EconomicDispatch;
+      } else {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::Auto;
+        opt.enable_primal_dual = true; opt.use_parity_ipm = true;
+      }
       auto r = hacdcpf::solve_ac_opf(sys, opt);
       json out;
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
+      out["solver_backend"]=r.profiling.linear_solver_backend;
       out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
       out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
       if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
