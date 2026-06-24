@@ -268,6 +268,7 @@ static json dc_bus_to_json(const DCBus& b) {
   j["vm_pu"] = b.vm_pu;
   j["vmax_pu"] = b.vmax_pu;
   j["vmin_pu"] = b.vmin_pu;
+  j["base_kv"] = b.base_kv;
   j["pd_mw"] = b.pd_mw;
   j["in_service"] = b.in_service;
   j["name"] = b.name;
@@ -283,6 +284,7 @@ static DCBus dc_bus_from_json(const json& j) {
   b.vm_pu = jget(j, "vm_pu", 1.0);
   b.vmax_pu = jget(j, "vmax_pu", 1.1);
   b.vmin_pu = jget(j, "vmin_pu", 0.9);
+  b.base_kv = jget(j, "base_kv", 0.0);
   b.pd_mw = jget(j, "pd_mw", 0.0);
   b.in_service = jget(j, "in_service", true);
   b.name = jget<std::string>(j, "name", "");
@@ -1911,6 +1913,7 @@ static json er_port_to_json(const EnergyRouterPort& p) {
   j["index"] = p.index;
   j["name"] = p.name;
   j["bus"] = p.bus;
+  j["side"] = p.side;
   j["port_type"] = er_port_type_str(p.port_type);
   j["voltage_level_kv"] = p.voltage_level_kv;
   j["p_mw"] = p.p_mw;
@@ -1933,6 +1936,7 @@ static EnergyRouterPort er_port_from_json(const json& j) {
   p.index = j.at("index").get<int>();
   p.name = jget<std::string>(j, "name", "");
   p.bus = j.at("bus").get<int>();
+  p.side = jget(j, "side", 0);
   p.port_type = er_port_type_from_str(jget<std::string>(j, "port_type", "AC"));
   p.voltage_level_kv = jget(j, "voltage_level_kv", 0.0);
   p.p_mw = jget(j, "p_mw", 0.0);
