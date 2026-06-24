@@ -11,66 +11,102 @@ extern "C" {
 #endif
 
 /* -------------------------------------------------------------------
- * Double-precision MUMPS structure (job-level view). Only fields
- * actually used by IpMumpsSolverInterface.cpp are documented here;
- * the rest are padding to maintain ABI compatibility.
+ * Double-precision MUMPS structure — EXACT MUMPS 5.6.2 ABI layout.
+ * Must byte-for-byte match the libdmumps.dylib that homebrew ipopt
+ * 3.14.19 links (MUMPS 5.6.2).  Field order/sizes are copied verbatim
+ * from MUMPS_5.6.2/include/dmumps_c.h; DMUMPS_REAL and DMUMPS_COMPLEX
+ * are both `double` for the real double-precision variant.
+ * Earlier this struct was a hand-written guess (claimed "5.7", padded
+ * with pad[60]); its wrong field offsets corrupted the heap because the
+ * linked MUMPS is 5.6.2, not 5.7.x.
  * ------------------------------------------------------------------- */
 typedef struct {
-  /* job / problem type */
-  MUMPS_INT   sym;          /* 0=unsym, 1=SPD, 2=general sym  */
-  MUMPS_INT   par;          /* 0=host is worker, 1=host is not */
-  MUMPS_INT   job;          /* -1=init, -2=destroy, 1=analyse, 2=factor, 3=solve, 4=1+2, 5=1+2+3, 6=2+3 */
-  MPI_Fint    comm_fortran; /* MPI_COMM_WORLD in Fortran integer form */
+  MUMPS_INT   sym, par, job;
+  MUMPS_INT   comm_fortran;       /* Fortran communicator */
+  MUMPS_INT   icntl[60];
+  MUMPS_INT   keep[500];
+  double      cntl[15];
+  double      dkeep[230];
+  MUMPS_INT8  keep8[150];
+  MUMPS_INT   n;
+  MUMPS_INT   nblk;
 
-  /* analysis */
-  MUMPS_INT   icntl[60];    /* integer control parameters  */
-  double      cntl[15];     /* real control parameters     */
-  MUMPS_INT   n;            /* order of A                  */
+  MUMPS_INT   nz_alloc;           /* matlab interface */
 
-  /* assembled triplet input */
-  MUMPS_INT   nz;           /* number of entries (deprecated MUMPS 5.x, use nnz for >2^31) */
-  MUMPS_INT8  nnz;          /* number of entries (MUMPS_INT8, MUMPS 5.1+) */
-  MUMPS_INT  *irn;          /* row indices (1-based)        */
-  MUMPS_INT  *jcn;          /* column indices (1-based)     */
-  double     *a;            /* values                       */
+  /* Assembled entry */
+  MUMPS_INT   nz;
+  MUMPS_INT8  nnz;
+  MUMPS_INT  *irn;
+  MUMPS_INT  *jcn;
+  double     *a;
 
-  /* RHS / solution */
-  MUMPS_INT   nrhs;         /* number of right-hand sides   */
-  MUMPS_INT   lrhs;         /* leading dimension of rhs     */
-  double     *rhs;          /* RHS and solution on return   */
+  /* Distributed entry */
+  MUMPS_INT   nz_loc;
+  MUMPS_INT8  nnz_loc;
+  MUMPS_INT  *irn_loc;
+  MUMPS_INT  *jcn_loc;
+  double     *a_loc;
 
-  /* sparse RHS (optional) */
-  MUMPS_INT   nz_rhs;
-  double     *rhs_sparse;
-  MUMPS_INT  *irhs_sparse;
-  MUMPS_INT  *irhs_ptr;
+  /* Element entry */
+  MUMPS_INT   nelt;
+  MUMPS_INT  *eltptr;
+  MUMPS_INT  *eltvar;
+  double     *a_elt;
 
-  /* distributed solution (optional) */
-  MUMPS_INT   lsol_loc;
-  double     *sol_loc;
-  MUMPS_INT  *isol_loc;
+  /* Matrix by blocks */
+  MUMPS_INT  *blkptr;
+  MUMPS_INT  *blkvar;
 
-  /* output info */
-  MUMPS_INT   infog[80];    /* global info (root process)   */
-  double      rinfog[20];   /* global real info (root)      */
-  MUMPS_INT   info[80];     /* local info per process       */
-  double      rinfo[40];    /* local real info per process  */
+  /* Ordering, if given by user */
+  MUMPS_INT  *perm_in;
 
-  /* pivoting */
-  MUMPS_INT  *pivnul_list;  /* list of pivoting null variables */
-  MUMPS_INT   npiv;         /* number of null pivots        */
+  /* Orderings returned to user */
+  MUMPS_INT  *sym_perm;
+  MUMPS_INT  *uns_perm;
 
-  /* ordering */
-  MUMPS_INT  *perm_in;      /* user-provided ordering       */
-  MUMPS_INT  *sym_perm;     /* symmetric permutation (output) */
-  MUMPS_INT  *uns_perm;     /* unsymmetric permutation      */
-  MUMPS_INT  *listvar_schur;/* list of variables for Schur  */
-  MUMPS_INT   size_schur;   /* size of the Schur complement */
-  double     *schur;        /* Schur complement             */
+  /* Scaling */
+  double     *colsca;
+  double     *rowsca;
+  MUMPS_INT   colsca_from_mumps;
+  MUMPS_INT   rowsca_from_mumps;
 
-  /* internal workspace (opaque) — must remain at end to preserve layout */
-  void       *instance_number_; /* internal */
-  MUMPS_INT   pad[60];      /* ABI padding for future fields */
+  /* RHS, solution, output data and statistics */
+  double     *rhs, *redrhs, *rhs_sparse, *sol_loc, *rhs_loc;
+  MUMPS_INT  *irhs_sparse, *irhs_ptr, *isol_loc, *irhs_loc;
+  MUMPS_INT   nrhs, lrhs, lredrhs, nz_rhs, lsol_loc, nloc_rhs, lrhs_loc;
+  MUMPS_INT   schur_mloc, schur_nloc, schur_lld;
+  MUMPS_INT   mblock, nblock, nprow, npcol;
+  MUMPS_INT   info[80], infog[80];
+  double      rinfo[40], rinfog[40];
+
+  /* Null space */
+  MUMPS_INT   deficiency;
+  MUMPS_INT  *pivnul_list;
+  MUMPS_INT  *mapping;
+
+  /* Schur */
+  MUMPS_INT   size_schur;
+  MUMPS_INT  *listvar_schur;
+  double     *schur;
+
+  /* Internal parameters */
+  MUMPS_INT   instance_number;
+  double     *wk_user;
+
+  /* Version number: MUMPS_VERSION_MAX_LEN(=30) + 1 (\0) + 1 (alignment) */
+  char        version_number[30 + 1 + 1];
+  /* Out-of-core */
+  char        ooc_tmpdir[256];
+  char        ooc_prefix[64];
+  /* Matrix-market dump */
+  char        write_problem[256];
+  MUMPS_INT   lwk_user;
+  /* Save/restore */
+  char        save_dir[256];
+  char        save_prefix[256];
+
+  /* Metis options */
+  MUMPS_INT   metis_options[40];
 } DMUMPS_STRUC_C;
 
 /* Alias: older Ipopt code uses nz, newer uses nnz; both alias the same field.
