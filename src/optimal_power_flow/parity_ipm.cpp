@@ -625,9 +625,6 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     return kkt_solve_sparse(sparse_cache, rhs, dx_out, dlambda_out);
   };
 
-  // Running ℓ1-merit penalty for the primal backtracking line search.
-  double merit_penalty = 1.0;
-
   for (int iter = 0; iter < opt.max_iter && !converged; ++iter) {
     out.iterations = iter;
     out.primal_inf = feascond;
@@ -813,50 +810,7 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Merit-function backtracking line search (primal step only)
-    //   φ(x) = obj_scale·f(x) + π·(‖g(x)‖₁ + ‖h_nl(x)⁺‖₁)
-    // This is a SAFEGUARD: for a well-behaved Newton step the full step
-    // already decreases φ, so no backtracking occurs (α_p unchanged) and the
-    // converging cases are untouched. It only damps the occasional
-    // merit-increasing primal step on ill-conditioned large systems. Box
-    // bounds are excluded (the fraction-to-boundary rule already keeps them
-    // strictly feasible, and shrinking α_p only makes them more feasible).
-    {
-      const double theta_cur =
-          rg.cwiseAbs().sum() +
-          (m_nonlin > 0 ? rh.head(m_nonlin).cwiseMax(0.0).sum() : 0.0);
-      merit_penalty =
-          std::max(merit_penalty, inf_norm(lambda) + inf_norm(mu) + 1.0);
-      const double phi_cur = obj + merit_penalty * theta_cur;
-      double a = alpha_p;
-      Eigen::VectorXd g_try;
-      Eigen::VectorXd h_try;
-      EvalWorkspace ws_ls;
-      for (int ls = 0; ls < 8; ++ls) {
-        const Eigen::VectorXd x_try = x + a * dx;
-        if (x_try.allFinite()) {
-          const double f_try = obj_scale * objective(prob, x_try);
-          equality_constraints(prob, x_try, ws_ls, g_try);
-          nonlinear_inequality_constraints(prob, x_try, h_try);
-          const double theta_try =
-              g_try.cwiseAbs().sum() +
-              (h_try.size() > 0 ? h_try.cwiseMax(0.0).sum() : 0.0);
-          const double phi_try = f_try + merit_penalty * theta_try;
-          if (std::isfinite(phi_try) &&
-              phi_try <= phi_cur + 1e-10 * std::abs(phi_cur)) {
-            break;  // step does not worsen the merit — accept
-          }
-        }
-        a *= 0.5;
-        if (a <= 1e-4 * alpha_p) {
-          break;  // give up shrinking; take the small step
-        }
-      }
-      alpha_p = std::max(a, 1e-10);
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    // Accept step (full Newton step unless damped by the line search above)
+    // Accept step (no line search — direct acceptance per Julia)
     // ────────────────────────────────────────────────────────────────
     x += alpha_p * dx;
     z += alpha_p * dz;
