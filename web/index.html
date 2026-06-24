@@ -112,8 +112,10 @@
   <div class="sub-section" data-sub="opf" hidden>
     <label class="sub-label">求解器
       <select id="opfSolver" title="最优潮流求解器">
-        <option value="parity">混合AC/DC (Parity-IPM)</option>
-        <option value="ac">交流OPF</option>
+        <option value="parity">混合AC/DC · 原生IPM (Parity)</option>
+        <option value="ipopt">混合AC/DC · Ipopt</option>
+        <option value="auto">自动 (Parity→Ipopt)</option>
+        <option value="dispatch">经济调度 (交流)</option>
         <option value="dc">直流OPF</option>
       </select>
     </label>
@@ -128,6 +130,9 @@
     </label>
     <label class="sub-label sub-checkbox" title="AC/DC、DC/DC换流器调制比限值 m_min ≤ m ≤ m_max">
       <input id="opfConvModulation" type="checkbox" checked/><span>换流器调制</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="OPF 收敛后，在 OPF 调度点固定发电出力与电压设定，独立再求解一次潮流，校验 OPF 与潮流的建模/参数一致性">
+      <input id="opfCheckConsistency" type="checkbox"/><span>潮流一致性校验</span>
     </label>
     <button id="btnRunOpf" class="toolbar-btn run-btn" title="运行最优潮流">运行最优潮流</button>
     <span id="opfHint" class="sub-hint">勾选需要施加的约束族；调制/电流/容量限值取自各换流器参数。</span>
@@ -840,6 +845,10 @@
         <div class="topo-section">
           <h4>最优潮流 — AC节点电压/电价</h4>
           <div id="opfBusResults" class="topo-table-wrap"></div>
+        </div>
+        <div class="topo-section" id="opfConsistencySection" style="display:none">
+          <h4>最优潮流 — 潮流一致性校验 (OPF↔潮流 建模/参数)</h4>
+          <div id="opfConsistencyResults" class="topo-table-wrap"></div>
         </div>
         <div class="topo-section" id="opfPostPfSection" style="display:none">
           <h4>最优潮流 — OPF后潮流 (支路功率)</h4>

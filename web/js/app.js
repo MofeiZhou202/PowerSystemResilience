@@ -1308,6 +1308,7 @@ const App = (() => {
   async function runOpf() {
     setStatus('最优潮流计算中...', 'busy');
     const solver = document.getElementById('opfSolver')?.value || 'parity';
+    const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
     const constraints = {
       branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
       converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
@@ -1321,15 +1322,27 @@ const App = (() => {
       return;
     }
 
-    const data = await apiPost('/api/session/opf', { solver, constraints });
+    const data = await apiPost('/api/session/opf', { solver, constraints, check_consistency: checkConsistency });
     if (data) {
       data._constraints = constraints;
+      const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
       if (data.converged) {
-        log(`最优潮流收敛 [${solver}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
+        log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
         setStatus('最优潮流收敛', '');
       } else {
-        log(`最优潮流未收敛 [${solver}]: ${data.status || ''}`, 'warn');
+        log(`最优潮流未收敛 [${solver}${backendTag}]: ${data.status || ''}`, 'warn');
         setStatus('未收敛', 'error');
+      }
+      // Surface the OPF↔PF consistency verdict in the activity log too.
+      if (data.consistency && data.consistency.ran) {
+        const c = data.consistency;
+        if (!c.pf_converged) {
+          log('一致性校验: OPF后潮流未收敛，无法校验', 'warn');
+        } else if (c.consistent) {
+          log(`一致性校验通过: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu, max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°`, 'success');
+        } else {
+          log(`一致性校验存在偏差: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu(Bus ${c.max_dvm_bus}), max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°(Bus ${c.max_dva_bus})`, 'warn');
+        }
       }
       _lastOpfData = data;
       // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
@@ -1386,6 +1399,8 @@ const App = (() => {
       sumDiv.innerHTML = `
         <div class="result-item"><span class="result-label">求解器</span>
           <span class="result-value">${escapeHtml(data.solver || '')}</span></div>
+        <div class="result-item"><span class="result-label">实际后端</span>
+          <span class="result-value">${escapeHtml(data.solver_backend || '-')}</span></div>
         <div class="result-item"><span class="result-label">收敛</span>
           <span class="result-value ${data.converged ? 'result-converged' : 'result-failed'}">
             ${data.converged ? '✓ 是' : '✗ 否'}</span></div>
@@ -1488,6 +1503,50 @@ const App = (() => {
       busDiv.innerHTML = html;
     } else if (busDiv) {
       busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
+    }
+
+    // ── OPF ↔ PF consistency audit (建模/参数一致性) ──
+    const ccSec = document.getElementById('opfConsistencySection');
+    const ccDiv = document.getElementById('opfConsistencyResults');
+    const cc = data.consistency;
+    if (ccSec && ccDiv && cc && cc.ran) {
+      ccSec.style.display = '';
+      const sci = (x) => (x == null || Number.isNaN(Number(x))) ? '-' : Number(x).toExponential(2);
+      const verdict = !cc.pf_converged
+        ? '<span style="color:#e06c75">✗ 潮流未收敛</span>'
+        : (cc.consistent ? '<span style="color:#15803d">✓ 一致</span>'
+                         : '<span style="color:#d19a66">⚠ 存在偏差</span>');
+      const devRow = (label, val, tol, unit, bus) => {
+        const over = (tol != null && Number.isFinite(Number(val)) && Number(val) > Number(tol));
+        const c = over ? 'color:#e06c75' : '';
+        const busTxt = (bus != null && bus >= 0) ? `Bus ${bus}` : '-';
+        return `<tr><td>${label}</td><td style="${c}">${sci(val)}${unit}</td><td>${tol != null ? ('≤ ' + tol + unit) : '-'}</td><td>${busTxt}</td></tr>`;
+      };
+      let html = `<div class="result-item"><span class="result-label">校验结论</span><span class="result-value">${verdict}</span></div>`;
+      if (cc.pf_converged) {
+        html += '<table style="margin-top:6px"><thead><tr><th>指标</th><th>最大偏差</th><th>容差</th><th>最严节点</th></tr></thead><tbody>';
+        html += devRow('|ΔVm| 电压幅值', cc.max_dvm_pu, cc.tol_vm_pu, ' pu', cc.max_dvm_bus);
+        html += devRow('|ΔVa| 电压相角', cc.max_dva_deg, cc.tol_va_deg, '°', cc.max_dva_bus);
+        if (cc.max_dvdc_bus != null && cc.max_dvdc_bus >= 0)
+          html += devRow('|ΔVdc| 直流电压', cc.max_dvdc_pu, cc.tol_vdc_pu, ' pu', cc.max_dvdc_bus);
+        if (cc.max_dpf_mw != null) {
+          const brTxt = (cc.max_dpf_branch != null && cc.max_dpf_branch >= 0) ? ('Branch ' + cc.max_dpf_branch) : '-';
+          html += `<tr><td>|ΔPf| 支路有功流(最大)</td><td>${sci(cc.max_dpf_mw)} MW</td><td>-</td><td>${brTxt}</td></tr>`;
+          html += `<tr><td>|ΔQf| 支路无功流(最大)</td><td>${sci(cc.max_dqf_mvar)} MVar</td><td>-</td><td>-</td></tr>`;
+          html += `<tr><td>发电/损耗一致性</td><td>${sci(cc.branch_loss_mismatch_mw)} MW</td><td>-</td><td>OPF损耗 ${sci(cc.branch_loss_opf_mw)} / 潮流 ${sci(cc.branch_loss_pf_mw)} MW</td></tr>`;
+          if (cc.converter_loss_pf_mw != null && Number(cc.converter_loss_pf_mw) !== 0)
+            html += `<tr><td>换流器损耗 (潮流)</td><td>${sci(cc.converter_loss_pf_mw)} MW</td><td>-</td><td>-</td></tr>`;
+        }
+        html += `<tr><td>平均 |ΔVm| / |ΔVa|</td><td>${sci(cc.mean_dvm_pu)} pu / ${sci(cc.mean_dva_deg)}°</td><td>-</td><td>-</td></tr>`;
+        html += `<tr><td>潮流迭代 / 残差</td><td>${cc.pf_iterations || 0} 次 / ${sci(cc.pf_residual)}</td><td>-</td><td>-</td></tr>`;
+        html += '</tbody></table>';
+        html += '<p class="empty-hint" style="margin-top:6px">在 OPF 调度点固定发电出力与电压设定后独立求解潮流。若 OPF 与潮流共享一致的网络建模/参数，OPF 解即为潮流不动点，电压/相角偏差应接近 0；偏差越大说明两者建模或参数越不一致。</p>';
+      } else {
+        html += `<p class="empty-hint" style="margin-top:6px">${escapeHtml(cc.note || 'OPF后潮流未收敛，无法完成一致性校验。')}</p>`;
+      }
+      ccDiv.innerHTML = html;
+    } else if (ccSec) {
+      ccSec.style.display = 'none';
     }
 
     // ── Post-OPF power flow (潮流) at the OPF dispatch ──
