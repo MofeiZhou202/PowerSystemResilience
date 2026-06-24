@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -66,6 +67,10 @@ Row run_one(const std::string& data_dir, const std::string& file,
 
   opf::ACOPFOptions opt;
   opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  // Backend override for diagnostics: HACDCPF_OPF_BENCH_BACKEND=ipopt|parity.
+  if (const char* be = std::getenv("HACDCPF_OPF_BENCH_BACKEND")) {
+    if (std::string(be) == "ipopt") opt.ac_solver_backend = opf::ACOPFSolverBackend::Ipopt;
+  }
   opt.enable_primal_dual = true;
   opt.use_parity_ipm = true;
   opt.allow_fallback = false;

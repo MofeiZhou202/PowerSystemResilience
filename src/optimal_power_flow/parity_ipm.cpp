@@ -3,14 +3,28 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
+
+// High-performance sparse KKT factorizations from SuiteSparse, used for large
+// systems (≳1500 KKT unknowns).  UMFPACK and KLU provide stronger numerical
+// pivoting than Eigen's built-in SparseLU and separate the symbolic analysis
+// (reused across iterations) from the per-iteration numeric factorization.
+// Gated on HACDCPF_OPF_HAVE_* so the build still works without SuiteSparse.
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+#include <Eigen/UmfPackSupport>
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+#include <Eigen/KLUSupport>
+#endif
 
 #include "hacdcpf/detail/logging.hpp"
 
@@ -36,15 +50,140 @@ double ftb(const Eigen::VectorXd& v, const Eigen::VectorXd& dv, double tau) {
   return alpha;
 }
 
-// Cache for the sparse KKT system, including the SparseLU factorization.
+// Sparse KKT linear-solver backend.  UMFPACK and KLU (SuiteSparse) offer
+// stronger pivoting and separable symbolic/numeric factorization; Eigen's
+// SparseLU is the always-available fallback.
+enum class SparseBackend { Auto, Umfpack, Klu, EigenLU };
+
+// One-time backend override for benchmarking/diagnostics:
+//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto   (default auto)
+SparseBackend sparse_backend_preference() {
+  const char* env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+  if (env != nullptr) {
+    const std::string s(env);
+    if (s == "umfpack") return SparseBackend::Umfpack;
+    if (s == "klu") return SparseBackend::Klu;
+    if (s == "eigen" || s == "sparselu") return SparseBackend::EigenLU;
+  }
+  return SparseBackend::Auto;
+}
+
+// Cache for the sparse KKT system.  Holds the assembled matrix plus whichever
+// factorization backend is active; the symbolic analysis is computed once and
+// reused across iterations (the KKT sparsity pattern is invariant — only the
+// numeric values change with the barrier and regularization).
 struct SparseKKTCache {
   Eigen::SparseMatrix<double> kkt;
   Eigen::SparseMatrix<double> kkt_orig;
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+  Eigen::UmfPackLU<Eigen::SparseMatrix<double>> umf;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+  Eigen::KLU<Eigen::SparseMatrix<double>> klu;
+#endif
   Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu;
+  int active{0};         ///< 0=unset, 1=UMFPACK, 2=KLU, 3=Eigen SparseLU
+  int analyzed_for{0};   ///< backend whose symbolic analysis is currently valid
+  int pat_dim{-1};
+  int pat_nnz{-1};
   bool factored{false};
+  bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
   int nn{0};
   int meq{0};
 };
+
+// Ordered candidate backends for a preference (most-preferred first), filtered
+// to those compiled in and de-duplicated.  Auto prefers UMFPACK: its multifrontal
+// pivoting stays accurate on the near-singular KKTs of very large / ill-conditioned
+// grids (≳6000 buses), where Eigen's SparseLU returns an accurately-solved but
+// wrong step (the system itself is near-singular) and the IPM diverges to NaN.
+// KLU then Eigen SparseLU are escalation failovers.  Eigen SparseLU is ~3–7×
+// faster on well-conditioned KKTs, so a caller that knows its case is benign can
+// pin it via HACDCPF_OPF_SPARSE_SOLVER=eigen.
+std::vector<int> backend_order(SparseBackend pref) {
+  std::vector<int> order;
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+  const bool have_umf = true;
+#else
+  const bool have_umf = false;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+  const bool have_klu = true;
+#else
+  const bool have_klu = false;
+#endif
+  switch (pref) {
+    case SparseBackend::Umfpack:
+      if (have_umf) order.push_back(1);
+      order.push_back(3);
+      if (have_klu) order.push_back(2);
+      break;
+    case SparseBackend::Klu:
+      if (have_klu) order.push_back(2);
+      order.push_back(3);
+      if (have_umf) order.push_back(1);
+      break;
+    case SparseBackend::EigenLU:
+      order.push_back(3);
+      break;
+    case SparseBackend::Auto:
+    default:
+      if (have_umf) order.push_back(1);
+      if (have_klu) order.push_back(2);
+      order.push_back(3);
+      break;
+  }
+  std::vector<int> uniq;
+  for (int b : order) {
+    if (std::find(uniq.begin(), uniq.end(), b) == uniq.end()) uniq.push_back(b);
+  }
+  return uniq;
+}
+
+// Numeric factorization for the active backend; analyzes the pattern only when
+// it has changed (first call or a genuine pattern change).
+bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
+  switch (cache.active) {
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+    case 1:
+      if (pattern_changed) {
+        cache.umf.analyzePattern(cache.kkt);
+        if (cache.umf.info() != Eigen::Success) return false;
+      }
+      cache.umf.factorize(cache.kkt);
+      return cache.umf.info() == Eigen::Success;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+    case 2:
+      if (pattern_changed) {
+        cache.klu.analyzePattern(cache.kkt);
+        if (cache.klu.info() != Eigen::Success) return false;
+      }
+      cache.klu.factorize(cache.kkt);
+      return cache.klu.info() == Eigen::Success;
+#endif
+    default:
+      if (pattern_changed) {
+        cache.lu.analyzePattern(cache.kkt);
+        if (cache.lu.info() != Eigen::Success) return false;
+      }
+      cache.lu.factorize(cache.kkt);
+      return cache.lu.info() == Eigen::Success;
+  }
+}
+
+// Back-solve for the active backend.
+Eigen::VectorXd sparse_solve_active(SparseKKTCache& cache, const Eigen::VectorXd& rhs) {
+  switch (cache.active) {
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+    case 1: return cache.umf.solve(rhs);
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+    case 2: return cache.klu.solve(rhs);
+#endif
+    default: return cache.lu.solve(rhs);
+  }
+}
 
 bool factor_kkt_sparse(SparseKKTCache& cache,
                        const Eigen::SparseMatrix<double>& w,
@@ -88,15 +227,45 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
   cache.kkt.makeCompressed();
   cache.kkt_orig = cache.kkt;
 
-  // Always use full compute() — symbolic reuse via analyzePattern/factorize
-  // is not reliably profitable with progressive regularization.
-  cache.lu.compute(cache.kkt);
-  if (cache.lu.info() != Eigen::Success) {
-    cache.factored = false;
-    return false;
+  const int nnz = static_cast<int>(cache.kkt.nonZeros());
+  const std::vector<int> order = backend_order(sparse_backend_preference());
+  if (cache.active == 0) cache.active = order.front();
+
+  // If the previous solve was inaccurate (a sign the current backend cannot
+  // handle this KKT), escalate to the next, more robust backend in the order.
+  if (cache.solve_degraded) {
+    const auto it = std::find(order.begin(), order.end(), cache.active);
+    if (it != order.end() && std::next(it) != order.end()) {
+      cache.active = *std::next(it);
+    }
+    cache.solve_degraded = false;
   }
-  cache.factored = true;
-  return true;
+
+  // Try the sticky active backend first (its symbolic analysis is reused when
+  // the pattern is unchanged), then escalate through the remaining candidates.
+  std::vector<int> trylist;
+  trylist.push_back(cache.active);
+  for (int b : order) {
+    if (b != cache.active) trylist.push_back(b);
+  }
+
+  for (int backend : trylist) {
+    cache.active = backend;
+    const bool need_analyze =
+        (cache.analyzed_for != backend) || (cache.pat_dim != dim) || (cache.pat_nnz != nnz);
+    if (sparse_factorize_active(cache, need_analyze)) {
+      if (need_analyze) {
+        cache.analyzed_for = backend;
+        cache.pat_dim = dim;
+        cache.pat_nnz = nnz;
+      }
+      cache.factored = true;
+      return true;
+    }
+  }
+
+  cache.factored = false;
+  return false;
 }
 
 bool kkt_solve_sparse(SparseKKTCache& cache,
@@ -106,21 +275,33 @@ bool kkt_solve_sparse(SparseKKTCache& cache,
   if (!cache.factored) {
     return false;
   }
-  Eigen::VectorXd sol = cache.lu.solve(rhs);
+  Eigen::VectorXd sol = sparse_solve_active(cache, rhs);
   if (!sol.allFinite()) {
+    cache.solve_degraded = true;
     return false;
   }
-  // Iterative refinement (2 steps)
+  // Iterative refinement (2 steps) — reuses the existing factorization.
   for (int ref = 0; ref < 2; ++ref) {
     Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
     if (residual.cwiseAbs().maxCoeff() < 1e-14 * rhs.cwiseAbs().maxCoeff()) {
       break;
     }
-    Eigen::VectorXd correction = cache.lu.solve(residual);
+    Eigen::VectorXd correction = sparse_solve_active(cache, residual);
     if (!correction.allFinite()) {
       break;
     }
     sol += correction;
+  }
+  // Flag an inaccurate solve so the next factorization escalates to a more
+  // robust backend.  Eigen's SparseLU can report a successful factorization yet
+  // return a poor solution on near-singular KKTs; the relative residual exposes
+  // that so the IPM switches to UMFPACK before the iterate diverges.
+  const double rhs_norm = rhs.cwiseAbs().maxCoeff();
+  if (rhs_norm > 0.0) {
+    const double resid = (rhs - cache.kkt_orig * sol).cwiseAbs().maxCoeff();
+    if (resid > 1e-6 * rhs_norm) {
+      cache.solve_degraded = true;
+    }
   }
   dx = sol.head(cache.nn);
   dlambda = sol.tail(cache.meq);
@@ -444,6 +625,9 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     return kkt_solve_sparse(sparse_cache, rhs, dx_out, dlambda_out);
   };
 
+  // Running ℓ1-merit penalty for the primal backtracking line search.
+  double merit_penalty = 1.0;
+
   for (int iter = 0; iter < opt.max_iter && !converged; ++iter) {
     out.iterations = iter;
     out.primal_inf = feascond;
@@ -629,7 +813,50 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Accept step (no line search — direct acceptance per Julia)
+    // Merit-function backtracking line search (primal step only)
+    //   φ(x) = obj_scale·f(x) + π·(‖g(x)‖₁ + ‖h_nl(x)⁺‖₁)
+    // This is a SAFEGUARD: for a well-behaved Newton step the full step
+    // already decreases φ, so no backtracking occurs (α_p unchanged) and the
+    // converging cases are untouched. It only damps the occasional
+    // merit-increasing primal step on ill-conditioned large systems. Box
+    // bounds are excluded (the fraction-to-boundary rule already keeps them
+    // strictly feasible, and shrinking α_p only makes them more feasible).
+    {
+      const double theta_cur =
+          rg.cwiseAbs().sum() +
+          (m_nonlin > 0 ? rh.head(m_nonlin).cwiseMax(0.0).sum() : 0.0);
+      merit_penalty =
+          std::max(merit_penalty, inf_norm(lambda) + inf_norm(mu) + 1.0);
+      const double phi_cur = obj + merit_penalty * theta_cur;
+      double a = alpha_p;
+      Eigen::VectorXd g_try;
+      Eigen::VectorXd h_try;
+      EvalWorkspace ws_ls;
+      for (int ls = 0; ls < 8; ++ls) {
+        const Eigen::VectorXd x_try = x + a * dx;
+        if (x_try.allFinite()) {
+          const double f_try = obj_scale * objective(prob, x_try);
+          equality_constraints(prob, x_try, ws_ls, g_try);
+          nonlinear_inequality_constraints(prob, x_try, h_try);
+          const double theta_try =
+              g_try.cwiseAbs().sum() +
+              (h_try.size() > 0 ? h_try.cwiseMax(0.0).sum() : 0.0);
+          const double phi_try = f_try + merit_penalty * theta_try;
+          if (std::isfinite(phi_try) &&
+              phi_try <= phi_cur + 1e-10 * std::abs(phi_cur)) {
+            break;  // step does not worsen the merit — accept
+          }
+        }
+        a *= 0.5;
+        if (a <= 1e-4 * alpha_p) {
+          break;  // give up shrinking; take the small step
+        }
+      }
+      alpha_p = std::max(a, 1e-10);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Accept step (full Newton step unless damped by the line search above)
     // ────────────────────────────────────────────────────────────────
     x += alpha_p * dx;
     z += alpha_p * dz;
@@ -707,6 +934,16 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   out.primal_inf = feascond;
   out.dual_inf = gradcond;
   out.complementarity = compcond;
+  if (use_dense) {
+    out.linear_solver = "dense_lu";
+  } else {
+    switch (sparse_cache.active) {
+      case 1: out.linear_solver = "sparse_umfpack"; break;
+      case 2: out.linear_solver = "sparse_klu"; break;
+      case 3: out.linear_solver = "sparse_eigen_lu"; break;
+      default: out.linear_solver = "sparse"; break;
+    }
+  }
   return out;
 }
 

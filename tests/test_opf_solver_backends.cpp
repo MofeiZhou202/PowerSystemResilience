@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <string>
 
 #include "hacdcpf/io/case_builders.hpp"
@@ -132,4 +133,42 @@ TEST_CASE("Real AC OPF beats economic-dispatch cost on case30", "[opf][backend]"
   // The full nonlinear OPF should not cost more than the suboptimal
   // economic-dispatch + PF shortcut (small tolerance for model differences).
   CHECK(r_pi.objective <= r_ed.objective * 1.001 + 1.0);
+}
+
+// ── Large-scale sparse-KKT robustness ────────────────────────────────────────
+
+TEST_CASE("Large OPF takes the sparse KKT path and converges (case2869pegase)",
+          "[opf][sparse][large]") {
+  HybridPowerSystem sys = io::parse_matpower(data_path("case2869pegase.m"));
+  REQUIRE(sys.ac.buses.size() > 2500);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 200;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK(r.converged);
+  CHECK(std::isfinite(r.objective));
+  // A KKT with far more than 1500 unknowns must use the sparse factorization.
+  CHECK(r.profiling.linear_solver_backend.find("sparse") != std::string::npos);
+}
+
+TEST_CASE("Sparse KKT keeps a 6500-bus RTE OPF finite (no factorization blow-up)",
+          "[opf][sparse][large]") {
+  // case6515rte previously diverged to NaN with a "KKT factorization failed"
+  // status under Eigen's SparseLU; the UMFPACK-first sparse backend keeps the
+  // iterates finite.  This guards that robustness win — convergence on this
+  // hard RTE case is not expected within the iteration budget.
+  HybridPowerSystem sys = io::parse_matpower(data_path("case6515rte.m"));
+  REQUIRE(sys.ac.buses.size() > 6000);
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 40;
+  opt.max_outer_iterations = 1;
+  const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+  CHECK(std::isfinite(r.objective));
+  CHECK(r.objective < 1e30);  // not the pre-fix divergence (objective ~ -3e48)
+  CHECK(r.profiling.linear_solver_backend.find("sparse") != std::string::npos);
 }

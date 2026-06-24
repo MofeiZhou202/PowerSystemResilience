@@ -1818,18 +1818,15 @@ parity::IPMResult solve_parity_with_ipopt(const parity::Problem& prob,
                                           bool& available) {
   parity::IPMResult res;
 #ifdef HACDCPF_HAVE_IPOPT
-  // The embedded Ipopt is statically linked against MUMPS 5.7.3, whose
-  // InitializeStructure currently corrupts the heap on this toolchain
-  // (___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED),
-  // aborting the whole process at the first factorization.  An abort cannot be
-  // caught, so the Ipopt OPF path is gated behind an explicit opt-in: set
-  // HACDCPF_ENABLE_IPOPT_OPF=1 only when linking against a working Ipopt/linear
-  // solver build.  When disabled, callers transparently keep the native result.
-  if (std::getenv("HACDCPF_ENABLE_IPOPT_OPF") == nullptr) {
+  // The embedded Ipopt links MUMPS 5.6.2 (homebrew).  The Ipopt MUMPS interface
+  // struct in MIPSolvers was corrected to the matching 5.6.2 ABI, so the former
+  // heap corruption is resolved and this path is enabled by default.  It can
+  // still be force-disabled with HACDCPF_DISABLE_IPOPT_OPF if a future toolchain
+  // reintroduces an Ipopt/MUMPS ABI mismatch.
+  if (std::getenv("HACDCPF_DISABLE_IPOPT_OPF") != nullptr) {
     available = false;
     res.converged = false;
-    res.status =
-        "Ipopt disabled (embedded MUMPS unstable; set HACDCPF_ENABLE_IPOPT_OPF=1 to attempt)";
+    res.status = "Ipopt disabled (HACDCPF_DISABLE_IPOPT_OPF set)";
     return res;
   }
   available = true;
@@ -1965,14 +1962,14 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     if (!ipopt_ok) {
       // Ipopt explicitly requested but not compiled in — fall back to native.
       ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
-      backend_label = "parity_ipm_dense_full_kkt (ipopt unavailable)";
+      backend_label = "parity_ipm:" + ipm_res.linear_solver + " (ipopt unavailable)";
     }
   } else if (inner == ParityInnerSolver::NativeIPM) {
     ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
-    backend_label = "parity_ipm_dense_full_kkt";
+    backend_label = "parity_ipm:" + ipm_res.linear_solver;
   } else {  // Auto: native parity IPM, then Ipopt fallback on non-convergence
     ipm_res = parity::solve_primal_dual_ipm(prob, ipm_opt);
-    backend_label = "parity_ipm_dense_full_kkt";
+    backend_label = "parity_ipm:" + ipm_res.linear_solver;
     if (!ipm_res.converged && opt.allow_fallback) {
       bool ipopt_ok = false;
       const parity::IPMResult ipopt_res =

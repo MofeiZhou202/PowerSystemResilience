@@ -295,6 +295,29 @@ endif()
 # ── Link against MIPSolvers (brings Eigen3, fmt, nlohmann_json, HiGHS, Ipopt) ─
 target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 
+# ── SuiteSparse include path for the OPF sparse-KKT solver (UMFPACK/KLU) ───────
+# MIPSolvers links UMFPACK/KLU and defines HACDCPF_HAVE_UMFPACK/KLU, but keeps the
+# SuiteSparse *include* directory PRIVATE to its own target.  The native OPF IPM
+# uses Eigen's UmfPackLU/KLU wrappers (which #include <umfpack.h>/<klu.h>), so
+# re-discover the include directory here and expose dedicated HACDCPF_OPF_HAVE_*
+# macros that are enabled only when the headers are actually reachable.
+find_path(HACDCPF_SUITESPARSE_INCLUDE_DIR
+  NAMES umfpack.h klu.h
+  HINTS $ENV{SUITESPARSE_ROOT} /opt/homebrew/opt/suite-sparse /opt/homebrew
+        /usr/local/opt/suite-sparse /usr/local /usr
+  PATH_SUFFIXES include include/suitesparse)
+if(HACDCPF_SUITESPARSE_INCLUDE_DIR)
+  target_include_directories(hacdcpf PRIVATE ${HACDCPF_SUITESPARSE_INCLUDE_DIR})
+  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/umfpack.h")
+    target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_UMFPACK=1)
+    message(STATUS "hacdcpf: OPF sparse KKT can use UMFPACK (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+  endif()
+  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/klu.h")
+    target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_KLU=1)
+    message(STATUS "hacdcpf: OPF sparse KKT can use KLU (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+  endif()
+endif()
+
 # ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────
 if(HACDCPF_ENABLE_ETAP AND TARGET OpenXLSX::OpenXLSX)
   target_link_libraries(hacdcpf PUBLIC OpenXLSX::OpenXLSX)
