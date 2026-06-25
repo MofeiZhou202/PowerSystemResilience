@@ -341,7 +341,9 @@ endif()
 # ── Apple Accelerate ─────────────────────────────────────────────────────────
 # 使用 generator expression 而非裸字符串，使导出的 targets 文件在非 Apple
 # 平台（Linux/Windows）上不会尝试链接 -framework Accelerate。
-if(APPLE)
+# GCC on macOS does not provide the same Accelerate sparse API surface used by
+# the IPM fast path, so only enable this path with Clang-family compilers.
+if(APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
   target_compile_definitions(mipsolvers PUBLIC
     MIPSOLVERS_HAVE_ACCELERATE=1 HACDCPF_HAVE_ACCELERATE=1)
 endif()
