@@ -1,0 +1,1963 @@
+Data directory: D:\luosipeng\Code_Script\HybridACDCDistribtutionSystemsSimulation\data
+MATPOWER directory: D:\luosipeng\Code_Script\HybridACDCDistribtutionSystemsSimulation\external_data\matpower
+XJTU frontend: http://127.0.0.1:8088/xjtu/
+  (serving from D:\luosipeng\Code_Script\HybridACDCDistribtutionSystemsSimulation\web)
+Hybrid AC/DC Planning Studio running at http://127.0.0.1:8088
+Press Ctrl+C to stop.
+[DEBUG] Dumped JSON to debug_json_dump_0.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_1.json (86353 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_2.json (100128 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_3.json (86353 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_4.json (86353 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_5.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_6.json (100134 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_7.json (98921 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_8.json (100188 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_9.json (100294 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_10.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_11.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_12.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_P vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_13.json (100134 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_14.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_15.json (154137 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_16.json (86353 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_17.json (85126 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98
+[DEBUG] Dumped JSON to debug_json_dump_18.json (85126 bytes)
+
+[DEBUG load_json_string] System: Canvas System
+  base_mva=100
+  AC Bus 1 type=3 vm=1.05 va=0
+  AC Bus 2 type=3 vm=1.05 va=0
+  AC Bus 3 type=3 vm=1.05 va=0
+  AC Bus 4 type=1 vm=1 va=0
+  AC Bus 5 type=1 vm=1 va=0
+  AC Bus 6 type=1 vm=1 va=0
+  AC Bus 7 type=1 vm=1 va=0
+  AC Bus 8 type=1 vm=1 va=0
+  AC Bus 9 type=1 vm=1 va=0
+  AC Bus 10 type=1 vm=1 va=0
+  AC Bus 11 type=1 vm=1 va=0
+  AC Bus 12 type=1 vm=1 va=0
+  AC Bus 13 type=1 vm=1 va=0
+  AC Bus 14 type=1 vm=1 va=0
+  AC Bus 15 type=1 vm=1 va=0
+  AC Bus 16 type=1 vm=1 va=0
+  AC Bus 17 type=1 vm=1 va=0
+  AC Bus 18 type=1 vm=1 va=0
+  AC Bus 19 type=1 vm=1 va=0
+  AC Bus 20 type=1 vm=1 va=0
+  AC Bus 21 type=1 vm=1 va=0
+  AC Bus 22 type=1 vm=1 va=0
+  AC Bus 23 type=1 vm=1 va=0
+  AC Bus 24 type=1 vm=1 va=0
+  AC Bus 25 type=1 vm=1 va=0
+  AC Bus 26 type=1 vm=1 va=0
+  AC Bus 27 type=1 vm=1 va=0
+  AC Bus 28 type=1 vm=1 va=0
+  AC Bus 29 type=1 vm=1 va=0
+  AC Bus 30 type=1 vm=1 va=0
+  AC Bus 31 type=1 vm=1 va=0
+  AC Bus 32 type=1 vm=1 va=0
+  AC Bus 33 type=1 vm=1 va=0
+  AC Bus 34 type=1 vm=1 va=0
+  AC Bus 35 type=1 vm=1 va=0
+  AC Bus 36 type=1 vm=1 va=0
+  AC Bus 37 type=1 vm=1 va=0
+  AC Bus 38 type=1 vm=1 va=0
+  AC Bus 39 type=1 vm=1 va=0
+  ExtGrid bus=1 vm=1.05
+  ExtGrid bus=2 vm=1.05
+  ExtGrid bus=3 vm=1.05
+  AC Branch 1->4 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->5 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->6 r=0.810375 x=0.8644 b=0 tap=1
+  AC Branch 1->7 r=1.2105 x=1.2912 b=0 tap=1
+  AC Branch 1->8 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->9 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->10 r=1.09102 x=1.16376 b=0 tap=1
+  AC Branch 1->11 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->12 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->13 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->14 r=0.647775 x=0.69096 b=0 tap=1
+  AC Branch 2->15 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->16 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->17 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->18 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->19 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->20 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->21 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 2->22 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->23 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->24 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->25 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 1->26 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 3->27 r=0.125 x=0.08 b=0 tap=1
+  AC Branch 31->34 r=0.0225 x=0.024 b=0 tap=1
+  AC Branch 32->34 r=0.0375 x=0.04 b=0 tap=1
+  AC Branch 10->28 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 8->29 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 6->30 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 14->31 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 7->32 r=0.0125 x=0.008 b=0 tap=1
+  AC Branch 13->33 r=0.0125 x=0.008 b=0 tap=1
+  DC Bus 1 type=DC_V vm=1 base_kv=0
+  DC Bus 2 type=DC_V vm=1 base_kv=0
+  DC Bus 3 type=DC_P vm=1 base_kv=0
+  DC Bus 4 type=DC_P vm=1 base_kv=0
+  DC Bus 5 type=DC_P vm=1 base_kv=0
+  DC Bus 6 type=DC_P vm=1 base_kv=0
+  DC Bus 7 type=DC_P vm=1 base_kv=0
+  DC Branch 2->3 r=0.001
+  DC Branch 2->4 r=0.001
+  DC Branch 2->5 r=0.001
+  DC Branch 2->6 r=0.001
+  DC Branch 2->7 r=0.02
+  DC Load bus=3 p=0.15
+  DC Load bus=4 p=0.15
+  DC Load bus=5 p=0.15
+  DC Load bus=6 p=0.15
+  VSC ac=28 dc=1 mode=1 p=0 q=0 eta=0.98
+  VSC ac=29 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=30 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=31 dc=1 mode=0 p=0 q=0 eta=0.98
+  VSC ac=35 dc=2 mode=1 p=0.24 q=0 eta=0.98
+  VSC ac=36 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=37 dc=7 mode=0 p=0.16 q=0.052589 eta=0.975
+  VSC ac=38 dc=7 mode=0 p=0.08 q=0.052589 eta=0.975
+  VSC ac=39 dc=7 mode=0 p=-0.4 q=0 eta=0.98

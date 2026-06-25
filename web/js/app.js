@@ -2931,6 +2931,8 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">总发电成本</span>
         <span class="result-value">$${(data.total_generation_cost || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">总网损</span>
+        <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
     `;
 
     const hrs = Array.from({ length: data.num_steps }, (_, i) => i);

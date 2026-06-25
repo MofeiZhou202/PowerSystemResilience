@@ -1,0 +1,7 @@
+loaded: buses_ac=? gens=? vsc=?
+ts_config: steps=8760 profiles=32 loads_mapped=25 materialized=0
+
+=== RESULT: PF 8760/8760  OPF 8760/8760  run_opf=True skip_uc=True ===
+suspected failing hours (vm empty or <0.70/>1.30): 0
+vm_min: global_min=0.9582 p1=0.9601 median=0.9931
+vm_max: median=1.0500 p99=1.0500 global_max=1.0500

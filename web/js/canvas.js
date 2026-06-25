@@ -1850,7 +1850,11 @@ const Canvas = (() => {
     });
 
     // Resolve bus index from a device component. Find connected bus via connections.
-    function findBusIndex(compId) {
+    // When no wired bus is found, fall back to `fallback` — callers pass the device's
+    // own stored `bus` param so a device whose wire was lost (e.g. generators added
+    // programmatically to the JSON, never hand-wired on the canvas) keeps its intended
+    // bus instead of silently collapsing onto bus 1.
+    function findBusIndex(compId, fallback = 1) {
       for (const conn of state.connections) {
         if (conn.from.compId === compId) {
           const idx = compBusMap[conn.to.compId];
@@ -1861,7 +1865,7 @@ const Canvas = (() => {
           if (idx !== undefined) return idx;
         }
       }
-      return 1;  // fallback: bus 1 (1-based)
+      return fallback;  // fallback: caller's stored bus, else bus 1 (1-based)
     }
 
     // Find two connected bus indices (for branches, transformers)
@@ -1886,7 +1890,7 @@ const Canvas = (() => {
       const p = comp.params;
       switch (comp.type) {
         case 'generator': {
-          const busIdx = findBusIndex(comp.id);
+          const busIdx = findBusIndex(comp.id, numOr(p.bus, 1));
           sys.ac.generators.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : genIdx,
             name: p.name || `Gen ${genIdx}`,
@@ -2037,6 +2041,9 @@ const Canvas = (() => {
             emission_factor_tco2_mwh: numOr(p.emission_factor_tco2_mwh, 0),
             controllable: p.controllable === true || p.controllable === 'true',
             in_service: p.in_service !== false,
+            cost_c2: numOr(p.cost_c2, 0),
+            cost_c1: numOr(p.cost_c1, 0),
+            cost_c0: numOr(p.cost_c0, 0),
           };
           if (Array.isArray(p.emission_factor_profile_tco2_mwh)) {
             eg.emission_factor_profile_tco2_mwh =
@@ -2835,6 +2842,7 @@ const Canvas = (() => {
         ...COMP.defaults.generator,
         index: gen.index,
         name: gen.name || `Gen ${gen.index !== undefined ? gen.index : ''}`,
+        bus: gen.bus,
         pg_mw: gen.pg_mw, qg_mvar: gen.qg_mvar,
         vg_pu: gen.vg_pu || 1.0,
         pmax_mw: gen.pmax_mw, pmin_mw: gen.pmin_mw,
@@ -2908,6 +2916,9 @@ const Canvas = (() => {
           : undefined,
         controllable: eg.controllable || false,
         in_service: eg.in_service !== false,
+        cost_c2: eg.cost_c2 || 0,
+        cost_c1: eg.cost_c1 || 0,
+        cost_c0: eg.cost_c0 || 0,
       }, busCompMap, -80);
     });
 

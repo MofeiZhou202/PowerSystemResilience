@@ -1316,7 +1316,77 @@
         "mttr_hr": 8
       }
     ],
-    "generators": [],
+    "generators": [
+      {
+        "index": 1,
+        "name": "港口站外部电网",
+        "bus": 1,
+        "pg_mw": 20,
+        "qg_mvar": 0,
+        "vg_pu": 1.05,
+        "pmax_mw": 200,
+        "pmin_mw": -50,
+        "qmax_mvar": 100,
+        "qmin_mvar": -100,
+        "mbase_mva": 100,
+        "is_slack": false,
+        "in_service": true,
+        "cost_c2": 10,
+        "cost_c1": 500,
+        "cost_c0": 0,
+        "emission_factor_tco2_mwh": 0,
+        "startup_cost": 0,
+        "shutdown_cost": 0,
+        "ramp_up_mw_min": 0,
+        "ramp_dn_mw_min": 0
+      },
+      {
+        "index": 2,
+        "name": "芦湾站外部电网",
+        "bus": 1,
+        "pg_mw": 20,
+        "qg_mvar": 0,
+        "vg_pu": 1.05,
+        "pmax_mw": 200,
+        "pmin_mw": -50,
+        "qmax_mvar": 100,
+        "qmin_mvar": -100,
+        "mbase_mva": 100,
+        "is_slack": false,
+        "in_service": true,
+        "cost_c2": 10,
+        "cost_c1": 500,
+        "cost_c0": 0,
+        "emission_factor_tco2_mwh": 0,
+        "startup_cost": 0,
+        "shutdown_cost": 0,
+        "ramp_up_mw_min": 0,
+        "ramp_dn_mw_min": 0
+      },
+      {
+        "index": 3,
+        "name": "环岛站外部电网",
+        "bus": 1,
+        "pg_mw": 20,
+        "qg_mvar": 0,
+        "vg_pu": 1.05,
+        "pmax_mw": 200,
+        "pmin_mw": -50,
+        "qmax_mvar": 100,
+        "qmin_mvar": -100,
+        "mbase_mva": 100,
+        "is_slack": false,
+        "in_service": true,
+        "cost_c2": 10,
+        "cost_c1": 500,
+        "cost_c0": 0,
+        "emission_factor_tco2_mwh": 0,
+        "startup_cost": 0,
+        "shutdown_cost": 0,
+        "ramp_up_mw_min": 0,
+        "ramp_dn_mw_min": 0
+      }
+    ],
     "loads": [
       {
         "index": 1,
@@ -2499,10 +2569,7 @@
         "vn_kv": 10,
         "emission_factor_tco2_mwh": 0,
         "controllable": true,
-        "in_service": true,
-        "cost_c2": 10.0,
-        "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "in_service": true
       },
       {
         "index": 2,
@@ -2521,10 +2588,7 @@
         "vn_kv": 10,
         "emission_factor_tco2_mwh": 0,
         "controllable": true,
-        "in_service": true,
-        "cost_c2": 10.0,
-        "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "in_service": true
       },
       {
         "index": 3,
@@ -2543,10 +2607,7 @@
         "vn_kv": 10,
         "emission_factor_tco2_mwh": 0,
         "controllable": true,
-        "in_service": true,
-        "cost_c2": 10.0,
-        "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "in_service": true
       }
     ],
     "transformers_2w": [
@@ -3080,7 +3141,7 @@
       },
       {
         "index": 2,
-        "bus_type": "DC_V",
+        "bus_type": "DC_P",
         "base_kv": 0.75,
         "vm_pu": 1,
         "vmax_pu": 1.15,
@@ -3606,10 +3667,10 @@
     "themeMode": "light",
     "connectionStyle": "orthogonal",
     "viewBox": {
-      "x": -1029.9274802119767,
-      "y": -449.58575260858834,
-      "w": 1438.0388709355652,
-      "h": 1087.1875024245846
+      "x": -1096.8229219803056,
+      "y": -571.7202379901446,
+      "w": 1130.5952601444951,
+      "h": 854.7536940568853
     },
     "components": [
       {
@@ -3932,6 +3993,27 @@
         "type": "dc_bus",
         "x": 600,
         "y": 20,
+        "rotation": 0
+      },
+      {
+        "key": "generator#1",
+        "type": "generator",
+        "x": -60,
+        "y": 180,
+        "rotation": 0
+      },
+      {
+        "key": "generator#2",
+        "type": "generator",
+        "x": 140,
+        "y": 180,
+        "rotation": 0
+      },
+      {
+        "key": "generator#3",
+        "type": "generator",
+        "x": 340,
+        "y": 180,
         "rotation": 0
       },
       {

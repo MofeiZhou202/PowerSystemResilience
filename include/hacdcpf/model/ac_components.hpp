@@ -206,6 +206,11 @@ struct ExternalGrid {
   bool controllable{true};
 
   double emission_factor_tco2_mwh{0.0};
+
+  // OPF cost (0 = not participating in OPF objective)
+  double cost_c2{0.0};
+  double cost_c1{0.0};
+  double cost_c0{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -2099,6 +2099,34 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return out;
   }
 
+  // Working copy: promote external grids with OPF cost into generator variables.
+  // Allows nighttime timesteps (no PV → sys.ac.generators is empty) to be
+  // dispatched through the grid-tie connection rather than falling back to PF.
+  HybridPowerSystem sys_work = sys;
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    if (eg.cost_c2 == 0.0 && eg.cost_c1 == 0.0) continue;
+    bool already_on_bus = false;
+    for (const auto& g : sys_work.ac.generators)
+      if (g.bus == eg.bus) { already_on_bus = true; break; }
+    if (already_on_bus) continue;
+    const double pmax = (eg.s_sc_max_mva > 0.0) ? eg.s_sc_max_mva : 1000.0;
+    Generator eg_gen;
+    eg_gen.index      = static_cast<int>(sys_work.ac.generators.size());
+    eg_gen.bus        = eg.bus;
+    eg_gen.in_service = true;
+    eg_gen.name       = eg.name.empty() ? ("EG_opf_" + std::to_string(eg.index)) : eg.name;
+    eg_gen.vg_pu      = eg.vm_pu;
+    eg_gen.pmax_mw    =  pmax;
+    eg_gen.pmin_mw    = -pmax;
+    eg_gen.qmax_mvar  =  pmax;
+    eg_gen.qmin_mvar  = -pmax;
+    eg_gen.cost_c2    = eg.cost_c2;
+    eg_gen.cost_c1    = eg.cost_c1;
+    eg_gen.cost_c0    = eg.cost_c0;
+    sys_work.ac.generators.push_back(std::move(eg_gen));
+  }
+
   const bool has_hybrid_acdc = contains_hybrid_acdc_components(sys);
   const bool dropped_dc = has_hybrid_acdc;
   auto append_hybrid_fallback_suppression = [&]() {
@@ -2151,11 +2179,11 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
   }
 
   if (opt.enable_primal_dual && opt.use_parity_ipm) {
-    ACOPFResult parity_out = solve_with_parity_ipm(sys, opt);
+    ACOPFResult parity_out = solve_with_parity_ipm(sys_work, opt);
     if (!parity_out.converged && opt.allow_fallback) {
       ACOPFOptions fallback_opt = opt;
       fallback_opt.use_parity_ipm = false;
-      ACOPFResult fallback = solve_ac_opf(sys, fallback_opt);
+      ACOPFResult fallback = solve_ac_opf(sys_work, fallback_opt);
       if (fallback.converged) {
         fallback.status =
             "converged (fallback after parity IPM failure: " + parity_out.status + ")";
@@ -2165,7 +2193,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return parity_out;
   }
 
-  HybridPowerSystem ac_only = sys;
+  HybridPowerSystem ac_only = sys_work;
   ac_only.dc.buses.clear();
   ac_only.dc.branches.clear();
   ac_only.vsc_converters.clear();
@@ -2197,7 +2225,7 @@ ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const ACOPFOptions& opt_i
     return out;
   }
 
-  core::SolverData data = core::make_solver_data(sys, LossModelType::Linear);
+  core::SolverData data = core::make_solver_data(sys_work, LossModelType::Linear);
   ACOPFIndex idx = build_index(data);
   if (idx.nb == 0 || idx.nvar == 0 || idx.neq == 0) {
     out.status = "AC OPF failed: degenerate model dimensions.";
