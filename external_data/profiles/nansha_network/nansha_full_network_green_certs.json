@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "name": "nansha_full_network_green_certs_2026",
+  "issuer": "广东电力交易中心 (示例)",
+  "vintage_year": 2026,
+  "currency": "CNY",
+  "source": "nansha_full_network_green_certs.json",
+  "note": "南沙混合 AC/DC 算例绿证样例 (auto-generated)。target.bus_index 对应 ac.buses[].index。",
+  "summary": {
+    "total_certs": 17,
+    "total_mwh": 131361.2,
+    "system_demand_mw": 85.2021
+  },
+  "certs": [
+    {
+      "id": "GC-2026-NS-SYS-001",
+      "type": "wind",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q1",
+      "mwh": 67173.36,
+      "price_cny_per_mwh": 60.0,
+      "target": {
+        "type": "system"
+      },
+      "note": "南沙混合电网全网风电绿证 (年度 30% 覆盖)"
+    },
+    {
+      "id": "GC-2026-NS-BUS4-PV01",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q1",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 4
+      },
+      "note": "母线 4 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS5-PV02",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 5
+      },
+      "note": "母线 5 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS6-PV03",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q3",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 6
+      },
+      "note": "母线 6 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS10-PV04",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q4",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 10
+      },
+      "note": "母线 10 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS11-PV05",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q1",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 11
+      },
+      "note": "母线 11 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS12-PV06",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 12
+      },
+      "note": "母线 12 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS13-PV07",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q3",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 13
+      },
+      "note": "母线 13 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS19-PV08",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q4",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 19
+      },
+      "note": "母线 19 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS20-PV09",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q1",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 20
+      },
+      "note": "母线 20 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS23-PV10",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 23
+      },
+      "note": "母线 23 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS24-PV11",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q3",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 24
+      },
+      "note": "母线 24 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS36-PV12",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q4",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 36
+      },
+      "note": "母线 36 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS39-PV13",
+      "type": "solar",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q1",
+      "mwh": 2066.87,
+      "price_cny_per_mwh": 55.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 39
+      },
+      "note": "母线 39 屋面光伏绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS27-HYD01",
+      "type": "hydro",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 12439.51,
+      "price_cny_per_mwh": 48.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 27
+      },
+      "note": "母线 27 工业水电绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS10-HYD02",
+      "type": "hydro",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 12439.51,
+      "price_cny_per_mwh": 48.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 10
+      },
+      "note": "母线 10 工业水电绿证"
+    },
+    {
+      "id": "GC-2026-NS-BUS11-HYD03",
+      "type": "hydro",
+      "issuer": "广东电力交易中心",
+      "vintage_period": "2026-Q2",
+      "mwh": 12439.51,
+      "price_cny_per_mwh": 48.0,
+      "target": {
+        "type": "bus",
+        "bus_index": 11
+      },
+      "note": "母线 11 工业水电绿证"
+    }
+  ]
+}
