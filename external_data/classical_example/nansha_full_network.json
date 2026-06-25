@@ -1,0 +1,7562 @@
+{
+  "name": "Nansha_Full_Hybrid_ACDC_Network",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "Nansha_AC_Backbone_24Feeders_ac",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "SLACK",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 1.0,
+        "in_service": true,
+        "name": "港口站外部电网等值母线"
+      },
+      {
+        "index": 2,
+        "bus_type": "SLACK",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 2,
+        "n_customers": 0,
+        "importance": 1.0,
+        "in_service": true,
+        "name": "芦湾站外部电网等值母线"
+      },
+      {
+        "index": 3,
+        "bus_type": "SLACK",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 1.0,
+        "in_service": true,
+        "name": "环岛站外部电网等值母线"
+      },
+      {
+        "index": 4,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F10 10kV馈线母线"
+      },
+      {
+        "index": 5,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 2,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F11 10kV馈线母线"
+      },
+      {
+        "index": 6,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F20 10kV馈线母线"
+      },
+      {
+        "index": 7,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 4,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F12 10kV馈线母线"
+      },
+      {
+        "index": 8,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 5,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F19 10kV馈线母线"
+      },
+      {
+        "index": 9,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 6,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F13 10kV馈线母线"
+      },
+      {
+        "index": 10,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 7,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F1 10kV馈线母线"
+      },
+      {
+        "index": 11,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 8,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F8 10kV馈线母线"
+      },
+      {
+        "index": 12,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 9,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F14 10kV馈线母线"
+      },
+      {
+        "index": 13,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 10,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F23 10kV馈线母线"
+      },
+      {
+        "index": 14,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 11,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F7 10kV馈线母线"
+      },
+      {
+        "index": 15,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 12,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F6 10kV馈线母线"
+      },
+      {
+        "index": 16,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 13,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F9 10kV馈线母线"
+      },
+      {
+        "index": 17,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 14,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F7 10kV馈线母线"
+      },
+      {
+        "index": 18,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 15,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F24 10kV馈线母线"
+      },
+      {
+        "index": 19,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 16,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F17 10kV馈线母线"
+      },
+      {
+        "index": 20,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 17,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F1 10kV馈线母线"
+      },
+      {
+        "index": 21,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 18,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F22 10kV馈线母线"
+      },
+      {
+        "index": 22,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 19,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "芦湾F2 10kV馈线母线"
+      },
+      {
+        "index": 23,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 20,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F15 10kV馈线母线"
+      },
+      {
+        "index": 24,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 21,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F16 10kV馈线母线"
+      },
+      {
+        "index": 25,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 22,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F18 10kV馈线母线"
+      },
+      {
+        "index": 26,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 23,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F22 10kV馈线母线"
+      },
+      {
+        "index": 27,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 1,
+        "zone": 24,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "环岛F9 10kV馈线母线"
+      },
+      {
+        "index": 28,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F1 工程接入10kV母线",
+        "source_id": 1001,
+        "metadata": {
+          "original_index": 1001,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 29,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F19 工程接入10kV母线",
+        "source_id": 1002,
+        "metadata": {
+          "original_index": 1002,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 30,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F20 工程接入10kV母线",
+        "source_id": 1003,
+        "metadata": {
+          "original_index": 1003,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 31,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F7 工程接入10kV母线",
+        "source_id": 1004,
+        "metadata": {
+          "original_index": 1004,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 32,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F12 工程接入10kV母线",
+        "source_id": 1005,
+        "metadata": {
+          "original_index": 1005,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 33,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 2,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "港口F23 工程接入10kV母线",
+        "source_id": 1006,
+        "metadata": {
+          "original_index": 1006,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 34,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 10.0,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 3,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "光储充站10kV接入母线(港口F7/F12)",
+        "source_id": 1007,
+        "metadata": {
+          "original_index": 1007,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 35,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 0.4,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 3,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "光储充站0.4kV AC母线",
+        "source_id": 1008,
+        "metadata": {
+          "original_index": 1008,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 36,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 0.4,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 4,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "山海湾11号开关房 0.4kV母线",
+        "source_id": 1009,
+        "metadata": {
+          "original_index": 1009,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 37,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 0.4,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 4,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "山海湾12号开关房 0.4kV母线",
+        "source_id": 1010,
+        "metadata": {
+          "original_index": 1010,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 38,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 0.4,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 4,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "山海湾13号开关房 0.4kV母线",
+        "source_id": 1011,
+        "metadata": {
+          "original_index": 1011,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 39,
+        "bus_type": "PQ",
+        "pd_mw": 0.0,
+        "qd_mvar": 0.0,
+        "vm_pu": 1.0,
+        "va_deg": 0.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "base_kv": 0.4,
+        "gs_mw": 0.0,
+        "bs_mvar": 0.0,
+        "area": 4,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0.5,
+        "in_service": true,
+        "name": "山海湾电力电子变压器0.4kV母线",
+        "source_id": 1012,
+        "metadata": {
+          "original_index": 1012,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      }
+    ],
+    "branches": [
+      {
+        "index": 1,
+        "from_bus": 1,
+        "to_bus": 4,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F10馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 2,
+        "from_bus": 1,
+        "to_bus": 5,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F11馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 3,
+        "from_bus": 1,
+        "to_bus": 6,
+        "r_pu": 0.810375,
+        "x_pu": 0.8644,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 10.805,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F20馈线等值线路",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 4.2 线路现状分析：10kV 港口 F20 线",
+        "confidence": "high",
+        "feeder_pdf_main_length_km": 10.805,
+        "feeder_pdf_cable_length_km": 10.805,
+        "feeder_pdf_overhead_length_km": 0.0,
+        "feeder_pdf_cable_models": "ZR-FY-YJV22;FYZRYJV22;YJV22;ZRYJV22",
+        "feeder_pdf_overhead_models": "LGJ-3x240mm2(0km)",
+        "feeder_pdf_safe_current_a": 484,
+        "feeder_pdf_max_current_2025_a": 282,
+        "feeder_pdf_max_load_rate_percent": 58.26,
+        "feeder_pdf_wiring_mode": "2-1单环网",
+        "feeder_pdf_transformer_count": 27,
+        "feeder_pdf_transformer_capacity_kva": 19195,
+        "parameter_basis": "ZR-FY-YJV22 typical_assumption"
+      },
+      {
+        "index": 4,
+        "from_bus": 1,
+        "to_bus": 7,
+        "r_pu": 1.2105,
+        "x_pu": 1.2912,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 16.14,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F12馈线等值线路",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 4.2 线路现状分析：10kV 港口 F12 线；PDF 原文主干线 16.14km、列明电缆 9.31km，长度口径存在未展开支线/分段差异",
+        "confidence": "high",
+        "feeder_pdf_main_length_km": 16.14,
+        "feeder_pdf_cable_length_km": 9.31,
+        "feeder_pdf_overhead_length_km": 0.0,
+        "feeder_pdf_cable_models": "FYZRYJV22;FYZAYJV22;ZRC-YJV22;ZRYJV22",
+        "feeder_pdf_overhead_models": "LGJ-3x240mm2(0km)",
+        "feeder_pdf_safe_current_a": 484,
+        "feeder_pdf_max_current_2025_a": 326,
+        "feeder_pdf_max_load_rate_percent": 67.36,
+        "feeder_pdf_wiring_mode": "2-1单环网",
+        "feeder_pdf_transformer_count": 22,
+        "feeder_pdf_transformer_capacity_kva": 14475,
+        "parameter_basis": "FYZRYJV22 typical_assumption"
+      },
+      {
+        "index": 5,
+        "from_bus": 1,
+        "to_bus": 8,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F19馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 6,
+        "from_bus": 1,
+        "to_bus": 9,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F13馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 7,
+        "from_bus": 1,
+        "to_bus": 10,
+        "r_pu": 1.091025,
+        "x_pu": 1.16376,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 14.547,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F1馈线等值线路",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 4.2 线路现状分析：10kV 港口 F1 线",
+        "confidence": "high",
+        "feeder_pdf_main_length_km": 14.547,
+        "feeder_pdf_cable_length_km": 13.569,
+        "feeder_pdf_overhead_length_km": 0.978,
+        "feeder_pdf_cable_models": "FYZA-YJV22-3x300",
+        "feeder_pdf_overhead_models": "JKLGYJ-3x240",
+        "feeder_pdf_safe_current_a": 484,
+        "feeder_pdf_max_current_2025_a": 410,
+        "feeder_pdf_max_load_rate_percent": 84.71,
+        "feeder_pdf_wiring_mode": "2-1单环网",
+        "feeder_pdf_transformer_count": 41,
+        "feeder_pdf_transformer_capacity_kva": 24790,
+        "parameter_basis": "FYZA-YJV22-3x300 typical_assumption"
+      },
+      {
+        "index": 8,
+        "from_bus": 1,
+        "to_bus": 11,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F8馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 9,
+        "from_bus": 1,
+        "to_bus": 12,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F14馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 10,
+        "from_bus": 1,
+        "to_bus": 13,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F23馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 11,
+        "from_bus": 1,
+        "to_bus": 14,
+        "r_pu": 0.647775,
+        "x_pu": 0.69096,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 8.637,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F7馈线等值线路",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 4.2 线路现状分析：10kV 港口 F7 线",
+        "confidence": "high",
+        "feeder_pdf_main_length_km": 8.637,
+        "feeder_pdf_cable_length_km": 8.637,
+        "feeder_pdf_overhead_length_km": 0.0,
+        "feeder_pdf_cable_models": "FYZRYJV22;ZRYJV22",
+        "feeder_pdf_overhead_models": "",
+        "feeder_pdf_safe_current_a": 800,
+        "feeder_pdf_max_current_2025_a": 67,
+        "feeder_pdf_max_load_rate_percent": 8.38,
+        "feeder_pdf_wiring_mode": "2-1单环网",
+        "feeder_pdf_transformer_count": 8,
+        "feeder_pdf_transformer_capacity_kva": 32330,
+        "parameter_basis": "FYZRYJV22 typical_assumption"
+      },
+      {
+        "index": 12,
+        "from_bus": 2,
+        "to_bus": 15,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F6馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 13,
+        "from_bus": 1,
+        "to_bus": 16,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F9馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 14,
+        "from_bus": 2,
+        "to_bus": 17,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F7馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 15,
+        "from_bus": 1,
+        "to_bus": 18,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F24馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 16,
+        "from_bus": 2,
+        "to_bus": 19,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F17馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 17,
+        "from_bus": 2,
+        "to_bus": 20,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F1馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 18,
+        "from_bus": 2,
+        "to_bus": 21,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F22馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 19,
+        "from_bus": 2,
+        "to_bus": 22,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "芦湾站-芦湾F2馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 20,
+        "from_bus": 1,
+        "to_bus": 23,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F15馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 21,
+        "from_bus": 1,
+        "to_bus": 24,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F16馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 22,
+        "from_bus": 1,
+        "to_bus": 25,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F18馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 23,
+        "from_bus": 1,
+        "to_bus": 26,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口站-港口F22馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 24,
+        "from_bus": 3,
+        "to_bus": 27,
+        "r_pu": 0.125,
+        "x_pu": 0.08,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 1.0,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "环岛站-环岛F9馈线等值线路",
+        "source_type": "typical_assumption",
+        "source_reference": "PDF/Excel 未给该馈线主干长度与型号，按典型 10kV 电缆 1km 等值。",
+        "confidence": "low"
+      },
+      {
+        "index": 1001,
+        "from_bus": 31,
+        "to_bus": 34,
+        "r_pu": 0.0225,
+        "x_pu": 0.024,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.3,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口F7至光储充站10kV接入",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 5.2 光储充一体充电站接入港口F7新建自动化开关站；PDF投资表中压电缆0.3km FYZA-YJV22-8.7/15kV-3x300mm2",
+        "selected_connection_basis": "当前选用港口F7作为主接入点；港口F12天后宫停车场保留为备用候选接入点。",
+        "candidate_connection": "港口F12天后宫停车场新建开关站",
+        "confidence": "medium"
+      },
+      {
+        "index": 1002,
+        "from_bus": 32,
+        "to_bus": 34,
+        "r_pu": 0.0375,
+        "x_pu": 0.04,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.075,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.5,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": false,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "港口F12天后宫至光储充站备用接入",
+        "source_type": "pdf_candidate_connection",
+        "source_reference": "PDF 5.2：光储充一体充电站接入港口F7新建自动化开关站或港口F12天后宫停车场新建开关站",
+        "normally_selected": false,
+        "confidence": "medium"
+      },
+      {
+        "index": 1003,
+        "from_bus": 10,
+        "to_bus": 28,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F1接入中压柔直"
+      },
+      {
+        "index": 1004,
+        "from_bus": 8,
+        "to_bus": 29,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F19接入中压柔直"
+      },
+      {
+        "index": 1005,
+        "from_bus": 6,
+        "to_bus": 30,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F20接入中压柔直/山海湾"
+      },
+      {
+        "index": 1006,
+        "from_bus": 14,
+        "to_bus": 31,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F7接入光储充站"
+      },
+      {
+        "index": 1007,
+        "from_bus": 7,
+        "to_bus": 32,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F12天后宫备用接入"
+      },
+      {
+        "index": 1008,
+        "from_bus": 13,
+        "to_bus": 33,
+        "r_pu": 0.0125,
+        "x_pu": 0.008,
+        "b_pu": 0.0,
+        "r_ohm_per_km": 0.125,
+        "x_ohm_per_km": 0.08,
+        "rate_a_mva": 20.0,
+        "rate_b_mva": 20.0,
+        "rate_c_mva": 20.0,
+        "length_km": 0.1,
+        "tap": 1.0,
+        "shift_deg": 0.0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0.02,
+        "mttr_hr": 8.0,
+        "name": "完整网-港口F23低压互联参考"
+      }
+    ],
+    "generators": [],
+    "loads": [
+      {
+        "index": 1,
+        "bus": 4,
+        "p_mw": 1.95716,
+        "q_mvar": 0.643287,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 17,
+        "profile_id": 100,
+        "in_service": true,
+        "name": "港口F10 聚合负荷"
+      },
+      {
+        "index": 2,
+        "bus": 5,
+        "p_mw": 5.73292,
+        "q_mvar": 1.88432,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 20,
+        "profile_id": 101,
+        "in_service": true,
+        "name": "港口F11 聚合负荷"
+      },
+      {
+        "index": 3,
+        "bus": 6,
+        "p_mw": 4.88424,
+        "q_mvar": 1.605372,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 22,
+        "profile_id": 102,
+        "in_service": true,
+        "name": "港口F20 聚合负荷"
+      },
+      {
+        "index": 4,
+        "bus": 7,
+        "p_mw": 5.64632,
+        "q_mvar": 1.855856,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 12,
+        "profile_id": 103,
+        "in_service": true,
+        "name": "港口F12 聚合负荷"
+      },
+      {
+        "index": 5,
+        "bus": 8,
+        "p_mw": 2.80584,
+        "q_mvar": 0.922235,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 13,
+        "profile_id": 104,
+        "in_service": true,
+        "name": "港口F19 聚合负荷"
+      },
+      {
+        "index": 6,
+        "bus": 9,
+        "p_mw": 1.50684,
+        "q_mvar": 0.495274,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 10,
+        "profile_id": 105,
+        "in_service": true,
+        "name": "港口F13 聚合负荷"
+      },
+      {
+        "index": 7,
+        "bus": 10,
+        "p_mw": 7.1012,
+        "q_mvar": 2.334052,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 38,
+        "profile_id": 106,
+        "in_service": true,
+        "name": "港口F1 聚合负荷"
+      },
+      {
+        "index": 8,
+        "bus": 11,
+        "p_mw": 6.78944,
+        "q_mvar": 2.231581,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 11,
+        "profile_id": 107,
+        "in_service": true,
+        "name": "港口F8 聚合负荷"
+      },
+      {
+        "index": 9,
+        "bus": 12,
+        "p_mw": 4.72836,
+        "q_mvar": 1.554137,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 3,
+        "profile_id": 108,
+        "in_service": true,
+        "name": "港口F14 聚合负荷"
+      },
+      {
+        "index": 10,
+        "bus": 13,
+        "p_mw": 4.05288,
+        "q_mvar": 1.332117,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 15,
+        "profile_id": 109,
+        "in_service": true,
+        "name": "港口F23 聚合负荷"
+      },
+      {
+        "index": 11,
+        "bus": 14,
+        "p_mw": 1.160977,
+        "q_mvar": 0.381595,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 2,
+        "profile_id": 110,
+        "in_service": true,
+        "name": "港口F7 聚合负荷"
+      },
+      {
+        "index": 12,
+        "bus": 15,
+        "p_mw": 3.36008,
+        "q_mvar": 1.104405,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 16,
+        "profile_id": 111,
+        "in_service": true,
+        "name": "芦湾F6 聚合负荷"
+      },
+      {
+        "index": 13,
+        "bus": 16,
+        "p_mw": 2.63264,
+        "q_mvar": 0.865307,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 3,
+        "profile_id": 112,
+        "in_service": true,
+        "name": "港口F9 聚合负荷"
+      },
+      {
+        "index": 14,
+        "bus": 17,
+        "p_mw": 2.00912,
+        "q_mvar": 0.660366,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 5,
+        "profile_id": 113,
+        "in_service": true,
+        "name": "芦湾F7 聚合负荷"
+      },
+      {
+        "index": 15,
+        "bus": 18,
+        "p_mw": 2.71924,
+        "q_mvar": 0.893771,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 5,
+        "profile_id": 114,
+        "in_service": true,
+        "name": "港口F24 聚合负荷"
+      },
+      {
+        "index": 16,
+        "bus": 19,
+        "p_mw": 5.2826,
+        "q_mvar": 1.736307,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 18,
+        "profile_id": 115,
+        "in_service": true,
+        "name": "芦湾F17 聚合负荷"
+      },
+      {
+        "index": 17,
+        "bus": 20,
+        "p_mw": 5.59436,
+        "q_mvar": 1.838777,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 22,
+        "profile_id": 116,
+        "in_service": true,
+        "name": "芦湾F1 聚合负荷"
+      },
+      {
+        "index": 18,
+        "bus": 21,
+        "p_mw": 0.76208,
+        "q_mvar": 0.250484,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 8,
+        "profile_id": 117,
+        "in_service": true,
+        "name": "芦湾F22 聚合负荷"
+      },
+      {
+        "index": 19,
+        "bus": 22,
+        "p_mw": 1.22972,
+        "q_mvar": 0.404189,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 6,
+        "profile_id": 118,
+        "in_service": true,
+        "name": "芦湾F2 聚合负荷"
+      },
+      {
+        "index": 20,
+        "bus": 23,
+        "p_mw": 3.6372,
+        "q_mvar": 1.19549,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 27,
+        "profile_id": 119,
+        "in_service": true,
+        "name": "港口F15 聚合负荷"
+      },
+      {
+        "index": 21,
+        "bus": 24,
+        "p_mw": 2.14768,
+        "q_mvar": 0.705908,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 6,
+        "profile_id": 120,
+        "in_service": true,
+        "name": "港口F16 聚合负荷"
+      },
+      {
+        "index": 22,
+        "bus": 25,
+        "p_mw": 0.88332,
+        "q_mvar": 0.290333,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 3,
+        "profile_id": 121,
+        "in_service": true,
+        "name": "港口F18 聚合负荷"
+      },
+      {
+        "index": 23,
+        "bus": 26,
+        "p_mw": 0.58888,
+        "q_mvar": 0.193555,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 3,
+        "profile_id": 122,
+        "in_service": true,
+        "name": "港口F22 聚合负荷"
+      },
+      {
+        "index": 24,
+        "bus": 27,
+        "p_mw": 7.30904,
+        "q_mvar": 2.402365,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 8,
+        "profile_id": 123,
+        "in_service": true,
+        "name": "环岛F9 聚合负荷"
+      },
+      {
+        "index": 1001,
+        "bus": 35,
+        "p_mw": 0.2,
+        "q_mvar": 0.065737,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Low",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "光储充站居民负荷 200kW"
+      },
+      {
+        "index": 1002,
+        "bus": 36,
+        "p_mw": 0.12,
+        "q_mvar": 0.039442,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾11号开关房 一般居民负荷"
+      },
+      {
+        "index": 1003,
+        "bus": 36,
+        "p_mw": 0.04,
+        "q_mvar": 0.013147,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Critical",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾11号开关房 关键负荷"
+      },
+      {
+        "index": 1004,
+        "bus": 37,
+        "p_mw": 0.12,
+        "q_mvar": 0.039442,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾12号开关房 一般居民负荷"
+      },
+      {
+        "index": 1005,
+        "bus": 37,
+        "p_mw": 0.04,
+        "q_mvar": 0.013147,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Critical",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾12号开关房 关键负荷"
+      },
+      {
+        "index": 1006,
+        "bus": 38,
+        "p_mw": 0.12,
+        "q_mvar": 0.039442,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾13号开关房 一般居民负荷"
+      },
+      {
+        "index": 1007,
+        "bus": 38,
+        "p_mw": 0.04,
+        "q_mvar": 0.013147,
+        "scaling": 1.0,
+        "model": "ConstantPower",
+        "z_percent_p": 0.0,
+        "i_percent_p": 0.0,
+        "p_percent_p": 100.0,
+        "z_percent_q": 0.0,
+        "i_percent_q": 0.0,
+        "p_percent_q": 100.0,
+        "controllable": false,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Critical",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true,
+        "name": "山海湾13号开关房 关键负荷"
+      }
+    ],
+    "shunts": [],
+    "storage": [
+      {
+        "index": 1001,
+        "bus": 28,
+        "in_service": true,
+        "name": "中压构网型储能-港口F1 1MW/2MWh",
+        "p_mw": 0.0,
+        "q_mvar": 0.0,
+        "p_rated_mw": 1.0,
+        "pmax_mw": 1.0,
+        "pmin_mw": -1.0,
+        "qmax_mvar": 0.5,
+        "qmin_mvar": -0.5,
+        "e_rated_mwh": 2.0,
+        "e_mwh": 1.1,
+        "soc_init": 0.55,
+        "soc_min": 0.2,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "self_discharge_pct": 0.03,
+        "max_cycles": 6000,
+        "current_cycles": 0,
+        "soh": 1.0,
+        "replacement_cost": 160.0,
+        "forced_outage_rate": 0.01,
+        "mttr_hr": 12.0
+      },
+      {
+        "index": 1002,
+        "bus": 29,
+        "in_service": true,
+        "name": "中压构网型储能-港口F19 1MW/2MWh",
+        "p_mw": 0.0,
+        "q_mvar": 0.0,
+        "p_rated_mw": 1.0,
+        "pmax_mw": 1.0,
+        "pmin_mw": -1.0,
+        "qmax_mvar": 0.5,
+        "qmin_mvar": -0.5,
+        "e_rated_mwh": 2.0,
+        "e_mwh": 1.1,
+        "soc_init": 0.55,
+        "soc_min": 0.2,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "self_discharge_pct": 0.03,
+        "max_cycles": 6000,
+        "current_cycles": 0,
+        "soh": 1.0,
+        "replacement_cost": 160.0,
+        "forced_outage_rate": 0.01,
+        "mttr_hr": 12.0
+      },
+      {
+        "index": 1003,
+        "bus": 35,
+        "in_service": true,
+        "name": "光储充站构网型储能 100kW/200kWh",
+        "p_mw": 0.0,
+        "q_mvar": 0.0,
+        "p_rated_mw": 0.1,
+        "pmax_mw": 0.1,
+        "pmin_mw": -0.1,
+        "qmax_mvar": 0.05,
+        "qmin_mvar": -0.05,
+        "e_rated_mwh": 0.2,
+        "e_mwh": 0.11,
+        "soc_init": 0.55,
+        "soc_min": 0.2,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "self_discharge_pct": 0.03,
+        "max_cycles": 6000,
+        "current_cycles": 0,
+        "soh": 1.0,
+        "replacement_cost": 160.0,
+        "forced_outage_rate": 0.01,
+        "mttr_hr": 12.0
+      },
+      {
+        "index": 1004,
+        "bus": 36,
+        "in_service": true,
+        "name": "山海湾低压储能 100kW/200kWh",
+        "p_mw": 0.0,
+        "q_mvar": 0.0,
+        "p_rated_mw": 0.1,
+        "pmax_mw": 0.1,
+        "pmin_mw": -0.1,
+        "qmax_mvar": 0.05,
+        "qmin_mvar": -0.05,
+        "e_rated_mwh": 0.2,
+        "e_mwh": 0.11,
+        "soc_init": 0.55,
+        "soc_min": 0.2,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "self_discharge_pct": 0.03,
+        "max_cycles": 6000,
+        "current_cycles": 0,
+        "soh": 1.0,
+        "replacement_cost": 160.0,
+        "forced_outage_rate": 0.01,
+        "mttr_hr": 12.0
+      }
+    ],
+    "renewable_gens": [],
+    "static_generators": [],
+    "flexible_loads": [],
+    "asymmetric_loads": [],
+    "pv_systems": [
+      {
+        "index": 1,
+        "bus": 4,
+        "in_service": true,
+        "name": "港口F10 现有光伏聚合",
+        "p_mw": 0.079496,
+        "q_mvar": 0.0,
+        "sn_mva": 0.218614,
+        "pmax_mw": 0.19874,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.069559,
+        "qmin_mvar": -0.069559,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.19874,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 2,
+        "bus": 5,
+        "in_service": true,
+        "name": "港口F11 现有光伏聚合",
+        "p_mw": 0.154668,
+        "q_mvar": 0.0,
+        "sn_mva": 0.425337,
+        "pmax_mw": 0.38667,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.135334,
+        "qmin_mvar": -0.135334,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.38667,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 3,
+        "bus": 6,
+        "in_service": true,
+        "name": "港口F20 现有光伏聚合",
+        "p_mw": 0.002788,
+        "q_mvar": 0.0,
+        "sn_mva": 0.007667,
+        "pmax_mw": 0.00697,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.002439,
+        "qmin_mvar": -0.002439,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.00697,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 4,
+        "bus": 10,
+        "in_service": true,
+        "name": "港口F1 现有光伏聚合",
+        "p_mw": 1.556876,
+        "q_mvar": 0.0,
+        "sn_mva": 4.281409,
+        "pmax_mw": 3.89219,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 1.362267,
+        "qmin_mvar": -1.362267,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 3.89219,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 5,
+        "bus": 11,
+        "in_service": true,
+        "name": "港口F8 现有光伏聚合",
+        "p_mw": 0.90482,
+        "q_mvar": 0.0,
+        "sn_mva": 2.488255,
+        "pmax_mw": 2.26205,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.791718,
+        "qmin_mvar": -0.791718,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 2.26205,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 6,
+        "bus": 12,
+        "in_service": true,
+        "name": "港口F14 现有光伏聚合",
+        "p_mw": 0.4148,
+        "q_mvar": 0.0,
+        "sn_mva": 1.1407,
+        "pmax_mw": 1.037,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.36295,
+        "qmin_mvar": -0.36295,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 1.037,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 7,
+        "bus": 13,
+        "in_service": true,
+        "name": "港口F23 现有光伏聚合",
+        "p_mw": 0.1248,
+        "q_mvar": 0.0,
+        "sn_mva": 0.3432,
+        "pmax_mw": 0.312,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.1092,
+        "qmin_mvar": -0.1092,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.312,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 8,
+        "bus": 19,
+        "in_service": true,
+        "name": "芦湾F17 现有光伏聚合",
+        "p_mw": 0.02578,
+        "q_mvar": 0.0,
+        "sn_mva": 0.070895,
+        "pmax_mw": 0.06445,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.022558,
+        "qmin_mvar": -0.022558,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.06445,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 9,
+        "bus": 20,
+        "in_service": true,
+        "name": "芦湾F1 现有光伏聚合",
+        "p_mw": 0.01,
+        "q_mvar": 0.0,
+        "sn_mva": 0.0275,
+        "pmax_mw": 0.025,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.00875,
+        "qmin_mvar": -0.00875,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.025,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 10,
+        "bus": 23,
+        "in_service": true,
+        "name": "港口F15 现有光伏聚合",
+        "p_mw": 0.16594,
+        "q_mvar": 0.0,
+        "sn_mva": 0.456335,
+        "pmax_mw": 0.41485,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.145197,
+        "qmin_mvar": -0.145197,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.41485,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 11,
+        "bus": 24,
+        "in_service": true,
+        "name": "港口F16 现有光伏聚合",
+        "p_mw": 0.01344,
+        "q_mvar": 0.0,
+        "sn_mva": 0.03696,
+        "pmax_mw": 0.0336,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.01176,
+        "qmin_mvar": -0.01176,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.0336,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 1001,
+        "bus": 35,
+        "in_service": true,
+        "name": "光储充站屋面光伏 100kW",
+        "p_mw": 0.04,
+        "q_mvar": 0.0,
+        "sn_mva": 0.11,
+        "pmax_mw": 0.1,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.035,
+        "qmin_mvar": -0.035,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.1,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      },
+      {
+        "index": 1002,
+        "bus": 38,
+        "in_service": true,
+        "name": "山海湾光伏 200kWp",
+        "p_mw": 0.08,
+        "q_mvar": 0.0,
+        "sn_mva": 0.22,
+        "pmax_mw": 0.2,
+        "pmin_mw": 0.0,
+        "qmax_mvar": 0.07,
+        "qmin_mvar": -0.07,
+        "control_mode": "MPPT",
+        "controllable": true,
+        "v_ac_set_pu": 1.0,
+        "v_dc_set_pu": 1.0,
+        "inverter_eff": 0.975,
+        "loss_percent": 1.5,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0.0,
+        "impp": 0.0,
+        "voc": 0.0,
+        "isc": 0.0,
+        "alpha_isc": 0.05,
+        "beta_voc": -0.32,
+        "irradiance": 400.0,
+        "temperature": 28.0,
+        "profile_id": 2,
+        "mtbf_panel_hours": 50000.0,
+        "mttr_panel_hours": 24.0,
+        "mtbf_inverter_hours": 25000.0,
+        "mttr_inverter_hours": 12.0,
+        "installed_capacity_mw": 0.2,
+        "baseline_output_pu": 0.4,
+        "pv_curve_disabled_for_pf": true,
+        "parameter_basis": "主算例基准潮流采用0.4pu出力；保留pmax_mw为装机容量。将voc/vmpp置0使luosipeng回退使用p_mw，避免由占位组件串并联数误算出力。"
+      }
+    ],
+    "external_grids": [
+      {
+        "index": 1,
+        "name": "港口站 ExternalGrid",
+        "bus": 1,
+        "in_service": true,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "s_sc_max_mva": 500.0,
+        "s_sc_min_mva": 300.0,
+        "rx_max": 0.2,
+        "rx_min": 0.1,
+        "r_pu": 0.001,
+        "x_pu": 0.01,
+        "r0_pu": 0.002,
+        "x0_pu": 0.02,
+        "vn_kv": 10.0,
+        "controllable": true
+      },
+      {
+        "index": 2,
+        "name": "芦湾站 ExternalGrid",
+        "bus": 2,
+        "in_service": true,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "s_sc_max_mva": 500.0,
+        "s_sc_min_mva": 300.0,
+        "rx_max": 0.2,
+        "rx_min": 0.1,
+        "r_pu": 0.001,
+        "x_pu": 0.01,
+        "r0_pu": 0.002,
+        "x0_pu": 0.02,
+        "vn_kv": 10.0,
+        "controllable": true
+      },
+      {
+        "index": 3,
+        "name": "环岛站 ExternalGrid",
+        "bus": 3,
+        "in_service": true,
+        "vm_pu": 1.05,
+        "va_deg": 0.0,
+        "s_sc_max_mva": 500.0,
+        "s_sc_min_mva": 300.0,
+        "rx_max": 0.2,
+        "rx_min": 0.1,
+        "r_pu": 0.001,
+        "x_pu": 0.01,
+        "r0_pu": 0.002,
+        "x0_pu": 0.02,
+        "vn_kv": 10.0,
+        "controllable": true
+      }
+    ],
+    "transformers_2w": [
+      {
+        "index": 1001,
+        "name": "#1变 800kVA 10/0.4kV",
+        "std_type": "0.8MVA-10.0/0.4",
+        "hv_bus": 34,
+        "lv_bus": 35,
+        "in_service": true,
+        "sn_mva": 0.8,
+        "vn_hv_kv": 10.0,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 6.0,
+        "vkr_percent": 1.0,
+        "pk_kw": 8.0,
+        "pfe_kw": 1.6,
+        "i0_percent": 0.5,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "shift_deg": 0.0,
+        "vector_group": "Dyn11",
+        "z0_percent": 6.0,
+        "x0_r0": 10.0,
+        "mtbf_hours": 80000.0,
+        "mttr_hours": 48.0
+      },
+      {
+        "index": 1002,
+        "name": "山海湾11号开关房 800kVA变压器",
+        "std_type": "0.8MVA-10.0/0.4",
+        "hv_bus": 30,
+        "lv_bus": 36,
+        "in_service": true,
+        "sn_mva": 0.8,
+        "vn_hv_kv": 10.0,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 6.0,
+        "vkr_percent": 1.0,
+        "pk_kw": 8.0,
+        "pfe_kw": 1.6,
+        "i0_percent": 0.5,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "shift_deg": 0.0,
+        "vector_group": "Dyn11",
+        "z0_percent": 6.0,
+        "x0_r0": 10.0,
+        "mtbf_hours": 80000.0,
+        "mttr_hours": 48.0
+      },
+      {
+        "index": 1003,
+        "name": "山海湾12号开关房 800kVA变压器",
+        "std_type": "0.8MVA-10.0/0.4",
+        "hv_bus": 30,
+        "lv_bus": 37,
+        "in_service": true,
+        "sn_mva": 0.8,
+        "vn_hv_kv": 10.0,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 6.0,
+        "vkr_percent": 1.0,
+        "pk_kw": 8.0,
+        "pfe_kw": 1.6,
+        "i0_percent": 0.5,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "shift_deg": 0.0,
+        "vector_group": "Dyn11",
+        "z0_percent": 6.0,
+        "x0_r0": 10.0,
+        "mtbf_hours": 80000.0,
+        "mttr_hours": 48.0
+      },
+      {
+        "index": 1004,
+        "name": "山海湾13号开关房 800kVA变压器",
+        "std_type": "0.8MVA-10.0/0.4",
+        "hv_bus": 32,
+        "lv_bus": 38,
+        "in_service": true,
+        "sn_mva": 0.8,
+        "vn_hv_kv": 10.0,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 6.0,
+        "vkr_percent": 1.0,
+        "pk_kw": 8.0,
+        "pfe_kw": 1.6,
+        "i0_percent": 0.5,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "shift_deg": 0.0,
+        "vector_group": "Dyn11",
+        "z0_percent": 6.0,
+        "x0_r0": 10.0,
+        "mtbf_hours": 80000.0,
+        "mttr_hours": 48.0
+      },
+      {
+        "index": 1005,
+        "name": "山海湾800kVA电力电子变压器等值",
+        "std_type": "0.8MVA-10.0/0.4",
+        "hv_bus": 30,
+        "lv_bus": 39,
+        "in_service": true,
+        "sn_mva": 0.8,
+        "vn_hv_kv": 10.0,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 6.0,
+        "vkr_percent": 1.0,
+        "pk_kw": 8.0,
+        "pfe_kw": 1.6,
+        "i0_percent": 0.5,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "shift_deg": 0.0,
+        "vector_group": "Dyn11",
+        "z0_percent": 6.0,
+        "x0_r0": 10.0,
+        "mtbf_hours": 80000.0,
+        "mttr_hours": 48.0
+      }
+    ],
+    "transformers_3w": [],
+    "switches": [],
+    "circuit_breakers": [
+      {
+        "index": 1,
+        "name": "港口F1-港口F13 常开联络(是)",
+        "bus_from": 10,
+        "bus_to": 9,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 1,
+        "edge_id": "tie_01"
+      },
+      {
+        "index": 2,
+        "name": "港口F7-港口F23 常开联络(是)",
+        "bus_from": 14,
+        "bus_to": 13,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 2,
+        "edge_id": "tie_02"
+      },
+      {
+        "index": 3,
+        "name": "港口F8-港口F14 常开联络(否)",
+        "bus_from": 11,
+        "bus_to": 12,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 3,
+        "edge_id": "tie_03"
+      },
+      {
+        "index": 4,
+        "name": "港口F9-芦湾F7 常开联络(是)",
+        "bus_from": 16,
+        "bus_to": 17,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 4,
+        "edge_id": "tie_04"
+      },
+      {
+        "index": 5,
+        "name": "港口F10-港口F20 常开联络(是)",
+        "bus_from": 4,
+        "bus_to": 6,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 5,
+        "edge_id": "tie_05"
+      },
+      {
+        "index": 6,
+        "name": "港口F11-港口F20 常开联络(是)",
+        "bus_from": 5,
+        "bus_to": 6,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 6,
+        "edge_id": "tie_06"
+      },
+      {
+        "index": 7,
+        "name": "港口F12-港口F19 常开联络(是)",
+        "bus_from": 7,
+        "bus_to": 8,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 7,
+        "edge_id": "tie_07"
+      },
+      {
+        "index": 8,
+        "name": "港口F23-芦湾F6 常开联络(是)",
+        "bus_from": 13,
+        "bus_to": 15,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 8,
+        "edge_id": "tie_08"
+      },
+      {
+        "index": 9,
+        "name": "港口F24-芦湾F1 常开联络(是)",
+        "bus_from": 18,
+        "bus_to": 20,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 9,
+        "edge_id": "tie_09"
+      },
+      {
+        "index": 10,
+        "name": "芦湾F17-芦湾F1 常开联络(是)",
+        "bus_from": 19,
+        "bus_to": 20,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 10,
+        "edge_id": "tie_10"
+      },
+      {
+        "index": 11,
+        "name": "芦湾F22-芦湾F2 常开联络(是)",
+        "bus_from": 21,
+        "bus_to": 22,
+        "breaker_type": "CB",
+        "closed": false,
+        "z_ohm": 0.001,
+        "rated_voltage_kv": 10.0,
+        "i_rated_ka": 1.25,
+        "i_breaking_ka": 25.0,
+        "rated_current_ka": 1.25,
+        "in_service": true,
+        "element_type": "tie",
+        "element_id": 11,
+        "edge_id": "tie_11"
+      }
+    ],
+    "motors": [],
+    "chargers": [],
+    "charging_stations": [
+      {
+        "index": 1,
+        "name": "港口F10 充电桩聚合",
+        "bus": 4,
+        "location": "港口F10 充电桩聚合",
+        "in_service": true,
+        "n_fast": 11,
+        "n_slow": 0,
+        "num_chargers": 11,
+        "n_cars": 22,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 1319.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 527.6,
+        "q_total_kvar": 132.229024,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 2,
+        "name": "港口F11 充电桩聚合",
+        "bus": 5,
+        "location": "港口F11 充电桩聚合",
+        "in_service": true,
+        "n_fast": 19,
+        "n_slow": 0,
+        "num_chargers": 19,
+        "n_cars": 38,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 2268.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 907.2,
+        "q_total_kvar": 227.365752,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 3,
+        "name": "港口F20 充电桩聚合",
+        "bus": 6,
+        "location": "港口F20 充电桩聚合",
+        "in_service": true,
+        "n_fast": 28,
+        "n_slow": 0,
+        "num_chargers": 28,
+        "n_cars": 56,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 3300.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 1320.0,
+        "q_total_kvar": 330.823184,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 4,
+        "name": "港口F19 充电桩聚合",
+        "bus": 8,
+        "location": "港口F19 充电桩聚合",
+        "in_service": true,
+        "n_fast": 5,
+        "n_slow": 0,
+        "num_chargers": 5,
+        "n_cars": 10,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 630.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 252.0,
+        "q_total_kvar": 63.157153,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 5,
+        "name": "港口F13 充电桩聚合",
+        "bus": 9,
+        "location": "港口F13 充电桩聚合",
+        "in_service": true,
+        "n_fast": 17,
+        "n_slow": 0,
+        "num_chargers": 17,
+        "n_cars": 34,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 2098.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 839.2,
+        "q_total_kvar": 210.323346,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 6,
+        "name": "港口F1 充电桩聚合",
+        "bus": 10,
+        "location": "港口F1 充电桩聚合",
+        "in_service": true,
+        "n_fast": 6,
+        "n_slow": 0,
+        "num_chargers": 6,
+        "n_cars": 12,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 715.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 286.0,
+        "q_total_kvar": 71.678357,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 7,
+        "name": "港口F8 充电桩聚合",
+        "bus": 11,
+        "location": "港口F8 充电桩聚合",
+        "in_service": true,
+        "n_fast": 3,
+        "n_slow": 0,
+        "num_chargers": 3,
+        "n_cars": 6,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 395.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 158.0,
+        "q_total_kvar": 39.598533,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 8,
+        "name": "港口F14 充电桩聚合",
+        "bus": 12,
+        "location": "港口F14 充电桩聚合",
+        "in_service": true,
+        "n_fast": 1,
+        "n_slow": 0,
+        "num_chargers": 1,
+        "n_cars": 2,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 7.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 2.8,
+        "q_total_kvar": 0.701746,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 9,
+        "name": "芦湾F6 充电桩聚合",
+        "bus": 15,
+        "location": "芦湾F6 充电桩聚合",
+        "in_service": true,
+        "n_fast": 2,
+        "n_slow": 0,
+        "num_chargers": 2,
+        "n_cars": 4,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 264.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 105.6,
+        "q_total_kvar": 26.465855,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 10,
+        "name": "港口F24 充电桩聚合",
+        "bus": 18,
+        "location": "港口F24 充电桩聚合",
+        "in_service": true,
+        "n_fast": 13,
+        "n_slow": 0,
+        "num_chargers": 13,
+        "n_cars": 26,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 1600.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 640.0,
+        "q_total_kvar": 160.39912,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 11,
+        "name": "芦湾F17 充电桩聚合",
+        "bus": 19,
+        "location": "芦湾F17 充电桩聚合",
+        "in_service": true,
+        "n_fast": 5,
+        "n_slow": 0,
+        "num_chargers": 5,
+        "n_cars": 10,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 540.3,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 216.12,
+        "q_total_kvar": 54.164778,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 12,
+        "name": "芦湾F1 充电桩聚合",
+        "bus": 20,
+        "location": "芦湾F1 充电桩聚合",
+        "in_service": true,
+        "n_fast": 65,
+        "n_slow": 0,
+        "num_chargers": 65,
+        "n_cars": 130,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 7749.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 3099.6,
+        "q_total_kvar": 776.832986,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 13,
+        "name": "芦湾F22 充电桩聚合",
+        "bus": 21,
+        "location": "芦湾F22 充电桩聚合",
+        "in_service": true,
+        "n_fast": 5,
+        "n_slow": 0,
+        "num_chargers": 5,
+        "n_cars": 10,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 620.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 248.0,
+        "q_total_kvar": 62.154659,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 14,
+        "name": "芦湾F2 充电桩聚合",
+        "bus": 22,
+        "location": "芦湾F2 充电桩聚合",
+        "in_service": true,
+        "n_fast": 5,
+        "n_slow": 0,
+        "num_chargers": 5,
+        "n_cars": 10,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 549.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 219.6,
+        "q_total_kvar": 55.036948,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      },
+      {
+        "index": 15,
+        "name": "港口F15 充电桩聚合",
+        "bus": 23,
+        "location": "港口F15 充电桩聚合",
+        "in_service": true,
+        "n_fast": 9,
+        "n_slow": 0,
+        "num_chargers": 9,
+        "n_cars": 18,
+        "p_fast_max_kw": 120.0,
+        "p_slow_max_kw": 7.0,
+        "max_power_kw": 1077.0,
+        "simultaneity_factor": 0.7,
+        "power_factor": 0.97,
+        "utilization_rate": 0.4,
+        "p_total_kw": 430.8,
+        "q_total_kvar": 107.968657,
+        "mtbf_hours": 15000.0,
+        "mttr_hours": 6.0,
+        "load_modeling_basis": "潮流运行负荷使用 p_total_kw/q_total_kvar；装机容量保留在 max_power_kw。ac.chargers 不再输出，避免 luosipeng 投影时重复叠加负荷。",
+        "v2g_capable": false,
+        "p_dis_max_kw": 0.0
+      }
+    ]
+  },
+  "dc": {
+    "name": "Nansha_AC_Backbone_24Feeders_dc",
+    "base_mva": 100.0,
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "DC_V",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 10.0,
+        "area": 2,
+        "zone": 2,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "中压柔直公共DC母线(等值)",
+        "source_id": 1001,
+        "metadata": {
+          "original_index": 1001,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 2,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "光储充站DC750V母线",
+        "source_id": 1002,
+        "metadata": {
+          "original_index": 1002,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 3,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "充电堆1 DC接入点",
+        "source_id": 1003,
+        "metadata": {
+          "original_index": 1003,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 4,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "充电堆2 DC接入点",
+        "source_id": 1004,
+        "metadata": {
+          "original_index": 1004,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 5,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "充电堆3 DC接入点",
+        "source_id": 1005,
+        "metadata": {
+          "original_index": 1005,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 6,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 3,
+        "zone": 3,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "充电堆4 DC接入点",
+        "source_id": 1006,
+        "metadata": {
+          "original_index": 1006,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      },
+      {
+        "index": 7,
+        "bus_type": "DC_P",
+        "vm_pu": 1.0,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0.0,
+        "base_kv": 0.75,
+        "area": 4,
+        "zone": 4,
+        "n_customers": 0,
+        "importance": 0.6,
+        "is_load": false,
+        "in_service": true,
+        "name": "山海湾低压柔直DC750V母线",
+        "source_id": 1007,
+        "metadata": {
+          "original_index": 1007,
+          "renumbering_reason": "luosipeng 部分潮流路径对 bus index 连续性敏感，主算例采用连续求解编号。"
+        }
+      }
+    ],
+    "branches": [
+      {
+        "index": 1001,
+        "from_bus": 2,
+        "to_bus": 3,
+        "r_pu": 0.001,
+        "rate_a_mva": 20.0,
+        "base_kv": 0.75,
+        "s_max_mva": 0.15,
+        "length_km": 0.02,
+        "in_service": true,
+        "name": "DC750V-充电堆1"
+      },
+      {
+        "index": 1002,
+        "from_bus": 2,
+        "to_bus": 4,
+        "r_pu": 0.001,
+        "rate_a_mva": 20.0,
+        "base_kv": 0.75,
+        "s_max_mva": 0.15,
+        "length_km": 0.02,
+        "in_service": true,
+        "name": "DC750V-充电堆2"
+      },
+      {
+        "index": 1003,
+        "from_bus": 2,
+        "to_bus": 5,
+        "r_pu": 0.001,
+        "rate_a_mva": 20.0,
+        "base_kv": 0.75,
+        "s_max_mva": 0.15,
+        "length_km": 0.02,
+        "in_service": true,
+        "name": "DC750V-充电堆3"
+      },
+      {
+        "index": 1004,
+        "from_bus": 2,
+        "to_bus": 6,
+        "r_pu": 0.001,
+        "rate_a_mva": 20.0,
+        "base_kv": 0.75,
+        "s_max_mva": 0.15,
+        "length_km": 0.02,
+        "in_service": true,
+        "name": "DC750V-充电堆4"
+      },
+      {
+        "index": 1005,
+        "from_bus": 2,
+        "to_bus": 7,
+        "r_pu": 0.02,
+        "rate_a_mva": 20.0,
+        "base_kv": 0.75,
+        "s_max_mva": 0.8,
+        "length_km": 4.5,
+        "in_service": true,
+        "name": "光储充站至山海湾12号低压直流远供",
+        "cable_model": "ZA-YJV22-0.6/1kV-4x240mm2",
+        "source_type": "pdf_direct_plus_lookup",
+        "source_reference": "PDF 5.2/7：光储充一体式超充站连接山海湾12号开关房；低压柔直互联低压电缆约4.5km，型号按投资表/导线选型记录",
+        "confidence": "medium"
+      }
+    ],
+    "loads": [
+      {
+        "index": 1001,
+        "bus": 3,
+        "in_service": true,
+        "name": "充电堆1 DC负荷等值",
+        "type": "EVCharging",
+        "p_mw": 0.15,
+        "p_rated_mw": 0.15,
+        "scaling": 0.4,
+        "z_percent": 0.0,
+        "i_percent": 0.0,
+        "p_percent": 100.0,
+        "controllable": true,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "profile_id": -1,
+        "rated_capacity_basis": "600kW液冷主机按4个150kW DC充电堆等值；基准运行负荷由scaling=0.4给出。"
+      },
+      {
+        "index": 1002,
+        "bus": 4,
+        "in_service": true,
+        "name": "充电堆2 DC负荷等值",
+        "type": "EVCharging",
+        "p_mw": 0.15,
+        "p_rated_mw": 0.15,
+        "scaling": 0.4,
+        "z_percent": 0.0,
+        "i_percent": 0.0,
+        "p_percent": 100.0,
+        "controllable": true,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "profile_id": -1,
+        "rated_capacity_basis": "600kW液冷主机按4个150kW DC充电堆等值；基准运行负荷由scaling=0.4给出。"
+      },
+      {
+        "index": 1003,
+        "bus": 5,
+        "in_service": true,
+        "name": "充电堆3 DC负荷等值",
+        "type": "EVCharging",
+        "p_mw": 0.15,
+        "p_rated_mw": 0.15,
+        "scaling": 0.4,
+        "z_percent": 0.0,
+        "i_percent": 0.0,
+        "p_percent": 100.0,
+        "controllable": true,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "profile_id": -1,
+        "rated_capacity_basis": "600kW液冷主机按4个150kW DC充电堆等值；基准运行负荷由scaling=0.4给出。"
+      },
+      {
+        "index": 1004,
+        "bus": 6,
+        "in_service": true,
+        "name": "充电堆4 DC负荷等值",
+        "type": "EVCharging",
+        "p_mw": 0.15,
+        "p_rated_mw": 0.15,
+        "scaling": 0.4,
+        "z_percent": 0.0,
+        "i_percent": 0.0,
+        "p_percent": 100.0,
+        "controllable": true,
+        "p_min_mw": 0.0,
+        "cost_mw": 0.0,
+        "priority": "Medium",
+        "profile_id": -1,
+        "rated_capacity_basis": "600kW液冷主机按4个150kW DC充电堆等值；基准运行负荷由scaling=0.4给出。"
+      }
+    ],
+    "static_generators": [],
+    "dc_static_generators": [],
+    "pv_arrays": [],
+    "storage": [],
+    "dc_circuit_breakers": []
+  },
+  "vsc_converters": [
+    {
+      "index": 1001,
+      "bus_ac": 28,
+      "bus_dc": 1,
+      "in_service": true,
+      "name": "港口F1 中压柔直端口 3MW",
+      "type": "mmc",
+      "control_mode": "VDC_Q",
+      "p_set_mw": 0.0,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 1.5,
+      "vn_ac_kv": 10.0,
+      "vn_dc_kv": 10.0,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 24.0,
+      "device_group": "mv_flexible_dc_device_1",
+      "shared_device_capacity_mw": 3.0,
+      "capacity_basis": "PDF投资表：双端口3MW中压柔直互联装置，数量2套。主算例按每套两个端口共享3MW的保守等值，将每端口p_rated/pmax取1.5MW，并在device_group记录组容量。",
+      "capacity_modeling_risk": "当前C++不读取device_group/shared_device_capacity_mw；端口1.5MW是算例层保守处理，不等同于设备级约束求解。"
+    },
+    {
+      "index": 1002,
+      "bus_ac": 29,
+      "bus_dc": 1,
+      "in_service": true,
+      "name": "港口F19 中压柔直端口 3MW",
+      "type": "mmc",
+      "control_mode": "PQ",
+      "p_set_mw": 0.0,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 1.5,
+      "vn_ac_kv": 10.0,
+      "vn_dc_kv": 10.0,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 24.0,
+      "device_group": "mv_flexible_dc_device_1",
+      "shared_device_capacity_mw": 3.0,
+      "capacity_basis": "PDF投资表：双端口3MW中压柔直互联装置，数量2套。主算例按每套两个端口共享3MW的保守等值，将每端口p_rated/pmax取1.5MW，并在device_group记录组容量。",
+      "capacity_modeling_risk": "当前C++不读取device_group/shared_device_capacity_mw；端口1.5MW是算例层保守处理，不等同于设备级约束求解。"
+    },
+    {
+      "index": 1003,
+      "bus_ac": 30,
+      "bus_dc": 1,
+      "in_service": true,
+      "name": "港口F20 中压柔直端口 3MW",
+      "type": "mmc",
+      "control_mode": "PQ",
+      "p_set_mw": 0.0,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 1.5,
+      "vn_ac_kv": 10.0,
+      "vn_dc_kv": 10.0,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 24.0,
+      "device_group": "mv_flexible_dc_device_2",
+      "shared_device_capacity_mw": 3.0,
+      "capacity_basis": "PDF投资表：双端口3MW中压柔直互联装置，数量2套。主算例按每套两个端口共享3MW的保守等值，将每端口p_rated/pmax取1.5MW，并在device_group记录组容量。",
+      "capacity_modeling_risk": "当前C++不读取device_group/shared_device_capacity_mw；端口1.5MW是算例层保守处理，不等同于设备级约束求解。"
+    },
+    {
+      "index": 1004,
+      "bus_ac": 31,
+      "bus_dc": 1,
+      "in_service": true,
+      "name": "港口F7 中压柔直端口 3MW",
+      "type": "mmc",
+      "control_mode": "PQ",
+      "p_set_mw": 0.0,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 1.5,
+      "vn_ac_kv": 10.0,
+      "vn_dc_kv": 10.0,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 24.0,
+      "device_group": "mv_flexible_dc_device_2",
+      "shared_device_capacity_mw": 3.0,
+      "capacity_basis": "PDF投资表：双端口3MW中压柔直互联装置，数量2套。主算例按每套两个端口共享3MW的保守等值，将每端口p_rated/pmax取1.5MW，并在device_group记录组容量。",
+      "capacity_modeling_risk": "当前C++不读取device_group/shared_device_capacity_mw；端口1.5MW是算例层保守处理，不等同于设备级约束求解。"
+    },
+    {
+      "index": 1005,
+      "bus_ac": 35,
+      "bus_dc": 2,
+      "in_service": true,
+      "name": "光储充站AC/DC变流器 DC750V",
+      "type": "two_level",
+      "control_mode": "VDC_Q",
+      "p_set_mw": -0.6,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.5,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 0.8,
+      "vn_ac_kv": 0.4,
+      "vn_dc_kv": 0.75,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 12.0,
+      "voltage_support_role": "光储充站DC750V岛电压支撑；DC母线保留为DC_P以进入潮流功率平衡方程。"
+    },
+    {
+      "index": 1006,
+      "bus_ac": 36,
+      "bus_dc": 7,
+      "in_service": true,
+      "name": "山海湾11号开关房 低压柔直 200kW",
+      "type": "two_level",
+      "control_mode": "PQ",
+      "p_set_mw": 0.16,
+      "q_set_mvar": 0.052589,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.975,
+      "loss_percent": 1.5,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 0.2,
+      "vn_ac_kv": 0.4,
+      "vn_dc_kv": 0.75,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 10.0,
+      "baseline_dispatch_basis": "并网基准工况：低压柔直承担本地0.12MW一般负荷和0.04MW关键负荷。"
+    },
+    {
+      "index": 1007,
+      "bus_ac": 37,
+      "bus_dc": 7,
+      "in_service": true,
+      "name": "山海湾12号开关房 低压柔直 200kW",
+      "type": "two_level",
+      "control_mode": "PQ",
+      "p_set_mw": 0.16,
+      "q_set_mvar": 0.052589,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.975,
+      "loss_percent": 1.5,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 0.2,
+      "vn_ac_kv": 0.4,
+      "vn_dc_kv": 0.75,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 10.0,
+      "baseline_dispatch_basis": "并网基准工况：低压柔直承担本地0.12MW一般负荷和0.04MW关键负荷。"
+    },
+    {
+      "index": 1008,
+      "bus_ac": 38,
+      "bus_dc": 7,
+      "in_service": true,
+      "name": "山海湾13号开关房 低压柔直 200kW",
+      "type": "two_level",
+      "control_mode": "PQ",
+      "p_set_mw": 0.08,
+      "q_set_mvar": 0.052589,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.975,
+      "loss_percent": 1.5,
+      "loss_mw": 0.0,
+      "k_vdc": 0.1,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 0.2,
+      "vn_ac_kv": 0.4,
+      "vn_dc_kv": 0.75,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 10.0,
+      "baseline_dispatch_basis": "并网基准工况：0.2MWp光伏按0.4pu出力抵减0.16MW本地负荷，低压柔直承担净0.08MW有功和本地无功。"
+    },
+    {
+      "index": 1009,
+      "bus_ac": 39,
+      "bus_dc": 7,
+      "in_service": true,
+      "name": "山海湾PET AC/DC端口 800kVA",
+      "type": "two_level",
+      "control_mode": "VDC_Q",
+      "p_set_mw": -0.4,
+      "q_set_mvar": 0.0,
+      "v_dc_set_pu": 1.0,
+      "v_ac_set_pu": 1.0,
+      "eta": 0.98,
+      "loss_percent": 1.0,
+      "loss_mw": 0.0,
+      "k_vdc": 0.5,
+      "pmax_mw": 5.0,
+      "pmin_mw": -5.0,
+      "qmax_mvar": 5.0,
+      "qmin_mvar": -5.0,
+      "p_rated_mw": 0.8,
+      "vn_ac_kv": 0.4,
+      "vn_dc_kv": 0.75,
+      "forced_outage_rate": 0.02,
+      "mttr_hr": 12.0,
+      "voltage_support_role": "山海湾低压柔直DC750V岛电压支撑；DC母线保留为DC_P以进入潮流功率平衡方程。"
+    }
+  ],
+  "dcdc_converters": [],
+  "energy_routers": [],
+  "mobile_storage": [],
+  "vpps": [],
+  "microgrids": [
+    {
+      "index": 1001,
+      "name": "山海湾社区微网",
+      "description": "依托港口F20、港口F12馈线，山海湾11/12/13号开关房低压柔直互联与自愈。",
+      "in_service": true,
+      "pcc_bus": 30,
+      "internal_buses": [
+        36,
+        37,
+        38,
+        39
+      ],
+      "operating_mode": "GridConnected",
+      "islanding_capability": true,
+      "auto_reconnection": true,
+      "p_exchange_max_mw": 0.8,
+      "p_exchange_min_mw": -0.8,
+      "p_import_max_mw": 0.8,
+      "p_export_max_mw": 0.6,
+      "p_exchange_mw": 0.0,
+      "total_generation_mw": 0.2,
+      "total_storage_mwh": 0.2,
+      "total_load_mw": 0.48,
+      "capacity_mw": 0.8,
+      "peak_load_mw": 0.8,
+      "f_set_hz": 50.0,
+      "v_set_pu": 1.0,
+      "k_droop": 0.04,
+      "area": 4,
+      "mtbf_hours": 22000.0,
+      "mttr_hours": 10.0,
+      "base_case_condition": "并网基准工况",
+      "bus_structure": "0.4kV交流母线",
+      "ats_configured": true,
+      "load_priority_scheme": "核心负荷和一般负荷分级；核心负荷按4-8小时供电需求配置储能能力",
+      "resilience_metadata": "支持并网/离网切换、孤岛运行和自愈；主算例不默认孤网运行。"
+    }
+  ],
+  "metadata": {
+    "official_case": true,
+    "case_policy": "有且只有一个正式主算例；AC backbone 和 hybrid projects 只作为脚本内部构建对象，不再输出独立 case。",
+    "source_documents": {
+      "pdf": "sources/01 附件1：国家科技重大专项《低碳高可靠城市配电系统示范工程》配套项目南沙湾可研报告(0401-V2).pdf",
+      "xlsx": "sources/03 南沙湾电网现状数据.xlsx",
+      "docx": "sources/01 附件1：国家科技重大专项《低碳高可靠城市配电系统示范工程》配套项目南沙湾可研报告(0401-V2)(1).docx"
+    },
+    "pdf_excel_alignment": {
+      "feeder_count": 24,
+      "pv_existing_kw": 8633.52,
+      "charger_capacity_kw": 23131.3,
+      "pv_candidate_mwp": 8.8712,
+      "key_pdf_feeders": [
+        "港口F1",
+        "港口F7",
+        "港口F12",
+        "港口F20"
+      ]
+    },
+    "mv_flexible_dc": {
+      "ports": [
+        "港口F1",
+        "港口F19",
+        "港口F20",
+        "港口F7"
+      ],
+      "devices": 2,
+      "device_type": "双端口3MW中压柔直互联装置",
+      "selected_scheme_cable_km": 5.55,
+      "candidate_scheme_cable_km": 8.35,
+      "cable_model": "FYZA-YJV22-8.7/15kV-3x300mm2",
+      "grid_forming_storage": "1000kW/2000kWh，2套，接入中压柔性装置10kV直流侧母线",
+      "functions": [
+        "功率互济",
+        "故障转供",
+        "构网型控制"
+      ]
+    },
+    "pv_storage_charging_station": {
+      "selected_connection": "港口F7新建自动化开关站",
+      "candidate_connection": "港口F12天后宫停车场新建开关站",
+      "pet_kva": 800,
+      "mv_cable_km": 0.3,
+      "liquid_cooling_charger_kw": 600,
+      "v2g_kw": 120,
+      "rooftop_pv_kw": 100,
+      "grid_forming_storage": "100kW/200kWh"
+    },
+    "lv_flexible_dc_scope": {
+      "focus_scene": "港口F12天后宫停车场低压台区与港口F20山海湾低压台区柔性互联；山海湾11/12/13台区自愈",
+      "modeled_key_vsc_count": 3,
+      "investment_total_devices": 15,
+      "device_rating_kw": 200,
+      "lv_cable_km": 4.5,
+      "cable_model": "ZA-YJV22-0.6/1kV-4x240mm2",
+      "overhead_wire_models": [
+        "BVV-120",
+        "BVV-185"
+      ],
+      "scope_note": "主算例按山海湾重点场景抽取关键装置，没有逐套展开全部15套，避免制造未定位设备和额外case。"
+    },
+    "pv_scope": {
+      "pdf_new_pv_mwp": 2.4,
+      "lujing_dc_pv_mwp": 2.0,
+      "coastal_ac_pv_mwp": 0.4,
+      "excel_candidate_pv_mwp": 8.8712,
+      "accounting_note": "PDF 2.4MWp为计划接入工程口径；Excel 8.8712MWp为新增潜在光伏候选资源，二者不按同一资源重复计入。"
+    },
+    "storage_scope": {
+      "pdf_total": "2.6MW/5.3MWh",
+      "modeled_key_devices": "中压2x1MW/2MWh、光储充站100kW/200kWh、山海湾100kW/200kWh",
+      "not_fully_expanded_reason": "部分储能属于鹿颈村、校园或投资口径候选，主算例只展开能在PDF拓扑中明确定位的南沙湾重点设备。"
+    },
+    "solver_numbering": {
+      "policy": "AC/DC bus 使用连续编号 1..N；原始工程编号保留在 bus.source_id 和 metadata.original_index。",
+      "ac_renumbered_count": 12,
+      "dc_renumbered_count": 7
+    }
+  },
+  "_canvas": {
+    "version": 1,
+    "viewBox": {
+      "x": -1845,
+      "y": -1100,
+      "w": 2865,
+      "h": 2166
+    },
+    "components": [
+      {
+        "key": "ac_bus#1",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#2",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -710,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#3",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -620,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#4",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#5",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -440,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#6",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -350,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#7",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -260,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#8",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -170,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#9",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": -80,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#10",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 10,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#11",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 100,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#12",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 190,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#13",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 280,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#14",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 370,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#15",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 460,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#16",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 550,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#17",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 640,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#18",
+        "type": "ac_bus",
+        "x": -1400,
+        "y": 730,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#19",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#20",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -710,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#21",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -620,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#22",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#23",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -440,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#24",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -350,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#25",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -260,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#26",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -170,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#27",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": -80,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#28",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 10,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#29",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 100,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#30",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 190,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#31",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 280,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#32",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 370,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#33",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 460,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#34",
+        "type": "ac_bus",
+        "x": -1040,
+        "y": 550,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#35",
+        "type": "ac_bus",
+        "x": -880,
+        "y": 640,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#36",
+        "type": "ac_bus",
+        "x": -880,
+        "y": 730,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#37",
+        "type": "ac_bus",
+        "x": -520,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#38",
+        "type": "ac_bus",
+        "x": -520,
+        "y": -710,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#39",
+        "type": "ac_bus",
+        "x": -520,
+        "y": -620,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#1",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -700,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#2",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -580,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#3",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -460,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#4",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -340,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#5",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -220,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#6",
+        "type": "dc_bus",
+        "x": 600,
+        "y": -100,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#7",
+        "type": "dc_bus",
+        "x": 600,
+        "y": 20,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -665.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#2",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -620.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#3",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -575.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#4",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -530.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#5",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -485.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#6",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -440.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#7",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -395.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#8",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -350.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#9",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -305.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#10",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -260.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#11",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -215.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#12",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -125.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#13",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -125.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#14",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -35.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#15",
+        "type": "ac_branch",
+        "x": -1400.0,
+        "y": -35.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#16",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -755.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#17",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -710.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#18",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -665.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#19",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -620.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#20",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -620.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#21",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -575.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#22",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -530.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#23",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -485.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#24",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -350.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1001",
+        "type": "ac_branch",
+        "x": -1040.0,
+        "y": 415.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1002",
+        "type": "ac_branch",
+        "x": -1040.0,
+        "y": 460.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1003",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": 10.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1004",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -35.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1005",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": -80.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1006",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": 325.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1007",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": 55.0,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#1008",
+        "type": "ac_branch",
+        "x": -1220.0,
+        "y": 370.0,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#1001",
+        "type": "dc_branch",
+        "x": 600.0,
+        "y": -520.0,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#1002",
+        "type": "dc_branch",
+        "x": 600.0,
+        "y": -460.0,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#1003",
+        "type": "dc_branch",
+        "x": 600.0,
+        "y": -400.0,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#1004",
+        "type": "dc_branch",
+        "x": 600.0,
+        "y": -340.0,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#1005",
+        "type": "dc_branch",
+        "x": 600.0,
+        "y": -280.0,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1001",
+        "type": "transformer_2w",
+        "x": -960.0,
+        "y": 595.0,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1002",
+        "type": "transformer_2w",
+        "x": -960.0,
+        "y": 460.0,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1003",
+        "type": "transformer_2w",
+        "x": -780.0,
+        "y": -305.0,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1004",
+        "type": "transformer_2w",
+        "x": -780.0,
+        "y": -170.0,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#1005",
+        "type": "transformer_2w",
+        "x": -780.0,
+        "y": -215.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#1",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": -10.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#2",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": 350.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#3",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": 170.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#4",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": 620.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#5",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": -415.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#6",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": -370.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#7",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": -190.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#8",
+        "type": "circuit_breaker",
+        "x": -1400.0,
+        "y": 395.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#9",
+        "type": "circuit_breaker",
+        "x": -1220.0,
+        "y": 35.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#10",
+        "type": "circuit_breaker",
+        "x": -1040.0,
+        "y": -730.0,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#11",
+        "type": "circuit_breaker",
+        "x": -1040.0,
+        "y": -550.0,
+        "rotation": 0
+      },
+      {
+        "key": "load#1",
+        "type": "load",
+        "x": -1490,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "load#2",
+        "type": "load",
+        "x": -1490,
+        "y": -422,
+        "rotation": 0
+      },
+      {
+        "key": "load#3",
+        "type": "load",
+        "x": -1490,
+        "y": -314,
+        "rotation": 0
+      },
+      {
+        "key": "load#4",
+        "type": "load",
+        "x": -1490,
+        "y": -260,
+        "rotation": 0
+      },
+      {
+        "key": "load#5",
+        "type": "load",
+        "x": -1490,
+        "y": -152,
+        "rotation": 0
+      },
+      {
+        "key": "load#6",
+        "type": "load",
+        "x": -1490,
+        "y": -44,
+        "rotation": 0
+      },
+      {
+        "key": "load#7",
+        "type": "load",
+        "x": -1490,
+        "y": 10,
+        "rotation": 0
+      },
+      {
+        "key": "load#8",
+        "type": "load",
+        "x": -1490,
+        "y": 118,
+        "rotation": 0
+      },
+      {
+        "key": "load#9",
+        "type": "load",
+        "x": -1490,
+        "y": 226,
+        "rotation": 0
+      },
+      {
+        "key": "load#10",
+        "type": "load",
+        "x": -1490,
+        "y": 280,
+        "rotation": 0
+      },
+      {
+        "key": "load#11",
+        "type": "load",
+        "x": -1490,
+        "y": 388,
+        "rotation": 0
+      },
+      {
+        "key": "load#12",
+        "type": "load",
+        "x": -1490,
+        "y": 496,
+        "rotation": 0
+      },
+      {
+        "key": "load#13",
+        "type": "load",
+        "x": -1490,
+        "y": 550,
+        "rotation": 0
+      },
+      {
+        "key": "load#14",
+        "type": "load",
+        "x": -1490,
+        "y": 658,
+        "rotation": 0
+      },
+      {
+        "key": "load#15",
+        "type": "load",
+        "x": -1490,
+        "y": 766,
+        "rotation": 0
+      },
+      {
+        "key": "load#16",
+        "type": "load",
+        "x": -1130,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "load#17",
+        "type": "load",
+        "x": -1130,
+        "y": -692,
+        "rotation": 0
+      },
+      {
+        "key": "load#18",
+        "type": "load",
+        "x": -1130,
+        "y": -584,
+        "rotation": 0
+      },
+      {
+        "key": "load#19",
+        "type": "load",
+        "x": -1130,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "load#20",
+        "type": "load",
+        "x": -1130,
+        "y": -422,
+        "rotation": 0
+      },
+      {
+        "key": "load#21",
+        "type": "load",
+        "x": -1130,
+        "y": -314,
+        "rotation": 0
+      },
+      {
+        "key": "load#22",
+        "type": "load",
+        "x": -1130,
+        "y": -260,
+        "rotation": 0
+      },
+      {
+        "key": "load#23",
+        "type": "load",
+        "x": -1130,
+        "y": -152,
+        "rotation": 0
+      },
+      {
+        "key": "load#24",
+        "type": "load",
+        "x": -1130,
+        "y": -44,
+        "rotation": 0
+      },
+      {
+        "key": "load#1001",
+        "type": "load",
+        "x": -970,
+        "y": 640,
+        "rotation": 0
+      },
+      {
+        "key": "load#1002",
+        "type": "load",
+        "x": -970,
+        "y": 748,
+        "rotation": 0
+      },
+      {
+        "key": "load#1003",
+        "type": "load",
+        "x": -970,
+        "y": 766,
+        "rotation": 0
+      },
+      {
+        "key": "load#1004",
+        "type": "load",
+        "x": -610,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "load#1005",
+        "type": "load",
+        "x": -610,
+        "y": -782,
+        "rotation": 0
+      },
+      {
+        "key": "load#1006",
+        "type": "load",
+        "x": -610,
+        "y": -674,
+        "rotation": 0
+      },
+      {
+        "key": "load#1007",
+        "type": "load",
+        "x": -610,
+        "y": -710,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#1",
+        "type": "pv_system",
+        "x": -1310,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#2",
+        "type": "pv_system",
+        "x": -1310,
+        "y": -422,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#3",
+        "type": "pv_system",
+        "x": -1310,
+        "y": -314,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#4",
+        "type": "pv_system",
+        "x": -1310,
+        "y": 10,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#5",
+        "type": "pv_system",
+        "x": -1310,
+        "y": 118,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#6",
+        "type": "pv_system",
+        "x": -1310,
+        "y": 226,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#7",
+        "type": "pv_system",
+        "x": -1310,
+        "y": 280,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#8",
+        "type": "pv_system",
+        "x": -950,
+        "y": -782,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#9",
+        "type": "pv_system",
+        "x": -950,
+        "y": -674,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#10",
+        "type": "pv_system",
+        "x": -950,
+        "y": -440,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#11",
+        "type": "pv_system",
+        "x": -950,
+        "y": -332,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#1001",
+        "type": "pv_system",
+        "x": -790,
+        "y": 676,
+        "rotation": 0
+      },
+      {
+        "key": "pv_system#1002",
+        "type": "pv_system",
+        "x": -430,
+        "y": -710,
+        "rotation": 0
+      },
+      {
+        "key": "storage#1001",
+        "type": "storage",
+        "x": -895,
+        "y": 10,
+        "rotation": 0
+      },
+      {
+        "key": "storage#1002",
+        "type": "storage",
+        "x": -895,
+        "y": 118,
+        "rotation": 0
+      },
+      {
+        "key": "storage#1003",
+        "type": "storage",
+        "x": -735,
+        "y": 676,
+        "rotation": 0
+      },
+      {
+        "key": "storage#1004",
+        "type": "storage",
+        "x": -735,
+        "y": 730,
+        "rotation": 0
+      },
+      {
+        "key": "external_grid#1",
+        "type": "external_grid",
+        "x": -1545,
+        "y": -800,
+        "rotation": 0
+      },
+      {
+        "key": "external_grid#2",
+        "type": "external_grid",
+        "x": -1545,
+        "y": -692,
+        "rotation": 0
+      },
+      {
+        "key": "external_grid#3",
+        "type": "external_grid",
+        "x": -1545,
+        "y": -584,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#1",
+        "type": "charging_station",
+        "x": -1200,
+        "y": -530,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#2",
+        "type": "charging_station",
+        "x": -1200,
+        "y": -422,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#3",
+        "type": "charging_station",
+        "x": -1200,
+        "y": -314,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#4",
+        "type": "charging_station",
+        "x": -1200,
+        "y": -170,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#5",
+        "type": "charging_station",
+        "x": -1200,
+        "y": -62,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#6",
+        "type": "charging_station",
+        "x": -1200,
+        "y": 46,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#7",
+        "type": "charging_station",
+        "x": -1200,
+        "y": 100,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#8",
+        "type": "charging_station",
+        "x": -1200,
+        "y": 208,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#9",
+        "type": "charging_station",
+        "x": -1200,
+        "y": 496,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#10",
+        "type": "charging_station",
+        "x": -1200,
+        "y": 730,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#11",
+        "type": "charging_station",
+        "x": -840,
+        "y": -782,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#12",
+        "type": "charging_station",
+        "x": -840,
+        "y": -674,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#13",
+        "type": "charging_station",
+        "x": -840,
+        "y": -620,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#14",
+        "type": "charging_station",
+        "x": -840,
+        "y": -512,
+        "rotation": 0
+      },
+      {
+        "key": "charging_station#15",
+        "type": "charging_station",
+        "x": -840,
+        "y": -404,
+        "rotation": 0
+      },
+      {
+        "key": "dc_load#1001",
+        "type": "dc_load",
+        "x": 720,
+        "y": -440,
+        "rotation": 0
+      },
+      {
+        "key": "dc_load#1002",
+        "type": "dc_load",
+        "x": 720,
+        "y": -320,
+        "rotation": 0
+      },
+      {
+        "key": "dc_load#1003",
+        "type": "dc_load",
+        "x": 720,
+        "y": -200,
+        "rotation": 0
+      },
+      {
+        "key": "dc_load#1004",
+        "type": "dc_load",
+        "x": 720,
+        "y": -80,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1001",
+        "type": "vsc_converter",
+        "x": -220.0,
+        "y": -345.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1002",
+        "type": "vsc_converter",
+        "x": -220.0,
+        "y": -300.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1003",
+        "type": "vsc_converter",
+        "x": -220.0,
+        "y": -255.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1004",
+        "type": "vsc_converter",
+        "x": -220.0,
+        "y": -210.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1005",
+        "type": "vsc_converter",
+        "x": -140.0,
+        "y": 30.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1006",
+        "type": "vsc_converter",
+        "x": -140.0,
+        "y": 375.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1007",
+        "type": "vsc_converter",
+        "x": 40.0,
+        "y": -390.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1008",
+        "type": "vsc_converter",
+        "x": 40.0,
+        "y": -345.0,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#1009",
+        "type": "vsc_converter",
+        "x": 40.0,
+        "y": -300.0,
+        "rotation": 0
+      },
+      {
+        "key": "microgrid#1001",
+        "type": "microgrid",
+        "x": -780,
+        "y": 120,
+        "rotation": 0
+      }
+    ],
+    "connections": [
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#3",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#7",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#8",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#9",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#12",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#13",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#14",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#12",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#12",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#15",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#13",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#13",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#16",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#14",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#14",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#17",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#15",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#15",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#18",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#16",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#16",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#19",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#17",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#17",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#20",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#18",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#18",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#21",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#19",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#19",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#22",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#20",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#20",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#23",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#21",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#21",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#24",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#22",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#22",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#25",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#23",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#23",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#26",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#3",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#24",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#24",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#27",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#31",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1001",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#34",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#32",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1002",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#34",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1003",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1003",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#28",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#8",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1004",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1004",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#29",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1005",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1005",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#30",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#14",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1006",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1006",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#31",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#7",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1007",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1007",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#32",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#13",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_branch#1008",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_branch#1008",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#33",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_branch#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_branch#1001",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_branch#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_branch#1002",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_branch#1003",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_branch#1003",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_branch#1004",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_branch#1004",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_branch#1005",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_branch#1005",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#34",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1001",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1001",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#35",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#30",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1002",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1002",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#36",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#30",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1003",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1003",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#37",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#32",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1004",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1004",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#38",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#30",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "transformer_2w#1005",
+          "port": "hv"
+        }
+      },
+      {
+        "from": {
+          "key": "transformer_2w#1005",
+          "port": "lv"
+        },
+        "to": {
+          "key": "ac_bus#39",
+          "port": "top"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#14",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#13",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#3",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#12",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#16",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#17",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#7",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#7",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#13",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#8",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#15",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#18",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#9",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#20",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#19",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#20",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#21",
+          "port": "right"
+        },
+        "to": {
+          "key": "circuit_breaker#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#22",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#7",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#8",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#9",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#12",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#13",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#14",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#15",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#12",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#16",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#13",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#17",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#14",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#18",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#15",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#19",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#16",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#20",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#17",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#21",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#18",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#22",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#19",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#23",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#20",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#24",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#21",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#25",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#22",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#26",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#23",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#27",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#24",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#35",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#36",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#36",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1003",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#37",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1004",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#37",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1005",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#38",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1006",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#38",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#1007",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#12",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#13",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#19",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#20",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#23",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#24",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#35",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#38",
+          "port": "right"
+        },
+        "to": {
+          "key": "pv_system#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#28",
+          "port": "right"
+        },
+        "to": {
+          "key": "storage#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#29",
+          "port": "right"
+        },
+        "to": {
+          "key": "storage#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#35",
+          "port": "right"
+        },
+        "to": {
+          "key": "storage#1003",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#36",
+          "port": "right"
+        },
+        "to": {
+          "key": "storage#1004",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "external_grid#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "external_grid#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#3",
+          "port": "right"
+        },
+        "to": {
+          "key": "external_grid#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#3",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#8",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#4",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#9",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#5",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#10",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#6",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#11",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#12",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#8",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#15",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#9",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#18",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#10",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#19",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#11",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#20",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#12",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#21",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#13",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#22",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#14",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#23",
+          "port": "right"
+        },
+        "to": {
+          "key": "charging_station#15",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#3",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_load#1001",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#4",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_load#1002",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#5",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_load#1003",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "dc_bus#6",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_load#1004",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#28",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1001",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1001",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#29",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1002",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1002",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#30",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1003",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1003",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#31",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1004",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1004",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#1",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#35",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1005",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1005",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#2",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#36",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1006",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1006",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#37",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1007",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1007",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#38",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1008",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1008",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#39",
+          "port": "right"
+        },
+        "to": {
+          "key": "vsc_converter#1009",
+          "port": "ac"
+        }
+      },
+      {
+        "from": {
+          "key": "vsc_converter#1009",
+          "port": "dc"
+        },
+        "to": {
+          "key": "dc_bus#7",
+          "port": "left"
+        }
+      },
+      {
+        "from": {
+          "key": "ac_bus#30",
+          "port": "right"
+        },
+        "to": {
+          "key": "microgrid#1001",
+          "port": "left"
+        }
+      }
+    ]
+  }
+}

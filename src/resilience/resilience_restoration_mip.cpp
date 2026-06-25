@@ -460,10 +460,14 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
 
   const auto& load_prof = opts.load_profile;
   const auto& ren_prof = opts.renewable_profile;
+  const auto& pv_prof = opts.pv_profile.empty() ? ren_prof : opts.pv_profile;
+  const auto& wind_prof = opts.wind_profile.empty() ? ren_prof : opts.wind_profile;
   for (int t = 0; t < T; ++t) {
     const double hour = static_cast<double>(t) * dt;
     const double load_mult = sample_profile(load_prof, hour);
     const double ren_mult = sample_profile(ren_prof, hour);
+    const double pv_mult = sample_profile(pv_prof, hour);
+    const double wind_mult = sample_profile(wind_prof, hour);
     // P1b: DC-OPF formulation adds bus.pd_mw and ac.loads additively as demand;
     // the demand matrix must mirror the same convention.  Both sources are
     // always accumulated unconditionally so neither is silently omitted.
@@ -500,15 +504,18 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
       if (!rg.in_service) continue;
       const auto it = bus_pos.find(rg.bus);
       if (it == bus_pos.end()) continue;
+      double mult = ren_mult;
+      if (rg.type == RenewableType::Wind) mult = wind_mult;
+      else if (rg.type == RenewableType::SolarPV || rg.type == RenewableType::SolarCSP) mult = pv_mult;
       out.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
-          std::max(0.0, (rg.p_rated_mw > 0.0 ? rg.p_rated_mw : rg.p_mw) * ren_mult);
+          std::max(0.0, (rg.p_rated_mw > 0.0 ? rg.p_rated_mw : rg.p_mw) * mult);
     }
     for (const auto& pv : sys.ac.pv_systems) {
       if (!pv.in_service) continue;
       const auto it = bus_pos.find(pv.bus);
       if (it == bus_pos.end()) continue;
       out.renewable_avail_mw[static_cast<size_t>(t)][static_cast<size_t>(it->second)] +=
-          std::max(0.0, (pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw) * ren_mult);
+          std::max(0.0, (pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw) * pv_mult);
     }
   }
 
@@ -997,7 +1004,7 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
 
   auto built = build_mip_skeleton(sys, opts);
   result.model_stats = built.stats;
-  for (const auto& f : built.faults) result.fault_sequence.push_back({f.branch_index, f.start_hr, f.repair_hr, f.name});
+  for (const auto& f : built.faults) result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
 
   solver::BCOptions bc_opts;
   bc_opts.time_limit_sec = static_cast<double>(opts.mip.max_time_s);

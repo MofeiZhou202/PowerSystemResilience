@@ -3,6 +3,8 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
@@ -14,6 +16,7 @@ namespace hacdcpf::analysis {
 enum class DistributionResilienceModel {
   HeuristicSequential,
   MultiPeriodMIPLinDistFlow,
+  RAStyleStageMILP,
 };
 
 enum class DistributionResilienceMIPSolver {
@@ -117,7 +120,15 @@ enum class ResilienceBranchKind {
   DC,
 };
 
+enum class DistributionDisasterStage {
+  Normal,
+  DisasterIsolation,
+  DisasterPostFaultReconfig,
+  PostDisasterRepair,
+};
+
 const char* to_string(ResilienceBranchKind kind);
+const char* to_string(DistributionDisasterStage stage);
 ResilienceBranchKind resilience_branch_kind_from_string(const std::string& value);
 
 /// @brief Description of a single branch fault used to drive the resilience study.
@@ -174,9 +185,24 @@ struct DistributionResilienceOptions {
   /// If empty, a built-in 24-h residential curve is used.
   std::vector<double> load_profile;
 
-  /// Normalized hourly RES (PV/wind) availability multipliers.
+  /// Normalized hourly aggregate RES availability multipliers.
   /// If empty, a built-in daytime PV curve is used.
   std::vector<double> renewable_profile;
+  /// Optional type-specific PV availability multipliers. Falls back to
+  /// renewable_profile when empty.
+  std::vector<double> pv_profile;
+  /// Optional type-specific wind availability multipliers. Falls back to
+  /// renewable_profile when empty.
+  std::vector<double> wind_profile;
+
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_position;
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_index;
+  std::unordered_map<int, std::vector<double>> ac_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_position;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_index;
+  std::unordered_map<int, std::vector<double>> dc_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> ac_bus_load_profiles_by_bus;
+  std::unordered_map<int, std::vector<double>> dc_bus_load_profiles_by_bus;
 
   std::vector<DistributionResilienceFault> faults;
   std::vector<TransportEdge> transport_edges;
@@ -185,6 +211,22 @@ struct DistributionResilienceOptions {
   /// If true, run full AC power flow at each step to obtain bus voltages
   /// and branch flows (slower but gives physical validation).
   bool run_power_flow{false};
+
+  /// Use RA-Validation-style disaster stages with switch-constrained topology
+  /// MILPs for stage 1 fault isolation and stage 2 post-fault reconfiguration.
+  bool use_ra_style_stage_milp{false};
+  /// Preferred user-facing toggle for staged disaster isolation/reconfiguration.
+  bool enable_disaster_stages{false};
+  /// Preferred post-fault reconfiguration window. Kept alongside the legacy
+  /// disaster_* spelling used by the standalone reference implementation.
+  double post_fault_reconfig_window_hr{2.0};
+  double disaster_post_fault_reconfig_window_hr{2.0};
+  bool use_switch_based_fault_isolation{true};
+  bool allow_stage1_open_switches{true};
+  bool allow_stage2_close_ties{true};
+  bool require_switch_for_nonfault_branch_operation{true};
+  bool allow_branch_operation_without_switch{false};
+  bool use_remote_switch_only{false};
 
   /// Strict restoration MIP options used when model ==
   /// MultiPeriodMIPLinDistFlow.
@@ -237,6 +279,8 @@ struct DistributionResilienceStepResult {
   double hour{0.0};
   double load_multiplier{1.0};
   double res_multiplier{0.0};
+  double pv_multiplier{0.0};
+  double wind_multiplier{0.0};
   double total_demand_mw{0.0};
   double served_mw{0.0};
   double shed_mw{0.0};
@@ -247,12 +291,39 @@ struct DistributionResilienceStepResult {
   int active_faults{0};
   int repaired_faults{0};
   int switch_actions{0};
+  std::string disaster_stage{"Normal"};
   std::vector<int> open_ac_branch_ids;
+  std::vector<int> open_dc_branch_ids;
   std::vector<int> closed_tie_branch_ids;
+  std::vector<int> closed_dc_tie_branch_ids;
+  std::vector<int> isolation_open_ac_branch_ids;
+  std::vector<int> isolation_open_dc_branch_ids;
+  std::vector<int> open_switch_ids;
+  std::vector<int> closed_switch_ids;
+  std::vector<int> switched_open_ids;
+  std::vector<int> switched_closed_ids;
+  std::vector<int> closed_tie_switch_ids;
+  std::vector<int> open_breaker_ids;
+  std::vector<int> closed_tie_breaker_ids;
+  int switch_open_actions{0};
+  int switch_close_actions{0};
+  int isolation_switch_actions{0};
+  int reconfiguration_switch_actions{0};
+  std::vector<int> fault_zone_ac_bus_ids;
+  std::vector<int> fault_zone_dc_bus_ids;
   std::vector<MESSStateStep> mess_states;
 
   /// Shed MW broken down by priority tier [Critical, High, Medium, Low].
   std::vector<double> shed_by_priority;
+
+  /// Per-bus demand/supply details for GUI component-level resilience curves.
+  std::vector<std::string> bus_supply_kind;
+  std::vector<int> bus_supply_index;
+  std::vector<double> bus_supply_demand_mw;
+  std::vector<double> bus_supply_served_mw;
+  std::vector<double> bus_supply_shed_mw;
+  std::vector<int> bus_supply_priority_tier;
+  std::vector<double> bus_supply_importance;
 
   // Power flow validation results (populated when run_power_flow == true).
   bool pf_converged{false};
@@ -271,6 +342,7 @@ struct DistributionResilienceStepResult {
 };
 
 struct FaultSequenceEntry {
+  ResilienceBranchKind branch_kind{ResilienceBranchKind::AC};
   int branch_index{0};
   double start_hr{0.0};
   double repair_hr{6.0};
@@ -323,6 +395,11 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys);
 /// solves it with the registered MILP backend (Gurobi / HiGHS / NativeBranchAndCut).
 /// Does NOT delegate to the heuristic path.
 DistributionResilienceResult run_distribution_resilience_mip_assessment(
+    const HybridPowerSystem& sys,
+    const DistributionResilienceOptions& opts = {});
+
+/// RA-style staged disaster isolation / post-fault reconfiguration assessment.
+DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
     const HybridPowerSystem& sys,
     const DistributionResilienceOptions& opts = {});
 

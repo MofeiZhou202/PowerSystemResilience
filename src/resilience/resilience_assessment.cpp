@@ -608,6 +608,8 @@ struct StepContext {
   bool enable_mess_dispatch;
   double dt_hr;
   double res_multiplier;
+  double pv_multiplier;
+  double wind_multiplier;
 };
 
 ComponentEvaluation evaluate_island(const StepContext& ctx,
@@ -659,13 +661,16 @@ ComponentEvaluation evaluate_island(const StepContext& ctx,
   }
   for (const auto& rg : ctx.sys.ac.renewable_gens) {
     if (!rg.in_service || !in_island(rg.bus)) continue;
-    const double cap = renewable_capacity_mw(rg) * ctx.res_multiplier;
+    double mult = ctx.res_multiplier;
+    if (rg.type == RenewableType::Wind) mult = ctx.wind_multiplier;
+    else if (rg.type == RenewableType::SolarPV || rg.type == RenewableType::SolarCSP) mult = ctx.pv_multiplier;
+    const double cap = renewable_capacity_mw(rg) * mult;
     available_supply += cap;
     out.res_mw += cap;
   }
   for (const auto& pv : ctx.sys.ac.pv_systems) {
     if (!pv.in_service || !in_island(pv.bus)) continue;
-    const double cap = pv_capacity_mw(pv) * ctx.res_multiplier;
+    const double cap = pv_capacity_mw(pv) * ctx.pv_multiplier;
     available_supply += cap;
     out.res_mw += cap;
   }
@@ -926,6 +931,16 @@ const char* to_string(ResilienceBranchKind kind) {
   return "AC";
 }
 
+const char* to_string(DistributionDisasterStage stage) {
+  switch (stage) {
+    case DistributionDisasterStage::Normal: return "Normal";
+    case DistributionDisasterStage::DisasterIsolation: return "DisasterIsolation";
+    case DistributionDisasterStage::DisasterPostFaultReconfig: return "DisasterPostFaultReconfig";
+    case DistributionDisasterStage::PostDisasterRepair: return "PostDisasterRepair";
+  }
+  return "Normal";
+}
+
 ResilienceBranchKind resilience_branch_kind_from_string(const std::string& value) {
   std::string v;
   v.reserve(value.size());
@@ -1144,6 +1159,14 @@ void apply_distribution_resilience_demo_data(HybridPowerSystem& sys) {
 DistributionResilienceResult run_distribution_resilience_assessment(
     const HybridPowerSystem& input_sys,
     const DistributionResilienceOptions& opts) {
+  // Dispatch to the switch-aware staged restoration model when requested.
+  // This ports the standalone RA-style disaster isolation / post-fault
+  // reconfiguration path without changing solver internals.
+  if (opts.model == DistributionResilienceModel::RAStyleStageMILP ||
+      opts.use_ra_style_stage_milp || opts.enable_disaster_stages) {
+    return run_distribution_resilience_stage_milp_assessment(input_sys, opts);
+  }
+
   // Dispatch to the strict multi-period MIP when requested.
   // run_distribution_resilience_mip_assessment() is the canonical entry
   // point for MultiPeriodMIPLinDistFlow; callers that set opts.model to that
@@ -1176,11 +1199,13 @@ DistributionResilienceResult run_distribution_resilience_assessment(
   const auto transport_graph = build_transport_graph(sys, opts, bus_pos);
 
   for (const auto& f : faults) {
-    result.fault_sequence.push_back({f.branch_index, f.start_hr, f.repair_hr, f.name});
+    result.fault_sequence.push_back({ResilienceBranchKind::AC, f.branch_index, f.start_hr, f.repair_hr, f.name});
   }
 
   const auto& load_prof = opts.load_profile.empty() ? kDefaultLoadProfile : opts.load_profile;
   const auto& res_prof = opts.renewable_profile.empty() ? kDefaultRenewableProfile : opts.renewable_profile;
+  const auto& pv_prof = opts.pv_profile.empty() ? res_prof : opts.pv_profile;
+  const auto& wind_prof = opts.wind_profile.empty() ? res_prof : opts.wind_profile;
 
   const int steps = std::max(1, static_cast<int>(std::ceil(opts.horizon_hours / opts.time_step_hr)));
   result.steps.reserve(static_cast<size_t>(steps));
@@ -1206,6 +1231,8 @@ DistributionResilienceResult run_distribution_resilience_assessment(
 
     const double load_mult = sample_profile(load_prof, hour);
     const double res_mult = sample_profile(res_prof, hour);
+    const double pv_mult = sample_profile(pv_prof, hour);
+    const double wind_mult = sample_profile(wind_prof, hour);
 
     loads = base_loads;
     for (auto& ld : loads) ld.demand_mw *= load_mult;
@@ -1219,6 +1246,8 @@ DistributionResilienceResult run_distribution_resilience_assessment(
     sr.hour = hour;
     sr.load_multiplier = load_mult;
     sr.res_multiplier = res_mult;
+    sr.pv_multiplier = pv_mult;
+    sr.wind_multiplier = wind_mult;
     open_branch_ids.clear();
     fault_active.clear();
     sr.repaired_faults = 0;
@@ -1263,7 +1292,8 @@ DistributionResilienceResult run_distribution_resilience_assessment(
 
     std::vector<ComponentEvaluation> evals(islands.size());
     const StepContext ctx{sys, loads, comp, bus_pos, fixed_storage, mess,
-                          opts.allow_mess_dispatch, opts.time_step_hr, res_mult};
+                          opts.allow_mess_dispatch, opts.time_step_hr,
+                          res_mult, pv_mult, wind_mult};
     for (size_t i = 0; i < islands.size(); ++i) {
       evals[i] = evaluate_island(ctx, islands[i]);
     }
