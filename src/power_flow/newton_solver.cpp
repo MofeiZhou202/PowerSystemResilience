@@ -282,10 +282,13 @@ DcSlackPlan plan_dc_island_references(const SolverData& data,
     bool dcdc_regulates = false;
     for (const auto& dcdc : data.dcdc_converters) {
       if (!dcdc.in_service) continue;
-      if (dcdc.control_mode != DCDCControlMode::Droop ||
-          std::abs(dcdc.k_droop) < 1e-12) {
-        continue;
-      }
+      // A DC/DC forms its OUTPUT bus voltage in Voltage mode, or in Droop mode
+      // with a non-trivial gain. Either way its output island has a reference.
+      const bool forms =
+          dcdc.control_mode == DCDCControlMode::Voltage ||
+          (dcdc.control_mode == DCDCControlMode::Droop &&
+           std::abs(dcdc.k_droop) >= 1e-12);
+      if (!forms) continue;
       const int bo = dcdc.bus_out - 1;
       if (bo >= 0 && bo < ndc && component[static_cast<size_t>(bo)] == c) {
         dcdc_regulates = true;

@@ -1762,11 +1762,29 @@ const Canvas = (() => {
       }
       return out;
     };
+    // Resolve the bus wired to a specific named port (for same-domain ports that
+    // busesOf() cannot disambiguate, e.g. a DC/DC's 'in'/'out').
+    const busByPort = (compId, portId) => {
+      for (const conn of state.connections) {
+        let other = null;
+        if (conn.from.compId === compId && conn.from.port === portId) other = conn.to.compId;
+        else if (conn.to.compId === compId && conn.to.port === portId) other = conn.from.compId;
+        if (other === null) continue;
+        if (acMap[other] != null) return acMap[other];
+        if (dcMap[other] != null) return dcMap[other];
+      }
+      return null;
+    };
     state.components.forEach(comp => {
       const p = comp.params;
       if (!p || comp.type === 'ac_bus' || comp.type === 'dc_bus') return;
       const buses = busesOf(comp.id);
-      if ('bus_ac' in p || 'bus_dc' in p) {
+      if ('bus_in' in p || 'bus_out' in p) {
+        const bi = busByPort(comp.id, 'in');
+        const bo = busByPort(comp.id, 'out');
+        if ('bus_in' in p && bi != null) p.bus_in = bi;
+        if ('bus_out' in p && bo != null) p.bus_out = bo;
+      } else if ('bus_ac' in p || 'bus_dc' in p) {
         const ac = buses.find(b => b.domain === 'ac');
         const dc = buses.find(b => b.domain === 'dc');
         if ('bus_ac' in p && ac) p.bus_ac = ac.index;
@@ -1876,6 +1894,24 @@ const Canvas = (() => {
         }
       }
       return indices.length >= 2 ? [indices[0], indices[1]] : [indices[0] || 1, indices[1] || 1];
+    }
+
+    // Resolve the bus index wired to a SPECIFIC named port of a device. Needed
+    // for devices whose ports cannot be disambiguated by domain alone — e.g. a
+    // DC/DC converter whose 'in' and 'out' ports are BOTH on the DC side, or a
+    // VSC's 'ac'/'dc' ports. Returns 0 when the port is unwired.
+    function findBusIndexByPort(compId, portId) {
+      for (const conn of state.connections) {
+        if (conn.from.compId === compId && conn.from.port === portId) {
+          const idx = compBusMap[conn.to.compId];
+          if (idx !== undefined) return idx;
+        }
+        if (conn.to.compId === compId && conn.to.port === portId) {
+          const idx = compBusMap[conn.from.compId];
+          if (idx !== undefined) return idx;
+        }
+      }
+      return 0;
     }
 
     // Second pass: create devices
@@ -2182,8 +2218,9 @@ const Canvas = (() => {
           sys.vsc_converters.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx,
             name: p.name || `VSC ${Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx}`,
-            bus_ac: parseInt(p.bus_ac) || 0,
-            bus_dc: parseInt(p.bus_dc) || 0,
+            // Resolve from the wired 'ac'/'dc' ports (authoritative); typed value is fallback.
+            bus_ac: findBusIndexByPort(comp.id, 'ac') || parseInt(p.bus_ac) || 0,
+            bus_dc: findBusIndexByPort(comp.id, 'dc') || parseInt(p.bus_dc) || 0,
             control_mode: p.control_mode || 'PQ_MODE',
             type: p.type || 'two_level',
             p_set_mw: numOr(p.p_set_mw, 0),
@@ -2501,8 +2538,10 @@ const Canvas = (() => {
           sys.dcdc_converters.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length,
             name: p.name || `DCDC ${Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length}`,
-            bus_in: parseInt(p.bus_in) || 0,
-            bus_out: parseInt(p.bus_out) || 0,
+            // Resolve from the wired 'in'/'out' ports (authoritative); the typed
+            // property is only a fallback when the port is unwired.
+            bus_in: findBusIndexByPort(comp.id, 'in') || parseInt(p.bus_in) || 0,
+            bus_out: findBusIndexByPort(comp.id, 'out') || parseInt(p.bus_out) || 0,
             control_mode: p.control_mode || 'Voltage',
             p_ref_mw: numOr(p.p_ref_mw, 0),
             v_ref_pu: numOr(p.v_ref_pu, 1.0),

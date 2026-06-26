@@ -330,6 +330,50 @@ TEST_CASE("DC_V bus type alone is not accepted as a physical voltage source",
   CHECK_FALSE(report.feasible);
 }
 
+TEST_CASE("DC_V bus backed by controllable DC storage is accepted as a physical voltage source",
+          "[converter][coordination][dc-bus]") {
+  hacdcpf::HybridPowerSystem sys;
+  hacdcpf::DCBus d;
+  d.index = 2;
+  d.bus_type = hacdcpf::DCBusType::DC_V;
+  d.vm_pu = 1.0;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  hacdcpf::DCLoad ld;
+  ld.index = 1;
+  ld.bus = 2;
+  ld.p_mw = 0.25;
+  ld.in_service = true;
+  sys.dc.loads = {ld};
+
+  hacdcpf::DCStorage st;
+  st.index = 1;
+  st.bus = 2;
+  st.p_mw = 0.3;
+  st.p_rated_mw = 0.3;
+  st.pmin_mw = -0.3;
+  st.pmax_mw = 0.3;
+  st.soc_init = 0.5;
+  st.soc_min = 0.1;
+  st.soc_max = 0.9;
+  st.controllable = true;
+  st.in_service = true;
+  sys.dc.dc_storage = {st};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  REQUIRE(report.dc_islands.size() == 1);
+  CHECK(report.dc_islands.front().declared_v_buses == std::vector<int>{2});
+  CHECK(report.dc_islands.front().hard_vdc_sources == 1);
+  REQUIRE(report.dc_islands.front().voltage_sources.size() == 1);
+  CHECK(report.dc_islands.front().voltage_sources.front().component_type ==
+        "dc_bus_storage_source");
+  CHECK_FALSE(report_has_rule(report, "DCBUS-01"));
+  CHECK_FALSE(report_has_rule(report, "DCISLAND-01"));
+  CHECK(report.feasible);
+}
+
 TEST_CASE("Conflicting VDC setpoints in one DC island are fatal",
           "[converter][coordination][vsc]") {
   hacdcpf::HybridPowerSystem sys;
@@ -345,17 +389,43 @@ TEST_CASE("Conflicting VDC setpoints in one DC island are fatal",
   CHECK_FALSE(report.feasible);
 }
 
-TEST_CASE("DC/DC Voltage mode is blocked until the PF model enforces v_ref",
+TEST_CASE("DC/DC Voltage mode forms its output voltage and is feasible with an input reference",
           "[converter][coordination][dcdc]") {
   hacdcpf::HybridPowerSystem sys;
   sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Input island (bus 1) has a VDC VSC reference; the Voltage-mode DC/DC forms
+  // the output island (bus 2) voltage and draws its regulated power from bus 1.
+  sys.vsc_converters = {vdc_vsc(5, 1, 1.0)};
   sys.dc.dcdc_converters = {dcdc_converter(3, 1, 2, hacdcpf::DCDCControlMode::Voltage)};
 
   const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
 
-  CHECK(report_has_rule(report, "DCDC-CTRL-01"));
+  // Voltage mode is now a true voltage-forming control: no longer blocked.
+  CHECK_FALSE(report_has_rule(report, "DCDC-CTRL-01"));
+  CHECK_FALSE(report_has_rule(report, "DCDC-CTRL-03"));  // input island has a reference
+  CHECK(report.feasible);
+  // The output island gained a hard Vdc reference contributed by the former.
+  bool out_has_dcdc_source = false;
+  for (const auto& isl : report.dc_islands) {
+    for (const auto& vs : isl.voltage_sources) {
+      if (vs.component_type == "dcdc_converter") out_has_dcdc_source = true;
+    }
+  }
+  CHECK(out_has_dcdc_source);
+}
+
+TEST_CASE("DC/DC Voltage mode needs an input-side voltage reference (DCDC-CTRL-03)",
+          "[converter][coordination][dcdc]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Voltage-mode DC/DC forms the output (bus 2) voltage, but the input island
+  // (bus 1) has no source to supply the regulated output.
+  sys.dc.dcdc_converters = {dcdc_converter(3, 1, 2, hacdcpf::DCDCControlMode::Voltage)};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCDC-CTRL-03"));
   CHECK_FALSE(report.feasible);
-  CHECK(report.blocking_count() > 0);
 }
 
 TEST_CASE("A DC grid-forming converter cannot hard-constrain AC active power (ACDC-GFM-01)",

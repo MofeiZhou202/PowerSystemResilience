@@ -678,16 +678,18 @@ void populate_derived_results(const powerflow::SolverData& data,
   result.dcdc_transfers.reserve(data.dcdc_converters.size());
   for (const auto& c : data.dcdc_converters) {
     if (!c.in_service) continue;
-    const double eta = (c.eta > 1e-9) ? c.eta : 1.0;
-    const double p_out_mw = c.p_ref_mw;
-    const double p_in_mw = (p_out_mw >= 0.0) ? (p_out_mw / eta) : (p_out_mw * eta);
+    // Report the SOLVED transfer evaluated at the converged DC voltages, not the
+    // schedule. In Voltage/Droop modes the delivered power is set by the island
+    // power balance, so c.p_ref_mw is NOT the actual transfer; Power mode yields
+    // the same numbers as before (minus the now-accounted I2R loss).
+    const auto xfer = powerflow::dcdc_power_transfer(c, vdc, data.base_mva);
     DCDCTransfer tr;
     tr.index = c.index;
     tr.bus_in = c.bus_in;
     tr.bus_out = c.bus_out;
-    tr.p_in_mw = p_in_mw;
-    tr.p_out_mw = p_out_mw;
-    tr.loss_mw = p_in_mw - p_out_mw;
+    tr.p_in_mw = xfer.p_in_pu * data.base_mva;
+    tr.p_out_mw = xfer.p_out_pu * data.base_mva;
+    tr.loss_mw = tr.p_in_mw - tr.p_out_mw;
     // Duty-ratio feasibility from the solved port voltages (multi-converter §3.2).
     const int bi = dc_pos(c.bus_in);
     const int bo = dc_pos(c.bus_out);

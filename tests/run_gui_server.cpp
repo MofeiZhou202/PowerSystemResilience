@@ -8,6 +8,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
@@ -19,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <httplib.h>
@@ -5118,6 +5120,7 @@ int main(int argc, char** argv) {
         if (o.contains("enable_pv_pq_conversion")) opt.enable_pv_pq_conversion = o["enable_pv_pq_conversion"].get<bool>();
         if (o.contains("enable_auto_swing_selection")) opt.enable_auto_swing_selection = o["enable_auto_swing_selection"].get<bool>();
         if (o.contains("enable_converter_mode_switching")) opt.enable_converter_mode_switching = o["enable_converter_mode_switching"].get<bool>();
+        if (o.contains("enable_converter_coordination_check")) opt.enable_converter_coordination_check = o["enable_converter_coordination_check"].get<bool>();
         if (o.contains("verbose")) opt.verbose = o["verbose"].get<bool>();
         if (o.contains("pv_q_hysteresis_pu")) opt.pv_q_hysteresis_pu = o["pv_q_hysteresis_pu"].get<double>();
         if (o.contains("pv_recover_vm_tol_pu")) opt.pv_recover_vm_tol_pu = o["pv_recover_vm_tol_pu"].get<double>();
@@ -5130,7 +5133,11 @@ int main(int argc, char** argv) {
           else opt.loss_model = hacdcpf::LossModelType::Linear;
         }
       }
-      opt.enable_converter_coordination_check = true;
+      // Honor the request's coordination-check flag (the GUI checkbox). Default
+      // to enabled for hybrid AC/DC safety when the request omits it.
+      if (!j.contains("options") || !j["options"].contains("enable_converter_coordination_check")) {
+        opt.enable_converter_coordination_check = true;
+      }
       json out;
       out["method"] = method;
       out["vm"] = json::array();
@@ -5282,6 +5289,24 @@ int main(int argc, char** argv) {
 
       // Helper to compute DC branch flows from DC bus voltages
       auto add_dc_branch_flows = [&]() {
+        if (out.contains("geo_dc_branches") && out["geo_dc_branches"].is_array() &&
+            !out["geo_dc_branches"].empty()) {
+          json dc_br = json::array();
+          for (const auto& br : out["geo_dc_branches"]) {
+            dc_br.push_back(json{
+              {"index", br.value("index", 0)},
+              {"from_bus", br.value("from", br.value("from_bus", 0))},
+              {"to_bus", br.value("to", br.value("to_bus", 0))},
+              {"pf_mw", br.value("pf_mw", 0.0)},
+              {"pt_mw", br.value("pt_mw", 0.0)},
+              {"loss_mw", br.value("loss_mw", br.value("pf_mw", 0.0) + br.value("pt_mw", 0.0))},
+              {"loading_pct", br.value("loading_pct", 0.0)},
+              {"rate_mva", br.value("rate_mva", 0.0)}
+            });
+          }
+          out["dc_branch_flows"] = dc_br;
+          return;
+        }
         if (!out.contains("vdc") || !out["vdc"].is_array() || out["vdc"].empty() || sys.dc.branches.empty()) return;
         // Build dc_bus_index → position map
         std::unordered_map<int, size_t> dc_idx;
@@ -5911,6 +5936,148 @@ int main(int argc, char** argv) {
         for (const auto& b : sys.dc.buses) {
           dc_net_export_p[b.index] = dc_dev_inj_p[b.index] + conv_inj_dc_p[b.index];
         }
+
+        auto is_dc_reference_bus = [&](int bus) {
+          for (const auto& b : sys.dc.buses) {
+            if (b.index == bus) return b.bus_type == hacdcpf::DCBusType::DC_V;
+          }
+          return false;
+        };
+        auto dc_branch_loss_estimate = [&](const hacdcpf::DCBranch& br, int bus, double p_mw) {
+          if (br.r_pu <= 0.0 || sys.base_mva <= 1e-12) return 0.0;
+          double v = 1.0;
+          auto vit = dc_vm_by_bus.find(bus);
+          if (vit != dc_vm_by_bus.end() && std::abs(vit->second) > 1e-6) v = std::abs(vit->second);
+          const double p_pu = std::abs(p_mw) / sys.base_mva;
+          const double i_pu = p_pu / std::max(v, 1e-3);
+          return br.r_pu * i_pu * i_pu * sys.base_mva;
+        };
+        auto set_dc_branch_flow_from_endpoint = [&](size_t branch_pos,
+                                                    int exact_bus,
+                                                    double exact_outflow_mw,
+                                                    const std::string& source) {
+          if (branch_pos >= sys.dc.branches.size() || branch_pos >= geo_dc_branches.size()) return;
+          const auto& br = sys.dc.branches[branch_pos];
+          const double loss = dc_branch_loss_estimate(br, exact_bus, exact_outflow_mw);
+          double pf = 0.0;
+          double pt = 0.0;
+          if (exact_bus == br.from_bus) {
+            pf = exact_outflow_mw;
+            pt = loss - pf;
+          } else if (exact_bus == br.to_bus) {
+            pt = exact_outflow_mw;
+            pf = loss - pt;
+          } else {
+            return;
+          }
+          double loading = 0.0;
+          if (br.rate_a_mva > 0.0) {
+            loading = 100.0 * std::max(std::abs(pf), std::abs(pt)) / br.rate_a_mva;
+          }
+          geo_dc_branches[branch_pos]["pf_mw"] = pf;
+          geo_dc_branches[branch_pos]["pt_mw"] = pt;
+          geo_dc_branches[branch_pos]["loss_mw"] = pf + pt;
+          geo_dc_branches[branch_pos]["loading_pct"] = loading;
+          geo_dc_branches[branch_pos]["source"] = source;
+        };
+        auto repair_dc_branch_flows_from_kcl = [&]() {
+          if (sys.dc.branches.empty() || sys.dc.buses.empty() || geo_dc_branches.empty()) return;
+
+          std::unordered_map<int, double> current_outflow;
+          for (const auto& br : geo_dc_branches) {
+            const int from = br.value("from", br.value("from_bus", 0));
+            const int to = br.value("to", br.value("to_bus", 0));
+            current_outflow[from] += br.value("pf_mw", 0.0);
+            current_outflow[to] += br.value("pt_mw", 0.0);
+          }
+          double max_non_ref_mismatch = 0.0;
+          for (const auto& b : sys.dc.buses) {
+            if (!b.in_service || is_dc_reference_bus(b.index)) continue;
+            max_non_ref_mismatch =
+                std::max(max_non_ref_mismatch,
+                         std::abs(dc_net_export_p[b.index] - current_outflow[b.index]));
+          }
+          if (max_non_ref_mismatch < 1e-5) return;
+
+          std::unordered_map<int, std::vector<std::pair<int, size_t>>> adj;
+          std::unordered_set<int> bus_ids;
+          for (const auto& b : sys.dc.buses) {
+            if (b.in_service && b.bus_type != hacdcpf::DCBusType::DC_ISOLATED) {
+              bus_ids.insert(b.index);
+            }
+          }
+          size_t active_edges = 0;
+          for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
+            const auto& br = sys.dc.branches[i];
+            if (!br.in_service || !bus_ids.count(br.from_bus) || !bus_ids.count(br.to_bus)) continue;
+            adj[br.from_bus].push_back({br.to_bus, i});
+            adj[br.to_bus].push_back({br.from_bus, i});
+            ++active_edges;
+          }
+          if (active_edges == 0) return;
+
+          std::unordered_set<int> visited;
+          std::unordered_set<size_t> repaired_edges;
+          for (int start : bus_ids) {
+            if (visited.count(start)) continue;
+            std::vector<int> component;
+            std::vector<int> roots;
+            std::vector<int> stack{start};
+            visited.insert(start);
+            size_t comp_edges_twice = 0;
+            while (!stack.empty()) {
+              const int u = stack.back();
+              stack.pop_back();
+              component.push_back(u);
+              if (is_dc_reference_bus(u)) roots.push_back(u);
+              comp_edges_twice += adj[u].size();
+              for (const auto& [v, edge_pos] : adj[u]) {
+                (void)edge_pos;
+                if (!visited.count(v)) {
+                  visited.insert(v);
+                  stack.push_back(v);
+                }
+              }
+            }
+            if (roots.size() != 1) continue;
+            const size_t comp_edges = comp_edges_twice / 2;
+            if (comp_edges + 1 != component.size()) continue;  // KCL tree repair only.
+
+            const int root = roots.front();
+            std::unordered_set<int> comp_set(component.begin(), component.end());
+            std::function<double(int, int)> dfs = [&](int u, int parent) -> double {
+              double subtree_export = dc_net_export_p[u];
+              for (const auto& [v, edge_pos] : adj[u]) {
+                if (v == parent || !comp_set.count(v)) continue;
+                const double child_export = dfs(v, u);
+                set_dc_branch_flow_from_endpoint(edge_pos, v, child_export, "dc_kcl_tree");
+                repaired_edges.insert(edge_pos);
+                subtree_export += child_export;
+              }
+              return subtree_export;
+            };
+            (void)dfs(root, -1);
+          }
+
+          // Meshed or multi-reference fragments cannot be oriented as a tree.
+          // Still recover terminal/leaf branches from their non-reference bus
+          // balance so a single visible feeder does not remain at stale zero.
+          for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
+            if (repaired_edges.count(i)) continue;
+            const auto& br = sys.dc.branches[i];
+            if (!br.in_service) continue;
+            const int f = br.from_bus;
+            const int t = br.to_bus;
+            if (!is_dc_reference_bus(f) && adj[f].size() == 1) {
+              set_dc_branch_flow_from_endpoint(i, f, dc_net_export_p[f], "dc_kcl_leaf");
+            } else if (!is_dc_reference_bus(t) && adj[t].size() == 1) {
+              set_dc_branch_flow_from_endpoint(i, t, dc_net_export_p[t], "dc_kcl_leaf");
+            }
+          }
+        };
+        repair_dc_branch_flows_from_kcl();
+        out["geo_dc_branches"] = geo_dc_branches;
+
         std::unordered_map<int, double> dc_visible_branch_p;
         for (const auto& br : geo_dc_branches) {
           const int from = br.value("from", br.value("from_bus", 0));
@@ -6123,7 +6290,12 @@ int main(int argc, char** argv) {
           // Net nodal injection = Σ(DC source/load/converter injections).
           const double dc_net_p = dc_net_export_p[b.index];
           add_metric(row, "P净注入", dc_net_p, "MW", "p", 4);
-          add_note(row, "净注入=该母线所有设备净注入(直流源为正、负荷为负、变换器按端口方向)，等于经支路外送的净有功");
+          const double branch_export_p = dc_visible_branch_p[b.index];
+          if (b.bus_type == hacdcpf::DCBusType::DC_V &&
+              std::abs(branch_export_p - dc_net_p) > 1e-5) {
+            add_metric(row, "DC平衡源", branch_export_p - dc_net_p, "MW", "p", 4);
+          }
+          add_note(row, "净注入=该母线普通设备净注入(直流源为正、负荷为负、变换器按端口方向)；DC_V母线还可显示平衡源功率，使总注入等于经支路外送的净有功");
           component_results.push_back(std::move(row));
         }
 
@@ -11217,11 +11389,12 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       auto sys = system_from_request(j);
       hacdcpf::PowerFlowOptions opt;
+      opt.enable_converter_coordination_check = true;  // default for hybrid safety
       if (j.contains("options")) { auto& o=j["options"];
         if(o.contains("max_iter"))opt.max_iter=o["max_iter"].get<int>();
         if(o.contains("tol"))opt.tol=o["tol"].get<double>();
+        if(o.contains("enable_converter_coordination_check"))opt.enable_converter_coordination_check=o["enable_converter_coordination_check"].get<bool>();
       }
-      opt.enable_converter_coordination_check = true;
       auto pf = hacdcpf::solve_power_flow(sys, opt);
       json out;
       out["converged"]=pf.converged; out["iterations"]=pf.iterations;

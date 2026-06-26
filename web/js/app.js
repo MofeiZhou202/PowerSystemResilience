@@ -5,6 +5,13 @@
 
 const API_BASE = window.location.origin;  // Same origin as the C++ server
 
+// Bus-terminal fields that are resolved from the canvas wiring (connected ports)
+// rather than typed by hand. The property inspector renders these read-only so
+// users wire ports (e.g. a DC/DC's 'in'/'out') instead of guessing internal IDs.
+const WIRING_DERIVED_BUS_FIELDS = new Set([
+  'bus_in', 'bus_out', 'bus_ac', 'bus_dc', 'from_bus', 'to_bus', 'hv_bus', 'lv_bus',
+]);
+
 const App = (() => {
   // ========== Canvas Dirty Tracking ==========
   // When a built-in case or JSON is loaded, the backend already has the correct
@@ -1756,13 +1763,14 @@ const App = (() => {
       return;
     }
 
+    const coordCheckEl = document.getElementById('pfCoordCheck');
     const data = await apiPost('/api/session/pf', {
       method: method,
       options: {
         max_iter: 100,
         tol: 1e-8,
         verbose: false,
-        enable_converter_coordination_check: true
+        enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
       }
     });
 
@@ -5137,6 +5145,28 @@ const App = (() => {
   }
 
   // ========== Topology Tables ==========
+  // Only these solvers co-solve AC + DC + converters as one coupled system.
+  // The others are AC-only (pure_ac/fdpf/three_phase), DC-only (dc), a one-shot
+  // linearization (hybrid_linearized), or use a different reference scheme
+  // (distributed_slack) — so they give non-comparable answers on a hybrid case.
+  const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded']);
+  function updatePfMethodAvailability(sys) {
+    const sel = document.getElementById('pfMethod');
+    if (!sel) return;
+    const dc = (sys && sys.dc) ? sys.dc : {};
+    const hasDc = (Array.isArray(dc.buses) && dc.buses.length > 0) ||
+      (sys && Array.isArray(sys.vsc_converters) && sys.vsc_converters.length > 0) ||
+      (sys && Array.isArray(sys.dcdc_converters) && sys.dcdc_converters.length > 0);
+    let selectedGotDisabled = false;
+    Array.from(sel.options).forEach(opt => {
+      const restrict = hasDc && !HYBRID_PF_METHODS.has(opt.value);
+      opt.disabled = restrict;
+      opt.title = restrict ? '该算法不联立求解直流网络/变换器，混合交直流算例结果不可比' : '';
+      if (restrict && opt.selected) selectedGotDisabled = true;
+    });
+    if (selectedGotDisabled) sel.value = 'ac_newton';
+  }
+
   function onTopologyChanged() {
     _canvasDirty = true;
     // Rewiring changes which buses a device connects to — re-derive those
@@ -5151,6 +5181,7 @@ const App = (() => {
   function updateTopologyTables() {
     const sys = Canvas.buildSystemJson();
     const m = Canvas.getCompBusMap();
+    updatePfMethodAvailability(sys);
     markResilienceFaultBranches();
     renderComponentCurveTargets('timeSeries');
     renderComponentCurveTargets('scenario');
@@ -5453,6 +5484,15 @@ const App = (() => {
         inp.type = typeof val === 'number' ? 'number' : 'text';
         inp.step = 'any';
         inp.value = val;
+        // Bus terminals are resolved from the canvas wiring (connected ports),
+        // not typed by hand. Show them read-only so the user wires ports — e.g.
+        // a DC/DC's 'in'/'out' — instead of guessing internal bus IDs.
+        if (WIRING_DERIVED_BUS_FIELDS.has(key)) {
+          inp.readOnly = true;
+          inp.title = '由接线自动确定（请通过连线修改端口）';
+          inp.style.opacity = '0.65';
+          inp.style.cursor = 'not-allowed';
+        }
         div.appendChild(inp);
       }
 

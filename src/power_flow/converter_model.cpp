@@ -242,6 +242,25 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
     const double vdc_out = (bout >= 0 && bout < ndc) ? vdc[bout] : dcdc.v_ref_pu;
     out.p_out_ref_pu += dcdc.k_droop * (vdc_out - dcdc.v_ref_pu);
     out.dpout_ref_dvdc_out = dcdc.k_droop;
+  } else if (dcdc.control_mode == DCDCControlMode::Voltage) {
+    // True voltage forming: the converter holds its OUTPUT bus at v_ref_pu by
+    // sourcing/sinking whatever power balances the output-side island, and
+    // reflecting it (via eta / I2R) onto the input bus. Implemented as a stiff
+    // negative-feedback law p_out_ref = -k_form*(vdc_out - v_ref) — the same
+    // stabilizing sign as a VSC in VDC mode (pdc = -k*(Vdc^2 - Vset^2)). The
+    // schedule term p_ref_mw is intentionally NOT added here: in Voltage mode
+    // the transfer is set by the power balance, not a fixed setpoint.
+    const double vdc_out = (bout >= 0 && bout < ndc) ? vdc[bout] : dcdc.v_ref_pu;
+    const double base = (base_mva > 0.0) ? base_mva : 100.0;
+    const double p_rated_pu =
+        (dcdc.sn_mva > 0.0
+             ? dcdc.sn_mva
+             : std::max(std::abs(dcdc.pmax_mw), std::abs(dcdc.pmin_mw))) /
+        base;
+    double k_form = std::max(p_rated_pu * 100.0, 25.0);
+    if (dcdc.k_droop != 0.0) k_form = std::max(k_form, std::abs(dcdc.k_droop));
+    out.p_out_ref_pu = -k_form * (vdc_out - dcdc.v_ref_pu);
+    out.dpout_ref_dvdc_out = -k_form;
   }
 
   out.dpin_dpout_ref = (out.p_out_ref_pu >= 0.0) ? (1.0 / out.eta) : out.eta;
