@@ -10,9 +10,35 @@
 namespace hacdcpf::opf {
 
 // ═══════════════════════════════════════════════════════════════════════
+// AC OPF Solver Backend
+// ═══════════════════════════════════════════════════════════════════════
+/// Selects which nonlinear-OPF engine `solve_ac_opf` uses.
+///
+/// - `Auto`             : parity full-space IPM first, then Ipopt as a fallback
+///                        if the parity IPM does not converge (and Ipopt is
+///                        compiled in).  Pure-AC cases may still use the fast
+///                        economic-dispatch path only when explicitly selected.
+/// - `ParityIPM`        : the self-developed full-space primal-dual IPM.
+/// - `Ipopt`            : the embedded Ipopt (filter line-search) NLP solver,
+///                        applied to the same parity formulation.
+/// - `EconomicDispatch` : merit-order economic dispatch + a single AC power
+///                        flow.  Fast but suboptimal; pure-AC systems only.
+enum class ACOPFSolverBackend {
+  Auto,
+  ParityIPM,
+  Ipopt,
+  EconomicDispatch
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 // AC OPF Options
 // ═══════════════════════════════════════════════════════════════════════
 struct ACOPFOptions {
+  /// Preferred nonlinear-OPF backend.  When left at `Auto`, the legacy
+  /// `use_parity_ipm` / `enable_primal_dual` flags continue to control path
+  /// selection (with an Ipopt fallback for hybrid AC/DC and large cases).
+  ACOPFSolverBackend ac_solver_backend{ACOPFSolverBackend::Auto};
+
   int max_inner_iterations{80};
   int max_outer_iterations{8};
   int max_line_search_steps{20};

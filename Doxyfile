@@ -64,12 +64,9 @@ DISABLE_INDEX          = NO
 FULL_SIDEBAR           = NO
 SEARCHENGINE           = YES
 SERVER_BASED_SEARCH    = NO
-<<<<<<< HEAD
-=======
 USE_MATHJAX            = YES
 MATHJAX_VERSION        = MathJax_3
 MATHJAX_EXTENSIONS     = ams
->>>>>>> origin/main
 
 GENERATE_LATEX         = NO
 GENERATE_XML           = NO
@@ -102,8 +99,5 @@ WARNINGS               = YES
 WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
 WARN_NO_PARAMDOC       = NO
-<<<<<<< HEAD
-=======
 WARN_LOGFILE           = docs/generated/doxygen-warnings.log
->>>>>>> origin/main
 QUIET                  = YES

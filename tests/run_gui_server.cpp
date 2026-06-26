@@ -28,6 +28,8 @@
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
+#include "hacdcpf/assembly/solver_data.hpp"
+#include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -1267,6 +1269,13 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
       <!-- ========================== OPF TAB ============================== -->
       <section id="opfPane" class="tabpane">
         <div class="btn-group">
+          <label style="align-self:center;font-size:13px;color:#555;">AC Solver</label>
+          <select id="opfSolver" title="AC OPF solver backend">
+            <option value="auto" selected>Auto (Parity IPM &rarr; Ipopt)</option>
+            <option value="parity">Parity IPM (native)</option>
+            <option value="ipopt">Ipopt (filter line-search)</option>
+            <option value="dispatch">Economic Dispatch (fast)</option>
+          </select>
           <button class="btn btn-primary" id="runAcOpfBtn">Run AC OPF</button>
           <button class="btn btn-accent" id="runDcOpfBtn">Run DC OPF</button>
           <button class="btn" id="runParityOpfBtn" style="background:#6a0dad;color:#fff;">Run Parity OPF</button>
@@ -2594,15 +2603,16 @@ function renderOpfDcResults(body){
 }
 document.getElementById('runAcOpfBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
-  try{setStatus('Running AC OPF...');const body=await api('/api/session/opf_ac',{});
-  document.getElementById('opfType').textContent='AC';
+  const solver=document.getElementById('opfSolver').value;
+  try{setStatus('Running AC OPF ('+solver+')...');const body=await api('/api/session/opf_ac',{solver});
+  document.getElementById('opfType').textContent=body.solver_backend?body.solver_backend:('AC ('+solver+')');
   document.getElementById('opfConv').textContent=body.converged?'Yes':'No';
   document.getElementById('opfObj').textContent=fmt(body.objective,2);
   document.getElementById('opfIter').textContent=body.iterations;
   Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   renderOpfDcResults(body);
-  setStatus('AC OPF completed.');}catch(e){setStatus(e.message,true);}
+  setStatus(body.converged?('AC OPF completed ('+(body.solver_backend||solver)+').'):('AC OPF did not converge: '+(body.status||'')) ,!body.converged);}catch(e){setStatus(e.message,true);}
 };
 
 document.getElementById('runDcOpfBtn').onclick=async()=>{
@@ -6983,6 +6993,8 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       const std::string solver = j.value("solver", std::string("parity"));
+      // Optional post-OPF power-flow consistency audit (OPF ↔ PF model/parameters).
+      const bool want_consistency = j.value("check_consistency", false);
       const json cons = j.contains("constraints") ? j["constraints"] : json::object();
       const bool en_branch = cons.value("branch_limits", true);
       const bool en_cap    = cons.value("converter_capacity", true);
@@ -7006,9 +7018,28 @@ int main(int argc, char** argv) {
         out["total_load_shedding_mw"]=r.total_load_shedding_mw;
       } else {
         hacdcpf::opf::ACOPFOptions opt;
-        opt.use_parity_ipm = (solver == "parity");
-        opt.allow_fallback = (solver != "parity");
-        opt.max_inner_iterations = (solver == "parity") ? 400 : 120;
+        // Map the GUI solver selector onto the modern backend enum.  The parity
+        // full-space formulation is shared by the native IPM and Ipopt; only the
+        // inner Newton engine differs.  EconomicDispatch is the fast merit-order
+        // + single AC PF path (pure-AC).  Unknown / legacy values default to the
+        // native parity IPM.
+        using SB = hacdcpf::opf::ACOPFSolverBackend;
+        if (solver == "ipopt") {
+          opt.ac_solver_backend = SB::Ipopt;
+        } else if (solver == "dispatch") {
+          opt.ac_solver_backend = SB::EconomicDispatch;
+        } else if (solver == "auto") {
+          // Auto = parity-first with an Ipopt fallback.  Force a real OPF so a
+          // pure-AC system does not silently degrade to economic dispatch.
+          opt.ac_solver_backend = SB::Auto;
+          opt.enable_primal_dual = true;
+          opt.use_parity_ipm = true;
+          opt.allow_fallback = true;
+        } else {  // "parity" (default)
+          opt.ac_solver_backend = SB::ParityIPM;
+        }
+        const bool nonlinear = (opt.ac_solver_backend != SB::EconomicDispatch);
+        opt.max_inner_iterations = nonlinear ? 400 : 120;
         opt.enforce_branch_limits = en_branch;
         opt.enforce_converter_capacity = en_cap;
         opt.enforce_converter_current_limits = en_iac;
@@ -7016,6 +7047,11 @@ int main(int argc, char** argv) {
         auto r = hacdcpf::solve_ac_opf(sys, opt);
         out["converged"]=r.converged; out["iterations"]=r.iterations;
         out["objective"]=r.objective; out["status"]=r.status;
+        // Report the engine that actually ran (e.g. parity_ipm:sparse_umfpack
+        // or ipopt_filter_linesearch) so the GUI can show the realized backend.
+        out["solver_backend"]=r.profiling.linear_solver_backend;
+        out["solver_path"]=(r.solver_path==hacdcpf::opf::OPFSolverPath::ParityIPM)?"parity":
+                           (r.solver_path==hacdcpf::opf::OPFSolverPath::NativeAC)?"native_ac":"other";
         out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
         out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
         out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
@@ -7035,6 +7071,57 @@ int main(int argc, char** argv) {
             if (i < r.qg_mvar.size()) sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
           }
           if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
+          if (want_consistency) {
+            // Warm-start the audit PF from the FULL OPF state (bus angles + DC
+            // voltages) so any residual deviation reflects OPF↔PF model/parameter
+            // inconsistency rather than the solver start point.  r.va is in
+            // radians (same convention as PowerFlowResult::va); ACBus stores
+            // degrees, and DCBus stores the DC voltage in vm_pu.
+            constexpr double kRad2Deg = 57.295779513082320876798154814105;
+            for (size_t i = 0; i < r.va.size() && i < sys.ac.buses.size(); ++i)
+              sys.ac.buses[i].va_deg = r.va[i] * kRad2Deg;
+            for (size_t i = 0; i < r.vdc.size() && i < sys.dc.buses.size(); ++i)
+              sys.dc.buses[i].vm_pu = r.vdc[i];
+            // Pin the VSC converters to the OPF operating point so the audit PF
+            // reproduces the AC/DC interface exactly.  Pinning every converter to
+            // its OPF AC P/Q (PQ injection) reproduces the precise operating
+            // point the OPF found — but a converter that forms the DC voltage
+            // (VDC_*) may be the only thing anchoring the DC grid.  So we only
+            // collapse DC-forming converters to PQ when the DC subsystem has its
+            // own DC_V reference bus; otherwise that converter keeps its mode to
+            // anchor Vdc (a small loss-model residual then remains for it).
+            bool dc_has_voltage_anchor = false;
+            for (const auto& db : sys.dc.buses)
+              if (db.in_service && db.bus_type == hacdcpf::DCBusType::DC_V) {
+                dc_has_voltage_anchor = true; break;
+              }
+            for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
+              auto& c = sys.vsc_converters[i];
+              const bool dc_forming =
+                  (c.control_mode == hacdcpf::ConverterMode::VDC_Q ||
+                   c.control_mode == hacdcpf::ConverterMode::VDC_VAC ||
+                   c.control_mode == hacdcpf::ConverterMode::DC_V_DROOP_AC_V);
+              if (i < r.qac_mvar.size()) c.q_set_mvar = r.qac_mvar[i];
+              if (i < r.pac_mw.size()) { c.p_schedule_mw = r.pac_mw[i];
+                                         c.p_initial_mw  = r.pac_mw[i]; }
+              if (dc_forming && !dc_has_voltage_anchor) {
+                // Keep this converter as the DC anchor; align its targets only.
+                if (c.bus_dc >= 0 && static_cast<size_t>(c.bus_dc) < r.vdc.size())
+                  c.v_dc_set_pu = r.vdc[static_cast<size_t>(c.bus_dc)];
+                if (c.bus_ac >= 0 && static_cast<size_t>(c.bus_ac) < r.vm.size())
+                  c.v_ac_set_pu = r.vm[static_cast<size_t>(c.bus_ac)];
+              } else {
+                // Pin to the exact OPF AC P/Q operating point (PQ injection).
+                if (i < r.pac_mw.size()) { c.p_set_mw = r.pac_mw[i];
+                                           c.p_is_hard_constraint = true; }
+                c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+                if (c.bus_ac >= 0 && static_cast<size_t>(c.bus_ac) < r.vm.size())
+                  c.v_ac_set_pu = r.vm[static_cast<size_t>(c.bus_ac)];
+                if (c.bus_dc >= 0 && static_cast<size_t>(c.bus_dc) < r.vdc.size())
+                  c.v_dc_set_pu = r.vdc[static_cast<size_t>(c.bus_dc)];
+              }
+            }
+          }
           auto ac_pf = hacdcpf::solve_power_flow(sys);
           if (ac_pf.converged) {
             { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
@@ -7071,6 +7158,94 @@ int main(int argc, char** argv) {
               out["post_carbon"] = carbon_analysis_to_json(sys, carbon);
             } catch (const std::exception&) { /* carbon view is best-effort */ }
           }
+          // ── OPF ↔ PF consistency audit ──────────────────────────────────
+          // Re-solve a plain power flow at the OPF dispatch (generation + voltage
+          // setpoints fixed) and measure how far the independent PF state drifts
+          // from the OPF state.  When the OPF and PF share the same network model
+          // and parameters, the OPF optimum is a PF fixed point, so the voltage /
+          // angle deviations are ~0.  A visible deviation localizes a modelling
+          // or parameter inconsistency between the two formulations.
+          if (want_consistency) {
+            json cc;
+            cc["ran"] = true;
+            cc["pf_converged"] = ac_pf.converged;
+            cc["pf_iterations"] = ac_pf.iterations;
+            cc["pf_residual"] = ac_pf.residual;
+            if (ac_pf.converged) {
+              double max_dvm = 0.0, sum_dvm = 0.0; int worst_vm = -1; size_t nvm = 0;
+              for (size_t i = 0; i < r.vm.size() && i < ac_pf.vm.size(); ++i) {
+                const double d = std::abs(r.vm[i] - ac_pf.vm[i]);
+                sum_dvm += d; ++nvm;
+                if (d > max_dvm) { max_dvm = d; worst_vm = static_cast<int>(i); }
+              }
+              double max_dva = 0.0, sum_dva = 0.0; int worst_va = -1; size_t nva = 0;
+              for (size_t i = 0; i < r.va.size() && i < ac_pf.va.size(); ++i) {
+                const double d = std::abs(r.va[i] - ac_pf.va[i]);
+                sum_dva += d; ++nva;
+                if (d > max_dva) { max_dva = d; worst_va = static_cast<int>(i); }
+              }
+              double max_dvdc = 0.0; int worst_vdc = -1;
+              for (size_t i = 0; i < r.vdc.size() && i < ac_pf.vdc.size(); ++i) {
+                const double d = std::abs(r.vdc[i] - ac_pf.vdc[i]);
+                if (d > max_dvdc) { max_dvdc = d; worst_vdc = static_cast<int>(i); }
+              }
+              constexpr double kRad2Deg = 57.295779513082320876798154814105;
+              const double max_dva_deg = max_dva * kRad2Deg;
+              const double tol_vm = 1e-3, tol_va_deg = 0.1, tol_vdc = 1e-3;
+              cc["max_dvm_pu"]  = max_dvm;
+              cc["mean_dvm_pu"] = nvm ? sum_dvm / static_cast<double>(nvm) : 0.0;
+              cc["max_dvm_bus"] = worst_vm >= 0 ? worst_vm + 1 : -1;
+              cc["max_dva_deg"]  = max_dva_deg;
+              cc["mean_dva_deg"] = nva ? (sum_dva / static_cast<double>(nva)) * kRad2Deg : 0.0;
+              cc["max_dva_bus"]  = worst_va >= 0 ? worst_va + 1 : -1;
+              cc["max_dvdc_pu"]  = max_dvdc;
+              cc["max_dvdc_bus"] = worst_vdc >= 0 ? worst_vdc + 1 : -1;
+              cc["tol_vm_pu"] = tol_vm; cc["tol_va_deg"] = tol_va_deg; cc["tol_vdc_pu"] = tol_vdc;
+              cc["consistent"] = (max_dvm <= tol_vm) && (max_dva_deg <= tol_va_deg) &&
+                                 (r.vdc.empty() || max_dvdc <= tol_vdc);
+
+              // Branch-flow + power-balance (loss) consistency: AC branch flows
+              // at the OPF voltage state, assembled with the same network the PF
+              // used, compared against the PF flows.  Because the load is the
+              // same in both, the branch-loss difference equals the extra slack
+              // generation the PF needs — i.e. the generation/loss consistency.
+              try {
+                auto opf_data = hacdcpf::powerflow::make_solver_data(
+                    sys, hacdcpf::LossModelType::Linear);
+                if (r.vm.size() == opf_data.ac_buses.size() &&
+                    r.va.size() == opf_data.ac_buses.size()) {
+                  auto opf_flows =
+                      hacdcpf::powerflow::compute_branch_flows(opf_data, r.vm, r.va);
+                  double max_dpf = 0.0, max_dqf = 0.0; int worst_br = -1;
+                  double loss_opf = 0.0, loss_pf = 0.0;
+                  const size_t nbr = std::min(opf_flows.size(), ac_pf.branch_flows.size());
+                  for (size_t i = 0; i < nbr; ++i) {
+                    const double dpf =
+                        std::abs(opf_flows[i].pf_mw - ac_pf.branch_flows[i].pf_mw);
+                    const double dqf =
+                        std::abs(opf_flows[i].qf_mvar - ac_pf.branch_flows[i].qf_mvar);
+                    if (dpf > max_dpf) { max_dpf = dpf; worst_br = static_cast<int>(i); }
+                    if (dqf > max_dqf) max_dqf = dqf;
+                    loss_opf += opf_flows[i].pf_mw + opf_flows[i].pt_mw;
+                    loss_pf  += ac_pf.branch_flows[i].pf_mw + ac_pf.branch_flows[i].pt_mw;
+                  }
+                  double conv_loss = 0.0;
+                  for (const auto& vt : ac_pf.vsc_transfers) conv_loss += vt.loss_mw;
+                  cc["max_dpf_mw"]     = max_dpf;
+                  cc["max_dqf_mvar"]   = max_dqf;
+                  cc["max_dpf_branch"] = worst_br >= 0 ? worst_br + 1 : -1;
+                  cc["branch_loss_opf_mw"]      = loss_opf;
+                  cc["branch_loss_pf_mw"]       = loss_pf;
+                  cc["branch_loss_mismatch_mw"] = std::abs(loss_opf - loss_pf);
+                  cc["converter_loss_pf_mw"]    = conv_loss;
+                }
+              } catch (const std::exception&) { /* flow/loss audit is best-effort */ }
+            } else {
+              cc["consistent"] = false;
+              cc["note"] = "post-OPF 潮流未收敛，无法完成一致性校验";
+            }
+            out["consistency"] = cc;
+          }
         }
       }
       res.set_content(out.dump(), "application/json");
@@ -7083,7 +7258,7 @@ int main(int argc, char** argv) {
   });
 
   svr.Post("/api/session/opf_ac",
-           [](const httplib::Request&, httplib::Response& res) {
+           [](const httplib::Request& req, httplib::Response& res) {
     try {
       hacdcpf::HybridPowerSystem sys;
       {
@@ -7099,10 +7274,30 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       hacdcpf::opf::ACOPFOptions opt;
       opt.allow_fallback = true; opt.max_inner_iterations = 120;
+      // Solver backend selection from the GUI dropdown.  "auto"/"parity"/"ipopt"
+      // all run a genuine nonlinear OPF (fixing the historical behaviour where
+      // "Run AC OPF" silently fell back to economic dispatch on pure-AC cases);
+      // "dispatch" keeps the fast merit-order + AC PF path.
+      std::string solver = "auto";
+      try {
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        if (j.contains("solver") && j["solver"].is_string()) solver = j["solver"].get<std::string>();
+      } catch (...) {}
+      if (solver == "parity") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
+      } else if (solver == "ipopt") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::Ipopt;
+      } else if (solver == "dispatch") {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::EconomicDispatch;
+      } else {
+        opt.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::Auto;
+        opt.enable_primal_dual = true; opt.use_parity_ipm = true;
+      }
       auto r = hacdcpf::solve_ac_opf(sys, opt);
       json out;
       out["converged"]=r.converged; out["iterations"]=r.iterations;
       out["objective"]=r.objective; out["status"]=r.status;
+      out["solver_backend"]=r.profiling.linear_solver_backend;
       out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
       out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
       if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;

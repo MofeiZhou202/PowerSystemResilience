@@ -296,6 +296,29 @@ endif()
 # ── Link against MIPSolvers (brings Eigen3, fmt, nlohmann_json, HiGHS, Ipopt) ─
 target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 
+# ── SuiteSparse include path for the OPF sparse-KKT solver (UMFPACK/KLU) ───────
+# MIPSolvers links UMFPACK/KLU and defines HACDCPF_HAVE_UMFPACK/KLU, but keeps the
+# SuiteSparse *include* directory PRIVATE to its own target.  The native OPF IPM
+# uses Eigen's UmfPackLU/KLU wrappers (which #include <umfpack.h>/<klu.h>), so
+# re-discover the include directory here and expose dedicated HACDCPF_OPF_HAVE_*
+# macros that are enabled only when the headers are actually reachable.
+find_path(HACDCPF_SUITESPARSE_INCLUDE_DIR
+  NAMES umfpack.h klu.h
+  HINTS $ENV{SUITESPARSE_ROOT} /opt/homebrew/opt/suite-sparse /opt/homebrew
+        /usr/local/opt/suite-sparse /usr/local /usr
+  PATH_SUFFIXES include include/suitesparse)
+if(HACDCPF_SUITESPARSE_INCLUDE_DIR)
+  target_include_directories(hacdcpf PRIVATE ${HACDCPF_SUITESPARSE_INCLUDE_DIR})
+  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/umfpack.h")
+    target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_UMFPACK=1)
+    message(STATUS "hacdcpf: OPF sparse KKT can use UMFPACK (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+  endif()
+  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/klu.h")
+    target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_KLU=1)
+    message(STATUS "hacdcpf: OPF sparse KKT can use KLU (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+  endif()
+endif()
+
 # ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────
 if(HACDCPF_ENABLE_ETAP AND TARGET OpenXLSX::OpenXLSX)
   target_link_libraries(hacdcpf PUBLIC OpenXLSX::OpenXLSX)
@@ -338,6 +361,16 @@ if(HACDCPF_ENABLE_ETAP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/etap_conver
   add_executable(etap_convert tools/etap_convert.cpp)
   target_link_libraries(etap_convert PRIVATE hacdcpf::hacdcpf)
   hacdcpf_copy_opendss_runtime(etap_convert)
+endif()
+
+# ── AC OPF numerical-performance benchmark (diagnostic CLI) ────────────────────
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opf_numerical_benchmark.cpp")
+  add_executable(opf_numerical_benchmark tools/opf_numerical_benchmark.cpp)
+  target_link_libraries(opf_numerical_benchmark PRIVATE hacdcpf::hacdcpf)
+  target_compile_options(opf_numerical_benchmark PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -DNDEBUG>
+    $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>)
+  hacdcpf_copy_opendss_runtime(opf_numerical_benchmark)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────

@@ -31,6 +31,9 @@ struct IPMResult {
   double dual_inf{0.0};
   double complementarity{0.0};
   std::string status;
+  /// Concrete KKT linear-algebra path used, e.g. "dense_lu",
+  /// "sparse_umfpack", "sparse_klu", or "sparse_eigen_lu".
+  std::string linear_solver;
   Eigen::VectorXd x;
   Eigen::VectorXd lambda_eq;
   Eigen::VectorXd mu;

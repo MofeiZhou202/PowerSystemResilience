@@ -1,6 +1,3 @@
-以下为可直接保存为 **`acdc_vsc_control_modes_supplement.md`** 的补充文档，建议作为原文档的独立附录或新增章节并入。
-
-````markdown
 # AC/DC 变换器 AC 侧构网与 VSC 七类控制模式补充文档
 
 # 理论补充与工程实现建议
@@ -21,6 +18,25 @@
 核心结论是：
 
 > AC/DC 变换器可以支持 AC 侧 PV 控制，也可以支持 AC 侧构网控制；但普通两端口 AC/DC 变换器不能同时在 AC 侧和 DC 侧构网。VSC 七类典型控制模式可以在统一设备方程框架下覆盖其稳态代数形式，其中 AC 侧构网模式需要显式增加角度或频率参考建模，并与 DC 侧构网互斥。
+
+---
+
+## 0.1 当前代码实现状态
+
+本文档是理论补充和工程实现建议；截至当前代码，核心稳态框架已经落到以下位置：
+
+- `include/hacdcpf/model/converter_components.hpp`：`VSCConverter` 已包含 `p_is_hard_constraint` / `p_schedule_mw` / `p_initial_mw`、`v_ac_angle_set_deg`、AC/DC 电流限值、调制比限值、`r_conv_ac_pu`、AC/DC 构网标志、双侧构网能量缓冲门控、协调组/主从/参与因子字段；`DCDCConverter` 已包含拓扑、占空比上下限和变比字段。
+- `include/hacdcpf/model/device_control_role.hpp`：`resolve_device_control_role()` 将 VSC 控制枚举解析为七类控制角色，明确每种模式控制哪些量、释放哪些量、提供哪些 AC/DC 岛参考。
+- `include/hacdcpf/power_flow/converter_coordination.hpp` 与 `src/power_flow/converter_coordination.cpp`：执行 AC_PV、AC 构网、DC 构网、双侧构网、DC 岛多电压源、主从/参与因子等协调检查，并把 `ConverterCoordinationReport` 写入 `PowerFlowResult::diagnostics`。
+- `include/hacdcpf/power_flow/power_flow_result.hpp`：`PowerFlowResult` 返回 `vsc_transfers`、`dcdc_transfers`、`er_port_transfers`、`effective_converters` 和 `converter_model_scope`。DC/DC 结果包含 duty、voltage ratio、duty_defined、duty_feasible。
+- `include/hacdcpf/optimal_power_flow/opf_result.hpp`：AC/DC OPF 结果也返回 `converter_model_scope`，用于说明当前求解路径实际约束了哪些换流器物理/控制特性。
+
+当前稳态潮流已支持 Mode 1 `AC_GRID_FORMING`、Mode 2 `AC_PV`、Mode 3 `PQ_MODE`、Mode 6 `DC_V_DROOP_AC_V` 以及 VDC_Q/VDC_VAC 的 DC 电压控制角色。需要注意：
+
+- `AC_PV` 固定 AC 有功和 AC 电压幅值，释放 AC 无功，但不提供 AC 角度参考。
+- `AC_GRID_FORMING` 固定 AC 角度和电压幅值，释放 AC P/Q，必须有 DC 侧功率/电压支撑。
+- 普通两端口 VSC 不能同时 AC 侧和 DC 侧构网；只有显式 `allow_dual_side_grid_forming && has_energy_buffer` 时才允许进入高级双侧构网情形。
+- 潮流会报告 converter model scope。Newton 潮流当前建模 VSC 损耗、AC 侧导通损耗、VDC 控制、DC/DC 损耗和多源协调，但 VSC 容量圆、电流限值、调制限值以及 DC/DC duty 限值主要以 OPF 约束或 post-solve 诊断形式出现。使用结果时应读取 `converter_model_scope.validity`，不要只根据模式名推断。
 
 ---
 
@@ -1891,4 +1907,3 @@ Ordinary AC/DC converter cannot be grid-forming on both AC and DC sides simultan
 ## 14.4 一句话总结
 
 **AC/DC 变换器可以支持 AC_PV、AC_PQ、DC 侧构网、DC 侧下垂和 AC 侧构网等多种 VSC 控制模式；其中 AC_PV 不是 AC 侧构网，AC 侧构网必须提供相角或频率参考。普通 AC/DC 只能选择 AC 侧构网或 DC 侧构网之一，不能双侧同时构网；VSC 七类典型控制模式可以在统一设备方程框架下覆盖其稳态代数形式，但动态意义上的 VSG、黑启动和双侧构网必须进一步引入能量状态和动态控制模型。**
-````

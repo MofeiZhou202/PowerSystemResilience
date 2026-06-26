@@ -15,6 +15,7 @@ hacdcpf_add_test(test_hacdcpf             test_hacdcpf.cpp)
 hacdcpf_add_test(test_all_components_pf   test_all_components_pf.cpp)
 hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
+hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)
 hacdcpf_add_test(test_enhanced_solver     test_enhanced_solver.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
@@ -270,6 +271,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   if(WIN32)
     target_link_libraries(run_gui_server PRIVATE ws2_32)
   endif()
+  add_custom_command(TARGET run_gui_server POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:run_gui_server>"
+            "${CMAKE_BINARY_DIR}/run_gui_server"
+    COMMENT "Copying run_gui_server to ${CMAKE_BINARY_DIR}/run_gui_server")
 
   # End-to-end GUI/HTTP smoke test: starts the server and drives the REST API
   # (load case -> export ETAP .xlsx -> re-import -> import ETAP XML -> PF -> SC).

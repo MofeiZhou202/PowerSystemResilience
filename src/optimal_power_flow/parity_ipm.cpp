@@ -3,14 +3,28 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
+
+// High-performance sparse KKT factorizations from SuiteSparse, used for large
+// systems (≳1500 KKT unknowns).  UMFPACK and KLU provide stronger numerical
+// pivoting than Eigen's built-in SparseLU and separate the symbolic analysis
+// (reused across iterations) from the per-iteration numeric factorization.
+// Gated on HACDCPF_OPF_HAVE_* so the build still works without SuiteSparse.
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+#include <Eigen/UmfPackSupport>
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+#include <Eigen/KLUSupport>
+#endif
 
 #include "hacdcpf/detail/logging.hpp"
 
@@ -36,15 +50,140 @@ double ftb(const Eigen::VectorXd& v, const Eigen::VectorXd& dv, double tau) {
   return alpha;
 }
 
-// Cache for the sparse KKT system, including the SparseLU factorization.
+// Sparse KKT linear-solver backend.  UMFPACK and KLU (SuiteSparse) offer
+// stronger pivoting and separable symbolic/numeric factorization; Eigen's
+// SparseLU is the always-available fallback.
+enum class SparseBackend { Auto, Umfpack, Klu, EigenLU };
+
+// One-time backend override for benchmarking/diagnostics:
+//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto   (default auto)
+SparseBackend sparse_backend_preference() {
+  const char* env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+  if (env != nullptr) {
+    const std::string s(env);
+    if (s == "umfpack") return SparseBackend::Umfpack;
+    if (s == "klu") return SparseBackend::Klu;
+    if (s == "eigen" || s == "sparselu") return SparseBackend::EigenLU;
+  }
+  return SparseBackend::Auto;
+}
+
+// Cache for the sparse KKT system.  Holds the assembled matrix plus whichever
+// factorization backend is active; the symbolic analysis is computed once and
+// reused across iterations (the KKT sparsity pattern is invariant — only the
+// numeric values change with the barrier and regularization).
 struct SparseKKTCache {
   Eigen::SparseMatrix<double> kkt;
   Eigen::SparseMatrix<double> kkt_orig;
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+  Eigen::UmfPackLU<Eigen::SparseMatrix<double>> umf;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+  Eigen::KLU<Eigen::SparseMatrix<double>> klu;
+#endif
   Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu;
+  int active{0};         ///< 0=unset, 1=UMFPACK, 2=KLU, 3=Eigen SparseLU
+  int analyzed_for{0};   ///< backend whose symbolic analysis is currently valid
+  int pat_dim{-1};
+  int pat_nnz{-1};
   bool factored{false};
+  bool solve_degraded{false};  ///< last solve was inaccurate → escalate backend
   int nn{0};
   int meq{0};
 };
+
+// Ordered candidate backends for a preference (most-preferred first), filtered
+// to those compiled in and de-duplicated.  Auto prefers UMFPACK: its multifrontal
+// pivoting stays accurate on the near-singular KKTs of very large / ill-conditioned
+// grids (≳6000 buses), where Eigen's SparseLU returns an accurately-solved but
+// wrong step (the system itself is near-singular) and the IPM diverges to NaN.
+// KLU then Eigen SparseLU are escalation failovers.  Eigen SparseLU is ~3–7×
+// faster on well-conditioned KKTs, so a caller that knows its case is benign can
+// pin it via HACDCPF_OPF_SPARSE_SOLVER=eigen.
+std::vector<int> backend_order(SparseBackend pref) {
+  std::vector<int> order;
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+  const bool have_umf = true;
+#else
+  const bool have_umf = false;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+  const bool have_klu = true;
+#else
+  const bool have_klu = false;
+#endif
+  switch (pref) {
+    case SparseBackend::Umfpack:
+      if (have_umf) order.push_back(1);
+      order.push_back(3);
+      if (have_klu) order.push_back(2);
+      break;
+    case SparseBackend::Klu:
+      if (have_klu) order.push_back(2);
+      order.push_back(3);
+      if (have_umf) order.push_back(1);
+      break;
+    case SparseBackend::EigenLU:
+      order.push_back(3);
+      break;
+    case SparseBackend::Auto:
+    default:
+      if (have_umf) order.push_back(1);
+      if (have_klu) order.push_back(2);
+      order.push_back(3);
+      break;
+  }
+  std::vector<int> uniq;
+  for (int b : order) {
+    if (std::find(uniq.begin(), uniq.end(), b) == uniq.end()) uniq.push_back(b);
+  }
+  return uniq;
+}
+
+// Numeric factorization for the active backend; analyzes the pattern only when
+// it has changed (first call or a genuine pattern change).
+bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
+  switch (cache.active) {
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+    case 1:
+      if (pattern_changed) {
+        cache.umf.analyzePattern(cache.kkt);
+        if (cache.umf.info() != Eigen::Success) return false;
+      }
+      cache.umf.factorize(cache.kkt);
+      return cache.umf.info() == Eigen::Success;
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+    case 2:
+      if (pattern_changed) {
+        cache.klu.analyzePattern(cache.kkt);
+        if (cache.klu.info() != Eigen::Success) return false;
+      }
+      cache.klu.factorize(cache.kkt);
+      return cache.klu.info() == Eigen::Success;
+#endif
+    default:
+      if (pattern_changed) {
+        cache.lu.analyzePattern(cache.kkt);
+        if (cache.lu.info() != Eigen::Success) return false;
+      }
+      cache.lu.factorize(cache.kkt);
+      return cache.lu.info() == Eigen::Success;
+  }
+}
+
+// Back-solve for the active backend.
+Eigen::VectorXd sparse_solve_active(SparseKKTCache& cache, const Eigen::VectorXd& rhs) {
+  switch (cache.active) {
+#if defined(HACDCPF_OPF_HAVE_UMFPACK)
+    case 1: return cache.umf.solve(rhs);
+#endif
+#if defined(HACDCPF_OPF_HAVE_KLU)
+    case 2: return cache.klu.solve(rhs);
+#endif
+    default: return cache.lu.solve(rhs);
+  }
+}
 
 bool factor_kkt_sparse(SparseKKTCache& cache,
                        const Eigen::SparseMatrix<double>& w,
@@ -88,15 +227,45 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
   cache.kkt.makeCompressed();
   cache.kkt_orig = cache.kkt;
 
-  // Always use full compute() — symbolic reuse via analyzePattern/factorize
-  // is not reliably profitable with progressive regularization.
-  cache.lu.compute(cache.kkt);
-  if (cache.lu.info() != Eigen::Success) {
-    cache.factored = false;
-    return false;
+  const int nnz = static_cast<int>(cache.kkt.nonZeros());
+  const std::vector<int> order = backend_order(sparse_backend_preference());
+  if (cache.active == 0) cache.active = order.front();
+
+  // If the previous solve was inaccurate (a sign the current backend cannot
+  // handle this KKT), escalate to the next, more robust backend in the order.
+  if (cache.solve_degraded) {
+    const auto it = std::find(order.begin(), order.end(), cache.active);
+    if (it != order.end() && std::next(it) != order.end()) {
+      cache.active = *std::next(it);
+    }
+    cache.solve_degraded = false;
   }
-  cache.factored = true;
-  return true;
+
+  // Try the sticky active backend first (its symbolic analysis is reused when
+  // the pattern is unchanged), then escalate through the remaining candidates.
+  std::vector<int> trylist;
+  trylist.push_back(cache.active);
+  for (int b : order) {
+    if (b != cache.active) trylist.push_back(b);
+  }
+
+  for (int backend : trylist) {
+    cache.active = backend;
+    const bool need_analyze =
+        (cache.analyzed_for != backend) || (cache.pat_dim != dim) || (cache.pat_nnz != nnz);
+    if (sparse_factorize_active(cache, need_analyze)) {
+      if (need_analyze) {
+        cache.analyzed_for = backend;
+        cache.pat_dim = dim;
+        cache.pat_nnz = nnz;
+      }
+      cache.factored = true;
+      return true;
+    }
+  }
+
+  cache.factored = false;
+  return false;
 }
 
 bool kkt_solve_sparse(SparseKKTCache& cache,
@@ -106,21 +275,33 @@ bool kkt_solve_sparse(SparseKKTCache& cache,
   if (!cache.factored) {
     return false;
   }
-  Eigen::VectorXd sol = cache.lu.solve(rhs);
+  Eigen::VectorXd sol = sparse_solve_active(cache, rhs);
   if (!sol.allFinite()) {
+    cache.solve_degraded = true;
     return false;
   }
-  // Iterative refinement (2 steps)
+  // Iterative refinement (2 steps) — reuses the existing factorization.
   for (int ref = 0; ref < 2; ++ref) {
     Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
     if (residual.cwiseAbs().maxCoeff() < 1e-14 * rhs.cwiseAbs().maxCoeff()) {
       break;
     }
-    Eigen::VectorXd correction = cache.lu.solve(residual);
+    Eigen::VectorXd correction = sparse_solve_active(cache, residual);
     if (!correction.allFinite()) {
       break;
     }
     sol += correction;
+  }
+  // Flag an inaccurate solve so the next factorization escalates to a more
+  // robust backend.  Eigen's SparseLU can report a successful factorization yet
+  // return a poor solution on near-singular KKTs; the relative residual exposes
+  // that so the IPM switches to UMFPACK before the iterate diverges.
+  const double rhs_norm = rhs.cwiseAbs().maxCoeff();
+  if (rhs_norm > 0.0) {
+    const double resid = (rhs - cache.kkt_orig * sol).cwiseAbs().maxCoeff();
+    if (resid > 1e-6 * rhs_norm) {
+      cache.solve_degraded = true;
+    }
   }
   dx = sol.head(cache.nn);
   dlambda = sol.tail(cache.meq);
@@ -322,11 +503,44 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   Eigen::VectorXd rg;
   Eigen::SparseMatrix<double> jg;
   objective_gradient_hessian_diag(prob, x, grad, hdiag);
+
+  // ── Gradient-based objective scaling (à la Ipopt nlp_scaling_method) ────────
+  // The economic objective is expressed in engineering units ($/MWh · MW), so
+  // ‖∇f‖ can reach 1e4–1e6 while the AC/DC balance rows are O(1).  This unscaled
+  // KKT system makes the stationarity residual dominated by the cost gradient,
+  // stalling the IPM on large/ill-conditioned grids (RTE, Polish).  Damping the
+  // objective by obj_scale = min(1, gmax_ref/‖∇f‖∞) brings the Lagrangian
+  // gradient and the optimal multipliers back to O(1).  It is a no-op when the
+  // objective gradient is already well-scaled (obj_scale == 1).
+  double obj_scale = 1.0;
+  {
+    const double gmax = inf_norm(grad);
+    constexpr double kObjGradRef = 100.0;
+    if (gmax > kObjGradRef) {
+      obj_scale = kObjGradRef / gmax;
+    }
+  }
+  // Add the (obj_scale-1)·∇²f correction to a Lagrangian Hessian computed with
+  // unit objective weight.  ∇²f is diagonal (separable generator costs), so only
+  // structurally present diagonal entries are touched.
+  auto apply_obj_scale_hessian = [&](Eigen::SparseMatrix<double>& H,
+                                     const Eigen::VectorXd& hd) {
+    if (obj_scale == 1.0) {
+      return;
+    }
+    for (Eigen::Index i = 0; i < hd.size(); ++i) {
+      if (hd[i] != 0.0) {
+        H.coeffRef(static_cast<int>(i), static_cast<int>(i)) +=
+            (obj_scale - 1.0) * hd[i];
+      }
+    }
+  };
+
   equality_constraints(prob, x, eq_ws, rg);
   equality_jacobian(prob, x, eq_ws, jg);
 
-  // Lagrangian gradient: Lx = ∇f + Jg'·λ + Jh'·μ
-  Eigen::VectorXd Lx = grad + jg.transpose() * lambda + dh.transpose() * mu;
+  // Lagrangian gradient: Lx = obj_scale·∇f + Jg'·λ + Jh'·μ
+  Eigen::VectorXd Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
 
   // Lagrangian Hessian
   const int m_nonlin = prob.cidx.n_ineq_nonlin;
@@ -341,9 +555,10 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
 
   Eigen::SparseMatrix<double> Lxx;
   lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
+  apply_obj_scale_hessian(Lxx, hdiag);
 
   // Convergence measures (normalized, matching Julia)
-  double obj = objective(prob, x);
+  double obj = obj_scale * objective(prob, x);
   const double obj0 = obj;  // reference for cost condition (NOT updated each iter)
 
   auto compute_convergence = [&](const Eigen::VectorXd& x_v, const Eigen::VectorXd& z_v,
@@ -612,13 +827,14 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
     }
 
     // Re-evaluate functions and derivatives
-    obj = objective(prob, x);
+    obj = obj_scale * objective(prob, x);
     equality_constraints(prob, x, eq_ws, rg);
     equality_jacobian(prob, x, eq_ws, jg);
     assemble_inequalities(prob, x, xmin, xmax, lb_cols, ub_cols, rh, dh);
     objective_gradient_hessian_diag(prob, x, grad, hdiag);
-    Lx = grad + jg.transpose() * lambda + dh.transpose() * mu;
+    Lx = obj_scale * grad + jg.transpose() * lambda + dh.transpose() * mu;
     lagrangian_hessian(prob, x, lambda, get_nu_ptr(mu), Lxx, 1e-12);
+    apply_obj_scale_hessian(Lxx, hdiag);
 
     std::tie(feascond, gradcond, compcond, costcond) =
         compute_convergence(x, z, lambda, mu, rg, rh, Lx, obj);
@@ -672,6 +888,16 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   out.primal_inf = feascond;
   out.dual_inf = gradcond;
   out.complementarity = compcond;
+  if (use_dense) {
+    out.linear_solver = "dense_lu";
+  } else {
+    switch (sparse_cache.active) {
+      case 1: out.linear_solver = "sparse_umfpack"; break;
+      case 2: out.linear_solver = "sparse_klu"; break;
+      case 3: out.linear_solver = "sparse_eigen_lu"; break;
+      default: out.linear_solver = "sparse"; break;
+    }
+  }
   return out;
 }
 
