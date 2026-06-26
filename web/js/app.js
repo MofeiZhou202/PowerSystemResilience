@@ -1943,10 +1943,15 @@ const App = (() => {
     const vdc = data.vdc || [];
     if (dcSec && dcDiv && vdc.length) {
       dcSec.style.display = '';
+      const dcBusIdAt = (i) => {
+        const id = SYS?.dc?.buses?.[i]?.index;
+        return id !== undefined && id !== null ? Number(id) : null;
+      };
       let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
       vdc.forEach((v, i) => {
-        const attr = panAttr(busMap.dc ? busMap.dc[i + 1] : undefined);
-        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(v, 6)}</td></tr>`;
+        const busId = dcBusIdAt(i);
+        const attr = panAttr(busId != null && busMap.dc ? busMap.dc[busId] : undefined);
+        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td>${fmt(v, 6)}</td></tr>`;
       });
       html += '</tbody></table>';
       dcDiv.innerHTML = html;
@@ -1962,12 +1967,17 @@ const App = (() => {
       const lmpP = data.lmp_p || [];
       const lmpQ = data.lmp_q || [];
       const hasLmp = lmpP.length > 0;
+      const acBusIdAt = (i) => {
+        const id = SYS?.ac?.buses?.[i]?.index;
+        return id !== undefined && id !== null ? Number(id) : null;
+      };
       let html = `<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
       vm.forEach((v, i) => {
+        const busId = acBusIdAt(i);
         const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-        const attr = panAttr(busMap.ac ? busMap.ac[i + 1] : undefined);
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
+        const attr = panAttr(busId != null && busMap.ac ? busMap.ac[busId] : undefined);
+        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -4193,16 +4203,29 @@ const App = (() => {
 
     renderAllPowerFlowComponentStatus(data, busMap);
 
+    const pfBusIdByPosition = (domain, i) => {
+      const type = domain === 'dc' ? 'dc_bus' : 'ac_bus';
+      const row = (data.component_results || []).find(r =>
+        r.canvas_type === type && Number(r.position) === Number(i));
+      if (row && row.index !== undefined && row.index !== null) return Number(row.index);
+      const geoType = domain === 'dc' ? 'DC' : 'AC';
+      const geo = (data.geo_buses || []).filter(b => b.type === geoType);
+      if (geo[i] && geo[i].id !== undefined && geo[i].id !== null) return Number(geo[i].id);
+      return null;
+    };
+
     // AC Bus voltage table
     const busDiv = document.getElementById('pfBusResults');
     if (data.vm && data.vm.length > 0) {
       let html = '<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th></tr></thead><tbody>';
       data.vm.forEach((vm, i) => {
+        const busId = pfBusIdByPosition('ac', i);
+        const busLabel = busId ?? `pos ${i}`;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const compId = busMap.ac[i + 1];
+        const compId = busId != null ? busMap.ac[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
+        html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -4226,11 +4249,13 @@ const App = (() => {
       };
       let html = `<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th><th>P净注入(${pUnit()})</th></tr></thead><tbody>`;
       data.vdc.forEach((vdc, i) => {
+        const busId = pfBusIdByPosition('dc', i);
+        const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const compId = busMap.dc[i + 1];
+        const compId = busId != null ? busMap.dc[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        const pNet = dcMetric(i + 1, 'P净注入');
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
+        const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
+        html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
       dcBusDiv.innerHTML = html;

@@ -474,6 +474,25 @@ void populate_derived_results(const powerflow::SolverData& data,
   for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
   for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
 
+  std::unordered_map<int, int> ac_pos_by_bus;
+  ac_pos_by_bus.reserve(data.ac_buses.size());
+  for (int i = 0; i < static_cast<int>(data.ac_buses.size()); ++i) {
+    ac_pos_by_bus[data.ac_buses[static_cast<size_t>(i)].index] = i;
+  }
+  std::unordered_map<int, int> dc_pos_by_bus;
+  dc_pos_by_bus.reserve(data.dc_buses.size());
+  for (int i = 0; i < static_cast<int>(data.dc_buses.size()); ++i) {
+    dc_pos_by_bus[data.dc_buses[static_cast<size_t>(i)].index] = i;
+  }
+  auto ac_pos = [&](int bus) {
+    const auto it = ac_pos_by_bus.find(bus);
+    return it != ac_pos_by_bus.end() ? it->second : -1;
+  };
+  auto dc_pos = [&](int bus) {
+    const auto it = dc_pos_by_bus.find(bus);
+    return it != dc_pos_by_bus.end() ? it->second : -1;
+  };
+
   // Converters the solver auto-promoted from PQ to VDC_Q (because their DC island
   // had no voltage reference) must report transfers using the regulating mode,
   // not their stored PQ setpoint — otherwise the reported AC/DC powers are wrong.
@@ -529,7 +548,7 @@ void populate_derived_results(const powerflow::SolverData& data,
     double p_dc_pu_out = p_dc_pu;
     if (conv.control_mode == ConverterMode::AC_PV &&
         ybus_current.size() == vm.size()) {
-      const int aci = conv.bus_ac - 1;
+      const int aci = ac_pos(conv.bus_ac);
       if (aci >= 0 && aci < static_cast<int>(vm.size())) {
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const double q_net_inj =
@@ -545,7 +564,7 @@ void populate_derived_results(const powerflow::SolverData& data,
       // slack). Report the bus's net active/reactive generation, and report the
       // DC injection as the energy-conduit value −(P_ac + loss) so the converter's
       // reported powers are energy-consistent (matching the solved DC balance).
-      const int aci = conv.bus_ac - 1;
+      const int aci = ac_pos(conv.bus_ac);
       if (aci >= 0 && aci < static_cast<int>(vm.size())) {
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const std::complex<double> s_net =
@@ -558,7 +577,7 @@ void populate_derived_results(const powerflow::SolverData& data,
                                 : 0.0;
         p_ac_pu_out = s_net.real() + pd_i;
         q_ac_pu_out = s_net.imag() + qd_i;
-        const int dci = conv.bus_dc - 1;
+        const int dci = dc_pos(conv.bus_dc);
         const double vdc_b = (dci >= 0 && dci < static_cast<int>(vdc.size()))
                                  ? vdc[static_cast<size_t>(dci)]
                                  : 1.0;
@@ -582,12 +601,16 @@ void populate_derived_results(const powerflow::SolverData& data,
     // §3.1.4–3.1.7).  Each check is opt-in — it only fires when the relevant
     // limit field is set (>0), so default systems are unaffected.  These are
     // diagnostics (warnings), not hard constraints in this determined solve.
-    const int ac_pos = conv.bus_ac - 1;
-    const int dc_pos = conv.bus_dc - 1;
+    const int ac_bus_pos = ac_pos(conv.bus_ac);
+    const int dc_bus_pos = dc_pos(conv.bus_dc);
     const double vm_ac =
-        (ac_pos >= 0 && ac_pos < static_cast<int>(vm.size())) ? std::max(vm[ac_pos], 1e-3) : 1.0;
+        (ac_bus_pos >= 0 && ac_bus_pos < static_cast<int>(vm.size()))
+            ? std::max(vm[ac_bus_pos], 1e-3)
+            : 1.0;
     const double vdc_b =
-        (dc_pos >= 0 && dc_pos < static_cast<int>(vdc.size())) ? std::max(vdc[dc_pos], 1e-3) : 1.0;
+        (dc_bus_pos >= 0 && dc_bus_pos < static_cast<int>(vdc.size()))
+            ? std::max(vdc[dc_bus_pos], 1e-3)
+            : 1.0;
     const double s_ac_pu = std::hypot(p_ac_pu_out, q_ac_pu_out);
     const double s_rated_pu = conv.p_rated_mw / data.base_mva;
     if (s_rated_pu > 0.0 && s_ac_pu > s_rated_pu * (1.0 + 1e-6)) {
@@ -648,8 +671,8 @@ void populate_derived_results(const powerflow::SolverData& data,
     tr.p_out_mw = p_out_mw;
     tr.loss_mw = p_in_mw - p_out_mw;
     // Duty-ratio feasibility from the solved port voltages (multi-converter §3.2).
-    const int bi = c.bus_in - 1;
-    const int bo = c.bus_out - 1;
+    const int bi = dc_pos(c.bus_in);
+    const int bo = dc_pos(c.bus_out);
     const double v_in = (bi >= 0 && bi < vdc.size()) ? vdc[bi] : 1.0;
     const double v_out = (bo >= 0 && bo < vdc.size()) ? vdc[bo] : 1.0;
     const auto duty = powerflow::dcdc_duty_ratio(c, v_in, v_out);
@@ -672,10 +695,10 @@ void populate_derived_results(const powerflow::SolverData& data,
       tr.p_mw = p.p_mw;
       tr.q_mvar = p.q_mvar;
       if (tr.is_ac) {
-        const int b = p.bus - 1;
+        const int b = ac_pos(p.bus);
         tr.v_pu = (b >= 0 && b < vm.size()) ? vm[b] : 1.0;
       } else {
-        const int b = p.bus - 1;
+        const int b = dc_pos(p.bus);
         tr.v_pu = (b >= 0 && b < vdc.size()) ? vdc[b] : 1.0;
       }
       result.er_port_transfers.push_back(tr);
@@ -708,12 +731,26 @@ void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSyste
   restore_original_vsc_bus_ac(result, bus_by_index);
 }
 
+void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
+  if (map.n_original_branches <= 0 || map.branch_orig_to_proj.empty()) return;
+
+  std::vector<BranchFlow> out(static_cast<size_t>(map.n_original_branches));
+  for (const auto& [orig_pos, proj_pos] : map.branch_orig_to_proj) {
+    if (orig_pos < 0 || orig_pos >= map.n_original_branches) continue;
+    if (proj_pos < 0 || proj_pos >= static_cast<int>(result.branch_flows.size())) continue;
+    out[static_cast<size_t>(orig_pos)] = result.branch_flows[static_cast<size_t>(proj_pos)];
+  }
+  result.branch_flows = std::move(out);
+}
+
 // Expand merged PF result vectors (vm, va) back to the original bus count
 // so that callers can index by original bus position.
 void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
-  if (!map.has_merges()) return;
-  result.vm = unproject_bus_vector(result.vm, map);
-  result.va = unproject_bus_vector(result.va, map);
+  if (map.has_merges() || map.has_dead_buses()) {
+    result.vm = unproject_bus_vector(result.vm, map);
+    result.va = unproject_bus_vector(result.va, map);
+  }
+  unproject_branch_flows(result, map);
 }
 
 }  // namespace

@@ -661,6 +661,85 @@ TEST_CASE("Participation factors reshape multi-source droop sharing",
   CHECK(std::abs(k1 / (k0 + k1) - 0.3) < 1e-6);
 }
 
+TEST_CASE("VSC transfer results report original AC bus after projection renumbering",
+          "[converter][projection][powerflow]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  ACBus b1, b2, b3, b4;
+  b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.0; b1.in_service = true;
+  b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true;
+  b3.index = 3; b3.bus_type = BusType::PQ; b3.in_service = true;  // removed as dead island
+  b4.index = 4; b4.bus_type = BusType::PQ; b4.in_service = true;
+  sys.ac.buses = {b1, b2, b3, b4};
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.is_slack = true;
+  g.vg_pu = 1.0;
+  g.pmax_mw = 500.0;
+  g.pmin_mw = -500.0;
+  g.qmax_mvar = 500.0;
+  g.qmin_mvar = -500.0;
+  g.in_service = true;
+  sys.ac.generators = {g};
+
+  ACBranch br12, br33, br14;
+  br12.index = 1; br12.from_bus = 1; br12.to_bus = 2; br12.r_pu = 0.01; br12.x_pu = 0.05;
+  br12.in_service = true;
+  br33.index = 2; br33.from_bus = 3; br33.to_bus = 3; br33.r_pu = 0.01; br33.x_pu = 0.05;
+  br33.in_service = true;
+  br14.index = 3; br14.from_bus = 1; br14.to_bus = 4; br14.r_pu = 0.01; br14.x_pu = 0.05;
+  br14.in_service = true;
+  sys.ac.branches = {br12, br33, br14};
+
+  DCBus d;
+  d.index = 1;
+  d.bus_type = DCBusType::DC_P;
+  d.vm_pu = 1.0;
+  d.vmin_pu = 0.8;
+  d.vmax_pu = 1.2;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  DCLoad dl;
+  dl.index = 1;
+  dl.bus = 1;
+  dl.p_mw = 1.0;
+  dl.in_service = true;
+  sys.dc.loads = {dl};
+
+  VSCConverter v;
+  v.index = 0;
+  v.bus_ac = 4;
+  v.bus_dc = 1;
+  v.control_mode = ConverterMode::VDC_Q;
+  v.k_vdc = 0.5;
+  v.v_dc_set_pu = 1.0;
+  v.pmax_mw = 100.0;
+  v.pmin_mw = -100.0;
+  v.p_rated_mw = 100.0;
+  v.in_service = true;
+  sys.vsc_converters = {v};
+
+  PowerFlowOptions opt;
+  const PowerFlowResult r = solve_power_flow(sys, opt);
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() == 4);
+  REQUIRE(r.branch_flows.size() == 3);
+  CHECK(std::abs(r.branch_flows[1].pf_mw) < 1e-12);
+  CHECK(std::abs(r.branch_flows[1].pt_mw) < 1e-12);
+  CHECK(std::abs(r.branch_flows[2].pf_mw) > 1e-6);
+
+  REQUIRE(r.vsc_transfers.size() == 1);
+  CHECK(r.vsc_transfers[0].bus_ac == 4);
+  REQUIRE(r.diagnostics.effective_converters.size() == 1);
+  CHECK(r.diagnostics.effective_converters[0].bus_ac == 4);
+}
+
 namespace {
 // Minimal hybrid AC/DC OPF fixture: AC slack generator feeds a DC load through a
 // single VSC.  Hybrid cases route to the parity-IPM formulation.

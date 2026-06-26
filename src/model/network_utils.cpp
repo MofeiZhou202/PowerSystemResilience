@@ -1529,13 +1529,19 @@ void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
   buses = std::move(merged_buses);
 
   // Phase 4: reindex branches and remove self-loops
+  merge_map.n_original_branches = static_cast<int>(branches.size());
   std::vector<ACBranch> kept_branches;
   kept_branches.reserve(branches.size());
-  for (auto& br : branches) {
+  for (int orig_i = 0; orig_i < static_cast<int>(branches.size()); ++orig_i) {
+    auto& br = branches[static_cast<size_t>(orig_i)];
     br.from_bus = remap_ac(br.from_bus);
     br.to_bus = remap_ac(br.to_bus);
     // Remove self-loops (branches within the same merged bus)
-    if (br.from_bus == br.to_bus) continue;
+    if (br.from_bus == br.to_bus) {
+      merge_map.branch_orig_to_proj[orig_i] = -1;
+      continue;
+    }
+    merge_map.branch_orig_to_proj[orig_i] = static_cast<int>(kept_branches.size());
     kept_branches.push_back(std::move(br));
   }
   branches = std::move(kept_branches);
@@ -1615,10 +1621,6 @@ std::vector<double> unproject_bus_vector(
     auto it_pos = map.ext_to_orig_pos.find(ext_bus);
     if (it_pos != map.ext_to_orig_pos.end()) {
       orig_pos = it_pos->second;
-    } else {
-      // Backward-compatibility fallback for legacy maps that did not store
-      // explicit external-index 鈫?original-position mapping.
-      orig_pos = ext_bus - 1;
     }
     if (orig_pos < 0 || orig_pos >= map.n_original) continue;
     out[static_cast<size_t>(orig_pos)] = merged[static_cast<size_t>(int_pos)];

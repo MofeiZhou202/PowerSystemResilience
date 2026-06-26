@@ -2229,13 +2229,21 @@ function renderPf(body){
   const u=pUnit(), sc=pScale(), qu=qUnit();
   const vm=body.vm||[];
   const branch=body.branch_abs||[];
-  Plotly.newPlot('pfVoltChart',[{x:vm.map((_,i)=>i+1),y:vm,mode:'lines+markers',line:{color:'#0b6e4f',width:2},marker:{size:5},name:'Vm'}],
+  const geoBuses=body.geo_buses||[];
+  const acBusIds=geoBuses.filter(b=>b.type==='AC').map(b=>b.id);
+  const dcBusIds=geoBuses.filter(b=>b.type==='DC').map(b=>b.id);
+  const acVoltX=vm.map((_,i)=>acBusIds[i]??`pos ${i}`);
+  const dcVoltX=(body.vdc||[]).map((_,i)=>dcBusIds[i]??`pos ${i}`);
+  const branchX=(body.geo_ac_branches||[]).length
+    ? (body.geo_ac_branches||[]).map(b=>b.index??`${b.from}->${b.to}`)
+    : branch.map((_,i)=>`pos ${i}`);
+  Plotly.newPlot('pfVoltChart',[{x:acVoltX,y:vm,mode:'lines+markers',line:{color:'#0b6e4f',width:2},marker:{size:5},name:'Vm'}],
     {title:`AC Voltage Magnitude (${PF_METHOD_LABEL[body.method]||body.method})`,xaxis:{title:'AC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
 
   /* DC Bus Voltages */
   const vdc=body.vdc||[];
   if(vdc.length>0){
-    Plotly.newPlot('pfDcVoltChart',[{x:vdc.map((_,i)=>i+1),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+    Plotly.newPlot('pfDcVoltChart',[{x:dcVoltX,y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
       {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   } else { Plotly.purge('pfDcVoltChart'); }
 
@@ -2250,7 +2258,7 @@ function renderPf(body){
     ],{title:'VSC Converter Power Transfers',barmode:'group',xaxis:{title:'Converter'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:80}},{responsive:true});
   } else { Plotly.purge('pfConverterChart'); }
 
-  Plotly.newPlot('pfBranchChart',[{x:branch.map((_,i)=>i+1),y:branch.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],
+  Plotly.newPlot('pfBranchChart',[{x:branchX,y:branch.map(v=>pConv(v)),type:'bar',marker:{color:'#2c8c99'}}],
     {title:`Branch |P|`,xaxis:{title:'Branch'},yaxis:{title:u},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
 
   // GIS Map
@@ -2581,9 +2589,11 @@ document.getElementById('pfDisplayUnit').onchange=()=>{
 
 /* OPF */
 function renderOpfDcResults(body){
+  const acBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`);
+  const dcBusX=(n)=>Array.from({length:n},(_,i)=>(SYS&&SYS.dc_buses&&SYS.dc_buses[i]&&SYS.dc_buses[i].index!=null)?SYS.dc_buses[i].index:`pos ${i}`);
   const vdc=body.vdc||[];
   if(vdc.length>0){
-    Plotly.newPlot('opfDcVoltChart',[{x:vdc.map((_,i)=>i+1),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
+    Plotly.newPlot('opfDcVoltChart',[{x:dcBusX(vdc.length),y:vdc,mode:'lines+markers',line:{color:'#6a0dad',width:2},marker:{size:5,color:'#6a0dad'},name:'Vdc'}],
       {title:'DC Bus Voltage',xaxis:{title:'DC Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   } else { Plotly.purge('opfDcVoltChart'); }
   const pac=body.pac_mw||[], qac=body.qac_mvar||[];
@@ -2597,11 +2607,12 @@ function renderOpfDcResults(body){
   // LMP chart
   const lp=body.lmp_p||[], lq=body.lmp_q||[], lmp=body.lmp||[];
   if(lp.length>0){
-    const traces=[{x:lp.map((_,i)=>i+1),y:lp,type:'bar',name:'Active LMP ($/MWh)',marker:{color:'#0b6e4f'}}];
-    if(lq.length>0) traces.push({x:lq.map((_,i)=>i+1),y:lq,type:'bar',name:'Reactive LMP ($/MVArh)',marker:{color:'#2c8c99'}});
+    const busX=acBusX(lp.length);
+    const traces=[{x:busX,y:lp,type:'bar',name:'Active LMP ($/MWh)',marker:{color:'#0b6e4f'}}];
+    if(lq.length>0) traces.push({x:busX,y:lq,type:'bar',name:'Reactive LMP ($/MVArh)',marker:{color:'#2c8c99'}});
     Plotly.newPlot('opfLmpChart',traces,{title:'Locational Marginal Prices',barmode:'group',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45},legend:{orientation:'h',y:-0.15}},{responsive:true});
   } else if(lmp.length>0){
-    Plotly.newPlot('opfLmpChart',[{x:lmp.map((_,i)=>i+1),y:lmp,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5},name:'LMP ($/MWh)'}],
+    Plotly.newPlot('opfLmpChart',[{x:dcBusX(lmp.length),y:lmp,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5},name:'LMP ($/MWh)'}],
       {title:'Locational Marginal Prices (DC OPF)',xaxis:{title:'Bus'},yaxis:{title:'$/MWh'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   } else { Plotly.purge('opfLmpChart'); }
 }
@@ -2614,7 +2625,7 @@ document.getElementById('runAcOpfBtn').onclick=async()=>{
   document.getElementById('opfObj').textContent=fmt(body.objective,2);
   document.getElementById('opfIter').textContent=body.iterations;
   Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#0b6e4f'}}],{title:'AC OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'AC OPF Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   renderOpfDcResults(body);
   setStatus(body.converged?('AC OPF completed ('+(body.solver_backend||solver)+').'):('AC OPF did not converge: '+(body.status||'')) ,!body.converged);}catch(e){setStatus(e.message,true);}
 };
@@ -2640,7 +2651,7 @@ document.getElementById('runParityOpfBtn').onclick=async()=>{
   document.getElementById('opfObj').textContent=fmt(body.objective,2);
   document.getElementById('opfIter').textContent=body.iterations;
   Plotly.newPlot('opfDispatchChart',[{x:body.pg_mw.map((_,i)=>i+1),y:body.pg_mw.map(v=>pConv(v)),type:'bar',marker:{color:'#6a0dad'}}],{title:'Parity OPF Dispatch',xaxis:{title:'Gen'},yaxis:{title:pUnit()},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
-  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:body.vm.map((_,i)=>i+1),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'Parity OPF AC Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
+  if(body.vm)Plotly.newPlot('opfAuxChart',[{x:Array.from({length:body.vm.length},(_,i)=>(SYS&&SYS.ac_buses&&SYS.ac_buses[i]&&SYS.ac_buses[i].index!=null)?SYS.ac_buses[i].index:`pos ${i}`),y:body.vm,mode:'lines+markers',line:{color:'#b5651d',width:2},marker:{size:5}}],{title:'Parity OPF AC Voltage',xaxis:{title:'Bus'},yaxis:{title:'p.u.'},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
   renderOpfDcResults(body);
   setStatus('Parity OPF completed.');}catch(e){setStatus(e.message,true);}
 };
@@ -7122,6 +7133,21 @@ int main(int argc, char** argv) {
               if (db.in_service && db.bus_type == hacdcpf::DCBusType::DC_V) {
                 dc_has_voltage_anchor = true; break;
               }
+            std::unordered_map<int, size_t> ac_result_pos_by_bus, dc_result_pos_by_bus;
+            for (size_t bi = 0; bi < sys.ac.buses.size() && bi < r.vm.size(); ++bi)
+              ac_result_pos_by_bus[sys.ac.buses[bi].index] = bi;
+            for (size_t bi = 0; bi < sys.dc.buses.size() && bi < r.vdc.size(); ++bi)
+              dc_result_pos_by_bus[sys.dc.buses[bi].index] = bi;
+            auto ac_result_pos = [&](int bus) -> std::optional<size_t> {
+              const auto it = ac_result_pos_by_bus.find(bus);
+              if (it == ac_result_pos_by_bus.end()) return std::nullopt;
+              return it->second;
+            };
+            auto dc_result_pos = [&](int bus) -> std::optional<size_t> {
+              const auto it = dc_result_pos_by_bus.find(bus);
+              if (it == dc_result_pos_by_bus.end()) return std::nullopt;
+              return it->second;
+            };
             for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
               auto& c = sys.vsc_converters[i];
               const bool dc_forming =
@@ -7133,19 +7159,19 @@ int main(int argc, char** argv) {
                                          c.p_initial_mw  = r.pac_mw[i]; }
               if (dc_forming && !dc_has_voltage_anchor) {
                 // Keep this converter as the DC anchor; align its targets only.
-                if (c.bus_dc >= 0 && static_cast<size_t>(c.bus_dc) < r.vdc.size())
-                  c.v_dc_set_pu = r.vdc[static_cast<size_t>(c.bus_dc)];
-                if (c.bus_ac >= 0 && static_cast<size_t>(c.bus_ac) < r.vm.size())
-                  c.v_ac_set_pu = r.vm[static_cast<size_t>(c.bus_ac)];
+                if (const auto pos = dc_result_pos(c.bus_dc))
+                  c.v_dc_set_pu = r.vdc[*pos];
+                if (const auto pos = ac_result_pos(c.bus_ac))
+                  c.v_ac_set_pu = r.vm[*pos];
               } else {
                 // Pin to the exact OPF AC P/Q operating point (PQ injection).
                 if (i < r.pac_mw.size()) { c.p_set_mw = r.pac_mw[i];
                                            c.p_is_hard_constraint = true; }
                 c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
-                if (c.bus_ac >= 0 && static_cast<size_t>(c.bus_ac) < r.vm.size())
-                  c.v_ac_set_pu = r.vm[static_cast<size_t>(c.bus_ac)];
-                if (c.bus_dc >= 0 && static_cast<size_t>(c.bus_dc) < r.vdc.size())
-                  c.v_dc_set_pu = r.vdc[static_cast<size_t>(c.bus_dc)];
+                if (const auto pos = ac_result_pos(c.bus_ac))
+                  c.v_ac_set_pu = r.vm[*pos];
+                if (const auto pos = dc_result_pos(c.bus_dc))
+                  c.v_dc_set_pu = r.vdc[*pos];
               }
             }
           }
