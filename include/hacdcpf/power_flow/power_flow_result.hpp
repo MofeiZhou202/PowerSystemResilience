@@ -242,6 +242,7 @@ struct DistributedSlackResult {
   bool converged{false};
   int iterations{0};
   double residual{0.0};
+  SolverDiagnostics diagnostics;
   std::unordered_map<int, double> distributed_slack_p;
   std::vector<int> hit_limits;
 };

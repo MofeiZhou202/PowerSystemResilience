@@ -13,6 +13,7 @@
 #include <Eigen/Core>
 
 #include "hacdcpf/projection/project_to_canonical.hpp"
+#include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
@@ -280,11 +281,32 @@ DistributedSlackResult DistributedSlackSolver::solve_simplified(const HybridPowe
                                                                 const DistributedSlack& slack_cfg,
                                                                 const PowerFlowOptions& opt) const {
   DistributedSlackResult out;
+  const ConverterCoordinationReport coordination =
+      evaluate_converter_coordination(sys, opt.enable_converter_coordination_check);
+  out.diagnostics.converter_coordination = coordination;
+  if (coordination.enabled && coordination.has_blocking_issue()) {
+    out.diagnostics.termination_reason = "Converter coordination feasibility check failed";
+    for (const auto& issue : coordination.issues) {
+      out.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+    }
+    return out;
+  }
+
   DistributedSlack cfg = sanitize_slack_cfg(sys, slack_cfg);
 
   SolverData data = make_solver_data(sys, opt.loss_model);
   NewtonSolver solver;
   const PowerFlowResult base = solver.solve(data, opt, nullptr);
+  out.diagnostics = base.diagnostics;
+  out.diagnostics.converter_coordination = coordination;
+  if (coordination.enabled) {
+    for (const auto& issue : coordination.issues) {
+      if (issue.severity == CoordinationSeverity::Warning ||
+          issue.severity == CoordinationSeverity::Info) {
+        out.diagnostics.warnings.push_back("[" + issue.rule_id + "] " + issue.message);
+      }
+    }
+  }
 
   if (data.bus_merge_map && data.bus_merge_map->has_merges()) {
     out.vm = unproject_bus_vector(base.vm, *data.bus_merge_map);

@@ -1793,7 +1793,7 @@ const Canvas = (() => {
             switches: [], circuit_breakers: [], motors: [],
             flexible_loads: [], asymmetric_loads: [], shunts: [],
             transformers_3w: [], chargers: [], charging_stations: [] },
-      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [] },
+      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [], dc_circuit_breakers: [] },
       vsc_converters: [],
       dcdc_converters: [],
       energy_routers: [],
@@ -2287,19 +2287,46 @@ const Canvas = (() => {
           break;
         }
         case 'circuit_breaker': {
+          const busConns = [];
+          for (const conn of state.connections) {
+            let otherCompId = null;
+            if (conn.from.compId === comp.id) otherCompId = conn.to.compId;
+            else if (conn.to.compId === comp.id) otherCompId = conn.from.compId;
+            if (otherCompId === null) continue;
+            const other = getComponent(otherCompId);
+            if (other && (other.type === 'ac_bus' || other.type === 'dc_bus')) {
+              busConns.push({ comp: other, type: other.type });
+            }
+          }
+          const isDcBreaker = busConns.length > 0 && busConns.every(b => b.type === 'dc_bus');
           const [from, to] = findTwoBusIndices(comp.id);
-          sys.ac.circuit_breakers.push({
-            index: Number.isFinite(Number(p.index)) ? Number(p.index) : cbIdx,
-            bus_from: from, bus_to: to,
-            breaker_type: p.breaker_type || '',
-            closed: p.closed !== false,
-            z_ohm: numOr(p.z_ohm, 0),
-            rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
-            i_rated_ka: numOr(p.i_rated_ka, 0),
-            i_breaking_ka: numOr(p.i_breaking_ka, 0),
-            rated_current_ka: numOr(p.rated_current_ka, 2.0),
-            in_service: p.in_service !== false,
-          });
+          const idxValue = Number.isFinite(Number(p.index)) ? Number(p.index) : cbIdx;
+          if (isDcBreaker) {
+            sys.dc.dc_circuit_breakers.push({
+              index: idxValue,
+              bus_from: from, bus_to: to,
+              breaker_type: p.breaker_type || '',
+              closed: p.closed !== false,
+              r_ohm: numOr(p.r_ohm ?? p.z_ohm, 0),
+              rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
+              i_rated_ka: numOr(p.i_rated_ka ?? p.rated_current_ka, 0),
+              i_breaking_ka: numOr(p.i_breaking_ka, 0),
+              in_service: p.in_service !== false,
+            });
+          } else {
+            sys.ac.circuit_breakers.push({
+              index: idxValue,
+              bus_from: from, bus_to: to,
+              breaker_type: p.breaker_type || '',
+              closed: p.closed !== false,
+              z_ohm: numOr(p.z_ohm, 0),
+              rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
+              i_rated_ka: numOr(p.i_rated_ka ?? p.rated_current_ka, 0),
+              i_breaking_ka: numOr(p.i_breaking_ka, 0),
+              rated_current_ka: numOr(p.rated_current_ka, 2.0),
+              in_service: p.in_service !== false,
+            });
+          }
           cbIdx++;
           break;
         }
@@ -3276,6 +3303,34 @@ const Canvas = (() => {
       addConnection(comp.id, 'right', toCompId, 'left');
     });
 
+    // DC circuit breakers use the same drawn breaker component but connect to
+    // DC buses; buildSystemJson classifies them back into dc.dc_circuit_breakers.
+    jsonSys.dc?.dc_circuit_breakers?.forEach(cb => {
+      const fromCompId = dcBusCompMap[cb.bus_from];
+      const toCompId = dcBusCompMap[cb.bus_to];
+      if (fromCompId === undefined || toCompId === undefined) return;
+      const fromComp = getComponent(fromCompId);
+      const toComp = getComponent(toCompId);
+      if (!fromComp || !toComp) return;
+      const mx = (fromComp.x + toComp.x) / 2;
+      const my = (fromComp.y + toComp.y) / 2;
+      const comp = addComponent('circuit_breaker', mx, my, {
+        ...COMP.defaults.circuit_breaker,
+        index: cb.index,
+        breaker_type: cb.breaker_type || '',
+        closed: cb.closed !== false,
+        r_ohm: cb.r_ohm,
+        z_ohm: cb.r_ohm,
+        rated_voltage_kv: cb.rated_voltage_kv,
+        i_rated_ka: cb.i_rated_ka,
+        i_breaking_ka: cb.i_breaking_ka,
+        rated_current_ka: cb.rated_current_ka ?? cb.i_rated_ka,
+        in_service: cb.in_service !== false,
+      });
+      addConnection(comp.id, 'left', fromCompId, 'right');
+      addConnection(comp.id, 'right', toCompId, 'left');
+    });
+
     // Motors
     jsonSys.ac?.motors?.forEach(m => {
       addDeviceAtBus('motor', m.bus, {
@@ -3747,6 +3802,35 @@ const Canvas = (() => {
       return conns.length ? conns[0] : null;
     }
 
+    function firstNonEmptyArray(...values) {
+      for (const value of values) {
+        if (Array.isArray(value) && value.length > 0) return value;
+      }
+      return [];
+    }
+
+    function resultRowsByIndexOrOrder(rows, comps) {
+      const out = [];
+      const list = Array.isArray(rows) ? rows : [];
+      const used = new Set();
+      comps.forEach((comp, order) => {
+        const idx = Number(comp.params?.index);
+        let row = null;
+        if (Number.isFinite(idx)) {
+          row = list.find((r, i) => !used.has(i) && Number(r.index) === idx) || null;
+        }
+        if (!row) {
+          row = list.find((r, i) => !used.has(i) && Number(r.position) === order) || null;
+        }
+        if (!row) {
+          row = list.find((r, i) => !used.has(i)) || null;
+        }
+        if (row) used.add(list.indexOf(row));
+        out.push(row);
+      });
+      return out;
+    }
+
     function readOperatingPowerMW(comp, busCompId) {
       const p = comp.params || {};
       if (p.in_service === false || p.in_service === 'false') return 0;
@@ -3807,20 +3891,18 @@ const Canvas = (() => {
       addKnownBusOutflow(busMap.ac[br.from], numOr(br.pf_mw, 0));
       addKnownBusOutflow(busMap.ac[br.to], numOr(br.pt_mw, 0));
     });
-    (_lastPfResult.geo_dc_branches || []).forEach(br => {
-      addKnownBusOutflow(busMap.dc[br.from], numOr(br.pf_mw, 0));
-      addKnownBusOutflow(busMap.dc[br.to], numOr(br.pt_mw, 0));
+    firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows).forEach(br => {
+      const from = br.from ?? br.from_bus;
+      const to = br.to ?? br.to_bus;
+      addKnownBusOutflow(busMap.dc[from], numOr(br.pf_mw, 0));
+      addKnownBusOutflow(busMap.dc[to], numOr(br.pt_mw, 0));
     });
-    const solvedVscTransfers = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
-      ? _lastPfResult.geo_vsc
-      : (_lastPfResult.vsc_transfers || []);
+    const solvedVscTransfers = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
     solvedVscTransfers.forEach(vsc => {
       addKnownBusOutflow(busMap.ac[vsc.bus_ac], -numOr(vsc.p_ac_mw, 0));
       addKnownBusOutflow(busMap.dc[vsc.bus_dc], -numOr(vsc.p_dc_mw, 0));
     });
-    const solvedDcdcTransfers = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
-      ? _lastPfResult.geo_dcdc
-      : (_lastPfResult.dcdc_transfers || []);
+    const solvedDcdcTransfers = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
     solvedDcdcTransfers.forEach(dcdc => {
       addKnownBusOutflow(busMap.dc[dcdc.bus_in], numOr(dcdc.p_in_mw, 0));
       addKnownBusOutflow(busMap.dc[dcdc.bus_out], -numOr(dcdc.p_out_mw, 0));
@@ -3969,24 +4051,22 @@ const Canvas = (() => {
       });
     });
 
-    const visualAcBranchCount = state.components.filter(comp =>
-      comp.type === 'ac_branch' || (comp.type === 'transformer_2w' && comp.params?._from_branch)
-    ).length;
-    const trafo3wExpandedBranchCount = state.components.reduce((sum, comp) => {
-      if (comp.type !== 'transformer_3w' || comp.params?.in_service === false) return sum;
-      return sum + (getComponentBusConnections(comp, new Set(['ac_bus'])).length >= 3 ? 3 : 0);
-    }, 0);
     const expandedSwitchFlows = [];
-    if (Array.isArray(_lastPfResult.branch_abs)) {
-      let absIdx = visualAcBranchCount + estimatedTrafo2wFlows.length + trafo3wExpandedBranchCount;
-      ['switch_comp', 'circuit_breaker'].forEach(type => {
-        state.components.forEach(comp => {
-          if (comp.type !== type) return;
-          const powerMW = numOr(_lastPfResult.branch_abs[absIdx++], 0);
-          expandedSwitchFlows.push({ comp, powerMW: Math.abs(powerMW) });
-        });
-      });
-    }
+    const switchComps = state.components.filter(comp => comp.type === 'switch_comp');
+    resultRowsByIndexOrOrder(_lastPfResult.ac_switch_flows, switchComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: switchComps[i], flow }); });
+    const breakerComps = state.components.filter(comp => comp.type === 'circuit_breaker');
+    const acBreakerComps = [];
+    const dcBreakerComps = [];
+    breakerComps.forEach(comp => {
+      const busConns = getComponentBusConnections(comp);
+      const isDc = busConns.length > 0 && busConns.every(bc => bc.busType === 'dc_bus');
+      (isDc ? dcBreakerComps : acBreakerComps).push(comp);
+    });
+    resultRowsByIndexOrOrder(_lastPfResult.ac_circuit_breaker_flows, acBreakerComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: acBreakerComps[i], flow }); });
+    resultRowsByIndexOrOrder(_lastPfResult.dc_circuit_breaker_flows, dcBreakerComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: dcBreakerComps[i], flow }); });
 
     const branchByKey = {};
     branchData.forEach((bd, i) => {
@@ -3997,11 +4077,11 @@ const Canvas = (() => {
     });
 
     // Compute power range for relative color normalization (include DC branches)
-    const dcBranchDataAll = _lastPfResult.geo_dc_branches || [];
+    const dcBranchDataAll = firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows);
     const powers = branchData.map(bd => Math.abs(bd.pf_mw))
       .concat(dcBranchDataAll.map(bd => Math.abs(numOr(bd.pf_mw, 0))))
       .concat(estimatedTrafo2wFlows.map(tf => Math.abs(numOr(tf.absPower, 0))))
-      .concat(expandedSwitchFlows.map(sw => Math.abs(numOr(sw.powerMW, 0))))
+      .concat(expandedSwitchFlows.map(sw => Math.max(Math.abs(numOr(sw.flow?.pf_mw, 0)), Math.abs(numOr(sw.flow?.pt_mw, 0)))))
       .filter(v => v > 0.01);
     // Running min/max (avoid Math.min(...spread) — overflows on thousands of branches).
     let maxPower = 1, minPower = 0;
@@ -4211,10 +4291,17 @@ const Canvas = (() => {
 
     expandedSwitchFlows.forEach(sw => {
       const comp = sw.comp;
-      const busConns = getComponentBusConnections(comp, new Set(['ac_bus']));
+      const isDc = getComponentBusConnections(comp).some(bc => bc.busType === 'dc_bus');
+      const busConns = getComponentBusConnections(comp, new Set([isDc ? 'dc_bus' : 'ac_bus']));
       if (busConns.length < 2) return;
-      const absPower = Math.abs(numOr(sw.powerMW, 0));
-      const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
+      const pf_mw = numOr(sw.flow?.pf_mw, 0);
+      const pt_mw = numOr(sw.flow?.pt_mw, 0);
+      const absPower = Math.max(Math.abs(pf_mw), Math.abs(pt_mw));
+      const rateMva = numOr(sw.flow?.rate_mva, 0);
+      const loadingPct = numOr(sw.flow?.loading_pct, 0);
+      const colorPct = rateMva > 0 && loadingPct > 0
+        ? loadingPct
+        : normalizedPowerPct(absPower, minPower, powerRange);
       const color = showHeat ? loadingColor(colorPct) : '#1976D2';
 
       if (showHeat && absPower > 0.01) {
@@ -4223,19 +4310,31 @@ const Canvas = (() => {
           colorPct,
           absPower,
           maxPower,
-          bd: { rate_mva: 0 },
-          hasLoading: false,
-          loading: 0,
+          bd: { rate_mva: rateMva },
+          hasLoading: rateMva > 0,
+          loading: loadingPct,
         });
       }
 
       if (showFlow) {
-        busConns.slice(0, 2).forEach(bc => {
+        const fromBus = Number(sw.flow?.from ?? sw.flow?.from_bus);
+        const toBus = Number(sw.flow?.to ?? sw.flow?.to_bus);
+        let fromBc = busConns.find(bc => Number(bc.busIdx) === fromBus);
+        let toBc = busConns.find(bc => Number(bc.busIdx) === toBus);
+        if (!fromBc || !toBc) {
+          [fromBc, toBc] = busConns.slice(0, 2);
+        }
+        [
+          { bc: fromBc, isFromSide: true },
+          { bc: toBc, isFromSide: false },
+        ].forEach(({ bc, isFromSide }) => {
+          if (!bc) return;
           if (!bc.conn || !bc.conn.el) return;
           const g = getConnGeom(bc.conn, { fromCompId: comp.id });
           if (!g) return;
           labeledFlowConnections.add(bc.conn.id);
-          addFlowMarker(g, g.compEnd, absPower, color);
+          const sidePower = isFromSide ? pf_mw : pt_mw;
+          addFlowMarker(g, sidePower >= 0 ? g.compEnd : g.busEnd, Math.abs(sidePower), color);
         });
       }
     });
@@ -4351,19 +4450,19 @@ const Canvas = (() => {
 
       // Compute bus net injection from branch flows for external_grid power estimation
       const busInject = {};
-      ((_lastPfResult.geo_ac_branches || []).concat(_lastPfResult.geo_dc_branches || [])).forEach(br => {
+      ((_lastPfResult.geo_ac_branches || [])
+        .concat(firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows)))
+        .forEach(br => {
         if (br.pf_mw !== undefined) {
-          busInject[br.from] = numOr(busInject[br.from], 0) - numOr(br.pf_mw, 0);
-          busInject[br.to] = numOr(busInject[br.to], 0) - numOr(br.pt_mw, 0);
+          const from = br.from ?? br.from_bus;
+          const to = br.to ?? br.to_bus;
+          busInject[from] = numOr(busInject[from], 0) - numOr(br.pf_mw, 0);
+          busInject[to] = numOr(busInject[to], 0) - numOr(br.pt_mw, 0);
         }
       });
 
-      const solvedVscTransfersForOverlay = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
-        ? _lastPfResult.geo_vsc
-        : (_lastPfResult.vsc_transfers || []);
-      const solvedDcdcTransfersForOverlay = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
-        ? _lastPfResult.geo_dcdc
-        : (_lastPfResult.dcdc_transfers || []);
+      const solvedVscTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
+      const solvedDcdcTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
 
       // VSC transfer power at AC-side buses
       solvedVscTransfersForOverlay.forEach(vsc => {
@@ -4454,7 +4553,7 @@ const Canvas = (() => {
 
     // ── DC branch flow arrows ──
     if (showFlow || showHeat) {
-      const dcBranchData = _lastPfResult.geo_dc_branches || [];
+      const dcBranchData = firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows);
       let dcBrIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'dc_branch') return;
@@ -4526,9 +4625,7 @@ const Canvas = (() => {
 
     // ── VSC converter flow arrows ──
     if (showFlow || showHeat) {
-      const vscData = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
-        ? _lastPfResult.geo_vsc
-        : (_lastPfResult.vsc_transfers || []);
+      const vscData = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
       let vscIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'vsc_converter') return;
@@ -4606,9 +4703,7 @@ const Canvas = (() => {
 
     // ── DCDC converter flow arrows ──
     if (showFlow || showHeat) {
-      const dcdcData = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
-        ? _lastPfResult.geo_dcdc
-        : (_lastPfResult.dcdc_transfers || []);
+      const dcdcData = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
       let dcdcIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'dcdc_converter') return;

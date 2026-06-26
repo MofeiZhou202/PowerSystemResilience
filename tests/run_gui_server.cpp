@@ -1231,7 +1231,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div><label><input type="checkbox" id="pfPvPq" checked style="width:auto;min-width:auto;"/> PV-PQ Conversion</label></div>
           <div><label><input type="checkbox" id="pfAutoSwing" checked style="width:auto;min-width:auto;"/> Auto Swing Selection</label></div>
           <div><label><input type="checkbox" id="pfConvSwitch" checked style="width:auto;min-width:auto;"/> Converter Mode Switching</label></div>
-          <div><label><input type="checkbox" id="pfCoordCheck" checked style="width:auto;min-width:auto;"/> Converter Coordination Check</label></div>
+          <div><label><input type="checkbox" id="pfCoordCheck" checked disabled style="width:auto;min-width:auto;"/> Converter Coordination Check</label></div>
           <div><label><input type="checkbox" id="pfVerbose" style="width:auto;min-width:auto;"/> Verbose</label></div>
           <div><label>PV Q Hysteresis (pu)</label><input id="pfPvQHyst" type="number" step="0.001" value="0.01" style="width:90px;"/></div>
           <div><label>Max ΔVa (rad)</label><input id="pfMaxDVa" type="number" step="0.1" value="1.5" style="width:80px;"/></div>
@@ -2202,7 +2202,7 @@ async function runPfMethod(method){
     enable_pv_pq_conversion:document.getElementById('pfPvPq').checked,
     enable_auto_swing_selection:document.getElementById('pfAutoSwing').checked,
     enable_converter_mode_switching:document.getElementById('pfConvSwitch').checked,
-    enable_converter_coordination_check:document.getElementById('pfCoordCheck').checked,
+    enable_converter_coordination_check:true,
     verbose:document.getElementById('pfVerbose').checked,
     pv_q_hysteresis_pu:Number(document.getElementById('pfPvQHyst').value||0.01),
     max_delta_va_rad:Number(document.getElementById('pfMaxDVa').value||1.5),
@@ -4681,51 +4681,7 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string js = j.value("json_string", "");
       if (js.empty()) throw std::runtime_error("Empty JSON string");
-      // ── DEBUG: dump raw JSON to file for comparison ───────────
-      {
-        static int dump_counter = 0;
-        std::string fname = "debug_json_dump_" + std::to_string(dump_counter++) + ".json";
-        std::ofstream ofs(fname);
-        if (ofs) { ofs << js; ofs.close(); }
-        std::cerr << "[DEBUG] Dumped JSON to " << fname << " (" << js.size() << " bytes)\n" << std::flush;
-      }
-      // ── END dump ──────────────────────────────────────────────
-
       auto sys = hacdcpf::io::from_json(js);
-
-      // ── DEBUG: dump critical fields after parsing ──────────────
-      std::cerr << "\n[DEBUG load_json_string] System: " << sys.name << "\n";
-      std::cerr << "  base_mva=" << sys.base_mva << "\n";
-      for (const auto& b : sys.ac.buses)
-        std::cerr << "  AC Bus " << b.index << " type=" << static_cast<int>(b.bus_type)
-                  << " vm=" << b.vm_pu << " va=" << b.va_deg << "\n";
-      for (const auto& eg : sys.ac.external_grids)
-        std::cerr << "  ExtGrid bus=" << eg.bus << " vm=" << eg.vm_pu << "\n";
-      for (const auto& br : sys.ac.branches)
-        std::cerr << "  AC Branch " << br.from_bus << "->" << br.to_bus
-                  << " r=" << br.r_pu << " x=" << br.x_pu << " b=" << br.b_pu
-                  << " tap=" << br.tap << "\n";
-      for (const auto& b : sys.dc.buses)
-        std::cerr << "  DC Bus " << b.index << " type="
-                  << (b.bus_type == hacdcpf::DCBusType::DC_V ? "DC_V" : "DC_P")
-                  << " vm=" << b.vm_pu << " base_kv=" << b.base_kv << "\n";
-      for (const auto& br : sys.dc.branches)
-        std::cerr << "  DC Branch " << br.from_bus << "->" << br.to_bus
-                  << " r=" << br.r_pu << "\n";
-      for (const auto& ld : sys.dc.loads)
-        std::cerr << "  DC Load bus=" << ld.bus << " p=" << ld.p_mw << "\n";
-      for (const auto& v : sys.vsc_converters)
-        std::cerr << "  VSC ac=" << v.bus_ac << " dc=" << v.bus_dc
-                  << " mode=" << static_cast<int>(v.control_mode)
-                  << " p=" << v.p_set_mw << " q=" << v.q_set_mvar
-                  << " eta=" << v.eta << "\n";
-      for (const auto& d : sys.dc.dcdc_converters)
-        std::cerr << "  DCDC in=" << d.bus_in << " out=" << d.bus_out
-                  << " mode=" << static_cast<int>(d.control_mode)
-                  << " p_ref=" << d.p_ref_mw << " v_ref=" << d.v_ref_pu
-                  << " eta=" << d.eta << "\n";
-      std::cerr << std::flush;
-      // ── END DEBUG ─────────────────────────────────────────────
 
       std::lock_guard<std::mutex> lk(g_session.mu);
       g_session.current_system = std::move(sys);
@@ -5162,7 +5118,6 @@ int main(int argc, char** argv) {
         if (o.contains("enable_pv_pq_conversion")) opt.enable_pv_pq_conversion = o["enable_pv_pq_conversion"].get<bool>();
         if (o.contains("enable_auto_swing_selection")) opt.enable_auto_swing_selection = o["enable_auto_swing_selection"].get<bool>();
         if (o.contains("enable_converter_mode_switching")) opt.enable_converter_mode_switching = o["enable_converter_mode_switching"].get<bool>();
-        if (o.contains("enable_converter_coordination_check")) opt.enable_converter_coordination_check = o["enable_converter_coordination_check"].get<bool>();
         if (o.contains("verbose")) opt.verbose = o["verbose"].get<bool>();
         if (o.contains("pv_q_hysteresis_pu")) opt.pv_q_hysteresis_pu = o["pv_q_hysteresis_pu"].get<double>();
         if (o.contains("pv_recover_vm_tol_pu")) opt.pv_recover_vm_tol_pu = o["pv_recover_vm_tol_pu"].get<double>();
@@ -5175,6 +5130,7 @@ int main(int argc, char** argv) {
           else opt.loss_model = hacdcpf::LossModelType::Linear;
         }
       }
+      opt.enable_converter_coordination_check = true;
       json out;
       out["method"] = method;
       out["vm"] = json::array();
@@ -5184,6 +5140,9 @@ int main(int argc, char** argv) {
       out["dc_branch_flows"] = json::array();
       out["vsc_transfers"] = json::array();
       out["dcdc_transfers"] = json::array();
+      out["ac_switch_flows"] = json::array();
+      out["ac_circuit_breaker_flows"] = json::array();
+      out["dc_circuit_breaker_flows"] = json::array();
       out["notes"] = "";
 
       // Snapshot original energy routers BEFORE canonical projection clears them.
@@ -5250,6 +5209,75 @@ int main(int argc, char** argv) {
           }
         }
         out["converter_coordination"] = coord;
+      };
+
+      auto add_converter_coordination_report =
+          [&](const hacdcpf::powerflow::ConverterCoordinationReport& rep) {
+        json coord;
+        coord["enabled"] = rep.enabled;
+        coord["feasible"] = rep.feasible;
+        coord["blocking_count"] = rep.blocking_count();
+        coord["fatal_count"] = rep.fatal_count();
+        coord["error_count"] = rep.error_count();
+        coord["warning_count"] = rep.warning_count();
+        coord["issues"] = json::array();
+        for (const auto& issue : rep.issues) {
+          coord["issues"].push_back(json{
+            {"severity", hacdcpf::powerflow::coordination_severity_str(issue.severity)},
+            {"rule_id", issue.rule_id},
+            {"component_type", issue.component_type},
+            {"component_index", issue.component_index},
+            {"island_index", issue.island_index},
+            {"message", issue.message}
+          });
+        }
+        coord["dc_islands"] = json::array();
+        for (const auto& isle : rep.dc_islands) {
+          coord["dc_islands"].push_back(json{
+            {"island_index", isle.island_index},
+            {"dc_buses", isle.dc_buses},
+            {"declared_v_buses", isle.declared_v_buses},
+            {"hard_vdc_sources", isle.hard_vdc_sources},
+            {"droop_sources", isle.droop_sources},
+            {"fixed_power_devices", isle.fixed_power_devices},
+            {"fixed_power_mw", isle.fixed_power_mw},
+            {"flexible_up_mw", isle.flexible_up_mw},
+            {"flexible_down_mw", isle.flexible_down_mw}
+          });
+          auto& island_json = coord["dc_islands"].back();
+          island_json["voltage_sources"] = json::array();
+          for (const auto& source : isle.voltage_sources) {
+            island_json["voltage_sources"].push_back(json{
+              {"component_type", source.component_type},
+              {"component_index", source.component_index},
+              {"bus", source.bus},
+              {"v_set_pu", source.v_set_pu},
+              {"has_v_set", source.has_v_set},
+              {"droop", source.droop}
+            });
+          }
+        }
+        out["converter_coordination"] = coord;
+      };
+
+      auto store_last_pf = [&](const hacdcpf::PowerFlowResult* pf) {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (pf != nullptr) {
+          g_session.last_pf_result = *pf;
+          g_session.last_pf_method = method;
+        } else {
+          g_session.last_pf_result.reset();
+          g_session.last_pf_method.clear();
+        }
+      };
+      store_last_pf(nullptr);
+
+      auto add_solver_diagnostics = [&](const hacdcpf::SolverDiagnostics& diag) {
+        json warns = json::array();
+        for (const auto& w : diag.warnings) warns.push_back(w);
+        out["warnings"] = warns;
+        out["termination_reason"] = diag.termination_reason;
+        out["promoted_vsc_indices"] = diag.promoted_vsc_indices;
       };
 
       // Helper to compute DC branch flows from DC bus voltages
@@ -5853,6 +5881,217 @@ int main(int argc, char** argv) {
         }
 
         // AC/DC bus rows.
+        struct TwoTerminalFlow {
+          double pf_mw{0.0};
+          double pt_mw{0.0};
+          double qf_mvar{0.0};
+          double qt_mvar{0.0};
+          double loading_pct{0.0};
+          double rate_mva{0.0};
+          std::string source{"open"};
+        };
+
+        std::unordered_map<int, double> ac_net_export_p, ac_net_export_q;
+        for (const auto& b : sys.ac.buses) {
+          ac_net_export_p[b.index] =
+              ac_non_grid_p[b.index] + ac_grid_inj_p[b.index] + vsc_inj_ac_p[b.index];
+          ac_net_export_q[b.index] =
+              ac_non_grid_q[b.index] + ac_grid_inj_q[b.index] + vsc_inj_ac_q[b.index];
+        }
+        std::unordered_map<int, double> ac_visible_branch_p, ac_visible_branch_q;
+        for (const auto& br : geo_ac_branches) {
+          const int from = br.value("from", 0);
+          const int to = br.value("to", 0);
+          ac_visible_branch_p[from] += br.value("pf_mw", 0.0);
+          ac_visible_branch_q[from] += br.value("qf_mvar", 0.0);
+          ac_visible_branch_p[to] += br.value("pt_mw", 0.0);
+          ac_visible_branch_q[to] += br.value("qt_mvar", 0.0);
+        }
+        std::unordered_map<int, double> dc_net_export_p;
+        for (const auto& b : sys.dc.buses) {
+          dc_net_export_p[b.index] = dc_dev_inj_p[b.index] + conv_inj_dc_p[b.index];
+        }
+        std::unordered_map<int, double> dc_visible_branch_p;
+        for (const auto& br : geo_dc_branches) {
+          const int from = br.value("from", br.value("from_bus", 0));
+          const int to = br.value("to", br.value("to_bus", 0));
+          dc_visible_branch_p[from] += br.value("pf_mw", 0.0);
+          dc_visible_branch_p[to] += br.value("pt_mw", 0.0);
+        }
+
+        auto ac_bus_base_kv = [&](int bus) {
+          for (const auto& b : sys.ac.buses) {
+            if (b.index == bus) return b.base_kv;
+          }
+          return 0.0;
+        };
+        auto dc_bus_base_kv = [&](int bus) {
+          for (const auto& b : sys.dc.buses) {
+            if (b.index == bus) return b.base_kv;
+          }
+          return 0.0;
+        };
+        auto signed_ac_endpoint_flow = [&](int from, int to, double& p, double& q) {
+          for (const auto& br : geo_ac_branches) {
+            const int br_from = br.value("from", 0);
+            const int br_to = br.value("to", 0);
+            if (br_from == from && br_to == to) {
+              p = br.value("pf_mw", 0.0);
+              q = br.value("qf_mvar", 0.0);
+              return true;
+            }
+            if (br_from == to && br_to == from) {
+              p = br.value("pt_mw", 0.0);
+              q = br.value("qt_mvar", 0.0);
+              return true;
+            }
+          }
+          return false;
+        };
+        auto signed_dc_endpoint_flow = [&](int from, int to, double& p) {
+          for (const auto& br : geo_dc_branches) {
+            const int br_from = br.value("from", br.value("from_bus", 0));
+            const int br_to = br.value("to", br.value("to_bus", 0));
+            if (br_from == from && br_to == to) {
+              p = br.value("pf_mw", 0.0);
+              return true;
+            }
+            if (br_from == to && br_to == from) {
+              p = br.value("pt_mw", 0.0);
+              return true;
+            }
+          }
+          return false;
+        };
+        auto derive_ac_terminal_flow = [&](int from, int to, bool closed,
+                                           double rated_current_ka,
+                                           double rated_voltage_kv) {
+          TwoTerminalFlow fl;
+          const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+          fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0
+              ? std::sqrt(3.0) * kv * rated_current_ka
+              : 0.0;
+          if (!closed || from == 0 || to == 0 || from == to) return fl;
+
+          if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar)) {
+            fl.pt_mw = -fl.pf_mw;
+            fl.qt_mvar = -fl.qf_mvar;
+            fl.source = "matched_ac_branch";
+          } else {
+            // Closed zero-impedance switching devices are contracted out of the
+            // public branch-flow list.  Recover their display flow from the
+            // solved KCL at one endpoint: choose the side with the smaller hidden
+            // exchange magnitude, which is usually the isolated device side
+            // (e.g. a converter bus behind a breaker).
+            const double p_from = ac_net_export_p[from] - ac_visible_branch_p[from];
+            const double q_from = ac_net_export_q[from] - ac_visible_branch_q[from];
+            const double p_to = ac_net_export_p[to] - ac_visible_branch_p[to];
+            const double q_to = ac_net_export_q[to] - ac_visible_branch_q[to];
+            const double mag_from = std::hypot(p_from, q_from);
+            const double mag_to = std::hypot(p_to, q_to);
+            if (mag_from <= mag_to || mag_to < 1e-12) {
+              fl.pf_mw = p_from;
+              fl.qf_mvar = q_from;
+              fl.pt_mw = -p_from;
+              fl.qt_mvar = -q_from;
+              fl.source = "endpoint_kcl_from";
+            } else {
+              fl.pf_mw = -p_to;
+              fl.qf_mvar = -q_to;
+              fl.pt_mw = p_to;
+              fl.qt_mvar = q_to;
+              fl.source = "endpoint_kcl_to";
+            }
+          }
+          if (fl.rate_mva > 0.0) {
+            fl.loading_pct = 100.0 *
+                std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                         std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+          }
+          return fl;
+        };
+        auto derive_dc_terminal_flow = [&](int from, int to, bool closed,
+                                           double rated_current_ka,
+                                           double rated_voltage_kv) {
+          TwoTerminalFlow fl;
+          const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : dc_bus_base_kv(from);
+          fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0 ? kv * rated_current_ka : 0.0;
+          if (!closed || from == 0 || to == 0 || from == to) return fl;
+
+          double p = 0.0;
+          if (signed_dc_endpoint_flow(from, to, p)) {
+            fl.pf_mw = p;
+            fl.pt_mw = -p;
+            fl.source = "matched_dc_branch";
+          } else {
+            const double p_from = dc_net_export_p[from] - dc_visible_branch_p[from];
+            const double p_to = dc_net_export_p[to] - dc_visible_branch_p[to];
+            const double mag_from = std::abs(p_from);
+            const double mag_to = std::abs(p_to);
+            if (mag_from <= mag_to || mag_to < 1e-12) {
+              fl.pf_mw = p_from;
+              fl.pt_mw = -p_from;
+              fl.source = "endpoint_kcl_from";
+            } else {
+              fl.pf_mw = -p_to;
+              fl.pt_mw = p_to;
+              fl.source = "endpoint_kcl_to";
+            }
+          }
+          if (fl.rate_mva > 0.0) {
+            fl.loading_pct = 100.0 * std::max(std::abs(fl.pf_mw), std::abs(fl.pt_mw)) / fl.rate_mva;
+          }
+          return fl;
+        };
+        auto flow_json = [](int index, size_t position, int from, int to,
+                            const TwoTerminalFlow& fl, const std::string& source_type) {
+          return json{
+            {"index", index},
+            {"position", static_cast<int>(position)},
+            {"from", from},
+            {"to", to},
+            {"from_bus", from},
+            {"to_bus", to},
+            {"pf_mw", fl.pf_mw},
+            {"pt_mw", fl.pt_mw},
+            {"qf_mvar", fl.qf_mvar},
+            {"qt_mvar", fl.qt_mvar},
+            {"loss_mw", fl.pf_mw + fl.pt_mw},
+            {"loading_pct", fl.loading_pct},
+            {"rate_mva", fl.rate_mva},
+            {"source", fl.source},
+            {"source_type", source_type}
+          };
+        };
+
+        json ac_switch_flows = json::array();
+        for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+          const auto& sw = sys.ac.switches[i];
+          const auto fl = derive_ac_terminal_flow(sw.bus_from, sw.bus_to,
+                                                  sw.in_service && sw.closed,
+                                                  sw.i_rated_ka, 0.0);
+          ac_switch_flows.push_back(flow_json(sw.index, i, sw.bus_from, sw.bus_to, fl, "ac_switch"));
+        }
+        json ac_cb_flows = json::array();
+        for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+          const auto& cb = sys.ac.circuit_breakers[i];
+          const auto fl = derive_ac_terminal_flow(cb.bus_from, cb.bus_to,
+                                                  cb.in_service && cb.closed,
+                                                  cb.i_rated_ka, cb.rated_voltage_kv);
+          ac_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "ac_circuit_breaker"));
+        }
+        json dc_cb_flows = json::array();
+        for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
+          const auto& cb = sys.dc.dc_circuit_breakers[i];
+          const auto fl = derive_dc_terminal_flow(cb.bus_from, cb.bus_to,
+                                                  cb.in_service && cb.closed,
+                                                  cb.i_rated_ka, cb.rated_voltage_kv);
+          dc_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "dc_circuit_breaker"));
+        }
+        out["ac_switch_flows"] = ac_switch_flows;
+        out["ac_circuit_breaker_flows"] = ac_cb_flows;
+        out["dc_circuit_breaker_flows"] = dc_cb_flows;
+
         for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
           const auto& b = sys.ac.buses[i];
           json row = base_row("ac_bus", "AC", b.index, static_cast<int>(i),
@@ -5882,7 +6121,7 @@ int main(int argc, char** argv) {
           add_text_metric(row, "类型", dc_bus_type_str(b.bus_type));
           add_metric(row, "Vdc", dc_vm_by_bus[b.index], "pu", "scalar", 6);
           // Net nodal injection = Σ(DC source/load/converter injections).
-          const double dc_net_p = dc_dev_inj_p[b.index] + conv_inj_dc_p[b.index];
+          const double dc_net_p = dc_net_export_p[b.index];
           add_metric(row, "P净注入", dc_net_p, "MW", "p", 4);
           add_note(row, "净注入=该母线所有设备净注入(直流源为正、负荷为负、变换器按端口方向)，等于经支路外送的净有功");
           component_results.push_back(std::move(row));
@@ -6054,8 +6293,17 @@ int main(int argc, char** argv) {
                               "开关", sw.name.empty() ? ("Switch " + std::to_string(sw.index)) : sw.name,
                               sw.in_service ? (sw.closed ? "合闸" : "分闸") : "停运",
                               ac_conn(sw.bus_from) + " -> " + ac_conn(sw.bus_to));
+          const auto& fl = ac_switch_flows[static_cast<int>(i)];
           add_text_metric(row, "状态", sw.closed ? "合闸" : "分闸");
           add_text_metric(row, "类型", switch_type_str(sw.switch_type));
+          add_metric(row, "Pf", fl.value("pf_mw", 0.0), "MW", "p", 4);
+          add_metric(row, "Pt", fl.value("pt_mw", 0.0), "MW", "p", 4);
+          add_metric(row, "Qf", fl.value("qf_mvar", 0.0), "MVar", "q", 4);
+          add_metric(row, "Qt", fl.value("qt_mvar", 0.0), "MVar", "q", 4);
+          if (fl.value("rate_mva", 0.0) > 0.0) {
+            add_metric(row, "Loading", fl.value("loading_pct", 0.0), "%", "scalar", 1);
+          }
+          add_note(row, "开关潮流由求解后支路匹配或端点KCL反算，用于显示零阻抗合闸开关的真实通过功率");
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
@@ -6064,8 +6312,17 @@ int main(int argc, char** argv) {
                               "断路器", cb.name.empty() ? ("CB " + std::to_string(cb.index)) : cb.name,
                               cb.in_service ? (cb.closed ? "合闸" : "分闸") : "停运",
                               ac_conn(cb.bus_from) + " -> " + ac_conn(cb.bus_to));
+          const auto& fl = ac_cb_flows[static_cast<int>(i)];
           add_text_metric(row, "状态", cb.closed ? "合闸" : "分闸");
           add_metric(row, "额定电流", cb.i_rated_ka, "kA", "scalar", 3);
+          add_metric(row, "Pf", fl.value("pf_mw", 0.0), "MW", "p", 4);
+          add_metric(row, "Pt", fl.value("pt_mw", 0.0), "MW", "p", 4);
+          add_metric(row, "Qf", fl.value("qf_mvar", 0.0), "MVar", "q", 4);
+          add_metric(row, "Qt", fl.value("qt_mvar", 0.0), "MVar", "q", 4);
+          if (fl.value("rate_mva", 0.0) > 0.0) {
+            add_metric(row, "Loading", fl.value("loading_pct", 0.0), "%", "scalar", 1);
+          }
+          add_note(row, "断路器潮流由求解后支路匹配或端点KCL反算，用于显示零阻抗合闸断路器的真实通过功率");
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < sys.ac.motors.size(); ++i) {
@@ -6183,8 +6440,15 @@ int main(int argc, char** argv) {
                               "直流断路器", cb.name.empty() ? ("DC CB " + std::to_string(cb.index)) : cb.name,
                               cb.in_service ? (cb.closed ? "合闸" : "分闸") : "停运",
                               dc_conn(cb.bus_from) + " -> " + dc_conn(cb.bus_to));
+          const auto& fl = dc_cb_flows[static_cast<int>(i)];
           add_text_metric(row, "状态", cb.closed ? "合闸" : "分闸");
           add_metric(row, "额定电流", cb.i_rated_ka, "kA", "scalar", 3);
+          add_metric(row, "Pf", fl.value("pf_mw", 0.0), "MW", "p", 4);
+          add_metric(row, "Pt", fl.value("pt_mw", 0.0), "MW", "p", 4);
+          if (fl.value("rate_mva", 0.0) > 0.0) {
+            add_metric(row, "Loading", fl.value("loading_pct", 0.0), "%", "scalar", 1);
+          }
+          add_note(row, "直流断路器潮流由求解后DC支路匹配或端点KCL反算");
           component_results.push_back(std::move(row));
         }
 
@@ -6369,10 +6633,14 @@ int main(int argc, char** argv) {
           // Set descriptive method name: unified AC/DC when DC components exist
           const bool has_dc = !sys.dc.buses.empty() || !sys.vsc_converters.empty() || !sys.dc.dcdc_converters.empty();
           out["method_actual"] = has_dc ? "hybrid_ac_dc_newton" : "ac_newton";
-          add_transfers(pf);
-          add_geo_data(pf);
+          if (pf.converged) {
+            add_transfers(pf);
+            add_geo_data(pf);
+            store_last_pf(&pf);
+          } else {
+            add_solver_diagnostics(pf.diagnostics);
+          }
           add_converter_coordination(pf);
-          { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pf; g_session.last_pf_method = method; }
         }
       } else if (method == "pure_ac") {
         // Pure AC Newton-Raphson: strip DC buses, DC branches, converters
@@ -6516,6 +6784,7 @@ int main(int argc, char** argv) {
         out["vm"] = pf.vm;
         out["va"] = pf.va;
         out["vdc"] = pf.vdc;
+        add_converter_coordination_report(pf.diagnostics.converter_coordination);
         // Run AC PF to get converter transfers for carbon analysis
         if (pf.converged) {
           auto ac_pf = hacdcpf::solve_power_flow(sys, opt);
@@ -6523,13 +6792,12 @@ int main(int argc, char** argv) {
             add_transfers(ac_pf);
             add_geo_data(ac_pf);
             for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = method;
+            store_last_pf(&ac_pf);
           } else {
-            hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
-            pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
-            add_geo_data(pfr);
-            std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = pfr; g_session.last_pf_method = method;
+            store_last_pf(nullptr);
           }
+        } else {
+          add_solver_diagnostics(pf.diagnostics);
         }
       } else if (method == "three_phase") {
         if (!sys.three_phase_ac.has_value()) {
@@ -7225,6 +7493,21 @@ int main(int argc, char** argv) {
             cc["pf_iterations"] = ac_pf.iterations;
             cc["pf_residual"] = ac_pf.residual;
             if (ac_pf.converged) {
+              auto ac_bus_id_at = [&](int pos) -> int {
+                return pos >= 0 && static_cast<size_t>(pos) < sys.ac.buses.size()
+                           ? sys.ac.buses[static_cast<size_t>(pos)].index
+                           : -1;
+              };
+              auto dc_bus_id_at = [&](int pos) -> int {
+                return pos >= 0 && static_cast<size_t>(pos) < sys.dc.buses.size()
+                           ? sys.dc.buses[static_cast<size_t>(pos)].index
+                           : -1;
+              };
+              auto ac_branch_id_at = [&](int pos) -> int {
+                if (pos < 0 || static_cast<size_t>(pos) >= sys.ac.branches.size()) return -1;
+                const auto& br = sys.ac.branches[static_cast<size_t>(pos)];
+                return br.index;
+              };
               double max_dvm = 0.0, sum_dvm = 0.0; int worst_vm = -1; size_t nvm = 0;
               for (size_t i = 0; i < r.vm.size() && i < ac_pf.vm.size(); ++i) {
                 const double d = std::abs(r.vm[i] - ac_pf.vm[i]);
@@ -7247,12 +7530,12 @@ int main(int argc, char** argv) {
               const double tol_vm = 1e-3, tol_va_deg = 0.1, tol_vdc = 1e-3;
               cc["max_dvm_pu"]  = max_dvm;
               cc["mean_dvm_pu"] = nvm ? sum_dvm / static_cast<double>(nvm) : 0.0;
-              cc["max_dvm_bus"] = worst_vm >= 0 ? worst_vm + 1 : -1;
+              cc["max_dvm_bus"] = ac_bus_id_at(worst_vm);
               cc["max_dva_deg"]  = max_dva_deg;
               cc["mean_dva_deg"] = nva ? (sum_dva / static_cast<double>(nva)) * kRad2Deg : 0.0;
-              cc["max_dva_bus"]  = worst_va >= 0 ? worst_va + 1 : -1;
+              cc["max_dva_bus"]  = ac_bus_id_at(worst_va);
               cc["max_dvdc_pu"]  = max_dvdc;
-              cc["max_dvdc_bus"] = worst_vdc >= 0 ? worst_vdc + 1 : -1;
+              cc["max_dvdc_bus"] = dc_bus_id_at(worst_vdc);
               cc["tol_vm_pu"] = tol_vm; cc["tol_va_deg"] = tol_va_deg; cc["tol_vdc_pu"] = tol_vdc;
               cc["consistent"] = (max_dvm <= tol_vm) && (max_dva_deg <= tol_va_deg) &&
                                  (r.vdc.empty() || max_dvdc <= tol_vdc);
@@ -7286,7 +7569,7 @@ int main(int argc, char** argv) {
                   for (const auto& vt : ac_pf.vsc_transfers) conv_loss += vt.loss_mw;
                   cc["max_dpf_mw"]     = max_dpf;
                   cc["max_dqf_mvar"]   = max_dqf;
-                  cc["max_dpf_branch"] = worst_br >= 0 ? worst_br + 1 : -1;
+                  cc["max_dpf_branch"] = ac_branch_id_at(worst_br);
                   cc["branch_loss_opf_mw"]      = loss_opf;
                   cc["branch_loss_pf_mw"]       = loss_pf;
                   cc["branch_loss_mismatch_mw"] = std::abs(loss_opf - loss_pf);
@@ -10546,7 +10829,7 @@ int main(int argc, char** argv) {
         opts.allow_branch_operation_without_switch = false;
         (void)consider_switches;
 
-        auto value_int_any = [](const json& obj, std::initializer_list<const char*> keys, int dflt = 0) {
+        auto value_int_any = [](const json& obj, std::initializer_list<const char*> keys, int dflt = -1) {
           for (const auto* key : keys) if (obj.contains(key) && !obj[key].is_null()) return obj[key].get<int>();
           return dflt;
         };
@@ -10560,7 +10843,7 @@ int main(int argc, char** argv) {
         };
         auto add_fault = [&](hacdcpf::analysis::ResilienceBranchKind kind, int bid,
                              double start_hr, double repair_hr, std::string label) {
-          if (bid <= 0) return;
+          if (bid < 0) return;
           hacdcpf::analysis::DistributionResilienceFault f;
           f.branch_kind = kind;
           f.branch_index = bid;
@@ -10574,7 +10857,7 @@ int main(int argc, char** argv) {
         // Manual faults with per-fault timing and branch type take priority.
         if (j.contains("manual_faults") && j["manual_faults"].is_array() && !j["manual_faults"].empty()) {
           for (const auto& mf : j["manual_faults"]) {
-            const int bid = value_int_any(mf, {"branch_id", "branch_index", "branch"}, 0);
+            const int bid = value_int_any(mf, {"branch_id", "branch_index", "branch"}, -1);
             const auto kind = hacdcpf::analysis::resilience_branch_kind_from_string(
                 value_string_any(mf, {"branch_type", "branch_kind", "type"}, "AC"));
             add_fault(kind, bid,
@@ -10937,8 +11220,8 @@ int main(int argc, char** argv) {
       if (j.contains("options")) { auto& o=j["options"];
         if(o.contains("max_iter"))opt.max_iter=o["max_iter"].get<int>();
         if(o.contains("tol"))opt.tol=o["tol"].get<double>();
-        if(o.contains("enable_converter_coordination_check"))opt.enable_converter_coordination_check=o["enable_converter_coordination_check"].get<bool>();
       }
+      opt.enable_converter_coordination_check = true;
       auto pf = hacdcpf::solve_power_flow(sys, opt);
       json out;
       out["converged"]=pf.converged; out["iterations"]=pf.iterations;

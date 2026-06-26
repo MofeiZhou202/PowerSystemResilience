@@ -175,6 +175,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_2w.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_3w.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.switches.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.circuit_breakers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.charging_stations.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.chargers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.external_grids.size()));
@@ -183,6 +184,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.static_generators.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dc_static_generators.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.pv_arrays.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dc_circuit_breakers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.three_phase_ac.has_value()));
   for (const auto& ld : sys.ac.loads) {
     h = hash_combine(h, static_cast<std::uint64_t>(ld.bus));
@@ -315,6 +317,14 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, static_cast<std::uint64_t>(sw.closed));
     h = hash_combine(h, static_cast<std::uint64_t>(sw.in_service));
   }
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_from));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_to));
+    h = hash_combine(h, hash_double(cb.z_ohm));
+    h = hash_combine(h, hash_double(cb.i_rated_ka));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.closed));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.in_service));
+  }
   for (const auto& ch : sys.ac.chargers) {
     h = hash_combine(h, static_cast<std::uint64_t>(ch.station_id));
     h = hash_combine(h, hash_double(ch.p_ch_max_kw));
@@ -337,6 +347,14 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, static_cast<std::uint64_t>(pva.bus));
     h = hash_combine(h, hash_double(pva.p_set_mw));
     h = hash_combine(h, static_cast<std::uint64_t>(pva.in_service));
+  }
+  for (const auto& cb : sys.dc.dc_circuit_breakers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_from));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_to));
+    h = hash_combine(h, hash_double(cb.r_ohm));
+    h = hash_combine(h, hash_double(cb.i_rated_ka));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.closed));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.in_service));
   }
   if (sys.three_phase_ac.has_value()) {
     const auto& tp = sys.three_phase_ac.value();

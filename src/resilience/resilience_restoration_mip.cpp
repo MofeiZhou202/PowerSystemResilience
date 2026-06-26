@@ -73,8 +73,7 @@ std::unordered_map<int, int> make_branch_pos_map(const HybridPowerSystem& sys) {
   std::unordered_map<int, int> out;
   out.reserve(sys.ac.branches.size());
   for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
-    const int idx = sys.ac.branches[i].index != 0 ? sys.ac.branches[i].index : static_cast<int>(i + 1);
-    out[idx] = static_cast<int>(i);
+    out[sys.ac.branches[i].index] = static_cast<int>(i);
   }
   return out;
 }
@@ -148,6 +147,10 @@ struct FaultData {
   std::string name;
 };
 
+int requested_branch_index(const DistributionResilienceFault& f) {
+  return (f.branch_index == 0 && f.ac_branch_index != 0) ? f.ac_branch_index : f.branch_index;
+}
+
 using Adj = std::vector<std::vector<std::pair<int, double>>>;
 
 Adj build_transport_graph(const HybridPowerSystem& sys,
@@ -202,11 +205,11 @@ std::vector<FaultData> build_faults(const HybridPowerSystem& sys,
   if (!opts.faults.empty()) {
     out.reserve(opts.faults.size());
     for (const auto& f : opts.faults) {
-      const auto it = branch_pos.find(f.ac_branch_index);
+      const auto it = branch_pos.find(requested_branch_index(f));
       if (it == branch_pos.end()) continue;
       const auto& br = sys.ac.branches[static_cast<size_t>(it->second)];
       out.push_back({it->second,
-                     br.index != 0 ? br.index : f.ac_branch_index,
+                     br.index,
                      f.outage_start_hr,
                      std::max(opts.time_step_hr, f.repair_duration_hr),
                      f.name.empty() ? br.name : f.name});
@@ -222,7 +225,7 @@ std::vector<FaultData> build_faults(const HybridPowerSystem& sys,
     const int pos = candidates[static_cast<size_t>(k)];
     const auto& br = sys.ac.branches[static_cast<size_t>(pos)];
     out.push_back({pos,
-                   br.index != 0 ? br.index : static_cast<int>(pos + 1),
+                   br.index,
                    opts.auto_fault_start_hr + k * std::max(0.0, opts.auto_fault_stagger_hr),
                    std::max(opts.time_step_hr, opts.default_repair_time_hr),
                    br.name});
@@ -556,7 +559,7 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     const auto it_f = bus_pos.find(br.from_bus);
     const auto it_t = bus_pos.find(br.to_bus);
     out.branches[static_cast<size_t>(b)] = {
-        br.index != 0 ? br.index : b + 1,
+        br.index,
         it_f != bus_pos.end() ? it_f->second : 0,
         it_t != bus_pos.end() ? it_t->second : 0,
         std::max(1e-4, std::abs(br.r_pu)),

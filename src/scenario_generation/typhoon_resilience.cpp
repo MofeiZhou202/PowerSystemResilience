@@ -986,7 +986,7 @@ std::vector<TyphoonLineSegment> generate_typhoon_line_segments(
     auto it_to = bus_geo.find(br.to_bus);
     if (it_from == bus_geo.end() || it_to == bus_geo.end()) continue;
 
-    const int branch_index = br.index != 0 ? br.index : static_cast<int>(pos) + 1;
+    const int branch_index = br.index;
     double length_km = br.length_km;
     const double geo_length = haversine_km(it_from->second.lat, it_from->second.lon,
                                            it_to->second.lat, it_to->second.lon);
@@ -1028,7 +1028,7 @@ std::vector<TyphoonLineSegment> generate_typhoon_line_segments(
     auto it_to = dc_bus_geo.find(br.to_bus);
     if (it_from == dc_bus_geo.end() || it_to == dc_bus_geo.end()) continue;
 
-    const int branch_index = br.index != 0 ? br.index : static_cast<int>(pos) + 1;
+    const int branch_index = br.index;
     double length_km = br.length_km;
     const double geo_length = haversine_km(it_from->second.lat, it_from->second.lon,
                                            it_to->second.lat, it_to->second.lon);
@@ -1069,15 +1069,13 @@ double typhoon_branch_length_km(const HybridPowerSystem& sys, ResilienceBranchKi
   if (kind == ResilienceBranchKind::DC) {
     for (std::size_t i = 0; i < sys.dc.branches.size(); ++i) {
       const auto& br = sys.dc.branches[i];
-      const int idx = br.index != 0 ? br.index : static_cast<int>(i + 1);
-      if (idx == branch_index) return std::max(0.0, br.length_km);
+      if (br.index == branch_index) return std::max(0.0, br.length_km);
     }
     return 0.0;
   }
   for (std::size_t i = 0; i < sys.ac.branches.size(); ++i) {
     const auto& br = sys.ac.branches[i];
-    const int idx = br.index != 0 ? br.index : static_cast<int>(i + 1);
-    if (idx == branch_index) return std::max(0.0, br.length_km);
+    if (br.index == branch_index) return std::max(0.0, br.length_km);
   }
   return 0.0;
 }
@@ -1115,16 +1113,14 @@ double served_load_mw_for_repair_state(const HybridPowerSystem& sys,
 
   for (std::size_t i = 0; i < sys.ac.branches.size(); ++i) {
     const auto& br = sys.ac.branches[i];
-    const int idx = br.index != 0 ? br.index : static_cast<int>(i + 1);
-    if (!br.in_service || branch_outaged(outaged, ResilienceBranchKind::AC, idx)) continue;
+    if (!br.in_service || branch_outaged(outaged, ResilienceBranchKind::AC, br.index)) continue;
     const auto f = ac_bus.find(br.from_bus);
     const auto t = ac_bus.find(br.to_bus);
     if (f != ac_bus.end() && t != ac_bus.end()) add_edge(f->second, t->second);
   }
   for (std::size_t i = 0; i < sys.dc.branches.size(); ++i) {
     const auto& br = sys.dc.branches[i];
-    const int idx = br.index != 0 ? br.index : static_cast<int>(i + 1);
-    if (!br.in_service || branch_outaged(outaged, ResilienceBranchKind::DC, idx)) continue;
+    if (!br.in_service || branch_outaged(outaged, ResilienceBranchKind::DC, br.index)) continue;
     const auto f = dc_bus.find(br.from_bus);
     const auto t = dc_bus.find(br.to_bus);
     if (f != dc_bus.end() && t != dc_bus.end()) add_edge(f->second, t->second);
@@ -1331,12 +1327,12 @@ TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
   std::unordered_map<int, const ACBranch*> branch_map;
   for (std::size_t i = 0; i < sys.ac.branches.size(); ++i) {
     const auto& br = sys.ac.branches[i];
-    branch_map[br.index != 0 ? br.index : static_cast<int>(i) + 1] = &br;
+    branch_map[br.index] = &br;
   }
   std::unordered_map<int, const DCBranch*> dc_branch_map;
   for (std::size_t i = 0; i < sys.dc.branches.size(); ++i) {
     const auto& br = sys.dc.branches[i];
-    dc_branch_map[br.index != 0 ? br.index : static_cast<int>(i) + 1] = &br;
+    dc_branch_map[br.index] = &br;
   }
 
   std::vector<BranchRisk> risks;

@@ -116,6 +116,10 @@ struct StageFault {
   std::string name;
 };
 
+int requested_branch_index(const DistributionResilienceFault& f) {
+  return (f.branch_index == 0 && f.ac_branch_index != 0) ? f.ac_branch_index : f.branch_index;
+}
+
 struct StageMessState {
   int storage_index{0};
   int ac_bus_id{0};
@@ -278,8 +282,7 @@ StageSolution make_initial_topology_solution(const StageData& data,
 std::unordered_map<int, int> make_ac_branch_pos(const HybridPowerSystem& sys) {
   std::unordered_map<int, int> out;
   for (size_t i = 0; i < sys.ac.branches.size(); ++i) {
-    const int idx = sys.ac.branches[i].index != 0 ? sys.ac.branches[i].index : static_cast<int>(i + 1);
-    out[idx] = static_cast<int>(i);
+    out[sys.ac.branches[i].index] = static_cast<int>(i);
   }
   return out;
 }
@@ -287,8 +290,7 @@ std::unordered_map<int, int> make_ac_branch_pos(const HybridPowerSystem& sys) {
 std::unordered_map<int, int> make_dc_branch_pos(const HybridPowerSystem& sys) {
   std::unordered_map<int, int> out;
   for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
-    const int idx = sys.dc.branches[i].index != 0 ? sys.dc.branches[i].index : static_cast<int>(i + 1);
-    out[idx] = static_cast<int>(i);
+    out[sys.dc.branches[i].index] = static_cast<int>(i);
   }
   return out;
 }
@@ -457,7 +459,7 @@ StageData build_stage_data(const HybridPowerSystem& sys,
     if (it_f == data.ac_bus_pos.end() || it_t == data.ac_bus_pos.end()) continue;
     StageEdge e;
     e.kind = ResilienceBranchKind::AC;
-    e.index = br.index != 0 ? br.index : static_cast<int>(i + 1);
+    e.index = br.index;
     e.from = it_f->second;
     e.to = it_t->second;
     e.initial_closed = br.in_service;
@@ -473,7 +475,7 @@ StageData build_stage_data(const HybridPowerSystem& sys,
     if (it_f == data.dc_bus_pos.end() || it_t == data.dc_bus_pos.end()) continue;
     StageEdge e;
     e.kind = ResilienceBranchKind::DC;
-    e.index = br.index != 0 ? br.index : static_cast<int>(i + 1);
+    e.index = br.index;
     e.from = it_f->second;
     e.to = it_t->second;
     e.initial_closed = br.in_service;
@@ -609,9 +611,8 @@ std::vector<StageFault> build_stage_faults(const HybridPowerSystem& sys,
   std::vector<StageFault> out;
   if (!opts.faults.empty()) {
     for (const auto& f : opts.faults) {
-      const ResilienceBranchKind kind = f.branch_index > 0 ? f.branch_kind : ResilienceBranchKind::AC;
-      const int requested = f.branch_index > 0 ? f.branch_index : f.ac_branch_index;
-      if (requested <= 0) continue;
+      const ResilienceBranchKind kind = f.branch_kind;
+      const int requested = requested_branch_index(f);
       if (kind == ResilienceBranchKind::DC) {
         const auto edge_it = data.dc_branch_edge_pos.find(requested);
         if (edge_it == data.dc_branch_edge_pos.end()) continue;

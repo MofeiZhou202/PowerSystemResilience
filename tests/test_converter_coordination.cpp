@@ -161,6 +161,75 @@ TEST_CASE("VDC-controlled VSC supplies the DC island reference but releases P se
   CHECK_FALSE(has_rule(pf, "DCISLAND-01"));
 }
 
+TEST_CASE("Distributed slack honors converter coordination blocking diagnostics",
+          "[converter][coordination][distributed_slack]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  hacdcpf::ACBus ac;
+  ac.index = 1;
+  ac.bus_type = hacdcpf::BusType::SLACK;
+  ac.vm_pu = 1.0;
+  ac.in_service = true;
+  sys.ac.buses = {ac};
+
+  hacdcpf::Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.is_slack = true;
+  gen.in_service = true;
+  gen.pmax_mw = 100.0;
+  gen.pmin_mw = -100.0;
+  sys.ac.generators = {gen};
+
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 2, 1)};
+
+  hacdcpf::DCLoad load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 0.25;
+  load.in_service = true;
+  sys.dc.loads = {load};
+
+  hacdcpf::PVArrayDC pv;
+  pv.index = 1;
+  pv.bus = 2;
+  pv.p_set_mw = 0.30;
+  pv.in_service = true;
+  sys.dc.pv_arrays = {pv};
+
+  hacdcpf::VSCConverter conv;
+  conv.index = 1;
+  conv.bus_ac = 1;
+  conv.bus_dc = 1;
+  conv.control_mode = hacdcpf::ConverterMode::AC_PV;
+  conv.v_ac_set_pu = 1.0;
+  conv.p_set_mw = 0.05;
+  conv.in_service = true;
+  sys.vsc_converters = {conv};
+
+  hacdcpf::DistributedSlack slack;
+  slack.participating_buses = {1};
+  slack.participation_factors = {1.0};
+  slack.reference_bus = 1;
+
+  hacdcpf::PowerFlowOptions opt;
+  opt.enable_converter_coordination_check = true;
+
+  const hacdcpf::DistributedSlackResult result =
+      hacdcpf::solve_power_flow_distributed_slack_full(sys, slack, opt);
+
+  CHECK_FALSE(result.converged);
+  CHECK(result.vm.empty());
+  CHECK(result.vdc.empty());
+  CHECK(result.diagnostics.converter_coordination.enabled);
+  CHECK_FALSE(result.diagnostics.converter_coordination.feasible);
+  CHECK(result.diagnostics.converter_coordination.has_blocking_issue());
+  CHECK(report_has_rule(result.diagnostics.converter_coordination, "DCISLAND-01"));
+}
+
 TEST_CASE("Dedicated DC storage participates in coordination island summaries",
           "[converter][coordination][dc_storage]") {
   hacdcpf::HybridPowerSystem sys;
