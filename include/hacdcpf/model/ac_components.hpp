@@ -211,6 +211,10 @@ struct ExternalGrid {
   double cost_c2{0.0};
   double cost_c1{0.0};
   double cost_c0{0.0};
+
+  // Time-varying electricity price: profile_id -> cost_c1 at each timestep.
+  // -1 = no profile (use static cost_c1).
+  int price_profile_id{-1};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -1095,6 +1095,8 @@ static json external_grid_to_json(const ExternalGrid& e) {
   j["cost_c2"] = e.cost_c2;
   j["cost_c1"] = e.cost_c1;
   j["cost_c0"] = e.cost_c0;
+  if (e.price_profile_id >= 0)
+    j["price_profile_id"] = e.price_profile_id;
   return j;
 }
 
@@ -1121,6 +1123,7 @@ static ExternalGrid external_grid_from_json(const json& j) {
   e.cost_c2 = jget(j, "cost_c2", 0.0);
   e.cost_c1 = jget(j, "cost_c1", 0.0);
   e.cost_c0 = jget(j, "cost_c0", 0.0);
+  e.price_profile_id = jget(j, "price_profile_id", -1);
   return e;
 }
 

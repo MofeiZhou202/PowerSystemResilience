@@ -2044,6 +2044,7 @@ const Canvas = (() => {
             cost_c2: numOr(p.cost_c2, 0),
             cost_c1: numOr(p.cost_c1, 0),
             cost_c0: numOr(p.cost_c0, 0),
+            price_profile_id: numOr(p.price_profile_id, -1),
           };
           if (Array.isArray(p.emission_factor_profile_tco2_mwh)) {
             eg.emission_factor_profile_tco2_mwh =
@@ -2919,6 +2920,7 @@ const Canvas = (() => {
         cost_c2: eg.cost_c2 || 0,
         cost_c1: eg.cost_c1 || 0,
         cost_c0: eg.cost_c0 || 0,
+        price_profile_id: eg.price_profile_id != null ? eg.price_profile_id : -1,
       }, busCompMap, -80);
     });
 

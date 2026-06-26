@@ -2502,7 +2502,8 @@
         "in_service": true,
         "cost_c2": 10.0,
         "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "cost_c0": 0.0,
+        "price_profile_id": 3
       },
       {
         "index": 2,
@@ -2524,7 +2525,8 @@
         "in_service": true,
         "cost_c2": 10.0,
         "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "cost_c0": 0.0,
+        "price_profile_id": 3
       },
       {
         "index": 3,
@@ -2546,7 +2548,8 @@
         "in_service": true,
         "cost_c2": 10.0,
         "cost_c1": 500.0,
-        "cost_c0": 0.0
+        "cost_c0": 0.0,
+        "price_profile_id": 3
       }
     ],
     "transformers_2w": [
