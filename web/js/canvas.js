@@ -3714,7 +3714,7 @@ const Canvas = (() => {
 
     const supplyTypes = new Set(['generator', 'pv_system', 'renewable_gen', 'static_generator', 'external_grid', 'dc_pv_array', 'vpp', 'microgrid']);
     const demandTypes = new Set(['load', 'dc_load', 'flexible_load', 'asymmetric_load', 'motor', 'charging_station', 'charger']);
-    const bidirTypes = new Set(['storage', 'mobile_storage']);
+    const bidirTypes = new Set(['storage', 'dc_storage', 'mobile_storage']);
 
     function getComponentBusConnections(comp, allowedBusTypes) {
       const busConns = [];
@@ -3768,6 +3768,7 @@ const Canvas = (() => {
         microgrid: ['p_exchange_mw'],
         charging_station: ['p_total_kw'],
         charger: ['p_ch_kw'],
+        dc_storage: ['p_mw'],
       };
       const fields = currentPowerFields[comp.type] || ['p_mw', 'p_set_mw'];
       for (const field of fields) {
@@ -4357,8 +4358,15 @@ const Canvas = (() => {
         }
       });
 
+      const solvedVscTransfersForOverlay = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
+        ? _lastPfResult.geo_vsc
+        : (_lastPfResult.vsc_transfers || []);
+      const solvedDcdcTransfersForOverlay = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
+        ? _lastPfResult.geo_dcdc
+        : (_lastPfResult.dcdc_transfers || []);
+
       // VSC transfer power at AC-side buses
-      (_lastPfResult.geo_vsc || []).forEach(vsc => {
+      solvedVscTransfersForOverlay.forEach(vsc => {
         if (vsc.p_ac_mw !== undefined) {
           busInject[vsc.bus_ac] = numOr(busInject[vsc.bus_ac], 0) - numOr(vsc.p_ac_mw, 0);
         }
@@ -4407,7 +4415,7 @@ const Canvas = (() => {
             if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
           }
         }
-        else if (comp.type === 'storage' || comp.type === 'mobile_storage') {
+        else if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage') {
           // Storage dispatch must use its signed setpoint. A zero setpoint is a
           // real operating state; falling back to rated power draws a false flow.
           powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0;
@@ -4421,7 +4429,7 @@ const Canvas = (() => {
 
         // Determine direction
         let isSupply;
-        if (comp.type === 'storage' || comp.type === 'mobile_storage' || comp.type === 'microgrid' || comp.type === 'vpp') isSupply = powerMW >= 0;
+        if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage' || comp.type === 'microgrid' || comp.type === 'vpp') isSupply = powerMW >= 0;
         else if (supplyTypes.has(comp.type)) isSupply = true;
         else if (demandTypes.has(comp.type)) isSupply = false;
         else isSupply = powerMW > 0; // storage: positive = discharge
@@ -4518,11 +4526,18 @@ const Canvas = (() => {
 
     // ── VSC converter flow arrows ──
     if (showFlow || showHeat) {
-      const vscData = _lastPfResult.geo_vsc || [];
+      const vscData = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
+        ? _lastPfResult.geo_vsc
+        : (_lastPfResult.vsc_transfers || []);
       let vscIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'vsc_converter') return;
-        const vd = vscData[vscIdx++];
+        const compIndex = Number(comp.params?.index);
+        let vd = Number.isFinite(compIndex)
+          ? vscData.find(v => Number(v.index) === compIndex)
+          : null;
+        if (!vd) vd = vscData[vscIdx];
+        vscIdx++;
         if (!vd) return;
 
         // Find ALL bus connections (AC and DC)
@@ -4591,11 +4606,18 @@ const Canvas = (() => {
 
     // ── DCDC converter flow arrows ──
     if (showFlow || showHeat) {
-      const dcdcData = _lastPfResult.geo_dcdc || [];
+      const dcdcData = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
+        ? _lastPfResult.geo_dcdc
+        : (_lastPfResult.dcdc_transfers || []);
       let dcdcIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'dcdc_converter') return;
-        const dd = dcdcData[dcdcIdx++];
+        const compIndex = Number(comp.params?.index);
+        let dd = Number.isFinite(compIndex)
+          ? dcdcData.find(d => Number(d.index) === compIndex)
+          : null;
+        if (!dd) dd = dcdcData[dcdcIdx];
+        dcdcIdx++;
         if (!dd) return;
 
         const busConns = [];

@@ -161,6 +161,50 @@ TEST_CASE("VDC-controlled VSC supplies the DC island reference but releases P se
   CHECK_FALSE(has_rule(pf, "DCISLAND-01"));
 }
 
+TEST_CASE("Dedicated DC storage participates in coordination island summaries",
+          "[converter][coordination][dc_storage]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};
+
+  hacdcpf::DCLoad load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 0.25;
+  load.scaling = 1.0;
+  load.in_service = true;
+  sys.dc.loads = {load};
+
+  hacdcpf::PVArrayDC pv;
+  pv.index = 1;
+  pv.bus = 2;
+  pv.p_set_mw = 0.30;
+  pv.in_service = true;
+  sys.dc.pv_arrays = {pv};
+
+  hacdcpf::DCStorage st;
+  st.index = 1;
+  st.bus = 2;
+  st.p_mw = 0.30;
+  st.p_rated_mw = 10.0;
+  st.pmax_mw = 10.0;
+  st.pmin_mw = -10.0;
+  st.soc_init = 0.5;
+  st.soc_min = 0.1;
+  st.soc_max = 0.9;
+  st.controllable = true;
+  st.in_service = true;
+  sys.dc.dc_storage = {st};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  REQUIRE(report.dc_islands.size() == 1);
+  CHECK(report.dc_islands[0].fixed_power_devices == 3);
+  CHECK(std::abs(report.dc_islands[0].fixed_power_mw - 0.35) < 1e-12);
+  CHECK(std::abs(report.dc_islands[0].flexible_up_mw - 9.70) < 1e-12);
+  CHECK(std::abs(report.dc_islands[0].flexible_down_mw - 10.30) < 1e-12);
+}
+
 TEST_CASE("DC/DC converters do not merge DC voltage islands",
           "[converter][coordination][dcdc]") {
   hacdcpf::HybridPowerSystem sys;

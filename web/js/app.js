@@ -1438,6 +1438,7 @@ const App = (() => {
       (sys.dc?.loads || []).forEach(l => add(true, l.bus, '负荷'));
 
       (sys.ac?.storage || []).forEach(s => add(false, s.bus, '储能'));
+      (sys.dc?.dc_storage || []).forEach(s => add(true, s.bus, '储能'));
       (sys.dc?.storage || []).forEach(s => add(true, s.bus, '储能'));
       (sys.mobile_storage || []).forEach(s => add(false, s.bus, '移动储能'));
     } catch (_) {
@@ -3275,7 +3276,7 @@ const App = (() => {
             comp.type === 'motor' || comp.type === 'charger' || comp.type === 'charging_station' ||
             comp.type === 'vpp' || comp.type === 'microgrid') return 'AC';
         if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
-            comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
+            comp.type === 'dc_storage' || comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
         if (comp.type === 'vsc_converter' || comp.type === 'energy_router') return 'ACDC';
         const buses = resultConnectedBuses(comp.id);
         const hasAc = buses.some(b => b.domain === 'ac');
@@ -3483,6 +3484,8 @@ const App = (() => {
           };
         case 'dc_load':
           return { p: -((toNum(p.p_mw) ?? 0) * scale), q: 0 };
+        case 'dc_storage':
+          return { p: toNum(p.p_mw) ?? 0, q: 0 };
         case 'storage':
         case 'mobile_storage':
           return { p: toNum(p.p_mw) ?? 0, q: toNum(p.q_mvar) ?? 0 };
@@ -3899,6 +3902,14 @@ const App = (() => {
       return Number.isFinite(x) ? x : d;
     };
     const isOn = (x) => !(x && (x.in_service === false || x.in_service === 'false'));
+    if (!data.converged) {
+      const coord = data.converter_coordination;
+      const blocked = coord && coord.enabled && coord.feasible === false;
+      const blockingCount = coord ? (coord.blocking_count ?? ((coord.fatal_count || 0) + (coord.error_count || 0))) : 0;
+      section.style.display = '';
+      div.innerHTML = `<p class="empty-hint" style="color:#b91c1c">潮流未收敛${blocked ? `，协调校核阻断 ${blockingCount || 0} 项` : ''}，节点功率平衡诊断不作为正常潮流结果显示。</p>`;
+      return;
+    }
     const ac = new Map();
     const dc = new Map();
     const add = (map, key, value, label) => {
@@ -4010,6 +4021,7 @@ const App = (() => {
     (sys.dc?.pv_arrays || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC光伏 ${x.index ?? ''}`); });
     (sys.dc?.static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
     (sys.dc?.dc_static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
+    (sys.dc?.dc_storage || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw), `DC储能 ${x.index ?? ''}`); });
     (sys.dc?.storage || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw), `DC储能 ${x.index ?? ''}`); });
 
     function dcSlackSet() {
@@ -4093,18 +4105,29 @@ const App = (() => {
       ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个非平衡节点超过 ${tolKw} kW，请检查连接或设备功率。</p>`
       : `<p class="empty-hint">普通节点有功平衡通过：未发现超过 ${tolKw} kW 的非平衡节点。</p>`;
     const sourceHint = sources.length
-      ? `<p class="empty-hint">下表中的 Slack/平衡源残差表示其承担的系统平衡功率；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
+      ? `<p class="empty-hint">Slack/平衡源承担的功率本来可以非零，它不是普通节点KCL残差；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
       : '';
-    const tableRows = rows.sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw)).map(r => {
+    const makeRow = (r) => {
       const compId = r.kind === 'AC' ? busMap.ac?.[r.id] : busMap.dc?.[r.id];
       const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-      const role = r.isImplicit ? '隐式DC平衡' : (r.isSlack ? 'Slack/平衡源' : '未平衡');
       const detail = r.details.map(x => `${x.label}: ${pFmt(x.mw, 3)} ${pUnit()}`).join('<br>');
-      return `<tr${attr}><td>${r.kind}</td><td>${r.id}</td><td>${escapeHtml(r.type)}</td><td>${role}</td><td>${pFmt(r.kw / 1000, 3)}</td><td>${escapeHtml(r.name)}</td><td>${detail}</td></tr>`;
-    }).join('');
-    div.innerHTML = status + sourceHint + (tableRows
-      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>角色</th><th>残差/平衡功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${tableRows}</tbody></table>`
-      : '');
+      return `<tr${attr}><td>${r.kind}</td><td>${r.id}</td><td>${escapeHtml(r.type)}</td><td>${pFmt(r.kw / 1000, 3)}</td><td>${escapeHtml(r.name)}</td><td>${detail}</td></tr>`;
+    };
+    const imbalanceRows = bad
+      .sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw))
+      .map(makeRow)
+      .join('');
+    const sourceRows = sources
+      .sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw))
+      .map(r => makeRow({ ...r, type: r.isImplicit ? `${r.type || ''} / 隐式DC平衡` : r.type }))
+      .join('');
+    const imbalanceTable = imbalanceRows
+      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>普通节点KCL残差(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${imbalanceRows}</tbody></table>`
+      : '';
+    const sourceTable = sourceRows
+      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
+      : '';
+    div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
   }
 
   function showPowerFlowResultsTables(data) {
@@ -4192,12 +4215,22 @@ const App = (() => {
     const dcBusDiv = document.getElementById('pfDcBusResults');
     if (data.vdc && data.vdc.length > 0) {
       dcBusSec.style.display = '';
-      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
+      const dcBusRows = (data.component_results || []).filter(r => r.canvas_type === 'dc_bus');
+      const dcMetric = (busId, label) => {
+        const row = dcBusRows.find(r => Number(r.index) === Number(busId));
+        const metric = row && Array.isArray(row.metrics)
+          ? row.metrics.find(m => m.label === label)
+          : null;
+        const n = metric ? Number(metric.value) : NaN;
+        return Number.isFinite(n) ? n : null;
+      };
+      let html = `<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th><th>P净注入(${pUnit()})</th></tr></thead><tbody>`;
       data.vdc.forEach((vdc, i) => {
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
         const compId = busMap.dc[i + 1];
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vdc.toFixed(6)}</td></tr>`;
+        const pNet = dcMetric(i + 1, 'P净注入');
+        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
       dcBusDiv.innerHTML = html;
@@ -4269,13 +4302,15 @@ const App = (() => {
       dcBrSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcBrData.forEach((br, i) => {
-        const compId = busMap.dcBranch[i];
+        const compId = busMap.dcBranch
+          ? (busMap.dcBranch[br.index] ?? busMap.dcBranch[i])
+          : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const from = br.from ?? br.from_bus ?? '-';
         const to = br.to ?? br.to_bus ?? '-';
         const pf = br.pf_mw || 0;
         const pt = br.pt_mw || 0;
-        const loss = pf + pt;
+        const loss = br.loss_mw != null ? br.loss_mw : (pf + pt);
         html += `<tr${attr}><td>${i}</td><td>${from}</td><td>${to}</td><td>${pFmt(pf, 4)}</td><td>${pFmt(pt, 4)}</td><td>${pFmt(loss, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -5155,6 +5190,10 @@ const App = (() => {
     // DC Load
     fillTable('#dcLoadTableInner', 'dcLoadSection', sys.dc.loads, m.dcLoad, dl =>
       `<td>${dl.bus}</td><td>${dl.p_mw}</td><td>${dl.scaling}</td>`);
+
+    // DC Storage
+    fillTable('#dcStorageTableInner', 'dcStorageSection', sys.dc.dc_storage || [], m.dcStorage, s =>
+      `<td>${s.bus}</td><td>${s.p_mw}</td><td>${s.p_rated_mw}</td><td>${s.e_rated_mwh}</td><td>${s.soc_init}</td>`);
 
     // DC PV Array
     fillTable('#dcPvTableInner', 'dcPvSection', sys.dc.pv_arrays || [], m.dcPv, pv =>
@@ -6749,6 +6788,7 @@ const App = (() => {
         if (st && Number(st.e_rated_mwh || 0) > 0) st.soc_init = Math.max(0, Math.min(1, soc));
       });
       update(systemJson?.ac?.storage);
+      update(systemJson?.dc?.dc_storage);
       update(systemJson?.dc?.storage);
       update(systemJson?.mobile_storage);
     }
@@ -6777,7 +6817,9 @@ const App = (() => {
         case 'acload': return markOutOfServiceByIndex(systemJson.ac?.loads, idx);
         case 'dcload': return markOutOfServiceByIndex(systemJson.dc?.loads, idx);
         case 'acstorage': return markOutOfServiceByIndex(systemJson.ac?.storage, idx);
-        case 'dcstorage': return markOutOfServiceByIndex(systemJson.dc?.storage, idx);
+        case 'dcstorage':
+          return markOutOfServiceByIndex(systemJson.dc?.dc_storage, idx) ||
+                 markOutOfServiceByIndex(systemJson.dc?.storage, idx);
         case 'mobilestorage': return markOutOfServiceByIndex(systemJson.mobile_storage, idx);
         case 'transformer2w': return markOutOfServiceByIndex(systemJson.ac?.transformers_2w, idx);
         case 'transformer3w': return markOutOfServiceByIndex(systemJson.ac?.transformers_3w, idx);

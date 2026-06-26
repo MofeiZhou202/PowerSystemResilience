@@ -1010,7 +1010,7 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
       {"dc_buses", {"dc", "buses"}},
       {"dc_branches", {"dc", "branches"}},
       {"dc_loads", {"dc", "loads"}},
-      {"dc_storage", {"dc", "storage"}},
+      {"dc_storage", {"dc", "dc_storage"}},
       {"dc_static_generators", {"dc", "static_generators"}},
       {"dc_native_static_generators", {"dc", "dc_static_generators"}},
       {"pv_arrays", {"dc", "pv_arrays"}},
@@ -1033,6 +1033,10 @@ json system_summary(const hacdcpf::HybridPowerSystem& sys) {
   for (const auto& [k, path] : comp_map) {
     s[k] = get_nested_array(path);
     counts[k] = s[k].size();
+  }
+  if (s["dc_storage"].empty()) {
+    s["dc_storage"] = get_nested_array({"dc", "storage"});
+    counts["dc_storage"] = s["dc_storage"].size();
   }
   s["counts"] = counts;
   return s;
@@ -4965,7 +4969,10 @@ int main(int argc, char** argv) {
       put_array("dc", "buses", "dc_buses");
       put_array("dc", "branches", "dc_branches");
       put_array("dc", "loads", "dc_loads");
-      put_array("dc", "storage", "dc_storage");
+      if (j.contains("dc_storage") && j["dc_storage"].is_array()) {
+        root["dc"]["dc_storage"] = j["dc_storage"];
+        root["dc"]["storage"] = json::array();
+      }
       put_array("dc", "static_generators", "dc_static_generators");
       put_array("dc", "dc_static_generators", "dc_native_static_generators");
       put_array("dc", "pv_arrays", "pv_arrays");
@@ -5460,6 +5467,7 @@ int main(int argc, char** argv) {
             }
           }
           geo_ac_branches.push_back(json{
+            {"index", br.index},
             {"name", br.name.empty() ? ("Line" + std::to_string(i)) : br.name},
             {"from", br.from_bus}, {"to", br.to_bus},
             {"from_lat", from_it->second.first}, {"from_lon", from_it->second.second},
@@ -5498,6 +5506,7 @@ int main(int argc, char** argv) {
               if (br.rate_a_mva > 0) loading_pct = 100.0 * std::abs(pf_mw) / br.rate_a_mva;
             }
             geo_dc_branches.push_back(json{
+              {"index", br.index},
               {"name", br.name.empty() ? ("DCLine" + std::to_string(i)) : br.name},
               {"from", br.from_bus}, {"to", br.to_bus},
               {"from_lat", from_it->second.first}, {"from_lon", from_it->second.second},
@@ -5514,6 +5523,7 @@ int main(int argc, char** argv) {
           auto dc_it = dc_bus_coords.find(v.bus_dc);
           if (ac_it == ac_bus_coords.end() || dc_it == dc_bus_coords.end()) continue;
           geo_vsc.push_back(json{
+            {"index", v.index},
             {"bus_ac", v.bus_ac}, {"bus_dc", v.bus_dc},
             {"ac_lat", ac_it->second.first}, {"ac_lon", ac_it->second.second},
             {"dc_lat", dc_it->second.first}, {"dc_lon", dc_it->second.second},
@@ -5527,6 +5537,7 @@ int main(int argc, char** argv) {
           auto out_it = dc_bus_coords.find(d.bus_out);
           if (in_it == dc_bus_coords.end() || out_it == dc_bus_coords.end()) continue;
           geo_dcdc.push_back(json{
+            {"index", d.index},
             {"bus_in", d.bus_in}, {"bus_out", d.bus_out},
             {"in_lat", in_it->second.first}, {"in_lon", in_it->second.second},
             {"out_lat", out_it->second.first}, {"out_lon", out_it->second.second},
@@ -5795,6 +5806,8 @@ int main(int argc, char** argv) {
           if (sg.in_service) add_dc_dev_inj(sg.bus, sg.p_mw * sg.scaling);
         for (const auto& sg : sys.dc.dc_static_generators)
           if (sg.in_service) add_dc_dev_inj(sg.bus, sg.p_set_mw * sg.scaling);
+        for (const auto& st : sys.dc.dc_storage)
+          if (st.in_service) add_dc_dev_inj(st.bus, st.p_mw);
         for (const auto& st : sys.dc.storage)
           if (st.in_service) add_dc_dev_inj(st.bus, st.p_mw);
 
@@ -6116,6 +6129,16 @@ int main(int argc, char** argv) {
           add_note(row, "正值为放电注入，负值为充电吸收");
           component_results.push_back(std::move(row));
         }
+        for (size_t i = 0; i < sys.dc.dc_storage.size(); ++i) {
+          const auto& st = sys.dc.dc_storage[i];
+          json row = base_row("dc_storage", "DC", st.index, static_cast<int>(i),
+                              "直流储能", st.name.empty() ? ("DC ESS " + std::to_string(st.index)) : st.name,
+                              is_solved(st.in_service), dc_conn(st.bus));
+          add_metric(row, "P计算", st.in_service ? st.p_mw : 0.0, "MW", "p", 4);
+          add_metric(row, "SOC", st.soc_init, "", "scalar", 4);
+          add_note(row, "正值为放电注入，负值为充电吸收");
+          component_results.push_back(std::move(row));
+        }
         for (size_t i = 0; i < sys.dc.static_generators.size(); ++i) {
           const auto& sg = sys.dc.static_generators[i];
           json row = base_row("static_generator", "DC", sg.index, static_cast<int>(i),
@@ -6195,7 +6218,7 @@ int main(int argc, char** argv) {
               add_metric(row, "P设定", c.p_set_mw, "MW", "p", 4);
             } else if (forms_vdc) {
               add_text_metric(row, "有功语义", "构网释放(P自由)");
-              add_metric(row, "P调度", p_sched, "MW", "p", 4);
+              add_metric(row, "P调度(非约束)", p_sched, "MW", "p", 4);
               add_metric(row, "P初值", p_init, "MW", "p", 4);
             }
           }
@@ -6205,6 +6228,10 @@ int main(int argc, char** argv) {
           add_metric(row, "Loss", v ? v->loss_mw : 0.0, "MW", "p", 4);
           if (promoted) {
             add_note(row, "所在直流岛无电压参考，求解器已将其自动升压为VDC_Q并以大增益构造Vdc(释放有功设定，仅作调度/初值)");
+          }
+          if (c.control_mode == hacdcpf::ConverterMode::VDC_Q ||
+              c.control_mode == hacdcpf::ConverterMode::VDC_VAC || promoted) {
+            add_note(row, "VDC类模式下P调度不是AC侧有功等式约束；潮流AC侧采用求解得到的Pac，DC侧采用求解得到的Pdc并计入损耗");
           }
           component_results.push_back(std::move(row));
         }

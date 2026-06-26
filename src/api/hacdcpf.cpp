@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -30,6 +31,7 @@ struct SolverHandle {
   powerflow::NewtonSolver newton_solver;
   powerflow::DCSolver dc_solver;
   LossModelType configured_loss_model{LossModelType::Linear};
+  std::unordered_map<int, int> original_vsc_bus_ac;
 };
 
 namespace {
@@ -432,6 +434,11 @@ powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, Loss
 void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
+  handle.original_vsc_bus_ac.clear();
+  handle.original_vsc_bus_ac.reserve(sys.vsc_converters.size());
+  for (const auto& conv : sys.vsc_converters) {
+    handle.original_vsc_bus_ac[conv.index] = conv.bus_ac;
+  }
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
 }
@@ -676,6 +683,31 @@ void populate_derived_results(const powerflow::SolverData& data,
   }
 }
 
+void restore_original_vsc_bus_ac(PowerFlowResult& result,
+                                 const std::unordered_map<int, int>& bus_by_index) {
+  if (bus_by_index.empty()) return;
+  auto original_bus = [&](int index, int fallback) {
+    const auto it = bus_by_index.find(index);
+    return it != bus_by_index.end() ? it->second : fallback;
+  };
+
+  for (auto& tr : result.vsc_transfers) {
+    tr.bus_ac = original_bus(tr.index, tr.bus_ac);
+  }
+  for (auto& conv : result.diagnostics.effective_converters) {
+    conv.bus_ac = original_bus(conv.index, conv.bus_ac);
+  }
+}
+
+void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSystem& sys) {
+  std::unordered_map<int, int> bus_by_index;
+  bus_by_index.reserve(sys.vsc_converters.size());
+  for (const auto& conv : sys.vsc_converters) {
+    bus_by_index[conv.index] = conv.bus_ac;
+  }
+  restore_original_vsc_bus_ac(result, bus_by_index);
+}
+
 // Expand merged PF result vectors (vm, va) back to the original bus count
 // so that callers can index by original bus position.
 void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
@@ -772,6 +804,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       }
     }
   }
+  restore_original_vsc_bus_ac(result, sys);
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
 
   // Declare which parts of the unified converter model this snapshot Newton
@@ -866,6 +899,7 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   apply_zip_weights(handle->data, opt);
   PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
   populate_derived_results(handle->data, result, opt.loss_model);
+  restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
   if (handle->data.bus_merge_map) unproject_pf_result(result, *handle->data.bus_merge_map);
   return result;
 }

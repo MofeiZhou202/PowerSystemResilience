@@ -151,6 +151,11 @@ bool storage_can_adjust(const Storage& st) {
   return st.soc_init > st.soc_min + 1e-6 && st.soc_init < st.soc_max - 1e-6;
 }
 
+bool dc_storage_can_adjust(const DCStorage& st) {
+  if (!st.in_service || !st.controllable) return false;
+  return st.soc_init > st.soc_min + 1e-6 && st.soc_init < st.soc_max - 1e-6;
+}
+
 double vsc_dc_injection_from_ac_setpoint_mw(const VSCConverter& conv) {
   const double eta = std::clamp(conv.eta, 0.01, 1.0);
   return (conv.p_set_mw >= 0.0) ? (-conv.p_set_mw / eta) : (-conv.p_set_mw * eta);
@@ -237,6 +242,8 @@ bool dc_island_has_support(const HybridPowerSystem& sys,
     if (forms) return true;
   }
   for (const auto& s : sys.dc.storage)
+    if (s.in_service && island_of(s.bus) == dc_island) return true;
+  for (const auto& s : sys.dc.dc_storage)
     if (s.in_service && island_of(s.bus) == dc_island) return true;
   for (const auto& g : sys.dc.static_generators)
     if (g.in_service && island_of(g.bus) == dc_island) return true;
@@ -1015,6 +1022,19 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
       add_voltage_source(summary, "dc_storage", st.index, st.bus, 0.0, false, true,
                          /*group_id=*/"", /*is_master=*/false,
                          /*participation_factor=*/0.0, /*droop_gain=*/1.0);
+    }
+  }
+  for (const auto& st : sys.dc.dc_storage) {
+    if (!st.in_service) continue;
+    const int island = island_for_bus(st.bus);
+    if (island < 0) continue;
+    auto& summary = report.dc_islands[static_cast<size_t>(island)];
+    summary.fixed_power_devices += 1;
+    summary.fixed_power_mw += st.p_mw;
+    if (dc_storage_can_adjust(st)) {
+      const double pmax = finite_limit(st.pmax_mw, st.p_rated_mw);
+      const double pmin = finite_limit(st.pmin_mw, -st.p_rated_mw);
+      add_flex_range(st.p_mw, pmin, pmax, summary.flexible_up_mw, summary.flexible_down_mw);
     }
   }
   for (const auto& er : sys.energy_routers) {
