@@ -6684,34 +6684,63 @@ int main(int argc, char** argv) {
       out["ac_bus_island"] = ac_bus_island;
       out["dc_bus_island"] = dc_bus_island;
 
-      // ── Cut vertices (articulation points) ──────────────────────────
-      out["cut_vertex_bus_ids"] = report.cut_vertex_bus_ids;
+      // ── Cut vertices (articulation points), domain-aware ────────────
+      // report.cut_vertex_bus_ids is a flat list of bus IDs that conflates AC
+      // and DC buses sharing the same integer ID (e.g. AC bus 2 and DC bus 2).
+      // Re-derive articulation points as node indices so each carries its true
+      // domain; emit a domain-tagged `cut_vertices` array and keep the legacy
+      // flat `cut_vertex_bus_ids` for backward compatibility.
       std::vector<bool> ac_cut(sys.ac.buses.size(), false);
       std::vector<bool> dc_cut(sys.dc.buses.size(), false);
-      for (int bid : report.cut_vertex_bus_ids) {
-        auto a = ac_id_to_pos.find(bid);
-        if (a != ac_id_to_pos.end()) ac_cut[a->second] = true;
-        auto d = dc_id_to_pos.find(bid);
-        if (d != dc_id_to_pos.end()) dc_cut[d->second] = true;
+      json cut_vertices = json::array();
+      std::vector<int> cut_ids;
+      for (int ni : gr::find_articulation_points(graph)) {
+        if (ni < 0 || ni >= graph.node_count()) continue;
+        const auto& nd = graph.nodes[ni];
+        const bool is_dc = (nd.domain == gr::NodeDomain::DC);
+        cut_ids.push_back(nd.bus_id);
+        auto& posmap = is_dc ? dc_id_to_pos : ac_id_to_pos;
+        auto it = posmap.find(nd.bus_id);
+        const int pos = (it != posmap.end()) ? it->second : -1;
+        if (it != posmap.end()) (is_dc ? dc_cut : ac_cut)[it->second] = true;
+        cut_vertices.push_back(json{
+          {"bus", nd.bus_id},
+          {"domain", is_dc ? "DC" : "AC"},
+          {"pos", pos},
+        });
       }
-      out["ac_cut_vertex"] = ac_cut;
-      out["dc_cut_vertex"] = dc_cut;
+      out["cut_vertex_bus_ids"] = cut_ids;
+      out["cut_vertices"]       = cut_vertices;
+      out["ac_cut_vertex"]      = ac_cut;
+      out["dc_cut_vertex"]      = dc_cut;
 
       // ── Bridges (cut-edges) ─────────────────────────────────────────
+      // Endpoint domain is a property of each NODE, not the edge: a converter
+      // bridge (VSC/DCDC) has one AC and one DC endpoint, so each end must be
+      // mapped in its own domain.  The previous per-edge `dc_edge` flag looked
+      // up the DC endpoint of a VSC bridge in the AC position map, yielding the
+      // wrong position (or a same-id AC bus).  Emit per-endpoint domains; keep
+      // a legacy single `domain` (DC only when both ends are DC) for old clients.
       json bridges = json::array();
       for (int eid : report.bridge_edge_ids) {
         if (eid < 0 || eid >= graph.edge_count()) continue;
         const auto& e = graph.edges[eid];
-        const bool dc_edge = (e.category == gr::EdgeCategory::DC_Line ||
-                              e.category == gr::EdgeCategory::DC_Switch);
+        const bool from_dc =
+            (e.from_node >= 0 && e.from_node < graph.node_count())
+            && (graph.nodes[e.from_node].domain == gr::NodeDomain::DC);
+        const bool to_dc =
+            (e.to_node >= 0 && e.to_node < graph.node_count())
+            && (graph.nodes[e.to_node].domain == gr::NodeDomain::DC);
         json jb;
-        jb["from_bus"] = e.from_bus_id;
-        jb["to_bus"]   = e.to_bus_id;
-        jb["category"] = edge_cat_str(e.category);
-        jb["domain"]   = dc_edge ? "DC" : "AC";
+        jb["from_bus"]    = e.from_bus_id;
+        jb["to_bus"]      = e.to_bus_id;
+        jb["category"]    = edge_cat_str(e.category);
+        jb["from_domain"] = from_dc ? "DC" : "AC";
+        jb["to_domain"]   = to_dc   ? "DC" : "AC";
+        jb["domain"]      = (from_dc && to_dc) ? "DC" : "AC";
         // Canvas positions (-1 when the endpoint is not in the matching domain map)
-        auto& fmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
-        auto& tmap = dc_edge ? dc_id_to_pos : ac_id_to_pos;
+        auto& fmap = from_dc ? dc_id_to_pos : ac_id_to_pos;
+        auto& tmap = to_dc   ? dc_id_to_pos : ac_id_to_pos;
         auto fit = fmap.find(e.from_bus_id);
         auto tit = tmap.find(e.to_bus_id);
         jb["from_pos"] = (fit != fmap.end()) ? fit->second : -1;

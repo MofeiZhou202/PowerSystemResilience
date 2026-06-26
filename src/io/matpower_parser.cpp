@@ -370,6 +370,22 @@ HybridPowerSystem parse_matpower(const std::string& filepath) {
     sys.ac.generators.push_back(std::move(g));
   }
 
+  // MATPOWER uses the generator VG column as the regulated voltage setpoint for
+  // in-service PV and reference buses. The bus VM column is an initial value.
+  for (const auto& gen : sys.ac.generators) {
+    if (!gen.in_service || gen.vg_pu <= 0.0) {
+      continue;
+    }
+    const int idx = gen.bus - 1;
+    if (idx < 0 || idx >= static_cast<int>(sys.ac.buses.size())) {
+      continue;
+    }
+    auto& bus = sys.ac.buses[static_cast<size_t>(idx)];
+    if (bus.bus_type == BusType::PV || bus.bus_type == BusType::SLACK) {
+      bus.vm_pu = gen.vg_pu;
+    }
+  }
+
   sys.ac.branches.reserve(branch_rows.size());
   for (size_t i = 0; i < branch_rows.size(); ++i) {
     const auto& r = branch_rows[i];

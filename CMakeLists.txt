@@ -373,6 +373,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/opf_numerical_benchmark.cpp")
   hacdcpf_copy_opendss_runtime(opf_numerical_benchmark)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/matpower_pf_compare.cpp")
+  add_executable(matpower_pf_compare tools/matpower_pf_compare.cpp)
+  target_link_libraries(matpower_pf_compare PRIVATE hacdcpf::hacdcpf)
+  hacdcpf_copy_opendss_runtime(matpower_pf_compare)
+endif()
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
 if(HACDCPF_BUILD_TESTS)
   include(CTest)

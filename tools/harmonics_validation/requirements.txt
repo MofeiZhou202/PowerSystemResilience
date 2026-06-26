@@ -1,4 +1,0 @@
-# Independent reference (always required)
-numpy>=1.23
-# External cross-check engine (optional; bundles the OpenDSS engine, no separate binary)
-OpenDSSDirect.py>=0.9
