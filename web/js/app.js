@@ -8228,7 +8228,7 @@ const App = (() => {
     // Connection style (直线 / 正交 / 避让) — doc §10.2/§10.3
     const connStyleSel = document.getElementById('connStyleSelect');
     if (connStyleSel) {
-      try { connStyleSel.value = localStorage.getItem('connectionStyle') || 'orthogonal'; } catch (e) {}
+      try { connStyleSel.value = localStorage.getItem('connectionStyle') || 'avoid'; } catch (e) {}
       connStyleSel.addEventListener('change', (e) => Canvas.setConnectionStyle?.(e.target.value));
     }
     document.getElementById('btnReroute')?.addEventListener('click', () => Canvas.rerouteConnections?.());
