@@ -6061,6 +6061,22 @@ int main(int argc, char** argv) {
         };
         auto ac_conn = [](int bus) { return "AC Bus " + std::to_string(bus); };
         auto dc_conn = [](int bus) { return "DC Bus " + std::to_string(bus); };
+        auto solved_ac_load = [&](const hacdcpf::Load& ld) {
+          const double vm = ac_vm_by_bus.count(ld.bus) ? ac_vm_by_bus[ld.bus] : 1.0;
+          const double scale = ld.scaling;
+          const double p0 = ld.p_mw * scale;
+          const double q0 = ld.q_mvar * scale;
+          if (ld.model != hacdcpf::LoadModel::ZIP) {
+            return std::pair<double, double>{p0, q0};
+          }
+          const double p = p0 * (ld.p_percent_p / 100.0 +
+                                 ld.i_percent_p / 100.0 * vm +
+                                 ld.z_percent_p / 100.0 * vm * vm);
+          const double q = q0 * (ld.p_percent_q / 100.0 +
+                                 ld.i_percent_q / 100.0 * vm +
+                                 ld.z_percent_q / 100.0 * vm * vm);
+          return std::pair<double, double>{p, q};
+        };
 
         // Reconstruct per-bus AC flow using the same signed conventions used by
         // the geo_* branch/converter results.  External-grid P/Q is the residual
@@ -6117,8 +6133,11 @@ int main(int argc, char** argv) {
           if (pv.in_service) add_ac_injection(pv.bus, pv.p_mw, pv.q_mvar);
         for (const auto& st : sys.ac.storage)
           if (st.in_service) add_ac_injection(st.bus, st.p_mw, st.q_mvar);
-        for (const auto& ld : sys.ac.loads)
-          if (ld.in_service) add_ac_injection(ld.bus, -ld.p_mw * ld.scaling, -ld.q_mvar * ld.scaling);
+        for (const auto& ld : sys.ac.loads) {
+          if (!ld.in_service) continue;
+          const auto [p_load, q_load] = solved_ac_load(ld);
+          add_ac_injection(ld.bus, -p_load, -q_load);
+        }
         for (const auto& fl : sys.ac.flexible_loads)
           if (fl.in_service) add_ac_injection(fl.bus, -fl.p_mw, -fl.q_mvar);
         for (const auto& al : sys.ac.asymmetric_loads) {
@@ -7066,11 +7085,17 @@ int main(int argc, char** argv) {
         }
         for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
           const auto& ld = sys.ac.loads[i];
+          const auto [p_load, q_load] = ld.in_service
+              ? solved_ac_load(ld)
+              : std::pair<double, double>{0.0, 0.0};
           json row = base_row("load", "AC", ld.index, static_cast<int>(i),
                               "负荷", ld.name.empty() ? ("Load " + std::to_string(ld.index)) : ld.name,
                               is_solved(ld.in_service), ac_conn(ld.bus));
-          add_metric(row, "P消耗", ld.in_service ? ld.p_mw * ld.scaling : 0.0, "MW", "p", 4);
-          add_metric(row, "Q消耗", ld.in_service ? ld.q_mvar * ld.scaling : 0.0, "MVar", "q", 4);
+          add_metric(row, "P消耗", p_load, "MW", "p", 4);
+          add_metric(row, "Q消耗", q_load, "MVar", "q", 4);
+          if (ld.in_service && ld.model == hacdcpf::LoadModel::ZIP) {
+            add_note(row, "ZIP负荷按求解后母线电压折算显示");
+          }
           component_results.push_back(std::move(row));
         }
         for (size_t i = 0; i < sys.ac.flexible_loads.size(); ++i) {

@@ -449,16 +449,55 @@ powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, Loss
   return cache.data;
 }
 
+std::unordered_map<int, int> build_original_vsc_ac_bus_map(
+    const HybridPowerSystem& sys);
+
 void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
-  handle.original_vsc_bus_ac.clear();
-  handle.original_vsc_bus_ac.reserve(sys.vsc_converters.size());
-  for (const auto& conv : sys.vsc_converters) {
-    handle.original_vsc_bus_ac[conv.index] = conv.bus_ac;
-  }
+  handle.original_vsc_bus_ac = build_original_vsc_ac_bus_map(sys);
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
+}
+
+std::unordered_map<int, int> build_original_vsc_ac_bus_map(
+    const HybridPowerSystem& sys) {
+  std::unordered_map<int, int> bus_by_index;
+  bus_by_index.reserve(sys.vsc_converters.size() + sys.energy_routers.size() * 4);
+  for (const auto& conv : sys.vsc_converters) {
+    bus_by_index[conv.index] = conv.bus_ac;
+  }
+  if (sys.energy_routers.empty()) return bus_by_index;
+
+  try {
+    const HybridPowerSystem projected = project_to_canonical_models(sys);
+    std::unordered_map<std::string, int> vsc_index_by_name;
+    vsc_index_by_name.reserve(projected.vsc_converters.size());
+    for (const auto& conv : projected.vsc_converters) {
+      vsc_index_by_name[conv.name] = conv.index;
+    }
+    for (const auto& er : sys.energy_routers) {
+      if (!er.in_service) continue;
+      for (const auto& port : er.ports) {
+        if (!port.in_service || port.bus == 0 ||
+            port.port_type != ERPortType::AC) {
+          continue;
+        }
+        const char side = (port.side == 0) ? 'A' : 'B';
+        const std::string vsc_name =
+            er.name + "_VSC_" + side + std::to_string(port.index);
+        const auto it = vsc_index_by_name.find(vsc_name);
+        if (it != vsc_index_by_name.end()) {
+          bus_by_index[it->second] = port.bus;
+        }
+      }
+    }
+  } catch (...) {
+    // Result attribution should not make a converged PF fail. Existing VSC
+    // converters are still restored by index; expanded ER ports fall back to
+    // the canonical bus if their reconstruction metadata is unavailable.
+  }
+  return bus_by_index;
 }
 
 void apply_zip_weights(powerflow::SolverData& data, const PowerFlowOptions& opt) {
@@ -743,12 +782,7 @@ void restore_original_vsc_bus_ac(PowerFlowResult& result,
 }
 
 void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSystem& sys) {
-  std::unordered_map<int, int> bus_by_index;
-  bus_by_index.reserve(sys.vsc_converters.size());
-  for (const auto& conv : sys.vsc_converters) {
-    bus_by_index[conv.index] = conv.bus_ac;
-  }
-  restore_original_vsc_bus_ac(result, bus_by_index);
+  restore_original_vsc_bus_ac(result, build_original_vsc_ac_bus_map(sys));
 }
 
 void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
@@ -981,6 +1015,7 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
   powerflow::FDPFSolver solver;
   PowerFlowResult result = solver.solve(data, opt);
   populate_derived_results(data, result, opt.loss_model);
+  restore_original_vsc_bus_ac(result, sys);
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
   return result;
 }
