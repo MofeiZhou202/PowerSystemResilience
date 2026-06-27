@@ -839,6 +839,220 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
   return out;
 }
 
+struct FMEAComponentPresentation {
+  std::string display_name;
+  std::string display_type;
+  std::string canvas_type;
+  int canvas_index{-1};
+  int primary_bus{0};
+  int secondary_bus{0};
+  bool mappable{false};
+};
+
+std::string fmea_type_label(const std::string& type) {
+  static const std::unordered_map<std::string, std::string> labels{
+      {"generator", "发电机"},
+      {"ac_branch", "AC线路"},
+      {"dc_branch", "DC线路"},
+      {"vsc_converter", "VSC换流器"},
+      {"static_generator", "静态电源"},
+      {"renewable_gen", "新能源电源"},
+      {"storage", "储能"},
+      {"transformer_2w", "双绕组变压器"},
+      {"transformer_3w", "三绕组变压器"},
+      {"dcdc_converter", "DC/DC变换器"},
+      {"dc_circuit_breaker", "DC断路器"},
+      {"dc_storage", "DC储能"},
+      {"dc_pv_array", "DC光伏"},
+      {"dc_static_generator", "DC静态电源"},
+      {"ac_switch", "AC开关"},
+      {"ac_circuit_breaker", "AC断路器"},
+      {"ac_pv_system", "AC光伏"},
+      {"dc_static_generator_ac", "DC分布式电源"},
+  };
+  const auto it = labels.find(type);
+  return it == labels.end() ? type : it->second;
+}
+
+std::string fmea_default_name(const std::string& display_type, int index) {
+  return display_type + " #" + std::to_string(index);
+}
+
+std::string fmea_branch_name(const std::string& display_type, int index, int from_bus, int to_bus) {
+  return display_type + " #" + std::to_string(index) + " (" +
+         std::to_string(from_bus) + " -> " + std::to_string(to_bus) + ")";
+}
+
+template <typename T>
+std::string explicit_or_default_name(const T& item, const std::string& display_type) {
+  return item.name.empty() ? fmea_default_name(display_type, item.index) : item.name;
+}
+
+template <typename T>
+FMEAComponentPresentation fmea_one_bus_component(const std::vector<T>& items,
+                                                 int position,
+                                                 const std::string& display_type,
+                                                 const std::string& canvas_type) {
+  FMEAComponentPresentation p;
+  p.display_type = display_type;
+  p.canvas_type = canvas_type;
+  if (position < 0 || position >= static_cast<int>(items.size())) {
+    p.display_name = fmea_default_name(display_type, position);
+    return p;
+  }
+  const auto& item = items[static_cast<size_t>(position)];
+  p.canvas_index = item.index;
+  p.primary_bus = item.bus;
+  p.display_name = explicit_or_default_name(item, display_type);
+  p.mappable = !canvas_type.empty();
+  return p;
+}
+
+FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSystem& sys,
+                                                  const std::string& type,
+                                                  int position) {
+  const std::string label = fmea_type_label(type);
+  FMEAComponentPresentation p;
+  p.display_type = label;
+  p.display_name = fmea_default_name(label, position);
+
+  if (type == "generator")
+    return fmea_one_bus_component(sys.ac.generators, position, label, "gen");
+  if (type == "static_generator")
+    return fmea_one_bus_component(sys.ac.static_generators, position, label, "sgen");
+  if (type == "renewable_gen")
+    return fmea_one_bus_component(sys.ac.renewable_gens, position, label, "renGen");
+  if (type == "storage")
+    return fmea_one_bus_component(sys.ac.storage, position, label, "storage");
+  if (type == "ac_pv_system")
+    return fmea_one_bus_component(sys.ac.pv_systems, position, label, "pv");
+  if (type == "dc_storage")
+    return fmea_one_bus_component(sys.dc.storage, position, label, "dcStorage");
+  if (type == "dc_pv_array")
+    return fmea_one_bus_component(sys.dc.pv_arrays, position, label, "dcPv");
+  if (type == "dc_static_generator_ac")
+    return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen");
+  if (type == "dc_static_generator")
+    return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "");
+
+  auto missing = [&] {
+    p.canvas_index = -1;
+    p.mappable = false;
+    return p;
+  };
+
+  if (type == "ac_branch") {
+    if (position < 0 || position >= static_cast<int>(sys.ac.branches.size())) return missing();
+    const auto& br = sys.ac.branches[static_cast<size_t>(position)];
+    p.canvas_type = "branch";
+    p.canvas_index = br.index;
+    p.primary_bus = br.from_bus;
+    p.secondary_bus = br.to_bus;
+    p.display_name = br.name.empty() ? fmea_branch_name(label, br.index, br.from_bus, br.to_bus) : br.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "dc_branch") {
+    if (position < 0 || position >= static_cast<int>(sys.dc.branches.size())) return missing();
+    const auto& br = sys.dc.branches[static_cast<size_t>(position)];
+    p.canvas_type = "dcBranch";
+    p.canvas_index = br.index;
+    p.primary_bus = br.from_bus;
+    p.secondary_bus = br.to_bus;
+    p.display_name = br.name.empty() ? fmea_branch_name(label, br.index, br.from_bus, br.to_bus) : br.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "transformer_2w") {
+    if (position < 0 || position >= static_cast<int>(sys.ac.transformers_2w.size())) return missing();
+    const auto& tr = sys.ac.transformers_2w[static_cast<size_t>(position)];
+    p.canvas_type = "trafo";
+    p.canvas_index = tr.index;
+    p.primary_bus = tr.hv_bus;
+    p.secondary_bus = tr.lv_bus;
+    p.display_name = tr.name.empty() ? fmea_branch_name(label, tr.index, tr.hv_bus, tr.lv_bus) : tr.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "transformer_3w") {
+    if (position < 0 || position >= static_cast<int>(sys.ac.transformers_3w.size())) return missing();
+    const auto& tr = sys.ac.transformers_3w[static_cast<size_t>(position)];
+    p.canvas_type = "trafo3w";
+    p.canvas_index = tr.index;
+    p.primary_bus = tr.hv_bus;
+    p.secondary_bus = tr.lv_bus;
+    p.display_name = tr.name.empty()
+        ? fmea_default_name(label, tr.index) + " (" + std::to_string(tr.hv_bus) + " / " +
+              std::to_string(tr.mv_bus) + " / " + std::to_string(tr.lv_bus) + ")"
+        : tr.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "vsc_converter") {
+    if (position < 0 || position >= static_cast<int>(sys.vsc_converters.size())) return missing();
+    const auto& v = sys.vsc_converters[static_cast<size_t>(position)];
+    p.canvas_type = "vsc";
+    p.canvas_index = v.index;
+    p.primary_bus = v.bus_ac;
+    p.secondary_bus = v.bus_dc;
+    p.display_name = v.name.empty()
+        ? label + " #" + std::to_string(v.index) + " (AC " + std::to_string(v.bus_ac) +
+              " -> DC " + std::to_string(v.bus_dc) + ")"
+        : v.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "dcdc_converter") {
+    if (position < 0 || position >= static_cast<int>(sys.dc.dcdc_converters.size())) return missing();
+    const auto& dc = sys.dc.dcdc_converters[static_cast<size_t>(position)];
+    p.canvas_type = "dcdcConverter";
+    p.canvas_index = dc.index;
+    p.primary_bus = dc.bus_in;
+    p.secondary_bus = dc.bus_out;
+    p.display_name = dc.name.empty()
+        ? label + " #" + std::to_string(dc.index) + " (DC " + std::to_string(dc.bus_in) +
+              " -> DC " + std::to_string(dc.bus_out) + ")"
+        : dc.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "ac_switch") {
+    if (position < 0 || position >= static_cast<int>(sys.ac.switches.size())) return missing();
+    const auto& sw = sys.ac.switches[static_cast<size_t>(position)];
+    p.canvas_type = "sw";
+    p.canvas_index = sw.index;
+    p.primary_bus = sw.bus_from;
+    p.secondary_bus = sw.bus_to;
+    p.display_name = sw.name.empty() ? fmea_branch_name(label, sw.index, sw.bus_from, sw.bus_to) : sw.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "ac_circuit_breaker") {
+    if (position < 0 || position >= static_cast<int>(sys.ac.circuit_breakers.size())) return missing();
+    const auto& cb = sys.ac.circuit_breakers[static_cast<size_t>(position)];
+    p.canvas_type = "cb";
+    p.canvas_index = cb.index;
+    p.primary_bus = cb.bus_from;
+    p.secondary_bus = cb.bus_to;
+    p.display_name = cb.name.empty() ? fmea_branch_name(label, cb.index, cb.bus_from, cb.bus_to) : cb.name;
+    p.mappable = true;
+    return p;
+  }
+  if (type == "dc_circuit_breaker") {
+    if (position < 0 || position >= static_cast<int>(sys.dc.dc_circuit_breakers.size())) return missing();
+    const auto& cb = sys.dc.dc_circuit_breakers[static_cast<size_t>(position)];
+    p.canvas_type = "dcCb";
+    p.canvas_index = cb.index;
+    p.primary_bus = cb.bus_from;
+    p.secondary_bus = cb.bus_to;
+    p.display_name = cb.name.empty() ? fmea_branch_name(label, cb.index, cb.bus_from, cb.bus_to) : cb.name;
+    p.mappable = true;
+    return p;
+  }
+
+  return p;
+}
+
 // Build default 24-h (or N-step) scaling profiles
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
   hacdcpf::TimeSeriesData ts;
@@ -3491,20 +3705,21 @@ document.getElementById('runFmeaBtn').onclick=async()=>{
     if(body.contingencies&&body.contingencies.length>0){
       const top=body.contingencies.slice(0,15);
       Plotly.newPlot('fmeaContChart',[{
-        x:top.map(c=>c.component_name),
+        x:top.map(c=>c.display_name||c.component_name),
         y:top.map(c=>c.eens_contribution),
         type:'bar',
         marker:{color:top.map(c=>c.shed_mw>0?'#c0392b':'#95a5a6')},
-        text:top.map(c=>c.component_type),
+        text:top.map(c=>c.display_type||c.component_type),
         hovertemplate:'%{x}<br>Type: %{text}<br>EENS: %{y:.2f} MWh/yr<extra></extra>'
       }],{title:'Top Contingencies by EENS Contribution',xaxis:{tickangle:-45},
           yaxis:{title:'EENS (MWh/yr)'},margin:{l:60,r:15,t:45,b:120}},{responsive:true});
     }
     
     // Plot EENS by component type (pie chart)
-    if(body.eens_by_type){
-      const types=Object.keys(body.eens_by_type).filter(k=>body.eens_by_type[k]>0);
-      const vals=types.map(k=>body.eens_by_type[k]);
+    const eensByType=body.eens_by_display_type||body.eens_by_type;
+    if(eensByType){
+      const types=Object.keys(eensByType).filter(k=>eensByType[k]>0);
+      const vals=types.map(k=>eensByType[k]);
       Plotly.newPlot('fmeaTypeChart',[{
         labels:types,values:vals,type:'pie',
         marker:{colors:['#c0392b','#e67e22','#2ecc71','#3498db','#9b59b6','#1abc9c','#34495e','#e74c3c','#f39c12']},
@@ -11564,9 +11779,18 @@ int main(int argc, char** argv) {
         
         json cont_arr = json::array();
         for (const auto& c : sorted) {
+          const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
           cont_arr.push_back({
-            {"component_name", c.component_name},
+            {"component_name", meta.display_name},
             {"component_type", c.component_type},
+            {"display_name", meta.display_name},
+            {"display_type", meta.display_type},
+            {"component_index", c.component_index},
+            {"canvas_type", meta.canvas_type},
+            {"canvas_index", meta.canvas_index},
+            {"primary_bus", meta.primary_bus},
+            {"secondary_bus", meta.secondary_bus},
+            {"mappable", meta.mappable},
             {"shed_mw", c.shed_rep_mw},
             {"eens_contribution", c.eens_contribution},
             {"failure_rate", c.failure_rate},
@@ -11577,6 +11801,7 @@ int main(int argc, char** argv) {
         
         // Aggregate EENS by component type
         json eens_by_type;
+        json eens_by_display_type;
         for (const auto& c : result.contingencies) {
           std::string tp = c.component_type;
           if (eens_by_type.contains(tp)) {
@@ -11584,8 +11809,16 @@ int main(int argc, char** argv) {
           } else {
             eens_by_type[tp] = c.eens_contribution;
           }
+          const std::string display_tp = fmea_type_label(tp);
+          if (eens_by_display_type.contains(display_tp)) {
+            eens_by_display_type[display_tp] =
+                eens_by_display_type[display_tp].get<double>() + c.eens_contribution;
+          } else {
+            eens_by_display_type[display_tp] = c.eens_contribution;
+          }
         }
         out["eens_by_type"] = eens_by_type;
+        out["eens_by_display_type"] = eens_by_display_type;
         
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);

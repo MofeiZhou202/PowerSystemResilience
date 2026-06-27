@@ -2483,7 +2483,9 @@ const Canvas = (() => {
         case 'renewable_gen': {
           const busIdx = findBusIndex(comp.id);
           sys.ac.renewable_gens.push({
-            index: renIdx++, bus: busIdx, type: p.type || 'Wind',
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : renIdx,
+            name: p.name || `${p.type || 'Renewable'} ${Number.isFinite(Number(p.index)) ? Number(p.index) : renIdx}`,
+            bus: busIdx, type: p.type || 'Wind',
             p_mw: numOr(p.p_mw, 20),
             q_mvar: numOr(p.q_mvar, 0),
             p_rated_mw: numOr(p.p_rated_mw, 30),
@@ -2496,11 +2498,17 @@ const Canvas = (() => {
             emission_offset_tco2_mwh: numOr(p.emission_offset_tco2_mwh, 0),
             in_service: p.in_service !== false,
           });
+          renIdx++;
           break;
         }
         case 'static_generator': {
           const busIdx = findBusIndex(comp.id);
-          sys.ac.static_generators.push({
+          const isDcStaticGen = state.connections.some(conn => {
+            const otherId = conn.from.compId === comp.id ? conn.to.compId
+              : (conn.to.compId === comp.id ? conn.from.compId : null);
+            return otherId != null && compBusDomainMap[otherId] === 'DC';
+          });
+          const row = {
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : sgenIdx,
             name: p.name || `SGen ${sgenIdx}`,
             bus: busIdx,
@@ -2518,7 +2526,9 @@ const Canvas = (() => {
             v_ref_pu: numOr(p.v_ref_pu, 0),
             co2_emission_rate: numOr(p.emission_factor_tco2_mwh ?? p.co2_emission_rate, 0),
             in_service: p.in_service !== false,
-          });
+          };
+          if (isDcStaticGen) sys.dc.static_generators.push(row);
+          else sys.ac.static_generators.push(row);
           sgenIdx++;
           break;
         }
@@ -2597,7 +2607,9 @@ const Canvas = (() => {
         case 'dc_pv_array': {
           const busIdx = findBusIndex(comp.id);
           sys.dc.pv_arrays.push({
-            index: dcPvIdx++, bus: busIdx,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : dcPvIdx,
+            name: p.name || `DC PV ${Number.isFinite(Number(p.index)) ? Number(p.index) : dcPvIdx}`,
+            bus: busIdx,
             p_set_mw: numOr(p.p_set_mw, 5),
             irradiance: numOr(p.irradiance, 1000),
             temperature: numOr(p.temperature, 25),
@@ -2612,6 +2624,7 @@ const Canvas = (() => {
             profile_id: numOr(p.profile_id, -1),
             in_service: p.in_service !== false,
           });
+          dcPvIdx++;
           break;
         }
         // switch, circuit_breaker, motor — add similarly
@@ -3347,7 +3360,8 @@ const Canvas = (() => {
     jsonSys.ac?.renewable_gens?.forEach(rg => {
       addDeviceAtBus('renewable_gen', rg.bus, {
         ...COMP.defaults.renewable_gen,
-        name: rg.type || 'Wind',
+        index: rg.index,
+        name: rg.name || rg.type || 'Wind',
         type: rg.type,
         p_mw: rg.p_mw, q_mvar: rg.q_mvar,
         p_rated_mw: rg.p_rated_mw,
@@ -3547,7 +3561,8 @@ const Canvas = (() => {
     jsonSys.dc?.static_generators?.forEach(sg => {
       addDeviceAtBus('static_generator', sg.bus, {
         ...COMP.defaults.static_generator,
-        name: 'DC SGen',
+        index: sg.index,
+        name: sg.name || `DC SGen ${sg.index !== undefined ? sg.index : ''}`,
         p_mw: sg.p_mw, q_mvar: sg.q_mvar,
         sgen_type: sg.sgen_type || 'PV',
         controllable: sg.controllable || false,
@@ -3585,7 +3600,8 @@ const Canvas = (() => {
     jsonSys.dc?.pv_arrays?.forEach(pv => {
       addDeviceAtBus('dc_pv_array', pv.bus, {
         ...COMP.defaults.dc_pv_array,
-        name: 'DC PV',
+        index: pv.index,
+        name: pv.name || `DC PV ${pv.index !== undefined ? pv.index : ''}`,
         p_set_mw: pv.p_set_mw,
         irradiance: pv.irradiance,
         temperature: pv.temperature,
@@ -5583,7 +5599,7 @@ const Canvas = (() => {
    */
   function getCompBusMap() {
     const maps = { ac: {}, dc: {}, branch: {}, gen: {}, load: {}, trafo: {},
-      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, sw: {}, cb: {},
+      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, dcSgen: {}, sw: {}, cb: {}, dcCb: {},
       motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
       flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
       mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {}, dcStorage: {} };
@@ -5602,7 +5618,7 @@ const Canvas = (() => {
 
     // Must match buildSystemJson iteration order for index consistency
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
-      ren: 0, sgen: 0, sw: 0, cb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
+      ren: 0, sgen: 0, dcSgen: 0, sw: 0, cb: 0, dcCb: 0, motor: 0, dcLoad: 0, dcBr: 0, vsc: 0,
       shunt: 0, trafo3w: 0, flex: 0, asym: 0, charger: 0, cs: 0, ms: 0,
       dcdc: 0, er: 0, vpp: 0, mg: 0, dcpv: 0, dcStor: 0 };
     state.components.forEach(comp => {
@@ -5620,9 +5636,27 @@ const Canvas = (() => {
         case 'pv_system': putIndexed(maps.pv, comp, idx.pv++); break;
         case 'dc_pv_array': putIndexed(maps.dcPv, comp, idx.dcpv++); break;
         case 'renewable_gen': putIndexed(maps.renGen, comp, idx.ren++); break;
-        case 'static_generator': putIndexed(maps.sgen, comp, idx.sgen++); break;
+        case 'static_generator': {
+          const isDcSgen = state.connections.some(conn => {
+            const otherId = conn.from.compId === comp.id ? conn.to.compId
+              : (conn.to.compId === comp.id ? conn.from.compId : null);
+            return otherId != null && getComponent(otherId)?.type === 'dc_bus';
+          });
+          if (isDcSgen) putIndexed(maps.dcSgen, comp, idx.dcSgen++);
+          else putIndexed(maps.sgen, comp, idx.sgen++);
+          break;
+        }
         case 'switch_comp': putIndexed(maps.sw, comp, idx.sw++); break;
-        case 'circuit_breaker': putIndexed(maps.cb, comp, idx.cb++); break;
+        case 'circuit_breaker': {
+          const isDcCb = state.connections.some(conn => {
+            const otherId = conn.from.compId === comp.id ? conn.to.compId
+              : (conn.to.compId === comp.id ? conn.from.compId : null);
+            return otherId != null && getComponent(otherId)?.type === 'dc_bus';
+          });
+          if (isDcCb) putIndexed(maps.dcCb, comp, idx.dcCb++);
+          else putIndexed(maps.cb, comp, idx.cb++);
+          break;
+        }
         case 'motor': putIndexed(maps.motor, comp, idx.motor++); break;
         case 'dc_load': putIndexed(maps.dcLoad, comp, idx.dcLoad++); break;
         case 'dc_storage': putIndexed(maps.dcStorage, comp, idx.dcStor++); break;
