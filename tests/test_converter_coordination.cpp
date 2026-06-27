@@ -161,6 +161,119 @@ TEST_CASE("VDC-controlled VSC supplies the DC island reference but releases P se
   CHECK_FALSE(has_rule(pf, "DCISLAND-01"));
 }
 
+TEST_CASE("Distributed slack honors converter coordination blocking diagnostics",
+          "[converter][coordination][distributed_slack]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  hacdcpf::ACBus ac;
+  ac.index = 1;
+  ac.bus_type = hacdcpf::BusType::SLACK;
+  ac.vm_pu = 1.0;
+  ac.in_service = true;
+  sys.ac.buses = {ac};
+
+  hacdcpf::Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.is_slack = true;
+  gen.in_service = true;
+  gen.pmax_mw = 100.0;
+  gen.pmin_mw = -100.0;
+  sys.ac.generators = {gen};
+
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 2, 1)};
+
+  hacdcpf::DCLoad load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 0.25;
+  load.in_service = true;
+  sys.dc.loads = {load};
+
+  hacdcpf::PVArrayDC pv;
+  pv.index = 1;
+  pv.bus = 2;
+  pv.p_set_mw = 0.30;
+  pv.in_service = true;
+  sys.dc.pv_arrays = {pv};
+
+  hacdcpf::VSCConverter conv;
+  conv.index = 1;
+  conv.bus_ac = 1;
+  conv.bus_dc = 1;
+  conv.control_mode = hacdcpf::ConverterMode::AC_PV;
+  conv.v_ac_set_pu = 1.0;
+  conv.p_set_mw = 0.05;
+  conv.in_service = true;
+  sys.vsc_converters = {conv};
+
+  hacdcpf::DistributedSlack slack;
+  slack.participating_buses = {1};
+  slack.participation_factors = {1.0};
+  slack.reference_bus = 1;
+
+  hacdcpf::PowerFlowOptions opt;
+  opt.enable_converter_coordination_check = true;
+
+  const hacdcpf::DistributedSlackResult result =
+      hacdcpf::solve_power_flow_distributed_slack_full(sys, slack, opt);
+
+  CHECK_FALSE(result.converged);
+  CHECK(result.vm.empty());
+  CHECK(result.vdc.empty());
+  CHECK(result.diagnostics.converter_coordination.enabled);
+  CHECK_FALSE(result.diagnostics.converter_coordination.feasible);
+  CHECK(result.diagnostics.converter_coordination.has_blocking_issue());
+  CHECK(report_has_rule(result.diagnostics.converter_coordination, "DCISLAND-01"));
+}
+
+TEST_CASE("Dedicated DC storage participates in coordination island summaries",
+          "[converter][coordination][dc_storage]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  sys.dc.branches = {dc_branch(1, 1, 2)};
+
+  hacdcpf::DCLoad load;
+  load.index = 1;
+  load.bus = 2;
+  load.p_mw = 0.25;
+  load.scaling = 1.0;
+  load.in_service = true;
+  sys.dc.loads = {load};
+
+  hacdcpf::PVArrayDC pv;
+  pv.index = 1;
+  pv.bus = 2;
+  pv.p_set_mw = 0.30;
+  pv.in_service = true;
+  sys.dc.pv_arrays = {pv};
+
+  hacdcpf::DCStorage st;
+  st.index = 1;
+  st.bus = 2;
+  st.p_mw = 0.30;
+  st.p_rated_mw = 10.0;
+  st.pmax_mw = 10.0;
+  st.pmin_mw = -10.0;
+  st.soc_init = 0.5;
+  st.soc_min = 0.1;
+  st.soc_max = 0.9;
+  st.controllable = true;
+  st.in_service = true;
+  sys.dc.dc_storage = {st};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  REQUIRE(report.dc_islands.size() == 1);
+  CHECK(report.dc_islands[0].fixed_power_devices == 3);
+  CHECK(std::abs(report.dc_islands[0].fixed_power_mw - 0.35) < 1e-12);
+  CHECK(std::abs(report.dc_islands[0].flexible_up_mw - 9.70) < 1e-12);
+  CHECK(std::abs(report.dc_islands[0].flexible_down_mw - 10.30) < 1e-12);
+}
+
 TEST_CASE("DC/DC converters do not merge DC voltage islands",
           "[converter][coordination][dcdc]") {
   hacdcpf::HybridPowerSystem sys;
@@ -217,6 +330,50 @@ TEST_CASE("DC_V bus type alone is not accepted as a physical voltage source",
   CHECK_FALSE(report.feasible);
 }
 
+TEST_CASE("DC_V bus backed by controllable DC storage is accepted as a physical voltage source",
+          "[converter][coordination][dc-bus]") {
+  hacdcpf::HybridPowerSystem sys;
+  hacdcpf::DCBus d;
+  d.index = 2;
+  d.bus_type = hacdcpf::DCBusType::DC_V;
+  d.vm_pu = 1.0;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  hacdcpf::DCLoad ld;
+  ld.index = 1;
+  ld.bus = 2;
+  ld.p_mw = 0.25;
+  ld.in_service = true;
+  sys.dc.loads = {ld};
+
+  hacdcpf::DCStorage st;
+  st.index = 1;
+  st.bus = 2;
+  st.p_mw = 0.3;
+  st.p_rated_mw = 0.3;
+  st.pmin_mw = -0.3;
+  st.pmax_mw = 0.3;
+  st.soc_init = 0.5;
+  st.soc_min = 0.1;
+  st.soc_max = 0.9;
+  st.controllable = true;
+  st.in_service = true;
+  sys.dc.dc_storage = {st};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  REQUIRE(report.dc_islands.size() == 1);
+  CHECK(report.dc_islands.front().declared_v_buses == std::vector<int>{2});
+  CHECK(report.dc_islands.front().hard_vdc_sources == 1);
+  REQUIRE(report.dc_islands.front().voltage_sources.size() == 1);
+  CHECK(report.dc_islands.front().voltage_sources.front().component_type ==
+        "dc_bus_storage_source");
+  CHECK_FALSE(report_has_rule(report, "DCBUS-01"));
+  CHECK_FALSE(report_has_rule(report, "DCISLAND-01"));
+  CHECK(report.feasible);
+}
+
 TEST_CASE("Conflicting VDC setpoints in one DC island are fatal",
           "[converter][coordination][vsc]") {
   hacdcpf::HybridPowerSystem sys;
@@ -232,17 +389,43 @@ TEST_CASE("Conflicting VDC setpoints in one DC island are fatal",
   CHECK_FALSE(report.feasible);
 }
 
-TEST_CASE("DC/DC Voltage mode is blocked until the PF model enforces v_ref",
+TEST_CASE("DC/DC Voltage mode forms its output voltage and is feasible with an input reference",
           "[converter][coordination][dcdc]") {
   hacdcpf::HybridPowerSystem sys;
   sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Input island (bus 1) has a VDC VSC reference; the Voltage-mode DC/DC forms
+  // the output island (bus 2) voltage and draws its regulated power from bus 1.
+  sys.vsc_converters = {vdc_vsc(5, 1, 1.0)};
   sys.dc.dcdc_converters = {dcdc_converter(3, 1, 2, hacdcpf::DCDCControlMode::Voltage)};
 
   const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
 
-  CHECK(report_has_rule(report, "DCDC-CTRL-01"));
+  // Voltage mode is now a true voltage-forming control: no longer blocked.
+  CHECK_FALSE(report_has_rule(report, "DCDC-CTRL-01"));
+  CHECK_FALSE(report_has_rule(report, "DCDC-CTRL-03"));  // input island has a reference
+  CHECK(report.feasible);
+  // The output island gained a hard Vdc reference contributed by the former.
+  bool out_has_dcdc_source = false;
+  for (const auto& isl : report.dc_islands) {
+    for (const auto& vs : isl.voltage_sources) {
+      if (vs.component_type == "dcdc_converter") out_has_dcdc_source = true;
+    }
+  }
+  CHECK(out_has_dcdc_source);
+}
+
+TEST_CASE("DC/DC Voltage mode needs an input-side voltage reference (DCDC-CTRL-03)",
+          "[converter][coordination][dcdc]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.dc.buses = {dc_bus(1), dc_bus(2)};
+  // Voltage-mode DC/DC forms the output (bus 2) voltage, but the input island
+  // (bus 1) has no source to supply the regulated output.
+  sys.dc.dcdc_converters = {dcdc_converter(3, 1, 2, hacdcpf::DCDCControlMode::Voltage)};
+
+  const auto report = hacdcpf::powerflow::evaluate_converter_coordination(sys, true);
+
+  CHECK(report_has_rule(report, "DCDC-CTRL-03"));
   CHECK_FALSE(report.feasible);
-  CHECK(report.blocking_count() > 0);
 }
 
 TEST_CASE("A DC grid-forming converter cannot hard-constrain AC active power (ACDC-GFM-01)",
@@ -615,6 +798,85 @@ TEST_CASE("Participation factors reshape multi-source droop sharing",
   REQUIRE(k0 + k1 > 1e-9);
   CHECK(std::abs(k0 / (k0 + k1) - 0.7) < 1e-6);
   CHECK(std::abs(k1 / (k0 + k1) - 0.3) < 1e-6);
+}
+
+TEST_CASE("VSC transfer results report original AC bus after projection renumbering",
+          "[converter][projection][powerflow]") {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+
+  ACBus b1, b2, b3, b4;
+  b1.index = 1; b1.bus_type = BusType::SLACK; b1.vm_pu = 1.0; b1.in_service = true;
+  b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true;
+  b3.index = 3; b3.bus_type = BusType::PQ; b3.in_service = true;  // removed as dead island
+  b4.index = 4; b4.bus_type = BusType::PQ; b4.in_service = true;
+  sys.ac.buses = {b1, b2, b3, b4};
+
+  Generator g;
+  g.index = 1;
+  g.bus = 1;
+  g.is_slack = true;
+  g.vg_pu = 1.0;
+  g.pmax_mw = 500.0;
+  g.pmin_mw = -500.0;
+  g.qmax_mvar = 500.0;
+  g.qmin_mvar = -500.0;
+  g.in_service = true;
+  sys.ac.generators = {g};
+
+  ACBranch br12, br33, br14;
+  br12.index = 1; br12.from_bus = 1; br12.to_bus = 2; br12.r_pu = 0.01; br12.x_pu = 0.05;
+  br12.in_service = true;
+  br33.index = 2; br33.from_bus = 3; br33.to_bus = 3; br33.r_pu = 0.01; br33.x_pu = 0.05;
+  br33.in_service = true;
+  br14.index = 3; br14.from_bus = 1; br14.to_bus = 4; br14.r_pu = 0.01; br14.x_pu = 0.05;
+  br14.in_service = true;
+  sys.ac.branches = {br12, br33, br14};
+
+  DCBus d;
+  d.index = 1;
+  d.bus_type = DCBusType::DC_P;
+  d.vm_pu = 1.0;
+  d.vmin_pu = 0.8;
+  d.vmax_pu = 1.2;
+  d.in_service = true;
+  sys.dc.buses = {d};
+
+  DCLoad dl;
+  dl.index = 1;
+  dl.bus = 1;
+  dl.p_mw = 1.0;
+  dl.in_service = true;
+  sys.dc.loads = {dl};
+
+  VSCConverter v;
+  v.index = 0;
+  v.bus_ac = 4;
+  v.bus_dc = 1;
+  v.control_mode = ConverterMode::VDC_Q;
+  v.k_vdc = 0.5;
+  v.v_dc_set_pu = 1.0;
+  v.pmax_mw = 100.0;
+  v.pmin_mw = -100.0;
+  v.p_rated_mw = 100.0;
+  v.in_service = true;
+  sys.vsc_converters = {v};
+
+  PowerFlowOptions opt;
+  const PowerFlowResult r = solve_power_flow(sys, opt);
+  REQUIRE(r.converged);
+  REQUIRE(r.vm.size() == 4);
+  REQUIRE(r.branch_flows.size() == 3);
+  CHECK(std::abs(r.branch_flows[1].pf_mw) < 1e-12);
+  CHECK(std::abs(r.branch_flows[1].pt_mw) < 1e-12);
+  CHECK(std::abs(r.branch_flows[2].pf_mw) > 1e-6);
+
+  REQUIRE(r.vsc_transfers.size() == 1);
+  CHECK(r.vsc_transfers[0].bus_ac == 4);
+  REQUIRE(r.diagnostics.effective_converters.size() == 1);
+  CHECK(r.diagnostics.effective_converters[0].bus_ac == 4);
 }
 
 namespace {

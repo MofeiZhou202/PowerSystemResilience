@@ -5,6 +5,13 @@
 
 const API_BASE = window.location.origin;  // Same origin as the C++ server
 
+// Bus-terminal fields that are resolved from the canvas wiring (connected ports)
+// rather than typed by hand. The property inspector renders these read-only so
+// users wire ports (e.g. a DC/DC's 'in'/'out') instead of guessing internal IDs.
+const WIRING_DERIVED_BUS_FIELDS = new Set([
+  'bus_in', 'bus_out', 'bus_ac', 'bus_dc', 'from_bus', 'to_bus', 'hv_bus', 'lv_bus',
+]);
+
 const App = (() => {
   // ========== Canvas Dirty Tracking ==========
   // When a built-in case or JSON is loaded, the backend already has the correct
@@ -66,6 +73,7 @@ const App = (() => {
     _lastTspfData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
+    if (typeof Canvas !== 'undefined' && Canvas.clearResults) Canvas.clearResults();
     if (reason) log(reason, 'info');
   }
 
@@ -102,7 +110,7 @@ const App = (() => {
 
   function parsePositiveIntText(raw) {
     return String(raw || '').trim()
-      ? String(raw || '').split(/[,，\s]+/).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v > 0)
+      ? String(raw || '').split(/[,，\s]+/).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v >= 0)
       : [];
   }
 
@@ -114,15 +122,14 @@ const App = (() => {
   function setFaultInputIds(kind, ids) {
     const id = kind === 'DC' ? 'resDcFaultLocations' : 'resAcFaultLocations';
     const el = document.getElementById(id);
-    if (el) el.value = Array.from(new Set((ids || []).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v > 0))).join(',');
+    if (el) el.value = Array.from(new Set((ids || []).map(v => parseInt(v, 10)).filter(v => Number.isFinite(v) && v >= 0))).join(',');
   }
 
   function mappedCompId(mapObj, item, rowIndex) {
     if (!mapObj) return undefined;
     const explicit = Number(item?.index);
-    if (Number.isFinite(explicit) && mapObj[explicit] != null) return mapObj[explicit];
+    if (Number.isFinite(explicit)) return mapObj[explicit];
     if (mapObj[rowIndex] != null) return mapObj[rowIndex];
-    if (mapObj[rowIndex + 1] != null) return mapObj[rowIndex + 1];
     return undefined;
   }
 
@@ -490,8 +497,8 @@ const App = (() => {
     const sys = Canvas.buildSystemJson ? Canvas.buildSystemJson() : { ac: {}, dc: {} };
     const m = Canvas.getCompBusMap ? Canvas.getCompBusMap() : {};
     const normalize = (kind, br, i) => {
-      const idx = Number(br.index ?? i + 1);
-      const compId = kind === 'DC' ? (m.dcBranch?.[idx] ?? m.dcBranch?.[i]) : (m.branch?.[idx] ?? m.branch?.[i]);
+      const idx = Number(br.index);
+      const compId = kind === 'DC' ? m.dcBranch?.[idx] : m.branch?.[idx];
       const name = br.name || `${kind} branch ${idx}`;
       const label = `${kind} #${idx} | ${name} | ${br.from_bus ?? '-'} → ${br.to_bus ?? '-'}`;
       return { kind, index: idx, name, from: br.from_bus, to: br.to_bus, compId, label };
@@ -630,6 +637,27 @@ const App = (() => {
       log(`Network error: ${e.message}`, 'error');
       return null;
     }
+  }
+
+  function firstNonEmptyArray(...values) {
+    for (const value of values) {
+      if (Array.isArray(value) && value.length > 0) return value;
+    }
+    return [];
+  }
+
+  function normalizePowerFlowResult(data) {
+    if (!data || typeof data !== 'object') return data;
+    data.geo_dc_branches = firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows);
+    data.dc_branch_flows = firstNonEmptyArray(data.dc_branch_flows, data.geo_dc_branches);
+    data.vsc_transfers = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
+    data.geo_vsc = firstNonEmptyArray(data.geo_vsc, data.vsc_transfers);
+    data.dcdc_transfers = firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc);
+    data.geo_dcdc = firstNonEmptyArray(data.geo_dcdc, data.dcdc_transfers);
+    data.ac_switch_flows = Array.isArray(data.ac_switch_flows) ? data.ac_switch_flows : [];
+    data.ac_circuit_breaker_flows = Array.isArray(data.ac_circuit_breaker_flows) ? data.ac_circuit_breaker_flows : [];
+    data.dc_circuit_breaker_flows = Array.isArray(data.dc_circuit_breaker_flows) ? data.dc_circuit_breaker_flows : [];
+    return data;
   }
 
   // ========== Status ==========
@@ -1438,6 +1466,7 @@ const App = (() => {
       (sys.dc?.loads || []).forEach(l => add(true, l.bus, '负荷'));
 
       (sys.ac?.storage || []).forEach(s => add(false, s.bus, '储能'));
+      (sys.dc?.dc_storage || []).forEach(s => add(true, s.bus, '储能'));
       (sys.dc?.storage || []).forEach(s => add(true, s.bus, '储能'));
       (sys.mobile_storage || []).forEach(s => add(false, s.bus, '移动储能'));
     } catch (_) {
@@ -1734,33 +1763,36 @@ const App = (() => {
       return;
     }
 
+    const coordCheckEl = document.getElementById('pfCoordCheck');
     const data = await apiPost('/api/session/pf', {
       method: method,
       options: {
         max_iter: 100,
         tol: 1e-8,
         verbose: false,
-        enable_converter_coordination_check: !!document.getElementById('pfCoordCheck')?.checked
+        enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
       }
     });
 
     if (data) {
-      const converged = data.converged;
-      const islandInfo = data.islands_detected
-        ? ` [检测到${data.islands_detected}个岛, ${data.solvable_islands}个可解]`
+      const pfData = normalizePowerFlowResult(data);
+      const converged = pfData.converged;
+      const islandInfo = pfData.islands_detected
+        ? ` [检测到${pfData.islands_detected}个岛, ${pfData.solvable_islands}个可解]`
         : '';
       if (converged) {
-        log(`潮流计算收敛 [${data.method_actual || method}]: 迭代${data.iterations}次, 残差=${Number(data.residual).toExponential(4)}${islandInfo}`, 'success');
+        log(`潮流计算收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次, 残差=${Number(pfData.residual).toExponential(4)}${islandInfo}`, 'success');
         setStatus('潮流收敛', '');
       } else {
-        log(`潮流计算未收敛 [${data.method_actual || method}]: 迭代${data.iterations}次${islandInfo}`, 'warn');
+        log(`潮流计算未收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次${islandInfo}`, 'warn');
         setStatus('未收敛', 'error');
       }
 
-      // Display results
-      _lastPfData = data;
-      Canvas.showPowerFlowResults(data);
-      showPowerFlowResultsTables(data);
+      // Display results.  Always replace the previous GUI cache, including after
+      // a failed run, so a later successful run is never masked by stale arrays.
+      _lastPfData = pfData;
+      Canvas.showPowerFlowResults(pfData);
+      showPowerFlowResultsTables(pfData);
       switchTab('results');
     } else {
       setStatus('计算失败', 'error');
@@ -1942,10 +1974,15 @@ const App = (() => {
     const vdc = data.vdc || [];
     if (dcSec && dcDiv && vdc.length) {
       dcSec.style.display = '';
+      const dcBusIdAt = (i) => {
+        const id = SYS?.dc?.buses?.[i]?.index;
+        return id !== undefined && id !== null ? Number(id) : null;
+      };
       let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
       vdc.forEach((v, i) => {
-        const attr = panAttr(busMap.dc ? busMap.dc[i + 1] : undefined);
-        html += `<tr${attr}><td>${i + 1}</td><td>${fmt(v, 6)}</td></tr>`;
+        const busId = dcBusIdAt(i);
+        const attr = panAttr(busId != null && busMap.dc ? busMap.dc[busId] : undefined);
+        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td>${fmt(v, 6)}</td></tr>`;
       });
       html += '</tbody></table>';
       dcDiv.innerHTML = html;
@@ -1961,12 +1998,17 @@ const App = (() => {
       const lmpP = data.lmp_p || [];
       const lmpQ = data.lmp_q || [];
       const hasLmp = lmpP.length > 0;
+      const acBusIdAt = (i) => {
+        const id = SYS?.ac?.buses?.[i]?.index;
+        return id !== undefined && id !== null ? Number(id) : null;
+      };
       let html = `<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
       vm.forEach((v, i) => {
+        const busId = acBusIdAt(i);
         const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-        const attr = panAttr(busMap.ac ? busMap.ac[i + 1] : undefined);
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
+        const attr = panAttr(busId != null && busMap.ac ? busMap.ac[busId] : undefined);
+        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -2751,7 +2793,7 @@ const App = (() => {
         const tg = br.thermal_grade || 'green';
         const cls = tg === 'red' ? 'grade-red' : (tg === 'yellow' ? 'grade-yellow' :
                     (tg === 'no_rating' ? '' : 'grade-green'));
-        const compId = (br.branch_pos >= 0) ? busMap.branch?.[br.branch_pos] : undefined;
+        const compId = Number.isFinite(Number(br.index)) ? busMap.branch?.[Number(br.index)] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const typeLabel = br.equip_type === 'transformer' ? '变压器' : '线路';
         const seStr = br.has_rating ? br.se_mva.toFixed(1) : '<span style="color:#999">未设</span>';
@@ -3215,6 +3257,7 @@ const App = (() => {
   }
 
   function renderAllPowerFlowComponentStatus(data, busMap) {
+    data = normalizePowerFlowResult(data);
     const section = document.getElementById('pfAllComponentsSection');
     const div = document.getElementById('pfAllComponentsResults');
     if (!section || !div) return;
@@ -3289,7 +3332,7 @@ const App = (() => {
             comp.type === 'motor' || comp.type === 'charger' || comp.type === 'charging_station' ||
             comp.type === 'vpp' || comp.type === 'microgrid') return 'AC';
         if (comp.type === 'dc_bus' || comp.type === 'dc_branch' || comp.type === 'dc_load' ||
-            comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
+            comp.type === 'dc_storage' || comp.type === 'dc_pv_array' || comp.type === 'dcdc_converter') return 'DC';
         if (comp.type === 'vsc_converter' || comp.type === 'energy_router') return 'ACDC';
         const buses = resultConnectedBuses(comp.id);
         const hasAc = buses.some(b => b.domain === 'ac');
@@ -3465,7 +3508,7 @@ const App = (() => {
       addBal('ac', br.from, br.pf_mw, br.qf_mvar);
       addBal('ac', br.to, br.pt_mw, br.qt_mvar);
     });
-    (data.geo_dc_branches || data.dc_branch_flows || []).forEach(br => {
+    firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows).forEach(br => {
       addBal('dc', br.from ?? br.from_bus, br.pf_mw, 0);
       addBal('dc', br.to ?? br.to_bus, br.pt_mw, 0);
     });
@@ -3474,11 +3517,11 @@ const App = (() => {
       addBal('ac', tf.mv_bus, tf.p_mv_mw, tf.q_mv_mvar);
       addBal('ac', tf.lv_bus, tf.p_lv_mw, tf.q_lv_mvar);
     });
-    (data.vsc_transfers || data.geo_vsc || []).forEach(v => {
+    firstNonEmptyArray(data.vsc_transfers, data.geo_vsc).forEach(v => {
       addBal('ac', v.bus_ac, -(v.p_ac_mw || 0), -(v.q_ac_mvar || 0));
       addBal('dc', v.bus_dc, -(v.p_dc_mw || 0), 0);
     });
-    (data.dcdc_transfers || data.geo_dcdc || []).forEach(d => {
+    firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc).forEach(d => {
       addBal('dc', d.bus_in, d.p_in_mw, 0);
       addBal('dc', d.bus_out, -(d.p_out_mw || 0), 0);
     });
@@ -3497,6 +3540,8 @@ const App = (() => {
           };
         case 'dc_load':
           return { p: -((toNum(p.p_mw) ?? 0) * scale), q: 0 };
+        case 'dc_storage':
+          return { p: toNum(p.p_mw) ?? 0, q: 0 };
         case 'storage':
         case 'mobile_storage':
           return { p: toNum(p.p_mw) ?? 0, q: toNum(p.q_mvar) ?? 0 };
@@ -3755,7 +3800,7 @@ const App = (() => {
           break;
         }
         case 'dc_branch': {
-          const br = rowByIndexOrPos(data.geo_dc_branches || data.dc_branch_flows, 'dcBranch', comp.id);
+          const br = rowByIndexOrPos(firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows), 'dcBranch', comp.id);
           solved = !!br;
           detail = [
             `${br?.from ?? br?.from_bus ?? p.from_bus ?? '-'} -> ${br?.to ?? br?.to_bus ?? p.to_bus ?? '-'}`,
@@ -3768,7 +3813,7 @@ const App = (() => {
           break;
         }
         case 'vsc_converter': {
-          const v = rowByIndexOrPos(data.vsc_transfers || data.geo_vsc, 'vsc', comp.id);
+          const v = rowByIndexOrPos(firstNonEmptyArray(data.vsc_transfers, data.geo_vsc), 'vsc', comp.id);
           solved = !!v;
           detail = [
             `模式=${p.control_mode || '-'}`,
@@ -3783,7 +3828,7 @@ const App = (() => {
           break;
         }
         case 'dcdc_converter': {
-          const d = rowByIndexOrPos(data.dcdc_transfers || data.geo_dcdc, 'dcdcConverter', comp.id);
+          const d = rowByIndexOrPos(firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc), 'dcdcConverter', comp.id);
           solved = !!d;
           detail = [
             `模式=${p.control_mode || '-'}`,
@@ -3811,8 +3856,28 @@ const App = (() => {
         }
         case 'switch_comp':
         case 'circuit_breaker': {
-          detail = [`状态=${p.closed !== false ? '合闸' : '分闸'}`, `From=${p.from_bus ?? p.bus_from ?? '-'}`, `To=${p.to_bus ?? p.bus_to ?? '-'}`];
+          const buses = resultConnectedBuses(comp.id);
+          const isDc = buses.some(b => b.domain === 'dc');
+          const rows = comp.type === 'switch_comp'
+            ? data.ac_switch_flows
+            : (isDc ? data.dc_circuit_breaker_flows : data.ac_circuit_breaker_flows);
+          const key = comp.type === 'switch_comp' ? 'sw' : 'cb';
+          const fl = rowByIndexOrPos(rows, key, comp.id);
+          solved = !!fl || data.converged;
+          detail = [
+            `状态=${p.closed !== false ? '合闸' : '分闸'}`,
+            `From=${fl?.from ?? fl?.from_bus ?? p.from_bus ?? p.bus_from ?? '-'}`,
+            `To=${fl?.to ?? fl?.to_bus ?? p.to_bus ?? p.bus_to ?? '-'}`,
+            `Pf=${fmtP(fl?.pf_mw, 3)}`,
+            `Pt=${fmtP(fl?.pt_mw, 3)}`,
+          ];
+          if (!isDc) {
+            detail.push(`Qf=${fmtQ(fl?.qf_mvar, 3)}`);
+            detail.push(`Qt=${fmtQ(fl?.qt_mvar, 3)}`);
+          }
+          if (fl?.loading_pct !== undefined) detail.push(`Loading=${pct(fl.loading_pct, 1)}`);
           if (comp.type === 'circuit_breaker') detail.push(`额定电流=${fmt(p.rated_current_ka ?? p.i_rated_ka, 3)} kA`);
+          if (!fl) note.push('本次潮流无该开关/断路器分项返回');
           break;
         }
         case 'shunt': {
@@ -3913,6 +3978,14 @@ const App = (() => {
       return Number.isFinite(x) ? x : d;
     };
     const isOn = (x) => !(x && (x.in_service === false || x.in_service === 'false'));
+    if (!data.converged) {
+      const coord = data.converter_coordination;
+      const blocked = coord && coord.enabled && coord.feasible === false;
+      const blockingCount = coord ? (coord.blocking_count ?? ((coord.fatal_count || 0) + (coord.error_count || 0))) : 0;
+      section.style.display = '';
+      div.innerHTML = `<p class="empty-hint" style="color:#b91c1c">潮流未收敛${blocked ? `，协调校核阻断 ${blockingCount || 0} 项` : ''}，节点功率平衡诊断不作为正常潮流结果显示。</p>`;
+      return;
+    }
     const ac = new Map();
     const dc = new Map();
     const add = (map, key, value, label) => {
@@ -3939,19 +4012,19 @@ const App = (() => {
       add(ac, br.from, br.pf_mw, `AC支路 ${br.from}->${br.to} Pf`);
       add(ac, br.to, br.pt_mw, `AC支路 ${br.from}->${br.to} Pt`);
     });
-    const dcBranches = data.geo_dc_branches || data.dc_branch_flows || [];
+    const dcBranches = firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows);
     dcBranches.forEach(br => {
       const from = br.from ?? br.from_bus;
       const to = br.to ?? br.to_bus;
       add(dc, from, br.pf_mw, `DC支路 ${from}->${to} Pf`);
       add(dc, to, br.pt_mw, `DC支路 ${from}->${to} Pt`);
     });
-    const vscRows = data.geo_vsc && data.geo_vsc.length ? data.geo_vsc : (data.vsc_transfers || []);
+    const vscRows = firstNonEmptyArray(data.geo_vsc, data.vsc_transfers);
     vscRows.forEach(v => {
       add(ac, v.bus_ac, -num(v.p_ac_mw), `VSC ${v.index ?? ''} AC侧`);
       add(dc, v.bus_dc, -num(v.p_dc_mw), `VSC ${v.index ?? ''} DC侧`);
     });
-    const dcdcRows = data.geo_dcdc && data.geo_dcdc.length ? data.geo_dcdc : (data.dcdc_transfers || []);
+    const dcdcRows = firstNonEmptyArray(data.geo_dcdc, data.dcdc_transfers);
     dcdcRows.forEach(d => {
       add(dc, d.bus_in, num(d.p_in_mw), `DCDC ${d.index ?? ''} 输入侧`);
       add(dc, d.bus_out, -num(d.p_out_mw), `DCDC ${d.index ?? ''} 输出侧`);
@@ -3971,8 +4044,24 @@ const App = (() => {
     }
     function cConj(a) { return complex(a.re, -a.im); }
     function cNeg(a) { return complex(-a.re, -a.im); }
+    const acVoltagePosByBus = new Map();
+    (data.component_results || []).forEach(row => {
+      if (row?.canvas_type !== 'ac_bus') return;
+      const bus = Number(row.index);
+      const pos = Number(row.position);
+      if (Number.isFinite(bus) && Number.isInteger(pos) && pos >= 0) {
+        acVoltagePosByBus.set(bus, pos);
+      }
+    });
+    if (!acVoltagePosByBus.size) {
+      (sys.ac?.buses || []).forEach((bus, pos) => {
+        const id = Number(bus?.index);
+        if (Number.isFinite(id)) acVoltagePosByBus.set(id, pos);
+      });
+    }
     function vphasor(busId) {
-      const idx = Number(busId) - 1;
+      const idx = acVoltagePosByBus.get(Number(busId));
+      if (!Number.isInteger(idx) || idx < 0) return null;
       const vm = Number(data.vm?.[idx]);
       const va = Number(data.va?.[idx]);
       if (!Number.isFinite(vm) || !Number.isFinite(va)) return null;
@@ -4024,6 +4113,7 @@ const App = (() => {
     (sys.dc?.pv_arrays || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC光伏 ${x.index ?? ''}`); });
     (sys.dc?.static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
     (sys.dc?.dc_static_generators || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw ?? x.p_set_mw), `DC静态电源 ${x.index ?? ''}`); });
+    (sys.dc?.dc_storage || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw), `DC储能 ${x.index ?? ''}`); });
     (sys.dc?.storage || []).forEach(x => { if (isOn(x)) add(dc, x.bus, -num(x.p_mw), `DC储能 ${x.index ?? ''}`); });
 
     function dcSlackSet() {
@@ -4107,21 +4197,33 @@ const App = (() => {
       ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个非平衡节点超过 ${tolKw} kW，请检查连接或设备功率。</p>`
       : `<p class="empty-hint">普通节点有功平衡通过：未发现超过 ${tolKw} kW 的非平衡节点。</p>`;
     const sourceHint = sources.length
-      ? `<p class="empty-hint">下表中的 Slack/平衡源残差表示其承担的系统平衡功率；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
+      ? `<p class="empty-hint">Slack/平衡源承担的功率本来可以非零，它不是普通节点KCL残差；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
       : '';
-    const tableRows = rows.sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw)).map(r => {
+    const makeRow = (r) => {
       const compId = r.kind === 'AC' ? busMap.ac?.[r.id] : busMap.dc?.[r.id];
       const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-      const role = r.isImplicit ? '隐式DC平衡' : (r.isSlack ? 'Slack/平衡源' : '未平衡');
       const detail = r.details.map(x => `${x.label}: ${pFmt(x.mw, 3)} ${pUnit()}`).join('<br>');
-      return `<tr${attr}><td>${r.kind}</td><td>${r.id}</td><td>${escapeHtml(r.type)}</td><td>${role}</td><td>${pFmt(r.kw / 1000, 3)}</td><td>${escapeHtml(r.name)}</td><td>${detail}</td></tr>`;
-    }).join('');
-    div.innerHTML = status + sourceHint + (tableRows
-      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>角色</th><th>残差/平衡功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${tableRows}</tbody></table>`
-      : '');
+      return `<tr${attr}><td>${r.kind}</td><td>${r.id}</td><td>${escapeHtml(r.type)}</td><td>${pFmt(r.kw / 1000, 3)}</td><td>${escapeHtml(r.name)}</td><td>${detail}</td></tr>`;
+    };
+    const imbalanceRows = bad
+      .sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw))
+      .map(makeRow)
+      .join('');
+    const sourceRows = sources
+      .sort((a, b) => Math.abs(b.kw) - Math.abs(a.kw))
+      .map(r => makeRow({ ...r, type: r.isImplicit ? `${r.type || ''} / 隐式DC平衡` : r.type }))
+      .join('');
+    const imbalanceTable = imbalanceRows
+      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>普通节点KCL残差(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${imbalanceRows}</tbody></table>`
+      : '';
+    const sourceTable = sourceRows
+      ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
+      : '';
+    div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
   }
 
   function showPowerFlowResultsTables(data) {
+    data = normalizePowerFlowResult(data);
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('powerFlow');
@@ -4184,16 +4286,29 @@ const App = (() => {
 
     renderAllPowerFlowComponentStatus(data, busMap);
 
+    const pfBusIdByPosition = (domain, i) => {
+      const type = domain === 'dc' ? 'dc_bus' : 'ac_bus';
+      const row = (data.component_results || []).find(r =>
+        r.canvas_type === type && Number(r.position) === Number(i));
+      if (row && row.index !== undefined && row.index !== null) return Number(row.index);
+      const geoType = domain === 'dc' ? 'DC' : 'AC';
+      const geo = (data.geo_buses || []).filter(b => b.type === geoType);
+      if (geo[i] && geo[i].id !== undefined && geo[i].id !== null) return Number(geo[i].id);
+      return null;
+    };
+
     // AC Bus voltage table
     const busDiv = document.getElementById('pfBusResults');
     if (data.vm && data.vm.length > 0) {
       let html = '<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th></tr></thead><tbody>';
       data.vm.forEach((vm, i) => {
+        const busId = pfBusIdByPosition('ac', i);
+        const busLabel = busId ?? `pos ${i}`;
         const va = data.va ? (data.va[i] * 180 / Math.PI).toFixed(4) : '0';
         const color = vm < 0.95 ? 'color:#e06c75' : vm > 1.05 ? 'color:#d19a66' : '';
-        const compId = busMap.ac[i + 1];
+        const compId = busId != null ? busMap.ac[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
+        html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vm.toFixed(6)}</td><td>${va}</td></tr>`;
       });
       html += '</tbody></table>';
       busDiv.innerHTML = html;
@@ -4206,12 +4321,24 @@ const App = (() => {
     const dcBusDiv = document.getElementById('pfDcBusResults');
     if (data.vdc && data.vdc.length > 0) {
       dcBusSec.style.display = '';
-      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
+      const dcBusRows = (data.component_results || []).filter(r => r.canvas_type === 'dc_bus');
+      const dcMetric = (busId, label) => {
+        const row = dcBusRows.find(r => Number(r.index) === Number(busId));
+        const metric = row && Array.isArray(row.metrics)
+          ? row.metrics.find(m => m.label === label)
+          : null;
+        const n = metric ? Number(metric.value) : NaN;
+        return Number.isFinite(n) ? n : null;
+      };
+      let html = `<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th><th>P净注入(${pUnit()})</th></tr></thead><tbody>`;
       data.vdc.forEach((vdc, i) => {
+        const busId = pfBusIdByPosition('dc', i);
+        const busLabel = busId ?? `pos ${i}`;
         const color = vdc < 0.95 ? 'color:#e06c75' : vdc > 1.05 ? 'color:#d19a66' : '';
-        const compId = busMap.dc[i + 1];
+        const compId = busId != null ? busMap.dc[busId] : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-        html += `<tr${attr}><td>${i + 1}</td><td style="${color}">${vdc.toFixed(6)}</td></tr>`;
+        const pNet = busId != null ? dcMetric(busId, 'P净注入') : null;
+        html += `<tr${attr}><td>${busLabel}</td><td style="${color}">${vdc.toFixed(6)}</td><td>${pNet === null ? '-' : pFmt(pNet, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
       dcBusDiv.innerHTML = html;
@@ -4278,18 +4405,20 @@ const App = (() => {
     // DC Branch flow table (prefer geo_dc_branches, fallback to dc_branch_flows)
     const dcBrSec = document.getElementById('pfDcBranchSection');
     const dcBrDiv = document.getElementById('pfDcBranchResults');
-    const dcBrData = data.geo_dc_branches || data.dc_branch_flows || [];
+    const dcBrData = firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows);
     if (dcBrData.length > 0) {
       dcBrSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>From</th><th>To</th><th>Pf(${pUnit()})</th><th>Pt(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
       dcBrData.forEach((br, i) => {
-        const compId = busMap.dcBranch[i];
+        const compId = busMap.dcBranch
+          ? (busMap.dcBranch[br.index] ?? busMap.dcBranch[i])
+          : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         const from = br.from ?? br.from_bus ?? '-';
         const to = br.to ?? br.to_bus ?? '-';
         const pf = br.pf_mw || 0;
         const pt = br.pt_mw || 0;
-        const loss = pf + pt;
+        const loss = br.loss_mw != null ? br.loss_mw : (pf + pt);
         html += `<tr${attr}><td>${i}</td><td>${from}</td><td>${to}</td><td>${pFmt(pf, 4)}</td><td>${pFmt(pt, 4)}</td><td>${pFmt(loss, 4)}</td></tr>`;
       });
       html += '</tbody></table>';
@@ -4322,10 +4451,11 @@ const App = (() => {
     // DCDC converter transfers table
     const dcdcSec = document.getElementById('pfDcdcSection');
     const dcdcDiv = document.getElementById('pfDcdcResults');
-    if (data.dcdc_transfers && data.dcdc_transfers.length > 0) {
+    const dcdcRows = firstNonEmptyArray(data.dcdc_transfers, data.geo_dcdc);
+    if (dcdcRows.length > 0) {
       dcdcSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>Bus In</th><th>Bus Out</th><th>P_in(${pUnit()})</th><th>P_out(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
-      data.dcdc_transfers.forEach((d, i) => {
+      dcdcRows.forEach((d, i) => {
         html += `<tr><td>${d.index ?? i}</td><td>${d.bus_in}</td><td>${d.bus_out}</td>`;
         html += `<td>${pFmt(d.p_in_mw || 0, 3)}</td><td>${pFmt(d.p_out_mw || 0, 3)}</td><td>${pFmt(d.loss_mw || 0, 3)}</td></tr>`;
       });
@@ -4339,10 +4469,11 @@ const App = (() => {
     // VSC converter transfers table
     const vscSec = document.getElementById('pfVscSection');
     const vscDiv = document.getElementById('pfVscResults');
-    if (data.vsc_transfers && data.vsc_transfers.length > 0) {
+    const vscRows = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
+    if (vscRows.length > 0) {
       vscSec.style.display = '';
       let html = `<table><thead><tr><th>#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(${pUnit()})</th><th>Qac(${qUnit()})</th><th>Pdc(${pUnit()})</th><th>Loss(${pUnit()})</th></tr></thead><tbody>`;
-      data.vsc_transfers.forEach((v, i) => {
+      vscRows.forEach((v, i) => {
         const compId = busMap.vsc ? (busMap.vsc[v.index] ?? busMap.vsc[i]) : undefined;
         const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
         html += `<tr${attr}><td>${v.index ?? i}</td><td>${v.bus_ac}</td><td>${v.bus_dc}</td>
@@ -5028,6 +5159,28 @@ const App = (() => {
   }
 
   // ========== Topology Tables ==========
+  // Only these solvers co-solve AC + DC + converters as one coupled system.
+  // The others are AC-only (pure_ac/fdpf/three_phase), DC-only (dc), a one-shot
+  // linearization (hybrid_linearized), or use a different reference scheme
+  // (distributed_slack) — so they give non-comparable answers on a hybrid case.
+  const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded']);
+  function updatePfMethodAvailability(sys) {
+    const sel = document.getElementById('pfMethod');
+    if (!sel) return;
+    const dc = (sys && sys.dc) ? sys.dc : {};
+    const hasDc = (Array.isArray(dc.buses) && dc.buses.length > 0) ||
+      (sys && Array.isArray(sys.vsc_converters) && sys.vsc_converters.length > 0) ||
+      (sys && Array.isArray(sys.dcdc_converters) && sys.dcdc_converters.length > 0);
+    let selectedGotDisabled = false;
+    Array.from(sel.options).forEach(opt => {
+      const restrict = hasDc && !HYBRID_PF_METHODS.has(opt.value);
+      opt.disabled = restrict;
+      opt.title = restrict ? '该算法不联立求解直流网络/变换器，混合交直流算例结果不可比' : '';
+      if (restrict && opt.selected) selectedGotDisabled = true;
+    });
+    if (selectedGotDisabled) sel.value = 'ac_newton';
+  }
+
   function onTopologyChanged() {
     _canvasDirty = true;
     // Rewiring changes which buses a device connects to — re-derive those
@@ -5042,6 +5195,7 @@ const App = (() => {
   function updateTopologyTables() {
     const sys = Canvas.buildSystemJson();
     const m = Canvas.getCompBusMap();
+    updatePfMethodAvailability(sys);
     markResilienceFaultBranches();
     renderComponentCurveTargets('timeSeries');
     renderComponentCurveTargets('scenario');
@@ -5169,6 +5323,10 @@ const App = (() => {
     // DC Load
     fillTable('#dcLoadTableInner', 'dcLoadSection', sys.dc.loads, m.dcLoad, dl =>
       `<td>${dl.bus}</td><td>${dl.p_mw}</td><td>${dl.scaling}</td>`);
+
+    // DC Storage
+    fillTable('#dcStorageTableInner', 'dcStorageSection', sys.dc.dc_storage || [], m.dcStorage, s =>
+      `<td>${s.bus}</td><td>${s.p_mw}</td><td>${s.p_rated_mw}</td><td>${s.e_rated_mwh}</td><td>${s.soc_init}</td>`);
 
     // DC PV Array
     fillTable('#dcPvTableInner', 'dcPvSection', sys.dc.pv_arrays || [], m.dcPv, pv =>
@@ -5340,6 +5498,15 @@ const App = (() => {
         inp.type = typeof val === 'number' ? 'number' : 'text';
         inp.step = 'any';
         inp.value = val;
+        // Bus terminals are resolved from the canvas wiring (connected ports),
+        // not typed by hand. Show them read-only so the user wires ports — e.g.
+        // a DC/DC's 'in'/'out' — instead of guessing internal bus IDs.
+        if (WIRING_DERIVED_BUS_FIELDS.has(key)) {
+          inp.readOnly = true;
+          inp.title = '由接线自动确定（请通过连线修改端口）';
+          inp.style.opacity = '0.65';
+          inp.style.cursor = 'not-allowed';
+        }
         div.appendChild(inp);
       }
 
@@ -6039,7 +6206,7 @@ const App = (() => {
       };
       const parseIntList = (id) => {
         const raw = (document.getElementById(id)?.value || '').trim();
-        return raw ? raw.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n) && n > 0) : [];
+        return raw ? raw.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n) && n >= 0) : [];
       };
       const parseNumList = (id) => {
         const raw = (document.getElementById(id)?.value || '').trim();
@@ -6763,13 +6930,14 @@ const App = (() => {
         if (st && Number(st.e_rated_mwh || 0) > 0) st.soc_init = Math.max(0, Math.min(1, soc));
       });
       update(systemJson?.ac?.storage);
+      update(systemJson?.dc?.dc_storage);
       update(systemJson?.dc?.storage);
       update(systemJson?.mobile_storage);
     }
 
     function markOutOfServiceByIndex(items, index) {
       const list = Array.isArray(items) ? items : [];
-      const target = list.find(item => Number(item?.index) === Number(index)) || list[Number(index)] || list[Number(index) - 1];
+      const target = list.find(item => Number(item?.index) === Number(index));
       if (target) target.in_service = false;
       return !!target;
     }
@@ -6791,7 +6959,9 @@ const App = (() => {
         case 'acload': return markOutOfServiceByIndex(systemJson.ac?.loads, idx);
         case 'dcload': return markOutOfServiceByIndex(systemJson.dc?.loads, idx);
         case 'acstorage': return markOutOfServiceByIndex(systemJson.ac?.storage, idx);
-        case 'dcstorage': return markOutOfServiceByIndex(systemJson.dc?.storage, idx);
+        case 'dcstorage':
+          return markOutOfServiceByIndex(systemJson.dc?.dc_storage, idx) ||
+                 markOutOfServiceByIndex(systemJson.dc?.storage, idx);
         case 'mobilestorage': return markOutOfServiceByIndex(systemJson.mobile_storage, idx);
         case 'transformer2w': return markOutOfServiceByIndex(systemJson.ac?.transformers_2w, idx);
         case 'transformer3w': return markOutOfServiceByIndex(systemJson.ac?.transformers_3w, idx);

@@ -1866,11 +1866,22 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
       c.features["net_load_mw"] = c.features["net_load_sum"];
       for (const auto& risk : generated.branch_risks) c.features["peak_failure_probability"] = std::max(c.features["peak_failure_probability"], risk.peak_failure_probability);
       c.outage_signature.assign(static_cast<std::size_t>(sys.ac.branches.size() + sys.dc.branches.size()), 0);
+      std::unordered_map<int, std::size_t> ac_branch_pos;
+      ac_branch_pos.reserve(sys.ac.branches.size());
+      for (std::size_t bi = 0; bi < sys.ac.branches.size(); ++bi) {
+        ac_branch_pos[sys.ac.branches[bi].index] = bi;
+      }
+      std::unordered_map<int, std::size_t> dc_branch_pos;
+      dc_branch_pos.reserve(sys.dc.branches.size());
+      for (std::size_t bi = 0; bi < sys.dc.branches.size(); ++bi) {
+        dc_branch_pos[sys.dc.branches[bi].index] = sys.ac.branches.size() + bi;
+      }
       for (const auto& f : generated.faults) {
-        std::size_t idx = f.branch_kind == ResilienceBranchKind::AC
-            ? static_cast<std::size_t>(std::max(0, f.branch_index - 1))
-            : sys.ac.branches.size() + static_cast<std::size_t>(std::max(0, f.branch_index - 1));
-        if (idx < c.outage_signature.size()) c.outage_signature[idx] = 1;
+        const auto& pos_map = f.branch_kind == ResilienceBranchKind::AC ? ac_branch_pos : dc_branch_pos;
+        auto it = pos_map.find(f.branch_index);
+        if (it != pos_map.end() && it->second < c.outage_signature.size()) {
+          c.outage_signature[it->second] = 1;
+        }
       }
       c.resilience_event = std::move(event);
       c.probability = 1.0 / static_cast<double>(candidate_count);

@@ -1,0 +1,779 @@
+{
+  "name": "Canvas System",
+  "base_mva": 100,
+  "ac": {
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "SLACK",
+        "base_kv": 10,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 2,
+        "bus_type": "PQ",
+        "base_kv": 0.4,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 3,
+        "bus_type": "PQ",
+        "base_kv": 0.4,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      },
+      {
+        "index": 4,
+        "bus_type": "PQ",
+        "base_kv": 0.4,
+        "vm_pu": 1,
+        "va_deg": 0,
+        "pd_mw": 0,
+        "qd_mvar": 0,
+        "vmin_pu": 0.9,
+        "vmax_pu": 1.1,
+        "gs_mw": 0,
+        "bs_mvar": 0,
+        "in_service": true,
+        "area": 1,
+        "zone": 1,
+        "n_customers": 0,
+        "importance": 0
+      }
+    ],
+    "branches": [
+      {
+        "index": 0,
+        "name": "AC Line 1",
+        "from_bus": 3,
+        "to_bus": 2,
+        "r_pu": 0.01,
+        "x_pu": 0.1,
+        "b_pu": 0,
+        "rate_a_mva": 100,
+        "rate_b_mva": 0,
+        "rate_c_mva": 0,
+        "length_km": 0,
+        "tap": 1,
+        "shift_deg": 0,
+        "in_service": true,
+        "n_parallel": 1,
+        "failure_rate": 0,
+        "mttr_hr": 0
+      }
+    ],
+    "generators": [],
+    "loads": [
+      {
+        "index": 0,
+        "name": "AC Load1",
+        "bus": 2,
+        "p_mw": 0.4,
+        "q_mvar": 0.15,
+        "scaling": 1,
+        "model": "ConstantPower",
+        "z_percent_p": 0,
+        "i_percent_p": 0,
+        "p_percent_p": 100,
+        "z_percent_q": 0,
+        "i_percent_q": 0,
+        "p_percent_q": 100,
+        "controllable": false,
+        "p_min_mw": 0,
+        "cost_mw": 0,
+        "priority": "Medium",
+        "n_customers": 0,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "static_generators": [],
+    "storage": [],
+    "renewable_gens": [],
+    "pv_systems": [],
+    "external_grids": [
+      {
+        "index": 0,
+        "name": "Grid 1",
+        "bus": 1,
+        "vm_pu": 1.05,
+        "va_deg": 0,
+        "s_sc_max_mva": 100,
+        "s_sc_min_mva": 78,
+        "rx_max": 0.1,
+        "rx_min": 0.1,
+        "r_pu": 0,
+        "x_pu": 0,
+        "r0_pu": 0,
+        "x0_pu": 0,
+        "vn_kv": 10,
+        "emission_factor_tco2_mwh": 0,
+        "controllable": false,
+        "in_service": true
+      }
+    ],
+    "transformers_2w": [
+      {
+        "index": 0,
+        "hv_bus": 1,
+        "lv_bus": 2,
+        "sn_mva": 1.5,
+        "vn_hv_kv": 10,
+        "vn_lv_kv": 0.4,
+        "vk_percent": 12,
+        "vkr_percent": 0.5,
+        "pfe_kw": 30,
+        "i0_percent": 0.1,
+        "shift_deg": 0,
+        "tap_side": 0,
+        "tap_pos": 0,
+        "tap_min": -8,
+        "tap_max": 8,
+        "tap_neutral": 0,
+        "tap_step_percent": 1.25,
+        "vector_group": "",
+        "in_service": true
+      }
+    ],
+    "switches": [],
+    "circuit_breakers": [
+      {
+        "index": 0,
+        "bus_from": 1,
+        "bus_to": 1,
+        "breaker_type": "",
+        "closed": true,
+        "z_ohm": 0,
+        "rated_voltage_kv": 0,
+        "i_rated_ka": 0,
+        "i_breaking_ka": 0,
+        "rated_current_ka": 2,
+        "in_service": true
+      },
+      {
+        "index": 1,
+        "bus_from": 4,
+        "bus_to": 3,
+        "breaker_type": "",
+        "closed": true,
+        "z_ohm": 0,
+        "rated_voltage_kv": 0,
+        "i_rated_ka": 0,
+        "i_breaking_ka": 0,
+        "rated_current_ka": 2,
+        "in_service": true
+      }
+    ],
+    "motors": [],
+    "flexible_loads": [],
+    "asymmetric_loads": [],
+    "shunts": [],
+    "transformers_3w": [],
+    "chargers": [],
+    "charging_stations": []
+  },
+  "dc": {
+    "buses": [
+      {
+        "index": 1,
+        "bus_type": "DC_P",
+        "base_kv": 0.75,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      },
+      {
+        "index": 2,
+        "bus_type": "DC_V",
+        "base_kv": 0.75,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      },
+      {
+        "index": 3,
+        "bus_type": "DC_P",
+        "base_kv": 0.75,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      },
+      {
+        "index": 4,
+        "bus_type": "DC_P",
+        "base_kv": 0.75,
+        "vm_pu": 1,
+        "vmax_pu": 1.1,
+        "vmin_pu": 0.9,
+        "pd_mw": 0,
+        "in_service": true
+      }
+    ],
+    "branches": [
+      {
+        "index": 0,
+        "name": "DC Line 1",
+        "from_bus": 1,
+        "to_bus": 2,
+        "r_pu": 0.01,
+        "rate_a_mva": 1,
+        "length_km": 100,
+        "in_service": true
+      },
+      {
+        "index": 1,
+        "name": "DC Line 58",
+        "from_bus": 3,
+        "to_bus": 2,
+        "r_pu": 0.01,
+        "rate_a_mva": 200,
+        "length_km": 10,
+        "in_service": true
+      }
+    ],
+    "loads": [
+      {
+        "index": 0,
+        "name": "DC Load1",
+        "bus": 2,
+        "p_mw": 0.25,
+        "scaling": 1,
+        "controllable": false,
+        "p_min_mw": 0,
+        "cost_mw": 0,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "dc_storage": [
+      {
+        "index": 0,
+        "name": "DC ESS ",
+        "bus": 2,
+        "p_mw": 0.3,
+        "p_rated_mw": 0.3,
+        "e_rated_mwh": 1,
+        "soc_init": 0.5,
+        "soc_min": 0.1,
+        "soc_max": 0.9,
+        "eta_charge": 0.95,
+        "eta_discharge": 0.95,
+        "pmax_mw": 10,
+        "pmin_mw": -10,
+        "self_discharge_pct": 0,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "static_generators": [],
+    "pv_arrays": [
+      {
+        "index": 0,
+        "bus": 4,
+        "p_set_mw": 0.3,
+        "irradiance": 1000,
+        "temperature": 25,
+        "num_series": 0,
+        "num_parallel": 0,
+        "vmpp": 0,
+        "impp": 0,
+        "voc": 0,
+        "isc": 0,
+        "alpha_isc": 0,
+        "beta_voc": 0,
+        "profile_id": -1,
+        "in_service": true
+      }
+    ],
+    "dc_circuit_breakers": []
+  },
+  "vsc_converters": [
+    {
+      "index": 0,
+      "name": "VSC ",
+      "bus_ac": 4,
+      "bus_dc": 1,
+      "control_mode": "AC_PV",
+      "type": "two_level",
+      "p_set_mw": 0.05,
+      "q_set_mvar": 0,
+      "pmax_mw": 200,
+      "pmin_mw": -200,
+      "qmax_mvar": 100,
+      "qmin_mvar": -100,
+      "eta": 0.98,
+      "loss_percent": 1,
+      "loss_mw": 0,
+      "v_dc_set_pu": 1,
+      "v_ac_set_pu": 1,
+      "v_ac_angle_set_deg": 0,
+      "k_vdc": 0.1,
+      "p_rated_mw": 0,
+      "r_conv_ac_pu": 0,
+      "i_ac_max_pu": 0,
+      "i_dc_max_pu": 0,
+      "k_m_modulation": 0,
+      "m_min": 0,
+      "m_max": 0,
+      "x_sc_pu": 0,
+      "vn_ac_kv": 0,
+      "vn_dc_kv": 0,
+      "grid_forming": false,
+      "ac_grid_forming": true,
+      "allow_dual_side_grid_forming": false,
+      "has_energy_buffer": false,
+      "in_service": true
+    }
+  ],
+  "dcdc_converters": [
+    {
+      "index": 0,
+      "name": "DC/DC 64",
+      "bus_in": 3,
+      "bus_out": 4,
+      "control_mode": "Voltage",
+      "p_ref_mw": 0,
+      "v_ref_pu": 1,
+      "sn_mva": 1,
+      "vn_in_kv": 0.75,
+      "vn_out_kv": 0.75,
+      "eta": 0.98,
+      "r_eq_pu": 0.01,
+      "pmax_mw": 50,
+      "pmin_mw": -50,
+      "k_droop": 0.05,
+      "topology": "Generic",
+      "d_min": 0.05,
+      "d_max": 0.95,
+      "n_ratio": 1,
+      "in_service": true
+    }
+  ],
+  "energy_routers": [],
+  "mobile_storage": [],
+  "vpps": [],
+  "microgrids": [],
+  "_canvas": {
+    "version": 2,
+    "themeMode": "dark",
+    "connectionStyle": "orthogonal",
+    "viewBox": {
+      "x": -1205.1686452480917,
+      "y": -4033.4745760214146,
+      "w": 1085.299594631975,
+      "h": 656.8918599088263
+    },
+    "components": [
+      {
+        "key": "ac_bus#1",
+        "type": "ac_bus",
+        "x": -1440,
+        "y": -4080,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#2",
+        "type": "ac_bus",
+        "x": -1440,
+        "y": -3880,
+        "rotation": 0
+      },
+      {
+        "key": "ac_bus#3",
+        "type": "ac_bus",
+        "x": -1280,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "ac_bus#4",
+        "type": "ac_bus",
+        "x": -1080,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "dc_bus#1",
+        "type": "dc_bus",
+        "x": -860,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "dc_bus#2",
+        "type": "dc_bus",
+        "x": -620,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "load#0",
+        "type": "load",
+        "x": -1060,
+        "y": -3960,
+        "rotation": 0
+      },
+      {
+        "key": "external_grid#0",
+        "type": "external_grid",
+        "x": -1440,
+        "y": -4280,
+        "rotation": 0
+      },
+      {
+        "key": "ac_branch#0",
+        "type": "ac_branch",
+        "x": -1380,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "transformer_2w#0",
+        "type": "transformer_2w",
+        "x": -1440,
+        "y": -3980,
+        "rotation": 0
+      },
+      {
+        "key": "vsc_converter#0",
+        "type": "vsc_converter",
+        "x": -980,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "dc_branch#0",
+        "type": "dc_branch",
+        "x": -740,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "dc_load#0",
+        "type": "dc_load",
+        "x": -380,
+        "y": -3580,
+        "rotation": 0
+      },
+      {
+        "key": "dc_storage#1",
+        "type": "dc_storage",
+        "x": -480,
+        "y": -3580,
+        "rotation": 0
+      },
+      {
+        "key": "dc_pv_array#1",
+        "type": "dc_pv_array",
+        "x": -140,
+        "y": -3600,
+        "rotation": 0
+      },
+      {
+        "key": "circuit_breaker#0",
+        "type": "circuit_breaker",
+        "x": -1440,
+        "y": -4180,
+        "rotation": 270
+      },
+      {
+        "key": "circuit_breaker#2",
+        "type": "circuit_breaker",
+        "x": -1180,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#3",
+        "type": "dc_bus",
+        "x": -340,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "dc_branch#2",
+        "type": "dc_branch",
+        "x": -480,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "dcdc_converter#1",
+        "type": "dcdc_converter",
+        "x": -240,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
+        "key": "dc_bus#4",
+        "type": "dc_bus",
+        "x": -140,
+        "y": -3780,
+        "rotation": 270
+      }
+    ],
+    "connections": [
+      {
+        "from": {
+          "key": "external_grid#0",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "circuit_breaker#0",
+          "port": "left"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_bus#1",
+          "port": "right"
+        },
+        "to": {
+          "key": "transformer_2w#0",
+          "port": "hv"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "load#0",
+          "port": "top"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#2",
+          "port": "right"
+        },
+        "to": {
+          "key": "ac_bus#4",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_bus#4",
+          "port": "bottom"
+        },
+        "to": {
+          "key": "vsc_converter#0",
+          "port": "ac"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#2",
+          "port": "left"
+        },
+        "to": {
+          "key": "ac_bus#3",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_bus#3",
+          "port": "top"
+        },
+        "to": {
+          "key": "ac_branch#0",
+          "port": "right"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_branch#0",
+          "port": "left"
+        },
+        "to": {
+          "key": "ac_bus#2",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "ac_bus#2",
+          "port": "top"
+        },
+        "to": {
+          "key": "transformer_2w#0",
+          "port": "lv"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_branch#0",
+          "port": "left"
+        },
+        "to": {
+          "key": "dc_bus#1",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_bus#1",
+          "port": "top"
+        },
+        "to": {
+          "key": "vsc_converter#0",
+          "port": "dc"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "circuit_breaker#0",
+          "port": "left"
+        },
+        "to": {
+          "key": "ac_bus#1",
+          "port": "top"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_branch#0",
+          "port": "right"
+        },
+        "to": {
+          "key": "dc_bus#2",
+          "port": "top"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_storage#1",
+          "port": "top"
+        },
+        "to": {
+          "key": "dc_bus#2",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_load#0",
+          "port": "top"
+        },
+        "to": {
+          "key": "dc_bus#2",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_bus#3",
+          "port": "top"
+        },
+        "to": {
+          "key": "dc_branch#2",
+          "port": "right"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_branch#2",
+          "port": "left"
+        },
+        "to": {
+          "key": "dc_bus#2",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dcdc_converter#1",
+          "port": "in"
+        },
+        "to": {
+          "key": "dc_bus#3",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dcdc_converter#1",
+          "port": "out"
+        },
+        "to": {
+          "key": "dc_bus#4",
+          "port": "top"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dc_pv_array#1",
+          "port": "top"
+        },
+        "to": {
+          "key": "dc_bus#4",
+          "port": "bottom"
+        },
+        "waypoints": null
+      }
+    ]
+  }
+}

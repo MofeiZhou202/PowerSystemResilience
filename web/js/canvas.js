@@ -1762,11 +1762,29 @@ const Canvas = (() => {
       }
       return out;
     };
+    // Resolve the bus wired to a specific named port (for same-domain ports that
+    // busesOf() cannot disambiguate, e.g. a DC/DC's 'in'/'out').
+    const busByPort = (compId, portId) => {
+      for (const conn of state.connections) {
+        let other = null;
+        if (conn.from.compId === compId && conn.from.port === portId) other = conn.to.compId;
+        else if (conn.to.compId === compId && conn.to.port === portId) other = conn.from.compId;
+        if (other === null) continue;
+        if (acMap[other] != null) return acMap[other];
+        if (dcMap[other] != null) return dcMap[other];
+      }
+      return null;
+    };
     state.components.forEach(comp => {
       const p = comp.params;
       if (!p || comp.type === 'ac_bus' || comp.type === 'dc_bus') return;
       const buses = busesOf(comp.id);
-      if ('bus_ac' in p || 'bus_dc' in p) {
+      if ('bus_in' in p || 'bus_out' in p) {
+        const bi = busByPort(comp.id, 'in');
+        const bo = busByPort(comp.id, 'out');
+        if ('bus_in' in p && bi != null) p.bus_in = bi;
+        if ('bus_out' in p && bo != null) p.bus_out = bo;
+      } else if ('bus_ac' in p || 'bus_dc' in p) {
         const ac = buses.find(b => b.domain === 'ac');
         const dc = buses.find(b => b.domain === 'dc');
         if ('bus_ac' in p && ac) p.bus_ac = ac.index;
@@ -1793,7 +1811,7 @@ const Canvas = (() => {
             switches: [], circuit_breakers: [], motors: [],
             flexible_loads: [], asymmetric_loads: [], shunts: [],
             transformers_3w: [], chargers: [], charging_stations: [] },
-      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [] },
+      dc: { buses: [], branches: [], loads: [], dc_storage: [], static_generators: [], pv_arrays: [], dc_circuit_breakers: [] },
       vsc_converters: [],
       dcdc_converters: [],
       energy_routers: [],
@@ -1880,6 +1898,24 @@ const Canvas = (() => {
         }
       }
       return indices.length >= 2 ? [indices[0], indices[1]] : [indices[0] || 1, indices[1] || 1];
+    }
+
+    // Resolve the bus index wired to a SPECIFIC named port of a device. Needed
+    // for devices whose ports cannot be disambiguated by domain alone — e.g. a
+    // DC/DC converter whose 'in' and 'out' ports are BOTH on the DC side, or a
+    // VSC's 'ac'/'dc' ports. Returns 0 when the port is unwired.
+    function findBusIndexByPort(compId, portId) {
+      for (const conn of state.connections) {
+        if (conn.from.compId === compId && conn.from.port === portId) {
+          const idx = compBusMap[conn.to.compId];
+          if (idx !== undefined) return idx;
+        }
+        if (conn.to.compId === compId && conn.to.port === portId) {
+          const idx = compBusMap[conn.from.compId];
+          if (idx !== undefined) return idx;
+        }
+      }
+      return 0;
     }
 
     // Second pass: create devices
@@ -2190,8 +2226,9 @@ const Canvas = (() => {
           sys.vsc_converters.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx,
             name: p.name || `VSC ${Number.isFinite(Number(p.index)) ? Number(p.index) : vscIdx}`,
-            bus_ac: parseInt(p.bus_ac) || 0,
-            bus_dc: parseInt(p.bus_dc) || 0,
+            // Resolve from the wired 'ac'/'dc' ports (authoritative); typed value is fallback.
+            bus_ac: findBusIndexByPort(comp.id, 'ac') || parseInt(p.bus_ac) || 0,
+            bus_dc: findBusIndexByPort(comp.id, 'dc') || parseInt(p.bus_dc) || 0,
             control_mode: p.control_mode || 'PQ_MODE',
             type: p.type || 'two_level',
             p_set_mw: numOr(p.p_set_mw, 0),
@@ -2295,19 +2332,46 @@ const Canvas = (() => {
           break;
         }
         case 'circuit_breaker': {
+          const busConns = [];
+          for (const conn of state.connections) {
+            let otherCompId = null;
+            if (conn.from.compId === comp.id) otherCompId = conn.to.compId;
+            else if (conn.to.compId === comp.id) otherCompId = conn.from.compId;
+            if (otherCompId === null) continue;
+            const other = getComponent(otherCompId);
+            if (other && (other.type === 'ac_bus' || other.type === 'dc_bus')) {
+              busConns.push({ comp: other, type: other.type });
+            }
+          }
+          const isDcBreaker = busConns.length > 0 && busConns.every(b => b.type === 'dc_bus');
           const [from, to] = findTwoBusIndices(comp.id);
-          sys.ac.circuit_breakers.push({
-            index: Number.isFinite(Number(p.index)) ? Number(p.index) : cbIdx,
-            bus_from: from, bus_to: to,
-            breaker_type: p.breaker_type || '',
-            closed: p.closed !== false,
-            z_ohm: numOr(p.z_ohm, 0),
-            rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
-            i_rated_ka: numOr(p.i_rated_ka, 0),
-            i_breaking_ka: numOr(p.i_breaking_ka, 0),
-            rated_current_ka: numOr(p.rated_current_ka, 2.0),
-            in_service: p.in_service !== false,
-          });
+          const idxValue = Number.isFinite(Number(p.index)) ? Number(p.index) : cbIdx;
+          if (isDcBreaker) {
+            sys.dc.dc_circuit_breakers.push({
+              index: idxValue,
+              bus_from: from, bus_to: to,
+              breaker_type: p.breaker_type || '',
+              closed: p.closed !== false,
+              r_ohm: numOr(p.r_ohm ?? p.z_ohm, 0),
+              rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
+              i_rated_ka: numOr(p.i_rated_ka ?? p.rated_current_ka, 0),
+              i_breaking_ka: numOr(p.i_breaking_ka, 0),
+              in_service: p.in_service !== false,
+            });
+          } else {
+            sys.ac.circuit_breakers.push({
+              index: idxValue,
+              bus_from: from, bus_to: to,
+              breaker_type: p.breaker_type || '',
+              closed: p.closed !== false,
+              z_ohm: numOr(p.z_ohm, 0),
+              rated_voltage_kv: numOr(p.rated_voltage_kv, 0),
+              i_rated_ka: numOr(p.i_rated_ka ?? p.rated_current_ka, 0),
+              i_breaking_ka: numOr(p.i_breaking_ka, 0),
+              rated_current_ka: numOr(p.rated_current_ka, 2.0),
+              in_service: p.in_service !== false,
+            });
+          }
           cbIdx++;
           break;
         }
@@ -2482,8 +2546,10 @@ const Canvas = (() => {
           sys.dcdc_converters.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length,
             name: p.name || `DCDC ${Number.isFinite(Number(p.index)) ? Number(p.index) : sys.dcdc_converters.length}`,
-            bus_in: parseInt(p.bus_in) || 0,
-            bus_out: parseInt(p.bus_out) || 0,
+            // Resolve from the wired 'in'/'out' ports (authoritative); the typed
+            // property is only a fallback when the port is unwired.
+            bus_in: findBusIndexByPort(comp.id, 'in') || parseInt(p.bus_in) || 0,
+            bus_out: findBusIndexByPort(comp.id, 'out') || parseInt(p.bus_out) || 0,
             control_mode: p.control_mode || 'Voltage',
             p_ref_mw: numOr(p.p_ref_mw, 0),
             v_ref_pu: numOr(p.v_ref_pu, 1.0),
@@ -3289,6 +3355,34 @@ const Canvas = (() => {
       addConnection(comp.id, 'right', toCompId, 'left');
     });
 
+    // DC circuit breakers use the same drawn breaker component but connect to
+    // DC buses; buildSystemJson classifies them back into dc.dc_circuit_breakers.
+    jsonSys.dc?.dc_circuit_breakers?.forEach(cb => {
+      const fromCompId = dcBusCompMap[cb.bus_from];
+      const toCompId = dcBusCompMap[cb.bus_to];
+      if (fromCompId === undefined || toCompId === undefined) return;
+      const fromComp = getComponent(fromCompId);
+      const toComp = getComponent(toCompId);
+      if (!fromComp || !toComp) return;
+      const mx = (fromComp.x + toComp.x) / 2;
+      const my = (fromComp.y + toComp.y) / 2;
+      const comp = addComponent('circuit_breaker', mx, my, {
+        ...COMP.defaults.circuit_breaker,
+        index: cb.index,
+        breaker_type: cb.breaker_type || '',
+        closed: cb.closed !== false,
+        r_ohm: cb.r_ohm,
+        z_ohm: cb.r_ohm,
+        rated_voltage_kv: cb.rated_voltage_kv,
+        i_rated_ka: cb.i_rated_ka,
+        i_breaking_ka: cb.i_breaking_ka,
+        rated_current_ka: cb.rated_current_ka ?? cb.i_rated_ka,
+        in_service: cb.in_service !== false,
+      });
+      addConnection(comp.id, 'left', fromCompId, 'right');
+      addConnection(comp.id, 'right', toCompId, 'left');
+    });
+
     // Motors
     jsonSys.ac?.motors?.forEach(m => {
       addDeviceAtBus('motor', m.bus, {
@@ -3727,7 +3821,7 @@ const Canvas = (() => {
 
     const supplyTypes = new Set(['generator', 'pv_system', 'renewable_gen', 'static_generator', 'external_grid', 'dc_pv_array', 'vpp', 'microgrid']);
     const demandTypes = new Set(['load', 'dc_load', 'flexible_load', 'asymmetric_load', 'motor', 'charging_station', 'charger']);
-    const bidirTypes = new Set(['storage', 'mobile_storage']);
+    const bidirTypes = new Set(['storage', 'dc_storage', 'mobile_storage']);
 
     function getComponentBusConnections(comp, allowedBusTypes) {
       const busConns = [];
@@ -3760,6 +3854,35 @@ const Canvas = (() => {
       return conns.length ? conns[0] : null;
     }
 
+    function firstNonEmptyArray(...values) {
+      for (const value of values) {
+        if (Array.isArray(value) && value.length > 0) return value;
+      }
+      return [];
+    }
+
+    function resultRowsByIndexOrOrder(rows, comps) {
+      const out = [];
+      const list = Array.isArray(rows) ? rows : [];
+      const used = new Set();
+      comps.forEach((comp, order) => {
+        const idx = Number(comp.params?.index);
+        let row = null;
+        if (Number.isFinite(idx)) {
+          row = list.find((r, i) => !used.has(i) && Number(r.index) === idx) || null;
+        }
+        if (!row) {
+          row = list.find((r, i) => !used.has(i) && Number(r.position) === order) || null;
+        }
+        if (!row) {
+          row = list.find((r, i) => !used.has(i)) || null;
+        }
+        if (row) used.add(list.indexOf(row));
+        out.push(row);
+      });
+      return out;
+    }
+
     function readOperatingPowerMW(comp, busCompId) {
       const p = comp.params || {};
       if (p.in_service === false || p.in_service === 'false') return 0;
@@ -3781,6 +3904,7 @@ const Canvas = (() => {
         microgrid: ['p_exchange_mw'],
         charging_station: ['p_total_kw'],
         charger: ['p_ch_kw'],
+        dc_storage: ['p_mw'],
       };
       const fields = currentPowerFields[comp.type] || ['p_mw', 'p_set_mw'];
       for (const field of fields) {
@@ -3819,20 +3943,18 @@ const Canvas = (() => {
       addKnownBusOutflow(busMap.ac[br.from], numOr(br.pf_mw, 0));
       addKnownBusOutflow(busMap.ac[br.to], numOr(br.pt_mw, 0));
     });
-    (_lastPfResult.geo_dc_branches || []).forEach(br => {
-      addKnownBusOutflow(busMap.dc[br.from], numOr(br.pf_mw, 0));
-      addKnownBusOutflow(busMap.dc[br.to], numOr(br.pt_mw, 0));
+    firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows).forEach(br => {
+      const from = br.from ?? br.from_bus;
+      const to = br.to ?? br.to_bus;
+      addKnownBusOutflow(busMap.dc[from], numOr(br.pf_mw, 0));
+      addKnownBusOutflow(busMap.dc[to], numOr(br.pt_mw, 0));
     });
-    const solvedVscTransfers = (_lastPfResult.geo_vsc && _lastPfResult.geo_vsc.length)
-      ? _lastPfResult.geo_vsc
-      : (_lastPfResult.vsc_transfers || []);
+    const solvedVscTransfers = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
     solvedVscTransfers.forEach(vsc => {
       addKnownBusOutflow(busMap.ac[vsc.bus_ac], -numOr(vsc.p_ac_mw, 0));
       addKnownBusOutflow(busMap.dc[vsc.bus_dc], -numOr(vsc.p_dc_mw, 0));
     });
-    const solvedDcdcTransfers = (_lastPfResult.geo_dcdc && _lastPfResult.geo_dcdc.length)
-      ? _lastPfResult.geo_dcdc
-      : (_lastPfResult.dcdc_transfers || []);
+    const solvedDcdcTransfers = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
     solvedDcdcTransfers.forEach(dcdc => {
       addKnownBusOutflow(busMap.dc[dcdc.bus_in], numOr(dcdc.p_in_mw, 0));
       addKnownBusOutflow(busMap.dc[dcdc.bus_out], -numOr(dcdc.p_out_mw, 0));
@@ -3981,24 +4103,22 @@ const Canvas = (() => {
       });
     });
 
-    const visualAcBranchCount = state.components.filter(comp =>
-      comp.type === 'ac_branch' || (comp.type === 'transformer_2w' && comp.params?._from_branch)
-    ).length;
-    const trafo3wExpandedBranchCount = state.components.reduce((sum, comp) => {
-      if (comp.type !== 'transformer_3w' || comp.params?.in_service === false) return sum;
-      return sum + (getComponentBusConnections(comp, new Set(['ac_bus'])).length >= 3 ? 3 : 0);
-    }, 0);
     const expandedSwitchFlows = [];
-    if (Array.isArray(_lastPfResult.branch_abs)) {
-      let absIdx = visualAcBranchCount + estimatedTrafo2wFlows.length + trafo3wExpandedBranchCount;
-      ['switch_comp', 'circuit_breaker'].forEach(type => {
-        state.components.forEach(comp => {
-          if (comp.type !== type) return;
-          const powerMW = numOr(_lastPfResult.branch_abs[absIdx++], 0);
-          expandedSwitchFlows.push({ comp, powerMW: Math.abs(powerMW) });
-        });
-      });
-    }
+    const switchComps = state.components.filter(comp => comp.type === 'switch_comp');
+    resultRowsByIndexOrOrder(_lastPfResult.ac_switch_flows, switchComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: switchComps[i], flow }); });
+    const breakerComps = state.components.filter(comp => comp.type === 'circuit_breaker');
+    const acBreakerComps = [];
+    const dcBreakerComps = [];
+    breakerComps.forEach(comp => {
+      const busConns = getComponentBusConnections(comp);
+      const isDc = busConns.length > 0 && busConns.every(bc => bc.busType === 'dc_bus');
+      (isDc ? dcBreakerComps : acBreakerComps).push(comp);
+    });
+    resultRowsByIndexOrOrder(_lastPfResult.ac_circuit_breaker_flows, acBreakerComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: acBreakerComps[i], flow }); });
+    resultRowsByIndexOrOrder(_lastPfResult.dc_circuit_breaker_flows, dcBreakerComps)
+      .forEach((flow, i) => { if (flow) expandedSwitchFlows.push({ comp: dcBreakerComps[i], flow }); });
 
     const branchByKey = {};
     branchData.forEach((bd, i) => {
@@ -4009,11 +4129,11 @@ const Canvas = (() => {
     });
 
     // Compute power range for relative color normalization (include DC branches)
-    const dcBranchDataAll = _lastPfResult.geo_dc_branches || [];
+    const dcBranchDataAll = firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows);
     const powers = branchData.map(bd => Math.abs(bd.pf_mw))
       .concat(dcBranchDataAll.map(bd => Math.abs(numOr(bd.pf_mw, 0))))
       .concat(estimatedTrafo2wFlows.map(tf => Math.abs(numOr(tf.absPower, 0))))
-      .concat(expandedSwitchFlows.map(sw => Math.abs(numOr(sw.powerMW, 0))))
+      .concat(expandedSwitchFlows.map(sw => Math.max(Math.abs(numOr(sw.flow?.pf_mw, 0)), Math.abs(numOr(sw.flow?.pt_mw, 0)))))
       .filter(v => v > 0.01);
     // Running min/max (avoid Math.min(...spread) — overflows on thousands of branches).
     let maxPower = 1, minPower = 0;
@@ -4131,7 +4251,9 @@ const Canvas = (() => {
         // Draw animated arrow along each connection segment
         connPairs.forEach(({ conn, busCompId }) => {
           if (!conn.el) return;
-          const g = getConnGeom(conn);
+          // Pass fromCompId so g.busEnd / g.compEnd are oriented to THIS branch
+          // regardless of how the user drew the wire (bus→branch or branch→bus).
+          const g = getConnGeom(conn, { fromCompId: comp.id });
           if (!g) return;
           labeledFlowConnections.add(conn.id);
 
@@ -4151,9 +4273,10 @@ const Canvas = (() => {
           const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
           const segPower = isFromSide ? Math.abs(pf_mw) : Math.abs(pt_mw);
 
-          // Arrow at the polyline midpoint, pointing toward the bus when
-          // flowsTowardBus so it follows the orthogonal route (doc §10.2).
-          addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, showHeat ? loadingColor(colorPct) : '#1976D2');
+          // Aim the arrow at the bus end when power flows toward the bus, else at
+          // the branch end — using the orientation-correct endpoints so the head
+          // is right whichever way the connection was drawn (doc §10.2).
+          addFlowMarker(g, flowsTowardBus ? g.busEnd : g.compEnd, segPower, showHeat ? loadingColor(colorPct) : '#1976D2');
         });
       }
 
@@ -4223,10 +4346,17 @@ const Canvas = (() => {
 
     expandedSwitchFlows.forEach(sw => {
       const comp = sw.comp;
-      const busConns = getComponentBusConnections(comp, new Set(['ac_bus']));
+      const isDc = getComponentBusConnections(comp).some(bc => bc.busType === 'dc_bus');
+      const busConns = getComponentBusConnections(comp, new Set([isDc ? 'dc_bus' : 'ac_bus']));
       if (busConns.length < 2) return;
-      const absPower = Math.abs(numOr(sw.powerMW, 0));
-      const colorPct = normalizedPowerPct(absPower, minPower, powerRange);
+      const pf_mw = numOr(sw.flow?.pf_mw, 0);
+      const pt_mw = numOr(sw.flow?.pt_mw, 0);
+      const absPower = Math.max(Math.abs(pf_mw), Math.abs(pt_mw));
+      const rateMva = numOr(sw.flow?.rate_mva, 0);
+      const loadingPct = numOr(sw.flow?.loading_pct, 0);
+      const colorPct = rateMva > 0 && loadingPct > 0
+        ? loadingPct
+        : normalizedPowerPct(absPower, minPower, powerRange);
       const color = showHeat ? loadingColor(colorPct) : '#1976D2';
 
       if (showHeat && absPower > 0.01) {
@@ -4235,19 +4365,31 @@ const Canvas = (() => {
           colorPct,
           absPower,
           maxPower,
-          bd: { rate_mva: 0 },
-          hasLoading: false,
-          loading: 0,
+          bd: { rate_mva: rateMva },
+          hasLoading: rateMva > 0,
+          loading: loadingPct,
         });
       }
 
       if (showFlow) {
-        busConns.slice(0, 2).forEach(bc => {
+        const fromBus = Number(sw.flow?.from ?? sw.flow?.from_bus);
+        const toBus = Number(sw.flow?.to ?? sw.flow?.to_bus);
+        let fromBc = busConns.find(bc => Number(bc.busIdx) === fromBus);
+        let toBc = busConns.find(bc => Number(bc.busIdx) === toBus);
+        if (!fromBc || !toBc) {
+          [fromBc, toBc] = busConns.slice(0, 2);
+        }
+        [
+          { bc: fromBc, isFromSide: true },
+          { bc: toBc, isFromSide: false },
+        ].forEach(({ bc, isFromSide }) => {
+          if (!bc) return;
           if (!bc.conn || !bc.conn.el) return;
           const g = getConnGeom(bc.conn, { fromCompId: comp.id });
           if (!g) return;
           labeledFlowConnections.add(bc.conn.id);
-          addFlowMarker(g, g.compEnd, absPower, color);
+          const sidePower = isFromSide ? pf_mw : pt_mw;
+          addFlowMarker(g, sidePower >= 0 ? g.compEnd : g.busEnd, Math.abs(sidePower), color);
         });
       }
     });
@@ -4363,15 +4505,22 @@ const Canvas = (() => {
 
       // Compute bus net injection from branch flows for external_grid power estimation
       const busInject = {};
-      ((_lastPfResult.geo_ac_branches || []).concat(_lastPfResult.geo_dc_branches || [])).forEach(br => {
+      ((_lastPfResult.geo_ac_branches || [])
+        .concat(firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows)))
+        .forEach(br => {
         if (br.pf_mw !== undefined) {
-          busInject[br.from] = numOr(busInject[br.from], 0) - numOr(br.pf_mw, 0);
-          busInject[br.to] = numOr(busInject[br.to], 0) - numOr(br.pt_mw, 0);
+          const from = br.from ?? br.from_bus;
+          const to = br.to ?? br.to_bus;
+          busInject[from] = numOr(busInject[from], 0) - numOr(br.pf_mw, 0);
+          busInject[to] = numOr(busInject[to], 0) - numOr(br.pt_mw, 0);
         }
       });
 
+      const solvedVscTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
+      const solvedDcdcTransfersForOverlay = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
+
       // VSC transfer power at AC-side buses
-      (_lastPfResult.geo_vsc || []).forEach(vsc => {
+      solvedVscTransfersForOverlay.forEach(vsc => {
         if (vsc.p_ac_mw !== undefined) {
           busInject[vsc.bus_ac] = numOr(busInject[vsc.bus_ac], 0) - numOr(vsc.p_ac_mw, 0);
         }
@@ -4387,6 +4536,7 @@ const Canvas = (() => {
       state.components.forEach(comp => {
         if (skipTypes.has(comp.type)) return;
         if (!supplyTypes.has(comp.type) && !demandTypes.has(comp.type) && !bidirTypes.has(comp.type)) return;
+        const p = comp.params || {};
 
         // Find a connection from this component to a bus
         let conn = null, busCompId = null;
@@ -4420,7 +4570,7 @@ const Canvas = (() => {
             if (loadAtBus) powerMW += numOr(loadAtBus.pd_mw, 0);
           }
         }
-        else if (comp.type === 'storage' || comp.type === 'mobile_storage') {
+        else if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage') {
           // Storage dispatch must use its signed setpoint. A zero setpoint is a
           // real operating state; falling back to rated power draws a false flow.
           powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0;
@@ -4434,7 +4584,7 @@ const Canvas = (() => {
 
         // Determine direction
         let isSupply;
-        if (comp.type === 'storage' || comp.type === 'mobile_storage' || comp.type === 'microgrid' || comp.type === 'vpp') isSupply = powerMW >= 0;
+        if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage' || comp.type === 'microgrid' || comp.type === 'vpp') isSupply = powerMW >= 0;
         else if (supplyTypes.has(comp.type)) isSupply = true;
         else if (demandTypes.has(comp.type)) isSupply = false;
         else isSupply = powerMW > 0; // storage: positive = discharge
@@ -4459,7 +4609,7 @@ const Canvas = (() => {
 
     // ── DC branch flow arrows ──
     if (showFlow || showHeat) {
-      const dcBranchData = _lastPfResult.geo_dc_branches || [];
+      const dcBranchData = firstNonEmptyArray(_lastPfResult.geo_dc_branches, _lastPfResult.dc_branch_flows);
       let dcBrIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'dc_branch') return;
@@ -4512,7 +4662,9 @@ const Canvas = (() => {
 
           connPairs.forEach(({ conn, busCompId }) => {
             if (!conn.el) return;
-            const g = getConnGeom(conn);
+            // Orient endpoints to THIS branch so the arrow head is correct no
+            // matter how the wire was drawn (bus→branch or branch→bus).
+            const g = getConnGeom(conn, { fromCompId: comp.id });
             if (!g) return;
             labeledFlowConnections.add(conn.id);
             let flowsTowardBus;
@@ -4523,19 +4675,38 @@ const Canvas = (() => {
             const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
             const segPower = isFromSide ? Math.abs(pf_mw_dc) : Math.abs(pt_mw_dc);
 
-            addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, loadingColor(colorPct));
+            addFlowMarker(g, flowsTowardBus ? g.busEnd : g.compEnd, segPower, loadingColor(colorPct));
           });
+        }
+
+        // Heatmap label for the DC branch (mirrors the AC branch label so DC
+        // lines show a number in 热力图 / 方向+热力图 modes, not just a glow).
+        if (showHeat && absPower > 0.01) {
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.classList.add('viz-overlay', 'heatmap-label');
+          label.setAttribute('x', comp.x);
+          label.setAttribute('y', comp.y + (showFlow ? 40 : 30));
+          label.setAttribute('fill', loadingColor(colorPct));
+          label.textContent = (rateMva > 0 && loadingPct > 0)
+            ? `${loadingPct.toFixed(1)}%`
+            : `${pFmt(absPower)} ${pUnit()}`;
+          resultsLayer.appendChild(label);
         }
       });
     }
 
     // ── VSC converter flow arrows ──
     if (showFlow || showHeat) {
-      const vscData = _lastPfResult.geo_vsc || [];
+      const vscData = firstNonEmptyArray(_lastPfResult.geo_vsc, _lastPfResult.vsc_transfers);
       let vscIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'vsc_converter') return;
-        const vd = vscData[vscIdx++];
+        const compIndex = Number(comp.params?.index);
+        let vd = Number.isFinite(compIndex)
+          ? vscData.find(v => Number(v.index) === compIndex)
+          : null;
+        if (!vd) vd = vscData[vscIdx];
+        vscIdx++;
         if (!vd) return;
 
         // Find ALL bus connections (AC and DC)
@@ -4587,6 +4758,18 @@ const Canvas = (() => {
           const sMax = Math.max(Math.abs(numOr(vd.p_ac_mw, 0)), Math.abs(numOr(vd.p_dc_mw, 0)));
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the VSC shows a value
+          // in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 55);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for VSC
@@ -4604,11 +4787,16 @@ const Canvas = (() => {
 
     // ── DCDC converter flow arrows ──
     if (showFlow || showHeat) {
-      const dcdcData = _lastPfResult.geo_dcdc || [];
+      const dcdcData = firstNonEmptyArray(_lastPfResult.geo_dcdc, _lastPfResult.dcdc_transfers);
       let dcdcIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'dcdc_converter') return;
-        const dd = dcdcData[dcdcIdx++];
+        const compIndex = Number(comp.params?.index);
+        let dd = Number.isFinite(compIndex)
+          ? dcdcData.find(d => Number(d.index) === compIndex)
+          : null;
+        if (!dd) dd = dcdcData[dcdcIdx];
+        dcdcIdx++;
         if (!dd) return;
 
         const busConns = [];
@@ -4660,6 +4848,18 @@ const Canvas = (() => {
           const sMax = Math.max(Math.abs(numOr(dd.p_in_mw, 0)), Math.abs(numOr(dd.p_out_mw, 0)));
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the DC/DC converter
+          // shows a value in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 55);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for DCDC
@@ -4733,6 +4933,18 @@ const Canvas = (() => {
           const sMax = Math.max(...erd.ports.map(pt => Math.abs(numOr(pt.p_mw, 0))), 0);
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the energy router
+          // shows a value in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 58);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for Energy Router

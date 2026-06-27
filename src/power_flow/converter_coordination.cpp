@@ -151,6 +151,21 @@ bool storage_can_adjust(const Storage& st) {
   return st.soc_init > st.soc_min + 1e-6 && st.soc_init < st.soc_max - 1e-6;
 }
 
+bool dc_storage_can_adjust(const DCStorage& st) {
+  if (!st.in_service || !st.controllable) return false;
+  return st.soc_init > st.soc_min + 1e-6 && st.soc_init < st.soc_max - 1e-6;
+}
+
+bool dc_v_bus_has_storage_source(const HybridPowerSystem& sys, int bus) {
+  for (const auto& st : sys.dc.storage) {
+    if (st.bus == bus && storage_can_adjust(st)) return true;
+  }
+  for (const auto& st : sys.dc.dc_storage) {
+    if (st.bus == bus && dc_storage_can_adjust(st)) return true;
+  }
+  return false;
+}
+
 double vsc_dc_injection_from_ac_setpoint_mw(const VSCConverter& conv) {
   const double eta = std::clamp(conv.eta, 0.01, 1.0);
   return (conv.p_set_mw >= 0.0) ? (-conv.p_set_mw / eta) : (-conv.p_set_mw * eta);
@@ -237,6 +252,8 @@ bool dc_island_has_support(const HybridPowerSystem& sys,
     if (forms) return true;
   }
   for (const auto& s : sys.dc.storage)
+    if (s.in_service && island_of(s.bus) == dc_island) return true;
+  for (const auto& s : sys.dc.dc_storage)
     if (s.in_service && island_of(s.bus) == dc_island) return true;
   for (const auto& g : sys.dc.static_generators)
     if (g.in_service && island_of(g.bus) == dc_island) return true;
@@ -538,19 +555,11 @@ void evaluate_dcdc_device_rules(const HybridPowerSystem& sys,
                     "imbalance.");
     }
 
-    if (dcdc.control_mode == DCDCControlMode::Voltage) {
-      add_issue(report,
-                CoordinationSeverity::Error,
-                "DCDC-CTRL-01",
-                "dcdc_converter",
-                dcdc.index,
-                island,
-                "DC/DC converter " + std::to_string(dcdc.index) +
-                    " is declared as Voltage mode, but the current PF injection model "
-                    "does not enforce v_ref_pu as an output-voltage equation. It is "
-                    "therefore assessed as a fixed p_ref_mw transfer, not as a DC "
-                    "voltage-forming source.");
-    }
+    // Voltage mode is now a true voltage-forming control: the solver enforces
+    // vdc_out = v_ref_pu via a stiff negative-feedback law (see
+    // dcdc_power_transfer), and the output island registers a hard Vdc reference.
+    // It therefore no longer raises DCDC-CTRL-01; its input-side reference
+    // requirement is checked alongside Droop in the §4.2 pass below.
   }
 }
 
@@ -826,17 +835,27 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     if (bus.bus_type == DCBusType::DC_V) {
       summary.declared_v_buses.push_back(bus.index);
       summary.has_declared_v_bus = true;
-      add_issue(report,
-                CoordinationSeverity::Warning,
-                "DCBUS-01",
-                "dc_bus",
-                bus.index,
-                c,
-                "DC bus " + std::to_string(bus.index) +
-                    " is typed as DC_V. This is treated only as a declared bus "
-                    "type, not as a physical voltage-forming device; a real "
-                    "VSC/ESS/ER/DC source must provide the Vdc control freedom, "
-                    "otherwise the island is reported as having no reference.");
+      if (dc_v_bus_has_storage_source(sys, bus.index)) {
+        add_voltage_source(summary,
+                           "dc_bus_storage_source",
+                           bus.index,
+                           bus.index,
+                           bus.vm_pu,
+                           true,
+                           false);
+      } else {
+        add_issue(report,
+                  CoordinationSeverity::Warning,
+                  "DCBUS-01",
+                  "dc_bus",
+                  bus.index,
+                  c,
+                  "DC bus " + std::to_string(bus.index) +
+                      " is typed as DC_V. This is treated only as a declared bus "
+                      "type, not as a physical voltage-forming device; a real "
+                      "VSC/ESS/ER/DC source must provide the Vdc control freedom, "
+                      "otherwise the island is reported as having no reference.");
+      }
     }
     if (std::abs(bus.pd_mw) > kTol) {
       summary.fixed_power_devices += 1;
@@ -940,6 +959,25 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
         report.dc_islands[static_cast<size_t>(island_out)].fixed_power_mw +=
             transfer.p_injection_out_mw;
       }
+    } else if (dcdc.control_mode == DCDCControlMode::Voltage) {
+      // Voltage mode forms the OUTPUT bus voltage: register a hard Vdc reference
+      // on the output island (the solver holds vdc_out = v_ref_pu). The regulated
+      // transfer is set by the power balance, so it is drawn from — and must be
+      // supported by — the input island, accounted here as a fixed-power proxy.
+      if (island_out >= 0) {
+        add_voltage_source(report.dc_islands[static_cast<size_t>(island_out)],
+                           "dcdc_converter",
+                           dcdc.index,
+                           dcdc.bus_out,
+                           dcdc.v_ref_pu,
+                           /*has_v_set=*/true,
+                           /*droop=*/false);
+      }
+      if (island_in >= 0) {
+        report.dc_islands[static_cast<size_t>(island_in)].fixed_power_devices += 1;
+        report.dc_islands[static_cast<size_t>(island_in)].fixed_power_mw +=
+            transfer.p_injection_in_mw;
+      }
     } else {
       if (island_in >= 0) {
         report.dc_islands[static_cast<size_t>(island_in)].fixed_power_devices += 1;
@@ -1015,6 +1053,19 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
       add_voltage_source(summary, "dc_storage", st.index, st.bus, 0.0, false, true,
                          /*group_id=*/"", /*is_master=*/false,
                          /*participation_factor=*/0.0, /*droop_gain=*/1.0);
+    }
+  }
+  for (const auto& st : sys.dc.dc_storage) {
+    if (!st.in_service) continue;
+    const int island = island_for_bus(st.bus);
+    if (island < 0) continue;
+    auto& summary = report.dc_islands[static_cast<size_t>(island)];
+    summary.fixed_power_devices += 1;
+    summary.fixed_power_mw += st.p_mw;
+    if (dc_storage_can_adjust(st)) {
+      const double pmax = finite_limit(st.pmax_mw, st.p_rated_mw);
+      const double pmin = finite_limit(st.pmin_mw, -st.p_rated_mw);
+      add_flex_range(st.p_mw, pmin, pmax, summary.flexible_up_mw, summary.flexible_down_mw);
     }
   }
   for (const auto& er : sys.energy_routers) {
@@ -1276,9 +1327,11 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
     const int out_isl = island_for_bus(dcdc.bus_out);
     const bool in_ref = island_has_ref(in_isl);
     const bool out_ref = island_has_ref(out_isl);
-    if (dcdc.control_mode == DCDCControlMode::Droop) {
-      // Output-droop voltage forming: the regulated output power must be drawn
-      // from the input side, which therefore needs a voltage-forming source.
+    if (dcdc.control_mode == DCDCControlMode::Droop ||
+        dcdc.control_mode == DCDCControlMode::Voltage) {
+      // Output voltage forming (Droop or Voltage mode): the regulated output
+      // power must be drawn from the input side, which therefore needs its own
+      // voltage-forming source.
       if (!in_ref) {
         add_issue(report,
                   CoordinationSeverity::Error,
@@ -1287,7 +1340,7 @@ ConverterCoordinationReport evaluate_converter_coordination(const HybridPowerSys
                   dcdc.index,
                   in_isl,
                   "DC/DC converter " + std::to_string(dcdc.index) + " forms its output "
-                  "voltage by droop, but its input-side DC island has no voltage-forming "
+                  "voltage, but its input-side DC island has no voltage-forming "
                   "source to supply the regulated output. Add a VSC/ESS/DC source on the "
                   "input side.");
       }

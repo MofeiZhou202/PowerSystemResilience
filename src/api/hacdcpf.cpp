@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "hacdcpf/graph/graph.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -30,6 +31,7 @@ struct SolverHandle {
   powerflow::NewtonSolver newton_solver;
   powerflow::DCSolver dc_solver;
   LossModelType configured_loss_model{LossModelType::Linear};
+  std::unordered_map<int, int> original_vsc_bus_ac;
 };
 
 namespace {
@@ -173,6 +175,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_2w.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.transformers_3w.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.switches.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.circuit_breakers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.charging_stations.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.chargers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.ac.external_grids.size()));
@@ -181,6 +184,7 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.static_generators.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dc_static_generators.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.pv_arrays.size()));
+  h = hash_combine(h, static_cast<std::uint64_t>(sys.dc.dc_circuit_breakers.size()));
   h = hash_combine(h, static_cast<std::uint64_t>(sys.three_phase_ac.has_value()));
   for (const auto& ld : sys.ac.loads) {
     h = hash_combine(h, static_cast<std::uint64_t>(ld.bus));
@@ -313,6 +317,14 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, static_cast<std::uint64_t>(sw.closed));
     h = hash_combine(h, static_cast<std::uint64_t>(sw.in_service));
   }
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_from));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_to));
+    h = hash_combine(h, hash_double(cb.z_ohm));
+    h = hash_combine(h, hash_double(cb.i_rated_ka));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.closed));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.in_service));
+  }
   for (const auto& ch : sys.ac.chargers) {
     h = hash_combine(h, static_cast<std::uint64_t>(ch.station_id));
     h = hash_combine(h, hash_double(ch.p_ch_max_kw));
@@ -335,6 +347,14 @@ std::uint64_t hash_system_signature(const HybridPowerSystem& sys, LossModelType 
     h = hash_combine(h, static_cast<std::uint64_t>(pva.bus));
     h = hash_combine(h, hash_double(pva.p_set_mw));
     h = hash_combine(h, static_cast<std::uint64_t>(pva.in_service));
+  }
+  for (const auto& cb : sys.dc.dc_circuit_breakers) {
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_from));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.bus_to));
+    h = hash_combine(h, hash_double(cb.r_ohm));
+    h = hash_combine(h, hash_double(cb.i_rated_ka));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.closed));
+    h = hash_combine(h, static_cast<std::uint64_t>(cb.in_service));
   }
   if (sys.three_phase_ac.has_value()) {
     const auto& tp = sys.three_phase_ac.value();
@@ -432,6 +452,11 @@ powerflow::SolverData& get_cached_solver_data(const HybridPowerSystem& sys, Loss
 void rebuild_handle_data(SolverHandle& handle,
                          const HybridPowerSystem& sys,
                          LossModelType loss_model) {
+  handle.original_vsc_bus_ac.clear();
+  handle.original_vsc_bus_ac.reserve(sys.vsc_converters.size());
+  for (const auto& conv : sys.vsc_converters) {
+    handle.original_vsc_bus_ac[conv.index] = conv.bus_ac;
+  }
   handle.data = powerflow::make_solver_data(sys, loss_model);
   handle.configured_loss_model = loss_model;
 }
@@ -466,6 +491,25 @@ void populate_derived_results(const powerflow::SolverData& data,
   for (Eigen::Index i = 0; i < vm.size(); ++i) vm[i] = result.vm[static_cast<size_t>(i)];
   for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
   for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
+
+  std::unordered_map<int, int> ac_pos_by_bus;
+  ac_pos_by_bus.reserve(data.ac_buses.size());
+  for (int i = 0; i < static_cast<int>(data.ac_buses.size()); ++i) {
+    ac_pos_by_bus[data.ac_buses[static_cast<size_t>(i)].index] = i;
+  }
+  std::unordered_map<int, int> dc_pos_by_bus;
+  dc_pos_by_bus.reserve(data.dc_buses.size());
+  for (int i = 0; i < static_cast<int>(data.dc_buses.size()); ++i) {
+    dc_pos_by_bus[data.dc_buses[static_cast<size_t>(i)].index] = i;
+  }
+  auto ac_pos = [&](int bus) {
+    const auto it = ac_pos_by_bus.find(bus);
+    return it != ac_pos_by_bus.end() ? it->second : -1;
+  };
+  auto dc_pos = [&](int bus) {
+    const auto it = dc_pos_by_bus.find(bus);
+    return it != dc_pos_by_bus.end() ? it->second : -1;
+  };
 
   // Converters the solver auto-promoted from PQ to VDC_Q (because their DC island
   // had no voltage reference) must report transfers using the regulating mode,
@@ -522,7 +566,7 @@ void populate_derived_results(const powerflow::SolverData& data,
     double p_dc_pu_out = p_dc_pu;
     if (conv.control_mode == ConverterMode::AC_PV &&
         ybus_current.size() == vm.size()) {
-      const int aci = conv.bus_ac - 1;
+      const int aci = ac_pos(conv.bus_ac);
       if (aci >= 0 && aci < static_cast<int>(vm.size())) {
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const double q_net_inj =
@@ -538,7 +582,7 @@ void populate_derived_results(const powerflow::SolverData& data,
       // slack). Report the bus's net active/reactive generation, and report the
       // DC injection as the energy-conduit value −(P_ac + loss) so the converter's
       // reported powers are energy-consistent (matching the solved DC balance).
-      const int aci = conv.bus_ac - 1;
+      const int aci = ac_pos(conv.bus_ac);
       if (aci >= 0 && aci < static_cast<int>(vm.size())) {
         const std::complex<double> v_i = std::polar(vm[aci], va[aci]);
         const std::complex<double> s_net =
@@ -551,7 +595,7 @@ void populate_derived_results(const powerflow::SolverData& data,
                                 : 0.0;
         p_ac_pu_out = s_net.real() + pd_i;
         q_ac_pu_out = s_net.imag() + qd_i;
-        const int dci = conv.bus_dc - 1;
+        const int dci = dc_pos(conv.bus_dc);
         const double vdc_b = (dci >= 0 && dci < static_cast<int>(vdc.size()))
                                  ? vdc[static_cast<size_t>(dci)]
                                  : 1.0;
@@ -575,12 +619,16 @@ void populate_derived_results(const powerflow::SolverData& data,
     // §3.1.4–3.1.7).  Each check is opt-in — it only fires when the relevant
     // limit field is set (>0), so default systems are unaffected.  These are
     // diagnostics (warnings), not hard constraints in this determined solve.
-    const int ac_pos = conv.bus_ac - 1;
-    const int dc_pos = conv.bus_dc - 1;
+    const int ac_bus_pos = ac_pos(conv.bus_ac);
+    const int dc_bus_pos = dc_pos(conv.bus_dc);
     const double vm_ac =
-        (ac_pos >= 0 && ac_pos < static_cast<int>(vm.size())) ? std::max(vm[ac_pos], 1e-3) : 1.0;
+        (ac_bus_pos >= 0 && ac_bus_pos < static_cast<int>(vm.size()))
+            ? std::max(vm[ac_bus_pos], 1e-3)
+            : 1.0;
     const double vdc_b =
-        (dc_pos >= 0 && dc_pos < static_cast<int>(vdc.size())) ? std::max(vdc[dc_pos], 1e-3) : 1.0;
+        (dc_bus_pos >= 0 && dc_bus_pos < static_cast<int>(vdc.size()))
+            ? std::max(vdc[dc_bus_pos], 1e-3)
+            : 1.0;
     const double s_ac_pu = std::hypot(p_ac_pu_out, q_ac_pu_out);
     const double s_rated_pu = conv.p_rated_mw / data.base_mva;
     if (s_rated_pu > 0.0 && s_ac_pu > s_rated_pu * (1.0 + 1e-6)) {
@@ -630,19 +678,21 @@ void populate_derived_results(const powerflow::SolverData& data,
   result.dcdc_transfers.reserve(data.dcdc_converters.size());
   for (const auto& c : data.dcdc_converters) {
     if (!c.in_service) continue;
-    const double eta = (c.eta > 1e-9) ? c.eta : 1.0;
-    const double p_out_mw = c.p_ref_mw;
-    const double p_in_mw = (p_out_mw >= 0.0) ? (p_out_mw / eta) : (p_out_mw * eta);
+    // Report the SOLVED transfer evaluated at the converged DC voltages, not the
+    // schedule. In Voltage/Droop modes the delivered power is set by the island
+    // power balance, so c.p_ref_mw is NOT the actual transfer; Power mode yields
+    // the same numbers as before (minus the now-accounted I2R loss).
+    const auto xfer = powerflow::dcdc_power_transfer(c, vdc, data.base_mva);
     DCDCTransfer tr;
     tr.index = c.index;
     tr.bus_in = c.bus_in;
     tr.bus_out = c.bus_out;
-    tr.p_in_mw = p_in_mw;
-    tr.p_out_mw = p_out_mw;
-    tr.loss_mw = p_in_mw - p_out_mw;
+    tr.p_in_mw = xfer.p_in_pu * data.base_mva;
+    tr.p_out_mw = xfer.p_out_pu * data.base_mva;
+    tr.loss_mw = tr.p_in_mw - tr.p_out_mw;
     // Duty-ratio feasibility from the solved port voltages (multi-converter §3.2).
-    const int bi = c.bus_in - 1;
-    const int bo = c.bus_out - 1;
+    const int bi = dc_pos(c.bus_in);
+    const int bo = dc_pos(c.bus_out);
     const double v_in = (bi >= 0 && bi < vdc.size()) ? vdc[bi] : 1.0;
     const double v_out = (bo >= 0 && bo < vdc.size()) ? vdc[bo] : 1.0;
     const auto duty = powerflow::dcdc_duty_ratio(c, v_in, v_out);
@@ -665,10 +715,10 @@ void populate_derived_results(const powerflow::SolverData& data,
       tr.p_mw = p.p_mw;
       tr.q_mvar = p.q_mvar;
       if (tr.is_ac) {
-        const int b = p.bus - 1;
+        const int b = ac_pos(p.bus);
         tr.v_pu = (b >= 0 && b < vm.size()) ? vm[b] : 1.0;
       } else {
-        const int b = p.bus - 1;
+        const int b = dc_pos(p.bus);
         tr.v_pu = (b >= 0 && b < vdc.size()) ? vdc[b] : 1.0;
       }
       result.er_port_transfers.push_back(tr);
@@ -676,12 +726,51 @@ void populate_derived_results(const powerflow::SolverData& data,
   }
 }
 
+void restore_original_vsc_bus_ac(PowerFlowResult& result,
+                                 const std::unordered_map<int, int>& bus_by_index) {
+  if (bus_by_index.empty()) return;
+  auto original_bus = [&](int index, int fallback) {
+    const auto it = bus_by_index.find(index);
+    return it != bus_by_index.end() ? it->second : fallback;
+  };
+
+  for (auto& tr : result.vsc_transfers) {
+    tr.bus_ac = original_bus(tr.index, tr.bus_ac);
+  }
+  for (auto& conv : result.diagnostics.effective_converters) {
+    conv.bus_ac = original_bus(conv.index, conv.bus_ac);
+  }
+}
+
+void restore_original_vsc_bus_ac(PowerFlowResult& result, const HybridPowerSystem& sys) {
+  std::unordered_map<int, int> bus_by_index;
+  bus_by_index.reserve(sys.vsc_converters.size());
+  for (const auto& conv : sys.vsc_converters) {
+    bus_by_index[conv.index] = conv.bus_ac;
+  }
+  restore_original_vsc_bus_ac(result, bus_by_index);
+}
+
+void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
+  if (map.n_original_branches <= 0 || map.branch_orig_to_proj.empty()) return;
+
+  std::vector<BranchFlow> out(static_cast<size_t>(map.n_original_branches));
+  for (const auto& [orig_pos, proj_pos] : map.branch_orig_to_proj) {
+    if (orig_pos < 0 || orig_pos >= map.n_original_branches) continue;
+    if (proj_pos < 0 || proj_pos >= static_cast<int>(result.branch_flows.size())) continue;
+    out[static_cast<size_t>(orig_pos)] = result.branch_flows[static_cast<size_t>(proj_pos)];
+  }
+  result.branch_flows = std::move(out);
+}
+
 // Expand merged PF result vectors (vm, va) back to the original bus count
 // so that callers can index by original bus position.
 void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
-  if (!map.has_merges()) return;
-  result.vm = unproject_bus_vector(result.vm, map);
-  result.va = unproject_bus_vector(result.va, map);
+  if (map.has_merges() || map.has_dead_buses()) {
+    result.vm = unproject_bus_vector(result.vm, map);
+    result.va = unproject_bus_vector(result.va, map);
+  }
+  unproject_branch_flows(result, map);
 }
 
 }  // namespace
@@ -772,6 +861,7 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
       }
     }
   }
+  restore_original_vsc_bus_ac(result, sys);
   if (data.bus_merge_map) unproject_pf_result(result, *data.bus_merge_map);
 
   // Declare which parts of the unified converter model this snapshot Newton
@@ -866,6 +956,7 @@ PowerFlowResult solve_handle(SolverHandle* handle, const PowerFlowOptions& opt) 
   apply_zip_weights(handle->data, opt);
   PowerFlowResult result = handle->newton_solver.solve(handle->data, opt, nullptr);
   populate_derived_results(handle->data, result, opt.loss_model);
+  restore_original_vsc_bus_ac(result, handle->original_vsc_bus_ac);
   if (handle->data.bus_merge_map) unproject_pf_result(result, *handle->data.bus_merge_map);
   return result;
 }

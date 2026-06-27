@@ -149,12 +149,16 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
     }
   }
 
-  // Always reserve pattern slots for DCDC droop: diagonal + input-bus cross-column.
-  // These are needed regardless of enable_coupled_jacobian because droop modifies
-  // the DC spec (pdc_spec[bout] and pdc_spec[bin] both depend on Vdc_out).
+  // Always reserve pattern slots for DCDC voltage-forming (Droop or Voltage):
+  // diagonal + input-bus cross-column. Needed regardless of enable_coupled_jacobian
+  // because the former modifies the DC spec (pdc_spec[bout] and pdc_spec[bin] both
+  // depend on Vdc_out via the droop / voltage-forming law).
   for (const auto& dcdc : data.dcdc_converters) {
-    if (!dcdc.in_service || dcdc.k_droop == 0.0) continue;
-    if (dcdc.control_mode != DCDCControlMode::Droop) continue;
+    if (!dcdc.in_service) continue;
+    const bool forms =
+        dcdc.control_mode == DCDCControlMode::Voltage ||
+        (dcdc.control_mode == DCDCControlMode::Droop && dcdc.k_droop != 0.0);
+    if (!forms) continue;
     const int bin = dcdc.bus_in - 1;
     const int bout = dcdc.bus_out - 1;
     if (bin < 0 || bin >= ctx.ndc || bout < 0 || bout >= ctx.ndc) continue;
@@ -211,8 +215,11 @@ JacobianPattern build_jacobian_pattern(const SolverData& data, const JacobianCon
   pattern.dcdc_droop_entries.clear();
   for (size_t di = 0; di < data.dcdc_converters.size(); ++di) {
     const auto& dcdc = data.dcdc_converters[di];
-    if (!dcdc.in_service || dcdc.control_mode != DCDCControlMode::Droop) continue;
-    if (dcdc.k_droop == 0.0) continue;
+    if (!dcdc.in_service) continue;
+    const bool forms =
+        dcdc.control_mode == DCDCControlMode::Voltage ||
+        (dcdc.control_mode == DCDCControlMode::Droop && dcdc.k_droop != 0.0);
+    if (!forms) continue;
     const int bin = dcdc.bus_in - 1;
     const int bout = dcdc.bus_out - 1;
     if (bin < 0 || bin >= ctx.ndc || bout < 0 || bout >= ctx.ndc) continue;
