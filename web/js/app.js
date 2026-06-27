@@ -104,6 +104,12 @@ const App = (() => {
       ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
   }
 
+  function compClickAttr(compId) {
+    const id = parseInt(compId, 10);
+    return Number.isInteger(id)
+      ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
+  }
+
   function numberOr(value, fallback = 0) {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
@@ -3305,6 +3311,68 @@ const App = (() => {
     return type || '';
   }
 
+  function reliabilityComponentTypeLabel(type) {
+    const labels = {
+      generator: '发电机',
+      ac_branch: 'AC线路',
+      dc_branch: 'DC线路',
+      vsc_converter: 'VSC换流器',
+      static_generator: '静态电源',
+      renewable_gen: '新能源电源',
+      storage: '储能',
+      transformer_2w: '双绕组变压器',
+      transformer_3w: '三绕组变压器',
+      dcdc_converter: 'DC/DC变换器',
+      dc_circuit_breaker: 'DC断路器',
+      dc_storage: 'DC储能',
+      dc_pv_array: 'DC光伏',
+      dc_static_generator: 'DC静态电源',
+      ac_switch: 'AC开关',
+      ac_circuit_breaker: 'AC断路器',
+      ac_pv_system: 'AC光伏',
+      dc_static_generator_ac: 'DC分布式电源',
+    };
+    return labels[type] || componentTypeLabel(type) || type || '—';
+  }
+
+  function reliabilityContingencyCompId(c, maps) {
+    if (!c || !maps) return undefined;
+    const bucketName = c.canvas_type;
+    const key = Number(c.canvas_index);
+    if (bucketName && maps[bucketName] && Number.isFinite(key) && maps[bucketName][key] != null) {
+      return maps[bucketName][key];
+    }
+    const fallbackMap = {
+      generator: 'gen',
+      ac_branch: 'branch',
+      dc_branch: 'dcBranch',
+      vsc_converter: 'vsc',
+      static_generator: 'sgen',
+      renewable_gen: 'renGen',
+      storage: 'storage',
+      transformer_2w: 'trafo',
+      transformer_3w: 'trafo3w',
+      dcdc_converter: 'dcdcConverter',
+      dc_circuit_breaker: 'dcCb',
+      dc_storage: 'dcStorage',
+      dc_pv_array: 'dcPv',
+      dc_static_generator: 'dcNativeSgen',
+      ac_switch: 'sw',
+      ac_circuit_breaker: 'cb',
+      ac_pv_system: 'pv',
+      dc_static_generator_ac: 'dcSgen',
+    };
+    const fallbackBucket = fallbackMap[c.component_type];
+    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
+      return maps[fallbackBucket][key];
+    }
+    const pos = Number(c.component_index);
+    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(pos) && maps[fallbackBucket][pos] != null) {
+      return maps[fallbackBucket][pos];
+    }
+    return undefined;
+  }
+
   function renderAllPowerFlowComponentStatus(data, busMap) {
     data = normalizePowerFlowResult(data);
     const section = document.getElementById('pfAllComponentsSection');
@@ -6368,8 +6436,11 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">关键故障 (按 EENS 贡献)</h4><table><thead><tr><th>元件</th><th>类型</th><th>EENS贡献(MWh/yr)</th><th>切负荷(MW)</th></tr></thead><tbody>';
         const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
         data.contingencies.slice(0, 15).forEach(c => {
-          const clk = busClickAttr(busIdFromComponentName(c.component_name), relBusMap);
-          html += `<tr${clk}><td>${c.component_name ?? '—'}</td><td>${c.component_type ?? '—'}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
+          const compId = reliabilityContingencyCompId(c, relBusMap);
+          const clk = compClickAttr(compId);
+          const name = c.display_name || c.component_name || '—';
+          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
+          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
         });
         html += '</tbody></table>';
       }
