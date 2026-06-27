@@ -2030,7 +2030,7 @@ const Canvas = (() => {
             brIdx++;
           } else {
             const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
-            sys.ac.transformers_2w.push({
+            const trafo = {
               index: trafoIndex, hv_bus: hv, lv_bus: lv,
               sn_mva: numOr(p.sn_mva, 100),
               vn_hv_kv: numOr(p.vn_hv_kv, 220),
@@ -2048,7 +2048,11 @@ const Canvas = (() => {
               tap_step_percent: numOr(p.tap_step_percent, 1.25),
               vector_group: p.vector_group || '',
               in_service: p.in_service !== false,
-            });
+            };
+            if (Number(p.source_branch_idx) > 0) {
+              trafo.source_branch_idx = Number(p.source_branch_idx);
+            }
+            sys.ac.transformers_2w.push(trafo);
             trafoIdx++;
           }
           break;
@@ -3127,6 +3131,7 @@ const Canvas = (() => {
         tap_neutral: tr.tap_neutral,
         tap_step_percent: tr.tap_step_percent,
         vector_group: tr.vector_group || '',
+        source_branch_idx: tr.source_branch_idx,
         in_service: tr.in_service !== false,
       });
       addConnection(comp.id, 'hv', hvCompId, 'bottom');
@@ -3242,6 +3247,7 @@ const Canvas = (() => {
     const importDcStorage = (s) => {
       addDeviceAtBus('dc_storage', s.bus, {
         ...COMP.defaults.dc_storage,
+        index: s.index,
         name: s.name || 'DC ESS',
         p_mw: s.p_mw,
         p_rated_mw: s.p_rated_mw, e_rated_mwh: s.e_rated_mwh,
@@ -3870,6 +3876,19 @@ const Canvas = (() => {
       return out;
     }
 
+    const dcStorageComps = state.components.filter(comp => comp.type === 'dc_storage');
+    const solvedDcStorageRows = resultRowsByIndexOrOrder(_lastPfResult.dc_storage_results || [], dcStorageComps);
+    const solvedDcStorageById = {};
+    dcStorageComps.forEach((comp, i) => {
+      if (solvedDcStorageRows[i]) solvedDcStorageById[comp.id] = solvedDcStorageRows[i];
+    });
+    const solvedDcStoragePowerMW = (comp) => {
+      const row = solvedDcStorageById[comp.id];
+      if (!row) return null;
+      const value = Number(row.p_mw);
+      return Number.isFinite(value) ? value : null;
+    };
+
     function readOperatingPowerMW(comp, busCompId) {
       const p = comp.params || {};
       if (p.in_service === false || p.in_service === 'false') return 0;
@@ -3885,6 +3904,10 @@ const Canvas = (() => {
       }
       if (comp.type === 'asymmetric_load') {
         return numOr(p.pa_mw, 0) + numOr(p.pb_mw, 0) + numOr(p.pc_mw, 0);
+      }
+      if (comp.type === 'dc_storage') {
+        const solved = solvedDcStoragePowerMW(comp);
+        if (solved !== null) return solved;
       }
       const currentPowerFields = {
         vpp: ['p_output_mw', 'p_mw'],
@@ -4560,7 +4583,8 @@ const Canvas = (() => {
         else if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage') {
           // Storage dispatch must use its signed setpoint. A zero setpoint is a
           // real operating state; falling back to rated power draws a false flow.
-          powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0;
+          const solved = comp.type === 'dc_storage' ? solvedDcStoragePowerMW(comp) : null;
+          powerMW = solved !== null ? solved : (Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0);
         }
         else if (comp.type === 'dc_pv_array') powerMW = Number.isFinite(Number(p.p_set_mw)) ? Number(p.p_set_mw) : 0;
         else powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw)

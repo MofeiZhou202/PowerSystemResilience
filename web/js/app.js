@@ -3539,6 +3539,14 @@ const App = (() => {
       const pos = posOf(key, compId);
       return pos >= 0 && pos < rows.length ? rows[pos] : null;
     };
+    const componentMetric = (row, label) => {
+      const metric = Array.isArray(row?.metrics)
+        ? row.metrics.find(m => m.label === label)
+        : null;
+      if (!metric || String(metric.quantity || '').toLowerCase() === 'text') return null;
+      const value = Number(metric.value);
+      return Number.isFinite(value) ? value : null;
+    };
 
     const geoBus = (domain, idx) => (data.geo_buses || []).find(b =>
       String(b.type || '').toLowerCase() === (domain === 'dc' ? 'dc' : 'ac') &&
@@ -3588,8 +3596,10 @@ const App = (() => {
           };
         case 'dc_load':
           return { p: -((toNum(p.p_mw) ?? 0) * scale), q: 0 };
-        case 'dc_storage':
-          return { p: toNum(p.p_mw) ?? 0, q: 0 };
+        case 'dc_storage': {
+          const row = rowByIndexOrPos(firstNonEmptyArray(data.dc_storage_results, (data.component_results || []).filter(r => r.canvas_type === 'dc_storage')), 'dcStorage', comp.id);
+          return { p: toNum(row?.p_mw) ?? componentMetric(row, 'P计算') ?? toNum(p.p_mw) ?? 0, q: 0 };
+        }
         case 'storage':
         case 'mobile_storage':
           return { p: toNum(p.p_mw) ?? 0, q: toNum(p.q_mvar) ?? 0 };
@@ -3782,19 +3792,32 @@ const App = (() => {
           note.push('本次潮流计算采用的相别负荷消耗');
           break;
         }
+        case 'dc_storage':
         case 'storage':
         case 'mobile_storage': {
+          const dcRow = comp.type === 'dc_storage'
+            ? rowByIndexOrPos(firstNonEmptyArray(data.dc_storage_results, (data.component_results || []).filter(r => r.canvas_type === 'dc_storage')), 'dcStorage', comp.id)
+            : null;
+          const pSolved = comp.type === 'dc_storage'
+            ? (toNum(dcRow?.p_mw) ?? componentMetric(dcRow, 'P计算') ?? toNum(p.p_mw))
+            : toNum(p.p_mw);
+          const pBalanceShare = comp.type === 'dc_storage'
+            ? (toNum(dcRow?.p_balance_share_mw) ?? componentMetric(dcRow, '平衡分摊'))
+            : null;
           detail = [
-            `P计算=${fmtP(p.p_mw, 3)}`,
+            `P计算=${fmtP(pSolved, 3)}`,
+            pBalanceShare !== null && Math.abs(pBalanceShare) > 1e-6 ? `平衡分摊=${fmtP(pBalanceShare, 3)}` : '',
             `Q计算=${fmtQ(p.q_mvar, 3)}`,
             `P额定=${fmtP(p.p_rated_mw, 3)}`,
             `E额定=${fmt(p.e_rated_mwh, 3)} MWh`,
-            `SOC=${fmt(p.soc_init, 4)}`,
+            `SOC=${fmt(dcRow?.soc ?? p.soc_init, 4)}`,
             comp.type === 'mobile_storage' ? `移动状态=${p.status || '-'}` : '',
             comp.type === 'mobile_storage' ? `目标母线=${p.target_bus || '-'}` : '',
           ];
           solved = data.converged;
-          note.push('本次潮流计算采用的储能注入；正值放电，负值充电');
+          note.push(pBalanceShare !== null && Math.abs(pBalanceShare) > 1e-6
+            ? '本次潮流计算采用的储能注入；正值放电，负值充电；DC_V平衡功率已投影到该储能'
+            : '本次潮流计算采用的储能注入；正值放电，负值充电');
           break;
         }
         case 'pv_system':
@@ -4161,8 +4184,43 @@ const App = (() => {
       if (!Number.isFinite(vm) || !Number.isFinite(va)) return null;
       return complex(vm * Math.cos(va), vm * Math.sin(va));
     }
+    const acBranchBackedTrafos = [];
+    (sys.ac?.branches || []).forEach(br => {
+      if (!isOn(br)) return;
+      const tap = num(br.tap, 1);
+      const shift = num(br.shift_deg, 0);
+      if (Math.abs(tap - 1) <= 1e-8 && Math.abs(shift) <= 1e-8) return;
+      acBranchBackedTrafos.push({
+        from: Number(br.from_bus),
+        to: Number(br.to_bus),
+        tap,
+        shift,
+        rPu: num(br.r_pu),
+        xPu: Math.abs(num(br.x_pu)),
+      });
+    });
+    const isBranchBackedTrafo = (tf) => {
+      const sourceIdx = Number(tf?.source_branch_idx);
+      if (Number.isFinite(sourceIdx) && sourceIdx > 0) return true;
+      const hv = Number(tf?.hv_bus);
+      const lv = Number(tf?.lv_bus);
+      const tap = Math.max(1e-6, 1 + (num(tf?.tap_pos) - num(tf?.tap_neutral)) * num(tf?.tap_step_percent) / 100);
+      const shift = num(tf?.shift_deg, 0);
+      const baseMva = num(sys.base_mva ?? sys.ac?.base_mva, 100);
+      const snMva = num(tf?.sn_mva);
+      const scale = snMva > 1e-9 ? baseMva / snMva : 0;
+      const zMag = Math.max(0, num(tf?.vk_percent) / 100) * scale;
+      const rPu = Math.max(0, num(tf?.vkr_percent) / 100) * scale;
+      const xPu = Math.sqrt(Math.max(0, zMag * zMag - rPu * rPu));
+      return acBranchBackedTrafos.some(br => {
+        if (br.from !== hv || br.to !== lv) return false;
+        if (Math.abs(br.tap - tap) > 1e-5 || Math.abs(br.shift - shift) > 1e-5) return false;
+        if (snMva <= 1e-9 || baseMva <= 1e-9) return true;
+        return Math.abs(br.rPu - rPu) <= 1e-5 && Math.abs(br.xPu - xPu) <= 1e-5;
+      });
+    };
     (sys.ac?.transformers_2w || []).forEach(tf => {
-      if (!isOn(tf) || tf.source_branch_idx > 0) return;
+      if (!isOn(tf) || isBranchBackedTrafo(tf)) return;
       const vh = vphasor(tf.hv_bus);
       const vl = vphasor(tf.lv_bus);
       const baseMva = num(sys.base_mva ?? sys.ac?.base_mva, 100);

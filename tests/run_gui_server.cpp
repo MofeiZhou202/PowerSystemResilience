@@ -4696,7 +4696,7 @@ int main(int argc, char** argv) {
       g_session.external_grid_carbon_profiles.clear();
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = js;
+      summary["_raw_json"] = hacdcpf::io::to_json(*g_session.current_system, 2);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -6721,6 +6721,7 @@ int main(int argc, char** argv) {
           add_metric(row, "P消耗", ld.in_service ? ld.p_mw * ld.scaling : 0.0, "MW", "p", 4);
           component_results.push_back(std::move(row));
         }
+        json dc_storage_results = json::array();
         for (size_t i = 0; i < sys.dc.storage.size(); ++i) {
           const auto& st = sys.dc.storage[i];
           const double p_solved = st.in_service
@@ -6739,6 +6740,21 @@ int main(int argc, char** argv) {
                             ? "正值为放电注入，负值为充电吸收；DC_V平衡功率已投影到该储能"
                             : "正值为放电注入，负值为充电吸收");
           component_results.push_back(std::move(row));
+          dc_storage_results.push_back(json{
+            {"index", st.index},
+            {"position", static_cast<int>(i)},
+            {"bus", st.bus},
+            {"p_mw", p_solved},
+            {"p_scheduled_mw", st.in_service ? st.p_mw : 0.0},
+            {"p_balance_share_mw", p_balance_share},
+            {"p_rated_mw", st.p_rated_mw},
+            {"e_rated_mwh", st.e_rated_mwh},
+            {"soc", st.soc_init},
+            {"in_service", st.in_service},
+            {"controllable", st.controllable},
+            {"name", st.name},
+            {"source_type", "storage"}
+          });
         }
         for (size_t i = 0; i < sys.dc.dc_storage.size(); ++i) {
           const auto& st = sys.dc.dc_storage[i];
@@ -6758,7 +6774,23 @@ int main(int argc, char** argv) {
                             ? "正值为放电注入，负值为充电吸收；DC_V平衡功率已投影到该储能"
                             : "正值为放电注入，负值为充电吸收");
           component_results.push_back(std::move(row));
+          dc_storage_results.push_back(json{
+            {"index", st.index},
+            {"position", static_cast<int>(i)},
+            {"bus", st.bus},
+            {"p_mw", p_solved},
+            {"p_scheduled_mw", st.in_service ? st.p_mw : 0.0},
+            {"p_balance_share_mw", p_balance_share},
+            {"p_rated_mw", st.p_rated_mw},
+            {"e_rated_mwh", st.e_rated_mwh},
+            {"soc", st.soc_init},
+            {"in_service", st.in_service},
+            {"controllable", st.controllable},
+            {"name", st.name},
+            {"source_type", "dc_storage"}
+          });
         }
+        out["dc_storage_results"] = dc_storage_results;
         for (size_t i = 0; i < sys.dc.static_generators.size(); ++i) {
           const auto& sg = sys.dc.static_generators[i];
           json row = base_row("static_generator", "DC", sg.index, static_cast<int>(i),
