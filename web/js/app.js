@@ -110,6 +110,61 @@ const App = (() => {
       ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
   }
 
+  function rowCanvasCompId(row, maps) {
+    if (!row || !maps) return undefined;
+    const type = row.canvas_type;
+    const rawIndex = row.canvas_index ?? row.index;
+    const bucketAliases = {
+      ac_bus: 'ac',
+      dc_bus: 'dc',
+      ac_branch: 'branch',
+      dc_branch: 'dcBranch',
+      vsc_converter: 'vsc',
+      dcdc_converter: 'dcdcConverter',
+      energy_router: 'energyRouter',
+      dc_storage: 'dcStorage',
+      pv_system: 'pv',
+      dc_pv_array: 'dcPv',
+      renewable_gen: 'renGen',
+      static_generator: 'sgen',
+      external_grid: 'extGrid',
+      transformer_2w: 'trafo',
+      transformer_3w: 'trafo3w',
+      switch_comp: 'sw',
+      circuit_breaker: 'cb',
+      dc_circuit_breaker: 'dcCb',
+      mobile_storage: 'mobileStorage',
+      flexible_load: 'flexLoad',
+      asymmetric_load: 'asymLoad',
+      charging_station: 'chargingStation',
+    };
+    const bucket = type && (maps[type] ? type : bucketAliases[type]);
+    if (bucket && rawIndex != null && maps[bucket]) {
+      const idx = Number(rawIndex);
+      if (Number.isFinite(idx) && maps[bucket][idx] != null) return maps[bucket][idx];
+    }
+    const bus = row.bus ?? row.bus_ac ?? row.bus_in ?? row.from_bus ?? row.index;
+    const busMap = (type === 'dc' || type === 'dc_bus' || type === 'dcBranch' ||
+      type === 'dc_branch' || type === 'dc_storage' || type === 'dcdcConverter' ||
+      type === 'dcdc_converter') ? maps.dc : maps.ac;
+    const busId = Number(bus);
+    return Number.isFinite(busId) && busMap ? busMap[busId] : undefined;
+  }
+
+  function positiveDemandMw(row) {
+    return Math.abs(numberOr(row?.display_demand_mw ?? row?.demand_mw, 0));
+  }
+
+  function carbonLoadLabel(row) {
+    if (row?.display_load != null && String(row.display_load).trim() !== '') {
+      return String(row.display_load);
+    }
+    const idx = Number(row?.load_index);
+    if (Number.isFinite(idx) && idx >= 0) return String(row.load_index);
+    const bus = row?.bus ?? '—';
+    return `${row?.is_dc ? 'DC Bus Load @' : 'Bus Load @'}${bus}`;
+  }
+
   function numberOr(value, fallback = 0) {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
@@ -1300,9 +1355,9 @@ const App = (() => {
     ];
     let loadHtml = `<table><thead><tr><th>类型</th><th>Load</th><th>Bus</th><th>P(MW)</th><th>碳强度(${carbonIntensityUnit()})</th><th>碳排(tCO2)</th></tr></thead><tbody>`;
     loadRows.forEach(l => {
-      const demand = Number(l.demand_mw || 0);
+      const demand = positiveDemandMw(l);
       const emissions = Math.max(0, Number(l.total_emissions_tco2 || 0));
-      loadHtml += `<tr${cbClick(l.bus, l.is_dc)}><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${l.load_index}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
+      loadHtml += `<tr${cbClick(l.bus, l.is_dc)}><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${escapeHtml(carbonLoadLabel(l))}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
     });
     loadHtml += loadRows.length ? '</tbody></table>' : '<tr><td colspan="6">暂无负荷碳排放结果</td></tr></tbody></table>';
     document.getElementById('carbonLoadResults').innerHTML = loadHtml;
@@ -1324,7 +1379,14 @@ const App = (() => {
       storageSec.style.display = '';
       let html = `<table><thead><tr><th>类型</th><th>Storage</th><th>Bus</th><th>P(MW)</th><th>SOC</th><th>库存碳强度(${carbonIntensityUnit()})</th><th>本时段碳排(tCO2)</th></tr></thead><tbody>`;
       storageRows.forEach(s => {
-        html += `<tr><td>${s.is_dc ? 'DC' : 'AC'}</td><td>${s.storage_index}</td><td>${s.bus}</td><td>${Number(s.p_mw || 0).toFixed(4)}</td><td>${Number(s.soc || 0).toFixed(4)}</td><td>${carbonIntensityDisplay(s.soc_carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(s.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
+        const row = {
+          ...s,
+          canvas_type: s.canvas_type || (s.is_dc ? 'dc_storage' : 'storage'),
+          canvas_index: s.canvas_index ?? s.storage_index,
+        };
+        const attr = compClickAttr(rowCanvasCompId(row, cbMap));
+        const pText = Number.isFinite(Number(s.p_mw)) ? Number(s.p_mw).toFixed(4) : '—';
+        html += `<tr${attr}><td>${s.is_dc ? 'DC' : 'AC'}</td><td>${s.storage_index}</td><td>${s.bus}</td><td>${pText}</td><td>${Number(s.soc || 0).toFixed(4)}</td><td>${carbonIntensityDisplay(s.soc_carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(s.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
       });
       html += '</tbody></table>';
       document.getElementById('carbonStorageResults').innerHTML = html;
@@ -1925,18 +1987,11 @@ const App = (() => {
     const req = data._constraints || {};
     // Bus/component map so OPF result rows pan to the matching canvas component
     // when clicked, exactly like the power-flow and carbon-flow result tables.
-    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
-      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
-    const panAttr = (compId) => compId !== undefined
-      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-    // Generator / converter maps are keyed by component index, which is 1-based
-    // for imported cases (MATPOWER) but 0-based for components drawn from
-    // scratch. Detect the base once so position-ordered OPF result rows resolve
-    // to the right component either way.
-    const keyBase = (m) => (m && m[0] !== undefined) ? 0 : 1;
-    const genBase = keyBase(busMap.gen);
-    const vscBase = keyBase(busMap.vsc);
-    const dcdcBase = keyBase(busMap.dcdcConverter);
+	    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+	      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
+	    const panAttr = (compId) => compId !== undefined
+	      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+	    const attrForRow = (row, fallbackCompId) => panAttr(rowCanvasCompId(row, busMap) ?? fallbackCompId);
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
@@ -1977,18 +2032,27 @@ const App = (() => {
     }
 
     // Generator dispatch
-    const genDiv = document.getElementById('opfGenResults');
-    if (genDiv) {
-      const pg = data.pg_mw || [];
-      const qg = data.qg_mvar || [];
-      if (pg.length) {
-        let html = '<table><thead><tr><th>#</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
-        pg.forEach((p, i) => {
-          const attr = panAttr(busMap.gen ? busMap.gen[i + genBase] : undefined);
-          html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qg[i])}</td></tr>`;
-        });
-        html += '</tbody></table>';
-        genDiv.innerHTML = html;
+	    const genDiv = document.getElementById('opfGenResults');
+	    if (genDiv) {
+	      const pg = data.pg_mw || [];
+	      const qg = data.qg_mvar || [];
+	      const genRows = Array.isArray(data.generator_dispatch) && data.generator_dispatch.length
+	        ? data.generator_dispatch
+	        : pg.map((p, i) => {
+	            const item = SYS?.ac?.generators?.[i] || {};
+	            return { position: i, index: item.index ?? i, name: item.name, bus: item.bus,
+	              pg_mw: p, qg_mvar: qg[i], canvas_type: 'gen', canvas_index: item.index ?? i };
+	          });
+	      if (genRows.length) {
+	        let html = '<table><thead><tr><th>发电机</th><th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
+	        genRows.forEach((g, i) => {
+	          const p = g.pg_mw ?? pg[i];
+	          const q = g.qg_mvar ?? qg[i];
+	          const label = g.name || (g.index != null ? `#${g.index}` : `pos ${g.position ?? i}`);
+	          html += `<tr${attrForRow(g)}><td>${escapeHtml(label)}</td><td>${g.bus ?? '-'}</td><td>${fmt(p)}</td><td>${fmt(q)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	        genDiv.innerHTML = html;
       } else {
         genDiv.innerHTML = '<p class="empty-hint">无发电机出力数据</p>';
       }
@@ -1998,88 +2062,99 @@ const App = (() => {
     // matches the canvas flow overlay, including converter losses/signs.
     const convSec = document.getElementById('opfConvSection');
     const convDiv = document.getElementById('opfConvResults');
-    const pac = data.pac_mw || [];
-    const qac = data.qac_mvar || [];
-    const pdcdc = data.pdcdc_mw || [];
-    const postVsc = data.post_pf?.vsc_transfers || data.vsc_transfers || [];
-    const postDcdc = data.post_pf?.dcdc_transfers || data.dcdc_transfers || [];
-    if (convSec && convDiv && (pac.length || postVsc.length || pdcdc.length || postDcdc.length)) {
-      convSec.style.display = '';
-      let html = '';
-      if (pac.length || postVsc.length) {
-        const n = Math.max(pac.length, postVsc.length);
-        html += '<table><thead><tr><th>VSC#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(MW)</th><th>Qac(MVar)</th><th>Pdc(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
-        for (let i = 0; i < n; i++) {
-          const v = postVsc[i] || {};
-          const idx = v.index ?? (i + 1);
-          const attr = panAttr(busMap.vsc ? (busMap.vsc[idx] ?? busMap.vsc[i + vscBase]) : undefined);
-          html += `<tr${attr}><td>${idx}</td><td>${v.bus_ac ?? '-'}</td><td>${v.bus_dc ?? '-'}</td>` +
-                  `<td>${fmt(v.p_ac_mw ?? pac[i])}</td><td>${fmt(v.q_ac_mvar ?? qac[i])}</td>` +
-                  `<td>${fmt(v.p_dc_mw)}</td><td>${fmt(v.loss_mw)}</td></tr>`;
-        }
-        html += '</tbody></table>';
-      }
-      if (pdcdc.length || postDcdc.length) {
-        const n = Math.max(pdcdc.length, postDcdc.length);
-        html += '<table style="margin-top:8px"><thead><tr><th>DC/DC#</th><th>Bus In</th><th>Bus Out</th><th>OPF P(MW)</th><th>Pin(MW)</th><th>Pout(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
-        for (let i = 0; i < n; i++) {
-          const d = postDcdc[i] || {};
-          const idx = d.index ?? (i + 1);
-          const attr = panAttr(busMap.dcdcConverter ? (busMap.dcdcConverter[idx] ?? busMap.dcdcConverter[i + dcdcBase]) : undefined);
-          html += `<tr${attr}><td>${idx}</td><td>${d.bus_in ?? '-'}</td><td>${d.bus_out ?? '-'}</td>` +
-                  `<td>${fmt(pdcdc[i])}</td><td>${fmt(d.p_in_mw)}</td><td>${fmt(d.p_out_mw)}</td><td>${fmt(d.loss_mw)}</td></tr>`;
-        }
-        html += '</tbody></table>';
-      }
+	    const pac = data.pac_mw || [];
+	    const qac = data.qac_mvar || [];
+	    const pdcdc = data.pdcdc_mw || [];
+	    const vscRows = Array.isArray(data.vsc_dispatch) ? data.vsc_dispatch : [];
+	    const dcdcRows = Array.isArray(data.dcdc_dispatch) ? data.dcdc_dispatch : [];
+	    const postVsc = data.post_pf?.vsc_transfers || data.vsc_transfers || [];
+	    const postDcdc = data.post_pf?.dcdc_transfers || data.dcdc_transfers || [];
+	    if (convSec && convDiv && (pac.length || postVsc.length || vscRows.length || pdcdc.length || postDcdc.length || dcdcRows.length)) {
+	      convSec.style.display = '';
+	      let html = '';
+	      if (pac.length || postVsc.length || vscRows.length) {
+	        const n = Math.max(pac.length, postVsc.length, vscRows.length);
+	        html += '<table><thead><tr><th>VSC</th><th>AC Bus</th><th>DC Bus</th><th>Pac(MW)</th><th>Qac(MVar)</th><th>Pdc(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
+	        for (let i = 0; i < n; i++) {
+	          const row = vscRows[i] || {};
+	          const v = postVsc[i] || {};
+	          const merged = { ...row, ...v, canvas_type: row.canvas_type || 'vsc', canvas_index: row.canvas_index ?? v.index ?? row.index };
+	          const label = row.name || (merged.index != null ? `#${merged.index}` : `pos ${i}`);
+	          html += `<tr${attrForRow(merged)}><td>${escapeHtml(label)}</td><td>${merged.bus_ac ?? '-'}</td><td>${merged.bus_dc ?? '-'}</td>` +
+	                  `<td>${fmt(v.p_ac_mw ?? row.pac_mw ?? pac[i])}</td><td>${fmt(v.q_ac_mvar ?? row.qac_mvar ?? qac[i])}</td>` +
+	                  `<td>${fmt(v.p_dc_mw)}</td><td>${fmt(v.loss_mw)}</td></tr>`;
+	        }
+	        html += '</tbody></table>';
+	      }
+	      if (pdcdc.length || postDcdc.length || dcdcRows.length) {
+	        const n = Math.max(pdcdc.length, postDcdc.length, dcdcRows.length);
+	        html += '<table style="margin-top:8px"><thead><tr><th>DC/DC</th><th>Bus In</th><th>Bus Out</th><th>OPF P(MW)</th><th>Pin(MW)</th><th>Pout(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
+	        for (let i = 0; i < n; i++) {
+	          const row = dcdcRows[i] || {};
+	          const d = postDcdc[i] || {};
+	          const merged = { ...row, ...d, canvas_type: row.canvas_type || 'dcdcConverter', canvas_index: row.canvas_index ?? d.index ?? row.index };
+	          const label = row.name || (merged.index != null ? `#${merged.index}` : `pos ${i}`);
+	          html += `<tr${attrForRow(merged)}><td>${escapeHtml(label)}</td><td>${merged.bus_in ?? '-'}</td><td>${merged.bus_out ?? '-'}</td>` +
+	                  `<td>${fmt(row.pdcdc_mw ?? pdcdc[i])}</td><td>${fmt(d.p_in_mw)}</td><td>${fmt(d.p_out_mw)}</td><td>${fmt(d.loss_mw)}</td></tr>`;
+	        }
+	        html += '</tbody></table>';
+	      }
       convDiv.innerHTML = html || '<p class="empty-hint">无换流器出力数据</p>';
     } else if (convSec) {
       convSec.style.display = 'none';
     }
 
     // DC bus voltages — only for hybrid AC/DC cases.
-    const dcSec = document.getElementById('opfDcBusSection');
-    const dcDiv = document.getElementById('opfDcBusResults');
-    const vdc = data.vdc || [];
-    if (dcSec && dcDiv && vdc.length) {
-      dcSec.style.display = '';
-      const dcBusIdAt = (i) => {
-        const id = SYS?.dc?.buses?.[i]?.index;
-        return id !== undefined && id !== null ? Number(id) : null;
-      };
-      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
-      vdc.forEach((v, i) => {
-        const busId = dcBusIdAt(i);
-        const attr = panAttr(busId != null && busMap.dc ? busMap.dc[busId] : undefined);
-        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td>${fmt(v, 6)}</td></tr>`;
-      });
-      html += '</tbody></table>';
-      dcDiv.innerHTML = html;
+	    const dcSec = document.getElementById('opfDcBusSection');
+	    const dcDiv = document.getElementById('opfDcBusResults');
+	    const vdc = data.vdc || [];
+	    const dcRows = Array.isArray(data.dc_bus_results) && data.dc_bus_results.length
+	      ? data.dc_bus_results
+	      : vdc.map((v, i) => {
+	          const busId = SYS?.dc?.buses?.[i]?.index;
+	          return { position: i, index: busId ?? i, vdc_pu: v, canvas_type: 'dc', canvas_index: busId ?? i };
+	        });
+	    if (dcSec && dcDiv && dcRows.length) {
+	      dcSec.style.display = '';
+	      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
+	      dcRows.forEach((row, i) => {
+	        const busId = row.index ?? row.canvas_index;
+	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td><td>${fmt(row.vdc_pu ?? vdc[i], 6)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      dcDiv.innerHTML = html;
     } else if (dcSec) {
       dcSec.style.display = 'none';
     }
 
-    // AC bus voltages and locational marginal prices.
-    const busDiv = document.getElementById('opfBusResults');
-    const vm = data.vm || [];
-    if (busDiv && vm.length) {
-      const va = data.va || [];
-      const lmpP = data.lmp_p || [];
-      const lmpQ = data.lmp_q || [];
-      const hasLmp = lmpP.length > 0;
-      const acBusIdAt = (i) => {
-        const id = SYS?.ac?.buses?.[i]?.index;
-        return id !== undefined && id !== null ? Number(id) : null;
-      };
-      let html = `<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
-      vm.forEach((v, i) => {
-        const busId = acBusIdAt(i);
-        const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
-        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-        const attr = panAttr(busId != null && busMap.ac ? busMap.ac[busId] : undefined);
-        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
-      });
-      html += '</tbody></table>';
-      busDiv.innerHTML = html;
+	    // AC bus voltages and locational marginal prices.
+	    const busDiv = document.getElementById('opfBusResults');
+	    const vm = data.vm || [];
+	    const acRows = Array.isArray(data.ac_bus_results) && data.ac_bus_results.length
+	      ? data.ac_bus_results
+	      : vm.map((v, i) => {
+	          const busId = SYS?.ac?.buses?.[i]?.index;
+	          return { position: i, index: busId ?? i, vm_pu: v, va_rad: data.va?.[i],
+	            lmp_p: data.lmp_p?.[i] ?? data.lmp?.[i], lmp_q: data.lmp_q?.[i],
+	            canvas_type: 'ac', canvas_index: busId ?? i };
+	        });
+	    if (busDiv && acRows.length) {
+	      const va = data.va || [];
+	      const lmpP = data.lmp_p || [];
+	      const lmpQ = data.lmp_q || [];
+	      const hasLmp = acRows.some(r => r.lmp_p != null) || lmpP.length > 0 || Array.isArray(data.lmp);
+	      const hasVm = acRows.some(r => r.vm_pu != null) || vm.length > 0;
+	      let html = `<table><thead><tr><th>Bus</th>${hasVm ? '<th>Vm(pu)</th>' : ''}<th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
+	      acRows.forEach((row, i) => {
+	        const busId = row.index ?? row.canvas_index;
+	        const v = row.vm_pu ?? vm[i];
+	        const ang = row.va_rad != null ? (row.va_rad * 180 / Math.PI).toFixed(4)
+	          : (va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0');
+	        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
+	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td>${hasVm ? `<td style="${color}">${fmt(v, 6)}</td>` : ''}<td>${ang}</td>${hasLmp ? `<td>${fmt(row.lmp_p ?? lmpP[i] ?? data.lmp?.[i])}</td><td>${fmt(row.lmp_q ?? lmpQ[i])}</td>` : ''}</tr>`;
+	      });
+	      html += '</tbody></table>';
+	      busDiv.innerHTML = html;
     } else if (busDiv) {
       busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
     }
@@ -2128,26 +2203,36 @@ const App = (() => {
       ccSec.style.display = 'none';
     }
 
-    // ── Post-OPF power flow (潮流) at the OPF dispatch ──
-    const postPfSec = document.getElementById('opfPostPfSection');
-    const postPfDiv = document.getElementById('opfPostPfResults');
-    const postPf = data.post_pf;
-    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
-      postPfSec.style.display = '';
-      const busMapAc = busMap.ac || {};
-      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
-      postPf.branch_flows.forEach(b => {
-        const ld = b.loading_pct || 0;
-        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
-        const attr = panAttr(busMapAc[b.from_bus]);
-        html += `<tr${attr}><td>${b.from_bus}→${b.to_bus}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
-      });
-      html += '</tbody></table>';
-      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
-      postPfDiv.innerHTML = html;
-    } else if (postPfSec) {
-      postPfSec.style.display = 'none';
-    }
+	    // ── Post-OPF power flow (潮流) at the OPF dispatch ──
+	    const postPfSec = document.getElementById('opfPostPfSection');
+	    const postPfDiv = document.getElementById('opfPostPfResults');
+	    const postPf = data.post_pf;
+	    const dcOpfBranches = Array.isArray(data.dc_opf_branch_dispatch) ? data.dc_opf_branch_dispatch : [];
+	    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
+	      postPfSec.style.display = '';
+	      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
+	      postPf.branch_flows.forEach(b => {
+	        const ld = b.loading_pct || 0;
+	        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
+	        const row = { ...b, canvas_type: b.canvas_type || 'branch', canvas_index: b.canvas_index ?? b.index };
+	        const label = b.name || (b.index != null ? `#${b.index} ${b.from_bus}→${b.to_bus}` : `${b.from_bus}→${b.to_bus}`);
+	        html += `<tr${attrForRow(row)}><td>${escapeHtml(label)}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
+	      postPfDiv.innerHTML = html;
+	    } else if (postPfSec && postPfDiv && dcOpfBranches.length) {
+	      postPfSec.style.display = '';
+	      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Rate(MVA)</th></tr></thead><tbody>';
+	      dcOpfBranches.forEach((b, i) => {
+	        const label = b.name || (b.index != null ? `#${b.index} ${b.from_bus}→${b.to_bus}` : `pos ${b.position ?? i}`);
+	        html += `<tr${attrForRow(b)}><td>${escapeHtml(label)}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.rate_mva)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      postPfDiv.innerHTML = html;
+	    } else if (postPfSec) {
+	      postPfSec.style.display = 'none';
+	    }
 
     // ── Post-OPF carbon flow (碳流) at the OPF dispatch ──
     const postCbSec = document.getElementById('opfPostCarbonSection');
@@ -6516,7 +6601,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">负荷碳排放 (Top 20)</h4>';
         html += '<table><thead><tr><th>负荷</th><th>母线</th><th>需求(MW)</th><th>碳强度(tCO₂/MWh)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
         loads.slice(0, 20).forEach(l => {
-          html += `<tr${busClickAttr(l.bus, cbBusMap)}><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
+          html += `<tr${busClickAttr(l.bus, cbBusMap)}><td>${escapeHtml(carbonLoadLabel(l))}</td><td>${l.bus ?? '—'}</td><td>${nf(positiveDemandMw(l), 3)}</td>`
             + `<td>${nf(l.carbon_intensity_tco2_mwh, 4)}</td><td class="result-value">${nf(l.total_emissions_tco2)}</td></tr>`;
         });
         html += '</tbody></table>';

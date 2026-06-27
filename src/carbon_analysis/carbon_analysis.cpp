@@ -18,6 +18,7 @@
 #include "hacdcpf/detail/logging.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/model/enums/storage_enums.hpp"
+#include "hacdcpf/model/hybrid_power_system.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -1396,7 +1397,8 @@ CarbonAnalysisResult compute_carbon_analysis(const HybridPowerSystem& sys,
   CarbonAnalysisResult result;
   if (!pf_result.converged) return result;
 
-  const HybridPowerSystem projected = project_to_canonical_models(sys);
+  HybridPowerSystem projected = project_to_canonical_models(sys);
+  materialize_dc_storage(projected);
   if (projected.ac.buses.empty() && projected.dc.buses.empty()) return result;
 
   const HybridIDMap id = build_id_map(projected);
