@@ -65,6 +65,11 @@ struct VarIndex {
   int n_pren{0}, n_qren{0};
   int n_pstor{0}, n_qstor{0}, n_pstordc{0};
   int n_pdcdc{0}, n_pflex{0};
+  // Energy-router ports: one active-power var per in-service port (AC or DC),
+  // one reactive-power var per AC port (multi-converter model: the router is a
+  // power-routing device, so port powers are decision variables coupled by a
+  // per-router active-power conservation row).
+  int n_erp{0}, n_erq{0};
   int n_total{0};
 
   int i_va{0}, i_vm{0}, i_pg{0}, i_qg{0};
@@ -73,6 +78,7 @@ struct VarIndex {
   int i_pren{0}, i_qren{0};
   int i_pstor{0}, i_qstor{0}, i_pstordc{0};
   int i_pdcdc{0}, i_pflex{0};
+  int i_erp{0}, i_erq{0};
 };
 
 /// Contiguous equality and nonlinear-inequality row layout.
@@ -152,16 +158,26 @@ struct Problem {
   std::vector<int> dcdc_bus_in;
   std::vector<int> dcdc_bus_out;
 
+  // DC buses whose voltage is otherwise unobservable (no conductive DC branch),
+  // anchored to their setpoint vm_pu by a soft "shunt to setpoint" term so the
+  // KKT stays nonsingular and V_dc → nominal (matching the PF default).
+  std::vector<int> dc_volt_anchor;
+
   std::vector<int> flex_var_to_data;
   std::vector<int> flex_bus;
 
   struct ERPortInfo {
-    int router_idx;
-    int port_idx;
-    int bus;
+    int router_idx;  ///< index into data.energy_routers
+    int port_idx;    ///< index into energy_routers[router_idx].ports
+    int bus;         ///< 0-based bus index (AC or DC domain per is_ac)
     bool is_ac;
+    int pvar;        ///< column offset within the er_p block
+    int qvar;        ///< column offset within the er_q block, or -1 for DC ports
   };
   std::vector<ERPortInfo> er_ports;
+  // In-service energy-router indices (into data.energy_routers); one
+  // active-power conservation equality row each, in this order.
+  std::vector<int> er_router_to_data;
 
   double scale_p{1.0};
   double scale_q{1.0};

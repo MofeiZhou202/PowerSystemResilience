@@ -2420,8 +2420,9 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
                           k < opf_res.dcdc_map.size(); ++k) {
         int orig = opf_res.dcdc_map[k].original_index;
         if (orig >= 0 && orig < static_cast<int>(sys_pf.dc.dcdc_converters.size())) {
-          sys_pf.dc.dcdc_converters[static_cast<size_t>(orig)].p_ref_mw =
-              opf_res.pdcdc_mw[k];
+          auto& dcdc = sys_pf.dc.dcdc_converters[static_cast<size_t>(orig)];
+          dcdc.p_ref_mw = powerflow::dcdc_output_power_from_input_ref_mw(
+              dcdc, opf_res.pdcdc_mw[k]);
         }
       }
 
