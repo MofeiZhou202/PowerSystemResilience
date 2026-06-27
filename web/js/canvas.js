@@ -4238,7 +4238,9 @@ const Canvas = (() => {
         // Draw animated arrow along each connection segment
         connPairs.forEach(({ conn, busCompId }) => {
           if (!conn.el) return;
-          const g = getConnGeom(conn);
+          // Pass fromCompId so g.busEnd / g.compEnd are oriented to THIS branch
+          // regardless of how the user drew the wire (bus→branch or branch→bus).
+          const g = getConnGeom(conn, { fromCompId: comp.id });
           if (!g) return;
           labeledFlowConnections.add(conn.id);
 
@@ -4258,9 +4260,10 @@ const Canvas = (() => {
           const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
           const segPower = isFromSide ? Math.abs(pf_mw) : Math.abs(pt_mw);
 
-          // Arrow at the polyline midpoint, pointing toward the bus when
-          // flowsTowardBus so it follows the orthogonal route (doc §10.2).
-          addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, showHeat ? loadingColor(colorPct) : '#1976D2');
+          // Aim the arrow at the bus end when power flows toward the bus, else at
+          // the branch end — using the orientation-correct endpoints so the head
+          // is right whichever way the connection was drawn (doc §10.2).
+          addFlowMarker(g, flowsTowardBus ? g.busEnd : g.compEnd, segPower, showHeat ? loadingColor(colorPct) : '#1976D2');
         });
       }
 
@@ -4645,7 +4648,9 @@ const Canvas = (() => {
 
           connPairs.forEach(({ conn, busCompId }) => {
             if (!conn.el) return;
-            const g = getConnGeom(conn);
+            // Orient endpoints to THIS branch so the arrow head is correct no
+            // matter how the wire was drawn (bus→branch or branch→bus).
+            const g = getConnGeom(conn, { fromCompId: comp.id });
             if (!g) return;
             labeledFlowConnections.add(conn.id);
             let flowsTowardBus;
@@ -4656,8 +4661,22 @@ const Canvas = (() => {
             const isFromSide = isForward ? (busCompId === fromBusCompId) : (busCompId === toBusCompId);
             const segPower = isFromSide ? Math.abs(pf_mw_dc) : Math.abs(pt_mw_dc);
 
-            addFlowMarker(g, flowsTowardBus ? g.toPt : g.fromPt, segPower, loadingColor(colorPct));
+            addFlowMarker(g, flowsTowardBus ? g.busEnd : g.compEnd, segPower, loadingColor(colorPct));
           });
+        }
+
+        // Heatmap label for the DC branch (mirrors the AC branch label so DC
+        // lines show a number in 热力图 / 方向+热力图 modes, not just a glow).
+        if (showHeat && absPower > 0.01) {
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.classList.add('viz-overlay', 'heatmap-label');
+          label.setAttribute('x', comp.x);
+          label.setAttribute('y', comp.y + (showFlow ? 40 : 30));
+          label.setAttribute('fill', loadingColor(colorPct));
+          label.textContent = (rateMva > 0 && loadingPct > 0)
+            ? `${loadingPct.toFixed(1)}%`
+            : `${pFmt(absPower)} ${pUnit()}`;
+          resultsLayer.appendChild(label);
         }
       });
     }
