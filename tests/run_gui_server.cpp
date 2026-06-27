@@ -7331,7 +7331,8 @@ int main(int argc, char** argv) {
           series_records.push_back(json{
             {"eliminated_bus_id", rec.eliminated_bus_id},
             {"from_bus_id", rec.from_bus_id}, {"to_bus_id", rec.to_bus_id},
-            {"domain", dom_str(rec.domain)}, {"r_eq", rec.r_eq}, {"x_eq", rec.x_eq}});
+            {"domain", dom_str(rec.domain)}, {"r_eq", rec.r_eq}, {"x_eq", rec.x_eq},
+            {"method", "series_impedance_sum"}, {"fidelity", "exact_for_passive_zero_injection_no_shunt"}});
           auto& rep    = (rec.domain == gr::NodeDomain::DC) ? dc_rep : ac_rep;
           auto& status = (rec.domain == gr::NodeDomain::DC) ? dc_status : ac_status;
           for (auto& [b, r] : rep)
@@ -7351,7 +7352,8 @@ int main(int argc, char** argv) {
         for (const auto& rec : pr.mapping.pendant_records) {
           pendant_records.push_back(json{
             {"eliminated_bus_id", rec.eliminated_bus_id},
-            {"parent_bus_id", rec.parent_bus_id}, {"domain", dom_str(rec.domain)}});
+            {"parent_bus_id", rec.parent_bus_id}, {"domain", dom_str(rec.domain)},
+            {"method", "flat_voltage_load_fold"}, {"fidelity", "approximate"}});
           auto& rep    = (rec.domain == gr::NodeDomain::DC) ? dc_rep : ac_rep;
           auto& status = (rec.domain == gr::NodeDomain::DC) ? dc_status : ac_status;
           for (auto& [b, r] : rep)
@@ -7425,10 +7427,20 @@ int main(int argc, char** argv) {
         ? 100.0 * (before_buses - after_buses) / before_buses : 0.0;
       out["stages"] = json{
         {"switch_contraction", json{{"enabled", en_switch}, {"n_groups", switch_groups.size()},
-                                    {"n_buses_merged", n_buses_merged}}},
-        {"series_reduction",   json{{"enabled", en_series},  {"n_eliminated", series_records.size()}}},
-        {"pendant_reduction",  json{{"enabled", en_pendant}, {"n_eliminated", pendant_records.size()}}},
-        {"kron_identify",      json{{"enabled", en_kron},    {"n_candidates", n_kron_candidates}}},
+                                    {"n_buses_merged", n_buses_merged},
+                                    {"fidelity", "exact_voltage_equality"}}},
+        {"series_reduction",   json{{"enabled", en_series},  {"n_eliminated", series_records.size()},
+                                    {"fidelity", "exact_for_passive_zero_injection_no_shunt"}}},
+        {"pendant_reduction",  json{{"enabled", en_pendant}, {"n_eliminated", pendant_records.size()},
+                                    {"fidelity", "approximate_flat_voltage_loss_fold"}}},
+        {"kron_identify",      json{{"enabled", en_kron},    {"n_candidates", n_kron_candidates},
+                                    {"fidelity", "identified_only_not_applied"}}},
+      };
+      out["formulation_notes"] = json{
+        "switch_contraction uses V_i = V_super for closed-switch/zero-impedance supernodes",
+        "series reduction is applied only to passive degree-2 line nodes and uses Z_eq = Z_ij + Z_jk",
+        "pendant folding is approximate and uses |V_parent| = 1.0 pu for folded load-loss accounting",
+        "Kron candidates are reported only; the GUI endpoint does not collapse them into the exported network view"
       };
       out["switch_groups"]   = switch_groups;
       out["series_records"]  = series_records;

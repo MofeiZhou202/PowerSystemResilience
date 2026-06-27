@@ -216,6 +216,43 @@ TEST_CASE("Round-trip: non-1-based AC bus indices converge after projection",
   REQUIRE(pf.vm[1] > pf.vm[2]);
 }
 
+TEST_CASE("Round-trip: PF and AC OPF results are unprojected after pure AC reindexing",
+          "[graph][roundtrip][reindex][opf]") {
+  HybridPowerSystem s;
+  s.base_mva = 10.0;
+  s.ac.buses = {mk_bus(11, BusType::SLACK, 11.0),
+                mk_bus(12, BusType::PQ, 11.0, 2.2, 0.6),
+                mk_bus(13, BusType::PQ, 11.0, 1.0, 0.3)};
+  s.ac.branches = {mk_branch(200, 11, 12, 0.02, 0.05),
+                   mk_branch(201, 12, 13, 0.02, 0.05)};
+  auto gen = mk_slack_gen(0, 11);
+  gen.pmin_mw = 0.0;
+  gen.pmax_mw = 20.0;
+  gen.qmin_mvar = -20.0;
+  gen.qmax_mvar = 20.0;
+  gen.cost_c1 = 1.0;
+  s.ac.generators = {gen};
+
+  PowerFlowResult pf = solve_power_flow(s, {});
+  REQUIRE(pf.converged);
+  REQUIRE(pf.vm.size() == s.ac.buses.size());
+  REQUIRE(pf.va.size() == s.ac.buses.size());
+
+  opf::ACOPFOptions opt;
+  opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  opt.max_inner_iterations = 80;
+  opt.max_outer_iterations = 1;
+  const opf::ACOPFResult opf_result = solve_ac_opf(s, opt);
+  REQUIRE(opf_result.vm.size() == s.ac.buses.size());
+  REQUIRE(opf_result.va.size() == s.ac.buses.size());
+  if (!opf_result.dpd_mw.empty()) {
+    REQUIRE(opf_result.dpd_mw.size() == s.ac.buses.size());
+  }
+  if (!opf_result.dqd_mvar.empty()) {
+    REQUIRE(opf_result.dqd_mvar.size() == s.ac.buses.size());
+  }
+}
+
 TEST_CASE("DIAG: GraphEdge::comp_index is populated from model .index",
           "[graph][roundtrip][diag]") {
   HybridPowerSystem sys;
@@ -982,5 +1019,3 @@ TEST_CASE("Round-trip: Kron elimination of a passive interior node",
   Eigen::VectorXcd I_alpha_reduced = kr.Y_reduced * V_alpha;
   REQUIRE((I_alpha_reduced - I_alpha_expected).cwiseAbs().maxCoeff() < 1e-9);
 }
-
-

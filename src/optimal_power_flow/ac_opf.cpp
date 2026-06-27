@@ -39,6 +39,26 @@ constexpr double kDegToRad = kPi / 180.0;
 constexpr double kMinInteriorWidth = 1e-6;
 constexpr double kHugeBound = 1e4;
 
+void unproject_per_bus_ac_opf_result(ACOPFResult& out, const BusMergeMap& map) {
+  if (map.ext_to_int.empty() || map.n_original <= 0) {
+    return;
+  }
+  out.vm = unproject_bus_vector(out.vm, map);
+  out.va = unproject_bus_vector(out.va, map);
+  if (!out.dpd_mw.empty()) {
+    out.dpd_mw = unproject_bus_vector(out.dpd_mw, map);
+  }
+  if (!out.dqd_mvar.empty()) {
+    out.dqd_mvar = unproject_bus_vector(out.dqd_mvar, map);
+  }
+  if (!out.lmp_p.empty()) {
+    out.lmp_p = unproject_bus_vector(out.lmp_p, map);
+  }
+  if (!out.lmp_q.empty()) {
+    out.lmp_q = unproject_bus_vector(out.lmp_q, map);
+  }
+}
+
 std::uint64_t rc_key(int row, int col) {
   return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(row)) << 32U) |
          static_cast<std::uint32_t>(col);
@@ -1773,6 +1793,9 @@ bool try_dispatch_pf_fallback(const HybridPowerSystem& ac_only_sys,
     out.max_constraint_violation = pf_result.residual;
     out.max_stationarity = 0.0;
     out.converged = true;
+    if (pf_data.bus_merge_map) {
+      unproject_per_bus_ac_opf_result(out, *pf_data.bus_merge_map);
+    }
     return true;
   };
 
@@ -2158,14 +2181,11 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
     out.status = "not converged: " + ipm_res.status;
   }
 
-  // Un-project merged results back to original bus count
-  if (prob.data.bus_merge_map && prob.data.bus_merge_map->has_merges()) {
-    out.vm = unproject_bus_vector(out.vm, *prob.data.bus_merge_map);
-    out.va = unproject_bus_vector(out.va, *prob.data.bus_merge_map);
-    if (!out.lmp_p.empty())
-      out.lmp_p = unproject_bus_vector(out.lmp_p, *prob.data.bus_merge_map);
-    if (!out.lmp_q.empty())
-      out.lmp_q = unproject_bus_vector(out.lmp_q, *prob.data.bus_merge_map);
+  // Expand per-bus results back to the original user-facing AC bus order.
+  // Projection may create a map for pure reindexing or dead-island stripping
+  // even when no physical bus merge occurred, so map presence is the gate.
+  if (prob.data.bus_merge_map) {
+    unproject_per_bus_ac_opf_result(out, *prob.data.bus_merge_map);
   }
 
   return out;
@@ -3026,6 +3046,10 @@ finalize:
                  ", max|Conv|=" + std::to_string(max_eq_conv_final) + ", max(h+)=" + std::to_string(max_ineq_final) +
                  ", worst_stat=" + variable_name(idx, static_cast<int>(worst_stationarity_idx)) + ":" +
                  std::to_string(worst_stationarity_val) + "]";
+  }
+
+  if (data.bus_merge_map) {
+    unproject_per_bus_ac_opf_result(out, *data.bus_merge_map);
   }
 
   return out;

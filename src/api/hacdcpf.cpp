@@ -766,7 +766,7 @@ void unproject_branch_flows(PowerFlowResult& result, const BusMergeMap& map) {
 // Expand merged PF result vectors (vm, va) back to the original bus count
 // so that callers can index by original bus position.
 void unproject_pf_result(PowerFlowResult& result, const BusMergeMap& map) {
-  if (map.has_merges() || map.has_dead_buses()) {
+  if (!map.ext_to_int.empty() && map.n_original > 0) {
     result.vm = unproject_bus_vector(result.vm, map);
     result.va = unproject_bus_vector(result.va, map);
   }

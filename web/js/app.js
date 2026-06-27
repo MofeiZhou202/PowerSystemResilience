@@ -2611,9 +2611,9 @@ const App = (() => {
       baEl.innerHTML =
         '<table class="topo-table"><thead><tr><th>化简阶段</th><th>状态</th><th>结果</th></tr></thead><tbody>' +
         row('开关合并 (零阻抗/闭合开关)', st.switch_contraction?.enabled,
-            `${st.switch_contraction?.n_groups ?? 0} 个超级节点，合并 ${st.switch_contraction?.n_buses_merged ?? 0} 母线`) +
+            `${st.switch_contraction?.n_groups ?? 0} 个超级节点，合并 ${st.switch_contraction?.n_buses_merged ?? 0} 母线 · 精确`) +
         row('串联化简 (二度无注入节点)', st.series_reduction?.enabled,
-            `消去 ${st.series_reduction?.n_eliminated ?? 0} 母线`) +
+            `消去 ${st.series_reduction?.n_eliminated ?? 0} 母线 · 条件精确`) +
         row('悬挂折叠 (叶子负荷节点·近似)', st.pendant_reduction?.enabled,
             `消去 ${st.pendant_reduction?.n_eliminated ?? 0} 母线`) +
         row('Kron 消去 (被动内部节点·仅识别)', st.kron_identify?.enabled,
@@ -2643,9 +2643,10 @@ const App = (() => {
         `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
         `<td class="topo-clickable" data-bus="${r.from_bus_id}">${r.from_bus_id}</td>` +
         `<td class="topo-clickable" data-bus="${r.to_bus_id}">${r.to_bus_id}</td>` +
-        `<td>${r.domain || ''}</td><td>${(r.r_eq ?? 0).toFixed(5)}</td><td>${(r.x_eq ?? 0).toFixed(5)}</td></tr>`).join('');
+        `<td>${r.domain || ''}</td><td>${(r.r_eq ?? 0).toFixed(5)}</td><td>${(r.x_eq ?? 0).toFixed(5)}</td>` +
+        `<td>${esc(r.fidelity || 'exact')}</td></tr>`).join('');
       srEl.innerHTML = rows
-        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>端点 i</th><th>端点 k</th><th>域</th><th>R_eq(pu)</th><th>X_eq(pu)</th></tr></thead><tbody>${rows}</tbody></table>`
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>端点 i</th><th>端点 k</th><th>域</th><th>R_eq(pu)</th><th>X_eq(pu)</th><th>保真度</th></tr></thead><tbody>${rows}</tbody></table>`
         : '<p class="empty-hint">无串联化简</p>';
     }
 
@@ -2655,9 +2656,9 @@ const App = (() => {
       const rows = (data.pendant_records || []).map(r =>
         `<tr><td class="topo-clickable" data-bus="${r.eliminated_bus_id}">${r.eliminated_bus_id}</td>` +
         `<td class="topo-clickable" data-bus="${r.parent_bus_id}">${r.parent_bus_id}</td>` +
-        `<td>${r.domain || ''}</td></tr>`).join('');
+        `<td>${r.domain || ''}</td><td>${esc(r.fidelity || 'approximate')}</td></tr>`).join('');
       prEl.innerHTML = rows
-        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>父母线</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
+        ? `<table class="topo-table"><thead><tr><th>消去母线</th><th>父母线</th><th>域</th><th>保真度</th></tr></thead><tbody>${rows}</tbody></table>`
         : '<p class="empty-hint">无悬挂折叠（未启用或无候选）</p>';
     }
 
