@@ -4523,6 +4523,7 @@ const Canvas = (() => {
       state.components.forEach(comp => {
         if (skipTypes.has(comp.type)) return;
         if (!supplyTypes.has(comp.type) && !demandTypes.has(comp.type) && !bidirTypes.has(comp.type)) return;
+        const p = comp.params || {};
 
         // Find a connection from this component to a bus
         let conn = null, busCompId = null;
@@ -4744,6 +4745,18 @@ const Canvas = (() => {
           const sMax = Math.max(Math.abs(numOr(vd.p_ac_mw, 0)), Math.abs(numOr(vd.p_dc_mw, 0)));
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the VSC shows a value
+          // in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 55);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for VSC
@@ -4822,6 +4835,18 @@ const Canvas = (() => {
           const sMax = Math.max(Math.abs(numOr(dd.p_in_mw, 0)), Math.abs(numOr(dd.p_out_mw, 0)));
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the DC/DC converter
+          // shows a value in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 55);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for DCDC
@@ -4895,6 +4920,18 @@ const Canvas = (() => {
           const sMax = Math.max(...erd.ports.map(pt => Math.abs(numOr(pt.p_mw, 0))), 0);
           const colorPct = normalizedPowerPct(sMax, minPower, powerRange);
           heatItems.push({ comp, colorPct, absPower: sMax, maxPower, bd: { rate_mva: 0 }, hasLoading: false, loading: 0 });
+
+          // Power number label (mirrors AC/DC branches so the energy router
+          // shows a value in 热力图 / 方向+热力图 modes, not just a glow).
+          if (sMax > 0.01) {
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.classList.add('viz-overlay', 'heatmap-label');
+            label.setAttribute('x', comp.x);
+            label.setAttribute('y', comp.y + 58);
+            label.setAttribute('fill', loadingColor(colorPct));
+            label.textContent = `${pFmt(sMax)} ${pUnit()}`;
+            resultsLayer.appendChild(label);
+          }
         }
 
         // Loss label for Energy Router
