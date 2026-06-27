@@ -33,6 +33,7 @@
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/assembly/branch_flow.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -5170,9 +5171,52 @@ int main(int argc, char** argv) {
       // Snapshot original energy routers BEFORE canonical projection clears them.
       // After solve_power_flow → project_to_canonical_models → expand_energy_routers,
       // sys.energy_routers is empty.  We reconstruct ER port flows from the
-      // expanded VSC transfers by matching bus_ac (each ER port becomes a VSC
-      // with bus_ac = port.bus after expansion).
+      // expanded VSC/DCDC transfers by matching the canonical expansion names
+      // back to solved transfer indices.
       const auto er_snapshot = sys.energy_routers;
+      struct ERExpansionRefs {
+        std::unordered_map<int, int> port_vsc_index;
+        int dcdc_index{-1};
+      };
+      auto build_er_expansion_refs = [&]() {
+        std::unordered_map<int, ERExpansionRefs> refs;
+        if (er_snapshot.empty()) return refs;
+        try {
+          const hacdcpf::HybridPowerSystem projected =
+              hacdcpf::project_to_canonical_models(sys);
+          std::unordered_map<std::string, int> vsc_by_name;
+          vsc_by_name.reserve(projected.vsc_converters.size());
+          for (const auto& vsc : projected.vsc_converters) {
+            vsc_by_name[vsc.name] = vsc.index;
+          }
+          std::unordered_map<std::string, int> dcdc_by_name;
+          dcdc_by_name.reserve(projected.dc.dcdc_converters.size());
+          for (const auto& dcdc : projected.dc.dcdc_converters) {
+            dcdc_by_name[dcdc.name] = dcdc.index;
+          }
+          for (const auto& er : er_snapshot) {
+            auto& r = refs[er.index];
+            if (const auto dit = dcdc_by_name.find(er.name + "_DCDC");
+                dit != dcdc_by_name.end()) {
+              r.dcdc_index = dit->second;
+            }
+            for (const auto& p : er.ports) {
+              const char side = (p.side == 0) ? 'A' : 'B';
+              const std::string vsc_name =
+                  er.name + "_VSC_" + side + std::to_string(p.index);
+              if (const auto vit = vsc_by_name.find(vsc_name);
+                  vit != vsc_by_name.end()) {
+                r.port_vsc_index[p.index] = vit->second;
+              }
+            }
+          }
+        } catch (...) {
+          // PF result serialization should not fail solely because rich ER
+          // metadata could not be reconstructed. The fallback below still
+          // emits scheduled port values.
+        }
+        return refs;
+      };
 
       // Helper to serialize VSC/DCDC transfers from a PowerFlowResult
       auto add_transfers = [&](const hacdcpf::PowerFlowResult& pf) {
@@ -5368,6 +5412,126 @@ int main(int argc, char** argv) {
           bus_qg[g.bus] += g.qg_mvar;
         }
 
+        struct ThreeWindingTerminalFlow {
+          int index{0};
+          int hv_bus{0};
+          int mv_bus{0};
+          int lv_bus{0};
+          double p_hv_mw{0.0};
+          double q_hv_mvar{0.0};
+          double p_mv_mw{0.0};
+          double q_mv_mvar{0.0};
+          double p_lv_mw{0.0};
+          double q_lv_mvar{0.0};
+          double loss_mw{0.0};
+          double loading_pct{0.0};
+          double rate_mva{0.0};
+          bool valid{false};
+        };
+        std::vector<ThreeWindingTerminalFlow> trafo3w_flows(sys.ac.transformers_3w.size());
+        std::vector<bool> trafo3w_supplied_by_pf(sys.ac.transformers_3w.size(), false);
+        std::unordered_map<int, size_t> trafo3w_pos_by_index;
+        for (size_t ti = 0; ti < sys.ac.transformers_3w.size(); ++ti) {
+          const auto& tr = sys.ac.transformers_3w[ti];
+          trafo3w_pos_by_index[tr.index] = ti;
+          auto& tf = trafo3w_flows[ti];
+          tf.index = tr.index;
+          tf.hv_bus = tr.hv_bus;
+          tf.mv_bus = tr.mv_bus;
+          tf.lv_bus = tr.lv_bus;
+          tf.rate_mva = std::max({tr.sn_hv_mva, tr.sn_mv_mva, tr.sn_lv_mva});
+        }
+        for (const auto& src : pf.trafo3w_flows) {
+          auto it = trafo3w_pos_by_index.find(src.index);
+          if (it == trafo3w_pos_by_index.end()) continue;
+          auto& tf = trafo3w_flows[it->second];
+          tf.index = src.index;
+          tf.hv_bus = src.hv_bus;
+          tf.mv_bus = src.mv_bus;
+          tf.lv_bus = src.lv_bus;
+          tf.p_hv_mw = src.p_hv_mw;
+          tf.q_hv_mvar = src.q_hv_mvar;
+          tf.p_mv_mw = src.p_mv_mw;
+          tf.q_mv_mvar = src.q_mv_mvar;
+          tf.p_lv_mw = src.p_lv_mw;
+          tf.q_lv_mvar = src.q_lv_mvar;
+          tf.loss_mw = src.loss_mw;
+          tf.loading_pct = src.loading_pct;
+          tf.rate_mva = src.rate_mva;
+          tf.valid = true;
+          trafo3w_supplied_by_pf[it->second] = true;
+        }
+        if (!sys.ac.transformers_3w.empty()) {
+          try {
+            const hacdcpf::HybridPowerSystem projected =
+                hacdcpf::project_to_canonical_models(sys);
+            if (projected.branch_expand_map.has_value()) {
+              std::unordered_map<int, size_t> flow_pos_by_branch_index;
+              for (size_t bi = 0; bi < sys.ac.branches.size(); ++bi) {
+                flow_pos_by_branch_index[sys.ac.branches[bi].index] = bi;
+              }
+              size_t next_expanded_pos = sys.ac.branches.size();
+              for (const auto& entry : projected.branch_expand_map->entries) {
+                if (!flow_pos_by_branch_index.count(entry.branch_index)) {
+                  flow_pos_by_branch_index[entry.branch_index] =
+                      next_expanded_pos++;
+                }
+              }
+              for (const auto& entry : projected.branch_expand_map->entries) {
+                if (entry.origin_type != hacdcpf::BranchOriginType::Transformer3W) {
+                  continue;
+                }
+                auto tit = trafo3w_pos_by_index.find(entry.origin_index);
+                if (tit == trafo3w_pos_by_index.end()) continue;
+                auto fit = flow_pos_by_branch_index.find(entry.branch_index);
+                if (fit == flow_pos_by_branch_index.end() ||
+                    fit->second >= pf.branch_flows.size()) {
+                  continue;
+                }
+                auto& tf = trafo3w_flows[tit->second];
+                if (trafo3w_supplied_by_pf[tit->second]) continue;
+                const auto& br_flow = pf.branch_flows[fit->second];
+                const auto& tr = sys.ac.transformers_3w[tit->second];
+                double pair_rate = 0.0;
+                if (entry.pair_number == 0) {
+                  tf.p_hv_mw += br_flow.pf_mw;
+                  tf.q_hv_mvar += br_flow.qf_mvar;
+                  tf.p_mv_mw += br_flow.pt_mw;
+                  tf.q_mv_mvar += br_flow.qt_mvar;
+                  pair_rate = std::min(tr.sn_hv_mva, tr.sn_mv_mva);
+                } else if (entry.pair_number == 1) {
+                  tf.p_hv_mw += br_flow.pf_mw;
+                  tf.q_hv_mvar += br_flow.qf_mvar;
+                  tf.p_lv_mw += br_flow.pt_mw;
+                  tf.q_lv_mvar += br_flow.qt_mvar;
+                  pair_rate = std::min(tr.sn_hv_mva, tr.sn_lv_mva);
+                } else if (entry.pair_number == 2) {
+                  tf.p_mv_mw += br_flow.pf_mw;
+                  tf.q_mv_mvar += br_flow.qf_mvar;
+                  tf.p_lv_mw += br_flow.pt_mw;
+                  tf.q_lv_mvar += br_flow.qt_mvar;
+                  pair_rate = std::min(tr.sn_mv_mva, tr.sn_lv_mva);
+                }
+                tf.valid = true;
+                const double pair_s = std::max(
+                    std::hypot(br_flow.pf_mw, br_flow.qf_mvar),
+                    std::hypot(br_flow.pt_mw, br_flow.qt_mvar));
+                if (pair_rate > 1e-9) {
+                  tf.loading_pct =
+                      std::max(tf.loading_pct, 100.0 * pair_s / pair_rate);
+                }
+              }
+              for (auto& tf : trafo3w_flows) {
+                if (!tf.valid) continue;
+                tf.loss_mw = tf.p_hv_mw + tf.p_mv_mw + tf.p_lv_mw;
+              }
+            }
+          } catch (const std::exception&) {
+            // Result attribution is best-effort; PF convergence/result payload
+            // should not fail if projection diagnostics cannot be reconstructed.
+          }
+        }
+
         // ── Compute solved per-generator P/Q from bus power balance ──
         // For non-slack generators, scheduled pg_mw is enforced by the solver.
         // For slack/PV generators, we back-calculate from branch flows.
@@ -5379,7 +5543,8 @@ int main(int argc, char** argv) {
           bus_q_out[br.from_bus] += pf.branch_flows[i].qf_mvar;
           bus_q_out[br.to_bus]   += pf.branch_flows[i].qt_mvar;
         }
-        for (const auto& tf : pf.trafo3w_flows) {
+        for (const auto& tf : trafo3w_flows) {
+          if (!tf.valid) continue;
           bus_p_out[tf.hv_bus] += tf.p_hv_mw;
           bus_p_out[tf.mv_bus] += tf.p_mv_mw;
           bus_p_out[tf.lv_bus] += tf.p_lv_mw;
@@ -5701,7 +5866,8 @@ int main(int argc, char** argv) {
 
         // 3W transformers with per-winding power flow
         json geo_trafo3w = json::array();
-        for (const auto& tf : pf.trafo3w_flows) {
+        for (const auto& tf : trafo3w_flows) {
+          if (!tf.valid) continue;
           auto hv_it = ac_bus_coords.find(tf.hv_bus);
           auto mv_it = ac_bus_coords.find(tf.mv_bus);
           auto lv_it = ac_bus_coords.find(tf.lv_bus);
@@ -5735,33 +5901,46 @@ int main(int argc, char** argv) {
           });
         }
 
-        // Energy router port transfers – reconstructed from expanded VSC results.
-        // During canonical projection (inside solve_power_flow), each ER port
-        // becomes a VSC with bus_ac = port.bus.  Since solve_power_flow takes
-        // const& sys, the expanded VSCs are NOT in our sys copy.  Instead we
-        // match ER ports to VSCTransfer results by bus_ac number.
+        // Energy router port transfers – reconstructed from expanded VSC/DCDC
+        // results. During canonical projection each ER port becomes a VSC named
+        // <router>_VSC_A/B<port_index>, and each router gets an internal DCDC
+        // named <router>_DCDC. Matching by expanded index avoids bus collisions
+        // when an ER port shares a bus with a normal VSC or another ER port.
         json geo_er = json::array();
         {
-          // Build bus_ac → VSCTransfer lookup from solved results.
-          // If multiple VSC transfers share the same bus_ac the last one wins,
-          // but for ER-expanded VSCs each port connects to a unique AC bus.
-          std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_bus;
+          const auto er_refs = build_er_expansion_refs();
+          std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_index;
           for (const auto& vt : pf.vsc_transfers)
-            vsc_tr_by_bus[vt.bus_ac] = &vt;
+            vsc_tr_by_index[vt.index] = &vt;
+          std::unordered_map<int, const hacdcpf::DCDCTransfer*> dcdc_tr_by_index;
+          for (const auto& dt : pf.dcdc_transfers)
+            dcdc_tr_by_index[dt.index] = &dt;
 
           for (const auto& er : er_snapshot) {
             if (!er.in_service) continue;
+            const auto ref_it = er_refs.find(er.index);
+            const ERExpansionRefs* refs =
+                ref_it != er_refs.end() ? &ref_it->second : nullptr;
             json port_arr = json::array();
             for (const auto& p : er.ports) {
               if (!p.in_service || p.bus == 0) continue;
               double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
               bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
+              int matched_vsc_index = -1;
 
-              // Match by bus number: the expanded VSC for this port has bus_ac == p.bus
-              auto tit = vsc_tr_by_bus.find(p.bus);
-              if (tit != vsc_tr_by_bus.end()) {
+              if (refs) {
+                const auto pit = refs->port_vsc_index.find(p.index);
+                if (pit != refs->port_vsc_index.end()) {
+                  matched_vsc_index = pit->second;
+                }
+              }
+              auto tit = vsc_tr_by_index.find(matched_vsc_index);
+              if (tit != vsc_tr_by_index.end()) {
                 p_mw = tit->second->p_ac_mw;
                 q_mvar = tit->second->q_ac_mvar;
+              } else {
+                p_mw = p.p_set_mw;
+                q_mvar = p.q_set_mvar;
               }
               // Get voltage from PF results
               if (is_ac) {
@@ -5778,19 +5957,38 @@ int main(int argc, char** argv) {
                 }
               }
               port_arr.push_back(json{
-                {"port_index", p.index}, {"bus", p.bus},
+                {"port_index", p.index}, {"name", p.name}, {"bus", p.bus},
+                {"side", p.side}, {"control_mode", hacdcpf::er_control_str(p.control_mode)},
+                {"matched_vsc_index", matched_vsc_index},
                 {"is_ac", is_ac},
                 {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
               });
             }
-            // ER internal loss = -(sum of all port injections).
-            // In bus-injection-positive sign convention, sum(p_mw) < 0 means
-            // the ER consumes net power internally (VSC + DCDC losses).
+            int internal_dcdc_index = refs ? refs->dcdc_index : -1;
+            const hacdcpf::DCDCTransfer* internal_dcdc = nullptr;
+            if (const auto dit = dcdc_tr_by_index.find(internal_dcdc_index);
+                dit != dcdc_tr_by_index.end()) {
+              internal_dcdc = dit->second;
+            }
             double sum_p = 0.0;
             for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
-            double total_loss = std::max(-sum_p, 0.0);
+            double vsc_loss = 0.0;
+            for (const auto& pp : port_arr) {
+              const int vidx = pp.value("matched_vsc_index", -1);
+              if (const auto vit = vsc_tr_by_index.find(vidx); vit != vsc_tr_by_index.end()) {
+                vsc_loss += vit->second->loss_mw;
+              }
+            }
+            const double dcdc_loss = internal_dcdc ? internal_dcdc->loss_mw : 0.0;
+            const double total_loss = vsc_loss + dcdc_loss;
             geo_er.push_back(json{
               {"router_index", er.index}, {"ports", port_arr},
+              {"p_port_sum_mw", sum_p},
+              {"internal_dcdc_index", internal_dcdc_index},
+              {"internal_dcdc_pin_mw", internal_dcdc ? internal_dcdc->p_in_mw : 0.0},
+              {"internal_dcdc_pout_mw", internal_dcdc ? internal_dcdc->p_out_mw : 0.0},
+              {"internal_dcdc_loss_mw", dcdc_loss},
+              {"vsc_loss_mw", vsc_loss},
               {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
             });
           }
@@ -5885,7 +6083,8 @@ int main(int argc, char** argv) {
           add_ac_flow(tr.hv_bus, tf.p_hv_mw, tf.q_hv_mvar);
           add_ac_flow(tr.lv_bus, tf.p_lv_mw, tf.q_lv_mvar);
         }
-        for (const auto& tf : pf.trafo3w_flows) {
+        for (const auto& tf : trafo3w_flows) {
+          if (!tf.valid) continue;
           add_ac_flow(tf.hv_bus, tf.p_hv_mw, tf.q_hv_mvar);
           add_ac_flow(tf.mv_bus, tf.p_mv_mw, tf.q_mv_mvar);
           add_ac_flow(tf.lv_bus, tf.p_lv_mw, tf.q_lv_mvar);
@@ -5902,7 +6101,9 @@ int main(int argc, char** argv) {
         for (const auto& b : sys.ac.buses) {
           if (!b.in_service) continue;
           add_ac_injection(b.index, -b.pd_mw, -b.qd_mvar);
-          add_ac_injection(b.index, b.gs_mw, b.bs_mvar);
+          const double vm = ac_vm_by_bus.count(b.index) ? ac_vm_by_bus[b.index] : b.vm_pu;
+          const double v2 = vm * vm;
+          add_ac_injection(b.index, -b.gs_mw * v2, b.bs_mvar * v2);
         }
         for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
           const auto& g = sys.ac.generators[gi];
@@ -5927,7 +6128,14 @@ int main(int argc, char** argv) {
                            -(al.qa_mvar + al.qb_mvar + al.qc_mvar) * al.scaling);
         }
         for (const auto& sh : sys.ac.shunts)
-          if (sh.in_service) add_ac_injection(sh.bus, sh.gs_mw, sh.bs_mvar);
+          if (sh.in_service) {
+            const double vm = ac_vm_by_bus.count(sh.bus) ? ac_vm_by_bus[sh.bus] : 1.0;
+            const double v2 = vm * vm;
+            const double bs = (sh.switchable && sh.n_steps > 0)
+                ? sh.bs_per_step * sh.current_step
+                : sh.bs_mvar;
+            add_ac_injection(sh.bus, -sh.gs_mw * v2, bs * v2);
+          }
         for (const auto& cs : sys.ac.charging_stations) {
           if (!cs.in_service) continue;
           const double p_mw = cs.p_total_kw > 0.0
@@ -6028,6 +6236,25 @@ int main(int argc, char** argv) {
           ac_visible_branch_q[from] += br.value("qf_mvar", 0.0);
           ac_visible_branch_p[to] += br.value("pt_mw", 0.0);
           ac_visible_branch_q[to] += br.value("qt_mvar", 0.0);
+        }
+        for (size_t ti = 0; ti < trafo2w_flows.size(); ++ti) {
+          if (ti >= sys.ac.transformers_2w.size()) continue;
+          const auto& tf = trafo2w_flows[ti];
+          if (!tf.valid) continue;
+          const auto& tr = sys.ac.transformers_2w[ti];
+          ac_visible_branch_p[tr.hv_bus] += tf.p_hv_mw;
+          ac_visible_branch_q[tr.hv_bus] += tf.q_hv_mvar;
+          ac_visible_branch_p[tr.lv_bus] += tf.p_lv_mw;
+          ac_visible_branch_q[tr.lv_bus] += tf.q_lv_mvar;
+        }
+        for (const auto& tf : trafo3w_flows) {
+          if (!tf.valid) continue;
+          ac_visible_branch_p[tf.hv_bus] += tf.p_hv_mw;
+          ac_visible_branch_q[tf.hv_bus] += tf.q_hv_mvar;
+          ac_visible_branch_p[tf.mv_bus] += tf.p_mv_mw;
+          ac_visible_branch_q[tf.mv_bus] += tf.q_mv_mvar;
+          ac_visible_branch_p[tf.lv_bus] += tf.p_lv_mw;
+          ac_visible_branch_q[tf.lv_bus] += tf.q_lv_mvar;
         }
         std::unordered_map<int, double> dc_net_export_p;
         for (const auto& b : sys.dc.buses) {
@@ -6227,6 +6454,11 @@ int main(int argc, char** argv) {
           }
           return false;
         };
+        auto has_nontrivial_ac_match = [&](int from, int to) {
+          double p = 0.0, q = 0.0;
+          if (!signed_ac_endpoint_flow(from, to, p, q)) return false;
+          return std::hypot(p, q) > 1e-7;
+        };
         auto signed_dc_endpoint_flow = [&](int from, int to, double& p) {
           for (const auto& br : geo_dc_branches) {
             const int br_from = br.value("from", br.value("from_bus", 0));
@@ -6252,7 +6484,8 @@ int main(int argc, char** argv) {
               : 0.0;
           if (!closed || from == 0 || to == 0 || from == to) return fl;
 
-          if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar)) {
+          if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+              std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
             fl.pt_mw = -fl.pf_mw;
             fl.qt_mvar = -fl.qf_mvar;
             fl.source = "matched_ac_branch";
@@ -6346,18 +6579,38 @@ int main(int argc, char** argv) {
         json ac_switch_flows = json::array();
         for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
           const auto& sw = sys.ac.switches[i];
+          const bool closed = sw.in_service && sw.closed;
+          const bool contracted = closed && !has_nontrivial_ac_match(sw.bus_from, sw.bus_to);
           const auto fl = derive_ac_terminal_flow(sw.bus_from, sw.bus_to,
-                                                  sw.in_service && sw.closed,
+                                                  closed,
                                                   sw.i_rated_ka, 0.0);
-          ac_switch_flows.push_back(flow_json(sw.index, i, sw.bus_from, sw.bus_to, fl, "ac_switch"));
+          auto row = flow_json(sw.index, i, sw.bus_from, sw.bus_to, fl, "ac_switch");
+          if (contracted) {
+            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
+            ac_visible_branch_p[sw.bus_from] += fl.pf_mw;
+            ac_visible_branch_q[sw.bus_from] += fl.qf_mvar;
+            ac_visible_branch_p[sw.bus_to] += fl.pt_mw;
+            ac_visible_branch_q[sw.bus_to] += fl.qt_mvar;
+          }
+          ac_switch_flows.push_back(std::move(row));
         }
         json ac_cb_flows = json::array();
         for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
           const auto& cb = sys.ac.circuit_breakers[i];
+          const bool closed = cb.in_service && cb.closed;
+          const bool contracted = closed && !has_nontrivial_ac_match(cb.bus_from, cb.bus_to);
           const auto fl = derive_ac_terminal_flow(cb.bus_from, cb.bus_to,
-                                                  cb.in_service && cb.closed,
+                                                  closed,
                                                   cb.i_rated_ka, cb.rated_voltage_kv);
-          ac_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "ac_circuit_breaker"));
+          auto row = flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "ac_circuit_breaker");
+          if (contracted) {
+            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
+            ac_visible_branch_p[cb.bus_from] += fl.pf_mw;
+            ac_visible_branch_q[cb.bus_from] += fl.qf_mvar;
+            ac_visible_branch_p[cb.bus_to] += fl.pt_mw;
+            ac_visible_branch_q[cb.bus_to] += fl.qt_mvar;
+          }
+          ac_cb_flows.push_back(std::move(row));
         }
         json dc_cb_flows = json::array();
         for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
@@ -6403,6 +6656,280 @@ int main(int argc, char** argv) {
           const int n = std::max(1, dc_swing_storage_count[bus]);
           return scheduled_p + dc_balance_source_p[bus] / static_cast<double>(n);
         };
+
+        auto metric_detail = [](const std::string& label, double mw) {
+          return json{{"label", label}, {"mw", mw}};
+        };
+        auto ac_is_slack_bus = [&](int bus) {
+          for (const auto& b : sys.ac.buses) {
+            if (b.index == bus && b.bus_type == hacdcpf::BusType::SLACK) return true;
+          }
+          for (const auto& eg : sys.ac.external_grids) {
+            if (eg.in_service && eg.bus == bus) return true;
+          }
+          for (const auto& conv : sys.vsc_converters) {
+            if (!conv.in_service) continue;
+            if (conv.bus_ac == bus &&
+                (conv.ac_grid_forming ||
+                 conv.control_mode == hacdcpf::ConverterMode::AC_GRID_FORMING)) {
+              return true;
+            }
+          }
+          return false;
+        };
+        auto ac_source_power = [&](int bus) {
+          double p = ac_grid_inj_p[bus];
+          for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+            const auto& g = sys.ac.generators[gi];
+            if (!g.in_service || g.bus != bus) continue;
+            if (g.is_slack || ac_is_slack_bus(bus)) p += gen_pg_solved[gi];
+          }
+          for (const auto& v : pf.vsc_transfers) {
+            if (v.bus_ac == bus) {
+              auto cit = std::find_if(sys.vsc_converters.begin(), sys.vsc_converters.end(),
+                  [&](const hacdcpf::VSCConverter& c) { return c.index == v.index; });
+              const bool forming = cit != sys.vsc_converters.end() &&
+                  (cit->ac_grid_forming ||
+                   cit->control_mode == hacdcpf::ConverterMode::AC_GRID_FORMING);
+              if (forming) p += v.p_ac_mw;
+            }
+          }
+          return p;
+        };
+        auto dc_reference_sets = [&]() {
+          struct RefSets {
+            std::unordered_set<int> explicit_refs;
+            std::unordered_set<int> implicit_refs;
+          } refs;
+          std::unordered_set<int> bus_ids;
+          std::unordered_map<int, const hacdcpf::DCBus*> by_bus;
+          std::unordered_map<int, std::vector<int>> adj;
+          for (const auto& b : sys.dc.buses) {
+            if (!b.in_service) continue;
+            bus_ids.insert(b.index);
+            by_bus[b.index] = &b;
+            adj[b.index];
+            if (b.bus_type == hacdcpf::DCBusType::DC_V) refs.explicit_refs.insert(b.index);
+          }
+          auto link = [&](int a, int b) {
+            if (!bus_ids.count(a) || !bus_ids.count(b)) return;
+            adj[a].push_back(b);
+            adj[b].push_back(a);
+          };
+          for (const auto& br : sys.dc.branches) {
+            if (br.in_service) link(br.from_bus, br.to_bus);
+          }
+          for (const auto& d : sys.dc.dcdc_converters) {
+            if (d.in_service) link(d.bus_in, d.bus_out);
+          }
+          std::unordered_set<int> visited;
+          for (int start : bus_ids) {
+            if (visited.count(start)) continue;
+            std::vector<int> comp;
+            std::vector<int> stack{start};
+            visited.insert(start);
+            while (!stack.empty()) {
+              const int u = stack.back();
+              stack.pop_back();
+              comp.push_back(u);
+              for (int v : adj[u]) {
+                if (!visited.count(v)) {
+                  visited.insert(v);
+                  stack.push_back(v);
+                }
+              }
+            }
+            const bool has_explicit = std::any_of(comp.begin(), comp.end(), [&](int b) {
+              return refs.explicit_refs.count(b) > 0;
+            });
+            if (has_explicit || comp.empty()) continue;
+            auto pick = std::find_if(comp.begin(), comp.end(), [&](int b) {
+              auto it = by_bus.find(b);
+              return it != by_bus.end() &&
+                     it->second->bus_type != hacdcpf::DCBusType::DC_ISOLATED;
+            });
+            if (pick == comp.end()) pick = comp.begin();
+            refs.implicit_refs.insert(*pick);
+          }
+          return refs;
+        }();
+        auto ac_balance_groups = [&]() {
+          std::unordered_map<int, int> parent;
+          for (const auto& b : sys.ac.buses) {
+            if (b.in_service) parent[b.index] = b.index;
+          }
+          std::function<int(int)> find = [&](int x) {
+            auto it = parent.find(x);
+            if (it == parent.end()) return x;
+            if (it->second == x) return x;
+            it->second = find(it->second);
+            return it->second;
+          };
+          auto unite = [&](int a, int b) {
+            if (!parent.count(a) || !parent.count(b)) return;
+            int ra = find(a), rb = find(b);
+            if (ra == rb) return;
+            if (rb < ra) std::swap(ra, rb);
+            parent[rb] = ra;
+          };
+          for (const auto& sw : sys.ac.switches) {
+            if (sw.in_service && sw.closed) unite(sw.bus_from, sw.bus_to);
+          }
+          for (const auto& cb : sys.ac.circuit_breakers) {
+            if (cb.in_service && cb.closed) unite(cb.bus_from, cb.bus_to);
+          }
+          std::unordered_map<int, std::vector<int>> groups;
+          for (const auto& kv : parent) groups[find(kv.first)].push_back(kv.first);
+          for (auto& kv : groups) std::sort(kv.second.begin(), kv.second.end());
+          return groups;
+        }();
+        auto dc_is_reference = [&](int bus) {
+          return dc_reference_sets.explicit_refs.count(bus) > 0 ||
+                 dc_reference_sets.implicit_refs.count(bus) > 0;
+        };
+
+        json balance_diag;
+        balance_diag["basis"] =
+            "canonical_projection_with_rich_terminal_attribution";
+        balance_diag["tolerance_kw"] = 1.0;
+        balance_diag["ordinary"] = json::array();
+        balance_diag["sources"] = json::array();
+        balance_diag["ac_terminal_export_p"] = json::object();
+        balance_diag["dc_terminal_export_p"] = json::object();
+        for (const auto& [bus, p] : ac_visible_branch_p)
+          balance_diag["ac_terminal_export_p"][std::to_string(bus)] = p;
+        for (const auto& [bus, p] : dc_terminal_export_p)
+          balance_diag["dc_terminal_export_p"][std::to_string(bus)] = p;
+
+        auto push_balance_row = [&](const std::string& domain, int bus,
+                                    const std::string& type,
+                                    const std::string& name,
+                                    double residual_mw,
+                                    double net_mw,
+                                    double terminal_mw,
+                                    bool is_implicit) {
+          json details = json::array();
+          details.push_back(metric_detail("端口外送合计", terminal_mw));
+          details.push_back(metric_detail("求解净注入", -net_mw));
+          balance_diag["ordinary"].push_back(json{
+              {"kind", domain},
+              {"domain", domain},
+              {"id", bus},
+              {"bus", bus},
+              {"type", type},
+              {"bus_type", type},
+              {"name", name},
+              {"mw", residual_mw},
+              {"kw", residual_mw * 1000.0},
+              {"residual_mw", residual_mw},
+              {"residual_kw", residual_mw * 1000.0},
+              {"net_injection_mw", net_mw},
+              {"terminal_export_mw", terminal_mw},
+              {"isImplicit", is_implicit},
+              {"is_implicit", is_implicit},
+              {"details", details}});
+        };
+        auto push_source_row = [&](const std::string& domain, int bus,
+                                   const std::string& type,
+                                   const std::string& name,
+                                   double source_mw,
+                                   bool is_implicit,
+                                   const std::string& label) {
+          if (std::abs(source_mw) * 1000.0 <= 1.0) return;
+          json details = json::array();
+          details.push_back(metric_detail(label, source_mw));
+          balance_diag["sources"].push_back(json{
+              {"kind", domain},
+              {"domain", domain},
+              {"id", bus},
+              {"bus", bus},
+              {"type", type},
+              {"bus_type", type},
+              {"name", name},
+              {"mw", source_mw},
+              {"kw", source_mw * 1000.0},
+              {"source_mw", source_mw},
+              {"source_kw", source_mw * 1000.0},
+              {"isImplicit", is_implicit},
+              {"is_implicit", is_implicit},
+              {"details", details}});
+        };
+        int ordinary_bad_count = 0;
+        auto ac_bus_by_id = [&](int bus) -> const hacdcpf::ACBus* {
+          for (const auto& b : sys.ac.buses)
+            if (b.index == bus) return &b;
+          return nullptr;
+        };
+        for (const auto& [root, members] : ac_balance_groups) {
+          double net = 0.0;
+          double terminal = 0.0;
+          bool is_slack = false;
+          std::string type = "PQ";
+          std::string name;
+          int row_bus = root;
+          for (int bus : members) {
+            const auto* b = ac_bus_by_id(bus);
+            if (!b || !b->in_service) continue;
+            net += ac_net_export_p[bus];
+            terminal += ac_visible_branch_p[bus];
+            if (ac_is_slack_bus(bus)) {
+              is_slack = true;
+              row_bus = bus;
+              type = bus_type_str(b->bus_type);
+              name = b->name.empty() ? ("Bus " + std::to_string(bus)) : b->name;
+            }
+          }
+          if (name.empty()) {
+            const auto* b = ac_bus_by_id(row_bus);
+            if (b) {
+              type = bus_type_str(b->bus_type);
+              name = b->name.empty() ? ("Bus " + std::to_string(row_bus)) : b->name;
+            }
+          }
+          const double residual = terminal - net;
+          if (!is_slack && std::abs(residual) * 1000.0 > 1.0) {
+            ++ordinary_bad_count;
+            push_balance_row("AC", row_bus, type, name,
+                             residual, net, terminal, false);
+            if (members.size() > 1) {
+              auto& row = balance_diag["ordinary"].back();
+              row["merged_buses"] = members;
+              row["basis_note"] =
+                  "closed AC switches/circuit breakers are checked as one canonical supernode";
+            }
+          }
+          if (is_slack) {
+            double source = 0.0;
+            for (int bus : members) source += ac_source_power(bus);
+            push_source_row("AC", row_bus, type, name, source, false, "AC平衡源");
+          }
+        }
+        for (const auto& b : sys.dc.buses) {
+          if (!b.in_service) continue;
+          const double net = dc_net_export_p[b.index];
+          const double terminal = dc_terminal_export_p[b.index];
+          const double residual = terminal - net;
+          const bool is_ref = dc_is_reference(b.index);
+          const bool is_implicit = dc_reference_sets.implicit_refs.count(b.index) > 0;
+          const std::string name =
+              b.name.empty() ? ("DC Bus " + std::to_string(b.index)) : b.name;
+          if (!is_ref && std::abs(residual) * 1000.0 > 1.0) {
+            ++ordinary_bad_count;
+            push_balance_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
+                             residual, net, terminal, is_implicit);
+          }
+          if (is_ref) {
+            double source = terminal - net;
+            auto sit = dc_balance_source_p.find(b.index);
+            if (sit != dc_balance_source_p.end()) source = sit->second;
+            push_source_row("DC", b.index, dc_bus_type_str(b.bus_type), name,
+                            source, is_implicit,
+                            is_implicit ? "隐式DC平衡源" : "DC_V平衡源");
+          }
+        }
+        balance_diag["ordinary_bad_count"] = ordinary_bad_count;
+        balance_diag["source_count"] = balance_diag["sources"].size();
+        out["power_balance_diagnostics"] = balance_diag;
 
         for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
           const auto& b = sys.ac.buses[i];
@@ -6496,7 +7023,8 @@ int main(int argc, char** argv) {
           }
           component_results.push_back(std::move(row));
         }
-        for (const auto& tf : pf.trafo3w_flows) {
+        for (const auto& tf : trafo3w_flows) {
+          if (!tf.valid) continue;
           json row = base_row("transformer_3w", "AC", tf.index, tf.index,
                               "三绕组变压器", "Trafo3W " + std::to_string(tf.index),
                               pf.converged ? "已求解" : "有潮流返回/未收敛",
@@ -6932,10 +7460,19 @@ int main(int argc, char** argv) {
                               is_solved(er.in_service), "multi-port");
           if (eit != geo_er.end() && eit->contains("ports")) {
             for (const auto& pt : (*eit)["ports"]) {
-              const std::string label = "P" + std::to_string(pt.value("port_index", 0));
-              add_metric(row, label, pt.value("p_mw", 0.0), "MW", "p", 4);
+              const std::string base_label =
+                  "Port " + std::to_string(pt.value("port_index", 0));
+              add_metric(row, base_label + " P", pt.value("p_mw", 0.0), "MW", "p", 4);
+              add_metric(row, base_label + " Q", pt.value("q_mvar", 0.0), "MVar", "q", 4);
+              add_metric(row, base_label + " V", pt.value("v_pu", 1.0), "pu", "scalar", 4);
             }
+            add_metric(row, "Port Psum", eit->value("p_port_sum_mw", 0.0), "MW", "p", 4);
+            add_metric(row, "DCDC Pin", eit->value("internal_dcdc_pin_mw", 0.0), "MW", "p", 4);
+            add_metric(row, "DCDC Pout", eit->value("internal_dcdc_pout_mw", 0.0), "MW", "p", 4);
+            add_metric(row, "DCDC Loss", eit->value("internal_dcdc_loss_mw", 0.0), "MW", "p", 4);
+            add_metric(row, "VSC Loss", eit->value("vsc_loss_mw", 0.0), "MW", "p", 4);
             add_metric(row, "Loss", eit->value("loss_mw", 0.0), "MW", "p", 4);
+            add_note(row, "能量路由器结果由展开后的端口VSC与内部DC/DC潮流按索引回填");
           }
           component_results.push_back(std::move(row));
         }

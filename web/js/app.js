@@ -10,6 +10,7 @@ const API_BASE = window.location.origin;  // Same origin as the C++ server
 // users wire ports (e.g. a DC/DC's 'in'/'out') instead of guessing internal IDs.
 const WIRING_DERIVED_BUS_FIELDS = new Set([
   'bus_in', 'bus_out', 'bus_ac', 'bus_dc', 'from_bus', 'to_bus', 'hv_bus', 'lv_bus',
+  'port1_bus', 'port2_bus', 'port3_bus', 'port4_bus',
 ]);
 
 const App = (() => {
@@ -3979,8 +3980,18 @@ const App = (() => {
           const er = rowByIndexOrPos(data.geo_er, 'energyRouter', comp.id);
           solved = !!er;
           if (er && Array.isArray(er.ports)) {
-            detail = er.ports.map(pt => `P${pt.port_index}@${pt.is_ac ? 'AC' : 'DC'} Bus ${pt.bus}: P=${fmtP(pt.p_mw, 3)}, V=${fmt(pt.v_pu, 4)} pu`);
+            detail = er.ports.map(pt =>
+              `Port ${pt.port_index}@${pt.is_ac ? 'AC' : 'DC'} Bus ${pt.bus}: ` +
+              `P=${fmtP(pt.p_mw, 3)}, Q=${fmtQ(pt.q_mvar, 3)}, V=${fmt(pt.v_pu, 4)} pu`
+            );
+            if (toNum(er.internal_dcdc_pin_mw) !== null || toNum(er.internal_dcdc_pout_mw) !== null) {
+              detail.push(`内部DC/DC: Pin=${fmtP(er.internal_dcdc_pin_mw, 3)}, Pout=${fmtP(er.internal_dcdc_pout_mw, 3)}`);
+            }
+            if (toNum(er.vsc_loss_mw) !== null || toNum(er.internal_dcdc_loss_mw) !== null) {
+              detail.push(`端口VSC损耗=${fmtP(er.vsc_loss_mw, 3)}, 内部DC/DC损耗=${fmtP(er.internal_dcdc_loss_mw, 3)}`);
+            }
             detail.push(`Loss=${fmtP(er.loss_mw, 3)}`);
+            note.push('能量路由器结果由展开后的端口VSC与内部DC/DC潮流按索引回填');
           } else {
             detail = [`类型=${p.router_type || '-'}`, `端口=${p.num_ports || 0}`, `额定=${fmtP(p.p_rated_mw, 3)}`];
             note.push('本次潮流无该能量路由器端口分项返回');
@@ -4057,6 +4068,54 @@ const App = (() => {
       div.innerHTML = `<p class="empty-hint" style="color:#b91c1c">潮流未收敛${blocked ? `，协调校核阻断 ${blockingCount || 0} 项` : ''}，节点功率平衡诊断不作为正常潮流结果显示。</p>`;
       return;
     }
+
+    const backendDiag = data.power_balance_diagnostics;
+    if (backendDiag && Array.isArray(backendDiag.ordinary) && Array.isArray(backendDiag.sources)) {
+      const tolKw = num(backendDiag.tolerance_kw, 1.0);
+      const rowKw = r => num(r.residual_kw ?? r.source_kw ?? r.kw ?? (num(r.mw ?? r.residual_mw ?? r.source_mw, 0) * 1000), 0);
+      const rowMw = r => num(r.mw ?? r.residual_mw ?? r.source_mw, rowKw(r) / 1000);
+      const rowKind = r => String(r.kind || r.domain || '').toUpperCase() === 'DC' ? 'DC' : 'AC';
+      const detailsHtml = r => {
+        const details = Array.isArray(r.details) ? r.details : [];
+        return details
+          .map(x => `${escapeHtml(x.label || '')}: ${pFmt(num(x.mw ?? x.value, 0), 3)} ${pUnit()}`)
+          .join('<br>');
+      };
+      const makeRow = (r, source = false) => {
+        const kind = rowKind(r);
+        const id = Number(r.id ?? r.bus);
+        const compId = kind === 'AC' ? busMap.ac?.[id] : busMap.dc?.[id];
+        const attr = compId !== undefined ? ` data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+        const type = source && (r.isImplicit || r.is_implicit)
+          ? `${r.type || r.bus_type || ''} / 隐式DC平衡`
+          : (r.type || r.bus_type || '');
+        return `<tr${attr}><td>${kind}</td><td>${Number.isFinite(id) ? id : ''}</td><td>${escapeHtml(type)}</td><td>${pFmt(rowMw(r), 3)}</td><td>${escapeHtml(r.name || '')}</td><td>${detailsHtml(r)}</td></tr>`;
+      };
+      const bad = backendDiag.ordinary
+        .filter(r => Math.abs(rowKw(r)) > tolKw)
+        .sort((a, b) => Math.abs(rowKw(b)) - Math.abs(rowKw(a)));
+      const sources = backendDiag.sources
+        .filter(r => Math.abs(rowKw(r)) > tolKw)
+        .sort((a, b) => Math.abs(rowKw(b)) - Math.abs(rowKw(a)));
+      section.style.display = '';
+      const status = bad.length
+        ? `<p class="empty-hint" style="color:#b45309">发现 ${bad.length} 个非平衡节点超过 ${tolKw} kW，请检查连接或设备功率。</p>`
+        : `<p class="empty-hint">普通节点有功平衡通过：未发现超过 ${tolKw} kW 的非平衡节点。</p>`;
+      const sourceHint = sources.length
+        ? `<p class="empty-hint">Slack/平衡源承担的功率本来可以非零，它不是普通节点KCL残差；“隐式DC平衡”表示该DC岛没有DC_V节点，求解器自动选该母线作为参考。</p>`
+        : '';
+      const imbalanceRows = bad.map(r => makeRow(r, false)).join('');
+      const sourceRows = sources.map(r => makeRow(r, true)).join('');
+      const imbalanceTable = imbalanceRows
+        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>普通节点KCL残差(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${imbalanceRows}</tbody></table>`
+        : '';
+      const sourceTable = sourceRows
+        ? `<table><thead><tr><th>域</th><th>Bus</th><th>类型</th><th>平衡源承担功率(${pUnit()})</th><th>名称</th><th>主要构成</th></tr></thead><tbody>${sourceRows}</tbody></table>`
+        : '';
+      div.innerHTML = status + sourceHint + imbalanceTable + sourceTable;
+      return;
+    }
+
     const ac = new Map();
     const dc = new Map();
     const add = (map, key, value, label) => {
@@ -5402,11 +5461,11 @@ const App = (() => {
   }
 
   // ========== Topology Tables ==========
-  // Only these solvers co-solve AC + DC + converters as one coupled system.
-  // The others are AC-only (pure_ac/fdpf/three_phase), DC-only (dc), a one-shot
-  // linearization (hybrid_linearized), or use a different reference scheme
-  // (distributed_slack) — so they give non-comparable answers on a hybrid case.
-  const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded']);
+  // Only these solvers can be selected directly on hybrid AC/DC cases.
+  // The others are AC-only (pure_ac/fdpf/three_phase), DC-only (dc), or a
+  // one-shot linearization (hybrid_linearized), so their hybrid answers are not
+  // directly comparable with the coupled Newton family.
+  const HYBRID_PF_METHODS = new Set(['ac_newton', 'adaptive', 'islanded', 'distributed_slack']);
   function updatePfMethodAvailability(sys) {
     const sel = document.getElementById('pfMethod');
     if (!sel) return;
@@ -5418,7 +5477,7 @@ const App = (() => {
     Array.from(sel.options).forEach(opt => {
       const restrict = hasDc && !HYBRID_PF_METHODS.has(opt.value);
       opt.disabled = restrict;
-      opt.title = restrict ? '该算法不联立求解直流网络/变换器，混合交直流算例结果不可比' : '';
+      opt.title = restrict ? '该算法不适合作为混合交直流算例的直接GUI潮流方法' : '';
       if (restrict && opt.selected) selectedGotDisabled = true;
     });
     if (selectedGotDisabled) sel.value = 'ac_newton';
@@ -5700,6 +5759,24 @@ const App = (() => {
           {v:'Boost',     l:'Boost (升压)'},
           {v:'BuckBoost', l:'Buck-Boost (升降压)'},
           {v:'Isolated',  l:'Isolated (隔离/DAB)'},
+        ].forEach(o => {
+          sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
+        });
+        div.appendChild(sel);
+      } else if (/^port\d+_type$/.test(key)) {
+        const sel = document.createElement('select');
+        sel.dataset.field = key;
+        ['AC', 'DC'].forEach(t => {
+          sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
+        });
+        div.appendChild(sel);
+      } else if (/^port\d+_control_mode$/.test(key)) {
+        const sel = document.createElement('select');
+        sel.dataset.field = key;
+        [
+          {v:'VF',    l:'VF'},
+          {v:'PQ',    l:'PQ'},
+          {v:'Droop', l:'Droop'},
         ].forEach(o => {
           sel.innerHTML += `<option value="${o.v}" ${val === o.v ? 'selected' : ''}>${o.l}</option>`;
         });

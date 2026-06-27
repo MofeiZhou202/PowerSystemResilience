@@ -1767,11 +1767,11 @@ const Canvas = (() => {
     const busByPort = (compId, portId) => {
       for (const conn of state.connections) {
         let other = null;
-        if (conn.from.compId === compId && conn.from.port === portId) other = conn.to.compId;
-        else if (conn.to.compId === compId && conn.to.port === portId) other = conn.from.compId;
+        if (conn.from.compId === compId && conn.from.portId === portId) other = conn.to.compId;
+        else if (conn.to.compId === compId && conn.to.portId === portId) other = conn.from.compId;
         if (other === null) continue;
-        if (acMap[other] != null) return acMap[other];
-        if (dcMap[other] != null) return dcMap[other];
+        if (acMap[other] != null) return { domain: 'AC', index: acMap[other] };
+        if (dcMap[other] != null) return { domain: 'DC', index: dcMap[other] };
       }
       return null;
     };
@@ -1782,8 +1782,17 @@ const Canvas = (() => {
       if ('bus_in' in p || 'bus_out' in p) {
         const bi = busByPort(comp.id, 'in');
         const bo = busByPort(comp.id, 'out');
-        if ('bus_in' in p && bi != null) p.bus_in = bi;
-        if ('bus_out' in p && bo != null) p.bus_out = bo;
+        if ('bus_in' in p && bi != null) p.bus_in = bi.index;
+        if ('bus_out' in p && bo != null) p.bus_out = bo.index;
+      } else if (comp.type === 'energy_router') {
+        const erPortDefs = COMP.ports.energy_router || [];
+        erPortDefs.forEach((def, idx) => {
+          const pi = idx + 1;
+          const b = busByPort(comp.id, def.id);
+          if (!b) return;
+          p['port' + pi + '_bus'] = b.index;
+          p['port' + pi + '_type'] = b.domain;
+        });
       } else if ('bus_ac' in p || 'bus_dc' in p) {
         const ac = buses.find(b => b.domain === 'ac');
         const dc = buses.find(b => b.domain === 'dc');
@@ -1824,7 +1833,8 @@ const Canvas = (() => {
     // Imported buses keep their original (possibly non-contiguous) index.
     const acBusIndexMap = assignBusIndices('ac_bus');
     const dcBusIndexMap = assignBusIndices('dc_bus');
-    const compBusMap = {}; // compId -> bus index (1-based)
+    const compBusMap = {}; // compId -> bus index (1-based, both AC and DC)
+    const compBusDomainMap = {}; // compId -> 'AC' | 'DC'
 
     // First pass: create buses
     state.components.forEach(comp => {
@@ -1832,6 +1842,7 @@ const Canvas = (() => {
         const p = comp.params;
         const idx = acBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
+        compBusDomainMap[comp.id] = 'AC';
         sys.ac.buses.push({
           index: idx,
           bus_type: p.bus_type || 'PQ',
@@ -1854,6 +1865,7 @@ const Canvas = (() => {
         const p = comp.params;
         const idx = dcBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
+        compBusDomainMap[comp.id] = 'DC';
         sys.dc.buses.push({
           index: idx,
           bus_type: p.bus_type || 'DC_P',
@@ -1902,16 +1914,33 @@ const Canvas = (() => {
     // VSC's 'ac'/'dc' ports. Returns 0 when the port is unwired.
     function findBusIndexByPort(compId, portId) {
       for (const conn of state.connections) {
-        if (conn.from.compId === compId && conn.from.port === portId) {
+        if (conn.from.compId === compId && conn.from.portId === portId) {
           const idx = compBusMap[conn.to.compId];
           if (idx !== undefined) return idx;
         }
-        if (conn.to.compId === compId && conn.to.port === portId) {
+        if (conn.to.compId === compId && conn.to.portId === portId) {
           const idx = compBusMap[conn.from.compId];
           if (idx !== undefined) return idx;
         }
       }
       return 0;
+    }
+
+    function findBusByPort(compId, portId) {
+      for (const conn of state.connections) {
+        let busCompId = null;
+        if (conn.from.compId === compId && conn.from.portId === portId) {
+          busCompId = conn.to.compId;
+        } else if (conn.to.compId === compId && conn.to.portId === portId) {
+          busCompId = conn.from.compId;
+        }
+        if (busCompId === null) continue;
+        const idx = compBusMap[busCompId];
+        if (idx !== undefined) {
+          return { index: idx, domain: compBusDomainMap[busCompId] || 'AC' };
+        }
+      }
+      return null;
     }
 
     // Second pass: create devices
@@ -2568,30 +2597,40 @@ const Canvas = (() => {
         case 'energy_router': {
           // Build ports array from per-port parameters
           const erPorts = [];
+          const erPortDefs = COMP.ports.energy_router || [];
           for (let pi = 1; pi <= 4; pi++) {
-            const pBus = parseInt(p['port' + pi + '_bus']) || 0;
+            const portDef = erPortDefs[pi - 1];
+            const wired = portDef ? findBusByPort(comp.id, portDef.id) : null;
+            const typedPortType = String(p['port' + pi + '_type'] || '').toUpperCase();
+            const portType = wired?.domain || (typedPortType === 'DC' ? 'DC' : 'AC');
+            const pBus = wired?.index || parseInt(p['port' + pi + '_bus']) || 0;
             if (pBus === 0) continue;  // skip ports with no bus assigned
+            const voltageLevel = portType === 'DC'
+              ? numOr(p.vn_dc_kv, numOr(p.vn_ac_kv, 0))
+              : numOr(p.vn_ac_kv, 0);
             erPorts.push({
-              index: pi,
-              name: (p.name || 'ER') + '_P' + pi,
+              index: Number.isFinite(Number(p['port' + pi + '_index']))
+                ? Number(p['port' + pi + '_index'])
+                : pi,
+              name: p['port' + pi + '_name'] || (p.name || 'ER') + '_P' + pi,
               bus: pBus,
-              port_type: 'AC',
+              port_type: portType,
               side: parseInt(p['port' + pi + '_side']) || 0,
               control_mode: p['port' + pi + '_control_mode'] || 'PQ',
               p_set_mw: numOr(p['port' + pi + '_p_set_mw'], 0),
               q_set_mvar: numOr(p['port' + pi + '_q_set_mvar'], 0),
               v_set_pu: numOr(p['port' + pi + '_v_set_pu'], 1.0),
               eta: numOr(p['port' + pi + '_eta'], 0.98),
-              voltage_level_kv: numOr(p.vn_ac_kv, 0),
-              pmax_mw: numOr(p.pmax_mw, 0),
-              pmin_mw: numOr(p.pmin_mw, 0),
-              qmax_mvar: numOr(p.qmax_mvar, 0),
-              qmin_mvar: numOr(p.qmin_mvar, 0),
-              in_service: true,
+              voltage_level_kv: voltageLevel,
+              pmax_mw: numOr(p['port' + pi + '_pmax_mw'], numOr(p.pmax_mw, 0)),
+              pmin_mw: numOr(p['port' + pi + '_pmin_mw'], numOr(p.pmin_mw, 0)),
+              qmax_mvar: numOr(p['port' + pi + '_qmax_mvar'], numOr(p.qmax_mvar, 0)),
+              qmin_mvar: numOr(p['port' + pi + '_qmin_mvar'], numOr(p.qmin_mvar, 0)),
+              in_service: p['port' + pi + '_in_service'] !== false,
             });
           }
           sys.energy_routers.push({
-            index: sys.energy_routers.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.energy_routers.length,
             name: p.name || 'ERouter',
             router_type: p.router_type || 'hybrid',
             num_ports: erPorts.length,
@@ -3553,13 +3592,22 @@ const Canvas = (() => {
       if (er.ports && er.ports.length > 0) {
         er.ports.forEach((pt, idx) => {
           const pi = idx + 1;
+          portParams['port' + pi + '_index'] = pt.index ?? pi;
+          portParams['port' + pi + '_name'] = pt.name || `${er.name || 'ER'}_P${pt.index ?? pi}`;
           portParams['port' + pi + '_bus'] = pt.bus || 0;
+          portParams['port' + pi + '_type'] = String(pt.port_type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
           portParams['port' + pi + '_side'] = pt.side || 0;
           portParams['port' + pi + '_control_mode'] = pt.control_mode || 'PQ';
           portParams['port' + pi + '_p_set_mw'] = pt.p_set_mw || 0;
           portParams['port' + pi + '_q_set_mvar'] = pt.q_set_mvar || 0;
           portParams['port' + pi + '_v_set_pu'] = pt.v_set_pu || 1.0;
           portParams['port' + pi + '_eta'] = pt.eta || 0.98;
+          portParams['port' + pi + '_pmax_mw'] = pt.pmax_mw || 0;
+          portParams['port' + pi + '_pmin_mw'] = pt.pmin_mw || 0;
+          portParams['port' + pi + '_qmax_mvar'] = pt.qmax_mvar || 0;
+          portParams['port' + pi + '_qmin_mvar'] = pt.qmin_mvar || 0;
+          portParams['port' + pi + '_voltage_level_kv'] = pt.voltage_level_kv || 0;
+          portParams['port' + pi + '_in_service'] = pt.in_service !== false;
         });
       }
       const comp = addComponent('energy_router', 500, 400, {
@@ -3582,7 +3630,8 @@ const Canvas = (() => {
         er.ports.forEach((pt, idx) => {
           const busIdx = pt.bus;
           if (!busIdx) return;
-          const busCompId = busCompMap[busIdx];
+          const portType = String(pt.port_type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
+          const busCompId = portType === 'DC' ? dcBusCompMap[busIdx] : busCompMap[busIdx];
           if (busCompId === undefined) return;
           // 端口ID与COMP.ports.energy_router顺序一一对应
           const erPortId = erPortDefs[idx] ? erPortDefs[idx].id : 'ac_left';
@@ -4896,9 +4945,13 @@ const Canvas = (() => {
       let erCompIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'energy_router') return;
-        // Determine ER index: match by sequential order among ER components
+        // Prefer the stable router index from component params. Fallback to
+        // sequential order for older canvases that do not carry the index.
         const erIdx = erCompIdx++;
-        const erd = erData[erIdx];
+        const paramIdx = Number(comp.params && comp.params.index);
+        const erd = Number.isFinite(paramIdx) && erByIdx[paramIdx]
+          ? erByIdx[paramIdx]
+          : erData[erIdx];
         if (!erd || !erd.ports) return;
 
         // Find ALL bus connections from this ER
