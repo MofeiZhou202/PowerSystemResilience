@@ -46,7 +46,7 @@ const Canvas = (() => {
     boxSelectStart: null,  // {x, y} in SVG coords
     boxSelectRect: null,   // SVG rect element
     baseMva: 100,          // system base MVA (preserved from loaded system)
-    connectionStyle: 'orthogonal', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
+    connectionStyle: 'avoid', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
     alignSnap: true,       // snap to neighbour x/y while dragging (doc §18 Phase 4)
   };
 
@@ -1233,12 +1233,202 @@ const Canvas = (() => {
     updateViewBox();
   }
 
+  // ========== Auto-layout geometry helpers ==========
+  const BUS_TYPES = new Set(['ac_bus', 'dc_bus']);
+  const INLINE_LAYOUT_TYPES = new Set([
+    'ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w',
+    'switch_comp', 'circuit_breaker', 'vsc_converter', 'dcdc_converter',
+    'energy_router'
+  ]);
+
+  function isBusType(type) {
+    return BUS_TYPES.has(type);
+  }
+
+  function isInlineLayoutType(type) {
+    return INLINE_LAYOUT_TYPES.has(type);
+  }
+
+  function applyComponentTransform(comp) {
+    if (comp?.el) {
+      comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
+    }
+  }
+
+  function layoutFootprint(comp, pad = 14) {
+    const isBus = isBusType(comp.type);
+    const isWide = comp.type === 'ac_branch' || comp.type === 'dc_branch' ||
+                   comp.type === 'switch_comp' || comp.type === 'circuit_breaker';
+    const hw = isBus ? 58 : (isWide ? 62 : 52);
+    const top = isBus ? 30 : 50;
+    const bottom = isBus ? 34 : 62;
+    return {
+      id: comp.id,
+      x: comp.x - hw - pad,
+      y: comp.y - top - pad,
+      w: 2 * hw + 2 * pad,
+      h: top + bottom + 2 * pad,
+    };
+  }
+
+  function layoutRectOverlap(a, b, clearance = 0) {
+    return a.x < b.x + b.w + clearance && a.x + a.w + clearance > b.x &&
+           a.y < b.y + b.h + clearance && a.y + a.h + clearance > b.y;
+  }
+
+  function countLayoutOverlaps(rects, clearance = 0) {
+    let count = 0;
+    for (let i = 0; i < rects.length; i++)
+      for (let j = i + 1; j < rects.length; j++)
+        if (layoutRectOverlap(rects[i], rects[j], clearance)) count++;
+    return count;
+  }
+
+  function rankFreeGridPosition(comp, targetX, targetY, occupied, opts = {}) {
+    const grid = opts.grid || 20;
+    const maxRing = opts.maxRing || 10;
+    const minDist = opts.minDist || 0;
+    const clearance = opts.clearance || 6;
+    const anchor = opts.anchor || null;
+    const baseX = snapToGrid(targetX, grid);
+    const baseY = snapToGrid(targetY, grid);
+    let best = null;
+    const testAt = (x, y, ring) => {
+      if (anchor && Math.hypot(x - anchor.x, y - anchor.y) < minDist) return;
+      const oldX = comp.x, oldY = comp.y;
+      comp.x = x; comp.y = y;
+      const box = layoutFootprint(comp);
+      comp.x = oldX; comp.y = oldY;
+      let overlaps = 0;
+      for (const o of occupied) if (layoutRectOverlap(box, o, clearance)) overlaps++;
+      const dist = Math.hypot(x - targetX, y - targetY);
+      const score = overlaps * 100000 + dist + ring * 2;
+      if (!best || score < best.score) best = { x, y, score, overlaps };
+    };
+
+    testAt(baseX, baseY, 0);
+    for (let ring = 1; ring <= maxRing; ring++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        testAt(baseX + dx * grid, baseY - ring * grid, ring);
+        testAt(baseX + dx * grid, baseY + ring * grid, ring);
+      }
+      for (let dy = -ring + 1; dy <= ring - 1; dy++) {
+        testAt(baseX - ring * grid, baseY + dy * grid, ring);
+        testAt(baseX + ring * grid, baseY + dy * grid, ring);
+      }
+      if (best && best.overlaps === 0) break;
+    }
+    return best || { x: baseX, y: baseY, overlaps: 0 };
+  }
+
+  function placeWithOccupancy(comp, targetX, targetY, occupied, opts = {}) {
+    const pos = rankFreeGridPosition(comp, targetX, targetY, occupied, opts);
+    comp.x = pos.x;
+    comp.y = pos.y;
+    occupied.push(layoutFootprint(comp));
+    return pos;
+  }
+
+  function layoutCollisionCount(comp, occupied, clearance = 2) {
+    const box = layoutFootprint(comp);
+    let count = 0;
+    for (const other of occupied) {
+      if (other.id !== comp.id && layoutRectOverlap(box, other, clearance)) count++;
+    }
+    return count;
+  }
+
+  function refineLayoutCollisions(movable, allComps, opts = {}) {
+    if (allComps.length > (opts.maxComponents || 1200)) return { moved: 0, skipped: true };
+    const clearance = opts.clearance || 8;
+    const passes = opts.passes || 4;
+    const maxRing = opts.maxRing || 32;
+    let moved = 0;
+    for (let pass = 0; pass < passes; pass++) {
+      let changed = false;
+      for (const comp of movable) {
+        const occupied = allComps.filter(c => c.id !== comp.id).map(c => layoutFootprint(c));
+        const before = layoutCollisionCount(comp, occupied, clearance);
+        if (before === 0) continue;
+        const oldX = comp.x, oldY = comp.y;
+        const pos = rankFreeGridPosition(comp, comp.x, comp.y, occupied, {
+          grid: 20,
+          maxRing,
+          clearance,
+        });
+        comp.x = pos.x;
+        comp.y = pos.y;
+        const after = layoutCollisionCount(comp, occupied, clearance);
+        if (after > before) {
+          comp.x = oldX;
+          comp.y = oldY;
+          continue;
+        }
+        if (Math.abs(comp.x - oldX) > 0.5 || Math.abs(comp.y - oldY) > 0.5) {
+          applyComponentTransform(comp);
+          changed = true;
+          moved++;
+        }
+      }
+      if (!changed) break;
+    }
+    return { moved, skipped: false };
+  }
+
+  function connectionBusNeighbors(compId, busIdSet, busNeighborsByComp) {
+    return [...new Set(busNeighborsByComp.get(compId) || [])].filter(id => busIdSet.has(id));
+  }
+
+  function layoutAttachedDevice(comp, bus, slot, dir, nodeGap, levelGap) {
+    const rowGap = Math.max(74, Math.min(100, Math.round(levelGap * 0.36)));
+    const colGap = Math.max(84, Math.min(118, Math.round(nodeGap * 0.45)));
+    const baseRadial = Math.max(112, Math.min(145, Math.round(levelGap * 0.48)));
+    const sideRadial = Math.max(120, Math.min(155, Math.round(nodeGap * 0.62)));
+    switch (slot.dir) {
+      case 'up': {
+        const col = slot.n % 5, row = Math.floor(slot.n / 5);
+        return { x: bus.x + (col - 2) * colGap, y: bus.y - baseRadial - row * rowGap };
+      }
+      case 'left':
+        return { x: bus.x - sideRadial - Math.floor(slot.n / 4) * colGap,
+                 y: bus.y + 24 + (slot.n % 4 - 1.5) * rowGap };
+      case 'right':
+        return { x: bus.x + sideRadial + Math.floor(slot.n / 4) * colGap,
+                 y: bus.y + 24 + (slot.n % 4 - 1.5) * rowGap };
+      case 'dl': {
+        const col = slot.n % 3, row = Math.floor(slot.n / 3);
+        return { x: bus.x - sideRadial - (2 - col) * colGap * 0.72,
+                 y: bus.y + baseRadial + row * rowGap };
+      }
+      case 'dr': {
+        const col = slot.n % 3, row = Math.floor(slot.n / 3);
+        return { x: bus.x + sideRadial + col * colGap * 0.72,
+                 y: bus.y + baseRadial + row * rowGap };
+      }
+      default: {
+        const col = slot.n % 5, row = Math.floor(slot.n / 5);
+        return { x: bus.x + (col - 2) * colGap,
+                 y: bus.y + baseRadial + row * rowGap };
+      }
+    }
+  }
+
+  function resolveInlinePorts(comp, linked, busParent) {
+    if (linked.length < 2) return null;
+    const a = linked[0], b = linked[1];
+    const aParentB = busParent.get(a.id) === b.id;
+    const bParentA = busParent.get(b.id) === a.id;
+    const parentFirst = bParentA;
+    const first = parentFirst ? b : a;
+    const second = parentFirst ? a : b;
+    return { first, second };
+  }
+
   // ========== Auto Layout ==========
   function autoLayout(options = {}) {
     const buses = state.components.filter(c => c.type === 'ac_bus' || c.type === 'dc_bus');
-    const branchTypes = new Set(['ac_branch', 'transformer_2w', 'transformer_3w', 'dc_branch']);
-    const branches = state.components.filter(c => branchTypes.has(c.type));
-    const devices = state.components.filter(c => c.type !== 'ac_bus' && c.type !== 'dc_bus' && !branchTypes.has(c.type));
+    const branches = state.components.filter(c => isInlineLayoutType(c.type));
+    const devices = state.components.filter(c => !isBusType(c.type) && !isInlineLayoutType(c.type));
 
     if (buses.length === 0) { zoomFit(); return; }
 
@@ -1249,15 +1439,11 @@ const Canvas = (() => {
     // Large systems (>10k buses) used to be O(branches × connections) because
     // every branch re-scanned the full connection list three separate times
     // (adjacency, ring detection, branch placement) and every device scanned it
-    // again. Precompute, per non-bus component, the bus ids it touches, plus a
-    // generic first-neighbour map for device placement, so each later pass is
-    // O(n) over its own list instead of O(n × connections).
+    // again. Precompute, per non-bus component, the bus ids it touches, so each
+    // later pass is O(n) over its own list instead of O(n × connections).
     const busNeighborsByComp = new Map(); // non-bus compId -> [busCompId,...]
-    const firstNeighbor = new Map();      // compId -> first connected compId
     state.connections.forEach(c => {
       const a = c.from.compId, b = c.to.compId;
-      if (!firstNeighbor.has(a)) firstNeighbor.set(a, b);
-      if (!firstNeighbor.has(b)) firstNeighbor.set(b, a);
       const aBus = busIdSet.has(a), bBus = busIdSet.has(b);
       if (aBus !== bBus) { // exactly one endpoint is a bus
         const busId = aBus ? a : b;
@@ -1267,7 +1453,17 @@ const Canvas = (() => {
         arr.push(busId);
       }
     });
-    const busesOfBranch = (brId) => busNeighborsByComp.get(brId) || [];
+    const busesOfBranch = (brId) => connectionBusNeighbors(brId, busIdSet, busNeighborsByComp);
+    const busLoadById = new Map(buses.map(b => [b.id, 0]));
+    state.components.forEach(comp => {
+      if (isBusType(comp.type)) return;
+      const linked = connectionBusNeighbors(comp.id, busIdSet, busNeighborsByComp);
+      if (!linked.length) return;
+      const weight = isInlineLayoutType(comp.type) && linked.length >= 2 ? 0.45 : 1;
+      linked.forEach(id => busLoadById.set(id, (busLoadById.get(id) || 0) + weight));
+    });
+    let maxLocalLoad = 0;
+    busLoadById.forEach(v => { if (v > maxLocalLoad) maxLocalLoad = v; });
 
     const adj = new Map(); // busCompId -> Set<busCompId>
     buses.forEach(b => adj.set(b.id, new Set()));
@@ -1289,10 +1485,26 @@ const Canvas = (() => {
       if (d.type === 'external_grid')
         (busNeighborsByComp.get(d.id) || []).forEach(bid => egBusIds.add(bid));
     });
-    // Prefer a SLACK bus, else an external-grid-backed bus, as the layout root.
+    // Prefer a SLACK bus, else an external-grid-backed bus, then the highest
+    // degree bus, as the layout root.
+    let foundRoot = false;
     for (const b of buses) {
-      if (b.params.bus_type === 'SLACK' || b.params.bus_type === 'Slack') { root = b.id; break; }
-      if (egBusIds.has(b.id)) { root = b.id; break; }
+      if (b.params.bus_type === 'SLACK' || b.params.bus_type === 'Slack') {
+        root = b.id;
+        foundRoot = true;
+        break;
+      }
+      if (!foundRoot && egBusIds.has(b.id)) {
+        root = b.id;
+        foundRoot = true;
+      }
+    }
+    if (!foundRoot) {
+      let bestDegree = -1;
+      for (const b of buses) {
+        const d = adj.get(b.id)?.size || 0;
+        if (d > bestDegree) { bestDegree = d; root = b.id; }
+      }
     }
 
     // Multi-root BFS: build a spanning tree (parent/children) per connected
@@ -1503,8 +1715,19 @@ const Canvas = (() => {
     //   with tighter gaps, BUSBAR = stacked horizontal busbars (depth→y) joined
     //   by vertical lines/cables/transformers (pos→x, wider node gap).
     const dir = (options && options.direction) || 'TB';
-    const levelGap = (options && options.levelGap) || (dir === 'COMPACT' ? 170 : dir === 'BUSBAR' ? 200 : 240);
-    const nodeGap  = (options && options.nodeGap)  || (dir === 'COMPACT' ? 130 : dir === 'BUSBAR' ? 240 : 200);
+    const densityExtra = Math.min(150, Math.max(0, Math.ceil(maxLocalLoad - 3)) * 18);
+    const meshExtra = Math.min(100, ringCount * 8);
+    const baseLevelGap = dir === 'COMPACT' ? 180 : dir === 'BUSBAR' ? 220 : dir === 'RADIAL' ? 250 : 250;
+    const baseNodeGap = dir === 'COMPACT' ? 155 : dir === 'BUSBAR' ? 270 : 220;
+    const levelGap = (options && options.levelGap) ||
+      (baseLevelGap + Math.min(90, densityExtra * 0.55) + Math.min(50, meshExtra * 0.35));
+    const nodeGap  = (options && options.nodeGap) ||
+      (baseNodeGap + densityExtra + meshExtra);
+    if (_layoutStats) {
+      _layoutStats.maxLocalDevices = Number(maxLocalLoad.toFixed(1));
+      _layoutStats.nodeGap = Math.round(nodeGap);
+      _layoutStats.levelGap = Math.round(levelGap);
+    }
     const totalLeaves = buses.reduce((m, b) => Math.max(m, b._pos || 0), 0);
     buses.forEach(b => {
       const depth = busLayer.get(b.id) || 0;
@@ -1579,95 +1802,139 @@ const Canvas = (() => {
       }
     });
 
-    // Place branch-type components at the midpoint of their two buses, pushed
-    // along the branch normal so the icon does not sit exactly on the wire
-    // (doc §8).  Transformers get a larger offset than plain lines.
-    const branchOffset = { ac_branch: 20, dc_branch: 20, transformer_2w: 30, transformer_3w: 40 };
-    const isLineType = (t) => t === 'ac_branch' || t === 'dc_branch';
+    // Collision-aware placement.  Buses are fixed first; all branch-like and
+    // attached components reserve approximate label-aware rectangles after they
+    // are placed, so later components can find a nearby free grid cell.
+    const occupied = buses.map(b => layoutFootprint(b, dir === 'BUSBAR' ? 24 : 16));
+    const pairSlots = new Map();
+    const inlineOffset = {
+      ac_branch: 42, dc_branch: 42, switch_comp: 38, circuit_breaker: 38,
+      transformer_2w: 60, transformer_3w: 72, vsc_converter: 64,
+      dcdc_converter: 64, energy_router: 80,
+    };
+    const isLineType = (t) => t === 'ac_branch' || t === 'dc_branch' ||
+                            t === 'switch_comp' || t === 'circuit_breaker';
     branches.forEach(br => {
       const linked = busesOfBranch(br.id).map(getComponent).filter(Boolean);
-      if (linked.length >= 2 && linked[0] && linked[1]) {
-        const a = linked[0], b = linked[1];
-        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        if (dir === 'BUSBAR') {
-          // Vertical connector sits on the line between the two stacked busbars.
-          br.x = snapToGrid(mx);
-          br.y = snapToGrid(my);
-        } else {
+      if (linked.length >= 2) {
+        const xs = linked.map(b => b.x), ys = linked.map(b => b.y);
+        let targetX = xs.reduce((s, x) => s + x, 0) / xs.length;
+        let targetY = ys.reduce((s, y) => s + y, 0) / ys.length;
+
+        if (linked.length === 2) {
+          const a = linked[0], b = linked[1];
+          const key = a.id < b.id ? a.id + '_' + b.id : b.id + '_' + a.id;
+          const n = pairSlots.get(key) || 0;
+          pairSlots.set(key, n + 1);
           const dx = b.x - a.x, dy = b.y - a.y;
           const len = Math.hypot(dx, dy) || 1;
-          const off = branchOffset[br.type] || 20;
-          br.x = snapToGrid(mx + (-dy / len) * off);
-          br.y = snapToGrid(my + (dx / len) * off);
+          const laneSign = (n % 2 === 0) ? 1 : -1;
+          const lane = Math.ceil((n + 1) / 2);
+          const meshLane = br._isRing ? 1.55 : 1;
+          const off = (inlineOffset[br.type] || 48) * lane * meshLane;
+          if (dir === 'BUSBAR') {
+            targetX += laneSign * off;
+          } else {
+            targetX += (-dy / len) * off * laneSign;
+            targetY += (dx / len) * off * laneSign;
+          }
+        } else {
+          const spread = Math.max(70, Math.min(140, linked.length * 22));
+          targetY += spread;
         }
-      } else if (linked.length === 1 && linked[0]) {
-        br.x = linked[0].x + 60;
-        br.y = linked[0].y;
+
+        const resolved = resolveInlinePorts(br, linked, busParent);
+        if (resolved) {
+          const dx = resolved.second.x - resolved.first.x;
+          const dy = resolved.second.y - resolved.first.y;
+          if (isLineType(br.type)) br.rotation = Math.abs(dy) > Math.abs(dx) ? 90 : 0;
+          else if (br.type === 'transformer_2w' || br.type === 'transformer_3w') br.rotation = 0;
+          else br.rotation = Math.abs(dy) > Math.abs(dx) ? 90 : 0;
+        }
+        if (dir === 'BUSBAR' && isLineType(br.type)) br.rotation = 90;
+
+        placeWithOccupancy(br, targetX, targetY, occupied, {
+          maxRing: br._isRing ? 16 : 11,
+          clearance: br._isRing ? 10 : 8,
+        });
+      } else if (linked.length === 1) {
+        const bus = linked[0];
+        const side = br.type.startsWith('dc') ? 1 : -1;
+        placeWithOccupancy(br, bus.x + side * 130, bus.y, occupied, {
+          anchor: bus, minDist: 96, maxRing: 10, clearance: 8,
+        });
+      } else {
+        const maxLayer = sortedLayers.length > 0 ? sortedLayers[sortedLayers.length - 1] + 1 : 0;
+        const i = occupied.length;
+        placeWithOccupancy(br, (i % 6) * 130, maxLayer * spacingY + 120 + Math.floor(i / 6) * 120, occupied);
       }
-      // Orientation: BUSBAR draws lines/cables vertically (rotate 90°) between
-      // horizontal busbars; transformers keep their inherently vertical symbol.
-      // Other directions restore the canonical horizontal line orientation.
-      if (dir === 'BUSBAR') {
-        if (isLineType(br.type)) br.rotation = 90;
-        else if (br.type === 'transformer_2w' || br.type === 'transformer_3w') br.rotation = 0;
-      } else if (isLineType(br.type)) {
-        br.rotation = 0;
-      }
-      br.el.setAttribute('transform', `translate(${br.x}, ${br.y}) rotate(${br.rotation || 0})`);
+      applyComponentTransform(br);
     });
 
-    // Place device components around their connected bus BY TYPE so the
-    // single-line diagram reads like a professional schematic (doc §5.3 step 8):
-    //   external grid → above,  generator → left,  pv / renewable → right,
-    //   load / motor → below,  storage → lower-right,  shunt → lower-left.
+    // Place device components around their connected bus by semantic zone.  Each
+    // candidate slot then goes through the occupancy search, so dense buses grow
+    // into clean rows instead of covering labels and neighboring feeders.
     const dirSlots = new Map(); // `${busId}|${dir}` -> count already placed
-    const slotOf = (busId, dir) => {
-      const key = busId + '|' + dir;
+    const slotOf = (busId, zone) => {
+      const key = busId + '|' + zone;
       const n = dirSlots.get(key) || 0;
       dirSlots.set(key, n + 1);
-      return n;
+      return { dir: zone, n };
     };
     const placement = {
-      external_grid:    { dir: 'up',    dx: 0,    dy: -110, sx: 70,  sy: 0 },
-      generator:        { dir: 'left',  dx: -110, dy: 20,   sx: 0,   sy: 64 },
-      static_generator: { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
-      pv_system:        { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
-      renewable_gen:    { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
-      vpp:              { dir: 'right', dx: 110,  dy: 20,   sx: 0,   sy: 64 },
-      storage:          { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
-      mobile_storage:   { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
-      microgrid:        { dir: 'dr',    dx: 95,   dy: 110,  sx: 70,  sy: 0 },
-      shunt:            { dir: 'dl',    dx: -95,  dy: 110,  sx: -70, sy: 0 },
+      external_grid:    'up',
+      generator:        'left',
+      static_generator: 'right',
+      pv_system:        'right',
+      dc_pv_array:      'right',
+      renewable_gen:    'right',
+      vpp:              'right',
+      storage:          'dr',
+      dc_storage:       'dr',
+      mobile_storage:   'dr',
+      microgrid:        'dr',
+      shunt:            'dl',
     };
-    const defaultPlace = { dir: 'down', dx: 0, dy: 110, sx: 80, sy: 70 };
     let orphanIdx = 0;
     devices.forEach(comp => {
-      const busId = firstNeighbor.get(comp.id);
+      const busId = connectionBusNeighbors(comp.id, busIdSet, busNeighborsByComp)[0];
       if (busId !== undefined) {
         const bus = getComponent(busId);
         if (bus) {
-          const p = placement[comp.type] || defaultPlace;
-          const n = slotOf(busId, p.dir);
-          if (p.dir === 'down') {
-            const col = n % 4, row = Math.floor(n / 4);
-            comp.x = bus.x + (col - 1.5) * p.sx;
-            comp.y = bus.y + p.dy + row * 70;
-          } else {
-            comp.x = bus.x + p.dx + n * p.sx;
-            comp.y = bus.y + p.dy + n * p.sy;
-          }
+          const zone = placement[comp.type] || 'down';
+          const target = layoutAttachedDevice(comp, bus, slotOf(busId, zone), dir, nodeGap, levelGap);
+          placeWithOccupancy(comp, target.x, target.y, occupied, {
+            anchor: bus,
+            minDist: 96,
+            maxRing: Math.max(8, Math.min(18, 8 + Math.ceil((busLoadById.get(busId) || 0) / 2))),
+            clearance: 8,
+          });
         }
       } else {
-        // No connection, place in a separate area
+        // No connection, place in a separate area beneath the bus layers.
         const maxLayer = sortedLayers.length > 0 ? sortedLayers[sortedLayers.length - 1] + 1 : 0;
-        comp.x = (orphanIdx % 5) * 100;
-        comp.y = maxLayer * spacingY + 100 + Math.floor(orphanIdx / 5) * 100;
+        placeWithOccupancy(comp,
+          (orphanIdx % 5) * 130,
+          maxLayer * spacingY + 140 + Math.floor(orphanIdx / 5) * 120,
+          occupied,
+          { maxRing: 8, clearance: 8 });
         orphanIdx++;
       }
-      comp.x = snapToGrid(comp.x);
-      comp.y = snapToGrid(comp.y);
-      comp.el.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
+      applyComponentTransform(comp);
     });
+
+    const movable = branches.concat(devices);
+    const refine = refineLayoutCollisions(movable, state.components, {
+      clearance: 8,
+      passes: 5,
+      maxRing: 36,
+    });
+    const finalRects = state.components.map(c => layoutFootprint(c));
+    if (_layoutStats) {
+      _layoutStats.overlaps = countLayoutOverlaps(finalRects, 2);
+      _layoutStats.refinedMoves = refine.moved;
+      _layoutStats.refineSkipped = refine.skipped;
+    }
 
     // Re-render connections — rebuild the avoidance context first so wires route
     // around the freshly-placed components.
@@ -1767,11 +2034,11 @@ const Canvas = (() => {
     const busByPort = (compId, portId) => {
       for (const conn of state.connections) {
         let other = null;
-        if (conn.from.compId === compId && conn.from.port === portId) other = conn.to.compId;
-        else if (conn.to.compId === compId && conn.to.port === portId) other = conn.from.compId;
+        if (conn.from.compId === compId && conn.from.portId === portId) other = conn.to.compId;
+        else if (conn.to.compId === compId && conn.to.portId === portId) other = conn.from.compId;
         if (other === null) continue;
-        if (acMap[other] != null) return acMap[other];
-        if (dcMap[other] != null) return dcMap[other];
+        if (acMap[other] != null) return { domain: 'AC', index: acMap[other] };
+        if (dcMap[other] != null) return { domain: 'DC', index: dcMap[other] };
       }
       return null;
     };
@@ -1782,8 +2049,17 @@ const Canvas = (() => {
       if ('bus_in' in p || 'bus_out' in p) {
         const bi = busByPort(comp.id, 'in');
         const bo = busByPort(comp.id, 'out');
-        if ('bus_in' in p && bi != null) p.bus_in = bi;
-        if ('bus_out' in p && bo != null) p.bus_out = bo;
+        if ('bus_in' in p && bi != null) p.bus_in = bi.index;
+        if ('bus_out' in p && bo != null) p.bus_out = bo.index;
+      } else if (comp.type === 'energy_router') {
+        const erPortDefs = COMP.ports.energy_router || [];
+        erPortDefs.forEach((def, idx) => {
+          const pi = idx + 1;
+          const b = busByPort(comp.id, def.id);
+          if (!b) return;
+          p['port' + pi + '_bus'] = b.index;
+          p['port' + pi + '_type'] = b.domain;
+        });
       } else if ('bus_ac' in p || 'bus_dc' in p) {
         const ac = buses.find(b => b.domain === 'ac');
         const dc = buses.find(b => b.domain === 'dc');
@@ -1824,7 +2100,8 @@ const Canvas = (() => {
     // Imported buses keep their original (possibly non-contiguous) index.
     const acBusIndexMap = assignBusIndices('ac_bus');
     const dcBusIndexMap = assignBusIndices('dc_bus');
-    const compBusMap = {}; // compId -> bus index (1-based)
+    const compBusMap = {}; // compId -> bus index (1-based, both AC and DC)
+    const compBusDomainMap = {}; // compId -> 'AC' | 'DC'
 
     // First pass: create buses
     state.components.forEach(comp => {
@@ -1832,6 +2109,7 @@ const Canvas = (() => {
         const p = comp.params;
         const idx = acBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
+        compBusDomainMap[comp.id] = 'AC';
         sys.ac.buses.push({
           index: idx,
           bus_type: p.bus_type || 'PQ',
@@ -1854,6 +2132,7 @@ const Canvas = (() => {
         const p = comp.params;
         const idx = dcBusIndexMap[comp.id];
         compBusMap[comp.id] = idx;
+        compBusDomainMap[comp.id] = 'DC';
         sys.dc.buses.push({
           index: idx,
           bus_type: p.bus_type || 'DC_P',
@@ -1906,16 +2185,33 @@ const Canvas = (() => {
     // VSC's 'ac'/'dc' ports. Returns 0 when the port is unwired.
     function findBusIndexByPort(compId, portId) {
       for (const conn of state.connections) {
-        if (conn.from.compId === compId && conn.from.port === portId) {
+        if (conn.from.compId === compId && conn.from.portId === portId) {
           const idx = compBusMap[conn.to.compId];
           if (idx !== undefined) return idx;
         }
-        if (conn.to.compId === compId && conn.to.port === portId) {
+        if (conn.to.compId === compId && conn.to.portId === portId) {
           const idx = compBusMap[conn.from.compId];
           if (idx !== undefined) return idx;
         }
       }
       return 0;
+    }
+
+    function findBusByPort(compId, portId) {
+      for (const conn of state.connections) {
+        let busCompId = null;
+        if (conn.from.compId === compId && conn.from.portId === portId) {
+          busCompId = conn.to.compId;
+        } else if (conn.to.compId === compId && conn.to.portId === portId) {
+          busCompId = conn.from.compId;
+        }
+        if (busCompId === null) continue;
+        const idx = compBusMap[busCompId];
+        if (idx !== undefined) {
+          return { index: idx, domain: compBusDomainMap[busCompId] || 'AC' };
+        }
+      }
+      return null;
     }
 
     // Second pass: create devices
@@ -2034,7 +2330,7 @@ const Canvas = (() => {
             brIdx++;
           } else {
             const trafoIndex = Number.isFinite(Number(p.index)) ? Number(p.index) : trafoIdx;
-            sys.ac.transformers_2w.push({
+            const trafo = {
               index: trafoIndex, hv_bus: hv, lv_bus: lv,
               sn_mva: numOr(p.sn_mva, 100),
               vn_hv_kv: numOr(p.vn_hv_kv, 220),
@@ -2052,7 +2348,11 @@ const Canvas = (() => {
               tap_step_percent: numOr(p.tap_step_percent, 1.25),
               vector_group: p.vector_group || '',
               in_service: p.in_service !== false,
-            });
+            };
+            if (Number(p.source_branch_idx) > 0) {
+              trafo.source_branch_idx = Number(p.source_branch_idx);
+            }
+            sys.ac.transformers_2w.push(trafo);
             trafoIdx++;
           }
           break;
@@ -2572,30 +2872,40 @@ const Canvas = (() => {
         case 'energy_router': {
           // Build ports array from per-port parameters
           const erPorts = [];
+          const erPortDefs = COMP.ports.energy_router || [];
           for (let pi = 1; pi <= 4; pi++) {
-            const pBus = parseInt(p['port' + pi + '_bus']) || 0;
+            const portDef = erPortDefs[pi - 1];
+            const wired = portDef ? findBusByPort(comp.id, portDef.id) : null;
+            const typedPortType = String(p['port' + pi + '_type'] || '').toUpperCase();
+            const portType = wired?.domain || (typedPortType === 'DC' ? 'DC' : 'AC');
+            const pBus = wired?.index || parseInt(p['port' + pi + '_bus']) || 0;
             if (pBus === 0) continue;  // skip ports with no bus assigned
+            const voltageLevel = portType === 'DC'
+              ? numOr(p.vn_dc_kv, numOr(p.vn_ac_kv, 0))
+              : numOr(p.vn_ac_kv, 0);
             erPorts.push({
-              index: pi,
-              name: (p.name || 'ER') + '_P' + pi,
+              index: Number.isFinite(Number(p['port' + pi + '_index']))
+                ? Number(p['port' + pi + '_index'])
+                : pi,
+              name: p['port' + pi + '_name'] || (p.name || 'ER') + '_P' + pi,
               bus: pBus,
-              port_type: 'AC',
+              port_type: portType,
               side: parseInt(p['port' + pi + '_side']) || 0,
               control_mode: p['port' + pi + '_control_mode'] || 'PQ',
               p_set_mw: numOr(p['port' + pi + '_p_set_mw'], 0),
               q_set_mvar: numOr(p['port' + pi + '_q_set_mvar'], 0),
               v_set_pu: numOr(p['port' + pi + '_v_set_pu'], 1.0),
               eta: numOr(p['port' + pi + '_eta'], 0.98),
-              voltage_level_kv: numOr(p.vn_ac_kv, 0),
-              pmax_mw: numOr(p.pmax_mw, 0),
-              pmin_mw: numOr(p.pmin_mw, 0),
-              qmax_mvar: numOr(p.qmax_mvar, 0),
-              qmin_mvar: numOr(p.qmin_mvar, 0),
-              in_service: true,
+              voltage_level_kv: voltageLevel,
+              pmax_mw: numOr(p['port' + pi + '_pmax_mw'], numOr(p.pmax_mw, 0)),
+              pmin_mw: numOr(p['port' + pi + '_pmin_mw'], numOr(p.pmin_mw, 0)),
+              qmax_mvar: numOr(p['port' + pi + '_qmax_mvar'], numOr(p.qmax_mvar, 0)),
+              qmin_mvar: numOr(p['port' + pi + '_qmin_mvar'], numOr(p.qmin_mvar, 0)),
+              in_service: p['port' + pi + '_in_service'] !== false,
             });
           }
           sys.energy_routers.push({
-            index: sys.energy_routers.length,
+            index: Number.isFinite(Number(p.index)) ? Number(p.index) : sys.energy_routers.length,
             name: p.name || 'ERouter',
             router_type: p.router_type || 'hybrid',
             num_ports: erPorts.length,
@@ -3140,6 +3450,7 @@ const Canvas = (() => {
         tap_neutral: tr.tap_neutral,
         tap_step_percent: tr.tap_step_percent,
         vector_group: tr.vector_group || '',
+        source_branch_idx: tr.source_branch_idx,
         in_service: tr.in_service !== false,
       });
       addConnection(comp.id, 'hv', hvCompId, 'bottom');
@@ -3255,6 +3566,7 @@ const Canvas = (() => {
     const importDcStorage = (s) => {
       addDeviceAtBus('dc_storage', s.bus, {
         ...COMP.defaults.dc_storage,
+        index: s.index,
         name: s.name || 'DC ESS',
         p_mw: s.p_mw,
         p_rated_mw: s.p_rated_mw, e_rated_mwh: s.e_rated_mwh,
@@ -3560,13 +3872,22 @@ const Canvas = (() => {
       if (er.ports && er.ports.length > 0) {
         er.ports.forEach((pt, idx) => {
           const pi = idx + 1;
+          portParams['port' + pi + '_index'] = pt.index ?? pi;
+          portParams['port' + pi + '_name'] = pt.name || `${er.name || 'ER'}_P${pt.index ?? pi}`;
           portParams['port' + pi + '_bus'] = pt.bus || 0;
+          portParams['port' + pi + '_type'] = String(pt.port_type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
           portParams['port' + pi + '_side'] = pt.side || 0;
           portParams['port' + pi + '_control_mode'] = pt.control_mode || 'PQ';
           portParams['port' + pi + '_p_set_mw'] = pt.p_set_mw || 0;
           portParams['port' + pi + '_q_set_mvar'] = pt.q_set_mvar || 0;
           portParams['port' + pi + '_v_set_pu'] = pt.v_set_pu || 1.0;
           portParams['port' + pi + '_eta'] = pt.eta || 0.98;
+          portParams['port' + pi + '_pmax_mw'] = pt.pmax_mw || 0;
+          portParams['port' + pi + '_pmin_mw'] = pt.pmin_mw || 0;
+          portParams['port' + pi + '_qmax_mvar'] = pt.qmax_mvar || 0;
+          portParams['port' + pi + '_qmin_mvar'] = pt.qmin_mvar || 0;
+          portParams['port' + pi + '_voltage_level_kv'] = pt.voltage_level_kv || 0;
+          portParams['port' + pi + '_in_service'] = pt.in_service !== false;
         });
       }
       const comp = addComponent('energy_router', 500, 400, {
@@ -3589,7 +3910,8 @@ const Canvas = (() => {
         er.ports.forEach((pt, idx) => {
           const busIdx = pt.bus;
           if (!busIdx) return;
-          const busCompId = busCompMap[busIdx];
+          const portType = String(pt.port_type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
+          const busCompId = portType === 'DC' ? dcBusCompMap[busIdx] : busCompMap[busIdx];
           if (busCompId === undefined) return;
           // 端口ID与COMP.ports.energy_router顺序一一对应
           const erPortId = erPortDefs[idx] ? erPortDefs[idx].id : 'ac_left';
@@ -3883,6 +4205,19 @@ const Canvas = (() => {
       return out;
     }
 
+    const dcStorageComps = state.components.filter(comp => comp.type === 'dc_storage');
+    const solvedDcStorageRows = resultRowsByIndexOrOrder(_lastPfResult.dc_storage_results || [], dcStorageComps);
+    const solvedDcStorageById = {};
+    dcStorageComps.forEach((comp, i) => {
+      if (solvedDcStorageRows[i]) solvedDcStorageById[comp.id] = solvedDcStorageRows[i];
+    });
+    const solvedDcStoragePowerMW = (comp) => {
+      const row = solvedDcStorageById[comp.id];
+      if (!row) return null;
+      const value = Number(row.p_mw);
+      return Number.isFinite(value) ? value : null;
+    };
+
     function readOperatingPowerMW(comp, busCompId) {
       const p = comp.params || {};
       if (p.in_service === false || p.in_service === 'false') return 0;
@@ -3898,6 +4233,10 @@ const Canvas = (() => {
       }
       if (comp.type === 'asymmetric_load') {
         return numOr(p.pa_mw, 0) + numOr(p.pb_mw, 0) + numOr(p.pc_mw, 0);
+      }
+      if (comp.type === 'dc_storage') {
+        const solved = solvedDcStoragePowerMW(comp);
+        if (solved !== null) return solved;
       }
       const currentPowerFields = {
         vpp: ['p_output_mw', 'p_mw'],
@@ -4573,7 +4912,8 @@ const Canvas = (() => {
         else if (comp.type === 'storage' || comp.type === 'dc_storage' || comp.type === 'mobile_storage') {
           // Storage dispatch must use its signed setpoint. A zero setpoint is a
           // real operating state; falling back to rated power draws a false flow.
-          powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0;
+          const solved = comp.type === 'dc_storage' ? solvedDcStoragePowerMW(comp) : null;
+          powerMW = solved !== null ? solved : (Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw) : 0);
         }
         else if (comp.type === 'dc_pv_array') powerMW = Number.isFinite(Number(p.p_set_mw)) ? Number(p.p_set_mw) : 0;
         else powerMW = Number.isFinite(Number(p.p_mw)) ? Number(p.p_mw)
@@ -4885,9 +5225,13 @@ const Canvas = (() => {
       let erCompIdx = 0;
       state.components.forEach(comp => {
         if (comp.type !== 'energy_router') return;
-        // Determine ER index: match by sequential order among ER components
+        // Prefer the stable router index from component params. Fallback to
+        // sequential order for older canvases that do not carry the index.
         const erIdx = erCompIdx++;
-        const erd = erData[erIdx];
+        const paramIdx = Number(comp.params && comp.params.index);
+        const erd = Number.isFinite(paramIdx) && erByIdx[paramIdx]
+          ? erByIdx[paramIdx]
+          : erData[erIdx];
         if (!erd || !erd.ports) return;
 
         // Find ALL bus connections from this ER

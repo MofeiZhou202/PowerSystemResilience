@@ -150,8 +150,8 @@
     "transformers_2w": [
       {
         "index": 0,
-        "hv_bus": 1,
-        "lv_bus": 2,
+        "hv_bus": 2,
+        "lv_bus": 1,
         "sn_mva": 1.5,
         "vn_hv_kv": 10,
         "vn_lv_kv": 0.4,
@@ -334,7 +334,7 @@
       "name": "VSC ",
       "bus_ac": 4,
       "bus_dc": 1,
-      "control_mode": "AC_PV",
+      "control_mode": "AC_GRID_FORMING",
       "type": "two_level",
       "p_set_mw": 0.05,
       "q_set_mvar": 0,
@@ -372,7 +372,7 @@
       "name": "DC/DC 64",
       "bus_in": 3,
       "bus_out": 4,
-      "control_mode": "Voltage",
+      "control_mode": "Droop",
       "p_ref_mw": 0,
       "v_ref_pu": 1,
       "sn_mva": 1,
@@ -399,10 +399,10 @@
     "themeMode": "dark",
     "connectionStyle": "orthogonal",
     "viewBox": {
-      "x": -1205.1686452480917,
-      "y": -4033.4745760214146,
-      "w": 1085.299594631975,
-      "h": 656.8918599088263
+      "x": -1550,
+      "y": -4390,
+      "w": 1640,
+      "h": 920
     },
     "components": [
       {
@@ -444,6 +444,20 @@
         "key": "dc_bus#2",
         "type": "dc_bus",
         "x": -620,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "dc_bus#3",
+        "type": "dc_bus",
+        "x": -340,
+        "y": -3780,
+        "rotation": 270
+      },
+      {
+        "key": "dc_bus#4",
+        "type": "dc_bus",
+        "x": -60,
         "y": -3780,
         "rotation": 270
       },
@@ -490,6 +504,13 @@
         "rotation": 0
       },
       {
+        "key": "dc_branch#2",
+        "type": "dc_branch",
+        "x": -480,
+        "y": -3780,
+        "rotation": 0
+      },
+      {
         "key": "dc_load#0",
         "type": "dc_load",
         "x": -380,
@@ -506,7 +527,7 @@
       {
         "key": "dc_pv_array#1",
         "type": "dc_pv_array",
-        "x": -140,
+        "x": -20,
         "y": -3600,
         "rotation": 0
       },
@@ -525,32 +546,11 @@
         "rotation": 0
       },
       {
-        "key": "dc_bus#3",
-        "type": "dc_bus",
-        "x": -340,
-        "y": -3780,
-        "rotation": 270
-      },
-      {
-        "key": "dc_branch#2",
-        "type": "dc_branch",
-        "x": -480,
-        "y": -3780,
-        "rotation": 0
-      },
-      {
-        "key": "dcdc_converter#1",
+        "key": "dcdc_converter#0",
         "type": "dcdc_converter",
-        "x": -240,
+        "x": -180,
         "y": -3780,
         "rotation": 0
-      },
-      {
-        "key": "dc_bus#4",
-        "type": "dc_bus",
-        "x": -140,
-        "y": -3780,
-        "rotation": 270
       }
     ],
     "connections": [
@@ -562,17 +562,6 @@
         "to": {
           "key": "circuit_breaker#0",
           "port": "left"
-        },
-        "waypoints": null
-      },
-      {
-        "from": {
-          "key": "ac_bus#1",
-          "port": "right"
-        },
-        "to": {
-          "key": "transformer_2w#0",
-          "port": "hv"
         },
         "waypoints": null
       },
@@ -743,18 +732,7 @@
       },
       {
         "from": {
-          "key": "dcdc_converter#1",
-          "port": "in"
-        },
-        "to": {
-          "key": "dc_bus#3",
-          "port": "bottom"
-        },
-        "waypoints": null
-      },
-      {
-        "from": {
-          "key": "dcdc_converter#1",
+          "key": "dcdc_converter#0",
           "port": "out"
         },
         "to": {
@@ -770,6 +748,28 @@
         },
         "to": {
           "key": "dc_bus#4",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "transformer_2w#0",
+          "port": "hv"
+        },
+        "to": {
+          "key": "ac_bus#1",
+          "port": "bottom"
+        },
+        "waypoints": null
+      },
+      {
+        "from": {
+          "key": "dcdc_converter#0",
+          "port": "in"
+        },
+        "to": {
+          "key": "dc_bus#3",
           "port": "bottom"
         },
         "waypoints": null

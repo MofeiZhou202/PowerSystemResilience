@@ -1344,9 +1344,18 @@ TEST_CASE("resolve_device_control_role maps the seven VSC control modes",
 
   // String round-trip for the two new ConverterMode values.
   CHECK(converter_mode_from_str("AC_GRID_FORMING") == ConverterMode::AC_GRID_FORMING);
+  CHECK(converter_mode_from_str("grid forming") == ConverterMode::AC_GRID_FORMING);
+  CHECK(converter_mode_from_str("DC_V_AC_Q") == ConverterMode::VDC_Q);
+  CHECK(converter_mode_from_str("dc-v-ac-v") == ConverterMode::VDC_VAC);
   CHECK(converter_mode_from_str("DC_V_DROOP_AC_V") == ConverterMode::DC_V_DROOP_AC_V);
   CHECK(converter_mode_str(ConverterMode::AC_GRID_FORMING) == "AC_GRID_FORMING");
   CHECK(converter_mode_str(ConverterMode::DC_V_DROOP_AC_V) == "DC_V_DROOP_AC_V");
+  CHECK(dcdc_control_from_str("P") == DCDCControlMode::Power);
+  CHECK(dcdc_control_from_str("constant power") == DCDCControlMode::Power);
+  CHECK(dcdc_control_from_str("D") == DCDCControlMode::Droop);
+  CHECK(dcdc_control_from_str("dc-v") == DCDCControlMode::Voltage);
+  CHECK(dcdc_topology_from_str("buck-boost") == DCDCTopology::BuckBoost);
+  CHECK(dcdc_topology_from_str("DAB") == DCDCTopology::Isolated);
 }
 
 // ── Mode 6: droop Udc + AC voltage hold (genuine power flow) ──────────────────

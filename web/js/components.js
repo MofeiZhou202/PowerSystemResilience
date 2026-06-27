@@ -501,14 +501,14 @@ const COMP = (() => {
       p_rated_mw: 10, vn_ac_kv: 10, vn_dc_kv: 20,
       loss_percent: 1.0, pmax_mw: 10, pmin_mw: -10,
       qmax_mvar: 5, qmin_mvar: -5, in_service: true,
-      // Port parameters (4 AC ports: Side A left 2, Side B right 2)
-      port1_bus: 0, port1_side: 0, port1_control_mode: 'VF',
+      // Port parameters (4 ports: AC/DC type determines which bus map is used)
+      port1_bus: 0, port1_type: 'AC', port1_side: 0, port1_control_mode: 'VF',
       port1_p_set_mw: 0, port1_q_set_mvar: 0, port1_v_set_pu: 1.0, port1_eta: 0.98,
-      port2_bus: 0, port2_side: 0, port2_control_mode: 'PQ',
+      port2_bus: 0, port2_type: 'AC', port2_side: 0, port2_control_mode: 'PQ',
       port2_p_set_mw: 0, port2_q_set_mvar: 0, port2_v_set_pu: 1.0, port2_eta: 0.98,
-      port3_bus: 0, port3_side: 1, port3_control_mode: 'PQ',
+      port3_bus: 0, port3_type: 'AC', port3_side: 1, port3_control_mode: 'PQ',
       port3_p_set_mw: 0, port3_q_set_mvar: 0, port3_v_set_pu: 1.0, port3_eta: 0.98,
-      port4_bus: 0, port4_side: 1, port4_control_mode: 'PQ',
+      port4_bus: 0, port4_type: 'AC', port4_side: 1, port4_control_mode: 'PQ',
       port4_p_set_mw: 0, port4_q_set_mvar: 0, port4_v_set_pu: 1.0, port4_eta: 0.98
     },
     vpp: {
@@ -635,6 +635,8 @@ const COMP = (() => {
     eta: '效率', loss_percent: '损耗(%)',
     v_dc_set_pu: 'DC电压设定(pu)', v_ac_set_pu: 'AC电压设定(pu)',
     v_ac_angle_set_deg: 'AC构网角度设定(°)',
+    port_type: '端口类型', port1_type: '端口1类型', port2_type: '端口2类型',
+    port3_type: '端口3类型', port4_type: '端口4类型',
     closed: '合闸状态', rated_current_ka: '额定电流(kA)',
     vn_kv: '额定电压(kV)', cos_phi: '功率因数', efficiency: '效率',
     // Flexible Load

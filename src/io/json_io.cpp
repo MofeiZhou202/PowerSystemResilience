@@ -1157,6 +1157,7 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["x0_r0"] = t.x0_r0;
   j["mtbf_hours"] = t.mtbf_hours;
   j["mttr_hours"] = t.mttr_hours;
+  j["source_branch_idx"] = t.source_branch_idx;
   return j;
 }
 
@@ -1188,7 +1189,52 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.x0_r0 = jget(j, "x0_r0", 0.0);
   t.mtbf_hours = jget_alias(j, "mtbf_hours", "mtbf_hours", 0.0);
   t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
+  t.source_branch_idx = jget(j, "source_branch_idx", 0);
   return t;
+}
+
+static bool branch_matches_transformer2w_metadata(const ACBranch& br,
+                                                  const Transformer2W& tr,
+                                                  double base_mva) {
+  if (br.index <= 0 || tr.source_branch_idx > 0) return false;
+  if (br.from_bus != tr.hv_bus || br.to_bus != tr.lv_bus) return false;
+  const double branch_tap = std::abs(br.tap) < 1e-12 ? 1.0 : br.tap;
+  const bool transformer_like_branch =
+      std::abs(branch_tap - 1.0) > 1e-8 || std::abs(br.shift_deg) > 1e-8;
+  if (!transformer_like_branch) return false;
+
+  const double tr_tap = std::max(
+      1e-6, 1.0 + (static_cast<double>(tr.tap_pos) -
+                    static_cast<double>(tr.tap_neutral)) *
+                       tr.tap_step_percent / 100.0);
+  if (std::abs(branch_tap - tr_tap) > 1e-5) return false;
+  if (std::abs(br.shift_deg - tr.shift_deg) > 1e-5) return false;
+  if (tr.sn_mva <= 1e-9 || base_mva <= 1e-9) return true;
+
+  const double scale = base_mva / tr.sn_mva;
+  const double z_mag = std::max(0.0, tr.vk_percent / 100.0) * scale;
+  const double r_pu = std::max(0.0, tr.vkr_percent / 100.0) * scale;
+  const double x_pu = std::sqrt(std::max(0.0, z_mag * z_mag - r_pu * r_pu));
+  const double tol = 1e-5;
+  return std::abs(br.r_pu - r_pu) <= tol &&
+         std::abs(std::abs(br.x_pu) - x_pu) <= tol;
+}
+
+static void repair_legacy_transformer2w_branch_links(HybridPowerSystem& sys) {
+  const double base_mva = pf_ac_base_mva(sys);
+  for (auto& tr : sys.ac.transformers_2w) {
+    if (tr.source_branch_idx > 0) continue;
+    int match = 0;
+    int match_count = 0;
+    for (const auto& br : sys.ac.branches) {
+      if (!branch_matches_transformer2w_metadata(br, tr, base_mva)) continue;
+      match = br.index;
+      ++match_count;
+    }
+    if (match_count == 1) {
+      tr.source_branch_idx = match;
+    }
+  }
 }
 
 static json transformer3w_to_json(const Transformer3W& t) {
@@ -2429,6 +2475,7 @@ HybridPowerSystem from_json(const std::string& json_str) {
     sys.three_phase_ac = three_phase_system_from_json(root["three_phase_ac"]);
   }
 
+  repair_legacy_transformer2w_branch_links(sys);
   return sys;
 }
 
@@ -4170,6 +4217,7 @@ HybridPowerSystem from_jpc_json(const std::string& json_str) {
     for (const auto& j : root["dccb"])
       sys.dc.dc_circuit_breakers.push_back(dc_circuit_breaker_from_json(j));
 
+  repair_legacy_transformer2w_branch_links(sys);
   return sys;
 }
 

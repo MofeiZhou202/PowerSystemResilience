@@ -3,11 +3,31 @@
 // Shared enum ↔ string conversions for all hacdcpf enum types.
 // Used by json_io, etap_io, html_visualizer, and any future serializers.
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 
 #include "hacdcpf/model/enums.hpp"
 
 namespace hacdcpf {
+
+inline std::string enum_parse_key(std::string s) {
+  std::string out;
+  out.reserve(s.size());
+  bool last_sep = false;
+  for (unsigned char ch : s) {
+    if (std::isalnum(ch)) {
+      out.push_back(static_cast<char>(std::toupper(ch)));
+      last_sep = false;
+    } else if (!last_sep) {
+      out.push_back('_');
+      last_sep = true;
+    }
+  }
+  while (!out.empty() && out.front() == '_') out.erase(out.begin());
+  while (!out.empty() && out.back() == '_') out.pop_back();
+  return out;
+}
 
 // ── BusType ─────────────────────────────────────────────────────────────
 inline std::string bus_type_str(BusType t) {
@@ -59,12 +79,13 @@ inline std::string converter_mode_str(ConverterMode m) {
   return "PQ";
 }
 inline ConverterMode converter_mode_from_str(const std::string& s) {
-  if (s == "PQ" || s == "PQ_MODE" || s == "AC_PQ") return ConverterMode::PQ_MODE;
-  if (s == "VDC_Q") return ConverterMode::VDC_Q;
-  if (s == "VDC_VAC") return ConverterMode::VDC_VAC;
-  if (s == "AC_PV") return ConverterMode::AC_PV;
-  if (s == "AC_GRID_FORMING" || s == "AC_GFM") return ConverterMode::AC_GRID_FORMING;
-  if (s == "DC_V_DROOP_AC_V") return ConverterMode::DC_V_DROOP_AC_V;
+  const std::string k = enum_parse_key(s);
+  if (k == "PQ" || k == "P_Q" || k == "PQ_MODE" || k == "AC_PQ" || k == "AC_P_Q") return ConverterMode::PQ_MODE;
+  if (k == "VDC_Q" || k == "DC_V_AC_Q" || k == "DC_V_DROOP_AC_Q") return ConverterMode::VDC_Q;
+  if (k == "VDC_VAC" || k == "VDC_V_AC" || k == "DC_V_AC_V") return ConverterMode::VDC_VAC;
+  if (k == "AC_PV" || k == "AC_P_V") return ConverterMode::AC_PV;
+  if (k == "AC_GRID_FORMING" || k == "AC_GFM" || k == "GFM" || k == "GRID_FORMING") return ConverterMode::AC_GRID_FORMING;
+  if (k == "DC_V_DROOP_AC_V") return ConverterMode::DC_V_DROOP_AC_V;
   return ConverterMode::PQ_MODE;
 }
 
@@ -200,8 +221,10 @@ inline std::string dcdc_control_str(DCDCControlMode m) {
   }
 }
 inline DCDCControlMode dcdc_control_from_str(const std::string& s) {
-  if (s == "Power") return DCDCControlMode::Power;
-  if (s == "Droop") return DCDCControlMode::Droop;
+  const std::string k = enum_parse_key(s);
+  if (k == "POWER" || k == "P" || k == "P_MODE" || k == "P_REF" || k == "CONSTANT_POWER") return DCDCControlMode::Power;
+  if (k == "DROOP" || k == "D" || k == "DROOP_MODE") return DCDCControlMode::Droop;
+  if (k == "VOLTAGE" || k == "V" || k == "V_MODE" || k == "DC_V" || k == "CONSTANT_VOLTAGE") return DCDCControlMode::Voltage;
   return DCDCControlMode::Voltage;
 }
 
@@ -216,10 +239,11 @@ inline std::string dcdc_topology_str(DCDCTopology t) {
   }
 }
 inline DCDCTopology dcdc_topology_from_str(const std::string& s) {
-  if (s == "Buck") return DCDCTopology::Buck;
-  if (s == "Boost") return DCDCTopology::Boost;
-  if (s == "BuckBoost") return DCDCTopology::BuckBoost;
-  if (s == "Isolated") return DCDCTopology::Isolated;
+  const std::string k = enum_parse_key(s);
+  if (k == "BUCK") return DCDCTopology::Buck;
+  if (k == "BOOST") return DCDCTopology::Boost;
+  if (k == "BUCKBOOST" || k == "BUCK_BOOST") return DCDCTopology::BuckBoost;
+  if (k == "ISOLATED" || k == "DAB") return DCDCTopology::Isolated;
   return DCDCTopology::Generic;
 }
 
