@@ -86,6 +86,10 @@ and does not require a Fortran compiler. The older MUMPS backend is still
 available with `-DMIPSOLVERS_IPOPT_LINEAR_SOLVER=mumps`, but that path requires
 Fortran.
 
+The Windows deployment preset disables PaPILO (`MIPSOLVERS_USE_PAPILO=OFF`)
+because some PaPILO package configs enable Fortran during discovery. Leave it
+off unless you specifically need that presolve backend.
+
 ---
 
 ## Build
@@ -195,6 +199,7 @@ Installed layout:
 | `MIPSOLVERS_EIGEN_MAX_ALIGN_BYTES` | `32` | Eigen alignment (16/32/64) |
 | `MIPSOLVERS_USE_SUITESPARSE` | `ON` | Auto-detect and use SuiteSparse |
 | `MIPSOLVERS_USE_SUPERLU` | `ON` | Auto-detect and use SuperLU |
+| `MIPSOLVERS_USE_PAPILO` | `ON` | Auto-detect and use PaPILO presolve |
 
 ---
 

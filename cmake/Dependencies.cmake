@@ -202,17 +202,22 @@ if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
 set(MIPSOLVERS_HAVE_PAPILO OFF)
-find_package(papilo CONFIG QUIET
-  HINTS
-    $ENV{PAPILO_ROOT}
-    /opt/homebrew
-    /opt/homebrew/lib/cmake/papilo
-    "C:/vcpkg/installed/x64-windows")
-if(papilo_FOUND)
-  set(MIPSOLVERS_HAVE_PAPILO ON)
-  message(STATUS "mipsolvers: PaPILO detected")
+option(MIPSOLVERS_USE_PAPILO "Enable PaPILO presolve when available" ON)
+if(MIPSOLVERS_USE_PAPILO)
+  find_package(papilo CONFIG QUIET
+    HINTS
+      $ENV{PAPILO_ROOT}
+      /opt/homebrew
+      /opt/homebrew/lib/cmake/papilo
+      "C:/vcpkg/installed/x64-windows")
+  if(papilo_FOUND)
+    set(MIPSOLVERS_HAVE_PAPILO ON)
+    message(STATUS "mipsolvers: PaPILO detected")
+  else()
+    message(STATUS "mipsolvers: PaPILO not found; using native MILP presolve only")
+  endif()
 else()
-  message(STATUS "mipsolvers: PaPILO not found; using native MILP presolve only")
+  message(STATUS "mipsolvers: PaPILO disabled (MIPSOLVERS_USE_PAPILO=OFF)")
 endif()
 
 # ── SuiteSparse (optional) ───────────────────────────────────────────────────
