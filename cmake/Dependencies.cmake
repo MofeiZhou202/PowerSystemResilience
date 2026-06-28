@@ -301,11 +301,17 @@ endif()
 
 # ── Intel MKL PARDISO (optional) ──────────────────────────────────────────────
 # Intel MKL PARDISO is only available on Linux and Windows (not macOS).
-set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
-set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
-set(MIPSOLVERS_MKL_LIBRARIES "")
+if(NOT DEFINED MIPSOLVERS_HAVE_MKL_PARDISO)
+  set(MIPSOLVERS_HAVE_MKL_PARDISO OFF)
+endif()
+if(NOT DEFINED MIPSOLVERS_MKL_INCLUDE_DIRS)
+  set(MIPSOLVERS_MKL_INCLUDE_DIRS "")
+endif()
+if(NOT DEFINED MIPSOLVERS_MKL_LIBRARIES)
+  set(MIPSOLVERS_MKL_LIBRARIES "")
+endif()
 option(MIPSOLVERS_USE_MKL "Enable Intel MKL PARDISO backend when available" ON)
-if(MIPSOLVERS_USE_MKL AND NOT APPLE)
+if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
   # Build the hints list carefully: $ENV{ONEAPI_ROOT} may be unset, which
   # would expand to the bogus path "/mkl/latest" inside a quoted string.
   set(_MKL_HINTS $ENV{MKLROOT})
@@ -401,6 +407,8 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE)
   else()
     message(STATUS "mipsolvers: Intel MKL not found")
   endif()
+elseif(MIPSOLVERS_HAVE_MKL_PARDISO)
+  message(STATUS "mipsolvers: Intel MKL detected at ${MIPSOLVERS_MKL_INCLUDE_DIRS}")
 endif()
 
 # ── Eigen3 (header-only) — prefer vcpkg, then system include path, then local sibling ──

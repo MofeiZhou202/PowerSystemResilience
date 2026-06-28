@@ -75,12 +75,16 @@ generator or Ninja:
 # Install optional deps via vcpkg (recommended)
 vcpkg install suitesparse:x64-windows nlohmann-json:x64-windows fmt:x64-windows eigen3:x64-windows
 
+# Install Intel oneAPI MKL when building embedded Ipopt on Windows.
+
 cmake -S . -B build -A x64 `
   -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
 ```
 
-Ipopt is disabled by default on Windows. The project builds and tests
-fully without it.
+Embedded Ipopt uses MKL Pardiso on Windows (`MIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl`)
+and does not require a Fortran compiler. The older MUMPS backend is still
+available with `-DMIPSOLVERS_IPOPT_LINEAR_SOLVER=mumps`, but that path requires
+Fortran.
 
 ---
 
@@ -183,7 +187,8 @@ Installed layout:
 | `MIPSOLVERS_BUILD_HFACTOR` | `ON` | Build HiGHS HFactor static library |
 | `MIPSOLVERS_BUILD_EMBEDDED_HIGHS` | `ON` | Compile HiGHS from `highs/` |
 | `MIPSOLVERS_BUILD_EMBEDDED_SCIP` | `ON` | Compile SCIP from `scip/` |
-| `MIPSOLVERS_BUILD_LOCAL_IPOPT` | `ON` (macOS), `OFF` (others) | Compile Ipopt from `ipopt/` |
+| `MIPSOLVERS_BUILD_LOCAL_IPOPT` | `ON` | Compile Ipopt from `ipopt/` |
+| `MIPSOLVERS_IPOPT_LINEAR_SOLVER` | `pardisomkl` on Windows, `mumps` elsewhere | Embedded Ipopt linear solver backend |
 | `MIPSOLVERS_ENABLE_NATIVE_ARCH` | `OFF` | Add `-march=native` (host-only builds) |
 | `MIPSOLVERS_ENABLE_WERROR` | `OFF` | Treat compiler warnings as errors |
 | `MIPSOLVERS_EIGEN_VECTORIZE` | `ON` | Enable Eigen SIMD intrinsics |
@@ -272,7 +277,7 @@ endif()
 
 The build produces a single self-contained archive that merges
 `libmipsolvers.a` with every static dependency built in-tree (HiGHS, SCIP,
-Ipopt, MUMPS, the HiGHS-factor kernel, and the static LUSOL archive). This is
+Ipopt, MUMPS when selected, the HiGHS-factor kernel, and the static LUSOL archive). This is
 controlled by `MIPSOLVERS_BUILD_BUNDLED_ARCHIVE` (default `ON`) and produced by
 the `mipsolvers_bundled` target:
 
@@ -303,7 +308,7 @@ target_link_libraries(my_app PRIVATE
   # Boost (pulled in by SCIP): container iostreams program_options random regex serialization
   # Gurobi (only if the Gurobi adapter is compiled in):
   #   /Library/gurobi<ver>/macos_universal2/lib/libgurobi<ver>.dylib
-  -lgfortran -lquadmath                  # Fortran runtime (Ipopt/MUMPS/LUSOL)
+  -lgfortran -lquadmath                  # macOS/Linux MUMPS/LUSOL Fortran runtime
 )
 if(APPLE)
   target_link_libraries(my_app PRIVATE "-framework Accelerate")
@@ -311,8 +316,8 @@ endif()
 ```
 
 > The bundled archive contains only the libraries we build ourselves; system
-> numeric/shared libraries (SuiteSparse, OpenBLAS, GMP, TBB, Boost, the Fortran
-> runtime, and Accelerate) are intentionally left out and must be supplied by
+> numeric/shared libraries (SuiteSparse, OpenBLAS, GMP, TBB, Boost, any Fortran
+> runtime used by MUMPS/LUSOL, and Accelerate) are intentionally left out and must be supplied by
 > the consumer at link time.
 
 ### Minimum consumer CMakeLists.txt example
