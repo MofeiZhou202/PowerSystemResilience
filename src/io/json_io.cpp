@@ -540,6 +540,14 @@ static json load_to_json(const Load& l) {
   j["priority"] = load_priority_str(l.priority);
   j["n_customers"] = l.n_customers;
   j["profile_id"] = l.profile_id;
+  j["sn_mva"] = l.sn_mva;
+  j["motor_percent"] = l.motor_percent;
+  j["x_sub_pu"] = l.x_sub_pu;
+  j["r_sc_pu"] = l.r_sc_pu;
+  j["sc_source_type"] = l.sc_source_type;
+  j["sc_source_index"] = l.sc_source_index;
+  j["motor_poles"] = l.motor_poles;
+  j["motor_efficiency"] = l.motor_efficiency;
   return j;
 }
 
@@ -564,6 +572,14 @@ static Load load_from_json(const json& j) {
   l.priority = load_priority_from_str(jget<std::string>(j, "priority", "Medium"));
   l.n_customers = jget(j, "n_customers", 0);
   l.profile_id = jget(j, "profile_id", -1);
+  l.sn_mva = jget(j, "sn_mva", 0.0);
+  l.motor_percent = jget(j, "motor_percent", 0.0);
+  l.x_sub_pu = jget(j, "x_sub_pu", 0.0);
+  l.r_sc_pu = jget(j, "r_sc_pu", 0.0);
+  l.sc_source_type = jget<std::string>(j, "sc_source_type", "");
+  l.sc_source_index = jget(j, "sc_source_index", 0);
+  l.motor_poles = jget(j, "motor_poles", 2);
+  l.motor_efficiency = jget(j, "motor_efficiency", 0.95);
   return l;
 }
 

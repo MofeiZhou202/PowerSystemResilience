@@ -18,11 +18,13 @@ const COMP = (() => {
               <text class="comp-value" x="0" y="16">${p.base_kv||110}kV</text>`;
     },
     generator(p) {
+      const pg = p._result_pg_mw ?? p.pg_mw ?? 0;
+      const unit = p._result_p_unit || 'MW';
       return `<circle cx="0" cy="0" r="18" class="symbol" fill="none" stroke="#98c379" stroke-width="2"/>
               <text x="0" y="5" text-anchor="middle" fill="#98c379" font-size="14" font-weight="700">G</text>
               <line x1="0" y1="-18" x2="0" y2="-30" stroke="#98c379" stroke-width="2"/>
               <text class="comp-label" x="0" y="32">${p.name||'Gen'}</text>
-              <text class="comp-value" x="0" y="44">${p.pg_mw||0}MW</text>`;
+              <text class="comp-value" x="0" y="44">${pg}${unit}</text>`;
     },
     load(p) {
       return `<line x1="0" y1="-30" x2="0" y2="-8" stroke="#d19a66" stroke-width="2"/>

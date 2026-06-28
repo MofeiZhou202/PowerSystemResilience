@@ -63,6 +63,54 @@ namespace fs = std::filesystem;
 
 namespace {
 
+std::string sc_fault_type_name(hacdcpf::analysis::FaultType ft) {
+  switch (ft) {
+    case hacdcpf::analysis::FaultType::ThreePhase: return "ThreePhase";
+    case hacdcpf::analysis::FaultType::SinglePhaseGround: return "SinglePhaseGround";
+    case hacdcpf::analysis::FaultType::TwoPhase: return "TwoPhase";
+    case hacdcpf::analysis::FaultType::TwoPhaseGround: return "TwoPhaseGround";
+  }
+  return "ThreePhase";
+}
+
+std::string sc_calc_type_name(hacdcpf::analysis::SCCalcType ct) {
+  return ct == hacdcpf::analysis::SCCalcType::Min ? "Min" : "Max";
+}
+
+void apply_sc_request_options(const json& root,
+                              hacdcpf::analysis::SCDetailedOptions& opt) {
+  const json* o = &root;
+  if (root.contains("options") && root["options"].is_object()) {
+    o = &root["options"];
+  }
+
+  const std::string ft = o->value("fault_type", std::string("ThreePhase"));
+  if (ft == "SinglePhaseGround") opt.fault_type = hacdcpf::analysis::FaultType::SinglePhaseGround;
+  else if (ft == "TwoPhase") opt.fault_type = hacdcpf::analysis::FaultType::TwoPhase;
+  else if (ft == "TwoPhaseGround") opt.fault_type = hacdcpf::analysis::FaultType::TwoPhaseGround;
+  else opt.fault_type = hacdcpf::analysis::FaultType::ThreePhase;
+
+  const std::string calc = o->value("calc_type", o->value("calculation_type", std::string("Max")));
+  if (calc == "Min" || calc == "min" || calc == "Minimum" || calc == "minimum") {
+    opt.calc_type = hacdcpf::analysis::SCCalcType::Min;
+  } else {
+    opt.calc_type = hacdcpf::analysis::SCCalcType::Max;
+  }
+
+  if (o->contains("c_factor") && (*o)["c_factor"].is_number()) {
+    opt.c_factor = (*o)["c_factor"].get<double>();
+  }
+  if (o->contains("fault_impedance_pu") && (*o)["fault_impedance_pu"].is_number()) {
+    opt.fault_impedance_pu = (*o)["fault_impedance_pu"].get<double>();
+  }
+  if (o->contains("breaking_time_s") && (*o)["breaking_time_s"].is_number()) {
+    opt.breaking_time_s = (*o)["breaking_time_s"].get<double>();
+  }
+  if (o->contains("ith_duration_s") && (*o)["ith_duration_s"].is_number()) {
+    opt.ith_duration_s = (*o)["ith_duration_s"].get<double>();
+  }
+}
+
 void apply_replay_zip_and_solver_flags(hacdcpf::powerflow::SolverData& data,
                                        const hacdcpf::PowerFlowOptions& opt) {
   for (int k = 0; k < 3; ++k) {
@@ -2009,6 +2057,32 @@ json opf_generator_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
   return rows;
 }
 
+json power_flow_geo_generator_json(const hacdcpf::HybridPowerSystem& sys,
+                                   const std::vector<double>& pg,
+                                   const std::vector<double>& qg = {}) {
+  json rows = json::array();
+  for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+    const auto& g = sys.ac.generators[i];
+    if (!g.in_service) continue;
+    json row{
+      {"position", static_cast<int>(i)},
+      {"index", g.index},
+      {"canvas_type", "gen"},
+      {"canvas_index", g.index},
+      {"bus", g.bus},
+      {"vg_pu", g.vg_pu},
+      {"is_slack", g.is_slack},
+      {"pmax_mw", g.pmax_mw},
+      {"pmin_mw", g.pmin_mw},
+      {"name", g.name}
+    };
+    row["pg_mw"] = i < pg.size() ? pg[i] : g.pg_mw;
+    row["qg_mvar"] = i < qg.size() ? qg[i] : g.qg_mvar;
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
 json opf_vsc_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
                            const hacdcpf::HybridPowerSystem& original_sys,
                            const std::vector<double>& pac,
@@ -2763,6 +2837,12 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
               <option value="SinglePhaseGround">Single-Phase-Ground</option>
               <option value="TwoPhase">Two-Phase</option>
               <option value="TwoPhaseGround">Two-Phase-Ground</option>
+            </select>
+          </div>
+          <div><label>Calculation</label>
+            <select id="scCalcType">
+              <option value="Max">Maximum</option>
+              <option value="Min">Minimum</option>
             </select>
           </div>
           <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
@@ -4117,7 +4197,11 @@ document.getElementById('runParityOpfBtn').onclick=async()=>{
 document.getElementById('runScBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
   try{setStatus('Running short circuit (all buses)...');
-  const body=await api('/api/session/sc',{options:{fault_type:document.getElementById('scFaultType').value,c_factor:Number(document.getElementById('scCFactor').value||1.1)}});
+  const body=await api('/api/session/sc',{options:{
+    fault_type:document.getElementById('scFaultType').value,
+    calc_type:document.getElementById('scCalcType').value,
+    c_factor:Number(document.getElementById('scCFactor').value||1.1)
+  }});
   document.getElementById('scFault').textContent=body.fault_type;
   document.getElementById('scBuses').textContent=body.bus_results.length;
   const ik=body.bus_results.map(r=>r.ikpp_ka);
@@ -4150,6 +4234,7 @@ document.getElementById('runScDetailedBtn').onclick=async()=>{
     const body=await api('/api/session/sc_detailed',{
       fault_bus_ids:busIds,
       fault_type:document.getElementById('scFaultType').value,
+      calc_type:document.getElementById('scCalcType').value,
       c_factor:Number(document.getElementById('scCFactor').value||1.1),
     });
     document.getElementById('scFault').textContent=body.fault_type;
@@ -7293,19 +7378,8 @@ int main(int argc, char** argv) {
           });
         }
 
-        // Individual generator results for visualization
-        json geo_gen = json::array();
-        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
-          const auto& g = sys.ac.generators[gi];
-          if (!g.in_service) continue;
-          geo_gen.push_back(json{
-            {"index", g.index}, {"bus", g.bus},
-            {"pg_mw", gen_pg_solved[gi]}, {"qg_mvar", gen_qg_solved[gi]},
-            {"vg_pu", g.vg_pu}, {"is_slack", g.is_slack},
-            {"pmax_mw", g.pmax_mw}, {"pmin_mw", g.pmin_mw},
-            {"name", g.name}
-          });
-        }
+        // Individual generator results for visualization.
+        json geo_gen = power_flow_geo_generator_json(sys, gen_pg_solved, gen_qg_solved);
 
         // Energy router port transfers – reconstructed from expanded VSC/DCDC
         // results. During canonical projection each ER port becomes a VSC named
@@ -9988,6 +10062,8 @@ int main(int argc, char** argv) {
 	                terminal_flows.value("dc_circuit_breaker_flows", json::array());
 	            post_pf["geo_er"] =
 	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
+	            post_pf["geo_gen"] =
+	                power_flow_geo_generator_json(original_sys, r.pg_mw, r.qg_mvar);
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
 	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
@@ -10287,14 +10363,7 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       hacdcpf::analysis::SCDetailedOptions dopt;
-      if (j.contains("options")) {
-        const auto& o = j["options"];
-        std::string ft = o.value("fault_type", std::string("ThreePhase"));
-        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
-        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
-        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
-        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
-      }
+      apply_sc_request_options(j, dopt);
       dopt.compute_branch_flows = false;
       dopt.compute_voltage_drops = false;
       dopt.compute_ith = true;
@@ -10309,14 +10378,9 @@ int main(int argc, char** argv) {
       }
       auto detailed = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, all_bus_ids, dopt);
       json out;
-      out["fault_type"] = [&](){
-        switch(dopt.fault_type){
-          case hacdcpf::analysis::FaultType::ThreePhase: return "ThreePhase";
-          case hacdcpf::analysis::FaultType::SinglePhaseGround: return "SinglePhaseGround";
-          case hacdcpf::analysis::FaultType::TwoPhase: return "TwoPhase";
-          case hacdcpf::analysis::FaultType::TwoPhaseGround: return "TwoPhaseGround";
-        } return "ThreePhase";
-      }();
+      out["fault_type"] = sc_fault_type_name(dopt.fault_type);
+      out["calc_type"] = sc_calc_type_name(dopt.calc_type);
+      out["c_factor"] = dopt.c_factor;
       out["bus_results"] = json::array();
       for (const auto& dr : detailed) {
         // Find the fault bus's own result
@@ -11221,17 +11285,15 @@ int main(int argc, char** argv) {
           fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
-        const std::string ft = j.value("fault_type", std::string("ThreePhase"));
-        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
-        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
-        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
-        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
+        apply_sc_request_options(j, dopt);
         dopt.compute_branch_flows = true;
         dopt.compute_voltage_drops = true;
         dopt.compute_ith = true;
         auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
         json out;
-        out["fault_type"] = ft;
+        out["fault_type"] = sc_fault_type_name(dopt.fault_type);
+        out["calc_type"] = sc_calc_type_name(dopt.calc_type);
+        out["c_factor"] = dopt.c_factor;
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;

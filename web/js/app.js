@@ -760,7 +760,18 @@ const App = (() => {
     data.ac_circuit_breaker_flows = Array.isArray(data.ac_circuit_breaker_flows) ? data.ac_circuit_breaker_flows : [];
     data.dc_circuit_breaker_flows = Array.isArray(data.dc_circuit_breaker_flows) ? data.dc_circuit_breaker_flows : [];
     data.geo_er = Array.isArray(data.geo_er) ? data.geo_er : [];
-    data.geo_gen = Array.isArray(data.geo_gen) ? data.geo_gen : [];
+    data.geo_gen = firstNonEmptyArray(data.geo_gen, data.generator_dispatch);
+    if (!data.geo_gen.length && Array.isArray(data.pg_mw) && data.pg_mw.length) {
+      const qg = Array.isArray(data.qg_mvar) ? data.qg_mvar : [];
+      data.geo_gen = data.pg_mw.map((p, i) => ({
+        position: i,
+        index: i,
+        canvas_type: 'gen',
+        canvas_index: i,
+        pg_mw: p,
+        qg_mvar: qg[i],
+      }));
+    }
     data.geo_trafo3w = Array.isArray(data.geo_trafo3w) ? data.geo_trafo3w : [];
     data.component_results = Array.isArray(data.component_results) ? data.component_results : [];
     data.dc_storage_results = Array.isArray(data.dc_storage_results) ? data.dc_storage_results : [];
@@ -2134,7 +2145,9 @@ const App = (() => {
 	    if (genDiv) {
 	      const pg = data.pg_mw || [];
 	      const qg = data.qg_mvar || [];
-	      const genRows = Array.isArray(data.generator_dispatch) && data.generator_dispatch.length
+	      const genRows = Array.isArray(data.geo_gen) && data.geo_gen.length
+	        ? data.geo_gen
+	        : Array.isArray(data.generator_dispatch) && data.generator_dispatch.length
 	        ? data.generator_dispatch
 	        : pg.map((p, i) => {
 	            const item = SYS?.ac?.generators?.[i] || {};
@@ -2394,6 +2407,7 @@ const App = (() => {
 
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
     const faultType = document.getElementById('scFaultType').value;
+    const calcType = document.getElementById('scCalcType')?.value || 'Max';
     const cFactor = parseFloat(document.getElementById('scCFactor').value);
 
     // Blank fault bus → short circuit at every bus (overview mode).
@@ -2401,6 +2415,7 @@ const App = (() => {
       const data = await apiPost('/api/session/sc', {
         options: {
           fault_type: faultType,
+          calc_type: calcType,
           c_factor: cFactor,
           compute_all_buses: true,
         }
@@ -2429,6 +2444,7 @@ const App = (() => {
     const resp = await apiPostResult('/api/session/sc_detailed', {
       fault_bus_ids: [faultBus],
       fault_type: faultType,
+      calc_type: calcType,
       c_factor: cFactor,
     });
 
@@ -6434,6 +6450,10 @@ const App = (() => {
       const f = document.getElementById('scFaultType');
       if (f) f.value = e.target.value;
     });
+    document.getElementById('scCalcTypeSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scCalcType');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('voltageCorrectionFactor')?.addEventListener('change', (e) => {
       const f = document.getElementById('scCFactor');
       if (f) f.value = e.target.value;
@@ -6441,8 +6461,10 @@ const App = (() => {
     document.getElementById('btnRunShortCircuit')?.addEventListener('click', () => {
       // Mirror sub-toolbar values into legacy dialog inputs, then run.
       const ft = document.getElementById('faultTypeSelect')?.value;
+      const ct = document.getElementById('scCalcTypeSelect')?.value;
       const cf = document.getElementById('voltageCorrectionFactor')?.value;
       if (ft) document.getElementById('scFaultType').value = ft;
+      if (ct) document.getElementById('scCalcType').value = ct;
       if (cf) document.getElementById('scCFactor').value = cf;
       runShortCircuit();
     });

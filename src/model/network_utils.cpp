@@ -55,6 +55,21 @@ std::pair<double, double> rx_from_vk_vkr(double vk_percent,
   return {r, std::sqrt(x2)};
 }
 
+std::pair<double, double> rx_from_z_percent_x_over_r(double z_percent,
+                                                     double x_over_r,
+                                                     double base_mva,
+                                                     double sn_mva) {
+  if (z_percent <= 0.0 || sn_mva <= 1e-9 || base_mva <= 1e-9) {
+    return {0.0, 0.0};
+  }
+  const double z = (z_percent / 100.0) * (base_mva / sn_mva);
+  if (x_over_r > 1e-9) {
+    const double r = z / std::sqrt(1.0 + x_over_r * x_over_r);
+    return {r, r * x_over_r};
+  }
+  return {0.0, z};
+}
+
 double tap_from_step(int tap_pos, int tap_neutral, double tap_step_percent) {
   if (std::abs(tap_step_percent) < 1e-12) {
     return 1.0;
@@ -141,9 +156,15 @@ void add_equivalent_branch_from_transformer2w(const Transformer2W& tr,
   br.rate_a_mva = tr.sn_mva;
   br.in_service = true;
   br.name = tr.name.empty() ? ("Transformer2W_" + std::to_string(tr.index)) : (tr.name + "_eq");
-  br.r0_pu = r_pu;
-  br.x0_pu = (tr.z0_percent > 0.0) ? (tr.z0_percent / 100.0 * base_mva / std::max(1e-9, tr.sn_mva))
-                                    : x_pu;
+  if (tr.z0_percent > 0.0) {
+    auto [r0_pu, x0_pu] =
+        rx_from_z_percent_x_over_r(tr.z0_percent, tr.x0_r0, base_mva, tr.sn_mva);
+    br.r0_pu = r0_pu;
+    br.x0_pu = x0_pu;
+  } else {
+    br.r0_pu = r_pu;
+    br.x0_pu = x_pu;
+  }
   br.b0_pu = 0.0;
   br.vn_hv_kv = tr.vn_hv_kv;
   br.vn_lv_kv = tr.vn_lv_kv;
@@ -388,11 +409,15 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ld.p_percent_p = 100.0;
   ld.p_percent_q = 100.0;
 
-  // SC subtransient impedance 鈥?convert from ohms to pu on motor base so that
+  // SC subtransient impedance: convert from ohms to pu on motor base so that
   // the Load motor-fraction SC path (sn_mva, motor_percent, r_sc_pu, x_sub_pu)
   // produces the same admittance as the dedicated Motor path.
   ld.sn_mva       = m.sn_mva;
   ld.motor_percent = 1.0;
+  ld.sc_source_type = "AsynchronousMotor";
+  ld.sc_source_index = m.index;
+  ld.motor_poles = m.poles;
+  ld.motor_efficiency = m.efficiency;
   if (m.vn_kv > 1e-6 && m.sn_mva > 1e-6) {
     const double z_base_motor = m.vn_kv * m.vn_kv / m.sn_mva;
     ld.r_sc_pu  = m.r_pu / z_base_motor;
@@ -609,6 +634,12 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.tap_step_percent = tr.tap_step_percent;
     eq.shift_deg = tr.shift_deg;
     eq.z0_percent = tr.vk0_percent;
+    if (tr.vkr0_percent > 1e-9) {
+      const double x0_sq =
+          std::max(0.0, tr.vk0_percent * tr.vk0_percent -
+                            tr.vkr0_percent * tr.vkr0_percent);
+      eq.x0_r0 = std::sqrt(x0_sq) / tr.vkr0_percent;
+    }
     out.ac.transformers_2w.push_back(eq);
   }
 

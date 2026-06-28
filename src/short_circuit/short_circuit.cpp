@@ -20,6 +20,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include <complex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -33,6 +34,7 @@
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
+#include "hacdcpf/projection/canonical_network.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -41,6 +43,8 @@ namespace {
 using Cx = std::complex<double>;
 using SpMat = Eigen::SparseMatrix<Cx>;
 using SpLU  = Eigen::SparseLU<SpMat>;
+
+constexpr double kMinMotorContributionMw = 0.05;
 
 // -------------------------------------------------------------------------
 // Build bus-ID → local-index map
@@ -55,6 +59,180 @@ build_id_map(const std::vector<ACBus>& buses) {
 }
 
 // All IEC 60909 functions now implemented.
+
+double detailed_voltage_factor(double vn_kv, const SCDetailedOptions& opt) {
+  return (opt.c_factor > 0.0) ? opt.c_factor
+                              : get_voltage_factor_sc(vn_kv, opt.calc_type);
+}
+
+double load_motor_fraction(double raw) {
+  if (raw <= 0.0) return 0.0;
+  return (raw > 1.0) ? std::clamp(raw / 100.0, 0.0, 1.0)
+                     : std::clamp(raw, 0.0, 1.0);
+}
+
+bool is_projected_rich_motor_load(const Load& ld) {
+  return ld.sc_source_type == "AsynchronousMotor";
+}
+
+double load_motor_active_power_mw(const Load& ld, double motor_fraction) {
+  if (is_projected_rich_motor_load(ld)) {
+    return std::abs(ld.p_mw);
+  }
+  if (ld.sn_mva > 1e-6) {
+    const double pf = std::clamp(
+        std::abs(ld.p_mw) / std::max(1e-9, std::hypot(ld.p_mw, ld.q_mvar)),
+        0.0, 1.0);
+    return ld.sn_mva * motor_fraction * ((pf > 1e-6) ? pf : 0.85);
+  }
+  return std::abs(ld.p_mw) * motor_fraction;
+}
+
+double load_motor_pn_mw(const Load& ld, double motor_fraction) {
+  const double pn = load_motor_active_power_mw(ld, motor_fraction);
+  if (is_projected_rich_motor_load(ld)) {
+    const double eta = std::clamp(ld.motor_efficiency, 0.01, 1.0);
+    return pn * eta;
+  }
+  return pn;
+}
+
+int motor_pair_count_from_poles(int poles) {
+  return std::max(1, poles / 2);
+}
+
+struct ExternalGridScImpedance {
+  Cx z1{0.0, 0.0};
+  Cx z0{0.0, 0.0};
+};
+
+struct TransformerBranchCorrection {
+  double k1{1.0};
+  double k0{1.0};
+};
+
+std::unordered_map<int, TransformerBranchCorrection>
+build_transformer_branch_corrections(const ACSystem& ac,
+                                     const std::optional<BranchExpandMap>& branch_map,
+                                     double base_mva,
+                                     const SCDetailedOptions& opt) {
+  std::unordered_map<int, TransformerBranchCorrection> corrections;
+  if (!branch_map) return corrections;
+
+  auto bus_kv = [&](int bus_id, double fallback) {
+    for (const auto& bus : ac.buses) {
+      if (bus.index == bus_id) return (bus.base_kv > 1e-6) ? bus.base_kv : fallback;
+    }
+    return fallback;
+  };
+
+  auto branch_by_index = [&](int branch_index) -> const ACBranch* {
+    for (const auto& br : ac.branches) {
+      if (br.index == branch_index) return &br;
+    }
+    return nullptr;
+  };
+
+  auto branch_based_correction = [&](const ACBranch& br) {
+    TransformerBranchCorrection corr;
+    if (br.sn_mva <= 1e-9) return corr;
+    const double vn = (br.vn_hv_kv > 1e-6) ? br.vn_hv_kv
+                     : bus_kv(br.from_bus, br.vn_lv_kv);
+    const double c = detailed_voltage_factor(vn, opt);
+    const double x_on_tr_base = std::abs(br.x_pu) * br.sn_mva / base_mva;
+    corr.k1 = 0.95 * c / (1.0 + 0.6 * x_on_tr_base);
+    if (std::abs(br.x0_pu) > 1e-12) {
+      const double x0_on_tr_base = std::abs(br.x0_pu) * br.sn_mva / base_mva;
+      corr.k0 = corr.k1 * (1.0 + 0.6 * x0_on_tr_base);
+    } else {
+      corr.k0 = corr.k1 * (1.0 + 0.6 * x_on_tr_base);
+    }
+    return corr;
+  };
+
+  for (const auto& entry : branch_map->entries) {
+    if (entry.origin_type == BranchOriginType::Transformer2W) {
+      const Transformer2W* tr = nullptr;
+      for (const auto& candidate : ac.transformers_2w) {
+        if (candidate.index == entry.origin_index) {
+          tr = &candidate;
+          break;
+        }
+      }
+      if (!tr || tr->sn_mva <= 1e-9) continue;
+
+      const double vn = (tr->vn_hv_kv > 1e-6) ? tr->vn_hv_kv
+                       : bus_kv(tr->hv_bus, tr->vn_lv_kv);
+      auto [r_pu, x_pu] = [&]() {
+        const double scale = base_mva / tr->sn_mva;
+        const double z = std::max(0.0, tr->vk_percent / 100.0) * scale;
+        const double r = std::max(0.0, tr->vkr_percent / 100.0) * scale;
+        return std::pair<double, double>{r, std::sqrt(std::max(0.0, z * z - r * r))};
+      }();
+      const double x_on_tr_base = x_pu * tr->sn_mva / base_mva;
+      const double c = detailed_voltage_factor(vn, opt);
+      TransformerBranchCorrection corr;
+      corr.k1 = 0.95 * c / (1.0 + 0.6 * x_on_tr_base);
+      if (tr->z0_percent > 0.0) {
+        const double x0_on_tr_base =
+            (tr->x0_r0 > 1e-9)
+                ? (tr->z0_percent / 100.0) * tr->x0_r0 /
+                      std::sqrt(1.0 + tr->x0_r0 * tr->x0_r0)
+                : (tr->z0_percent / 100.0);
+        corr.k0 = corr.k1 * (1.0 + 0.6 * x0_on_tr_base);
+      } else {
+        corr.k0 = corr.k1 * (1.0 + 0.6 * x_on_tr_base);
+      }
+      if (corr.k1 > 1e-9 && corr.k0 > 1e-9) {
+        corrections[entry.branch_index] = corr;
+      }
+    } else if (entry.origin_type == BranchOriginType::Transformer3W) {
+      if (const ACBranch* br = branch_by_index(entry.branch_index)) {
+        corrections[entry.branch_index] = branch_based_correction(*br);
+      }
+    }
+  }
+
+  return corrections;
+}
+
+ExternalGridScImpedance external_grid_impedance_sc(const ExternalGrid& eg,
+                                                   double eg_bus_kv,
+                                                   double base_mva,
+                                                   const SCDetailedOptions& opt) {
+  const double c = detailed_voltage_factor(eg_bus_kv, opt);
+  Cx z1(0.0, 0.0);
+
+  if (eg.ikq_ka > 1e-6) {
+    const double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : eg_bus_kv;
+    const double z_ext_ohm = c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
+    const double z_ext_pu = z_ext_ohm * (base_mva / (eg_bus_kv * eg_bus_kv));
+    const double xr = (eg.x_r > 1e-6) ? eg.x_r : 10.0;
+    const double r_ext = z_ext_pu / std::sqrt(1.0 + xr * xr);
+    const double x_ext = r_ext * xr;
+    z1 = Cx(r_ext, x_ext);
+  } else if (std::abs(eg.r_pu) > 1e-12 || std::abs(eg.x_pu) > 1e-12) {
+    z1 = Cx(eg.r_pu, eg.x_pu);
+  } else {
+    const double s_sc = (opt.calc_type == SCCalcType::Min && eg.s_sc_min_mva > 1e-6)
+                            ? eg.s_sc_min_mva
+                            : eg.s_sc_max_mva;
+    if (s_sc > 1e-6) {
+      const double z_ext_pu = c * base_mva / s_sc;
+      const double rx = (opt.calc_type == SCCalcType::Min && eg.rx_min > 1e-9)
+                            ? eg.rx_min
+                            : ((eg.rx_max > 1e-9) ? eg.rx_max : 0.1);
+      const double x_ext = z_ext_pu / std::sqrt(1.0 + rx * rx);
+      const double r_ext = rx * x_ext;
+      z1 = Cx(r_ext, x_ext);
+    }
+  }
+
+  Cx z0 = (std::abs(eg.r0_pu) > 1e-12 || std::abs(eg.x0_pu) > 1e-12)
+              ? Cx(eg.r0_pu, eg.x0_pu)
+              : z1;
+  return {z1, z0};
+}
 
 // -------------------------------------------------------------------------
 // Build fault-network admittance matrix (positive sequence)
@@ -179,11 +357,13 @@ BusFaultResult fault_at_bus(SpLU& lu,
     r.i_fault_pu = V0 / Z_total;
   }
 
-  // Short-circuit MVA: Sk = |V0|² / |Z_kk|
-  r.sk_mva   = (base_mva * std::norm(V0)) / std::abs(Z_kk);
+  // Short-circuit apparent power on the system base. For a 3-phase fault this
+  // is S_k'' = S_base * c / |Z_k|; for unbalanced overview rows it follows the
+  // reported fault-current magnitude.
+  r.sk_mva = base_mva * std::abs(r.i_fault_pu);
   // Initial symmetrical short-circuit current in kA
   double v_base_kv = (base_kv > 0.0) ? base_kv : 1.0;
-  double i_base_ka = base_mva / (std::sqrt(3.0) * v_base_kv * 1e3);  // [kA]
+  double i_base_ka = base_mva / (std::sqrt(3.0) * v_base_kv);  // [kA]
   r.ikpp_ka  = std::abs(r.i_fault_pu) * i_base_ka;
 
   return r;
@@ -204,6 +384,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
                                          const std::unordered_map<int, int>& id_map,
                                          int n,
                                          const SCDetailedOptions& opt,
+                                         const std::unordered_map<int, TransformerBranchCorrection>& transformer_corrections,
                                          bool steady_state) {
   Eigen::MatrixXcd Ybus  = Eigen::MatrixXcd::Zero(n, n);
   Eigen::MatrixXcd Ybus2 = Eigen::MatrixXcd::Zero(n, n);  // negative-sequence
@@ -222,6 +403,10 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     if (std::abs(br.r_pu) < 1e-12 && std::abs(br.x_pu) < 1e-12) continue;
 
     Cx z_series(br.r_pu, br.x_pu);
+    if (auto it_corr = transformer_corrections.find(br.index);
+        it_corr != transformer_corrections.end()) {
+      z_series *= it_corr->second.k1;
+    }
     Cx y_series = Cx(1.0, 0.0) / z_series;
     Cx y_shunt(0.0, br.b_pu / 2.0);
 
@@ -254,6 +439,10 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     // Zero-sequence branch
     if (std::abs(br.r0_pu) > 1e-12 || std::abs(br.x0_pu) > 1e-12) {
       Cx z0(br.r0_pu, br.x0_pu);
+      if (auto it_corr = transformer_corrections.find(br.index);
+          it_corr != transformer_corrections.end()) {
+        z0 *= it_corr->second.k0;
+      }
       Cx y0 = Cx(1.0, 0.0) / z0;
       Cx y0_shunt(0.0, br.b0_pu / 2.0);
       if (std::abs(t - Cx(1.0, 0.0)) < 1e-9) {
@@ -293,7 +482,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     for (const auto& bus : ac.buses) {
       if (bus.index == g.bus) { bus_kv = bus.base_kv; break; }
     }
-    double c = get_voltage_factor_sc(bus_kv, opt.calc_type);
+    double c = detailed_voltage_factor(bus_kv, opt);
     double cos_phi = std::clamp(g.cos_phi, 0.01, 1.0);
     double sin_phi = std::sqrt(std::max(0.0, 1.0 - cos_phi * cos_phi));
     double KG = c / (1.0 + xdpp * sin_phi);
@@ -322,6 +511,8 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
   if (!steady_state) {
     for (const auto& m : ac.motors) {
       if (!m.in_service) continue;
+      const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
+      if (motor_p_mw < kMinMotorContributionMw) continue;
       auto it = id_map.find(m.bus);
       if (it == id_map.end()) continue;
       int mi = it->second;
@@ -348,12 +539,14 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     // --- loads with motor fraction (subtransient only) ---
     for (const auto& ld : ac.loads) {
       if (!ld.in_service) continue;
-      if (ld.motor_percent <= 1e-6 || ld.sn_mva <= 1e-6) continue;
+      const double motor_fraction = load_motor_fraction(ld.motor_percent);
+      if (motor_fraction <= 1e-6 || ld.sn_mva <= 1e-6) continue;
+      if (load_motor_active_power_mw(ld, motor_fraction) < kMinMotorContributionMw) continue;
       auto it = id_map.find(ld.bus);
       if (it == id_map.end()) continue;
       int li = it->second;
 
-      double actual_s = ld.sn_mva * ld.motor_percent;
+      double actual_s = ld.sn_mva * motor_fraction;
       if (actual_s < 1e-12) continue;
       Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
       if (std::abs(z_load) > 1e-15) {
@@ -375,42 +568,16 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     for (const auto& bus : ac.buses) {
       if (bus.index == eg.bus) { bus_kv = bus.base_kv; break; }
     }
-    double c = get_voltage_factor_sc(bus_kv, opt.calc_type);
-
-    // Compute impedance from ikq_ka if available
-    if (eg.ikq_ka > 1e-6) {
-      double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : bus_kv;
-      double z_ext_ohm = c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
-      double z_ext_pu = z_ext_ohm * (base_mva / (bus_kv * bus_kv));
-      double xr = (eg.x_r > 1e-6) ? eg.x_r : 10.0;
-      double r_ext = z_ext_pu / std::sqrt(1.0 + xr * xr);
-      double x_ext = r_ext * xr;
-      Cx y_ext = Cx(1.0, 0.0) / Cx(r_ext, x_ext);
-      Ybus(ei, ei) += y_ext;
-      Ybus2(ei, ei) += y_ext;  // Z2 ≈ Z1 for external grid
-    } else if (std::abs(eg.r_pu) > 1e-12 || std::abs(eg.x_pu) > 1e-12) {
-      Cx z_ext(eg.r_pu, eg.x_pu);
-      Cx y_ext = Cx(1.0, 0.0) / z_ext;
-      Ybus(ei, ei) += y_ext;
-      Ybus2(ei, ei) += y_ext;
-    } else if (eg.s_sc_max_mva > 1e-6) {
-      // IEC 60909 grid-source impedance from the (maximum) 3-phase short-circuit
-      // MVA: Z_Q = c · S_base / S_kQ" (pu), split into R/X using the rx_max
-      // ratio.  Lets an imported ETAP utility specified only by fault MVA + R/X
-      // (the common case) still contribute a finite source impedance.
-      const double z_ext_pu = c * base_mva / eg.s_sc_max_mva;
-      const double rx = (eg.rx_max > 1e-9) ? eg.rx_max : 0.1;  // R/X ratio
-      const double x_ext = z_ext_pu / std::sqrt(1.0 + rx * rx);
-      const double r_ext = rx * x_ext;
-      Cx y_ext = Cx(1.0, 0.0) / Cx(r_ext, x_ext);
+    const auto z_ext = external_grid_impedance_sc(eg, bus_kv, base_mva, opt);
+    if (std::abs(z_ext.z1) > 1e-15) {
+      Cx y_ext = Cx(1.0, 0.0) / z_ext.z1;
       Ybus(ei, ei) += y_ext;
       Ybus2(ei, ei) += y_ext;
     }
 
     // Zero-sequence external grid
-    if (std::abs(eg.r0_pu) > 1e-12 || std::abs(eg.x0_pu) > 1e-12) {
-      Cx z0(eg.r0_pu, eg.x0_pu);
-      Ybus0(ei, ei) += Cx(1.0, 0.0) / z0;
+    if (std::abs(z_ext.z0) > 1e-15) {
+      Ybus0(ei, ei) += Cx(1.0, 0.0) / z_ext.z0;
     }
   }
 
@@ -858,9 +1025,11 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   const int fault_idx = it_fault->second;
 
   const double fault_kv = ac.buses[fault_idx].base_kv;
-  const double c = get_voltage_factor_sc(fault_kv, opt.calc_type);
+  const double c = detailed_voltage_factor(fault_kv, opt);
   const double I_base = base_mva / (std::sqrt(3.0) * fault_kv);  // kA
   const Cx Zf(opt.fault_impedance_pu, 0.0);
+  const auto transformer_corrections = build_transformer_branch_corrections(
+      ac, projected.branch_expand_map, base_mva, opt);
 
   auto bus_kv = [&](int bus_id) -> double {
     for (const auto& bus : ac.buses) {
@@ -879,33 +1048,13 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   auto external_grid_impedances = [&](const ExternalGrid& eg) -> std::pair<Cx, Cx> {
     const double eg_bus_kv = bus_kv(eg.bus);
-    const double eg_c = get_voltage_factor_sc(eg_bus_kv, opt.calc_type);
-    Cx z1(0.0, 0.0);
-    if (eg.ikq_ka > 1e-6) {
-      const double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : eg_bus_kv;
-      const double z_ext_ohm = eg_c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
-      const double z_ext_pu = z_ext_ohm * (base_mva / (eg_bus_kv * eg_bus_kv));
-      const double xr = (eg.x_r > 1e-6) ? eg.x_r : 10.0;
-      const double r_ext = z_ext_pu / std::sqrt(1.0 + xr * xr);
-      const double x_ext = r_ext * xr;
-      z1 = Cx(r_ext, x_ext);
-    } else if (std::abs(eg.r_pu) > 1e-12 || std::abs(eg.x_pu) > 1e-12) {
-      z1 = Cx(eg.r_pu, eg.x_pu);
-    } else if (eg.s_sc_max_mva > 1e-6) {
-      const double z_ext_pu = eg_c * base_mva / eg.s_sc_max_mva;
-      const double rx = (eg.rx_max > 1e-9) ? eg.rx_max : 0.1;
-      const double x_ext = z_ext_pu / std::sqrt(1.0 + rx * rx);
-      const double r_ext = rx * x_ext;
-      z1 = Cx(r_ext, x_ext);
-    }
-    Cx z0 = (std::abs(eg.r0_pu) > 1e-12 || std::abs(eg.x0_pu) > 1e-12)
-                ? Cx(eg.r0_pu, eg.x0_pu)
-                : z1;
-    return {z1, z0};
+    const auto z = external_grid_impedance_sc(eg, eg_bus_kv, base_mva, opt);
+    return {z.z1, z.z0};
   };
 
   // ====== Step 1: Build subtransient Ybus & Zbus ======
-  auto [Ybus, Ybus2, Ybus0] = build_sc_admittance_matrices(ac, projected.vsc_converters, id_map, n, opt, false);
+  auto [Ybus, Ybus2, Ybus0] = build_sc_admittance_matrices(
+      ac, projected.vsc_converters, id_map, n, opt, transformer_corrections, false);
   Eigen::MatrixXcd Zbus  = safe_inverse(Ybus);
   Eigen::MatrixXcd Zbus2 = safe_inverse(Ybus2);
   Eigen::MatrixXcd Zbus0 = safe_inverse(Ybus0);
@@ -979,6 +1128,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   // Motor contributions at fault bus
   for (const auto& m : ac.motors) {
     if (!m.in_service) continue;
+    const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
+    if (motor_p_mw < kMinMotorContributionMw) continue;
     Cx z_motor_ohm(m.r_pu, m.x_pu);
     if (std::abs(z_motor_ohm) < 1e-15) continue;
     double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
@@ -1006,11 +1157,18 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   // Load motor-fraction contributions at fault bus
   for (const auto& ld : ac.loads) {
     if (!ld.in_service) continue;
-    if (ld.motor_percent <= 1e-6 || ld.sn_mva <= 1e-6) continue;
-    double actual_s = ld.sn_mva * ld.motor_percent;
+    const double motor_fraction = load_motor_fraction(ld.motor_percent);
+    if (motor_fraction <= 1e-6 || ld.sn_mva <= 1e-6) continue;
+    if (load_motor_active_power_mw(ld, motor_fraction) < kMinMotorContributionMw) continue;
+    double actual_s = ld.sn_mva * motor_fraction;
     if (actual_s < 1e-12) continue;
     Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
-    load_contrib += voltage_source_contribution_ka(ld.bus, z_load);
+    const double contrib = voltage_source_contribution_ka(ld.bus, z_load);
+    if (is_projected_rich_motor_load(ld)) {
+      motor_contrib += contrib;
+    } else {
+      load_contrib += contrib;
+    }
   }
 
   // Static generator (sgen) contributions at fault bus via IEC 60909 §6.7
@@ -1153,6 +1311,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
       for (const auto& m : ac.motors) {
         if (!m.in_service || m.bus != bus_id) continue;
+        const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
+        if (motor_p_mw < kMinMotorContributionMw) continue;
         Cx z_motor_ohm(m.r_pu, m.x_pu);
         if (std::abs(z_motor_ohm) < 1e-15) continue;
         double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
@@ -1167,6 +1327,24 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
           // For unbalanced faults, use transfer ratio
           double m_pu = (c / std::abs(z_motor)) * std::abs(tr.Zk_xfer) / std::abs(Zk);
           bus_motor += m_pu * I_base;
+        }
+      }
+
+      for (const auto& ld : ac.loads) {
+        if (!ld.in_service || ld.bus != bus_id) continue;
+        const double motor_fraction = load_motor_fraction(ld.motor_percent);
+        if (motor_fraction <= 1e-6 || ld.sn_mva <= 1e-6) continue;
+        if (load_motor_active_power_mw(ld, motor_fraction) < kMinMotorContributionMw) continue;
+        const double actual_s = ld.sn_mva * motor_fraction;
+        if (actual_s < 1e-12) continue;
+        const Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
+        if (std::abs(z_load) <= 1e-15 || std::abs(Zk) <= 1e-15) continue;
+        const double contrib =
+            (c / std::abs(z_load)) * std::abs(tr.Zk_xfer) / std::abs(Zk) * I_base;
+        if (is_projected_rich_motor_load(ld)) {
+          bus_motor += contrib;
+        } else {
+          bus_load += contrib;
         }
       }
 
@@ -1294,6 +1472,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       // Motor contribution to breaking current at all buses
       for (const auto& m : ac.motors) {
         if (!m.in_service) continue;
+        const double motor_p_mw = m.sn_mva * std::clamp(m.cos_phi, 0.01, 1.0);
+        if (motor_p_mw < kMinMotorContributionMw) continue;
         auto mit = id_map.find(m.bus);
         if (mit == id_map.end()) continue;
         Cx z_motor_ohm(m.r_pu, m.x_pu);
@@ -1309,15 +1489,43 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
             ? motor_current * std::abs(Zbus(mi, fault_idx)) / Zk_abs
             : 0.0;
 
-          if (motor_current > 1e-15) {
-            double sn = (m.sn_mva > 1e-6) ? m.sn_mva : 1.0;
-            double Ik_ratio = motor_current * std::sqrt(3.0) * mvn / sn;
-            double mu = compute_mu(Ik_ratio, t_break);
-            double pn_mw = sn * m.cos_phi * m.efficiency;
-            double q = compute_q(pn_mw, m.poles, t_break);
-            Ib += mu * q * motor_current_tr;
-          }
+        if (motor_current > 1e-15) {
+          double sn = (m.sn_mva > 1e-6) ? m.sn_mva : 1.0;
+          double Ik_ratio = motor_current * std::sqrt(3.0) * mvn / sn;
+          double mu = compute_mu(Ik_ratio, t_break);
+          double pn_mw = sn * m.cos_phi * m.efficiency;
+          double q = compute_q(pn_mw, motor_pair_count_from_poles(m.poles), t_break);
+          Ib += mu * q * motor_current_tr;
         }
+      }
+
+      for (const auto& ld : ac.loads) {
+        if (!ld.in_service) continue;
+        const double motor_fraction = load_motor_fraction(ld.motor_percent);
+        if (motor_fraction <= 1e-6 || ld.sn_mva <= 1e-6) continue;
+        if (load_motor_active_power_mw(ld, motor_fraction) < kMinMotorContributionMw) continue;
+        auto lit = id_map.find(ld.bus);
+        if (lit == id_map.end()) continue;
+        const double actual_s = ld.sn_mva * motor_fraction;
+        if (actual_s < 1e-12) continue;
+        const Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
+        if (std::abs(z_load) <= 1e-15) continue;
+        const double motor_current = (c / std::abs(z_load)) * I_base;
+        const double Zk_abs = std::abs(Zbus(fault_idx, fault_idx) + Zf);
+        const double motor_current_tr =
+            (Zk_abs > 1e-15)
+                ? motor_current * std::abs(Zbus(lit->second, fault_idx)) / Zk_abs
+                : 0.0;
+        if (motor_current <= 1e-15) continue;
+        const double sn = (actual_s > 1e-6) ? actual_s : 1.0;
+        const double Ik_ratio = motor_current * std::sqrt(3.0) * bus_kv(ld.bus) / sn;
+        const double mu = compute_mu(Ik_ratio, t_break);
+        const double q = compute_q(
+            load_motor_pn_mw(ld, motor_fraction),
+            motor_pair_count_from_poles(ld.motor_poles),
+            t_break);
+        Ib += mu * q * motor_current_tr;
+      }
 
       // Network (no-motor) contribution passes through directly
       Ib += row.ikss_no_motor_ka;
@@ -1328,7 +1536,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   // ====== Step 7: Steady-state current (Ik) ======
   {
-    auto [Ybus_s, Ybus2_s, Ybus0_s] = build_sc_admittance_matrices(ac, projected.vsc_converters, id_map, n, opt, true);
+    auto [Ybus_s, Ybus2_s, Ybus0_s] = build_sc_admittance_matrices(
+        ac, projected.vsc_converters, id_map, n, opt, transformer_corrections, true);
     Eigen::MatrixXcd Zbus_s = safe_inverse(Ybus_s);
 
     Cx Zk_s = compute_Zk(opt.fault_type,

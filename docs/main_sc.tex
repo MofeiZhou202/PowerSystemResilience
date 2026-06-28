@@ -1,0 +1,1112 @@
+\documentclass[a4paper,11pt,AutoFakeBold]{ctexart}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{titletoc}  % 用于自定义目录格式
+\renewcommand{\contentsname}{}  % 清空原目录标题
+% 关于中文文献引用的格式参数设置请参考
+% https://github.com/hushidong/biblatex-gb7714-2015
+\usepackage[backend=biber,style=gb7714-2015]{biblatex}
+\usepackage{fancyhdr}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{listings}
+\usepackage{minted}
+\usepackage{tabularx}
+\usepackage{url}
+\usepackage[dvipsnames]{xcolor} 
+\usepackage{booktabs, multirow, tabularx, enumitem}
+\usepackage{siunitx}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{decorations.pathreplacing}
+
+\usepackage[linesnumbered,ruled,vlined,longend]{algorithm2e}
+
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+% 设置algorithm2e允许跨页
+\SetAlgoLined
+% 设置页眉，从第二页开始
+\pagestyle{fancy}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{1pt}
+
+% 定义Julia代码的样式
+\lstdefinestyle{JuliaStyle}{
+  language=Julia,
+  basicstyle=\small\ttfamily,
+  keywordstyle=\color{blue},
+  stringstyle=\color{red},
+  commentstyle=\color{green!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  stepnumber=1,
+  numbersep=5pt,
+  backgroundcolor=\color{white},
+  showspaces=false,
+  showstringspaces=false,
+  showtabs=false,
+  frame=single,
+  tabsize=4,
+  captionpos=b,
+  breaklines=true,
+  breakatwhitespace=false,
+  escapeinside={(*@}{@*)},
+  morekeywords={SystemData, push!, function, end, return, println, include, using}
+}
+
+
+
+% 定义行距=1.25倍
+\linespread{1.25}
+
+% 定义英文字体
+\setmainfont{Times New Roman}
+% 定义中文字体
+\setCJKmainfont{FandolSong}
+% 定义生僻字处理，当文字无法显示时前缀指令`\fallback`
+\setCJKfamilyfont{Babel}{BabelStone Han}
+\newcommand{\fallback}{\CJKfamily{Babel}}
+
+% 设置一级标题左对齐
+\ctexset{
+  section={
+    format+ =\raggedright
+  }
+}
+
+% 定义常见软链颜色
+% \hypersetup{
+%   colorlinks = true,
+%   urlcolor = CadetBlue,
+%   linkcolor = Cerulean,
+%   citecolor = Maroon
+% }
+
+% 定义行内代码格式
+\definecolor{light-gray}{rgb}{0.96, 0.96, 0.96}
+\NewDocumentCommand{
+  \codeword}{v}{%
+    \colorbox{light-gray}{
+      \texttt{\textcolor{Black}{#1}
+    }
+  }%
+}
+
+% 定义引用源
+\addbibresource{ref.bib}
+
+\title{\textbf{有源配电网建模仿真技术研究\\（短路部分）}}
+\author{刘彦辉，赵天阳}
+\date{\today}
+\newpage
+
+\begin{document}
+
+\maketitle
+
+\clearpage  % 确保从新页开始
+{\centering  % 居中显示"目录"标题
+\Large\bfseries  % 可选：使用大号加粗字体
+目录 
+\par}  % \par 结束居中环境
+\tableofcontents
+\addtocontents{toc}{\protect\setcounter{tocdepth}{4}}
+% 在文档开始处添加这行，去掉"目录"二字
+
+\newpage
+\section{引言}
+
+IEC 60909标准是由国际电工委员会（IEC）制定的一项国际标准，主要针对三相交流系统的短路电流计算。IEC 60909标准适用于频率为50Hz或60Hz的低压三相交流系统（100V<U<1000V）和高压交流三相系统（1kV<U≤550kV）的短路电流计算。标准提供了一种通用、实用且简洁的计算方法，用于确定短路电流的最大值和最小值，以支持设备的额定特性和保护装置的设计。
+
+主要内容包含：
+\begin{itemize}
+    \item 计算方法：基于等效电压源法，通过引入短路位置的等效电压源来计算短路电流。所有网络馈送器、同步和异步电机均用其内部阻抗替代。
+    \item 故障类型：标准涵盖了三相短路、两相短路、两相接地短路和单相接地短路等多种故障类型。
+    \item 应用场景：适用于低压、中压和高压电力系统，包括平衡和不平衡短路电流的计算。
+    \item 技术改进：2016年版标准对2001年版进行了修订，增加了风力发电站和光伏系统的短路电流计算内容。
+    \item 功能用途：短路电流计算用于短路保护、断路能力验证、热应力分析和间接接触保护等。
+\end{itemize}
+
+
+适用范围如下：
+\begin{itemize}
+    \item IEC 60909标准适用于低压（100V<U≤1000V）和高压（1kV<U≤550kV）三相交流系统的短路电流计算，包括平衡和不平衡短路电流的计算。
+    \item 标准适用于各种网络类型，包括放射状、网状和混合网络。
+    \item 对于最高电压等级超过550kV且具有长输电线路的系统，需要特别考虑。
+    \item 平衡短路（三相）与不平衡短路（两相、单相接地、两相接地等）。
+    \item 最大短路电流：用于设备选型（如断路器分断能力校验）。
+    \item 最小短路电流：用于保护装置校准（如过流保护阈值设定）。
+\end{itemize}
+
+IEC 60909 的核心计算方法为，等效电压源法、叠加法与对称分量法。
+\begin{itemize}
+    \item 等效电压源法: 基于戴维南定理，在短路点引入等效电压源（通常取系统标称电压的1.1倍），忽略非旋转负载导纳，简化计算流程；通过阻抗校正因子（如发电机、变压器阻抗修正）提升精度，与叠加法相比偏差控制在±5\%以内。
+    \item 对称分量法：采用正序、负序、零序阻抗分析不平衡故障，适用于非对称短路电流计算；忽略线路电容（零序系统除外），简化模型复杂度。
+\end{itemize}
+
+
+相比IEEE标准，IEC 60909更注重全局系统建模，引入电压修正因子，精度更高；而IEEE侧重设备级参数（如断路器选型）。支持手动计算与软件仿真（如ETAP、EasyPower），实现高效分析。IEC 60909标准为电力系统设计和设备选型提供了重要的技术支持，确保系统在正常运行和故障条件下的安全性和可靠性。
+
+\newpage
+\include{sections/definitions_sc}
+
+\newpage
+\section{IEC 60909 符号体系规范}
+
+\subsection{基本物理量符号}
+\begin{tabular}{lll}
+符号 & 英文定义 & 中文解释 \\
+\hline
+$c$ & Voltage factor & 电压系数 \\
+$U_n/\sqrt{3}$ & Equivalent voltage source & 等效电压源 \\
+$f$ & Frequency (50 Hz or 60 Hz) & 频率(50 Hz 或 60 Hz) \\
+$I_k$ & Short-circuit current & 短路电流 \\
+$I''_k$ & Initial symmetrical current & 初始对称电流 \\
+$I_{kmax}$ & Maximum steady-state current & 最大稳态电流 \\
+$i_p$ & Peak short-circuit current & 短路峰值电流 \\
+$I_b$ & Short-circuit breaking current & 开断短路电流 \\
+$I_k$ & Steady-state short-circuit current & 稳态短路电流 \\
+$Z_k$ & Short-circuit impedance & 短路阻抗 \\
+$\kappa$ & Peak short-circuir current factor & 峰值系数 \\
+$\mu$ & Breaking short-circuit current factor & 开断短路电流修正因子 \\
+$\lambda$ & Steady-state short-circuit current factor & 稳态短路电流修正因子 \\
+$\eta$ & Efficicency of asynchronous motors & 电动机功率因数 \\
+$R/X$ & Resistance-reactance ratio & 电阻电抗比 \\
+$K$ & Correction factor for impedences & 阻抗修正因子 \\
+$p$ & Pair of poles of an asynchronous & 异步电动机极对数 \\
+$q$ & Asynchronous factor & 异步电机开断电流修正因子 \\
+$t_r$ & Rated transformer ratio & 变压器额定变比 \\
+$t_{min}$ & Minimum time delay & 最小延时 \\
+$S_r$ & Rated apparent power of electrical equipment & 电气设备视在功率 \\
+$U_r$ & Rated voltage,line to line & 额定(线)电压 \\
+$U_n$ & Nominal system voltage,line to line & 系统标称(线)电压 \\
+$R \ resp \ r$ & Resistance & 电阻，有名值与标幺值 \\
+$X \ resp \ x$ & Reactance & 电抗，有名值与标幺值 \\
+$X_d \ resp \ X_q$ & Synchronous reactance & 同步电抗，直轴与交轴 \\
+$X''_d \ resp \ X''_q$ & Subtransient reactance & 次暂态电抗，直轴与交轴 \\
+$Z \ resp \ z$ & Impedance & 阻抗，有名值与标幺值 \\
+$Z_k$ & Short-circuit impedance of a 3-phase system & 三相交流系统短路阻抗 \\
+$Z_{(1)}$ & Positive-sequence short-circuit impedance & 正序短路阻抗 \\
+$Z_{(2)}$ & Negative-sequence short-circuit impedance & 负序短路阻抗 \\
+$Z_{(0)}$ & Zero-sequence short-circuit impedance & 零序短路阻抗 
+
+\end{tabular}
+
+\subsection{下标体系}
+\begin{tabular}{ll}
+(1)  & - 正序元件 \\
+(2)  & - 负序元件 \\
+(0)  & - 零序元件 \\
+AC   & - 交流系统 \\
+DC   & - 直流系统 \\
+max  & - 最大值 \\
+min  & - 最小值 \\
+k    & - 三相短路 \\
+n    & - 标称值 \\
+r    & - 额定值 \\
+t    & - 转换值 \\
+G    & - 发电机 \\
+M    & - 异步电动机 \\
+T    & - 变压器 \\
+HV   & - 变压器高压侧 \\
+LV   & - 变压器低压侧 \\
+S    & - 发电站 \\
+WA   & - 异步发电机型风电机组 \\
+WD   & - 双馈异步发电机型风电机组 \\
+WF   & - 全功率变换器型风电机组 \\
+\end{tabular}
+
+\subsection{修正系数体系}
+\begin{itemize}
+\item \textbf{同步机修正}：
+  \[
+  K_G = \frac{U_{nQ}}{U_r} \cdot \frac{1}{1 + x''_d \sin\varphi_r} 
+  \]
+  
+\item \textbf{变压器修正}：
+  \[
+  K_T = 0.95 \cdot \frac{c_{max}}{1 + 0.6x_T}
+  \]
+\end{itemize}
+
+\subsection{特殊符号规则}
+\begin{enumerate}
+\item 复数符号下划线：\[ \underline{Z} = R + jX \]
+\item 标幺值表示：\[ x''_d = 0.2\si{pu} \]
+\item 序列分量标注：
+  \[
+  \begin{cases}
+  I_{(1)} & \text{正序分量} \\
+  I_{(2)} & \text{负序分量} \\
+  I_{(0)} & \text{零序分量}
+  \end{cases}
+  \]
+\end{enumerate}
+
+\subsection{典型参数范围}
+\begin{tabular}{lll}
+参数 & 典型范围 & 单位 \\
+\hline
+$c_{max}$ & 0.9-1.1 & -- \\
+$x''_d$ & 0.12-0.35 & \si{pu} \\
+$R/X$ & 0.05-0.30 & -- \\
+$I_{LR}/I_r$ & 4-8 & -- \\
+\end{tabular}
+
+
+\newpage
+\section{计算模型}
+\subsection{假设}
+以下为IEC 60909标准短路电流计算前提假设：
+\begin{itemize}
+    \item a) 短路类型恒定；短路期间故障类型不变：三相短路保持三相短路，单相接地短路保持单相接地短路。
+    \item b) 网络结构恒定；短路期间网络拓扑结构无变化。
+    \item c) 变压器阻抗基准；变压器阻抗归算至分接开关主接点位置。
+    \item d) 电弧电阻忽略；电弧电阻不计入计算模型。
+    \item e) 非旋转负荷导纳处理；正序、负序、零序系统中，非旋转负荷的并联导纳均忽略。
+    \item f) 线路电容处理；正/负序系统：线路电容忽略；零序系统：仅在接地故障系数（IEC 60027-1定义）>1.4的低阻抗接地网络中考虑线路电容。
+    \item g) 变压器磁化导纳处理；正序、负序系统中变压器磁化导纳忽略。
+    \item h) 正序网络阻抗等于负序网络阻抗。
+\end{itemize}
+\subsection{计算原理}
+采用“等效电压源法”计算短路点电流，其核心逻辑为：在短路点F处引入等效电压源作为系统唯一激励源，其余电源均以内部阻抗等效替代。
+
+\subsubsection{等效建模原则}
+电源处理。所有输电线路、同步电机、异步电机均由其内部阻抗$Z_{\text{int}}$表示；等效电压源幅值取系统标称电压$U_{n}$。
+
+\subsubsection{核心公式}
+\begin{equation}
+    I_{k} = \frac{cU_{n}}{\sqrt{3} Z_{\text{eq}}},
+\end{equation}
+中，$c$为电压系数（按系统电压等级取值），如表\ref{tab:voltage_factor}所示；$Z_{\text{eq}}$为从短路点看入的等效阻抗（含线路、变压器、发电机等所有元件阻抗）。
+
+\begin{table}[ht]
+\centering
+\caption{电压系数$c$对照表（根据IEC 60909标准）}
+\label{tab:voltage_factor}
+\begin{tabularx}{\textwidth}{lXX}
+\toprule
+\multirow{2}{*}{系统标称电压 \( U_n \)} & \multicolumn{2}{c}{电压系数 \( c \)} \\
+\cmidrule(lr){2-3}
+& 最大短路电流计算 \( c_{\text{max}} \) & 最小短路电流计算 \( c_{\text{min}} \) \\
+\midrule
+低压系统 & 1.05\textsuperscript{a} & 0.95\textsuperscript{b} \\
+（100 V - 1000 V） & 1.10\textsuperscript{c} & 0.90\textsuperscript{d} \\
+\addlinespace
+
+高压系统 & \multirow{2}{*}{1.10} & \multirow{2}{*}{1.00} \\
+（>1 kV - 230 kV） & & \\
+\addlinespace
+
+特高压系统 & \multirow{2}{*}{1.10\textsuperscript{e}} & \multirow{2}{*}{1.00} \\
+（>230 kV） & & \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.5em}
+\begin{minipage}{\textwidth}
+\footnotesize
+\begin{enumerate}[label=\alph*), leftmargin=2em, nosep]
+  \item 适用于±6\%公差系统（如380V系统改为400V）
+  \item 未定义系统标称电压时，取\( c_{\text{min}}U_n = 0.90U_m \)
+  \item 适用于±10\%公差系统
+  \item \( c_{\text{max}}U_n \)不得超过设备最高电压\( U_m \)
+  \item 标称电压>420 kV时未定义
+\end{enumerate}
+\end{minipage}
+\end{table}
+
+关于$Z_{eq}$的计算，具体参加下一章。
+
+
+\newpage
+\include{sections/components_sc}
+
+
+\newpage
+\section{初始短路电流计算规范}
+\subsection{通用原则}
+\begin{itemize}
+\item \textbf{最大值计算}：
+  \begin{itemize}
+  \item 电压因子采用$c_{max}$（见表1）
+  \item 系统配置取最大短路贡献模式
+  \item 阻抗校正因子应用于正/负/零序系统
+  \end{itemize}
+
+\item \textbf{电动机处理}：
+  \begin{equation}
+  \text{计入条件：} \quad P_{motor} \geq 0.05\si{MW} \label{eq:motor_cond}
+  \end{equation}
+\end{itemize}
+
+
+
+\begin{itemize}
+\item \textbf{线路电阻}：
+  \begin{itemize}
+  \item 最大值计算取20度电阻值
+  \item 最小值计算取高温修正值：
+    \[ R_L = [1+0.004(\theta_e-20)]R_{20} \]
+  \end{itemize}
+
+\item \textbf{网络简化限制}：
+  \begin{itemize}
+  \item 正序网络阻抗等于负序网络阻抗
+  \end{itemize}
+\end{itemize}
+\newpage
+
+\begin{itemize}
+\item \textbf{电压因子}：
+  \[ c = 
+  \begin{cases} 
+  c_{max} & \text{最大值计算} \\
+  c_{min} & \text{最小值计算}
+  \end{cases} \]
+\end{itemize}
+
+\subsection{三相短路}
+
+\begin{align}
+I_k'' &= \frac{c \cdot U_n}{\sqrt{3} \cdot Z_k} \label{eq:ik} \\
+Z_k &= \sqrt{R_k^2 + X_k^2} \label{eq:zk}
+\end{align}
+
+
+\begin{tabular}{ll}
+发电机组类型 & 修正规则 \\
+\hline
+带载调压变压器 & 按式(35)-(37)修正$Z_G$ \\
+静止变频电源 & 按式(34)叠加$I_{KPF}$ \\
+辅助变压器组 & 阻抗温度修正$K_T$ \\
+\end{tabular}
+
+
+\begin{itemize}
+\item \textbf{允许简化}：
+  \begin{itemize}
+  \item 正序阻抗网络归并
+  \item 节点阻抗矩阵法求$Z_{ii}$
+  \end{itemize}
+  
+\item \textbf{禁止简化}：
+  \begin{itemize}
+  \item 峰值电流直接叠加计算
+  \item 含电弧电阻的非线性修正
+  \end{itemize}
+\end{itemize}
+
+
+\subsection{相间短路}
+
+\begin{align}
+I_{k2}'' &= \frac{\sqrt{3}\cdot c \cdot U_n}{\sqrt{3} \cdot [Z_{(1)} + Z_{(2)}]} \label{eq:ik2} \\
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{阻抗条件}：
+  \[ \text{当}\ Z_{(2)} = Z_{(1)}\ \text{时：} \quad I_{k2}'' = \frac{\sqrt{3}\cdot I_{k3}''}{2} \]
+  
+\item \textbf{变流电源修正}：
+  \begin{equation}
+  I_{k2max} = \frac{c_{max}U_n}{\sqrt{3}[Z_{(1)ii} + Z_{(2)ii}]} + \sqrt{3}\sum_{j=1}^{n}Z_{(1)ij}I_{sk2PFj} 
+  \end{equation}
+\end{itemize}
+
+其中，
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$Z_{(1)}$ & 正序系统阻抗 & $\Omega$ \\
+$Z_{(2)}$ & 负序系统阻抗 & $\Omega$ \\
+$c$ & 电压校正因子 & -- \\
+$U_n$ & 标称线电压 & \si{kV} \\
+$I_{sk2PFj}$ & 变流器发出电流 & \si{kA} \\
+$(R/X)_{(1+2)}$ & 正负序阻抗比 & -- \\
+\end{tabular}
+
+\begin{enumerate}
+\item 确定短路点正/负序阻抗$Z_{(1)}$, $Z_{(2)}$
+\item 选择电压因子$c_{max}$或$c_{min}$
+\item 计算非对称系数$\kappa_{(2)}$
+\item 校验$Z_{(1)}=Z_{(2)}$条件是否触发简化计算
+\item 含变流器时叠加$I_{sk2PFj}$分量
+\end{enumerate}
+
+
+\subsection{带接地相间}
+
+\begin{align}
+I_{k2EL2}'' &= \frac{\sqrt{3}(Z_{(0)} - aZ_{(2)})}{D} \cdot \frac{cU_n}{\sqrt{3}} \label{eq:ik2el2} \\
+I_{k2EL3}'' &= \frac{\sqrt{3}(Z_{(0)} - a^2Z_{(2)})}{D} \cdot \frac{cU_n}{\sqrt{3}} \label{eq:ik2el3} \\
+I_{kE2E}'' &= \frac{3Z_{(2)}}{D} \cdot \frac{cU_n}{\sqrt{3}} \label{eq:ike2e}
+\end{align}
+其中，
+\[ D = Z_{(1)}Z_{(2)} + Z_{(1)}Z_{(0)} + Z_{(2)}Z_{(0)} \]
+
+
+\begin{itemize}
+\item \textbf{阻抗条件}：
+  \[ \text{当}\ Z_{(0)} < Z_{(2)} = Z_{(1)}\ \text{时：} \quad I_{kE2E}'' > I_{k3}'' \]
+  
+\item \textbf{变流电源修正}：
+  \begin{align}
+  I_{k2E2max}'' &= \frac{3\cdot Z_{(2)ii}}{D_i} \cdot (\frac{c_{max}U_n}{\sqrt{3}} + \sum_{j=1}^{n}Z_{(1)ij}I_{sk2PFj}) \label{eq:ik2el2max}
+  \end{align}
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$Z_{(0)}$ & 零序系统阻抗 & $\Omega$ \\
+$a$ & 旋转因子($e^{j120^\circ}$) & -- \\
+$D$ & 阻抗组合参数 & $\Omega^2$ \\
+$Z_{(xy)ii}$ & 节点导纳矩阵对角元素 & $\Omega$ \\
+$I_{sk2PFj}$ & 变流器正序供给电流 & \si{kA} \\
+$\kappa_{(2E)}$ & 接地故障峰值系数 & -- \\
+\end{tabular}
+
+
+\begin{enumerate}
+\item 确定短路点正/负/零序阻抗$Z_{(1)}$, $Z_{(2)}$, $Z_{(0)}$
+\item 计算阻抗组合参数$D$
+\item 选择电压因子$c_{max}$或$c_{min}$
+\item 计算各短路电流分量$I_{k2EL2}''$, $I_{k2EL3}''$, $I_{kE2E}''$
+\item 含变流器时叠加$\sum Z_{(1)ij}I_{sk2PFj}$项
+\end{enumerate}
+
+
+\subsection{单相接地}
+
+\begin{align}
+i_{p(1)} &= \kappa_{(1)} \sqrt{2} I_{k1}'' \label{eq:peak1} \\
+I_{k1}'' &= \frac{3cU_n}{\sqrt{3}[Z_{(1)} + Z_{(2)} + Z_{(0)}]} \label{eq:ik1} \\
+I_{k1max}'' &= \frac{3c_{max}U_n}{\sqrt{3}[Z_{(1)ii} + Z_{(2)ii} + Z_{(0)ii}]} + \frac{3}{[Z_{(1)ii} + Z_{(2)ii} + Z_{(0)ii}]}\sum_{j=1}^{n}Z_{(1)ij}I_{sk1PFj} \label{eq:ik1max}
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{阻抗条件}：
+  \[ \text{当}\ 0.23 < \frac{Z_{(0)}}{Z_{(1)}} < 1.0\ \text{时：} \quad I_{k1}'' > I_{k3}'' \]
+  
+\item \textbf{变流电源修正}：
+  \[ \frac{Z_{(0)}}{Z_{(1)}} \in (0.23,1.0) \Rightarrow i_{p(1)}\ \text{为断路器最大开断电流} \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$Z_{(0)ii}$ & 零序节点自阻抗 & $\Omega$ \\
+$I_{sk1PFj}$ & 变流器正序供给电流 & \si{kA} \\
+$\kappa_{(1)}$ & 单相短路峰值系数 & -- \\
+$Z_{(1)ij}$ & 正序节点互阻抗 & $\Omega$ \\
+$Z_{(2)ii}$ & 负序节点自阻抗 & $\Omega$ \\
+\end{tabular}
+
+
+\begin{enumerate}
+\item 确定短路点正/负/零序阻抗$Z_{(1)}$, $Z_{(2)}$, $Z_{(0)}$
+\item 计算阻抗组合参数$Z_\Sigma = Z_{(1)} + Z_{(2)} + Z_{(0)}$
+\item 选择电压因子$c_{max}$或$c_{min}$
+\item 计算非对称系数$\kappa_{(1)}$
+\item 校验$Z_{(0)}/Z_{(1)}$比值是否触发断路器选型条件
+\item 含变流器时叠加$\sum Z_{(1)ij}I_{sk1PFj}$分量
+\end{enumerate}
+
+\newpage
+\section{峰值短路电流计算规范}
+
+\begin{align}
+i_{p3} &= \kappa \sqrt{2} I_{k}'' \quad \text{(三相短路单馈线)} \label{eq:peak3} \\
+i_{p3} &= \kappa \sqrt{2} I_{kmaxPFO}'' + \sqrt{2}I_{KPF}''\quad\text{(三相短路多馈线)} \\
+i_{p1} &= \kappa \sqrt{2} I_{k1maxPFO}'' + \sqrt{2}I_{k1PF}'' \quad \text{(单相接地)} \label{eq:peak1} \\
+i_{p2} &= \kappa \sqrt{2} I_{k2maxPFO}'' + \sqrt{2}I_{k2PF}'' \quad \text{(相间短路)} \label{eq:peak2} \\
+i_{p2E} &= \kappa \sqrt{2} I_{k2EL2maxPFO}'' + \sqrt{2}I_{k2EL2PF}'' \quad \text{(带接地相间)} \label{eq:peak2e}
+\end{align}
+其中，
+\[ \kappa = 1.02 + 0.98e^{-3(R/X)} \quad \text{(峰值系数)} \]
+
+
+\begin{itemize}
+  
+\item \textbf{等效频率法}：
+  \[ \frac{R}{X} = \frac{R_c f}{X_c f_c} \quad \text{(当使用} f_c=20\si{Hz} \text{时)} \]
+
+\item \textbf{虚构电阻}：
+  \[
+  R_{Gf} = 
+  \begin{cases}
+  0.05X_d'' & S_{TG} \geq 100\si{MVA} \\
+  0.07X_d'' & S_{TG} < 100\si{MVA} \\
+  0.15X_d'' & U_{rG} \leq 1\si{kV}
+  \end{cases}
+  \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$I_{kmaxPFO}$ & 无变流器影响的最大初始三相短路电流 & \si{kA} \\
+$I_{kPF}$ & 带有全功率变流器的发电站机组的电流分量贡献 & \si{kA} \\
+$I_{k1maxPFO}$ & 无变流器影响的最大初始单相短路电流 & \si{KA} \\
+$I_{k2maxPFO}$ & 无变流器影响的最大初始两相短路电流 & \si{KA} \\
+$I_{k2EL2maxPFO}$ & 无变流器影响的最大初始两相接地短路电流 & \si{KA} \\
+$R_c/X_c$ & 等效频率阻抗比 & -- \\
+$f_c$ & 等效计算频率(20/24Hz) & \si{Hz} \\
+\end{tabular}
+
+
+\begin{enumerate}
+\item 确定短路类型对应公式（式\ref{eq:peak3}至式\ref{eq:peak2e}）
+\item 计算各支路$R/X$比值
+\item 计算各分量$I_{kmaxPFO}$和$I_{kPF}$
+\item 应用多馈入修正$\sum i_{pi}$
+\item 选择$\kappa$计算方法
+\begin{enumerate}[label=\alph*)]
+    \item 选用网络中所有分支中最小的电阻电抗比
+    \item 乘以1.15，校验$R/X$适用范围（$R/X<0.3$时免乘1.15）
+    \item 等效频率法
+\end{enumerate}
+\item 多数情况下，选择$\kappa$计算方法时选择等效频率法
+\item 对于含有同步发电机和发电站机组的支路，利用其虚拟电阻计算峰值短路电流
+\end{enumerate}
+
+\newpage
+\section{开断短路电流计算规范}
+
+\begin{align}
+I_{b3} &= \mu I_{kmax} ''\quad \text{(同步机对称开断)} \label{eq:ib3} \\
+I_{bM} &= \mu q I_{kM} ''\quad \text{(异步机对称开断)} \label{eq:ibm} \\
+I_{bPF} &= I_{kPFmax} ''\quad \text{(全功率变流器)} \label{eq:ibpf} \\
+I_{basym} &= \sqrt{I_b^2 + I_{DC}^2} \quad \text{(非对称开断)} \label{eq:ibasym}
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{同步机μ因子}：
+  \[
+  \mu = 
+  \begin{cases}
+  0.84 + 0.26e^{-0.26\kappa} & t_{min}=0.02\si{s} \\
+  0.71 + 0.51e^{-0.30\kappa} & t_{min}=0.05\si{s} \\
+  0.62 + 0.72e^{-0.32\kappa} & t_{min}=0.10\si{s} \\
+  0.56 + 0.94e^{-0.38\kappa} & t_{min}\geq0.25\si{s}
+  \end{cases}
+  \]
+  其中，\[ \kappa = I_{kG}''/I_{rG} \]
+
+\item \textbf{异步机q因子}：
+  \[
+  q = 
+  \begin{cases}
+  \min[1,1.03 + 0.12\ln(P_{rM}/p)] & t_{min}=0.02\si{s} \\
+  \min[1,0.79 + 0.12\ln(P_{rM}/p)] & t_{min}=0.05\si{s} \\
+  \min[1,0.57 + 0.12\ln(P_{rM}/p)] & t_{min}=0.10\si{s} \\
+  \min[1,0.26 + 0.10\ln(P_{rM}/p)] & t_{min}\geq0.25\si{s}
+  \end{cases}
+  \]
+
+\item \textbf{直流分量}：
+  \[
+  I_{DC} = \sqrt{2}I_k''e^{-2\pi f t (R/X)}
+  \]
+\end{itemize}
+
+其中， 
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$\mu$ & 同步机衰减因子 & -- \\
+$q$ & 异步机修正因子 & -- \\
+$P_{rM}$ & 异步机额定有功功率 & \si{MW} \\
+$p$ & 异步机极对数 & -- \\
+$t_{min}$ & 最小动作延时 & \si{s} \\
+$R/X$ & 等效频率阻抗比 & -- \\
+\end{tabular}
+
+\begin{enumerate}
+\item 确定开断类型选择公式（式\ref{eq:ib3}至式\ref{eq:ibasym}）
+\item 计算同步机$\mu$因子
+\item 计算异步机$q$因子
+\item 叠加各支路开断电流$\sum I_{bi}$
+\item 计算直流分量$I_{DC}$
+\item 合成非对称开断电流
+\end{enumerate}
+
+
+\newpage
+\section{短路稳态电流计算规范}
+
+\begin{align}
+I_{kmax} &= \lambda_{max}I_{rG} \quad \text{(同步机最大稳态)} \label{eq:ikmax} \\
+I_{kmin} &= \lambda_{min}I_{rG} \quad \text{(同步机最小稳态)} \label{eq:ikmin} \\
+I_{kM} &= 0 \quad \text{(异步机端子短路)} \label{eq:ikm} \\
+I_{kPF} &= I_{kPF} ''\quad \text{(全功率变流器)} \label{eq:ikpf} \\
+I_{knet} &= I_k'' \quad \text{(网络馈线)} \label{eq:iknet}
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{同步机λ系数}：
+  \[
+  \lambda_{max} = 
+  \begin{cases}
+  2.8 & \text{隐极机(系列1)} \\
+  3.5 & \text{隐极机(系列2)} \\
+  5.0 & \text{凸极机(系列1)} \\
+  5.5 & \text{凸极机(系列2)}
+  \end{cases}
+  \]
+  查图确定具体值
+
+\item \textbf{静态励磁修正}：
+  \[
+  \lambda_{max} = \lambda_{min} \quad \text{(当励磁电压崩溃时)}
+  \]
+
+\item \textbf{多电源叠加}：
+  \[
+  I_k = \sum I_{ki} = I_{kS} + I_{kT} + I_{kWF}
+  \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$\lambda_{max}$ & 最大励磁系数 & -- \\
+$\lambda_{min}$ & 最小励磁系数 & -- \\
+$I_{rG}$ & 发电机额定电流 & \si{kA} \\
+$I_{kPFmax}$ & 变流器最大稳态电流 & \si{kA} \\
+$x_{dsat}$ & 饱和同步电抗 & \si{pu} \\
+\end{tabular}
+
+\begin{enumerate}
+\item 确定电源类型选择公式（式\ref{eq:ikmax}至式\ref{eq:iknet}）
+\item 查曲线确定$\lambda$系数
+\item 计算各支路稳态电流分量
+\item 应用多电源叠加$\sum I_{ki}$
+\item 校验励磁条件（静态/旋转励磁）
+\item 特殊机组处理（双馈/变流器）
+\end{enumerate}
+
+\newpage
+\section{高压侧熔断器断开短路计算规范}
+
+\begin{align}
+I_{kV} &= \frac{cU_n/\sqrt{3}}{Z_{(1)} + K_TZ_T + Z_L + \beta(K_{0T}Z_{(0)T} + Z_{(0)})} \label{eq:ikv} \\
+Z_{(1)} &= \sqrt{R_{Q}^2 + X_{Q}^2} \quad \text{(正序网络阻抗)} \label{eq:z1} \\
+Z_{(0)} &= \sqrt{R_{0}^2 + X_{0}^2} \quad \text{(零序网络阻抗)} \label{eq:z0}
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{变压器修正系数}：
+  \[
+  \begin{cases}
+  K_T = 0.95c_{max}/(1 + 0.6x_T) \\
+  K_{0T} = K_T \cdot (1 + 0.6x_{0T}) 
+  \end{cases}
+  \]
+  
+\item \textbf{电压系数}：
+  \[
+  c = 
+  \begin{cases}
+  1.0 & U_n > 1\si{kV} \\
+  1.1 & U_n \leq 1\si{kV}
+  \end{cases}
+  \]
+  
+\item \textbf{熔断相修正}：
+  \[
+  \alpha = 
+  \begin{cases}
+  0.5 & \text{L1相熔断} \\
+  1.5 & \text{L2/L3相熔断}
+  \end{cases}
+  \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$Z_{(1)}$ & 正序系统总阻抗 & \si{\ohm} \\
+$Z_{(0)}$ & 零序系统总阻抗 & \si{\ohm} \\
+$x_T$ & 变压器相对电抗 & \si{pu} \\
+$x_{0T}$ & 变压器零序电抗 & \si{pu} \\
+$\alpha$ & 熔断相修正因子 & -- \\
+$\beta$ & 接地方式因子 & -- \\
+\end{tabular}
+
+
+\begin{enumerate}
+\item 确定熔断相序选择$\alpha$值（表3）
+\item 计算正序阻抗$Z_{(1)}$（式\ref{eq:z1}）
+\item 计算零序阻抗$Z_{(0)}$（式\ref{eq:z0}）
+\item 确定修正系数$K_T$, $K_{0T}$
+\item 代入总阻抗公式计算$I_{kV}$（式\ref{eq:ikv}）
+\item 校验$\beta$因子与接地方式关系
+\end{enumerate}
+
+
+\begin{tabular}{llll}
+短路类型 & $\alpha$ & $\beta$ & 适用条件 \\
+\hline
+三相短路 & 0.5 & 0 & 全相运行 \\
+线间接地短路 & 1.5 & 2 & L1-L3-N \\
+线地短路 & 3.0 & 1.5 & L2-N \\
+\end{tabular}
+
+\newpage
+\section{异步电动机短路计算规范}
+
+\begin{align}
+I''_{k3M} &= \frac{U_n/\sqrt{3}}{Z_M} \quad \text{(三相短路初始电流)} \label{eq:ik3m} \\
+i_{p3M} &= \kappa_M \sqrt{2} I''_{k3M} \quad \text{(三相短路峰值电流)} \label{eq:ip3m} \\
+I_{b3M} &= \mu I''_{k3M} \quad \text{(对称开断电流)} \label{eq:ib3m} \\
+I_{k2M} &= \frac{\sqrt{3}}{2} I''_{k3M} \quad \text{(线间短路电流)} \label{eq:ik2m}
+\end{align}
+
+
+\begin{itemize}
+\item \textbf{峰值系数$\kappa_M$}：
+  \[
+  \kappa_M = 
+  \begin{cases}
+  1.65 & \text{高压电机（单极功率}< 1 MW ） \\
+  1.75 & \text{高压电机（单极功率}\geq 1 MW） \\
+  1.30 & \text{低压电机组}
+  \end{cases}
+  \]
+  
+\item \textbf{衰减系数$\mu$}：
+  \[
+  \mu = 0.72 + 0.28e^{-0.32t_{min}} \quad (t_{min}=0.02\si{s})
+  \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$Z_M$ & 电动机等效阻抗 & \si{\ohm} \\
+$Z_{(0)M}$ & 零序阻抗 & \si{\ohm} \\
+$\kappa_M$ & 峰值修正系数 & -- \\
+$\mu$ & 电流衰减系数 & -- \\
+$I_{LR}/I_rM$ & 堵转电流比 & -- \\
+\end{tabular}
+
+
+\begin{enumerate}
+\item 确定电动机接线方式（是否接地）
+\item 计算正序阻抗$Z_M = \sqrt{R_M^2 + X_M^2}$
+\item 选择$\kappa_M$值（按表4）
+\item 计算各短路类型电流（式\ref{eq:ik3m}-\ref{eq:ik2m}）
+\item 校核零序条件：$Z_{(0)M} \rightarrow \infty$（不接地时）
+\end{enumerate}
+
+\begin{tabular}{llll}
+电机类型 & $R_M/X_M$ & $\kappa_M$范围 & 适用条件 \\
+\hline
+高压电机（<1MW） & 0.15 & 1.65 & 单极功率限制 \\
+高压电机（≥1MW） & 0.10 & 1.75 & 大功率机组 \\
+低压电机组 & 0.42 & 1.30 & 含连接电缆 \\
+\end{tabular}
+
+\newpage
+\section{焦耳积分与热等效电流计算规范}
+\begin{align}
+\int_0^{T_k}i^2dt &= {I''_k}^{2(m+n)}T_k \quad \text{(单次短路)} \label{eq:joule_single} \\
+I_{th} &= I''_k\sqrt{m+n} \quad \text{(热等效电流)} \label{eq:ith} \\
+\sum\int i^2dt &= \sum_{i=1}^n {I''_{ki}}^2(m_i+n_i)T_{ki} \quad \text{(多次短路)} \label{eq:joule_multi} \\
+I_{th\_total} &= \sqrt{\frac{\sum {I''_{ki}}^2(m_i+n_i)T_{ki}}{\sum T_{ki}}} \label{eq:ith_total}
+\end{align}
+
+\begin{itemize}
+\item \textbf{直流分量系数$m$}：
+  \[
+  m = f(\kappa, T_{ki}/T_p) \quad \text{(查图18)}
+  \]
+  
+\item \textbf{交流分量系数$n$}：
+  \[
+  n = 
+  \begin{cases}
+  1 & \text{配电网络（远端短路）} \\
+  f(I_{ki}/I''_{ki}, T_{ki}) & \text{(查图19)}
+  \end{cases}
+  \]
+  
+\item \textbf{特殊情形}：
+  \[
+  m+n = 
+  \begin{cases}
+  1 & T_k \geq 0.5\si{s} \\
+  \text{常规计算} & T_k < 0.5\si{s}
+  \end{cases}
+  \]
+\end{itemize}
+
+其中，
+
+\begin{tabular}{lll}
+符号 & 物理意义 & 单位 \\
+\hline
+$T_k$ & 短路持续时间 & \si{s} \\
+$m$ & 直流分量热效应系数 & -- \\
+$n$ & 交流分量热效应系数 & -- \\
+$\kappa$ & 峰值系数 & -- \\
+$I_{ki}/I''_{ki}$ & 稳态/初始短路电流比 & -- \\
+\end{tabular}
+
+\begin{enumerate}
+\item 确定短路类型（单次/多次）
+\item 查图18获取$m$值（需$\kappa$和$T_k/T_p$）
+\item 查图19获取$n$值（需$I_{ki}/I''_{ki}$和$T_k$）
+\item 计算焦耳积分（式\ref{eq:joule_single}或\ref{eq:joule_multi}）
+\item 计算热等效电流（式\ref{eq:ith}或\ref{eq:ith_total}）
+\end{enumerate}
+
+\begin{tabular}{llll}
+网络类型 & $n$值 & $m+n$范围 & 适用条件 \\
+\hline
+配电网络 & 1 & 1.0-2.2 & 远端短路 \\
+发电厂近端 & 0.8-1.1 & 1.5-2.5 & $T_k<0.5\si{s}$ \\
+\end{tabular}
+
+\newpage
+\include{sections/algorithm_sc}
+
+\newpage
+\include{sections/examples_sc}
+
+\newpage
+\section*{附录}
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.8]
+\begin{axis}[
+    width=14cm,
+    height=9cm,
+    axis lines=middle,
+    xlabel={Time},
+    ylabel={Current},
+    xlabel style={at={(axis description cs:1.05,0)}, anchor=west, font=\small},
+    ylabel style={at={(axis description cs:0,1.05)}, anchor=south, font=\small},
+    xmin=0, xmax=14,
+    ymin=-3, ymax=6,
+    xtick=\empty,
+    ytick=\empty,
+    grid=none,
+    samples=400,
+    domain=0:12,
+    every axis plot/.append style={line width=1pt},
+    clip=false
+]
+
+% DC component: exponential decay from A to 0
+\addplot[dotted, color=gray, line width=1pt] {2.5*exp(-0.4*x)};
+
+% AC amplitude (equals DC initial value)
+\def\acamplitude{2.5}
+
+% Top envelope: DC component + AC amplitude (extended)
+\addplot[dashed, color=black, domain=0:13] {2.5*exp(-0.4*x) + \acamplitude};
+
+% Bottom envelope: DC component - AC amplitude (extended)
+\addplot[dashed, color=black, domain=0:13] {2.5*exp(-0.4*x) - \acamplitude};
+
+% Main oscillating current: DC + AC components with phase shift
+\addplot[solid, color=black, line width=1.5pt] {
+    2.5*exp(-0.4*x) + \acamplitude*sin(deg(4*x - pi/4))
+};
+
+% Add zero line
+\draw[dotted, gray] (axis cs:0,0) -- (axis cs:14,0);
+
+% DC component label - positioned outside the curve
+\node at (axis cs:6,1.5) [font=\small, fill=white, inner sep=2pt] {DC分量};
+\draw[gray, dotted, ->] (axis cs:5.5,1.5) -- (axis cs:4.5,{2.5*exp(-0.4*4.5)});
+
+% Add labels for envelopes
+\node at (axis cs:2,4.8) [font=\small] {上包络线};
+\node at (axis cs:3,-1.2) [font=\small] {下包络线};
+
+% Mark 2Ik at y=5 (top envelope at t=0)
+\node at (axis cs:-0.8,5) [font=\small] {$2\sqrt{2}I''_k$};
+\draw[thick] (axis cs:-0.3,5) -- (axis cs:-0.1,5);
+\draw[fill=black] (axis cs:0,5) circle (1pt);
+
+% Mark ip at the actual first peak value
+\pgfmathsetmacro{\firstpeaktime}{3*pi/16}
+\pgfmathsetmacro{\dcatpeak}{2.5*exp(-0.4*\firstpeaktime)}
+\pgfmathsetmacro{\ipvalue}{\dcatpeak + 2.5}
+\node at (axis cs:-0.8,\ipvalue) [font=\small] {$i_p$};
+\draw[thick] (axis cs:-0.3,\ipvalue) -- (axis cs:-0.1,\ipvalue);
+\draw[fill=black] (axis cs:0,\ipvalue) circle (1pt);
+
+% Mark A at DC component initial value (y=2.5)
+\node at (axis cs:-0.8,2.5) [font=\small] {$A$};
+\draw[thick] (axis cs:-0.3,2.5) -- (axis cs:-0.1,2.5);
+\draw[fill=black] (axis cs:0,2.5) circle (1pt);
+
+% Mark 2IB at the steady state (moved to extended envelope area)
+\pgfmathsetmacro{\steadydc}{2.5*exp(-0.4*12.5)}
+\draw[<->] (axis cs:12.5,{\steadydc + 2.5}) -- (axis cs:12.5,{\steadydc - 2.5});
+\node at (axis cs:13.2,\steadydc) [font=\small] {$2\sqrt{2}I_K=2\sqrt{2}I''_k$};
+
+\end{axis}
+\end{tikzpicture}
+\vspace{0.5em}
+\begin{center}
+\begin{tabular}{ll}
+$Figure1$ & 远离发电机短路的短路电流（恒定交流分量示意图） \\
+\end{tabular}
+\end{center}
+\vspace{0.5em}
+\begin{flushleft}
+\textbf{符号说明：} \\
+$I"_k$ — 初始对称短路电流 \\
+$i_p$ — 短路冲击电流峰值 \\
+$I_k$ — 稳态短路电流 \\
+$i_{DC}$ — 短路电流直流分量 \\
+$A$ — 直流分量初始值
+\end{flushleft}
+
+\label{fig:short_circuit_current}
+\end{figure}
+
+
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[scale=0.8]
+\begin{axis}[
+    width=14cm,
+    height=9cm,
+    axis lines=middle,
+    xlabel={Time},
+    ylabel={Current},
+    xlabel style={at={(axis description cs:1.05,0)}, anchor=west, font=\small},
+    ylabel style={at={(axis description cs:0,1.05)}, anchor=south, font=\small},
+    xmin=0, xmax=14,
+    ymin=-3, ymax=6,
+    xtick=\empty,
+    ytick=\empty,
+    grid=none,
+    samples=400,
+    domain=0:12,
+    every axis plot/.append style={line width=1pt},
+    clip=false
+]
+
+% Parameters
+\def\acamplitude{2.5}  % Initial AC amplitude
+\def\transitiontime{6} % Time when AC amplitude reaches half and stabilizes
+\def\finalacamplitude{1.25} % Final AC amplitude (half of initial)
+
+% DC component: exponential decay from AC amplitude to 0
+\addplot[dotted, color=gray, line width=1pt] {\acamplitude*exp(-0.4*x)};
+
+% Define AC amplitude function: decays to half then stays constant
+% Using smooth transition: initial_amp * (0.5 + 0.5*exp(-decay_rate*(x-delay)))
+\pgfmathdeclarefunction{ac_amplitude}{1}{%
+    \pgfmathparse{%
+        (\acamplitude) * (0.5 + 0.5*exp(-0.8*(#1)))%
+    }%
+}
+
+% Top envelope: DC component + time-varying AC amplitude (extended)
+\addplot[dashed, color=black, domain=0:13] {\acamplitude*exp(-0.4*x) + ac_amplitude(x)};
+
+% Bottom envelope: DC component - time-varying AC amplitude (extended)
+\addplot[dashed, color=black, domain=0:13] {\acamplitude*exp(-0.4*x) - ac_amplitude(x)};
+
+% Main oscillating current: DC + time-varying AC components with phase shift
+\addplot[solid, color=black, line width=1.5pt] {
+    \acamplitude*exp(-0.4*x) + ac_amplitude(x)*sin(deg(4*x - pi/4))
+};
+
+% Add zero line
+\draw[dotted, gray] (axis cs:0,0) -- (axis cs:14,0);
+
+% DC component label - positioned outside the curve
+\node at (axis cs:6,1.0) [font=\small, fill=white, inner sep=2pt] {DC分量};
+\draw[gray, dotted, ->] (axis cs:5.5,1.0) -- (axis cs:4.5,{\acamplitude*exp(-0.4*4.5)});
+
+% Add labels for envelopes
+\node at (axis cs:2,4.8) [font=\small] {上包络线};
+\node at (axis cs:3,-1.2) [font=\small] {下包络线};
+
+% Mark 2Ik at y=5 (top envelope at t=0)
+\node at (axis cs:-0.8,5) [font=\small] {$2\sqrt{2}I''_k$};
+\draw[thick] (axis cs:-0.3,5) -- (axis cs:-0.1,5);
+\draw[fill=black] (axis cs:0,5) circle (1pt);
+
+% Mark ip at the actual first peak value
+\pgfmathsetmacro{\firstpeaktime}{3*pi/16}
+\pgfmathsetmacro{\dcatpeak}{\acamplitude*exp(-0.4*\firstpeaktime)}
+\pgfmathsetmacro{\ipvalue}{\dcatpeak + \acamplitude}
+\node at (axis cs:-0.8,\ipvalue) [font=\small] {$i_p$};
+\draw[thick] (axis cs:-0.3,\ipvalue) -- (axis cs:-0.1,\ipvalue);
+\draw[fill=black] (axis cs:0,\ipvalue) circle (1pt);
+
+% Mark A at DC component initial value (y=2.5, equals initial AC amplitude)
+\node at (axis cs:-0.8,2.5) [font=\small] {$A$};
+\draw[thick] (axis cs:-0.3,2.5) -- (axis cs:-0.1,2.5);
+\draw[fill=black] (axis cs:0,2.5) circle (1pt);
+
+% Mark 2IB at the steady state (moved to extended envelope area)
+\pgfmathsetmacro{\steadydc}{\acamplitude*exp(-0.4*12.5)}
+\pgfmathsetmacro{\steadyac}{\finalacamplitude}
+\draw[<->] (axis cs:12.5,{\steadydc + \steadyac}) -- (axis cs:12.5,{\steadydc - \steadyac});
+\node at (axis cs:13.2,\steadydc) [font=\small] {$2\sqrt{2}I_k$};
+
+
+% Add dashed line to show the stabilized AC amplitude level
+\draw[dashed, gray, thin] (axis cs:8,{\acamplitude*exp(-0.4*8) + \finalacamplitude}) -- (axis cs:13,{\acamplitude*exp(-0.4*13) + \finalacamplitude});
+\draw[dashed, gray, thin] (axis cs:8,{\acamplitude*exp(-0.4*8) - \finalacamplitude}) -- (axis cs:13,{\acamplitude*exp(-0.4*13) - \finalacamplitude});
+
+\end{axis}
+\end{tikzpicture}
+\vspace{0.5em}
+\begin{center}
+\begin{tabular}{ll}
+$Figure2$ & 靠近发电机短路的短路电流（恒定交流分量示意图） \\
+\end{tabular}
+\end{center}
+\vspace{0.5em}
+\begin{flushleft}
+\textbf{符号说明：} \\
+$I''_k$ — 初始对称短路电流（次暂态） \\
+$i_p$ — 短路冲击电流峰值 \\
+$I_k$ — 稳态短路电流 \\
+$i_{DC}$ — 短路电流直流分量 \\
+$A$ — 直流分量初始值（等于AC分量初始幅值）
+\end{flushleft}
+
+\label{fig:short_circuit_current_near_generator}
+\end{figure}
+\end{document}
