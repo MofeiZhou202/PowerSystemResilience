@@ -193,6 +193,7 @@ struct ScenarioCandidate {
   double risk_score{0.0};
   std::unordered_map<std::string, double> risk_source_scores;
   std::vector<std::string> anchor_reasons;
+  nlohmann::json component_load_profiles;
   bool tail_anchor{false};
   bool frozen_medoid{false};
 };

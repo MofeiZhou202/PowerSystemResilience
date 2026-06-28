@@ -13460,6 +13460,12 @@ int main(int argc, char** argv) {
             if (!values.empty()) scenario_profiles_by_id[id] = std::move(values);
           }
         }
+        int scenario_profile_count = static_cast<int>(scenario_profiles_by_id.size());
+        int load_profile_map_rows = 0;
+        int ac_load_profiles_bound = 0;
+        int dc_load_profiles_bound = 0;
+        int ac_bus_load_profiles_bound = 0;
+        int dc_bus_load_profiles_bound = 0;
         if (j.contains("load_profile_map") && j["load_profile_map"].is_array()) {
           for (const auto& row : j["load_profile_map"]) {
             if (!row.is_object()) continue;
@@ -13472,18 +13478,29 @@ int main(int argc, char** argv) {
             const int position = row.value("load_position", row.value("position", -1));
             const int load_index = row.value("load_index", -1);
             const int bus = row.value("bus", -1);
+            ++load_profile_map_rows;
             if (kind == "DC_LOAD") {
-              if (position >= 0) opts.dc_load_profiles_by_position[position] = values;
-              if (load_index >= 0) opts.dc_load_profiles_by_index[load_index] = values;
-              if (bus >= 0) opts.dc_load_profiles_by_bus[bus] = values;
+              if (position >= 0) { opts.dc_load_profiles_by_position[position] = values; ++dc_load_profiles_bound; }
+              if (load_index >= 0) { opts.dc_load_profiles_by_index[load_index] = values; ++dc_load_profiles_bound; }
+              if (bus >= 0) { opts.dc_load_profiles_by_bus[bus] = values; ++dc_load_profiles_bound; }
             } else if (kind == "AC_BUS") {
-              if (bus >= 0) opts.ac_bus_load_profiles_by_bus[bus] = values;
+              if (bus >= 0) {
+                opts.ac_bus_load_profiles_by_bus[bus] = values;
+                opts.ac_load_profiles_by_bus[bus] = values;
+                ++ac_bus_load_profiles_bound;
+                ++ac_load_profiles_bound;
+              }
             } else if (kind == "DC_BUS") {
-              if (bus >= 0) opts.dc_bus_load_profiles_by_bus[bus] = values;
+              if (bus >= 0) {
+                opts.dc_bus_load_profiles_by_bus[bus] = values;
+                opts.dc_load_profiles_by_bus[bus] = values;
+                ++dc_bus_load_profiles_bound;
+                ++dc_load_profiles_bound;
+              }
             } else {
-              if (position >= 0) opts.ac_load_profiles_by_position[position] = values;
-              if (load_index >= 0) opts.ac_load_profiles_by_index[load_index] = values;
-              if (bus >= 0) opts.ac_load_profiles_by_bus[bus] = values;
+              if (position >= 0) { opts.ac_load_profiles_by_position[position] = values; ++ac_load_profiles_bound; }
+              if (load_index >= 0) { opts.ac_load_profiles_by_index[load_index] = values; ++ac_load_profiles_bound; }
+              if (bus >= 0) { opts.ac_load_profiles_by_bus[bus] = values; ++ac_load_profiles_bound; }
             }
           }
         }
@@ -13588,6 +13605,13 @@ int main(int argc, char** argv) {
         out["mess_travel_distance_km"] = result.mess_travel_distance_km;
         out["total_switch_actions"] = result.total_switch_actions;
         out["total_repaired_faults"] = result.total_repaired_faults;
+        out["scenario_profile_binding_diagnostics"] = json{
+            {"scenario_profile_count", scenario_profile_count},
+            {"load_profile_map_rows", load_profile_map_rows},
+            {"ac_load_profiles_bound", ac_load_profiles_bound},
+            {"dc_load_profiles_bound", dc_load_profiles_bound},
+            {"ac_bus_load_profiles_bound", ac_bus_load_profiles_bound},
+            {"dc_bus_load_profiles_bound", dc_bus_load_profiles_bound}};
 
         // Fault sequence used (auto-generated or user-specified).
         {

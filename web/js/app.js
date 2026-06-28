@@ -350,6 +350,49 @@ const App = (() => {
     return Array.isArray(profile?.values) ? profile.values.map(v => Number(v || 0)) : [];
   }
 
+  function scenarioCandidateComponentLoadCurve(candidate, type, row, comp, isDc) {
+    const source = candidate?.component_load_profiles;
+    const profiles = Array.isArray(source?.profiles) ? source.profiles : [];
+    const map = Array.isArray(source?.load_profile_map) ? source.load_profile_map : [];
+    if (!profiles.length || !map.length) return null;
+    const item = row?.item || {};
+    const itemBus = Number(item.bus ?? comp?.params?.bus);
+    const itemIndex = Number(item.index);
+    const itemPosition = Number(row?.index);
+    const desiredLoadKind = isDc ? 'DC_LOAD' : 'AC_LOAD';
+    const desiredBusKind = isDc ? 'DC_BUS' : 'AC_BUS';
+    const matches = (m) => {
+      const kind = String(m?.kind || desiredLoadKind).toUpperCase();
+      if (kind !== desiredLoadKind && kind !== desiredBusKind) return false;
+      const pos = Number(m.load_position ?? m.position);
+      const idx = Number(m.load_index);
+      const bus = Number(m.bus);
+      if (Number.isFinite(pos) && Number.isFinite(itemPosition) && pos === itemPosition) return true;
+      if (Number.isFinite(idx) && Number.isFinite(itemIndex) && idx === itemIndex) return true;
+      // Scenario generation may emit AC_BUS/DC_BUS rows when the source case used
+      // bus pd_mw fallback, while imported/generated cases may materialize those
+      // bus loads into explicit loads.  Matching by bus keeps both views aligned.
+      if (Number.isFinite(bus) && Number.isFinite(itemBus) && bus === itemBus) return true;
+      return false;
+    };
+    const binding = map.find(matches);
+    if (!binding) return null;
+    const profileId = Number(binding.profile_id);
+    const profile = profiles.find(p => Number(p?.id) === profileId || String(p?.id) === String(binding.profile_id));
+    const values = Array.isArray(profile?.values) ? profile.values.map(v => Number(v || 0)) : [];
+    if (!values.length) return null;
+    const baseMw = isDc
+      ? positivePower(item.p_mw, item.p_rated_mw, comp?.params?.p_mw, comp?.params?.p_rated_mw) * numberOr(item.scaling ?? comp?.params?.scaling, 1)
+      : numberOr(item.p_mw ?? comp?.params?.p_mw, 0) * numberOr(item.scaling ?? comp?.params?.scaling, 1);
+    if (!(baseMw > 1e-9)) return null;
+    return {
+      y: values.map(v => Math.max(0, v) * baseMw),
+      profileId,
+      source: source?.source || 'backend_per_load_site',
+      kind: String(binding.kind || desiredLoadKind).toUpperCase(),
+    };
+  }
+
   function positivePower(...values) {
     for (const value of values) {
       const n = Number(value);
@@ -517,11 +560,14 @@ const App = (() => {
     if (type === 'load' || type === 'dc_load') {
       const isDc = type === 'dc_load';
       const row = modelRowForComp(isDc ? (sys.dc?.loads || []) : (sys.ac?.loads || []), isDc ? maps.dcLoad : maps.load, compId);
+      const componentCurve = scenarioCandidateComponentLoadCurve(candidate, type, row, comp, isDc);
+      if (componentCurve) {
+        return make(componentCurve.y, `场景${isDc ? 'DC' : 'AC'}负荷曲线：${label}`,
+          `使用后端逐负荷场景 profile #${componentCurve.profileId}（${componentCurve.kind}），与导出 JSON 和弹性评估绑定一致。`);
+      }
       const total = (sys.ac?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0) + (sys.dc?.loads || []).reduce((a, x) => a + numberOr(x.p_mw, 0) * numberOr(x.scaling, 1), 0);
       const base = scaledCurve(load, numberOr(row.item?.p_mw ?? comp.params?.p_mw, 0) * numberOr(row.item?.scaling ?? comp.params?.scaling, 1), total);
-      const profile = baseDeterministicProfile(base.length, Number(row.item?.index ?? row.index ?? compId));
-      const y = base.map((v, i) => v * profile[i]);
-      return make(y, `场景${isDc ? 'DC' : 'AC'}负荷曲线：${label}`);
+      return make(base, `场景${isDc ? 'DC' : 'AC'}负荷估算曲线：${label}`, '后端未返回/未匹配逐负荷 profile，按额定负荷占比由代表场景总负荷估算。');
     }
     if (type === 'pv_system' || type === 'dc_pv_array') {
       const isDc = type === 'dc_pv_array';
@@ -7481,6 +7527,25 @@ const App = (() => {
       return { profiles, map };
     }
 
+    function backendComponentLoadProfiles(candidate) {
+      const source = candidate?.component_load_profiles;
+      const rawProfiles = Array.isArray(source?.profiles) ? source.profiles : [];
+      const rawMap = Array.isArray(source?.load_profile_map) ? source.load_profile_map : [];
+      if (!rawProfiles.length || !rawMap.length) return { profiles: [], map: [], source: 'none' };
+      const profiles = rawProfiles.map((p, i) => {
+        const values = Array.isArray(p?.values) ? p.values.map(Number).map(v => Number.isFinite(v) ? v : 0) : [];
+        return {
+          id: Number.isInteger(p?.id) ? p.id : 10 + i,
+          name: p?.name || `scenario_backend_load_${i + 1}_scale`,
+          values,
+        };
+      }).filter(p => p.values.length);
+      if (!profiles.length) return { profiles: [], map: [], source: 'none' };
+      const ids = new Set(profiles.map(p => p.id));
+      const map = rawMap.map(row => ({ ...row })).filter(row => ids.has(Number(row.profile_id)));
+      return map.length ? { profiles, map, source: source?.source || 'backend_per_load_site' } : { profiles: [], map: [], source: 'none' };
+    }
+
     function buildScenarioTimeSeries(candidate, baseSystem, family) {
       const profiles = candidate?.time_series?.profiles || [];
       if (!Array.isArray(profiles) || profiles.length === 0) return null;
@@ -7491,9 +7556,13 @@ const App = (() => {
       const totals = scenarioBaseTotals(baseSystem);
       const calcProfiles = [];
       const warnings = [];
-      const componentLoadProfiles = load.length
-        ? buildComponentLoadProfiles(load, baseSystem, 10)
-        : { profiles: [], map: [] };
+      let componentLoadProfiles = backendComponentLoadProfiles(candidate);
+      if (!componentLoadProfiles.map.length) {
+        componentLoadProfiles = load.length
+          ? buildComponentLoadProfiles(load, baseSystem, 10)
+          : { profiles: [], map: [], source: 'none' };
+        componentLoadProfiles.source = componentLoadProfiles.map.length ? 'post_generated_total_load_split' : 'none';
+      }
       if (load.length) {
         calcProfiles.push({ id: 0, name: 'scenario_load_scale', values: makeScaleProfile(load, totals.load, 1.0) });
         calcProfiles.push(...componentLoadProfiles.profiles);
@@ -7535,8 +7604,10 @@ const App = (() => {
           base_pv_mw: totals.pv,
           base_wind_mw: totals.wind,
           profile_semantics: 'profiles are dimensionless multipliers for /api/session/set_ts_config',
-          component_load_profile_source: componentLoadProfiles.map.length ? 'post_generated_total_load_split' : 'none',
-          component_load_profile_note: 'component load profiles split backend randomized total_load_mw by capacity and deterministic component shapes, normalized per timestep',
+          component_load_profile_source: componentLoadProfiles.source || (componentLoadProfiles.map.length ? 'post_generated_total_load_split' : 'none'),
+          component_load_profile_note: componentLoadProfiles.source === 'backend_per_load_site'
+            ? 'component load profiles are emitted by backend per-load/per-bus scenario generation and normalized against each component base MW'
+            : 'component load profiles split backend randomized total_load_mw by capacity and deterministic component shapes, normalized per timestep',
         },
         warnings,
       };
