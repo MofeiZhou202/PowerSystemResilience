@@ -121,10 +121,13 @@ if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
   endif()
 endif()
 
-# Disable MIPSolvers' own tests and Python bindings when building as a
-# sub-project so that only the mipsolvers static library target is compiled.
-set(MIPSOLVERS_BUILD_TESTS OFF CACHE BOOL
-    "Disable MIPSolvers tests when used as dependency" FORCE)
+# MIPSolvers subproject knobs are set by the top-level dependency profile before
+# this file is included.  Keep a conservative fallback for direct/manual
+# inclusion, but do not override an explicit profile choice such as full-dev.
+if(NOT DEFINED MIPSOLVERS_BUILD_TESTS)
+  set(MIPSOLVERS_BUILD_TESTS OFF CACHE BOOL
+      "Build MIPSolvers tests when used as dependency")
+endif()
 
 if(NOT TARGET mipsolvers::mipsolvers)
   add_subdirectory(

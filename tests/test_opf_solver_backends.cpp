@@ -9,6 +9,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <cmath>
 #include <string>
 
@@ -24,6 +25,46 @@ namespace {
 std::string data_path(const std::string& f) {
   return std::string(HACDCPF_TEST_DATA_DIR) + "/" + f;
 }
+
+void set_env_var(const char* key, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(key, value);
+#else
+  setenv(key, value, 1);
+#endif
+}
+
+void unset_env_var(const char* key) {
+#if defined(_WIN32)
+  _putenv_s(key, "");
+#else
+  unsetenv(key);
+#endif
+}
+
+class ScopedEnvVar {
+ public:
+  ScopedEnvVar(const char* key, const char* value) : key_(key) {
+    if (const char* old = std::getenv(key)) {
+      had_old_ = true;
+      old_value_ = old;
+    }
+    set_env_var(key, value);
+  }
+
+  ~ScopedEnvVar() {
+    if (had_old_) {
+      set_env_var(key_.c_str(), old_value_.c_str());
+    } else {
+      unset_env_var(key_.c_str());
+    }
+  }
+
+ private:
+  std::string key_;
+  bool had_old_{false};
+  std::string old_value_;
+};
 }  // namespace
 
 // ── Internal hybrid AC/DC cases ──────────────────────────────────────────────
@@ -133,6 +174,26 @@ TEST_CASE("Real AC OPF beats economic-dispatch cost on case30", "[opf][backend]"
   // The full nonlinear OPF should not cost more than the suboptimal
   // economic-dispatch + PF shortcut (small tolerance for model differences).
   CHECK(r_pi.objective <= r_ed.objective * 1.001 + 1.0);
+}
+
+TEST_CASE("Parity IPM dense KKT backend solves small MATPOWER OPF cases",
+          "[opf][backend][windows]") {
+  ScopedEnvVar force_dense("HACDCPF_OPF_LINEAR_SOLVER", "dense");
+
+  for (const std::string case_name : {"case9.m", "case30.m"}) {
+    HybridPowerSystem sys = io::parse_matpower(data_path(case_name));
+
+    opf::ACOPFOptions opt;
+    opt.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+    opt.max_inner_iterations = 400;
+    const opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+
+    INFO("case=" << case_name << " status=" << r.status
+                 << " backend=" << r.profiling.linear_solver_backend);
+    CHECK(r.converged);
+    CHECK(r.objective > 0.0);
+    CHECK(r.profiling.linear_solver_backend.find("dense_lu") != std::string::npos);
+  }
 }
 
 // ── Large-scale sparse-KKT robustness ────────────────────────────────────────

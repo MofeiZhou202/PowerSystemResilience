@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -55,15 +56,44 @@ double ftb(const Eigen::VectorXd& v, const Eigen::VectorXd& dv, double tau) {
 // SparseLU is the always-available fallback.
 enum class SparseBackend { Auto, Umfpack, Klu, EigenLU };
 
-// One-time backend override for benchmarking/diagnostics:
-//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto   (default auto)
-SparseBackend sparse_backend_preference() {
-  const char* env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+std::string linear_solver_preference_env() {
+  const char* env = std::getenv("HACDCPF_OPF_LINEAR_SOLVER");
+  if (env == nullptr || std::string(env).empty()) {
+    // Backward-compatible spelling used before the dense backend could be
+    // selected explicitly.
+    env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+  }
   if (env != nullptr) {
-    const std::string s(env);
+    std::string s(env);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    return s;
+  }
+  return {};
+}
+
+bool has_linear_solver_override() {
+  const std::string s = linear_solver_preference_env();
+  return !s.empty() && s != "auto";
+}
+
+bool dense_backend_forced() {
+  const std::string s = linear_solver_preference_env();
+  return s == "dense" || s == "dense_lu" || s == "lu";
+}
+
+// One-time backend override for benchmarking/diagnostics:
+//   HACDCPF_OPF_LINEAR_SOLVER = dense | umfpack | klu | eigen | auto
+//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto  (legacy alias)
+SparseBackend sparse_backend_preference() {
+  const std::string s = linear_solver_preference_env();
+  if (!s.empty()) {
     if (s == "umfpack") return SparseBackend::Umfpack;
     if (s == "klu") return SparseBackend::Klu;
-    if (s == "eigen" || s == "sparselu") return SparseBackend::EigenLU;
+    if (s == "eigen" || s == "sparselu" || s == "sparse_eigen_lu") {
+      return SparseBackend::EigenLU;
+    }
   }
   return SparseBackend::Auto;
 }
@@ -653,10 +683,24 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   double best_comp = compcond;
   int best_iter = 0;
 
-  // Always use the sparse KKT path: it carries Ruiz equilibration + robust
-  // SuiteSparse backends with escalation, which the dense PartialPivLU lacks.
-  // The dense path (un-equilibrated) failed on badly-scaled hybrid AC/DC KKTs.
-  const bool use_dense = false;
+  // Sparse KKT is the default path: it carries Ruiz equilibration + robust
+  // SuiteSparse backends with escalation for large / badly scaled hybrid AC/DC
+  // KKTs.  On Windows deployments, SuiteSparse/KLU/UMFPACK availability and
+  // runtime behavior vary more than on Linux/macOS; small pure-AC MATPOWER
+  // cases should not fail solely because the sparse factorizer stack is absent
+  // or brittle.  Use dense pivoted LU for small Windows KKTs unless the operator
+  // explicitly requests a sparse backend.  The same dense path can be forced
+  // everywhere with HACDCPF_OPF_LINEAR_SOLVER=dense for diagnostics.
+  constexpr int kDenseAutoKktDim =
+#if defined(_WIN32)
+      1024;
+#else
+      0;
+#endif
+  const int kkt_dim = n + meq;
+  const bool use_dense =
+      dense_backend_forced() ||
+      (!has_linear_solver_override() && kDenseAutoKktDim > 0 && kkt_dim <= kDenseAutoKktDim);
   DenseKKTCache dense_cache;
   SparseKKTCache sparse_cache;
 
