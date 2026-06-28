@@ -21,6 +21,7 @@
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/system.hpp"
+#include "hacdcpf/model/network_utils.hpp"
 #include <catch2/catch_test_macros.hpp>
 
 using namespace hacdcpf;
@@ -282,6 +283,52 @@ TEST_CASE("SC: non-contiguous bus IDs resolve to the correct bus",
   CHECK_THROWS_AS(compute_fault_at_bus(sys, 999, opt), std::invalid_argument);
 }
 
+TEST_CASE("SC detailed: downstream fault reports upstream source contribution and voltages",
+          "[short_circuit][detailed][regression]") {
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ), make_bus(3, BusType::PQ)},
+      {make_branch(1, 1, 2, 0.02, 0.20),
+       make_branch(2, 2, 3, 0.03, 0.30)},
+      100.0,
+      0.001);
+  sys.ac.generators.clear();
+
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.in_service = true;
+  eg.s_sc_max_mva = 5000.0;
+  eg.rx_max = 0.1;
+  sys.ac.external_grids.push_back(eg);
+
+  SCDetailedOptions dopt;
+  dopt.fault_type = FaultType::ThreePhase;
+  dopt.calc_type = SCCalcType::Max;
+  auto det = run_short_circuit_detailed(sys, 3, dopt);
+  REQUIRE(det.solved);
+  REQUIRE(det.bus_results.size() == 3);
+
+  const SCDetailedBusResult* bus1 = nullptr;
+  const SCDetailedBusResult* bus2 = nullptr;
+  const SCDetailedBusResult* fault_row = nullptr;
+  for (const auto& br : det.bus_results) {
+    if (br.bus_id == 1) bus1 = &br;
+    if (br.bus_id == 2) bus2 = &br;
+    if (br.bus_id == 3) fault_row = &br;
+  }
+  REQUIRE(bus1 != nullptr);
+  REQUIRE(bus2 != nullptr);
+  REQUIRE(fault_row != nullptr);
+
+  CHECK(fault_row->ikss_ka > 0.0);
+  CHECK(fault_row->ikss_extgrid_contrib_ka > 0.0);
+  CHECK(fault_row->v_remaining_pu == 0.0);
+  CHECK(bus1->v_remaining_pu > 0.0);
+  CHECK(bus2->v_remaining_pu > 0.0);
+  CHECK(std::isfinite(bus1->v_remaining_pu));
+  CHECK(std::isfinite(bus2->v_remaining_pu));
+}
+
 // ---------------------------------------------------------------------------
 // Test 5 — Fault-type ratios (SLG vs 3PH on 2-bus grounded source)
 // ---------------------------------------------------------------------------
@@ -341,10 +388,221 @@ TEST_CASE("SC: IEC c-factor scales fault levels", "[short_circuit][iec60909]") {
   double sk_high = res_high.bus_results[1].sk_mva;
 
   INFO("Sk(c=1.0)=" << sk_low << " MVA  Sk(c=1.1)=" << sk_high << " MVA");
-  // Sk ∝ c² → high/low ratio ≈ 1.21
+  // Sk and Ik'' scale linearly with IEC voltage factor c.
   CHECK(sk_high > sk_low);
-  CHECK(sk_high / sk_low > 1.15);
-  CHECK(sk_high / sk_low < 1.30);
+  CHECK(sk_high / sk_low > 1.09);
+  CHECK(sk_high / sk_low < 1.11);
+  CHECK(res_low.bus_results[1].ikpp_ka > 1.0);
+}
+
+TEST_CASE("SC detailed: explicit c-factor scales selected-bus current",
+          "[short_circuit][iec60909][detailed]") {
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ)},
+      {make_branch(1, 1, 2, 0.05, 0.20)},
+      100.0, 0.05);
+  sys.ac.generators.clear();
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.r_pu = 0.001;
+  eg.x_pu = 0.01;
+  sys.ac.external_grids = {eg};
+
+  SCDetailedOptions lo, hi;
+  lo.fault_type = FaultType::ThreePhase;
+  hi.fault_type = FaultType::ThreePhase;
+  lo.c_factor = 1.0;
+  hi.c_factor = 1.1;
+
+  const auto r_lo = run_short_circuit_detailed(sys, 2, lo);
+  const auto r_hi = run_short_circuit_detailed(sys, 2, hi);
+  REQUIRE(r_lo.solved);
+  REQUIRE(r_hi.solved);
+
+  auto own_ik = [](const SCDetailedResult& r) {
+    for (const auto& b : r.bus_results)
+      if (b.bus_id == r.fault_bus_id) return b.ikss_ka;
+    return 0.0;
+  };
+  const double i_lo = own_ik(r_lo);
+  const double i_hi = own_ik(r_hi);
+  CHECK(i_lo > 0.0);
+  CHECK(i_hi / i_lo > 1.09);
+  CHECK(i_hi / i_lo < 1.11);
+}
+
+TEST_CASE("SC detailed: minimum external-grid data lowers fault current",
+          "[short_circuit][iec60909][external_grid]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 110.0)};
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.vn_kv = 110.0;
+  eg.s_sc_max_mva = 5000.0;
+  eg.s_sc_min_mva = 500.0;
+  eg.rx_max = 0.1;
+  eg.rx_min = 0.1;
+  sys.ac.external_grids = {eg};
+
+  SCDetailedOptions max_opt, min_opt;
+  max_opt.fault_type = FaultType::ThreePhase;
+  min_opt.fault_type = FaultType::ThreePhase;
+  max_opt.calc_type = SCCalcType::Max;
+  min_opt.calc_type = SCCalcType::Min;
+
+  const auto r_max = run_short_circuit_detailed(sys, 1, max_opt);
+  const auto r_min = run_short_circuit_detailed(sys, 1, min_opt);
+  REQUIRE(r_max.solved);
+  REQUIRE(r_min.solved);
+
+  const double i_max = r_max.bus_results.front().ikss_ka;
+  const double i_min = r_min.bus_results.front().ikss_ka;
+  CHECK(i_max > 0.0);
+  CHECK(i_min > 0.0);
+  CHECK(i_min < i_max * 0.2);
+}
+
+TEST_CASE("SC detailed: transformer correction factor is applied in canonical space",
+          "[short_circuit][iec60909][transformer]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {
+      make_bus(1, BusType::SLACK, 110.0),
+      make_bus(2, BusType::PQ, 20.0),
+  };
+
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.r_pu = 0.001;
+  eg.x_pu = 0.01;
+  sys.ac.external_grids = {eg};
+  sys.ac.generators.clear();
+
+  Transformer2W tr;
+  tr.index = 1;
+  tr.hv_bus = 1;
+  tr.lv_bus = 2;
+  tr.sn_mva = 100.0;
+  tr.vn_hv_kv = 110.0;
+  tr.vn_lv_kv = 20.0;
+  tr.vk_percent = 10.0;
+  tr.vkr_percent = 0.0;
+  sys.ac.transformers_2w = {tr};
+
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.calc_type = SCCalcType::Max;
+  opt.c_factor = 1.1;
+
+  const auto r = run_short_circuit_detailed(sys, 2, opt);
+  REQUIRE(r.solved);
+  const auto& row = r.bus_results.back();
+
+  const double kt = 0.95 * 1.1 / (1.0 + 0.6 * 0.10);
+  const Cx expected_z = Cx(0.001, 0.01) + Cx(0.0, 0.10) * kt;
+  const double expected_ka =
+      (1.1 / std::abs(expected_z)) * (100.0 / (std::sqrt(3.0) * 20.0));
+
+  CHECK(row.bus_id == 2);
+  CHECK(std::abs(row.ikss_ka - expected_ka) < expected_ka * 0.02);
+}
+
+TEST_CASE("SC projection: transformer zero-sequence percent respects x0/r0 ratio",
+          "[short_circuit][iec60909][transformer][zero_sequence]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {
+      make_bus(1, BusType::SLACK, 110.0),
+      make_bus(2, BusType::PQ, 20.0),
+  };
+
+  Transformer2W tr;
+  tr.index = 1;
+  tr.hv_bus = 1;
+  tr.lv_bus = 2;
+  tr.sn_mva = 50.0;
+  tr.vn_hv_kv = 110.0;
+  tr.vn_lv_kv = 20.0;
+  tr.vk_percent = 10.0;
+  tr.vkr_percent = 1.0;
+  tr.z0_percent = 8.0;
+  tr.x0_r0 = 4.0;
+  sys.ac.transformers_2w = {tr};
+
+  const auto proj = project_to_canonical_models(sys);
+  REQUIRE(!proj.ac.branches.empty());
+  const auto& br = proj.ac.branches.back();
+
+  const double z0 = 0.08 * (100.0 / 50.0);
+  const double expected_r0 = z0 / std::sqrt(1.0 + 4.0 * 4.0);
+  const double expected_x0 = expected_r0 * 4.0;
+
+  CHECK(std::abs(br.r0_pu - expected_r0) < 1e-12);
+  CHECK(std::abs(br.x0_pu - expected_x0) < 1e-12);
+}
+
+TEST_CASE("SC detailed: projected rich motors remain motor contributions and obey threshold",
+          "[short_circuit][iec60909][motor]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::SLACK, 20.0)};
+  sys.ac.generators.clear();
+
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.r_pu = 0.01;
+  eg.x_pu = 0.10;
+  sys.ac.external_grids = {eg};
+
+  AsynchronousMotor small;
+  small.index = 1;
+  small.bus = 1;
+  small.vn_kv = 20.0;
+  small.sn_mva = 0.04;
+  small.cos_phi = 0.9;
+  small.efficiency = 0.9;
+  small.r_pu = 0.5;
+  small.x_pu = 2.0;
+
+  AsynchronousMotor large = small;
+  large.index = 2;
+  large.sn_mva = 1.0;
+  large.r_pu = 5.0;
+  large.x_pu = 20.0;
+  large.poles = 4;
+
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.c_factor = 1.0;
+
+  auto base = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(base.solved);
+  const double i_base = base.bus_results.front().ikss_ka;
+
+  sys.ac.motors = {small};
+  auto with_small = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(with_small.solved);
+  CHECK(with_small.bus_results.front().ikss_motor_contrib_ka == 0.0);
+  CHECK(std::abs(with_small.bus_results.front().ikss_ka - i_base) < 1e-9);
+
+  sys.ac.motors = {large};
+  auto with_large = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(with_large.solved);
+  const auto& row = with_large.bus_results.front();
+  CHECK(row.ikss_motor_contrib_ka > 0.0);
+  CHECK(row.ikss_load_contrib_ka == 0.0);
+  CHECK(row.ikss_ka > i_base);
+  CHECK(row.ib_ka > 0.0);
+  CHECK(std::isfinite(row.ib_ka));
 }
 
 // ---------------------------------------------------------------------------

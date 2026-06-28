@@ -20,6 +20,10 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDegToRad = kPi / 180.0;
+// Stiffness (pu power per pu volt) of the soft anchor that holds an unobservable
+// DC bus at its setpoint — large enough to pin V_dc≈vm_pu, small enough to stay
+// well conditioned in the KKT.
+constexpr double kDcVoltAnchor = 1.0;
 
 double clamp_interior(double x, double lo, double hi) {
   const double w = hi - lo;
@@ -259,6 +263,41 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
     prob.flex_bus.push_back(bus);
   }
 
+  // --- Enhanced component: energy-router ports ---
+  // Each in-service port of each in-service router gets an active-power injection
+  // variable (AC or DC); AC ports additionally get a reactive-power variable.  The
+  // port powers are decision variables (the control_mode declares which the router
+  // regulates) and are tied by one active-power conservation row per router so the
+  // router routes power rather than creating it.
+  prob.er_ports.clear();
+  prob.er_router_to_data.clear();
+  {
+    int erp = 0, erq = 0;
+    for (size_t ri = 0; ri < prob.data.energy_routers.size(); ++ri) {
+      const auto& er = prob.data.energy_routers[ri];
+      if (!er.in_service) continue;
+      bool any_port = false;
+      for (size_t pi = 0; pi < er.ports.size(); ++pi) {
+        const auto& port = er.ports[pi];
+        if (!port.in_service) continue;
+        const bool is_ac = (port.port_type == ERPortType::AC);
+        const int bus = port.bus - 1;
+        const int nbus_domain = is_ac ? nb : ndc;
+        if (bus < 0 || bus >= nbus_domain) continue;
+        Problem::ERPortInfo info;
+        info.router_idx = static_cast<int>(ri);
+        info.port_idx = static_cast<int>(pi);
+        info.bus = bus;
+        info.is_ac = is_ac;
+        info.pvar = erp++;
+        info.qvar = is_ac ? erq++ : -1;
+        prob.er_ports.push_back(info);
+        any_port = true;
+      }
+      if (any_port) prob.er_router_to_data.push_back(static_cast<int>(ri));
+    }
+  }
+
   VarIndex vidx;
   vidx.n_va = nb;
   vidx.n_vm = nb;
@@ -277,6 +316,15 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   vidx.n_pstordc = static_cast<int>(prob.stor_dc_var_to_data.size());
   vidx.n_pdcdc = static_cast<int>(prob.dcdc_var_to_data.size());
   vidx.n_pflex = static_cast<int>(prob.flex_var_to_data.size());
+  {
+    int erp = 0, erq = 0;
+    for (const auto& info : prob.er_ports) {
+      erp = std::max(erp, info.pvar + 1);
+      if (info.qvar >= 0) erq = std::max(erq, info.qvar + 1);
+    }
+    vidx.n_erp = erp;
+    vidx.n_erq = erq;
+  }
 
   int off = 0;
   vidx.i_va = off;
@@ -313,6 +361,10 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   off += vidx.n_pdcdc;
   vidx.i_pflex = off;
   off += vidx.n_pflex;
+  vidx.i_erp = off;
+  off += vidx.n_erp;
+  vidx.i_erq = off;
+  off += vidx.n_erq;
   vidx.n_total = off;
   prob.vidx = vidx;
 
@@ -321,13 +373,19 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   cidx.n_qbal_ac = nb;
   cidx.n_pbal_dc = ndc;
   cidx.n_conv_bal = vidx.n_pac;
-  cidx.n_dcdc_bal = vidx.n_pdcdc;
+  // DC/DC: p_in is a free decision variable folded directly into the two DC
+  // nodal-balance rows; no dedicated equality block (allocating one without
+  // populating it leaves empty rows that make the KKT structurally singular).
+  cidx.n_dcdc_bal = 0;
+  // One active-power conservation row per in-service energy router.
+  cidx.n_er_bal = static_cast<int>(prob.er_router_to_data.size());
   cidx.i_pbal_ac = 0;
   cidx.i_qbal_ac = cidx.i_pbal_ac + cidx.n_pbal_ac;
   cidx.i_pbal_dc = cidx.i_qbal_ac + cidx.n_qbal_ac;
   cidx.i_conv_bal = cidx.i_pbal_dc + cidx.n_pbal_dc;
   cidx.i_dcdc_bal = cidx.i_conv_bal + cidx.n_conv_bal;
-  cidx.n_eq_total = cidx.i_dcdc_bal + cidx.n_dcdc_bal;
+  cidx.i_er_bal = cidx.i_dcdc_bal + cidx.n_dcdc_bal;
+  cidx.n_eq_total = cidx.i_er_bal + cidx.n_er_bal;
   cidx.n_sf = static_cast<int>(prob.branch_limited.size());
   cidx.n_st = cidx.n_sf;
   cidx.n_sconv = vidx.n_pac;
@@ -389,6 +447,18 @@ Problem build_problem(const HybridPowerSystem& sys, const ParityOptions& opt) {
   }
 
   prob.gdc_dense = Eigen::MatrixXd(prob.data.gdc);
+
+  // DC buses with no conductive branch are voltage-unobservable (they connect to
+  // the rest of the network only through converters whose injections do not
+  // depend on the bus's own voltage).  Anchor them softly to vm_pu.
+  prob.dc_volt_anchor.clear();
+  for (int k = 0; k < ndc; ++k) {
+    bool has_branch = false;
+    for (int m = 0; m < ndc; ++m) {
+      if (m != k && std::abs(prob.gdc_dense(k, m)) > 0.0) { has_branch = true; break; }
+    }
+    if (!has_branch) prob.dc_volt_anchor.push_back(k);
+  }
 
   // --- Compute fixed DER injections (non-variable components) ---
   prob.p_fixed_inj = Eigen::VectorXd::Zero(nb);
@@ -585,6 +655,25 @@ void build_variable_bounds(const Problem& prob, Eigen::VectorXd& xmin, Eigen::Ve
     const auto& fl = prob.data.flexible_loads[static_cast<size_t>(prob.flex_var_to_data[static_cast<size_t>(k)])];
     xmin[idx.i_pflex + k] = (fl.p_mw - fl.flex_down_mw) / prob.data.base_mva;
     xmax[idx.i_pflex + k] = (fl.p_mw + fl.flex_up_mw) / prob.data.base_mva;
+  }
+
+  // Energy-router port power limits (decision variables within the port's
+  // [pmin,pmax]/[qmin,qmax] capability; DC ports have no reactive variable).
+  for (const auto& port : prob.er_ports) {
+    const auto& p = prob.data.energy_routers[static_cast<size_t>(port.router_idx)]
+                        .ports[static_cast<size_t>(port.port_idx)];
+    double plo = p.pmin_mw / prob.data.base_mva;
+    double phi = p.pmax_mw / prob.data.base_mva;
+    if (!(plo < phi)) { plo = -1e6; phi = 1e6; }
+    xmin[idx.i_erp + port.pvar] = plo;
+    xmax[idx.i_erp + port.pvar] = phi;
+    if (port.qvar >= 0) {
+      double qlo = p.qmin_mvar / prob.data.base_mva;
+      double qhi = p.qmax_mvar / prob.data.base_mva;
+      if (!(qlo < qhi)) { qlo = -1e6; qhi = 1e6; }
+      xmin[idx.i_erq + port.qvar] = qlo;
+      xmax[idx.i_erq + port.qvar] = qhi;
+    }
   }
 }
 
@@ -832,6 +921,19 @@ void build_initial_point(const Problem& prob,
   for (int k = 0; k < idx.n_pflex; ++k) {
     const auto& fl = prob.data.flexible_loads[static_cast<size_t>(prob.flex_var_to_data[static_cast<size_t>(k)])];
     x0[idx.i_pflex + k] = fl.p_mw / prob.data.base_mva;
+  }
+  // Energy-router ports: warm-start from the given per-port p_mw/q_mvar.
+  for (const auto& port : prob.er_ports) {
+    const auto& p = prob.data.energy_routers[static_cast<size_t>(port.router_idx)]
+                        .ports[static_cast<size_t>(port.port_idx)];
+    x0[idx.i_erp + port.pvar] = clamp_interior(p.p_mw / prob.data.base_mva,
+                                               xmin[idx.i_erp + port.pvar],
+                                               xmax[idx.i_erp + port.pvar]);
+    if (port.qvar >= 0) {
+      x0[idx.i_erq + port.qvar] = clamp_interior(p.q_mvar / prob.data.base_mva,
+                                                 xmin[idx.i_erq + port.qvar],
+                                                 xmax[idx.i_erq + port.qvar]);
+    }
   }
 
   // DC warm start: compute voltage angles consistent with P dispatch
@@ -1208,6 +1310,42 @@ void equality_constraints(const Problem& prob,
   // and both are folded into the DC bus power-balance rows above:
   //   bus_in:  += p_in   (power withdrawn from bus_in)
   //   bus_out: -= p_out  (power injected into bus_out)
+
+  // Soft voltage anchor for unobservable DC buses: a stiff "shunt to setpoint"
+  // K·(V_dc[k] − vm_pu) added to the bus mismatch makes the otherwise all-zero
+  // V_dc column nonzero (KKT nonsingular) and drives V_dc → nominal, matching the
+  // PF default for such buses (preserves OPF↔PF zero-diff).
+  for (int k : prob.dc_volt_anchor) {
+    g[cidx.i_pbal_dc + k] += kDcVoltAnchor * (vdc[k] - prob.data.dc_buses[static_cast<size_t>(k)].vm_pu);
+  }
+
+  // Energy-router ports: each port's active (and AC reactive) power is a decision
+  // variable injected at its bus (positive = into the bus, matching the PF
+  // p_spec/pdc_spec += p_mw convention), so it is SUBTRACTED from the bus
+  // mismatch like any other source.  Active power is conserved across each
+  // router by a dedicated row so the device routes — not creates — power.
+  // AC balance rows are pre-scaled (×scale_p/scale_q at the bus loop above) and
+  // this block runs after that scaling, so apply the same scale here; DC rows
+  // are unscaled (like the DC/DC folding).
+  for (const auto& port : prob.er_ports) {
+    const double pp = x[idx.i_erp + port.pvar];
+    if (port.is_ac) {
+      g[cidx.i_pbal_ac + port.bus] -= pp * prob.scale_p;
+      if (port.qvar >= 0) g[cidx.i_qbal_ac + port.bus] -= x[idx.i_erq + port.qvar] * prob.scale_q;
+    } else {
+      g[cidx.i_pbal_dc + port.bus] -= pp;
+    }
+  }
+  for (size_t r = 0; r < prob.er_router_to_data.size(); ++r) {
+    const int ri = prob.er_router_to_data[r];
+    double sum_p = 0.0;
+    for (const auto& port : prob.er_ports) {
+      if (port.router_idx == ri) sum_p += x[idx.i_erp + port.pvar];
+    }
+    // Lossless real-power conservation: Σ_ports P_port = 0.  (loss_percent
+    // refinement deferred; PF replays the written-back per-port p_mw regardless.)
+    g[cidx.i_er_bal + static_cast<int>(r)] = sum_p;
+  }
 }
 
 void equality_jacobian(const Problem& prob,
@@ -1405,6 +1543,28 @@ void equality_jacobian(const Problem& prob,
     // Flex load in power balance: +pflex (adds to demand side)
     t.emplace_back(cidx.i_pbal_ac + bus, idx.i_pflex + k, prob.scale_p);
   }
+  // Soft DC voltage anchor: ∂/∂V_dc[k] = K for unobservable buses.
+  for (int k : prob.dc_volt_anchor) {
+    t.emplace_back(cidx.i_pbal_dc + k, idx.i_vdc + k, kDcVoltAnchor);
+  }
+  // Energy-router port injections (AC rows scaled like other injections; DC
+  // unscaled) and per-router active-power conservation rows.
+  for (const auto& port : prob.er_ports) {
+    if (port.is_ac) {
+      t.emplace_back(cidx.i_pbal_ac + port.bus, idx.i_erp + port.pvar, -prob.scale_p);
+      if (port.qvar >= 0)
+        t.emplace_back(cidx.i_qbal_ac + port.bus, idx.i_erq + port.qvar, -prob.scale_q);
+    } else {
+      t.emplace_back(cidx.i_pbal_dc + port.bus, idx.i_erp + port.pvar, -1.0);
+    }
+  }
+  for (size_t r = 0; r < prob.er_router_to_data.size(); ++r) {
+    const int ri = prob.er_router_to_data[r];
+    for (const auto& port : prob.er_ports) {
+      if (port.router_idx == ri)
+        t.emplace_back(cidx.i_er_bal + static_cast<int>(r), idx.i_erp + port.pvar, 1.0);
+    }
+  }
 
   jg.resize(cidx.n_eq_total, idx.n_total);
   jg.setFromTriplets(t.begin(), t.end());
@@ -1420,19 +1580,30 @@ struct DcdcDutyRows {
   double in_max{0.0}, out_max{0.0};  // D ≤ d_max  row
   double in_min{0.0}, out_min{0.0};  // D ≥ d_min  row
 };
-static DcdcDutyRows dcdc_duty_rows(const DCDCConverter& dc) {
+static double dcdc_port_nominal_kv(double converter_kv, double bus_kv) {
+  if (converter_kv > 1e-9) return converter_kv;
+  if (bus_kv > 1e-9) return bus_kv;
+  return 1.0;
+}
+
+static DcdcDutyRows dcdc_duty_rows(const DCDCConverter& dc,
+                                   double vn_in_kv,
+                                   double vn_out_kv) {
   const double dmin = dc.d_min;
   const double dmax = dc.d_max;
   const double n = (dc.n_ratio > 0.0) ? dc.n_ratio : 1.0;
   switch (dc.topology) {
     case DCDCTopology::Buck:       // Vout = D·Vin
-      return {-dmax, 1.0, dmin, -1.0};
+      return {-dmax * vn_in_kv, vn_out_kv, dmin * vn_in_kv, -vn_out_kv};
     case DCDCTopology::Boost:      // Vout = Vin/(1-D)
-      return {-1.0, 1.0 - dmax, 1.0, -(1.0 - dmin)};
+      return {-vn_in_kv, (1.0 - dmax) * vn_out_kv,
+              vn_in_kv, -(1.0 - dmin) * vn_out_kv};
     case DCDCTopology::BuckBoost:  // Vout = D/(1-D)·Vin
-      return {-dmax, 1.0 - dmax, dmin, -(1.0 - dmin)};
+      return {-dmax * vn_in_kv, (1.0 - dmax) * vn_out_kv,
+              dmin * vn_in_kv, -(1.0 - dmin) * vn_out_kv};
     case DCDCTopology::Isolated:   // M = Vout/(n·Vin)
-      return {-dmax * n, 1.0, dmin * n, -1.0};
+      return {-dmax * n * vn_in_kv, vn_out_kv,
+              dmin * n * vn_in_kv, -vn_out_kv};
     default:
       return {};
   }
@@ -1535,7 +1706,11 @@ void nonlinear_inequality_constraints(const Problem& prob,
         prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
     const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
     const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
-    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    const double vn_in = dcdc_port_nominal_kv(
+        dc.vn_in_kv, prob.data.dc_buses[static_cast<size_t>(bin)].base_kv);
+    const double vn_out = dcdc_port_nominal_kv(
+        dc.vn_out_kv, prob.data.dc_buses[static_cast<size_t>(bout)].base_kv);
+    const DcdcDutyRows r = dcdc_duty_rows(dc, vn_in, vn_out);
     h[off++] = r.in_max * vdc[bin] + r.out_max * vdc[bout];  // D ≤ d_max
     h[off++] = r.in_min * vdc[bin] + r.out_min * vdc[bout];  // D ≥ d_min
   }
@@ -1669,7 +1844,11 @@ void nonlinear_inequality_jacobian(const Problem& prob,
         prob.data.dcdc_converters[static_cast<size_t>(prob.dcdc_var_to_data[static_cast<size_t>(k)])];
     const int bin = prob.dcdc_bus_in[static_cast<size_t>(k)];
     const int bout = prob.dcdc_bus_out[static_cast<size_t>(k)];
-    const DcdcDutyRows r = dcdc_duty_rows(dc);
+    const double vn_in = dcdc_port_nominal_kv(
+        dc.vn_in_kv, prob.data.dc_buses[static_cast<size_t>(bin)].base_kv);
+    const double vn_out = dcdc_port_nominal_kv(
+        dc.vn_out_kv, prob.data.dc_buses[static_cast<size_t>(bout)].base_kv);
+    const DcdcDutyRows r = dcdc_duty_rows(dc, vn_in, vn_out);
     t.emplace_back(off, idx.i_vdc + bin, r.in_max);
     t.emplace_back(off, idx.i_vdc + bout, r.out_max);
     ++off;

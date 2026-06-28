@@ -344,6 +344,68 @@ const Canvas = (() => {
     });
   }
 
+  function clearSolvedGeneratorDisplays() {
+    state.components.forEach(comp => {
+      if (comp.type !== 'generator' || !comp.params) return;
+      delete comp.params._result_pg_mw;
+      delete comp.params._result_qg_mvar;
+      delete comp.params._result_p_unit;
+    });
+  }
+
+  function formatSolvedPowerForComponent(mw) {
+    const n = Number(mw);
+    if (!Number.isFinite(n)) return null;
+    return pFmt(n, Math.abs(n) >= 10 ? 1 : 2);
+  }
+
+  function resultRowsByIndexOrOrder(rows, comps) {
+    const out = [];
+    const list = Array.isArray(rows) ? rows : [];
+    const used = new Set();
+    comps.forEach((comp, order) => {
+      const idx = Number(comp.params?.index);
+      let row = null;
+      if (Number.isFinite(idx)) {
+        row = list.find((r, i) => !used.has(i) && Number(r.index) === idx) || null;
+      }
+      if (!row && Number.isFinite(idx)) {
+        row = list.find((r, i) => !used.has(i) && Number(r.canvas_index) === idx) || null;
+      }
+      if (!row) {
+        row = list.find((r, i) => !used.has(i) && Number(r.position) === order) || null;
+      }
+      if (!row) {
+        row = list.find((r, i) => !used.has(i)) || null;
+      }
+      if (row) used.add(list.indexOf(row));
+      out.push(row);
+    });
+    return out;
+  }
+
+  function applySolvedGeneratorDisplays(result) {
+    clearSolvedGeneratorDisplays();
+    const genComps = state.components.filter(comp => comp.type === 'generator');
+    if (!genComps.length || !result) return;
+    const rows = resultRowsByIndexOrOrder(result.geo_gen || result.generator_dispatch || [], genComps);
+    genComps.forEach((comp, i) => {
+      const row = rows[i];
+      const pgText = formatSolvedPowerForComponent(row?.pg_mw);
+      if (pgText === null) return;
+      comp.params._result_pg_mw = pgText;
+      const qg = Number(row?.qg_mvar);
+      if (Number.isFinite(qg)) comp.params._result_qg_mvar = qg;
+      comp.params._result_p_unit = pUnit();
+    });
+  }
+
+  function refreshSolvedGeneratorComponents() {
+    state.components
+      .filter(comp => comp.type === 'generator')
+      .forEach(comp => rerenderComponent(comp));
+  }
+
   function normalizePortId(compId, portId) {
     const comp = getComponent(compId);
     if (!comp) return portId;
@@ -4034,6 +4096,8 @@ const Canvas = (() => {
 
     // Store last PF result for visualization mode changes
     _lastPfResult = result;
+    applySolvedGeneratorDisplays(result);
+    refreshSolvedGeneratorComponents();
 
     // Overlay voltage values on buses (tagged with data-comp-id for drag tracking)
     let dcIdx = 0;
@@ -4102,6 +4166,10 @@ const Canvas = (() => {
   }
 
   function applyVisualizationOverlay() {
+    if (_lastPfResult) {
+      applySolvedGeneratorDisplays(_lastPfResult);
+      refreshSolvedGeneratorComponents();
+    }
     // Remove existing visualization elements (keep voltage text)
     resultsLayer.querySelectorAll('.viz-overlay').forEach(el => el.remove());
     // Remove previous radial gradient defs
@@ -4197,28 +4265,6 @@ const Canvas = (() => {
         if (Array.isArray(value) && value.length > 0) return value;
       }
       return [];
-    }
-
-    function resultRowsByIndexOrOrder(rows, comps) {
-      const out = [];
-      const list = Array.isArray(rows) ? rows : [];
-      const used = new Set();
-      comps.forEach((comp, order) => {
-        const idx = Number(comp.params?.index);
-        let row = null;
-        if (Number.isFinite(idx)) {
-          row = list.find((r, i) => !used.has(i) && Number(r.index) === idx) || null;
-        }
-        if (!row) {
-          row = list.find((r, i) => !used.has(i) && Number(r.position) === order) || null;
-        }
-        if (!row) {
-          row = list.find((r, i) => !used.has(i)) || null;
-        }
-        if (row) used.add(list.indexOf(row));
-        out.push(row);
-      });
-      return out;
     }
 
     const dcStorageComps = state.components.filter(comp => comp.type === 'dc_storage');
@@ -5468,6 +5514,8 @@ const Canvas = (() => {
   function clearResults() {
     resultsLayer.innerHTML = '';
     _lastPfResult = null;
+    clearSolvedGeneratorDisplays();
+    refreshSolvedGeneratorComponents();
     // Remove heatmap gradient defs
     const svgEl = resultsLayer.ownerSVGElement || document.querySelector('#canvas');
     const defsEl = svgEl.querySelector('defs#vizGradDefs');

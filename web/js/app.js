@@ -67,6 +67,45 @@ const App = (() => {
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
+  let _analysisQueue = Promise.resolve();
+  let _activeLoadPromise = null;
+
+  const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForBackendIdle(timeoutMs = 120000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const status = await apiGet('/api/session/status', { quiet: true });
+      if (!status || status.busy !== true) return true;
+      await sleep(250);
+    }
+    log('后端仍有分析任务在运行，请稍后重试', 'warn');
+    return false;
+  }
+
+  async function withAnalysisQueue(work) {
+    const previous = _analysisQueue.catch(() => {});
+    let release;
+    _analysisQueue = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  function trackActiveLoad(work) {
+    const loadPromise = Promise.resolve().then(work);
+    _activeLoadPromise = loadPromise;
+    return loadPromise.finally(() => {
+      if (_activeLoadPromise === loadPromise) _activeLoadPromise = null;
+    });
+  }
 
   function invalidateAnalysisResults(reason = '') {
     _lastPfData = null;
@@ -108,6 +147,61 @@ const App = (() => {
     const id = parseInt(compId, 10);
     return Number.isInteger(id)
       ? ` class="topo-clickable" data-comp-id="${id}" onclick="Canvas.panToComponent(${id})"` : '';
+  }
+
+  function rowCanvasCompId(row, maps) {
+    if (!row || !maps) return undefined;
+    const type = row.canvas_type;
+    const rawIndex = row.canvas_index ?? row.index;
+    const bucketAliases = {
+      ac_bus: 'ac',
+      dc_bus: 'dc',
+      ac_branch: 'branch',
+      dc_branch: 'dcBranch',
+      vsc_converter: 'vsc',
+      dcdc_converter: 'dcdcConverter',
+      energy_router: 'energyRouter',
+      dc_storage: 'dcStorage',
+      pv_system: 'pv',
+      dc_pv_array: 'dcPv',
+      renewable_gen: 'renGen',
+      static_generator: 'sgen',
+      external_grid: 'extGrid',
+      transformer_2w: 'trafo',
+      transformer_3w: 'trafo3w',
+      switch_comp: 'sw',
+      circuit_breaker: 'cb',
+      dc_circuit_breaker: 'dcCb',
+      mobile_storage: 'mobileStorage',
+      flexible_load: 'flexLoad',
+      asymmetric_load: 'asymLoad',
+      charging_station: 'chargingStation',
+    };
+    const bucket = type && (maps[type] ? type : bucketAliases[type]);
+    if (bucket && rawIndex != null && maps[bucket]) {
+      const idx = Number(rawIndex);
+      if (Number.isFinite(idx) && maps[bucket][idx] != null) return maps[bucket][idx];
+    }
+    const bus = row.bus ?? row.bus_ac ?? row.bus_in ?? row.from_bus ?? row.index;
+    const busMap = (type === 'dc' || type === 'dc_bus' || type === 'dcBranch' ||
+      type === 'dc_branch' || type === 'dc_storage' || type === 'dcdcConverter' ||
+      type === 'dcdc_converter') ? maps.dc : maps.ac;
+    const busId = Number(bus);
+    return Number.isFinite(busId) && busMap ? busMap[busId] : undefined;
+  }
+
+  function positiveDemandMw(row) {
+    return Math.abs(numberOr(row?.display_demand_mw ?? row?.demand_mw, 0));
+  }
+
+  function carbonLoadLabel(row) {
+    if (row?.display_load != null && String(row.display_load).trim() !== '') {
+      return String(row.display_load);
+    }
+    const idx = Number(row?.load_index);
+    if (Number.isFinite(idx) && idx >= 0) return String(row.load_index);
+    const bus = row?.bus ?? '—';
+    return `${row?.is_dc ? 'DC Bus Load @' : 'Bus Load @'}${bus}`;
   }
 
   function numberOr(value, fallback = 0) {
@@ -584,9 +678,9 @@ const App = (() => {
   }
 
   // ========== API Client ==========
-  async function apiPost(path, body = {}) {
+  async function apiPost(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
-    log(`POST ${path}`, 'info');
+    if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -595,12 +689,12 @@ const App = (() => {
       });
       const data = await res.json();
       if (!res.ok) {
-        log(`Error: ${data.error || res.statusText}`, 'error');
+        if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
       }
       return data;
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return null;
     }
   }
@@ -608,9 +702,9 @@ const App = (() => {
   // Like apiPost but surfaces the backend error message instead of swallowing
   // it.  Returns { ok, data, error } so callers can show a specific reason
   // (e.g. an unknown fault bus id rejected by the server).
-  async function apiPostResult(path, body = {}) {
+  async function apiPostResult(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
-    log(`POST ${path}`, 'info');
+    if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -620,28 +714,28 @@ const App = (() => {
       const data = await res.json();
       if (!res.ok) {
         const error = (data && data.error) || res.statusText;
-        log(`Error: ${error}`, 'error');
+        if (!options.quiet) log(`Error: ${error}`, 'error');
         return { ok: false, data: null, error };
       }
       return { ok: true, data, error: null };
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return { ok: false, data: null, error: e.message };
     }
   }
 
-  async function apiGet(path) {
+  async function apiGet(path, options = {}) {
     const url = `${API_BASE}${path}`;
     try {
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) {
-        log(`Error: ${data.error || res.statusText}`, 'error');
+        if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
       }
       return data;
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return null;
     }
   }
@@ -655,6 +749,7 @@ const App = (() => {
 
   function normalizePowerFlowResult(data) {
     if (!data || typeof data !== 'object') return data;
+    data.geo_ac_branches = firstNonEmptyArray(data.geo_ac_branches, data.branch_flows);
     data.geo_dc_branches = firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows);
     data.dc_branch_flows = firstNonEmptyArray(data.dc_branch_flows, data.geo_dc_branches);
     data.vsc_transfers = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
@@ -664,6 +759,22 @@ const App = (() => {
     data.ac_switch_flows = Array.isArray(data.ac_switch_flows) ? data.ac_switch_flows : [];
     data.ac_circuit_breaker_flows = Array.isArray(data.ac_circuit_breaker_flows) ? data.ac_circuit_breaker_flows : [];
     data.dc_circuit_breaker_flows = Array.isArray(data.dc_circuit_breaker_flows) ? data.dc_circuit_breaker_flows : [];
+    data.geo_er = Array.isArray(data.geo_er) ? data.geo_er : [];
+    data.geo_gen = firstNonEmptyArray(data.geo_gen, data.generator_dispatch);
+    if (!data.geo_gen.length && Array.isArray(data.pg_mw) && data.pg_mw.length) {
+      const qg = Array.isArray(data.qg_mvar) ? data.qg_mvar : [];
+      data.geo_gen = data.pg_mw.map((p, i) => ({
+        position: i,
+        index: i,
+        canvas_type: 'gen',
+        canvas_index: i,
+        pg_mw: p,
+        qg_mvar: qg[i],
+      }));
+    }
+    data.geo_trafo3w = Array.isArray(data.geo_trafo3w) ? data.geo_trafo3w : [];
+    data.component_results = Array.isArray(data.component_results) ? data.component_results : [];
+    data.dc_storage_results = Array.isArray(data.dc_storage_results) ? data.dc_storage_results : [];
     return data;
   }
 
@@ -707,30 +818,33 @@ const App = (() => {
 
   async function loadMatpowerCase(filename) {
     if (!filename) return;
-    setStatus('加载MATPOWER...', 'busy');
-    const data = await apiPost('/api/session/load_matpower', { filename });
-    if (data) {
-      log(`已加载MATPOWER文件: ${filename}`, 'success');
-      if (data._raw_json) {
-        try {
-          const sys = JSON.parse(data._raw_json);
-          Canvas.loadFromSystemJson(sys);
-          _canvasDirty = false;  // backend already has the correct system
-          updateResilienceSwitchDefault();
-          invalidateAnalysisResults();
-          log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
-        } catch (e) {
-          log(`JSON解析失败: ${e.message}`, 'error');
+    return trackActiveLoad(async () => {
+      setStatus('加载MATPOWER...', 'busy');
+      const data = await apiPost('/api/session/load_matpower', { filename });
+      if (data) {
+        log(`已加载MATPOWER文件: ${filename}`, 'success');
+        if (data._raw_json) {
+          try {
+            const sys = JSON.parse(data._raw_json);
+            Canvas.loadFromSystemJson(sys);
+            _canvasDirty = false;  // backend already has the correct system
+            updateResilienceSwitchDefault();
+            invalidateAnalysisResults();
+            log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+          } catch (e) {
+            log(`JSON解析失败: ${e.message}`, 'error');
+          }
         }
-      }
-      setStatus('就绪');
+        setStatus('就绪');
 
-      // Auto-run power flow after import
-      log('自动运行潮流计算...', 'info');
-      await runPowerFlow();
-    } else {
-      setStatus('加载失败', 'error');
-    }
+        // Auto-run power flow after import
+        log('自动运行潮流计算...', 'info');
+        await runPowerFlow();
+      } else {
+        setStatus('加载失败', 'error');
+      }
+      return data;
+    });
   }
 
   async function loadBuiltinCase(caseName) {
@@ -1300,9 +1414,9 @@ const App = (() => {
     ];
     let loadHtml = `<table><thead><tr><th>类型</th><th>Load</th><th>Bus</th><th>P(MW)</th><th>碳强度(${carbonIntensityUnit()})</th><th>碳排(tCO2)</th></tr></thead><tbody>`;
     loadRows.forEach(l => {
-      const demand = Number(l.demand_mw || 0);
+      const demand = positiveDemandMw(l);
       const emissions = Math.max(0, Number(l.total_emissions_tco2 || 0));
-      loadHtml += `<tr${cbClick(l.bus, l.is_dc)}><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${l.load_index}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
+      loadHtml += `<tr${cbClick(l.bus, l.is_dc)}><td>${l.is_dc ? 'DC' : 'AC'}</td><td>${escapeHtml(carbonLoadLabel(l))}</td><td>${l.bus}</td><td>${demand.toFixed(4)}</td><td>${carbonIntensityDisplay(l.carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${emissions.toFixed(6)}</td></tr>`;
     });
     loadHtml += loadRows.length ? '</tbody></table>' : '<tr><td colspan="6">暂无负荷碳排放结果</td></tr></tbody></table>';
     document.getElementById('carbonLoadResults').innerHTML = loadHtml;
@@ -1324,7 +1438,14 @@ const App = (() => {
       storageSec.style.display = '';
       let html = `<table><thead><tr><th>类型</th><th>Storage</th><th>Bus</th><th>P(MW)</th><th>SOC</th><th>库存碳强度(${carbonIntensityUnit()})</th><th>本时段碳排(tCO2)</th></tr></thead><tbody>`;
       storageRows.forEach(s => {
-        html += `<tr><td>${s.is_dc ? 'DC' : 'AC'}</td><td>${s.storage_index}</td><td>${s.bus}</td><td>${Number(s.p_mw || 0).toFixed(4)}</td><td>${Number(s.soc || 0).toFixed(4)}</td><td>${carbonIntensityDisplay(s.soc_carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(s.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
+        const row = {
+          ...s,
+          canvas_type: s.canvas_type || (s.is_dc ? 'dc_storage' : 'storage'),
+          canvas_index: s.canvas_index ?? s.storage_index,
+        };
+        const attr = compClickAttr(rowCanvasCompId(row, cbMap));
+        const pText = Number.isFinite(Number(s.p_mw)) ? Number(s.p_mw).toFixed(4) : '—';
+        html += `<tr${attr}><td>${s.is_dc ? 'DC' : 'AC'}</td><td>${s.storage_index}</td><td>${s.bus}</td><td>${pText}</td><td>${Number(s.soc || 0).toFixed(4)}</td><td>${carbonIntensityDisplay(s.soc_carbon_intensity_tco2_mwh).toFixed(3)}</td><td>${Math.max(0, Number(s.total_emissions_tco2 || 0)).toFixed(6)}</td></tr>`;
       });
       html += '</tbody></table>';
       document.getElementById('carbonStorageResults').innerHTML = html;
@@ -1761,49 +1882,56 @@ const App = (() => {
 
   // ========== Power Flow ==========
   async function runPowerFlow() {
-    setStatus('潮流计算中...', 'busy');
-    const method = document.getElementById('pfMethod').value;
+    return withAnalysisQueue(async () => {
+      setStatus('潮流计算中...', 'busy');
+      const method = document.getElementById('pfMethod').value;
 
-    // Sync canvas to backend first
-    if (!await syncToBackend()) {
-      setStatus('同步失败', 'error');
-      return;
-    }
-
-    const coordCheckEl = document.getElementById('pfCoordCheck');
-    const data = await apiPost('/api/session/pf', {
-      method: method,
-      options: {
-        max_iter: 100,
-        tol: 1e-8,
-        verbose: false,
-        enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
+      // Sync canvas to backend first
+      if (!await syncToBackend()) {
+        setStatus('同步失败', 'error');
+        return null;
       }
-    });
 
-    if (data) {
-      const pfData = normalizePowerFlowResult(data);
-      const converged = pfData.converged;
-      const islandInfo = pfData.islands_detected
-        ? ` [检测到${pfData.islands_detected}个岛, ${pfData.solvable_islands}个可解]`
-        : '';
-      if (converged) {
-        log(`潮流计算收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次, 残差=${Number(pfData.residual).toExponential(4)}${islandInfo}`, 'success');
-        setStatus('潮流收敛', '');
+      const coordCheckEl = document.getElementById('pfCoordCheck');
+      if (!await waitForBackendIdle()) {
+        setStatus('后端繁忙', 'error');
+        return null;
+      }
+      const data = await apiPost('/api/session/pf', {
+        method: method,
+        options: {
+          max_iter: 100,
+          tol: 1e-8,
+          verbose: false,
+          enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
+        }
+      });
+
+      if (data) {
+        const pfData = normalizePowerFlowResult(data);
+        const converged = pfData.converged;
+        const islandInfo = pfData.islands_detected
+          ? ` [检测到${pfData.islands_detected}个岛, ${pfData.solvable_islands}个可解]`
+          : '';
+        if (converged) {
+          log(`潮流计算收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次, 残差=${Number(pfData.residual).toExponential(4)}${islandInfo}`, 'success');
+          setStatus('潮流收敛', '');
+        } else {
+          log(`潮流计算未收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次${islandInfo}`, 'warn');
+          setStatus('未收敛', 'error');
+        }
+
+        // Display results.  Always replace the previous GUI cache, including after
+        // a failed run, so a later successful run is never masked by stale arrays.
+        _lastPfData = pfData;
+        Canvas.showPowerFlowResults(pfData);
+        showPowerFlowResultsTables(pfData);
+        switchTab('results');
       } else {
-        log(`潮流计算未收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次${islandInfo}`, 'warn');
-        setStatus('未收敛', 'error');
+        setStatus('计算失败', 'error');
       }
-
-      // Display results.  Always replace the previous GUI cache, including after
-      // a failed run, so a later successful run is never masked by stale arrays.
-      _lastPfData = pfData;
-      Canvas.showPowerFlowResults(pfData);
-      showPowerFlowResultsTables(pfData);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
-    }
+      return data;
+    });
   }
 
   // ========== Optimal Power Flow ==========
@@ -1814,98 +1942,141 @@ const App = (() => {
   // converter AC/DC current limits, and converter modulation-ratio limits, all
   // of which are honoured by the parity manual-KKT formulation.
   async function runOpf() {
-    setStatus('最优潮流计算中...', 'busy');
-    const solver = document.getElementById('opfSolver')?.value || 'parity';
-    const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
-    const constraints = {
-      branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
-      converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
-      converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
-      converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
-    };
-
-    // Sync canvas to backend first so the OPF runs against the current edits.
-    if (!await syncToBackend()) {
-      setStatus('同步失败', 'error');
-      return;
+    if (_activeLoadPromise) {
+      setStatus('等待算例加载完成...', 'busy');
+      await _activeLoadPromise.catch(() => null);
     }
+    return withAnalysisQueue(async () => {
+      setStatus('最优潮流计算中...', 'busy');
+      const solver = document.getElementById('opfSolver')?.value || 'parity';
+      const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
+      const constraints = {
+        branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
+        converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
+        converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
+        converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
+      };
 
-    const data = await apiPost('/api/session/opf', { solver, constraints, check_consistency: checkConsistency });
-    if (data) {
-      data._constraints = constraints;
-      const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
-      if (data.converged) {
-        log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
-        setStatus('最优潮流收敛', '');
-      } else {
-        log(`最优潮流未收敛 [${solver}${backendTag}]: ${data.status || ''}`, 'warn');
-        setStatus('未收敛', 'error');
+      // Sync canvas to backend first so the OPF runs against the current edits.
+      if (!await syncToBackend()) {
+        setStatus('同步失败', 'error');
+        return null;
       }
-      // Surface the OPF↔PF consistency verdict in the activity log too.
-      if (data.consistency && data.consistency.ran) {
-        const c = data.consistency;
-        if (!c.pf_converged) {
-          log('一致性校验: OPF后潮流未收敛，无法校验', 'warn');
-        } else if (c.consistent) {
-          log(`一致性校验通过: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu, max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°`, 'success');
+
+      if (!await waitForBackendIdle()) {
+        setStatus('后端繁忙', 'error');
+        return null;
+      }
+      let resp = await apiPostResult('/api/session/opf',
+        { solver, constraints, check_consistency: checkConsistency });
+      if (!resp.ok && resp.error === ANALYSIS_BUSY_ERROR) {
+        setStatus('等待当前分析完成...', 'busy');
+        if (await waitForBackendIdle()) {
+          resp = await apiPostResult('/api/session/opf',
+            { solver, constraints, check_consistency: checkConsistency },
+            { quiet: true });
+        }
+      }
+      const data = resp.ok ? resp.data : null;
+      if (data) {
+        data._constraints = constraints;
+        const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
+        if (data.converged) {
+          log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
+          setStatus('最优潮流收敛', '');
         } else {
-          log(`一致性校验存在偏差: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu(Bus ${c.max_dvm_bus}), max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°(Bus ${c.max_dva_bus})`, 'warn');
+          log(`最优潮流未收敛 [${solver}${backendTag}]: ${data.status || ''}`, 'warn');
+          setStatus('未收敛', 'error');
         }
+        // Surface the OPF↔PF consistency verdict in the activity log too.
+        if (data.consistency && data.consistency.ran) {
+          const c = data.consistency;
+          if (!c.pf_converged) {
+            log('一致性校验: OPF后潮流未收敛，无法校验', 'warn');
+          } else if (c.consistent) {
+            log(`一致性校验通过: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu, max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°`, 'success');
+          } else {
+            log(`一致性校验存在偏差: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu(Bus ${c.max_dvm_bus}), max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°(Bus ${c.max_dva_bus})`, 'warn');
+          }
+        }
+        _lastOpfData = data;
+        // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
+        // the power-flow voltage overlay. The OPF endpoint now also emits the
+        // post-OPF terminal flows, so wire them into the same canonical fields the
+        // PF overlay/tables already consume.
+        if (data.post_pf) {
+          const pf = data.post_pf;
+          if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
+          if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
+          if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
+          [
+            'geo_buses',
+            'geo_ac_branches',
+            'geo_dc_branches',
+            'geo_vsc',
+            'geo_dcdc',
+            'geo_trafo3w',
+            'geo_gen',
+            'geo_er',
+            'component_results',
+            'dc_storage_results',
+            'ac_switch_flows',
+            'ac_circuit_breaker_flows',
+            'dc_circuit_breaker_flows',
+          ].forEach(key => {
+            if (Array.isArray(pf[key])) data[key] = pf[key];
+          });
+          if (pf.power_balance_diagnostics && typeof pf.power_balance_diagnostics === 'object') {
+            data.power_balance_diagnostics = pf.power_balance_diagnostics;
+          }
+          if (Array.isArray(pf.branch_flows)) {
+            data.branch_flows = pf.branch_flows;
+            if (!Array.isArray(pf.geo_ac_branches) || !pf.geo_ac_branches.length) data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
+              index: b.index ?? i,
+              from: b.from_bus ?? b.from,
+              to: b.to_bus ?? b.to,
+              from_bus: b.from_bus ?? b.from,
+              to_bus: b.to_bus ?? b.to,
+              pf_mw: b.pf_mw, pt_mw: b.pt_mw,
+              qf_mvar: b.qf_mvar, qt_mvar: b.qt_mvar,
+              loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
+              loading_pct: b.loading_pct || 0,
+              rate_mva: b.rate_mva || 0,
+            }));
+          }
+          if (Array.isArray(pf.dc_branch_flows)) {
+            data.dc_branch_flows = pf.dc_branch_flows;
+            if (!Array.isArray(pf.geo_dc_branches) || !pf.geo_dc_branches.length) data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
+              index: b.index ?? i,
+              from: b.from_bus ?? b.from,
+              to: b.to_bus ?? b.to,
+              from_bus: b.from_bus ?? b.from,
+              to_bus: b.to_bus ?? b.to,
+              pf_mw: b.pf_mw, pt_mw: b.pt_mw,
+              loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
+              loading_pct: b.loading_pct || 0,
+              rate_mva: b.rate_mva || 0,
+            }));
+          }
+          if (Array.isArray(pf.vsc_transfers)) {
+            data.vsc_transfers = pf.vsc_transfers;
+            if (!Array.isArray(pf.geo_vsc) || !pf.geo_vsc.length) data.geo_vsc = pf.vsc_transfers;
+          }
+          if (Array.isArray(pf.dcdc_transfers)) {
+            data.dcdc_transfers = pf.dcdc_transfers;
+            if (!Array.isArray(pf.geo_dcdc) || !pf.geo_dcdc.length) data.geo_dcdc = pf.dcdc_transfers;
+          }
+        }
+        normalizePowerFlowResult(data);
+        if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
+        showOpfResults(data);
+        switchTab('results');
+      } else {
+        if (resp.error) log(`最优潮流计算失败: ${resp.error}`, 'error');
+        setStatus('计算失败', 'error');
       }
-      _lastOpfData = data;
-      // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
-      // the power-flow voltage overlay. The OPF endpoint now also emits the
-      // post-OPF terminal flows, so wire them into the same canonical fields the
-      // PF overlay/tables already consume.
-      if (data.post_pf) {
-        const pf = data.post_pf;
-        if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
-        if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
-        if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
-        if (Array.isArray(pf.branch_flows)) {
-          data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
-            index: b.index ?? i,
-            from: b.from_bus ?? b.from,
-            to: b.to_bus ?? b.to,
-            from_bus: b.from_bus ?? b.from,
-            to_bus: b.to_bus ?? b.to,
-            pf_mw: b.pf_mw, pt_mw: b.pt_mw,
-            qf_mvar: b.qf_mvar, qt_mvar: b.qt_mvar,
-            loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
-            loading_pct: b.loading_pct || 0,
-            rate_mva: b.rate_mva || 0,
-          }));
-        }
-        if (Array.isArray(pf.dc_branch_flows)) {
-          data.dc_branch_flows = pf.dc_branch_flows;
-          data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
-            index: b.index ?? i,
-            from: b.from_bus ?? b.from,
-            to: b.to_bus ?? b.to,
-            from_bus: b.from_bus ?? b.from,
-            to_bus: b.to_bus ?? b.to,
-            pf_mw: b.pf_mw, pt_mw: b.pt_mw,
-            loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
-            loading_pct: b.loading_pct || 0,
-            rate_mva: b.rate_mva || 0,
-          }));
-        }
-        if (Array.isArray(pf.vsc_transfers)) {
-          data.vsc_transfers = pf.vsc_transfers;
-          data.geo_vsc = pf.vsc_transfers;
-        }
-        if (Array.isArray(pf.dcdc_transfers)) {
-          data.dcdc_transfers = pf.dcdc_transfers;
-          data.geo_dcdc = pf.dcdc_transfers;
-        }
-      }
-      normalizePowerFlowResult(data);
-      if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
-      showOpfResults(data);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
-    }
+      return data;
+    });
   }
 
   // Render the optimal-power-flow result tables: summary, the enforced
@@ -1925,18 +2096,11 @@ const App = (() => {
     const req = data._constraints || {};
     // Bus/component map so OPF result rows pan to the matching canvas component
     // when clicked, exactly like the power-flow and carbon-flow result tables.
-    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
-      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
-    const panAttr = (compId) => compId !== undefined
-      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-    // Generator / converter maps are keyed by component index, which is 1-based
-    // for imported cases (MATPOWER) but 0-based for components drawn from
-    // scratch. Detect the base once so position-ordered OPF result rows resolve
-    // to the right component either way.
-    const keyBase = (m) => (m && m[0] !== undefined) ? 0 : 1;
-    const genBase = keyBase(busMap.gen);
-    const vscBase = keyBase(busMap.vsc);
-    const dcdcBase = keyBase(busMap.dcdcConverter);
+	    const busMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap)
+	      ? Canvas.getCompBusMap() : { ac: {}, dc: {}, gen: {}, vsc: {} };
+	    const panAttr = (compId) => compId !== undefined
+	      ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
+	    const attrForRow = (row, fallbackCompId) => panAttr(rowCanvasCompId(row, busMap) ?? fallbackCompId);
 
     // Summary
     const sumDiv = document.getElementById('opfSummary');
@@ -1977,18 +2141,29 @@ const App = (() => {
     }
 
     // Generator dispatch
-    const genDiv = document.getElementById('opfGenResults');
-    if (genDiv) {
-      const pg = data.pg_mw || [];
-      const qg = data.qg_mvar || [];
-      if (pg.length) {
-        let html = '<table><thead><tr><th>#</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
-        pg.forEach((p, i) => {
-          const attr = panAttr(busMap.gen ? busMap.gen[i + genBase] : undefined);
-          html += `<tr${attr}><td>${i + 1}</td><td>${fmt(p)}</td><td>${fmt(qg[i])}</td></tr>`;
-        });
-        html += '</tbody></table>';
-        genDiv.innerHTML = html;
+	    const genDiv = document.getElementById('opfGenResults');
+	    if (genDiv) {
+	      const pg = data.pg_mw || [];
+	      const qg = data.qg_mvar || [];
+	      const genRows = Array.isArray(data.geo_gen) && data.geo_gen.length
+	        ? data.geo_gen
+	        : Array.isArray(data.generator_dispatch) && data.generator_dispatch.length
+	        ? data.generator_dispatch
+	        : pg.map((p, i) => {
+	            const item = SYS?.ac?.generators?.[i] || {};
+	            return { position: i, index: item.index ?? i, name: item.name, bus: item.bus,
+	              pg_mw: p, qg_mvar: qg[i], canvas_type: 'gen', canvas_index: item.index ?? i };
+	          });
+	      if (genRows.length) {
+	        let html = '<table><thead><tr><th>发电机</th><th>Bus</th><th>Pg(MW)</th><th>Qg(MVar)</th></tr></thead><tbody>';
+	        genRows.forEach((g, i) => {
+	          const p = g.pg_mw ?? pg[i];
+	          const q = g.qg_mvar ?? qg[i];
+	          const label = g.name || (g.index != null ? `#${g.index}` : `pos ${g.position ?? i}`);
+	          html += `<tr${attrForRow(g)}><td>${escapeHtml(label)}</td><td>${g.bus ?? '-'}</td><td>${fmt(p)}</td><td>${fmt(q)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	        genDiv.innerHTML = html;
       } else {
         genDiv.innerHTML = '<p class="empty-hint">无发电机出力数据</p>';
       }
@@ -1998,88 +2173,104 @@ const App = (() => {
     // matches the canvas flow overlay, including converter losses/signs.
     const convSec = document.getElementById('opfConvSection');
     const convDiv = document.getElementById('opfConvResults');
-    const pac = data.pac_mw || [];
-    const qac = data.qac_mvar || [];
-    const pdcdc = data.pdcdc_mw || [];
-    const postVsc = data.post_pf?.vsc_transfers || data.vsc_transfers || [];
-    const postDcdc = data.post_pf?.dcdc_transfers || data.dcdc_transfers || [];
-    if (convSec && convDiv && (pac.length || postVsc.length || pdcdc.length || postDcdc.length)) {
-      convSec.style.display = '';
-      let html = '';
-      if (pac.length || postVsc.length) {
-        const n = Math.max(pac.length, postVsc.length);
-        html += '<table><thead><tr><th>VSC#</th><th>AC Bus</th><th>DC Bus</th><th>Pac(MW)</th><th>Qac(MVar)</th><th>Pdc(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
-        for (let i = 0; i < n; i++) {
-          const v = postVsc[i] || {};
-          const idx = v.index ?? (i + 1);
-          const attr = panAttr(busMap.vsc ? (busMap.vsc[idx] ?? busMap.vsc[i + vscBase]) : undefined);
-          html += `<tr${attr}><td>${idx}</td><td>${v.bus_ac ?? '-'}</td><td>${v.bus_dc ?? '-'}</td>` +
-                  `<td>${fmt(v.p_ac_mw ?? pac[i])}</td><td>${fmt(v.q_ac_mvar ?? qac[i])}</td>` +
-                  `<td>${fmt(v.p_dc_mw)}</td><td>${fmt(v.loss_mw)}</td></tr>`;
-        }
-        html += '</tbody></table>';
-      }
-      if (pdcdc.length || postDcdc.length) {
-        const n = Math.max(pdcdc.length, postDcdc.length);
-        html += '<table style="margin-top:8px"><thead><tr><th>DC/DC#</th><th>Bus In</th><th>Bus Out</th><th>OPF P(MW)</th><th>Pin(MW)</th><th>Pout(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
-        for (let i = 0; i < n; i++) {
-          const d = postDcdc[i] || {};
-          const idx = d.index ?? (i + 1);
-          const attr = panAttr(busMap.dcdcConverter ? (busMap.dcdcConverter[idx] ?? busMap.dcdcConverter[i + dcdcBase]) : undefined);
-          html += `<tr${attr}><td>${idx}</td><td>${d.bus_in ?? '-'}</td><td>${d.bus_out ?? '-'}</td>` +
-                  `<td>${fmt(pdcdc[i])}</td><td>${fmt(d.p_in_mw)}</td><td>${fmt(d.p_out_mw)}</td><td>${fmt(d.loss_mw)}</td></tr>`;
-        }
-        html += '</tbody></table>';
-      }
+	    const pac = data.pac_mw || [];
+	    const qac = data.qac_mvar || [];
+	    const pdcdc = data.pdcdc_mw || [];
+	    const vscRows = Array.isArray(data.vsc_dispatch) ? data.vsc_dispatch : [];
+	    const dcdcRows = Array.isArray(data.dcdc_dispatch) ? data.dcdc_dispatch : [];
+	    const postVsc = data.post_pf?.vsc_transfers || data.vsc_transfers || [];
+	    const postDcdc = data.post_pf?.dcdc_transfers || data.dcdc_transfers || [];
+	    if (convSec && convDiv && (pac.length || postVsc.length || vscRows.length || pdcdc.length || postDcdc.length || dcdcRows.length)) {
+	      convSec.style.display = '';
+	      let html = '';
+	      if (pac.length || postVsc.length || vscRows.length) {
+	        const n = Math.max(pac.length, postVsc.length, vscRows.length);
+	        html += '<table><thead><tr><th>VSC</th><th>AC Bus</th><th>DC Bus</th><th>Pac(MW)</th><th>Qac(MVar)</th><th>Pdc(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
+	        for (let i = 0; i < n; i++) {
+	          const row = vscRows[i] || {};
+	          const v = postVsc[i] || {};
+	          const merged = { ...row, ...v, canvas_type: row.canvas_type || 'vsc', canvas_index: row.canvas_index ?? v.index ?? row.index };
+	          const label = row.name || (merged.index != null ? `#${merged.index}` : `pos ${i}`);
+	          html += `<tr${attrForRow(merged)}><td>${escapeHtml(label)}</td><td>${merged.bus_ac ?? '-'}</td><td>${merged.bus_dc ?? '-'}</td>` +
+	                  `<td>${fmt(v.p_ac_mw ?? row.pac_mw ?? pac[i])}</td><td>${fmt(v.q_ac_mvar ?? row.qac_mvar ?? qac[i])}</td>` +
+	                  `<td>${fmt(v.p_dc_mw)}</td><td>${fmt(v.loss_mw)}</td></tr>`;
+	        }
+	        html += '</tbody></table>';
+	      }
+	      if (pdcdc.length || postDcdc.length || dcdcRows.length) {
+	        const n = Math.max(pdcdc.length, postDcdc.length, dcdcRows.length);
+	        html += '<table style="margin-top:8px"><thead><tr><th>DC/DC</th><th>Bus In</th><th>Bus Out</th><th>OPF P(MW)</th><th>Pin(MW)</th><th>Pout(MW)</th><th>Loss(MW)</th></tr></thead><tbody>';
+	        for (let i = 0; i < n; i++) {
+	          const row = dcdcRows[i] || {};
+	          const d = postDcdc[i] || {};
+	          const merged = { ...row, ...d, canvas_type: row.canvas_type || 'dcdcConverter', canvas_index: row.canvas_index ?? d.index ?? row.index };
+	          const label = row.name || (merged.index != null ? `#${merged.index}` : `pos ${i}`);
+	          html += `<tr${attrForRow(merged)}><td>${escapeHtml(label)}</td><td>${merged.bus_in ?? '-'}</td><td>${merged.bus_out ?? '-'}</td>` +
+	                  `<td>${fmt(row.pdcdc_mw ?? pdcdc[i])}</td><td>${fmt(d.p_in_mw)}</td><td>${fmt(d.p_out_mw)}</td><td>${fmt(d.loss_mw)}</td></tr>`;
+	        }
+	        html += '</tbody></table>';
+	      }
       convDiv.innerHTML = html || '<p class="empty-hint">无换流器出力数据</p>';
     } else if (convSec) {
       convSec.style.display = 'none';
     }
 
     // DC bus voltages — only for hybrid AC/DC cases.
-    const dcSec = document.getElementById('opfDcBusSection');
-    const dcDiv = document.getElementById('opfDcBusResults');
-    const vdc = data.vdc || [];
-    if (dcSec && dcDiv && vdc.length) {
-      dcSec.style.display = '';
-      const dcBusIdAt = (i) => {
-        const id = SYS?.dc?.buses?.[i]?.index;
-        return id !== undefined && id !== null ? Number(id) : null;
-      };
-      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
-      vdc.forEach((v, i) => {
-        const busId = dcBusIdAt(i);
-        const attr = panAttr(busId != null && busMap.dc ? busMap.dc[busId] : undefined);
-        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td>${fmt(v, 6)}</td></tr>`;
-      });
-      html += '</tbody></table>';
-      dcDiv.innerHTML = html;
+	    const dcSec = document.getElementById('opfDcBusSection');
+	    const dcDiv = document.getElementById('opfDcBusResults');
+	    const vdc = data.vdc || [];
+	    const dcRows = Array.isArray(data.dc_bus_results) && data.dc_bus_results.length
+	      ? data.dc_bus_results
+	      : vdc.map((v, i) => {
+	          const busId = SYS?.dc?.buses?.[i]?.index;
+	          return { position: i, index: busId ?? i, vdc_pu: v, canvas_type: 'dc', canvas_index: busId ?? i };
+	        });
+	    if (dcSec && dcDiv && dcRows.length) {
+	      dcSec.style.display = '';
+	      let html = '<table><thead><tr><th>DC Bus</th><th>Vdc(pu)</th></tr></thead><tbody>';
+	      dcRows.forEach((row, i) => {
+	        const busId = row.index ?? row.canvas_index;
+	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td><td>${fmt(row.vdc_pu ?? vdc[i], 6)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      dcDiv.innerHTML = html;
     } else if (dcSec) {
       dcSec.style.display = 'none';
     }
 
-    // AC bus voltages and locational marginal prices.
-    const busDiv = document.getElementById('opfBusResults');
-    const vm = data.vm || [];
-    if (busDiv && vm.length) {
-      const va = data.va || [];
-      const lmpP = data.lmp_p || [];
-      const lmpQ = data.lmp_q || [];
-      const hasLmp = lmpP.length > 0;
-      const acBusIdAt = (i) => {
-        const id = SYS?.ac?.buses?.[i]?.index;
-        return id !== undefined && id !== null ? Number(id) : null;
-      };
-      let html = `<table><thead><tr><th>Bus</th><th>Vm(pu)</th><th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
-      vm.forEach((v, i) => {
-        const busId = acBusIdAt(i);
-        const ang = va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0';
-        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
-        const attr = panAttr(busId != null && busMap.ac ? busMap.ac[busId] : undefined);
-        html += `<tr${attr}><td>${busId ?? `pos ${i}`}</td><td style="${color}">${fmt(v, 6)}</td><td>${ang}</td>${hasLmp ? `<td>${fmt(lmpP[i])}</td><td>${fmt(lmpQ[i])}</td>` : ''}</tr>`;
-      });
-      html += '</tbody></table>';
-      busDiv.innerHTML = html;
+    renderAllPowerFlowComponentStatus(data, busMap, {
+      sectionId: 'opfAllComponentsSection',
+      resultsId: 'opfAllComponentsResults',
+    });
+
+	    // AC bus voltages and locational marginal prices.
+	    const busDiv = document.getElementById('opfBusResults');
+	    const vm = data.vm || [];
+	    const acRows = Array.isArray(data.ac_bus_results) && data.ac_bus_results.length
+	      ? data.ac_bus_results
+	      : vm.map((v, i) => {
+	          const busId = SYS?.ac?.buses?.[i]?.index;
+	          return { position: i, index: busId ?? i, vm_pu: v, va_rad: data.va?.[i],
+	            lmp_p: data.lmp_p?.[i] ?? data.lmp?.[i], lmp_q: data.lmp_q?.[i],
+	            canvas_type: 'ac', canvas_index: busId ?? i };
+	        });
+	    if (busDiv && acRows.length) {
+	      const va = data.va || [];
+	      const lmpP = data.lmp_p || [];
+	      const lmpQ = data.lmp_q || [];
+	      const hasLmp = acRows.some(r => r.lmp_p != null) || lmpP.length > 0 || Array.isArray(data.lmp);
+	      const hasVm = acRows.some(r => r.vm_pu != null) || vm.length > 0;
+	      let html = `<table><thead><tr><th>Bus</th>${hasVm ? '<th>Vm(pu)</th>' : ''}<th>Va(°)</th>${hasLmp ? '<th>LMP-P</th><th>LMP-Q</th>' : ''}</tr></thead><tbody>`;
+	      acRows.forEach((row, i) => {
+	        const busId = row.index ?? row.canvas_index;
+	        const v = row.vm_pu ?? vm[i];
+	        const ang = row.va_rad != null ? (row.va_rad * 180 / Math.PI).toFixed(4)
+	          : (va[i] != null ? (va[i] * 180 / Math.PI).toFixed(4) : '0');
+	        const color = v < 0.95 ? 'color:#e06c75' : v > 1.05 ? 'color:#d19a66' : '';
+	        html += `<tr${attrForRow(row)}><td>${busId ?? `pos ${row.position ?? i}`}</td>${hasVm ? `<td style="${color}">${fmt(v, 6)}</td>` : ''}<td>${ang}</td>${hasLmp ? `<td>${fmt(row.lmp_p ?? lmpP[i] ?? data.lmp?.[i])}</td><td>${fmt(row.lmp_q ?? lmpQ[i])}</td>` : ''}</tr>`;
+	      });
+	      html += '</tbody></table>';
+	      busDiv.innerHTML = html;
     } else if (busDiv) {
       busDiv.innerHTML = '<p class="empty-hint">无AC节点电压数据</p>';
     }
@@ -2128,26 +2319,36 @@ const App = (() => {
       ccSec.style.display = 'none';
     }
 
-    // ── Post-OPF power flow (潮流) at the OPF dispatch ──
-    const postPfSec = document.getElementById('opfPostPfSection');
-    const postPfDiv = document.getElementById('opfPostPfResults');
-    const postPf = data.post_pf;
-    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
-      postPfSec.style.display = '';
-      const busMapAc = busMap.ac || {};
-      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
-      postPf.branch_flows.forEach(b => {
-        const ld = b.loading_pct || 0;
-        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
-        const attr = panAttr(busMapAc[b.from_bus]);
-        html += `<tr${attr}><td>${b.from_bus}→${b.to_bus}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
-      });
-      html += '</tbody></table>';
-      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
-      postPfDiv.innerHTML = html;
-    } else if (postPfSec) {
-      postPfSec.style.display = 'none';
-    }
+	    // ── Post-OPF power flow (潮流) at the OPF dispatch ──
+	    const postPfSec = document.getElementById('opfPostPfSection');
+	    const postPfDiv = document.getElementById('opfPostPfResults');
+	    const postPf = data.post_pf;
+	    const dcOpfBranches = Array.isArray(data.dc_opf_branch_dispatch) ? data.dc_opf_branch_dispatch : [];
+	    if (postPfSec && postPfDiv && postPf && Array.isArray(postPf.branch_flows) && postPf.branch_flows.length) {
+	      postPfSec.style.display = '';
+	      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Q_from(MVar)</th><th>P_to(MW)</th><th>负载率(%)</th></tr></thead><tbody>';
+	      postPf.branch_flows.forEach(b => {
+	        const ld = b.loading_pct || 0;
+	        const color = ld > 100 ? 'color:#e06c75' : ld > 80 ? 'color:#d19a66' : '';
+	        const row = { ...b, canvas_type: b.canvas_type || 'branch', canvas_index: b.canvas_index ?? b.index };
+	        const label = b.name || (b.index != null ? `#${b.index} ${b.from_bus}→${b.to_bus}` : `${b.from_bus}→${b.to_bus}`);
+	        html += `<tr${attrForRow(row)}><td>${escapeHtml(label)}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.qf_mvar)}</td><td>${fmt(b.pt_mw)}</td><td style="${color}">${fmt(ld, 1)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      html += '<p class="empty-hint" style="margin-top:6px">提示：使用画布上方的「可视化」下拉(潮流/热力图)可在 OPF 解上叠加支路潮流与负载率热力图。</p>';
+	      postPfDiv.innerHTML = html;
+	    } else if (postPfSec && postPfDiv && dcOpfBranches.length) {
+	      postPfSec.style.display = '';
+	      let html = '<table><thead><tr><th>支路</th><th>P_from(MW)</th><th>Rate(MVA)</th></tr></thead><tbody>';
+	      dcOpfBranches.forEach((b, i) => {
+	        const label = b.name || (b.index != null ? `#${b.index} ${b.from_bus}→${b.to_bus}` : `pos ${b.position ?? i}`);
+	        html += `<tr${attrForRow(b)}><td>${escapeHtml(label)}</td><td>${fmt(b.pf_mw)}</td><td>${fmt(b.rate_mva)}</td></tr>`;
+	      });
+	      html += '</tbody></table>';
+	      postPfDiv.innerHTML = html;
+	    } else if (postPfSec) {
+	      postPfSec.style.display = 'none';
+	    }
 
     // ── Post-OPF carbon flow (碳流) at the OPF dispatch ──
     const postCbSec = document.getElementById('opfPostCarbonSection');
@@ -2206,6 +2407,7 @@ const App = (() => {
 
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
     const faultType = document.getElementById('scFaultType').value;
+    const calcType = document.getElementById('scCalcType')?.value || 'Max';
     const cFactor = parseFloat(document.getElementById('scCFactor').value);
 
     // Blank fault bus → short circuit at every bus (overview mode).
@@ -2213,6 +2415,7 @@ const App = (() => {
       const data = await apiPost('/api/session/sc', {
         options: {
           fault_type: faultType,
+          calc_type: calcType,
           c_factor: cFactor,
           compute_all_buses: true,
         }
@@ -2241,6 +2444,7 @@ const App = (() => {
     const resp = await apiPostResult('/api/session/sc_detailed', {
       fault_bus_ids: [faultBus],
       fault_type: faultType,
+      calc_type: calcType,
       c_factor: cFactor,
     });
 
@@ -3387,10 +3591,10 @@ const App = (() => {
     return undefined;
   }
 
-  function renderAllPowerFlowComponentStatus(data, busMap) {
+  function renderAllPowerFlowComponentStatus(data, busMap, options = {}) {
     data = normalizePowerFlowResult(data);
-    const section = document.getElementById('pfAllComponentsSection');
-    const div = document.getElementById('pfAllComponentsResults');
+    const section = document.getElementById(options.sectionId || 'pfAllComponentsSection');
+    const div = document.getElementById(options.resultsId || 'pfAllComponentsResults');
     if (!section || !div) return;
 
     const components = (typeof Canvas !== 'undefined' && Canvas.state && Array.isArray(Canvas.state.components))
@@ -6260,6 +6464,10 @@ const App = (() => {
       const f = document.getElementById('scFaultType');
       if (f) f.value = e.target.value;
     });
+    document.getElementById('scCalcTypeSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scCalcType');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('voltageCorrectionFactor')?.addEventListener('change', (e) => {
       const f = document.getElementById('scCFactor');
       if (f) f.value = e.target.value;
@@ -6267,8 +6475,10 @@ const App = (() => {
     document.getElementById('btnRunShortCircuit')?.addEventListener('click', () => {
       // Mirror sub-toolbar values into legacy dialog inputs, then run.
       const ft = document.getElementById('faultTypeSelect')?.value;
+      const ct = document.getElementById('scCalcTypeSelect')?.value;
       const cf = document.getElementById('voltageCorrectionFactor')?.value;
       if (ft) document.getElementById('scFaultType').value = ft;
+      if (ct) document.getElementById('scCalcType').value = ct;
       if (cf) document.getElementById('scCFactor').value = cf;
       runShortCircuit();
     });
@@ -6530,7 +6740,7 @@ const App = (() => {
         html += '<h4 style="margin:10px 0 4px;">负荷碳排放 (Top 20)</h4>';
         html += '<table><thead><tr><th>负荷</th><th>母线</th><th>需求(MW)</th><th>碳强度(tCO₂/MWh)</th><th>排放(tCO₂)</th></tr></thead><tbody>';
         loads.slice(0, 20).forEach(l => {
-          html += `<tr${busClickAttr(l.bus, cbBusMap)}><td>${l.load_index ?? '—'}</td><td>${l.bus ?? '—'}</td><td>${nf(l.demand_mw, 3)}</td>`
+          html += `<tr${busClickAttr(l.bus, cbBusMap)}><td>${escapeHtml(carbonLoadLabel(l))}</td><td>${l.bus ?? '—'}</td><td>${nf(positiveDemandMw(l), 3)}</td>`
             + `<td>${nf(l.carbon_intensity_tco2_mwh, 4)}</td><td class="result-value">${nf(l.total_emissions_tco2)}</td></tr>`;
         });
         html += '</tbody></table>';
@@ -8425,6 +8635,9 @@ const App = (() => {
     setActiveCanvasTool,
     showCaseLoadModal,
     hideCaseLoadModal,
+    loadMatpowerCase,
+    runPowerFlow,
+    runOpf,
   };
 })();
 

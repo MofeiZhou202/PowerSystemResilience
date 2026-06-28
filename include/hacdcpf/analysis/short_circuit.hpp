@@ -92,6 +92,8 @@ struct SCDetailedOptions {
   SCCalcType calc_type{SCCalcType::Max};
   SCKappaMethod kappa_method{SCKappaMethod::B};
   SCTopology topology{SCTopology::Meshed};
+  double c_factor{0.0};                 ///< Optional explicit IEC voltage factor.
+                                        ///  <=0 uses calc_type + nominal voltage.
   double fault_impedance_pu{0.0};
   double breaking_time_s{0.05};
   double base_frequency_hz{50.0};

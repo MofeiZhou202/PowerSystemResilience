@@ -281,30 +281,41 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
   return out;
 }
 
+double dcdc_output_power_from_input_ref_mw(const DCDCConverter& dcdc,
+                                           double p_in_mw) {
+  const double eta = std::clamp(dcdc.eta, 0.01, 1.0);
+  return (p_in_mw >= 0.0) ? (p_in_mw * eta) : (p_in_mw / eta);
+}
+
 DCDCDutyResult dcdc_duty_ratio(const DCDCConverter& dcdc, double v_in, double v_out) {
   DCDCDutyResult r;
   // Generic topology imposes no duty-ratio law -> nothing to evaluate.
   if (dcdc.topology == DCDCTopology::Generic) return r;
   if (!(v_in > 1e-9) || !(v_out > 1e-9)) return r;  // undefined for non-positive Vdc
-  r.voltage_ratio = v_out / v_in;
+  const double vn_in = (dcdc.vn_in_kv > 1e-9) ? dcdc.vn_in_kv : 1.0;
+  const double vn_out = (dcdc.vn_out_kv > 1e-9) ? dcdc.vn_out_kv : 1.0;
+  const double vin_abs = v_in * vn_in;
+  const double vout_abs = v_out * vn_out;
+  if (!(vin_abs > 1e-9) || !(vout_abs > 1e-9)) return r;
+  r.voltage_ratio = vout_abs / vin_abs;
   r.defined = true;
   switch (dcdc.topology) {
     case DCDCTopology::Buck:
       // Ideal CCM Buck: Vout = D·Vin (step-down, D in (0,1]).
-      r.duty = v_out / v_in;
+      r.duty = vout_abs / vin_abs;
       break;
     case DCDCTopology::Boost:
       // Ideal CCM Boost: Vout = Vin/(1-D) (step-up).
-      r.duty = 1.0 - v_in / v_out;
+      r.duty = 1.0 - vin_abs / vout_abs;
       break;
     case DCDCTopology::BuckBoost:
       // Non-inverting Buck-Boost: Vout/Vin = D/(1-D).
-      r.duty = v_out / (v_in + v_out);
+      r.duty = vout_abs / (vin_abs + vout_abs);
       break;
     case DCDCTopology::Isolated: {
       // Isolated: Vout = n·M(D)·Vin -> report the modulation gain M.
       const double n = (std::abs(dcdc.n_ratio) > 1e-9) ? dcdc.n_ratio : 1.0;
-      r.duty = v_out / (n * v_in);
+      r.duty = vout_abs / (n * vin_abs);
       break;
     }
     default:

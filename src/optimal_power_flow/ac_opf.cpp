@@ -2131,6 +2131,26 @@ ACOPFResult solve_with_parity_ipm(const HybridPowerSystem& sys, const ACOPFOptio
         out.flex_map[ku].source_type    = 0;
       }
     }
+    if (vidx.n_erp > 0) {
+      const size_t ner = static_cast<size_t>(vidx.n_erp);
+      out.er_port_p_mw.assign(ner, 0.0);
+      out.er_port_q_mvar.assign(ner, 0.0);
+      out.er_port_map.resize(ner);
+      for (const auto& port : prob.er_ports) {
+        if (port.pvar < 0 || port.pvar >= vidx.n_erp) continue;
+        const size_t ku = static_cast<size_t>(port.pvar);
+        out.er_port_p_mw[ku] =
+            ipm_res.x[vidx.i_erp + port.pvar] * prob.data.base_mva;
+        if (port.qvar >= 0 && port.qvar < vidx.n_erq) {
+          out.er_port_q_mvar[ku] =
+              ipm_res.x[vidx.i_erq + port.qvar] * prob.data.base_mva;
+        }
+        const auto& er = prob.data.energy_routers[static_cast<size_t>(port.router_idx)];
+        const auto& er_port = er.ports[static_cast<size_t>(port.port_idx)];
+        out.er_port_map[ku].original_index = er.index;
+        out.er_port_map[ku].source_type = er_port.index;
+      }
+    }
 
     out.objective = parity::objective(prob, ipm_res.x);
 

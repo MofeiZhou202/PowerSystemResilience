@@ -30,7 +30,9 @@
 #include "hacdcpf/analysis/short_circuit.hpp"
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
+#include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/distribution_power_flow.hpp"
+#include "hacdcpf/power_flow/newton_solver.hpp"
 #include "hacdcpf/assembly/solver_data.hpp"
 #include "hacdcpf/power_flow/assembly/branch_flow.hpp"
 #include "hacdcpf/projection/project_to_canonical.hpp"
@@ -60,6 +62,794 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
+
+std::string sc_fault_type_name(hacdcpf::analysis::FaultType ft) {
+  switch (ft) {
+    case hacdcpf::analysis::FaultType::ThreePhase: return "ThreePhase";
+    case hacdcpf::analysis::FaultType::SinglePhaseGround: return "SinglePhaseGround";
+    case hacdcpf::analysis::FaultType::TwoPhase: return "TwoPhase";
+    case hacdcpf::analysis::FaultType::TwoPhaseGround: return "TwoPhaseGround";
+  }
+  return "ThreePhase";
+}
+
+std::string sc_calc_type_name(hacdcpf::analysis::SCCalcType ct) {
+  return ct == hacdcpf::analysis::SCCalcType::Min ? "Min" : "Max";
+}
+
+void apply_sc_request_options(const json& root,
+                              hacdcpf::analysis::SCDetailedOptions& opt) {
+  const json* o = &root;
+  if (root.contains("options") && root["options"].is_object()) {
+    o = &root["options"];
+  }
+
+  const std::string ft = o->value("fault_type", std::string("ThreePhase"));
+  if (ft == "SinglePhaseGround") opt.fault_type = hacdcpf::analysis::FaultType::SinglePhaseGround;
+  else if (ft == "TwoPhase") opt.fault_type = hacdcpf::analysis::FaultType::TwoPhase;
+  else if (ft == "TwoPhaseGround") opt.fault_type = hacdcpf::analysis::FaultType::TwoPhaseGround;
+  else opt.fault_type = hacdcpf::analysis::FaultType::ThreePhase;
+
+  const std::string calc = o->value("calc_type", o->value("calculation_type", std::string("Max")));
+  if (calc == "Min" || calc == "min" || calc == "Minimum" || calc == "minimum") {
+    opt.calc_type = hacdcpf::analysis::SCCalcType::Min;
+  } else {
+    opt.calc_type = hacdcpf::analysis::SCCalcType::Max;
+  }
+
+  if (o->contains("c_factor") && (*o)["c_factor"].is_number()) {
+    opt.c_factor = (*o)["c_factor"].get<double>();
+  }
+  if (o->contains("fault_impedance_pu") && (*o)["fault_impedance_pu"].is_number()) {
+    opt.fault_impedance_pu = (*o)["fault_impedance_pu"].get<double>();
+  }
+  if (o->contains("breaking_time_s") && (*o)["breaking_time_s"].is_number()) {
+    opt.breaking_time_s = (*o)["breaking_time_s"].get<double>();
+  }
+  if (o->contains("ith_duration_s") && (*o)["ith_duration_s"].is_number()) {
+    opt.ith_duration_s = (*o)["ith_duration_s"].get<double>();
+  }
+}
+
+void apply_replay_zip_and_solver_flags(hacdcpf::powerflow::SolverData& data,
+                                       const hacdcpf::PowerFlowOptions& opt) {
+  for (int k = 0; k < 3; ++k) {
+    data.zip_pw[k] = opt.zip_pw[k];
+    data.zip_qw[k] = opt.zip_qw[k];
+  }
+  data.enable_coupled_jacobian = opt.enable_coupled_jacobian;
+  data.enable_augmented_equations = opt.enable_augmented_equations;
+  data.enable_semi_smooth_newton = opt.enable_semi_smooth_newton;
+}
+
+void populate_projected_replay_results(const hacdcpf::powerflow::SolverData& data,
+                                       hacdcpf::PowerFlowResult& result,
+                                       hacdcpf::LossModelType loss_model) {
+  result.branch_flows.clear();
+  result.vsc_transfers.clear();
+  result.dcdc_transfers.clear();
+  result.er_port_transfers.clear();
+  if (!result.converged) return;
+
+  result.branch_flows =
+      hacdcpf::powerflow::compute_branch_flows(data, result.vm, result.va);
+
+  Eigen::VectorXd vm =
+      Eigen::VectorXd::Ones(static_cast<Eigen::Index>(result.vm.size()));
+  Eigen::VectorXd va =
+      Eigen::VectorXd::Zero(static_cast<Eigen::Index>(result.va.size()));
+  Eigen::VectorXd vdc =
+      Eigen::VectorXd::Ones(static_cast<Eigen::Index>(result.vdc.size()));
+  for (Eigen::Index i = 0; i < vm.size(); ++i) vm[i] = result.vm[static_cast<size_t>(i)];
+  for (Eigen::Index i = 0; i < va.size(); ++i) va[i] = result.va[static_cast<size_t>(i)];
+  for (Eigen::Index i = 0; i < vdc.size(); ++i) vdc[i] = result.vdc[static_cast<size_t>(i)];
+
+  std::unordered_map<int, int> dc_pos_by_bus;
+  dc_pos_by_bus.reserve(data.dc_buses.size());
+  for (int i = 0; i < static_cast<int>(data.dc_buses.size()); ++i) {
+    dc_pos_by_bus[data.dc_buses[static_cast<size_t>(i)].index] = i;
+  }
+  auto dc_pos = [&](int bus) {
+    const auto it = dc_pos_by_bus.find(bus);
+    return it != dc_pos_by_bus.end() ? it->second : -1;
+  };
+
+  const std::vector<hacdcpf::VSCConverter>& eff_converters =
+      !result.diagnostics.effective_converters.empty()
+          ? result.diagnostics.effective_converters
+          : data.converters;
+  result.vsc_transfers.reserve(eff_converters.size());
+  for (const auto& conv : eff_converters) {
+    if (!conv.in_service) continue;
+    const auto [p_ac_pu, q_ac_pu] =
+        hacdcpf::powerflow::converter_ac_injection(
+            conv, vm, va, vdc, data.base_mva, loss_model);
+    const double p_dc_pu =
+        hacdcpf::powerflow::converter_dc_injection(
+            conv, vm, va, vdc, data.base_mva, loss_model);
+    hacdcpf::VSCTransfer tr;
+    tr.index = conv.index;
+    tr.bus_ac = conv.bus_ac;
+    tr.bus_dc = conv.bus_dc;
+    tr.p_ac_mw = p_ac_pu * data.base_mva;
+    tr.q_ac_mvar = q_ac_pu * data.base_mva;
+    tr.p_dc_mw = p_dc_pu * data.base_mva;
+    tr.loss_mw = -(tr.p_ac_mw + tr.p_dc_mw);
+    result.vsc_transfers.push_back(tr);
+  }
+
+  result.dcdc_transfers.reserve(data.dcdc_converters.size());
+  for (const auto& c : data.dcdc_converters) {
+    if (!c.in_service) continue;
+    const auto xfer =
+        hacdcpf::powerflow::dcdc_power_transfer(c, vdc, data.base_mva);
+    hacdcpf::DCDCTransfer tr;
+    tr.index = c.index;
+    tr.bus_in = c.bus_in;
+    tr.bus_out = c.bus_out;
+    tr.p_in_mw = xfer.p_in_pu * data.base_mva;
+    tr.p_out_mw = xfer.p_out_pu * data.base_mva;
+    tr.loss_mw = tr.p_in_mw - tr.p_out_mw;
+    const int bi = dc_pos(c.bus_in);
+    const int bo = dc_pos(c.bus_out);
+    const double v_in =
+        (bi >= 0 && bi < static_cast<int>(vdc.size()))
+            ? vdc[static_cast<Eigen::Index>(bi)]
+            : 1.0;
+    const double v_out =
+        (bo >= 0 && bo < static_cast<int>(vdc.size()))
+            ? vdc[static_cast<Eigen::Index>(bo)]
+            : 1.0;
+    const auto duty = hacdcpf::powerflow::dcdc_duty_ratio(c, v_in, v_out);
+    tr.duty = duty.duty;
+    tr.voltage_ratio = duty.voltage_ratio;
+    tr.duty_defined = duty.defined;
+    tr.duty_feasible = duty.feasible;
+    result.dcdc_transfers.push_back(tr);
+  }
+
+  for (const auto& er : data.energy_routers) {
+    if (!er.in_service) continue;
+    for (const auto& p : er.ports) {
+      if (!p.in_service) continue;
+      hacdcpf::ERPortTransfer tr;
+      tr.router_index = er.index;
+      tr.port_index = p.index;
+      tr.bus = p.bus;
+      tr.is_ac = (p.port_type == hacdcpf::ERPortType::AC);
+      tr.p_mw = p.p_mw;
+      tr.q_mvar = p.q_mvar;
+      if (tr.is_ac) {
+        const auto it = std::find_if(
+            data.ac_buses.begin(), data.ac_buses.end(),
+            [&](const hacdcpf::ACBus& b) { return b.index == p.bus; });
+        const size_t pos = static_cast<size_t>(std::distance(data.ac_buses.begin(), it));
+        tr.v_pu = (it != data.ac_buses.end() && pos < result.vm.size())
+                      ? result.vm[pos]
+                      : 1.0;
+      } else {
+        const int b = dc_pos(p.bus);
+        tr.v_pu = (b >= 0 && b < static_cast<int>(result.vdc.size()))
+                      ? result.vdc[static_cast<size_t>(b)]
+                      : 1.0;
+      }
+      result.er_port_transfers.push_back(tr);
+    }
+  }
+
+  auto& sc = result.converter_model_scope;
+  sc.model_scope = "steady-state-newton:vsc-3mode+dcdc-power-transfer";
+  sc.validity.vsc_loss_modelled = true;
+  sc.validity.vsc_ac_conduction_loss_modelled = true;
+  sc.validity.vsc_vdc_control_modelled = true;
+  sc.validity.dcdc_loss_modelled = true;
+  sc.validity.dc_multisource_coordination_modelled = true;
+  sc.validity.equation_closure_checked =
+      result.diagnostics.equation_closure_checked;
+}
+
+void unproject_replay_branch_flows(hacdcpf::PowerFlowResult& result,
+                                   const hacdcpf::BusMergeMap& map) {
+  if (map.n_original_branches <= 0 || map.branch_orig_to_proj.empty()) return;
+
+  std::vector<hacdcpf::BranchFlow> out(static_cast<size_t>(map.n_original_branches));
+  for (const auto& [orig_pos, proj_pos] : map.branch_orig_to_proj) {
+    if (orig_pos < 0 || orig_pos >= map.n_original_branches) continue;
+    if (proj_pos < 0 || proj_pos >= static_cast<int>(result.branch_flows.size())) continue;
+    out[static_cast<size_t>(orig_pos)] = result.branch_flows[static_cast<size_t>(proj_pos)];
+  }
+  result.branch_flows = std::move(out);
+}
+
+void unproject_replay_result(hacdcpf::PowerFlowResult& result,
+                             const hacdcpf::BusMergeMap& map) {
+  if (!map.ext_to_int.empty() && map.n_original > 0) {
+    result.vm = hacdcpf::unproject_bus_vector(result.vm, map);
+    result.va = hacdcpf::unproject_bus_vector(result.va, map);
+  }
+  unproject_replay_branch_flows(result, map);
+}
+
+hacdcpf::PowerFlowResult solve_projected_replay_power_flow(
+    hacdcpf::HybridPowerSystem replay_sys,
+    const hacdcpf::PowerFlowOptions& opt = {},
+    hacdcpf::PowerFlowResult* projected_result = nullptr) {
+  auto data = hacdcpf::powerflow::make_solver_data_projected(
+      std::move(replay_sys), opt.loss_model);
+  apply_replay_zip_and_solver_flags(data, opt);
+  hacdcpf::powerflow::NewtonSolver solver;
+  const hacdcpf::InitialState* init_ptr =
+      opt.initial_state ? &*opt.initial_state : nullptr;
+  hacdcpf::PowerFlowResult result = solver.solve(data, opt, init_ptr);
+  populate_projected_replay_results(data, result, opt.loss_model);
+  if (projected_result != nullptr) *projected_result = result;
+  if (data.bus_merge_map) unproject_replay_result(result, *data.bus_merge_map);
+  if (result.converged) {
+    for (const auto& tr : result.dcdc_transfers) {
+      if (tr.duty_defined && !tr.duty_feasible) {
+        result.diagnostics.warnings.push_back(
+            "[DCDC-PHYS-01] DC/DC converter " + std::to_string(tr.index) +
+            " duty ratio " + std::to_string(tr.duty) +
+            " is outside its feasible window (Vout/Vin=" +
+            std::to_string(tr.voltage_ratio) + ").");
+      }
+    }
+  }
+  return result;
+}
+
+json post_power_flow_terminal_flows_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::PowerFlowResult& pf,
+    const std::vector<double>& solved_pg = {},
+    const std::vector<double>& solved_qg = {}) {
+  struct TwoTerminalFlow {
+    double pf_mw{0.0};
+    double pt_mw{0.0};
+    double qf_mvar{0.0};
+    double qt_mvar{0.0};
+    double loading_pct{0.0};
+    double rate_mva{0.0};
+    std::string source{"open"};
+  };
+
+  std::unordered_map<int, double> ac_vm_by_bus, ac_visible_p, ac_visible_q;
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    const auto& b = sys.ac.buses[i];
+    ac_vm_by_bus[b.index] = (i < pf.vm.size()) ? pf.vm[i] : b.vm_pu;
+  }
+  for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+    const auto& br = sys.ac.branches[i];
+    const auto& fl = pf.branch_flows[i];
+    ac_visible_p[br.from_bus] += fl.pf_mw;
+    ac_visible_q[br.from_bus] += fl.qf_mvar;
+    ac_visible_p[br.to_bus] += fl.pt_mw;
+    ac_visible_q[br.to_bus] += fl.qt_mvar;
+  }
+
+  std::unordered_map<int, int> original_vsc_ac_bus;
+  original_vsc_ac_bus.reserve(sys.vsc_converters.size());
+  for (const auto& v : sys.vsc_converters) original_vsc_ac_bus[v.index] = v.bus_ac;
+
+  std::unordered_map<int, double> ac_flow_p = ac_visible_p;
+  std::unordered_map<int, double> ac_flow_q = ac_visible_q;
+  std::unordered_map<int, double> vsc_inj_ac_p, vsc_inj_ac_q;
+  for (const auto& v : pf.vsc_transfers) {
+    const auto it = original_vsc_ac_bus.find(v.index);
+    const int bus = it != original_vsc_ac_bus.end() ? it->second : v.bus_ac;
+    ac_flow_p[bus] -= v.p_ac_mw;
+    ac_flow_q[bus] -= v.q_ac_mvar;
+    vsc_inj_ac_p[bus] += v.p_ac_mw;
+    vsc_inj_ac_q[bus] += v.q_ac_mvar;
+  }
+
+  auto ac_bus_base_kv = [&](int bus) {
+    for (const auto& b : sys.ac.buses) {
+      if (b.index == bus) return b.base_kv;
+    }
+    return 0.0;
+  };
+  auto solved_ac_load = [&](const hacdcpf::Load& ld) {
+    const double vm = ac_vm_by_bus.count(ld.bus) ? ac_vm_by_bus[ld.bus] : 1.0;
+    const double p0 = ld.p_mw * ld.scaling;
+    const double q0 = ld.q_mvar * ld.scaling;
+    if (ld.model != hacdcpf::LoadModel::ZIP) {
+      return std::pair<double, double>{p0, q0};
+    }
+    const double p = p0 * (ld.p_percent_p / 100.0 +
+                           ld.i_percent_p / 100.0 * vm +
+                           ld.z_percent_p / 100.0 * vm * vm);
+    const double q = q0 * (ld.p_percent_q / 100.0 +
+                           ld.i_percent_q / 100.0 * vm +
+                           ld.z_percent_q / 100.0 * vm * vm);
+    return std::pair<double, double>{p, q};
+  };
+
+  std::unordered_map<int, double> ac_non_grid_p, ac_non_grid_q;
+  auto add_ac_injection = [&](int bus, double p, double q) {
+    ac_non_grid_p[bus] += p;
+    ac_non_grid_q[bus] += q;
+  };
+  for (const auto& b : sys.ac.buses) {
+    if (!b.in_service) continue;
+    const double vm = ac_vm_by_bus.count(b.index) ? ac_vm_by_bus[b.index] : b.vm_pu;
+    const double v2 = vm * vm;
+    add_ac_injection(b.index, -b.pd_mw - b.gs_mw * v2, -b.qd_mvar + b.bs_mvar * v2);
+  }
+  for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+    const auto& g = sys.ac.generators[gi];
+    if (!g.in_service) continue;
+    const double pg = gi < solved_pg.size() ? solved_pg[gi] : g.pg_mw;
+    const double qg = gi < solved_qg.size() ? solved_qg[gi] : g.qg_mvar;
+    add_ac_injection(g.bus, pg, qg);
+  }
+  for (const auto& sg : sys.ac.static_generators)
+    if (sg.in_service) add_ac_injection(sg.bus, sg.p_mw * sg.scaling, sg.q_mvar * sg.scaling);
+  for (const auto& rg : sys.ac.renewable_gens)
+    if (rg.in_service) add_ac_injection(rg.bus, rg.p_mw, rg.q_mvar);
+  for (const auto& pv : sys.ac.pv_systems)
+    if (pv.in_service) add_ac_injection(pv.bus, pv.p_mw, pv.q_mvar);
+  for (const auto& st : sys.ac.storage)
+    if (st.in_service) add_ac_injection(st.bus, st.p_mw, st.q_mvar);
+  for (const auto& ld : sys.ac.loads) {
+    if (!ld.in_service) continue;
+    const auto [p_load, q_load] = solved_ac_load(ld);
+    add_ac_injection(ld.bus, -p_load, -q_load);
+  }
+  for (const auto& fl : sys.ac.flexible_loads)
+    if (fl.in_service) add_ac_injection(fl.bus, -fl.p_mw, -fl.q_mvar);
+  for (const auto& al : sys.ac.asymmetric_loads)
+    if (al.in_service)
+      add_ac_injection(al.bus,
+                       -(al.pa_mw + al.pb_mw + al.pc_mw) * al.scaling,
+                       -(al.qa_mvar + al.qb_mvar + al.qc_mvar) * al.scaling);
+  for (const auto& sh : sys.ac.shunts) {
+    if (!sh.in_service) continue;
+    const double vm = ac_vm_by_bus.count(sh.bus) ? ac_vm_by_bus[sh.bus] : 1.0;
+    const double bs = (sh.switchable && sh.n_steps > 0)
+        ? sh.bs_per_step * sh.current_step
+        : sh.bs_mvar;
+    add_ac_injection(sh.bus, -sh.gs_mw * vm * vm, bs * vm * vm);
+  }
+  for (const auto& cs : sys.ac.charging_stations) {
+    if (!cs.in_service) continue;
+    const double p_mw = cs.p_total_kw > 0.0
+        ? cs.p_total_kw / 1000.0
+        : cs.max_power_kw * cs.utilization_rate * cs.simultaneity_factor / 1000.0;
+    add_ac_injection(cs.bus, -p_mw, -cs.q_total_kvar / 1000.0);
+  }
+  for (const auto& m : sys.ac.motors) {
+    if (!m.in_service) continue;
+    const double p_mw = m.efficiency > 1e-9
+        ? m.sn_mva * m.cos_phi / m.efficiency
+        : m.sn_mva * m.cos_phi;
+    const double q_mvar =
+        std::sqrt(std::max(0.0, m.sn_mva * m.sn_mva -
+                                    (m.sn_mva * m.cos_phi) * (m.sn_mva * m.cos_phi)));
+    add_ac_injection(m.bus, -p_mw, -q_mvar);
+  }
+  for (const auto& ms : sys.mobile_storage)
+    if (ms.in_service) add_ac_injection(ms.bus, ms.p_mw, ms.q_mvar);
+  for (const auto& vpp : sys.vpps)
+    if (vpp.in_service) add_ac_injection(vpp.pcc_bus, vpp.p_output_mw, vpp.q_output_mvar);
+  for (const auto& mg : sys.microgrids)
+    if (mg.in_service) add_ac_injection(mg.pcc_bus, -mg.p_exchange_mw, 0.0);
+
+  std::unordered_map<int, int> ext_count_by_bus;
+  for (const auto& eg : sys.ac.external_grids)
+    if (eg.in_service) ++ext_count_by_bus[eg.bus];
+
+  std::unordered_map<int, double> ac_grid_inj_p, ac_grid_inj_q;
+  for (const auto& kv : ext_count_by_bus) {
+    const int bus = kv.first;
+    ac_grid_inj_p[bus] = ac_flow_p[bus] - ac_non_grid_p[bus];
+    ac_grid_inj_q[bus] = ac_flow_q[bus] - ac_non_grid_q[bus];
+  }
+
+  std::unordered_map<int, double> ac_net_export_p, ac_net_export_q;
+  for (const auto& b : sys.ac.buses) {
+    ac_net_export_p[b.index] =
+        ac_non_grid_p[b.index] + ac_grid_inj_p[b.index] + vsc_inj_ac_p[b.index];
+    ac_net_export_q[b.index] =
+        ac_non_grid_q[b.index] + ac_grid_inj_q[b.index] + vsc_inj_ac_q[b.index];
+  }
+
+  auto signed_ac_endpoint_flow = [&](int from, int to, double& p, double& q) {
+    for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+      const auto& br = sys.ac.branches[i];
+      const auto& fl = pf.branch_flows[i];
+      if (br.from_bus == from && br.to_bus == to) {
+        p = fl.pf_mw;
+        q = fl.qf_mvar;
+        return true;
+      }
+      if (br.from_bus == to && br.to_bus == from) {
+        p = fl.pt_mw;
+        q = fl.qt_mvar;
+        return true;
+      }
+    }
+    return false;
+  };
+  auto has_nontrivial_ac_match = [&](int from, int to) {
+    double p = 0.0, q = 0.0;
+    if (!signed_ac_endpoint_flow(from, to, p, q)) return false;
+    return std::hypot(p, q) > 1e-7;
+  };
+  auto derive_ac_terminal_flow = [&](int from, int to, bool closed,
+                                     double rated_current_ka,
+                                     double rated_voltage_kv) {
+    TwoTerminalFlow fl;
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+    fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0
+        ? std::sqrt(3.0) * kv * rated_current_ka
+        : 0.0;
+    if (!closed || from == 0 || to == 0 || from == to) return fl;
+
+    if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+        std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+      fl.pt_mw = -fl.pf_mw;
+      fl.qt_mvar = -fl.qf_mvar;
+      fl.source = "matched_ac_branch";
+    } else {
+      const double p_from = ac_net_export_p[from] - ac_visible_p[from];
+      const double q_from = ac_net_export_q[from] - ac_visible_q[from];
+      const double p_to = ac_net_export_p[to] - ac_visible_p[to];
+      const double q_to = ac_net_export_q[to] - ac_visible_q[to];
+      const double mag_from = std::hypot(p_from, q_from);
+      const double mag_to = std::hypot(p_to, q_to);
+      if (mag_from <= mag_to || mag_to < 1e-12) {
+        fl.pf_mw = p_from;
+        fl.qf_mvar = q_from;
+        fl.pt_mw = -p_from;
+        fl.qt_mvar = -q_from;
+        fl.source = "endpoint_kcl_from";
+      } else {
+        fl.pf_mw = -p_to;
+        fl.qf_mvar = -q_to;
+        fl.pt_mw = p_to;
+        fl.qt_mvar = q_to;
+        fl.source = "endpoint_kcl_to";
+      }
+    }
+    if (fl.rate_mva > 0.0) {
+      fl.loading_pct = 100.0 *
+          std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                   std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+    }
+    return fl;
+  };
+
+  auto flow_json = [](int index, size_t position, int from, int to,
+                      const TwoTerminalFlow& fl, const std::string& source_type) {
+    return json{
+      {"index", index},
+      {"position", static_cast<int>(position)},
+      {"from", from},
+      {"to", to},
+      {"from_bus", from},
+      {"to_bus", to},
+      {"pf_mw", fl.pf_mw},
+      {"pt_mw", fl.pt_mw},
+      {"qf_mvar", fl.qf_mvar},
+      {"qt_mvar", fl.qt_mvar},
+      {"loss_mw", fl.pf_mw + fl.pt_mw},
+      {"loading_pct", fl.loading_pct},
+      {"rate_mva", fl.rate_mva},
+      {"source", fl.source},
+      {"source_type", source_type}
+    };
+  };
+
+  struct ACTerminalEdge {
+    bool is_switch{false};
+    size_t position{0};
+    int from{0};
+    int to{0};
+  };
+  std::vector<TwoTerminalFlow> ac_switch_flow_rows(sys.ac.switches.size());
+  std::vector<TwoTerminalFlow> ac_cb_flow_rows(sys.ac.circuit_breakers.size());
+  std::vector<ACTerminalEdge> ac_terminal_edges;
+  ac_terminal_edges.reserve(sys.ac.switches.size() + sys.ac.circuit_breakers.size());
+
+  auto ac_rate_mva = [&](int from, double rated_current_ka, double rated_voltage_kv) {
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+    return rated_current_ka > 0.0 && kv > 0.0
+        ? std::sqrt(3.0) * kv * rated_current_ka
+        : 0.0;
+  };
+  auto register_ac_terminal = [&](bool is_switch, size_t pos, int from, int to,
+                                  bool closed, double rate_mva) {
+    TwoTerminalFlow& fl = is_switch ? ac_switch_flow_rows[pos] : ac_cb_flow_rows[pos];
+    fl.rate_mva = rate_mva;
+    if (!closed || from == 0 || to == 0 || from == to) return;
+
+    if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+        std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+      fl.pt_mw = -fl.pf_mw;
+      fl.qt_mvar = -fl.qf_mvar;
+      fl.source = "matched_ac_branch";
+      if (fl.rate_mva > 0.0) {
+        fl.loading_pct = 100.0 *
+            std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                     std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+      }
+      return;
+    }
+
+    fl.source = "terminal_kcl_tree";
+    ac_terminal_edges.push_back(ACTerminalEdge{is_switch, pos, from, to});
+  };
+
+  for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    register_ac_terminal(true, i, sw.bus_from, sw.bus_to,
+                         sw.in_service && sw.closed,
+                         ac_rate_mva(sw.bus_from, sw.i_rated_ka, 0.0));
+  }
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    register_ac_terminal(false, i, cb.bus_from, cb.bus_to,
+                         cb.in_service && cb.closed,
+                         ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
+  }
+
+  std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
+  std::set<int> ac_terminal_buses;
+  for (size_t ei = 0; ei < ac_terminal_edges.size(); ++ei) {
+    const auto& e = ac_terminal_edges[ei];
+    ac_terminal_adj[e.from].push_back({e.to, ei});
+    ac_terminal_adj[e.to].push_back({e.from, ei});
+    ac_terminal_buses.insert(e.from);
+    ac_terminal_buses.insert(e.to);
+  }
+  std::unordered_set<int> ac_terminal_seen;
+  for (int start : ac_terminal_buses) {
+    if (ac_terminal_seen.count(start)) continue;
+    std::vector<int> order;
+    std::unordered_map<int, int> parent;
+    std::unordered_map<int, size_t> parent_edge;
+    std::vector<int> stack{start};
+    parent[start] = start;
+    ac_terminal_seen.insert(start);
+    while (!stack.empty()) {
+      const int u = stack.back();
+      stack.pop_back();
+      order.push_back(u);
+      auto ait = ac_terminal_adj.find(u);
+      if (ait == ac_terminal_adj.end()) continue;
+      for (const auto& [v, edge_pos] : ait->second) {
+        if (parent.count(v)) continue;
+        parent[v] = u;
+        parent_edge[v] = edge_pos;
+        ac_terminal_seen.insert(v);
+        stack.push_back(v);
+      }
+    }
+
+    std::unordered_map<int, double> subtree_p, subtree_q;
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+      const int bus = *it;
+      double p = ac_net_export_p[bus] - ac_visible_p[bus] + subtree_p[bus];
+      double q = ac_net_export_q[bus] - ac_visible_q[bus] + subtree_q[bus];
+      if (bus != start) {
+        const auto eit = parent_edge.find(bus);
+        if (eit != parent_edge.end()) {
+          const auto& e = ac_terminal_edges[eit->second];
+          const double pf = (e.from == bus) ? p : -p;
+          const double qf = (e.from == bus) ? q : -q;
+          TwoTerminalFlow& fl =
+              e.is_switch ? ac_switch_flow_rows[e.position] : ac_cb_flow_rows[e.position];
+          fl.pf_mw = pf;
+          fl.pt_mw = -pf;
+          fl.qf_mvar = qf;
+          fl.qt_mvar = -qf;
+          if (fl.rate_mva > 0.0) {
+            fl.loading_pct = 100.0 *
+                std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                         std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+          }
+          subtree_p[parent[bus]] += p;
+          subtree_q[parent[bus]] += q;
+        }
+      }
+    }
+  }
+
+  json ac_switch_flows = json::array();
+  for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    ac_switch_flows.push_back(
+        flow_json(sw.index, i, sw.bus_from, sw.bus_to,
+                  ac_switch_flow_rows[i], "ac_switch"));
+  }
+
+  json ac_cb_flows = json::array();
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    ac_cb_flows.push_back(
+        flow_json(cb.index, i, cb.bus_from, cb.bus_to,
+                  ac_cb_flow_rows[i], "ac_circuit_breaker"));
+  }
+
+  std::unordered_map<int, double> dc_vm_by_bus, dc_visible_p, dc_net_export_p;
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    const auto& b = sys.dc.buses[i];
+    dc_vm_by_bus[b.index] = (i < pf.vdc.size()) ? pf.vdc[i] : b.vm_pu;
+  }
+  for (const auto& b : sys.dc.buses)
+    if (b.in_service) dc_net_export_p[b.index] -= b.pd_mw;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) dc_net_export_p[ld.bus] -= ld.p_mw * ld.scaling;
+  for (const auto& pv : sys.dc.pv_arrays)
+    if (pv.in_service) dc_net_export_p[pv.bus] += pv.p_set_mw;
+  for (const auto& sg : sys.dc.static_generators)
+    if (sg.in_service) dc_net_export_p[sg.bus] += sg.p_mw * sg.scaling;
+  for (const auto& sg : sys.dc.dc_static_generators)
+    if (sg.in_service) dc_net_export_p[sg.bus] += sg.p_set_mw * sg.scaling;
+  for (const auto& st : sys.dc.dc_storage)
+    if (st.in_service) dc_net_export_p[st.bus] += st.p_mw;
+  for (const auto& st : sys.dc.storage)
+    if (st.in_service) dc_net_export_p[st.bus] += st.p_mw;
+
+  std::unordered_map<int, int> original_vsc_dc_bus;
+  original_vsc_dc_bus.reserve(sys.vsc_converters.size());
+  for (const auto& v : sys.vsc_converters) original_vsc_dc_bus[v.index] = v.bus_dc;
+  for (const auto& v : pf.vsc_transfers) {
+    const auto it = original_vsc_dc_bus.find(v.index);
+    const int bus = it != original_vsc_dc_bus.end() ? it->second : v.bus_dc;
+    dc_net_export_p[bus] += v.p_dc_mw;
+  }
+  for (const auto& d : pf.dcdc_transfers) {
+    dc_net_export_p[d.bus_in] -= d.p_in_mw;
+    dc_net_export_p[d.bus_out] += d.p_out_mw;
+  }
+  for (const auto& br : sys.dc.branches) {
+    if (!br.in_service || br.r_pu <= 1e-12) continue;
+    const double vf = dc_vm_by_bus.count(br.from_bus) ? dc_vm_by_bus[br.from_bus] : 1.0;
+    const double vt = dc_vm_by_bus.count(br.to_bus) ? dc_vm_by_bus[br.to_bus] : 1.0;
+    const double i_pu = (vf - vt) / br.r_pu;
+    const double pf_mw = vf * i_pu * sys.base_mva;
+    const double pt_mw = -vt * i_pu * sys.base_mva;
+    dc_visible_p[br.from_bus] += pf_mw;
+    dc_visible_p[br.to_bus] += pt_mw;
+  }
+  auto dc_bus_base_kv = [&](int bus) {
+    for (const auto& b : sys.dc.buses) {
+      if (b.index == bus) return b.base_kv;
+    }
+    return 0.0;
+  };
+  auto signed_dc_endpoint_flow = [&](int from, int to, double& p) {
+    for (const auto& br : sys.dc.branches) {
+      if (!br.in_service || br.r_pu <= 1e-12) continue;
+      const double vf = dc_vm_by_bus.count(br.from_bus) ? dc_vm_by_bus[br.from_bus] : 1.0;
+      const double vt = dc_vm_by_bus.count(br.to_bus) ? dc_vm_by_bus[br.to_bus] : 1.0;
+      const double i_pu = (vf - vt) / br.r_pu;
+      const double pf_mw = vf * i_pu * sys.base_mva;
+      const double pt_mw = -vt * i_pu * sys.base_mva;
+      if (br.from_bus == from && br.to_bus == to) {
+        p = pf_mw;
+        return true;
+      }
+      if (br.from_bus == to && br.to_bus == from) {
+        p = pt_mw;
+        return true;
+      }
+    }
+    return false;
+  };
+  auto derive_dc_terminal_flow = [&](int from, int to, bool closed,
+                                     double rated_current_ka,
+                                     double rated_voltage_kv) {
+    TwoTerminalFlow fl;
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : dc_bus_base_kv(from);
+    fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0 ? kv * rated_current_ka : 0.0;
+    if (!closed || from == 0 || to == 0 || from == to) return fl;
+    double p = 0.0;
+    if (signed_dc_endpoint_flow(from, to, p)) {
+      fl.pf_mw = p;
+      fl.pt_mw = -p;
+      fl.source = "matched_dc_branch";
+    } else {
+      const double p_from = dc_net_export_p[from] - dc_visible_p[from];
+      const double p_to = dc_net_export_p[to] - dc_visible_p[to];
+      if (std::abs(p_from) <= std::abs(p_to) || std::abs(p_to) < 1e-12) {
+        fl.pf_mw = p_from;
+        fl.pt_mw = -p_from;
+        fl.source = "endpoint_kcl_from";
+      } else {
+        fl.pf_mw = -p_to;
+        fl.pt_mw = p_to;
+        fl.source = "endpoint_kcl_to";
+      }
+    }
+    if (fl.rate_mva > 0.0) {
+      fl.loading_pct = 100.0 * std::max(std::abs(fl.pf_mw), std::abs(fl.pt_mw)) / fl.rate_mva;
+    }
+    return fl;
+  };
+
+  json dc_cb_flows = json::array();
+  for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
+    const auto& cb = sys.dc.dc_circuit_breakers[i];
+    const auto fl = derive_dc_terminal_flow(cb.bus_from, cb.bus_to,
+                                            cb.in_service && cb.closed,
+                                            cb.i_rated_ka, cb.rated_voltage_kv);
+    dc_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl,
+                                    "dc_circuit_breaker"));
+  }
+
+  return json{{"ac_switch_flows", ac_switch_flows},
+              {"ac_circuit_breaker_flows", ac_cb_flows},
+              {"dc_circuit_breaker_flows", dc_cb_flows}};
+}
+
+std::vector<double> project_replay_ac_bus_vector(
+    const std::vector<double>& original_space,
+    const hacdcpf::HybridPowerSystem& projected_sys) {
+  if (!projected_sys.bus_merge_map || original_space.empty()) return original_space;
+  const auto& map = *projected_sys.bus_merge_map;
+  std::vector<double> projected(static_cast<size_t>(map.n_merged), 0.0);
+  std::vector<char> assigned(static_cast<size_t>(map.n_merged), 0);
+  for (const auto& [ext_bus, int_pos] : map.ext_to_int) {
+    const auto op = map.ext_to_orig_pos.find(ext_bus);
+    if (op == map.ext_to_orig_pos.end()) continue;
+    if (int_pos < 0 || int_pos >= static_cast<int>(projected.size())) continue;
+    const int orig_pos = op->second;
+    if (orig_pos < 0 || orig_pos >= static_cast<int>(original_space.size())) continue;
+    if (!assigned[static_cast<size_t>(int_pos)]) {
+      projected[static_cast<size_t>(int_pos)] = original_space[static_cast<size_t>(orig_pos)];
+      assigned[static_cast<size_t>(int_pos)] = 1;
+    }
+  }
+  for (size_t i = 0; i < projected.size() && i < original_space.size(); ++i) {
+    if (!assigned[i]) projected[i] = original_space[i];
+  }
+  return projected;
+}
+
+std::optional<double> replay_ac_value_for_bus(
+    const std::vector<double>& original_space,
+    const hacdcpf::HybridPowerSystem& projected_sys,
+    int projected_bus) {
+  if (original_space.empty()) return std::nullopt;
+  if (projected_sys.bus_merge_map) {
+    const auto& map = *projected_sys.bus_merge_map;
+    const int int_pos = projected_bus - 1;
+    if (int_pos >= 0 && int_pos < static_cast<int>(map.int_to_ext.size())) {
+      const int ext_bus = map.int_to_ext[static_cast<size_t>(int_pos)];
+      const auto op = map.ext_to_orig_pos.find(ext_bus);
+      if (op != map.ext_to_orig_pos.end() && op->second >= 0 &&
+          op->second < static_cast<int>(original_space.size())) {
+        return original_space[static_cast<size_t>(op->second)];
+      }
+    }
+  }
+  const int pos = projected_bus - 1;
+  if (pos >= 0 && pos < static_cast<int>(original_space.size())) {
+    return original_space[static_cast<size_t>(pos)];
+  }
+  return std::nullopt;
+}
+
+std::optional<size_t> replay_ac_original_pos_for_bus(
+    const hacdcpf::HybridPowerSystem& projected_sys,
+    int projected_bus) {
+  if (projected_sys.bus_merge_map) {
+    const auto& map = *projected_sys.bus_merge_map;
+    const int int_pos = projected_bus - 1;
+    if (int_pos >= 0 && int_pos < static_cast<int>(map.int_to_ext.size())) {
+      const int ext_bus = map.int_to_ext[static_cast<size_t>(int_pos)];
+      const auto op = map.ext_to_orig_pos.find(ext_bus);
+      if (op != map.ext_to_orig_pos.end() && op->second >= 0) {
+        return static_cast<size_t>(op->second);
+      }
+    }
+  }
+  const int pos = projected_bus - 1;
+  return pos >= 0 ? std::optional<size_t>(static_cast<size_t>(pos)) : std::nullopt;
+}
 
 unsigned int fresh_typhoon_seed() {
   static std::random_device rd;
@@ -512,6 +1302,23 @@ json emissions_summary_to_json(const hacdcpf::analysis::EmissionsSummary& s) {
 
 json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
                              const hacdcpf::analysis::CarbonAnalysisResult& carbon) {
+  auto storage_canvas_type = [&](const hacdcpf::analysis::StorageCarbonResult& s) {
+    return s.is_dc ? "dc_storage" : "storage";
+  };
+  auto storage_source_type = [&](const hacdcpf::analysis::StorageCarbonResult& s) {
+    if (!s.is_dc) return "storage";
+    for (const auto& st : sys.dc.dc_storage) {
+      if (st.index == s.storage_index) return "dc_storage";
+    }
+    return "storage";
+  };
+  auto load_display_label = [](const hacdcpf::analysis::LoadCarbonResult& l,
+                               bool is_dc) {
+    if (l.load_index >= 0) return std::to_string(l.load_index);
+    const char* prefix = is_dc ? "DC Bus Load @" : "Bus Load @";
+    return std::string(prefix) + std::to_string(l.bus);
+  };
+
   auto ac_bus_sink_power = [&](int bus) {
     double p = 0.0;
     for (const auto& l : sys.ac.loads) {
@@ -597,8 +1404,10 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
   json lc = json::array();
   for (const auto& l : carbon.load_carbon)
     lc.push_back({{"load_index", l.load_index},
+                  {"display_load", load_display_label(l, false)},
                   {"bus", l.bus},
                   {"demand_mw", l.demand_mw},
+                  {"display_demand_mw", std::abs(l.demand_mw)},
                   {"carbon_intensity_tco2_mwh", l.carbon_intensity_tco2_mwh},
                   {"total_emissions_tco2", l.total_emissions_tco2}});
   out["load_carbon"] = lc;
@@ -606,8 +1415,10 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
   json dlc = json::array();
   for (const auto& l : carbon.dc_load_carbon)
     dlc.push_back({{"load_index", l.load_index},
+                   {"display_load", load_display_label(l, true)},
                    {"bus", l.bus},
                    {"demand_mw", l.demand_mw},
+                   {"display_demand_mw", std::abs(l.demand_mw)},
                    {"carbon_intensity_tco2_mwh", l.carbon_intensity_tco2_mwh},
                    {"total_emissions_tco2", l.total_emissions_tco2}});
   out["dc_load_carbon"] = dlc;
@@ -655,6 +1466,9 @@ json carbon_analysis_to_json(const hacdcpf::HybridPowerSystem& sys,
     sc.push_back({{"storage_index", s.storage_index},
                   {"bus", s.bus},
                   {"is_dc", s.is_dc},
+                  {"canvas_type", storage_canvas_type(s)},
+                  {"canvas_index", s.storage_index},
+                  {"source_type", storage_source_type(s)},
                   {"p_mw", s.p_mw},
                   {"soc", s.soc},
                   {"stored_energy_mwh", s.stored_energy_mwh},
@@ -1051,6 +1865,501 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
   }
 
   return p;
+}
+
+std::string opf_default_name(const std::string& display_type, int index) {
+  return display_type + " #" + std::to_string(index);
+}
+
+std::string opf_branch_name(const std::string& display_type, int index, int from_bus, int to_bus) {
+  return display_type + " #" + std::to_string(index) + " (" +
+         std::to_string(from_bus) + " -> " + std::to_string(to_bus) + ")";
+}
+
+template <typename T>
+std::string opf_component_name(const T& item, const std::string& display_type) {
+  return item.name.empty() ? opf_default_name(display_type, item.index) : item.name;
+}
+
+std::vector<size_t> opf_active_vsc_positions(const hacdcpf::HybridPowerSystem& sys) {
+  std::vector<size_t> positions;
+  positions.reserve(sys.vsc_converters.size());
+  std::unordered_set<int> ac_bus_ids, dc_bus_ids;
+  ac_bus_ids.reserve(sys.ac.buses.size());
+  dc_bus_ids.reserve(sys.dc.buses.size());
+  for (const auto& b : sys.ac.buses) ac_bus_ids.insert(b.index);
+  for (const auto& b : sys.dc.buses) dc_bus_ids.insert(b.index);
+  for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
+    const auto& c = sys.vsc_converters[i];
+    if (!c.in_service) continue;
+    if (!ac_bus_ids.count(c.bus_ac) || !dc_bus_ids.count(c.bus_dc)) continue;
+    positions.push_back(i);
+  }
+  return positions;
+}
+
+std::vector<size_t> opf_active_dcdc_positions(const hacdcpf::HybridPowerSystem& sys) {
+  std::vector<size_t> positions;
+  positions.reserve(sys.dc.dcdc_converters.size());
+  std::unordered_set<int> dc_bus_ids;
+  dc_bus_ids.reserve(sys.dc.buses.size());
+  for (const auto& b : sys.dc.buses) dc_bus_ids.insert(b.index);
+  for (size_t i = 0; i < sys.dc.dcdc_converters.size(); ++i) {
+    const auto& c = sys.dc.dcdc_converters[i];
+    if (!c.in_service) continue;
+    if (!dc_bus_ids.count(c.bus_in) || !dc_bus_ids.count(c.bus_out)) continue;
+    positions.push_back(i);
+  }
+  return positions;
+}
+
+std::optional<int> opf_energy_router_index_from_name(const std::vector<hacdcpf::EnergyRouter>& routers,
+                                                     const std::string& canonical_name) {
+  if (canonical_name.empty()) return std::nullopt;
+  std::optional<int> best;
+  size_t best_len = 0;
+  for (const auto& er : routers) {
+    if (er.name.empty()) continue;
+    if (canonical_name.rfind(er.name + "_", 0) == 0 && er.name.size() > best_len) {
+      best = er.index;
+      best_len = er.name.size();
+    }
+  }
+  return best;
+}
+
+const hacdcpf::EnergyRouter* opf_find_energy_router(const hacdcpf::HybridPowerSystem& sys, int index) {
+  for (const auto& er : sys.energy_routers) {
+    if (er.index == index) return &er;
+  }
+  return nullptr;
+}
+
+template <typename T>
+const T* opf_find_by_index(const std::vector<T>& items, int index) {
+  for (const auto& item : items) {
+    if (item.index == index) return &item;
+  }
+  return nullptr;
+}
+
+std::optional<int> opf_energy_router_port_bus_from_vsc_name(const hacdcpf::EnergyRouter& er,
+                                                            const std::string& canonical_name) {
+  const std::string prefix_a = er.name + "_VSC_A";
+  const std::string prefix_b = er.name + "_VSC_B";
+  std::string suffix;
+  if (canonical_name.rfind(prefix_a, 0) == 0) {
+    suffix = canonical_name.substr(prefix_a.size());
+  } else if (canonical_name.rfind(prefix_b, 0) == 0) {
+    suffix = canonical_name.substr(prefix_b.size());
+  } else {
+    return std::nullopt;
+  }
+  try {
+    const int port_index = std::stoi(suffix);
+    for (const auto& port : er.ports) {
+      if (port.index == port_index) return port.bus;
+    }
+  } catch (const std::exception&) {
+  }
+  return std::nullopt;
+}
+
+void opf_apply_canonical_source(json& row,
+                                const hacdcpf::HybridPowerSystem& original_sys,
+                                const std::string& source_type,
+                                int source_index) {
+  if (source_type == "energy_router") {
+    if (const auto* er = opf_find_energy_router(original_sys, source_index)) {
+      row["source_type"] = source_type;
+      row["source_index"] = source_index;
+      row["source_name"] = er->name.empty() ? opf_default_name("能量路由器", er->index) : er->name;
+      row["index"] = er->index;
+      row["canvas_type"] = "energyRouter";
+      row["canvas_index"] = er->index;
+      row["name"] = row["source_name"];
+    }
+  }
+}
+
+json opf_ac_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
+                             const std::vector<double>& vm,
+                             const std::vector<double>& va,
+                             const std::vector<double>& lmp_p = {},
+                             const std::vector<double>& lmp_q = {}) {
+  json rows = json::array();
+  const size_t n = std::max({sys.ac.buses.size(), vm.size(), va.size(), lmp_p.size(), lmp_q.size()});
+  for (size_t i = 0; i < n; ++i) {
+    json row{{"position", i}, {"canvas_type", "ac"}};
+    if (i < sys.ac.buses.size()) {
+      const auto& b = sys.ac.buses[i];
+      row["index"] = b.index;
+      row["name"] = b.name.empty() ? opf_default_name("AC Bus", b.index) : b.name;
+      row["canvas_index"] = b.index;
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "AC Bus pos " + std::to_string(i);
+      row["canvas_index"] = nullptr;
+    }
+    if (i < vm.size()) row["vm_pu"] = vm[i];
+    if (i < va.size()) row["va_rad"] = va[i];
+    if (i < lmp_p.size()) row["lmp_p"] = lmp_p[i];
+    if (i < lmp_q.size()) row["lmp_q"] = lmp_q[i];
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json opf_dc_bus_results_json(const hacdcpf::HybridPowerSystem& sys,
+                             const std::vector<double>& vdc) {
+  json rows = json::array();
+  const size_t n = std::max(sys.dc.buses.size(), vdc.size());
+  for (size_t i = 0; i < n; ++i) {
+    json row{{"position", i}, {"canvas_type", "dc"}};
+    if (i < sys.dc.buses.size()) {
+      const auto& b = sys.dc.buses[i];
+      row["index"] = b.index;
+      row["name"] = b.name.empty() ? opf_default_name("DC Bus", b.index) : b.name;
+      row["canvas_index"] = b.index;
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "DC Bus pos " + std::to_string(i);
+      row["canvas_index"] = nullptr;
+    }
+    if (i < vdc.size()) row["vdc_pu"] = vdc[i];
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json opf_generator_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
+                                 const std::vector<double>& pg,
+                                 const std::vector<double>& qg = {}) {
+  json rows = json::array();
+  const size_t n = std::max(sys.ac.generators.size(), pg.size());
+  for (size_t i = 0; i < n; ++i) {
+    json row{{"position", i}, {"display_type", "发电机"}, {"canvas_type", "gen"}};
+    if (i < sys.ac.generators.size()) {
+      const auto& g = sys.ac.generators[i];
+      row["index"] = g.index;
+      row["name"] = opf_component_name(g, "发电机");
+      row["bus"] = g.bus;
+      row["canvas_index"] = g.index;
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "发电机 pos " + std::to_string(i);
+      row["canvas_index"] = nullptr;
+    }
+    if (i < pg.size()) row["pg_mw"] = pg[i];
+    if (i < qg.size()) row["qg_mvar"] = qg[i];
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json power_flow_geo_generator_json(const hacdcpf::HybridPowerSystem& sys,
+                                   const std::vector<double>& pg,
+                                   const std::vector<double>& qg = {}) {
+  json rows = json::array();
+  for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
+    const auto& g = sys.ac.generators[i];
+    if (!g.in_service) continue;
+    json row{
+      {"position", static_cast<int>(i)},
+      {"index", g.index},
+      {"canvas_type", "gen"},
+      {"canvas_index", g.index},
+      {"bus", g.bus},
+      {"vg_pu", g.vg_pu},
+      {"is_slack", g.is_slack},
+      {"pmax_mw", g.pmax_mw},
+      {"pmin_mw", g.pmin_mw},
+      {"name", g.name}
+    };
+    row["pg_mw"] = i < pg.size() ? pg[i] : g.pg_mw;
+    row["qg_mvar"] = i < qg.size() ? qg[i] : g.qg_mvar;
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json opf_vsc_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
+                           const hacdcpf::HybridPowerSystem& original_sys,
+                           const std::vector<double>& pac,
+                           const std::vector<double>& qac) {
+  json rows = json::array();
+  const auto positions = opf_active_vsc_positions(sys);
+  const size_t n = std::max(pac.size(), std::max(qac.size(), positions.size()));
+  for (size_t k = 0; k < n; ++k) {
+    json row{{"position", k}, {"display_type", "VSC换流器"}, {"canvas_type", "vsc"}};
+    const bool has_pos = k < positions.size() && positions[k] < sys.vsc_converters.size();
+    if (has_pos) {
+      const size_t pos = positions[k];
+      const auto& c = sys.vsc_converters[pos];
+      const auto* original_vsc = opf_find_by_index(original_sys.vsc_converters, c.index);
+      row["source_position"] = pos;
+      row["index"] = c.index;
+      row["name"] = (original_vsc && !original_vsc->name.empty())
+          ? original_vsc->name
+          : (c.name.empty()
+                ? "VSC换流器 #" + std::to_string(c.index) + " (AC " + std::to_string(c.bus_ac) +
+                      " -> DC " + std::to_string(c.bus_dc) + ")"
+                : c.name);
+      row["bus_ac"] = original_vsc ? original_vsc->bus_ac : c.bus_ac;
+      row["bus_dc"] = original_vsc ? original_vsc->bus_dc : c.bus_dc;
+      row["canvas_index"] = c.index;
+      if (const auto er_idx = opf_energy_router_index_from_name(original_sys.energy_routers, c.name)) {
+        opf_apply_canonical_source(row, original_sys, "energy_router", *er_idx);
+        if (const auto* er = opf_find_energy_router(original_sys, *er_idx)) {
+          if (const auto port_bus = opf_energy_router_port_bus_from_vsc_name(*er, c.name))
+            row["bus_ac"] = *port_bus;
+        }
+        row["bus_dc"] = nullptr;
+      }
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "VSC换流器 pos " + std::to_string(k);
+      row["canvas_index"] = nullptr;
+    }
+    if (k < pac.size()) row["pac_mw"] = pac[k];
+    if (k < qac.size()) row["qac_mvar"] = qac[k];
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json opf_dcdc_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
+                            const hacdcpf::HybridPowerSystem& original_sys,
+                            const hacdcpf::opf::ACOPFResult& r) {
+  json rows = json::array();
+  const auto fallback_positions = opf_active_dcdc_positions(sys);
+  for (size_t k = 0; k < r.pdcdc_mw.size(); ++k) {
+    size_t pos = k;
+    if (k < r.dcdc_map.size() && r.dcdc_map[k].original_index >= 0) {
+      pos = static_cast<size_t>(r.dcdc_map[k].original_index);
+    } else if (k < fallback_positions.size()) {
+      pos = fallback_positions[k];
+    }
+    json row{{"position", k}, {"display_type", "DC/DC变换器"}, {"canvas_type", "dcdcConverter"},
+             {"pdcdc_mw", r.pdcdc_mw[k]}};
+    if (pos < sys.dc.dcdc_converters.size()) {
+      const auto& c = sys.dc.dcdc_converters[pos];
+      const auto* original_dcdc = opf_find_by_index(original_sys.dc.dcdc_converters, c.index);
+      row["source_position"] = pos;
+      row["index"] = c.index;
+      row["name"] = (original_dcdc && !original_dcdc->name.empty())
+          ? original_dcdc->name
+          : (c.name.empty()
+                ? "DC/DC变换器 #" + std::to_string(c.index) + " (DC " + std::to_string(c.bus_in) +
+                      " -> DC " + std::to_string(c.bus_out) + ")"
+                : c.name);
+      row["bus_in"] = original_dcdc ? original_dcdc->bus_in : c.bus_in;
+      row["bus_out"] = original_dcdc ? original_dcdc->bus_out : c.bus_out;
+      row["canvas_index"] = c.index;
+      if (const auto er_idx = opf_energy_router_index_from_name(original_sys.energy_routers, c.name)) {
+        opf_apply_canonical_source(row, original_sys, "energy_router", *er_idx);
+        row["bus_in"] = nullptr;
+        row["bus_out"] = nullptr;
+      }
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "DC/DC变换器 pos " + std::to_string(k);
+      row["canvas_index"] = nullptr;
+    }
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+json opf_er_port_dispatch_json(const hacdcpf::HybridPowerSystem& original_sys,
+                               const hacdcpf::opf::ACOPFResult& r) {
+  json rows = json::array();
+  for (size_t k = 0; k < r.er_port_p_mw.size(); ++k) {
+    json row{{"position", k}, {"display_type", "能量路由器端口"},
+             {"canvas_type", "energyRouter"}};
+    if (k < r.er_port_map.size()) {
+      const int er_index = r.er_port_map[k].original_index;
+      const int port_index = r.er_port_map[k].source_type;
+      row["router_index"] = er_index;
+      row["port_index"] = port_index;
+      row["canvas_index"] = er_index;
+      if (const auto* er = opf_find_energy_router(original_sys, er_index)) {
+        row["router_name"] =
+            er->name.empty() ? opf_default_name("能量路由器", er->index) : er->name;
+        if (const auto* port = opf_find_by_index(er->ports, port_index)) {
+          row["port_name"] =
+              port->name.empty() ? ("Port " + std::to_string(port->index)) : port->name;
+          row["bus"] = port->bus;
+          row["side"] = port->side;
+          row["is_ac"] = port->port_type == hacdcpf::ERPortType::AC;
+        }
+      }
+    }
+    row["p_mw"] = r.er_port_p_mw[k];
+    if (k < r.er_port_q_mvar.size()) row["q_mvar"] = r.er_port_q_mvar[k];
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+struct EnergyRouterExpansionRefs {
+  std::unordered_map<int, int> port_vsc_index;
+  int dcdc_index{-1};
+};
+
+std::unordered_map<int, EnergyRouterExpansionRefs> build_energy_router_expansion_refs(
+    const hacdcpf::HybridPowerSystem& sys,
+    const std::vector<hacdcpf::EnergyRouter>& er_snapshot) {
+  std::unordered_map<int, EnergyRouterExpansionRefs> refs;
+  if (er_snapshot.empty()) return refs;
+  try {
+    const hacdcpf::HybridPowerSystem projected =
+        hacdcpf::project_to_canonical_models(sys);
+    std::unordered_map<std::string, int> vsc_by_name;
+    vsc_by_name.reserve(projected.vsc_converters.size());
+    for (const auto& vsc : projected.vsc_converters) {
+      vsc_by_name[vsc.name] = vsc.index;
+    }
+    std::unordered_map<std::string, int> dcdc_by_name;
+    dcdc_by_name.reserve(projected.dc.dcdc_converters.size());
+    for (const auto& dcdc : projected.dc.dcdc_converters) {
+      dcdc_by_name[dcdc.name] = dcdc.index;
+    }
+    for (const auto& er : er_snapshot) {
+      auto& r = refs[er.index];
+      if (const auto dit = dcdc_by_name.find(er.name + "_DCDC");
+          dit != dcdc_by_name.end()) {
+        r.dcdc_index = dit->second;
+      }
+      for (const auto& p : er.ports) {
+        const char side = (p.side == 0) ? 'A' : 'B';
+        const std::string vsc_name =
+            er.name + "_VSC_" + side + std::to_string(p.index);
+        if (const auto vit = vsc_by_name.find(vsc_name);
+            vit != vsc_by_name.end()) {
+          r.port_vsc_index[p.index] = vit->second;
+        }
+      }
+    }
+  } catch (...) {
+    // Presentation JSON should still be returned if rich ER attribution is not
+    // recoverable; the caller falls back to scheduled port values.
+  }
+  return refs;
+}
+
+json power_flow_geo_energy_router_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const std::vector<hacdcpf::EnergyRouter>& er_snapshot,
+    const hacdcpf::PowerFlowResult& pf) {
+  json geo_er = json::array();
+  const auto er_refs = build_energy_router_expansion_refs(sys, er_snapshot);
+  std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_index;
+  for (const auto& vt : pf.vsc_transfers) vsc_tr_by_index[vt.index] = &vt;
+  std::unordered_map<int, const hacdcpf::DCDCTransfer*> dcdc_tr_by_index;
+  for (const auto& dt : pf.dcdc_transfers) dcdc_tr_by_index[dt.index] = &dt;
+
+  for (const auto& er : er_snapshot) {
+    if (!er.in_service) continue;
+    const auto ref_it = er_refs.find(er.index);
+    const EnergyRouterExpansionRefs* refs =
+        ref_it != er_refs.end() ? &ref_it->second : nullptr;
+    json port_arr = json::array();
+    for (const auto& p : er.ports) {
+      if (!p.in_service || p.bus == 0) continue;
+      double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
+      const bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
+      int matched_vsc_index = -1;
+
+      if (refs) {
+        const auto pit = refs->port_vsc_index.find(p.index);
+        if (pit != refs->port_vsc_index.end()) matched_vsc_index = pit->second;
+      }
+      if (const auto tit = vsc_tr_by_index.find(matched_vsc_index);
+          tit != vsc_tr_by_index.end()) {
+        p_mw = tit->second->p_ac_mw;
+        q_mvar = tit->second->q_ac_mvar;
+      } else {
+        p_mw = p.p_set_mw;
+        q_mvar = p.q_set_mvar;
+      }
+      if (is_ac) {
+        for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
+          if (sys.ac.buses[bi].index == p.bus && bi < pf.vm.size()) {
+            v_pu = pf.vm[bi];
+            break;
+          }
+        }
+      } else {
+        for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi) {
+          if (sys.dc.buses[bi].index == p.bus && bi < pf.vdc.size()) {
+            v_pu = pf.vdc[bi];
+            break;
+          }
+        }
+      }
+      port_arr.push_back(json{
+        {"port_index", p.index}, {"name", p.name}, {"bus", p.bus},
+        {"side", p.side}, {"control_mode", hacdcpf::er_control_str(p.control_mode)},
+        {"matched_vsc_index", matched_vsc_index},
+        {"is_ac", is_ac},
+        {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
+      });
+    }
+    const int internal_dcdc_index = refs ? refs->dcdc_index : -1;
+    const hacdcpf::DCDCTransfer* internal_dcdc = nullptr;
+    if (const auto dit = dcdc_tr_by_index.find(internal_dcdc_index);
+        dit != dcdc_tr_by_index.end()) {
+      internal_dcdc = dit->second;
+    }
+    double sum_p = 0.0;
+    for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
+    double vsc_loss = 0.0;
+    for (const auto& pp : port_arr) {
+      const int vidx = pp.value("matched_vsc_index", -1);
+      if (const auto vit = vsc_tr_by_index.find(vidx); vit != vsc_tr_by_index.end()) {
+        vsc_loss += vit->second->loss_mw;
+      }
+    }
+    const double dcdc_loss = internal_dcdc ? internal_dcdc->loss_mw : 0.0;
+    const double total_loss = vsc_loss + dcdc_loss;
+    geo_er.push_back(json{
+      {"router_index", er.index}, {"ports", port_arr},
+      {"p_port_sum_mw", sum_p},
+      {"internal_dcdc_index", internal_dcdc_index},
+      {"internal_dcdc_pin_mw", internal_dcdc ? internal_dcdc->p_in_mw : 0.0},
+      {"internal_dcdc_pout_mw", internal_dcdc ? internal_dcdc->p_out_mw : 0.0},
+      {"internal_dcdc_loss_mw", dcdc_loss},
+      {"vsc_loss_mw", vsc_loss},
+      {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
+    });
+  }
+  return geo_er;
+}
+
+json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
+                                 const std::vector<double>& pf) {
+  json rows = json::array();
+  const size_t n = std::max(sys.ac.branches.size(), pf.size());
+  for (size_t i = 0; i < n; ++i) {
+    json row{{"position", i}, {"display_type", "AC线路"}, {"canvas_type", "branch"}};
+    if (i < sys.ac.branches.size()) {
+      const auto& br = sys.ac.branches[i];
+      row["index"] = br.index;
+      row["name"] = br.name.empty() ? opf_branch_name("AC线路", br.index, br.from_bus, br.to_bus) : br.name;
+      row["from_bus"] = br.from_bus;
+      row["to_bus"] = br.to_bus;
+      row["canvas_index"] = br.index;
+      row["rate_mva"] = br.rate_a_mva;
+    } else {
+      row["index"] = nullptr;
+      row["name"] = "AC线路 pos " + std::to_string(i);
+      row["canvas_index"] = nullptr;
+    }
+    if (i < pf.size()) row["pf_mw"] = pf[i];
+    rows.push_back(std::move(row));
+  }
+  return rows;
 }
 
 // Build default 24-h (or N-step) scaling profiles
@@ -1528,6 +2837,12 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
               <option value="SinglePhaseGround">Single-Phase-Ground</option>
               <option value="TwoPhase">Two-Phase</option>
               <option value="TwoPhaseGround">Two-Phase-Ground</option>
+            </select>
+          </div>
+          <div><label>Calculation</label>
+            <select id="scCalcType">
+              <option value="Max">Maximum</option>
+              <option value="Min">Minimum</option>
             </select>
           </div>
           <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
@@ -2882,7 +4197,11 @@ document.getElementById('runParityOpfBtn').onclick=async()=>{
 document.getElementById('runScBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
   try{setStatus('Running short circuit (all buses)...');
-  const body=await api('/api/session/sc',{options:{fault_type:document.getElementById('scFaultType').value,c_factor:Number(document.getElementById('scCFactor').value||1.1)}});
+  const body=await api('/api/session/sc',{options:{
+    fault_type:document.getElementById('scFaultType').value,
+    calc_type:document.getElementById('scCalcType').value,
+    c_factor:Number(document.getElementById('scCFactor').value||1.1)
+  }});
   document.getElementById('scFault').textContent=body.fault_type;
   document.getElementById('scBuses').textContent=body.bus_results.length;
   const ik=body.bus_results.map(r=>r.ikpp_ka);
@@ -2915,6 +4234,7 @@ document.getElementById('runScDetailedBtn').onclick=async()=>{
     const body=await api('/api/session/sc_detailed',{
       fault_bus_ids:busIds,
       fault_type:document.getElementById('scFaultType').value,
+      calc_type:document.getElementById('scCalcType').value,
       c_factor:Number(document.getElementById('scCFactor').value||1.1),
     });
     document.getElementById('scFault').textContent=body.fault_type;
@@ -5364,11 +6684,11 @@ int main(int argc, char** argv) {
       // translate it on this request-local copy before solving.  This keeps
       // user-authored JSON fields and solver semantics aligned without mutating
       // the stored session system.
-      for (auto& conv : sys.vsc_converters) {
-        if (!conv.in_service || !conv.ac_grid_forming) continue;
-        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
-        conv.p_is_hard_constraint = false;
-      }
+	      for (auto& conv : sys.vsc_converters) {
+	        if (!conv.in_service || !conv.ac_grid_forming) continue;
+	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
+	        conv.p_is_hard_constraint = false;
+	      }
       json out;
       out["method"] = method;
       out["vm"] = json::array();
@@ -5389,50 +6709,6 @@ int main(int argc, char** argv) {
       // expanded VSC/DCDC transfers by matching the canonical expansion names
       // back to solved transfer indices.
       const auto er_snapshot = sys.energy_routers;
-      struct ERExpansionRefs {
-        std::unordered_map<int, int> port_vsc_index;
-        int dcdc_index{-1};
-      };
-      auto build_er_expansion_refs = [&]() {
-        std::unordered_map<int, ERExpansionRefs> refs;
-        if (er_snapshot.empty()) return refs;
-        try {
-          const hacdcpf::HybridPowerSystem projected =
-              hacdcpf::project_to_canonical_models(sys);
-          std::unordered_map<std::string, int> vsc_by_name;
-          vsc_by_name.reserve(projected.vsc_converters.size());
-          for (const auto& vsc : projected.vsc_converters) {
-            vsc_by_name[vsc.name] = vsc.index;
-          }
-          std::unordered_map<std::string, int> dcdc_by_name;
-          dcdc_by_name.reserve(projected.dc.dcdc_converters.size());
-          for (const auto& dcdc : projected.dc.dcdc_converters) {
-            dcdc_by_name[dcdc.name] = dcdc.index;
-          }
-          for (const auto& er : er_snapshot) {
-            auto& r = refs[er.index];
-            if (const auto dit = dcdc_by_name.find(er.name + "_DCDC");
-                dit != dcdc_by_name.end()) {
-              r.dcdc_index = dit->second;
-            }
-            for (const auto& p : er.ports) {
-              const char side = (p.side == 0) ? 'A' : 'B';
-              const std::string vsc_name =
-                  er.name + "_VSC_" + side + std::to_string(p.index);
-              if (const auto vit = vsc_by_name.find(vsc_name);
-                  vit != vsc_by_name.end()) {
-                r.port_vsc_index[p.index] = vit->second;
-              }
-            }
-          }
-        } catch (...) {
-          // PF result serialization should not fail solely because rich ER
-          // metadata could not be reconstructed. The fallback below still
-          // emits scheduled port values.
-        }
-        return refs;
-      };
-
       // Helper to serialize VSC/DCDC transfers from a PowerFlowResult
       auto add_transfers = [&](const hacdcpf::PowerFlowResult& pf) {
         for (const auto& v : pf.vsc_transfers)
@@ -6102,112 +7378,15 @@ int main(int argc, char** argv) {
           });
         }
 
-        // Individual generator results for visualization
-        json geo_gen = json::array();
-        for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
-          const auto& g = sys.ac.generators[gi];
-          if (!g.in_service) continue;
-          geo_gen.push_back(json{
-            {"index", g.index}, {"bus", g.bus},
-            {"pg_mw", gen_pg_solved[gi]}, {"qg_mvar", gen_qg_solved[gi]},
-            {"vg_pu", g.vg_pu}, {"is_slack", g.is_slack},
-            {"pmax_mw", g.pmax_mw}, {"pmin_mw", g.pmin_mw},
-            {"name", g.name}
-          });
-        }
+        // Individual generator results for visualization.
+        json geo_gen = power_flow_geo_generator_json(sys, gen_pg_solved, gen_qg_solved);
 
         // Energy router port transfers – reconstructed from expanded VSC/DCDC
         // results. During canonical projection each ER port becomes a VSC named
         // <router>_VSC_A/B<port_index>, and each router gets an internal DCDC
         // named <router>_DCDC. Matching by expanded index avoids bus collisions
         // when an ER port shares a bus with a normal VSC or another ER port.
-        json geo_er = json::array();
-        {
-          const auto er_refs = build_er_expansion_refs();
-          std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_index;
-          for (const auto& vt : pf.vsc_transfers)
-            vsc_tr_by_index[vt.index] = &vt;
-          std::unordered_map<int, const hacdcpf::DCDCTransfer*> dcdc_tr_by_index;
-          for (const auto& dt : pf.dcdc_transfers)
-            dcdc_tr_by_index[dt.index] = &dt;
-
-          for (const auto& er : er_snapshot) {
-            if (!er.in_service) continue;
-            const auto ref_it = er_refs.find(er.index);
-            const ERExpansionRefs* refs =
-                ref_it != er_refs.end() ? &ref_it->second : nullptr;
-            json port_arr = json::array();
-            for (const auto& p : er.ports) {
-              if (!p.in_service || p.bus == 0) continue;
-              double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
-              bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
-              int matched_vsc_index = -1;
-
-              if (refs) {
-                const auto pit = refs->port_vsc_index.find(p.index);
-                if (pit != refs->port_vsc_index.end()) {
-                  matched_vsc_index = pit->second;
-                }
-              }
-              auto tit = vsc_tr_by_index.find(matched_vsc_index);
-              if (tit != vsc_tr_by_index.end()) {
-                p_mw = tit->second->p_ac_mw;
-                q_mvar = tit->second->q_ac_mvar;
-              } else {
-                p_mw = p.p_set_mw;
-                q_mvar = p.q_set_mvar;
-              }
-              // Get voltage from PF results
-              if (is_ac) {
-                for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
-                  if (sys.ac.buses[bi].index == p.bus && bi < pf.vm.size()) {
-                    v_pu = pf.vm[bi]; break;
-                  }
-                }
-              } else {
-                for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi) {
-                  if (sys.dc.buses[bi].index == p.bus && bi < pf.vdc.size()) {
-                    v_pu = pf.vdc[bi]; break;
-                  }
-                }
-              }
-              port_arr.push_back(json{
-                {"port_index", p.index}, {"name", p.name}, {"bus", p.bus},
-                {"side", p.side}, {"control_mode", hacdcpf::er_control_str(p.control_mode)},
-                {"matched_vsc_index", matched_vsc_index},
-                {"is_ac", is_ac},
-                {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
-              });
-            }
-            int internal_dcdc_index = refs ? refs->dcdc_index : -1;
-            const hacdcpf::DCDCTransfer* internal_dcdc = nullptr;
-            if (const auto dit = dcdc_tr_by_index.find(internal_dcdc_index);
-                dit != dcdc_tr_by_index.end()) {
-              internal_dcdc = dit->second;
-            }
-            double sum_p = 0.0;
-            for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
-            double vsc_loss = 0.0;
-            for (const auto& pp : port_arr) {
-              const int vidx = pp.value("matched_vsc_index", -1);
-              if (const auto vit = vsc_tr_by_index.find(vidx); vit != vsc_tr_by_index.end()) {
-                vsc_loss += vit->second->loss_mw;
-              }
-            }
-            const double dcdc_loss = internal_dcdc ? internal_dcdc->loss_mw : 0.0;
-            const double total_loss = vsc_loss + dcdc_loss;
-            geo_er.push_back(json{
-              {"router_index", er.index}, {"ports", port_arr},
-              {"p_port_sum_mw", sum_p},
-              {"internal_dcdc_index", internal_dcdc_index},
-              {"internal_dcdc_pin_mw", internal_dcdc ? internal_dcdc->p_in_mw : 0.0},
-              {"internal_dcdc_pout_mw", internal_dcdc ? internal_dcdc->p_out_mw : 0.0},
-              {"internal_dcdc_loss_mw", dcdc_loss},
-              {"vsc_loss_mw", vsc_loss},
-              {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
-            });
-          }
-        }
+        json geo_er = power_flow_geo_energy_router_json(sys, er_snapshot, pf);
 
         out["geo_buses"] = geo_buses;
         out["geo_ac_branches"] = geo_ac_branches;
@@ -6810,41 +7989,123 @@ int main(int argc, char** argv) {
           };
         };
 
+        struct ACTerminalEdge {
+          bool is_switch{false};
+          size_t position{0};
+          int from{0};
+          int to{0};
+        };
+        std::vector<TwoTerminalFlow> ac_switch_flow_rows(sys.ac.switches.size());
+        std::vector<TwoTerminalFlow> ac_cb_flow_rows(sys.ac.circuit_breakers.size());
+        std::vector<ACTerminalEdge> ac_terminal_edges;
+        ac_terminal_edges.reserve(sys.ac.switches.size() + sys.ac.circuit_breakers.size());
+        auto ac_rate_mva = [&](int from, double rated_current_ka, double rated_voltage_kv) {
+          const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+          return rated_current_ka > 0.0 && kv > 0.0
+              ? std::sqrt(3.0) * kv * rated_current_ka
+              : 0.0;
+        };
+        auto register_ac_terminal = [&](bool is_switch, size_t pos, int from, int to,
+                                        bool closed, double rate_mva) {
+          TwoTerminalFlow& fl = is_switch ? ac_switch_flow_rows[pos] : ac_cb_flow_rows[pos];
+          fl.rate_mva = rate_mva;
+          if (!closed || from == 0 || to == 0 || from == to) return;
+          if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+              std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+            fl.pt_mw = -fl.pf_mw;
+            fl.qt_mvar = -fl.qf_mvar;
+            fl.source = "matched_ac_branch";
+            if (fl.rate_mva > 0.0) {
+              fl.loading_pct = 100.0 *
+                  std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                           std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+            }
+            return;
+          }
+          fl.source = "terminal_kcl_tree";
+          ac_terminal_edges.push_back(ACTerminalEdge{is_switch, pos, from, to});
+        };
+        for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+          const auto& sw = sys.ac.switches[i];
+          register_ac_terminal(true, i, sw.bus_from, sw.bus_to,
+                               sw.in_service && sw.closed,
+                               ac_rate_mva(sw.bus_from, sw.i_rated_ka, 0.0));
+        }
+        for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+          const auto& cb = sys.ac.circuit_breakers[i];
+          register_ac_terminal(false, i, cb.bus_from, cb.bus_to,
+                               cb.in_service && cb.closed,
+                               ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
+        }
+        std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
+        std::set<int> ac_terminal_buses;
+        for (size_t ei = 0; ei < ac_terminal_edges.size(); ++ei) {
+          const auto& e = ac_terminal_edges[ei];
+          ac_terminal_adj[e.from].push_back({e.to, ei});
+          ac_terminal_adj[e.to].push_back({e.from, ei});
+          ac_terminal_buses.insert(e.from);
+          ac_terminal_buses.insert(e.to);
+        }
+        std::unordered_set<int> ac_terminal_seen;
+        for (int start : ac_terminal_buses) {
+          if (ac_terminal_seen.count(start)) continue;
+          std::vector<int> order;
+          std::unordered_map<int, int> parent;
+          std::unordered_map<int, size_t> parent_edge;
+          std::vector<int> stack{start};
+          parent[start] = start;
+          ac_terminal_seen.insert(start);
+          while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            order.push_back(u);
+            auto ait = ac_terminal_adj.find(u);
+            if (ait == ac_terminal_adj.end()) continue;
+            for (const auto& [v, edge_pos] : ait->second) {
+              if (parent.count(v)) continue;
+              parent[v] = u;
+              parent_edge[v] = edge_pos;
+              ac_terminal_seen.insert(v);
+              stack.push_back(v);
+            }
+          }
+          std::unordered_map<int, double> subtree_p, subtree_q;
+          for (auto it = order.rbegin(); it != order.rend(); ++it) {
+            const int bus = *it;
+            const double p = ac_net_export_p[bus] - ac_visible_branch_p[bus] + subtree_p[bus];
+            const double q = ac_net_export_q[bus] - ac_visible_branch_q[bus] + subtree_q[bus];
+            if (bus == start) continue;
+            const auto eit = parent_edge.find(bus);
+            if (eit == parent_edge.end()) continue;
+            const auto& e = ac_terminal_edges[eit->second];
+            const double pf_edge = (e.from == bus) ? p : -p;
+            const double qf_edge = (e.from == bus) ? q : -q;
+            TwoTerminalFlow& fl =
+                e.is_switch ? ac_switch_flow_rows[e.position] : ac_cb_flow_rows[e.position];
+            fl.pf_mw = pf_edge;
+            fl.pt_mw = -pf_edge;
+            fl.qf_mvar = qf_edge;
+            fl.qt_mvar = -qf_edge;
+            if (fl.rate_mva > 0.0) {
+              fl.loading_pct = 100.0 *
+                  std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                           std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+            }
+            subtree_p[parent[bus]] += p;
+            subtree_q[parent[bus]] += q;
+          }
+        }
         json ac_switch_flows = json::array();
         for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
           const auto& sw = sys.ac.switches[i];
-          const bool closed = sw.in_service && sw.closed;
-          const bool contracted = closed && !has_nontrivial_ac_match(sw.bus_from, sw.bus_to);
-          const auto fl = derive_ac_terminal_flow(sw.bus_from, sw.bus_to,
-                                                  closed,
-                                                  sw.i_rated_ka, 0.0);
-          auto row = flow_json(sw.index, i, sw.bus_from, sw.bus_to, fl, "ac_switch");
-          if (contracted) {
-            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
-            ac_visible_branch_p[sw.bus_from] += fl.pf_mw;
-            ac_visible_branch_q[sw.bus_from] += fl.qf_mvar;
-            ac_visible_branch_p[sw.bus_to] += fl.pt_mw;
-            ac_visible_branch_q[sw.bus_to] += fl.qt_mvar;
-          }
-          ac_switch_flows.push_back(std::move(row));
+          ac_switch_flows.push_back(flow_json(sw.index, i, sw.bus_from, sw.bus_to,
+                                              ac_switch_flow_rows[i], "ac_switch"));
         }
         json ac_cb_flows = json::array();
         for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
           const auto& cb = sys.ac.circuit_breakers[i];
-          const bool closed = cb.in_service && cb.closed;
-          const bool contracted = closed && !has_nontrivial_ac_match(cb.bus_from, cb.bus_to);
-          const auto fl = derive_ac_terminal_flow(cb.bus_from, cb.bus_to,
-                                                  closed,
-                                                  cb.i_rated_ka, cb.rated_voltage_kv);
-          auto row = flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "ac_circuit_breaker");
-          if (contracted) {
-            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
-            ac_visible_branch_p[cb.bus_from] += fl.pf_mw;
-            ac_visible_branch_q[cb.bus_from] += fl.qf_mvar;
-            ac_visible_branch_p[cb.bus_to] += fl.pt_mw;
-            ac_visible_branch_q[cb.bus_to] += fl.qt_mvar;
-          }
-          ac_cb_flows.push_back(std::move(row));
+          ac_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to,
+                                          ac_cb_flow_rows[i], "ac_circuit_breaker"));
         }
         json dc_cb_flows = json::array();
         for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
@@ -6857,6 +8118,20 @@ int main(int argc, char** argv) {
         out["ac_switch_flows"] = ac_switch_flows;
         out["ac_circuit_breaker_flows"] = ac_cb_flows;
         out["dc_circuit_breaker_flows"] = dc_cb_flows;
+
+        std::unordered_map<int, double> ac_terminal_export_p = ac_visible_branch_p;
+        std::unordered_map<int, double> ac_terminal_export_q = ac_visible_branch_q;
+        auto add_unmatched_ac_terminal_export = [&](const json& fl) {
+          if (fl.value("source", std::string{}) == "matched_ac_branch") return;
+          const int from = fl.value("from_bus", fl.value("from", 0));
+          const int to = fl.value("to_bus", fl.value("to", 0));
+          ac_terminal_export_p[from] += fl.value("pf_mw", 0.0);
+          ac_terminal_export_q[from] += fl.value("qf_mvar", 0.0);
+          ac_terminal_export_p[to] += fl.value("pt_mw", 0.0);
+          ac_terminal_export_q[to] += fl.value("qt_mvar", 0.0);
+        };
+        for (const auto& fl : ac_switch_flows) add_unmatched_ac_terminal_export(fl);
+        for (const auto& fl : ac_cb_flows) add_unmatched_ac_terminal_export(fl);
 
         std::unordered_map<int, double> dc_terminal_export_p = dc_visible_branch_p;
         for (const auto& fl : dc_cb_flows) {
@@ -7030,7 +8305,7 @@ int main(int argc, char** argv) {
         balance_diag["sources"] = json::array();
         balance_diag["ac_terminal_export_p"] = json::object();
         balance_diag["dc_terminal_export_p"] = json::object();
-        for (const auto& [bus, p] : ac_visible_branch_p)
+        for (const auto& [bus, p] : ac_terminal_export_p)
           balance_diag["ac_terminal_export_p"][std::to_string(bus)] = p;
         for (const auto& [bus, p] : dc_terminal_export_p)
           balance_diag["dc_terminal_export_p"][std::to_string(bus)] = p;
@@ -7105,7 +8380,7 @@ int main(int argc, char** argv) {
             const auto* b = ac_bus_by_id(bus);
             if (!b || !b->in_service) continue;
             net += ac_net_export_p[bus];
-            terminal += ac_visible_branch_p[bus];
+            terminal += ac_terminal_export_p[bus];
             if (ac_is_slack_bus(bus)) {
               is_slack = true;
               row_bus = bus;
@@ -8509,28 +9784,40 @@ int main(int argc, char** argv) {
       const bool en_iac    = cons.value("converter_current", true);
       const bool en_mod    = cons.value("converter_modulation", true);
 
-      for (auto& conv : sys.vsc_converters) {
-        if (!conv.in_service || !conv.ac_grid_forming) continue;
-        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
-        conv.p_is_hard_constraint = false;
-      }
+	      for (auto& conv : sys.vsc_converters) {
+	        if (!conv.in_service || !conv.ac_grid_forming) continue;
+	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
+	        conv.p_is_hard_constraint = false;
+	      }
+		      const hacdcpf::HybridPowerSystem original_sys = sys;
+		      const auto er_snapshot = original_sys.energy_routers;
+		      hacdcpf::HybridPowerSystem presentation_sys =
+		          hacdcpf::project_to_canonical_models(original_sys);
+	      for (auto& conv : presentation_sys.vsc_converters) {
+	        if (!conv.in_service || !conv.ac_grid_forming) continue;
+	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
+	        conv.p_is_hard_constraint = false;
+	      }
 
-      json out;
+	      json out;
       out["solver"] = solver;
       out["constraints"] = {{"branch_limits", en_branch},
                             {"converter_capacity", en_cap},
                             {"converter_current", en_iac},
                             {"converter_modulation", en_mod}};
 
-      if (solver == "dc") {
-        hacdcpf::opf::DCOPFOptions opt;
-        opt.include_branch_limits = en_branch;
-        auto r = hacdcpf::solve_dc_opf(sys, opt);
-        out["converged"]=r.converged; out["iterations"]=r.iterations;
-        out["objective"]=r.objective; out["status"]=r.status;
-        out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
-        out["total_load_shedding_mw"]=r.total_load_shedding_mw;
-      } else {
+	      if (solver == "dc") {
+	        hacdcpf::opf::DCOPFOptions opt;
+	        opt.include_branch_limits = en_branch;
+	        auto r = hacdcpf::solve_dc_opf(sys, opt);
+	        out["converged"]=r.converged; out["iterations"]=r.iterations;
+	        out["objective"]=r.objective; out["status"]=r.status;
+	        out["pg_mw"]=r.pg_mw; out["pf_mw"]=r.pf_mw; out["lmp"]=r.lmp;
+	        out["generator_dispatch"] = opf_generator_dispatch_json(sys, r.pg_mw);
+	        out["ac_bus_results"] = opf_ac_bus_results_json(sys, {}, r.va, r.lmp);
+	        out["dc_opf_branch_dispatch"] = opf_dc_branch_dispatch_json(sys, r.pf_mw);
+	        out["total_load_shedding_mw"]=r.total_load_shedding_mw;
+	      } else {
         hacdcpf::opf::ACOPFOptions opt;
         // Map the GUI solver selector onto the modern backend enum.  The parity
         // full-space formulation is shared by the native IPM and Ipopt; only the
@@ -8566,12 +9853,19 @@ int main(int argc, char** argv) {
         out["solver_backend"]=r.profiling.linear_solver_backend;
         out["solver_path"]=(r.solver_path==hacdcpf::opf::OPFSolverPath::ParityIPM)?"parity":
                            (r.solver_path==hacdcpf::opf::OPFSolverPath::NativeAC)?"native_ac":"other";
-        out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
-        out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
-        out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
-        out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
-        if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
-        if (!r.lmp_q.empty()) out["lmp_q"]=r.lmp_q;
+	        out["vm"]=r.vm; out["va"]=r.va; out["pg_mw"]=r.pg_mw; out["qg_mvar"]=r.qg_mvar;
+	        out["vdc"]=r.vdc; out["pac_mw"]=r.pac_mw; out["qac_mvar"]=r.qac_mvar;
+	        out["dpd_mw"]=r.dpd_mw; out["pren_mw"]=r.pren_mw; out["pstor_mw"]=r.pstor_mw;
+	        out["pdcdc_mw"]=r.pdcdc_mw; out["pflex_mw"]=r.pflex_mw;
+	        out["er_port_p_mw"]=r.er_port_p_mw; out["er_port_q_mvar"]=r.er_port_q_mvar;
+	        out["ac_bus_results"] = opf_ac_bus_results_json(original_sys, r.vm, r.va, r.lmp_p, r.lmp_q);
+	        out["dc_bus_results"] = opf_dc_bus_results_json(original_sys, r.vdc);
+	        out["generator_dispatch"] = opf_generator_dispatch_json(presentation_sys, r.pg_mw, r.qg_mvar);
+	        out["vsc_dispatch"] = opf_vsc_dispatch_json(presentation_sys, original_sys, r.pac_mw, r.qac_mvar);
+	        out["dcdc_dispatch"] = opf_dcdc_dispatch_json(presentation_sys, original_sys, r);
+	        out["er_port_dispatch"] = opf_er_port_dispatch_json(original_sys, r);
+	        if (!r.lmp_p.empty()) out["lmp_p"]=r.lmp_p;
+	        if (!r.lmp_q.empty()) out["lmp_q"]=r.lmp_q;
         const auto& v = r.converter_model_scope.validity;
         out["scope"] = {{"model_scope", r.converter_model_scope.model_scope},
                         {"capacity", v.vsc_capacity_circle_enforced},
@@ -8580,31 +9874,56 @@ int main(int argc, char** argv) {
                         {"dcdc_duty", v.dcdc_duty_ratio_enforced},
                         {"vdc_control", v.vsc_vdc_control_modelled}};
         if (r.converged) {
-          for (size_t i = 0; i < r.pg_mw.size() && i < sys.ac.generators.size(); ++i) {
-            sys.ac.generators[i].pg_mw = r.pg_mw[i];
-            if (i < r.qg_mvar.size()) sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
+          // Replay against the same canonical model that the OPF formulation
+          // sees.  This preserves projected external grids and energy-router
+          // internal VSC/DC-DC devices for the OPF -> PF consistency audit.
+          hacdcpf::HybridPowerSystem replay_sys = presentation_sys;
+          const auto projected_opf_vm = project_replay_ac_bus_vector(r.vm, replay_sys);
+          const auto projected_opf_va = project_replay_ac_bus_vector(r.va, replay_sys);
+          for (size_t i = 0; i < r.pg_mw.size() && i < replay_sys.ac.generators.size(); ++i) {
+            replay_sys.ac.generators[i].pg_mw = r.pg_mw[i];
+            if (i < r.qg_mvar.size()) replay_sys.ac.generators[i].qg_mvar = r.qg_mvar[i];
           }
-          if (!r.vm.empty()) { for (size_t i = 0; i < r.vm.size() && i < sys.ac.buses.size(); ++i) sys.ac.buses[i].vm_pu = r.vm[i]; }
+          if (!projected_opf_vm.empty()) {
+            for (size_t i = 0; i < projected_opf_vm.size() && i < replay_sys.ac.buses.size(); ++i)
+              replay_sys.ac.buses[i].vm_pu = projected_opf_vm[i];
+          }
           // Build the post-OPF PF view from the OPF operating point, even when the
           // optional consistency audit is disabled.  Otherwise the GUI overlay can
           // show stale converter setpoints while the OPF tables show the optimized
           // Pac/Qac/Pdcdc vectors.
           constexpr double kRad2Deg = 57.295779513082320876798154814105;
-          for (size_t i = 0; i < r.va.size() && i < sys.ac.buses.size(); ++i)
-            sys.ac.buses[i].va_deg = r.va[i] * kRad2Deg;
-          for (size_t i = 0; i < r.vdc.size() && i < sys.dc.buses.size(); ++i)
-            sys.dc.buses[i].vm_pu = r.vdc[i];
+          for (size_t i = 0; i < projected_opf_va.size() && i < replay_sys.ac.buses.size(); ++i)
+            replay_sys.ac.buses[i].va_deg = projected_opf_va[i] * kRad2Deg;
+	          for (size_t i = 0; i < r.vdc.size() && i < replay_sys.dc.buses.size(); ++i) {
+	            replay_sys.dc.buses[i].vm_pu = r.vdc[i];
+	            replay_sys.dc.buses[i].bus_type = hacdcpf::DCBusType::DC_V;
+	          }
+          for (auto& eg : replay_sys.ac.external_grids) {
+            if (const auto vm = replay_ac_value_for_bus(r.vm, replay_sys, eg.bus))
+              eg.vm_pu = *vm;
+            if (const auto va = replay_ac_value_for_bus(r.va, replay_sys, eg.bus))
+              eg.va_deg = *va * kRad2Deg;
+          }
+          for (auto& gen : replay_sys.ac.generators) {
+            if (const auto vm = replay_ac_value_for_bus(r.vm, replay_sys, gen.bus))
+              gen.vg_pu = *vm;
+          }
 
           bool dc_has_voltage_anchor = false;
-          for (const auto& db : sys.dc.buses)
+          for (const auto& db : replay_sys.dc.buses)
             if (db.in_service && db.bus_type == hacdcpf::DCBusType::DC_V) {
               dc_has_voltage_anchor = true; break;
             }
           std::unordered_map<int, size_t> ac_result_pos_by_bus, dc_result_pos_by_bus;
-          for (size_t bi = 0; bi < sys.ac.buses.size() && bi < r.vm.size(); ++bi)
-            ac_result_pos_by_bus[sys.ac.buses[bi].index] = bi;
-          for (size_t bi = 0; bi < sys.dc.buses.size() && bi < r.vdc.size(); ++bi)
-            dc_result_pos_by_bus[sys.dc.buses[bi].index] = bi;
+          for (const auto& bus : replay_sys.ac.buses) {
+            if (const auto pos = replay_ac_original_pos_for_bus(replay_sys, bus.index);
+                pos && *pos < r.vm.size()) {
+              ac_result_pos_by_bus[bus.index] = *pos;
+            }
+          }
+          for (size_t bi = 0; bi < replay_sys.dc.buses.size() && bi < r.vdc.size(); ++bi)
+            dc_result_pos_by_bus[replay_sys.dc.buses[bi].index] = bi;
           auto ac_result_pos = [&](int bus) -> std::optional<size_t> {
             const auto it = ac_result_pos_by_bus.find(bus);
             if (it == ac_result_pos_by_bus.end()) return std::nullopt;
@@ -8615,41 +9934,96 @@ int main(int argc, char** argv) {
             if (it == dc_result_pos_by_bus.end()) return std::nullopt;
             return it->second;
           };
-          for (size_t i = 0; i < sys.vsc_converters.size(); ++i) {
-            auto& c = sys.vsc_converters[i];
-            const bool dc_forming =
-                (c.control_mode == hacdcpf::ConverterMode::VDC_Q ||
-                 c.control_mode == hacdcpf::ConverterMode::VDC_VAC ||
-                 c.control_mode == hacdcpf::ConverterMode::DC_V_DROOP_AC_V);
-            if (i < r.qac_mvar.size()) c.q_set_mvar = r.qac_mvar[i];
-            if (i < r.pac_mw.size()) { c.p_schedule_mw = r.pac_mw[i];
-                                       c.p_initial_mw  = r.pac_mw[i]; }
-            if (dc_forming && !dc_has_voltage_anchor) {
-              // Keep this converter as the DC anchor; align its targets only.
-              if (const auto pos = dc_result_pos(c.bus_dc))
-                c.v_dc_set_pu = r.vdc[*pos];
-              if (const auto pos = ac_result_pos(c.bus_ac))
-                c.v_ac_set_pu = r.vm[*pos];
-            } else {
-              // Pin to the exact OPF AC P/Q operating point (PQ injection).
-              if (i < r.pac_mw.size()) { c.p_set_mw = r.pac_mw[i];
-                                         c.p_is_hard_constraint = true; }
-              c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
-              if (const auto pos = ac_result_pos(c.bus_ac))
-                c.v_ac_set_pu = r.vm[*pos];
-              if (const auto pos = dc_result_pos(c.bus_dc))
-                c.v_dc_set_pu = r.vdc[*pos];
+	          const auto opf_vsc_positions = opf_active_vsc_positions(replay_sys);
+	          std::unordered_map<size_t, size_t> opf_vsc_result_pos_by_component;
+	          opf_vsc_result_pos_by_component.reserve(opf_vsc_positions.size());
+	          for (size_t k = 0; k < opf_vsc_positions.size(); ++k)
+	            opf_vsc_result_pos_by_component[opf_vsc_positions[k]] = k;
+	          for (size_t i = 0; i < replay_sys.vsc_converters.size(); ++i) {
+	            auto& c = replay_sys.vsc_converters[i];
+	            const auto rit = opf_vsc_result_pos_by_component.find(i);
+	            const std::optional<size_t> result_pos =
+	                rit == opf_vsc_result_pos_by_component.end()
+	                    ? std::nullopt
+	                    : std::optional<size_t>(rit->second);
+	            if (result_pos && *result_pos < r.qac_mvar.size()) c.q_set_mvar = r.qac_mvar[*result_pos];
+	            if (result_pos && *result_pos < r.pac_mw.size()) { c.p_schedule_mw = r.pac_mw[*result_pos];
+	                                                               c.p_initial_mw  = r.pac_mw[*result_pos]; }
+	            // Replay the OPF point, not the converter controller response:
+	            // OPF optimized Pac/Qac/Pdc/Vdc directly, while PF VDC modes
+	            // would otherwise recompute Pac from Vdc and move the state.
+	            if (result_pos && *result_pos < r.pac_mw.size()) { c.p_set_mw = r.pac_mw[*result_pos];
+	                                                               c.p_is_hard_constraint = true; }
+	            c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+	            if (const auto pos = ac_result_pos(c.bus_ac))
+	              c.v_ac_set_pu = r.vm[*pos];
+	            if (const auto pos = dc_result_pos(c.bus_dc))
+	              c.v_dc_set_pu = r.vdc[*pos];
+	          }
+		          const auto er_expansion_refs =
+		              build_energy_router_expansion_refs(original_sys, er_snapshot);
+		          std::unordered_map<int, size_t> replay_vsc_pos_by_index;
+		          replay_vsc_pos_by_index.reserve(replay_sys.vsc_converters.size());
+		          for (size_t vi = 0; vi < replay_sys.vsc_converters.size(); ++vi)
+		            replay_vsc_pos_by_index[replay_sys.vsc_converters[vi].index] = vi;
+		          for (size_t k = 0; k < r.er_port_p_mw.size() && k < r.er_port_map.size(); ++k) {
+		            const int er_index = r.er_port_map[k].original_index;
+		            const int port_index = r.er_port_map[k].source_type;
+		            if (const auto ref_it = er_expansion_refs.find(er_index);
+		                ref_it != er_expansion_refs.end()) {
+		              if (const auto vit = ref_it->second.port_vsc_index.find(port_index);
+		                  vit != ref_it->second.port_vsc_index.end()) {
+		                if (const auto pit = replay_vsc_pos_by_index.find(vit->second);
+		                    pit != replay_vsc_pos_by_index.end()) {
+		                  auto& c = replay_sys.vsc_converters[pit->second];
+		                  c.p_set_mw = r.er_port_p_mw[k];
+		                  c.p_schedule_mw = r.er_port_p_mw[k];
+		                  c.p_initial_mw = r.er_port_p_mw[k];
+		                  c.p_is_hard_constraint = true;
+		                  if (k < r.er_port_q_mvar.size()) c.q_set_mvar = r.er_port_q_mvar[k];
+		                  c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+		                }
+		              }
+		            }
+		            for (auto& er : replay_sys.energy_routers) {
+		              if (er.index != er_index) continue;
+		              for (auto& port : er.ports) {
+	                if (port.index != port_index) continue;
+	                port.p_mw = r.er_port_p_mw[k];
+	                port.p_set_mw = r.er_port_p_mw[k];
+	                if (k < r.er_port_q_mvar.size()) {
+	                  port.q_mvar = r.er_port_q_mvar[k];
+	                  port.q_set_mvar = r.er_port_q_mvar[k];
+	                }
+	                if (const auto vm = replay_ac_value_for_bus(r.vm, replay_sys, port.bus))
+	                  port.v_pu = *vm;
+	              }
+	            }
+	          }
+	          const auto opf_dcdc_positions = opf_active_dcdc_positions(replay_sys);
+	          for (size_t k = 0; k < r.pdcdc_mw.size(); ++k) {
+	            size_t i = k;
+	            if (k < r.dcdc_map.size() && r.dcdc_map[k].original_index >= 0) {
+	              i = static_cast<size_t>(r.dcdc_map[k].original_index);
+	            } else if (k < opf_dcdc_positions.size()) {
+	              i = opf_dcdc_positions[k];
+	            }
+	            if (i >= replay_sys.dc.dcdc_converters.size()) continue;
+	            auto& dcdc = replay_sys.dc.dcdc_converters[i];
+	            dcdc.p_ref_mw = hacdcpf::powerflow::dcdc_output_power_from_input_ref_mw(
+	                dcdc, r.pdcdc_mw[k]);
+	            if (dc_has_voltage_anchor) {
+	              dcdc.control_mode = hacdcpf::DCDCControlMode::Power;
+	            } else if (const auto pos = dc_result_pos(replay_sys.dc.dcdc_converters[i].bus_out)) {
+              dcdc.v_ref_pu = r.vdc[*pos];
             }
           }
-          for (size_t i = 0; i < sys.dc.dcdc_converters.size() && i < r.pdcdc_mw.size(); ++i) {
-            sys.dc.dcdc_converters[i].p_ref_mw = r.pdcdc_mw[i];
-            if (dc_has_voltage_anchor) {
-              sys.dc.dcdc_converters[i].control_mode = hacdcpf::DCDCControlMode::Power;
-            } else if (const auto pos = dc_result_pos(sys.dc.dcdc_converters[i].bus_out)) {
-              sys.dc.dcdc_converters[i].v_ref_pu = r.vdc[*pos];
-            }
-          }
-          auto ac_pf = hacdcpf::solve_power_flow(sys);
+          hacdcpf::PowerFlowOptions replay_opt;
+          replay_opt.max_iter = 80;
+          replay_opt.tol = 1e-8;
+          hacdcpf::PowerFlowResult projected_ac_pf;
+          auto ac_pf = solve_projected_replay_power_flow(
+              replay_sys, replay_opt, &projected_ac_pf);
           if (ac_pf.converged) {
             { std::lock_guard<std::mutex> lk(g_session.mu); g_session.last_pf_result = ac_pf; g_session.last_pf_method = "opf"; }
             // Post-OPF power-flow view: the actual branch flows + converter
@@ -8658,16 +10032,17 @@ int main(int argc, char** argv) {
             json post_pf;
             post_pf["converged"] = true;
             json brf = json::array();
-            for (size_t i = 0; i < sys.ac.branches.size() && i < ac_pf.branch_flows.size(); ++i) {
-              const auto& br = sys.ac.branches[i];
+            for (size_t i = 0; i < original_sys.ac.branches.size() && i < ac_pf.branch_flows.size(); ++i) {
+              const auto& br = original_sys.ac.branches[i];
               const auto& f = ac_pf.branch_flows[i];
               const double rate = br.rate_a_mva;
               const double s_from = std::hypot(f.pf_mw, f.qf_mvar);
               const double s_to = std::hypot(f.pt_mw, f.qt_mvar);
               const double loading = (rate > 1e-9) ? (std::max(s_from, s_to) / rate * 100.0) : 0.0;
-              brf.push_back(json{{"from_bus", br.from_bus}, {"to_bus", br.to_bus},
-                {"pf_mw", f.pf_mw}, {"qf_mvar", f.qf_mvar}, {"pt_mw", f.pt_mw}, {"qt_mvar", f.qt_mvar},
-                {"loading_pct", loading}});
+	              brf.push_back(json{{"index", br.index}, {"name", br.name}, {"canvas_type", "branch"},
+	                {"canvas_index", br.index}, {"from_bus", br.from_bus}, {"to_bus", br.to_bus},
+	                {"pf_mw", f.pf_mw}, {"qf_mvar", f.qf_mvar}, {"pt_mw", f.pt_mw}, {"qt_mvar", f.qt_mvar},
+	                {"loss_mw", f.pf_mw + f.pt_mw}, {"loading_pct", loading}, {"rate_mva", rate}});
             }
             post_pf["branch_flows"] = brf;
             json vtr = json::array();
@@ -8682,10 +10057,10 @@ int main(int argc, char** argv) {
             post_pf["dcdc_transfers"] = dtr;
             json dcbr = json::array();
             std::unordered_map<int, size_t> dc_pos_by_bus;
-            for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi)
-              dc_pos_by_bus[sys.dc.buses[bi].index] = bi;
-            for (size_t i = 0; i < sys.dc.branches.size(); ++i) {
-              const auto& br = sys.dc.branches[i];
+            for (size_t bi = 0; bi < original_sys.dc.buses.size(); ++bi)
+              dc_pos_by_bus[original_sys.dc.buses[bi].index] = bi;
+            for (size_t i = 0; i < original_sys.dc.branches.size(); ++i) {
+              const auto& br = original_sys.dc.branches[i];
               double pf_mw = 0.0, pt_mw = 0.0, loss_mw = 0.0, loading = 0.0;
               const auto fi = dc_pos_by_bus.find(br.from_bus);
               const auto ti = dc_pos_by_bus.find(br.to_bus);
@@ -8705,14 +10080,26 @@ int main(int argc, char** argv) {
                 {"pf_mw",pf_mw},{"pt_mw",pt_mw},{"loss_mw",loss_mw},{"loading_pct",loading},
                 {"rate_mva",br.rate_a_mva}});
             }
-            post_pf["dc_branch_flows"] = dcbr;
-            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
-            out["post_pf"] = post_pf;
+	            post_pf["dc_branch_flows"] = dcbr;
+	            const json terminal_flows =
+	                post_power_flow_terminal_flows_json(original_sys, ac_pf, r.pg_mw, r.qg_mvar);
+	            post_pf["ac_switch_flows"] =
+	                terminal_flows.value("ac_switch_flows", json::array());
+	            post_pf["ac_circuit_breaker_flows"] =
+	                terminal_flows.value("ac_circuit_breaker_flows", json::array());
+	            post_pf["dc_circuit_breaker_flows"] =
+	                terminal_flows.value("dc_circuit_breaker_flows", json::array());
+	            post_pf["geo_er"] =
+	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
+	            post_pf["geo_gen"] =
+	                power_flow_geo_generator_json(original_sys, r.pg_mw, r.qg_mvar);
+	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
+	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
             // dispatch (same engine as /api/session/run_carbon, fed the OPF PF).
             try {
               hacdcpf::analysis::CarbonAnalysisOptions ca_opt; ca_opt.verbose = false;
-              auto carbon = hacdcpf::analysis::compute_carbon_analysis(sys, ac_pf, ca_opt);
+              auto carbon = hacdcpf::analysis::compute_carbon_analysis(replay_sys, ac_pf, ca_opt);
               out["post_carbon"] = carbon_analysis_to_json(sys, carbon);
             } catch (const std::exception&) { /* carbon view is best-effort */ }
           }
@@ -8731,18 +10118,18 @@ int main(int argc, char** argv) {
             cc["pf_residual"] = ac_pf.residual;
             if (ac_pf.converged) {
               auto ac_bus_id_at = [&](int pos) -> int {
-                return pos >= 0 && static_cast<size_t>(pos) < sys.ac.buses.size()
-                           ? sys.ac.buses[static_cast<size_t>(pos)].index
+                return pos >= 0 && static_cast<size_t>(pos) < replay_sys.ac.buses.size()
+                           ? replay_sys.ac.buses[static_cast<size_t>(pos)].index
                            : -1;
               };
               auto dc_bus_id_at = [&](int pos) -> int {
-                return pos >= 0 && static_cast<size_t>(pos) < sys.dc.buses.size()
-                           ? sys.dc.buses[static_cast<size_t>(pos)].index
+                return pos >= 0 && static_cast<size_t>(pos) < replay_sys.dc.buses.size()
+                           ? replay_sys.dc.buses[static_cast<size_t>(pos)].index
                            : -1;
               };
               auto ac_branch_id_at = [&](int pos) -> int {
-                if (pos < 0 || static_cast<size_t>(pos) >= sys.ac.branches.size()) return -1;
-                const auto& br = sys.ac.branches[static_cast<size_t>(pos)];
+                if (pos < 0 || static_cast<size_t>(pos) >= replay_sys.ac.branches.size()) return -1;
+                const auto& br = replay_sys.ac.branches[static_cast<size_t>(pos)];
                 return br.index;
               };
               double max_dvm = 0.0, sum_dvm = 0.0; int worst_vm = -1; size_t nvm = 0;
@@ -8752,8 +10139,10 @@ int main(int argc, char** argv) {
                 if (d > max_dvm) { max_dvm = d; worst_vm = static_cast<int>(i); }
               }
               double max_dva = 0.0, sum_dva = 0.0; int worst_va = -1; size_t nva = 0;
+              const double va_ref =
+                  (!r.va.empty() && !ac_pf.va.empty()) ? (r.va[0] - ac_pf.va[0]) : 0.0;
               for (size_t i = 0; i < r.va.size() && i < ac_pf.va.size(); ++i) {
-                const double d = std::abs(r.va[i] - ac_pf.va[i]);
+                const double d = std::abs((r.va[i] - ac_pf.va[i]) - va_ref);
                 sum_dva += d; ++nva;
                 if (d > max_dva) { max_dva = d; worst_va = static_cast<int>(i); }
               }
@@ -8783,24 +10172,29 @@ int main(int argc, char** argv) {
               // same in both, the branch-loss difference equals the extra slack
               // generation the PF needs — i.e. the generation/loss consistency.
               try {
-                auto opf_data = hacdcpf::powerflow::make_solver_data(
-                    sys, hacdcpf::LossModelType::Linear);
-                if (r.vm.size() == opf_data.ac_buses.size() &&
-                    r.va.size() == opf_data.ac_buses.size()) {
+                auto opf_data = hacdcpf::powerflow::make_solver_data_projected(
+                    hacdcpf::HybridPowerSystem(replay_sys), hacdcpf::LossModelType::Linear);
+                if (projected_opf_vm.size() == opf_data.ac_buses.size() &&
+                    projected_opf_va.size() == opf_data.ac_buses.size()) {
                   auto opf_flows =
-                      hacdcpf::powerflow::compute_branch_flows(opf_data, r.vm, r.va);
+                      hacdcpf::powerflow::compute_branch_flows(
+                          opf_data, projected_opf_vm, projected_opf_va);
                   double max_dpf = 0.0, max_dqf = 0.0; int worst_br = -1;
                   double loss_opf = 0.0, loss_pf = 0.0;
-                  const size_t nbr = std::min(opf_flows.size(), ac_pf.branch_flows.size());
+                  const size_t nbr =
+                      std::min(opf_flows.size(), projected_ac_pf.branch_flows.size());
                   for (size_t i = 0; i < nbr; ++i) {
                     const double dpf =
-                        std::abs(opf_flows[i].pf_mw - ac_pf.branch_flows[i].pf_mw);
+                        std::abs(opf_flows[i].pf_mw -
+                                 projected_ac_pf.branch_flows[i].pf_mw);
                     const double dqf =
-                        std::abs(opf_flows[i].qf_mvar - ac_pf.branch_flows[i].qf_mvar);
+                        std::abs(opf_flows[i].qf_mvar -
+                                 projected_ac_pf.branch_flows[i].qf_mvar);
                     if (dpf > max_dpf) { max_dpf = dpf; worst_br = static_cast<int>(i); }
                     if (dqf > max_dqf) max_dqf = dqf;
                     loss_opf += opf_flows[i].pf_mw + opf_flows[i].pt_mw;
-                    loss_pf  += ac_pf.branch_flows[i].pf_mw + ac_pf.branch_flows[i].pt_mw;
+                    loss_pf += projected_ac_pf.branch_flows[i].pf_mw +
+                               projected_ac_pf.branch_flows[i].pt_mw;
                   }
                   double conv_loss = 0.0;
                   for (const auto& vt : ac_pf.vsc_transfers) conv_loss += vt.loss_mw;
@@ -8998,14 +10392,7 @@ int main(int argc, char** argv) {
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       hacdcpf::analysis::SCDetailedOptions dopt;
-      if (j.contains("options")) {
-        const auto& o = j["options"];
-        std::string ft = o.value("fault_type", std::string("ThreePhase"));
-        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
-        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
-        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
-        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
-      }
+      apply_sc_request_options(j, dopt);
       dopt.compute_branch_flows = false;
       dopt.compute_voltage_drops = false;
       dopt.compute_ith = true;
@@ -9020,14 +10407,9 @@ int main(int argc, char** argv) {
       }
       auto detailed = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, all_bus_ids, dopt);
       json out;
-      out["fault_type"] = [&](){
-        switch(dopt.fault_type){
-          case hacdcpf::analysis::FaultType::ThreePhase: return "ThreePhase";
-          case hacdcpf::analysis::FaultType::SinglePhaseGround: return "SinglePhaseGround";
-          case hacdcpf::analysis::FaultType::TwoPhase: return "TwoPhase";
-          case hacdcpf::analysis::FaultType::TwoPhaseGround: return "TwoPhaseGround";
-        } return "ThreePhase";
-      }();
+      out["fault_type"] = sc_fault_type_name(dopt.fault_type);
+      out["calc_type"] = sc_calc_type_name(dopt.calc_type);
+      out["c_factor"] = dopt.c_factor;
       out["bus_results"] = json::array();
       for (const auto& dr : detailed) {
         // Find the fault bus's own result
@@ -9932,17 +11314,15 @@ int main(int argc, char** argv) {
           fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
-        const std::string ft = j.value("fault_type", std::string("ThreePhase"));
-        if (ft=="SinglePhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::SinglePhaseGround;
-        else if (ft=="TwoPhase") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhase;
-        else if (ft=="TwoPhaseGround") dopt.fault_type=hacdcpf::analysis::FaultType::TwoPhaseGround;
-        else dopt.fault_type=hacdcpf::analysis::FaultType::ThreePhase;
+        apply_sc_request_options(j, dopt);
         dopt.compute_branch_flows = true;
         dopt.compute_voltage_drops = true;
         dopt.compute_ith = true;
         auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
         json out;
-        out["fault_type"] = ft;
+        out["fault_type"] = sc_fault_type_name(dopt.fault_type);
+        out["calc_type"] = sc_calc_type_name(dopt.calc_type);
+        out["c_factor"] = dopt.c_factor;
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;

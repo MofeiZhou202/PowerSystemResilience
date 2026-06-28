@@ -451,6 +451,13 @@ struct Load {
   double motor_percent{0.0};
   double x_sub_pu{0.0};
   double r_sc_pu{0.0};
+
+  // Provenance for IEC 60909 motor contribution after rich AsynchronousMotor
+  // projection.  Empty/zero values keep legacy load motor-fraction semantics.
+  std::string sc_source_type;
+  int sc_source_index{0};
+  int motor_poles{2};
+  double motor_efficiency{0.95};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

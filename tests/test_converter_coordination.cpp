@@ -506,6 +506,15 @@ TEST_CASE("DC/DC Buck duty ratio feasibility is backed out from port voltages",
   CHECK(step_up.defined);
   CHECK_FALSE(step_up.feasible);
 
+  // Per-unit port voltages must be compared on their physical kV bases. A
+  // 1.0 pu -> 1.0 pu Buck from 1.5 kV to 0.4 kV is a 0.2667 duty, not 1.0.
+  c.vn_in_kv = 1.5;
+  c.vn_out_kv = 0.4;
+  const auto different_bases = hacdcpf::powerflow::dcdc_duty_ratio(c, 1.0, 1.0);
+  CHECK(different_bases.defined);
+  CHECK(different_bases.feasible);
+  CHECK(std::abs(different_bases.duty - (0.4 / 1.5)) < 1e-9);
+
   // Generic topology imposes no duty law.
   c.topology = hacdcpf::DCDCTopology::Generic;
   const auto generic = hacdcpf::powerflow::dcdc_duty_ratio(c, 1.0, 1.5);

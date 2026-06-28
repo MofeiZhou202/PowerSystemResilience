@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -55,15 +56,44 @@ double ftb(const Eigen::VectorXd& v, const Eigen::VectorXd& dv, double tau) {
 // SparseLU is the always-available fallback.
 enum class SparseBackend { Auto, Umfpack, Klu, EigenLU };
 
-// One-time backend override for benchmarking/diagnostics:
-//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto   (default auto)
-SparseBackend sparse_backend_preference() {
-  const char* env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+std::string linear_solver_preference_env() {
+  const char* env = std::getenv("HACDCPF_OPF_LINEAR_SOLVER");
+  if (env == nullptr || std::string(env).empty()) {
+    // Backward-compatible spelling used before the dense backend could be
+    // selected explicitly.
+    env = std::getenv("HACDCPF_OPF_SPARSE_SOLVER");
+  }
   if (env != nullptr) {
-    const std::string s(env);
+    std::string s(env);
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char ch) {
+      return static_cast<char>(std::tolower(ch));
+    });
+    return s;
+  }
+  return {};
+}
+
+bool has_linear_solver_override() {
+  const std::string s = linear_solver_preference_env();
+  return !s.empty() && s != "auto";
+}
+
+bool dense_backend_forced() {
+  const std::string s = linear_solver_preference_env();
+  return s == "dense" || s == "dense_lu" || s == "lu";
+}
+
+// One-time backend override for benchmarking/diagnostics:
+//   HACDCPF_OPF_LINEAR_SOLVER = dense | umfpack | klu | eigen | auto
+//   HACDCPF_OPF_SPARSE_SOLVER = umfpack | klu | eigen | auto  (legacy alias)
+SparseBackend sparse_backend_preference() {
+  const std::string s = linear_solver_preference_env();
+  if (!s.empty()) {
     if (s == "umfpack") return SparseBackend::Umfpack;
     if (s == "klu") return SparseBackend::Klu;
-    if (s == "eigen" || s == "sparselu") return SparseBackend::EigenLU;
+    if (s == "eigen" || s == "sparselu" || s == "sparse_eigen_lu") {
+      return SparseBackend::EigenLU;
+    }
   }
   return SparseBackend::Auto;
 }
@@ -75,6 +105,13 @@ SparseBackend sparse_backend_preference() {
 struct SparseKKTCache {
   Eigen::SparseMatrix<double> kkt;
   Eigen::SparseMatrix<double> kkt_orig;
+  // Symmetric Ruiz equilibration scaling: the factored matrix is D·K·D, so a
+  // solve of K·x=b is run as (D·K·D)·y = D·b with x = D·y.  Balancing the rows
+  // and columns is essential for hybrid AC/DC KKTs, where AC balance rows are
+  // pre-scaled to O(1) while DC/converter rows can be orders of magnitude
+  // smaller (e.g. a sub-MW microgrid on a 100 MVA base) — left unbalanced the
+  // DC block looks singular to the factorization ("KKT factorization failed").
+  Eigen::VectorXd scale;
 #if defined(HACDCPF_OPF_HAVE_UMFPACK)
   Eigen::UmfPackLU<Eigen::SparseMatrix<double>> umf;
 #endif
@@ -148,7 +185,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     case 1:
       if (pattern_changed) {
         cache.umf.analyzePattern(cache.kkt);
-        if (cache.umf.info() != Eigen::Success) return false;
       }
       cache.umf.factorize(cache.kkt);
       return cache.umf.info() == Eigen::Success;
@@ -157,7 +193,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     case 2:
       if (pattern_changed) {
         cache.klu.analyzePattern(cache.kkt);
-        if (cache.klu.info() != Eigen::Success) return false;
       }
       cache.klu.factorize(cache.kkt);
       return cache.klu.info() == Eigen::Success;
@@ -165,7 +200,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     default:
       if (pattern_changed) {
         cache.lu.analyzePattern(cache.kkt);
-        if (cache.lu.info() != Eigen::Success) return false;
       }
       cache.lu.factorize(cache.kkt);
       return cache.lu.info() == Eigen::Success;
@@ -183,6 +217,35 @@ Eigen::VectorXd sparse_solve_active(SparseKKTCache& cache, const Eigen::VectorXd
 #endif
     default: return cache.lu.solve(rhs);
   }
+}
+
+// Symmetric Ruiz equilibration: find a positive diagonal D so the rows (and, by
+// symmetry, columns) of D·K·D have unit ∞-norm.  A few sweeps are enough to pull
+// a badly-scaled symmetric indefinite KKT into a factorable range.  Zero/empty
+// rows keep D=1 (no division).
+Eigen::VectorXd compute_ruiz_scaling(const Eigen::SparseMatrix<double>& K, int sweeps = 5) {
+  const int dim = static_cast<int>(K.rows());
+  Eigen::VectorXd D = Eigen::VectorXd::Ones(dim);
+  Eigen::VectorXd rmax(dim);
+  for (int s = 0; s < sweeps; ++s) {
+    rmax.setZero();
+    for (int col = 0; col < K.outerSize(); ++col) {
+      for (Eigen::SparseMatrix<double>::InnerIterator it(K, col); it; ++it) {
+        // Magnitude of the entry under the current accumulated scaling.
+        const double v = std::abs(it.value()) * D[it.row()] * D[it.col()];
+        if (v > rmax[it.row()]) rmax[it.row()] = v;
+      }
+    }
+    double max_dev = 0.0;
+    for (int i = 0; i < dim; ++i) {
+      if (rmax[i] > 0.0) {
+        D[i] /= std::sqrt(rmax[i]);
+        max_dev = std::max(max_dev, std::abs(std::log(rmax[i])));
+      }
+    }
+    if (max_dev < 1e-3) break;  // already balanced
+  }
+  return D;
 }
 
 bool factor_kkt_sparse(SparseKKTCache& cache,
@@ -225,6 +288,15 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
   cache.kkt.resize(dim, dim);
   cache.kkt.setFromTriplets(trips.begin(), trips.end());
   cache.kkt.makeCompressed();
+
+  // Equilibrate: replace K with D·K·D so the factorization sees a balanced
+  // matrix.  The scaling is undone around each solve (see kkt_solve_sparse).
+  cache.scale = compute_ruiz_scaling(cache.kkt);
+  for (int col = 0; col < cache.kkt.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(cache.kkt, col); it; ++it) {
+      it.valueRef() *= cache.scale[it.row()] * cache.scale[it.col()];
+    }
+  }
   cache.kkt_orig = cache.kkt;
 
   const int nnz = static_cast<int>(cache.kkt.nonZeros());
@@ -275,15 +347,20 @@ bool kkt_solve_sparse(SparseKKTCache& cache,
   if (!cache.factored) {
     return false;
   }
-  Eigen::VectorXd sol = sparse_solve_active(cache, rhs);
+  // The factored matrix is the equilibrated D·K·D, so solve in the scaled space:
+  //   (D·K·D)·y = D·b,   x = D·y.   kkt_orig is the scaled matrix, so iterative
+  //   refinement below is self-consistent in the scaled space.
+  const Eigen::VectorXd& D = cache.scale;
+  const Eigen::VectorXd rhs_s = D.cwiseProduct(rhs);
+  Eigen::VectorXd sol = sparse_solve_active(cache, rhs_s);
   if (!sol.allFinite()) {
     cache.solve_degraded = true;
     return false;
   }
   // Iterative refinement (2 steps) — reuses the existing factorization.
   for (int ref = 0; ref < 2; ++ref) {
-    Eigen::VectorXd residual = rhs - cache.kkt_orig * sol;
-    if (residual.cwiseAbs().maxCoeff() < 1e-14 * rhs.cwiseAbs().maxCoeff()) {
+    Eigen::VectorXd residual = rhs_s - cache.kkt_orig * sol;
+    if (residual.cwiseAbs().maxCoeff() < 1e-14 * rhs_s.cwiseAbs().maxCoeff()) {
       break;
     }
     Eigen::VectorXd correction = sparse_solve_active(cache, residual);
@@ -292,17 +369,20 @@ bool kkt_solve_sparse(SparseKKTCache& cache,
     }
     sol += correction;
   }
-  // Flag an inaccurate solve so the next factorization escalates to a more
-  // robust backend.  Eigen's SparseLU can report a successful factorization yet
-  // return a poor solution on near-singular KKTs; the relative residual exposes
-  // that so the IPM switches to UMFPACK before the iterate diverges.
-  const double rhs_norm = rhs.cwiseAbs().maxCoeff();
+  // Flag an inaccurate Eigen SparseLU solve so the next factorization can try
+  // another backend when one is available.  Do not downgrade away from
+  // UMFPACK/KLU on a warning residual: those SuiteSparse backends are already
+  // the robust sparse path, and switching backend mid-IPM changes the trajectory
+  // enough to break otherwise convergent hybrid AC/DC cases.
+  const double rhs_norm = rhs_s.cwiseAbs().maxCoeff();
   if (rhs_norm > 0.0) {
-    const double resid = (rhs - cache.kkt_orig * sol).cwiseAbs().maxCoeff();
-    if (resid > 1e-6 * rhs_norm) {
+    const double resid = (rhs_s - cache.kkt_orig * sol).cwiseAbs().maxCoeff();
+    if (cache.active == 3 && resid > 1e-6 * rhs_norm) {
       cache.solve_degraded = true;
     }
   }
+  // Undo the column scaling: x = D·y.
+  sol = D.cwiseProduct(sol);
   dx = sol.head(cache.nn);
   dlambda = sol.tail(cache.meq);
   return true;
@@ -601,9 +681,24 @@ IPMResult solve_primal_dual_ipm(const Problem& prob, const IPMOptions& opt) {
   double best_comp = compcond;
   int best_iter = 0;
 
-  // Use dense KKT for small systems (fast pivoted LU), sparse for larger ones
-  constexpr int kDenseThreshold = 1500;  // dim = n + meq
-  const bool use_dense = (n + meq) <= kDenseThreshold;
+  // Sparse KKT is the default path: it carries Ruiz equilibration + robust
+  // SuiteSparse backends with escalation for large / badly scaled hybrid AC/DC
+  // KKTs.  On Windows deployments, SuiteSparse/KLU/UMFPACK availability and
+  // runtime behavior vary more than on Linux/macOS; small pure-AC MATPOWER
+  // cases should not fail solely because the sparse factorizer stack is absent
+  // or brittle.  Use dense pivoted LU for small Windows KKTs unless the operator
+  // explicitly requests a sparse backend.  The same dense path can be forced
+  // everywhere with HACDCPF_OPF_LINEAR_SOLVER=dense for diagnostics.
+  constexpr int kDenseAutoKktDim =
+#if defined(_WIN32)
+      1024;
+#else
+      0;
+#endif
+  const int kkt_dim = n + meq;
+  const bool use_dense =
+      dense_backend_forced() ||
+      (!has_linear_solver_override() && kDenseAutoKktDim > 0 && kkt_dim <= kDenseAutoKktDim);
   DenseKKTCache dense_cache;
   SparseKKTCache sparse_cache;
 

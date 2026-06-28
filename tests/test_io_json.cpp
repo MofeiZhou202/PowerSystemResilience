@@ -101,6 +101,38 @@ TEST_CASE("JSON round-trip: 2-bus system serialises and deserialises", "[io][jso
     CHECK_THAT(restored.ac.branches[0].x_pu, WithinAbs(0.04, 1e-9));
 }
 
+TEST_CASE("JSON round-trip: Load short-circuit motor fields are preserved",
+          "[io][json][roundtrip][short_circuit]") {
+    auto orig = make_2bus();
+    Load load;
+    load.index = 1;
+    load.bus = 2;
+    load.in_service = true;
+    load.p_mw = 1.5;
+    load.q_mvar = 0.5;
+    load.sn_mva = 2.5;
+    load.motor_percent = 35.0;
+    load.r_sc_pu = 0.08;
+    load.x_sub_pu = 0.22;
+    load.sc_source_type = "AsynchronousMotor";
+    load.sc_source_index = 7;
+    load.motor_poles = 4;
+    load.motor_efficiency = 0.91;
+    orig.ac.loads = {load};
+
+    const auto restored = from_json(to_json(orig));
+    REQUIRE(!restored.ac.loads.empty());
+    const auto& rt = restored.ac.loads.front();
+    CHECK_THAT(rt.sn_mva, WithinAbs(2.5, 1e-12));
+    CHECK_THAT(rt.motor_percent, WithinAbs(35.0, 1e-12));
+    CHECK_THAT(rt.r_sc_pu, WithinAbs(0.08, 1e-12));
+    CHECK_THAT(rt.x_sub_pu, WithinAbs(0.22, 1e-12));
+    CHECK(rt.sc_source_type == "AsynchronousMotor");
+    CHECK(rt.sc_source_index == 7);
+    CHECK(rt.motor_poles == 4);
+    CHECK_THAT(rt.motor_efficiency, WithinAbs(0.91, 1e-12));
+}
+
 TEST_CASE("JSON round-trip: IEEE-14 AC/DC case preserves topology", "[io][json][roundtrip]") {
     auto orig = build_ieee14_acdc();
     const std::string json_str = to_json(orig);

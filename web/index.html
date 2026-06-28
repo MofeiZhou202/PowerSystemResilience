@@ -156,6 +156,12 @@
         <option value="TwoPhaseGround">两相接地</option>
       </select>
     </label>
+    <label class="sub-label">计算类型
+      <select id="scCalcTypeSelect">
+        <option value="Max">最大短路电流</option>
+        <option value="Min">最小短路电流</option>
+      </select>
+    </label>
     <label class="sub-label">电压矫正系数
       <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
     </label>
@@ -857,6 +863,10 @@
           <h4>最优潮流 — DC节点电压</h4>
           <div id="opfDcBusResults" class="topo-table-wrap"></div>
         </div>
+        <div class="topo-section" id="opfAllComponentsSection" style="display:none">
+          <h4>最优潮流 — OPF后潮流全部元件计算结果</h4>
+          <div id="opfAllComponentsResults" class="topo-table-wrap"></div>
+        </div>
         <div class="topo-section">
           <h4>最优潮流 — AC节点电压/电价</h4>
           <div id="opfBusResults" class="topo-table-wrap"></div>
@@ -1096,6 +1106,7 @@
       不存在的编号会被拒绝并给出提示；<strong>留空</strong>则计算全部母线。
     </p>
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
+    <input type="hidden" id="scCalcType" value="Max"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
     <div class="modal-actions">
       <button id="btnScRun" class="btn btn-warn">确定</button>
@@ -1157,8 +1168,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260626-vdc-dc-power"></script>
-<script src="js/canvas.js?v=20260626-vdc-dc-power"></script>
-<script src="js/app.js?v=20260626-vdc-dc-power"></script>
+<script src="js/components.js?v=20260628-generator-results"></script>
+<script src="js/canvas.js?v=20260628-generator-results"></script>
+<script src="js/app.js?v=20260628-generator-results"></script>
 </body>
 </html>

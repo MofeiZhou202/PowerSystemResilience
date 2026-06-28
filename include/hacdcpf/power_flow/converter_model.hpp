@@ -77,6 +77,9 @@ DCDCPowerTransfer dcdc_power_transfer(const DCDCConverter& dcdc,
                                       const Eigen::VectorXd& vdc,
                                       double base_mva);
 
+double dcdc_output_power_from_input_ref_mw(const DCDCConverter& dcdc,
+                                           double p_in_mw);
+
 // Ideal CCM duty-ratio feasibility result for a DC/DC converter (multi-converter
 // model §3.2).  `duty` is the duty ratio D backed out from the port voltages for
 // Buck/Boost/Buck-Boost, or the modulation gain M = Vout/(n·Vin) for Isolated.

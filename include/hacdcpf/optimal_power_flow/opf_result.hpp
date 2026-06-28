@@ -76,6 +76,8 @@ struct ACOPFResult {
   std::vector<double> qstor_mvar;
   std::vector<double> pdcdc_mw;
   std::vector<double> pflex_mw;
+  std::vector<double> er_port_p_mw;
+  std::vector<double> er_port_q_mvar;
 
   std::vector<double> lmp_p;
   std::vector<double> lmp_q;
@@ -88,6 +90,7 @@ struct ACOPFResult {
   std::vector<ComponentRef> stor_map;
   std::vector<ComponentRef> dcdc_map;
   std::vector<ComponentRef> flex_map;
+  std::vector<ComponentRef> er_port_map;
 
   bool converged{false};
   int iterations{0};

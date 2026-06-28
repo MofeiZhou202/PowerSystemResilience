@@ -36,6 +36,37 @@ option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
 option(HACDCPF_ENABLE_WERROR  "Treat warnings as errors for core library"  OFF)
 option(HACDCPF_ENABLE_NATIVE_ARCH
        "Enable -march=native for host-specific builds"                     OFF)
+set(HACDCPF_DEPENDENCY_PROFILE "portable" CACHE STRING
+    "Dependency profile: portable, full, or minimal.")
+set_property(CACHE HACDCPF_DEPENDENCY_PROFILE PROPERTY STRINGS
+  portable full minimal)
+if(APPLE)
+  set(_HACDCPF_ENABLE_IPOPT_DEFAULT ON)
+else()
+  set(_HACDCPF_ENABLE_IPOPT_DEFAULT OFF)
+endif()
+option(HACDCPF_ENABLE_IPOPT
+       "Build MIPSolvers embedded Ipopt when supported by that checkout"
+       ${_HACDCPF_ENABLE_IPOPT_DEFAULT})
+unset(_HACDCPF_ENABLE_IPOPT_DEFAULT)
+option(HACDCPF_USE_SUITESPARSE
+       "Use SuiteSparse-backed sparse linear solvers when available"        ON)
+option(HACDCPF_USE_GUROBI
+       "Enable Gurobi detection through MIPSolvers when available"          OFF)
+set(HACDCPF_SUITESPARSE_ROOT "" CACHE PATH
+    "SuiteSparse installation prefix. Mirrors SUITESPARSE_ROOT when empty.")
+if(NOT HACDCPF_SUITESPARSE_ROOT AND DEFINED ENV{SUITESPARSE_ROOT})
+  set(HACDCPF_SUITESPARSE_ROOT "$ENV{SUITESPARSE_ROOT}" CACHE PATH
+      "SuiteSparse installation prefix. Mirrors SUITESPARSE_ROOT when empty."
+      FORCE)
+endif()
+if(HACDCPF_SUITESPARSE_ROOT)
+  set(SUITESPARSE_ROOT "${HACDCPF_SUITESPARSE_ROOT}" CACHE PATH
+      "SuiteSparse installation prefix used by this project and MIPSolvers."
+      FORCE)
+  set(ENV{SUITESPARSE_ROOT} "${HACDCPF_SUITESPARSE_ROOT}")
+  list(PREPEND CMAKE_PREFIX_PATH "${HACDCPF_SUITESPARSE_ROOT}")
+endif()
 # IO optional features: OpenDSS and Excel require external libs not bundled here
 option(HACDCPF_ENABLE_OPENDSS "Build OpenDSS bridge (requires dss_capi)"   OFF)
 option(HACDCPF_ENABLE_OPENDSS_COMPARE
@@ -49,13 +80,71 @@ set(HACDCPF_DSS_CAPI_PLATFORM "win_x64" CACHE STRING
 
 # ── Dependencies (pulls in MIPSolvers + transitive: Eigen3, fmt, nlohmann_json,
 #                 HiGHS, optional Ipopt/SCIP) ─────────────────────────────────
-# Embedded SCIP uses POSIX sigaction(), which the Windows/UCRT CRT does not
-# provide. Define SCIP_NO_SIGACTION so SCIP falls back to signal() there.
-# SCIP also calls POSIX strtok_r(); MSVC provides the compatible strtok_s().
+# Embedded SCIP uses POSIX sigaction() and strtok_r(), which the Windows/UCRT
+# CRT does not provide. Use SCIP's own portability switches before adding the
+# dependency subdirectory so they propagate into the embedded SCIP target.
 # Applied before the dependency add_subdirectory so it propagates to SCIP.
 if(WIN32)
   add_compile_definitions(SCIP_NO_SIGACTION)
-  add_compile_definitions(strtok_r=strtok_s)
+  add_compile_definitions(SCIP_NO_STRTOK_R)
+endif()
+
+if(HACDCPF_ENABLE_IPOPT AND NOT APPLE)
+  message(FATAL_ERROR
+    "HACDCPF_ENABLE_IPOPT=ON was requested, but the current MIPSolvers "
+    "embedded Ipopt CMake path is macOS-only. Keep it OFF on Windows/Linux "
+    "or extend MIPSolvers/cmake/BuildIpopt.cmake for that platform.")
+endif()
+
+if(HACDCPF_DEPENDENCY_PROFILE STREQUAL "minimal")
+  set(_hacdcpf_build_mipsolvers_tests OFF)
+  set(_hacdcpf_build_mipsolvers_scuc OFF)
+  set(_hacdcpf_build_mipsolvers_scuc_case_builder OFF)
+  set(_hacdcpf_build_embedded_scip OFF)
+  set(_hacdcpf_build_hfactor OFF)
+elseif(HACDCPF_DEPENDENCY_PROFILE STREQUAL "full")
+  set(_hacdcpf_build_mipsolvers_tests ${HACDCPF_BUILD_TESTS})
+  set(_hacdcpf_build_mipsolvers_scuc ON)
+  set(_hacdcpf_build_mipsolvers_scuc_case_builder ON)
+  set(_hacdcpf_build_embedded_scip ON)
+  set(_hacdcpf_build_hfactor ON)
+else()
+  set(_hacdcpf_build_mipsolvers_tests OFF)
+  set(_hacdcpf_build_mipsolvers_scuc OFF)
+  set(_hacdcpf_build_mipsolvers_scuc_case_builder OFF)
+  set(_hacdcpf_build_embedded_scip ON)
+  set(_hacdcpf_build_hfactor ON)
+endif()
+
+set(MIPSOLVERS_BUILD_TESTS ${_hacdcpf_build_mipsolvers_tests} CACHE BOOL
+    "Build MIPSolvers tests when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_SCUC ${_hacdcpf_build_mipsolvers_scuc} CACHE BOOL
+    "Build MIPSolvers SCUC CLI when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_SCUC_CASE_BUILDER
+    ${_hacdcpf_build_mipsolvers_scuc_case_builder} CACHE BOOL
+    "Build MIPSolvers SCUC case builder when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_PYTHON OFF CACHE BOOL
+    "Build MIPSolvers Python bindings when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_HFACTOR ${_hacdcpf_build_hfactor} CACHE BOOL
+    "Build MIPSolvers HFactor when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_EMBEDDED_HIGHS ON CACHE BOOL
+    "Build embedded MIPSolvers HiGHS source" FORCE)
+set(MIPSOLVERS_BUILD_EMBEDDED_SCIP ${_hacdcpf_build_embedded_scip} CACHE BOOL
+    "Build embedded MIPSolvers SCIP source" FORCE)
+set(MIPSOLVERS_ENABLE_NATIVE_ARCH ${HACDCPF_ENABLE_NATIVE_ARCH} CACHE BOOL
+    "Propagate host-specific native-arch builds to MIPSolvers" FORCE)
+set(MIPSOLVERS_USE_SUITESPARSE ${HACDCPF_USE_SUITESPARSE} CACHE BOOL
+    "Use SuiteSparse in MIPSolvers when available" FORCE)
+set(MIPSOLVERS_USE_GUROBI ${HACDCPF_USE_GUROBI} CACHE BOOL
+    "Enable Gurobi detection in MIPSolvers when available" FORCE)
+
+set(MIPSOLVERS_BUILD_LOCAL_IPOPT ${HACDCPF_ENABLE_IPOPT} CACHE BOOL
+    "Build embedded Ipopt from MIPSolvers/ipopt when supported" FORCE)
+
+if(WIN32 AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY
+      "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING
+      "Use the dynamic MSVC runtime so vcpkg x64-windows DLL packages link cleanly")
 endif()
 include(cmake/Dependencies.cmake)
 
@@ -296,27 +385,96 @@ endif()
 # ── Link against MIPSolvers (brings Eigen3, fmt, nlohmann_json, HiGHS, Ipopt) ─
 target_link_libraries(hacdcpf PUBLIC mipsolvers::mipsolvers)
 
-# ── SuiteSparse include path for the OPF sparse-KKT solver (UMFPACK/KLU) ───────
-# MIPSolvers links UMFPACK/KLU and defines HACDCPF_HAVE_UMFPACK/KLU, but keeps the
-# SuiteSparse *include* directory PRIVATE to its own target.  The native OPF IPM
-# uses Eigen's UmfPackLU/KLU wrappers (which #include <umfpack.h>/<klu.h>), so
-# re-discover the include directory here and expose dedicated HACDCPF_OPF_HAVE_*
-# macros that are enabled only when the headers are actually reachable.
+# ── SuiteSparse for the OPF sparse-KKT solver (UMFPACK/KLU) ───────────────────
+# MIPSolvers uses SuiteSparse privately, while the native OPF IPM includes
+# Eigen's UmfPackLU/KLU wrappers directly. Re-discover both headers and link
+# libraries here so an OPF sparse backend is enabled only when this target can
+# compile and link it on the current machine.
+set(HACDCPF_OPF_SUITESPARSE_LIBRARIES "")
+set(_HACDCPF_SUITESPARSE_HINTS
+  ${HACDCPF_SUITESPARSE_ROOT}
+  $ENV{SUITESPARSE_ROOT}
+  /opt/homebrew/opt/suite-sparse
+  /opt/homebrew
+  /usr/local/opt/suite-sparse
+  /usr/local
+  /usr
+  "C:/vcpkg/installed/x64-windows"
+  "C:/vcpkg/installed/x64-windows-static"
+  "C:/vcpkg/installed/arm64-windows"
+  "C:/SuiteSparse")
+list(REMOVE_DUPLICATES _HACDCPF_SUITESPARSE_HINTS)
 find_path(HACDCPF_SUITESPARSE_INCLUDE_DIR
   NAMES umfpack.h klu.h
-  HINTS $ENV{SUITESPARSE_ROOT} /opt/homebrew/opt/suite-sparse /opt/homebrew
-        /usr/local/opt/suite-sparse /usr/local /usr
+  HINTS ${_HACDCPF_SUITESPARSE_HINTS}
   PATH_SUFFIXES include include/suitesparse)
-if(HACDCPF_SUITESPARSE_INCLUDE_DIR)
+find_library(HACDCPF_UMFPACK_LIBRARY
+  NAMES umfpack
+  HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+  PATH_SUFFIXES lib lib64)
+find_library(HACDCPF_KLU_LIBRARY
+  NAMES klu
+  HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+  PATH_SUFFIXES lib lib64)
+
+if(HACDCPF_USE_SUITESPARSE AND HACDCPF_SUITESPARSE_INCLUDE_DIR)
+  find_library(HACDCPF_AMD_LIBRARY
+    NAMES amd
+    HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+    PATH_SUFFIXES lib lib64)
+  find_library(HACDCPF_COLAMD_LIBRARY
+    NAMES colamd
+    HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+    PATH_SUFFIXES lib lib64)
+  find_library(HACDCPF_CHOLMOD_LIBRARY
+    NAMES cholmod
+    HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+    PATH_SUFFIXES lib lib64)
+  find_library(HACDCPF_SUITESPARSECONFIG_LIBRARY
+    NAMES suitesparseconfig
+    HINTS ${_HACDCPF_SUITESPARSE_HINTS}
+    PATH_SUFFIXES lib lib64)
+
   target_include_directories(hacdcpf PRIVATE ${HACDCPF_SUITESPARSE_INCLUDE_DIR})
-  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/umfpack.h")
+  foreach(_hacdcpf_ss_lib IN ITEMS
+      HACDCPF_AMD_LIBRARY
+      HACDCPF_COLAMD_LIBRARY
+      HACDCPF_CHOLMOD_LIBRARY
+      HACDCPF_SUITESPARSECONFIG_LIBRARY)
+    if(NOT "${${_hacdcpf_ss_lib}}" STREQUAL "" AND
+       NOT "${${_hacdcpf_ss_lib}}" MATCHES "-NOTFOUND$")
+      list(APPEND HACDCPF_OPF_SUITESPARSE_LIBRARIES ${${_hacdcpf_ss_lib}})
+    endif()
+  endforeach()
+
+  if(HACDCPF_UMFPACK_LIBRARY AND
+     EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/umfpack.h")
+    list(APPEND HACDCPF_OPF_SUITESPARSE_LIBRARIES ${HACDCPF_UMFPACK_LIBRARY})
     target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_UMFPACK=1)
-    message(STATUS "hacdcpf: OPF sparse KKT can use UMFPACK (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+    message(STATUS
+      "hacdcpf: OPF sparse KKT can use UMFPACK "
+      "(${HACDCPF_UMFPACK_LIBRARY})")
   endif()
-  if(EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/klu.h")
+
+  if(HACDCPF_KLU_LIBRARY AND
+     EXISTS "${HACDCPF_SUITESPARSE_INCLUDE_DIR}/klu.h")
+    list(APPEND HACDCPF_OPF_SUITESPARSE_LIBRARIES ${HACDCPF_KLU_LIBRARY})
     target_compile_definitions(hacdcpf PRIVATE HACDCPF_OPF_HAVE_KLU=1)
-    message(STATUS "hacdcpf: OPF sparse KKT can use KLU (${HACDCPF_SUITESPARSE_INCLUDE_DIR})")
+    message(STATUS
+      "hacdcpf: OPF sparse KKT can use KLU (${HACDCPF_KLU_LIBRARY})")
   endif()
+
+  if(HACDCPF_OPF_SUITESPARSE_LIBRARIES)
+    list(REMOVE_DUPLICATES HACDCPF_OPF_SUITESPARSE_LIBRARIES)
+    target_link_libraries(hacdcpf PRIVATE ${HACDCPF_OPF_SUITESPARSE_LIBRARIES})
+  else()
+    message(STATUS
+      "hacdcpf: SuiteSparse headers found, but UMFPACK/KLU libraries were not; "
+      "OPF sparse KKT will use Eigen SparseLU unless forced otherwise.")
+  endif()
+else()
+  message(STATUS
+    "hacdcpf: SuiteSparse disabled or not found; OPF sparse KKT will use Eigen SparseLU")
 endif()
 
 # ── ETAP Excel I/O backend (OpenXLSX) ────────────────────────────────────

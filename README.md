@@ -118,6 +118,10 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 
 优化和 MILP 模块依赖 sibling directory `../MIPSolvers` 提供的 Eigen、HiGHS、Ipopt 和 native branch-and-cut 后端。项目 CMake 默认从该 sibling 路径解析依赖，而不是搜索系统 solver。
 
+跨平台构建建议使用仓库内的 CMake presets；macOS/Linux/Windows 的依赖安装、
+`MIPSolvers` 源码路径、SuiteSparse 稀疏求解器和 Windows OPF 后端选择见
+[`docs/cross_platform_build.md`](docs/cross_platform_build.md)。
+
 ## 6. Validation 与诊断
 
 Validation 是从 rich component 到 canonical model 的安全门。主要入口：
