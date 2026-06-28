@@ -118,3 +118,5 @@ LearningtoOptimize/
 .github/
 
 ._deps/
+
+.vscode/

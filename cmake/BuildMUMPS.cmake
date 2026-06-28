@@ -14,6 +14,57 @@ include(FetchContent)
 include(GNUInstallDirs)
 
 # ── Enable Fortran (project uses only CXX C; we enable Fortran here) ──────────
+# Support explicit toolchain wiring via cache/env so the same repo can be
+# configured consistently on Windows/macOS/Linux.
+if(NOT CMAKE_Fortran_COMPILER)
+  set(_MIPSOLVERS_FORTRAN_HINTS)
+
+  if(DEFINED MIPSOLVERS_FORTRAN_COMPILER AND NOT MIPSOLVERS_FORTRAN_COMPILER STREQUAL "")
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "${MIPSOLVERS_FORTRAN_COMPILER}")
+  endif()
+  if(DEFINED ENV{MIPSOLVERS_FORTRAN_COMPILER} AND NOT "$ENV{MIPSOLVERS_FORTRAN_COMPILER}" STREQUAL "")
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "$ENV{MIPSOLVERS_FORTRAN_COMPILER}")
+  endif()
+  if(DEFINED ENV{FC} AND NOT "$ENV{FC}" STREQUAL "")
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS "$ENV{FC}")
+  endif()
+
+  if(WIN32)
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
+      "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifx.exe"
+      "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifort.exe"
+      "C:/msys64/mingw64/bin/gfortran.exe")
+    set(_MIPSOLVERS_FORTRAN_NAMES ifx ifort gfortran)
+  elseif(APPLE)
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
+      "/opt/homebrew/bin/gfortran"
+      "/usr/local/bin/gfortran")
+    set(_MIPSOLVERS_FORTRAN_NAMES gfortran ifx ifort)
+  else()
+    list(APPEND _MIPSOLVERS_FORTRAN_HINTS
+      "/usr/bin/gfortran"
+      "/usr/local/bin/gfortran")
+    set(_MIPSOLVERS_FORTRAN_NAMES gfortran ifx ifort)
+  endif()
+
+  set(_MIPSOLVERS_FORTRAN_CANDIDATE "")
+  foreach(_fc_hint IN LISTS _MIPSOLVERS_FORTRAN_HINTS)
+    if(EXISTS "${_fc_hint}")
+      set(_MIPSOLVERS_FORTRAN_CANDIDATE "${_fc_hint}")
+      break()
+    endif()
+  endforeach()
+
+  if(NOT _MIPSOLVERS_FORTRAN_CANDIDATE)
+    find_program(_MIPSOLVERS_FORTRAN_CANDIDATE NAMES ${_MIPSOLVERS_FORTRAN_NAMES})
+  endif()
+
+  if(_MIPSOLVERS_FORTRAN_CANDIDATE)
+    set(CMAKE_Fortran_COMPILER "${_MIPSOLVERS_FORTRAN_CANDIDATE}" CACHE FILEPATH "Fortran compiler for embedded MUMPS/Ipopt" FORCE)
+    message(STATUS "mipsolvers: using Fortran compiler ${CMAKE_Fortran_COMPILER}")
+  endif()
+endif()
+
 enable_language(Fortran)
 
 # ── Download MUMPS 5.7.3 ──────────────────────────────────────────────────────
@@ -121,6 +172,14 @@ endif()
 # CMake's built-in Fortran module dependency scanner handles ordering of
 # module-definition files automatically; no manual OBJECT-target chains needed.
 # ─────────────────────────────────────────────────────────────────────────────
+if(WIN32 AND CMAKE_Fortran_COMPILER_ID STREQUAL "IntelLLVM")
+  set(_MIPSOLVERS_FORTRAN_MAIN_STUB "${CMAKE_CURRENT_BINARY_DIR}/_mumps_main_stub.c")
+  file(WRITE "${_MIPSOLVERS_FORTRAN_MAIN_STUB}"
+    "void MAIN__(void) {}\n"
+    "void MAIN_(void) {}\n")
+  add_library(mipsolvers_fortran_main_stub STATIC "${_MIPSOLVERS_FORTRAN_MAIN_STUB}")
+endif()
+
 add_library(dmumps STATIC
 
   # ── PORD fill-reducing ordering library ──────────────────────────────────
@@ -326,16 +385,23 @@ set_target_properties(dmumps PROPERTIES
 # -Werror-implicit-function-declaration  catch missing C prototypes early
 target_compile_options(dmumps PRIVATE
   $<$<COMPILE_LANGUAGE:Fortran>:
-    -w
-    -fno-strict-aliasing
-    $<$<VERSION_GREATER_EQUAL:${CMAKE_Fortran_COMPILER_VERSION},10>:
-      -fallow-argument-mismatch
-      -fallow-invalid-boz
+    $<$<OR:$<Fortran_COMPILER_ID:GNU>,$<Fortran_COMPILER_ID:LLVMFlang>>:
+      -w
+      -fno-strict-aliasing
+      $<$<VERSION_GREATER_EQUAL:${CMAKE_Fortran_COMPILER_VERSION},10>:
+        -fallow-argument-mismatch
+        -fallow-invalid-boz
+      >
+    >
+    $<$<AND:$<PLATFORM_ID:Windows>,$<Fortran_COMPILER_ID:IntelLLVM>>:
+      -nofor-main
     >
   >
   $<$<COMPILE_LANGUAGE:C>:
-    -fno-strict-aliasing
-    -Werror-implicit-function-declaration
+    $<$<OR:$<C_COMPILER_ID:GNU>,$<C_COMPILER_ID:Clang>,$<C_COMPILER_ID:AppleClang>>:
+      -fno-strict-aliasing
+      -Werror-implicit-function-declaration
+    >
   >
 )
 
@@ -358,6 +424,10 @@ set_source_files_properties(
 target_link_libraries(dmumps PUBLIC
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
 
+if(TARGET mipsolvers_fortran_main_stub)
+  target_link_libraries(dmumps PUBLIC mipsolvers_fortran_main_stub)
+endif()
+
 # ── MUMPS::MUMPS — interface alias (matches scivision's exported target name) ─
 if(NOT TARGET MUMPS)
   add_library(MUMPS INTERFACE)
@@ -372,5 +442,15 @@ install(TARGETS dmumps MUMPS
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if(TARGET mipsolvers_fortran_main_stub)
+  install(TARGETS mipsolvers_fortran_main_stub
+  EXPORT  mipsolversTargets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+endif()
 
 message(STATUS "mipsolvers: MUMPS 5.7.3 built from source (sequential, double precision)")

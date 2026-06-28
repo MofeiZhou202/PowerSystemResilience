@@ -9,13 +9,10 @@
 # scivision/mumps-superbuild + FetchContent to download MUMPS 5.9).
 # This makes the build fully standalone: no homebrew ipopt required.
 
-if(NOT APPLE)
+if(NOT APPLE AND NOT WIN32 AND NOT UNIX)
   message(FATAL_ERROR
-    "BuildIpopt.cmake is currently macOS-specific. "
-    "No system Ipopt fallback is allowed for this project. Disable "
-    "MIPSOLVERS_BUILD_LOCAL_IPOPT only if the TNLP bridge is intentionally "
-    "unavailable, or add the required in-repository BLAS/LAPACK/MUMPS build "
-    "for this platform.")
+    "BuildIpopt.cmake currently supports macOS, Linux, and Windows. "
+    "No system Ipopt fallback is allowed for this project.")
 endif()
 
 # ── Build MUMPS from source (sequential, no MPI) ──────────────────────────────
@@ -34,9 +31,11 @@ file(MAKE_DIRECTORY "${_IPOPT_BIN}")
 # (via macOS Accelerate framework) and disables everything else.
 set(_IPOPT_CONFIG_H "${_IPOPT_BIN}/config.h")
 file(WRITE "${_IPOPT_CONFIG_H}" [=[
-/* config.h — generated for embedded Ipopt build on macOS.
- * MUMPS backend built from source (sequential, double-precision).
- * BLAS/LAPACK backend provided by macOS Accelerate framework. */
+/* config.h — generated for embedded Ipopt build.
+ * Pull in upstream fallback defaults first so compiler/platform-specific
+ * macros (e.g. IPOPTLIB_EXPORT, F77_FUNC, HAVE_CSTDDEF) are defined. */
+#include "config_default.h"
+
 #define PACKAGE_VERSION "3.14.20"
 #define PACKAGE "Ipopt"
 #define PACKAGE_NAME "Ipopt"
@@ -51,18 +50,18 @@ file(WRITE "${_IPOPT_CONFIG_H}" [=[
 /* Enable MUMPS linear solver (built from source, sequential mode) */
 #define IPOPT_HAS_MUMPS 1
 
-/* Enable LAPACK (via Accelerate framework on macOS) */
+/* Enable LAPACK (Accelerate on macOS, MKL on Windows, BLAS/LAPACK on Linux) */
 #define IPOPT_HAS_LAPACK 1
 
-/* BLAS/LAPACK functions — use Accelerate's Fortran name-mangling convention */
-#define F77_FUNC(name,NAME) name ## _
-#define F77_FUNC_(name,NAME) name ## _
+/* BLAS/LAPACK function mappers rely on F77_FUNC/F77_FUNC_ from config_default.h */
 #define IPOPT_LAPACK_FUNC(name,NAME) F77_FUNC(name,NAME)
 #define IPOPT_LAPACK_FUNC_(name,NAME) F77_FUNC_(name,NAME)
 
 /* Random number generator — standard rand() is always available */
 #define IPOPT_HAS_RAND 1
+#ifndef _WIN32
 #define IPOPT_HAS_DRAND48 1
+#endif
 
 /* Available standard C++ features */
 #define HAVE_CMATH 1
@@ -166,10 +165,58 @@ target_compile_options(ipopt_local PRIVATE
     -Wno-sign-compare>)
 
 # ── 6. Link libraries ─────────────────────────────────────────────────────────
-# BLAS/LAPACK via macOS Accelerate framework
-# 使用 generator expression：非 Apple 平台上此条目求值为空，避免写入导出文件。
+# BLAS/LAPACK backend:
+# - macOS: Accelerate
+# - Windows: Intel MKL (required for embedded Ipopt build)
 target_link_libraries(ipopt_local PRIVATE
   "$<$<PLATFORM_ID:Darwin>:-framework Accelerate>")
+
+if(WIN32)
+  # Dependencies.cmake currently evaluates MKL detection after including this
+  # file. Probe oneAPI MKL directly here so embedded Ipopt can configure.
+  if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)
+    set(_MIPSOLVERS_IPOPT_MKL_ROOTS
+      "$ENV{MKLROOT}"
+      "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+      "C:/Program Files/Intel/oneAPI/mkl/latest")
+    foreach(_mkl_root IN LISTS _MIPSOLVERS_IPOPT_MKL_ROOTS)
+      if(NOT _mkl_root)
+        continue()
+      endif()
+      set(_mkl_inc "${_mkl_root}/include")
+      set(_mkl_lib "${_mkl_root}/lib")
+      if(EXISTS "${_mkl_inc}/mkl_pardiso.h"
+         AND EXISTS "${_mkl_lib}/mkl_intel_lp64.lib"
+         AND EXISTS "${_mkl_lib}/mkl_sequential.lib"
+         AND EXISTS "${_mkl_lib}/mkl_core.lib")
+        set(MIPSOLVERS_HAVE_MKL_PARDISO ON)
+        set(MIPSOLVERS_MKL_INCLUDE_DIRS "${_mkl_inc}")
+        set(MIPSOLVERS_MKL_LIBRARIES
+          "${_mkl_lib}/mkl_intel_lp64.lib"
+          "${_mkl_lib}/mkl_sequential.lib"
+          "${_mkl_lib}/mkl_core.lib")
+        if(EXISTS "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
+          list(APPEND MIPSOLVERS_MKL_LIBRARIES
+            "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
+        endif()
+        break()
+      endif()
+    endforeach()
+    unset(_MIPSOLVERS_IPOPT_MKL_ROOTS)
+  endif()
+
+  if(NOT MIPSOLVERS_HAVE_MKL_PARDISO)
+    message(FATAL_ERROR
+      "Embedded Ipopt on Windows requires MKL for BLAS/LAPACK. "
+      "Set MIPSOLVERS_USE_MKL=ON and provide a valid oneAPI MKL installation.")
+  endif()
+  target_include_directories(ipopt_local PRIVATE ${MIPSOLVERS_MKL_INCLUDE_DIRS})
+  target_link_libraries(ipopt_local PRIVATE ${MIPSOLVERS_MKL_LIBRARIES})
+elseif(UNIX AND NOT APPLE)
+  find_package(BLAS REQUIRED)
+  find_package(LAPACK REQUIRED)
+  target_link_libraries(ipopt_local PRIVATE ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
+endif()
 
 # MUMPS sequential linear solver — built from source by cmake/BuildMUMPS.cmake.
 # MUMPS::MUMPS is an interface alias that transitively pulls in dmumps,

@@ -12,6 +12,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "MIPSOLVERS_FORTRAN_COMPILER": "$env{MIPSOLVERS_FORTRAN_COMPILER}",
         "MIPSOLVERS_BUILD_TESTS": "ON",
         "MIPSOLVERS_BUILD_SCUC": "OFF",
         "MIPSOLVERS_BUILD_SCUC_CASE_BUILDER": "OFF",
@@ -39,17 +40,23 @@
       "inherits": "base",
       "generator": "Unix Makefiles",
       "cacheVariables": {
-        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "OFF"
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON"
       }
     },
     {
       "name": "windows-msvc-release",
       "displayName": "Windows MSVC Release",
       "inherits": "base",
-      "generator": "Visual Studio 17 2022",
-      "architecture": "x64",
+      "generator": "Ninja Multi-Config",
       "cacheVariables": {
-        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "OFF",
+        "CMAKE_MAKE_PROGRAM": "C:/Users/matri/AppData/Local/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe/ninja.exe",
+        "CMAKE_C_COMPILER": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+        "CMAKE_CXX_COMPILER": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+        "CMAKE_RC_COMPILER": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe",
+        "CMAKE_MT": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe",
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON",
+        "MIPSOLVERS_ENABLE_IPO": "OFF",
+        "MIPSOLVERS_FORTRAN_COMPILER": "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/bin/ifx.exe",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
       }
     },
@@ -72,7 +79,7 @@
       "inherits": "base",
       "generator": "Unix Makefiles",
       "cacheVariables": {
-        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "OFF",
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON",
         "MIPSOLVERS_USE_SUITESPARSE": "OFF",
         "MIPSOLVERS_USE_SUPERLU": "OFF",
         "MIPSOLVERS_USE_MKL": "OFF"

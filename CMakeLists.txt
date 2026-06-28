@@ -383,7 +383,9 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
     list(APPEND _bundle_inputs "${MIPSOLVERS_CLUSOL_STATIC_LIB}")
   endif()
 
-  set(_bundle_output "${CMAKE_BINARY_DIR}/libmipsolvers_bundled.a")
+  # Multi-config generators (e.g., Visual Studio) need config-specific outputs
+  # so generated command files do not conflict across Debug/Release variants.
+  set(_bundle_output "${CMAKE_BINARY_DIR}/$<CONFIG>/libmipsolvers_bundled.a")
   if(APPLE)
     # macOS libtool cleanly merges archives and de-dups member names.
     add_custom_command(
@@ -394,7 +396,7 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
       VERBATIM)
   else()
     # GNU ar MRI script: ADDLIB each input, then SAVE.
-    set(_mri "${CMAKE_BINARY_DIR}/mipsolvers_bundle.mri")
+    set(_mri "${CMAKE_BINARY_DIR}/$<CONFIG>/mipsolvers_bundle.mri")
     set(_mri_lines "CREATE ${_bundle_output}")
     foreach(_in IN LISTS _bundle_inputs)
       string(APPEND _mri_lines "\nADDLIB ${_in}")

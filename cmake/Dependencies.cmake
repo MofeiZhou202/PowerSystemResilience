@@ -130,11 +130,7 @@ endif()
 
 # ── Ipopt NLP solver ──────────────────────────────────────────────────────────
 set(MIPSOLVERS_HAVE_IPOPT OFF)
-if(APPLE)
-  set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT ON)
-else()
-  set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT OFF)
-endif()
+set(_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT ON)
 option(MIPSOLVERS_BUILD_LOCAL_IPOPT
   "Build embedded Ipopt source (ipopt/) from this repository"
   ${_MIPSOLVERS_BUILD_LOCAL_IPOPT_DEFAULT})
@@ -348,6 +344,36 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE)
     find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
       HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
   endif()
+
+  # vcpkg toolchain settings can restrict find_* to rooted prefixes and miss
+  # oneAPI's system install path on Windows. Fall back to direct path checks.
+  if(WIN32)
+    if(NOT MIPSOLVERS_MKL_INCLUDE_DIR)
+      set(_MKL_DEFAULT_INCLUDE "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/include")
+      if(EXISTS "${_MKL_DEFAULT_INCLUDE}/mkl_pardiso.h")
+        set(MIPSOLVERS_MKL_INCLUDE_DIR "${_MKL_DEFAULT_INCLUDE}")
+      endif()
+      unset(_MKL_DEFAULT_INCLUDE)
+    endif()
+
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+      set(_MKL_DEFAULT_LIBDIR "C:/Program Files (x86)/Intel/oneAPI/mkl/latest/lib")
+      if(NOT MIPSOLVERS_MKL_LP64_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_intel_lp64.lib")
+        set(MIPSOLVERS_MKL_LP64_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_intel_lp64.lib")
+      endif()
+      if(NOT MIPSOLVERS_MKL_THREAD_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
+        set(MIPSOLVERS_MKL_THREAD_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_sequential.lib")
+      endif()
+      if(NOT MIPSOLVERS_MKL_CORE_LIB AND EXISTS "${_MKL_DEFAULT_LIBDIR}/mkl_core.lib")
+        set(MIPSOLVERS_MKL_CORE_LIB "${_MKL_DEFAULT_LIBDIR}/mkl_core.lib")
+      endif()
+      if(NOT _MKL_IOMP5MD AND EXISTS "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
+        set(_MKL_IOMP5MD "C:/Program Files (x86)/Intel/oneAPI/compiler/latest/lib/libiomp5md.lib")
+      endif()
+      unset(_MKL_DEFAULT_LIBDIR)
+    endif()
+  endif()
+
   if(MIPSOLVERS_MKL_INCLUDE_DIR AND MIPSOLVERS_MKL_LP64_LIB
       AND MIPSOLVERS_MKL_THREAD_LIB AND MIPSOLVERS_MKL_CORE_LIB)
     set(MIPSOLVERS_HAVE_MKL_PARDISO ON)
@@ -377,8 +403,43 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE)
   endif()
 endif()
 
-# ── Eigen3 (header-only) — use installed package, system include path, or local sibling ──
-find_package(Eigen3 3.3 CONFIG QUIET)
+# ── Eigen3 (header-only) — prefer vcpkg, then system include path, then local sibling ──
+set(_EIGEN_VCPKG_TRIPLET_HINTS)
+if(WIN32)
+  if(DEFINED VCPKG_TARGET_TRIPLET)
+    list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "${VCPKG_TARGET_TRIPLET}")
+  endif()
+  list(APPEND _EIGEN_VCPKG_TRIPLET_HINTS "x64-windows")
+endif()
+
+set(_EIGEN_VCPKG_CONFIG_HINTS)
+set(_EIGEN_VCPKG_INCLUDE_HINTS)
+set(_EIGEN_VCPKG_INCLUDE_DIR "")
+if(DEFINED ENV{VCPKG_ROOT})
+  foreach(_triplet IN LISTS _EIGEN_VCPKG_TRIPLET_HINTS)
+    list(APPEND _EIGEN_VCPKG_CONFIG_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/share/eigen3")
+    list(APPEND _EIGEN_VCPKG_INCLUDE_HINTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
+    if(NOT _EIGEN_VCPKG_INCLUDE_DIR AND EXISTS "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3/Eigen/Core")
+      set(_EIGEN_VCPKG_INCLUDE_DIR "$ENV{VCPKG_ROOT}/installed/${_triplet}/include/eigen3")
+    endif()
+  endforeach()
+endif()
+
+if(_EIGEN_VCPKG_INCLUDE_DIR)
+  if(NOT TARGET Eigen3::Eigen)
+    add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+    target_include_directories(Eigen3::Eigen INTERFACE "${_EIGEN_VCPKG_INCLUDE_DIR}")
+  endif()
+  set(Eigen3_FOUND TRUE)
+  message(STATUS "mipsolvers: Eigen3 found via vcpkg at ${_EIGEN_VCPKG_INCLUDE_DIR}")
+endif()
+
+if(NOT Eigen3_FOUND)
+  find_package(Eigen3 3.3 CONFIG QUIET PATHS ${_EIGEN_VCPKG_CONFIG_HINTS} NO_DEFAULT_PATH)
+endif()
+if(NOT Eigen3_FOUND)
+  find_package(Eigen3 3.3 CONFIG QUIET)
+endif()
 
 if(NOT Eigen3_FOUND)
   find_path(MIPSOLVERS_EIGEN3_INCLUDE_DIR
@@ -386,6 +447,7 @@ if(NOT Eigen3_FOUND)
     HINTS
       $ENV{EIGEN3_ROOT}
       $ENV{EIGEN_ROOT}
+      ${_EIGEN_VCPKG_INCLUDE_HINTS}
       /usr/include/eigen3
       /usr/local/include/eigen3
       /opt/homebrew/include/eigen3
