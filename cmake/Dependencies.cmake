@@ -170,29 +170,35 @@ endif()
 set(MIPSOLVERS_HAVE_GUROBI OFF)
 set(MIPSOLVERS_GUROBI_INCLUDE_DIRS "")
 set(MIPSOLVERS_GUROBI_LIBRARIES "")
-find_path(MIPSOLVERS_GUROBI_INCLUDE_DIR NAMES gurobi_c.h
-  HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-        /opt/gurobi/macos_universal2
-        "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
-        $ENV{GUROBI_HOME}
-  PATH_SUFFIXES include)
-foreach(_grb_ver 130 120 110 100 95)
-  if(NOT MIPSOLVERS_GUROBI_LIBRARY)
-    find_library(MIPSOLVERS_GUROBI_LIBRARY NAMES gurobi${_grb_ver}
-      HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
-            /opt/gurobi/macos_universal2
-            "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
-            $ENV{GUROBI_HOME}
-      PATH_SUFFIXES lib)
+option(MIPSOLVERS_USE_GUROBI
+  "Enable Gurobi detection and native C API adapter when available" OFF)
+if(MIPSOLVERS_USE_GUROBI)
+  find_path(MIPSOLVERS_GUROBI_INCLUDE_DIR NAMES gurobi_c.h
+    HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
+          /opt/gurobi/macos_universal2
+          "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
+          $ENV{GUROBI_HOME}
+    PATH_SUFFIXES include)
+  foreach(_grb_ver 130 120 110 100 95)
+    if(NOT MIPSOLVERS_GUROBI_LIBRARY)
+      find_library(MIPSOLVERS_GUROBI_LIBRARY NAMES gurobi${_grb_ver}
+        HINTS /Library/gurobi1300/macos_universal2 /Library/gurobi1200/macos_universal2
+              /opt/gurobi/macos_universal2
+              "C:/gurobi1300/win64" "C:/gurobi1200/win64" "C:/gurobi1100/win64"
+              $ENV{GUROBI_HOME}
+        PATH_SUFFIXES lib)
+    endif()
+  endforeach()
+  if(MIPSOLVERS_GUROBI_INCLUDE_DIR AND MIPSOLVERS_GUROBI_LIBRARY)
+    set(MIPSOLVERS_HAVE_GUROBI ON)
+    set(MIPSOLVERS_GUROBI_INCLUDE_DIRS ${MIPSOLVERS_GUROBI_INCLUDE_DIR})
+    set(MIPSOLVERS_GUROBI_LIBRARIES ${MIPSOLVERS_GUROBI_LIBRARY})
+    message(STATUS "mipsolvers: Gurobi detected: ${MIPSOLVERS_GUROBI_LIBRARY}")
+  else()
+    message(STATUS "mipsolvers: Gurobi enabled but not detected; Gurobi adapter will be unavailable")
   endif()
-endforeach()
-if(MIPSOLVERS_GUROBI_INCLUDE_DIR AND MIPSOLVERS_GUROBI_LIBRARY)
-  set(MIPSOLVERS_HAVE_GUROBI ON)
-  set(MIPSOLVERS_GUROBI_INCLUDE_DIRS ${MIPSOLVERS_GUROBI_INCLUDE_DIR})
-  set(MIPSOLVERS_GUROBI_LIBRARIES ${MIPSOLVERS_GUROBI_LIBRARY})
-  message(STATUS "mipsolvers: Gurobi detected: ${MIPSOLVERS_GUROBI_LIBRARY}")
 else()
-  message(STATUS "mipsolvers: Gurobi not detected; Gurobi adapter will be unavailable")
+  message(STATUS "mipsolvers: Gurobi disabled (MIPSOLVERS_USE_GUROBI=OFF)")
 endif()
 
 # ── PaPILO (optional) ────────────────────────────────────────────────────────

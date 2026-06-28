@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "mipsolvers/engine/api/solver.hpp"
@@ -24,6 +25,21 @@ TEST_CASE("SolverEngine default construction registers adapters", "[engine][api]
   auto lp_adapters = eng.list_solvers(ProblemClass::LP);
   CHECK_FALSE(lp_adapters.empty());
 }
+
+#ifndef HACDCPF_HAVE_GUROBI
+TEST_CASE("SolverEngine default adapters omit Gurobi when not compiled",
+          "[engine][api][gurobi]") {
+  SolverEngine eng(/*register_defaults=*/true);
+
+  auto does_not_contain_gurobi = [](const std::vector<std::string>& solvers) {
+    return std::find(solvers.begin(), solvers.end(), "Gurobi") == solvers.end();
+  };
+
+  CHECK(does_not_contain_gurobi(eng.list_solvers(ProblemClass::LP)));
+  CHECK(does_not_contain_gurobi(eng.list_solvers(ProblemClass::QP)));
+  CHECK(does_not_contain_gurobi(eng.list_solvers(ProblemClass::MILP)));
+}
+#endif
 
 TEST_CASE("SolverEngine empty construction registers no adapters", "[engine][api]") {
   SolverEngine eng(/*register_defaults=*/false);

@@ -71,7 +71,9 @@ class GurobiAdapter final : public SolverAdapter {
   bool available() const;
 
  private:
+#ifdef HACDCPF_HAVE_GUROBI
   void* env_{nullptr};  // GRBenv* (opaque to avoid header dependency)
+#endif
 };
 
 }  // namespace mipsolvers::engine
