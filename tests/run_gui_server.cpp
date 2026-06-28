@@ -250,6 +250,493 @@ hacdcpf::PowerFlowResult solve_projected_replay_power_flow(
   return result;
 }
 
+json post_power_flow_terminal_flows_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::PowerFlowResult& pf,
+    const std::vector<double>& solved_pg = {},
+    const std::vector<double>& solved_qg = {}) {
+  struct TwoTerminalFlow {
+    double pf_mw{0.0};
+    double pt_mw{0.0};
+    double qf_mvar{0.0};
+    double qt_mvar{0.0};
+    double loading_pct{0.0};
+    double rate_mva{0.0};
+    std::string source{"open"};
+  };
+
+  std::unordered_map<int, double> ac_vm_by_bus, ac_visible_p, ac_visible_q;
+  for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+    const auto& b = sys.ac.buses[i];
+    ac_vm_by_bus[b.index] = (i < pf.vm.size()) ? pf.vm[i] : b.vm_pu;
+  }
+  for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+    const auto& br = sys.ac.branches[i];
+    const auto& fl = pf.branch_flows[i];
+    ac_visible_p[br.from_bus] += fl.pf_mw;
+    ac_visible_q[br.from_bus] += fl.qf_mvar;
+    ac_visible_p[br.to_bus] += fl.pt_mw;
+    ac_visible_q[br.to_bus] += fl.qt_mvar;
+  }
+
+  std::unordered_map<int, int> original_vsc_ac_bus;
+  original_vsc_ac_bus.reserve(sys.vsc_converters.size());
+  for (const auto& v : sys.vsc_converters) original_vsc_ac_bus[v.index] = v.bus_ac;
+
+  std::unordered_map<int, double> ac_flow_p = ac_visible_p;
+  std::unordered_map<int, double> ac_flow_q = ac_visible_q;
+  std::unordered_map<int, double> vsc_inj_ac_p, vsc_inj_ac_q;
+  for (const auto& v : pf.vsc_transfers) {
+    const auto it = original_vsc_ac_bus.find(v.index);
+    const int bus = it != original_vsc_ac_bus.end() ? it->second : v.bus_ac;
+    ac_flow_p[bus] -= v.p_ac_mw;
+    ac_flow_q[bus] -= v.q_ac_mvar;
+    vsc_inj_ac_p[bus] += v.p_ac_mw;
+    vsc_inj_ac_q[bus] += v.q_ac_mvar;
+  }
+
+  auto ac_bus_base_kv = [&](int bus) {
+    for (const auto& b : sys.ac.buses) {
+      if (b.index == bus) return b.base_kv;
+    }
+    return 0.0;
+  };
+  auto solved_ac_load = [&](const hacdcpf::Load& ld) {
+    const double vm = ac_vm_by_bus.count(ld.bus) ? ac_vm_by_bus[ld.bus] : 1.0;
+    const double p0 = ld.p_mw * ld.scaling;
+    const double q0 = ld.q_mvar * ld.scaling;
+    if (ld.model != hacdcpf::LoadModel::ZIP) {
+      return std::pair<double, double>{p0, q0};
+    }
+    const double p = p0 * (ld.p_percent_p / 100.0 +
+                           ld.i_percent_p / 100.0 * vm +
+                           ld.z_percent_p / 100.0 * vm * vm);
+    const double q = q0 * (ld.p_percent_q / 100.0 +
+                           ld.i_percent_q / 100.0 * vm +
+                           ld.z_percent_q / 100.0 * vm * vm);
+    return std::pair<double, double>{p, q};
+  };
+
+  std::unordered_map<int, double> ac_non_grid_p, ac_non_grid_q;
+  auto add_ac_injection = [&](int bus, double p, double q) {
+    ac_non_grid_p[bus] += p;
+    ac_non_grid_q[bus] += q;
+  };
+  for (const auto& b : sys.ac.buses) {
+    if (!b.in_service) continue;
+    const double vm = ac_vm_by_bus.count(b.index) ? ac_vm_by_bus[b.index] : b.vm_pu;
+    const double v2 = vm * vm;
+    add_ac_injection(b.index, -b.pd_mw - b.gs_mw * v2, -b.qd_mvar + b.bs_mvar * v2);
+  }
+  for (size_t gi = 0; gi < sys.ac.generators.size(); ++gi) {
+    const auto& g = sys.ac.generators[gi];
+    if (!g.in_service) continue;
+    const double pg = gi < solved_pg.size() ? solved_pg[gi] : g.pg_mw;
+    const double qg = gi < solved_qg.size() ? solved_qg[gi] : g.qg_mvar;
+    add_ac_injection(g.bus, pg, qg);
+  }
+  for (const auto& sg : sys.ac.static_generators)
+    if (sg.in_service) add_ac_injection(sg.bus, sg.p_mw * sg.scaling, sg.q_mvar * sg.scaling);
+  for (const auto& rg : sys.ac.renewable_gens)
+    if (rg.in_service) add_ac_injection(rg.bus, rg.p_mw, rg.q_mvar);
+  for (const auto& pv : sys.ac.pv_systems)
+    if (pv.in_service) add_ac_injection(pv.bus, pv.p_mw, pv.q_mvar);
+  for (const auto& st : sys.ac.storage)
+    if (st.in_service) add_ac_injection(st.bus, st.p_mw, st.q_mvar);
+  for (const auto& ld : sys.ac.loads) {
+    if (!ld.in_service) continue;
+    const auto [p_load, q_load] = solved_ac_load(ld);
+    add_ac_injection(ld.bus, -p_load, -q_load);
+  }
+  for (const auto& fl : sys.ac.flexible_loads)
+    if (fl.in_service) add_ac_injection(fl.bus, -fl.p_mw, -fl.q_mvar);
+  for (const auto& al : sys.ac.asymmetric_loads)
+    if (al.in_service)
+      add_ac_injection(al.bus,
+                       -(al.pa_mw + al.pb_mw + al.pc_mw) * al.scaling,
+                       -(al.qa_mvar + al.qb_mvar + al.qc_mvar) * al.scaling);
+  for (const auto& sh : sys.ac.shunts) {
+    if (!sh.in_service) continue;
+    const double vm = ac_vm_by_bus.count(sh.bus) ? ac_vm_by_bus[sh.bus] : 1.0;
+    const double bs = (sh.switchable && sh.n_steps > 0)
+        ? sh.bs_per_step * sh.current_step
+        : sh.bs_mvar;
+    add_ac_injection(sh.bus, -sh.gs_mw * vm * vm, bs * vm * vm);
+  }
+  for (const auto& cs : sys.ac.charging_stations) {
+    if (!cs.in_service) continue;
+    const double p_mw = cs.p_total_kw > 0.0
+        ? cs.p_total_kw / 1000.0
+        : cs.max_power_kw * cs.utilization_rate * cs.simultaneity_factor / 1000.0;
+    add_ac_injection(cs.bus, -p_mw, -cs.q_total_kvar / 1000.0);
+  }
+  for (const auto& m : sys.ac.motors) {
+    if (!m.in_service) continue;
+    const double p_mw = m.efficiency > 1e-9
+        ? m.sn_mva * m.cos_phi / m.efficiency
+        : m.sn_mva * m.cos_phi;
+    const double q_mvar =
+        std::sqrt(std::max(0.0, m.sn_mva * m.sn_mva -
+                                    (m.sn_mva * m.cos_phi) * (m.sn_mva * m.cos_phi)));
+    add_ac_injection(m.bus, -p_mw, -q_mvar);
+  }
+  for (const auto& ms : sys.mobile_storage)
+    if (ms.in_service) add_ac_injection(ms.bus, ms.p_mw, ms.q_mvar);
+  for (const auto& vpp : sys.vpps)
+    if (vpp.in_service) add_ac_injection(vpp.pcc_bus, vpp.p_output_mw, vpp.q_output_mvar);
+  for (const auto& mg : sys.microgrids)
+    if (mg.in_service) add_ac_injection(mg.pcc_bus, -mg.p_exchange_mw, 0.0);
+
+  std::unordered_map<int, int> ext_count_by_bus;
+  for (const auto& eg : sys.ac.external_grids)
+    if (eg.in_service) ++ext_count_by_bus[eg.bus];
+
+  std::unordered_map<int, double> ac_grid_inj_p, ac_grid_inj_q;
+  for (const auto& kv : ext_count_by_bus) {
+    const int bus = kv.first;
+    ac_grid_inj_p[bus] = ac_flow_p[bus] - ac_non_grid_p[bus];
+    ac_grid_inj_q[bus] = ac_flow_q[bus] - ac_non_grid_q[bus];
+  }
+
+  std::unordered_map<int, double> ac_net_export_p, ac_net_export_q;
+  for (const auto& b : sys.ac.buses) {
+    ac_net_export_p[b.index] =
+        ac_non_grid_p[b.index] + ac_grid_inj_p[b.index] + vsc_inj_ac_p[b.index];
+    ac_net_export_q[b.index] =
+        ac_non_grid_q[b.index] + ac_grid_inj_q[b.index] + vsc_inj_ac_q[b.index];
+  }
+
+  auto signed_ac_endpoint_flow = [&](int from, int to, double& p, double& q) {
+    for (size_t i = 0; i < sys.ac.branches.size() && i < pf.branch_flows.size(); ++i) {
+      const auto& br = sys.ac.branches[i];
+      const auto& fl = pf.branch_flows[i];
+      if (br.from_bus == from && br.to_bus == to) {
+        p = fl.pf_mw;
+        q = fl.qf_mvar;
+        return true;
+      }
+      if (br.from_bus == to && br.to_bus == from) {
+        p = fl.pt_mw;
+        q = fl.qt_mvar;
+        return true;
+      }
+    }
+    return false;
+  };
+  auto has_nontrivial_ac_match = [&](int from, int to) {
+    double p = 0.0, q = 0.0;
+    if (!signed_ac_endpoint_flow(from, to, p, q)) return false;
+    return std::hypot(p, q) > 1e-7;
+  };
+  auto derive_ac_terminal_flow = [&](int from, int to, bool closed,
+                                     double rated_current_ka,
+                                     double rated_voltage_kv) {
+    TwoTerminalFlow fl;
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+    fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0
+        ? std::sqrt(3.0) * kv * rated_current_ka
+        : 0.0;
+    if (!closed || from == 0 || to == 0 || from == to) return fl;
+
+    if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+        std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+      fl.pt_mw = -fl.pf_mw;
+      fl.qt_mvar = -fl.qf_mvar;
+      fl.source = "matched_ac_branch";
+    } else {
+      const double p_from = ac_net_export_p[from] - ac_visible_p[from];
+      const double q_from = ac_net_export_q[from] - ac_visible_q[from];
+      const double p_to = ac_net_export_p[to] - ac_visible_p[to];
+      const double q_to = ac_net_export_q[to] - ac_visible_q[to];
+      const double mag_from = std::hypot(p_from, q_from);
+      const double mag_to = std::hypot(p_to, q_to);
+      if (mag_from <= mag_to || mag_to < 1e-12) {
+        fl.pf_mw = p_from;
+        fl.qf_mvar = q_from;
+        fl.pt_mw = -p_from;
+        fl.qt_mvar = -q_from;
+        fl.source = "endpoint_kcl_from";
+      } else {
+        fl.pf_mw = -p_to;
+        fl.qf_mvar = -q_to;
+        fl.pt_mw = p_to;
+        fl.qt_mvar = q_to;
+        fl.source = "endpoint_kcl_to";
+      }
+    }
+    if (fl.rate_mva > 0.0) {
+      fl.loading_pct = 100.0 *
+          std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                   std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+    }
+    return fl;
+  };
+
+  auto flow_json = [](int index, size_t position, int from, int to,
+                      const TwoTerminalFlow& fl, const std::string& source_type) {
+    return json{
+      {"index", index},
+      {"position", static_cast<int>(position)},
+      {"from", from},
+      {"to", to},
+      {"from_bus", from},
+      {"to_bus", to},
+      {"pf_mw", fl.pf_mw},
+      {"pt_mw", fl.pt_mw},
+      {"qf_mvar", fl.qf_mvar},
+      {"qt_mvar", fl.qt_mvar},
+      {"loss_mw", fl.pf_mw + fl.pt_mw},
+      {"loading_pct", fl.loading_pct},
+      {"rate_mva", fl.rate_mva},
+      {"source", fl.source},
+      {"source_type", source_type}
+    };
+  };
+
+  struct ACTerminalEdge {
+    bool is_switch{false};
+    size_t position{0};
+    int from{0};
+    int to{0};
+  };
+  std::vector<TwoTerminalFlow> ac_switch_flow_rows(sys.ac.switches.size());
+  std::vector<TwoTerminalFlow> ac_cb_flow_rows(sys.ac.circuit_breakers.size());
+  std::vector<ACTerminalEdge> ac_terminal_edges;
+  ac_terminal_edges.reserve(sys.ac.switches.size() + sys.ac.circuit_breakers.size());
+
+  auto ac_rate_mva = [&](int from, double rated_current_ka, double rated_voltage_kv) {
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+    return rated_current_ka > 0.0 && kv > 0.0
+        ? std::sqrt(3.0) * kv * rated_current_ka
+        : 0.0;
+  };
+  auto register_ac_terminal = [&](bool is_switch, size_t pos, int from, int to,
+                                  bool closed, double rate_mva) {
+    TwoTerminalFlow& fl = is_switch ? ac_switch_flow_rows[pos] : ac_cb_flow_rows[pos];
+    fl.rate_mva = rate_mva;
+    if (!closed || from == 0 || to == 0 || from == to) return;
+
+    if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+        std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+      fl.pt_mw = -fl.pf_mw;
+      fl.qt_mvar = -fl.qf_mvar;
+      fl.source = "matched_ac_branch";
+      if (fl.rate_mva > 0.0) {
+        fl.loading_pct = 100.0 *
+            std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                     std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+      }
+      return;
+    }
+
+    fl.source = "terminal_kcl_tree";
+    ac_terminal_edges.push_back(ACTerminalEdge{is_switch, pos, from, to});
+  };
+
+  for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    register_ac_terminal(true, i, sw.bus_from, sw.bus_to,
+                         sw.in_service && sw.closed,
+                         ac_rate_mva(sw.bus_from, sw.i_rated_ka, 0.0));
+  }
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    register_ac_terminal(false, i, cb.bus_from, cb.bus_to,
+                         cb.in_service && cb.closed,
+                         ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
+  }
+
+  std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
+  std::set<int> ac_terminal_buses;
+  for (size_t ei = 0; ei < ac_terminal_edges.size(); ++ei) {
+    const auto& e = ac_terminal_edges[ei];
+    ac_terminal_adj[e.from].push_back({e.to, ei});
+    ac_terminal_adj[e.to].push_back({e.from, ei});
+    ac_terminal_buses.insert(e.from);
+    ac_terminal_buses.insert(e.to);
+  }
+  std::unordered_set<int> ac_terminal_seen;
+  for (int start : ac_terminal_buses) {
+    if (ac_terminal_seen.count(start)) continue;
+    std::vector<int> order;
+    std::unordered_map<int, int> parent;
+    std::unordered_map<int, size_t> parent_edge;
+    std::vector<int> stack{start};
+    parent[start] = start;
+    ac_terminal_seen.insert(start);
+    while (!stack.empty()) {
+      const int u = stack.back();
+      stack.pop_back();
+      order.push_back(u);
+      auto ait = ac_terminal_adj.find(u);
+      if (ait == ac_terminal_adj.end()) continue;
+      for (const auto& [v, edge_pos] : ait->second) {
+        if (parent.count(v)) continue;
+        parent[v] = u;
+        parent_edge[v] = edge_pos;
+        ac_terminal_seen.insert(v);
+        stack.push_back(v);
+      }
+    }
+
+    std::unordered_map<int, double> subtree_p, subtree_q;
+    for (auto it = order.rbegin(); it != order.rend(); ++it) {
+      const int bus = *it;
+      double p = ac_net_export_p[bus] - ac_visible_p[bus] + subtree_p[bus];
+      double q = ac_net_export_q[bus] - ac_visible_q[bus] + subtree_q[bus];
+      if (bus != start) {
+        const auto eit = parent_edge.find(bus);
+        if (eit != parent_edge.end()) {
+          const auto& e = ac_terminal_edges[eit->second];
+          const double pf = (e.from == bus) ? p : -p;
+          const double qf = (e.from == bus) ? q : -q;
+          TwoTerminalFlow& fl =
+              e.is_switch ? ac_switch_flow_rows[e.position] : ac_cb_flow_rows[e.position];
+          fl.pf_mw = pf;
+          fl.pt_mw = -pf;
+          fl.qf_mvar = qf;
+          fl.qt_mvar = -qf;
+          if (fl.rate_mva > 0.0) {
+            fl.loading_pct = 100.0 *
+                std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                         std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+          }
+          subtree_p[parent[bus]] += p;
+          subtree_q[parent[bus]] += q;
+        }
+      }
+    }
+  }
+
+  json ac_switch_flows = json::array();
+  for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+    const auto& sw = sys.ac.switches[i];
+    ac_switch_flows.push_back(
+        flow_json(sw.index, i, sw.bus_from, sw.bus_to,
+                  ac_switch_flow_rows[i], "ac_switch"));
+  }
+
+  json ac_cb_flows = json::array();
+  for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+    const auto& cb = sys.ac.circuit_breakers[i];
+    ac_cb_flows.push_back(
+        flow_json(cb.index, i, cb.bus_from, cb.bus_to,
+                  ac_cb_flow_rows[i], "ac_circuit_breaker"));
+  }
+
+  std::unordered_map<int, double> dc_vm_by_bus, dc_visible_p, dc_net_export_p;
+  for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+    const auto& b = sys.dc.buses[i];
+    dc_vm_by_bus[b.index] = (i < pf.vdc.size()) ? pf.vdc[i] : b.vm_pu;
+  }
+  for (const auto& b : sys.dc.buses)
+    if (b.in_service) dc_net_export_p[b.index] -= b.pd_mw;
+  for (const auto& ld : sys.dc.loads)
+    if (ld.in_service) dc_net_export_p[ld.bus] -= ld.p_mw * ld.scaling;
+  for (const auto& pv : sys.dc.pv_arrays)
+    if (pv.in_service) dc_net_export_p[pv.bus] += pv.p_set_mw;
+  for (const auto& sg : sys.dc.static_generators)
+    if (sg.in_service) dc_net_export_p[sg.bus] += sg.p_mw * sg.scaling;
+  for (const auto& sg : sys.dc.dc_static_generators)
+    if (sg.in_service) dc_net_export_p[sg.bus] += sg.p_set_mw * sg.scaling;
+  for (const auto& st : sys.dc.dc_storage)
+    if (st.in_service) dc_net_export_p[st.bus] += st.p_mw;
+  for (const auto& st : sys.dc.storage)
+    if (st.in_service) dc_net_export_p[st.bus] += st.p_mw;
+
+  std::unordered_map<int, int> original_vsc_dc_bus;
+  original_vsc_dc_bus.reserve(sys.vsc_converters.size());
+  for (const auto& v : sys.vsc_converters) original_vsc_dc_bus[v.index] = v.bus_dc;
+  for (const auto& v : pf.vsc_transfers) {
+    const auto it = original_vsc_dc_bus.find(v.index);
+    const int bus = it != original_vsc_dc_bus.end() ? it->second : v.bus_dc;
+    dc_net_export_p[bus] += v.p_dc_mw;
+  }
+  for (const auto& d : pf.dcdc_transfers) {
+    dc_net_export_p[d.bus_in] -= d.p_in_mw;
+    dc_net_export_p[d.bus_out] += d.p_out_mw;
+  }
+  for (const auto& br : sys.dc.branches) {
+    if (!br.in_service || br.r_pu <= 1e-12) continue;
+    const double vf = dc_vm_by_bus.count(br.from_bus) ? dc_vm_by_bus[br.from_bus] : 1.0;
+    const double vt = dc_vm_by_bus.count(br.to_bus) ? dc_vm_by_bus[br.to_bus] : 1.0;
+    const double i_pu = (vf - vt) / br.r_pu;
+    const double pf_mw = vf * i_pu * sys.base_mva;
+    const double pt_mw = -vt * i_pu * sys.base_mva;
+    dc_visible_p[br.from_bus] += pf_mw;
+    dc_visible_p[br.to_bus] += pt_mw;
+  }
+  auto dc_bus_base_kv = [&](int bus) {
+    for (const auto& b : sys.dc.buses) {
+      if (b.index == bus) return b.base_kv;
+    }
+    return 0.0;
+  };
+  auto signed_dc_endpoint_flow = [&](int from, int to, double& p) {
+    for (const auto& br : sys.dc.branches) {
+      if (!br.in_service || br.r_pu <= 1e-12) continue;
+      const double vf = dc_vm_by_bus.count(br.from_bus) ? dc_vm_by_bus[br.from_bus] : 1.0;
+      const double vt = dc_vm_by_bus.count(br.to_bus) ? dc_vm_by_bus[br.to_bus] : 1.0;
+      const double i_pu = (vf - vt) / br.r_pu;
+      const double pf_mw = vf * i_pu * sys.base_mva;
+      const double pt_mw = -vt * i_pu * sys.base_mva;
+      if (br.from_bus == from && br.to_bus == to) {
+        p = pf_mw;
+        return true;
+      }
+      if (br.from_bus == to && br.to_bus == from) {
+        p = pt_mw;
+        return true;
+      }
+    }
+    return false;
+  };
+  auto derive_dc_terminal_flow = [&](int from, int to, bool closed,
+                                     double rated_current_ka,
+                                     double rated_voltage_kv) {
+    TwoTerminalFlow fl;
+    const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : dc_bus_base_kv(from);
+    fl.rate_mva = rated_current_ka > 0.0 && kv > 0.0 ? kv * rated_current_ka : 0.0;
+    if (!closed || from == 0 || to == 0 || from == to) return fl;
+    double p = 0.0;
+    if (signed_dc_endpoint_flow(from, to, p)) {
+      fl.pf_mw = p;
+      fl.pt_mw = -p;
+      fl.source = "matched_dc_branch";
+    } else {
+      const double p_from = dc_net_export_p[from] - dc_visible_p[from];
+      const double p_to = dc_net_export_p[to] - dc_visible_p[to];
+      if (std::abs(p_from) <= std::abs(p_to) || std::abs(p_to) < 1e-12) {
+        fl.pf_mw = p_from;
+        fl.pt_mw = -p_from;
+        fl.source = "endpoint_kcl_from";
+      } else {
+        fl.pf_mw = -p_to;
+        fl.pt_mw = p_to;
+        fl.source = "endpoint_kcl_to";
+      }
+    }
+    if (fl.rate_mva > 0.0) {
+      fl.loading_pct = 100.0 * std::max(std::abs(fl.pf_mw), std::abs(fl.pt_mw)) / fl.rate_mva;
+    }
+    return fl;
+  };
+
+  json dc_cb_flows = json::array();
+  for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
+    const auto& cb = sys.dc.dc_circuit_breakers[i];
+    const auto fl = derive_dc_terminal_flow(cb.bus_from, cb.bus_to,
+                                            cb.in_service && cb.closed,
+                                            cb.i_rated_ka, cb.rated_voltage_kv);
+    dc_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl,
+                                    "dc_circuit_breaker"));
+  }
+
+  return json{{"ac_switch_flows", ac_switch_flows},
+              {"ac_circuit_breaker_flows", ac_cb_flows},
+              {"dc_circuit_breaker_flows", dc_cb_flows}};
+}
+
 std::vector<double> project_replay_ac_bus_vector(
     const std::vector<double>& original_space,
     const hacdcpf::HybridPowerSystem& projected_sys) {
@@ -7428,41 +7915,123 @@ int main(int argc, char** argv) {
           };
         };
 
+        struct ACTerminalEdge {
+          bool is_switch{false};
+          size_t position{0};
+          int from{0};
+          int to{0};
+        };
+        std::vector<TwoTerminalFlow> ac_switch_flow_rows(sys.ac.switches.size());
+        std::vector<TwoTerminalFlow> ac_cb_flow_rows(sys.ac.circuit_breakers.size());
+        std::vector<ACTerminalEdge> ac_terminal_edges;
+        ac_terminal_edges.reserve(sys.ac.switches.size() + sys.ac.circuit_breakers.size());
+        auto ac_rate_mva = [&](int from, double rated_current_ka, double rated_voltage_kv) {
+          const double kv = rated_voltage_kv > 0.0 ? rated_voltage_kv : ac_bus_base_kv(from);
+          return rated_current_ka > 0.0 && kv > 0.0
+              ? std::sqrt(3.0) * kv * rated_current_ka
+              : 0.0;
+        };
+        auto register_ac_terminal = [&](bool is_switch, size_t pos, int from, int to,
+                                        bool closed, double rate_mva) {
+          TwoTerminalFlow& fl = is_switch ? ac_switch_flow_rows[pos] : ac_cb_flow_rows[pos];
+          fl.rate_mva = rate_mva;
+          if (!closed || from == 0 || to == 0 || from == to) return;
+          if (signed_ac_endpoint_flow(from, to, fl.pf_mw, fl.qf_mvar) &&
+              std::hypot(fl.pf_mw, fl.qf_mvar) > 1e-7) {
+            fl.pt_mw = -fl.pf_mw;
+            fl.qt_mvar = -fl.qf_mvar;
+            fl.source = "matched_ac_branch";
+            if (fl.rate_mva > 0.0) {
+              fl.loading_pct = 100.0 *
+                  std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                           std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+            }
+            return;
+          }
+          fl.source = "terminal_kcl_tree";
+          ac_terminal_edges.push_back(ACTerminalEdge{is_switch, pos, from, to});
+        };
+        for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
+          const auto& sw = sys.ac.switches[i];
+          register_ac_terminal(true, i, sw.bus_from, sw.bus_to,
+                               sw.in_service && sw.closed,
+                               ac_rate_mva(sw.bus_from, sw.i_rated_ka, 0.0));
+        }
+        for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
+          const auto& cb = sys.ac.circuit_breakers[i];
+          register_ac_terminal(false, i, cb.bus_from, cb.bus_to,
+                               cb.in_service && cb.closed,
+                               ac_rate_mva(cb.bus_from, cb.i_rated_ka, cb.rated_voltage_kv));
+        }
+        std::unordered_map<int, std::vector<std::pair<int, size_t>>> ac_terminal_adj;
+        std::set<int> ac_terminal_buses;
+        for (size_t ei = 0; ei < ac_terminal_edges.size(); ++ei) {
+          const auto& e = ac_terminal_edges[ei];
+          ac_terminal_adj[e.from].push_back({e.to, ei});
+          ac_terminal_adj[e.to].push_back({e.from, ei});
+          ac_terminal_buses.insert(e.from);
+          ac_terminal_buses.insert(e.to);
+        }
+        std::unordered_set<int> ac_terminal_seen;
+        for (int start : ac_terminal_buses) {
+          if (ac_terminal_seen.count(start)) continue;
+          std::vector<int> order;
+          std::unordered_map<int, int> parent;
+          std::unordered_map<int, size_t> parent_edge;
+          std::vector<int> stack{start};
+          parent[start] = start;
+          ac_terminal_seen.insert(start);
+          while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            order.push_back(u);
+            auto ait = ac_terminal_adj.find(u);
+            if (ait == ac_terminal_adj.end()) continue;
+            for (const auto& [v, edge_pos] : ait->second) {
+              if (parent.count(v)) continue;
+              parent[v] = u;
+              parent_edge[v] = edge_pos;
+              ac_terminal_seen.insert(v);
+              stack.push_back(v);
+            }
+          }
+          std::unordered_map<int, double> subtree_p, subtree_q;
+          for (auto it = order.rbegin(); it != order.rend(); ++it) {
+            const int bus = *it;
+            const double p = ac_net_export_p[bus] - ac_visible_branch_p[bus] + subtree_p[bus];
+            const double q = ac_net_export_q[bus] - ac_visible_branch_q[bus] + subtree_q[bus];
+            if (bus == start) continue;
+            const auto eit = parent_edge.find(bus);
+            if (eit == parent_edge.end()) continue;
+            const auto& e = ac_terminal_edges[eit->second];
+            const double pf_edge = (e.from == bus) ? p : -p;
+            const double qf_edge = (e.from == bus) ? q : -q;
+            TwoTerminalFlow& fl =
+                e.is_switch ? ac_switch_flow_rows[e.position] : ac_cb_flow_rows[e.position];
+            fl.pf_mw = pf_edge;
+            fl.pt_mw = -pf_edge;
+            fl.qf_mvar = qf_edge;
+            fl.qt_mvar = -qf_edge;
+            if (fl.rate_mva > 0.0) {
+              fl.loading_pct = 100.0 *
+                  std::max(std::hypot(fl.pf_mw, fl.qf_mvar),
+                           std::hypot(fl.pt_mw, fl.qt_mvar)) / fl.rate_mva;
+            }
+            subtree_p[parent[bus]] += p;
+            subtree_q[parent[bus]] += q;
+          }
+        }
         json ac_switch_flows = json::array();
         for (size_t i = 0; i < sys.ac.switches.size(); ++i) {
           const auto& sw = sys.ac.switches[i];
-          const bool closed = sw.in_service && sw.closed;
-          const bool contracted = closed && !has_nontrivial_ac_match(sw.bus_from, sw.bus_to);
-          const auto fl = derive_ac_terminal_flow(sw.bus_from, sw.bus_to,
-                                                  closed,
-                                                  sw.i_rated_ka, 0.0);
-          auto row = flow_json(sw.index, i, sw.bus_from, sw.bus_to, fl, "ac_switch");
-          if (contracted) {
-            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
-            ac_visible_branch_p[sw.bus_from] += fl.pf_mw;
-            ac_visible_branch_q[sw.bus_from] += fl.qf_mvar;
-            ac_visible_branch_p[sw.bus_to] += fl.pt_mw;
-            ac_visible_branch_q[sw.bus_to] += fl.qt_mvar;
-          }
-          ac_switch_flows.push_back(std::move(row));
+          ac_switch_flows.push_back(flow_json(sw.index, i, sw.bus_from, sw.bus_to,
+                                              ac_switch_flow_rows[i], "ac_switch"));
         }
         json ac_cb_flows = json::array();
         for (size_t i = 0; i < sys.ac.circuit_breakers.size(); ++i) {
           const auto& cb = sys.ac.circuit_breakers[i];
-          const bool closed = cb.in_service && cb.closed;
-          const bool contracted = closed && !has_nontrivial_ac_match(cb.bus_from, cb.bus_to);
-          const auto fl = derive_ac_terminal_flow(cb.bus_from, cb.bus_to,
-                                                  closed,
-                                                  cb.i_rated_ka, cb.rated_voltage_kv);
-          auto row = flow_json(cb.index, i, cb.bus_from, cb.bus_to, fl, "ac_circuit_breaker");
-          if (contracted) {
-            row["source"] = fl.source == "open" ? "open" : fl.source + "_contracted";
-            ac_visible_branch_p[cb.bus_from] += fl.pf_mw;
-            ac_visible_branch_q[cb.bus_from] += fl.qf_mvar;
-            ac_visible_branch_p[cb.bus_to] += fl.pt_mw;
-            ac_visible_branch_q[cb.bus_to] += fl.qt_mvar;
-          }
-          ac_cb_flows.push_back(std::move(row));
+          ac_cb_flows.push_back(flow_json(cb.index, i, cb.bus_from, cb.bus_to,
+                                          ac_cb_flow_rows[i], "ac_circuit_breaker"));
         }
         json dc_cb_flows = json::array();
         for (size_t i = 0; i < sys.dc.dc_circuit_breakers.size(); ++i) {
@@ -7475,6 +8044,20 @@ int main(int argc, char** argv) {
         out["ac_switch_flows"] = ac_switch_flows;
         out["ac_circuit_breaker_flows"] = ac_cb_flows;
         out["dc_circuit_breaker_flows"] = dc_cb_flows;
+
+        std::unordered_map<int, double> ac_terminal_export_p = ac_visible_branch_p;
+        std::unordered_map<int, double> ac_terminal_export_q = ac_visible_branch_q;
+        auto add_unmatched_ac_terminal_export = [&](const json& fl) {
+          if (fl.value("source", std::string{}) == "matched_ac_branch") return;
+          const int from = fl.value("from_bus", fl.value("from", 0));
+          const int to = fl.value("to_bus", fl.value("to", 0));
+          ac_terminal_export_p[from] += fl.value("pf_mw", 0.0);
+          ac_terminal_export_q[from] += fl.value("qf_mvar", 0.0);
+          ac_terminal_export_p[to] += fl.value("pt_mw", 0.0);
+          ac_terminal_export_q[to] += fl.value("qt_mvar", 0.0);
+        };
+        for (const auto& fl : ac_switch_flows) add_unmatched_ac_terminal_export(fl);
+        for (const auto& fl : ac_cb_flows) add_unmatched_ac_terminal_export(fl);
 
         std::unordered_map<int, double> dc_terminal_export_p = dc_visible_branch_p;
         for (const auto& fl : dc_cb_flows) {
@@ -7648,7 +8231,7 @@ int main(int argc, char** argv) {
         balance_diag["sources"] = json::array();
         balance_diag["ac_terminal_export_p"] = json::object();
         balance_diag["dc_terminal_export_p"] = json::object();
-        for (const auto& [bus, p] : ac_visible_branch_p)
+        for (const auto& [bus, p] : ac_terminal_export_p)
           balance_diag["ac_terminal_export_p"][std::to_string(bus)] = p;
         for (const auto& [bus, p] : dc_terminal_export_p)
           balance_diag["dc_terminal_export_p"][std::to_string(bus)] = p;
@@ -7723,7 +8306,7 @@ int main(int argc, char** argv) {
             const auto* b = ac_bus_by_id(bus);
             if (!b || !b->in_service) continue;
             net += ac_net_export_p[bus];
-            terminal += ac_visible_branch_p[bus];
+            terminal += ac_terminal_export_p[bus];
             if (ac_is_slack_bus(bus)) {
               is_slack = true;
               row_bus = bus;
@@ -9346,8 +9929,8 @@ int main(int argc, char** argv) {
             json post_pf;
             post_pf["converged"] = true;
             json brf = json::array();
-            for (size_t i = 0; i < replay_sys.ac.branches.size() && i < ac_pf.branch_flows.size(); ++i) {
-              const auto& br = replay_sys.ac.branches[i];
+            for (size_t i = 0; i < original_sys.ac.branches.size() && i < ac_pf.branch_flows.size(); ++i) {
+              const auto& br = original_sys.ac.branches[i];
               const auto& f = ac_pf.branch_flows[i];
               const double rate = br.rate_a_mva;
               const double s_from = std::hypot(f.pf_mw, f.qf_mvar);
@@ -9371,10 +9954,10 @@ int main(int argc, char** argv) {
             post_pf["dcdc_transfers"] = dtr;
             json dcbr = json::array();
             std::unordered_map<int, size_t> dc_pos_by_bus;
-            for (size_t bi = 0; bi < replay_sys.dc.buses.size(); ++bi)
-              dc_pos_by_bus[replay_sys.dc.buses[bi].index] = bi;
-            for (size_t i = 0; i < replay_sys.dc.branches.size(); ++i) {
-              const auto& br = replay_sys.dc.branches[i];
+            for (size_t bi = 0; bi < original_sys.dc.buses.size(); ++bi)
+              dc_pos_by_bus[original_sys.dc.buses[bi].index] = bi;
+            for (size_t i = 0; i < original_sys.dc.branches.size(); ++i) {
+              const auto& br = original_sys.dc.branches[i];
               double pf_mw = 0.0, pt_mw = 0.0, loss_mw = 0.0, loading = 0.0;
               const auto fi = dc_pos_by_bus.find(br.from_bus);
               const auto ti = dc_pos_by_bus.find(br.to_bus);
@@ -9395,6 +9978,14 @@ int main(int argc, char** argv) {
                 {"rate_mva",br.rate_a_mva}});
             }
 	            post_pf["dc_branch_flows"] = dcbr;
+	            const json terminal_flows =
+	                post_power_flow_terminal_flows_json(original_sys, ac_pf, r.pg_mw, r.qg_mvar);
+	            post_pf["ac_switch_flows"] =
+	                terminal_flows.value("ac_switch_flows", json::array());
+	            post_pf["ac_circuit_breaker_flows"] =
+	                terminal_flows.value("ac_circuit_breaker_flows", json::array());
+	            post_pf["dc_circuit_breaker_flows"] =
+	                terminal_flows.value("dc_circuit_breaker_flows", json::array());
 	            post_pf["geo_er"] =
 	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
 	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
