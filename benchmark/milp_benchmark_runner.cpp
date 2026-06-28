@@ -60,6 +60,30 @@ using namespace mipsolvers;
 using namespace mipsolvers::scuc;
 using json = nlohmann::json;
 
+namespace {
+
+void set_env_var(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value ? value : "");
+#else
+    if (value) {
+        ::setenv(name, value, 1);
+    } else {
+        ::unsetenv(name);
+    }
+#endif
+}
+
+void unset_env_var(const char* name) {
+#if defined(_WIN32)
+    _putenv_s(name, "");
+#else
+    ::unsetenv(name);
+#endif
+}
+
+}  // namespace
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Solver configuration variants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1439,10 +1463,10 @@ int main(int argc, char** argv)
         // HiGHS[noFC]: same but with our FlowCover separator disabled via env var.
         // Comparing against HiGHS[direct] isolates the contribution of
         // HighsFlowCoverSeparator to HiGHS B&B solving performance.
-        ::setenv("HIGHS_NO_FLOWCOVER", "1", 1);
+        set_env_var("HIGHS_NO_FLOWCOVER", "1");
         RunRecord direct_highs_nofc = run_direct_highs_reference(
             tc, time_limit, "choose", "", "HiGHS[noFC]");
-        ::unsetenv("HIGHS_NO_FLOWCOVER");
+        unset_env_var("HIGHS_NO_FLOWCOVER");
         print_record(direct_highs_nofc);
         std::printf("  status: %s\n", direct_highs_nofc.status.c_str());
 #endif

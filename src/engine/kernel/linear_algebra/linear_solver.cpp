@@ -63,6 +63,8 @@ class EigenUmfPackSolver::Impl {
   Eigen::UmfPackLU<Eigen::SparseMatrix<double>> solver;
 };
 
+EigenUmfPackSolver::~EigenUmfPackSolver() = default;
+
 const char* EigenUmfPackSolver::backend_name() const {
   return "SuiteSparse-UMFPACK(Eigen)";
 }
@@ -105,6 +107,8 @@ class EigenKluSolver::Impl {
  public:
   Eigen::KLU<Eigen::SparseMatrix<double>> solver;
 };
+
+EigenKluSolver::~EigenKluSolver() = default;
 
 const char* EigenKluSolver::backend_name() const {
   return "SuiteSparse-KLU(Eigen)";
@@ -149,6 +153,8 @@ class SuperLUSolver::Impl {
   Eigen::SuperLU<Eigen::SparseMatrix<double>> solver;
 };
 
+SuperLUSolver::~SuperLUSolver() = default;
+
 const char* SuperLUSolver::backend_name() const {
   return "SuperLU(Eigen)";
 }
@@ -190,6 +196,9 @@ class MKLPardisoSolver::Impl {
  public:
   Eigen::PardisoLU<Eigen::SparseMatrix<double>> solver;
 };
+
+MKLPardisoSolver::MKLPardisoSolver() = default;
+MKLPardisoSolver::~MKLPardisoSolver() = default;
 
 const char* MKLPardisoSolver::backend_name() const {
   return "Intel-MKL-PARDISO(Eigen)";

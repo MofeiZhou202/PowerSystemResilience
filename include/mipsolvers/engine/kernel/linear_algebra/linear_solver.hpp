@@ -34,6 +34,7 @@ class EigenSparseLUSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_UMFPACK
 class EigenUmfPackSolver final : public SparseLinearSolver {
  public:
+  ~EigenUmfPackSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
@@ -49,6 +50,7 @@ class EigenUmfPackSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_KLU
 class EigenKluSolver final : public SparseLinearSolver {
  public:
+  ~EigenKluSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
@@ -64,6 +66,7 @@ class EigenKluSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_SUPERLU
 class SuperLUSolver final : public SparseLinearSolver {
  public:
+  ~SuperLUSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;
@@ -79,6 +82,8 @@ class SuperLUSolver final : public SparseLinearSolver {
 #ifdef HACDCPF_HAVE_MKL_PARDISO
 class MKLPardisoSolver final : public SparseLinearSolver {
  public:
+  MKLPardisoSolver();
+  ~MKLPardisoSolver() override;
   const char* backend_name() const override;
   void analyze_pattern(const Eigen::SparseMatrix<double>& a) override;
   bool factorize(const Eigen::SparseMatrix<double>& a) override;

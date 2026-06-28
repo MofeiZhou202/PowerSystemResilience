@@ -326,15 +326,25 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE)
   if(CMAKE_SIZEOF_VOID_P EQUAL 8)
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_lp64
       HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
-    find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+    if(WIN32)
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
+        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+    else()
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
+        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
+    endif()
     find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
       HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/intel64)
   else()
     find_library(MIPSOLVERS_MKL_LP64_LIB   NAMES mkl_intel_c
       HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
-    find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
-      HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+    if(WIN32)
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_sequential mkl_intel_thread
+        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+    else()
+      find_library(MIPSOLVERS_MKL_THREAD_LIB NAMES mkl_intel_thread mkl_sequential
+        HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
+    endif()
     find_library(MIPSOLVERS_MKL_CORE_LIB   NAMES mkl_core
       HINTS ${_MKL_HINTS} PATH_SUFFIXES lib lib/ia32)
   endif()
