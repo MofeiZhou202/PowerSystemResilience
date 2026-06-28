@@ -521,7 +521,7 @@ const App = (() => {
       const base = scaledCurve(load, numberOr(row.item?.p_mw ?? comp.params?.p_mw, 0) * numberOr(row.item?.scaling ?? comp.params?.scaling, 1), total);
       const profile = baseDeterministicProfile(base.length, Number(row.item?.index ?? row.index ?? compId));
       const y = base.map((v, i) => v * profile[i]);
-      return make(y, `场景${isDc ? 'DC' : 'AC'}负荷估算曲线：${label}`, '按该负荷容量占比叠加确定性随机波动，避免所有负荷共用完全相同形状。');
+      return make(y, `场景${isDc ? 'DC' : 'AC'}负荷曲线：${label}`);
     }
     if (type === 'pv_system' || type === 'dc_pv_array') {
       const isDc = type === 'dc_pv_array';
@@ -7467,12 +7467,14 @@ const App = (() => {
         const profileId = firstProfileId + i;
         profiles.push({ id: profileId, name: `scenario_${e.kind.toLowerCase()}_${e.item?.index ?? e.item?.bus ?? e.position + 1}_scale`, values: componentMw[i].map(v => v / e.base) });
         const row = { kind: e.kind, profile_id: profileId };
+        const itemIndex = Number(e.item?.index);
+        const itemBus = Number(e.item?.bus);
         if (e.kind.endsWith('LOAD')) {
           row.load_position = e.position;
-          row.load_index = Number(e.item?.index);
-          row.bus = Number(e.item?.bus);
-        } else {
-          row.bus = Number(e.item?.index);
+          if (Number.isFinite(itemIndex)) row.load_index = itemIndex;
+          if (Number.isFinite(itemBus)) row.bus = itemBus;
+        } else if (Number.isFinite(itemIndex)) {
+          row.bus = itemIndex;
         }
         map.push(row);
       });
@@ -7489,7 +7491,7 @@ const App = (() => {
       const totals = scenarioBaseTotals(baseSystem);
       const calcProfiles = [];
       const warnings = [];
-      const componentLoadProfiles = (family === 'resilience' && load.length)
+      const componentLoadProfiles = load.length
         ? buildComponentLoadProfiles(load, baseSystem, 10)
         : { profiles: [], map: [] };
       if (load.length) {
@@ -7533,6 +7535,8 @@ const App = (() => {
           base_pv_mw: totals.pv,
           base_wind_mw: totals.wind,
           profile_semantics: 'profiles are dimensionless multipliers for /api/session/set_ts_config',
+          component_load_profile_source: componentLoadProfiles.map.length ? 'post_generated_total_load_split' : 'none',
+          component_load_profile_note: 'component load profiles split backend randomized total_load_mw by capacity and deterministic component shapes, normalized per timestep',
         },
         warnings,
       };
@@ -7680,10 +7684,10 @@ const App = (() => {
         metadata.resilience_event = representative.resilience_event || null;
       }
       caseJson._generated_scenario = metadata;
-      const ts = family === 'reliability' ? null : buildScenarioTimeSeries(representative, caseJson, family);
+      const ts = buildScenarioTimeSeries(representative, caseJson, family);
       if (ts) {
         caseJson._time_series = ts;
-        metadata.calculation_defaults.use_time_series = family === 'regular' || family === 'resilience';
+        metadata.calculation_defaults.use_time_series = family === 'regular' || family === 'reliability' || family === 'resilience';
       }
       return caseJson;
     }

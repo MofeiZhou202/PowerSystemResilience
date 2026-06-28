@@ -1157,10 +1157,16 @@ struct Session {
   // Persistent time-series binding spec — re-applied at every run_ts_pf call.
   // Survives system replacement (e.g. canvas resync via load_json_string)
   // so per-load profile mappings are not lost between set_ts_config and run.
+  struct TsLoadBindingRow {
+    std::string kind{"AC_LOAD"};
+    int profile_id{-1};
+    int load_position{-1};
+    int load_index{-1};
+    int bus{-1};
+  };
   struct TsBindingSpec {
     bool valid = false;
-    std::vector<std::pair<int,int>> map_by_load_index; // (load_index, profile_id)
-    std::vector<std::pair<int,int>> map_by_bus;        // (bus, profile_id)
+    std::vector<TsLoadBindingRow> load_profile_map;
     int assign_all_loads_to = -1;
     int assign_all_pv_to = -1;
   };
@@ -11369,7 +11375,8 @@ int main(int argc, char** argv) {
         [](hacdcpf::HybridPowerSystem& sys,
            const Session::TsBindingSpec& spec) -> int {
       int n_materialized = 0;
-      if (sys.ac.loads.empty()) {
+      auto materialize_ac_bus_loads = [&]() {
+        if (!sys.ac.loads.empty()) return;
         int li = 0;
         for (const auto& b : sys.ac.buses) {
           if (!b.in_service) continue;
@@ -11386,19 +11393,57 @@ int main(int argc, char** argv) {
           ++li;
         }
         for (auto& b : sys.ac.buses) { b.pd_mw = 0.0; b.qd_mvar = 0.0; }
-        n_materialized = li;
-      }
+        n_materialized += li;
+      };
+      auto materialize_dc_bus_loads = [&]() {
+        if (!sys.dc.loads.empty()) return;
+        int li = 0;
+        for (auto& b : sys.dc.buses) {
+          if (!b.in_service) continue;
+          if (std::fabs(b.pd_mw) < 1e-12) continue;
+          hacdcpf::DCLoad ld;
+          ld.index = li;
+          ld.bus = b.index;
+          ld.in_service = true;
+          ld.name = "dc_load_bus" + std::to_string(b.index);
+          ld.p_mw = b.pd_mw;
+          ld.p_rated_mw = b.pd_mw;
+          ld.scaling = 1.0;
+          sys.dc.loads.push_back(std::move(ld));
+          b.pd_mw = 0.0;
+          ++li;
+        }
+        n_materialized += li;
+      };
+      materialize_ac_bus_loads();
       if (!spec.valid) return n_materialized;
-      auto& loads = sys.ac.loads;
-      for (const auto& [li, pid] : spec.map_by_load_index) {
-        if (li >= 0 && li < (int)loads.size()) loads[li].profile_id = pid;
+      auto upper_kind = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        return s;
+      };
+      auto bind_ac_load = [&](const Session::TsLoadBindingRow& row) {
+        auto& loads = sys.ac.loads;
+        if (row.load_position >= 0 && row.load_position < (int)loads.size()) { loads[row.load_position].profile_id = row.profile_id; return; }
+        if (row.load_index >= 0) for (auto& ld : loads) if (ld.index == row.load_index) { ld.profile_id = row.profile_id; return; }
+        if (row.bus >= 0) for (auto& ld : loads) if (ld.bus == row.bus) { ld.profile_id = row.profile_id; return; }
+      };
+      auto bind_dc_load = [&](const Session::TsLoadBindingRow& row) {
+        auto& loads = sys.dc.loads;
+        if (row.load_position >= 0 && row.load_position < (int)loads.size()) { loads[row.load_position].profile_id = row.profile_id; return; }
+        if (row.load_index >= 0) for (auto& ld : loads) if (ld.index == row.load_index) { ld.profile_id = row.profile_id; return; }
+        if (row.bus >= 0) for (auto& ld : loads) if (ld.bus == row.bus) { ld.profile_id = row.profile_id; return; }
+      };
+      for (const auto& row : spec.load_profile_map) {
+        const std::string kind = upper_kind(row.kind.empty() ? std::string{"AC_LOAD"} : row.kind);
+        if (kind == "DC_LOAD") bind_dc_load(row);
+        else if (kind == "AC_BUS") { materialize_ac_bus_loads(); bind_ac_load(row); }
+        else if (kind == "DC_BUS") { materialize_dc_bus_loads(); bind_dc_load(row); }
+        else bind_ac_load(row);
       }
-      for (const auto& [bus, pid] : spec.map_by_bus) {
-        for (auto& ld : loads)
-          if (ld.bus == bus) { ld.profile_id = pid; break; }
+      if (spec.assign_all_loads_to >= 0) {
+        for (auto& ld : sys.ac.loads) ld.profile_id = spec.assign_all_loads_to;
+        for (auto& ld : sys.dc.loads) ld.profile_id = spec.assign_all_loads_to;
       }
-      if (spec.assign_all_loads_to >= 0)
-        for (auto& ld : loads) ld.profile_id = spec.assign_all_loads_to;
       if (spec.assign_all_pv_to >= 0) {
         for (auto& pv : sys.ac.pv_systems) pv.profile_id = spec.assign_all_pv_to;
         for (auto& pv : sys.dc.pv_arrays) pv.profile_id = spec.assign_all_pv_to;
@@ -11430,8 +11475,8 @@ int main(int argc, char** argv) {
         } else {
           g_session.ts_data = make_default_ts_data(num_steps);
         }
-        // Optional per-load mapping: bind each load to a specific profile id.
-        // Accepts either {load_index, profile_id} or {bus, profile_id}.
+        // Optional per-load/per-bus mapping: bind each AC/DC load or bus load to a specific profile id.
+        // Accepts new rows with {kind, load_position/load_index/bus, profile_id} and legacy {load_index|bus, profile_id} rows.
         int n_load_mapped = 0;
         int n_loads_materialized = 0;
 
@@ -11442,14 +11487,15 @@ int main(int argc, char** argv) {
         spec.valid = true;
         if (j.contains("load_profile_map") && j["load_profile_map"].is_array()) {
           for (const auto& m : j["load_profile_map"]) {
-            int pid = m.value("profile_id", -1);
-            if (pid < 0) continue;
-            if (m.contains("load_index")) {
-              int li = m.value("load_index", -1);
-              if (li >= 0) spec.map_by_load_index.emplace_back(li, pid);
-            } else if (m.contains("bus")) {
-              int bus = m.value("bus", -1);
-              if (bus >= 0) spec.map_by_bus.emplace_back(bus, pid);
+            Session::TsLoadBindingRow row;
+            row.profile_id = m.value("profile_id", -1);
+            if (row.profile_id < 0) continue;
+            row.kind = m.value("kind", std::string{"AC_LOAD"});
+            row.load_position = m.value("load_position", m.value("position", -1));
+            row.load_index = m.value("load_index", -1);
+            row.bus = m.value("bus", -1);
+            if (row.load_position >= 0 || row.load_index >= 0 || row.bus >= 0) {
+              spec.load_profile_map.push_back(std::move(row));
             }
           }
         }
@@ -11464,6 +11510,8 @@ int main(int argc, char** argv) {
               *g_session.current_system, spec);
           // Count actual mapped loads (those whose profile_id matches the spec).
           for (const auto& ld : g_session.current_system->ac.loads)
+            if (ld.profile_id >= 0) ++n_load_mapped;
+          for (const auto& ld : g_session.current_system->dc.loads)
             if (ld.profile_id >= 0) ++n_load_mapped;
         }
         json out;
