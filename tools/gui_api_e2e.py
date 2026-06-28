@@ -136,20 +136,51 @@ def main() -> int:
         chk.check(st == 200 and counts.get("ac_buses") == 14,
                   f"load_builtin -> {counts.get('ac_buses')} AC buses")
 
-        print("3. export ETAP .xlsx (binary)")
+        print("3. MATPOWER OPF regression cases")
+        opf_payload = {
+            "solver": "parity",
+            "constraints": {
+                "branch_limits": True,
+                "converter_capacity": True,
+                "converter_current": True,
+                "converter_modulation": True,
+            },
+            "check_consistency": True,
+        }
+        for case_name, expected_buses in (("case9.m", 9), ("case30.m", 30)):
+            st, body = c.post_json("/api/session/load_matpower",
+                                   {"filename": case_name})
+            counts = body.get("counts", {})
+            chk.check(st == 200 and counts.get("ac_buses") == expected_buses,
+                      f"load_matpower {case_name} -> {counts.get('ac_buses')} AC buses")
+
+            st, opf = c.post_json("/api/session/opf", opf_payload)
+            consistent = opf.get("consistency", {}).get("consistent")
+            chk.check(st == 200 and opf.get("converged") is True,
+                      f"opf {case_name} converged={opf.get('converged')} status={opf.get('status')}")
+            chk.check(opf.get("post_pf", {}).get("converged") is True and consistent is True,
+                      f"opf->pf {case_name} post_pf={opf.get('post_pf', {}).get('converged')} consistent={consistent}")
+
+        print("4. reload built-in ieee14_acdc for ETAP export")
+        st, body = c.post_json("/api/session/load_builtin", {"case": "ieee14_acdc"})
+        counts = body.get("counts", {})
+        chk.check(st == 200 and counts.get("ac_buses") == 14,
+                  f"load_builtin -> {counts.get('ac_buses')} AC buses")
+
+        print("5. export ETAP .xlsx (binary)")
         st, hdrs, xlsx = c.post_bytes("/api/session/export_etap", b"{}")
         ctype = hdrs.get("Content-Type", "")
         is_xlsx = xlsx[:2] == b"PK" and "spreadsheetml" in ctype
         chk.check(st == 200 and is_xlsx,
                   f"export_etap -> {len(xlsx)} bytes, ctype ok={is_xlsx}")
 
-        print("4. re-import the exported workbook (.xlsx upload)")
+        print("6. re-import the exported workbook (.xlsx upload)")
         st, _, raw = c.post_bytes("/api/session/load_etap_xlsx", xlsx)
         re_counts = json.loads(raw).get("counts", {})
         chk.check(st == 200 and re_counts.get("ac_buses") == 14,
                   f"load_etap_xlsx -> {re_counts.get('ac_buses')} AC buses")
 
-        print("5. import a tiny native ETAP XML")
+        print("7. import a tiny native ETAP XML")
         xml = (
             '<PROJECT><COMPONENTS>'
             '<BUS ID="B1" NominalkV="110" InService="true"/>'
@@ -165,12 +196,12 @@ def main() -> int:
         chk.check(st == 200 and xml_counts.get("ac_buses") == 2,
                   f"load_etap_xml -> {xml_counts.get('ac_buses')} AC buses")
 
-        print("6. power flow on the imported XML system")
+        print("8. power flow on the imported XML system")
         st, pf = c.post_json("/api/session/pf", {"method": "pure_ac", "options": {}})
         chk.check(st == 200 and pf.get("converged") is True,
                   f"pf converged={pf.get('converged')}")
 
-        print("7. short-circuit on the imported system")
+        print("9. short-circuit on the imported system")
         st, sc = c.post_json("/api/session/sc",
                              {"options": {"fault_type": "3ph", "c_factor": 1.1}})
         chk.check(st == 200 and len(sc.get("bus_results", [])) >= 1,

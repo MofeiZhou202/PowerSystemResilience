@@ -67,6 +67,45 @@ const App = (() => {
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
+  let _analysisQueue = Promise.resolve();
+  let _activeLoadPromise = null;
+
+  const ANALYSIS_BUSY_ERROR = 'Another analysis is already running';
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForBackendIdle(timeoutMs = 120000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const status = await apiGet('/api/session/status', { quiet: true });
+      if (!status || status.busy !== true) return true;
+      await sleep(250);
+    }
+    log('后端仍有分析任务在运行，请稍后重试', 'warn');
+    return false;
+  }
+
+  async function withAnalysisQueue(work) {
+    const previous = _analysisQueue.catch(() => {});
+    let release;
+    _analysisQueue = new Promise(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  function trackActiveLoad(work) {
+    const loadPromise = Promise.resolve().then(work);
+    _activeLoadPromise = loadPromise;
+    return loadPromise.finally(() => {
+      if (_activeLoadPromise === loadPromise) _activeLoadPromise = null;
+    });
+  }
 
   function invalidateAnalysisResults(reason = '') {
     _lastPfData = null;
@@ -639,9 +678,9 @@ const App = (() => {
   }
 
   // ========== API Client ==========
-  async function apiPost(path, body = {}) {
+  async function apiPost(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
-    log(`POST ${path}`, 'info');
+    if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -650,12 +689,12 @@ const App = (() => {
       });
       const data = await res.json();
       if (!res.ok) {
-        log(`Error: ${data.error || res.statusText}`, 'error');
+        if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
       }
       return data;
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return null;
     }
   }
@@ -663,9 +702,9 @@ const App = (() => {
   // Like apiPost but surfaces the backend error message instead of swallowing
   // it.  Returns { ok, data, error } so callers can show a specific reason
   // (e.g. an unknown fault bus id rejected by the server).
-  async function apiPostResult(path, body = {}) {
+  async function apiPostResult(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
-    log(`POST ${path}`, 'info');
+    if (!options.quiet) log(`POST ${path}`, 'info');
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -675,28 +714,28 @@ const App = (() => {
       const data = await res.json();
       if (!res.ok) {
         const error = (data && data.error) || res.statusText;
-        log(`Error: ${error}`, 'error');
+        if (!options.quiet) log(`Error: ${error}`, 'error');
         return { ok: false, data: null, error };
       }
       return { ok: true, data, error: null };
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return { ok: false, data: null, error: e.message };
     }
   }
 
-  async function apiGet(path) {
+  async function apiGet(path, options = {}) {
     const url = `${API_BASE}${path}`;
     try {
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) {
-        log(`Error: ${data.error || res.statusText}`, 'error');
+        if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
       }
       return data;
     } catch (e) {
-      log(`Network error: ${e.message}`, 'error');
+      if (!options.quiet) log(`Network error: ${e.message}`, 'error');
       return null;
     }
   }
@@ -762,30 +801,33 @@ const App = (() => {
 
   async function loadMatpowerCase(filename) {
     if (!filename) return;
-    setStatus('加载MATPOWER...', 'busy');
-    const data = await apiPost('/api/session/load_matpower', { filename });
-    if (data) {
-      log(`已加载MATPOWER文件: ${filename}`, 'success');
-      if (data._raw_json) {
-        try {
-          const sys = JSON.parse(data._raw_json);
-          Canvas.loadFromSystemJson(sys);
-          _canvasDirty = false;  // backend already has the correct system
-          updateResilienceSwitchDefault();
-          invalidateAnalysisResults();
-          log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
-        } catch (e) {
-          log(`JSON解析失败: ${e.message}`, 'error');
+    return trackActiveLoad(async () => {
+      setStatus('加载MATPOWER...', 'busy');
+      const data = await apiPost('/api/session/load_matpower', { filename });
+      if (data) {
+        log(`已加载MATPOWER文件: ${filename}`, 'success');
+        if (data._raw_json) {
+          try {
+            const sys = JSON.parse(data._raw_json);
+            Canvas.loadFromSystemJson(sys);
+            _canvasDirty = false;  // backend already has the correct system
+            updateResilienceSwitchDefault();
+            invalidateAnalysisResults();
+            log(`画布已更新: ${data.counts ? JSON.stringify(data.counts) : ''}`, 'info');
+          } catch (e) {
+            log(`JSON解析失败: ${e.message}`, 'error');
+          }
         }
-      }
-      setStatus('就绪');
+        setStatus('就绪');
 
-      // Auto-run power flow after import
-      log('自动运行潮流计算...', 'info');
-      await runPowerFlow();
-    } else {
-      setStatus('加载失败', 'error');
-    }
+        // Auto-run power flow after import
+        log('自动运行潮流计算...', 'info');
+        await runPowerFlow();
+      } else {
+        setStatus('加载失败', 'error');
+      }
+      return data;
+    });
   }
 
   async function loadBuiltinCase(caseName) {
@@ -1823,49 +1865,56 @@ const App = (() => {
 
   // ========== Power Flow ==========
   async function runPowerFlow() {
-    setStatus('潮流计算中...', 'busy');
-    const method = document.getElementById('pfMethod').value;
+    return withAnalysisQueue(async () => {
+      setStatus('潮流计算中...', 'busy');
+      const method = document.getElementById('pfMethod').value;
 
-    // Sync canvas to backend first
-    if (!await syncToBackend()) {
-      setStatus('同步失败', 'error');
-      return;
-    }
-
-    const coordCheckEl = document.getElementById('pfCoordCheck');
-    const data = await apiPost('/api/session/pf', {
-      method: method,
-      options: {
-        max_iter: 100,
-        tol: 1e-8,
-        verbose: false,
-        enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
+      // Sync canvas to backend first
+      if (!await syncToBackend()) {
+        setStatus('同步失败', 'error');
+        return null;
       }
-    });
 
-    if (data) {
-      const pfData = normalizePowerFlowResult(data);
-      const converged = pfData.converged;
-      const islandInfo = pfData.islands_detected
-        ? ` [检测到${pfData.islands_detected}个岛, ${pfData.solvable_islands}个可解]`
-        : '';
-      if (converged) {
-        log(`潮流计算收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次, 残差=${Number(pfData.residual).toExponential(4)}${islandInfo}`, 'success');
-        setStatus('潮流收敛', '');
+      const coordCheckEl = document.getElementById('pfCoordCheck');
+      if (!await waitForBackendIdle()) {
+        setStatus('后端繁忙', 'error');
+        return null;
+      }
+      const data = await apiPost('/api/session/pf', {
+        method: method,
+        options: {
+          max_iter: 100,
+          tol: 1e-8,
+          verbose: false,
+          enable_converter_coordination_check: coordCheckEl ? coordCheckEl.checked : true
+        }
+      });
+
+      if (data) {
+        const pfData = normalizePowerFlowResult(data);
+        const converged = pfData.converged;
+        const islandInfo = pfData.islands_detected
+          ? ` [检测到${pfData.islands_detected}个岛, ${pfData.solvable_islands}个可解]`
+          : '';
+        if (converged) {
+          log(`潮流计算收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次, 残差=${Number(pfData.residual).toExponential(4)}${islandInfo}`, 'success');
+          setStatus('潮流收敛', '');
+        } else {
+          log(`潮流计算未收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次${islandInfo}`, 'warn');
+          setStatus('未收敛', 'error');
+        }
+
+        // Display results.  Always replace the previous GUI cache, including after
+        // a failed run, so a later successful run is never masked by stale arrays.
+        _lastPfData = pfData;
+        Canvas.showPowerFlowResults(pfData);
+        showPowerFlowResultsTables(pfData);
+        switchTab('results');
       } else {
-        log(`潮流计算未收敛 [${pfData.method_actual || method}]: 迭代${pfData.iterations}次${islandInfo}`, 'warn');
-        setStatus('未收敛', 'error');
+        setStatus('计算失败', 'error');
       }
-
-      // Display results.  Always replace the previous GUI cache, including after
-      // a failed run, so a later successful run is never masked by stale arrays.
-      _lastPfData = pfData;
-      Canvas.showPowerFlowResults(pfData);
-      showPowerFlowResultsTables(pfData);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
-    }
+      return data;
+    });
   }
 
   // ========== Optimal Power Flow ==========
@@ -1876,98 +1925,120 @@ const App = (() => {
   // converter AC/DC current limits, and converter modulation-ratio limits, all
   // of which are honoured by the parity manual-KKT formulation.
   async function runOpf() {
-    setStatus('最优潮流计算中...', 'busy');
-    const solver = document.getElementById('opfSolver')?.value || 'parity';
-    const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
-    const constraints = {
-      branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
-      converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
-      converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
-      converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
-    };
-
-    // Sync canvas to backend first so the OPF runs against the current edits.
-    if (!await syncToBackend()) {
-      setStatus('同步失败', 'error');
-      return;
+    if (_activeLoadPromise) {
+      setStatus('等待算例加载完成...', 'busy');
+      await _activeLoadPromise.catch(() => null);
     }
+    return withAnalysisQueue(async () => {
+      setStatus('最优潮流计算中...', 'busy');
+      const solver = document.getElementById('opfSolver')?.value || 'parity';
+      const checkConsistency = !!(document.getElementById('opfCheckConsistency')?.checked);
+      const constraints = {
+        branch_limits:        !!(document.getElementById('opfBranchLimits')?.checked),
+        converter_capacity:   !!(document.getElementById('opfConvCapacity')?.checked),
+        converter_current:    !!(document.getElementById('opfConvCurrent')?.checked),
+        converter_modulation: !!(document.getElementById('opfConvModulation')?.checked),
+      };
 
-    const data = await apiPost('/api/session/opf', { solver, constraints, check_consistency: checkConsistency });
-    if (data) {
-      data._constraints = constraints;
-      const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
-      if (data.converged) {
-        log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
-        setStatus('最优潮流收敛', '');
-      } else {
-        log(`最优潮流未收敛 [${solver}${backendTag}]: ${data.status || ''}`, 'warn');
-        setStatus('未收敛', 'error');
+      // Sync canvas to backend first so the OPF runs against the current edits.
+      if (!await syncToBackend()) {
+        setStatus('同步失败', 'error');
+        return null;
       }
-      // Surface the OPF↔PF consistency verdict in the activity log too.
-      if (data.consistency && data.consistency.ran) {
-        const c = data.consistency;
-        if (!c.pf_converged) {
-          log('一致性校验: OPF后潮流未收敛，无法校验', 'warn');
-        } else if (c.consistent) {
-          log(`一致性校验通过: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu, max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°`, 'success');
+
+      if (!await waitForBackendIdle()) {
+        setStatus('后端繁忙', 'error');
+        return null;
+      }
+      let resp = await apiPostResult('/api/session/opf',
+        { solver, constraints, check_consistency: checkConsistency });
+      if (!resp.ok && resp.error === ANALYSIS_BUSY_ERROR) {
+        setStatus('等待当前分析完成...', 'busy');
+        if (await waitForBackendIdle()) {
+          resp = await apiPostResult('/api/session/opf',
+            { solver, constraints, check_consistency: checkConsistency },
+            { quiet: true });
+        }
+      }
+      const data = resp.ok ? resp.data : null;
+      if (data) {
+        data._constraints = constraints;
+        const backendTag = data.solver_backend ? ` · ${data.solver_backend}` : '';
+        if (data.converged) {
+          log(`最优潮流收敛 [${solver}${backendTag}]: 迭代${data.iterations || 0}次, 目标=${Number(data.objective || 0).toFixed(4)}`, 'success');
+          setStatus('最优潮流收敛', '');
         } else {
-          log(`一致性校验存在偏差: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu(Bus ${c.max_dvm_bus}), max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°(Bus ${c.max_dva_bus})`, 'warn');
+          log(`最优潮流未收敛 [${solver}${backendTag}]: ${data.status || ''}`, 'warn');
+          setStatus('未收敛', 'error');
         }
+        // Surface the OPF↔PF consistency verdict in the activity log too.
+        if (data.consistency && data.consistency.ran) {
+          const c = data.consistency;
+          if (!c.pf_converged) {
+            log('一致性校验: OPF后潮流未收敛，无法校验', 'warn');
+          } else if (c.consistent) {
+            log(`一致性校验通过: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu, max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°`, 'success');
+          } else {
+            log(`一致性校验存在偏差: max|ΔVm|=${Number(c.max_dvm_pu).toExponential(2)}pu(Bus ${c.max_dvm_bus}), max|ΔVa|=${Number(c.max_dva_deg).toExponential(2)}°(Bus ${c.max_dva_bus})`, 'warn');
+          }
+        }
+        _lastOpfData = data;
+        // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
+        // the power-flow voltage overlay. The OPF endpoint now also emits the
+        // post-OPF terminal flows, so wire them into the same canonical fields the
+        // PF overlay/tables already consume.
+        if (data.post_pf) {
+          const pf = data.post_pf;
+          if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
+          if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
+          if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
+          if (Array.isArray(pf.branch_flows)) {
+            data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
+              index: b.index ?? i,
+              from: b.from_bus ?? b.from,
+              to: b.to_bus ?? b.to,
+              from_bus: b.from_bus ?? b.from,
+              to_bus: b.to_bus ?? b.to,
+              pf_mw: b.pf_mw, pt_mw: b.pt_mw,
+              qf_mvar: b.qf_mvar, qt_mvar: b.qt_mvar,
+              loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
+              loading_pct: b.loading_pct || 0,
+              rate_mva: b.rate_mva || 0,
+            }));
+          }
+          if (Array.isArray(pf.dc_branch_flows)) {
+            data.dc_branch_flows = pf.dc_branch_flows;
+            data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
+              index: b.index ?? i,
+              from: b.from_bus ?? b.from,
+              to: b.to_bus ?? b.to,
+              from_bus: b.from_bus ?? b.from,
+              to_bus: b.to_bus ?? b.to,
+              pf_mw: b.pf_mw, pt_mw: b.pt_mw,
+              loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
+              loading_pct: b.loading_pct || 0,
+              rate_mva: b.rate_mva || 0,
+            }));
+          }
+          if (Array.isArray(pf.vsc_transfers)) {
+            data.vsc_transfers = pf.vsc_transfers;
+            data.geo_vsc = pf.vsc_transfers;
+          }
+          if (Array.isArray(pf.dcdc_transfers)) {
+            data.dcdc_transfers = pf.dcdc_transfers;
+            data.geo_dcdc = pf.dcdc_transfers;
+          }
+        }
+        normalizePowerFlowResult(data);
+        if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
+        showOpfResults(data);
+        switchTab('results');
+      } else {
+        if (resp.error) log(`最优潮流计算失败: ${resp.error}`, 'error');
+        setStatus('计算失败', 'error');
       }
-      _lastOpfData = data;
-      // Overlay the optimal voltages on the canvas (AC vm/va + DC vdc), reusing
-      // the power-flow voltage overlay. The OPF endpoint now also emits the
-      // post-OPF terminal flows, so wire them into the same canonical fields the
-      // PF overlay/tables already consume.
-      if (data.post_pf) {
-        const pf = data.post_pf;
-        if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
-        if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
-        if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
-        if (Array.isArray(pf.branch_flows)) {
-          data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
-            index: b.index ?? i,
-            from: b.from_bus ?? b.from,
-            to: b.to_bus ?? b.to,
-            from_bus: b.from_bus ?? b.from,
-            to_bus: b.to_bus ?? b.to,
-            pf_mw: b.pf_mw, pt_mw: b.pt_mw,
-            qf_mvar: b.qf_mvar, qt_mvar: b.qt_mvar,
-            loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
-            loading_pct: b.loading_pct || 0,
-            rate_mva: b.rate_mva || 0,
-          }));
-        }
-        if (Array.isArray(pf.dc_branch_flows)) {
-          data.dc_branch_flows = pf.dc_branch_flows;
-          data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
-            index: b.index ?? i,
-            from: b.from_bus ?? b.from,
-            to: b.to_bus ?? b.to,
-            from_bus: b.from_bus ?? b.from,
-            to_bus: b.to_bus ?? b.to,
-            pf_mw: b.pf_mw, pt_mw: b.pt_mw,
-            loss_mw: b.loss_mw ?? ((Number(b.pf_mw) || 0) + (Number(b.pt_mw) || 0)),
-            loading_pct: b.loading_pct || 0,
-            rate_mva: b.rate_mva || 0,
-          }));
-        }
-        if (Array.isArray(pf.vsc_transfers)) {
-          data.vsc_transfers = pf.vsc_transfers;
-          data.geo_vsc = pf.vsc_transfers;
-        }
-        if (Array.isArray(pf.dcdc_transfers)) {
-          data.dcdc_transfers = pf.dcdc_transfers;
-          data.geo_dcdc = pf.dcdc_transfers;
-        }
-      }
-      normalizePowerFlowResult(data);
-      if (Canvas.showPowerFlowResults) Canvas.showPowerFlowResults(data);
-      showOpfResults(data);
-      switchTab('results');
-    } else {
-      setStatus('计算失败', 'error');
-    }
+      return data;
+    });
   }
 
   // Render the optimal-power-flow result tables: summary, the enforced
@@ -8496,6 +8567,9 @@ const App = (() => {
     setActiveCanvasTool,
     showCaseLoadModal,
     hideCaseLoadModal,
+    loadMatpowerCase,
+    runPowerFlow,
+    runOpf,
   };
 })();
 

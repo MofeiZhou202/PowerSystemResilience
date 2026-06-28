@@ -282,6 +282,52 @@ TEST_CASE("SC: non-contiguous bus IDs resolve to the correct bus",
   CHECK_THROWS_AS(compute_fault_at_bus(sys, 999, opt), std::invalid_argument);
 }
 
+TEST_CASE("SC detailed: downstream fault reports upstream source contribution and voltages",
+          "[short_circuit][detailed][regression]") {
+  auto sys = make_sys(
+      {make_bus(1, BusType::SLACK), make_bus(2, BusType::PQ), make_bus(3, BusType::PQ)},
+      {make_branch(1, 1, 2, 0.02, 0.20),
+       make_branch(2, 2, 3, 0.03, 0.30)},
+      100.0,
+      0.001);
+  sys.ac.generators.clear();
+
+  ExternalGrid eg;
+  eg.index = 1;
+  eg.bus = 1;
+  eg.in_service = true;
+  eg.s_sc_max_mva = 5000.0;
+  eg.rx_max = 0.1;
+  sys.ac.external_grids.push_back(eg);
+
+  SCDetailedOptions dopt;
+  dopt.fault_type = FaultType::ThreePhase;
+  dopt.calc_type = SCCalcType::Max;
+  auto det = run_short_circuit_detailed(sys, 3, dopt);
+  REQUIRE(det.solved);
+  REQUIRE(det.bus_results.size() == 3);
+
+  const SCDetailedBusResult* bus1 = nullptr;
+  const SCDetailedBusResult* bus2 = nullptr;
+  const SCDetailedBusResult* fault_row = nullptr;
+  for (const auto& br : det.bus_results) {
+    if (br.bus_id == 1) bus1 = &br;
+    if (br.bus_id == 2) bus2 = &br;
+    if (br.bus_id == 3) fault_row = &br;
+  }
+  REQUIRE(bus1 != nullptr);
+  REQUIRE(bus2 != nullptr);
+  REQUIRE(fault_row != nullptr);
+
+  CHECK(fault_row->ikss_ka > 0.0);
+  CHECK(fault_row->ikss_extgrid_contrib_ka > 0.0);
+  CHECK(fault_row->v_remaining_pu == 0.0);
+  CHECK(bus1->v_remaining_pu > 0.0);
+  CHECK(bus2->v_remaining_pu > 0.0);
+  CHECK(std::isfinite(bus1->v_remaining_pu));
+  CHECK(std::isfinite(bus2->v_remaining_pu));
+}
+
 // ---------------------------------------------------------------------------
 // Test 5 — Fault-type ratios (SLG vs 3PH on 2-bus grounded source)
 // ---------------------------------------------------------------------------

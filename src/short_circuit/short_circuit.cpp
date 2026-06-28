@@ -862,30 +862,46 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   const double I_base = base_mva / (std::sqrt(3.0) * fault_kv);  // kA
   const Cx Zf(opt.fault_impedance_pu, 0.0);
 
+  auto bus_kv = [&](int bus_id) -> double {
+    for (const auto& bus : ac.buses) {
+      if (bus.index == bus_id) return (bus.base_kv > 1e-6) ? bus.base_kv : fault_kv;
+    }
+    return fault_kv;
+  };
+
+  auto converter_current_multiplier = [](const VSCConverter& conv) -> double {
+    if (conv.i_max_pu > 1e-6 && std::abs(conv.i_max_pu - 1.0) > 1e-9) {
+      return conv.i_max_pu;
+    }
+    if (conv.i_ac_max_pu > 1e-6) return conv.i_ac_max_pu;
+    return (conv.i_max_pu > 1e-6) ? conv.i_max_pu : 1.0;
+  };
+
   auto external_grid_impedances = [&](const ExternalGrid& eg) -> std::pair<Cx, Cx> {
+    const double eg_bus_kv = bus_kv(eg.bus);
+    const double eg_c = get_voltage_factor_sc(eg_bus_kv, opt.calc_type);
     Cx z1(0.0, 0.0);
     if (eg.ikq_ka > 1e-6) {
-      const double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : fault_kv;
-      const double z_ext_ohm = c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
-      const double z_ext_pu = z_ext_ohm * (base_mva / (fault_kv * fault_kv));
+      const double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : eg_bus_kv;
+      const double z_ext_ohm = eg_c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
+      const double z_ext_pu = z_ext_ohm * (base_mva / (eg_bus_kv * eg_bus_kv));
       const double xr = (eg.x_r > 1e-6) ? eg.x_r : 10.0;
       const double r_ext = z_ext_pu / std::sqrt(1.0 + xr * xr);
       const double x_ext = r_ext * xr;
       z1 = Cx(r_ext, x_ext);
     } else if (std::abs(eg.r_pu) > 1e-12 || std::abs(eg.x_pu) > 1e-12) {
       z1 = Cx(eg.r_pu, eg.x_pu);
+    } else if (eg.s_sc_max_mva > 1e-6) {
+      const double z_ext_pu = eg_c * base_mva / eg.s_sc_max_mva;
+      const double rx = (eg.rx_max > 1e-9) ? eg.rx_max : 0.1;
+      const double x_ext = z_ext_pu / std::sqrt(1.0 + rx * rx);
+      const double r_ext = rx * x_ext;
+      z1 = Cx(r_ext, x_ext);
     }
     Cx z0 = (std::abs(eg.r0_pu) > 1e-12 || std::abs(eg.x0_pu) > 1e-12)
                 ? Cx(eg.r0_pu, eg.x0_pu)
                 : z1;
     return {z1, z0};
-  };
-
-  auto external_grid_fault_current_ka = [&](const ExternalGrid& eg) -> double {
-    const auto [z1, z0] = external_grid_impedances(eg);
-    if (std::abs(z1) <= 1e-15) return 0.0;
-    const Cx zk = compute_Zk(opt.fault_type, z1, z1, z0, Zf);
-    return (std::abs(zk) > 1e-15) ? (c / std::abs(zk)) * I_base : 0.0;
   };
 
   // ====== Step 1: Build subtransient Ybus & Zbus ======
@@ -903,25 +919,32 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   double I_kss_pu = (std::abs(Zk) > 1e-15) ? (c / std::abs(Zk)) : 0.0;
   double I_kss_kA = I_kss_pu * I_base;
 
-  // Grid-following converter contributions (current source, IEC 60909 §6.7)
-  double converter_contrib = 0.0;
-  for (const auto& conv : projected.vsc_converters) {
-    if (!conv.in_service || conv.grid_forming) continue;
-    if (conv.bus_ac != resolved_fault_bus_id) continue;
-    double s_rated = (conv.p_rated_mw > 1e-6) ? conv.p_rated_mw : 0.0;
-    if (s_rated < 1e-12) continue;
-    double i_rated = s_rated / (std::sqrt(3.0) * fault_kv);  // kA
-    double k_conv = (conv.i_max_pu > 1e-6) ? conv.i_max_pu : 1.0;
-    converter_contrib += k_conv * i_rated;
-  }
-
   // ====== Step 3: Compute per-source contributions at fault bus ======
   double gen_contrib = 0.0, motor_contrib = 0.0, load_contrib = 0.0;
+
+  auto source_transfer_abs = [&](int source_bus_id) -> double {
+    auto it = id_map.find(source_bus_id);
+    if (it == id_map.end() || std::abs(Zk) <= 1e-15) return 0.0;
+    const auto tr = compute_transfer(opt.fault_type, Zbus, Zbus2, Zbus0,
+                                     it->second, fault_idx);
+    return std::abs(tr.Zk_xfer) / std::abs(Zk);
+  };
+
+  auto voltage_source_contribution_ka = [&](int source_bus_id, Cx source_zk) -> double {
+    if (std::abs(source_zk) <= 1e-15) return 0.0;
+    return (c / std::abs(source_zk)) * source_transfer_abs(source_bus_id) * I_base;
+  };
+
+  auto current_source_contribution_ka = [&](int source_bus_id, double source_current_ka) -> double {
+    if (source_current_ka <= 1e-15) return 0.0;
+    const double source_i_base = base_mva / (std::sqrt(3.0) * bus_kv(source_bus_id));
+    if (source_i_base <= 1e-15) return 0.0;
+    return (source_current_ka / source_i_base) * source_transfer_abs(source_bus_id) * I_base;
+  };
 
   // Generator contributions
   for (const auto& g : ac.generators) {
     if (!g.in_service) continue;
-    if (g.bus != resolved_fault_bus_id) continue;
     double xdpp = (g.xdpp_pu > 1e-6) ? g.xdpp_pu : opt.default_xdpp;
     double ra = g.ra_pu;
     double mbase = (g.mbase_mva > 1e-6) ? g.mbase_mva : base_mva;
@@ -932,34 +955,30 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     Cx z_gen_corr = z_gen * KG;
 
     if (opt.fault_type == FaultType::ThreePhase) {
-      if (std::abs(z_gen_corr) > 1e-15)
-        gen_contrib += (c / std::abs(z_gen_corr)) * I_base;
+      gen_contrib += voltage_source_contribution_ka(g.bus, z_gen_corr);
     } else if (opt.fault_type == FaultType::SinglePhaseGround) {
       double x0 = g.x0_pu, r0 = g.r0_pu;
       Cx z_gen_0 = Cx(r0, x0) * (base_mva / mbase);
       double KG0 = c / (1.0 + x0 * sin_phi);
       Cx z_gen_0_corr = z_gen_0 * KG0;
       Cx z_k = (z_gen_corr * 2.0 + z_gen_0_corr) / 3.0;
-      if (std::abs(z_k) > 1e-15)
-        gen_contrib += (c / std::abs(z_k)) * I_base;
+      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
     } else if (opt.fault_type == FaultType::TwoPhase) {
       Cx z_k = z_gen_corr * 2.0 / std::sqrt(3.0);
-      if (std::abs(z_k) > 1e-15)
-        gen_contrib += (c / std::abs(z_k)) * I_base;
+      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
     } else if (opt.fault_type == FaultType::TwoPhaseGround) {
       double x0 = g.x0_pu, r0 = g.r0_pu;
       Cx z_gen_0 = Cx(r0, x0) * (base_mva / mbase);
       double KG0 = c / (1.0 + x0 * sin_phi);
       Cx z_gen_0_corr = z_gen_0 * KG0;
       Cx z_k = (2.0 * z_gen_corr * z_gen_0_corr + z_gen_corr * z_gen_corr) / (3.0 * z_gen_corr);
-      if (std::abs(z_k) > 1e-15)
-        gen_contrib += (c / std::abs(z_k)) * I_base;
+      gen_contrib += voltage_source_contribution_ka(g.bus, z_k);
     }
   }
 
   // Motor contributions at fault bus
   for (const auto& m : ac.motors) {
-    if (!m.in_service || m.bus != resolved_fault_bus_id) continue;
+    if (!m.in_service) continue;
     Cx z_motor_ohm(m.r_pu, m.x_pu);
     if (std::abs(z_motor_ohm) < 1e-15) continue;
     double mvn = (m.vn_kv > 1e-6) ? m.vn_kv : 1.0;
@@ -967,66 +986,98 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
     Cx z_motor = z_motor_ohm / z_base;
 
     if (opt.fault_type == FaultType::ThreePhase) {
-      motor_contrib += (c / std::abs(z_motor)) * I_base;
+      motor_contrib += voltage_source_contribution_ka(m.bus, z_motor);
     } else if (opt.fault_type == FaultType::SinglePhaseGround) {
       Cx z_m0_ohm(m.r0_pu, m.x0_pu);
       Cx z_m0 = z_m0_ohm / z_base;
       Cx z_k = (2.0 * z_motor + z_m0) / 3.0;
-      if (std::abs(z_k) > 1e-15)
-        motor_contrib += (c / std::abs(z_k)) * I_base;
+      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
     } else if (opt.fault_type == FaultType::TwoPhase) {
       Cx z_k = z_motor * 2.0 / std::sqrt(3.0);
-      if (std::abs(z_k) > 1e-15)
-        motor_contrib += (c / std::abs(z_k)) * I_base;
+      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
     } else if (opt.fault_type == FaultType::TwoPhaseGround) {
       Cx z_m0_ohm(m.r0_pu, m.x0_pu);
       Cx z_m0 = z_m0_ohm / z_base;
       Cx z_k = (2.0 * z_motor * z_m0 + z_motor * z_motor) / (3.0 * z_motor);
-      if (std::abs(z_k) > 1e-15)
-        motor_contrib += (c / std::abs(z_k)) * I_base;
+      motor_contrib += voltage_source_contribution_ka(m.bus, z_k);
     }
   }
 
   // Load motor-fraction contributions at fault bus
   for (const auto& ld : ac.loads) {
-    if (!ld.in_service || ld.bus != resolved_fault_bus_id) continue;
+    if (!ld.in_service) continue;
     if (ld.motor_percent <= 1e-6 || ld.sn_mva <= 1e-6) continue;
     double actual_s = ld.sn_mva * ld.motor_percent;
     if (actual_s < 1e-12) continue;
     Cx z_load = Cx(ld.r_sc_pu, ld.x_sub_pu) * (base_mva / actual_s);
-    if (std::abs(z_load) > 1e-15)
-      load_contrib += (c / std::abs(z_load)) * I_base;
+    load_contrib += voltage_source_contribution_ka(ld.bus, z_load);
   }
-
-  double no_motor = I_kss_kA - gen_contrib - motor_contrib - load_contrib;
 
   // Static generator (sgen) contributions at fault bus via IEC 60909 §6.7
   double sgen_contrib = 0.0;
   for (const auto& sg : ac.static_generators) {
-    if (!sg.in_service || sg.bus != resolved_fault_bus_id) continue;
+    if (!sg.in_service) continue;
     if (sg.sn_mva < 1e-12 || sg.k < 1e-12) continue;
-    double I_rated = sg.sn_mva / (std::sqrt(3.0) * fault_kv);
-    sgen_contrib += sg.k * I_rated;
+    double I_rated = sg.sn_mva / (std::sqrt(3.0) * bus_kv(sg.bus));
+    sgen_contrib += current_source_contribution_ka(sg.bus, sg.k * I_rated);
   }
-  no_motor -= sgen_contrib;
-  no_motor -= converter_contrib;
 
   // External grid contributions at fault bus
   double extgrid_contrib = 0.0;
   for (const auto& eg : ac.external_grids) {
-    if (!eg.in_service || eg.bus != resolved_fault_bus_id) continue;
-    extgrid_contrib += external_grid_fault_current_ka(eg);
+    if (!eg.in_service) continue;
+    const auto [z1, z0] = external_grid_impedances(eg);
+    if (std::abs(z1) <= 1e-15) continue;
+    const Cx source_zk = compute_Zk(opt.fault_type, z1, z1, z0, Cx(0.0, 0.0));
+    extgrid_contrib += voltage_source_contribution_ka(eg.bus, source_zk);
   }
-  no_motor -= extgrid_contrib;
+
+  // Converter contributions. Grid-following converters are current sources;
+  // grid-forming converters are represented by the same voltage-source shunt
+  // that build_sc_admittance_matrices() adds to the fault network.
+  double converter_contrib = 0.0;
+  double converter_current_source_contrib = 0.0;
+  for (const auto& conv : projected.vsc_converters) {
+    if (!conv.in_service) continue;
+    if (conv.grid_forming) {
+      const double s_rated = (conv.p_rated_mw > 1e-6) ? conv.p_rated_mw : base_mva;
+      const Cx z_conv = Cx(conv.r_sc_pu, (conv.x_sc_pu > 1e-12) ? conv.x_sc_pu : 0.15)
+                        * (base_mva / s_rated);
+      converter_contrib += voltage_source_contribution_ka(conv.bus_ac, z_conv);
+      continue;
+    }
+    const double s_rated = (conv.p_rated_mw > 1e-6) ? conv.p_rated_mw : 0.0;
+    if (s_rated < 1e-12) continue;
+    const double i_rated = s_rated / (std::sqrt(3.0) * bus_kv(conv.bus_ac));
+    const double contrib = current_source_contribution_ka(
+        conv.bus_ac, converter_current_multiplier(conv) * i_rated);
+    converter_contrib += contrib;
+    converter_current_source_contrib += contrib;
+  }
+  const double total_ikss_kA = I_kss_kA + sgen_contrib + converter_current_source_contrib;
+  const double no_motor = std::max(0.0, total_ikss_kA - gen_contrib - motor_contrib - load_contrib);
+
+  Eigen::VectorXcd V_fault(n);
+  const Cx Z_voltage_denom = Zbus(fault_idx, fault_idx) + Zf;
+  for (int k = 0; k < n; ++k) {
+    if (k == fault_idx) {
+      V_fault[k] = Cx(0.0, 0.0);
+    } else if (std::abs(Z_voltage_denom) > 1e-15) {
+      V_fault[k] = Cx(c, 0.0) *
+                   (Cx(1.0, 0.0) - Zbus(k, fault_idx) / Z_voltage_denom);
+    } else {
+      V_fault[k] = Cx(c, 0.0);
+    }
+  }
 
   // ====== Step 4: Build result vector for all buses ======
   out.bus_results.resize(n);
   for (int k = 0; k < n; ++k) {
     auto& row = out.bus_results[k];
-    row.bus_id = ext_bus_id(ac.buses[k].index);
+    row.bus_id = (k == fault_idx) ? fault_bus_id : ext_bus_id(ac.buses[k].index);
 
     if (k == fault_idx) {
-      row.ikss_ka = I_kss_kA + converter_contrib;
+      row.ikss_ka = total_ikss_kA;
       row.ikss_1_ka = I_kss_kA;
       // Negative-sequence current uses Zbus2
       row.ikss_2_ka = (opt.fault_type == FaultType::ThreePhase) ? 0.0
@@ -1058,13 +1109,9 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
             ? c * Z2_xfer / (std::abs(Zk) * Z2_self) * I_base : 0.0;
       }
 
-      // Voltage drop at non-fault bus: V_remaining = c * (1 - Z_kf / Z_kk)
+      // Voltage drop at non-fault bus: V_remaining = c * (1 - Z_kf / (Z_ff + Zf)).
       if (opt.compute_voltage_drops) {
-        Cx Z_kf = Zbus(k, fault_idx);
-        Cx Z_ff = Zbus(fault_idx, fault_idx);
-        row.v_remaining_pu = (std::abs(Z_ff) > 1e-15)
-            ? std::abs(Cx(c, 0.0) * (Cx(1.0, 0.0) - Z_kf / Z_ff))
-            : c;
+        row.v_remaining_pu = std::abs(V_fault[k]);
       }
 
       // Per-source contributions at this bus via transfer ratio
@@ -1132,8 +1179,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       for (const auto& sg : ac.static_generators) {
         if (!sg.in_service || sg.bus != bus_id) continue;
         if (sg.sn_mva < 1e-12 || sg.k < 1e-12) continue;
-        double bus_kv = ac.buses[static_cast<size_t>(k)].base_kv;
-        double I_rated = sg.sn_mva / (std::sqrt(3.0) * bus_kv);
+        double bus_kv_local = ac.buses[static_cast<size_t>(k)].base_kv;
+        double I_rated = sg.sn_mva / (std::sqrt(3.0) * bus_kv_local);
         double sgen_fault_contrib = sg.k * I_rated;
         double tr_abs = (std::abs(Zk) > 1e-15)
             ? std::abs(tr.Zk_xfer) / std::abs(Zk) : 0.0;
@@ -1145,19 +1192,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       double bus_extgrid = 0.0;
       for (const auto& eg : ac.external_grids) {
         if (!eg.in_service || eg.bus != bus_id) continue;
-        double bus_kv = ac.buses[static_cast<size_t>(k)].base_kv;
-        Cx z_ext(0.0, 0.0);
-        if (eg.ikq_ka > 1e-6) {
-          double u_nq = (eg.vn_kv > 1e-6) ? eg.vn_kv : bus_kv;
-          double z_ext_ohm = c * u_nq / (std::sqrt(3.0) * eg.ikq_ka);
-          double z_ext_pu = z_ext_ohm * (base_mva / (bus_kv * bus_kv));
-          double xr = (eg.x_r > 1e-6) ? eg.x_r : 10.0;
-          double r_ext = z_ext_pu / std::sqrt(1.0 + xr * xr);
-          double x_ext = r_ext * xr;
-          z_ext = Cx(r_ext, x_ext);
-        } else if (std::abs(eg.r_pu) > 1e-12 || std::abs(eg.x_pu) > 1e-12) {
-          z_ext = Cx(eg.r_pu, eg.x_pu);
-        }
+        const Cx z_ext = external_grid_impedances(eg).first;
         if (std::abs(z_ext) > 1e-15) {
           double tr_abs = (std::abs(Zk) > 1e-15)
               ? std::abs(tr.Zk_xfer) / std::abs(Zk) : 0.0;
@@ -1176,15 +1211,13 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
         if (s_rated < 1e-12) continue;
         double conv_bus_kv = ac.buses[static_cast<size_t>(k)].base_kv;
         double i_rated = s_rated / (std::sqrt(3.0) * conv_bus_kv);
-        double k_conv = (conv.i_max_pu > 1e-6) ? conv.i_max_pu : 1.0;
         double tr_abs = (std::abs(Zk) > 1e-15)
             ? std::abs(tr.Zk_xfer) / std::abs(Zk) : 0.0;
-        bus_converter += k_conv * i_rated * tr_abs;
+        bus_converter += converter_current_multiplier(conv) * i_rated * tr_abs;
       }
       row.ikss_converter_contrib_ka = bus_converter;
 
-      row.ikss_no_motor_ka = I_kA - bus_gen - bus_motor - bus_load
-                              - bus_sgen - bus_extgrid - bus_converter;
+      row.ikss_no_motor_ka = std::max(0.0, I_kA - bus_gen - bus_motor - bus_load);
     }
   }
 
@@ -1424,20 +1457,6 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   // ====== Step 9: Branch fault currents and power flows ======
   if (opt.compute_branch_flows) {
-    // Compute bus voltages during fault: V_k = c * (1 - Z_kf / Z_ff)
-    Eigen::VectorXcd V_fault(n);
-    for (int k = 0; k < n; ++k) {
-      if (k == fault_idx) {
-        V_fault[k] = Cx(0.0, 0.0);  // voltage at fault point
-      } else {
-        Cx Z_kf = Zbus(k, fault_idx);
-        Cx Z_ff = Zbus(fault_idx, fault_idx);
-        V_fault[k] = (std::abs(Z_ff) > 1e-15)
-            ? Cx(c, 0.0) * (Cx(1.0, 0.0) - Z_kf / Z_ff)
-            : Cx(c, 0.0);
-      }
-    }
-
     // Branch currents from voltage differences
     for (const auto& br : ac.branches) {
       if (!br.in_service) continue;
