@@ -749,6 +749,7 @@ const App = (() => {
 
   function normalizePowerFlowResult(data) {
     if (!data || typeof data !== 'object') return data;
+    data.geo_ac_branches = firstNonEmptyArray(data.geo_ac_branches, data.branch_flows);
     data.geo_dc_branches = firstNonEmptyArray(data.geo_dc_branches, data.dc_branch_flows);
     data.dc_branch_flows = firstNonEmptyArray(data.dc_branch_flows, data.geo_dc_branches);
     data.vsc_transfers = firstNonEmptyArray(data.vsc_transfers, data.geo_vsc);
@@ -758,6 +759,11 @@ const App = (() => {
     data.ac_switch_flows = Array.isArray(data.ac_switch_flows) ? data.ac_switch_flows : [];
     data.ac_circuit_breaker_flows = Array.isArray(data.ac_circuit_breaker_flows) ? data.ac_circuit_breaker_flows : [];
     data.dc_circuit_breaker_flows = Array.isArray(data.dc_circuit_breaker_flows) ? data.dc_circuit_breaker_flows : [];
+    data.geo_er = Array.isArray(data.geo_er) ? data.geo_er : [];
+    data.geo_gen = Array.isArray(data.geo_gen) ? data.geo_gen : [];
+    data.geo_trafo3w = Array.isArray(data.geo_trafo3w) ? data.geo_trafo3w : [];
+    data.component_results = Array.isArray(data.component_results) ? data.component_results : [];
+    data.dc_storage_results = Array.isArray(data.dc_storage_results) ? data.dc_storage_results : [];
     return data;
   }
 
@@ -1992,8 +1998,29 @@ const App = (() => {
           if (Array.isArray(pf.vm) && pf.vm.length) data.vm = pf.vm;
           if (Array.isArray(pf.va) && pf.va.length) data.va = pf.va;
           if (Array.isArray(pf.vdc) && pf.vdc.length) data.vdc = pf.vdc;
+          [
+            'geo_buses',
+            'geo_ac_branches',
+            'geo_dc_branches',
+            'geo_vsc',
+            'geo_dcdc',
+            'geo_trafo3w',
+            'geo_gen',
+            'geo_er',
+            'component_results',
+            'dc_storage_results',
+            'ac_switch_flows',
+            'ac_circuit_breaker_flows',
+            'dc_circuit_breaker_flows',
+          ].forEach(key => {
+            if (Array.isArray(pf[key])) data[key] = pf[key];
+          });
+          if (pf.power_balance_diagnostics && typeof pf.power_balance_diagnostics === 'object') {
+            data.power_balance_diagnostics = pf.power_balance_diagnostics;
+          }
           if (Array.isArray(pf.branch_flows)) {
-            data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
+            data.branch_flows = pf.branch_flows;
+            if (!Array.isArray(pf.geo_ac_branches) || !pf.geo_ac_branches.length) data.geo_ac_branches = pf.branch_flows.map((b, i) => ({
               index: b.index ?? i,
               from: b.from_bus ?? b.from,
               to: b.to_bus ?? b.to,
@@ -2008,7 +2035,7 @@ const App = (() => {
           }
           if (Array.isArray(pf.dc_branch_flows)) {
             data.dc_branch_flows = pf.dc_branch_flows;
-            data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
+            if (!Array.isArray(pf.geo_dc_branches) || !pf.geo_dc_branches.length) data.geo_dc_branches = pf.dc_branch_flows.map((b, i) => ({
               index: b.index ?? i,
               from: b.from_bus ?? b.from,
               to: b.to_bus ?? b.to,
@@ -2022,11 +2049,11 @@ const App = (() => {
           }
           if (Array.isArray(pf.vsc_transfers)) {
             data.vsc_transfers = pf.vsc_transfers;
-            data.geo_vsc = pf.vsc_transfers;
+            if (!Array.isArray(pf.geo_vsc) || !pf.geo_vsc.length) data.geo_vsc = pf.vsc_transfers;
           }
           if (Array.isArray(pf.dcdc_transfers)) {
             data.dcdc_transfers = pf.dcdc_transfers;
-            data.geo_dcdc = pf.dcdc_transfers;
+            if (!Array.isArray(pf.geo_dcdc) || !pf.geo_dcdc.length) data.geo_dcdc = pf.dcdc_transfers;
           }
         }
         normalizePowerFlowResult(data);
@@ -2197,6 +2224,11 @@ const App = (() => {
     } else if (dcSec) {
       dcSec.style.display = 'none';
     }
+
+    renderAllPowerFlowComponentStatus(data, busMap, {
+      sectionId: 'opfAllComponentsSection',
+      resultsId: 'opfAllComponentsResults',
+    });
 
 	    // AC bus voltages and locational marginal prices.
 	    const busDiv = document.getElementById('opfBusResults');
@@ -3529,10 +3561,10 @@ const App = (() => {
     return undefined;
   }
 
-  function renderAllPowerFlowComponentStatus(data, busMap) {
+  function renderAllPowerFlowComponentStatus(data, busMap, options = {}) {
     data = normalizePowerFlowResult(data);
-    const section = document.getElementById('pfAllComponentsSection');
-    const div = document.getElementById('pfAllComponentsResults');
+    const section = document.getElementById(options.sectionId || 'pfAllComponentsSection');
+    const div = document.getElementById(options.resultsId || 'pfAllComponentsResults');
     if (!section || !div) return;
 
     const components = (typeof Canvas !== 'undefined' && Canvas.state && Array.isArray(Canvas.state.components))

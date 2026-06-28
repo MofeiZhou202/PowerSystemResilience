@@ -134,6 +134,7 @@ or the executable was not linked to the SuiteSparse libraries.
 |---|---:|---|
 | `HACDCPF_DEPENDENCY_PROFILE` | `portable` | Controls how much of `MIPSolvers` is built: `portable`, `full`, or `minimal`. |
 | `HACDCPF_USE_SUITESPARSE` | `ON` | Enables SuiteSparse discovery for both `MIPSolvers` and the OPF KKT backend. |
+| `HACDCPF_USE_GUROBI` | `OFF` | Keeps Gurobi disabled even when it is installed locally; set `ON` only for deliberate Gurobi validation. |
 | `HACDCPF_SUITESPARSE_ROOT` | empty | SuiteSparse prefix; also exported as `SUITESPARSE_ROOT` for `MIPSolvers`. |
 | `HACDCPF_ENABLE_IPOPT` | `ON` on macOS, `OFF` elsewhere | Builds embedded Ipopt only where the current `MIPSolvers` CMake supports it. |
 | `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | Propagates host-specific CPU tuning to this project and `MIPSolvers`. |
@@ -141,3 +142,7 @@ or the executable was not linked to the SuiteSparse libraries.
 The `portable` profile builds embedded HiGHS/SCIP/HFactor but disables
 MIPSolvers tests, SCUC command-line tools, and Python bindings while used as a
 subproject.  Use `full-dev` when actively developing the solver dependency too.
+
+Gurobi is intentionally disabled by default on macOS, Linux, and Windows.  The
+Auto solver chains should therefore use native/HiGHS/SCIP paths and report
+`has_gurobi=false` from `get_solver_capabilities()`.

@@ -1641,6 +1641,141 @@ json opf_er_port_dispatch_json(const hacdcpf::HybridPowerSystem& original_sys,
   return rows;
 }
 
+struct EnergyRouterExpansionRefs {
+  std::unordered_map<int, int> port_vsc_index;
+  int dcdc_index{-1};
+};
+
+std::unordered_map<int, EnergyRouterExpansionRefs> build_energy_router_expansion_refs(
+    const hacdcpf::HybridPowerSystem& sys,
+    const std::vector<hacdcpf::EnergyRouter>& er_snapshot) {
+  std::unordered_map<int, EnergyRouterExpansionRefs> refs;
+  if (er_snapshot.empty()) return refs;
+  try {
+    const hacdcpf::HybridPowerSystem projected =
+        hacdcpf::project_to_canonical_models(sys);
+    std::unordered_map<std::string, int> vsc_by_name;
+    vsc_by_name.reserve(projected.vsc_converters.size());
+    for (const auto& vsc : projected.vsc_converters) {
+      vsc_by_name[vsc.name] = vsc.index;
+    }
+    std::unordered_map<std::string, int> dcdc_by_name;
+    dcdc_by_name.reserve(projected.dc.dcdc_converters.size());
+    for (const auto& dcdc : projected.dc.dcdc_converters) {
+      dcdc_by_name[dcdc.name] = dcdc.index;
+    }
+    for (const auto& er : er_snapshot) {
+      auto& r = refs[er.index];
+      if (const auto dit = dcdc_by_name.find(er.name + "_DCDC");
+          dit != dcdc_by_name.end()) {
+        r.dcdc_index = dit->second;
+      }
+      for (const auto& p : er.ports) {
+        const char side = (p.side == 0) ? 'A' : 'B';
+        const std::string vsc_name =
+            er.name + "_VSC_" + side + std::to_string(p.index);
+        if (const auto vit = vsc_by_name.find(vsc_name);
+            vit != vsc_by_name.end()) {
+          r.port_vsc_index[p.index] = vit->second;
+        }
+      }
+    }
+  } catch (...) {
+    // Presentation JSON should still be returned if rich ER attribution is not
+    // recoverable; the caller falls back to scheduled port values.
+  }
+  return refs;
+}
+
+json power_flow_geo_energy_router_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const std::vector<hacdcpf::EnergyRouter>& er_snapshot,
+    const hacdcpf::PowerFlowResult& pf) {
+  json geo_er = json::array();
+  const auto er_refs = build_energy_router_expansion_refs(sys, er_snapshot);
+  std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_index;
+  for (const auto& vt : pf.vsc_transfers) vsc_tr_by_index[vt.index] = &vt;
+  std::unordered_map<int, const hacdcpf::DCDCTransfer*> dcdc_tr_by_index;
+  for (const auto& dt : pf.dcdc_transfers) dcdc_tr_by_index[dt.index] = &dt;
+
+  for (const auto& er : er_snapshot) {
+    if (!er.in_service) continue;
+    const auto ref_it = er_refs.find(er.index);
+    const EnergyRouterExpansionRefs* refs =
+        ref_it != er_refs.end() ? &ref_it->second : nullptr;
+    json port_arr = json::array();
+    for (const auto& p : er.ports) {
+      if (!p.in_service || p.bus == 0) continue;
+      double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
+      const bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
+      int matched_vsc_index = -1;
+
+      if (refs) {
+        const auto pit = refs->port_vsc_index.find(p.index);
+        if (pit != refs->port_vsc_index.end()) matched_vsc_index = pit->second;
+      }
+      if (const auto tit = vsc_tr_by_index.find(matched_vsc_index);
+          tit != vsc_tr_by_index.end()) {
+        p_mw = tit->second->p_ac_mw;
+        q_mvar = tit->second->q_ac_mvar;
+      } else {
+        p_mw = p.p_set_mw;
+        q_mvar = p.q_set_mvar;
+      }
+      if (is_ac) {
+        for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
+          if (sys.ac.buses[bi].index == p.bus && bi < pf.vm.size()) {
+            v_pu = pf.vm[bi];
+            break;
+          }
+        }
+      } else {
+        for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi) {
+          if (sys.dc.buses[bi].index == p.bus && bi < pf.vdc.size()) {
+            v_pu = pf.vdc[bi];
+            break;
+          }
+        }
+      }
+      port_arr.push_back(json{
+        {"port_index", p.index}, {"name", p.name}, {"bus", p.bus},
+        {"side", p.side}, {"control_mode", hacdcpf::er_control_str(p.control_mode)},
+        {"matched_vsc_index", matched_vsc_index},
+        {"is_ac", is_ac},
+        {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
+      });
+    }
+    const int internal_dcdc_index = refs ? refs->dcdc_index : -1;
+    const hacdcpf::DCDCTransfer* internal_dcdc = nullptr;
+    if (const auto dit = dcdc_tr_by_index.find(internal_dcdc_index);
+        dit != dcdc_tr_by_index.end()) {
+      internal_dcdc = dit->second;
+    }
+    double sum_p = 0.0;
+    for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
+    double vsc_loss = 0.0;
+    for (const auto& pp : port_arr) {
+      const int vidx = pp.value("matched_vsc_index", -1);
+      if (const auto vit = vsc_tr_by_index.find(vidx); vit != vsc_tr_by_index.end()) {
+        vsc_loss += vit->second->loss_mw;
+      }
+    }
+    const double dcdc_loss = internal_dcdc ? internal_dcdc->loss_mw : 0.0;
+    const double total_loss = vsc_loss + dcdc_loss;
+    geo_er.push_back(json{
+      {"router_index", er.index}, {"ports", port_arr},
+      {"p_port_sum_mw", sum_p},
+      {"internal_dcdc_index", internal_dcdc_index},
+      {"internal_dcdc_pin_mw", internal_dcdc ? internal_dcdc->p_in_mw : 0.0},
+      {"internal_dcdc_pout_mw", internal_dcdc ? internal_dcdc->p_out_mw : 0.0},
+      {"internal_dcdc_loss_mw", dcdc_loss},
+      {"vsc_loss_mw", vsc_loss},
+      {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
+    });
+  }
+  return geo_er;
+}
+
 json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
                                  const std::vector<double>& pf) {
   json rows = json::array();
@@ -6002,50 +6137,6 @@ int main(int argc, char** argv) {
       // expanded VSC/DCDC transfers by matching the canonical expansion names
       // back to solved transfer indices.
       const auto er_snapshot = sys.energy_routers;
-      struct ERExpansionRefs {
-        std::unordered_map<int, int> port_vsc_index;
-        int dcdc_index{-1};
-      };
-      auto build_er_expansion_refs = [&]() {
-        std::unordered_map<int, ERExpansionRefs> refs;
-        if (er_snapshot.empty()) return refs;
-        try {
-          const hacdcpf::HybridPowerSystem projected =
-              hacdcpf::project_to_canonical_models(sys);
-          std::unordered_map<std::string, int> vsc_by_name;
-          vsc_by_name.reserve(projected.vsc_converters.size());
-          for (const auto& vsc : projected.vsc_converters) {
-            vsc_by_name[vsc.name] = vsc.index;
-          }
-          std::unordered_map<std::string, int> dcdc_by_name;
-          dcdc_by_name.reserve(projected.dc.dcdc_converters.size());
-          for (const auto& dcdc : projected.dc.dcdc_converters) {
-            dcdc_by_name[dcdc.name] = dcdc.index;
-          }
-          for (const auto& er : er_snapshot) {
-            auto& r = refs[er.index];
-            if (const auto dit = dcdc_by_name.find(er.name + "_DCDC");
-                dit != dcdc_by_name.end()) {
-              r.dcdc_index = dit->second;
-            }
-            for (const auto& p : er.ports) {
-              const char side = (p.side == 0) ? 'A' : 'B';
-              const std::string vsc_name =
-                  er.name + "_VSC_" + side + std::to_string(p.index);
-              if (const auto vit = vsc_by_name.find(vsc_name);
-                  vit != vsc_by_name.end()) {
-                r.port_vsc_index[p.index] = vit->second;
-              }
-            }
-          }
-        } catch (...) {
-          // PF result serialization should not fail solely because rich ER
-          // metadata could not be reconstructed. The fallback below still
-          // emits scheduled port values.
-        }
-        return refs;
-      };
-
       // Helper to serialize VSC/DCDC transfers from a PowerFlowResult
       auto add_transfers = [&](const hacdcpf::PowerFlowResult& pf) {
         for (const auto& v : pf.vsc_transfers)
@@ -6734,93 +6825,7 @@ int main(int argc, char** argv) {
         // <router>_VSC_A/B<port_index>, and each router gets an internal DCDC
         // named <router>_DCDC. Matching by expanded index avoids bus collisions
         // when an ER port shares a bus with a normal VSC or another ER port.
-        json geo_er = json::array();
-        {
-          const auto er_refs = build_er_expansion_refs();
-          std::unordered_map<int, const hacdcpf::VSCTransfer*> vsc_tr_by_index;
-          for (const auto& vt : pf.vsc_transfers)
-            vsc_tr_by_index[vt.index] = &vt;
-          std::unordered_map<int, const hacdcpf::DCDCTransfer*> dcdc_tr_by_index;
-          for (const auto& dt : pf.dcdc_transfers)
-            dcdc_tr_by_index[dt.index] = &dt;
-
-          for (const auto& er : er_snapshot) {
-            if (!er.in_service) continue;
-            const auto ref_it = er_refs.find(er.index);
-            const ERExpansionRefs* refs =
-                ref_it != er_refs.end() ? &ref_it->second : nullptr;
-            json port_arr = json::array();
-            for (const auto& p : er.ports) {
-              if (!p.in_service || p.bus == 0) continue;
-              double p_mw = 0.0, q_mvar = 0.0, v_pu = 1.0;
-              bool is_ac = (p.port_type == hacdcpf::ERPortType::AC);
-              int matched_vsc_index = -1;
-
-              if (refs) {
-                const auto pit = refs->port_vsc_index.find(p.index);
-                if (pit != refs->port_vsc_index.end()) {
-                  matched_vsc_index = pit->second;
-                }
-              }
-              auto tit = vsc_tr_by_index.find(matched_vsc_index);
-              if (tit != vsc_tr_by_index.end()) {
-                p_mw = tit->second->p_ac_mw;
-                q_mvar = tit->second->q_ac_mvar;
-              } else {
-                p_mw = p.p_set_mw;
-                q_mvar = p.q_set_mvar;
-              }
-              // Get voltage from PF results
-              if (is_ac) {
-                for (size_t bi = 0; bi < sys.ac.buses.size(); ++bi) {
-                  if (sys.ac.buses[bi].index == p.bus && bi < pf.vm.size()) {
-                    v_pu = pf.vm[bi]; break;
-                  }
-                }
-              } else {
-                for (size_t bi = 0; bi < sys.dc.buses.size(); ++bi) {
-                  if (sys.dc.buses[bi].index == p.bus && bi < pf.vdc.size()) {
-                    v_pu = pf.vdc[bi]; break;
-                  }
-                }
-              }
-              port_arr.push_back(json{
-                {"port_index", p.index}, {"name", p.name}, {"bus", p.bus},
-                {"side", p.side}, {"control_mode", hacdcpf::er_control_str(p.control_mode)},
-                {"matched_vsc_index", matched_vsc_index},
-                {"is_ac", is_ac},
-                {"p_mw", p_mw}, {"q_mvar", q_mvar}, {"v_pu", v_pu}
-              });
-            }
-            int internal_dcdc_index = refs ? refs->dcdc_index : -1;
-            const hacdcpf::DCDCTransfer* internal_dcdc = nullptr;
-            if (const auto dit = dcdc_tr_by_index.find(internal_dcdc_index);
-                dit != dcdc_tr_by_index.end()) {
-              internal_dcdc = dit->second;
-            }
-            double sum_p = 0.0;
-            for (const auto& pp : port_arr) sum_p += pp["p_mw"].get<double>();
-            double vsc_loss = 0.0;
-            for (const auto& pp : port_arr) {
-              const int vidx = pp.value("matched_vsc_index", -1);
-              if (const auto vit = vsc_tr_by_index.find(vidx); vit != vsc_tr_by_index.end()) {
-                vsc_loss += vit->second->loss_mw;
-              }
-            }
-            const double dcdc_loss = internal_dcdc ? internal_dcdc->loss_mw : 0.0;
-            const double total_loss = vsc_loss + dcdc_loss;
-            geo_er.push_back(json{
-              {"router_index", er.index}, {"ports", port_arr},
-              {"p_port_sum_mw", sum_p},
-              {"internal_dcdc_index", internal_dcdc_index},
-              {"internal_dcdc_pin_mw", internal_dcdc ? internal_dcdc->p_in_mw : 0.0},
-              {"internal_dcdc_pout_mw", internal_dcdc ? internal_dcdc->p_out_mw : 0.0},
-              {"internal_dcdc_loss_mw", dcdc_loss},
-              {"vsc_loss_mw", vsc_loss},
-              {"loss_mw", total_loss}, {"p_rated_mw", er.p_rated_mw}
-            });
-          }
-        }
+        json geo_er = power_flow_geo_energy_router_json(sys, er_snapshot, pf);
 
         out["geo_buses"] = geo_buses;
         out["geo_ac_branches"] = geo_ac_branches;
@@ -9098,9 +9103,10 @@ int main(int argc, char** argv) {
 	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
 	        conv.p_is_hard_constraint = false;
 	      }
-	      const hacdcpf::HybridPowerSystem original_sys = sys;
-	      hacdcpf::HybridPowerSystem presentation_sys =
-	          hacdcpf::project_to_canonical_models(original_sys);
+		      const hacdcpf::HybridPowerSystem original_sys = sys;
+		      const auto er_snapshot = original_sys.energy_routers;
+		      hacdcpf::HybridPowerSystem presentation_sys =
+		          hacdcpf::project_to_canonical_models(original_sys);
 	      for (auto& conv : presentation_sys.vsc_converters) {
 	        if (!conv.in_service || !conv.ac_grid_forming) continue;
 	        conv.control_mode = hacdcpf::ConverterMode::AC_GRID_FORMING;
@@ -9268,12 +9274,34 @@ int main(int argc, char** argv) {
 	            if (const auto pos = dc_result_pos(c.bus_dc))
 	              c.v_dc_set_pu = r.vdc[*pos];
 	          }
-	          for (size_t k = 0; k < r.er_port_p_mw.size() && k < r.er_port_map.size(); ++k) {
-	            const int er_index = r.er_port_map[k].original_index;
-	            const int port_index = r.er_port_map[k].source_type;
-	            for (auto& er : replay_sys.energy_routers) {
-	              if (er.index != er_index) continue;
-	              for (auto& port : er.ports) {
+		          const auto er_expansion_refs =
+		              build_energy_router_expansion_refs(original_sys, er_snapshot);
+		          std::unordered_map<int, size_t> replay_vsc_pos_by_index;
+		          replay_vsc_pos_by_index.reserve(replay_sys.vsc_converters.size());
+		          for (size_t vi = 0; vi < replay_sys.vsc_converters.size(); ++vi)
+		            replay_vsc_pos_by_index[replay_sys.vsc_converters[vi].index] = vi;
+		          for (size_t k = 0; k < r.er_port_p_mw.size() && k < r.er_port_map.size(); ++k) {
+		            const int er_index = r.er_port_map[k].original_index;
+		            const int port_index = r.er_port_map[k].source_type;
+		            if (const auto ref_it = er_expansion_refs.find(er_index);
+		                ref_it != er_expansion_refs.end()) {
+		              if (const auto vit = ref_it->second.port_vsc_index.find(port_index);
+		                  vit != ref_it->second.port_vsc_index.end()) {
+		                if (const auto pit = replay_vsc_pos_by_index.find(vit->second);
+		                    pit != replay_vsc_pos_by_index.end()) {
+		                  auto& c = replay_sys.vsc_converters[pit->second];
+		                  c.p_set_mw = r.er_port_p_mw[k];
+		                  c.p_schedule_mw = r.er_port_p_mw[k];
+		                  c.p_initial_mw = r.er_port_p_mw[k];
+		                  c.p_is_hard_constraint = true;
+		                  if (k < r.er_port_q_mvar.size()) c.q_set_mvar = r.er_port_q_mvar[k];
+		                  c.control_mode = hacdcpf::ConverterMode::PQ_MODE;
+		                }
+		              }
+		            }
+		            for (auto& er : replay_sys.energy_routers) {
+		              if (er.index != er_index) continue;
+		              for (auto& port : er.ports) {
 	                if (port.index != port_index) continue;
 	                port.p_mw = r.er_port_p_mw[k];
 	                port.p_set_mw = r.er_port_p_mw[k];
@@ -9366,9 +9394,11 @@ int main(int argc, char** argv) {
                 {"pf_mw",pf_mw},{"pt_mw",pt_mw},{"loss_mw",loss_mw},{"loading_pct",loading},
                 {"rate_mva",br.rate_a_mva}});
             }
-            post_pf["dc_branch_flows"] = dcbr;
-            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
-            out["post_pf"] = post_pf;
+	            post_pf["dc_branch_flows"] = dcbr;
+	            post_pf["geo_er"] =
+	                power_flow_geo_energy_router_json(original_sys, er_snapshot, ac_pf);
+	            post_pf["vm"] = ac_pf.vm; post_pf["va"] = ac_pf.va; post_pf["vdc"] = ac_pf.vdc;
+	            out["post_pf"] = post_pf;
             // Post-OPF carbon flow: static carbon-emission-flow analysis on the OPF
             // dispatch (same engine as /api/session/run_carbon, fed the OPF PF).
             try {

@@ -90,6 +90,13 @@ TEST_CASE("get_solver_capabilities: always-on features present", "[capabilities]
     CHECK(caps.supports_quadratic_objective);
 }
 
+#ifndef HACDCPF_HAVE_GUROBI
+TEST_CASE("get_solver_capabilities: Gurobi is disabled by default", "[capabilities][gurobi]") {
+    const auto caps = get_solver_capabilities();
+    CHECK_FALSE(caps.has_gurobi);
+}
+#endif
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Logical consistency rules
 // ─────────────────────────────────────────────────────────────────────────────

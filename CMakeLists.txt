@@ -51,6 +51,8 @@ option(HACDCPF_ENABLE_IPOPT
 unset(_HACDCPF_ENABLE_IPOPT_DEFAULT)
 option(HACDCPF_USE_SUITESPARSE
        "Use SuiteSparse-backed sparse linear solvers when available"        ON)
+option(HACDCPF_USE_GUROBI
+       "Enable Gurobi detection through MIPSolvers when available"          OFF)
 set(HACDCPF_SUITESPARSE_ROOT "" CACHE PATH
     "SuiteSparse installation prefix. Mirrors SUITESPARSE_ROOT when empty.")
 if(NOT HACDCPF_SUITESPARSE_ROOT AND DEFINED ENV{SUITESPARSE_ROOT})
@@ -133,6 +135,8 @@ set(MIPSOLVERS_ENABLE_NATIVE_ARCH ${HACDCPF_ENABLE_NATIVE_ARCH} CACHE BOOL
     "Propagate host-specific native-arch builds to MIPSolvers" FORCE)
 set(MIPSOLVERS_USE_SUITESPARSE ${HACDCPF_USE_SUITESPARSE} CACHE BOOL
     "Use SuiteSparse in MIPSolvers when available" FORCE)
+set(MIPSOLVERS_USE_GUROBI ${HACDCPF_USE_GUROBI} CACHE BOOL
+    "Enable Gurobi detection in MIPSolvers when available" FORCE)
 
 set(MIPSOLVERS_BUILD_LOCAL_IPOPT ${HACDCPF_ENABLE_IPOPT} CACHE BOOL
     "Build embedded Ipopt from MIPSolvers/ipopt when supported" FORCE)

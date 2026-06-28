@@ -1472,9 +1472,9 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     return std::make_shared<GurobiAdapter>();
   }
 
-  // Auto: try Gurobi → HiGHS → Native
+  // Auto: keep the portable in-tree path first. Gurobi remains available only
+  // through the explicit UCSolverChoice::Gurobi selection when compiled in.
   AdapterRegistry reg;
-  reg.register_adapter(std::make_shared<GurobiAdapter>());
   reg.register_adapter(std::make_shared<HighsAdapter>());
   reg.register_adapter(make_tuned_native());
 

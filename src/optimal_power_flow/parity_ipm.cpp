@@ -185,7 +185,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     case 1:
       if (pattern_changed) {
         cache.umf.analyzePattern(cache.kkt);
-        if (cache.umf.info() != Eigen::Success) return false;
       }
       cache.umf.factorize(cache.kkt);
       return cache.umf.info() == Eigen::Success;
@@ -194,7 +193,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     case 2:
       if (pattern_changed) {
         cache.klu.analyzePattern(cache.kkt);
-        if (cache.klu.info() != Eigen::Success) return false;
       }
       cache.klu.factorize(cache.kkt);
       return cache.klu.info() == Eigen::Success;
@@ -202,7 +200,6 @@ bool sparse_factorize_active(SparseKKTCache& cache, bool pattern_changed) {
     default:
       if (pattern_changed) {
         cache.lu.analyzePattern(cache.kkt);
-        if (cache.lu.info() != Eigen::Success) return false;
       }
       cache.lu.factorize(cache.kkt);
       return cache.lu.info() == Eigen::Success;
@@ -372,14 +369,15 @@ bool kkt_solve_sparse(SparseKKTCache& cache,
     }
     sol += correction;
   }
-  // Flag an inaccurate solve so the next factorization escalates to a more
-  // robust backend.  Eigen's SparseLU can report a successful factorization yet
-  // return a poor solution on near-singular KKTs; the relative residual exposes
-  // that so the IPM switches to UMFPACK before the iterate diverges.
+  // Flag an inaccurate Eigen SparseLU solve so the next factorization can try
+  // another backend when one is available.  Do not downgrade away from
+  // UMFPACK/KLU on a warning residual: those SuiteSparse backends are already
+  // the robust sparse path, and switching backend mid-IPM changes the trajectory
+  // enough to break otherwise convergent hybrid AC/DC cases.
   const double rhs_norm = rhs_s.cwiseAbs().maxCoeff();
   if (rhs_norm > 0.0) {
     const double resid = (rhs_s - cache.kkt_orig * sol).cwiseAbs().maxCoeff();
-    if (resid > 1e-6 * rhs_norm) {
+    if (cache.active == 3 && resid > 1e-6 * rhs_norm) {
       cache.solve_degraded = true;
     }
   }
