@@ -865,19 +865,26 @@ TopoReconfResult run_topology_reconfiguration(
   // LinDistFlow inequalities
   const double bigM_v = opt.big_m_v;
   if (g4_volt) {
-    // (P3) Voltage drop big-M
+    // (P3) Voltage drop big-M (per-branch, tightened): an open branch only needs
+    // M ≥ max|v_j−v_i+2rP+2xQ| = (Vmax²−Vmin²)+2(r+x)·rate. Tighter M shrinks the
+    // LP gap and the B&C tree vs a flat constant.
+    auto bigm_branch = [&](int i){ int fi=edge_from[i],ti=edge_to[i];
+      double vspan = (fi>=0&&ti>=0)? std::max(Vmax2[fi]-Vmin2[ti], Vmax2[ti]-Vmin2[fi]) : opt.big_m_v;
+      double m = std::abs(vspan) + 2.0*(std::abs(edge_r[i])+std::abs(edge_x[i]))*edge_rate[i];
+      return std::min(opt.big_m_v, std::max(0.1, m)); };
     for (int i = 0; i < nl; ++i) {
       int fi = edge_from[i], ti = edge_to[i];
       if (fi < 0) { ineq_row += 2; continue; }
       double r = edge_r[i], x = edge_x[i];
+      const double bM = bigm_branch(i);
       // Upper
       ineq_trips.emplace_back(ineq_row, idx.v(ti),   1.0);
       ineq_trips.emplace_back(ineq_row, idx.v(fi),  -1.0);
       ineq_trips.emplace_back(ineq_row, idx.Pij(i),  2.0*r);
       if (i < nl_ac)
         ineq_trips.emplace_back(ineq_row, idx.Qij(i), 2.0*x);
-      ineq_trips.emplace_back(ineq_row, idx.beta(i), bigM_v);
-      b_ineq[ineq_row] = bigM_v;
+      ineq_trips.emplace_back(ineq_row, idx.beta(i), bM);
+      b_ineq[ineq_row] = bM;
       ++ineq_row;
       // Lower
       ineq_trips.emplace_back(ineq_row, idx.v(fi),   1.0);
@@ -885,8 +892,8 @@ TopoReconfResult run_topology_reconfiguration(
       ineq_trips.emplace_back(ineq_row, idx.Pij(i), -2.0*r);
       if (i < nl_ac)
         ineq_trips.emplace_back(ineq_row, idx.Qij(i), -2.0*x);
-      ineq_trips.emplace_back(ineq_row, idx.beta(i), bigM_v);
-      b_ineq[ineq_row] = bigM_v;
+      ineq_trips.emplace_back(ineq_row, idx.beta(i), bM);
+      b_ineq[ineq_row] = bM;
       ++ineq_row;
     }
     for (int i = 0; i < nl_vsc; ++i) {
@@ -1007,8 +1014,13 @@ TopoReconfResult run_topology_reconfiguration(
     lp.vars[i] = {VarType::Continuous, lb[i], ub[i], {}};
 
   for (int i = 0; i < nl + nl_vsc; ++i) {
-    lp.vars[idx.beta(i)].type = VarType::Binary;
-    milp.binary_idx.push_back(idx.beta(i));
+    // Only switchable branches need a branching variable; fixed edges already
+    // have lb==ub, so leaving them continuous shrinks the B&C tree without
+    // changing the feasible region. Major native-solver speed-up.
+    if (beta_free[i]) {
+      lp.vars[idx.beta(i)].type = VarType::Binary;
+      milp.binary_idx.push_back(idx.beta(i));
+    }
   }
   for (int g = 0; g < ng; ++g) {
     lp.vars[idx.gamma(g)].type = VarType::Binary;

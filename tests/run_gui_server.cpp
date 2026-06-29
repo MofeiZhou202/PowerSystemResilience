@@ -12649,6 +12649,7 @@ int main(int argc, char** argv) {
         add_faults("fault_vsc", hacdcpf::graph::EdgeCategory::VSC_Coupling);
         tr_opts.max_switch_ops = opts.value("max_switch_ops", 0);
         tr_opts.solver = opts.value("solver", std::string("auto"));
+        tr_opts.skip_heuristic = opts.value("skip_heuristic", false);
         tr_opts.verbose   = false;
         // Every AC branch is a reconfiguration candidate so the MILP can both
         // open in-service lines and close ties → reach the optimal radial tree.
