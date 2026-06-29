@@ -229,6 +229,12 @@ hacdcpf_add_test(test_ev_power_traffic_formulations_e_f_g_h test_ev_power_traffi
 # spillback propagation, road failure and rerouting, differential class costs.
 hacdcpf_add_test(test_ev_power_traffic_phase1 test_ev_power_traffic_phase1.cpp)
 
+# Device terminal flows (switch/CB) + reconfig device back-projection.
+hacdcpf_add_test(test_device_flows test_device_flows.cpp)
+
+# ONR options: split-domain radiality + G4/G5 constraint toggles.
+hacdcpf_add_test(test_reconfig_options test_reconfig_options.cpp)
+
 # Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
 # runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).
 # TC-1 (symbol linkage + project tree check) runs unconditionally.

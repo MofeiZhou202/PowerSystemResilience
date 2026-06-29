@@ -2558,6 +2558,7 @@ std::vector<std::string> case_names() {
       "comprehensive_hybrid_acdc",
       "market_3bus_toy",
       "market_5bus_acdc_toy",
+      "dist33_tie_demo",
   };
 }
 
@@ -2577,6 +2578,18 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
   if (name == "market_3bus_toy") return build_market_3bus_toy();
   if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
+  if (name == "dist33_tie_demo") {
+    // Pure-AC IEEE 33-bus with the 5 standard ties open (suboptimal radial).
+    // Every branch is switchable, so ONR re-picks a lower-loss radial tree.
+    auto sys = build_case33bw_acdc();
+    sys.dc = hacdcpf::DCSystem{};
+    sys.vsc_converters.clear();
+    sys.energy_routers.clear();
+    int n = static_cast<int>(sys.ac.branches.size());
+    for (int i = std::max(0, n - 5); i < n; ++i) sys.ac.branches[static_cast<size_t>(i)].in_service = false;
+    sys.name = "Dist33 Tie Demo (pure AC, 5 standard ties open)";
+    return sys;
+  }
   throw std::runtime_error("Unsupported case: " + name);
 }
 
@@ -3257,6 +3270,20 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           </div>
           <div><label>MIP Gap</label><input id="rcMipGap" type="number" step=".005" value="0.01"></div>
           <div><label>Max time (s)</label><input id="rcMaxTime" type="number" min="10" max="600" value="60"></div>
+          <div><label>Power Flow</label>
+            <select id="rcEnablePF"><option value="1" selected>LinDistFlow (G3–G6)</option><option value="0">Connectivity only</option></select>
+          </div>
+          <div><label>Objective</label>
+            <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value]||[10,1];rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];"><option value="loss" selected>Min loss</option><option value="switch">Min switching</option><option value="restore">Max restored</option></select>
+          </div>
+          <div><label>λ loss/sw/shed</label>
+            <span style="display:flex;gap:4px;"><input id="rcLambdaLoss" type="number" value="10" style="width:60px"><input id="rcLambdaSwitch" type="number" value="1" style="width:50px"><input id="rcLambdaShed" type="number" value="10000" style="width:70px"></span>
+          </div>
+          <div><label>Groups</label>
+            <span style="font-size:.85em;"><input type="checkbox" id="rcEnableVoltage" checked/>G4 <input type="checkbox" id="rcEnableThermal" checked/>G5 <input type="checkbox" id="rcSplitTrees"/>AC/DC <input type="checkbox" id="rcDcMesh"/>DCmesh <input type="checkbox" id="rcLossAware" checked/>I2R</span>
+          </div>
+          <div><label>Max switch ops</label><input id="rcMaxSwOps" type="number" min="0" value="0"></div>
+          <div><label>Solver</label><select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></div>
         </div>
         <div class="btn-group">
           <button class="btn btn-primary" id="runReconfigBtn">Run Network Reconfiguration</button>
@@ -3271,6 +3298,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
         <div id="rcLossChart" class="chart"></div>
         <div id="rcSwitchChart" class="chart"></div>
         <div id="rcESSChart" class="chart"></div>
+        <div id="rcSwOps" style="margin-top:10px;"></div>
       </section>
 
       <!-- =================== ANNUAL PRODUCTION SIM TAB ================ -->
@@ -5649,6 +5677,16 @@ document.getElementById('runReconfigBtn').onclick=async()=>{
       v_max:parseFloat(document.getElementById('rcVmax').value)||1.05,
       mip_gap:parseFloat(document.getElementById('rcMipGap').value)||0.01,
       max_time_s:parseInt(document.getElementById('rcMaxTime').value)||60,
+      enable_pf:(document.getElementById('rcEnablePF')||{}).value!=='0',
+      enable_voltage:(document.getElementById('rcEnableVoltage')||{}).checked!==false,
+      enable_thermal:(document.getElementById('rcEnableThermal')||{}).checked!==false,
+      split_domain_trees:(document.getElementById('rcSplitTrees')||{}).checked===true,
+      allow_dc_mesh:(document.getElementById('rcDcMesh')||{}).checked===true,
+      loss_aware:(document.getElementById('rcLossAware')||{}).checked!==false,
+      max_switch_ops:parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
+      lambda_loss:parseFloat((document.getElementById('rcLambdaLoss')||{}).value)||10,
+      lambda_switch:parseFloat((document.getElementById('rcLambdaSwitch')||{}).value)||1,
+      lambda_shed:parseFloat((document.getElementById('rcLambdaShed')||{}).value)||1e4,
     });
     document.getElementById('rcFeas').textContent=body.feasible?'Yes':'No';
     document.getElementById('rcObj').textContent=fmt(body.total_objective,2);
@@ -5678,6 +5716,8 @@ document.getElementById('runReconfigBtn').onclick=async()=>{
       Plotly.newPlot('rcESSChart',essSocData,{title:'ESS SOC during Reconfiguration',xaxis:{title:'Step'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
     else
       document.getElementById('rcESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage units in this case.</div>';
+    const ops=body.switch_operations||[];const sumr=body.switch_op_summary||{};const opEl=document.getElementById('rcSwOps');
+    if(opEl){var ot=body.obj_terms||{};var hdr='<div style="font-size:.85em;margin:4px 0;">目标: 损耗='+(ot.loss||0).toFixed(3)+' 开关='+(ot.switching||0).toFixed(0)+' 切荷='+(ot.shed||0).toFixed(1)+' 孤岛='+(ot.island||0).toFixed(0)+' | 校验 PF='+(body.reconfig_pf_converged?'✓':'✗')+' OPF='+(body.opf_converged?'✓':'✗')+'</div>';if(ops.length){const kn={circuit_breaker:'CB',switch:'Switch',branch:'Branch'};let h='<table class="tbl"><thead><tr><th>Device</th><th>ID</th><th>From</th><th>To</th><th>Action</th></tr></thead><tbody>';ops.forEach(o=>{h+='<tr><td>'+(kn[o.kind]||o.kind)+'</td><td>'+o.index+'</td><td>'+o.from_bus+'</td><td>'+o.to_bus+'</td><td>'+(o.close?'CLOSE':'OPEN')+'</td></tr>';});h+='</tbody></table><div style="color:var(--muted);font-size:.85em;">Switch +'+(sumr.switch_close||0)+'/-'+(sumr.switch_open||0)+', CB +'+(sumr.cb_close||0)+'/-'+(sumr.cb_open||0)+'</div>';opEl.innerHTML=hdr+h;}else{opEl.innerHTML=hdr+'<div style="color:var(--muted);">No device-mapped switch operations.</div>';}}
     setStatus('Reconfiguration done. Feasible: '+body.feasible+'. Obj: '+fmt(body.total_objective,2)+'. Switch actions: '+(totalSwOn+totalSwOff)+'. Solver: '+(body.solver_name||'native')+'.');
   }catch(e){setStatus(e.message,true);}
 };
@@ -12584,8 +12624,50 @@ int main(int argc, char** argv) {
         tr_opts.v_max_pu  = opts.value("v_max_pu", opts.value("v_max", 1.05));
         tr_opts.mip_gap   = opts.value("mip_gap", 0.01);
         tr_opts.max_time_s = opts.value("max_time_s", 60);
-        tr_opts.enable_pf = true;
+        tr_opts.enable_pf = opts.value("enable_pf", true);
+        tr_opts.enable_voltage = opts.value("enable_voltage", true);
+        tr_opts.enable_thermal = opts.value("enable_thermal", true);
+        tr_opts.split_domain_trees = opts.value("split_domain_trees", false);
+        tr_opts.allow_dc_mesh = opts.value("allow_dc_mesh", false);
+        tr_opts.loss_aware = opts.value("loss_aware", true);  // I²R-aware so ties are used
+        // Faulted lines (ACBranch.index) are forced open so the MILP must close
+        // a tie to restore downstream load — gives a visible reconfiguration.
+        if (opts.contains("line_failures") && opts["line_failures"].is_array())
+          for (const auto& f : opts["line_failures"]) tr_opts.line_failures.push_back(f.get<int>());
+        tr_opts.lambda_switch = opts.value("lambda_switch", 1.0);
+        tr_opts.lambda_loss   = opts.value("lambda_loss", 10.0);
+        tr_opts.lambda_shed   = opts.value("lambda_shed", 1e4);
+        tr_opts.lambda_island = opts.value("lambda_island", 1e5);
+        // Arbitrary device faults: AC lines via line_failures, plus structured
+        // AC/DC/VSC faults so any device can be forced out of service.
+        auto add_faults = [&](const char* key, hacdcpf::graph::EdgeCategory cat) {
+          if (opts.contains(key) && opts[key].is_array())
+            for (const auto& f : opts[key]) tr_opts.faulted_branches.push_back({cat, f.get<int>()});
+        };
+        add_faults("fault_ac", hacdcpf::graph::EdgeCategory::AC_Line);
+        add_faults("fault_dc", hacdcpf::graph::EdgeCategory::DC_Line);
+        add_faults("fault_vsc", hacdcpf::graph::EdgeCategory::VSC_Coupling);
+        tr_opts.max_switch_ops = opts.value("max_switch_ops", 0);
+        tr_opts.solver = opts.value("solver", std::string("auto"));
         tr_opts.verbose   = false;
+        // Every AC branch is a reconfiguration candidate so the MILP can both
+        // open in-service lines and close ties → reach the optimal radial tree.
+        for (const auto& br : sys_tr.ac.branches) tr_opts.switchable_branch_ids.push_back(br.index);
+        // Auto-enable split-domain radiality when the case is hybrid (has DC
+        // buses + converters) unless the caller overrode it.
+        if (!opts.contains("split_domain_trees") && !sys_tr.dc.buses.empty() && !sys_tr.vsc_converters.empty())
+          tr_opts.split_domain_trees = true;
+        // Drop a DC subnetwork that has no DC voltage source: keeping it (dead
+        // ties stay) would leave an unrooted DC island and force infeasibility.
+        {
+          bool dc_src = false;
+          for (const auto& b : sys_tr.dc.buses) if (b.bus_type == hacdcpf::DCBusType::DC_V) dc_src = true;
+          if (!dc_src && sys_tr.dc.static_generators.empty() && sys_tr.dc.dc_static_generators.empty() &&
+              sys_tr.dc.pv_arrays.empty() && sys_tr.dc.storage.empty() && sys_tr.dc.dc_storage.empty()) {
+            sys_tr.dc = hacdcpf::DCSystem{};
+            sys_tr.vsc_converters.clear();
+          }
+        }
         auto recon = hacdcpf::analysis::run_topology_reconfiguration(sys_tr, tr_opts);
 
         // Per-branch closed flag (1 = in service) derived from the open-branch set,
@@ -12623,6 +12705,7 @@ int main(int argc, char** argv) {
         double reconfig_loss_mw = 0.0;
         bool reconfig_pf_converged = false;
         int reconfig_pf_iterations = 0;
+        bool opf_converged = false; double opf_objective = 0.0;
         double reconfig_pf_residual = 0.0;
         bool reconfig_is_radial = false;
         bool reconfig_is_connected = false;
@@ -12658,12 +12741,22 @@ int main(int argc, char** argv) {
               if (loss > 0.0) reconfig_loss_mw += loss;
             }
           }
+          // OPF cross-validation on the reconfigured topology.
+          try {
+            hacdcpf::opf::ACOPFOptions oo;
+            auto opf_r = hacdcpf::solve_ac_opf(sys_reconfig, oo);
+            opf_converged = opf_r.converged; opf_objective = opf_r.objective;
+          } catch (...) {}
         }
 
         // ========== Build JSON response ==========
         json out;
         out["feasible"] = sched.feasible;
         out["total_objective"] = sched.total_objective;
+        out["obj_terms"] = json{{"loss", recon.obj_terms.loss}, {"switching", recon.obj_terms.switching},
+                                {"shed", recon.obj_terms.shed}, {"island", recon.obj_terms.island}};
+        out["opf_converged"] = opf_converged;
+        out["opf_objective"] = opf_objective;
         out["total_shed_mw"] = sched.total_shed_mw;
         out["milp_objective"] = sched.total_objective;
         out["estimated_loss_mw"] = sched.total_objective * sys_tr.base_mva;
@@ -12735,6 +12828,32 @@ int main(int argc, char** argv) {
           out["open_branch_ids"] = open_ids;
           out["closed_branch_ids"] = closed_ids;
           out["branch_details"] = branch_details;
+        }
+        // Tie-switch / circuit-breaker operations projected back to physical
+        // devices from canonical branches (BranchExpandMap). This restores the
+        // device-space actions lost when switches/CBs are flattened to ACBranches.
+        {
+          json sw_ops = json::array();
+          int sw_close = 0, sw_open = 0, cb_close = 0, cb_open = 0;
+          for (const auto& op : recon.switch_operations) {
+            const char* kind = op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker
+                                   ? "circuit_breaker"
+                                   : (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch
+                                          ? "switch" : "branch");
+            sw_ops.push_back(json{{"kind", kind}, {"index", op.index},
+                                  {"from_bus", op.bus_from}, {"to_bus", op.bus_to},
+                                  {"close", op.close}});
+            if (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker)
+              (op.close ? cb_close : cb_open)++;
+            else if (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch)
+              (op.close ? sw_close : sw_open)++;
+          }
+          out["switch_operations"] = sw_ops;
+          out["switch_op_summary"] = json{{"switch_close", sw_close}, {"switch_open", sw_open},
+                                          {"cb_close", cb_close}, {"cb_open", cb_open}};
+          out["applied_faults"] = json{{"ac", opts.value("line_failures", json::array())},
+                                       {"dc", opts.value("fault_dc", json::array())},
+                                       {"vsc", opts.value("fault_vsc", json::array())}};
         }
         // Per-step per-branch topology for detailed display
         {

@@ -15,13 +15,20 @@ namespace hacdcpf {
 // Switch).  Callers can use this to map solver branch-flow results back
 // to their original component type and index.
 // ─────────────────────────────────────────────────────────────────────
-enum class BranchOriginType { Transformer2W, Transformer3W, Switch };
+enum class BranchOriginType { Transformer2W, Transformer3W, Switch, CircuitBreaker };
 
 struct BranchExpandEntry {
   int    branch_index{0};     ///< ACBranch::index of the equivalent branch
   BranchOriginType origin_type{BranchOriginType::Transformer2W};
   int    origin_index{0};     ///< index of the original element (tr.index / sw.index)
   int    pair_number{0};      ///< Transformer3W only: 0=HV-MV, 1=HV-LV, 2=MV-LV
+  // Original (pre-merge) endpoint bus indices of the device that produced this
+  // branch.  Populated for Switch/CircuitBreaker origins so callers can map a
+  // collapsed zero-impedance device back to a two-terminal cut and compute its
+  // flow as the net injection across that cut.  -1 when not applicable.
+  int    bus_from{-1};
+  int    bus_to{-1};
+  bool   closed{true};        ///< device closed state at projection time
 };
 
 struct BranchExpandMap {

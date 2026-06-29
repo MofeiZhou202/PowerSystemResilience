@@ -2696,6 +2696,22 @@ const App = (() => {
         v_max_pu: 1.05,
         mip_gap: 0.01,
         max_time_s: 60,
+        enable_pf: (document.getElementById('rcEnablePF')||{}).value !== '0',
+        enable_voltage: (document.getElementById('rcEnableVoltage')||{}).checked !== false,
+        enable_thermal: (document.getElementById('rcEnableThermal')||{}).checked !== false,
+        split_domain_trees: (document.getElementById('rcSplitTrees')||{}).checked === true,
+        allow_dc_mesh: (document.getElementById('rcDcMesh')||{}).checked === true,
+        loss_aware: (document.getElementById('rcLossAware')||{}).checked !== false,
+        line_failures: ((document.getElementById('rcFaults')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        fault_dc: ((document.getElementById('rcFaultsDc')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        fault_vsc: ((document.getElementById('rcFaultsVsc')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        lambda_shed: parseFloat((document.getElementById('rcLambdaShed')||{}).value) || 1e4,
+        lambda_island: parseFloat((document.getElementById('rcLambdaIsland')||{}).value) || 1e5,
+        solver: (document.getElementById('rcSolver')||{}).value || 'auto',
+        lambda_loss: parseFloat((document.getElementById('rcLambdaLoss')||{}).value) || ({loss:50,switch:5,restore:10})[(document.getElementById('rcObjective')||{}).value||'loss'],
+        lambda_switch: parseFloat((document.getElementById('rcLambdaSwitch')||{}).value) || ({loss:1,switch:20,restore:1})[(document.getElementById('rcObjective')||{}).value||'loss'],
+        lambda_shed: parseFloat((document.getElementById('rcLambdaShed')||{}).value) || 1e4,
+        max_switch_ops: parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
         verbose: false,
       }
     });
@@ -2707,6 +2723,16 @@ const App = (() => {
         const redPct = data.loss_reduction_pct?.toFixed(1) || '0';
         log(`拓扑重构完成: 重构前损耗=${baseLoss}MW, 重构后损耗=${reconLoss}MW, 降低${redPct}%, ` +
             `辐射状=${data.reconfig_is_radial ? '是' : '否'}, 连通=${data.reconfig_is_connected ? '是' : '否'}`, 'success');
+        const ops = data.switch_operations || [];
+        const ot = data.obj_terms || {};
+        log(`目标分解: 损耗=${(ot.loss||0).toFixed(3)} 开关=${(ot.switching||0).toFixed(0)} 切负荷=${(ot.shed||0).toFixed(1)} 孤岛=${(ot.island||0).toFixed(0)} | 校验 PF=${data.reconfig_pf_converged?'✓':'✗'} OPF=${data.opf_converged?'✓':'✗'}(obj=${(data.opf_objective||0).toFixed(1)})`, 'info');
+        const af = data.applied_faults || {};
+        const nf = (af.ac||[]).length + (af.dc||[]).length + (af.vsc||[]).length;
+        if (nf) log(`已施加故障 AC=[${(af.ac||[]).join(',')}] DC=[${(af.dc||[]).join(',')}] VSC=[${(af.vsc||[]).join(',')}]`, 'info');
+        if (ops.length) {
+          const desc = ops.map(o => `${o.kind === 'circuit_breaker' ? '断路器' : (o.kind === 'switch' ? '开关' : '支路')}#${o.index}:${o.close ? '合' : '分'}`).join(', ');
+          log(`联络开关/断路器操作 (${ops.length}): ${desc}`, 'info');
+        }
         setStatus('拓扑重构完成');
       } else {
         log('拓扑重构: 未找到可行解', 'warn');

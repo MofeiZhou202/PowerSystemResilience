@@ -881,6 +881,15 @@ PowerFlowResult solve_power_flow(const HybridPowerSystem& sys, const PowerFlowOp
     }
   }
   populate_derived_results(data, result, opt.loss_model);
+  // Recover switch / circuit-breaker terminal flows: PF-aware (from solved AC
+  // line flows) when available so merged-out devices still report flow.
+  if (result.converged && (!sys.ac.switches.empty() || !sys.ac.circuit_breakers.empty())) {
+    auto df = result.branch_flows.size() == sys.ac.branches.size()
+                  ? compute_device_terminal_flows(sys, result.branch_flows)
+                  : compute_device_terminal_flows(sys, result.vm, result.va);
+    result.ac_switch_flows = std::move(df.ac_switches);
+    result.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
+  }
   // Post-solve DC/DC duty-ratio feasibility (multi-converter §3.2): a converged
   // solution can still demand an infeasible voltage conversion for the declared
   // power-stage topology.
@@ -1027,7 +1036,14 @@ powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& 
 }
 
 opf::ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const opf::ACOPFOptions& opt) {
-  return opf::solve_ac_opf(sys, opt);
+  opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
+  // Surface switch / circuit-breaker terminal flows at the OPF dispatch point.
+  if (r.converged && (!sys.ac.switches.empty() || !sys.ac.circuit_breakers.empty())) {
+    auto df = compute_device_terminal_flows(sys, r.vm, r.va);
+    r.ac_switch_flows = std::move(df.ac_switches);
+    r.ac_circuit_breaker_flows = std::move(df.ac_circuit_breakers);
+  }
+  return r;
 }
 
 opf::DCOPFResult solve_dc_opf(const HybridPowerSystem& sys, const opf::DCOPFOptions& opt) {

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"  // BranchFlow, DeviceTerminalFlow
 
 namespace hacdcpf {
 
@@ -76,6 +77,12 @@ std::vector<int> generators_per_bus(const HybridPowerSystem& sys);
 HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys);
 HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys);
 
+// Reconfiguration-friendly projection: expands rich devices and merges
+// zero-impedance buses but optionally KEEPS dead islands so open tie switches
+// into currently-unenergised sections remain valid reconnection candidates.
+HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys,
+                                              bool strip_dead);
+
 // ═══════════════════════════════════════════════════════════════════════
 // Zero-impedance bus merging
 // ═══════════════════════════════════════════════════════════════════════
@@ -87,5 +94,34 @@ void strip_dead_islands(HybridPowerSystem& sys);
 std::vector<double> unproject_bus_vector(
     const std::vector<double>& merged,
     const BusMergeMap& map);
+
+// ═══════════════════════════════════════════════════════════════════════
+// Device terminal flows (switches / circuit breakers)
+// ═══════════════════════════════════════════════════════════════════════
+// Closed switches/CBs collapse to zero-impedance branches and are merged out of
+// the canonical solve, so they carry no ACBranch flow. This recovers their flow
+// as the net real/reactive injection across the two-terminal cut, using the
+// original endpoint buses and per-bus net injection (gen − load). Open devices
+// report zero. base_mva scales the result to MW/MVAr.
+// ═══════════════════════════════════════════════════════════════════════
+// Device terminal flows (switches / circuit breakers)
+// ═══════════════════════════════════════════════════════════════════════
+// Closed switches/CBs collapse to zero-impedance branches and are merged out of
+// the canonical solve, so they carry no ACBranch flow. This recovers their flow
+// as the net real/reactive injection across the two-terminal cut. The base
+// overload uses rich component net injection (exact for radial feeders). The
+// PF-aware overload subtracts solved AC line flows at each bus so meshed/looped
+// networks are handled from the actual converged state. Open devices report 0.
+struct DeviceTerminalFlows {
+  std::vector<DeviceTerminalFlow> ac_switches;
+  std::vector<DeviceTerminalFlow> ac_circuit_breakers;
+};
+DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
+                                                  const std::vector<double>& vm,
+                                                  const std::vector<double>& va);
+// PF-aware: orig-space AC branch flows (same indexing as sys.ac.branches) make
+// the cut account for already-solved line flows.
+DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
+                                                  const std::vector<BranchFlow>& ac_branch_flows);
 
 }  // namespace hacdcpf

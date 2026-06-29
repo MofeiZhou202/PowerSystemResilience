@@ -57,6 +57,31 @@ struct TopoReconfOptions {
   /// 是否启用 LinDistFlow 潮流约束
   bool enable_pf{true};
 
+  /// G4 voltage-drop (LinDistFlow) constraints (only if enable_pf).
+  bool enable_voltage{true};
+  /// G5 thermal P/Q limit constraints (only if enable_pf).
+  bool enable_thermal{true};
+  /// Per-domain radiality: count AC and DC branches in the spanning-tree
+  /// cardinality but leave AC/DC converters (VSC) free as bridges, so meshed
+  /// MTDC links are not forced into a single radial tree.
+  bool split_domain_trees{false};
+  /// Allow meshed DC: exclude DC branches from the spanning-tree cardinality so
+  /// the DC subnetwork may keep loops (only the AC side stays radial). Implies
+  /// split_domain_trees behaviour for converters.
+  bool allow_dc_mesh{false};
+  /// Loss-aware objective: minimise Σ r·|P| (I²R proxy via t≥|P|) so closing a
+  /// tie that reduces flow loss is rewarded — candidate ties get used. Requires
+  /// enable_pf. Default false keeps the resistance-only Σ r·β behaviour.
+  bool loss_aware{false};
+
+  // ── Objective weights (GUI-configurable; defaults match historical) ──
+  double lambda_switch{1.0};    ///< switching cost
+  double lambda_loss{10.0};     ///< resistive-loss proxy
+  double lambda_shed{1e4};      ///< load-shed penalty
+  double lambda_island{1e5};    ///< extra-island (root) penalty
+  /// Optional cap on total switch operations (0 = unlimited).
+  int max_switch_ops{0};
+
   /// 电压下限 (p.u.)
   double v_min_pu{0.95};
   /// 电压上限 (p.u.)
@@ -76,6 +101,8 @@ struct TopoReconfOptions {
   bool verbose{false};
   /// 是否跳过图启发式（强制 MILP 求解）
   bool skip_heuristic{false};
+  /// MILP backend: "auto" (HiGHS→native), "native", "highs", "scip".
+  std::string solver{"auto"};
 };
 
 // ── 拓扑重构结果 ───────────────────────────────────────────────────────
@@ -102,13 +129,27 @@ struct TopoReconfResult {
   std::vector<int> open_branch_ids;
   /// @deprecated  Use closed_branches instead.  Same caveat as open_branch_ids.
   std::vector<int> closed_branch_ids;
-  /// @deprecated  Use switched_on instead.
-  std::vector<int> switched_on_ids;
-  /// @deprecated  Use switched_off instead.
-  std::vector<int> switched_off_ids;
-
   int n_switch_on{0};
   int n_switch_off{0};
+  /// @deprecated  Use switched_off instead.
+  std::vector<int> switched_off_ids;
+  /// @deprecated  Use switched_on instead.
+  std::vector<int> switched_on_ids;
+
+  // ── Device-space actions (rich model) ──────────────────────────────
+  /// Origin device a reconfigured branch maps back to, via BranchExpandMap.
+  enum class DeviceKind { Switch, CircuitBreaker, Branch };
+  struct SwitchOperation {
+    DeviceKind  kind{DeviceKind::Branch}; ///< original device type
+    int         index{-1};                ///< Switch/CB/branch .index
+    int         bus_from{0};
+    int         bus_to{0};
+    bool        close{true};              ///< true=close, false=open
+  };
+  /// Tie-switch / breaker operations needed to realise the optimal topology,
+  /// projected from canonical branches back to the original switches and
+  /// circuit breakers.  Branch-origin operations fall back to DeviceKind::Branch.
+  std::vector<SwitchOperation> switch_operations;
 
   double base_loss_mw{0.0};
   /// Approximate post-reconfiguration resistive loss [MW].
@@ -121,6 +162,10 @@ struct TopoReconfResult {
   double loss_reduction_pct{0.0};
   double milp_objective{0.0};
   double solve_time_s{0.0};
+
+  /// Objective decomposition (term contributions to milp_objective).
+  struct ObjBreakdown { double loss{0.0}; double switching{0.0}; double shed{0.0}; double island{0.0}; };
+  ObjBreakdown obj_terms{};
 
   /// Native B&C solver diagnostics.
   solver::BCStats bc_stats;

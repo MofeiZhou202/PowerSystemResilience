@@ -307,6 +307,22 @@
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
+    <label class="sub-label">潮流 <select id="rcEnablePF"><option value="1" selected>LinDistFlow</option><option value="0">仅连通</option></select></label>
+    <label class="sub-label">目标 <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value];if(p){rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];}"><option value="loss" selected>最小损耗</option><option value="switch">最少开关</option><option value="restore">最大恢复</option><option value="custom">自定义</option></select></label>
+    <label class="sub-label">λloss <input id="rcLambdaLoss" type="number" min="0" value="10" style="width:55px"/></label>
+    <label class="sub-label">λsw <input id="rcLambdaSwitch" type="number" min="0" value="1" style="width:50px"/></label>
+    <label class="sub-label">λshed <input id="rcLambdaShed" type="number" min="0" value="10000" style="width:70px"/></label>
+    <label class="sub-label">λisl <input id="rcLambdaIsland" type="number" min="0" value="100000" style="width:70px"/></label>
+    <label class="sub-label sub-checkbox"><input id="rcEnableVoltage" type="checkbox" checked/><span>G4电压</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcEnableThermal" type="checkbox" checked/><span>G5容量</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox"/><span>AC/DC分域</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcDcMesh" type="checkbox"/><span>DC环网</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcLossAware" type="checkbox" checked/><span>I²R损耗</span></label>
+    <label class="sub-label">开关上限 <input id="rcMaxSwOps" type="number" min="0" value="0" style="width:50px"/></label>
+    <label class="sub-label">求解器 <select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></label>
+    <label class="sub-label">故障AC <input id="rcFaults" type="text" placeholder="5,9" style="width:60px"/></label>
+    <label class="sub-label">故障DC <input id="rcFaultsDc" type="text" placeholder="id" style="width:50px"/></label>
+    <label class="sub-label">故障VSC <input id="rcFaultsVsc" type="text" placeholder="id" style="width:50px"/></label>
     <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
   </div>
   <!-- Topology analysis (graph structure) -->

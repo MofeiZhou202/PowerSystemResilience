@@ -118,15 +118,16 @@ struct VarLayout {
 
   int off_Fij, off_Fij_vsc, off_Fg, off_beta, off_gamma;
   int off_Pij, off_Pij_vsc, off_Qij, off_Qij_vsc;
-  int off_Pg, off_Qg, off_v, off_sP, off_sQ;
+  int off_Pg, off_Qg, off_v, off_sP, off_sQ, off_t;
 
   int n_vars;
   bool has_pf;
+  bool loss_aware;
 
   VarLayout(int nl_, int nl_vsc_, int ng_, int nb_, int nb_ac_, int nl_ac_,
-            bool enable_pf)
+            bool enable_pf, bool loss_aware_ = false)
       : nl(nl_), nl_vsc(nl_vsc_), ng(ng_), nb(nb_), nb_ac(nb_ac_),
-        nl_ac(nl_ac_), has_pf(enable_pf) {
+        nl_ac(nl_ac_), has_pf(enable_pf), loss_aware(loss_aware_) {
     off_Fij     = 0;
     off_Fij_vsc = off_Fij + nl;
     off_Fg      = off_Fij_vsc + nl_vsc;
@@ -143,10 +144,11 @@ struct VarLayout {
       off_v       = off_Qg + ng;
       off_sP      = off_v + nb;
       off_sQ      = off_sP + nb;
-      n_vars      = off_sQ + nb_ac;
+      off_t       = off_sQ + nb_ac;
+      n_vars      = off_t + (loss_aware ? nl : 0);
     } else {
       off_Pij = off_Pij_vsc = off_Qij = off_Qij_vsc = 0;
-      off_Pg = off_Qg = off_v = off_sP = off_sQ = 0;
+      off_Pg = off_Qg = off_v = off_sP = off_sQ = off_t = 0;
       n_vars = off_gamma + ng;
     }
   }
@@ -165,6 +167,7 @@ struct VarLayout {
   int v(int i)       const { return off_v + i; }
   int sP(int i)      const { return off_sP + i; }
   int sQ(int i)      const { return off_sQ + i; }
+  int t(int b)       const { return off_t + b; }
 };
 
 }  // anonymous namespace
@@ -180,8 +183,10 @@ TopoReconfResult run_topology_reconfiguration(
   namespace chr = std::chrono;
   const auto t_start = chr::steady_clock::now();
 
-  // Project system to canonical form
-  const HybridPowerSystem proj = project_to_canonical_models(sys);
+  // Project system to canonical form. Keep dead islands so open tie switches
+  // into currently de-energised sections survive as reconnection candidates;
+  // the MILP's connectivity + slack-shed terms decide which stay energised.
+  const HybridPowerSystem proj = project_to_canonical_models(sys, /*strip_dead=*/false);
   const auto& ac = proj.ac;
   const auto& dc = proj.dc;
   const auto& vscs = proj.vsc_converters;
@@ -479,7 +484,7 @@ TopoReconfResult run_topology_reconfiguration(
   // -------------------------------------------------------------------
   // Variable layout
   // -------------------------------------------------------------------
-  VarLayout idx(nl, nl_vsc, ng, nb, nb_ac, nl_ac, opt.enable_pf);
+  VarLayout idx(nl, nl_vsc, ng, nb, nb_ac, nl_ac, opt.enable_pf, opt.loss_aware && opt.enable_pf);
   if (opt.verbose) {
     spdlog::info("[拓扑重构] 变量数: {} (enable_pf={})", idx.n_vars, opt.enable_pf);
   }
@@ -665,6 +670,8 @@ TopoReconfResult run_topology_reconfiguration(
     for (int i = 0; i < nb_ac; ++i) {
       lb[idx.sQ(i)] = 0.0; ub[idx.sQ(i)] = 1e20;
     }
+    if (idx.loss_aware)
+      for (int i = 0; i < nl; ++i) { lb[idx.t(i)] = 0.0; ub[idx.t(i)] = 1e20; }
   }
 
   // -------------------------------------------------------------------
@@ -672,19 +679,23 @@ TopoReconfResult run_topology_reconfiguration(
   // -------------------------------------------------------------------
   Eigen::VectorXd c = Eigen::VectorXd::Zero(idx.n_vars);
 
-  const double lambda_sw     = 1.0;
-  const double lambda_loss   = 10.0;
-  const double lambda_shed   = 1e4;
-  const double lambda_island = 1e5;
+  const double lambda_sw     = opt.lambda_switch;
+  const double lambda_loss   = opt.lambda_loss;
+  const double lambda_shed   = opt.lambda_shed;
+  const double lambda_island = opt.lambda_island;
 
   for (int i = 0; i < nl + nl_vsc; ++i) {
     if (!edge_status[i])
       c[idx.beta(i)] += lambda_sw;    // penalize closing tie switches
-    else
-      c[idx.beta(i)] -= lambda_sw;    // reward keeping in-service edges closed
+    else if (!opt.loss_aware)
+      c[idx.beta(i)] -= lambda_sw;    // legacy: reward keeping in-service closed
+    // In loss-aware mode in-service edges carry no reward, so the objective is a
+    // physically meaningful non-negative cost (loss + switching + shed), not a
+    // large negative biased by the count of closed lines.
   }
   for (int i = 0; i < nl; ++i)
-    c[idx.beta(i)] += lambda_loss * std::abs(edge_r[i]);
+    if (idx.loss_aware) c[idx.t(i)] += lambda_loss * std::abs(edge_r[i]);
+    else                c[idx.beta(i)] += lambda_loss * std::abs(edge_r[i]);
   if (opt.enable_pf) {
     for (int i = 0; i < nb; ++i)   c[idx.sP(i)] = lambda_shed;
     for (int i = 0; i < nb_ac; ++i) c[idx.sQ(i)] = lambda_shed;
@@ -700,10 +711,19 @@ TopoReconfResult run_topology_reconfiguration(
   const int n_eq      = n_eq_topo + n_eq_pf;
 
   const int n_ineq_topo = 2 * n_beta_free + ng + 1;
-  const int n_ineq_pf = opt.enable_pf
-      ? (2*(nl+nl_vsc) + 2*(nl+nl_vsc) + 2*(nl_ac+nl_vsc))
-      : 0;
-  const int n_ineq = n_ineq_topo + n_ineq_pf;
+  const bool g4_volt = opt.enable_pf && opt.enable_voltage;
+  const bool g5_therm = opt.enable_pf && opt.enable_thermal;
+  const int n_ineq_volt = g4_volt ? 2*(nl+nl_vsc) : 0;
+  const int n_ineq_therm = g5_therm ? (2*(nl+nl_vsc) + 2*(nl_ac+nl_vsc)) : 0;
+  const int n_ineq_pf = n_ineq_volt + n_ineq_therm;
+  const int n_ineq_budget = (opt.max_switch_ops > 0) ? 1 : 0;
+  // Per-domain root: split-tree mode forces ≥1 root in the DC source set so a
+  // meshed DC island is not assumed to be fed solely through an AC root.
+  int n_dc_sources = 0;
+  for (int g = 0; g < ng; ++g) if (gen_bus[g] >= nb_ac) ++n_dc_sources;
+  const int n_ineq_root = ((opt.split_domain_trees || opt.allow_dc_mesh) && n_dc_sources > 0) ? 1 : 0;
+  const int n_ineq_loss = idx.loss_aware ? 2 * nl : 0;  // t ≥ |P| both AC+DC
+  const int n_ineq = n_ineq_topo + n_ineq_pf + n_ineq_budget + n_ineq_root + n_ineq_loss;
 
   // -------------------------------------------------------------------
   // Equality constraints (triplets)
@@ -732,12 +752,19 @@ TopoReconfResult run_topology_reconfiguration(
     beq[eq_row + i] = -1.0;
   eq_row += nb;
 
-  // (T4) Forest property: Σβ + Σγ = nb
-  for (int i = 0; i < nl + nl_vsc; ++i)
+  // (T4) Forest property: Σβ + Σγ = nb.  In split-domain mode VSC bridges are
+  // excluded from the cardinality so meshed AC/DC converter links are not
+  // forced into a single radial tree; only AC+DC branches count.  In DC-mesh
+  // mode DC branches are excluded too, leaving only the AC side radial.
+  const bool split = opt.split_domain_trees || opt.allow_dc_mesh;
+  const int n_tree_edges = opt.allow_dc_mesh ? nl_ac : (split ? nl : (nl + nl_vsc));
+  const int tree_bus_total = opt.allow_dc_mesh ? nb_ac : (split ? (nb_ac + nb_dc) : nb);
+  for (int i = 0; i < n_tree_edges; ++i)
     eq_trips.emplace_back(eq_row, idx.beta(i), 1.0);
   for (int g = 0; g < ng; ++g)
-    eq_trips.emplace_back(eq_row, idx.gamma(g), 1.0);
-  beq[eq_row] = static_cast<double>(nb);
+    if (!opt.allow_dc_mesh || gen_bus[g] < nb_ac)  // only AC roots count the AC tree
+      eq_trips.emplace_back(eq_row, idx.gamma(g), 1.0);
+  beq[eq_row] = static_cast<double>(tree_bus_total);
   eq_row += 1;
 
   // (P1) Active power balance
@@ -837,7 +864,7 @@ TopoReconfResult run_topology_reconfiguration(
 
   // LinDistFlow inequalities
   const double bigM_v = opt.big_m_v;
-  if (opt.enable_pf) {
+  if (g4_volt) {
     // (P3) Voltage drop big-M
     for (int i = 0; i < nl; ++i) {
       int fi = edge_from[i], ti = edge_to[i];
@@ -877,7 +904,9 @@ TopoReconfResult run_topology_reconfiguration(
       b_ineq[ineq_row] = bigM_v;
       ++ineq_row;
     }
+  }
 
+  if (g5_therm) {
     // (P4) P thermal: P - Smax·β ≤ 0
     for (int i = 0; i < nl; ++i) {
       ineq_trips.emplace_back(ineq_row, idx.Pij(i),  1.0);
@@ -911,6 +940,41 @@ TopoReconfResult run_topology_reconfiguration(
       ++ineq_row;
       ineq_trips.emplace_back(ineq_row, idx.Qij_vsc(i), -1.0);
       ineq_trips.emplace_back(ineq_row, idx.beta(nl+i), -Smax_vsc[i]);
+      ++ineq_row;
+    }
+  }
+
+  // (G7) Switch-operation budget: Σ_free|β−β0| ≤ N.  Closing a tie (β0=0)
+  // adds +β; opening an in-service edge (β0=1) adds (1−β).  Fixed edges do
+  // not change, so only free edges contribute.
+  if (n_ineq_budget) {
+    int free_insvc = 0;
+    for (int i = 0; i < nl + nl_vsc; ++i) {
+      if (!beta_free[i]) continue;
+      if (edge_status[i]) { ineq_trips.emplace_back(ineq_row, idx.beta(i), -1.0); ++free_insvc; }
+      else                  ineq_trips.emplace_back(ineq_row, idx.beta(i),  1.0);
+    }
+    b_ineq[ineq_row] = static_cast<double>(opt.max_switch_ops - free_insvc);
+    ++ineq_row;
+  }
+
+  // Per-domain DC root: −Σ γ_dc ≤ −1 (at least one DC source is a root) so a
+  // meshed DC subnetwork has its own voltage reference under split-tree mode.
+  if (n_ineq_root) {
+    for (int g = 0; g < ng; ++g)
+      if (gen_bus[g] >= nb_ac) ineq_trips.emplace_back(ineq_row, idx.gamma(g), -1.0);
+    b_ineq[ineq_row] = -1.0;
+    ++ineq_row;
+  }
+
+  // (G6-loss) t ≥ |P|: P − t ≤ 0 and −P − t ≤ 0, so Σ r·t is an I²R loss proxy.
+  if (idx.loss_aware) {
+    for (int i = 0; i < nl; ++i) {
+      ineq_trips.emplace_back(ineq_row, idx.Pij(i), 1.0);
+      ineq_trips.emplace_back(ineq_row, idx.t(i), -1.0);
+      ++ineq_row;
+      ineq_trips.emplace_back(ineq_row, idx.Pij(i), -1.0);
+      ineq_trips.emplace_back(ineq_row, idx.t(i), -1.0);
       ++ineq_row;
     }
   }
@@ -1180,38 +1244,31 @@ TopoReconfResult run_topology_reconfiguration(
       return false;
     };
 
-    engine::HighsAdapter highs;
-    if (highs.available()) {
-      auto highs_result = highs.solve_milp(milp);
-      if (highs_result.stats.success && highs_result.x.size() >= idx.n_vars) {
-        x_sol = highs_result.x;
-        solved_ok = true;
-        result.milp_objective = highs_result.stats.objective;
-        result.solver_backend = "HiGHS";
-        result.solver_status = highs_result.stats.status;
-        result.solver_mip_gap = highs_result.stats.mip_gap;
-        result.proven_optimal = status_indicates_optimal(result.solver_status) &&
-          std::isfinite(result.solver_mip_gap) &&
-          result.solver_mip_gap <= opt.mip_gap + 1e-9;
-        if (opt.verbose) {
-          spdlog::info("[拓扑重构] HiGHS fallback 成功: obj={:.6f}",
-                       result.milp_objective);
-        }
-      } else {
-        std::string reason = highs_result.stats.status.empty()
-            ? std::string("unsuccessful solve")
-            : highs_result.stats.status;
-        if (highs_result.stats.success && highs_result.x.size() < idx.n_vars) {
-          reason += " (solution vector too small)";
-        }
-        if (opt.verbose) {
-          spdlog::warn("[拓扑重构] HiGHS fallback 未找到可行解: {}; retry NativeB&C",
-                       reason);
-        }
-        solved_ok = try_native_bc(reason);
+    auto try_external = [&](auto& adapter, const char* label) -> bool {
+      if (!adapter.available()) return false;
+      auto r = adapter.solve_milp(milp);
+      if (r.stats.success && r.x.size() >= idx.n_vars) {
+        x_sol = r.x; solved_ok = true; result.milp_objective = r.stats.objective;
+        result.solver_backend = label; result.solver_status = r.stats.status;
+        result.solver_mip_gap = r.stats.mip_gap;
+        result.proven_optimal = status_indicates_optimal(r.stats.status) &&
+            std::isfinite(r.stats.mip_gap) && r.stats.mip_gap <= opt.mip_gap + 1e-9;
+        return true;
       }
-    } else {
+      return false;
+    };
+
+    if (opt.solver == "native") {
       solved_ok = try_native_bc("");
+    } else if (opt.solver == "scip") {
+      engine::ScipAdapter scip;
+      if (!try_external(scip, "SCIP")) solved_ok = try_native_bc("SCIP unavailable/failed");
+    } else if (opt.solver == "highs") {
+      engine::HighsAdapter highs;
+      if (!try_external(highs, "HiGHS")) solved_ok = try_native_bc("HiGHS unavailable/failed");
+    } else {  // auto: HiGHS → native
+      engine::HighsAdapter highs;
+      if (!try_external(highs, "HiGHS")) solved_ok = try_native_bc("HiGHS unavailable/failed");
     }
   }
 
@@ -1291,6 +1348,17 @@ TopoReconfResult run_topology_reconfiguration(
   // no optimality certificate, so optimal stays false in that case.
   result.optimal = result.proven_optimal;
 
+  // Map canonical ACBranch .index → original Switch/CircuitBreaker so the
+  // optimal topology can be projected back to physical device operations.
+  std::unordered_map<int, BranchExpandEntry> device_by_branch;
+  if (proj.branch_expand_map) {
+    for (const auto& e : proj.branch_expand_map->entries) {
+      if (e.origin_type == BranchOriginType::Switch ||
+          e.origin_type == BranchOriginType::CircuitBreaker)
+        device_by_branch[e.branch_index] = e;
+    }
+  }
+
   for (int i = 0; i < nl + nl_vsc; ++i) {
     bool was_on = edge_status[i];
     bool now_on = (x_sol[idx.beta(i)] > 0.5);
@@ -1308,6 +1376,28 @@ TopoReconfResult run_topology_reconfiguration(
     } else {
       result.open_branch_ids.push_back(edge_orig_idx[i]);    // legacy
       result.open_branches.push_back(ref);
+    }
+
+    if (was_on != now_on) {
+      // Project the toggled branch back to its physical device, if any.
+      TopoReconfResult::SwitchOperation sop;
+      sop.close = now_on;
+      sop.bus_from = (edge_from[i] >= 0 && edge_from[i] < nb_ac) ? ac.buses[edge_from[i]].index : 0;
+      sop.bus_to   = (edge_to[i] >= 0 && edge_to[i] < nb_ac) ? ac.buses[edge_to[i]].index : 0;
+      sop.index    = edge_orig_idx[i];
+      sop.kind     = TopoReconfResult::DeviceKind::Branch;
+      if (ref.category == graph::EdgeCategory::AC_Line) {
+        auto it = device_by_branch.find(edge_orig_idx[i]);
+        if (it != device_by_branch.end()) {
+          sop.kind = (it->second.origin_type == BranchOriginType::CircuitBreaker)
+                         ? TopoReconfResult::DeviceKind::CircuitBreaker
+                         : TopoReconfResult::DeviceKind::Switch;
+          sop.index = it->second.origin_index;
+          sop.bus_from = it->second.bus_from;
+          sop.bus_to = it->second.bus_to;
+        }
+      }
+      result.switch_operations.push_back(sop);
     }
 
     if (was_on && !now_on) {
@@ -1335,6 +1425,19 @@ TopoReconfResult run_topology_reconfiguration(
       loss_proxy += edge_r[i];
   result.reconf_loss_mw = loss_proxy * base_mva;  // nominal-current proxy [MW]
   result.milp_objective = c.dot(x_sol);
+
+  // Decompose the objective into interpretable terms.
+  for (int i = 0; i < nl; ++i) {
+    if (idx.loss_aware) result.obj_terms.loss += lambda_loss * std::abs(edge_r[i]) * x_sol[idx.t(i)];
+    else                result.obj_terms.loss += lambda_loss * std::abs(edge_r[i]) * x_sol[idx.beta(i)];
+  }
+  for (int i = 0; i < nl + nl_vsc; ++i)
+    if (!edge_status[i] && x_sol[idx.beta(i)] > 0.5) result.obj_terms.switching += lambda_sw;
+  if (opt.enable_pf) {
+    for (int i = 0; i < nb; ++i)   result.obj_terms.shed += lambda_shed * x_sol[idx.sP(i)];
+    for (int i = 0; i < nb_ac; ++i) result.obj_terms.shed += lambda_shed * x_sol[idx.sQ(i)];
+  }
+  for (int g = 1; g < ng; ++g) result.obj_terms.island += lambda_island * x_sol[idx.gamma(g)];
 
   result.solve_time_s = chr::duration<double>(
       chr::steady_clock::now() - t_start).count();
