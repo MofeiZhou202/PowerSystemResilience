@@ -1,0 +1,48 @@
+{
+  "name": "SC_HAND_02_three_bus_radial_feeder",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "SourceBus", "bus_type": "SLACK", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "MiddleBus", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 3, "name": "EndBus", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "Line_1_2", "from_bus": 1, "to_bus": 2, "r_pu": 0.05, "x_pu": 0.15, "b_pu": 0.0, "tap": 1.0, "shift_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "Line_2_3", "from_bus": 2, "to_bus": 3, "r_pu": 0.03, "x_pu": 0.10, "b_pu": 0.0, "tap": 1.0, "shift_deg": 0.0, "in_service": true}
+    ],
+    "generators": [],
+    "loads": [],
+    "external_grids": [
+      {"index": 1, "name": "Grid_Z_j0p05", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "r_pu": 0.0, "x_pu": 0.05, "vn_kv": 10.0, "in_service": true}
+    ],
+    "static_generators": [],
+    "transformers_2w": []
+  },
+  "expected_short_circuit": {
+    "basis": "Detailed IEC calculation, c=1.0. Bus 2 Zth=0.05+j0.20 pu; bus 3 Zth=0.08+j0.30 pu.",
+    "checks": [
+      {
+        "fault_bus_id": 2,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "z_thevenin_pu": {"r": 0.05, "x": 0.20, "abs": 0.20615528128088306},
+        "i_base_ka": 5.773502691896258,
+        "ikss_ka": 28.005601680560197,
+        "sk_mva": 485.07125007266586
+      },
+      {
+        "fault_bus_id": 3,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "z_thevenin_pu": {"r": 0.08, "x": 0.30, "abs": 0.31048349392520047},
+        "i_base_ka": 5.773502691896258,
+        "ikss_ka": 18.595200082640044,
+        "sk_mva": 322.07831320041544
+      }
+    ],
+    "tolerance": {"relative": 1e-6, "absolute_ka": 1e-6}
+  }
+}
+

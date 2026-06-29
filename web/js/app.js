@@ -2396,6 +2396,51 @@ const App = (() => {
     document.getElementById('scDialog').style.display = 'none';
   }
 
+  function scReadNumber(id, fallback) {
+    const el = document.getElementById(id);
+    const value = Number(el?.value);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function scReadChecked(id, fallback = false) {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  }
+
+  function syncScToolbarToHidden() {
+    const pairs = [
+      ['faultTypeSelect', 'scFaultType'],
+      ['scCalcTypeSelect', 'scCalcType'],
+      ['voltageCorrectionFactor', 'scCFactor'],
+      ['scKappaMethodSelect', 'scKappaMethod'],
+      ['scTopologySelect', 'scTopology'],
+    ];
+    pairs.forEach(([srcId, dstId]) => {
+      const src = document.getElementById(srcId);
+      const dst = document.getElementById(dstId);
+      if (src && dst) dst.value = src.value;
+    });
+  }
+
+  function getShortCircuitOptions({ detailed = false } = {}) {
+    syncScToolbarToHidden();
+    return {
+      fault_type: document.getElementById('scFaultType')?.value || 'ThreePhase',
+      calc_type: document.getElementById('scCalcType')?.value || 'Max',
+      c_factor: scReadNumber('scCFactor', 0),
+      kappa_method: document.getElementById('scKappaMethod')?.value || 'B',
+      topology: document.getElementById('scTopology')?.value || 'Meshed',
+      fault_impedance_pu: scReadNumber('scFaultImpedance', 0),
+      breaking_time_s: scReadNumber('scBreakingTime', 0.05),
+      ith_duration_s: scReadNumber('scIthDuration', 1.0),
+      base_frequency_hz: scReadNumber('scBaseFrequency', 50),
+      default_xdpp: scReadNumber('scDefaultXdpp', 0.2),
+      compute_branch_flows: detailed && scReadChecked('scComputeBranchFlows', true),
+      compute_voltage_drops: detailed && scReadChecked('scComputeVoltageDrops', true),
+      compute_ith: scReadChecked('scComputeIth', true),
+    };
+  }
+
   async function runShortCircuit() {
     hideScDialog();
     setStatus('短路计算中...', 'busy');
@@ -2406,17 +2451,13 @@ const App = (() => {
     }
 
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
-    const faultType = document.getElementById('scFaultType').value;
-    const calcType = document.getElementById('scCalcType')?.value || 'Max';
-    const cFactor = parseFloat(document.getElementById('scCFactor').value);
+    const overviewOptions = getShortCircuitOptions({ detailed: false });
 
     // Blank fault bus → short circuit at every bus (overview mode).
     if (faultBusRaw === '') {
       const data = await apiPost('/api/session/sc', {
         options: {
-          fault_type: faultType,
-          calc_type: calcType,
-          c_factor: cFactor,
+          ...overviewOptions,
           compute_all_buses: true,
         }
       });
@@ -2443,9 +2484,7 @@ const App = (() => {
 
     const resp = await apiPostResult('/api/session/sc_detailed', {
       fault_bus_ids: [faultBus],
-      fault_type: faultType,
-      calc_type: calcType,
-      c_factor: cFactor,
+      ...getShortCircuitOptions({ detailed: true }),
     });
 
     if (!resp.ok) {
@@ -5066,6 +5105,31 @@ const App = (() => {
     document.getElementById('topoResults').innerHTML = '';
   }
 
+  function scOpt(data, key, fallback = '') {
+    const opts = data?.options || {};
+    return opts[key] !== undefined ? opts[key] : (data?.[key] !== undefined ? data[key] : fallback);
+  }
+
+  function scFmtOpt(value, digits = 3) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : 'N/A';
+  }
+
+  function scOptionsSummaryHtml(data, detailed = false) {
+    return `
+      <div class="result-item"><span class="result-label">计算类型</span>
+        <span class="result-value">${scOpt(data, 'calc_type', 'Max')}</span></div>
+      <div class="result-item"><span class="result-label">c / κ / 拓扑</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'c_factor', 0), 3)} / ${scOpt(data, 'kappa_method', 'B')} / ${scOpt(data, 'topology', 'Meshed')}</span></div>
+      <div class="result-item"><span class="result-label">Zf / x''d</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'fault_impedance_pu', 0), 4)} / ${scFmtOpt(scOpt(data, 'default_xdpp', 0.2), 3)} pu</span></div>
+      <div class="result-item"><span class="result-label">tb / Tk / f</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'breaking_time_s', 0.05), 3)}s / ${scFmtOpt(scOpt(data, 'ith_duration_s', 1), 3)}s / ${scFmtOpt(scOpt(data, 'base_frequency_hz', 50), 1)}Hz</span></div>
+      ${detailed ? `<div class="result-item"><span class="result-label">输出</span>
+        <span class="result-value">支路:${scOpt(data, 'compute_branch_flows', true) ? '开' : '关'} 电压:${scOpt(data, 'compute_voltage_drops', true) ? '开' : '关'} Ith:${scOpt(data, 'compute_ith', true) ? '开' : '关'}</span></div>` : ''}
+    `;
+  }
+
   function showShortCircuitResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -5077,6 +5141,7 @@ const App = (() => {
         <span class="result-value">${data.fault_type || 'ThreePhase'}</span></div>
       <div class="result-item"><span class="result-label">计算母线数</span>
         <span class="result-value">${data.bus_results?.length || 0}</span></div>
+      ${scOptionsSummaryHtml(data, false)}
     `;
 
     const scDiv = document.getElementById('scResults');
@@ -5135,6 +5200,7 @@ const App = (() => {
         <span class="result-value">${fmt(fb.ik_ka, 3)}</span></div>
       <div class="result-item"><span class="result-label">Ith 热效 (kA)</span>
         <span class="result-value">${fmt(fb.ith_ka, 3)}</span></div>
+      ${scOptionsSummaryHtml(data, true)}
     `;
 
     const busMap = Canvas.getCompBusMap();
@@ -6458,14 +6524,16 @@ const App = (() => {
       const f = document.getElementById('scCFactor');
       if (f) f.value = e.target.value;
     });
+    document.getElementById('scKappaMethodSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scKappaMethod');
+      if (f) f.value = e.target.value;
+    });
+    document.getElementById('scTopologySelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scTopology');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('btnRunShortCircuit')?.addEventListener('click', () => {
-      // Mirror sub-toolbar values into legacy dialog inputs, then run.
-      const ft = document.getElementById('faultTypeSelect')?.value;
-      const ct = document.getElementById('scCalcTypeSelect')?.value;
-      const cf = document.getElementById('voltageCorrectionFactor')?.value;
-      if (ft) document.getElementById('scFaultType').value = ft;
-      if (ct) document.getElementById('scCalcType').value = ct;
-      if (cf) document.getElementById('scCFactor').value = cf;
+      syncScToolbarToHidden();
       runShortCircuit();
     });
 

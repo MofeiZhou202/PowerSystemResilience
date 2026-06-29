@@ -1,0 +1,37 @@
+{
+  "name": "SC_HAND_01_two_bus_source_line",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "SourceBus", "bus_type": "SLACK", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "FaultBus", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "Line_Z_0p1_j0p3", "from_bus": 1, "to_bus": 2, "r_pu": 0.1, "x_pu": 0.3, "b_pu": 0.0, "tap": 1.0, "shift_deg": 0.0, "in_service": true}
+    ],
+    "generators": [],
+    "loads": [],
+    "external_grids": [
+      {"index": 1, "name": "Grid_Z_j0p1", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "r_pu": 0.0, "x_pu": 0.1, "vn_kv": 10.0, "in_service": true}
+    ],
+    "static_generators": [],
+    "transformers_2w": []
+  },
+  "expected_short_circuit": {
+    "basis": "Detailed IEC calculation, c=1.0, three-phase fault at bus 2. Zth = j0.1 + (0.1+j0.3) = 0.1+j0.4 pu.",
+    "checks": [
+      {
+        "fault_bus_id": 2,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "z_thevenin_pu": {"r": 0.1, "x": 0.4, "abs": 0.4123105625617661},
+        "i_base_ka": 5.773502691896258,
+        "ikss_ka": 14.002800840560098,
+        "sk_mva": 242.535625036333
+      }
+    ],
+    "tolerance": {"relative": 1e-6, "absolute_ka": 1e-6}
+  }
+}

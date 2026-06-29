@@ -235,6 +235,9 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["in_service"] = br.in_service;
   j["name"] = br.name;
   j["length_km"] = br.length_km;
+  j["r0_pu"] = br.r0_pu;
+  j["x0_pu"] = br.x0_pu;
+  j["b0_pu"] = br.b0_pu;
   j["failure_rate"] = br.failure_rate;
   j["mttr_hr"] = br.mttr_hr;
   return j;
@@ -256,6 +259,9 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.in_service = jget(j, "in_service", true);
   br.name = jget<std::string>(j, "name", "");
   br.length_km = jget(j, "length_km", 0.0);
+  br.r0_pu = jget(j, "r0_pu", 0.0);
+  br.x0_pu = jget(j, "x0_pu", 0.0);
+  br.b0_pu = jget(j, "b0_pu", 0.0);
   br.failure_rate = jget(j, "failure_rate", 0.0);
   br.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   return br;
@@ -801,6 +807,11 @@ static json vsc_to_json(const VSCConverter& c) {
   j["qmin_mvar"] = c.qmin_mvar;
   j["p_rated_mw"] = c.p_rated_mw;
   j["r_conv_ac_pu"] = c.r_conv_ac_pu;
+  j["r_sc_pu"] = c.r_sc_pu;
+  j["x_sc_pu"] = c.x_sc_pu;
+  j["r2_sc_pu"] = c.r2_sc_pu;
+  j["x2_sc_pu"] = c.x2_sc_pu;
+  j["i_max_pu"] = c.i_max_pu;
   j["i_ac_max_pu"] = c.i_ac_max_pu;
   j["i_dc_max_pu"] = c.i_dc_max_pu;
   j["k_m_modulation"] = c.k_m_modulation;
@@ -845,6 +856,11 @@ static VSCConverter vsc_from_json(const json& j) {
   c.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   c.p_rated_mw = jget(j, "p_rated_mw", 0.0);
   c.r_conv_ac_pu = jget(j, "r_conv_ac_pu", 0.0);
+  c.r_sc_pu = jget(j, "r_sc_pu", 0.0);
+  c.x_sc_pu = jget(j, "x_sc_pu", 0.15);
+  c.r2_sc_pu = jget(j, "r2_sc_pu", 0.0);
+  c.x2_sc_pu = jget(j, "x2_sc_pu", 0.0);
+  c.i_max_pu = jget(j, "i_max_pu", 1.0);
   c.i_ac_max_pu = jget(j, "i_ac_max_pu", 0.0);
   c.i_dc_max_pu = jget(j, "i_dc_max_pu", 0.0);
   c.k_m_modulation = jget(j, "k_m_modulation", 0.0);

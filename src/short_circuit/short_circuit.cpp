@@ -32,6 +32,8 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/model/components.hpp"
+#include "hacdcpf/model/enum_strings.hpp"
+#include "hacdcpf/model/device_control_role.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/network_utils.hpp"
 #include "hacdcpf/projection/canonical_network.hpp"
@@ -73,6 +75,10 @@ double load_motor_fraction(double raw) {
 
 bool is_projected_rich_motor_load(const Load& ld) {
   return ld.sc_source_type == "AsynchronousMotor";
+}
+
+bool is_ac_grid_forming_converter(const VSCConverter& conv) {
+  return resolve_device_control_role(conv).is_ac_grid_forming;
 }
 
 double load_motor_active_power_mw(const Load& ld, double motor_fraction) {
@@ -581,7 +587,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
     }
   }
 
-  // --- VSC converters (grid-forming contributes to Ybus; grid-following = current source) ---
+  // --- VSC converters (AC grid-forming contributes to Ybus; grid-following = current source) ---
   if (!steady_state) {
     for (const auto& conv : vsc_converters) {
       if (!conv.in_service) continue;
@@ -589,7 +595,7 @@ YbusTriplet build_sc_admittance_matrices(const ACSystem& ac,
       if (it == id_map.end()) continue;
       int ci = it->second;
 
-      if (conv.grid_forming) {
+      if (is_ac_grid_forming_converter(conv)) {
         // Grid-forming: voltage source behind impedance Z_filter + Z_virtual
         double r1 = conv.r_sc_pu;
         double x1 = (conv.x_sc_pu > 1e-12) ? conv.x_sc_pu : 0.15;
@@ -1086,6 +1092,8 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
 
   auto current_source_contribution_ka = [&](int source_bus_id, double source_current_ka) -> double {
     if (source_current_ka <= 1e-15) return 0.0;
+    auto it = id_map.find(source_bus_id);
+    if (it != id_map.end() && it->second == fault_idx) return source_current_ka;
     const double source_i_base = base_mva / (std::sqrt(3.0) * bus_kv(source_bus_id));
     if (source_i_base <= 1e-15) return 0.0;
     return (source_current_ka / source_i_base) * source_transfer_abs(source_bus_id) * I_base;
@@ -1191,13 +1199,13 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
   }
 
   // Converter contributions. Grid-following converters are current sources;
-  // grid-forming converters are represented by the same voltage-source shunt
+  // AC grid-forming converters are represented by the same voltage-source shunt
   // that build_sc_admittance_matrices() adds to the fault network.
   double converter_contrib = 0.0;
   double converter_current_source_contrib = 0.0;
   for (const auto& conv : projected.vsc_converters) {
     if (!conv.in_service) continue;
-    if (conv.grid_forming) {
+    if (is_ac_grid_forming_converter(conv)) {
       const double s_rated = (conv.p_rated_mw > 1e-6) ? conv.p_rated_mw : base_mva;
       const Cx z_conv = Cx(conv.r_sc_pu, (conv.x_sc_pu > 1e-12) ? conv.x_sc_pu : 0.15)
                         * (base_mva / s_rated);
@@ -1383,7 +1391,7 @@ SCDetailedResult run_short_circuit_detailed(const HybridPowerSystem& sys,
       double bus_converter = 0.0;
       int bus_id_conv = ac.buses[k].index;
       for (const auto& conv : projected.vsc_converters) {
-        if (!conv.in_service || conv.grid_forming) continue;
+        if (!conv.in_service || is_ac_grid_forming_converter(conv)) continue;
         if (conv.bus_ac != bus_id_conv) continue;
         double s_rated = (conv.p_rated_mw > 1e-6) ? conv.p_rated_mw : 0.0;
         if (s_rated < 1e-12) continue;

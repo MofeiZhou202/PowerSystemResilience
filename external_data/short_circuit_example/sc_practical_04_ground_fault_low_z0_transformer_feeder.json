@@ -1,0 +1,68 @@
+{
+  "name": "SC_PRACTICAL_04_ground_fault_low_z0_transformer_feeder",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "Grounded 20 kV Feeder with Low Zero Sequence",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "HV_Grid_110kV", "bus_type": "SLACK", "base_kv": 110.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "Grounded_MV_Bus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 3, "name": "Cable_Feeder_End", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "Low_Z0_Cable", "from_bus": 2, "to_bus": 3, "r_pu": 0.030, "x_pu": 0.100, "b_pu": 0.0, "r0_pu": 0.006, "x0_pu": 0.020, "b0_pu": 0.0, "rate_a_mva": 25.0, "in_service": true}
+    ],
+    "generators": [],
+    "loads": [
+      {"index": 1, "name": "Feeder_Load", "bus": 3, "p_mw": 6.0, "q_mvar": 2.0, "in_service": true}
+    ],
+    "external_grids": [
+      {"index": 1, "name": "Grounded_Grid_Z0_Low", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "r_pu": 0.002, "x_pu": 0.020, "r0_pu": 0.0005, "x0_pu": 0.005, "vn_kv": 110.0, "in_service": true}
+    ],
+    "static_generators": [],
+    "transformers_2w": [
+      {"index": 1, "name": "Grounding_Transformer_110_20kV", "hv_bus": 1, "lv_bus": 2, "sn_mva": 80.0, "vn_hv_kv": 110.0, "vn_lv_kv": 20.0, "vk_percent": 10.0, "vkr_percent": 0.5, "z0_percent": 3.0, "x0_r0": 8.0, "shift_deg": 0.0, "tap_side": 0, "tap_pos": 0, "tap_min": -8, "tap_max": 8, "tap_neutral": 0, "tap_step_percent": 1.25, "vector_group": "YNyn0+d", "in_service": true}
+    ],
+    "motors": []
+  },
+  "dc": {
+    "name": "DC System",
+    "base_mva": 100.0,
+    "buses": [],
+    "branches": [],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [],
+  "expected_short_circuit": {
+    "basis": "Practical SLG benchmark. It uses explicit external-grid, transformer, and feeder zero-sequence data to verify that a well-grounded low-Z0 path can make single-phase-to-ground current exceed the three-phase current.",
+    "canonical_checks": {
+      "min_projected_branch_count": 2,
+      "min_transformer_origin_branches": 1
+    },
+    "practical_checks": [
+      {
+        "id": "ground_low_z0_3ph",
+        "fault_bus_id": 3,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 80.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.05
+        }
+      },
+      {
+        "id": "ground_low_z0_slg",
+        "fault_bus_id": 3,
+        "options": {"fault_type": "SinglePhaseGround", "calc_type": "Max", "c_factor": 1.1},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 120.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.05
+        },
+        "compare": {"check_id": "ground_low_z0_3ph", "field": "ikss_ka", "relation": "greater_than", "ratio_min": 1.05}
+      }
+    ]
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "name": "SC_PRACTICAL_03_hybrid_acdc_inverter_microgrid",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "Hybrid AC/DC Inverter Microgrid",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "Utility_20kV", "bus_type": "SLACK", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "Grid_Following_AC_Bus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 3, "name": "AC_Grid_Forming_Bus", "bus_type": "PV", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 4, "name": "Critical_Load_Bus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "Utility_to_GFL", "from_bus": 1, "to_bus": 2, "r_pu": 0.020, "x_pu": 0.120, "b_pu": 0.0, "r0_pu": 0.060, "x0_pu": 0.360, "b0_pu": 0.0, "rate_a_mva": 30.0, "in_service": true},
+      {"index": 2, "name": "Utility_to_GFM", "from_bus": 1, "to_bus": 3, "r_pu": 0.022, "x_pu": 0.125, "b_pu": 0.0, "r0_pu": 0.066, "x0_pu": 0.375, "b0_pu": 0.0, "rate_a_mva": 30.0, "in_service": true},
+      {"index": 3, "name": "GFM_to_Critical", "from_bus": 3, "to_bus": 4, "r_pu": 0.018, "x_pu": 0.090, "b_pu": 0.0, "r0_pu": 0.054, "x0_pu": 0.270, "b0_pu": 0.0, "rate_a_mva": 20.0, "in_service": true},
+      {"index": 4, "name": "AC_Microgrid_Tie", "from_bus": 2, "to_bus": 4, "r_pu": 0.030, "x_pu": 0.150, "b_pu": 0.0, "r0_pu": 0.090, "x0_pu": 0.450, "b0_pu": 0.0, "rate_a_mva": 15.0, "in_service": true}
+    ],
+    "generators": [],
+    "loads": [
+      {"index": 1, "name": "Critical_Load", "bus": 4, "p_mw": 5.0, "q_mvar": 1.8, "in_service": true},
+      {"index": 2, "name": "Workshop_Motor_Mix", "bus": 2, "p_mw": 3.0, "q_mvar": 1.0, "in_service": true, "sn_mva": 4.0, "motor_percent": 40.0, "r_sc_pu": 0.10, "x_sub_pu": 0.35, "motor_poles": 4, "motor_efficiency": 0.90}
+    ],
+    "external_grids": [
+      {"index": 1, "name": "Medium_Strength_Utility", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "s_sc_max_mva": 800.0, "s_sc_min_mva": 350.0, "rx_max": 0.10, "rx_min": 0.15, "vn_kv": 20.0, "in_service": true}
+    ],
+    "static_generators": [],
+    "transformers_2w": [],
+    "motors": []
+  },
+  "dc": {
+    "name": "DC Collection System",
+    "base_mva": 100.0,
+    "buses": [
+      {"index": 1, "name": "PV_DC_Link", "bus_type": "DC_P", "base_kv": 0.75, "vm_pu": 1.0, "in_service": true},
+      {"index": 2, "name": "BESS_DC_Link", "bus_type": "DC_V", "base_kv": 0.75, "vm_pu": 1.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "DC_Link_Cable", "from_bus": 1, "to_bus": 2, "r_pu": 0.020, "rate_a_mw": 10.0, "in_service": true}
+    ],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [
+    {"index": 1, "name": "Grid_Following_PV_VSC", "bus_ac": 2, "bus_dc": 1, "control_mode": "PQ", "p_rated_mw": 6.0, "p_set_mw": 4.5, "q_set_mvar": 0.0, "r_sc_pu": 0.01, "x_sc_pu": 0.18, "r2_sc_pu": 0.01, "x2_sc_pu": 0.18, "i_max_pu": 1.25, "grid_forming": true, "ac_grid_forming": false, "in_service": true},
+    {"index": 2, "name": "AC_Grid_Forming_BESS_VSC", "bus_ac": 3, "bus_dc": 2, "control_mode": "AC_GRID_FORMING", "p_rated_mw": 6.0, "p_set_mw": 0.0, "q_set_mvar": 0.0, "r_sc_pu": 0.01, "x_sc_pu": 0.16, "r2_sc_pu": 0.02, "x2_sc_pu": 0.20, "i_max_pu": 1.30, "grid_forming": false, "ac_grid_forming": true, "in_service": true}
+  ],
+  "expected_short_circuit": {
+    "basis": "Practical hybrid AC/DC benchmark. It checks that DC-side grid_forming on a grid-following VSC remains current-limited, while ac_grid_forming VSCs are voltage sources behind impedance in the canonical detailed SC solve.",
+    "canonical_checks": {
+      "min_projected_branch_count": 4,
+      "min_vsc_converters": 2
+    },
+    "practical_checks": [
+      {
+        "id": "hybrid_gfl_bus2_fault",
+        "fault_bus_id": 2,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 60.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.05,
+          "ikss_converter_contrib_ka": 0.05,
+          "ikss_load_contrib_ka": 0.01
+        }
+      },
+      {
+        "id": "hybrid_gfm_bus3_fault",
+        "fault_bus_id": 3,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 60.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.05,
+          "ikss_converter_contrib_ka": 0.20
+        },
+        "compare": {"check_id": "hybrid_gfl_bus2_fault", "field": "ikss_converter_contrib_ka", "relation": "greater_than", "ratio_min": 1.20}
+      }
+    ]
+  }
+}

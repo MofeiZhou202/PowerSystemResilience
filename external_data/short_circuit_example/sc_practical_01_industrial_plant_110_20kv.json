@@ -1,0 +1,87 @@
+{
+  "name": "SC_PRACTICAL_01_industrial_plant_110_20kV",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "Industrial Plant 110/20 kV",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "Utility_110kV", "bus_type": "SLACK", "base_kv": 110.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "Plant_PCC_20kV", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 3, "name": "Main_SWGR_20kV", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 4, "name": "Mill_Motor_Bus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 5, "name": "CHP_Bus", "bus_type": "PV", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 6, "name": "PV_Feed_Bus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "PCC_to_Main", "from_bus": 2, "to_bus": 3, "r_pu": 0.006, "x_pu": 0.035, "b_pu": 0.0, "r0_pu": 0.018, "x0_pu": 0.105, "b0_pu": 0.0, "rate_a_mva": 80.0, "in_service": true},
+      {"index": 2, "name": "Main_to_Motor", "from_bus": 3, "to_bus": 4, "r_pu": 0.014, "x_pu": 0.070, "b_pu": 0.0, "r0_pu": 0.042, "x0_pu": 0.210, "b0_pu": 0.0, "rate_a_mva": 40.0, "in_service": true},
+      {"index": 3, "name": "Main_to_CHP", "from_bus": 3, "to_bus": 5, "r_pu": 0.010, "x_pu": 0.055, "b_pu": 0.0, "r0_pu": 0.030, "x0_pu": 0.165, "b0_pu": 0.0, "rate_a_mva": 35.0, "in_service": true},
+      {"index": 4, "name": "Main_to_PV", "from_bus": 3, "to_bus": 6, "r_pu": 0.035, "x_pu": 0.120, "b_pu": 0.0, "r0_pu": 0.105, "x0_pu": 0.360, "b0_pu": 0.0, "rate_a_mva": 25.0, "in_service": true}
+    ],
+    "generators": [
+      {"index": 1, "name": "CHP_Synchronous_Generator", "bus": 5, "in_service": true, "pg_mw": 16.0, "qg_mvar": 0.0, "vg_pu": 1.0, "pmax_mw": 20.0, "pmin_mw": 0.0, "qmax_mvar": 12.0, "qmin_mvar": -12.0, "mbase_mva": 25.0, "ra_pu": 0.006, "xdpp_pu": 0.18, "xd_pu": 1.0, "x0_pu": 0.08, "r0_pu": 0.006, "cos_phi": 0.85, "vn_kv": 20.0}
+    ],
+    "loads": [
+      {"index": 1, "name": "Process_Load", "bus": 3, "p_mw": 18.0, "q_mvar": 6.0, "in_service": true},
+      {"index": 2, "name": "Aux_Loads", "bus": 6, "p_mw": 4.0, "q_mvar": 1.5, "in_service": true}
+    ],
+    "motors": [
+      {"index": 1, "name": "Rolling_Mill_Motor", "bus": 4, "vn_kv": 20.0, "sn_mva": 12.0, "r_pu": 0.45, "x_pu": 6.0, "r0_pu": 0.60, "x0_pu": 8.0, "cos_phi": 0.90, "efficiency": 0.94, "poles": 4, "in_service": true}
+    ],
+    "external_grids": [
+      {"index": 1, "name": "Utility_Grid_Equivalent", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "s_sc_max_mva": 6000.0, "s_sc_min_mva": 2500.0, "rx_max": 0.10, "rx_min": 0.12, "vn_kv": 110.0, "in_service": true}
+    ],
+    "static_generators": [
+      {"index": 1, "name": "PV_Inverter_Block", "bus": 6, "sgen_type": "PV", "p_mw": 4.5, "q_mvar": 0.0, "sn_mva": 5.0, "p_rated_mw": 4.5, "k": 1.20, "rx": 0.10, "in_service": true}
+    ],
+    "transformers_2w": [
+      {"index": 1, "name": "T1_110_20kV_63MVA", "hv_bus": 1, "lv_bus": 2, "sn_mva": 63.0, "vn_hv_kv": 110.0, "vn_lv_kv": 20.0, "vk_percent": 12.0, "vkr_percent": 0.8, "z0_percent": 10.0, "x0_r0": 6.0, "shift_deg": 0.0, "tap_side": 0, "tap_pos": 0, "tap_min": -8, "tap_max": 8, "tap_neutral": 0, "tap_step_percent": 1.25, "vector_group": "Dyn11", "in_service": true}
+    ]
+  },
+  "dc": {
+    "name": "DC System",
+    "base_mva": 100.0,
+    "buses": [],
+    "branches": [],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [],
+  "expected_short_circuit": {
+    "basis": "Practical industrial plant benchmark. It stresses rich Transformer2W projection, rich asynchronous motor aggregation, synchronous-machine contribution, inverter current-source contribution, IEC max/min source strength, and branch-current reporting.",
+    "canonical_checks": {
+      "min_projected_branch_count": 5,
+      "min_transformer_origin_branches": 1,
+      "min_projected_loads_from_motors": 1,
+      "rich_motors_removed_after_projection": true
+    },
+    "practical_checks": [
+      {
+        "id": "industrial_motor_bus_max",
+        "fault_bus_id": 4,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1, "compute_branch_flows": true},
+        "ikss_min_ka": 1.0,
+        "ikss_max_ka": 80.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.1,
+          "ikss_gen_contrib_ka": 0.05,
+          "ikss_motor_contrib_ka": 0.05,
+          "ikss_sgen_contrib_ka": 0.01
+        },
+        "branch_current_min_ka": [
+          {"branch_index": 1, "min_ka": 0.05},
+          {"branch_index": 2, "min_ka": 0.05}
+        ]
+      },
+      {
+        "id": "industrial_motor_bus_min",
+        "fault_bus_id": 4,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Min", "c_factor": 0.0},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 80.0,
+        "compare": {"check_id": "industrial_motor_bus_max", "field": "ikss_ka", "relation": "less_than", "ratio_max": 0.98}
+      }
+    ]
+  }
+}

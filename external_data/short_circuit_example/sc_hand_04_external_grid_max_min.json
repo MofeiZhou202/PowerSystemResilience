@@ -1,0 +1,43 @@
+{
+  "name": "SC_HAND_04_external_grid_max_min",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "GridBus110kV", "bus_type": "SLACK", "base_kv": 110.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [],
+    "generators": [],
+    "loads": [],
+    "external_grids": [
+      {"index": 1, "name": "Grid_Ssc_5000_500", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "s_sc_max_mva": 5000.0, "s_sc_min_mva": 500.0, "rx_max": 0.1, "rx_min": 0.1, "vn_kv": 110.0, "in_service": true}
+    ],
+    "static_generators": [],
+    "transformers_2w": []
+  },
+  "expected_short_circuit": {
+    "basis": "External-grid source-data case. With explicit Ssc, Ik''=Ssc/(sqrt(3)*Un), independent of system base.",
+    "checks": [
+      {
+        "fault_bus_id": 1,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "s_sc_mva": 5000.0,
+        "i_base_ka": 0.524863881081478,
+        "ikss_ka": 26.2431940540739,
+        "sk_mva": 5000.0
+      },
+      {
+        "fault_bus_id": 1,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Min", "c_factor": 1.0},
+        "s_sc_mva": 500.0,
+        "i_base_ka": 0.524863881081478,
+        "ikss_ka": 2.6243194054073897,
+        "sk_mva": 500.0
+      }
+    ],
+    "tolerance": {"relative": 1e-6, "absolute_ka": 1e-6}
+  }
+}
+

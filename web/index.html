@@ -165,6 +165,43 @@
     <label class="sub-label">电压矫正系数
       <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
     </label>
+    <label class="sub-label">峰值法
+      <select id="scKappaMethodSelect">
+        <option value="B">IEC B</option>
+        <option value="A">IEC A</option>
+        <option value="C">IEC C</option>
+      </select>
+    </label>
+    <label class="sub-label">网络
+      <select id="scTopologySelect">
+        <option value="Meshed">网状</option>
+        <option value="Radial">辐射状</option>
+      </select>
+    </label>
+    <label class="sub-label">Zf(pu)
+      <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
+    </label>
+    <label class="sub-label">tb(s)
+      <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label">Tk(s)
+      <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
+    </label>
+    <label class="sub-label">f(Hz)
+      <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
+    </label>
+    <label class="sub-label">x''d(pu)
+      <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
+      <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
+      <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
+      <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
+    </label>
     <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
   </div>
   <!-- Harmonic power flow (hybrid AC/DC) -->
@@ -1108,6 +1145,8 @@
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
     <input type="hidden" id="scCalcType" value="Max"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
+    <input type="hidden" id="scKappaMethod" value="B"/>
+    <input type="hidden" id="scTopology" value="Meshed"/>
     <div class="modal-actions">
       <button id="btnScRun" class="btn btn-warn">确定</button>
       <button id="btnScCancel" class="btn">取消</button>

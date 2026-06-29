@@ -77,6 +77,37 @@ std::string sc_calc_type_name(hacdcpf::analysis::SCCalcType ct) {
   return ct == hacdcpf::analysis::SCCalcType::Min ? "Min" : "Max";
 }
 
+std::string sc_kappa_method_name(hacdcpf::analysis::SCKappaMethod km) {
+  switch (km) {
+    case hacdcpf::analysis::SCKappaMethod::A: return "A";
+    case hacdcpf::analysis::SCKappaMethod::B: return "B";
+    case hacdcpf::analysis::SCKappaMethod::C: return "C";
+  }
+  return "B";
+}
+
+std::string sc_topology_name(hacdcpf::analysis::SCTopology top) {
+  return top == hacdcpf::analysis::SCTopology::Radial ? "Radial" : "Meshed";
+}
+
+json sc_options_to_json(const hacdcpf::analysis::SCDetailedOptions& opt) {
+  return json{
+      {"fault_type", sc_fault_type_name(opt.fault_type)},
+      {"calc_type", sc_calc_type_name(opt.calc_type)},
+      {"kappa_method", sc_kappa_method_name(opt.kappa_method)},
+      {"topology", sc_topology_name(opt.topology)},
+      {"c_factor", opt.c_factor},
+      {"fault_impedance_pu", opt.fault_impedance_pu},
+      {"breaking_time_s", opt.breaking_time_s},
+      {"base_frequency_hz", opt.base_frequency_hz},
+      {"default_xdpp", opt.default_xdpp},
+      {"compute_branch_flows", opt.compute_branch_flows},
+      {"compute_voltage_drops", opt.compute_voltage_drops},
+      {"compute_ith", opt.compute_ith},
+      {"ith_duration_s", opt.ith_duration_s},
+  };
+}
+
 void apply_sc_request_options(const json& root,
                               hacdcpf::analysis::SCDetailedOptions& opt) {
   const json* o = &root;
@@ -97,6 +128,23 @@ void apply_sc_request_options(const json& root,
     opt.calc_type = hacdcpf::analysis::SCCalcType::Max;
   }
 
+  const std::string kappa =
+      o->value("kappa_method", o->value("kappa", std::string("B")));
+  if (kappa == "A" || kappa == "a" || kappa == "MethodA" || kappa == "method_a") {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::A;
+  } else if (kappa == "C" || kappa == "c" || kappa == "MethodC" || kappa == "method_c") {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::C;
+  } else {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::B;
+  }
+
+  const std::string topology = o->value("topology", std::string("Meshed"));
+  if (topology == "Radial" || topology == "radial" || topology == "Tree" || topology == "tree") {
+    opt.topology = hacdcpf::analysis::SCTopology::Radial;
+  } else {
+    opt.topology = hacdcpf::analysis::SCTopology::Meshed;
+  }
+
   if (o->contains("c_factor") && (*o)["c_factor"].is_number()) {
     opt.c_factor = (*o)["c_factor"].get<double>();
   }
@@ -105,6 +153,21 @@ void apply_sc_request_options(const json& root,
   }
   if (o->contains("breaking_time_s") && (*o)["breaking_time_s"].is_number()) {
     opt.breaking_time_s = (*o)["breaking_time_s"].get<double>();
+  }
+  if (o->contains("base_frequency_hz") && (*o)["base_frequency_hz"].is_number()) {
+    opt.base_frequency_hz = (*o)["base_frequency_hz"].get<double>();
+  }
+  if (o->contains("default_xdpp") && (*o)["default_xdpp"].is_number()) {
+    opt.default_xdpp = (*o)["default_xdpp"].get<double>();
+  }
+  if (o->contains("compute_branch_flows") && (*o)["compute_branch_flows"].is_boolean()) {
+    opt.compute_branch_flows = (*o)["compute_branch_flows"].get<bool>();
+  }
+  if (o->contains("compute_voltage_drops") && (*o)["compute_voltage_drops"].is_boolean()) {
+    opt.compute_voltage_drops = (*o)["compute_voltage_drops"].get<bool>();
+  }
+  if (o->contains("compute_ith") && (*o)["compute_ith"].is_boolean()) {
+    opt.compute_ith = (*o)["compute_ith"].get<bool>();
   }
   if (o->contains("ith_duration_s") && (*o)["ith_duration_s"].is_number()) {
     opt.ith_duration_s = (*o)["ith_duration_s"].get<double>();
@@ -2846,6 +2909,27 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             </select>
           </div>
           <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
+          <div><label>Kappa method</label>
+            <select id="scKappaMethod">
+              <option value="B">IEC B</option>
+              <option value="A">IEC A</option>
+              <option value="C">IEC C</option>
+            </select>
+          </div>
+          <div><label>Topology</label>
+            <select id="scTopology">
+              <option value="Meshed">Meshed</option>
+              <option value="Radial">Radial</option>
+            </select>
+          </div>
+          <div><label>Fault Z (pu)</label><input id="scFaultImpedance" type="number" step=".001" value="0"/></div>
+          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.05"/></div>
+          <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
+          <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
+          <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
+          <div><label><input id="scComputeBranchFlows" type="checkbox" checked/> Branch flows</label></div>
+          <div><label><input id="scComputeVoltageDrops" type="checkbox" checked/> Voltage drops</label></div>
+          <div><label><input id="scComputeIth" type="checkbox" checked/> Thermal Ith</label></div>
           <div><label>Fault Bus (blank=all)</label><input id="scFaultBus" type="text" placeholder="e.g. 0,3,5 or blank" style="width:130px;"/></div>
         </div>
         <div class="btn-group">
@@ -4194,14 +4278,29 @@ document.getElementById('runParityOpfBtn').onclick=async()=>{
 };
 
 /* Short Circuit */
+function scNumber(id,fallback){const el=document.getElementById(id);const v=Number(el&&el.value);return Number.isFinite(v)?v:fallback;}
+function scChecked(id,fallback){const el=document.getElementById(id);return el?!!el.checked:!!fallback;}
+function scOptions(detailed){
+  return {
+    fault_type:document.getElementById('scFaultType').value,
+    calc_type:document.getElementById('scCalcType').value,
+    c_factor:scNumber('scCFactor',1.1),
+    kappa_method:document.getElementById('scKappaMethod').value,
+    topology:document.getElementById('scTopology').value,
+    fault_impedance_pu:scNumber('scFaultImpedance',0),
+    breaking_time_s:scNumber('scBreakingTime',0.05),
+    ith_duration_s:scNumber('scIthDuration',1),
+    base_frequency_hz:scNumber('scBaseFrequency',50),
+    default_xdpp:scNumber('scDefaultXdpp',0.2),
+    compute_branch_flows:!!detailed&&scChecked('scComputeBranchFlows',true),
+    compute_voltage_drops:!!detailed&&scChecked('scComputeVoltageDrops',true),
+    compute_ith:scChecked('scComputeIth',true)
+  };
+}
 document.getElementById('runScBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
   try{setStatus('Running short circuit (all buses)...');
-  const body=await api('/api/session/sc',{options:{
-    fault_type:document.getElementById('scFaultType').value,
-    calc_type:document.getElementById('scCalcType').value,
-    c_factor:Number(document.getElementById('scCFactor').value||1.1)
-  }});
+  const body=await api('/api/session/sc',{options:scOptions(false)});
   document.getElementById('scFault').textContent=body.fault_type;
   document.getElementById('scBuses').textContent=body.bus_results.length;
   const ik=body.bus_results.map(r=>r.ikpp_ka);
@@ -4233,9 +4332,7 @@ document.getElementById('runScDetailedBtn').onclick=async()=>{
     setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
     const body=await api('/api/session/sc_detailed',{
       fault_bus_ids:busIds,
-      fault_type:document.getElementById('scFaultType').value,
-      calc_type:document.getElementById('scCalcType').value,
-      c_factor:Number(document.getElementById('scCFactor').value||1.1),
+      ...scOptions(true),
     });
     document.getElementById('scFault').textContent=body.fault_type;
     document.getElementById('scBuses').textContent=body.results.length+' (detailed)';
@@ -10366,7 +10463,6 @@ int main(int argc, char** argv) {
       apply_sc_request_options(j, dopt);
       dopt.compute_branch_flows = false;
       dopt.compute_voltage_drops = false;
-      dopt.compute_ith = true;
       // Fault at every AC bus
       std::vector<int> all_bus_ids;
       std::unordered_map<int, double> bus_kv;
@@ -10381,6 +10477,7 @@ int main(int argc, char** argv) {
       out["fault_type"] = sc_fault_type_name(dopt.fault_type);
       out["calc_type"] = sc_calc_type_name(dopt.calc_type);
       out["c_factor"] = dopt.c_factor;
+      out["options"] = sc_options_to_json(dopt);
       out["bus_results"] = json::array();
       for (const auto& dr : detailed) {
         // Find the fault bus's own result
@@ -11286,14 +11383,12 @@ int main(int argc, char** argv) {
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
         apply_sc_request_options(j, dopt);
-        dopt.compute_branch_flows = true;
-        dopt.compute_voltage_drops = true;
-        dopt.compute_ith = true;
         auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
         json out;
         out["fault_type"] = sc_fault_type_name(dopt.fault_type);
         out["calc_type"] = sc_calc_type_name(dopt.calc_type);
         out["c_factor"] = dopt.c_factor;
+        out["options"] = sc_options_to_json(dopt);
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;
