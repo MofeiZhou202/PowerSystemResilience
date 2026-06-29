@@ -44,6 +44,11 @@ class ScipAdapter final : public SolverAdapter {
 
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
+  /// Solve a pure (linear) MILP.  SCIP natively reads the MPS export produced by
+  /// write_lp_as_mps(), so the linear part is handed to SCIP directly without a
+  /// symbolic-objective detour.  This makes SCIP a first-class MILP backend
+  /// (e.g. unit commitment) alongside HiGHS and the native branch-and-cut.
+  SolveResult solve_milp(const MIPModel& prob) const override;
   SolveResult solve_minlp(const MINLPModel& prob) const override;
 
   bool available() const;

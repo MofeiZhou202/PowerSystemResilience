@@ -1757,7 +1757,7 @@ bool IpoptAdapter::supports(ProblemClass cls) const {
 }
 
 bool ScipAdapter::supports(ProblemClass cls) const {
-  return cls == ProblemClass::MINLP;
+  return cls == ProblemClass::MINLP || cls == ProblemClass::MILP;
 }
 
 bool IpoptAdapter::available() const {
@@ -1782,6 +1782,153 @@ bool ScipAdapter::available() const {
 
 const std::string& ScipAdapter::executable() const {
   return executable_;
+}
+
+SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
+  const auto t0 = std::chrono::steady_clock::now();
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    return unavailable_result(name(), vr.errors.empty() ? "invalid MILP model"
+                                                        : vr.errors.front());
+  }
+  if (!available()) {
+    return unavailable_result(name(), "embedded SCIP library not compiled");
+  }
+
+  // Promote integrality onto the linear part so the MPS export carries the
+  // INTORG/INTEND markers SCIP reads.  Mirrors HighsAdapter::solve_milp().
+  LPModel lp = prob.linear_part;
+  for (int idx : prob.integer_idx) {
+    lp.vars[idx].type = VarType::Integer;
+  }
+  for (int idx : prob.binary_idx) {
+    lp.vars[idx].type = VarType::Binary;
+    lp.vars[idx].lb = std::max(0.0, lp.vars[idx].lb);
+    lp.vars[idx].ub = std::min(1.0, lp.vars[idx].ub);
+  }
+  const int n = static_cast<int>(lp.vars.size());
+
+  std::error_code ec;
+  const auto stamp = std::to_string(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
+  const fs::path mps_path =
+      fs::temp_directory_path() / ("mipsolvers_scip_milp_" + stamp + ".mps");
+  const fs::path sol_path =
+      fs::temp_directory_path() / ("mipsolvers_scip_milp_" + stamp + ".sol");
+
+  // write_lp_as_mps names columns X1..Xn (1-indexed); the solution is mapped
+  // back through that convention below.
+  if (!write_lp_as_mps(lp, mps_path, true)) {
+    out.stats.status = "Unavailable: failed to write MPS for SCIP";
+    return out;
+  }
+
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  // ── In-process SCIP via libscip ────────────────────────────────────────────
+  SCIP* scip_env = nullptr;
+  SCIP_RETCODE scip_rc = SCIPcreate(&scip_env);
+  if (scip_rc != SCIP_OKAY || scip_env == nullptr) {
+    out.stats.status =
+        "SCIPcreate failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+  SCIPincludeDefaultPlugins(scip_env);
+  SCIPsetIntParam(scip_env, "display/verblevel", 0);
+  // 0.1% relative gap matches the native B&C / HiGHS UC tolerance; the time cap
+  // guards against pathological instances while still returning any incumbent.
+  SCIPsetRealParam(scip_env, "limits/gap", 1e-3);
+  SCIPsetRealParam(scip_env, "limits/time", 300.0);
+
+  scip_rc = SCIPreadProb(scip_env, mps_path.string().c_str(), nullptr);
+  if (scip_rc != SCIP_OKAY) {
+    SCIPfree(&scip_env);
+    out.stats.status =
+        "SCIPreadProb(MPS) failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+
+  SCIPsolve(scip_env);
+  const SCIP_STATUS scip_status = SCIPgetStatus(scip_env);
+  SCIP_SOL* scip_sol = SCIPgetBestSol(scip_env);
+  if (scip_sol != nullptr && SCIPgetNSols(scip_env) > 0) {
+    out.stats.success = true;
+    out.stats.status = (scip_status == SCIP_STATUS_OPTIMAL) ? "Solved"
+                                                            : "Feasible (limit)";
+    out.stats.objective = SCIPgetSolOrigObj(scip_env, scip_sol);
+    out.stats.mip_gap = SCIPgetGap(scip_env);
+
+    std::unordered_map<std::string, int> name_to_idx;
+    name_to_idx.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) name_to_idx.emplace("X" + std::to_string(i + 1), i);
+
+    // Iterate the ORIGINAL variables (named X1..Xn by write_lp_as_mps).  After
+    // presolve, SCIPgetVars() returns transformed/aggregated columns whose names
+    // no longer match the MPS export, which would silently zero the solution.
+    // SCIPgetBestSol() lives in the original space, so original vars map cleanly.
+    const int nvars_scip = SCIPgetNOrigVars(scip_env);
+    SCIP_VAR** scip_vars = SCIPgetOrigVars(scip_env);
+    out.x = Eigen::VectorXd::Zero(n);
+    for (int vi = 0; vi < nvars_scip; ++vi) {
+      const char* vname = SCIPvarGetName(scip_vars[vi]);
+      if (vname == nullptr) continue;
+      auto it = name_to_idx.find(vname);
+      if (it != name_to_idx.end()) {
+        out.x[it->second] = SCIPgetSolVal(scip_env, scip_sol, scip_vars[vi]);
+      }
+    }
+  } else {
+    out.stats.success = false;
+    out.stats.status = (scip_status == SCIP_STATUS_INFEASIBLE)
+                           ? "Infeasible"
+                           : "SCIP finished without solution";
+  }
+
+  SCIPfree(&scip_env);
+  fs::remove(mps_path, ec);
+  out.stats.runtime_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return out;
+#else
+  // ── External SCIP subprocess ────────────────────────────────────────────────
+  const std::string cmd = shell_quote(executable_) +
+                          " -c \"set limits gap 0.001\" -c \"read " + shell_quote(mps_path) +
+                          "\" -c \"optimize\" -c \"write solution " + shell_quote(sol_path) +
+                          "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
+  const int rc = std::system(cmd.c_str());
+  const ScipSolution sol = parse_scip_solution(sol_path);
+  if (!sol.success && rc != 0) {
+    out.stats.status = "SCIP process failed";
+    fs::remove(mps_path, ec);
+    fs::remove(sol_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+  out.stats.success = sol.success;
+  out.stats.status = sol.success
+                         ? "Solved"
+                         : (sol.status.empty() ? "SCIP finished without solution" : sol.status);
+  out.stats.objective = sol.objective;
+  out.x = Eigen::VectorXd::Zero(n);
+  for (int i = 0; i < n; ++i) {
+    auto it = sol.values.find("X" + std::to_string(i + 1));
+    if (it != sol.values.end()) out.x[i] = it->second;
+  }
+  fs::remove(mps_path, ec);
+  fs::remove(sol_path, ec);
+  out.stats.runtime_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return out;
+#endif  // HACDCPF_HAVE_SCIP_LIB
 }
 
 SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
