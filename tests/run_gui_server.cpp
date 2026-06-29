@@ -28,6 +28,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
+#include "hacdcpf/analysis/dc_short_circuit.hpp"
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
@@ -106,6 +107,48 @@ json sc_options_to_json(const hacdcpf::analysis::SCDetailedOptions& opt) {
       {"compute_ith", opt.compute_ith},
       {"ith_duration_s", opt.ith_duration_s},
   };
+}
+
+json dc_sc_options_to_json(const hacdcpf::analysis::DCFaultOptions& opt) {
+  return json{
+      {"fault_resistance_pu", opt.fault_resistance_pu},
+      {"source_voltage_pu", opt.source_voltage_pu},
+      {"consider_dc_breakers", opt.consider_dc_breakers},
+      {"dc_breakers_control_branches", opt.dc_breakers_control_branches},
+      {"add_unassigned_closed_breaker_edges", opt.add_unassigned_closed_breaker_edges},
+      {"min_closed_breaker_resistance_pu", opt.min_closed_breaker_resistance_pu},
+  };
+}
+
+void apply_dc_sc_request_options(const json& root,
+                                 hacdcpf::analysis::DCFaultOptions& opt) {
+  const json* o = &root;
+  if (root.contains("options") && root["options"].is_object()) {
+    o = &root["options"];
+  }
+  if (o->contains("fault_resistance_pu") && (*o)["fault_resistance_pu"].is_number()) {
+    opt.fault_resistance_pu = (*o)["fault_resistance_pu"].get<double>();
+  }
+  if (o->contains("source_voltage_pu") && (*o)["source_voltage_pu"].is_number()) {
+    opt.source_voltage_pu = (*o)["source_voltage_pu"].get<double>();
+  }
+  if (o->contains("consider_dc_breakers") && (*o)["consider_dc_breakers"].is_boolean()) {
+    opt.consider_dc_breakers = (*o)["consider_dc_breakers"].get<bool>();
+  }
+  if (o->contains("dc_breakers_control_branches") &&
+      (*o)["dc_breakers_control_branches"].is_boolean()) {
+    opt.dc_breakers_control_branches = (*o)["dc_breakers_control_branches"].get<bool>();
+  }
+  if (o->contains("add_unassigned_closed_breaker_edges") &&
+      (*o)["add_unassigned_closed_breaker_edges"].is_boolean()) {
+    opt.add_unassigned_closed_breaker_edges =
+        (*o)["add_unassigned_closed_breaker_edges"].get<bool>();
+  }
+  if (o->contains("min_closed_breaker_resistance_pu") &&
+      (*o)["min_closed_breaker_resistance_pu"].is_number()) {
+    opt.min_closed_breaker_resistance_pu =
+        (*o)["min_closed_breaker_resistance_pu"].get<double>();
+  }
 }
 
 void apply_sc_request_options(const json& root,
@@ -2894,6 +2937,12 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
       <!-- ========================== SC TAB =============================== -->
       <section id="scPane" class="tabpane">
         <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Domain</label>
+            <select id="scDomain">
+              <option value="AC">AC</option>
+              <option value="DC">DC</option>
+            </select>
+          </div>
           <div><label>Fault type</label>
             <select id="scFaultType">
               <option value="ThreePhase">Three-Phase</option>
@@ -2927,6 +2976,10 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
           <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
           <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
+          <div><label>DC Vsrc (pu)</label><input id="dcScSourceVoltage" type="number" step=".01" value="0"/></div>
+          <div><label><input id="dcScConsiderBreakers" type="checkbox" checked/> DCCB topology</label></div>
+          <div><label><input id="dcScBreakerControlsBranch" type="checkbox" checked/> DCCB controls branch</label></div>
+          <div><label><input id="dcScAddBreakerEdges" type="checkbox" checked/> Closed DCCB edges</label></div>
           <div><label><input id="scComputeBranchFlows" type="checkbox" checked/> Branch flows</label></div>
           <div><label><input id="scComputeVoltageDrops" type="checkbox" checked/> Voltage drops</label></div>
           <div><label><input id="scComputeIth" type="checkbox" checked/> Thermal Ith</label></div>
@@ -4297,8 +4350,38 @@ function scOptions(detailed){
     compute_ith:scChecked('scComputeIth',true)
   };
 }
+function dcScOptions(){
+  return {
+    fault_resistance_pu:scNumber('scFaultImpedance',0),
+    source_voltage_pu:scNumber('dcScSourceVoltage',0),
+    consider_dc_breakers:scChecked('dcScConsiderBreakers',true),
+    dc_breakers_control_branches:scChecked('dcScBreakerControlsBranch',true),
+    add_unassigned_closed_breaker_edges:scChecked('dcScAddBreakerEdges',true)
+  };
+}
 document.getElementById('runScBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    const ids=(SYS.dc&&SYS.dc.buses?SYS.dc.buses:[]).map(b=>b.index);
+    if(!ids.length){setStatus('No DC buses available.',true);return;}
+    try{
+      setStatus('Running DC short circuit...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:ids,options:dcScOptions()});
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length;
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scIkChart',[{x:body.results.map(r=>'DC '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Short Circuit Fault Current (kA)',xaxis:{title:'DC Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      document.getElementById('scSkChart').innerHTML='';
+      document.getElementById('scDetailedChart').innerHTML='';
+      document.getElementById('scContribChart').innerHTML='';
+      document.getElementById('scVremainChart').innerHTML='';
+      setStatus('DC short circuit completed. '+body.results.length+' buses analyzed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
+  }
   try{setStatus('Running short circuit (all buses)...');
   const body=await api('/api/session/sc',{options:scOptions(false)});
   document.getElementById('scFault').textContent=body.fault_type;
@@ -4328,6 +4411,21 @@ document.getElementById('runScDetailedBtn').onclick=async()=>{
   if(!busInput){setStatus('Enter bus IDs (e.g. 0,3,5) for detailed SC analysis.',true);return;}
   const busIds=busInput.split(/[,\s]+/).map(Number).filter(n=>!isNaN(n));
   if(!busIds.length){setStatus('Invalid bus IDs.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    try{
+      setStatus('Running detailed DC SC at bus(es): '+busIds.join(', ')+'...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:busIds,options:dcScOptions()});
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length+' (dc)';
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scDetailedChart',[{x:body.results.map(r=>'DC Fault@Bus '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Detailed Fault Current (kA)',xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      setStatus('Detailed DC SC completed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
+  }
   try{
     setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
     const body=await api('/api/session/sc_detailed',{
@@ -11410,7 +11508,96 @@ int main(int argc, char** argv) {
             });
           }
           rj["bus_results"] = bus_arr;
+          json conv_arr = json::array();
+          for (const auto& cc : dr.converter_contributions) {
+            conv_arr.push_back({
+              {"converter_index", cc.converter_index},
+              {"bus_id", cc.bus_id},
+              {"name", cc.name},
+              {"model", cc.model},
+              {"ac_grid_forming", cc.ac_grid_forming},
+              {"dc_grid_forming", cc.dc_grid_forming},
+              {"p_rated_mw", cc.p_rated_mw},
+              {"i_limit_pu", cc.i_limit_pu},
+              {"contribution_ka", cc.contribution_ka},
+            });
+          }
+          rj["converter_contributions"] = conv_arr;
           res_arr.push_back(rj);
+        }
+        out["results"] = res_arr;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- DC Short Circuit at Selected DC Buses ----
+    svr.Post("/api/session/dc_sc",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        std::vector<int> fault_bus_ids;
+        if (j.contains("fault_bus_ids") && j["fault_bus_ids"].is_array())
+          fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
+        if (fault_bus_ids.empty()) throw std::runtime_error("No dc fault_bus_ids specified");
+
+        hacdcpf::analysis::DCFaultOptions dopt;
+        apply_dc_sc_request_options(j, dopt);
+
+        json out;
+        out["analysis"] = "dc_short_circuit";
+        out["options"] = dc_sc_options_to_json(dopt);
+        json res_arr = json::array();
+        for (const int bus_id : fault_bus_ids) {
+          const auto dr = hacdcpf::analysis::dc_bus_fault_level(sys, bus_id, dopt);
+          json rj;
+          rj["fault_bus_id"] = dr.fault_bus_id;
+          rj["solved"] = dr.solved;
+          rj["message"] = dr.message;
+          rj["v_prefault_pu"] = dr.v_prefault_pu;
+          rj["r_thevenin_pu"] = dr.r_thevenin_pu;
+          rj["i_fault_pu"] = dr.i_fault_pu;
+          rj["i_fault_ka"] = dr.i_fault_ka;
+          rj["dc_branch_edges_used"] = dr.dc_branch_edges_used;
+          rj["dccb_edges_used"] = dr.dccb_edges_used;
+          rj["dccb_open_count"] = dr.dccb_open_count;
+          rj["dccb_blocked_branch_count"] = dr.dccb_blocked_branch_count;
+          json duties = json::array();
+          for (const auto& duty : dr.breaker_duties) {
+            duties.push_back({
+              {"breaker_index", duty.breaker_index},
+              {"name", duty.name},
+              {"from_bus", duty.from_bus},
+              {"to_bus", duty.to_bus},
+              {"in_service", duty.in_service},
+              {"closed", duty.closed},
+              {"controls_branch", duty.controls_branch},
+              {"controlled_branch_index", duty.controlled_branch_index},
+              {"r_pu", duty.r_pu},
+              {"i_duty_ka", duty.i_duty_ka},
+              {"i_breaking_ka", duty.i_breaking_ka},
+              {"breaking_rating_ok", duty.breaking_rating_ok},
+              {"model", duty.model},
+            });
+          }
+          rj["breaker_duties"] = duties;
+          res_arr.push_back(std::move(rj));
         }
         out["results"] = res_arr;
         res.set_content(out.dump(), "application/json");
@@ -14040,6 +14227,63 @@ int main(int argc, char** argv) {
       out["bus_results"]=json::array();
       for(const auto& br:sc.bus_results)
         out["bus_results"].push_back(json{{"bus_id",br.bus_id},{"sk_mva",br.sk_mva},{"ikpp_ka",br.ikpp_ka}});
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/dc_sc", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto sys = system_from_request(j);
+      std::vector<int> fault_bus_ids;
+      if (j.contains("fault_bus_ids") && j["fault_bus_ids"].is_array()) {
+        fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
+      } else if (j.contains("fault_bus_id") && j["fault_bus_id"].is_number_integer()) {
+        fault_bus_ids.push_back(j["fault_bus_id"].get<int>());
+      }
+      if (fault_bus_ids.empty()) throw std::runtime_error("No dc fault bus specified");
+
+      hacdcpf::analysis::DCFaultOptions opt;
+      apply_dc_sc_request_options(j, opt);
+      json out;
+      out["analysis"] = "dc_short_circuit";
+      out["options"] = dc_sc_options_to_json(opt);
+      out["results"] = json::array();
+      for (int bus_id : fault_bus_ids) {
+        const auto r = hacdcpf::analysis::dc_bus_fault_level(sys, bus_id, opt);
+        json rj{{"fault_bus_id", r.fault_bus_id},
+                {"solved", r.solved},
+                {"message", r.message},
+                {"v_prefault_pu", r.v_prefault_pu},
+                {"r_thevenin_pu", r.r_thevenin_pu},
+                {"i_fault_pu", r.i_fault_pu},
+                {"i_fault_ka", r.i_fault_ka},
+                {"dc_branch_edges_used", r.dc_branch_edges_used},
+                {"dccb_edges_used", r.dccb_edges_used},
+                {"dccb_open_count", r.dccb_open_count},
+                {"dccb_blocked_branch_count", r.dccb_blocked_branch_count}};
+        rj["breaker_duties"] = json::array();
+        for (const auto& duty : r.breaker_duties) {
+          rj["breaker_duties"].push_back({
+              {"breaker_index", duty.breaker_index},
+              {"name", duty.name},
+              {"from_bus", duty.from_bus},
+              {"to_bus", duty.to_bus},
+              {"closed", duty.closed},
+              {"controls_branch", duty.controls_branch},
+              {"controlled_branch_index", duty.controlled_branch_index},
+              {"r_pu", duty.r_pu},
+              {"i_duty_ka", duty.i_duty_ka},
+              {"i_breaking_ka", duty.i_breaking_ka},
+              {"breaking_rating_ok", duty.breaking_rating_ok},
+              {"model", duty.model},
+          });
+        }
+        out["results"].push_back(std::move(rj));
+      }
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;

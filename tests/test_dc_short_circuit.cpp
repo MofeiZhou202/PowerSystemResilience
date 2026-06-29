@@ -97,3 +97,79 @@ TEST_CASE("DC fault level: no voltage source means no fault level",
   CHECK_FALSE(r.solved);
   CHECK_FALSE(r.message.empty());
 }
+
+TEST_CASE("DC fault level: closed DCCB adds series resistance to controlled branch",
+          "[analysis][dc][shortcircuit][dccb]") {
+  HybridPowerSystem sys = radial_dc(0.1, 0.1, 1.0, 1.0);
+  DCCircuitBreaker cb;
+  cb.index = 7;
+  cb.name = "DCCB_source_mid";
+  cb.bus_from = 1;
+  cb.bus_to = 2;
+  cb.element_type = "dc_branch";
+  cb.element_id = 1;
+  cb.closed = true;
+  cb.in_service = true;
+  cb.r_ohm = 0.1;          // Zbase = 1^2/1 = 1 ohm => 0.1 pu
+  cb.rated_voltage_kv = 1.0;
+  cb.i_breaking_ka = 4.0;
+  sys.dc.dc_circuit_breakers = {cb};
+
+  const DCFaultResult r = dc_bus_fault_level(sys, 2);
+  REQUIRE(r.solved);
+  CHECK_THAT(r.r_thevenin_pu, WithinAbs(0.2, 1e-9));
+  CHECK_THAT(r.i_fault_pu, WithinAbs(5.0, 1e-9));
+  REQUIRE(r.breaker_duties.size() == 1);
+  CHECK(r.breaker_duties.front().controls_branch);
+  CHECK(r.breaker_duties.front().model == "closed_series_branch");
+  CHECK_FALSE(r.breaker_duties.front().breaking_rating_ok);
+}
+
+TEST_CASE("DC fault level: open DCCB blocks controlled branch",
+          "[analysis][dc][shortcircuit][dccb]") {
+  HybridPowerSystem sys = radial_dc(0.1, 0.1);
+  DCCircuitBreaker cb;
+  cb.index = 8;
+  cb.bus_from = 1;
+  cb.bus_to = 2;
+  cb.element_type = "dc_branch";
+  cb.element_id = 1;
+  cb.closed = false;
+  cb.in_service = true;
+  sys.dc.dc_circuit_breakers = {cb};
+
+  const DCFaultResult r = dc_bus_fault_level(sys, 2);
+  CHECK_FALSE(r.solved);
+  CHECK(r.message.find("no resistive path") != std::string::npos);
+  CHECK(r.dccb_blocked_branch_count == 1);
+}
+
+TEST_CASE("DC fault level: unassigned closed DCCB can act as standalone edge",
+          "[analysis][dc][shortcircuit][dccb]") {
+  HybridPowerSystem sys = radial_dc(0.5, 0.1, 1.0, 1.0);
+  DCCircuitBreaker cb;
+  cb.index = 9;
+  cb.bus_from = 1;
+  cb.bus_to = 2;
+  cb.closed = true;
+  cb.in_service = true;
+  cb.r_ohm = 0.1;
+  cb.rated_voltage_kv = 1.0;
+  sys.dc.dc_circuit_breakers = {cb};
+
+  DCFaultOptions with_edge;
+  with_edge.dc_breakers_control_branches = false;
+  with_edge.add_unassigned_closed_breaker_edges = true;
+  const DCFaultResult r_edge = dc_bus_fault_level(sys, 2, with_edge);
+  REQUIRE(r_edge.solved);
+
+  DCFaultOptions no_edge = with_edge;
+  no_edge.add_unassigned_closed_breaker_edges = false;
+  const DCFaultResult r_no_edge = dc_bus_fault_level(sys, 2, no_edge);
+  REQUIRE(r_no_edge.solved);
+
+  CHECK(r_edge.r_thevenin_pu < r_no_edge.r_thevenin_pu);
+  CHECK(r_edge.dccb_edges_used == 1);
+  REQUIRE(r_edge.breaker_duties.size() == 1);
+  CHECK(r_edge.breaker_duties.front().model == "closed_standalone_edge");
+}

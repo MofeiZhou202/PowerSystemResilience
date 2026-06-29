@@ -108,6 +108,7 @@ hacdcpf_add_test(test_carbonflow_case_validation test_carbonflow_case_validation
 #   6. IEC c-factor: Sk ∝ c²  (ratio ≈ 1.21 for c=1.0 vs c=1.1)
 #   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
 hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
+hacdcpf_add_test(test_dc_short_circuit test_dc_short_circuit.cpp)
 
 # Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
 # NIC AC/DC coupling, validated against closed-form analytical voltages.

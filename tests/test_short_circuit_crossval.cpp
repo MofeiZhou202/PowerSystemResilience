@@ -550,6 +550,11 @@ TEST_CASE("SC detailed: VSC AC grid-forming flag selects voltage-source model",
 
   const auto dc_forming_only = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(dc_forming_only.solved);
+  REQUIRE(dc_forming_only.converter_contributions.size() == 1);
+  CHECK(dc_forming_only.converter_contributions.front().model ==
+        "dc_side_forming_current_limited_source");
+  CHECK(dc_forming_only.converter_contributions.front().dc_grid_forming);
+  CHECK_FALSE(dc_forming_only.converter_contributions.front().ac_grid_forming);
   const auto current_limited = dc_forming_only.bus_results.front().ikss_converter_contrib_ka;
   const double expected_current_limited = 1.2 * 20.0 / (std::sqrt(3.0) * 20.0);
   CHECK(std::abs(current_limited - expected_current_limited) < 1e-9);
@@ -557,6 +562,10 @@ TEST_CASE("SC detailed: VSC AC grid-forming flag selects voltage-source model",
   sys.vsc_converters.front().ac_grid_forming = true;
   const auto ac_forming = run_short_circuit_detailed(sys, 1, opt);
   REQUIRE(ac_forming.solved);
+  REQUIRE(ac_forming.converter_contributions.size() == 1);
+  CHECK(ac_forming.converter_contributions.front().model ==
+        "ac_grid_forming_voltage_source");
+  CHECK(ac_forming.converter_contributions.front().ac_grid_forming);
   const auto voltage_source = ac_forming.bus_results.front().ikss_converter_contrib_ka;
 
   CHECK(voltage_source > current_limited * 3.0);
@@ -779,7 +788,7 @@ TEST_CASE("SC: IEEE 33-bus BW monotonic fault levels", "[short_circuit][ieee33bw
 }
 
 TEST_CASE("SC: classical hand examples match embedded expected values",
-          "[short_circuit][classical_examples]") {
+          "[short_circuit][short_circuit_example]") {
 #ifdef HACDCPF_PROJECT_ROOT
   const std::string root = HACDCPF_PROJECT_ROOT;
 #else
@@ -796,7 +805,7 @@ TEST_CASE("SC: classical hand examples match embedded expected values",
   };
 
   for (const auto& file : files) {
-    const std::string path = root + "/external_data/classical_examples/" + file;
+    const std::string path = root + "/external_data/short_circuit_example/" + file;
     INFO("case=" << file);
     const std::string text = read_text_file(path);
     const json doc = json::parse(text);
@@ -850,7 +859,7 @@ TEST_CASE("SC: classical hand examples match embedded expected values",
 }
 
 TEST_CASE("SC: practical classical examples satisfy stress invariants",
-          "[short_circuit][classical_examples][practical]") {
+          "[short_circuit][short_circuit_example][practical]") {
 #ifdef HACDCPF_PROJECT_ROOT
   const std::string root = HACDCPF_PROJECT_ROOT;
 #else
@@ -864,7 +873,7 @@ TEST_CASE("SC: practical classical examples satisfy stress invariants",
   };
 
   for (const auto& file : files) {
-    const std::string path = root + "/external_data/classical_examples/" + file;
+    const std::string path = root + "/external_data/short_circuit_example/" + file;
     INFO("case=" << file);
     const std::string text = read_text_file(path);
     const json doc = json::parse(text);

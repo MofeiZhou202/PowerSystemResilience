@@ -2409,6 +2409,7 @@ const App = (() => {
 
   function syncScToolbarToHidden() {
     const pairs = [
+      ['scDomainSelect', 'scDomain'],
       ['faultTypeSelect', 'scFaultType'],
       ['scCalcTypeSelect', 'scCalcType'],
       ['voltageCorrectionFactor', 'scCFactor'],
@@ -2441,6 +2442,16 @@ const App = (() => {
     };
   }
 
+  function getDcShortCircuitOptions() {
+    return {
+      fault_resistance_pu: scReadNumber('scFaultImpedance', 0),
+      source_voltage_pu: scReadNumber('dcScSourceVoltage', 0),
+      consider_dc_breakers: scReadChecked('dcScConsiderBreakers', true),
+      dc_breakers_control_branches: scReadChecked('dcScBreakerControlsBranch', true),
+      add_unassigned_closed_breaker_edges: scReadChecked('dcScAddBreakerEdges', true),
+    };
+  }
+
   async function runShortCircuit() {
     hideScDialog();
     setStatus('短路计算中...', 'busy');
@@ -2451,6 +2462,31 @@ const App = (() => {
     }
 
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
+    const domain = (document.getElementById('scDomain')?.value || 'AC').toUpperCase();
+    if (domain === 'DC') {
+      const dcBusIds = Array.isArray(SYS?.dc?.buses) ? SYS.dc.buses.map(b => b.index) : [];
+      const faultBusIds = faultBusRaw === ''
+        ? dcBusIds
+        : faultBusRaw.split(/[,\s]+/).map(x => parseInt(x, 10)).filter(Number.isInteger);
+      if (!faultBusIds.length) {
+        setStatus('没有可计算的DC故障母线。', 'error');
+        return;
+      }
+      const resp = await apiPostResult('/api/session/dc_sc', {
+        fault_bus_ids: faultBusIds,
+        options: getDcShortCircuitOptions(),
+      });
+      if (!resp.ok) {
+        setStatus(resp.error || 'DC短路计算失败', 'error');
+        return;
+      }
+      log(`DC短路计算完成: ${faultBusIds.length} 个母线结果`, 'success');
+      setStatus('DC短路完成');
+      showDcShortCircuitResults(resp.data, faultBusIds[0]);
+      switchTab('results');
+      return;
+    }
+
     const overviewOptions = getShortCircuitOptions({ detailed: false });
 
     // Blank fault bus → short circuit at every bus (overview mode).
@@ -5223,6 +5259,17 @@ const App = (() => {
       html += '</tbody></table>';
     }
 
+    if (r.converter_contributions && r.converter_contributions.length) {
+      html += '<h4 style="margin:12px 0 4px">换流器短路模型</h4>';
+      html += '<table><thead><tr><th>ID</th><th>Bus</th><th>模型</th><th>Ir限值(pu)</th><th>贡献(kA)</th></tr></thead><tbody>';
+      r.converter_contributions.forEach(c => {
+        html += `<tr><td>${c.converter_index ?? ''}</td><td>${c.bus_id ?? ''}</td>` +
+                `<td>${c.model || ''}</td><td>${fmt(c.i_limit_pu, 3)}</td>` +
+                `<td>${fmt(c.contribution_ka, 4)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
     html += '<h4 style="margin:12px 0 4px">故障期间各母线剩余电压 (p.u.)</h4>';
     html += '<table><thead><tr><th>Bus</th><th>V<sub>remain</sub> (p.u.)</th></tr></thead><tbody>';
     busRows.forEach(b => {
@@ -5235,6 +5282,59 @@ const App = (() => {
               `<td>${fmt(b.v_remaining_pu, 4)}</td></tr>`;
     });
     html += '</tbody></table>';
+    scDiv.innerHTML = html;
+  }
+
+  function showDcShortCircuitResults(data, primaryFaultBus) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('shortCircuit');
+
+    const fmt = (x, d = 3) =>
+      (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+    const results = data.results || [];
+    const r = results.find(x => x.fault_bus_id === primaryFaultBus) || results[0] || {};
+    const solved = results.filter(x => x.solved).length;
+    const summary = document.getElementById('resultsSummary');
+    const scDiv = document.getElementById('scResults');
+
+    summary.innerHTML = `
+      <div class="result-item"><span class="result-label">短路域</span>
+        <span class="result-value">DC</span></div>
+      <div class="result-item"><span class="result-label">计算母线数</span>
+        <span class="result-value">${results.length} (${solved} solved)</span></div>
+      <div class="result-item"><span class="result-label">首个故障母线</span>
+        <span class="result-value">DC Bus ${r.fault_bus_id ?? 'N/A'}</span></div>
+      <div class="result-item"><span class="result-label">If (kA)</span>
+        <span class="result-value">${fmt(r.i_fault_ka, 4)}</span></div>
+      <div class="result-item"><span class="result-label">Rth / Vpre</span>
+        <span class="result-value">${fmt(r.r_thevenin_pu, 5)} pu / ${fmt(r.v_prefault_pu, 4)} pu</span></div>
+      <div class="result-item"><span class="result-label">DCCB拓扑</span>
+        <span class="result-value">${data.options?.consider_dc_breakers ? '开' : '关'}</span></div>
+    `;
+
+    let html = '<h4 style="margin:8px 0 4px">DC母线故障电流</h4>';
+    html += '<table><thead><tr><th>DC Bus</th><th>Solved</th><th>If(kA)</th><th>If(pu)</th><th>Rth(pu)</th><th>消息</th></tr></thead><tbody>';
+    results.forEach(row => {
+      html += `<tr><td>${row.fault_bus_id}</td><td>${row.solved ? 'yes' : 'no'}</td>` +
+              `<td>${fmt(row.i_fault_ka, 4)}</td><td>${fmt(row.i_fault_pu, 4)}</td>` +
+              `<td>${fmt(row.r_thevenin_pu, 5)}</td><td>${row.message || ''}</td></tr>`;
+    });
+    html += '</tbody></table>';
+
+    const duties = r.breaker_duties || [];
+    if (duties.length) {
+      html += '<h4 style="margin:12px 0 4px">DCCB开断能力校核</h4>';
+      html += '<table><thead><tr><th>DCCB</th><th>端点</th><th>模型</th><th>Duty(kA)</th><th>Breaking(kA)</th><th>状态</th></tr></thead><tbody>';
+      duties.forEach(d => {
+        const ok = d.breaking_rating_ok;
+        html += `<tr><td>${d.name || d.breaker_index}</td><td>${d.from_bus}-${d.to_bus}</td>` +
+                `<td>${d.model || ''}</td><td>${fmt(d.i_duty_ka, 4)}</td>` +
+                `<td>${fmt(d.i_breaking_ka, 4)}</td>` +
+                `<td class="${ok ? 'result-ok' : 'result-failed'}">${ok ? 'OK' : '超限'}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
     scDiv.innerHTML = html;
   }
 
@@ -6512,6 +6612,10 @@ const App = (() => {
 
     // Bar 3: shortCircuit sub-toolbar
     document.getElementById('btnFaultLocation')?.addEventListener('click', showScDialog);
+    document.getElementById('scDomainSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scDomain');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('faultTypeSelect')?.addEventListener('change', (e) => {
       const f = document.getElementById('scFaultType');
       if (f) f.value = e.target.value;
