@@ -2857,10 +2857,16 @@ const App = (() => {
     // ── Bridges table ──
     const brEl = document.getElementById('topoAnalysisBridges');
     if (brEl) {
-      const rows = (data.bridges || []).map(b =>
-        `<tr><td class="topo-clickable" data-bus="${b.from_bus}">${b.from_bus}</td>` +
-        `<td class="topo-clickable" data-bus="${b.to_bus}">${b.to_bus}</td>` +
-        `<td>${esc(b.category || '')}</td><td>${b.domain || ''}</td></tr>`).join('');
+      const rows = (data.bridges || []).map(b => {
+        // Per-endpoint domain when the bridge straddles AC/DC (e.g. a VSC),
+        // else the single domain.
+        const fd = b.from_domain || b.domain || '';
+        const td = b.to_domain || b.domain || '';
+        const domLabel = fd && td && fd !== td ? `${fd}→${td}` : (fd || td || '');
+        return `<tr><td class="topo-clickable" data-bus="${b.from_bus}">${b.from_bus}</td>` +
+          `<td class="topo-clickable" data-bus="${b.to_bus}">${b.to_bus}</td>` +
+          `<td>${esc(b.category || '')}</td><td>${esc(domLabel)}</td></tr>`;
+      }).join('');
       brEl.innerHTML = rows
         ? `<table class="topo-table"><thead><tr><th>起始母线</th><th>终止母线</th><th>类型</th><th>域</th></tr></thead><tbody>${rows}</tbody></table>`
         : '<p class="empty-hint">无桥支路（无单点故障支路）</p>';
@@ -2869,10 +2875,16 @@ const App = (() => {
     // ── Cut vertices table ──
     const cvEl = document.getElementById('topoAnalysisCutVertices');
     if (cvEl) {
-      const ids = data.cut_vertex_bus_ids || [];
-      cvEl.innerHTML = ids.length
-        ? '<div class="topo-cutvertex-chips">' + ids.map(id =>
-            `<span class="legend-item topo-clickable" data-bus="${id}">母线 ${id}</span>`).join(' ') + '</div>'
+      // Prefer the domain-tagged list so AC bus N and DC bus N are shown
+      // distinctly (a flat id list would render "母线 N" twice with no way to
+      // tell them apart); fall back to the legacy flat list.
+      const cvs = Array.isArray(data.cut_vertices)
+        ? data.cut_vertices
+        : (data.cut_vertex_bus_ids || []).map(id => ({ bus: id, domain: '' }));
+      cvEl.innerHTML = cvs.length
+        ? '<div class="topo-cutvertex-chips">' + cvs.map(cv =>
+            `<span class="legend-item topo-clickable" data-bus="${cv.bus}">` +
+            `${cv.domain ? esc(cv.domain) + '母线' : '母线 '} ${cv.bus}</span>`).join(' ') + '</div>'
         : '<p class="empty-hint">无割点</p>';
     }
 
@@ -3406,6 +3418,8 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">总发电成本</span>
         <span class="result-value">$${(data.total_generation_cost || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">总网损</span>
+        <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
     `;
 
     const hrs = Array.from({ length: data.num_steps }, (_, i) => i);

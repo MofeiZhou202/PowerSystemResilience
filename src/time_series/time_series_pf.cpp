@@ -1915,6 +1915,15 @@ HybridPowerSystem build_time_series_system_snapshot(
     load.scaling = 1.0;
   }
 
+  // Apply time-varying electricity price to external grids (price_profile_id → cost_c1).
+  // The profile contains absolute prices (e.g. RMB/MWh) that replace cost_c1 each step.
+  for (auto& eg : sys_t.ac.external_grids) {
+    if (!eg.in_service) continue;
+    const auto* prof = find_profile(profile_map, eg.price_profile_id);
+    if (prof == nullptr) continue;
+    eg.cost_c1 = profile_value(prof, step, eg.cost_c1);
+  }
+
   return sys_t;
 }
 

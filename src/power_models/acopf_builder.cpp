@@ -92,6 +92,31 @@ ACOPFData to_acopf_data(const HybridPowerSystem& sys) {
     d.generators.push_back(std::move(gd));
   }
 
+  // External grids with cost participate in OPF as dispatchable slack sources.
+  // They already anchor V/θ via is_ref; here we add their cost-curve entries so
+  // the IPM Hessian is non-singular even when there are no conventional generators.
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    if (eg.cost_c2 == 0.0 && eg.cost_c1 == 0.0) continue;
+    auto it = idx_to_id.find(eg.bus);
+    if (it == idx_to_id.end()) continue;
+
+    const double pmax = (eg.s_sc_max_mva > 0.0) ? eg.s_sc_max_mva : 1000.0;
+    ACOPFGenData gd;
+    gd.id        = eg.name.empty() ? ("EG" + std::to_string(eg.index)) : eg.name;
+    gd.bus_id    = it->second;
+    gd.pg_min_pu = -pmax / Sb;
+    gd.pg_max_pu =  pmax / Sb;
+    gd.qg_min_pu = -pmax / Sb;
+    gd.qg_max_pu =  pmax / Sb;
+    gd.cost_c2   = eg.cost_c2;
+    gd.cost_c1   = eg.cost_c1;
+    gd.cost_c0   = eg.cost_c0;
+    gd.pg0_pu    = 0.0;
+    gd.qg0_pu    = 0.0;
+    d.generators.push_back(std::move(gd));
+  }
+
   // Branches (in-service, finite impedance)
   for (const auto& br : sys.ac.branches) {
     if (!br.in_service) continue;

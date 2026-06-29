@@ -98,6 +98,7 @@ hacdcpf_add_test(test_crossmodule_integration test_crossmodule_integration.cpp)
 hacdcpf_add_test(test_carbonflow_dynamic_storage test_carbonflow_dynamic_storage.cpp)
 hacdcpf_add_test(test_carbonflow_tracing test_carbonflow_tracing.cpp)
 hacdcpf_add_test(test_carbonflow_case_validation test_carbonflow_case_validation.cpp)
+hacdcpf_add_test(test_nighttime_opf test_nighttime_opf.cpp)
 
 # Short-circuit analysis: Z-bus Thévenin cross-validation + IEC 60909 checks.
 #   1. 2-bus analytical: Z_Thev = Z_line

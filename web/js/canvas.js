@@ -2209,7 +2209,11 @@ const Canvas = (() => {
     });
 
     // Resolve bus index from a device component. Find connected bus via connections.
-    function findBusIndex(compId) {
+    // When no wired bus is found, fall back to `fallback` — callers pass the device's
+    // own stored `bus` param so a device whose wire was lost (e.g. generators added
+    // programmatically to the JSON, never hand-wired on the canvas) keeps its intended
+    // bus instead of silently collapsing onto bus 1.
+    function findBusIndex(compId, fallback = 1) {
       for (const conn of state.connections) {
         if (conn.from.compId === compId) {
           const idx = compBusMap[conn.to.compId];
@@ -2220,7 +2224,7 @@ const Canvas = (() => {
           if (idx !== undefined) return idx;
         }
       }
-      return 1;  // fallback: bus 1 (1-based)
+      return fallback;  // fallback: caller's stored bus, else bus 1 (1-based)
     }
 
     // Find two connected bus indices (for branches, transformers)
@@ -2280,7 +2284,7 @@ const Canvas = (() => {
       const p = comp.params;
       switch (comp.type) {
         case 'generator': {
-          const busIdx = findBusIndex(comp.id);
+          const busIdx = findBusIndex(comp.id, numOr(p.bus, 1));
           sys.ac.generators.push({
             index: Number.isFinite(Number(p.index)) ? Number(p.index) : genIdx,
             name: p.name || `Gen ${genIdx}`,
@@ -2435,6 +2439,10 @@ const Canvas = (() => {
             emission_factor_tco2_mwh: numOr(p.emission_factor_tco2_mwh, 0),
             controllable: p.controllable === true || p.controllable === 'true',
             in_service: p.in_service !== false,
+            cost_c2: numOr(p.cost_c2, 0),
+            cost_c1: numOr(p.cost_c1, 0),
+            cost_c0: numOr(p.cost_c0, 0),
+            price_profile_id: numOr(p.price_profile_id, -1),
           };
           if (Array.isArray(p.emission_factor_profile_tco2_mwh)) {
             eg.emission_factor_profile_tco2_mwh =
@@ -3290,6 +3298,7 @@ const Canvas = (() => {
         ...COMP.defaults.generator,
         index: gen.index,
         name: gen.name || `Gen ${gen.index !== undefined ? gen.index : ''}`,
+        bus: gen.bus,
         pg_mw: gen.pg_mw, qg_mvar: gen.qg_mvar,
         vg_pu: gen.vg_pu || 1.0,
         pmax_mw: gen.pmax_mw, pmin_mw: gen.pmin_mw,
@@ -3363,6 +3372,10 @@ const Canvas = (() => {
           : undefined,
         controllable: eg.controllable || false,
         in_service: eg.in_service !== false,
+        cost_c2: eg.cost_c2 || 0,
+        cost_c1: eg.cost_c1 || 0,
+        cost_c0: eg.cost_c0 || 0,
+        price_profile_id: eg.price_profile_id != null ? eg.price_profile_id : -1,
       }, busCompMap, -80);
     });
 
@@ -5743,7 +5756,23 @@ const Canvas = (() => {
       (isl.ac_bus_ids || []).forEach(id => { acIsl[id] = isl.island_id; });
       (isl.dc_bus_ids || []).forEach(id => { dcIsl[id] = isl.island_id; });
     });
-    const cutSet = new Set(data.cut_vertex_bus_ids || []);
+    // Cut vertices, domain-separated.  AC and DC buses can share the same
+    // integer id, so a flat id list conflates e.g. AC bus 2 with DC bus 2 and
+    // would draw a false ring on the wrong-domain twin.  Prefer the new
+    // domain-tagged `cut_vertices` array; fall back to the legacy flat list
+    // (applied to both domains, preserving old behaviour) when absent.
+    let acCutSet, dcCutSet;
+    if (Array.isArray(data.cut_vertices)) {
+      acCutSet = new Set();
+      dcCutSet = new Set();
+      data.cut_vertices.forEach(cv => {
+        (cv.domain === 'DC' ? dcCutSet : acCutSet).add(cv.bus);
+      });
+    } else {
+      const flat = new Set(data.cut_vertex_bus_ids || []);
+      acCutSet = flat;
+      dcCutSet = flat;
+    }
 
     const drawBusOverlay = (comp, islandId, isCut) => {
       if (!comp) return;
@@ -5770,22 +5799,44 @@ const Canvas = (() => {
       }
     };
 
-    Object.keys(acIsl).forEach(id => drawBusOverlay(acComp(+id), acIsl[id], cutSet.has(+id)));
-    Object.keys(dcIsl).forEach(id => drawBusOverlay(dcComp(+id), dcIsl[id], cutSet.has(+id)));
+    Object.keys(acIsl).forEach(id => drawBusOverlay(acComp(+id), acIsl[id], acCutSet.has(+id)));
+    Object.keys(dcIsl).forEach(id => drawBusOverlay(dcComp(+id), dcIsl[id], dcCutSet.has(+id)));
     // Cut vertices not covered by an island map (rare) still get a ring.
     if (showCutVertices) {
-      cutSet.forEach(id => {
+      acCutSet.forEach(id => {
         if (acIsl[id] === undefined) drawBusOverlay(acComp(id), undefined, true);
+      });
+      dcCutSet.forEach(id => {
         if (dcIsl[id] === undefined) drawBusOverlay(dcComp(id), undefined, true);
       });
     }
 
-    // Bridge edges: dashed line between the two endpoint buses.
+    // Bridge edges: dashed line between the two endpoint buses.  A bridge may
+    // straddle the AC/DC boundary (a VSC/converter coupling), so each endpoint
+    // is resolved in its OWN domain — not a single per-edge domain, which would
+    // look up the DC endpoint in the AC component map and miss (or hit a
+    // same-id AC bus).  Prefer explicit per-endpoint from_domain/to_domain from
+    // the server; otherwise derive from the edge category.
     if (showBridges) {
+      const DC_BOTH = { DC_Line: 1, DC_Switch: 1, DCDC_Coupling: 1 };
       (data.bridges || []).forEach(b => {
-        const dc = b.domain === 'DC';
-        const fromComp = dc ? dcComp(b.from_bus) : acComp(b.from_bus);
-        const toComp = dc ? dcComp(b.to_bus) : acComp(b.to_bus);
+        let fromDc, toDc;
+        if (b.from_domain || b.to_domain) {
+          fromDc = b.from_domain === 'DC';
+          toDc = b.to_domain === 'DC';
+        } else if (b.category === 'VSC_Coupling') {
+          // server emits from_bus = AC bus, to_bus = DC bus
+          fromDc = false;
+          toDc = true;
+        } else if (DC_BOTH[b.category]) {
+          fromDc = true;
+          toDc = true;
+        } else {
+          fromDc = b.domain === 'DC';
+          toDc = b.domain === 'DC';
+        }
+        const fromComp = fromDc ? dcComp(b.from_bus) : acComp(b.from_bus);
+        const toComp = toDc ? dcComp(b.to_bus) : acComp(b.to_bus);
         if (!fromComp || !toComp) return;
         const line = document.createElementNS(SVGNS, 'line');
         line.setAttribute('class', 'topo-bridge-edge');

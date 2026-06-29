@@ -206,6 +206,15 @@ struct ExternalGrid {
   bool controllable{true};
 
   double emission_factor_tco2_mwh{0.0};
+
+  // OPF cost (0 = not participating in OPF objective)
+  double cost_c2{0.0};
+  double cost_c1{0.0};
+  double cost_c0{0.0};
+
+  // Time-varying electricity price: profile_id -> cost_c1 at each timestep.
+  // -1 = no profile (use static cost_c1).
+  int price_profile_id{-1};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
