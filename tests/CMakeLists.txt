@@ -17,6 +17,15 @@ hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
 hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)
 hacdcpf_add_test(test_enhanced_solver     test_enhanced_solver.cpp)
+hacdcpf_add_test(test_uc_external_grid     test_uc_external_grid.cpp)
+hacdcpf_add_test(test_uc_demand_response   test_uc_demand_response.cpp)
+hacdcpf_add_test(test_uc_dispatchable_pv   test_uc_dispatchable_pv.cpp)
+hacdcpf_add_test(test_uc_microgrid         test_uc_microgrid.cpp)
+hacdcpf_add_test(test_uc_dc_branch_flows   test_uc_dc_branch_flows.cpp)
+hacdcpf_add_test(test_uc_storage_degradation test_uc_storage_degradation.cpp)
+hacdcpf_add_test(test_uc_vpp               test_uc_vpp.cpp)
+hacdcpf_add_test(test_uc_energy_router     test_uc_energy_router.cpp)
+hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
 
@@ -109,6 +118,7 @@ hacdcpf_add_test(test_nighttime_opf test_nighttime_opf.cpp)
 #   6. IEC c-factor: Sk ∝ c²  (ratio ≈ 1.21 for c=1.0 vs c=1.1)
 #   7. IEEE 33-bus BW: monotonic Sk, end-of-feeder attenuation, API round-trip
 hacdcpf_add_test(test_short_circuit_crossval test_short_circuit_crossval.cpp)
+hacdcpf_add_test(test_dc_short_circuit test_dc_short_circuit.cpp)
 
 # Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
 # NIC AC/DC coupling, validated against closed-form analytical voltages.
@@ -228,6 +238,12 @@ hacdcpf_add_test(test_ev_power_traffic_formulations_e_f_g_h test_ev_power_traffi
 # Covers: single-class EV baseline, mixed ICV+EV capacity sharing (PCE),
 # spillback propagation, road failure and rerouting, differential class costs.
 hacdcpf_add_test(test_ev_power_traffic_phase1 test_ev_power_traffic_phase1.cpp)
+
+# Device terminal flows (switch/CB) + reconfig device back-projection.
+hacdcpf_add_test(test_device_flows test_device_flows.cpp)
+
+# ONR options: split-domain radiality + G4/G5 constraint toggles.
+hacdcpf_add_test(test_reconfig_options test_reconfig_options.cpp)
 
 # Three-stage MILP fault-recovery reliability bridge (Julia/Gurobi required at
 # runtime for TC-2/TC-3/TC-4; set HACDCPF_RUN_JULIA_RELIABILITY=1 to enable).

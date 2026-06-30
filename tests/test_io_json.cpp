@@ -60,6 +60,7 @@ static HybridPowerSystem make_2bus() {
     sys.ac.buses = {b1, b2};
 
     ACBranch br; br.from_bus=1; br.to_bus=2; br.r_pu=0.01; br.x_pu=0.04;
+    br.r0_pu=0.03; br.x0_pu=0.12; br.b0_pu=0.001;
     br.b_pu=0.0; br.tap=1.0; br.in_service=true;
     sys.ac.branches = {br};
 
@@ -99,6 +100,9 @@ TEST_CASE("JSON round-trip: 2-bus system serialises and deserialises", "[io][jso
     CHECK(restored.ac.branches[0].to_bus   == orig.ac.branches[0].to_bus);
     CHECK_THAT(restored.ac.branches[0].r_pu, WithinAbs(0.01, 1e-9));
     CHECK_THAT(restored.ac.branches[0].x_pu, WithinAbs(0.04, 1e-9));
+    CHECK_THAT(restored.ac.branches[0].r0_pu, WithinAbs(0.03, 1e-9));
+    CHECK_THAT(restored.ac.branches[0].x0_pu, WithinAbs(0.12, 1e-9));
+    CHECK_THAT(restored.ac.branches[0].b0_pu, WithinAbs(0.001, 1e-9));
 }
 
 TEST_CASE("JSON round-trip: Load short-circuit motor fields are preserved",
@@ -131,6 +135,43 @@ TEST_CASE("JSON round-trip: Load short-circuit motor fields are preserved",
     CHECK(rt.sc_source_index == 7);
     CHECK(rt.motor_poles == 4);
     CHECK_THAT(rt.motor_efficiency, WithinAbs(0.91, 1e-12));
+}
+
+TEST_CASE("JSON round-trip: VSC short-circuit fields are preserved",
+          "[io][json][roundtrip][short_circuit][converter]") {
+    auto orig = make_2bus();
+
+    DCBus d1;
+    d1.index = 1;
+    d1.bus_type = DCBusType::DC_V;
+    d1.base_kv = 320.0;
+    d1.in_service = true;
+    orig.dc.buses = {d1};
+
+    VSCConverter vsc;
+    vsc.index = 3;
+    vsc.bus_ac = 1;
+    vsc.bus_dc = 1;
+    vsc.in_service = true;
+    vsc.r_sc_pu = 0.012;
+    vsc.x_sc_pu = 0.16;
+    vsc.r2_sc_pu = 0.021;
+    vsc.x2_sc_pu = 0.18;
+    vsc.i_max_pu = 1.35;
+    vsc.grid_forming = true;
+    vsc.ac_grid_forming = true;
+    orig.vsc_converters = {vsc};
+
+    const auto restored = from_json(to_json(orig));
+    REQUIRE(restored.vsc_converters.size() == 1);
+    const auto& rt = restored.vsc_converters.front();
+    CHECK_THAT(rt.r_sc_pu, WithinAbs(0.012, 1e-12));
+    CHECK_THAT(rt.x_sc_pu, WithinAbs(0.16, 1e-12));
+    CHECK_THAT(rt.r2_sc_pu, WithinAbs(0.021, 1e-12));
+    CHECK_THAT(rt.x2_sc_pu, WithinAbs(0.18, 1e-12));
+    CHECK_THAT(rt.i_max_pu, WithinAbs(1.35, 1e-12));
+    CHECK(rt.grid_forming);
+    CHECK(rt.ac_grid_forming);
 }
 
 TEST_CASE("JSON round-trip: IEEE-14 AC/DC case preserves topology", "[io][json][roundtrip]") {

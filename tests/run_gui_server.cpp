@@ -28,6 +28,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
+#include "hacdcpf/analysis/dc_short_circuit.hpp"
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/power_flow/converter_coordination.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
@@ -77,6 +78,79 @@ std::string sc_calc_type_name(hacdcpf::analysis::SCCalcType ct) {
   return ct == hacdcpf::analysis::SCCalcType::Min ? "Min" : "Max";
 }
 
+std::string sc_kappa_method_name(hacdcpf::analysis::SCKappaMethod km) {
+  switch (km) {
+    case hacdcpf::analysis::SCKappaMethod::A: return "A";
+    case hacdcpf::analysis::SCKappaMethod::B: return "B";
+    case hacdcpf::analysis::SCKappaMethod::C: return "C";
+  }
+  return "B";
+}
+
+std::string sc_topology_name(hacdcpf::analysis::SCTopology top) {
+  return top == hacdcpf::analysis::SCTopology::Radial ? "Radial" : "Meshed";
+}
+
+json sc_options_to_json(const hacdcpf::analysis::SCDetailedOptions& opt) {
+  return json{
+      {"fault_type", sc_fault_type_name(opt.fault_type)},
+      {"calc_type", sc_calc_type_name(opt.calc_type)},
+      {"kappa_method", sc_kappa_method_name(opt.kappa_method)},
+      {"topology", sc_topology_name(opt.topology)},
+      {"c_factor", opt.c_factor},
+      {"fault_impedance_pu", opt.fault_impedance_pu},
+      {"breaking_time_s", opt.breaking_time_s},
+      {"base_frequency_hz", opt.base_frequency_hz},
+      {"default_xdpp", opt.default_xdpp},
+      {"compute_branch_flows", opt.compute_branch_flows},
+      {"compute_voltage_drops", opt.compute_voltage_drops},
+      {"compute_ith", opt.compute_ith},
+      {"ith_duration_s", opt.ith_duration_s},
+  };
+}
+
+json dc_sc_options_to_json(const hacdcpf::analysis::DCFaultOptions& opt) {
+  return json{
+      {"fault_resistance_pu", opt.fault_resistance_pu},
+      {"source_voltage_pu", opt.source_voltage_pu},
+      {"consider_dc_breakers", opt.consider_dc_breakers},
+      {"dc_breakers_control_branches", opt.dc_breakers_control_branches},
+      {"add_unassigned_closed_breaker_edges", opt.add_unassigned_closed_breaker_edges},
+      {"min_closed_breaker_resistance_pu", opt.min_closed_breaker_resistance_pu},
+  };
+}
+
+void apply_dc_sc_request_options(const json& root,
+                                 hacdcpf::analysis::DCFaultOptions& opt) {
+  const json* o = &root;
+  if (root.contains("options") && root["options"].is_object()) {
+    o = &root["options"];
+  }
+  if (o->contains("fault_resistance_pu") && (*o)["fault_resistance_pu"].is_number()) {
+    opt.fault_resistance_pu = (*o)["fault_resistance_pu"].get<double>();
+  }
+  if (o->contains("source_voltage_pu") && (*o)["source_voltage_pu"].is_number()) {
+    opt.source_voltage_pu = (*o)["source_voltage_pu"].get<double>();
+  }
+  if (o->contains("consider_dc_breakers") && (*o)["consider_dc_breakers"].is_boolean()) {
+    opt.consider_dc_breakers = (*o)["consider_dc_breakers"].get<bool>();
+  }
+  if (o->contains("dc_breakers_control_branches") &&
+      (*o)["dc_breakers_control_branches"].is_boolean()) {
+    opt.dc_breakers_control_branches = (*o)["dc_breakers_control_branches"].get<bool>();
+  }
+  if (o->contains("add_unassigned_closed_breaker_edges") &&
+      (*o)["add_unassigned_closed_breaker_edges"].is_boolean()) {
+    opt.add_unassigned_closed_breaker_edges =
+        (*o)["add_unassigned_closed_breaker_edges"].get<bool>();
+  }
+  if (o->contains("min_closed_breaker_resistance_pu") &&
+      (*o)["min_closed_breaker_resistance_pu"].is_number()) {
+    opt.min_closed_breaker_resistance_pu =
+        (*o)["min_closed_breaker_resistance_pu"].get<double>();
+  }
+}
+
 void apply_sc_request_options(const json& root,
                               hacdcpf::analysis::SCDetailedOptions& opt) {
   const json* o = &root;
@@ -97,6 +171,23 @@ void apply_sc_request_options(const json& root,
     opt.calc_type = hacdcpf::analysis::SCCalcType::Max;
   }
 
+  const std::string kappa =
+      o->value("kappa_method", o->value("kappa", std::string("B")));
+  if (kappa == "A" || kappa == "a" || kappa == "MethodA" || kappa == "method_a") {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::A;
+  } else if (kappa == "C" || kappa == "c" || kappa == "MethodC" || kappa == "method_c") {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::C;
+  } else {
+    opt.kappa_method = hacdcpf::analysis::SCKappaMethod::B;
+  }
+
+  const std::string topology = o->value("topology", std::string("Meshed"));
+  if (topology == "Radial" || topology == "radial" || topology == "Tree" || topology == "tree") {
+    opt.topology = hacdcpf::analysis::SCTopology::Radial;
+  } else {
+    opt.topology = hacdcpf::analysis::SCTopology::Meshed;
+  }
+
   if (o->contains("c_factor") && (*o)["c_factor"].is_number()) {
     opt.c_factor = (*o)["c_factor"].get<double>();
   }
@@ -105,6 +196,21 @@ void apply_sc_request_options(const json& root,
   }
   if (o->contains("breaking_time_s") && (*o)["breaking_time_s"].is_number()) {
     opt.breaking_time_s = (*o)["breaking_time_s"].get<double>();
+  }
+  if (o->contains("base_frequency_hz") && (*o)["base_frequency_hz"].is_number()) {
+    opt.base_frequency_hz = (*o)["base_frequency_hz"].get<double>();
+  }
+  if (o->contains("default_xdpp") && (*o)["default_xdpp"].is_number()) {
+    opt.default_xdpp = (*o)["default_xdpp"].get<double>();
+  }
+  if (o->contains("compute_branch_flows") && (*o)["compute_branch_flows"].is_boolean()) {
+    opt.compute_branch_flows = (*o)["compute_branch_flows"].get<bool>();
+  }
+  if (o->contains("compute_voltage_drops") && (*o)["compute_voltage_drops"].is_boolean()) {
+    opt.compute_voltage_drops = (*o)["compute_voltage_drops"].get<bool>();
+  }
+  if (o->contains("compute_ith") && (*o)["compute_ith"].is_boolean()) {
+    opt.compute_ith = (*o)["compute_ith"].get<bool>();
   }
   if (o->contains("ith_duration_s") && (*o)["ith_duration_s"].is_number()) {
     opt.ith_duration_s = (*o)["ith_duration_s"].get<double>();
@@ -2369,32 +2475,110 @@ json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
 }
 
 // Build default 24-h (or N-step) scaling profiles
+// ─────────────────────────────────────────────────────────────────────────
+// Parse a GUI MILP-solver selection string into the engine enum.
+// Accepts: "auto" | "native" | "highs" | "scip" | "gurobi" (case-insensitive).
+// Unknown / empty values fall back to Auto so the solve never dead-ends.
+hacdcpf::UCSolverChoice parse_uc_solver_choice(const std::string& s) {
+  std::string v;
+  v.reserve(s.size());
+  for (char c : s) v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  if (v == "native") return hacdcpf::UCSolverChoice::Native;
+  if (v == "highs")  return hacdcpf::UCSolverChoice::HiGHS;
+  if (v == "scip")   return hacdcpf::UCSolverChoice::SCIP;
+  if (v == "gurobi") return hacdcpf::UCSolverChoice::Gurobi;
+  return hacdcpf::UCSolverChoice::Auto;
+}
+
+// Human-readable label for the enum (echoed back to the GUI for confirmation).
+const char* uc_solver_choice_label(hacdcpf::UCSolverChoice c) {
+  switch (c) {
+    case hacdcpf::UCSolverChoice::Native: return "native";
+    case hacdcpf::UCSolverChoice::HiGHS:  return "highs";
+    case hacdcpf::UCSolverChoice::SCIP:   return "scip";
+    case hacdcpf::UCSolverChoice::Gurobi: return "gurobi";
+    case hacdcpf::UCSolverChoice::Auto:   return "auto";
+  }
+  return "auto";
+}
+
+// Parse a GUI objective selection string into the UC objective enum.
+// Accepts: "cost" | "carbon" | "curtailment" | "loss" | "weighted".
+hacdcpf::UCObjective parse_uc_objective(const std::string& s) {
+  std::string v;
+  v.reserve(s.size());
+  for (char c : s) v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  if (v == "carbon" || v == "emission" || v == "co2") return hacdcpf::UCObjective::Carbon;
+  if (v == "curtailment" || v == "curtail" || v == "renewable") return hacdcpf::UCObjective::MinCurtailment;
+  if (v == "loss" || v == "minloss" || v == "min_loss") return hacdcpf::UCObjective::MinLoss;
+  if (v == "weighted" || v == "weight" || v == "multi") return hacdcpf::UCObjective::Weighted;
+  return hacdcpf::UCObjective::Cost;
+}
+
+const char* uc_objective_label(hacdcpf::UCObjective o) {
+  switch (o) {
+    case hacdcpf::UCObjective::Carbon:         return "carbon";
+    case hacdcpf::UCObjective::MinCurtailment: return "curtailment";
+    case hacdcpf::UCObjective::MinLoss:        return "loss";
+    case hacdcpf::UCObjective::Weighted:       return "weighted";
+    case hacdcpf::UCObjective::Cost:           return "cost";
+  }
+  return "cost";
+}
+
+// Apply objective selection (mode + optional weights) onto TimeSeriesPFOptions.
+void apply_uc_objective(hacdcpf::TimeSeriesPFOptions& opts, const json& j) {
+  opts.objective_mode = parse_uc_objective(j.value("objective", std::string("cost")));
+  if (j.contains("objective_weights") && j["objective_weights"].is_object()) {
+    const auto& w = j["objective_weights"];
+    opts.w_cost = w.value("cost", 1.0);
+    opts.w_carbon = w.value("carbon", 0.0);
+    opts.w_loss = w.value("loss", 0.0);
+    opts.w_curtailment = w.value("curtailment", 0.0);
+  }
+}
+
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
   hacdcpf::TimeSeriesData ts;
   ts.num_steps = steps;
   ts.step_duration_hr = 1.0;
-  // Profile 0: daily load curve
-  hacdcpf::TimeSeriesProfile lp; lp.id = 0; lp.name = "daily_load";
-  if (steps == 24) {
-    lp.values = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
-                 0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
-  } else { lp.values.assign(steps, 0.80); }
-  ts.profiles.push_back(lp);
-  // Profile 1: wind
-  hacdcpf::TimeSeriesProfile wp; wp.id = 1; wp.name = "wind_daily";
-  if (steps == 24) {
-    wp.values = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
-                 0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
-  } else { wp.values.assign(steps, 0.40); }
-  ts.profiles.push_back(wp);
-  // Profile 2: solar
-  hacdcpf::TimeSeriesProfile sp; sp.id = 2; sp.name = "solar_daily";
-  if (steps == 24) {
-    sp.values = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
-                 0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
-  } else { sp.values.assign(steps, 0.30); }
-  ts.profiles.push_back(sp);
+  // 24-hour daily templates, tiled (repeated) to cover any horizon length so a
+  // 48 h / multi-day run gets a realistic repeating curve instead of a flat line.
+  const std::vector<double> load24 = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
+                                      0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
+  const std::vector<double> wind24 = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
+                                      0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
+  const std::vector<double> sol24  = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
+                                      0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
+  auto tile = [steps](const std::vector<double>& tmpl, int id, const char* name) {
+    hacdcpf::TimeSeriesProfile p; p.id = id; p.name = name;
+    p.values.resize(static_cast<size_t>(std::max(0, steps)));
+    for (int t = 0; t < steps; ++t)
+      p.values[static_cast<size_t>(t)] = tmpl[static_cast<size_t>(t % 24)];
+    return p;
+  };
+  ts.profiles.push_back(tile(load24, 0, "daily_load"));
+  ts.profiles.push_back(tile(wind24, 1, "wind_daily"));
+  ts.profiles.push_back(tile(sol24, 2, "solar_daily"));
   return ts;
+}
+
+// Fit every profile in `ts` to `steps` samples: tile (repeat) when a profile is
+// shorter than the requested horizon, truncate when it is longer.  This keeps
+// imported time-series data instead of discarding it when 仿真时间(小时) differs
+// from the imported length (fixes the >24 h "lost imported data" issue).
+void fit_ts_data_to_steps(hacdcpf::TimeSeriesData& ts, int steps) {
+  if (steps <= 0) return;
+  ts.num_steps = steps;
+  for (auto& p : ts.profiles) {
+    if (p.values.empty()) { p.values.assign(static_cast<size_t>(steps), 1.0); continue; }
+    if (static_cast<int>(p.values.size()) == steps) continue;
+    const size_t orig = p.values.size();
+    std::vector<double> v(static_cast<size_t>(steps));
+    for (int t = 0; t < steps; ++t)
+      v[static_cast<size_t>(t)] = p.values[static_cast<size_t>(t) % orig];
+    p.values = std::move(v);
+  }
 }
 
 // Build annual time-series data with seasonal variation
@@ -2442,6 +2626,36 @@ hacdcpf::TimeSeriesData make_annual_ts_data(double step_hr = 6.0) {
   return ts;
 }
 
+// Slice the annual profiles down to a single calendar day (1-based) at the given
+// resolution, so the rich per-step time-series solver can reproduce one day of
+// an annual run.  Mirrors make_annual_ts_data's sequential month/day/step index.
+hacdcpf::TimeSeriesData make_annual_day_slice(double step_hr, int day_index) {
+  const int spd = std::max(1, static_cast<int>(24.0 / step_hr));
+  const hacdcpf::TimeSeriesData full = make_annual_ts_data(step_hr);
+  const int total = full.num_steps;
+  int day = day_index < 1 ? 1 : day_index;
+  const int max_day = std::max(1, total / spd);
+  if (day > max_day) day = max_day;
+  const int start = (day - 1) * spd;
+  hacdcpf::TimeSeriesData day_ts;
+  day_ts.num_steps = spd;
+  day_ts.step_duration_hr = step_hr;
+  for (const auto& p : full.profiles) {
+    hacdcpf::TimeSeriesProfile dp;
+    dp.id = p.id;
+    dp.name = p.name;
+    dp.values.reserve(static_cast<size_t>(spd));
+    for (int t = 0; t < spd; ++t) {
+      int gi = start + t;
+      if (gi < 0) gi = 0;
+      if (gi >= static_cast<int>(p.values.size())) gi = static_cast<int>(p.values.size()) - 1;
+      dp.values.push_back(gi >= 0 && !p.values.empty() ? p.values[static_cast<size_t>(gi)] : 1.0);
+    }
+    day_ts.profiles.push_back(std::move(dp));
+  }
+  return day_ts;
+}
+
 std::vector<std::string> case_names() {
   return {
       "ieee14_acdc",
@@ -2458,6 +2672,7 @@ std::vector<std::string> case_names() {
       "comprehensive_hybrid_acdc",
       "market_3bus_toy",
       "market_5bus_acdc_toy",
+      "dist33_tie_demo",
   };
 }
 
@@ -2477,6 +2692,18 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   if (name == "comprehensive_hybrid_acdc") return build_comprehensive_hybrid_acdc();
   if (name == "market_3bus_toy") return build_market_3bus_toy();
   if (name == "market_5bus_acdc_toy") return build_market_5bus_acdc_toy();
+  if (name == "dist33_tie_demo") {
+    // Pure-AC IEEE 33-bus with the 5 standard ties open (suboptimal radial).
+    // Every branch is switchable, so ONR re-picks a lower-loss radial tree.
+    auto sys = build_case33bw_acdc();
+    sys.dc = hacdcpf::DCSystem{};
+    sys.vsc_converters.clear();
+    sys.energy_routers.clear();
+    int n = static_cast<int>(sys.ac.branches.size());
+    for (int i = std::max(0, n - 5); i < n; ++i) sys.ac.branches[static_cast<size_t>(i)].in_service = false;
+    sys.name = "Dist33 Tie Demo (pure AC, 5 standard ties open)";
+    return sys;
+  }
   throw std::runtime_error("Unsupported case: " + name);
 }
 
@@ -2837,6 +3064,12 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
       <!-- ========================== SC TAB =============================== -->
       <section id="scPane" class="tabpane">
         <div class="ctrl-row" style="margin-bottom:10px;">
+          <div><label>Domain</label>
+            <select id="scDomain">
+              <option value="AC">AC</option>
+              <option value="DC">DC</option>
+            </select>
+          </div>
           <div><label>Fault type</label>
             <select id="scFaultType">
               <option value="ThreePhase">Three-Phase</option>
@@ -2852,6 +3085,31 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             </select>
           </div>
           <div><label>c-factor</label><input id="scCFactor" type="number" step=".01" value="1.10"/></div>
+          <div><label>Kappa method</label>
+            <select id="scKappaMethod">
+              <option value="B">IEC B</option>
+              <option value="A">IEC A</option>
+              <option value="C">IEC C</option>
+            </select>
+          </div>
+          <div><label>Topology</label>
+            <select id="scTopology">
+              <option value="Meshed">Meshed</option>
+              <option value="Radial">Radial</option>
+            </select>
+          </div>
+          <div><label>Fault Z (pu)</label><input id="scFaultImpedance" type="number" step=".001" value="0"/></div>
+          <div><label>Breaking t (s)</label><input id="scBreakingTime" type="number" step=".01" value="0.05"/></div>
+          <div><label>Thermal Tk (s)</label><input id="scIthDuration" type="number" step=".1" value="1.0"/></div>
+          <div><label>Frequency (Hz)</label><input id="scBaseFrequency" type="number" step="1" value="50"/></div>
+          <div><label>Default x''d (pu)</label><input id="scDefaultXdpp" type="number" step=".01" value="0.20"/></div>
+          <div><label>DC Vsrc (pu)</label><input id="dcScSourceVoltage" type="number" step=".01" value="0"/></div>
+          <div><label><input id="dcScConsiderBreakers" type="checkbox" checked/> DCCB topology</label></div>
+          <div><label><input id="dcScBreakerControlsBranch" type="checkbox" checked/> DCCB controls branch</label></div>
+          <div><label><input id="dcScAddBreakerEdges" type="checkbox" checked/> Closed DCCB edges</label></div>
+          <div><label><input id="scComputeBranchFlows" type="checkbox" checked/> Branch flows</label></div>
+          <div><label><input id="scComputeVoltageDrops" type="checkbox" checked/> Voltage drops</label></div>
+          <div><label><input id="scComputeIth" type="checkbox" checked/> Thermal Ith</label></div>
           <div><label>Fault Bus (blank=all)</label><input id="scFaultBus" type="text" placeholder="e.g. 0,3,5 or blank" style="width:130px;"/></div>
         </div>
         <div class="btn-group">
@@ -3126,6 +3384,20 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           </div>
           <div><label>MIP Gap</label><input id="rcMipGap" type="number" step=".005" value="0.01"></div>
           <div><label>Max time (s)</label><input id="rcMaxTime" type="number" min="10" max="600" value="60"></div>
+          <div><label>Power Flow</label>
+            <select id="rcEnablePF"><option value="1" selected>LinDistFlow (G3–G6)</option><option value="0">Connectivity only</option></select>
+          </div>
+          <div><label>Objective</label>
+            <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value]||[10,1];rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];"><option value="loss" selected>Min loss</option><option value="switch">Min switching</option><option value="restore">Max restored</option></select>
+          </div>
+          <div><label>λ loss/sw/shed</label>
+            <span style="display:flex;gap:4px;"><input id="rcLambdaLoss" type="number" value="10" style="width:60px"><input id="rcLambdaSwitch" type="number" value="1" style="width:50px"><input id="rcLambdaShed" type="number" value="10000" style="width:70px"></span>
+          </div>
+          <div><label>Groups</label>
+            <span style="font-size:.85em;"><input type="checkbox" id="rcEnableVoltage" checked/>G4 <input type="checkbox" id="rcEnableThermal" checked/>G5 <input type="checkbox" id="rcSplitTrees"/>AC/DC <input type="checkbox" id="rcDcMesh"/>DCmesh <input type="checkbox" id="rcLossAware" checked/>I2R</span>
+          </div>
+          <div><label>Max switch ops</label><input id="rcMaxSwOps" type="number" min="0" value="0"></div>
+          <div><label>Solver</label><select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></div>
         </div>
         <div class="btn-group">
           <button class="btn btn-primary" id="runReconfigBtn">Run Network Reconfiguration</button>
@@ -3140,6 +3412,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
         <div id="rcLossChart" class="chart"></div>
         <div id="rcSwitchChart" class="chart"></div>
         <div id="rcESSChart" class="chart"></div>
+        <div id="rcSwOps" style="margin-top:10px;"></div>
       </section>
 
       <!-- =================== ANNUAL PRODUCTION SIM TAB ================ -->
@@ -4200,14 +4473,59 @@ document.getElementById('runParityOpfBtn').onclick=async()=>{
 };
 
 /* Short Circuit */
-document.getElementById('runScBtn').onclick=async()=>{
-  if(!SYS){setStatus('Load a system first.',true);return;}
-  try{setStatus('Running short circuit (all buses)...');
-  const body=await api('/api/session/sc',{options:{
+function scNumber(id,fallback){const el=document.getElementById(id);const v=Number(el&&el.value);return Number.isFinite(v)?v:fallback;}
+function scChecked(id,fallback){const el=document.getElementById(id);return el?!!el.checked:!!fallback;}
+function scOptions(detailed){
+  return {
     fault_type:document.getElementById('scFaultType').value,
     calc_type:document.getElementById('scCalcType').value,
-    c_factor:Number(document.getElementById('scCFactor').value||1.1)
-  }});
+    c_factor:scNumber('scCFactor',1.1),
+    kappa_method:document.getElementById('scKappaMethod').value,
+    topology:document.getElementById('scTopology').value,
+    fault_impedance_pu:scNumber('scFaultImpedance',0),
+    breaking_time_s:scNumber('scBreakingTime',0.05),
+    ith_duration_s:scNumber('scIthDuration',1),
+    base_frequency_hz:scNumber('scBaseFrequency',50),
+    default_xdpp:scNumber('scDefaultXdpp',0.2),
+    compute_branch_flows:!!detailed&&scChecked('scComputeBranchFlows',true),
+    compute_voltage_drops:!!detailed&&scChecked('scComputeVoltageDrops',true),
+    compute_ith:scChecked('scComputeIth',true)
+  };
+}
+function dcScOptions(){
+  return {
+    fault_resistance_pu:scNumber('scFaultImpedance',0),
+    source_voltage_pu:scNumber('dcScSourceVoltage',0),
+    consider_dc_breakers:scChecked('dcScConsiderBreakers',true),
+    dc_breakers_control_branches:scChecked('dcScBreakerControlsBranch',true),
+    add_unassigned_closed_breaker_edges:scChecked('dcScAddBreakerEdges',true)
+  };
+}
+document.getElementById('runScBtn').onclick=async()=>{
+  if(!SYS){setStatus('Load a system first.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    const ids=(SYS.dc&&SYS.dc.buses?SYS.dc.buses:[]).map(b=>b.index);
+    if(!ids.length){setStatus('No DC buses available.',true);return;}
+    try{
+      setStatus('Running DC short circuit...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:ids,options:dcScOptions()});
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length;
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scIkChart',[{x:body.results.map(r=>'DC '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Short Circuit Fault Current (kA)',xaxis:{title:'DC Bus'},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      document.getElementById('scSkChart').innerHTML='';
+      document.getElementById('scDetailedChart').innerHTML='';
+      document.getElementById('scContribChart').innerHTML='';
+      document.getElementById('scVremainChart').innerHTML='';
+      setStatus('DC short circuit completed. '+body.results.length+' buses analyzed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
+  }
+  try{setStatus('Running short circuit (all buses)...');
+  const body=await api('/api/session/sc',{options:scOptions(false)});
   document.getElementById('scFault').textContent=body.fault_type;
   document.getElementById('scBuses').textContent=body.bus_results.length;
   const ik=body.bus_results.map(r=>r.ikpp_ka);
@@ -4235,13 +4553,26 @@ document.getElementById('runScDetailedBtn').onclick=async()=>{
   if(!busInput){setStatus('Enter bus IDs (e.g. 0,3,5) for detailed SC analysis.',true);return;}
   const busIds=busInput.split(/[,\s]+/).map(Number).filter(n=>!isNaN(n));
   if(!busIds.length){setStatus('Invalid bus IDs.',true);return;}
+  if(document.getElementById('scDomain').value==='DC'){
+    try{
+      setStatus('Running detailed DC SC at bus(es): '+busIds.join(', ')+'...');
+      const body=await api('/api/session/dc_sc',{fault_bus_ids:busIds,options:dcScOptions()});
+      const ik=body.results.map(r=>r.i_fault_ka||0);
+      document.getElementById('scFault').textContent='DC';
+      document.getElementById('scBuses').textContent=body.results.length+' (dc)';
+      document.getElementById('scMaxIk').textContent=fmt(Math.max(...ik),3);
+      document.getElementById('scMinIk').textContent=fmt(Math.min(...ik),3);
+      Plotly.newPlot('scDetailedChart',[{x:body.results.map(r=>'DC Fault@Bus '+r.fault_bus_id),y:ik,type:'bar',name:'If',marker:{color:'#0b6e4f'}}],
+        {title:'DC Detailed Fault Current (kA)',xaxis:{title:''},yaxis:{title:'kA'},margin:{l:55,r:15,t:45,b:60}},{responsive:true});
+      setStatus('Detailed DC SC completed.');
+    }catch(e){setStatus(e.message,true);}
+    return;
+  }
   try{
     setStatus('Running detailed SC at bus(es): '+busIds.join(', ')+'...');
     const body=await api('/api/session/sc_detailed',{
       fault_bus_ids:busIds,
-      fault_type:document.getElementById('scFaultType').value,
-      calc_type:document.getElementById('scCalcType').value,
-      c_factor:Number(document.getElementById('scCFactor').value||1.1),
+      ...scOptions(true),
     });
     document.getElementById('scFault').textContent=body.fault_type;
     document.getElementById('scBuses').textContent=body.results.length+' (detailed)';
@@ -5460,6 +5791,16 @@ document.getElementById('runReconfigBtn').onclick=async()=>{
       v_max:parseFloat(document.getElementById('rcVmax').value)||1.05,
       mip_gap:parseFloat(document.getElementById('rcMipGap').value)||0.01,
       max_time_s:parseInt(document.getElementById('rcMaxTime').value)||60,
+      enable_pf:(document.getElementById('rcEnablePF')||{}).value!=='0',
+      enable_voltage:(document.getElementById('rcEnableVoltage')||{}).checked!==false,
+      enable_thermal:(document.getElementById('rcEnableThermal')||{}).checked!==false,
+      split_domain_trees:(document.getElementById('rcSplitTrees')||{}).checked===true,
+      allow_dc_mesh:(document.getElementById('rcDcMesh')||{}).checked===true,
+      loss_aware:(document.getElementById('rcLossAware')||{}).checked!==false,
+      max_switch_ops:parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
+      lambda_loss:parseFloat((document.getElementById('rcLambdaLoss')||{}).value)||10,
+      lambda_switch:parseFloat((document.getElementById('rcLambdaSwitch')||{}).value)||1,
+      lambda_shed:parseFloat((document.getElementById('rcLambdaShed')||{}).value)||1e4,
     });
     document.getElementById('rcFeas').textContent=body.feasible?'Yes':'No';
     document.getElementById('rcObj').textContent=fmt(body.total_objective,2);
@@ -5489,6 +5830,8 @@ document.getElementById('runReconfigBtn').onclick=async()=>{
       Plotly.newPlot('rcESSChart',essSocData,{title:'ESS SOC during Reconfiguration',xaxis:{title:'Step'},yaxis:{title:'SOC',range:[0,1]},margin:{l:55,r:15,t:45,b:45}},{responsive:true});
     else
       document.getElementById('rcESSChart').innerHTML='<div style="padding:20px;color:var(--muted);">No storage units in this case.</div>';
+    const ops=body.switch_operations||[];const sumr=body.switch_op_summary||{};const opEl=document.getElementById('rcSwOps');
+    if(opEl){var ot=body.obj_terms||{};var hdr='<div style="font-size:.85em;margin:4px 0;">目标: 损耗='+(ot.loss||0).toFixed(3)+' 开关='+(ot.switching||0).toFixed(0)+' 切荷='+(ot.shed||0).toFixed(1)+' 孤岛='+(ot.island||0).toFixed(0)+' | 校验 PF='+(body.reconfig_pf_converged?'✓':'✗')+' OPF='+(body.opf_converged?'✓':'✗')+'</div>';if(ops.length){const kn={circuit_breaker:'CB',switch:'Switch',branch:'Branch'};let h='<table class="tbl"><thead><tr><th>Device</th><th>ID</th><th>From</th><th>To</th><th>Action</th></tr></thead><tbody>';ops.forEach(o=>{h+='<tr><td>'+(kn[o.kind]||o.kind)+'</td><td>'+o.index+'</td><td>'+o.from_bus+'</td><td>'+o.to_bus+'</td><td>'+(o.close?'CLOSE':'OPEN')+'</td></tr>';});h+='</tbody></table><div style="color:var(--muted);font-size:.85em;">Switch +'+(sumr.switch_close||0)+'/-'+(sumr.switch_open||0)+', CB +'+(sumr.cb_close||0)+'/-'+(sumr.cb_open||0)+'</div>';opEl.innerHTML=hdr+h;}else{opEl.innerHTML=hdr+'<div style="color:var(--muted);">No device-mapped switch operations.</div>';}}
     setStatus('Reconfiguration done. Feasible: '+body.feasible+'. Obj: '+fmt(body.total_objective,2)+'. Switch actions: '+(totalSwOn+totalSwOff)+'. Solver: '+(body.solver_name||'native')+'.');
   }catch(e){setStatus(e.message,true);}
 };
@@ -10401,7 +10744,6 @@ int main(int argc, char** argv) {
       apply_sc_request_options(j, dopt);
       dopt.compute_branch_flows = false;
       dopt.compute_voltage_drops = false;
-      dopt.compute_ith = true;
       // Fault at every AC bus
       std::vector<int> all_bus_ids;
       std::unordered_map<int, double> bus_kv;
@@ -10416,6 +10758,7 @@ int main(int argc, char** argv) {
       out["fault_type"] = sc_fault_type_name(dopt.fault_type);
       out["calc_type"] = sc_calc_type_name(dopt.calc_type);
       out["c_factor"] = dopt.c_factor;
+      out["options"] = sc_options_to_json(dopt);
       out["bus_results"] = json::array();
       for (const auto& dr : detailed) {
         // Find the fault bus's own result
@@ -11321,14 +11664,12 @@ int main(int argc, char** argv) {
         if (fault_bus_ids.empty()) throw std::runtime_error("No fault_bus_ids specified");
         hacdcpf::analysis::SCDetailedOptions dopt;
         apply_sc_request_options(j, dopt);
-        dopt.compute_branch_flows = true;
-        dopt.compute_voltage_drops = true;
-        dopt.compute_ith = true;
         auto results = hacdcpf::analysis::run_short_circuit_detailed_batch(sys, fault_bus_ids, dopt);
         json out;
         out["fault_type"] = sc_fault_type_name(dopt.fault_type);
         out["calc_type"] = sc_calc_type_name(dopt.calc_type);
         out["c_factor"] = dopt.c_factor;
+        out["options"] = sc_options_to_json(dopt);
         json res_arr = json::array();
         for (const auto& dr : results) {
           json rj;
@@ -11350,7 +11691,96 @@ int main(int argc, char** argv) {
             });
           }
           rj["bus_results"] = bus_arr;
+          json conv_arr = json::array();
+          for (const auto& cc : dr.converter_contributions) {
+            conv_arr.push_back({
+              {"converter_index", cc.converter_index},
+              {"bus_id", cc.bus_id},
+              {"name", cc.name},
+              {"model", cc.model},
+              {"ac_grid_forming", cc.ac_grid_forming},
+              {"dc_grid_forming", cc.dc_grid_forming},
+              {"p_rated_mw", cc.p_rated_mw},
+              {"i_limit_pu", cc.i_limit_pu},
+              {"contribution_ka", cc.contribution_ka},
+            });
+          }
+          rj["converter_contributions"] = conv_arr;
           res_arr.push_back(rj);
+        }
+        out["results"] = res_arr;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- DC Short Circuit at Selected DC Buses ----
+    svr.Post("/api/session/dc_sc",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        std::vector<int> fault_bus_ids;
+        if (j.contains("fault_bus_ids") && j["fault_bus_ids"].is_array())
+          fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
+        if (fault_bus_ids.empty()) throw std::runtime_error("No dc fault_bus_ids specified");
+
+        hacdcpf::analysis::DCFaultOptions dopt;
+        apply_dc_sc_request_options(j, dopt);
+
+        json out;
+        out["analysis"] = "dc_short_circuit";
+        out["options"] = dc_sc_options_to_json(dopt);
+        json res_arr = json::array();
+        for (const int bus_id : fault_bus_ids) {
+          const auto dr = hacdcpf::analysis::dc_bus_fault_level(sys, bus_id, dopt);
+          json rj;
+          rj["fault_bus_id"] = dr.fault_bus_id;
+          rj["solved"] = dr.solved;
+          rj["message"] = dr.message;
+          rj["v_prefault_pu"] = dr.v_prefault_pu;
+          rj["r_thevenin_pu"] = dr.r_thevenin_pu;
+          rj["i_fault_pu"] = dr.i_fault_pu;
+          rj["i_fault_ka"] = dr.i_fault_ka;
+          rj["dc_branch_edges_used"] = dr.dc_branch_edges_used;
+          rj["dccb_edges_used"] = dr.dccb_edges_used;
+          rj["dccb_open_count"] = dr.dccb_open_count;
+          rj["dccb_blocked_branch_count"] = dr.dccb_blocked_branch_count;
+          json duties = json::array();
+          for (const auto& duty : dr.breaker_duties) {
+            duties.push_back({
+              {"breaker_index", duty.breaker_index},
+              {"name", duty.name},
+              {"from_bus", duty.from_bus},
+              {"to_bus", duty.to_bus},
+              {"in_service", duty.in_service},
+              {"closed", duty.closed},
+              {"controls_branch", duty.controls_branch},
+              {"controlled_branch_index", duty.controlled_branch_index},
+              {"r_pu", duty.r_pu},
+              {"i_duty_ka", duty.i_duty_ka},
+              {"i_breaking_ka", duty.i_breaking_ka},
+              {"breaking_rating_ok", duty.breaking_rating_ok},
+              {"model", duty.model},
+            });
+          }
+          rj["breaker_duties"] = duties;
+          res_arr.push_back(std::move(rj));
         }
         out["results"] = res_arr;
         res.set_content(out.dump(), "application/json");
@@ -11542,11 +11972,24 @@ int main(int argc, char** argv) {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
           const auto j2 = json::parse(req.body.empty() ? "{}" : req.body);
-          const int ns = j2.value("num_steps", 24);
-          if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
-            g_session.ts_data = make_default_ts_data(ns);
+          const int day_index = j2.value("day_index", 0);
+          if (day_index > 0) {
+            // Annual day drill-down: solve a single calendar day of the annual
+            // run using the annual-resolution profiles sliced to that day. Build
+            // a local ts_data and do NOT mutate the persistent session config.
+            const double dhr = j2.value("step_duration_hr", 6.0);
+            ts_data = make_annual_day_slice(dhr, day_index);
+          } else {
+            const int ns = j2.value("num_steps", 24);
+            // Build defaults only when nothing is loaded; otherwise PRESERVE the
+            // imported/session profiles and fit them to the requested horizon
+            // (tile if shorter, truncate if longer) so >24 h runs keep the data.
+            if (g_session.ts_data.profiles.empty())
+              g_session.ts_data = make_default_ts_data(ns);
+            ts_data = g_session.ts_data;
+            fit_ts_data_to_steps(ts_data, ns);
+          }
           sys_ts = *g_session.current_system;
-          ts_data = g_session.ts_data;
           spec = g_session.ts_binding;
         }
         // Re-apply persistent binding to the per-call sys copy. This
@@ -11571,6 +12014,12 @@ int main(int argc, char** argv) {
         const int num_steps = j.value("num_steps", 24);
         const bool skip_uc = j.value("skip_uc", false);
         const bool run_opf = j.value("run_opf", false);
+        // MILP solver + constraint-set selection (GUI "时序生产模拟" controls).
+        const hacdcpf::UCSolverChoice uc_solver =
+            parse_uc_solver_choice(j.value("uc_solver", std::string("auto")));
+        const bool enable_net = j.value("enable_network_constraints", false);
+        const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
+        const double reserve_frac = j.value("reserve_fraction", 0.0);
         // Auto-assign profiles to components without explicit ids
         for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
         for (auto& ren : sys_ts.ac.renewable_gens) {
@@ -11586,6 +12035,48 @@ int main(int argc, char** argv) {
         hacdcpf::TimeSeriesPFOptions opts;
         opts.skip_uc = skip_uc;
         opts.run_opf = run_opf;
+        opts.uc_solver = uc_solver;
+        opts.enable_network_constraints = enable_net;
+        // DC network coupling is only meaningful when AC nodal constraints are on.
+        opts.enable_dc_network_constraints = enable_dc_net && enable_net;
+        opts.reserve_requirement_fraction = std::max(0.0, reserve_frac);
+        apply_uc_objective(opts, j);
+        opts.enable_external_grid = j.value("enable_external_grid", false);
+        opts.enable_demand_response = j.value("enable_demand_response", false);
+        opts.dr_shiftable = j.value("dr_shiftable", false);
+        opts.w_demand_response = j.value("dr_penalty", 20.0);
+        opts.enable_dispatchable_pv = j.value("enable_dispatchable_pv", false);
+        opts.pv_curtail_penalty = j.value("pv_curtail_penalty", 50.0);
+        opts.enable_microgrid = j.value("enable_microgrid", false);
+        opts.w_microgrid_island = j.value("microgrid_island_penalty", 100.0);
+        opts.enable_dc_branch_flows = j.value("enable_dc_branch_flows", false);
+        opts.enable_storage_degradation = j.value("enable_storage_degradation", false);
+        opts.enable_vpp = j.value("enable_vpp", false);
+        opts.enable_energy_router = j.value("enable_energy_router", false);
+        opts.enable_mobile_storage = j.value("enable_mobile_storage", false);
+        opts.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
+        // Cyclic terminal SOC: pin each scheduling day's end SOC to its start so
+        // storage is energy-neutral over the day (also the basis for parallelism).
+        opts.enforce_terminal_soc_cyclic = j.value("cyclic_soc", false);
+        // Per-day parallel decomposition of a multi-day time-series horizon.
+        opts.parallel_daily = j.value("parallel_daily", false);
+        opts.parallel_threads = j.value("parallel_threads", 0);
+        // Day drill-down faithfulness: when a daily_mode is supplied (annual
+        // drill-down), map it to the same SCUC / dynamic-SCED / dynamic-OPF
+        // configuration the annual run used so the re-solved day matches.
+        {
+          const std::string daily_mode = j.value("daily_mode", std::string());
+          if (daily_mode == "scuc") {
+            opts.skip_uc = false; opts.run_opf = true;  opts.fix_commitment = false;
+          } else if (daily_mode == "sced") {
+            opts.skip_uc = false; opts.run_opf = false; opts.fix_commitment = true;
+          } else if (daily_mode == "dopf") {
+            opts.skip_uc = true;  opts.run_opf = true;  opts.fix_commitment = false;
+          }
+          // A drill-down day is one scheduling day → match the annual cyclic-SOC.
+          if (j.value("day_index", 0) > 0)
+            opts.enforce_terminal_soc_cyclic = j.value("cyclic_soc", true);
+        }
         opts.keep_system_snapshots = true;
         opts.verbose = false;
         auto result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, opts);
@@ -11602,6 +12093,19 @@ int main(int argc, char** argv) {
         out["num_converged"] = result.num_converged;
         out["num_opf_converged"] = result.num_opf_converged;
         out["total_generation_cost"] = result.total_generation_cost;
+        // Echo back the requested solver + active constraint set and report the
+        // objective so the GUI can present "constraints / solver / objective".
+        out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
+        out["objective_value"] = result.total_generation_cost;
+        out["objective_label"] = "总发电成本 ($)";
+        out["objective_mode"] = uc_objective_label(opts.objective_mode);
+        out["uc_solve_sec"] = result.uc_solve_sec;
+        out["constraints"] = json{
+            {"network_constraints", enable_net},
+            {"dc_network_constraints", enable_dc_net && enable_net},
+            {"reserve_fraction", std::max(0.0, reserve_frac)},
+            {"unit_commitment", !skip_uc},
+            {"economic_dispatch_opf", run_opf}};
         out["uc_feasible"] = result.uc_schedule.feasible;
         out["uc_solver_name"] = result.uc_schedule.solver_name;
         // Diagnostic: how many loads were materialized at PF time and how
@@ -12379,8 +12883,51 @@ int main(int argc, char** argv) {
         tr_opts.v_max_pu  = opts.value("v_max_pu", opts.value("v_max", 1.05));
         tr_opts.mip_gap   = opts.value("mip_gap", 0.01);
         tr_opts.max_time_s = opts.value("max_time_s", 60);
-        tr_opts.enable_pf = true;
+        tr_opts.enable_pf = opts.value("enable_pf", true);
+        tr_opts.enable_voltage = opts.value("enable_voltage", true);
+        tr_opts.enable_thermal = opts.value("enable_thermal", true);
+        tr_opts.split_domain_trees = opts.value("split_domain_trees", false);
+        tr_opts.allow_dc_mesh = opts.value("allow_dc_mesh", false);
+        tr_opts.loss_aware = opts.value("loss_aware", true);  // I²R-aware so ties are used
+        // Faulted lines (ACBranch.index) are forced open so the MILP must close
+        // a tie to restore downstream load — gives a visible reconfiguration.
+        if (opts.contains("line_failures") && opts["line_failures"].is_array())
+          for (const auto& f : opts["line_failures"]) tr_opts.line_failures.push_back(f.get<int>());
+        tr_opts.lambda_switch = opts.value("lambda_switch", 1.0);
+        tr_opts.lambda_loss   = opts.value("lambda_loss", 10.0);
+        tr_opts.lambda_shed   = opts.value("lambda_shed", 1e4);
+        tr_opts.lambda_island = opts.value("lambda_island", 1e5);
+        // Arbitrary device faults: AC lines via line_failures, plus structured
+        // AC/DC/VSC faults so any device can be forced out of service.
+        auto add_faults = [&](const char* key, hacdcpf::graph::EdgeCategory cat) {
+          if (opts.contains(key) && opts[key].is_array())
+            for (const auto& f : opts[key]) tr_opts.faulted_branches.push_back({cat, f.get<int>()});
+        };
+        add_faults("fault_ac", hacdcpf::graph::EdgeCategory::AC_Line);
+        add_faults("fault_dc", hacdcpf::graph::EdgeCategory::DC_Line);
+        add_faults("fault_vsc", hacdcpf::graph::EdgeCategory::VSC_Coupling);
+        tr_opts.max_switch_ops = opts.value("max_switch_ops", 0);
+        tr_opts.solver = opts.value("solver", std::string("auto"));
+        tr_opts.skip_heuristic = opts.value("skip_heuristic", false);
         tr_opts.verbose   = false;
+        // Every AC branch is a reconfiguration candidate so the MILP can both
+        // open in-service lines and close ties → reach the optimal radial tree.
+        for (const auto& br : sys_tr.ac.branches) tr_opts.switchable_branch_ids.push_back(br.index);
+        // Auto-enable split-domain radiality when the case is hybrid (has DC
+        // buses + converters) unless the caller overrode it.
+        if (!opts.contains("split_domain_trees") && !sys_tr.dc.buses.empty() && !sys_tr.vsc_converters.empty())
+          tr_opts.split_domain_trees = true;
+        // Drop a DC subnetwork that has no DC voltage source: keeping it (dead
+        // ties stay) would leave an unrooted DC island and force infeasibility.
+        {
+          bool dc_src = false;
+          for (const auto& b : sys_tr.dc.buses) if (b.bus_type == hacdcpf::DCBusType::DC_V) dc_src = true;
+          if (!dc_src && sys_tr.dc.static_generators.empty() && sys_tr.dc.dc_static_generators.empty() &&
+              sys_tr.dc.pv_arrays.empty() && sys_tr.dc.storage.empty() && sys_tr.dc.dc_storage.empty()) {
+            sys_tr.dc = hacdcpf::DCSystem{};
+            sys_tr.vsc_converters.clear();
+          }
+        }
         auto recon = hacdcpf::analysis::run_topology_reconfiguration(sys_tr, tr_opts);
 
         // Per-branch closed flag (1 = in service) derived from the open-branch set,
@@ -12418,6 +12965,7 @@ int main(int argc, char** argv) {
         double reconfig_loss_mw = 0.0;
         bool reconfig_pf_converged = false;
         int reconfig_pf_iterations = 0;
+        bool opf_converged = false; double opf_objective = 0.0;
         double reconfig_pf_residual = 0.0;
         bool reconfig_is_radial = false;
         bool reconfig_is_connected = false;
@@ -12453,12 +13001,22 @@ int main(int argc, char** argv) {
               if (loss > 0.0) reconfig_loss_mw += loss;
             }
           }
+          // OPF cross-validation on the reconfigured topology.
+          try {
+            hacdcpf::opf::ACOPFOptions oo;
+            auto opf_r = hacdcpf::solve_ac_opf(sys_reconfig, oo);
+            opf_converged = opf_r.converged; opf_objective = opf_r.objective;
+          } catch (...) {}
         }
 
         // ========== Build JSON response ==========
         json out;
         out["feasible"] = sched.feasible;
         out["total_objective"] = sched.total_objective;
+        out["obj_terms"] = json{{"loss", recon.obj_terms.loss}, {"switching", recon.obj_terms.switching},
+                                {"shed", recon.obj_terms.shed}, {"island", recon.obj_terms.island}};
+        out["opf_converged"] = opf_converged;
+        out["opf_objective"] = opf_objective;
         out["total_shed_mw"] = sched.total_shed_mw;
         out["milp_objective"] = sched.total_objective;
         out["estimated_loss_mw"] = sched.total_objective * sys_tr.base_mva;
@@ -12530,6 +13088,32 @@ int main(int argc, char** argv) {
           out["open_branch_ids"] = open_ids;
           out["closed_branch_ids"] = closed_ids;
           out["branch_details"] = branch_details;
+        }
+        // Tie-switch / circuit-breaker operations projected back to physical
+        // devices from canonical branches (BranchExpandMap). This restores the
+        // device-space actions lost when switches/CBs are flattened to ACBranches.
+        {
+          json sw_ops = json::array();
+          int sw_close = 0, sw_open = 0, cb_close = 0, cb_open = 0;
+          for (const auto& op : recon.switch_operations) {
+            const char* kind = op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker
+                                   ? "circuit_breaker"
+                                   : (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch
+                                          ? "switch" : "branch");
+            sw_ops.push_back(json{{"kind", kind}, {"index", op.index},
+                                  {"from_bus", op.bus_from}, {"to_bus", op.bus_to},
+                                  {"close", op.close}});
+            if (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::CircuitBreaker)
+              (op.close ? cb_close : cb_open)++;
+            else if (op.kind == hacdcpf::analysis::TopoReconfResult::DeviceKind::Switch)
+              (op.close ? sw_close : sw_open)++;
+          }
+          out["switch_operations"] = sw_ops;
+          out["switch_op_summary"] = json{{"switch_close", sw_close}, {"switch_open", sw_open},
+                                          {"cb_close", cb_close}, {"cb_open", cb_open}};
+          out["applied_faults"] = json{{"ac", opts.value("line_failures", json::array())},
+                                       {"dc", opts.value("fault_dc", json::array())},
+                                       {"vsc", opts.value("fault_vsc", json::array())}};
         }
         // Per-step per-branch topology for detailed display
         {
@@ -12620,9 +13204,51 @@ int main(int argc, char** argv) {
             : hacdcpf::analysis::AnnualBlockType::Monthly;
         opts.ts_pf_options.run_opf = j.value("run_opf", true);
         opts.ts_pf_options.verbose = false;
+        // MILP solver + constraint-set selection (shared with run_ts_pf).
+        const hacdcpf::UCSolverChoice uc_solver =
+            parse_uc_solver_choice(j.value("uc_solver", std::string("auto")));
+        const bool enable_net = j.value("enable_network_constraints", false);
+        const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
+        const double reserve_frac = j.value("reserve_fraction", 0.0);
+        opts.ts_pf_options.uc_solver = uc_solver;
+        opts.ts_pf_options.enable_network_constraints = enable_net;
+        opts.ts_pf_options.enable_dc_network_constraints = enable_dc_net && enable_net;
+        opts.ts_pf_options.reserve_requirement_fraction = std::max(0.0, reserve_frac);
+        apply_uc_objective(opts.ts_pf_options, j);
+        opts.ts_pf_options.enable_external_grid = j.value("enable_external_grid", false);
+        opts.ts_pf_options.enable_demand_response = j.value("enable_demand_response", false);
+        opts.ts_pf_options.dr_shiftable = j.value("dr_shiftable", false);
+        opts.ts_pf_options.w_demand_response = j.value("dr_penalty", 20.0);
+        opts.ts_pf_options.enable_dispatchable_pv = j.value("enable_dispatchable_pv", false);
+        opts.ts_pf_options.pv_curtail_penalty = j.value("pv_curtail_penalty", 50.0);
+        opts.ts_pf_options.enable_microgrid = j.value("enable_microgrid", false);
+        opts.ts_pf_options.w_microgrid_island = j.value("microgrid_island_penalty", 100.0);
+        opts.ts_pf_options.enable_dc_branch_flows = j.value("enable_dc_branch_flows", false);
+        opts.ts_pf_options.enable_storage_degradation = j.value("enable_storage_degradation", false);
+        opts.ts_pf_options.enable_vpp = j.value("enable_vpp", false);
+        opts.ts_pf_options.enable_energy_router = j.value("enable_energy_router", false);
+        opts.ts_pf_options.enable_mobile_storage = j.value("enable_mobile_storage", false);
+        opts.ts_pf_options.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
         opts.skip_replay = j.value("skip_replay", false);
         opts.enforce_cyclic_soc = j.value("cyclic_soc", true);
         opts.pf_snapshot_interval = j.value("snapshot_interval", 24);
+        // Parallel daily decomposition: split the year into independent calendar
+        // days (cyclic SOC) solved concurrently; per-day mode SCUC/SCED/DOPF.
+        opts.enable_parallel_daily = j.value("parallel_daily", false);
+        {
+          std::string dm = j.value("daily_mode", std::string("scuc"));
+          std::transform(dm.begin(), dm.end(), dm.begin(),
+                         [](unsigned char ch){ return static_cast<char>(std::tolower(ch)); });
+          if (dm == "sced" || dm == "dynamic_sced")
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::DynamicSCED;
+          else if (dm == "dopf" || dm == "dynamic_opf" || dm == "opf")
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::DynamicOPF;
+          else
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::SCUC;
+        }
+        opts.parallel_threads = j.value("parallel_threads", 0);
+        opts.enforce_daily_cyclic_soc = j.value("daily_cyclic_soc", true);
+        opts.sced_reuse_scuc_commitment = j.value("sced_reuse_scuc_commitment", true);
         opts.verbose = false;
         auto result = hacdcpf::analysis::solve_annual_production_simulation(sys_ann, ts_data, opts);
         json out;
@@ -12630,6 +13256,19 @@ int main(int argc, char** argv) {
         out["num_steps"] = result.num_steps;
         out["step_duration_hr"] = result.step_duration_hr;
         out["total_cost"] = result.total_cost;
+        // Echo back the requested solver + active constraint set + objective.
+        out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
+        out["solver_name"] = result.solver_name;
+        out["parallel_daily"] = opts.enable_parallel_daily;
+        out["objective_value"] = result.total_cost;
+        out["objective_label"] = "年总运行成本 ($)";
+        out["objective_mode"] = uc_objective_label(opts.ts_pf_options.objective_mode);
+        out["constraints"] = json{
+            {"network_constraints", enable_net},
+            {"dc_network_constraints", enable_dc_net && enable_net},
+            {"reserve_fraction", std::max(0.0, reserve_frac)},
+            {"economic_dispatch_opf", opts.ts_pf_options.run_opf},
+            {"cyclic_soc", opts.enforce_cyclic_soc}};
         out["total_gen_mwh"] = result.total_gen_mwh;
         out["total_load_mwh"] = result.total_load_mwh;
         out["total_renewable_mwh"] = result.total_renewable_mwh;
@@ -12661,6 +13300,57 @@ int main(int argc, char** argv) {
         out["timeline_curt"] = tl_curt;
         out["timeline_ess"] = tl_ess;
         out["timeline_loss"] = tl_loss;
+        // Representative days (1-based) for quick drill-down presets: global
+        // peak-load / min-load / peak-net-load, plus the peak-net-load day in
+        // each season.  Computed from the full per-step results (not the
+        // subsampled timeline) so they are exact.
+        {
+          const int spd = std::max(1, static_cast<int>(std::lround(
+              24.0 / std::max(1e-9, result.step_duration_hr))));
+          const int nsteps = static_cast<int>(result.step_results.size());
+          const int ndays = (nsteps + spd - 1) / spd;
+          auto day_month = [](int d0) {
+            static const int md[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+            int rem = d0;
+            for (int m = 0; m < 12; ++m) { if (rem < md[m]) return m; rem -= md[m]; }
+            return 11;
+          };
+          auto season_of = [](int month) {
+            if (month >= 2 && month <= 4) return 0;   // spring
+            if (month >= 5 && month <= 7) return 1;   // summer
+            if (month >= 8 && month <= 10) return 2;  // autumn
+            return 3;                                 // winter
+          };
+          int peak_load_day = 0, min_load_day = 0, peak_net_day = 0;
+          double peak_load = -1e30, min_load = 1e30, peak_net = -1e30;
+          int season_day[4] = {-1, -1, -1, -1};
+          double season_net[4] = {-1e30, -1e30, -1e30, -1e30};
+          for (int d = 0; d < ndays; ++d) {
+            const int g0 = d * spd, g1 = std::min(g0 + spd, nsteps);
+            if (g1 <= g0) continue;
+            double load_sum = 0.0, net_peak = -1e30;
+            for (int t = g0; t < g1; ++t) {
+              const auto& s = result.step_results[static_cast<size_t>(t)];
+              load_sum += s.total_load_mw;
+              net_peak = std::max(net_peak, s.total_load_mw - s.total_renewable_mw);
+            }
+            if (load_sum > peak_load) { peak_load = load_sum; peak_load_day = d; }
+            if (load_sum < min_load) { min_load = load_sum; min_load_day = d; }
+            if (net_peak > peak_net) { peak_net = net_peak; peak_net_day = d; }
+            const int se = season_of(day_month(d));
+            if (net_peak > season_net[se]) { season_net[se] = net_peak; season_day[se] = d; }
+          }
+          json rep = json::array();
+          auto add_rep = [&](const char* label, int d0) {
+            if (d0 >= 0 && d0 < ndays) rep.push_back({{"label", label}, {"day", d0 + 1}});
+          };
+          add_rep("峰荷日", peak_load_day);
+          add_rep("谷荷日", min_load_day);
+          add_rep("峰净荷日", peak_net_day);
+          static const char* sn[4] = {"春季代表日", "夏季代表日", "秋季代表日", "冬季代表日"};
+          for (int s = 0; s < 4; ++s) add_rep(sn[s], season_day[s]);
+          out["representative_days"] = rep;
+        }
         // Monthly summaries
         json ms = json::array();
         for (const auto& m : result.monthly_summaries) {
@@ -14046,6 +14736,63 @@ int main(int argc, char** argv) {
       out["bus_results"]=json::array();
       for(const auto& br:sc.bus_results)
         out["bus_results"].push_back(json{{"bus_id",br.bus_id},{"sk_mva",br.sk_mva},{"ikpp_ka",br.ikpp_ka}});
+      res.set_content(out.dump(), "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/dc_sc", [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      auto sys = system_from_request(j);
+      std::vector<int> fault_bus_ids;
+      if (j.contains("fault_bus_ids") && j["fault_bus_ids"].is_array()) {
+        fault_bus_ids = j["fault_bus_ids"].get<std::vector<int>>();
+      } else if (j.contains("fault_bus_id") && j["fault_bus_id"].is_number_integer()) {
+        fault_bus_ids.push_back(j["fault_bus_id"].get<int>());
+      }
+      if (fault_bus_ids.empty()) throw std::runtime_error("No dc fault bus specified");
+
+      hacdcpf::analysis::DCFaultOptions opt;
+      apply_dc_sc_request_options(j, opt);
+      json out;
+      out["analysis"] = "dc_short_circuit";
+      out["options"] = dc_sc_options_to_json(opt);
+      out["results"] = json::array();
+      for (int bus_id : fault_bus_ids) {
+        const auto r = hacdcpf::analysis::dc_bus_fault_level(sys, bus_id, opt);
+        json rj{{"fault_bus_id", r.fault_bus_id},
+                {"solved", r.solved},
+                {"message", r.message},
+                {"v_prefault_pu", r.v_prefault_pu},
+                {"r_thevenin_pu", r.r_thevenin_pu},
+                {"i_fault_pu", r.i_fault_pu},
+                {"i_fault_ka", r.i_fault_ka},
+                {"dc_branch_edges_used", r.dc_branch_edges_used},
+                {"dccb_edges_used", r.dccb_edges_used},
+                {"dccb_open_count", r.dccb_open_count},
+                {"dccb_blocked_branch_count", r.dccb_blocked_branch_count}};
+        rj["breaker_duties"] = json::array();
+        for (const auto& duty : r.breaker_duties) {
+          rj["breaker_duties"].push_back({
+              {"breaker_index", duty.breaker_index},
+              {"name", duty.name},
+              {"from_bus", duty.from_bus},
+              {"to_bus", duty.to_bus},
+              {"closed", duty.closed},
+              {"controls_branch", duty.controls_branch},
+              {"controlled_branch_index", duty.controlled_branch_index},
+              {"r_pu", duty.r_pu},
+              {"i_duty_ka", duty.i_duty_ka},
+              {"i_breaking_ka", duty.i_breaking_ka},
+              {"breaking_rating_ok", duty.breaking_rating_ok},
+              {"model", duty.model},
+          });
+        }
+        out["results"].push_back(std::move(rj));
+      }
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;

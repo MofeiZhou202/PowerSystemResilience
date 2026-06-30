@@ -55,6 +55,7 @@ const App = (() => {
   let _lastPfData = null;
   let _lastOpfData = null;
   let _lastTspfData = null;
+  let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
   let _lastReliabilityData = null;
@@ -2442,6 +2443,62 @@ const App = (() => {
     document.getElementById('scDialog').style.display = 'none';
   }
 
+  function scReadNumber(id, fallback) {
+    const el = document.getElementById(id);
+    const value = Number(el?.value);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function scReadChecked(id, fallback = false) {
+    const el = document.getElementById(id);
+    return el ? !!el.checked : fallback;
+  }
+
+  function syncScToolbarToHidden() {
+    const pairs = [
+      ['scDomainSelect', 'scDomain'],
+      ['faultTypeSelect', 'scFaultType'],
+      ['scCalcTypeSelect', 'scCalcType'],
+      ['voltageCorrectionFactor', 'scCFactor'],
+      ['scKappaMethodSelect', 'scKappaMethod'],
+      ['scTopologySelect', 'scTopology'],
+    ];
+    pairs.forEach(([srcId, dstId]) => {
+      const src = document.getElementById(srcId);
+      const dst = document.getElementById(dstId);
+      if (src && dst) dst.value = src.value;
+    });
+  }
+
+  function getShortCircuitOptions({ detailed = false } = {}) {
+    syncScToolbarToHidden();
+    return {
+      fault_type: document.getElementById('scFaultType')?.value || 'ThreePhase',
+      calc_type: document.getElementById('scCalcType')?.value || 'Max',
+      c_factor: scReadNumber('scCFactor', 0),
+      kappa_method: document.getElementById('scKappaMethod')?.value || 'B',
+      topology: document.getElementById('scTopology')?.value || 'Meshed',
+      fault_impedance_pu: scReadNumber('scFaultImpedance', 0),
+      breaking_time_s: scReadNumber('scBreakingTime', 0.05),
+      ith_duration_s: scReadNumber('scIthDuration', 1.0),
+      base_frequency_hz: scReadNumber('scBaseFrequency', 50),
+      default_xdpp: scReadNumber('scDefaultXdpp', 0.2),
+      compute_branch_flows: detailed && scReadChecked('scComputeBranchFlows', true),
+      compute_voltage_drops: detailed && scReadChecked('scComputeVoltageDrops', true),
+      compute_ith: scReadChecked('scComputeIth', true),
+    };
+  }
+
+  function getDcShortCircuitOptions() {
+    return {
+      fault_resistance_pu: scReadNumber('scFaultImpedance', 0),
+      source_voltage_pu: scReadNumber('dcScSourceVoltage', 0),
+      consider_dc_breakers: scReadChecked('dcScConsiderBreakers', true),
+      dc_breakers_control_branches: scReadChecked('dcScBreakerControlsBranch', true),
+      add_unassigned_closed_breaker_edges: scReadChecked('dcScAddBreakerEdges', true),
+    };
+  }
+
   async function runShortCircuit() {
     hideScDialog();
     setStatus('短路计算中...', 'busy');
@@ -2452,17 +2509,38 @@ const App = (() => {
     }
 
     const faultBusRaw = (document.getElementById('scFaultBus').value || '').trim();
-    const faultType = document.getElementById('scFaultType').value;
-    const calcType = document.getElementById('scCalcType')?.value || 'Max';
-    const cFactor = parseFloat(document.getElementById('scCFactor').value);
+    const domain = (document.getElementById('scDomain')?.value || 'AC').toUpperCase();
+    if (domain === 'DC') {
+      const dcBusIds = Array.isArray(SYS?.dc?.buses) ? SYS.dc.buses.map(b => b.index) : [];
+      const faultBusIds = faultBusRaw === ''
+        ? dcBusIds
+        : faultBusRaw.split(/[,\s]+/).map(x => parseInt(x, 10)).filter(Number.isInteger);
+      if (!faultBusIds.length) {
+        setStatus('没有可计算的DC故障母线。', 'error');
+        return;
+      }
+      const resp = await apiPostResult('/api/session/dc_sc', {
+        fault_bus_ids: faultBusIds,
+        options: getDcShortCircuitOptions(),
+      });
+      if (!resp.ok) {
+        setStatus(resp.error || 'DC短路计算失败', 'error');
+        return;
+      }
+      log(`DC短路计算完成: ${faultBusIds.length} 个母线结果`, 'success');
+      setStatus('DC短路完成');
+      showDcShortCircuitResults(resp.data, faultBusIds[0]);
+      switchTab('results');
+      return;
+    }
+
+    const overviewOptions = getShortCircuitOptions({ detailed: false });
 
     // Blank fault bus → short circuit at every bus (overview mode).
     if (faultBusRaw === '') {
       const data = await apiPost('/api/session/sc', {
         options: {
-          fault_type: faultType,
-          calc_type: calcType,
-          c_factor: cFactor,
+          ...overviewOptions,
           compute_all_buses: true,
         }
       });
@@ -2489,9 +2567,7 @@ const App = (() => {
 
     const resp = await apiPostResult('/api/session/sc_detailed', {
       fault_bus_ids: [faultBus],
-      fault_type: faultType,
-      calc_type: calcType,
-      c_factor: cFactor,
+      ...getShortCircuitOptions({ detailed: true }),
     });
 
     if (!resp.ok) {
@@ -2667,6 +2743,22 @@ const App = (() => {
         v_max_pu: 1.05,
         mip_gap: 0.01,
         max_time_s: 60,
+        enable_pf: (document.getElementById('rcEnablePF')||{}).value !== '0',
+        enable_voltage: (document.getElementById('rcEnableVoltage')||{}).checked !== false,
+        enable_thermal: (document.getElementById('rcEnableThermal')||{}).checked !== false,
+        split_domain_trees: (document.getElementById('rcSplitTrees')||{}).checked === true,
+        allow_dc_mesh: (document.getElementById('rcDcMesh')||{}).checked === true,
+        loss_aware: (document.getElementById('rcLossAware')||{}).checked !== false,
+        line_failures: ((document.getElementById('rcFaults')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        fault_dc: ((document.getElementById('rcFaultsDc')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        fault_vsc: ((document.getElementById('rcFaultsVsc')||{}).value||'').split(',').map(x=>parseInt(x.trim())).filter(x=>x>0),
+        lambda_shed: parseFloat((document.getElementById('rcLambdaShed')||{}).value) || 1e4,
+        lambda_island: parseFloat((document.getElementById('rcLambdaIsland')||{}).value) || 1e5,
+        solver: (document.getElementById('rcSolver')||{}).value || 'auto',
+        lambda_loss: parseFloat((document.getElementById('rcLambdaLoss')||{}).value) || ({loss:50,switch:5,restore:10})[(document.getElementById('rcObjective')||{}).value||'loss'],
+        lambda_switch: parseFloat((document.getElementById('rcLambdaSwitch')||{}).value) || ({loss:1,switch:20,restore:1})[(document.getElementById('rcObjective')||{}).value||'loss'],
+        lambda_shed: parseFloat((document.getElementById('rcLambdaShed')||{}).value) || 1e4,
+        max_switch_ops: parseInt((document.getElementById('rcMaxSwOps')||{}).value)||0,
         verbose: false,
       }
     });
@@ -2678,6 +2770,16 @@ const App = (() => {
         const redPct = data.loss_reduction_pct?.toFixed(1) || '0';
         log(`拓扑重构完成: 重构前损耗=${baseLoss}MW, 重构后损耗=${reconLoss}MW, 降低${redPct}%, ` +
             `辐射状=${data.reconfig_is_radial ? '是' : '否'}, 连通=${data.reconfig_is_connected ? '是' : '否'}`, 'success');
+        const ops = data.switch_operations || [];
+        const ot = data.obj_terms || {};
+        log(`目标分解: 损耗=${(ot.loss||0).toFixed(3)} 开关=${(ot.switching||0).toFixed(0)} 切负荷=${(ot.shed||0).toFixed(1)} 孤岛=${(ot.island||0).toFixed(0)} | 校验 PF=${data.reconfig_pf_converged?'✓':'✗'} OPF=${data.opf_converged?'✓':'✗'}(obj=${(data.opf_objective||0).toFixed(1)})`, 'info');
+        const af = data.applied_faults || {};
+        const nf = (af.ac||[]).length + (af.dc||[]).length + (af.vsc||[]).length;
+        if (nf) log(`已施加故障 AC=[${(af.ac||[]).join(',')}] DC=[${(af.dc||[]).join(',')}] VSC=[${(af.vsc||[]).join(',')}]`, 'info');
+        if (ops.length) {
+          const desc = ops.map(o => `${o.kind === 'circuit_breaker' ? '断路器' : (o.kind === 'switch' ? '开关' : '支路')}#${o.index}:${o.close ? '合' : '分'}`).join(', ');
+          log(`联络开关/断路器操作 (${ops.length}): ${desc}`, 'info');
+        }
         setStatus('拓扑重构完成');
       } else {
         log('拓扑重构: 未找到可行解', 'warn');
@@ -3320,11 +3422,39 @@ const App = (() => {
     const numSteps = (Number.isFinite(simHours) && simHours > 0) ? simHours : 24;
     const skipUC = document.getElementById('tspfSkipUC')?.checked ?? true;
     const runOPF = document.getElementById('tspfRunOPF')?.checked ?? false;
+    // Constraint set + MILP solver selection (时序生产模拟 controls).
+    const ucSolver = document.getElementById('tspfUcSolver')?.value || 'auto';
+    const enableNet = document.getElementById('tspfNetworkConstraints')?.checked ?? false;
+    const enableDcNet = document.getElementById('tspfDcNetworkConstraints')?.checked ?? false;
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    const reserveFraction = (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0;
 
     const data = await apiPost('/api/session/run_ts_pf', {
       num_steps: numSteps,
       skip_uc: skipUC,
       run_opf: runOPF,
+      uc_solver: ucSolver,
+      enable_network_constraints: enableNet,
+      enable_dc_network_constraints: enableDcNet,
+      reserve_fraction: reserveFraction,
+      objective: document.getElementById('tspfObjective')?.value || 'cost',
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+      dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+      dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+      enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+      pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+      enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+      microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+      enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+      enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+      enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+      enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+      enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+      mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
+      cyclic_soc: document.getElementById('tspfCyclicSoc')?.checked ?? false,
+      parallel_daily: document.getElementById('tspfParallel')?.checked ?? false,
+      parallel_threads: parseInt(document.getElementById('tspfThreads')?.value, 10) || 0,
     });
 
     if (data) {
@@ -3338,7 +3468,342 @@ const App = (() => {
     }
   }
 
-  function showTimeSeriesResults(data) {
+  // ── Annual parallel production simulation (split year into independent days) ──
+  async function runAnnualSim() {
+    setStatus('年度并行生产模拟计算中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const resolution = document.getElementById('annResolution')?.value || '6h';
+    const dailyMode = document.getElementById('annDailyMode')?.value || 'scuc';
+    const parallel = document.getElementById('annParallel')?.checked ?? true;
+    const threads = parseInt(document.getElementById('annThreads')?.value, 10);
+    const cyclicSoc = document.getElementById('annCyclicSoc')?.checked ?? true;
+    // Reuse the shared solver / constraint controls from the time-series toolbar.
+    const ucSolver = document.getElementById('tspfUcSolver')?.value || 'auto';
+    const enableNet = document.getElementById('tspfNetworkConstraints')?.checked ?? false;
+    const enableDcNet = document.getElementById('tspfDcNetworkConstraints')?.checked ?? false;
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    const reserveFraction = (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0;
+
+    // Lightweight progress indicator: tick elapsed time while the (blocking)
+    // annual solve runs, since the backend call is synchronous.
+    const t0 = performance.now();
+    let _tick = 0;
+    const progressTimer = setInterval(() => {
+      _tick += 1;
+      setStatus(`年度并行生产模拟计算中... ${_tick}s`, 'busy');
+    }, 1000);
+
+    let data;
+    try {
+      data = await apiPost('/api/session/run_annual_sim', {
+        resolution,
+        daily_mode: dailyMode,
+        parallel_daily: parallel,
+        parallel_threads: Number.isFinite(threads) ? threads : 0,
+        daily_cyclic_soc: cyclicSoc,
+        run_opf: dailyMode !== 'sced',
+        uc_solver: ucSolver,
+        enable_network_constraints: enableNet,
+        enable_dc_network_constraints: enableDcNet,
+        reserve_fraction: reserveFraction,
+        objective: document.getElementById('tspfObjective')?.value || 'cost',
+        enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+        enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+        dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+        dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+        enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+        pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+        enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+        microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+        enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+        enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+        enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+        enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+        enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+        mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
+      });
+    } finally {
+      clearInterval(progressTimer);
+    }
+
+    if (data) {
+      data._wallSeconds = (performance.now() - t0) / 1000.0;
+      data._dailyMode = dailyMode;   // remember the per-day mode for drill-down faithfulness
+      data._cyclicSoc = cyclicSoc;
+      log(`年度仿真完成: ${data.solver_name || ''}, 目标=$${Number(data.total_cost || 0).toFixed(0)}, 用时${data._wallSeconds.toFixed(1)}s`, 'success');
+      setStatus('年度并行仿真完成');
+      _lastAnnualData = data;
+      showAnnualSimResults(data);
+      switchTab('results');
+    } else {
+      setStatus('计算失败', 'error');
+    }
+  }
+
+  // Shared rich-model / solver options read from the time-series toolbar, reused
+  // by the single-horizon run and the annual day drill-down.
+  function tspfRichOptions() {
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    return {
+      uc_solver: document.getElementById('tspfUcSolver')?.value || 'auto',
+      enable_network_constraints: document.getElementById('tspfNetworkConstraints')?.checked ?? false,
+      enable_dc_network_constraints: document.getElementById('tspfDcNetworkConstraints')?.checked ?? false,
+      reserve_fraction: (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0,
+      objective: document.getElementById('tspfObjective')?.value || 'cost',
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+      dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+      dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+      enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+      pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+      enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+      microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+      enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+      enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+      enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+      enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+      enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+      mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
+    };
+  }
+
+  // Drill into a single day of the last annual run: re-solve that day's window
+  // with the rich per-step time-series solver and show it in the (rich) 时序潮流
+  // 结果 dashboard, keeping the annual dashboard in place for context.
+  async function runAnnualDayDetail() {
+    const meta = _lastAnnualData;
+    if (!meta) { log('请先运行年度仿真，再查看某日详情', 'warn'); return; }
+    const stepHr = meta.step_duration_hr || 1;
+    const stepsPerDay = Math.max(1, Math.round(24 / stepHr));
+    const numDays = Math.max(1, Math.round((meta.num_steps || stepsPerDay) / stepsPerDay));
+    let day = parseInt(document.getElementById('annualSimDaySel')?.value, 10);
+    if (!Number.isFinite(day) || day < 1) day = 1;
+    if (day > numDays) day = numDays;
+
+    setStatus(`第 ${day} 日逐步详情重解中...`, 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+
+    const payload = Object.assign({
+      num_steps: stepsPerDay,
+      step_duration_hr: stepHr,
+      day_index: day,
+      skip_uc: false,
+      run_opf: true,
+      // Faithful drill-down: re-solve the day with the SAME per-day mode and
+      // cyclic-SOC the annual run used, so it matches that day of the annual run.
+      daily_mode: meta._dailyMode || 'scuc',
+      cyclic_soc: meta._cyclicSoc != null ? meta._cyclicSoc : true,
+    }, tspfRichOptions());
+
+    const data = await apiPost('/api/session/run_ts_pf', payload);
+    if (data) {
+      log(`第 ${day} 日详情完成: ${data.num_converged}/${data.num_steps} 步收敛`, 'success');
+      setStatus(`第 ${day} 日详情完成`);
+      _lastTspfData = data;
+      showTimeSeriesResults(data, { keepAnnual: true });
+      const tspfSec = document.getElementById('tspfResultsSection');
+      if (tspfSec && tspfSec.scrollIntoView) { try { tspfSec.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }
+    } else {
+      setStatus('计算失败', 'error');
+    }
+  }
+
+  function showAnnualSimResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('timeSeries');
+
+    const section = document.getElementById('annualSimResultsSection');
+    if (section) section.style.display = 'block';
+    // Hide the (stale) single-horizon time-series dashboard so the annual
+    // dashboard is shown unambiguously when an annual run completes.
+    const tspfSec = document.getElementById('tspfResultsSection');
+    if (tspfSec) tspfSec.style.display = 'none';
+    // Day drill-down: size the selector to the number of simulated days.
+    const stepsPerDay = Math.max(1, Math.round(24 / (data.step_duration_hr || 1)));
+    const numDays = Math.max(1, Math.round((data.num_steps || stepsPerDay) / stepsPerDay));
+    const daySel = document.getElementById('annualSimDaySel');
+    if (daySel) {
+      daySel.max = String(numDays);
+      if (!daySel.value || +daySel.value < 1 || +daySel.value > numDays) daySel.value = '1';
+    }
+    // Representative-day quick presets (peak-load / min-load / peak-net-load /
+    // per-season), auto-detected by the backend — one click drills into that day.
+    const presetBox = document.getElementById('annualSimDayPresets');
+    if (presetBox) {
+      const reps = Array.isArray(data.representative_days) ? data.representative_days : [];
+      presetBox.innerHTML = '<span style="font-weight:600;">代表日：</span>';
+      if (!reps.length) {
+        presetBox.insertAdjacentHTML('beforeend', '<span class="sub-hint">（无）</span>');
+      } else {
+        reps.forEach((r) => {
+          const btn = document.createElement('button');
+          btn.className = 'toolbar-btn';
+          btn.textContent = `${r.label} (第${r.day}日)`;
+          btn.title = `定位并以富时序图表重解第 ${r.day} 日`;
+          btn.addEventListener('click', () => {
+            const sel = document.getElementById('annualSimDaySel');
+            if (sel) sel.value = String(r.day);
+            runAnnualDayDetail();
+          });
+          presetBox.appendChild(btn);
+        });
+      }
+    }
+
+    const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
+    const feasClass = data.feasible ? 'result-converged' : 'result-failed';
+    const summary = document.getElementById('annualSimSummary');
+    if (summary) {
+      summary.innerHTML = `
+        <div class="result-item"><span class="result-label">求解模型/调度</span>
+          <span class="result-value">${data.solver_name || '—'}</span></div>
+        <div class="result-item"><span class="result-label">可行</span>
+          <span class="result-value ${feasClass}">${data.feasible ? '是' : '否'}</span></div>
+        <div class="result-item"><span class="result-label">时间步数</span>
+          <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
+        <div class="result-item"><span class="result-label">并行</span>
+          <span class="result-value">${data.parallel_daily ? '按日并行' : '串行'}</span></div>
+        <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
+          <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
+        <div class="result-item"><span class="result-label">墙钟用时</span>
+          <span class="result-value">${(data._wallSeconds || 0).toFixed(1)} s</span></div>
+        <div class="result-item"><span class="result-label">总发电量</span>
+          <span class="result-value">${fmt(data.total_gen_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">总负荷</span>
+          <span class="result-value">${fmt(data.total_load_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">新能源发电</span>
+          <span class="result-value">${fmt(data.total_renewable_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">弃电量</span>
+          <span class="result-value">${fmt(data.total_curtailment_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">网损</span>
+          <span class="result-value">${fmt(data.total_loss_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">失负荷(ENS)</span>
+          <span class="result-value">${fmt(data.total_ens_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">潮流收敛</span>
+          <span class="result-value">${data.num_pf_converged}/${data.num_steps}</span></div>
+      `;
+    }
+
+    const theme = {
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#abb2bf', size: 11 },
+      xaxis: { gridcolor: '#3e4451' }, yaxis: { gridcolor: '#3e4451' },
+      margin: { l: 55, r: 15, t: 40, b: 40 }, legend: { orientation: 'h', y: -0.25 },
+    };
+
+    // Annual timeline (gen / load / renewable / curtailment / storage / loss).
+    const tl = document.getElementById('annualSimTimelineChart');
+    if (tl && window.Plotly && Array.isArray(data.timeline_hours)) {
+      const h = data.timeline_hours;
+      Plotly.react(tl, [
+        { x: h, y: data.timeline_load || [], name: '负荷', type: 'scatter', mode: 'lines', line: { color: '#e74c3c' } },
+        { x: h, y: data.timeline_gen || [], name: '发电', type: 'scatter', mode: 'lines', line: { color: '#0b6e4f' } },
+        { x: h, y: data.timeline_ren || [], name: '新能源', type: 'scatter', mode: 'lines', line: { color: '#2980b9' } },
+        { x: h, y: data.timeline_curt || [], name: '弃电', type: 'scatter', mode: 'lines', line: { color: '#f39c12' } },
+        { x: h, y: data.timeline_ess || [], name: '储能(+放/−充)', type: 'scatter', mode: 'lines', line: { color: '#8e44ad', dash: 'dot' } },
+        { x: h, y: data.timeline_loss || [], name: '网损', type: 'scatter', mode: 'lines', line: { color: '#7f8c8d', dash: 'dot' }, yaxis: 'y2' },
+      ], Object.assign({
+        title: '全年逐时段功率 (MW)',
+        xaxis: Object.assign({ title: '小时' }, theme.xaxis),
+        yaxis2: { title: '网损 (MW)', overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', titlefont: { color: '#7f8c8d' }, tickfont: { color: '#7f8c8d' } },
+      }, theme), { responsive: true, displayModeBar: false });
+    }
+
+    // Annual bus-voltage envelope (min / mean / max across buses per snapshot).
+    const vc = document.getElementById('annualSimVoltChart');
+    if (vc && window.Plotly && Array.isArray(data.snapshot_vm) && data.snapshot_vm.length) {
+      const sh = data.snapshot_hours || data.snapshot_vm.map((_, i) => i);
+      const vmin = [], vmean = [], vmax = [];
+      data.snapshot_vm.forEach(row => {
+        if (!Array.isArray(row) || !row.length) { vmin.push(null); vmean.push(null); vmax.push(null); return; }
+        let mn = Infinity, mx = -Infinity, sum = 0;
+        row.forEach(v => { if (v < mn) mn = v; if (v > mx) mx = v; sum += v; });
+        vmin.push(mn); vmax.push(mx); vmean.push(sum / row.length);
+      });
+      Plotly.react(vc, [
+        { x: sh, y: vmax, name: '最高电压', type: 'scatter', mode: 'lines', line: { color: '#e74c3c', width: 1 } },
+        { x: sh, y: vmean, name: '平均电压', type: 'scatter', mode: 'lines', line: { color: '#2980b9', width: 2 } },
+        { x: sh, y: vmin, name: '最低电压', type: 'scatter', mode: 'lines', line: { color: '#f39c12', width: 1 }, fill: 'tonexty', fillcolor: 'rgba(41,128,185,0.08)' },
+      ], Object.assign({ title: '全年母线电压区间 (p.u., 抽样快照)', xaxis: Object.assign({ title: '小时' }, theme.xaxis), yaxis: Object.assign({ title: 'p.u.' }, theme.yaxis) }, theme), { responsive: true, displayModeBar: false });
+    }
+
+    // Monthly cost + energy bars.
+    const ms = data.monthly_summaries || [];
+    const mc = document.getElementById('annualSimMonthlyChart');
+    if (mc && window.Plotly && ms.length) {
+      const months = ms.map((m, i) => ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`);
+      Plotly.react(mc, [
+        { x: months, y: ms.map(m => m.total_cost), name: '月成本($)', type: 'bar', marker: { color: '#8e44ad' } },
+      ], Object.assign({ title: '月度成本', xaxis: theme.xaxis, yaxis: Object.assign({ title: '$' }, theme.yaxis) }, theme), { responsive: true });
+    }
+
+    // Monthly table.
+    const mt = document.getElementById('annualSimMonthlyTable');
+    if (mt && ms.length) {
+      let html = '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
+      ms.forEach((m, i) => {
+        const mn = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`;
+        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(m.total_cost)}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      mt.innerHTML = html;
+    }
+
+    // Per-generator annual statistics.
+    const gt = document.getElementById('annualSimGenStats');
+    if (gt) {
+      const gss = data.gen_stats || [];
+      if (gss.length) {
+        let html = '<table class="tbl"><thead><tr><th>机组</th><th>发电量(MWh)</th><th>容量因子</th><th>启动次数</th><th>在线小时</th></tr></thead><tbody>';
+        gss.forEach(g => {
+          html += `<tr><td>${g.name || '—'}</td><td>${fmt(g.total_energy_mwh)}</td><td>${(Number(g.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${fmt(g.total_startups)}</td><td>${fmt(g.total_hours_online)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        gt.innerHTML = html;
+      } else gt.innerHTML = '<p class="empty-hint">无机组统计</p>';
+    }
+
+    // Per-storage annual statistics.
+    const st = document.getElementById('annualSimStorageStats');
+    if (st) {
+      const sss = data.storage_stats || [];
+      if (sss.length) {
+        let html = '<table class="tbl"><thead><tr><th>储能</th><th>充电(MWh)</th><th>放电(MWh)</th><th>等效循环</th></tr></thead><tbody>';
+        sss.forEach(s => {
+          html += `<tr><td>${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        st.innerHTML = html;
+      } else st.innerHTML = '<p class="empty-hint">无储能统计</p>';
+    }
+
+    // Per-renewable annual statistics.
+    const rt = document.getElementById('annualSimRenStats');
+    if (rt) {
+      const rss = data.renewable_stats || [];
+      if (rss.length) {
+        let html = '<table class="tbl"><thead><tr><th>新能源</th><th>发电量(MWh)</th><th>弃电量(MWh)</th><th>容量因子</th><th>弃电率</th></tr></thead><tbody>';
+        rss.forEach(r => {
+          html += `<tr><td>${r.name || '—'}</td><td>${fmt(r.total_energy_mwh)}</td><td>${fmt(r.total_curtailed_mwh)}</td><td>${(Number(r.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${(Number(r.curtailment_rate || 0) * 100).toFixed(1)}%</td></tr>`;
+        });
+        html += '</tbody></table>';
+        rt.innerHTML = html;
+      } else rt.innerHTML = '<p class="empty-hint">无新能源统计</p>';
+    }
+
+    // Bring the annual dashboard into view (it sits below the time-series one).
+    if (section && section.scrollIntoView) {
+      try { section.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { section.scrollIntoView(); }
+    }
+  }
+
+  function showTimeSeriesResults(data, opts) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('timeSeries');
@@ -3346,11 +3811,29 @@ const App = (() => {
 
     const section = document.getElementById('tspfResultsSection');
     section.style.display = 'block';
+    // Unless this is an annual day drill-down (keepAnnual), hide the annual
+    // dashboard so a plain time-series run shows only its own results.
+    if (!(opts && opts.keepAnnual)) {
+      const annSec = document.getElementById('annualSimResultsSection');
+      if (annSec) annSec.style.display = 'none';
+    }
 
     // Summary KPIs
     const summary = document.getElementById('tspfSummary');
     const ucStatus = data.uc_feasible === false ? '失败' : (data.uc_feasible === true ? '成功' : '—');
     const ucClass = data.uc_feasible === false ? 'result-failed' : 'result-converged';
+    // Active-constraint set summary (from the backend echo).
+    const c = data.constraints || {};
+    const cParts = [];
+    if (c.unit_commitment) cParts.push('机组组合');
+    if (c.economic_dispatch_opf) cParts.push('经济调度OPF');
+    cParts.push(c.network_constraints ? '网络约束(DC潮流)' : '单母线平衡');
+    if (c.dc_network_constraints) cParts.push('DC网络耦合');
+    if (c.reserve_fraction > 0) cParts.push('旋转备用' + (c.reserve_fraction * 100).toFixed(0) + '%');
+    const constraintSummary = cParts.join('、') || '—';
+    const objLabel = data.objective_label || '目标函数值';
+    const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
+    const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -3361,8 +3844,12 @@ const App = (() => {
         <span class="result-value">${data.num_opf_converged}/${data.num_steps}</span></div>
       <div class="result-item"><span class="result-label">机组组合</span>
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
-      <div class="result-item"><span class="result-label">总发电成本</span>
-        <span class="result-value">$${(data.total_generation_cost || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">求解器</span>
+        <span class="result-value">${solverTag || '—'}</span></div>
+      <div class="result-item"><span class="result-label">${objLabel}</span>
+        <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">约束集</span>
+        <span class="result-value" style="font-size:0.82em;">${constraintSummary}</span></div>
       <div class="result-item"><span class="result-label">总网损</span>
         <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
     `;
@@ -5126,6 +5613,31 @@ const App = (() => {
     document.getElementById('topoResults').innerHTML = '';
   }
 
+  function scOpt(data, key, fallback = '') {
+    const opts = data?.options || {};
+    return opts[key] !== undefined ? opts[key] : (data?.[key] !== undefined ? data[key] : fallback);
+  }
+
+  function scFmtOpt(value, digits = 3) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(digits) : 'N/A';
+  }
+
+  function scOptionsSummaryHtml(data, detailed = false) {
+    return `
+      <div class="result-item"><span class="result-label">计算类型</span>
+        <span class="result-value">${scOpt(data, 'calc_type', 'Max')}</span></div>
+      <div class="result-item"><span class="result-label">c / κ / 拓扑</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'c_factor', 0), 3)} / ${scOpt(data, 'kappa_method', 'B')} / ${scOpt(data, 'topology', 'Meshed')}</span></div>
+      <div class="result-item"><span class="result-label">Zf / x''d</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'fault_impedance_pu', 0), 4)} / ${scFmtOpt(scOpt(data, 'default_xdpp', 0.2), 3)} pu</span></div>
+      <div class="result-item"><span class="result-label">tb / Tk / f</span>
+        <span class="result-value">${scFmtOpt(scOpt(data, 'breaking_time_s', 0.05), 3)}s / ${scFmtOpt(scOpt(data, 'ith_duration_s', 1), 3)}s / ${scFmtOpt(scOpt(data, 'base_frequency_hz', 50), 1)}Hz</span></div>
+      ${detailed ? `<div class="result-item"><span class="result-label">输出</span>
+        <span class="result-value">支路:${scOpt(data, 'compute_branch_flows', true) ? '开' : '关'} 电压:${scOpt(data, 'compute_voltage_drops', true) ? '开' : '关'} Ith:${scOpt(data, 'compute_ith', true) ? '开' : '关'}</span></div>` : ''}
+    `;
+  }
+
   function showShortCircuitResults(data) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
@@ -5137,6 +5649,7 @@ const App = (() => {
         <span class="result-value">${data.fault_type || 'ThreePhase'}</span></div>
       <div class="result-item"><span class="result-label">计算母线数</span>
         <span class="result-value">${data.bus_results?.length || 0}</span></div>
+      ${scOptionsSummaryHtml(data, false)}
     `;
 
     const scDiv = document.getElementById('scResults');
@@ -5195,6 +5708,7 @@ const App = (() => {
         <span class="result-value">${fmt(fb.ik_ka, 3)}</span></div>
       <div class="result-item"><span class="result-label">Ith 热效 (kA)</span>
         <span class="result-value">${fmt(fb.ith_ka, 3)}</span></div>
+      ${scOptionsSummaryHtml(data, true)}
     `;
 
     const busMap = Canvas.getCompBusMap();
@@ -5217,6 +5731,17 @@ const App = (() => {
       html += '</tbody></table>';
     }
 
+    if (r.converter_contributions && r.converter_contributions.length) {
+      html += '<h4 style="margin:12px 0 4px">换流器短路模型</h4>';
+      html += '<table><thead><tr><th>ID</th><th>Bus</th><th>模型</th><th>Ir限值(pu)</th><th>贡献(kA)</th></tr></thead><tbody>';
+      r.converter_contributions.forEach(c => {
+        html += `<tr><td>${c.converter_index ?? ''}</td><td>${c.bus_id ?? ''}</td>` +
+                `<td>${c.model || ''}</td><td>${fmt(c.i_limit_pu, 3)}</td>` +
+                `<td>${fmt(c.contribution_ka, 4)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
+
     html += '<h4 style="margin:12px 0 4px">故障期间各母线剩余电压 (p.u.)</h4>';
     html += '<table><thead><tr><th>Bus</th><th>V<sub>remain</sub> (p.u.)</th></tr></thead><tbody>';
     busRows.forEach(b => {
@@ -5229,6 +5754,59 @@ const App = (() => {
               `<td>${fmt(b.v_remaining_pu, 4)}</td></tr>`;
     });
     html += '</tbody></table>';
+    scDiv.innerHTML = html;
+  }
+
+  function showDcShortCircuitResults(data, primaryFaultBus) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('shortCircuit');
+
+    const fmt = (x, d = 3) =>
+      (x === undefined || x === null || isNaN(x)) ? 'N/A' : Number(x).toFixed(d);
+    const results = data.results || [];
+    const r = results.find(x => x.fault_bus_id === primaryFaultBus) || results[0] || {};
+    const solved = results.filter(x => x.solved).length;
+    const summary = document.getElementById('resultsSummary');
+    const scDiv = document.getElementById('scResults');
+
+    summary.innerHTML = `
+      <div class="result-item"><span class="result-label">短路域</span>
+        <span class="result-value">DC</span></div>
+      <div class="result-item"><span class="result-label">计算母线数</span>
+        <span class="result-value">${results.length} (${solved} solved)</span></div>
+      <div class="result-item"><span class="result-label">首个故障母线</span>
+        <span class="result-value">DC Bus ${r.fault_bus_id ?? 'N/A'}</span></div>
+      <div class="result-item"><span class="result-label">If (kA)</span>
+        <span class="result-value">${fmt(r.i_fault_ka, 4)}</span></div>
+      <div class="result-item"><span class="result-label">Rth / Vpre</span>
+        <span class="result-value">${fmt(r.r_thevenin_pu, 5)} pu / ${fmt(r.v_prefault_pu, 4)} pu</span></div>
+      <div class="result-item"><span class="result-label">DCCB拓扑</span>
+        <span class="result-value">${data.options?.consider_dc_breakers ? '开' : '关'}</span></div>
+    `;
+
+    let html = '<h4 style="margin:8px 0 4px">DC母线故障电流</h4>';
+    html += '<table><thead><tr><th>DC Bus</th><th>Solved</th><th>If(kA)</th><th>If(pu)</th><th>Rth(pu)</th><th>消息</th></tr></thead><tbody>';
+    results.forEach(row => {
+      html += `<tr><td>${row.fault_bus_id}</td><td>${row.solved ? 'yes' : 'no'}</td>` +
+              `<td>${fmt(row.i_fault_ka, 4)}</td><td>${fmt(row.i_fault_pu, 4)}</td>` +
+              `<td>${fmt(row.r_thevenin_pu, 5)}</td><td>${row.message || ''}</td></tr>`;
+    });
+    html += '</tbody></table>';
+
+    const duties = r.breaker_duties || [];
+    if (duties.length) {
+      html += '<h4 style="margin:12px 0 4px">DCCB开断能力校核</h4>';
+      html += '<table><thead><tr><th>DCCB</th><th>端点</th><th>模型</th><th>Duty(kA)</th><th>Breaking(kA)</th><th>状态</th></tr></thead><tbody>';
+      duties.forEach(d => {
+        const ok = d.breaking_rating_ok;
+        html += `<tr><td>${d.name || d.breaker_index}</td><td>${d.from_bus}-${d.to_bus}</td>` +
+                `<td>${d.model || ''}</td><td>${fmt(d.i_duty_ka, 4)}</td>` +
+                `<td>${fmt(d.i_breaking_ka, 4)}</td>` +
+                `<td class="${ok ? 'result-ok' : 'result-failed'}">${ok ? 'OK' : '超限'}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    }
     scDiv.innerHTML = html;
   }
 
@@ -6506,6 +7084,10 @@ const App = (() => {
 
     // Bar 3: shortCircuit sub-toolbar
     document.getElementById('btnFaultLocation')?.addEventListener('click', showScDialog);
+    document.getElementById('scDomainSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scDomain');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('faultTypeSelect')?.addEventListener('change', (e) => {
       const f = document.getElementById('scFaultType');
       if (f) f.value = e.target.value;
@@ -6518,14 +7100,16 @@ const App = (() => {
       const f = document.getElementById('scCFactor');
       if (f) f.value = e.target.value;
     });
+    document.getElementById('scKappaMethodSelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scKappaMethod');
+      if (f) f.value = e.target.value;
+    });
+    document.getElementById('scTopologySelect')?.addEventListener('change', (e) => {
+      const f = document.getElementById('scTopology');
+      if (f) f.value = e.target.value;
+    });
     document.getElementById('btnRunShortCircuit')?.addEventListener('click', () => {
-      // Mirror sub-toolbar values into legacy dialog inputs, then run.
-      const ft = document.getElementById('faultTypeSelect')?.value;
-      const ct = document.getElementById('scCalcTypeSelect')?.value;
-      const cf = document.getElementById('voltageCorrectionFactor')?.value;
-      if (ft) document.getElementById('scFaultType').value = ft;
-      if (ct) document.getElementById('scCalcType').value = ct;
-      if (cf) document.getElementById('scCFactor').value = cf;
+      syncScToolbarToHidden();
       runShortCircuit();
     });
 
@@ -6569,6 +7153,21 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
+    document.getElementById('btnToggleAnnualPanel')?.addEventListener('click', () => {
+      const panel = document.getElementById('annualSimControls');
+      const btn = document.getElementById('btnToggleAnnualPanel');
+      if (!panel || !btn) return;
+      const show = panel.hasAttribute('hidden');
+      if (show) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+      btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+      btn.textContent = show ? '年度并行仿真 ▾' : '年度并行仿真 ▸';
+    });
+    document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
+    document.getElementById('btnExportAnnualSim')?.addEventListener('click', () => {
+      if (!_lastAnnualData) { log('请先运行年度并行生产模拟', 'warn'); return; }
+      downloadJsonFile(`annual_production_sim_${tsTagForFilename()}.json`, _lastAnnualData);
+    });
+    document.getElementById('btnAnnualDayDetail')?.addEventListener('click', runAnnualDayDetail);
     document.getElementById('btnDynamicCarbonFlow')?.addEventListener('click', runDynamicCarbonFlow);
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.

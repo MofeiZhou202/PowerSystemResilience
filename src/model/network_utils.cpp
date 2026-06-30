@@ -709,9 +709,6 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
 
 }  // namespace
 
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-// Count queries
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 int n_ac_buses(const HybridPowerSystem& sys) {
   return static_cast<int>(sys.ac.buses.size());
 }
@@ -750,9 +747,7 @@ int n_converters(const HybridPowerSystem& sys) {
   return static_cast<int>(sys.vsc_converters.size());
 }
 
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // Aggregation queries
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 double total_gen_capacity_mw(const HybridPowerSystem& sys) {
   double total = 0.0;
   for (const auto& g : sys.ac.generators) {
@@ -1415,9 +1410,7 @@ void strip_dead_islands(HybridPowerSystem& sys) {
   }
 }
 
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // merge_zero_impedance_buses
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 void merge_zero_impedance_buses(HybridPowerSystem& sys, bool allow_merge) {
   auto& buses = sys.ac.buses;
   auto& branches = sys.ac.branches;
@@ -1912,7 +1905,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
 }
 
 // Internal helper: project a mutable HybridPowerSystem in place.
-static void project_in_place(HybridPowerSystem& out) {
+static void project_in_place(HybridPowerSystem& out, bool strip_dead = true) {
   if (out.base_mva <= 1e-9) {
     out.base_mva = 100.0;
   }
@@ -2028,14 +2021,28 @@ static void project_in_place(HybridPowerSystem& out) {
     const int br_before = next_br;
     add_equivalent_branch_from_switch(sw, out.ac, out.base_mva, next_br);
     if (next_br > br_before) {
-      bmap.entries.push_back({br_before, BranchOriginType::Switch, sw.index, 0});
+      BranchExpandEntry e;
+      e.branch_index = br_before;
+      e.origin_type = BranchOriginType::Switch;
+      e.origin_index = sw.index;
+      e.bus_from = sw.bus_from;
+      e.bus_to = sw.bus_to;
+      e.closed = sw.closed;
+      bmap.entries.push_back(e);
     }
   }
   for (const auto& cb : out.ac.circuit_breakers) {
     const int br_before = next_br;
     add_equivalent_branch_from_circuit_breaker(cb, out.ac, out.base_mva, next_br);
     if (next_br > br_before) {
-      bmap.entries.push_back({br_before, BranchOriginType::Switch, cb.index, 0});
+      BranchExpandEntry e;
+      e.branch_index = br_before;
+      e.origin_type = BranchOriginType::CircuitBreaker;
+      e.origin_index = cb.index;
+      e.bus_from = cb.bus_from;
+      e.bus_to = cb.bus_to;
+      e.closed = cb.closed;
+      bmap.entries.push_back(e);
     }
   }
   if (!bmap.empty()) out.branch_expand_map = std::move(bmap);
@@ -2066,7 +2073,9 @@ static void project_in_place(HybridPowerSystem& out) {
   // source.  This ensures all downstream algorithms (PF, OPF, DPF,
   // time-series, reliability, etc.) receive a clean system without
   // isolated dead nodes that would cause singular admittance matrices.
-  strip_dead_islands(out);
+  // Reconfiguration skips this so open ties into de-energised sections
+  // remain valid reconnection candidates.
+  if (strip_dead) strip_dead_islands(out);
 
   if (!out.ac.chargers.empty()) {
     if (out.ac.charging_stations.empty()) {
@@ -2095,6 +2104,89 @@ static void project_in_place(HybridPowerSystem& out) {
   }
 }
 
+static DeviceTerminalFlows device_terminal_flows_from_net(
+    const HybridPowerSystem& sys,
+    const std::unordered_map<int, double>& net_p,
+    const std::unordered_map<int, double>& net_q) {
+  DeviceTerminalFlows out;
+  // Adjacency over in-service AC lines + closed switches/CBs; the device under
+  // test is excluded by stopping BFS at its far bus so we sum only one side.
+  std::unordered_map<int, std::vector<int>> adj;
+  for (const auto& br : sys.ac.branches)
+    if (br.in_service) { adj[br.from_bus].push_back(br.to_bus); adj[br.to_bus].push_back(br.from_bus); }
+  for (const auto& sw : sys.ac.switches)
+    if (sw.in_service && sw.closed) { adj[sw.bus_from].push_back(sw.bus_to); adj[sw.bus_to].push_back(sw.bus_from); }
+  for (const auto& cb : sys.ac.circuit_breakers)
+    if (cb.in_service && cb.closed) { adj[cb.bus_from].push_back(cb.bus_to); adj[cb.bus_to].push_back(cb.bus_from); }
+
+  auto side_injection = [&](int a, int b) {
+    double p = 0.0, q = 0.0; std::unordered_set<int> seen{a};
+    std::queue<int> bfs; bfs.push(a);
+    while (!bfs.empty()) {
+      int u = bfs.front(); bfs.pop();
+      auto pit = net_p.find(u); if (pit != net_p.end()) p += pit->second;
+      auto qit = net_q.find(u); if (qit != net_q.end()) q += qit->second;
+      auto ait = adj.find(u); if (ait == adj.end()) continue;
+      for (int v : ait->second) { if (v == b) continue; if (!seen.count(v)) { seen.insert(v); bfs.push(v); } }
+    }
+    return std::pair<double,double>{p, q};
+  };
+  auto fill = [&](DeviceTerminalFlow& f, int from, int to, bool closed, double rate) {
+    f.bus_from = from; f.bus_to = to; f.closed = closed; f.rate_mva = rate;
+    if (!closed || !from || !to || from == to) return;
+    auto [p, q] = side_injection(to, from);  // flow into to-side = its net demand
+    f.pf_mw = -p; f.pt_mw = p; f.qf_mvar = -q; f.qt_mvar = q;
+    if (rate > 0) f.loading_pct = 100.0 * std::hypot(p, q) / rate;
+  };
+  for (const auto& sw : sys.ac.switches) {
+    DeviceTerminalFlow f; f.index = sw.index;
+    const double kv = bus_base_kv_or_default(sys.ac, sw.bus_from);
+    fill(f, sw.bus_from, sw.bus_to, sw.in_service && sw.closed,
+         sw.i_rated_ka > 0 ? std::sqrt(3.0) * kv * sw.i_rated_ka : 0.0);
+    out.ac_switches.push_back(f);
+  }
+  for (const auto& cb : sys.ac.circuit_breakers) {
+    DeviceTerminalFlow f; f.index = cb.index;
+    const double kv = bus_base_kv_or_default(sys.ac, cb.bus_from);
+    fill(f, cb.bus_from, cb.bus_to, cb.in_service && cb.closed,
+         cb.i_rated_ka > 0 ? std::sqrt(3.0) * kv * cb.i_rated_ka : 0.0);
+    out.ac_circuit_breakers.push_back(f);
+  }
+  return out;
+}
+
+DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
+                                                  const std::vector<double>& /*vm*/,
+                                                  const std::vector<double>& /*va*/) {
+  // Per-bus net injection (gen − load), MW/MVAr, keyed by bus .index.
+  std::unordered_map<int, double> net_p, net_q;
+  auto add_p = [&](int b, double v) { if (b) net_p[b] += v; };
+  auto add_q = [&](int b, double v) { if (b) net_q[b] += v; };
+  for (const auto& b : sys.ac.buses) { add_p(b.index, -b.pd_mw); add_q(b.index, -b.qd_mvar); }
+  for (const auto& l : sys.ac.loads) if (l.in_service) { add_p(l.bus, -l.p_mw); add_q(l.bus, -l.q_mvar); }
+  for (const auto& g : sys.ac.generators) if (g.in_service) { add_p(g.bus, g.pg_mw); add_q(g.bus, g.qg_mvar); }
+  for (const auto& g : sys.ac.static_generators) if (g.in_service) { add_p(g.bus, g.p_mw); add_q(g.bus, g.q_mvar); }
+  for (const auto& g : sys.ac.renewable_gens) if (g.in_service) { add_p(g.bus, g.p_mw); }
+  for (const auto& g : sys.ac.pv_systems) if (g.in_service) { add_p(g.bus, g.p_mw); add_q(g.bus, g.q_mvar); }
+  for (const auto& s : sys.ac.storage) if (s.in_service) { add_p(s.bus, s.p_mw); add_q(s.bus, s.q_mvar); }
+  return device_terminal_flows_from_net(sys, net_p, net_q);
+}
+
+DeviceTerminalFlows compute_device_terminal_flows(const HybridPowerSystem& sys,
+                                                  const std::vector<BranchFlow>& ac_branch_flows) {
+  // PF-aware: net injection at a bus = Σ outgoing solved AC line flows (KCL),
+  // so meshed/looped feeders use the actual converged state, not nominal loads.
+  std::unordered_map<int, double> net_p, net_q;
+  const size_t n = std::min(ac_branch_flows.size(), sys.ac.branches.size());
+  for (size_t i = 0; i < n; ++i) {
+    const auto& br = sys.ac.branches[i];
+    if (!br.in_service) continue;
+    net_p[br.from_bus] += ac_branch_flows[i].pf_mw; net_p[br.to_bus] += ac_branch_flows[i].pt_mw;
+    net_q[br.from_bus] += ac_branch_flows[i].qf_mvar; net_q[br.to_bus] += ac_branch_flows[i].qt_mvar;
+  }
+  return device_terminal_flows_from_net(sys, net_p, net_q);
+}
+
 HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys) {
   HybridPowerSystem out = sys;
   project_in_place(out);
@@ -2104,6 +2196,12 @@ HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys) {
 HybridPowerSystem project_to_canonical_models(HybridPowerSystem&& sys) {
   project_in_place(sys);
   return std::move(sys);
+}
+
+HybridPowerSystem project_to_canonical_models(const HybridPowerSystem& sys, bool strip_dead) {
+  HybridPowerSystem out = sys;
+  project_in_place(out, strip_dead);
+  return out;
 }
 
 }  // namespace hacdcpf

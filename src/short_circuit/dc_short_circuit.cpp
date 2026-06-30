@@ -16,6 +16,79 @@
 
 namespace hacdcpf::analysis {
 
+namespace {
+
+struct DCBreakerMatch {
+  const DCCircuitBreaker* breaker{nullptr};
+};
+
+bool same_dc_terminals(int a_from, int a_to, int b_from, int b_to) {
+  return (a_from == b_from && a_to == b_to) ||
+         (a_from == b_to && a_to == b_from);
+}
+
+double dc_base_kv_for_edge(const DCSystem& dc, int from_bus, int to_bus) {
+  for (const auto& b : dc.buses) {
+    if ((b.index == from_bus || b.index == to_bus) && b.base_kv > 1e-9) {
+      return b.base_kv;
+    }
+  }
+  return 1.0;
+}
+
+double breaker_r_pu(const HybridPowerSystem& sys, const DCCircuitBreaker& cb,
+                    const DCFaultOptions& opt) {
+  const double base_mva = (sys.dc.base_mva > 1e-9) ? sys.dc.base_mva : sys.base_mva;
+  const double base_kv = (cb.rated_voltage_kv > 1e-9)
+      ? cb.rated_voltage_kv
+      : dc_base_kv_for_edge(sys.dc, cb.bus_from, cb.bus_to);
+  const double z_base = (base_kv * base_kv) / std::max(1e-9, base_mva);
+  double r = (cb.r_ohm > 0.0 && z_base > 1e-12) ? cb.r_ohm / z_base : 0.0;
+  if (r <= 1e-12) r = std::max(opt.min_closed_breaker_resistance_pu, 1e-12);
+  return r;
+}
+
+void stamp_conductance(Eigen::MatrixXd& G, int fi, int ti, double r_pu,
+                       int n_parallel = 1) {
+  if (r_pu <= 1e-12) return;
+  const double g = static_cast<double>(std::max(1, n_parallel)) / r_pu;
+  G(fi, fi) += g;
+  G(ti, ti) += g;
+  G(fi, ti) -= g;
+  G(ti, fi) -= g;
+}
+
+std::unordered_map<int, DCBreakerMatch>
+match_breakers_to_branches(const DCSystem& dc) {
+  std::unordered_map<int, DCBreakerMatch> out;
+  for (const auto& br : dc.branches) {
+    std::vector<const DCCircuitBreaker*> matches;
+    for (const auto& cb : dc.dc_circuit_breakers) {
+      if (!cb.in_service) continue;
+      if (cb.element_id == br.index &&
+          (cb.element_type.empty() || cb.element_type == "branch" ||
+           cb.element_type == "dc_branch" || cb.element_type == "l" ||
+           cb.element_type == "line" || cb.element_type == "dc_line")) {
+        matches.push_back(&cb);
+      }
+    }
+    if (matches.empty()) {
+      for (const auto& cb : dc.dc_circuit_breakers) {
+        if (!cb.in_service) continue;
+        if (same_dc_terminals(cb.bus_from, cb.bus_to, br.from_bus, br.to_bus)) {
+          matches.push_back(&cb);
+        }
+      }
+    }
+    if (matches.size() == 1) {
+      out[br.index] = {matches.front()};
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 DCFaultResult dc_bus_fault_level(const HybridPowerSystem& sys, int dc_bus_id,
                                  const DCFaultOptions& opt) {
   DCFaultResult res;
@@ -38,17 +111,57 @@ DCFaultResult dc_bus_fault_level(const HybridPowerSystem& sys, int dc_bus_id,
 
   // Resistive nodal conductance matrix (per-unit).
   Eigen::MatrixXd G = Eigen::MatrixXd::Zero(n, n);
+  std::unordered_map<int, DCBreakerMatch> branch_breakers;
+  if (opt.consider_dc_breakers && opt.dc_breakers_control_branches) {
+    branch_breakers = match_breakers_to_branches(dc);
+  }
+
+  std::vector<char> breaker_used(dc.dc_circuit_breakers.size(), 0);
   for (const auto& br : dc.branches) {
     if (!br.in_service) continue;
     const auto f = pos.find(br.from_bus);
     const auto t = pos.find(br.to_bus);
     if (f == pos.end() || t == pos.end()) continue;
-    if (br.r_pu <= 1e-12) continue;  // ideal short -> skip (avoids singularity)
-    const double g = static_cast<double>(std::max(1, br.n_parallel)) / br.r_pu;
-    G(f->second, f->second) += g;
-    G(t->second, t->second) += g;
-    G(f->second, t->second) -= g;
-    G(t->second, f->second) -= g;
+    double r_pu = br.r_pu;
+    if (opt.consider_dc_breakers && opt.dc_breakers_control_branches) {
+      auto bit = branch_breakers.find(br.index);
+      if (bit != branch_breakers.end() && bit->second.breaker) {
+        const auto& cb = *bit->second.breaker;
+        auto cb_it = std::find_if(dc.dc_circuit_breakers.begin(),
+                                  dc.dc_circuit_breakers.end(),
+                                  [&](const DCCircuitBreaker& x) { return &x == &cb; });
+        if (cb_it != dc.dc_circuit_breakers.end()) {
+          breaker_used[static_cast<size_t>(std::distance(dc.dc_circuit_breakers.begin(), cb_it))] = 1;
+        }
+        if (!cb.closed) {
+          ++res.dccb_open_count;
+          ++res.dccb_blocked_branch_count;
+          continue;
+        }
+        r_pu += breaker_r_pu(sys, cb, opt);
+      }
+    }
+    if (r_pu <= 1e-12) continue;  // ideal short -> skip (avoids singularity)
+    stamp_conductance(G, f->second, t->second, r_pu, br.n_parallel);
+    ++res.dc_branch_edges_used;
+  }
+
+  if (opt.consider_dc_breakers && opt.add_unassigned_closed_breaker_edges) {
+    for (size_t i = 0; i < dc.dc_circuit_breakers.size(); ++i) {
+      const auto& cb = dc.dc_circuit_breakers[i];
+      if (!cb.in_service) continue;
+      if (breaker_used[i]) continue;
+      if (!cb.closed) {
+        ++res.dccb_open_count;
+        continue;
+      }
+      const auto f = pos.find(cb.bus_from);
+      const auto t = pos.find(cb.bus_to);
+      if (f == pos.end() || t == pos.end()) continue;
+      stamp_conductance(G, f->second, t->second, breaker_r_pu(sys, cb, opt));
+      breaker_used[i] = 1;
+      ++res.dccb_edges_used;
+    }
   }
 
   // Voltage-reference (DC_V) buses act as ideal sources.
@@ -112,6 +225,47 @@ DCFaultResult dc_bus_fault_level(const HybridPowerSystem& sys, int dc_bus_id,
   res.r_thevenin_pu = zkk;
   res.i_fault_pu = vpre / rtot;
   res.i_fault_ka = res.i_fault_pu * (base_mva / base_kv);  // DC: P = V*I
+
+  if (opt.consider_dc_breakers) {
+    for (size_t i = 0; i < dc.dc_circuit_breakers.size(); ++i) {
+      const auto& cb = dc.dc_circuit_breakers[i];
+      DCBreakerDutyResult duty;
+      duty.breaker_index = cb.index;
+      duty.name = cb.name;
+      duty.from_bus = cb.bus_from;
+      duty.to_bus = cb.bus_to;
+      duty.in_service = cb.in_service;
+      duty.closed = cb.closed;
+      duty.i_breaking_ka = cb.i_breaking_ka;
+      if (cb.in_service && cb.closed) {
+        duty.r_pu = breaker_r_pu(sys, cb, opt);
+      }
+      for (const auto& [branch_index, match] : branch_breakers) {
+        if (match.breaker == &cb) {
+          duty.controls_branch = true;
+          duty.controlled_branch_index = branch_index;
+          break;
+        }
+      }
+      if (!cb.in_service) {
+        duty.model = "out_of_service";
+      } else if (!cb.closed) {
+        duty.model = duty.controls_branch ? "open_blocks_branch" : "open_no_edge";
+      } else if (duty.controls_branch) {
+        duty.model = "closed_series_branch";
+      } else if (breaker_used[i]) {
+        duty.model = "closed_standalone_edge";
+      } else {
+        duty.model = "not_in_fault_graph";
+      }
+      if (cb.in_service && cb.closed && breaker_used[i]) {
+        duty.i_duty_ka = res.i_fault_ka;
+      }
+      duty.breaking_rating_ok =
+          (duty.i_breaking_ka <= 1e-12) || (duty.i_duty_ka <= duty.i_breaking_ka + 1e-9);
+      res.breaker_duties.push_back(std::move(duty));
+    }
+  }
   res.solved = true;
   return res;
 }

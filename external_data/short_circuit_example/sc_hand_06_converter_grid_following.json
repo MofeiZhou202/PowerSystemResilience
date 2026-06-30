@@ -1,0 +1,45 @@
+{
+  "name": "SC_HAND_06_converter_grid_following",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "ConverterACBus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [],
+    "generators": [],
+    "loads": [],
+    "external_grids": [],
+    "static_generators": [],
+    "transformers_2w": []
+  },
+  "dc": {
+    "name": "DC System",
+    "base_mva": 100.0,
+    "buses": [
+      {"index": 1, "name": "ConverterDCBus", "bus_type": "DC_V", "base_kv": 320.0, "vm_pu": 1.0, "in_service": true}
+    ],
+    "branches": [],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [
+    {"index": 1, "name": "GridFollowingVSC", "bus_ac": 1, "bus_dc": 1, "control_mode": "PQ", "p_rated_mw": 20.0, "p_set_mw": 0.0, "q_set_mvar": 0.0, "r_sc_pu": 0.0, "x_sc_pu": 0.2, "i_max_pu": 1.2, "grid_forming": true, "ac_grid_forming": false, "in_service": true}
+  ],
+  "expected_short_circuit": {
+    "basis": "Grid-following/current-limited VSC. DC-side grid_forming alone must not create an AC voltage source. Contribution = i_max_pu * S_rated/(sqrt(3)*Un).",
+    "checks": [
+      {
+        "fault_bus_id": 1,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "converter_model": "grid_following_current_source",
+        "ikss_ka": 0.692820323027551,
+        "ikss_converter_contrib_ka": 0.692820323027551
+      }
+    ],
+    "tolerance": {"relative": 1e-6, "absolute_ka": 1e-6}
+  }
+}
+

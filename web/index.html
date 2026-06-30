@@ -148,6 +148,12 @@
   <!-- Short circuit -->
   <div class="sub-section" data-sub="shortCircuit" hidden>
     <button id="btnFaultLocation" class="toolbar-btn" title="设置故障母线">故障点位设置</button>
+    <label class="sub-label">故障域
+      <select id="scDomainSelect">
+        <option value="AC">AC</option>
+        <option value="DC">DC</option>
+      </select>
+    </label>
     <label class="sub-label">故障类型
       <select id="faultTypeSelect">
         <option value="ThreePhase">三相短路</option>
@@ -164,6 +170,55 @@
     </label>
     <label class="sub-label">电压矫正系数
       <input id="voltageCorrectionFactor" type="number" value="1.1" step="0.05" min="0"/>
+    </label>
+    <label class="sub-label">峰值法
+      <select id="scKappaMethodSelect">
+        <option value="B">IEC B</option>
+        <option value="A">IEC A</option>
+        <option value="C">IEC C</option>
+      </select>
+    </label>
+    <label class="sub-label">网络
+      <select id="scTopologySelect">
+        <option value="Meshed">网状</option>
+        <option value="Radial">辐射状</option>
+      </select>
+    </label>
+    <label class="sub-label">Zf(pu)
+      <input id="scFaultImpedance" type="number" value="0" step="0.001" min="0"/>
+    </label>
+    <label class="sub-label">tb(s)
+      <input id="scBreakingTime" type="number" value="0.05" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label">Tk(s)
+      <input id="scIthDuration" type="number" value="1.0" step="0.1" min="0"/>
+    </label>
+    <label class="sub-label">f(Hz)
+      <input id="scBaseFrequency" type="number" value="50" step="1" min="1"/>
+    </label>
+    <label class="sub-label">x''d(pu)
+      <input id="scDefaultXdpp" type="number" value="0.2" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label">DC Vsrc(pu)
+      <input id="dcScSourceVoltage" type="number" value="0" step="0.01" min="0"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="DC短路计算考虑DCCB开合状态">
+      <input id="dcScConsiderBreakers" type="checkbox" checked/><span>DCCB拓扑</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="匹配DCCB控制对应DC支路">
+      <input id="dcScBreakerControlsBranch" type="checkbox" checked/><span>DCCB支路</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="未分配闭合DCCB作为独立导通边">
+      <input id="dcScAddBreakerEdges" type="checkbox" checked/><span>DCCB成边</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算故障期间各母线剩余电压">
+      <input id="scComputeVoltageDrops" type="checkbox" checked/><span>电压</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="计算热等效短路电流 Ith">
+      <input id="scComputeIth" type="checkbox" checked/><span>Ith</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="详细短路计算输出支路故障电流">
+      <input id="scComputeBranchFlows" type="checkbox" checked/><span>支路</span>
     </label>
     <button id="btnRunShortCircuit" class="toolbar-btn run-btn" title="运行短路计算">运行短路计算</button>
   </div>
@@ -252,6 +307,22 @@
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
+    <label class="sub-label">潮流 <select id="rcEnablePF"><option value="1" selected>LinDistFlow</option><option value="0">仅连通</option></select></label>
+    <label class="sub-label">目标 <select id="rcObjective" onchange="var p={loss:[10,1],switch:[5,20],restore:[10,1]}[this.value];if(p){rcLambdaLoss.value=p[0];rcLambdaSwitch.value=p[1];}"><option value="loss" selected>最小损耗</option><option value="switch">最少开关</option><option value="restore">最大恢复</option><option value="custom">自定义</option></select></label>
+    <label class="sub-label">λloss <input id="rcLambdaLoss" type="number" min="0" value="10" style="width:55px"/></label>
+    <label class="sub-label">λsw <input id="rcLambdaSwitch" type="number" min="0" value="1" style="width:50px"/></label>
+    <label class="sub-label">λshed <input id="rcLambdaShed" type="number" min="0" value="10000" style="width:70px"/></label>
+    <label class="sub-label">λisl <input id="rcLambdaIsland" type="number" min="0" value="100000" style="width:70px"/></label>
+    <label class="sub-label sub-checkbox"><input id="rcEnableVoltage" type="checkbox" checked/><span>G4电压</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcEnableThermal" type="checkbox" checked/><span>G5容量</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcSplitTrees" type="checkbox"/><span>AC/DC分域</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcDcMesh" type="checkbox"/><span>DC环网</span></label>
+    <label class="sub-label sub-checkbox"><input id="rcLossAware" type="checkbox" checked/><span>I²R损耗</span></label>
+    <label class="sub-label">开关上限 <input id="rcMaxSwOps" type="number" min="0" value="0" style="width:50px"/></label>
+    <label class="sub-label">求解器 <select id="rcSolver"><option value="auto" selected>Auto</option><option value="native">Native</option><option value="highs">HiGHS</option><option value="scip">SCIP</option></select></label>
+    <label class="sub-label">故障AC <input id="rcFaults" type="text" placeholder="5,9" style="width:60px"/></label>
+    <label class="sub-label">故障DC <input id="rcFaultsDc" type="text" placeholder="id" style="width:50px"/></label>
+    <label class="sub-label">故障VSC <input id="rcFaultsVsc" type="text" placeholder="id" style="width:50px"/></label>
     <button id="btnRunTopology" class="toolbar-btn run-btn" title="运行拓扑重构">运行拓扑重构</button>
   </div>
   <!-- Topology analysis (graph structure) -->
@@ -301,8 +372,93 @@
       <span>使用场景时序</span>
     </label>
     <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
-    <label class="sub-label">仿真时间(小时)
-      <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="以下为「时序潮流」与「年度仿真」共用的建模设置（求解器/网络约束/优化目标/各类丰富模型）">公共建模设置</span>
+    <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
+      <select id="tspfUcSolver">
+        <option value="auto" selected>Auto (优选)</option>
+        <option value="native">Native B&amp;C</option>
+        <option value="highs">HiGHS</option>
+        <option value="scip">SCIP</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用 AC 网络约束：在机组组合中加入 DC 潮流节点功率平衡与线路热稳定限值；关闭则使用单母线(铜板)平衡">
+      <input id="tspfNetworkConstraints" type="checkbox"/>
+      <span>网络约束(DC潮流)</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用 DC 网络耦合约束：在机组组合中显式建模 DC 母线节点平衡与 VSC/DCDC 换流器耦合（需同时启用网络约束）">
+      <input id="tspfDcNetworkConstraints" type="checkbox"/>
+      <span>DC网络耦合</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="显式 DC 支路潮流+热稳定限值：为每条 DC 支路增加传输潮流变量(|f|≤额定)，使功率可在 DC 母线间按线路容量传输（需启用 DC 网络耦合）">
+      <input id="tspfDcBranchFlows" type="checkbox"/>
+      <span>DC支路限值</span>
+    </label>
+    <label class="sub-label" title="旋转备用需求，占每步总负荷的百分比；0 表示不约束备用">旋转备用(%)
+      <input id="tspfReservePct" type="number" value="0" min="0" max="100" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)建模为可调电源：按 电价曲线×cost_c1(或静态cost_c1) 计价的净交换(进口/出口)。默认关闭以保持现有算例不变">
+      <input id="tspfExternalGrid" type="checkbox"/>
+      <span>外部电网交易</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="需求响应：柔性负荷可在 flex_up/flex_down 范围内调整(上调/下调)，附带不适惩罚。默认关闭，柔性负荷保持基线">
+      <input id="tspfDemandResponse" type="checkbox"/>
+      <span>需求响应</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="可转移模式：柔性负荷在时段间转移(全周期净偏差为零，能量守恒)；不勾选则为可调整模式(允许净增减)">
+      <input id="tspfDrShiftable" type="checkbox"/>
+      <span>可转移负荷</span>
+    </label>
+    <label class="sub-label" title="需求响应不适惩罚权重 ($/MWh 偏差)；越大越抑制负荷调整">DR惩罚
+      <input id="tspfDrPenalty" type="number" value="20" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="可调分布式光伏/直流电源：将必发(must-take)的 AC光伏/DC光伏阵列/DC静态电源 变为可弃电变量，可在过电压/反向功率/过供条件下弃电。默认关闭，保持必发行为">
+      <input id="tspfDispatchablePv" type="checkbox"/>
+      <span>可调光伏</span>
+    </label>
+    <label class="sub-label" title="弃光惩罚权重 ($/MWh)；越大越避免弃电">弃光惩罚
+      <input id="tspfPvCurtailPenalty" type="number" value="50" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="微网 PCC 交换+孤岛：每个微网在 PCC 母线有净交换(出力/受电，受 p_export_max/p_import_max 限制)与并网指示(二进制)，可由优化器选择并网/孤岛(孤岛时交换为零)。默认关闭">
+      <input id="tspfMicrogrid" type="checkbox"/>
+      <span>微网PCC交换</span>
+    </label>
+    <label class="sub-label" title="孤岛惩罚权重 ($/步)；越大越倾向保持并网">孤岛惩罚
+      <input id="tspfMgIslandPenalty" type="number" value="100" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="储能循环老化成本：按 replacement_cost/(2·max_cycles·E) 对储能吞吐量($/MWh)计价以抑制无谓循环；daily_cycle_limit>0 时附加日循环上限。默认关闭">
+      <input id="tspfStorageDegradation" type="checkbox"/>
+      <span>储能退化成本</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="虚拟电厂(VPP)聚合调度：每个 VPP 在 PCC 母线注入净出力 p∈[pmin,pmax](受爬坡限制)，并维护聚合储能包络 e∈[0,E](E=e_storage_sum_mwh，半满起始)；E=0 时退化为纯发电型 VPP，仅受功率/爬坡约束。默认关闭">
+      <input id="tspfVpp" type="checkbox"/>
+      <span>虚拟电厂(VPP)</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="能量路由器(多端口变换器)：对仍保留显式端口(未在网络投影中展开为 VSC+DC/DC)的 EnergyRouter，按端口建立带损耗内部功率守恒(Σηj·p_in,j=Σp_out,j)的净注入，是两端口 VSC/DC-DC 耦合的 N 端口推广。默认关闭，端口被展开时为空操作">
+      <input id="tspfEnergyRouter" type="checkbox"/>
+      <span>能量路由器</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="移动储能：每个 MobileStorage 有带电量状态(soc∈[soc_min,soc_max])的带符号功率(+放电)；连接母线按 departure_time/arrival_time/status 的外生调度变化(出发前在当前母线，在途时功率强制为0，到达后在 target_bus)。转场时刻为给定输入(无逐母线指派二进制)。默认关闭">
+      <input id="tspfMobileStorage" type="checkbox"/>
+      <span>移动储能</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="移动储能协同选址(需先启用移动储能)：将固定调度升级为决策——每步在 origin 母线/target 母线/在途之间选择(二进制 z0/z1/w，z0+z1+w=1)；功率仅在所连母线注入(q0/q1 受 z 门控)；离开母线须经一个在途步；在途按行驶里程消耗电量；最短停留(由 t_stay_min_hr)抑制频繁切换。更大的 MILP。默认关闭">
+      <input id="tspfMobileCorelocate" type="checkbox"/>
+      <span>协同选址</span>
+    </label>
+    <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
+      <select id="tspfObjective">
+        <option value="cost" selected>最小成本</option>
+        <option value="carbon">最小碳排放</option>
+        <option value="curtailment">最小弃电</option>
+        <option value="loss">最小网损(代理)</option>
+        <option value="weighted">加权多目标</option>
+      </select>
+    </label>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">时序潮流</span>
+    <label class="sub-label" title="时序潮流仿真时长（小时）；>24h 时保留并铺展导入的时序数据，可配合「按日并行」加速">仿真时间(小时)
+      <input id="simulationHours" type="number" value="24" min="1" step="1"/>
     </label>
     <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
       <input id="tspfSkipUC" type="checkbox" checked/>
@@ -312,8 +468,50 @@
       <input id="tspfRunOPF" type="checkbox"/>
       <span>启用OPF优化调度</span>
     </label>
+    <label class="sub-label sub-checkbox" title="日内周期SOC：每个调度日终端储能 SOC 等于初始 SOC（储能日内能量自平衡）；也是按日并行的前提">
+      <input id="tspfCyclicSoc" type="checkbox"/>
+      <span>日内周期SOC</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。SCIP 可完全并行；其他求解器安全串行">
+      <input id="tspfParallel" type="checkbox"/>
+      <span>按日并行</span>
+    </label>
+    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+      <input id="tspfThreads" type="number" value="0" min="0" max="256" step="1"/>
+    </label>
     <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
     <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <button id="btnToggleAnnualPanel" class="toolbar-btn" title="展开/收起年度并行生产模拟控制面板" aria-expanded="false">年度并行仿真 ▸</button>
+    <span id="annualSimControls" hidden>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="年度生产模拟：将一年按日并行分解求解（每日能量自平衡/周期SOC）">年度并行仿真</span>
+    <label class="sub-label" title="时间分辨率：6 小时(全年1460步) 或 1 小时(全年8760步)">分辨率
+      <select id="annResolution">
+        <option value="6h" selected>6 小时</option>
+        <option value="1h">1 小时</option>
+      </select>
+    </label>
+    <label class="sub-label" title="日内仿真模型：SCUC 安全约束机组组合；动态SCED 固定机组的安全约束经济调度；动态OPF 逐时段最优潮流">日内模型
+      <select id="annDailyMode">
+        <option value="scuc" selected>SCUC</option>
+        <option value="sced">动态 SCED</option>
+        <option value="dopf">动态 OPF</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。SCIP 求解器可完全并行；其他求解器为安全串行">
+      <input id="annParallel" type="checkbox" checked/>
+      <span>按日并行</span>
+    </label>
+    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+      <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="每日终端储能 SOC 等于初始 SOC，使各日相互独立（并行的前提）">
+      <input id="annCyclicSoc" type="checkbox" checked/>
+      <span>日内周期SOC</span>
+    </label>
+    <button id="btnRunAnnualSim" class="toolbar-btn run-btn" title="运行年度并行生产模拟（复用上方机组组合求解器/网络约束/旋转备用/优化目标设置）">运行年度仿真</button>
+    <button id="btnExportAnnualSim" class="toolbar-btn" title="将年度生产模拟结果导出为 JSON 文件">年度结果导出</button>
+    </span>
     <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
@@ -1030,6 +1228,30 @@
             <div id="tspfSelectedComponentCurve" class="tspf-chart selected-component-chart"></div>
           </div>
         </div>
+        <div class="topo-section" id="annualSimResultsSection" style="display:none">
+          <h4>年度并行生产模拟结果</h4>
+          <div id="annualSimSummary" class="results-summary"></div>
+          <div id="annualSimTimelineChart" class="tspf-chart"></div>
+          <div id="annualSimVoltChart" class="tspf-chart"></div>
+          <div id="annualSimMonthlyChart" class="tspf-chart"></div>
+          <div id="annualSimMonthlyTable"></div>
+          <div id="annualSimDayDrill" class="annual-day-drill" style="margin:10px 0;padding:8px 10px;border:1px solid var(--border,#3e4451);border-radius:6px;">
+            <div id="annualSimDayPresets" style="margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+              <span style="font-weight:600;">代表日：</span>
+            </div>
+            <label style="font-weight:600;">逐日详情：第
+              <input id="annualSimDaySel" type="number" min="1" value="1" style="width:72px"/> 日
+            </label>
+            <button id="btnAnnualDayDetail" class="toolbar-btn">查看该日详情（富时序图表）</button>
+            <span class="sub-hint" style="display:block;margin-top:4px;">点选上方代表日按钮可一键定位并重解；或手动输入日序号。按当前年度分辨率、相同日内模型与周期SOC重解所选日，以分机组出力/电压/储能/网损等富时序图表展示（显示于上方“时序潮流结果”面板）。</span>
+          </div>
+          <h5>分机组年度统计</h5>
+          <div id="annualSimGenStats" class="topo-table-wrap"></div>
+          <h5>储能年度统计</h5>
+          <div id="annualSimStorageStats" class="topo-table-wrap"></div>
+          <h5>新能源年度统计</h5>
+          <div id="annualSimRenStats" class="topo-table-wrap"></div>
+        </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="reliability">
           <div class="topo-section">
@@ -1099,15 +1321,18 @@
 <div id="scDialog" class="modal" style="display:none">
   <div class="modal-content">
     <h3>故障点位设置</h3>
-    <p style="opacity:.7;font-size:12px;margin:6px 0 10px">短路类型与电压调节系数请在功能栏中设置。</p>
+    <p style="opacity:.7;font-size:12px;margin:6px 0 10px">短路域、短路类型与电压调节系数请在功能栏中设置。</p>
     <label>故障母线ID: <input type="number" id="scFaultBus" value="1" min="0" step="1"/></label>
     <p style="opacity:.65;font-size:12px;margin:8px 0 0;line-height:1.5">
-      请输入母线的<strong>真实编号</strong>（与结果表 / 画布中显示的 <code>Bus</code> 编号一致）。<br>
+      请输入AC或DC母线的<strong>真实编号</strong>（与结果表 / 画布中显示的 <code>Bus</code> 编号一致）。<br>
       不存在的编号会被拒绝并给出提示；<strong>留空</strong>则计算全部母线。
     </p>
+    <input type="hidden" id="scDomain" value="AC"/>
     <input type="hidden" id="scFaultType" value="ThreePhase"/>
     <input type="hidden" id="scCalcType" value="Max"/>
     <input type="hidden" id="scCFactor" value="1.1"/>
+    <input type="hidden" id="scKappaMethod" value="B"/>
+    <input type="hidden" id="scTopology" value="Meshed"/>
     <div class="modal-actions">
       <button id="btnScRun" class="btn btn-warn">确定</button>
       <button id="btnScCancel" class="btn">取消</button>

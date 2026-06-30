@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "hacdcpf/model/converter_model_scope.hpp"
+#include "hacdcpf/power_flow/power_flow_result.hpp"  // DeviceTerminalFlow
 
 namespace hacdcpf::opf {
 
@@ -112,6 +113,10 @@ struct ACOPFResult {
 
   /// Declares which parts of the unified converter model this OPF honored.
   ConverterModelScope converter_model_scope{};
+
+  // Switch / circuit-breaker terminal flows at the OPF dispatch point.
+  std::vector<DeviceTerminalFlow> ac_switch_flows;
+  std::vector<DeviceTerminalFlow> ac_circuit_breaker_flows;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <future>
 #include <unordered_map>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include "hacdcpf/power_flow/branch_flow.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf {
 
@@ -507,12 +509,24 @@ struct UCBuildResult {
   int T;  // number of time steps
   int C{0};   // number of VSC converters (in-service)
   int Cd{0};  // number of DC-DC converters (in-service)
+  int X{0};   // number of external grids (in-service, when enabled)
+  int F{0};   // number of flexible loads (in-service, when DR enabled)
+  int U{0};   // number of microgrids (in-service, when enabled)
+  int V{0};   // number of VPPs (in-service, when enabled)
   std::vector<int> gen_indices;       // original indices into sys.ac.generators
   std::vector<int> storage_indices;   // original indices into sys.ac.storage
   std::vector<int> dc_storage_indices;// original indices into sys.dc.storage
   std::vector<int> renewable_indices; // original indices into sys.ac.renewable_gens
   std::vector<int> vsc_indices;       // original indices into sys.vsc_converters
   std::vector<int> dcdc_indices;      // original indices into sys.dc.dcdc_converters
+  std::vector<int> ext_indices;       // original indices into sys.ac.external_grids
+  std::vector<int> flex_indices;      // original indices into sys.ac.flexible_loads
+  std::vector<int> mg_indices;        // original indices into sys.microgrids
+  std::vector<int> vpp_indices;       // original indices into sys.vpps
+  // Constant objective offset to add back to the solver objective so the
+  // reported cost reflects the true penalty form (e.g. islanding cost
+  // pen·(1−o), encoded in c as −pen·o with the constant pen dropped).
+  double obj_offset{0.0};
 };
 
 UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
@@ -582,6 +596,46 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   }
   res.Cd = static_cast<int>(res.dcdc_indices.size());
 
+  // Collect in-service external grids (only used when enable_external_grid).
+  if (opts.enable_external_grid) {
+    for (int i = 0; i < static_cast<int>(sys.ac.external_grids.size()); ++i) {
+      if (sys.ac.external_grids[static_cast<size_t>(i)].in_service) {
+        res.ext_indices.push_back(i);
+      }
+    }
+  }
+  res.X = static_cast<int>(res.ext_indices.size());
+
+  // Collect in-service flexible loads (only used when enable_demand_response).
+  if (opts.enable_demand_response) {
+    for (int i = 0; i < static_cast<int>(sys.ac.flexible_loads.size()); ++i) {
+      if (sys.ac.flexible_loads[static_cast<size_t>(i)].in_service) {
+        res.flex_indices.push_back(i);
+      }
+    }
+  }
+  res.F = static_cast<int>(res.flex_indices.size());
+
+  // Collect in-service microgrids (only used when enable_microgrid).
+  if (opts.enable_microgrid) {
+    for (int i = 0; i < static_cast<int>(sys.microgrids.size()); ++i) {
+      if (sys.microgrids[static_cast<size_t>(i)].in_service) {
+        res.mg_indices.push_back(i);
+      }
+    }
+  }
+  res.U = static_cast<int>(res.mg_indices.size());
+
+  // Collect in-service VPPs (only used when enable_vpp).
+  if (opts.enable_vpp) {
+    for (int i = 0; i < static_cast<int>(sys.vpps.size()); ++i) {
+      if (sys.vpps[static_cast<size_t>(i)].in_service) {
+        res.vpp_indices.push_back(i);
+      }
+    }
+  }
+  res.V = static_cast<int>(res.vpp_indices.size());
+
   // Build DC bus index map
   std::unordered_map<int, int> dc_bus_idx;
   for (int i = 0; i < dcg.n_dc_bus; ++i) {
@@ -589,10 +643,218 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   }
 
   const int G = res.G, S = res.S, Sd = res.Sd, R = res.R;
-  const int C = res.C, Cd = res.Cd;
+  const int C = res.C, Cd = res.Cd, X = res.X, F = res.F, U = res.U, V = res.V;
   const bool use_network_constraints = opts.enable_network_constraints && net.n_bus > 1;
   const bool use_dc_network = use_network_constraints && opts.enable_dc_network_constraints
                               && dcg.n_dc_bus > 0 && C > 0;
+  const bool use_dr = opts.enable_demand_response && F > 0;
+  const bool use_dr_shift = use_dr && opts.dr_shiftable;
+  const bool use_mg = opts.enable_microgrid && U > 0;
+  const bool use_degr = opts.enable_storage_degradation && (S + Sd) > 0;
+  const bool use_vpp = opts.enable_vpp && V > 0;
+
+  // Dispatchable-PV curtailment descriptors: one per must-take source that may
+  // be clawed back.  avail[t] is the profile-scaled available output; the
+  // curtailment variable lives in [0, avail] and adds back to the bus balance
+  // (reducing net injection).  AC PV is only must-take when the DC network is
+  // not modelled explicitly, so it is only clawed back in that case.
+  struct PVCurtSource { std::vector<double> avail; int ac_bus; int dc_bus; };
+  std::vector<PVCurtSource> pvcurt;
+  if (opts.enable_dispatchable_pv) {
+    if (!use_dc_network) {
+      for (const auto& pvsys : sys.ac.pv_systems) {
+        if (!pvsys.in_service) continue;
+        const auto* pvprof = find_profile(profile_map, pvsys.profile_id);
+        PVCurtSource d; d.ac_bus = pvsys.bus; d.dc_bus = -1;
+        d.avail.resize(static_cast<size_t>(T));
+        for (int t = 0; t < T; ++t) {
+          const double scale = profile_value(pvprof, t, 1.0);
+          double pv_mw;
+          if (pvsys.voc > 0.0 && pvsys.isc > 0.0 && pvsys.vmpp > 0.0) {
+            PVSystem c = pvsys; c.irradiance = scale * 1000.0;
+            pv_mw = powerflow::compute_pv_power_mw(c);
+          } else {
+            pv_mw = pvsys.p_mw * scale;
+          }
+          d.avail[static_cast<size_t>(t)] = std::max(0.0, pv_mw);
+        }
+        pvcurt.push_back(std::move(d));
+      }
+    }
+    for (const auto& pvarr : sys.dc.pv_arrays) {
+      if (!pvarr.in_service) continue;
+      const auto* pv = find_profile(profile_map, pvarr.profile_id);
+      PVCurtSource d; d.ac_bus = -1; d.dc_bus = pvarr.bus;
+      d.avail.resize(static_cast<size_t>(T));
+      for (int t = 0; t < T; ++t)
+        d.avail[static_cast<size_t>(t)] = std::max(0.0, pvarr.p_set_mw * profile_value(pv, t, 1.0));
+      pvcurt.push_back(std::move(d));
+    }
+    for (const auto& sg : sys.dc.dc_static_generators) {
+      if (!sg.in_service) continue;
+      const auto* pv = find_profile(profile_map, sg.profile_id);
+      PVCurtSource d; d.ac_bus = -1; d.dc_bus = sg.bus;
+      d.avail.resize(static_cast<size_t>(T));
+      for (int t = 0; t < T; ++t)
+        d.avail[static_cast<size_t>(t)] = std::max(0.0, sg.p_set_mw * sg.scaling * profile_value(pv, t, 1.0));
+      pvcurt.push_back(std::move(d));
+    }
+  }
+  const int Pc = static_cast<int>(pvcurt.size());
+
+  // Dispatchable AC static generators (sys.ac.static_generators).  Unlike the
+  // must-take PV sources, these are not otherwise in the UC, so they get a
+  // supply variable p_sgen ∈ [0, available] (available = p_mw·scaling) added to
+  // the AC balance.  Curtailment is rewarded (like renewables): the objective
+  // gets −pv_curtail_penalty·p_sgen with the constant penalty·available tracked
+  // in obj_offset, so the reported cost equals fuel cost + penalty·curtailment.
+  struct SgenSupply { std::vector<double> avail; int ac_bus; };
+  std::vector<SgenSupply> sgsup;
+  if (opts.enable_dispatchable_pv) {
+    for (const auto& sg : sys.ac.static_generators) {
+      if (!sg.in_service) continue;
+      double a = std::max(0.0, sg.p_mw * sg.scaling);
+      if (a <= 0.0) continue;
+      SgenSupply d; d.ac_bus = sg.bus;
+      d.avail.assign(static_cast<size_t>(T), a);
+      sgsup.push_back(std::move(d));
+    }
+  }
+  const int Ng = static_cast<int>(sgsup.size());
+
+  // Explicit DC branch transport flows + thermal limits.  Each in-service DC
+  // branch gets a flow variable f ∈ [−rate, rate] (a transport / network-flow
+  // model with no DC voltages) that enters the DC nodal balance so power can
+  // move between DC buses up to the line rating.
+  struct DcFlow { int from_pos; int to_pos; double rate; };
+  std::vector<DcFlow> dcflow;
+  const bool use_dc_flows = use_dc_network && opts.enable_dc_branch_flows;
+  if (use_dc_flows) {
+    for (const auto& br : sys.dc.branches) {
+      if (!br.in_service) continue;
+      auto fi = dc_bus_idx.find(br.from_bus);
+      auto ti = dc_bus_idx.find(br.to_bus);
+      if (fi == dc_bus_idx.end() || ti == dc_bus_idx.end()) continue;
+      if (fi->second == ti->second) continue;
+      DcFlow d;
+      d.from_pos = fi->second;
+      d.to_pos = ti->second;
+      d.rate = (br.rate_a_mva > 0.0) ? br.rate_a_mva
+                                     : ((br.s_max_mva > 0.0) ? br.s_max_mva : 1.0e5);
+      dcflow.push_back(d);
+    }
+  }
+  const int Nf = static_cast<int>(dcflow.size());
+
+  // Energy-router (multi-port converter) ports (§4.9).  Each in-service router
+  // that still carries explicit ports (not yet expanded into VSC/DC-DC during
+  // network projection) contributes, per placeable port, an inflow/outflow pair
+  // bounded by the port rating.  A per-router lossy conservation constraint
+  // (Σ η_j·p_in_j = Σ p_out_j) ties the ports together; the signed bus injection
+  // is p_out − p_in.  DC ports require the DC network to be modelled; otherwise
+  // (copper-plate, or AC-nodal without a DC network) DC ports fall back to the
+  // single system / slack balance, like the must-take DC sources.
+  struct ErPort { int router_pos; int ac_bus; int dc_bus; double cap; double eta; };
+  std::vector<ErPort> erports;
+  std::vector<std::vector<int>> er_ports_of_router;  // router_pos -> erport indices
+  const bool use_router = opts.enable_energy_router && !sys.energy_routers.empty();
+  if (use_router) {
+    for (const auto& er : sys.energy_routers) {
+      if (!er.in_service) continue;
+      std::vector<ErPort> ports_this;
+      for (const auto& port : er.ports) {
+        if (!port.in_service || port.bus == 0) continue;
+        ErPort d;
+        d.router_pos = static_cast<int>(er_ports_of_router.size());
+        d.cap = (port.pmax_mw > 0.0)
+                    ? port.pmax_mw
+                    : (er.p_rated_mw > 0.0 ? er.p_rated_mw : 1.0e5);
+        d.eta = (port.eta > 1e-6 && port.eta <= 1.0) ? port.eta : 0.98;
+        d.ac_bus = -1;
+        d.dc_bus = -1;
+        if (port.port_type == ERPortType::DC)
+          d.dc_bus = port.bus;
+        else
+          d.ac_bus = port.bus;
+        ports_this.push_back(d);
+      }
+      if (ports_this.empty()) continue;
+      std::vector<int> idxs;
+      for (auto& d : ports_this) {
+        idxs.push_back(static_cast<int>(erports.size()));
+        erports.push_back(d);
+      }
+      er_ports_of_router.push_back(std::move(idxs));
+    }
+  }
+  const int Per = static_cast<int>(erports.size());        // placeable router ports
+  const int Rrouter = static_cast<int>(er_ports_of_router.size());  // active routers
+
+  // Mobile storage (§4.4) with an exogenous relocation schedule.  Each unit gets
+  // a signed power variable (+discharge) and an energy state in [soc_min,
+  // soc_max].  The connection bus per step follows departure_time/arrival_time/
+  // status: at `bus` before departure, disconnected (power forced 0) while in
+  // transit, at `target_bus` after arrival.  loc[t] holds the raw AC bus number
+  // for that step, or −1 when disconnected.
+  struct MobStor {
+    int orig_idx;
+    std::vector<int> loc;     // per-step raw AC bus number, or −1 (in transit)
+    double pmin, pmax, E, eta, soc_init, soc_min, soc_max;
+    // Co-optimised relocation (only used when use_coreloc): two candidate buses
+    // (origin / target), per-transit SOC drain, and minimum-stay length.
+    int busO{0}, busD{-1};    // origin bus, target bus (−1 = no relocation)
+    double drain{0.0};        // per-transit-step SOC depletion (per-unit)
+    int min_stay{1};          // minimum dwell once connected (steps)
+  };
+  std::vector<MobStor> mobstor;
+  const bool use_mobstor = opts.enable_mobile_storage && !sys.mobile_storage.empty();
+  const bool use_coreloc = use_mobstor && opts.mobile_storage_corelocate;
+  if (use_mobstor) {
+    for (int i = 0; i < static_cast<int>(sys.mobile_storage.size()); ++i) {
+      const auto& ms = sys.mobile_storage[static_cast<size_t>(i)];
+      if (!ms.in_service) continue;
+      MobStor d;
+      d.orig_idx = i;
+      const double pcap = (ms.pmax_mw > 0.0) ? ms.pmax_mw
+                                             : (ms.p_rated_mw > 0.0 ? ms.p_rated_mw : 0.0);
+      d.pmax = std::abs(pcap);
+      d.pmin = (ms.pmin_mw < 0.0) ? ms.pmin_mw : -d.pmax;
+      d.E = (ms.e_rated_mwh > 1e-9) ? ms.e_rated_mwh : 1.0;
+      d.eta = std::sqrt(std::max(1e-6, ms.eta_charge * ms.eta_discharge));
+      d.soc_init = ms.soc_init;
+      d.soc_min = ms.soc_min;
+      d.soc_max = ms.soc_max;
+      // Candidate buses + relocation parameters for the co-optimised model.
+      d.busO = ms.bus;
+      d.busD = (ms.target_bus != 0 && ms.target_bus != ms.bus) ? ms.target_bus : -1;
+      const double trip_drain = (ms.e_consumption_mwh_km > 0.0 && ms.max_travel_distance_km > 0.0)
+                                    ? (ms.e_consumption_mwh_km * ms.max_travel_distance_km) / d.E
+                                    : 0.0;
+      d.drain = std::min(std::max(0.0, trip_drain), 0.2);  // cap per-transit drain
+      d.min_stay = (ms.t_stay_min_hr > 0.0 && dt > 0.0)
+                       ? std::max(1, static_cast<int>(std::lround(ms.t_stay_min_hr / dt)))
+                       : 1;
+      d.loc.resize(static_cast<size_t>(T));
+      const double td = ms.departure_time, ta = ms.arrival_time;
+      const bool relocate = (td > 0.0 && ta > td && ms.target_bus != 0);
+      for (int t = 0; t < T; ++t) {
+        const double thr = static_cast<double>(t) * dt;
+        int loc_bus;
+        if (ms.status == MobileStorageStatus::InTransit && !relocate) {
+          loc_bus = -1;                       // mid-journey, no schedule
+        } else if (relocate) {
+          if (thr < td)      loc_bus = ms.bus;       // pre-departure
+          else if (thr < ta) loc_bus = -1;           // traveling
+          else               loc_bus = ms.target_bus; // arrived
+        } else {
+          loc_bus = ms.bus;                   // stationary
+        }
+        d.loc[static_cast<size_t>(t)] = loc_bus;
+      }
+      mobstor.push_back(std::move(d));
+    }
+  }
+  const int M = static_cast<int>(mobstor.size());  // active mobile-storage units
 
   // Variable layout:
   //   p_g[g,t]      dispatch for generator g at time t    (continuous) : G*T
@@ -603,9 +865,12 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   //   p_dcess[d,t]  DC ESS dispatch (positive=discharge)   (continuous): Sd*T
   //   soc_d[d,t]    DC ESS SOC at end of period t          (continuous): Sd*T
   //   p_ren[r,t]    renewable dispatch at time t           (continuous): R*T
+  //   p_ext[x,t]    external-grid net exchange (+imp/−exp) (continuous): X*T  (if enable_external_grid)
   //   theta[b,t]    AC bus voltage angle (non-slack)       (continuous): nTheta
   //   p_vsc[c,t]    VSC AC-side injection (pos=into AC)    (continuous): C*T  (if use_dc_network)
   //   p_dcdc[dd,t]  DC-DC input power (pos=in→out)         (continuous): Cd*T (if use_dc_network)
+  // p_ext sits before theta so the warm-start heuristic and extract_schedule's
+  // back-calculation of the trailing vsc/dcdc blocks remain valid.
   const int nPg  = G * T;
   const int nUg  = G * T;
   const int nSg  = G * T;
@@ -614,10 +879,33 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int nDcEss = Sd * T;
   const int nDcSoc = Sd * T;
   const int nRen = R * T;
+  const int nExt = X * T;
+  const int nDrUp = use_dr ? F * T : 0;   // flexible-load demand increase
+  const int nDrDn = use_dr ? F * T : 0;   // flexible-load demand decrease
+  const int nCurt = Pc * T;               // dispatchable-PV curtailment claw-back
+  const int nSgen = Ng * T;               // dispatchable AC static-gen supply
+  const int nMgEx = use_mg ? U * T : 0;   // microgrid PCC net exchange (+export)
+  const int nMgO  = use_mg ? U * T : 0;   // microgrid connection indicator (binary)
+  const int nDcFlow = Nf * T;             // explicit DC branch transport flows
+  const int nGdeg = use_degr ? (S + Sd) * T : 0;  // storage throughput |p| aux
+  const int nVpp  = use_vpp ? V * T : 0;          // VPP aggregate net output
+  const int nVppE = use_vpp ? V * T : 0;          // VPP aggregate energy state
+  const int nErIn  = use_router ? Per * T : 0;    // router port inflow (bus→router)
+  const int nErOut = use_router ? Per * T : 0;    // router port outflow (router→bus)
+  const int nMsP = (use_mobstor && !use_coreloc) ? M * T : 0;  // mobile power (exogenous)
+  const int nMsE = use_mobstor ? M * T : 0;       // mobile-storage energy state
+  const int nMsZ0 = use_coreloc ? M * T : 0;      // connected at origin (binary)
+  const int nMsZ1 = use_coreloc ? M * T : 0;      // connected at target (binary)
+  const int nMsW  = use_coreloc ? M * T : 0;      // in transit (binary)
+  const int nMsQ0 = use_coreloc ? M * T : 0;      // injection at origin bus
+  const int nMsQ1 = use_coreloc ? M * T : 0;      // injection at target bus
   const int nTheta = use_network_constraints ? static_cast<int>(net.non_slack.size()) * T : 0;
   const int nVsc = use_dc_network ? C * T : 0;
   const int nDcdc = use_dc_network ? Cd * T : 0;
-  const int n = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen + nTheta + nVsc + nDcdc;
+  const int n = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen + nExt
+              + nDrUp + nDrDn + nCurt + nSgen + nMgEx + nMgO + nDcFlow + nGdeg
+              + nVpp + nVppE + nErIn + nErOut + nMsP + nMsE
+              + nMsZ0 + nMsZ1 + nMsW + nMsQ0 + nMsQ1 + nTheta + nVsc + nDcdc;
 
   auto pg_idx  = [&](int g, int t) { return g * T + t; };
   auto ug_idx  = [&](int g, int t) { return nPg + g * T + t; };
@@ -633,7 +921,47 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   auto ren_idx = [&](int r, int t) {
     return nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + r * T + t;
   };
-  const int theta_offset = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen;
+  const int ext_offset = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen;
+  auto ext_idx = [&](int x, int t) { return ext_offset + x * T + t; };
+  const int drup_offset = ext_offset + nExt;
+  auto drup_idx = [&](int f, int t) { return drup_offset + f * T + t; };
+  const int drdn_offset = drup_offset + nDrUp;
+  auto drdn_idx = [&](int f, int t) { return drdn_offset + f * T + t; };
+  const int curt_offset = drdn_offset + nDrDn;
+  auto curt_idx = [&](int k, int t) { return curt_offset + k * T + t; };
+  const int sgen_offset = curt_offset + nCurt;
+  auto sgen_idx = [&](int k, int t) { return sgen_offset + k * T + t; };
+  const int mgex_offset = sgen_offset + nSgen;
+  auto mgex_idx = [&](int u, int t) { return mgex_offset + u * T + t; };
+  const int mgo_offset = mgex_offset + nMgEx;
+  auto mgo_idx = [&](int u, int t) { return mgo_offset + u * T + t; };
+  const int dcflow_offset = mgo_offset + nMgO;
+  auto dcflow_idx = [&](int m, int t) { return dcflow_offset + m * T + t; };
+  const int gdeg_offset = dcflow_offset + nDcFlow;
+  auto gdeg_idx = [&](int k, int t) { return gdeg_offset + k * T + t; };
+  const int vpp_offset = gdeg_offset + nGdeg;
+  auto vpp_idx = [&](int v, int t) { return vpp_offset + v * T + t; };
+  const int vppe_offset = vpp_offset + nVpp;
+  auto vppe_idx = [&](int v, int t) { return vppe_offset + v * T + t; };
+  const int erin_offset = vppe_offset + nVppE;
+  auto erin_idx = [&](int p, int t) { return erin_offset + p * T + t; };
+  const int erout_offset = erin_offset + nErIn;
+  auto erout_idx = [&](int p, int t) { return erout_offset + p * T + t; };
+  const int msp_offset = erout_offset + nErOut;
+  auto msp_idx = [&](int b, int t) { return msp_offset + b * T + t; };
+  const int mse_offset = msp_offset + nMsP;
+  auto mse_idx = [&](int b, int t) { return mse_offset + b * T + t; };
+  const int msz0_offset = mse_offset + nMsE;
+  auto msz0_idx = [&](int b, int t) { return msz0_offset + b * T + t; };
+  const int msz1_offset = msz0_offset + nMsZ0;
+  auto msz1_idx = [&](int b, int t) { return msz1_offset + b * T + t; };
+  const int msw_offset = msz1_offset + nMsZ1;
+  auto msw_idx = [&](int b, int t) { return msw_offset + b * T + t; };
+  const int msq0_offset = msw_offset + nMsW;
+  auto msq0_idx = [&](int b, int t) { return msq0_offset + b * T + t; };
+  const int msq1_offset = msq0_offset + nMsQ0;
+  auto msq1_idx = [&](int b, int t) { return msq1_offset + b * T + t; };
+  const int theta_offset = msq1_offset + nMsQ1;
   auto theta_idx = [&](int b_pos, int t) {
     return theta_offset + b_pos * T + t;
   };
@@ -651,16 +979,31 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   m.linear_part.c = Eigen::VectorXd::Zero(n);
   m.linear_part.vars.resize(static_cast<size_t>(n));
 
-  // --- Objective: gen linear cost * p_g + startup cost s_g ---
+  // --- Objective: configurable production-cost / emissions / curtailment ---
+  // Resolve the effective weight on each linear term from the objective mode.
+  // All terms are linear so the model stays a MILP for every solver backend.
+  double w_cost = 0.0, w_carbon = 0.0, w_loss = 0.0, w_curt = 0.0;
+  switch (opts.objective_mode) {
+    case UCObjective::Cost:           w_cost = 1.0; break;
+    case UCObjective::Carbon:         w_carbon = 1.0; w_curt = 1.0; break;
+    case UCObjective::MinCurtailment: w_curt = 1.0; w_cost = 1e-3; break;
+    case UCObjective::MinLoss:        w_loss = 1.0; w_curt = 1.0; break;
+    case UCObjective::Weighted:
+      w_cost = opts.w_cost; w_carbon = opts.w_carbon;
+      w_loss = opts.w_loss; w_curt = opts.w_curtailment;
+      break;
+  }
   for (int gi = 0; gi < G; ++gi) {
     const auto& gen = sys.ac.generators[static_cast<size_t>(res.gen_indices[static_cast<size_t>(gi)])];
     for (int t = 0; t < T; ++t) {
-      // Linear cost per MWh: cost_c1 * p_mw * dt
-      m.linear_part.c[pg_idx(gi, t)] = gen.cost_c1 * dt;
-      // No-load commitment cost per hour (use cost_c0 as on-cost coefficient).
-      m.linear_part.c[ug_idx(gi, t)] = std::max(0.0, gen.cost_c0) * dt;
-      // Startup cost
-      m.linear_part.c[sg_idx(gi, t)] = 1.0;
+      // p_g coefficient blends fuel cost ($/MWh), CO2 ($/MWh-equivalent via the
+      // emission factor) and a generation-minimization loss proxy ($/MWh).
+      m.linear_part.c[pg_idx(gi, t)] =
+          (w_cost * gen.cost_c1 + w_carbon * gen.emission_factor_tco2_mwh + w_loss) * dt;
+      // No-load and startup costs only carry the cost-objective weight (they are
+      // not emissions/loss quantities).
+      m.linear_part.c[ug_idx(gi, t)] = w_cost * std::max(0.0, gen.cost_c0) * dt;
+      m.linear_part.c[sg_idx(gi, t)] = w_cost;
     }
   }
 
@@ -671,8 +1014,21 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(pg_idx(gi, t))] = {
         VarType::Continuous, 0.0, gen.pmax_mw,
         "p_g" + std::to_string(gi) + "_t" + std::to_string(t)};
+      // Dynamic-SCED mode pins commitment: either to an explicit representative
+      // schedule (fixed_commitment_schedule) or, failing that, ON for all
+      // in-service units (fix_commitment) — collapsing SCUC to an ED LP.
+      double u_lo = 0.0, u_hi = 1.0;
+      if (opts.fixed_commitment_schedule &&
+          gi < static_cast<int>(opts.fixed_commitment_schedule->size()) &&
+          t < static_cast<int>((*opts.fixed_commitment_schedule)[static_cast<size_t>(gi)].size())) {
+        const double u = (*opts.fixed_commitment_schedule)[static_cast<size_t>(gi)][static_cast<size_t>(t)]
+                             ? 1.0 : 0.0;
+        u_lo = u_hi = u;
+      } else if (opts.fix_commitment) {
+        u_lo = 1.0;
+      }
       m.linear_part.vars[static_cast<size_t>(ug_idx(gi, t))] = {
-        VarType::Binary, 0.0, 1.0,
+        VarType::Binary, u_lo, u_hi,
         "u_g" + std::to_string(gi) + "_t" + std::to_string(t)};
       m.linear_part.vars[static_cast<size_t>(sg_idx(gi, t))] = {
         VarType::Continuous, 0.0, gen.startup_cost,
@@ -687,8 +1043,15 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(ess_idx(si, t))] = {
         VarType::Continuous, ess.pmin_mw, ess.pmax_mw,
         "p_ess" + std::to_string(si) + "_t" + std::to_string(t)};
+      // Cyclic boundary: pin the terminal SOC to the initial SOC so the horizon
+      // is energy-neutral and independent (enables parallel day decomposition).
+      double soc_lo = ess.soc_min, soc_hi = ess.soc_max;
+      if (opts.enforce_terminal_soc_cyclic && t == T - 1) {
+        const double soc_fix = std::min(ess.soc_max, std::max(ess.soc_min, ess.soc_init));
+        soc_lo = soc_hi = soc_fix;
+      }
       m.linear_part.vars[static_cast<size_t>(soc_idx(si, t))] = {
-        VarType::Continuous, ess.soc_min, ess.soc_max,
+        VarType::Continuous, soc_lo, soc_hi,
         "soc" + std::to_string(si) + "_t" + std::to_string(t)};
     }
   }
@@ -700,8 +1063,13 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(dcess_idx(si, t))] = {
         VarType::Continuous, ess.pmin_mw, ess.pmax_mw,
         "p_dcess" + std::to_string(si) + "_t" + std::to_string(t)};
+      double soc_lo = ess.soc_min, soc_hi = ess.soc_max;
+      if (opts.enforce_terminal_soc_cyclic && t == T - 1) {
+        const double soc_fix = std::min(ess.soc_max, std::max(ess.soc_min, ess.soc_init));
+        soc_lo = soc_hi = soc_fix;
+      }
       m.linear_part.vars[static_cast<size_t>(dcsoc_idx(si, t))] = {
-        VarType::Continuous, ess.soc_min, ess.soc_max,
+        VarType::Continuous, soc_lo, soc_hi,
         "soc_d" + std::to_string(si) + "_t" + std::to_string(t)};
     }
   }
@@ -715,9 +1083,250 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       m.linear_part.vars[static_cast<size_t>(ren_idx(ri, t))] = {
         VarType::Continuous, 0.0, p_avail,
         "p_ren" + std::to_string(ri) + "_t" + std::to_string(t)};
-      // Curtailment cost in objective
-      if (ren.cost_curtail_mwh > 0.0) {
-        m.linear_part.c[ren_idx(ri, t)] = -ren.cost_curtail_mwh * dt;
+      // Reward renewable utilisation: the cost objective uses cost_curtail_mwh;
+      // the curtailment / clean-dispatch objectives add a unit utilisation
+      // reward so the optimiser maximises renewable output.
+      const double ren_reward = w_cost * ren.cost_curtail_mwh + w_curt;
+      if (ren_reward != 0.0) {
+        m.linear_part.c[ren_idx(ri, t)] = -ren_reward * dt;
+      }
+    }
+  }
+
+  // External-grid net exchange (+import / −export), priced by a time-varying
+  // tariff (price_profile_id × cost_c1, else static cost_c1).  Carbon objective
+  // charges the import emission factor (applied to the net variable; export is
+  // typically small).  Bounds are a symmetric big-M when no explicit limit.
+  for (int xi = 0; xi < X; ++xi) {
+    const auto& xg = sys.ac.external_grids[static_cast<size_t>(res.ext_indices[static_cast<size_t>(xi)])];
+    const auto* price_pv = find_profile(profile_map, xg.price_profile_id);
+    const double cap = std::max(1.0, opts.external_grid_cap_mw);
+    for (int t = 0; t < T; ++t) {
+      m.linear_part.vars[static_cast<size_t>(ext_idx(xi, t))] = {
+        VarType::Continuous, -cap, cap,
+        "p_ext" + std::to_string(xi) + "_t" + std::to_string(t)};
+      const double price = xg.cost_c1 * profile_value(price_pv, t, 1.0);
+      m.linear_part.c[ext_idx(xi, t)] =
+          (w_cost * price + w_carbon * xg.emission_factor_tco2_mwh) * dt;
+    }
+  }
+
+  // Demand response: served demand of flexible load f = baseline P0 + up − down,
+  // with up,down ≥ 0 bounded by flex_up/flex_down (× availability).  The
+  // discomfort penalty w_demand_response·(up+down) discourages shifting.
+  if (use_dr) {
+    for (int fi = 0; fi < F; ++fi) {
+      const auto& fl = sys.ac.flexible_loads[static_cast<size_t>(res.flex_indices[static_cast<size_t>(fi)])];
+      const double avail = std::clamp(fl.availability_pct / 100.0, 0.0, 1.0);
+      const double up_cap = std::max(0.0, fl.flex_up_mw) * avail;
+      const double dn_cap = std::min(std::max(0.0, fl.flex_down_mw) * avail,
+                                     std::max(0.0, fl.p_mw));  // cannot shed below 0
+      const double pen = std::max(0.0, opts.w_demand_response) * dt;
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(drup_idx(fi, t))] = {
+          VarType::Continuous, 0.0, up_cap,
+          "dr_up" + std::to_string(fi) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(drdn_idx(fi, t))] = {
+          VarType::Continuous, 0.0, dn_cap,
+          "dr_dn" + std::to_string(fi) + "_t" + std::to_string(t)};
+        m.linear_part.c[drup_idx(fi, t)] = pen;
+        m.linear_part.c[drdn_idx(fi, t)] = pen;
+      }
+    }
+  }
+
+  // Dispatchable-PV curtailment claw-back: curt[k,t] ∈ [0, avail[k,t]], priced
+  // by pv_curtail_penalty so it stays at 0 unless curtailment is required.
+  if (Pc > 0) {
+    const double pen = std::max(0.0, opts.pv_curtail_penalty) * dt;
+    for (int k = 0; k < Pc; ++k) {
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(curt_idx(k, t))] = {
+          VarType::Continuous, 0.0, pvcurt[static_cast<size_t>(k)].avail[static_cast<size_t>(t)],
+          "pv_curt" + std::to_string(k) + "_t" + std::to_string(t)};
+        m.linear_part.c[curt_idx(k, t)] = pen;
+      }
+    }
+  }
+
+  // Dispatchable AC static-generator supply: p_sgen ∈ [0, avail], rewarded for
+  // utilisation (−pen) with the constant pen·avail tracked in obj_offset so the
+  // reported cost = fuel cost + pen·curtailment.
+  if (Ng > 0) {
+    const double pen = std::max(0.0, opts.pv_curtail_penalty) * dt;
+    for (int k = 0; k < Ng; ++k) {
+      for (int t = 0; t < T; ++t) {
+        const double a = sgsup[static_cast<size_t>(k)].avail[static_cast<size_t>(t)];
+        m.linear_part.vars[static_cast<size_t>(sgen_idx(k, t))] = {
+          VarType::Continuous, 0.0, a,
+          "p_sgen" + std::to_string(k) + "_t" + std::to_string(t)};
+        m.linear_part.c[sgen_idx(k, t)] = -pen;
+        res.obj_offset += pen * a;
+      }
+    }
+  }
+
+  // Microgrid PCC exchange + islanding indicator.  p_mg ∈ [−p_import_max,
+  // p_export_max] (positive = export into the main system); binary o = 1 when
+  // grid-connected.  Islanding (o = 0) is penalised by w_microgrid_island.
+  if (use_mg) {
+    for (int ui = 0; ui < U; ++ui) {
+      const auto& mg = sys.microgrids[static_cast<size_t>(res.mg_indices[static_cast<size_t>(ui)])];
+      const double p_imp = std::max(0.0, mg.p_import_max_mw);
+      const double p_exp = std::max(0.0, mg.p_export_max_mw);
+      // A microgrid that cannot island is pinned connected (o ≡ 1).
+      const double o_lo = mg.islanding_capability ? 0.0 : 1.0;
+      const double island_pen = std::max(0.0, opts.w_microgrid_island) * dt;
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(mgex_idx(ui, t))] = {
+          VarType::Continuous, -p_imp, p_exp,
+          "p_mg" + std::to_string(ui) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(mgo_idx(ui, t))] = {
+          VarType::Binary, o_lo, 1.0,
+          "mg_on" + std::to_string(ui) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(mgo_idx(ui, t));
+        // Penalise islanding: cost = island_pen·(1 − o) ⇒ −island_pen·o (+const).
+        m.linear_part.c[mgo_idx(ui, t)] = -island_pen;
+        // Track the dropped constant so the reported cost is the true penalty.
+        res.obj_offset += island_pen;
+      }
+    }
+  }
+
+  // DC branch transport flows: f ∈ [−rate, rate].  The thermal limit is encoded
+  // directly as the variable bound, so no extra constraint rows are needed.
+  if (Nf > 0) {
+    for (int m_f = 0; m_f < Nf; ++m_f) {
+      const double rate = dcflow[static_cast<size_t>(m_f)].rate;
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(dcflow_idx(m_f, t))] = {
+          VarType::Continuous, -rate, rate,
+          "f_dc" + std::to_string(m_f) + "_t" + std::to_string(t)};
+      }
+    }
+  }
+
+  // Storage degradation: throughput auxiliary g ≥ |p_ess| priced at the
+  // cycle-aging cost replacement_cost / (2·max_cycles·E) per MWh moved.
+  // Combined index k: [0,S) = AC storage, [S,S+Sd) = DC storage.
+  auto stor_ref = [&](int k) -> const Storage& {
+    return (k < S)
+        ? sys.ac.storage[static_cast<size_t>(res.storage_indices[static_cast<size_t>(k)])]
+        : sys.dc.storage[static_cast<size_t>(res.dc_storage_indices[static_cast<size_t>(k - S)])];
+  };
+  auto stor_power_idx = [&](int k, int t) {
+    return (k < S) ? ess_idx(k, t) : dcess_idx(k - S, t);
+  };
+  if (use_degr) {
+    for (int k = 0; k < S + Sd; ++k) {
+      const auto& st = stor_ref(k);
+      const double E = (st.e_rated_mwh > 1e-9) ? st.e_rated_mwh : 1.0;
+      const int ncyc = (st.max_cycles > 0) ? st.max_cycles : 5000;
+      const double degr = (st.replacement_cost > 0.0)
+                              ? st.replacement_cost / (2.0 * ncyc * E)
+                              : 0.0;
+      const double g_hi = std::max(std::abs(st.pmin_mw), st.pmax_mw);
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(gdeg_idx(k, t))] = {
+          VarType::Continuous, 0.0, (g_hi > 0.0 ? g_hi : 1.0e9),
+          "g_deg" + std::to_string(k) + "_t" + std::to_string(t)};
+        m.linear_part.c[gdeg_idx(k, t)] = degr * dt;
+      }
+    }
+  }
+
+  // VPP aggregate dispatch p_vpp ∈ [pmin, pmax] (free aggregate resource) plus an
+  // aggregate energy state e_vpp ∈ [0, E].  When e_storage_sum_mwh = 0 the
+  // envelope is made non-binding by sizing it to the horizon-wide power span
+  // (2·max|p|·T·dt, starting half full) so a generation-only VPP can export its
+  // full power every step without the energy state ever binding.  This keeps the
+  // bound magnitudes small and well-conditioned for the MILP backends (a 1e9
+  // sentinel makes SCIP's presolve report spurious infeasibility).
+  if (use_vpp) {
+    for (int v = 0; v < V; ++v) {
+      const auto& vp = sys.vpps[static_cast<size_t>(res.vpp_indices[static_cast<size_t>(v)])];
+      const double vpp_span =
+          std::max(std::abs(vp.pmin_mw), std::abs(vp.pmax_mw)) * static_cast<double>(T) * dt;
+      const double E_eff = (vp.e_storage_sum_mwh > 1e-9)
+                               ? vp.e_storage_sum_mwh
+                               : std::max(2.0 * vpp_span, 1.0);
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(vpp_idx(v, t))] = {
+          VarType::Continuous, vp.pmin_mw, vp.pmax_mw,
+          "p_vpp" + std::to_string(v) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(vppe_idx(v, t))] = {
+          VarType::Continuous, 0.0, E_eff,
+          "e_vpp" + std::to_string(v) + "_t" + std::to_string(t)};
+      }
+    }
+  }
+
+  // Energy-router ports: inflow / outflow pair per placeable port, each in
+  // [0, cap].  The signed bus injection is p_out − p_in; the per-router lossy
+  // conservation row (added below) couples the ports.  Simultaneous in/out at a
+  // port is never optimal because the round-trip loss must be made up by costed
+  // generation, so no anti-simultaneity binary is required.
+  if (use_router) {
+    for (int p = 0; p < Per; ++p) {
+      const double cap = erports[static_cast<size_t>(p)].cap;
+      for (int t = 0; t < T; ++t) {
+        m.linear_part.vars[static_cast<size_t>(erin_idx(p, t))] = {
+          VarType::Continuous, 0.0, cap,
+          "er_in" + std::to_string(p) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(erout_idx(p, t))] = {
+          VarType::Continuous, 0.0, cap,
+          "er_out" + std::to_string(p) + "_t" + std::to_string(t)};
+      }
+    }
+  }
+
+  // Mobile storage.  Exogenous-schedule mode: power in [pmin, pmax] when
+  // connected, pinned to 0 in transit, plus an energy state.  Co-optimised mode:
+  // connect/transit binaries (z0/z1/w), per-bus injections (q0/q1), and the
+  // energy state; the start (t=0) is anchored connected at the origin.
+  if (use_mobstor && !use_coreloc) {
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        const bool connected = d.loc[static_cast<size_t>(t)] >= 0;
+        m.linear_part.vars[static_cast<size_t>(msp_idx(b, t))] = {
+          VarType::Continuous, connected ? d.pmin : 0.0, connected ? d.pmax : 0.0,
+          "p_ms" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(mse_idx(b, t))] = {
+          VarType::Continuous, d.soc_min, d.soc_max,
+          "e_ms" + std::to_string(b) + "_t" + std::to_string(t)};
+      }
+    }
+  } else if (use_coreloc) {
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const bool has_dest = d.busD >= 0;
+      for (int t = 0; t < T; ++t) {
+        // z0: connected at origin (anchored to 1 at t=0).
+        m.linear_part.vars[static_cast<size_t>(msz0_idx(b, t))] = {
+          VarType::Binary, (t == 0) ? 1.0 : 0.0, 1.0,
+          "ms_z0_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msz0_idx(b, t));
+        // z1: connected at target (disabled when there is no valid destination).
+        m.linear_part.vars[static_cast<size_t>(msz1_idx(b, t))] = {
+          VarType::Binary, 0.0, has_dest && t > 0 ? 1.0 : 0.0,
+          "ms_z1_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msz1_idx(b, t));
+        // w: in transit (0 at t=0).
+        m.linear_part.vars[static_cast<size_t>(msw_idx(b, t))] = {
+          VarType::Binary, 0.0, (has_dest && t > 0) ? 1.0 : 0.0,
+          "ms_w_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msw_idx(b, t));
+        // q0/q1: injection at origin / target (gated by z0/z1 below).
+        m.linear_part.vars[static_cast<size_t>(msq0_idx(b, t))] = {
+          VarType::Continuous, d.pmin, d.pmax,
+          "ms_q0_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(msq1_idx(b, t))] = {
+          VarType::Continuous, has_dest ? d.pmin : 0.0, has_dest ? d.pmax : 0.0,
+          "ms_q1_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(mse_idx(b, t))] = {
+          VarType::Continuous, d.soc_min, d.soc_max,
+          "e_ms" + std::to_string(b) + "_t" + std::to_string(t)};
       }
     }
   }
@@ -778,7 +1387,20 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_eq_soc_ac = S * T;      // AC SOC dynamics
   const int n_eq_soc_dc = Sd * T;     // DC SOC dynamics
   const int n_eq_soc = n_eq_soc_ac + n_eq_soc_dc;
-  const int m_eq = n_eq_balance + n_eq_dc_balance + n_eq_soc;
+  // Shiftable demand response: one energy-neutrality row per flexible load
+  // (Σ_t up − Σ_t down = 0), only in the shiftable variant.
+  const int n_eq_dr_shift = use_dr_shift ? F : 0;
+  // VPP aggregate energy-state dynamics: one row per VPP-step.
+  const int n_eq_vpp = use_vpp ? V * T : 0;
+  // Energy-router internal lossy conservation: one row per active router-step
+  // (Σ_j η_j·p_in_j − Σ_j p_out_j = 0).
+  const int n_eq_router = use_router ? Rrouter * T : 0;
+  // Mobile-storage SOC dynamics: one row per active unit-step.
+  const int n_eq_mobstor = use_mobstor ? M * T : 0;
+  // Co-optimised relocation state-exclusivity (z0 + z1 + w = 1): one per step.
+  const int n_eq_ms_excl = use_coreloc ? M * T : 0;
+  const int m_eq = n_eq_balance + n_eq_dc_balance + n_eq_soc + n_eq_dr_shift
+                 + n_eq_vpp + n_eq_router + n_eq_mobstor + n_eq_ms_excl;
 
   const int n_ineq_pmax = G * T;
   const int n_ineq_pmin = G * T;
@@ -825,10 +1447,39 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_dc_line = 0;
   (void)dc_bus_idx; // used above for DC load/converter mapping
   const int n_ineq_reserve = (opts.reserve_requirement_fraction > 0.0) ? T : 0;
+  // Microgrid islanding gating: two rows per microgrid-step
+  //   p_mg ≤ o·p_export_max  and  −p_mg ≤ o·p_import_max.
+  const int n_ineq_mg = use_mg ? (2 * U * T) : 0;
+  // Storage degradation: two |p| rows per storage-step, plus one daily cycle
+  // cap row per storage whose daily_cycle_limit > 0.
+  const int n_ineq_degr_abs = use_degr ? (2 * (S + Sd) * T) : 0;
+  int n_ineq_degr_cap = 0;
+  if (use_degr) {
+    for (int k = 0; k < S + Sd; ++k) {
+      if (stor_ref(k).daily_cycle_limit > 0.0) ++n_ineq_degr_cap;
+    }
+  }
+  // VPP ramp limits: up to two rows per VPP-step (t ≥ 1) for units with limits.
+  int n_ineq_vpp_ramp = 0;
+  if (use_vpp) {
+    for (int v = 0; v < V; ++v) {
+      const auto& vp = sys.vpps[static_cast<size_t>(res.vpp_indices[static_cast<size_t>(v)])];
+      if (vp.ramp_up_max_mw_min > 0.0) n_ineq_vpp_ramp += (T > 0 ? T - 1 : 0);
+      if (vp.ramp_down_max_mw_min > 0.0) n_ineq_vpp_ramp += (T > 0 ? T - 1 : 0);
+    }
+  }
+  // Co-optimised mobile relocation: q-gating (4·M·T), transit-linking (2·M·T)
+  // and minimum-stay (2·M·T) rows.  All blocks are sized M·T (some rows are
+  // trivially 0 ≤ 0 at the horizon edges) so the counting stays regular.
+  const int n_ineq_ms_q = use_coreloc ? (4 * M * T) : 0;
+  const int n_ineq_ms_transit = use_coreloc ? (2 * M * T) : 0;
+  const int n_ineq_ms_minstay = use_coreloc ? (2 * M * T) : 0;
 
   const int m_ineq = n_ineq_pmax + n_ineq_pmin + n_ineq_ramp_up + n_ineq_ramp_dn
                    + n_ineq_startup + n_ineq_min_updn + n_ineq_line + n_ineq_dc_line
-                   + n_ineq_reserve;
+                   + n_ineq_reserve + n_ineq_mg + n_ineq_degr_abs + n_ineq_degr_cap
+                   + n_ineq_vpp_ramp
+                   + n_ineq_ms_q + n_ineq_ms_transit + n_ineq_ms_minstay;
 
   // --- Compute total load per time step (AC + DC loads) ---
   // Match PF aggregation semantics:
@@ -1026,6 +1677,48 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       for (int ri = 0; ri < R; ++ri) {
         eq_trips.emplace_back(t, ren_idx(ri, t), 1.0);
       }
+      // External-grid net exchange (+import) supplies the copper-plate balance.
+      for (int xi = 0; xi < X; ++xi) {
+        eq_trips.emplace_back(t, ext_idx(xi, t), 1.0);
+      }
+      // Demand response: +up raises demand (−1 on supply side), +down lowers it.
+      for (int fi = 0; fi < F; ++fi) {
+        eq_trips.emplace_back(t, drup_idx(fi, t), -1.0);
+        eq_trips.emplace_back(t, drdn_idx(fi, t), 1.0);
+      }
+      // Dispatchable-PV curtailment reduces must-take injection (−1 = less supply).
+      for (int k = 0; k < Pc; ++k) {
+        eq_trips.emplace_back(t, curt_idx(k, t), -1.0);
+      }
+      // Dispatchable AC static-generator supply (+1).
+      for (int k = 0; k < Ng; ++k) {
+        eq_trips.emplace_back(t, sgen_idx(k, t), 1.0);
+      }
+      // Microgrid PCC exchange injects into the main system (+export).
+      for (int ui = 0; ui < U; ++ui) {
+        eq_trips.emplace_back(t, mgex_idx(ui, t), 1.0);
+      }
+      // VPP aggregate net output injects at the system level (+output).
+      for (int v = 0; v < V; ++v) {
+        eq_trips.emplace_back(t, vpp_idx(v, t), 1.0);
+      }
+      // Energy-router ports: net injection p_out − p_in into the single
+      // copper-plate balance (DC ports also fold in here, as DC injections do).
+      for (int p = 0; p < Per; ++p) {
+        eq_trips.emplace_back(t, erout_idx(p, t), 1.0);
+        eq_trips.emplace_back(t, erin_idx(p, t), -1.0);
+      }
+      // Mobile storage injects (+discharge) into the system balance.  Exogenous
+      // mode uses the single power var when connected; co-optimised mode sums
+      // the two per-bus injections (the bus is irrelevant in copper-plate mode).
+      for (int b = 0; b < M; ++b) {
+        if (use_coreloc) {
+          eq_trips.emplace_back(t, msq0_idx(b, t), 1.0);
+          eq_trips.emplace_back(t, msq1_idx(b, t), 1.0);
+        } else if (mobstor[static_cast<size_t>(b)].loc[static_cast<size_t>(t)] >= 0) {
+          eq_trips.emplace_back(t, msp_idx(b, t), 1.0);
+        }
+      }
       beq[t] = total_load[static_cast<size_t>(t)];
     }
   } else {
@@ -1060,6 +1753,67 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         if (it != bus_idx.end()) vsc_at_ac_bus[static_cast<size_t>(it->second)].push_back(ci);
       }
     }
+    // Map external grids to their AC bus for nodal injection.
+    std::vector<std::vector<int>> ext_at_bus(static_cast<size_t>(net.n_bus));
+    for (int xi = 0; xi < X; ++xi) {
+      const auto& xg = sys.ac.external_grids[static_cast<size_t>(res.ext_indices[static_cast<size_t>(xi)])];
+      auto it = bus_idx.find(xg.bus);
+      if (it != bus_idx.end()) ext_at_bus[static_cast<size_t>(it->second)].push_back(xi);
+    }
+    // Map flexible loads to their AC bus for nodal demand adjustment.
+    std::vector<std::vector<int>> flex_at_bus(static_cast<size_t>(net.n_bus));
+    for (int fi = 0; fi < F; ++fi) {
+      const auto& fl = sys.ac.flexible_loads[static_cast<size_t>(res.flex_indices[static_cast<size_t>(fi)])];
+      auto it = bus_idx.find(fl.bus);
+      if (it != bus_idx.end()) flex_at_bus[static_cast<size_t>(it->second)].push_back(fi);
+    }
+    // Route PV curtailment to the AC bus where the source was subtracted:
+    // AC PV → its own bus; DC sources (no explicit DC network) → the slack bus
+    // (their must-take was folded into the slack residual).  DC-network DC
+    // sources are routed in the DC nodal balance below instead.
+    std::vector<std::vector<int>> curt_at_ac_bus(static_cast<size_t>(net.n_bus));
+    for (int k = 0; k < Pc; ++k) {
+      const auto& d = pvcurt[static_cast<size_t>(k)];
+      if (d.ac_bus >= 0) {
+        auto it = bus_idx.find(d.ac_bus);
+        if (it != bus_idx.end()) curt_at_ac_bus[static_cast<size_t>(it->second)].push_back(k);
+      } else if (!use_dc_network && net.slack_bus >= 0) {
+        curt_at_ac_bus[static_cast<size_t>(net.slack_bus)].push_back(k);
+      }
+    }
+    // Map microgrids to their PCC bus for nodal exchange injection.
+    std::vector<std::vector<int>> mg_at_bus(static_cast<size_t>(net.n_bus));
+    for (int ui = 0; ui < U; ++ui) {
+      const auto& mg = sys.microgrids[static_cast<size_t>(res.mg_indices[static_cast<size_t>(ui)])];
+      auto it = bus_idx.find(mg.pcc_bus);
+      if (it != bus_idx.end()) mg_at_bus[static_cast<size_t>(it->second)].push_back(ui);
+    }
+    // Map dispatchable AC static generators to their bus.
+    std::vector<std::vector<int>> sgen_at_bus(static_cast<size_t>(net.n_bus));
+    for (int k = 0; k < Ng; ++k) {
+      auto it = bus_idx.find(sgsup[static_cast<size_t>(k)].ac_bus);
+      if (it != bus_idx.end()) sgen_at_bus[static_cast<size_t>(it->second)].push_back(k);
+    }
+    // Map VPPs to their PCC bus.
+    std::vector<std::vector<int>> vpp_at_bus(static_cast<size_t>(net.n_bus));
+    for (int v = 0; v < V; ++v) {
+      const auto& vp = sys.vpps[static_cast<size_t>(res.vpp_indices[static_cast<size_t>(v)])];
+      auto it = bus_idx.find(vp.pcc_bus);
+      if (it != bus_idx.end()) vpp_at_bus[static_cast<size_t>(it->second)].push_back(v);
+    }
+    // Map energy-router ports to an AC balance row: AC ports → their own bus;
+    // DC ports without an explicit DC network → the slack bus (their injection
+    // folds into the slack residual, mirroring the must-take DC sources).
+    std::vector<std::vector<int>> er_at_ac_bus(static_cast<size_t>(net.n_bus));
+    for (int p = 0; p < Per; ++p) {
+      const auto& ep = erports[static_cast<size_t>(p)];
+      if (ep.ac_bus >= 0) {
+        auto it = bus_idx.find(ep.ac_bus);
+        if (it != bus_idx.end()) er_at_ac_bus[static_cast<size_t>(it->second)].push_back(p);
+      } else if (ep.dc_bus >= 0 && !use_dc_network && net.slack_bus >= 0) {
+        er_at_ac_bus[static_cast<size_t>(net.slack_bus)].push_back(p);
+      }
+    }
 
     // Pre-compute a row-major view of B to allow O(nnz) row iteration.
     // net.B is column-major by default; scanning all columns via .coeff(b,j)
@@ -1078,6 +1832,36 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         }
         for (int ri : ren_at_bus[static_cast<size_t>(b)]) {
           eq_trips.emplace_back(row_bal, ren_idx(ri, t), 1.0);
+        }
+        // External-grid net exchange injected at its AC bus (+import).
+        for (int xi : ext_at_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, ext_idx(xi, t), 1.0);
+        }
+        // Demand response at this bus: +up raises demand, +down lowers it.
+        for (int fi : flex_at_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, drup_idx(fi, t), -1.0);
+          eq_trips.emplace_back(row_bal, drdn_idx(fi, t), 1.0);
+        }
+        // PV curtailment reduces must-take injection at this AC bus (−1).
+        for (int k : curt_at_ac_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, curt_idx(k, t), -1.0);
+        }
+        // Microgrid PCC exchange injects at its PCC bus (+export).
+        for (int ui : mg_at_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, mgex_idx(ui, t), 1.0);
+        }
+        // Dispatchable AC static-generator supply at this bus (+1).
+        for (int k : sgen_at_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, sgen_idx(k, t), 1.0);
+        }
+        // VPP aggregate net output at its PCC bus (+1).
+        for (int v : vpp_at_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, vpp_idx(v, t), 1.0);
+        }
+        // Energy-router net injection (p_out − p_in) at this AC bus.
+        for (int p : er_at_ac_bus[static_cast<size_t>(b)]) {
+          eq_trips.emplace_back(row_bal, erout_idx(p, t), 1.0);
+          eq_trips.emplace_back(row_bal, erin_idx(p, t), -1.0);
         }
         // VSC converters: p_vsc is AC-side injection (positive = into AC bus)
         if (use_dc_network) {
@@ -1106,6 +1890,30 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         }
 
         beq[row_bal] = bus_load[static_cast<size_t>(bus_load_idx(b, t))];
+      }
+    }
+    // Mobile storage injects (+discharge) at its bus each step.  Exogenous mode
+    // uses the scheduled bus loc[t]; co-optimised mode routes q0 to the origin
+    // bus and q1 to the target bus (each gated to 0 unless connected there).
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        if (use_coreloc) {
+          auto io = bus_idx.find(d.busO);
+          if (io != bus_idx.end())
+            eq_trips.emplace_back(t * net.n_bus + io->second, msq0_idx(b, t), 1.0);
+          if (d.busD >= 0) {
+            auto id = bus_idx.find(d.busD);
+            if (id != bus_idx.end())
+              eq_trips.emplace_back(t * net.n_bus + id->second, msq1_idx(b, t), 1.0);
+          }
+        } else {
+          const int raw = d.loc[static_cast<size_t>(t)];
+          if (raw < 0) continue;
+          auto it = bus_idx.find(raw);
+          if (it == bus_idx.end()) continue;
+          eq_trips.emplace_back(t * net.n_bus + it->second, msp_idx(b, t), 1.0);
+        }
       }
     }
   }
@@ -1149,6 +1957,33 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       if (ti != dc_bus_idx.end()) dcdc_at_dc_bus[static_cast<size_t>(ti->second)].emplace_back(di, false);
     }
 
+    // Route DC-side PV curtailment to its DC bus (reduces injection → −1).
+    std::vector<std::vector<int>> curt_at_dc_bus(static_cast<size_t>(dcg.n_dc_bus));
+    for (int k = 0; k < Pc; ++k) {
+      const auto& d = pvcurt[static_cast<size_t>(k)];
+      if (d.dc_bus < 0) continue;
+      auto it = dc_bus_idx.find(d.dc_bus);
+      if (it != dc_bus_idx.end()) curt_at_dc_bus[static_cast<size_t>(it->second)].push_back(k);
+    }
+    // Route DC branch flows to their endpoints: −f leaves the from-bus, +f
+    // arrives at the to-bus.
+    std::vector<std::vector<std::pair<int,double>>> dcflow_at_bus(static_cast<size_t>(dcg.n_dc_bus));
+    for (int mf = 0; mf < Nf; ++mf) {
+      const auto& d = dcflow[static_cast<size_t>(mf)];
+      if (d.from_pos >= 0 && d.from_pos < dcg.n_dc_bus)
+        dcflow_at_bus[static_cast<size_t>(d.from_pos)].emplace_back(mf, -1.0);
+      if (d.to_pos >= 0 && d.to_pos < dcg.n_dc_bus)
+        dcflow_at_bus[static_cast<size_t>(d.to_pos)].emplace_back(mf, 1.0);
+    }
+    // Route energy-router DC ports to their DC bus (net injection p_out − p_in).
+    std::vector<std::vector<int>> er_at_dc_bus(static_cast<size_t>(dcg.n_dc_bus));
+    for (int p = 0; p < Per; ++p) {
+      const auto& ep = erports[static_cast<size_t>(p)];
+      if (ep.dc_bus < 0) continue;
+      auto it = dc_bus_idx.find(ep.dc_bus);
+      if (it != dc_bus_idx.end()) er_at_dc_bus[static_cast<size_t>(it->second)].push_back(p);
+    }
+
     for (int t = 0; t < T; ++t) {
       for (int d = 0; d < dcg.n_dc_bus; ++d) {
         // DC balance rows start at n_eq_balance, spanning dcg.n_dc_bus * T rows.
@@ -1165,6 +2000,20 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         // DC ESS at this DC bus
         for (int si : dcess_at_dc_bus[static_cast<size_t>(d)]) {
           eq_trips.emplace_back(row_dc2, dcess_idx(si, t), 1.0);
+        }
+
+        // DC-side PV / static-gen curtailment reduces injection at this DC bus.
+        for (int k : curt_at_dc_bus[static_cast<size_t>(d)]) {
+          eq_trips.emplace_back(row_dc2, curt_idx(k, t), -1.0);
+        }
+        // DC branch transport flows (−f out of from-bus, +f into to-bus).
+        for (const auto& [mf, sgn] : dcflow_at_bus[static_cast<size_t>(d)]) {
+          eq_trips.emplace_back(row_dc2, dcflow_idx(mf, t), sgn);
+        }
+        // Energy-router DC ports: net injection p_out − p_in at this DC bus.
+        for (int p : er_at_dc_bus[static_cast<size_t>(d)]) {
+          eq_trips.emplace_back(row_dc2, erout_idx(p, t), 1.0);
+          eq_trips.emplace_back(row_dc2, erin_idx(p, t), -1.0);
         }
 
         // DC-DC converters
@@ -1234,6 +2083,111 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       } else {
         eq_trips.emplace_back(row_dc, dcsoc_idx(si, t - 1), -sd);
         beq[row_dc] = 0.0;
+      }
+    }
+  }
+
+  // Shiftable demand response: per-load energy neutrality over the horizon,
+  //   Σ_t up[f,t] − Σ_t down[f,t] = 0  (deferred load is recovered, not lost).
+  if (use_dr_shift) {
+    const int dr_eq_offset = soc_eq_offset + n_eq_soc;
+    for (int fi = 0; fi < F; ++fi) {
+      const int row_dr = dr_eq_offset + fi;
+      for (int t = 0; t < T; ++t) {
+        eq_trips.emplace_back(row_dr, drup_idx(fi, t), 1.0);
+        eq_trips.emplace_back(row_dr, drdn_idx(fi, t), -1.0);
+      }
+      beq[row_dr] = 0.0;
+    }
+  }
+
+  // VPP aggregate energy-state dynamics: e_vpp[v,t] = e_vpp[v,t-1] − p_vpp[v,t]·dt
+  // (net output depletes the aggregate energy), starting from a half-full state.
+  if (use_vpp) {
+    const int vpp_eq_offset = soc_eq_offset + n_eq_soc + n_eq_dr_shift;
+    for (int v = 0; v < V; ++v) {
+      const auto& vp = sys.vpps[static_cast<size_t>(res.vpp_indices[static_cast<size_t>(v)])];
+      const double vpp_span =
+          std::max(std::abs(vp.pmin_mw), std::abs(vp.pmax_mw)) * static_cast<double>(T) * dt;
+      const double E_eff = (vp.e_storage_sum_mwh > 1e-9)
+                               ? vp.e_storage_sum_mwh
+                               : std::max(2.0 * vpp_span, 1.0);
+      for (int t = 0; t < T; ++t) {
+        const int row_v = vpp_eq_offset + v * T + t;
+        eq_trips.emplace_back(row_v, vppe_idx(v, t), 1.0);
+        eq_trips.emplace_back(row_v, vpp_idx(v, t), dt);
+        if (t == 0) {
+          beq[row_v] = 0.5 * E_eff;
+        } else {
+          eq_trips.emplace_back(row_v, vppe_idx(v, t - 1), -1.0);
+          beq[row_v] = 0.0;
+        }
+      }
+    }
+  }
+
+  // Energy-router internal lossy power conservation, per active router-step:
+  //   Σ_j η_j·p_in[j,t] − Σ_j p_out[j,t] = 0
+  // (inflow crosses the port with efficiency η_j into the internal node; outflow
+  // is drawn from it).  Rows follow the VPP block.
+  if (use_router) {
+    const int router_eq_offset =
+        soc_eq_offset + n_eq_soc + n_eq_dr_shift + n_eq_vpp;
+    for (int rp = 0; rp < Rrouter; ++rp) {
+      for (int t = 0; t < T; ++t) {
+        const int row_r = router_eq_offset + rp * T + t;
+        for (int p : er_ports_of_router[static_cast<size_t>(rp)]) {
+          eq_trips.emplace_back(row_r, erin_idx(p, t), erports[static_cast<size_t>(p)].eta);
+          eq_trips.emplace_back(row_r, erout_idx(p, t), -1.0);
+        }
+        beq[row_r] = 0.0;
+      }
+    }
+  }
+
+  // Mobile-storage SOC dynamics (per-unit SOC, +discharge depletes energy):
+  //   e[b,0] + dt/(η·E)·p[b,0] = soc_init
+  //   e[b,t] − e[b,t-1] + dt/(η·E)·p[b,t] = 0   (t ≥ 1)
+  // While in transit p is pinned to 0, so the SOC simply holds.
+  if (use_mobstor) {
+    const int mobstor_eq_offset =
+        soc_eq_offset + n_eq_soc + n_eq_dr_shift + n_eq_vpp + n_eq_router;
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const double coeff_p = dt / (d.eta * d.E);
+      for (int t = 0; t < T; ++t) {
+        const int row_m = mobstor_eq_offset + b * T + t;
+        eq_trips.emplace_back(row_m, mse_idx(b, t), 1.0);
+        if (use_coreloc) {
+          // Power is the sum of the two per-bus injections; transit drains SOC.
+          eq_trips.emplace_back(row_m, msq0_idx(b, t), coeff_p);
+          eq_trips.emplace_back(row_m, msq1_idx(b, t), coeff_p);
+          if (d.drain > 0.0)
+            eq_trips.emplace_back(row_m, msw_idx(b, t), d.drain);
+        } else {
+          eq_trips.emplace_back(row_m, msp_idx(b, t), coeff_p);
+        }
+        if (t == 0) {
+          beq[row_m] = d.soc_init;
+        } else {
+          eq_trips.emplace_back(row_m, mse_idx(b, t - 1), -1.0);
+          beq[row_m] = 0.0;
+        }
+      }
+    }
+  }
+
+  // Co-optimised relocation: state-exclusivity z0 + z1 + w = 1 per unit-step.
+  if (use_coreloc) {
+    const int ms_excl_offset =
+        soc_eq_offset + n_eq_soc + n_eq_dr_shift + n_eq_vpp + n_eq_router + n_eq_mobstor;
+    for (int b = 0; b < M; ++b) {
+      for (int t = 0; t < T; ++t) {
+        const int row_e = ms_excl_offset + b * T + t;
+        eq_trips.emplace_back(row_e, msz0_idx(b, t), 1.0);
+        eq_trips.emplace_back(row_e, msz1_idx(b, t), 1.0);
+        eq_trips.emplace_back(row_e, msw_idx(b, t), 1.0);
+        beq[row_e] = 1.0;
       }
     }
   }
@@ -1426,6 +2380,143 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
+  // Microgrid islanding gating: exchange is zero unless grid-connected (o = 1).
+  //   p_mg − o·p_export_max ≤ 0      (export only when connected)
+  //  −p_mg − o·p_import_max ≤ 0      (import only when connected)
+  if (use_mg) {
+    for (int ui = 0; ui < U; ++ui) {
+      const auto& mg = sys.microgrids[static_cast<size_t>(res.mg_indices[static_cast<size_t>(ui)])];
+      const double p_imp = std::max(0.0, mg.p_import_max_mw);
+      const double p_exp = std::max(0.0, mg.p_export_max_mw);
+      for (int t = 0; t < T; ++t) {
+        ineq_trips.emplace_back(row, mgex_idx(ui, t), 1.0);
+        ineq_trips.emplace_back(row, mgo_idx(ui, t), -p_exp);
+        b_ineq[row] = 0.0;
+        ++row;
+        ineq_trips.emplace_back(row, mgex_idx(ui, t), -1.0);
+        ineq_trips.emplace_back(row, mgo_idx(ui, t), -p_imp);
+        b_ineq[row] = 0.0;
+        ++row;
+      }
+    }
+  }
+
+  // Storage degradation: throughput auxiliary g ≥ |p_ess|, plus optional daily
+  // cycle cap.
+  if (use_degr) {
+    for (int k = 0; k < S + Sd; ++k) {
+      for (int t = 0; t < T; ++t) {
+        // p_ess − g ≤ 0
+        ineq_trips.emplace_back(row, stor_power_idx(k, t), 1.0);
+        ineq_trips.emplace_back(row, gdeg_idx(k, t), -1.0);
+        b_ineq[row] = 0.0;
+        ++row;
+        // −p_ess − g ≤ 0
+        ineq_trips.emplace_back(row, stor_power_idx(k, t), -1.0);
+        ineq_trips.emplace_back(row, gdeg_idx(k, t), -1.0);
+        b_ineq[row] = 0.0;
+        ++row;
+      }
+    }
+    // Daily cycle cap: Σ_t g·dt ≤ 2·daily_cycle_limit·E.
+    for (int k = 0; k < S + Sd; ++k) {
+      const auto& st = stor_ref(k);
+      if (st.daily_cycle_limit <= 0.0) continue;
+      const double E = (st.e_rated_mwh > 1e-9) ? st.e_rated_mwh : 1.0;
+      for (int t = 0; t < T; ++t) {
+        ineq_trips.emplace_back(row, gdeg_idx(k, t), dt);
+      }
+      b_ineq[row] = 2.0 * st.daily_cycle_limit * E;
+      ++row;
+    }
+  }
+
+  // VPP ramp limits: |p_vpp[v,t] − p_vpp[v,t−1]| ≤ ramp·dt·60.
+  if (use_vpp) {
+    for (int v = 0; v < V; ++v) {
+      const auto& vp = sys.vpps[static_cast<size_t>(res.vpp_indices[static_cast<size_t>(v)])];
+      if (vp.ramp_up_max_mw_min > 0.0) {
+        const double lim = vp.ramp_up_max_mw_min * dt * 60.0;
+        for (int t = 1; t < T; ++t) {
+          ineq_trips.emplace_back(row, vpp_idx(v, t), 1.0);
+          ineq_trips.emplace_back(row, vpp_idx(v, t - 1), -1.0);
+          b_ineq[row] = lim;
+          ++row;
+        }
+      }
+      if (vp.ramp_down_max_mw_min > 0.0) {
+        const double lim = vp.ramp_down_max_mw_min * dt * 60.0;
+        for (int t = 1; t < T; ++t) {
+          ineq_trips.emplace_back(row, vpp_idx(v, t - 1), 1.0);
+          ineq_trips.emplace_back(row, vpp_idx(v, t), -1.0);
+          b_ineq[row] = lim;
+          ++row;
+        }
+      }
+    }
+  }
+
+  // Co-optimised mobile relocation inequalities (each block sized M·T so the
+  // count stays regular; horizon-edge rows are trivially 0 ≤ 0):
+  //   (1) q-gating  q ∈ [pmin·z, pmax·z]  — inject only at the connected bus
+  //   (2) transit-linking  leaving a bus forces a transit step
+  //   (3) minimum-stay  a fresh connection must persist for min_stay steps
+  if (use_coreloc) {
+    for (int b = 0; b < M; ++b) {           // (1) q-gating: 4 rows per (b,t)
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        ineq_trips.emplace_back(row, msq0_idx(b, t), 1.0);          // q0 ≤ pmax·z0
+        ineq_trips.emplace_back(row, msz0_idx(b, t), -d.pmax);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msz0_idx(b, t), d.pmin);       // pmin·z0 ≤ q0
+        ineq_trips.emplace_back(row, msq0_idx(b, t), -1.0);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msq1_idx(b, t), 1.0);          // q1 ≤ pmax·z1
+        ineq_trips.emplace_back(row, msz1_idx(b, t), -d.pmax);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msz1_idx(b, t), d.pmin);       // pmin·z1 ≤ q1
+        ineq_trips.emplace_back(row, msq1_idx(b, t), -1.0);
+        b_ineq[row] = 0.0; ++row;
+      }
+    }
+    for (int b = 0; b < M; ++b) {           // (2) transit-linking: 2 rows per (b,t)
+      for (int t = 0; t < T; ++t) {
+        if (t >= 1) {                       // z0[t-1] − z0[t] − w[t] ≤ 0
+          ineq_trips.emplace_back(row, msz0_idx(b, t - 1), 1.0);
+          ineq_trips.emplace_back(row, msz0_idx(b, t), -1.0);
+          ineq_trips.emplace_back(row, msw_idx(b, t), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+        if (t >= 1) {                       // z1[t-1] − z1[t] − w[t] ≤ 0
+          ineq_trips.emplace_back(row, msz1_idx(b, t - 1), 1.0);
+          ineq_trips.emplace_back(row, msz1_idx(b, t), -1.0);
+          ineq_trips.emplace_back(row, msw_idx(b, t), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+      }
+    }
+    for (int b = 0; b < M; ++b) {           // (3) min-stay: 2 rows per (b,t)
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const int H = d.min_stay;
+      for (int t = 0; t < T; ++t) {
+        if (H >= 2 && t >= 1 && t + H <= T) {     // origin window
+          ineq_trips.emplace_back(row, msz0_idx(b, t), static_cast<double>(H) - 1.0);
+          ineq_trips.emplace_back(row, msz0_idx(b, t - 1), -static_cast<double>(H));
+          for (int tau = t + 1; tau < t + H; ++tau)
+            ineq_trips.emplace_back(row, msz0_idx(b, tau), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+        if (H >= 2 && d.busD >= 0 && t >= 1 && t + H <= T) {  // target window
+          ineq_trips.emplace_back(row, msz1_idx(b, t), static_cast<double>(H) - 1.0);
+          ineq_trips.emplace_back(row, msz1_idx(b, t - 1), -static_cast<double>(H));
+          for (int tau = t + 1; tau < t + H; ++tau)
+            ineq_trips.emplace_back(row, msz1_idx(b, tau), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+      }
+    }
+  }
+
   if (row != m_ineq) {
     throw std::runtime_error("UC MILP row assembly mismatch");
   }
@@ -1467,6 +2558,14 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
   }
   if (choice == UCSolverChoice::HiGHS) {
     return std::make_shared<HighsAdapter>();
+  }
+  if (choice == UCSolverChoice::SCIP) {
+    // SCIP solves the UC MILP directly via its native MPS reader (embedded
+    // libscip when compiled in, else the SCIP executable).  Fall back to the
+    // tuned native B&C when SCIP is unavailable so the choice never dead-ends.
+    auto scip = std::make_shared<ScipAdapter>();
+    if (scip->available()) return scip;
+    return make_tuned_native();
   }
   if (choice == UCSolverChoice::Gurobi) {
     return std::make_shared<GurobiAdapter>();
@@ -2028,7 +3127,7 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
   }
 
   return extract_schedule(result.x, build,
-                          result.stats.objective,
+                          result.stats.objective + build.obj_offset,
                           result.stats.success,
                           result.stats.solver_name);
 }
@@ -2036,11 +3135,137 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
 // ═══════════════════════════════════════════════════════════════════════
 // Full pipeline: UC → OPF (per step) → PF validation (per step)
 // ═══════════════════════════════════════════════════════════════════════
+
+// Slice a time-series window [g0, g1) out of `src`, copying the corresponding
+// span of every profile.  Used by the per-day parallel decomposition.
+static TimeSeriesData slice_ts_window(const TimeSeriesData& src, int g0, int g1) {
+  TimeSeriesData out;
+  out.step_duration_hr = src.step_duration_hr;
+  out.num_steps = std::max(0, g1 - g0);
+  out.profiles.reserve(src.profiles.size());
+  for (const auto& p : src.profiles) {
+    TimeSeriesProfile dp;
+    dp.id = p.id;
+    dp.name = p.name;
+    dp.values.reserve(static_cast<size_t>(out.num_steps));
+    for (int t = g0; t < g1; ++t) {
+      if (t >= 0 && t < static_cast<int>(p.values.size()))
+        dp.values.push_back(p.values[static_cast<size_t>(t)]);
+      else if (!p.values.empty())
+        dp.values.push_back(p.values.back());
+      else
+        dp.values.push_back(1.0);
+    }
+    out.profiles.push_back(std::move(dp));
+  }
+  return out;
+}
+
+// Stitch per-day TimeSeriesPFResults (in chronological order) into one result by
+// concatenating every per-step series along the time axis.
+static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& parts,
+                                            int total_steps) {
+  TimeSeriesPFResult out;
+  out.num_steps = total_steps;
+  auto cat_d = [](std::vector<std::vector<double>>& dst,
+                  const std::vector<std::vector<double>>& src) {
+    if (src.empty()) return;
+    if (dst.empty()) dst.resize(src.size());
+    if (dst.size() != src.size()) return;
+    for (size_t c = 0; c < src.size(); ++c)
+      dst[c].insert(dst[c].end(), src[c].begin(), src[c].end());
+  };
+  auto cat_i = [](std::vector<std::vector<int>>& dst,
+                  const std::vector<std::vector<int>>& src) {
+    if (src.empty()) return;
+    if (dst.empty()) dst.resize(src.size());
+    if (dst.size() != src.size()) return;
+    for (size_t c = 0; c < src.size(); ++c)
+      dst[c].insert(dst[c].end(), src[c].begin(), src[c].end());
+  };
+  bool first = true;
+  out.uc_schedule.feasible = true;
+  for (auto& p : parts) {
+    auto& u = p.uc_schedule;
+    cat_d(out.uc_schedule.gen_dispatch, u.gen_dispatch);
+    cat_i(out.uc_schedule.gen_commit, u.gen_commit);
+    cat_d(out.uc_schedule.ess_dispatch, u.ess_dispatch);
+    cat_d(out.uc_schedule.ess_soc, u.ess_soc);
+    cat_d(out.uc_schedule.renewable_dispatch, u.renewable_dispatch);
+    cat_d(out.uc_schedule.dc_pv_dispatch, u.dc_pv_dispatch);
+    cat_d(out.uc_schedule.dc_ess_dispatch, u.dc_ess_dispatch);
+    cat_d(out.uc_schedule.dc_ess_soc, u.dc_ess_soc);
+    cat_d(out.uc_schedule.dc_sgen_dispatch, u.dc_sgen_dispatch);
+    cat_d(out.uc_schedule.dc_load_demand, u.dc_load_demand);
+    cat_d(out.uc_schedule.vsc_dispatch, u.vsc_dispatch);
+    cat_d(out.uc_schedule.dcdc_dispatch, u.dcdc_dispatch);
+    out.uc_schedule.total_cost += u.total_cost;
+    out.uc_schedule.feasible = out.uc_schedule.feasible && u.feasible;
+    if (first) { out.uc_schedule.solver_name = u.solver_name; first = false; }
+    for (auto& x : p.opf_results) out.opf_results.push_back(std::move(x));
+    for (auto& x : p.pf_results) out.pf_results.push_back(std::move(x));
+    for (auto& x : p.pf_system_snapshots) out.pf_system_snapshots.push_back(std::move(x));
+    for (auto& x : p.crossval) out.crossval.push_back(std::move(x));
+    out.num_converged += p.num_converged;
+    out.num_opf_converged += p.num_opf_converged;
+    out.total_generation_cost += p.total_generation_cost;
+    out.uc_solve_sec += p.uc_solve_sec;
+  }
+  return out;
+}
+
 TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
                                          const TimeSeriesData& ts_data,
                                          const TimeSeriesPFOptions& opts) {
-  TimeSeriesPFResult result;
   const int T = ts_data.num_steps;
+
+  // ── Optional per-day parallel decomposition ──────────────────────────────
+  // Split a multi-day horizon into independent scheduling days (cyclic SOC per
+  // day), solve them concurrently, and stitch the per-step results back. The
+  // single-day coupled solve below runs when this is disabled or T fits one day.
+  if (opts.parallel_daily && T > 0) {
+    const double dt = ts_data.step_duration_hr > 0.0 ? ts_data.step_duration_hr : 1.0;
+    const int day_len = std::max(1, static_cast<int>(std::lround(24.0 / dt)));
+    const int num_days = (T + day_len - 1) / day_len;
+    if (num_days > 1) {
+      TimeSeriesPFOptions day_opts = opts;
+      day_opts.parallel_daily = false;              // each day is a plain solve
+      day_opts.enforce_terminal_soc_cyclic = true;  // independence across days
+      // Force the thread-safe native parity IPM for any per-step AC-OPF.
+      day_opts.opf_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+      // Concurrent MILP is safe only with instance-isolated SCIP (HiGHS shares a
+      // global scheduler; native B&C spawns its own threads).  No MILP when skip_uc.
+      const bool uses_milp = !opts.skip_uc;
+      const bool parallel_safe =
+          !uses_milp || (opts.uc_solver == UCSolverChoice::SCIP);
+
+      std::vector<TimeSeriesPFResult> day_results(static_cast<size_t>(num_days));
+      auto solve_day = [&](int d) {
+        const int g0 = d * day_len;
+        const int g1 = std::min(g0 + day_len, T);
+        if (g1 <= g0) return;
+        TimeSeriesData sub = slice_ts_window(ts_data, g0, g1);
+        day_results[static_cast<size_t>(d)] = solve_time_series_pf(sys_in, sub, day_opts);
+      };
+      if (parallel_safe) {
+        int nthreads = opts.parallel_threads > 0
+                           ? opts.parallel_threads
+                           : static_cast<int>(std::thread::hardware_concurrency());
+        if (nthreads <= 0) nthreads = 1;
+        util::ThreadPool pool(std::min(nthreads, num_days));
+        std::vector<std::future<void>> futs;
+        futs.reserve(static_cast<size_t>(num_days));
+        for (int d = 0; d < num_days; ++d)
+          futs.push_back(pool.submit([&solve_day, d]() { solve_day(d); }));
+        for (auto& f : futs) f.get();
+      } else {
+        for (int d = 0; d < num_days; ++d) solve_day(d);
+      }
+      return concat_ts_results(day_results, T);
+    }
+  }
+
+  TimeSeriesPFResult result;
   result.num_steps = T;
 
   if (T <= 0) {

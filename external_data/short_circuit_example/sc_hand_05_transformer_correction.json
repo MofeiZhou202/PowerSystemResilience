@@ -1,0 +1,39 @@
+{
+  "name": "SC_HAND_05_transformer_correction",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "HVSourceBus", "bus_type": "SLACK", "base_kv": 110.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "LVFaultBus", "bus_type": "PQ", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [],
+    "generators": [],
+    "loads": [],
+    "external_grids": [
+      {"index": 1, "name": "HVGrid", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "r_pu": 0.001, "x_pu": 0.01, "vn_kv": 110.0, "in_service": true}
+    ],
+    "transformers_2w": [
+      {"index": 1, "name": "T1_110_20kV_100MVA", "hv_bus": 1, "lv_bus": 2, "sn_mva": 100.0, "vn_hv_kv": 110.0, "vn_lv_kv": 20.0, "vk_percent": 10.0, "vkr_percent": 0.0, "shift_deg": 0.0, "tap_side": 0, "tap_pos": 0, "tap_min": 0, "tap_max": 0, "tap_neutral": 0, "tap_step_percent": 0.0, "vector_group": "Dyn11", "in_service": true}
+    ],
+    "static_generators": []
+  },
+  "expected_short_circuit": {
+    "basis": "Detailed IEC max calculation, c=1.1. Transformer correction K_T=0.95*c/(1+0.6*xT)=0.9858490566 for xT=0.10 pu. Zth=0.001+j(0.01+0.10*K_T).",
+    "checks": [
+      {
+        "fault_bus_id": 2,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1},
+        "transformer_k_t": 0.9858490566037734,
+        "z_thevenin_pu": {"r": 0.001, "x": 0.10858490566037735, "abs": 0.10858951025431991},
+        "i_base_ka": 2.886751345948129,
+        "ikss_ka": 29.24247906732425,
+        "sk_mva": 1012.9891896774992
+      }
+    ],
+    "tolerance": {"relative": 2e-4, "absolute_ka": 1e-4}
+  }
+}
+

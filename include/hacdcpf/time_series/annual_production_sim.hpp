@@ -168,6 +168,17 @@ enum class AnnualBlockType {
   Weekly,     // 52 blocks — finer L0 resolution
 };
 
+/// Per-day simulation model for the parallel daily decomposition.
+/// Each calendar day is an independent, energy-neutral horizon (cyclic SOC), so
+/// all days can be solved concurrently.
+enum class DailySimMode {
+  SCUC,         // Security-constrained unit commitment: binary commitment + DC
+                // network/line limits, then AC-OPF + PF replay.
+  DynamicSCED,  // Dynamic security-constrained economic dispatch: commitment
+                // fixed ON, multi-period ED with ramping + network limits.
+  DynamicOPF,   // Dynamic optimal power flow: per-step AC-OPF + PF (no UC).
+};
+
 struct AnnualProductionSimOptions {
   // Pipeline options inherited per sub-horizon solve
   TimeSeriesPFOptions ts_pf_options;
@@ -176,6 +187,19 @@ struct AnnualProductionSimOptions {
   AnnualBlockType block_type{AnnualBlockType::Monthly};
   int weekly_lookahead_hours{48};      // L2 look-ahead buffer
   int daily_window_hours{24};          // L3 daily sub-horizon
+
+  // ── Parallel daily decomposition ───────────────────────────────────────
+  // When enabled, the year is partitioned into independent calendar days
+  // (each an energy-neutral horizon via per-day cyclic SOC) and the days are
+  // solved concurrently on a thread pool, bypassing the sequential L0→L3 path.
+  bool enable_parallel_daily{false};
+  DailySimMode daily_mode{DailySimMode::SCUC};
+  int parallel_threads{0};             // 0 = hardware_concurrency()
+  bool enforce_daily_cyclic_soc{true}; // pin each day's terminal SOC to its initial
+  // Dynamic-SCED commitment source: when true, a representative (peak-load) day
+  // is first solved as SCUC and its commitment is reused across all SCED days;
+  // when false, every in-service unit is simply forced ON.
+  bool sced_reuse_scuc_commitment{true};
 
   // Cyclic storage boundary enforcement
   bool enforce_cyclic_soc{true};       // E_{s,T-1} = E_{s,0}

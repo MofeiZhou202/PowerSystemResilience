@@ -134,11 +134,24 @@ struct SCDetailedBranchResult {
   double s_branch_mva{0.0};           ///< Apparent power flow through branch during fault [MVA]
 };
 
+struct SCConverterContributionResult {
+  int converter_index{0};
+  int bus_id{0};
+  std::string name;
+  std::string model;                 ///< grid_following_current_source, ac_grid_forming_voltage_source, ...
+  bool ac_grid_forming{false};
+  bool dc_grid_forming{false};
+  double p_rated_mw{0.0};
+  double i_limit_pu{0.0};
+  double contribution_ka{0.0};
+};
+
 struct SCDetailedResult {
   int fault_bus_id{0};
   bool solved{false};
   std::vector<SCDetailedBusResult> bus_results;
   std::vector<SCDetailedBranchResult> branch_results;
+  std::vector<SCConverterContributionResult> converter_contributions;
 };
 
 struct SCGeneratorParams {

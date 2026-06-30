@@ -7,6 +7,11 @@ This chapter documents the current ONR mixed-integer model for radial feeder
 reconfiguration.  The runtime problem is a LinDistFlow-style MILP with binary
 branch-status variables, feeder-flow variables, squared-voltage variables, and
 connectivity-flow variables, solved through the native branch-and-cut engine.
+The formulation is written over solver-visible canonical network components,
+matching the power-flow and public OPF convention in
+Sections~\ref{sec:powerflow} and~\ref{sec:opf}.  The binary switching decision
+is therefore a canonical line or edge status, not a direct physical command on
+every circuit breaker or switch object.
 
 \subsection{Code Map}
 
@@ -40,12 +45,14 @@ builds a restoration MILP with failed-line availability, source limits, load
 pickup, and optional PF-style constraints.  They share graph and MILP concepts
 but have different data assembly and fallback behavior.
 
-\subsection{Scope of the Current ONR Module}
+\subsection{Canonical Model Space}
 
-The ONR solver now exposes both \texttt{ACSystem} and
-\texttt{HybridPowerSystem} overloads.  The \texttt{HybridPowerSystem} overload
-first projects the rich model through \texttt{project\_to\_canonical\_models()},
-so the current production path can see
+The ONR solver exposes both \texttt{ACSystem} and \texttt{HybridPowerSystem}
+entry points.  The \texttt{HybridPowerSystem} overload first projects the rich
+model through \texttt{project\_to\_canonical\_models()}, so the steady ONR MILP
+is assembled from \(\widehat{\mathcal{S}}=\Pi_{\qual{canon}}(\mathcal{S})\).
+After this projection it calls the AC-only builder on
+\texttt{projected.ac}.  The steady path can therefore see
 \begin{itemize}
   \item direct AC buses and branches,
   \item direct AC loads and generators,
@@ -53,6 +60,21 @@ so the current production path can see
   \item projected transformers, switches, flexible loads, asymmetric loads, chargers, and optional three-phase reductions,
   \item still no automatic injection of \texttt{VPP}, \texttt{Microgrid}, or \texttt{MobileStorage} overlays into the ONR MILP.
 \end{itemize}
+It does not include projected DC branches, DC sources, VSC couplings, or DCDC
+devices in the steady loss-minimizing ONR model.
+
+The fault-triggered path, \texttt{run\_topology\_reconfiguration()}, also starts
+from \(\widehat{\mathcal{S}}\), but it keeps a unified AC/DC/VSC edge list:
+\begin{align}
+\mathcal{E}_{\qual{hyb}} =
+\mathcal{E}_{ac}^{\qual{canon}}
+\cup \mathcal{E}_{dc}^{\qual{canon}}
+\cup \mathcal{E}_{vsc}^{\qual{canon}} .
+\end{align}
+Its binary \(\beta_e\) variables are canonical edge-status decisions over this
+hybrid list.  Structured \texttt{BranchRef\{category,index\}} results preserve
+whether an edge came from an AC branch, DC branch, or VSC coupling; the legacy
+integer vectors remain ambiguous in hybrid cases.
 
 \subsection{Decision Variables}
 
@@ -71,6 +93,64 @@ v_i &\in \mathbb{R} && \text{squared bus voltage magnitude}, \\
 f_b &\in \mathbb{R} && \text{single-commodity connectivity flow}, \\
 t_b &\ge 0 && \text{auxiliary variable for } |P_b|.
 \end{align}
+
+For the hybrid fault-triggered path, the analogous topology status is
+\(\beta_e\in\{0,1\}\) on \(e\in\mathcal{E}_{\qual{hyb}}\).  The model still
+optimizes line or edge status; physical device status is outside the MILP
+variable vector.
+
+\subsection{Switching Candidates and Device Realization}
+
+The current ONR formulation treats switchability as a property of canonical
+branches or edges:
+\begin{align}
+\alpha_b &\in \{0,1\}, && b\in\mathcal{K}_{ac},\\
+\beta_e  &\in \{0,1\}, && e\in\mathcal{K}_{\qual{hyb}},
+\end{align}
+where \(\mathcal{K}\) is supplied by the caller or inferred from normally-open
+ties.  In the steady path, \texttt{ONROptions::switchable\_branch\_ids} contains
+stable \texttt{ACBranch::index} values; an empty list makes every canonical AC
+branch a candidate.  Non-candidates are fixed to their current
+\texttt{in\_service} state, and structural bridges are fixed closed.  In the
+fault-triggered path, \texttt{TopoReconfOptions::switchable\_branches} should be
+used for new hybrid code because it carries the edge category as well as the
+component index.
+
+This is not yet the same as a complete circuit-breaker and switch operation
+model.  The implemented MILP decides whether a canonical branch or edge is
+energized.  It does not introduce separate binary variables for each physical
+\texttt{Switch}, \texttt{CircuitBreaker}, or \texttt{DCCircuitBreaker}, and it
+does not yet derive \(\mathcal{K}\) automatically from the one-side or
+double-side breaker layout of each protected line.
+
+The projection layer provides partial provenance.  \texttt{BranchExpandMap}
+records AC branches synthesized from transformers and AC switchgear, but both
+\texttt{Switch} and \texttt{CircuitBreaker} entries currently use the same
+\texttt{BranchOriginType::Switch} tag.  DC circuit breakers are represented as
+\texttt{DC\_Switch} graph edges rather than entries in this AC branch expansion
+map.  Closed ideal AC switches and breakers can also be contracted by
+\texttt{merge\_zero\_impedance\_buses()}, which is correct for PF/OPF
+canonicalization but can erase the direct one-to-one edge needed for a switching
+operation report.
+
+The intended ONR contract should therefore be:
+\begin{align}
+z_\ell &= \Phi_\ell(u_{\ell,1},u_{\ell,2},\ldots),
+&& z_\ell\in\{0,1\},
+\end{align}
+where \(z_\ell\) is the canonical line-status decision optimized by ONR and
+\(u_{\ell,k}\) are the physical commands for the switches or circuit breakers
+that can realize that line state.  Examples include
+\begin{align}
+z_\ell &= u_{\ell,\qual{sw}}, && \text{direct switch or tie line},\\
+z_\ell &= u_{\ell,\qual{cb}}, && \text{single-side breaker control},\\
+z_\ell &= u_{\ell,\qual{from}}\land u_{\ell,\qual{to}},
+&& \text{double-side breaker control}.
+\end{align}
+The current code implements \(z_\ell\) or \(\beta_e\), while the
+line-to-device map \(\Phi_\ell\) is only implicit in component metadata such as
+\texttt{element\_type}, \texttt{element\_id}, terminal buses, and projection
+provenance.
 
 \subsection{Net-Injection Model}
 

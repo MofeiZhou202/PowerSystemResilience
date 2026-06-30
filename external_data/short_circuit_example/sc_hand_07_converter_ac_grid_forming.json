@@ -1,0 +1,48 @@
+{
+  "name": "SC_HAND_07_converter_ac_grid_forming",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "AC System",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "ConverterACBus", "bus_type": "SLACK", "base_kv": 20.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [],
+    "generators": [],
+    "loads": [],
+    "external_grids": [],
+    "static_generators": [],
+    "transformers_2w": []
+  },
+  "dc": {
+    "name": "DC System",
+    "base_mva": 100.0,
+    "buses": [
+      {"index": 1, "name": "ConverterDCBus", "bus_type": "DC_V", "base_kv": 320.0, "vm_pu": 1.0, "in_service": true}
+    ],
+    "branches": [],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [
+    {"index": 1, "name": "ACGridFormingVSC", "bus_ac": 1, "bus_dc": 1, "control_mode": "AC_GRID_FORMING", "p_rated_mw": 20.0, "p_set_mw": 0.0, "q_set_mvar": 0.0, "r_sc_pu": 0.0, "x_sc_pu": 0.2, "i_max_pu": 1.2, "grid_forming": false, "ac_grid_forming": true, "in_service": true}
+  ],
+  "expected_short_circuit": {
+    "basis": "AC-grid-forming VSC as voltage source behind impedance. Converter-base Xsc=0.2 pu on 20 MVA becomes 1.0 pu on 100 MVA system base.",
+    "checks": [
+      {
+        "fault_bus_id": 1,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.0},
+        "converter_model": "ac_grid_forming_voltage_source",
+        "z_thevenin_pu": {"r": 0.0, "x": 1.0, "abs": 1.0},
+        "i_base_ka": 2.886751345948129,
+        "ikss_ka": 2.886751345948129,
+        "ikss_converter_contrib_ka": 2.886751345948129,
+        "sk_mva": 100.0
+      }
+    ],
+    "tolerance": {"relative": 1e-6, "absolute_ka": 1e-6}
+  }
+}
+

@@ -14,19 +14,26 @@
 
 #include <cmath>
 #include <complex>
+#include <fstream>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/components.hpp"
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/system.hpp"
 #include "hacdcpf/model/network_utils.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 
 using namespace hacdcpf;
 using namespace hacdcpf::analysis;
 using Cx = std::complex<double>;
+using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -73,6 +80,83 @@ static ACBranch make_branch(int id, int f, int t, double r, double x) {
   br.tap = 1.0; br.shift_deg = 0.0; br.in_service = true;
   br.rate_a_mva = 9999.0;
   return br;
+}
+
+static std::string read_text_file(const std::string& path) {
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  return std::string(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+}
+
+static double check_value(const json& j, const std::string& key, double fallback = 0.0) {
+  return j.contains(key) && j[key].is_number() ? j[key].get<double>() : fallback;
+}
+
+static double check_abs_tolerance(const json& meta) {
+  if (!meta.contains("tolerance")) return 1e-6;
+  return meta["tolerance"].value("absolute_ka", 1e-6);
+}
+
+static double check_rel_tolerance(const json& meta) {
+  if (!meta.contains("tolerance")) return 1e-6;
+  return meta["tolerance"].value("relative", 1e-6);
+}
+
+static const SCDetailedBusResult& fault_row(const SCDetailedResult& r) {
+  for (const auto& row : r.bus_results)
+    if (row.bus_id == r.fault_bus_id) return row;
+  FAIL("Fault bus row not found");
+  return r.bus_results.front();
+}
+
+static const SCDetailedBranchResult* branch_row(const SCDetailedResult& r,
+                                                int branch_index) {
+  for (const auto& row : r.branch_results)
+    if (row.branch_index == branch_index) return &row;
+  return nullptr;
+}
+
+static double sc_result_field(const SCDetailedBusResult& row,
+                              const std::string& field) {
+  if (field == "ikss_ka") return row.ikss_ka;
+  if (field == "ikss_1_ka") return row.ikss_1_ka;
+  if (field == "ikss_2_ka") return row.ikss_2_ka;
+  if (field == "ikss_gen_contrib_ka") return row.ikss_gen_contrib_ka;
+  if (field == "ikss_motor_contrib_ka") return row.ikss_motor_contrib_ka;
+  if (field == "ikss_load_contrib_ka") return row.ikss_load_contrib_ka;
+  if (field == "ikss_sgen_contrib_ka") return row.ikss_sgen_contrib_ka;
+  if (field == "ikss_extgrid_contrib_ka") return row.ikss_extgrid_contrib_ka;
+  if (field == "ikss_converter_contrib_ka") return row.ikss_converter_contrib_ka;
+  if (field == "ikss_no_motor_ka") return row.ikss_no_motor_ka;
+  if (field == "ip_ka") return row.ip_ka;
+  if (field == "ib_ka") return row.ib_ka;
+  if (field == "ik_ka") return row.ik_ka;
+  if (field == "ith_ka") return row.ith_ka;
+  if (field == "v_remaining_pu") return row.v_remaining_pu;
+  FAIL("Unknown short-circuit result field: " << field);
+  return 0.0;
+}
+
+static int count_branch_origins(const HybridPowerSystem& projected,
+                                BranchOriginType type) {
+  if (!projected.branch_expand_map) return 0;
+  int count = 0;
+  for (const auto& entry : projected.branch_expand_map->entries) {
+    if (entry.origin_type == type) ++count;
+  }
+  return count;
+}
+
+static FaultType fault_type_from_name(const std::string& name) {
+  if (name == "SinglePhaseGround") return FaultType::SinglePhaseGround;
+  if (name == "TwoPhase") return FaultType::TwoPhase;
+  if (name == "TwoPhaseGround") return FaultType::TwoPhaseGround;
+  return FaultType::ThreePhase;
+}
+
+static SCCalcType calc_type_from_name(const std::string& name) {
+  return name == "Min" ? SCCalcType::Min : SCCalcType::Max;
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +516,62 @@ TEST_CASE("SC detailed: explicit c-factor scales selected-bus current",
   CHECK(i_hi / i_lo < 1.11);
 }
 
+TEST_CASE("SC detailed: VSC AC grid-forming flag selects voltage-source model",
+          "[short_circuit][converter][iec60909]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {make_bus(1, BusType::PQ, 20.0)};
+  sys.ac.generators.clear();
+
+  DCBus dc;
+  dc.index = 1;
+  dc.bus_type = DCBusType::DC_V;
+  dc.base_kv = 320.0;
+  dc.in_service = true;
+  sys.dc.buses = {dc};
+
+  VSCConverter vsc;
+  vsc.index = 1;
+  vsc.bus_ac = 1;
+  vsc.bus_dc = 1;
+  vsc.in_service = true;
+  vsc.p_rated_mw = 20.0;
+  vsc.r_sc_pu = 0.0;
+  vsc.x_sc_pu = 0.2;
+  vsc.i_max_pu = 1.2;
+  vsc.grid_forming = true;     // DC-side forming only.
+  vsc.ac_grid_forming = false;
+  sys.vsc_converters = {vsc};
+
+  SCDetailedOptions opt;
+  opt.fault_type = FaultType::ThreePhase;
+  opt.c_factor = 1.0;
+
+  const auto dc_forming_only = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(dc_forming_only.solved);
+  REQUIRE(dc_forming_only.converter_contributions.size() == 1);
+  CHECK(dc_forming_only.converter_contributions.front().model ==
+        "dc_side_forming_current_limited_source");
+  CHECK(dc_forming_only.converter_contributions.front().dc_grid_forming);
+  CHECK_FALSE(dc_forming_only.converter_contributions.front().ac_grid_forming);
+  const auto current_limited = dc_forming_only.bus_results.front().ikss_converter_contrib_ka;
+  const double expected_current_limited = 1.2 * 20.0 / (std::sqrt(3.0) * 20.0);
+  CHECK(std::abs(current_limited - expected_current_limited) < 1e-9);
+
+  sys.vsc_converters.front().ac_grid_forming = true;
+  const auto ac_forming = run_short_circuit_detailed(sys, 1, opt);
+  REQUIRE(ac_forming.solved);
+  REQUIRE(ac_forming.converter_contributions.size() == 1);
+  CHECK(ac_forming.converter_contributions.front().model ==
+        "ac_grid_forming_voltage_source");
+  CHECK(ac_forming.converter_contributions.front().ac_grid_forming);
+  const auto voltage_source = ac_forming.bus_results.front().ikss_converter_contrib_ka;
+
+  CHECK(voltage_source > current_limited * 3.0);
+  CHECK(std::abs(ac_forming.bus_results.front().ikss_ka - voltage_source) < voltage_source * 1e-9);
+}
+
 TEST_CASE("SC detailed: minimum external-grid data lowers fault current",
           "[short_circuit][iec60909][external_grid]") {
   HybridPowerSystem sys;
@@ -645,4 +785,194 @@ TEST_CASE("SC: IEEE 33-bus BW monotonic fault levels", "[short_circuit][ieee33bw
   auto single = compute_fault_at_bus(sys, 18, opt);
   CHECK(single.bus_id == 18);
   CHECK(std::abs(single.sk_mva - res.bus_results[17].sk_mva) < 1e-4);
+}
+
+TEST_CASE("SC: classical hand examples match embedded expected values",
+          "[short_circuit][short_circuit_example]") {
+#ifdef HACDCPF_PROJECT_ROOT
+  const std::string root = HACDCPF_PROJECT_ROOT;
+#else
+  const std::string root = ".";
+#endif
+  const std::vector<std::string> files = {
+      "sc_hand_01_two_bus_source_line.json",
+      "sc_hand_02_three_bus_radial_feeder.json",
+      "sc_hand_03_slg_low_zero_sequence.json",
+      "sc_hand_04_external_grid_max_min.json",
+      "sc_hand_05_transformer_correction.json",
+      "sc_hand_06_converter_grid_following.json",
+      "sc_hand_07_converter_ac_grid_forming.json",
+  };
+
+  for (const auto& file : files) {
+    const std::string path = root + "/external_data/short_circuit_example/" + file;
+    INFO("case=" << file);
+    const std::string text = read_text_file(path);
+    const json doc = json::parse(text);
+    const auto sys = hacdcpf::io::from_json(text);
+    REQUIRE(doc.contains("expected_short_circuit"));
+    const json& meta = doc["expected_short_circuit"];
+    REQUIRE(meta.contains("checks"));
+      const double abs_tol = check_abs_tolerance(meta);
+    const double rel_tol = check_rel_tolerance(meta);
+
+    for (const auto& check : meta["checks"]) {
+      INFO("case=" << file << " fault_bus=" << check.value("fault_bus_id", -1)
+                   << " fault_type=" << check["options"].value("fault_type", "ThreePhase"));
+      SCDetailedOptions opt;
+      const auto& opts = check["options"];
+      opt.fault_type = fault_type_from_name(opts.value("fault_type", "ThreePhase"));
+      opt.calc_type = calc_type_from_name(opts.value("calc_type", "Max"));
+      opt.c_factor = opts.value("c_factor", 0.0);
+      opt.compute_branch_flows = false;
+      opt.compute_voltage_drops = true;
+      opt.compute_ith = false;
+
+      const int fault_bus = check.at("fault_bus_id").get<int>();
+      const auto result = run_short_circuit_detailed(sys, fault_bus, opt);
+      REQUIRE(result.solved);
+      const auto& row = fault_row(result);
+
+      const double expected_ik = check.at("ikss_ka").get<double>();
+      INFO("actual_ikss_ka=" << row.ikss_ka << " expected_ikss_ka=" << expected_ik);
+      CHECK(std::abs(row.ikss_ka - expected_ik)
+            <= std::max(abs_tol, rel_tol * std::max(1.0, std::abs(expected_ik))));
+
+      if (check.contains("ikss_converter_contrib_ka")) {
+        const double expected = check.at("ikss_converter_contrib_ka").get<double>();
+        CHECK(std::abs(row.ikss_converter_contrib_ka - expected)
+              <= std::max(abs_tol, rel_tol * std::max(1.0, std::abs(expected))));
+      }
+      if (check.contains("sk_mva")) {
+        const double expected = check.at("sk_mva").get<double>();
+        const double bus_kv = [&]() {
+          for (const auto& b : sys.ac.buses)
+            if (b.index == fault_bus) return b.base_kv;
+          return 1.0;
+        }();
+        const double sk = std::sqrt(3.0) * bus_kv * row.ikss_ka;
+        CHECK(std::abs(sk - expected)
+              <= std::max(1e-4, rel_tol * std::max(1.0, std::abs(expected))));
+      }
+    }
+  }
+}
+
+TEST_CASE("SC: practical classical examples satisfy stress invariants",
+          "[short_circuit][short_circuit_example][practical]") {
+#ifdef HACDCPF_PROJECT_ROOT
+  const std::string root = HACDCPF_PROJECT_ROOT;
+#else
+  const std::string root = ".";
+#endif
+  const std::vector<std::string> files = {
+      "sc_practical_01_industrial_plant_110_20kv.json",
+      "sc_practical_02_urban_meshed_10kv_feeder.json",
+      "sc_practical_03_hybrid_acdc_inverter_microgrid.json",
+      "sc_practical_04_ground_fault_low_z0_transformer_feeder.json",
+  };
+
+  for (const auto& file : files) {
+    const std::string path = root + "/external_data/short_circuit_example/" + file;
+    INFO("case=" << file);
+    const std::string text = read_text_file(path);
+    const json doc = json::parse(text);
+    const auto sys = hacdcpf::io::from_json(text);
+    REQUIRE(doc.contains("expected_short_circuit"));
+    const json& meta = doc["expected_short_circuit"];
+    REQUIRE(meta.contains("practical_checks"));
+
+    const auto projected = project_to_canonical_models(sys);
+    if (meta.contains("canonical_checks")) {
+      const auto& cc = meta["canonical_checks"];
+      if (cc.contains("min_projected_branch_count")) {
+        CHECK(projected.ac.branches.size() >=
+              cc.at("min_projected_branch_count").get<size_t>());
+      }
+      if (cc.contains("min_transformer_origin_branches")) {
+        CHECK(count_branch_origins(projected, BranchOriginType::Transformer2W) >=
+              cc.at("min_transformer_origin_branches").get<int>());
+      }
+      if (cc.contains("min_projected_loads_from_motors")) {
+        int motor_loads = 0;
+        for (const auto& ld : projected.ac.loads) {
+          if (ld.sc_source_type == "AsynchronousMotor") ++motor_loads;
+        }
+        CHECK(motor_loads >= cc.at("min_projected_loads_from_motors").get<int>());
+      }
+      if (cc.value("rich_motors_removed_after_projection", false)) {
+        CHECK(projected.ac.motors.empty());
+      }
+      if (cc.contains("min_vsc_converters")) {
+        CHECK(projected.vsc_converters.size() >=
+              cc.at("min_vsc_converters").get<size_t>());
+      }
+    }
+
+    std::unordered_map<std::string, SCDetailedBusResult> by_check_id;
+
+    for (const auto& check : meta["practical_checks"]) {
+      const std::string check_id = check.value("id", "");
+      INFO("case=" << file << " check=" << check_id
+                   << " fault_bus=" << check.value("fault_bus_id", -1));
+      SCDetailedOptions opt;
+      const auto& opts = check["options"];
+      opt.fault_type = fault_type_from_name(opts.value("fault_type", "ThreePhase"));
+      opt.calc_type = calc_type_from_name(opts.value("calc_type", "Max"));
+      opt.c_factor = opts.value("c_factor", 0.0);
+      opt.compute_branch_flows = opts.value("compute_branch_flows", false);
+      opt.compute_voltage_drops = true;
+      opt.compute_ith = false;
+
+      const int fault_bus = check.at("fault_bus_id").get<int>();
+      const auto result = run_short_circuit_detailed(sys, fault_bus, opt);
+      REQUIRE(result.solved);
+      const auto& row = fault_row(result);
+      CHECK(row.ikss_ka > 0.0);
+      CHECK(std::isfinite(row.ikss_ka));
+      CHECK(row.ip_ka >= row.ikss_1_ka);
+
+      if (check.contains("ikss_min_ka")) {
+        CHECK(row.ikss_ka >= check.at("ikss_min_ka").get<double>());
+      }
+      if (check.contains("ikss_max_ka")) {
+        CHECK(row.ikss_ka <= check.at("ikss_max_ka").get<double>());
+      }
+      if (check.contains("contribution_min_ka")) {
+        for (auto it = check["contribution_min_ka"].begin();
+             it != check["contribution_min_ka"].end(); ++it) {
+          const double actual = sc_result_field(row, it.key());
+          CHECK(actual >= it.value().get<double>());
+        }
+      }
+      if (check.contains("branch_current_min_ka")) {
+        REQUIRE(opt.compute_branch_flows);
+        for (const auto& bc : check["branch_current_min_ka"]) {
+          const int branch_index = bc.at("branch_index").get<int>();
+          const auto* br = branch_row(result, branch_index);
+          REQUIRE(br != nullptr);
+          CHECK(br->i_branch_ka >= bc.at("min_ka").get<double>());
+        }
+      }
+      if (check.contains("compare")) {
+        const auto& cmp = check["compare"];
+        const std::string ref_id = cmp.at("check_id").get<std::string>();
+        REQUIRE(by_check_id.count(ref_id) == 1);
+        const std::string field = cmp.value("field", "ikss_ka");
+        const double actual = sc_result_field(row, field);
+        const double ref = sc_result_field(by_check_id.at(ref_id), field);
+        const std::string relation = cmp.value("relation", "");
+        if (relation == "less_than") {
+          CHECK(actual < ref * cmp.value("ratio_max", 1.0));
+        } else if (relation == "greater_than") {
+          CHECK(actual > ref * cmp.value("ratio_min", 1.0));
+        } else {
+          FAIL("Unknown practical comparison relation: " << relation);
+        }
+      }
+      if (!check_id.empty()) {
+        by_check_id[check_id] = row;
+      }
+    }
+  }
 }

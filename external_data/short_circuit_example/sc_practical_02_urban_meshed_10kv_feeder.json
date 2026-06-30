@@ -1,0 +1,81 @@
+{
+  "name": "SC_PRACTICAL_02_urban_meshed_10kV_feeder",
+  "base_mva": 100.0,
+  "ac": {
+    "name": "Urban 10 kV Meshed Feeder",
+    "base_mva": 100.0,
+    "freq_hz": 50.0,
+    "buses": [
+      {"index": 1, "name": "Substation_A", "bus_type": "SLACK", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 2, "name": "Feeder_Left", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 3, "name": "Feeder_Right", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 4, "name": "Downtown_Ring", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 5, "name": "Remote_Load_Pocket", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true},
+      {"index": 6, "name": "Rooftop_PV_Pocket", "bus_type": "PQ", "base_kv": 10.0, "vm_pu": 1.0, "va_deg": 0.0, "in_service": true}
+    ],
+    "branches": [
+      {"index": 1, "name": "A_to_Left", "from_bus": 1, "to_bus": 2, "r_pu": 0.018, "x_pu": 0.075, "b_pu": 0.0, "r0_pu": 0.054, "x0_pu": 0.225, "b0_pu": 0.0, "rate_a_mva": 25.0, "in_service": true},
+      {"index": 2, "name": "A_to_Right", "from_bus": 1, "to_bus": 3, "r_pu": 0.020, "x_pu": 0.080, "b_pu": 0.0, "r0_pu": 0.060, "x0_pu": 0.240, "b0_pu": 0.0, "rate_a_mva": 25.0, "in_service": true},
+      {"index": 3, "name": "Left_to_Ring", "from_bus": 2, "to_bus": 4, "r_pu": 0.020, "x_pu": 0.070, "b_pu": 0.0, "r0_pu": 0.060, "x0_pu": 0.210, "b0_pu": 0.0, "rate_a_mva": 20.0, "in_service": true},
+      {"index": 4, "name": "Right_to_Ring", "from_bus": 3, "to_bus": 4, "r_pu": 0.022, "x_pu": 0.085, "b_pu": 0.0, "r0_pu": 0.066, "x0_pu": 0.255, "b0_pu": 0.0, "rate_a_mva": 20.0, "in_service": true},
+      {"index": 5, "name": "Ring_to_Remote", "from_bus": 4, "to_bus": 5, "r_pu": 0.040, "x_pu": 0.140, "b_pu": 0.0, "r0_pu": 0.120, "x0_pu": 0.420, "b0_pu": 0.0, "rate_a_mva": 14.0, "in_service": true},
+      {"index": 6, "name": "Left_Right_Tie_Closed", "from_bus": 2, "to_bus": 3, "r_pu": 0.050, "x_pu": 0.160, "b_pu": 0.0, "r0_pu": 0.150, "x0_pu": 0.480, "b0_pu": 0.0, "rate_a_mva": 10.0, "in_service": true},
+      {"index": 7, "name": "Ring_to_PV", "from_bus": 4, "to_bus": 6, "r_pu": 0.030, "x_pu": 0.110, "b_pu": 0.0, "r0_pu": 0.090, "x0_pu": 0.330, "b0_pu": 0.0, "rate_a_mva": 12.0, "in_service": true}
+    ],
+    "generators": [],
+    "loads": [
+      {"index": 1, "name": "Commercial_Load", "bus": 4, "p_mw": 7.0, "q_mvar": 2.0, "in_service": true, "sn_mva": 9.0, "motor_percent": 20.0, "r_sc_pu": 0.08, "x_sub_pu": 0.28, "motor_poles": 4, "motor_efficiency": 0.90},
+      {"index": 2, "name": "Residential_Remote", "bus": 5, "p_mw": 3.5, "q_mvar": 1.2, "in_service": true},
+      {"index": 3, "name": "PV_Pocket_Load", "bus": 6, "p_mw": 1.2, "q_mvar": 0.4, "in_service": true}
+    ],
+    "external_grids": [
+      {"index": 1, "name": "Substation_Grid", "bus": 1, "vm_pu": 1.0, "va_deg": 0.0, "s_sc_max_mva": 420.0, "s_sc_min_mva": 180.0, "rx_max": 0.12, "rx_min": 0.16, "vn_kv": 10.0, "in_service": true}
+    ],
+    "static_generators": [
+      {"index": 1, "name": "Urban_Rooftop_Inverters", "bus": 6, "sgen_type": "PV", "p_mw": 2.0, "q_mvar": 0.0, "sn_mva": 2.4, "p_rated_mw": 2.0, "k": 1.15, "rx": 0.10, "in_service": true}
+    ],
+    "transformers_2w": [],
+    "motors": []
+  },
+  "dc": {
+    "name": "DC System",
+    "base_mva": 100.0,
+    "buses": [],
+    "branches": [],
+    "loads": [],
+    "static_generators": []
+  },
+  "vsc_converters": [],
+  "expected_short_circuit": {
+    "basis": "Practical urban ring benchmark. It stresses meshed transfer impedances, branch current reporting from multiple upstream paths, downstream attenuation, load motor-fraction contribution, and inverter current-source contribution.",
+    "canonical_checks": {
+      "min_projected_branch_count": 7
+    },
+    "practical_checks": [
+      {
+        "id": "urban_ring_bus4",
+        "fault_bus_id": 4,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1, "compute_branch_flows": true},
+        "ikss_min_ka": 0.5,
+        "ikss_max_ka": 40.0,
+        "contribution_min_ka": {
+          "ikss_extgrid_contrib_ka": 0.1,
+          "ikss_load_contrib_ka": 0.01,
+          "ikss_sgen_contrib_ka": 0.01
+        },
+        "branch_current_min_ka": [
+          {"branch_index": 3, "min_ka": 0.01},
+          {"branch_index": 4, "min_ka": 0.01}
+        ]
+      },
+      {
+        "id": "urban_remote_bus5",
+        "fault_bus_id": 5,
+        "options": {"fault_type": "ThreePhase", "calc_type": "Max", "c_factor": 1.1},
+        "ikss_min_ka": 0.2,
+        "ikss_max_ka": 40.0,
+        "compare": {"check_id": "urban_ring_bus4", "field": "ikss_ka", "relation": "less_than", "ratio_max": 0.98}
+      }
+    ]
+  }
+}

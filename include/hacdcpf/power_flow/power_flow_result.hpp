@@ -138,6 +138,19 @@ struct BranchFlow {
   double qt_mvar{0.0};
 };
 
+// Terminal flow of a two-terminal device (switch / circuit breaker) recovered
+// after canonical projection collapsed it. Populated by power flow / OPF so
+// merged-out breakers still report a flow and loading.
+struct DeviceTerminalFlow {
+  int    index{0};
+  int    bus_from{0};
+  int    bus_to{0};
+  bool   closed{true};
+  double pf_mw{0.0}, pt_mw{0.0}, qf_mvar{0.0}, qt_mvar{0.0};
+  double rate_mva{0.0};
+  double loading_pct{0.0};
+};
+
 struct VSCTransfer {
   int index{0};
   int bus_ac{0};
@@ -202,6 +215,11 @@ struct PowerFlowResult {
   std::vector<DCDCTransfer> dcdc_transfers;
   std::vector<Trafo3WFlow> trafo3w_flows;
   std::vector<ERPortTransfer> er_port_transfers;
+
+  // Switch / circuit-breaker terminal flows recovered across collapsed
+  // (merged-out) zero-impedance devices. Empty when the system has none.
+  std::vector<DeviceTerminalFlow> ac_switch_flows;
+  std::vector<DeviceTerminalFlow> ac_circuit_breaker_flows;
 
   /// Declares which parts of the unified converter model this solve honored.
   ConverterModelScope converter_model_scope{};
