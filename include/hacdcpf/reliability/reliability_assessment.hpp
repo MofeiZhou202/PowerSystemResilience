@@ -31,6 +31,15 @@ enum class ReliabilityDefaultPolicy {
   OverwriteWithNamedTemplate
 };
 
+/// Convention for interpreting a legacy `mtbf_hours` field.  MTBF is ambiguous
+/// in industry (mean operating time to failure vs. full failure-repair cycle
+/// time), so the resolver records which interpretation was applied.
+enum class MtbfConvention {
+  MtbfAsMttf,       ///< mtbf_hours is mean time TO failure: lambda = H / mtbf
+  MtbfAsCycleTime,  ///< mtbf_hours is the cycle time: MTTF = max(mtbf - mttr, 0)
+  Unspecified       ///< not declared; strict mode blocks, compat assumes MtbfAsMttf
+};
+
 /// Policy object threaded through every reliability method.
 struct ReliabilityDataPolicy {
   ReliabilityDefaultPolicy default_policy{
@@ -38,27 +47,52 @@ struct ReliabilityDataPolicy {
   std::string template_name;                 // "ieee-rts-24", "comprehensive", …
   bool fail_on_missing_required_data{false}; // strict mode hard-stop
   bool report_defaulted_components{true};
+  /// Reporting hours per year (H).  Normally 8760; some studies use 8736.
+  double hours_per_year{8760.0};
+  /// How to interpret legacy `mtbf_hours` fields (default = mean-time-to-failure).
+  MtbfConvention mtbf_convention{MtbfConvention::MtbfAsMttf};
 };
 
-/// Raw component reliability fields as stored on the model.  Any field left at
-/// its zero default is treated as "not provided".
+/// Raw failure-mode reliability fields as stored on the model / case.  Any
+/// field left at its zero/false default is treated as "not provided".
 struct ReliabilityRawFields {
+  // ── Passive (time-based) inputs ──
   double failure_rate_per_year{0.0};  // ACBranch::failure_rate (occ/yr)
   double mttr_hr{0.0};                // ACBranch/VSC/Storage repair time (hr)
-  double mtbf_hours{0.0};            // transformer / DC component MTBF (hr)
+  double mtbf_hours{0.0};            // legacy MTBF (hr) — see MtbfConvention
   double mttr_hours{0.0};            // transformer / DC component MTTR (hr)
+  double mttf_hours{0.0};            // explicit mean time to failure (hr)
   double forced_outage_rate{0.0};   // Generator/VSC/Storage FOR (steady U)
+  // ── Active-on-demand inputs ──
+  bool   is_active{false};               // true if this is an active failure mode
+  double probability_per_demand{0.0};    // p_d (probability of failure per demand)
+  double demand_frequency_per_year{0.0}; // nu_d (demand events/yr)
+  /// True when the active params above are catalog template defaults (not from
+  /// the case/model).  Under StrictCaseDataOnly these resolve to "missing"
+  /// rather than masquerading as case data (data-policy honesty).
+  bool   active_params_are_template{false};
+  // ── Cyber/control recovery time (used instead of physical repair when set) ──
+  double cyber_recovery_hr{0.0};
 };
 
-/// Canonical resolved reliability parameters (code-review Finding 1).
+/// Canonical resolved reliability parameters (failure-mode level).
 struct ReliabilityParams {
   bool has_data{false};            // true if the case provided usable data
   bool used_default{false};        // true if a default/template filled gaps
   std::string data_source;         // "case" | "template" | "default" | "missing"
   double lambda_per_year{0.0};     // failure frequency (occ/yr)
-  double repair_hr{0.0};           // mean repair time (hr)
+  double repair_hr{0.0};           // mean repair / recovery duration (hr)
   double unavailability{0.0};      // steady-state forced unavailability
   double mttf_hr{0.0};             // mean time to failure (hr)
+  // ── Active-on-demand outputs ──
+  bool   is_active{false};
+  double probability_per_demand{0.0};
+  double demand_frequency_per_year{0.0};
+  double lambda_active_per_year{0.0};   // nu_d * p_d (equivalent annual freq)
+  // ── Cyber/control recovery time, when applicable ──
+  double cyber_recovery_hr{0.0};
+  /// Which mtbf interpretation was actually applied (Unspecified if none used).
+  MtbfConvention mtbf_convention_applied{MtbfConvention::Unspecified};
   std::vector<std::string> warnings;
 };
 
@@ -493,6 +527,27 @@ ReliabilityDataQuality summarize_reliability_data_quality(
 /// This is an analytical alternative to Monte Carlo that avoids sampling
 /// variance and is fast for small-to-medium systems.
 FMEAResult run_distribution_fmea(
+    const HybridPowerSystem& sys,
+    const FMEAOptions& options = {});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Failed-network-state shed evaluator (consequence-engine entry point)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Result of evaluating the load shedding of a (possibly failed) network state.
+struct NetworkShedResult {
+  double total_shed_mw{0.0};
+  std::vector<double> nodal_shed_mw;  ///< [AC buses | DC buses] for hybrid systems
+  bool is_loss{false};
+  std::string model_scope;            ///< "hybrid-acdc-network-lp" | "ac-only-dcopf"
+};
+
+/// Evaluate the steady-state minimum load shedding of `sys` AS-IS.  Callers
+/// apply component failures or a failure-mode consequence patch to `sys`
+/// BEFORE calling.  Reuses the FMEA hybrid AC/DC network LP for hybrid systems
+/// and AC-only DC-OPF otherwise — no new solver is introduced.  This is the
+/// shared consequence-engine entry point used by the failure-mode FMEA.
+NetworkShedResult evaluate_failed_network_state(
     const HybridPowerSystem& sys,
     const FMEAOptions& options = {});
 

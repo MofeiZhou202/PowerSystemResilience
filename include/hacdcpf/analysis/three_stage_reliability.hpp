@@ -165,6 +165,25 @@ struct ThreeStageReliabilityOptions {
   /// Stage-2 normally-open switch closing.  Negative values are treated as 0.
   /// Typical field values are 1–5 operations per fault.
   int max_switch_operations{INT_MAX};
+
+  /// Switch indices (``Switch::index``) of normally-open ties that CANNOT be
+  /// closed during Stage-2 restoration (deterministic fail-to-close).  Use this
+  /// to evaluate the load-restoration impact of a tie switch's fail-to-close
+  /// failure mode: run once with the tie available and once with its id listed
+  /// here, then weight the load-shed difference by the switch's per-demand
+  /// failure probability.  Empty (default) = every in-service tie may close.
+  std::vector<int> unavailable_tie_switch_ids;
+
+  /// Include generator forced-outage contingencies in the fault set.  Default
+  /// off preserves the historical branch-only enumeration (so SAIFI/EENS and
+  /// fault counts are unchanged unless explicitly enabled).
+  bool include_generator_faults{false};
+
+  /// Include 2-winding transformer outage contingencies.  When enabled the
+  /// transformer is also modelled as a (near-ideal, capacity-limited)
+  /// restoration edge so its outage disconnects the downstream zone.  Default
+  /// off preserves the historical branch-only model.
+  bool include_transformer_faults{false};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

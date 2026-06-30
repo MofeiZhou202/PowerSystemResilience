@@ -39,12 +39,33 @@ ReliabilityParams resolve_reliability_params(
     double default_repair_hr) {
   ReliabilityParams p;
 
-  constexpr double kHoursPerYear = 8760.0;
-  const bool has_lambda = raw.failure_rate_per_year > 0.0;
-  const bool has_mttr_hr = raw.mttr_hr > 0.0;
-  const bool has_mtbf = raw.mtbf_hours > 0.0;
-  const bool has_mttr_hours = raw.mttr_hours > 0.0;
-  const bool has_for = raw.forced_outage_rate > 0.0 && raw.forced_outage_rate < 1.0;
+  const double kHoursPerYear =
+      (std::isfinite(policy.hours_per_year) && policy.hours_per_year > 0.0)
+          ? policy.hours_per_year
+          : 8760.0;
+
+  // Domain validity: non-finite or non-positive inputs are treated as "not
+  // provided" (frozen mathematical spec — all conversions require domain checks).
+  auto valid = [](double v) { return std::isfinite(v) && v > 0.0; };
+
+  const bool has_lambda     = valid(raw.failure_rate_per_year);
+  const bool has_mttr_hr    = valid(raw.mttr_hr);
+  const bool has_mtbf       = valid(raw.mtbf_hours);
+  const bool has_mttr_hours = valid(raw.mttr_hours);
+  const bool has_mttf       = valid(raw.mttf_hours);
+  const bool has_for        = std::isfinite(raw.forced_outage_rate) &&
+                              raw.forced_outage_rate > 0.0 && raw.forced_outage_rate < 1.0;
+  const bool has_pdemand    = std::isfinite(raw.probability_per_demand) &&
+                              raw.probability_per_demand > 0.0 &&
+                              raw.probability_per_demand <= 1.0;
+  const bool has_demandfreq = valid(raw.demand_frequency_per_year);
+  const bool has_cyber      = valid(raw.cyber_recovery_hr);
+
+  // Carry active-mode descriptors through regardless of the resolution outcome.
+  p.is_active = raw.is_active;
+  p.probability_per_demand = raw.probability_per_demand;
+  p.demand_frequency_per_year = raw.demand_frequency_per_year;
+  p.cyber_recovery_hr = raw.cyber_recovery_hr;
 
   auto finalize_from_lambda_repair = [&](double lambda, double repair) {
     p.lambda_per_year = lambda;
@@ -56,23 +77,82 @@ ReliabilityParams resolve_reliability_params(
     p.mttf_hr = lambda > 0.0 ? kHoursPerYear / lambda : 0.0;
   };
 
-  // ── Case-data resolution (priority by which fields the model provides) ──
-  if (has_lambda && has_mttr_hr) {
+  // Repair/recovery preference: cyber recovery time overrides physical repair
+  // when explicitly provided (cyber/control modes need no physical repair).
+  const double active_repair =
+      has_cyber ? raw.cyber_recovery_hr
+                : (has_mttr_hr ? raw.mttr_hr : (has_mttr_hours ? raw.mttr_hours : 0.0));
+
+  // ── Case-data resolution (priority by which fields the mode provides) ──
+  // Template active params (catalog defaults, not case/model data) only resolve
+  // when defaulting is permitted; under StrictCaseDataOnly they are "missing".
+  const bool active_case = raw.is_active && has_pdemand && has_demandfreq;
+  const bool may_default_now =
+      policy.default_policy != ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  const bool active_usable =
+      active_case && (!raw.active_params_are_template || may_default_now);
+  bool template_active_resolved = false;
+  if (active_usable) {
+    // Active-on-demand: lambda_active = nu_demand * p_demand.
+    const double lambda_active =
+        raw.demand_frequency_per_year * raw.probability_per_demand;
+    p.lambda_active_per_year = lambda_active;
+    finalize_from_lambda_repair(lambda_active, active_repair);
+    if (raw.active_params_are_template) {
+      p.used_default = true;
+      p.data_source = "default";  // template default — not case data (honest provenance)
+      template_active_resolved = true;
+    } else {
+      p.has_data = true;
+      p.data_source = "case";
+    }
+    if (active_repair <= 0.0) {
+      p.warnings.push_back(
+          "Active-on-demand mode has no repair/recovery time; unavailability is "
+          "undetermined (equivalent annual frequency only).");
+    }
+  } else if (has_lambda && has_mttr_hr) {
     // ACBranch-style: failures/year + repair hours.
     finalize_from_lambda_repair(raw.failure_rate_per_year, raw.mttr_hr);
     p.has_data = true;
     p.data_source = "case";
+  } else if (has_mttf) {
+    // Explicit MTTF (preferred over the ambiguous legacy MTBF).
+    const double lambda = kHoursPerYear / raw.mttf_hours;
+    const double repair = has_mttr_hours ? raw.mttr_hours
+                                         : (has_mttr_hr ? raw.mttr_hr : 0.0);
+    if (repair > 0.0) {
+      finalize_from_lambda_repair(lambda, repair);
+      p.unavailability = repair / (raw.mttf_hours + repair);
+    } else {
+      p.lambda_per_year = lambda;
+      p.mttf_hr = raw.mttf_hours;
+    }
+    p.has_data = true;
+    p.data_source = "case";
   } else if (has_mtbf) {
-    // Transformer / DC-component-style: MTBF (with or without MTTR).
-    const double lambda = kHoursPerYear / raw.mtbf_hours;
+    // Legacy MTBF with declared convention (records which was applied).
+    double mttf = raw.mtbf_hours;
+    if (policy.mtbf_convention == MtbfConvention::MtbfAsCycleTime && has_mttr_hours) {
+      mttf = std::max(raw.mtbf_hours - raw.mttr_hours, 0.0);
+    }
+    p.mtbf_convention_applied =
+        (policy.mtbf_convention == MtbfConvention::Unspecified)
+            ? MtbfConvention::MtbfAsMttf
+            : policy.mtbf_convention;
+    if (policy.mtbf_convention == MtbfConvention::Unspecified) {
+      p.warnings.push_back(
+          "mtbf_hours convention not declared; assumed MTBF-as-MTTF (provenance).");
+    }
+    const double lambda = mttf > 0.0 ? kHoursPerYear / mttf : 0.0;
     if (has_mttr_hours) {
       finalize_from_lambda_repair(lambda, raw.mttr_hours);
-      // Use the exact MTBF/MTTR steady-state unavailability form.
-      p.unavailability = raw.mttr_hours / (raw.mtbf_hours + raw.mttr_hours);
+      // Exact MTBF/MTTR steady-state unavailability form.
+      p.unavailability = raw.mttr_hours / (mttf + raw.mttr_hours);
     } else {
       // MTBF only: frequency known, repair time will be defaulted downstream.
       p.lambda_per_year = lambda;
-      p.mttf_hr = raw.mtbf_hours;  // MTBF ≈ MTTF when MTTR ≪ MTBF
+      p.mttf_hr = mttf;  // MTTF ≈ MTBF when MTTR ≪ MTBF
     }
     p.has_data = true;
     p.data_source = "case";
@@ -106,7 +186,8 @@ ReliabilityParams resolve_reliability_params(
   }
 
   // ── Missing-data handling per policy ──
-  const bool incomplete = !p.has_data || p.repair_hr <= 0.0 || p.lambda_per_year <= 0.0;
+  const bool resolved = p.has_data || template_active_resolved;
+  const bool incomplete = !resolved || p.repair_hr <= 0.0 || p.lambda_per_year <= 0.0;
   if (incomplete) {
     const bool may_default =
         policy.default_policy != ReliabilityDefaultPolicy::StrictCaseDataOnly;
@@ -118,13 +199,13 @@ ReliabilityParams resolve_reliability_params(
       finalize_from_lambda_repair(lambda, repair);
       p.used_default = true;
       p.data_source = p.has_data ? "case" : "default";
-      if (!p.has_data) {
+      if (!resolved) {
         p.warnings.push_back("No case reliability data; using per-kind default "
                              "(lambda=" + std::to_string(lambda) +
                              " occ/yr, repair=" + std::to_string(repair) + " hr).");
       }
       p.has_data = p.has_data;  // keep "had real data" semantics distinct
-    } else if (!p.has_data) {
+    } else if (!resolved) {
       // Strict mode (or no template available): report missing, invent nothing.
       p.data_source = "missing";
       p.warnings.push_back("No reliability data available under the active "
@@ -150,6 +231,42 @@ double compute_unavailability_lambda(double lambda_per_yr, double repair_hr) {
   // U = lambda / (lambda + mu)
   double mu = 8760.0 / repair_hr;
   return lambda_per_yr / (lambda_per_yr + mu);
+}
+
+// ── Reliability objective: minimise LOAD SHEDDING, not generation cost ───────
+// Every Monte-Carlo / FMEA method reuses the economic-dispatch DC-OPF (or the
+// hybrid AC/DC network LP) to evaluate a *failed* network state.  In a
+// reliability study we do not care about generation economics — only whether
+// the surviving network can serve load.  The objective must therefore be
+// dominated by load shedding so the solver never sheds load it could otherwise
+// supply; generation/source cost is kept only as a negligible tie-breaker among
+// minimum-shed dispatches (lexicographic "minimum load shedding", matching the
+// three-stage restoration MILP which already minimises pure MW shed).
+//
+// Enforced by choosing a Value-of-Lost-Load that strongly dominates the worst
+// generator/source marginal cost.  The result is scaled, floored, and capped so
+// the objective coefficient stays well-conditioned for the native simplex LP.
+// Reliability code reads only the shed quantities (total_load_shedding_mw /
+// nodal load_shedding_mw), never the objective value, so inflating VOLL changes
+// *which* min-shed dispatch is chosen but not the reported curtailment.
+double reliability_shedding_voll(const HybridPowerSystem& sys,
+                                 double user_voll,
+                                 double extra_max_marginal = 0.0) {
+  double max_marginal = std::max(0.0, extra_max_marginal);
+  for (const auto& g : sys.ac.generators) {
+    if (!g.in_service) continue;
+    const double mc = g.cost_c1 + 2.0 * g.cost_c2 * std::max(0.0, g.pmax_mw);
+    max_marginal = std::max(max_marginal, mc);
+  }
+  // 1000x the worst marginal cost guarantees min-shed dominance; the [1e5, 1e7]
+  // window keeps the objective coefficient well-conditioned for the simplex.
+  double dominant = 1000.0 * max_marginal;
+  dominant = std::max(dominant, 1.0e5);
+  dominant = std::min(dominant, 1.0e7);
+  // Honour an explicit (larger) user VOLL but never fall below the dominant
+  // floor that makes the evaluation a true minimum-load-shedding study.
+  if (user_voll > 0.0) dominant = std::max(dominant, user_voll);
+  return dominant;
 }
 
 using StateKey = std::vector<std::uint64_t>;
@@ -615,6 +732,29 @@ StateEvalResult evaluate_state(
       ld.p_mw *= load_scale;
       ld.q_mvar *= load_scale;
     }
+    // Scale DC demand too so the hybrid LP (below) sees a consistent stress level.
+    for (auto& ld : sys.dc.loads) ld.p_mw *= load_scale;
+    for (auto& bus : sys.dc.buses) bus.pd_mw *= load_scale;
+  }
+
+  // ── Hybrid AC/DC routing ────────────────────────────────────────────────
+  // For hybrid systems, evaluate the failed state with the hybrid network LP so
+  // DC load curtailment, DC sources, and VSC/DC-DC transfers are included in the
+  // shed (DC load now contributes to EENS/LOLE).  evaluate_failed_network_state
+  // prepares supply sources (external grid / VPP / mobile storage / microgrid /
+  // energy router) and routes hybrid systems to evaluate_hybrid_fmea_network_lp;
+  // it only calls back into evaluate_state for NON-hybrid systems, so there is
+  // no recursion here.
+  if (has_hybrid_fmea_components(sys)) {
+    FMEAOptions fo;
+    fo.opf_options = opf_opt;
+    fo.voll = opf_opt.voll;
+    fo.load_scale_factor = 1.0;  // load scaling already applied to `sys` above
+    NetworkShedResult ns = evaluate_failed_network_state(sys, fo);
+    result.curtailment_mw = ns.total_shed_mw;
+    result.nodal_curtailment_mw = std::move(ns.nodal_shed_mw);
+    result.is_loss_state = ns.is_loss;
+    return result;
   }
 
   // ── Island pre-screening ──────────────────────────────────────────────────
@@ -800,7 +940,21 @@ ReliabilityResult run_nonsequential_mc(
   result.data_quality = summarize_reliability_data_quality(sys, options.data_policy);
   ComponentOffsets co(sys);
   const size_t nc = co.total;
-  const size_t nb = sys.ac.buses.size();
+  // Hybrid systems use the hybrid network LP per sampled state (DC load in EENS).
+  const bool hybrid_mc = has_hybrid_fmea_components(sys);
+  const size_t nb = sys.ac.buses.size() + (hybrid_mc ? sys.dc.buses.size() : 0);
+  if (hybrid_mc) {
+    result.model_scope = "hybrid-acdc-network-lp";
+    result.validity = ReliabilityResult::ValidityFlags{};
+    result.validity.dc_load_curtailment_included = true;
+    result.validity.vsc_dc_power_flow_modelled = true;
+    result.validity.ac_opf_curtailment = true;
+    result.model_limitations =
+        "Monte Carlo with the hybrid AC/DC network LP: AC/DC branch transfer "
+        "limits, DC load shedding, DC sources, and DC/DC + VSC active-power "
+        "transfers are included for each sampled state. Nonlinear AC "
+        "voltage/reactive limits are outside this evaluator.";
+  }
 
   // Compute unavailabilities for all components
   std::vector<double> unavailabilities(nc);
@@ -1017,9 +1171,11 @@ ReliabilityResult run_nonsequential_mc(
     rng.seed(rd());
   }
   
-  // DC-OPF options
+  // DC-OPF options.  Reliability state evaluation minimises LOAD SHEDDING, so
+  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
+  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
@@ -1259,7 +1415,20 @@ ReliabilityResult run_sequential_mc(
   result.data_quality = summarize_reliability_data_quality(sys, options.data_policy);
   ComponentOffsets co(sys);
   const size_t nc = co.total;
-  const size_t nb = sys.ac.buses.size();
+  // Hybrid systems use the hybrid network LP per sampled state (DC load in EENS).
+  const bool hybrid_mc = has_hybrid_fmea_components(sys);
+  const size_t nb = sys.ac.buses.size() + (hybrid_mc ? sys.dc.buses.size() : 0);
+  if (hybrid_mc) {
+    result.model_scope = "hybrid-acdc-network-lp";
+    result.validity = ReliabilityResult::ValidityFlags{};
+    result.validity.dc_load_curtailment_included = true;
+    result.validity.vsc_dc_power_flow_modelled = true;
+    result.validity.ac_opf_curtailment = true;
+    result.model_limitations =
+        "Sequential Monte Carlo with the hybrid AC/DC network LP: AC/DC branch "
+        "transfer limits, DC load shedding, DC sources, and DC/DC + VSC "
+        "active-power transfers are included for each chronological state.";
+  }
   const int hours_per_year = options.hours_per_year;
   
   // Compute MTTF and MTTR for all components (in hours)
@@ -1414,9 +1583,11 @@ ReliabilityResult run_sequential_mc(
     rng.seed(rd());
   }
   
-  // DC-OPF options
+  // DC-OPF options.  Reliability state evaluation minimises LOAD SHEDDING, so
+  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
+  opf_opt.voll = reliability_shedding_voll(sys, opf_opt.voll);
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
@@ -2774,6 +2945,72 @@ void add_external_grid_dispatch_sources(HybridPowerSystem& sys, double marginal_
   }
 }
 
+// Materialize the remaining aggregated / transfer reliability sources so that a
+// failure mode which sets one out of service produces real load shedding:
+//   * VirtualPowerPlant / MobileStorage / Microgrid -> dispatchable AC injection
+//     at the PCC/connection bus (mirrors add_external_grid_dispatch_sources).
+//   * EnergyRouter -> an AC<->DC transfer modelled as a VSC link between its
+//     first in-service AC port and first in-service DC port (dominant routing
+//     function; multi-port detail is a later refinement).
+// Out-of-service components are skipped, so apply_consequence_patch setting one
+// out removes its contribution and the load it supplied is shed.
+void materialize_aggregated_reliability_sources(HybridPowerSystem& sys,
+                                                double marginal_cost) {
+  int next_gen = next_generator_index(sys);
+  for (const auto& vpp : sys.vpps) {
+    if (!vpp.in_service || vpp.pcc_bus <= 0) continue;
+    double p = vpp.pmax_mw > 0.0 ? vpp.pmax_mw : vpp.p_output_mw;
+    if (p <= 1e-9) p = vpp.p_generation_sum_mw;
+    add_emergency_generator(sys, vpp.pcc_bus, std::max(0.0, p),
+        "FMEA_vpp_" + std::to_string(vpp.index), next_gen, marginal_cost);
+  }
+  for (const auto& ms : sys.mobile_storage) {
+    if (!ms.in_service || ms.bus <= 0 || !ms.controllable) continue;
+    double p = ms.pmax_mw > 0.0 ? ms.pmax_mw : ms.p_rated_mw;
+    if (p <= 1e-9) p = std::max(0.0, ms.p_mw);
+    add_emergency_generator(sys, ms.bus, std::max(0.0, p),
+        "FMEA_mobile_storage_" + std::to_string(ms.index), next_gen, marginal_cost);
+  }
+  for (const auto& mg : sys.microgrids) {
+    if (!mg.in_service || mg.pcc_bus <= 0) continue;
+    double p = mg.capacity_mw;
+    if (p <= 1e-9) p = mg.total_generation_mw;
+    if (p <= 1e-9) p = mg.total_dg_capacity_mw + mg.total_diesel_capacity_mw;
+    if (p <= 1e-9) p = mg.p_exchange_max_mw;
+    add_emergency_generator(sys, mg.pcc_bus, std::max(0.0, p),
+        "FMEA_microgrid_" + std::to_string(mg.index), next_gen, marginal_cost);
+  }
+  int next_vsc = 1;
+  for (const auto& v : sys.vsc_converters) next_vsc = std::max(next_vsc, v.index + 1);
+  // An AC<->DC router transfer only matters when the system has a DC side.
+  if (!sys.dc.buses.empty()) {
+    for (const auto& er : sys.energy_routers) {
+      if (!er.in_service) continue;
+      int ac_bus = -1, dc_bus = -1;
+      for (const auto& port : er.ports) {
+        if (!port.in_service) continue;
+        if (port.port_type == ERPortType::AC && ac_bus < 0) ac_bus = port.bus;
+        if (port.port_type == ERPortType::DC && dc_bus < 0) dc_bus = port.bus;
+      }
+      if (ac_bus <= 0 || dc_bus <= 0) continue;
+      double p = er.p_rated_mw > 0.0 ? er.p_rated_mw : er.pmax_mw;
+      if (p <= 1e-9) continue;
+      VSCConverter v;
+      v.index = next_vsc++;
+      v.bus_ac = ac_bus;
+      v.bus_dc = dc_bus;
+      v.in_service = true;
+      v.controllable = true;
+      v.pmax_mw = p;
+      v.pmin_mw = -p;
+      v.p_rated_mw = p;
+      v.p_set_mw = 0.0;
+      v.name = "FMEA_energy_router_" + std::to_string(er.index);
+      sys.vsc_converters.push_back(std::move(v));
+    }
+  }
+}
+
 void apply_fmea_support_sources(
     HybridPowerSystem& sys,
     const FMEAOptions& options,
@@ -3234,7 +3471,13 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   }
 
   const double base_mva = std::max({sys.base_mva, sys.ac.base_mva, sys.dc.base_mva, 1.0});
-  const double voll = options.voll > 0.0 ? options.voll : 10000.0;
+  // Reliability evaluation: minimise load shedding, not dispatch cost.  Use a
+  // VOLL that strongly dominates every source's marginal cost so the LP serves
+  // all load it physically can before shedding (source cost stays only a
+  // tie-breaker among minimum-shed dispatches).
+  double max_src_cost = 0.0;
+  for (const auto& s : sources) max_src_cost = std::max(max_src_cost, s.cost_mwh);
+  const double voll = reliability_shedding_voll(sys, options.voll, max_src_cost);
   engine::LPModel lp;
   lp.sense = engine::Sense::Minimize;
   lp.vars.resize(variable_count);
@@ -3532,6 +3775,46 @@ FMEAStageEval evaluate_contingency_stage(
 
 }  // anonymous namespace
 
+NetworkShedResult evaluate_failed_network_state(
+    const HybridPowerSystem& sys,
+    const FMEAOptions& options) {
+  NetworkShedResult r;
+  // Materialize supply / aggregated / transfer sources (external grid, VPP,
+  // mobile storage, microgrid, energy router) as dispatchable injections so a
+  // failure mode that sets one out of service produces real load shedding.
+  // Only this failure-mode-FMEA evaluator is affected; run_distribution_fmea
+  // prepares its own sources upstream and does not call this function.
+  HybridPowerSystem prepared = sys;
+  add_external_grid_dispatch_sources(prepared, /*marginal_cost=*/1.0);
+  materialize_aggregated_reliability_sources(prepared, /*marginal_cost=*/1.0);
+  if (has_hybrid_fmea_components(prepared)) {
+    // Hybrid AC/DC: reuse the FMEA network LP (load scale applied internally).
+    StateEvalResult e = evaluate_hybrid_fmea_network_lp(
+        prepared, options, /*stage_duration_hr=*/1.0, /*curtail_threshold_mw=*/0.01);
+    r.total_shed_mw = e.curtailment_mw;
+    r.nodal_shed_mw = std::move(e.nodal_curtailment_mw);
+    r.is_loss = e.is_loss_state;
+    r.model_scope = "hybrid-acdc-network-lp";
+  } else {
+    // AC-only: reuse the DC-OPF state evaluator with no extra sampled failures.
+    // Minimise load shedding (not dispatch cost) for the failed state.
+    opf::DCOPFOptions opf_opt = options.opf_options;
+    opf_opt.load_shedding = true;
+    opf_opt.voll = reliability_shedding_voll(prepared, std::max(opf_opt.voll, options.voll));
+    opf_opt.verbose = false;
+    opf_opt.compute_lmp = false;
+    ComponentOffsets co(prepared);
+    StateEvalResult e = evaluate_state(
+        prepared, std::vector<bool>(co.total, false), opf_opt,
+        options.load_scale_factor, 0.01);
+    r.total_shed_mw = e.curtailment_mw;
+    r.nodal_shed_mw = std::move(e.nodal_curtailment_mw);
+    r.is_loss = e.is_loss_state;
+    r.model_scope = "ac-only-dcopf";
+  }
+  return r;
+}
+
 FMEAResult run_distribution_fmea(
     const HybridPowerSystem& sys,
     const FMEAOptions& options) {
@@ -3577,9 +3860,11 @@ FMEAResult run_distribution_fmea(
                sys.ac.generators.size(), sys.ac.branches.size(),
                sys.dc.branches.size(), sys.vsc_converters.size());
 
-  // DC-OPF options
+  // DC-OPF options.  FMEA contingency evaluation minimises LOAD SHEDDING, so
+  // VOLL is set to strongly dominate generation cost (lexicographic min-shed).
   opf::DCOPFOptions opf_opt = options.opf_options;
   opf_opt.load_shedding = true;
+  opf_opt.voll = reliability_shedding_voll(sys, std::max(opf_opt.voll, options.voll));
   opf_opt.verbose = false;
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
 

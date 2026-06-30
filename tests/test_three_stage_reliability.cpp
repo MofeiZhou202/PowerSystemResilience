@@ -36,9 +36,12 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
+#include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/reliability/reliability_assessment.hpp"
 
 namespace fs = std::filesystem;
 
@@ -339,6 +342,171 @@ TEST_CASE("Three-stage reliability — standalone AC switch is a Stage 2 candida
   const auto& faulted_source_edge = r.faults.front();
   CHECK(faulted_source_edge.pls_stage1 > 900.0);
   CHECK(faulted_source_edge.pls_stage2 == Catch::Approx(0.0).margin(1e-6));
+}
+
+TEST_CASE("Three-stage reliability — unavailable tie (fail-to-close) loses Stage 2 restoration",
+          "[reliability][three_stage][switch_fail]") {
+  const char* json = R"json({
+    "name":"tie_fail_to_close", "base_mva":10.0,
+    "ac":{
+      "base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":1},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"from_bus":2,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],
+      "switches":[{"index":1,"bus_from":1,"bus_to":3,"closed":false,"in_service":true}]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  // Baseline: the tie may close -> Stage 2 fully restores the isolated feeder.
+  ThreeStageReliabilityOptions opts;
+  opts.inherit_stdio = false;
+  opts.max_switch_operations = 1;
+  auto base = run_three_stage_reliability_from_string(json, opts);
+  REQUIRE(base.ok);
+  REQUIRE(base.faults.size() == 2);
+
+  // Fail-to-close: tie switch index 1 is unavailable -> Stage-2 restoration lost.
+  ThreeStageReliabilityOptions opts_fail = opts;
+  opts_fail.unavailable_tie_switch_ids = {1};
+  auto failed = run_three_stage_reliability_from_string(json, opts_fail);
+  REQUIRE(failed.ok);
+  REQUIRE(failed.faults.size() == 2);
+
+  const auto& base_fault = base.faults.front();
+  const auto& failed_fault = failed.faults.front();
+  CHECK(base_fault.pls_stage2 == Catch::Approx(0.0).margin(1e-6));
+  CHECK(failed_fault.pls_stage2 > base_fault.pls_stage2 + 1.0);
+  CHECK(failed.eens_kwh_yr > base.eens_kwh_yr);
+}
+
+TEST_CASE("Three-stage reliability — longer MTTR raises EENS (per-component repair duration)",
+          "[reliability][three_stage][duration]") {
+  auto run_with_mttr = [](double mttr) {
+    // Capacity-limited source (gen 0.5 MW < load 1.0 MW) so Stage-3 (post-repair)
+    // shed is non-zero; the Stage-3 duration then scales with the branch MTTR.
+    std::string json = std::string(R"json({
+      "name":"mttr_test","base_mva":10.0,
+      "ac":{"base_mva":10.0,
+        "buses":[
+          {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+          {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
+        ],
+        "branches":[
+          {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":)json")
+      + std::to_string(mttr) + R"json(}
+        ],
+        "loads":[],"external_grids":[],
+        "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":0.5,"pmax_mw":0.5,"pmin_mw":0.0,"qmax_mvar":0.5,"qmin_mvar":0.0}],
+        "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+      },
+      "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+      "vsc_converters":[],"dcdc_converters":[]
+    })json";
+    ThreeStageReliabilityOptions opts;
+    opts.inherit_stdio = false;
+    return run_three_stage_reliability_from_string(json, opts);
+  };
+
+  auto r1 = run_with_mttr(1.0);
+  auto r20 = run_with_mttr(20.0);
+  REQUIRE(r1.ok);
+  REQUIRE(r20.ok);
+  CHECK(r1.eens_kwh_yr > 0.0);
+  // ~20x MTTR on the dominant Stage-3 repair window -> several-fold more EENS.
+  CHECK(r20.eens_kwh_yr > 5.0 * r1.eens_kwh_yr);
+}
+
+TEST_CASE("Three-stage reliability — opt-in generator + transformer faults extend the contingency set",
+          "[reliability][three_stage][fault_set]") {
+  // bus3 is reachable only through transformer1 (hv=1, lv=3); branch1 feeds bus2.
+  // gen1 at bus1 is the only source.
+  const char* json = R"json({
+    "name":"gen_tf_faults","base_mva":10.0,
+    "ac":{"base_mva":10.0,
+      "buses":[
+        {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.5,"qd_mvar":0.0,"n_customers":1}
+      ],
+      "branches":[
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+      ],
+      "transformers_2w":[
+        {"index":1,"hv_bus":1,"lv_bus":3,"sn_mva":10.0,"in_service":true,"mtbf_hours":8760.0,"mttr_hours":5.0}
+      ],
+      "loads":[],"external_grids":[],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":3.0,"pmax_mw":3.0,"pmin_mw":0.0,"qmax_mvar":3.0,"qmin_mvar":0.0,"forced_outage_rate":0.02,"mttr_hr":10.0}],
+      "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+    },
+    "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+    "vsc_converters":[],"dcdc_converters":[]
+  })json";
+
+  ThreeStageReliabilityOptions base;
+  base.inherit_stdio = false;
+  auto r_base = run_three_stage_reliability_from_string(json, base);
+  REQUIRE(r_base.ok);
+  const size_t n_base = r_base.faults.size();
+
+  ThreeStageReliabilityOptions gen_on = base;
+  gen_on.include_generator_faults = true;
+  auto r_gen = run_three_stage_reliability_from_string(json, gen_on);
+  REQUIRE(r_gen.ok);
+  CHECK(r_gen.faults.size() == n_base + 1);            // +1 generator outage
+  CHECK(r_gen.eens_kwh_yr > r_base.eens_kwh_yr);       // loss-of-only-source adds EENS
+
+  ThreeStageReliabilityOptions tf_on = base;
+  tf_on.include_transformer_faults = true;
+  auto r_tf = run_three_stage_reliability_from_string(json, tf_on);
+  REQUIRE(r_tf.ok);
+  CHECK(r_tf.faults.size() == n_base + 1);             // +1 transformer outage
+
+  ThreeStageReliabilityOptions both = base;
+  both.include_generator_faults = true;
+  both.include_transformer_faults = true;
+  auto r_both = run_three_stage_reliability_from_string(json, both);
+  REQUIRE(r_both.ok);
+  CHECK(r_both.faults.size() == n_base + 2);
+}
+
+TEST_CASE("nsq Monte Carlo on a real hybrid case file routes through the hybrid LP",
+          "[reliability][mc][hybrid][integration]") {
+  const fs::path path = reliability_data("case33mg_acdc.json");
+  if (!fs::exists(path)) {
+    WARN("case33mg_acdc.json not found; skipping real-file MC test");
+    return;
+  }
+  std::ifstream in(path);
+  const std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  REQUIRE_FALSE(text.empty());
+
+  hacdcpf::HybridPowerSystem sys = hacdcpf::io::from_json(text);
+  REQUIRE_FALSE(sys.vsc_converters.empty());  // confirms a hybrid AC/DC case
+
+  hacdcpf::analysis::ReliabilityOptions opt;
+  opt.max_iterations = 300;
+  opt.seed = 7;
+  opt.compute_tail_risk = false;
+  auto r = hacdcpf::analysis::run_nonsequential_mc(sys, opt);
+
+  // The hybrid case must now be evaluated with the hybrid network LP so DC load
+  // curtailment is part of the reported EENS/LOLE.
+  CHECK(r.model_scope == "hybrid-acdc-network-lp");
+  CHECK(r.validity.dc_load_curtailment_included);
+  CHECK(r.eens_mwh_yr >= 0.0);
+  CHECK(r.iterations_used > 0);
 }
 
 TEST_CASE("Three-stage reliability — Stage 1/3 cannot open healthy closed lines for free",

@@ -59,6 +59,8 @@ struct SourcePoint {
   double p_kw{0.0};
 };
 
+enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W };
+
 struct FaultLine {
   int id{0};
   bool ac{true};
@@ -67,6 +69,13 @@ struct FaultLine {
   int to_bus{0};
   bool normally_in_service{true};
   double failure_rate{0.0};
+  // Per-component stage durations (hr).  Isolation/switching default to the
+  // global boundary times (no per-branch field exists); the repair stage
+  // absorbs the faulted component's MTTR (r_m - tau_iso - tau_sw).
+  double tau_iso_hr{kTauSwitchHr};
+  double tau_sw_hr{kTauTrippingHr - kTauSwitchHr};
+  double tau_rep_hr{kTauRepairHr - kTauTrippingHr};
+  FaultKind kind{FaultKind::ACBranch};
 };
 
 struct NativeCase {
@@ -75,6 +84,8 @@ struct NativeCase {
   std::vector<LoadPoint> loads;
   std::vector<SourcePoint> sources;
   std::vector<FaultLine> faults;
+  bool include_generator_faults{false};
+  bool include_transformer_faults{false};
 };
 
 std::string read_file_text(const fs::path& path) {
@@ -113,9 +124,12 @@ void add_source(std::vector<SourcePoint>& sources, int bus, double p_mw) {
   sources.push_back({bus, p_mw * 1000.0});
 }
 
-NativeCase build_native_case(const HybridPowerSystem& sys) {
+NativeCase build_native_case(const HybridPowerSystem& sys,
+                             const ThreeStageReliabilityOptions& options = {}) {
   NativeCase c;
   c.sys = sys;
+  c.include_generator_faults = options.include_generator_faults;
+  c.include_transformer_faults = options.include_transformer_faults;
 
   for (const auto& b : sys.ac.buses) {
     if (b.in_service) add_bus(c.buses, b.index);
@@ -195,8 +209,13 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_bus(c.buses, br.from_bus);
     add_bus(c.buses, br.to_bus);
     if (!br.in_service) continue;  // out-of-service branches cannot fail
+    // Stage-3 repair duration from this branch's MTTR (per-component); isolation
+    // and switching keep the global defaults (no per-branch field exists).
+    const double r_ac = br.mttr_hr > 1e-9 ? br.mttr_hr : kTauRepairHr;
+    const double d3_ac = std::max(0.0, r_ac - kTauTrippingHr);
     c.faults.push_back({id++, true, i, br.from_bus, br.to_bus, br.in_service,
-                        br.failure_rate > 0.0 ? br.failure_rate : kDefaultFailureRate});
+                        br.failure_rate > 0.0 ? br.failure_rate : kDefaultFailureRate,
+                        kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_ac});
   }
   for (int i = 0; i < static_cast<int>(sys.dc.branches.size()); ++i) {
     const auto& br = sys.dc.branches[i];
@@ -204,8 +223,45 @@ NativeCase build_native_case(const HybridPowerSystem& sys) {
     add_bus(c.buses, br.to_bus + kDCBusOffset);
     if (!br.in_service) continue;  // out-of-service branches cannot fail
     double lambda = br.mtbf_hours > 0.0 ? 8760.0 / br.mtbf_hours : kDefaultFailureRate;
+    const double r_dc = br.mttr_hours > 1e-9 ? br.mttr_hours : kTauRepairHr;
+    const double d3_dc = std::max(0.0, r_dc - kTauTrippingHr);
     // from_bus/to_bus stored without offset — informational only, not used in stage_components
-    c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda});
+    c.faults.push_back({id++, false, i, br.from_bus, br.to_bus, br.in_service, lambda,
+                        kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_dc,
+                        FaultKind::DCBranch});
+  }
+  // Generator forced-outage contingencies (opt-in).  lambda from FOR + MTTR.
+  if (c.include_generator_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.generators.size()); ++i) {
+      const auto& g = sys.ac.generators[i];
+      if (!g.in_service) continue;
+      if (hacdcpf::model::effective_capacity_mw(g) <= 1e-9) continue;
+      add_bus(c.buses, g.bus);
+      double lam = kDefaultFailureRate;
+      const double f = g.forced_outage_rate;
+      const double m = g.mttr_hr;
+      if (f > 0.0 && f < 1.0 && m > 1e-9) lam = f / ((1.0 - f) * m) * 8760.0;
+      const double r_g = m > 1e-9 ? m : kTauRepairHr;
+      const double d3_g = std::max(0.0, r_g - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, g.bus, g.bus, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_g,
+                          FaultKind::Generator});
+    }
+  }
+  // 2-winding transformer outage contingencies (opt-in; modelled as edges).
+  if (c.include_transformer_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.transformers_2w.size()); ++i) {
+      const auto& t = sys.ac.transformers_2w[i];
+      add_bus(c.buses, t.hv_bus);
+      add_bus(c.buses, t.lv_bus);
+      if (!t.in_service) continue;
+      double lam = t.mtbf_hours > 0.0 ? 8760.0 / t.mtbf_hours : kDefaultFailureRate;
+      const double r_t = t.mttr_hours > 1e-9 ? t.mttr_hours : kTauRepairHr;
+      const double d3_t = std::max(0.0, r_t - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, t.hv_bus, t.lv_bus, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_t,
+                          FaultKind::Transformer2W});
+    }
   }
 
   std::sort(c.buses.begin(), c.buses.end());
@@ -309,7 +365,8 @@ double vsc_transfer_capacity_kw(const VSCConverter& vsc) {
 // loads on buses with no AC equivalent are handled by the connectivity/capacity
 // fallback at the end of this function.
 StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int stage,
-                            int max_sw_ops = INT_MAX) {
+                            int max_sw_ops = INT_MAX,
+                            const std::unordered_set<int>* unavailable_ties = nullptr) {
   StageSolve out;
   const int nd_total = static_cast<int>(c.loads.size());
   out.shed_by_load.assign(c.loads.size(), 0.0);
@@ -339,6 +396,8 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     double s_max_mw;  // thermal limit in MW (= rate_a_mva, or default)
     bool normally_open;  // true if this is a normally-open switch
     bool failed;         // true if this is the faulted branch
+    int switch_index;    // Switch::index of the controlling tie (-1 if none)
+    int transformer_index{-1};  // sys.ac.transformers_2w index (-1 if not a transformer)
   };
   // Default branch rating: 2× total system demand (ensures feasibility when
   // no explicit rating is given, without making Big-M constraints too loose).
@@ -361,24 +420,27 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     branch_pair_seen[undirected_key(br.from_bus, br.to_bus)] = true;
 
     bool has_open_switch = false;
+    int open_switch_index = -1;
     for (const auto& sw : sys.ac.switches) {
       if (!sw.in_service) continue;
       if (!sw.closed &&
           ((sw.bus_from == br.from_bus && sw.bus_to == br.to_bus) ||
            (sw.bus_from == br.to_bus   && sw.bus_to == br.from_bus))) {
         has_open_switch = true;
+        open_switch_index = sw.index;
         break;
       }
     }
     const bool is_no_switch = !br.in_service || has_open_switch;
-    const bool is_failed = (fault.ac && b == fault.index);
+    const bool is_failed = (fault.kind == FaultKind::ACBranch && b == fault.index);
     const double s_max = br.rate_a_mva > 1e-9 ? br.rate_a_mva : default_rate_mw;
     ac_branches.push_back({b, it_f->second, it_t->second,
                            std::max(1e-6, br.r_pu),
                            std::max(1e-6, br.x_pu),
                            s_max,
                            is_no_switch,
-                           is_failed});
+                           is_failed,
+                           open_switch_index});
   }
   for (const auto& sw : sys.ac.switches) {
     if (!sw.in_service) continue;
@@ -389,7 +451,26 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     ac_branches.push_back({-1, it_f->second, it_t->second,
                            1e-6, 1e-6, default_rate_mw,
                            !sw.closed,
-                           false});
+                           false,
+                           sw.index});
+  }
+  // Transformers as near-ideal capacity-limited restoration edges (opt-in).
+  // A faulted transformer edge is forced open in Stages 1/2 (isolation) and
+  // restored in Stage 3 (repair), exactly like a faulted branch.
+  if (c.include_transformer_faults) {
+    for (int t = 0; t < static_cast<int>(sys.ac.transformers_2w.size()); ++t) {
+      const auto& tr = sys.ac.transformers_2w[t];
+      if (!tr.in_service) continue;
+      auto it_f = ac_bus_pos.find(tr.hv_bus);
+      auto it_t = ac_bus_pos.find(tr.lv_bus);
+      if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+      const bool tf_failed =
+          (fault.kind == FaultKind::Transformer2W && t == fault.index);
+      const double s_max = tr.sn_mva > 1e-9 ? tr.sn_mva : default_rate_mw;
+      ac_branches.push_back({-1, it_f->second, it_t->second,
+                             1e-6, 1e-6, s_max,
+                             false, tf_failed, -1, t});
+    }
   }
   const int n_br = static_cast<int>(ac_branches.size());
 
@@ -415,8 +496,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     auto it = ac_bus_pos.find(eg.bus);
     if (it != ac_bus_pos.end()) q_gen_max[it->second] += cap;
   }
-  for (const auto& g : sys.ac.generators) {
+  for (int gi = 0; gi < static_cast<int>(sys.ac.generators.size()); ++gi) {
+    const auto& g = sys.ac.generators[gi];
     if (!g.in_service) continue;
+    // Generator forced outage: out during isolation/switching, repaired in Stage 3.
+    if (fault.kind == FaultKind::Generator && gi == fault.index && stage < 3) continue;
     mark_source(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
     auto it = ac_bus_pos.find(g.bus);
     if (it != ac_bus_pos.end())
@@ -556,6 +640,14 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       z_lb = 0.0; z_ub = 0.0;
     }
     // Stage 2: normally-open switch — free binary variable, subject to C9 (count constraint)
+
+    // Deterministic fail-to-close: a tie listed as unavailable cannot close in
+    // Stage 2, so its back-feed restoration path is lost.
+    if (stage == 2 && br.normally_open && !br.failed && unavailable_ties &&
+        br.switch_index >= 0 && unavailable_ties->count(br.switch_index) > 0) {
+      z_lb = 0.0;
+      z_ub = 0.0;
+    }
 
     // Fixed z (lb==ub) → Continuous: pure-LP path, avoids B&C postsolve issues.
     // Free z (lb < ub) → Binary: only for truly free NO switches in stage 2.
@@ -1070,7 +1162,8 @@ void fill_summary(const NativeCase& c, ThreeStageReliabilityResult& r) {
 }
 
 void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
-                     int max_sw_ops = INT_MAX) {
+                     int max_sw_ops = INT_MAX,
+                     const std::unordered_set<int>& unavailable_ties = {}) {
   // Clamp negative values: negative has no sensible meaning; treat as 0
   // (no switching) rather than propagating a misleading negative count string.
   if (max_sw_ops < 0) max_sw_ops = 0;
@@ -1091,7 +1184,7 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
   for (const auto& fault : c.faults) {
     auto s1 = solve_stage_milp(c, fault, 1);
-    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops);  // switch-count limit applies only to Stage 2
+    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties);  // switch-count limit applies only to Stage 2
     auto s3 = solve_stage_milp(c, fault, 3);
 
     ThreeStageFaultDetail d;
@@ -1114,11 +1207,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.pls_stage2 = s2.shed_kw;
     d.pls_stage3 = s3.shed_kw;
     d.pls_total = d.pls_stage1 + d.pls_stage2 + d.pls_stage3;
-    // P1c: kTauSwitchHr/kTauTrippingHr/kTauRepairHr are boundary times
-    // (τ_SW, τ_TP, τ_RP).  Stage durations are τ_SW, τ_TP-τ_SW, τ_RP-τ_TP.
-    d.objective = d.pls_stage1 * kTauSwitchHr
-                + d.pls_stage2 * (kTauTrippingHr - kTauSwitchHr)
-                + d.pls_stage3 * (kTauRepairHr   - kTauTrippingHr);
+    // P1c: per-component stage durations from the faulted component's MTTR.
+    // Stage 1 = tau_iso, Stage 2 = tau_sw, Stage 3 = tau_rep (repair).
+    d.objective = d.pls_stage1 * fault.tau_iso_hr
+                + d.pls_stage2 * fault.tau_sw_hr
+                + d.pls_stage3 * fault.tau_rep_hr;
     // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
     // yet implemented; the binary load-shedding MILP above does not dispatch
     // SOP active-power flows. A dedicated OPF-based restoration model is
@@ -1135,17 +1228,17 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
     for (size_t i = 0; i < c.loads.size(); ++i) {
       const double ens = fault.failure_rate *
-          (s1.shed_by_load[i] * kTauSwitchHr +
-           s2.shed_by_load[i] * (kTauTrippingHr - kTauSwitchHr) +
-           s3.shed_by_load[i] * (kTauRepairHr   - kTauTrippingHr));
+          (s1.shed_by_load[i] * fault.tau_iso_hr +
+           s2.shed_by_load[i] * fault.tau_sw_hr +
+           s3.shed_by_load[i] * fault.tau_rep_hr);
       r.nodal_eens_kwh_yr[i] += ens;
       r.eens_kwh_yr += ens;
       const bool interrupted = s1.shed_by_load[i] > 1e-6 || s2.shed_by_load[i] > 1e-6 || s3.shed_by_load[i] > 1e-6;
       if (interrupted) {
         const double cust = std::max(1.0, c.loads[i].customers);
-        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? kTauSwitchHr                      : 0.0) +
-                                     (s2.shed_by_load[i] > 1e-6 ? (kTauTrippingHr - kTauSwitchHr)  : 0.0) +
-                                     (s3.shed_by_load[i] > 1e-6 ? (kTauRepairHr   - kTauTrippingHr) : 0.0)) * 60.0;
+        const double duration_min = ((s1.shed_by_load[i] > 1e-6 ? fault.tau_iso_hr : 0.0) +
+                                     (s2.shed_by_load[i] > 1e-6 ? fault.tau_sw_hr  : 0.0) +
+                                     (s3.shed_by_load[i] > 1e-6 ? fault.tau_rep_hr : 0.0)) * 60.0;
         r.nodal_cif[i] += fault.failure_rate;
         r.nodal_cid_min[i] += fault.failure_rate * duration_min;
         weighted_interruptions += fault.failure_rate * cust;
@@ -1240,7 +1333,7 @@ ThreeStageReliabilityResult run_three_stage_reliability(
   }
   try {
     HybridPowerSystem sys = io::from_json(text);
-    NativeCase c = build_native_case(sys);
+    NativeCase c = build_native_case(sys, options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
@@ -1249,7 +1342,10 @@ ThreeStageReliabilityResult run_three_stage_reliability(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result, options.max_switch_operations);
+    std::unordered_set<int> unavailable_ties(
+        options.unavailable_tie_switch_ids.begin(),
+        options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }
@@ -1266,7 +1362,7 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
   }
   try {
     HybridPowerSystem sys = io::from_json(case_json_text);
-    NativeCase c = build_native_case(sys);
+    NativeCase c = build_native_case(sys, options);
     if (c.loads.empty()) {
       result.error = "case JSON contains no load points";
       return result;
@@ -1275,7 +1371,10 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
       result.error = "case JSON contains no AC/DC branch contingencies";
       return result;
     }
-    run_native_case(c, result, options.max_switch_operations);
+    std::unordered_set<int> unavailable_ties(
+        options.unavailable_tie_switch_ids.begin(),
+        options.unavailable_tie_switch_ids.end());
+    run_native_case(c, result, options.max_switch_operations, unavailable_ties);
   } catch (const std::exception& e) {
     result.error = std::string("failed to evaluate native three-stage reliability: ") + e.what();
   }

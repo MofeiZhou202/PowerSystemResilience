@@ -15,11 +15,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/reliability/failure_mode.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::analysis;
@@ -213,6 +216,515 @@ TEST_CASE("resolver: MTBF + MTTR equals lambda+repair round trip",
 
   CHECK(pa.lambda_per_year == Approx(pb.lambda_per_year));
   CHECK(pa.repair_hr == Approx(pb.repair_hr));
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Active-on-demand, explicit MTTF, MTBF convention, configurable H
+// ─────────────────────────────────────────────────────────────────────────
+
+TEST_CASE("resolver: active-on-demand frequency = demand_freq * p_demand",
+          "[reliability][resolver][active]") {
+  ReliabilityRawFields raw;
+  raw.is_active = true;
+  raw.probability_per_demand = 0.01;
+  raw.demand_frequency_per_year = 2.0;
+  raw.cyber_recovery_hr = 1.0;
+
+  ReliabilityParams p = resolve_reliability_params(raw, ReliabilityDataPolicy{});
+
+  REQUIRE(p.has_data);
+  CHECK(p.is_active);
+  CHECK(p.lambda_active_per_year == Approx(0.02));   // 2.0 * 0.01
+  CHECK(p.lambda_per_year == Approx(0.02));
+  CHECK(p.repair_hr == Approx(1.0));                  // cyber recovery time
+  CHECK(p.unavailability == Approx(0.02 * 1.0 / (8760.0 + 0.02 * 1.0)));
+}
+
+TEST_CASE("resolver: active mode without repair is frequency-only",
+          "[reliability][resolver][active]") {
+  ReliabilityRawFields raw;
+  raw.is_active = true;
+  raw.probability_per_demand = 0.005;
+  raw.demand_frequency_per_year = 1.0;
+  // no repair / recovery time
+
+  ReliabilityParams p = resolve_reliability_params(raw, ReliabilityDataPolicy{});
+
+  REQUIRE(p.has_data);
+  CHECK(p.lambda_active_per_year == Approx(0.005));
+  CHECK(p.repair_hr == Approx(0.0));
+  CHECK_FALSE(p.warnings.empty());
+}
+
+TEST_CASE("resolver: explicit MTTF + MTTR", "[reliability][resolver][mttf]") {
+  ReliabilityRawFields raw;
+  raw.mttf_hours = 4380.0;   // lambda = 2.0/yr
+  raw.mttr_hours = 12.0;
+
+  ReliabilityParams p = resolve_reliability_params(raw, ReliabilityDataPolicy{});
+
+  REQUIRE(p.has_data);
+  CHECK(p.lambda_per_year == Approx(2.0));
+  CHECK(p.repair_hr == Approx(12.0));
+  CHECK(p.unavailability == Approx(12.0 / (4380.0 + 12.0)));
+}
+
+TEST_CASE("resolver: MTBF cycle-time convention subtracts MTTR",
+          "[reliability][resolver][mtbf]") {
+  ReliabilityRawFields raw;
+  raw.mtbf_hours = 4392.0;   // cycle time
+  raw.mttr_hours = 12.0;     // MTTF = 4392 - 12 = 4380
+
+  ReliabilityDataPolicy pol;
+  pol.mtbf_convention = MtbfConvention::MtbfAsCycleTime;
+
+  ReliabilityParams p = resolve_reliability_params(raw, pol);
+
+  CHECK(p.lambda_per_year == Approx(8760.0 / 4380.0));
+  CHECK(p.mtbf_convention_applied == MtbfConvention::MtbfAsCycleTime);
+}
+
+TEST_CASE("resolver: configurable hours-per-year (8736)",
+          "[reliability][resolver][hours]") {
+  ReliabilityRawFields raw;
+  raw.failure_rate_per_year = 2.0;
+  raw.mttr_hr = 10.0;
+
+  ReliabilityDataPolicy pol;
+  pol.hours_per_year = 8736.0;
+
+  ReliabilityParams p = resolve_reliability_params(raw, pol);
+
+  CHECK(p.unavailability == Approx(2.0 / (2.0 + 8736.0 / 10.0)));
+  CHECK(p.mttf_hr == Approx(8736.0 / 2.0));
+}
+
+TEST_CASE("resolver: non-finite inputs are rejected",
+          "[reliability][resolver][edge]") {
+  ReliabilityRawFields raw;
+  raw.failure_rate_per_year = std::numeric_limits<double>::infinity();
+  raw.mttr_hr = std::nan("");
+
+  ReliabilityDataPolicy strict;
+  strict.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  ReliabilityParams p = resolve_reliability_params(raw, strict);
+
+  CHECK_FALSE(p.has_data);
+  CHECK(p.data_source == "missing");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Failure-mode catalog
+// ─────────────────────────────────────────────────────────────────────────
+
+namespace {
+HybridPowerSystem make_switch_breaker_vsc_system() {
+  HybridPowerSystem sys;
+  ACBus a;
+  a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true;
+  sys.ac.buses = {a};
+
+  Switch sw;
+  sw.index = 1; sw.bus_from = 1; sw.bus_to = 1; sw.in_service = true;
+  sw.p_sw_fail = 0.02;
+  sys.ac.switches = {sw};
+
+  CircuitBreaker cb;
+  cb.index = 1; cb.bus_from = 1; cb.bus_to = 1; cb.in_service = true;
+  sys.ac.circuit_breakers = {cb};
+
+  VSCConverter v;
+  v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.forced_outage_rate = 0.01; v.mttr_hr = 24.0;
+  sys.vsc_converters = {v};
+
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("catalog: switch emits active + passive + cyber modes",
+          "[reliability][failure_mode][catalog]") {
+  auto sys = make_switch_breaker_vsc_system();
+  FailureModeCatalogOptions opt;
+  auto cat = build_failure_mode_catalog(sys, opt, ReliabilityDataPolicy{});
+
+  // Collect the switch mode ids.
+  std::vector<std::string> sw_modes;
+  for (const auto& e : cat)
+    if (e.mode.ref.component.kind == ReliabilityComponentKind::ACSwitch)
+      sw_modes.push_back(e.mode.ref.mode_id);
+
+  auto has_suffix = [&](const std::string& suf) {
+    for (const auto& m : sw_modes)
+      if (m.size() >= suf.size() && m.compare(m.size() - suf.size(), suf.size(), suf) == 0)
+        return true;
+    return false;
+  };
+  CHECK(has_suffix("/hardware_outage"));
+  CHECK(has_suffix("/fail_to_open"));
+  CHECK(has_suffix("/fail_to_close"));
+  CHECK(has_suffix("/comm_loss"));
+
+  // The active fail-to-open mode must carry the case p_sw_fail as p_demand.
+  for (const auto& e : cat) {
+    if (e.mode.ref.consequence == FailureConsequenceKind::FailToOpen) {
+      CHECK(e.mode.ref.activation == FailureActivation::ActiveOnDemand);
+      CHECK(e.mode.probability_per_demand == Approx(0.02));
+      CHECK(e.mode.params.lambda_active_per_year == Approx(2.0 * 0.02));
+    }
+  }
+}
+
+TEST_CASE("catalog: breaker emits fail-to-trip protection mode + VSC grid-forming",
+          "[reliability][failure_mode][catalog]") {
+  auto sys = make_switch_breaker_vsc_system();
+  FailureModeCatalogOptions opt;
+  auto cat = build_failure_mode_catalog(sys, opt, ReliabilityDataPolicy{});
+
+  bool saw_fail_to_trip = false, saw_grid_forming = false;
+  for (const auto& e : cat) {
+    if (e.mode.ref.consequence == FailureConsequenceKind::FailToTrip &&
+        e.mode.ref.cause == FailureCause::ProtectionLogic)
+      saw_fail_to_trip = true;
+    if (e.mode.ref.consequence == FailureConsequenceKind::GridFormingUnavailable)
+      saw_grid_forming = true;
+  }
+  CHECK(saw_fail_to_trip);
+  CHECK(saw_grid_forming);
+}
+
+TEST_CASE("catalog: coverage summary splits active/passive and physical/cyber",
+          "[reliability][failure_mode][coverage]") {
+  auto sys = make_switch_breaker_vsc_system();
+  FailureModeCatalogOptions opt;
+  auto cat = build_failure_mode_catalog(sys, opt, ReliabilityDataPolicy{});
+  auto cov = summarize_failure_mode_coverage(cat);
+
+  CHECK(cov.modes_total == (int)cat.size());
+  CHECK(cov.modes_active > 0);
+  CHECK(cov.modes_passive > 0);
+  CHECK(cov.modes_physical > 0);
+  CHECK(cov.modes_cyber_control > 0);
+  CHECK(cov.components_total == 3);  // switch + breaker + vsc
+}
+
+TEST_CASE("catalog: activation filter excludes active modes",
+          "[reliability][failure_mode][catalog]") {
+  auto sys = make_switch_breaker_vsc_system();
+  FailureModeCatalogOptions opt;
+  opt.include_active_on_demand = false;
+  auto cat = build_failure_mode_catalog(sys, opt, ReliabilityDataPolicy{});
+
+  for (const auto& e : cat)
+    CHECK(e.mode.ref.activation == FailureActivation::Passive);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rich-component catalog coverage (every rich model is represented)
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_rich_component_system() {
+  HybridPowerSystem sys;
+  ACBus a; a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true;
+  sys.ac.buses = {a};
+
+  ExternalGrid eg; eg.index = 1; eg.bus = 1; eg.in_service = true; eg.name = "Grid";
+  sys.ac.external_grids = {eg};
+
+  Load ld; ld.index = 1; ld.bus = 1; ld.in_service = true; ld.p_mw = 5.0;
+  ld.n_customers = 80; ld.controllable = true;
+  sys.ac.loads = {ld};
+
+  Charger ch; ch.index = 1; ch.in_service = true; ch.mtbf_hours = 8760.0; ch.mttr_hours = 6.0;
+  sys.ac.chargers = {ch};
+
+  EnergyRouterPort port; port.index = 1; port.in_service = true;
+  EnergyRouter er; er.index = 1; er.in_service = true;
+  er.mtbf_hours = 4380.0; er.mttr_hours = 48.0; er.ports = {port};
+  sys.energy_routers = {er};
+
+  MobileStorage ms; ms.index = 1; ms.bus = 1; ms.in_service = true;
+  ms.mtbf_hours = 4380.0; ms.mttr_hours = 24.0;
+  sys.mobile_storage = {ms};
+
+  VirtualPowerPlant vpp; vpp.index = 1; vpp.pcc_bus = 1; vpp.in_service = true;
+  vpp.mtbf_hours = 4380.0; vpp.mttr_hours = 4.0;
+  sys.vpps = {vpp};
+
+  Microgrid mg; mg.index = 1; mg.in_service = true;
+  mg.mtbf_hours = 8760.0; mg.mttr_hours = 4.0;
+  sys.microgrids = {mg};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("catalog: rich components (grid/load/router/mobile/vpp/microgrid) are catalogued",
+          "[reliability][failure_mode][catalog]") {
+  auto sys = make_rich_component_system();
+  FailureModeCatalogOptions opt;
+  // Allow defaulting so template-only components (external grid, loads) are enabled.
+  ReliabilityDataPolicy policy;
+  policy.default_policy = ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly;
+  auto cat = build_failure_mode_catalog(sys, opt, policy);
+
+  auto saw_kind = [&](ReliabilityComponentKind k) {
+    for (const auto& e : cat)
+      if (e.mode.ref.component.kind == k) return true;
+    return false;
+  };
+  CHECK(saw_kind(ReliabilityComponentKind::ExternalGrid));
+  CHECK(saw_kind(ReliabilityComponentKind::ACLoad));
+  CHECK(saw_kind(ReliabilityComponentKind::Charger));
+  CHECK(saw_kind(ReliabilityComponentKind::EnergyRouter));
+  CHECK(saw_kind(ReliabilityComponentKind::EnergyRouterPort));
+  CHECK(saw_kind(ReliabilityComponentKind::MobileStorage));
+  CHECK(saw_kind(ReliabilityComponentKind::VirtualPowerPlant));
+  CHECK(saw_kind(ReliabilityComponentKind::Microgrid));
+
+  // The energy-router outage resolves its MTBF/MTTR into a real lambda (case data).
+  for (const auto& e : cat) {
+    if (e.mode.ref.component.kind == ReliabilityComponentKind::EnergyRouter &&
+        e.mode.ref.consequence == FailureConsequenceKind::ForcedOutage) {
+      CHECK(e.mode.params.lambda_per_year == Approx(8760.0 / 4380.0));
+      CHECK(e.mode.params.repair_hr == Approx(48.0));
+    }
+  }
+}
+
+TEST_CASE("catalog: aggregated sources support forced-outage; control effects + unmodeled kinds unsupported",
+          "[reliability][failure_mode][consequence]") {
+  auto sys = make_rich_component_system();
+  FailureModeCatalogOptions opt;
+  ReliabilityDataPolicy policy;
+  policy.default_policy = ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly;
+  auto cat = build_failure_mode_catalog(sys, opt, policy);
+
+  ConsequenceModelCapabilities caps;  // steady-state AC/DC shed defaults
+  bool saw_grid_outage = false, saw_grid_control = false, saw_charger_outage = false;
+  for (const auto& e : cat) {
+    auto patch = build_consequence_patch(sys, e.mode, caps);
+    const auto kind = e.mode.ref.component.kind;
+    const auto cons = e.mode.ref.consequence;
+    if (kind == ReliabilityComponentKind::ExternalGrid &&
+        cons == FailureConsequenceKind::ForcedOutage) {
+      saw_grid_outage = true;
+      // External grid is now wired as a dispatchable source -> outage is modelled.
+      CHECK(patch.representable_by_selected_model);
+    }
+    if (kind == ReliabilityComponentKind::ExternalGrid &&
+        cons == FailureConsequenceKind::ControlUnavailable) {
+      saw_grid_control = true;
+      // Only forced-outage of an aggregated source is modelled by the shed engine.
+      CHECK_FALSE(patch.representable_by_selected_model);
+      CHECK_FALSE(patch.unsupported_reason.empty());
+    }
+    if (kind == ReliabilityComponentKind::Charger &&
+        cons == FailureConsequenceKind::ForcedOutage) {
+      saw_charger_outage = true;
+      // Chargers are not represented by the steady-state shed engine.
+      CHECK_FALSE(patch.representable_by_selected_model);
+    }
+  }
+  CHECK(saw_grid_outage);
+  CHECK(saw_grid_control);
+  CHECK(saw_charger_outage);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Active-failure parameter data-policy honesty
+// ─────────────────────────────────────────────────────────────────────────
+TEST_CASE("resolver: template active params resolve to default, missing under strict",
+          "[reliability][resolver][active]") {
+  ReliabilityRawFields raw;
+  raw.is_active = true;
+  raw.probability_per_demand = 0.005;
+  raw.demand_frequency_per_year = 1.0;
+  raw.active_params_are_template = true;  // catalog default, not case data
+
+  // Non-strict: template active resolves but is flagged "default" (not case).
+  ReliabilityDataPolicy lenient;
+  lenient.default_policy = ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly;
+  auto p1 = resolve_reliability_params(raw, lenient);
+  CHECK(p1.data_source == "default");
+  CHECK_FALSE(p1.has_data);
+  CHECK(p1.lambda_active_per_year == Approx(0.005));
+
+  // Strict: template active params are NOT case data -> missing.
+  ReliabilityDataPolicy strict;
+  strict.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  auto p2 = resolve_reliability_params(raw, strict);
+  CHECK(p2.data_source == "missing");
+  CHECK_FALSE(p2.has_data);
+
+  // Case-sourced active params (template flag false) are "case" even under strict.
+  raw.active_params_are_template = false;
+  auto p3 = resolve_reliability_params(raw, strict);
+  CHECK(p3.data_source == "case");
+  CHECK(p3.has_data);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Forced-shed-at-load: load-point interruption counts as shed
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_single_load_system() {
+  HybridPowerSystem sys;
+  ACBus a; a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true;
+  sys.ac.buses = {a};
+  Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 50.0; g.pmin_mw = 0.0; g.cost_c1 = 10.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  Load ld; ld.index = 1; ld.bus = 1; ld.in_service = true; ld.p_mw = 5.0;
+  ld.n_customers = 40;
+  sys.ac.loads = {ld};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("fmea: load-point interruption counts the load MW as shed",
+          "[reliability][failure_mode][forced_shed]") {
+  auto sys = make_single_load_system();
+  FailureModeFMEAOptions opt;  // default policy fills template defaults
+  auto res = run_failure_mode_fmea(sys, opt);
+
+  bool found = false;
+  for (const auto& c : res.contingencies) {
+    if (c.ref.component.kind == ReliabilityComponentKind::ACLoad &&
+        c.ref.consequence == FailureConsequenceKind::ForcedOutage) {
+      found = true;
+      CHECK(c.supported);
+      CHECK(c.total_shed_mw == Approx(5.0).margin(1e-6));
+      CHECK(c.causes_loss);
+      CHECK(c.eens_contribution > 0.0);
+    }
+  }
+  CHECK(found);
+  CHECK(res.eens_mwh_yr > 0.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// External grid wired as a source: its outage sheds the load it supplied
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_external_grid_load_system() {
+  HybridPowerSystem sys;
+  ACBus a; a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true;
+  sys.ac.buses = {a};
+  ExternalGrid eg; eg.index = 1; eg.bus = 1; eg.in_service = true; eg.name = "MainGrid";
+  sys.ac.external_grids = {eg};
+  Load ld; ld.index = 1; ld.bus = 1; ld.in_service = true; ld.p_mw = 10.0;
+  ld.n_customers = 100;
+  sys.ac.loads = {ld};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("fmea: external grid outage sheds the load it supplied",
+          "[reliability][failure_mode][external_grid]") {
+  auto sys = make_external_grid_load_system();
+  FailureModeFMEAOptions opt;  // default policy enables the template-filled grid mode
+  auto res = run_failure_mode_fmea(sys, opt);
+
+  bool found = false;
+  for (const auto& c : res.contingencies) {
+    if (c.ref.component.kind == ReliabilityComponentKind::ExternalGrid &&
+        c.ref.consequence == FailureConsequenceKind::ForcedOutage) {
+      found = true;
+      CHECK(c.supported);
+      CHECK(c.total_shed_mw == Approx(10.0).margin(0.5));
+      CHECK(c.causes_loss);
+    }
+  }
+  CHECK(found);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Active switching: fail-to-open/stuck-closed expand the isolation zone;
+// fail-to-close is deferred to the three-stage restoration engine.
+// ─────────────────────────────────────────────────────────────────────────
+TEST_CASE("consequence: switch fail-to-open expands the isolation zone; fail-to-close deferred",
+          "[reliability][failure_mode][protection]") {
+  HybridPowerSystem sys;
+  ACBus b1; b1.index = 1; b1.in_service = true;
+  ACBus b2; b2.index = 2; b2.in_service = true;
+  sys.ac.buses = {b1, b2};
+  ACBranch br; br.index = 1; br.from_bus = 1; br.to_bus = 2; br.in_service = true;
+  sys.ac.branches = {br};
+  Switch sw; sw.index = 1; sw.bus_from = 2; sw.bus_to = 2; sw.in_service = true;
+  sw.closed = true; sw.p_sw_fail = 0.02;
+  sys.ac.switches = {sw};
+
+  FailureModeCatalogOptions opt;
+  auto cat = build_failure_mode_catalog(sys, opt, ReliabilityDataPolicy{});
+  ConsequenceModelCapabilities caps;
+  caps.supports_protection_modeling = true;  // FMEA engine enables this
+
+  bool saw_open = false, saw_close = false;
+  for (const auto& e : cat) {
+    if (e.mode.ref.component.kind != ReliabilityComponentKind::ACSwitch) continue;
+    if (e.mode.ref.consequence == FailureConsequenceKind::FailToOpen) {
+      saw_open = true;
+      auto patch = build_consequence_patch(sys, e.mode, caps);
+      CHECK(patch.representable_by_selected_model);
+      REQUIRE(patch.mutations.size() == 1);
+      CHECK(patch.mutations[0].kind == MutationKind::ProtectionZoneExpansion);
+      // Applying it de-energizes the branch incident to the switch's bus_from.
+      auto sys_m = apply_consequence_patch(sys, patch);
+      CHECK_FALSE(sys_m.ac.branches[0].in_service);
+    }
+    if (e.mode.ref.consequence == FailureConsequenceKind::FailToClose) {
+      saw_close = true;
+      auto patch = build_consequence_patch(sys, e.mode, caps);
+      CHECK_FALSE(patch.representable_by_selected_model);  // deferred to three-stage
+    }
+  }
+  CHECK(saw_open);
+  CHECK(saw_close);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// End-to-end: non-sequential MC on a hybrid AC/DC system includes DC load
+// curtailment in EENS (MC now routes hybrid states through the hybrid LP).
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_hybrid_mc_system() {
+  HybridPowerSystem sys;
+  // AC bus 1: slack with a reliable generator (the only physical source).
+  ACBus a; a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true; a.pd_mw = 0.0;
+  sys.ac.buses = {a};
+  Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 20.0; g.pmin_mw = 0.0; g.is_slack = true; g.forced_outage_rate = 0.0;
+  sys.ac.generators = {g};
+  // DC bus 101 with a 5 MW DC load, fed only through the VSC.
+  DCBus d; d.index = 101; d.in_service = true; d.pd_mw = 0.0;
+  sys.dc.buses = {d};
+  DCLoad dl; dl.index = 1; dl.bus = 101; dl.in_service = true; dl.p_mw = 5.0;
+  dl.n_customers = 50;
+  sys.dc.loads = {dl};
+  // VSC AC<->DC: when it fails the DC load loses its only source.
+  VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.pmax_mw = 10.0; v.pmin_mw = -10.0; v.p_rated_mw = 10.0; v.controllable = true;
+  v.forced_outage_rate = 0.1; v.mttr_hr = 24.0;
+  sys.vsc_converters = {v};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("nsq MC: hybrid system includes DC load curtailment in EENS",
+          "[reliability][mc][hybrid][e2e]") {
+  auto sys = make_hybrid_mc_system();
+  ReliabilityOptions opt;
+  opt.max_iterations = 4000;
+  opt.seed = 42;
+  opt.compute_tail_risk = false;
+  auto r = run_nonsequential_mc(sys, opt);
+
+  CHECK(r.model_scope == "hybrid-acdc-network-lp");
+  CHECK(r.validity.dc_load_curtailment_included);
+  CHECK(r.validity.vsc_dc_power_flow_modelled);
+  // VSC unavailability ~0.1 -> the 5 MW DC load is shed in those states, so the
+  // hybrid-LP-based MC reports non-trivial EENS (previously zero under AC-only).
+  CHECK(r.eens_mwh_yr > 100.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
