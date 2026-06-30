@@ -10,6 +10,79 @@
 namespace hacdcpf::analysis {
 
 // ═══════════════════════════════════════════════════════════════════════
+// Unified Reliability Parameter Semantics  (code-review Finding 1 & 2)
+// ═══════════════════════════════════════════════════════════════════════
+// A single resolver converts the heterogeneous component reliability fields
+// (ACBranch::failure_rate, Generator::forced_outage_rate, MTBF/MTTR pairs,
+// VSC/Storage FOR, …) into one canonical parameter set so that every method
+// (NSQ MC, SEQ MC, FMEA, three-stage) consumes identical lambda/repair/
+// unavailability for identical components.
+
+/// How a method should treat components whose case data is missing.
+enum class ReliabilityDefaultPolicy {
+  /// Use only the data present on the case.  Missing data is reported, never
+  /// invented.  This is the honest GUI default.
+  StrictCaseDataOnly,
+  /// Fill ONLY missing fields from a named default/template library; existing
+  /// case values are preserved and flagged as case-sourced.
+  UseNamedTemplateForMissingOnly,
+  /// Overwrite every component with the named template (legacy behaviour of
+  /// apply_ieee24_reliability_data / apply_comprehensive_reliability_data).
+  OverwriteWithNamedTemplate
+};
+
+/// Policy object threaded through every reliability method.
+struct ReliabilityDataPolicy {
+  ReliabilityDefaultPolicy default_policy{
+      ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly};
+  std::string template_name;                 // "ieee-rts-24", "comprehensive", …
+  bool fail_on_missing_required_data{false}; // strict mode hard-stop
+  bool report_defaulted_components{true};
+};
+
+/// Raw component reliability fields as stored on the model.  Any field left at
+/// its zero default is treated as "not provided".
+struct ReliabilityRawFields {
+  double failure_rate_per_year{0.0};  // ACBranch::failure_rate (occ/yr)
+  double mttr_hr{0.0};                // ACBranch/VSC/Storage repair time (hr)
+  double mtbf_hours{0.0};            // transformer / DC component MTBF (hr)
+  double mttr_hours{0.0};            // transformer / DC component MTTR (hr)
+  double forced_outage_rate{0.0};   // Generator/VSC/Storage FOR (steady U)
+};
+
+/// Canonical resolved reliability parameters (code-review Finding 1).
+struct ReliabilityParams {
+  bool has_data{false};            // true if the case provided usable data
+  bool used_default{false};        // true if a default/template filled gaps
+  std::string data_source;         // "case" | "template" | "default" | "missing"
+  double lambda_per_year{0.0};     // failure frequency (occ/yr)
+  double repair_hr{0.0};           // mean repair time (hr)
+  double unavailability{0.0};      // steady-state forced unavailability
+  double mttf_hr{0.0};             // mean time to failure (hr)
+  std::vector<std::string> warnings;
+};
+
+/// Per-method data-quality summary surfaced to the API/GUI (Finding 4).
+struct ReliabilityDataQuality {
+  int components_total{0};
+  int components_with_reliability_data{0};
+  int components_defaulted{0};
+  std::vector<std::string> missing_required_data;  // component display names
+};
+
+/// Single resolver used by every reliability method.  Applies the conversion
+/// rules from the code review's "Reliability Parameter Semantics" section.
+///
+/// `default_lambda_per_year` / `default_repair_hr` are the named-template
+/// fallback values for this component kind; they are only consulted when the
+/// policy permits defaulting and the case data is incomplete.
+ReliabilityParams resolve_reliability_params(
+    const ReliabilityRawFields& raw,
+    const ReliabilityDataPolicy& policy,
+    double default_lambda_per_year = 0.0,
+    double default_repair_hr = 0.0);
+
+// ═══════════════════════════════════════════════════════════════════════
 // Load Profile for Sequential Monte Carlo
 // ═══════════════════════════════════════════════════════════════════════
 struct LoadProfile {
@@ -36,6 +109,10 @@ struct ReliabilityOptions {
 
   // Sequential-specific
   int hours_per_year{8736};
+
+  // Reliability data policy (Finding 1 & 2).  Controls how missing component
+  // reliability data is treated when assembling component unavailabilities.
+  ReliabilityDataPolicy data_policy{};
 
   // DC-OPF solver options for state evaluation
   opf::DCOPFOptions opf_options{};
@@ -184,6 +261,9 @@ struct ReliabilityResult {
   };
   ValidityFlags validity{};
 
+  // Data-quality summary for the resolved reliability parameters (Finding 4).
+  ReliabilityDataQuality data_quality;
+
   // ─── Advanced Results ───
   TailRiskMetrics tail_risk;             // VaR/CVaR metrics
   DistributionIndices distribution_idx;  // SAIFI/SAIDI/ASAI (if computed)
@@ -270,6 +350,12 @@ struct FMEAOptions {
   // treated as a black-start / grid-forming candidate for FMEA restoration.
   bool enable_black_start_storage{true};
 
+  // Reliability data policy (Finding 1 & 2): how missing component reliability
+  // data is treated when building the contingency catalog.  Default fills only
+  // missing fields from built-in per-kind defaults; StrictCaseDataOnly reports
+  // missing data instead of inventing values.
+  ReliabilityDataPolicy data_policy{};
+
   // DC-OPF solver options for contingency evaluation
   opf::DCOPFOptions opf_options{};
 };
@@ -336,6 +422,9 @@ struct FMEAResult {
   // Distribution indices (customer-based)
   DistributionIndices distribution_idx;
 
+  // Data-quality summary for the resolved reliability parameters (Finding 4).
+  ReliabilityDataQuality data_quality;
+
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;
 
@@ -385,6 +474,14 @@ DistributionIndices compute_distribution_indices(
     const std::vector<double>& nodal_cif,  // interruption freq per bus
     const std::vector<double>& nodal_cid,  // interruption duration per bus
     int hours_per_year = 8760);
+
+/// Scan every reliability-relevant component in the system and summarize how
+/// many have usable case reliability data vs. how many would be defaulted or
+/// are missing under the given policy.  Used for pre-run diagnostics and the
+/// API/GUI data-quality panel (code-review Finding 4).
+ReliabilityDataQuality summarize_reliability_data_quality(
+    const HybridPowerSystem& sys,
+    const ReliabilityDataPolicy& policy = {});
 
 // ═══════════════════════════════════════════════════════════════════════
 // FMEA Distribution Reliability Assessment

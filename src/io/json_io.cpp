@@ -336,10 +336,13 @@ static json dc_load_to_json(const DCLoad& l) {
   j["in_service"] = l.in_service;
   j["name"] = l.name;
   j["p_mw"] = l.p_mw;
+  j["p_rated_mw"] = l.p_rated_mw;
+  j["scaling"] = l.scaling;
   j["controllable"] = l.controllable;
   j["p_min_mw"] = l.p_min_mw;
   j["cost_mw"] = l.cost_mw;
   j["profile_id"] = l.profile_id;
+  j["n_customers"] = l.n_customers;
   return j;
 }
 
@@ -350,10 +353,13 @@ static DCLoad dc_load_from_json(const json& j) {
   l.in_service = jget(j, "in_service", true);
   l.name = jget<std::string>(j, "name", "");
   l.p_mw = jget(j, "p_mw", 0.0);
+  l.p_rated_mw = jget(j, "p_rated_mw", 0.0);
+  l.scaling = jget(j, "scaling", 1.0);
   l.controllable = jget(j, "controllable", false);
   l.p_min_mw = jget(j, "p_min_mw", 0.0);
   l.cost_mw = jget(j, "cost_mw", 0.0);
   l.profile_id = jget(j, "profile_id", -1);
+  l.n_customers = jget(j, "n_customers", 0);
   return l;
 }
 

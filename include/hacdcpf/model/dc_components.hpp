@@ -140,6 +140,10 @@ struct DCLoad {
   double cost_mw{0.0};
   int profile_id{-1};
   LoadPriority priority{LoadPriority::Medium};
+
+  // Reliability / planning: number of served customers at this DC load, used
+  // for hybrid SAIFI/SAIDI customer weighting (mirrors AC Load::n_customers).
+  int n_customers{0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════

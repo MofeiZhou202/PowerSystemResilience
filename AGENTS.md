@@ -1,6 +1,6 @@
 # Project Instructions
 
-This working tree is on the `zhoumofei` branch and is intended to be merged later with the `luosipeng` branch.
+This working tree is on the `main` branch and is intended to be merged later with the `luosipeng` branch.
 
 ## Merge and solver-safety constraints
 

@@ -528,10 +528,25 @@
         <option value="seq">序贯蒙特卡洛 (SEQ)</option>
         <option value="fmea">FMEA (N-1 枚举)</option>
         <option value="fd">频率-持续时间 (F&amp;D)</option>
+        <option value="three_stage">三阶段恢复重构 (MILP)</option>
       </select>
     </label>
     <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
       <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+    </label>
+    <label class="sub-label" title="可靠性数据策略：命名模板现为可选（不再自动套用）">数据策略
+      <select id="relDataPolicy">
+        <option value="missing_only" selected>缺失项→默认值</option>
+        <option value="case_data_only">仅用例数据 (严格)</option>
+        <option value="overwrite_template">套用模板覆盖</option>
+      </select>
+    </label>
+    <label class="sub-label" title="命名可靠性模板（仅在“套用模板覆盖”模式生效）">模板
+      <select id="relTemplate">
+        <option value="none" selected>无</option>
+        <option value="ieee-rts-24">IEEE RTS-24</option>
+        <option value="comprehensive">综合混合示范</option>
+      </select>
     </label>
     <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
     <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>

@@ -251,6 +251,12 @@ hacdcpf_add_test(test_reconfig_options test_reconfig_options.cpp)
 # TC-5 (missing-file error handling) runs unconditionally.
 hacdcpf_add_test(test_three_stage_reliability test_three_stage_reliability.cpp)
 
+# Unified reliability parameter resolver + hybrid AC/DC customer metrics.
+#   Verifies resolve_reliability_params() conversion rules, the DC-customer
+#   SAIFI/SAIDI fix (compute_distribution_indices), the data-quality summary,
+#   and the opt-in data policy through run_distribution_fmea.
+hacdcpf_add_test(test_reliability_resolver test_reliability_resolver.cpp)
+
 # LTM traffic framework: triangular FD sending/receiving, single-link LTM,
 # mesoscopic multi-link corridor, EV penetration sweep (station loading),
 # individual EV agent trajectory reconstruction (FIFO), and V2G potential.

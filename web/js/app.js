@@ -7186,11 +7186,15 @@ const App = (() => {
       const method = (document.getElementById('relMethod')?.value) || 'nsq';
       const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
       const epMap = { nsq: 'run_reliability_nsq', seq: 'run_reliability_seq',
-                      fmea: 'run_reliability_fmea', fd: 'run_reliability_fd' };
-      const opts = {};
+                      fmea: 'run_reliability_fmea', fd: 'run_reliability_fd',
+                      three_stage: 'run_reliability_three_stage' };
+      const opts = {
+        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
+        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
+      };
       if (method === 'nsq') opts.max_iterations = maxIter;
       else if (method === 'seq') { opts.max_years = Math.max(50, Math.round(maxIter / 10)); opts.hours_per_year = 8736; }
-      else if (method === 'fmea') { opts.load_scale_factor = 1.0; opts.apply_comprehensive_data = true; }
+      else if (method === 'fmea') { opts.load_scale_factor = 1.0; }
       const data = await apiPost('/api/session/' + epMap[method], opts);
       if (data && !data.error) {
         _lastReliabilityData = Object.assign({ _method: method }, data);
@@ -7202,14 +7206,55 @@ const App = (() => {
       }
     }
 
+    function relScopeBadge(text, ok) {
+      const bg = (ok === true) ? '#2e7d32' : (ok === false) ? '#b03a3a' : '#4a4f59';
+      return `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:11px;background:${bg};color:#fff;">${text}</span>`;
+    }
+    function renderRelScopeHtml(data) {
+      if (!data || !data.model_scope) return '';
+      let h = '<div style="border:1px solid var(--border,#3a3f4b);border-radius:6px;padding:8px 10px;margin-bottom:10px;">';
+      h += `<b>物理模型：</b>${relScopeBadge(data.model_scope)}`;
+      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
+      const v = data.validity || {};
+      const vkeys = Object.keys(v);
+      if (vkeys.length) {
+        h += '<br><b>有效性：</b>';
+        if ('dc_load_curtailment_included' in v) {
+          h += relScopeBadge('DC负荷' + (v.dc_load_curtailment_included ? '已计入' : '未计入'), v.dc_load_curtailment_included);
+          h += relScopeBadge('VSC直流潮流' + (v.vsc_dc_power_flow_modelled ? '已建模' : '未建模'), v.vsc_dc_power_flow_modelled);
+          h += relScopeBadge('AC电压/无功' + (v.ac_voltage_reactive_feasibility_certified ? '已认证' : '未认证'), v.ac_voltage_reactive_feasibility_certified);
+        } else {
+          vkeys.forEach(k => { if (typeof v[k] === 'boolean') h += relScopeBadge(k.replace(/_/g, ' '), v[k]); });
+        }
+      }
+      if (v.generation_adequacy_only) h += '<br>' + relScopeBadge('仅发电充裕度 — 无网络/DC/用户指标', false);
+      const dq = data.data_quality;
+      if (dq) {
+        h += `<br><b>数据质量：</b>${dq.components_with_reliability_data}/${dq.components_total} 含用例数据，${dq.components_defaulted} 默认值`;
+        if (dq.missing_required_data && dq.missing_required_data.length) h += ' ' + relScopeBadge(dq.missing_required_data.length + ' 缺失', false);
+      }
+      if (data.model_limitations) h += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.model_limitations)}</div>`;
+      h += '</div>';
+      return h;
+    }
+
     function showReliabilityResults(data, method) {
       document.getElementById('resultsEmpty').style.display = 'none';
       document.getElementById('resultsContent').style.display = 'block';
       setActiveResultGroup('reliability');
       const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', fd: '频率-持续时间' }[method] || method;
+      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
       let kpis = [];
-      if (method === 'fd') {
+      if (method === 'three_stage') {
+        kpis = [
+          ['SAIFI', nf(data.saifi, 4)],
+          ['SAIDI (min/yr)', nf(data.saidi_min, 2)],
+          ['EENS (kWh/yr)', nf(data.eens_kwh_yr, 1)],
+          ['EENS 成本', nf(data.eens_cost, 1)],
+          ['最差线路', data.worst_line ?? '—'],
+          ['精确求解', data.ok ? '✓ 是' : '✗ 回退/近似'],
+        ];
+      } else if (method === 'fd') {
         kpis = [
           ['LOLP (失负荷概率)', nf(data.lolp, 6)],
           ['LOLE (h/yr)', nf(data.lole_fd, 2)],
@@ -7225,13 +7270,14 @@ const App = (() => {
           ['PLC (%)', nf((data.plc ?? 0) * 100, 3)],
         ];
         if (method === 'fmea') {
-          kpis.push(['SAIFI', nf(data.saifi, 4)], ['SAIDI', nf(data.saidi, 4)], ['ASAI', nf(data.asai, 6)]);
-          if (data.n_contingencies != null) kpis.push(['故障枚举数', `${data.n_contingencies} (${data.n_with_loss ?? '?'} 含失负荷)`]);
+          kpis.push(['SAIFI', nf(data.saifi, 4)], ['SAIDI', nf(data.saidi, 4)], ['CAIDI', nf(data.caidi, 4)], ['ASAI', nf(data.asai, 6)]);
+          if (data.n_contingencies != null) { const swo = (data.n_with_loss_switching_only ?? 0); kpis.push(['故障枚举数', `${data.n_contingencies} (${data.n_with_loss ?? '?'} 含失负荷${swo > 0 ? ('，' + swo + ' 仅隔离阶段') : ''})`]); }
         } else {
           kpis.push(['收敛', data.converged ? '✓ 是' : '✗ 否'], ['迭代/年数', data.iterations_used ?? '—'], ['最终 CoV', nf(data.final_cov, 4)]);
         }
       }
       let html = `<div style="margin-bottom:8px;"><b>方法：</b>${methodLabel}</div>`;
+      html += renderRelScopeHtml(data);
       html += '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
       for (const [k, v] of kpis) html += `<tr><td>${k}</td><td class="result-value">${v}</td></tr>`;
       html += '</tbody></table>';
@@ -7264,6 +7310,14 @@ const App = (() => {
           const name = c.display_name || c.component_name || '—';
           const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
           html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+      }
+      // Three-stage restoration: per-fault load shed by stage
+      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
+        html += '<h4 style="margin:10px 0 4px;">故障线路恢复 (按总切负荷 kW)</h4><table><thead><tr><th>线路</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th></tr></thead><tbody>';
+        data.faults.slice().sort((a, b) => (b.pls_total || 0) - (a.pls_total || 0)).slice(0, 15).forEach(f => {
+          html += `<tr><td>Line ${f.line_id}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td></tr>`;
         });
         html += '</tbody></table>';
       }

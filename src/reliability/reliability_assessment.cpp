@@ -24,6 +24,117 @@
 
 namespace hacdcpf::analysis {
 
+// ═══════════════════════════════════════════════════════════════════════
+// Unified reliability parameter resolver  (code-review Finding 1 & 2)
+// ═══════════════════════════════════════════════════════════════════════
+// Converts the heterogeneous component reliability fields into one canonical
+// {lambda, repair_hr, unavailability, mttf_hr} set, applying the exact rules
+// from the review's "Reliability Parameter Semantics" section.  The same
+// function is used by FMEA, the Monte-Carlo paths, and unit tests so that
+// identical components yield identical parameters across all methods.
+ReliabilityParams resolve_reliability_params(
+    const ReliabilityRawFields& raw,
+    const ReliabilityDataPolicy& policy,
+    double default_lambda_per_year,
+    double default_repair_hr) {
+  ReliabilityParams p;
+
+  constexpr double kHoursPerYear = 8760.0;
+  const bool has_lambda = raw.failure_rate_per_year > 0.0;
+  const bool has_mttr_hr = raw.mttr_hr > 0.0;
+  const bool has_mtbf = raw.mtbf_hours > 0.0;
+  const bool has_mttr_hours = raw.mttr_hours > 0.0;
+  const bool has_for = raw.forced_outage_rate > 0.0 && raw.forced_outage_rate < 1.0;
+
+  auto finalize_from_lambda_repair = [&](double lambda, double repair) {
+    p.lambda_per_year = lambda;
+    p.repair_hr = repair;
+    if (repair > 0.0) {
+      const double mu = kHoursPerYear / repair;  // repairs per year
+      p.unavailability = (lambda + mu) > 0.0 ? lambda / (lambda + mu) : 0.0;
+    }
+    p.mttf_hr = lambda > 0.0 ? kHoursPerYear / lambda : 0.0;
+  };
+
+  // ── Case-data resolution (priority by which fields the model provides) ──
+  if (has_lambda && has_mttr_hr) {
+    // ACBranch-style: failures/year + repair hours.
+    finalize_from_lambda_repair(raw.failure_rate_per_year, raw.mttr_hr);
+    p.has_data = true;
+    p.data_source = "case";
+  } else if (has_mtbf) {
+    // Transformer / DC-component-style: MTBF (with or without MTTR).
+    const double lambda = kHoursPerYear / raw.mtbf_hours;
+    if (has_mttr_hours) {
+      finalize_from_lambda_repair(lambda, raw.mttr_hours);
+      // Use the exact MTBF/MTTR steady-state unavailability form.
+      p.unavailability = raw.mttr_hours / (raw.mtbf_hours + raw.mttr_hours);
+    } else {
+      // MTBF only: frequency known, repair time will be defaulted downstream.
+      p.lambda_per_year = lambda;
+      p.mttf_hr = raw.mtbf_hours;  // MTBF ≈ MTTF when MTTR ≪ MTBF
+    }
+    p.has_data = true;
+    p.data_source = "case";
+  } else if (has_for && (has_mttr_hr || has_mttr_hours)) {
+    // Generator / VSC / Storage-style: FOR + repair hours.
+    const double mttr = has_mttr_hr ? raw.mttr_hr : raw.mttr_hours;
+    const double f = raw.forced_outage_rate;
+    p.unavailability = f;
+    p.repair_hr = mttr;
+    p.lambda_per_year = f / ((1.0 - f) * mttr) * kHoursPerYear;
+    p.mttf_hr = mttr * (1.0 - f) / f;
+    p.has_data = true;
+    p.data_source = "case";
+  } else if (has_for) {
+    // FOR only: unavailability is known but frequency/duration are not.
+    p.unavailability = raw.forced_outage_rate;
+    p.has_data = true;
+    p.data_source = "case";
+    p.warnings.push_back(
+        "Only forced_outage_rate provided; failure frequency and repair time "
+        "are undetermined (no MTTR).");
+  } else if (has_lambda) {
+    // Lambda only: frequency known, repair time unknown.
+    p.lambda_per_year = raw.failure_rate_per_year;
+    p.mttf_hr = kHoursPerYear / raw.failure_rate_per_year;
+    p.has_data = true;
+    p.data_source = "case";
+    p.warnings.push_back(
+        "Only failure_rate provided; repair time and unavailability are "
+        "undetermined (no MTTR).");
+  }
+
+  // ── Missing-data handling per policy ──
+  const bool incomplete = !p.has_data || p.repair_hr <= 0.0 || p.lambda_per_year <= 0.0;
+  if (incomplete) {
+    const bool may_default =
+        policy.default_policy != ReliabilityDefaultPolicy::StrictCaseDataOnly;
+    if (may_default && default_lambda_per_year > 0.0 && default_repair_hr > 0.0) {
+      // Fill only the gaps from the per-kind template defaults.
+      const double lambda =
+          (p.lambda_per_year > 0.0) ? p.lambda_per_year : default_lambda_per_year;
+      const double repair = (p.repair_hr > 0.0) ? p.repair_hr : default_repair_hr;
+      finalize_from_lambda_repair(lambda, repair);
+      p.used_default = true;
+      p.data_source = p.has_data ? "case" : "default";
+      if (!p.has_data) {
+        p.warnings.push_back("No case reliability data; using per-kind default "
+                             "(lambda=" + std::to_string(lambda) +
+                             " occ/yr, repair=" + std::to_string(repair) + " hr).");
+      }
+      p.has_data = p.has_data;  // keep "had real data" semantics distinct
+    } else if (!p.has_data) {
+      // Strict mode (or no template available): report missing, invent nothing.
+      p.data_source = "missing";
+      p.warnings.push_back("No reliability data available under the active "
+                           "data policy (StrictCaseDataOnly).");
+    }
+  }
+
+  return p;
+}
+
 // IEEE RTS-24 Load Profile Data
 
 namespace {
@@ -193,6 +304,55 @@ decode_component(size_t c, const ComponentOffsets& co) {
   else if (c < co.off_dcsg)  return {int(c - co.off_pvs),   "ACPVSystem"};
   else if (c < co.off_dcsgx) return {int(c - co.off_dcsg),  "DCStaticGenAC"};
   else                       return {int(c - co.off_dcsgx), "DCStaticGen"};
+}
+
+// Per-state-vector-index flag: does the component have usable CASE reliability
+// data?  Index layout matches ComponentOffsets.  Used by the Monte-Carlo paths
+// to honour StrictCaseDataOnly — components without case data are not assigned
+// invented failure rates (code-review Finding 1 & 2).
+static std::vector<bool> mc_component_has_case_data(
+    const HybridPowerSystem& sys, const ComponentOffsets& co,
+    const ReliabilityDataPolicy& policy) {
+  std::vector<bool> hd(co.total, false);
+  auto has = [&](const ReliabilityRawFields& raw) {
+    return resolve_reliability_params(raw, policy, 0.0, 0.0).has_data;
+  };
+  auto for_mttr = [](double f, double m) {
+    ReliabilityRawFields r; r.forced_outage_rate = f; r.mttr_hr = m; return r;
+  };
+  auto lam_mttr = [](double l, double m) {
+    ReliabilityRawFields r; r.failure_rate_per_year = l; r.mttr_hr = m; return r;
+  };
+  auto mtbf_mttr = [](double mb, double mt) {
+    ReliabilityRawFields r; r.mtbf_hours = mb; r.mttr_hours = mt; return r;
+  };
+  for (size_t i = 0; i < co.ng; ++i) { const auto& x = sys.ac.generators[i];        hd[co.off_gen + i] = has(for_mttr(x.forced_outage_rate, x.mttr_hr)); }
+  for (size_t i = 0; i < co.nl; ++i) { const auto& x = sys.ac.branches[i];          hd[co.off_br + i]  = has(lam_mttr(x.failure_rate, x.mttr_hr)); }
+  for (size_t i = 0; i < co.nsg; ++i){ const auto& x = sys.ac.static_generators[i]; hd[co.off_sg + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nrg; ++i){ const auto& x = sys.ac.renewable_gens[i];    hd[co.off_rg + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nst; ++i){ const auto& x = sys.ac.storage[i];           hd[co.off_st + i]  = has(for_mttr(x.forced_outage_rate, x.mttr_hr)); }
+  for (size_t i = 0; i < co.nvsc; ++i){ const auto& x = sys.vsc_converters[i];      hd[co.off_vsc + i] = has(for_mttr(x.forced_outage_rate, x.mttr_hr)); }
+  for (size_t i = 0; i < co.ndb; ++i){ const auto& x = sys.dc.branches[i];          hd[co.off_db + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nt2; ++i){ const auto& x = sys.ac.transformers_2w[i];   hd[co.off_t2 + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nt3; ++i){ const auto& x = sys.ac.transformers_3w[i];   hd[co.off_t3 + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.ndcdc; ++i){ const auto& x = sys.dc.dcdc_converters[i]; hd[co.off_dcdc + i] = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  // DC circuit breakers: no reliability fields → always missing.
+  for (size_t i = 0; i < co.ndcst; ++i){ const auto& x = sys.dc.storage[i];         hd[co.off_dcst + i] = has(for_mttr(x.forced_outage_rate, x.mttr_hr)); }
+  for (size_t i = 0; i < co.ndcpv; ++i){ const auto& x = sys.dc.pv_arrays[i];       hd[co.off_dcpv + i] = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.nsw; ++i){
+    const auto& x = sys.ac.switches[i];
+    ReliabilityRawFields r = mtbf_mttr(x.mtbf_hours, x.mttr_hours);
+    if (x.mtbf_hours <= 0 && x.p_sw_fail > 0 && x.p_sw_fail < 1.0) {
+      r.failure_rate_per_year = x.p_sw_fail;
+      r.mttr_hr = x.mttr_hours > 0 ? x.mttr_hours : 4.0;
+    }
+    hd[co.off_sw + i] = has(r);
+  }
+  // AC circuit breakers: no reliability fields → always missing.
+  for (size_t i = 0; i < co.npvs; ++i){ const auto& x = sys.ac.pv_systems[i];          hd[co.off_pvs + i]   = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.ndcsg; ++i){ const auto& x = sys.dc.static_generators[i];  hd[co.off_dcsg + i]  = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  for (size_t i = 0; i < co.ndcsgx; ++i){ const auto& x = sys.dc.dc_static_generators[i]; hd[co.off_dcsgx + i] = has(mtbf_mttr(x.mtbf_hours, x.mttr_hours)); }
+  return hd;
 }
 
 // Build the display name for a component from the actual system data.
@@ -636,6 +796,8 @@ ReliabilityResult run_nonsequential_mc(
         "DC components (DC/DC, DCCB, DC storage, DC PV, DC static gens, AC switch, AC CB) "
         "and AC PV systems are sampled in the state vector but failures affect only network "
         "topology \u2014 no DC power-flow re-dispatch is performed.";
+  // Data-quality summary for the resolved reliability parameters (Finding 4).
+  result.data_quality = summarize_reliability_data_quality(sys, options.data_policy);
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
@@ -833,6 +995,17 @@ ReliabilityResult run_nonsequential_mc(
   const auto active_component = build_active_component_mask(sys, co);
   for (size_t c = 0; c < nc; ++c) {
     if (!active_component[c]) unavailabilities[c] = 0.0;
+  }
+
+  // StrictCaseDataOnly: do not invent failure data.  Components without usable
+  // case reliability data are treated as non-failing (unavailability = 0) so
+  // EENS/LOLE reflect only documented component risk (Finding 1 & 2).
+  if (options.data_policy.default_policy ==
+      ReliabilityDefaultPolicy::StrictCaseDataOnly) {
+    const auto has_data = mc_component_has_case_data(sys, co, options.data_policy);
+    for (size_t c = 0; c < nc && c < has_data.size(); ++c) {
+      if (!has_data[c]) unavailabilities[c] = 0.0;
+    }
   }
 
   // Initialize random number generator
@@ -1082,6 +1255,8 @@ ReliabilityResult run_sequential_mc(
         "DC components (DC/DC, DCCB, DC storage, DC PV, DC static gens, AC switch, AC CB) "
         "and AC PV systems are sampled in the state vector but failures affect only network "
         "topology \u2014 no DC power-flow re-dispatch is performed.";
+  // Data-quality summary for the resolved reliability parameters (Finding 4).
+  result.data_quality = summarize_reliability_data_quality(sys, options.data_policy);
   ComponentOffsets co(sys);
   const size_t nc = co.total;
   const size_t nb = sys.ac.buses.size();
@@ -1219,6 +1394,18 @@ ReliabilityResult run_sequential_mc(
   }
 
   const auto active_component = build_active_component_mask(sys, co);
+
+  // StrictCaseDataOnly: components without usable case reliability data are
+  // assigned an effectively infinite MTTF so they never fail in the simulated
+  // horizon (no invented failure data — Finding 1 & 2).
+  if (options.data_policy.default_policy ==
+      ReliabilityDefaultPolicy::StrictCaseDataOnly) {
+    const auto has_data = mc_component_has_case_data(sys, co, options.data_policy);
+    for (size_t c = 0; c < nc && c < has_data.size(); ++c) {
+      if (!has_data[c]) mttf[c] = 1e15;
+    }
+  }
+
   std::mt19937 rng;
   if (options.seed != 0) {
     rng.seed(options.seed);
@@ -1680,8 +1867,17 @@ DistributionIndices compute_distribution_indices(
   }
   
   // Get customer counts from loads
-  // Note: In our model, we use load.p_mw as a proxy for customers if num_customers not available
-  std::vector<double> customers_per_bus(sys.ac.buses.size(), 0.0);
+  // Note: In our model, we use load.p_mw as a proxy for customers if num_customers not available.
+  //
+  // Hybrid layout (code-review Finding 3): the nodal CIF/CID vectors produced by
+  // the FMEA evaluator are laid out as [AC buses | DC buses].  When the caller
+  // passes DC nodes (vector longer than the AC bus count) we must weight DC bus
+  // customers too, otherwise DC load interruptions never reach SAIFI/SAIDI/ASAI.
+  const bool include_dc =
+      std::max(nodal_cif.size(), nodal_cid.size()) > sys.ac.buses.size();
+  const size_t n_dc = include_dc ? sys.dc.buses.size() : 0U;
+
+  std::vector<double> customers_per_bus(sys.ac.buses.size() + n_dc, 0.0);
   double total_customers = 0.0;
 
   // P2a: bus IDs may be non-contiguous; build a position map so that
@@ -1694,18 +1890,54 @@ DistributionIndices compute_distribution_indices(
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service || ld.bus < 1) continue;
     const auto it = bp_map.find(ld.bus);
-    if (it == bp_map.end() || it->second >= customers_per_bus.size()) continue;
+    if (it == bp_map.end() || it->second >= sys.ac.buses.size()) continue;
     // Use n_customers if available, otherwise estimate from load
     double nc = ld.n_customers > 0 ? ld.n_customers : std::max(1.0, ld.p_mw * 10.0);
     customers_per_bus[it->second] += nc;
     total_customers += nc;
   }
   
-  // For buses without explicit loads, add customers based on pd_mw
+  // For AC buses without explicit loads, add customers based on pd_mw
   for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
     if (customers_per_bus[i] == 0.0 && sys.ac.buses[i].pd_mw > 0) {
       double nc = std::max(1.0, sys.ac.buses[i].pd_mw * 10.0);  // ~10 customers per MW
       customers_per_bus[i] = nc;
+      total_customers += nc;
+    }
+  }
+
+  // DC customer weights, appended after the AC block to match the nodal layout.
+  if (include_dc) {
+    const size_t off = sys.ac.buses.size();
+    std::unordered_map<int, size_t> dbp_map;
+    dbp_map.reserve(sys.dc.buses.size());
+    for (size_t j = 0; j < sys.dc.buses.size(); ++j)
+      dbp_map[sys.dc.buses[j].index] = j;
+
+    // Aggregate DC load MW and explicit DC load customers per DC bus.
+    std::vector<double> dc_load_mw(sys.dc.buses.size(), 0.0);
+    std::vector<double> dc_load_cust(sys.dc.buses.size(), 0.0);
+    for (const auto& ld : sys.dc.loads) {
+      if (!ld.in_service) continue;
+      const auto it = dbp_map.find(ld.bus);
+      if (it == dbp_map.end()) continue;
+      double scaling = ld.scaling != 0.0 ? ld.scaling : 1.0;
+      dc_load_mw[it->second] += std::abs(ld.p_mw) * scaling;
+      if (ld.n_customers > 0)
+        dc_load_cust[it->second] += static_cast<double>(ld.n_customers);
+    }
+    for (size_t j = 0; j < sys.dc.buses.size(); ++j) {
+      const auto& b = sys.dc.buses[j];
+      double nc = 0.0;
+      if (b.n_customers > 0) {
+        nc = static_cast<double>(b.n_customers);          // DC bus-level count
+      } else if (dc_load_cust[j] > 0.0) {
+        nc = dc_load_cust[j];                              // explicit DC load count
+      } else {
+        double mw = dc_load_mw[j] + std::max(0.0, b.pd_mw);
+        if (mw > 0.0) nc = std::max(1.0, mw * 10.0);       // ~10 customers per MW
+      }
+      customers_per_bus[off + j] = nc;
       total_customers += nc;
     }
   }
@@ -1745,6 +1977,148 @@ DistributionIndices compute_distribution_indices(
                idx.saifi, idx.saidi, idx.asai);
   
   return idx;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Reliability data-quality summary (code-review Finding 4)
+// ═══════════════════════════════════════════════════════════════════════
+// Scans every component that carries reliability fields and reports how many
+// have usable case data, how many would be defaulted, and which are missing,
+// using the same resolver as the assessment methods.  Surfaced to the API/GUI
+// pre-run diagnostics and result panels.
+ReliabilityDataQuality summarize_reliability_data_quality(
+    const HybridPowerSystem& sys,
+    const ReliabilityDataPolicy& policy) {
+  ReliabilityDataQuality dq;
+
+  auto tally = [&](const ReliabilityRawFields& raw, const std::string& name) {
+    // def_lambda/def_repair = 0 → the resolver reports "missing" for no-data
+    // components instead of silently filling, giving an honest coverage signal.
+    ReliabilityParams pr = resolve_reliability_params(raw, policy, 0.0, 0.0);
+    dq.components_total++;
+    if (pr.data_source == "missing") {
+      dq.missing_required_data.push_back(name);
+    } else if (pr.used_default) {
+      dq.components_defaulted++;
+    } else {
+      dq.components_with_reliability_data++;
+    }
+  };
+  auto nm = [](const std::string& n, const char* p, int idx) {
+    return n.empty() ? (std::string(p) + std::to_string(idx)) : n;
+  };
+
+  for (const auto& g : sys.ac.generators) {
+    if (!g.in_service) continue;
+    ReliabilityRawFields r;
+    r.forced_outage_rate = g.forced_outage_rate;
+    r.mttr_hr = g.mttr_hr;
+    tally(r, nm(g.name, "Gen_", g.index));
+  }
+  for (const auto& b : sys.ac.branches) {
+    if (!b.in_service) continue;
+    ReliabilityRawFields r;
+    r.failure_rate_per_year = b.failure_rate;
+    r.mttr_hr = b.mttr_hr;
+    tally(r, nm(b.name, "ACBr_", b.index));
+  }
+  for (const auto& t : sys.ac.transformers_2w) {
+    if (!t.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = t.mtbf_hours;
+    r.mttr_hours = t.mttr_hours;
+    tally(r, nm(t.name, "Trafo2W_", t.index));
+  }
+  for (const auto& t : sys.ac.transformers_3w) {
+    if (!t.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = t.mtbf_hours;
+    r.mttr_hours = t.mttr_hours;
+    tally(r, nm(t.name, "Trafo3W_", t.index));
+  }
+  for (const auto& sg : sys.ac.static_generators) {
+    if (!sg.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = sg.mtbf_hours;
+    r.mttr_hours = sg.mttr_hours;
+    tally(r, nm(sg.name, "SGen_", sg.index));
+  }
+  for (const auto& rg : sys.ac.renewable_gens) {
+    if (!rg.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = rg.mtbf_hours;
+    r.mttr_hours = rg.mttr_hours;
+    tally(r, nm(rg.name, "RGen_", rg.index));
+  }
+  for (const auto& st : sys.ac.storage) {
+    if (!st.in_service) continue;
+    ReliabilityRawFields r;
+    r.forced_outage_rate = st.forced_outage_rate;
+    r.mttr_hr = st.mttr_hr;
+    tally(r, nm(st.name, "BESS_", st.index));
+  }
+  for (const auto& v : sys.vsc_converters) {
+    if (!v.in_service) continue;
+    ReliabilityRawFields r;
+    r.forced_outage_rate = v.forced_outage_rate;
+    r.mttr_hr = v.mttr_hr;
+    tally(r, nm(v.name, "VSC_", v.index));
+  }
+  for (const auto& b : sys.dc.branches) {
+    if (!b.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = b.mtbf_hours;
+    r.mttr_hours = b.mttr_hours;
+    tally(r, nm(b.name, "DCBr_", b.index));
+  }
+  for (const auto& d : sys.dc.dcdc_converters) {
+    if (!d.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = d.mtbf_hours;
+    r.mttr_hours = d.mttr_hours;
+    tally(r, nm(d.name, "DCDC_", d.index));
+  }
+  for (const auto& st : sys.dc.storage) {
+    if (!st.in_service) continue;
+    ReliabilityRawFields r;
+    r.forced_outage_rate = st.forced_outage_rate;
+    r.mttr_hr = st.mttr_hr;
+    tally(r, nm(st.name, "DCStorage_", st.index));
+  }
+  for (const auto& pv : sys.dc.pv_arrays) {
+    if (!pv.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = pv.mtbf_hours;
+    r.mttr_hours = pv.mttr_hours;
+    tally(r, nm(pv.name, "DCPV_", pv.index));
+  }
+  for (const auto& sg : sys.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = sg.mtbf_hours;
+    r.mttr_hours = sg.mttr_hours;
+    tally(r, nm(sg.name, "DCSGen_", sg.index));
+  }
+  for (const auto& sg : sys.dc.static_generators) {
+    if (!sg.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = sg.mtbf_hours;
+    r.mttr_hours = sg.mttr_hours;
+    tally(r, nm(sg.name, "DCSGen2_", sg.index));
+  }
+  for (const auto& sw : sys.ac.switches) {
+    if (!sw.in_service) continue;
+    ReliabilityRawFields r;
+    r.mtbf_hours = sw.mtbf_hours;
+    r.mttr_hours = sw.mttr_hours;
+    if (sw.mtbf_hours <= 0 && sw.p_sw_fail > 0 && sw.p_sw_fail < 1.0) {
+      r.failure_rate_per_year = sw.p_sw_fail;
+      r.mttr_hr = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
+    }
+    tally(r, nm(sw.name, "SW_", sw.index));
+  }
+
+  return dq;
 }
 
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -1807,11 +2181,40 @@ std::string switch_type_name(SwitchType type) {
 }
 
 // Build the component catalog from the system.
+//
+// All per-component failure frequency / repair time values are now produced by
+// the single `resolve_reliability_params` resolver (code-review Finding 1) so
+// that FMEA, Monte-Carlo, and three-stage paths agree for identical components.
+// `policy` controls missing-data handling and `dq` accumulates the data-quality
+// summary surfaced to the API/GUI.
 std::vector<FMEAComponent> build_fmea_catalog(
     const HybridPowerSystem& sys,
-    double default_sw_hr) {
-  
+    double default_sw_hr,
+    const ReliabilityDataPolicy& policy,
+    ReliabilityDataQuality& dq) {
+
   std::vector<FMEAComponent> catalog;
+
+  // Resolve one component's reliability params, update the data-quality
+  // tally, and return {lambda_per_year, repair_hr}.  `def_lambda`/`def_repair`
+  // are the per-kind template fallbacks used only when the policy permits
+  // defaulting and case data is incomplete.
+  auto resolve_cat = [&](const ReliabilityRawFields& raw,
+                         double def_lambda, double def_repair,
+                         const std::string& name) -> std::pair<double, double> {
+    ReliabilityParams pr =
+        resolve_reliability_params(raw, policy, def_lambda, def_repair);
+    dq.components_total++;
+    if (pr.data_source == "missing") {
+      dq.missing_required_data.push_back(name);
+    } else if (pr.used_default) {
+      dq.components_defaulted++;
+    } else {
+      dq.components_with_reliability_data++;
+    }
+    double repair = pr.repair_hr > 0.0 ? pr.repair_hr : def_repair;
+    return {pr.lambda_per_year, repair};
+  };
 
   // ---- AC Generators ----
   for (size_t i = 0; i < sys.ac.generators.size(); ++i) {
@@ -1823,15 +2226,14 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = g.name.empty() ? "Gen_" + std::to_string(g.index) : g.name;
     
-    // Derive lambda from FOR and MTTR
-    double mttr = g.mttr_hr > 0 ? g.mttr_hr : 50.0;
-    if (g.forced_outage_rate > 0 && g.forced_outage_rate < 1.0) {
-      c.lambda = g.forced_outage_rate / ((1.0 - g.forced_outage_rate) * mttr) * 8760.0;
-    } else {
-      c.lambda = 8760.0 / 2000.0;   // default ~4.38 occ/yr
-    }
+    // Resolve FOR + MTTR -> {lambda, repair} via the unified resolver.
+    ReliabilityRawFields raw;
+    raw.forced_outage_rate = g.forced_outage_rate;
+    raw.mttr_hr = g.mttr_hr;
+    auto pr = resolve_cat(raw, 8760.0 / 2000.0, 50.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1846,9 +2248,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.name = b.name.empty() ?
         "ACBr_" + std::to_string(b.from_bus) + "-" + std::to_string(b.to_bus) : b.name;
     
-    c.lambda = b.failure_rate > 0 ? b.failure_rate : 0.35;
+    ReliabilityRawFields raw;
+    raw.failure_rate_per_year = b.failure_rate;
+    raw.mttr_hr = b.mttr_hr;
+    auto pr = resolve_cat(raw, 0.35, 10.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = b.mttr_hr > 0 ? b.mttr_hr : 10.0;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1863,14 +2269,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.name = b.name.empty() ?
         "DCBr_" + std::to_string(b.from_bus) + "-" + std::to_string(b.to_bus) : b.name;
     
-    double mttr = b.mttr_hours > 0 ? b.mttr_hours : 24.0;
-    if (b.mtbf_hours > 0) {
-      c.lambda = 8760.0 / b.mtbf_hours;
-    } else {
-      c.lambda = 0.20;
-    }
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = b.mtbf_hours;
+    raw.mttr_hours = b.mttr_hours;
+    auto pr = resolve_cat(raw, 0.20, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1884,14 +2289,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = v.name.empty() ? "VSC_" + std::to_string(v.index) : v.name;
     
-    double mttr = v.mttr_hr > 0 ? v.mttr_hr : 48.0;
-    if (v.forced_outage_rate > 0 && v.forced_outage_rate < 1.0) {
-      c.lambda = v.forced_outage_rate / ((1.0 - v.forced_outage_rate) * mttr) * 8760.0;
-    } else {
-      c.lambda = 0.10;
-    }
+    ReliabilityRawFields raw;
+    raw.forced_outage_rate = v.forced_outage_rate;
+    raw.mttr_hr = v.mttr_hr;
+    auto pr = resolve_cat(raw, 0.10, 48.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1905,14 +2309,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = sg.name.empty() ? "SGen_" + std::to_string(sg.index) : sg.name;
     
-    double mttr = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    if (sg.mtbf_hours > 0) {
-      c.lambda = 8760.0 / sg.mtbf_hours;
-    } else {
-      c.lambda = 1.5;  // typical DG ~1.5 occ/yr
-    }
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = sg.mtbf_hours;
+    raw.mttr_hours = sg.mttr_hours;
+    auto pr = resolve_cat(raw, 1.5, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1926,14 +2329,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = rg.name.empty() ? "RGen_" + std::to_string(rg.index) : rg.name;
     
-    double mttr = rg.mttr_hours > 0 ? rg.mttr_hours : 48.0;
-    if (rg.mtbf_hours > 0) {
-      c.lambda = 8760.0 / rg.mtbf_hours;
-    } else {
-      c.lambda = 2.0;  // typical wind ~2 occ/yr
-    }
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = rg.mtbf_hours;
+    raw.mttr_hours = rg.mttr_hours;
+    auto pr = resolve_cat(raw, 2.0, 48.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1947,14 +2349,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = st.name.empty() ? "BESS_" + std::to_string(st.index) : st.name;
     
-    double mttr = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
-    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1.0) {
-      c.lambda = st.forced_outage_rate / ((1.0 - st.forced_outage_rate) * mttr) * 8760.0;
-    } else {
-      c.lambda = 1.0;  // typical BESS ~1 occ/yr
-    }
+    ReliabilityRawFields raw;
+    raw.forced_outage_rate = st.forced_outage_rate;
+    raw.mttr_hr = st.mttr_hr;
+    auto pr = resolve_cat(raw, 1.0, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1968,14 +2369,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = t.name.empty() ? "Trafo2W_" + std::to_string(t.index) : t.name;
     
-    double mttr = t.mttr_hours > 0 ? t.mttr_hours : 200.0;
-    if (t.mtbf_hours > 0) {
-      c.lambda = 8760.0 / t.mtbf_hours;
-    } else {
-      c.lambda = 0.03;  // typical power transformer ~0.03 occ/yr
-    }
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = t.mtbf_hours;
+    raw.mttr_hours = t.mttr_hours;
+    auto pr = resolve_cat(raw, 0.03, 200.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -1989,14 +2389,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.idx = static_cast<int>(i);
     c.name = t.name.empty() ? "Trafo3W_" + std::to_string(t.index) : t.name;
     
-    double mttr = t.mttr_hours > 0 ? t.mttr_hours : 200.0;
-    if (t.mtbf_hours > 0) {
-      c.lambda = 8760.0 / t.mtbf_hours;
-    } else {
-      c.lambda = 0.04;  // slightly higher than 2W
-    }
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = t.mtbf_hours;
+    raw.mttr_hours = t.mttr_hours;
+    auto pr = resolve_cat(raw, 0.04, 200.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2008,10 +2407,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCDCConv;
     c.idx  = static_cast<int>(i);
     c.name = d.name.empty() ? "DCDC_" + std::to_string(d.index) : d.name;
-    double mttr = d.mttr_hours > 0 ? d.mttr_hours : 48.0;
-    c.lambda = d.mtbf_hours > 0 ? 8760.0 / d.mtbf_hours : 0.20;
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = d.mtbf_hours;
+    raw.mttr_hours = d.mttr_hours;
+    auto pr = resolve_cat(raw, 0.20, 48.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2023,10 +2425,11 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCCB;
     c.idx  = static_cast<int>(i);
     c.name = cb.name.empty() ? "DCCB_" + std::to_string(cb.index) : cb.name;
-    // DCCircuitBreaker has no mtbf/mttr fields; use typical CB defaults.
-    c.lambda     = 0.10;   // ~0.1 failures/yr
+    // DCCircuitBreaker has no mtbf/mttr fields; resolver applies CB defaults.
+    auto pr = resolve_cat(ReliabilityRawFields{}, 0.10, 8.0, c.name);
+    c.lambda     = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = 8.0;    // 8-hr typical repair
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2038,13 +2441,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCStorage;
     c.idx  = static_cast<int>(i);
     c.name = st.name.empty() ? "DCStorage_" + std::to_string(st.index) : st.name;
-    double mttr = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
-    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1.0)
-      c.lambda = st.forced_outage_rate / ((1.0 - st.forced_outage_rate) * mttr) * 8760.0;
-    else
-      c.lambda = 1.0;
+    ReliabilityRawFields raw;
+    raw.forced_outage_rate = st.forced_outage_rate;
+    raw.mttr_hr = st.mttr_hr;
+    auto pr = resolve_cat(raw, 1.0, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2056,10 +2459,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCPVArray;
     c.idx  = static_cast<int>(i);
     c.name = pv.name.empty() ? "DCPV_" + std::to_string(pv.index) : pv.name;
-    double mttr = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
-    c.lambda = pv.mtbf_hours > 0 ? 8760.0 / pv.mtbf_hours : 1.5;
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = pv.mtbf_hours;
+    raw.mttr_hours = pv.mttr_hours;
+    auto pr = resolve_cat(raw, 1.5, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2071,10 +2477,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCStaticGen;
     c.idx  = static_cast<int>(i);
     c.name = sg.name.empty() ? "DCSGen_" + std::to_string(sg.index) : sg.name;
-    double mttr = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    c.lambda = sg.mtbf_hours > 0 ? 8760.0 / sg.mtbf_hours : 1.5;
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = sg.mtbf_hours;
+    raw.mttr_hours = sg.mttr_hours;
+    auto pr = resolve_cat(raw, 1.5, 24.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2086,16 +2495,18 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::ACSwitch;
     c.idx  = static_cast<int>(i);
     c.name = sw.name.empty() ? "SW_" + std::to_string(sw.index) : sw.name;
-    double mttr = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
-    // p_sw_fail as annual failure probability if set, else use MTBF.
-    if (sw.mtbf_hours > 0)
-      c.lambda = 8760.0 / sw.mtbf_hours;
-    else if (sw.p_sw_fail > 0 && sw.p_sw_fail < 1.0)
-      c.lambda = sw.p_sw_fail;   // already in occ/yr convention
-    else
-      c.lambda = 0.05;  // typical distribution switch ~0.05 failures/yr
+    // Prefer MTBF/MTTR; fall back to p_sw_fail (occ/yr) through the resolver.
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = sw.mtbf_hours;
+    raw.mttr_hours = sw.mttr_hours;
+    if (sw.mtbf_hours <= 0 && sw.p_sw_fail > 0 && sw.p_sw_fail < 1.0) {
+      raw.failure_rate_per_year = sw.p_sw_fail;
+      raw.mttr_hr = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
+    }
+    auto pr = resolve_cat(raw, 0.05, 4.0, c.name);
+    c.lambda = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2107,10 +2518,11 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::ACCB;
     c.idx  = static_cast<int>(i);
     c.name = cb.name.empty() ? "CB_" + std::to_string(cb.index) : cb.name;
-    // CircuitBreaker has no mtbf/mttr; use utility-typical CB defaults.
-    c.lambda     = 0.05;   // ~0.05 failures/yr
+    // CircuitBreaker has no mtbf/mttr; resolver applies utility CB defaults.
+    auto pr = resolve_cat(ReliabilityRawFields{}, 0.05, 8.0, c.name);
+    c.lambda     = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = 8.0;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2122,10 +2534,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::ACPVSystem;
     c.idx  = static_cast<int>(i);
     c.name = pv.name.empty() ? "PV_" + std::to_string(pv.index) : pv.name;
-    double mttr  = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
-    c.lambda     = pv.mtbf_hours > 0 ? 8760.0 / pv.mtbf_hours : 1.5;
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = pv.mtbf_hours;
+    raw.mttr_hours = pv.mttr_hours;
+    auto pr = resolve_cat(raw, 1.5, 24.0, c.name);
+    c.lambda     = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -2137,10 +2552,13 @@ std::vector<FMEAComponent> build_fmea_catalog(
     c.type = FMEAComponent::DCStaticGenAC;
     c.idx  = static_cast<int>(i);
     c.name = sg.name.empty() ? "DCSGen2_" + std::to_string(sg.index) : sg.name;
-    double mttr  = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    c.lambda     = sg.mtbf_hours > 0 ? 8760.0 / sg.mtbf_hours : 1.5;
+    ReliabilityRawFields raw;
+    raw.mtbf_hours = sg.mtbf_hours;
+    raw.mttr_hours = sg.mttr_hours;
+    auto pr = resolve_cat(raw, 1.5, 24.0, c.name);
+    c.lambda     = pr.first;
     c.tau_sw_hr  = default_sw_hr;
-    c.tau_rep_hr = mttr;
+    c.tau_rep_hr = pr.second;
     catalog.push_back(c);
   }
 
@@ -3149,8 +3567,9 @@ FMEAResult run_distribution_fmea(
   const size_t nb = sys.ac.buses.size() + (hybrid_fmea ? sys.dc.buses.size() : 0U);
   result.nodal_eens_mwh_yr.resize(nb, 0.0);
 
-  // Build component catalog
-  auto catalog = build_fmea_catalog(sys, options.switching_time_hr);
+  // Build component catalog (resolves reliability params + data quality).
+  auto catalog = build_fmea_catalog(sys, options.switching_time_hr,
+                                    options.data_policy, result.data_quality);
   result.n_contingencies = static_cast<int>(catalog.size());
   
   spdlog::info("FMEA: {} components in catalog (generators={}, ac_branches={}, dc_branches={}, vsc={})",

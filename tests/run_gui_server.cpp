@@ -53,6 +53,7 @@
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/analysis/three_stage_reliability.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
@@ -1973,6 +1974,97 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
   return p;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Reliability data policy + model-scope JSON helpers (code-review F2 & F4)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Human-readable label for a resolved data policy (for API/GUI display).
+static std::string reliability_policy_label(
+    const hacdcpf::analysis::ReliabilityDataPolicy& pol) {
+  using P = hacdcpf::analysis::ReliabilityDefaultPolicy;
+  switch (pol.default_policy) {
+    case P::StrictCaseDataOnly: return "case_data_only";
+    case P::UseNamedTemplateForMissingOnly: return "missing_filled_with_defaults";
+    case P::OverwriteWithNamedTemplate:
+      return "overwrite_template:" + (pol.template_name.empty() ? "none"
+                                                                : pol.template_name);
+  }
+  return "case_data_only";
+}
+
+// Parse the reliability data policy from a request body and, when the policy is
+// "overwrite_template", apply the named reliability template to `sys`.
+// Templates are now OPT-IN (default = case data only) so a normal run never
+// silently overwrites case-specific reliability data (Finding 2).  The legacy
+// apply_ieee24_data / apply_comprehensive_data flags are honoured for
+// backward compatibility but default to false.
+static hacdcpf::analysis::ReliabilityDataPolicy parse_reliability_data_policy(
+    const json& j, hacdcpf::HybridPowerSystem& sys) {
+  using namespace hacdcpf::analysis;
+  ReliabilityDataPolicy pol;
+
+  std::string mode = j.value("data_policy", std::string("missing_only"));
+  std::string tmpl = j.value("reliability_template", std::string("none"));
+
+  // Backward-compatibility with the previous opt-out template flags.
+  const bool legacy_comp = j.value("apply_comprehensive_data", false);
+  const bool legacy_ieee = j.value("apply_ieee24_data", false);
+  if (legacy_comp) { mode = "overwrite_template"; tmpl = "comprehensive"; }
+  else if (legacy_ieee) { mode = "overwrite_template"; tmpl = "ieee-rts-24"; }
+
+  if (mode == "case_data_only" || mode == "strict") {
+    pol.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  } else if (mode == "overwrite_template") {
+    pol.default_policy = ReliabilityDefaultPolicy::OverwriteWithNamedTemplate;
+  } else {  // "missing_only" (default)
+    pol.default_policy = ReliabilityDefaultPolicy::UseNamedTemplateForMissingOnly;
+  }
+  pol.template_name = tmpl;
+  pol.fail_on_missing_required_data = j.value("fail_on_missing", false);
+
+  if (pol.default_policy == ReliabilityDefaultPolicy::OverwriteWithNamedTemplate) {
+    if (tmpl == "comprehensive" || tmpl == "comprehensive-hybrid") {
+      apply_comprehensive_reliability_data(sys);
+    } else if (tmpl == "ieee-rts-24" || tmpl == "ieee24" || tmpl == "ieee-24") {
+      apply_ieee24_reliability_data(sys);
+    }
+  }
+  return pol;
+}
+
+static json reliability_validity_json(
+    const hacdcpf::analysis::ReliabilityResult::ValidityFlags& v) {
+  return json{
+      {"dc_load_curtailment_included", v.dc_load_curtailment_included},
+      {"vsc_dc_power_flow_modelled", v.vsc_dc_power_flow_modelled},
+      {"ac_opf_curtailment", v.ac_opf_curtailment},
+      {"ac_voltage_reactive_feasibility_certified",
+       v.ac_voltage_reactive_feasibility_certified}};
+}
+
+static json fmea_validity_json(
+    const hacdcpf::analysis::FMEAResult::ValidityFlags& v) {
+  return json{
+      {"dc_load_curtailment_included", v.dc_load_curtailment_included},
+      {"vsc_dc_power_flow_modelled", v.vsc_dc_power_flow_modelled},
+      {"ac_opf_curtailment", v.ac_opf_curtailment},
+      {"ac_voltage_reactive_feasibility_certified",
+       v.ac_voltage_reactive_feasibility_certified},
+      {"repair_ac_switch_reconfiguration_modelled",
+       v.repair_ac_switch_reconfiguration_modelled},
+      {"repair_dc_side_reconfiguration_modelled",
+       v.repair_dc_side_reconfiguration_modelled}};
+}
+
+static json reliability_data_quality_json(
+    const hacdcpf::analysis::ReliabilityDataQuality& dq) {
+  return json{
+      {"components_total", dq.components_total},
+      {"components_with_reliability_data", dq.components_with_reliability_data},
+      {"components_defaulted", dq.components_defaulted},
+      {"missing_required_data", dq.missing_required_data}};
+}
+
 std::string opf_default_name(const std::string& display_type, int index) {
   return display_type + " #" + std::to_string(index);
 }
@@ -3554,9 +3646,19 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div><label>Load Scale Factor</label><input id="relLoadScale" type="number" min="0.5" max="3.0" step="0.05" value="1.0" title="Scale load (>1 reduces reserve margin)"/></div>
           <div><label>CoV Threshold</label><input id="relCovThresh" type="number" min="0.01" max="0.5" step="0.01" value="0.05"/></div>
           <div><label>Random Seed</label><input id="relSeed" type="number" min="0" max="999999" value="0" title="0 = non-deterministic"/></div>
-          <div style="display:flex;align-items:center;gap:4px;">
-            <input type="checkbox" id="relApplyIEEE24" checked/>
-            <label for="relApplyIEEE24" style="margin:0;">Apply IEEE-24 Reliability Data</label>
+          <div><label title="Reliability data policy: how missing component data is treated. Named templates are opt-in (no longer auto-applied).">Data Policy</label>
+            <select id="relDataPolicy">
+              <option value="missing_only" selected>Missing &rarr; generic defaults</option>
+              <option value="case_data_only">Case data only (strict)</option>
+              <option value="overwrite_template">Overwrite with template</option>
+            </select>
+          </div>
+          <div><label title="Named reliability template (only applied in Overwrite mode).">Template</label>
+            <select id="relTemplate">
+              <option value="none" selected>None</option>
+              <option value="ieee-rts-24">IEEE RTS-24</option>
+              <option value="comprehensive">Comprehensive hybrid</option>
+            </select>
           </div>
         </div>
         <!-- Advanced Options: Tail Risk -->
@@ -3601,12 +3703,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
         <details style="border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:14px;">
           <summary style="cursor:pointer;font-weight:600;color:var(--accent);">&#128270; FMEA (Failure Modes &amp; Effects Analysis)</summary>
           <p style="color:var(--muted);font-size:0.9em;margin:6px 0 10px 0;">N-1 contingency enumeration for distribution system reliability. Evaluates each component failure individually.</p>
-          <div class="ctrl-row" style="margin-top:10px;">
-            <div style="display:flex;align-items:center;gap:4px;">
-              <input type="checkbox" id="relFmeaApplyComprehensive" checked/>
-              <label for="relFmeaApplyComprehensive" style="margin:0;">Apply Comprehensive Reliability Data</label>
-            </div>
-          </div>
+          <p style="color:var(--muted);font-size:0.85em;margin:0 0 8px 0;">Uses the shared <b>Data Policy</b> / <b>Template</b> selectors at the top. To reproduce the comprehensive hybrid demo, choose <b>Overwrite with template</b> + <b>Comprehensive hybrid</b>.</p>
           <div class="btn-group" style="margin-top:8px;">
             <button class="btn" style="background:#c0392b;color:#fff;" id="runFmeaBtn">&#9654; Run FMEA</button>
           </div>
@@ -3635,6 +3732,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
           <div class="kpi"><div id="relLOLECVar" class="v">-</div><div class="l">LOLE CVaR</div></div>
         </div>
         <div id="relStatus" class="status mono" style="margin-bottom:10px;">Set parameters above and run an analysis.</div>
+        <div id="relScopePanel" style="margin-bottom:10px;"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div id="relConvergenceChart" class="chart" style="height:320px;"></div>
           <div id="relNodalEENSChart" class="chart" style="height:320px;"></div>
@@ -3650,6 +3748,7 @@ textarea{width:100%;border-radius:8px;border:1px solid #cfc7ba;padding:7px 8px;
             <div class="kpi"><div id="fmeaLOLF" class="v">-</div><div class="l">LOLF (occ/yr)</div></div>
             <div class="kpi"><div id="fmeaSAIFI" class="v">-</div><div class="l">SAIFI</div></div>
             <div class="kpi"><div id="fmeaSAIDI" class="v">-</div><div class="l">SAIDI</div></div>
+            <div class="kpi"><div id="fmeaCAIDI" class="v">-</div><div class="l">CAIDI</div></div>
             <div class="kpi"><div id="fmeaASAI" class="v">-</div><div class="l">ASAI</div></div>
             <div class="kpi"><div id="fmeaContingencies" class="v">-</div><div class="l">Contingencies</div></div>
           </div>
@@ -5131,10 +5230,39 @@ function getRelOpts(){
     load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
     cov_threshold: parseFloat(document.getElementById('relCovThresh').value)||0.05,
     seed: parseInt(document.getElementById('relSeed').value)||0,
-    apply_ieee24_data: document.getElementById('relApplyIEEE24').checked,
+    data_policy: (document.getElementById('relDataPolicy')||{}).value||'missing_only',
+    reliability_template: (document.getElementById('relTemplate')||{}).value||'none',
     compute_tail_risk: document.getElementById('relTailRisk').checked,
     var_confidence: parseFloat(document.getElementById('relVarConf').value)||0.95,
   };
+}
+
+function relBadge(text,color){return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:0.8em;background:'+color+';color:#fff;">'+text+'</span>';}
+function renderRelScope(body){
+  const el=document.getElementById('relScopePanel'); if(!el) return;
+  if(!body||!body.model_scope){el.innerHTML='';return;}
+  const yn=(b)=>b?'#27ae60':'#c0392b';
+  let h='<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:#fafbfc;">';
+  h+='<b>Physical model:</b> '+relBadge(body.model_scope,'#34495e');
+  if(body.data_policy){h+=' &nbsp;<b>Data policy:</b> '+relBadge(body.data_policy,'#7f8c8d');}
+  const v=body.validity||{};
+  if('dc_load_curtailment_included' in v){
+    h+='<br><b>Validity:</b> ';
+    h+=relBadge('DC load '+(v.dc_load_curtailment_included?'included':'excluded'),yn(v.dc_load_curtailment_included));
+    h+=relBadge('VSC DC PF '+(v.vsc_dc_power_flow_modelled?'modelled':'not modelled'),yn(v.vsc_dc_power_flow_modelled));
+    h+=relBadge('AC OPF curtailment '+(v.ac_opf_curtailment?'yes':'no'),yn(v.ac_opf_curtailment));
+    h+=relBadge('AC voltage/Q '+(v.ac_voltage_reactive_feasibility_certified?'certified':'not certified'),yn(v.ac_voltage_reactive_feasibility_certified));
+    if('repair_ac_switch_reconfiguration_modelled' in v){h+=relBadge('AC switch reconfig '+(v.repair_ac_switch_reconfiguration_modelled?'on':'off'),yn(v.repair_ac_switch_reconfiguration_modelled));}
+  }
+  if(v.generation_adequacy_only){h+='<br>'+relBadge('Generation adequacy only — no network/DC/customer indices','#b57e2b');}
+  const dq=body.data_quality;
+  if(dq){
+    h+='<br><b>Data quality:</b> '+dq.components_with_reliability_data+'/'+dq.components_total+' with case data, '+dq.components_defaulted+' defaulted';
+    if(dq.missing_required_data&&dq.missing_required_data.length){h+=' '+relBadge(dq.missing_required_data.length+' missing data','#c0392b');}
+  }
+  if(body.model_limitations){h+='<div style="color:var(--muted);font-size:0.85em;margin-top:6px;">'+body.model_limitations+'</div>';}
+  h+='</div>';
+  el.innerHTML=h;
 }
 
 function updateRelKPIs(body, method){
@@ -5157,6 +5285,7 @@ function updateRelKPIs(body, method){
   } else {
     tailKPIs.style.display='none';
   }
+  renderRelScope(body);
 }
 
 function updateFDKPIs(body){
@@ -5168,6 +5297,7 @@ function updateFDKPIs(body){
   document.getElementById('relCoV').textContent='N/A';
   document.getElementById('relIters').textContent='Analytical';
   document.getElementById('relTailKPIs').style.display='none';
+  renderRelScope(body);
 }
 
 function plotRelConvergence(body, title){
@@ -5332,11 +5462,8 @@ let relLastFMEA=null;
 document.getElementById('runFmeaBtn').onclick=async()=>{
   if(!SYS){setStatus('Load a system first.',true);return;}
   try{
-    const opts={
-      load_scale_factor: parseFloat(document.getElementById('relLoadScale').value)||1.0,
-      apply_comprehensive_data: document.getElementById('relFmeaApplyComprehensive').checked,
-      verbose: false,
-    };
+    const opts=getRelOpts();
+    opts.verbose=false;
     setStatus('Running FMEA (N-1 contingency enumeration)...');
     document.getElementById('relStatus').textContent='Running FMEA analysis...';
     const body=await api('/api/session/run_reliability_fmea',opts);
@@ -5349,8 +5476,10 @@ document.getElementById('runFmeaBtn').onclick=async()=>{
     document.getElementById('fmeaLOLF').textContent=fmt(body.lolf_occ_yr,2);
     document.getElementById('fmeaSAIFI').textContent=fmt(body.saifi,4);
     document.getElementById('fmeaSAIDI').textContent=fmt(body.saidi,4);
+    var caidiEl=document.getElementById('fmeaCAIDI'); if(caidiEl) caidiEl.textContent=fmt(body.caidi,4);
     document.getElementById('fmeaASAI').textContent=fmt(body.asai,6);
-    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss)';
+    document.getElementById('fmeaContingencies').textContent=body.n_contingencies+' ('+body.n_with_loss+' with loss'+((body.n_with_loss_switching_only!=null&&body.n_with_loss_switching_only>0)?(', '+body.n_with_loss_switching_only+' switching-only'):'')+')';
+    renderRelScope(body);
     
     // Plot top contingencies (bar chart)
     if(body.contingencies&&body.contingencies.length>0){
@@ -13643,12 +13772,11 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::ReliabilityOptions opts;
+        opts.data_policy = pol;
         opts.max_iterations = j.value("max_iterations", 5000);
         opts.cov_threshold = j.value("cov_threshold", 0.05);
         opts.load_scale_factor = j.value("load_scale_factor", 1.0);
@@ -13666,6 +13794,12 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
         
         json out;
+        out["method"] = "nsq";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = reliability_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -13685,13 +13819,16 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components
+        // Critical components (full metadata — Phase 0 task 2)
         json crit_arr = json::array();
         for (const auto& ci : result.critical_components) {
           crit_arr.push_back({
             {"index", ci.index},
             {"is_generator", ci.is_generator},
-            {"importance", ci.importance}
+            {"importance", ci.importance},
+            {"component_type", ci.component_type},
+            {"component_name", ci.component_name},
+            {"global_state_index", ci.global_state_index}
           });
         }
         out["critical_components"] = crit_arr;
@@ -13723,12 +13860,11 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::ReliabilityOptions opts;
+        opts.data_policy = pol;
         opts.max_iterations = j.value("max_years", 500);
         opts.cov_threshold = j.value("cov_threshold", 0.05);
         opts.load_scale_factor = j.value("load_scale_factor", 1.0);
@@ -13750,6 +13886,12 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_sequential_mc(sys, load_profile, opts);
         
         json out;
+        out["method"] = "seq";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = reliability_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -13773,13 +13915,16 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components
+        // Critical components (full metadata — Phase 0 task 2)
         json crit_arr = json::array();
         for (const auto& ci : result.critical_components) {
           crit_arr.push_back({
             {"index", ci.index},
             {"is_generator", ci.is_generator},
-            {"importance", ci.importance}
+            {"importance", ci.importance},
+            {"component_type", ci.component_type},
+            {"component_name", ci.component_name},
+            {"global_state_index", ci.global_state_index}
           });
         }
         out["critical_components"] = crit_arr;
@@ -13811,20 +13956,23 @@ int main(int argc, char** argv) {
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply comprehensive reliability data if requested
-        if (j.value("apply_comprehensive_data", true)) {
-          hacdcpf::analysis::apply_comprehensive_reliability_data(sys);
-        } else if (j.value("apply_ieee24_data", false)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         hacdcpf::analysis::FMEAOptions fmea_opts;
+        fmea_opts.data_policy = pol;
         fmea_opts.load_scale_factor = j.value("load_scale_factor", 1.0);
         fmea_opts.verbose = j.value("verbose", false);
         
         auto result = hacdcpf::analysis::run_distribution_fmea(sys, fmea_opts);
         
         json out;
+        out["method"] = "fmea";
+        out["model_scope"] = result.model_scope;
+        out["model_limitations"] = result.model_limitations;
+        out["validity"] = fmea_validity_json(result.validity);
+        out["data_quality"] = reliability_data_quality_json(result.data_quality);
+        out["data_policy"] = reliability_policy_label(pol);
         out["eens_mwh_yr"] = result.eens_mwh_yr;
         out["edns_mw"] = result.edns_mw;
         out["lole_hr_yr"] = result.lole_hr_yr;
@@ -13833,14 +13981,18 @@ int main(int argc, char** argv) {
         out["saidi"] = result.distribution_idx.saidi;
         out["caidi"] = result.distribution_idx.caidi;
         out["asai"] = result.distribution_idx.asai;
+        out["asui"] = result.distribution_idx.asui;
         out["n_contingencies"] = result.contingencies.size();
         
-        // Count contingencies with loss
-        int n_with_loss = 0;
+        // Contingencies causing ANY load loss (switching OR repair stage).
+        // Use the solver's count; the GUI previously tested shed_rep_mw alone
+        // and silently dropped switching-stage-only interruptions.
+        out["n_with_loss"] = result.n_loss_contingencies;
+        int n_with_loss_switching_only = 0;
         for (const auto& c : result.contingencies) {
-          if (c.shed_rep_mw > 0.01) n_with_loss++;
+          if (c.causes_loss_sw && !c.causes_loss_rep) n_with_loss_switching_only++;
         }
-        out["n_with_loss"] = n_with_loss;
+        out["n_with_loss_switching_only"] = n_with_loss_switching_only;
         
         // Contingencies sorted by EENS contribution (descending)
         auto sorted = result.contingencies;
@@ -13850,6 +14002,17 @@ int main(int argc, char** argv) {
         json cont_arr = json::array();
         for (const auto& c : sorted) {
           const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
+          json switch_actions = json::array();
+          for (const auto& sa : c.repair_switch_actions) {
+            switch_actions.push_back({
+              {"switch_index", sa.switch_index},
+              {"switch_name", sa.switch_name},
+              {"switch_type", sa.switch_type},
+              {"action", sa.action},
+              {"bus_from", sa.bus_from},
+              {"bus_to", sa.bus_to}
+            });
+          }
           cont_arr.push_back({
             {"component_name", meta.display_name},
             {"component_type", c.component_type},
@@ -13861,10 +14024,21 @@ int main(int argc, char** argv) {
             {"primary_bus", meta.primary_bus},
             {"secondary_bus", meta.secondary_bus},
             {"mappable", meta.mappable},
-            {"shed_mw", c.shed_rep_mw},
-            {"eens_contribution", c.eens_contribution},
             {"failure_rate", c.failure_rate},
-            {"repair_time", c.tau_rep_hr}
+            {"tau_sw_hr", c.tau_sw_hr},
+            {"tau_rep_hr", c.tau_rep_hr},
+            {"repair_time", c.tau_rep_hr},
+            {"shed_sw_mw", c.shed_sw_mw},
+            {"shed_rep_mw", c.shed_rep_mw},
+            {"shed_mw", c.shed_rep_mw},
+            {"ens_sw_mwh", c.ens_sw_mwh},
+            {"ens_rep_mwh", c.ens_rep_mwh},
+            {"eens_contribution", c.eens_contribution},
+            {"lole_contribution", c.lole_contribution},
+            {"causes_loss_sw", c.causes_loss_sw},
+            {"causes_loss_rep", c.causes_loss_rep},
+            {"repair_search_truncated", c.repair_search_truncated},
+            {"repair_switch_actions", switch_actions}
           });
         }
         out["contingencies"] = cont_arr;
@@ -14488,10 +14662,8 @@ int main(int argc, char** argv) {
         }
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         
-        // Apply IEEE-24 reliability data if requested
-        if (j.value("apply_ieee24_data", true)) {
-          hacdcpf::analysis::apply_ieee24_reliability_data(sys);
-        }
+        // Reliability data policy (templates are opt-in — Finding 2).
+        auto pol = parse_reliability_data_policy(j, sys);
         
         // Calculate total load (with optional scaling)
         double load_scale = j.value("load_scale_factor", 1.0);
@@ -14507,6 +14679,25 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::run_frequency_duration_analysis(sys, total_load);
         
         json out;
+        // Frequency-duration is a GENERATION ADEQUACY method only (Finding 7):
+        // AC generators vs constant peak load, no network/DC/customer indices.
+        out["method"] = "fd";
+        out["model_scope"] = "generation-adequacy-fd";
+        out["model_limitations"] =
+            "Frequency-duration generation adequacy: AC generator capacity-outage "
+            "table against a constant peak load. Network contingencies, DC equipment, "
+            "branch limits, restoration, and load-point/customer interruption indices "
+            "(SAIFI/SAIDI/CAIDI/ASAI) are NOT modelled.";
+        out["validity"] = json{
+            {"dc_load_curtailment_included", false},
+            {"vsc_dc_power_flow_modelled", false},
+            {"ac_opf_curtailment", false},
+            {"network_contingencies_modelled", false},
+            {"customer_interruption_indices_available", false},
+            {"generation_adequacy_only", true}};
+        out["data_quality"] = reliability_data_quality_json(
+            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+        out["data_policy"] = reliability_policy_label(pol);
         out["lolp"] = result.lolp;
         out["lole_fd"] = result.lole_fd;
         out["lolf_fd"] = result.lolf_fd;
@@ -14517,6 +14708,245 @@ int main(int argc, char** argv) {
         
         res.set_content(out.dump(), "application/json");
       } catch (const std::exception& e) {
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Reliability Assessment (Three-Stage Fault-Recovery Restoration) ----
+    // Exposes the staged restoration reliability evaluator as a first-class
+    // reliability method (code-review item 5 / Finding 6).  The result already
+    // carries model_scope / validity / model_limitations declaring the AC
+    // LinDistFlow restoration MILP scope and the DC connectivity fallback.
+    svr.Post("/api/session/run_reliability_three_stage",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        auto pol = parse_reliability_data_policy(j, sys);  // templates opt-in
+
+        hacdcpf::analysis::ThreeStageReliabilityOptions opts;
+        if (j.contains("max_switch_operations"))
+          opts.max_switch_operations = j.value("max_switch_operations", INT_MAX);
+
+        const std::string case_json = hacdcpf::io::to_json(sys, 2);
+        auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, opts);
+
+        json out;
+        out["method"] = "three_stage";
+        out["physical_model"] = "ac_lindistflow_restoration_milp";
+        out["ok"] = r.ok;
+        if (!r.error.empty()) out["error_detail"] = r.error;
+        out["model_scope"] = r.model_scope;
+        out["model_limitations"] = r.model_limitations;
+        out["validity"] = json{
+          {"branch_flow_enforced", r.validity.branch_flow_enforced},
+          {"voltage_constraints_enforced", r.validity.voltage_constraints_enforced},
+          {"radial_topology_enforced", r.validity.radial_topology_enforced},
+          {"sop_dispatch_optimised", r.validity.sop_dispatch_optimised},
+          {"dc_power_flow_enforced", r.validity.dc_power_flow_enforced},
+          {"restoration_milp_solved", r.validity.restoration_milp_solved}};
+        out["data_policy"] = reliability_policy_label(pol);
+        out["data_quality"] = reliability_data_quality_json(
+            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+        out["saifi"] = r.saifi;
+        out["saidi_min"] = r.saidi_min;       // minutes / customer / yr
+        out["eens_kwh_yr"] = r.eens_kwh_yr;
+        out["eens_cost"] = r.eens_cost;
+        out["worst_line"] = r.worst_line;
+        out["counts"] = json{{"nb",r.nb},{"nb_ac",r.nb_ac},{"nb_dc",r.nb_dc},
+                             {"nl",r.nl},{"nl_ac",r.nl_ac},{"nl_dc",r.nl_dc},
+                             {"nl_vsc",r.nl_vsc},{"nl_sop",r.nl_sop},
+                             {"nd",r.nd},{"ng",r.ng},{"nmg",r.nmg}};
+        json faults = json::array();
+        for (const auto& f : r.faults) {
+          faults.push_back({
+            {"line_id", f.line_id}, {"status", f.status},
+            {"pls_stage1", f.pls_stage1}, {"pls_stage2", f.pls_stage2},
+            {"pls_stage3", f.pls_stage3}, {"pls_total", f.pls_total},
+            {"objective", f.objective}});
+        }
+        out["faults"] = faults;
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // ---- Unified reliability endpoint (code-review Phase 4) ----
+    // One request/result contract dispatching to every method.  The legacy
+    // per-method endpoints above remain for backward compatibility.
+    svr.Post("/api/session/run_reliability",
+             [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        hacdcpf::HybridPowerSystem sys;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system) throw std::runtime_error("No system loaded");
+          sys = *g_session.current_system;
+        }
+        if (g_session.busy.exchange(true)) {
+          res.status = 409;
+          res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+          return;
+        }
+        g_session.cancel.store(false);
+        const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        const std::string method = j.value("method", std::string("fmea"));
+        auto pol = parse_reliability_data_policy(j, sys);
+        const json load = j.value("load", json::object());
+        const json mc   = j.value("monte_carlo", json::object());
+        const json rest = j.value("restoration", json::object());
+        const double load_scale =
+            load.value("scale_factor", j.value("load_scale_factor", 1.0));
+
+        auto na = [](const std::string& reason) {
+          return json{{"value", nullptr}, {"available", false}, {"reason", reason}};
+        };
+
+        json out;
+        out["method"] = method;
+        out["data_policy"] = reliability_policy_label(pol);
+
+        if (method == "nsq" || method == "seq") {
+          hacdcpf::analysis::ReliabilityOptions opts;
+          opts.data_policy = pol;
+          opts.load_scale_factor = load_scale;
+          opts.cov_threshold = mc.value("cov_threshold", 0.05);
+          opts.seed = mc.value("seed", 0);
+          opts.compute_tail_risk = mc.value("compute_tail_risk", false);
+          opts.var_confidence = mc.value("var_confidence", 0.95);
+          opts.hours_per_year = load.value("hours_per_year", 8736);
+          opts.progress_callback = [](int, double, double) { return !g_session.cancel.load(); };
+          hacdcpf::analysis::ReliabilityResult r;
+          if (method == "seq") {
+            opts.max_iterations = mc.value("max_iterations", j.value("max_years", 500));
+            auto lp = hacdcpf::analysis::build_ieee_rts24_load_profile(opts.hours_per_year);
+            r = hacdcpf::analysis::run_sequential_mc(sys, lp, opts);
+          } else {
+            opts.max_iterations = mc.value("max_iterations", 5000);
+            r = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
+          }
+          out["physical_model"] = "ac_only_dcopf";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = r.model_limitations;
+          out["validity"] = reliability_validity_json(r.validity);
+          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+          out["metrics"] = json{
+            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+            {"lole_hr_yr", r.lole_hr_yr},
+            {"lolf_occ_yr", method == "seq" ? json(r.lolf_occ_yr)
+                                            : na("LOLF requires chronological simulation (sequential MC).")},
+            {"plc", r.plc},
+            {"saifi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"saidi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"caidi", na("Monte Carlo adequacy method does not compute customer indices.")},
+            {"asai",  na("Monte Carlo adequacy method does not compute customer indices.")}};
+          out["converged"] = r.converged;
+          out["iterations_used"] = r.iterations_used;
+          out["final_cov"] = r.final_cov;
+          out["eens_history"] = r.eens_history;
+          json crit = json::array();
+          for (const auto& ci : r.critical_components)
+            crit.push_back({{"index", ci.index}, {"is_generator", ci.is_generator},
+                            {"importance", ci.importance}, {"component_type", ci.component_type},
+                            {"component_name", ci.component_name},
+                            {"global_state_index", ci.global_state_index}});
+          out["critical_components"] = crit;
+        } else if (method == "fmea") {
+          hacdcpf::analysis::FMEAOptions fo;
+          fo.data_policy = pol;
+          fo.load_scale_factor = load_scale;
+          fo.switching_time_hr = rest.value("switching_time_hr", 0.5);
+          fo.enable_switch_reconfiguration = rest.value("enable_switch_reconfiguration", true);
+          fo.max_repair_switch_actions = rest.value("max_switch_actions", 2);
+          fo.max_repair_opf_calls = rest.value("max_physical_evaluations", 200);
+          auto r = hacdcpf::analysis::run_distribution_fmea(sys, fo);
+          out["physical_model"] =
+              r.model_scope == "hybrid-acdc-network-lp" ? "hybrid_network_lp" : "ac_only_dcopf";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = r.model_limitations;
+          out["validity"] = fmea_validity_json(r.validity);
+          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+          out["metrics"] = json{
+            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+            {"plc", na("FMEA reports frequency-weighted indices, not a sampled PLC.")},
+            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+          out["n_contingencies"] = r.contingencies.size();
+          out["n_with_loss"] = r.n_loss_contingencies;
+        } else if (method == "fd") {
+          double total_load = 0.0;
+          for (const auto& bus : sys.ac.buses) total_load += bus.pd_mw;
+          for (const auto& ld : sys.ac.loads) if (ld.in_service) total_load += ld.p_mw * ld.scaling;
+          total_load *= load_scale;
+          auto r = hacdcpf::analysis::run_frequency_duration_analysis(sys, total_load);
+          out["physical_model"] = "generation_adequacy_copt";
+          out["model_scope"] = "generation-adequacy-fd";
+          out["model_limitations"] =
+              "Frequency-duration generation adequacy: AC generator capacity-outage table "
+              "vs constant peak load. No network/DC/restoration/customer indices.";
+          out["validity"] = json{{"generation_adequacy_only", true},
+                                  {"network_contingencies_modelled", false},
+                                  {"customer_interruption_indices_available", false}};
+          out["data_quality"] = reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+          out["metrics"] = json{
+            {"lolp", r.lolp}, {"lole_hr_yr", r.lole_fd}, {"lolf_occ_yr", r.lolf_fd},
+            {"lold_hr", r.lold},
+            {"eens_mwh_yr", na("F&D generation adequacy does not compute EENS.")},
+            {"saifi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"saidi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"caidi", na("F&D generation adequacy does not compute customer interruption indices.")},
+            {"asai",  na("F&D generation adequacy does not compute customer interruption indices.")}};
+          out["capacity_outage_levels"] = r.capacity_outage_levels;
+          out["cumulative_probability"] = r.cumulative_probability;
+          out["cumulative_frequency"] = r.cumulative_frequency;
+        } else if (method == "three_stage") {
+          hacdcpf::analysis::ThreeStageReliabilityOptions tso;
+          if (rest.contains("max_switch_operations"))
+            tso.max_switch_operations = rest.value("max_switch_operations", INT_MAX);
+          const std::string case_json = hacdcpf::io::to_json(sys, 2);
+          auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, tso);
+          out["physical_model"] = "ac_lindistflow_restoration_milp";
+          out["model_scope"] = r.model_scope;
+          out["model_limitations"] = r.model_limitations;
+          out["ok"] = r.ok;
+          out["validity"] = json{
+            {"branch_flow_enforced", r.validity.branch_flow_enforced},
+            {"voltage_constraints_enforced", r.validity.voltage_constraints_enforced},
+            {"radial_topology_enforced", r.validity.radial_topology_enforced},
+            {"sop_dispatch_optimised", r.validity.sop_dispatch_optimised},
+            {"dc_power_flow_enforced", r.validity.dc_power_flow_enforced},
+            {"restoration_milp_solved", r.validity.restoration_milp_solved}};
+          out["data_quality"] = reliability_data_quality_json(
+              hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+          out["metrics"] = json{
+            {"saifi", r.saifi}, {"saidi_min", r.saidi_min},
+            {"eens_kwh_yr", r.eens_kwh_yr}, {"eens_cost", r.eens_cost},
+            {"lole_hr_yr", na("Three-stage restoration evaluator reports SAIFI/SAIDI/EENS, not LOLE.")}};
+        } else {
+          throw std::runtime_error("Unknown reliability method: " + method);
+        }
+
+        res.set_content(out.dump(), "application/json");
+        g_session.busy.store(false);
+      } catch (const std::exception& e) {
+        g_session.busy.store(false);
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
