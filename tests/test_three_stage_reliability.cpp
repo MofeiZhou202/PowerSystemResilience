@@ -427,6 +427,78 @@ TEST_CASE("Three-stage reliability — longer MTTR raises EENS (per-component re
   CHECK(r20.eens_kwh_yr > 5.0 * r1.eens_kwh_yr);
 }
 
+// ─── F7 demonstration: repair-window EENS collapse for topology-isolated load ──
+// A radial feeder with ONE branch and NO tie.  Ample generation (10 MW) feeds a
+// 1 MW load through the only branch.  When that branch faults the load is
+// DISCONNECTED (topology isolation, not a capacity shortfall).  Physically it
+// stays out for the whole repair time (≈ MTTR).  But Stage 3 restores the faulted
+// branch, so pls_stage3 ≈ 0 and the long τ_rep ≈ MTTR multiplies zero shed.  The
+// only EENS charged is the τ_iso + τ_sw window (≈ 2 min), INDEPENDENT of MTTR.
+//
+// Contrast: the "longer MTTR raises EENS" test above uses a CAPACITY shortfall
+// (gen 0.5 MW < load 1.0 MW) so pls_stage3 ≠ 0 and EENS does scale with MTTR.
+// That case cannot expose F7; this one can.
+TEST_CASE("Three-stage reliability — F7: topology-isolated load is not charged the repair window",
+          "[reliability][three_stage][f7]") {
+  auto run_with_mttr = [](double mttr) {
+    std::string json = std::string(R"json({
+      "name":"f7_radial_no_tie","base_mva":10.0,
+      "ac":{"base_mva":10.0,
+        "buses":[
+          {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
+          {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
+        ],
+        "branches":[
+          {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":)json")
+      + std::to_string(mttr) + R"json(}
+        ],
+        "loads":[],"external_grids":[],
+        "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":10.0,"pmax_mw":10.0,"pmin_mw":0.0,"qmax_mvar":10.0,"qmin_mvar":0.0}],
+        "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
+      },
+      "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
+      "vsc_converters":[],"dcdc_converters":[]
+    })json";
+    ThreeStageReliabilityOptions opts;
+    opts.inherit_stdio = false;
+    return run_three_stage_reliability_from_string(json, opts);
+  };
+
+  // Sweep MTTR over three orders of magnitude.
+  const double mttrs[] = {1.0, 10.0, 100.0, 1000.0};
+  std::printf("\n[F7] radial 1-branch feeder, 1 MW load, 10 MW gen, no tie, lambda=1/yr\n");
+  std::printf("[F7] %8s | %10s %10s %10s | %12s | %14s\n",
+              "MTTR(h)", "shed1(kW)", "shed2(kW)", "shed3(kW)", "EENS(kWh/yr)",
+              "correct~lam*L*MTTR");
+  double eens_first = -1.0, eens_last = -1.0;
+  for (double mttr : mttrs) {
+    auto r = run_with_mttr(mttr);
+    REQUIRE(r.ok);
+    REQUIRE(r.faults.size() == 1);
+    const auto& f = r.faults.front();
+    const double correct = 1.0 * 1000.0 * mttr;  // lambda * load(kW) * MTTR(h)
+    std::printf("[F7] %8.1f | %10.3f %10.3f %10.3f | %12.3f | %14.0f\n",
+                mttr, f.pls_stage1, f.pls_stage2, f.pls_stage3, r.eens_kwh_yr, correct);
+    if (eens_first < 0.0) eens_first = r.eens_kwh_yr;
+    eens_last = r.eens_kwh_yr;
+
+    // The smoking gun: Stage-3 (post-repair) shed is ~0 even though the load was
+    // disconnected for the whole repair, so the repair duration contributes nothing.
+    CHECK(f.pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+  }
+
+  // EENS at MTTR=1000 h is essentially identical to EENS at MTTR=1 h: the
+  // 1000x repair window does NOT change the reported energy not supplied.
+  std::printf("[F7] EENS(MTTR=1h)=%.3f  EENS(MTTR=1000h)=%.3f  ratio=%.4f "
+              "(correct ratio would be ~1000)\n",
+              eens_first, eens_last, eens_last / std::max(1e-9, eens_first));
+  CHECK(eens_last == Catch::Approx(eens_first).epsilon(0.02));
+
+  // And the magnitude equals only the isolation+switching window:
+  //   EENS ≈ lambda * load_kW * (tau_iso + tau_sw) = 1 * 1000 * (1/60 + 1/60) ≈ 33.3 kWh/yr.
+  CHECK(eens_first == Catch::Approx(1000.0 * (2.0 / 60.0)).epsilon(0.05));
+}
+
 TEST_CASE("Three-stage reliability — opt-in generator + transformer faults extend the contingency set",
           "[reliability][three_stage][fault_set]") {
   // bus3 is reachable only through transformer1 (hv=1, lv=3); branch1 feeds bus2.

@@ -7346,7 +7346,7 @@ const App = (() => {
 
 	    function relPlotLayout(title, xTitle, yTitle) {
 	      return {
-	        title: { text: title, font: { size: 13 } },
+	        title: { text: title, font: { size: 13 }, x: 0.02, xanchor: 'left' },
 	        margin: { l: 58, r: 18, t: 38, b: 70 },
 	        xaxis: { title: xTitle || '', tickangle: -30, automargin: true },
 	        yaxis: { title: yTitle || '', automargin: true },
@@ -7376,17 +7376,22 @@ const App = (() => {
 	      const riskChart = document.getElementById('relRiskChart');
 	      if (riskChart && riskRows.length) {
 	        Plotly.newPlot(riskChart, [{
-	          x: riskRows.map(r => r.name),
-	          y: riskRows.map(r => r.y),
+	          x: riskRows.map(r => r.y).reverse(),
+	          y: riskRows.map(r => r.name).reverse(),
 	          type: 'bar',
-	          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef') },
-	          customdata: riskRows.map(r => r.pct),
-	          hovertemplate: '%{x}<br>EENS=%{y:.3f} MWh/yr<br>风险占比=%{customdata:.3f}<extra></extra>'
-	        }], relPlotLayout('Top 风险元件/失效模式', '', 'MWh/yr'), { responsive: true });
+	          orientation: 'h',
+	          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef').reverse() },
+	          customdata: riskRows.map(r => r.pct).reverse(),
+	          hovertemplate: '%{y}<br>EENS=%{x:.3f} MWh/yr<br>风险占比=%{customdata:.3f}<extra></extra>'
+	        }], {
+	          ...relPlotLayout('Top 风险元件/失效模式', 'MWh/yr', ''),
+	          margin: { l: 92, r: 18, t: 38, b: 48 },
+	          yaxis: { automargin: true }
+	        }, { responsive: true });
 	        if (riskChart.on) {
 	          riskChart.on('plotly_click', ev => {
 	            const idx = Number(ev?.points?.[0]?.pointIndex);
-	            const compId = Number.isInteger(idx) ? riskRows[idx]?.compId : undefined;
+	            const compId = Number.isInteger(idx) ? riskRows[riskRows.length - 1 - idx]?.compId : undefined;
 	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
 	              Canvas.panToComponent(compId);
 	            }
@@ -7405,16 +7410,21 @@ const App = (() => {
 	      const nodalChart = document.getElementById('relNodalChart');
 	      if (nodalChart && nodal.length) {
 	        Plotly.newPlot(nodalChart, [{
-	          x: nodal.map(r => `Bus ${r.bus}`),
-	          y: nodal.map(r => r.value),
+	          x: nodal.map(r => r.value).reverse(),
+	          y: nodal.map(r => `Bus ${r.bus}`).reverse(),
 	          type: 'bar',
+	          orientation: 'h',
 	          marker: { color: '#ff9f43' },
-	          hovertemplate: '%{x}<br>节点EENS=%{y:.3f} MWh/yr<extra></extra>'
-	        }], relPlotLayout('负荷点影响', '', 'MWh/yr'), { responsive: true });
+	          hovertemplate: '%{y}<br>节点EENS=%{x:.3f} MWh/yr<extra></extra>'
+	        }], {
+	          ...relPlotLayout('负荷点影响', 'MWh/yr', ''),
+	          margin: { l: 74, r: 18, t: 38, b: 48 },
+	          yaxis: { automargin: true }
+	        }, { responsive: true });
 	        if (nodalChart.on) {
 	          nodalChart.on('plotly_click', ev => {
 	            const idx = Number(ev?.points?.[0]?.pointIndex);
-	            const compId = Number.isInteger(idx) ? nodal[idx]?.compId : undefined;
+	            const compId = Number.isInteger(idx) ? nodal[nodal.length - 1 - idx]?.compId : undefined;
 	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
 	              Canvas.panToComponent(compId);
 	            }
@@ -7552,6 +7562,21 @@ const App = (() => {
 	      return html ? renderReliabilityPanel('元件建模', html) : '';
 	    }
 
+	    function renderReliabilityRiskBasisHtml(method) {
+	      if (method === 'nsq' || method === 'seq') {
+	        return '<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">' +
+	          '蒙特卡洛薄弱元件按抽样故障状态中的失负荷加权贡献排序，包含多元件共停运/共影响；' +
+	          'FMEA 按单一 N-1 故障的频率×后果排序。因此同一算例中二者排序可以不同。' +
+	          '</div>';
+	      }
+	      if (method === 'fmea' || method === 'failure_mode_fmea') {
+	        return '<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">' +
+	          'FMEA 结果按单一故障或失效模式的 EENS 贡献排序；蒙特卡洛薄弱元件表则反映抽样共停运状态中的失负荷加权风险。' +
+	          '</div>';
+	      }
+	      return '';
+	    }
+
 	    function showReliabilityResults(data, method) {
 	      document.getElementById('resultsEmpty').style.display = 'none';
 	      document.getElementById('resultsContent').style.display = 'block';
@@ -7569,7 +7594,9 @@ const App = (() => {
       // Critical components (NSQ/SEQ) — index is 0-based positional (generator
 	      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
 	      if (Array.isArray(data.critical_components) && data.critical_components.length) {
-	        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (按失负荷加权风险)</h4><table><thead><tr><th>#</th><th>元件</th><th>类型</th><th>风险占比</th><th>P(停运|失负荷)</th><th>关联EENS</th></tr></thead><tbody>';
+	        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (按失负荷加权风险)</h4>';
+	        html += renderReliabilityRiskBasisHtml(method);
+	        html += '<table><thead><tr><th>#</th><th>元件</th><th>类型</th><th>风险占比</th><th>P(停运|失负荷)</th><th>关联EENS</th></tr></thead><tbody>';
 	        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 	        data.critical_components.slice(0, 15).forEach((c, i) => {
 	          const compId = reliabilityContingencyCompId(c, ccBusMap);
@@ -7582,7 +7609,9 @@ const App = (() => {
 	      }
 	      // FMEA top contingencies
 	      if ((method === 'fmea' || method === 'failure_mode_fmea') && Array.isArray(data.contingencies) && data.contingencies.length) {
-	        html += '<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 EENS 贡献)</h4><table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
+	        html += '<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 EENS 贡献)</h4>';
+	        html += renderReliabilityRiskBasisHtml(method);
+	        html += '<table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
 	        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
 	        data.contingencies.slice(0, 15).forEach(c => {
 	          const compId = reliabilityContingencyCompId(c, relBusMap);
