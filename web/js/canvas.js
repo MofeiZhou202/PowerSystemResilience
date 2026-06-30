@@ -5585,6 +5585,192 @@ const Canvas = (() => {
     resultsLayer.querySelectorAll('.carbon-potential-overlay').forEach(el => el.remove());
   }
 
+  function showReliabilityImpactResults(data) {
+    if (!resultsLayer || !data) return;
+    resultsLayer.innerHTML = '';
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const maps = getCompBusMap();
+    const compsById = new Map(state.components.map(c => [c.id, c]));
+    const fallbackMap = {
+      generator: 'gen', Generator: 'gen',
+      ac_branch: 'branch', ACBranch: 'branch',
+      dc_branch: 'dcBranch', DCBranch: 'dcBranch',
+      vsc_converter: 'vsc', VSCConverter: 'vsc',
+      static_generator: 'sgen', StaticGen: 'sgen',
+      renewable_gen: 'renGen', RenewableGen: 'renGen',
+      storage: 'storage', ACStorage: 'storage',
+      transformer_2w: 'trafo', Transformer2W: 'trafo',
+      transformer_3w: 'trafo3w', Transformer3W: 'trafo3w',
+      dcdc_converter: 'dcdcConverter', DCDCConverter: 'dcdcConverter',
+      dc_circuit_breaker: 'dcCb', DCCircuitBreaker: 'dcCb',
+      dc_storage: 'dcStorage', DCStorage: 'dcStorage',
+      dc_pv_array: 'dcPv', DCPVArray: 'dcPv',
+      ac_switch: 'sw', ACSwitch: 'sw',
+      ac_circuit_breaker: 'cb', ACCircuitBreaker: 'cb',
+      ac_pv_system: 'pv', ACPVSystem: 'pv',
+      dc_static_generator_ac: 'dcSgen', DCStaticGenAC: 'dcSgen'
+    };
+    const compIdFor = (row) => {
+      const rawDirect = row?.canvas_comp_id ?? row?.comp_id;
+      if (rawDirect !== null && rawDirect !== undefined && rawDirect !== '') {
+        const direct = Number(rawDirect);
+        if (Number.isInteger(direct) && compsById.has(direct)) return direct;
+      }
+      const bucket = row?.canvas_type || fallbackMap[row?.component_type] ||
+        fallbackMap[row?.canonical_component_type];
+      const modelIdx = Number(row?.canvas_index);
+      if (bucket && maps[bucket] && Number.isFinite(modelIdx) &&
+          maps[bucket][modelIdx] != null) {
+        return maps[bucket][modelIdx];
+      }
+      const pos = Number(row?.component_index ?? row?.index);
+      if (bucket && maps.byPosition && maps.byPosition[bucket] &&
+          Number.isFinite(pos) && maps.byPosition[bucket][pos] != null) {
+        return maps.byPosition[bucket][pos];
+      }
+      if (bucket && maps[bucket] && Number.isFinite(pos) && maps[bucket][pos] != null) {
+        return maps[bucket][pos];
+      }
+      const primaryBus = Number(row?.primary_bus);
+      if (Number.isFinite(primaryBus) && primaryBus > 0) {
+        if (row?.component_domain === 'DC' && maps.dc[primaryBus] != null) return maps.dc[primaryBus];
+        if (maps.ac[primaryBus] != null) return maps.ac[primaryBus];
+        if (maps.dc[primaryBus] != null) return maps.dc[primaryBus];
+      }
+      return null;
+    };
+    const scoreOf = (row) => {
+      const candidates = [
+        row?.loss_weighted_risk,
+        row?.associated_eens_mwh_yr,
+        row?.eens_contribution,
+        row?.importance
+      ].map(Number).filter(Number.isFinite);
+      return candidates.find(v => v > 0) ?? candidates[0] ?? 0;
+    };
+    const sourceRows = Array.isArray(data.critical_components) && data.critical_components.length
+      ? data.critical_components
+      : (Array.isArray(data.contingencies) ? data.contingencies : []);
+    const riskRows = sourceRows
+      .filter(row => row && scoreOf(row) > 0)
+      .slice(0, 8)
+      .map((row, i) => ({ row, index: i, score: scoreOf(row), comp: compsById.get(compIdFor(row)) }))
+      .filter(item => item.comp);
+
+    const nodal = Array.isArray(data.nodal_eens_mwh_yr) ? data.nodal_eens_mwh_yr : [];
+    const maxEens = Math.max(0, ...nodal.map(v => Number(v) || 0));
+    const nodalItems = [];
+    if (maxEens > 0) {
+      nodal.forEach((value, i) => {
+        const eens = Number(value) || 0;
+        if (eens <= 0) return;
+        const busId = i + 1;
+        const compId = maps.ac[busId] ?? maps.dc[busId];
+        const comp = compsById.get(compId);
+        if (comp) nodalItems.push({ busId, eens, comp });
+      });
+      nodalItems.sort((a, b) => b.eens - a.eens);
+      nodalItems.forEach(item => {
+        const radius = 8 + 28 * Math.sqrt(item.eens / maxEens);
+        const dot = document.createElementNS(SVGNS, 'circle');
+        dot.setAttribute('cx', item.comp.x);
+        dot.setAttribute('cy', item.comp.y);
+        dot.setAttribute('r', radius.toFixed(1));
+        dot.setAttribute('fill', '#ff7a59');
+        dot.setAttribute('opacity', '0.22');
+        dot.setAttribute('data-comp-id', item.comp.id);
+        dot.style.pointerEvents = 'none';
+        dot.classList.add('reliability-impact-overlay');
+        resultsLayer.insertBefore(dot, resultsLayer.firstChild);
+      });
+    }
+
+    riskRows.forEach(({ row, index, score, comp }) => {
+      const radius = Math.max(22, Math.min(62, 22 + Math.sqrt(Math.abs(score)) * 30));
+      const ring = document.createElementNS(SVGNS, 'circle');
+      ring.setAttribute('cx', comp.x);
+      ring.setAttribute('cy', comp.y);
+      ring.setAttribute('r', radius);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', index < 3 ? '#ff6b6b' : '#f5c542');
+      ring.setAttribute('stroke-width', index < 3 ? '4' : '2.5');
+      ring.setAttribute('opacity', index < 3 ? '0.78' : '0.55');
+      ring.setAttribute('data-comp-id', comp.id);
+      ring.style.pointerEvents = 'none';
+      ring.classList.add('reliability-impact-overlay');
+      resultsLayer.appendChild(ring);
+
+      const label = document.createElementNS(SVGNS, 'text');
+      label.setAttribute('x', comp.x + radius + 5);
+      label.setAttribute('y', comp.y - radius * 0.55);
+      label.setAttribute('fill', '#ffdf80');
+      label.setAttribute('font-size', '12');
+      label.setAttribute('font-weight', '700');
+      label.setAttribute('data-comp-id', comp.id);
+      label.style.pointerEvents = 'none';
+      label.classList.add('reliability-impact-overlay');
+      label.textContent = `R${index + 1}`;
+      resultsLayer.appendChild(label);
+    });
+
+    riskRows.slice(0, 3).forEach(({ comp }, i) => {
+      nodalItems.slice(0, 4).forEach((item, j) => {
+        if (item.comp.id === comp.id) return;
+        const line = document.createElementNS(SVGNS, 'line');
+        line.setAttribute('x1', comp.x);
+        line.setAttribute('y1', comp.y);
+        line.setAttribute('x2', item.comp.x);
+        line.setAttribute('y2', item.comp.y);
+        line.setAttribute('stroke', i === 0 ? '#ff6b6b' : '#f5c542');
+        line.setAttribute('stroke-width', Math.max(1.2, 3.4 - j * 0.55).toFixed(1));
+        line.setAttribute('stroke-dasharray', '8 7');
+        line.setAttribute('opacity', (0.36 - j * 0.05).toFixed(2));
+        line.style.pointerEvents = 'none';
+        line.classList.add('reliability-impact-overlay');
+        resultsLayer.insertBefore(line, resultsLayer.firstChild);
+      });
+    });
+
+    if (riskRows.length || nodalItems.length) {
+      const legend = document.createElementNS(SVGNS, 'g');
+      legend.classList.add('reliability-impact-overlay');
+      legend.style.pointerEvents = 'none';
+      const x = viewBox.x + 18;
+      const y = viewBox.y + 22;
+      const box = document.createElementNS(SVGNS, 'rect');
+      box.setAttribute('x', x);
+      box.setAttribute('y', y);
+      box.setAttribute('width', '230');
+      box.setAttribute('height', '58');
+      box.setAttribute('rx', '6');
+      box.setAttribute('fill', 'rgba(22, 25, 31, 0.82)');
+      box.setAttribute('stroke', '#3a3f4b');
+      legend.appendChild(box);
+      const labels = [
+        { color: '#ff6b6b', text: 'R1-R3 最高风险元件' },
+        { color: '#ff7a59', text: '负荷点 EENS 影响' },
+        { color: '#f5c542', text: '虚线：传播/关联影响' }
+      ];
+      labels.forEach((entry, i) => {
+        const cy = y + 17 + i * 16;
+        const swatch = document.createElementNS(SVGNS, 'circle');
+        swatch.setAttribute('cx', x + 12);
+        swatch.setAttribute('cy', cy - 4);
+        swatch.setAttribute('r', '4');
+        swatch.setAttribute('fill', entry.color);
+        legend.appendChild(swatch);
+        const text = document.createElementNS(SVGNS, 'text');
+        text.setAttribute('x', x + 24);
+        text.setAttribute('y', cy);
+        text.setAttribute('fill', '#dcdfe4');
+        text.setAttribute('font-size', '11');
+        text.textContent = entry.text;
+        legend.appendChild(text);
+      });
+      resultsLayer.appendChild(legend);
+    }
+  }
+
   function compToBusIndex(compId) {
     // Reconstruct bus index from component position in list
     let idx = 0;
@@ -5650,11 +5836,12 @@ const Canvas = (() => {
    *           branch: { branchIndex -> compId }, gen: { genIndex -> compId } }
    */
   function getCompBusMap() {
-    const maps = { ac: {}, dc: {}, branch: {}, gen: {}, load: {}, trafo: {},
-      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, dcSgen: {}, sw: {}, cb: {}, dcCb: {},
-      motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
-      flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
-      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {}, dcStorage: {} };
+	    const maps = { ac: {}, dc: {}, branch: {}, gen: {}, load: {}, trafo: {},
+	      extGrid: {}, storage: {}, pv: {}, renGen: {}, sgen: {}, dcSgen: {}, sw: {}, cb: {}, dcCb: {},
+	      motor: {}, dcLoad: {}, dcBranch: {}, vsc: {}, shunt: {}, trafo3w: {},
+	      flexLoad: {}, asymLoad: {}, charger: {}, chargingStation: {},
+	      mobileStorage: {}, dcdcConverter: {}, energyRouter: {}, vpp: {}, microgrid: {}, dcPv: {}, dcStorage: {},
+	      byPosition: {} };
 
     const acBusIndexMap = assignBusIndices('ac_bus');
     const dcBusIndexMap = assignBusIndices('dc_bus');
@@ -5663,10 +5850,13 @@ const Canvas = (() => {
       else if (comp.type === 'dc_bus') maps.dc[dcBusIndexMap[comp.id]] = comp.id;
     });
 
-    const putIndexed = (bucket, comp, fallback) => {
-      const idx = Number(comp.params?.index);
-      bucket[Number.isFinite(idx) ? idx : fallback] = comp.id;
-    };
+	    const putIndexed = (bucketName, comp, fallback) => {
+	      const bucket = maps[bucketName];
+	      const idx = Number(comp.params?.index);
+	      bucket[Number.isFinite(idx) ? idx : fallback] = comp.id;
+	      if (!maps.byPosition[bucketName]) maps.byPosition[bucketName] = {};
+	      maps.byPosition[bucketName][fallback] = comp.id;
+	    };
 
     // Must match buildSystemJson iteration order for index consistency
     const idx = { br: 0, gen: 0, load: 0, trafo: 0, eg: 0, stor: 0, pv: 0,
@@ -5676,55 +5866,55 @@ const Canvas = (() => {
     state.components.forEach(comp => {
       const p = comp.params;
       switch (comp.type) {
-        case 'ac_branch': putIndexed(maps.branch, comp, idx.br++); break;
-        case 'generator': putIndexed(maps.gen, comp, idx.gen++); break;
-        case 'load': putIndexed(maps.load, comp, idx.load++); break;
-        case 'transformer_2w':
-          if (p._from_branch) putIndexed(maps.branch, comp, idx.br++);
-          else putIndexed(maps.trafo, comp, idx.trafo++);
-          break;
-        case 'external_grid': putIndexed(maps.extGrid, comp, idx.eg++); break;
-        case 'storage': putIndexed(maps.storage, comp, idx.stor++); break;
-        case 'pv_system': putIndexed(maps.pv, comp, idx.pv++); break;
-        case 'dc_pv_array': putIndexed(maps.dcPv, comp, idx.dcpv++); break;
-        case 'renewable_gen': putIndexed(maps.renGen, comp, idx.ren++); break;
+	        case 'ac_branch': putIndexed('branch', comp, idx.br++); break;
+	        case 'generator': putIndexed('gen', comp, idx.gen++); break;
+	        case 'load': putIndexed('load', comp, idx.load++); break;
+	        case 'transformer_2w':
+	          if (p._from_branch) putIndexed('branch', comp, idx.br++);
+	          else putIndexed('trafo', comp, idx.trafo++);
+	          break;
+	        case 'external_grid': putIndexed('extGrid', comp, idx.eg++); break;
+	        case 'storage': putIndexed('storage', comp, idx.stor++); break;
+	        case 'pv_system': putIndexed('pv', comp, idx.pv++); break;
+	        case 'dc_pv_array': putIndexed('dcPv', comp, idx.dcpv++); break;
+	        case 'renewable_gen': putIndexed('renGen', comp, idx.ren++); break;
         case 'static_generator': {
           const isDcSgen = state.connections.some(conn => {
             const otherId = conn.from.compId === comp.id ? conn.to.compId
               : (conn.to.compId === comp.id ? conn.from.compId : null);
             return otherId != null && getComponent(otherId)?.type === 'dc_bus';
           });
-          if (isDcSgen) putIndexed(maps.dcSgen, comp, idx.dcSgen++);
-          else putIndexed(maps.sgen, comp, idx.sgen++);
-          break;
-        }
-        case 'switch_comp': putIndexed(maps.sw, comp, idx.sw++); break;
+	          if (isDcSgen) putIndexed('dcSgen', comp, idx.dcSgen++);
+	          else putIndexed('sgen', comp, idx.sgen++);
+	          break;
+	        }
+	        case 'switch_comp': putIndexed('sw', comp, idx.sw++); break;
         case 'circuit_breaker': {
           const isDcCb = state.connections.some(conn => {
             const otherId = conn.from.compId === comp.id ? conn.to.compId
               : (conn.to.compId === comp.id ? conn.from.compId : null);
             return otherId != null && getComponent(otherId)?.type === 'dc_bus';
           });
-          if (isDcCb) putIndexed(maps.dcCb, comp, idx.dcCb++);
-          else putIndexed(maps.cb, comp, idx.cb++);
-          break;
-        }
-        case 'motor': putIndexed(maps.motor, comp, idx.motor++); break;
-        case 'dc_load': putIndexed(maps.dcLoad, comp, idx.dcLoad++); break;
-        case 'dc_storage': putIndexed(maps.dcStorage, comp, idx.dcStor++); break;
-        case 'dc_branch': putIndexed(maps.dcBranch, comp, idx.dcBr++); break;
-        case 'vsc_converter': putIndexed(maps.vsc, comp, idx.vsc++); break;
-        case 'shunt': putIndexed(maps.shunt, comp, idx.shunt++); break;
-        case 'transformer_3w': putIndexed(maps.trafo3w, comp, idx.trafo3w++); break;
-        case 'flexible_load': putIndexed(maps.flexLoad, comp, idx.flex++); break;
-        case 'asymmetric_load': putIndexed(maps.asymLoad, comp, idx.asym++); break;
-        case 'charger': putIndexed(maps.charger, comp, idx.charger++); break;
-        case 'charging_station': putIndexed(maps.chargingStation, comp, idx.cs++); break;
-        case 'mobile_storage': putIndexed(maps.mobileStorage, comp, idx.ms++); break;
-        case 'dcdc_converter': putIndexed(maps.dcdcConverter, comp, idx.dcdc++); break;
-        case 'energy_router': putIndexed(maps.energyRouter, comp, idx.er++); break;
-        case 'vpp': putIndexed(maps.vpp, comp, idx.vpp++); break;
-        case 'microgrid': putIndexed(maps.microgrid, comp, idx.mg++); break;
+	          if (isDcCb) putIndexed('dcCb', comp, idx.dcCb++);
+	          else putIndexed('cb', comp, idx.cb++);
+	          break;
+	        }
+	        case 'motor': putIndexed('motor', comp, idx.motor++); break;
+	        case 'dc_load': putIndexed('dcLoad', comp, idx.dcLoad++); break;
+	        case 'dc_storage': putIndexed('dcStorage', comp, idx.dcStor++); break;
+	        case 'dc_branch': putIndexed('dcBranch', comp, idx.dcBr++); break;
+	        case 'vsc_converter': putIndexed('vsc', comp, idx.vsc++); break;
+	        case 'shunt': putIndexed('shunt', comp, idx.shunt++); break;
+	        case 'transformer_3w': putIndexed('trafo3w', comp, idx.trafo3w++); break;
+	        case 'flexible_load': putIndexed('flexLoad', comp, idx.flex++); break;
+	        case 'asymmetric_load': putIndexed('asymLoad', comp, idx.asym++); break;
+	        case 'charger': putIndexed('charger', comp, idx.charger++); break;
+	        case 'charging_station': putIndexed('chargingStation', comp, idx.cs++); break;
+	        case 'mobile_storage': putIndexed('mobileStorage', comp, idx.ms++); break;
+	        case 'dcdc_converter': putIndexed('dcdcConverter', comp, idx.dcdc++); break;
+	        case 'energy_router': putIndexed('energyRouter', comp, idx.er++); break;
+	        case 'vpp': putIndexed('vpp', comp, idx.vpp++); break;
+	        case 'microgrid': putIndexed('microgrid', comp, idx.mg++); break;
       }
     });
 
@@ -5961,9 +6151,10 @@ const Canvas = (() => {
     buildSystemJson,
     syncConnectivity,
     loadFromSystemJson,
-    showPowerFlowResults,
-    showCarbonPotentialResults,
-    clearCarbonPotentialResults,
+	    showPowerFlowResults,
+	    showCarbonPotentialResults,
+	    showReliabilityImpactResults,
+	    clearCarbonPotentialResults,
     showTopologyResults,
     showNetworkReduction,
     showTopologyReconfigResults,

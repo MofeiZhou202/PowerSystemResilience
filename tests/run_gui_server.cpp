@@ -1765,6 +1765,7 @@ struct FMEAComponentPresentation {
   std::string display_name;
   std::string display_type;
   std::string canvas_type;
+  std::string component_domain;
   int canvas_index{-1};
   int primary_bus{0};
   int secondary_bus{0};
@@ -1814,10 +1815,12 @@ template <typename T>
 FMEAComponentPresentation fmea_one_bus_component(const std::vector<T>& items,
                                                  int position,
                                                  const std::string& display_type,
-                                                 const std::string& canvas_type) {
+                                                 const std::string& canvas_type,
+                                                 const std::string& component_domain = "AC") {
   FMEAComponentPresentation p;
   p.display_type = display_type;
   p.canvas_type = canvas_type;
+  p.component_domain = component_domain;
   if (position < 0 || position >= static_cast<int>(items.size())) {
     p.display_name = fmea_default_name(display_type, position);
     return p;
@@ -1849,13 +1852,13 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
   if (type == "ac_pv_system")
     return fmea_one_bus_component(sys.ac.pv_systems, position, label, "pv");
   if (type == "dc_storage")
-    return fmea_one_bus_component(sys.dc.storage, position, label, "dcStorage");
+    return fmea_one_bus_component(sys.dc.storage, position, label, "dcStorage", "DC");
   if (type == "dc_pv_array")
-    return fmea_one_bus_component(sys.dc.pv_arrays, position, label, "dcPv");
+    return fmea_one_bus_component(sys.dc.pv_arrays, position, label, "dcPv", "DC");
   if (type == "dc_static_generator_ac")
-    return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen");
+    return fmea_one_bus_component(sys.dc.static_generators, position, label, "dcSgen", "DC");
   if (type == "dc_static_generator")
-    return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "");
+    return fmea_one_bus_component(sys.dc.dc_static_generators, position, label, "", "DC");
 
   auto missing = [&] {
     p.canvas_index = -1;
@@ -1867,6 +1870,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.branches.size())) return missing();
     const auto& br = sys.ac.branches[static_cast<size_t>(position)];
     p.canvas_type = "branch";
+    p.component_domain = "AC";
     p.canvas_index = br.index;
     p.primary_bus = br.from_bus;
     p.secondary_bus = br.to_bus;
@@ -1878,6 +1882,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.branches.size())) return missing();
     const auto& br = sys.dc.branches[static_cast<size_t>(position)];
     p.canvas_type = "dcBranch";
+    p.component_domain = "DC";
     p.canvas_index = br.index;
     p.primary_bus = br.from_bus;
     p.secondary_bus = br.to_bus;
@@ -1889,6 +1894,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.transformers_2w.size())) return missing();
     const auto& tr = sys.ac.transformers_2w[static_cast<size_t>(position)];
     p.canvas_type = "trafo";
+    p.component_domain = "AC";
     p.canvas_index = tr.index;
     p.primary_bus = tr.hv_bus;
     p.secondary_bus = tr.lv_bus;
@@ -1900,6 +1906,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.transformers_3w.size())) return missing();
     const auto& tr = sys.ac.transformers_3w[static_cast<size_t>(position)];
     p.canvas_type = "trafo3w";
+    p.component_domain = "AC";
     p.canvas_index = tr.index;
     p.primary_bus = tr.hv_bus;
     p.secondary_bus = tr.lv_bus;
@@ -1914,6 +1921,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.vsc_converters.size())) return missing();
     const auto& v = sys.vsc_converters[static_cast<size_t>(position)];
     p.canvas_type = "vsc";
+    p.component_domain = "HYBRID";
     p.canvas_index = v.index;
     p.primary_bus = v.bus_ac;
     p.secondary_bus = v.bus_dc;
@@ -1928,6 +1936,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.dcdc_converters.size())) return missing();
     const auto& dc = sys.dc.dcdc_converters[static_cast<size_t>(position)];
     p.canvas_type = "dcdcConverter";
+    p.component_domain = "DC";
     p.canvas_index = dc.index;
     p.primary_bus = dc.bus_in;
     p.secondary_bus = dc.bus_out;
@@ -1942,6 +1951,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.switches.size())) return missing();
     const auto& sw = sys.ac.switches[static_cast<size_t>(position)];
     p.canvas_type = "sw";
+    p.component_domain = "AC";
     p.canvas_index = sw.index;
     p.primary_bus = sw.bus_from;
     p.secondary_bus = sw.bus_to;
@@ -1953,6 +1963,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.ac.circuit_breakers.size())) return missing();
     const auto& cb = sys.ac.circuit_breakers[static_cast<size_t>(position)];
     p.canvas_type = "cb";
+    p.component_domain = "AC";
     p.canvas_index = cb.index;
     p.primary_bus = cb.bus_from;
     p.secondary_bus = cb.bus_to;
@@ -1964,6 +1975,7 @@ FMEAComponentPresentation describe_fmea_component(const hacdcpf::HybridPowerSyst
     if (position < 0 || position >= static_cast<int>(sys.dc.dc_circuit_breakers.size())) return missing();
     const auto& cb = sys.dc.dc_circuit_breakers[static_cast<size_t>(position)];
     p.canvas_type = "dcCb";
+    p.component_domain = "DC";
     p.canvas_index = cb.index;
     p.primary_bus = cb.bus_from;
     p.secondary_bus = cb.bus_to;
@@ -2158,6 +2170,9 @@ static json failure_mode_contingency_json(
                               : meta.display_name;
   row["canvas_type"] = meta.canvas_type;
   row["canvas_index"] = meta.canvas_index;
+  row["component_domain"] = meta.component_domain.empty()
+                                ? c.ref.component.domain
+                                : meta.component_domain;
   row["primary_bus"] = meta.primary_bus;
   row["secondary_bus"] = meta.secondary_bus;
   row["mappable"] = meta.mappable;
@@ -2172,6 +2187,57 @@ static json failure_mode_contingency_json(
   row["lole_contribution"] = c.lole_contribution;
   row["causes_loss"] = c.causes_loss;
   return row;
+}
+
+static std::string mc_type_to_fmea_type(const std::string& type) {
+  static const std::unordered_map<std::string, std::string> map{
+      {"Generator", "generator"},
+      {"ACBranch", "ac_branch"},
+      {"StaticGen", "static_generator"},
+      {"RenewableGen", "renewable_gen"},
+      {"ACStorage", "storage"},
+      {"VSCConverter", "vsc_converter"},
+      {"DCBranch", "dc_branch"},
+      {"Transformer2W", "transformer_2w"},
+      {"Transformer3W", "transformer_3w"},
+      {"DCDCConverter", "dcdc_converter"},
+      {"DCCircuitBreaker", "dc_circuit_breaker"},
+      {"DCStorage", "dc_storage"},
+      {"DCPVArray", "dc_pv_array"},
+      {"ACSwitch", "ac_switch"},
+      {"ACCircuitBreaker", "ac_circuit_breaker"},
+      {"ACPVSystem", "ac_pv_system"},
+      {"DCStaticGenAC", "dc_static_generator_ac"},
+      {"DCStaticGen", "dc_static_generator"}};
+  const auto it = map.find(type);
+  return it == map.end() ? type : it->second;
+}
+
+static json mc_critical_component_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ReliabilityResult::ComponentImportance& ci) {
+  const std::string canonical_type = mc_type_to_fmea_type(ci.component_type);
+  const auto meta = describe_fmea_component(sys, canonical_type, ci.index);
+  return json{
+      {"index", ci.index},
+      {"component_index", ci.index},
+      {"is_generator", ci.is_generator},
+      {"importance", ci.importance},
+      {"loss_weighted_risk", ci.loss_weighted_risk},
+      {"conditional_down_given_loss", ci.conditional_down_given_loss},
+      {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
+      {"component_type", ci.component_type},
+      {"canonical_component_type", canonical_type},
+      {"component_name", ci.component_name},
+      {"display_name", meta.display_name.empty() ? ci.component_name : meta.display_name},
+      {"display_type", meta.display_type.empty() ? fmea_type_label(canonical_type) : meta.display_type},
+      {"canvas_type", meta.canvas_type},
+      {"canvas_index", meta.canvas_index},
+      {"component_domain", meta.component_domain},
+      {"primary_bus", meta.primary_bus},
+      {"secondary_bus", meta.secondary_bus},
+      {"mappable", meta.mappable},
+      {"global_state_index", ci.global_state_index}};
 }
 
 std::string opf_default_name(const std::string& display_type, int index) {
@@ -13928,22 +13994,12 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components (full metadata — Phase 0 task 2)
-        json crit_arr = json::array();
-        for (const auto& ci : result.critical_components) {
-	          crit_arr.push_back({
-	            {"index", ci.index},
-	            {"is_generator", ci.is_generator},
-	            {"importance", ci.importance},
-	            {"loss_weighted_risk", ci.loss_weighted_risk},
-	            {"conditional_down_given_loss", ci.conditional_down_given_loss},
-	            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
-	            {"component_type", ci.component_type},
-	            {"component_name", ci.component_name},
-	            {"global_state_index", ci.global_state_index}
-	          });
-        }
-        out["critical_components"] = crit_arr;
+	        // Critical components (full metadata — Phase 0 task 2)
+	        json crit_arr = json::array();
+	        for (const auto& ci : result.critical_components) {
+	          crit_arr.push_back(mc_critical_component_json(sys, ci));
+	        }
+	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
@@ -14027,22 +14083,12 @@ int main(int argc, char** argv) {
           out["tail_risk"]["lole_cvar"] = result.tail_risk.lole_cvar;
         }
         
-        // Critical components (full metadata — Phase 0 task 2)
-        json crit_arr = json::array();
-        for (const auto& ci : result.critical_components) {
-	          crit_arr.push_back({
-	            {"index", ci.index},
-	            {"is_generator", ci.is_generator},
-	            {"importance", ci.importance},
-	            {"loss_weighted_risk", ci.loss_weighted_risk},
-	            {"conditional_down_given_loss", ci.conditional_down_given_loss},
-	            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
-	            {"component_type", ci.component_type},
-	            {"component_name", ci.component_name},
-	            {"global_state_index", ci.global_state_index}
-	          });
-        }
-        out["critical_components"] = crit_arr;
+	        // Critical components (full metadata — Phase 0 task 2)
+	        json crit_arr = json::array();
+	        for (const auto& ci : result.critical_components) {
+	          crit_arr.push_back(mc_critical_component_json(sys, ci));
+	        }
+	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
         g_session.busy.store(false);
@@ -14136,6 +14182,7 @@ int main(int argc, char** argv) {
             {"component_index", c.component_index},
             {"canvas_type", meta.canvas_type},
             {"canvas_index", meta.canvas_index},
+            {"component_domain", meta.component_domain},
             {"primary_bus", meta.primary_bus},
             {"secondary_bus", meta.secondary_bus},
             {"mappable", meta.mappable},
@@ -14972,20 +15019,14 @@ int main(int argc, char** argv) {
             {"saidi", na("Monte Carlo adequacy method does not compute customer indices.")},
             {"caidi", na("Monte Carlo adequacy method does not compute customer indices.")},
             {"asai",  na("Monte Carlo adequacy method does not compute customer indices.")}};
-          out["converged"] = r.converged;
-          out["iterations_used"] = r.iterations_used;
-          out["final_cov"] = r.final_cov;
-          out["eens_history"] = r.eens_history;
+	          out["converged"] = r.converged;
+	          out["iterations_used"] = r.iterations_used;
+	          out["final_cov"] = r.final_cov;
+	          out["eens_history"] = r.eens_history;
+	          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
 	          json crit = json::array();
 	          for (const auto& ci : r.critical_components)
-	            crit.push_back({{"index", ci.index}, {"is_generator", ci.is_generator},
-	                            {"importance", ci.importance},
-	                            {"loss_weighted_risk", ci.loss_weighted_risk},
-	                            {"conditional_down_given_loss", ci.conditional_down_given_loss},
-	                            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
-	                            {"component_type", ci.component_type},
-	                            {"component_name", ci.component_name},
-	                            {"global_state_index", ci.global_state_index}});
+	            crit.push_back(mc_critical_component_json(sys, ci));
 	          out["critical_components"] = crit;
 	        } else if (method == "fmea") {
           hacdcpf::analysis::FMEAOptions fo;
@@ -15010,6 +15051,7 @@ int main(int argc, char** argv) {
 	            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
 	          out["n_contingencies"] = r.contingencies.size();
 	          out["n_with_loss"] = r.n_loss_contingencies;
+	          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
 	          json cont = json::array();
 	          for (const auto& c : r.contingencies) {
 	            const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
@@ -15018,10 +15060,11 @@ int main(int argc, char** argv) {
 	                {"component_type", c.component_type},
 	                {"display_name", meta.display_name},
 	                {"display_type", meta.display_type},
-	                {"component_index", c.component_index},
-	                {"canvas_type", meta.canvas_type},
-	                {"canvas_index", meta.canvas_index},
-	                {"primary_bus", meta.primary_bus},
+                {"component_index", c.component_index},
+                {"canvas_type", meta.canvas_type},
+                {"canvas_index", meta.canvas_index},
+                {"component_domain", meta.component_domain},
+                {"primary_bus", meta.primary_bus},
 	                {"secondary_bus", meta.secondary_bus},
 	                {"mappable", meta.mappable},
 	                {"failure_rate", c.failure_rate},
@@ -15061,12 +15104,13 @@ int main(int argc, char** argv) {
 	              {"protection_modes_modelled", fo.catalog.include_protection_logic}};
 	          out["data_quality"] = reliability_data_quality_json(r.data_quality);
 	          out["failure_mode_coverage"] = failure_mode_coverage_json(r.coverage);
-	          out["metrics"] = json{
-	            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
-	            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
-	            {"plc", na("Failure-mode FMEA reports frequency-weighted indices, not a sampled PLC.")},
-	            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
-	            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+		          out["metrics"] = json{
+		            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+		            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+		            {"plc", na("Failure-mode FMEA reports frequency-weighted indices, not a sampled PLC.")},
+		            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+		            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+		          out["nodal_eens_mwh_yr"] = r.nodal_eens_mwh_yr;
 	          json modes = json::array();
 	          for (const auto& c : r.contingencies) {
 	            modes.push_back(failure_mode_contingency_json(sys, c));

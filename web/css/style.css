@@ -503,7 +503,8 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   max-height: 200px;
   overflow: auto;
 }
-#resilienceResults.topo-table-wrap {
+#resilienceResults.topo-table-wrap,
+#reliabilityResults.topo-table-wrap {
   max-height: none;
   overflow: visible;
 }
@@ -661,6 +662,45 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 .results-summary .result-value { font-weight: 600; font-family: "IBM Plex Mono", monospace; }
 .result-converged { color: var(--green); }
 .result-failed { color: var(--red); }
+.reliability-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+.reliability-kpi-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.reliability-kpi-label,
+.reliability-kpi-unit {
+  color: var(--ink2);
+  font-size: 11px;
+}
+.reliability-kpi-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.reliability-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  gap: 10px;
+  margin: 8px 0;
+}
+.reliability-chart {
+  min-height: 340px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.reliability-chart-wide {
+  min-height: 380px;
+}
+@media (max-width: 900px) {
+  .reliability-dashboard-grid { grid-template-columns: 1fr; }
+}
 .carbon-chart {
   height: 240px;
   margin: 4px 0 10px;

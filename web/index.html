@@ -558,26 +558,26 @@
 	        <option value="comprehensive">综合混合示范</option>
 	      </select>
 	    </label>
-	    <label class="sub-label sub-checkbox" title="计入被动、按时间发生的物理失效">
-	      <input id="relFmPassive" type="checkbox" checked/>
-	      <span>被动</span>
-	    </label>
-	    <label class="sub-label sub-checkbox" title="计入按操作/保护/控制需求触发的主动失效">
-	      <input id="relFmActive" type="checkbox" checked/>
-	      <span>主动</span>
-	    </label>
-	    <label class="sub-label sub-checkbox" title="计入物理设备失效">
-	      <input id="relFmPhysical" type="checkbox" checked/>
-	      <span>物理</span>
-	    </label>
-	    <label class="sub-label sub-checkbox" title="计入网络/控制/通信/保护类失效">
-	      <input id="relFmCyber" type="checkbox" checked/>
-	      <span>网络/控制</span>
-	    </label>
-	    <label class="sub-label sub-checkbox" title="计入保护逻辑相关失效模式">
-	      <input id="relFmProtection" type="checkbox" checked/>
-	      <span>保护</span>
-	    </label>
+		    <label class="sub-label sub-checkbox" title="被动/时基：元件运行中按年故障率 λ 自然发生，例如线路永久故障、设备老化损坏">
+		      <input id="relFmPassive" type="checkbox" checked/>
+		      <span>时基失效</span>
+		    </label>
+		    <label class="sub-label sub-checkbox" title="主动/按需：只有在开关、保护、控制动作被请求时才可能失败，例如拒动、误动、失败合闸">
+		      <input id="relFmActive" type="checkbox" checked/>
+		      <span>按需动作失效</span>
+		    </label>
+		    <label class="sub-label sub-checkbox" title="物理设备：硬件、线路、电缆、变压器、功率器件等实体故障">
+		      <input id="relFmPhysical" type="checkbox" checked/>
+		      <span>设备物理</span>
+		    </label>
+		    <label class="sub-label sub-checkbox" title="网络/控制：控制器不可用、通信中断、测量异常、设定值冻结等 cyber/control 失效">
+		      <input id="relFmCyber" type="checkbox" checked/>
+		      <span>网络控制</span>
+		    </label>
+		    <label class="sub-label sub-checkbox" title="保护逻辑：继电保护拒动、误动、保护区扩大等影响故障隔离范围的模式">
+		      <input id="relFmProtection" type="checkbox" checked/>
+		      <span>保护逻辑</span>
+		    </label>
 	    <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
     <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
     <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>

@@ -4060,56 +4060,73 @@ const App = (() => {
 
   function reliabilityContingencyCompId(c, maps) {
     if (!c || !maps) return undefined;
+    const rawDirect = c.canvas_comp_id ?? c.comp_id;
+    if (rawDirect !== null && rawDirect !== undefined && rawDirect !== '') {
+      const direct = Number(rawDirect);
+      if (Number.isInteger(direct)) {
+        if (typeof Canvas === 'undefined' || !Canvas.getComponent || Canvas.getComponent(direct)) {
+          return direct;
+        }
+      }
+    }
     const bucketName = c.canvas_type;
     const key = Number(c.canvas_index);
     if (bucketName && maps[bucketName] && Number.isFinite(key) && maps[bucketName][key] != null) {
       return maps[bucketName][key];
     }
     const fallbackMap = {
-	      generator: 'gen',
-	      Generator: 'gen',
-	      ac_branch: 'branch',
-	      ACBranch: 'branch',
-	      dc_branch: 'dcBranch',
-	      DCBranch: 'dcBranch',
-	      vsc_converter: 'vsc',
-	      VSCConverter: 'vsc',
-	      static_generator: 'sgen',
-	      StaticGen: 'sgen',
-	      renewable_gen: 'renGen',
-	      RenewableGen: 'renGen',
-	      storage: 'storage',
-	      ACStorage: 'storage',
-	      transformer_2w: 'trafo',
-	      Transformer2W: 'trafo',
-	      transformer_3w: 'trafo3w',
-	      Transformer3W: 'trafo3w',
-	      dcdc_converter: 'dcdcConverter',
-	      DCDCConverter: 'dcdcConverter',
-	      dc_circuit_breaker: 'dcCb',
-	      DCCircuitBreaker: 'dcCb',
-	      dc_storage: 'dcStorage',
-	      DCStorage: 'dcStorage',
-	      dc_pv_array: 'dcPv',
-	      DCPVArray: 'dcPv',
-	      dc_static_generator: 'dcNativeSgen',
-	      DCStaticGen: 'dcNativeSgen',
-	      ac_switch: 'sw',
-	      ACSwitch: 'sw',
-	      ac_circuit_breaker: 'cb',
-	      ACCircuitBreaker: 'cb',
-	      ac_pv_system: 'pv',
-	      ACPVSystem: 'pv',
-	      dc_static_generator_ac: 'dcSgen',
-	      DCStaticGenAC: 'dcSgen',
-	    };
-	    const fallbackBucket = fallbackMap[c.component_type];
-	    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
-	      return maps[fallbackBucket][key];
-	    }
-	    const pos = Number(c.component_index ?? c.index);
+      generator: 'gen',
+      Generator: 'gen',
+      ac_branch: 'branch',
+      ACBranch: 'branch',
+      dc_branch: 'dcBranch',
+      DCBranch: 'dcBranch',
+      vsc_converter: 'vsc',
+      VSCConverter: 'vsc',
+      static_generator: 'sgen',
+      StaticGen: 'sgen',
+      renewable_gen: 'renGen',
+      RenewableGen: 'renGen',
+      storage: 'storage',
+      ACStorage: 'storage',
+      transformer_2w: 'trafo',
+      Transformer2W: 'trafo',
+      transformer_3w: 'trafo3w',
+      Transformer3W: 'trafo3w',
+      dcdc_converter: 'dcdcConverter',
+      DCDCConverter: 'dcdcConverter',
+      dc_circuit_breaker: 'dcCb',
+      DCCircuitBreaker: 'dcCb',
+      dc_storage: 'dcStorage',
+      DCStorage: 'dcStorage',
+      dc_pv_array: 'dcPv',
+      DCPVArray: 'dcPv',
+      ac_switch: 'sw',
+      ACSwitch: 'sw',
+      ac_circuit_breaker: 'cb',
+      ACCircuitBreaker: 'cb',
+      ac_pv_system: 'pv',
+      ACPVSystem: 'pv',
+      dc_static_generator_ac: 'dcSgen',
+      DCStaticGenAC: 'dcSgen',
+    };
+    const fallbackBucket = fallbackMap[c.component_type] || fallbackMap[c.canonical_component_type];
+    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
+      return maps[fallbackBucket][key];
+    }
+    const pos = Number(c.component_index ?? c.index);
+    if (fallbackBucket && maps.byPosition && maps.byPosition[fallbackBucket] &&
+        Number.isFinite(pos) && maps.byPosition[fallbackBucket][pos] != null) {
+      return maps.byPosition[fallbackBucket][pos];
+    }
     if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(pos) && maps[fallbackBucket][pos] != null) {
       return maps[fallbackBucket][pos];
+    }
+    const primaryBus = Number(c.primary_bus);
+    if (Number.isFinite(primaryBus) && primaryBus > 0) {
+      if (c.component_domain === 'DC' && maps.dc && maps.dc[primaryBus] != null) return maps.dc[primaryBus];
+      if (maps.ac && maps.ac[primaryBus] != null) return maps.ac[primaryBus];
+      if (maps.dc && maps.dc[primaryBus] != null) return maps.dc[primaryBus];
     }
     return undefined;
   }
@@ -7283,7 +7300,145 @@ const App = (() => {
 	             `<h5 style="margin:0 0 6px;">${escapeHtml(title)}</h5>${inner}</div>`;
 	    }
 
-	    function relScopeBadge(text, ok) {
+	    function relNumber(value) {
+	      if (value && typeof value === 'object' && value.available === false) return null;
+	      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+	      const n = Number(value);
+	      return Number.isFinite(n) ? n : null;
+	    }
+
+	    function renderReliabilityKpiTiles(data, method) {
+	      const items = [
+	        ['EENS', relMetricValue(data, 'eens_mwh_yr'), 'MWh/yr', 1],
+	        ['EDNS', relMetricValue(data, 'edns_mw'), 'MW', 3],
+	        ['LOLE', relMetricValue(data, 'lole_hr_yr'), 'h/yr', 2],
+	        ['SAIFI', relMetricValue(data, 'saifi'), 'int/cust/yr', 3],
+	        ['ASAI', relMetricValue(data, 'asai'), '', 6],
+	        ['PLC', relMetricValue(data, 'plc'), '%', 3, 100],
+	      ].filter(x => relNumber(x[1]) !== null);
+	      if (!items.length) return '';
+	      let html = '<div class="reliability-kpi-grid">';
+	      items.forEach(([label, value, unit, digits, scale]) => {
+	        html += `<div class="reliability-kpi-card">` +
+	                `<div class="reliability-kpi-label">${escapeHtml(label)}</div>` +
+	                `<div class="reliability-kpi-value">${relMetricHtml(value, digits, scale || 1)}</div>` +
+	                `<div class="reliability-kpi-unit">${escapeHtml(unit)}</div></div>`;
+	      });
+	      html += '</div>';
+	      return html;
+	    }
+
+	    function renderReliabilityDashboardShell(data, method) {
+	      const hasRisk = (Array.isArray(data.critical_components) && data.critical_components.length) ||
+	                      (Array.isArray(data.contingencies) && data.contingencies.length);
+	      const hasNodal = Array.isArray(data.nodal_eens_mwh_yr) && data.nodal_eens_mwh_yr.some(v => Number(v) > 0);
+	      const hasCoverage = !!data.failure_mode_coverage;
+	      const hasConv = (method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length;
+	      if (!hasRisk && !hasNodal && !hasCoverage && !hasConv) return '';
+	      let html = '<div class="reliability-dashboard-grid">';
+	      if (hasRisk) html += '<div id="relRiskChart" class="reliability-chart reliability-chart-wide"></div>';
+	      if (hasNodal) html += '<div id="relNodalChart" class="reliability-chart"></div>';
+	      if (hasCoverage) html += '<div id="relFailureTaxonomyChart" class="reliability-chart"></div>';
+	      if (hasConv) html += '<div id="relConvChart" class="reliability-chart"></div>';
+	      html += '</div>';
+	      return renderReliabilityPanel('可靠性风险仪表盘', html);
+	    }
+
+	    function relPlotLayout(title, xTitle, yTitle) {
+	      return {
+	        title: { text: title, font: { size: 13 } },
+	        margin: { l: 58, r: 18, t: 38, b: 70 },
+	        xaxis: { title: xTitle || '', tickangle: -30, automargin: true },
+	        yaxis: { title: yTitle || '', automargin: true },
+	        paper_bgcolor: 'rgba(0,0,0,0)',
+	        plot_bgcolor: 'rgba(0,0,0,0)',
+	        font: { color: '#dcdfe4' }
+	      };
+	    }
+
+	    function drawReliabilityDashboard(data, method) {
+	      if (typeof Plotly === 'undefined') return;
+	      const relMaps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	      const riskRows = Array.isArray(data.critical_components) && data.critical_components.length
+	        ? data.critical_components.slice(0, 12).map(r => ({
+	            name: r.display_name || r.component_name || r.mode_id || '—',
+	            y: Number(r.associated_eens_mwh_yr ?? r.eens_contribution ?? 0) || 0,
+	            pct: Number(r.loss_weighted_risk ?? r.importance ?? 0) || 0,
+	            compId: reliabilityContingencyCompId(r, relMaps),
+	          }))
+	        : (data.contingencies || []).slice(0, 12).map(r => ({
+	            name: r.display_name || r.component_name || r.mode_id || '—',
+	            y: Number(r.eens_contribution ?? 0) || 0,
+	            pct: 0,
+	            compId: reliabilityContingencyCompId(r, relMaps),
+	          }));
+	      riskRows.sort((a, b) => b.y - a.y || b.pct - a.pct);
+	      const riskChart = document.getElementById('relRiskChart');
+	      if (riskChart && riskRows.length) {
+	        Plotly.newPlot(riskChart, [{
+	          x: riskRows.map(r => r.name),
+	          y: riskRows.map(r => r.y),
+	          type: 'bar',
+	          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef') },
+	          customdata: riskRows.map(r => r.pct),
+	          hovertemplate: '%{x}<br>EENS=%{y:.3f} MWh/yr<br>风险占比=%{customdata:.3f}<extra></extra>'
+	        }], relPlotLayout('Top 风险元件/失效模式', '', 'MWh/yr'), { responsive: true });
+	        if (riskChart.on) {
+	          riskChart.on('plotly_click', ev => {
+	            const idx = Number(ev?.points?.[0]?.pointIndex);
+	            const compId = Number.isInteger(idx) ? riskRows[idx]?.compId : undefined;
+	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
+	              Canvas.panToComponent(compId);
+	            }
+	          });
+	        }
+	      }
+	      const nodal = (data.nodal_eens_mwh_yr || [])
+	        .map((v, i) => {
+	          const bus = i + 1;
+	          const compId = relMaps ? (relMaps.ac?.[bus] ?? relMaps.dc?.[bus]) : undefined;
+	          return { bus, value: Number(v) || 0, compId };
+	        })
+	        .filter(r => r.value > 0)
+	        .sort((a, b) => b.value - a.value)
+	        .slice(0, 20);
+	      const nodalChart = document.getElementById('relNodalChart');
+	      if (nodalChart && nodal.length) {
+	        Plotly.newPlot(nodalChart, [{
+	          x: nodal.map(r => `Bus ${r.bus}`),
+	          y: nodal.map(r => r.value),
+	          type: 'bar',
+	          marker: { color: '#ff9f43' },
+	          hovertemplate: '%{x}<br>节点EENS=%{y:.3f} MWh/yr<extra></extra>'
+	        }], relPlotLayout('负荷点影响', '', 'MWh/yr'), { responsive: true });
+	        if (nodalChart.on) {
+	          nodalChart.on('plotly_click', ev => {
+	            const idx = Number(ev?.points?.[0]?.pointIndex);
+	            const compId = Number.isInteger(idx) ? nodal[idx]?.compId : undefined;
+	            if (compId != null && typeof Canvas !== 'undefined' && Canvas.panToComponent) {
+	              Canvas.panToComponent(compId);
+	            }
+	          });
+	        }
+	      }
+	      const cov = data.failure_mode_coverage;
+	      if (document.getElementById('relFailureTaxonomyChart') && cov) {
+	        Plotly.newPlot('relFailureTaxonomyChart', [{
+	          labels: ['被动时基', '主动按需', '物理设备', '网络/控制', '保护逻辑', '不支持'],
+	          values: [cov.modes_passive, cov.modes_active, cov.modes_physical, cov.modes_cyber_control, cov.modes_protection_logic, cov.modes_unsupported],
+	          type: 'pie',
+	          hole: 0.45,
+	          marker: { colors: ['#61afef', '#f5c542', '#98c379', '#c678dd', '#e06c75', '#5c6370'] }
+	        }], { ...relPlotLayout('失效模式分类', '', ''), margin: { l: 10, r: 10, t: 38, b: 10 } }, { responsive: true });
+	      }
+	      if (document.getElementById('relConvChart') && Array.isArray(data.eens_history) && data.eens_history.length) {
+	        const x = data.eens_history.map((_, i) => i + 1);
+	        Plotly.newPlot('relConvChart', [{ x, y: data.eens_history, mode: 'lines', name: 'EENS', line: { color: '#61afef' } }],
+	          relPlotLayout('EENS 收敛过程', '样本批次', 'MWh/yr'), { responsive: true });
+	      }
+	    }
+
+      function relScopeBadge(text, ok) {
 	      const bg = (ok === true) ? '#2e7d32' : (ok === false) ? '#b03a3a' : '#4a4f59';
 	      return `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:11px;background:${bg};color:#fff;">${escapeHtml(text)}</span>`;
 	    }
@@ -7367,6 +7522,18 @@ const App = (() => {
 	      return renderReliabilityPanel('失效模式覆盖', html);
 	    }
 
+	    function renderFailureModeLegendHtml(data) {
+	      if (!data.failure_mode_coverage && !(data.method === 'failure_mode_fmea')) return '';
+	      const html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:12px;">' +
+	        '<div><b>时基失效</b><br><span style="color:var(--muted,#8a909c);">运行中按 λ 随时间发生，用于线路、设备、功率器件等被动故障。</span></div>' +
+	        '<div><b>按需动作失效</b><br><span style="color:var(--muted,#8a909c);">只有控制、开断、保护动作被请求时才暴露，例如拒动、失败合闸。</span></div>' +
+	        '<div><b>设备物理</b><br><span style="color:var(--muted,#8a909c);">硬件或一次设备故障，通常改变拓扑、容量或可用性。</span></div>' +
+	        '<div><b>网络控制</b><br><span style="color:var(--muted,#8a909c);">通信、测量、控制器或设定值异常，代表 cyber/control 层失效。</span></div>' +
+	        '<div><b>保护逻辑</b><br><span style="color:var(--muted,#8a909c);">保护拒动、误动或保护区扩大，影响隔离和故障传播。</span></div>' +
+	        '</div>';
+	      return renderReliabilityPanel('失效模式含义', html);
+	    }
+
 	    function renderReliabilityComponentModelHtml(data) {
 	      const dq = data.data_quality;
 	      const cov = data.failure_mode_coverage;
@@ -7392,15 +7559,13 @@ const App = (() => {
 	      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
 	      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
 	      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
+	      html += renderReliabilityKpiTiles(data, method);
+	      html += renderReliabilityDashboardShell(data, method);
 	      html += renderReliabilityComponentModelHtml(data);
 	      html += renderFailureModeCoverageHtml(data);
+	      html += renderFailureModeLegendHtml(data);
 	      html += renderRelScopeHtml(data);
 	      html += renderReliabilityMetricsHtml(data, method);
-
-	      // Convergence chart (NSQ/SEQ)
-	      if ((method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length) {
-        html += '<h4 style="margin:10px 0 4px;">EENS 收敛过程</h4><div id="relConvChart" style="height:240px;"></div>';
-      }
       // Critical components (NSQ/SEQ) — index is 0-based positional (generator
 	      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
 	      if (Array.isArray(data.critical_components) && data.critical_components.length) {
@@ -7437,15 +7602,12 @@ const App = (() => {
         });
         html += '</tbody></table>';
       }
-      document.getElementById('reliabilityResults').innerHTML = html;
-
-      if ((method === 'nsq' || method === 'seq') && typeof Plotly !== 'undefined' && Array.isArray(data.eens_history) && data.eens_history.length) {
-        const x = data.eens_history.map((_, i) => i + 1);
-        Plotly.newPlot('relConvChart', [{ x, y: data.eens_history, mode: 'lines', name: 'EENS', line: { color: '#61afef' } }],
-          { margin: { l: 55, r: 10, t: 10, b: 35 }, xaxis: { title: '样本批次' }, yaxis: { title: 'EENS (MWh/yr)' },
-            paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: '#dcdfe4' } }, { responsive: true });
-      }
-    }
+	      document.getElementById('reliabilityResults').innerHTML = html;
+	      drawReliabilityDashboard(data, method);
+	      if (typeof Canvas !== 'undefined' && Canvas.showReliabilityImpactResults) {
+	        Canvas.showReliabilityImpactResults(data);
+	      }
+	    }
 
     document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
