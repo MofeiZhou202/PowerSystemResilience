@@ -243,14 +243,17 @@ struct ReliabilityResult {
   std::vector<double> nodal_eens_mwh_yr;
 
   // Weak point detection
-  struct ComponentImportance {
-    int index;            // within-type index (0-based within component_type group)
-    bool is_generator;    // true = generator, false = other
-    double importance;    // P(component down | system failure)
-    std::string component_type;  // e.g. "Generator", "ACBranch", "VSCConverter"
-    std::string component_name;  // e.g. "Generator[2]", "ACBranch[5]"
-    size_t global_state_index{0}; // raw index into the flat component state vector
-  };
+	  struct ComponentImportance {
+	    int index;            // within-type index (0-based within component_type group)
+	    bool is_generator;    // true = generator, false = other
+	    double importance;    // primary displayed rank metric: loss-weighted risk share
+	    double conditional_down_given_loss{0.0};  // P(component down | system failure)
+	    double loss_weighted_risk{0.0};           // share of loss-state curtailed MW
+	    double associated_eens_mwh_yr{0.0};       // co-outage-associated EENS
+	    std::string component_type;  // e.g. "Generator", "ACBranch", "VSCConverter"
+	    std::string component_name;  // e.g. "Generator[2]", "ACBranch[5]"
+	    size_t global_state_index{0}; // raw index into the flat component state vector
+	  };
   std::vector<ComponentImportance> critical_components;
 
   // Per-year results (sequential MC only)

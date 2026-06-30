@@ -1189,9 +1189,11 @@ ReliabilityResult run_nonsequential_mc(
   double sum_dns = 0.0;
   double sum_dns_sq = 0.0;
   int loss_hours = 0;
-  std::vector<double> nodal_dns_sum(nb, 0.0);
-  std::vector<double> comp_fail_count(nc, 0.0);
-  int total_loss_samples = 0;
+	  std::vector<double> nodal_dns_sum(nb, 0.0);
+	  std::vector<double> comp_fail_count(nc, 0.0);
+	  std::vector<double> comp_loss_weighted_sum(nc, 0.0);
+	  double total_loss_weighted_sum = 0.0;
+	  int total_loss_samples = 0;
   
   // Compute total system load
   double total_load_mw = 0.0;
@@ -1264,20 +1266,26 @@ ReliabilityResult run_nonsequential_mc(
       result.annual_lole.push_back(eval_result.is_loss_state ? 8760.0 : 0.0);
     }
     
-    if (eval_result.is_loss_state) {
-      ++loss_hours;
-      ++total_loss_samples;
-      
-      // Accumulate nodal curtailment
-      for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
-        nodal_dns_sum[b] += eval_result.nodal_curtailment_mw[b];
-      }
-      
-      // Track component failures during loss
-      for (size_t c = 0; c < nc; ++c) {
-        if (state[c]) comp_fail_count[c] += 1.0;
-      }
-    }
+	    if (eval_result.is_loss_state) {
+	      ++loss_hours;
+	      ++total_loss_samples;
+	      total_loss_weighted_sum += dns;
+	      
+	      // Accumulate nodal curtailment
+	      for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
+	        nodal_dns_sum[b] += eval_result.nodal_curtailment_mw[b];
+	      }
+	      
+	      // Track component failures during loss.  The conditional count is a
+	      // diagnostic, while the MW-weighted sum is the risk ranking aligned
+	      // with FMEA EENS contribution.
+	      for (size_t c = 0; c < nc; ++c) {
+	        if (state[c]) {
+	          comp_fail_count[c] += 1.0;
+	          comp_loss_weighted_sum[c] += dns;
+	        }
+	      }
+	    }
     
     // Update expected indices
     double edns = sum_dns / iter;
@@ -1348,26 +1356,39 @@ ReliabilityResult run_nonsequential_mc(
     result.nodal_eens_mwh_yr[b] = (nodal_dns_sum[b] / n) * 8760.0;
   }
   
-  // Critical components
-  if (total_loss_samples > 0) {
-    for (size_t c = 0; c < nc; ++c) {
-      double importance = comp_fail_count[c] / total_loss_samples;
-      if (importance > 0.01) {
-        ReliabilityResult::ComponentImportance ci;
-        auto [idx, type_name] = decode_component(c, co);
-        ci.index               = idx;
-        ci.global_state_index  = c;
-        ci.component_type      = type_name;
-        ci.component_name      = resolve_component_name(idx, type_name, sys);
-        ci.is_generator        = (c < co.off_br);
-        ci.importance          = importance;
-        result.critical_components.push_back(ci);
-      }
-    }
-    // Sort by importance descending
-    std::sort(result.critical_components.begin(), result.critical_components.end(),
-              [](const auto& a, const auto& b) { return a.importance > b.importance; });
-  }
+	  // Critical components
+	  if (total_loss_samples > 0) {
+	    for (size_t c = 0; c < nc; ++c) {
+	      const double conditional = comp_fail_count[c] / total_loss_samples;
+	      const double loss_weighted =
+	          total_loss_weighted_sum > 0.0
+	              ? comp_loss_weighted_sum[c] / total_loss_weighted_sum
+	              : 0.0;
+	      if (loss_weighted > 0.01 || conditional > 0.01) {
+	        ReliabilityResult::ComponentImportance ci;
+	        auto [idx, type_name] = decode_component(c, co);
+	        ci.index               = idx;
+	        ci.global_state_index  = c;
+	        ci.component_type      = type_name;
+	        ci.component_name      = resolve_component_name(idx, type_name, sys);
+	        ci.is_generator        = (c < co.off_br);
+	        ci.importance          = loss_weighted;
+	        ci.loss_weighted_risk  = loss_weighted;
+	        ci.conditional_down_given_loss = conditional;
+	        ci.associated_eens_mwh_yr = (comp_loss_weighted_sum[c] / n) * 8760.0;
+	        result.critical_components.push_back(ci);
+	      }
+	    }
+	    // Sort by the risk metric, not by P(component down | loss).  This aligns
+	    // Monte Carlo "critical components" with FMEA's EENS-contribution ranking.
+	    std::sort(result.critical_components.begin(), result.critical_components.end(),
+	              [](const auto& a, const auto& b) {
+	                if (a.loss_weighted_risk != b.loss_weighted_risk) {
+	                  return a.loss_weighted_risk > b.loss_weighted_risk;
+	                }
+	                return a.conditional_down_given_loss > b.conditional_down_given_loss;
+	              });
+	  }
   
   spdlog::info("NSQ MC: Complete. EENS={:.2f} MWh/yr, LOLE={:.2f} hr/yr, PLC={:.4f}",
                result.eens_mwh_yr, result.lole_hr_yr, result.plc);
@@ -1592,9 +1613,11 @@ ReliabilityResult run_sequential_mc(
   opf_opt.compute_lmp = false;  // batch path — LMPs not needed, skip supporting LP
   
   // Accumulators
-  std::vector<double> nodal_eens_accum(nb, 0.0);
-  std::vector<double> comp_fail_during_loss(nc, 0.0);
-  int total_loss_hours = 0;
+	  std::vector<double> nodal_eens_accum(nb, 0.0);
+	  std::vector<double> comp_fail_during_loss(nc, 0.0);
+	  std::vector<double> comp_loss_during_loss(nc, 0.0);
+	  double total_loss_weighted_mwh = 0.0;
+	  int total_loss_hours = 0;
   
   spdlog::info("SEQ MC: {} total components, {} hours/year", nc, hours_per_year);
 
@@ -1689,21 +1712,26 @@ ReliabilityResult run_sequential_mc(
                            options.curtail_threshold_mw)
           : n0_for_hour(h);
       
-      if (eval_result.is_loss_state) {
-        year_eens += eval_result.curtailment_mw;
-        ++year_loss_hours;
-        year_loss_flags[h] = true;
-        
-        // Accumulate nodal EENS
-        for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
-          nodal_eens_accum[b] += eval_result.nodal_curtailment_mw[b];
-        }
-        
-        // Track component failures during loss
-        for (size_t c = 0; c < nc; ++c) {
-          if (state[c]) comp_fail_during_loss[c] += 1.0;
-        }
-        total_loss_hours++;
+	      if (eval_result.is_loss_state) {
+	        year_eens += eval_result.curtailment_mw;
+	        ++year_loss_hours;
+	        year_loss_flags[h] = true;
+	        total_loss_weighted_mwh += eval_result.curtailment_mw;
+	        
+	        // Accumulate nodal EENS
+	        for (size_t b = 0; b < nb && b < eval_result.nodal_curtailment_mw.size(); ++b) {
+	          nodal_eens_accum[b] += eval_result.nodal_curtailment_mw[b];
+	        }
+	        
+	        // Track component failures during loss.  Keep both the conditional
+	        // probability diagnostic and the loss-weighted risk ranking.
+	        for (size_t c = 0; c < nc; ++c) {
+	          if (state[c]) {
+	            comp_fail_during_loss[c] += 1.0;
+	            comp_loss_during_loss[c] += eval_result.curtailment_mw;
+	          }
+	        }
+	        total_loss_hours++;
       }
     }
     
@@ -1784,25 +1812,37 @@ ReliabilityResult run_sequential_mc(
     result.nodal_eens_mwh_yr[b] = nodal_eens_accum[b] / n_years;
   }
   
-  // Critical components
-  if (total_loss_hours > 0) {
-    for (size_t c = 0; c < nc; ++c) {
-      double importance = comp_fail_during_loss[c] / total_loss_hours;
-      if (importance > 0.01) {
-        ReliabilityResult::ComponentImportance ci;
-        auto [idx, type_name] = decode_component(c, co);
-        ci.index               = idx;
-        ci.global_state_index  = c;
-        ci.component_type      = type_name;
-        ci.component_name      = resolve_component_name(idx, type_name, sys);
-        ci.is_generator        = (c < co.off_br);
-        ci.importance          = importance;
-        result.critical_components.push_back(ci);
-      }
-    }
-    std::sort(result.critical_components.begin(), result.critical_components.end(),
-              [](const auto& a, const auto& b) { return a.importance > b.importance; });
-  }
+	  // Critical components
+	  if (total_loss_hours > 0) {
+	    for (size_t c = 0; c < nc; ++c) {
+	      const double conditional = comp_fail_during_loss[c] / total_loss_hours;
+	      const double loss_weighted =
+	          total_loss_weighted_mwh > 0.0
+	              ? comp_loss_during_loss[c] / total_loss_weighted_mwh
+	              : 0.0;
+	      if (loss_weighted > 0.01 || conditional > 0.01) {
+	        ReliabilityResult::ComponentImportance ci;
+	        auto [idx, type_name] = decode_component(c, co);
+	        ci.index               = idx;
+	        ci.global_state_index  = c;
+	        ci.component_type      = type_name;
+	        ci.component_name      = resolve_component_name(idx, type_name, sys);
+	        ci.is_generator        = (c < co.off_br);
+	        ci.importance          = loss_weighted;
+	        ci.loss_weighted_risk  = loss_weighted;
+	        ci.conditional_down_given_loss = conditional;
+	        ci.associated_eens_mwh_yr = comp_loss_during_loss[c] / n_years;
+	        result.critical_components.push_back(ci);
+	      }
+	    }
+	    std::sort(result.critical_components.begin(), result.critical_components.end(),
+	              [](const auto& a, const auto& b) {
+	                if (a.loss_weighted_risk != b.loss_weighted_risk) {
+	                  return a.loss_weighted_risk > b.loss_weighted_risk;
+	                }
+	                return a.conditional_down_given_loss > b.conditional_down_given_loss;
+	              });
+	  }
   
   spdlog::info("SEQ MC: Complete. EENS={:.2f} MWh/yr, LOLE={:.2f} hr/yr, LOLF={:.2f} occ/yr",
                result.eens_mwh_yr, result.lole_hr_yr, result.lolf_occ_yr);

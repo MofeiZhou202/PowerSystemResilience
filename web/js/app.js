@@ -4018,25 +4018,43 @@ const App = (() => {
 
   function reliabilityComponentTypeLabel(type) {
     const labels = {
-      generator: '发电机',
-      ac_branch: 'AC线路',
-      dc_branch: 'DC线路',
-      vsc_converter: 'VSC换流器',
-      static_generator: '静态电源',
-      renewable_gen: '新能源电源',
-      storage: '储能',
-      transformer_2w: '双绕组变压器',
-      transformer_3w: '三绕组变压器',
-      dcdc_converter: 'DC/DC变换器',
-      dc_circuit_breaker: 'DC断路器',
-      dc_storage: 'DC储能',
-      dc_pv_array: 'DC光伏',
-      dc_static_generator: 'DC静态电源',
-      ac_switch: 'AC开关',
-      ac_circuit_breaker: 'AC断路器',
-      ac_pv_system: 'AC光伏',
-      dc_static_generator_ac: 'DC分布式电源',
-    };
+	      generator: '发电机',
+	      Generator: '发电机',
+	      ac_branch: 'AC线路',
+	      ACBranch: 'AC线路',
+	      dc_branch: 'DC线路',
+	      DCBranch: 'DC线路',
+	      vsc_converter: 'VSC换流器',
+	      VSCConverter: 'VSC换流器',
+	      static_generator: '静态电源',
+	      StaticGen: '静态电源',
+	      renewable_gen: '新能源电源',
+	      RenewableGen: '新能源电源',
+	      storage: '储能',
+	      ACStorage: '储能',
+	      transformer_2w: '双绕组变压器',
+	      Transformer2W: '双绕组变压器',
+	      transformer_3w: '三绕组变压器',
+	      Transformer3W: '三绕组变压器',
+	      dcdc_converter: 'DC/DC变换器',
+	      DCDCConverter: 'DC/DC变换器',
+	      dc_circuit_breaker: 'DC断路器',
+	      DCCircuitBreaker: 'DC断路器',
+	      dc_storage: 'DC储能',
+	      DCStorage: 'DC储能',
+	      dc_pv_array: 'DC光伏',
+	      DCPVArray: 'DC光伏',
+	      dc_static_generator: 'DC静态电源',
+	      DCStaticGen: 'DC静态电源',
+	      ac_switch: 'AC开关',
+	      ACSwitch: 'AC开关',
+	      ac_circuit_breaker: 'AC断路器',
+	      ACCircuitBreaker: 'AC断路器',
+	      ac_pv_system: 'AC光伏',
+	      ACPVSystem: 'AC光伏',
+	      dc_static_generator_ac: 'DC分布式电源',
+	      DCStaticGenAC: 'DC分布式电源',
+	    };
     return labels[type] || componentTypeLabel(type) || type || '—';
   }
 
@@ -4048,30 +4066,48 @@ const App = (() => {
       return maps[bucketName][key];
     }
     const fallbackMap = {
-      generator: 'gen',
-      ac_branch: 'branch',
-      dc_branch: 'dcBranch',
-      vsc_converter: 'vsc',
-      static_generator: 'sgen',
-      renewable_gen: 'renGen',
-      storage: 'storage',
-      transformer_2w: 'trafo',
-      transformer_3w: 'trafo3w',
-      dcdc_converter: 'dcdcConverter',
-      dc_circuit_breaker: 'dcCb',
-      dc_storage: 'dcStorage',
-      dc_pv_array: 'dcPv',
-      dc_static_generator: 'dcNativeSgen',
-      ac_switch: 'sw',
-      ac_circuit_breaker: 'cb',
-      ac_pv_system: 'pv',
-      dc_static_generator_ac: 'dcSgen',
-    };
-    const fallbackBucket = fallbackMap[c.component_type];
-    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
-      return maps[fallbackBucket][key];
-    }
-    const pos = Number(c.component_index);
+	      generator: 'gen',
+	      Generator: 'gen',
+	      ac_branch: 'branch',
+	      ACBranch: 'branch',
+	      dc_branch: 'dcBranch',
+	      DCBranch: 'dcBranch',
+	      vsc_converter: 'vsc',
+	      VSCConverter: 'vsc',
+	      static_generator: 'sgen',
+	      StaticGen: 'sgen',
+	      renewable_gen: 'renGen',
+	      RenewableGen: 'renGen',
+	      storage: 'storage',
+	      ACStorage: 'storage',
+	      transformer_2w: 'trafo',
+	      Transformer2W: 'trafo',
+	      transformer_3w: 'trafo3w',
+	      Transformer3W: 'trafo3w',
+	      dcdc_converter: 'dcdcConverter',
+	      DCDCConverter: 'dcdcConverter',
+	      dc_circuit_breaker: 'dcCb',
+	      DCCircuitBreaker: 'dcCb',
+	      dc_storage: 'dcStorage',
+	      DCStorage: 'dcStorage',
+	      dc_pv_array: 'dcPv',
+	      DCPVArray: 'dcPv',
+	      dc_static_generator: 'dcNativeSgen',
+	      DCStaticGen: 'dcNativeSgen',
+	      ac_switch: 'sw',
+	      ACSwitch: 'sw',
+	      ac_circuit_breaker: 'cb',
+	      ACCircuitBreaker: 'cb',
+	      ac_pv_system: 'pv',
+	      ACPVSystem: 'pv',
+	      dc_static_generator_ac: 'dcSgen',
+	      DCStaticGenAC: 'dcSgen',
+	    };
+	    const fallbackBucket = fallbackMap[c.component_type];
+	    if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(key) && maps[fallbackBucket][key] != null) {
+	      return maps[fallbackBucket][key];
+	    }
+	    const pos = Number(c.component_index ?? c.index);
     if (fallbackBucket && maps[fallbackBucket] && Number.isFinite(pos) && maps[fallbackBucket][pos] != null) {
       return maps[fallbackBucket][pos];
     }
@@ -7179,44 +7215,86 @@ const App = (() => {
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
     });
 
-    // Bar 3: Reliability — run (NSQ/SEQ/FMEA/F&D) + export. Backend live.
-    async function runReliability() {
-      setStatus('可靠性分析中...', 'busy');
-      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-      const method = (document.getElementById('relMethod')?.value) || 'nsq';
-      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
-      const epMap = { nsq: 'run_reliability_nsq', seq: 'run_reliability_seq',
-                      fmea: 'run_reliability_fmea', fd: 'run_reliability_fd',
-                      three_stage: 'run_reliability_three_stage' };
-      const opts = {
-        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
-        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
-      };
-      if (method === 'nsq') opts.max_iterations = maxIter;
-      else if (method === 'seq') { opts.max_years = Math.max(50, Math.round(maxIter / 10)); opts.hours_per_year = 8736; }
-      else if (method === 'fmea') { opts.load_scale_factor = 1.0; }
-      const data = await apiPost('/api/session/' + epMap[method], opts);
-      if (data && !data.error) {
-        _lastReliabilityData = Object.assign({ _method: method }, data);
-        showReliabilityResults(data, method);
+	    // Bar 3: Reliability — run + export. Backend live.
+	    async function runReliability() {
+	      setStatus('可靠性分析中...', 'busy');
+	      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+	      const method = (document.getElementById('relMethod')?.value) || 'nsq';
+	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
+	      const opts = {
+	        method,
+	        physical_model: (document.getElementById('relPhysicalModel')?.value) || 'auto',
+	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
+	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
+	        load: { scale_factor: 1.0, hours_per_year: 8736 },
+	        monte_carlo: {
+	          max_iterations: method === 'seq' ? Math.max(50, Math.round(maxIter / 10)) : maxIter,
+	          cov_threshold: 0.05,
+	          compute_tail_risk: false,
+	        },
+	        restoration: {
+	          enable_switch_reconfiguration: true,
+	          max_switch_actions: 2,
+	        },
+	        failure_mode_scope: {
+	          include_passive: !!document.getElementById('relFmPassive')?.checked,
+	          include_active_on_demand: !!document.getElementById('relFmActive')?.checked,
+	          include_physical: !!document.getElementById('relFmPhysical')?.checked,
+	          include_cyber_control: !!document.getElementById('relFmCyber')?.checked,
+	          include_communication: !!document.getElementById('relFmCyber')?.checked,
+	          include_measurement: !!document.getElementById('relFmCyber')?.checked,
+	          include_protection_logic: !!document.getElementById('relFmProtection')?.checked,
+	          include_human_operation: true,
+	          include_scheduled: false,
+	          only_in_service: true,
+	        },
+	      };
+	      const data = await apiPost('/api/session/run_reliability', opts);
+	      if (data && !data.error) {
+	        _lastReliabilityData = Object.assign({ _method: method }, data);
+	        showReliabilityResults(data, method);
         switchTab('results');
         setStatus('可靠性分析完成');
       } else {
         setStatus('计算失败', 'error');
-      }
-    }
+	      }
+	    }
 
-    function relScopeBadge(text, ok) {
-      const bg = (ok === true) ? '#2e7d32' : (ok === false) ? '#b03a3a' : '#4a4f59';
-      return `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:11px;background:${bg};color:#fff;">${text}</span>`;
-    }
-    function renderRelScopeHtml(data) {
-      if (!data || !data.model_scope) return '';
-      let h = '<div style="border:1px solid var(--border,#3a3f4b);border-radius:6px;padding:8px 10px;margin-bottom:10px;">';
-      h += `<b>物理模型：</b>${relScopeBadge(data.model_scope)}`;
-      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
-      const v = data.validity || {};
-      const vkeys = Object.keys(v);
+	    function relMetricValue(data, key) {
+	      const metrics = data && data.metrics ? data.metrics : null;
+	      if (metrics && Object.prototype.hasOwnProperty.call(metrics, key)) return metrics[key];
+	      return data ? data[key] : undefined;
+	    }
+
+	    function relMetricHtml(value, digits = 2, scale = 1) {
+	      if (value && typeof value === 'object' && value.available === false) {
+	        return `<span title="${escapeHtml(value.reason || 'not available')}">—</span>`;
+	      }
+	      const raw = value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')
+	        ? value.value : value;
+	      if (raw === null || raw === undefined) return '—';
+	      const n = Number(raw);
+	      if (Number.isFinite(n)) return (n * scale).toFixed(digits);
+	      return escapeHtml(String(raw));
+	    }
+
+	    function renderReliabilityPanel(title, inner) {
+	      return `<div style="border:1px solid var(--border,#3a3f4b);border-radius:6px;padding:8px 10px;margin:10px 0;">` +
+	             `<h5 style="margin:0 0 6px;">${escapeHtml(title)}</h5>${inner}</div>`;
+	    }
+
+	    function relScopeBadge(text, ok) {
+	      const bg = (ok === true) ? '#2e7d32' : (ok === false) ? '#b03a3a' : '#4a4f59';
+	      return `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:10px;font-size:11px;background:${bg};color:#fff;">${escapeHtml(text)}</span>`;
+	    }
+	    function renderRelScopeHtml(data) {
+	      if (!data || !data.model_scope) return '';
+	      let h = '';
+	      h += `<b>有效分析：</b>${relScopeBadge(data.model_scope)}`;
+	      if (data.physical_model) h += ` <b>物理模型：</b>${relScopeBadge(data.physical_model)}`;
+	      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
+	      const v = data.validity || {};
+	      const vkeys = Object.keys(v);
       if (vkeys.length) {
         h += '<br><b>有效性：</b>';
         if ('dc_load_curtailment_included' in v) {
@@ -7228,91 +7306,129 @@ const App = (() => {
         }
       }
       if (v.generation_adequacy_only) h += '<br>' + relScopeBadge('仅发电充裕度 — 无网络/DC/用户指标', false);
-      const dq = data.data_quality;
-      if (dq) {
-        h += `<br><b>数据质量：</b>${dq.components_with_reliability_data}/${dq.components_total} 含用例数据，${dq.components_defaulted} 默认值`;
-        if (dq.missing_required_data && dq.missing_required_data.length) h += ' ' + relScopeBadge(dq.missing_required_data.length + ' 缺失', false);
-      }
-      if (data.model_limitations) h += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.model_limitations)}</div>`;
-      h += '</div>';
-      return h;
-    }
+	      const dq = data.data_quality;
+	      if (dq) {
+	        h += `<br><b>数据质量：</b>${dq.components_with_reliability_data}/${dq.components_total} 含用例数据，${dq.components_defaulted} 默认值`;
+	        if (dq.missing_required_data && dq.missing_required_data.length) h += ' ' + relScopeBadge(dq.missing_required_data.length + ' 缺失', false);
+	      }
+	      if (data.model_limitations) h += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.model_limitations)}</div>`;
+	      return renderReliabilityPanel('有效分析方法', h);
+	    }
 
-    function showReliabilityResults(data, method) {
-      document.getElementById('resultsEmpty').style.display = 'none';
-      document.getElementById('resultsContent').style.display = 'block';
-      setActiveResultGroup('reliability');
-      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
-      let kpis = [];
-      if (method === 'three_stage') {
-        kpis = [
-          ['SAIFI', nf(data.saifi, 4)],
-          ['SAIDI (min/yr)', nf(data.saidi_min, 2)],
-          ['EENS (kWh/yr)', nf(data.eens_kwh_yr, 1)],
-          ['EENS 成本', nf(data.eens_cost, 1)],
-          ['最差线路', data.worst_line ?? '—'],
-          ['精确求解', data.ok ? '✓ 是' : '✗ 回退/近似'],
-        ];
-      } else if (method === 'fd') {
-        kpis = [
-          ['LOLP (失负荷概率)', nf(data.lolp, 6)],
-          ['LOLE (h/yr)', nf(data.lole_fd, 2)],
-          ['LOLF (occ/yr)', nf(data.lolf_fd, 2)],
-          ['LOLD (h/occ)', nf(data.lold, 2)],
-        ];
-      } else {
-        kpis = [
-          ['EENS (MWh/yr)', nf(data.eens_mwh_yr, 1)],
-          ['EDNS (MW)', nf(data.edns_mw, 3)],
-          ['LOLE (h/yr)', nf(data.lole_hr_yr, 2)],
-          ['LOLF (occ/yr)', nf(data.lolf_occ_yr, 2)],
-          ['PLC (%)', nf((data.plc ?? 0) * 100, 3)],
-        ];
-        if (method === 'fmea') {
-          kpis.push(['SAIFI', nf(data.saifi, 4)], ['SAIDI', nf(data.saidi, 4)], ['CAIDI', nf(data.caidi, 4)], ['ASAI', nf(data.asai, 6)]);
-          if (data.n_contingencies != null) { const swo = (data.n_with_loss_switching_only ?? 0); kpis.push(['故障枚举数', `${data.n_contingencies} (${data.n_with_loss ?? '?'} 含失负荷${swo > 0 ? ('，' + swo + ' 仅隔离阶段') : ''})`]); }
-        } else {
-          kpis.push(['收敛', data.converged ? '✓ 是' : '✗ 否'], ['迭代/年数', data.iterations_used ?? '—'], ['最终 CoV', nf(data.final_cov, 4)]);
-        }
-      }
-      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${methodLabel}</div>`;
-      html += renderRelScopeHtml(data);
-      html += '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
-      for (const [k, v] of kpis) html += `<tr><td>${k}</td><td class="result-value">${v}</td></tr>`;
-      html += '</tbody></table>';
+	    function renderReliabilityMetricsHtml(data, method) {
+	      const rows = [
+	        ['EENS (MWh/yr)', 'eens_mwh_yr', 2],
+	        ['EENS (kWh/yr)', 'eens_kwh_yr', 1],
+	        ['EDNS (MW)', 'edns_mw', 3],
+	        ['LOLE (h/yr)', 'lole_hr_yr', 2],
+	        ['LOLF (occ/yr)', 'lolf_occ_yr', 3],
+	        ['LOLP', 'lolp', 6],
+	        ['LOLD (h/occ)', 'lold_hr', 2],
+	        ['PLC (%)', 'plc', 3, 100],
+	        ['SAIFI', 'saifi', 4],
+	        ['SAIDI (h/yr)', 'saidi', 4],
+	        ['SAIDI (min/yr)', 'saidi_min', 2],
+	        ['CAIDI', 'caidi', 4],
+	        ['ASAI', 'asai', 6],
+	        ['EENS 成本', 'eens_cost', 1],
+	      ];
+	      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
+	      rows.forEach(([label, key, digits, scale]) => {
+	        const value = relMetricValue(data, key);
+	        if (value === undefined && !(data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, key))) return;
+	        html += `<tr><td>${escapeHtml(label)}</td><td class="result-value">${relMetricHtml(value, digits, scale || 1)}</td></tr>`;
+	      });
+	      if (method === 'nsq' || method === 'seq') {
+	        html += `<tr><td>收敛</td><td>${data.converged ? '是' : '否'}</td></tr>`;
+	        html += `<tr><td>迭代/年数</td><td>${data.iterations_used ?? '—'}</td></tr>`;
+	        html += `<tr><td>最终 CoV</td><td>${relMetricHtml(data.final_cov, 4)}</td></tr>`;
+	      }
+	      if (data.n_contingencies != null) {
+	        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;
+	      }
+	      html += '</tbody></table>';
+	      return renderReliabilityPanel('指标', html);
+	    }
 
-      // Convergence chart (NSQ/SEQ)
-      if ((method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length) {
+	    function renderFailureModeCoverageHtml(data) {
+	      const cov = data.failure_mode_coverage;
+	      if (!cov) return '';
+	      const rows = [
+	        ['元件数', cov.components_total],
+	        ['模式总数', cov.modes_total],
+	        ['启用/停用/不支持', `${cov.modes_enabled}/${cov.modes_disabled}/${cov.modes_unsupported}`],
+	        ['被动/主动', `${cov.modes_passive}/${cov.modes_active}`],
+	        ['物理/网络控制/保护', `${cov.modes_physical}/${cov.modes_cyber_control}/${cov.modes_protection_logic}`],
+	        ['用例/模板/缺失数据', `${cov.modes_case_data}/${cov.modes_template_or_default}/${cov.modes_missing_data}`],
+	      ];
+	      let html = '<table><tbody>';
+	      rows.forEach(([k, v]) => { html += `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(v ?? '—'))}</td></tr>`; });
+	      html += '</tbody></table>';
+	      return renderReliabilityPanel('失效模式覆盖', html);
+	    }
+
+	    function renderReliabilityComponentModelHtml(data) {
+	      const dq = data.data_quality;
+	      const cov = data.failure_mode_coverage;
+	      let html = '';
+	      if (dq) {
+	        html += '<table><tbody>';
+	        html += `<tr><td>可靠性元件</td><td>${dq.components_total ?? 0}</td></tr>`;
+	        html += `<tr><td>用例含参</td><td>${dq.components_with_reliability_data ?? 0}</td></tr>`;
+	        html += `<tr><td>模板/默认补全</td><td>${dq.components_defaulted ?? 0}</td></tr>`;
+	        html += `<tr><td>缺失必需数据</td><td>${(dq.missing_required_data || []).length}</td></tr>`;
+	        html += '</tbody></table>';
+	      }
+	      if (cov) {
+	        html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">组件已展开为 ${cov.modes_total} 个失效模式，其中 ${cov.modes_active} 个主动模式、${cov.modes_passive} 个被动模式。</div>`;
+	      }
+	      return html ? renderReliabilityPanel('元件建模', html) : '';
+	    }
+
+	    function showReliabilityResults(data, method) {
+	      document.getElementById('resultsEmpty').style.display = 'none';
+	      document.getElementById('resultsContent').style.display = 'block';
+	      setActiveResultGroup('reliability');
+	      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+	      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
+	      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
+	      html += renderReliabilityComponentModelHtml(data);
+	      html += renderFailureModeCoverageHtml(data);
+	      html += renderRelScopeHtml(data);
+	      html += renderReliabilityMetricsHtml(data, method);
+
+	      // Convergence chart (NSQ/SEQ)
+	      if ((method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length) {
         html += '<h4 style="margin:10px 0 4px;">EENS 收敛过程</h4><div id="relConvChart" style="height:240px;"></div>';
       }
       // Critical components (NSQ/SEQ) — index is 0-based positional (generator
-      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
-      if (Array.isArray(data.critical_components) && data.critical_components.length) {
-        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (Top)</h4><table><thead><tr><th>#</th><th>类型</th><th>索引</th><th>重要度</th></tr></thead><tbody>';
-        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-        data.critical_components.slice(0, 15).forEach((c, i) => {
-          const compId = ccBusMap ? (c.is_generator ? (ccBusMap.gen ? ccBusMap.gen[c.index] : undefined)
-                                                     : (ccBusMap.branch ? ccBusMap.branch[c.index] : undefined)) : undefined;
-          const clk = compId != null
-            ? ` class="topo-clickable" data-comp-id="${compId}" onclick="Canvas.panToComponent(${compId})"` : '';
-          html += `<tr${clk}><td>${i + 1}</td><td>${c.is_generator ? '发电机' : '支路'}</td><td>${c.index ?? '—'}</td><td>${nf(c.importance, 4)}</td></tr>`;
-        });
-        html += '</tbody></table>';
-      }
-      // FMEA top contingencies
-      if (method === 'fmea' && Array.isArray(data.contingencies) && data.contingencies.length) {
-        html += '<h4 style="margin:10px 0 4px;">关键故障 (按 EENS 贡献)</h4><table><thead><tr><th>元件</th><th>类型</th><th>EENS贡献(MWh/yr)</th><th>切负荷(MW)</th></tr></thead><tbody>';
-        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-        data.contingencies.slice(0, 15).forEach(c => {
-          const compId = reliabilityContingencyCompId(c, relBusMap);
-          const clk = compClickAttr(compId);
-          const name = c.display_name || c.component_name || '—';
-          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
-          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw, 2)}</td></tr>`;
-        });
-        html += '</tbody></table>';
-      }
+	      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
+	      if (Array.isArray(data.critical_components) && data.critical_components.length) {
+	        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (按失负荷加权风险)</h4><table><thead><tr><th>#</th><th>元件</th><th>类型</th><th>风险占比</th><th>P(停运|失负荷)</th><th>关联EENS</th></tr></thead><tbody>';
+	        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	        data.critical_components.slice(0, 15).forEach((c, i) => {
+	          const compId = reliabilityContingencyCompId(c, ccBusMap);
+	          const clk = compClickAttr(compId);
+	          const name = c.component_name || `${c.component_type || ''}[${c.index ?? ''}]`;
+	          const type = reliabilityComponentTypeLabel(c.component_type);
+	          html += `<tr${clk}><td>${i + 1}</td><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.loss_weighted_risk ?? c.importance, 4)}</td><td>${nf(c.conditional_down_given_loss, 4)}</td><td>${nf(c.associated_eens_mwh_yr, 2)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	      }
+	      // FMEA top contingencies
+	      if ((method === 'fmea' || method === 'failure_mode_fmea') && Array.isArray(data.contingencies) && data.contingencies.length) {
+	        html += '<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 EENS 贡献)</h4><table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
+	        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	        data.contingencies.slice(0, 15).forEach(c => {
+	          const compId = reliabilityContingencyCompId(c, relBusMap);
+	          const clk = compClickAttr(compId);
+	          const name = c.display_name || c.mode_id || c.component_name || '—';
+	          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
+	          const supported = c.supported === false ? (c.unsupported_reason || '不支持') : (c.data_source || '已评估');
+	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(c.activation || '—')}</td><td>${escapeHtml(c.cause || '—')}</td><td>${escapeHtml(supported)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw ?? c.total_shed_mw, 2)}</td></tr>`;
+	        });
+	        html += '</tbody></table>';
+	      }
       // Three-stage restoration: per-fault load shed by stage
       if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
         html += '<h4 style="margin:10px 0 4px;">故障线路恢复 (按总切负荷 kW)</h4><table><thead><tr><th>线路</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th></tr></thead><tbody>';

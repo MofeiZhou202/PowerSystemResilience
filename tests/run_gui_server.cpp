@@ -53,6 +53,7 @@
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/reliability/failure_mode.hpp"
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
@@ -2063,6 +2064,114 @@ static json reliability_data_quality_json(
       {"components_with_reliability_data", dq.components_with_reliability_data},
       {"components_defaulted", dq.components_defaulted},
       {"missing_required_data", dq.missing_required_data}};
+}
+
+static json failure_mode_coverage_json(
+    const hacdcpf::analysis::FailureModeCoverage& cov) {
+  return json{
+      {"components_total", cov.components_total},
+      {"modes_total", cov.modes_total},
+      {"modes_enabled", cov.modes_enabled},
+      {"modes_disabled", cov.modes_disabled},
+      {"modes_unsupported", cov.modes_unsupported},
+      {"modes_case_data", cov.modes_case_data},
+      {"modes_template_or_default", cov.modes_template_or_default},
+      {"modes_missing_data", cov.modes_missing_data},
+      {"modes_active", cov.modes_active},
+      {"modes_passive", cov.modes_passive},
+      {"modes_physical", cov.modes_physical},
+      {"modes_cyber_control", cov.modes_cyber_control},
+      {"modes_protection_logic", cov.modes_protection_logic}};
+}
+
+static hacdcpf::analysis::FailureModeCatalogOptions parse_failure_mode_catalog_options(
+    const json& j) {
+  hacdcpf::analysis::FailureModeCatalogOptions opt;
+  const json scope = j.value("failure_mode_scope", json::object());
+  opt.include_passive = scope.value("include_passive", true);
+  opt.include_active_on_demand = scope.value("include_active_on_demand", true);
+  opt.include_physical = scope.value("include_physical", true);
+  opt.include_cyber_control = scope.value("include_cyber_control", true);
+  opt.include_communication = scope.value("include_communication", true);
+  opt.include_measurement = scope.value("include_measurement", true);
+  opt.include_protection_logic = scope.value("include_protection_logic", true);
+  opt.include_human_operation = scope.value("include_human_operation", true);
+  opt.include_scheduled = scope.value("include_scheduled", false);
+  opt.only_in_service = scope.value("only_in_service", true);
+  opt.default_isolation_hr = scope.value("default_isolation_hr", 0.5);
+  opt.default_switching_hr = scope.value("default_switching_hr", 0.5);
+  return opt;
+}
+
+static json failure_mode_ref_json(
+    const hacdcpf::analysis::FailureModeRef& ref) {
+  return json{
+      {"component_kind", hacdcpf::analysis::to_string(ref.component.kind)},
+      {"component_index", ref.component.element_index},
+      {"component_name", ref.component.element_name},
+      {"component_domain", ref.component.domain},
+      {"stable_id", ref.component.stable_id},
+      {"mode_id", ref.mode_id},
+      {"display_name", ref.display_name},
+      {"activation", hacdcpf::analysis::to_string(ref.activation)},
+      {"cause", hacdcpf::analysis::to_string(ref.cause)},
+      {"consequence", hacdcpf::analysis::to_string(ref.consequence)}};
+}
+
+static std::string fmea_type_from_failure_kind(
+    hacdcpf::analysis::ReliabilityComponentKind kind) {
+  using K = hacdcpf::analysis::ReliabilityComponentKind;
+  switch (kind) {
+    case K::ACGenerator: return "generator";
+    case K::ACBranch: return "ac_branch";
+    case K::ACStaticGenerator: return "static_generator";
+    case K::ACRenewableGenerator: return "renewable_gen";
+    case K::ACStorage: return "storage";
+    case K::ACPVSystem: return "ac_pv_system";
+    case K::ACTransformer2W: return "transformer_2w";
+    case K::ACTransformer3W: return "transformer_3w";
+    case K::ACSwitch: return "ac_switch";
+    case K::ACCircuitBreaker: return "ac_circuit_breaker";
+    case K::DCBranch: return "dc_branch";
+    case K::DCStaticGenerator: return "dc_static_generator";
+    case K::DCStaticGeneratorAC: return "dc_static_generator_ac";
+    case K::DCDCConverter: return "dcdc_converter";
+    case K::DCCircuitBreaker: return "dc_circuit_breaker";
+    case K::DCStorage: return "dc_storage";
+    case K::DCPVArray: return "dc_pv_array";
+    case K::VSCConverter: return "vsc_converter";
+    default: return hacdcpf::analysis::to_string(kind);
+  }
+}
+
+static json failure_mode_contingency_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::FailureModeContingency& c) {
+  const std::string component_type = fmea_type_from_failure_kind(c.ref.component.kind);
+  const auto meta = describe_fmea_component(
+      sys, component_type, c.ref.component.element_index);
+  json row = failure_mode_ref_json(c.ref);
+  row["component_type"] = component_type;
+  row["display_type"] = meta.display_type;
+  row["component_name"] = meta.display_name.empty()
+                              ? c.ref.component.element_name
+                              : meta.display_name;
+  row["canvas_type"] = meta.canvas_type;
+  row["canvas_index"] = meta.canvas_index;
+  row["primary_bus"] = meta.primary_bus;
+  row["secondary_bus"] = meta.secondary_bus;
+  row["mappable"] = meta.mappable;
+  row["data_source"] = c.data_source;
+  row["supported"] = c.supported;
+  row["unsupported_reason"] = c.unsupported_reason;
+  row["frequency_per_year"] = c.frequency_per_year;
+  row["duration_hr"] = c.duration_hr;
+  row["total_shed_mw"] = c.total_shed_mw;
+  row["shed_mw"] = c.total_shed_mw;
+  row["eens_contribution"] = c.eens_contribution;
+  row["lole_contribution"] = c.lole_contribution;
+  row["causes_loss"] = c.causes_loss;
+  return row;
 }
 
 std::string opf_default_name(const std::string& display_type, int index) {
@@ -13822,14 +13931,17 @@ int main(int argc, char** argv) {
         // Critical components (full metadata — Phase 0 task 2)
         json crit_arr = json::array();
         for (const auto& ci : result.critical_components) {
-          crit_arr.push_back({
-            {"index", ci.index},
-            {"is_generator", ci.is_generator},
-            {"importance", ci.importance},
-            {"component_type", ci.component_type},
-            {"component_name", ci.component_name},
-            {"global_state_index", ci.global_state_index}
-          });
+	          crit_arr.push_back({
+	            {"index", ci.index},
+	            {"is_generator", ci.is_generator},
+	            {"importance", ci.importance},
+	            {"loss_weighted_risk", ci.loss_weighted_risk},
+	            {"conditional_down_given_loss", ci.conditional_down_given_loss},
+	            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
+	            {"component_type", ci.component_type},
+	            {"component_name", ci.component_name},
+	            {"global_state_index", ci.global_state_index}
+	          });
         }
         out["critical_components"] = crit_arr;
         
@@ -13918,14 +14030,17 @@ int main(int argc, char** argv) {
         // Critical components (full metadata — Phase 0 task 2)
         json crit_arr = json::array();
         for (const auto& ci : result.critical_components) {
-          crit_arr.push_back({
-            {"index", ci.index},
-            {"is_generator", ci.is_generator},
-            {"importance", ci.importance},
-            {"component_type", ci.component_type},
-            {"component_name", ci.component_name},
-            {"global_state_index", ci.global_state_index}
-          });
+	          crit_arr.push_back({
+	            {"index", ci.index},
+	            {"is_generator", ci.is_generator},
+	            {"importance", ci.importance},
+	            {"loss_weighted_risk", ci.loss_weighted_risk},
+	            {"conditional_down_given_loss", ci.conditional_down_given_loss},
+	            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
+	            {"component_type", ci.component_type},
+	            {"component_name", ci.component_name},
+	            {"global_state_index", ci.global_state_index}
+	          });
         }
         out["critical_components"] = crit_arr;
         
@@ -14840,7 +14955,9 @@ int main(int argc, char** argv) {
             opts.max_iterations = mc.value("max_iterations", 5000);
             r = hacdcpf::analysis::run_nonsequential_mc(sys, opts);
           }
-          out["physical_model"] = "ac_only_dcopf";
+	          out["physical_model"] =
+	              r.model_scope == "hybrid-acdc-network-lp" ? "hybrid_network_lp"
+	                                                        : "ac_only_dcopf";
           out["model_scope"] = r.model_scope;
           out["model_limitations"] = r.model_limitations;
           out["validity"] = reliability_validity_json(r.validity);
@@ -14859,14 +14976,18 @@ int main(int argc, char** argv) {
           out["iterations_used"] = r.iterations_used;
           out["final_cov"] = r.final_cov;
           out["eens_history"] = r.eens_history;
-          json crit = json::array();
-          for (const auto& ci : r.critical_components)
-            crit.push_back({{"index", ci.index}, {"is_generator", ci.is_generator},
-                            {"importance", ci.importance}, {"component_type", ci.component_type},
-                            {"component_name", ci.component_name},
-                            {"global_state_index", ci.global_state_index}});
-          out["critical_components"] = crit;
-        } else if (method == "fmea") {
+	          json crit = json::array();
+	          for (const auto& ci : r.critical_components)
+	            crit.push_back({{"index", ci.index}, {"is_generator", ci.is_generator},
+	                            {"importance", ci.importance},
+	                            {"loss_weighted_risk", ci.loss_weighted_risk},
+	                            {"conditional_down_given_loss", ci.conditional_down_given_loss},
+	                            {"associated_eens_mwh_yr", ci.associated_eens_mwh_yr},
+	                            {"component_type", ci.component_type},
+	                            {"component_name", ci.component_name},
+	                            {"global_state_index", ci.global_state_index}});
+	          out["critical_components"] = crit;
+	        } else if (method == "fmea") {
           hacdcpf::analysis::FMEAOptions fo;
           fo.data_policy = pol;
           fo.load_scale_factor = load_scale;
@@ -14881,15 +15002,79 @@ int main(int argc, char** argv) {
           out["model_limitations"] = r.model_limitations;
           out["validity"] = fmea_validity_json(r.validity);
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
-          out["metrics"] = json{
-            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
-            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
-            {"plc", na("FMEA reports frequency-weighted indices, not a sampled PLC.")},
-            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
-            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
-          out["n_contingencies"] = r.contingencies.size();
-          out["n_with_loss"] = r.n_loss_contingencies;
-        } else if (method == "fd") {
+	          out["metrics"] = json{
+	            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+	            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+	            {"plc", na("FMEA reports frequency-weighted indices, not a sampled PLC.")},
+	            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+	            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+	          out["n_contingencies"] = r.contingencies.size();
+	          out["n_with_loss"] = r.n_loss_contingencies;
+	          json cont = json::array();
+	          for (const auto& c : r.contingencies) {
+	            const auto meta = describe_fmea_component(sys, c.component_type, c.component_index);
+	            cont.push_back({
+	                {"component_name", meta.display_name},
+	                {"component_type", c.component_type},
+	                {"display_name", meta.display_name},
+	                {"display_type", meta.display_type},
+	                {"component_index", c.component_index},
+	                {"canvas_type", meta.canvas_type},
+	                {"canvas_index", meta.canvas_index},
+	                {"primary_bus", meta.primary_bus},
+	                {"secondary_bus", meta.secondary_bus},
+	                {"mappable", meta.mappable},
+	                {"failure_rate", c.failure_rate},
+	                {"duration_hr", c.tau_sw_hr + c.tau_rep_hr},
+	                {"tau_sw_hr", c.tau_sw_hr},
+	                {"tau_rep_hr", c.tau_rep_hr},
+	                {"shed_sw_mw", c.shed_sw_mw},
+	                {"shed_rep_mw", c.shed_rep_mw},
+	                {"shed_mw", c.shed_rep_mw},
+	                {"eens_contribution", c.eens_contribution},
+	                {"lole_contribution", c.lole_contribution},
+	                {"causes_loss_sw", c.causes_loss_sw},
+	                {"causes_loss_rep", c.causes_loss_rep}});
+	          }
+	          out["contingencies"] = cont;
+	        } else if (method == "failure_mode_fmea") {
+	          hacdcpf::analysis::FailureModeFMEAOptions fo;
+	          fo.data_policy = pol;
+	          fo.catalog = parse_failure_mode_catalog_options(j);
+	          fo.load_scale_factor = load_scale;
+	          fo.curtail_threshold_mw = j.value("curtail_threshold_mw", 0.01);
+	          fo.verbose = j.value("verbose", false);
+	          auto r = hacdcpf::analysis::run_failure_mode_fmea(sys, fo);
+	          out["physical_model"] =
+	              r.model_scope.find("hybrid-acdc-network-lp") != std::string::npos
+	                  ? "failure_mode_hybrid_network_lp"
+	                  : "failure_mode_ac_only_dcopf";
+	          out["model_scope"] = r.model_scope;
+	          out["model_limitations"] = r.model_limitations;
+	          out["validity"] = json{
+	              {"failure_mode_catalog_modelled", true},
+	              {"active_on_demand_modes_modelled", fo.catalog.include_active_on_demand},
+	              {"passive_modes_modelled", fo.catalog.include_passive},
+	              {"physical_modes_modelled", fo.catalog.include_physical},
+	              {"cyber_control_modes_modelled", fo.catalog.include_cyber_control},
+	              {"communication_modes_modelled", fo.catalog.include_communication},
+	              {"protection_modes_modelled", fo.catalog.include_protection_logic}};
+	          out["data_quality"] = reliability_data_quality_json(r.data_quality);
+	          out["failure_mode_coverage"] = failure_mode_coverage_json(r.coverage);
+	          out["metrics"] = json{
+	            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
+	            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
+	            {"plc", na("Failure-mode FMEA reports frequency-weighted indices, not a sampled PLC.")},
+	            {"saifi", r.distribution_idx.saifi}, {"saidi", r.distribution_idx.saidi},
+	            {"caidi", r.distribution_idx.caidi}, {"asai", r.distribution_idx.asai}};
+	          json modes = json::array();
+	          for (const auto& c : r.contingencies) {
+	            modes.push_back(failure_mode_contingency_json(sys, c));
+	          }
+	          out["failure_modes"] = modes;
+	          out["contingencies"] = modes;
+	          out["n_contingencies"] = r.contingencies.size();
+	        } else if (method == "fd") {
           double total_load = 0.0;
           for (const auto& bus : sys.ac.buses) total_load += bus.pd_mw;
           for (const auto& ld : sys.ac.loads) if (ld.in_service) total_load += ld.p_mw * ld.scaling;
