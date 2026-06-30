@@ -788,6 +788,72 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int Per = static_cast<int>(erports.size());        // placeable router ports
   const int Rrouter = static_cast<int>(er_ports_of_router.size());  // active routers
 
+  // Mobile storage (§4.4) with an exogenous relocation schedule.  Each unit gets
+  // a signed power variable (+discharge) and an energy state in [soc_min,
+  // soc_max].  The connection bus per step follows departure_time/arrival_time/
+  // status: at `bus` before departure, disconnected (power forced 0) while in
+  // transit, at `target_bus` after arrival.  loc[t] holds the raw AC bus number
+  // for that step, or −1 when disconnected.
+  struct MobStor {
+    int orig_idx;
+    std::vector<int> loc;     // per-step raw AC bus number, or −1 (in transit)
+    double pmin, pmax, E, eta, soc_init, soc_min, soc_max;
+    // Co-optimised relocation (only used when use_coreloc): two candidate buses
+    // (origin / target), per-transit SOC drain, and minimum-stay length.
+    int busO{0}, busD{-1};    // origin bus, target bus (−1 = no relocation)
+    double drain{0.0};        // per-transit-step SOC depletion (per-unit)
+    int min_stay{1};          // minimum dwell once connected (steps)
+  };
+  std::vector<MobStor> mobstor;
+  const bool use_mobstor = opts.enable_mobile_storage && !sys.mobile_storage.empty();
+  const bool use_coreloc = use_mobstor && opts.mobile_storage_corelocate;
+  if (use_mobstor) {
+    for (int i = 0; i < static_cast<int>(sys.mobile_storage.size()); ++i) {
+      const auto& ms = sys.mobile_storage[static_cast<size_t>(i)];
+      if (!ms.in_service) continue;
+      MobStor d;
+      d.orig_idx = i;
+      const double pcap = (ms.pmax_mw > 0.0) ? ms.pmax_mw
+                                             : (ms.p_rated_mw > 0.0 ? ms.p_rated_mw : 0.0);
+      d.pmax = std::abs(pcap);
+      d.pmin = (ms.pmin_mw < 0.0) ? ms.pmin_mw : -d.pmax;
+      d.E = (ms.e_rated_mwh > 1e-9) ? ms.e_rated_mwh : 1.0;
+      d.eta = std::sqrt(std::max(1e-6, ms.eta_charge * ms.eta_discharge));
+      d.soc_init = ms.soc_init;
+      d.soc_min = ms.soc_min;
+      d.soc_max = ms.soc_max;
+      // Candidate buses + relocation parameters for the co-optimised model.
+      d.busO = ms.bus;
+      d.busD = (ms.target_bus != 0 && ms.target_bus != ms.bus) ? ms.target_bus : -1;
+      const double trip_drain = (ms.e_consumption_mwh_km > 0.0 && ms.max_travel_distance_km > 0.0)
+                                    ? (ms.e_consumption_mwh_km * ms.max_travel_distance_km) / d.E
+                                    : 0.0;
+      d.drain = std::min(std::max(0.0, trip_drain), 0.2);  // cap per-transit drain
+      d.min_stay = (ms.t_stay_min_hr > 0.0 && dt > 0.0)
+                       ? std::max(1, static_cast<int>(std::lround(ms.t_stay_min_hr / dt)))
+                       : 1;
+      d.loc.resize(static_cast<size_t>(T));
+      const double td = ms.departure_time, ta = ms.arrival_time;
+      const bool relocate = (td > 0.0 && ta > td && ms.target_bus != 0);
+      for (int t = 0; t < T; ++t) {
+        const double thr = static_cast<double>(t) * dt;
+        int loc_bus;
+        if (ms.status == MobileStorageStatus::InTransit && !relocate) {
+          loc_bus = -1;                       // mid-journey, no schedule
+        } else if (relocate) {
+          if (thr < td)      loc_bus = ms.bus;       // pre-departure
+          else if (thr < ta) loc_bus = -1;           // traveling
+          else               loc_bus = ms.target_bus; // arrived
+        } else {
+          loc_bus = ms.bus;                   // stationary
+        }
+        d.loc[static_cast<size_t>(t)] = loc_bus;
+      }
+      mobstor.push_back(std::move(d));
+    }
+  }
+  const int M = static_cast<int>(mobstor.size());  // active mobile-storage units
+
   // Variable layout:
   //   p_g[g,t]      dispatch for generator g at time t    (continuous) : G*T
   //   u_g[g,t]      commitment for generator g at time t  (binary)     : G*T
@@ -824,12 +890,20 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int nVppE = use_vpp ? V * T : 0;          // VPP aggregate energy state
   const int nErIn  = use_router ? Per * T : 0;    // router port inflow (bus→router)
   const int nErOut = use_router ? Per * T : 0;    // router port outflow (router→bus)
+  const int nMsP = (use_mobstor && !use_coreloc) ? M * T : 0;  // mobile power (exogenous)
+  const int nMsE = use_mobstor ? M * T : 0;       // mobile-storage energy state
+  const int nMsZ0 = use_coreloc ? M * T : 0;      // connected at origin (binary)
+  const int nMsZ1 = use_coreloc ? M * T : 0;      // connected at target (binary)
+  const int nMsW  = use_coreloc ? M * T : 0;      // in transit (binary)
+  const int nMsQ0 = use_coreloc ? M * T : 0;      // injection at origin bus
+  const int nMsQ1 = use_coreloc ? M * T : 0;      // injection at target bus
   const int nTheta = use_network_constraints ? static_cast<int>(net.non_slack.size()) * T : 0;
   const int nVsc = use_dc_network ? C * T : 0;
   const int nDcdc = use_dc_network ? Cd * T : 0;
   const int n = nPg + nUg + nSg + nEss + nSoc + nDcEss + nDcSoc + nRen + nExt
               + nDrUp + nDrDn + nCurt + nSgen + nMgEx + nMgO + nDcFlow + nGdeg
-              + nVpp + nVppE + nErIn + nErOut + nTheta + nVsc + nDcdc;
+              + nVpp + nVppE + nErIn + nErOut + nMsP + nMsE
+              + nMsZ0 + nMsZ1 + nMsW + nMsQ0 + nMsQ1 + nTheta + nVsc + nDcdc;
 
   auto pg_idx  = [&](int g, int t) { return g * T + t; };
   auto ug_idx  = [&](int g, int t) { return nPg + g * T + t; };
@@ -871,7 +945,21 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   auto erin_idx = [&](int p, int t) { return erin_offset + p * T + t; };
   const int erout_offset = erin_offset + nErIn;
   auto erout_idx = [&](int p, int t) { return erout_offset + p * T + t; };
-  const int theta_offset = erout_offset + nErOut;
+  const int msp_offset = erout_offset + nErOut;
+  auto msp_idx = [&](int b, int t) { return msp_offset + b * T + t; };
+  const int mse_offset = msp_offset + nMsP;
+  auto mse_idx = [&](int b, int t) { return mse_offset + b * T + t; };
+  const int msz0_offset = mse_offset + nMsE;
+  auto msz0_idx = [&](int b, int t) { return msz0_offset + b * T + t; };
+  const int msz1_offset = msz0_offset + nMsZ0;
+  auto msz1_idx = [&](int b, int t) { return msz1_offset + b * T + t; };
+  const int msw_offset = msz1_offset + nMsZ1;
+  auto msw_idx = [&](int b, int t) { return msw_offset + b * T + t; };
+  const int msq0_offset = msw_offset + nMsW;
+  auto msq0_idx = [&](int b, int t) { return msq0_offset + b * T + t; };
+  const int msq1_offset = msq0_offset + nMsQ0;
+  auto msq1_idx = [&](int b, int t) { return msq1_offset + b * T + t; };
+  const int theta_offset = msq1_offset + nMsQ1;
   auto theta_idx = [&](int b_pos, int t) {
     return theta_offset + b_pos * T + t;
   };
@@ -1190,6 +1278,57 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
+  // Mobile storage.  Exogenous-schedule mode: power in [pmin, pmax] when
+  // connected, pinned to 0 in transit, plus an energy state.  Co-optimised mode:
+  // connect/transit binaries (z0/z1/w), per-bus injections (q0/q1), and the
+  // energy state; the start (t=0) is anchored connected at the origin.
+  if (use_mobstor && !use_coreloc) {
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        const bool connected = d.loc[static_cast<size_t>(t)] >= 0;
+        m.linear_part.vars[static_cast<size_t>(msp_idx(b, t))] = {
+          VarType::Continuous, connected ? d.pmin : 0.0, connected ? d.pmax : 0.0,
+          "p_ms" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(mse_idx(b, t))] = {
+          VarType::Continuous, d.soc_min, d.soc_max,
+          "e_ms" + std::to_string(b) + "_t" + std::to_string(t)};
+      }
+    }
+  } else if (use_coreloc) {
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const bool has_dest = d.busD >= 0;
+      for (int t = 0; t < T; ++t) {
+        // z0: connected at origin (anchored to 1 at t=0).
+        m.linear_part.vars[static_cast<size_t>(msz0_idx(b, t))] = {
+          VarType::Binary, (t == 0) ? 1.0 : 0.0, 1.0,
+          "ms_z0_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msz0_idx(b, t));
+        // z1: connected at target (disabled when there is no valid destination).
+        m.linear_part.vars[static_cast<size_t>(msz1_idx(b, t))] = {
+          VarType::Binary, 0.0, has_dest && t > 0 ? 1.0 : 0.0,
+          "ms_z1_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msz1_idx(b, t));
+        // w: in transit (0 at t=0).
+        m.linear_part.vars[static_cast<size_t>(msw_idx(b, t))] = {
+          VarType::Binary, 0.0, (has_dest && t > 0) ? 1.0 : 0.0,
+          "ms_w_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.binary_idx.push_back(msw_idx(b, t));
+        // q0/q1: injection at origin / target (gated by z0/z1 below).
+        m.linear_part.vars[static_cast<size_t>(msq0_idx(b, t))] = {
+          VarType::Continuous, d.pmin, d.pmax,
+          "ms_q0_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(msq1_idx(b, t))] = {
+          VarType::Continuous, has_dest ? d.pmin : 0.0, has_dest ? d.pmax : 0.0,
+          "ms_q1_" + std::to_string(b) + "_t" + std::to_string(t)};
+        m.linear_part.vars[static_cast<size_t>(mse_idx(b, t))] = {
+          VarType::Continuous, d.soc_min, d.soc_max,
+          "e_ms" + std::to_string(b) + "_t" + std::to_string(t)};
+      }
+    }
+  }
+
   if (use_network_constraints) {
     for (int bp = 0; bp < static_cast<int>(net.non_slack.size()); ++bp) {
       for (int t = 0; t < T; ++t) {
@@ -1254,8 +1393,12 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   // Energy-router internal lossy conservation: one row per active router-step
   // (Σ_j η_j·p_in_j − Σ_j p_out_j = 0).
   const int n_eq_router = use_router ? Rrouter * T : 0;
+  // Mobile-storage SOC dynamics: one row per active unit-step.
+  const int n_eq_mobstor = use_mobstor ? M * T : 0;
+  // Co-optimised relocation state-exclusivity (z0 + z1 + w = 1): one per step.
+  const int n_eq_ms_excl = use_coreloc ? M * T : 0;
   const int m_eq = n_eq_balance + n_eq_dc_balance + n_eq_soc + n_eq_dr_shift
-                 + n_eq_vpp + n_eq_router;
+                 + n_eq_vpp + n_eq_router + n_eq_mobstor + n_eq_ms_excl;
 
   const int n_ineq_pmax = G * T;
   const int n_ineq_pmin = G * T;
@@ -1323,11 +1466,18 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
       if (vp.ramp_down_max_mw_min > 0.0) n_ineq_vpp_ramp += (T > 0 ? T - 1 : 0);
     }
   }
+  // Co-optimised mobile relocation: q-gating (4·M·T), transit-linking (2·M·T)
+  // and minimum-stay (2·M·T) rows.  All blocks are sized M·T (some rows are
+  // trivially 0 ≤ 0 at the horizon edges) so the counting stays regular.
+  const int n_ineq_ms_q = use_coreloc ? (4 * M * T) : 0;
+  const int n_ineq_ms_transit = use_coreloc ? (2 * M * T) : 0;
+  const int n_ineq_ms_minstay = use_coreloc ? (2 * M * T) : 0;
 
   const int m_ineq = n_ineq_pmax + n_ineq_pmin + n_ineq_ramp_up + n_ineq_ramp_dn
                    + n_ineq_startup + n_ineq_min_updn + n_ineq_line + n_ineq_dc_line
                    + n_ineq_reserve + n_ineq_mg + n_ineq_degr_abs + n_ineq_degr_cap
-                   + n_ineq_vpp_ramp;
+                   + n_ineq_vpp_ramp
+                   + n_ineq_ms_q + n_ineq_ms_transit + n_ineq_ms_minstay;
 
   // --- Compute total load per time step (AC + DC loads) ---
   // Match PF aggregation semantics:
@@ -1556,6 +1706,17 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         eq_trips.emplace_back(t, erout_idx(p, t), 1.0);
         eq_trips.emplace_back(t, erin_idx(p, t), -1.0);
       }
+      // Mobile storage injects (+discharge) into the system balance.  Exogenous
+      // mode uses the single power var when connected; co-optimised mode sums
+      // the two per-bus injections (the bus is irrelevant in copper-plate mode).
+      for (int b = 0; b < M; ++b) {
+        if (use_coreloc) {
+          eq_trips.emplace_back(t, msq0_idx(b, t), 1.0);
+          eq_trips.emplace_back(t, msq1_idx(b, t), 1.0);
+        } else if (mobstor[static_cast<size_t>(b)].loc[static_cast<size_t>(t)] >= 0) {
+          eq_trips.emplace_back(t, msp_idx(b, t), 1.0);
+        }
+      }
       beq[t] = total_load[static_cast<size_t>(t)];
     }
   } else {
@@ -1727,6 +1888,30 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
         }
 
         beq[row_bal] = bus_load[static_cast<size_t>(bus_load_idx(b, t))];
+      }
+    }
+    // Mobile storage injects (+discharge) at its bus each step.  Exogenous mode
+    // uses the scheduled bus loc[t]; co-optimised mode routes q0 to the origin
+    // bus and q1 to the target bus (each gated to 0 unless connected there).
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        if (use_coreloc) {
+          auto io = bus_idx.find(d.busO);
+          if (io != bus_idx.end())
+            eq_trips.emplace_back(t * net.n_bus + io->second, msq0_idx(b, t), 1.0);
+          if (d.busD >= 0) {
+            auto id = bus_idx.find(d.busD);
+            if (id != bus_idx.end())
+              eq_trips.emplace_back(t * net.n_bus + id->second, msq1_idx(b, t), 1.0);
+          }
+        } else {
+          const int raw = d.loc[static_cast<size_t>(t)];
+          if (raw < 0) continue;
+          auto it = bus_idx.find(raw);
+          if (it == bus_idx.end()) continue;
+          eq_trips.emplace_back(t * net.n_bus + it->second, msp_idx(b, t), 1.0);
+        }
       }
     }
   }
@@ -1954,6 +2139,53 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
           eq_trips.emplace_back(row_r, erout_idx(p, t), -1.0);
         }
         beq[row_r] = 0.0;
+      }
+    }
+  }
+
+  // Mobile-storage SOC dynamics (per-unit SOC, +discharge depletes energy):
+  //   e[b,0] + dt/(η·E)·p[b,0] = soc_init
+  //   e[b,t] − e[b,t-1] + dt/(η·E)·p[b,t] = 0   (t ≥ 1)
+  // While in transit p is pinned to 0, so the SOC simply holds.
+  if (use_mobstor) {
+    const int mobstor_eq_offset =
+        soc_eq_offset + n_eq_soc + n_eq_dr_shift + n_eq_vpp + n_eq_router;
+    for (int b = 0; b < M; ++b) {
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const double coeff_p = dt / (d.eta * d.E);
+      for (int t = 0; t < T; ++t) {
+        const int row_m = mobstor_eq_offset + b * T + t;
+        eq_trips.emplace_back(row_m, mse_idx(b, t), 1.0);
+        if (use_coreloc) {
+          // Power is the sum of the two per-bus injections; transit drains SOC.
+          eq_trips.emplace_back(row_m, msq0_idx(b, t), coeff_p);
+          eq_trips.emplace_back(row_m, msq1_idx(b, t), coeff_p);
+          if (d.drain > 0.0)
+            eq_trips.emplace_back(row_m, msw_idx(b, t), d.drain);
+        } else {
+          eq_trips.emplace_back(row_m, msp_idx(b, t), coeff_p);
+        }
+        if (t == 0) {
+          beq[row_m] = d.soc_init;
+        } else {
+          eq_trips.emplace_back(row_m, mse_idx(b, t - 1), -1.0);
+          beq[row_m] = 0.0;
+        }
+      }
+    }
+  }
+
+  // Co-optimised relocation: state-exclusivity z0 + z1 + w = 1 per unit-step.
+  if (use_coreloc) {
+    const int ms_excl_offset =
+        soc_eq_offset + n_eq_soc + n_eq_dr_shift + n_eq_vpp + n_eq_router + n_eq_mobstor;
+    for (int b = 0; b < M; ++b) {
+      for (int t = 0; t < T; ++t) {
+        const int row_e = ms_excl_offset + b * T + t;
+        eq_trips.emplace_back(row_e, msz0_idx(b, t), 1.0);
+        eq_trips.emplace_back(row_e, msz1_idx(b, t), 1.0);
+        eq_trips.emplace_back(row_e, msw_idx(b, t), 1.0);
+        beq[row_e] = 1.0;
       }
     }
   }
@@ -2218,6 +2450,67 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
           b_ineq[row] = lim;
           ++row;
         }
+      }
+    }
+  }
+
+  // Co-optimised mobile relocation inequalities (each block sized M·T so the
+  // count stays regular; horizon-edge rows are trivially 0 ≤ 0):
+  //   (1) q-gating  q ∈ [pmin·z, pmax·z]  — inject only at the connected bus
+  //   (2) transit-linking  leaving a bus forces a transit step
+  //   (3) minimum-stay  a fresh connection must persist for min_stay steps
+  if (use_coreloc) {
+    for (int b = 0; b < M; ++b) {           // (1) q-gating: 4 rows per (b,t)
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      for (int t = 0; t < T; ++t) {
+        ineq_trips.emplace_back(row, msq0_idx(b, t), 1.0);          // q0 ≤ pmax·z0
+        ineq_trips.emplace_back(row, msz0_idx(b, t), -d.pmax);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msz0_idx(b, t), d.pmin);       // pmin·z0 ≤ q0
+        ineq_trips.emplace_back(row, msq0_idx(b, t), -1.0);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msq1_idx(b, t), 1.0);          // q1 ≤ pmax·z1
+        ineq_trips.emplace_back(row, msz1_idx(b, t), -d.pmax);
+        b_ineq[row] = 0.0; ++row;
+        ineq_trips.emplace_back(row, msz1_idx(b, t), d.pmin);       // pmin·z1 ≤ q1
+        ineq_trips.emplace_back(row, msq1_idx(b, t), -1.0);
+        b_ineq[row] = 0.0; ++row;
+      }
+    }
+    for (int b = 0; b < M; ++b) {           // (2) transit-linking: 2 rows per (b,t)
+      for (int t = 0; t < T; ++t) {
+        if (t >= 1) {                       // z0[t-1] − z0[t] − w[t] ≤ 0
+          ineq_trips.emplace_back(row, msz0_idx(b, t - 1), 1.0);
+          ineq_trips.emplace_back(row, msz0_idx(b, t), -1.0);
+          ineq_trips.emplace_back(row, msw_idx(b, t), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+        if (t >= 1) {                       // z1[t-1] − z1[t] − w[t] ≤ 0
+          ineq_trips.emplace_back(row, msz1_idx(b, t - 1), 1.0);
+          ineq_trips.emplace_back(row, msz1_idx(b, t), -1.0);
+          ineq_trips.emplace_back(row, msw_idx(b, t), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+      }
+    }
+    for (int b = 0; b < M; ++b) {           // (3) min-stay: 2 rows per (b,t)
+      const auto& d = mobstor[static_cast<size_t>(b)];
+      const int H = d.min_stay;
+      for (int t = 0; t < T; ++t) {
+        if (H >= 2 && t >= 1 && t + H <= T) {     // origin window
+          ineq_trips.emplace_back(row, msz0_idx(b, t), static_cast<double>(H) - 1.0);
+          ineq_trips.emplace_back(row, msz0_idx(b, t - 1), -static_cast<double>(H));
+          for (int tau = t + 1; tau < t + H; ++tau)
+            ineq_trips.emplace_back(row, msz0_idx(b, tau), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
+        if (H >= 2 && d.busD >= 0 && t >= 1 && t + H <= T) {  // target window
+          ineq_trips.emplace_back(row, msz1_idx(b, t), static_cast<double>(H) - 1.0);
+          ineq_trips.emplace_back(row, msz1_idx(b, t - 1), -static_cast<double>(H));
+          for (int tau = t + 1; tau < t + H; ++tau)
+            ineq_trips.emplace_back(row, msz1_idx(b, tau), -1.0);
+        }
+        b_ineq[row] = 0.0; ++row;
       }
     }
   }

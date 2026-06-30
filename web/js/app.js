@@ -3404,6 +3404,8 @@ const App = (() => {
       enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
       enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
       enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+      enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+      mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
     });
 
     if (data) {
@@ -3473,6 +3475,8 @@ const App = (() => {
         enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
         enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
         enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+        enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+        mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
       });
     } finally {
       clearInterval(progressTimer);

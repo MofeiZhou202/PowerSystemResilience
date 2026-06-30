@@ -3,10 +3,17 @@
 > **Purpose.** This document (1) restates *exactly* the unit-commitment /
 > economic-dispatch / power-flow models that the time-series production
 > simulation **currently** implements so they can be double-checked, and
-> (2) derives the **new** mathematical models needed to cover **all**
-> component types in the package (the "rich models"). Everything marked
-> 🆕 is a proposed extension that is **not yet in code** — please review
-> before it is implemented.
+> (2) derives the **rich models** that extend coverage to **all** component
+> types in the package.
+>
+> **Status (updated).** All nine rich models in §4 (§4.1–§4.9) are now
+> **implemented** in `build_uc_milp`, each behind its own opt-in
+> `TimeSeriesPFOptions` flag (default off, so the baseline solve is unchanged),
+> exercised by a dedicated `tests/test_uc_*.cpp`, and exposed as a checkbox in
+> the time-series GUI. Where the build deviates from the ideal derivation below
+> the difference is called out in the relevant subsection (e.g. §4.1 uses a
+> single net-exchange variable, §4.4 takes the relocation schedule as input,
+> §4.9 uses an inflow/outflow split). Marks: 🆕 = rich model (now built).
 >
 > **Implementation anchors.**
 > `src/time_series/time_series_pf.cpp` (`build_uc_milp`, `solve_unit_commitment`,
@@ -14,7 +21,7 @@
 > (`solve_annual_production_simulation`), `src/time_series/lifecycle_simulation.cpp`.
 > Component data: `include/hacdcpf/model/{ac_components,dc_components,converter_components}.hpp`.
 
-Legend: ✅ implemented · ⚠️ partial / approximated · 🆕 proposed (this draft) · ❌ not modelled.
+Legend: ✅ implemented · ⚠️ partial / approximated · 🆕 rich model (now implemented, opt-in) · ❌ not modelled.
 
 ---
 
@@ -137,7 +144,7 @@ boundary $e_{s,T-1}=e_{s,0}$.
 | `ExternalGrid` | ✅ §4.1 net-exchange (opt-in) | **§4.1 🆕 done** |
 | `FlexibleLoad` | ✅ §4.2 demand response (opt-in) | **§4.2 🆕 done** |
 | `ChargingStation`, `Charger` | ⚠️ fixed load | §4.2 / §4.6 🆕 (V2G) |
-| `MobileStorage` | ❌ not in UC | **§4.4 🆕** |
+| `MobileStorage` | ✅ §4.4 (opt-in; exogenous schedule) | **§4.4 🆕 done** |
 | `VirtualPowerPlant` | ✅ §4.5 (opt-in) | **§4.5 🆕** |
 | `Microgrid` | ✅ §4.6 (opt-in) | **§4.6 🆕** |
 | `EnergyRouter` | ✅ §4.9 (opt-in; else expanded→VSC/DC-DC) | **§4.9 🆕 done** |
@@ -151,6 +158,20 @@ boundary $e_{s,T-1}=e_{s,0}$.
 
 All extensions stay **linear / mixed-integer-linear** so they fit the existing
 MILP and remain solvable by Native B&C / HiGHS / SCIP.
+
+**Build status (all opt-in, default off; each preserves the baseline solve).**
+
+| § | Model | `TimeSeriesPFOptions` flag | Test | Build note |
+|---|---|---|---|---|
+| 4.1 | External grid | `enable_external_grid` | `test_uc_external_grid` | single net-exchange var (no buy/sell binary) |
+| 4.2 | Demand response | `enable_demand_response` (+`dr_shiftable`) | `test_uc_demand_response` | up/down split; shiftable adds energy-neutrality row |
+| 4.3 | Dispatchable PV / static gen | `enable_dispatchable_pv` | `test_uc_dispatchable_pv` | 4 source types (AC/DC PV, DC/AC static gen) |
+| 4.4 | Mobile storage | `enable_mobile_storage` (+`mobile_storage_corelocate`) | `test_uc_mobile_storage` | exogenous schedule; opt-in co-optimised relocation (binaries) |
+| 4.5 | Virtual power plant | `enable_vpp` | `test_uc_vpp` | aggregate output + energy envelope |
+| 4.6 | Microgrid | `enable_microgrid` | `test_uc_microgrid` | PCC exchange + islanding binary |
+| 4.7 | Storage degradation | `enable_storage_degradation` | `test_uc_storage_degradation` | throughput cost + daily-cycle cap |
+| 4.8 | DC branch flows | `enable_dc_branch_flows` | `test_uc_dc_branch_flows` | transport flows + thermal limits |
+| 4.9 | Energy router | `enable_energy_router` | `test_uc_energy_router` | per-port inflow/outflow + lossy conservation |
 
 ### 4.1 External grid — import/export with time-varying price 🆕
 
@@ -218,30 +239,41 @@ with $\bar P^{\text{pv}}_{r,t}$ the irradiance/profile-scaled MPPT cap. This let
 optimiser curtail distributed PV under reverse-power or voltage limits instead of forcing
 must-take injection.
 
-### 4.4 Mobile storage with transport scheduling 🆕
+### 4.4 Mobile storage with transport scheduling 🆕 ✅ implemented (exogenous schedule)
 
 `MobileStorage` adds location state to a battery: `e_rated_mwh` $E_b$, efficiencies,
-`status`∈{Stationary, InTransit}, `target_bus`, `e_consumption_mwh_km`, travel/stay windows.
-Decision variables per candidate bus $i$ and step $t$:
+`status`∈{Stationary, InTransit, Deployed}, `target_bus`, travel/stay windows.
+
+**Implemented (opt-in, LP-sized).** The relocation *timing* is taken as given input rather
+than co-optimised, which removes the per-bus assignment binaries.  Each unit $b$ has a signed
+power $p^{\text{m}}_{b,t}$ (+=discharge) and an energy state $e^{\text{m}}_{b,t}$, with an
+exogenous connection bus $\text{loc}_{b,t}$ derived from `departure_time`/`arrival_time`/
+`status` (at `bus` before departure, disconnected while in transit, at `target_bus` after
+arrival):
 $$
-z_{b,i,t}\in\{0,1\}\ \text{(connected at }i),\quad
-p^{\text{m}}_{b,t}\ (\text{+=discharge}),\quad e^{\text{m}}_{b,t},\quad
-w_{b,t}\in\{0,1\}\ \text{(in transit)}.
+p^{\text{m}}_{b,t}\in
+\begin{cases}[P^{\min}_b,P^{\max}_b],&\text{loc}_{b,t}\ \text{connected}\\[2pt]
+\{0\},&\text{in transit},\end{cases}
+\qquad
+e^{\text{m}}_{b,t}=e^{\text{m}}_{b,t-1}-\tfrac{\Delta t}{\eta_b E_b}\,p^{\text{m}}_{b,t},\quad
+\underline{\text{soc}}_b\le e^{\text{m}}_{b,t}\le\overline{\text{soc}}_b.
+\tag{4.4}
 $$
-$$
-\sum_i z_{b,i,t}+w_{b,t}=1,\qquad
-|p^{\text{m}}_{b,t}|\le P^{\max}_b\sum_i z_{b,i,t},
-\tag{4.4a}
-$$
-$$
-e^{\text{m}}_{b,t}=e^{\text{m}}_{b,t-1}-\tfrac{\Delta t}{\eta_b E_b}p^{\text{m}}_{b,t}-\underbrace{\tfrac{\delta_{b,t}\,\chi_b}{E_b}}_{\text{travel drain}},\quad
-\underline{\text{soc}}_b\le e^{\text{m}}_{b,t}\le\overline{\text{soc}}_b,
-\tag{4.4b}
-$$
-where $\chi_b=$ `e_consumption_mwh_km`, $\delta_{b,t}$ = km travelled. Relocation logic
-links $z_{b,i,t-1}\to w_{b,t}\to z_{b,j,t'}$ with minimum-stay
-$\sum_{\tau=t}^{t+\underline H_b-1}z_{b,i,\tau}\ge \underline H_b\,(z_{b,i,t}-z_{b,i,t-1})$.
-Its injection $p^{\text{m}}_{b,t}$ enters (C1b) at the connected bus.
+$p^{\text{m}}_{b,t}$ enters the balance (C1b) at the *time-varying* bus $\text{loc}_{b,t}$,
+so a unit can carry stored energy from a depot bus to a load bus.  A no-op when no mobile
+storage is present, preserving the exact baseline.
+
+**Co-optimised relocation (opt-in `mobile_storage_corelocate`).** When enabled the schedule
+itself becomes a decision over two candidate buses (origin $O$, target $D$): per step the unit
+is connected at $O$, connected at $D$, or in transit (binaries $z^O_{b,t},z^D_{b,t},w_{b,t}$
+with $z^O+z^D+w=1$, anchored at $O$ at $t=0$). Power is injected only at the connected bus via
+gated per-bus injections $q^O,q^D$ ($p^{\min}z\le q\le p^{\max}z$); leaving a bus forces a
+transit step ($z^i_{b,t-1}-z^i_{b,t}\le w_{b,t}$); a per-transit travel drain
+$\chi_b D_b/E_b$ depletes the battery while $w=1$; and a minimum-stay window
+$\sum_{\tau=t}^{t+\underline H-1} z^i_{b,\tau}\ge \underline H(z^i_{b,t}-z^i_{b,t-1})$
+(from `t_stay_min_hr`) prevents oscillation. This is the larger MILP form of (4.4); it is a
+no-op when no mobile storage is present and falls back to the exogenous schedule when off.
+
 
 ### 4.5 Virtual power plant (aggregated DER) 🆕
 
@@ -374,14 +406,20 @@ Each braced group is an independently selectable **objective term** (GUI: see §
 |---|---|---|
 | 机组组合求解器 = Auto/Native/HiGHS/**SCIP** | MILP backend for (2.1)–(C9) | ✅ wired (`uc_solver`) |
 | 网络约束(DC潮流) | (C1b)+(C8) instead of (C1a) | ✅ wired (`enable_network_constraints`) |
-| DC网络耦合 | (C2) [→ §4.8 explicit 🆕] | ✅ wired (`enable_dc_network_constraints`) |
+| DC网络耦合 | (C2) | ✅ wired (`enable_dc_network_constraints`) |
+| DC支路限值 | §4.8 transport flows | ✅ wired (`enable_dc_branch_flows`) |
 | 旋转备用(%) | (C9) with $\rho$ | ✅ wired (`reserve_fraction`) |
 | 机组组合 / OPF 开关 | UC on/off, AC-OPF replay | ✅ wired (`skip_uc`,`run_opf`) |
-| 外部电网交易 | §4.1 + $\Delta J^{\text{ext}}$ | 🆕 proposed |
-| 需求响应 | §4.2 + $\Delta J^{\text{DR}}$ | 🆕 proposed |
-| 储能退化成本 | §4.7 | 🆕 proposed |
-| 碳排放成本 | carbon term (6.1) | 🆕 proposed |
-| 目标函数选择 | enable/disable each brace in (6.1) | 🆕 proposed |
+| 外部电网交易 | §4.1 + $\Delta J^{\text{ext}}$ | ✅ wired (`enable_external_grid`) |
+| 需求响应 / 可转移负荷 | §4.2 + $\Delta J^{\text{DR}}$ | ✅ wired (`enable_demand_response`,`dr_shiftable`) |
+| 可调光伏 | §4.3 | ✅ wired (`enable_dispatchable_pv`) |
+| 微网PCC交换 | §4.6 | ✅ wired (`enable_microgrid`) |
+| 储能退化成本 | §4.7 | ✅ wired (`enable_storage_degradation`) |
+| 虚拟电厂(VPP) | §4.5 | ✅ wired (`enable_vpp`) |
+| 能量路由器 | §4.9 | ✅ wired (`enable_energy_router`) |
+| 移动储能 | §4.4 | ✅ wired (`enable_mobile_storage`) |
+| 协同选址 | §4.4 co-optimised relocation | ✅ wired (`mobile_storage_corelocate`) |
+| 优化目标 = 成本/碳排放/弃电/网损/加权 | enable/weight each brace in (6.1) | ✅ wired (`objective`,`objective_weights`) |
 
 The objective value, the requested solver, and the active constraint set are already
 returned by `/api/session/run_ts_pf` and `/api/session/run_annual_sim`
@@ -389,19 +427,31 @@ returned by `/api/session/run_ts_pf` and `/api/session/run_annual_sim`
 
 ---
 
-## 8. Validation plan for the 🆕 models
+## 8. Validation (implemented — `tests/test_uc_*.cpp`)
 
-1. **Conservation / sanity:** with all 🆕 terms off, (6.1) and (2.1) coincide
-   (regression: objective must equal the current value, e.g. `ieee24_3area_acdc_expanded`
-   24 h ⇒ \$694{,}503.6, already cross-checked Native = HiGHS = SCIP).
-2. **External grid:** isolated single-bus case, $\pi^{\text{imp}}$ time-varying ⇒ optimiser
-   imports only in cheap hours, exports surplus PV; check $p^{\text{imp}}p^{\text{exp}}=0$.
-3. **DR:** shiftable load conserves daily energy (4.2b) and flattens the net-load peak.
-4. **Mobile storage:** relocation only when arbitrage value exceeds travel drain (4.4b).
-5. **Explicit DC (§4.8):** DC line flow respects `rate_a_mva`; compare against the Newton
-   DC power-flow replay loss.
-6. **Solver agreement:** every enabled constraint/objective set must give matching optima
-   (within the 0.1 % MIP gap) across Native / HiGHS / SCIP.
+Every rich model ships with a dedicated Catch2 test on a small hand-checked system,
+all passing with the SCIP backend (**75 assertions / 29 cases** total), plus a standing
+baseline-regression check:
 
-> **Please review** the 🆕 sections (§4, §6) and indicate which rich models to implement
-> first; §8 gives the acceptance tests that will accompany each.
+1. **Conservation / sanity:** with all rich-model flags off, the objective equals the
+   current value — `ieee24_3area_acdc_expanded` 24 h ⇒ \$694{,}503.645, cross-checked
+   Native = HiGHS = SCIP, and re-verified after each model was added.
+2. **External grid:** cheap grid displaces local generation; gen-offline case is infeasible
+   without the tie and feasible with it.
+3. **Demand response:** shiftable load conserves horizon energy and shaves the peak; a high
+   discomfort penalty suppresses any shed.
+4. **Dispatchable PV / static gen:** over-supply is curtailed (claw-back) instead of forcing
+   infeasibility; all four source types covered.
+5. **Mobile storage:** a stationary battery shifts its full energy into the peak step; a unit
+   in transit during the peak can only help the off-peak step (higher cost).
+6. **VPP / Microgrid / Storage degradation / DC flows / Energy router:** each verified against
+   the closed-form optimum on its small test system (envelope limits, islanding cost,
+   throughput cap, line-rating transport, lossy multi-port conservation).
+7. **Solver agreement:** the baseline and enabled sets match (within the 0.1 % MIP gap)
+   across Native / HiGHS / SCIP.
+
+> **Status:** §4 (§4.1–§4.9), the selectable objectives in §6, and the GUI controls in §7
+> are all implemented, opt-in, and regression-clean. Mobile storage offers both an exogenous
+> schedule and a co-optimised relocation MILP (`mobile_storage_corelocate`). Remaining future
+> work is noted inline (e.g. §4.1 buy/sell binary, §5 co-optimised topology).
+

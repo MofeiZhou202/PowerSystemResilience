@@ -11947,6 +11947,8 @@ int main(int argc, char** argv) {
         opts.enable_storage_degradation = j.value("enable_storage_degradation", false);
         opts.enable_vpp = j.value("enable_vpp", false);
         opts.enable_energy_router = j.value("enable_energy_router", false);
+        opts.enable_mobile_storage = j.value("enable_mobile_storage", false);
+        opts.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
         opts.keep_system_snapshots = true;
         opts.verbose = false;
         auto result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, opts);
@@ -13097,6 +13099,8 @@ int main(int argc, char** argv) {
         opts.ts_pf_options.enable_storage_degradation = j.value("enable_storage_degradation", false);
         opts.ts_pf_options.enable_vpp = j.value("enable_vpp", false);
         opts.ts_pf_options.enable_energy_router = j.value("enable_energy_router", false);
+        opts.ts_pf_options.enable_mobile_storage = j.value("enable_mobile_storage", false);
+        opts.ts_pf_options.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
         opts.skip_replay = j.value("skip_replay", false);
         opts.enforce_cyclic_soc = j.value("cyclic_soc", true);
         opts.pf_snapshot_interval = j.value("snapshot_interval", 24);

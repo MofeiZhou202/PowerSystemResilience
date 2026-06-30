@@ -204,6 +204,23 @@ struct TimeSeriesPFOptions {
   // the two-port VSC/DC-DC coupling.  Opt-in (default off); a no-op when no
   // router survives projection.
   bool enable_energy_router{false};
+  // Mobile storage with an exogenous relocation schedule.  Each in-service
+  // MobileStorage gets a signed power variable (+discharge) and an energy state
+  // bounded by [soc_min, soc_max].  Its connection bus follows a schedule
+  // derived from departure_time / arrival_time / status: it injects at its
+  // current bus before departure, is disconnected (power forced to 0) while in
+  // transit, and injects at target_bus after arrival.  The relocation timing is
+  // taken as given input rather than co-optimised (no per-bus assignment
+  // binaries), which keeps the model an LP-sized add-on.  Opt-in (default off).
+  bool enable_mobile_storage{false};
+  // Co-optimised mobile-storage relocation (requires enable_mobile_storage).
+  // Replaces the fixed schedule with a decision: per step the unit is connected
+  // at its origin bus, connected at target_bus, or in transit (binaries
+  // z0/z1/w with z0+z1+w=1).  Power is injected only at the connected bus
+  // (q0/q1 gated by z0/z1); leaving a bus forces a transit step; a per-transit
+  // travel drain depletes the battery; and a minimum-stay (from t_stay_min_hr)
+  // prevents oscillation.  A larger MILP (binaries per unit-step); default off.
+  bool mobile_storage_corelocate{false};
   bool keep_system_snapshots{false};
   bool verbose{false};
 };

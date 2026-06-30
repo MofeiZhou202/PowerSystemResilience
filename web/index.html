@@ -447,6 +447,14 @@
       <input id="tspfEnergyRouter" type="checkbox"/>
       <span>能量路由器</span>
     </label>
+    <label class="sub-label sub-checkbox" title="移动储能：每个 MobileStorage 有带电量状态(soc∈[soc_min,soc_max])的带符号功率(+放电)；连接母线按 departure_time/arrival_time/status 的外生调度变化(出发前在当前母线，在途时功率强制为0，到达后在 target_bus)。转场时刻为给定输入(无逐母线指派二进制)。默认关闭">
+      <input id="tspfMobileStorage" type="checkbox"/>
+      <span>移动储能</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="移动储能协同选址(需先启用移动储能)：将固定调度升级为决策——每步在 origin 母线/target 母线/在途之间选择(二进制 z0/z1/w，z0+z1+w=1)；功率仅在所连母线注入(q0/q1 受 z 门控)；离开母线须经一个在途步；在途按行驶里程消耗电量；最短停留(由 t_stay_min_hr)抑制频繁切换。更大的 MILP。默认关闭">
+      <input id="tspfMobileCorelocate" type="checkbox"/>
+      <span>协同选址</span>
+    </label>
     <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
       <select id="tspfObjective">
         <option value="cost" selected>最小成本</option>
