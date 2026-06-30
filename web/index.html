@@ -383,8 +383,112 @@
       <input id="tspfRunOPF" type="checkbox"/>
       <span>启用OPF优化调度</span>
     </label>
+    <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
+      <select id="tspfUcSolver">
+        <option value="auto" selected>Auto (优选)</option>
+        <option value="native">Native B&amp;C</option>
+        <option value="highs">HiGHS</option>
+        <option value="scip">SCIP</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用 AC 网络约束：在机组组合中加入 DC 潮流节点功率平衡与线路热稳定限值；关闭则使用单母线(铜板)平衡">
+      <input id="tspfNetworkConstraints" type="checkbox"/>
+      <span>网络约束(DC潮流)</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用 DC 网络耦合约束：在机组组合中显式建模 DC 母线节点平衡与 VSC/DCDC 换流器耦合（需同时启用网络约束）">
+      <input id="tspfDcNetworkConstraints" type="checkbox"/>
+      <span>DC网络耦合</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="显式 DC 支路潮流+热稳定限值：为每条 DC 支路增加传输潮流变量(|f|≤额定)，使功率可在 DC 母线间按线路容量传输（需启用 DC 网络耦合）">
+      <input id="tspfDcBranchFlows" type="checkbox"/>
+      <span>DC支路限值</span>
+    </label>
+    <label class="sub-label" title="旋转备用需求，占每步总负荷的百分比；0 表示不约束备用">旋转备用(%)
+      <input id="tspfReservePct" type="number" value="0" min="0" max="100" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="将外部电网(变电站联络线)建模为可调电源：按 电价曲线×cost_c1(或静态cost_c1) 计价的净交换(进口/出口)。默认关闭以保持现有算例不变">
+      <input id="tspfExternalGrid" type="checkbox"/>
+      <span>外部电网交易</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="需求响应：柔性负荷可在 flex_up/flex_down 范围内调整(上调/下调)，附带不适惩罚。默认关闭，柔性负荷保持基线">
+      <input id="tspfDemandResponse" type="checkbox"/>
+      <span>需求响应</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="可转移模式：柔性负荷在时段间转移(全周期净偏差为零，能量守恒)；不勾选则为可调整模式(允许净增减)">
+      <input id="tspfDrShiftable" type="checkbox"/>
+      <span>可转移负荷</span>
+    </label>
+    <label class="sub-label" title="需求响应不适惩罚权重 ($/MWh 偏差)；越大越抑制负荷调整">DR惩罚
+      <input id="tspfDrPenalty" type="number" value="20" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="可调分布式光伏/直流电源：将必发(must-take)的 AC光伏/DC光伏阵列/DC静态电源 变为可弃电变量，可在过电压/反向功率/过供条件下弃电。默认关闭，保持必发行为">
+      <input id="tspfDispatchablePv" type="checkbox"/>
+      <span>可调光伏</span>
+    </label>
+    <label class="sub-label" title="弃光惩罚权重 ($/MWh)；越大越避免弃电">弃光惩罚
+      <input id="tspfPvCurtailPenalty" type="number" value="50" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="微网 PCC 交换+孤岛：每个微网在 PCC 母线有净交换(出力/受电，受 p_export_max/p_import_max 限制)与并网指示(二进制)，可由优化器选择并网/孤岛(孤岛时交换为零)。默认关闭">
+      <input id="tspfMicrogrid" type="checkbox"/>
+      <span>微网PCC交换</span>
+    </label>
+    <label class="sub-label" title="孤岛惩罚权重 ($/步)；越大越倾向保持并网">孤岛惩罚
+      <input id="tspfMgIslandPenalty" type="number" value="100" min="0" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="储能循环老化成本：按 replacement_cost/(2·max_cycles·E) 对储能吞吐量($/MWh)计价以抑制无谓循环；daily_cycle_limit>0 时附加日循环上限。默认关闭">
+      <input id="tspfStorageDegradation" type="checkbox"/>
+      <span>储能退化成本</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="虚拟电厂(VPP)聚合调度：每个 VPP 在 PCC 母线注入净出力 p∈[pmin,pmax](受爬坡限制)，并维护聚合储能包络 e∈[0,E](E=e_storage_sum_mwh，半满起始)；E=0 时退化为纯发电型 VPP，仅受功率/爬坡约束。默认关闭">
+      <input id="tspfVpp" type="checkbox"/>
+      <span>虚拟电厂(VPP)</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="能量路由器(多端口变换器)：对仍保留显式端口(未在网络投影中展开为 VSC+DC/DC)的 EnergyRouter，按端口建立带损耗内部功率守恒(Σηj·p_in,j=Σp_out,j)的净注入，是两端口 VSC/DC-DC 耦合的 N 端口推广。默认关闭，端口被展开时为空操作">
+      <input id="tspfEnergyRouter" type="checkbox"/>
+      <span>能量路由器</span>
+    </label>
+    <label class="sub-label" title="优化目标：成本(燃料+启停)；碳排放(发电CO2)；最小弃电(最大化新能源消纳)；最小网损(发电量最小化代理)；加权(多目标)">优化目标
+      <select id="tspfObjective">
+        <option value="cost" selected>最小成本</option>
+        <option value="carbon">最小碳排放</option>
+        <option value="curtailment">最小弃电</option>
+        <option value="loss">最小网损(代理)</option>
+        <option value="weighted">加权多目标</option>
+      </select>
+    </label>
     <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
     <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <button id="btnToggleAnnualPanel" class="toolbar-btn" title="展开/收起年度并行生产模拟控制面板" aria-expanded="false">年度并行仿真 ▸</button>
+    <span id="annualSimControls" hidden>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="年度生产模拟：将一年按日并行分解求解（每日能量自平衡/周期SOC）">年度并行仿真</span>
+    <label class="sub-label" title="时间分辨率：6 小时(全年1460步) 或 1 小时(全年8760步)">分辨率
+      <select id="annResolution">
+        <option value="6h" selected>6 小时</option>
+        <option value="1h">1 小时</option>
+      </select>
+    </label>
+    <label class="sub-label" title="日内仿真模型：SCUC 安全约束机组组合；动态SCED 固定机组的安全约束经济调度；动态OPF 逐时段最优潮流">日内模型
+      <select id="annDailyMode">
+        <option value="scuc" selected>SCUC</option>
+        <option value="sced">动态 SCED</option>
+        <option value="dopf">动态 OPF</option>
+      </select>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。SCIP 求解器可完全并行；其他求解器为安全串行">
+      <input id="annParallel" type="checkbox" checked/>
+      <span>按日并行</span>
+    </label>
+    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+      <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="每日终端储能 SOC 等于初始 SOC，使各日相互独立（并行的前提）">
+      <input id="annCyclicSoc" type="checkbox" checked/>
+      <span>日内周期SOC</span>
+    </label>
+    <button id="btnRunAnnualSim" class="toolbar-btn run-btn" title="运行年度并行生产模拟（复用上方机组组合求解器/网络约束/旋转备用/优化目标设置）">运行年度仿真</button>
+    <button id="btnExportAnnualSim" class="toolbar-btn" title="将年度生产模拟结果导出为 JSON 文件">年度结果导出</button>
+    </span>
     <input type="file" id="fileImportIrradiance"  accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportPrice"       accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
     <input type="file" id="fileImportLoadProfile" accept=".json,.xlsx,.xls,.csv,.txt" style="display:none"/>
@@ -1100,6 +1204,13 @@
             <div id="tspfComponentCurveTargets" class="component-curve-targets"></div>
             <div id="tspfSelectedComponentCurve" class="tspf-chart selected-component-chart"></div>
           </div>
+        </div>
+        <div class="topo-section" id="annualSimResultsSection" style="display:none">
+          <h4>年度并行生产模拟结果</h4>
+          <div id="annualSimSummary" class="results-summary"></div>
+          <div id="annualSimTimelineChart" class="tspf-chart"></div>
+          <div id="annualSimMonthlyChart" class="tspf-chart"></div>
+          <div id="annualSimMonthlyTable"></div>
         </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="reliability">

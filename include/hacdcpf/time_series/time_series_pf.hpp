@@ -80,7 +80,18 @@ struct CrossValStep {
 // ═══════════════════════════════════════════════════════════════════════
 // Time-Series PF Options — controls for the entire UC→OPF→PF pipeline
 // ═══════════════════════════════════════════════════════════════════════
-enum class UCSolverChoice { Auto, Native, HiGHS, Gurobi };
+enum class UCSolverChoice { Auto, Native, HiGHS, SCIP, Gurobi };
+
+// Unit-commitment objective selection.  All terms are linear, so any choice
+// keeps the model a MILP solvable by every backend.  The reported $ cost is
+// always recomputed from the resulting dispatch, independent of this choice.
+//   * Cost          — minimize fuel + no-load + startup (classic, default).
+//   * Carbon        — minimize generator CO2 (emission_factor_tco2_mwh).
+//   * MinCurtailment— maximize renewable utilization (minimize curtailment).
+//   * MinLoss       — generation-minimization proxy (true loss needs the
+//                     explicit-DC model; the UC DC power flow is lossless).
+//   * Weighted      — w_cost·cost + w_carbon·CO2 + w_loss·gen − w_curtailment·RES.
+enum class UCObjective { Cost, Carbon, MinCurtailment, MinLoss, Weighted };
 
 struct TimeSeriesPFOptions {
   PowerFlowOptions pf_options;
@@ -113,6 +124,86 @@ struct TimeSeriesPFOptions {
   bool enforce_non_slack_strict_tracking{true};
   double non_slack_tracking_rel{0.02};
   double non_slack_tracking_abs_mw{1.0};
+  // Per-horizon cyclic storage boundary: when true, every storage unit's SOC at
+  // the final step is pinned to its initial SOC (e_{s,T-1}=soc_init).  This is
+  // what makes day-decomposed production simulation horizons independent and
+  // therefore safe to solve in parallel.  Implemented as a variable-bound tweak
+  // on the last SOC variable (no extra constraint rows).
+  bool enforce_terminal_soc_cyclic{false};
+  // Fix unit commitment: force every in-service generator committed (u_{g,t}=1)
+  // for the whole horizon, turning the SCUC MILP into a pure (security-constrained)
+  // economic-dispatch problem.  Used by the "dynamic SCED" daily mode.
+  bool fix_commitment{false};
+  // Optional explicit commitment to pin (non-owning; must outlive the solve).
+  // Indexed [g_active][t] over in-service generators in their natural order,
+  // matching UCSchedule::gen_commit.  When set, each u_{g,t} is fixed to the
+  // scheduled 0/1 value (overrides fix_commitment).  Lets dynamic SCED reuse a
+  // representative SCUC day's commitment instead of forcing every unit ON.
+  const std::vector<std::vector<int>>* fixed_commitment_schedule{nullptr};
+  // Unit-commitment objective selection + weights for the Weighted mode.
+  UCObjective objective_mode{UCObjective::Cost};
+  double w_cost{1.0};
+  double w_carbon{0.0};
+  double w_loss{0.0};
+  double w_curtailment{0.0};
+  // Model external grids (substation ties) as price-aware exchange sources in
+  // the UC: each in-service ExternalGrid gets a net-exchange variable
+  // (+import / −export) priced by price_profile_id × cost_c1 (or static cost_c1).
+  // Opt-in so existing cases (where generators cover all load) are unaffected.
+  bool enable_external_grid{false};
+  // Big-M cap on |external-grid exchange| (MW) when no explicit limit exists.
+  double external_grid_cap_mw{1.0e5};
+  // Demand response on FlexibleLoad: served demand may deviate from baseline by
+  // up to flex_up_mw / flex_down_mw (× availability) via non-negative up/down
+  // variables.  A discomfort penalty (w_demand_response · (up+down)) discourages
+  // unnecessary shifting.  When dr_shiftable is true the per-load net deviation
+  // over the horizon is constrained to zero (energy-conserving load shifting).
+  // Opt-in so existing cases are unaffected (flexible loads stay at baseline).
+  bool enable_demand_response{false};
+  bool dr_shiftable{false};
+  double w_demand_response{20.0};
+  // Dispatchable (curtailable) distributed PV / static generation.  The
+  // otherwise must-take sources (AC PVSystem, DC PVArrayDC, DC static gens) get
+  // a curtailment "claw-back" variable in [0, available], priced by
+  // pv_curtail_penalty, so the optimiser can curtail them under reverse-power /
+  // oversupply / voltage limits instead of forcing must-take injection.
+  // Opt-in; when off (default) the must-take behaviour is unchanged.
+  bool enable_dispatchable_pv{false};
+  double pv_curtail_penalty{50.0};
+  // Microgrid PCC exchange + islanding.  Each in-service Microgrid gets a net
+  // exchange variable at its PCC bus (+export / −import, bounded by
+  // p_export_max / p_import_max) and a binary connection indicator o (1 =
+  // grid-connected).  Exchange is gated to zero when islanded (o = 0); the
+  // optimiser may island, penalised by w_microgrid_island per islanded step.
+  // Microgrids without islanding_capability are pinned grid-connected.
+  bool enable_microgrid{false};
+  double w_microgrid_island{100.0};
+  // Explicit DC branch flows + thermal limits (requires enable_dc_network_
+  // constraints).  Adds a transport flow variable per DC branch bounded by its
+  // rating (|f| ≤ rate_a_mva), entering the DC nodal balance so power can move
+  // between DC buses up to the line capacity, replacing the per-bus self-balance
+  // of the flat-voltage model.  Converter losses stay proportional (via eta).
+  bool enable_dc_branch_flows{false};
+  // Storage cycle-aging (degradation) cost.  Charges throughput at
+  // replacement_cost / (2·max_cycles·E_rated) per MWh moved (via an absolute-
+  // value auxiliary on the storage power), discouraging unnecessary cycling.
+  // When a unit's daily_cycle_limit > 0, a hard cap Σ|p|·dt ≤ 2·limit·E is added
+  // over the horizon.  Covers AC and DC storage.  Opt-in (default off).
+  bool enable_storage_degradation{false};
+  // Virtual power plant aggregate dispatch.  Each in-service VirtualPowerPlant
+  // gets a net-output variable at its PCC bus bounded by [pmin_mw, pmax_mw] with
+  // ramp limits, plus an aggregate energy state bounded by e_storage_sum_mwh
+  // (the storage envelope) so its sustained output is energy-limited.  Opt-in.
+  bool enable_vpp{false};
+  // Energy router (multi-port converter) aggregate dispatch.  Each in-service
+  // EnergyRouter that still carries explicit ports (i.e. has not been pre-
+  // expanded into VSC + DC/DC converters during network projection) gets, per
+  // port, a signed net injection at the port's bus modelled as an inflow/outflow
+  // pair, coupled by a lossy internal power-conservation constraint
+  // (Σ_j η_j·p_in_j = Σ_j p_out_j).  This realises the N-port generalisation of
+  // the two-port VSC/DC-DC coupling.  Opt-in (default off); a no-op when no
+  // router survives projection.
+  bool enable_energy_router{false};
   bool keep_system_snapshots{false};
   bool verbose{false};
 };

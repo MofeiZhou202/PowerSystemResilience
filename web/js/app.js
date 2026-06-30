@@ -55,6 +55,7 @@ const App = (() => {
   let _lastPfData = null;
   let _lastOpfData = null;
   let _lastTspfData = null;
+  let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
   let _lastReliabilityData = null;
@@ -3375,11 +3376,34 @@ const App = (() => {
     const numSteps = (Number.isFinite(simHours) && simHours > 0) ? simHours : 24;
     const skipUC = document.getElementById('tspfSkipUC')?.checked ?? true;
     const runOPF = document.getElementById('tspfRunOPF')?.checked ?? false;
+    // Constraint set + MILP solver selection (时序生产模拟 controls).
+    const ucSolver = document.getElementById('tspfUcSolver')?.value || 'auto';
+    const enableNet = document.getElementById('tspfNetworkConstraints')?.checked ?? false;
+    const enableDcNet = document.getElementById('tspfDcNetworkConstraints')?.checked ?? false;
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    const reserveFraction = (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0;
 
     const data = await apiPost('/api/session/run_ts_pf', {
       num_steps: numSteps,
       skip_uc: skipUC,
       run_opf: runOPF,
+      uc_solver: ucSolver,
+      enable_network_constraints: enableNet,
+      enable_dc_network_constraints: enableDcNet,
+      reserve_fraction: reserveFraction,
+      objective: document.getElementById('tspfObjective')?.value || 'cost',
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+      dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+      dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+      enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+      pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+      enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+      microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+      enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+      enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+      enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+      enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
     });
 
     if (data) {
@@ -3390,6 +3414,163 @@ const App = (() => {
       switchTab('results');
     } else {
       setStatus('计算失败', 'error');
+    }
+  }
+
+  // ── Annual parallel production simulation (split year into independent days) ──
+  async function runAnnualSim() {
+    setStatus('年度并行生产模拟计算中...', 'busy');
+
+    if (!await syncToBackend(true)) {
+      setStatus('同步失败', 'error');
+      return;
+    }
+
+    const resolution = document.getElementById('annResolution')?.value || '6h';
+    const dailyMode = document.getElementById('annDailyMode')?.value || 'scuc';
+    const parallel = document.getElementById('annParallel')?.checked ?? true;
+    const threads = parseInt(document.getElementById('annThreads')?.value, 10);
+    const cyclicSoc = document.getElementById('annCyclicSoc')?.checked ?? true;
+    // Reuse the shared solver / constraint controls from the time-series toolbar.
+    const ucSolver = document.getElementById('tspfUcSolver')?.value || 'auto';
+    const enableNet = document.getElementById('tspfNetworkConstraints')?.checked ?? false;
+    const enableDcNet = document.getElementById('tspfDcNetworkConstraints')?.checked ?? false;
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    const reserveFraction = (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0;
+
+    // Lightweight progress indicator: tick elapsed time while the (blocking)
+    // annual solve runs, since the backend call is synchronous.
+    const t0 = performance.now();
+    let _tick = 0;
+    const progressTimer = setInterval(() => {
+      _tick += 1;
+      setStatus(`年度并行生产模拟计算中... ${_tick}s`, 'busy');
+    }, 1000);
+
+    let data;
+    try {
+      data = await apiPost('/api/session/run_annual_sim', {
+        resolution,
+        daily_mode: dailyMode,
+        parallel_daily: parallel,
+        parallel_threads: Number.isFinite(threads) ? threads : 0,
+        daily_cyclic_soc: cyclicSoc,
+        run_opf: dailyMode !== 'sced',
+        uc_solver: ucSolver,
+        enable_network_constraints: enableNet,
+        enable_dc_network_constraints: enableDcNet,
+        reserve_fraction: reserveFraction,
+        objective: document.getElementById('tspfObjective')?.value || 'cost',
+        enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+        enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+        dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+        dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+        enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+        pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+        enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+        microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+        enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+        enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+        enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+        enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+      });
+    } finally {
+      clearInterval(progressTimer);
+    }
+
+    if (data) {
+      data._wallSeconds = (performance.now() - t0) / 1000.0;
+      log(`年度仿真完成: ${data.solver_name || ''}, 目标=$${Number(data.total_cost || 0).toFixed(0)}, 用时${data._wallSeconds.toFixed(1)}s`, 'success');
+      setStatus('年度并行仿真完成');
+      _lastAnnualData = data;
+      showAnnualSimResults(data);
+      switchTab('results');
+    } else {
+      setStatus('计算失败', 'error');
+    }
+  }
+
+  function showAnnualSimResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('timeSeries');
+
+    const section = document.getElementById('annualSimResultsSection');
+    if (section) section.style.display = 'block';
+
+    const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
+    const feasClass = data.feasible ? 'result-converged' : 'result-failed';
+    const summary = document.getElementById('annualSimSummary');
+    if (summary) {
+      summary.innerHTML = `
+        <div class="result-item"><span class="result-label">求解模型/调度</span>
+          <span class="result-value">${data.solver_name || '—'}</span></div>
+        <div class="result-item"><span class="result-label">可行</span>
+          <span class="result-value ${feasClass}">${data.feasible ? '是' : '否'}</span></div>
+        <div class="result-item"><span class="result-label">时间步数</span>
+          <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
+        <div class="result-item"><span class="result-label">并行</span>
+          <span class="result-value">${data.parallel_daily ? '按日并行' : '串行'}</span></div>
+        <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
+          <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
+        <div class="result-item"><span class="result-label">墙钟用时</span>
+          <span class="result-value">${(data._wallSeconds || 0).toFixed(1)} s</span></div>
+        <div class="result-item"><span class="result-label">总发电量</span>
+          <span class="result-value">${fmt(data.total_gen_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">总负荷</span>
+          <span class="result-value">${fmt(data.total_load_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">新能源发电</span>
+          <span class="result-value">${fmt(data.total_renewable_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">弃电量</span>
+          <span class="result-value">${fmt(data.total_curtailment_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">网损</span>
+          <span class="result-value">${fmt(data.total_loss_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">失负荷(ENS)</span>
+          <span class="result-value">${fmt(data.total_ens_mwh)} MWh</span></div>
+        <div class="result-item"><span class="result-label">潮流收敛</span>
+          <span class="result-value">${data.num_pf_converged}/${data.num_steps}</span></div>
+      `;
+    }
+
+    const theme = {
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: '#abb2bf', size: 11 },
+      xaxis: { gridcolor: '#3e4451' }, yaxis: { gridcolor: '#3e4451' },
+      margin: { l: 55, r: 15, t: 40, b: 40 }, legend: { orientation: 'h', y: -0.25 },
+    };
+
+    // Annual timeline (gen / load / renewable / curtailment).
+    const tl = document.getElementById('annualSimTimelineChart');
+    if (tl && window.Plotly && Array.isArray(data.timeline_hours)) {
+      const h = data.timeline_hours;
+      Plotly.react(tl, [
+        { x: h, y: data.timeline_load || [], name: '负荷', type: 'scatter', mode: 'lines', line: { color: '#e74c3c' } },
+        { x: h, y: data.timeline_gen || [], name: '发电', type: 'scatter', mode: 'lines', line: { color: '#0b6e4f' } },
+        { x: h, y: data.timeline_ren || [], name: '新能源', type: 'scatter', mode: 'lines', line: { color: '#2980b9' } },
+        { x: h, y: data.timeline_curt || [], name: '弃电', type: 'scatter', mode: 'lines', line: { color: '#f39c12' } },
+      ], Object.assign({ title: '全年逐时段功率 (MW)', xaxis: Object.assign({ title: '小时' }, theme.xaxis) }, theme), { responsive: true, displayModeBar: false });
+    }
+
+    // Monthly cost + energy bars.
+    const ms = data.monthly_summaries || [];
+    const mc = document.getElementById('annualSimMonthlyChart');
+    if (mc && window.Plotly && ms.length) {
+      const months = ms.map((m, i) => ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`);
+      Plotly.react(mc, [
+        { x: months, y: ms.map(m => m.total_cost), name: '月成本($)', type: 'bar', marker: { color: '#8e44ad' } },
+      ], Object.assign({ title: '月度成本', xaxis: theme.xaxis, yaxis: Object.assign({ title: '$' }, theme.yaxis) }, theme), { responsive: true });
+    }
+
+    // Monthly table.
+    const mt = document.getElementById('annualSimMonthlyTable');
+    if (mt && ms.length) {
+      let html = '<table class="tbl"><thead><tr><th>月</th><th>发电(MWh)</th><th>负荷(MWh)</th><th>新能源(MWh)</th><th>弃电(MWh)</th><th>网损(MWh)</th><th>成本($)</th><th>PF收敛</th></tr></thead><tbody>';
+      ms.forEach((m, i) => {
+        const mn = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'][m.block_id != null ? m.block_id : i] || `块${i}`;
+        html += `<tr><td>${mn}</td><td>${fmt(m.total_gen_mwh)}</td><td>${fmt(m.total_load_mwh)}</td><td>${fmt(m.total_renewable_mwh)}</td><td>${fmt(m.total_curtailment_mwh)}</td><td>${fmt(m.total_loss_mwh)}</td><td>${fmt(m.total_cost)}</td><td>${m.num_pf_converged}/${m.num_steps}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      mt.innerHTML = html;
     }
   }
 
@@ -3406,6 +3587,18 @@ const App = (() => {
     const summary = document.getElementById('tspfSummary');
     const ucStatus = data.uc_feasible === false ? '失败' : (data.uc_feasible === true ? '成功' : '—');
     const ucClass = data.uc_feasible === false ? 'result-failed' : 'result-converged';
+    // Active-constraint set summary (from the backend echo).
+    const c = data.constraints || {};
+    const cParts = [];
+    if (c.unit_commitment) cParts.push('机组组合');
+    if (c.economic_dispatch_opf) cParts.push('经济调度OPF');
+    cParts.push(c.network_constraints ? '网络约束(DC潮流)' : '单母线平衡');
+    if (c.dc_network_constraints) cParts.push('DC网络耦合');
+    if (c.reserve_fraction > 0) cParts.push('旋转备用' + (c.reserve_fraction * 100).toFixed(0) + '%');
+    const constraintSummary = cParts.join('、') || '—';
+    const objLabel = data.objective_label || '目标函数值';
+    const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
+    const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -3416,8 +3609,12 @@ const App = (() => {
         <span class="result-value">${data.num_opf_converged}/${data.num_steps}</span></div>
       <div class="result-item"><span class="result-label">机组组合</span>
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
-      <div class="result-item"><span class="result-label">总发电成本</span>
-        <span class="result-value">$${(data.total_generation_cost || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">求解器</span>
+        <span class="result-value">${solverTag || '—'}</span></div>
+      <div class="result-item"><span class="result-label">${objLabel}</span>
+        <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
+      <div class="result-item"><span class="result-label">约束集</span>
+        <span class="result-value" style="font-size:0.82em;">${constraintSummary}</span></div>
       <div class="result-item"><span class="result-label">总网损</span>
         <span class="result-value">${((data.losses_mw || []).reduce((a, b) => a + b, 0) * (data.step_duration_hr || 1)).toFixed(2)} MWh</span></div>
     `;
@@ -6721,6 +6918,20 @@ const App = (() => {
 
     // Bar 3: time-series — run directly with inline params (skip UC / OPF).
     document.getElementById('btnRunTimeSeriesPF')?.addEventListener('click', runTimeSeriesPF);
+    document.getElementById('btnToggleAnnualPanel')?.addEventListener('click', () => {
+      const panel = document.getElementById('annualSimControls');
+      const btn = document.getElementById('btnToggleAnnualPanel');
+      if (!panel || !btn) return;
+      const show = panel.hasAttribute('hidden');
+      if (show) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+      btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+      btn.textContent = show ? '年度并行仿真 ▾' : '年度并行仿真 ▸';
+    });
+    document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
+    document.getElementById('btnExportAnnualSim')?.addEventListener('click', () => {
+      if (!_lastAnnualData) { log('请先运行年度并行生产模拟', 'warn'); return; }
+      downloadJsonFile(`annual_production_sim_${tsTagForFilename()}.json`, _lastAnnualData);
+    });
     document.getElementById('btnDynamicCarbonFlow')?.addEventListener('click', runDynamicCarbonFlow);
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.

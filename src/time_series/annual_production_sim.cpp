@@ -1,11 +1,16 @@
 #include "hacdcpf/time_series/annual_production_sim.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <future>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
+
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -103,6 +108,32 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
           sub_result.opf_results[static_cast<size_t>(t)].converged;
       sr.opf_cost =
           sub_result.opf_results[static_cast<size_t>(t)].objective;
+    } else {
+      // No OPF for this step (e.g. dynamic SCED / UC-only): derive the step cost
+      // from the UC generator dispatch using each unit's cost curve so the
+      // production-cost objective is still populated.
+      double cost = 0.0;
+      int gpos = 0;
+      for (const auto& gg : sys.ac.generators) {
+        if (!gg.in_service) continue;
+        if (gpos < static_cast<int>(sub_result.uc_schedule.gen_dispatch.size()) &&
+            t < static_cast<int>(
+                    sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)].size())) {
+          const double p =
+              sub_result.uc_schedule.gen_dispatch[static_cast<size_t>(gpos)][static_cast<size_t>(t)];
+          double u = 1.0;
+          if (gpos < static_cast<int>(sub_result.uc_schedule.gen_commit.size()) &&
+              t < static_cast<int>(
+                      sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)].size())) {
+            u = sub_result.uc_schedule.gen_commit[static_cast<size_t>(gpos)][static_cast<size_t>(t)]
+                    ? 1.0 : 0.0;
+          }
+          cost += gg.cost_c0 * u + gg.cost_c1 * p + gg.cost_c2 * p * p;
+        }
+        ++gpos;
+      }
+      sr.opf_cost = cost;
+      sr.opf_converged = sub_result.uc_schedule.feasible;
     }
 
     // Aggregate generation from UC schedule
@@ -570,6 +601,215 @@ static TimeSeriesPFResult solve_daily_replay(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Parallel daily decomposition
+// ═══════════════════════════════════════════════════════════════════════
+// The year is partitioned into independent calendar days.  Each day is an
+// energy-neutral horizon (per-day cyclic SOC, e_{s,T-1}=soc_init), so the days
+// are decoupled and can be solved concurrently.  Inside each day the chosen
+// DailySimMode selects SCUC / dynamic SCED / dynamic OPF.
+
+/// Translate the per-day simulation mode into a TimeSeriesPFOptions config.
+static TimeSeriesPFOptions make_daily_pf_options(
+    const AnnualProductionSimOptions& opts) {
+  TimeSeriesPFOptions p = opts.ts_pf_options;
+  p.keep_system_snapshots = false;
+  // Per-day cyclic SOC makes the horizons independent (the key to parallelism).
+  p.enforce_terminal_soc_cyclic = opts.enforce_daily_cyclic_soc;
+  switch (opts.daily_mode) {
+    case DailySimMode::SCUC:
+      p.skip_uc = false; p.run_opf = true;  p.fix_commitment = false;
+      break;
+    case DailySimMode::DynamicSCED:
+      // Commitment fixed ON → multi-period security-constrained economic dispatch.
+      p.skip_uc = false; p.run_opf = false; p.fix_commitment = true;
+      break;
+    case DailySimMode::DynamicOPF:
+      // Per-step AC-OPF, no unit commitment.
+      p.skip_uc = true;  p.run_opf = true;  p.fix_commitment = false;
+      break;
+  }
+  // Thread-safety: in parallel mode force the native parity IPM so the
+  // non-thread-safe Ipopt/MUMPS OPF fallback is never invoked concurrently.
+  if (opts.enable_parallel_daily) {
+    p.opf_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+  }
+  return p;
+}
+
+/// Solve the annual production simulation by independent, parallel calendar days.
+static AnnualProductionSimResult solve_parallel_daily(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const AnnualProductionSimOptions& opts) {
+  AnnualProductionSimResult result;
+  const int T_yr = ts_data.num_steps;
+  const double dt = ts_data.step_duration_hr;
+  result.num_steps = T_yr;
+  result.step_duration_hr = dt;
+  if (T_yr <= 0) return result;
+  result.step_results.resize(static_cast<size_t>(T_yr));
+
+  const int steps_per_day =
+      std::max(1, static_cast<int>(std::round(
+                      static_cast<double>(opts.daily_window_hours) / dt)));
+  const int num_days = (T_yr + steps_per_day - 1) / steps_per_day;
+  const TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
+
+  // Dynamic-SCED commitment: optionally solve a representative (peak-load) day
+  // as SCUC up front and reuse its commitment across every SCED day, instead of
+  // forcing all units ON.  repr_commit must outlive the parallel region.
+  std::vector<std::vector<int>> repr_commit;
+  TimeSeriesPFOptions eff_day_opts = day_opts;
+  if (opts.daily_mode == DailySimMode::DynamicSCED &&
+      opts.sced_reuse_scuc_commitment && num_days > 0) {
+    int peak_day = 0;
+    double peak_val = -1.0;
+    const std::vector<double>* lp = nullptr;
+    for (const auto& p : ts_data.profiles) {
+      if (p.id == 0) { lp = &p.values; break; }
+    }
+    if (lp) {
+      for (int d = 0; d < num_days; ++d) {
+        const int g0 = d * steps_per_day;
+        const int g1 = std::min(g0 + steps_per_day, T_yr);
+        double mx = 0.0;
+        for (int t = g0; t < g1 && t < static_cast<int>(lp->size()); ++t) {
+          mx = std::max(mx, (*lp)[static_cast<size_t>(t)]);
+        }
+        if (mx > peak_val) { peak_val = mx; peak_day = d; }
+      }
+    }
+    const int g0 = peak_day * steps_per_day;
+    const int g1 = std::min(g0 + steps_per_day, T_yr);
+    TimeSeriesData repr_ts = slice_ts_data(ts_data, g0, g1);
+    TimeSeriesPFOptions scuc_opts = opts.ts_pf_options;
+    scuc_opts.skip_uc = false;
+    scuc_opts.run_opf = false;
+    scuc_opts.fix_commitment = false;
+    scuc_opts.fixed_commitment_schedule = nullptr;
+    scuc_opts.enforce_terminal_soc_cyclic = opts.enforce_daily_cyclic_soc;
+    UCSchedule repr = solve_unit_commitment(sys, repr_ts, scuc_opts);
+    if (repr.feasible && !repr.gen_commit.empty()) {
+      repr_commit = repr.gen_commit;
+      eff_day_opts.fix_commitment = false;
+      eff_day_opts.fixed_commitment_schedule = &repr_commit;
+    }
+    // Otherwise eff_day_opts keeps fix_commitment=true (all-on fallback).
+  }
+
+  // Concurrent solves are safe only when every solver used is instance-isolated:
+  //   * MILP: SCIP creates an independent environment per solve; HiGHS shares a
+  //     global scheduler and the native B&C is itself multi-threaded, so only
+  //     SCIP is dispatched lock-free.  DynamicOPF uses no MILP at all.
+  //   * OPF: forced to the native parity IPM above (no Ipopt/MUMPS global state).
+  //   * PF: the Newton kernel keeps all state per-call.
+  const bool uses_milp = (opts.daily_mode != DailySimMode::DynamicOPF);
+  const bool parallel_safe =
+      !uses_milp || (opts.ts_pf_options.uc_solver == UCSolverChoice::SCIP);
+
+  // Per-day outputs are index-addressed so worker threads never write the same
+  // slot (lock-free); they are stitched together after the parallel region.
+  std::vector<WeeklySchedule> day_scheds(static_cast<size_t>(num_days));
+  std::vector<std::vector<PFSnapshot>> day_snaps(static_cast<size_t>(num_days));
+  std::atomic<int> feasible_days{0};
+
+  auto solve_one_day = [&](int d) {
+    const int g0 = d * steps_per_day;
+    const int g1 = std::min(g0 + steps_per_day, T_yr);
+    const int day_steps = g1 - g0;
+    if (day_steps <= 0) return;
+
+    TimeSeriesData sub_ts = slice_ts_data(ts_data, g0, g1);
+    TimeSeriesPFResult day_res = solve_time_series_pf(sys, sub_ts, eff_day_opts);
+
+    fill_step_results(result.step_results, g0, day_res, sys, sub_ts, day_steps);
+
+    WeeklySchedule ws;
+    ws.week_id = d;
+    ws.start_step = g0;
+    ws.num_steps = day_steps;
+    ws.uc = day_res.uc_schedule;
+    if (day_res.uc_schedule.feasible) feasible_days.fetch_add(1);
+    day_scheds[static_cast<size_t>(d)] = std::move(ws);
+
+    if (opts.pf_snapshot_interval > 0) {
+      for (int t = 0; t < day_steps; ++t) {
+        const int g_step = g0 + t;
+        if (g_step % opts.pf_snapshot_interval != 0) continue;
+        if (t >= static_cast<int>(day_res.pf_results.size())) continue;
+        const auto& pfr = day_res.pf_results[static_cast<size_t>(t)];
+        if (!pfr.converged) continue;
+        PFSnapshot snap;
+        snap.global_step = g_step;
+        snap.vm = pfr.vm;
+        snap.vdc = pfr.vdc;
+        snap.branch_flows = pfr.branch_flows;
+        snap.vsc_transfers = pfr.vsc_transfers;
+        snap.dcdc_transfers = pfr.dcdc_transfers;
+        snap.converged = true;
+        day_snaps[static_cast<size_t>(d)].push_back(std::move(snap));
+      }
+    }
+  };
+
+  if (parallel_safe && num_days > 1) {
+    int nthreads = opts.parallel_threads > 0
+                       ? opts.parallel_threads
+                       : static_cast<int>(std::thread::hardware_concurrency());
+    if (nthreads <= 0) nthreads = 1;
+    util::ThreadPool pool(std::min(nthreads, num_days));
+    std::vector<std::future<void>> futs;
+    futs.reserve(static_cast<size_t>(num_days));
+    for (int d = 0; d < num_days; ++d) {
+      futs.push_back(pool.submit([&solve_one_day, d]() { solve_one_day(d); }));
+    }
+    for (auto& f : futs) f.get();
+  } else {
+    for (int d = 0; d < num_days; ++d) solve_one_day(d);
+  }
+
+  // Stitch ordered outputs.
+  result.weekly_schedules = std::move(day_scheds);
+  for (auto& v : day_snaps) {
+    for (auto& s : v) result.pf_snapshots.push_back(std::move(s));
+  }
+
+  // Monthly summaries + component statistics (reuse the sequential helpers).
+  auto block_ranges = build_block_ranges(T_yr, dt, AnnualBlockType::Monthly);
+  result.monthly_summaries.reserve(block_ranges.size());
+  for (size_t b = 0; b < block_ranges.size(); ++b) {
+    result.monthly_summaries.push_back(aggregate_block(
+        static_cast<int>(b), block_ranges[b].first, block_ranges[b].second,
+        result.step_results, dt));
+  }
+  result.gen_stats = compute_gen_stats(sys, result.weekly_schedules, dt);
+  result.storage_stats = compute_storage_stats(sys, result.weekly_schedules, dt);
+  result.renewable_stats =
+      compute_renewable_stats(sys, ts_data, result.weekly_schedules, dt);
+
+  for (const auto& ms : result.monthly_summaries) {
+    result.total_gen_mwh += ms.total_gen_mwh;
+    result.total_load_mwh += ms.total_load_mwh;
+    result.total_renewable_mwh += ms.total_renewable_mwh;
+    result.total_curtailment_mwh += ms.total_curtailment_mwh;
+    result.total_ens_mwh += ms.total_ens_mwh;
+    result.total_loss_mwh += ms.total_loss_mwh;
+    result.total_cost += ms.total_cost;
+    result.num_pf_converged += ms.num_pf_converged;
+    result.num_opf_converged += ms.num_opf_converged;
+  }
+
+  result.feasible = (feasible_days.load() == num_days);
+  const char* mode_tag = (opts.daily_mode == DailySimMode::SCUC) ? "SCUC"
+                         : (opts.daily_mode == DailySimMode::DynamicSCED)
+                             ? "dyn-SCED"
+                             : "dyn-OPF";
+  result.solver_name = std::string("parallel-daily/") + mode_tag +
+                       (parallel_safe ? "/parallel" : "/serial");
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Main Orchestrator
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -586,6 +826,12 @@ AnnualProductionSimResult solve_annual_production_simulation(
 
   if (T_yr <= 0) {
     return result;
+  }
+
+  // Parallel daily decomposition path: independent, energy-neutral calendar days
+  // solved concurrently (bypasses the sequential L0→L3 hierarchy).
+  if (opts.enable_parallel_daily) {
+    return solve_parallel_daily(sys, ts_data, opts);
   }
 
   result.step_results.resize(static_cast<size_t>(T_yr));

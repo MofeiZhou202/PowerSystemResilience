@@ -2469,6 +2469,69 @@ json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
 }
 
 // Build default 24-h (or N-step) scaling profiles
+// ─────────────────────────────────────────────────────────────────────────
+// Parse a GUI MILP-solver selection string into the engine enum.
+// Accepts: "auto" | "native" | "highs" | "scip" | "gurobi" (case-insensitive).
+// Unknown / empty values fall back to Auto so the solve never dead-ends.
+hacdcpf::UCSolverChoice parse_uc_solver_choice(const std::string& s) {
+  std::string v;
+  v.reserve(s.size());
+  for (char c : s) v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  if (v == "native") return hacdcpf::UCSolverChoice::Native;
+  if (v == "highs")  return hacdcpf::UCSolverChoice::HiGHS;
+  if (v == "scip")   return hacdcpf::UCSolverChoice::SCIP;
+  if (v == "gurobi") return hacdcpf::UCSolverChoice::Gurobi;
+  return hacdcpf::UCSolverChoice::Auto;
+}
+
+// Human-readable label for the enum (echoed back to the GUI for confirmation).
+const char* uc_solver_choice_label(hacdcpf::UCSolverChoice c) {
+  switch (c) {
+    case hacdcpf::UCSolverChoice::Native: return "native";
+    case hacdcpf::UCSolverChoice::HiGHS:  return "highs";
+    case hacdcpf::UCSolverChoice::SCIP:   return "scip";
+    case hacdcpf::UCSolverChoice::Gurobi: return "gurobi";
+    case hacdcpf::UCSolverChoice::Auto:   return "auto";
+  }
+  return "auto";
+}
+
+// Parse a GUI objective selection string into the UC objective enum.
+// Accepts: "cost" | "carbon" | "curtailment" | "loss" | "weighted".
+hacdcpf::UCObjective parse_uc_objective(const std::string& s) {
+  std::string v;
+  v.reserve(s.size());
+  for (char c : s) v.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+  if (v == "carbon" || v == "emission" || v == "co2") return hacdcpf::UCObjective::Carbon;
+  if (v == "curtailment" || v == "curtail" || v == "renewable") return hacdcpf::UCObjective::MinCurtailment;
+  if (v == "loss" || v == "minloss" || v == "min_loss") return hacdcpf::UCObjective::MinLoss;
+  if (v == "weighted" || v == "weight" || v == "multi") return hacdcpf::UCObjective::Weighted;
+  return hacdcpf::UCObjective::Cost;
+}
+
+const char* uc_objective_label(hacdcpf::UCObjective o) {
+  switch (o) {
+    case hacdcpf::UCObjective::Carbon:         return "carbon";
+    case hacdcpf::UCObjective::MinCurtailment: return "curtailment";
+    case hacdcpf::UCObjective::MinLoss:        return "loss";
+    case hacdcpf::UCObjective::Weighted:       return "weighted";
+    case hacdcpf::UCObjective::Cost:           return "cost";
+  }
+  return "cost";
+}
+
+// Apply objective selection (mode + optional weights) onto TimeSeriesPFOptions.
+void apply_uc_objective(hacdcpf::TimeSeriesPFOptions& opts, const json& j) {
+  opts.objective_mode = parse_uc_objective(j.value("objective", std::string("cost")));
+  if (j.contains("objective_weights") && j["objective_weights"].is_object()) {
+    const auto& w = j["objective_weights"];
+    opts.w_cost = w.value("cost", 1.0);
+    opts.w_carbon = w.value("carbon", 0.0);
+    opts.w_loss = w.value("loss", 0.0);
+    opts.w_curtailment = w.value("curtailment", 0.0);
+  }
+}
+
 hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
   hacdcpf::TimeSeriesData ts;
   ts.num_steps = steps;
@@ -11845,6 +11908,12 @@ int main(int argc, char** argv) {
         const int num_steps = j.value("num_steps", 24);
         const bool skip_uc = j.value("skip_uc", false);
         const bool run_opf = j.value("run_opf", false);
+        // MILP solver + constraint-set selection (GUI "时序生产模拟" controls).
+        const hacdcpf::UCSolverChoice uc_solver =
+            parse_uc_solver_choice(j.value("uc_solver", std::string("auto")));
+        const bool enable_net = j.value("enable_network_constraints", false);
+        const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
+        const double reserve_frac = j.value("reserve_fraction", 0.0);
         // Auto-assign profiles to components without explicit ids
         for (auto& ld : sys_ts.ac.loads) if (ld.profile_id < 0) ld.profile_id = 0;
         for (auto& ren : sys_ts.ac.renewable_gens) {
@@ -11860,6 +11929,24 @@ int main(int argc, char** argv) {
         hacdcpf::TimeSeriesPFOptions opts;
         opts.skip_uc = skip_uc;
         opts.run_opf = run_opf;
+        opts.uc_solver = uc_solver;
+        opts.enable_network_constraints = enable_net;
+        // DC network coupling is only meaningful when AC nodal constraints are on.
+        opts.enable_dc_network_constraints = enable_dc_net && enable_net;
+        opts.reserve_requirement_fraction = std::max(0.0, reserve_frac);
+        apply_uc_objective(opts, j);
+        opts.enable_external_grid = j.value("enable_external_grid", false);
+        opts.enable_demand_response = j.value("enable_demand_response", false);
+        opts.dr_shiftable = j.value("dr_shiftable", false);
+        opts.w_demand_response = j.value("dr_penalty", 20.0);
+        opts.enable_dispatchable_pv = j.value("enable_dispatchable_pv", false);
+        opts.pv_curtail_penalty = j.value("pv_curtail_penalty", 50.0);
+        opts.enable_microgrid = j.value("enable_microgrid", false);
+        opts.w_microgrid_island = j.value("microgrid_island_penalty", 100.0);
+        opts.enable_dc_branch_flows = j.value("enable_dc_branch_flows", false);
+        opts.enable_storage_degradation = j.value("enable_storage_degradation", false);
+        opts.enable_vpp = j.value("enable_vpp", false);
+        opts.enable_energy_router = j.value("enable_energy_router", false);
         opts.keep_system_snapshots = true;
         opts.verbose = false;
         auto result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, opts);
@@ -11876,6 +11963,19 @@ int main(int argc, char** argv) {
         out["num_converged"] = result.num_converged;
         out["num_opf_converged"] = result.num_opf_converged;
         out["total_generation_cost"] = result.total_generation_cost;
+        // Echo back the requested solver + active constraint set and report the
+        // objective so the GUI can present "constraints / solver / objective".
+        out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
+        out["objective_value"] = result.total_generation_cost;
+        out["objective_label"] = "总发电成本 ($)";
+        out["objective_mode"] = uc_objective_label(opts.objective_mode);
+        out["uc_solve_sec"] = result.uc_solve_sec;
+        out["constraints"] = json{
+            {"network_constraints", enable_net},
+            {"dc_network_constraints", enable_dc_net && enable_net},
+            {"reserve_fraction", std::max(0.0, reserve_frac)},
+            {"unit_commitment", !skip_uc},
+            {"economic_dispatch_opf", run_opf}};
         out["uc_feasible"] = result.uc_schedule.feasible;
         out["uc_solver_name"] = result.uc_schedule.solver_name;
         // Diagnostic: how many loads were materialized at PF time and how
@@ -12974,9 +13074,49 @@ int main(int argc, char** argv) {
             : hacdcpf::analysis::AnnualBlockType::Monthly;
         opts.ts_pf_options.run_opf = j.value("run_opf", true);
         opts.ts_pf_options.verbose = false;
+        // MILP solver + constraint-set selection (shared with run_ts_pf).
+        const hacdcpf::UCSolverChoice uc_solver =
+            parse_uc_solver_choice(j.value("uc_solver", std::string("auto")));
+        const bool enable_net = j.value("enable_network_constraints", false);
+        const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
+        const double reserve_frac = j.value("reserve_fraction", 0.0);
+        opts.ts_pf_options.uc_solver = uc_solver;
+        opts.ts_pf_options.enable_network_constraints = enable_net;
+        opts.ts_pf_options.enable_dc_network_constraints = enable_dc_net && enable_net;
+        opts.ts_pf_options.reserve_requirement_fraction = std::max(0.0, reserve_frac);
+        apply_uc_objective(opts.ts_pf_options, j);
+        opts.ts_pf_options.enable_external_grid = j.value("enable_external_grid", false);
+        opts.ts_pf_options.enable_demand_response = j.value("enable_demand_response", false);
+        opts.ts_pf_options.dr_shiftable = j.value("dr_shiftable", false);
+        opts.ts_pf_options.w_demand_response = j.value("dr_penalty", 20.0);
+        opts.ts_pf_options.enable_dispatchable_pv = j.value("enable_dispatchable_pv", false);
+        opts.ts_pf_options.pv_curtail_penalty = j.value("pv_curtail_penalty", 50.0);
+        opts.ts_pf_options.enable_microgrid = j.value("enable_microgrid", false);
+        opts.ts_pf_options.w_microgrid_island = j.value("microgrid_island_penalty", 100.0);
+        opts.ts_pf_options.enable_dc_branch_flows = j.value("enable_dc_branch_flows", false);
+        opts.ts_pf_options.enable_storage_degradation = j.value("enable_storage_degradation", false);
+        opts.ts_pf_options.enable_vpp = j.value("enable_vpp", false);
+        opts.ts_pf_options.enable_energy_router = j.value("enable_energy_router", false);
         opts.skip_replay = j.value("skip_replay", false);
         opts.enforce_cyclic_soc = j.value("cyclic_soc", true);
         opts.pf_snapshot_interval = j.value("snapshot_interval", 24);
+        // Parallel daily decomposition: split the year into independent calendar
+        // days (cyclic SOC) solved concurrently; per-day mode SCUC/SCED/DOPF.
+        opts.enable_parallel_daily = j.value("parallel_daily", false);
+        {
+          std::string dm = j.value("daily_mode", std::string("scuc"));
+          std::transform(dm.begin(), dm.end(), dm.begin(),
+                         [](unsigned char ch){ return static_cast<char>(std::tolower(ch)); });
+          if (dm == "sced" || dm == "dynamic_sced")
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::DynamicSCED;
+          else if (dm == "dopf" || dm == "dynamic_opf" || dm == "opf")
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::DynamicOPF;
+          else
+            opts.daily_mode = hacdcpf::analysis::DailySimMode::SCUC;
+        }
+        opts.parallel_threads = j.value("parallel_threads", 0);
+        opts.enforce_daily_cyclic_soc = j.value("daily_cyclic_soc", true);
+        opts.sced_reuse_scuc_commitment = j.value("sced_reuse_scuc_commitment", true);
         opts.verbose = false;
         auto result = hacdcpf::analysis::solve_annual_production_simulation(sys_ann, ts_data, opts);
         json out;
@@ -12984,6 +13124,19 @@ int main(int argc, char** argv) {
         out["num_steps"] = result.num_steps;
         out["step_duration_hr"] = result.step_duration_hr;
         out["total_cost"] = result.total_cost;
+        // Echo back the requested solver + active constraint set + objective.
+        out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
+        out["solver_name"] = result.solver_name;
+        out["parallel_daily"] = opts.enable_parallel_daily;
+        out["objective_value"] = result.total_cost;
+        out["objective_label"] = "年总运行成本 ($)";
+        out["objective_mode"] = uc_objective_label(opts.ts_pf_options.objective_mode);
+        out["constraints"] = json{
+            {"network_constraints", enable_net},
+            {"dc_network_constraints", enable_dc_net && enable_net},
+            {"reserve_fraction", std::max(0.0, reserve_frac)},
+            {"economic_dispatch_opf", opts.ts_pf_options.run_opf},
+            {"cyclic_soc", opts.enforce_cyclic_soc}};
         out["total_gen_mwh"] = result.total_gen_mwh;
         out["total_load_mwh"] = result.total_load_mwh;
         out["total_renewable_mwh"] = result.total_renewable_mwh;
