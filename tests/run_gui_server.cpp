@@ -2536,28 +2536,43 @@ hacdcpf::TimeSeriesData make_default_ts_data(int steps = 24) {
   hacdcpf::TimeSeriesData ts;
   ts.num_steps = steps;
   ts.step_duration_hr = 1.0;
-  // Profile 0: daily load curve
-  hacdcpf::TimeSeriesProfile lp; lp.id = 0; lp.name = "daily_load";
-  if (steps == 24) {
-    lp.values = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
-                 0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
-  } else { lp.values.assign(steps, 0.80); }
-  ts.profiles.push_back(lp);
-  // Profile 1: wind
-  hacdcpf::TimeSeriesProfile wp; wp.id = 1; wp.name = "wind_daily";
-  if (steps == 24) {
-    wp.values = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
-                 0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
-  } else { wp.values.assign(steps, 0.40); }
-  ts.profiles.push_back(wp);
-  // Profile 2: solar
-  hacdcpf::TimeSeriesProfile sp; sp.id = 2; sp.name = "solar_daily";
-  if (steps == 24) {
-    sp.values = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
-                 0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
-  } else { sp.values.assign(steps, 0.30); }
-  ts.profiles.push_back(sp);
+  // 24-hour daily templates, tiled (repeated) to cover any horizon length so a
+  // 48 h / multi-day run gets a realistic repeating curve instead of a flat line.
+  const std::vector<double> load24 = {0.50,0.45,0.42,0.40,0.42,0.50,0.60,0.72,0.80,0.85,0.88,0.90,
+                                      0.88,0.85,0.82,0.85,0.90,1.00,1.10,1.05,0.95,0.85,0.72,0.60};
+  const std::vector<double> wind24 = {0.65,0.70,0.75,0.80,0.72,0.55,0.35,0.20,0.15,0.10,0.18,0.25,
+                                      0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
+  const std::vector<double> sol24  = {0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
+                                      0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
+  auto tile = [steps](const std::vector<double>& tmpl, int id, const char* name) {
+    hacdcpf::TimeSeriesProfile p; p.id = id; p.name = name;
+    p.values.resize(static_cast<size_t>(std::max(0, steps)));
+    for (int t = 0; t < steps; ++t)
+      p.values[static_cast<size_t>(t)] = tmpl[static_cast<size_t>(t % 24)];
+    return p;
+  };
+  ts.profiles.push_back(tile(load24, 0, "daily_load"));
+  ts.profiles.push_back(tile(wind24, 1, "wind_daily"));
+  ts.profiles.push_back(tile(sol24, 2, "solar_daily"));
   return ts;
+}
+
+// Fit every profile in `ts` to `steps` samples: tile (repeat) when a profile is
+// shorter than the requested horizon, truncate when it is longer.  This keeps
+// imported time-series data instead of discarding it when 仿真时间(小时) differs
+// from the imported length (fixes the >24 h "lost imported data" issue).
+void fit_ts_data_to_steps(hacdcpf::TimeSeriesData& ts, int steps) {
+  if (steps <= 0) return;
+  ts.num_steps = steps;
+  for (auto& p : ts.profiles) {
+    if (p.values.empty()) { p.values.assign(static_cast<size_t>(steps), 1.0); continue; }
+    if (static_cast<int>(p.values.size()) == steps) continue;
+    const size_t orig = p.values.size();
+    std::vector<double> v(static_cast<size_t>(steps));
+    for (int t = 0; t < steps; ++t)
+      v[static_cast<size_t>(t)] = p.values[static_cast<size_t>(t) % orig];
+    p.values = std::move(v);
+  }
 }
 
 // Build annual time-series data with seasonal variation
@@ -2603,6 +2618,36 @@ hacdcpf::TimeSeriesData make_annual_ts_data(double step_hr = 6.0) {
   ts.profiles.push_back(make_profile(1, "annual_wind", wind_daily, wind_season));
   ts.profiles.push_back(make_profile(2, "annual_solar", sol_daily, sol_season));
   return ts;
+}
+
+// Slice the annual profiles down to a single calendar day (1-based) at the given
+// resolution, so the rich per-step time-series solver can reproduce one day of
+// an annual run.  Mirrors make_annual_ts_data's sequential month/day/step index.
+hacdcpf::TimeSeriesData make_annual_day_slice(double step_hr, int day_index) {
+  const int spd = std::max(1, static_cast<int>(24.0 / step_hr));
+  const hacdcpf::TimeSeriesData full = make_annual_ts_data(step_hr);
+  const int total = full.num_steps;
+  int day = day_index < 1 ? 1 : day_index;
+  const int max_day = std::max(1, total / spd);
+  if (day > max_day) day = max_day;
+  const int start = (day - 1) * spd;
+  hacdcpf::TimeSeriesData day_ts;
+  day_ts.num_steps = spd;
+  day_ts.step_duration_hr = step_hr;
+  for (const auto& p : full.profiles) {
+    hacdcpf::TimeSeriesProfile dp;
+    dp.id = p.id;
+    dp.name = p.name;
+    dp.values.reserve(static_cast<size_t>(spd));
+    for (int t = 0; t < spd; ++t) {
+      int gi = start + t;
+      if (gi < 0) gi = 0;
+      if (gi >= static_cast<int>(p.values.size())) gi = static_cast<int>(p.values.size()) - 1;
+      dp.values.push_back(gi >= 0 && !p.values.empty() ? p.values[static_cast<size_t>(gi)] : 1.0);
+    }
+    day_ts.profiles.push_back(std::move(dp));
+  }
+  return day_ts;
 }
 
 std::vector<std::string> case_names() {
@@ -11879,11 +11924,24 @@ int main(int argc, char** argv) {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
           const auto j2 = json::parse(req.body.empty() ? "{}" : req.body);
-          const int ns = j2.value("num_steps", 24);
-          if (g_session.ts_data.num_steps != ns || g_session.ts_data.profiles.empty())
-            g_session.ts_data = make_default_ts_data(ns);
+          const int day_index = j2.value("day_index", 0);
+          if (day_index > 0) {
+            // Annual day drill-down: solve a single calendar day of the annual
+            // run using the annual-resolution profiles sliced to that day. Build
+            // a local ts_data and do NOT mutate the persistent session config.
+            const double dhr = j2.value("step_duration_hr", 6.0);
+            ts_data = make_annual_day_slice(dhr, day_index);
+          } else {
+            const int ns = j2.value("num_steps", 24);
+            // Build defaults only when nothing is loaded; otherwise PRESERVE the
+            // imported/session profiles and fit them to the requested horizon
+            // (tile if shorter, truncate if longer) so >24 h runs keep the data.
+            if (g_session.ts_data.profiles.empty())
+              g_session.ts_data = make_default_ts_data(ns);
+            ts_data = g_session.ts_data;
+            fit_ts_data_to_steps(ts_data, ns);
+          }
           sys_ts = *g_session.current_system;
-          ts_data = g_session.ts_data;
           spec = g_session.ts_binding;
         }
         // Re-apply persistent binding to the per-call sys copy. This
@@ -11949,6 +12007,28 @@ int main(int argc, char** argv) {
         opts.enable_energy_router = j.value("enable_energy_router", false);
         opts.enable_mobile_storage = j.value("enable_mobile_storage", false);
         opts.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
+        // Cyclic terminal SOC: pin each scheduling day's end SOC to its start so
+        // storage is energy-neutral over the day (also the basis for parallelism).
+        opts.enforce_terminal_soc_cyclic = j.value("cyclic_soc", false);
+        // Per-day parallel decomposition of a multi-day time-series horizon.
+        opts.parallel_daily = j.value("parallel_daily", false);
+        opts.parallel_threads = j.value("parallel_threads", 0);
+        // Day drill-down faithfulness: when a daily_mode is supplied (annual
+        // drill-down), map it to the same SCUC / dynamic-SCED / dynamic-OPF
+        // configuration the annual run used so the re-solved day matches.
+        {
+          const std::string daily_mode = j.value("daily_mode", std::string());
+          if (daily_mode == "scuc") {
+            opts.skip_uc = false; opts.run_opf = true;  opts.fix_commitment = false;
+          } else if (daily_mode == "sced") {
+            opts.skip_uc = false; opts.run_opf = false; opts.fix_commitment = true;
+          } else if (daily_mode == "dopf") {
+            opts.skip_uc = true;  opts.run_opf = true;  opts.fix_commitment = false;
+          }
+          // A drill-down day is one scheduling day → match the annual cyclic-SOC.
+          if (j.value("day_index", 0) > 0)
+            opts.enforce_terminal_soc_cyclic = j.value("cyclic_soc", true);
+        }
         opts.keep_system_snapshots = true;
         opts.verbose = false;
         auto result = hacdcpf::solve_time_series_pf(sys_ts, ts_data, opts);
@@ -13172,6 +13252,57 @@ int main(int argc, char** argv) {
         out["timeline_curt"] = tl_curt;
         out["timeline_ess"] = tl_ess;
         out["timeline_loss"] = tl_loss;
+        // Representative days (1-based) for quick drill-down presets: global
+        // peak-load / min-load / peak-net-load, plus the peak-net-load day in
+        // each season.  Computed from the full per-step results (not the
+        // subsampled timeline) so they are exact.
+        {
+          const int spd = std::max(1, static_cast<int>(std::lround(
+              24.0 / std::max(1e-9, result.step_duration_hr))));
+          const int nsteps = static_cast<int>(result.step_results.size());
+          const int ndays = (nsteps + spd - 1) / spd;
+          auto day_month = [](int d0) {
+            static const int md[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+            int rem = d0;
+            for (int m = 0; m < 12; ++m) { if (rem < md[m]) return m; rem -= md[m]; }
+            return 11;
+          };
+          auto season_of = [](int month) {
+            if (month >= 2 && month <= 4) return 0;   // spring
+            if (month >= 5 && month <= 7) return 1;   // summer
+            if (month >= 8 && month <= 10) return 2;  // autumn
+            return 3;                                 // winter
+          };
+          int peak_load_day = 0, min_load_day = 0, peak_net_day = 0;
+          double peak_load = -1e30, min_load = 1e30, peak_net = -1e30;
+          int season_day[4] = {-1, -1, -1, -1};
+          double season_net[4] = {-1e30, -1e30, -1e30, -1e30};
+          for (int d = 0; d < ndays; ++d) {
+            const int g0 = d * spd, g1 = std::min(g0 + spd, nsteps);
+            if (g1 <= g0) continue;
+            double load_sum = 0.0, net_peak = -1e30;
+            for (int t = g0; t < g1; ++t) {
+              const auto& s = result.step_results[static_cast<size_t>(t)];
+              load_sum += s.total_load_mw;
+              net_peak = std::max(net_peak, s.total_load_mw - s.total_renewable_mw);
+            }
+            if (load_sum > peak_load) { peak_load = load_sum; peak_load_day = d; }
+            if (load_sum < min_load) { min_load = load_sum; min_load_day = d; }
+            if (net_peak > peak_net) { peak_net = net_peak; peak_net_day = d; }
+            const int se = season_of(day_month(d));
+            if (net_peak > season_net[se]) { season_net[se] = net_peak; season_day[se] = d; }
+          }
+          json rep = json::array();
+          auto add_rep = [&](const char* label, int d0) {
+            if (d0 >= 0 && d0 < ndays) rep.push_back({{"label", label}, {"day", d0 + 1}});
+          };
+          add_rep("峰荷日", peak_load_day);
+          add_rep("谷荷日", min_load_day);
+          add_rep("峰净荷日", peak_net_day);
+          static const char* sn[4] = {"春季代表日", "夏季代表日", "秋季代表日", "冬季代表日"};
+          for (int s = 0; s < 4; ++s) add_rep(sn[s], season_day[s]);
+          out["representative_days"] = rep;
+        }
         // Monthly summaries
         json ms = json::array();
         for (const auto& m : result.monthly_summaries) {

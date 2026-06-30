@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <future>
 #include <unordered_map>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include "hacdcpf/power_flow/branch_flow.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf {
 
@@ -3133,11 +3135,137 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
 // ═══════════════════════════════════════════════════════════════════════
 // Full pipeline: UC → OPF (per step) → PF validation (per step)
 // ═══════════════════════════════════════════════════════════════════════
+
+// Slice a time-series window [g0, g1) out of `src`, copying the corresponding
+// span of every profile.  Used by the per-day parallel decomposition.
+static TimeSeriesData slice_ts_window(const TimeSeriesData& src, int g0, int g1) {
+  TimeSeriesData out;
+  out.step_duration_hr = src.step_duration_hr;
+  out.num_steps = std::max(0, g1 - g0);
+  out.profiles.reserve(src.profiles.size());
+  for (const auto& p : src.profiles) {
+    TimeSeriesProfile dp;
+    dp.id = p.id;
+    dp.name = p.name;
+    dp.values.reserve(static_cast<size_t>(out.num_steps));
+    for (int t = g0; t < g1; ++t) {
+      if (t >= 0 && t < static_cast<int>(p.values.size()))
+        dp.values.push_back(p.values[static_cast<size_t>(t)]);
+      else if (!p.values.empty())
+        dp.values.push_back(p.values.back());
+      else
+        dp.values.push_back(1.0);
+    }
+    out.profiles.push_back(std::move(dp));
+  }
+  return out;
+}
+
+// Stitch per-day TimeSeriesPFResults (in chronological order) into one result by
+// concatenating every per-step series along the time axis.
+static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& parts,
+                                            int total_steps) {
+  TimeSeriesPFResult out;
+  out.num_steps = total_steps;
+  auto cat_d = [](std::vector<std::vector<double>>& dst,
+                  const std::vector<std::vector<double>>& src) {
+    if (src.empty()) return;
+    if (dst.empty()) dst.resize(src.size());
+    if (dst.size() != src.size()) return;
+    for (size_t c = 0; c < src.size(); ++c)
+      dst[c].insert(dst[c].end(), src[c].begin(), src[c].end());
+  };
+  auto cat_i = [](std::vector<std::vector<int>>& dst,
+                  const std::vector<std::vector<int>>& src) {
+    if (src.empty()) return;
+    if (dst.empty()) dst.resize(src.size());
+    if (dst.size() != src.size()) return;
+    for (size_t c = 0; c < src.size(); ++c)
+      dst[c].insert(dst[c].end(), src[c].begin(), src[c].end());
+  };
+  bool first = true;
+  out.uc_schedule.feasible = true;
+  for (auto& p : parts) {
+    auto& u = p.uc_schedule;
+    cat_d(out.uc_schedule.gen_dispatch, u.gen_dispatch);
+    cat_i(out.uc_schedule.gen_commit, u.gen_commit);
+    cat_d(out.uc_schedule.ess_dispatch, u.ess_dispatch);
+    cat_d(out.uc_schedule.ess_soc, u.ess_soc);
+    cat_d(out.uc_schedule.renewable_dispatch, u.renewable_dispatch);
+    cat_d(out.uc_schedule.dc_pv_dispatch, u.dc_pv_dispatch);
+    cat_d(out.uc_schedule.dc_ess_dispatch, u.dc_ess_dispatch);
+    cat_d(out.uc_schedule.dc_ess_soc, u.dc_ess_soc);
+    cat_d(out.uc_schedule.dc_sgen_dispatch, u.dc_sgen_dispatch);
+    cat_d(out.uc_schedule.dc_load_demand, u.dc_load_demand);
+    cat_d(out.uc_schedule.vsc_dispatch, u.vsc_dispatch);
+    cat_d(out.uc_schedule.dcdc_dispatch, u.dcdc_dispatch);
+    out.uc_schedule.total_cost += u.total_cost;
+    out.uc_schedule.feasible = out.uc_schedule.feasible && u.feasible;
+    if (first) { out.uc_schedule.solver_name = u.solver_name; first = false; }
+    for (auto& x : p.opf_results) out.opf_results.push_back(std::move(x));
+    for (auto& x : p.pf_results) out.pf_results.push_back(std::move(x));
+    for (auto& x : p.pf_system_snapshots) out.pf_system_snapshots.push_back(std::move(x));
+    for (auto& x : p.crossval) out.crossval.push_back(std::move(x));
+    out.num_converged += p.num_converged;
+    out.num_opf_converged += p.num_opf_converged;
+    out.total_generation_cost += p.total_generation_cost;
+    out.uc_solve_sec += p.uc_solve_sec;
+  }
+  return out;
+}
+
 TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
                                          const TimeSeriesData& ts_data,
                                          const TimeSeriesPFOptions& opts) {
-  TimeSeriesPFResult result;
   const int T = ts_data.num_steps;
+
+  // ── Optional per-day parallel decomposition ──────────────────────────────
+  // Split a multi-day horizon into independent scheduling days (cyclic SOC per
+  // day), solve them concurrently, and stitch the per-step results back. The
+  // single-day coupled solve below runs when this is disabled or T fits one day.
+  if (opts.parallel_daily && T > 0) {
+    const double dt = ts_data.step_duration_hr > 0.0 ? ts_data.step_duration_hr : 1.0;
+    const int day_len = std::max(1, static_cast<int>(std::lround(24.0 / dt)));
+    const int num_days = (T + day_len - 1) / day_len;
+    if (num_days > 1) {
+      TimeSeriesPFOptions day_opts = opts;
+      day_opts.parallel_daily = false;              // each day is a plain solve
+      day_opts.enforce_terminal_soc_cyclic = true;  // independence across days
+      // Force the thread-safe native parity IPM for any per-step AC-OPF.
+      day_opts.opf_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
+      // Concurrent MILP is safe only with instance-isolated SCIP (HiGHS shares a
+      // global scheduler; native B&C spawns its own threads).  No MILP when skip_uc.
+      const bool uses_milp = !opts.skip_uc;
+      const bool parallel_safe =
+          !uses_milp || (opts.uc_solver == UCSolverChoice::SCIP);
+
+      std::vector<TimeSeriesPFResult> day_results(static_cast<size_t>(num_days));
+      auto solve_day = [&](int d) {
+        const int g0 = d * day_len;
+        const int g1 = std::min(g0 + day_len, T);
+        if (g1 <= g0) return;
+        TimeSeriesData sub = slice_ts_window(ts_data, g0, g1);
+        day_results[static_cast<size_t>(d)] = solve_time_series_pf(sys_in, sub, day_opts);
+      };
+      if (parallel_safe) {
+        int nthreads = opts.parallel_threads > 0
+                           ? opts.parallel_threads
+                           : static_cast<int>(std::thread::hardware_concurrency());
+        if (nthreads <= 0) nthreads = 1;
+        util::ThreadPool pool(std::min(nthreads, num_days));
+        std::vector<std::future<void>> futs;
+        futs.reserve(static_cast<size_t>(num_days));
+        for (int d = 0; d < num_days; ++d)
+          futs.push_back(pool.submit([&solve_day, d]() { solve_day(d); }));
+        for (auto& f : futs) f.get();
+      } else {
+        for (int d = 0; d < num_days; ++d) solve_day(d);
+      }
+      return concat_ts_results(day_results, T);
+    }
+  }
+
+  TimeSeriesPFResult result;
   result.num_steps = T;
 
   if (T <= 0) {

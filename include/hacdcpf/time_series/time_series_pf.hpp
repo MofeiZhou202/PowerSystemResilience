@@ -221,6 +221,16 @@ struct TimeSeriesPFOptions {
   // travel drain depletes the battery; and a minimum-stay (from t_stay_min_hr)
   // prevents oscillation.  A larger MILP (binaries per unit-step); default off.
   bool mobile_storage_corelocate{false};
+  // Per-day parallel decomposition.  When set and the horizon spans more than one
+  // scheduling day, the time-series solve is split into independent days (each
+  // with cyclic terminal SOC) that are solved concurrently and stitched back
+  // together — the same speedup the annual simulation uses, now available to a
+  // plain multi-day run.  A single-day (or sub-day) horizon stays a coupled
+  // solve.  Concurrency is dispatched lock-free only when the MILP backend is
+  // instance-isolated (SCIP) or no MILP is used (skip_uc); otherwise it falls
+  // back to a sequential day loop.  Default off (the coupled solve).
+  bool parallel_daily{false};
+  int parallel_threads{0};            // 0 = hardware_concurrency()
   bool keep_system_snapshots{false};
   bool verbose{false};
 };

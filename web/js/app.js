@@ -3406,6 +3406,9 @@ const App = (() => {
       enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
       enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
       mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
+      cyclic_soc: document.getElementById('tspfCyclicSoc')?.checked ?? false,
+      parallel_daily: document.getElementById('tspfParallel')?.checked ?? false,
+      parallel_threads: parseInt(document.getElementById('tspfThreads')?.value, 10) || 0,
     });
 
     if (data) {
@@ -3484,11 +3487,81 @@ const App = (() => {
 
     if (data) {
       data._wallSeconds = (performance.now() - t0) / 1000.0;
+      data._dailyMode = dailyMode;   // remember the per-day mode for drill-down faithfulness
+      data._cyclicSoc = cyclicSoc;
       log(`年度仿真完成: ${data.solver_name || ''}, 目标=$${Number(data.total_cost || 0).toFixed(0)}, 用时${data._wallSeconds.toFixed(1)}s`, 'success');
       setStatus('年度并行仿真完成');
       _lastAnnualData = data;
       showAnnualSimResults(data);
       switchTab('results');
+    } else {
+      setStatus('计算失败', 'error');
+    }
+  }
+
+  // Shared rich-model / solver options read from the time-series toolbar, reused
+  // by the single-horizon run and the annual day drill-down.
+  function tspfRichOptions() {
+    const reservePct = parseFloat(document.getElementById('tspfReservePct')?.value);
+    return {
+      uc_solver: document.getElementById('tspfUcSolver')?.value || 'auto',
+      enable_network_constraints: document.getElementById('tspfNetworkConstraints')?.checked ?? false,
+      enable_dc_network_constraints: document.getElementById('tspfDcNetworkConstraints')?.checked ?? false,
+      reserve_fraction: (Number.isFinite(reservePct) && reservePct > 0) ? reservePct / 100.0 : 0.0,
+      objective: document.getElementById('tspfObjective')?.value || 'cost',
+      enable_external_grid: document.getElementById('tspfExternalGrid')?.checked ?? false,
+      enable_demand_response: document.getElementById('tspfDemandResponse')?.checked ?? false,
+      dr_shiftable: document.getElementById('tspfDrShiftable')?.checked ?? false,
+      dr_penalty: parseFloat(document.getElementById('tspfDrPenalty')?.value) || 0,
+      enable_dispatchable_pv: document.getElementById('tspfDispatchablePv')?.checked ?? false,
+      pv_curtail_penalty: parseFloat(document.getElementById('tspfPvCurtailPenalty')?.value) || 0,
+      enable_microgrid: document.getElementById('tspfMicrogrid')?.checked ?? false,
+      microgrid_island_penalty: parseFloat(document.getElementById('tspfMgIslandPenalty')?.value) || 0,
+      enable_dc_branch_flows: document.getElementById('tspfDcBranchFlows')?.checked ?? false,
+      enable_storage_degradation: document.getElementById('tspfStorageDegradation')?.checked ?? false,
+      enable_vpp: document.getElementById('tspfVpp')?.checked ?? false,
+      enable_energy_router: document.getElementById('tspfEnergyRouter')?.checked ?? false,
+      enable_mobile_storage: document.getElementById('tspfMobileStorage')?.checked ?? false,
+      mobile_storage_corelocate: document.getElementById('tspfMobileCorelocate')?.checked ?? false,
+    };
+  }
+
+  // Drill into a single day of the last annual run: re-solve that day's window
+  // with the rich per-step time-series solver and show it in the (rich) 时序潮流
+  // 结果 dashboard, keeping the annual dashboard in place for context.
+  async function runAnnualDayDetail() {
+    const meta = _lastAnnualData;
+    if (!meta) { log('请先运行年度仿真，再查看某日详情', 'warn'); return; }
+    const stepHr = meta.step_duration_hr || 1;
+    const stepsPerDay = Math.max(1, Math.round(24 / stepHr));
+    const numDays = Math.max(1, Math.round((meta.num_steps || stepsPerDay) / stepsPerDay));
+    let day = parseInt(document.getElementById('annualSimDaySel')?.value, 10);
+    if (!Number.isFinite(day) || day < 1) day = 1;
+    if (day > numDays) day = numDays;
+
+    setStatus(`第 ${day} 日逐步详情重解中...`, 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+
+    const payload = Object.assign({
+      num_steps: stepsPerDay,
+      step_duration_hr: stepHr,
+      day_index: day,
+      skip_uc: false,
+      run_opf: true,
+      // Faithful drill-down: re-solve the day with the SAME per-day mode and
+      // cyclic-SOC the annual run used, so it matches that day of the annual run.
+      daily_mode: meta._dailyMode || 'scuc',
+      cyclic_soc: meta._cyclicSoc != null ? meta._cyclicSoc : true,
+    }, tspfRichOptions());
+
+    const data = await apiPost('/api/session/run_ts_pf', payload);
+    if (data) {
+      log(`第 ${day} 日详情完成: ${data.num_converged}/${data.num_steps} 步收敛`, 'success');
+      setStatus(`第 ${day} 日详情完成`);
+      _lastTspfData = data;
+      showTimeSeriesResults(data, { keepAnnual: true });
+      const tspfSec = document.getElementById('tspfResultsSection');
+      if (tspfSec && tspfSec.scrollIntoView) { try { tspfSec.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }
     } else {
       setStatus('计算失败', 'error');
     }
@@ -3501,6 +3574,41 @@ const App = (() => {
 
     const section = document.getElementById('annualSimResultsSection');
     if (section) section.style.display = 'block';
+    // Hide the (stale) single-horizon time-series dashboard so the annual
+    // dashboard is shown unambiguously when an annual run completes.
+    const tspfSec = document.getElementById('tspfResultsSection');
+    if (tspfSec) tspfSec.style.display = 'none';
+    // Day drill-down: size the selector to the number of simulated days.
+    const stepsPerDay = Math.max(1, Math.round(24 / (data.step_duration_hr || 1)));
+    const numDays = Math.max(1, Math.round((data.num_steps || stepsPerDay) / stepsPerDay));
+    const daySel = document.getElementById('annualSimDaySel');
+    if (daySel) {
+      daySel.max = String(numDays);
+      if (!daySel.value || +daySel.value < 1 || +daySel.value > numDays) daySel.value = '1';
+    }
+    // Representative-day quick presets (peak-load / min-load / peak-net-load /
+    // per-season), auto-detected by the backend — one click drills into that day.
+    const presetBox = document.getElementById('annualSimDayPresets');
+    if (presetBox) {
+      const reps = Array.isArray(data.representative_days) ? data.representative_days : [];
+      presetBox.innerHTML = '<span style="font-weight:600;">代表日：</span>';
+      if (!reps.length) {
+        presetBox.insertAdjacentHTML('beforeend', '<span class="sub-hint">（无）</span>');
+      } else {
+        reps.forEach((r) => {
+          const btn = document.createElement('button');
+          btn.className = 'toolbar-btn';
+          btn.textContent = `${r.label} (第${r.day}日)`;
+          btn.title = `定位并以富时序图表重解第 ${r.day} 日`;
+          btn.addEventListener('click', () => {
+            const sel = document.getElementById('annualSimDaySel');
+            if (sel) sel.value = String(r.day);
+            runAnnualDayDetail();
+          });
+          presetBox.appendChild(btn);
+        });
+      }
+    }
 
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
     const feasClass = data.feasible ? 'result-converged' : 'result-failed';
@@ -3543,7 +3651,7 @@ const App = (() => {
       margin: { l: 55, r: 15, t: 40, b: 40 }, legend: { orientation: 'h', y: -0.25 },
     };
 
-    // Annual timeline (gen / load / renewable / curtailment).
+    // Annual timeline (gen / load / renewable / curtailment / storage / loss).
     const tl = document.getElementById('annualSimTimelineChart');
     if (tl && window.Plotly && Array.isArray(data.timeline_hours)) {
       const h = data.timeline_hours;
@@ -3552,7 +3660,31 @@ const App = (() => {
         { x: h, y: data.timeline_gen || [], name: '发电', type: 'scatter', mode: 'lines', line: { color: '#0b6e4f' } },
         { x: h, y: data.timeline_ren || [], name: '新能源', type: 'scatter', mode: 'lines', line: { color: '#2980b9' } },
         { x: h, y: data.timeline_curt || [], name: '弃电', type: 'scatter', mode: 'lines', line: { color: '#f39c12' } },
-      ], Object.assign({ title: '全年逐时段功率 (MW)', xaxis: Object.assign({ title: '小时' }, theme.xaxis) }, theme), { responsive: true, displayModeBar: false });
+        { x: h, y: data.timeline_ess || [], name: '储能(+放/−充)', type: 'scatter', mode: 'lines', line: { color: '#8e44ad', dash: 'dot' } },
+        { x: h, y: data.timeline_loss || [], name: '网损', type: 'scatter', mode: 'lines', line: { color: '#7f8c8d', dash: 'dot' }, yaxis: 'y2' },
+      ], Object.assign({
+        title: '全年逐时段功率 (MW)',
+        xaxis: Object.assign({ title: '小时' }, theme.xaxis),
+        yaxis2: { title: '网损 (MW)', overlaying: 'y', side: 'right', gridcolor: 'rgba(0,0,0,0)', titlefont: { color: '#7f8c8d' }, tickfont: { color: '#7f8c8d' } },
+      }, theme), { responsive: true, displayModeBar: false });
+    }
+
+    // Annual bus-voltage envelope (min / mean / max across buses per snapshot).
+    const vc = document.getElementById('annualSimVoltChart');
+    if (vc && window.Plotly && Array.isArray(data.snapshot_vm) && data.snapshot_vm.length) {
+      const sh = data.snapshot_hours || data.snapshot_vm.map((_, i) => i);
+      const vmin = [], vmean = [], vmax = [];
+      data.snapshot_vm.forEach(row => {
+        if (!Array.isArray(row) || !row.length) { vmin.push(null); vmean.push(null); vmax.push(null); return; }
+        let mn = Infinity, mx = -Infinity, sum = 0;
+        row.forEach(v => { if (v < mn) mn = v; if (v > mx) mx = v; sum += v; });
+        vmin.push(mn); vmax.push(mx); vmean.push(sum / row.length);
+      });
+      Plotly.react(vc, [
+        { x: sh, y: vmax, name: '最高电压', type: 'scatter', mode: 'lines', line: { color: '#e74c3c', width: 1 } },
+        { x: sh, y: vmean, name: '平均电压', type: 'scatter', mode: 'lines', line: { color: '#2980b9', width: 2 } },
+        { x: sh, y: vmin, name: '最低电压', type: 'scatter', mode: 'lines', line: { color: '#f39c12', width: 1 }, fill: 'tonexty', fillcolor: 'rgba(41,128,185,0.08)' },
+      ], Object.assign({ title: '全年母线电压区间 (p.u., 抽样快照)', xaxis: Object.assign({ title: '小时' }, theme.xaxis), yaxis: Object.assign({ title: 'p.u.' }, theme.yaxis) }, theme), { responsive: true, displayModeBar: false });
     }
 
     // Monthly cost + energy bars.
@@ -3576,9 +3708,56 @@ const App = (() => {
       html += '</tbody></table>';
       mt.innerHTML = html;
     }
+
+    // Per-generator annual statistics.
+    const gt = document.getElementById('annualSimGenStats');
+    if (gt) {
+      const gss = data.gen_stats || [];
+      if (gss.length) {
+        let html = '<table class="tbl"><thead><tr><th>机组</th><th>发电量(MWh)</th><th>容量因子</th><th>启动次数</th><th>在线小时</th></tr></thead><tbody>';
+        gss.forEach(g => {
+          html += `<tr><td>${g.name || '—'}</td><td>${fmt(g.total_energy_mwh)}</td><td>${(Number(g.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${fmt(g.total_startups)}</td><td>${fmt(g.total_hours_online)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        gt.innerHTML = html;
+      } else gt.innerHTML = '<p class="empty-hint">无机组统计</p>';
+    }
+
+    // Per-storage annual statistics.
+    const st = document.getElementById('annualSimStorageStats');
+    if (st) {
+      const sss = data.storage_stats || [];
+      if (sss.length) {
+        let html = '<table class="tbl"><thead><tr><th>储能</th><th>充电(MWh)</th><th>放电(MWh)</th><th>等效循环</th></tr></thead><tbody>';
+        sss.forEach(s => {
+          html += `<tr><td>${s.name || '—'}</td><td>${fmt(s.total_charge_mwh)}</td><td>${fmt(s.total_discharge_mwh)}</td><td>${Number(s.cycles || 0).toFixed(1)}</td></tr>`;
+        });
+        html += '</tbody></table>';
+        st.innerHTML = html;
+      } else st.innerHTML = '<p class="empty-hint">无储能统计</p>';
+    }
+
+    // Per-renewable annual statistics.
+    const rt = document.getElementById('annualSimRenStats');
+    if (rt) {
+      const rss = data.renewable_stats || [];
+      if (rss.length) {
+        let html = '<table class="tbl"><thead><tr><th>新能源</th><th>发电量(MWh)</th><th>弃电量(MWh)</th><th>容量因子</th><th>弃电率</th></tr></thead><tbody>';
+        rss.forEach(r => {
+          html += `<tr><td>${r.name || '—'}</td><td>${fmt(r.total_energy_mwh)}</td><td>${fmt(r.total_curtailed_mwh)}</td><td>${(Number(r.capacity_factor || 0) * 100).toFixed(1)}%</td><td>${(Number(r.curtailment_rate || 0) * 100).toFixed(1)}%</td></tr>`;
+        });
+        html += '</tbody></table>';
+        rt.innerHTML = html;
+      } else rt.innerHTML = '<p class="empty-hint">无新能源统计</p>';
+    }
+
+    // Bring the annual dashboard into view (it sits below the time-series one).
+    if (section && section.scrollIntoView) {
+      try { section.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { section.scrollIntoView(); }
+    }
   }
 
-  function showTimeSeriesResults(data) {
+  function showTimeSeriesResults(data, opts) {
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('timeSeries');
@@ -3586,6 +3765,12 @@ const App = (() => {
 
     const section = document.getElementById('tspfResultsSection');
     section.style.display = 'block';
+    // Unless this is an annual day drill-down (keepAnnual), hide the annual
+    // dashboard so a plain time-series run shows only its own results.
+    if (!(opts && opts.keepAnnual)) {
+      const annSec = document.getElementById('annualSimResultsSection');
+      if (annSec) annSec.style.display = 'none';
+    }
 
     // Summary KPIs
     const summary = document.getElementById('tspfSummary');
@@ -6936,6 +7121,7 @@ const App = (() => {
       if (!_lastAnnualData) { log('请先运行年度并行生产模拟', 'warn'); return; }
       downloadJsonFile(`annual_production_sim_${tsTagForFilename()}.json`, _lastAnnualData);
     });
+    document.getElementById('btnAnnualDayDetail')?.addEventListener('click', runAnnualDayDetail);
     document.getElementById('btnDynamicCarbonFlow')?.addEventListener('click', runDynamicCarbonFlow);
 
     // Bar 3: PF result export — write _lastPfData to a JSON file.

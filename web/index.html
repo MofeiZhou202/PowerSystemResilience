@@ -372,17 +372,8 @@
       <span>使用场景时序</span>
     </label>
     <input type="file" id="fileImportGeneratedRegularScenario" accept=".json" style="display:none"/>
-    <label class="sub-label">仿真时间(小时)
-      <input id="simulationHours" type="number" value="8760" min="1" step="1"/>
-    </label>
-    <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
-      <input id="tspfSkipUC" type="checkbox" checked/>
-      <span>跳过机组组合</span>
-    </label>
-    <label class="sub-label sub-checkbox" title="启用经济调度（OPF）：每步以最低运行成本重分配可调机组出力">
-      <input id="tspfRunOPF" type="checkbox"/>
-      <span>启用OPF优化调度</span>
-    </label>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="以下为「时序潮流」与「年度仿真」共用的建模设置（求解器/网络约束/优化目标/各类丰富模型）">公共建模设置</span>
     <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
       <select id="tspfUcSolver">
         <option value="auto" selected>Auto (优选)</option>
@@ -463,6 +454,30 @@
         <option value="loss">最小网损(代理)</option>
         <option value="weighted">加权多目标</option>
       </select>
+    </label>
+    <span class="sub-sep" style="border-left:1px solid var(--border,#3e4451);margin:0 6px;height:34px;display:inline-block;"></span>
+    <span class="sub-group-label" style="font-weight:600;align-self:center;" title="时序潮流：在单一连续时段上按上面的公共设置求解 UC→OPF→PF（可选按日并行 / 日周期SOC）">时序潮流</span>
+    <label class="sub-label" title="时序潮流仿真时长（小时）；>24h 时保留并铺展导入的时序数据，可配合「按日并行」加速">仿真时间(小时)
+      <input id="simulationHours" type="number" value="24" min="1" step="1"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="跳过机组组合优化（直接按现有出力分配进行潮流仿真）">
+      <input id="tspfSkipUC" type="checkbox" checked/>
+      <span>跳过机组组合</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="启用经济调度（OPF）：每步以最低运行成本重分配可调机组出力">
+      <input id="tspfRunOPF" type="checkbox"/>
+      <span>启用OPF优化调度</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="日内周期SOC：每个调度日终端储能 SOC 等于初始 SOC（储能日内能量自平衡）；也是按日并行的前提">
+      <input id="tspfCyclicSoc" type="checkbox"/>
+      <span>日内周期SOC</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。SCIP 可完全并行；其他求解器安全串行">
+      <input id="tspfParallel" type="checkbox"/>
+      <span>按日并行</span>
+    </label>
+    <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+      <input id="tspfThreads" type="number" value="0" min="0" max="256" step="1"/>
     </label>
     <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行时序潮流</button>
     <button id="btnExportTspfResults" class="toolbar-btn" title="将时序潮流结果导出为 JSON 文件">结果导出</button>
@@ -1217,8 +1232,25 @@
           <h4>年度并行生产模拟结果</h4>
           <div id="annualSimSummary" class="results-summary"></div>
           <div id="annualSimTimelineChart" class="tspf-chart"></div>
+          <div id="annualSimVoltChart" class="tspf-chart"></div>
           <div id="annualSimMonthlyChart" class="tspf-chart"></div>
           <div id="annualSimMonthlyTable"></div>
+          <div id="annualSimDayDrill" class="annual-day-drill" style="margin:10px 0;padding:8px 10px;border:1px solid var(--border,#3e4451);border-radius:6px;">
+            <div id="annualSimDayPresets" style="margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+              <span style="font-weight:600;">代表日：</span>
+            </div>
+            <label style="font-weight:600;">逐日详情：第
+              <input id="annualSimDaySel" type="number" min="1" value="1" style="width:72px"/> 日
+            </label>
+            <button id="btnAnnualDayDetail" class="toolbar-btn">查看该日详情（富时序图表）</button>
+            <span class="sub-hint" style="display:block;margin-top:4px;">点选上方代表日按钮可一键定位并重解；或手动输入日序号。按当前年度分辨率、相同日内模型与周期SOC重解所选日，以分机组出力/电压/储能/网损等富时序图表展示（显示于上方“时序潮流结果”面板）。</span>
+          </div>
+          <h5>分机组年度统计</h5>
+          <div id="annualSimGenStats" class="topo-table-wrap"></div>
+          <h5>储能年度统计</h5>
+          <div id="annualSimStorageStats" class="topo-table-wrap"></div>
+          <h5>新能源年度统计</h5>
+          <div id="annualSimRenStats" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="reliability">
