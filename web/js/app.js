@@ -63,6 +63,7 @@ const App = (() => {
   let _lastTopoAnalysisData = null;
   let _lastNetReductionData = null;
   let _lastScenarioBaseSystemJson = null;
+  let _resilienceComparisonRuns = [];
   let _scenarioCurveEntries = [];
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
@@ -663,11 +664,11 @@ const App = (() => {
     const layout = {
       paper_bgcolor: whiteChart ? '#ffffff' : 'rgba(0,0,0,0)',
       plot_bgcolor: whiteChart ? '#ffffff' : 'rgba(0,0,0,0)',
-      font: { color: whiteChart ? '#111827' : '#abb2bf', size: 11 }, margin: { l: 55, r: 15, t: 42, b: info.note ? 68 : 40 },
+      font: { color: whiteChart ? '#111827' : '#abb2bf', size: 11 }, margin: { l: 55, r: 15, t: 42, b: 40 },
       xaxis: { ...axisTheme, title: context === 'resilience' ? '小时' : '时间步' },
       yaxis: { ...axisTheme, title: 'MW', ...(range ? { range } : {}) },
       title: info.title,
-      annotations: info.note ? [{ text: info.note, x: 0, y: -0.28, xref: 'paper', yref: 'paper', showarrow: false, align: 'left', font: { size: 10, color: whiteChart ? '#92400e' : '#d19a66' } }] : [],
+      annotations: [],
     };
     if (window.Plotly) Plotly.newPlot(chart, info.traces, layout, { responsive: true });
     else chart.innerHTML = '<p class="empty-hint">Plotly 未加载，无法展示曲线。</p>';
@@ -6923,6 +6924,8 @@ const App = (() => {
       const dcStarts = parseNumList('resDcFaultStartHour');
       const acRepairs = parseNumList('resAcRepairDuration');
       const dcRepairs = parseNumList('resDcRepairDuration');
+      const resilienceModel = document.getElementById('resModelSelect')?.value || 'RAStyleStageMILP';
+      const resilienceSolver = document.getElementById('resSolverSelect')?.value || 'Native';
       const manual_faults = [];
       acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
       dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
@@ -6933,6 +6936,8 @@ const App = (() => {
         dc_fault_branch_ids: dcIds,
         manual_faults,
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
+        resilience_model: resilienceModel,
+        resilience_solver: resilienceSolver,
         consider_switches: true,
         horizon_hours: Math.max(48, Math.ceil(latestEnd + 4)),
       };
@@ -6990,8 +6995,13 @@ const App = (() => {
       if (!validateFaultBranchIds()) return;
       markResilienceFaultBranches();
       const p = collectResilienceParams();
+      const isRaStageModel = p.resilience_model === 'RAStyleStageMILP';
       const scenarioProfiles = getResilienceScenarioProfiles();
       const params = {
+        model: p.resilience_model,
+        resilience_model: p.resilience_model,
+        mip_solver: p.resilience_solver,
+        resilience_solver: p.resilience_solver,
         default_fault_count: p.fault_count,
         manual_faults: p.manual_faults,
         ac_fault_branch_ids: p.ac_fault_branch_ids,
@@ -7003,12 +7013,12 @@ const App = (() => {
         allow_mess_dispatch: true,
         run_power_flow: false,
         consider_switches: true,
-        enable_disaster_stages: true,
-        use_ra_style_stage_milp: true,
-        allow_stage1_open_switches: true,
-        allow_stage2_close_ties: true,
-        require_switch_for_nonfault_branch_operation: true,
-        allow_branch_operation_without_switch: false,
+        enable_disaster_stages: isRaStageModel,
+        use_ra_style_stage_milp: isRaStageModel,
+        allow_stage1_open_switches: isRaStageModel,
+        allow_stage2_close_ties: isRaStageModel,
+        require_switch_for_nonfault_branch_operation: isRaStageModel,
+        allow_branch_operation_without_switch: !isRaStageModel,
         post_fault_reconfig_window_hr: 2.0,
       };
       if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) {
@@ -7140,15 +7150,106 @@ const App = (() => {
       ], { ...chartLayout('AC/DC 拓扑状态统计', '数量'), barmode: 'group' }, cfg);
     }
 
+    function resilienceModelLabel(model) {
+      const key = String(model || '');
+      if (key === 'RAStyleStageMILP') return 'RA阶段MILP';
+      if (key === 'MultiPeriodMIPLinDistFlow') return '多时段MIP LinDistFlow';
+      if (key === 'HeuristicSequential') return '启发式序贯';
+      return key || '—';
+    }
+
+    function summarizeMessTrace(trace) {
+      const nums = arr => Array.isArray(arr) ? arr.map(Number).filter(Number.isFinite) : [];
+      const unique = arr => Array.from(new Set((arr || []).filter(v => v !== null && v !== undefined && String(v) !== '')));
+      const buses = nums(trace?.bus);
+      const targets = nums(trace?.target_bus).filter(v => v >= 0);
+      const statuses = unique(trace?.status || []);
+      const remaining = nums(trace?.remaining_travel_hr);
+      const dispatch = nums(trace?.dispatch_mw);
+      const startBus = buses.length ? buses[0] : null;
+      const finalBus = buses.length ? buses[buses.length - 1] : null;
+      const busChanged = buses.some(v => v !== startBus);
+      const targetChanged = targets.length > 0 && targets.some(v => v !== startBus && v !== finalBus);
+      const inTransit = statuses.some(s => /transit|行驶|途中/i.test(String(s)));
+      const moved = busChanged || targetChanged || inTransit;
+      const targetSummary = unique(targets).slice(0, 8).join(' → ') || '—';
+      const statusSummary = statuses.slice(0, 6).join(' / ') || '—';
+      const maxRemain = remaining.length ? Math.max(...remaining) : null;
+      const maxDispatch = dispatch.length ? Math.max(...dispatch.map(v => Math.abs(v))) : null;
+      const totalAbsDispatch = dispatch.reduce((a, b) => a + Math.abs(b), 0);
+      return { startBus, finalBus, targetSummary, statusSummary, maxRemain, moved, maxDispatch, totalAbsDispatch };
+    }
+
+    function renderMessTrajectoryTable(data, nf) {
+      const mess = Array.isArray(data?.mess_traces) ? data.mess_traces : [];
+      if (!mess.length) return '<p class="empty-hint compact-hint">无移动储能轨迹数据</p>';
+      let html = '<h4 style="margin:8px 0 4px;">移动储能路径/轨迹证据</h4><table><thead><tr><th>MESS</th><th>起始母线</th><th>最终母线</th><th>目标母线</th><th>状态</th><th>最大剩余行驶(h)</th><th>是否移动</th><th>最大|出力|(MW)</th></tr></thead><tbody>';
+      mess.forEach((tr, idx) => {
+        const s = summarizeMessTrace(tr);
+        const name = tr.name || `MESS ${tr.storage_index ?? idx + 1}`;
+        html += `<tr><td>${escapeHtml(String(name))}</td><td>${s.startBus ?? '—'}</td><td>${s.finalBus ?? '—'}</td><td>${escapeHtml(String(s.targetSummary))}</td><td>${escapeHtml(String(s.statusSummary))}</td><td>${nf(s.maxRemain, 1)}</td><td>${s.moved ? '是' : '否'}</td><td>${nf(s.maxDispatch, 2)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      return html;
+    }
+
+    function updateResilienceComparisonRuns(data) {
+      const ms = data.model_stats || {};
+      _resilienceComparisonRuns.unshift({
+        time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        model: data.effective_model || data.model,
+        solver: data.effective_solver || ms.solver_name || data.requested_solver,
+        status: data.status || ms.solver_status || '',
+        feasible: data.feasible !== false,
+        resilience_index: data.resilience_index,
+        total_shed_mwh: data.total_shed_mwh,
+        weighted_unserved_mwh: data.weighted_unserved_mwh,
+        mess_energy_delivered_mwh: data.mess_energy_delivered_mwh,
+        mess_travel_distance_km: data.mess_travel_distance_km,
+        objective_value: ms.objective_value,
+        mip_gap: ms.mip_gap,
+        runtime_sec: ms.runtime_sec,
+      });
+      _resilienceComparisonRuns = _resilienceComparisonRuns.slice(0, 8);
+    }
+
+    function renderResilienceComparisonTable(nf) {
+      if (!_resilienceComparisonRuns.length) return '';
+      let html = '<h4 style="margin:8px 0 4px;">最近弹性评估对比</h4><table><thead><tr><th>时间</th><th>模型</th><th>求解器</th><th>可行</th><th>弹性指数</th><th>切负荷(MWh)</th><th>移储供能</th><th>移储行程</th><th>目标值</th><th>Gap</th><th>运行(s)</th></tr></thead><tbody>';
+      _resilienceComparisonRuns.forEach(r => {
+        html += `<tr><td>${r.time}</td><td>${resilienceModelLabel(r.model)}</td><td>${escapeHtml(String(r.solver || '—'))}</td><td>${r.feasible ? '✓' : '✗'}</td><td>${nf(r.resilience_index, 4)}</td><td>${nf(r.total_shed_mwh, 2)}</td><td>${nf(r.mess_energy_delivered_mwh, 2)}</td><td>${nf(r.mess_travel_distance_km, 1)}</td><td>${nf(r.objective_value, 2)}</td><td>${nf(r.mip_gap, 4)}</td><td>${nf(r.runtime_sec, 2)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      return html;
+    }
+
     function showResilienceResults(data) {
       document.getElementById('resultsEmpty').style.display = 'none';
       document.getElementById('resultsContent').style.display = 'block';
       setActiveResultGroup('resilience');
-      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+      const nf = (v, d = 2) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n.toFixed(d) : '—';
+      };
+      updateResilienceComparisonRuns(data);
+      const ms = data.model_stats || {};
+      const eqCount = Number(ms.num_eq_constraints);
+      const ineqCount = Number(ms.num_ineq_constraints);
+      const constraintCount = (Number.isFinite(eqCount) || Number.isFinite(ineqCount))
+        ? `${Number.isFinite(eqCount) ? eqCount : 0} / ${Number.isFinite(ineqCount) ? ineqCount : 0}` : '—';
       const resilienceIndexTip = '弹性指数 = 评估时段内总供电电量 / 总需求电量，取值 0–1；越接近 1 表示灾害期间整体供电保持得越好。它是全时段能量积分指标；最低供电率是单个最差时刻指标。';
       const supplyRatios = Array.isArray(data.restoration_ratio) ? data.restoration_ratio.map(Number).filter(Number.isFinite) : [];
       const minSupplyRatio = supplyRatios.length ? Math.min(...supplyRatios) : (data.avg_restoration_ratio ?? 0);
       const kpis = [
+        ['评估模型', resilienceModelLabel(data.effective_model || data.model)],
+        ['请求求解器', data.requested_solver || '—'],
+        ['实际求解器', data.effective_solver || ms.solver_name || '—'],
+        ['求解状态', ms.solver_status || data.status || '—'],
+        ['变量 / 二进制变量', `${ms.num_variables ?? '—'} / ${ms.num_binary_variables ?? '—'}`],
+        ['等式 / 不等式约束', constraintCount],
+        ['目标值', nf(ms.objective_value, 3)],
+        ['MIP Gap', nf(ms.mip_gap, 4)],
+        ['运行时间 (s)', nf(ms.runtime_sec, 2)],
         ['可行', data.feasible === false ? '✗ 否' : '✓ 是'],
         ['状态', data.status ?? '—'],
         ['弹性指数', nf(data.resilience_index, 4), resilienceIndexTip],
@@ -7168,15 +7269,16 @@ const App = (() => {
       summaryHtml += '</tbody></table>';
 
       let detailHtml = '';
-      if (data.canonical_mapping_audit) {
-        const audit = data.canonical_mapping_audit || {};
-        detailHtml += '<h4 style="margin:0 0 4px;">Canonical → Rich 回映射</h4>';
-        detailHtml += `<table><tbody>
-          <tr><td>求解空间</td><td>${escapeHtml(audit.model_space || 'canonical_bus_edge_switch_mess')}</td></tr>
-          <tr><td>负荷回映射</td><td>${escapeHtml(audit.back_projection_policy || audit.load_mapping_policy || 'priority_first_then_proportional_by_real_time_demand')}</td></tr>
-          <tr><td>Rich负荷数</td><td>${audit.rich_load_count ?? (Array.isArray(data.rich_loads) ? data.rich_loads.length : '—')}</td></tr>
-        </tbody></table>`;
+      if (ms.formulation_notes) {
+        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4>';
+        detailHtml += `<p class="empty-hint compact-hint">${escapeHtml(String(ms.formulation_notes))}</p>`;
+      } else if ((data.effective_model || data.model) === 'HeuristicSequential') {
+        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4><p class="empty-hint compact-hint">启发式序贯模型使用移动储能路径分配，并在轨迹表中体现 bus / target_bus / status / remaining_travel_hr。</p>';
+      } else if ((data.effective_model || data.model) === 'MultiPeriodMIPLinDistFlow') {
+        detailHtml += '<h4 style="margin:0 0 4px;">模型说明</h4><p class="empty-hint compact-hint">多时段MIP模型包含移动储能时空路径约束，求解统计见评估指标。</p>';
       }
+      detailHtml += renderMessTrajectoryTable(data, nf);
+      detailHtml += renderResilienceComparisonTable(nf);
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
         detailHtml += '<h4 style="margin:0 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
         const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;

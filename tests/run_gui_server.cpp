@@ -13522,6 +13522,64 @@ int main(int argc, char** argv) {
         opts.auto_fault_stagger_hr = j.value("auto_fault_stagger_hr", 0.0);
         opts.auto_fault_start_hr = j.value("auto_fault_start_hr", 0.0);
         opts.run_power_flow = j.value("run_power_flow", false);
+        auto lower_copy = [](std::string s) {
+          std::transform(s.begin(), s.end(), s.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+          return s;
+        };
+        auto string_value_any = [&](std::initializer_list<const char*> keys, std::string dflt) {
+          for (const auto* key : keys) {
+            if (j.contains(key) && j[key].is_string()) return j[key].get<std::string>();
+          }
+          return dflt;
+        };
+        auto resilience_model_to_string = [](hacdcpf::analysis::DistributionResilienceModel model) {
+          switch (model) {
+            case hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP:
+              return std::string{"RAStyleStageMILP"};
+            case hacdcpf::analysis::DistributionResilienceModel::MultiPeriodMIPLinDistFlow:
+              return std::string{"MultiPeriodMIPLinDistFlow"};
+            case hacdcpf::analysis::DistributionResilienceModel::HeuristicSequential:
+              return std::string{"HeuristicSequential"};
+          }
+          return std::string{"HeuristicSequential"};
+        };
+        auto resilience_solver_to_string = [](hacdcpf::analysis::DistributionResilienceMIPSolver solver) {
+          switch (solver) {
+            case hacdcpf::analysis::DistributionResilienceMIPSolver::Native:
+              return std::string{"Native"};
+            case hacdcpf::analysis::DistributionResilienceMIPSolver::HiGHS:
+              return std::string{"HiGHS"};
+            case hacdcpf::analysis::DistributionResilienceMIPSolver::Gurobi:
+              return std::string{"Gurobi"};
+          }
+          return std::string{"Native"};
+        };
+        auto parse_resilience_model = [&](const std::string& raw) {
+          const std::string v = lower_copy(raw);
+          if (v == "multiperiodmiplindistflow" || v == "mip" || v == "strict_mip" ||
+              v == "strict-mip" || v == "lindistflow" || v == "multi_period_mip") {
+            return hacdcpf::analysis::DistributionResilienceModel::MultiPeriodMIPLinDistFlow;
+          }
+          if (v == "heuristicsequential" || v == "heuristic" || v == "sequential") {
+            return hacdcpf::analysis::DistributionResilienceModel::HeuristicSequential;
+          }
+          return hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
+        };
+        auto parse_resilience_solver = [&](const std::string& raw) {
+          const std::string v = lower_copy(raw);
+          if (v == "highs") return hacdcpf::analysis::DistributionResilienceMIPSolver::HiGHS;
+          if (v == "gurobi") return hacdcpf::analysis::DistributionResilienceMIPSolver::Gurobi;
+          return hacdcpf::analysis::DistributionResilienceMIPSolver::Native;
+        };
+        const std::string requested_model = string_value_any({"model", "resilience_model"}, "RAStyleStageMILP");
+        const std::string requested_solver = string_value_any({"mip_solver", "resilience_solver", "solver"}, "Native");
+        opts.model = parse_resilience_model(requested_model);
+        opts.mip.solver = parse_resilience_solver(requested_solver);
+        if (j.contains("mip_gap") && j["mip_gap"].is_number()) opts.mip.mip_gap = j["mip_gap"].get<double>();
+        if (j.contains("mip_time_limit_s") && j["mip_time_limit_s"].is_number_integer()) opts.mip.max_time_s = j["mip_time_limit_s"].get<int>();
+        if (j.contains("mip_max_nodes") && j["mip_max_nodes"].is_number_integer()) opts.mip.max_nodes = j["mip_max_nodes"].get<int>();
+        if (j.contains("mip_num_threads") && j["mip_num_threads"].is_number_integer()) opts.mip.num_threads = j["mip_num_threads"].get<int>();
         auto parse_profile = [&](const char* key) {
           std::vector<double> profile;
           if (!j.contains(key) || !j[key].is_array()) return profile;
@@ -13714,28 +13772,32 @@ int main(int argc, char** argv) {
         };
 
         const bool consider_switches = j.value("consider_switches", true);
-        opts.enable_disaster_stages = j.value("enable_disaster_stages", true);
-        opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", true);
+        const bool selected_ra = opts.model == hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
         opts.post_fault_reconfig_window_hr = j.value("post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
         opts.disaster_post_fault_reconfig_window_hr = j.value(
             "disaster_post_fault_reconfig_window_hr", opts.post_fault_reconfig_window_hr);
-        opts.use_switch_based_fault_isolation = j.value("use_switch_based_fault_isolation", true);
-        opts.allow_stage1_open_switches = j.value("allow_stage1_open_switches", true);
-        opts.allow_stage2_close_ties = j.value("allow_stage2_close_ties", true);
-        opts.require_switch_for_nonfault_branch_operation =
-            j.value("require_switch_for_nonfault_branch_operation", consider_switches);
-        opts.allow_branch_operation_without_switch =
-            j.value("allow_branch_operation_without_switch", !consider_switches);
         opts.use_remote_switch_only = j.value("use_remote_switch_only", false);
-        opts.model = hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP;
-        opts.enable_disaster_stages = true;
-        opts.use_ra_style_stage_milp = true;
-        opts.use_switch_based_fault_isolation = true;
-        opts.allow_stage1_open_switches = true;
-        opts.allow_stage2_close_ties = true;
-        opts.require_switch_for_nonfault_branch_operation = true;
-        opts.allow_branch_operation_without_switch = false;
-        (void)consider_switches;
+        if (selected_ra) {
+          opts.enable_disaster_stages = j.value("enable_disaster_stages", true);
+          opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", true);
+          opts.use_switch_based_fault_isolation = j.value("use_switch_based_fault_isolation", true);
+          opts.allow_stage1_open_switches = j.value("allow_stage1_open_switches", true);
+          opts.allow_stage2_close_ties = j.value("allow_stage2_close_ties", true);
+          opts.require_switch_for_nonfault_branch_operation =
+              j.value("require_switch_for_nonfault_branch_operation", true);
+          opts.allow_branch_operation_without_switch =
+              j.value("allow_branch_operation_without_switch", false);
+        } else {
+          opts.enable_disaster_stages = false;
+          opts.use_ra_style_stage_milp = false;
+          opts.use_switch_based_fault_isolation = j.value("use_switch_based_fault_isolation", consider_switches);
+          opts.allow_stage1_open_switches = j.value("allow_stage1_open_switches", false);
+          opts.allow_stage2_close_ties = j.value("allow_stage2_close_ties", false);
+          opts.require_switch_for_nonfault_branch_operation =
+              j.value("require_switch_for_nonfault_branch_operation", consider_switches);
+          opts.allow_branch_operation_without_switch =
+              j.value("allow_branch_operation_without_switch", !consider_switches);
+        }
 
         auto value_int_any = [](const json& obj, std::initializer_list<const char*> keys, int dflt = -1) {
           for (const auto* key : keys) if (obj.contains(key) && !obj[key].is_null()) return obj[key].get<int>();
@@ -14094,12 +14156,21 @@ int main(int argc, char** argv) {
         out["switched_open_ids"] = switched_open_ids;
         out["switched_closed_ids"] = switched_closed_ids;
         out["hourly"] = hourly;
-        out["model"] = result.model == hacdcpf::analysis::DistributionResilienceModel::RAStyleStageMILP
-                           ? "RAStyleStageMILP"
-                           : (result.model == hacdcpf::analysis::DistributionResilienceModel::MultiPeriodMIPLinDistFlow
-                                  ? "MultiPeriodMIPLinDistFlow"
-                                  : "HeuristicSequential");
-        out["model_stats"] = json{{"solver_name", result.model_stats.solver_name},
+        const std::string effective_model = resilience_model_to_string(result.model);
+        const std::string normalized_requested_model = resilience_model_to_string(opts.model);
+        const std::string normalized_requested_solver = resilience_solver_to_string(opts.mip.solver);
+        const std::string effective_solver = result.model_stats.solver_name.empty()
+            ? (result.model == hacdcpf::analysis::DistributionResilienceModel::HeuristicSequential
+                   ? std::string{"N/A"}
+                   : normalized_requested_solver)
+            : result.model_stats.solver_name;
+        out["model"] = effective_model;
+        out["requested_model"] = normalized_requested_model;
+        out["requested_solver"] = normalized_requested_solver;
+        out["effective_model"] = effective_model;
+        out["effective_solver"] = effective_solver;
+        out["model_stats"] = json{{"model", effective_model},
+                                   {"solver_name", result.model_stats.solver_name},
                                    {"solver_status", result.model_stats.solver_status},
                                    {"model_scope", result.model_stats.model_scope},
                                    {"model_built", result.model_stats.model_built},

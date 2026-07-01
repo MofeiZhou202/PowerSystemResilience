@@ -415,6 +415,14 @@
     <label class="sub-label" title="移动储能行驶速度 (km/h)">移储速度
       <input id="resMobileSpeed" type="number" value="40" min="0" step="5"/>
     </label>
+    <input id="resModelSelect" type="hidden" value="RAStyleStageMILP"/>
+    <label class="sub-label" title="MIP模型使用的求解器；启发式序贯模型会忽略该选项">求解器
+      <select id="resSolverSelect">
+        <option value="Native" selected>Native</option>
+        <option value="HiGHS">HiGHS</option>
+        <option value="Gurobi">Gurobi</option>
+      </select>
+    </label>
     <input id="resConsiderSwitches" type="checkbox" style="display:none"/>
     <button id="btnRunResilience" class="toolbar-btn run-btn" title="运行弹性评估">运行弹性评估</button>
     <button id="btnExportResilienceResults" class="toolbar-btn" title="将评估结果导出为 JSON">评估结果<br>导出</button>
