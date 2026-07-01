@@ -4,6 +4,7 @@
 
 #include "hacdcpf/api/solver_capabilities.hpp"
 #include "hacdcpf/detail/internal_helpers.hpp"
+#include "hacdcpf/dynamics/dynamics.hpp"
 #include "hacdcpf/ev_power_traffic/ev_power_traffic_simulation.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
@@ -86,6 +87,12 @@ PowerFlowResult solve_power_flow_fdpf(const HybridPowerSystem& sys,
 
 powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& sys,
                                                         const PowerFlowOptions& opt = {});
+
+// ── Transient dynamics ─────────────────────────────────────────────────────
+
+dynamics::DynamicResults run_transient_simulation(
+    const HybridPowerSystem& sys,
+    const dynamics::DynamicSolverOptions& opt = {});
 
 // ── OPF ───────────────────────────────────────────────────────────────────────
 

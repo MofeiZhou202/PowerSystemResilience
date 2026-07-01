@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Hybrid AC/DC Power System Simulator — ETAP-Style</title>
-<link rel="stylesheet" href="css/style.css?v=20260621-harmonics"/>
+<link rel="stylesheet" href="css/style.css?v=20260701-transient-wide"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -59,6 +59,7 @@
   <button id="moduleOpf"          class="module-btn" data-module="opf">最优潮流</button>
   <button id="moduleShortCircuit" class="module-btn" data-module="shortCircuit">短路计算</button>
   <button id="moduleHarmonics"    class="module-btn" data-module="harmonics">谐波潮流</button>
+  <button id="moduleTransient"    class="module-btn" data-module="transient">暂态仿真</button>
   <button id="moduleTopology"     class="module-btn" data-module="topology">拓扑重构</button>
   <button id="moduleTopologyAnalysis" class="module-btn" data-module="topologyAnalysis">拓扑分析</button>
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries">时序生产模拟</button>
@@ -304,6 +305,68 @@
     </label>
 
     <button id="btnRunHarmonics" class="toolbar-btn run-btn" title="运行谐波分析">运行</button>
+  </div>
+  <!-- Transient phasor-domain dynamics -->
+  <div class="sub-section" data-sub="transient" hidden>
+    <label class="sub-label">积分器
+      <select id="trSolver" title="暂态积分/DAE求解器">
+        <option value="heun" selected>Heun 显式二阶</option>
+        <option value="rk4">RK4 显式四阶</option>
+        <option value="backward_euler">后退欧拉 Newton</option>
+        <option value="trapezoidal">梯形 Newton</option>
+        <option value="rosenbrock">Rosenbrock-Euler</option>
+        <option value="euler">Euler 显式</option>
+      </select>
+    </label>
+    <label class="sub-label">终止(s)
+      <input id="trEnd" type="number" value="1.0" step="0.05" min="0.001" style="width:72px"/>
+    </label>
+    <label class="sub-label">步长(s)
+      <input id="trDt" type="number" value="0.01" step="0.001" min="0.0001" style="width:72px"/>
+    </label>
+    <label class="sub-label">事件
+      <select id="trEventType" title="可选扰动事件">
+        <option value="">无事件</option>
+        <option value="ACLoadScale">AC负荷阶跃</option>
+        <option value="FaultShunt">母线故障</option>
+        <option value="ClearFault">清除故障</option>
+        <option value="VSCTrip">VSC跳闸</option>
+        <option value="GeneratorTrip">发电机跳闸</option>
+        <option value="ACBranchTrip">AC支路跳闸</option>
+      </select>
+    </label>
+    <label class="sub-label">t(s)
+      <input id="trEventTime" type="number" value="0.2" step="0.01" min="0" style="width:64px"/>
+    </label>
+    <label class="sub-label">对象
+      <input id="trEventTarget" type="number" value="1" step="1" min="0" style="width:58px"/>
+    </label>
+    <label class="sub-label">值
+      <input id="trEventValue" type="number" value="0.5" step="0.1" style="width:64px"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="失败时自动缩小步长重试">
+      <input id="trAdaptive" type="checkbox" checked/><span>自适应</span>
+    </label>
+    <label class="sub-label sub-checkbox" title="用现有潮流求解器计算事件前初始运行点">
+      <input id="trPowerFlowInit" type="checkbox" checked/><span>潮流初始化</span>
+    </label>
+    <label class="sub-label">PF迭代
+      <input id="trPfMaxIter" type="number" value="80" step="10" min="5" style="width:62px"/>
+    </label>
+    <label class="sub-label">PF容差
+      <input id="trPfTol" type="number" value="1e-8" step="1e-8" min="1e-12" style="width:82px"/>
+    </label>
+    <label class="sub-label sub-checkbox" title="为带 DC 端口的 VSC 启用 DC 母线电容电压状态">
+      <input id="trDynamicDcLink" type="checkbox"/><span>DC链动态</span>
+    </label>
+    <label class="sub-label">Cdc(s)
+      <input id="trDcLinkC" type="number" value="0.10" step="0.01" min="0.001" style="width:70px"/>
+    </label>
+    <label class="sub-label">Gdc
+      <input id="trDcLinkG" type="number" value="20" step="1" min="0" style="width:58px"/>
+    </label>
+    <button id="btnRunTransient" class="toolbar-btn run-btn" title="运行暂态仿真">运行暂态</button>
+    <button id="btnExportTransient" class="toolbar-btn" title="导出暂态仿真结果 JSON">结果导出</button>
   </div>
   <!-- Topology reconstruction -->
   <div class="sub-section" data-sub="topology" hidden>
@@ -1264,6 +1327,14 @@
           <div id="hpfNewtonResults" class="topo-table-wrap"></div>
         </div>
         </div><!-- /result-group harmonics -->
+        <div class="result-group" data-result-group="transient">
+          <div class="topo-section">
+            <h4>暂态仿真结果</h4>
+            <div id="transientResults" class="topo-table-wrap">
+              <p class="empty-hint">运行暂态仿真后查看 GFL/GFM 控制、三相电压和 DC 电压动态。</p>
+            </div>
+          </div>
+        </div><!-- /result-group transient -->
         <div class="result-group" data-result-group="topology">
         <div class="topo-section">
           <h4>拓扑重构结果</h4>
@@ -1497,8 +1568,8 @@
   </div>
 </div>
 
-<script src="js/components.js?v=20260628-generator-flow-results"></script>
-<script src="js/canvas.js?v=20260628-generator-flow-results"></script>
-<script src="js/app.js?v=20260628-generator-flow-results"></script>
+<script src="js/components.js?v=20260701-transient-wide"></script>
+<script src="js/canvas.js?v=20260701-transient-wide"></script>
+<script src="js/app.js?v=20260701-transient-wide"></script>
 </body>
 </html>

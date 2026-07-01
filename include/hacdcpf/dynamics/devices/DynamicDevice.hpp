@@ -7,6 +7,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/dynamics/DynamicEvent.hpp"
+#include "hacdcpf/dynamics/DynamicResults.hpp"
 #include "hacdcpf/dynamics/DynamicStamp.hpp"
 #include "hacdcpf/dynamics/DynamicState.hpp"
 #include "hacdcpf/dynamics/NetworkState.hpp"
@@ -24,6 +25,13 @@ class DynamicDevice {
                                        DynamicState& x,
                                        NetworkState& y) = 0;
 
+  virtual bool trimToNetworkEquilibrium(DynamicState& x,
+                                        NetworkState& y) {
+    (void)x;
+    (void)y;
+    return false;
+  }
+
   virtual void computeDerivatives(double t,
                                   const DynamicState& x,
                                   const NetworkState& y,
@@ -38,6 +46,17 @@ class DynamicDevice {
                                       const NetworkState& y) {
     (void)x;
     (void)y;
+  }
+
+  [[nodiscard]] virtual DynamicDeviceOutput output(const DynamicState& x,
+                                                   const NetworkState& y) const {
+    (void)x;
+    (void)y;
+    DynamicDeviceOutput out;
+    out.name = name();
+    out.type = type();
+    out.component_index = componentIndex();
+    return out;
   }
 
   virtual void handleEvent(const DynamicEvent& event,

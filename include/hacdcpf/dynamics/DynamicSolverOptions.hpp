@@ -11,7 +11,8 @@ enum class DynamicSolverType {
   PartitionedHeun,
   PartitionedRK4,
   BackwardEulerNewton,
-  TrapezoidalNewton
+  TrapezoidalNewton,
+  RosenbrockEuler
 };
 
 enum class DynamicLinearSolverType {
@@ -30,20 +31,28 @@ struct DynamicSolverOptions {
   double rel_tol{1e-6};
   int max_newton_iters{20};
   double newton_tol{1e-8};
+  double newton_damping_min{1e-3};
 
   bool use_adaptive_step{false};
   bool use_analytic_jacobian{false};
   bool use_numerical_jacobian{false};
 
   bool run_power_flow_initialization{true};
+  bool trim_dynamic_initial_conditions{true};
   bool project_to_canonical{true};
   bool synthesize_three_phase_if_absent{true};
   bool include_constant_power_as_admittance{true};
+  bool dynamic_dc_link{false};
   bool record_every_step{true};
   bool verbose{false};
+  int max_step_halving{8};
+  int max_dynamic_trim_iters{12};
+  double dynamic_trim_tol{1e-7};
 
   double source_stiffness_pu{1e4};
   double inverter_virtual_reactance_pu{0.10};
+  double dc_link_capacitance_s{0.10};
+  double dc_link_coupling_conductance_pu{20.0};
   double min_branch_impedance_pu{1e-6};
   double singular_regularization_pu{1e-8};
 

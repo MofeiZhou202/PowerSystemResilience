@@ -415,6 +415,11 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   flex-shrink: 0;
   overflow: hidden;
 }
+body[data-active-result-group="transient"] #rightPanel {
+  width: clamp(760px, 66vw, 1180px);
+  min-width: min(760px, calc(100vw - var(--lib-w) - 220px));
+  max-width: 82vw;
+}
 .panel-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
@@ -505,6 +510,10 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 #resilienceResults.topo-table-wrap,
 #reliabilityResults.topo-table-wrap {
+  max-height: none;
+  overflow: visible;
+}
+#transientResults.topo-table-wrap {
   max-height: none;
   overflow: visible;
 }
@@ -782,6 +791,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 #resultsContent[data-active-group="carbonFlow"]   .result-group[data-result-group="carbonFlow"],
 #resultsContent[data-active-group="shortCircuit"] .result-group[data-result-group="shortCircuit"],
 #resultsContent[data-active-group="harmonics"]    .result-group[data-result-group="harmonics"],
+#resultsContent[data-active-group="transient"]    .result-group[data-result-group="transient"],
 #resultsContent[data-active-group="topology"]     .result-group[data-result-group="topology"],
 #resultsContent[data-active-group="topologyAnalysis"] .result-group[data-result-group="topologyAnalysis"],
 #resultsContent[data-active-group="hosting"]      .result-group[data-result-group="hosting"],
@@ -794,6 +804,114 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 .scenario-generation-charts {
   width: 100%;
   margin: 6px 0 10px;
+}
+
+.transient-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+.transient-kpi {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: rgba(97,175,239,0.08);
+}
+.transient-kpi-label {
+  font-size: 11px;
+  color: var(--ink2);
+}
+.transient-kpi-value {
+  font-size: 22px;
+  font-weight: 700;
+  margin-top: 2px;
+}
+.transient-init-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 8px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.03);
+}
+.transient-init-panel > div {
+  min-width: 0;
+}
+.transient-init-panel span {
+  display: block;
+  font-size: 11px;
+  color: var(--ink2);
+}
+.transient-init-panel strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 14px;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.transient-init-warnings {
+  grid-column: 1 / -1;
+  color: var(--orange);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.transient-dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(330px, 1fr));
+  gap: 14px;
+  margin: 12px 0 16px;
+}
+.transient-chart {
+  min-width: 0;
+  height: 380px;
+  min-height: 380px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  background: rgba(255,255,255,0.02);
+}
+.transient-chart-wide {
+  grid-column: 1 / -1;
+  height: 460px;
+  min-height: 440px;
+}
+body[data-active-result-group="transient"] #tabResults {
+  padding: 12px;
+}
+body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section {
+  margin-bottom: 0;
+}
+body[data-active-result-group="transient"] .result-group[data-result-group="transient"] .topo-section h4 {
+  font-size: 14px;
+  padding: 2px 0 8px;
+  margin-bottom: 8px;
+}
+#transientResults table {
+  margin-top: 6px;
+}
+#transientResults th,
+#transientResults td {
+  font-size: 12px;
+  padding: 5px 7px;
+}
+@media (max-width: 1150px) {
+  .transient-dashboard-grid { grid-template-columns: 1fr; }
+  .transient-chart-wide { grid-column: auto; }
+}
+@media (max-width: 900px) {
+  body[data-active-result-group="transient"] #rightPanel {
+    width: 100vw;
+    min-width: 0;
+    max-width: none;
+  }
+  body[data-active-result-group="transient"] #componentLib,
+  body[data-active-result-group="transient"] #canvasContainer,
+  body[data-active-result-group="transient"] #rightPanelResizer {
+    display: none;
+  }
 }
 
 /* ── Topology analysis: island legend + canvas overlay ───────────────── */

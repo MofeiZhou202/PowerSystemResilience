@@ -1035,6 +1035,12 @@ powerflow::ACLinearizedDCResult solve_ac_dc_power_flow(const HybridPowerSystem& 
   return powerflow::solve_ac_linearized_dc(data);
 }
 
+dynamics::DynamicResults run_transient_simulation(
+    const HybridPowerSystem& sys,
+    const dynamics::DynamicSolverOptions& opt) {
+  return dynamics::run_transient_simulation(sys, opt);
+}
+
 opf::ACOPFResult solve_ac_opf(const HybridPowerSystem& sys, const opf::ACOPFOptions& opt) {
   opf::ACOPFResult r = opf::solve_ac_opf(sys, opt);
   // Surface switch / circuit-breaker terminal flows at the OPF dispatch point.

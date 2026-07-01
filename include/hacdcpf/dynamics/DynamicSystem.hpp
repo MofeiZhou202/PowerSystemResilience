@@ -99,6 +99,7 @@ class DynamicNetwork {
 struct DynamicSystem {
   HybridPowerSystem canonical_system;
   PowerFlowResult initial_power_flow;
+  DynamicInitializationSummary initialization;
   DynamicNetwork network;
   std::vector<std::unique_ptr<DynamicDevice>> devices;
   std::vector<DynamicEvent> events;
@@ -109,6 +110,12 @@ struct DynamicSystem {
 
   void assignStateIndices();
   void initializeStatesFromPowerFlow();
+  [[nodiscard]] bool solveNetwork(double t, std::string& error);
+  [[nodiscard]] bool evaluateDerivatives(double t,
+                                         const Eigen::VectorXd& state,
+                                         Eigen::VectorXd& dxdt,
+                                         std::string& error);
+  [[nodiscard]] double derivativeInfinityNorm(double t, std::string& error);
   [[nodiscard]] int stateCount() const noexcept { return x.size(); }
 };
 

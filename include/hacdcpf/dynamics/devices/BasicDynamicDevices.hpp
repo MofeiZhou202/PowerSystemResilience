@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <complex>
 #include <string>
 
@@ -7,11 +8,19 @@
 
 namespace hacdcpf::dynamics {
 
+enum class DCLinkMode {
+  ConstantDCVoltage,
+  DynamicDCVoltage
+};
+
 struct ACLoadDynamicParams {
   int component_index{0};
   int bus{0};
   int bus_pos{-1};
   std::string label;
+  std::string canvas_type{"load"};
+  std::string component_domain{"AC"};
+  std::string source_type{"ac_load"};
   double p_mw{0.0};
   double q_mvar{0.0};
   double base_mva{100.0};
@@ -42,9 +51,57 @@ class DynamicLoad : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "ACLoad"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   ACLoadDynamicParams params_;
+};
+
+struct ThreePhaseLoadDynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"asymLoad"};
+  std::string component_domain{"AC"};
+  std::string source_type{"three_phase_load"};
+  std::array<double, 3> p_mw{0.0, 0.0, 0.0};
+  std::array<double, 3> q_mvar{0.0, 0.0, 0.0};
+  std::array<bool, 3> phase_active{true, true, true};
+  double base_mva{100.0};
+  double scale{1.0};
+  bool in_service{true};
+};
+
+class ThreePhaseDynamicLoad : public DynamicDevice {
+ public:
+  explicit ThreePhaseDynamicLoad(ThreePhaseLoadDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "ThreePhaseLoad"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  ThreePhaseLoadDynamicParams params_;
 };
 
 struct DCLoadDynamicParams {
@@ -52,6 +109,9 @@ struct DCLoadDynamicParams {
   int bus{0};
   int bus_pos{-1};
   std::string label;
+  std::string canvas_type{"dcLoad"};
+  std::string component_domain{"DC"};
+  std::string source_type{"dc_load"};
   double p_mw{0.0};
   double base_mva{100.0};
   double scale{1.0};
@@ -81,9 +141,55 @@ class DCDynamicLoad : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "DCLoad"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   DCLoadDynamicParams params_;
+};
+
+struct DCVoltageSourceDynamicParams {
+  int component_index{0};
+  int bus{0};
+  int bus_pos{-1};
+  std::string label;
+  std::string canvas_type{"dc"};
+  std::string component_domain{"DC"};
+  std::string source_type{"dc_voltage_source"};
+  double v_ref_pu{1.0};
+  double conductance_pu{1e4};
+  bool trip_on_vsc_event{false};
+  bool in_service{true};
+};
+
+class DCVoltageSourceDynamic : public DynamicDevice {
+ public:
+  explicit DCVoltageSourceDynamic(DCVoltageSourceDynamicParams params);
+
+  void assignStateIndices(int& offset) override;
+  void initializeFromPowerFlow(const PowerFlowResult& pf,
+                               DynamicState& x,
+                               NetworkState& y) override;
+  void computeDerivatives(double t,
+                          const DynamicState& x,
+                          const NetworkState& y,
+                          Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void stamp(double t,
+             const DynamicState& x,
+             const NetworkState& y,
+             DynamicStamp& stamp) const override;
+  void handleEvent(const DynamicEvent& event,
+                   DynamicState& x,
+                   NetworkState& y) override;
+
+  [[nodiscard]] std::string name() const override;
+  [[nodiscard]] std::string type() const override { return "DCVoltageSource"; }
+  [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
+
+ private:
+  DCVoltageSourceDynamicParams params_;
 };
 
 struct VoltageSourceDynamicParams {
@@ -92,6 +198,9 @@ struct VoltageSourceDynamicParams {
   int bus_pos{-1};
   std::string label;
   std::string device_type{"VoltageSource"};
+  std::string canvas_type{"gen"};
+  std::string component_domain{"AC"};
+  std::string source_type{"voltage_source"};
   double base_mva{100.0};
   double vm_set_pu{1.0};
   double angle_set_rad{0.0};
@@ -114,6 +223,8 @@ class SynchronousMachine : public DynamicDevice {
   void initializeFromPowerFlow(const PowerFlowResult& pf,
                                DynamicState& x,
                                NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
   void computeDerivatives(double t,
                           const DynamicState& x,
                           const NetworkState& y,
@@ -129,6 +240,8 @@ class SynchronousMachine : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   VoltageSourceDynamicParams params_;
@@ -142,6 +255,9 @@ struct GridFormingInverterParams {
   int dc_bus_pos{-1};
   std::string label;
   std::string device_type{"GridFormingInverter"};
+  std::string canvas_type{"vsc"};
+  std::string component_domain{"AC"};
+  std::string source_type{"grid_forming_inverter"};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -150,10 +266,26 @@ struct GridFormingInverterParams {
   double frequency_hz{50.0};
   double virtual_r_pu{0.0};
   double virtual_x_pu{0.10};
-  double p_droop_pu{0.02};
-  double q_droop_pu{0.04};
+  double p_droop_pu{0.01};
+  double q_droop_pu{0.05};
   double power_filter_t_s{0.05};
+  double voltage_control_t_s{0.02};
+  double voltage_kp{0.1};
+  double voltage_ki{10.0};
+  double overload_kp{0.1};
+  double overload_ki{10.0};
+  double current_limit_pu{0.0};
+  double pmax_mw{0.0};
+  double pmin_mw{0.0};
+  double vmax_internal_pu{1.30};
+  double vmin_internal_pu{0.20};
   double eta{0.98};
+  double dc_link_capacitance_s{0.10};
+  double dc_link_conductance_pu{1e4};
+  double vdc_ref_pu{1.0};
+  double vdc_min_pu{0.20};
+  double vdc_max_pu{2.00};
+  DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool in_service{true};
 };
 
@@ -165,6 +297,8 @@ class GridFormingInverter : public DynamicDevice {
   void initializeFromPowerFlow(const PowerFlowResult& pf,
                                DynamicState& x,
                                NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
   void computeDerivatives(double t,
                           const DynamicState& x,
                           const NetworkState& y,
@@ -180,6 +314,8 @@ class GridFormingInverter : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   GridFormingInverterParams params_;
@@ -193,13 +329,32 @@ struct GridFollowingInverterParams {
   int dc_bus_pos{-1};
   std::string label;
   std::string device_type{"GridFollowingInverter"};
+  std::string canvas_type{"vsc"};
+  std::string component_domain{"AC"};
+  std::string source_type{"grid_following_inverter"};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
   double response_t_s{0.02};
+  double pll_kp{0.01};
+  double pll_ki{1.0};
+  double power_filter_t_s{0.02};
+  double v_min_current_pu{0.20};
   double current_limit_pu{0.0};
+  double stabilizing_admittance_pu{0.0};
+  double frequency_watt_droop_pu{0.0};
+  double volt_var_droop_pu{0.0};
+  double v_ref_pu{1.0};
+  double f_ref_hz{50.0};
   double eta{0.98};
+  double dc_link_capacitance_s{0.10};
+  double dc_link_conductance_pu{1e4};
+  double vdc_ref_pu{1.0};
+  double vdc_min_pu{0.20};
+  double vdc_max_pu{2.00};
+  DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool stamp_dc_power{false};
+  bool reactive_current_priority{false};
   bool in_service{true};
 };
 
@@ -211,6 +366,8 @@ class GridFollowingInverter : public DynamicDevice {
   void initializeFromPowerFlow(const PowerFlowResult& pf,
                                DynamicState& x,
                                NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
   void computeDerivatives(double t,
                           const DynamicState& x,
                           const NetworkState& y,
@@ -226,6 +383,8 @@ class GridFollowingInverter : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   GridFollowingInverterParams params_;
@@ -239,6 +398,9 @@ struct DCDCConverterDynamicParams {
   int bus_in_pos{-1};
   int bus_out_pos{-1};
   std::string label;
+  std::string canvas_type{"dcdcConverter"};
+  std::string component_domain{"DC"};
+  std::string source_type{"dcdc_converter"};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double eta{0.98};
@@ -254,6 +416,8 @@ class DCDCConverterDynamic : public DynamicDevice {
   void initializeFromPowerFlow(const PowerFlowResult& pf,
                                DynamicState& x,
                                NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
   void computeDerivatives(double t,
                           const DynamicState& x,
                           const NetworkState& y,
@@ -269,6 +433,8 @@ class DCDCConverterDynamic : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "DCDCConverter"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   DCDCConverterDynamicParams params_;
@@ -281,6 +447,9 @@ struct BatteryDynamicParams {
   int bus_pos{-1};
   bool is_ac{true};
   std::string label;
+  std::string canvas_type{"storage"};
+  std::string component_domain{"AC"};
+  std::string source_type{"storage"};
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -292,6 +461,7 @@ struct BatteryDynamicParams {
   double eta_discharge{0.95};
   double self_discharge_pct_per_h{0.0};
   double response_t_s{0.05};
+  bool stamp_power{true};
   bool in_service{true};
 };
 
@@ -303,6 +473,8 @@ class BatteryDynamic : public DynamicDevice {
   void initializeFromPowerFlow(const PowerFlowResult& pf,
                                DynamicState& x,
                                NetworkState& y) override;
+  bool trimToNetworkEquilibrium(DynamicState& x,
+                                NetworkState& y) override;
   void computeDerivatives(double t,
                           const DynamicState& x,
                           const NetworkState& y,
@@ -318,6 +490,8 @@ class BatteryDynamic : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.is_ac ? "ACStorage" : "DCStorage"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
+                                           const NetworkState& y) const override;
 
  private:
   BatteryDynamicParams params_;

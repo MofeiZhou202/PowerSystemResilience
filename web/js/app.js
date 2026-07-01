@@ -58,6 +58,7 @@ const App = (() => {
   let _lastAnnualData = null;
   let _lastCarbonData = null;
   let _lastDynamicCarbonData = null;
+  let _lastTransientData = null;
   let _lastReliabilityData = null;
   let _lastResilienceData = null;
   let _lastScenarioGenerationData = null;
@@ -114,6 +115,7 @@ const App = (() => {
     _lastTspfData = null;
     _lastCarbonData = null;
     _lastDynamicCarbonData = null;
+    _lastTransientData = null;
     if (typeof Canvas !== 'undefined' && Canvas.clearResults) Canvas.clearResults();
     if (reason) log(reason, 'info');
   }
@@ -125,7 +127,23 @@ const App = (() => {
   // visually mix their results.
   function setActiveResultGroup(name) {
     const rc = document.getElementById('resultsContent');
-    if (rc) rc.dataset.activeGroup = name || '';
+    const active = name || '';
+    if (rc) rc.dataset.activeGroup = active;
+    document.body?.setAttribute('data-active-result-group', active);
+    const panel = document.getElementById('rightPanel');
+    if (panel) {
+      if (active === 'transient') {
+        const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
+        const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
+        if (!panel.style.width || panel.offsetWidth < minUseful) {
+          panel.style.width = `${minUseful}px`;
+          panel.dataset.autoTransientWidth = '1';
+        }
+      } else if (panel.dataset.autoTransientWidth === '1') {
+        panel.style.width = '';
+        delete panel.dataset.autoTransientWidth;
+      }
+    }
   }
 
   // Build an inline attribute that makes a result row pan the canvas to a bus
@@ -159,6 +177,23 @@ const App = (() => {
       dc_bus: 'dc',
       ac_branch: 'branch',
       dc_branch: 'dcBranch',
+      ACLoad: 'load',
+      ThreePhaseLoad: 'load',
+      DCLoad: 'dcLoad',
+      ACStorage: 'storage',
+      DCStorage: 'dcStorage',
+      DCDCConverter: 'dcdcConverter',
+      GridFormingStorage: 'storage',
+      VSCGridForming: 'vsc',
+      VSCGridFollowing: 'vsc',
+      PVSystem: 'pv',
+      RenewableGen: 'renGen',
+      StaticGenerator: 'sgen',
+      ExternalGrid: 'extGrid',
+      SynchronousMachine: 'gen',
+      ThreePhaseGenerator: 'gen',
+      ThreePhaseExternalGrid: 'extGrid',
+      DCVoltageSource: 'dc',
       vsc_converter: 'vsc',
       dcdc_converter: 'dcdcConverter',
       energy_router: 'energyRouter',
@@ -679,6 +714,16 @@ const App = (() => {
   }
 
   // ========== API Client ==========
+  async function parseJsonResponse(res) {
+    const text = await res.text();
+    if (!text.trim()) return {};
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      return { error: text || res.statusText || e.message };
+    }
+  }
+
   async function apiPost(path, body = {}, options = {}) {
     const url = `${API_BASE}${path}`;
     if (!options.quiet) log(`POST ${path}`, 'info');
@@ -688,7 +733,7 @@ const App = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
@@ -712,7 +757,7 @@ const App = (() => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         const error = (data && data.error) || res.statusText;
         if (!options.quiet) log(`Error: ${error}`, 'error');
@@ -729,7 +774,7 @@ const App = (() => {
     const url = `${API_BASE}${path}`;
     try {
       const res = await fetch(url);
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok) {
         if (!options.quiet) log(`Error: ${data.error || res.statusText}`, 'error');
         return null;
@@ -2583,6 +2628,247 @@ const App = (() => {
       const modes = (el.getAttribute('data-modes') || '').split(/\s+/);
       el.style.display = modes.includes(mode) ? '' : 'none';
     });
+  }
+
+  function transientReadOptions() {
+    const eventType = document.getElementById('trEventType')?.value || '';
+    const eventTime = numberOr(document.getElementById('trEventTime')?.value, 0.2);
+    const eventTarget = parseInt(document.getElementById('trEventTarget')?.value, 10) || 0;
+    const eventValue = numberOr(document.getElementById('trEventValue')?.value, 0.0);
+    const events = [];
+    if (eventType) {
+      const event = {
+        type: eventType,
+        time_s: eventTime,
+        component_index: eventTarget,
+        value: eventValue,
+        label: `${eventType} ${eventTarget || ''}`.trim(),
+      };
+      if (eventType === 'FaultShunt' || eventType === 'ClearFault') {
+        event.bus = eventTarget;
+        event.component_type = 'AC';
+        if (eventType === 'FaultShunt') event.duration_s = Math.max(0.0, eventValue || 0.08);
+      }
+      events.push(event);
+    }
+    return {
+      solver_type: document.getElementById('trSolver')?.value || 'heun',
+      t_end_s: Math.max(0.001, numberOr(document.getElementById('trEnd')?.value, 1.0)),
+      dt_s: Math.max(0.0001, numberOr(document.getElementById('trDt')?.value, 0.01)),
+      use_adaptive_step: !!document.getElementById('trAdaptive')?.checked,
+      dynamic_dc_link: !!document.getElementById('trDynamicDcLink')?.checked,
+      dc_link_capacitance_s: Math.max(0.001, numberOr(document.getElementById('trDcLinkC')?.value, 0.10)),
+      dc_link_coupling_conductance_pu: Math.max(0.0, numberOr(document.getElementById('trDcLinkG')?.value, 20.0)),
+      run_power_flow_initialization: document.getElementById('trPowerFlowInit')?.checked !== false,
+      power_flow_options: {
+        max_iter: Math.max(5, parseInt(document.getElementById('trPfMaxIter')?.value, 10) || 80),
+        tol: Math.max(1e-12, numberOr(document.getElementById('trPfTol')?.value, 1e-8)),
+        enable_converter_coordination_check: true,
+      },
+      record_every_step: true,
+      events,
+    };
+  }
+
+  async function runTransientSimulation() {
+    setStatus('暂态仿真中...', 'busy');
+    if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    const data = await apiPost('/api/session/run_transient', transientReadOptions());
+    if (data && !data.error) {
+      _lastTransientData = data;
+      showTransientResults(data);
+      switchTab('results');
+      setStatus('暂态仿真完成');
+    } else {
+      setStatus('暂态仿真失败', 'error');
+    }
+  }
+
+  function updateTransientPfControls() {
+    const enabled = document.getElementById('trPowerFlowInit')?.checked !== false;
+    ['trPfMaxIter', 'trPfTol'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = !enabled;
+    });
+  }
+
+  function transientDeviceByType(data, pred) {
+    return (data?.device_series || []).filter(d => pred(String(d.type || '')));
+  }
+
+  function transientMetricTrace(dev, metric, name, color) {
+    const y = dev?.values?.[metric];
+    if (!Array.isArray(y) || !y.length) return null;
+    return {
+      x: _lastTransientData?.time_s || [],
+      y,
+      mode: 'lines',
+      name,
+      line: color ? { color } : undefined,
+      hovertemplate: `${escapeHtml(name)}<br>t=%{x:.4f}s<br>%{y:.4f}<extra></extra>`,
+    };
+  }
+
+  function transientPlotLayout(title, yTitle = '') {
+    return {
+      title: { text: title, font: { size: 14 }, x: 0.02, xanchor: 'left' },
+      margin: { l: 64, r: 24, t: 44, b: 52 },
+      xaxis: { title: 's', automargin: true },
+      yaxis: { title: yTitle, automargin: true },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#dcdfe4' },
+    };
+  }
+
+  function drawTransientDashboard(data) {
+    if (typeof Plotly === 'undefined') return;
+    const tab = document.getElementById('tabResults');
+    if (tab && !tab.classList.contains('active')) {
+      return;
+    }
+    const t = data.time_s || [];
+    const cfg = {
+      responsive: true,
+      displaylogo: false,
+      modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+    };
+    const voltageChart = document.getElementById('trVoltageChart');
+    if (voltageChart) {
+      Plotly.react(voltageChart, [
+        { x: t, y: data.max_ac_voltage_pu || [], mode: 'lines', name: 'AC max', line: { color: '#61afef' } },
+        { x: t, y: data.min_ac_voltage_pu || [], mode: 'lines', name: 'AC min', line: { color: '#e06c75' } },
+        { x: t, y: data.max_dc_voltage_pu || [], mode: 'lines', name: 'DC max', line: { color: '#98c379', dash: 'dot' } },
+        { x: t, y: data.min_dc_voltage_pu || [], mode: 'lines', name: 'DC min', line: { color: '#d19a66', dash: 'dot' } },
+      ], transientPlotLayout('电压包络', 'p.u.'), cfg);
+    }
+    const acHeat = document.getElementById('trAcHeatmap');
+    if (acHeat && Array.isArray(data.ac_voltage_matrix) && data.ac_voltage_matrix.length) {
+      Plotly.react(acHeat, [{
+        z: data.ac_voltage_matrix,
+        x: t,
+        y: data.ac_voltage_matrix.map((_, i) => `n${i + 1}`),
+        type: 'heatmap',
+        colorscale: 'Viridis',
+        colorbar: { title: 'p.u.' },
+      }], transientPlotLayout('三相节点电压热图', ''), cfg);
+    }
+    const freqChart = document.getElementById('trFreqChart');
+    const gfl = transientDeviceByType(data, type => type.includes('GridFollowing'));
+    const gfm = transientDeviceByType(data, type => type.includes('GridForming'));
+    const freqTraces = [];
+    gfl.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'pll_frequency_hz', `${dev.name} PLL`, ['#61afef', '#56b6c2', '#c678dd', '#e5c07b'][i % 4]);
+      if (tr) freqTraces.push(tr);
+    });
+    gfm.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'frequency_hz', `${dev.name} GFM`, ['#98c379', '#d19a66', '#e06c75', '#7c3aed'][i % 4]);
+      if (tr) freqTraces.push(tr);
+    });
+    if (freqChart) {
+      if (freqTraces.length) Plotly.react(freqChart, freqTraces, transientPlotLayout('控制频率 / PLL', 'Hz'), cfg);
+      else freqChart.innerHTML = '<p class="empty-hint">无 GFL/GFM 频率轨迹</p>';
+    }
+    const powerChart = document.getElementById('trPowerChart');
+    const pTraces = [];
+    [...gfl, ...gfm].slice(0, 6).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'p_mw', `${dev.name} P`, ['#61afef', '#98c379', '#d19a66', '#e06c75', '#c678dd', '#56b6c2'][i % 6]);
+      if (tr) pTraces.push(tr);
+    });
+    if (powerChart) {
+      if (pTraces.length) Plotly.react(powerChart, pTraces, transientPlotLayout('逆变器有功响应', 'MW'), cfg);
+      else powerChart.innerHTML = '<p class="empty-hint">无逆变器功率轨迹</p>';
+    }
+    const currentChart = document.getElementById('trCurrentChart');
+    const iTraces = [];
+    gfl.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'i_mag_pu', `${dev.name} |I|`, ['#61afef', '#56b6c2', '#c678dd', '#e5c07b'][i % 4]);
+      if (tr) iTraces.push(tr);
+    });
+    gfm.slice(0, 4).forEach((dev, i) => {
+      const tr = transientMetricTrace(dev, 'i_rms_pu', `${dev.name} Irms`, ['#98c379', '#d19a66', '#e06c75', '#7c3aed'][i % 4]);
+      if (tr) iTraces.push(tr);
+    });
+    if (currentChart) {
+      if (iTraces.length) Plotly.react(currentChart, iTraces, transientPlotLayout('逆变器电流限幅', 'p.u.'), cfg);
+      else currentChart.innerHTML = '<p class="empty-hint">无逆变器电流轨迹</p>';
+    }
+    const dcLinkChart = document.getElementById('trDcLinkChart');
+    if (dcLinkChart) {
+      const dcLinkTraces = [...gfl, ...gfm].slice(0, 6).map((dev, i) =>
+        transientMetricTrace(dev, 'vdc_link_pu', `${dev.name} Vdc`, ['#56b6c2', '#98c379', '#d19a66', '#c678dd', '#61afef', '#e06c75'][i % 6])
+      ).filter(Boolean);
+      if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('DC链电压状态', 'p.u.'), cfg);
+      else dcLinkChart.innerHTML = '<p class="empty-hint">未启用动态 DC 链</p>';
+    }
+    requestAnimationFrame(() => {
+      document.querySelectorAll('#transientResults .js-plotly-plot').forEach(el => {
+        try { Plotly.Plots.resize(el); } catch (_) {}
+      });
+    });
+  }
+
+  function showTransientResults(data) {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('transient');
+    const nf = (v, d = 3) => Number.isFinite(Number(v)) ? Number(v).toFixed(d) : '—';
+    const final = data.final || {};
+    const init = data.initialization || {};
+    const gflCount = transientDeviceByType(data, type => type.includes('GridFollowing')).length;
+    const gfmCount = transientDeviceByType(data, type => type.includes('GridForming')).length;
+    const initStatus = init.power_flow_requested
+      ? (init.power_flow_converged ? 'PF收敛' : (init.fallback_voltage_setpoints ? 'PF未收敛/回退' : 'PF未收敛'))
+      : '设定值初始化';
+    let html = '<div class="transient-kpi-grid">';
+    [
+      ['初始点', initStatus, 't=0'],
+      ['步数', data.steps ?? 0, ''],
+      ['Newton', data.newton_iterations ?? 0, 'iter'],
+      ['GFL', gflCount, '台'],
+      ['GFM', gfmCount, '台'],
+      ['AC最低电压', nf(final.min_ac_voltage_pu), 'p.u.'],
+      ['DC最高电压', nf(final.max_dc_voltage_pu), 'p.u.'],
+    ].forEach(([label, value, unit]) => {
+      html += `<div class="transient-kpi"><div class="transient-kpi-label">${escapeHtml(label)}</div><div class="transient-kpi-value">${escapeHtml(String(value))}</div><div class="transient-kpi-label">${escapeHtml(unit)}</div></div>`;
+    });
+    html += '</div>';
+    if (Array.isArray(data.warnings) && data.warnings.length) {
+      html += `<div style="color:var(--orange);font-size:12px;margin:6px 0;">${data.warnings.map(escapeHtml).join('<br>')}</div>`;
+    }
+    const initWarnings = Array.isArray(init.warnings) && init.warnings.length
+      ? `<div class="transient-init-warnings">${init.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+    html += '<div class="transient-init-panel">';
+    html += `<div><span>事件前初始点</span><strong>${escapeHtml(initStatus)}</strong></div>`;
+    html += `<div><span>PF迭代</span><strong>${escapeHtml(String(init.iterations ?? 0))}</strong></div>`;
+    html += `<div><span>PF残差</span><strong>${Number.isFinite(Number(init.residual)) ? Number(init.residual).toExponential(2) : '—'}</strong></div>`;
+    html += `<div><span>AC电压范围</span><strong>${nf(init.min_ac_voltage_pu)} - ${nf(init.max_ac_voltage_pu)} pu</strong></div>`;
+    html += `<div><span>DC电压范围</span><strong>${nf(init.min_dc_voltage_pu)} - ${nf(init.max_dc_voltage_pu)} pu</strong></div>`;
+    html += initWarnings;
+    html += '</div>';
+    html += '<div class="transient-dashboard-grid">';
+    html += '<div id="trVoltageChart" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trAcHeatmap" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trFreqChart" class="transient-chart"></div>';
+    html += '<div id="trPowerChart" class="transient-chart"></div>';
+    html += '<div id="trCurrentChart" class="transient-chart"></div>';
+    html += '<div id="trDcLinkChart" class="transient-chart"></div>';
+    html += '</div>';
+    html += '<h5>动态设备</h5><table><thead><tr><th>设备</th><th>类型</th><th>母线</th><th>P(MW)</th><th>Q(Mvar)</th><th>频率/PLL(Hz)</th><th>|I|(pu)</th></tr></thead><tbody>';
+    const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
+    (data.device_series || []).slice(0, 80).forEach(dev => {
+      const vals = dev.values || {};
+      const last = arr => Array.isArray(arr) && arr.length ? arr[arr.length - 1] : undefined;
+      const freq = last(vals.frequency_hz) ?? last(vals.pll_frequency_hz);
+      const imag = last(vals.i_mag_pu) ?? last(vals.i_rms_pu);
+      const compId = rowCanvasCompId(dev, maps);
+      const attr = compClickAttr(compId);
+      html += `<tr${attr}><td>${escapeHtml(dev.name || '')}</td><td>${escapeHtml(dev.type || '')}</td><td>${escapeHtml(String(dev.bus ?? ''))}</td><td>${nf(last(vals.p_mw), 3)}</td><td>${nf(last(vals.q_mvar), 3)}</td><td>${nf(freq, 3)}</td><td>${nf(imag, 4)}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    const el = document.getElementById('transientResults');
+    if (el) el.innerHTML = html;
+    drawTransientDashboard(data);
   }
 
   // Dispatch the harmonics run by the selected analysis mode.
@@ -6910,6 +7196,9 @@ const App = (() => {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     document.querySelector(`.panel-tab[data-tab="${tabName}"]`)?.classList.add('active');
     document.getElementById('tab' + tabName.charAt(0).toUpperCase() + tabName.slice(1))?.classList.add('active');
+    if (tabName === 'results' && document.getElementById('resultsContent')?.dataset.activeGroup === 'transient' && _lastTransientData) {
+      requestAnimationFrame(() => drawTransientDashboard(_lastTransientData));
+    }
   }
 
   // ========== Component Library ==========
@@ -7166,6 +7455,18 @@ const App = (() => {
     document.getElementById('btnRunHarmonics')?.addEventListener('click', runHarmonics);
     document.getElementById('hpfMode')?.addEventListener('change', hpfUpdateModeControls);
     hpfUpdateModeControls();
+
+    // Bar 3: transient phasor dynamics
+    document.getElementById('btnRunTransient')?.addEventListener('click', runTransientSimulation);
+    document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
+    updateTransientPfControls();
+    document.getElementById('btnExportTransient')?.addEventListener('click', () => {
+      if (!_lastTransientData) {
+        log('暂无暂态仿真结果可导出，请先运行暂态仿真', 'warn');
+        return;
+      }
+      downloadJsonFile(`transient_results_${tsTagForFilename()}.json`, _lastTransientData);
+    });
 
     // Bar 3: topology
     document.getElementById('btnRunTopology')?.addEventListener('click', runTopologyReconfig);
@@ -9805,7 +10106,10 @@ const App = (() => {
         let rafId = 0;
         const onMove = (ev) => {
           const newW = startW - (ev.clientX - startX);
-          panel.style.width = Math.max(240, Math.min(window.innerWidth * 0.6, newW)) + 'px';
+          const activeGroup = document.getElementById('resultsContent')?.dataset.activeGroup || '';
+          const minW = activeGroup === 'transient' ? Math.min(window.innerWidth - 360, 720) : 240;
+          const maxW = activeGroup === 'transient' ? window.innerWidth * 0.82 : window.innerWidth * 0.6;
+          panel.style.width = Math.max(minW, Math.min(maxW, newW)) + 'px';
           // Throttle Plotly resizes to animation frames
           if (!rafId) rafId = requestAnimationFrame(() => { resizePlotlyCharts(); rafId = 0; });
         };

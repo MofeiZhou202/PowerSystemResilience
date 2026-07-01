@@ -60,6 +60,7 @@
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
+#include "hacdcpf/dynamics/dynamics.hpp"
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -1758,6 +1759,187 @@ json annual_carbon_to_json(const hacdcpf::analysis::AnnualCarbonAnalysisResult& 
   out["hourly_bus_intensity_tco2_mwh"] = annual.hourly_bus_intensity_tco2_mwh;
   out["hourly_load_emissions_tco2"] = annual.hourly_load_emissions_tco2;
   out["hourly_load_energy_mwh"] = annual.hourly_load_energy_mwh;
+  return out;
+}
+
+const char* dynamic_solver_type_name(hacdcpf::dynamics::DynamicSolverType type) {
+  using hacdcpf::dynamics::DynamicSolverType;
+  switch (type) {
+    case DynamicSolverType::PartitionedEuler: return "PartitionedEuler";
+    case DynamicSolverType::PartitionedHeun: return "PartitionedHeun";
+    case DynamicSolverType::PartitionedRK4: return "PartitionedRK4";
+    case DynamicSolverType::BackwardEulerNewton: return "BackwardEulerNewton";
+    case DynamicSolverType::TrapezoidalNewton: return "TrapezoidalNewton";
+    case DynamicSolverType::RosenbrockEuler: return "RosenbrockEuler";
+  }
+  return "PartitionedHeun";
+}
+
+hacdcpf::dynamics::DynamicSolverType dynamic_solver_type_from_json(const json& root) {
+  using hacdcpf::dynamics::DynamicSolverType;
+  const std::string solver =
+      root.value("solver_type", root.value("solver", std::string("heun")));
+  if (solver == "euler" || solver == "PartitionedEuler") {
+    return DynamicSolverType::PartitionedEuler;
+  }
+  if (solver == "rk4" || solver == "PartitionedRK4") {
+    return DynamicSolverType::PartitionedRK4;
+  }
+  if (solver == "backward_euler" || solver == "BackwardEulerNewton") {
+    return DynamicSolverType::BackwardEulerNewton;
+  }
+  if (solver == "trapezoidal" || solver == "TrapezoidalNewton") {
+    return DynamicSolverType::TrapezoidalNewton;
+  }
+  if (solver == "rosenbrock" || solver == "RosenbrockEuler") {
+    return DynamicSolverType::RosenbrockEuler;
+  }
+  return DynamicSolverType::PartitionedHeun;
+}
+
+hacdcpf::dynamics::DynamicEventType dynamic_event_type_from_json(const std::string& type) {
+  using hacdcpf::dynamics::DynamicEventType;
+  if (type == "ACBranchTrip") return DynamicEventType::ACBranchTrip;
+  if (type == "ACBranchClose") return DynamicEventType::ACBranchClose;
+  if (type == "DCBranchTrip") return DynamicEventType::DCBranchTrip;
+  if (type == "DCBranchClose") return DynamicEventType::DCBranchClose;
+  if (type == "ACLoadScale") return DynamicEventType::ACLoadScale;
+  if (type == "DCLoadScale") return DynamicEventType::DCLoadScale;
+  if (type == "GeneratorTrip") return DynamicEventType::GeneratorTrip;
+  if (type == "VSCTrip") return DynamicEventType::VSCTrip;
+  if (type == "DCDCTrip") return DynamicEventType::DCDCTrip;
+  if (type == "StoragePowerStep") return DynamicEventType::StoragePowerStep;
+  if (type == "DCStoragePowerStep") return DynamicEventType::DCStoragePowerStep;
+  if (type == "FaultShunt") return DynamicEventType::FaultShunt;
+  if (type == "ClearFault") return DynamicEventType::ClearFault;
+  return DynamicEventType::Custom;
+}
+
+json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt) {
+  return json{{"solver_type", dynamic_solver_type_name(opt.solver_type)},
+              {"t_start_s", opt.t_start_s},
+              {"t_end_s", opt.t_end_s},
+              {"dt_s", opt.dt_s},
+              {"newton_tol", opt.newton_tol},
+              {"max_newton_iters", opt.max_newton_iters},
+              {"use_adaptive_step", opt.use_adaptive_step},
+              {"record_every_step", opt.record_every_step},
+              {"run_power_flow_initialization", opt.run_power_flow_initialization},
+              {"project_to_canonical", opt.project_to_canonical},
+              {"synthesize_three_phase_if_absent", opt.synthesize_three_phase_if_absent},
+              {"dynamic_dc_link", opt.dynamic_dc_link},
+              {"source_stiffness_pu", opt.source_stiffness_pu},
+              {"inverter_virtual_reactance_pu", opt.inverter_virtual_reactance_pu},
+              {"dc_link_capacitance_s", opt.dc_link_capacitance_s},
+              {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu}};
+}
+
+json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
+                             const hacdcpf::dynamics::DynamicSolverOptions& opt) {
+  json out;
+  out["success"] = result.success;
+  out["message"] = result.message;
+  out["steps"] = result.steps;
+  out["failed_step"] = result.failed_step;
+  out["newton_iterations"] = result.newton_iterations;
+  out["rejected_steps"] = result.rejected_steps;
+  out["warnings"] = result.warnings;
+  out["applied_events"] = result.applied_events;
+  out["options"] = dynamic_options_to_json(opt);
+  out["initialization"] =
+      json{{"power_flow_requested", result.initialization.power_flow_requested},
+           {"power_flow_converged", result.initialization.power_flow_converged},
+           {"fallback_voltage_setpoints", result.initialization.fallback_voltage_setpoints},
+           {"iterations", result.initialization.iterations},
+           {"residual", result.initialization.residual},
+           {"min_ac_voltage_pu", result.initialization.min_ac_voltage_pu},
+           {"max_ac_voltage_pu", result.initialization.max_ac_voltage_pu},
+           {"min_dc_voltage_pu", result.initialization.min_dc_voltage_pu},
+           {"max_dc_voltage_pu", result.initialization.max_dc_voltage_pu},
+           {"warnings", result.initialization.warnings}};
+
+  json times = json::array();
+  json min_ac = json::array();
+  json max_ac = json::array();
+  json min_dc = json::array();
+  json max_dc = json::array();
+  json frequency = json::array();
+  json ac_voltage_matrix = json::array();
+  json dc_voltage_matrix = json::array();
+  std::vector<json> ac_rows;
+  std::vector<json> dc_rows;
+  std::map<std::string, json> device_series;
+
+  for (const auto& snap : result.snapshots) {
+    times.push_back(snap.time_s);
+    min_ac.push_back(snap.min_ac_voltage_pu);
+    max_ac.push_back(snap.max_ac_voltage_pu);
+    min_dc.push_back(snap.min_dc_voltage_pu);
+    max_dc.push_back(snap.max_dc_voltage_pu);
+    frequency.push_back(snap.frequency_hz);
+
+    if (ac_rows.empty()) {
+      ac_rows.resize(static_cast<std::size_t>(snap.vac_abc.size()));
+      for (auto& row : ac_rows) row = json::array();
+    }
+    for (Eigen::Index i = 0; i < snap.vac_abc.size(); ++i) {
+      ac_rows[static_cast<std::size_t>(i)].push_back(std::abs(snap.vac_abc[i]));
+    }
+    if (dc_rows.empty()) {
+      dc_rows.resize(static_cast<std::size_t>(snap.vdc.size()));
+      for (auto& row : dc_rows) row = json::array();
+    }
+    for (Eigen::Index i = 0; i < snap.vdc.size(); ++i) {
+      dc_rows[static_cast<std::size_t>(i)].push_back(snap.vdc[i]);
+    }
+
+    for (const auto& dev : snap.device_outputs) {
+      const std::string key =
+          dev.type + ":" + std::to_string(dev.component_index) + ":" + dev.name;
+      if (!device_series.count(key)) {
+        device_series[key] =
+            json{{"name", dev.name},
+                 {"type", dev.type},
+                 {"component_index", dev.component_index},
+                 {"canvas_type", dev.canvas_type},
+                 {"canvas_index", dev.canvas_index},
+                 {"component_domain", dev.component_domain},
+                 {"source_type", dev.source_type},
+                 {"bus", dev.bus},
+                 {"values", json::object()}};
+      }
+      for (const auto& [metric, value] : dev.values) {
+        auto& arr = device_series[key]["values"][metric];
+        if (!arr.is_array()) arr = json::array();
+        arr.push_back(value);
+      }
+    }
+  }
+
+  for (const auto& row : ac_rows) ac_voltage_matrix.push_back(row);
+  for (const auto& row : dc_rows) dc_voltage_matrix.push_back(row);
+
+  json devices = json::array();
+  for (auto& [_, dev] : device_series) {
+    devices.push_back(dev);
+  }
+
+  out["time_s"] = times;
+  out["min_ac_voltage_pu"] = min_ac;
+  out["max_ac_voltage_pu"] = max_ac;
+  out["min_dc_voltage_pu"] = min_dc;
+  out["max_dc_voltage_pu"] = max_dc;
+  out["frequency_hz"] = frequency;
+  out["ac_voltage_matrix"] = ac_voltage_matrix;
+  out["dc_voltage_matrix"] = dc_voltage_matrix;
+  out["device_series"] = devices;
+  if (const auto* final = result.final_snapshot()) {
+    out["final"] = json{{"time_s", final->time_s},
+                        {"min_ac_voltage_pu", final->min_ac_voltage_pu},
+                        {"max_ac_voltage_pu", final->max_ac_voltage_pu},
+                        {"min_dc_voltage_pu", final->min_dc_voltage_pu},
+                        {"max_dc_voltage_pu", final->max_dc_voltage_pu}};
+  }
   return out;
 }
 
@@ -10232,6 +10414,90 @@ int main(int argc, char** argv) {
   // Read-only structural analysis of the network graph: island / connectivity
   // detection, radiality, bridges (cut-edges), articulation points (cut-vertices)
   // and per-island validity diagnostics.  Backed by hacdcpf::graph.
+  svr.Post("/api/session/run_transient",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      hacdcpf::HybridPowerSystem sys;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys = *g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
+        return;
+      }
+      g_session.cancel.store(false);
+
+      const json j = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::dynamics::DynamicSolverOptions opt;
+      opt.solver_type = dynamic_solver_type_from_json(j);
+      opt.t_start_s = j.value("t_start_s", 0.0);
+      opt.t_end_s = j.value("t_end_s", 1.0);
+      opt.dt_s = j.value("dt_s", 0.01);
+      opt.newton_tol = j.value("newton_tol", opt.newton_tol);
+      opt.max_newton_iters = j.value("max_newton_iters", opt.max_newton_iters);
+      opt.use_adaptive_step = j.value("use_adaptive_step", false);
+      opt.record_every_step = j.value("record_every_step", true);
+      opt.run_power_flow_initialization =
+          j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
+      if (j.contains("power_flow_options") && j["power_flow_options"].is_object()) {
+        const auto& pfj = j["power_flow_options"];
+        opt.power_flow_options.max_iter =
+            pfj.value("max_iter", opt.power_flow_options.max_iter);
+        opt.power_flow_options.tol =
+            pfj.value("tol", opt.power_flow_options.tol);
+        opt.power_flow_options.enable_converter_coordination_check =
+            pfj.value("enable_converter_coordination_check",
+                      opt.power_flow_options.enable_converter_coordination_check);
+      }
+      opt.project_to_canonical = j.value("project_to_canonical", true);
+      opt.synthesize_three_phase_if_absent =
+          j.value("synthesize_three_phase_if_absent", true);
+      opt.dynamic_dc_link = j.value("dynamic_dc_link", opt.dynamic_dc_link);
+      opt.source_stiffness_pu = j.value("source_stiffness_pu", opt.source_stiffness_pu);
+      opt.inverter_virtual_reactance_pu =
+          j.value("inverter_virtual_reactance_pu", opt.inverter_virtual_reactance_pu);
+      opt.dc_link_capacitance_s =
+          j.value("dc_link_capacitance_s", opt.dc_link_capacitance_s);
+      opt.dc_link_coupling_conductance_pu =
+          j.value("dc_link_coupling_conductance_pu",
+                  opt.dc_link_coupling_conductance_pu);
+      opt.singular_regularization_pu =
+          j.value("singular_regularization_pu", opt.singular_regularization_pu);
+      opt.max_step_halving = j.value("max_step_halving", opt.max_step_halving);
+
+      hacdcpf::dynamics::DynamicModelBuilder builder;
+      hacdcpf::dynamics::DynamicSystem dyn = builder.build(sys, opt);
+      if (j.contains("events") && j["events"].is_array()) {
+        for (const auto& ej : j["events"]) {
+          hacdcpf::dynamics::DynamicEvent event;
+          event.time_s = ej.value("time_s", 0.0);
+          event.type = dynamic_event_type_from_json(ej.value("type", std::string("Custom")));
+          event.component_index = ej.value("component_index", 0);
+          event.bus = ej.value("bus", 0);
+          event.value = ej.value("value", 0.0);
+          event.duration_s = ej.value("duration_s", 0.0);
+          event.component_type = ej.value("component_type", std::string());
+          event.label = ej.value("label", std::string());
+          dyn.events.push_back(event);
+        }
+      }
+
+      hacdcpf::dynamics::DynamicSolver solver;
+      const auto result = solver.solve(dyn);
+      json out = dynamic_results_to_json(result, opt);
+      res.status = result.success ? 200 : 400;
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/api/session/topology",
            [](const httplib::Request&, httplib::Response& res) {
     try {

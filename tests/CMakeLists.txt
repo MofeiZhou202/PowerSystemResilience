@@ -142,6 +142,10 @@ hacdcpf_add_test(test_three_phase_nr_load_models test_three_phase_nr_load_models
 hacdcpf_add_test(test_three_phase_nr_transformer_source test_three_phase_nr_transformer_source.cpp)
 hacdcpf_add_test(test_three_phase_nr_regulator test_three_phase_nr_regulator.cpp)
 
+# Transient dynamics: rich/canonical model builder, device-stamped phasor
+# network solve, events, and hybrid AC/DC converter coupling.
+hacdcpf_add_test(test_transient_dynamics test_transient_dynamics.cpp)
+
 set(_HACDCPF_PHASE_DOMAIN_DATA_DIR
   "${CMAKE_SOURCE_DIR}/tests/data/phase_domain_julia")
 if(HACDCPF_HAVE_OPENDSS AND EXISTS "${_HACDCPF_PHASE_DOMAIN_DATA_DIR}")

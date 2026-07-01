@@ -43,14 +43,6 @@ cmake --build --preset windows-vcpkg-release
 ctest --preset windows-vcpkg-release
 ```
 
-Use `portable-no-suitesparse` when you want the most conservative dependency
-surface and accept Eigen's built-in sparse LU fallback:
-
-```bash
-cmake --preset portable-no-suitesparse
-cmake --build --preset portable-no-suitesparse
-```
-
 ## Platform Prerequisites
 
 ### macOS

@@ -53,6 +53,12 @@ option(HACDCPF_USE_SUITESPARSE
        "Use SuiteSparse-backed sparse linear solvers when available"        ON)
 option(HACDCPF_USE_GUROBI
        "Enable Gurobi detection through MIPSolvers when available"          OFF)
+option(HACDCPF_USE_PAPILO
+       "Enable PaPILO presolve through MIPSolvers when available"           OFF)
+option(HACDCPF_USE_HFACTOR
+       "Build MIPSolvers vendored HiGHS HFactor backend"                   ON)
+option(HACDCPF_BUILD_MIPSOLVERS_BUNDLED_ARCHIVE
+       "Build MIPSolvers single-file bundled static archive"               OFF)
 set(HACDCPF_SUITESPARSE_ROOT "" CACHE PATH
     "SuiteSparse installation prefix. Mirrors SUITESPARSE_ROOT when empty.")
 if(NOT HACDCPF_SUITESPARSE_ROOT AND DEFINED ENV{SUITESPARSE_ROOT})
@@ -102,18 +108,21 @@ if(HACDCPF_DEPENDENCY_PROFILE STREQUAL "minimal")
   set(_hacdcpf_build_mipsolvers_scuc_case_builder OFF)
   set(_hacdcpf_build_embedded_scip OFF)
   set(_hacdcpf_build_hfactor OFF)
+  set(_hacdcpf_use_papilo OFF)
 elseif(HACDCPF_DEPENDENCY_PROFILE STREQUAL "full")
   set(_hacdcpf_build_mipsolvers_tests ${HACDCPF_BUILD_TESTS})
   set(_hacdcpf_build_mipsolvers_scuc ON)
   set(_hacdcpf_build_mipsolvers_scuc_case_builder ON)
   set(_hacdcpf_build_embedded_scip ON)
-  set(_hacdcpf_build_hfactor ON)
+  set(_hacdcpf_build_hfactor ${HACDCPF_USE_HFACTOR})
+  set(_hacdcpf_use_papilo ${HACDCPF_USE_PAPILO})
 else()
   set(_hacdcpf_build_mipsolvers_tests OFF)
   set(_hacdcpf_build_mipsolvers_scuc OFF)
   set(_hacdcpf_build_mipsolvers_scuc_case_builder OFF)
   set(_hacdcpf_build_embedded_scip ON)
-  set(_hacdcpf_build_hfactor ON)
+  set(_hacdcpf_build_hfactor ${HACDCPF_USE_HFACTOR})
+  set(_hacdcpf_use_papilo ${HACDCPF_USE_PAPILO})
 endif()
 
 set(MIPSOLVERS_BUILD_TESTS ${_hacdcpf_build_mipsolvers_tests} CACHE BOOL
@@ -127,6 +136,9 @@ set(MIPSOLVERS_BUILD_PYTHON OFF CACHE BOOL
     "Build MIPSolvers Python bindings when used as a dependency" FORCE)
 set(MIPSOLVERS_BUILD_HFACTOR ${_hacdcpf_build_hfactor} CACHE BOOL
     "Build MIPSolvers HFactor when used as a dependency" FORCE)
+set(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE
+    ${HACDCPF_BUILD_MIPSOLVERS_BUNDLED_ARCHIVE} CACHE BOOL
+    "Build MIPSolvers bundled archive when used as a dependency" FORCE)
 set(MIPSOLVERS_BUILD_EMBEDDED_HIGHS ON CACHE BOOL
     "Build embedded MIPSolvers HiGHS source" FORCE)
 set(MIPSOLVERS_BUILD_EMBEDDED_SCIP ${_hacdcpf_build_embedded_scip} CACHE BOOL
@@ -137,6 +149,8 @@ set(MIPSOLVERS_USE_SUITESPARSE ${HACDCPF_USE_SUITESPARSE} CACHE BOOL
     "Use SuiteSparse in MIPSolvers when available" FORCE)
 set(MIPSOLVERS_USE_GUROBI ${HACDCPF_USE_GUROBI} CACHE BOOL
     "Enable Gurobi detection in MIPSolvers when available" FORCE)
+set(MIPSOLVERS_USE_PAPILO ${_hacdcpf_use_papilo} CACHE BOOL
+    "Enable PaPILO presolve in MIPSolvers when available" FORCE)
 
 set(MIPSOLVERS_BUILD_LOCAL_IPOPT ${HACDCPF_ENABLE_IPOPT} CACHE BOOL
     "Build embedded Ipopt from MIPSolvers/ipopt when supported" FORCE)
@@ -282,6 +296,11 @@ set(HACDCPF_SOURCES
   src/power_flow/jacobian_check.cpp
   src/power_flow/jacobian_check.cpp
   src/power_flow/distribution_power_flow.cpp
+  # ── dynamics / transient simulation ──────────────────────────────────────
+  src/dynamics/DynamicSystem.cpp
+  src/dynamics/DynamicModelBuilder.cpp
+  src/dynamics/DynamicSolver.cpp
+  src/dynamics/devices/BasicDynamicDevices.cpp
   # ── optimal_power_flow ───────────────────────────────────────────────────
   src/optimal_power_flow/ac_opf.cpp
   src/optimal_power_flow/dc_opf.cpp
