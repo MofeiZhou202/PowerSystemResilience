@@ -40,6 +40,7 @@
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/etap_io.hpp"
+#include "hacdcpf/io/scenario_bundle_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/enum_strings.hpp"
 #include "hacdcpf/power_flow/three_phase.hpp"
@@ -6435,6 +6436,104 @@ int main(int argc, char** argv) {
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       if (!tmp.empty()) { std::error_code ec; std::filesystem::remove(tmp, ec); }
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  // ---- Scenario generated-case bundle validation / workbook conversion ----
+  svr.Post("/api/session/validate_scenario_bundle",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      auto j = json::parse(req.body.empty() ? "{}" : req.body);
+      if (j.contains("bundle") && j["bundle"].is_object()) j = j["bundle"];
+      hacdcpf::io::ScenarioBundleIoReport report;
+      auto bundle = hacdcpf::io::normalize_generated_scenario_bundle(j, report);
+      hacdcpf::io::validate_scenario_bundle(
+          bundle, hacdcpf::io::ScenarioBundleImportMode::Permissive, report);
+      res.set_content(json{{"bundle", bundle},
+                           {"warnings", report.warnings},
+                           {"errors", report.errors},
+                           {"summary", {{"case_count", bundle.value("case_count", 0)},
+                                         {"unit_space", bundle.value("unit_space", "")}}}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/export_scenario_workbook",
+           [](const httplib::Request& req, httplib::Response& res) {
+    std::string tmp_json, tmp_xlsx;
+    try {
+      static std::atomic<int> export_counter{0};
+      const auto id = std::to_string(export_counter.fetch_add(1));
+      tmp_json = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_export_" + id + ".json")).string();
+      tmp_xlsx = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_export_" + id + ".xlsx")).string();
+      { std::ofstream ofs(tmp_json, std::ios::binary); ofs << (req.body.empty() ? "{}" : req.body); }
+#ifdef HACDCPF_PROJECT_ROOT
+      const auto script = (std::filesystem::path(HACDCPF_PROJECT_ROOT) / "tools" / "scenario_excel_convert.py").string();
+#else
+      const auto script = (std::filesystem::current_path() / "tools" / "scenario_excel_convert.py").string();
+#endif
+      const std::string cmd = "python \"" + script + "\" json-to-xlsx \"" + tmp_json + "\" \"" + tmp_xlsx + "\"";
+      const int rc = std::system(cmd.c_str());
+      if (rc != 0) throw std::runtime_error("Scenario JSON to Excel converter failed (python/openpyxl)");
+      std::ifstream ifs(tmp_xlsx, std::ios::binary);
+      if (!ifs) throw std::runtime_error("Failed to read generated scenario workbook");
+      std::string bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+      ifs.close();
+      std::error_code ec;
+      std::filesystem::remove(tmp_json, ec);
+      std::filesystem::remove(tmp_xlsx, ec);
+      res.set_header("Content-Disposition", "attachment; filename=\"scenario_bundle.xlsx\"");
+      res.set_content(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    } catch (const std::exception& e) {
+      std::error_code ec;
+      if (!tmp_json.empty()) std::filesystem::remove(tmp_json, ec);
+      if (!tmp_xlsx.empty()) std::filesystem::remove(tmp_xlsx, ec);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/api/session/import_scenario_workbook",
+           [](const httplib::Request& req, httplib::Response& res) {
+    std::string tmp_xlsx, tmp_json;
+    try {
+      if (req.body.empty()) throw std::runtime_error("Empty scenario workbook upload");
+      static std::atomic<int> import_counter{0};
+      const auto id = std::to_string(import_counter.fetch_add(1));
+      tmp_xlsx = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_import_" + id + ".xlsx")).string();
+      tmp_json = (std::filesystem::temp_directory_path() / ("hacdcpf_scenario_import_" + id + ".json")).string();
+      { std::ofstream ofs(tmp_xlsx, std::ios::binary); ofs.write(req.body.data(), static_cast<std::streamsize>(req.body.size())); }
+#ifdef HACDCPF_PROJECT_ROOT
+      const auto script = (std::filesystem::path(HACDCPF_PROJECT_ROOT) / "tools" / "scenario_excel_convert.py").string();
+#else
+      const auto script = (std::filesystem::current_path() / "tools" / "scenario_excel_convert.py").string();
+#endif
+      const std::string cmd = "python \"" + script + "\" xlsx-to-json \"" + tmp_xlsx + "\" \"" + tmp_json + "\"";
+      const int rc = std::system(cmd.c_str());
+      if (rc != 0) throw std::runtime_error("Scenario Excel to JSON converter failed (python/openpyxl)");
+      std::ifstream ifs(tmp_json, std::ios::binary);
+      if (!ifs) throw std::runtime_error("Failed to read converted scenario JSON");
+      std::string text((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+      ifs.close();
+      auto bundle = json::parse(text);
+      std::error_code ec;
+      std::filesystem::remove(tmp_xlsx, ec);
+      std::filesystem::remove(tmp_json, ec);
+      res.set_content(json{{"bundle", bundle},
+                           {"warnings", json::array()},
+                           {"errors", json::array()},
+                           {"summary", {{"case_count", bundle.value("case_count", 0)},
+                                         {"unit_space", bundle.value("unit_space", "dimensionless_multiplier")}}}}.dump(),
+                      "application/json");
+    } catch (const std::exception& e) {
+      std::error_code ec;
+      if (!tmp_xlsx.empty()) std::filesystem::remove(tmp_xlsx, ec);
+      if (!tmp_json.empty()) std::filesystem::remove(tmp_json, ec);
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -13505,6 +13604,115 @@ int main(int argc, char** argv) {
           }
         }
 
+        auto sample_resilience_profile = [](const std::vector<double>& profile, double hour, double fallback) {
+          if (profile.empty()) return fallback;
+          if (profile.size() == 1) return std::max(0.0, profile.front());
+          const double period = static_cast<double>(profile.size());
+          double h = std::fmod(hour, period);
+          if (h < 0.0) h += period;
+          const size_t lo = static_cast<size_t>(h) % profile.size();
+          const size_t hi = (lo + 1) % profile.size();
+          const double frac = h - std::floor(h);
+          return std::max(0.0, profile[lo] * (1.0 - frac) + profile[hi] * frac);
+        };
+        auto mapped_resilience_profile = [&](const std::unordered_map<int, std::vector<double>>& profiles,
+                                             int key,
+                                             double hour,
+                                             double fallback) {
+          const auto it = profiles.find(key);
+          return it == profiles.end() || it->second.empty()
+              ? fallback
+              : sample_resilience_profile(it->second, hour, fallback);
+        };
+        auto priority_tier = [](hacdcpf::LoadPriority p) {
+          switch (p) {
+            case hacdcpf::LoadPriority::Critical: return 0;
+            case hacdcpf::LoadPriority::High: return 1;
+            case hacdcpf::LoadPriority::Medium: return 2;
+            case hacdcpf::LoadPriority::Low: return 3;
+          }
+          return 2;
+        };
+        auto priority_importance = [](hacdcpf::LoadPriority p) {
+          switch (p) {
+            case hacdcpf::LoadPriority::Critical: return 4.0;
+            case hacdcpf::LoadPriority::High: return 2.5;
+            case hacdcpf::LoadPriority::Medium: return 1.5;
+            case hacdcpf::LoadPriority::Low: return 1.0;
+          }
+          return 1.5;
+        };
+        auto priority_from_bus_importance = [](double importance) {
+          if (importance >= 4.0 - 1e-9) return hacdcpf::LoadPriority::Critical;
+          if (importance >= 2.5 - 1e-9) return hacdcpf::LoadPriority::High;
+          if (importance >= 1.5 - 1e-9) return hacdcpf::LoadPriority::Medium;
+          return hacdcpf::LoadPriority::Low;
+        };
+        struct RichLoadContributor {
+          std::string kind;
+          int position{-1};
+          int index{-1};
+          int bus{-1};
+          std::string name;
+          double base_mw{0.0};
+          hacdcpf::LoadPriority priority{hacdcpf::LoadPriority::Medium};
+          bool virtual_bus_load{false};
+        };
+        std::vector<RichLoadContributor> rich_loads;
+        auto add_rich_load = [&](RichLoadContributor row) {
+          row.base_mw = std::max(0.0, row.base_mw);
+          if (row.base_mw <= 1e-12 || row.bus < 0) return;
+          rich_loads.push_back(std::move(row));
+        };
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          const auto& b = sys.ac.buses[i];
+          if (!b.in_service || std::max(0.0, b.pd_mw) <= 1e-12) continue;
+          add_rich_load({"AC_BUS", static_cast<int>(i), b.index, b.index,
+                         b.name.empty() ? ("AC bus load " + std::to_string(b.index)) : (b.name + " load"),
+                         b.pd_mw, priority_from_bus_importance(std::max(1.0, b.importance)), true});
+        }
+        for (size_t i = 0; i < sys.ac.loads.size(); ++i) {
+          const auto& ld = sys.ac.loads[i];
+          if (!ld.in_service) continue;
+          add_rich_load({"AC_LOAD", static_cast<int>(i), ld.index, ld.bus,
+                         ld.name.empty() ? ("AC load " + std::to_string(ld.index)) : ld.name,
+                         ld.p_mw * std::max(ld.scaling, 1.0), ld.priority, false});
+        }
+        for (size_t i = 0; i < sys.dc.buses.size(); ++i) {
+          const auto& b = sys.dc.buses[i];
+          if (!b.in_service || std::max(0.0, b.pd_mw) <= 1e-12) continue;
+          add_rich_load({"DC_BUS", static_cast<int>(i), b.index, b.index,
+                         b.name.empty() ? ("DC bus load " + std::to_string(b.index)) : (b.name + " load"),
+                         b.pd_mw, priority_from_bus_importance(std::max(1.0, b.importance)), true});
+        }
+        for (size_t i = 0; i < sys.dc.loads.size(); ++i) {
+          const auto& ld = sys.dc.loads[i];
+          if (!ld.in_service) continue;
+          const double base = ld.p_mw > 0.0 ? ld.p_mw : ld.p_rated_mw;
+          add_rich_load({"DC_LOAD", static_cast<int>(i), ld.index, ld.bus,
+                         ld.name.empty() ? ("DC load " + std::to_string(ld.index)) : ld.name,
+                         base * std::max(ld.scaling, 1.0), ld.priority, false});
+        }
+        auto rich_load_demand_at = [&](const RichLoadContributor& row, double hour, double fallback_load_mult) {
+          double mult = fallback_load_mult;
+          if (row.kind == "AC_BUS") {
+            mult = mapped_resilience_profile(opts.ac_bus_load_profiles_by_bus, row.bus, hour, mult);
+            mult = mapped_resilience_profile(opts.ac_load_profiles_by_bus, row.bus, hour, mult);
+          } else if (row.kind == "DC_BUS") {
+            mult = mapped_resilience_profile(opts.dc_bus_load_profiles_by_bus, row.bus, hour, mult);
+            mult = mapped_resilience_profile(opts.dc_load_profiles_by_bus, row.bus, hour, mult);
+          } else if (row.kind == "DC_LOAD") {
+            mult = mapped_resilience_profile(opts.dc_load_profiles_by_position, row.position, hour, mult);
+            mult = mapped_resilience_profile(opts.dc_load_profiles_by_index, row.index, hour, mult);
+            mult = mapped_resilience_profile(opts.dc_load_profiles_by_bus, row.bus, hour, mult);
+          } else {
+            mult = mapped_resilience_profile(opts.ac_load_profiles_by_position, row.position, hour, mult);
+            mult = mapped_resilience_profile(opts.ac_load_profiles_by_index, row.index, hour, mult);
+            mult = mapped_resilience_profile(opts.ac_load_profiles_by_bus, row.bus, hour, mult);
+          }
+          return std::max(0.0, row.base_mw * opts.load_scale_factor * mult);
+        };
+
         const bool consider_switches = j.value("consider_switches", true);
         opts.enable_disaster_stages = j.value("enable_disaster_stages", true);
         opts.use_ra_style_stage_milp = j.value("use_ra_style_stage_milp", true);
@@ -13590,6 +13798,76 @@ int main(int argc, char** argv) {
 
         auto result = hacdcpf::analysis::run_distribution_resilience_assessment(sys, opts);
 
+        const std::vector<double> default_load_profile = {
+            0.64, 0.60, 0.58, 0.56, 0.56, 0.58, 0.64, 0.76,
+            0.87, 0.95, 0.99, 1.00, 0.99, 1.00, 1.00, 0.97,
+            0.96, 0.96, 0.93, 0.92, 0.92, 0.93, 0.87, 0.72};
+        const auto& aggregate_load_profile = opts.load_profile.empty() ? default_load_profile : opts.load_profile;
+        json rich_load_meta = json::array();
+        for (const auto& row : rich_loads) {
+          rich_load_meta.push_back({{"kind", row.kind},
+                                   {"position", row.position},
+                                   {"index", row.index},
+                                   {"bus", row.bus},
+                                   {"name", row.name},
+                                   {"base_mw", row.base_mw},
+                                   {"priority", hacdcpf::load_priority_str(row.priority)},
+                                   {"priority_tier", priority_tier(row.priority)},
+                                   {"importance", priority_importance(row.priority)},
+                                   {"virtual_bus_load", row.virtual_bus_load}});
+        }
+        json rich_load_demand_mw = json::array();
+        json rich_load_served_mw = json::array();
+        json rich_load_shed_mw = json::array();
+        for (const auto& step : result.steps) {
+          const double fallback_load_mult = sample_resilience_profile(aggregate_load_profile, step.hour, 1.0);
+          std::vector<double> demand_by_load(rich_loads.size(), 0.0);
+          std::vector<double> served_by_load(rich_loads.size(), 0.0);
+          std::vector<double> shed_by_load(rich_loads.size(), 0.0);
+          std::map<std::pair<std::string, int>, std::vector<size_t>> loads_by_bus;
+          for (size_t i = 0; i < rich_loads.size(); ++i) {
+            const auto& row = rich_loads[i];
+            demand_by_load[i] = rich_load_demand_at(row, step.hour, fallback_load_mult);
+            const std::string bus_kind = row.kind.rfind("DC", 0) == 0 ? "DC" : "AC";
+            loads_by_bus[{bus_kind, row.bus}].push_back(i);
+          }
+          for (size_t bi = 0; bi < step.bus_supply_kind.size() && bi < step.bus_supply_index.size(); ++bi) {
+            const std::string bus_kind = step.bus_supply_kind[bi];
+            const int bus = step.bus_supply_index[bi];
+            const auto it = loads_by_bus.find({bus_kind, bus});
+            if (it == loads_by_bus.end()) continue;
+            double remaining_served = bi < step.bus_supply_served_mw.size()
+                ? std::max(0.0, step.bus_supply_served_mw[bi])
+                : 0.0;
+            for (int tier = 0; tier <= 3; ++tier) {
+              double tier_demand = 0.0;
+              for (const size_t li : it->second) {
+                if (priority_tier(rich_loads[li].priority) == tier) tier_demand += demand_by_load[li];
+              }
+              if (tier_demand <= 1e-12) continue;
+              const double tier_served = std::min(remaining_served, tier_demand);
+              for (const size_t li : it->second) {
+                if (priority_tier(rich_loads[li].priority) != tier) continue;
+                served_by_load[li] = tier_served * demand_by_load[li] / tier_demand;
+              }
+              remaining_served = std::max(0.0, remaining_served - tier_served);
+              if (remaining_served <= 1e-12) break;
+            }
+          }
+          json demand_row = json::array();
+          json served_row = json::array();
+          json shed_row = json::array();
+          for (size_t i = 0; i < rich_loads.size(); ++i) {
+            shed_by_load[i] = std::max(0.0, demand_by_load[i] - served_by_load[i]);
+            demand_row.push_back(demand_by_load[i]);
+            served_row.push_back(served_by_load[i]);
+            shed_row.push_back(shed_by_load[i]);
+          }
+          rich_load_demand_mw.push_back(std::move(demand_row));
+          rich_load_served_mw.push_back(std::move(served_row));
+          rich_load_shed_mw.push_back(std::move(shed_row));
+        }
+
         json out;
         out["feasible"] = result.feasible;
         out["status"] = result.status;
@@ -13612,6 +13890,18 @@ int main(int argc, char** argv) {
             {"dc_load_profiles_bound", dc_load_profiles_bound},
             {"ac_bus_load_profiles_bound", ac_bus_load_profiles_bound},
             {"dc_bus_load_profiles_bound", dc_bus_load_profiles_bound}};
+        out["canonical_mapping_audit"] = json{
+            {"model_space", "canonical_bus_edge_switch_mess"},
+            {"back_projection_policy", "priority_first_then_proportional_by_real_time_demand"},
+            {"load_mapping_policy", "canonical bus served/shed is allocated to rich loads by Critical-High-Medium-Low priority; ties use real-time demand share"},
+            {"edge_mapping_policy", "AC/DC branch edges map back by kind plus branch index; virtual switches map to branch-level breaker actions"},
+            {"generation_mapping_policy", "bus generation capacity is aggregated for restoration feasibility; component dispatch views use capacity/profile proportional estimates unless a dedicated solver result exists"},
+            {"rich_load_count", rich_loads.size()},
+            {"rich_loads", rich_load_meta}};
+        out["rich_loads"] = rich_load_meta;
+        out["rich_load_demand_mw"] = rich_load_demand_mw;
+        out["rich_load_served_mw"] = rich_load_served_mw;
+        out["rich_load_shed_mw"] = rich_load_shed_mw;
 
         // Fault sequence used (auto-generated or user-specified).
         {

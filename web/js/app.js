@@ -472,15 +472,48 @@ const App = (() => {
           if (pos >= 0 && tier === null) tier = Number(d.bus_supply_priority_tier?.[t]?.[pos]);
           if (pos >= 0 && importance === null) importance = Number(d.bus_supply_importance?.[t]?.[pos]);
         });
-        return { demand, served, shed, tier, importance };
+        return { demand, served, shed, tier, importance, source: 'canonical_bus' };
+      };
+      const findRichLoadSeries = (isDc, row, comp) => {
+        const richLoads = Array.isArray(d.rich_loads) ? d.rich_loads : [];
+        if (!richLoads.length || !Array.isArray(d.rich_load_demand_mw)) return null;
+        const desired = isDc ? 'DC_LOAD' : 'AC_LOAD';
+        const desiredBus = isDc ? 'DC_BUS' : 'AC_BUS';
+        const item = row?.item || {};
+        const pos = Number(row?.index);
+        const idx = Number(item.index);
+        const bus = Number(item.bus ?? comp?.params?.bus);
+        const matches = (r) => {
+          const kind = String(r?.kind || '').toUpperCase();
+          if (kind !== desired && kind !== desiredBus) return false;
+          if (Number.isFinite(Number(r.position)) && Number.isFinite(pos) && Number(r.position) === pos) return true;
+          if (Number.isFinite(Number(r.index)) && Number.isFinite(idx) && Number(r.index) === idx) return true;
+          if (Number.isFinite(Number(r.bus)) && Number.isFinite(bus) && Number(r.bus) === bus) return true;
+          return false;
+        };
+        const richPos = richLoads.findIndex(matches);
+        if (richPos < 0) return null;
+        const pick = (rows) => hrs.map((_, t) => Number(rows?.[t]?.[richPos] || 0));
+        return {
+          demand: pick(d.rich_load_demand_mw),
+          served: pick(d.rich_load_served_mw),
+          shed: pick(d.rich_load_shed_mw),
+          tier: Number(richLoads[richPos]?.priority_tier),
+          importance: Number(richLoads[richPos]?.importance),
+          priority: richLoads[richPos]?.priority,
+          source: 'rich_load_back_projection',
+          rich: richLoads[richPos],
+        };
       };
       if (type === 'load' || type === 'dc_load') {
         const isDc = type === 'dc_load';
         const row = modelRowForComp(isDc ? (sys.dc?.loads || []) : (sys.ac?.loads || []), isDc ? maps.dcLoad : maps.load, compId);
         const bus = row.item?.bus ?? comp.params?.bus;
-        const s = findBusSeries(isDc ? 'DC' : 'AC', bus);
-        const pr = Number.isInteger(s.tier) ? priorityNames[Math.max(0, Math.min(3, s.tier))] : '—';
-        const note = `负荷优先级：${pr}${Number.isFinite(s.importance) ? `（重要度 ${s.importance.toFixed(1)}）` : ''}`;
+        const s = findRichLoadSeries(isDc, row, comp) || findBusSeries(isDc ? 'DC' : 'AC', bus);
+        const pr = s.priority || (Number.isInteger(s.tier) ? priorityNames[Math.max(0, Math.min(3, s.tier))] : '—');
+        const note = s.source === 'rich_load_back_projection'
+          ? `Rich 负荷回映射：canonical bus 供电/切负荷按“优先级优先、同级按实时需求比例”分摊到该元件；优先级 ${pr}。`
+          : `未找到 rich 负荷回映射，展示 canonical bus 聚合结果；负荷优先级：${pr}${Number.isFinite(s.importance) ? `（重要度 ${s.importance.toFixed(1)}）` : ''}`;
         return makeXY([
           { x: hrs, y: s.demand, mode: 'lines+markers', name: '负荷需求', line: { color: '#61afef', width: 2 } },
           { x: hrs, y: s.served, mode: 'lines+markers', name: '实际供电', line: { color: '#98c379', width: 2 } },
@@ -831,6 +864,17 @@ const App = (() => {
       badge.textContent = text;
       badge.className = 'badge' + (type ? ' ' + type : '');
     }
+  }
+
+  function nextPaint() {
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  async function showFormatConversionStatus(text) {
+    setStatus(text, 'busy');
+    // Give the browser a chance to repaint the top-right badge before JSON
+    // parsing or workbook upload/download work starts, so large files don't look frozen.
+    await nextPaint();
   }
 
   // ========== Load Built-in Cases ==========
@@ -3260,7 +3304,6 @@ const App = (() => {
   async function applyGeneratedScenarioTimeSeries(caseJson) {
     const ts = caseJson?._time_series;
     if (!ts || !Array.isArray(ts.profiles) || ts.profiles.length === 0) return false;
-    if (_generatedScenarioTimeSeriesActive) return true;
     const body = {
       num_steps: ts.num_steps || ts.profiles[0]?.values?.length || 24,
       step_duration_hr: ts.step_duration_hr || 1.0,
@@ -7125,6 +7168,15 @@ const App = (() => {
       summaryHtml += '</tbody></table>';
 
       let detailHtml = '';
+      if (data.canonical_mapping_audit) {
+        const audit = data.canonical_mapping_audit || {};
+        detailHtml += '<h4 style="margin:0 0 4px;">Canonical → Rich 回映射</h4>';
+        detailHtml += `<table><tbody>
+          <tr><td>求解空间</td><td>${escapeHtml(audit.model_space || 'canonical_bus_edge_switch_mess')}</td></tr>
+          <tr><td>负荷回映射</td><td>${escapeHtml(audit.back_projection_policy || audit.load_mapping_policy || 'priority_first_then_proportional_by_real_time_demand')}</td></tr>
+          <tr><td>Rich负荷数</td><td>${audit.rich_load_count ?? (Array.isArray(data.rich_loads) ? data.rich_loads.length : '—')}</td></tr>
+        </tbody></table>`;
+      }
       if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
         detailHtml += '<h4 style="margin:0 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
         const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
@@ -7547,12 +7599,18 @@ const App = (() => {
     }
 
     function buildScenarioTimeSeries(candidate, baseSystem, family) {
+      if (isUsableScenarioTimeSeries(candidate?.standard_time_series)) {
+        const ts = deepCloneJson(candidate.standard_time_series);
+        ts.family = ts.family || family;
+        ts.unit_space = ts.unit_space || 'dimensionless_multiplier';
+        if (!ts.binding && ts.bindings) ts.binding = ts.bindings;
+        return ts;
+      }
       const profiles = candidate?.time_series?.profiles || [];
       if (!Array.isArray(profiles) || profiles.length === 0) return null;
       const load = scenarioCandidateProfileValues(candidate, 'total_load_mw');
       const pv = scenarioCandidateProfileValues(candidate, 'pv_mw');
       const wind = scenarioCandidateProfileValues(candidate, 'wind_mw');
-      const renewable = scenarioCandidateProfileValues(candidate, 'total_renewable_mw');
       const totals = scenarioBaseTotals(baseSystem);
       const calcProfiles = [];
       const warnings = [];
@@ -7580,9 +7638,6 @@ const App = (() => {
       } else if (pv.length && pv.some(v => Math.abs(v) > 1e-9)) {
         warnings.push('Base PV capacity is zero; PV scale profile is omitted.');
       }
-      if (renewable.length) {
-        calcProfiles.push({ id: 3, name: 'scenario_renewable_scale', values: makeScaleProfile(renewable, totals.pv + totals.wind, 1.0) });
-      }
       if (calcProfiles.length === 0) return null;
       return {
         version: 1,
@@ -7597,7 +7652,7 @@ const App = (() => {
           resilience_load_profile_id: load.length ? 0 : -1,
           resilience_wind_profile_id: wind.length && hasWindCapacity ? 1 : -1,
           resilience_pv_profile_id: pv.length && hasPvCapacity ? 2 : -1,
-          resilience_renewable_profile_id: renewable.length ? 3 : (pv.length && hasPvCapacity ? 2 : (wind.length && hasWindCapacity ? 1 : -1)),
+          resilience_renewable_profile_id: pv.length && hasPvCapacity ? 2 : (wind.length && hasWindCapacity ? 1 : -1),
         },
         normalization: {
           base_load_mw: totals.load,
@@ -7807,15 +7862,27 @@ const App = (() => {
       return true;
     }
 
+    function generatedScenarioCaseMetadata(caseJson) {
+      return caseJson?._generated_scenario || caseJson?.generated_scenario || {};
+    }
+
+    function generatedScenarioCaseTimeSeries(caseJson) {
+      return caseJson?._time_series || caseJson?.standard_time_series || null;
+    }
+
+    function generatedScenarioCaseSystem(caseJson) {
+      return caseJson?.system || caseJson;
+    }
+
     function generatedScenarioCaseFaults(caseJson) {
-      const event = caseJson?._generated_scenario?.resilience_event || caseJson?.resilience_event || {};
+      const event = generatedScenarioCaseMetadata(caseJson)?.resilience_event || caseJson?.resilience_event || {};
       const candidates = [event.faults, event.generated_faults, event.manual_faults, caseJson?.generated_faults, caseJson?.manual_faults];
       for (const arr of candidates) if (Array.isArray(arr) && arr.length) return arr;
       return [];
     }
 
     function generatedScenarioCaseLabel(caseJson, index) {
-      const meta = caseJson?._generated_scenario || {};
+      const meta = generatedScenarioCaseMetadata(caseJson);
       const event = meta.resilience_event || {};
       const faults = generatedScenarioCaseFaults(caseJson);
       const family = meta.family || 'unknown';
@@ -7834,7 +7901,7 @@ const App = (() => {
     }
 
     function chooseGeneratedScenarioCase(cases, targetFamily) {
-      const matched = cases.filter(c => !targetFamily || c?._generated_scenario?.family === targetFamily);
+      const matched = cases.filter(c => !targetFamily || generatedScenarioCaseMetadata(c)?.family === targetFamily);
       const choices = matched.length ? matched : cases;
       if (!choices.length) throw new Error('生成场景文件中没有可导入 case');
       if (choices.length === 1) return choices[0];
@@ -7854,12 +7921,22 @@ const App = (() => {
       return choices[chosen - 1];
     }
 
+    function normalizeGeneratedScenarioCaseShape(caseLike) {
+      const caseJson = deepCloneJson(generatedScenarioCaseSystem(caseLike) || {});
+      if (!caseJson || (!caseJson.ac && !caseJson.dc)) return caseLike;
+      const meta = generatedScenarioCaseMetadata(caseLike);
+      const ts = generatedScenarioCaseTimeSeries(caseLike);
+      if (meta && Object.keys(meta).length && !caseJson._generated_scenario) caseJson._generated_scenario = deepCloneJson(meta);
+      if (ts && !caseJson._time_series) caseJson._time_series = deepCloneJson(ts);
+      return caseJson;
+    }
+
     function firstCaseFromGeneratedScenarioJson(obj, targetFamily) {
-      const allowedBundleFormats = new Set(['generated_scenario_case_bundle_v1', 'generated_scenario_case_bundle_v2']);
+      const allowedBundleFormats = new Set(['generated_scenario_case_bundle_v1', 'generated_scenario_case_bundle_v2', 'generated_scenario_case_bundle_v3']);
       if (allowedBundleFormats.has(obj?.format) && Array.isArray(obj.cases)) {
-        return chooseGeneratedScenarioCase(obj.cases, targetFamily);
+        return normalizeGeneratedScenarioCaseShape(chooseGeneratedScenarioCase(obj.cases, targetFamily));
       }
-      if (obj && (obj.ac || obj.dc)) return obj;
+      if (obj && (obj.ac || obj.dc || obj.system)) return normalizeGeneratedScenarioCaseShape(obj);
       throw new Error('不是有效的生成场景 JSON 或系统算例 JSON');
     }
 
@@ -8309,9 +8386,82 @@ const App = (() => {
       }
     }
 
+    async function convertScenarioJsonToExcel(file) {
+      await showFormatConversionStatus('正在转换 JSON→Excel...');
+      log(`正在转换格式：${file.name} → Excel，请稍候...`, 'info');
+      try {
+        const text = await readFileAsText(file);
+        await showFormatConversionStatus('正在解析场景 JSON...');
+        const bundle = JSON.parse(text);
+        await showFormatConversionStatus('正在生成 Excel 工作簿...');
+        const resp = await fetch('/api/session/export_scenario_workbook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(bundle),
+        });
+        if (!resp.ok) {
+          let msg = 'HTTP ' + resp.status;
+          try { const j = await resp.json(); if (j?.error) msg = j.error; } catch (_) {}
+          throw new Error(msg);
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const stem = file.name.replace(/\.json$/i, '') || 'generated_scenarios';
+        a.href = url;
+        a.download = `${stem}.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        log(`JSON 已转换为 Excel：${a.download}`, 'success');
+        setStatus('格式转换完成');
+      } catch (err) {
+        log(`JSON 转 Excel 失败：${err.message || err}`, 'error');
+        setStatus('格式转换失败', 'error');
+      }
+    }
+
+    async function convertScenarioExcelToJson(file) {
+      await showFormatConversionStatus('正在转换 Excel→JSON...');
+      log(`正在转换格式：${file.name} → JSON，请稍候...`, 'info');
+      try {
+        const bytes = await file.arrayBuffer();
+        await showFormatConversionStatus('正在解析 Excel 工作簿...');
+        const resp = await fetch('/api/session/import_scenario_workbook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: bytes,
+        });
+        await showFormatConversionStatus('正在生成场景 JSON...');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Excel 转 JSON 失败');
+        const stem = file.name.replace(/\.xlsx$/i, '') || 'generated_scenarios';
+        const ok = downloadJsonFile(`${stem}.json`, data.bundle || {}, { compact: (data.bundle?.family === 'regular') });
+        (data.warnings || []).forEach(w => log(`场景 Excel 警告：${w}`, 'warn'));
+        if (ok) log(`Excel 已转换为 JSON：${stem}.json`, 'success');
+        setStatus('格式转换完成');
+      } catch (err) {
+        log(`Excel 转 JSON 失败：${err.message || err}`, 'error');
+        setStatus('格式转换失败', 'error');
+      }
+    }
+
     document.getElementById('btnExportRegularScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('regular', '常规'));
     document.getElementById('btnExportReliabilityScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('reliability', '可靠性'));
     document.getElementById('btnExportResilienceScenarioJson')?.addEventListener('click', () => exportGeneratedScenarioFamily('resilience', '弹性'));
+    document.getElementById('btnScenarioJsonToExcel')?.addEventListener('click', () => document.getElementById('fileScenarioJsonToExcel')?.click());
+    document.getElementById('fileScenarioJsonToExcel')?.addEventListener('change', e => {
+      const file = e.currentTarget.files && e.currentTarget.files[0];
+      if (file) convertScenarioJsonToExcel(file);
+      e.currentTarget.value = '';
+    });
+    document.getElementById('btnScenarioExcelToJson')?.addEventListener('click', () => document.getElementById('fileScenarioExcelToJson')?.click());
+    document.getElementById('fileScenarioExcelToJson')?.addEventListener('change', e => {
+      const file = e.currentTarget.files && e.currentTarget.files[0];
+      if (file) convertScenarioExcelToJson(file);
+      e.currentTarget.value = '';
+    });
 
     document.getElementById('btnExportScenarioResults')?.addEventListener('click', () => {
       if (!_lastScenarioGenerationData) {
