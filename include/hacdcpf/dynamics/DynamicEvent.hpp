@@ -1,0 +1,36 @@
+#pragma once
+
+#include <string>
+
+namespace hacdcpf::dynamics {
+
+enum class DynamicEventType {
+  ACBranchTrip,
+  ACBranchClose,
+  DCBranchTrip,
+  DCBranchClose,
+  ACLoadScale,
+  DCLoadScale,
+  GeneratorTrip,
+  VSCTrip,
+  DCDCTrip,
+  StoragePowerStep,
+  DCStoragePowerStep,
+  FaultShunt,
+  ClearFault,
+  Custom
+};
+
+struct DynamicEvent {
+  double time_s{0.0};
+  DynamicEventType type{DynamicEventType::Custom};
+  int component_index{0};
+  int bus{0};
+  double value{0.0};
+  double duration_s{0.0};
+  std::string component_type;
+  std::string label;
+  bool applied{false};
+};
+
+}  // namespace hacdcpf::dynamics

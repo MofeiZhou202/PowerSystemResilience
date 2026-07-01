@@ -1044,6 +1044,8 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 }
 .toolbar-btn {
   min-width: 64px;
+  max-width: 128px;
+  min-height: 34px;
   padding: 4px 10px;
   font: inherit;
   font-size: 12px;
@@ -1052,6 +1054,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   text-align: center;
   white-space: normal;
   word-break: keep-all;
+  overflow-wrap: anywhere;
   color: var(--tb-text);
   background: var(--tb-bg);
   border: 1px solid var(--tb-border);
@@ -1076,6 +1079,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 .toolbar-btn.run-btn {
   font-weight: 700;
   min-width: 110px;
+  max-width: 138px;
   background: var(--tb-run-bg);
   color: var(--tb-run-text);
   border-color: #a87a4f;
@@ -1181,7 +1185,7 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
 /* ===== Bar 3: Sub-toolbar ===== */
 .sub-toolbar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
   padding: 6px 10px;
   background: var(--sub-bar-bg);
@@ -1189,15 +1193,20 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   border-bottom: 1px solid var(--sub-bar-border);
   flex-shrink: 0;
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: min(38vh, 360px);
 }
 .sub-toolbar.hidden { display: none; }
 .sub-section {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
 }
-.sub-section[data-sub="reliability"] {
+.sub-section[data-sub="reliability"],
+.sub-section[data-sub="timeSeries"] {
   align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
@@ -1242,16 +1251,23 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   cursor: pointer;
   accent-color: var(--accent2, #56b6c2);
 }
+.control-param-group,
 .rel-param-group {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
   padding: 5px 8px;
   border: 1px solid var(--tb-border);
   border-radius: 6px;
   background: color-mix(in srgb, var(--tb-bg) 82%, transparent);
 }
+.control-param-group[hidden],
+.rel-param-group[hidden] {
+  display: none !important;
+}
+.control-param-title,
 .rel-param-title {
   align-self: stretch;
   display: inline-flex;
@@ -1263,6 +1279,31 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   font-weight: 700;
   white-space: nowrap;
 }
+.control-param-group .toolbar-btn,
+.rel-param-group .toolbar-btn {
+  align-self: center;
+}
+.ts-param-group {
+  flex: 1 1 460px;
+  max-width: 100%;
+}
+.ts-annual-group {
+  flex: 0 1 260px;
+}
+.ts-annual-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.ts-annual-group.ts-annual-expanded {
+  flex-basis: 100%;
+}
+.ts-annual-controls[hidden] {
+  display: none !important;
+}
+.ts-param-group-actions,
 .rel-param-group-actions {
   border-color: color-mix(in srgb, var(--accent2) 40%, var(--tb-border));
 }

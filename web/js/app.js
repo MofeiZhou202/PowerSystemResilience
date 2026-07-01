@@ -7208,8 +7208,9 @@ const App = (() => {
       if (!panel || !btn) return;
       const show = panel.hasAttribute('hidden');
       if (show) panel.removeAttribute('hidden'); else panel.setAttribute('hidden', '');
+      panel.closest('.ts-annual-group')?.classList.toggle('ts-annual-expanded', show);
       btn.setAttribute('aria-expanded', show ? 'true' : 'false');
-      btn.textContent = show ? '年度并行仿真 ▾' : '年度并行仿真 ▸';
+      btn.innerHTML = show ? '收起<br>年度设置 ▾' : '展开<br>年度设置 ▸';
     });
     document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
     document.getElementById('btnExportAnnualSim')?.addEventListener('click', () => {
