@@ -4058,6 +4058,28 @@ const App = (() => {
     return labels[type] || componentTypeLabel(type) || type || '—';
   }
 
+  // Readable labels for failure-mode taxonomy tokens (activation / cause /
+  // consequence) emitted by the failure-mode FMEA engine.
+  function reliabilityFmLabel(value) {
+    const labels = {
+      // activation
+      passive: '时基/被动', active_on_demand: '按需动作',
+      // cause
+      physical: '物理', cyber_control: '网络控制', communication: '通信',
+      measurement: '测量', protection_logic: '保护逻辑',
+      human_operation: '人为操作', scheduled: '计划检修',
+      // consequence
+      forced_outage: '强制停运', derating: '降容', stuck_open: '卡断开',
+      stuck_closed: '卡闭合', fail_to_open: '拒动(分闸)', fail_to_close: '拒动(合闸)',
+      fail_to_trip: '拒动(跳闸)', nuisance_trip: '误动跳闸',
+      control_unavailable: '控制不可用', setpoint_frozen: '设定值冻结',
+      measurement_bias: '测量偏差', communication_loss: '通信中断',
+      grid_forming_unavailable: '构网能力丧失', protection_zone_trip: '保护区扩大',
+    };
+    if (value === null || value === undefined || value === '') return '—';
+    return labels[value] || value;
+  }
+
   function reliabilityContingencyCompId(c, maps) {
     if (!c || !maps) return undefined;
     const rawDirect = c.canvas_comp_id ?? c.comp_id;
@@ -7232,15 +7254,34 @@ const App = (() => {
       log(`时序潮流结果已导出：${d.num_steps} 步 × ${nbus} 母线电压/相角 × ${nbr} 分支 Pf/Pt/Qf/Qt`, 'success');
     });
 
+	    function updateReliabilityControlState() {
+	      const physicalModel = document.getElementById('relPhysicalModel')?.value || 'auto';
+	      const methodEl = document.getElementById('relMethod');
+	      const maxIterEl = document.getElementById('relMaxIter');
+	      const hintEl = document.getElementById('relAnalysisHint');
+	      const useThreeStage = physicalModel === 'restoration_milp';
+	      if (methodEl) methodEl.disabled = useThreeStage;
+	      if (maxIterEl) maxIterEl.disabled = useThreeStage;
+	      if (hintEl) {
+	        hintEl.textContent = useThreeStage
+	          ? '三阶段恢复 MILP 将作为独立可靠性评估运行'
+	          : '后果模型由所选统计方法自动匹配';
+	      }
+	    }
+
 	    // Bar 3: Reliability — run + export. Backend live.
 	    async function runReliability() {
 	      setStatus('可靠性分析中...', 'busy');
 	      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-	      const method = (document.getElementById('relMethod')?.value) || 'nsq';
+	      const selectedMethod = (document.getElementById('relMethod')?.value) || 'nsq';
+	      const physicalModel = (document.getElementById('relPhysicalModel')?.value) || 'auto';
+	      const method = physicalModel === 'restoration_milp' ? 'three_stage' : selectedMethod;
 	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
+	      const metricFocus = (document.getElementById('relMetricFocus')?.value) || 'all';
+	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
 	      const opts = {
 	        method,
-	        physical_model: (document.getElementById('relPhysicalModel')?.value) || 'auto',
+	        physical_model: physicalModel,
 	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
 	        load: { scale_factor: 1.0, hours_per_year: 8736 },
@@ -7252,6 +7293,11 @@ const App = (() => {
 	        restoration: {
 	          enable_switch_reconfiguration: true,
 	          max_switch_actions: 2,
+	          include_converter_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_switch_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_generator_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_transformer_faults: !!document.getElementById('relTsFaults')?.checked,
+	          include_dc_power_flow: !!document.getElementById('relTsDcPf')?.checked,
 	        },
 	        failure_mode_scope: {
 	          include_passive: !!document.getElementById('relFmPassive')?.checked,
@@ -7265,9 +7311,13 @@ const App = (() => {
 	          include_scheduled: false,
 	          only_in_service: true,
 	        },
+	        max_order: (document.getElementById('relFmN2')?.checked ? 2 : 1),
+	        reporting: { metric_focus: metricFocus, weak_basis: weakBasis },
 	      };
 	      const data = await apiPost('/api/session/run_reliability', opts);
 	      if (data && !data.error) {
+	        data._metric_focus = metricFocus;
+	        data._weak_basis = weakBasis;
 	        _lastReliabilityData = Object.assign({ _method: method }, data);
 	        showReliabilityResults(data, method);
         switchTab('results');
@@ -7300,24 +7350,129 @@ const App = (() => {
 	             `<h5 style="margin:0 0 6px;">${escapeHtml(title)}</h5>${inner}</div>`;
 	    }
 
-	    function relNumber(value) {
-	      if (value && typeof value === 'object' && value.available === false) return null;
-	      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
-	      const n = Number(value);
-	      return Number.isFinite(n) ? n : null;
-	    }
+		    function relNumber(value) {
+		      if (value && typeof value === 'object' && value.available === false) return null;
+		      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+		      const n = Number(value);
+		      return Number.isFinite(n) ? n : null;
+		    }
 
-	    function renderReliabilityKpiTiles(data, method) {
-	      const items = [
-	        ['EENS', relMetricValue(data, 'eens_mwh_yr'), 'MWh/yr', 1],
-	        ['EDNS', relMetricValue(data, 'edns_mw'), 'MW', 3],
-	        ['LOLE', relMetricValue(data, 'lole_hr_yr'), 'h/yr', 2],
-	        ['SAIFI', relMetricValue(data, 'saifi'), 'int/cust/yr', 3],
-	        ['ASAI', relMetricValue(data, 'asai'), '', 6],
-	        ['PLC', relMetricValue(data, 'plc'), '%', 3, 100],
-	      ].filter(x => relNumber(x[1]) !== null);
-	      if (!items.length) return '';
-	      let html = '<div class="reliability-kpi-grid">';
+		    function relSelectedMetricFocus(data) {
+		      return data?._metric_focus || document.getElementById('relMetricFocus')?.value || 'all';
+		    }
+
+		    function relSelectedWeakBasis(data, method) {
+		      const selected = data?._weak_basis || document.getElementById('relWeakBasis')?.value || 'auto';
+		      if (selected && selected !== 'auto') return selected;
+		      if (method === 'three_stage') return 'eens';
+		      if (method === 'nsq' || method === 'seq') return 'eens';
+		      if (method === 'fd') return 'frequency';
+		      return 'eens';
+		    }
+
+		    function relWeakBasisMeta(basis) {
+		      const metas = {
+		        eens: { label: 'EENS 贡献', unit: 'MWh/yr', digits: 3, axis: 'MWh/yr',
+		          help: '按期望未供电量排序，适合找能量风险最大的元件或失效模式。' },
+		        lole: { label: 'LOLE 贡献', unit: 'h/yr', digits: 3, axis: 'h/yr',
+		          help: '按失负荷持续时间贡献排序，适合找停电影响时间最长的薄弱环节。' },
+		        frequency: { label: '故障频率', unit: 'occ/yr', digits: 4, axis: 'occ/yr',
+		          help: '按导致失负荷的年发生频率排序，适合关注频繁动作或频繁停运模式。' },
+		        conditional: { label: '条件风险', unit: '', digits: 4, axis: '',
+		          help: '按蒙特卡洛 P(元件停运 | 系统失负荷) 或风险占比排序，适合解释抽样状态中的关联风险。' },
+		        stage_shed: { label: '阶段切负荷', unit: 'kW', digits: 1, axis: 'kW',
+		          help: '按三阶段恢复中的阶段切负荷总量排序，适合诊断隔离、重构和修复窗口的故障传播影响。' },
+		      };
+		      return metas[basis] || metas.eens;
+		    }
+
+		    function relMetricFocusLabel(focus) {
+		      const labels = {
+		        all: '全部指标',
+		        eens: 'EENS/EDNS',
+		        lole: 'LOLE/LOLP',
+		        customer: 'SAIFI/SAIDI',
+		        cost: '成本',
+		      };
+		      return labels[focus] || focus || '全部指标';
+		    }
+
+		    function relMetricField(row, basis) {
+		      const firstNumber = (...values) => {
+		        for (const value of values) {
+		          const n = relNumber(value);
+		          if (n !== null) return n;
+		        }
+		        return 0;
+		      };
+		      if (basis === 'lole') {
+		        return firstNumber(row?.lole_contribution_hr_yr, row?.lole_contribution);
+		      }
+		      if (basis === 'frequency') {
+		        return firstNumber(row?.lolf_contribution_occ_yr, row?.lolf_contribution,
+		          row?.frequency_per_year, row?.failure_rate, row?.joint_frequency_per_year);
+		      }
+		      if (basis === 'conditional') {
+		        return firstNumber(row?.conditional_down_given_loss, row?.loss_weighted_risk,
+		          row?.importance);
+		      }
+		      if (basis === 'stage_shed') {
+		        return firstNumber(row?.pls_total, row?.shed_kw,
+		          relNumber(row?.shed_mw ?? row?.total_shed_mw) !== null
+		            ? relNumber(row?.shed_mw ?? row?.total_shed_mw) * 1000.0
+		            : null);
+		      }
+		      return firstNumber(row?.associated_eens_mwh_yr, row?.eens_contribution_mwh_yr,
+		        row?.eens_contribution);
+		    }
+
+		    function relCandidateRows(data) {
+		      if (Array.isArray(data?.critical_components) && data.critical_components.length) return data.critical_components;
+		      if (Array.isArray(data?.contingencies) && data.contingencies.length) return data.contingencies;
+		      if (Array.isArray(data?.faults) && data.faults.length) return data.faults;
+		      return [];
+		    }
+
+		    function relRankRows(rows, basis) {
+		      return (rows || []).slice()
+		        .map(row => ({ row, score: relMetricField(row, basis) }))
+		        .filter(item => Number.isFinite(item.score) && item.score > 0)
+		        .sort((a, b) => b.score - a.score)
+		        .map(item => item.row);
+		    }
+
+		    function relFocusMetricKeys(focus) {
+		      const groups = {
+		        all: ['eens_mwh_yr', 'edns_mw', 'lole_hr_yr', 'lolf_occ_yr', 'lolp', 'plc', 'saifi', 'saidi', 'asai', 'eens_cost'],
+		        eens: ['eens_mwh_yr', 'eens_kwh_yr', 'edns_mw'],
+		        lole: ['lole_hr_yr', 'lolf_occ_yr', 'lolp', 'lold_hr', 'plc'],
+		        customer: ['saifi', 'saidi', 'saidi_min', 'caidi', 'asai'],
+		        cost: ['eens_cost', 'eens_mwh_yr'],
+		      };
+		      return new Set(groups[focus] || groups.all);
+		    }
+
+		    function renderReliabilityKpiTiles(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const allowed = relFocusMetricKeys(focus);
+		      const allItems = [
+		        ['EENS', 'eens_mwh_yr', 'MWh/yr', 1],
+		        ['EDNS', 'edns_mw', 'MW', 3],
+		        ['LOLE', 'lole_hr_yr', 'h/yr', 2],
+		        ['LOLF', 'lolf_occ_yr', 'occ/yr', 3],
+		        ['LOLP', 'lolp', '', 6],
+		        ['SAIFI', 'saifi', 'int/cust/yr', 3],
+		        ['SAIDI', 'saidi', 'h/cust/yr', 3],
+		        ['ASAI', 'asai', '', 6],
+		        ['PLC', 'plc', '%', 3, 100],
+		        ['EENS成本', 'eens_cost', '', 1],
+		      ];
+		      const items = allItems
+		        .filter(([, key]) => allowed.has(key))
+		        .map(([label, key, unit, digits, scale]) => [label, relMetricValue(data, key), unit, digits, scale])
+		        .filter(x => relNumber(x[1]) !== null);
+		      if (!items.length) return '';
+		      let html = '<div class="reliability-kpi-grid">';
 	      items.forEach(([label, value, unit, digits, scale]) => {
 	        html += `<div class="reliability-kpi-card">` +
 	                `<div class="reliability-kpi-label">${escapeHtml(label)}</div>` +
@@ -7328,9 +7483,10 @@ const App = (() => {
 	      return html;
 	    }
 
-	    function renderReliabilityDashboardShell(data, method) {
-	      const hasRisk = (Array.isArray(data.critical_components) && data.critical_components.length) ||
-	                      (Array.isArray(data.contingencies) && data.contingencies.length);
+		    function renderReliabilityDashboardShell(data, method) {
+		      const hasRisk = (Array.isArray(data.critical_components) && data.critical_components.length) ||
+		                      (Array.isArray(data.contingencies) && data.contingencies.length) ||
+		                      (Array.isArray(data.faults) && data.faults.length);
 	      const hasNodal = Array.isArray(data.nodal_eens_mwh_yr) && data.nodal_eens_mwh_yr.some(v => Number(v) > 0);
 	      const hasCoverage = !!data.failure_mode_coverage;
 	      const hasConv = (method === 'nsq' || method === 'seq') && Array.isArray(data.eens_history) && data.eens_history.length;
@@ -7356,36 +7512,30 @@ const App = (() => {
 	      };
 	    }
 
-	    function drawReliabilityDashboard(data, method) {
-	      if (typeof Plotly === 'undefined') return;
-	      const relMaps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-	      const riskRows = Array.isArray(data.critical_components) && data.critical_components.length
-	        ? data.critical_components.slice(0, 12).map(r => ({
-	            name: r.display_name || r.component_name || r.mode_id || '—',
-	            y: Number(r.associated_eens_mwh_yr ?? r.eens_contribution ?? 0) || 0,
-	            pct: Number(r.loss_weighted_risk ?? r.importance ?? 0) || 0,
-	            compId: reliabilityContingencyCompId(r, relMaps),
-	          }))
-	        : (data.contingencies || []).slice(0, 12).map(r => ({
-	            name: r.display_name || r.component_name || r.mode_id || '—',
-	            y: Number(r.eens_contribution ?? 0) || 0,
-	            pct: 0,
-	            compId: reliabilityContingencyCompId(r, relMaps),
-	          }));
-	      riskRows.sort((a, b) => b.y - a.y || b.pct - a.pct);
-	      const riskChart = document.getElementById('relRiskChart');
-	      if (riskChart && riskRows.length) {
-	        Plotly.newPlot(riskChart, [{
+		    function drawReliabilityDashboard(data, method) {
+		      if (typeof Plotly === 'undefined') return;
+		      const relMaps = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		      const basis = relSelectedWeakBasis(data, method);
+		      const basisMeta = relWeakBasisMeta(basis);
+		      const riskRows = relRankRows(relCandidateRows(data), basis).slice(0, 12).map(r => ({
+		        name: r.display_name || r.component_name || r.mode_id || `Line ${r.line_id ?? '—'}`,
+		        y: relMetricField(r, basis),
+		        pct: Number(r.loss_weighted_risk ?? r.importance ?? 0) || 0,
+		        compId: reliabilityContingencyCompId(r, relMaps),
+		      }));
+		      const riskChart = document.getElementById('relRiskChart');
+		      if (riskChart && riskRows.length) {
+		        Plotly.newPlot(riskChart, [{
 	          x: riskRows.map(r => r.y).reverse(),
 	          y: riskRows.map(r => r.name).reverse(),
 	          type: 'bar',
 	          orientation: 'h',
-	          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef').reverse() },
-	          customdata: riskRows.map(r => r.pct).reverse(),
-	          hovertemplate: '%{y}<br>EENS=%{x:.3f} MWh/yr<br>风险占比=%{customdata:.3f}<extra></extra>'
-	        }], {
-	          ...relPlotLayout('Top 风险元件/失效模式', 'MWh/yr', ''),
-	          margin: { l: 92, r: 18, t: 38, b: 48 },
+		          marker: { color: riskRows.map((_, i) => i < 3 ? '#ff6b6b' : '#61afef').reverse() },
+		          customdata: riskRows.map(r => [r.pct, basisMeta.label, basisMeta.unit]).reverse(),
+		          hovertemplate: '%{y}<br>%{customdata[1]}=%{x:.3f} %{customdata[2]}<br>风险占比=%{customdata[0]:.3f}<extra></extra>'
+		        }], {
+		          ...relPlotLayout(`Top 风险元件/失效模式 (${basisMeta.label})`, basisMeta.axis, ''),
+		          margin: { l: 92, r: 18, t: 38, b: 48 },
 	          yaxis: { automargin: true }
 	        }, { responsive: true });
 	        if (riskChart.on) {
@@ -7480,40 +7630,46 @@ const App = (() => {
 	      return renderReliabilityPanel('有效分析方法', h);
 	    }
 
-	    function renderReliabilityMetricsHtml(data, method) {
-	      const rows = [
-	        ['EENS (MWh/yr)', 'eens_mwh_yr', 2],
-	        ['EENS (kWh/yr)', 'eens_kwh_yr', 1],
-	        ['EDNS (MW)', 'edns_mw', 3],
-	        ['LOLE (h/yr)', 'lole_hr_yr', 2],
-	        ['LOLF (occ/yr)', 'lolf_occ_yr', 3],
-	        ['LOLP', 'lolp', 6],
-	        ['LOLD (h/occ)', 'lold_hr', 2],
-	        ['PLC (%)', 'plc', 3, 100],
-	        ['SAIFI', 'saifi', 4],
-	        ['SAIDI (h/yr)', 'saidi', 4],
-	        ['SAIDI (min/yr)', 'saidi_min', 2],
-	        ['CAIDI', 'caidi', 4],
-	        ['ASAI', 'asai', 6],
-	        ['EENS 成本', 'eens_cost', 1],
-	      ];
-	      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
-	      rows.forEach(([label, key, digits, scale]) => {
-	        const value = relMetricValue(data, key);
-	        if (value === undefined && !(data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, key))) return;
-	        html += `<tr><td>${escapeHtml(label)}</td><td class="result-value">${relMetricHtml(value, digits, scale || 1)}</td></tr>`;
+		    function renderReliabilityMetricsHtml(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const allowed = relFocusMetricKeys(focus);
+		      const rows = [
+		        ['EENS (MWh/yr)', 'eens_mwh_yr', 2, 1, 'eens'],
+		        ['EENS (kWh/yr)', 'eens_kwh_yr', 1, 1, 'eens'],
+		        ['EDNS (MW)', 'edns_mw', 3, 1, 'eens'],
+		        ['LOLE (h/yr)', 'lole_hr_yr', 2, 1, 'lole'],
+		        ['LOLF (occ/yr)', 'lolf_occ_yr', 3, 1, 'lole'],
+		        ['LOLP', 'lolp', 6, 1, 'lole'],
+		        ['LOLD (h/occ)', 'lold_hr', 2, 1, 'lole'],
+		        ['PLC (%)', 'plc', 3, 100, 'lole'],
+		        ['SAIFI', 'saifi', 4, 1, 'customer'],
+		        ['SAIDI (h/yr)', 'saidi', 4, 1, 'customer'],
+		        ['SAIDI (min/yr)', 'saidi_min', 2, 1, 'customer'],
+		        ['CAIDI', 'caidi', 4, 1, 'customer'],
+		        ['ASAI', 'asai', 6, 1, 'customer'],
+		        ['EENS 成本', 'eens_cost', 1, 1, 'cost'],
+		      ];
+		      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
+		      rows.forEach(([label, key, digits, scale]) => {
+		        if (focus !== 'all' && !allowed.has(key)) return;
+		        const value = relMetricValue(data, key);
+		        if (value === undefined && !(data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, key))) return;
+		        html += `<tr><td>${escapeHtml(label)}</td><td class="result-value">${relMetricHtml(value, digits, scale || 1)}</td></tr>`;
 	      });
 	      if (method === 'nsq' || method === 'seq') {
 	        html += `<tr><td>收敛</td><td>${data.converged ? '是' : '否'}</td></tr>`;
 	        html += `<tr><td>迭代/年数</td><td>${data.iterations_used ?? '—'}</td></tr>`;
 	        html += `<tr><td>最终 CoV</td><td>${relMetricHtml(data.final_cov, 4)}</td></tr>`;
 	      }
-	      if (data.n_contingencies != null) {
-	        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;
-	      }
-	      html += '</tbody></table>';
-	      return renderReliabilityPanel('指标', html);
-	    }
+		      if (data.n_contingencies != null) {
+		        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;
+		      }
+		      html += '</tbody></table>';
+		      if (data.metric_semantics?.description) {
+		        html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(data.metric_semantics.description)}</div>`;
+		      }
+		      return renderReliabilityPanel('指标', html);
+		    }
 
 	    function renderFailureModeCoverageHtml(data) {
 	      const cov = data.failure_mode_coverage;
@@ -7532,17 +7688,17 @@ const App = (() => {
 	      return renderReliabilityPanel('失效模式覆盖', html);
 	    }
 
-	    function renderFailureModeLegendHtml(data) {
-	      if (!data.failure_mode_coverage && !(data.method === 'failure_mode_fmea')) return '';
-	      const html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:12px;">' +
-	        '<div><b>时基失效</b><br><span style="color:var(--muted,#8a909c);">运行中按 λ 随时间发生，用于线路、设备、功率器件等被动故障。</span></div>' +
-	        '<div><b>按需动作失效</b><br><span style="color:var(--muted,#8a909c);">只有控制、开断、保护动作被请求时才暴露，例如拒动、失败合闸。</span></div>' +
-	        '<div><b>设备物理</b><br><span style="color:var(--muted,#8a909c);">硬件或一次设备故障，通常改变拓扑、容量或可用性。</span></div>' +
-	        '<div><b>网络控制</b><br><span style="color:var(--muted,#8a909c);">通信、测量、控制器或设定值异常，代表 cyber/control 层失效。</span></div>' +
-	        '<div><b>保护逻辑</b><br><span style="color:var(--muted,#8a909c);">保护拒动、误动或保护区扩大，影响隔离和故障传播。</span></div>' +
-	        '</div>';
-	      return renderReliabilityPanel('失效模式含义', html);
-	    }
+		    function renderFailureModeLegendHtml(data) {
+		      const html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:12px;">' +
+		        '<div><b>时基失效</b><br><span style="color:var(--muted,#8a909c);">用年故障率 lambda 和修复时间 r；不可用度 U=lambda*r/(H+lambda*r)，确定性贡献为 lambda × 持续时间 × 后果。</span></div>' +
+		        '<div><b>按需动作失效</b><br><span style="color:var(--muted,#8a909c);">只在开断、保护或控制动作被请求时暴露；等效年频率为 demand frequency × probability per demand。</span></div>' +
+		        '<div><b>设备物理</b><br><span style="color:var(--muted,#8a909c);">硬件或一次设备故障，通常改变拓扑、容量、连通性或设备可用性。</span></div>' +
+		        '<div><b>网络控制</b><br><span style="color:var(--muted,#8a909c);">通信、测量、控制器或设定值异常，代表 cyber/control 层失效；恢复时间可独立于物理 MTTR。</span></div>' +
+		        '<div><b>保护逻辑</b><br><span style="color:var(--muted,#8a909c);">保护拒动、误动或保护区扩大，影响隔离范围和故障传播路径。</span></div>' +
+		        '<div><b>N-2 共因</b><br><span style="color:var(--muted,#8a909c);">当前按独立重叠 U_i × U_j 近似联合不可用度；用于筛查二阶薄弱组合。</span></div>' +
+		        '</div>';
+		      return renderReliabilityPanel('故障模式计算方法', html);
+		    }
 
 	    function renderReliabilityComponentModelHtml(data) {
 	      const dq = data.data_quality;
@@ -7562,73 +7718,115 @@ const App = (() => {
 	      return html ? renderReliabilityPanel('元件建模', html) : '';
 	    }
 
-	    function renderReliabilityRiskBasisHtml(method) {
-	      if (method === 'nsq' || method === 'seq') {
-	        return '<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">' +
-	          '蒙特卡洛薄弱元件按抽样故障状态中的失负荷加权贡献排序，包含多元件共停运/共影响；' +
-	          'FMEA 按单一 N-1 故障的频率×后果排序。因此同一算例中二者排序可以不同。' +
-	          '</div>';
-	      }
-	      if (method === 'fmea' || method === 'failure_mode_fmea') {
-	        return '<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">' +
-	          'FMEA 结果按单一故障或失效模式的 EENS 贡献排序；蒙特卡洛薄弱元件表则反映抽样共停运状态中的失负荷加权风险。' +
-	          '</div>';
-	      }
-	      return '';
-	    }
+		    function renderReliabilitySelectionHtml(data, method) {
+		      const focus = relSelectedMetricFocus(data);
+		      const basis = relSelectedWeakBasis(data, method);
+		      const meta = relWeakBasisMeta(basis);
+		      let html = `<b>指标聚焦：</b>${escapeHtml(relMetricFocusLabel(focus))} `;
+		      html += `<b style="margin-left:10px;">薄弱环节排序：</b>${escapeHtml(meta.label)}`;
+		      html += `<div style="color:var(--muted,#8a909c);font-size:11px;margin-top:6px;">${escapeHtml(meta.help)}</div>`;
+		      return renderReliabilityPanel('统计指标与薄弱环节', html);
+		    }
 
-	    function showReliabilityResults(data, method) {
-	      document.getElementById('resultsEmpty').style.display = 'none';
-	      document.getElementById('resultsContent').style.display = 'block';
-	      setActiveResultGroup('reliability');
-	      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-	      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
-	      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
-	      html += renderReliabilityKpiTiles(data, method);
-	      html += renderReliabilityDashboardShell(data, method);
-	      html += renderReliabilityComponentModelHtml(data);
-	      html += renderFailureModeCoverageHtml(data);
-	      html += renderFailureModeLegendHtml(data);
-	      html += renderRelScopeHtml(data);
-	      html += renderReliabilityMetricsHtml(data, method);
-      // Critical components (NSQ/SEQ) — index is 0-based positional (generator
-	      // or branch), the same space PF uses for busMap.gen[i] / busMap.branch[i].
-	      if (Array.isArray(data.critical_components) && data.critical_components.length) {
-	        html += '<h4 style="margin:10px 0 4px;">薄弱元件 (按失负荷加权风险)</h4>';
-	        html += renderReliabilityRiskBasisHtml(method);
-	        html += '<table><thead><tr><th>#</th><th>元件</th><th>类型</th><th>风险占比</th><th>P(停运|失负荷)</th><th>关联EENS</th></tr></thead><tbody>';
-	        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-	        data.critical_components.slice(0, 15).forEach((c, i) => {
-	          const compId = reliabilityContingencyCompId(c, ccBusMap);
-	          const clk = compClickAttr(compId);
-	          const name = c.component_name || `${c.component_type || ''}[${c.index ?? ''}]`;
-	          const type = reliabilityComponentTypeLabel(c.component_type);
-	          html += `<tr${clk}><td>${i + 1}</td><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(c.loss_weighted_risk ?? c.importance, 4)}</td><td>${nf(c.conditional_down_given_loss, 4)}</td><td>${nf(c.associated_eens_mwh_yr, 2)}</td></tr>`;
+		    function renderReliabilityRiskBasisHtml(method, basis) {
+		      const meta = relWeakBasisMeta(basis || 'eens');
+		      let prefix = `<div style="color:var(--muted,#8a909c);font-size:11px;margin:4px 0 8px;">当前按 ${escapeHtml(meta.label)} 排序。${escapeHtml(meta.help)} `;
+		      if (method === 'nsq' || method === 'seq') {
+		        return prefix +
+		          '蒙特卡洛薄弱元件反映抽样共停运状态中的关联风险；FMEA 按单一故障或失效模式的频率×后果排序，因此同一算例排序可以不同。</div>';
+		      }
+		      if (method === 'fmea' || method === 'failure_mode_fmea') {
+		        return prefix + 'FMEA 为确定性枚举，薄弱环节来自单一故障或失效模式的频率加权后果。</div>';
+		      }
+		      if (method === 'three_stage') {
+		        return prefix + '三阶段恢复为确定性频率加权评估，阶段1/2/3分别对应隔离、重构和修复窗口。</div>';
+		      }
+		      return prefix + '</div>';
+		    }
+
+		    function showReliabilityResults(data, method) {
+		      document.getElementById('resultsEmpty').style.display = 'none';
+		      document.getElementById('resultsContent').style.display = 'block';
+		      setActiveResultGroup('reliability');
+		      const nf = (v, d = 2) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
+		      const methodLabel = { nsq: '非序贯蒙特卡洛', seq: '序贯蒙特卡洛', fmea: 'FMEA (N-1)', failure_mode_fmea: '失效模式 FMEA', fd: '频率-持续时间', three_stage: '三阶段恢复重构' }[method] || method;
+		      const weakBasis = relSelectedWeakBasis(data, method);
+		      const weakMeta = relWeakBasisMeta(weakBasis);
+		      const weakRows = relRankRows(relCandidateRows(data), weakBasis);
+		      let html = `<div style="margin-bottom:8px;"><b>方法：</b>${escapeHtml(methodLabel)}</div>`;
+		      html += renderReliabilityKpiTiles(data, method);
+		      html += renderReliabilityDashboardShell(data, method);
+		      html += renderReliabilityComponentModelHtml(data);
+		      html += renderFailureModeCoverageHtml(data);
+		      html += renderFailureModeLegendHtml(data);
+		      html += renderReliabilitySelectionHtml(data, method);
+		      html += renderRelScopeHtml(data);
+		      html += renderReliabilityMetricsHtml(data, method);
+		      if (weakRows.length) {
+		        html += `<h4 style="margin:10px 0 4px;">薄弱环节 (按 ${escapeHtml(weakMeta.label)})</h4>`;
+		        html += renderReliabilityRiskBasisHtml(method, weakBasis);
+		        html += `<table><thead><tr><th>#</th><th>元件/模式</th><th>类型</th><th>${escapeHtml(weakMeta.label)}</th><th>风险占比</th><th>关联EENS</th><th>LOLE</th></tr></thead><tbody>`;
+		        const ccBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		        weakRows.slice(0, 15).forEach((c, i) => {
+		          const compId = reliabilityContingencyCompId(c, ccBusMap);
+		          const clk = compClickAttr(compId);
+		          const fallbackName = c.line_id != null
+		            ? `故障 ${c.line_id} (${c.from_bus ?? '—'} -> ${c.to_bus ?? '—'})`
+		            : `${c.component_type || ''}[${c.index ?? c.component_index ?? ''}]`;
+		          const name = c.display_name || c.component_name || c.mode_id || fallbackName;
+		          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type || c.canonical_component_type);
+		          html += `<tr${clk}><td>${i + 1}</td><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${nf(relMetricField(c, weakBasis), weakMeta.digits)} ${escapeHtml(weakMeta.unit)}</td><td>${nf(c.loss_weighted_risk ?? c.importance, 4)}</td><td>${nf(c.associated_eens_mwh_yr ?? c.eens_contribution, 3)}</td><td>${nf(c.lole_contribution_hr_yr ?? c.lole_contribution, 3)}</td></tr>`;
+		        });
+		        html += '</tbody></table>';
+		      } else if (relCandidateRows(data).length) {
+		        html += renderReliabilityPanel('薄弱环节', `<div style="color:var(--muted,#8a909c);font-size:12px;">当前排序依据“${escapeHtml(weakMeta.label)}”在该方法结果中没有可用的正贡献值；请切换薄弱环节排序依据或查看下方原始结果表。</div>`);
+		      }
+		      // FMEA top contingencies
+		      if ((method === 'fmea' || method === 'failure_mode_fmea') && Array.isArray(data.contingencies) && data.contingencies.length) {
+		        const contingencyRows = relRankRows(data.contingencies, weakBasis);
+		        html += `<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 ${escapeHtml(weakMeta.label)})</h4>`;
+		        html += renderReliabilityRiskBasisHtml(method, weakBasis);
+		        if (contingencyRows.length) {
+		          html += '<table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>后果</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
+		          const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+		          contingencyRows.slice(0, 15).forEach(c => {
+		            const compId = reliabilityContingencyCompId(c, relBusMap);
+		            const clk = compClickAttr(compId);
+		            const name = c.display_name || c.mode_id || c.component_name || '—';
+		            const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
+		            const supported = c.supported === false ? (c.unsupported_reason || '不支持') : (c.data_source || '已评估');
+		            html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(reliabilityFmLabel(c.activation))}</td><td>${escapeHtml(reliabilityFmLabel(c.cause))}</td><td>${escapeHtml(reliabilityFmLabel(c.consequence))}</td><td>${escapeHtml(supported)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw ?? c.total_shed_mw, 2)}</td></tr>`;
+		          });
+		          html += '</tbody></table>';
+		        } else {
+		          html += `<div style="color:var(--muted,#8a909c);font-size:12px;">该 FMEA 结果没有“${escapeHtml(weakMeta.label)}”排序值。</div>`;
+		        }
+		      }
+	      // Multi-mode (N-2) co-failures (failure-mode FMEA with max_order>=2)
+	      if (Array.isArray(data.co_contingencies) && data.co_contingencies.length) {
+	        html += '<h4 style="margin:10px 0 4px;">共因失效 (N-2 联合停运，按 EENS 贡献)</h4>';
+	        html += '<table><thead><tr><th>模式 A</th><th>模式 B</th><th>联合不可用度</th><th>切负荷(MW)</th><th>EENS贡献</th></tr></thead><tbody>';
+	        data.co_contingencies.slice(0, 15).forEach(co => {
+	          const a = co.mode_a || {}, b = co.mode_b || {};
+	          const na2 = (a.display_name || a.mode_id || '—') + ' · ' + reliabilityFmLabel(a.consequence);
+	          const nb2 = (b.display_name || b.mode_id || '—') + ' · ' + reliabilityFmLabel(b.consequence);
+	          const uij = (co.joint_unavailability != null) ? Number(co.joint_unavailability).toExponential(2) : '—';
+	          html += `<tr><td>${escapeHtml(na2)}</td><td>${escapeHtml(nb2)}</td><td>${uij}</td><td>${nf(co.total_shed_mw, 2)}</td><td>${nf(co.eens_contribution, 3)}</td></tr>`;
 	        });
 	        html += '</tbody></table>';
 	      }
-	      // FMEA top contingencies
-	      if ((method === 'fmea' || method === 'failure_mode_fmea') && Array.isArray(data.contingencies) && data.contingencies.length) {
-	        html += '<h4 style="margin:10px 0 4px;">关键故障/失效模式 (按 EENS 贡献)</h4>';
-	        html += renderReliabilityRiskBasisHtml(method);
-	        html += '<table><thead><tr><th>元件/模式</th><th>类型</th><th>激活</th><th>原因</th><th>状态</th><th>EENS贡献</th><th>切负荷</th></tr></thead><tbody>';
-	        const relBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-	        data.contingencies.slice(0, 15).forEach(c => {
-	          const compId = reliabilityContingencyCompId(c, relBusMap);
+	      // Three-stage restoration: per-fault load shed by stage
+	      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
+	        const faultRows = relRankRows(data.faults, weakBasis);
+	        html += '<h4 style="margin:10px 0 4px;">三阶段故障传播与恢复</h4><table><thead><tr><th>元件</th><th>类型</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th><th>EENS</th><th>LOLE</th></tr></thead><tbody>';
+	        const tsMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+	        faultRows.slice(0, 15).forEach(f => {
+	          const compId = reliabilityContingencyCompId(f, tsMap);
 	          const clk = compClickAttr(compId);
-	          const name = c.display_name || c.mode_id || c.component_name || '—';
-	          const type = c.display_type || reliabilityComponentTypeLabel(c.component_type);
-	          const supported = c.supported === false ? (c.unsupported_reason || '不支持') : (c.data_source || '已评估');
-	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(c.activation || '—')}</td><td>${escapeHtml(c.cause || '—')}</td><td>${escapeHtml(supported)}</td><td>${nf(c.eens_contribution, 2)}</td><td>${nf(c.shed_mw ?? c.total_shed_mw, 2)}</td></tr>`;
+	          const name = f.display_name || f.component_name || `故障 ${f.line_id} (${f.from_bus ?? '—'} -> ${f.to_bus ?? '—'})`;
+	          const type = f.display_type || reliabilityComponentTypeLabel(f.component_type);
+	          html += `<tr${clk}><td>${escapeHtml(name)}</td><td>${escapeHtml(type)}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td><td>${nf(f.eens_contribution_mwh_yr ?? f.eens_contribution, 3)}</td><td>${nf(f.lole_contribution_hr_yr ?? f.lole_contribution, 3)}</td></tr>`;
 	        });
-	        html += '</tbody></table>';
-	      }
-      // Three-stage restoration: per-fault load shed by stage
-      if (method === 'three_stage' && Array.isArray(data.faults) && data.faults.length) {
-        html += '<h4 style="margin:10px 0 4px;">故障线路恢复 (按总切负荷 kW)</h4><table><thead><tr><th>线路</th><th>状态</th><th>阶段1</th><th>阶段2</th><th>阶段3</th><th>合计(kW)</th></tr></thead><tbody>';
-        data.faults.slice().sort((a, b) => (b.pls_total || 0) - (a.pls_total || 0)).slice(0, 15).forEach(f => {
-          html += `<tr><td>Line ${f.line_id}</td><td>${escapeHtml(f.status || '')}</td><td>${nf(f.pls_stage1, 1)}</td><td>${nf(f.pls_stage2, 1)}</td><td>${nf(f.pls_stage3, 1)}</td><td>${nf(f.pls_total, 1)}</td></tr>`;
-        });
         html += '</tbody></table>';
       }
 	      document.getElementById('reliabilityResults').innerHTML = html;
@@ -7638,7 +7836,9 @@ const App = (() => {
 	      }
 	    }
 
-    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
+	    document.getElementById('relPhysicalModel')?.addEventListener('change', updateReliabilityControlState);
+	    updateReliabilityControlState();
+	    document.getElementById('btnRunReliability')?.addEventListener('click', runReliability);
     document.getElementById('btnExportReliabilityResults')?.addEventListener('click', () => {
       if (!_lastReliabilityData) {
         log('暂无可靠性分析结果可导出，请先运行可靠性分析', 'warn');

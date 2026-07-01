@@ -1197,6 +1197,11 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   gap: 8px;
   flex-wrap: nowrap;
 }
+.sub-section[data-sub="reliability"] {
+  align-items: stretch;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 .sub-section[hidden] { display: none; }
 .sub-label {
   display: flex;
@@ -1236,6 +1241,30 @@ select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px
   margin: 0;
   cursor: pointer;
   accent-color: var(--accent2, #56b6c2);
+}
+.rel-param-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 5px 8px;
+  border: 1px solid var(--tb-border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tb-bg) 82%, transparent);
+}
+.rel-param-title {
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  padding-right: 8px;
+  border-right: 1px solid var(--tb-border);
+  color: var(--accent2);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.rel-param-group-actions {
+  border-color: color-mix(in srgb, var(--accent2) 40%, var(--tb-border));
 }
 .sub-placeholder {
   font-size: 12px;

@@ -161,7 +161,7 @@ TEST_CASE("Three-stage reliability — test_1_no_sop (5-bus pure AC)",
   CHECK(r.saifi < 1.0);
 
   CHECK(r.model_scope == "ac-lindistflow-milp");
-  CHECK(r.model_limitations.find("branch-only") != std::string::npos);
+  CHECK(r.model_limitations.find("ACBranch and DCBranch") != std::string::npos);
   CHECK(r.model_limitations.find("VSC") != std::string::npos);
   CHECK(r.validity.branch_flow_enforced);
   CHECK(r.validity.voltage_constraints_enforced);
@@ -185,9 +185,9 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
   CHECK(r.nb_ac  >= 33);
   CHECK(r.nl_vsc >= 1);
 
-  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
-  CHECK(r.model_limitations.find("branch-only") != std::string::npos);
-  CHECK_FALSE(r.validity.dc_power_flow_enforced);
+  CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
+  CHECK(r.model_limitations.find("ACBranch and DCBranch") != std::string::npos);
+  CHECK(r.validity.dc_power_flow_enforced);
   CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
   check_result_shape(r, false);
@@ -200,6 +200,122 @@ TEST_CASE("Three-stage reliability — case33mg_acdc (33-bus AC/DC + microgrid)"
                r.saifi, r.saidi_min, r.eens_kwh_yr);
 }
 
+// ─── TC-3b: opt-in converter / switch / breaker fault set ────────────────────
+
+TEST_CASE("Three-stage reliability — converter fault set extends contingencies",
+          "[reliability][three_stage][faults]") {
+  const auto path = reliability_data("case33mg_acdc.json");
+  REQUIRE(fs::exists(path));
+
+  ThreeStageReliabilityOptions base;
+  base.inherit_stdio = true;
+  auto r_base = run_three_stage_reliability(path, base);
+
+  ThreeStageReliabilityOptions with_conv;
+  with_conv.inherit_stdio = true;
+  with_conv.include_converter_faults = true;  // case33mg_acdc has >=1 VSC
+  auto r_conv = run_three_stage_reliability(path, with_conv);
+
+  // Enabling converter faults adds VSC/DC-DC contingencies to the fault set.
+  // (Whether they shed depends on DC-side redundancy; case33mg has a self-
+  // sufficient DC subnetwork, so EENS may be unchanged here — the synthetic
+  // case below proves the shedding path.)
+  CHECK(r_conv.faults.size() > r_base.faults.size());
+  CHECK(r_conv.eens_kwh_yr >= r_base.eens_kwh_yr - 1e-6);
+}
+
+TEST_CASE("Three-stage reliability — VSC fault islands a VSC-fed DC load",
+          "[reliability][three_stage][faults]") {
+  // AC slack + generator; a DC bus (DC_P, not a source) whose only supply path
+  // is the single VSC.  A VSC outage therefore islands the DC load.
+  hacdcpf::HybridPowerSystem sys;
+  hacdcpf::ACBus b1; b1.index = 1; b1.bus_type = hacdcpf::BusType::SLACK; b1.in_service = true;
+  sys.ac.buses = {b1};
+  hacdcpf::Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 20.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  hacdcpf::DCBus d; d.index = 101; d.in_service = true;  // DC_P default -> not a source
+  sys.dc.buses = {d};
+  hacdcpf::DCLoad dl; dl.index = 1; dl.bus = 101; dl.in_service = true; dl.p_mw = 5.0;
+  sys.dc.loads = {dl};
+  hacdcpf::VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.pmax_mw = 10.0; v.pmin_mw = -10.0; v.p_rated_mw = 10.0;
+  sys.vsc_converters = {v};
+
+  const std::string js = hacdcpf::io::to_json(sys, 2);
+
+  ThreeStageReliabilityOptions base;
+  base.inherit_stdio = true;
+  auto r_base = hacdcpf::analysis::run_three_stage_reliability_from_string(js, base);
+
+  ThreeStageReliabilityOptions conv;
+  conv.inherit_stdio = true;
+  conv.include_converter_faults = true;
+  auto r_conv = hacdcpf::analysis::run_three_stage_reliability_from_string(js, conv);
+
+  // Baseline (branch-only) has no faults here; the opt-in VSC fault islands the
+  // DC bus and sheds its 5 MW, so it strictly raises EENS.
+  CHECK(r_conv.faults.size() > r_base.faults.size());
+  CHECK(r_conv.eens_kwh_yr > r_base.eens_kwh_yr + 1e-6);
+  bool sheds = false;
+  for (const auto& f : r_conv.faults)
+    if (f.pls_total > 1e-6) { sheds = true; break; }
+  CHECK(sheds);
+}
+
+TEST_CASE("Three-stage reliability — DC power flow captures a DC line-limit shed",
+          "[reliability][three_stage][dcpf]") {
+  // AC slack + generator feed a DC bus via a VSC; two parallel DC branches
+  // (each rated 3 MVA) carry a 5 MW DC load at the far DC bus.  A single DC-
+  // branch outage leaves the survivor to carry all 5 MW — a thermal overload the
+  // aggregate capacity fallback cannot see, but the DC power flow does.
+  hacdcpf::HybridPowerSystem sys;
+  hacdcpf::ACBus b1; b1.index = 1; b1.bus_type = hacdcpf::BusType::SLACK; b1.in_service = true;
+  sys.ac.buses = {b1};
+  hacdcpf::Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 20.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  hacdcpf::DCBus d101; d101.index = 101; d101.in_service = true;
+  hacdcpf::DCBus d102; d102.index = 102; d102.in_service = true;
+  sys.dc.buses = {d101, d102};
+  hacdcpf::DCLoad dl; dl.index = 1; dl.bus = 102; dl.in_service = true; dl.p_mw = 5.0;
+  sys.dc.loads = {dl};
+  hacdcpf::DCBranch br1; br1.index = 1; br1.from_bus = 101; br1.to_bus = 102;
+  br1.in_service = true; br1.r_pu = 0.01; br1.rate_a_mva = 3.0;
+  hacdcpf::DCBranch br2; br2.index = 2; br2.from_bus = 101; br2.to_bus = 102;
+  br2.in_service = true; br2.r_pu = 0.01; br2.rate_a_mva = 3.0;
+  sys.dc.branches = {br1, br2};
+  hacdcpf::VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.pmax_mw = 10.0; v.pmin_mw = -10.0; v.p_rated_mw = 10.0;
+  sys.vsc_converters = {v};
+
+  const std::string js = hacdcpf::io::to_json(sys, 2);
+
+  ThreeStageReliabilityOptions cap;  // force the legacy capacity-only fallback
+  cap.inherit_stdio = true;
+  cap.include_dc_power_flow = false;
+  auto r_cap = hacdcpf::analysis::run_three_stage_reliability_from_string(js, cap);
+
+  ThreeStageReliabilityOptions pf;
+  pf.inherit_stdio = true;
+  pf.include_dc_power_flow = true;
+  auto r_pf = hacdcpf::analysis::run_three_stage_reliability_from_string(js, pf);
+
+  // The capacity fallback sees aggregate capacity (VSC 10 MW) >= 5 MW demand, so
+  // a single DC-branch outage sheds nothing.  The DC power flow enforces the
+  // 3 MVA branch limit -> ~2 MW shed per stage.
+  CHECK_FALSE(r_cap.validity.dc_power_flow_enforced);
+  CHECK(r_cap.eens_kwh_yr == Catch::Approx(0.0).margin(1.0));
+
+  CHECK(r_pf.validity.dc_power_flow_enforced);
+  CHECK(r_pf.model_scope.find("dc-lindistflow") != std::string::npos);
+  CHECK(r_pf.eens_kwh_yr > r_cap.eens_kwh_yr + 1.0);
+  bool overload_shed = false;
+  for (const auto& f : r_pf.faults)
+    if (f.pls_stage1 == Catch::Approx(2000.0).margin(300.0)) { overload_shed = true; break; }
+  CHECK(overload_shed);
+}
+
 // ─── TC-4: case33bw_acdc — IEEE 33-bus (BW) with SOP ────────────────────────
 
 TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
@@ -208,8 +324,8 @@ TEST_CASE("Three-stage reliability — case33bw_acdc (33-bus BW + SOP)",
 
   // Must have at least one SOP device.
   CHECK(r.nl_sop >= 1);
-  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
-  CHECK_FALSE(r.validity.dc_power_flow_enforced);
+  CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
+  CHECK(r.validity.dc_power_flow_enforced);
   CHECK_FALSE(r.validity.sop_dispatch_optimised);
 
   // SOP configuration must be populated.
@@ -683,8 +799,8 @@ TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE_FALSE(r.ok);
   REQUIRE(!r.error.empty());
-  CHECK(r.model_scope.find("dc-connectivity-fallback") != std::string::npos);
-  CHECK_FALSE(r.validity.dc_power_flow_enforced);
+  CHECK(r.model_scope.find("dc-lindistflow") != std::string::npos);
+  CHECK(r.validity.dc_power_flow_enforced);
   REQUIRE(r.faults.size() == 1);
 
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(400.0).margin(1e-3));

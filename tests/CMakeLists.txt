@@ -90,6 +90,7 @@ target_compile_options(test_powerflow_performance PRIVATE
   $<$<CXX_COMPILER_ID:MSVC>:/O2 /DNDEBUG>
 )
 hacdcpf_copy_opendss_runtime(test_powerflow_performance)
+
 catch_discover_tests(test_powerflow_performance
   TEST_SUFFIX " [perf]"
   PROPERTIES LABELS "performance;slow"

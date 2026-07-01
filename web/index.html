@@ -522,63 +522,106 @@
   </div>
   <!-- Reliability -->
   <div class="sub-section" data-sub="reliability" hidden>
-    <label class="sub-label" title="可靠性分析方法">方法
-      <select id="relMethod">
-        <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
-        <option value="seq">序贯蒙特卡洛 (SEQ)</option>
-	        <option value="fmea">FMEA (N-1 枚举)</option>
-	        <option value="failure_mode_fmea">失效模式 FMEA</option>
-	        <option value="fd">频率-持续时间 (F&amp;D)</option>
-	        <option value="three_stage">三阶段恢复重构 (MILP)</option>
-	      </select>
-	    </label>
-	    <label class="sub-label" title="有效分析模型声明；自动会按方法选择当前后端支持的物理模型">模型
-	      <select id="relPhysicalModel">
-	        <option value="auto" selected>自动</option>
-	        <option value="hybrid_network_lp">AC/DC 网络 LP</option>
-	        <option value="ac_only_dcopf">AC DC-OPF</option>
-	        <option value="restoration_milp">三阶段恢复 MILP</option>
-	        <option value="generation_adequacy">发电充裕度 COPT</option>
-	      </select>
-	    </label>
-	    <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
-	      <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
-	    </label>
-    <label class="sub-label" title="可靠性数据策略：命名模板现为可选（不再自动套用）">数据策略
-      <select id="relDataPolicy">
-        <option value="missing_only" selected>缺失项→默认值</option>
-        <option value="case_data_only">仅用例数据 (严格)</option>
-        <option value="overwrite_template">套用模板覆盖</option>
-      </select>
-    </label>
-    <label class="sub-label" title="命名可靠性模板（仅在“套用模板覆盖”模式生效）">模板
-      <select id="relTemplate">
-        <option value="none" selected>无</option>
-        <option value="ieee-rts-24">IEEE RTS-24</option>
-	        <option value="comprehensive">综合混合示范</option>
-	      </select>
-	    </label>
-		    <label class="sub-label sub-checkbox" title="被动/时基：元件运行中按年故障率 λ 自然发生，例如线路永久故障、设备老化损坏">
-		      <input id="relFmPassive" type="checkbox" checked/>
-		      <span>时基失效</span>
-		    </label>
-		    <label class="sub-label sub-checkbox" title="主动/按需：只有在开关、保护、控制动作被请求时才可能失败，例如拒动、误动、失败合闸">
-		      <input id="relFmActive" type="checkbox" checked/>
-		      <span>按需动作失效</span>
-		    </label>
-		    <label class="sub-label sub-checkbox" title="物理设备：硬件、线路、电缆、变压器、功率器件等实体故障">
-		      <input id="relFmPhysical" type="checkbox" checked/>
-		      <span>设备物理</span>
-		    </label>
-		    <label class="sub-label sub-checkbox" title="网络/控制：控制器不可用、通信中断、测量异常、设定值冻结等 cyber/control 失效">
-		      <input id="relFmCyber" type="checkbox" checked/>
-		      <span>网络控制</span>
-		    </label>
-		    <label class="sub-label sub-checkbox" title="保护逻辑：继电保护拒动、误动、保护区扩大等影响故障隔离范围的模式">
-		      <input id="relFmProtection" type="checkbox" checked/>
-		      <span>保护逻辑</span>
-		    </label>
-	    <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+    <div class="rel-param-group" title="可靠性元件参数来源与模板覆盖策略">
+      <span class="rel-param-title">元件建模</span>
+      <label class="sub-label" title="可靠性数据策略：命名模板现为可选（不再自动套用）">数据策略
+        <select id="relDataPolicy">
+          <option value="missing_only" selected>缺失项→默认值</option>
+          <option value="case_data_only">仅用例数据 (严格)</option>
+          <option value="overwrite_template">套用模板覆盖</option>
+        </select>
+      </label>
+      <label class="sub-label" title="命名可靠性模板（仅在“套用模板覆盖”模式生效）">模板
+        <select id="relTemplate">
+          <option value="none" selected>无</option>
+          <option value="ieee-rts-24">IEEE RTS-24</option>
+          <option value="comprehensive">综合混合示范</option>
+        </select>
+      </label>
+    </div>
+    <div class="rel-param-group" title="失效模式筛选：时基/按需、物理/cyber/control/protection">
+      <span class="rel-param-title">故障模式</span>
+      <label class="sub-label sub-checkbox" title="被动/时基：元件运行中按年故障率 λ 自然发生，例如线路永久故障、设备老化损坏">
+        <input id="relFmPassive" type="checkbox" checked/>
+        <span>时基失效</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="主动/按需：只有在开关、保护、控制动作被请求时才可能失败，例如拒动、误动、失败合闸">
+        <input id="relFmActive" type="checkbox" checked/>
+        <span>按需动作失效</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="物理设备：硬件、线路、电缆、变压器、功率器件等实体故障">
+        <input id="relFmPhysical" type="checkbox" checked/>
+        <span>设备物理</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="网络/控制：控制器不可用、通信中断、测量异常、设定值冻结等 cyber/control 失效">
+        <input id="relFmCyber" type="checkbox" checked/>
+        <span>网络控制</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="保护逻辑：继电保护拒动、误动、保护区扩大等影响故障隔离范围的模式">
+        <input id="relFmProtection" type="checkbox" checked/>
+        <span>保护逻辑</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="共因失效：枚举两个不同元件失效模式的 N-2 同时停运，按独立二阶重叠概率 U_i*U_j 加权（仅失效模式 FMEA）">
+        <input id="relFmN2" type="checkbox"/>
+        <span>N-2 共因</span>
+      </label>
+    </div>
+    <div class="rel-param-group" title="故障后果与恢复重构模型">
+      <span class="rel-param-title">故障分析</span>
+      <label class="sub-label" title="故障后果模型；选择三阶段恢复 MILP 时会调用三阶段可靠性评估器">后果模型
+        <select id="relPhysicalModel">
+          <option value="auto" selected>自动</option>
+          <option value="hybrid_network_lp">AC/DC 网络 LP</option>
+          <option value="ac_only_dcopf">AC DC-OPF</option>
+          <option value="restoration_milp">三阶段恢复 MILP</option>
+          <option value="generation_adequacy">发电充裕度 COPT</option>
+        </select>
+      </label>
+      <span id="relAnalysisHint" class="sub-hint"></span>
+      <label class="sub-label sub-checkbox" title="三阶段恢复重构：除 AC/DC 线路外，额外枚举 VSC/DC-DC 变换器、AC 开关、AC/DC 断路器以及发电机/变压器停运故障（仅三阶段恢复 MILP）">
+        <input id="relTsFaults" type="checkbox"/>
+        <span>三阶段扩展故障</span>
+      </label>
+      <label class="sub-label sub-checkbox" title="三阶段 DC 子网用 DC LinDistFlow 潮流替代容量回退：母线电压下限、线路电阻压降与热稳定限制（仅三阶段恢复 MILP；默认开启，取消勾选则回退到容量法）">
+        <input id="relTsDcPf" type="checkbox" checked/>
+        <span>三阶段DC潮流</span>
+      </label>
+    </div>
+    <div class="rel-param-group rel-param-group-actions" title="统计评估方法、抽样规模与结果输出">
+      <span class="rel-param-title">统计指标与薄弱环节</span>
+      <label class="sub-label" title="选择结果面板优先展示的指标族；后端仍返回所有可用指标">指标
+        <select id="relMetricFocus">
+          <option value="all" selected>全部</option>
+          <option value="eens">EENS/EDNS</option>
+          <option value="lole">LOLE/LOLP</option>
+          <option value="customer">SAIFI/SAIDI</option>
+          <option value="cost">成本</option>
+        </select>
+      </label>
+      <label class="sub-label" title="选择薄弱环节排序依据：EENS 表示能量风险，LOLE 表示停电时长，频率表示故障发生次数，阶段切负荷适合三阶段恢复诊断">薄弱环节
+        <select id="relWeakBasis">
+          <option value="auto" selected>自动</option>
+          <option value="eens">按 EENS</option>
+          <option value="lole">按 LOLE</option>
+          <option value="frequency">按频率</option>
+          <option value="conditional">按条件风险</option>
+          <option value="stage_shed">按阶段切负荷</option>
+        </select>
+      </label>
+      <label class="sub-label" title="可靠性统计方法；三阶段恢复 MILP 已移动到故障分析后果模型">方法
+        <select id="relMethod">
+          <option value="nsq">非序贯蒙特卡洛 (NSQ)</option>
+          <option value="seq">序贯蒙特卡洛 (SEQ)</option>
+          <option value="fmea">元件 N-1 FMEA</option>
+          <option value="failure_mode_fmea">失效模式 FMEA</option>
+          <option value="fd">频率-持续时间 (F&amp;D)</option>
+        </select>
+      </label>
+      <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
+        <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+      </label>
+      <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
+    </div>
     <input type="file" id="fileImportGeneratedReliabilityScenario" accept=".json" style="display:none"/>
     <button id="btnRunReliability" class="toolbar-btn run-btn" title="运行可靠性分析">运行可靠性分析</button>
     <button id="btnExportReliabilityResults" class="toolbar-btn" title="将可靠性分析结果导出为 JSON">结果导出</button>

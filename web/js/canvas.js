@@ -5640,17 +5640,37 @@ const Canvas = (() => {
       return null;
     };
     const scoreOf = (row) => {
-      const candidates = [
-        row?.loss_weighted_risk,
-        row?.associated_eens_mwh_yr,
-        row?.eens_contribution,
-        row?.importance
-      ].map(Number).filter(Number.isFinite);
-      return candidates.find(v => v > 0) ?? candidates[0] ?? 0;
+      const basis = data?._weak_basis || 'auto';
+      const firstNumber = (...values) => {
+        for (const value of values) {
+          const n = Number(value);
+          if (Number.isFinite(n)) return n;
+        }
+        return null;
+      };
+      if (basis === 'lole') {
+        return firstNumber(row?.lole_contribution_hr_yr, row?.lole_contribution) ?? 0;
+      }
+      if (basis === 'frequency') {
+        return firstNumber(row?.lolf_contribution_occ_yr, row?.lolf_contribution,
+          row?.frequency_per_year, row?.failure_rate, row?.joint_frequency_per_year) ?? 0;
+      }
+      if (basis === 'conditional') {
+        return firstNumber(row?.conditional_down_given_loss, row?.loss_weighted_risk,
+          row?.importance) ?? 0;
+      }
+      if (basis === 'stage_shed') {
+        const shedMw = firstNumber(row?.shed_mw, row?.total_shed_mw);
+        return firstNumber(row?.pls_total, row?.shed_kw, shedMw != null ? shedMw * 1000 : null) ?? 0;
+      }
+      return firstNumber(row?.loss_weighted_risk, row?.associated_eens_mwh_yr,
+        row?.eens_contribution_mwh_yr, row?.eens_contribution, row?.importance) ?? 0;
     };
     const sourceRows = Array.isArray(data.critical_components) && data.critical_components.length
       ? data.critical_components
-      : (Array.isArray(data.contingencies) ? data.contingencies : []);
+      : (Array.isArray(data.contingencies) && data.contingencies.length
+          ? data.contingencies
+          : (Array.isArray(data.faults) ? data.faults : []));
     const riskRows = sourceRows
       .filter(row => row && scoreOf(row) > 0)
       .slice(0, 8)

@@ -409,17 +409,33 @@ $\text{ENS}_i=\sum_k\lambda_k\big(s^{1}_i\tau^{iso}_k+s^{2}_i\tau^{sw}_k+s^{3}_i
 > 0.4843\,p_{d,i}$ (`:548`), discarding each load's actual `q_mvar`. The 0.9-PF
 > assumption is applied uniformly even when measured Q is available.
 
-> ◐ Hybrid scope: DC buses/branches/VSC are **not** in the MILP — they are a
-> connectivity/capacity fallback (`:1043-1133`), VSC/SOP setpoints are fixed at 0
-> (`:1216-1221`), and `r.ok` is forced false for any DC/VSC case (`:1308`). So for
-> hybrid systems the three-stage method is AC-MILP + DC-transportation, not a full
-> hybrid restoration. Honestly flagged in `validity`/`model_scope` (`:1280-1289`).
+> ◐ Hybrid scope: DC buses/branches/VSC are **not** in the AC MILP; VSC/SOP
+> setpoints are fixed at 0 (`:1216-1221`), and `r.ok` is forced false for any
+> DC/VSC case (`:1308`). ✓ **DC power flow (default on):** the DC subnetwork is a
+> **DC LinDistFlow LP** (per-bus voltage bounds $v\in[v_{\min}^2,v_{\max}^2]$,
+> resistive drop $v_j=v_i-2rP$, per-branch thermal limits, DC sources, and VSC
+> transfers budgeted by the AC component surplus), so DC line congestion and
+> voltage violations shed load the old aggregate check missed. Set
+> `include_dc_power_flow=false` to force the legacy capacity fallback (also used
+> automatically if the DC LP fails to solve). `dc_power_flow_enforced` and
+> `model_scope` (`…+dc-lindistflow` vs `…+dc-connectivity-fallback`) report which
+> is active. Honestly flagged in `validity`/`model_scope` (`:1280-1289`).
 > Solver hardening (bound/integrality/residual post-checks with conservative
 > full-shed fallback, `:957-1026`) is solid.
 
 > ◐ Stage boundary times $\tau_{SW}=1$ min, $\tau_{TP}=2$ min are **global
 > constants** (`:39-41`), not per-device, and the default repair when MTTR is
 > absent is 1 hr — short for distribution assets.
+
+> ✓ **Fault set (extended).** N-1 enumeration covers **ACBranch** and **DCBranch**
+> outages by default; **generator, transformer, VSC/DC-DC converter, AC switch,
+> and AC/DC circuit-breaker** outages are enumerated when their opt-in flags
+> (`include_generator_faults`, `include_transformer_faults`,
+> `include_converter_faults`, `include_switch_faults`) are set. Converter and
+> DC-breaker faults act through the DC connectivity fallback (the faulted coupling
+> and its transfer capacity are dropped); AC switch/breaker faults become
+> forced-open AC restoration edges. Default off preserves the historical
+> branch-only enumeration, so existing SAIFI/EENS are unchanged unless enabled.
 
 ---
 
@@ -472,9 +488,15 @@ applied — `:829-851`) are a genuine strength. Scope after the F15 wiring:
 - `ProtectionZoneExpansion` opens **every** edge incident to `bus_from`
   (`expand_protection_zone:1014-1049`) — a conservative radial approximation that
   is exact only for radial feeders; meshed buses are mis-handled either way.
-- Modes are evaluated **singly**; `compose_consequence_patches` (with correct
-  outage-dominates-derating precedence, `:1086-1137`) exists but is not used by
-  the single-mode FMEA, so multi-mode co-failures are not enumerated.
+- \u2713 **Multi-mode (N-2) co-failures** are now enumerated on demand
+  (`FailureModeFMEAOptions::max_order >= 2`): pairs of supported modes on
+  **distinct** components are composed via `compose_consequence_patches` (correct
+  outage-dominates-derating precedence, `:1086-1137`; hard forced-open/closed
+  conflicts skipped), evaluated jointly, and weighted by the independent
+  second-order overlap $U_i U_j$ (EENS $+= U_i U_j\cdot 8760\cdot S_{ij}$). A
+  `min_pair_unavailability` floor and `max_pairs_evaluated` cap keep the
+  $O(M^2)$ enumeration tractable; `co_contingencies[]` reports the ranked joint
+  states. Default `max_order = 1` (single-mode) is unchanged.
 - Independence across the *several modes of one component* is assumed (their EENS
   contributions add), which double-counts to second order — fine when modes are
   rare.

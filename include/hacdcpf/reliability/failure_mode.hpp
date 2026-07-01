@@ -327,6 +327,30 @@ struct FailureModeFMEAOptions {
   double load_scale_factor{1.0};
   double curtail_threshold_mw{0.01};
   bool verbose{false};
+  /// Highest simultaneous-failure order to enumerate.  1 = single-mode FMEA
+  /// (default).  2 = also enumerate pairwise co-failures (N-2) of supported
+  /// modes on distinct components, composed via compose_consequence_patches and
+  /// weighted by the independent second-order overlap probability U_i*U_j.
+  int max_order{1};
+  /// Skip a co-failure pair whose joint unavailability U_i*U_j is below this
+  /// (keeps the O(M^2) enumeration tractable by dropping negligible overlaps).
+  double min_pair_unavailability{1e-10};
+  /// Hard cap on the number of pair evaluations (safety bound for large cases).
+  int max_pairs_evaluated{50000};
+};
+
+/// One enumerated second-order (co-failure) state: two simultaneously-down
+/// modes on distinct components, weighted by the independent overlap.
+struct FailureModeCoContingency {
+  FailureModeRef mode_a;
+  FailureModeRef mode_b;
+  double joint_frequency_per_year{0.0};  ///< overlap rate f_i*f_j*(d_i+d_j)/8760
+  double joint_unavailability{0.0};      ///< U_i*U_j (both simultaneously down)
+  double duration_hr{0.0};               ///< overlap mean duration d_i*d_j/(d_i+d_j)
+  double total_shed_mw{0.0};             ///< S_ij with both modes applied
+  double eens_contribution{0.0};         ///< U_i*U_j*8760*S_ij
+  double lole_contribution{0.0};         ///< U_i*U_j*8760 (if S_ij>eps)
+  bool causes_loss{false};
 };
 
 /// Aggregate result of a deterministic failure-mode FMEA.
@@ -341,6 +365,8 @@ struct FailureModeFMEAResult {
   DistributionIndices distribution_idx;
   std::vector<double> nodal_eens_mwh_yr;
   std::vector<FailureModeContingency> contingencies;
+  std::vector<FailureModeCoContingency> co_contingencies;  ///< N-2 (max_order>=2)
+  int n_pairs_evaluated{0};                                ///< co-failure solves done
   FailureModeCoverage coverage;
   ReliabilityDataQuality data_quality;
   std::vector<std::string> warnings;

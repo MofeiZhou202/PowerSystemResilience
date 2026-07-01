@@ -713,6 +713,61 @@ TEST_CASE("fmea: cyber/control converter modes move EENS (F15)",
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Multi-mode (N-2) co-failure enumeration: two parallel branches each carry
+// the load alone (no single-mode shed), but their co-failure islands the load.
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_n2_branch_system() {
+  HybridPowerSystem sys;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.in_service = true;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true;
+  b2.pd_mw = 8.0;
+  sys.ac.buses = {b1, b2};
+  // Generator carries no reliability data -> its modes are disabled under the
+  // strict policy, leaving a perfectly reliable source (only the branches fail).
+  Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 20.0; g.pmin_mw = 0.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  // Two parallel 1-2 branches, each rated 10 MVA with explicit failure data.
+  ACBranch a; a.index = 1; a.from_bus = 1; a.to_bus = 2; a.in_service = true;
+  a.x_pu = 0.1; a.rate_a_mva = 10.0; a.failure_rate = 0.5; a.mttr_hr = 10.0;
+  ACBranch bb; bb.index = 2; bb.from_bus = 1; bb.to_bus = 2; bb.in_service = true;
+  bb.x_pu = 0.1; bb.rate_a_mva = 10.0; bb.failure_rate = 0.5; bb.mttr_hr = 10.0;
+  sys.ac.branches = {a, bb};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("fmea: multi-mode co-failure enumeration captures N-2 risk",
+          "[reliability][failure_mode][n2]") {
+  auto sys = make_n2_branch_system();
+  ReliabilityDataPolicy strict;
+  strict.default_policy = ReliabilityDefaultPolicy::StrictCaseDataOnly;
+
+  // Single-mode (default max_order = 1): either branch alone leaves the parallel
+  // branch (rated 10) to carry the 8 MW load -> no shed, no co-contingencies.
+  FailureModeFMEAOptions opt1;
+  opt1.data_policy = strict;
+  auto r1 = run_failure_mode_fmea(sys, opt1);
+  CHECK(r1.eens_mwh_yr == Approx(0.0).margin(1e-6));
+  CHECK(r1.co_contingencies.empty());
+  CHECK(r1.n_pairs_evaluated == 0);
+
+  // Second-order (max_order = 2): the double branch outage islands bus 2 -> the
+  // full 8 MW is shed, and this N-2 state now moves EENS.
+  FailureModeFMEAOptions opt2;
+  opt2.data_policy = strict;
+  opt2.max_order = 2;
+  auto r2 = run_failure_mode_fmea(sys, opt2);
+  CHECK(r2.n_pairs_evaluated >= 1);
+  CHECK(r2.eens_mwh_yr > 0.0);
+  REQUIRE_FALSE(r2.co_contingencies.empty());
+  CHECK(r2.co_contingencies.front().total_shed_mw == Approx(8.0).margin(0.5));
+  CHECK(r2.co_contingencies.front().eens_contribution > 0.0);
+  CHECK(r2.co_contingencies.front().joint_unavailability > 0.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Active switching: fail-to-open/stuck-closed expand the isolation zone;
 // fail-to-close is deferred to the three-stage restoration engine.
 // ─────────────────────────────────────────────────────────────────────────

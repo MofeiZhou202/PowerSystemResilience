@@ -36,6 +36,12 @@ namespace hacdcpf::analysis {
 /// Per-fault detail record produced by the three-stage reliability solver.
 struct ThreeStageFaultDetail {
   int line_id{0};
+  std::string component_type;  ///< canonical component type, e.g. "ac_branch"
+  int component_index{-1};     ///< position in the corresponding component vector
+  bool ac{true};
+  int from_bus{0};
+  int to_bus{0};
+  double failure_rate{0.0};    ///< occ / yr
   std::string status;         ///< "success" | "success (approximate)" | "failed"
   std::string stage1_status;
   std::string stage2_status;
@@ -48,6 +54,11 @@ struct ThreeStageFaultDetail {
   double pls_stage2{0.0};     ///< load shed in Stage 2 (kW)
   double pls_stage3{0.0};     ///< load shed in Stage 3 (kW)
   double pls_total{0.0};      ///< pls_stage1 + 2 + 3 (kW)
+  double duration_hr{0.0};    ///< loss duration used for LOLE when this fault sheds load
+  double ens_kwh{0.0};        ///< event energy not supplied before frequency weighting
+  double eens_contribution_mwh_yr{0.0};
+  double lole_contribution_hr_yr{0.0};
+  double lolf_contribution_occ_yr{0.0};
   std::vector<double> psop1;  ///< SOP power per device, Stage 1 (kW)
   std::vector<double> psop2;
   std::vector<double> psop3;
@@ -190,6 +201,26 @@ struct ThreeStageReliabilityOptions {
   /// restoration edge so its outage disconnects the downstream zone.  Default
   /// off preserves the historical branch-only model.
   bool include_transformer_faults{false};
+
+  /// Include VSC and DC-DC converter outage contingencies.  A faulted converter
+  /// is removed from the DC connectivity/capacity fallback for the event (its
+  /// AC<->DC or DC<->DC coupling and transfer capacity are lost), so DC loads
+  /// that depend on it are shed.  Default off preserves the branch-only model.
+  bool include_converter_faults{false};
+
+  /// Include AC switch and AC/DC circuit-breaker outage contingencies.  A
+  /// faulted AC switch/breaker edge is forced open in all three stages (like a
+  /// faulted branch); a faulted DC breaker is dropped from the DC connectivity
+  /// fallback.  Default off preserves the branch-only model.
+  bool include_switch_faults{false};
+
+  /// Use a DC LinDistFlow power flow for the DC subnetwork (per-bus voltage
+  /// bounds v in [vmin^2, vmax^2], resistive branch drop v_j = v_i - 2 r P, and
+  /// per-branch thermal limits), coupled to the AC MILP through per-component VSC
+  /// transfer budgets.  Default **on**: hybrid runs are physics-based by default,
+  /// and the aggregate capacity fallback is used automatically only if the DC LP
+  /// fails to solve.  Set false to force the legacy capacity-only fallback.
+  bool include_dc_power_flow{true};
 };
 
 // ─── Entry points ────────────────────────────────────────────────────────────

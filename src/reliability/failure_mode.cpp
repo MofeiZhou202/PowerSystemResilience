@@ -1252,6 +1252,48 @@ FailureModeFMEAResult run_failure_mode_fmea(
   ConsequenceModelCapabilities caps = options.capabilities;
   caps.supports_protection_modeling = true;
 
+  // Evaluate a consequence patch: apply it to a copy, run the shed engine, and
+  // fold in any ForceLoadShed load-point interruptions (the patch removes those
+  // loads from demand, so their MW is added back here as shed).  Shared by the
+  // single-mode pass and the optional co-failure pass.
+  auto evaluate_patch = [&](const ConsequencePatch& patch,
+                            std::vector<double>& nodal_out) -> double {
+    HybridPowerSystem sys_m = apply_consequence_patch(sys, patch);
+    NetworkShedResult shed = evaluate_failed_network_state(sys_m, fmea_opts);
+    if (shed.nodal_shed_mw.size() < nb) shed.nodal_shed_mw.resize(nb, 0.0);
+    for (const auto& mut : patch.mutations) {
+      if (mut.kind != MutationKind::ForceLoadShed) continue;
+      double mw = 0.0; int bus_id = -1; bool is_dc = false;
+      forced_load_point(sys, mut, mw, bus_id, is_dc);
+      if (mw <= 0.0) continue;
+      mw *= options.load_scale_factor;
+      shed.total_shed_mw += mw;
+      int nidx = -1;
+      if (is_dc) {
+        auto it = dc_bus_pos.find(bus_id);
+        if (it != dc_bus_pos.end()) nidx = (int)sys.ac.buses.size() + it->second;
+      } else {
+        auto it = ac_bus_pos.find(bus_id);
+        if (it != ac_bus_pos.end()) nidx = it->second;
+      }
+      if (nidx >= 0 && (size_t)nidx < shed.nodal_shed_mw.size())
+        shed.nodal_shed_mw[nidx] += mw;
+    }
+    nodal_out = shed.nodal_shed_mw;
+    return shed.total_shed_mw;
+  };
+
+  // Cache of supported single modes (patch + overlap weights) for the optional
+  // second-order co-failure pass.
+  struct SupportedMode {
+    ConsequencePatch patch;
+    std::string component_id;
+    double frequency{0.0};
+    double duration{0.0};
+    double unavailability{0.0};
+  };
+  std::vector<SupportedMode> supported_modes;
+
   for (auto& entry : catalog) {
     FailureModeContingency c;
     c.ref = entry.mode.ref;
@@ -1285,53 +1327,114 @@ FailureModeFMEAResult run_failure_mode_fmea(
       continue;
     }
 
-    // Apply the patch to a copy and evaluate the failed network state.
-    HybridPowerSystem sys_m = apply_consequence_patch(sys, patch);
-    NetworkShedResult shed = evaluate_failed_network_state(sys_m, fmea_opts);
+    // Apply the patch to a copy, evaluate the failed network state, and fold in
+    // any load-point interruptions (shared helper).
+    std::vector<double> nodal_shed;
+    const double total_shed = evaluate_patch(patch, nodal_shed);
 
-    // Load-point interruptions: add each interrupted load's own MW as shed.
-    // The load was removed from OPF/LP demand by the patch, so its MW is added
-    // here so it counts in EENS / SAIFI / SAIDI (forced-shed-at-load).
-    if (shed.nodal_shed_mw.size() < nb) shed.nodal_shed_mw.resize(nb, 0.0);
-    for (const auto& mut : patch.mutations) {
-      if (mut.kind != MutationKind::ForceLoadShed) continue;
-      double mw = 0.0; int bus_id = -1; bool is_dc = false;
-      forced_load_point(sys, mut, mw, bus_id, is_dc);
-      if (mw <= 0.0) continue;
-      mw *= options.load_scale_factor;
-      shed.total_shed_mw += mw;
-      shed.is_loss = shed.is_loss || (mw > eps);
-      int nidx = -1;
-      if (is_dc) {
-        auto it = dc_bus_pos.find(bus_id);
-        if (it != dc_bus_pos.end()) nidx = (int)sys.ac.buses.size() + it->second;
-      } else {
-        auto it = ac_bus_pos.find(bus_id);
-        if (it != ac_bus_pos.end()) nidx = it->second;
-      }
-      if (nidx >= 0 && (size_t)nidx < shed.nodal_shed_mw.size())
-        shed.nodal_shed_mw[nidx] += mw;
-    }
-
-    c.total_shed_mw = shed.total_shed_mw;
-    c.causes_loss = shed.total_shed_mw > eps;
-    c.nodal_shed_mw = shed.nodal_shed_mw;
-    c.eens_contribution = c.frequency_per_year * dur * shed.total_shed_mw;
+    c.total_shed_mw = total_shed;
+    c.causes_loss = total_shed > eps;
+    c.nodal_shed_mw = nodal_shed;
+    c.eens_contribution = c.frequency_per_year * dur * total_shed;
     c.lole_contribution = c.causes_loss ? c.frequency_per_year * dur : 0.0;
 
     result.eens_mwh_yr += c.eens_contribution;
     result.lole_hr_yr += c.lole_contribution;
     if (c.causes_loss) result.lolf_occ_yr += c.frequency_per_year;
 
-    for (size_t b = 0; b < nb && b < shed.nodal_shed_mw.size(); ++b) {
-      const double sbed = shed.nodal_shed_mw[b];
+    for (size_t b = 0; b < nb && b < nodal_shed.size(); ++b) {
+      const double sbed = nodal_shed[b];
       result.nodal_eens_mwh_yr[b] += c.frequency_per_year * dur * sbed;
       if (sbed > eps) {
         nodal_cif[b] += c.frequency_per_year;
         nodal_cid[b] += c.frequency_per_year * dur;
       }
     }
+
+    // Cache this supported mode for the optional co-failure pass.
+    if (options.max_order >= 2 && c.frequency_per_year > 0.0 && dur > 0.0) {
+      SupportedMode sm;
+      sm.patch = patch;
+      sm.component_id = entry.mode.ref.component.stable_id;
+      sm.frequency = c.frequency_per_year;
+      sm.duration = dur;
+      sm.unavailability = std::min(1.0, c.frequency_per_year * dur / 8760.0);
+      supported_modes.push_back(std::move(sm));
+    }
+
     result.contingencies.push_back(std::move(c));
+  }
+
+  // ── Optional second-order (co-failure) enumeration ──────────────────────
+  // Compose pairs of supported single modes on DISTINCT components, evaluate the
+  // joint network state, and accumulate the overlap contribution using the
+  // standard independent second-order approximation: the probability that both
+  // modes are simultaneously down is U_i*U_j, so the joint state contributes
+  // EENS += U_i*U_j*8760*S_ij (MWh/yr) and LOLE += U_i*U_j*8760 (hr/yr).  These
+  // are distinct states from the single-mode terms (which approximate "i down,
+  // others up"), so the sum is the standard first+second-order state expansion.
+  if (options.max_order >= 2 && supported_modes.size() > 1) {
+    for (size_t i = 0; i < supported_modes.size() &&
+                       result.n_pairs_evaluated < options.max_pairs_evaluated; ++i) {
+      for (size_t k = i + 1; k < supported_modes.size(); ++k) {
+        if (result.n_pairs_evaluated >= options.max_pairs_evaluated) break;
+        const auto& a = supported_modes[i];
+        const auto& b = supported_modes[k];
+        // Modes of the same component are mutually-exclusive alternatives, not
+        // independent co-failures.
+        if (a.component_id == b.component_id) continue;
+        const double u_ij = a.unavailability * b.unavailability;
+        if (u_ij < options.min_pair_unavailability) continue;
+
+        ConsequencePatch composed =
+            compose_consequence_patches({a.patch, b.patch});
+        bool conflict = false;
+        for (const auto& w : composed.warnings)
+          if (w.find("hard conflict") != std::string::npos) { conflict = true; break; }
+        if (conflict) continue;
+
+        std::vector<double> nodal_shed;
+        const double shed_ij = evaluate_patch(composed, nodal_shed);
+        result.n_pairs_evaluated++;
+        if (shed_ij <= eps) continue;
+
+        const double eens_ij = u_ij * 8760.0 * shed_ij;
+        const double lole_ij = u_ij * 8760.0;
+        const double freq_ij =
+            a.frequency * b.frequency * (a.duration + b.duration) / 8760.0;
+        const double dur_ij = (a.duration + b.duration) > 0.0
+                                  ? a.duration * b.duration / (a.duration + b.duration)
+                                  : 0.0;
+
+        result.eens_mwh_yr += eens_ij;
+        result.lole_hr_yr += lole_ij;
+        result.lolf_occ_yr += freq_ij;
+        for (size_t bb = 0; bb < nb && bb < nodal_shed.size(); ++bb) {
+          const double sbed = nodal_shed[bb];
+          result.nodal_eens_mwh_yr[bb] += u_ij * 8760.0 * sbed;
+          if (sbed > eps) {
+            nodal_cif[bb] += freq_ij;
+            nodal_cid[bb] += freq_ij * dur_ij;
+          }
+        }
+
+        FailureModeCoContingency co;
+        co.mode_a = a.patch.mode;
+        co.mode_b = b.patch.mode;
+        co.joint_frequency_per_year = freq_ij;
+        co.joint_unavailability = u_ij;
+        co.duration_hr = dur_ij;
+        co.total_shed_mw = shed_ij;
+        co.eens_contribution = eens_ij;
+        co.lole_contribution = lole_ij;
+        co.causes_loss = true;
+        result.co_contingencies.push_back(std::move(co));
+      }
+    }
+    std::sort(result.co_contingencies.begin(), result.co_contingencies.end(),
+              [](const FailureModeCoContingency& x, const FailureModeCoContingency& y) {
+                return x.eens_contribution > y.eens_contribution;
+              });
   }
 
   result.edns_mw = result.eens_mwh_yr / 8760.0;

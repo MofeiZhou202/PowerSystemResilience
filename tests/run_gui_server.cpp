@@ -2189,6 +2189,32 @@ static json failure_mode_contingency_json(
   return row;
 }
 
+static json failure_mode_co_contingency_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::FailureModeCoContingency& co) {
+  auto ref_row = [&](const hacdcpf::analysis::FailureModeRef& ref) {
+    const std::string ctype = fmea_type_from_failure_kind(ref.component.kind);
+    const auto meta = describe_fmea_component(sys, ctype, ref.component.element_index);
+    return json{
+        {"mode_id", ref.mode_id},
+        {"display_name", meta.display_name.empty() ? ref.display_name : meta.display_name},
+        {"component_type", ctype},
+        {"display_type", meta.display_type},
+        {"cause", hacdcpf::analysis::to_string(ref.cause)},
+        {"consequence", hacdcpf::analysis::to_string(ref.consequence)}};
+  };
+  return json{
+      {"mode_a", ref_row(co.mode_a)},
+      {"mode_b", ref_row(co.mode_b)},
+      {"joint_frequency_per_year", co.joint_frequency_per_year},
+      {"joint_unavailability", co.joint_unavailability},
+      {"duration_hr", co.duration_hr},
+      {"total_shed_mw", co.total_shed_mw},
+      {"eens_contribution", co.eens_contribution},
+      {"lole_contribution", co.lole_contribution},
+      {"causes_loss", co.causes_loss}};
+}
+
 static std::string mc_type_to_fmea_type(const std::string& type) {
   static const std::unordered_map<std::string, std::string> map{
       {"Generator", "generator"},
@@ -2238,6 +2264,173 @@ static json mc_critical_component_json(
       {"secondary_bus", meta.secondary_bus},
       {"mappable", meta.mappable},
       {"global_state_index", ci.global_state_index}};
+}
+
+static json three_stage_validity_json(
+    const hacdcpf::analysis::ThreeStageReliabilityResult::ValidityFlags& v) {
+  return json{
+      {"branch_flow_enforced", v.branch_flow_enforced},
+      {"voltage_constraints_enforced", v.voltage_constraints_enforced},
+      {"radial_topology_enforced", v.radial_topology_enforced},
+      {"sop_dispatch_optimised", v.sop_dispatch_optimised},
+      {"dc_power_flow_enforced", v.dc_power_flow_enforced},
+      {"restoration_milp_solved", v.restoration_milp_solved}};
+}
+
+static json three_stage_metrics_json(
+    const hacdcpf::analysis::ThreeStageReliabilityResult& r,
+    double hours_per_year) {
+  if (!std::isfinite(hours_per_year) || hours_per_year <= 0.0) hours_per_year = 8760.0;
+  double lole_hr_yr = 0.0;
+  double lolf_occ_yr = 0.0;
+  for (const auto& f : r.faults) {
+    lole_hr_yr += f.lole_contribution_hr_yr;
+    lolf_occ_yr += f.lolf_contribution_occ_yr;
+  }
+  const double eens_mwh_yr = r.eens_kwh_yr / 1000.0;
+  const double saidi_hr = r.saidi_min / 60.0;
+  const double lolp = std::clamp(lole_hr_yr / hours_per_year, 0.0, 1.0);
+  const double asai = std::clamp(1.0 - saidi_hr / hours_per_year, 0.0, 1.0);
+  json caidi = nullptr;
+  if (r.saifi > 1e-12) caidi = saidi_hr / r.saifi;
+  json lold = nullptr;
+  if (lolf_occ_yr > 1e-12) lold = lole_hr_yr / lolf_occ_yr;
+  return json{
+      {"eens_mwh_yr", eens_mwh_yr},
+      {"eens_kwh_yr", r.eens_kwh_yr},
+      {"edns_mw", eens_mwh_yr / hours_per_year},
+      {"lole_hr_yr", lole_hr_yr},
+      {"lolf_occ_yr", lolf_occ_yr},
+      {"lolp", lolp},
+      {"plc", lolp},
+      {"lold_hr", lold},
+      {"saifi", r.saifi},
+      {"saidi", saidi_hr},
+      {"saidi_min", r.saidi_min},
+      {"caidi", caidi},
+      {"asai", asai},
+      {"eens_cost", r.eens_cost}};
+}
+
+static json three_stage_fault_json(
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ThreeStageFaultDetail& f) {
+  const auto meta = describe_fmea_component(sys, f.component_type, f.component_index);
+  const std::string domain = meta.component_domain.empty() ? (f.ac ? "AC" : "DC")
+                                                            : meta.component_domain;
+  return json{
+      {"line_id", f.line_id},
+      {"index", f.component_index},
+      {"component_index", f.component_index},
+      {"component_type", f.component_type},
+      {"component_name", meta.display_name},
+      {"display_name", meta.display_name},
+      {"display_type", meta.display_type},
+      {"canvas_type", meta.canvas_type},
+      {"canvas_index", meta.canvas_index},
+      {"component_domain", domain},
+      {"primary_bus", meta.primary_bus != 0 ? meta.primary_bus : f.from_bus},
+      {"secondary_bus", meta.secondary_bus != 0 ? meta.secondary_bus : f.to_bus},
+      {"mappable", meta.mappable},
+      {"ac", f.ac},
+      {"branch_type", f.ac ? "AC" : "DC"},
+      {"from_bus", f.from_bus},
+      {"to_bus", f.to_bus},
+      {"status", f.status},
+      {"stage1_status", f.stage1_status},
+      {"stage2_status", f.stage2_status},
+      {"stage3_status", f.stage3_status},
+      {"stage1_mip_gap", f.stage1_mip_gap},
+      {"stage2_mip_gap", f.stage2_mip_gap},
+      {"stage3_mip_gap", f.stage3_mip_gap},
+      {"failure_rate", f.failure_rate},
+      {"frequency_per_year", f.failure_rate},
+      {"duration_hr", f.duration_hr},
+      {"ens_kwh", f.ens_kwh},
+      {"ens_mwh", f.ens_kwh / 1000.0},
+      {"objective", f.objective},
+      {"pls_stage1", f.pls_stage1},
+      {"pls_stage2", f.pls_stage2},
+      {"pls_stage3", f.pls_stage3},
+      {"pls_total", f.pls_total},
+      {"shed_kw", f.pls_total},
+      {"shed_mw", f.pls_total / 1000.0},
+      {"eens_contribution", f.eens_contribution_mwh_yr},
+      {"eens_contribution_mwh_yr", f.eens_contribution_mwh_yr},
+      {"associated_eens_mwh_yr", f.eens_contribution_mwh_yr},
+      {"lole_contribution", f.lole_contribution_hr_yr},
+      {"lole_contribution_hr_yr", f.lole_contribution_hr_yr},
+      {"lolf_contribution", f.lolf_contribution_occ_yr},
+      {"lolf_contribution_occ_yr", f.lolf_contribution_occ_yr}};
+}
+
+static void populate_three_stage_result_json(
+    json& out,
+    const hacdcpf::HybridPowerSystem& sys,
+    const hacdcpf::analysis::ThreeStageReliabilityResult& r,
+    double hours_per_year) {
+  if (!std::isfinite(hours_per_year) || hours_per_year <= 0.0) hours_per_year = 8760.0;
+  out["physical_model"] = "ac_lindistflow_restoration_milp";
+  out["ok"] = r.ok;
+  if (!r.error.empty()) out["error_detail"] = r.error;
+  out["model_scope"] = r.model_scope;
+  out["model_limitations"] = r.model_limitations;
+  out["validity"] = three_stage_validity_json(r.validity);
+  out["counts"] = json{{"nb", r.nb}, {"nb_ac", r.nb_ac}, {"nb_dc", r.nb_dc},
+                       {"nl", r.nl}, {"nl_ac", r.nl_ac}, {"nl_dc", r.nl_dc},
+                       {"nl_vsc", r.nl_vsc}, {"nl_sop", r.nl_sop},
+                       {"nd", r.nd}, {"ng", r.ng}, {"nmg", r.nmg}};
+
+  json metrics = three_stage_metrics_json(r, hours_per_year);
+  out["metrics"] = metrics;
+  for (auto it = metrics.begin(); it != metrics.end(); ++it) out[it.key()] = it.value();
+  out["worst_line"] = r.worst_line;
+  out["metric_semantics"] = json{
+      {"type", "deterministic_frequency_weighted"},
+      {"hours_per_year", hours_per_year},
+      {"description",
+       "Three-stage metrics use FMEA-style lambda times consequence aggregation; "
+       "LOLP/PLC is LOLE divided by reporting hours, not a Monte Carlo sample probability."},
+      {"stage_duration_convention",
+       "Stage 1 isolation, Stage 2 switching restoration, Stage 3 repair window with "
+       "the faulted component still out and Stage-2 reconfiguration held."}};
+
+  json nodal = json::array();
+  for (double kwh : r.nodal_eens_kwh_yr) nodal.push_back(kwh / 1000.0);
+  out["nodal_eens_mwh_yr"] = nodal;
+
+  json faults = json::array();
+  int n_with_loss = 0;
+  for (const auto& f : r.faults) {
+    if (f.lolf_contribution_occ_yr > 0.0) n_with_loss++;
+    faults.push_back(three_stage_fault_json(sys, f));
+  }
+  out["faults"] = faults;
+  out["n_contingencies"] = r.faults.size();
+  out["n_with_loss"] = n_with_loss;
+
+  std::vector<json> crit_rows;
+  const double total_eens = metrics.value("eens_mwh_yr", 0.0);
+  for (const auto& row : faults) {
+    json c = row;
+    const double contribution = row.value("associated_eens_mwh_yr", 0.0);
+    c["importance"] = total_eens > 1e-12 ? contribution / total_eens : 0.0;
+    c["loss_weighted_risk"] = c["importance"];
+    c["conditional_down_given_loss"] = nullptr;
+    crit_rows.push_back(std::move(c));
+  }
+  std::sort(crit_rows.begin(), crit_rows.end(), [](const json& a, const json& b) {
+    const double ae = a.value("associated_eens_mwh_yr", 0.0);
+    const double be = b.value("associated_eens_mwh_yr", 0.0);
+    if (ae != be) return ae > be;
+    const double al = a.value("lole_contribution_hr_yr", 0.0);
+    const double bl = b.value("lole_contribution_hr_yr", 0.0);
+    if (al != bl) return al > bl;
+    return a.value("pls_total", 0.0) > b.value("pls_total", 0.0);
+  });
+  json critical = json::array();
+  for (const auto& row : crit_rows) critical.push_back(row);
+  out["critical_components"] = critical;
 }
 
 std::string opf_default_name(const std::string& display_type, int index) {
@@ -14900,47 +15093,26 @@ int main(int argc, char** argv) {
         hacdcpf::analysis::ThreeStageReliabilityOptions opts;
         if (j.contains("max_switch_operations"))
           opts.max_switch_operations = j.value("max_switch_operations", INT_MAX);
+        opts.include_generator_faults = j.value("include_generator_faults", false);
+        opts.include_transformer_faults = j.value("include_transformer_faults", false);
+        opts.include_converter_faults = j.value("include_converter_faults", false);
+        opts.include_switch_faults = j.value("include_switch_faults", false);
+        opts.include_dc_power_flow = j.value("include_dc_power_flow", true);
 
         const std::string case_json = hacdcpf::io::to_json(sys, 2);
         auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, opts);
 
-        json out;
-        out["method"] = "three_stage";
-        out["physical_model"] = "ac_lindistflow_restoration_milp";
-        out["ok"] = r.ok;
-        if (!r.error.empty()) out["error_detail"] = r.error;
-        out["model_scope"] = r.model_scope;
-        out["model_limitations"] = r.model_limitations;
-        out["validity"] = json{
-          {"branch_flow_enforced", r.validity.branch_flow_enforced},
-          {"voltage_constraints_enforced", r.validity.voltage_constraints_enforced},
-          {"radial_topology_enforced", r.validity.radial_topology_enforced},
-          {"sop_dispatch_optimised", r.validity.sop_dispatch_optimised},
-          {"dc_power_flow_enforced", r.validity.dc_power_flow_enforced},
-          {"restoration_milp_solved", r.validity.restoration_milp_solved}};
-        out["data_policy"] = reliability_policy_label(pol);
-        out["data_quality"] = reliability_data_quality_json(
-            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
-        out["saifi"] = r.saifi;
-        out["saidi_min"] = r.saidi_min;       // minutes / customer / yr
-        out["eens_kwh_yr"] = r.eens_kwh_yr;
-        out["eens_cost"] = r.eens_cost;
-        out["worst_line"] = r.worst_line;
-        out["counts"] = json{{"nb",r.nb},{"nb_ac",r.nb_ac},{"nb_dc",r.nb_dc},
-                             {"nl",r.nl},{"nl_ac",r.nl_ac},{"nl_dc",r.nl_dc},
-                             {"nl_vsc",r.nl_vsc},{"nl_sop",r.nl_sop},
-                             {"nd",r.nd},{"ng",r.ng},{"nmg",r.nmg}};
-        json faults = json::array();
-        for (const auto& f : r.faults) {
-          faults.push_back({
-            {"line_id", f.line_id}, {"status", f.status},
-            {"pls_stage1", f.pls_stage1}, {"pls_stage2", f.pls_stage2},
-            {"pls_stage3", f.pls_stage3}, {"pls_total", f.pls_total},
-            {"objective", f.objective}});
-        }
-        out["faults"] = faults;
-        res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+	        json out;
+	        out["method"] = "three_stage";
+	        out["data_policy"] = reliability_policy_label(pol);
+	        out["data_quality"] = reliability_data_quality_json(
+	            hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
+	        const json load = j.value("load", json::object());
+	        const double hours_per_year =
+	            load.value("hours_per_year", j.value("hours_per_year", 8760.0));
+	        populate_three_stage_result_json(out, sys, r, hours_per_year);
+	        res.set_content(out.dump(), "application/json");
+	        g_session.busy.store(false);
       } catch (const std::exception& e) {
         g_session.busy.store(false);
         res.status = 400;
@@ -15087,6 +15259,9 @@ int main(int argc, char** argv) {
 	          fo.load_scale_factor = load_scale;
 	          fo.curtail_threshold_mw = j.value("curtail_threshold_mw", 0.01);
 	          fo.verbose = j.value("verbose", false);
+	          fo.max_order = j.value("max_order", 1);
+	          fo.min_pair_unavailability = j.value("min_pair_unavailability", 1e-10);
+	          fo.max_pairs_evaluated = j.value("max_pairs_evaluated", 50000);
 	          auto r = hacdcpf::analysis::run_failure_mode_fmea(sys, fo);
 	          out["physical_model"] =
 	              r.model_scope.find("hybrid-acdc-network-lp") != std::string::npos
@@ -15118,6 +15293,11 @@ int main(int argc, char** argv) {
 	          out["failure_modes"] = modes;
 	          out["contingencies"] = modes;
 	          out["n_contingencies"] = r.contingencies.size();
+	          out["n_pairs_evaluated"] = r.n_pairs_evaluated;
+	          json co_modes = json::array();
+	          for (const auto& x : r.co_contingencies)
+	            co_modes.push_back(failure_mode_co_contingency_json(sys, x));
+	          out["co_contingencies"] = co_modes;
 	        } else if (method == "fd") {
           double total_load = 0.0;
           for (const auto& bus : sys.ac.buses) total_load += bus.pd_mw;
@@ -15149,25 +15329,17 @@ int main(int argc, char** argv) {
           hacdcpf::analysis::ThreeStageReliabilityOptions tso;
           if (rest.contains("max_switch_operations"))
             tso.max_switch_operations = rest.value("max_switch_operations", INT_MAX);
+          tso.include_generator_faults = rest.value("include_generator_faults", false);
+          tso.include_transformer_faults = rest.value("include_transformer_faults", false);
+          tso.include_converter_faults = rest.value("include_converter_faults", false);
+          tso.include_switch_faults = rest.value("include_switch_faults", false);
+          tso.include_dc_power_flow = rest.value("include_dc_power_flow", true);
           const std::string case_json = hacdcpf::io::to_json(sys, 2);
           auto r = hacdcpf::analysis::run_three_stage_reliability_from_string(case_json, tso);
-          out["physical_model"] = "ac_lindistflow_restoration_milp";
-          out["model_scope"] = r.model_scope;
-          out["model_limitations"] = r.model_limitations;
-          out["ok"] = r.ok;
-          out["validity"] = json{
-            {"branch_flow_enforced", r.validity.branch_flow_enforced},
-            {"voltage_constraints_enforced", r.validity.voltage_constraints_enforced},
-            {"radial_topology_enforced", r.validity.radial_topology_enforced},
-            {"sop_dispatch_optimised", r.validity.sop_dispatch_optimised},
-            {"dc_power_flow_enforced", r.validity.dc_power_flow_enforced},
-            {"restoration_milp_solved", r.validity.restoration_milp_solved}};
           out["data_quality"] = reliability_data_quality_json(
               hacdcpf::analysis::summarize_reliability_data_quality(sys, pol));
-          out["metrics"] = json{
-            {"saifi", r.saifi}, {"saidi_min", r.saidi_min},
-            {"eens_kwh_yr", r.eens_kwh_yr}, {"eens_cost", r.eens_cost},
-            {"lole_hr_yr", na("Three-stage restoration evaluator reports SAIFI/SAIDI/EENS, not LOLE.")}};
+          const double hours_per_year = load.value("hours_per_year", 8760.0);
+          populate_three_stage_result_json(out, sys, r, hours_per_year);
         } else {
           throw std::runtime_error("Unknown reliability method: " + method);
         }

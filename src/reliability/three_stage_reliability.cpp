@@ -60,7 +60,24 @@ struct SourcePoint {
   double p_kw{0.0};
 };
 
-enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W };
+enum class FaultKind { ACBranch, DCBranch, Generator, Transformer2W,
+                       VSCConverter, DCDCConverter, ACSwitch, ACCircuitBreaker,
+                       DCCircuitBreaker };
+
+std::string fault_kind_type(FaultKind kind) {
+  switch (kind) {
+    case FaultKind::ACBranch: return "ac_branch";
+    case FaultKind::DCBranch: return "dc_branch";
+    case FaultKind::Generator: return "generator";
+    case FaultKind::Transformer2W: return "transformer_2w";
+    case FaultKind::VSCConverter: return "vsc_converter";
+    case FaultKind::DCDCConverter: return "dcdc_converter";
+    case FaultKind::ACSwitch: return "ac_switch";
+    case FaultKind::ACCircuitBreaker: return "ac_circuit_breaker";
+    case FaultKind::DCCircuitBreaker: return "dc_circuit_breaker";
+  }
+  return "unknown";
+}
 
 struct FaultLine {
   int id{0};
@@ -87,6 +104,9 @@ struct NativeCase {
   std::vector<FaultLine> faults;
   bool include_generator_faults{false};
   bool include_transformer_faults{false};
+  bool include_converter_faults{false};
+  bool include_switch_faults{false};
+  bool include_dc_power_flow{true};
 };
 
 std::string read_file_text(const fs::path& path) {
@@ -131,6 +151,9 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
   c.sys = sys;
   c.include_generator_faults = options.include_generator_faults;
   c.include_transformer_faults = options.include_transformer_faults;
+  c.include_converter_faults = options.include_converter_faults;
+  c.include_switch_faults = options.include_switch_faults;
+  c.include_dc_power_flow = options.include_dc_power_flow;
 
   for (const auto& b : sys.ac.buses) {
     if (b.in_service) add_bus(c.buses, b.index);
@@ -263,6 +286,61 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
       c.faults.push_back({id++, true, i, t.hv_bus, t.lv_bus, true, lam,
                           kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_t,
                           FaultKind::Transformer2W});
+    }
+  }
+  // VSC / DC-DC converter outage contingencies (opt-in).  Handled by the DC
+  // connectivity fallback: a faulted converter drops its coupling + transfer.
+  if (c.include_converter_faults) {
+    for (int i = 0; i < static_cast<int>(sys.vsc_converters.size()); ++i) {
+      const auto& v = sys.vsc_converters[i];
+      if (!v.in_service) continue;
+      double lam = kDefaultFailureRate;
+      if (v.forced_outage_rate > 0.0 && v.forced_outage_rate < 1.0 && v.mttr_hr > 1e-9)
+        lam = v.forced_outage_rate / ((1.0 - v.forced_outage_rate) * v.mttr_hr) * 8760.0;
+      const double r_v = v.mttr_hr > 1e-9 ? v.mttr_hr : kTauRepairHr;
+      const double d3_v = std::max(0.0, r_v - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, v.bus_ac, v.bus_dc, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_v,
+                          FaultKind::VSCConverter});
+    }
+    for (int i = 0; i < static_cast<int>(sys.dc.dcdc_converters.size()); ++i) {
+      const auto& d = sys.dc.dcdc_converters[i];
+      if (!d.in_service) continue;
+      double lam = d.mtbf_hours > 0.0 ? 8760.0 / d.mtbf_hours : kDefaultFailureRate;
+      const double r_d = d.mttr_hours > 1e-9 ? d.mttr_hours : kTauRepairHr;
+      const double d3_d = std::max(0.0, r_d - kTauTrippingHr);
+      c.faults.push_back({id++, false, i, d.bus_in, d.bus_out, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_d,
+                          FaultKind::DCDCConverter});
+    }
+  }
+  // AC switch / AC & DC circuit-breaker outage contingencies (opt-in).
+  if (c.include_switch_faults) {
+    for (int i = 0; i < static_cast<int>(sys.ac.switches.size()); ++i) {
+      const auto& sw = sys.ac.switches[i];
+      if (!sw.in_service) continue;
+      double lam = sw.mtbf_hours > 0.0 ? 8760.0 / sw.mtbf_hours : kDefaultFailureRate;
+      const double r_s = sw.mttr_hours > 1e-9 ? sw.mttr_hours : kTauRepairHr;
+      const double d3_s = std::max(0.0, r_s - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, sw.bus_from, sw.bus_to, true, lam,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_s,
+                          FaultKind::ACSwitch});
+    }
+    for (int i = 0; i < static_cast<int>(sys.ac.circuit_breakers.size()); ++i) {
+      const auto& cb = sys.ac.circuit_breakers[i];
+      if (!cb.in_service) continue;
+      const double d3_c = std::max(0.0, kTauRepairHr - kTauTrippingHr);
+      c.faults.push_back({id++, true, i, cb.bus_from, cb.bus_to, true, kDefaultFailureRate,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_c,
+                          FaultKind::ACCircuitBreaker});
+    }
+    for (int i = 0; i < static_cast<int>(sys.dc.dc_circuit_breakers.size()); ++i) {
+      const auto& cb = sys.dc.dc_circuit_breakers[i];
+      if (!cb.in_service) continue;
+      const double d3_c = std::max(0.0, kTauRepairHr - kTauTrippingHr);
+      c.faults.push_back({id++, false, i, cb.bus_from, cb.bus_to, true, kDefaultFailureRate,
+                          kTauSwitchHr, kTauTrippingHr - kTauSwitchHr, d3_c,
+                          FaultKind::DCCircuitBreaker});
     }
   }
 
@@ -450,17 +528,37 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
                            is_failed,
                            open_switch_index});
   }
-  for (const auto& sw : sys.ac.switches) {
+  for (int si = 0; si < static_cast<int>(sys.ac.switches.size()); ++si) {
+    const auto& sw = sys.ac.switches[si];
     if (!sw.in_service) continue;
     if (branch_pair_seen.count(undirected_key(sw.bus_from, sw.bus_to))) continue;
     auto it_f = ac_bus_pos.find(sw.bus_from);
     auto it_t = ac_bus_pos.find(sw.bus_to);
     if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+    const bool sw_failed = (fault.kind == FaultKind::ACSwitch && si == fault.index);
     ac_branches.push_back({-1, it_f->second, it_t->second,
                            1e-6, 1e-6, default_rate_mw,
                            !sw.closed,
-                           false,
+                           sw_failed,
                            sw.index});
+    branch_pair_seen[undirected_key(sw.bus_from, sw.bus_to)] = true;
+  }
+  // AC circuit breakers as near-ideal restoration edges (opt-in switch faults),
+  // deduped against branch/switch pairs and forced open when faulted.
+  if (c.include_switch_faults) {
+    for (int ci = 0; ci < static_cast<int>(sys.ac.circuit_breakers.size()); ++ci) {
+      const auto& cb = sys.ac.circuit_breakers[ci];
+      if (!cb.in_service) continue;
+      if (branch_pair_seen.count(undirected_key(cb.bus_from, cb.bus_to))) continue;
+      auto it_f = ac_bus_pos.find(cb.bus_from);
+      auto it_t = ac_bus_pos.find(cb.bus_to);
+      if (it_f == ac_bus_pos.end() || it_t == ac_bus_pos.end()) continue;
+      const bool cb_failed = (fault.kind == FaultKind::ACCircuitBreaker && ci == fault.index);
+      ac_branches.push_back({-1, it_f->second, it_t->second,
+                             1e-6, 1e-6, default_rate_mw,
+                             !cb.closed, cb_failed, -1});
+      branch_pair_seen[undirected_key(cb.bus_from, cb.bus_to)] = true;
+    }
   }
   // Transformers as near-ideal capacity-limited restoration edges (opt-in).
   // A faulted transformer edge is forced open in Stages 1/2 (isolation) and
@@ -1076,20 +1174,36 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
       bool on = br.in_service;
       // F7: the faulted branch is out in every stage (repaired only at tau_RP);
       // do not re-energize it in Stage 3.
-      if (fault.ac && b == fault.index) on = false;
+      if (fault.kind == FaultKind::ACBranch && b == fault.index) on = false;
       if (on) connect_dc(br.from_bus, br.to_bus);
     }
     for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
       const auto& br = sys.dc.branches[b];
       bool on = br.in_service;
-      if (!fault.ac && b == fault.index) on = false;  // F7
+      if (fault.kind == FaultKind::DCBranch && b == fault.index) on = false;  // F7
       if (on) connect_dc(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
     }
-    for (const auto& vsc : sys.vsc_converters) {
-      if (vsc.in_service) connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
+    for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+      const auto& vsc = sys.vsc_converters[vi];
+      if (!vsc.in_service) continue;
+      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+      connect_dc(vsc.bus_ac, vsc.bus_dc + kDCBusOffset);
     }
-    for (const auto& dc : sys.dc.dcdc_converters) {
-      if (dc.in_service) connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+    for (int di = 0; di < static_cast<int>(sys.dc.dcdc_converters.size()); ++di) {
+      const auto& dc = sys.dc.dcdc_converters[di];
+      if (!dc.in_service) continue;
+      if (fault.kind == FaultKind::DCDCConverter && di == fault.index) continue;
+      connect_dc(dc.bus_in + kDCBusOffset, dc.bus_out + kDCBusOffset);
+    }
+    // DC circuit breakers as connectivity edges (opt-in switch/breaker faults):
+    // a faulted DC breaker is out for the event, disconnecting its DC segment.
+    if (c.include_switch_faults) {
+      for (int ci = 0; ci < static_cast<int>(sys.dc.dc_circuit_breakers.size()); ++ci) {
+        const auto& cb = sys.dc.dc_circuit_breakers[ci];
+        if (!cb.in_service || !cb.closed) continue;
+        if (fault.kind == FaultKind::DCCircuitBreaker && ci == fault.index) continue;
+        connect_dc(cb.bus_from + kDCBusOffset, cb.bus_to + kDCBusOffset);
+      }
     }
 
     std::unordered_map<int, int> dc_comp;
@@ -1113,8 +1227,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
           std::max(0.0, c.loads[li].p_kw - out.shed_by_load[li]);
     }
     std::unordered_map<int, double> comp_vsc_transfer_kw;
-    for (const auto& vsc : sys.vsc_converters) {
+    for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+      const auto& vsc = sys.vsc_converters[vi];
       if (!vsc.in_service) continue;
+      if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
       auto ac_it = dc_comp.find(vsc.bus_ac);
       auto dc_it = dc_comp.find(vsc.bus_dc + kDCBusOffset);
       if (ac_it == dc_comp.end() || dc_it == dc_comp.end()) continue;
@@ -1122,6 +1238,181 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         comp_vsc_transfer_kw[ac_it->second] += vsc_transfer_capacity_kw(vsc);
       }
     }
+    // ── DC LinDistFlow power flow (opt-in) ────────────────────────────────
+    // When enabled, replace the aggregate capacity check with a per-bus DC power
+    // flow: v in [vmin^2, vmax^2], resistive drop v_j = v_i - 2 r P, per-branch
+    // thermal limits, DC sources, and VSC transfers budgeted by the AC surplus of
+    // the merged component.  Falls back to the capacity check if it cannot solve.
+    bool dc_pf_done = false;
+    if (c.include_dc_power_flow) {
+      dc_pf_done = [&]() -> bool {
+        std::vector<int> dcbus_ids;
+        std::unordered_map<int, int> dcpos;
+        for (const auto& b : sys.dc.buses) {
+          if (!b.in_service || dcpos.count(b.index)) continue;
+          dcpos[b.index] = static_cast<int>(dcbus_ids.size());
+          dcbus_ids.push_back(b.index);
+        }
+        const int ndcb = static_cast<int>(dcbus_ids.size());
+        if (ndcb == 0) return true;  // no DC buses -> nothing to shed
+
+        std::vector<double> vlo(ndcb, 0.81), vhi(ndcb, 1.21);
+        std::vector<char> vref(ndcb, 0);
+        std::vector<double> dcsrc_mw(ndcb, 0.0);
+        for (const auto& b : sys.dc.buses) {
+          auto it = dcpos.find(b.index);
+          if (it == dcpos.end()) continue;
+          vlo[it->second] = b.vmin_pu * b.vmin_pu;
+          vhi[it->second] = b.vmax_pu * b.vmax_pu;
+          if (b.bus_type == DCBusType::DC_V) vref[it->second] = 1;
+        }
+        for (const auto& s : c.sources) {
+          if (s.bus < kDCBusOffset) continue;
+          auto it = dcpos.find(s.bus - kDCBusOffset);
+          if (it != dcpos.end()) dcsrc_mw[it->second] += s.p_kw / 1000.0;
+        }
+        struct Edge { int f, t; double r, smax; };
+        std::vector<Edge> dcbrs, dcdcs;
+        for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
+          const auto& br = sys.dc.branches[b];
+          if (!br.in_service) continue;
+          if (fault.kind == FaultKind::DCBranch && b == fault.index) continue;
+          auto itf = dcpos.find(br.from_bus), itt = dcpos.find(br.to_bus);
+          if (itf == dcpos.end() || itt == dcpos.end()) continue;
+          const double smax = br.rate_a_mva > 1e-9 ? br.rate_a_mva
+                            : (br.s_max_mva > 1e-9 ? br.s_max_mva : default_rate_mw);
+          dcbrs.push_back({itf->second, itt->second, std::max(1e-6, br.r_pu), smax});
+        }
+        for (int d = 0; d < static_cast<int>(sys.dc.dcdc_converters.size()); ++d) {
+          const auto& dd = sys.dc.dcdc_converters[d];
+          if (!dd.in_service) continue;
+          if (fault.kind == FaultKind::DCDCConverter && d == fault.index) continue;
+          auto itf = dcpos.find(dd.bus_in), itt = dcpos.find(dd.bus_out);
+          if (itf == dcpos.end() || itt == dcpos.end()) continue;
+          const double cap = std::max(std::abs(dd.pmax_mw), std::abs(dd.pmin_mw));
+          dcdcs.push_back({itf->second, itt->second, 0.0, cap > 1e-9 ? cap : default_rate_mw});
+        }
+        struct VscT { int dcb; double cap_mw; int accomp; };
+        std::vector<VscT> vscs;
+        for (int vi = 0; vi < static_cast<int>(sys.vsc_converters.size()); ++vi) {
+          const auto& v = sys.vsc_converters[vi];
+          if (!v.in_service) continue;
+          if (fault.kind == FaultKind::VSCConverter && vi == fault.index) continue;
+          auto itd = dcpos.find(v.bus_dc);
+          if (itd == dcpos.end()) continue;
+          vref[itd->second] = 1;  // VSC forms the DC voltage reference
+          auto acc = dc_comp.find(v.bus_ac);
+          vscs.push_back({itd->second, vsc_transfer_capacity_kw(v) / 1000.0,
+                          acc != dc_comp.end() ? acc->second : -1});
+        }
+        std::vector<int> dcload_li, dcload_pos;
+        std::vector<double> dcload_mw;
+        for (int li = 0; li < nd_total; ++li) {
+          if (load_ac_bus[li] >= 0) continue;
+          auto it = dcpos.find(c.loads[li].bus - kDCBusOffset);
+          if (it == dcpos.end()) { out.shed_by_load[li] = std::max(0.0, c.loads[li].p_kw); continue; }
+          dcload_li.push_back(li);
+          dcload_pos.push_back(it->second);
+          dcload_mw.push_back(std::max(0.0, c.loads[li].p_kw) / 1000.0);
+        }
+        const int nL = static_cast<int>(dcload_li.size());
+        const int nBr = static_cast<int>(dcbrs.size());
+        const int nDd = static_cast<int>(dcdcs.size());
+        const int nV = static_cast<int>(vscs.size());
+        // Layout: [shed_L][v_bus][P_br][psrc_bus][pvsc_V][pdcdc_Dd]
+        const int o_shed = 0, o_v = o_shed + nL, o_P = o_v + ndcb;
+        const int o_src = o_P + nBr, o_vsc = o_src + ndcb, o_dd = o_vsc + nV;
+        const int nvar = o_dd + nDd;
+
+        engine::MIPModel dcmip;
+        auto& dclp = dcmip.linear_part;
+        dclp.sense = engine::Sense::Minimize;
+        dclp.vars.resize(static_cast<size_t>(nvar));
+        dclp.c = Eigen::VectorXd::Zero(nvar);
+        for (int i = 0; i < nL; ++i) {
+          dclp.vars[o_shed + i] = {engine::VarType::Continuous, 0.0, dcload_mw[i], "dcshed"};
+          dclp.c[o_shed + i] = 1.0;
+        }
+        for (int i = 0; i < ndcb; ++i)
+          dclp.vars[o_v + i] = {engine::VarType::Continuous,
+                                vref[i] ? 1.0 : vlo[i], vref[i] ? 1.0 : vhi[i], "dcv"};
+        for (int i = 0; i < nBr; ++i)
+          dclp.vars[o_P + i] = {engine::VarType::Continuous, -dcbrs[i].smax, dcbrs[i].smax, "dcP"};
+        for (int i = 0; i < ndcb; ++i)
+          dclp.vars[o_src + i] = {engine::VarType::Continuous, 0.0, dcsrc_mw[i], "dcsrc"};
+        for (int i = 0; i < nV; ++i)
+          dclp.vars[o_vsc + i] = {engine::VarType::Continuous, 0.0, std::max(0.0, vscs[i].cap_mw), "dcvsc"};
+        for (int i = 0; i < nDd; ++i)
+          dclp.vars[o_dd + i] = {engine::VarType::Continuous, -dcdcs[i].smax, dcdcs[i].smax, "dcdc"};
+
+        std::vector<Eigen::Triplet<double>> eqT, inT;
+        std::vector<double> beqV, binV;
+        auto d_eq = [&](const std::vector<std::pair<int, double>>& t, double rhs) {
+          const int r = static_cast<int>(beqV.size());
+          for (const auto& [col, val] : t) if (std::abs(val) > 1e-12) eqT.emplace_back(r, col, val);
+          beqV.push_back(rhs);
+        };
+        auto d_le = [&](const std::vector<std::pair<int, double>>& t, double rhs) {
+          const int r = static_cast<int>(binV.size());
+          for (const auto& [col, val] : t) if (std::abs(val) > 1e-12) inT.emplace_back(r, col, val);
+          binV.push_back(rhs);
+        };
+        // Bus balance: (inflow - outflow) + src + vsc_in + dcdc_net + shed = demand
+        std::vector<std::vector<std::pair<int, double>>> busTerms(ndcb);
+        std::vector<double> busDemand(ndcb, 0.0);
+        for (int i = 0; i < nBr; ++i) {
+          busTerms[dcbrs[i].t].push_back({o_P + i, +1.0});
+          busTerms[dcbrs[i].f].push_back({o_P + i, -1.0});
+        }
+        for (int i = 0; i < ndcb; ++i) busTerms[i].push_back({o_src + i, +1.0});
+        for (int i = 0; i < nV; ++i) busTerms[vscs[i].dcb].push_back({o_vsc + i, +1.0});
+        for (int i = 0; i < nDd; ++i) {
+          busTerms[dcdcs[i].t].push_back({o_dd + i, +1.0});
+          busTerms[dcdcs[i].f].push_back({o_dd + i, -1.0});
+        }
+        for (int i = 0; i < nL; ++i) {
+          busTerms[dcload_pos[i]].push_back({o_shed + i, +1.0});
+          busDemand[dcload_pos[i]] += dcload_mw[i];
+        }
+        for (int b = 0; b < ndcb; ++b) d_eq(busTerms[b], busDemand[b]);
+        // Resistive voltage drop for each closed DC branch: v_f - v_t - 2 r P = 0
+        for (int i = 0; i < nBr; ++i)
+          d_eq({{o_v + dcbrs[i].f, 1.0}, {o_v + dcbrs[i].t, -1.0}, {o_P + i, -2.0 * dcbrs[i].r}}, 0.0);
+        // VSC transfer budget: total AC->DC transfer <= AC surplus of its component
+        std::unordered_map<int, std::vector<int>> vsc_by_comp;
+        for (int i = 0; i < nV; ++i)
+          if (vscs[i].accomp >= 0) vsc_by_comp[vscs[i].accomp].push_back(i);
+        for (const auto& [comp, vlist] : vsc_by_comp) {
+          auto sit = comp_ac_source_kw.find(comp);
+          auto vit = comp_ac_served_kw.find(comp);
+          const double surplus_mw = std::max(0.0,
+              (sit != comp_ac_source_kw.end() ? sit->second : 0.0) -
+              (vit != comp_ac_served_kw.end() ? vit->second : 0.0)) / 1000.0;
+          std::vector<std::pair<int, double>> t;
+          for (int i : vlist) t.push_back({o_vsc + i, 1.0});
+          d_le(t, surplus_mw);
+        }
+
+        const int neq = static_cast<int>(beqV.size()), nin = static_cast<int>(binV.size());
+        dclp.Aeq.resize(neq, nvar); dclp.beq.resize(neq);
+        dclp.Aeq.setFromTriplets(eqT.begin(), eqT.end()); dclp.Aeq.makeCompressed();
+        for (int r = 0; r < neq; ++r) dclp.beq[r] = beqV[r];
+        dclp.A.resize(nin, nvar); dclp.b.resize(nin);
+        dclp.A.setFromTriplets(inT.begin(), inT.end()); dclp.A.makeCompressed();
+        for (int r = 0; r < nin; ++r) dclp.b[r] = binV[r];
+
+        engine::SimplexOptions so;
+        so.max_iter = 20000; so.feasibility_tol = 1e-8; so.optimality_tol = 1e-8; so.verbose = false;
+        auto sr = engine::solve_lp_with_basis(dclp, so, nullptr);
+        if (!sr.result.stats.success || sr.result.x.size() != nvar) return false;
+        for (int i = 0; i < nL; ++i)
+          out.shed_by_load[dcload_li[i]] =
+              std::max(0.0, std::min(dcload_mw[i], sr.result.x[o_shed + i])) * 1000.0;
+        return true;
+      }();
+    }
+
+    if (!dc_pf_done) {
     // Proper per-component capacity check for DC loads
     std::unordered_map<int, double> dc_comp_demand;
     for (int li = 0; li < nd_total; ++li) {
@@ -1150,6 +1441,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
         out.shed_by_load[li] = li_kw * std::min(1.0, std::max(0.0, ratio));
       }
     }
+    }  // if (!dc_pf_done)
   }
 
   out.shed_kw = std::accumulate(out.shed_by_load.begin(), out.shed_by_load.end(), 0.0);
@@ -1192,6 +1484,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
   r.nodal_cif.assign(c.loads.size(), 0.0);
   r.nodal_cid_min.assign(c.loads.size(), 0.0);
   r.faults.clear();
+  r.saifi = 0.0;
+  r.saidi_min = 0.0;
+  r.eens_kwh_yr = 0.0;
+  r.eens_cost = 0.0;
+  r.worst_line = 0;
 
   double total_customers = 0.0;
   for (const auto& ld : c.loads) total_customers += std::max(1.0, ld.customers);
@@ -1213,6 +1510,12 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;
+    d.component_type = fault_kind_type(fault.kind);
+    d.component_index = fault.index;
+    d.ac = fault.ac;
+    d.from_bus = fault.from_bus;
+    d.to_bus = fault.to_bus;
+    d.failure_rate = fault.failure_rate;
     d.stage1_status = s1.status;
     d.stage2_status = s2.status;
     d.stage3_status = s3.status;
@@ -1236,6 +1539,13 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
     d.objective = d.pls_stage1 * fault.tau_iso_hr
                 + d.pls_stage2 * fault.tau_sw_hr
                 + d.pls_stage3 * fault.tau_rep_hr;
+    d.duration_hr = (d.pls_stage1 > 1e-6 ? fault.tau_iso_hr : 0.0)
+                  + (d.pls_stage2 > 1e-6 ? fault.tau_sw_hr : 0.0)
+                  + (d.pls_stage3 > 1e-6 ? fault.tau_rep_hr : 0.0);
+    d.ens_kwh = d.objective;
+    d.eens_contribution_mwh_yr = fault.failure_rate * d.ens_kwh / 1000.0;
+    d.lole_contribution_hr_yr = fault.failure_rate * d.duration_hr;
+    d.lolf_contribution_occ_yr = d.duration_hr > 0.0 ? fault.failure_rate : 0.0;
     // SOP power vectors: zero-filled. Full SOP dispatch optimization is not
     // yet implemented; the binary load-shedding MILP above does not dispatch
     // SOP active-power flows. A dedicated OPF-based restoration model is
@@ -1290,8 +1600,11 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
            ? std::string(" (no limit)")
            : " (≤ " + std::to_string(max_sw_ops) + " operations per fault)")
       + ". "
-        "N-1 contingency enumeration is branch-only: ACBranch and DCBranch outages are evaluated; "
-        "VSC, DCDC, switch, breaker, transformer, generator, load, and storage outages are not enumerated as faults. "
+        "N-1 contingency enumeration covers ACBranch and DCBranch outages by default; "
+        "generator, transformer, VSC/DC-DC converter, AC switch, and AC/DC circuit-breaker "
+        "outages are enumerated only when their opt-in flags are set (converter and "
+        "switch/breaker faults act through the DC connectivity fallback or as forced-open "
+        "AC edges; a load/storage outage is not enumerated as a standalone fault). "
        "DC sub-network: connectivity/capacity fallback with DC source capacity and "
        "AC-source surplus transferable through VSC capacity limits; no DC power-flow constraints. "
        "DCDC devices are still treated as lossless connectivity edges. "
@@ -1301,14 +1614,16 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
       // Validity flags describe whole-result physical coverage.  They are true for
       // pure-AC cases and intentionally false for hybrid cases because DC/VSC/SOP
       // physics are not part of the MILP.
-      r.model_scope = has_dc_or_vsc ? "ac-lindistflow-milp+dc-connectivity-fallback"
+      r.model_scope = has_dc_or_vsc
+                    ? (c.include_dc_power_flow ? "ac-lindistflow-milp+dc-lindistflow"
+                                              : "ac-lindistflow-milp+dc-connectivity-fallback")
                     : "ac-lindistflow-milp";
   r.validity = ThreeStageReliabilityResult::ValidityFlags{
         .branch_flow_enforced        = !has_dc_or_vsc,
         .voltage_constraints_enforced = !has_dc_or_vsc,
         .radial_topology_enforced    = !has_dc_or_vsc,
       .sop_dispatch_optimised      = false,  // VSC setpoints still zero
-      .dc_power_flow_enforced      = false,  // DC sub-network is connectivity-only
+      .dc_power_flow_enforced      = c.include_dc_power_flow && has_dc_or_vsc,
         .restoration_milp_solved     = !has_dc_or_vsc,
   };
 
