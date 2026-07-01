@@ -472,6 +472,86 @@ static std::vector<bool> mc_component_has_case_data(
   return hd;
 }
 
+// ── F10: unified Monte-Carlo reliability parameters ──────────────────────────
+// Produce per-state-index {unavailability, MTTF(hr), MTTR(hr)} via the SAME
+// resolve_reliability_params resolver and the SAME per-kind template defaults
+// that build_fmea_catalog uses, so NSQ / SEQ / FMEA agree on both present-data
+// and missing-data parameters for identical components (previously the MC paths
+// used their own inline fallback constants, which diverged from FMEA).
+struct MCReliability {
+  std::vector<double> U;      // steady-state unavailability (NSQ Bernoulli prob)
+  std::vector<double> mttf;   // mean time to failure, hr  (SEQ up-time)
+  std::vector<double> mttr;   // mean time to repair, hr   (SEQ down-time)
+};
+
+static MCReliability compute_mc_reliability(
+    const HybridPowerSystem& sys, const ComponentOffsets& co,
+    const ReliabilityDataPolicy& policy) {
+  MCReliability r;
+  r.U.assign(co.total, 0.0);
+  r.mttf.assign(co.total, 1e15);  // default: never fails within the horizon
+  r.mttr.assign(co.total, 0.0);
+
+  // Resolve one component and store {U, MTTF, MTTR} at state index `idx`.
+  // `for_based` marks kinds whose case datum is a forced-outage rate (FOR): FOR
+  // is the steady-state unavailability by definition, so it is honoured directly
+  // (and used to back out a consistent MTTF) rather than being re-derived from a
+  // template default when the repair time is absent.
+  auto set = [&](size_t idx, const ReliabilityRawFields& raw,
+                 double def_lambda, double def_repair, bool for_based) {
+    const ReliabilityParams pr =
+        resolve_reliability_params(raw, policy, def_lambda, def_repair);
+    const bool valid_for = for_based && std::isfinite(raw.forced_outage_rate) &&
+                           raw.forced_outage_rate > 0.0 &&
+                           raw.forced_outage_rate < 1.0;
+    double U, mttf, mttr;
+    if (valid_for) {
+      U = raw.forced_outage_rate;
+      mttr = raw.mttr_hr > 0.0 ? raw.mttr_hr
+                               : (pr.repair_hr > 0.0 ? pr.repair_hr : def_repair);
+      mttf = mttr * (1.0 - U) / U;
+    } else {
+      U = pr.unavailability;
+      mttf = pr.mttf_hr > 0.0 ? pr.mttf_hr : 1e15;  // unresolved -> never fails
+      mttr = pr.repair_hr > 0.0 ? pr.repair_hr : def_repair;
+    }
+    r.U[idx] = U;
+    r.mttf[idx] = mttf;
+    r.mttr[idx] = (mttr > 0.0 ? mttr : def_repair);
+  };
+  auto raw_for  = [](double f, double m){ ReliabilityRawFields x; x.forced_outage_rate=f; x.mttr_hr=m; return x; };
+  auto raw_lam  = [](double l, double m){ ReliabilityRawFields x; x.failure_rate_per_year=l; x.mttr_hr=m; return x; };
+  auto raw_mtbf = [](double mb, double mt){ ReliabilityRawFields x; x.mtbf_hours=mb; x.mttr_hours=mt; return x; };
+
+  for (size_t i=0;i<co.ng;   ++i){ const auto& x=sys.ac.generators[i];         set(co.off_gen+i,  raw_for (x.forced_outage_rate,x.mttr_hr), 8760.0/2000.0, 50.0, true); }
+  for (size_t i=0;i<co.nl;   ++i){ const auto& x=sys.ac.branches[i];           set(co.off_br+i,   raw_lam (x.failure_rate,x.mttr_hr),       0.35, 10.0, false); }
+  for (size_t i=0;i<co.nsg;  ++i){ const auto& x=sys.ac.static_generators[i];  set(co.off_sg+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  for (size_t i=0;i<co.nrg;  ++i){ const auto& x=sys.ac.renewable_gens[i];     set(co.off_rg+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     2.0, 48.0, false); }
+  for (size_t i=0;i<co.nst;  ++i){ const auto& x=sys.ac.storage[i];            set(co.off_st+i,   raw_for (x.forced_outage_rate,x.mttr_hr), 1.0, 24.0, true); }
+  for (size_t i=0;i<co.nvsc; ++i){ const auto& x=sys.vsc_converters[i];        set(co.off_vsc+i,  raw_for (x.forced_outage_rate,x.mttr_hr), 0.10, 48.0, true); }
+  for (size_t i=0;i<co.ndb;  ++i){ const auto& x=sys.dc.branches[i];           set(co.off_db+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     0.20, 24.0, false); }
+  for (size_t i=0;i<co.nt2;  ++i){ const auto& x=sys.ac.transformers_2w[i];    set(co.off_t2+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     0.03, 200.0, false); }
+  for (size_t i=0;i<co.nt3;  ++i){ const auto& x=sys.ac.transformers_3w[i];    set(co.off_t3+i,   raw_mtbf(x.mtbf_hours,x.mttr_hours),     0.04, 200.0, false); }
+  for (size_t i=0;i<co.ndcdc;++i){ const auto& x=sys.dc.dcdc_converters[i];    set(co.off_dcdc+i, raw_mtbf(x.mtbf_hours,x.mttr_hours),     0.20, 48.0, false); }
+  for (size_t i=0;i<co.ndccb;++i){                                             set(co.off_dccb+i, ReliabilityRawFields{},                   0.10, 8.0, false); }
+  for (size_t i=0;i<co.ndcst;++i){ const auto& x=sys.dc.storage[i];            set(co.off_dcst+i, raw_for (x.forced_outage_rate,x.mttr_hr), 1.0, 24.0, true); }
+  for (size_t i=0;i<co.ndcpv;++i){ const auto& x=sys.dc.pv_arrays[i];          set(co.off_dcpv+i, raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  for (size_t i=0;i<co.nsw;  ++i){
+    const auto& x=sys.ac.switches[i];
+    ReliabilityRawFields raw = raw_mtbf(x.mtbf_hours, x.mttr_hours);
+    if (x.mtbf_hours <= 0 && x.p_sw_fail > 0 && x.p_sw_fail < 1.0) {
+      raw.failure_rate_per_year = x.p_sw_fail;
+      raw.mttr_hr = x.mttr_hours > 0 ? x.mttr_hours : 4.0;
+    }
+    set(co.off_sw+i, raw, 0.05, 4.0, false);
+  }
+  for (size_t i=0;i<co.ncb;  ++i){                                             set(co.off_cb+i,   ReliabilityRawFields{},                   0.05, 8.0, false); }
+  for (size_t i=0;i<co.npvs; ++i){ const auto& x=sys.ac.pv_systems[i];         set(co.off_pvs+i,  raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  for (size_t i=0;i<co.ndcsg;++i){ const auto& x=sys.dc.static_generators[i];  set(co.off_dcsg+i, raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  for (size_t i=0;i<co.ndcsgx;++i){const auto& x=sys.dc.dc_static_generators[i];set(co.off_dcsgx+i,raw_mtbf(x.mtbf_hours,x.mttr_hours),     1.5, 24.0, false); }
+  return r;
+}
+
 // Build the display name for a component from the actual system data.
 // Uses component.index (original element ID) and component.name (business
 // label) instead of the 0-based vector position, so that non-contiguous
@@ -956,183 +1036,12 @@ ReliabilityResult run_nonsequential_mc(
         "voltage/reactive limits are outside this evaluator.";
   }
 
-  // Compute unavailabilities for all components
-  std::vector<double> unavailabilities(nc);
-  
-  // --- Generators ---
-  for (size_t i = 0; i < co.ng; ++i) {
-    const auto& gen = sys.ac.generators[i];
-    unavailabilities[co.off_gen + i] = gen.forced_outage_rate;
-    if (unavailabilities[co.off_gen + i] <= 0) {
-      if (gen.mttr_hr > 0) {
-        double mttf = 2000.0;
-        unavailabilities[co.off_gen + i] = compute_unavailability(mttf, gen.mttr_hr);
-      } else {
-        unavailabilities[co.off_gen + i] = 0.02;
-      }
-    }
-  }
-  
-  // --- AC Branches ---
-  for (size_t i = 0; i < co.nl; ++i) {
-    const auto& br = sys.ac.branches[i];
-    if (br.failure_rate > 0 && br.mttr_hr > 0) {
-      unavailabilities[co.off_br + i] = compute_unavailability_lambda(br.failure_rate, br.mttr_hr);
-    } else {
-      unavailabilities[co.off_br + i] = 0.01;
-    }
-  }
-  
-  // --- Static Generators ---
-  for (size_t i = 0; i < co.nsg; ++i) {
-    const auto& sg = sys.ac.static_generators[i];
-    if (sg.mtbf_hours > 0 && sg.mttr_hours > 0) {
-      unavailabilities[co.off_sg + i] = compute_unavailability(sg.mtbf_hours, sg.mttr_hours);
-    } else {
-      unavailabilities[co.off_sg + i] = 0.03;
-    }
-  }
-  
-  // --- Renewable Generators ---
-  for (size_t i = 0; i < co.nrg; ++i) {
-    const auto& rg = sys.ac.renewable_gens[i];
-    if (rg.mtbf_hours > 0 && rg.mttr_hours > 0) {
-      unavailabilities[co.off_rg + i] = compute_unavailability(rg.mtbf_hours, rg.mttr_hours);
-    } else {
-      unavailabilities[co.off_rg + i] = 0.03;
-    }
-  }
-  
-  // --- Storage ---
-  for (size_t i = 0; i < co.nst; ++i) {
-    const auto& st = sys.ac.storage[i];
-    double u = st.forced_outage_rate;
-    if (u <= 0 && st.mttr_hr > 0) {
-      double mttf = 5000.0;
-      u = compute_unavailability(mttf, st.mttr_hr);
-    }
-    unavailabilities[co.off_st + i] = (u > 0) ? u : 0.02;
-  }
-  
-  // --- VSC Converters ---
-  for (size_t i = 0; i < co.nvsc; ++i) {
-    const auto& v = sys.vsc_converters[i];
-    double u = v.forced_outage_rate;
-    if (u <= 0 && v.mttr_hr > 0) {
-      double mttf = 10000.0;  // default MTTF for VSC
-      u = compute_unavailability(mttf, v.mttr_hr);
-    }
-    unavailabilities[co.off_vsc + i] = (u > 0) ? u : 0.01;
-  }
-  
-  // --- DC Branches ---
-  for (size_t i = 0; i < co.ndb; ++i) {
-    const auto& db = sys.dc.branches[i];
-    if (db.mtbf_hours > 0 && db.mttr_hours > 0) {
-      unavailabilities[co.off_db + i] = compute_unavailability(db.mtbf_hours, db.mttr_hours);
-    } else {
-      unavailabilities[co.off_db + i] = 0.005;
-    }
-  }
-  
-  // --- Transformers 2W ---
-  for (size_t i = 0; i < co.nt2; ++i) {
-    const auto& t = sys.ac.transformers_2w[i];
-    if (t.mtbf_hours > 0 && t.mttr_hours > 0) {
-      unavailabilities[co.off_t2 + i] = compute_unavailability(t.mtbf_hours, t.mttr_hours);
-    } else {
-      unavailabilities[co.off_t2 + i] = 0.005;
-    }
-  }
-  
-  // --- Transformers 3W ---
-  for (size_t i = 0; i < co.nt3; ++i) {
-    const auto& t = sys.ac.transformers_3w[i];
-    if (t.mtbf_hours > 0 && t.mttr_hours > 0) {
-      unavailabilities[co.off_t3 + i] = compute_unavailability(t.mtbf_hours, t.mttr_hours);
-    } else {
-      unavailabilities[co.off_t3 + i] = 0.005;
-    }
-  }
-
-  // --- DC/DC Converters ---
-  for (size_t i = 0; i < co.ndcdc; ++i) {
-    const auto& d = sys.dc.dcdc_converters[i];
-    unavailabilities[co.off_dcdc + i] =
-        (d.mtbf_hours > 0 && d.mttr_hours > 0)
-            ? compute_unavailability(d.mtbf_hours, d.mttr_hours)
-            : 0.02;  // default ~2 % annual unavailability
-  }
-
-  // --- DC Circuit Breakers ---
-  // DCCircuitBreaker has no reliability fields; use a conservative default.
-  for (size_t i = 0; i < co.ndccb; ++i) {
-    unavailabilities[co.off_dccb + i] = 0.01;
-  }
-
-  // --- DC Storage ---
-  for (size_t i = 0; i < co.ndcst; ++i) {
-    const auto& st = sys.dc.storage[i];
-    double u = st.forced_outage_rate;
-    if (u <= 0 && st.mttr_hr > 0) {
-      constexpr double kDefaultMttfHrs = 5000.0;
-      u = compute_unavailability(kDefaultMttfHrs, st.mttr_hr);
-    }
-    unavailabilities[co.off_dcst + i] = (u > 0) ? u : 0.02;
-  }
-
-  // --- DC PV Arrays ---
-  for (size_t i = 0; i < co.ndcpv; ++i) {
-    const auto& pv = sys.dc.pv_arrays[i];
-    unavailabilities[co.off_dcpv + i] =
-        (pv.mtbf_hours > 0 && pv.mttr_hours > 0)
-            ? compute_unavailability(pv.mtbf_hours, pv.mttr_hours)
-            : 0.03;
-  }
-
-  // --- AC Switches ---
-  // p_sw_fail is the per-operation failure probability; when non-zero use it
-  // directly as an unavailability proxy.  Otherwise derive from mtbf/mttr.
-  for (size_t i = 0; i < co.nsw; ++i) {
-    const auto& sw = sys.ac.switches[i];
-    double u = sw.p_sw_fail;
-    if (u <= 0 && sw.mtbf_hours > 0 && sw.mttr_hours > 0)
-      u = compute_unavailability(sw.mtbf_hours, sw.mttr_hours);
-    unavailabilities[co.off_sw + i] = (u > 0) ? u : 0.005;
-  }
-
-  // --- AC Circuit Breakers ---
-  // CircuitBreaker has no mtbf/mttr fields; use a conservative default.
-  for (size_t i = 0; i < co.ncb; ++i) {
-    unavailabilities[co.off_cb + i] = 0.01;
-  }
-
-  // --- AC PV Systems ---
-  for (size_t i = 0; i < co.npvs; ++i) {
-    const auto& pv = sys.ac.pv_systems[i];
-    unavailabilities[co.off_pvs + i] =
-        (pv.mtbf_hours > 0 && pv.mttr_hours > 0)
-            ? compute_unavailability(pv.mtbf_hours, pv.mttr_hours)
-            : 0.03;  // typical PV system ~3 % annual unavailability
-  }
-
-  // --- DC Static Generators (AC StaticGenerator type in DC container) ---
-  for (size_t i = 0; i < co.ndcsg; ++i) {
-    const auto& sg = sys.dc.static_generators[i];
-    unavailabilities[co.off_dcsg + i] =
-        (sg.mtbf_hours > 0 && sg.mttr_hours > 0)
-            ? compute_unavailability(sg.mtbf_hours, sg.mttr_hours)
-            : 0.03;
-  }
-
-  // --- DC Static Generators (StaticGeneratorDC type) ---
-  for (size_t i = 0; i < co.ndcsgx; ++i) {
-    const auto& sg = sys.dc.dc_static_generators[i];
-    unavailabilities[co.off_dcsgx + i] =
-        (sg.mtbf_hours > 0 && sg.mttr_hours > 0)
-            ? compute_unavailability(sg.mtbf_hours, sg.mttr_hours)
-            : 0.03;
-  }
+  // F10: unified per-component reliability using the SAME resolver and per-kind
+  // template defaults as build_fmea_catalog, so NSQ/SEQ/FMEA agree on both
+  // present-data and missing-data parameters (replaces the old inline fallback
+  // constants that diverged across methods).
+  const MCReliability mcr = compute_mc_reliability(sys, co, options.data_policy);
+  std::vector<double> unavailabilities = mcr.U;
 
   spdlog::info("NSQ MC: {} total components "
                "(gen={}, br={}, sg={}, rg={}, st={}, vsc={}, db={}, t2={}, t3={}, "
@@ -1194,7 +1103,18 @@ ReliabilityResult run_nonsequential_mc(
 	  std::vector<double> comp_loss_weighted_sum(nc, 0.0);
 	  double total_loss_weighted_sum = 0.0;
 	  int total_loss_samples = 0;
-  
+
+  // F8: collect the per-sampled-state DNS and loss flag so tail risk can be
+  // computed on bootstrap-aggregated SYNTHETIC YEARS (a statistically valid
+  // annual-EENS distribution) rather than on the per-state dns*8760, which is
+  // the distribution of one random hour annualized — not an annual quantity.
+  std::vector<double> hourly_dns_samples;
+  std::vector<std::uint8_t> hourly_loss_samples;
+  if (options.compute_tail_risk) {
+    hourly_dns_samples.reserve(static_cast<size_t>(options.max_iterations));
+    hourly_loss_samples.reserve(static_cast<size_t>(options.max_iterations));
+  }
+
   // Compute total system load
   double total_load_mw = 0.0;
   for (const auto& bus : sys.ac.buses) {
@@ -1260,10 +1180,11 @@ ReliabilityResult run_nonsequential_mc(
     sum_dns += dns;
     sum_dns_sq += dns * dns;
 
-    // Record per-sample EENS and LOLE for tail-risk computation
+    // F8: record the raw per-state DNS and loss flag; annual samples are built by
+    // bootstrap aggregation after the loop (a per-state dns*8760 is NOT annual).
     if (options.compute_tail_risk) {
-      result.annual_eens.push_back(dns * 8760.0);
-      result.annual_lole.push_back(eval_result.is_loss_state ? 8760.0 : 0.0);
+      hourly_dns_samples.push_back(dns);
+      hourly_loss_samples.push_back(eval_result.is_loss_state ? 1u : 0u);
     }
     
 	    if (eval_result.is_loss_state) {
@@ -1393,12 +1314,36 @@ ReliabilityResult run_nonsequential_mc(
   spdlog::info("NSQ MC: Complete. EENS={:.2f} MWh/yr, LOLE={:.2f} hr/yr, PLC={:.4f}",
                result.eens_mwh_yr, result.lole_hr_yr, result.plc);
   
-  // 鈹€鈹€鈹€ Compute Tail Risk Metrics (if enabled and we have annual samples) 鈹€鈹€鈹€
-  if (options.compute_tail_risk && !result.annual_eens.empty()) {
+  // 鈹€鈹€鈹€ Compute Tail Risk Metrics (F8: bootstrap synthetic years) 鈹€鈹€鈹€
+  // Non-sequential samples are i.i.d. system states, each standing for one random
+  // hour.  A synthetic year's EENS is the sum of 8760 such hourly DNS draws; its
+  // distribution (tight, by the CLT) is the correct object for VaR/CVaR.  We
+  // resample the observed hourly DNS/loss with replacement to form K synthetic
+  // years, then take tail metrics over them.  Mean(annual_eens) == eens_mwh_yr and
+  // mean(annual_lole) == lole_hr_yr by construction, so the summary is unchanged.
+  if (options.compute_tail_risk && !hourly_dns_samples.empty()) {
+    constexpr int kSynthYearHours = 8760;
+    const int n_years = std::min(std::max(200, result.iterations_used), 2000);
+    std::uniform_int_distribution<size_t> pick(0, hourly_dns_samples.size() - 1);
+    result.annual_eens.clear();
+    result.annual_lole.clear();
+    result.annual_eens.reserve(static_cast<size_t>(n_years));
+    result.annual_lole.reserve(static_cast<size_t>(n_years));
+    for (int y = 0; y < n_years; ++y) {
+      double eens_y = 0.0;
+      double loss_hours_y = 0.0;
+      for (int h = 0; h < kSynthYearHours; ++h) {
+        const size_t idx = pick(rng);
+        eens_y += hourly_dns_samples[idx];          // MW * 1 hr -> MWh
+        loss_hours_y += hourly_loss_samples[idx];   // loss-hour indicator
+      }
+      result.annual_eens.push_back(eens_y);
+      result.annual_lole.push_back(loss_hours_y);
+    }
     result.tail_risk = compute_tail_risk(
         result.annual_eens, result.annual_lole, options.var_confidence);
   }
-  
+
   return result;
 }
 
@@ -1452,136 +1397,12 @@ ReliabilityResult run_sequential_mc(
   }
   const int hours_per_year = options.hours_per_year;
   
-  // Compute MTTF and MTTR for all components (in hours)
-  std::vector<double> mttf(nc);
-  std::vector<double> mttr_v(nc);
-  
-  // --- Generators ---
-  for (size_t i = 0; i < co.ng; ++i) {
-    const auto& gen = sys.ac.generators[i];
-    mttr_v[co.off_gen + i] = gen.mttr_hr > 0 ? gen.mttr_hr : 50.0;
-    if (gen.forced_outage_rate > 0 && gen.forced_outage_rate < 1) {
-      mttf[co.off_gen + i] = mttr_v[co.off_gen + i] * (1.0 - gen.forced_outage_rate) / gen.forced_outage_rate;
-    } else {
-      mttf[co.off_gen + i] = 2000.0;
-    }
-  }
-  // --- AC Branches ---
-  for (size_t i = 0; i < co.nl; ++i) {
-    const auto& br = sys.ac.branches[i];
-    mttr_v[co.off_br + i] = br.mttr_hr > 0 ? br.mttr_hr : 10.0;
-    if (br.failure_rate > 0) {
-      mttf[co.off_br + i] = 8760.0 / br.failure_rate;
-    } else {
-      mttf[co.off_br + i] = 25000.0;
-    }
-  }
-  // --- Static Generators ---
-  for (size_t i = 0; i < co.nsg; ++i) {
-    const auto& sg = sys.ac.static_generators[i];
-    mttr_v[co.off_sg + i] = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    mttf[co.off_sg + i] = sg.mtbf_hours > 0 ? sg.mtbf_hours : 5000.0;
-  }
-  // --- Renewable Generators ---
-  for (size_t i = 0; i < co.nrg; ++i) {
-    const auto& rg = sys.ac.renewable_gens[i];
-    mttr_v[co.off_rg + i] = rg.mttr_hours > 0 ? rg.mttr_hours : 48.0;
-    mttf[co.off_rg + i] = rg.mtbf_hours > 0 ? rg.mtbf_hours : 4000.0;
-  }
-  // --- Storage ---
-  for (size_t i = 0; i < co.nst; ++i) {
-    const auto& st = sys.ac.storage[i];
-    mttr_v[co.off_st + i] = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
-    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1) {
-      mttf[co.off_st + i] = mttr_v[co.off_st + i] * (1.0 - st.forced_outage_rate) / st.forced_outage_rate;
-    } else {
-      mttf[co.off_st + i] = 5000.0;
-    }
-  }
-  // --- VSC Converters ---
-  for (size_t i = 0; i < co.nvsc; ++i) {
-    const auto& v = sys.vsc_converters[i];
-    mttr_v[co.off_vsc + i] = v.mttr_hr > 0 ? v.mttr_hr : 48.0;
-    if (v.forced_outage_rate > 0 && v.forced_outage_rate < 1) {
-      mttf[co.off_vsc + i] = mttr_v[co.off_vsc + i] * (1.0 - v.forced_outage_rate) / v.forced_outage_rate;
-    } else {
-      mttf[co.off_vsc + i] = 10000.0;
-    }
-  }
-  // --- DC Branches ---
-  for (size_t i = 0; i < co.ndb; ++i) {
-    const auto& db = sys.dc.branches[i];
-    mttr_v[co.off_db + i] = db.mttr_hours > 0 ? db.mttr_hours : 24.0;
-    mttf[co.off_db + i] = db.mtbf_hours > 0 ? db.mtbf_hours : 50000.0;
-  }
-  // --- Transformers 2W ---
-  for (size_t i = 0; i < co.nt2; ++i) {
-    const auto& t = sys.ac.transformers_2w[i];
-    mttr_v[co.off_t2 + i] = t.mttr_hours > 0 ? t.mttr_hours : 200.0;
-    mttf[co.off_t2 + i] = t.mtbf_hours > 0 ? t.mtbf_hours : 300000.0;
-  }
-  // --- Transformers 3W ---
-  for (size_t i = 0; i < co.nt3; ++i) {
-    const auto& t = sys.ac.transformers_3w[i];
-    mttr_v[co.off_t3 + i] = t.mttr_hours > 0 ? t.mttr_hours : 200.0;
-    mttf[co.off_t3 + i] = t.mtbf_hours > 0 ? t.mtbf_hours : 300000.0;
-  }
-  // --- DC/DC Converters ---
-  for (size_t i = 0; i < co.ndcdc; ++i) {
-    const auto& d = sys.dc.dcdc_converters[i];
-    mttr_v[co.off_dcdc + i] = d.mttr_hours > 0 ? d.mttr_hours : 48.0;
-    mttf[co.off_dcdc + i]   = d.mtbf_hours > 0 ? d.mtbf_hours : 5000.0;
-  }
-  // --- DC Circuit Breakers ---
-  for (size_t i = 0; i < co.ndccb; ++i) {
-    mttr_v[co.off_dccb + i] = 8.0;
-    mttf[co.off_dccb + i]   = 87600.0;  // ~10 yr
-  }
-  // --- DC Storage ---
-  for (size_t i = 0; i < co.ndcst; ++i) {
-    const auto& st = sys.dc.storage[i];
-    mttr_v[co.off_dcst + i] = st.mttr_hr > 0 ? st.mttr_hr : 24.0;
-    if (st.forced_outage_rate > 0 && st.forced_outage_rate < 1) {
-      mttf[co.off_dcst + i] = mttr_v[co.off_dcst + i] * (1.0 - st.forced_outage_rate) / st.forced_outage_rate;
-    } else {
-      mttf[co.off_dcst + i] = 5000.0;
-    }
-  }
-  // --- DC PV Arrays ---
-  for (size_t i = 0; i < co.ndcpv; ++i) {
-    const auto& pv = sys.dc.pv_arrays[i];
-    mttr_v[co.off_dcpv + i] = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
-    mttf[co.off_dcpv + i]   = pv.mtbf_hours > 0 ? pv.mtbf_hours : 4000.0;
-  }
-  // --- AC Switches ---
-  for (size_t i = 0; i < co.nsw; ++i) {
-    const auto& sw = sys.ac.switches[i];
-    mttr_v[co.off_sw + i] = sw.mttr_hours > 0 ? sw.mttr_hours : 4.0;
-    mttf[co.off_sw + i]   = sw.mtbf_hours > 0 ? sw.mtbf_hours : 87600.0;
-  }
-  // --- AC Circuit Breakers ---
-  for (size_t i = 0; i < co.ncb; ++i) {
-    mttr_v[co.off_cb + i] = 8.0;
-    mttf[co.off_cb + i]   = 87600.0;
-  }
-  // --- AC PV Systems ---
-  for (size_t i = 0; i < co.npvs; ++i) {
-    const auto& pv = sys.ac.pv_systems[i];
-    mttr_v[co.off_pvs + i] = pv.mttr_hours > 0 ? pv.mttr_hours : 24.0;
-    mttf[co.off_pvs + i]   = pv.mtbf_hours > 0 ? pv.mtbf_hours : 4000.0;
-  }
-  // --- DC Static Generators (AC StaticGenerator type in DC container) ---
-  for (size_t i = 0; i < co.ndcsg; ++i) {
-    const auto& sg = sys.dc.static_generators[i];
-    mttr_v[co.off_dcsg + i] = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    mttf[co.off_dcsg + i]   = sg.mtbf_hours > 0 ? sg.mtbf_hours : 5000.0;
-  }
-  // --- DC Static Generators (StaticGeneratorDC type) ---
-  for (size_t i = 0; i < co.ndcsgx; ++i) {
-    const auto& sg = sys.dc.dc_static_generators[i];
-    mttr_v[co.off_dcsgx + i] = sg.mttr_hours > 0 ? sg.mttr_hours : 24.0;
-    mttf[co.off_dcsgx + i]   = sg.mtbf_hours > 0 ? sg.mtbf_hours : 5000.0;
-  }
+  // F10: unified per-component MTTF/MTTR via the shared resolver (same per-kind
+  // template defaults as build_fmea_catalog), replacing the old inline fallback
+  // constants so SEQ agrees with NSQ and FMEA on identical components.
+  const MCReliability mcr = compute_mc_reliability(sys, co, options.data_policy);
+  std::vector<double> mttf = mcr.mttf;
+  std::vector<double> mttr_v = mcr.mttr;
 
   const auto active_component = build_active_component_mask(sys, co);
 
@@ -2928,7 +2749,8 @@ void add_emergency_generator(
   sys.ac.generators.push_back(std::move(g));
 }
 
-void mark_island_anchor(HybridPowerSystem& sys, int bus, int index, const std::string& name) {
+void mark_island_anchor(HybridPowerSystem& sys, int bus, int index,
+                        const std::string& name, double rating_mva = 0.0) {
   if (bus <= 0) return;
   for (auto& b : sys.ac.buses) {
     if (b.index == bus) {
@@ -2943,6 +2765,10 @@ void mark_island_anchor(HybridPowerSystem& sys, int bus, int index, const std::s
   eg.name = name;
   eg.vm_pu = 1.0;
   eg.va_deg = 0.0;
+  // F12: cap the island anchor's injection at the forming device's rating so it
+  // is not an unbounded 2x-demand slack.  add_external_grid_dispatch_sources
+  // uses s_sc_max_mva as the anchor generator's pmax when it is > 0.
+  eg.s_sc_max_mva = std::max(0.0, rating_mva);
   sys.ac.external_grids.push_back(std::move(eg));
 }
 
@@ -3075,7 +2901,7 @@ void apply_fmea_support_sources(
             next_gen, support_cost);
         mark_island_anchor(
             sys, st.bus, next_eg++,
-            "FMEA_black_start_storage_grid_" + std::to_string(st.index));
+            "FMEA_black_start_storage_grid_" + std::to_string(st.index), p);
       }
     }
   }
@@ -3095,9 +2921,12 @@ void apply_fmea_support_sources(
   if (options.enable_grid_forming_vsc_support) {
     for (const auto& vsc : sys.vsc_converters) {
       if (!vsc.in_service || !vsc.grid_forming) continue;
+      // F12: cap the island anchor at the converter's own MVA rating.
+      const double vsc_cap =
+          std::max({vsc.pmax_mw, std::abs(vsc.pmin_mw), vsc.p_rated_mw});
       mark_island_anchor(
           sys, vsc.bus_ac, next_eg++,
-          "FMEA_grid_forming_vsc_grid_" + std::to_string(vsc.index));
+          "FMEA_grid_forming_vsc_grid_" + std::to_string(vsc.index), vsc_cap);
     }
   }
 
@@ -3108,12 +2937,12 @@ void apply_fmea_support_sources(
       if (p <= 1e-9) p = mg.total_generation_mw;
       if (p <= 1e-9) p = mg.total_dg_capacity_mw + mg.total_diesel_capacity_mw;
       if (p <= 1e-9) p = mg.p_exchange_max_mw;
-      add_emergency_generator(
-          sys, mg.pcc_bus, p, "FMEA_microgrid_" + std::to_string(mg.index),
-          next_gen, support_cost);
+      if (p <= 1e-9) continue;  // no rated island capacity -> no credited support
+      // F12: one capacity-capped anchor provides both the island voltage
+      // reference and the bounded injection (no separate unbounded emergency gen).
       mark_island_anchor(
           sys, mg.pcc_bus, next_eg++,
-          "FMEA_microgrid_grid_" + std::to_string(mg.index));
+          "FMEA_microgrid_" + std::to_string(mg.index), p);
     }
   }
 }
@@ -3133,6 +2962,10 @@ struct FMEANetworkEdge {
   int to_pos{-1};
   double capacity_mw{0.0};
   std::string name;
+  // F9: per-unit susceptance B = 1/x for AC branches (DC power-flow / Kirchhoff
+  // voltage law).  0 = equipotential edge (zero-impedance switch/breaker/
+  // transformer) whose endpoints are angle-tied but flow is free (a bus merge).
+  double susceptance{0.0};
 };
 
 struct FMEANetworkTransfer {
@@ -3389,12 +3222,14 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
                       int from_pos,
                       int to_pos,
                       double capacity_mw,
-                      std::string name) {
+                      std::string name,
+                      double susceptance = 0.0) {
     if (from_pos < 0 || to_pos < 0 || from_pos == to_pos) return;
     if (!std::isfinite(capacity_mw) || capacity_mw <= 1e-9) {
       capacity_mw = reserve_capacity_mw;
     }
-    edges.push_back({ac_side, from_pos, to_pos, capacity_mw, std::move(name)});
+    edges.push_back({ac_side, from_pos, to_pos, capacity_mw, std::move(name),
+                     susceptance});
   };
 
   for (const auto& branch : sys.ac.branches) {
@@ -3403,9 +3238,13 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
     auto to_it = ac_bus_pos.find(branch.to_bus);
     if (from_it == ac_bus_pos.end() || to_it == ac_bus_pos.end()) continue;
     double capacity = branch.rate_a_mva > 0.0 ? branch.rate_a_mva : branch.sn_mva;
+    // F9: DC power-flow susceptance B = 1/x (p.u.) so the branch flow obeys
+    // Kirchhoff's voltage law (Pf = B*(theta_from - theta_to)).
+    const double b_pu = 1.0 / std::max(std::abs(branch.x_pu), 1e-4);
     add_edge(ac_edges, true, from_it->second, to_it->second, capacity,
              branch.name.empty() ? "ac_branch_" + std::to_string(branch.index)
-                                 : branch.name);
+                                 : branch.name,
+             b_pu);
   }
   for (const auto& transformer : sys.ac.transformers_2w) {
     if (!transformer.in_service) continue;
@@ -3504,8 +3343,12 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
   const int dcdc_offset = vsc_offset + static_cast<int>(vsc_transfers.size());
   const int ac_shed_offset = dcdc_offset + static_cast<int>(dcdc_transfers.size());
   const int dc_shed_offset = ac_shed_offset + static_cast<int>(ac_bus_count);
-  const int variable_count = dc_shed_offset + static_cast<int>(dc_bus_count);
-  const int row_count = static_cast<int>(ac_bus_count + dc_bus_count);
+  // F9: AC bus voltage-angle (theta) variables for the DC power-flow constraints.
+  const int theta_offset = dc_shed_offset + static_cast<int>(dc_bus_count);
+  const int variable_count = theta_offset + static_cast<int>(ac_bus_count);
+  // Rows: [AC bus balance | DC bus balance | one flow-definition row per AC edge].
+  const int flow_row_offset = static_cast<int>(ac_bus_count + dc_bus_count);
+  const int row_count = flow_row_offset + static_cast<int>(ac_edges.size());
   if (variable_count <= 0 || row_count <= 0) {
     return conservative_hybrid_shed(sys, ac_load_mw, dc_load_mw, curtail_threshold_mw);
   }
@@ -3603,6 +3446,37 @@ StateEvalResult evaluate_hybrid_fmea_network_lp(
                     "shed_dc_" + std::to_string(sys.dc.buses[bus_pos].index)};
     lp.c[var] = voll * base_mva;
     equality_triplets.emplace_back(static_cast<int>(ac_bus_count + bus_pos), var, 1.0);
+  }
+
+  // F9: AC bus angle variables + DC power-flow (Kirchhoff) flow-definition rows.
+  // theta[0] is the angle reference (fixed at 0); the others are free.  Each AC
+  // edge adds one row: branches enforce Pf = B*(theta_from - theta_to) (DC power
+  // flow), while zero-impedance edges (switch/breaker/transformer, B=0) enforce
+  // theta_from = theta_to (equipotential bus merge) with their flow left free.
+  // For radial networks this reproduces the transport solution; for meshed
+  // networks it constrains loop flows that the pure transport LP left free.
+  for (size_t bus_pos = 0; bus_pos < ac_bus_count; ++bus_pos) {
+    const int var = theta_offset + static_cast<int>(bus_pos);
+    const double bound = (bus_pos == 0) ? 0.0 : 1.0e3;
+    lp.vars[var] = {engine::VarType::Continuous, -bound, bound,
+                    "theta_ac_" + std::to_string(sys.ac.buses[bus_pos].index)};
+  }
+  for (size_t edge_pos = 0; edge_pos < ac_edges.size(); ++edge_pos) {
+    const auto& edge = ac_edges[edge_pos];
+    const int row = flow_row_offset + static_cast<int>(edge_pos);
+    const int theta_from = theta_offset + edge.from_pos;
+    const int theta_to = theta_offset + edge.to_pos;
+    if (edge.susceptance > 0.0) {
+      // Pf - B*(theta_from - theta_to) = 0
+      const int flow_var = ac_edge_offset + static_cast<int>(edge_pos);
+      equality_triplets.emplace_back(row, flow_var, 1.0);
+      equality_triplets.emplace_back(row, theta_from, -edge.susceptance);
+      equality_triplets.emplace_back(row, theta_to, edge.susceptance);
+    } else {
+      // Equipotential (zero-impedance): theta_from - theta_to = 0
+      equality_triplets.emplace_back(row, theta_from, 1.0);
+      equality_triplets.emplace_back(row, theta_to, -1.0);
+    }
   }
 
   lp.Aeq.resize(row_count, variable_count);
@@ -3925,7 +3799,11 @@ FMEAResult run_distribution_fmea(
     detail.component_name = comp.name;
     detail.failure_rate = comp.lambda;
     detail.tau_sw_hr = comp.tau_sw_hr;
-    detail.tau_rep_hr = comp.tau_rep_hr;
+    // F11: the fault event lasts MTTR in total, partitioned as
+    //   switching stage [0, tau_sw]  then  repair stage [tau_sw, MTTR].
+    // The repair-stage duration is therefore (MTTR - tau_sw), not the full MTTR;
+    // charging the full MTTR on top of tau_sw double-counts the switching window.
+    detail.tau_rep_hr = std::max(0.0, comp.tau_rep_hr - comp.tau_sw_hr);
     detail.component_type = fmea_component_type_name(comp.type);
 
     // 鈹€鈹€ Switching stage 鈹€鈹€
@@ -3937,10 +3815,13 @@ FMEAResult run_distribution_fmea(
     detail.nodal_shed_sw_mw = eval_sw.eval.nodal_curtailment_mw;
 
     // 鈹€鈹€ Repair stage 鈹€鈹€
+    // Evaluate the post-reconfiguration network for the physical repair horizon
+    // (comp.tau_rep_hr) so storage energy limits use the true repair time, but
+    // weight the energy by the repair-STAGE duration detail.tau_rep_hr (F11).
     auto eval_rep = evaluate_contingency_stage(
         sys, comp, options, opf_opt, comp.tau_rep_hr, true);
     detail.shed_rep_mw = eval_rep.eval.curtailment_mw;
-    detail.ens_rep_mwh = eval_rep.eval.curtailment_mw * comp.tau_rep_hr;
+    detail.ens_rep_mwh = eval_rep.eval.curtailment_mw * detail.tau_rep_hr;
     detail.causes_loss_rep = eval_rep.eval.is_loss_state;
     detail.nodal_shed_rep_mw = eval_rep.eval.nodal_curtailment_mw;
     detail.repair_switch_actions = std::move(eval_rep.switch_actions);
@@ -3951,8 +3832,8 @@ FMEAResult run_distribution_fmea(
     detail.eens_contribution = comp.lambda * total_ens;
 
     double loss_duration = 0.0;
-    if (detail.causes_loss_sw) loss_duration += comp.tau_sw_hr;
-    if (detail.causes_loss_rep) loss_duration += comp.tau_rep_hr;
+    if (detail.causes_loss_sw) loss_duration += detail.tau_sw_hr;
+    if (detail.causes_loss_rep) loss_duration += detail.tau_rep_hr;
     detail.lole_contribution = comp.lambda * loss_duration;
 
     // 鈹€鈹€ Aggregate system indices 鈹€鈹€
@@ -3971,7 +3852,7 @@ FMEAResult run_distribution_fmea(
       double shed_rep = b < detail.nodal_shed_rep_mw.size()
                             ? detail.nodal_shed_rep_mw[b]
                             : 0.0;
-      double nodal_ens = shed_sw * comp.tau_sw_hr + shed_rep * comp.tau_rep_hr;
+      double nodal_ens = shed_sw * detail.tau_sw_hr + shed_rep * detail.tau_rep_hr;
       result.nodal_eens_mwh_yr[b] += comp.lambda * nodal_ens;
     }
 
@@ -3981,11 +3862,11 @@ FMEAResult run_distribution_fmea(
       double duration = 0.0;
       if (b < detail.nodal_shed_sw_mw.size() && detail.nodal_shed_sw_mw[b] > 0.01) {
         bus_loss = true;
-        duration += comp.tau_sw_hr;
+        duration += detail.tau_sw_hr;
       }
       if (b < detail.nodal_shed_rep_mw.size() && detail.nodal_shed_rep_mw[b] > 0.01) {
         bus_loss = true;
-        duration += comp.tau_rep_hr;
+        duration += detail.tau_rep_hr;
       }
       if (bus_loss) {
         nodal_cif[b] += comp.lambda;

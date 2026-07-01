@@ -44,13 +44,13 @@ assumptions), **◐ approximate** (sound but with a documented simplification),
 | F6 | FMEA / 3-stage first-order `Σ λ·τ·shed` | ◐ first-order | low | `:3949-3976`, `three_stage…:1229-1234` |
 | **F7** | **Three-stage Stage-3 restores the faulted component for the whole repair window** (empirically confirmed, §6) | **✗ misleading** | **high** | `three_stage…:628`, `:637-641`, `:1212-1234` |
 | F8 | NSQ tail-risk built on per-state `shed×8760` samples | ✗ misleading | medium | `:1264-1267`, `:1396-1400` |
-| F9 | Hybrid consequence engine is a transportation LP (no Kirchhoff voltage law) | ⚠ over-optimistic | medium | `:3248-3640` |
+| F9 | Hybrid consequence engine now enforces AC-branch DC power flow (Kirchhoff via angles) | ✓ fixed | medium | `:3248-3640` |
 | F10 | MC unavailabilities bypass the unified resolver; per-method missing-data defaults diverge | ⚠ inconsistent | medium | `:959-1135`, `:1459-1584` vs `:2413-2428` |
 | F11 | FMEA event duration = `τ_sw + full MTTR` (switching time double-counted) | ◐ small bias | low | `:3935`, `:3943`, `:2444-2447` |
 | F12 | FMEA grid-forming/microgrid support modeled as an unbounded slack (rating ignored) | ⚠ over-optimistic | medium | `:3095-3118`, `:2964-2986` |
 | F13 | Single load level in NSQ & F&D (no load-duration curve) | ◐ documented | low | `:1199-1208`, `:2049` |
 | F14 | Three-stage reactive demand rebuilt from PF=0.9 (ignores `q_mvar`) | ⚠ discards data | low | `three_stage…:548` |
-| F15 | Failure-mode taxonomy largely descriptive (cyber/comm/active modes → 0 EENS) | ◐ scope | low | `failure_mode.cpp:834-925` |
+| F15 | Cyber/comm/control modes now drive EENS (comm-loss→frozen setpoint; data-driven derating) | ✓ fixed | low | `failure_mode.cpp:834-940` |
 | F16 | Component-importance = co-occurrence attribution, not a Birnbaum/marginal measure | ◐ heuristic | low | `:1282-1287`, `:1360-1390` |
 | F17 | `use_importance_sampling` option unimplemented | ⚠ dead option | low | header `:165-167` |
 
@@ -144,20 +144,22 @@ cross-cutting issue, so it is stated once here and referenced later.
 | Engine | Physics | Used by | Fidelity |
 |---|---|---|---|
 | **DC-OPF** `solve_dc_opf` | DC power flow (B·θ), thermal limits, load shed; **no V/Q** | NSQ/SEQ/FMEA on **AC-only** systems (`:838`, `evaluate_failed_network_state:3847`) | enforces Kirchhoff voltage law (angles) |
-| **Hybrid network LP** `evaluate_hybrid_fmea_network_lp` | **transportation/transshipment**: nodal MW balance + edge capacity $\pm\bar S$; **no susceptance, no angle, no voltage** | every method on **hybrid AC/DC** systems (`:3248-3640`) | **weaker than DC-PF** — loop flows unconstrained |
+| **Hybrid network LP** `evaluate_hybrid_fmea_network_lp` | AC branches enforce **DC power flow** $P_f=B(\theta_i-\theta_j)$ (angles); zero-impedance edges (switch/breaker/transformer) enforce $\theta_i=\theta_j$; DC side + VSC/DC-DC transfers are transportation | every method on **hybrid AC/DC** systems (`:3248-3640`) | DC-PF on the AC subnetwork; DC/converter transfers transport-bound |
 | **LinDistFlow MILP** `solve_stage_milp` | linearised DistFlow: $v_j=v_i-2(rP+xQ)$, V-bounds, thermal, radiality | three-stage AC sub-network only (`three_stage…:367-1137`) | most detailed (has voltage); DC side falls back to connectivity |
 
-> ⚠ **F9.** The hybrid path (used whenever a DC bus/branch/VSC/DCDC/DC-storage/DC-PV
-> exists) is a **pure network-flow LP**: branch variables are free in
-> $[-\bar S,\bar S]$ with only nodal balance (`:3547-3568`). It ignores Kirchhoff's
-> voltage law entirely, so it can route power along paths a real DC/AC network
-> cannot sustain ⇒ it **under-estimates shed** (over-optimistic adequacy).
-> Meanwhile the AC-only path through `solve_dc_opf` *does* enforce angle-based
-> DC power flow. So upgrading an AC case to hybrid by adding one DC bus silently
-> *relaxes* the physics from DC-PF to transportation. The model-scope strings and
-> `validity` flags document the limitation honestly
-> (`reliability_assessment.hpp:264-299`), but the **fidelity is non-monotone** in
-> system richness, which is surprising and worth surfacing in the GUI.
+> ✓ **F9 (fixed).** The hybrid path (used whenever a DC bus/branch/VSC/DCDC/DC-storage/DC-PV
+> exists) now enforces **Kirchhoff's voltage law on the AC subnetwork**: each AC
+> branch adds a bus-angle-difference flow definition $P_f=B(\theta_i-\theta_j)$ with
+> $B=1/\max(|x|,10^{-4})$, and zero-impedance edges (switch/breaker/transformer)
+> collapse to $\theta_i=\theta_j$ (equipotential bus merge, flow free). Radial
+> networks reproduce the previous transport answer exactly (unique flow); **meshed
+> networks now constrain loop flows**, so the engine no longer routes power along
+> paths a real network cannot sustain. Load-shed slack keeps the LP feasible, and
+> the `conservative_hybrid_shed` fallback is preserved. The DC subnetwork and the
+> VSC / DC-DC transfers remain transportation-bound (voltage-source converters set
+> their own terminal, so a transport model of the converter transfer is
+> appropriate). Fidelity is now **monotone**: adding a DC bus to an AC case keeps
+> DC-PF physics on the AC side rather than relaxing to transportation.
 
 **Connection to reconfiguration.** The repair-stage search in FMEA
 (`evaluate_contingency_stage:3724-3814`) and all three stages of the three-stage
@@ -447,17 +449,26 @@ $\text{dur}_m=\tau^{iso}+\tau^{sw}+r_m$ and $f_m=\lambda$ (passive) or $\nu_d p_
 
 **Verdict.** The taxonomy, provenance, and "honest support gate" (modes the
 steady-state engine cannot represent are reported `unsupported`, not silently
-applied — `:829-851`) are a genuine strength. But note the **scope reality**:
+applied — `:829-851`) are a genuine strength. Scope after the F15 wiring:
 
-- Only `ForcedOutage`, `Derating`, load-point shed, aggregated-source outage, and
-  breaker `FailToTrip→ProtectionZoneExpansion` drive any EENS. **Active switching,
-  control-unavailable, setpoint-frozen, measurement, communication, and
-  fail-to-close modes resolve to zero shed** (`:874-925`) — they are catalogued and
-  counted for coverage but **do not move the indices**. The rich cyber/active
-  taxonomy is, today, largely *descriptive*.
-- `Derating` is a hard-coded **0.5** capacity multiplier regardless of severity
-  (`:870`), and most derating modes carry $\lambda=0$ (`rf_lambda(0,0)`), so under
-  any non-defaulting policy they resolve to `missing`/disabled.
+- `ForcedOutage`, `Derating`, load-point shed, aggregated-source outage,
+  breaker `FailToTrip→ProtectionZoneExpansion`, **control-unavailable /
+  setpoint-frozen (pinned setpoint), and communication-loss on a dispatchable
+  converter/DER (frozen dispatch → possible shed)** now drive EENS. A
+  communication-loss on a *non-dispatchable* target (switch/breaker), pure
+  `MeasurementBias`, and `FailToClose` still resolve to zero steady-state shed —
+  correctly, since those are restoration-path / state-estimation effects with no
+  first-order shed signature (they remain honestly `unsupported`).
+- ✓ **F15a.** Communication loss on a controllable converter now maps to
+  loss-of-dispatch (`RemoveControllability`): the device holds its last setpoint
+  and cannot re-dispatch, so an island that relied on its flexible infeed sheds
+  (`build_consequence_patch` `CommunicationLoss` case).
+- ✓ **F15b.** `Derating` severity is **data-driven**: each derating mode carries a
+  `residual_capacity_factor` (surviving fraction, e.g. thermal 0.75, cooling 0.70,
+  converter power-stage 0.70) instead of a uniform 0.5, and the consequence mapper
+  reads it. `derate()` now scales **both** transfer directions of a bidirectional
+  converter (`pmax` and `pmin`), so a converter feeding a DC island is actually
+  capacity-limited (previously derating only touched `pmax`, a no-op for AC→DC).
 - `ProtectionZoneExpansion` opens **every** edge incident to `bus_from`
   (`expand_protection_zone:1014-1049`) — a conservative radial approximation that
   is exact only for radial feeders; meshed buses are mis-handled either way.
@@ -527,16 +538,21 @@ rig (§7); the consequence-patch provenance/support-gate discipline.
 
 **Secondary (fidelity/consistency):**
 
-4. **F9** — give the hybrid consequence engine at least DC-power-flow physics (it
-   is currently a transportation LP weaker than the AC-only DC-OPF), or clearly
-   gate the GUI so users know hybrid results are transportation-bound.
+4. **F9** ✓ *done* — the hybrid consequence engine now enforces DC-power-flow
+   physics on the AC subnetwork (branch angle-difference flow definitions;
+   zero-impedance edges equipotential), so fidelity is monotone with system
+   richness. DC/converter transfers remain (appropriately) transportation-bound.
 5. **F12** — cap FMEA grid-forming/microgrid support at the device rating with an
    islanded power balance, instead of a 2×demand slack.
 6. **F11/§6** — adopt one stage-duration convention
    ($\tau^{rep}=\text{MTTR}-\tau^{sw}$) across FMEA and three-stage.
 7. **F14** — use measured `q_mvar` in the three-stage MILP when available.
-8. **F15** — wire active/cyber/protection consequences into the engine (or relabel
-   them as descriptive-only in the GUI so they are not mistaken for risk drivers).
+8. **F15** ✓ *done* — control-unavailable / setpoint-frozen and communication-loss
+   on a dispatchable converter/DER now wire into the shed engine (frozen dispatch
+   → possible shed), and derating severity is data-driven (`residual_capacity_factor`,
+   with bidirectional converter derating fixed). Measurement-bias, comm-loss on
+   non-dispatchable devices, and fail-to-close remain honestly `unsupported`
+   (restoration / state-estimation effects, no first-order shed).
 9. **F13/F16/F17** — expose the load-level/LDC assumption; relabel
    "critical components" as co-occurrence share (or implement a Birnbaum measure);
    either implement or remove the importance-sampling option.

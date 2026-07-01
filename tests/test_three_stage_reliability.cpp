@@ -275,11 +275,20 @@ TEST_CASE("Three-stage reliability — AC bus load is not counted twice",
   REQUIRE(r.ok);
   REQUIRE(r.faults.size() == 1);
 
-  CHECK(r.faults.front().pls_stage3 == Catch::Approx(0.0).margin(1e-6));
+  // The single branch fault isolates bus2 for the whole event (F7: the fault is
+  // repaired only at tau_RP, so Stage 3 keeps it open).  bus2's 1 MW = 1000 kW is
+  // therefore shed in the repair window, counted exactly ONCE (2000 would signal
+  // the bus-load double count this test guards against).
+  CHECK(r.faults.front().pls_stage3 == Catch::Approx(1000.0).margin(1e-3));
 }
 
 TEST_CASE("Three-stage reliability — source capacity is finite, not infinite slack",
           "[reliability][three_stage][regression]") {
+  // Two PARALLEL branches feed bus2 so that faulting one still leaves bus2
+  // connected to the finite 1 MW source through the other.  This isolates the
+  // *capacity* limit (gen 1 MW < load 3 MW ⇒ 2 MW shed) from the F7 topology
+  // effect: with the healthy parallel branch carrying, bus2 stays energized in
+  // every stage, and the finite source can only serve 1 MW ⇒ pls == 2000 kW.
   const char* json = R"json({
     "name":"finite_source", "base_mva":10.0,
     "ac":{
@@ -289,7 +298,8 @@ TEST_CASE("Three-stage reliability — source capacity is finite, not infinite s
         {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":3.0,"qd_mvar":0.0,"n_customers":3}
       ],
       "branches":[
-        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+        {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":2,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
       ],
       "loads":[],"external_grids":[],
       "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":1.0,"pmax_mw":1.0,"pmin_mw":0.0,"qmax_mvar":1.0,"qmin_mvar":0.0}],
@@ -303,8 +313,11 @@ TEST_CASE("Three-stage reliability — source capacity is finite, not infinite s
   opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
-  REQUIRE(r.faults.size() == 1);
+  REQUIRE(r.faults.size() == 2);  // one fault per parallel branch
 
+  // Faulting either parallel branch leaves bus2 fed by the surviving branch;
+  // the finite 1 MW source serves 1 MW of the 3 MW load ⇒ 2 MW (2000 kW) shed
+  // during the repair window.
   CHECK(r.faults.front().pls_stage3 == Catch::Approx(2000.0).margin(1e-3));
 }
 
@@ -427,18 +440,18 @@ TEST_CASE("Three-stage reliability — longer MTTR raises EENS (per-component re
   CHECK(r20.eens_kwh_yr > 5.0 * r1.eens_kwh_yr);
 }
 
-// ─── F7 demonstration: repair-window EENS collapse for topology-isolated load ──
+// ─── F7 regression guard: topology-isolated load IS charged the repair window ──
 // A radial feeder with ONE branch and NO tie.  Ample generation (10 MW) feeds a
 // 1 MW load through the only branch.  When that branch faults the load is
-// DISCONNECTED (topology isolation, not a capacity shortfall).  Physically it
-// stays out for the whole repair time (≈ MTTR).  But Stage 3 restores the faulted
-// branch, so pls_stage3 ≈ 0 and the long τ_rep ≈ MTTR multiplies zero shed.  The
-// only EENS charged is the τ_iso + τ_sw window (≈ 2 min), INDEPENDENT of MTTR.
+// DISCONNECTED for the whole repair time (F7 fix: Stage 3 keeps the fault open
+// and holds the reconfiguration through [τ_TP, τ_RP]).  The stage durations sum
+// exactly to MTTR (τ_iso + τ_sw + τ_rep = 1/60 + 1/60 + (MTTR − 1/30) = MTTR), so
+// EENS = λ·L·MTTR = 1000·MTTR kWh/yr and scales linearly with MTTR.
 //
-// Contrast: the "longer MTTR raises EENS" test above uses a CAPACITY shortfall
-// (gen 0.5 MW < load 1.0 MW) so pls_stage3 ≠ 0 and EENS does scale with MTTR.
-// That case cannot expose F7; this one can.
-TEST_CASE("Three-stage reliability — F7: topology-isolated load is not charged the repair window",
+// Before the fix, Stage 3 restored the faulted branch, giving pls_stage3 ≈ 0 and
+// an EENS pinned at λ·L·(τ_iso+τ_sw) ≈ 33.3 kWh/yr regardless of MTTR.  This test
+// now fails if that regression returns.
+TEST_CASE("Three-stage reliability — F7: topology-isolated load is charged the repair window",
           "[reliability][three_stage][f7]") {
   auto run_with_mttr = [](double mttr) {
     std::string json = std::string(R"json({
@@ -469,34 +482,33 @@ TEST_CASE("Three-stage reliability — F7: topology-isolated load is not charged
   std::printf("\n[F7] radial 1-branch feeder, 1 MW load, 10 MW gen, no tie, lambda=1/yr\n");
   std::printf("[F7] %8s | %10s %10s %10s | %12s | %14s\n",
               "MTTR(h)", "shed1(kW)", "shed2(kW)", "shed3(kW)", "EENS(kWh/yr)",
-              "correct~lam*L*MTTR");
+              "lam*L*MTTR");
   double eens_first = -1.0, eens_last = -1.0;
   for (double mttr : mttrs) {
     auto r = run_with_mttr(mttr);
     REQUIRE(r.ok);
     REQUIRE(r.faults.size() == 1);
     const auto& f = r.faults.front();
-    const double correct = 1.0 * 1000.0 * mttr;  // lambda * load(kW) * MTTR(h)
+    const double textbook = 1.0 * 1000.0 * mttr;  // lambda * load(kW) * MTTR(h)
     std::printf("[F7] %8.1f | %10.3f %10.3f %10.3f | %12.3f | %14.0f\n",
-                mttr, f.pls_stage1, f.pls_stage2, f.pls_stage3, r.eens_kwh_yr, correct);
+                mttr, f.pls_stage1, f.pls_stage2, f.pls_stage3, r.eens_kwh_yr, textbook);
     if (eens_first < 0.0) eens_first = r.eens_kwh_yr;
     eens_last = r.eens_kwh_yr;
 
-    // The smoking gun: Stage-3 (post-repair) shed is ~0 even though the load was
-    // disconnected for the whole repair, so the repair duration contributes nothing.
-    CHECK(f.pls_stage3 == Catch::Approx(0.0).margin(1e-3));
+    // The isolated 1 MW load is now shed in every stage, including the long
+    // repair window (Stage 3), so pls_stage3 == the full load.
+    CHECK(f.pls_stage3 == Catch::Approx(1000.0).margin(1e-3));
+    // EENS equals the textbook radial load-point index lambda*L*MTTR exactly,
+    // because the three stage durations sum to MTTR.
+    CHECK(r.eens_kwh_yr == Catch::Approx(textbook).epsilon(0.02));
   }
 
-  // EENS at MTTR=1000 h is essentially identical to EENS at MTTR=1 h: the
-  // 1000x repair window does NOT change the reported energy not supplied.
+  // EENS now scales linearly with MTTR: a 1000x repair window ⇒ ~1000x EENS.
   std::printf("[F7] EENS(MTTR=1h)=%.3f  EENS(MTTR=1000h)=%.3f  ratio=%.4f "
-              "(correct ratio would be ~1000)\n",
+              "(expected ~1000)\n",
               eens_first, eens_last, eens_last / std::max(1e-9, eens_first));
-  CHECK(eens_last == Catch::Approx(eens_first).epsilon(0.02));
-
-  // And the magnitude equals only the isolation+switching window:
-  //   EENS ≈ lambda * load_kW * (tau_iso + tau_sw) = 1 * 1000 * (1/60 + 1/60) ≈ 33.3 kWh/yr.
-  CHECK(eens_first == Catch::Approx(1000.0 * (2.0 / 60.0)).epsilon(0.05));
+  CHECK(eens_last == Catch::Approx(1000.0 * eens_first).epsilon(0.02));
+  CHECK(eens_first == Catch::Approx(1000.0 * 1.0).epsilon(0.05));  // MTTR=1h ⇒ ~1000 kWh/yr
 }
 
 TEST_CASE("Three-stage reliability — opt-in generator + transformer faults extend the contingency set",
@@ -581,24 +593,37 @@ TEST_CASE("nsq Monte Carlo on a real hybrid case file routes through the hybrid 
   CHECK(r.iterations_used > 0);
 }
 
-TEST_CASE("Three-stage reliability — Stage 1/3 cannot open healthy closed lines for free",
+TEST_CASE("Three-stage reliability — healthy closed loop must shed to stay radial",
           "[reliability][three_stage][regression]") {
+  // Triangle (buses 1-2-3, branches b1,b2,b3) fed by a 3 MW source at bus 1, plus
+  // a radial spur b4 (3-4) to load bus 4.  The z >= y_from+y_to-1 constraint means
+  // a healthy closed line cannot be opened for free — a loop can only be broken by
+  // de-energizing (shedding) a bus.  Two behaviours are checked together:
+  //   • Fault on the spur b4 (line_id 4): bus4 is isolated for the whole repair
+  //     window (F7) AND the still-healthy, still-closed triangle must shed one of
+  //     its load buses to become radial ⇒ pls_stage3 ≈ 2000 kW.
+  //   • Fault on a triangle edge (line_id 1): the fault itself breaks the loop, so
+  //     the remaining network is radial and the 3 MW source serves all load ⇒
+  //     pls_stage3 ≈ 0.  (Under the old Stage-3-restores-fault bug this fault also
+  //     recreated the closed triangle and wrongly forced a shed.)
   const char* json = R"json({
-    "name":"closed_loop_no_free_open", "base_mva":10.0,
+    "name":"closed_loop_shed_for_radiality", "base_mva":10.0,
     "ac":{
       "base_mva":10.0,
       "buses":[
         {"index":1,"bus_type":1,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":0.0,"qd_mvar":0.0,"n_customers":1},
         {"index":2,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1},
-        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
+        {"index":3,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1},
+        {"index":4,"bus_type":3,"base_kv":10.0,"vm_pu":1.0,"vmin_pu":0.95,"vmax_pu":1.05,"in_service":true,"pd_mw":1.0,"qd_mvar":0.0,"n_customers":1}
       ],
       "branches":[
         {"index":1,"from_bus":1,"to_bus":2,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
         {"index":2,"from_bus":2,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
-        {"index":3,"from_bus":1,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
+        {"index":3,"from_bus":1,"to_bus":3,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0},
+        {"index":4,"from_bus":3,"to_bus":4,"r_pu":0.001,"x_pu":0.001,"rate_a_mva":10.0,"in_service":true,"failure_rate":1.0,"mttr_hr":1.0}
       ],
       "loads":[],"external_grids":[],
-      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":2.0,"pmax_mw":2.0,"pmin_mw":0.0,"qmax_mvar":2.0,"qmin_mvar":0.0}],
+      "generators":[{"index":1,"bus":1,"in_service":true,"pg_mw":3.0,"pmax_mw":3.0,"pmin_mw":0.0,"qmax_mvar":3.0,"qmin_mvar":0.0}],
       "static_generators":[],"renewable_gens":[],"pv_systems":[],"storage":[],"switches":[]
     },
     "dc":{"buses":[],"branches":[],"loads":[],"storage":[],"static_generators":[],"dc_static_generators":[],"pv_arrays":[],"dc_circuit_breakers":[]},
@@ -609,12 +634,23 @@ TEST_CASE("Three-stage reliability — Stage 1/3 cannot open healthy closed line
   opts.inherit_stdio = false;
   auto r = run_three_stage_reliability_from_string(json, opts);
   REQUIRE(r.ok);
-  REQUIRE(!r.faults.empty());
+  REQUIRE(r.faults.size() == 4);
 
-  for (const auto& fault : r.faults) {
-    CHECK(fault.stage3_status == "success");
-    CHECK(fault.pls_stage3 >= 999.0);
+  const hacdcpf::analysis::ThreeStageFaultDetail* spur = nullptr;  // fault on b4 (3-4), line_id 4
+  const hacdcpf::analysis::ThreeStageFaultDetail* tri = nullptr;   // fault on a triangle edge, line_id 1
+  for (const auto& f : r.faults) {
+    CHECK(f.stage3_status == "success");
+    if (f.line_id == 4) spur = &f;
+    if (f.line_id == 1) tri = &f;
   }
+  REQUIRE(spur != nullptr);
+  REQUIRE(tri != nullptr);
+
+  // Spur fault: isolated spur load (1000 kW) + one triangle load shed to break the
+  // healthy closed loop (1000 kW) ⇒ ≈ 2000 kW.
+  CHECK(spur->pls_stage3 >= 1999.0);
+  // Triangle-edge fault breaks the loop itself ⇒ radial, fully served ⇒ ≈ 0.
+  CHECK(tri->pls_stage3 == Catch::Approx(0.0).margin(1e-3));
 }
 
 TEST_CASE("Three-stage reliability — VSC transfer limits AC source support for DC load",

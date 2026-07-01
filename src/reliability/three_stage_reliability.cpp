@@ -52,6 +52,7 @@ struct LoadPoint {
   int bus{0};
   double p_kw{0.0};
   double customers{1.0};
+  double q_kvar{0.0};  // F14: measured reactive demand (0 -> reconstruct from 0.9 PF)
 };
 
 struct SourcePoint {
@@ -141,11 +142,12 @@ NativeCase build_native_case(const HybridPowerSystem& sys,
   for (const auto& ld : sys.ac.loads) {
     if (!ld.in_service) continue;
     add_bus(c.buses, ld.bus);
-    c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0), load_customers(sys, ld)});
+    c.loads.push_back({ld.bus, std::max(0.0, ld.p_mw * ld.scaling * 1000.0),
+                       load_customers(sys, ld), ld.q_mvar * ld.scaling * 1000.0});
   }
   for (const auto& b : sys.ac.buses) {
     if (!b.in_service || b.pd_mw <= 1e-9) continue;
-    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b)});
+    c.loads.push_back({b.index, b.pd_mw * 1000.0, bus_customers(b), b.qd_mvar * 1000.0});
   }
   for (const auto& ld : sys.dc.loads) {
     if (!ld.in_service) continue;
@@ -320,7 +322,13 @@ struct DSU {
 //                    z_ij = 1  ∀(i,j) ∉ (L^NO ∪ {k})
 //                  Stage 1: all switches remain at nominal position (no switching allowed).
 //                  Stage 2: normally-open switches are free (0 ≤ z_ij ≤ 1, binary) subject to C9.
-//                  Stage 3: fault branch is restored; all z_ij fixed at nominal (all n.c. = 1).
+//                  Stage 3: repair window — the fault branch stays FORCED-OPEN (z_k = 0,
+//                           it is repaired only at τ_RP) and the normally-open ties remain
+//                           free (the Stage-2 reconfiguration is held), subject to C9.  This
+//                           is topologically identical to Stage 2; only the duration differs
+//                           (τ_rep ≈ MTTR).  (F7 fix — Stage 3 previously restored the fault
+//                           and re-opened the ties, so unrestorable load was charged only the
+//                           brief switching window instead of the whole repair window.)
 //
 //   C9  (eq. 14):  Switch count:   Σ_{(i,j)∈L^NO} z_ij ≤ K^sw
 //
@@ -499,8 +507,11 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   for (int gi = 0; gi < static_cast<int>(sys.ac.generators.size()); ++gi) {
     const auto& g = sys.ac.generators[gi];
     if (!g.in_service) continue;
-    // Generator forced outage: out during isolation/switching, repaired in Stage 3.
-    if (fault.kind == FaultKind::Generator && gi == fault.index && stage < 3) continue;
+    // Generator forced outage: the unit is out for the whole event and is only
+    // repaired at the end of the repair window (tau_RP).  Stage 3 [tau_TP, tau_RP]
+    // IS that repair window, so the faulted unit stays out in all three stages
+    // (F7: Stage 3 is "during repair", not "after repair").
+    if (fault.kind == FaultKind::Generator && gi == fault.index) continue;
     mark_source(g.bus, g.pmax_mw > 0.0 ? g.pmax_mw : g.pg_mw);
     auto it = ac_bus_pos.find(g.bus);
     if (it != ac_bus_pos.end())
@@ -545,7 +556,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     load_ac_bus[li] = it->second;
     const double p_mw = std::max(0.0, c.loads[li].p_kw) / 1000.0;
     p_d[it->second] += p_mw;
-    q_d[it->second] += p_mw * 0.4843;  // tan(arccos(0.9)) ≈ 0.4843
+    // F14: use the load's measured reactive demand when provided; otherwise fall
+    // back to a uniform 0.9-PF reconstruction (tan(arccos(0.9)) approx 0.4843).
+    const double q_mvar = c.loads[li].q_kvar / 1000.0;
+    q_d[it->second] += (std::abs(q_mvar) > 1e-9) ? q_mvar : p_mw * 0.4843;
   }
   // Number of AC load points (those with AC bus)
   // (DC-only loads get connectivity fallback below)
@@ -585,7 +599,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int b = 0; b < n_br; ++b) {
       const auto& br = ac_branches[b];
       if (br.normally_open) continue;
-      if (br.failed && stage < 3) continue;
+      if (br.failed) continue;  // F7: faulted branch is out in every stage
       source_dsu.unite(br.from_pos, br.to_pos);
     }
     std::unordered_set<int> source_components;
@@ -624,27 +638,32 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     const auto& br = ac_branches[b];
     double z_lb = 0.0, z_ub = 1.0;
 
-    // C7: Forced-open failed branch (eq. 12)
-    if (br.failed && stage < 3) {
+    // C7: Forced-open failed branch (eq. 12).  F7: the faulted element is out for
+    // the whole event and is only repaired at tau_RP, so it stays forced-open in
+    // ALL stages, including the Stage-3 repair window [tau_TP, tau_RP].
+    if (br.failed) {
       z_lb = 0.0; z_ub = 0.0;
     }
     // C8: z denotes energized branch use, not the mechanical switch handle.
     // Healthy normally-closed edges may de-energize when their endpoint bus is
     // shed; the radial/commodity constraints choose the energized forest.
-    // Normally-open ties stay open in Stage 1/3 and are candidate switches in Stage 2.
+    // Normally-open ties stay open only in Stage 1 (no switching yet); in Stage 2
+    // AND Stage 3 they are candidate switches, so the post-fault reconfiguration
+    // is HELD through the repair window (F7).
     else if (!br.normally_open) {
       z_lb = 0.0; z_ub = 1.0;
-    } else if (stage == 1 || stage == 3) {
-      // Stage 1: no switching — normally-open switches stay open
-      // Stage 3: repair restores everything to nominal (normally-open stays open)
+    } else if (stage == 1) {
+      // Stage 1: no switching — normally-open switches stay open.
       z_lb = 0.0; z_ub = 0.0;
     }
-    // Stage 2: normally-open switch — free binary variable, subject to C9 (count constraint)
+    // Stage 2 & 3: normally-open switch — free binary variable, subject to C9.
 
     // Deterministic fail-to-close: a tie listed as unavailable cannot close in
-    // Stage 2, so its back-feed restoration path is lost.
-    if (stage == 2 && br.normally_open && !br.failed && unavailable_ties &&
-        br.switch_index >= 0 && unavailable_ties->count(br.switch_index) > 0) {
+    // the reconfiguration stages (2 and 3), so its back-feed restoration path is
+    // lost for the entire repair window (F7).
+    if ((stage == 2 || stage == 3) && br.normally_open && !br.failed &&
+        unavailable_ties && br.switch_index >= 0 &&
+        unavailable_ties->count(br.switch_index) > 0) {
       z_lb = 0.0;
       z_ub = 0.0;
     }
@@ -811,7 +830,7 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     add_le({{ off_f + b, -1.0}, { off_z + b, -commodity_cap}}, 0.0);  // -f ≤ cap·z
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].from_pos, -1.0}}, 0.0);
     add_le({{ off_z + b,  1.0}, { off_y + ac_branches[b].to_pos,   -1.0}}, 0.0);
-    if (!ac_branches[b].normally_open && !(ac_branches[b].failed && stage < 3)) {
+    if (!ac_branches[b].normally_open && !ac_branches[b].failed) {
       add_le({{ off_y + ac_branches[b].from_pos, 1.0},
               { off_y + ac_branches[b].to_pos,   1.0},
               { off_z + b,                      -1.0}},
@@ -840,9 +859,10 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
   }
 
   // ── C9 (eq. 14): Switch count ≤ K^sw ────────────────────────────────────
-  // Σ_{(i,j)∈L^NO} z_ij ≤ K^sw   (Stage 2 only; K^sw = max_sw_ops)
-  // In stage 2, normally-open switches have free z_ij ∈ {0,1}.
-  if (stage == 2 && n_no_switch > 0) {
+  // Σ_{(i,j)∈L^NO} z_ij ≤ K^sw   (Stages 2 and 3; K^sw = max_sw_ops).
+  // The reconfiguration chosen at switching (Stage 2) is HELD through the repair
+  // window (Stage 3, F7), so the same switch-count budget applies in both.
+  if ((stage == 2 || stage == 3) && n_no_switch > 0) {
     std::vector<std::pair<int,double>> sw_terms;
     for (int b = 0; b < n_br; ++b) {
       if (ac_branches[b].normally_open) sw_terms.push_back({off_z + b, 1.0});
@@ -1054,15 +1074,15 @@ StageSolve solve_stage_milp(const NativeCase& c, const FaultLine& fault, int sta
     for (int b = 0; b < static_cast<int>(sys.ac.branches.size()); ++b) {
       const auto& br = sys.ac.branches[b];
       bool on = br.in_service;
-      if (fault.ac && b == fault.index && stage < 3) on = false;
-      if (stage >= 3 && br.in_service) on = true;
+      // F7: the faulted branch is out in every stage (repaired only at tau_RP);
+      // do not re-energize it in Stage 3.
+      if (fault.ac && b == fault.index) on = false;
       if (on) connect_dc(br.from_bus, br.to_bus);
     }
     for (int b = 0; b < static_cast<int>(sys.dc.branches.size()); ++b) {
       const auto& br = sys.dc.branches[b];
       bool on = br.in_service;
-      if (!fault.ac && b == fault.index && stage < 3) on = false;
-      if (stage >= 3 && br.in_service) on = true;
+      if (!fault.ac && b == fault.index) on = false;  // F7
       if (on) connect_dc(br.from_bus + kDCBusOffset, br.to_bus + kDCBusOffset);
     }
     for (const auto& vsc : sys.vsc_converters) {
@@ -1184,8 +1204,12 @@ void run_native_case(const NativeCase& c, ThreeStageReliabilityResult& r,
 
   for (const auto& fault : c.faults) {
     auto s1 = solve_stage_milp(c, fault, 1);
-    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties);  // switch-count limit applies only to Stage 2
-    auto s3 = solve_stage_milp(c, fault, 3);
+    auto s2 = solve_stage_milp(c, fault, 2, max_sw_ops, &unavailable_ties);
+    // F7: Stage 3 is the repair window [tau_TP, tau_RP] with the fault still out
+    // and the Stage-2 reconfiguration held, so it uses the same switch budget and
+    // unavailable-tie set as Stage 2 (previously it ran with defaults and a
+    // silently-restored fault, which zeroed the repair-window shed).
+    auto s3 = solve_stage_milp(c, fault, 3, max_sw_ops, &unavailable_ties);
 
     ThreeStageFaultDetail d;
     d.line_id = fault.id;

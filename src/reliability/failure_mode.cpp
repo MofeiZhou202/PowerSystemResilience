@@ -174,7 +174,7 @@ struct CatalogCtx {
            const std::string& disp, FailureActivation act, FailureCause cause,
            FailureConsequenceKind cons, const ReliabilityRawFields& raw,
            double def_lambda, double def_repair,
-           double iso_hr, double sw_hr) {
+           double iso_hr, double sw_hr, double residual_capacity = 0.5) {
     if (!kind_included(ref.kind, opt)) return;
     if (!activation_allowed(act, opt)) return;
     if (!cause_allowed(cause, opt)) return;
@@ -195,6 +195,7 @@ struct CatalogCtx {
     e.mode.isolation_hr = iso_hr;
     e.mode.switching_hr = sw_hr;
     e.mode.repair_hr = e.mode.params.repair_hr;
+    e.mode.residual_capacity_factor = residual_capacity;
 
     // Disable modes that resolved to missing data under strict policy.
     if (e.mode.params.data_source == "missing") {
@@ -262,7 +263,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
             Q::ForcedOutage, rf_for(g.forced_outage_rate, g.mttr_hr),
             8760.0 / 2000.0, 50.0, iso, sw);
     ctx.add(ref, "derating", "capacity derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.5, 24.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.5, 24.0, iso, sw, 0.6);
     ctx.add(ref, "control_unavailable", "AGC/control unavailable", A::Passive,
             C::CyberControl, Q::ControlUnavailable, rf_cyber(0.0, 2.0),
             0.3, 2.0, iso, sw);
@@ -278,7 +279,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
             C::Physical, Q::ForcedOutage, rf_lambda(b.failure_rate, b.mttr_hr),
             0.35, 10.0, iso, sw);
     ctx.add(ref, "thermal_derating", "thermal derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.1, 8.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.1, 8.0, iso, sw, 0.75);
   }
 
   // ── Transformers 2W / 3W ──
@@ -292,7 +293,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
             C::Physical, Q::ControlUnavailable, rf_active(0.005, 50.0, 0.0),
             0.0, 24.0, iso, sw);
     ctx.add(ref, "cooling_derating", "cooling derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.05, 24.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.05, 24.0, iso, sw, 0.7);
   }
   for (size_t i = 0; i < sys.ac.transformers_3w.size(); ++i) {
     const auto& t = sys.ac.transformers_3w[i];
@@ -301,7 +302,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "internal_fault", "internal fault", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(t.mtbf_hours, t.mttr_hours), 0.04, 200.0, iso, sw);
     ctx.add(ref, "cooling_derating", "cooling derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.05, 24.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.05, 24.0, iso, sw, 0.7);
   }
 
   // ── Static / renewable generators ──
@@ -322,7 +323,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "unit_outage", "unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(rg.mtbf_hours, rg.mttr_hours), 2.0, 48.0, iso, sw);
     ctx.add(ref, "resource_derating", "resource/availability derating", A::Passive,
-            C::Physical, Q::Derating, rf_lambda(0.0, 0.0), 2.0, 4.0, iso, sw);
+            C::Physical, Q::Derating, rf_lambda(0.0, 0.0), 2.0, 4.0, iso, sw, 0.5);
   }
 
   // ── AC PV systems ──
@@ -333,7 +334,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "plant_outage", "whole plant outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(pv.mtbf_hours, pv.mttr_hours), 1.5, 24.0, iso, sw);
     ctx.add(ref, "inverter_failure", "inverter failure", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 1.0, 12.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 1.0, 12.0, iso, sw, 0.5);
   }
 
   // ── AC storage ──
@@ -344,7 +345,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "unit_outage", "whole unit outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(st.forced_outage_rate, st.mttr_hr), 1.0, 24.0, iso, sw);
     ctx.add(ref, "pcs_failure", "PCS power-stage failure", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.5, 12.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.5, 12.0, iso, sw, 0.5);
     ctx.add(ref, "bms_control_unavailable", "BMS/control unavailable", A::Passive,
             C::CyberControl, Q::ControlUnavailable, rf_cyber(0.0, 2.0), 0.3, 2.0, iso, sw);
   }
@@ -402,7 +403,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "power_stage_outage", "power-stage outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_for(v.forced_outage_rate, v.mttr_hr), 0.10, 48.0, iso, sw);
     ctx.add(ref, "derating", "power-stage derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.2, 24.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.2, 24.0, iso, sw, 0.7);
     ctx.add(ref, "grid_forming_lost", "grid-forming capability lost",
             A::ActiveOnDemand, C::CyberControl, Q::GridFormingUnavailable,
             rf_active(0.02, 1.0, 1.0), 0.0, 1.0, iso, sw);
@@ -422,7 +423,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "pole_fault", "pole/cable permanent fault", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(b.mtbf_hours, b.mttr_hours), 0.20, 24.0, iso, sw);
     ctx.add(ref, "derating", "derating", A::Passive, C::Physical, Q::Derating,
-            rf_lambda(0.0, 0.0), 0.1, 8.0, iso, sw);
+            rf_lambda(0.0, 0.0), 0.1, 8.0, iso, sw, 0.75);
   }
 
   // ── DCDC converters ──
@@ -433,7 +434,7 @@ std::vector<FailureModeCatalogEntry> build_failure_mode_catalog(
     ctx.add(ref, "power_stage_outage", "power-stage outage", A::Passive, C::Physical,
             Q::ForcedOutage, rf_mtbf(d.mtbf_hours, d.mttr_hours), 0.20, 48.0, iso, sw);
     ctx.add(ref, "derating", "power-stage derating", A::Passive, C::Physical,
-            Q::Derating, rf_lambda(0.0, 0.0), 0.2, 24.0, iso, sw);
+            Q::Derating, rf_lambda(0.0, 0.0), 0.2, 24.0, iso, sw, 0.7);
     ctx.add(ref, "setpoint_frozen", "duty/setpoint frozen", A::Passive,
             C::CyberControl, Q::SetpointFrozen, rf_cyber(0.3, 1.0), 0.3, 1.0, iso, sw);
     ctx.add(ref, "comm_loss", "communication loss", A::Passive, C::Communication,
@@ -865,12 +866,21 @@ ConsequencePatch build_consequence_patch(
                 "spurious trip removes element");
       else unsupported("selected model does not support forced-outage topology");
       break;
-    case FailureConsequenceKind::Derating:
-      if (caps.supports_derating)
-        add_mut(MutationCategory::Capacity, MutationKind::CapacityDerate, 0.5,
-                "capacity derated to 50%");
-      else unsupported("selected model does not support capacity derating");
+    case FailureConsequenceKind::Derating: {
+      if (caps.supports_derating) {
+        // Data-driven severity: the surviving-capacity fraction comes from the
+        // failure mode (per-mode template value), not a hard-coded constant.
+        const double residual =
+            (mode.residual_capacity_factor > 0.0 &&
+             mode.residual_capacity_factor <= 1.0)
+                ? mode.residual_capacity_factor
+                : 0.5;
+        add_mut(MutationCategory::Capacity, MutationKind::CapacityDerate, residual,
+                "capacity derated (surviving fraction " +
+                    std::to_string(residual) + ")");
+      } else unsupported("selected model does not support capacity derating");
       break;
+    }
     case FailureConsequenceKind::ControlUnavailable:
     case FailureConsequenceKind::SetpointFrozen:
       if (caps.supports_control_unavailable)
@@ -916,12 +926,37 @@ ConsequencePatch build_consequence_patch(
                 0.0, "breaker fail-to-trip: backup protection expands the outage zone");
       else unsupported("protection misoperation needs a protection-zone model");
       break;
+    case FailureConsequenceKind::CommunicationLoss: {
+      // Loss of the remote dispatch / command channel.  For a *dispatchable*
+      // converter or DER this freezes the operating setpoint: the device holds
+      // its last command and can no longer be re-dispatched to support a
+      // contingency, which the steady-state engine represents as loss of
+      // controllability (pinned at its setpoint) -> possible shed.  For
+      // non-dispatchable targets (switches, breakers, measurement-only assets)
+      // a lost command channel has no steady-state shed effect.
+      const bool dispatchable =
+          kind == ReliabilityComponentKind::VSCConverter ||
+          kind == ReliabilityComponentKind::DCDCConverter ||
+          kind == ReliabilityComponentKind::ACStaticGenerator ||
+          kind == ReliabilityComponentKind::DCStaticGenerator ||
+          kind == ReliabilityComponentKind::ACStorage ||
+          kind == ReliabilityComponentKind::DCStorage;
+      if (dispatchable && caps.supports_control_unavailable)
+        add_mut(MutationCategory::Control, MutationKind::RemoveControllability, 0.0,
+                "communication loss freezes the dispatch setpoint (no re-dispatch)");
+      else if (caps.supports_observation_cyber)
+        add_mut(MutationCategory::Observation, MutationKind::ObservationDegraded, 0.0,
+                "communication degraded (no steady-state shed effect)");
+      else
+        unsupported("communication loss on a non-dispatchable target has no "
+                    "steady-state shed effect");
+      break;
+    }
     case FailureConsequenceKind::MeasurementBias:
-    case FailureConsequenceKind::CommunicationLoss:
       if (caps.supports_observation_cyber)
         add_mut(MutationCategory::Observation, MutationKind::ObservationDegraded, 0.0,
-                "measurement/communication degraded");
-      else unsupported("measurement/communication-only mode has no steady-state shed effect");
+                "measurement bias (no steady-state shed effect)");
+      else unsupported("measurement-only mode has no steady-state shed effect");
       break;
   }
   return patch;
@@ -976,10 +1011,16 @@ void derate(HybridPowerSystem& s, ReliabilityComponentKind k, int i, double fact
       } break;
     case K::ACGenerator: if (ok(s.ac.generators.size())) s.ac.generators[i].pmax_mw *= factor; break;
     case K::VSCConverter: if (ok(s.vsc_converters.size())) {
+        // Bidirectional: derate BOTH transfer directions (pmax = DC->AC,
+        // pmin = AC->DC) so a converter feeding a DC island is actually limited.
         s.vsc_converters[i].pmax_mw *= factor;
+        s.vsc_converters[i].pmin_mw *= factor;
         s.vsc_converters[i].p_rated_mw *= factor;
       } break;
-    case K::DCDCConverter: if (ok(s.dc.dcdc_converters.size())) s.dc.dcdc_converters[i].pmax_mw *= factor; break;
+    case K::DCDCConverter: if (ok(s.dc.dcdc_converters.size())) {
+        s.dc.dcdc_converters[i].pmax_mw *= factor;
+        s.dc.dcdc_converters[i].pmin_mw *= factor;
+      } break;
     case K::DCBranch: if (ok(s.dc.branches.size())) {
         s.dc.branches[i].rate_a_mva *= factor;
         s.dc.branches[i].s_max_mva *= factor;

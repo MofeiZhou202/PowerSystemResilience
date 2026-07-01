@@ -639,6 +639,80 @@ TEST_CASE("fmea: external grid outage sheds the load it supplied",
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// F15: cyber/control converter modes now move EENS (communication loss freezes
+// the dispatch setpoint; derating severity is data-driven, not a flat 0.5).
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_vsc_cyber_system() {
+  HybridPowerSystem sys;
+  ACBus a; a.index = 1; a.bus_type = BusType::SLACK; a.in_service = true;
+  sys.ac.buses = {a};
+  Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 20.0; g.pmin_mw = 0.0; g.is_slack = true; g.forced_outage_rate = 0.0;
+  sys.ac.generators = {g};
+  DCBus d; d.index = 101; d.in_service = true;
+  sys.dc.buses = {d};
+  DCLoad dl; dl.index = 1; dl.bus = 101; dl.in_service = true; dl.p_mw = 8.0;
+  dl.n_customers = 40;
+  sys.dc.loads = {dl};
+  // The controllable VSC is the DC island's only infeed, with setpoint 0, so a
+  // frozen / dropped control channel removes the infeed entirely.
+  VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.pmax_mw = 10.0; v.pmin_mw = -10.0; v.p_rated_mw = 10.0; v.p_set_mw = 0.0;
+  v.controllable = true;
+  sys.vsc_converters = {v};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("fmea: cyber/control converter modes move EENS (F15)",
+          "[reliability][failure_mode][f15]") {
+  auto sys = make_vsc_cyber_system();
+  FailureModeFMEAOptions opt;  // default policy fills template frequencies
+  auto res = run_failure_mode_fmea(sys, opt);
+
+  const FailureModeContingency* comm = nullptr;
+  const FailureModeContingency* frozen = nullptr;
+  const FailureModeContingency* derate = nullptr;
+  const FailureModeContingency* meas = nullptr;
+  for (const auto& c : res.contingencies) {
+    if (c.ref.component.kind != ReliabilityComponentKind::VSCConverter) continue;
+    switch (c.ref.consequence) {
+      case FailureConsequenceKind::CommunicationLoss: comm = &c; break;
+      case FailureConsequenceKind::SetpointFrozen:    frozen = &c; break;
+      case FailureConsequenceKind::Derating:          derate = &c; break;
+      case FailureConsequenceKind::MeasurementBias:   meas = &c; break;
+      default: break;
+    }
+  }
+  REQUIRE(comm != nullptr);
+  REQUIRE(frozen != nullptr);
+  REQUIRE(derate != nullptr);
+  REQUIRE(meas != nullptr);
+
+  // Communication loss freezes the dispatch setpoint (pinned at 0) -> the DC
+  // island loses its only infeed -> full 8 MW shed, and it now moves EENS.
+  CHECK(comm->supported);
+  CHECK(comm->total_shed_mw == Approx(8.0).margin(0.5));
+  CHECK(comm->eens_contribution > 0.0);
+
+  // Setpoint-frozen is the same control-loss consequence.
+  CHECK(frozen->supported);
+  CHECK(frozen->total_shed_mw == Approx(8.0).margin(0.5));
+
+  // Data-driven derating: surviving fraction 0.7 -> pmax 10->7 -> 1 MW shed.
+  // A hard-coded 0.5 would derate to 5 MW and shed 3 MW instead.
+  CHECK(derate->supported);
+  CHECK(derate->total_shed_mw == Approx(1.0).margin(0.5));
+
+  // Measurement bias has no steady-state shed effect (honest unsupported).
+  CHECK_FALSE(meas->supported);
+  CHECK(meas->total_shed_mw == Approx(0.0).margin(1e-6));
+
+  CHECK(res.eens_mwh_yr > 0.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Active switching: fail-to-open/stuck-closed expand the isolation zone;
 // fail-to-close is deferred to the three-stage restoration engine.
 // ─────────────────────────────────────────────────────────────────────────
@@ -725,6 +799,51 @@ TEST_CASE("nsq MC: hybrid system includes DC load curtailment in EENS",
   // VSC unavailability ~0.1 -> the 5 MW DC load is shed in those states, so the
   // hybrid-LP-based MC reports non-trivial EENS (previously zero under AC-only).
   CHECK(r.eens_mwh_yr > 100.0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// F9: the hybrid LP now enforces DC power flow (Kirchhoff), so meshed loop
+// flow is constrained by reactance instead of split freely (transport).
+// ─────────────────────────────────────────────────────────────────────────
+namespace {
+HybridPowerSystem make_meshed_hybrid_system() {
+  HybridPowerSystem sys;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.in_service = true;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true; b2.pd_mw = 10.0;
+  sys.ac.buses = {b1, b2};
+  Generator g; g.index = 1; g.bus = 1; g.in_service = true;
+  g.pmax_mw = 50.0; g.pmin_mw = 0.0; g.is_slack = true;
+  sys.ac.generators = {g};
+  // Two parallel 1-2 branches with a 2:1 susceptance ratio (x=0.1 vs 0.2), each
+  // rated 6 MVA.  Serving 10 MW forces the low-x branch to ~6.67 MW under
+  // Kirchhoff -> overloaded -> ~1 MW shed even healthy.  Transport would split
+  // 5/5 and shed nothing.
+  ACBranch a; a.index = 1; a.from_bus = 1; a.to_bus = 2; a.in_service = true;
+  a.x_pu = 0.1; a.r_pu = 0.0; a.rate_a_mva = 6.0; a.failure_rate = 0.0;
+  ACBranch bb; bb.index = 2; bb.from_bus = 1; bb.to_bus = 2; bb.in_service = true;
+  bb.x_pu = 0.2; bb.r_pu = 0.0; bb.rate_a_mva = 6.0; bb.failure_rate = 0.0;
+  sys.ac.branches = {a, bb};
+  // A trivial DC bus routes the evaluation through the hybrid AC/DC network LP.
+  DCBus d; d.index = 101; d.in_service = true;
+  sys.dc.buses = {d};
+  return sys;
+}
+}  // namespace
+
+TEST_CASE("hybrid LP: DC power flow constrains meshed loop flow (F9)",
+          "[reliability][hybrid][f9]") {
+  auto sys = make_meshed_hybrid_system();
+  ReliabilityOptions opt;
+  opt.max_iterations = 50;
+  opt.seed = 3;
+  opt.compute_tail_risk = false;
+  auto r = run_nonsequential_mc(sys, opt);
+
+  CHECK(r.model_scope == "hybrid-acdc-network-lp");
+  // Kirchhoff forces the 2:1 split, overloading the low-reactance branch and
+  // shedding ~1 MW even in the healthy state (~1 MW * 8760 h).  A pure transport
+  // LP would split freely and report ~0 EENS.
+  CHECK(r.eens_mwh_yr > 1000.0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

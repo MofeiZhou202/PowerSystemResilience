@@ -242,7 +242,12 @@ struct ReliabilityResult {
   // Per-bus EENS (MWh/yr)
   std::vector<double> nodal_eens_mwh_yr;
 
-  // Weak point detection
+  // Weak point detection.
+  // F16: these are CO-OCCURRENCE / attribution metrics (the share of loss-state
+  // shed observed while a component is down), NOT a Birnbaum marginal importance
+  // (d EENS / d U_c).  In a multi-failure state the whole state shed is attributed
+  // to every down component, so contributions can sum to more than 100%.  Read
+  // them as a rank, not as marginal risk.
 	  struct ComponentImportance {
 	    int index;            // within-type index (0-based within component_type group)
 	    bool is_generator;    // true = generator, false = other

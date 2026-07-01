@@ -11,8 +11,14 @@
 //   Stage 1  [0, τ_SW]:        Fault isolation   — protect healthy zones
 //   Stage 2  [τ_SW, τ_TP]:     Post-fault reconfig — restore as many loads as
 //                              possible with switching operations
-//   Stage 3  [τ_TP, τ_RP]:     Post-repair reconfig — re-optimise topology
-//                              after the faulted component is repaired
+//   Stage 3  [τ_TP, τ_RP]:     Repair window — the faulted component is STILL
+//                              out (it is only repaired at τ_RP), and the Stage-2
+//                              reconfiguration is HELD.  This is the long window
+//                              (τ_RP ≈ MTTR); load that switching could not
+//                              restore is shed for its whole duration.  (Fixed:
+//                              Stage 3 used to re-close the faulted component and
+//                              re-open the ties, which zeroed the repair-window
+//                              shed for topology-isolated load.)
 //
 // No Julia runtime is required.
 // =============================================================================

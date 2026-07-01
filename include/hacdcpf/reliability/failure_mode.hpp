@@ -136,6 +136,7 @@ struct FailureModeReliability {
   double switching_hr{0.0};                 ///< tau_sw  (stage 2)
   double repair_hr{0.0};                    ///< tau_rep (stage 3, physical)
   double cyber_recovery_hr{0.0};            ///< recovery time for cyber modes
+  double residual_capacity_factor{0.5};     ///< derating: surviving capacity fraction (0..1]
 };
 
 // ═══════════════════════════════════════════════════════════════════════
