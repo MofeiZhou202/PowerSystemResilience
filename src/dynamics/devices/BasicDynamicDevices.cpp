@@ -121,6 +121,15 @@ double finite_value(double value, double fallback = 0.0) {
   return std::isfinite(value) ? value : fallback;
 }
 
+bool set_if_changed(Eigen::VectorXd& x, int idx, double value, double tol = 1e-10) {
+  if (idx < 0 || idx >= x.size() || !std::isfinite(value)) return false;
+  if (std::abs(x[idx] - value) <= tol * std::max({1.0, std::abs(x[idx]), std::abs(value)})) {
+    return false;
+  }
+  x[idx] = value;
+  return true;
+}
+
 double safe_base(double base_mva) {
   return std::max(1.0, base_mva);
 }
@@ -460,6 +469,23 @@ void SynchronousMachine::initializeFromPowerFlow(const PowerFlowResult& pf,
   x.x[range_.offset + 3] = params_.p_mech_mw / std::max(1.0, params_.base_mva);
 }
 
+bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (!params_.in_service || range_.empty()) return false;
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 1), 1.0) || changed;
+  if (params_.dynamic_angle) {
+    const double theta = x.x[state_index(range_, 0)];
+    const double e_mag = x.x[state_index(range_, 2)];
+    const Complex z(params_.r_pu, std::max(1e-5, params_.x_pu));
+    const Complex yv = Complex(1.0, 0.0) / z;
+    const Eigen::Vector3cd v = bus_voltage(y, params_.bus_pos);
+    const Eigen::Vector3cd e = balanced_phasors(e_mag, theta);
+    const double pe = finite_value(average_complex_power(v, yv * (e - v)).real());
+    changed = set_if_changed(x.x, state_index(range_, 3), pe) || changed;
+  }
+  return changed;
+}
+
 void SynchronousMachine::computeDerivatives(double,
                                            const DynamicState& x,
                                            const NetworkState& y,
@@ -578,6 +604,63 @@ void GridFormingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
     x.x[state_index(range_, 6)] =
         clamp_voltage_window(vdc, params_.vdc_min_pu, params_.vdc_max_pu);
   }
+}
+
+bool GridFormingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (!params_.in_service || range_.empty() || params_.bus_pos < 0) return false;
+  const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+  const Complex v = positive_sequence_voltage(vabc);
+  const double vt = std::max(kMinVoltage, std::abs(v));
+  const double v_angle = std::arg(v);
+  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+  const Complex z(params_.virtual_r_pu, std::max(1e-5, params_.virtual_x_pu));
+  const Complex s_ref(p_ref, q_ref);
+  const Complex i_ref = std::conj(s_ref / v);
+  const Complex e = v + z * i_ref;
+  const double e_mag =
+      clamp_voltage_window(std::abs(e), params_.vmin_internal_pu, params_.vmax_internal_pu);
+  const double theta = std::arg(e);
+
+  const double pmax = params_.pmax_mw > 0.0
+                          ? params_.pmax_mw / safe_base(params_.base_mva)
+                          : std::numeric_limits<double>::infinity();
+  const double pmin = params_.pmin_mw < 0.0
+                          ? params_.pmin_mw / safe_base(params_.base_mva)
+                          : -std::numeric_limits<double>::infinity();
+  const double overload =
+      (std::isfinite(pmax) ? std::max(0.0, p_ref - pmax) : 0.0) -
+      (std::isfinite(pmin) ? std::max(0.0, pmin - p_ref) : 0.0);
+  const double e_droop = params_.v_ref_pu;
+  const double voltage_error = e_droop - vt;
+  double xi_v = x.x[state_index(range_, 4)];
+  if (std::abs(params_.voltage_ki) > 1e-9) {
+    xi_v = (e_mag - e_droop - params_.voltage_kp * voltage_error) / params_.voltage_ki;
+  }
+  double xi_ol = 0.0;
+  if (std::abs(params_.overload_ki) > 1e-9) {
+    xi_ol = -params_.overload_kp * overload / params_.overload_ki;
+  }
+
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), theta) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), e_mag) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 2), p_ref) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 3), q_ref) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 4), finite_value(xi_v)) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 5), finite_value(xi_ol)) || changed;
+  if (range_.size > 6) {
+    double vdc = params_.vdc_ref_pu;
+    if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
+      vdc = y.Vdc[params_.dc_bus_pos];
+    }
+    changed = set_if_changed(x.x,
+                             state_index(range_, 6),
+                             clamp_voltage_window(vdc,
+                                                  params_.vdc_min_pu,
+                                                  params_.vdc_max_pu)) || changed;
+  }
+  return changed;
 }
 
 void GridFormingInverter::computeDerivatives(double,
@@ -810,6 +893,53 @@ void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
   }
 }
 
+bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkState& y) {
+  if (!params_.in_service || range_.empty() || params_.bus_pos < 0) return false;
+  const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+  const Complex vpos = positive_sequence_voltage(vabc);
+  const double theta = std::arg(vpos);
+  const auto [vd, vq] = dq_from_phasor(vpos, theta);
+  const double xi_pll = std::abs(params_.pll_ki) > 1e-12
+                            ? -params_.pll_kp * vq / params_.pll_ki
+                            : 0.0;
+  const double freq_error_pu = params_.pll_kp * vq + params_.pll_ki * xi_pll;
+  double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+  double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
+  if (params_.frequency_watt_droop_pu > 0.0) {
+    p_ref -= params_.frequency_watt_droop_pu * freq_error_pu;
+  }
+  if (params_.volt_var_droop_pu > 0.0) {
+    q_ref += params_.volt_var_droop_pu * (params_.v_ref_pu - std::abs(vpos));
+  }
+  const double denom = std::max(vd * vd + vq * vq,
+                                params_.v_min_current_pu * params_.v_min_current_pu);
+  const double id_ref = (vd * p_ref + vq * q_ref) / denom;
+  const double iq_ref = (vq * p_ref - vd * q_ref) / denom;
+  const auto [id, iq] = limited_current(id_ref,
+                                        iq_ref,
+                                        params_.current_limit_pu,
+                                        params_.reactive_current_priority);
+  bool changed = false;
+  changed = set_if_changed(x.x, state_index(range_, 0), theta) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 1), finite_value(xi_pll)) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 2), id) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 3), iq) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 4), p_ref) || changed;
+  changed = set_if_changed(x.x, state_index(range_, 5), q_ref) || changed;
+  if (range_.size > 6) {
+    double vdc = params_.vdc_ref_pu;
+    if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
+      vdc = y.Vdc[params_.dc_bus_pos];
+    }
+    changed = set_if_changed(x.x,
+                             state_index(range_, 6),
+                             clamp_voltage_window(vdc,
+                                                  params_.vdc_min_pu,
+                                                  params_.vdc_max_pu)) || changed;
+  }
+  return changed;
+}
+
 void GridFollowingInverter::computeDerivatives(double,
                                                const DynamicState& x,
                                                const NetworkState& y,
@@ -999,6 +1129,13 @@ void DCDCConverterDynamic::initializeFromPowerFlow(const PowerFlowResult&,
   x.x[range_.offset] = params_.p_ref_mw / std::max(1.0, params_.base_mva);
 }
 
+bool DCDCConverterDynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  return set_if_changed(x.x,
+                        range_.offset,
+                        params_.p_ref_mw / std::max(1.0, params_.base_mva));
+}
+
 void DCDCConverterDynamic::computeDerivatives(double,
                                               const DynamicState& x,
                                               const NetworkState&,
@@ -1073,6 +1210,13 @@ void BatteryDynamic::initializeFromPowerFlow(const PowerFlowResult&,
   x.x[range_.offset + 1] = clamp01(params_.soc_init, params_.soc_min, params_.soc_max);
 }
 
+bool BatteryDynamic::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
+  if (!params_.in_service || range_.empty()) return false;
+  return set_if_changed(x.x,
+                        range_.offset + 0,
+                        params_.p_ref_mw / std::max(1.0, params_.base_mva));
+}
+
 void BatteryDynamic::computeDerivatives(double,
                                         const DynamicState& x,
                                         const NetworkState&,
@@ -1090,6 +1234,12 @@ void BatteryDynamic::computeDerivatives(double,
                            x.x[range_.offset + 1] / 3600.0;
   dxdt[range_.offset + 0] = (p_ref_pu - p_pu) / tau;
   dxdt[range_.offset + 1] = dsoc_power / 3600.0 + dsoc_self;
+}
+
+void BatteryDynamic::maskSlowStateResidual(Eigen::Ref<Eigen::VectorXd> dxdt) const {
+  if (!range_.empty() && range_.offset + 1 < dxdt.size()) {
+    dxdt[range_.offset + 1] = 0.0;
+  }
 }
 
 void BatteryDynamic::stamp(double,

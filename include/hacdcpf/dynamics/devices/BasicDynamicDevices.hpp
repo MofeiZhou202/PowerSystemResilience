@@ -479,6 +479,7 @@ class BatteryDynamic : public DynamicDevice {
                           const DynamicState& x,
                           const NetworkState& y,
                           Eigen::Ref<Eigen::VectorXd> dxdt) const override;
+  void maskSlowStateResidual(Eigen::Ref<Eigen::VectorXd> dxdt) const override;
   void stamp(double t,
              const DynamicState& x,
              const NetworkState& y,

@@ -37,6 +37,10 @@ class DynamicDevice {
                                   const NetworkState& y,
                                   Eigen::Ref<Eigen::VectorXd> dxdt) const = 0;
 
+  virtual void maskSlowStateResidual(Eigen::Ref<Eigen::VectorXd> dxdt) const {
+    (void)dxdt;
+  }
+
   virtual void stamp(double t,
                      const DynamicState& x,
                      const NetworkState& y,

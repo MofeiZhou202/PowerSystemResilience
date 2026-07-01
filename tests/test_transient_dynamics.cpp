@@ -444,6 +444,8 @@ TEST_CASE("Transient initialization uses solved power flow and exposes canvas me
   CHECK(result.initialization.power_flow_converged);
   CHECK_FALSE(result.initialization.fallback_voltage_setpoints);
   CHECK(result.initialization.max_ac_voltage_pu > 0.9);
+  CHECK(result.initialization.dynamic_trim_iterations > 0);
+  CHECK(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
   REQUIRE(result.final_snapshot() != nullptr);
   const auto& outputs = result.final_snapshot()->device_outputs;
   const auto vsc = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
@@ -454,6 +456,34 @@ TEST_CASE("Transient initialization uses solved power flow and exposes canvas me
   CHECK(vsc->canvas_index == 1);
   CHECK(vsc->component_domain == "AC");
   CHECK(vsc->source_type == "vsc_grid_following");
+}
+
+TEST_CASE("Transient initialization trims GFL fast states to avoid artificial PLL settling",
+          "[dynamics][initialization][trim]") {
+  const auto sys = make_hybrid_dc_case();
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 0.05;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(result.success);
+  REQUIRE(result.snapshots.size() >= 2);
+  CHECK(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
+
+  auto pll_freq = [](const DynamicSnapshot& snapshot) {
+    const auto it = std::find_if(snapshot.device_outputs.begin(),
+                                 snapshot.device_outputs.end(),
+                                 [](const DynamicDeviceOutput& out) {
+                                   return out.type == "VSCGridFollowing";
+                                 });
+    REQUIRE(it != snapshot.device_outputs.end());
+    REQUIRE(it->values.count("pll_frequency_hz") == 1);
+    return it->values.at("pll_frequency_hz");
+  };
+  CHECK(pll_freq(result.snapshots.front()) == Catch::Approx(pll_freq(result.snapshots.back())).margin(1e-4));
 }
 
 TEST_CASE("Updated GFL inverter can use dynamic DC-link voltage state",

@@ -1825,13 +1825,16 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"use_adaptive_step", opt.use_adaptive_step},
               {"record_every_step", opt.record_every_step},
               {"run_power_flow_initialization", opt.run_power_flow_initialization},
+              {"trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions},
               {"project_to_canonical", opt.project_to_canonical},
               {"synthesize_three_phase_if_absent", opt.synthesize_three_phase_if_absent},
               {"dynamic_dc_link", opt.dynamic_dc_link},
               {"source_stiffness_pu", opt.source_stiffness_pu},
               {"inverter_virtual_reactance_pu", opt.inverter_virtual_reactance_pu},
               {"dc_link_capacitance_s", opt.dc_link_capacitance_s},
-              {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu}};
+              {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu},
+              {"dynamic_trim_tol", opt.dynamic_trim_tol},
+              {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters}};
 }
 
 json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
@@ -1852,6 +1855,10 @@ json dynamic_results_to_json(const hacdcpf::dynamics::DynamicResults& result,
            {"fallback_voltage_setpoints", result.initialization.fallback_voltage_setpoints},
            {"iterations", result.initialization.iterations},
            {"residual", result.initialization.residual},
+           {"dynamic_trim_converged", result.initialization.dynamic_trim_converged},
+           {"dynamic_trim_iterations", result.initialization.dynamic_trim_iterations},
+           {"dynamic_initial_dxdt_inf_norm", result.initialization.dynamic_initial_dxdt_inf_norm},
+           {"dynamic_fast_dxdt_inf_norm", result.initialization.dynamic_fast_dxdt_inf_norm},
            {"min_ac_voltage_pu", result.initialization.min_ac_voltage_pu},
            {"max_ac_voltage_pu", result.initialization.max_ac_voltage_pu},
            {"min_dc_voltage_pu", result.initialization.min_dc_voltage_pu},
@@ -10442,6 +10449,11 @@ int main(int argc, char** argv) {
       opt.record_every_step = j.value("record_every_step", true);
       opt.run_power_flow_initialization =
           j.value("run_power_flow_initialization", opt.run_power_flow_initialization);
+      opt.trim_dynamic_initial_conditions =
+          j.value("trim_dynamic_initial_conditions", opt.trim_dynamic_initial_conditions);
+      opt.dynamic_trim_tol = j.value("dynamic_trim_tol", opt.dynamic_trim_tol);
+      opt.max_dynamic_trim_iters =
+          j.value("max_dynamic_trim_iters", opt.max_dynamic_trim_iters);
       if (j.contains("power_flow_options") && j["power_flow_options"].is_object()) {
         const auto& pfj = j["power_flow_options"];
         opt.power_flow_options.max_iter =

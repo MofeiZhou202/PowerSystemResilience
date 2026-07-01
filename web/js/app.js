@@ -2660,6 +2660,7 @@ const App = (() => {
       dc_link_capacitance_s: Math.max(0.001, numberOr(document.getElementById('trDcLinkC')?.value, 0.10)),
       dc_link_coupling_conductance_pu: Math.max(0.0, numberOr(document.getElementById('trDcLinkG')?.value, 20.0)),
       run_power_flow_initialization: document.getElementById('trPowerFlowInit')?.checked !== false,
+      trim_dynamic_initial_conditions: true,
       power_flow_options: {
         max_iter: Math.max(5, parseInt(document.getElementById('trPfMaxIter')?.value, 10) || 80),
         tol: Math.max(1e-12, numberOr(document.getElementById('trPfTol')?.value, 1e-8)),
@@ -2842,6 +2843,8 @@ const App = (() => {
     html += `<div><span>事件前初始点</span><strong>${escapeHtml(initStatus)}</strong></div>`;
     html += `<div><span>PF迭代</span><strong>${escapeHtml(String(init.iterations ?? 0))}</strong></div>`;
     html += `<div><span>PF残差</span><strong>${Number.isFinite(Number(init.residual)) ? Number(init.residual).toExponential(2) : '—'}</strong></div>`;
+    html += `<div><span>动态平衡</span><strong>${init.dynamic_trim_converged ? 'trim收敛' : 'trim未收敛'} / ${escapeHtml(String(init.dynamic_trim_iterations ?? 0))}次</strong></div>`;
+    html += `<div><span>快速状态残差</span><strong>${Number.isFinite(Number(init.dynamic_fast_dxdt_inf_norm)) ? Number(init.dynamic_fast_dxdt_inf_norm).toExponential(2) : '—'}</strong></div>`;
     html += `<div><span>AC电压范围</span><strong>${nf(init.min_ac_voltage_pu)} - ${nf(init.max_ac_voltage_pu)} pu</strong></div>`;
     html += `<div><span>DC电压范围</span><strong>${nf(init.min_dc_voltage_pu)} - ${nf(init.max_dc_voltage_pu)} pu</strong></div>`;
     html += initWarnings;

@@ -160,10 +160,15 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
 
   if (!options.trim_dynamic_initial_conditions) {
     std::string error;
-    const double norm = derivativeInfinityNorm(options.t_start_s, error);
-    if (error.empty()) {
-      initialization.dynamic_initial_dxdt_inf_norm = norm;
-      initialization.dynamic_fast_dxdt_inf_norm = norm;
+    Eigen::VectorXd dxdt;
+    if (evaluateDerivatives(options.t_start_s, x.x, dxdt, error)) {
+      initialization.dynamic_initial_dxdt_inf_norm =
+          dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+      for (const auto& device : devices) {
+        device->maskSlowStateResidual(dxdt);
+      }
+      initialization.dynamic_fast_dxdt_inf_norm =
+          dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
     } else {
       initialization.warnings.push_back(error);
     }
@@ -190,6 +195,11 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
       break;
     }
     x.dxdt = dxdt;
+    initialization.dynamic_initial_dxdt_inf_norm =
+        dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
+    for (const auto& device : devices) {
+      device->maskSlowStateResidual(dxdt);
+    }
     fast_norm = dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
     initialization.dynamic_trim_iterations = iter + 1;
     if (fast_norm <= options.dynamic_trim_tol || !changed) {
@@ -202,7 +212,6 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     fast_norm = derivativeInfinityNorm(options.t_start_s, error);
   }
   initialization.dynamic_fast_dxdt_inf_norm = std::isfinite(fast_norm) ? fast_norm : 0.0;
-  initialization.dynamic_initial_dxdt_inf_norm = initialization.dynamic_fast_dxdt_inf_norm;
   initialization.dynamic_trim_converged = trimmed ||
       initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol;
   if (!initialization.dynamic_trim_converged) {
