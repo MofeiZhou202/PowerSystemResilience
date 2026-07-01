@@ -472,7 +472,7 @@
       <input id="tspfCyclicSoc" type="checkbox"/>
       <span>日内周期SOC</span>
     </label>
-    <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。SCIP 可完全并行；其他求解器安全串行">
+    <label class="sub-label sub-checkbox" title="按日并行：当仿真时长跨多日时，将时段按日(每日周期SOC)拆分并多线程并行求解后拼接。Auto 会优先使用适合并行日分解的 SCIP，缺失时回退到 Native B&C；显式外部求解器可能安全串行">
       <input id="tspfParallel" type="checkbox"/>
       <span>按日并行</span>
     </label>
@@ -498,7 +498,7 @@
         <option value="dopf">动态 OPF</option>
       </select>
     </label>
-    <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。SCIP 求解器可完全并行；其他求解器为安全串行">
+    <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。Auto 会优先使用适合并行日分解的 SCIP，缺失时回退到 Native B&C；显式外部求解器可能安全串行">
       <input id="annParallel" type="checkbox" checked/>
       <span>按日并行</span>
     </label>
@@ -619,6 +619,13 @@
       </label>
       <label class="sub-label" title="蒙特卡洛最大抽样次数 (NSQ) / 年数×10 (SEQ)">抽样次数
         <input id="relMaxIter" type="number" value="2000" min="100" step="500"/>
+      </label>
+      <label class="sub-label sub-checkbox" title="并行评估独立样本、年份或故障枚举项">
+        <input id="relParallel" type="checkbox" checked/>
+        <span>并行</span>
+      </label>
+      <label class="sub-label" title="可靠性分析线程数；0 表示自动使用硬件并发数">线程
+        <input id="relParallelThreads" type="number" value="0" min="0" max="256" step="1"/>
       </label>
       <button id="btnImportGeneratedReliabilityScenario" class="toolbar-btn" title="导入场景生成模块导出的可靠性场景 JSON">导入生成<br>场景</button>
     </div>

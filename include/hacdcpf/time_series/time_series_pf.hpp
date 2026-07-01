@@ -226,11 +226,13 @@ struct TimeSeriesPFOptions {
   // with cyclic terminal SOC) that are solved concurrently and stitched back
   // together — the same speedup the annual simulation uses, now available to a
   // plain multi-day run.  A single-day (or sub-day) horizon stays a coupled
-  // solve.  Concurrency is dispatched lock-free only when the MILP backend is
-  // instance-isolated (SCIP) or no MILP is used (skip_uc); otherwise it falls
-  // back to a sequential day loop.  Default off (the coupled solve).
+  // solve.  Concurrency is dispatched lock-free only when no MILP is used
+  // (skip_uc) or with the in-process Native B&C backend capped to one worker
+  // per day; global-scheduler external MILP backends fall back to a sequential
+  // day loop.  Default off (the coupled solve).
   bool parallel_daily{false};
   int parallel_threads{0};            // 0 = hardware_concurrency()
+  int uc_solver_threads{0};            // 0 = backend default; Native B&C cap
   bool keep_system_snapshots{false};
   bool verbose{false};
 };
@@ -260,6 +262,10 @@ struct TimeSeriesPFResult {
 
   /// Wall-clock time for UC MILP solve only (seconds).
   double uc_solve_sec{0.0};
+
+  bool parallel_daily_effective{false};
+  int parallel_workers{1};
+  std::string parallel_mode;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -283,5 +289,19 @@ HybridPowerSystem build_time_series_system_snapshot(
 TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys,
                                          const TimeSeriesData& ts_data,
                                          const TimeSeriesPFOptions& opts = {});
+
+/// Effective UC backend for day-level parallel decomposition.
+///
+/// Auto is resolved to SCIP when a MILP-capable SCIP adapter is available,
+/// otherwise to Native B&C so concurrent days avoid HiGHS' process-global
+/// scheduler. Native B&C is capped by the decomposition caller via
+/// TimeSeriesPFOptions::uc_solver_threads.
+UCSolverChoice resolve_parallel_daily_uc_solver(UCSolverChoice requested);
+
+/// Whether the resolved UC backend can be used for concurrent daily solves.
+bool uc_solver_allows_parallel_daily(UCSolverChoice solver);
+
+/// Resolve requested worker count; 0 means hardware_concurrency().
+int resolve_parallel_worker_count(int requested_threads, int work_items);
 
 }  // namespace hacdcpf

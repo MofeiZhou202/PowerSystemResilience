@@ -2533,6 +2533,19 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
 // ═══════════════════════════════════════════════════════════════════════
 // Select and create MILP solver adapter
 // ═══════════════════════════════════════════════════════════════════════
+namespace {
+thread_local int g_active_uc_solver_threads = 0;
+
+struct ScopedUCSolverThreadOverride {
+  explicit ScopedUCSolverThreadOverride(int threads)
+      : previous(g_active_uc_solver_threads) {
+    g_active_uc_solver_threads = std::max(0, threads);
+  }
+  ~ScopedUCSolverThreadOverride() { g_active_uc_solver_threads = previous; }
+  int previous;
+};
+}  // namespace
+
 engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
   using namespace engine;
 
@@ -2549,7 +2562,14 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     opt.max_lp_iter = 20000;  // large enough for IEEE118+ root LP
     opt.verbose = false;
     const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    if (hw >= 4) opt.num_threads = std::min(hw, 8);
+    const int requested_threads = g_active_uc_solver_threads > 0
+                                      ? g_active_uc_solver_threads
+                                      : 0;
+    if (requested_threads > 0) {
+      opt.num_threads = requested_threads;
+    } else if (hw >= 4) {
+      opt.num_threads = std::min(hw, 8);
+    }
     return std::make_shared<NativeBranchAndCutAdapter>(opt);
   };
 
@@ -2564,7 +2584,7 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     // libscip when compiled in, else the SCIP executable).  Fall back to the
     // tuned native B&C when SCIP is unavailable so the choice never dead-ends.
     auto scip = std::make_shared<ScipAdapter>();
-    if (scip->available()) return scip;
+    if (scip->available() && scip->supports(ProblemClass::MILP)) return scip;
     return make_tuned_native();
   }
   if (choice == UCSolverChoice::Gurobi) {
@@ -2816,6 +2836,36 @@ Eigen::VectorXd priority_list_uc_heuristic(
 
 }  // namespace
 
+UCSolverChoice resolve_parallel_daily_uc_solver(UCSolverChoice requested) {
+  if (requested == UCSolverChoice::Auto) {
+    engine::ScipAdapter scip;
+    if (scip.available() && scip.supports(engine::ProblemClass::MILP)) {
+      return UCSolverChoice::SCIP;
+    }
+    return UCSolverChoice::Native;
+  }
+  return requested;
+}
+
+bool uc_solver_allows_parallel_daily(UCSolverChoice solver) {
+  solver = resolve_parallel_daily_uc_solver(solver);
+  if (solver == UCSolverChoice::Native) return true;
+  if (solver == UCSolverChoice::SCIP) {
+    engine::ScipAdapter scip;
+    return scip.available() && scip.supports(engine::ProblemClass::MILP);
+  }
+  return false;
+}
+
+int resolve_parallel_worker_count(int requested_threads, int work_items) {
+  if (work_items <= 0) return 1;
+  int nthreads = requested_threads > 0
+                     ? requested_threads
+                     : static_cast<int>(std::thread::hardware_concurrency());
+  if (nthreads <= 0) nthreads = 1;
+  return std::max(1, std::min(nthreads, work_items));
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Phase II: Solve Unit Commitment
 // ═══════════════════════════════════════════════════════════════════════
@@ -3029,6 +3079,7 @@ HybridPowerSystem build_time_series_system_snapshot(
 UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                                  const TimeSeriesData& ts_data,
                                  const TimeSeriesPFOptions& opts) {
+  ScopedUCSolverThreadOverride thread_override(opts.uc_solver_threads);
   if (ts_data.num_steps <= 0) {
     throw std::invalid_argument("TimeSeriesData must have at least one time step");
   }
@@ -3231,13 +3282,25 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       TimeSeriesPFOptions day_opts = opts;
       day_opts.parallel_daily = false;              // each day is a plain solve
       day_opts.enforce_terminal_soc_cyclic = true;  // independence across days
+      day_opts.uc_solver = resolve_parallel_daily_uc_solver(opts.uc_solver);
+      day_opts.uc_solver_threads =
+          day_opts.uc_solver == UCSolverChoice::Native ? 1 : 0;
       // Force the thread-safe native parity IPM for any per-step AC-OPF.
       day_opts.opf_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
-      // Concurrent MILP is safe only with instance-isolated SCIP (HiGHS shares a
-      // global scheduler; native B&C spawns its own threads).  No MILP when skip_uc.
+      // Concurrent MILP is safe only when each daily solve owns its worker
+      // state. HiGHS/Gurobi share process-global scheduling state, so explicit
+      // selections are guarded to serial day execution.
       const bool uses_milp = !opts.skip_uc;
-      const bool parallel_safe =
-          !uses_milp || (opts.uc_solver == UCSolverChoice::SCIP);
+      const bool parallel_safe = !uses_milp ||
+          uc_solver_allows_parallel_daily(day_opts.uc_solver);
+      const int workers = parallel_safe
+          ? resolve_parallel_worker_count(opts.parallel_threads, num_days)
+          : 1;
+      const std::string parallel_backend =
+          !uses_milp ? "no-milp"
+          : (day_opts.uc_solver == UCSolverChoice::SCIP) ? "scip"
+          : (day_opts.uc_solver == UCSolverChoice::Native) ? "native-bc"
+          : "guarded";
 
       std::vector<TimeSeriesPFResult> day_results(static_cast<size_t>(num_days));
       auto solve_day = [&](int d) {
@@ -3248,11 +3311,7 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         day_results[static_cast<size_t>(d)] = solve_time_series_pf(sys_in, sub, day_opts);
       };
       if (parallel_safe) {
-        int nthreads = opts.parallel_threads > 0
-                           ? opts.parallel_threads
-                           : static_cast<int>(std::thread::hardware_concurrency());
-        if (nthreads <= 0) nthreads = 1;
-        util::ThreadPool pool(std::min(nthreads, num_days));
+        util::ThreadPool pool(workers);
         std::vector<std::future<void>> futs;
         futs.reserve(static_cast<size_t>(num_days));
         for (int d = 0; d < num_days; ++d)
@@ -3261,12 +3320,20 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       } else {
         for (int d = 0; d < num_days; ++d) solve_day(d);
       }
-      return concat_ts_results(day_results, T);
+      auto out = concat_ts_results(day_results, T);
+      out.parallel_daily_effective = parallel_safe && workers > 1;
+      out.parallel_workers = workers;
+      out.parallel_mode = parallel_safe
+          ? "parallel-daily/" + parallel_backend
+          : "parallel-daily/serial-guarded";
+      return out;
     }
   }
 
   TimeSeriesPFResult result;
   result.num_steps = T;
+  result.parallel_workers = 1;
+  result.parallel_mode = opts.parallel_daily ? "single-day" : "coupled";
 
   if (T <= 0) {
     return result;

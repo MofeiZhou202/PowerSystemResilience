@@ -653,7 +653,11 @@ static AnnualProductionSimResult solve_parallel_daily(
       std::max(1, static_cast<int>(std::round(
                       static_cast<double>(opts.daily_window_hours) / dt)));
   const int num_days = (T_yr + steps_per_day - 1) / steps_per_day;
-  const TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
+  TimeSeriesPFOptions day_opts = make_daily_pf_options(opts);
+  day_opts.uc_solver =
+      hacdcpf::resolve_parallel_daily_uc_solver(day_opts.uc_solver);
+  day_opts.uc_solver_threads =
+      day_opts.uc_solver == UCSolverChoice::Native ? 1 : 0;
 
   // Dynamic-SCED commitment: optionally solve a representative (peak-load) day
   // as SCUC up front and reuse its commitment across every SCED day, instead of
@@ -688,6 +692,8 @@ static AnnualProductionSimResult solve_parallel_daily(
     scuc_opts.fix_commitment = false;
     scuc_opts.fixed_commitment_schedule = nullptr;
     scuc_opts.enforce_terminal_soc_cyclic = opts.enforce_daily_cyclic_soc;
+    scuc_opts.uc_solver =
+        hacdcpf::resolve_parallel_daily_uc_solver(scuc_opts.uc_solver);
     UCSchedule repr = solve_unit_commitment(sys, repr_ts, scuc_opts);
     if (repr.feasible && !repr.gen_commit.empty()) {
       repr_commit = repr.gen_commit;
@@ -697,15 +703,22 @@ static AnnualProductionSimResult solve_parallel_daily(
     // Otherwise eff_day_opts keeps fix_commitment=true (all-on fallback).
   }
 
-  // Concurrent solves are safe only when every solver used is instance-isolated:
-  //   * MILP: SCIP creates an independent environment per solve; HiGHS shares a
-  //     global scheduler and the native B&C is itself multi-threaded, so only
-  //     SCIP is dispatched lock-free.  DynamicOPF uses no MILP at all.
+  // Concurrent solves are safe only when every solver used owns its worker
+  // state. HiGHS/Gurobi share process-global scheduling state, so explicit
+  // selections are guarded to serial day execution. DynamicOPF uses no MILP.
   //   * OPF: forced to the native parity IPM above (no Ipopt/MUMPS global state).
   //   * PF: the Newton kernel keeps all state per-call.
   const bool uses_milp = (opts.daily_mode != DailySimMode::DynamicOPF);
-  const bool parallel_safe =
-      !uses_milp || (opts.ts_pf_options.uc_solver == UCSolverChoice::SCIP);
+  const bool parallel_safe = !uses_milp ||
+      hacdcpf::uc_solver_allows_parallel_daily(day_opts.uc_solver);
+  const int workers = parallel_safe
+      ? hacdcpf::resolve_parallel_worker_count(opts.parallel_threads, num_days)
+      : 1;
+  const std::string parallel_backend =
+      !uses_milp ? "no-milp"
+      : (day_opts.uc_solver == UCSolverChoice::SCIP) ? "scip"
+      : (day_opts.uc_solver == UCSolverChoice::Native) ? "native-bc"
+      : "guarded";
 
   // Per-day outputs are index-addressed so worker threads never write the same
   // slot (lock-free); they are stitched together after the parallel region.
@@ -753,11 +766,7 @@ static AnnualProductionSimResult solve_parallel_daily(
   };
 
   if (parallel_safe && num_days > 1) {
-    int nthreads = opts.parallel_threads > 0
-                       ? opts.parallel_threads
-                       : static_cast<int>(std::thread::hardware_concurrency());
-    if (nthreads <= 0) nthreads = 1;
-    util::ThreadPool pool(std::min(nthreads, num_days));
+    util::ThreadPool pool(workers);
     std::vector<std::future<void>> futs;
     futs.reserve(static_cast<size_t>(num_days));
     for (int d = 0; d < num_days; ++d) {
@@ -806,6 +815,11 @@ static AnnualProductionSimResult solve_parallel_daily(
                              : "dyn-OPF";
   result.solver_name = std::string("parallel-daily/") + mode_tag +
                        (parallel_safe ? "/parallel" : "/serial");
+  result.parallel_daily_effective = parallel_safe && workers > 1 && num_days > 1;
+  result.parallel_workers = workers;
+  result.parallel_mode = parallel_safe
+      ? "parallel-daily/" + parallel_backend
+      : "parallel-daily/serial-guarded";
   return result;
 }
 
@@ -823,6 +837,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
   const double dt = ts_data.step_duration_hr;
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
+  result.parallel_workers = 1;
+  result.parallel_mode = opts.enable_parallel_daily ? "parallel-daily" : "hierarchical";
 
   if (T_yr <= 0) {
     return result;

@@ -337,6 +337,9 @@ struct FailureModeFMEAOptions {
   double min_pair_unavailability{1e-10};
   /// Hard cap on the number of pair evaluations (safety bound for large cases).
   int max_pairs_evaluated{50000};
+  /// Parallel evaluation of independent modes / co-failure pairs.
+  bool enable_parallel{true};
+  int parallel_threads{0};  ///< 0 = hardware_concurrency()
 };
 
 /// One enumerated second-order (co-failure) state: two simultaneously-down
@@ -370,6 +373,9 @@ struct FailureModeFMEAResult {
   FailureModeCoverage coverage;
   ReliabilityDataQuality data_quality;
   std::vector<std::string> warnings;
+  bool parallel_effective{false};
+  int parallel_workers{1};
+  std::string parallel_mode{"serial"};
 };
 
 /// Run a deterministic failure-mode enumeration: build the catalog, map every

@@ -11,7 +11,11 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
+
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -1203,6 +1207,15 @@ void forced_load_point(const HybridPowerSystem& sys, const ConsequenceMutation& 
     bus_id = al.bus; is_dc = false;
   }
 }
+
+int resolve_failure_mode_worker_count(int requested_threads, int work_items) {
+  if (work_items <= 0) return 1;
+  int nthreads = requested_threads > 0
+                     ? requested_threads
+                     : static_cast<int>(std::thread::hardware_concurrency());
+  if (nthreads <= 0) nthreads = 1;
+  return std::max(1, std::min(nthreads, work_items));
+}
 }  // namespace
 
 FailureModeFMEAResult run_failure_mode_fmea(
@@ -1294,7 +1307,18 @@ FailureModeFMEAResult run_failure_mode_fmea(
   };
   std::vector<SupportedMode> supported_modes;
 
-  for (auto& entry : catalog) {
+  struct SingleModeWorkResult {
+    FailureModeContingency contingency;
+    std::vector<double> nodal_eens;
+    std::vector<double> nodal_cif;
+    std::vector<double> nodal_cid;
+    SupportedMode supported_mode;
+    bool has_supported_mode{false};
+    bool supported_by_selected_model{true};
+  };
+
+  auto evaluate_single_mode = [&](const FailureModeCatalogEntry& entry) {
+    SingleModeWorkResult work;
     FailureModeContingency c;
     c.ref = entry.mode.ref;
     c.data_source = entry.mode.params.data_source;
@@ -1309,22 +1333,21 @@ FailureModeFMEAResult run_failure_mode_fmea(
       c.supported = false;
       c.unsupported_reason = entry.disabled_reason.empty()
                                  ? "mode disabled" : entry.disabled_reason;
-      result.contingencies.push_back(std::move(c));
-      continue;
+      work.contingency = std::move(c);
+      return work;
     }
 
     // Map the mode to a consequence patch under the engine capabilities.
     ConsequencePatch patch =
         build_consequence_patch(sys, entry.mode, caps);
-    entry.supported_by_selected_consequence_model =
-        patch.representable_by_selected_model;
+    work.supported_by_selected_model = patch.representable_by_selected_model;
     c.supported = patch.representable_by_selected_model;
     c.unsupported_reason = patch.unsupported_reason;
 
     if (!patch.representable_by_selected_model) {
       // Reported but contributes no steady-state shed.
-      result.contingencies.push_back(std::move(c));
-      continue;
+      work.contingency = std::move(c);
+      return work;
     }
 
     // Apply the patch to a copy, evaluate the failed network state, and fold in
@@ -1338,31 +1361,78 @@ FailureModeFMEAResult run_failure_mode_fmea(
     c.eens_contribution = c.frequency_per_year * dur * total_shed;
     c.lole_contribution = c.causes_loss ? c.frequency_per_year * dur : 0.0;
 
-    result.eens_mwh_yr += c.eens_contribution;
-    result.lole_hr_yr += c.lole_contribution;
-    if (c.causes_loss) result.lolf_occ_yr += c.frequency_per_year;
-
+    work.nodal_eens.assign(nb, 0.0);
+    work.nodal_cif.assign(nb, 0.0);
+    work.nodal_cid.assign(nb, 0.0);
     for (size_t b = 0; b < nb && b < nodal_shed.size(); ++b) {
       const double sbed = nodal_shed[b];
-      result.nodal_eens_mwh_yr[b] += c.frequency_per_year * dur * sbed;
+      work.nodal_eens[b] += c.frequency_per_year * dur * sbed;
       if (sbed > eps) {
-        nodal_cif[b] += c.frequency_per_year;
-        nodal_cid[b] += c.frequency_per_year * dur;
+        work.nodal_cif[b] += c.frequency_per_year;
+        work.nodal_cid[b] += c.frequency_per_year * dur;
       }
     }
 
     // Cache this supported mode for the optional co-failure pass.
     if (options.max_order >= 2 && c.frequency_per_year > 0.0 && dur > 0.0) {
-      SupportedMode sm;
-      sm.patch = patch;
-      sm.component_id = entry.mode.ref.component.stable_id;
-      sm.frequency = c.frequency_per_year;
-      sm.duration = dur;
-      sm.unavailability = std::min(1.0, c.frequency_per_year * dur / 8760.0);
-      supported_modes.push_back(std::move(sm));
+      work.supported_mode.patch = patch;
+      work.supported_mode.component_id = entry.mode.ref.component.stable_id;
+      work.supported_mode.frequency = c.frequency_per_year;
+      work.supported_mode.duration = dur;
+      work.supported_mode.unavailability =
+          std::min(1.0, c.frequency_per_year * dur / 8760.0);
+      work.has_supported_mode = true;
     }
 
-    result.contingencies.push_back(std::move(c));
+    work.contingency = std::move(c);
+    return work;
+  };
+
+  std::vector<SingleModeWorkResult> single_results(catalog.size());
+  const int single_workers = options.enable_parallel
+      ? resolve_failure_mode_worker_count(options.parallel_threads,
+                                          static_cast<int>(catalog.size()))
+      : 1;
+  result.parallel_workers = single_workers;
+  result.parallel_effective = options.enable_parallel && single_workers > 1 &&
+                              catalog.size() > 1U;
+  result.parallel_mode = result.parallel_effective
+      ? "parallel-failure-mode-fmea"
+      : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+
+  if (result.parallel_effective) {
+    util::ThreadPool pool(single_workers);
+    pool.parallel_for(catalog.size(),
+                      [&](size_t begin, size_t end) {
+                        for (size_t i = begin; i < end; ++i) {
+                          single_results[i] = evaluate_single_mode(catalog[i]);
+                        }
+                      },
+                      single_workers);
+  } else {
+    for (size_t i = 0; i < catalog.size(); ++i) {
+      single_results[i] = evaluate_single_mode(catalog[i]);
+    }
+  }
+
+  for (size_t i = 0; i < single_results.size(); ++i) {
+    auto& work = single_results[i];
+    catalog[i].supported_by_selected_consequence_model =
+        work.supported_by_selected_model;
+    catalog[i].unsupported_reason = work.contingency.unsupported_reason;
+
+    result.eens_mwh_yr += work.contingency.eens_contribution;
+    result.lole_hr_yr += work.contingency.lole_contribution;
+    if (work.contingency.causes_loss) {
+      result.lolf_occ_yr += work.contingency.frequency_per_year;
+    }
+    for (size_t b = 0; b < nb; ++b) {
+      if (b < work.nodal_eens.size()) result.nodal_eens_mwh_yr[b] += work.nodal_eens[b];
+      if (b < work.nodal_cif.size()) nodal_cif[b] += work.nodal_cif[b];
+      if (b < work.nodal_cid.size()) nodal_cid[b] += work.nodal_cid[b];
+    }
+    if (work.has_supported_mode) supported_modes.push_back(std::move(work.supported_mode));
+    result.contingencies.push_back(std::move(work.contingency));
   }
 
   // ── Optional second-order (co-failure) enumeration ──────────────────────
@@ -1374,10 +1444,28 @@ FailureModeFMEAResult run_failure_mode_fmea(
   // are distinct states from the single-mode terms (which approximate "i down,
   // others up"), so the sum is the standard first+second-order state expansion.
   if (options.max_order >= 2 && supported_modes.size() > 1) {
+    struct PairWork {
+      size_t a{0};
+      size_t b{0};
+      double joint_unavailability{0.0};
+      ConsequencePatch composed;
+    };
+    struct PairWorkResult {
+      bool evaluated{false};
+      bool causes_loss{false};
+      FailureModeCoContingency co;
+      std::vector<double> nodal_eens;
+      std::vector<double> nodal_cif;
+      std::vector<double> nodal_cid;
+    };
+
+    const int max_pairs = std::max(0, options.max_pairs_evaluated);
+    std::vector<PairWork> pair_work;
+    pair_work.reserve(static_cast<size_t>(std::min<int>(max_pairs, 4096)));
     for (size_t i = 0; i < supported_modes.size() &&
-                       result.n_pairs_evaluated < options.max_pairs_evaluated; ++i) {
+                       static_cast<int>(pair_work.size()) < max_pairs; ++i) {
       for (size_t k = i + 1; k < supported_modes.size(); ++k) {
-        if (result.n_pairs_evaluated >= options.max_pairs_evaluated) break;
+        if (static_cast<int>(pair_work.size()) >= max_pairs) break;
         const auto& a = supported_modes[i];
         const auto& b = supported_modes[k];
         // Modes of the same component are mutually-exclusive alternatives, not
@@ -1393,43 +1481,89 @@ FailureModeFMEAResult run_failure_mode_fmea(
           if (w.find("hard conflict") != std::string::npos) { conflict = true; break; }
         if (conflict) continue;
 
-        std::vector<double> nodal_shed;
-        const double shed_ij = evaluate_patch(composed, nodal_shed);
-        result.n_pairs_evaluated++;
-        if (shed_ij <= eps) continue;
-
-        const double eens_ij = u_ij * 8760.0 * shed_ij;
-        const double lole_ij = u_ij * 8760.0;
-        const double freq_ij =
-            a.frequency * b.frequency * (a.duration + b.duration) / 8760.0;
-        const double dur_ij = (a.duration + b.duration) > 0.0
-                                  ? a.duration * b.duration / (a.duration + b.duration)
-                                  : 0.0;
-
-        result.eens_mwh_yr += eens_ij;
-        result.lole_hr_yr += lole_ij;
-        result.lolf_occ_yr += freq_ij;
-        for (size_t bb = 0; bb < nb && bb < nodal_shed.size(); ++bb) {
-          const double sbed = nodal_shed[bb];
-          result.nodal_eens_mwh_yr[bb] += u_ij * 8760.0 * sbed;
-          if (sbed > eps) {
-            nodal_cif[bb] += freq_ij;
-            nodal_cid[bb] += freq_ij * dur_ij;
-          }
-        }
-
-        FailureModeCoContingency co;
-        co.mode_a = a.patch.mode;
-        co.mode_b = b.patch.mode;
-        co.joint_frequency_per_year = freq_ij;
-        co.joint_unavailability = u_ij;
-        co.duration_hr = dur_ij;
-        co.total_shed_mw = shed_ij;
-        co.eens_contribution = eens_ij;
-        co.lole_contribution = lole_ij;
-        co.causes_loss = true;
-        result.co_contingencies.push_back(std::move(co));
+        pair_work.push_back({i, k, u_ij, std::move(composed)});
       }
+    }
+
+    result.n_pairs_evaluated = static_cast<int>(pair_work.size());
+
+    auto evaluate_pair = [&](const PairWork& pw) {
+      PairWorkResult work;
+      work.evaluated = true;
+      const auto& a = supported_modes[pw.a];
+      const auto& b = supported_modes[pw.b];
+
+      std::vector<double> nodal_shed;
+      const double shed_ij = evaluate_patch(pw.composed, nodal_shed);
+      if (shed_ij <= eps) return work;
+
+      const double eens_ij = pw.joint_unavailability * 8760.0 * shed_ij;
+      const double lole_ij = pw.joint_unavailability * 8760.0;
+      const double freq_ij =
+          a.frequency * b.frequency * (a.duration + b.duration) / 8760.0;
+      const double dur_ij = (a.duration + b.duration) > 0.0
+                                ? a.duration * b.duration / (a.duration + b.duration)
+                                : 0.0;
+
+      work.nodal_eens.assign(nb, 0.0);
+      work.nodal_cif.assign(nb, 0.0);
+      work.nodal_cid.assign(nb, 0.0);
+      for (size_t bb = 0; bb < nb && bb < nodal_shed.size(); ++bb) {
+        const double sbed = nodal_shed[bb];
+        work.nodal_eens[bb] += pw.joint_unavailability * 8760.0 * sbed;
+        if (sbed > eps) {
+          work.nodal_cif[bb] += freq_ij;
+          work.nodal_cid[bb] += freq_ij * dur_ij;
+        }
+      }
+
+      work.co.mode_a = a.patch.mode;
+      work.co.mode_b = b.patch.mode;
+      work.co.joint_frequency_per_year = freq_ij;
+      work.co.joint_unavailability = pw.joint_unavailability;
+      work.co.duration_hr = dur_ij;
+      work.co.total_shed_mw = shed_ij;
+      work.co.eens_contribution = eens_ij;
+      work.co.lole_contribution = lole_ij;
+      work.co.causes_loss = true;
+      work.causes_loss = true;
+      return work;
+    };
+
+    std::vector<PairWorkResult> pair_results(pair_work.size());
+    const int pair_workers = options.enable_parallel
+        ? resolve_failure_mode_worker_count(options.parallel_threads,
+                                            static_cast<int>(pair_work.size()))
+        : 1;
+    if (options.enable_parallel && pair_workers > 1 && pair_work.size() > 1U) {
+      result.parallel_effective = true;
+      result.parallel_workers = std::max(result.parallel_workers, pair_workers);
+      result.parallel_mode = "parallel-failure-mode-fmea+n2";
+      util::ThreadPool pool(pair_workers);
+      pool.parallel_for(pair_work.size(),
+                        [&](size_t begin, size_t end) {
+                          for (size_t idx = begin; idx < end; ++idx) {
+                            pair_results[idx] = evaluate_pair(pair_work[idx]);
+                          }
+                        },
+                        pair_workers);
+    } else {
+      for (size_t idx = 0; idx < pair_work.size(); ++idx) {
+        pair_results[idx] = evaluate_pair(pair_work[idx]);
+      }
+    }
+
+    for (auto& work : pair_results) {
+      if (!work.evaluated || !work.causes_loss) continue;
+      result.eens_mwh_yr += work.co.eens_contribution;
+      result.lole_hr_yr += work.co.lole_contribution;
+      result.lolf_occ_yr += work.co.joint_frequency_per_year;
+      for (size_t bb = 0; bb < nb; ++bb) {
+        if (bb < work.nodal_eens.size()) result.nodal_eens_mwh_yr[bb] += work.nodal_eens[bb];
+        if (bb < work.nodal_cif.size()) nodal_cif[bb] += work.nodal_cif[bb];
+        if (bb < work.nodal_cid.size()) nodal_cid[bb] += work.nodal_cid[bb];
+      }
+      result.co_contingencies.push_back(std::move(work.co));
     }
     std::sort(result.co_contingencies.begin(), result.co_contingencies.end(),
               [](const FailureModeCoContingency& x, const FailureModeCoContingency& y) {

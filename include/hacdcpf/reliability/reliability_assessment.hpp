@@ -165,6 +165,10 @@ struct ReliabilityOptions {
   // Importance sampling for variance reduction (experimental)
   bool use_importance_sampling{false};
   double importance_lambda{2.0};      // Importance sampling twisting factor
+
+  // Parallel evaluation of independent sampled states / simulated years.
+  bool enable_parallel{true};
+  int parallel_threads{0};            // 0 = hardware_concurrency()
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -306,6 +310,11 @@ struct ReliabilityResult {
   // Data-quality summary for the resolved reliability parameters (Finding 4).
   ReliabilityDataQuality data_quality;
 
+  // Parallel execution diagnostics.
+  bool parallel_effective{false};
+  int parallel_workers{1};
+  std::string parallel_mode{"serial"};
+
   // ─── Advanced Results ───
   TailRiskMetrics tail_risk;             // VaR/CVaR metrics
   DistributionIndices distribution_idx;  // SAIFI/SAIDI/ASAI (if computed)
@@ -400,6 +409,10 @@ struct FMEAOptions {
 
   // DC-OPF solver options for contingency evaluation
   opf::DCOPFOptions opf_options{};
+
+  // Parallel evaluation of independent contingencies.
+  bool enable_parallel{true};
+  int parallel_threads{0};            // 0 = hardware_concurrency()
 };
 
 /// Per-contingency detail for FMEA.
@@ -466,6 +479,11 @@ struct FMEAResult {
 
   // Data-quality summary for the resolved reliability parameters (Finding 4).
   ReliabilityDataQuality data_quality;
+
+  // Parallel execution diagnostics.
+  bool parallel_effective{false};
+  int parallel_workers{1};
+  std::string parallel_mode{"serial"};
 
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;

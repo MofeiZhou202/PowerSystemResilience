@@ -153,6 +153,9 @@ struct AnnualProductionSimResult {
   int num_opf_converged{0};
   bool feasible{false};
   std::string solver_name;
+  bool parallel_daily_effective{false};
+  int parallel_workers{1};
+  std::string parallel_mode;
 
   /// Text summary for logging.
   std::string summary() const;

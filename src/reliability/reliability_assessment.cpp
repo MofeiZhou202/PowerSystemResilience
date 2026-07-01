@@ -4,9 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -21,6 +23,7 @@
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/model/effective_capacity.hpp"
+#include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -291,6 +294,16 @@ struct StateKeyHash {
     return h;
   }
 };
+
+static int resolve_reliability_worker_count(int requested_threads,
+                                            int work_items) {
+  if (work_items <= 0) return 1;
+  int nthreads = requested_threads > 0
+                     ? requested_threads
+                     : static_cast<int>(std::thread::hardware_concurrency());
+  if (nthreads <= 0) nthreads = 1;
+  return std::max(1, std::min(nthreads, work_items));
+}
 
 // Returns total in-service DC load (MW) for the given system.
 // Used to populate model_limitations in exported result structs.
@@ -1139,42 +1152,9 @@ ReliabilityResult run_nonsequential_mc(
                  "base-case infeasibility will affect all samples' EENS/LOLE",
                  n0_result.curtailment_mw);
 
-  // Main simulation loop
-  for (int iter = 1; iter <= options.max_iterations; ++iter) {
-    // Sample component state
-    auto state = sample_state(unavailabilities, rng);
-
-    // Check if N-0 (all up)
-    bool is_n0 = std::none_of(state.begin(), state.end(), [](bool b) { return b; });
-
-    StateEvalResult eval_result;
-    if (is_n0) {
-      ++n0_count;
-      eval_result = n0_result;  // reuse pre-computed N-0 baseline; never assumed zero-shed
-    } else {
-      ++contingency_count;
-      // Count failures
-      int num_fail = 0;
-      for (size_t i = 0; i < nc; ++i) if (state[i]) ++num_fail;
-      
-      // Check state database
-      StateKey state_key = pack_state_key(state);
-      auto it = state_db.find(state_key);
-      if (it != state_db.end()) {
-        eval_result = it->second;
-      } else {
-        // Evaluate new state
-        eval_result = evaluate_state(sys, state, opf_opt, options.load_scale_factor,
-                                     options.curtail_threshold_mw);
-        state_db.emplace(std::move(state_key), eval_result);
-        
-        if (state_db.size() <= 5) {
-          spdlog::info("NSQ MC: State #{} - {} failures -> shed={:.2f} MW",
-                       state_db.size(), num_fail, eval_result.curtailment_mw);
-        }
-      }
-    }
-    
+  auto consume_nsq_sample = [&](int iter,
+                                const std::vector<bool>& state,
+                                const StateEvalResult& eval_result) {
     // Accumulate results
     double dns = eval_result.curtailment_mw;
     sum_dns += dns;
@@ -1233,7 +1213,7 @@ ReliabilityResult run_nonsequential_mc(
       if (!options.progress_callback(iter, eens, cov)) {
         spdlog::info("NSQ MC: Cancelled by user at iteration {}", iter);
         result.iterations_used = iter;  // P2a: ensure denominator is valid
-        break;
+        return false;
       }
     }
     
@@ -1248,10 +1228,117 @@ ReliabilityResult run_nonsequential_mc(
       spdlog::info("NSQ MC: Converged at iteration {} (CoV={:.4f})", iter, cov);
       result.converged = true;
       result.iterations_used = iter;
-      break;
+      return false;
     }
     
     result.iterations_used = iter;
+    return true;
+  };
+
+  const int nsq_workers = options.enable_parallel
+      ? resolve_reliability_worker_count(
+            options.parallel_threads,
+            std::min(options.max_iterations, std::max(1, options.parallel_threads > 0
+                                                           ? options.parallel_threads * 4
+                                                           : 64)))
+      : 1;
+  result.parallel_workers = nsq_workers;
+  result.parallel_effective = options.enable_parallel && nsq_workers > 1 &&
+                              options.max_iterations > 1;
+  result.parallel_mode = result.parallel_effective
+      ? "parallel-nsq-state-batches"
+      : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+  std::unique_ptr<util::ThreadPool> nsq_pool;
+  if (result.parallel_effective) {
+    nsq_pool = std::make_unique<util::ThreadPool>(nsq_workers);
+    spdlog::info("NSQ MC: evaluating cache-miss states in parallel with {} workers",
+                 nsq_workers);
+  }
+
+  struct NSQSampleWork {
+    std::vector<bool> state;
+    StateKey key;
+    StateEvalResult eval;
+    bool is_n0{false};
+    bool cache_miss{false};
+    int num_failures{0};
+  };
+
+  const int nsq_batch_size = result.parallel_effective
+      ? std::max(1, nsq_workers * 4)
+      : 1;
+
+  // Main simulation loop.  Sampling and reduction stay in iteration order;
+  // only expensive cache-miss state evaluations are dispatched to workers.
+  for (int batch_start = 1; batch_start <= options.max_iterations; ) {
+    const int batch_end = std::min(options.max_iterations,
+                                   batch_start + nsq_batch_size - 1);
+    std::vector<NSQSampleWork> batch(
+        static_cast<size_t>(batch_end - batch_start + 1));
+    std::vector<size_t> miss_indices;
+
+    for (size_t bi = 0; bi < batch.size(); ++bi) {
+      auto& item = batch[bi];
+      item.state = sample_state(unavailabilities, rng);
+      item.is_n0 = std::none_of(item.state.begin(), item.state.end(),
+                                [](bool b) { return b; });
+      if (item.is_n0) {
+        ++n0_count;
+        item.eval = n0_result;
+        continue;
+      }
+
+      ++contingency_count;
+      for (size_t c = 0; c < nc; ++c) {
+        if (item.state[c]) ++item.num_failures;
+      }
+      item.key = pack_state_key(item.state);
+      auto it = state_db.find(item.key);
+      if (it != state_db.end()) {
+        item.eval = it->second;
+      } else {
+        item.cache_miss = true;
+        miss_indices.push_back(bi);
+      }
+    }
+
+    if (!miss_indices.empty()) {
+      auto eval_missing = [&](size_t begin, size_t end) {
+        for (size_t pos = begin; pos < end; ++pos) {
+          auto& item = batch[miss_indices[pos]];
+          item.eval = evaluate_state(sys, item.state, opf_opt,
+                                     options.load_scale_factor,
+                                     options.curtail_threshold_mw);
+        }
+      };
+      if (result.parallel_effective && nsq_pool && miss_indices.size() > 1U) {
+        nsq_pool->parallel_for(miss_indices.size(), eval_missing, nsq_workers);
+      } else {
+        eval_missing(0, miss_indices.size());
+      }
+
+      for (size_t bi : miss_indices) {
+        auto& item = batch[bi];
+        auto [it, inserted] = state_db.emplace(item.key, item.eval);
+        if (!inserted) item.eval = it->second;
+        if (inserted && state_db.size() <= 5) {
+          spdlog::info("NSQ MC: State #{} - {} failures -> shed={:.2f} MW",
+                       state_db.size(), item.num_failures,
+                       item.eval.curtailment_mw);
+        }
+      }
+    }
+
+    bool stop = false;
+    for (size_t bi = 0; bi < batch.size(); ++bi) {
+      const int iter = batch_start + static_cast<int>(bi);
+      if (!consume_nsq_sample(iter, batch[bi].state, batch[bi].eval)) {
+        stop = true;
+        break;
+      }
+    }
+    if (stop) break;
+    batch_start = batch_end + 1;
   }
   
   // Log summary of sampling
@@ -1442,6 +1529,22 @@ ReliabilityResult run_sequential_mc(
   
   spdlog::info("SEQ MC: {} total components, {} hours/year", nc, hours_per_year);
 
+  const int seq_workers = options.enable_parallel
+      ? resolve_reliability_worker_count(options.parallel_threads, hours_per_year)
+      : 1;
+  result.parallel_workers = seq_workers;
+  result.parallel_effective = options.enable_parallel && seq_workers > 1 &&
+                              hours_per_year > 1;
+  result.parallel_mode = result.parallel_effective
+      ? "parallel-seq-hourly-states"
+      : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+  std::unique_ptr<util::ThreadPool> seq_pool;
+  if (result.parallel_effective) {
+    seq_pool = std::make_unique<util::ThreadPool>(seq_workers);
+    spdlog::info("SEQ MC: evaluating hourly states in parallel with {} workers",
+                 seq_workers);
+  }
+
   std::unordered_map<long long, StateEvalResult> n0_cache;
   auto n0_for_hour = [&](int h) -> const StateEvalResult& {
     const double load_scale = hourly_load_scale(load_profile, options, h);
@@ -1517,21 +1620,46 @@ ReliabilityResult run_sequential_mc(
     double year_eens = 0.0;
     int year_loss_hours = 0;
     std::vector<bool> year_loss_flags(hours_per_year, false);
-    
+
+    struct SEQHourWork {
+      std::vector<bool> state;
+      StateEvalResult eval;
+      bool any_down{false};
+      double load_scale{1.0};
+    };
+    std::vector<SEQHourWork> hour_work(static_cast<size_t>(hours_per_year));
+    std::vector<size_t> down_hours;
     for (int h = 0; h < hours_per_year; ++h) {
-      // Build component state for this hour
-      std::vector<bool> state(nc);
-      bool any_down = false;
+      auto& hw = hour_work[static_cast<size_t>(h)];
+      hw.state.assign(nc, false);
       for (size_t c = 0; c < nc; ++c) {
-        state[c] = state_matrix[c][h];
-        any_down = any_down || state[c];
+        hw.state[c] = state_matrix[c][h];
+        hw.any_down = hw.any_down || hw.state[c];
       }
-      
-      // Evaluate state
-      auto eval_result = any_down
-          ? evaluate_state(sys, state, opf_opt, hourly_load_scale(load_profile, options, h),
-                           options.curtail_threshold_mw)
-          : n0_for_hour(h);
+      hw.load_scale = hourly_load_scale(load_profile, options, h);
+      if (hw.any_down) {
+        down_hours.push_back(static_cast<size_t>(h));
+      } else {
+        hw.eval = n0_for_hour(h);
+      }
+    }
+
+    auto eval_down_hours = [&](size_t begin, size_t end) {
+      for (size_t pos = begin; pos < end; ++pos) {
+        auto& hw = hour_work[down_hours[pos]];
+        hw.eval = evaluate_state(sys, hw.state, opf_opt, hw.load_scale,
+                                 options.curtail_threshold_mw);
+      }
+    };
+    if (result.parallel_effective && seq_pool && down_hours.size() > 1U) {
+      seq_pool->parallel_for(down_hours.size(), eval_down_hours, seq_workers);
+    } else if (!down_hours.empty()) {
+      eval_down_hours(0, down_hours.size());
+    }
+
+    for (int h = 0; h < hours_per_year; ++h) {
+      const auto& state = hour_work[static_cast<size_t>(h)].state;
+      const auto& eval_result = hour_work[static_cast<size_t>(h)].eval;
       
 	      if (eval_result.is_loss_state) {
 	        year_eens += eval_result.curtailment_mw;
@@ -3786,14 +3914,16 @@ FMEAResult run_distribution_fmea(
   std::vector<double> nodal_cif(nb, 0.0);  // per-bus interruption frequency
   std::vector<double> nodal_cid(nb, 0.0);  // per-bus interruption duration
 
-  // Enumerate N-1 contingencies
-  // Suppress a bogus GCC -Wmaybe-uninitialized warning when tracking
-  // `comp.type` from the catalog vector through this loop at -O2.
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-  for (const auto& comp : catalog) {
+  struct FMEAContingencyWorkResult {
+    FMEAContingencyDetail detail;
+    std::vector<double> nodal_eens;
+    std::vector<double> nodal_cif;
+    std::vector<double> nodal_cid;
+    bool causes_loss{false};
+  };
+
+  auto evaluate_fmea_contingency = [&](const FMEAComponent& comp) {
+    FMEAContingencyWorkResult work;
     FMEAContingencyDetail detail;
     detail.component_index = comp.idx;
     detail.component_name = comp.name;
@@ -3836,15 +3966,8 @@ FMEAResult run_distribution_fmea(
     if (detail.causes_loss_rep) loss_duration += detail.tau_rep_hr;
     detail.lole_contribution = comp.lambda * loss_duration;
 
-    // 鈹€鈹€ Aggregate system indices 鈹€鈹€
-    result.eens_mwh_yr += detail.eens_contribution;
-    result.lole_hr_yr += detail.lole_contribution;
-    if (detail.causes_loss_sw || detail.causes_loss_rep) {
-      result.lolf_occ_yr += comp.lambda;
-      result.n_loss_contingencies++;
-    }
-
     // 鈹€鈹€ Nodal EENS accumulation 鈹€鈹€
+    work.nodal_eens.assign(nb, 0.0);
     for (size_t b = 0; b < nb; ++b) {
       double shed_sw = b < detail.nodal_shed_sw_mw.size()
                            ? detail.nodal_shed_sw_mw[b]
@@ -3853,10 +3976,12 @@ FMEAResult run_distribution_fmea(
                             ? detail.nodal_shed_rep_mw[b]
                             : 0.0;
       double nodal_ens = shed_sw * detail.tau_sw_hr + shed_rep * detail.tau_rep_hr;
-      result.nodal_eens_mwh_yr[b] += comp.lambda * nodal_ens;
+      work.nodal_eens[b] += comp.lambda * nodal_ens;
     }
 
     // 鈹€鈹€ Nodal CIF / CID for SAIFI/SAIDI 鈹€鈹€
+    work.nodal_cif.assign(nb, 0.0);
+    work.nodal_cid.assign(nb, 0.0);
     for (size_t b = 0; b < nb; ++b) {
       bool bus_loss = false;
       double duration = 0.0;
@@ -3869,21 +3994,65 @@ FMEAResult run_distribution_fmea(
         duration += detail.tau_rep_hr;
       }
       if (bus_loss) {
-        nodal_cif[b] += comp.lambda;
-        nodal_cid[b] += comp.lambda * duration;
+        work.nodal_cif[b] += comp.lambda;
+        work.nodal_cid[b] += comp.lambda * duration;
       }
     }
 
-    result.contingencies.push_back(std::move(detail));
-    
     if (options.verbose) {
       spdlog::info("FMEA: {} -> shed={:.2f} MW, EENS_contrib={:.2f} MWh/yr",
                    comp.name, detail.shed_rep_mw, detail.eens_contribution);
     }
+
+    work.causes_loss = detail.causes_loss_sw || detail.causes_loss_rep;
+    work.detail = std::move(detail);
+    return work;
+  };
+
+  std::vector<FMEAContingencyWorkResult> work_results(catalog.size());
+  const int fmea_workers = options.enable_parallel
+      ? resolve_reliability_worker_count(options.parallel_threads,
+                                         static_cast<int>(catalog.size()))
+      : 1;
+  result.parallel_workers = fmea_workers;
+  result.parallel_effective = options.enable_parallel && fmea_workers > 1 &&
+                              catalog.size() > 1U;
+  result.parallel_mode = result.parallel_effective
+      ? "parallel-fmea-contingencies"
+      : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+
+  if (result.parallel_effective) {
+    spdlog::info("FMEA: evaluating contingencies in parallel with {} workers",
+                 fmea_workers);
+    util::ThreadPool pool(fmea_workers);
+    pool.parallel_for(catalog.size(),
+                      [&](size_t begin, size_t end) {
+                        for (size_t i = begin; i < end; ++i) {
+                          work_results[i] = evaluate_fmea_contingency(catalog[i]);
+                        }
+                      },
+                      fmea_workers);
+  } else {
+    for (size_t i = 0; i < catalog.size(); ++i) {
+      work_results[i] = evaluate_fmea_contingency(catalog[i]);
+    }
   }
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
+
+  for (auto& work : work_results) {
+    const auto& detail = work.detail;
+    result.eens_mwh_yr += detail.eens_contribution;
+    result.lole_hr_yr += detail.lole_contribution;
+    if (work.causes_loss) {
+      result.lolf_occ_yr += detail.failure_rate;
+      result.n_loss_contingencies++;
+    }
+    for (size_t b = 0; b < nb; ++b) {
+      if (b < work.nodal_eens.size()) result.nodal_eens_mwh_yr[b] += work.nodal_eens[b];
+      if (b < work.nodal_cif.size()) nodal_cif[b] += work.nodal_cif[b];
+      if (b < work.nodal_cid.size()) nodal_cid[b] += work.nodal_cid[b];
+    }
+    result.contingencies.push_back(std::move(work.detail));
+  }
 
   result.edns_mw = result.eens_mwh_yr / 8760.0;
 

@@ -3612,6 +3612,10 @@ const App = (() => {
 
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
     const feasClass = data.feasible ? 'result-converged' : 'result-failed';
+    const annWorkers = Number(data.parallel_workers || 1);
+    const annParLabel = data.parallel_daily_effective
+      ? `按日并行 (${annWorkers}线程)`
+      : (data.parallel_daily ? '安全串行' : '串行');
     const summary = document.getElementById('annualSimSummary');
     if (summary) {
       summary.innerHTML = `
@@ -3622,7 +3626,7 @@ const App = (() => {
         <div class="result-item"><span class="result-label">时间步数</span>
           <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
         <div class="result-item"><span class="result-label">并行</span>
-          <span class="result-value">${data.parallel_daily ? '按日并行' : '串行'}</span></div>
+          <span class="result-value">${annParLabel}</span></div>
         <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
           <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
         <div class="result-item"><span class="result-label">墙钟用时</span>
@@ -3788,6 +3792,10 @@ const App = (() => {
     const objLabel = data.objective_label || '目标函数值';
     const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
     const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
+    const parWorkers = Number(data.parallel_workers || 1);
+    const parLabel = data.parallel_daily_effective
+      ? `按日并行 (${parWorkers}线程)`
+      : (data.parallel_mode === 'parallel-daily/serial-guarded' ? '安全串行' : '串行');
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -3800,6 +3808,8 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${solverTag || '—'}</span></div>
+      <div class="result-item"><span class="result-label">并行</span>
+        <span class="result-value">${parLabel}</span></div>
       <div class="result-item"><span class="result-label">${objLabel}</span>
         <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
       <div class="result-item"><span class="result-label">约束集</span>
@@ -7279,20 +7289,30 @@ const App = (() => {
 	      const maxIter = parseInt(document.getElementById('relMaxIter')?.value) || 2000;
 	      const metricFocus = (document.getElementById('relMetricFocus')?.value) || 'all';
 	      const weakBasis = (document.getElementById('relWeakBasis')?.value) || 'auto';
+	      const relParallel = document.getElementById('relParallel')?.checked ?? true;
+	      const relParallelThreads = parseInt(document.getElementById('relParallelThreads')?.value, 10);
 	      const opts = {
 	        method,
 	        physical_model: physicalModel,
 	        data_policy: (document.getElementById('relDataPolicy')?.value) || 'missing_only',
 	        reliability_template: (document.getElementById('relTemplate')?.value) || 'none',
 	        load: { scale_factor: 1.0, hours_per_year: 8736 },
+	        execution: {
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
+	        },
 	        monte_carlo: {
 	          max_iterations: method === 'seq' ? Math.max(50, Math.round(maxIter / 10)) : maxIter,
 	          cov_threshold: 0.05,
 	          compute_tail_risk: false,
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
 	        },
 	        restoration: {
 	          enable_switch_reconfiguration: true,
 	          max_switch_actions: 2,
+	          parallel: relParallel,
+	          parallel_threads: Number.isFinite(relParallelThreads) ? relParallelThreads : 0,
 	          include_converter_faults: !!document.getElementById('relTsFaults')?.checked,
 	          include_switch_faults: !!document.getElementById('relTsFaults')?.checked,
 	          include_generator_faults: !!document.getElementById('relTsFaults')?.checked,
@@ -7608,6 +7628,9 @@ const App = (() => {
 	      h += `<b>有效分析：</b>${relScopeBadge(data.model_scope)}`;
 	      if (data.physical_model) h += ` <b>物理模型：</b>${relScopeBadge(data.physical_model)}`;
 	      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
+	      if (data.parallel_mode) {
+	        h += ` <b>并行：</b>${relScopeBadge(`${data.parallel_effective ? '有效' : '串行'} ${data.parallel_workers || 1}线程`, !!data.parallel_effective)}`;
+	      }
 	      const v = data.validity || {};
 	      const vkeys = Object.keys(v);
       if (vkeys.length) {
@@ -7656,11 +7679,16 @@ const App = (() => {
 		        if (value === undefined && !(data.metrics && Object.prototype.hasOwnProperty.call(data.metrics, key))) return;
 		        html += `<tr><td>${escapeHtml(label)}</td><td class="result-value">${relMetricHtml(value, digits, scale || 1)}</td></tr>`;
 	      });
-	      if (method === 'nsq' || method === 'seq') {
-	        html += `<tr><td>收敛</td><td>${data.converged ? '是' : '否'}</td></tr>`;
-	        html += `<tr><td>迭代/年数</td><td>${data.iterations_used ?? '—'}</td></tr>`;
-	        html += `<tr><td>最终 CoV</td><td>${relMetricHtml(data.final_cov, 4)}</td></tr>`;
-	      }
+		      if (method === 'nsq' || method === 'seq') {
+		        html += `<tr><td>收敛</td><td>${data.converged ? '是' : '否'}</td></tr>`;
+		        html += `<tr><td>迭代/年数</td><td>${data.iterations_used ?? '—'}</td></tr>`;
+		        html += `<tr><td>最终 CoV</td><td>${relMetricHtml(data.final_cov, 4)}</td></tr>`;
+		      }
+		      if (data.parallel_mode || data.parallel_workers != null) {
+		        const pEff = data.parallel_effective ? '有效' : (data.parallel ? '未触发' : '关闭');
+		        const pWorkers = Number(data.parallel_workers || 1);
+		        html += `<tr><td>并行执行</td><td>${escapeHtml(pEff)} · ${escapeHtml(String(pWorkers))} 线程 · ${escapeHtml(data.parallel_mode || 'serial')}</td></tr>`;
+		      }
 		      if (data.n_contingencies != null) {
 		        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;
 		      }
