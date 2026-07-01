@@ -5,6 +5,7 @@
 
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/util/parallel_execution.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -156,6 +157,7 @@ struct AnnualProductionSimResult {
   bool parallel_daily_effective{false};
   int parallel_workers{1};
   std::string parallel_mode;
+  util::ParallelExecutionInfo parallel_execution;
 
   /// Text summary for logging.
   std::string summary() const;

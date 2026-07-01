@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <utility>
 
+#include "hacdcpf/util/parallel_execution.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
@@ -1209,12 +1210,7 @@ void forced_load_point(const HybridPowerSystem& sys, const ConsequenceMutation& 
 }
 
 int resolve_failure_mode_worker_count(int requested_threads, int work_items) {
-  if (work_items <= 0) return 1;
-  int nthreads = requested_threads > 0
-                     ? requested_threads
-                     : static_cast<int>(std::thread::hardware_concurrency());
-  if (nthreads <= 0) nthreads = 1;
-  return std::max(1, std::min(nthreads, work_items));
+  return util::resolve_worker_count(requested_threads, work_items);
 }
 }  // namespace
 
@@ -1399,20 +1395,34 @@ FailureModeFMEAResult run_failure_mode_fmea(
   result.parallel_mode = result.parallel_effective
       ? "parallel-failure-mode-fmea"
       : (options.enable_parallel ? "serial/insufficient-work" : "serial/disabled");
+  result.parallel_execution = util::make_parallel_execution_info(
+      options.enable_parallel, options.parallel_threads,
+      static_cast<int>(catalog.size()), "parallel-failure-mode-fmea",
+      "failure-modes");
+  result.parallel_execution.effective = result.parallel_effective;
+  result.parallel_execution.resolved_workers = single_workers;
+  result.parallel_execution.mode = result.parallel_mode;
+  if (!result.parallel_effective && options.enable_parallel) {
+    result.parallel_execution.guard_reason =
+        util::insufficient_work_reason(result.parallel_execution);
+  }
 
   if (result.parallel_effective) {
     util::ThreadPool pool(single_workers);
-    pool.parallel_for(catalog.size(),
-                      [&](size_t begin, size_t end) {
-                        for (size_t i = begin; i < end; ++i) {
-                          single_results[i] = evaluate_single_mode(catalog[i]);
-                        }
-                      },
-                      single_workers);
+    pool.parallel_for_dynamic(
+        catalog.size(),
+        [&](size_t i) {
+          single_results[i] = evaluate_single_mode(catalog[i]);
+        },
+        single_workers);
+    result.parallel_execution.actual_parallel_evaluations =
+        static_cast<long long>(catalog.size());
   } else {
     for (size_t i = 0; i < catalog.size(); ++i) {
       single_results[i] = evaluate_single_mode(catalog[i]);
     }
+    result.parallel_execution.serial_evaluations =
+        static_cast<long long>(catalog.size());
   }
 
   for (size_t i = 0; i < single_results.size(); ++i) {
@@ -1539,18 +1549,28 @@ FailureModeFMEAResult run_failure_mode_fmea(
       result.parallel_effective = true;
       result.parallel_workers = std::max(result.parallel_workers, pair_workers);
       result.parallel_mode = "parallel-failure-mode-fmea+n2";
+      result.parallel_execution.effective = true;
+      result.parallel_execution.resolved_workers =
+          std::max(result.parallel_execution.resolved_workers, pair_workers);
+      result.parallel_execution.mode = result.parallel_mode;
+      result.parallel_execution.guard_reason.clear();
+      result.parallel_execution.work_items += static_cast<int>(pair_work.size());
       util::ThreadPool pool(pair_workers);
-      pool.parallel_for(pair_work.size(),
-                        [&](size_t begin, size_t end) {
-                          for (size_t idx = begin; idx < end; ++idx) {
-                            pair_results[idx] = evaluate_pair(pair_work[idx]);
-                          }
-                        },
-                        pair_workers);
+      pool.parallel_for_dynamic(
+          pair_work.size(),
+          [&](size_t idx) {
+            pair_results[idx] = evaluate_pair(pair_work[idx]);
+          },
+          pair_workers);
+      result.parallel_execution.actual_parallel_evaluations +=
+          static_cast<long long>(pair_work.size());
     } else {
       for (size_t idx = 0; idx < pair_work.size(); ++idx) {
         pair_results[idx] = evaluate_pair(pair_work[idx]);
       }
+      result.parallel_execution.work_items += static_cast<int>(pair_work.size());
+      result.parallel_execution.serial_evaluations +=
+          static_cast<long long>(pair_work.size());
     }
 
     for (auto& work : pair_results) {

@@ -6,6 +6,7 @@
 
 #include "hacdcpf/model/hybrid_power_system.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
+#include "hacdcpf/util/parallel_execution.hpp"
 
 namespace hacdcpf::analysis {
 
@@ -314,6 +315,7 @@ struct ReliabilityResult {
   bool parallel_effective{false};
   int parallel_workers{1};
   std::string parallel_mode{"serial"};
+  hacdcpf::util::ParallelExecutionInfo parallel_execution;
 
   // ─── Advanced Results ───
   TailRiskMetrics tail_risk;             // VaR/CVaR metrics
@@ -484,6 +486,7 @@ struct FMEAResult {
   bool parallel_effective{false};
   int parallel_workers{1};
   std::string parallel_mode{"serial"};
+  hacdcpf::util::ParallelExecutionInfo parallel_execution;
 
   // Per-contingency details (sorted by EENS contribution descending)
   std::vector<FMEAContingencyDetail> contingencies;

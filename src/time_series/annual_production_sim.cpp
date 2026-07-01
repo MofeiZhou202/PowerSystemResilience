@@ -10,6 +10,7 @@
 #include <thread>
 #include <unordered_map>
 
+#include "hacdcpf/util/parallel_execution.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf::analysis {
@@ -711,14 +712,19 @@ static AnnualProductionSimResult solve_parallel_daily(
   const bool uses_milp = (opts.daily_mode != DailySimMode::DynamicOPF);
   const bool parallel_safe = !uses_milp ||
       hacdcpf::uc_solver_allows_parallel_daily(day_opts.uc_solver);
-  const int workers = parallel_safe
-      ? hacdcpf::resolve_parallel_worker_count(opts.parallel_threads, num_days)
-      : 1;
   const std::string parallel_backend =
       !uses_milp ? "no-milp"
       : (day_opts.uc_solver == UCSolverChoice::SCIP) ? "scip"
       : (day_opts.uc_solver == UCSolverChoice::Native) ? "native-bc"
       : "guarded";
+  const std::string guard_reason = parallel_safe ? std::string()
+      : "explicit UC solver backend is guarded for concurrent daily solves";
+  auto parallel_info = util::make_parallel_execution_info(
+      true, opts.parallel_threads, num_days,
+      parallel_safe ? "parallel-daily/" + parallel_backend
+                    : "parallel-daily/serial-guarded",
+      parallel_backend, guard_reason);
+  const int workers = parallel_info.resolved_workers;
 
   // Per-day outputs are index-addressed so worker threads never write the same
   // slot (lock-free); they are stitched together after the parallel region.
@@ -815,11 +821,17 @@ static AnnualProductionSimResult solve_parallel_daily(
                              : "dyn-OPF";
   result.solver_name = std::string("parallel-daily/") + mode_tag +
                        (parallel_safe ? "/parallel" : "/serial");
-  result.parallel_daily_effective = parallel_safe && workers > 1 && num_days > 1;
+  parallel_info.actual_parallel_evaluations =
+      parallel_info.effective ? num_days : 0;
+  parallel_info.serial_evaluations =
+      parallel_info.effective ? 0 : num_days;
+  if (!parallel_info.effective && parallel_info.guard_reason.empty()) {
+    parallel_info.guard_reason = util::insufficient_work_reason(parallel_info);
+  }
+  result.parallel_execution = parallel_info;
+  result.parallel_daily_effective = parallel_info.effective;
   result.parallel_workers = workers;
-  result.parallel_mode = parallel_safe
-      ? "parallel-daily/" + parallel_backend
-      : "parallel-daily/serial-guarded";
+  result.parallel_mode = parallel_info.mode;
   return result;
 }
 
@@ -839,6 +851,9 @@ AnnualProductionSimResult solve_annual_production_simulation(
   result.step_duration_hr = dt;
   result.parallel_workers = 1;
   result.parallel_mode = opts.enable_parallel_daily ? "parallel-daily" : "hierarchical";
+  result.parallel_execution = util::make_parallel_execution_info(
+      opts.enable_parallel_daily, opts.parallel_threads, 0,
+      result.parallel_mode);
 
   if (T_yr <= 0) {
     return result;

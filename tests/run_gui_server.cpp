@@ -2079,6 +2079,25 @@ static json reliability_parallel_json(bool requested,
               {"mode", mode}};
 }
 
+static json parallel_execution_json(
+    const hacdcpf::util::ParallelExecutionInfo& p) {
+  return json{{"requested", p.requested},
+              {"effective", p.effective},
+              {"requested_threads", p.requested_threads},
+              {"hardware_threads", p.hardware_threads},
+              {"workers", p.resolved_workers},
+              {"work_items", p.work_items},
+              {"mode", p.mode},
+              {"backend", p.backend},
+              {"guard_reason", p.guard_reason},
+              {"actual_parallel_evaluations", p.actual_parallel_evaluations},
+              {"serial_evaluations", p.serial_evaluations},
+              {"batch_size", p.batch_size},
+              {"cache_hits", p.cache_hits},
+              {"cache_misses", p.cache_misses},
+              {"n0_evaluations", p.n0_evaluations}};
+}
+
 static void add_reliability_parallel_json(json& out,
                                           bool requested,
                                           bool effective,
@@ -2090,6 +2109,19 @@ static void add_reliability_parallel_json(json& out,
   out["parallel_mode"] = mode;
   out["parallel_execution"] =
       reliability_parallel_json(requested, effective, workers, mode);
+}
+
+static void add_reliability_parallel_json(
+    json& out,
+    bool requested,
+    const hacdcpf::util::ParallelExecutionInfo& info) {
+  auto effective_info = info;
+  effective_info.requested = requested;
+  out["parallel"] = requested;
+  out["parallel_effective"] = effective_info.effective;
+  out["parallel_workers"] = effective_info.resolved_workers;
+  out["parallel_mode"] = effective_info.mode;
+  out["parallel_execution"] = parallel_execution_json(effective_info);
 }
 
 static json reliability_data_quality_json(
@@ -12583,6 +12615,8 @@ int main(int argc, char** argv) {
         out["parallel_daily_effective"] = result.parallel_daily_effective;
         out["parallel_workers"] = result.parallel_workers;
         out["parallel_mode"] = result.parallel_mode;
+        out["parallel_execution"] =
+            parallel_execution_json(result.parallel_execution);
         // Diagnostic: how many loads were materialized at PF time and how
         // many ended up bound to a profile id. Helps catch silent mapping
         // failures from the GUI side.
@@ -13738,6 +13772,8 @@ int main(int argc, char** argv) {
         out["parallel_daily_effective"] = result.parallel_daily_effective;
         out["parallel_workers"] = result.parallel_workers;
         out["parallel_mode"] = result.parallel_mode;
+        out["parallel_execution"] =
+            parallel_execution_json(result.parallel_execution);
         out["objective_value"] = result.total_cost;
         out["objective_label"] = "年总运行成本 ($)";
         out["objective_mode"] = uc_objective_label(opts.ts_pf_options.objective_mode);
@@ -14200,9 +14236,7 @@ int main(int argc, char** argv) {
         out["data_quality"] = reliability_data_quality_json(result.data_quality);
         out["data_policy"] = reliability_policy_label(pol);
         add_reliability_parallel_json(out, opts.enable_parallel,
-                                      result.parallel_effective,
-                                      result.parallel_workers,
-                                      result.parallel_mode);
+                                      result.parallel_execution);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -14291,9 +14325,7 @@ int main(int argc, char** argv) {
         out["data_quality"] = reliability_data_quality_json(result.data_quality);
         out["data_policy"] = reliability_policy_label(pol);
         add_reliability_parallel_json(out, opts.enable_parallel,
-                                      result.parallel_effective,
-                                      result.parallel_workers,
-                                      result.parallel_mode);
+                                      result.parallel_execution);
         out["converged"] = result.converged;
         out["iterations_used"] = result.iterations_used;
         out["final_cov"] = result.final_cov;
@@ -14371,9 +14403,7 @@ int main(int argc, char** argv) {
         out["data_quality"] = reliability_data_quality_json(result.data_quality);
         out["data_policy"] = reliability_policy_label(pol);
         add_reliability_parallel_json(out, fmea_opts.enable_parallel,
-                                      result.parallel_effective,
-                                      result.parallel_workers,
-                                      result.parallel_mode);
+                                      result.parallel_execution);
         out["eens_mwh_yr"] = result.eens_mwh_yr;
         out["edns_mw"] = result.edns_mw;
         out["lole_hr_yr"] = result.lole_hr_yr;
@@ -15236,9 +15266,7 @@ int main(int argc, char** argv) {
           out["validity"] = reliability_validity_json(r.validity);
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
           add_reliability_parallel_json(out, opts.enable_parallel,
-                                        r.parallel_effective,
-                                        r.parallel_workers,
-                                        r.parallel_mode);
+                                        r.parallel_execution);
           out["metrics"] = json{
             {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
             {"lole_hr_yr", r.lole_hr_yr},
@@ -15276,9 +15304,7 @@ int main(int argc, char** argv) {
           out["validity"] = fmea_validity_json(r.validity);
           out["data_quality"] = reliability_data_quality_json(r.data_quality);
           add_reliability_parallel_json(out, fo.enable_parallel,
-                                        r.parallel_effective,
-                                        r.parallel_workers,
-                                        r.parallel_mode);
+                                        r.parallel_execution);
 	          out["metrics"] = json{
 	            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
 	            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},
@@ -15346,9 +15372,7 @@ int main(int argc, char** argv) {
 	          out["data_quality"] = reliability_data_quality_json(r.data_quality);
 	          out["failure_mode_coverage"] = failure_mode_coverage_json(r.coverage);
 	          add_reliability_parallel_json(out, fo.enable_parallel,
-	                                        r.parallel_effective,
-	                                        r.parallel_workers,
-	                                        r.parallel_mode);
+	                                        r.parallel_execution);
 		          out["metrics"] = json{
 		            {"eens_mwh_yr", r.eens_mwh_yr}, {"edns_mw", r.edns_mw},
 		            {"lole_hr_yr", r.lole_hr_yr}, {"lolf_occ_yr", r.lolf_occ_yr},

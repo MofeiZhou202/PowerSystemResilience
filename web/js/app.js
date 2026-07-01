@@ -3612,10 +3612,15 @@ const App = (() => {
 
     const fmt = (x, n = 0) => Number(x || 0).toLocaleString('en-US', { maximumFractionDigits: n });
     const feasClass = data.feasible ? 'result-converged' : 'result-failed';
+    const annParExec = data.parallel_execution || {};
     const annWorkers = Number(data.parallel_workers || 1);
     const annParLabel = data.parallel_daily_effective
       ? `按日并行 (${annWorkers}线程)`
       : (data.parallel_daily ? '安全串行' : '串行');
+    const annParDetail = annParExec.work_items != null
+      ? ` · ${annParExec.work_items}项 · HW ${annParExec.hardware_threads || '—'}`
+        + (annParExec.guard_reason ? ` · ${escapeHtml(annParExec.guard_reason)}` : '')
+      : '';
     const summary = document.getElementById('annualSimSummary');
     if (summary) {
       summary.innerHTML = `
@@ -3626,7 +3631,7 @@ const App = (() => {
         <div class="result-item"><span class="result-label">时间步数</span>
           <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
         <div class="result-item"><span class="result-label">并行</span>
-          <span class="result-value">${annParLabel}</span></div>
+          <span class="result-value">${annParLabel}${annParDetail}</span></div>
         <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
           <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
         <div class="result-item"><span class="result-label">墙钟用时</span>
@@ -3792,10 +3797,15 @@ const App = (() => {
     const objLabel = data.objective_label || '目标函数值';
     const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
     const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
+    const parExec = data.parallel_execution || {};
     const parWorkers = Number(data.parallel_workers || 1);
     const parLabel = data.parallel_daily_effective
       ? `按日并行 (${parWorkers}线程)`
       : (data.parallel_mode === 'parallel-daily/serial-guarded' ? '安全串行' : '串行');
+    const parDetail = parExec.work_items != null
+      ? ` · ${parExec.work_items}项 · HW ${parExec.hardware_threads || '—'}`
+        + (parExec.guard_reason ? ` · ${escapeHtml(parExec.guard_reason)}` : '')
+      : '';
     summary.innerHTML = `
       <div class="result-item"><span class="result-label">时间步数</span>
         <span class="result-value">${data.num_steps}</span></div>
@@ -3809,7 +3819,7 @@ const App = (() => {
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${solverTag || '—'}</span></div>
       <div class="result-item"><span class="result-label">并行</span>
-        <span class="result-value">${parLabel}</span></div>
+        <span class="result-value">${parLabel}${parDetail}</span></div>
       <div class="result-item"><span class="result-label">${objLabel}</span>
         <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
       <div class="result-item"><span class="result-label">约束集</span>
@@ -7629,7 +7639,11 @@ const App = (() => {
 	      if (data.physical_model) h += ` <b>物理模型：</b>${relScopeBadge(data.physical_model)}`;
 	      if (data.data_policy) h += ` <b>数据策略：</b>${relScopeBadge(data.data_policy)}`;
 	      if (data.parallel_mode) {
-	        h += ` <b>并行：</b>${relScopeBadge(`${data.parallel_effective ? '有效' : '串行'} ${data.parallel_workers || 1}线程`, !!data.parallel_effective)}`;
+	        const pe = data.parallel_execution || {};
+	        let ptxt = `${data.parallel_effective ? '有效' : '串行'} ${data.parallel_workers || 1}线程`;
+	        if (pe.work_items != null) ptxt += ` / ${pe.work_items}项`;
+	        if (pe.guard_reason) ptxt += ` / ${pe.guard_reason}`;
+	        h += ` <b>并行：</b>${relScopeBadge(ptxt, !!data.parallel_effective)}`;
 	      }
 	      const v = data.validity || {};
 	      const vkeys = Object.keys(v);
@@ -7687,7 +7701,13 @@ const App = (() => {
 		      if (data.parallel_mode || data.parallel_workers != null) {
 		        const pEff = data.parallel_effective ? '有效' : (data.parallel ? '未触发' : '关闭');
 		        const pWorkers = Number(data.parallel_workers || 1);
-		        html += `<tr><td>并行执行</td><td>${escapeHtml(pEff)} · ${escapeHtml(String(pWorkers))} 线程 · ${escapeHtml(data.parallel_mode || 'serial')}</td></tr>`;
+		        const pe = data.parallel_execution || {};
+		        const pExtra = pe.work_items != null
+		          ? ` · ${escapeHtml(String(pe.work_items))}项 · HW ${escapeHtml(String(pe.hardware_threads || '—'))}`
+		            + (pe.actual_parallel_evaluations != null ? ` · 并行评估 ${escapeHtml(String(pe.actual_parallel_evaluations))}` : '')
+		            + (pe.guard_reason ? ` · ${escapeHtml(pe.guard_reason)}` : '')
+		          : '';
+		        html += `<tr><td>并行执行</td><td>${escapeHtml(pEff)} · ${escapeHtml(String(pWorkers))} 线程 · ${escapeHtml(data.parallel_mode || 'serial')}${pExtra}</td></tr>`;
 		      }
 		      if (data.n_contingencies != null) {
 		        html += `<tr><td>枚举项</td><td>${data.n_contingencies}${data.n_with_loss != null ? ` (${data.n_with_loss} 含失负荷)` : ''}</td></tr>`;

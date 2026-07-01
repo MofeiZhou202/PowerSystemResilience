@@ -98,6 +98,40 @@ class ThreadPool {
     }
   }
 
+  /// Execute one work item at a time using an atomic cursor.  This is better
+  /// than static chunking when item costs vary substantially, e.g. contingency
+  /// searches or Monte Carlo cache-miss states.
+  void parallel_for_dynamic(size_t count,
+                            const std::function<void(size_t)>& body,
+                            int num_tasks = 0) {
+    if (count == 0) return;
+    if (num_tasks <= 0) num_tasks = size();
+    num_tasks = std::min(num_tasks, static_cast<int>(count));
+    if (num_tasks <= 1) {
+      for (size_t i = 0; i < count; ++i) body(i);
+      return;
+    }
+
+    std::atomic<size_t> next{0};
+    auto run_worker = [&]() {
+      while (true) {
+        const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+        if (i >= count) break;
+        body(i);
+      }
+    };
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(static_cast<size_t>(num_tasks - 1));
+    for (int t = 1; t < num_tasks; ++t) {
+      futures.push_back(submit(run_worker));
+    }
+    run_worker();
+    for (auto& f : futures) {
+      f.get();
+    }
+  }
+
   /// Process-wide singleton (lazy, thread-safe).
   static ThreadPool& global() {
     static ThreadPool pool;

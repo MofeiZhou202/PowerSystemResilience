@@ -10,6 +10,7 @@
 #include "hacdcpf/optimal_power_flow/opf_result.hpp"
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/power_flow_result.hpp"
+#include "hacdcpf/util/parallel_execution.hpp"
 
 // Time-series data types used by io and analysis modules.
 // TimeSeriesData/TimeSeriesProfile are in the global hacdcpf namespace for
@@ -266,6 +267,7 @@ struct TimeSeriesPFResult {
   bool parallel_daily_effective{false};
   int parallel_workers{1};
   std::string parallel_mode;
+  util::ParallelExecutionInfo parallel_execution;
 };
 
 // ═══════════════════════════════════════════════════════════════════════

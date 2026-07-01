@@ -376,6 +376,7 @@ struct FailureModeFMEAResult {
   bool parallel_effective{false};
   int parallel_workers{1};
   std::string parallel_mode{"serial"};
+  hacdcpf::util::ParallelExecutionInfo parallel_execution;
 };
 
 /// Run a deterministic failure-mode enumeration: build the catalog, map every

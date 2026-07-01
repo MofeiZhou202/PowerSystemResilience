@@ -23,6 +23,7 @@
 #include "hacdcpf/power_flow/branch_flow.hpp"
 #include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
+#include "hacdcpf/util/parallel_execution.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
 
 namespace hacdcpf {
@@ -2858,12 +2859,7 @@ bool uc_solver_allows_parallel_daily(UCSolverChoice solver) {
 }
 
 int resolve_parallel_worker_count(int requested_threads, int work_items) {
-  if (work_items <= 0) return 1;
-  int nthreads = requested_threads > 0
-                     ? requested_threads
-                     : static_cast<int>(std::thread::hardware_concurrency());
-  if (nthreads <= 0) nthreads = 1;
-  return std::max(1, std::min(nthreads, work_items));
+  return util::resolve_worker_count(requested_threads, work_items);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3293,14 +3289,19 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       const bool uses_milp = !opts.skip_uc;
       const bool parallel_safe = !uses_milp ||
           uc_solver_allows_parallel_daily(day_opts.uc_solver);
-      const int workers = parallel_safe
-          ? resolve_parallel_worker_count(opts.parallel_threads, num_days)
-          : 1;
       const std::string parallel_backend =
           !uses_milp ? "no-milp"
           : (day_opts.uc_solver == UCSolverChoice::SCIP) ? "scip"
           : (day_opts.uc_solver == UCSolverChoice::Native) ? "native-bc"
           : "guarded";
+      const std::string guard_reason = parallel_safe ? std::string()
+          : "explicit UC solver backend is guarded for concurrent daily solves";
+      auto parallel_info = util::make_parallel_execution_info(
+          true, opts.parallel_threads, num_days,
+          parallel_safe ? "parallel-daily/" + parallel_backend
+                        : "parallel-daily/serial-guarded",
+          parallel_backend, guard_reason);
+      const int workers = parallel_info.resolved_workers;
 
       std::vector<TimeSeriesPFResult> day_results(static_cast<size_t>(num_days));
       auto solve_day = [&](int d) {
@@ -3321,11 +3322,17 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
         for (int d = 0; d < num_days; ++d) solve_day(d);
       }
       auto out = concat_ts_results(day_results, T);
-      out.parallel_daily_effective = parallel_safe && workers > 1;
+      parallel_info.actual_parallel_evaluations =
+          parallel_info.effective ? num_days : 0;
+      parallel_info.serial_evaluations =
+          parallel_info.effective ? 0 : num_days;
+      if (!parallel_info.effective && parallel_info.guard_reason.empty()) {
+        parallel_info.guard_reason = util::insufficient_work_reason(parallel_info);
+      }
+      out.parallel_execution = parallel_info;
+      out.parallel_daily_effective = parallel_info.effective;
       out.parallel_workers = workers;
-      out.parallel_mode = parallel_safe
-          ? "parallel-daily/" + parallel_backend
-          : "parallel-daily/serial-guarded";
+      out.parallel_mode = parallel_info.mode;
       return out;
     }
   }
@@ -3334,6 +3341,13 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
   result.num_steps = T;
   result.parallel_workers = 1;
   result.parallel_mode = opts.parallel_daily ? "single-day" : "coupled";
+  result.parallel_execution = util::make_parallel_execution_info(
+      opts.parallel_daily, opts.parallel_threads,
+      T > 0 ? 1 : 0, result.parallel_mode);
+  if (opts.parallel_daily && T > 0) {
+    result.parallel_execution.guard_reason = "horizon fits within one scheduling day";
+    result.parallel_execution.mode = result.parallel_mode;
+  }
 
   if (T <= 0) {
     return result;
