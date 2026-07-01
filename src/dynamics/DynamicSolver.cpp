@@ -141,6 +141,24 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
       }
       break;
     }
+    case DynamicEventType::ACLoadScale: {
+      for (auto& load : sys.network.ac_bus_loads) {
+        if (event.bus != 0 && load.bus != event.bus) continue;
+        if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
+        load.scale = std::max(0.0, event.value);
+        rebuild = true;
+      }
+      break;
+    }
+    case DynamicEventType::DCLoadScale: {
+      for (auto& load : sys.network.dc_bus_loads) {
+        if (event.bus != 0 && load.bus != event.bus) continue;
+        if (event.bus == 0 && event.component_index != 0 && load.bus != event.component_index) continue;
+        load.scale = std::max(0.0, event.value);
+        rebuild = true;
+      }
+      break;
+    }
     default:
       break;
   }

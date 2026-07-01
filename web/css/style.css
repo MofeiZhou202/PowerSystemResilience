@@ -858,6 +858,46 @@ body[data-active-result-group="transient"] #rightPanel {
   font-size: 12px;
   line-height: 1.45;
 }
+.transient-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 6px;
+}
+.transient-section-head h5 {
+  margin: 0;
+  font-size: 13px;
+}
+.transient-section-head span {
+  color: var(--ink2);
+  font-size: 11px;
+}
+.transient-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.transient-mini-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.025);
+  min-width: 0;
+}
+.transient-mini-card strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.transient-mini-card span {
+  display: block;
+  color: var(--ink2);
+  font-size: 11px;
+  line-height: 1.45;
+}
 .transient-dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(330px, 1fr));
@@ -1328,6 +1368,57 @@ body[data-active-result-group="transient"] .result-group[data-result-group="tran
   align-items: stretch;
   gap: 10px;
   flex-wrap: wrap;
+}
+.transient-sub-section {
+  flex-direction: column;
+}
+.transient-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.transient-event-row {
+  padding-top: 5px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.transient-event-schedule {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 28px;
+  min-width: min(100%, 360px);
+  flex: 1 1 420px;
+}
+.transient-event-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--tb-border);
+  border-radius: 4px;
+  background: rgba(86,182,194,0.12);
+  color: var(--sub-bar-text);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.transient-event-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--ink2);
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
+.transient-event-chip button:hover {
+  color: var(--danger);
+}
+.transient-event-empty {
+  color: var(--ink2);
+  font-size: 11px;
 }
 .sub-section[hidden] { display: none; }
 .sub-label {

@@ -69,6 +69,7 @@ const App = (() => {
   let _importedGeneratedScenario = null;
   let _lastImportedGeneratedScenarioKey = '';
   let _generatedScenarioTimeSeriesActive = false;
+  let _transientEvents = [];
   let _analysisQueue = Promise.resolve();
   let _activeLoadPromise = null;
 
@@ -759,9 +760,9 @@ const App = (() => {
       });
       const data = await parseJsonResponse(res);
       if (!res.ok) {
-        const error = (data && data.error) || res.statusText;
+        const error = (data && (data.error || data.message)) || res.statusText;
         if (!options.quiet) log(`Error: ${error}`, 'error');
-        return { ok: false, data: null, error };
+        return { ok: false, data, error };
       }
       return { ok: true, data, error: null };
     } catch (e) {
@@ -2630,27 +2631,176 @@ const App = (() => {
     });
   }
 
-  function transientReadOptions() {
-    const eventType = document.getElementById('trEventType')?.value || '';
-    const eventTime = numberOr(document.getElementById('trEventTime')?.value, 0.2);
-    const eventTarget = parseInt(document.getElementById('trEventTarget')?.value, 10) || 0;
-    const eventValue = numberOr(document.getElementById('trEventValue')?.value, 0.0);
-    const events = [];
-    if (eventType) {
-      const event = {
-        type: eventType,
-        time_s: eventTime,
-        component_index: eventTarget,
-        value: eventValue,
-        label: `${eventType} ${eventTarget || ''}`.trim(),
-      };
-      if (eventType === 'FaultShunt' || eventType === 'ClearFault') {
-        event.bus = eventTarget;
-        event.component_type = 'AC';
-        if (eventType === 'FaultShunt') event.duration_s = Math.max(0.0, eventValue || 0.08);
-      }
-      events.push(event);
+  const transientEventLabels = {
+    ACBranchTrip: 'AC支路跳闸',
+    ACBranchClose: 'AC支路合闸',
+    DCBranchTrip: 'DC支路跳闸',
+    DCBranchClose: 'DC支路合闸',
+    ACLoadScale: 'AC负荷阶跃',
+    DCLoadScale: 'DC负荷阶跃',
+    GeneratorTrip: '发电机跳闸',
+    VSCTrip: 'VSC跳闸',
+    DCDCTrip: 'DC/DC跳闸',
+    StoragePowerStep: 'AC储能P阶跃',
+    DCStoragePowerStep: 'DC储能P阶跃',
+    FaultShunt: '母线故障',
+    ClearFault: '清除故障',
+  };
+
+  function transientEventLabel(type) {
+    return transientEventLabels[type] || type || '扰动';
+  }
+
+  function transientEventUsesBus(eventType) {
+    return eventType === 'FaultShunt' || eventType === 'ClearFault' ||
+      eventType === 'ACLoadScale' || eventType === 'DCLoadScale';
+  }
+
+  function transientEventDefaultDomain(eventType) {
+    if (eventType === 'DCLoadScale' || eventType === 'DCBranchTrip' ||
+        eventType === 'DCBranchClose' || eventType === 'DCStoragePowerStep') {
+      return 'DC';
     }
+    return 'AC';
+  }
+
+  function transientNormalizeEvent(raw, fallbackIndex = 0) {
+    const type = raw?.type || '';
+    if (!type) return null;
+    const event = {
+      type,
+      time_s: Math.max(0, numberOr(raw.time_s, 0.2)),
+      component_index: Math.max(0, parseInt(raw.component_index ?? raw.target ?? 0, 10) || 0),
+      bus: Math.max(0, parseInt(raw.bus ?? 0, 10) || 0),
+      value: numberOr(raw.value, 0.0),
+      duration_s: Math.max(0, numberOr(raw.duration_s, 0.0)),
+      component_type: raw.component_type || transientEventDefaultDomain(type),
+      label: String(raw.label || '').trim(),
+    };
+    if (transientEventUsesBus(type)) {
+      event.bus = event.bus || event.component_index;
+      event.component_index = event.bus;
+    }
+    if (!event.label) {
+      const target = transientEventUsesBus(type)
+        ? `${event.component_type || 'AC'} bus ${event.bus || '*'}`
+        : (event.component_index ? `#${event.component_index}` : '全部');
+      event.label = `${transientEventLabel(type)} ${target}`;
+    }
+    event._id = raw._id || `tr_evt_${Date.now()}_${fallbackIndex}_${Math.random().toString(36).slice(2, 7)}`;
+    return event;
+  }
+
+  function transientEventFromControls() {
+    const type = document.getElementById('trEventType')?.value || '';
+    if (!type) return null;
+    const domainEl = document.getElementById('trEventDomain');
+    const domain = domainEl?.value || transientEventDefaultDomain(type);
+    const target = parseInt(document.getElementById('trEventTarget')?.value, 10) || 0;
+    const event = transientNormalizeEvent({
+      type,
+      time_s: numberOr(document.getElementById('trEventTime')?.value, 0.2),
+      component_index: target,
+      bus: transientEventUsesBus(type) ? target : 0,
+      value: numberOr(document.getElementById('trEventValue')?.value, type.includes('LoadScale') ? 1.10 : 0.0),
+      duration_s: numberOr(document.getElementById('trEventDuration')?.value, type === 'FaultShunt' ? 0.08 : 0.0),
+      component_type: domain,
+      label: document.getElementById('trEventLabel')?.value || '',
+    }, _transientEvents.length);
+    return event;
+  }
+
+  function transientFormatEvent(event) {
+    if (!event) return '';
+    const type = transientEventLabel(event.type);
+    const target = transientEventUsesBus(event.type)
+      ? `${event.component_type || 'AC'} bus ${event.bus || event.component_index || '*'}`
+      : (event.component_index ? `#${event.component_index}` : '全部');
+    const pieces = [`${Number(event.time_s || 0).toFixed(3)}s`, type, target];
+    if (event.type === 'FaultShunt') {
+      pieces.push(`g=${Number(event.value || 0).toFixed(3)}pu`);
+      if (Number(event.duration_s) > 0) pieces.push(`${Number(event.duration_s).toFixed(3)}s`);
+    } else if (event.type.includes('LoadScale')) {
+      pieces.push(`x${Number(event.value || 0).toFixed(3)}`);
+    } else if (event.type.includes('StoragePowerStep')) {
+      pieces.push(`${Number(event.value || 0).toFixed(3)}MW`);
+    }
+    return pieces.join(' · ');
+  }
+
+  function transientSerializableEvents() {
+    return _transientEvents
+      .map((event, i) => transientNormalizeEvent(event, i))
+      .filter(Boolean)
+      .sort((a, b) => (a.time_s - b.time_s) || String(a.label).localeCompare(String(b.label)))
+      .map(({ _id, ...event }) => event);
+  }
+
+  function renderTransientEventSchedule() {
+    const box = document.getElementById('trEventSchedule');
+    if (!box) return;
+    if (!_transientEvents.length) {
+      box.innerHTML = '<span class="transient-event-empty">未设置扰动序列</span>';
+      return;
+    }
+    const events = _transientEvents
+      .map((event, i) => ({ event, i }))
+      .sort((a, b) => (a.event.time_s - b.event.time_s) || a.i - b.i);
+    box.innerHTML = events.map(({ event, i }) =>
+      `<span class="transient-event-chip" title="${escapeHtml(event.label || '')}">
+        ${escapeHtml(transientFormatEvent(event))}
+        <button type="button" data-tr-event-remove="${i}" aria-label="删除扰动">×</button>
+      </span>`
+    ).join('');
+    box.querySelectorAll('[data-tr-event-remove]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.trEventRemove, 10);
+        if (Number.isInteger(idx)) {
+          _transientEvents.splice(idx, 1);
+          renderTransientEventSchedule();
+        }
+      });
+    });
+  }
+
+  function addTransientEventFromControls() {
+    const event = transientEventFromControls();
+    if (!event) {
+      setStatus('请选择一个暂态扰动类型', 'warn');
+      return;
+    }
+    _transientEvents.push(event);
+    renderTransientEventSchedule();
+    setStatus(`已加入扰动: ${transientFormatEvent(event)}`);
+  }
+
+  function clearTransientEvents() {
+    _transientEvents = [];
+    renderTransientEventSchedule();
+    setStatus('已清空暂态扰动序列');
+  }
+
+  function updateTransientEventControls() {
+    const type = document.getElementById('trEventType')?.value || '';
+    const domainEl = document.getElementById('trEventDomain');
+    const durationEl = document.getElementById('trEventDuration');
+    const valueEl = document.getElementById('trEventValue');
+    if (domainEl) {
+      domainEl.disabled = !(type === 'FaultShunt' || type === 'ClearFault' ||
+        type === 'ACLoadScale' || type === 'DCLoadScale');
+      domainEl.value = transientEventDefaultDomain(type);
+    }
+    if (durationEl) durationEl.disabled = type !== 'FaultShunt';
+    if (valueEl) {
+      if (type === 'FaultShunt') valueEl.title = '故障并联电导强度 g(pu)，越大表示故障越强';
+      else if (type.includes('LoadScale')) valueEl.title = '负荷倍率，例如 1.10 表示增加 10%';
+      else if (type.includes('StoragePowerStep')) valueEl.title = '储能有功目标 MW';
+      else valueEl.title = '该事件类型通常不需要值';
+    }
+  }
+
+  function transientReadOptions() {
+    const events = transientSerializableEvents();
     return {
       solver_type: document.getElementById('trSolver')?.value || 'heun',
       t_end_s: Math.max(0.001, numberOr(document.getElementById('trEnd')?.value, 1.0)),
@@ -2674,14 +2824,17 @@ const App = (() => {
   async function runTransientSimulation() {
     setStatus('暂态仿真中...', 'busy');
     if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-    const data = await apiPost('/api/session/run_transient', transientReadOptions());
-    if (data && !data.error) {
+    const result = await apiPostResult('/api/session/run_transient', transientReadOptions());
+    const data = result.data;
+    if (result.ok && data && !data.error) {
       _lastTransientData = data;
       showTransientResults(data);
       switchTab('results');
       setStatus('暂态仿真完成');
     } else {
-      setStatus('暂态仿真失败', 'error');
+      const msg = result.error || data?.error || '暂态仿真失败';
+      log(`暂态仿真失败: ${msg}`, 'error');
+      setStatus(msg, 'error');
     }
   }
 
@@ -2695,6 +2848,25 @@ const App = (() => {
 
   function transientDeviceByType(data, pred) {
     return (data?.device_series || []).filter(d => pred(String(d.type || '')));
+  }
+
+  function transientTraditionalGenerators(data) {
+    return (data?.device_series || []).filter(dev => {
+      const type = String(dev.type || '');
+      const source = String(dev.source_type || '');
+      return type === 'SynchronousMachine' || type === 'ExternalGrid' ||
+        type === 'ThreePhaseGenerator' || type === 'ThreePhaseExternalGrid' ||
+        source === 'generator' || source === 'external_grid' ||
+        source === 'three_phase_generator' || source === 'three_phase_external_grid';
+    });
+  }
+
+  function transientConverters(data) {
+    return (data?.device_series || []).filter(dev => {
+      const type = String(dev.type || '');
+      return type.includes('GridFollowing') || type.includes('GridForming') ||
+        type === 'DCDCConverter' || String(dev.canvas_type || '') === 'vsc';
+    });
   }
 
   function transientMetricTrace(dev, metric, name, color) {
@@ -2720,6 +2892,71 @@ const App = (() => {
       plot_bgcolor: 'rgba(0,0,0,0)',
       font: { color: getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#dcdfe4' },
     };
+  }
+
+  function transientBusVoltageTrace(data, domain, busId, color) {
+    const ids = domain === 'DC' ? (data.dc_bus_ids || []) : (data.ac_bus_ids || []);
+    const matrix = domain === 'DC' ? (data.dc_voltage_matrix || []) : (data.ac_voltage_matrix || []);
+    const pos = ids.findIndex(id => Number(id) === Number(busId));
+    if (pos < 0 || !Array.isArray(matrix[pos])) return null;
+    return {
+      x: data.time_s || [],
+      y: matrix[pos],
+      mode: 'lines',
+      name: `${domain} bus ${busId}`,
+      line: color ? { color } : undefined,
+      hovertemplate: `${domain} bus ${busId}<br>t=%{x:.4f}s<br>V=%{y:.4f} pu<extra></extra>`,
+    };
+  }
+
+  function transientObserverRows(data) {
+    const rows = [];
+    const seen = new Set();
+    const add = row => {
+      const key = `${row.kind}:${row.domain || ''}:${row.bus || ''}:${row.compKey || ''}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push(row);
+    };
+    (data?.scheduled_events || []).forEach(event => {
+      const type = String(event.type || '');
+      if (type === 'FaultShunt' || type === 'ClearFault' || type.includes('LoadScale')) {
+        const domain = event.component_type === 'DC' || type === 'DCLoadScale' ? 'DC' : 'AC';
+        const bus = Number(event.bus || 0);
+        if (bus > 0) {
+          add({
+            kind: 'bus',
+            name: `${domain} bus ${bus}`,
+            domain,
+            bus,
+            reason: transientEventLabel(type),
+          });
+        }
+      }
+    });
+    const devices = [
+      ...transientTraditionalGenerators(data).slice(0, 4),
+      ...transientConverters(data).slice(0, 4),
+    ];
+    devices.forEach(dev => add({
+      kind: 'device',
+      name: dev.name || `${dev.type || 'device'} ${dev.component_index ?? ''}`,
+      domain: dev.component_domain || (String(dev.canvas_type || '').startsWith('dc') ? 'DC' : 'AC'),
+      bus: Number(dev.bus || 0),
+      compKey: `${dev.type}:${dev.component_index}:${dev.name}`,
+      dev,
+      reason: dev.type || '',
+    }));
+    if (!rows.length) {
+      (data?.ac_bus_ids || []).slice(0, 4).forEach(bus => add({
+        kind: 'bus',
+        name: `AC bus ${bus}`,
+        domain: 'AC',
+        bus,
+        reason: '电压观测',
+      }));
+    }
+    return rows.slice(0, 10);
   }
 
   function drawTransientDashboard(data) {
@@ -2757,6 +2994,8 @@ const App = (() => {
     const freqChart = document.getElementById('trFreqChart');
     const gfl = transientDeviceByType(data, type => type.includes('GridFollowing'));
     const gfm = transientDeviceByType(data, type => type.includes('GridForming'));
+    const gens = transientTraditionalGenerators(data);
+    const converters = transientConverters(data);
     const freqTraces = [];
     gfl.slice(0, 4).forEach((dev, i) => {
       const tr = transientMetricTrace(dev, 'pll_frequency_hz', `${dev.name} PLL`, ['#61afef', '#56b6c2', '#c678dd', '#e5c07b'][i % 4]);
@@ -2772,7 +3011,7 @@ const App = (() => {
     }
     const powerChart = document.getElementById('trPowerChart');
     const pTraces = [];
-    [...gfl, ...gfm].slice(0, 6).forEach((dev, i) => {
+    converters.slice(0, 6).forEach((dev, i) => {
       const tr = transientMetricTrace(dev, 'p_mw', `${dev.name} P`, ['#61afef', '#98c379', '#d19a66', '#e06c75', '#c678dd', '#56b6c2'][i % 6]);
       if (tr) pTraces.push(tr);
     });
@@ -2796,11 +3035,51 @@ const App = (() => {
     }
     const dcLinkChart = document.getElementById('trDcLinkChart');
     if (dcLinkChart) {
-      const dcLinkTraces = [...gfl, ...gfm].slice(0, 6).map((dev, i) =>
+      const dcLinkTraces = converters.slice(0, 6).map((dev, i) =>
         transientMetricTrace(dev, 'vdc_link_pu', `${dev.name} Vdc`, ['#56b6c2', '#98c379', '#d19a66', '#c678dd', '#61afef', '#e06c75'][i % 6])
       ).filter(Boolean);
       if (dcLinkTraces.length) Plotly.react(dcLinkChart, dcLinkTraces, transientPlotLayout('DC链电压状态', 'p.u.'), cfg);
       else dcLinkChart.innerHTML = '<p class="empty-hint">未启用动态 DC 链</p>';
+    }
+    const genFreqChart = document.getElementById('trGenFreqChart');
+    if (genFreqChart) {
+      const traces = gens.slice(0, 6).map((dev, i) =>
+        transientMetricTrace(dev, 'frequency_hz', `${dev.name} f`, ['#e06c75', '#d19a66', '#98c379', '#61afef', '#c678dd', '#56b6c2'][i % 6])
+      ).filter(Boolean);
+      if (traces.length) Plotly.react(genFreqChart, traces, transientPlotLayout('传统机组转速/频率', 'Hz'), cfg);
+      else genFreqChart.innerHTML = '<p class="empty-hint">无传统同步机/外部电网频率轨迹</p>';
+    }
+    const genPowerChart = document.getElementById('trGenPowerChart');
+    if (genPowerChart) {
+      const traces = [];
+      gens.slice(0, 4).forEach((dev, i) => {
+        const p = transientMetricTrace(dev, 'p_mw', `${dev.name} Pe`, ['#61afef', '#98c379', '#e06c75', '#c678dd'][i % 4]);
+        const pm = transientMetricTrace(dev, 'p_mech_mw', `${dev.name} Pm`, ['#61afef', '#98c379', '#e06c75', '#c678dd'][i % 4]);
+        if (p) traces.push(p);
+        if (pm) {
+          pm.line = { ...(pm.line || {}), dash: 'dot' };
+          traces.push(pm);
+        }
+      });
+      if (traces.length) Plotly.react(genPowerChart, traces, transientPlotLayout('传统机组电磁/机械功率', 'MW'), cfg);
+      else genPowerChart.innerHTML = '<p class="empty-hint">无传统机组功率轨迹</p>';
+    }
+    const observerChart = document.getElementById('trObserverChart');
+    if (observerChart) {
+      const palette = ['#61afef', '#e06c75', '#98c379', '#d19a66', '#c678dd', '#56b6c2', '#e5c07b', '#7c3aed'];
+      const traces = [];
+      transientObserverRows(data).forEach((row, i) => {
+        let tr = null;
+        if (row.kind === 'bus') {
+          tr = transientBusVoltageTrace(data, row.domain || 'AC', row.bus, palette[i % palette.length]);
+        } else if (row.dev) {
+          tr = transientMetricTrace(row.dev, 'v_pos_pu', `${row.name} V`, palette[i % palette.length]) ||
+            transientMetricTrace(row.dev, 'vdc_pu', `${row.name} Vdc`, palette[i % palette.length]);
+        }
+        if (tr) traces.push(tr);
+      });
+      if (traces.length) Plotly.react(observerChart, traces, transientPlotLayout('本地观测点电压', 'p.u.'), cfg);
+      else observerChart.innerHTML = '<p class="empty-hint">暂无可用本地观测轨迹</p>';
     }
     requestAnimationFrame(() => {
       document.querySelectorAll('#transientResults .js-plotly-plot').forEach(el => {
@@ -2818,6 +3097,7 @@ const App = (() => {
     const init = data.initialization || {};
     const gflCount = transientDeviceByType(data, type => type.includes('GridFollowing')).length;
     const gfmCount = transientDeviceByType(data, type => type.includes('GridForming')).length;
+    const genCount = transientTraditionalGenerators(data).length;
     const initStatus = init.power_flow_requested
       ? (init.power_flow_converged ? 'PF收敛' : (init.fallback_voltage_setpoints ? 'PF未收敛/回退' : 'PF未收敛'))
       : '设定值初始化';
@@ -2828,6 +3108,8 @@ const App = (() => {
       ['Newton', data.newton_iterations ?? 0, 'iter'],
       ['GFL', gflCount, '台'],
       ['GFM', gfmCount, '台'],
+      ['传统机组', genCount, '台'],
+      ['扰动数', Array.isArray(data.scheduled_events) ? data.scheduled_events.length : 0, '个'],
       ['AC最低电压', nf(final.min_ac_voltage_pu), 'p.u.'],
       ['DC最高电压', nf(final.max_dc_voltage_pu), 'p.u.'],
     ].forEach(([label, value, unit]) => {
@@ -2849,16 +3131,50 @@ const App = (() => {
     html += `<div><span>DC电压范围</span><strong>${nf(init.min_dc_voltage_pu)} - ${nf(init.max_dc_voltage_pu)} pu</strong></div>`;
     html += initWarnings;
     html += '</div>';
+    const scheduledEvents = Array.isArray(data.scheduled_events) ? data.scheduled_events : [];
+    const appliedEvents = Array.isArray(data.applied_events) ? data.applied_events : [];
+    html += '<div class="transient-section-head"><h5>扰动序列</h5><span>计划 / 实际触发</span></div>';
+    html += '<div class="transient-mini-grid">';
+    if (scheduledEvents.length) {
+      scheduledEvents.forEach((event, i) => {
+        html += `<div class="transient-mini-card"><strong>${escapeHtml(event.label || transientEventLabel(event.type) || `Event ${i + 1}`)}</strong><span>${escapeHtml(transientFormatEvent(event))}</span></div>`;
+      });
+    } else {
+      html += '<div class="transient-mini-card"><strong>无扰动</strong><span>本次为事件前平衡点保持/小扰动检查。</span></div>';
+    }
+    html += `<div class="transient-mini-card"><strong>已触发</strong><span>${appliedEvents.length ? appliedEvents.map(escapeHtml).join('<br>') : '无'}</span></div>`;
+    html += '</div>';
+    const observerRows = transientObserverRows(data);
+    const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
+    html += '<div class="transient-section-head"><h5>本地观测点</h5><span>点击卡片定位画布元件</span></div>';
+    html += '<div class="transient-mini-grid">';
+    if (observerRows.length) {
+      observerRows.forEach(row => {
+        const compId = row.dev ? rowCanvasCompId(row.dev, maps)
+          : (row.domain === 'DC' ? maps?.dc?.[row.bus] : maps?.ac?.[row.bus]);
+        const cid = parseInt(compId, 10);
+        const clickable = Number.isInteger(cid);
+        const attr = clickable
+          ? ` class="transient-mini-card topo-clickable" data-comp-id="${cid}" onclick="Canvas.panToComponent(${cid})"`
+          : ' class="transient-mini-card"';
+        html += `<div${attr}><strong>${escapeHtml(row.name || 'Observer')}</strong><span>${escapeHtml(row.reason || '')}${row.bus ? `<br>${escapeHtml(row.domain || 'AC')} bus ${escapeHtml(String(row.bus))}` : ''}</span></div>`;
+      });
+    } else {
+      html += '<div class="transient-mini-card"><strong>暂无观测点</strong><span>加载含母线或动态设备的算例后自动生成。</span></div>';
+    }
+    html += '</div>';
     html += '<div class="transient-dashboard-grid">';
     html += '<div id="trVoltageChart" class="transient-chart transient-chart-wide"></div>';
     html += '<div id="trAcHeatmap" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trObserverChart" class="transient-chart transient-chart-wide"></div>';
+    html += '<div id="trGenFreqChart" class="transient-chart"></div>';
+    html += '<div id="trGenPowerChart" class="transient-chart"></div>';
     html += '<div id="trFreqChart" class="transient-chart"></div>';
     html += '<div id="trPowerChart" class="transient-chart"></div>';
     html += '<div id="trCurrentChart" class="transient-chart"></div>';
     html += '<div id="trDcLinkChart" class="transient-chart"></div>';
     html += '</div>';
     html += '<h5>动态设备</h5><table><thead><tr><th>设备</th><th>类型</th><th>母线</th><th>P(MW)</th><th>Q(Mvar)</th><th>频率/PLL(Hz)</th><th>|I|(pu)</th></tr></thead><tbody>';
-    const maps = typeof Canvas !== 'undefined' && Canvas.getCompBusMap ? Canvas.getCompBusMap() : null;
     (data.device_series || []).slice(0, 80).forEach(dev => {
       const vals = dev.values || {};
       const last = arr => Array.isArray(arr) && arr.length ? arr[arr.length - 1] : undefined;
@@ -7462,7 +7778,12 @@ const App = (() => {
     // Bar 3: transient phasor dynamics
     document.getElementById('btnRunTransient')?.addEventListener('click', runTransientSimulation);
     document.getElementById('trPowerFlowInit')?.addEventListener('change', updateTransientPfControls);
+    document.getElementById('trEventType')?.addEventListener('change', updateTransientEventControls);
+    document.getElementById('btnAddTransientEvent')?.addEventListener('click', addTransientEventFromControls);
+    document.getElementById('btnClearTransientEvents')?.addEventListener('click', clearTransientEvents);
     updateTransientPfControls();
+    updateTransientEventControls();
+    renderTransientEventSchedule();
     document.getElementById('btnExportTransient')?.addEventListener('click', () => {
       if (!_lastTransientData) {
         log('暂无暂态仿真结果可导出，请先运行暂态仿真', 'warn');

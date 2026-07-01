@@ -340,6 +340,30 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     network.dc_bus_ids.push_back(bus.index);
   }
 
+  for (const auto& bus : dyn.canonical_system.ac.buses) {
+    if (!bus.in_service || bus.bus_type == BusType::ISOLATED) continue;
+    const int bus_pos = network.acBusPosition(bus.index);
+    if (bus_pos < 0) continue;
+    if (std::abs(bus.pd_mw) <= 1e-12 && std::abs(bus.qd_mvar) <= 1e-12) continue;
+    DynamicACBusLoad load;
+    load.bus = bus.index;
+    load.bus_pos = bus_pos;
+    load.p_mw = bus.pd_mw;
+    load.q_mvar = bus.qd_mvar;
+    network.ac_bus_loads.push_back(load);
+  }
+
+  for (const auto& bus : dyn.canonical_system.dc.buses) {
+    if (!bus.in_service || bus.bus_type == DCBusType::DC_ISOLATED) continue;
+    const int bus_pos = network.dcBusPosition(bus.index);
+    if (bus_pos < 0 || std::abs(bus.pd_mw) <= 1e-12) continue;
+    DynamicDCBusLoad load;
+    load.bus = bus.index;
+    load.bus_pos = bus_pos;
+    load.p_mw = bus.pd_mw;
+    network.dc_bus_loads.push_back(load);
+  }
+
   if (dyn.canonical_system.three_phase_ac &&
       !dyn.canonical_system.three_phase_ac->buses.empty()) {
     for (const auto& line : dyn.canonical_system.three_phase_ac->lines) {

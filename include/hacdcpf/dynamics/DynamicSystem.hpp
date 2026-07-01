@@ -52,6 +52,21 @@ struct DynamicFaultShunt {
   double clear_time_s{0.0};
 };
 
+struct DynamicACBusLoad {
+  int bus{0};
+  int bus_pos{-1};
+  double p_mw{0.0};
+  double q_mvar{0.0};
+  double scale{1.0};
+};
+
+struct DynamicDCBusLoad {
+  int bus{0};
+  int bus_pos{-1};
+  double p_mw{0.0};
+  double scale{1.0};
+};
+
 class DynamicNetwork {
  public:
   using Complex = std::complex<double>;
@@ -64,6 +79,8 @@ class DynamicNetwork {
   std::vector<DynamicACBranch> ac_branches;
   std::vector<DynamicDCBranch> dc_branches;
   std::vector<DynamicFaultShunt> fault_shunts;
+  std::vector<DynamicACBusLoad> ac_bus_loads;
+  std::vector<DynamicDCBusLoad> dc_bus_loads;
 
   std::unordered_map<int, int> ac_bus_pos_by_id;
   std::unordered_map<int, int> dc_bus_pos_by_id;

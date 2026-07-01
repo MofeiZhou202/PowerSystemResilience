@@ -247,8 +247,12 @@ void DynamicLoad::stamp(double,
 
 void DynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::ACLoadScale) return;
-  if (event.component_index != 0 && event.component_index != params_.component_index) return;
-  if (event.bus != 0 && event.bus != params_.bus) return;
+  const bool bus_targeted = event.bus != 0;
+  if (bus_targeted && event.bus != params_.bus) return;
+  if (!bus_targeted && event.component_index != 0 &&
+      event.component_index != params_.component_index) {
+    return;
+  }
   params_.scale = std::max(0.0, event.value);
 }
 
@@ -308,8 +312,12 @@ void ThreePhaseDynamicLoad::handleEvent(const DynamicEvent& event,
                                         DynamicState&,
                                         NetworkState&) {
   if (event.type != DynamicEventType::ACLoadScale) return;
-  if (event.component_index != 0 && event.component_index != params_.component_index) return;
-  if (event.bus != 0 && event.bus != params_.bus) return;
+  const bool bus_targeted = event.bus != 0;
+  if (bus_targeted && event.bus != params_.bus) return;
+  if (!bus_targeted && event.component_index != 0 &&
+      event.component_index != params_.component_index) {
+    return;
+  }
   params_.scale = std::max(0.0, event.value);
 }
 
@@ -372,8 +380,12 @@ void DCDynamicLoad::stamp(double,
 
 void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type != DynamicEventType::DCLoadScale) return;
-  if (event.component_index != 0 && event.component_index != params_.component_index) return;
-  if (event.bus != 0 && event.bus != params_.bus) return;
+  const bool bus_targeted = event.bus != 0;
+  if (bus_targeted && event.bus != params_.bus) return;
+  if (!bus_targeted && event.component_index != 0 &&
+      event.component_index != params_.component_index) {
+    return;
+  }
   params_.scale = std::max(0.0, event.value);
 }
 

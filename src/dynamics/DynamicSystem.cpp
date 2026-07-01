@@ -32,7 +32,7 @@ int DynamicNetwork::dcBusPosition(int bus_id) const {
 
 void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
   std::vector<Eigen::Triplet<Complex>> y_triplets;
-  y_triplets.reserve(ac_branches.size() * 36 + ac_bus_ids.size() * 3);
+  y_triplets.reserve(ac_branches.size() * 36 + ac_bus_loads.size() * 3 + ac_bus_ids.size() * 3);
 
   for (const auto& branch : ac_branches) {
     if (!branch.in_service || branch.from_pos < 0 || branch.to_pos < 0) continue;
@@ -59,6 +59,17 @@ void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
     }
   }
 
+  for (const auto& load : ac_bus_loads) {
+    if (load.bus_pos < 0 || base_mva <= 0.0 || load.scale <= 0.0) continue;
+    const Complex s_pu(load.p_mw / base_mva * load.scale,
+                       load.q_mvar / base_mva * load.scale);
+    const Complex y_load = std::conj(s_pu) / 3.0;
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = acPhaseNode(load.bus_pos, phase);
+      y_triplets.emplace_back(node, node, y_load);
+    }
+  }
+
   if (singular_regularization_pu > 0.0) {
     for (int i = 0; i < acPhaseNodeCount(); ++i) {
       y_triplets.emplace_back(i, i, Complex(singular_regularization_pu, 0.0));
@@ -69,7 +80,7 @@ void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
   Yac_base.setFromTriplets(y_triplets.begin(), y_triplets.end());
 
   std::vector<Eigen::Triplet<double>> g_triplets;
-  g_triplets.reserve(dc_branches.size() * 4 + dc_bus_ids.size());
+  g_triplets.reserve(dc_branches.size() * 4 + dc_bus_loads.size() + dc_bus_ids.size());
   for (const auto& branch : dc_branches) {
     if (!branch.in_service || branch.from_pos < 0 || branch.to_pos < 0 ||
         branch.conductance_pu == 0.0) {
@@ -85,6 +96,12 @@ void DynamicNetwork::rebuildBaseMatrices(double singular_regularization_pu) {
   for (const auto& fault : fault_shunts) {
     if (!fault.active || fault.is_ac || fault.bus_pos < 0) continue;
     g_triplets.emplace_back(fault.bus_pos, fault.bus_pos, fault.g_pu);
+  }
+
+  for (const auto& load : dc_bus_loads) {
+    if (load.bus_pos < 0 || base_mva <= 0.0 || load.scale <= 0.0) continue;
+    const double p_pu = load.p_mw / base_mva * load.scale;
+    g_triplets.emplace_back(load.bus_pos, load.bus_pos, std::max(0.0, p_pu));
   }
 
   if (singular_regularization_pu > 0.0) {

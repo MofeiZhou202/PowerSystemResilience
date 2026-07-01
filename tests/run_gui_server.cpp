@@ -1815,6 +1815,177 @@ hacdcpf::dynamics::DynamicEventType dynamic_event_type_from_json(const std::stri
   return DynamicEventType::Custom;
 }
 
+const char* dynamic_event_type_name(hacdcpf::dynamics::DynamicEventType type) {
+  using hacdcpf::dynamics::DynamicEventType;
+  switch (type) {
+    case DynamicEventType::ACBranchTrip: return "ACBranchTrip";
+    case DynamicEventType::ACBranchClose: return "ACBranchClose";
+    case DynamicEventType::DCBranchTrip: return "DCBranchTrip";
+    case DynamicEventType::DCBranchClose: return "DCBranchClose";
+    case DynamicEventType::ACLoadScale: return "ACLoadScale";
+    case DynamicEventType::DCLoadScale: return "DCLoadScale";
+    case DynamicEventType::GeneratorTrip: return "GeneratorTrip";
+    case DynamicEventType::VSCTrip: return "VSCTrip";
+    case DynamicEventType::DCDCTrip: return "DCDCTrip";
+    case DynamicEventType::StoragePowerStep: return "StoragePowerStep";
+    case DynamicEventType::DCStoragePowerStep: return "DCStoragePowerStep";
+    case DynamicEventType::FaultShunt: return "FaultShunt";
+    case DynamicEventType::ClearFault: return "ClearFault";
+    case DynamicEventType::Custom: return "Custom";
+  }
+  return "Custom";
+}
+
+json dynamic_event_to_json(const hacdcpf::dynamics::DynamicEvent& event) {
+  return json{{"time_s", event.time_s},
+              {"type", dynamic_event_type_name(event.type)},
+              {"component_index", event.component_index},
+              {"bus", event.bus},
+              {"value", event.value},
+              {"duration_s", event.duration_s},
+              {"component_type", event.component_type},
+              {"label", event.label}};
+}
+
+template <typename T>
+bool indexed_component_exists(const std::vector<T>& rows, int index) {
+  if (index == 0) return true;
+  return std::any_of(rows.begin(), rows.end(), [&](const auto& row) {
+    return row.index == index;
+  });
+}
+
+std::vector<std::string> validate_dynamic_event(
+    const hacdcpf::dynamics::DynamicEvent& event,
+    const hacdcpf::dynamics::DynamicSystem& dyn) {
+  using hacdcpf::dynamics::DynamicEventType;
+  std::vector<std::string> warnings;
+  const auto prefix = [&]() {
+    std::ostringstream os;
+    os << "Transient event " << dynamic_event_type_name(event.type) << " @ "
+       << event.time_s << "s: ";
+    return os.str();
+  };
+  const auto warn = [&](const std::string& msg) {
+    warnings.push_back(prefix() + msg);
+  };
+
+  if (!std::isfinite(event.time_s) || event.time_s < 0.0) {
+    warn("time must be non-negative");
+  }
+  switch (event.type) {
+    case DynamicEventType::FaultShunt: {
+      const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
+      const int bus = event.bus != 0 ? event.bus : event.component_index;
+      if (bus == 0) {
+        warn("fault bus is not set");
+      } else if ((is_dc ? dyn.network.dcBusPosition(bus)
+                        : dyn.network.acBusPosition(bus)) < 0) {
+        warn(std::string(is_dc ? "DC" : "AC") + " fault bus " +
+             std::to_string(bus) + " was not found");
+      }
+      if (event.value <= 0.0) {
+        warn("fault intensity/admittance is not positive; solver will use the default strong shunt");
+      }
+      if (event.duration_s <= 0.0) {
+        warn("fault duration is not positive; it will persist until an explicit ClearFault event");
+      }
+      break;
+    }
+    case DynamicEventType::ClearFault: {
+      const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
+      const int bus = event.bus != 0 ? event.bus : event.component_index;
+      if (bus != 0 && (is_dc ? dyn.network.dcBusPosition(bus)
+                             : dyn.network.acBusPosition(bus)) < 0) {
+        warn(std::string(is_dc ? "DC" : "AC") + " clear-fault bus " +
+             std::to_string(bus) + " was not found");
+      }
+      break;
+    }
+    case DynamicEventType::ACLoadScale:
+      if (event.value < 0.0) warn("load scale is negative and will be clipped to zero");
+      if (event.bus != 0 || event.component_index != 0) {
+        const int bus = event.bus != 0 ? event.bus : event.component_index;
+        if (bus != 0 && dyn.network.acBusPosition(bus) >= 0) {
+          break;
+        }
+        const bool exists =
+            indexed_component_exists(dyn.canonical_system.ac.loads, event.component_index) ||
+            (dyn.canonical_system.three_phase_ac &&
+             indexed_component_exists(dyn.canonical_system.three_phase_ac->loads,
+                                      event.component_index));
+        if (!exists) warn("AC load bus/index " + std::to_string(bus) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCLoadScale:
+      if (event.value < 0.0) warn("DC load scale is negative and will be clipped to zero");
+      if (event.bus != 0 || event.component_index != 0) {
+        const int bus = event.bus != 0 ? event.bus : event.component_index;
+        if (bus != 0 && dyn.network.dcBusPosition(bus) >= 0) {
+          break;
+        }
+        if (!indexed_component_exists(dyn.canonical_system.dc.loads, event.component_index)) {
+          warn("DC load bus/index " + std::to_string(bus) + " was not found");
+        }
+      }
+      break;
+    case DynamicEventType::ACBranchTrip:
+    case DynamicEventType::ACBranchClose:
+      if (!indexed_component_exists(dyn.network.ac_branches, event.component_index)) {
+        warn("AC branch index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCBranchTrip:
+    case DynamicEventType::DCBranchClose:
+      if (!indexed_component_exists(dyn.network.dc_branches, event.component_index)) {
+        warn("DC branch index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::GeneratorTrip: {
+      if (event.component_index != 0) {
+        const bool exists =
+            indexed_component_exists(dyn.canonical_system.ac.generators, event.component_index) ||
+            indexed_component_exists(dyn.canonical_system.ac.external_grids, event.component_index) ||
+            (dyn.canonical_system.three_phase_ac &&
+             (indexed_component_exists(dyn.canonical_system.three_phase_ac->generators,
+                                       event.component_index) ||
+              indexed_component_exists(dyn.canonical_system.three_phase_ac->external_grids,
+                                       event.component_index)));
+        if (!exists) warn("generator/external-grid index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    }
+    case DynamicEventType::VSCTrip:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.vsc_converters, event.component_index)) {
+        warn("VSC index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCDCTrip:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.dc.dcdc_converters, event.component_index)) {
+        warn("DC/DC converter index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::StoragePowerStep:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.ac.storage, event.component_index)) {
+        warn("AC storage index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::DCStoragePowerStep:
+      if (event.component_index != 0 &&
+          !indexed_component_exists(dyn.canonical_system.dc.storage, event.component_index)) {
+        warn("DC storage index " + std::to_string(event.component_index) + " was not found");
+      }
+      break;
+    case DynamicEventType::Custom:
+      warn("custom events are recorded but have no solver action yet");
+      break;
+  }
+  return warnings;
+}
+
 json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt) {
   return json{{"solver_type", dynamic_solver_type_name(opt.solver_type)},
               {"t_start_s", opt.t_start_s},
@@ -10497,9 +10668,21 @@ int main(int argc, char** argv) {
         }
       }
 
+      json scheduled_events = json::array();
+      for (const auto& event : dyn.events) {
+        scheduled_events.push_back(dynamic_event_to_json(event));
+        auto validation_warnings = validate_dynamic_event(event, dyn);
+        dyn.warnings.insert(dyn.warnings.end(),
+                            validation_warnings.begin(),
+                            validation_warnings.end());
+      }
+
       hacdcpf::dynamics::DynamicSolver solver;
       const auto result = solver.solve(dyn);
       json out = dynamic_results_to_json(result, opt);
+      out["scheduled_events"] = scheduled_events;
+      out["ac_bus_ids"] = dyn.network.ac_bus_ids;
+      out["dc_bus_ids"] = dyn.network.dc_bus_ids;
       res.status = result.success ? 200 : 400;
       res.set_content(out.dump(), "application/json");
       g_session.busy.store(false);
