@@ -41,6 +41,31 @@ double clamp_nonnegative(double x) {
   return (x > 0.0) ? x : 0.0;
 }
 
+DynamicModelProfile projected_dynamic_profile(DynamicModelProfile profile,
+                                              const std::string& source_id,
+                                              const std::string& notes) {
+  if (profile.empty()) return profile;
+  if (profile.source_id.empty()) profile.source_id = source_id;
+  if (profile.notes.empty()) profile.notes = notes;
+  return profile;
+}
+
+DynamicModelProfile energy_router_profile_for(const EnergyRouter& er,
+                                              const EnergyRouterPort* port,
+                                              const std::string& device_role) {
+  if (port != nullptr && !port->dynamic_model.empty()) {
+    return projected_dynamic_profile(
+        port->dynamic_model,
+        "EnergyRouterPort:" + std::to_string(er.index) + ":" +
+            std::to_string(port->index),
+        "Projected from energy router port into canonical " + device_role);
+  }
+  return projected_dynamic_profile(
+      er.dynamic_model,
+      "EnergyRouter:" + std::to_string(er.index),
+      "Projected from energy router into canonical " + device_role);
+}
+
 std::pair<double, double> rx_from_vk_vkr(double vk_percent,
                                          double vkr_percent,
                                          double base_mva,
@@ -119,6 +144,10 @@ void add_equivalent_load_from_asymmetric(const AsymmetricLoad& al, ACSystem& ac,
   ld.p_percent_q = al.const_p_percent;
   ld.controllable = al.controllable;
   ld.priority = al.priority;
+  ld.dynamic_model =
+      projected_dynamic_profile(al.dynamic_model,
+                                "AsymmetricLoad:" + std::to_string(al.index),
+                                "Projected from asymmetric load into canonical load");
   ac.loads.push_back(ld);
 }
 
@@ -418,6 +447,10 @@ void add_equivalent_load_from_motor(const AsynchronousMotor& m,
   ld.sc_source_index = m.index;
   ld.motor_poles = m.poles;
   ld.motor_efficiency = m.efficiency;
+  ld.dynamic_model =
+      projected_dynamic_profile(m.dynamic_model,
+                                "AsynchronousMotor:" + std::to_string(m.index),
+                                "Projected from asynchronous motor into canonical load");
   if (m.vn_kv > 1e-6 && m.sn_mva > 1e-6) {
     const double z_base_motor = m.vn_kv * m.vn_kv / m.sn_mva;
     ld.r_sc_pu  = m.r_pu / z_base_motor;
@@ -457,6 +490,10 @@ void add_equivalent_static_gen_from_vpp(const VirtualPowerPlant& vpp,
   // Regulation capability 鈫?reactive limits (symmetric if not given)
   sg.qmax_mvar = (vpp.q_output_mvar >= 0.0) ? vpp.q_output_mvar : 0.0;
   sg.qmin_mvar = (vpp.q_output_mvar < 0.0)  ? vpp.q_output_mvar : 0.0;
+  sg.dynamic_model =
+      projected_dynamic_profile(vpp.dynamic_model,
+                                "VirtualPowerPlant:" + std::to_string(vpp.index),
+                                "Projected from virtual power plant into canonical static generator");
 
   ac.static_generators.push_back(sg);
 }
@@ -490,6 +527,10 @@ void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
   sg.pmax_mw   = mg.p_export_max_mw > 1e-9 ? mg.p_export_max_mw : mg.p_exchange_max_mw;
   sg.pmin_mw   = mg.p_import_max_mw > 1e-9 ? -mg.p_import_max_mw : mg.p_exchange_min_mw;
   sg.controllable = true;
+  sg.dynamic_model =
+      projected_dynamic_profile(mg.dynamic_model,
+                                "Microgrid:" + std::to_string(mg.index),
+                                "Projected from microgrid into canonical static generator");
 
   ac.static_generators.push_back(sg);
 }
@@ -530,6 +571,10 @@ void add_equivalent_storage_from_mobile_storage(const MobileStorage& ms,
   st.e_mwh         = ms.e_mwh;
   st.controllable  = ms.controllable;
   st.type          = ms.type;
+  st.dynamic_model =
+      projected_dynamic_profile(ms.dynamic_model,
+                                "MobileStorage:" + std::to_string(ms.index),
+                                "Projected from mobile storage into canonical storage");
 
   ac.storage.push_back(st);
 }
@@ -660,6 +705,10 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.p_percent_q = ld.const_p_percent;
     eq.motor_percent = ld.motor_percent;
     eq.x_sub_pu = ld.x_r_ratio;
+    eq.dynamic_model =
+        projected_dynamic_profile(ld.dynamic_model,
+                                  "ThreePhaseLoad:" + std::to_string(ld.index),
+                                  "Projected from three-phase load into canonical load");
     out.ac.loads.push_back(eq);
   }
 
@@ -683,6 +732,10 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.xdpp_pu = g.xdpp_pu;
     eq.x0_pu = g.x0_pu;
     eq.r0_pu = g.r0_pu;
+    eq.dynamic_model =
+        projected_dynamic_profile(g.dynamic_model,
+                                  "ThreePhaseGenerator:" + std::to_string(g.index),
+                                  "Projected from three-phase generator into canonical generator");
     out.ac.generators.push_back(eq);
   }
 
@@ -703,6 +756,10 @@ void project_three_phase_if_needed(HybridPowerSystem& out) {
     eq.x_pu = eg.x1_pu;
     eq.r0_pu = eg.r0_pu;
     eq.x0_pu = eg.x0_pu;
+    eq.dynamic_model =
+        projected_dynamic_profile(eg.dynamic_model,
+                                  "ThreePhaseExternalGrid:" + std::to_string(eg.index),
+                                  "Projected from three-phase external grid into canonical external grid");
     out.ac.external_grids.push_back(eq);
   }
 }
@@ -1790,6 +1847,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
       vsc.vn_ac_kv     = (p->voltage_level_kv > 0.0) ? p->voltage_level_kv : er.vn_ac_kv;
       vsc.vn_dc_kv     = dc_kv;
       vsc.controllable = true;
+      vsc.dynamic_model = energy_router_profile_for(er, p, "VSC converter");
 
       sys.vsc_converters.push_back(vsc);
     }
@@ -1843,6 +1901,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
       vsc.vn_ac_kv     = (p->voltage_level_kv > 0.0) ? p->voltage_level_kv : er.vn_ac_kv;
       vsc.vn_dc_kv     = dc_kv;
       vsc.controllable = true;
+      vsc.dynamic_model = energy_router_profile_for(er, p, "VSC converter");
 
       sys.vsc_converters.push_back(vsc);
     }
@@ -1894,6 +1953,7 @@ static void expand_energy_routers(HybridPowerSystem& sys) {
     dcdc.controllable = true;
     dcdc.mtbf_hours   = er.mtbf_hours;
     dcdc.mttr_hours   = er.mttr_hours;
+    dcdc.dynamic_model = energy_router_profile_for(er, nullptr, "DCDC converter");
 
     sys.dc.dcdc_converters.push_back(dcdc);
   }

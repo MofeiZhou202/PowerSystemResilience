@@ -13,6 +13,7 @@
 #include "hacdcpf/model/ac_components.hpp"
 #include "hacdcpf/model/converter_components.hpp"
 #include "hacdcpf/model/dc_components.hpp"
+#include "hacdcpf/model/dynamic_model_profile.hpp"
 #include "hacdcpf/model/enums/grid_enums.hpp"
 #include "hacdcpf/projection/canonical_network.hpp"
 
@@ -58,6 +59,8 @@ struct VirtualPowerPlant {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -106,6 +109,8 @@ struct Microgrid {
   double mtbf_hours{0.0};
   double mttr_hours{0.0};
   double t_scheduled_hr{0.0};
+
+  DynamicModelProfile dynamic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -223,6 +228,7 @@ inline void materialize_dc_storage(HybridPowerSystem& sys) {
     st.forced_outage_rate = d.forced_outage_rate;
     st.mttr_hr = d.mttr_hr;
     st.t_scheduled_hr = d.t_scheduled_hr;
+    st.dynamic_model = d.dynamic_model;
     sys.dc.storage.push_back(std::move(st));
   }
   sys.dc.dc_storage.clear();

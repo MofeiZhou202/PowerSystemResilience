@@ -1,0 +1,124 @@
+# PowerSimulationsDynamics.jl Validation
+
+This folder contains reusable helpers for cross-checking HACDCPF transient
+models against PowerSimulationsDynamics.jl benchmark cases.
+
+## Validation Ladder
+
+The C++ transient test suite now writes HACDCPF validation traces for three
+levels:
+
+- Component level: conventional generator subset derived from PSD Test 15
+  `GENROU` three-bus data.
+- Component level: constant-power load voltage response derived from PSD Test 33
+  ZIP-load data.
+- System level: hybrid AC/DC VSC step response with preserved dynamic profiles.
+
+Normal C++ tests do not require Julia. They check that the HACDCPF models
+initialize at dynamic equilibrium, react to events, preserve dynamic metadata,
+and emit trace artifacts.
+
+Artifacts are written under:
+
+```text
+${TMPDIR}/hacdcpf_psd_validation
+```
+
+The summary CSV is:
+
+```text
+${TMPDIR}/hacdcpf_psd_validation/hacdcpf_psd_validation_summary.csv
+```
+
+## Grid-Following Inverter Benchmarks
+
+The C++ test `test_transient_dynamics` always runs local HACDCPF traces for:
+
+- PSD Test 24: grid-following inverter with `ReducedOrderPLL`.
+- PSD Test 51: grid-following inverter with `KauraPLL`.
+
+Both use the PSD reference-power step `P_ref: 0.5 -> 0.7` at `t = 1.0 s`.
+The normal test run does not require Julia.
+
+To run the external PSD comparison:
+
+```bash
+cd /Users/tianyangzhao/Codes/HybridACDCDistributionSystemsSimulation
+HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
+  "[dynamics][benchmark][psd][gridfollowing]"
+```
+
+Optional environment variables:
+
+- `HACDCPF_PSD_REPO`: path to the PowerSimulationsDynamics.jl checkout.
+  Defaults to `/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl`.
+- `HACDCPF_JULIA_BIN`: Julia executable. Defaults to `julia`.
+
+If PSD dependencies are missing, instantiate the PSD test environment first:
+
+```bash
+cd /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl
+julia --project=test -e 'using Pkg; Pkg.instantiate()'
+```
+
+The C++ test writes HACDCPF and PSD CSV traces plus Julia logs under:
+
+```text
+${TMPDIR}/hacdcpf_psd_gridfollowing
+```
+
+The focused grid-following exporter can also be run directly:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_gridfollowing_trace.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  test24 \
+  /tmp/psd_test24_p_oc.csv \
+  p_oc
+```
+
+## Generic PSD Trace Exporter
+
+`export_trace.jl` supports the broader validation ladder:
+
+```bash
+julia --project=/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl/test \
+  tools/psd_validation/export_trace.jl \
+  /Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl \
+  genrou \
+  /tmp/psd_genrou_delta.csv \
+  generator-102-1:delta_deg
+```
+
+Supported cases today:
+
+- `genrou`
+- `zip_constant_power`
+- `test24` / `gridfollowing_reduced`
+- `test51` / `gridfollowing_kaura`
+
+Supported signals today:
+
+- `bus<number>:voltage_mag`
+- `bus<number>:voltage_angle`
+- `<device>:delta_rad`
+- `<device>:delta_deg`
+- `<device>:omega_pu`
+- `<device>:frequency_pu`
+- `<device>:p_pu`
+- `<device>:q_pu`
+- `<device>:p_oc`
+
+Run the external comparison tests with:
+
+```bash
+cd /Users/tianyangzhao/Codes/HybridACDCDistributionSystemsSimulation
+HACDCPF_RUN_PSD_COMPARE=1 ./build/macos-release/tests/test_transient_dynamics \
+  "[dynamics][benchmark][psd][external]"
+```
+
+Current limitation: the generator and load external comparisons are deliberately
+loose because HACDCPF still uses reduced dynamic subsets. They are evidence
+gates for trace plumbing and event alignment, not a claim of GENROU/ZIP waveform
+equivalence yet.

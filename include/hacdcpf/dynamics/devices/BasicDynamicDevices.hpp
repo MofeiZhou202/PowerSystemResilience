@@ -3,6 +3,7 @@
 #include <array>
 #include <complex>
 #include <string>
+#include <vector>
 
 #include "hacdcpf/dynamics/devices/DynamicDevice.hpp"
 
@@ -13,6 +14,12 @@ enum class DCLinkMode {
   DynamicDCVoltage
 };
 
+enum class FrequencyEstimatorKind {
+  ReducedOrderPLL,
+  KauraPLL,
+  FixedFrequency
+};
+
 struct ACLoadDynamicParams {
   int component_index{0};
   int bus{0};
@@ -21,6 +28,7 @@ struct ACLoadDynamicParams {
   std::string canvas_type{"load"};
   std::string component_domain{"AC"};
   std::string source_type{"ac_load"};
+  std::vector<DynamicModelProfile> model_profiles;
   double p_mw{0.0};
   double q_mvar{0.0};
   double base_mva{100.0};
@@ -51,6 +59,7 @@ class DynamicLoad : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "ACLoad"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -66,6 +75,7 @@ struct ThreePhaseLoadDynamicParams {
   std::string canvas_type{"asymLoad"};
   std::string component_domain{"AC"};
   std::string source_type{"three_phase_load"};
+  std::vector<DynamicModelProfile> model_profiles;
   std::array<double, 3> p_mw{0.0, 0.0, 0.0};
   std::array<double, 3> q_mvar{0.0, 0.0, 0.0};
   std::array<bool, 3> phase_active{true, true, true};
@@ -97,6 +107,7 @@ class ThreePhaseDynamicLoad : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "ThreePhaseLoad"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -112,6 +123,7 @@ struct DCLoadDynamicParams {
   std::string canvas_type{"dcLoad"};
   std::string component_domain{"DC"};
   std::string source_type{"dc_load"};
+  std::vector<DynamicModelProfile> model_profiles;
   double p_mw{0.0};
   double base_mva{100.0};
   double scale{1.0};
@@ -141,6 +153,7 @@ class DCDynamicLoad : public DynamicDevice {
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "DCLoad"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -201,6 +214,7 @@ struct VoltageSourceDynamicParams {
   std::string canvas_type{"gen"};
   std::string component_domain{"AC"};
   std::string source_type{"voltage_source"};
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double vm_set_pu{1.0};
   double angle_set_rad{0.0};
@@ -242,6 +256,7 @@ class SynchronousMachine : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "IEEE"; }
   [[nodiscard]] std::string modelName() const override { return "ClassicalMachine"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -371,6 +386,7 @@ struct GridFormingInverterParams {
   std::string canvas_type{"vsc"};
   std::string component_domain{"AC"};
   std::string source_type{"grid_forming_inverter"};
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -429,6 +445,7 @@ class GridFormingInverter : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "NERC"; }
   [[nodiscard]] std::string modelName() const override { return "GridFormingNortonDroop"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -447,12 +464,16 @@ struct GridFollowingInverterParams {
   std::string canvas_type{"vsc"};
   std::string component_domain{"AC"};
   std::string source_type{"grid_following_inverter"};
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
   double response_t_s{0.02};
+  FrequencyEstimatorKind frequency_estimator{FrequencyEstimatorKind::ReducedOrderPLL};
+  std::string frequency_estimator_name{"ReducedOrderPLL"};
   double pll_kp{0.01};
   double pll_ki{1.0};
+  double pll_lpf_t_s{0.005};
   double power_filter_t_s{0.02};
   double v_min_current_pu{0.20};
   double current_limit_pu{0.0};
@@ -500,6 +521,7 @@ class GridFollowingInverter : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "NERC"; }
   [[nodiscard]] std::string modelName() const override { return "REGC_REEC_GFL_Subset"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -510,6 +532,20 @@ class GridFollowingInverter : public DynamicDevice {
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {
   bool grid_forming{false};
+  double angle_ref_rad{0.0};
+  double virtual_r_pu{0.0};
+  double virtual_x_pu{0.10};
+  double p_droop_pu{0.01};
+  double q_droop_pu{0.05};
+  double voltage_control_t_s{0.02};
+  double voltage_kp{0.1};
+  double voltage_ki{10.0};
+  double overload_kp{0.1};
+  double overload_ki{10.0};
+  double pmax_mw{0.0};
+  double pmin_mw{0.0};
+  double vmax_internal_pu{1.30};
+  double vmin_internal_pu{0.20};
 };
 
 class VSCConverterDynamic : public DynamicDevice {
@@ -546,6 +582,9 @@ class VSCConverterDynamic : public DynamicDevice {
   [[nodiscard]] std::string modelName() const override {
     return params_.grid_forming ? "GridFormingNortonDroop" : "REGC_REEC_GFL_Subset";
   }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override {
+    return params_.grid_forming ? gfm_.modelProfiles() : gfl_.modelProfiles();
+  }
 
  private:
   VSCConverterDynamicParams params_;
@@ -563,6 +602,7 @@ struct DCDCConverterDynamicParams {
   std::string canvas_type{"dcdcConverter"};
   std::string component_domain{"DC"};
   std::string source_type{"dcdc_converter"};
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double eta{0.98};
@@ -597,6 +637,7 @@ class DCDCConverterDynamic : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "HACDCPF"; }
   [[nodiscard]] std::string modelName() const override { return "FirstOrderDCDCConverter"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -614,6 +655,7 @@ struct BatteryDynamicParams {
   std::string canvas_type{"storage"};
   std::string component_domain{"AC"};
   std::string source_type{"storage"};
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -657,6 +699,7 @@ class BatteryDynamic : public DynamicDevice {
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "IEEE1547"; }
   [[nodiscard]] std::string modelName() const override { return "BatterySOCFirstOrder"; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 
@@ -676,6 +719,7 @@ struct PVDynamicParams {
   std::string model_standard{"IEEE1547"};
   std::string model_name{"PVCurrentSourceFirstOrder"};
   std::string parameter_set;
+  std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
   double p_ref_mw{0.0};
   double q_ref_mvar{0.0};
@@ -713,6 +757,7 @@ class PVDynamic : public DynamicDevice {
   [[nodiscard]] std::string modelStandard() const override { return params_.model_standard; }
   [[nodiscard]] std::string modelName() const override { return params_.model_name; }
   [[nodiscard]] std::string parameterSet() const override { return params_.parameter_set; }
+  [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
 

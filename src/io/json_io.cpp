@@ -135,6 +135,107 @@ static void reconcile_for_mtbf(double& forced_outage_rate,
   }
 }
 
+static bool dynamic_model_component_empty(
+    const DynamicModelComponentProfile& profile) {
+  return profile.type.empty() && profile.model.empty() &&
+         profile.standard.empty() && profile.parameter_set.empty() &&
+         profile.parameters.empty();
+}
+
+static json dynamic_model_component_to_json(
+    const DynamicModelComponentProfile& profile) {
+  json j;
+  if (!profile.type.empty()) j["type"] = profile.type;
+  if (!profile.model.empty()) j["model"] = profile.model;
+  if (!profile.standard.empty()) j["standard"] = profile.standard;
+  if (!profile.parameter_set.empty()) {
+    j["parameter_set"] = profile.parameter_set;
+  }
+  if (!profile.parameters.empty()) j["parameters"] = profile.parameters;
+  return j;
+}
+
+static DynamicModelComponentProfile dynamic_model_component_from_json(
+    const json& j) {
+  DynamicModelComponentProfile profile;
+  if (!j.is_object()) return profile;
+  profile.type = jget<std::string>(j, "type", "");
+  profile.model = jget_alias<std::string>(j, "model", "model_name", "");
+  profile.standard = jget<std::string>(j, "standard", "");
+  profile.parameter_set = jget<std::string>(j, "parameter_set", "");
+  if (j.contains("parameters") && j["parameters"].is_object()) {
+    for (const auto& [key, value] : j["parameters"].items()) {
+      if (value.is_number()) {
+        profile.parameters[key] = value.get<double>();
+      }
+    }
+  }
+  return profile;
+}
+
+static json dynamic_model_to_json(const DynamicModelProfile& profile) {
+  json j;
+  if (!profile.standard.empty()) j["standard"] = profile.standard;
+  if (!profile.model_name.empty()) j["model_name"] = profile.model_name;
+  if (!profile.parameter_set.empty()) {
+    j["parameter_set"] = profile.parameter_set;
+  }
+  if (!profile.source_id.empty()) j["source_id"] = profile.source_id;
+  if (!profile.notes.empty()) j["notes"] = profile.notes;
+  if (!profile.components.empty()) {
+    j["components"] = json::array();
+    for (const auto& component : profile.components) {
+      if (!dynamic_model_component_empty(component)) {
+        j["components"].push_back(dynamic_model_component_to_json(component));
+      }
+    }
+  }
+  if (!profile.parameters.empty()) j["parameters"] = profile.parameters;
+  return j;
+}
+
+static DynamicModelProfile dynamic_model_from_json(const json& j) {
+  DynamicModelProfile profile;
+  if (j.is_string()) {
+    profile.model_name = j.get<std::string>();
+    return profile;
+  }
+  if (!j.is_object()) return profile;
+  profile.standard = jget<std::string>(j, "standard", "");
+  profile.model_name = jget_alias<std::string>(j, "model_name", "model", "");
+  profile.parameter_set = jget<std::string>(j, "parameter_set", "");
+  profile.source_id = jget<std::string>(j, "source_id", "");
+  profile.notes = jget<std::string>(j, "notes", "");
+  if (j.contains("components") && j["components"].is_array()) {
+    for (const auto& component : j["components"]) {
+      auto parsed = dynamic_model_component_from_json(component);
+      if (!dynamic_model_component_empty(parsed)) {
+        profile.components.push_back(std::move(parsed));
+      }
+    }
+  }
+  if (j.contains("parameters") && j["parameters"].is_object()) {
+    for (const auto& [key, value] : j["parameters"].items()) {
+      if (value.is_number()) {
+        profile.parameters[key] = value.get<double>();
+      }
+    }
+  }
+  return profile;
+}
+
+static void add_dynamic_model_if_present(json& j,
+                                         const DynamicModelProfile& profile) {
+  if (!profile.empty()) j["dynamic_model"] = dynamic_model_to_json(profile);
+}
+
+static void read_dynamic_model_if_present(const json& j,
+                                          DynamicModelProfile& profile) {
+  if (j.contains("dynamic_model") && !j["dynamic_model"].is_null()) {
+    profile = dynamic_model_from_json(j["dynamic_model"]);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // To JSON
 // ═══════════════════════════════════════════════════════════════════════
@@ -343,6 +444,7 @@ static json dc_load_to_json(const DCLoad& l) {
   j["cost_mw"] = l.cost_mw;
   j["profile_id"] = l.profile_id;
   j["n_customers"] = l.n_customers;
+  add_dynamic_model_if_present(j, l.dynamic_model);
   return j;
 }
 
@@ -360,6 +462,7 @@ static DCLoad dc_load_from_json(const json& j) {
   l.cost_mw = jget(j, "cost_mw", 0.0);
   l.profile_id = jget(j, "profile_id", -1);
   l.n_customers = jget(j, "n_customers", 0);
+  read_dynamic_model_if_present(j, l.dynamic_model);
   return l;
 }
 
@@ -379,6 +482,7 @@ static json dc_static_generator_to_json(const StaticGeneratorDC& g) {
   j["mtbf_hours"] = g.mtbf_hours;
   j["mttr_hours"] = g.mttr_hours;
   j["t_scheduled_hr"] = g.t_scheduled_hr;
+  add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
 
@@ -398,6 +502,7 @@ static StaticGeneratorDC dc_static_generator_from_json(const json& j) {
   g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   g.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
+  read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }
 
@@ -422,6 +527,7 @@ static json pv_array_dc_to_json(const PVArrayDC& p) {
   j["mtbf_hours"] = p.mtbf_hours;
   j["mttr_hours"] = p.mttr_hours;
   j["t_scheduled_hr"] = p.t_scheduled_hr;
+  add_dynamic_model_if_present(j, p.dynamic_model);
   return j;
 }
 
@@ -446,6 +552,7 @@ static PVArrayDC pv_array_dc_from_json(const json& j) {
   p.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   p.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   p.t_scheduled_hr = jget(j, "t_scheduled_hr", 0.0);
+  read_dynamic_model_if_present(j, p.dynamic_model);
   return p;
 }
 
@@ -487,6 +594,7 @@ static json generator_to_json(const Generator& g) {
   j["profile_id"] = g.profile_id;
   j["forced_outage_rate"] = g.forced_outage_rate;
   j["mttr_hr"] = g.mttr_hr;
+  add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
 
@@ -528,6 +636,7 @@ static Generator generator_from_json(const json& j) {
   g.profile_id = jget(j, "profile_id", -1);
   g.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   g.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }
 
@@ -560,6 +669,7 @@ static json load_to_json(const Load& l) {
   j["sc_source_index"] = l.sc_source_index;
   j["motor_poles"] = l.motor_poles;
   j["motor_efficiency"] = l.motor_efficiency;
+  add_dynamic_model_if_present(j, l.dynamic_model);
   return j;
 }
 
@@ -592,6 +702,7 @@ static Load load_from_json(const json& j) {
   l.sc_source_index = jget(j, "sc_source_index", 0);
   l.motor_poles = jget(j, "motor_poles", 2);
   l.motor_efficiency = jget(j, "motor_efficiency", 0.95);
+  read_dynamic_model_if_present(j, l.dynamic_model);
   return l;
 }
 
@@ -653,6 +764,7 @@ static json storage_to_json(const Storage& st) {
   j["profile_id"] = st.profile_id;
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
+  add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
 
@@ -684,6 +796,7 @@ static Storage storage_from_json(const json& j) {
   st.profile_id = jget(j, "profile_id", -1);
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
 
@@ -715,6 +828,7 @@ static json dc_storage_to_json(const DCStorage& st) {
   j["controllable"] = st.controllable;
   j["forced_outage_rate"] = st.forced_outage_rate;
   j["mttr_hr"] = st.mttr_hr;
+  add_dynamic_model_if_present(j, st.dynamic_model);
   return j;
 }
 
@@ -745,6 +859,7 @@ static DCStorage dc_storage_from_json(const json& j) {
   st.controllable = jget(j, "controllable", true);
   st.forced_outage_rate = jget(j, "forced_outage_rate", 0.0);
   st.mttr_hr = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, st.dynamic_model);
   return st;
 }
 
@@ -765,6 +880,7 @@ static json renewable_gen_to_json(const RenewableGen& r) {
   j["capacity_factor"] = r.capacity_factor;
   j["profile_id"] = r.profile_id;
   j["emission_offset_tco2_mwh"] = r.emission_offset_tco2_mwh;
+  add_dynamic_model_if_present(j, r.dynamic_model);
   return j;
 }
 
@@ -785,6 +901,7 @@ static RenewableGen renewable_gen_from_json(const json& j) {
   r.capacity_factor = jget(j, "capacity_factor", 0.3);
   r.profile_id = jget(j, "profile_id", -1);
   r.emission_offset_tco2_mwh = jget(j, "emission_offset_tco2_mwh", 0.0);
+  read_dynamic_model_if_present(j, r.dynamic_model);
   return r;
 }
 
@@ -833,6 +950,7 @@ static json vsc_to_json(const VSCConverter& c) {
   j["coordination_group_id"] = c.coordination_group_id;
   j["is_master"] = c.is_master;
   j["participation_factor"] = c.participation_factor;
+  add_dynamic_model_if_present(j, c.dynamic_model);
   return j;
 }
 
@@ -882,6 +1000,7 @@ static VSCConverter vsc_from_json(const json& j) {
   c.coordination_group_id = jget<std::string>(j, "coordination_group_id", "");
   c.is_master = jget(j, "is_master", false);
   c.participation_factor = jget(j, "participation_factor", 0.0);
+  read_dynamic_model_if_present(j, c.dynamic_model);
   return c;
 }
 
@@ -910,6 +1029,7 @@ static json static_generator_to_json(const StaticGenerator& g) {
   j["co2_emission_rate"] = g.co2_emission_rate;
   j["mtbf_hours"] = g.mtbf_hours;
   j["mttr_hours"] = g.mttr_hours;
+  add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
 
@@ -938,6 +1058,7 @@ static StaticGenerator static_generator_from_json(const json& j) {
   g.co2_emission_rate = jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
   g.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   g.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }
 
@@ -1007,6 +1128,7 @@ static json asymmetric_load_to_json(const AsymmetricLoad& l) {
   j["const_p_percent"] = l.const_p_percent;
   j["controllable"] = l.controllable;
   j["priority"] = load_priority_str(l.priority);
+  add_dynamic_model_if_present(j, l.dynamic_model);
   return j;
 }
 
@@ -1036,6 +1158,7 @@ static AsymmetricLoad asymmetric_load_from_json(const json& j) {
   l.const_p_percent = jget(j, "const_p_percent", 100.0);
   l.controllable = jget(j, "controllable", false);
   l.priority = load_priority_from_str(jget<std::string>(j, "priority", "Medium"));
+  read_dynamic_model_if_present(j, l.dynamic_model);
   return l;
 }
 
@@ -1073,6 +1196,7 @@ static json pv_system_to_json(const PVSystem& p) {
   j["mttr_panel_hours"] = p.mttr_panel_hours;
   j["mtbf_inverter_hours"] = p.mtbf_inverter_hours;
   j["mttr_inverter_hours"] = p.mttr_inverter_hours;
+  add_dynamic_model_if_present(j, p.dynamic_model);
   return j;
 }
 
@@ -1110,6 +1234,7 @@ static PVSystem pv_system_from_json(const json& j) {
   p.mttr_panel_hours = jget(j, "mttr_panel_hours", 0.0);
   p.mtbf_inverter_hours = jget(j, "mtbf_inverter_hours", 0.0);
   p.mttr_inverter_hours = jget(j, "mttr_inverter_hours", 0.0);
+  read_dynamic_model_if_present(j, p.dynamic_model);
   return p;
 }
 
@@ -1137,6 +1262,7 @@ static json external_grid_to_json(const ExternalGrid& e) {
   j["cost_c0"] = e.cost_c0;
   if (e.price_profile_id >= 0)
     j["price_profile_id"] = e.price_profile_id;
+  add_dynamic_model_if_present(j, e.dynamic_model);
   return j;
 }
 
@@ -1164,6 +1290,7 @@ static ExternalGrid external_grid_from_json(const json& j) {
   e.cost_c1 = jget(j, "cost_c1", 0.0);
   e.cost_c0 = jget(j, "cost_c0", 0.0);
   e.price_profile_id = jget(j, "price_profile_id", -1);
+  read_dynamic_model_if_present(j, e.dynamic_model);
   return e;
 }
 
@@ -1358,6 +1485,7 @@ static json asynchronous_motor_to_json(const AsynchronousMotor& m) {
   j["efficiency"] = m.efficiency;
   j["r0_pu"] = m.r0_pu;
   j["x0_pu"] = m.x0_pu;
+  add_dynamic_model_if_present(j, m.dynamic_model);
   return j;
 }
 
@@ -1378,6 +1506,7 @@ static AsynchronousMotor asynchronous_motor_from_json(const json& j) {
   m.efficiency = jget(j, "efficiency", 0.95);
   m.r0_pu = jget(j, "r0_pu", 0.0);
   m.x0_pu = jget(j, "x0_pu", 0.0);
+  read_dynamic_model_if_present(j, m.dynamic_model);
   return m;
 }
 
@@ -1585,6 +1714,7 @@ static json three_phase_load_to_json(const ThreePhaseLoad& l) {
   j["motor_percent"] = l.motor_percent;
   j["lrc_pu"] = l.lrc_pu;
   j["x_r_ratio"] = l.x_r_ratio;
+  add_dynamic_model_if_present(j, l.dynamic_model);
   return j;
 }
 
@@ -1608,6 +1738,7 @@ static ThreePhaseLoad three_phase_load_from_json(const json& j) {
   l.motor_percent = jget(j, "motor_percent", 0.0);
   l.lrc_pu = jget(j, "lrc_pu", 0.0);
   l.x_r_ratio = jget(j, "x_r_ratio", 0.0);
+  read_dynamic_model_if_present(j, l.dynamic_model);
   return l;
 }
 
@@ -1631,6 +1762,7 @@ static json three_phase_generator_to_json(const ThreePhaseGenerator& g) {
   j["x2_pu"] = g.x2_pu;
   j["x0_pu"] = g.x0_pu;
   j["r0_pu"] = g.r0_pu;
+  add_dynamic_model_if_present(j, g.dynamic_model);
   return j;
 }
 
@@ -1654,6 +1786,7 @@ static ThreePhaseGenerator three_phase_generator_from_json(const json& j) {
   g.x2_pu = jget(j, "x2_pu", 0.0);
   g.x0_pu = jget(j, "x0_pu", 0.0);
   g.r0_pu = jget(j, "r0_pu", 0.0);
+  read_dynamic_model_if_present(j, g.dynamic_model);
   return g;
 }
 
@@ -1675,6 +1808,7 @@ static json three_phase_external_grid_to_json(const ThreePhaseExternalGrid& e) {
   j["x2_pu"] = e.x2_pu;
   j["r0_pu"] = e.r0_pu;
   j["x0_pu"] = e.x0_pu;
+  add_dynamic_model_if_present(j, e.dynamic_model);
   return j;
 }
 
@@ -1696,6 +1830,7 @@ static ThreePhaseExternalGrid three_phase_external_grid_from_json(const json& j)
   e.x2_pu = jget(j, "x2_pu", 0.0);
   e.r0_pu = jget(j, "r0_pu", 0.0);
   e.x0_pu = jget(j, "x0_pu", 0.0);
+  read_dynamic_model_if_present(j, e.dynamic_model);
   return e;
 }
 
@@ -2072,6 +2207,7 @@ static json dcdc_to_json(const DCDCConverter& c) {
   j["n_ratio"] = c.n_ratio;
   j["mtbf_hours"] = c.mtbf_hours;
   j["mttr_hours"] = c.mttr_hours;
+  add_dynamic_model_if_present(j, c.dynamic_model);
   return j;
 }
 
@@ -2099,6 +2235,7 @@ static DCDCConverter dcdc_from_json(const json& j) {
   c.n_ratio = jget(j, "n_ratio", 1.0);
   c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, c.dynamic_model);
   return c;
 }
 
@@ -2122,6 +2259,7 @@ static json er_port_to_json(const EnergyRouterPort& p) {
   j["q_set_mvar"] = p.q_set_mvar;
   j["v_set_pu"] = p.v_set_pu;
   j["in_service"] = p.in_service;
+  add_dynamic_model_if_present(j, p.dynamic_model);
   return j;
 }
 
@@ -2145,6 +2283,7 @@ static EnergyRouterPort er_port_from_json(const json& j) {
   p.q_set_mvar = jget(j, "q_set_mvar", 0.0);
   p.v_set_pu = jget(j, "v_set_pu", 1.0);
   p.in_service = jget(j, "in_service", true);
+  read_dynamic_model_if_present(j, p.dynamic_model);
   return p;
 }
 
@@ -2167,6 +2306,7 @@ static json energy_router_to_json(const EnergyRouter& r) {
   j["qmin_mvar"] = r.qmin_mvar;
   j["mtbf_hours"] = r.mtbf_hours;
   j["mttr_hours"] = r.mttr_hours;
+  add_dynamic_model_if_present(j, r.dynamic_model);
   return j;
 }
 
@@ -2190,6 +2330,7 @@ static EnergyRouter energy_router_from_json(const json& j) {
   r.qmin_mvar = jget(j, "qmin_mvar", 0.0);
   r.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   r.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, r.dynamic_model);
   return r;
 }
 
@@ -2223,6 +2364,7 @@ static json mobile_storage_to_json(const MobileStorage& s) {
   j["max_travel_distance_km"] = s.max_travel_distance_km;
   j["mtbf_hours"] = s.mtbf_hours;
   j["mttr_hours"] = s.mttr_hours;
+  add_dynamic_model_if_present(j, s.dynamic_model);
   return j;
 }
 
@@ -2256,6 +2398,7 @@ static MobileStorage mobile_storage_from_json(const json& j) {
   s.max_travel_distance_km = jget(j, "max_travel_distance_km", 0.0);
   s.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   s.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, s.dynamic_model);
   return s;
 }
 
@@ -2282,6 +2425,7 @@ static json vpp_to_json(const VirtualPowerPlant& v) {
   j["ramp_down_max_mw_min"] = v.ramp_down_max_mw_min;
   j["mtbf_hours"] = v.mtbf_hours;
   j["mttr_hours"] = v.mttr_hours;
+  add_dynamic_model_if_present(j, v.dynamic_model);
   return j;
 }
 
@@ -2308,6 +2452,7 @@ static VirtualPowerPlant vpp_from_json(const json& j) {
   v.ramp_down_max_mw_min = jget(j, "ramp_down_max_mw_min", 0.0);
   v.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   v.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, v.dynamic_model);
   return v;
 }
 
@@ -2338,6 +2483,7 @@ static json microgrid_to_json(const Microgrid& m) {
   j["area"] = m.area;
   j["mtbf_hours"] = m.mtbf_hours;
   j["mttr_hours"] = m.mttr_hours;
+  add_dynamic_model_if_present(j, m.dynamic_model);
   return j;
 }
 
@@ -2368,6 +2514,7 @@ static Microgrid microgrid_from_json(const json& j) {
   m.area = jget(j, "area", 0);
   m.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   m.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
+  read_dynamic_model_if_present(j, m.dynamic_model);
   return m;
 }
 

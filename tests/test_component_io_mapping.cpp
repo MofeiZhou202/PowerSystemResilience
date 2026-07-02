@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <set>
 #include <string>
 
@@ -8,6 +9,7 @@
 #include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
+#include "hacdcpf/projection/project_to_canonical.hpp"
 
 using Catch::Matchers::ContainsSubstring;
 
@@ -416,4 +418,99 @@ TEST_CASE("Regulator controls are preserved by internal JSON",
         1);
   CHECK(restored.three_phase_ac->regulator_controls.front().vreg_volts ==
         120.0);
+}
+
+TEST_CASE("Dynamic profiles survive rich-to-canonical projection",
+          "[io][mapping][dynamic][canonical]") {
+  hacdcpf::HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 10.0;
+
+  hacdcpf::ACBus ac1;
+  ac1.index = 1;
+  ac1.bus_type = hacdcpf::BusType::SLACK;
+  hacdcpf::ACBus ac2;
+  ac2.index = 2;
+  ac2.bus_type = hacdcpf::BusType::PQ;
+  sys.ac.buses = {ac1, ac2};
+
+  hacdcpf::Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.is_slack = true;
+  sys.ac.generators.push_back(gen);
+
+  hacdcpf::DynamicModelProfile vpp_profile;
+  vpp_profile.standard = "NERC";
+  vpp_profile.model_name = "DER_Aggregate";
+  vpp_profile.parameters["fleet_droop"] = 0.04;
+  hacdcpf::VirtualPowerPlant vpp;
+  vpp.index = 12;
+  vpp.pcc_bus = 2;
+  vpp.p_output_mw = 0.3;
+  vpp.dynamic_model = vpp_profile;
+  sys.vpps.push_back(vpp);
+
+  hacdcpf::DynamicModelProfile er_profile;
+  er_profile.standard = "IEC";
+  er_profile.model_name = "EnergyRouterAverageModel";
+  er_profile.parameters["dc_link_capacitance_s"] = 0.15;
+  hacdcpf::EnergyRouter er;
+  er.index = 4;
+  er.name = "er";
+  er.in_service = true;
+  er.p_rated_mw = 1.0;
+  er.vn_dc_kv = 0.75;
+  er.dynamic_model = er_profile;
+
+  hacdcpf::EnergyRouterPort port;
+  port.index = 1;
+  port.bus = 2;
+  port.side = 0;
+  port.port_type = hacdcpf::ERPortType::AC;
+  port.control_mode = hacdcpf::ERControlMode::PQ;
+  port.p_set_mw = 0.1;
+  port.dynamic_model.standard = "NERC";
+  port.dynamic_model.model_name = "REGC_A";
+  port.dynamic_model.components.push_back(
+      {"pll", "ReducedOrderPLL", "PSD", "", {{"kp_pll", 0.02}}});
+  er.ports.push_back(port);
+  sys.energy_routers.push_back(er);
+
+  const auto projected = hacdcpf::project_to_canonical_models(sys, false);
+
+  REQUIRE_FALSE(projected.ac.static_generators.empty());
+  const auto vpp_eq = std::find_if(
+      projected.ac.static_generators.begin(),
+      projected.ac.static_generators.end(),
+      [](const hacdcpf::StaticGenerator& sg) {
+        return sg.dynamic_model.source_id == "VirtualPowerPlant:12";
+      });
+  REQUIRE(vpp_eq != projected.ac.static_generators.end());
+  CHECK(vpp_eq->dynamic_model.model_name == "DER_Aggregate");
+  CHECK(std::abs(vpp_eq->dynamic_model.parameters.at("fleet_droop") - 0.04) <=
+        1e-12);
+
+  REQUIRE_FALSE(projected.vsc_converters.empty());
+  const auto er_vsc = std::find_if(
+      projected.vsc_converters.begin(),
+      projected.vsc_converters.end(),
+      [](const hacdcpf::VSCConverter& c) {
+        return c.dynamic_model.source_id == "EnergyRouterPort:4:1";
+      });
+  REQUIRE(er_vsc != projected.vsc_converters.end());
+  CHECK(er_vsc->dynamic_model.model_name == "REGC_A");
+  REQUIRE(er_vsc->dynamic_model.components.size() == 1);
+  CHECK(er_vsc->dynamic_model.components.front().model == "ReducedOrderPLL");
+
+  REQUIRE_FALSE(projected.dc.dcdc_converters.empty());
+  const auto er_dcdc = std::find_if(
+      projected.dc.dcdc_converters.begin(),
+      projected.dc.dcdc_converters.end(),
+      [](const hacdcpf::DCDCConverter& c) {
+        return c.dynamic_model.source_id == "EnergyRouter:4";
+      });
+  REQUIRE(er_dcdc != projected.dc.dcdc_converters.end());
+  CHECK(er_dcdc->dynamic_model.model_name == "EnergyRouterAverageModel");
+  CHECK(std::abs(er_dcdc->dynamic_model.parameters.at("dc_link_capacitance_s") -
+                 0.15) <= 1e-12);
 }

@@ -186,6 +186,57 @@ DynamicDeviceOutput make_output_base(const DynamicDevice& device,
   return out;
 }
 
+std::vector<DynamicModelProfile> profiles_or_default(
+    const std::vector<DynamicModelProfile>& profiles,
+    const DynamicDevice& device) {
+  if (!profiles.empty()) return profiles;
+  DynamicModelProfile profile;
+  profile.standard = device.modelStandard();
+  profile.model_name = device.modelName();
+  profile.parameter_set = device.parameterSet();
+  return {profile};
+}
+
+bool uses_kaura_pll(FrequencyEstimatorKind kind) {
+  return kind == FrequencyEstimatorKind::KauraPLL;
+}
+
+int gfl_vdf_local(const GridFollowingInverterParams& params) {
+  return uses_kaura_pll(params.frequency_estimator) ? 6 : -1;
+}
+
+int gfl_vqf_local(const GridFollowingInverterParams& params) {
+  return uses_kaura_pll(params.frequency_estimator) ? 7 : -1;
+}
+
+int gfl_vdc_local(const GridFollowingInverterParams& params) {
+  int local = 6;
+  if (uses_kaura_pll(params.frequency_estimator)) local += 2;
+  return params.dc_link_mode == DCLinkMode::DynamicDCVoltage &&
+                 params.dc_bus_pos >= 0
+             ? local
+             : -1;
+}
+
+int gfl_state_count(const GridFollowingInverterParams& params) {
+  int count = 6;
+  if (uses_kaura_pll(params.frequency_estimator)) count += 2;
+  if (gfl_vdc_local(params) >= 0) count += 1;
+  return count;
+}
+
+std::pair<double, double> pll_measurement(const GridFollowingInverterParams& params,
+                                          const DynamicState& x,
+                                          const StateIndexRange& range,
+                                          double vd_raw,
+                                          double vq_raw) {
+  if (uses_kaura_pll(params.frequency_estimator)) {
+    return {x.x[state_index(range, gfl_vdf_local(params))],
+            x.x[state_index(range, gfl_vqf_local(params))]};
+  }
+  return {vd_raw, vq_raw};
+}
+
 void add_voltage_metrics(DynamicDeviceOutput& out,
                          const NetworkState& y,
                          int ac_bus_pos,
@@ -266,6 +317,10 @@ std::string DynamicLoad::name() const {
                                : params_.label;
 }
 
+std::vector<DynamicModelProfile> DynamicLoad::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
 DynamicDeviceOutput DynamicLoad::output(const DynamicState&,
                                         const NetworkState& y) const {
   DynamicDeviceOutput out = make_output_base(*this,
@@ -331,6 +386,10 @@ std::string ThreePhaseDynamicLoad::name() const {
   return params_.label.empty()
              ? "Three-phase load " + std::to_string(params_.component_index)
              : params_.label;
+}
+
+std::vector<DynamicModelProfile> ThreePhaseDynamicLoad::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput ThreePhaseDynamicLoad::output(const DynamicState&,
@@ -399,6 +458,10 @@ void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, Networ
 std::string DCDynamicLoad::name() const {
   return params_.label.empty() ? "DC load " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> DCDynamicLoad::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput DCDynamicLoad::output(const DynamicState&,
@@ -554,6 +617,10 @@ void SynchronousMachine::handleEvent(const DynamicEvent& event, DynamicState&, N
 std::string SynchronousMachine::name() const {
   return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> SynchronousMachine::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput SynchronousMachine::output(const DynamicState& x,
@@ -936,12 +1003,25 @@ void GridFormingInverter::handleEvent(const DynamicEvent& event, DynamicState&, 
   if (event.type == DynamicEventType::VSCTrip &&
       (event.component_index == 0 || event.component_index == params_.component_index)) {
     params_.in_service = false;
+  } else if (event.type == DynamicEventType::Custom &&
+             event.component_type == "VSC" &&
+             (event.component_index == 0 || event.component_index == params_.component_index)) {
+    const auto p_it = event.params.find("p_ref_mw");
+    if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
+    const auto q_it = event.params.find("q_ref_mvar");
+    if (q_it != event.params.end()) params_.q_ref_mvar = q_it->second;
+    const auto v_it = event.params.find("v_ref_pu");
+    if (v_it != event.params.end()) params_.v_ref_pu = v_it->second;
   }
 }
 
 std::string GridFormingInverter::name() const {
   return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> GridFormingInverter::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
@@ -1013,10 +1093,7 @@ GridFollowingInverter::GridFollowingInverter(GridFollowingInverterParams params)
     : params_(std::move(params)) {}
 
 void GridFollowingInverter::assignStateIndices(int& offset) {
-  range_ = {offset,
-            params_.dc_link_mode == DCLinkMode::DynamicDCVoltage && params_.dc_bus_pos >= 0
-                ? 7
-                : 6};
+  range_ = {offset, gfl_state_count(params_)};
   offset += range_.size;
 }
 
@@ -1047,12 +1124,17 @@ void GridFollowingInverter::initializeFromPowerFlow(const PowerFlowResult& pf,
   x.x[state_index(range_, 3)] = iq;
   x.x[state_index(range_, 4)] = p;
   x.x[state_index(range_, 5)] = q;
-  if (range_.size > 6) {
+  if (uses_kaura_pll(params_.frequency_estimator)) {
+    x.x[state_index(range_, gfl_vdf_local(params_))] = vd;
+    x.x[state_index(range_, gfl_vqf_local(params_))] = vq;
+  }
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
     double vdc = params_.vdc_ref_pu;
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
-    x.x[state_index(range_, 6)] =
+    x.x[state_index(range_, vdc_local)] =
         clamp_voltage_window(vdc, params_.vdc_min_pu, params_.vdc_max_pu);
   }
 }
@@ -1062,7 +1144,13 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
   const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
   const Complex vpos = positive_sequence_voltage(vabc);
   const double theta = std::arg(vpos);
-  const auto [vd, vq] = dq_from_phasor(vpos, theta);
+  const auto [vd_raw, vq_raw] = dq_from_phasor(vpos, theta);
+  bool changed = false;
+  if (uses_kaura_pll(params_.frequency_estimator)) {
+    changed = set_if_changed(x.x, state_index(range_, gfl_vdf_local(params_)), vd_raw) || changed;
+    changed = set_if_changed(x.x, state_index(range_, gfl_vqf_local(params_)), vq_raw) || changed;
+  }
+  const auto [vd, vq] = pll_measurement(params_, x, range_, vd_raw, vq_raw);
   const double xi_pll = std::abs(params_.pll_ki) > 1e-12
                             ? -params_.pll_kp * vq / params_.pll_ki
                             : 0.0;
@@ -1083,20 +1171,20 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
                                         iq_ref,
                                         params_.current_limit_pu,
                                         params_.reactive_current_priority);
-  bool changed = false;
   changed = set_if_changed(x.x, state_index(range_, 0), theta) || changed;
   changed = set_if_changed(x.x, state_index(range_, 1), finite_value(xi_pll)) || changed;
   changed = set_if_changed(x.x, state_index(range_, 2), id) || changed;
   changed = set_if_changed(x.x, state_index(range_, 3), iq) || changed;
   changed = set_if_changed(x.x, state_index(range_, 4), p_ref) || changed;
   changed = set_if_changed(x.x, state_index(range_, 5), q_ref) || changed;
-  if (range_.size > 6) {
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
     double vdc = params_.vdc_ref_pu;
     if (params_.dc_bus_pos >= 0 && params_.dc_bus_pos < y.Vdc.size()) {
       vdc = y.Vdc[params_.dc_bus_pos];
     }
     changed = set_if_changed(x.x,
-                             state_index(range_, 6),
+                             state_index(range_, vdc_local),
                              clamp_voltage_window(vdc,
                                                   params_.vdc_min_pu,
                                                   params_.vdc_max_pu)) || changed;
@@ -1117,12 +1205,16 @@ void GridFollowingInverter::computeDerivatives(double,
   const double qf = x.x[state_index(range_, 5)];
   const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
   const Complex vpos = positive_sequence_voltage(vabc);
-  const auto [vd, vq] = dq_from_phasor(vpos, theta);
+  const auto [vd_raw, vq_raw] = dq_from_phasor(vpos, theta);
+  const auto [vd, vq] = pll_measurement(params_, x, range_, vd_raw, vq_raw);
   const double tau_i = std::max(kMinTimeConstant, params_.response_t_s);
   const double tau_p = std::max(kMinTimeConstant, params_.power_filter_t_s);
   const double p_nom = params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_nom = params_.q_ref_mvar / safe_base(params_.base_mva);
-  const double freq_error_pu = params_.pll_kp * vq + params_.pll_ki * xi_pll;
+  const double freq_error_pu =
+      params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency
+          ? 0.0
+          : params_.pll_kp * vq + params_.pll_ki * xi_pll;
   double p_ref = p_nom;
   double q_ref = q_nom;
   if (params_.frequency_watt_droop_pu > 0.0) {
@@ -1141,21 +1233,30 @@ void GridFollowingInverter::computeDerivatives(double,
                                                 params_.reactive_current_priority);
 
   dxdt[state_index(range_, 0)] = kTwoPi * params_.f_ref_hz * freq_error_pu;
-  dxdt[state_index(range_, 1)] = vq;
+  dxdt[state_index(range_, 1)] =
+      params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency ? 0.0 : vq;
   dxdt[state_index(range_, 2)] = (id_cmd - id) / tau_i;
   dxdt[state_index(range_, 3)] = (iq_cmd - iq) / tau_i;
   dxdt[state_index(range_, 4)] = (p_ref - pf) / tau_p;
   dxdt[state_index(range_, 5)] = (q_ref - qf) / tau_p;
-  if (range_.size > 6) {
+  if (uses_kaura_pll(params_.frequency_estimator)) {
+    const double tau_pll_filter = std::max(kMinTimeConstant, params_.pll_lpf_t_s);
+    dxdt[state_index(range_, gfl_vdf_local(params_))] =
+        (vd_raw - x.x[state_index(range_, gfl_vdf_local(params_))]) / tau_pll_filter;
+    dxdt[state_index(range_, gfl_vqf_local(params_))] =
+        (vq_raw - x.x[state_index(range_, gfl_vqf_local(params_))]) / tau_pll_filter;
+  }
+  const int vdc_local = gfl_vdc_local(params_);
+  if (vdc_local >= 0) {
     const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
     const double p_ac = finite_value(average_complex_power(vabc, current).real());
-    const double vdc_link = x.x[state_index(range_, 6)];
+    const double vdc_link = x.x[state_index(range_, vdc_local)];
     const double pdc_net =
         dc_link_network_power_pu(y,
                                  params_.dc_bus_pos,
                                  vdc_link,
                                  params_.dc_link_conductance_pu);
-    dxdt[state_index(range_, 6)] =
+    dxdt[state_index(range_, vdc_local)] =
         dc_link_voltage_derivative(p_ac,
                                    pdc_net,
                                    vdc_link,
@@ -1183,9 +1284,10 @@ void GridFollowingInverter::stamp(double,
   }
 
   if (params_.stamp_dc_power && params_.dc_bus_pos >= 0) {
-    if (params_.dc_link_mode == DCLinkMode::DynamicDCVoltage && range_.size > 6) {
+    const int vdc_local = gfl_vdc_local(params_);
+    if (vdc_local >= 0) {
       const double vdc_link =
-          clamp_voltage_window(x.x[state_index(range_, 6)],
+          clamp_voltage_window(x.x[state_index(range_, vdc_local)],
                                params_.vdc_min_pu,
                                params_.vdc_max_pu);
       const double g = std::max(0.0, params_.dc_link_conductance_pu);
@@ -1210,12 +1312,25 @@ void GridFollowingInverter::handleEvent(const DynamicEvent& event,
     if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
       x.x.segment(range_.offset, range_.size).setZero();
     }
+  } else if (event.type == DynamicEventType::Custom &&
+             event.component_type == "VSC" &&
+             (event.component_index == 0 || event.component_index == params_.component_index)) {
+    const auto p_it = event.params.find("p_ref_mw");
+    if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
+    const auto q_it = event.params.find("q_ref_mvar");
+    if (q_it != event.params.end()) params_.q_ref_mvar = q_it->second;
+    const auto v_it = event.params.find("v_ref_pu");
+    if (v_it != event.params.end()) params_.v_ref_pu = v_it->second;
   }
 }
 
 std::string GridFollowingInverter::name() const {
   return params_.label.empty() ? params_.device_type + " " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> GridFollowingInverter::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
@@ -1234,10 +1349,14 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     const double iq = x.x[state_index(range_, 3)];
     const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
     const Complex vpos = positive_sequence_voltage(vabc);
-    const auto [vd, vq] = dq_from_phasor(vpos, theta);
+    const auto [vd_raw, vq_raw] = dq_from_phasor(vpos, theta);
+    const auto [vd, vq] = pll_measurement(params_, x, range_, vd_raw, vq_raw);
     const Eigen::Vector3cd current = balanced_current_from_dq(id, iq, theta);
     const Complex s = average_complex_power(vabc, current);
-    const double freq_error_pu = params_.pll_kp * vq + params_.pll_ki * xi_pll;
+    const double freq_error_pu =
+        params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency
+            ? 0.0
+            : params_.pll_kp * vq + params_.pll_ki * xi_pll;
     const double denom = std::max(vd * vd + vq * vq,
                                   params_.v_min_current_pu * params_.v_min_current_pu);
     const double p_nom = params_.p_ref_mw / safe_base(params_.base_mva);
@@ -1248,6 +1367,13 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["pll_angle_rad"] = theta;
     out.values["pll_frequency_hz"] = params_.f_ref_hz * (1.0 + freq_error_pu);
     out.values["pll_vq_pu"] = vq;
+    out.values["pll_vd_pu"] = vd;
+    out.values["pll_vq_raw_pu"] = vq_raw;
+    out.values["pll_vd_raw_pu"] = vd_raw;
+    out.values["pll_model"] =
+        params_.frequency_estimator == FrequencyEstimatorKind::KauraPLL
+            ? 1.0
+            : (params_.frequency_estimator == FrequencyEstimatorKind::FixedFrequency ? 2.0 : 0.0);
     out.values["pll_integrator"] = xi_pll;
     out.values["id_pu"] = id;
     out.values["iq_pu"] = iq;
@@ -1261,8 +1387,9 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
     out.values["q_ref_mvar"] = params_.q_ref_mvar;
     out.values["p_filtered_mw"] = x.x[state_index(range_, 4)] * safe_base(params_.base_mva);
     out.values["q_filtered_mvar"] = x.x[state_index(range_, 5)] * safe_base(params_.base_mva);
-    if (range_.size > 6 && state_index(range_, 6) < x.x.size()) {
-      const double vdc_link = x.x[state_index(range_, 6)];
+    const int vdc_local = gfl_vdc_local(params_);
+    if (vdc_local >= 0 && state_index(range_, vdc_local) < x.x.size()) {
+      const double vdc_link = x.x[state_index(range_, vdc_local)];
       out.values["vdc_link_pu"] = vdc_link;
       const double pdc_net =
           dc_link_network_power_pu(y,
@@ -1292,13 +1419,28 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.canvas_type = params.canvas_type;
   gfm.component_domain = params.component_domain;
   gfm.source_type = "vsc_grid_forming";
+  gfm.model_profiles = params.model_profiles;
   gfm.base_mva = params.base_mva;
   gfm.p_ref_mw = params.p_ref_mw;
   gfm.q_ref_mvar = params.q_ref_mvar;
   gfm.v_ref_pu = params.v_ref_pu;
+  gfm.angle_ref_rad = params.angle_ref_rad;
   gfm.frequency_hz = params.f_ref_hz;
-  gfm.virtual_x_pu = 0.10;
+  gfm.virtual_r_pu = params.virtual_r_pu;
+  gfm.virtual_x_pu = params.virtual_x_pu;
+  gfm.p_droop_pu = params.p_droop_pu;
+  gfm.q_droop_pu = params.q_droop_pu;
+  gfm.power_filter_t_s = params.power_filter_t_s;
+  gfm.voltage_control_t_s = params.voltage_control_t_s;
+  gfm.voltage_kp = params.voltage_kp;
+  gfm.voltage_ki = params.voltage_ki;
+  gfm.overload_kp = params.overload_kp;
+  gfm.overload_ki = params.overload_ki;
   gfm.current_limit_pu = params.current_limit_pu;
+  gfm.pmax_mw = params.pmax_mw;
+  gfm.pmin_mw = params.pmin_mw;
+  gfm.vmax_internal_pu = params.vmax_internal_pu;
+  gfm.vmin_internal_pu = params.vmin_internal_pu;
   gfm.eta = params.eta;
   gfm.dc_link_capacitance_s = params.dc_link_capacitance_s;
   gfm.dc_link_conductance_pu = params.dc_link_conductance_pu;
@@ -1449,6 +1591,10 @@ std::string DCDCConverterDynamic::name() const {
                                : params_.label;
 }
 
+std::vector<DynamicModelProfile> DCDCConverterDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
+}
+
 DynamicDeviceOutput DCDCConverterDynamic::output(const DynamicState& x,
                                                  const NetworkState& y) const {
   DynamicDeviceOutput out = make_output_base(*this,
@@ -1560,6 +1706,10 @@ void BatteryDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, Net
 std::string BatteryDynamic::name() const {
   return params_.label.empty() ? type() + " " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> BatteryDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput BatteryDynamic::output(const DynamicState& x,
@@ -1676,6 +1826,10 @@ void PVDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkS
 std::string PVDynamic::name() const {
   return params_.label.empty() ? "PV dynamic " + std::to_string(params_.component_index)
                                : params_.label;
+}
+
+std::vector<DynamicModelProfile> PVDynamic::modelProfiles() const {
+  return profiles_or_default(params_.model_profiles, *this);
 }
 
 DynamicDeviceOutput PVDynamic::output(const DynamicState& x, const NetworkState& y) const {

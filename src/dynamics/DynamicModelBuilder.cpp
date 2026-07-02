@@ -1,6 +1,7 @@
 #include "hacdcpf/dynamics/DynamicModelBuilder.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <complex>
 #include <limits>
@@ -32,6 +33,100 @@ double scale_or_one(double value) {
 
 std::string label_or(const std::string& label, const std::string& fallback) {
   return label.empty() ? fallback : label;
+}
+
+std::vector<DynamicModelProfile> to_dynamic_profiles(
+    const hacdcpf::DynamicModelProfile& profile) {
+  std::vector<DynamicModelProfile> profiles;
+  if (profile.empty()) return profiles;
+  DynamicModelProfile root;
+  root.standard = profile.standard;
+  root.model_name = profile.model_name;
+  root.parameter_set = profile.parameter_set;
+  root.source_id = profile.source_id;
+  root.notes = profile.notes;
+  profiles.push_back(std::move(root));
+  for (const auto& component : profile.components) {
+    DynamicModelProfile child;
+    child.standard = component.standard;
+    child.profile = component.type;
+    child.model_name = component.model;
+    child.parameter_set = component.parameter_set;
+    child.source_id = profile.source_id;
+    child.notes = profile.notes;
+    profiles.push_back(std::move(child));
+  }
+  return profiles;
+}
+
+bool iequals(std::string lhs, std::string rhs) {
+  std::transform(lhs.begin(), lhs.end(), lhs.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  std::transform(rhs.begin(), rhs.end(), rhs.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return lhs == rhs;
+}
+
+void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
+                       GridFollowingInverterParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
+  if (profile.empty()) return;
+  auto apply_name = [&](const std::string& name) {
+    if (iequals(name, "KauraPLL")) {
+      params.frequency_estimator = FrequencyEstimatorKind::KauraPLL;
+      params.frequency_estimator_name = "KauraPLL";
+    } else if (iequals(name, "ReducedOrderPLL")) {
+      params.frequency_estimator = FrequencyEstimatorKind::ReducedOrderPLL;
+      params.frequency_estimator_name = "ReducedOrderPLL";
+    } else if (iequals(name, "FixedFrequency")) {
+      params.frequency_estimator = FrequencyEstimatorKind::FixedFrequency;
+      params.frequency_estimator_name = "FixedFrequency";
+    }
+  };
+  apply_name(profile.model_name);
+  for (const auto& component : profile.components) {
+    apply_name(component.model);
+    if (!iequals(component.type, "pll")) continue;
+    auto it = component.parameters.find("kp_pll");
+    if (it != component.parameters.end()) params.pll_kp = it->second;
+    it = component.parameters.find("ki_pll");
+    if (it != component.parameters.end()) params.pll_ki = it->second;
+    it = component.parameters.find("pll_lpf_t_s");
+    if (it != component.parameters.end()) params.pll_lpf_t_s = it->second;
+  }
+  auto it = profile.parameters.find("pll_kp");
+  if (it != profile.parameters.end()) params.pll_kp = it->second;
+  it = profile.parameters.find("pll_ki");
+  if (it != profile.parameters.end()) params.pll_ki = it->second;
+  it = profile.parameters.find("pll_lpf_t_s");
+  if (it != profile.parameters.end()) params.pll_lpf_t_s = it->second;
+}
+
+void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
+                       GridFormingInverterParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
+}
+
+void apply_gfm_profile(const hacdcpf::DynamicModelProfile& profile,
+                       VSCConverterDynamicParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
+}
+
+void apply_voltage_source_profile(const hacdcpf::DynamicModelProfile& profile,
+                                  VoltageSourceDynamicParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
+}
+
+void apply_battery_profile(const hacdcpf::DynamicModelProfile& profile,
+                           BatteryDynamicParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
+}
+
+void apply_dcdc_profile(const hacdcpf::DynamicModelProfile& profile,
+                        DCDCConverterDynamicParams& params) {
+  params.model_profiles = to_dynamic_profiles(profile);
 }
 
 std::pair<double, double> finite_range(const std::vector<double>& values) {
@@ -445,6 +540,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.r_pu = grid.r1_pu;
       p.x_pu = positive_or(grid.x1_pu, 1.0 / std::max(1.0, options.source_stiffness_pu));
       p.in_service = true;
+      apply_voltage_source_profile(grid.dynamic_model, p);
       dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
       voltage_source_buses.insert(grid.bus);
     }
@@ -469,6 +565,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.p_mech_mw = gen.p_mw;
         p.inertia_h = gen.is_slack ? 5.0 : 1.0;
         p.dynamic_angle = !gen.is_slack;
+        apply_voltage_source_profile(gen.dynamic_model, p);
         dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
         voltage_source_buses.insert(gen.bus);
       } else {
@@ -484,6 +581,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.p_ref_mw = gen.p_mw;
         p.q_ref_mvar = gen.q_mvar;
         p.f_ref_hz = network.frequency_hz;
+        apply_gfl_profile(gen.dynamic_model, p);
         dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
       }
     }
@@ -503,6 +601,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.q_mvar = {load.q_a_mvar, load.q_b_mvar, load.q_c_mvar};
       p.phase_active = {load.phase_mask.has(0), load.phase_mask.has(1), load.phase_mask.has(2)};
       p.base_mva = base_mva;
+      p.model_profiles = to_dynamic_profiles(load.dynamic_model);
       dyn.devices.push_back(std::make_unique<ThreePhaseDynamicLoad>(p));
     }
   }
@@ -527,6 +626,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.r_pu = grid.r_pu;
     p.x_pu = positive_or(grid.x_pu, 1.0 / std::max(1.0, options.source_stiffness_pu));
     p.in_service = true;
+    apply_voltage_source_profile(grid.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
     voltage_source_buses.insert(grid.bus);
   }
@@ -553,6 +653,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.inertia_h = positive_or(gen.inertia_h, gen.is_slack ? 5.0 : 1.0);
     p.droop_r = positive_or(gen.droop_r, 0.05);
     p.dynamic_angle = !gen.is_slack && gen.inertia_h > 0.0;
+    apply_voltage_source_profile(gen.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<SynchronousMachine>(p));
     voltage_source_buses.insert(gen.bus);
   }
@@ -577,6 +678,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_mw = load.p_mw * load.scaling;
     p.q_mvar = load.q_mvar * load.scaling;
     p.base_mva = base_mva;
+    p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<DynamicLoad>(p));
   }
 
@@ -596,6 +698,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.q_mvar = {load.qa_mvar, load.qb_mvar, load.qc_mvar};
     p.scale = scale_or_one(load.scaling);
     p.base_mva = base_mva;
+    p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<ThreePhaseDynamicLoad>(p));
   }
 
@@ -623,6 +726,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.v_ref_pu = positive_or(gen.v_ref_pu, 1.0);
     p.frequency_watt_droop_pu = gen.k_p;
     p.volt_var_droop_pu = gen.k_q;
+    apply_gfl_profile(gen.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
   }
 
@@ -647,6 +751,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.current_limit_pu = pv.sn_mva > 0.0
                              ? pv.sn_mva / base_mva
                              : (pv.pmax_mw > 0.0 ? pv.pmax_mw / base_mva : 0.0);
+    apply_gfl_profile(pv.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
   }
 
@@ -667,6 +772,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.q_ref_mvar = rg.q_mvar;
     p.f_ref_hz = network.frequency_hz;
     p.current_limit_pu = rg.p_rated_mw > 0.0 ? rg.p_rated_mw / base_mva : 0.0;
+    apply_gfl_profile(rg.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
   }
 
@@ -694,6 +800,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.pmax_mw = st.pmax_mw > 0.0 ? st.pmax_mw : st.p_rated_mw;
       p.pmin_mw = st.pmin_mw < 0.0 ? st.pmin_mw : -std::max(st.pmax_mw, st.p_rated_mw);
       p.dc_link_capacitance_s = options.dc_link_capacitance_s;
+      apply_gfm_profile(st.dynamic_model, p);
       dyn.devices.push_back(std::make_unique<GridFormingInverter>(p));
       voltage_source_buses.insert(st.bus);
     }
@@ -718,6 +825,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.eta_discharge = positive_or(st.eta_discharge, 0.95);
     p.self_discharge_pct_per_h = st.self_discharge_pct;
     p.stamp_power = !st.grid_forming;
+    apply_battery_profile(st.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<BatteryDynamic>(p));
   }
 
@@ -734,6 +842,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.source_type = "dc_load";
     p.p_mw = load.p_mw * load.scaling;
     p.base_mva = base_mva;
+    p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<DCDynamicLoad>(p));
   }
 
@@ -754,6 +863,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_ref_mw = gen.p_set_mw * gen.scaling;
     p.e_rated_mwh = 1e9;
     p.soc_init = 0.5;
+    apply_battery_profile(gen.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<BatteryDynamic>(p));
   }
 
@@ -774,6 +884,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.p_ref_mw = pv.p_set_mw;
     p.e_rated_mwh = 1e9;
     p.soc_init = 0.5;
+    apply_battery_profile(pv.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<BatteryDynamic>(p));
   }
 
@@ -799,6 +910,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.eta_charge = positive_or(st.eta_charge, 0.95);
     p.eta_discharge = positive_or(st.eta_discharge, 0.95);
     p.self_discharge_pct_per_h = st.self_discharge_pct;
+    apply_battery_profile(st.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<BatteryDynamic>(p));
   }
 
@@ -823,7 +935,8 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       dyn.devices.push_back(std::make_unique<DCVoltageSourceDynamic>(p));
     }
     if (role.is_ac_grid_forming && ac_pos >= 0) {
-      GridFormingInverterParams p;
+      VSCConverterDynamicParams p;
+      p.grid_forming = true;
       p.component_index = conv.index;
       p.bus = conv.bus_ac;
       p.bus_pos = ac_pos;
@@ -839,7 +952,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.angle_ref_rad = conv.v_ac_angle_set_deg * kDegToRad;
       p.virtual_r_pu = positive_or(conv.r_conv_ac_pu, 0.0);
       p.virtual_x_pu = options.inverter_virtual_reactance_pu;
-      p.frequency_hz = positive_or(conv.f_ref_hz, network.frequency_hz);
+      p.f_ref_hz = positive_or(conv.f_ref_hz, network.frequency_hz);
       p.current_limit_pu = conv.i_ac_max_pu;
       p.pmax_mw = conv.pmax_mw > 0.0 ? conv.pmax_mw
                                       : (conv.p_rated_mw > 0.0 ? conv.p_rated_mw : 0.0);
@@ -855,10 +968,12 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
           (options.dynamic_dc_link && dc_pos >= 0)
               ? DCLinkMode::DynamicDCVoltage
               : DCLinkMode::ConstantDCVoltage;
-      dyn.devices.push_back(std::make_unique<GridFormingInverter>(p));
+      apply_gfm_profile(conv.dynamic_model, p);
+      dyn.devices.push_back(std::make_unique<VSCConverterDynamic>(p));
       voltage_source_buses.insert(conv.bus_ac);
     } else if (ac_pos >= 0) {
-      GridFollowingInverterParams p;
+      VSCConverterDynamicParams p;
+      p.grid_forming = false;
       p.component_index = conv.index;
       p.bus = conv.bus_ac;
       p.bus_pos = ac_pos;
@@ -884,7 +999,8 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
           (options.dynamic_dc_link && dc_pos >= 0)
               ? DCLinkMode::DynamicDCVoltage
               : DCLinkMode::ConstantDCVoltage;
-      dyn.devices.push_back(std::make_unique<GridFollowingInverter>(p));
+      apply_gfl_profile(conv.dynamic_model, p);
+      dyn.devices.push_back(std::make_unique<VSCConverterDynamic>(p));
     }
   }
 
@@ -905,6 +1021,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.base_mva = base_mva;
     p.p_ref_mw = conv.p_ref_mw;
     p.eta = positive_or(conv.eta, 0.98);
+    apply_dcdc_profile(conv.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<DCDCConverterDynamic>(p));
   }
 

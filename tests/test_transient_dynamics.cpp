@@ -1,5 +1,11 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -147,6 +153,174 @@ HybridPowerSystem make_asymmetric_ac_case() {
   return sys;
 }
 
+HybridPowerSystem make_psd_genrou_three_bus_subset_case() {
+  HybridPowerSystem sys;
+  sys.name = "psd_genrou_three_bus_subset";
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.freq_hz = 60.0;
+
+  ACBus b101;
+  b101.index = 101;
+  b101.name = "BUS 1";
+  b101.bus_type = BusType::SLACK;
+  b101.base_kv = 138.0;
+  b101.vm_pu = 1.05;
+  b101.va_deg = 0.0;
+  b101.in_service = true;
+
+  ACBus b102;
+  b102.index = 102;
+  b102.name = "BUS 2";
+  b102.bus_type = BusType::PV;
+  b102.base_kv = 138.0;
+  b102.vm_pu = 1.02;
+  b102.va_deg = -0.9440;
+  b102.in_service = true;
+
+  ACBus b103;
+  b103.index = 103;
+  b103.name = "BUS 3";
+  b103.bus_type = BusType::PQ;
+  b103.base_kv = 138.0;
+  b103.vm_pu = 0.99341;
+  b103.va_deg = -8.7697;
+  b103.in_service = true;
+
+  sys.ac.buses = {b101, b102, b103};
+
+  auto branch = [](int index, int from, int to) {
+    ACBranch br;
+    br.index = index;
+    br.from_bus = from;
+    br.to_bus = to;
+    br.r_pu = 0.01;
+    br.x_pu = 0.12;
+    br.tap = 1.0;
+    br.in_service = true;
+    br.name = "BUS " + std::to_string(from - 100) + "-BUS " +
+              std::to_string(to - 100) + "-i_1";
+    return br;
+  };
+  sys.ac.branches = {
+      branch(1, 101, 102),
+      branch(2, 101, 103),
+      branch(3, 102, 103),
+  };
+
+  Generator slack;
+  slack.index = 1;
+  slack.bus = 101;
+  slack.name = "generator-101-1";
+  slack.is_slack = true;
+  slack.in_service = true;
+  slack.pg_mw = 153.335;
+  slack.qg_mvar = 73.271;
+  slack.vg_pu = 1.05;
+  slack.pmax_mw = 318.0;
+  slack.pmin_mw = 0.0;
+  slack.qmax_mvar = 100.0;
+  slack.qmin_mvar = -100.0;
+  slack.xdpp_pu = 1.0e-5;
+  slack.dynamic_model.standard = "PSS/E";
+  slack.dynamic_model.model_name = "GENCLS";
+  slack.dynamic_model.source_id = "PowerSimulationsDynamics:test_case15_genrou";
+
+  Generator genrou;
+  genrou.index = 2;
+  genrou.bus = 102;
+  genrou.name = "generator-102-1";
+  genrou.is_slack = false;
+  genrou.in_service = true;
+  genrou.pg_mw = 100.0;
+  genrou.qg_mvar = -3.247;
+  genrou.vg_pu = 1.02;
+  genrou.pmax_mw = 318.0;
+  genrou.pmin_mw = 0.0;
+  genrou.qmax_mvar = 100.0;
+  genrou.qmin_mvar = -100.0;
+  genrou.ra_pu = 0.0;
+  genrou.xd_pu = 1.8;
+  genrou.xq_pu = 1.7;
+  genrou.xdp_pu = 0.30;
+  genrou.xdpp_pu = 0.25;
+  genrou.td0p_s = 8.0;
+  genrou.td0pp_s = 0.03;
+  genrou.inertia_h = 6.175;
+  genrou.droop_r = 0.05;
+  genrou.dynamic_model.standard = "PSS/E";
+  genrou.dynamic_model.model_name = "GENROU";
+  genrou.dynamic_model.source_id = "PowerSimulationsDynamics:test_case15_genrou";
+  genrou.dynamic_model.parameters = {
+      {"H", 6.175},
+      {"D", 0.05},
+      {"Xd", 1.8},
+      {"Xq", 1.7},
+      {"Xd_p", 0.30},
+      {"Xq_p", 0.55},
+      {"Xd_pp", 0.25},
+      {"Xl", 0.20},
+      {"Td0_p", 8.0},
+      {"Td0_pp", 0.03},
+      {"Tq0_p", 0.4},
+      {"Tq0_pp", 0.05},
+  };
+
+  sys.ac.generators = {slack, genrou};
+
+  Load load;
+  load.index = 1;
+  load.bus = 103;
+  load.name = "load1031";
+  load.p_mw = 250.0;
+  load.q_mvar = 30.0;
+  load.in_service = true;
+  load.dynamic_model.standard = "PSS/E";
+  load.dynamic_model.model_name = "ConstantImpedanceLoad";
+  load.dynamic_model.source_id = "PowerSimulationsDynamics:test_case15_genrou";
+  sys.ac.loads = {load};
+
+  return sys;
+}
+
+HybridPowerSystem make_psd_zip_load_three_bus_subset_case() {
+  HybridPowerSystem sys = make_psd_genrou_three_bus_subset_case();
+  sys.name = "psd_zip_load_three_bus_subset";
+  sys.ac.loads.clear();
+
+  Load l102;
+  l102.index = 1;
+  l102.bus = 102;
+  l102.name = "load1021";
+  l102.p_mw = 50.0;
+  l102.q_mvar = 30.0;
+  l102.in_service = true;
+  l102.dynamic_model.standard = "PSS/E";
+  l102.dynamic_model.model_name = "ConstantPowerLoad";
+  l102.dynamic_model.source_id = "PowerSimulationsDynamics:test_case33_zip_load";
+
+  Load l103a;
+  l103a.index = 2;
+  l103a.bus = 103;
+  l103a.name = "load1031";
+  l103a.p_mw = 150.0;
+  l103a.q_mvar = 30.0;
+  l103a.in_service = true;
+  l103a.dynamic_model = l102.dynamic_model;
+
+  Load l103b;
+  l103b.index = 3;
+  l103b.bus = 103;
+  l103b.name = "load1032";
+  l103b.p_mw = 50.0;
+  l103b.q_mvar = 30.0;
+  l103b.in_service = true;
+  l103b.dynamic_model = l102.dynamic_model;
+
+  sys.ac.loads = {l102, l103a, l103b};
+  return sys;
+}
+
 HybridPowerSystem make_unbalanced_three_phase_case() {
   HybridPowerSystem sys;
   sys.name = "transient_three_phase";
@@ -216,6 +390,329 @@ DynamicSolverOptions fast_options() {
   opt.run_power_flow_initialization = false;
   opt.singular_regularization_pu = 1e-7;
   return opt;
+}
+
+double vsc_p_mw(const DynamicSnapshot& snapshot) {
+  const auto& outputs = snapshot.device_outputs;
+  const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
+    return out.type == "VSCGridFollowing";
+  });
+  REQUIRE(it != outputs.end());
+  REQUIRE(it->values.count("p_mw") == 1);
+  return it->values.at("p_mw");
+}
+
+double vsc_value(const DynamicSnapshot& snapshot, const std::string& key) {
+  const auto& outputs = snapshot.device_outputs;
+  const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
+    return out.type == "VSCGridFollowing";
+  });
+  REQUIRE(it != outputs.end());
+  REQUIRE(it->values.count(key) == 1);
+  return it->values.at(key);
+}
+
+double final_vsc_p_mw(const DynamicResults& result) {
+  REQUIRE(result.final_snapshot() != nullptr);
+  return vsc_p_mw(*result.final_snapshot());
+}
+
+struct CsvSeries {
+  std::vector<double> t;
+  std::vector<double> y;
+};
+
+std::string shell_quote(const std::string& value) {
+  std::string out = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      out += "'\\''";
+    } else {
+      out += ch;
+    }
+  }
+  out += "'";
+  return out;
+}
+
+std::filesystem::path psd_repo_path() {
+  if (const char* env = std::getenv("HACDCPF_PSD_REPO")) {
+    return env;
+  }
+  return "/Users/tianyangzhao/Codes/PowerSimulationsDynamics.jl";
+}
+
+std::string julia_bin() {
+  if (const char* env = std::getenv("HACDCPF_JULIA_BIN")) {
+    return env;
+  }
+  return "julia";
+}
+
+CsvSeries read_csv_series(const std::filesystem::path& path) {
+  CsvSeries series;
+  std::ifstream in(path);
+  REQUIRE(in.good());
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    std::replace(line.begin(), line.end(), ',', ' ');
+    std::istringstream iss(line);
+    double t = 0.0;
+    double y = 0.0;
+    if (iss >> t >> y) {
+      series.t.push_back(t);
+      series.y.push_back(y);
+    }
+  }
+  return series;
+}
+
+void write_csv_series(const std::filesystem::path& path,
+                      const CsvSeries& series) {
+  REQUIRE(series.t.size() == series.y.size());
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  for (std::size_t i = 0; i < series.t.size(); ++i) {
+    out << series.t[i] << "," << series.y[i] << "\n";
+  }
+}
+
+double interpolate_series(const CsvSeries& series, double t) {
+  REQUIRE(series.t.size() >= 2);
+  if (t <= series.t.front()) return series.y.front();
+  if (t >= series.t.back()) return series.y.back();
+  const auto hi = std::lower_bound(series.t.begin(), series.t.end(), t);
+  const std::size_t i = static_cast<std::size_t>(std::distance(series.t.begin(), hi));
+  REQUIRE(i > 0);
+  const double t0 = series.t[i - 1];
+  const double t1 = series.t[i];
+  const double y0 = series.y[i - 1];
+  const double y1 = series.y[i];
+  const double a = (t - t0) / std::max(1e-12, t1 - t0);
+  return y0 + a * (y1 - y0);
+}
+
+double rms_common_error(const CsvSeries& lhs,
+                        const CsvSeries& rhs,
+                        double t_start,
+                        double t_end) {
+  double sum_sq = 0.0;
+  std::size_t n = 0;
+  for (double t : lhs.t) {
+    if (t < t_start - 1e-12 || t > t_end + 1e-12) continue;
+    const double e = interpolate_series(lhs, t) - interpolate_series(rhs, t);
+    sum_sq += e * e;
+    ++n;
+  }
+  REQUIRE(n > 0);
+  return std::sqrt(sum_sq / static_cast<double>(n));
+}
+
+double max_common_abs_error(const CsvSeries& lhs,
+                            const CsvSeries& rhs,
+                            double t_start,
+                            double t_end) {
+  double max_abs = 0.0;
+  std::size_t n = 0;
+  for (double t : lhs.t) {
+    if (t < t_start - 1e-12 || t > t_end + 1e-12) continue;
+    const double e = interpolate_series(lhs, t) - interpolate_series(rhs, t);
+    max_abs = std::max(max_abs, std::abs(e));
+    ++n;
+  }
+  REQUIRE(n > 0);
+  return max_abs;
+}
+
+const DynamicDeviceOutput& require_device_output(const DynamicSnapshot& snapshot,
+                                                 const std::string& type,
+                                                 int component_index = 0) {
+  const auto& outputs = snapshot.device_outputs;
+  const auto it = std::find_if(outputs.begin(), outputs.end(), [&](const DynamicDeviceOutput& out) {
+    return out.type == type &&
+           (component_index == 0 || out.component_index == component_index);
+  });
+  REQUIRE(it != outputs.end());
+  return *it;
+}
+
+CsvSeries device_output_series(const DynamicResults& result,
+                               const std::string& type,
+                               int component_index,
+                               const std::string& key,
+                               double scale = 1.0) {
+  CsvSeries series;
+  for (const auto& snapshot : result.snapshots) {
+    const auto& out = require_device_output(snapshot, type, component_index);
+    REQUIRE(out.values.count(key) == 1);
+    series.t.push_back(snapshot.time_s);
+    series.y.push_back(out.values.at(key) * scale);
+  }
+  return series;
+}
+
+CsvSeries bus_voltage_mag_series(const DynamicResults& result, int bus_position) {
+  CsvSeries series;
+  for (const auto& snapshot : result.snapshots) {
+    const int node = 3 * bus_position;
+    REQUIRE(node >= 0);
+    REQUIRE(node < snapshot.vac_abc.size());
+    series.t.push_back(snapshot.time_s);
+    series.y.push_back(std::abs(snapshot.vac_abc[node]));
+  }
+  return series;
+}
+
+double series_range(const CsvSeries& series) {
+  REQUIRE_FALSE(series.y.empty());
+  const auto [min_it, max_it] = std::minmax_element(series.y.begin(), series.y.end());
+  return *max_it - *min_it;
+}
+
+struct ValidationMetric {
+  std::string level;
+  std::string case_name;
+  std::string reference;
+  std::string signal;
+  double rms_error{0.0};
+  double max_abs_error{0.0};
+  double tolerance{0.0};
+  bool passed{false};
+};
+
+void write_validation_summary(const std::filesystem::path& path,
+                              const std::vector<ValidationMetric>& metrics) {
+  std::ofstream out(path);
+  REQUIRE(out.good());
+  out << "level,case,reference,signal,rms_error,max_abs_error,tolerance,passed\n";
+  for (const auto& metric : metrics) {
+    out << metric.level << ","
+        << metric.case_name << ","
+        << metric.reference << ","
+        << metric.signal << ","
+        << metric.rms_error << ","
+        << metric.max_abs_error << ","
+        << metric.tolerance << ","
+        << (metric.passed ? "true" : "false") << "\n";
+  }
+}
+
+struct PsdGflCase {
+  std::string name;
+  std::string psd_case;
+  std::string psd_test_file;
+  std::string pll_model;
+  double pll_kp{0.0};
+  double pll_ki{0.0};
+  double pll_lpf_t_s{0.0};
+};
+
+DynamicResults run_hacdcpf_psd_gfl_case(const PsdGflCase& spec,
+                                        double base_mva) {
+  auto sys = make_hybrid_dc_case();
+  sys.base_mva = base_mva;
+  sys.ac.base_mva = base_mva;
+  sys.vsc_converters[0].p_set_mw = 50.0;
+  sys.vsc_converters[0].p_schedule_mw = 50.0;
+  sys.vsc_converters[0].q_set_mvar = 0.0;
+  sys.vsc_converters[0].dynamic_model.standard = "NERC";
+  sys.vsc_converters[0].dynamic_model.model_name = "REGC_REEC_GFL_Subset";
+  sys.vsc_converters[0].dynamic_model.components.push_back(
+      {"pll", spec.pll_model, "PowerSimulationsDynamics", spec.psd_case,
+       {{"kp_pll", spec.pll_kp},
+        {"ki_pll", spec.pll_ki},
+        {"pll_lpf_t_s", spec.pll_lpf_t_s}}});
+
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 2.0;
+  opt.dt_s = 0.005;
+  opt.record_every_step = true;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  DynamicEvent pref_step;
+  pref_step.time_s = 1.0;
+  pref_step.type = DynamicEventType::Custom;
+  pref_step.component_type = "VSC";
+  pref_step.component_index = 1;
+  pref_step.label = "PSD active-power reference step";
+  pref_step.params["p_ref_mw"] = 70.0;
+  dyn.events.push_back(pref_step);
+
+  DynamicSolver solver;
+  return solver.solve(dyn);
+}
+
+CsvSeries hacdcpf_vsc_filtered_power_series(const DynamicResults& result,
+                                            double base_mva) {
+  CsvSeries local;
+  for (const auto& snapshot : result.snapshots) {
+    local.t.push_back(snapshot.time_s);
+    local.y.push_back(vsc_value(snapshot, "p_filtered_mw") / base_mva);
+  }
+  return local;
+}
+
+bool export_psd_trace(const std::string& psd_case,
+                      const std::string& signal,
+                      const std::filesystem::path& out_csv,
+                      const std::filesystem::path& log_file) {
+  const std::filesystem::path repo = psd_repo_path();
+  const std::filesystem::path script =
+      std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+      "tools" / "psd_validation" / "export_trace.jl";
+
+  INFO("PSD repo: " << repo);
+  INFO("PSD generic exporter: " << script);
+  INFO("PSD case: " << psd_case << " signal: " << signal);
+  INFO("PSD output CSV: " << out_csv);
+  INFO("PSD log: " << log_file);
+  REQUIRE(std::filesystem::exists(repo / "Project.toml"));
+  REQUIRE(std::filesystem::exists(repo / "test" / "Project.toml"));
+  REQUIRE(std::filesystem::exists(script));
+
+  const std::string command =
+      "cd " + shell_quote(repo.string()) + " && " +
+      shell_quote(julia_bin()) + " --project=" +
+      shell_quote((repo / "test").string()) + " " +
+      shell_quote(script.string()) + " " +
+      shell_quote(repo.string()) + " " +
+      shell_quote(psd_case) + " " +
+      shell_quote(out_csv.string()) + " " +
+      shell_quote(signal) + " > " +
+      shell_quote(log_file.string()) + " 2>&1";
+  return std::system(command.c_str()) == 0;
+}
+
+bool export_psd_gridfollowing_trace(const PsdGflCase& spec,
+                                    const std::filesystem::path& out_csv,
+                                    const std::filesystem::path& log_file) {
+  const std::filesystem::path repo = psd_repo_path();
+  const std::filesystem::path script =
+      std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+      "tools" / "psd_validation" / "export_gridfollowing_trace.jl";
+
+  INFO("PSD repo: " << repo);
+  INFO("PSD exporter: " << script);
+  INFO("PSD output CSV: " << out_csv);
+  INFO("PSD log: " << log_file);
+  REQUIRE(std::filesystem::exists(repo / "Project.toml"));
+  REQUIRE(std::filesystem::exists(repo / "test" / "Project.toml"));
+  REQUIRE(std::filesystem::exists(repo / "test" / spec.psd_test_file));
+  REQUIRE(std::filesystem::exists(script));
+
+  const std::string command =
+      "cd " + shell_quote(repo.string()) + " && " +
+      shell_quote(julia_bin()) + " --project=" +
+      shell_quote((repo / "test").string()) + " " +
+      shell_quote(script.string()) + " " +
+      shell_quote(repo.string()) + " " +
+      shell_quote(spec.psd_case) + " " +
+      shell_quote(out_csv.string()) + " p_oc > " +
+      shell_quote(log_file.string()) + " 2>&1";
+  return std::system(command.c_str()) == 0;
 }
 
 }  // namespace
@@ -429,6 +926,43 @@ TEST_CASE("Updated GFL inverter exposes PLL current-limited positive-sequence te
   CHECK(std::abs(it->values.at("p_mw")) > 0.1);
 }
 
+TEST_CASE("GFL inverter supports KauraPLL profile and exposes dynamic model metadata",
+          "[dynamics][gfl][pll][profile]") {
+  auto sys = make_hybrid_dc_case();
+  sys.vsc_converters[0].dynamic_model.standard = "NERC";
+  sys.vsc_converters[0].dynamic_model.model_name = "REGC_REEC_GFL_Subset";
+  sys.vsc_converters[0].dynamic_model.parameter_set = "kaura_demo";
+  sys.vsc_converters[0].dynamic_model.components.push_back(
+      {"pll", "KauraPLL", "PSD", "default", {{"kp_pll", 0.015},
+                                               {"ki_pll", 1.1},
+                                               {"pll_lpf_t_s", 0.004}}});
+  auto opt = fast_options();
+  opt.t_end_s = 0.02;
+  opt.dt_s = 0.005;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(result.success);
+  REQUIRE(result.final_snapshot() != nullptr);
+  const auto& outputs = result.final_snapshot()->device_outputs;
+  const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
+    return out.type == "VSCGridFollowing";
+  });
+  REQUIRE(it != outputs.end());
+  REQUIRE(it->values.count("pll_model") == 1);
+  CHECK(it->values.at("pll_model") == Catch::Approx(1.0));
+  CHECK(it->values.count("pll_vq_raw_pu") == 1);
+  CHECK(it->values.count("pll_vd_pu") == 1);
+  REQUIRE(it->model_profiles.size() >= 2);
+  CHECK(it->model_profiles.front().model_name == "REGC_REEC_GFL_Subset");
+  CHECK(std::any_of(it->model_profiles.begin(),
+                    it->model_profiles.end(),
+                    [](const hacdcpf::dynamics::DynamicModelProfile& profile) {
+                      return profile.profile == "pll" &&
+                             profile.model_name == "KauraPLL";
+                    }));
+}
+
 TEST_CASE("Transient initialization uses solved power flow and exposes canvas metadata",
           "[dynamics][initialization][gui]") {
   const auto sys = make_hybrid_dc_case();
@@ -484,6 +1018,436 @@ TEST_CASE("Transient initialization trims GFL fast states to avoid artificial PL
     return it->values.at("pll_frequency_hz");
   };
   CHECK(pll_freq(result.snapshots.front()) == Catch::Approx(pll_freq(result.snapshots.back())).margin(1e-4));
+}
+
+TEST_CASE("No-event dynamic equilibrium residual is a hard benchmark gate",
+          "[dynamics][benchmark][equilibrium]") {
+  const auto sys = make_hybrid_dc_case();
+  DynamicSolverOptions opt = fast_options();
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 0.02;
+  opt.dt_s = 0.01;
+  opt.record_every_step = true;
+  opt.dynamic_trim_tol = 1e-7;
+
+  const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+
+  REQUIRE(result.success);
+  CHECK(result.initialization.dynamic_trim_converged);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE(result.snapshots.size() >= 2);
+  const double p0 = vsc_p_mw(result.snapshots.front());
+  const double p1 = final_vsc_p_mw(result);
+  CHECK(p1 == Catch::Approx(p0).margin(5e-4));
+}
+
+TEST_CASE("PSD validation ladder covers component, load, and system-level HACDCPF anchors",
+          "[dynamics][benchmark][psd][validation]") {
+  const std::filesystem::path out_dir =
+      std::filesystem::temp_directory_path() / "hacdcpf_psd_validation";
+  std::filesystem::create_directories(out_dir);
+  std::vector<ValidationMetric> metrics;
+
+  {
+    auto sys = make_psd_genrou_three_bus_subset_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.dynamic_trim_tol = 1e-7;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    trip.label = "PSD GENROU fixture branch trip";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+
+    REQUIRE(result.success);
+    CHECK(result.initialization.power_flow_converged);
+    CHECK(result.initialization.dynamic_trim_converged);
+    CHECK(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+    REQUIRE_FALSE(result.applied_event_records.empty());
+    REQUIRE(result.snapshots.size() > 100);
+
+    const auto rotor = device_output_series(result,
+                                            "SynchronousMachine",
+                                            2,
+                                            "angle_rad");
+    const auto omega = device_output_series(result,
+                                            "SynchronousMachine",
+                                            2,
+                                            "omega_pu");
+    write_csv_series(out_dir / "hacdcpf_component_genrou_angle_rad.csv", rotor);
+    write_csv_series(out_dir / "hacdcpf_component_genrou_omega_pu.csv", omega);
+
+    CHECK(series_range(rotor) > 1e-4);
+    CHECK(series_range(omega) > 1e-7);
+
+    const auto& gen_out =
+        require_device_output(*result.final_snapshot(), "SynchronousMachine", 2);
+    CHECK(gen_out.model_standard == "IEEE");
+    REQUIRE(gen_out.model_profiles.size() >= 1);
+    CHECK(std::any_of(gen_out.model_profiles.begin(),
+                      gen_out.model_profiles.end(),
+                      [](const hacdcpf::dynamics::DynamicModelProfile& profile) {
+                        return profile.standard == "PSS/E" &&
+                               profile.model_name == "GENROU";
+                      }));
+
+    metrics.push_back({"component",
+                       "genrou_three_bus_subset",
+                       "HACDCPF",
+                       "no_event_initial_dxdt_inf",
+                       result.initialization.dynamic_fast_dxdt_inf_norm,
+                       result.initialization.dynamic_fast_dxdt_inf_norm,
+                       opt.dynamic_trim_tol,
+                       result.initialization.dynamic_fast_dxdt_inf_norm <=
+                           opt.dynamic_trim_tol});
+  }
+
+  {
+    auto sys = make_psd_zip_load_three_bus_subset_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    trip.label = "PSD ZIP fixture branch trip";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+
+    REQUIRE(result.success);
+    CHECK(result.initialization.power_flow_converged);
+    REQUIRE(result.snapshots.size() > 100);
+    const auto v102 = bus_voltage_mag_series(result, 1);
+    const auto v103 = bus_voltage_mag_series(result, 2);
+    write_csv_series(out_dir / "hacdcpf_component_zip_v102.csv", v102);
+    write_csv_series(out_dir / "hacdcpf_component_zip_v103.csv", v103);
+
+    CHECK(series_range(v102) > 1e-5);
+    CHECK(series_range(v103) > 1e-5);
+
+    const auto& load_out = require_device_output(*result.final_snapshot(), "ACLoad", 1);
+    REQUIRE(load_out.model_profiles.size() >= 1);
+    CHECK(std::any_of(load_out.model_profiles.begin(),
+                      load_out.model_profiles.end(),
+                      [](const hacdcpf::dynamics::DynamicModelProfile& profile) {
+                        return profile.standard == "PSS/E" &&
+                               profile.model_name == "ConstantPowerLoad";
+                      }));
+
+    metrics.push_back({"component",
+                       "zip_load_three_bus_subset",
+                       "HACDCPF",
+                       "voltage_response_range_bus103",
+                       series_range(v103),
+                       series_range(v103),
+                       1e-5,
+                       series_range(v103) > 1e-5});
+  }
+
+  {
+    auto sys = make_hybrid_dc_case();
+    sys.ac.generators[0].dynamic_model.standard = "IEEE";
+    sys.ac.generators[0].dynamic_model.model_name = "ClassicalMachine";
+    sys.vsc_converters[0].dynamic_model.standard = "NERC";
+    sys.vsc_converters[0].dynamic_model.model_name = "REGC_REEC_GFL_Subset";
+    sys.vsc_converters[0].dynamic_model.components.push_back(
+        {"pll", "FixedFrequency", "PowerSimulationsDynamics", "system_anchor", {}});
+
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+    opt.dynamic_trim_tol = 1e-7;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent pref_step;
+    pref_step.time_s = 1.0;
+    pref_step.type = DynamicEventType::Custom;
+    pref_step.component_type = "VSC";
+    pref_step.component_index = 1;
+    pref_step.label = "system-level VSC reference step";
+    pref_step.params["p_ref_mw"] = 12.0;
+    dyn.events.push_back(pref_step);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+
+    REQUIRE(result.success);
+    CHECK(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+    REQUIRE(result.snapshots.size() > 100);
+    const auto p_vsc = device_output_series(result,
+                                            "VSCGridFollowing",
+                                            1,
+                                            "p_filtered_mw");
+    const auto f_vsc = device_output_series(result,
+                                            "VSCGridFollowing",
+                                            1,
+                                            "pll_frequency_hz");
+    write_csv_series(out_dir / "hacdcpf_system_hybrid_vsc_p_filtered_mw.csv", p_vsc);
+    write_csv_series(out_dir / "hacdcpf_system_hybrid_vsc_pll_frequency_hz.csv", f_vsc);
+
+    CHECK(series_range(p_vsc) > 0.5);
+    CHECK(*std::min_element(f_vsc.y.begin(), f_vsc.y.end()) > 45.0);
+    CHECK(*std::max_element(f_vsc.y.begin(), f_vsc.y.end()) < 55.0);
+
+    metrics.push_back({"system",
+                       "hybrid_acdc_vsc_step",
+                       "HACDCPF",
+                       "p_filtered_response_range_mw",
+                       series_range(p_vsc),
+                       series_range(p_vsc),
+                       0.5,
+                       series_range(p_vsc) > 0.5});
+  }
+
+  write_validation_summary(out_dir / "hacdcpf_psd_validation_summary.csv", metrics);
+  for (const auto& metric : metrics) {
+    INFO("Validation artifact directory: " << out_dir);
+    INFO(metric.level << " " << metric.case_name << " " << metric.signal);
+    CHECK(metric.passed);
+  }
+}
+
+TEST_CASE("Opt-in PSD external comparisons cover generator, load, and system traces",
+          "[dynamics][benchmark][psd][external]") {
+  const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
+  const bool run_external_psd = run_psd != nullptr && std::string(run_psd) == "1";
+  if (!run_external_psd) {
+    SUCCEED("Set HACDCPF_RUN_PSD_COMPARE=1 to run Julia-backed PSD trace comparisons");
+    return;
+  }
+
+  const std::filesystem::path out_dir =
+      std::filesystem::temp_directory_path() / "hacdcpf_psd_validation";
+  std::filesystem::create_directories(out_dir);
+
+  struct ExternalSpec {
+    std::string case_name;
+    std::string signal;
+    CsvSeries local;
+    double t_start{0.0};
+    double t_end{2.0};
+    double rms_tolerance{1.0};
+    std::string level;
+  };
+
+  std::vector<ExternalSpec> specs;
+
+  {
+    auto sys = make_psd_genrou_three_bus_subset_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    REQUIRE(result.success);
+    auto local = device_output_series(result,
+                                      "SynchronousMachine",
+                                      2,
+                                      "angle_rad",
+                                      180.0 / 3.14159265358979323846);
+    write_csv_series(out_dir / "hacdcpf_psd_genrou_delta_deg.csv", local);
+    specs.push_back({"genrou",
+                     "generator-102-1:delta_deg",
+                     std::move(local),
+                     0.0,
+                     2.0,
+                     360.0,
+                     "component"});
+  }
+
+  {
+    auto sys = make_psd_zip_load_three_bus_subset_case();
+    DynamicSolverOptions opt = fast_options();
+    opt.run_power_flow_initialization = true;
+    opt.t_end_s = 2.0;
+    opt.dt_s = 0.005;
+    opt.record_every_step = true;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dyn = builder.build(sys, opt);
+    DynamicEvent trip;
+    trip.time_s = 1.0;
+    trip.type = DynamicEventType::ACBranchTrip;
+    trip.component_index = 1;
+    trip.component_type = "AC";
+    dyn.events.push_back(trip);
+
+    DynamicSolver solver;
+    const DynamicResults result = solver.solve(dyn);
+    REQUIRE(result.success);
+    auto local = bus_voltage_mag_series(result, 2);
+    write_csv_series(out_dir / "hacdcpf_psd_zip_constant_power_v103.csv", local);
+    specs.push_back({"zip_constant_power",
+                     "bus103:voltage_mag",
+                     std::move(local),
+                     0.0,
+                     2.0,
+                     0.25,
+                     "component"});
+  }
+
+  {
+    const PsdGflCase psd_system_case{
+        "reduced_pll_test24",
+        "test24",
+        "test_case_gridfollowing.jl",
+        "ReducedOrderPLL",
+        2.0,
+        20.0,
+        1.0 / (1.32 * 2.0 * 3.14159265358979323846 * 50.0)};
+    const double base_mva = 100.0;
+    const DynamicResults result =
+        run_hacdcpf_psd_gfl_case(psd_system_case, base_mva);
+    REQUIRE(result.success);
+    auto local = hacdcpf_vsc_filtered_power_series(result, base_mva);
+    write_csv_series(out_dir / "hacdcpf_psd_gridfollowing_reduced_p_oc.csv", local);
+    specs.push_back({"test24",
+                     "generator-102-1:p_oc",
+                     std::move(local),
+                     0.0,
+                     2.0,
+                     0.35,
+                     "system"});
+  }
+
+  std::vector<ValidationMetric> metrics;
+  for (const auto& spec : specs) {
+    const std::filesystem::path psd_csv =
+        out_dir / ("psd_" + spec.case_name + "_" +
+                   spec.signal.substr(spec.signal.find(':') + 1) + ".csv");
+    const std::filesystem::path psd_log =
+        out_dir / ("psd_" + spec.case_name + ".log");
+    const bool exported =
+        export_psd_trace(spec.case_name, spec.signal, psd_csv, psd_log);
+    INFO("PSD export failed. Inspect " << psd_log
+         << ". Run `cd " << psd_repo_path()
+         << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
+         << "to install missing PSD test dependencies.");
+    REQUIRE(exported);
+
+    const CsvSeries psd = read_csv_series(psd_csv);
+    REQUIRE(psd.t.size() > 100);
+    const double rms = rms_common_error(spec.local, psd, spec.t_start, spec.t_end);
+    const double max_abs =
+        max_common_abs_error(spec.local, psd, spec.t_start, spec.t_end);
+    metrics.push_back({spec.level,
+                       spec.case_name,
+                       "PowerSimulationsDynamics.jl",
+                       spec.signal,
+                       rms,
+                       max_abs,
+                       spec.rms_tolerance,
+                       rms < spec.rms_tolerance});
+  }
+  write_validation_summary(out_dir / "psd_external_validation_summary.csv", metrics);
+  for (const auto& metric : metrics) {
+    INFO("PSD validation artifact directory: " << out_dir);
+    INFO(metric.level << " " << metric.case_name << " " << metric.signal
+                      << " rms=" << metric.rms_error
+                      << " max=" << metric.max_abs_error);
+    CHECK(metric.passed);
+  }
+}
+
+TEST_CASE("PSD grid-following comparison harness is available",
+          "[dynamics][benchmark][psd][gridfollowing]") {
+  const std::vector<PsdGflCase> cases = {
+      {"reduced_pll_test24",
+       "test24",
+       "test_case_gridfollowing.jl",
+       "ReducedOrderPLL",
+       2.0,
+       20.0,
+       1.0 / (1.32 * 2.0 * 3.14159265358979323846 * 50.0)},
+      {"kaura_pll_test51",
+       "test51",
+       "test_case51_gridfollowing_kaura.jl",
+       "KauraPLL",
+       0.084,
+       4.69,
+       1.0 / 500.0},
+  };
+
+  const double base_mva = 100.0;
+  const char* run_psd = std::getenv("HACDCPF_RUN_PSD_COMPARE");
+  const bool run_external_psd = run_psd != nullptr && std::string(run_psd) == "1";
+  const std::filesystem::path out_dir =
+      std::filesystem::temp_directory_path() / "hacdcpf_psd_gridfollowing";
+  std::filesystem::create_directories(out_dir);
+
+  for (const auto& spec : cases) {
+    INFO("PSD validation case: " << spec.name);
+    const DynamicResults result = run_hacdcpf_psd_gfl_case(spec, base_mva);
+    REQUIRE(result.success);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
+    REQUIRE(result.snapshots.size() > 100);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const double p_final = final_vsc_p_mw(result);
+    CHECK(std::isfinite(p_final));
+    const double p_filtered_final =
+        vsc_value(*result.final_snapshot(), "p_filtered_mw");
+    CHECK(p_filtered_final > 40.0);
+    CHECK(p_filtered_final < 80.0);
+
+    const CsvSeries local =
+        hacdcpf_vsc_filtered_power_series(result, base_mva);
+    const std::filesystem::path hacdcpf_csv =
+        out_dir / ("hacdcpf_" + spec.name + "_p_oc.csv");
+    write_csv_series(hacdcpf_csv, local);
+
+    if (!run_external_psd) continue;
+
+    const std::filesystem::path psd_csv =
+        out_dir / ("psd_" + spec.name + "_p_oc.csv");
+    const std::filesystem::path psd_log =
+        out_dir / ("psd_" + spec.name + ".log");
+    const bool exported =
+        export_psd_gridfollowing_trace(spec, psd_csv, psd_log);
+    INFO("PSD export failed. Inspect " << psd_log
+         << ". Run `cd " << psd_repo_path()
+         << " && julia --project=test -e 'using Pkg; Pkg.instantiate()'` "
+         << "to install missing PSD test dependencies.");
+    REQUIRE(exported);
+    const CsvSeries psd = read_csv_series(psd_csv);
+    REQUIRE(psd.t.size() > 100);
+    const double rms = rms_common_error(local, psd, 0.0, 2.0);
+    CHECK(rms < 0.35);
+  }
 }
 
 TEST_CASE("Updated GFL inverter can use dynamic DC-link voltage state",
